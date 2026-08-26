@@ -10,6 +10,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..agent_core.tool_context.window import (
+    TERMINAL_TOOL_FOLD_METADATA_KEY,
+    conversation_message_with_terminal_tool_fold,
+    conversation_terminal_tool_fold,
+)
 from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
 from .compact_checkpoint import CompactCheckpointRequest, write_compact_checkpoint
@@ -82,6 +87,8 @@ class ConversationContextUsage:
     compact_generation: int
     compact_source_messages: int
     compact_source_tool_pairs: int
+    terminal_tool_fold_turns: int
+    terminal_tool_fold_calls: int
     pending_messages: int
     has_summary: bool
 
@@ -232,8 +239,9 @@ def prepare_conversation_context(
 
 
 # LLM: `/context` and diagnostics are read-only consumers of the automatic compact contract;
-# this function must never generate a summary, write a checkpoint, or advance a cursor.
-# 函数用途: 用自动 compact 的同一估算口径查看当前会话占用，不修改任何状态。
+# terminal folds are counted separately from committed Compact generations and source pairs.
+# This function must never generate a summary, write a checkpoint, or advance a cursor.
+# 函数用途: 用自动 compact 的同一估算口径查看当前会话占用，并单列当前尾部的回合工具折叠。
 def inspect_conversation_context(
     agent: SimpleAgent,
     store: ConversationStore,
@@ -261,6 +269,16 @@ def inspect_conversation_context(
             0,
             int(thread.compact_source_tool_pairs or 0),
         )
+    terminal_tool_folds = [
+        conversation_terminal_tool_fold(
+            (row.metadata if isinstance(row.metadata, dict) else {}).get(
+                TERMINAL_TOOL_FOLD_METADATA_KEY
+            )
+        )
+        for row in pending
+        if row.role == "assistant"
+    ]
+    terminal_tool_folds = [fold for fold in terminal_tool_folds if fold]
     projected = _projected_context_tokens(
         agent,
         summary,
@@ -277,14 +295,20 @@ def inspect_conversation_context(
         compact_generation=generation,
         compact_source_messages=source_messages,
         compact_source_tool_pairs=source_tool_pairs,
+        terminal_tool_fold_turns=len(terminal_tool_folds),
+        terminal_tool_fold_calls=sum(
+            _nonnegative_int(fold.get("tool_call_count"))
+            for fold in terminal_tool_folds
+        ),
         pending_messages=len(pending),
         has_summary=bool(summary.strip()),
     )
 
 
 # LLM: Render only the structured usage snapshot; wording cannot become a trigger or compact
-# authority. Token counts remain explicitly estimated because providers may tokenize differently.
-# 函数用途: 把 `/context` 的真实估算、触发线和压缩历史整理成终端可读文字。
+# authority. Terminal folds must remain visibly distinct from true Compact generations.
+# Token counts remain explicitly estimated because providers may tokenize differently.
+# 函数用途: 把 `/context` 的真实估算、触发线、压缩历史和普通回合工具折叠分栏展示。
 def render_conversation_context_usage(
     usage: ConversationContextUsage,
     *,
@@ -323,9 +347,15 @@ def render_conversation_context_usage(
     )
     lines.append(
         f"历史：{generation}；未压缩消息 {usage.pending_messages} 条；"
-        f"已纳入摘要：消息 {usage.compact_source_messages} 条、"
-        f"工具往返 {usage.compact_source_tool_pairs} 对；"
+        f"已纳入摘要的消息 {usage.compact_source_messages} 条；"
+        f"运行中工具 Compact {usage.compact_source_tool_pairs} 对；"
         f"摘要={'有' if usage.has_summary else '无'}"
+    )
+    lines.append(
+        "回合终态折叠："
+        f"当前未压缩尾部 {usage.terminal_tool_fold_turns} 个回合、"
+        f"{usage.terminal_tool_fold_calls} 次工具调用；"
+        "用于跨回合续接与缓存复用，不计入 compact 次数"
     )
     return "\n".join(lines)
 
@@ -596,8 +626,9 @@ def _without_current_request_suffix(
     return rows[:end]
 
 
-# LLM: 投影只统计下一次请求实际会携带的 system/persona、summary、消息尾和当前输入；不得加入尚未生成的未来输出预算。
-# 函数用途: 估算当前会话送进模型的输入 token，用于与唯一 compact 阈值比较。
+# LLM: The projection counts exactly what the next request carries, including immutable terminal
+# folds attached to assistant rows. It must not reserve future output or re-summarize old folds.
+# 函数用途: 估算下一轮实际送入模型的摘要、消息、工具终态折叠和当前输入，用于唯一 Compact 阈值。
 def _projected_context_tokens(
     agent: SimpleAgent,
     summary: str,
@@ -623,7 +654,16 @@ def _projected_context_tokens(
                 recent_operation_evidence or {}
             ),
             "conversation_messages": [
-                {"role": row.role, "content": row.content} for row in foreground_rows
+                {
+                    "role": row.role,
+                    "content": conversation_message_with_terminal_tool_fold(
+                        row.content,
+                        row.metadata,
+                    )
+                    if row.role == "assistant"
+                    else row.content,
+                }
+                for row in foreground_rows
             ],
         }
     )
@@ -805,22 +845,26 @@ def _nonnegative_int(value: object) -> int:
         return 0
 
 
-# LLM: compact 输入把用户正文和程序核验事实分栏；不得从中文核验尾注反向解析执行状态。
-# 函数用途: 为摘要模型保留可读正文，并在存在时附上权威公开操作核验 metadata。
+# LLM: Compact input keeps prose, operation facts, and deterministic terminal folds in separate
+# fields; it must never infer execution state from localized prose or silently drop folded calls.
+# 函数用途: 为摘要模型保留正文、权威操作核验和跨回合工具折叠，供真正 Compact 一次性吸收。
 def _summary_content(row: MessageLogEntry) -> object:
     content = project_user_reply(row.content).content if row.role == "assistant" else row.content
     metadata = row.metadata if isinstance(row.metadata, dict) else {}
     verification = metadata.get("operation_verification")
+    terminal_tool_fold = conversation_terminal_tool_fold(
+        metadata.get(TERMINAL_TOOL_FOLD_METADATA_KEY)
+    )
+    structured: dict[str, object] = {"content": content}
     if (
         row.role == "assistant"
         and isinstance(verification, dict)
         and verification.get("schema") == "operation_verification.public.v1"
     ):
-        return {
-            "content": content,
-            "operation_verification": verification,
-        }
-    return content
+        structured["operation_verification"] = verification
+    if row.role == "assistant" and terminal_tool_fold:
+        structured["terminal_tool_fold"] = terminal_tool_fold
+    return structured if len(structured) > 1 else content
 
 
 __all__ = [

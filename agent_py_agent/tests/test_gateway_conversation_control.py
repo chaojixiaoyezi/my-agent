@@ -3156,6 +3156,58 @@ def test_interrupted_result_never_becomes_assistant_transcript(tmp_path) -> None
     assert agent.conversation_store.recent_messages(thread.thread_id, limit=10) == []
 
 
+def test_persisted_assistant_keeps_public_body_and_stores_terminal_tool_fold(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "u-1",
+            "channel": "feishu",
+            "channel_conversation_id": "c-1",
+            "channel_user_id": "u-1",
+        }
+    )
+    request = _request("req-terminal-fold")
+    context = _GatewayAskRunContext(
+        agent=agent,
+        request=request,
+        request_path=tmp_path / "req-terminal-fold.json",
+        response_path=tmp_path / "req-terminal-fold.response.json",
+        request_id="req-terminal-fold",
+        on_chunk=None,
+    )
+    result = SimpleNamespace(
+        response="已经完成检查。",
+        archive_tool_calls=[
+            {
+                "tool": "read_file",
+                "ok": True,
+                "scoped_call_id": "call-terminal-read",
+                "model_summary": "读取配置并完成核对",
+            }
+        ],
+        delivery_artifacts=[],
+        operation_verification=None,
+    )
+
+    persisted = _persist_gateway_assistant_result(
+        context,
+        _GatewayConversationContext(thread_id=thread.thread_id),
+        result,
+    )
+    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    updated = agent.conversation_store.load_thread(thread.thread_id)
+
+    assert persisted.channel_delivery["content"] == "已经完成检查。"
+    assert len(rows) == 1
+    assert rows[0].content == "已经完成检查。"
+    assert rows[0].metadata["terminal_tool_fold"]["tool_call_count"] == 1
+    assert "call-terminal-read" in rows[0].metadata["terminal_tool_fold"]["text"]
+    assert updated is not None and updated.compact_generation == 0
+
+
 def test_control_fails_closed_for_other_user(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),

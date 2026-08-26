@@ -16,7 +16,11 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
     preflight_context_pressure_response,
     safe_inline_tool_result_tokens,
 )
-from agent_py_agent.agent.agent_core.tool_context.window import window_tool_context_params
+from agent_py_agent.agent.agent_core.tool_context.window import (
+    build_conversation_terminal_tool_fold,
+    conversation_message_with_terminal_tool_fold,
+    window_tool_context_params,
+)
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
@@ -28,6 +32,57 @@ from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapsh
 class _AgentStub:
     config = AgentConfig(auto_save_memory=True)
     backend = SimpleNamespace(context_window_tokens=128_000, name="fake")
+
+
+def test_terminal_tool_fold_is_deterministic_bounded_and_redacted() -> None:
+    agent = SimpleNamespace(
+        config=AgentConfig(conversation_terminal_tool_fold_max_chars=1_400)
+    )
+    records = [
+        {
+            "tool": "write_file" if index % 2 == 0 else "run_command",
+            "ok": index != 5,
+            "scoped_call_id": f"call-{index}",
+            "parameters": {
+                "path": f"work/file-{index}.txt",
+                "credentials": {"api_key": "terminal-fold-secret-value"},
+            },
+            "model_summary": f"完成第 {index} 项工具工作",
+        }
+        for index in range(12)
+    ]
+
+    first = build_conversation_terminal_tool_fold(agent, records)
+    second = build_conversation_terminal_tool_fold(agent, records)
+    rendered = conversation_message_with_terminal_tool_fold(
+        "本轮完成。",
+        {"terminal_tool_fold": first},
+    )
+
+    assert first == second
+    assert first["schema"] == "conversation_terminal_tool_fold.v1"
+    assert first["tool_call_count"] == 12
+    assert first["successful_tool_call_count"] == 11
+    assert first["non_successful_tool_call_count"] == 1
+    assert len(str(first["text"])) <= 1_400
+    assert "terminal-fold-secret-value" not in str(first["text"])
+    assert "call-0" in str(first["text"])
+    assert "conversation-terminal-tool-fold" in rendered
+    assert rendered.startswith("本轮完成。")
+
+
+def test_terminal_tool_fold_can_be_disabled_without_changing_public_body() -> None:
+    agent = SimpleNamespace(
+        config=AgentConfig(conversation_terminal_tool_fold_enabled=False)
+    )
+
+    fold = build_conversation_terminal_tool_fold(
+        agent,
+        [{"tool": "read_file", "ok": True, "scoped_call_id": "call-1"}],
+    )
+
+    assert fold == {}
+    assert conversation_message_with_terminal_tool_fold("公开正文", {}) == "公开正文"
 
 
 def test_tool_context_window_requests_compact_for_saved_runs() -> None:

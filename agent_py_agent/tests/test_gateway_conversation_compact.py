@@ -118,6 +118,49 @@ def test_conversation_projection_counts_recent_operation_evidence() -> None:
     assert with_evidence > without_evidence
 
 
+def test_true_compact_counts_and_summarizes_terminal_tool_fold() -> None:
+    backend = _SummaryBackend()
+    agent = SimpleNamespace(
+        prompts=SimpleNamespace(build=lambda *_args, **_kwargs: "完整输入上下文"),
+        backend=backend,
+    )
+    plain_row = MessageLogEntry(
+        message_id="msg-plain",
+        thread_id="thread-fold",
+        role="assistant",
+        content="本轮完成。",
+    )
+    folded_row = MessageLogEntry(
+        message_id="msg-folded",
+        thread_id="thread-fold",
+        role="assistant",
+        content="本轮完成。",
+        metadata={
+            "terminal_tool_fold": {
+                "schema": "conversation_terminal_tool_fold.v1",
+                "tool_call_count": 1,
+                "successful_tool_call_count": 1,
+                "non_successful_tool_call_count": 0,
+                "text": (
+                    "[conversation-terminal-tool-fold]\n"
+                    "- tool_call_count: 1\n"
+                    "- ordered_tool_index:\n"
+                    "  - 1: tool=write_file status=ok ref=call-folded-write"
+                ),
+            }
+        },
+    )
+
+    plain_tokens = _projected_context_tokens(agent, "", [plain_row], "继续")
+    folded_tokens = _projected_context_tokens(agent, "", [folded_row], "继续")
+    _summarize(agent, "", {}, [folded_row])
+
+    assert folded_tokens > plain_tokens
+    assert len(backend.prompts) == 1
+    assert "terminal_tool_fold" in backend.prompts[0]
+    assert "call-folded-write" in backend.prompts[0]
+
+
 def test_context_inspection_uses_the_automatic_compact_policy_without_writing(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=20_000)
     request = _request("ou_context")
@@ -149,6 +192,60 @@ def test_context_inspection_uses_the_automatic_compact_policy_without_writing(tm
     assert "20,000 tokens" in rendered
     assert "50%" in rendered
     assert "未压缩消息 1 条" in rendered
+
+
+def test_terminal_tool_fold_reaches_next_turn_without_incrementing_compact(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=20_000)
+    request = _request("ou_fold")
+    context = _context(agent, request, "gw-create", "开始")
+    fold = {
+        "schema": "conversation_terminal_tool_fold.v1",
+        "tool_call_count": 2,
+        "successful_tool_call_count": 2,
+        "non_successful_tool_call_count": 0,
+        "text": (
+            "[conversation-terminal-tool-fold]\n"
+            "- tool_call_count: 2\n"
+            "- ordered_tool_index:\n"
+            "  - 1: tool=read_file status=ok ref=call-read\n"
+            "  - 2: tool=write_file status=ok ref=call-write"
+        ),
+    }
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        context,
+        request_id="gw-fold-user",
+        role="user",
+        content="检查并修改文件",
+    )
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        context,
+        request_id="gw-fold-assistant",
+        role="assistant",
+        content="文件已经修改。",
+        terminal_tool_fold=fold,
+    )
+
+    followup = _context(agent, request, "gw-followup", "继续检查")
+    replayed_followup = _context(agent, request, "gw-followup-replay", "继续检查")
+    thread = agent.conversation_store.load_thread(context.thread_id)
+    usage = inspect_conversation_context(agent, agent.conversation_store, thread)
+    rendered = render_conversation_context_usage(usage, model_name="MiniMax-M2.7")
+
+    assert followup.compact_generation == 0
+    assert followup.history[-1][0] == "assistant"
+    assert followup.history[-1][1].startswith("文件已经修改。")
+    assert "conversation-terminal-tool-fold" in followup.history[-1][1]
+    assert "call-write" in followup.history[-1][1]
+    assert replayed_followup.history == followup.history
+    assert usage.compact_generation == 0
+    assert usage.terminal_tool_fold_turns == 1
+    assert usage.terminal_tool_fold_calls == 2
+    assert "当前未压缩尾部 1 个回合、2 次工具调用" in rendered
+    assert "不计入 compact 次数" in rendered
 
 
 def test_forced_compact_passes_optional_instructions_as_soft_summary_context(tmp_path) -> None:

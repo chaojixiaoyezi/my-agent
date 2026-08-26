@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## 跨回合工具终态折叠
+
+- `request_execution._persist_gateway_assistant_result` 从本轮 `archive_tool_calls` 构造唯一
+  `conversation_terminal_tool_fold.v1`，与公开 assistant 正文同一次写入 ConversationStore metadata；repair
+  队列携带同一份值。用户 transcript、channel delivery 和最终正文不拼接该投影。
+- `_gateway_conversation_context` 读取 raw tail 时只对 provider-facing assistant history 附加已落盘 fold；
+  旧 metadata 不重新预算或重写，所以同一历史前缀跨轮保持字节稳定。完整输出继续由 owner archive 掌权，
+  operation/artifact refs 继续是副作用与产物事实源。
+- `conversation/compact.py` 计量并摘要正文加 fold，但普通 fold 不推进 generation。当前尾部 fold 次数与
+  `compact_source_tool_pairs` 分栏，后者仍只表示运行中 native IR 真压掉的完整工具对。
+
 ## 普通续轮的直属子代理完成输入
 
 - `request_execution._gateway_conversation_context` 在加载 sticky workspace 后，从同一 thread 的
@@ -70,11 +81,12 @@ handler 内的 owner/thread 鉴权、turn 串行、operation 幂等或状态权�
 只在各自层适配这两类合同，不按用户启动 Gateway，也不把共享 IP 当成 owner 身份。
 
 累计成本另走 `ModelCallLedger`：按 request/run 记录 provider input、output、cache read、
-cache creation 和真实/估算调用数，再投影到 runtime fact、`AgentRunResult` 与 Gateway
-result。每次 finalization 还会把同一冻结 summary 幂等追加到 exact owner/thread 的
-`model_usage/<thread_id>.jsonl`；后台 main 即使 `do_save=false` 也只跳过普通档案，不丢真实模型用量。
-供应商真值和本地估算分栏汇总，损坏账本不能降成零成本。它不会反向改动 Context 行，也不会参与
-Compact、任务完成或权限触发。
+cache creation 和真实/估算调用数，再投影到 runtime fact、`AgentRunResult` 与 Gateway result。一次 request
+可能在 overflow→Compact 前后多次 finalization；每次都以 `physical_model_attempt_count` 作为累计 snapshot
+cursor，`ConversationModelUsageStore` 在唯一追加锁内减去同 scope 既有增量，把 delta 幂等写入 exact
+owner/thread 的 `model_usage/<thread_id>.jsonl`。事件保存原 snapshot digest；重放同 cursor 幂等、异值复用
+fail closed。后台 main 即使 `do_save=false` 也只跳过普通档案，不丢真实模型用量。供应商真值和本地估算分栏
+汇总，损坏账本不能降成零成本。它不会反向改动 Context 行，也不会参与 Compact、任务完成或权限触发。
 
 薄 TUI 的 audit hook 与 workspace 传递相互独立：客户端无需构造第二个完整 Agent，仍必须把当前绝对
 cwd/roots 放进首次 ask。服务路径继续固定到 owner 唯一 Gateway；workspace 只属于 thread v6，不能因

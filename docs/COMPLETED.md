@@ -1,5 +1,12 @@
 # COMPLETED
 
+- 2026-08-25 `4425618` 把完整 task-path 进度账本与当前 conversation request 的 TUI Todo 分层：宿主
+  `display_plan` 携带 exact generation/revision/item ids，迟到旧快照不能复活上一阶段清单；主/子 transcript
+  的 typed anchor 通过 prompt_toolkit `Window.get_vertical_scroll` 落到真实窗口。362 项 focused（2 xfail）、
+  95 项 Compact/TUI 组合和本地严格 gate 通过，已推送并部署 `.7` 唯一 Gateway。原长 tmux
+  `ma-97468f3-longchain-r27` 两轮普通追加均清掉旧 24/35 Todo，PageUp 离底显示跳底提示，Enter 立即回底，
+  终态 Working 收起；46%–53% 低于 90% 压缩线，主代理 `compact 0` 与权威 thread 一致。
+
 - 2026-08-25 `8e6948d` 已把 会话运行时 的“同批只放可立即并行的独立 sidecar”写入唯一
   `create_subagents` 模型合同并部署 `.7` 单 Gateway。长 TUI `ma-97468f3-longchain-r27` 真实证明修复 child
   完成后才由 typed wake 创建独立 tester：12:50 与 2:27 两段没有重叠、均一次 attempt、无需用户发送

@@ -1,5 +1,34 @@
 # TESTS
 
+## 2026-08-25 跨回合工具终态折叠与缓存连续性
+
+普通回合的工具历史不能在下一轮无痕消失，也不能为保留历史而把大段原始结果每次重发。每个完成回合只生成
+一次确定性、有界、脱敏的 `conversation_terminal_tool_fold.v1`，下一轮读取同一份不可变 metadata；真正
+Compact 才摘要并推进 generation。主代理、子代理、配置、上下文计量与摘要消费的定向命令：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_runtime_context_pressure.py \
+  agent_py_agent/tests/test_tool_context_microcompact.py \
+  agent_py_agent/tests/test_gateway_conversation_compact.py \
+  agent_py_agent/tests/test_gateway_chat_conversation_context.py \
+  agent_py_agent/tests/test_gateway_conversation_control.py \
+  agent_py_agent/tests/test_subagent_runtime_compact.py \
+  agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py \
+  agent_py_agent/tests/test_conversation_store.py \
+  agent_py_agent/tests/test_memory_runtime_basics.py::test_run_no_save_still_persists_thread_model_usage_without_runtime_archive \
+  agent_py_agent/tests/test_config_validation.py::test_terminal_tool_fold_defaults_match_shipped_config \
+  agent_py_agent/tests/test_config_validation.py::test_terminal_tool_fold_config_is_normalized_and_bounded \
+  -q --tb=short
+```
+
+当前 289 项通过。覆盖折叠确定性、字符上限、嵌套敏感参数脱敏、主链同账、公开正文不变、下一轮可见、
+main/child 共用、真正 Compact 摘要输入、token 估算和 `compact 0` 不被普通折叠冒充。还覆盖 HEAD 原可复现的
+child overflow→Compact→继续回复：会话用量从同 scope 累计快照原子换成逐物理调用增量，第二次成功不再因
+event id 异值复用失败，provider cache-read/cache-write 不重复累计。真机仍需核对连续轮供应商用量，不能只看
+本地估算。本轮远端提交前的 Ruff、doc sync、strict code-size、diff 与 clean-package 也全部通过；改动远低于
+一万行，因此按约定未重复跑全仓 pytest。
+
 ## 2026-08-25 当前回合 Todo、真实 Window 粘底与 Compact 计数
 
 同一长 conversation 会把完整 task-path 进度账本跨回合保留，但底部 Todo 只能显示当前普通用户回合明确
@@ -26,7 +55,8 @@ python3 -m pytest \
 
 当前 362 项通过（含 2 项既有 xfail）。另以 95 项 Compact/TUI 组合回归确认：状态条次数只来自成功提交的
 `ConversationThread.compact_generation`；`68k/128k=53%` 低于配置的 `90%` 压缩点（约 115.2k），此时
-`compact 0` 是正确事实，不按屏幕历史长度、临时进度或模型文字推断。
+`compact 0` 是正确事实，不按屏幕历史长度、临时进度或模型文字推断。`.7` 真机继续显示 46%–53% 与
+`compact 0`；两轮追加、PageUp 离底、Enter 回底和终态 Working 收口均在原长 session 通过。
 
 ## 2026-08-25 显式 output_files 祖先冲突必须整批返工
 

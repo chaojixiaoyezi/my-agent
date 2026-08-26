@@ -1,4 +1,7 @@
-
+# LLM: This module owns bounded model-facing projections of archived tool activity. Live windows,
+# cross-process handoffs, and terminal conversation folds must share redaction and size rules while
+# canonical archives and ConversationStore remain the only durable fact sources.
+# 模块用途: 把过长工具历史压成可续做、可核验的短上下文，供当前轮、恢复轮和跨回合历史共用。
 from __future__ import annotations
 
 import json
@@ -12,8 +15,12 @@ from ..runtime.context_compactor import runtime_compact_policy
 
 _DEFAULT_MAX_CHARS = 48_000
 _DEFAULT_ACTIVE_TURN_HANDOFF_MAX_CHARS = 12_000
+_DEFAULT_TERMINAL_TOOL_FOLD_MAX_CHARS = 6_000
+_MAX_STORED_TERMINAL_TOOL_FOLD_CHARS = 48_000
 _CHARS_PER_TOKEN_WINDOW = 3
 _RECENT_REF_LIMIT = 8
+TERMINAL_TOOL_FOLD_METADATA_KEY = "terminal_tool_fold"
+TERMINAL_TOOL_FOLD_SCHEMA = "conversation_terminal_tool_fold.v1"
 
 
 @dataclass(frozen=True)
@@ -139,6 +146,103 @@ def native_carried_tool_handoff(
     return rendered[: max(0, limit - len(suffix))].rstrip() + suffix
 
 
+# LLM: One completed run may contribute exactly one immutable terminal fold. It is built only from
+# canonical archive rows, never by another model call, so subsequent prompts retain an append-only
+# stable prefix and provider cache hits are not invalidated by re-summarizing old turns.
+# 函数用途: 将一个已结束回合的工具调用整理成有界、脱敏、确定性的跨回合续接记录。
+def build_conversation_terminal_tool_fold(
+    agent: object,
+    archive_tool_calls: object,
+) -> dict[str, object]:
+    config = getattr(agent, "config", None)
+    if not bool(getattr(config, "conversation_terminal_tool_fold_enabled", True)):
+        return {}
+    records = [item for item in list(archive_tool_calls or []) if isinstance(item, dict)]
+    if not records:
+        return {}
+    try:
+        configured_limit = int(
+            getattr(
+                config,
+                "conversation_terminal_tool_fold_max_chars",
+                _DEFAULT_TERMINAL_TOOL_FOLD_MAX_CHARS,
+            )
+        )
+    except (TypeError, ValueError):
+        configured_limit = _DEFAULT_TERMINAL_TOOL_FOLD_MAX_CHARS
+    limit = min(
+        _MAX_STORED_TERMINAL_TOOL_FOLD_CHARS,
+        max(1_000, configured_limit),
+    )
+    succeeded = sum(1 for record in records if record.get("ok") is True)
+    recent_lines = _recent_archive_handoff(records)
+    header = [
+        "[conversation-terminal-tool-fold]",
+        f"- schema_version: {TERMINAL_TOOL_FOLD_SCHEMA}",
+        f"- tool_call_count: {len(records)}",
+        f"- successful_tool_call_count: {succeeded}",
+        f"- non_successful_tool_call_count: {len(records) - succeeded}",
+        "- authority: canonical owner tool archive, operation ledger, artifact refs, and current files",
+        "- replay_policy: this turn has ended; do not replay writes, sends, or dispatches merely because raw provider pairs were folded",
+        "- ordered_tool_index:",
+    ]
+    recent_section = ["- recent_tool_details:", *recent_lines]
+    fixed_chars = len("\n".join([*header, *recent_section])) + 2
+    index_lines = _bounded_carried_tool_index(
+        records,
+        max(500, limit - fixed_chars),
+    )
+    text = "\n".join([*header, *index_lines, *recent_section])
+    if len(text) > limit:
+        suffix = "\n[conversation-terminal-tool-fold truncated]"
+        text = text[: max(0, limit - len(suffix))].rstrip() + suffix
+    return {
+        "schema": TERMINAL_TOOL_FOLD_SCHEMA,
+        "tool_call_count": len(records),
+        "successful_tool_call_count": succeeded,
+        "non_successful_tool_call_count": len(records) - succeeded,
+        "text": text,
+    }
+
+
+# LLM: Transcript metadata is untrusted on read. Accept only the current schema and bounded scalar
+# counters/text; callers must never inject arbitrary nested metadata into the provider prompt.
+# 函数用途: 从 assistant metadata 安全读取已落盘的工具终态折叠，旧行或坏数据返回空对象。
+def conversation_terminal_tool_fold(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or value.get("schema") != TERMINAL_TOOL_FOLD_SCHEMA:
+        return {}
+    text = str(value.get("text") or "").strip()[:_MAX_STORED_TERMINAL_TOOL_FOLD_CHARS]
+    if not text:
+        return {}
+    return {
+        "schema": TERMINAL_TOOL_FOLD_SCHEMA,
+        "tool_call_count": _nonnegative_int(value.get("tool_call_count")),
+        "successful_tool_call_count": _nonnegative_int(
+            value.get("successful_tool_call_count")
+        ),
+        "non_successful_tool_call_count": _nonnegative_int(
+            value.get("non_successful_tool_call_count")
+        ),
+        "text": text,
+    }
+
+
+# LLM: The provider-facing fold is appended after the original assistant body without changing
+# user-visible transcript content. This deterministic projection is shared by main and child turns.
+# 函数用途: 把一条 assistant 正文与其工具终态折叠拼成下一轮模型看到的稳定历史内容。
+def conversation_message_with_terminal_tool_fold(
+    content: object,
+    metadata: object,
+) -> str:
+    body = str(content or "")
+    source = metadata if isinstance(metadata, dict) else {}
+    fold = conversation_terminal_tool_fold(source.get(TERMINAL_TOOL_FOLD_METADATA_KEY))
+    fold_text = str(fold.get("text") or "").strip()
+    if not fold_text:
+        return body
+    return f"{body.rstrip()}\n\n{fold_text}" if body.strip() else fold_text
+
+
 # LLM: Text-protocol windowing alone uses this character approximation; native protocol callers
 # must use the full token estimator instead of converting this value back into an IR budget.
 # 函数用途: 根据统一 Compact 配置计算文字工具记录的近似字符窗口，不负责原生工具消息计量。
@@ -190,6 +294,15 @@ def _positive_max_chars(value: object) -> int:
     except (TypeError, ValueError):
         return _DEFAULT_MAX_CHARS
     return parsed if parsed > 0 else _DEFAULT_MAX_CHARS
+
+
+# LLM: Persisted numeric projections must fail closed to zero and never raise during prompt load.
+# 函数用途: 将工具折叠里的计数规范成非负整数。
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _context_chars(entries: list) -> int:
@@ -347,7 +460,7 @@ def _recent_archive_handoff(records: list) -> list[str]:
             ).replace("\n", " ")
         row = f"- recent_tool: tool={tool} status={status}"
         if ref:
-            row += f" ref={ref}"
+            row += f" ref={ref[:240]}"
         if summary:
             row += f" summary={summary}"
         rows.append(row)

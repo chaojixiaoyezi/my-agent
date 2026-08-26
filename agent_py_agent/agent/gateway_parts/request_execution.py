@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams, release_active_turn_inputs_for_compact
+from ..agent_core.tool_context.window import (
+    TERMINAL_TOOL_FOLD_METADATA_KEY,
+    build_conversation_terminal_tool_fold,
+    conversation_message_with_terminal_tool_fold,
+)
 from ..common.audit_activation import (
     AUDIT_ATTR,
 )
@@ -1246,6 +1251,10 @@ def _persist_gateway_assistant_result(
     operation_verification = public_operation_verification(
         getattr(result, "operation_verification", None)
     )
+    terminal_tool_fold = build_conversation_terminal_tool_fold(
+        context.agent,
+        getattr(result, "archive_tool_calls", None),
+    )
     channel_delivery["operation_verification"] = operation_verification
     result.channel_delivery = channel_delivery
     if not _append_gateway_conversation_message(
@@ -1257,6 +1266,7 @@ def _persist_gateway_assistant_result(
         content=public_content,
         delivery_artifacts=channel_delivery["artifacts"],
         operation_verification=channel_delivery.get("operation_verification"),
+        terminal_tool_fold=terminal_tool_fold,
     ):
         _queue_gateway_conversation_repair(
             context.agent,
@@ -1267,6 +1277,7 @@ def _persist_gateway_assistant_result(
             content=public_content,
             delivery_artifacts=channel_delivery["artifacts"],
             operation_verification=channel_delivery.get("operation_verification"),
+            terminal_tool_fold=terminal_tool_fold,
         )
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
@@ -2835,6 +2846,7 @@ def _gateway_conversation_history(
         content = str(getattr(row, "content", "") or "")
         if role == "assistant":
             content = project_user_reply(content).content
+            content = conversation_message_with_terminal_tool_fold(content, metadata)
         candidates.append((role, _clip_conversation_message(content, message_chars)))
     history_chars = total_chars
     history_messages = max_turns * 2
@@ -2959,9 +2971,10 @@ def _latest_conversation_messages(
     return tuple(selected)
 
 
-# LLM: assistant正文、artifact与operation facts分栏落账；新行同时写跨 surface 的
-# conversation_request_id 和显式 Gateway 迁移键，Compact 排除当前输入不再依赖入口专名。
-# 函数用途: 幂等追加 Gateway 消息，并保存统一请求身份、可复用产物和操作核验 metadata。
+# LLM: Assistant prose, artifacts, operation facts, and one immutable terminal tool fold are
+# persisted in separate fields. The public body must stay unchanged while later model turns may
+# consume the bounded fold from metadata.
+# 函数用途: 幂等追加 Gateway 消息，并分栏保存统一请求身份、产物、操作核验和工具终态折叠。
 def _append_gateway_conversation_message(
     agent: SimpleAgent,
     request: dict,
@@ -2972,6 +2985,7 @@ def _append_gateway_conversation_message(
     content: str,
     delivery_artifacts: object = (),
     operation_verification: object = None,
+    terminal_tool_fold: object = None,
 ) -> bool:
     if not conversation.thread_id or not content:
         return not conversation.thread_id
@@ -3007,6 +3021,10 @@ def _append_gateway_conversation_message(
             entry_metadata["operation_verification"] = _metadata_operation_verification(
                 operation_verification
             )
+        if role == "assistant" and isinstance(terminal_tool_fold, dict):
+            fold = dict(terminal_tool_fold)
+            if fold:
+                entry_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
         entry = store.append_message(
             {
                 "thread_id": conversation.thread_id,
@@ -3041,9 +3059,9 @@ def _append_gateway_conversation_message(
         return False
 
 
-# LLM: Delayed repair preserves the same canonical conversation request identity, sanitized body,
-# artifacts and operation facts as the normal append; it must not downgrade to Gateway-only ids.
-# 函数用途: transcript 暂时写失败时保存与正常路径字段一致、可幂等恢复的消息记录。
+# LLM: Delayed repair preserves the same canonical request identity, sanitized body, artifacts,
+# operation facts, and immutable terminal fold as normal append; no repair path may lose history.
+# 函数用途: transcript 暂时写失败时保存与正常路径完全一致、可幂等恢复的消息记录。
 def _queue_gateway_conversation_repair(
     agent: SimpleAgent,
     request: dict,
@@ -3054,6 +3072,7 @@ def _queue_gateway_conversation_repair(
     content: str,
     delivery_artifacts: object = (),
     operation_verification: object = None,
+    terminal_tool_fold: object = None,
 ) -> None:
     store = getattr(agent, "conversation_store", None)
     root = getattr(store, "root", None)
@@ -3071,6 +3090,10 @@ def _queue_gateway_conversation_repair(
         repair_metadata["operation_verification"] = _metadata_operation_verification(
             operation_verification
         )
+    if role == "assistant" and isinstance(terminal_tool_fold, dict):
+        fold = dict(terminal_tool_fold)
+        if fold:
+            repair_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
     payload = {
         "thread_id": conversation.thread_id,
         "role": role,

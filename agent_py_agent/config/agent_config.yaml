@@ -877,6 +877,11 @@ chat_history_assistant_preview_chars: 500
 conversation_history_max_turns: 20
 conversation_history_max_chars: 48000
 conversation_history_message_max_chars: 12000
+# 普通回合结束后，把本轮工具轨迹一次性折叠进 assistant metadata，供后续轮继续使用。
+# 这不是 Compact，不增加 compact 次数；折叠内容确定后不再改写，便于命中 provider 前缀缓存。
+conversation_terminal_tool_fold_enabled: true
+# 折叠只保留有界工具索引、最近结果和精确引用；完整输出继续留在 owner 工具归档中按需读取。
+conversation_terminal_tool_fold_max_chars: 6000
 chat_transcript_max_chars: 500000
 chat_collapse_preview_lines: 12
 chat_collapse_preview_chars: 900

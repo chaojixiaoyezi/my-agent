@@ -1,14 +1,28 @@
 # Subagent Progress
 
-## 2026-08-25 当前回合 Todo 与真实 Window 粘底（本地候选）
+## 2026-08-25 跨回合工具终态折叠与缓存前缀（本地候选）
+
+- 长 session 的 `compact 0` 与 60k→50k 回落同时成立：没有真正 Compact，普通回合末尾的 native 工具对却也
+  没进入下一轮。这会让 main/child 忘记已完成操作，并让用户误以为次数或上下文显示坏了。
+- 对照 会话运行时 完整 ResponseItem history 和 终端交互 cache-aware microcompact，main/child 共用
+  `conversation_terminal_tool_fold.v1`：从本轮 canonical archive 一次生成脱敏、有界工具索引、近期摘要、refs
+  与防重放提示，和 assistant metadata 同账；公开正文不变，完整原输出不复制出 owner archive。
+- 下一轮只附加读取这份不可变折叠，旧前缀不重写；真正 Conversation Compact 才将其纳入摘要。
+  `/context` 单列当前尾部折叠回合/调用数，`compact_generation` 与 live native IR source pairs 继续各自权威。
+- 扩展回归在未改 HEAD 快照也复现 overflow→Compact→继续回复的用量 event id 冲突。当前 ConversationStore
+  在唯一追加锁内将 request/run 累计快照转为按物理调用游标的新增加量，并以原快照 digest 守幂等；成功续跑
+  不再被记成失败，cache-read/cache-write 不双计。289 项 main/child/Gateway/store/config focused 与本地严格
+  gate 已通过，MiniMax-M2.7 真 TUI cache-read 仍待部署验收。
+
+## 2026-08-25 当前回合 Todo 与真实 Window 粘底（已部署）
 
 - 同一长 session 的七路调研、两个小追加和 Click→Go 复刻证明完整 task-path 账本不能直接等于当前底部 Todo；
   r27/r28/r29 的历史项会跨阶段累积。当前候选保留完整 ledger，新增 exact conversation request display plan，
   tool result、后台 activity、child detail 和最终 notice 统一携带 generation/revision。
 - TUI 新回合先清上一代，旧 poll/notice 迟到时按结构化身份丢弃；不解析标题、不删除历史、不改变完成语义。
 - 切主/子页面和提交后“control cursor 已到底但真实窗口没到底”的第二层问题，按 终端交互 repin 行为把锚点
-  接到 prompt_toolkit `get_vertical_scroll`。相关 task-progress/conversation/TUI/renderer/worker focused 已过，
-  待严格 gate 和 `.7` 唯一 Gateway 同一 session 真机复验。
+  接到 prompt_toolkit `get_vertical_scroll`。`4425618` 已过 362 项 focused（2 xfail）和严格 gate；`.7` 唯一
+  Gateway 的原长 session 两轮普通追加均清旧 Todo，PageUp 离底、Enter 回底和终态 Working 收口已真机通过。
 
 ## 2026-08-25 同批显式 output 范围祖先冲突（本地候选）
 

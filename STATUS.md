@@ -1,16 +1,35 @@
 # STATUS
 
-## 2026-08-25 当前回合 Todo 与物理 Window 粘底（本地候选）
+## 2026-08-25 跨回合工具终态折叠与缓存稳定前缀（本地候选）
+
+- 原长 TUI 当前模型可见上下文在同一次请求内约 58k–61k，下一普通回合回到约 58k，而 canonical
+  `compact_generation=0`。这不是一次漏显示的 Compact：缺口是普通回合结束后，native ToolCall/ToolResult
+  没有进入下一轮历史，只剩 assistant 最终正文。
+- 对照 会话运行时 `context_manager/history.rs::record_items/process_item/for_prompt` 与
+  `stream_events_utils.rs::record_completed_response_item`，以及 终端交互 `query.ts` 的
+  tool-result budget → microcompact → autocompact 顺序和 `microCompact.ts` 的 cached prefix 规则后，候选为
+  main/child 每个完成回合生成一次确定性 `conversation_terminal_tool_fold.v1`。完整原文仍在 owner archive；
+  折叠只保存脱敏工具索引、近期摘要、精确 refs 和防重放提示。
+- 折叠与 assistant 同账追加，旧行不随新轮重新总结，因此 provider 可复用 append-only 稳定前缀；它不推进
+  `compact_generation`。真正 Compact 会把这些折叠纳入摘要；`/context` 已把当前尾部折叠回合/工具调用数与
+  Compact 次数分开。
+- 扩展回归同时复现并修掉一项 HEAD 既有故障：同一 child 在 overflow→Compact→继续回复时，旧会话用量事件
+  只按 request/run 生成一个 id，却先后写入“一次调用”和“两次累计调用”，把第二次成功结果打成数据冲突。
+  现在按物理调用游标把累计快照原子换成增量事件，缓存读写 token 也只加新增部分。289 项 Compact、Gateway、
+  child、store/config focused 与本地严格 gate 已通过，待部署和 MiniMax-M2.7 真 TUI 连续轮验收。
+
+## 2026-08-25 当前回合 Todo 与物理 Window 粘底（已部署真机验证）
 
 - 同一长 session 的多阶段任务暴露两层展示问题：完整 task-path ledger 被直接当成当前 Todo，导致追加任务
   仍挂上一阶段清单；TUI 切主/子页面或提交后虽把 control cursor 设到底部，prompt_toolkit Window 的物理
   scroll 仍可能留在旧位置。
-- 当前候选保留完整耐久 ledger，新增宿主写入的
+- `4425618` 保留完整耐久 ledger，新增宿主写入的
   `display_plan(generation_id/revision/item_ids)`：同一 conversation request 续片合并，新的普通用户回合换代；
   tool progress、activity、child detail 和最终 notice 均携带身份，TUI 清旧代并拒绝迟到/倒退快照。
 - 主/子 transcript 各自的 typed anchor 已接入 `Window.get_vertical_scroll`；362 项相关 focused 通过（2 xfail），
-  另 95 项 Compact/TUI 回归通过。主代理当前约 68k/128k（53%），低于 90%（约 115.2k）触发线，
-  `compact 0` 是权威 thread 的正确次数，不是漏显示。待严格 gate、推送、唯一 Gateway 部署和同 session 真测。
+  另 95 项 Compact/TUI 回归通过，本地严格 gate 全绿并推送。`.7` 仅重启唯一 Gateway 后，原 tmux
+  `ma-97468f3-longchain-r27` 原位恢复同一 conversation；两轮普通追加均立即清旧 Todo，PageUp 离底显示
+  `Jump to bottom ↓`，提交后回底，终态 Working 收起。Context 为 46%–53%，低于 90% 线，`compact 0` 正确。
 
 ## 2026-08-25 DNS 瞬断直接杀死两小时 child（本地候选）
 

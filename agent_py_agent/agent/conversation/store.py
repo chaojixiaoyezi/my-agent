@@ -1475,6 +1475,59 @@ class ConversationModelUsageStore(ConversationMessageStore):
             append_jsonl(path, event.to_dict(), sort_keys=True)
             return event
 
+    # LLM: Finalizers submit a cumulative request/run snapshot, while this
+    # append-only ledger stores only the monotonic delta since prior snapshots
+    # in the same exact scope. The snapshot digest makes replay idempotent even
+    # after later deltas exist and rejects conflicting reuse of an event id.
+    # 函数用途: 把同一轮多次收口的累计模型用量换算成逐次增量，避免 Compact 重试重复计费或复用事件键失败。
+    def append_model_usage_snapshot_once(
+        self,
+        request: dict[str, Any],
+    ) -> ThreadModelUsageEvent:
+        snapshot = _thread_model_usage_event(request)
+        self._require_thread(snapshot.thread_id)
+        path = self._model_usage_path(snapshot.thread_id)
+        transition = path.with_name(f".{path.name}.append-once")
+        snapshot_digest = _model_usage_snapshot_digest(snapshot.model_calls)
+        with locked_file_transition(transition):
+            events, load_errors = self.model_usage_events_report(snapshot.thread_id)
+            if load_errors:
+                raise DataCorruptionError(
+                    f"conversation model usage ledger is unreadable: {snapshot.thread_id}"
+                )
+            existing = next(
+                (item for item in events if item.event_id == snapshot.event_id),
+                None,
+            )
+            if existing is not None:
+                if (
+                    _model_usage_event_scope(existing)
+                    != _model_usage_event_scope(snapshot)
+                    or _model_usage_snapshot_digest_from_delta(existing.model_calls)
+                    != snapshot_digest
+                ):
+                    raise DataCorruptionError(
+                        f"model usage snapshot event id reused with different input: "
+                        f"{snapshot.event_id}"
+                    )
+                return existing
+            prior = [
+                item.model_calls
+                for item in events
+                if _model_usage_event_scope(item) == _model_usage_event_scope(snapshot)
+            ]
+            delta = _model_usage_snapshot_delta(snapshot.model_calls, prior)
+            delta["ledger_projection"] = {
+                "kind": "cumulative_snapshot_delta",
+                "snapshot_physical_model_attempt_count": _usage_int(
+                    snapshot.model_calls.get("physical_model_attempt_count")
+                ),
+                "snapshot_digest": snapshot_digest,
+            }
+            event = _thread_model_usage_event({**request, "model_calls": delta})
+            append_jsonl(path, event.to_dict(), sort_keys=True)
+            return event
+
     # LLM: A corrupt row remains an explicit load error; consumers must never
     # convert missing or unreadable provider usage into a zero-cost turn.
     # 函数用途: 读取指定会话的全部模型用量事件及损坏记录。
@@ -1559,6 +1612,188 @@ def _model_usage_identity_payload(event: ThreadModelUsageEvent) -> dict[str, Any
     payload = event.to_dict()
     payload.pop("created_at", None)
     return payload
+
+
+# LLM: Usage snapshot subtraction is scoped only by immutable structured
+# identities; prompt text, cwd, display names and model prose never participate.
+# 函数用途: 生成模型用量增量账的精确会话/请求/运行范围键。
+def _model_usage_event_scope(event: ThreadModelUsageEvent) -> tuple[str, ...]:
+    return (
+        event.thread_id,
+        event.request_id,
+        event.run_id,
+        event.task_id,
+        event.source,
+    )
+
+
+# LLM: The digest covers the original cumulative snapshot, not the stored
+# delta marker, so an exact replay remains stable after later events append.
+# 函数用途: 为累计模型用量快照生成不含时间戳的稳定指纹。
+def _model_usage_snapshot_digest(model_calls: dict[str, Any]) -> str:
+    payload = dict(model_calls)
+    payload.pop("ledger_projection", None)
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+# LLM: Only rows written by append_model_usage_snapshot_once carry this marker;
+# a legacy/direct additive event cannot silently impersonate a snapshot replay.
+# 函数用途: 从已落盘增量行读取原累计快照指纹，供幂等重放核对。
+def _model_usage_snapshot_digest_from_delta(model_calls: dict[str, Any]) -> str:
+    marker = model_calls.get("ledger_projection")
+    marker = marker if isinstance(marker, dict) else {}
+    if str(marker.get("kind") or "") != "cumulative_snapshot_delta":
+        return ""
+    return str(marker.get("snapshot_digest") or "").strip()
+
+
+# LLM: Every numeric field in a cumulative model_call_summary is monotonic at
+# finalization boundaries. Regression is corruption, never a reason to clamp or
+# duplicate spend. Lists are represented as newly observed set members.
+# 函数用途: 用当前累计快照减去同范围既有增量，生成可安全求和的一条模型用量事件。
+def _model_usage_snapshot_delta(
+    snapshot: dict[str, Any],
+    prior_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    prior = _sum_model_call_summaries(prior_summaries)
+    additive_fields = (
+        "logical_model_turn_count",
+        "physical_model_attempt_count",
+        "model_retry_count",
+        "provider_http_attempt_count",
+        "provider_http_retry_count",
+        "accounted_input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+        "cache_creation_input_tokens",
+        "provider_usage_call_count",
+        "estimated_usage_call_count",
+    )
+    delta: dict[str, Any] = {"schema": "model_call_summary.v1"}
+    for key in additive_fields:
+        delta[key] = _monotonic_usage_delta(snapshot.get(key), prior.get(key), key)
+    delta["status_counts"] = _usage_mapping_delta(
+        snapshot.get("status_counts"),
+        prior.get("status_counts"),
+        "status_counts",
+    )
+    prior_backends = {str(item) for item in prior.get("backends", []) if str(item)}
+    prior_models = {str(item) for item in prior.get("models", []) if str(item)}
+    delta["backends"] = sorted(
+        {str(item) for item in snapshot.get("backends", []) if str(item)}
+        - prior_backends
+    )
+    delta["models"] = sorted(
+        {str(item) for item in snapshot.get("models", []) if str(item)}
+        - prior_models
+    )
+    snapshot_usage = snapshot.get("usage_breakdown")
+    snapshot_usage = snapshot_usage if isinstance(snapshot_usage, dict) else {}
+    prior_usage = prior.get("usage_breakdown")
+    prior_usage = prior_usage if isinstance(prior_usage, dict) else {}
+    delta["usage_breakdown"] = {
+        "schema": "model_usage_breakdown.v1",
+        "provider": _usage_mapping_delta(
+            snapshot_usage.get("provider"),
+            prior_usage.get("provider"),
+            "usage_breakdown.provider",
+        ),
+        "estimated": _usage_mapping_delta(
+            snapshot_usage.get("estimated"),
+            prior_usage.get("estimated"),
+            "usage_breakdown.estimated",
+        ),
+    }
+    return delta
+
+
+# LLM: Prior persisted rows are already additive deltas (or one legacy additive
+# event), so aggregation must never reinterpret them as fresh cumulative input.
+# 函数用途: 合并同一模型用量范围内已经落盘的增量，供下一份累计快照做减法。
+def _sum_model_call_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    total: dict[str, Any] = {
+        "backends": [],
+        "models": [],
+        "status_counts": {},
+        "usage_breakdown": {"provider": {}, "estimated": {}},
+    }
+    for summary in summaries:
+        for key, value in summary.items():
+            if key in {"schema", "ledger_projection", "status_counts", "usage_breakdown"}:
+                continue
+            if key in {"backends", "models"}:
+                known = {str(item) for item in total[key] if str(item)}
+                known.update(str(item) for item in value if str(item))
+                total[key] = sorted(known)
+            else:
+                total[key] = _usage_int(total.get(key)) + _usage_int(value)
+        _add_usage_mapping(total["status_counts"], summary.get("status_counts"))
+        usage = summary.get("usage_breakdown")
+        usage = usage if isinstance(usage, dict) else {}
+        _add_usage_mapping(total["usage_breakdown"]["provider"], usage.get("provider"))
+        _add_usage_mapping(total["usage_breakdown"]["estimated"], usage.get("estimated"))
+    return total
+
+
+# LLM: Mapping deltas stay open to future numeric counters while schema labels
+# are ignored; any cumulative regression is explicit data corruption.
+# 函数用途: 对状态数或供应商用量分区逐字段做非负累计差值。
+def _usage_mapping_delta(current: object, prior: object, label: str) -> dict[str, int]:
+    current_row = current if isinstance(current, dict) else {}
+    prior_row = prior if isinstance(prior, dict) else {}
+    keys = {
+        str(key)
+        for key in (*current_row.keys(), *prior_row.keys())
+        if str(key) != "schema"
+    }
+    return {
+        key: _monotonic_usage_delta(
+            current_row.get(key),
+            prior_row.get(key),
+            f"{label}.{key}",
+        )
+        for key in sorted(keys)
+    }
+
+
+# LLM: Aggregation accepts only non-negative integer counters; malformed values
+# cannot become negative cost or silently erase a previous event.
+# 函数用途: 把一个用量分区的数字累加到已有字典。
+def _add_usage_mapping(target: dict[str, int], source: object) -> None:
+    row = source if isinstance(source, dict) else {}
+    for key, value in row.items():
+        if str(key) == "schema":
+            continue
+        normalized = str(key)
+        target[normalized] = _usage_int(target.get(normalized)) + _usage_int(value)
+
+
+# LLM: Cumulative usage snapshots cannot move backward between completed
+# finalizations in one exact request/run scope; fail closed if they do.
+# 函数用途: 计算单个累计计数器的新增加量并拒绝倒退。
+def _monotonic_usage_delta(current: object, prior: object, label: str) -> int:
+    current_value = _usage_int(current)
+    prior_value = _usage_int(prior)
+    if current_value < prior_value:
+        raise DataCorruptionError(f"model usage cumulative snapshot regressed: {label}")
+    return current_value - prior_value
+
+
+# LLM: Usage coercion is shared by additive snapshot helpers and treats invalid
+# values as zero without permitting negative persisted totals.
+# 函数用途: 将模型用量字段归一为非负整数。
+def _usage_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 # LLM: Partition addition is open to future numeric keys only through the

@@ -149,9 +149,11 @@ class FinalizationService:
         return written
 
     # LLM: Provider usage follows the exact conversation/agent thread even when
-    # do_save=False. This append is independent from transcript, memory and run
-    # archive saving, so a background wake cannot masquerade as a user turn.
-    # 函数用途: 将本轮模型账幂等写入所属会话；没有可信线程身份时明确跳过而不猜。
+    # do_save=False. Each finalization submits the cumulative request/run
+    # snapshot at its physical-attempt cursor; ConversationStore atomically
+    # persists only the new delta so Compact retries neither collide nor double
+    # count. This stays independent from transcript, memory and run archives.
+    # 函数用途: 将本轮累计模型账按物理调用游标幂等写入所属会话；没有可信线程身份时明确跳过而不猜。
     def _write_thread_model_usage_if_bound(
         self,
         ctx: FinalizeContext,
@@ -167,16 +169,21 @@ class FinalizationService:
             or ""
         ).strip()
         store = getattr(self._agent, "conversation_store", None)
-        append_usage = getattr(store, "append_model_usage_once", None)
+        append_usage = getattr(store, "append_model_usage_snapshot_once", None)
         if not thread_id or not callable(append_usage):
             return ""
         request_id = str(ctx.request_id or run_request_id or "").strip()
+        physical_attempt_count = int(
+            model_calls.get("physical_model_attempt_count") or 0
+        )
         identity = "\x1f".join(
             (
                 thread_id,
                 request_id,
                 str(ctx.run_id or "").strip(),
+                str(ctx.task_id or "").strip(),
                 str(ctx.source or "").strip(),
+                str(physical_attempt_count),
             )
         )
         event_id = "usage-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]

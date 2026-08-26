@@ -173,3 +173,9 @@ Conversation Compact。task-local 只保留子代理权限、Memory 隔离和运
 continue。排障时以 `task.agent_thread_id -> ConversationThread.compact_generation/checkpoint_id` 为正式次数与
 恢复事实；允许持久化的活动回合 native IR reduction 必须以 `source_kind=live_tool_ir` 进入同一 checkpoint/
 generation，实时事件只投影提交结果。presentation/no-save 临时 reduction 不计数。
+
+provider overflow 可能让同一 request/run 在 Compact 前后各收口一次。模型调用内存账是累计快照，会话用量
+JSONL 是逐次增量：事件 id 必须包含 `physical_model_attempt_count` cursor，Store 在唯一锁内减去同 scope
+既有增量，并保存原快照 digest。排障时若第二次模型回复已成功却 child 反向失败，先查
+`conversations/model_usage/<thread>.jsonl` 是否出现 scope-only event id 异值复用；不得通过清账、忽略冲突或把
+两份累计快照直接相加来绕过。

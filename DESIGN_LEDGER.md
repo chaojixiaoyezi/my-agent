@@ -32,6 +32,19 @@
   只允许白名单字段进入 provider replay，工具 id/name/input 仍以 canonical ToolCall 为权威；compact 或
   其他结构化裁剪一旦改变签名覆盖的内容，就必须丢弃对应 provider blocks 并回落到无签名的规范历史，
   不能伪造、拼接或向用户泄露 reasoning。
+- 普通回合结束时允许做一次 会话运行时/终端交互 式工具终态折叠，但它不是 Compact：宿主只从该回合
+  canonical tool archive 生成有界、脱敏、带计数和 refs 的 `conversation_terminal_tool_fold.v1`，与 assistant
+  消息同一次落入唯一 ConversationStore。后续轮只读这份不可变折叠，不重新总结、不按当前窗口改写旧行；
+  因而既保留“做过什么、哪里核验、不要重放副作用”的续做事实，也让历史保持 append-only 稳定前缀以利用
+  provider cache。完整原始输出继续只在 owner archive，最近折叠保留有限明细，不能伪造已删除的
+  ToolCall/ToolResult 或 thinking signature。真正 Conversation Compact 才把折叠纳入摘要、推进
+  `compact_generation` 与 transcript source-message 计数；`compact_source_tool_pairs` 继续只表示运行中 native IR
+  真压缩掉的完整工具对，终态折叠的回合/调用数必须独立展示，不能冒充 Compact 或重复累计。
+- 同一 request/run 在 provider overflow 后可能先收口失败响应、提交 Conversation Compact，再继续调用模型；
+  `ModelCallLedger` 对这个 scope 给出累计快照，持久 `ConversationModelUsageStore` 必须按
+  `physical_model_attempt_count` 游标原子换算成 append-only 增量。每个增量事件保存原累计快照指纹，精确重放
+  幂等、同 id 异值 fail closed；input/output/cache-read/cache-write 与 provider/estimated 分区均只累计新增值。
+  禁止把第二份累计快照整条相加，也禁止复用 scope-only event id 让一次正常 Compact 续跑变成数据冲突。
 - 供应商额度耗尽、明确不可用或健康探测失败时，正式运行面立即切到已配置且探活成功的本地模型，禁止
   为等待刷新而让任务空转；本地首选端口和供应商刷新时刻来自显式配置，不从错误正文或自然语言猜测。
   只有当前没有 live request、到达配置刷新点且供应商探活成功时才安全切回，模型切换不得创建第二个

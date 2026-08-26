@@ -97,6 +97,127 @@ def test_thread_model_usage_is_idempotent_partitioned_and_survives_restart(
     }
 
 
+def test_thread_model_usage_cumulative_snapshots_persist_only_new_deltas(
+    tmp_path,
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {"canonical_user_id": "user-usage-snapshot", "now": 10.0}
+    )
+    first_calls = _cumulative_model_calls(
+        physical=1,
+        input_tokens=90_000,
+        output_tokens=10,
+        cache_read_tokens=80_000,
+    )
+    second_calls = _cumulative_model_calls(
+        physical=2,
+        input_tokens=90_500,
+        output_tokens=110,
+        cache_read_tokens=80_400,
+    )
+    common = {
+        "thread_id": thread.thread_id,
+        "request_id": "request-compact-retry",
+        "run_id": "run-child-1",
+        "task_id": "task-child-1",
+        "source": "subagent_run",
+    }
+
+    first = store.append_model_usage_snapshot_once(
+        {**common, "event_id": "usage-snapshot-1", "model_calls": first_calls}
+    )
+    second = store.append_model_usage_snapshot_once(
+        {**common, "event_id": "usage-snapshot-2", "model_calls": second_calls}
+    )
+    replay = store.append_model_usage_snapshot_once(
+        {
+            **common,
+            "event_id": "usage-snapshot-2",
+            "model_calls": second_calls,
+            "now": 99.0,
+        }
+    )
+
+    assert replay == second
+    with pytest.raises(
+        DataCorruptionError,
+        match="snapshot event id reused with different input",
+    ):
+        store.append_model_usage_snapshot_once(
+            {
+                **common,
+                "event_id": "usage-snapshot-2",
+                "model_calls": {
+                    **second_calls,
+                    "output_tokens": 111,
+                    "total_tokens": 90_611,
+                },
+            }
+        )
+    assert first.model_calls["physical_model_attempt_count"] == 1
+    assert second.model_calls["physical_model_attempt_count"] == 1
+    assert second.model_calls["usage_breakdown"]["provider"] == {
+        "cache_read_input_tokens": 400,
+        "cache_write_input_tokens": 0,
+        "call_count": 1,
+        "input_tokens": 500,
+        "output_tokens": 100,
+    }
+    assert second.model_calls["ledger_projection"][
+        "snapshot_physical_model_attempt_count"
+    ] == 2
+    assert store.model_usage_summary(thread.thread_id)["provider"] == {
+        "input_tokens": 90_500,
+        "output_tokens": 110,
+        "cache_read_input_tokens": 80_400,
+        "cache_write_input_tokens": 0,
+        "call_count": 2,
+    }
+
+
+def _cumulative_model_calls(
+    *,
+    physical: int,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+) -> dict[str, object]:
+    return {
+        "schema": "model_call_summary.v1",
+        "logical_model_turn_count": physical,
+        "physical_model_attempt_count": physical,
+        "model_retry_count": 0,
+        "provider_http_attempt_count": physical,
+        "provider_http_retry_count": 0,
+        "status_counts": {"finished": physical},
+        "backends": ["test"],
+        "models": ["test-model"],
+        "accounted_input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "cached_input_tokens": cache_read_tokens,
+        "cache_creation_input_tokens": 0,
+        "provider_usage_call_count": physical,
+        "estimated_usage_call_count": 0,
+        "usage_breakdown": {
+            "schema": "model_usage_breakdown.v1",
+            "provider": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_input_tokens": cache_read_tokens,
+                "cache_write_input_tokens": 0,
+                "call_count": physical,
+            },
+            "estimated": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "call_count": 0,
+            },
+        },
+    }
+
+
 def test_thread_model_usage_conflict_and_corruption_fail_closed(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(

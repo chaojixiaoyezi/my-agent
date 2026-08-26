@@ -321,6 +321,7 @@ class UserFieldsService:
 
 _RUNTIME_BOOL_FIELDS = (
     "auto_save_memory", "local_store_fts_enabled",
+    "conversation_terminal_tool_fold_enabled",
     "enable_subagents",
     "concurrency_lock_enabled", "audit_enabled", "watchdog_enabled",
 )

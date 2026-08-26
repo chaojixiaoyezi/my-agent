@@ -17,6 +17,25 @@
 
 ## 下一版优先级
 
+### 跨回合工具终态折叠与缓存稳定前缀
+
+状态：本地实现、289 项 focused 与严格 gate 已通过，待 `.7` 单 Gateway 真 TUI
+
+解决问题：同一长 TUI 中，当前模型可见上下文从 60 多 K 回落到 50 多 K，但 canonical thread 仍为
+`compact 0`。权威账本证明没有漏记 Compact；真实缺口是普通回合结束后 native ToolCall/ToolResult 只保留
+最终 assistant 正文，工具历史无痕退出下一轮。用户认可合理终态折叠，但要求保留续做事实并合理利用缓存。
+
+实现边界：每个 main/child 回合从 canonical archive 一次生成不可变、有界、脱敏的 typed fold，与 assistant
+消息同账落盘；下一轮按原顺序追加投影，近期细节与 exact refs 保留，原始长输出仍按需读取。折叠不推进
+Compact；真正 Compact 才汇总这些 fold 并推进 generation/transcript source-message；运行中 native IR 已压掉的
+完整工具对继续单独计数，不能把同一次调用重复算两遍。历史旧前缀不按每轮预算重新改写，以便
+MiniMax/Anthropic 兼容链继续命中 cache-read。需补主/子共享回归、Compact 计量与真 TUI 连续轮证据。
+
+扩展 Compact 回归还复现了 HEAD 既有的 child 终态反转：同一 request/run 在 overflow 后先落一次累计模型账，
+Compact 继续成功后再以同 event id 写更大的累计账，Store 正确 fail closed 却导致成功 child 被标失败。当前按
+物理调用游标生成事件 id，并在唯一 Store 锁内把累计快照减去既有增量；精确重放核对原快照指纹，缓存读写
+和 provider/estimated 分区不双计。该修复不改变 Compact 次数、task 状态或 provider cache 协议。
+
 当前 `.7` 同一长 TUI 的新七路调研再次证明 7 个 child 都真实 `DONE`，但 root 最终只收到 3 份并错误收口。
 逐条 wake 账本已定位到更底层的接收者串线：前 6 条 completion 在兄弟 child 仍运行时被其 task-local
 模型安全点读取并确认，只有最后一条留给主代理。当前候选按 会话运行时 的 exact parent session mailbox 收口：
@@ -57,7 +76,7 @@ runner 把当前 role `prompt_zh` 直接丢弃，worker 实际从未看到共享
 
 ### 新阶段仍展示上一份已关闭 Todo
 
-状态：本地候选 focused 通过，待严格 gate、推送、`.7` 单 Gateway 同一长 session 复验
+状态：`4425618` 已推送、部署并由 `.7` 单 Gateway 同一长 session 真机收口
 
 解决问题：`ma-97468f3-longchain-r27` 已进入独立验收失败后的三路修复，底部 child 面板正确显示三名
 RUNNING，固定 Todo 却仍显示上一轮调研的 `完成 4/7`（实际 4 done + 3 skipped）。这是旧 task-path 计划
@@ -67,7 +86,8 @@ RUNNING，固定 Todo 却仍显示上一轮调研的 `完成 4/7`（实际 4 don
 host-owned `display_plan` 只列当前 conversation request 的 exact item ids。同一 lifecycle wake 继续原代，
 下一普通用户回合换代；TUI 在 dequeue 时先清旧 Todo，并按代次/修订拒绝迟到 activity/notice。与此同时按
 终端交互 `repinScroll` 补了 prompt_toolkit Window 的显式垂直滚动落点，提交与页面切换能真实粘底，手动
-上翻仍不抢滚动。相关 focused 集合已通过，尚不能冒充真 TUI 验收。
+上翻仍不抢滚动。362 项 focused（2 xfail）及严格 gate 通过；原 `ma-97468f3-longchain-r27` 原位 resume 后，
+两轮追加均清掉旧 `完成 24/35`，PageUp 离底可见 `Jump to bottom ↓`，下一次 Enter 立即回底且 Working 收口。
 
 ### DNS 瞬断不能终止长代理
 

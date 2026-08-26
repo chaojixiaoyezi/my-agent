@@ -9,6 +9,11 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..agent_core.tool_context.window import (
+    TERMINAL_TOOL_FOLD_METADATA_KEY,
+    build_conversation_terminal_tool_fold,
+    conversation_message_with_terminal_tool_fold,
+)
 from ..tooling.operation_verification import public_operation_verification
 from .compact import ConversationCompactResult, prepare_conversation_context
 from .models import ConversationThread, MessageLogEntry
@@ -148,8 +153,9 @@ def prepare_subagent_thread_turn(
 
 
 # LLM: Only the terminal result of one concrete attempt becomes assistant transcript. Typed
-# runtime/operation facts remain metadata and retries reuse the same dedupe identity.
-# 函数用途: 子代理一轮真正结束后幂等保存模型结果，供下一次运行或 Compact 恢复使用。
+# runtime/operation facts and one immutable terminal tool fold remain metadata; retries reuse the
+# same dedupe identity and later turns consume the fold without copying raw provider pairs.
+# 函数用途: 子代理一轮结束后幂等保存正文与工具终态折叠，供下一轮续接或真正 Compact 使用。
 def append_subagent_thread_result(
     agent: object,
     task: object,
@@ -175,6 +181,12 @@ def append_subagent_thread_result(
             ),
         }
     )
+    terminal_tool_fold = build_conversation_terminal_tool_fold(
+        agent,
+        getattr(result, "archive_tool_calls", None),
+    )
+    if terminal_tool_fold:
+        metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = terminal_tool_fold
     return agent.conversation_store.append_message_once(
         {
             "thread_id": thread.thread_id,
@@ -289,8 +301,16 @@ def _render_agent_thread_context(
     if bounded:
         lines.append("## Recent Agent History")
         for row in bounded:
+            content = (
+                conversation_message_with_terminal_tool_fold(
+                    row.content,
+                    row.metadata,
+                )
+                if row.role == "assistant"
+                else row.content
+            )
             lines.append(
-                f"- {row.role}: {json.dumps(row.content, ensure_ascii=False)}"
+                f"- {row.role}: {json.dumps(content, ensure_ascii=False)}"
             )
     return "\n".join(lines)
 
@@ -316,7 +336,15 @@ def _bounded_agent_history(
     selected: list[MessageLogEntry] = []
     used = 0
     for row in reversed(rows):
-        content = _clip_middle(str(row.content or ""), per_message)
+        content = (
+            conversation_message_with_terminal_tool_fold(
+                row.content,
+                row.metadata,
+            )
+            if row.role == "assistant"
+            else str(row.content or "")
+        )
+        content = _clip_middle(content, per_message)
         remaining = total_limit - used
         if remaining <= 0:
             break
@@ -331,7 +359,11 @@ def _bounded_agent_history(
                 channel=row.channel,
                 channel_message_id=row.channel_message_id,
                 created_at=row.created_at,
-                metadata=row.metadata,
+                metadata={
+                    key: value
+                    for key, value in row.metadata.items()
+                    if key != TERMINAL_TOOL_FOLD_METADATA_KEY
+                },
             )
         )
         used += len(content)

@@ -11,6 +11,7 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
 )
 from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_scope_root
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.conversation.agent_thread import prepare_subagent_thread_turn
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.services.control_plane_projection import (
@@ -234,6 +235,19 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
     assert parent_link.thread_id == parent_thread.thread_id
     assert child_thread is not None
     assert [row.role for row in child_rows] == ["user", "assistant"]
+    assert child_rows[-1].metadata["terminal_tool_fold"]["tool_call_count"] == 1
+
+    followup = prepare_subagent_thread_turn(
+        agent,
+        task,
+        prompt="继续核对刚才写入的文件",
+        attempt_id="followup-attempt",
+    )
+
+    assert followup.compact_generation == 0
+    assert "conversation-terminal-tool-fold" in followup.injection
+    assert "write_file" in followup.injection
+    assert "call-child-write-1" in followup.injection
 
 
 def test_subagent_preflight_compacts_large_completed_history_before_sampling(

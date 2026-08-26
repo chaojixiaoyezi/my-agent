@@ -66,6 +66,46 @@ def test_card_and_prompt_defaults_match_shipped_config():
     assert config_path.read_text(encoding="utf-8").count("gateway_per_user_owner_scoping:") == 1
 
 
+def test_terminal_tool_fold_defaults_match_shipped_config() -> None:
+    config_path = Path(__file__).parents[1] / "config" / "agent_config.yaml"
+    shipped = load_config(config_path)
+    defaults = AgentConfig()
+
+    assert (
+        defaults.conversation_terminal_tool_fold_enabled
+        is shipped.conversation_terminal_tool_fold_enabled
+        is True
+    )
+    assert (
+        defaults.conversation_terminal_tool_fold_max_chars
+        == shipped.conversation_terminal_tool_fold_max_chars
+        == 6_000
+    )
+
+
+def test_terminal_tool_fold_config_is_normalized_and_bounded() -> None:
+    normalized, warnings = normalize_agent_config(
+        {
+            "conversation_terminal_tool_fold_enabled": "false",
+            "conversation_terminal_tool_fold_max_chars": "2400",
+        }
+    )
+
+    assert warnings == []
+    assert normalized["conversation_terminal_tool_fold_enabled"] is False
+    assert normalized["conversation_terminal_tool_fold_max_chars"] == 2_400
+
+    fallback, warnings = normalize_agent_config(
+        {"conversation_terminal_tool_fold_max_chars": "999999"}
+    )
+
+    assert any("conversation_terminal_tool_fold_max_chars" in item for item in warnings)
+    assert (
+        fallback["conversation_terminal_tool_fold_max_chars"]
+        == AgentConfig().conversation_terminal_tool_fold_max_chars
+    )
+
+
 def test_normalize_agent_config_type_coercion():
     data = {
         "request_timeout": 45,

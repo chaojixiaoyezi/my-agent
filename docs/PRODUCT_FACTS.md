@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-08-22（`my-agent` 测试机）。本文是当前工作树能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-08-25（`my-agent` 测试机）。本文是当前工作树能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -11,6 +11,33 @@
 - **仅设计**：只有方案、接口预留或文档，不应向用户宣称可用。
 
 状态只描述当前工作树。它不等同于已发布版本；未提交、未推送的能力不属于远程 `main`。
+
+## 2026-08-25 跨回合工具终态折叠
+
+- **状态：实验性（本地 289 项 focused 与严格 gate 通过，尚未部署真机）**。普通 main/child 工具回合结束时，从 canonical
+  archive 一次生成有界、脱敏、确定性的 `conversation_terminal_tool_fold.v1`，与 assistant 正文同一条
+  ConversationStore 消息落账。用户可见正文不拼接折叠；下一模型轮才从 metadata 读取。
+- 该折叠是 会话运行时 完整 ResponseItem 历史与 终端交互 cache-aware microcompact 之间的适配：完整工具输出继续
+  由 owner archive 掌权，prompt 只带工具顺序、状态、有限参数结构、近期摘要和 refs。已结束旧回合不重新
+  总结，历史保持 append-only 稳定前缀，供兼容 provider 自动复用 cache-read。
+- 普通折叠不推进 Compact generation，也不重复累计运行中 native IR 已真压掉的 tool pairs。`/context` 单列
+  当前未压缩尾部的折叠回合/工具调用数；真正 Conversation Compact 才把折叠吸收进 summary 并推进 generation。
+- 同一 request/run 经 provider overflow 做 Compact 后继续时，内存 `ModelCallLedger` 的累计快照由会话存储按
+  `physical_model_attempt_count` 游标换成 append-only 增量；事件保留原快照指纹以幂等重放，供应商 input/output/
+  cache-read/cache-write 和 estimated 分区均只累计新增值。该修复避免第二次成功回复因 scope-only event id
+  冲突而反向把 child 标成失败。
+
+## 2026-08-25 长 session 当前回合 Todo 与滚动锚点
+
+- **状态：稳定（focused、严格 gate 与 `.7` 单 Gateway 原长 session 通过）**。完整 task-path
+  `task_progress.v1` 继续保存跨阶段历史；底部 Todo 只按宿主的 exact
+  `display_plan(generation_id/revision/item_ids)` 展示当前 ordinary user turn。lifecycle continuation 继承同代，
+  新普通用户回合换代，迟到 poll/tool/final notice 不能把旧清单刷回来。
+- 主/子页面各自保存 typed scroll anchor，并由 prompt_toolkit `Window.get_vertical_scroll` 落到真实 viewport。
+  手动离底不被后台输出强拉；有效消息提交后立即回底。`4425618` 的 362 项 focused（2 xfail）与严格 gate
+  通过，`.7` 的原 `ma-97468f3-longchain-r27` 两轮追加、PageUp/Enter 和终态 Working 已真机验证。
+- Context 常驻行显示当前 provider-visible 估算与配置压缩点；`compact N` 只读成功提交的 canonical thread
+  generation。128k、90% 配置下，46%–53% 显示 `compact 0` 是正确事实，不按屏幕历史长度推断压缩。
 
 ## 2026-08-22 子代理生命周期 active-turn 续接
 

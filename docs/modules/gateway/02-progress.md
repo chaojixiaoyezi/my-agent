@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-08-25 assistant 终态折叠与 Compact 续跑用量增量（本地候选）
+
+- Gateway 完成回合仍只向用户保存原 assistant 正文；同一条消息 metadata 新增一次从 canonical archive 构造的
+  `conversation_terminal_tool_fold.v1`。下一轮历史按原顺序附加这份不可变、有界、脱敏投影，不复制完整
+  ToolCall/ToolResult，也不重新总结旧轮，因此历史前缀稳定且 provider cache 可继续复用。
+- `/context` 单列当前未压缩尾部的 fold 回合/调用数，普通折叠不推进 `compact_generation`；真正 Compact 才
+  吸收它。消息 repair 使用完全相同的 metadata，不能因正常落账失败而丢掉续接事实。
+- HEAD 基线可复现 overflow→Compact→成功继续时 model-usage event id 异值冲突。当前 finalizer 用物理调用累计
+  数作 cursor，ConversationStore 在唯一锁内把累计快照换成增量，cache-read/cache-write 不双计。289 项相关
+  focused 与本地严格 gate 已通过，待 `.7` 唯一 Gateway 真 TUI。
+
 ## 2026-08-25 DNS 瞬断的 会话运行时 式有界恢复（本地候选）
 
 - `ma-97468f3-longchain-r27` 的 worker-6 已运行近两小时并 Compact 3 次，一次 typed
