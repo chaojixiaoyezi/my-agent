@@ -6,12 +6,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 import time
 
 import pytest
 
+from agent_py_agent.agent.tooling.background_process_host import (
+    start_background_process_host,
+)
 from agent_py_agent.agent.tooling.shell import _kill_process_group, _LogSizeWatchdog
 
 
@@ -44,3 +49,29 @@ def test_watchdog_lets_normal_command_finish(tmp_path) -> None:
     handle.close()
     assert proc.returncode == 0  # 正常小输出命令不被杀,正常结束
     assert "hi-bg" in log.read_text(encoding="utf-8")
+
+
+def test_detached_host_keeps_enforcing_log_cap_after_launcher_scope(tmp_path) -> None:
+    """独立 host 自己守日志上限，不依赖已经结束的子代理 watchdog 线程。"""
+
+    log = tmp_path / "hosted.log"
+    hosted = start_background_process_host(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "while True: print('x' * 1000, flush=True)",
+        ],
+        cwd=tmp_path,
+        log_path=log,
+        env=dict(os.environ),
+        max_log_bytes=20_000,
+    )
+    try:
+        hosted.process.wait(timeout=6)
+        state = json.loads(hosted.state_file.read_text(encoding="utf-8"))
+        assert state["status"] == "exited"
+        assert state["reason"] == "log_limit_exceeded"
+    finally:
+        if hosted.process.poll() is None:
+            _kill_process_group(hosted.process)

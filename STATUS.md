@@ -1,5 +1,22 @@
 # STATUS
 
+## 2026-08-26 后台进程改归 conversation session 托管（第九候选）
+
+- `d29caab` 已推送并部署 `.7` 唯一 Gateway。fresh
+  `ma-evidence-r52-child-owner-approval-fresh` 证明 child 的 exact 工具请求能在 owner TUI 展示；Yes、
+  Yes always 与 No 都作用于服务端原 request，child 随后自然 DONE。
+- 同轮出现新的独立 P0：child 启动 Python HTTP 服务时返回 PID `1389135`，主代理最终也报告正在运行；但
+  child runner 一退出，端口 8768 实测 `connect_ex=111`。根因是 bwrap 正确带
+  `--die-with-parent`，它的直接父进程却是一次性 child runner；旧 `process_registry` 也只在该 Python
+  进程内存里，主代理无法再核对或停止。
+- 对照 会话运行时 Session 级 `UnifiedExecProcessManager` 与 终端交互 worker-exit cleanup 后，本产品选择 会话运行时
+  语义：已明确批准的后台服务属于 owner conversation session，而不是一次模型工作片。当前候选为每条命令
+  启动 detached managed host，host 再持有原 bwrap；受保护的 `managed_process_session.v1` 记录 owner/
+  conversation、host/child PID、PID 出生指纹和单调终态。登记失败会先杀 host，主机崩溃后不自动重放。
+- one-shot launcher 退出后由另一 Python 进程重新水合、查询 running 和 stop，owner 沙箱外存储、终态不回退、
+  runner 退出后的日志上限及完整后代树回收共 50 项 focused 已通过；严格 gate、提交部署和 fresh r53
+  MiniMax-M2.7 真 TUI 仍待完成。
+
 ## 2026-08-26 子代理 exact tool approval 转交 owner TUI（第八候选）
 
 - `c8a01f7` 已推送、部署 `.7` 唯一 Gateway。fresh r51 中，child 先获得匹配的 command/path capability
@@ -15,8 +32,9 @@
   收键，child 标题只作展示，回写始终使用服务端原 request。切入 child 页面时 overlay 仍绑定 root runtime。
   写回失败保持面板，无客户端/租约过期/取消/终态/坏记录全部 fail closed。
 - 实际 `BackgroundTranscriptSink` 接线、无 consumer 关闭式失败、owner 服务、薄客户端、两个 child FIFO
-  及 main+child 混合 FIFO、child session exact 缓存等 179 项 focused 已通过；全项目严格 gate、提交、部署和 fresh MiniMax-M2.7
-  child 真 TUI 尚待本轮继续完成。
+  及 main+child 混合 FIFO、child session exact 缓存等 179 项 focused 与严格 gate 已通过；`d29caab` 已
+  推送部署。fresh r52 已完成 child Yes / exact Yes always / No 三条路径，审批前无副作用、批准后原调用
+  续跑。该桥本身通过；同轮暴露的后台进程所有权 P0 单列在第九候选。
 
 ## 2026-08-26 受管后台进程、PTY 与子代理授权边界（第七候选）
 

@@ -1,10 +1,10 @@
 # TEST CHECKLIST
 
-- [ ] child capability grant 与 exact tool approval 继续分账；child 的实际 `BackgroundTranscriptSink` 遇到
+- [x] child capability grant 与 exact tool approval 继续分账；child 的实际 `BackgroundTranscriptSink` 遇到
   `ask` 时必须把完整 request 上送所属 owner TUI，并阻塞原 ToolCall。main 与多个 child 的确认共用一个
   FIFO，页面切换不隐藏 root overlay；无交互 consumer、租约过期、取消、终态、损坏或 stale 决定全部
-  fail closed。179 项 focused 已通过，待 `.7` 唯一 Gateway 的 fresh MiniMax-M2.7 TUI 证明审批前无副作用、
-  面板标出 child、批准后同一调用原地续跑。
+  fail closed。179 项 focused 与严格 gate 已通过；`d29caab` 部署 `.7` 唯一 Gateway 后，fresh r52 已证明
+  面板标出 child，Yes/Yes always/No 均对服务端原 request 生效，批准后同一调用原地续跑。
 
 - [ ] fresh MiniMax-M2.7 child 的 output contract、task packet、workspace refs 和 runner prompt 均不得暴露
   宿主 `final_report/output.json/runner_result`；child 完成业务后直接自然 final，不额外调用写工具生成内部
@@ -54,7 +54,9 @@
 - [ ] `run_command(run_in_background=true)` 返回的 session 必须能由同一用户会话通过
   `process_session list/status/wait/stop` 管理；wait 不派生 shell sleep，另一 TUI/owner 即使猜到 id 也看不到
   日志、不能停止。默认 coding role、动态 capability grant 和旧任务恢复也必须自动补齐该依赖，owner 显式
-  禁用仍优先。46 项 shell/process 与 54 项角色/授权组合 focused 已通过，待同一长 TUI 真构建验证工具选择。
+  禁用仍优先。后台命令必须归 conversation session，不归 one-shot child runner；原 runner 退出后 detached
+  host 继续持有 bwrap，受保护记录按 scope/store/PID 出生指纹水合，终态不回退。50 项 shell/process 与
+  54 项角色/授权组合 focused 已通过，待 fresh r53 真机证明 child/root 结束十秒后服务仍在且可查询停止。
 - [ ] 同一个长 TUI/同一个 conversation 依次完成“大型多子代理任务 -> 两个普通小任务/追问 -> 第二个大型
   多子代理复刻 -> 独立审计/修复”时，历史、工作区、输入队列、Todo、child 列表、Compact 计数和 main 状态
   必须连续且互不串轮；每阶段只给一次普通中文 prompt，测试者只观察，不替被测 Agent 补产物。

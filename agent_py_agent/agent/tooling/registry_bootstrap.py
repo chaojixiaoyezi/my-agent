@@ -111,7 +111,12 @@ def _register_network_tools(registry: Any, params: Any) -> None:
         ),
     )
     registry.register(shell_tool)
-    registry.register(ProcessSessionTool(params.owner_scope_root))
+    registry.register(
+        ProcessSessionTool(
+            params.owner_scope_root,
+            registry.workspace_root,
+        )
+    )
     registry.register(TerminalSessionTool(shell_tool))
     # controlled_exec is an internal tool used by capability grants.
     # flows, but ToolRegistry hides it from the default model-facing catalog.

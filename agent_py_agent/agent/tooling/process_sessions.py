@@ -24,6 +24,7 @@ from .models import (
     ToolRuntimePolicy,
 )
 from .process_registry import process_access_scope, process_registry
+from .process_session_store import process_session_store_root
 
 _DEFAULT_WAIT_SECONDS = 5.0
 _MAX_WAIT_SECONDS = 30.0
@@ -115,11 +116,16 @@ class ProcessSessionTool(BaseTool):
         mutates_workspace=False,
     )
 
-    # LLM: owner_scope_root 由当前 ToolRegistry 固定，模型不能覆盖；它和 host 注入
-    # run_scope 一起形成精确访问边界。
-    # 函数用途: 创建绑定当前用户根目录的后台进程会话工具。
-    def __init__(self, owner_scope_root: object = "") -> None:
+    # LLM: owner_scope_root and workspace_root are fixed by ToolRegistry, never by
+    # model arguments. Together they locate the protected cross-process store.
+    # 函数用途: 创建绑定当前用户根和工作区的后台进程会话工具。
+    def __init__(
+        self,
+        owner_scope_root: object = "",
+        workspace_root: object = ".",
+    ) -> None:
         self.owner_scope_root = str(owner_scope_root or "")
+        self.workspace_root = str(workspace_root or ".")
 
     # LLM: action 只分派到 registry 的 scope-aware 方法；未知、越界与不存在记录均
     # 返回稳定结构化错误，不泄露其他会话是否存在同名 session。
@@ -131,9 +137,17 @@ class ProcessSessionTool(BaseTool):
                 "OWNER_SCOPE_UNAVAILABLE",
                 "当前运行缺少可信用户会话范围，不能访问后台进程。",
             )
+        store_root = process_session_store_root(
+            self.workspace_root,
+            self.owner_scope_root,
+        )
         action = str(params.get("action") or "").strip().lower()
         if action == "list":
-            return self._ok({"processes": process_registry.list(scope)})
+            processes, load_errors = process_registry.list_report(scope, store_root)
+            payload: dict[str, Any] = {"processes": processes}
+            if load_errors:
+                payload["load_errors"] = load_errors
+            return self._ok(payload)
         if action not in {"status", "wait", "stop"}:
             return self._error(
                 "TOOL_INVALID_ARGUMENTS",
@@ -146,12 +160,12 @@ class ProcessSessionTool(BaseTool):
                 f"{action} 需要 session_id",
             )
         if action == "status":
-            result = process_registry.status(session_id, scope)
+            result = process_registry.status(session_id, scope, store_root)
         elif action == "stop":
-            result = process_registry.kill(session_id, scope)
+            result = process_registry.kill(session_id, scope, store_root)
         else:
             timeout = self._wait_timeout(params.get("timeout_seconds"))
-            result = process_registry.wait(session_id, timeout, scope)
+            result = process_registry.wait(session_id, timeout, scope, store_root)
         if result is None:
             return self._error(
                 "PROCESS_NOT_FOUND",

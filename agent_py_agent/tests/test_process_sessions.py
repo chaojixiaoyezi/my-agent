@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.tooling.process_registry import process_registry
+from agent_py_agent.agent.tooling.process_session_store import (
+    PROCESS_SESSION_SCHEMA,
+    ProcessSessionStore,
+    process_session_store_root,
+)
 from agent_py_agent.agent.tooling.process_sessions import ProcessSessionTool
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
-from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+from agent_py_agent.tests._tool_runtime_harness import (
+    execute_approved_registry_test_call,
+    execute_registry_test_call,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -51,7 +61,12 @@ def _call(
     arguments: dict[str, object],
     scope: dict[str, object],
 ):
-    return execute_registry_test_call(
+    executor = (
+        execute_approved_registry_test_call
+        if tool_name == "run_command" and bool(arguments.get("run_in_background"))
+        else execute_registry_test_call
+    )
+    return executor(
         registry,
         tool_name,
         arguments,
@@ -210,6 +225,107 @@ def test_process_session_follows_background_command_tool_profiles() -> None:
     assert "process_session" in DEFAULT_BACKGROUND_ALLOWED_TOOLS
     assert "process_session" in CODING_SUBAGENT_TOOLS
     assert "process_session" not in READ_ONLY_SUBAGENT_TOOLS
+
+
+def test_background_session_outlives_one_shot_launcher_and_is_rehydrated(tmp_path: Path) -> None:
+    """子代理式短命 Python 进程退出后，另一个进程仍能查询并停止同一后台会话。"""
+
+    scope = {
+        "owner_id": "owner-cross-process",
+        "session_id": "thread-cross-process",
+        "root_task_id": "task-cross-process",
+        "run_id": "subagent-cross-process",
+    }
+    command = f"{shlex.quote(sys.executable)} -c \"import time; time.sleep(20)\""
+    script = "\n".join(
+        (
+            "import json",
+            "from pathlib import Path",
+            "from agent_py_agent.agent.tooling.process_registry import ProcessAccessScope",
+            "from agent_py_agent.agent.tooling.shell import ShellTool",
+            f"root = Path({str(tmp_path)!r})",
+            f"command = {command!r}",
+            "tool = ShellTool(root)",
+            "result = tool._start_background_command(",
+            "    command, root, None, None,",
+            "    ProcessAccessScope('owner-cross-process', 'thread-cross-process', ''),",
+            ")",
+            "print(result.output, flush=True)",
+            "raise SystemExit(0 if result.ok else 1)",
+        )
+    )
+    launcher = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert launcher.returncode == 0, launcher.stderr or launcher.stdout
+    started = json.loads(launcher.stdout.strip().splitlines()[-1])
+
+    tool = ProcessSessionTool("", tmp_path)
+    deadline = time.monotonic() + 3
+    status = None
+    while time.monotonic() < deadline:
+        status = tool.execute(
+            {
+                "action": "status",
+                "session_id": started["session_id"],
+                "__run_scope": scope,
+            }
+        )
+        if status.ok and json.loads(status.output)["status"] == "running":
+            break
+        time.sleep(0.05)
+    assert status is not None and status.ok is True, getattr(status, "output", "")
+    assert json.loads(status.output)["status"] == "running"
+
+    stopped = tool.execute(
+        {
+            "action": "stop",
+            "session_id": started["session_id"],
+            "__run_scope": scope,
+        }
+    )
+    assert stopped.ok is True
+    assert json.loads(stopped.output)["status"] == "killed"
+
+
+def test_process_session_authority_store_is_outside_owner_sandbox(tmp_path: Path) -> None:
+    owner_home = tmp_path / "owners" / "alice"
+    workspace = owner_home / "task"
+    workspace.mkdir(parents=True)
+
+    store_root = process_session_store_root(workspace, owner_home)
+
+    assert not store_root.is_relative_to(owner_home)
+    assert store_root.parent.parent == owner_home.parent / ".my-agent-runtime"
+
+
+def test_process_session_terminal_state_never_regresses_to_running(tmp_path: Path) -> None:
+    store = ProcessSessionStore(tmp_path / "authority")
+    running = {
+        "schema": PROCESS_SESSION_SCHEMA,
+        "session_id": "bg-terminal-monotonic",
+        "pid": 12345,
+        "pid_birth_token": "birth-a",
+        "started_at": 1.0,
+        "status": "running",
+        "access_scope": {
+            "owner_id": "owner-a",
+            "conversation_id": "thread-a",
+            "owner_home": "/owners/alice",
+        },
+    }
+    store.write(running)
+    store.write({**running, "status": "killed", "finished_at": 2.0})
+
+    effective = store.write(running)
+
+    assert effective["status"] == "killed"
+    assert store.load("bg-terminal-monotonic").record["status"] == "killed"
 
 
 def test_configured_background_shell_profile_adds_session_companion() -> None:

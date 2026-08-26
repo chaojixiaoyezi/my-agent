@@ -14,7 +14,7 @@
 
 ## 2026-08-26 受管后台进程、PTY 与子代理副作用授权
 
-- **状态：实验性（`c8a01f7` 已部署并通过 child grant/approval 隔离真测；当前工作树已补 owner TUI 审批桥，179 项 focused 通过，尚未部署/真机）**。
+- **状态：实验性（`d29caab` 已部署并通过 owner TUI 的 child exact approval 真测；当前工作树正补后台进程跨 runner 托管，50 项 focused 通过，尚未部署/真机）**。
   `EffectResolverPolicy` 允许 command parser 和结构化参数 mapping 叠加，各 effect 消费者统一
   取最高风险。`ShellTool` 声明 `run_in_background=true` 为 `dangerous`。
 - 当前 bwrap 只包住文件边界，依然共享主机网络；受管后台进程和新 PTY 也会越过单次
@@ -26,10 +26,14 @@
   runtime sandbox 声明改为真实的 `none`；`apply=true` 仍走与 root 相同的 exact approval binding，
   未批准时 handler 不执行。该边界对齐 会话运行时 child 继承审批策略和 终端交互 worker 回送 leader 确认。
 - `c8a01f7` 的 r51 已证明 child 获得 scope grant 后，具体 `controlled_exec(apply=true)` 仍停在
-  `APPROVAL_REQUIRED` 且 handler/端口均未启动。当前未部署工作树进一步让 child 通过唯一
+  `APPROVAL_REQUIRED` 且 handler/端口均未启动。`d29caab` 进一步让 child 通过唯一
   `subagent_tool_approval.v1` 记录向所属 owner TUI 请求决定；主代理与多个 child 共用 FIFO，批准后由现有
   ToolExecutor 续跑原 ToolCall。无交互客户端、断线、取消、终态和坏记录均返回 unavailable/cancelled，
-  不会自动放行。远程稳定能力仍以部署后的 fresh TUI 证据为准。
+  不会自动放行；fresh r52 的 Yes、Yes always 与 No 已真机通过。
+- r52 同时证明旧后台进程仍归一次性 child runner，child DONE 后 bwrap 会按 `--die-with-parent` 正确杀掉
+  服务，而主代理仍按旧启动回执误报。当前工作树将后台命令改归 owner conversation session：独立 host
+  持有原 bwrap，跨进程权威记录位于 owner 沙箱外，查询/停止核对 exact scope、store root 和 PID 出生指纹，
+  终态不可回退且不会自动重放命令。远程承诺仍等待 fresh r53 证明 child/root 结束后服务继续存活。
 
 ## 2026-08-25 跨回合工具终态折叠与缓存稳定前缀
 

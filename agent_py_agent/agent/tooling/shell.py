@@ -26,6 +26,10 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
+from .background_process_host import (
+    HostedBackgroundProcess,
+    start_background_process_host,
+)
 from .cancellation import (
     CancellationToken,
     cancellation_requested,
@@ -49,11 +53,13 @@ from .models import (
     TrustedParameterBinding,
 )
 from .process_registry import (
+    BackgroundProcess,
     ProcessAccessScope,
     process_access_scope,
     process_registry,
     terminate_process_tree,
 )
+from .process_session_store import process_session_store_root
 from .sandbox import SandboxUnavailable
 
 _MAX_COMMAND_CHARS = 2000
@@ -671,19 +677,21 @@ def _sandbox_exec(
     return argv, False
 
 
-# LLM: 后台 shell 与前台共用 _sandbox_exec 硬门（G6：POSIX 单租户也经 attempt
-#   沙箱，full_access 档）；Windows owner-scoped 也必须拒绝，不能因为平台分支
-#   绕开 sandbox。Popen 失败由上层转成结构化工具错误。
-# 函数用途: 独立会话启动后台进程,stdout/stderr 合并写入给定日志句柄。
+# LLM: The explicit background command keeps the same sandbox argv as foreground
+# execution, including bwrap --die-with-parent. A detached host becomes that
+# parent so a one-shot child-agent runner may exit without killing the command.
+# Windows owner-scoped execution remains fail-closed through _sandbox_exec.
+# 函数用途: 由独立托管进程启动沙箱命令，并把输出持续写入指定日志。
 def _spawn_background_process(
     command: str,
     target: Path,
-    handle: Any,
+    log_path: Path,
     owner_home: object = None,
     protected_persona_root: object = None,
     write_roots: tuple[Path, ...] | None = None,
     read_roots: tuple[Path, ...] | None = None,
-) -> subprocess.Popen:
+    max_log_bytes: int = _MAX_BG_LOG_BYTES,
+) -> HostedBackgroundProcess:
     if owner_home or protected_persona_root or os.name == "posix":
         exec_arg, use_shell = _sandbox_exec(
             command,
@@ -693,33 +701,31 @@ def _spawn_background_process(
             write_roots,
             read_roots,
         )
-        return subprocess.Popen(
+        if use_shell or not isinstance(exec_arg, list):
+            raise OSError("managed background sandbox must provide argv execution")
+        return start_background_process_host(
             exec_arg,
-            shell=use_shell,
-            cwd=str(target),
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
+            cwd=target,
+            log_path=log_path,
             env=_subprocess_text_env(owner_home),
+            max_log_bytes=max_log_bytes,
         )
     if os.name == "nt":
-        return subprocess.Popen(  # noqa: S602 - 工作区内受控 shell,与同步路径同策略
+        return start_background_process_host(
             ["powershell.exe", "-NoProfile", "-Command", command],
-            cwd=str(target),
-            stdout=handle,
-            stderr=subprocess.STDOUT,
+            cwd=target,
+            log_path=log_path,
             env=_subprocess_text_env(owner_home),
+            max_log_bytes=max_log_bytes,
         )
     from .sandbox import strict_posix_shell_argv
 
-    return subprocess.Popen(
+    return start_background_process_host(
         strict_posix_shell_argv(command),
-        shell=False,
-        cwd=str(target),
-        stdout=handle,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
+        cwd=target,
+        log_path=log_path,
         env=_subprocess_text_env(owner_home),
+        max_log_bytes=max_log_bytes,
     )
 
 
@@ -730,14 +736,75 @@ _MAX_BACKGROUND_JOB_RECORDS = 1000
 
 # 函数用途: 把后台任务登记到 .background_jobs/registry.jsonl(供观测/孤儿排查;
 #   纯辅助,登记失败不影响进程已启动的事实)。
-def _record_background_job(jobs_dir: Path, pid: int, command: str, log_path: Path) -> None:
-    record = {"pid": pid, "command": command[:200], "output_file": str(log_path)}
+def _record_background_job(
+    jobs_dir: Path,
+    pid: int,
+    command: str,
+    log_path: Path,
+    *,
+    session_id: str = "",
+    process_pid: int = 0,
+) -> None:
+    record = {
+        "pid": pid,
+        "command": command[:200],
+        "output_file": str(log_path),
+        "session_id": str(session_id or ""),
+        "process_pid": max(0, int(process_pid or 0)),
+    }
     try:
         append_jsonl_capped(
             jobs_dir / "registry.jsonl", record, max_records=_MAX_BACKGROUND_JOB_RECORDS
         )
     except OSError:
         pass
+
+
+# LLM: Durable registration is a fail-closed boundary. Production scopes receive
+# one protected cross-process authority record; an unbound internal/test call stays
+# process-local. If persistence fails, the exact managed host tree is terminated.
+# 函数用途: 登记托管后台进程、写辅助观测记录；登记失败时立即回收，避免失管服务。
+def _register_hosted_background_process(
+    *,
+    workspace_root: Path,
+    owner_scope_root: object,
+    jobs_dir: Path,
+    log_path: Path,
+    command: str,
+    target: Path,
+    hosted: HostedBackgroundProcess,
+    access_scope: ProcessAccessScope,
+) -> BackgroundProcess:
+    store_root = (
+        process_session_store_root(workspace_root, owner_scope_root)
+        if access_scope.is_bound()
+        else None
+    )
+    try:
+        record = process_registry.register(
+            command=command,
+            pid=hosted.process.pid,
+            output_file=str(log_path),
+            process=hosted.process,
+            cwd=str(target),
+            access_scope=access_scope,
+            child_pid=hosted.child_pid,
+            pid_birth_token=hosted.pid_birth_token,
+            host_state_file=str(hosted.state_file),
+            store_root=store_root,
+        )
+    except (OSError, TypeError, ValueError):
+        _kill_process_group(hosted.process)
+        raise
+    _record_background_job(
+        jobs_dir,
+        hosted.process.pid,
+        command,
+        log_path,
+        session_id=record.session_id,
+        process_pid=hosted.child_pid,
+    )
+    return record
 
 
 # LLM: 模型说明必须把持久进程导向结构化 run_in_background，和 execute 的硬门保持一致。
@@ -1200,12 +1267,10 @@ class ShellTool(BaseTool):
                 {"status": "not_started", "reason": type(exc).__name__},
             )
 
-    # LLM: 后台执行(P0-2 对照能力补齐:对照组 3/5 有持久/后台 shell,my-agent
-    #   run_command 此前只能一次性阻塞执行,跑不了长任务而不卡住工具循环)。
-    #   契约:Popen 独立会话启动(start_new_session,与子代理后台进程同款,出口
-    #   孤儿回收能发现),stdout/stderr 合并落工作区 .background_jobs/ 日志文件,
-    #   立即返回 pid + output_file + session_id；所属用户会话由 host scope 固定，
-    #   后续只允许 process_session 查询/等待/停止。不做交互式 stdin（由 PTY 管）。
+    # LLM: Background execution is owned by a detached managed host, not the
+    # one-shot agent runner. It returns pid + process_pid + output_file + session_id;
+    # the exact owner/conversation scope is persisted before success is reported.
+    # stdin remains unsupported here because interactive processes belong to PTY.
     # 函数用途: 把命令放到当前用户会话的后台，马上返回，不堵住模型工具循环。
     def _start_background_command(
         self,
@@ -1219,7 +1284,7 @@ class ShellTool(BaseTool):
             jobs_dir = self.workspace_root / ".background_jobs"
             jobs_dir.mkdir(parents=True, exist_ok=True)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
-            handle = log_path.open("wb")
+            log_path.touch(exist_ok=False)
         except OSError as exc:
             return ToolHandlerOutcome(
                 self.model_spec.name,
@@ -1228,17 +1293,16 @@ class ShellTool(BaseTool):
                 error_code="COMMAND_FAILED",
             )
         try:
-            process = _spawn_background_process(
+            hosted = _spawn_background_process(
                 command,
                 target,
-                handle,
+                log_path,
                 self.path_access_policy.owner_scope_root,
                 self.protected_persona_root,
                 sandbox_write_roots,
                 sandbox_read_roots,
             )
         except SandboxUnavailable as exc:
-            handle.close()
             return ToolHandlerOutcome(
                 self.model_spec.name,
                 False,
@@ -1246,34 +1310,40 @@ class ShellTool(BaseTool):
                 error_code="SANDBOX_UNAVAILABLE",
             )
         except OSError as exc:
-            handle.close()
             return ToolHandlerOutcome(
                 self.model_spec.name,
                 False,
                 f"COMMAND_FAILED: 后台启动失败: {exc}",
                 error_code="COMMAND_FAILED",
             )
-        handle.close()  # 子进程已持有 fd 副本,父进程关闭自己的句柄避免泄漏
-        _record_background_job(jobs_dir, process.pid, command, log_path)
-        # 登记进程及可信会话范围；模型只通过 process_session 按 session_id
-        # 查询、等待或整组停止，避免只剩日志文件却管不了进程。
-        record = process_registry.register(
-            command=command,
-            pid=process.pid,
-            output_file=str(log_path),
-            process=process,
-            cwd=str(target),
-            access_scope=access_scope,
-        )
+        try:
+            record = _register_hosted_background_process(
+                workspace_root=self.workspace_root,
+                owner_scope_root=self.path_access_policy.owner_scope_root,
+                jobs_dir=jobs_dir,
+                log_path=log_path,
+                command=command,
+                target=target,
+                hosted=hosted,
+                access_scope=access_scope,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                False,
+                f"COMMAND_FAILED: 后台会话登记失败: {exc}",
+                error_code="COMMAND_FAILED",
+            )
         _LogSizeWatchdog(
-            process,
+            hosted.process,
             log_path,
             cancellation_token=current_cancellation_token(),
         ).start()  # 日志超上限或所属 turn 取消时终止完整进程组
         payload = {
             "status": "started",
             "session_id": record.session_id,
-            "pid": process.pid,
+            "pid": hosted.process.pid,
+            "process_pid": hosted.child_pid,
             "output_file": str(log_path),
             "hint": (
                 "命令已在后台运行。用 process_session 的 status/wait/list/stop 动作管理；"

@@ -410,11 +410,12 @@ buffer 和 终端交互 状态累积/帧级刷新，把首片之外的同块 del
 继续兜底；47 项 focused 已通过。待当前真实复刻阶段自然结束后部署唯一 Gateway，并在同一 session 的下一条
 普通追加中核对事件数、首屏延迟和持续思考可见性。
 
-同一现场还证明后台进程续接合同是断的：`run_command` 返回三个未注册工具名，模型被迫执行 shell sleep
-轮询。当前候选对照 会话运行时 unified exec 和 终端交互 LocalShellTask，新增一个 scope-aware
-`process_session(list/status/wait/stop)`；启动记录绑定可信 owner/TUI session，wait 最长 30 秒且返回真实状态。
-46 项 shell/process focused 已通过，待当前任务自然结束后部署单 Gateway，并在本 session 下一轮确认不再出现
-`sleep + cat log`。
+后台进程工具名与续接入口已收口为 scope-aware `process_session(list/status/wait/stop)`；但 fresh r52 又证明
+旧进程所有权仍在一次性 child runner：child DONE 后 bwrap 按 `--die-with-parent` 杀掉服务，主代理却按旧
+启动回执误报运行。当前候选对照 会话运行时 Session process manager，将原 bwrap 的父进程改为 detached managed
+host，并把 owner/conversation/PID 出生指纹/终态写到 owner 沙箱外唯一记录；不采用 终端交互 的 worker-exit
+即清理语义，也不自动重放命令。50 项 shell/process focused 已通过，待严格 gate、部署一个 Gateway 和
+fresh r53 验证 child/root 工作片结束十秒后端口仍在、同 scope 可查询停止。
 
 子代理详情的真机回看暴露的三项同源缺口已由 `91a1c3d` 收口：详情首条改读完整 `task.goal`，非 callable
 child sink 先按 typed `write_progress` 接工具事件，`Ctrl+O` 改为冻结 active runtime。218 项直接 focused 与

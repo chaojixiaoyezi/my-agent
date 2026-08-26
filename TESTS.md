@@ -25,8 +25,31 @@ python3 -m pytest \
   -q --tb=short
 ```
 
-当前 179 项 focused 全部通过，定向 Ruff 通过。本轮生产/测试改动远低于 10,000 行，不跑全仓 pytest；
-严格 gate、`.7` 单 Gateway 部署和 fresh MiniMax-M2.7 TUI 仍待完成。
+当前 179 项 focused 与严格 gate 全部通过，`d29caab` 已推送并部署 `.7` 唯一 Gateway。fresh
+`ma-evidence-r52-child-owner-approval-fresh` 已证明 child Yes、exact Yes always 与 No；面板显示 child，
+批准前无副作用，批准后原调用续跑。本轮生产/测试改动远低于 10,000 行，未跑全仓 pytest。
+
+## 2026-08-26 后台命令必须跨 one-shot runner 存活
+
+r52 中 child 的工具审批与启动均成功，但 child DONE 后 HTTP 端口立即关闭。回归必须钉住：
+
+- detached managed host 是 bwrap 的直接父进程，child/root runner 自然退出不杀已批准服务；
+- 另一个 Python 进程能从受保护记录水合同一 session，查询 running 并 stop；
+- owner store 位于模型沙箱外，scope/store root/PID 出生指纹全部匹配后才可控制；
+- running 只能进入 exited/killed，旧缓存不能复活终态；
+- agent runner 消失后 host 仍执行日志上限，stop 仍终止完整进程树。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_process_sessions.py \
+  agent_py_agent/tests/test_tools/test_shell_background.py \
+  agent_py_agent/tests/test_shell_bg_log_cap.py \
+  agent_py_agent/tests/test_sandbox.py \
+  agent_py_agent/tests/test_shell_orphan_kill.py \
+  -q --tb=short
+```
+
+当前 50 passed，定向 Ruff 与 strict code-size 通过。待严格 gate、部署和 fresh r53 MiniMax-M2.7 TUI。
 
 ## 2026-08-26 受管后台进程与 PTY start 必须经过精确审批
 
@@ -495,7 +518,7 @@ python3 -m pytest \
   -q --tb=short
 ```
 
-当前结果：46 passed。部署后在同一长 TUI 的下一次后台构建中检查模型实际调用
+当前结果已由上方跨 runner 套件扩为 50 passed。部署后在 fresh TUI 的后台服务中检查模型实际调用
 `process_session(action=wait)`，不得再出现 `run_command("sleep ...")` 轮询。
 
 子代理还要覆盖默认角色、动态 shell 授权和旧持久任务恢复的工具依赖闭包：

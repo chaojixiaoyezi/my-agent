@@ -46,6 +46,12 @@
   页面切换不改变 root overlay。无交互 consumer、取消、终态、损坏或写回失败全部 fail closed；不从标题、
   行位置或回复文案猜授权。详细设计见
   `docs/design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md`。
+- 显式后台命令归 owner conversation 的受管 session，不归一次性 main/child runner。ShellTool 仍使用
+  原 bwrap argv 和 `--die-with-parent`，但由 detached managed host 成为直接父进程；runner 退出后服务继续，
+  host 退出时沙箱后代仍收口。跨进程唯一事实是 owner 沙箱外的 `managed_process_session.v1`，PID 必须配
+  出生指纹，owner/conversation/store root 必须精确匹配，终态单调且落盘失败先回收进程。模型仍只通过
+  `process_session` 管理，不自动重启命令。详细设计见
+  `docs/design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md`。
 - 普通可恢复工具错误按 会话运行时 的 `RespondToModel` 语义回到当前模型继续修正：同工具同类失败达到
   提示阈值只能注入换参数、换工具或拆步骤的强返工提示，不能按次数结束 turn。精确同参机械重试可由
   action guardrail 拒绝该次动作，但不得升级成任务终态；跨轮 streak/episode 机器裁判不进入默认主链。
@@ -1540,7 +1546,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   后续同一 block 按 0.25 秒或 256 字符合批；完整 `thinking_completed` 仍是慢客户端恢复权威。合批不改变
   lifecycle、Compact、正文持久化或完成判断，47 项 background/TUI focused 已通过。
 
-## 2026-08-25 会话运行时 式后台进程会话续接【状态：本地候选 focused 通过，待 `.7` 真机】
+## 2026-08-25 会话运行时 式后台进程会话续接【状态：跨 runner 托管候选 focused 通过，待 `.7` fresh 真机】
 
 - 真实 Rust 构建现场使用 `run_command(run_in_background=true)` 后，返回文案要求模型调用
   `process_status/list_processes/kill_process`，但 Registry 从未注册这三个模型工具；shell 又正确拒绝裸 `&`，
@@ -1559,6 +1565,11 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 子代理的最终执行工具快照把 `run_command -> process_session` 作为结构化依赖闭包：角色默认、显式 coding
   预设、能力申请获批和旧任务恢复都走同一规范化入口；owner 显式 `disabled_tools` 仍在闭包之后做最终收窄。
   因此不是靠提示词要求模型再次申请，也不会只有新建 child 生效、恢复 child 继续缺工具。
+- fresh r52 进一步暴露旧内存注册表只活在 child runner：child 启动 HTTP 服务后自然 DONE，bwrap 因
+  `--die-with-parent` 随 runner 退出，主代理仍按启动回执误报运行。当前候选保留该安全参数，但把直接父进程
+  改为 detached managed host，并将 scope/PID/出生指纹/终态写入 owner 沙箱外权威记录；另一个进程已能
+  水合 running、读取日志并 stop。完整合同见
+  `docs/design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md`。
 
 ## 2026-08-24 较早未决操作的 会话运行时 式软核对
 

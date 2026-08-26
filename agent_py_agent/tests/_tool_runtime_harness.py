@@ -463,6 +463,7 @@ def execute_approved_registry_test_call(
     *,
     allowed_tools: list[str] | None = None,
     write_boundary: dict[str, object] | None = None,
+    trusted_run_context: dict[str, object] | None = None,
     run_id: str = "test-run",
     call_id: str = "test-call",
     attempt_id: str = "test-attempt",
@@ -474,7 +475,7 @@ def execute_approved_registry_test_call(
         authoritative = _authority_attempt_id(
             register_with,
             run_id,
-            task_id=_declared_task_id(write_boundary, None),
+            task_id=_declared_task_id(write_boundary, trusted_run_context),
         )
         if authoritative:
             attempt_id = authoritative
@@ -490,6 +491,7 @@ def execute_approved_registry_test_call(
         call,
         write_boundary=write_boundary,
         runtime_snapshot=snapshot,
+        trusted_run_context=trusted_run_context,
     )
     # R2-8 对齐 会话运行时: sandbox required 工具的 dangerous 效果在沙箱内自动执行不弹审批。
     # 因此"approved 执行"兼容两种路径: 弹审批(非沙箱工具)就注入批准 binding;
@@ -510,6 +512,7 @@ def execute_approved_registry_test_call(
         call,
         runtime_snapshot=snapshot,
         write_boundary=approved_boundary,
+        trusted_run_context=trusted_run_context,
     ).result
 
 
