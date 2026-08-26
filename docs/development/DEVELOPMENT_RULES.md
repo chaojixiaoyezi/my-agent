@@ -275,6 +275,12 @@ before changing code.
   subsequent write/read/close calls only transport or close that already-approved
   session, matching 会话运行时 `write_stdin`. These decisions use only structured tool
   parameters declared by `SandboxPolicy`, never prompt semantics or tool-name branches.
+- A subagent capability grant limits tool, command, path, and network scope; it is
+  not user approval for a concrete side effect. Every execution surface still uses
+  the parent-inherited exact approval policy. `controlled_exec` currently calls
+  `subprocess.Popen` without an OS sandbox, so it must declare `sandbox=none` and
+  require exact approval for `apply=true`. Change that declaration only when the
+  executor is demonstrably sandboxed, never because a capability grant exists.
 - Shell policy must be controlled rather than name-banned: ordinary cleanup such
   as `rm file`, `rm -rf build`, `rmdir tmp`, or `chmod 777 scratch` may run when it
   stays inside the configured access boundary.  Catastrophic actions such as

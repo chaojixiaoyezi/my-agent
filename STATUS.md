@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-26 受管后台进程与 PTY 的副作用审批（第六候选）
+## 2026-08-26 受管后台进程、PTY 与子代理授权边界（第七候选）
 
 - 第四候选 `b33badf` 已通过 366 项 provider/system 相关 focused（359 passed、7 个既有
   xfail）和本地严格 gate，并部署 `.7` 唯一 Gateway。真 TUI `ma-evidence-r43-provider-system`
@@ -32,7 +32,19 @@
   `write/read/close` 只操作已批准创建的会话，像 会话运行时 `write_stdin` 一样不重复弹窗。扩大后
   审批、PTY 生命周期、Gateway 权限事件、TUI 输入/渲染等 293 项 focused 全部通过；
   语法、全项目 Ruff、doc sync、strict code-size、diff 和 clean-package 严格 gate 全绿。
-  待提交、部署和同题真 TUI 双拒绝验收。
+  `467093c` 已推送并部署 `.7` 唯一 Gateway。
+- fresh r46 只读核对正确报告 8765 未监听；fresh r47 的直接后台 `run_command` 在 handler 前弹出审批，
+  拒绝后没有启动。但主代理随后创建 child 继续同一动作：child 的后台命令也先被审批门拒绝，随后
+  `CapabilityRouter` 给出 command/path capability grant，旧 `controlled_exec(apply=true)` 却把该 grant
+  当成用户批准，经直接 `subprocess.Popen` 启动了 8765。现场用 Esc 精确停止 root/child/process，端口恢复
+  关闭。fresh r48 证明 `terminal_session.start` 本身也会弹审批，拒绝后没有新建 PTY 或进程。
+- 会话运行时 创建 child 时继承父 turn 的 approval policy/sandbox；终端交互 worker 的权限请求会回到 leader
+  标准确认队列。第七候选据此保持两条结构化事实正交：capability grant 只缩小工具、命令、目录和网络范围，
+  不授予一次具体副作用；exact approval 仍绑定具体 tool/run/operation/args。`controlled_exec` 当前没有
+  bwrap/OS sandbox，故声明 `sandbox=none`，`apply=true` 未获用户批准时返回 `APPROVAL_REQUIRED`、handler
+  不执行、文件/进程无副作用。扩大后的 capability/subagent/Gateway/TUI 240 项 focused 已通过；语法、
+  全项目 Ruff、doc sync、strict code-size、diff 和 clean-package 严格 gate 全绿，待提交、部署和 fresh
+  child 真 TUI 复验。
 
 ## 2026-08-26 主/子代理统一验证证据与动作授权边界（第四候选）
 

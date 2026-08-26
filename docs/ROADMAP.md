@@ -19,7 +19,7 @@
 
 ### 主/子代理验证结论与受管后台动作边界
 
-状态：第五候选的 run_command 审批真 TUI 通过，但 PTY 绕过使 r44 整体失败；第六候选 293 项 focused 和严格 gate 通过
+状态：`467093c` 已部署，直接 run_command/PTY 拒绝真 TUI 通过；第七候选 240 项 focused 与严格 gate 通过，待部署和 child 真 TUI
 
 解决问题：真实超级玛丽任务中，模型把测试机本机 HTTP 200 和 `0.0.0.0` 监听错误说成另一台电脑已经能
 访问；即使用户明确要求“不能就说真实原因、不要把本机访问说成局域网访问”，后续模型仍重复误报。
@@ -27,9 +27,11 @@
 当前进展：`f8a4744` 已在 r44 真实阻住后台 `run_command`，但模型拒绝后改用
 `terminal_session.start` 真实启动同一服务。第六候选把“sandbox 未包住的参数变体”收入
 `SandboxPolicy` 权威合同，Shell 后台和 PTY start 都走 exact approval，ActionPolicy 不按工具名分支。
-PTY 已批准创建后，`write/read/close` 作为 会话运行时 `write_stdin` 同类运输不重复弹窗。部署后仍从
-原任务 cwd 恢复同一会话，必须先拒绝 run_command，再亲眼看到 PTY start 也弹审批；二次拒绝后
-无端口、无进程、无 succeeded operation 才能通过。
+PTY 已批准创建后，`write/read/close` 作为 会话运行时 `write_stdin` 同类运输不重复弹窗。fresh r47/r48 已分别
+证明直接后台命令和 PTY start 拒绝时 handler 不执行；r47 同时发现主代理可派 child，child 获得 capability
+grant 后经 `controlled_exec` 直接 Popen 同一服务。第七候选把 grant 与 exact approval 分开，并如实声明
+`controlled_exec sandbox=none`。部署后必须用 fresh child 任务证明 grant 可以形成，但所有未获用户批准的
+执行入口均返回 `APPROVAL_REQUIRED`，端口、进程和 succeeded operation 都不存在。
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 

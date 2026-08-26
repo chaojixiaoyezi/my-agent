@@ -33,6 +33,12 @@
   网络，进程也越过单次 handler 存活。审批只认现有 exact binding，不从命令字符串或
   用户自然语言推断意图。PTY `write/read/close` 只运输/关闭已经审批创建的 session，对齐
   会话运行时 `write_stdin` 不再触发第二次命令审批；一次性前台命令和已有灾难命令硬拒绝保持原语义。
+- 子代理 capability grant 与用户副作用批准是正交合同：grant 只限定可见工具、command allowlist、
+  path/network scope，不得生成、隐含或替代具体 tool/run/operation/args 的 exact approval。会话运行时 child
+  继承父 turn 的 approval policy/sandbox，终端交互 worker 把权限请求回送 leader 的标准确认队列；本项目
+  适配为同一 ToolExecutor 审批门。当前 `controlled_exec` 直接进入 `subprocess.Popen`，没有 bwrap/OS
+  sandbox，所以必须声明 `sandbox=none`；`apply=true` 未批准时 handler 不执行。未来只有真实执行器已接入
+  可验证 sandbox 后，才能修改该声明，不能凭 capability grant、工具名或自然语言放宽。
 - 普通可恢复工具错误按 会话运行时 的 `RespondToModel` 语义回到当前模型继续修正：同工具同类失败达到
   提示阈值只能注入换参数、换工具或拆步骤的强返工提示，不能按次数结束 turn。精确同参机械重试可由
   action guardrail 拒绝该次动作，但不得升级成任务终态；跨轮 streak/episode 机器裁判不进入默认主链。

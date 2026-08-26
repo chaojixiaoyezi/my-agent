@@ -100,6 +100,37 @@ def test_controlled_exec_tool_accepts_duplicate_equivalent_grants_without_grant_
     assert payload["grant_id"] == "grant-shell-1"
 
 
+# LLM: 这是 r47 真机绕过的核心回归；父级 capability grant 只缩范围，不能代替用户 exact approval。
+# 函数用途: 确保子代理即使拿到 Python 命令白名单，未批准的 apply 也不会进入 handler 或写出文件。
+def test_controlled_exec_parent_grant_does_not_replace_user_approval(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = workspace / "must-not-exist.txt"
+    boundary = _controlled_exec_boundary(workspace)
+    boundary["controlled_exec_grants"][0]["command_allowlist"] = ["python3"]
+    registry = make_tool_registry(workspace)
+
+    result = _execute(
+        registry,
+        {
+            "grant_id": "grant-shell-1",
+            "command": [
+                "python3",
+                "-c",
+                f"from pathlib import Path; Path({str(marker)!r}).write_text('bypass')",
+            ],
+            "cwd": str(workspace),
+            "apply": True,
+        },
+        boundary=boundary,
+    )
+
+    assert result.ok is False
+    assert result.error_code == "APPROVAL_REQUIRED"
+    assert result.handler_executed is False
+    assert not marker.exists()
+
+
 def test_controlled_exec_tool_apply_runs_with_bounded_audit_refs(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

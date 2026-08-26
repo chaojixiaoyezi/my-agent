@@ -199,6 +199,10 @@ audit Agent 为空而回退 daemon cwd。
   bwrap 共享主机网络，因此不能用 `sandbox=required` 免掉 exact approval。这条门只读
   typed 工具参数和 binding，不解析 prompt 或命令的业务含义。PTY 已批准 start 后的
   `write/read/close` 只操作原 session，不重复弹窗。
+- child capability grant 与 `approved_actions` 分账：前者只投影允许的工具、命令、路径和网络 scope，
+  后者才按 exact `tool_name/run_id/operation_id/idempotency_key/args_hash` 批准一次具体副作用。
+  `controlled_exec` 当前经 `subprocess.Popen` 执行且没有 OS sandbox，因此声明 `sandbox=none`；即使 grant
+  完整匹配，`apply=true` 仍必须进入同一 ToolExecutor/permission bridge，未批准时 handler 不运行。
 - `agent/gateway_parts/permission_bridge.py` 是跨进程决定桥。目标固定为 processing chunk 同级的
   `.approvals/<sha256(request_id)[:24]>/<sha256(permission_id)[:24]>.json`；路径不接受外部 id 拼接，
   原子文件在 schema、request id、permission id、完整 binding 全部匹配后才消费。

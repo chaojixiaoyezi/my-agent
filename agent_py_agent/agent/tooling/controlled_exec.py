@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+# LLM: capability grant 只给 command/path/network scope，不得代替全局 ToolExecutor 的用户审批。
+# 模块用途: 把子代理获批的精确命令和路径范围投影成可计划、可执行的受控命令工具。
 """Tool wrapper for grant-backed subagent exec requests."""
 
 import json
@@ -39,6 +41,8 @@ class ControlledExecToolRequest:
     write_boundary: dict[str, object] | None = None
 
 
+# LLM: apply=true 会直接进入 subprocess.Popen，当前没有 bwrap/OS sandbox；即使已有父级 grant 也必须单独审批。
+# 类用途: 让子代理在父级限定的命令和目录内先预览计划，获得用户批准后再真正执行。
 class ControlledExecTool(BaseTool):
     model_spec = ToolModelSpec(
         name="controlled_exec",
@@ -91,7 +95,9 @@ class ControlledExecTool(BaseTool):
             "mutating",
             by_parameter=(("apply", (("false", "read_only"), ("true", "dangerous"))),),
         ),
-        sandbox_policy=SandboxPolicy("required"),
+        # controlled_exec 的范围 grant 是授权围栏，不是 OS sandbox；
+        # execute_shell_command 直接 Popen，所以不能用 sandbox 免掉 apply 审批。
+        sandbox_policy=SandboxPolicy("none"),
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(parameter_names=("cwd",)),
         input_policy=ToolInputPolicy(

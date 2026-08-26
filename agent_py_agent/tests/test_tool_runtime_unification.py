@@ -944,6 +944,7 @@ def test_controlled_exec_boolean_apply_has_exact_effect_mapping() -> None:
 
     assert tool_effect_for_runtime_policy(policy, {"apply": False}) == "read_only"
     assert tool_effect_for_runtime_policy(policy, {"apply": True}) == "dangerous"
+    assert policy.sandbox_policy.mode == "none"
 
 
 def test_required_action_gate_still_blocks_open_actions_without_evidence() -> None:

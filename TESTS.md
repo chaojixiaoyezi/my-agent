@@ -36,8 +36,38 @@ r44 不通过。第六候选必须证明：
 - manifest 完整投影 uncontained mapping，不在 ActionPolicy 按工具名猜。
 
 扩大后共 293 项 focused 全部通过；语法、全项目 Ruff、doc-sync、strict
-code-size、diff 与 clean-package 严格 gate 全绿。部署后同 TUI 二次拒绝尚待
-完成。本轮远低于 10,000 行，不跑全仓 pytest。
+code-size、diff 与 clean-package 严格 gate 全绿。`467093c` 部署后的 fresh r47 已证明后台
+`run_command` 拒绝时 handler 不执行，fresh r48 也证明 PTY start 拒绝时不创建新进程；但 r47 又发现
+child 可在 capability grant 后经 `controlled_exec` 绕过用户批准。本轮远低于 10,000 行，不跑全仓 pytest。
+
+### 子代理 capability grant 不得代替用户 exact approval
+
+r47 的真实链路是“直接后台命令被拒绝 → child 创建 capability request → Router/grant 缩小到
+`python3` 与任务目录 → `controlled_exec(apply=true)` 直接 Popen 成功”。回归必须证明权限范围和单次
+副作用批准是两个正交合同：
+
+- 有效 command/path capability grant 存在时，`apply=true` 仍返回 `APPROVAL_REQUIRED`；
+- 未批准时 `handler_executed=false`，marker/进程不能出现；
+- `apply=false` 仍可只读预览，不弹副作用审批；
+- exact approval binding 完整匹配后，既有成功执行与审计 refs 保持可用；
+- `controlled_exec` 当前执行器直接使用 `subprocess.Popen`，所以 runtime policy 必须声明
+  `sandbox=none`，不能借 capability grant 冒充 bwrap/OS sandbox。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_subagent_controlled_exec_tool.py \
+  agent_py_agent/tests/test_subagent_controlled_exec_gateway.py \
+  agent_py_agent/tests/test_subagent_shell_gateway.py \
+  agent_py_agent/tests/test_capability_auto_grant.py \
+  agent_py_agent/tests/test_tool_runtime_unification.py \
+  agent_py_agent/tests/test_gateway_streaming.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_tui_input.py \
+  -q --tb=short
+```
+
+扩大后的相关 240 项 focused 已通过；语法、全项目 Ruff、doc-sync、strict code-size、diff 与
+clean-package 严格 gate 全绿，部署和 fresh child 真 TUI 仍待完成。
 
 ## 2026-08-26 模型验证结论与动作不能越过实际边界
 
