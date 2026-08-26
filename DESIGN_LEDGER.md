@@ -28,9 +28,11 @@
 - 工具 effect 仍只有一个 `EffectResolverPolicy` 事实源：command parser 给出的基础等级可与
   结构化参数 mapping 叠加，所有授权、并发、验证和统计消费者统一取最高风险，
   不能各自猜。`run_command(run_in_background=true)` 是持久进程的唯一入口，显式提升为
-  `dangerous`；当前 bwrap 共享主机网络，且进程越过单次工具调用存活，所以这个
-  effect 不能被 `sandbox=required` 免掉审批。审批只认现有 exact binding，不从命令字符串或
-  用户自然语言推断意图；一次性前台命令和已有灾难命令硬拒绝保持原语义。
+  `dangerous`。sandbox 是否真包住副作用只读同一 `SandboxPolicy.uncontained_by_parameter`；
+  `run_in_background=true` 和 `terminal_session.action=start` 均不被当前 bwrap 包住，因为它共享主机
+  网络，进程也越过单次 handler 存活。审批只认现有 exact binding，不从命令字符串或
+  用户自然语言推断意图。PTY `write/read/close` 只运输/关闭已经审批创建的 session，对齐
+  会话运行时 `write_stdin` 不再触发第二次命令审批；一次性前台命令和已有灾难命令硬拒绝保持原语义。
 - 普通可恢复工具错误按 会话运行时 的 `RespondToModel` 语义回到当前模型继续修正：同工具同类失败达到
   提示阈值只能注入换参数、换工具或拆步骤的强返工提示，不能按次数结束 turn。精确同参机械重试可由
   action guardrail 拒绝该次动作，但不得升级成任务终态；跨轮 streak/episode 机器裁判不进入默认主链。

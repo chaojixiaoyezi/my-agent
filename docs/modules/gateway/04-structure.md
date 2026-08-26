@@ -194,9 +194,11 @@ audit Agent 为空而回退 daemon cwd。
   `tool_name/run_id/operation_id/idempotency_key/args_hash` 组成的 binding 和有限 decision 枚举；标题、
   option label、feedback 都只用于展示或后续模型上下文。
 - `run_command` 的 command parser 与结构化 effect mapping 由同一 `EffectResolverPolicy` 取最高风险。
-  `run_in_background=true` 固定把本次调用提升为 `dangerous`；当前 bwrap 共享主机网络且该
-  进程越过单次 handler 存活，因此 `sandbox=required` 不能免掉 exact approval。这条门只读
-  typed 工具参数和 binding，不解析 prompt 或命令的业务含义。
+  sandbox 包含性另由 canonical `SandboxPolicy.uncontained_by_parameter` 显式声明：
+  `run_in_background=true` 和 `terminal_session.action=start` 都越过单次 handler 存活，且当前
+  bwrap 共享主机网络，因此不能用 `sandbox=required` 免掉 exact approval。这条门只读
+  typed 工具参数和 binding，不解析 prompt 或命令的业务含义。PTY 已批准 start 后的
+  `write/read/close` 只操作原 session，不重复弹窗。
 - `agent/gateway_parts/permission_bridge.py` 是跨进程决定桥。目标固定为 processing chunk 同级的
   `.approvals/<sha256(request_id)[:24]>/<sha256(permission_id)[:24]>.json`；路径不接受外部 id 拼接，
   原子文件在 schema、request id、permission id、完整 binding 全部匹配后才消费。

@@ -1,9 +1,9 @@
 # TESTS
 
-## 2026-08-26 受管后台进程必须经过精确审批
+## 2026-08-26 受管后台进程与 PTY start 必须经过精确审批
 
 真机 r43 证明 provider system 能改正“尚未跨机验证”的回复，但模型仍可以在只读要求下
-提交 `run_command(run_in_background=true)`。回归不解析该中文要求，而是钙住两个结构化
+提交 `run_command(run_in_background=true)`。回归不解析该中文要求，而是钉住两个结构化
 合同：command effect 与参数 effect 取最高等级；共享主机网络且越过调用生命周期的后台
 进程不属于 sandbox 已包住效果。未有 exact approval binding 时必须 `ask`、handler 不执行；
 绑定完整匹配后才能 `allow`。
@@ -11,17 +11,33 @@
 ```bash
 python3 -m pytest \
   agent_py_agent/tests/test_tool_runtime_unification.py \
+  agent_py_agent/tests/test_tool_manifest_contract.py \
+  agent_py_agent/tests/test_native_tool_protocol_wiring.py \
   agent_py_agent/tests/test_tool_round_execution.py \
   agent_py_agent/tests/test_gateway_streaming.py \
+  agent_py_agent/tests/test_gateway_verbose_progress.py \
   agent_py_agent/tests/test_tui_runtime.py \
   agent_py_agent/tests/test_tui_input.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  agent_py_agent/tests/test_tools/test_shell_background.py \
+  agent_py_agent/tests/test_pty_sessions.py \
+  agent_py_agent/tests/test_tool_input_completion_provenance.py \
+  agent_py_agent/tests/test_registry_resilience_contract.py \
   -q --tb=short
 ```
 
-上述加 tool manifest/native guidance/background 工具合同共 166 项全部通过；语法、全项目
-Ruff、doc-sync、strict code-size、diff 与 clean-package 严格 gate 全绿。本轮远低于 10,000 行，
-不跑全仓 pytest。`.7` 唯一 Gateway 真 TUI 审批尚待部署后完成；必须确认审批前端口
-未监听，拒绝后不得留下后台进程或 succeeded operation。
+`f8a4744` 的 166 项与严格 gate 通过；真 TUI r44 已证明 `run_command` 审批前端口关闭、
+拒绝后 handler 未执行。但模型随后用 `terminal_session.start` 绕过并真实启动端口，所以
+r44 不通过。第六候选必须证明：
+
+- `SandboxPolicy.uncontained_by_parameter` 只能引用同一工具 schema 已声明字段；
+- `terminal_session.start` 未批准时 `ask` 且 handler 不执行；
+- `write/read/close` 复用已批准 PTY，不重复弹窗；
+- manifest 完整投影 uncontained mapping，不在 ActionPolicy 按工具名猜。
+
+扩大后共 293 项 focused 全部通过；语法、全项目 Ruff、doc-sync、strict
+code-size、diff 与 clean-package 严格 gate 全绿。部署后同 TUI 二次拒绝尚待
+完成。本轮远低于 10,000 行，不跑全仓 pytest。
 
 ## 2026-08-26 模型验证结论与动作不能越过实际边界
 

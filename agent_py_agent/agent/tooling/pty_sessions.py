@@ -252,6 +252,8 @@ class PtySessionRegistry:
 pty_session_registry = PtySessionRegistry()
 
 
+# LLM: terminal_session 必须将 start 视为一次新的可持久命令授权；write/read/close 只操作已批准会话。
+# 类用途: 启动并操作真实 PTY，供必须有 TTY/stdin 的交互命令使用。
 class TerminalSessionTool(BaseTool):
     """Start and interact with a real pseudoterminal session."""
 
@@ -290,7 +292,10 @@ class TerminalSessionTool(BaseTool):
             "dangerous",
             by_parameter=(("action", (("read", "read_only"),)),),
         ),
-        sandbox_policy=SandboxPolicy("required"),
+        sandbox_policy=SandboxPolicy(
+            "required",
+            uncontained_by_parameter=(("action", ("start",)),),
+        ),
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(
             parameter_names=("session_id", "working_dir"),

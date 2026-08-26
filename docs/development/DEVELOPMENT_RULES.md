@@ -270,8 +270,11 @@ before changing code.
 - A managed background process is a dangerous effect even when its command parser
   would otherwise classify the foreground command as mutating or read-only. The
   current bwrap policy shares host networking and the process outlives one handler
-  call, so `sandbox=required` cannot bypass its exact tool approval binding. This
-  decision uses only the structured boolean parameter, never prompt semantics.
+  call, so `sandbox=required` cannot bypass its exact tool approval binding. A new
+  `terminal_session(action=start)` has the same boundary and must request approval;
+  subsequent write/read/close calls only transport or close that already-approved
+  session, matching 会话运行时 `write_stdin`. These decisions use only structured tool
+  parameters declared by `SandboxPolicy`, never prompt semantics or tool-name branches.
 - Shell policy must be controlled rather than name-banned: ordinary cleanup such
   as `rm file`, `rm -rf build`, `rmdir tmp`, or `chmod 777 scratch` may run when it
   stays inside the configured access boundary.  Catastrophic actions such as

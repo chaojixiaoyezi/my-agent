@@ -44,6 +44,7 @@ from agent_py_agent.agent.tooling.models import (
     EffectResolverPolicy,
     IdempotencyPolicy,
     ResourceScopePolicy,
+    SandboxPolicy,
     ToolHandlerOutcome,
     ToolInputPolicy,
     ToolModelSpec,
@@ -53,6 +54,7 @@ from agent_py_agent.agent.tooling.models import (
     TrustedParameterBinding,
     tool_effect_for_runtime_policy,
 )
+from agent_py_agent.agent.tooling.pty_sessions import TerminalSessionTool
 from agent_py_agent.agent.tooling.runtime_contracts import (
     ProviderToolCapability,
     ToolCall,
@@ -335,6 +337,104 @@ def test_managed_background_command_needs_exact_approval_binding(tmp_path: Path)
     assert executed[0]["command"] == "python3 -m http.server 8765 --bind 0.0.0.0"
     assert executed[0]["run_in_background"] is True
     assert executed[0]["timeout"] == 30
+
+
+# LLM: 夹具复用真实 terminal_session schema/policy，但不得真正创建 PTY 或子进程。
+# 函数用途: 构造可穿过完整 ToolExecutor 的 PTY start 授权用例。
+def _terminal_start_request(
+    tmp_path: Path,
+) -> tuple[ToolExecutorRequest, list[dict[str, object]]]:
+    tool = TerminalSessionTool(ShellTool(tmp_path))
+    executed: list[dict[str, object]] = []
+
+    def fake_execute(params: dict[str, object]) -> ToolHandlerOutcome:
+        executed.append(dict(params))
+        return ToolHandlerOutcome("terminal_session", True, "started")
+
+    tool.execute = fake_execute  # type: ignore[method-assign]
+    runtime = ToolRuntime(tool.model_spec, tool.runtime_policy, tool)
+    snapshot = ToolRuntimeSnapshot(
+        run_id="run-terminal-approval",
+        runtimes=(runtime,),
+        available_tool_names=frozenset({"terminal_session"}),
+        unavailable_tools=(),
+        allowed_tools=None,
+    )
+    call = ToolCall(
+        call_id="call-terminal-server",
+        tool_name="terminal_session",
+        arguments={
+            "action": "start",
+            "command": "python3 -m http.server 8765 --bind 0.0.0.0",
+        },
+        source_protocol="native",
+        schema_hash=tool.model_spec.schema_hash,
+        run_id=snapshot.run_id,
+        turn_id="turn-terminal-server",
+        attempt_id="attempt-terminal-server",
+    )
+    return (
+        ToolExecutorRequest(
+            call=call,
+            runtime_snapshot=snapshot,
+            workspace_root=tmp_path,
+            workspace_roots=(tmp_path,),
+            operation_store_required=False,
+        ),
+        executed,
+    )
+
+
+def test_terminal_session_start_needs_approval_before_handler(tmp_path: Path) -> None:
+    request, executed = _terminal_start_request(tmp_path)
+
+    first = ToolExecutor().execute(request)
+
+    assert first.decision.status == "ask"
+    assert first.decision.reason_codes == ("APPROVAL_REQUIRED",)
+    assert first.decision.resolved_effect == "dangerous"
+    assert first.decision.approval_request is not None
+    assert first.result.handler_executed is False
+    assert executed == []
+
+    binding = {
+        **dict(first.decision.approval_request),
+        "approval_id": "approval-terminal-server",
+        "status": "APPROVED",
+    }
+    second = ToolExecutor().execute(
+        replace(request, write_boundary={"approved_actions": [binding]})
+    )
+
+    assert second.decision.status == "allow"
+    assert second.decision.resolved_effect == "dangerous"
+    assert second.result.handler_executed is True
+    assert [item["action"] for item in executed] == ["start"]
+
+
+def test_terminal_session_existing_transport_does_not_reprompt(tmp_path: Path) -> None:
+    request, executed = _terminal_start_request(tmp_path)
+
+    for index, arguments in enumerate(
+        (
+            {"action": "write", "session_id": "pty-approved", "data": "print(42)"},
+            {"action": "read", "session_id": "pty-approved", "cursor": 0},
+            {"action": "close", "session_id": "pty-approved"},
+        )
+    ):
+        call = replace(
+            request.call,
+            call_id=f"call-terminal-transport-{index}",
+            arguments=arguments,
+            operation_id="",
+            idempotency_key="",
+        )
+        execution = ToolExecutor().execute(replace(request, call=call))
+
+        assert execution.decision.status == "allow"
+        assert execution.result.handler_executed is True
+
+    assert [item["action"] for item in executed] == ["write", "read", "close"]
 
 
 def test_write_boundary_denial_happens_before_operation_claim(tmp_path: Path) -> None:
@@ -756,11 +856,20 @@ def test_runtime_snapshot_rejects_policy_field_missing_from_public_schema() -> N
         tool.runtime_policy,
         resource_scopes=ResourceScopePolicy(parameter_names=("missing",)),
     )
+    bad_sandbox_policy = replace(
+        tool.runtime_policy,
+        sandbox_policy=SandboxPolicy(
+            "required",
+            uncontained_by_parameter=(("missing", ("true",)),),
+        ),
+    )
 
     with pytest.raises(ValueError, match="effect resolver.*missing"):
         ToolRuntime(tool.model_spec, bad_effect_policy, tool)
     with pytest.raises(ValueError, match="resource scope.*missing"):
         ToolRuntime(tool.model_spec, bad_scope_policy, tool)
+    with pytest.raises(ValueError, match="sandbox uncontained effect.*missing"):
+        ToolRuntime(tool.model_spec, bad_sandbox_policy, tool)
 
 
 def test_runtime_snapshot_allows_only_explicit_internal_trusted_parameters() -> None:

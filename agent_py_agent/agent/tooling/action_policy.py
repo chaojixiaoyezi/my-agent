@@ -30,6 +30,7 @@ from .input_schema import normalize_tool_input, validate_tool_input
 from .models import (
     ToolRuntime,
     ToolRuntimeSnapshot,
+    sandbox_effect_is_contained,
     tool_effect_for_runtime_policy,
 )
 from .registry_rate_limit_policy import tool_rate_limit_policy
@@ -393,7 +394,7 @@ def _task_boundary_decision(
     return None
 
 
-# LLM: sandbox 只能免掉它真正包住的危险效果；受管后台进程共享主机网络并越过单次调用存活，必须走精确审批绑定。
+# LLM: sandbox 只能免掉它真正包住的危险效果；越过当前隔离边界的结构化变体必须走精确审批绑定。
 # 函数用途: 按工具审批模式、sandbox 包含性和已批准记录决定放行、询问或拒绝。
 def _approval_decision(
     request: ActionPolicyRequest,
@@ -402,9 +403,10 @@ def _approval_decision(
 ) -> ActionDecision | None:
     mode = runtime.runtime_policy.approval_policy.mode
     sandbox_mode = runtime.runtime_policy.sandbox_policy.mode
-    # bwrap 能限制文件写入，但当前共享主机网络，且受管后台进程会越过
-    # 单次工具调用存活；该结构化参数为 true 时不能声称 effect 已被 sandbox 包住。
-    effect_contained = request.call.arguments.get("run_in_background") is not True
+    effect_contained = sandbox_effect_is_contained(
+        runtime.runtime_policy.sandbox_policy,
+        request.call.arguments,
+    )
     if (
         mode != "always"
         and sandbox_mode == "required"

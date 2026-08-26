@@ -6,6 +6,7 @@ from agent_py_agent.agent.tooling.models import (
     EffectResolverPolicy,
     IdempotencyPolicy,
     OutputPolicy,
+    SandboxPolicy,
     TimeoutPolicy,
     ToolRuntimePolicy,
 )
@@ -36,6 +37,10 @@ def test_tool_manifest_projects_runtime_policy_without_duplicate_approval_flag()
 
     assert policy["effect_resolver"]["default_effect"] == "mutating"
     assert policy["approval_policy"] == {"mode": "dangerous"}
+    assert policy["sandbox_policy"] == {
+        "mode": "required",
+        "uncontained_by_parameter": [{"field": "path", "values": ["host"]}],
+    }
     assert policy["idempotency_policy"] == {"scope": "operation"}
     assert policy["timeout_policy"] == {"seconds": 20}
     assert policy["output_policy"]["refs"] == ["file"]
@@ -101,6 +106,10 @@ def _tool_manifest_payload() -> dict[str, object]:
         "write_file": ToolRuntimePolicy(
             effect_resolver=EffectResolverPolicy("mutating"),
             approval_policy=ApprovalPolicy("dangerous"),
+            sandbox_policy=SandboxPolicy(
+                "required",
+                uncontained_by_parameter=(("path", ("host",)),),
+            ),
             idempotency_policy=IdempotencyPolicy("operation"),
             timeout_policy=TimeoutPolicy(20),
             output_policy=OutputPolicy(refs=("file",)),

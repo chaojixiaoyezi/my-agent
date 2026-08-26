@@ -817,7 +817,10 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
             command_parameter="command",
             by_parameter=(("run_in_background", (("true", "dangerous"),)),),
         ),
-        sandbox_policy=SandboxPolicy("required"),
+        sandbox_policy=SandboxPolicy(
+            "required",
+            uncontained_by_parameter=(("run_in_background", ("true",)),),
+        ),
         idempotency_policy=IdempotencyPolicy("operation"),
         timeout_policy=TimeoutPolicy(default_timeout),
         resource_scopes=ResourceScopePolicy(parameter_names=("working_dir",)),

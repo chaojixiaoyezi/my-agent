@@ -280,15 +280,51 @@ class ApprovalPolicy:
         object.__setattr__(self, "mode", mode)
 
 
+# LLM: sandbox policy 必须显式声明哪些结构化动作会越过当前隔离边界，授权层不得按工具名猜。
+# 类用途: 声明工具是否需要 sandbox，以及哪些参数变体不能因有 sandbox 而免审批。
 @dataclass(frozen=True)
 class SandboxPolicy:
     mode: str = "inherit"
+    uncontained_by_parameter: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
+    # LLM: 这份 mapping 会直接影响是否弹用户审批，字段/值必须非空、唯一并保留精确匹配。
+    # 函数用途: 校验并固化 sandbox 模式和未被隔离的结构化参数变体。
     def __post_init__(self) -> None:
         mode = str(self.mode or "").strip().lower()
         if mode not in {"inherit", "required", "none"}:
             raise ValueError(f"invalid tool sandbox mode: {mode}")
+        if mode != "required" and self.uncontained_by_parameter:
+            raise ValueError("sandbox uncontained mappings require mode=required")
+        normalized_mappings: list[tuple[str, tuple[str, ...]]] = []
+        seen_fields: set[str] = set()
+        for raw_field_name, raw_values in self.uncontained_by_parameter:
+            field_name = str(raw_field_name or "").strip()
+            if not field_name:
+                raise ValueError("sandbox uncontained parameter name is required")
+            if field_name in seen_fields:
+                raise ValueError(f"duplicate sandbox uncontained parameter: {field_name}")
+            seen_fields.add(field_name)
+            values = tuple(str(value).strip() for value in raw_values if str(value).strip())
+            if not values or len(values) != len(set(values)):
+                raise ValueError(f"invalid sandbox uncontained values: {field_name}")
+            normalized_mappings.append((field_name, values))
         object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "uncontained_by_parameter", tuple(normalized_mappings))
+
+
+# LLM: 这是 sandbox 免审批的唯一包含性裁决；只匹配 policy 声明的结构化参数，不读命令或正文。
+# 函数用途: 判断当前工具变体的副作用是否真的被该 sandbox 边界包住。
+def sandbox_effect_is_contained(policy: SandboxPolicy, arguments: object) -> bool:
+    if policy.mode != "required":
+        return False
+    values = arguments if isinstance(arguments, dict) else {}
+    for field_name, uncontained_values in policy.uncontained_by_parameter:
+        if field_name not in values:
+            continue
+        value = _parameter_variant(values.get(field_name))
+        if value in uncontained_values:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -475,11 +511,7 @@ def tool_effect_for_runtime_policy(
     for field_name, variants in resolver.by_parameter:
         if field_name not in values:
             continue
-        raw_value = values.get(field_name)
-        if isinstance(raw_value, bool):
-            value = "true" if raw_value else "false"
-        else:
-            value = str(raw_value or "").strip()
+        value = _parameter_variant(values.get(field_name))
         mapping = {str(key): str(effect).strip().lower() for key, effect in variants}
         if value in mapping:
             matched.append(mapping[value])
@@ -487,6 +519,16 @@ def tool_effect_for_runtime_policy(
         return resolver.default_effect
     rank = {"read_only": 0, "mutating": 1, "dangerous": 2}
     return max(matched, key=rank.__getitem__)
+
+
+# LLM: effect 和 sandbox mapping 必须共用同一个布尔/标量规范化，避免 True 与 "true" 分裂授权结果。
+# 函数用途: 把一个结构化参数值转成 policy mapping 使用的精确字符串。
+def _parameter_variant(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def resource_scopes_for_runtime_policy(
@@ -781,6 +823,8 @@ class ToolRuntime:
             )
 
 
+# LLM: snapshot 构造是 policy 引用字段的唯一 fail-closed 入口；新增策略必须在此校验它们来自同一 schema。
+# 函数用途: 核对一个工具的输入 schema 与副作用、sandbox、补参、资源等运行策略是否自洽。
 def _validate_runtime_policy(
     model_spec: ToolModelSpec,
     runtime_policy: ToolRuntimePolicy,
@@ -854,6 +898,13 @@ def _validate_runtime_policy(
             public_names,
             resolver.command_parameter,
             "command effect resolver",
+        )
+    for field_name, _values in runtime_policy.sandbox_policy.uncontained_by_parameter:
+        _require_public_input_parameter(
+            model_spec,
+            public_names,
+            field_name,
+            "sandbox uncontained effect",
         )
     for name in runtime_policy.resource_scopes.parameter_names:
         _require_runtime_input_parameter(

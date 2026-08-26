@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-26 受管后台进程的副作用与 TUI 审批（第五候选）
+## 2026-08-26 受管后台进程与 PTY 的副作用审批（第六候选）
 
 - 第四候选 `b33badf` 已通过 366 项 provider/system 相关 focused（359 passed、7 个既有
   xfail）和本地严格 gate，并部署 `.7` 唯一 Gateway。真 TUI `ma-evidence-r43-provider-system`
@@ -18,9 +18,21 @@
   `tool_name/run_id/operation_id/idempotency_key/args_hash` 精确绑定审批。未批准时
   handler 不启动；一次性前台命令及原有安全硬门不变。这一层不解析用户正文，
   不恢复机器语义验收。
-- effect/授权、Gateway permission event、TUI 审批消费、输入与后台进程共 166 项 focused
-  全部通过；语法、全项目 Ruff、doc sync、strict code-size、diff 和 clean-package 严格 gate
-  全绿。本轮远低于 10,000 行，按约定不跑全仓 pytest；待推送部署和同题真 TUI 拒绝验证。
+- 第五候选 `f8a4744` 的 166 项 focused 和本地严格 gate 通过后已推送、部署 `.7`
+  唯一 Gateway。真 TUI `ma-evidence-r44-background-approval` 在模型再次请求后台 HTTP 服务时
+  真实显示 `Waiting for permission`；选择拒绝后立即显示 `User rejected tool use`，且此时
+  8765 未监听，证明 `run_command(run_in_background=true)` 已正确停在 handler 前。
+- r44 随后抓到第二个真实绕过：模型改用 `terminal_session(action=start)`，在 PTY 前台
+  启动同一 HTTP 服务，没有再弹审批，8765 变为监听并本机 200。测试回合已停止，
+  测试产生的监听进程 PID `1376652` 已精确终止，端口恢复关闭。因此 `f8a4744`
+  只是部分通过，r44 整体仍判失败。
+- 对照 会话运行时 的 `exec_command -> write_stdin` 和 终端交互 的 Bash 授权主链后，第六候选不按工具名写
+  if/else：`SandboxPolicy.uncontained_by_parameter` 显式声明哪个结构化动作越过当前 sandbox。
+  `run_in_background=true` 和 `terminal_session.action=start` 都必须走 exact approval；PTY 的
+  `write/read/close` 只操作已批准创建的会话，像 会话运行时 `write_stdin` 一样不重复弹窗。扩大后
+  审批、PTY 生命周期、Gateway 权限事件、TUI 输入/渲染等 293 项 focused 全部通过；
+  语法、全项目 Ruff、doc sync、strict code-size、diff 和 clean-package 严格 gate 全绿。
+  待提交、部署和同题真 TUI 双拒绝验收。
 
 ## 2026-08-26 主/子代理统一验证证据与动作授权边界（第四候选）
 

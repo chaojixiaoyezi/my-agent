@@ -118,6 +118,8 @@ def _input_field_items(input_schema: dict[str, object]) -> list[dict[str, object
     ]
 
 
+# LLM: manifest 只能展开 canonical ToolRuntimePolicy，effect/sandbox 参数变体不得在此重新推断。
+# 函数用途: 把一个工具的运行时策略投影成可诊断、可归档的机器清单。
 def _runtime_policy_item(policy: object) -> dict[str, object]:
     resolver = policy.effect_resolver
     return {
@@ -134,7 +136,13 @@ def _runtime_policy_item(policy: object) -> dict[str, object]:
             ],
         },
         "approval_policy": {"mode": policy.approval_policy.mode},
-        "sandbox_policy": {"mode": policy.sandbox_policy.mode},
+        "sandbox_policy": {
+            "mode": policy.sandbox_policy.mode,
+            "uncontained_by_parameter": [
+                {"field": field_name, "values": list(values)}
+                for field_name, values in policy.sandbox_policy.uncontained_by_parameter
+            ],
+        },
         "idempotency_policy": {"scope": policy.idempotency_policy.scope},
         "timeout_policy": {"seconds": policy.timeout_policy.seconds},
         "concurrency_policy": {"mode": policy.concurrency_policy.mode},

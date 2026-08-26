@@ -14,13 +14,13 @@
 
 ## 2026-08-26 受管后台进程的副作用授权
 
-- **状态：实验性（166 项 focused 与本地严格 gate 通过，尚未推送、部署或真 TUI 验证）**。
+- **状态：实验性（`f8a4744` 已部署且 run_command 真 TUI 审批通过，但 r44 发现 PTY 绕过；第六候选 293 项 focused 和本地严格 gate 通过，待真 TUI）**。
   `EffectResolverPolicy` 允许 command parser 和结构化参数 mapping 叠加，各 effect 消费者统一
   取最高风险。`ShellTool` 声明 `run_in_background=true` 为 `dangerous`。
-- 当前 bwrap 只包住文件边界，依然共享主机网络；受管后台进程也会越过单次工具调用
-  存活。因此该 effect 不使用 sandbox 免审批分支，而是复用 TUI/Gateway 现有 exact approval
-  binding；未批准时 handler 不运行。这不解析用户正文、不改变一次性前台命令，也不恢复
-  机器语义验收。
+- 当前 bwrap 只包住文件边界，依然共享主机网络；受管后台进程和新 PTY 也会越过单次
+  handler 存活。`SandboxPolicy.uncontained_by_parameter` 现显式声明 Shell 后台与 PTY start 不能免
+  exact approval；未批准时 handler 不运行。已批准 PTY 的 write/read/close 不重复弹窗。这不解析
+  用户正文、不改变一次性前台命令，也不恢复机器语义验收。
 
 ## 2026-08-25 跨回合工具终态折叠与缓存稳定前缀
 
