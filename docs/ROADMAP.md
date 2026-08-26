@@ -17,20 +17,19 @@
 
 ## 下一版优先级
 
-### 主/子代理验证结论不得越过实际证据边界
+### 主/子代理验证结论与受管后台动作边界
 
-状态：前三候选均有真 TUI 失败证据；第四候选 focused 359 passed、7 xfail，待严格 gate/真 TUI
+状态：前四候选均有真 TUI 局部通过/动作失败证据；第五候选 166 项 focused 与严格 gate 通过，待真 TUI
 
 解决问题：真实超级玛丽任务中，模型把测试机本机 HTTP 200 和 `0.0.0.0` 监听错误说成另一台电脑已经能
 访问；即使用户明确要求“不能就说真实原因、不要把本机访问说成局域网访问”，后续模型仍重复误报。
 
-当前进展：第二候选真 TUI 已能写清“本机已验证、另一机器未验证”，但仍在只核对时启动服务；第三候选把
-授权段追加到有副作用的原生工具定义后，`ma-evidence-r42-tool-auth` 仍启动了 HTTP 服务。代码对照确认旧
-`# System` 实际仍是 `role=user`。第四候选像 终端交互/会话运行时 一样使用供应商真实高优先级通道：
-OpenAI-compatible 发首条 system，Anthropic-compatible 发顶层 system；用户任务和 native 历史不改序。
-工具说明继续按结构化 effect policy 复用同一授权段，运行时不做语义硬拦。部署后必须从原任务 cwd 用同一
-普通中文 follow-up 复测；若仍擅自改变状态，就如实记录当前模型对软边界的遵循上限，不堆重复提示或恢复
-机器验收。
+当前进展：`b33badf` 已把统一边界放入 provider 真 system 通道，r43 最终表述已能区分
+本机与另一机器，但仍擅自启动 HTTP 服务。第五候选不继续堆提示：它把 command parser 与
+结构化 effect mapping 合并为一条权威链，声明 `run_in_background=true` 为 dangerous；由于
+bwrap 共享主机网络且后台进程越过调用存活，现有 sandbox 不能免掉它的 exact TUI approval。
+未批准时 handler 不启动，不解析用户或模型正文，不恢复机器验收。部署后仍从原任务 cwd
+用同一普通中文 follow-up 复测，必须亲眼看到审批卡、拒绝后无端口/无后台进程/无 succeeded operation。
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 

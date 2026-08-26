@@ -267,6 +267,11 @@ before changing code.
   parameter and the returned process session. Do not append shell `&`, combine
   `nohup ... &`, or otherwise create an unregistered background child; readiness
   checks must run in a later tool call against that managed session.
+- A managed background process is a dangerous effect even when its command parser
+  would otherwise classify the foreground command as mutating or read-only. The
+  current bwrap policy shares host networking and the process outlives one handler
+  call, so `sandbox=required` cannot bypass its exact tool approval binding. This
+  decision uses only the structured boolean parameter, never prompt semantics.
 - Shell policy must be controlled rather than name-banned: ordinary cleanup such
   as `rm file`, `rm -rf build`, `rmdir tmp`, or `chmod 777 scratch` may run when it
   stays inside the configured access boundary.  Catastrophic actions such as

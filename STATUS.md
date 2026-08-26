@@ -1,5 +1,27 @@
 # STATUS
 
+## 2026-08-26 受管后台进程的副作用与 TUI 审批（第五候选）
+
+- 第四候选 `b33badf` 已通过 366 项 provider/system 相关 focused（359 passed、7 个既有
+  xfail）和本地严格 gate，并部署 `.7` 唯一 Gateway。真 TUI `ma-evidence-r43-provider-system`
+  已能把“另一台机器未验证”写清，但仍在用户只要求核对时执行
+  `run_command(run_in_background=true)` 启动 `0.0.0.0:8765`；canonical operation 为 succeeded。
+  因此高优先级 system 改正了最终表述，但不能单独充当副作用授权门。
+- 对照 会话运行时 的 typed permission/sandbox 与 终端交互 的 Bash AST/rule/mode 授权后，根因定位为
+  宿主 effect 合同错误，不是需要更多提示词：`python3 -m http.server` 原先只按 command
+  parser 算 `mutating`，而 `run_in_background=true` 没有提升风险；同时旧审批门错把
+  `sandbox=required` 理解为包住一切 dangerous 效果，但 bwrap 当前共享主机网络，
+  后台进程还会越过单次工具调用存活。
+- 当前候选扩展唯一 `EffectResolverPolicy`：command 分类可与结构化参数 mapping
+  叠加并取最高风险。`ShellTool` 声明 `run_in_background=true -> dangerous`；审批门不再把
+  该后台效果当成 sandbox 已包住，而是复用现有
+  `tool_name/run_id/operation_id/idempotency_key/args_hash` 精确绑定审批。未批准时
+  handler 不启动；一次性前台命令及原有安全硬门不变。这一层不解析用户正文，
+  不恢复机器语义验收。
+- effect/授权、Gateway permission event、TUI 审批消费、输入与后台进程共 166 项 focused
+  全部通过；语法、全项目 Ruff、doc sync、strict code-size、diff 和 clean-package 严格 gate
+  全绿。本轮远低于 10,000 行，按约定不跑全仓 pytest；待推送部署和同题真 TUI 拒绝验证。
+
 ## 2026-08-26 主/子代理统一验证证据与动作授权边界（第四候选）
 
 - r38 超级玛丽任务的产物在测试机本机 `0.0.0.0:8765` 返回 200，但 `.7` firewalld 未开放该端口，从开发机

@@ -1,5 +1,28 @@
 # TESTS
 
+## 2026-08-26 受管后台进程必须经过精确审批
+
+真机 r43 证明 provider system 能改正“尚未跨机验证”的回复，但模型仍可以在只读要求下
+提交 `run_command(run_in_background=true)`。回归不解析该中文要求，而是钙住两个结构化
+合同：command effect 与参数 effect 取最高等级；共享主机网络且越过调用生命周期的后台
+进程不属于 sandbox 已包住效果。未有 exact approval binding 时必须 `ask`、handler 不执行；
+绑定完整匹配后才能 `allow`。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_tool_runtime_unification.py \
+  agent_py_agent/tests/test_tool_round_execution.py \
+  agent_py_agent/tests/test_gateway_streaming.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_tui_input.py \
+  -q --tb=short
+```
+
+上述加 tool manifest/native guidance/background 工具合同共 166 项全部通过；语法、全项目
+Ruff、doc-sync、strict code-size、diff 与 clean-package 严格 gate 全绿。本轮远低于 10,000 行，
+不跑全仓 pytest。`.7` 唯一 Gateway 真 TUI 审批尚待部署后完成；必须确认审批前端口
+未监听，拒绝后不得留下后台进程或 succeeded operation。
+
 ## 2026-08-26 模型验证结论与动作不能越过实际边界
 
 真实反例：测试机本机 HTTP 200、监听所有接口，但开发机跨机连接被 firewalld 拒绝；MiniMax-M2.7 在原任务

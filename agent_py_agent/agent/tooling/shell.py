@@ -807,7 +807,49 @@ def _build_shell_tool_model_spec(
     )
 
 
+# LLM: shell 的 effect、sandbox、幂等、资源和补参必须由这一个 policy 工厂同步声明。
+# 函数用途: 构造 run_command 的唯一运行时策略，包括后台进程的 dangerous 风险下限。
+def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
+    return ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            default_effect="dangerous",
+            strategy="command",
+            command_parameter="command",
+            by_parameter=(("run_in_background", (("true", "dangerous"),)),),
+        ),
+        sandbox_policy=SandboxPolicy("required"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        timeout_policy=TimeoutPolicy(default_timeout),
+        resource_scopes=ResourceScopePolicy(parameter_names=("working_dir",)),
+        output_policy=OutputPolicy(trust="external_data"),
+        input_policy=ToolInputPolicy(
+            internal_parameters=(
+                "__sandbox_write_roots",
+                "__sandbox_read_roots",
+                "__access_mode",
+                "__run_scope",
+            ),
+            safe_parameter_defaults=(
+                ("timeout", default_timeout),
+                ("run_in_background", False),
+            ),
+            trusted_parameter_bindings=(
+                (
+                    "working_dir",
+                    TrustedParameterBinding(source_refs=("registry.effective_cwd",)),
+                ),
+            ),
+        ),
+        promotes_task=True,
+        mutates_workspace=True,
+    )
+
+
+# LLM: ShellTool 是命令执行的唯一注册入口；后台参数必须在 runtime policy 中声明为 dangerous。
+# 类用途: 在工作区内执行一次性命令，或启动可查看、可停止的受管后台进程。
 class ShellTool(BaseTool):
+    # LLM: model spec、effect、sandbox、幂等和受信补参必须在同一个 runtime policy 中同步构造。
+    # 函数用途: 按工作区和访问选项初始化 shell 工具的展示 schema 与执行边界。
     def __init__(
         self,
         workspace_root: Path,
@@ -831,38 +873,7 @@ class ShellTool(BaseTool):
         self.model_spec = _build_shell_tool_model_spec(
             self.access_mode, self.default_timeout, self.max_output_chars
         )
-        self.runtime_policy = ToolRuntimePolicy(
-            effect_resolver=EffectResolverPolicy(
-                default_effect="dangerous",
-                strategy="command",
-                command_parameter="command",
-            ),
-            sandbox_policy=SandboxPolicy("required"),
-            idempotency_policy=IdempotencyPolicy("operation"),
-            timeout_policy=TimeoutPolicy(self.default_timeout),
-            resource_scopes=ResourceScopePolicy(parameter_names=("working_dir",)),
-            output_policy=OutputPolicy(trust="external_data"),
-            input_policy=ToolInputPolicy(
-                internal_parameters=(
-                    "__sandbox_write_roots",
-                    "__sandbox_read_roots",
-                    "__access_mode",
-                    "__run_scope",
-                ),
-                safe_parameter_defaults=(
-                    ("timeout", self.default_timeout),
-                    ("run_in_background", False),
-                ),
-                trusted_parameter_bindings=(
-                    (
-                        "working_dir",
-                        TrustedParameterBinding(source_refs=("registry.effective_cwd",)),
-                    ),
-                ),
-            ),
-            promotes_task=True,
-            mutates_workspace=True,
-        )
+        self.runtime_policy = _build_shell_runtime_policy(self.default_timeout)
 
     # seq 253 #5：bwrap 沙箱允许写全部 allowed_write_roots，执行写根不在
     # working_dir 参数里——经 effective_write_roots 协议结构化声明（与写边界

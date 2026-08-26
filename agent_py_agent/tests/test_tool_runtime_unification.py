@@ -59,6 +59,7 @@ from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolChoice,
     ToolProtocolSnapshot,
 )
+from agent_py_agent.agent.tooling.shell import ShellTool
 
 
 class _CountingTool(BaseTool):
@@ -259,6 +260,81 @@ def test_dangerous_command_needs_exact_approval_binding(tmp_path: Path) -> None:
     assert second.result.ok is True
     assert second.result.handler_executed is True
     assert tool.executions == 1
+
+
+# LLM: 这个夹具必须复用真实 ShellTool schema/policy，只用无副作用 handler 替换实际进程启动。
+# 函数用途: 构造一次可安全穿过完整 ToolExecutor 的后台 HTTP 命令授权用例。
+def _background_shell_request(
+    tmp_path: Path,
+) -> tuple[ToolExecutorRequest, list[dict[str, object]]]:
+    tool = ShellTool(tmp_path)
+    executed: list[dict[str, object]] = []
+
+    def fake_execute(params: dict[str, object]) -> ToolHandlerOutcome:
+        executed.append(dict(params))
+        return ToolHandlerOutcome("run_command", True, "started")
+
+    tool.execute = fake_execute  # type: ignore[method-assign]
+    runtime = ToolRuntime(tool.model_spec, tool.runtime_policy, tool)
+    snapshot = ToolRuntimeSnapshot(
+        run_id="run-background-approval",
+        runtimes=(runtime,),
+        available_tool_names=frozenset({"run_command"}),
+        unavailable_tools=(),
+        allowed_tools=None,
+    )
+    call = ToolCall(
+        call_id="call-background-server",
+        tool_name="run_command",
+        arguments={
+            "command": "python3 -m http.server 8765 --bind 0.0.0.0",
+            "run_in_background": True,
+        },
+        source_protocol="native",
+        schema_hash=tool.model_spec.schema_hash,
+        run_id=snapshot.run_id,
+        turn_id="turn-background-server",
+        attempt_id="attempt-background-server",
+    )
+    return (
+        ToolExecutorRequest(
+            call=call,
+            runtime_snapshot=snapshot,
+            workspace_root=tmp_path,
+            workspace_roots=(tmp_path,),
+            operation_store_required=False,
+        ),
+        executed,
+    )
+
+
+def test_managed_background_command_needs_exact_approval_binding(tmp_path: Path) -> None:
+    request, executed = _background_shell_request(tmp_path)
+    first = ToolExecutor().execute(request)
+
+    assert first.decision.status == "ask"
+    assert first.decision.reason_codes == ("APPROVAL_REQUIRED",)
+    assert first.decision.resolved_effect == "dangerous"
+    assert first.decision.approval_request is not None
+    assert first.result.handler_executed is False
+    assert executed == []
+
+    binding = {
+        **dict(first.decision.approval_request),
+        "approval_id": "approval-background-server",
+        "status": "APPROVED",
+    }
+    second = ToolExecutor().execute(
+        replace(request, write_boundary={"approved_actions": [binding]})
+    )
+
+    assert second.decision.status == "allow"
+    assert second.decision.resolved_effect == "dangerous"
+    assert second.result.handler_executed is True
+    assert len(executed) == 1
+    assert executed[0]["command"] == "python3 -m http.server 8765 --bind 0.0.0.0"
+    assert executed[0]["run_in_background"] is True
+    assert executed[0]["timeout"] == 30
 
 
 def test_write_boundary_denial_happens_before_operation_claim(tmp_path: Path) -> None:
@@ -712,14 +788,40 @@ def test_runtime_snapshot_allows_only_explicit_internal_trusted_parameters() -> 
         ToolRuntime(tool.model_spec, undeclared, tool)
 
 
-def test_policy_objects_reject_mixed_effect_and_resource_scope_strategies() -> None:
-    with pytest.raises(ValueError, match="command effect strategy cannot carry by_parameter"):
-        EffectResolverPolicy(
+def test_policy_objects_combine_command_and_parameter_effects() -> None:
+    policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
             "dangerous",
             strategy="command",
             command_parameter="command",
-            by_parameter=(("mode", (("safe", "read_only"),)),),
+            by_parameter=(("run_in_background", (("true", "dangerous"),)),),
         )
+    )
+
+    assert (
+        tool_effect_for_runtime_policy(
+            policy,
+            {"command": "ls -la", "run_in_background": False},
+        )
+        == "read_only"
+    )
+    assert (
+        tool_effect_for_runtime_policy(
+            policy,
+            {"command": "python3 -m http.server", "run_in_background": False},
+        )
+        == "mutating"
+    )
+    assert (
+        tool_effect_for_runtime_policy(
+            policy,
+            {"command": "ls -la", "run_in_background": True},
+        )
+        == "dangerous"
+    )
+
+
+def test_resource_scope_policy_rejects_mixed_strategies() -> None:
     with pytest.raises(ValueError, match="from_arguments.*static_scopes"):
         ResourceScopePolicy(
             mode="from_arguments",

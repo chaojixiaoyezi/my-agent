@@ -239,6 +239,8 @@ def _schema_decision(call: ToolCall, runtime: ToolRuntime) -> ActionDecision | N
     )
 
 
+# LLM: ActionPolicy 必须既保留 command analysis 证据，又使用全局唯一 effect resolver。
+# 函数用途: 计算工具真实副作用，并在 shell 工具上额外返回命令分类结果。
 def _resolved_effect(
     call: ToolCall,
     runtime: ToolRuntime,
@@ -247,7 +249,7 @@ def _resolved_effect(
     if resolver.strategy != "command":
         return tool_effect_for_runtime_policy(runtime.runtime_policy, call.arguments), None
     command = analyze_command(call.arguments.get(resolver.command_parameter))
-    return command.resolved_effect, command
+    return tool_effect_for_runtime_policy(runtime.runtime_policy, call.arguments), command
 
 
 def _command_classification_decision(
@@ -391,6 +393,8 @@ def _task_boundary_decision(
     return None
 
 
+# LLM: sandbox 只能免掉它真正包住的危险效果；受管后台进程共享主机网络并越过单次调用存活，必须走精确审批绑定。
+# 函数用途: 按工具审批模式、sandbox 包含性和已批准记录决定放行、询问或拒绝。
 def _approval_decision(
     request: ActionPolicyRequest,
     runtime: ToolRuntime,
@@ -398,11 +402,15 @@ def _approval_decision(
 ) -> ActionDecision | None:
     mode = runtime.runtime_policy.approval_policy.mode
     sandbox_mode = runtime.runtime_policy.sandbox_policy.mode
-    # 会话运行时 对齐(R2-8): sandbox required 工具的沙箱就是边界——dangerous 效果(命令执行)
-    # 在沙箱内自动执行不弹审批, 审批只保留给 always 显式要求与非沙箱工具。
-    # 沙箱(bwrap)限制命令影响范围, 危险操作无法越出沙箱, 因此无需逐次确认
-    # (与 会话运行时 on-request 模式"沙箱内命令自动跑不弹"一致)。
-    if mode != "always" and sandbox_mode == "required" and effect == "dangerous":
+    # bwrap 能限制文件写入，但当前共享主机网络，且受管后台进程会越过
+    # 单次工具调用存活；该结构化参数为 true 时不能声称 effect 已被 sandbox 包住。
+    effect_contained = request.call.arguments.get("run_in_background") is not True
+    if (
+        mode != "always"
+        and sandbox_mode == "required"
+        and effect == "dangerous"
+        and effect_contained
+    ):
         return None
     required = (
         mode == "always"

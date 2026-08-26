@@ -213,6 +213,8 @@ def tool_schema_hash(schema: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+# LLM: effect resolver 是工具副作用的唯一声明源；command 解析结果和结构化参数下限必须取最高等级。
+# 类用途: 声明工具默认副作用、参数变体副作用，以及是否需要解析 shell 命令。
 @dataclass(frozen=True)
 class EffectResolverPolicy:
     default_effect: str = "read_only"
@@ -220,6 +222,8 @@ class EffectResolverPolicy:
     strategy: str = "declared"
     command_parameter: str = ""
 
+    # LLM: 规范化后的 mapping 会进入授权、并发、验证和统计多条链路，不得容忍重复或未知 effect。
+    # 函数用途: 校验并固化副作用策略；命令策略可叠加结构化参数的风险下限。
     def __post_init__(self) -> None:
         effect = str(self.default_effect or "").strip().lower()
         strategy = str(self.strategy or "declared").strip().lower()
@@ -232,8 +236,6 @@ class EffectResolverPolicy:
             raise ValueError("command effect strategy requires command_parameter")
         if strategy == "declared" and command_parameter:
             raise ValueError("declared effect strategy cannot carry command_parameter")
-        if strategy == "command" and self.by_parameter:
-            raise ValueError("command effect strategy cannot carry by_parameter mappings")
         normalized_mappings: list[tuple[str, tuple[tuple[str, str], ...]]] = []
         seen_fields: set[str] = set()
         for raw_field_name, variants in self.by_parameter:
@@ -455,6 +457,8 @@ class ToolRuntimePolicy:
     mutates_workspace: bool = False
 
 
+# LLM: 所有 effect 消费者必须共用这个解析入口；command 分类与参数 mapping 取风险最高值。
+# 函数用途: 从工具策略和本次结构化参数计算真实副作用等级。
 def tool_effect_for_runtime_policy(
     policy: ToolRuntimePolicy,
     arguments: object,
@@ -463,11 +467,11 @@ def tool_effect_for_runtime_policy(
 
     values = arguments if isinstance(arguments, dict) else {}
     resolver = policy.effect_resolver
+    matched: list[str] = []
     if resolver.strategy == "command":
         from ..contracts.gates.command_policy import analyze_command
 
-        return analyze_command(values.get(resolver.command_parameter)).resolved_effect
-    matched: list[str] = []
+        matched.append(analyze_command(values.get(resolver.command_parameter)).resolved_effect)
     for field_name, variants in resolver.by_parameter:
         if field_name not in values:
             continue
