@@ -1,22 +1,27 @@
 # STATUS
 
-## 2026-08-26 大工具参数生成期可见进度（本地候选，等待长任务终态部署）
+## 2026-08-26 大工具参数生成期可见进度（已部署并通过真 TUI）
 
 - `.7` 的 `ma-cache-firstturn-r34` 在 Click→TypeScript 长任务中抓到：`source-reader-1` 说“开始写第一块”后
   约 4 分钟没有 transcript 事件，但 runner、TLS 连接和收包字节持续增长，最终一次写出 56,876 字节/
   2,150 行文档。根因不是锁或 Gateway 卡死，而是 Anthropic `input_json_delta` 直到
   `content_block_stop` 才形成完整工具调用，旧界面期间只能显示笼统 Working。
 - 对照 会话运行时 的 `ToolCallInputDelta`/500ms patch diff consumer，以及 终端交互 的
-  `streamingToolUses` 后，当前候选在 parser 内只生成 `tool/stream_index/phase/received_chars`，按首条、
+  `streamingToolUses` 后，当前实现只在 parser 内生成 `tool/stream_index/phase/received_chars`，按首条、
   每 1 秒或每 8,192 字符、ready 合批；半截 JSON、文件正文、命令、路径和凭据均不进入公开事件。
 - Gateway 前台、后台 main、child 与本地 TUI 共用 `provider_tool_input_progress.v1` 和临时 block 生命周期；
   界面显示灰色动画“正在准备 Write 参数 · 12.3k chars”，ready、重试、真实工具开始或回合终态后直接收起，
   不留下“工具已完成”历史。它不创建 ToolCall、不执行 handler，也不改变超时、Compact、任务或完成裁决。
-- 8 个直接相关测试文件共 195 项通过，Ruff 与 strict code-size 已通过；当前生产/测试改动远低于 10,000 行，
-  不跑全仓 pytest。唯一 Gateway 仍保持旧部署，不在 3 个实现 child 运行中重启。
-- 同场长任务现已完成 source/test/architecture/基础模块 4 个阶段，另外 3 个实现 child 运行中；后三者均已
-  真实 Compact 1 次，主代理 Context 约 52.6k、Compact 0。会话运行时+MiniMax-M2.7 r36 对照在 1:46 后停下：
-  child 无产物，主代理违背“不能自己做”后仍未开始复刻；该失败仅记作模型/adapter 对照，不照抄其行为。
+- 8 个直接相关测试文件共 195 项与本地严格 gate 通过；当前生产/测试改动远低于 10,000 行，按约定不跑
+  全仓 pytest。`8c11eab` 已推送、快进部署 `.7`；`/status` 返回 running，Gateway 精确为 1，fresh TUI
+  `ma-tool-progress-r37-mario` 在 4 秒内显示 `MiniMax-M2.7 · API`。
+- r37 使用用户原始“多子代理复刻超级玛丽”任务，真实捕获 `create_subagents` 参数从 515 chars/5s 增长到
+  3.0k chars/29s；55s 后完整工具卡创建 5 个 child，临时行同时删除。过程中没有半截 JSON、重复工具卡、
+  提前执行或历史残留，既有 Todo/child footer 正常接棒。
+- 部署前同场 Click→TypeScript 长任务安全终态为 8 个 child 完成、主线程 1:02:36、Compact 0；三个长 child
+  各 Compact 1。独立验收确认 5,817 行 TS 源码、45 个自写测试通过，但真实 CLI 示例因缺少
+  `Command/Group` 核心 API 编译失败，对照原项目 14,529 行测试仅有 520 行，约 40% 交付，未冒充完整复刻。
+  会话运行时+MiniMax-M2.7 r36 对照在 1:46 后停下且无产物，仅记作模型/adapter 失败样本，不照抄其行为。
 
 ## 2026-08-26 Anthropic-compatible 主动缓存（已部署并通过真 TUI）
 

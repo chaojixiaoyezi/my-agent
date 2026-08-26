@@ -17,23 +17,6 @@
 
 ## 下一版优先级
 
-### 大工具参数生成期间可见进度
-
-状态：本地 195 项 focused、Ruff、strict code-size 已通过；等待当前长任务终态后部署唯一 Gateway 真 TUI 复验
-
-解决问题：MiniMax-M2.7 为 `write_file/apply_patch` 生成大段结构化参数时，HTTP/SSE 连接持续收包、
-idle timeout 也持续刷新，但当前解析器只在 `content_block_stop` 后交出完整工具调用。用户因此只能看到
-笼统 `Working`，会把正常的大参数生成误认为模型或 Gateway 卡死。
-
-实现边界：后端只投影结构化 `tool id/name/phase/累计字符数`，不公开半截 JSON、文件正文、命令或凭据；
-后台展示按时间与字符阈值合批，避免逐 delta 写满 1024 条有界事件环。TUI 用临时动画行显示“正在准备工具
-参数”，真实工具开始、provider 重试或回合终态时原位收起，再沿现有 typed tool/diff 卡片展示执行结果。
-该投影不执行工具、不改变超时、Compact、任务状态、工具参数或完成裁决。
-
-当前候选已经贯通 Anthropic parser、provider 合批、Gateway rich/后台 main/child、本地 TUI reducer 与
-终端交互 风格动画 renderer。下一验收只看真实大 write 参数期间是否持续出现计数行、ready 后是否无历史残留，
-以及既有完整 Write/Update 卡片能否正常接棒；测试者不修改复刻产物。
-
 ### 跨回合工具终态折叠与缓存稳定前缀
 
 状态：`7b14e34` + `ff94d61` 已推送、部署并完成 `.7` 单 Gateway 原长 TUI；该切片已完成

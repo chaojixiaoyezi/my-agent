@@ -1,5 +1,11 @@
 # COMPLETED
 
+- 2026-08-26 `8c11eab` 将 Anthropic `input_json_delta` 的脱敏工具名、阶段、累计字符数和耗时接入
+  Gateway rich/后台 main/child 与 TUI transient block；半截 JSON、正文、命令、路径和凭据不离开 parser，
+  也不提前创建 ToolCall、执行 handler 或改变 Compact/任务状态。8 个相关文件 195 项与本地严格 gate
+  通过，已推送并部署 `.7` 唯一 Gateway。fresh `ma-tool-progress-r37-mario` 真实显示
+  515 chars/5s → 3.0k chars/29s，55s 后完整 `create_subagents` 卡片创建 5 个 child，临时行自动删除。
+
 - 2026-08-26 `df95d27` 收口 Anthropic-compatible native 首轮空历史身份：`None` 只表示 text 请求，
   `[]` 保留 native empty history，使稳定 prompt/工具从第一次 Agent 调用进入唯一 copy-on-write
   `cache_control` 投影。9 个相关文件 193 项与本地严格 gate 通过，已推送并部署 `.7` 唯一 Gateway。

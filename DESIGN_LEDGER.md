@@ -1783,7 +1783,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   TUI reducer 只接受当前期望 generation 且不倒退 revision 的快照，最终 notice 也携带同一身份。
 - 视窗：每个 main/child store 仍保存自己的 follow/cursor；真实 prompt_toolkit Window 通过公开
   `get_vertical_scroll` 每帧应用锚点。提交、首次进入或显式 End 粘底，手动上翻不被新输出抢走。
-## 2026-08-26 大工具参数流的脱敏可见进度【状态：本地验证，待真 TUI】
+## 2026-08-26 大工具参数流的脱敏可见进度【状态：已部署并通过真 TUI】
 
 - `.7` 长任务中，`source-reader-1` 在生成 56,876 字节分析文件前约 4 分钟没有新的 transcript 事件；
   进程、TLS 连接和收包计数均持续推进，证明不是锁、进程退出或 provider idle。现有 Anthropic parser
@@ -1797,8 +1797,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   完成权威。后台事件必须按时间和字符阈值合批；真实工具开始、provider 重试或回合终态时删除临时块，
   继续复用现有工具/diff 卡片。Gateway 重启可丢这段易失进度，不影响 canonical tool/result 与最终回复。
 - 当前实现以 `provider_tool_input_progress.v1` 作为唯一公开白名单，provider 层首条、1 秒/8,192 字符和
-  ready 合批；Gateway rich、后台 main/child 与本地 TUI 共用 transient projector。7 个相关测试文件
-  195 项、Ruff 和 strict code-size 已通过；当前长任务终态前不重启唯一 Gateway，真机复验仍待执行。
+  ready 合批；Gateway rich、后台 main/child 与本地 TUI 共用 transient projector。8 个相关测试文件
+  195 项与本地严格 gate 通过；`8c11eab` 已部署 `.7` 唯一 Gateway。fresh r37 在真实复杂任务中显示
+  515 chars/5s → 3.0k chars/29s，55s 后完整 `create_subagents` 工具卡接棒并删除临时行，边界成立。
 
 ## 2026-08-26 Anthropic-compatible 主动缓存断点【状态：已部署并通过真 TUI】
 

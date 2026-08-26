@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-08-26 provider 大工具参数临时进度（本地候选）
+## 2026-08-26 provider 大工具参数临时进度（已部署真机验证）
 
 - 真 TUI 已把“约 4 分钟没事件但 TLS 持续收包”收敛为 Anthropic parser 的完整块缓冲，而不是 Gateway
   进程/锁/idle timeout 故障。当前候选从 `input_json_delta` 只抽取工具名、流内序号、阶段和累计字符数，
@@ -9,8 +9,9 @@
   发送有状态 reset；后台 main/child 则复用有界 transcript event。TUI reducer 的 transient block 在
   ready/reset/turn terminal 后删除，不进入 stable history。
 - 该路径不创建/修补 ToolCall，不提前触发审批或 handler，不刷新任务/Compact/验收，也不改变 provider
-  timeout。8 个相关测试文件 195 项、Ruff 和 strict code-size 已通过；部署与真 TUI 复验等待当前 Click
-  长任务安全终态，期间 `.7` 仍只有一个旧 HEAD Gateway。
+  timeout。8 个相关测试文件 195 项与本地严格 gate 通过；`8c11eab` 已在 Click 长任务安全终态后部署
+  `.7` 唯一 Gateway。fresh r37 真 TUI 中 `create_subagents` 参数计数从 515 chars/5s 增长到
+  3.0k chars/29s，55s 后完整工具卡创建 5 个 child，临时行无残留。
 
 ## 2026-08-26 Anthropic native 首轮缓存身份（已部署真机验证）
 

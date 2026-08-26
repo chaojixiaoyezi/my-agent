@@ -27,9 +27,11 @@ python3 -m pytest \
 - reducer 只维护 `role=tool_input` 易失块，ready/reset/真实 tool/turn terminal 后删除且 stable history 为空；
 - renderer 隐藏同阶段笼统 Thinking，显示灰色动画工具名、累计字符数与耗时，缓存键只读取展示字段。
 
-本轮另通过 Ruff 与 strict code-size；改动远少于 10,000 行，遵守约定不跑全仓 pytest。真 TUI 复验必须
-等待 `ma-cache-firstturn-r34` 当前长任务安全终态，再只重启 `.7` 唯一 Gateway，用能生成大 write 参数的
-普通中文任务观察临时行与后续真实 Write/diff 卡片交接。
+本轮另通过 Ruff 与 strict code-size；改动远少于 10,000 行，遵守约定不跑全仓 pytest。`8c11eab` 已在
+`ma-cache-firstturn-r34` 安全终态后快进部署 `.7` 唯一 Gateway。fresh
+`ma-tool-progress-r37-mario` 使用用户原始复杂中文任务，真实观察到 `create_subagents` 从
+515 chars/5s 增长到 3.0k chars/29s，55s 后完整工具卡创建 5 个 child，临时行自动删除；没有半截 JSON、
+提前执行、重复卡片或 stable history 残留。
 
 ## 2026-08-26 Anthropic-compatible 原生主动缓存
 
