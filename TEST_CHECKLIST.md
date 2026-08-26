@@ -6,11 +6,11 @@
   继续回复的累计模型账必须按物理调用游标写增量，不能复用事件 id 或重复累计 cache-read。289 项 focused
   与本地严格 gate 已过；`.7` 唯一 Gateway 的 MiniMax-M2.7 连续轮已准确续接两次 Read，provider 回执分别
   有 42,107 与 12,987 cache-read，随后手动 Compact generation 1 把 45,639 降到 15,029。
-- [ ] 手动 `/compact` 成功后，HTTP/operation receipt 必须把 canonical `task_status.compact_generation` 原样
+- [x] 手动 `/compact` 成功后，HTTP/operation receipt 必须把 canonical `task_status.compact_generation` 原样
   交给 TUI；不能解析中文回执猜次数。TUI 应立即显示 Compact 边界和新代数、撤下压缩前 Context 数字，
   并由下一次真实模型调用刷新 provider-visible 用量，不能为刷新界面额外请求模型。idle/resume 即使没有
-  Working block 也必须水合 activity 中的代数，迟到旧帧不得回退。190 项主链加 105 项水合 focused 已通过，
-  待 `.7` 唯一 Gateway 在原长 tmux 显示 generation 1，并真实提交 generation 2 后勾选。
+  Working block 也必须水合 activity 中的代数，迟到旧帧不得回退。251 项完整相关 focused 与严格 gate 通过；
+  `.7` 原 tmux 已直接水合 generation 1、手动提交 generation 2、刷新到约 28.5k，并在下一轮命中 17,019 cache-read。
 - [x] 同一长 conversation 的完整进度账本继续保留历史，但底部 Todo 只展示当前 ordinary user turn 的 exact
   `display_plan(generation_id/revision/item_ids)`；新回合立即清上一代，迟到的旧 poll、tool progress 和最终
   notice 均不得把旧 Todo 刷回来。362 项 focused 已通过；`.7` 唯一 Gateway 的原长 session 两轮追加均清掉

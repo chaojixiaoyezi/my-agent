@@ -1,5 +1,11 @@
 # COMPLETED
 
+- 2026-08-25 `f901645` + `ff94d61` 对齐 会话运行时 typed Compact/TokenCount 与 终端交互 post-compact state：手动
+  `/compact` 回执携带 canonical generation，TUI 立即撤下压缩前 Context；idle/resume 无 Working block 时仍
+  从 activity 水合代数，迟到旧帧不能回退。251 项完整相关 focused 与严格 gate 通过并部署 `.7` 唯一 Gateway。
+  原 `ma-97468f3-longchain-r27` 已直接恢复 `compact 1`，手动 generation 2 为 15,328→14,246，下一真实轮显示
+  约 28.5k/128k；再一普通轮命中 17,019 provider cache-read、仅 3,254 uncached input，证明新前缀可继续复用。
+
 - 2026-08-25 `7b14e34` 已把普通 main/child 回合的 canonical 工具 archive 一次折成不可变、脱敏、6k 默认上限
   的 `conversation_terminal_tool_fold.v1`；公开正文不变，下一轮历史只追加同一 fold，真正 Compact 才摘要。
   overflow→Compact→继续调用的累计 provider usage 同时按物理游标原子转为增量，cache-read/cache-write 不再

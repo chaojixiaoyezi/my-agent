@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-08-25 assistant 终态折叠、缓存稳定前缀与 Compact 回执刷新（一层已部署，二层本地候选）
+## 2026-08-25 assistant 终态折叠、缓存稳定前缀与 Compact 回执刷新（已部署真机验证）
 
 - Gateway 完成回合仍只向用户保存原 assistant 正文；同一条消息 metadata 新增一次从 canonical archive 构造的
   `conversation_terminal_tool_fold.v1`。下一轮历史按原顺序附加这份不可变、有界、脱敏投影，不复制完整
@@ -18,7 +18,8 @@
   数字，不解析文案、不额外调用模型。5 个直接相关测试文件当前 190 项通过。
 - `f901645` 部署并恢复原 TUI 后，Gateway activity 明确返回 generation 1、真实模型轮把 Context 刷新到约
   29.4k，footer 仍为 0。根因是无 Working block 的 completed frame 没更新 status。当前候选让 idle/resume
-  同帧水合 Compact，并在 controller/reducer 两层拒绝旧代数回退；4 个相关文件 105 项通过，待再部署真测。
+  同帧水合 Compact，并在 controller/reducer 两层拒绝旧代数回退。`ff94d61` 的完整相关 251 项与严格 gate
+  通过并部署；原 tmux 已验证 generation 1 水合、generation 2 即时刷新和 17,019 cache-read 的新前缀复用。
 
 ## 2026-08-25 DNS 瞬断的 会话运行时 式有界恢复（本地候选）
 

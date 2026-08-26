@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-25 跨回合工具终态折叠、缓存稳定前缀与 Compact 回执刷新（已部署一层，二层本地候选）
+## 2026-08-25 跨回合工具终态折叠、缓存稳定前缀与 Compact 回执刷新（已部署真机验证）
 
 - 原长 TUI 当前模型可见上下文在同一次请求内约 58k–61k，下一普通回合回到约 58k，而 canonical
   `compact_generation=0`。这不是一次漏显示的 Compact：缺口是普通回合结束后，native ToolCall/ToolResult
@@ -28,9 +28,11 @@
   文件当前 190 项通过。
 - `f901645` 部署后用原 session 重启 TUI，服务端 `/client/notices` 已返回 `compact_count=1`，下一次真实模型
   调用也把 Context 刷到约 29.4k，但客户端仍显示 0。根因是 count=0、无 Working block 的合法 activity frame
-  被 reducer 当成纯收起事件，完整丢掉同帧 generation。当前第二层补丁让 idle/resume frame 也更新 status，
-  controller 与 reducer 双层保证 generation 单调不减；105 项活动/TUI focused 已通过，待重新严格 gate、
-  推送部署及同 tmux 验证 generation 1 水合和 generation 2 即时刷新。
+  被 reducer 当成纯收起事件，完整丢掉同帧 generation。`ff94d61` 让 idle/resume frame 也更新 status，
+  controller 与 reducer 双层保证 generation 单调不减；251 项完整相关 focused 与严格 gate 通过并部署。
+- 原 tmux 恢复后无需模型调用即显示 `compact 1`；手动 `/compact` 在 11.5 秒内提交 generation 2，15,328 →
+  14,246，并立即撤下旧 Context；下一真实轮刷新为约 28.5k/128k、`compact 2`。新摘要前缀首轮 cache-read 为
+  0，紧接着不 Compact 的普通续轮命中 17,019 cache-read，仅 3,254 uncached input，证明缓存按新稳定前缀复用。
 
 ## 2026-08-25 当前回合 Todo 与物理 Window 粘底（已部署真机验证）
 

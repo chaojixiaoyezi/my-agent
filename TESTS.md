@@ -58,7 +58,9 @@ python3 -m pytest \
 ```
 
 当前 105 项通过。现场服务端 activity 已独立返回 `compact_count=1`，因此该回归锁定的是客户端状态水合，
-不复制服务端账本，也不从屏幕文字猜次数。
+不复制服务端账本，也不从屏幕文字猜次数。扩展到控制回执、持久 operation receipt、Compact 历史的完整相关
+链共 251 项通过。`.7` 原 tmux 真机已验证：恢复时直接水合 `compact 1`；手动 generation 2 后下一真实模型轮
+显示约 28.5k 与 `compact 2`；再一轮普通续问命中 17,019 provider cache-read，仅新增 3,254 input。
 
 ## 2026-08-25 当前回合 Todo、真实 Window 粘底与 Compact 计数
 

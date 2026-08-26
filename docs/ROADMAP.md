@@ -19,7 +19,7 @@
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 
-状态：`7b14e34` 已推送、部署并完成 `.7` 单 Gateway 真 TUI；手动 Compact 状态刷新二层候选待发布
+状态：`7b14e34` + `ff94d61` 已推送、部署并完成 `.7` 单 Gateway 原长 TUI；该切片已完成
 
 解决问题：同一长 TUI 中，当前模型可见上下文从 60 多 K 回落到 50 多 K，但 canonical thread 仍为
 `compact 0`。权威账本证明没有漏记 Compact；真实缺口是普通回合结束后 native ToolCall/ToolResult 只保留
@@ -48,7 +48,8 @@ session 先补齐这次调研，再连续做两个小追加和多子代理复刻
 二层候选通过既有 `task_status.compact_generation` 跨 HTTP/operation receipt 传递 canonical 代数，立即撤下
 失效 Context，固定显示下次真实模型调用刷新；不额外调用模型、不解析文案、不改 provider cache 协议。
 `f901645` 首次部署后又定位到恢复水合缺口：Gateway activity 已是 1，客户端因没有 Working block 丢掉同帧
-状态。后续候选让 idle/resume frame 同样更新 status，且 generation 单调不减；待原 tmux 真机闭环后完成。
+状态。`ff94d61` 让 idle/resume frame 同样更新 status，且 generation 单调不减。原 tmux 已验证恢复 generation 1、
+手动 generation 2、下一真实轮约 28.5k/128k，以及再一普通轮 17,019 cache-read / 3,254 uncached input。
 
 ### Leaf 角色行为与共享工作区修改纪律
 

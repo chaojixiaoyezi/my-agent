@@ -14,7 +14,7 @@
 
 ## 2026-08-25 跨回合工具终态折叠与缓存稳定前缀
 
-- **状态：部分可用（`7b14e34` 已部署真机；手动 Compact 状态刷新二层候选尚未发布）**。普通 main/child 工具回合结束时，从 canonical
+- **状态：稳定（`7b14e34` + `ff94d61` 已部署 `.7` 单 Gateway 并完成原长 TUI 验证）**。普通 main/child 工具回合结束时，从 canonical
   archive 一次生成有界、脱敏、确定性的 `conversation_terminal_tool_fold.v1`，与 assistant 正文同一条
   ConversationStore 消息落账。用户可见正文不拼接折叠；下一模型轮才从 metadata 读取。
 - 该折叠是 会话运行时 完整 ResponseItem 历史与 终端交互 cache-aware microcompact 之间的适配：完整工具输出继续
@@ -29,12 +29,13 @@
 - `.7` 原长 TUI 已证明：前一轮 2 次 Read 能在下一轮无工具调用时准确续接，两轮 provider cache-read 分别为
   42,107 与 12,987；手动 Compact generation 1 把 45,639 降到 15,029 并吸收 98 条消息。缓存策略不是每轮
   重写旧摘要：普通 fold 保持旧历史 exact 稳定前缀，真正 Compact 才一次替换为新摘要前缀。
-- 当前工作树的二层候选让手动 Compact 通过 typed `task_status.compact_generation` 立即更新 TUI，并清掉已经
+- 手动 Compact 通过 typed `task_status.compact_generation` 立即更新 TUI，并清掉已经
   失效的压缩前 Context 数字；下一次真实模型调用再发布新 provider-visible snapshot。它不解析成功文案，
   不为界面刷新额外调用模型，也不新增一套 provider cache key。
 - `f901645` 真机首次复验又证明 Gateway activity 已返回 generation 1，但无 Working block 的客户端完成事件
-  丢掉了水合值。当前工作树继续让 idle/resume frame 更新 status，并在 controller/reducer 两层保持代数单调；
-  服务端 ConversationThread 仍是唯一权威，客户端只保留该 session 已观察到的最大 generation。
+  丢掉了水合值。`ff94d61` 让 idle/resume frame 更新 status，并在 controller/reducer 两层保持代数单调；
+  服务端 ConversationThread 仍是唯一权威，客户端只保留该 session 已观察到的最大 generation。原 tmux 已
+  验证 generation 1 恢复、generation 2 即时刷新，以及新摘要首轮后下一普通轮命中 17,019 cache-read。
 
 ## 2026-08-25 长 session 当前回合 Todo 与滚动锚点
 
