@@ -351,6 +351,10 @@ def read_ref_context_lines(context: SubAgentExecutionContext) -> list[str]:
     return lines
 
 
+# LLM: Required product refs are the only model-authored delivery paths. Host
+# closeout/report files are created after the final response and stay unnamed in
+# the child prompt so they cannot be mistaken for a second deliverable.
+# 函数用途: 告诉子代理真正要写哪些用户业务文件，并明确内部交接由宿主自动收口。
 def required_product_contract_lines(context: SubAgentExecutionContext) -> list[str]:
     bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
     contract = bundle.get("output_contract") if isinstance(bundle.get("output_contract"), dict) else {}
@@ -360,8 +364,7 @@ def required_product_contract_lines(context: SubAgentExecutionContext) -> list[s
     return [
         "- 用户要求的业务产物必须写到 output_contract.required_file_refs 中的精确路径；"
         "最终回复也要明确列出这些业务产物路径。",
-        "- agent_run_final_report_ref 是系统内部交接报告，不是用户要求的业务产物；"
-        "除非它同时出现在 required_file_refs 里，否则不能把它当作交付文件。",
+        "- 系统内部交接记录由宿主在最终回复后自动生成；不要为交差另写内部状态或交接文件。",
         f"- required_file_refs: {', '.join(refs[:8])}",
     ]
 

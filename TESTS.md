@@ -1,5 +1,28 @@
 # TESTS
 
+## 2026-08-25 子代理业务产物与宿主交接文件隔离
+
+子代理只能看到和写入父级/用户明确声明的业务产物；宿主内部 `final_report/output.json/runner_result` 不得
+进入 output contract、task packet、workspace refs 或旧 bundle 的 runner prompt。显式业务文件即使同名为
+`final_report.md` 仍必须保留。定向命令：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_runner_prompts.py \
+  agent_py_agent/tests/test_subagent_context_bundle.py \
+  agent_py_agent/tests/test_subagent_policies.py \
+  agent_py_agent/tests/test_subagent_prompt_contract.py \
+  agent_py_agent/tests/test_direct_parent_lifecycle.py \
+  agent_py_agent/tests/test_subagent_context_bundle_prompting.py \
+  -q --tb=short
+```
+
+上面 100 项通过；另补执行上下文落盘的 grants/quality 两项定向回归，总计 102 项。覆盖当前 child 不见宿主
+closeout、旧 bundle 二次过滤、恢复清单过滤、显式同名业务文件保留，以及 coordinator 仍能收到直属 child
+完成信封。全量 Ruff、doc-sync、strict code-size、diff 与 clean-package 均通过；改动远少于 10,000 行，按
+约定未跑全仓 pytest。真 TUI 必须使用部署后的 fresh child，检查业务完成后直接自然 final，宿主仍生成
+交接投影且 child 不主动写内部报告。
+
 ## 2026-08-25 跨回合工具终态折叠与缓存连续性
 
 普通回合的工具历史不能在下一轮无痕消失，也不能为保留历史而把大段原始结果每次重发。每个完成回合只生成

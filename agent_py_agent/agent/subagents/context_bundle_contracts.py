@@ -33,6 +33,10 @@ class _TaskContractComponents(NamedTuple):
     source: str
 
 
+# LLM: The child-visible output contract contains only parent/user-declared
+# product targets. Host-owned closeout, runner-result, and final-report paths
+# must stay out; the host creates those projections after the final response.
+# 函数用途: 生成子代理真正需要执行的业务产物合同，不把内部收口文件伪装成待写交付物。
 def output_contract(task: SubAgentTask) -> dict[str, object]:
     components = task_contract_components(task)
     # R4 修复：执行合同里的目标 refs 必须翻译成子代理可写落点（声明意图位置保留在
@@ -42,22 +46,18 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
     return {
         "product_write_roots": components.product_roots,
         "required_file_refs": anchored_required,
-        "final_report_ref": _preferred_final_report_ref(task, anchored_required),
-        "agent_run_final_report_ref": safe_string_ref(task, "agent_run_final_report_md") or safe_string_ref(task, "debrief_file"),
-        "runner_result_ref": safe_string_ref(task, "runner_result_json"),
-        "run_closeout_ref": safe_string_ref(task, "output_json"),
         "declared_output_refs": declared_output_refs(task),
         "output_delivery_map": anchoring.delivery_map,
         "write_contract_warnings": anchoring.warnings,
         "required_files": components.required_files,
         "forbidden_files": components.forbidden_files,
         "file_contract_source": components.source,
-        "evidence_refs_required": True,
-        "tests_ref_style": "refs_only_with_working_dir",
-        "artifact_refs_required": True,
     }
 
 
+# LLM: The task packet mirrors only executable task/tool/write facts. Runtime
+# closeout refs are host state and cannot be model-authored or treated as tools.
+# 函数用途: 生成子代理可读取的任务包，列清身份、目标、工具和实际写入范围。
 def task_packet(task: SubAgentTask) -> dict[str, object]:
     refs = workspace_refs(task)
     components = task_contract_components(task)
@@ -97,7 +97,6 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "allowed_skills": list(task.allowed_skills or []),
             "canonical_tool_names": True,
             "path_argument": "path",
-            "run_closeout_ref": safe_string_ref(task, "output_json"),
         },
         "workspace_refs": {
             "owner_workspace_dir": refs.get("owner_workspace_dir", ""),
@@ -353,13 +352,6 @@ def _dedupe_file_terms(values) -> list[str]:
         if text and text not in terms:
             terms.append(text)
     return terms
-
-
-def _preferred_final_report_ref(task: SubAgentTask, required_refs: list[str]) -> str:
-    for ref in required_refs:
-        if Path(str(ref)).name == "final_report.md":
-            return str(ref)
-    return safe_string_ref(task, "agent_run_final_report_md") or safe_string_ref(task, "debrief_file")
 
 
 def _resolve_required_file_ref(root: str, file_path: Path) -> str:

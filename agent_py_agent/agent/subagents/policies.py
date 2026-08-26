@@ -386,12 +386,16 @@ def _new_grant_cards(grant: CapabilityGrant, seen: set[str]) -> list[dict[str, s
         seen.add(key)
         cards.append({str(item_key): str(item_value) for item_key, item_value in card.items()})
     return cards
+# LLM: These are model behavior hints only. Verification uses real tool facts,
+# while final_report/output.json/runner_result remain host-owned projections and
+# must never be requested as child-authored evidence.
+# 函数用途: 给子代理说明工具、核对和写入边界，并避免它重复生成宿主收口文件。
 def _execution_context_instructions() -> list[str]:
     return [
         "只能使用本上下文列出的 allowed_skills、allowed_tools 和 granted_cards。",
         "不要读取或展开全局 skill/tool registry；缺能力时提交 capability_request。",
         "工具失败要记录 tried/evidence，并优先在已授权能力内换替代方案；无可用替代方案时上抛。",
-        "完成前必须写入可验收 evidence，不能只口头声明完成。",
+        "完成前用真实工具核对目标产物，并在最终回复报告检查结果；不要自行写内部状态、output.json、runner_result 或 final_report。",
         "写入只允许发生在 allowed_write_roots 内，禁止写 forbidden_write_roots 和 locked_files。",
         "如果通道损坏、工单文件缺失或任务边界不清，先标记 BLOCKED 并等待父代理处理。",
     ]

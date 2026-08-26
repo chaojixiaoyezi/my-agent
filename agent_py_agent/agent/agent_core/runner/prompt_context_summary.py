@@ -6,10 +6,15 @@ from pathlib import Path
 from ...model_visible_refs import current_model_ref, current_model_text
 from ...subagents import SubAgentExecutionContext
 
+_HOST_CLOSEOUT_FILENAMES = frozenset(
+    {"final_report.md", "output.json", "runner_result.json", "runner_response.md"}
+)
+
 
 # LLM: The runner prompt is a bounded projection of canonical context. Direct
-# child rows retain structured objects so the parent can integrate without a poll tool.
-# 函数用途: 生成子代理模型真正看到的精简上下文，包含直属孩子事件结果。
+# child rows retain structured objects for parent integration, while host-owned
+# closeout/final-report refs are filtered even when an old bundle still has them.
+# 函数用途: 生成子代理模型真正看到的精简上下文，包含直属孩子结果但不暴露宿主收口文件。
 def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[str, object]:
     bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
     return {
@@ -25,7 +30,7 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
             "allowed_skills": list(context.allowed_skills or []),
             "controlled_exec_grant_count": len(context.controlled_exec_grants or []),
         },
-        "write_boundary": dict(context.write_boundary or {}),
+        "write_boundary": _write_boundary_prompt_payload(context.write_boundary),
         "conversation": _conversation_prompt_payload(bundle),
         "direct_children": _direct_children_prompt_payload(bundle.get("direct_children")),
         "collaboration": _collaboration_prompt_payload(bundle.get("collaboration")),
@@ -33,7 +38,7 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
         "context_packs": _context_packs_prompt_payload(context.context_packs),
         "task_envelope": _task_envelope_prompt_payload(bundle.get("task_envelope")),
         "tool_preflight": _tool_preflight_prompt_payload(bundle.get("tool_preflight")),
-        "recovery": _bounded_object(bundle.get("runner_recovery_preflight")),
+        "recovery": _recovery_prompt_payload(bundle.get("runner_recovery_preflight")),
         "read_refs": _read_refs_prompt_payload(context),
         "output_contract": _dict_prompt_subset(
             bundle.get("output_contract"),
@@ -42,9 +47,6 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
                 "output_refs",
                 "required_files",
                 "required_file_refs",
-                "final_report_ref",
-                "agent_run_final_report_ref",
-                "run_closeout_ref",
                 "file_contract",
             ],
         ),
@@ -238,8 +240,6 @@ def _runner_ref_payload(context: SubAgentExecutionContext, bundle: dict[str, obj
     )
     return {
         "task_root": current_model_ref(workspace_refs.get("task_root") or context.task_dir),
-        "execution_context_json": current_model_ref(context.execution_context_json),
-        "execution_context_file": current_model_ref(context.execution_context_file),
         "context_bundle_json": current_model_ref(context.context_bundle_json),
         "context_bundle_file": current_model_ref(context.context_bundle_file),
         "workspace_refs": workspace_refs,
@@ -265,8 +265,62 @@ def _task_envelope_prompt_payload(envelope: object) -> dict[str, object]:
             envelope.get("write_contract"),
             ["output_files", "output_refs", "forbidden_write_roots", "locked_files"],
         ),
-        "context_refs": _dict_prompt_subset(envelope.get("context_refs"), ["context_bundle", "execution_context"]),
+        "context_refs": _dict_prompt_subset(envelope.get("context_refs"), ["context_bundle"]),
     }
+
+
+# LLM: Tool execution keeps the full host boundary internally, but the model
+# sees only cwd, permission roots, and typed grants. Host status/closeout file
+# slots are never task instructions or delivery targets.
+# 函数用途: 把运行时写围栏裁成子代理真正需要理解的权限事实，隐藏宿主维护的状态文件。
+def _write_boundary_prompt_payload(value: object) -> dict[str, object]:
+    return _dict_prompt_subset(
+        value,
+        [
+            "execution_cwd",
+            "owner_workspace_dir",
+            "role",
+            "allowed_write_roots",
+            "allowed_read_roots",
+            "read_scope_mode",
+            "artifact_read_scope_mode",
+            "artifact_read_root",
+            "product_write_roots",
+            "product_write_policy",
+            "forbidden_write_roots",
+            "locked_files",
+            "controlled_exec_grants",
+            "effective_permissions",
+            "shell_access_mode",
+        ],
+    )
+
+
+# LLM: Recovery may expose bounded checkpoint/summary/task refs, never the
+# current run's host-generated response/result/closeout files. This also cleans
+# old durable bundles before they reach a resumed model prompt.
+# 函数用途: 保留真正能续跑的恢复线索，并移除宿主最终收口文件及其提示文字。
+def _recovery_prompt_payload(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    payload = dict(value)
+    refs = [str(item or "").strip() for item in payload.get("recovery_refs") or []]
+    blocked = [ref for ref in refs if _is_host_closeout_ref(ref)]
+    payload["recovery_refs"] = [ref for ref in refs if ref and ref not in blocked]
+    instruction = current_model_text(payload.get("runner_instruction") or "")
+    for ref in blocked:
+        instruction = instruction.replace(ref, "")
+    payload["runner_instruction"] = instruction
+    return _bounded_object(payload)
+
+
+# LLM: Filename checks are confined to the host-owned recovery-ref list; normal
+# required_file_refs remain authoritative even when a business file shares a
+# familiar name such as final_report.md.
+# 函数用途: 识别恢复清单里的宿主收口文件，不按名称误删用户明确声明的业务产物。
+def _is_host_closeout_ref(value: object) -> bool:
+    text = str(value or "").strip()
+    return bool(text and Path(text).name in _HOST_CLOSEOUT_FILENAMES)
 
 
 def _tool_preflight_prompt_payload(preflight: object) -> dict[str, object]:

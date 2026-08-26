@@ -46,6 +46,9 @@ REQUIRED_CONTEXT_BUNDLE_FIELDS = (
 # change a verdict.  Larger profiles remain available through the exact read
 # scope already carried by the task.
 _AUDIT_SOURCE_PROFILE_INLINE_MAX_CHARS = 12_000
+_HOST_CLOSEOUT_FILENAMES = frozenset(
+    {"final_report.md", "output.json", "runner_result.json", "runner_response.md"}
+)
 
 
 # LLM: This frozen bundle is the canonical bounded runner context snapshot;
@@ -174,6 +177,10 @@ def _object_string_list(value: object) -> list[str]:
     return [text for item in value if (text := str(item or "").strip())]
 
 
+# LLM: Source provenance for the model-visible output contract may name only
+# explicit product declarations; host closeout/result/report fields are not
+# inputs to the child's work contract.
+# 函数用途: 说明上下文各字段来自哪里，并防止内部收口路径被登记成业务产物来源。
 def _source_refs() -> dict[str, list[str]]:
     return {
         "goal": ["task.goal"],
@@ -188,11 +195,12 @@ def _source_refs() -> dict[str, list[str]]:
             "task.agent_run_workspace_dir",
         ],
         "output_contract": [
-            "task.output_json",
-            "task.runner_result_json",
-            "task.agent_run_final_report_md",
-            "task.goal",
-            "task.thought",
+            "task.attributes.required_files",
+            "task.attributes.required_file_refs",
+            "task.attributes.output_files",
+            "task.attributes.output_refs",
+            "task.attributes.artifact_refs",
+            "task.allowed_write_roots",
         ],
         "lineage": ["task.root_id", "task.parent_id", "task.depth", "task.inheritance_manifest_json"],
         "context_packs": ["task.context_packs"],
@@ -390,11 +398,25 @@ def _path_terms(value: object) -> list[str]:
     return clean_path_contract_refs(value)
 
 
+# LLM: Canonical recovery bookkeeping may retain host result/closeout files,
+# while the model-visible bundle receives only checkpoint/summary/task clues.
+# Exact host paths are also removed from the bounded recovery instruction.
+# 函数用途: 投影子代理可使用的恢复线索，隐藏由宿主生成的最终响应和收口文件。
 def _runner_recovery_preflight(task: SubAgentTask) -> dict[str, object]:
     attributes = getattr(task, "attributes", {})
     attributes = attributes if isinstance(attributes, dict) else {}
     preflight = attributes.get("runner_recovery_preflight")
-    return dict(preflight) if isinstance(preflight, dict) else {}
+    if not isinstance(preflight, dict):
+        return {}
+    payload = dict(preflight)
+    refs = [str(item or "").strip() for item in payload.get("recovery_refs") or []]
+    blocked = [ref for ref in refs if ref and Path(ref).name in _HOST_CLOSEOUT_FILENAMES]
+    payload["recovery_refs"] = [ref for ref in refs if ref and ref not in blocked]
+    instruction = str(payload.get("runner_instruction") or "")
+    for ref in blocked:
+        instruction = instruction.replace(ref, "")
+    payload["runner_instruction"] = instruction
+    return payload
 
 
 def _conversation_context(task: SubAgentTask) -> dict[str, str]:

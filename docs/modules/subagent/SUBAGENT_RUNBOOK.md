@@ -119,6 +119,15 @@ child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是�
 2. 同一交接包里的 artifact refs、`declared_output_refs` 与 `final_report_ref`。
 3. 只有这些结构化交接内容缺失或损坏时，才由宿主把 run 内部结果文件当恢复证据。
 
+执行 child 只写 `required_file_refs` 或父级明确声明的业务产物。内部 final report、runner result 和 closeout
+记录由宿主在 child 自然 final 后自动生成，不会出现在 child 的 output contract、task packet 或 workspace
+refs；不要为“完成交差”主动创建这些运行时文件。若用户明确要求的业务文件恰好叫 `final_report.md`，仍按
+精确 `required_file_refs` 写入，不能仅凭文件名把它隐藏。
+
+attempt 续跑时只按模型可见的 checkpoint、summary、task 与明确 handoff 接续；不要读取本 run 的
+output/runner-result/final-response 来反推工作。完整 execution-context 和完整 write boundary 属于宿主审计与
+工具执行面，runner prompt 只收到安全投影和 context bundle。
+
 后台 lifecycle wake 与用户在同一 TUI 里追加的普通前台消息必须读取同一份完成信封。普通追加轮会换
 task id，但继续复用原 canonical task workspace；前台续轮会按 same-thread、非 detached task link 的 exact
 task path 形成 workspace lineage，再从 ConversationStore observation 中选择 root 属于 lineage、且

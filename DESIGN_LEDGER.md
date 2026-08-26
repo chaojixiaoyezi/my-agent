@@ -1720,6 +1720,13 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   暴露给直接父级的有界交接投影，不是 canonical 状态权威。精确该文件允许通过 `read_file` 按现有
   workspace/owner 边界读取；同目录的 state/checkpoint/summary/progress、目录枚举和 shell 仍拒绝。
   不复制第二份报告，也不让 final_report 正文参与 child 或 root 的完成、权限、验收裁决。
+- child 自己的模型上下文只暴露用户/父级明确声明的业务产物：`required_file_refs`、显式 output/artifact refs
+  与实际写入根。宿主拥有的 `final_report/output.json/runner_result` 不进入 child 的 output contract、task
+  packet、workspace refs 或旧 bundle 摘要；否则模型会把运行时收口文件误当成第二份交付并浪费工具轮。
+  child 自然 final 后由宿主一次生成交接投影，语义对齐 会话运行时 将 child 最后一条 assistant message 投给父级。
+  工具执行器仍在内存中持有完整 write boundary，落盘 execution-context 仍供宿主审计，但两者不作为模型
+  渐进披露入口；模型只看 cwd、读写根、grant 与安全后的 context bundle。attempt 恢复只暴露 checkpoint、
+  summary、task 等续跑线索，旧 bundle 中的 closeout refs 也必须在 runner prompt 边界再次过滤。
 - 同一现场的 completion 信封已经给出正确 `final_report_ref`，但模型保留 exact run id 后拼入了完整 durable
   task id，形成不存在的目录。读取层只对这个 exact final-report 叶子按同 owner
   `agents/<run>/state.json` 投影找 canonical ref，并再次执行原读权限检查；run id、run dir、owner containment

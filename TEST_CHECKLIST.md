@@ -1,5 +1,11 @@
 # TEST CHECKLIST
 
+- [ ] fresh MiniMax-M2.7 child 的 output contract、task packet、workspace refs 和 runner prompt 均不得暴露
+  宿主 `final_report/output.json/runner_result`；child 完成业务后直接自然 final，不额外调用写工具生成内部
+  报告。宿主仍须从最终回复生成完成信封/交接投影，显式同名业务文件继续按 `required_file_refs` 交付。
+  完整 execution-context 只供宿主审计，prompt 只拿安全 write boundary/context bundle；attempt 恢复只见
+  checkpoint/summary/task。父—子—孙相关 102 项 focused 与本地严格 gate 已通过，待 `.7` 新 child 真 TUI。
+
 - [x] main/child 每个已结束工具回合只生成一次不可变 `conversation_terminal_tool_fold.v1`；下一轮能看到
   有界、脱敏工具索引/近期摘要/exact refs，完整输出仍只在 owner archive。旧折叠不得每轮重写，
   `/context` 必须把折叠回合/调用数与真正 `compact N` 分开；真正 Compact 能吸收折叠。overflow→Compact→

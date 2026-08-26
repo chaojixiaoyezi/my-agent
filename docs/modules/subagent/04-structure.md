@@ -308,7 +308,8 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - 模型或用户显式给出的输出引用保持原值，继续参加 shared-output 冲突检查。
 - 未显式声明输出的 child 不生成业务文件合同；typed status、最终回复、系统
   `agent_run_final_report_ref` 与真实 artifact refs 通过直属 lifecycle wake 交给父级，和 会话运行时 child
-  final message watcher 同义。模型不需要为了“交差”另写一份 Markdown。
+  final message watcher 同义。该系统 ref 只存在于宿主生成的完成信封，不进入正在执行 child 的
+  `output_contract`、task packet 或 workspace refs；模型不需要也不能为了“交差”另写一份 Markdown。
 - 旧 durable task 可能仍带 `system_default_output_ref=true` 和
   `work/child_outputs/<run_id>/<slot>-<slug>.md`。唯一 rebind 读取入口继续保留，避免恢复时路径相撞；但
   context bundle、完成信封和父级 `expected_outputs` 全部隐藏该内部 ref。真正的用户文件、artifact 和
@@ -317,6 +318,11 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `direct-children-context.v2` 直接给出有界最终回复和精确交付 refs。内部
   `runner_result.json`、`output.json`、`runner_response.md` 仍可供宿主审计/恢复，但不再进入父模型的正常
   prompt。该设计对应 会话运行时 把 child `last_agent_message` 随 terminal status 交给父级，而不是让父级猜目录。
+  旧 context bundle 若仍保存宿主收口键，runner 的有界摘要也必须过滤；真正显式声明的业务文件无论名称
+  是否为 `final_report.md`，仍以 `required_file_refs` 为权威正常交付。
+- `SubAgentExecutionContext.write_boundary` 的完整对象继续供 Tool Gateway 执行权限门使用，落盘完整上下文也
+  继续供宿主审计；模型 prompt 只投影 cwd、读写根、grant 和 policy，不再拿完整 execution-context 文件当
+  渐进披露入口。恢复 bundle 只暴露 checkpoint/summary/task 等续跑线索，不能暴露本 run 的最终响应或结果。
 
 ## 2026-07-29 后台 claim 与当前执行轮
 

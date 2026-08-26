@@ -139,7 +139,9 @@ def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert bundle.workspace_refs["agent_run_checkpoint"].endswith("checkpoint.json")
     assert bundle.workspace_refs["agent_run_summary"].endswith("summary.md")
     assert bundle.workspace_refs["agent_run_findings"].endswith("findings.jsonl")
-    assert bundle.output_contract["final_report_ref"].endswith("final_report.md")
+    assert "final_report_ref" not in bundle.output_contract
+    assert "agent_run_final_report" not in bundle.workspace_refs
+    assert "run_closeout_ref" not in bundle.task_packet["tool_contract"]
     assert bundle.task_packet["schema_version"] == "subagent_task_packet.v1"
     assert bundle.task_packet["run_id"] == task.id
     assert bundle.task_packet["role"] == "worker"
@@ -169,8 +171,8 @@ def test_context_bundle_maps_required_file_to_product_root(tmp_path) -> None:
 
     assert bundle.output_contract["product_write_roots"] == [str(product_root)]
     assert bundle.output_contract["required_file_refs"] == [expected]
-    assert bundle.output_contract["final_report_ref"] == expected
-    assert bundle.output_contract["agent_run_final_report_ref"].endswith("final_report.md")
+    assert "final_report_ref" not in bundle.output_contract
+    assert "agent_run_final_report_ref" not in bundle.output_contract
     assert bundle.task_packet["file_contract"]["required_file_refs"] == [expected]
     assert bundle.task_packet["write_contract"]["product_write_roots"] == [str(product_root)]
 
@@ -219,11 +221,46 @@ def test_context_bundle_hides_legacy_system_default_output_ref_from_model(tmp_pa
     assert bundle.output_contract["declared_output_refs"] == []
     assert bundle.output_contract["required_file_refs"] == []
     assert bundle.output_contract["output_delivery_map"] == []
-    assert bundle.output_contract["final_report_ref"].endswith("final_report.md")
+    assert "final_report_ref" not in bundle.output_contract
     assert bundle.task_packet["file_contract"]["declared_output_refs"] == []
     assert bundle.task_packet["file_contract"]["required_file_refs"] == []
     assert bundle.task_packet["write_contract"]["declared_output_refs"] == []
     assert str(internal_report) not in json.dumps(asdict(bundle), ensure_ascii=False)
+
+
+def test_context_bundle_hides_host_closeout_refs_from_recovery_prompt(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
+    task = manager.create_run(
+        goal="从断点继续业务实现。",
+        thought="恢复时只需要 checkpoint 和 summary。",
+        plan=["读断点", "继续实现"],
+        role="worker",
+    )
+    run_dir = Path(task.agent_run_workspace_dir)
+    checkpoint = run_dir / "checkpoint.json"
+    summary = run_dir / "summary.md"
+    output_json = run_dir / "output.json"
+    runner_result = run_dir / "runner_result.json"
+    task.attributes["runner_recovery_preflight"] = {
+        "recovery_refs": [
+            str(checkpoint),
+            str(summary),
+            str(output_json),
+            str(runner_result),
+        ],
+        "runner_instruction": f"先读 {checkpoint}，不要重做；旧结果在 {output_json}",
+    }
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+    recovery = bundle.runner_recovery_preflight
+
+    assert recovery["recovery_refs"] == [str(checkpoint), str(summary)]
+    assert str(checkpoint) in recovery["runner_instruction"]
+    assert str(output_json) not in recovery["runner_instruction"]
+    payload = json.dumps(asdict(bundle), ensure_ascii=False)
+    assert str(output_json) not in payload
+    assert str(runner_result) not in payload
 
 
 def test_context_bundle_keeps_logical_output_refs_out_of_required_files(tmp_path) -> None:

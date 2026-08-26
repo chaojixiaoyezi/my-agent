@@ -1,5 +1,11 @@
 # COMPLETED
 
+- 2026-08-25 对照 会话运行时 child `last_agent_message` 交接主链，执行 child 的可见合同已只保留用户/父级显式
+  业务产物；宿主 `final_report/output.json/runner_result` 从 output contract、task packet、workspace refs 和
+  旧 bundle prompt 全部移除，自然 final 后再由宿主一次收口。完整 execution-context 留作宿主审计，模型
+  只收安全 write boundary/context bundle，恢复只见 checkpoint/summary/task；显式同名业务文件仍以
+  `required_file_refs` 为权威。102 项 focused 与本地严格 gate 已通过；`.7` fresh child 仍列在 ROADMAP。
+
 - 2026-08-25 `f901645` + `ff94d61` 对齐 会话运行时 typed Compact/TokenCount 与 终端交互 post-compact state：手动
   `/compact` 回执携带 canonical generation，TUI 立即撤下压缩前 Context；idle/resume 无 Working block 时仍
   从 activity 水合代数，迟到旧帧不能回退。251 项完整相关 focused 与严格 gate 通过并部署 `.7` 唯一 Gateway。

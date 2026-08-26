@@ -502,6 +502,8 @@ def test_execution_context_instructions_not_empty():
     instructions = _execution_context_instructions()
     assert len(instructions) > 0
     assert any("allowed_skills" in i for i in instructions)
+    assert any("不要自行写内部状态" in item for item in instructions)
+    assert not any("必须写入可验收 evidence" in item for item in instructions)
 
 
 # ── _is_active 测试 ────────────────────────────────────────────────────────

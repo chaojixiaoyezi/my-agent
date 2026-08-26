@@ -183,6 +183,24 @@ active task link 仍不关闭。
 权限门。5 个直接相关测试文件共 206 项，结果 204 passed、2 个既有 xfailed；Ruff、doc-sync、strict
 code-size、diff 与 clean-package 均通过。推送、`.7` 单 Gateway 部署和同一 tmux 复验尚待完成。
 
+### 子代理业务产物与宿主交接文件隔离
+
+状态：第二层本地严格 gate 通过，待推送和 `.7` fresh child 真 TUI
+
+解决问题：r31 的 Shell 补全 child 已经完成业务代码，却又多调用一次 `write_file` 去写内部
+`final_report.md`；随后宿主用 child 的最终回复覆盖同一文件。这不是业务工作，而是 output contract、task
+packet、workspace refs 和执行提示把宿主收口路径暴露给了执行模型，既浪费模型/工具轮，也容易让它把内部
+状态文件误报成用户产物。
+
+当前进展：对照 会话运行时 `forward_child_completion_to_parent` / `last_agent_message`，child 现在只看到父级或
+用户明确声明的业务文件与写入根；`final_report/output.json/runner_result` 全部留给宿主在自然 final 后生成。
+旧持久 bundle 即使仍含这些键，runner prompt 也会过滤。显式业务产物本身恰好叫 `final_report.md` 时仍按
+`required_file_refs` 正常交付，不按文件名猜内部状态。进一步审计发现完整 execution-context ref、write
+boundary 与 recovery refs 仍是旧旁路；当前只把安全后的 context bundle 给模型，恢复清单只留
+checkpoint/summary/task，宿主完整账本仍保留。父—子—孙完成、prompt、context 和持久化相关 102 项通过；
+全量 Ruff、doc-sync、strict code-size、diff 与 clean-package 同时通过。当前 r31 运行的是旧 Gateway，只保留
+失败基线，不能冒充部署验收。
+
 ### 会话运行时 式依赖派工分批
 
 状态：模型合同候选 focused 通过，待严格 gate、推送与 `.7` 真 TUI

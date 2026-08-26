@@ -7,6 +7,10 @@ from ..model_visible_refs import current_model_ref
 from .models import SubAgentTask
 
 
+# LLM: Child-visible workspace refs include execution/recovery locations but
+# exclude the host-owned final report, which is written only after the child
+# returns and is delivered to the parent through the completion envelope.
+# 函数用途: 投影子代理执行与恢复所需的工作区路径，不要求它自行写宿主收口报告。
 def workspace_refs(task: SubAgentTask) -> dict[str, str]:
     task_workspace = safe_string_ref(task, "task_workspace_dir")
     work_dir = str(Path(task_workspace) / "work") if task_workspace else ""
@@ -25,7 +29,6 @@ def workspace_refs(task: SubAgentTask) -> dict[str, str]:
         "agent_run_task": safe_string_ref(task, "agent_run_task_md"),
         "agent_run_checkpoint": safe_string_ref(task, "agent_run_checkpoint_json"),
         "agent_run_summary": safe_string_ref(task, "agent_run_summary_md"),
-        "agent_run_final_report": safe_string_ref(task, "agent_run_final_report_md"),
         "agent_run_findings": safe_string_ref(task, "agent_run_findings_jsonl"),
         "agent_run_timeline": safe_string_ref(task, "agent_run_timeline_jsonl"),
         "shared_blackboard": safe_string_ref(task, "task_workspace_shared_blackboard"),

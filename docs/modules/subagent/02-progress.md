@@ -1,5 +1,17 @@
 # Subagent Progress
 
+## 2026-08-25 子代理不再自行生成宿主交接文件（本地候选）
+
+- r31 Shell 补全 child 在业务实现结束后额外调用 `write_file` 写内部 `final_report.md`，宿主随后又从自然
+  final 自动覆盖；这证明模型把 host closeout 当成了第二份业务交付，白耗一轮模型和工具调用。
+- 对照 会话运行时 child 完成时转发 `last_agent_message` 的主链，child-visible output contract、task packet、
+  workspace refs 和旧 bundle prompt 现在只保留显式业务产物；`final_report/output.json/runner_result` 由宿主
+  在自然 final 后一次生成，不再作为 child 任务、工具或证据要求。
+- 显式业务文件即使名为 `final_report.md` 仍保留，因为权威来自 `required_file_refs` 而不是文件名。runner
+  进一步只投影模型需要的 write boundary，并把完整 execution-context 留作宿主审计而不再给模型读取；恢复
+  清单保留 checkpoint/summary/task，旧 closeout refs 在 bundle 构建和 prompt 两端过滤。父—子—孙完成、
+  prompt、context 和持久化相关 102 项及本地严格 gate 全通过；待推送和 fresh MiniMax-M2.7 child 真 TUI 验证。
+
 ## 2026-08-25 跨回合工具终态折叠与缓存前缀（本地候选）
 
 - 长 session 的 `compact 0` 与 60k→50k 回落同时成立：没有真正 Compact，普通回合末尾的 native 工具对却也

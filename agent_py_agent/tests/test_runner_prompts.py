@@ -129,7 +129,8 @@ class TestBuildSubagentRunnerPrompt:
         prompt = _build_subagent_runner_prompt(context)
 
         assert "Execution Context JSON" in prompt
-        assert "/tmp/task/execution_context.json" in prompt
+        assert "/tmp/task/execution_context.json" not in prompt
+        assert "/tmp/task/EXECUTION_CONTEXT.md" not in prompt
         assert "/tmp/task/context_bundle.json" in prompt
         assert "subagent_task_envelope.v1" in prompt
         assert "oversized_internal_body" not in prompt
@@ -165,8 +166,65 @@ class TestBuildSubagentRunnerPrompt:
         assert str(artifact) in prompt
         assert missing_alias not in prompt
         assert "data_collection.md" in prompt
+        assert str(workspace / "final_report.md") in prompt
         assert "不是启动前置条件" in prompt
         assert "input_contract" not in prompt
+
+    def test_prompt_filters_host_owned_closeout_refs_from_old_bundle(self):
+        from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
+
+        context = self._make_context(
+            "run-old-bundle",
+            "实现模块并在最终回复中汇报",
+            task_dir="/tmp/task/work/agents/run-old-bundle",
+            execution_context_json="/tmp/task/work/agents/run-old-bundle/execution_context.json",
+            execution_context_file="/tmp/task/work/agents/run-old-bundle/EXECUTION_CONTEXT.md",
+            write_boundary={
+                "execution_cwd": "/tmp/product",
+                "allowed_write_roots": ["/tmp/product"],
+                "output_json": "/tmp/task/work/agents/run-old-bundle/output.json",
+                "handoff_file": "/tmp/task/work/agents/run-old-bundle/HANDOFF.md",
+            },
+            context_bundle={
+                "output_contract": {
+                    "required_file_refs": ["/tmp/product/module.ts"],
+                    "final_report_ref": "/tmp/task/work/agents/run-old-bundle/final_report.md",
+                    "agent_run_final_report_ref": "/tmp/task/work/agents/run-old-bundle/final_report.md",
+                    "run_closeout_ref": "/tmp/task/work/agents/run-old-bundle/output.json",
+                },
+                "runner_recovery_preflight": {
+                    "recovery_refs": [
+                        "/tmp/task/work/agents/run-old-bundle/checkpoint.json",
+                        "/tmp/task/work/agents/run-old-bundle/output.json",
+                        "/tmp/task/work/agents/run-old-bundle/runner_result.json",
+                    ],
+                    "runner_instruction": (
+                        "先读 /tmp/task/work/agents/run-old-bundle/checkpoint.json，"
+                        "再读 /tmp/task/work/agents/run-old-bundle/output.json"
+                    ),
+                },
+                "task_envelope": {
+                    "context_refs": {
+                        "context_bundle": "/tmp/task/work/agents/run-old-bundle/context_bundle.json",
+                        "execution_context": "/tmp/task/work/agents/run-old-bundle/execution_context.json",
+                    },
+                },
+            },
+            allowed_tools=["read_file", "write_file"],
+        )
+
+        prompt = _build_subagent_runner_prompt(context)
+
+        assert "/tmp/product/module.ts" in prompt
+        assert "agent_run_final_report_ref" not in prompt
+        assert "/tmp/task/work/agents/run-old-bundle/execution_context.json" not in prompt
+        assert "/tmp/task/work/agents/run-old-bundle/EXECUTION_CONTEXT.md" not in prompt
+        assert "/tmp/task/work/agents/run-old-bundle/final_report.md" not in prompt
+        assert "/tmp/task/work/agents/run-old-bundle/output.json" not in prompt
+        assert "/tmp/task/work/agents/run-old-bundle/runner_result.json" not in prompt
+        assert "/tmp/task/work/agents/run-old-bundle/HANDOFF.md" not in prompt
+        assert "/tmp/task/work/agents/run-old-bundle/checkpoint.json" in prompt
+        assert '"execution_cwd": "/tmp/product"' in prompt
 
     def test_prompt_exposes_targeted_collaboration_clue_packet(self):
         from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runner_prompt
