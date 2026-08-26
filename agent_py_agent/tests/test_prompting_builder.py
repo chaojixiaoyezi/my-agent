@@ -313,10 +313,15 @@ class TestBuildBasic:
 
         for prompt in (root_prompt, delegated_prompt):
             assert prompt.count("# Verification Evidence Boundary") == 1
-            assert "本机、替代环境、模拟器、局部入口或单一身份通过，只证明该边界" in prompt
-            assert "不能外推到另一台机器、真实用户、外部网络或服务" in prompt
-            assert "必须明确标为未验证" in prompt
-            assert "还差哪个具体入口或环境的复核步骤" in prompt
+            assert "绑定 `0.0.0.0`、localhost 或本机地址成功" in prompt
+            assert "不证明另一台机器、真实用户或外部网络能够连接" in prompt
+            assert "结论必须明确写“未验证”" in prompt
+            assert "还差哪个具体复核步骤" in prompt
+            assert "用户只要求检查、确认、诊断、解释、对比或汇报时保持只读" in prompt
+            assert "不要写文件、改配置、启动或停止服务、创建任务或派子代理" in prompt
+            assert prompt.index("确认服务是否可用") < prompt.index(
+                "# Verification Evidence Boundary"
+            )
 
     def test_build_no_memories(self, tmp_path):
         config = AgentConfig()

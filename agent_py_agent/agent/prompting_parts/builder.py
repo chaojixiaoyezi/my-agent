@@ -33,11 +33,13 @@ if TYPE_CHECKING:
 _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
 _VERIFICATION_EVIDENCE_BOUNDARY = (
-    "验证结论必须严格停留在你亲自观察到的证据边界：本进程、本机、替代环境、模拟器、"
-    "局部入口或单一身份通过，只证明该边界，不能外推到另一台机器、真实用户、外部网络或服务、"
-    "其他身份或完整端到端也通过。若当前工具、权限或环境不能观察用户要求的边界，必须明确标为未验证，"
-    "说明已经验证了什么，以及还差哪个具体入口或环境的复核步骤；配置或代码看起来正确、按理可用、"
-    "局部成功，都不能写成目标已经验证。"
+    "每次行动和最终回复前重新核对验证与授权边界。只把目标观察点真实执行到的结果写成已验证："
+    "当前主机的进程或端口存在、绑定 `0.0.0.0`、localhost 或本机地址成功，只证明当前主机这一观察点，"
+    "不证明另一台机器、真实用户或外部网络能够连接；模拟器、替代环境、局部入口和单一身份同理，"
+    "都不能外推到完整端到端。没有来自目标观察点的真实结果时，结论必须明确写“未验证”，"
+    "不得写“能用”“可达”“通过”或“应该可用”，只说明已经验证了什么和还差哪个具体复核步骤。"
+    "用户只要求检查、确认、诊断、解释、对比或汇报时保持只读；除非用户同时明确要求修复、启动或部署，"
+    "否则不要写文件、改配置、启动或停止服务、创建任务或派子代理。"
 )
 
 
@@ -176,7 +178,6 @@ class PromptBuilder:
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
         return (
             f"# System\n{system_prompt}\n\n"
-            f"# Verification Evidence Boundary\n{_VERIFICATION_EVIDENCE_BOUNDARY}\n\n"
             f"# Related Memory\n{memory_text}\n\n"
             f"# Owner Scope\n{owner_scope}\n\n"
             f"# Dynamic Prompt Files\n{dynamic or '（无）'}\n\n"
@@ -185,7 +186,8 @@ class PromptBuilder:
             f"{_tools.tool_catalog_section or default_tools}\n\n"
             f"{_tools.tool_recommendations_section or default_recommendations}\n\n"
             f"{task_and_transcript}\n\n"
-            f"{_tools.execution_facts_section}\n"
+            f"{_tools.execution_facts_section}\n\n"
+            f"# Verification Evidence Boundary\n{_VERIFICATION_EVIDENCE_BOUNDARY}\n"
         )
 
     def read_home_context(self, user_prompt: str) -> list[str]:

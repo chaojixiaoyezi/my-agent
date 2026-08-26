@@ -4,7 +4,7 @@
 
 真实反例：测试机本机 HTTP 200、监听所有接口，但开发机跨机连接被 firewalld 拒绝；MiniMax-M2.7 在原任务
 和明确纠正 follow-up 中都误报“局域网能用”。回归不模拟 HTTP/防火墙语义，只证明所有 root/delegated
-Prompt 都恰好收到一份通用证据边界，使用独立 `system_prompt_override` 也不能绕过：
+Prompt 都恰好在完整输入末尾收到一份通用证据边界，使用独立 `system_prompt_override` 也不能绕过：
 
 ```bash
 python3 -m pytest \
@@ -19,9 +19,12 @@ python3 -m pytest \
   -q --tb=short
 ```
 
-当前收集 203 项，结果为 196 passed、7 个既有 xfail；`py_compile`、全项目 Ruff、doc-sync、strict code-size、
-diff 和 clean-package 也通过。真实验收必须在部署后的单 Gateway fresh TUI 中重发普通中文复核要求；只看
-prompt 单测或测试机 localhost 结果都不能反过来冒充跨机验证。本轮代码量远低于 10,000 行，不跑全仓 pytest。
+首版收集 203 项，结果为 196 passed、7 个既有 xfail，且本地严格 gate 通过；但部署后的正确 cwd fresh TUI
+仍生成矛盾结论，并擅自启动服务，所以明确判失败。第二候选新增断言：`0.0.0.0/localhost` 不能证明另一
+机器可达、没有目标观察点必须写未验证、只读核对不能产生修改动作，而且该段排在用户任务和运行事实之后。
+第二候选 203 项仍为 196 passed、7 个既有 xfail；`py_compile`、全项目 Ruff、doc-sync、strict code-size、
+diff 和 clean-package 全部通过。本轮远低于 10,000 行，不跑全仓 pytest。真机仍必须重发普通中文要求，
+只看 prompt 单测或测试机 localhost 结果不能冒充跨机验证。
 
 ## 2026-08-26 空输入 ↓ 返回当前视口最新消息
 

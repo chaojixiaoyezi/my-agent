@@ -1,16 +1,16 @@
 # Verification：开发推进
 
-## 2026-08-26 主/子代理共用验证证据边界（本地候选）
+## 2026-08-26 主/子代理共用验证证据边界（第二候选）
 
 - r38 真实任务证明 canonical 工具事实没有丢：测试机本机服务监听 `0.0.0.0:8765` 且 localhost 200，开发机
   跨机连接被 firewalld 拒绝；问题是模型把局部证据外推成更大结论。明确纠正的普通中文 follow-up 仍复现，
   因此不靠继续堆用户提示解决。
-- 对照 会话运行时 `protocol/src/prompts/base_instructions/default.md` 的可执行计划、针对性验证与无法运行时提供复核
-  步骤，当前由 `PromptBuilder` 在 System 后统一放一份通用 `Verification Evidence Boundary`。主代理和所有
-  使用 `system_prompt_override` 的 child 都经过该入口，Compact 后续轮也自然保留。
-- 该规则只约束模型如何表述证据，不识别 HTTP、防火墙或任何任务类型，不解析完成正文，不执行外部探测，
-  不写结构化状态，也不恢复机器完成门。Prompt/子代理相关 203 项为 196 passed、7 个既有 xfail，本地严格
-  gate 通过，真机状态待部署复验。
+- 首版 `57e91cb` 的正确 cwd fresh TUI 证明抽象提示不够：模型先说无法外部验证，随后仍把
+  `0.0.0.0 + localhost 200` 标为局域网可用，最终又要求外部电脑复核；同时擅自启服务，正文和授权都失守。
+- 第二候选把同一 `Verification Evidence Boundary` 放到完整 Prompt 最末，列出跨观察点反例和只读核对边界。
+  主代理和所有使用 `system_prompt_override` 的 child 都经过该入口，Compact 后续轮自然保留。
+- 该规则只约束模型行动与表述，不识别 HTTP、防火墙或项目类型，不解析完成正文，不执行外部探测，不写
+  结构化状态，也不恢复机器完成门。203 项为 196 passed、7 个既有 xfail，本地严格 gate 通过，真机待办。
 
 ## 2026-08-25 后台续片不再丢失 succeeded operation
 
