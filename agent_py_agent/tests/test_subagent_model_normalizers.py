@@ -226,5 +226,5 @@ class TestCodingSubagentTools:
         from agent_py_agent.agent.agent_core.orchestration.tool_grants import CODING_SUBAGENT_TOOLS
 
         assert "write_file" in CODING_SUBAGENT_TOOLS
-        assert "apply_patch" in CODING_SUBAGENT_TOOLS
+        assert "edit_file" in CODING_SUBAGENT_TOOLS
         assert "apply_patch" in CODING_SUBAGENT_TOOLS

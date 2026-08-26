@@ -8,7 +8,7 @@
   "handles_multiple_targets": true,
   "use_when_zh": ["需要找 bug、风险、遗漏、矛盾、引用失效或不符合需求的地方。"],
   "do_not_use_when_zh": ["只是执行一个明确改动时不要用找茬角色。"],
-  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "web_search", "web_fetch", "write_file", "apply_patch", "capability_request"],
+  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "web_search", "web_fetch", "write_file", "edit_file", "apply_patch", "capability_request"],
   "can_write": true,
   "can_accept": false,
   "depends_on_outputs": true,

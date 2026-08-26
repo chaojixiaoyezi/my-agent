@@ -20,6 +20,7 @@ from agent_py_agent.agent.tooling.write_boundary import (
 class TestConstants:
     def test_write_tool_names(self):
         assert "write_file" in WRITE_TOOL_NAMES
+        assert "edit_file" in WRITE_TOOL_NAMES
         assert "apply_patch" in WRITE_TOOL_NAMES
         assert "append_file" not in WRITE_TOOL_NAMES
         assert "replace_in_file" not in WRITE_TOOL_NAMES

@@ -397,6 +397,19 @@
 
 以后新增长期设计，只写摘要和链接，不再把完整方案塞回这个文件。
 
+## 2026-08-25 子代理局部文件编辑能力单一权威【状态：本地 focused 通过，待长任务安全点部署】
+
+- 同一长 TUI 的 Click Python→TypeScript 复刻中，首个 worker 已收到“不用整文件覆盖”的角色提示，实际
+  capability snapshot 却只有 `write_file/apply_patch`，没有仓库既有的 `edit_file`。一次补丁仅因期望行多
+  两个前导空格而未命中，工具又只返回路径；模型随后反复重写整个文件并制造重复声明。因此问题不在
+  Compact summary，而在工具可用性与失败反馈没有形成同一条主链。
+- 文件写工具的唯一成员与顺序统一收在 `tooling/write_boundary.py` 的
+  `WRITE_TOOL_ORDER/WRITE_TOOL_NAMES`：直接 coding child、递归 leaf、角色模板、capability grant、写围栏、
+  路径 gate、进度与验证投影都消费它。父级显式缩窄工具仍是权限上界，缺少 `edit_file` 时后代不得扩权。
+- 对照 会话运行时 apply-patch 的 expected-lines 错误，`apply_patch` 仍保持逐字严格匹配和零写入，只在未命中时
+  有界回显最多 4,000 字符的期望原文并指出空格/缩进；一处或少数片段引导使用已有的空白容错
+  `edit_file`，多文件关联修改继续使用 `apply_patch`。不增加目录锁、自然语言裁决、自动重试或整文件兜底。
+
 ## 2026-08-25 当前主任务 Working 时钟【状态：本地 focused 通过，待单 Gateway 真机复验】
 
 - 终端交互 的 spinner 时间只读当前 query 的 `loadingStartTimeRef`，并在 query 从 idle 进入 active 的同一渲染

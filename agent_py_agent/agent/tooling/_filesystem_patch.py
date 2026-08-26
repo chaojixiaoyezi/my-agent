@@ -28,6 +28,8 @@ from .models import (
     ToolRuntimePolicy,
 )
 
+_MAX_MISSING_CONTEXT_PREVIEW_CHARS = 4_000
+
 
 class PatchTargetMissingError(ValueError):
     """apply_patch 的 Update/Delete 目标文件不存在：是路径/状态问题，不是补丁格式错。
@@ -38,6 +40,9 @@ class PatchTargetMissingError(ValueError):
     """
 
 
+# LLM: The patch schema stays 会话运行时 and now routes small exact
+# replacements toward edit_file; hints are selection guidance, not authority.
+# 函数用途: 构建 apply_patch 的模型说明，讲清多文件补丁语法和少量局部修改的更合适入口。
 def _build_apply_patch_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="apply_patch",
@@ -66,6 +71,7 @@ def _build_apply_patch_model_spec() -> ToolModelSpec:
                 "安全删除单个文本文件，使用 *** Delete File 而不是 rm/rmdir/unlink",
             ),
             avoid_when=(
+                "只改已有文件的一处或少数片段时优先用 edit_file",
                 "要完整重写一个文件时用 write_file",
                 "要写 PDF、XLSX、图片等二进制文件时用 write_file 的 data_base64",
             ),
@@ -418,6 +424,10 @@ def _apply_update_patch(
     touched.append(tool.display_path(destination))
 
 
+# LLM: Context mismatch feedback follows 会话运行时 by returning the exact expected
+# old lines, while staying bounded and pointing small edits to edit_file.  It
+# must never relax apply_patch's byte-accurate match or mutate the file on miss.
+# 函数用途: 找到补丁要替换的原文；未命中时回显有界的期望行，帮助模型修正空格或改用局部编辑工具。
 def _replacement_text(change: dict[str, Any], content: str, display_path: str) -> tuple[str, str]:
     old = "\n".join(change["old"]) + "\n"
     new = "\n".join(change["new"]) + "\n"
@@ -426,7 +436,15 @@ def _replacement_text(change: dict[str, Any], content: str, display_path: str) -
     old = old.rstrip("\n")
     new = new.rstrip("\n")
     if old not in content:
-        raise ValueError(f"补丁上下文未命中: {display_path}")
+        expected = old
+        if len(expected) > _MAX_MISSING_CONTEXT_PREVIEW_CHARS:
+            expected = expected[:_MAX_MISSING_CONTEXT_PREVIEW_CHARS] + "\n…（期望行已截断）"
+        raise ValueError(
+            f"补丁上下文未命中: {display_path}\n"
+            "未找到以下补丁原始行（逐字匹配，包含空格与缩进）:\n"
+            f"{expected}\n"
+            "请读取目标位置的最新片段后重试；只改一处或少数片段时可改用 edit_file。"
+        )
     return old, new
 
 

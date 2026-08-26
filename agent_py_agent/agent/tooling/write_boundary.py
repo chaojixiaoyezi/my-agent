@@ -16,7 +16,12 @@ from typing import Any
 
 from ..path_access_policy import PathAccessPolicy
 
-WRITE_TOOL_NAMES = {"write_file", "apply_patch", "edit_file"}
+# LLM: Every file-mutation capability snapshot and write-scope consumer must
+# reuse this canonical order/set; duplicating partial lists previously hid
+# edit_file from child agents while the executor already authorized it.
+# 常量用途: 统一文件写工具的展示顺序与成员集合，避免主代理、子代理和权限门各维护一份后漂移。
+WRITE_TOOL_ORDER = ("write_file", "edit_file", "apply_patch")
+WRITE_TOOL_NAMES = frozenset(WRITE_TOOL_ORDER)
 _MAX_BOUNDARY_PATH_CHARS = 4096
 _INTERNAL_OUTPUT_JSON_NAME = "output.json"
 _WRITE_SCOPE_BOUNDARY_KEYS = frozenset(

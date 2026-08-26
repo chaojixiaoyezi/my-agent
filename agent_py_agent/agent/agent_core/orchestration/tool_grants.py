@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ...subagents.role_templates import SHELL_SESSION_TOOLS, active_model_subagent_tools
+from ...tooling.write_boundary import WRITE_TOOL_ORDER
 
 CODING_SUBAGENT_TOOLS = [
     "list_files",
@@ -12,8 +13,7 @@ CODING_SUBAGENT_TOOLS = [
     "web_search",
     "web_fetch",
     "watch_stream",
-    "write_file",
-    "apply_patch",
+    *WRITE_TOOL_ORDER,
     *SHELL_SESSION_TOOLS,
     "capability_request",
 ]

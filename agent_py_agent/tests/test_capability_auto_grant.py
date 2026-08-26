@@ -60,7 +60,9 @@ def test_routine_shell_write_request_auto_grants():
         grant = auto_grant_routine_request(agent.subagents, task.id, request.id)
         assert grant is not None
         assert "run_command" in grant.tools
-        assert "write_file" in grant.tools and "apply_patch" in grant.tools
+        assert "write_file" in grant.tools
+        assert "edit_file" in grant.tools
+        assert "apply_patch" in grant.tools
         context = agent.subagents.runner_context.build_execution_context(task.id)
         assert "process_session" in context.allowed_tools
         assert grant.command_allowlist == ["npm"]

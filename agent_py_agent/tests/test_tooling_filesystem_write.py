@@ -435,6 +435,9 @@ def test_apply_patch_rejects_unmatched_context(tmp_path: Path) -> None:
 
     assert not result.ok
     assert "上下文未命中" in result.output
+    assert "未找到以下补丁原始行" in result.output
+    assert "missing" in result.output
+    assert "edit_file" in result.output
 
 
 # LLM: GUIDE-01(2026-08-15 轻量运行时 对照真机): owner 模式写外部路径被拦时, 错误消息必须带

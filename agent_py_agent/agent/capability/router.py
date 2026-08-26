@@ -13,6 +13,7 @@ from typing import Any
 
 from ..common.value_parsing import dedupe_strings
 from ..tooling.models import ToolModelSpec
+from ..tooling.write_boundary import WRITE_TOOL_NAMES
 from .config import CapabilityConfig
 from .skill_snapshot import SkillSnapshot, SkillSnapshotEntry
 from .skills import SkillCard
@@ -379,6 +380,9 @@ def _playwright_capability_card() -> CapabilityCard:
     )
 
 
+# LLM: Capability cards must classify every canonical filesystem mutation tool
+# through WRITE_TOOL_NAMES; a newly exposed editor cannot fall back to read-only risk.
+# 函数用途: 给工具卡补基础风险分类，确保所有文件写工具都按高风险写入能力展示。
 def classify_tool_model_risk(spec: ToolModelSpec) -> tuple[list[str], str]:
     """给现有工具补一层基础风险分类。
 
@@ -386,7 +390,7 @@ def classify_tool_model_risk(spec: ToolModelSpec) -> tuple[list[str], str]:
     后续可以在 tool card 里继续扩展更细的权限和确认机制。"""
 
     name = spec.name
-    if name in {"write_file", "apply_patch"}:
+    if name in WRITE_TOOL_NAMES:
         return ["filesystem_write"], "high"
     if name == "web_fetch":
         return ["network_read", "network_request"], "medium"

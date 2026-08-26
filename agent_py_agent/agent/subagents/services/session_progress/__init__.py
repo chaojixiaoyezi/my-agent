@@ -12,6 +12,7 @@ from typing import Any
 from ....common.json_io import read_json_object_report
 from ....common.value_parsing import sequence_strings
 from ....runtime_errors import runtime_error_report
+from ....tooling.write_boundary import WRITE_TOOL_NAMES
 from ...model_task import SubAgentTask
 from .integrity import (
     artifact_integrity_progress,
@@ -21,7 +22,10 @@ from .integrity import (
 
 _SCHEMA_VERSION = "subagent_tool_progress.v1"
 _MAX_HEADINGS = 16
-_WRITE_TOOLS = {"write_file", "apply_patch"}
+# LLM: Progress projection recognizes the same canonical mutation tools as the
+# executor so edit_file activity cannot disappear from durable child progress.
+# 常量用途: 识别会改变工作区的文件工具，用于记录子代理的真实写入进度。
+_WRITE_TOOLS = WRITE_TOOL_NAMES
 _EXPLICIT_PROGRESS_PATH_KEYS = (
     "progress_path",
     "product_path",

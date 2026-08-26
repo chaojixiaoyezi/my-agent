@@ -260,6 +260,10 @@
 - [ ] 既有同级/父子 child 的 `output_files/output_refs` 不产生文件所有权、持久 workspace 租约或动态
   `locked_files`；但同一次 `create_subagents.items` 主动提供的 `output_files` 若完全相同或互为祖先/子路径，
   必须整批 `not_started` 并返回冲突 item/path 供模型缩窄或分批。未声明写集不猜，越出父 workspace 仍拒绝。
+- [ ] 直属 coding child、递归 leaf 与所有可写内置角色的工具快照必须含
+  `write_file/edit_file/apply_patch`，并由同一 canonical 成员源驱动授权、写围栏、路径 gate 和进度投影；父级
+  显式缺少 `edit_file` 时后代不得扩权。`apply_patch` 未命中回显有界 expected lines 且不写文件，部署后真
+  TUI 需证明 worker 能实际调用 `edit_file`，不再因空格失配退回整文件覆盖循环。
 - [ ] child 完成事件在后台轮开始时只采样一次；采样后才创建的 DONE wake 保持 pending 并另开新轮。
   新鲜终态轮的自然回复不等待 root task status 充当第二验收器。
 - [ ] 单 Gateway 内后台车道按 `owner + durable thread_id` 隔离；同 thread 继续由 run claim

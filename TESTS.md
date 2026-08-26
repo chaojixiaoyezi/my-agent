@@ -151,6 +151,31 @@ python3 -m pytest agent_py_agent/tests/test_orchestration_tools.py -q --tb=short
 模块范围，同时保留 `output_files` 不是完整写集、权限或机器锁。部署后须在同一长 TUI 的新复刻阶段观察
 模型实际生成的 items，不得由测试者人工改写被测派工。
 
+## 2026-08-25 子代理必须实际拿到局部编辑工具
+
+真实失败基线来自 `.7` 唯一 Gateway 的 `ma-97468f3-longchain-r27`：首个 Click→TypeScript worker 已收到
+局部修改提示，但真实工具列表没有 `edit_file`；一次只差两个前导空格的 `apply_patch` 失败后，它反复整文件
+重写并制造重复声明。回归覆盖直属/递归/角色三条工具快照、父级显式缩窄负例、授权/写围栏/风险分类，
+以及 会话运行时 式有界 expected-lines 失败反馈：
+
+```bash
+python3 -m pytest -q --tb=short \
+  agent_py_agent/tests/test_tooling_filesystem_write.py \
+  agent_py_agent/tests/test_tool_failure_error_code_semantics.py \
+  agent_py_agent/tests/test_orchestration_tool_constants.py \
+  agent_py_agent/tests/test_subagent_role_templates.py \
+  agent_py_agent/tests/test_subagent_role_contracts.py \
+  agent_py_agent/tests/test_subagent_hierarchy_scheduler.py \
+  agent_py_agent/tests/test_subagent_model_normalizers.py \
+  agent_py_agent/tests/test_capability_auto_grant.py \
+  agent_py_agent/tests/test_orchestration_write_guard.py \
+  agent_py_agent/tests/test_capabilities.py
+```
+
+当前结果：11 个文件共 188 passed；`test_write_boundary.py` 直接确保 canonical 成员集含
+`edit_file`。当前长任务仍使用旧部署，不能用它冒充修复后通过；须等安全点部署后由新 child 的真实工具账
+证明 `edit_file` 可见且补丁失配不再诱发整文件覆盖循环。
+
 ## 2026-08-25 父级 lifecycle mailbox 不得被兄弟 child 消费
 
 真实失败序列不是“7 个 child 一次性全部结束”，而是 child 逐个结束时，其余 task-local child 仍在模型轮中。

@@ -24,6 +24,7 @@
     "web_search",
     "web_fetch",
     "write_file",
+    "edit_file",
     "apply_patch",
     "capability_request"
   ],

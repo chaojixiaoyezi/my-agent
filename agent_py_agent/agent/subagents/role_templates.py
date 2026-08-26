@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.value_parsing import StringListOptions, string_list
+from ..tooling.write_boundary import WRITE_TOOL_ORDER
 
 _ROLE_TEMPLATE_LIST_OPTIONS = StringListOptions(split_commas=True)
 ROLE_TEMPLATE_ATTRIBUTE_KEY = "role_template"
@@ -16,8 +17,11 @@ WEB_TOOLS = ["web_search", "web_fetch"]
 READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
 WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact", *WEB_TOOLS]
 ARTIFACT_BUILDER_TOOLS: list[str] = []
-WORKER_WRITE_TOOLS = ["write_file", "apply_patch"]
-REPORT_WRITE_TOOLS = ["write_file", "apply_patch"]
+# LLM: Writable role defaults consume the canonical file-mutation order; role
+# templates may narrow this list but must not silently omit an available editor.
+# 常量用途: 给执行和报告类角色提供统一、有序的默认文件写工具。
+WORKER_WRITE_TOOLS = list(WRITE_TOOL_ORDER)
+REPORT_WRITE_TOOLS = list(WRITE_TOOL_ORDER)
 SHELL_TOOL = "run_command"
 PROCESS_SESSION_TOOL = "process_session"
 SHELL_SESSION_TOOLS = (SHELL_TOOL, PROCESS_SESSION_TOOL)

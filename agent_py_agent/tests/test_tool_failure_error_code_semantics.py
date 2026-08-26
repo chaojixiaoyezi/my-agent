@@ -181,6 +181,9 @@ def test_apply_patch_context_mismatch_is_invalid_arguments(tmp_path: Path):
     r = tool.execute({"patch": patch})
     assert r.ok is False
     assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
+    assert "totally different" in r.output
+    assert "包含空格与缩进" in r.output
+    assert "edit_file" in r.output
 
 
 # ============================================================================

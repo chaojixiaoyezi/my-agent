@@ -338,6 +338,11 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - 角色默认、显式 grant、历史快照与递归继承在进入模型工具面前共用
   `active_model_subagent_tools`；它删除已退休的查树/手动调度工具并保持顺序去重。显式
   `allowed_tools=[]` 保持为空，只有缺省值 `None` 才从角色模板派生候选工具。
+- 文件变更工具不再由各层分别手写：`tooling/write_boundary.py` 的
+  `WRITE_TOOL_ORDER=(write_file, edit_file, apply_patch)` 与对应不可变成员集是直属 coding child、递归 leaf、
+  角色模板、capability grant、写围栏和进度投影的唯一来源。继承仍先与父级当前工具集合求交，因此父级
+  显式缺少 `edit_file` 时 child 不得补回。`apply_patch` 未命中继续严格失败，只额外返回有界 expected lines；
+  一处或少数片段由模型改用空白容错 `edit_file`，宿主不自动改写文件。
 - task-local child 虽保存父 conversation/task id 作为结构化 lineage，但工具准入读取其既有
   `context_scope=task_local`，不进入主 conversation execution lane 的防双执行判断。
 - 这条链复用现有 role/template/scheduler，没有新增研究型、编码型、测试型等底层 Agent 分类，
@@ -552,7 +557,8 @@ SimpleAgent orchestration tool
   也不再把旧层级别名静默映射成当前模板。
 - role snapshot 除能力标量外还冻结 `name_zh/prompt_zh`。普通 leaf runner 只把当前角色提示作为软行为条款
   注入；coordinator 继续使用完整角色索引。旧 snapshot 缺提示时只按 exact role id 回落内置模板，不能从
-  goal 或展示名猜角色。worker 的共享目录/局部 patch 纪律不产生目录锁、写权限或完成判定。
+  goal 或展示名猜角色。worker 的共享目录/局部编辑纪律不产生目录锁、写权限或完成判定；小范围修改优先
+  `edit_file`、关联多文件修改使用 `apply_patch` 只是模型选择提示，真实准入仍由结构化工具快照与写边界决定。
 - 层级继承状态写在 `attributes.inherited_parent_context`；`goal` 只承载给模型阅读的任务说明和
   父级边界摘要，不承担机器状态判断。
 

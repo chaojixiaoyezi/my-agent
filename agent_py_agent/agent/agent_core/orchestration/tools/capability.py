@@ -38,6 +38,7 @@ from ....tooling.models import (
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
+from ....tooling.write_boundary import WRITE_TOOL_ORDER
 from ...runner.context import current_subagent_run_id
 from ..create_policy import _current_run_id
 from ..tool_specs import build_resolve_capability_requests_model_spec
@@ -45,7 +46,7 @@ from ..tool_specs import build_resolve_capability_requests_model_spec
 if TYPE_CHECKING:
     from ....core import SimpleAgent
 
-_FILESYSTEM_WRITE_TOOLS = ("write_file", "apply_patch")
+_FILESYSTEM_WRITE_TOOLS = WRITE_TOOL_ORDER
 _CAPABILITY_DECISIONS = {"grant", "deny"}
 
 

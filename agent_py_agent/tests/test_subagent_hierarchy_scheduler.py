@@ -230,6 +230,7 @@ def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(t
             "read_file",
             "read_artifact",
             "write_file",
+            "edit_file",
             "apply_patch",
         ],
         extra_write_roots=[str(deliverables)],
@@ -254,6 +255,7 @@ def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(t
     assert "write_file" in leaf.allowed_tools
     assert "read_artifact" in leaf.allowed_tools
     assert "apply_patch" in leaf.allowed_tools
+    assert "edit_file" in leaf.allowed_tools
     assert "create_subagents" not in leaf.allowed_tools
     assert "send_guidance" not in leaf.allowed_tools
     assert "cancel_subagents" not in leaf.allowed_tools
@@ -301,6 +303,7 @@ def test_hierarchy_schedule_filters_unknown_write_alias_and_uses_parent_capabili
     assert "write_file" in leaf.allowed_tools
     assert "read_artifact" in leaf.allowed_tools
     assert "apply_patch" in leaf.allowed_tools
+    assert "edit_file" not in leaf.allowed_tools
 
 
 def test_hierarchy_schedule_carries_parent_context_to_child_thought(tmp_path):

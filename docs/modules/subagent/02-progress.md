@@ -45,6 +45,18 @@
   focused 35 项通过并随 `85433d4` 部署。r28 状态文件和 child TUI 已证明当前 worker 提示真实注入；该批
   后续冲突来自父级主动声明的祖先范围，已转入上方第二层结构化预检候选。
 
+## 2026-08-25 Leaf 局部编辑工具与补丁失配反馈（本地候选）
+
+- r31 首个 TypeScript worker 已看到共享工作区/局部修改纪律，但它的真实 `allowed_tools` 只有
+  `write_file/apply_patch`；仓库现成的 `edit_file` 没进入直属 child、递归 leaf 或内置角色快照。补丁期望行
+  比真实文件多两个空格时，旧错误只说“上下文未命中”，模型随后重写 `core.ts` 并产生重复定义。
+- 对照 会话运行时 `会话运行时-rs/apply-patch/src/lib.rs` 的 expected-lines 失败信息，当前 `apply_patch` 保持严格匹配，
+  但回显有界期望行和空格/缩进提示；少量局部替换优先交给已有三级空白容错且要求唯一命中的
+  `edit_file`，而不是放宽 patch 或宿主自动猜改法。
+- `WRITE_TOOL_ORDER/WRITE_TOOL_NAMES` 成为文件写能力唯一成员源，直属 coding child、递归角色、能力授权、
+  写边界、路径 gate 与进度投影同步消费。父级显式去掉 `edit_file` 的负向继承仍通过，证明没有隐式扩权。
+  11 个相关测试文件共 188 项通过；当前 r31 仍运行在旧 Gateway，只作为失败基线，部署后新 child 才算验收。
+
 ## 2026-08-25 并行编码写入范围软纪律（本地候选）
 
 - 同一长 TUI 的 Click→Go 复刻中，至少 3 名 child 同时改旧目录的 `internal/param`，并明确报告兄弟修改持续

@@ -89,3 +89,19 @@ def test_external_write_guard_blocks_configured_dangerous_targets(tmp_path):
     )
 
     assert "危险目录" in result
+
+
+def test_external_write_guard_treats_edit_file_as_a_write_capability(tmp_path):
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace_root = tmp_path
+    mock_agent.subagents.workspace_roots = [tmp_path]
+    mock_agent.config.path_access_mode = "normal"
+    mock_agent.config.path_dangerous_roots = [str(tmp_path / "danger")]
+
+    result = _write_target_error(
+        mock_agent,
+        ["edit_file"],
+        {"output_refs": [str(tmp_path / "danger" / "settings.py")]},
+    )
+
+    assert "危险目录" in result

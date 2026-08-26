@@ -182,6 +182,7 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         "web_search",
         "web_fetch",
         "write_file",
+        "edit_file",
         "apply_patch",
         "capability_request",
     ]
@@ -203,6 +204,7 @@ def test_worker_template_supplies_default_write_tools(tmp_path):
 
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
+    assert "edit_file" in task.allowed_tools
     assert "apply_patch" in task.allowed_tools
 
 
@@ -306,7 +308,7 @@ def test_all_builtin_role_contracts_are_applied_on_create_run(tmp_path):
         assert task.allowed_tools[:len(template.default_tools)] == list(template.default_tools)
         assert task.acceptance_checks == []
         assert task.attributes["role_template"]["prompt_zh"] == template.prompt_zh
-        for tool_name in ["write_file", "apply_patch", "apply_patch"]:
+        for tool_name in ["write_file", "edit_file", "apply_patch"]:
             assert tool_name in task.allowed_tools
         assert ("create_subagents" in task.allowed_tools) is template.can_spawn_children
 

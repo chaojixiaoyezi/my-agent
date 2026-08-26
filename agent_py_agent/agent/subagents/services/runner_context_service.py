@@ -13,6 +13,7 @@ from ...common.audit_activation import (
 )
 from ...common.value_parsing import text_or_sequence_strings
 from ...model_visible_refs import clean_path_contract_refs, is_non_model_visible_locator_root
+from ...tooling.write_boundary import WRITE_TOOL_NAMES
 from ..context_bundle_refs import workspace_refs
 from ..controlled_exec_gateway import controlled_exec_grant_refs
 from ..manager_collaboration_context import collaboration_context_payload
@@ -330,7 +331,10 @@ def _task_text_field(task: object, name: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-_FILESYSTEM_WRITE_GRANT_TOOLS = {"write_file", "apply_patch"}
+# LLM: Execution context write roots are exposed whenever any canonical file
+# mutation tool is granted; omitting an editor here would create a false grant.
+# 常量用途: 判断当前子代理是否拥有文件写能力，从而生成对应的结构化写入边界。
+_FILESYSTEM_WRITE_GRANT_TOOLS = WRITE_TOOL_NAMES
 
 
 def _granted_filesystem_write_roots(task: object) -> list[str]:

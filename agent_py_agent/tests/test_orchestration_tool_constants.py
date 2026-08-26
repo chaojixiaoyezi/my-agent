@@ -23,7 +23,7 @@ def test_coding_subagent_tools_defaults_to_leaf_execution_tools():
     from agent_py_agent.agent.agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS
 
     assert "write_file" in CODING_SUBAGENT_TOOLS
-    assert "apply_patch" in CODING_SUBAGENT_TOOLS
+    assert "edit_file" in CODING_SUBAGENT_TOOLS
     assert "apply_patch" in CODING_SUBAGENT_TOOLS
     assert "read_file" in CODING_SUBAGENT_TOOLS
     assert "list_files" in CODING_SUBAGENT_TOOLS

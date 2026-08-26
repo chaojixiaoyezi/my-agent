@@ -295,3 +295,12 @@ class TestRouterMutationCoverage:
 
         # With candidate_limit=2, should return at most 2
         assert len(hits) <= 2, f"Expected max 2 candidates with limit=2, got {len(hits)}"
+
+    def test_edit_file_is_classified_as_filesystem_write(self):
+        from agent_py_agent.agent.capability.router import classify_tool_model_risk
+        from agent_py_agent.agent.tooling._filesystem_edit import EditFileTool
+
+        capabilities, risk = classify_tool_model_risk(EditFileTool.model_spec)
+
+        assert capabilities == ["filesystem_write"]
+        assert risk == "high"

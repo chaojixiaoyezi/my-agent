@@ -6,9 +6,13 @@ from ..model_visible_refs import (
     current_model_ref,
     is_non_model_visible_locator_root,
 )
+from ..tooling.write_boundary import WRITE_TOOL_NAMES
 from .models import SubAgentTask
 
-_FILESYSTEM_WRITE_GRANT_TOOLS = {"write_file", "apply_patch"}
+# LLM: The prompt write contract may describe only tools classified by the
+# canonical write boundary; it must not maintain a smaller parallel list.
+# 常量用途: 识别哪些授权会让子代理看到文件写入合同与允许写目录。
+_FILESYSTEM_WRITE_GRANT_TOOLS = WRITE_TOOL_NAMES
 
 
 def build_write_contract(task: SubAgentTask) -> dict[str, object]:

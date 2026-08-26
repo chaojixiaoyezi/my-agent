@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..tooling.write_boundary import WRITE_TOOL_NAMES, WRITE_TOOL_ORDER
 from .capability_scope import (
     _delete_only_request,
     grant_command_allowlist,
@@ -28,9 +29,12 @@ from .services.lifecycle import RecordCapabilityGrantParams
 
 # 常规内置工具:读/写/跑命令,全部只作用于文件系统围栏内,由 owner 墙 + 沙箱兜底。
 ROUTINE_GRANT_TOOLS = frozenset(
-    {"run_command", "write_file", "apply_patch", "edit_file", "read_file", "list_files", "search_text", "search"}
+    {"run_command", *WRITE_TOOL_NAMES, "read_file", "list_files", "search_text", "search"}
 )
-_WRITE_TOOLS = ("write_file", "apply_patch")
+# LLM: Routine write grants must reuse the canonical ordered mutation tools so
+# child snapshots never receive a different editor set from the write boundary.
+# 常量用途: 规定自动授权时文件写工具的稳定顺序，并和执行围栏保持同一成员集合。
+_WRITE_TOOLS = WRITE_TOOL_ORDER
 _SHELL_HINTS = frozenset({"shell", "controlled_exec"})
 _NON_ROUTINE_CAPABILITY_TYPES = frozenset({"mcp", "network", "skill"})
 

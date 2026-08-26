@@ -9,6 +9,7 @@ from urllib.parse import unquote, urlparse
 
 from ...common.value_parsing import text_value as _text
 from ...path_access_policy import PathAccessPolicy
+from ...tooling.write_boundary import WRITE_TOOL_NAMES
 from .command_policy import evaluate_command_policy
 from .models import GateDecision, GateFinding
 
@@ -112,6 +113,9 @@ def _collect_command_findings(
         findings.extend(_command_findings(str(key), value, allow_shell_operators, allowed_commands))
 
 
+# LLM: Canonical filesystem mutation tools share the same symlink/write-boundary
+# exception here; adding an editor must not accidentally route it as a read tool.
+# 函数用途: 检查一个路径参数是否越界或穿过符号链接，并统一识别所有正式文件写工具。
 def _path_finding(request: PathFindingRequest) -> GateFinding | None:
     text = _text(request.raw_path)
     if not text:
@@ -144,7 +148,7 @@ def _path_finding(request: PathFindingRequest) -> GateFinding | None:
                 "dangerous_root": decision.dangerous_root,
             })
     if (
-        request.tool_name not in {"write_file", "apply_patch"}
+        request.tool_name not in WRITE_TOOL_NAMES
         and not _under_any_root(resolved, request.roots)
         and _lexically_under_any_root(candidate, request.roots)
     ):

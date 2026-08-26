@@ -53,7 +53,7 @@ session 先补齐这次调研，再连续做两个小追加和多子代理复刻
 
 ### Leaf 角色行为与共享工作区修改纪律
 
-状态：`85433d4` 已严格 gate、推送并部署；r28 真实 child 已验证角色提示注入，继续观察跨批职责行为
+状态：`85433d4` 第一层已部署；r31 暴露工具缺口，第二层本地 focused 通过，待当前长任务安全点部署
 
 解决问题：Click→Go 复刻的 worker-2 被分配 examples，却扩到 `internal/core`、覆盖兄弟文件，并在局部补丁
 失败后用 `head/write_file/mv/heredoc` 整文件重写。对照 会话运行时 `core/src/agent/role.rs` 后确认，本项目 leaf
@@ -61,6 +61,10 @@ runner 把当前 role `prompt_zh` 直接丢弃，worker 实际从未看到共享
 
 当前进展：创建 snapshot 新增当前角色名称/提示，leaf 只注入自己一份；worker 内置规则明确独占分工、
 不覆盖兄弟和局部补丁重试。自然语言仍只是软纪律，不增加目录锁、diff 机器验收或 Click 专项分支。
+真实 r31 进一步证明提示已经到达，但 child 的工具快照没有既有 `edit_file`，而 `apply_patch` 未命中只返回
+路径，模型仍会退回整文件重写。当前第二层把文件写工具收为唯一 canonical 顺序/集合，贯穿直属与递归
+child、角色、授权和写围栏；会话运行时 式补丁错误有界回显 exact expected lines，小改优先走空白容错
+`edit_file`。显式父级工具上界继续只减不增；11 个文件共 188 项定向回归通过，真 TUI 需部署后另取新 child 验收。
 
 ### heredoc 正文不能冒充后台 shell 操作符
 

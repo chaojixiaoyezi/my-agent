@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from ....tooling.write_boundary import WRITE_TOOL_ORDER
 from ...role_templates import (
     COORDINATOR_TOOLS,
     DIRECT_CHILD_CONTROL_TOOLS,
@@ -13,6 +14,9 @@ from ...role_templates import (
     role_template_snapshot_for_role,
 )
 
+# LLM: Recursive leaf defaults share the canonical write-tool order with direct
+# children; scheduled_child_tools still intersects them with the parent's cap.
+# 常量用途: 定义递归编码子代理的缺省工具候选，实际授权仍不得超过父级工具上界。
 _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
     "read_file",
@@ -20,8 +24,7 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "read_artifact",
     "web_search",
     "web_fetch",
-    "write_file",
-    "apply_patch",
+    *WRITE_TOOL_ORDER,
     "capability_request",
 ]
 
