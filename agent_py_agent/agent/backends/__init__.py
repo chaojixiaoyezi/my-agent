@@ -14,6 +14,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "HttpBackend": ("base", "HttpBackend"),
     "ModelResponse": ("base", "ModelResponse"),
     "OpenAICompatibleBackend": ("base", "OpenAICompatibleBackend"),
+    "ProviderRequestOptions": ("base", "ProviderRequestOptions"),
     "get_backend": ("base", "get_backend"),
     "ProviderContextWindowError": ("errors", "ProviderContextWindowError"),
     "ProviderQuotaExhaustedError": ("errors", "ProviderQuotaExhaustedError"),

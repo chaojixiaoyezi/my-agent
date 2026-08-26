@@ -109,9 +109,12 @@ class BackendOptions:
     prompt_cache_enabled: bool = True
 
 
+# LLM: OpenAI 请求对象把 system 与 user 面分开保存；任何适配器都不得靠标题文本重新猜角色。
+# 类用途: 汇总一次 OpenAI-compatible 调用的高优先级规则、用户输入、工具和输出格式选项。
 @dataclass(frozen=True)
 class _OpenAIGenerateRequest:
     prompt: str
+    system_instruction: str = ""
     on_chunk: Callable[[str], None] | None = None
     tools: list[dict[str, Any]] | None = None
     tool_choice: ToolChoice | None = None
@@ -121,11 +124,21 @@ class _OpenAIGenerateRequest:
     max_output_tokens: int | None = None
 
 
+# LLM: 供应商级请求控制集中在 typed options；新增高优先级规则或协议开关时不能继续扩张 generate 参数列表。
+# 类用途: 携带一次模型请求的宿主 system 指令和供应商思考开关，不混入用户正文或工具历史。
+@dataclass(frozen=True)
+class ProviderRequestOptions:
+    system_instruction: str = ""
+    thinking_disabled: bool = False
+
+
 # 原生工具能力探针的最大尝试次数(弱模型偶发无视强制 tool_choice 回散文,
 # 单发误判"不支持 native"; 有界重试后仍无结构化调用才判不支持)。
 _PROBE_MAX_ATTEMPTS = 3
 
 
+# LLM: 后端 capability flag 决定上层能否传真实 system instruction；未声明支持的旧实现保持原关键字形态。
+# 类用途: 定义所有模型后端共用接口，并明确哪些供应商适配器能承载高优先级宿主规则。
 class BaseBackend:
     """所有后端适配器都要实现的基类接口。"""
 
@@ -133,6 +146,10 @@ class BaseBackend:
     # 只有确实能从 provider 流中取得结构化工具参数 delta 的后端才开启；
     # 上层据此避免给第三方/fake backend 传入未知关键字。
     supports_tool_input_progress = False
+    # 只有把宿主规则送进供应商真实 system/developer 通道的后端才能开启；上层据此避免给旧 fake 传新参数。
+    supports_system_instructions = False
+    # 只有理解 ProviderRequestOptions 的后端才能开启；旧 fake 不接收新请求控制对象。
+    supports_provider_request_options = False
 
     def provider_context_window_tokens(self) -> int:
         """Return provider-advertised context capacity, or zero when unavailable."""
@@ -151,9 +168,9 @@ class BaseBackend:
             observed_at=_utc_now_iso(),
         )
 
-    # LLM: Base signature 只声明可选 observer 合同；具体 backend 未显式声明
-    # capability 时，上层不得传入 tool-input callback。
-    # 函数用途: 定义所有模型后端共用的生成入口与可选流式观察器。
+    # LLM: Base signature 用 typed request options 承载供应商控制；具体 backend 未显式声明 capability 时，
+    # 上层不得传入该对象或可选 tool-input callback。
+    # 函数用途: 定义所有模型后端共用的生成入口、高优先级宿主规则和可选流式观察器。
     def generate(
         self,
         prompt: str,
@@ -163,8 +180,13 @@ class BaseBackend:
         messages: list[dict[str, Any]] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
         on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
+        request_options: ProviderRequestOptions | None = None,
     ) -> ModelResponse:
         """Generate one assistant response for the supplied prompt.
+
+        ``request_options.system_instruction`` carries stable host guidance in
+        the provider's real high-priority instruction channel. It must not be
+        folded into the user prompt by an HTTP backend that declares support.
 
         ``tools`` carries the run-fixed provider schema for native tool use.
         A backend without the selected native capability must fail closed;
@@ -173,7 +195,8 @@ class BaseBackend:
         ``messages`` carries a provider-native structured conversation (native
         tool_use IR translated to Anthropic ``messages``). When supplied it
         replaces the single ``{"role":"user","content":prompt}`` turn; ``prompt``
-        still feeds the system/task instructions. Text-protocol callers omit it.
+        remains the original user turn while the system instruction stays separate.
+        Text-protocol callers omit it.
 
         ``on_tool_input_progress`` is an optional display observer for backends
         that explicitly declare support; it never receives tool arguments.
@@ -228,6 +251,8 @@ class EchoBackend(BaseBackend):
             observed_at=_utc_now_iso(),
         )
 
+    # LLM: Echo 不执行真实 provider role 映射；新增参数只为保持公开接口兼容，不能假装完成 system 验证。
+    # 函数用途: 用确定性本地回复支撑测试，并安全忽略真实模型才会消费的 system/tool 参数。
     def generate(
         self,
         prompt: str,
@@ -236,8 +261,9 @@ class EchoBackend(BaseBackend):
         tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
+        request_options: ProviderRequestOptions | None = None,
     ) -> ModelResponse:
-        del tools, tool_choice, messages, on_thinking_delta  # echo backend never speaks native tool_use
+        del request_options, tools, tool_choice, messages, on_thinking_delta
         lines = [line.strip() for line in prompt.splitlines() if line.strip()]
         if "# User Task" in prompt:
             task = prompt.split("# User Task", 1)[-1]
@@ -259,8 +285,13 @@ class EchoBackend(BaseBackend):
         return ModelResponse(text=text, backend=self.name)
 
 
+# LLM: 所有内置 HTTP backend 都必须把 system_instruction 映射到供应商真实高优先级字段，而非拼回 user prompt。
+# 类用途: 共享真实模型 HTTP、能力探针、连接和 metadata 逻辑，并声明支持独立 system 指令。
 class HttpBackend(BaseBackend):
     """真实模型后端共用的 HTTP 请求基础逻辑。"""
+
+    supports_system_instructions = True
+    supports_provider_request_options = True
 
     def __init__(
         self,
@@ -349,7 +380,7 @@ class HttpBackend(BaseBackend):
                     ),
                     tools=[probe_tool],
                     tool_choice=ToolChoice.specific("my_agent_capability_probe"),
-                    thinking_disabled=True,
+                    request_options=ProviderRequestOptions(thinking_disabled=True),
                 )
             except (ProviderRecoverableError, ProviderConfigurationError):
                 # EXEC-41b: provider 侧失败(429 额度/限流/超时/连接)不是"不支持
@@ -462,6 +493,8 @@ class OpenAICompatibleBackend(HttpBackend):
     def _tool_endpoint(self) -> str:
         return self.api_base + "/chat/completions"
 
+    # LLM: OpenAI-compatible 传输必须保持 system -> 初始 user -> 原生工具历史的固定顺序。
+    # 函数用途: 调用 chat/completions，并把宿主规则放入真正的 role=system 消息。
     def generate(
         self,
         prompt: str,
@@ -469,11 +502,14 @@ class OpenAICompatibleBackend(HttpBackend):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
+        request_options: ProviderRequestOptions | None = None,
     ) -> ModelResponse:
         """Call the OpenAI-compatible chat completion endpoint."""
+        provider_options = request_options or ProviderRequestOptions()
         return self._generate(
             _OpenAIGenerateRequest(
                 prompt=prompt,
+                system_instruction=provider_options.system_instruction,
                 on_chunk=on_chunk,
                 tools=tools,
                 tool_choice=tool_choice,
@@ -516,19 +552,26 @@ class OpenAICompatibleBackend(HttpBackend):
             )
         )
 
+    # LLM: payload 角色由 typed request 字段决定；prompt 标题和模型正文都不能提升成 system。
+    # 函数用途: 组装一次 OpenAI-compatible 请求并选择流式或非流式解析。
     def _generate(self, request: _OpenAIGenerateRequest) -> ModelResponse:
         payload = {
             "model": self.model_name,
             "max_tokens": _bounded_output_tokens(self.max_tokens, request.max_output_tokens),
             "temperature": self.temperature,
         }
-        if request.messages:
+        if request.messages is not None:
             payload["messages"] = _openai_messages_from_native(
                 request.messages,
                 initial_user_prompt=request.prompt,
+                system_instruction=request.system_instruction,
             )
         else:
-            payload["messages"] = [{"role": "user", "content": request.prompt}]
+            payload["messages"] = _openai_messages_from_native(
+                [],
+                initial_user_prompt=request.prompt,
+                system_instruction=request.system_instruction,
+            )
         tools = _tools_for_choice(request.tools, request.tool_choice)
         if tools:
             from .tool_protocol_adapter import openai_tool_choice
@@ -662,16 +705,20 @@ def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any
     return translated
 
 
+# LLM: system 必须始终位于首条消息，初始 user prompt 必须恰好一次且先于 assistant/tool 历史。
+# 函数用途: 把统一原生消息转换成 OpenAI 顺序，同时保持空 prompt 和空历史的合法形态。
 def _openai_messages_from_native(
     messages: list[dict[str, Any]],
     *,
     initial_user_prompt: str,
+    system_instruction: str = "",
 ) -> list[dict[str, Any]]:
     """Translate IR while preserving the first-turn user message across tool rounds."""
 
     translated: list[dict[str, Any]] = []
-    if initial_user_prompt:
-        translated.append({"role": "user", "content": initial_user_prompt})
+    if system_instruction:
+        translated.append({"role": "system", "content": system_instruction})
+    translated.append({"role": "user", "content": initial_user_prompt})
     for message in messages:
         translated.extend(_openai_message_from_native(message))
     return translated
@@ -802,9 +849,9 @@ class AnthropicCompatibleBackend(HttpBackend):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
-        thinking_disabled: bool = False,
         on_thinking_delta: Callable[[str], None] | None = None,
         on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
+        request_options: ProviderRequestOptions | None = None,
     ) -> ModelResponse:
         """Call the Anthropic-compatible messages endpoint.
 
@@ -812,15 +859,18 @@ class AnthropicCompatibleBackend(HttpBackend):
         native 协议（``messages`` 非空）：保留第一轮真实发送的 ``user=prompt``，再接结构化
         IR 翻出的 assistant(tool_use)/user(tool_result) 序列。不能把同一 prompt 在续轮改成
         system；否则历史失去原始 user turn，严格 OpenAI chat template 会拒绝工具结果续轮。
+        独立 ``request_options.system_instruction`` 始终走 Anthropic 顶层 system 字段，不改变上述 user 历史。
         工具参数 callback 只接收 parser 生成的累计字符计数，不参与 tool_use 解析或执行。
         """
+        provider_options = request_options or ProviderRequestOptions()
         return self._generate_request(
             prompt,
+            system_instruction=provider_options.system_instruction,
             on_chunk=on_chunk,
             tools=tools,
             tool_choice=tool_choice,
             messages=messages,
-            thinking_disabled=thinking_disabled,
+            thinking_disabled=provider_options.thinking_disabled,
             on_thinking_delta=on_thinking_delta,
             on_tool_input_progress=on_tool_input_progress,
         )
@@ -903,6 +953,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         self,
         prompt: str,
         *,
+        system_instruction: str = "",
         on_chunk: Callable[[str], None] | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: ToolChoice | None = None,
@@ -922,6 +973,8 @@ class AnthropicCompatibleBackend(HttpBackend):
             ),
             "temperature": self.temperature if temperature is None else float(temperature),
         }
+        if system_instruction:
+            payload["system"] = system_instruction
         if thinking_disabled:
             # LLM: 兼容 Anthropic 官方 thinking 参数；不识别该字段的端点(如 MiniMax)静默忽略。
             payload["thinking"] = {"type": "disabled"}

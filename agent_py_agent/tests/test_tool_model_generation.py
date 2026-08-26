@@ -789,18 +789,19 @@ def test_forced_tool_choice_turn_disables_thinking_for_provider_compat():
         ToolChoice.none("open_required_action_has_no_provider_tool"),
     ):
         backend = _KwargRecordingBackend()
+        backend.supports_provider_request_options = True
         _do_generate_with_tool_choice(backend, choice)
-        assert backend.seen[-1]["thinking_disabled"] is True
+        assert backend.seen[-1]["request_options"].thinking_disabled is True
         assert backend.seen[-1]["tool_choice"] is choice
 
 
 def test_auto_tool_choice_turn_keeps_original_request_shape():
-    """auto 轮保持原请求形态,不传 thinking_disabled(对不识别该字段的端点零影响)。"""
+    """旧 fake 的 auto 轮不接收 provider options，保持原请求形态。"""
     from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
 
     backend = _KwargRecordingBackend()
     _do_generate_with_tool_choice(backend, ToolChoice.auto("ordinary_tool_turn"))
-    assert "thinking_disabled" not in backend.seen[-1]
+    assert "request_options" not in backend.seen[-1]
 
 
 def test_isolated_presentation_turn_does_not_stream_thinking_delta():
@@ -856,3 +857,32 @@ def test_native_tool_turn_passes_tool_input_progress_only_to_capable_backend():
     ordinary = _KwargRecordingBackend()
     _do_backend_generate(ordinary, "prompt", state)
     assert "on_tool_input_progress" not in ordinary.seen[-1]
+
+
+def test_model_turn_passes_host_guidance_only_to_system_capable_backend():
+    from agent_py_agent.agent.agent_core.tool_model_generation import _do_backend_generate
+    from agent_py_agent.agent.model_guidance import VERIFICATION_EVIDENCE_BOUNDARY
+
+    class SystemCapableBackend(_KwargRecordingBackend):
+        supports_system_instructions = True
+        supports_provider_request_options = True
+
+    state = SimpleNamespace(
+        tools=[],
+        tool_choice=None,
+        messages=[],
+        on_chunk=None,
+        params=SimpleNamespace(context_scope="shared", effective_on_chunk=None),
+        system_instruction=VERIFICATION_EVIDENCE_BOUNDARY,
+    )
+
+    capable = SystemCapableBackend()
+    _do_backend_generate(capable, "user prompt", state)
+    assert (
+        capable.seen[-1]["request_options"].system_instruction
+        == VERIFICATION_EVIDENCE_BOUNDARY
+    )
+
+    legacy = _KwargRecordingBackend()
+    _do_backend_generate(legacy, "user prompt", state)
+    assert "request_options" not in legacy.seen[-1]

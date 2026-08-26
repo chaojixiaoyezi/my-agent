@@ -1,6 +1,6 @@
 # Verification：开发推进
 
-## 2026-08-26 主/子代理共用验证证据与动作授权边界（第三候选）
+## 2026-08-26 主/子代理共用验证证据与动作授权边界（第四候选）
 
 - r38 真实任务证明 canonical 工具事实没有丢：测试机本机服务监听 `0.0.0.0:8765` 且 localhost 200，开发机
   跨机连接被 firewalld 拒绝；问题是模型把局部证据外推成更大结论。明确纠正的普通中文 follow-up 仍复现，
@@ -11,10 +11,16 @@
   主代理和所有使用 `system_prompt_override` 的 child 都经过该入口，Compact 后续轮自然保留。
 - `4247582` 部署后的 `ma-evidence-r41-readonly` 已不再把本机结果写成跨机可达，但仍擅自启动服务；因此
   “证据表述”通过，“只读行动”失败，不能整体报通过。
-- 第三候选把授权正文收进 `model_guidance.py` 唯一事实源。完整 Prompt 继续在末尾注入；原生工具投影再按
-  canonical `ToolRuntimePolicy` 只为可能产生副作用的工具追加同一提示，纯只读说明、Schema、可用性和执行
-  gate 都不变。该规则不识别 HTTP、防火墙或项目类型，不解析完成正文，不写状态，也不恢复机器完成门。
-  provider/prompt 定向回归为 217 passed、7 个既有 xfail，严格 gate 与真机复验待办。
+- 第三候选 `4796cfb` 已通过本地 gate 并部署，但 `ma-evidence-r42-tool-auth` 仍在只读核对请求中调用
+  `run_command` 启动 HTTP 服务；canonical operation 为 succeeded，所以不是展示误判，必须记为真失败。
+- 代码对照定位到旧宿主规则虽名为 `# System`，实际仍塞进单条 `role=user`；终端交互 使用 Anthropic 顶层
+  system，会话运行时 使用独立 developer instructions。第四候选把 `model_guidance.py` 全量边界送进 provider
+  真实高优先级通道：OpenAI-compatible 为首条 system，Anthropic-compatible 为顶层 system；初始 user 和
+  native history 顺序不变。工具投影仍只给结构化 effect 可能有副作用的工具追加动作段，纯只读工具不变。
+  不支持 system 的旧 fake 不接收新关键字，context/Compact 也不虚算该段。该规则不识别 HTTP、防火墙或
+  项目类型，不解析完成正文，不写状态，也不恢复机器完成门；供应商控制由 typed request options 集中承载。
+  backend/prompt/root/child/native/context focused 共 366 项，结果为 359 passed、7 个既有 xfail，严格 gate 与
+  真机待办。
 
 ## 2026-08-25 后台续片不再丢失 succeeded operation
 

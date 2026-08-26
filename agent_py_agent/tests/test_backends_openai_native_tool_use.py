@@ -5,7 +5,11 @@ from dataclasses import replace
 
 import pytest
 
-from agent_py_agent.agent.backends.base import BackendOptions, OpenAICompatibleBackend
+from agent_py_agent.agent.backends.base import (
+    BackendOptions,
+    OpenAICompatibleBackend,
+    ProviderRequestOptions,
+)
 from agent_py_agent.agent.backends.errors import ProviderResponseError
 
 _OPTIONS = BackendOptions(
@@ -109,13 +113,44 @@ def test_openai_native_history_translates_tool_calls_and_results() -> None:
         return {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}
 
     backend.request_json = request_json
-    response = backend.generate("original user prompt", tools=_TOOLS, messages=messages)
+    response = backend.generate(
+        "original user prompt",
+        tools=_TOOLS,
+        messages=messages,
+        request_options=ProviderRequestOptions(
+            system_instruction="host authorization policy"
+        ),
+    )
 
     assert response.text == "done"
     sent = captured["payload"]["messages"]
-    assert sent[0] == {"role": "user", "content": "original user prompt"}
-    assert sent[1]["tool_calls"][0]["function"]["arguments"] == '{"path": "README.md"}'
-    assert sent[2] == {"role": "tool", "tool_call_id": "call_1", "content": "file contents"}
+    assert sent[0] == {"role": "system", "content": "host authorization policy"}
+    assert sent[1] == {"role": "user", "content": "original user prompt"}
+    assert sent[2]["tool_calls"][0]["function"]["arguments"] == '{"path": "README.md"}'
+    assert sent[3] == {"role": "tool", "tool_call_id": "call_1", "content": "file contents"}
+
+
+def test_openai_empty_native_history_keeps_system_before_original_user_prompt() -> None:
+    backend = OpenAICompatibleBackend(_OPTIONS)
+    captured = {}
+
+    def request_json(path, payload, headers):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}
+
+    backend.request_json = request_json
+    backend.generate(
+        "original user prompt",
+        messages=[],
+        request_options=ProviderRequestOptions(
+            system_instruction="host authorization policy"
+        ),
+    )
+
+    assert captured["payload"]["messages"] == [
+        {"role": "system", "content": "host authorization policy"},
+        {"role": "user", "content": "original user prompt"},
+    ]
 
 
 def test_openai_stream_accumulates_fragmented_native_tool_arguments() -> None:

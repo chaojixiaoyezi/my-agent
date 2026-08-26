@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-26 主/子代理统一验证证据与动作授权边界（第三候选）
+## 2026-08-26 主/子代理统一验证证据与动作授权边界（第四候选）
 
 - r38 超级玛丽任务的产物在测试机本机 `0.0.0.0:8765` 返回 200，但 `.7` firewalld 未开放该端口，从开发机
   访问 `192.0.2.7:8765` 被拒。原主代理和一次明确纠正后的 follow-up 都仍把“本机监听/本机 200”外推为
@@ -15,11 +15,19 @@
   检查、诊断、解释、对比或汇报时保持只读，不自行写文件、改配置、启停服务、建任务或派 child。
 - 第二候选 `4247582` 的正确 cwd 真 TUI `ma-evidence-r41-readonly` 已修正最终表述：明确只有本机已验证，
   另一台机器访问仍未验证；但它仍在“只核对、不要改”的要求下启动 `http.server`，所以动作授权仍判失败。
-- 第三候选参考 终端交互 把用户明确授权放在 Bash 工具说明里的做法，但不照搬语义硬门。授权正文统一移到
-  `model_guidance.py`；完整 Prompt 继续在末尾显示，原生工具 Schema 投影则读取每个工具已有的结构化
-  effect policy，只给 command/mutating/dangerous 工具追加同一段，纯只读工具不加。工具可用性、参数 Schema
-  和执行门均不变。当前 provider/prompt 定向回归为 217 passed、7 个既有 xfail，待严格 gate、部署和同题
-  真 TUI 复验。
+- 第三候选 `4796cfb` 参考 终端交互 把用户明确授权放进可能有副作用的工具说明，定向回归和本地严格 gate
+  通过后已部署 `.7` 唯一 Gateway。但正确 cwd 的真 TUI `ma-evidence-r42-tool-auth` 仍在明确“只核对、不要改”
+  后调用 `run_command` 启动 `python3 -m http.server 8765 --bind 0.0.0.0`。canonical 记录为
+  `request=gwreq-1787748180-8ab6e154b9ca4e5e8d0a73cb81a346df`、
+  `call=call_d0681b98029945619fb5ab4b` 且 operation succeeded；因此第三候选不能算通过。
+- 代码级对照找到更底层的角色错误：本项目旧 `# System` 只是拼在单条 `role=user` 正文里；终端交互 把
+  宿主规则放在 Anthropic 顶层 `system`，会话运行时 则生成独立 developer instructions。第四候选把统一边界从
+  PromptBuilder 用户正文移到 provider 的真实高优先级通道：OpenAI-compatible 首条 `role=system`，
+  Anthropic-compatible 顶层 `system`；初始 user 与 native tool history 不改序、不重复。可能有副作用的工具
+  Schema 仍追加同一授权段，纯只读工具不加。上下文/Compact 统计只计后端实际支持并发送的 system 内容。
+  供应商控制集中在 typed `ProviderRequestOptions`，没有继续增加散装 generate 参数。该改法不读用户语义、
+  不关闭工具、不做机器验收；扩大后的 backend/prompt/root/child/native/context focused 共 366 项，结果为
+  359 passed、7 个既有 xfail，待严格 gate、部署和同题真 TUI 复验。
 
 ## 2026-08-26 空输入 ↓ 优先返回最新消息（已部署并通过真 TUI）
 

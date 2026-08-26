@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 
 from ..capability.persona_repository import PersonaRepository, PersonaRepositoryError
 from ..common import agent_time
-from ..model_guidance import VERIFICATION_EVIDENCE_BOUNDARY
 from ..settings import AgentConfig
 from .memory_context import memory_context_text
 
@@ -178,8 +177,7 @@ class PromptBuilder:
             f"{_tools.tool_catalog_section or default_tools}\n\n"
             f"{_tools.tool_recommendations_section or default_recommendations}\n\n"
             f"{task_and_transcript}\n\n"
-            f"{_tools.execution_facts_section}\n\n"
-            f"# Verification Evidence Boundary\n{VERIFICATION_EVIDENCE_BOUNDARY}\n"
+            f"{_tools.execution_facts_section}\n"
         )
 
     def read_home_context(self, user_prompt: str) -> list[str]:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Stable model-facing guidance shared by prompts and native tool descriptions."""
+"""Stable host guidance shared by provider system channels and native tools."""
 
 # LLM: 这里是验证表述与动作授权软提示的唯一正文；它们不能参与宿主状态、权限或完成判断。
 # 模块用途: 让完整 Prompt 和可能改状态的原生工具共用同一套用户授权边界，避免两处文案逐渐打架。
@@ -24,8 +24,22 @@ VERIFICATION_EVIDENCE_BOUNDARY = (
     f"{VERIFICATION_EVIDENCE_GUIDANCE}{ACTION_AUTHORIZATION_GUIDANCE}"
 )
 
+
+# LLM: capability flag 是 system 指令是否真实进入 provider 请求的唯一裁决；旧 fake/第三方后端不能被假装支持。
+# 函数用途: 为模型调用和上下文统计返回实际会发送的宿主规则，不支持独立 system 通道时返回空串。
+def provider_system_instruction(backend: object) -> str:
+    supports_system = bool(getattr(backend, "supports_system_instructions", False))
+    supports_options = bool(
+        getattr(backend, "supports_provider_request_options", False)
+    )
+    if not (supports_system and supports_options):
+        return ""
+    return VERIFICATION_EVIDENCE_BOUNDARY
+
+
 __all__ = [
     "ACTION_AUTHORIZATION_GUIDANCE",
     "VERIFICATION_EVIDENCE_BOUNDARY",
     "VERIFICATION_EVIDENCE_GUIDANCE",
+    "provider_system_instruction",
 ]

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from ...backends import ModelResponse, is_provider_context_window_error
 from ...memory_archive import estimate_tokens
+from ...model_guidance import provider_system_instruction
 from ..native_tool_protocol import native_tool_use_active, resolve_native_tools
 from ..runtime.context_compactor import runtime_compact_policy
 
@@ -196,8 +197,13 @@ def _model_visible_context_components(
     params: object | None,
     prompt: str,
 ) -> tuple[str, int, dict[str, int]]:
+    system_instruction = provider_system_instruction(getattr(agent, "backend", None))
     if not native_tool_use_active(params):
-        current = estimate_tokens(str(prompt or ""))
+        prompt_surface = {
+            "system_instruction": system_instruction,
+            "user_prompt": str(prompt or ""),
+        }
+        current = estimate_tokens(prompt_surface)
         return (
             "text",
             current,
@@ -230,6 +236,7 @@ def _model_visible_context_components(
     )
     tools = resolve_native_tools(agent, params) or []
     payload = {
+        "system_instruction": system_instruction,
         "initial_user_prompt": str(prompt or ""),
         "messages": messages,
         "pending_runtime_guidance": guidance,
@@ -239,7 +246,13 @@ def _model_visible_context_components(
     components = _normalize_context_component_tokens(
         current,
         (
-            ("prompt_tokens", str(prompt or "")),
+            (
+                "prompt_tokens",
+                {
+                    "system_instruction": system_instruction,
+                    "user_prompt": str(prompt or ""),
+                },
+            ),
             ("messages_tokens", messages),
             ("runtime_guidance_tokens", guidance),
             ("tool_schema_tokens", tools),

@@ -1,21 +1,19 @@
 # TESTS
 
-## 2026-08-26 模型验证结论不能越过实际观察边界
+## 2026-08-26 模型验证结论与动作不能越过实际边界
 
 真实反例：测试机本机 HTTP 200、监听所有接口，但开发机跨机连接被 firewalld 拒绝；MiniMax-M2.7 在原任务
-和明确纠正 follow-up 中都误报“局域网能用”。回归不模拟 HTTP/防火墙语义，只证明所有 root/delegated
-Prompt 都恰好在完整输入末尾收到一份通用证据边界，使用独立 `system_prompt_override` 也不能绕过：
+和明确纠正 follow-up 中都误报“局域网能用”。第三候选虽在可能有副作用的工具说明里加入同一授权段，
+真 TUI `ma-evidence-r42-tool-auth` 仍擅自启动 HTTP 服务。回归不模拟 HTTP/防火墙语义，也不建立任务专项
+裁判；它证明宿主边界通过供应商真实 system 通道发送，原 user/tool 历史顺序不变，旧 fake 不接收未知参数：
 
 ```bash
 python3 -m pytest \
-  agent_py_agent/tests/test_prompting.py \
+  agent_py_agent/tests/test_backends_openai_native_tool_use.py \
+  agent_py_agent/tests/test_backends_native_tool_use.py \
+  agent_py_agent/tests/test_tool_model_generation.py \
   agent_py_agent/tests/test_prompting_builder.py \
-  agent_py_agent/tests/test_runner_prompts.py \
-  agent_py_agent/tests/test_subagent_prompt_contract.py \
-  agent_py_agent/tests/test_subagent_context_bundle_prompting.py \
-  agent_py_agent/tests/test_native_prompt_no_text_protocol_leak.py \
-  agent_py_agent/tests/test_runtime_guidance.py \
-  agent_py_agent/tests/test_integration_coverage_context.py \
+  agent_py_agent/tests/test_context_pressure_native_trigger.py \
   -q --tb=short
 ```
 
@@ -24,20 +22,24 @@ python3 -m pytest \
 203 项为 196 passed、7 个既有 xfail，严格 gate 通过。部署后 `ma-evidence-r41-readonly` 的最终结论已能
 明确区分本机已验证与另一机器未验证，但仍擅自启动服务，因此只通过“如实汇报”，未通过“只读行动”。
 
-第三候选不解析用户正文、不关闭工具，只在原生 Schema 投影中读取 canonical `ToolRuntimePolicy`：纯
-`read_only` 工具保持原说明，command strategy、默认 mutating/dangerous 或参数可升为副作用的工具追加
-`model_guidance.py` 中同一动作授权段。定向回归还必须证明原 ToolModelSpec 与 input_schema 没有被改写：
+第四候选不解析用户正文、不关闭工具。OpenAI-compatible payload 必须是 system → 原始 user → native history；
+Anthropic-compatible payload 必须使用顶层 system。原生 Schema 投影继续读取 canonical
+`ToolRuntimePolicy`：纯 `read_only` 工具保持原说明，command strategy、默认 mutating/dangerous 或参数可升为
+副作用的工具追加 `model_guidance.py` 中同一动作授权段。定向回归还必须证明原 ToolModelSpec 与
+input_schema 没有被改写，provider-visible token 只统计实际支持的 system 通道：
 
 ```bash
 python3 -m pytest \
   agent_py_agent/tests/test_native_tool_protocol_wiring.py \
   agent_py_agent/tests/test_prompting_builder.py \
   agent_py_agent/tests/test_backends_tool_schema.py \
+  agent_py_agent/tests/test_context_pressure_native_trigger.py \
   -q --tb=short
 ```
 
-当前为 217 passed、7 个既有 xfail；严格 gate 和真 TUI 待办。本轮远低于 10,000 行，不跑全仓 pytest。
-真机仍必须重发普通中文要求，只看 prompt 单测或测试机 localhost 结果不能冒充跨机验证。
+最小 provider/system 定向组通过；加入 backend 能力探针、native IR、root/child Prompt 与 runtime guidance 后
+共收集 366 项，结果为 359 passed、7 个既有 xfail。严格 gate 和真 TUI 待办。本轮远低于 10,000 行，不跑
+全仓 pytest。真机仍必须重发普通中文要求，只看 payload 单测或测试机 localhost 结果不能冒充跨机验证。
 
 ## 2026-08-26 空输入 ↓ 返回当前视口最新消息
 

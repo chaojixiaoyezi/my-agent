@@ -8,11 +8,14 @@ agent/verification/
 ```
 
 模型提示侧不另建验收状态机：`agent/model_guidance.py` 是证据与动作授权软提示的唯一正文；
-`agent/prompting_parts/builder.py` 在每个 root/delegated 完整 Prompt 的最末放入一次，使它排在用户任务、
-工具目录和当前运行事实之后。`agent/agent_core/native_tool_protocol.py` 只读取同一轮
-`ToolRuntimeSnapshot`，把动作授权段追加给 command strategy、默认 mutating/dangerous 或参数可升为副作用
-的工具；纯 read-only 工具保持原说明。两处文本只影响模型行动与陈述，不能创建 verification event、改变
-状态、禁用工具或授权探测；`system_prompt_override` 只替换角色身份，不会移除这条共享边界。
+`agent/agent_core/tool_model_generation.py` 只在 backend 声明真实 system 能力时传入，OpenAI-compatible 映射为
+首条 `role=system`，Anthropic-compatible 映射为顶层 `system`。`PromptBuilder` 仍只负责用户任务、角色、工具
+目录和当前运行事实，不再用 `# System` 标题把宿主边界伪装成 user 正文；原始 user 与 native history 保持
+顺序。`agent/agent_core/native_tool_protocol.py` 只读取同一轮 `ToolRuntimeSnapshot`，把动作授权段追加给
+command strategy、默认 mutating/dangerous 或参数可升为副作用的工具；纯 read-only 工具保持原说明。
+context/Compact 计数使用同一 backend capability，只统计实际发送的 system 内容。两处文本只影响模型行动
+与陈述，不能创建 verification event、改变状态、禁用工具或授权探测；`system_prompt_override` 只替换角色
+身份，不会移除 backend 共享边界。
 
 Compact 不建立第二套验证链。live tool-context 与 archive 共用一个有界 `model_summary` 投影：
 归档记录还保存 tool round/index、operation、failure stage、handler executed、refs 和输出信任策略。

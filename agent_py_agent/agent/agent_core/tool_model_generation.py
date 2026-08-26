@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from queue import Empty, Queue
 from threading import Thread
 
-from ..backends import ModelResponse
+from ..backends import ModelResponse, ProviderRequestOptions
 from ..backends.errors import ProviderTimeoutError
 from ..backends.tool_ir import AssistantTurn, ToolResult
 from ..concurrency.interrupt import (
@@ -16,6 +16,7 @@ from ..concurrency.interrupt import (
     register_interrupt_callback,
     set_interrupt,
 )
+from ..model_guidance import provider_system_instruction
 from ..tooling.runtime_contracts import ToolChoice
 from ._runtime_params import ToolLoopExecuteParams
 from .model.call_runtime import (
@@ -97,6 +98,8 @@ class _ModelGenerationState:
     tool_choice: ToolChoice | None = None
     # native 下由 IR 历史翻出的厂商原生 messages；text 协议为 None（走单条 user prompt）。
     messages: list[dict] | None = None
+    # 供应商真实 system/developer 通道使用的稳定宿主规则；不混入用户任务或 IR 历史。
+    system_instruction: str = ""
     # 仅用于富 TUI 的人类可读耗时；不参与模型 timeout、重试或工具状态判断。
     started_at: float = 0.0
 
@@ -328,6 +331,7 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         tools=tools,
         tool_choice=tool_choice,
         messages=_native_provider_messages(request.agent, request.params),
+        system_instruction=provider_system_instruction(request.agent.backend),
         started_at=time.monotonic(),
     )
 
@@ -796,14 +800,23 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # 只在宿主 writer 提供 thinking 增量入口时透传；旧后端/测试 fake 不接收该参数。
     thinking_delta = thinking_sink if callable(thinking_sink) else None
     tool_input_progress = _tool_input_progress_callback(backend, state)
+    system_instruction = str(getattr(state, "system_instruction", "") or "")
+    provider_options_supported = bool(
+        getattr(backend, "supports_provider_request_options", False)
+    )
     _generate_started = time.monotonic()
     if state.tools is None and state.messages is None:
         kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
+        if system_instruction and provider_options_supported:
+            kwargs["request_options"] = ProviderRequestOptions(
+                system_instruction=system_instruction
+            )
         if thinking_delta is not None:
             kwargs["on_thinking_delta"] = thinking_delta
         result = backend.generate(prompt, **kwargs)
     else:
         kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
+        thinking_disabled = False
         if thinking_delta is not None:
             kwargs["on_thinking_delta"] = thinking_delta
         if tool_input_progress is not None:
@@ -812,11 +825,14 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
             kwargs["tools"] = state.tools
             tool_choice = state.tool_choice or ToolChoice.auto()
             kwargs["tool_choice"] = tool_choice
-            if tool_choice.mode != "auto":
-                # LLM: 强制 tool_choice(specific/required/none)必须同时关思考——部分兼容端点
-                # (如 工具运行时 zen)在思考模式下拒绝强制工具选择,回哑 400;不识别该字段的
-                # 端点(如 MiniMax)静默忽略。与 generate_structured 的 thinking_disabled 同一形态。
-                kwargs["thinking_disabled"] = True
+            thinking_disabled = tool_choice.mode != "auto"
+        if provider_options_supported and (system_instruction or thinking_disabled):
+            # LLM: 强制 tool_choice(specific/required/none)必须同时关思考——部分兼容端点
+            # (如 工具运行时 zen)在思考模式下拒绝强制工具选择；typed options 避免继续扩张公开签名。
+            kwargs["request_options"] = ProviderRequestOptions(
+                system_instruction=system_instruction,
+                thinking_disabled=thinking_disabled,
+            )
         if state.messages is not None:
             kwargs["messages"] = state.messages
         result = backend.generate(prompt, **kwargs)

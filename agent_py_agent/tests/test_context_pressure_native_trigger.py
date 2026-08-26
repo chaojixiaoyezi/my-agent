@@ -11,6 +11,7 @@ compact 永不触发。修复后: native 下以 IR 历史 ToolResult 为准、to
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.model.context_pressure import (
+    model_visible_context_tokens,
     should_compact_before_more_tool_output,
 )
 from agent_py_agent.agent.tooling.runtime_contracts import (
@@ -118,3 +119,17 @@ def test_text_protocol_still_uses_prompt_text_threshold() -> None:
     assert should_compact_before_more_tool_output(agent, params, long_prompt)
     short_prompt = "hello"
     assert not should_compact_before_more_tool_output(agent, params, short_prompt)
+
+
+def test_context_estimate_counts_only_a_real_provider_system_channel() -> None:
+    """宿主规则只在后端声明真实 system 通道时计入 provider 可见 token。"""
+    legacy = _agent("text")
+    capable = _agent("text")
+    capable.backend.supports_system_instructions = True
+    capable.backend.supports_provider_request_options = True
+    params = _params("text", save=True, history=[])
+
+    legacy_tokens = model_visible_context_tokens(legacy, params, "hello")
+    capable_tokens = model_visible_context_tokens(capable, params, "hello")
+
+    assert capable_tokens > legacy_tokens

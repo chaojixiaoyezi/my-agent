@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_py_agent.agent.memory_store import MemoryRecord
-from agent_py_agent.agent.model_guidance import ACTION_AUTHORIZATION_GUIDANCE
 from agent_py_agent.agent.prompting_parts.builder import (
     PromptBuilder,
     PromptBuildRequest,
@@ -299,10 +298,10 @@ class TestBuildBasic:
 
         assert "# System\nsubagent system prompt" in result
         assert "root system prompt" not in result
-        assert "# Verification Evidence Boundary" in result
+        assert "# Verification Evidence Boundary" not in result
 
-    def test_build_limits_root_and_delegated_claims_to_observed_boundary(self, tmp_path):
-        """主代理和使用独立 system prompt 的子代理都只能汇报亲自验证到的范围。"""
+    def test_build_keeps_host_boundary_out_of_root_and_delegated_user_prompts(self, tmp_path):
+        """高优先级宿主规则由 provider system 通道承载，不能在 user prompt 重复一份。"""
         builder = PromptBuilder(AgentConfig(), tmp_path)
 
         root_prompt = builder.build("确认服务是否可用", [])
@@ -313,18 +312,9 @@ class TestBuildBasic:
         )
 
         for prompt in (root_prompt, delegated_prompt):
-            assert prompt.count("# Verification Evidence Boundary") == 1
-            assert "绑定 `0.0.0.0`、localhost 或本机地址成功" in prompt
-            assert "不证明另一台机器、真实用户或外部网络能够连接" in prompt
-            assert "结论必须明确写“未验证”" in prompt
-            assert "还差哪个具体复核步骤" in prompt
-            assert prompt.count(ACTION_AUTHORIZATION_GUIDANCE) == 1
-            assert "只要求查看、核对、确认、检查、诊断、解释、比较、对比或汇报" in prompt
-            assert "任何工具若无法只读使用就不要调用" in prompt
-            assert "不得写文件、改配置、启动或停止服务、安装或部署" in prompt
-            assert prompt.index("确认服务是否可用") < prompt.index(
-                "# Verification Evidence Boundary"
-            )
+            assert "# Verification Evidence Boundary" not in prompt
+            assert "绑定 `0.0.0.0`、localhost 或本机地址成功" not in prompt
+            assert "确认服务是否可用" in prompt
 
     def test_build_no_memories(self, tmp_path):
         config = AgentConfig()

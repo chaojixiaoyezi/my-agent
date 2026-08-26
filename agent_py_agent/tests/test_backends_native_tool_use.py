@@ -9,6 +9,7 @@ import pytest
 from agent_py_agent.agent.backends.base import (
     AnthropicCompatibleBackend,
     BackendOptions,
+    ProviderRequestOptions,
 )
 from agent_py_agent.agent.backends.errors import ProviderResponseError
 from agent_py_agent.agent.backends.stream_parsers import anthropic_stream_events
@@ -113,9 +114,19 @@ def test_native_prompt_cache_marks_prompt_and_latest_history_without_mutating_in
         return {"content": [{"type": "text", "text": "continue"}]}
 
     backend.request_json = fake_request_json
-    backend.generate("root prompt", tools=tools, messages=messages)
+    backend.generate(
+        "root prompt",
+        tools=tools,
+        messages=messages,
+        request_options=ProviderRequestOptions(
+            system_instruction="host authorization policy",
+            thinking_disabled=True,
+        ),
+    )
 
     payload = captured["payload"]
+    assert payload["system"] == "host authorization policy"
+    assert payload["thinking"] == {"type": "disabled"}
     assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral"}
     assert payload["messages"][0] == {
         "role": "user",
