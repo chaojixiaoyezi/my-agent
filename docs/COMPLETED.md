@@ -1,5 +1,11 @@
 # COMPLETED
 
+- 2026-08-26 `df95d27` 收口 Anthropic-compatible native 首轮空历史身份：`None` 只表示 text 请求，
+  `[]` 保留 native empty history，使稳定 prompt/工具从第一次 Agent 调用进入唯一 copy-on-write
+  `cache_control` 投影。9 个相关文件 193 项与本地严格 gate 通过，已推送并部署 `.7` 唯一 Gateway。
+  fresh `ma-cache-firstturn-r34` 首请求真实写 25,999、读 12,313 cache tokens；同 thread 两个后续回合
+  又读 37,234 与 46,972。MiniMax-M2.7、单 Gateway、canonical compact 0 均由结构化状态确认。
+
 - 2026-08-25 对照 会话运行时 child `last_agent_message` 交接主链，执行 child 的可见合同已只保留用户/父级显式
   业务产物；宿主 `final_report/output.json/runner_result` 从 output contract、task packet、workspace refs 和
   旧 bundle prompt 全部移除，自然 final 后再由宿主一次收口。完整 execution-context 留作宿主审计，模型

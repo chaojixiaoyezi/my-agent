@@ -1783,7 +1783,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   TUI reducer 只接受当前期望 generation 且不倒退 revision 的快照，最终 notice 也携带同一身份。
 - 视窗：每个 main/child store 仍保存自己的 follow/cursor；真实 prompt_toolkit Window 通过公开
   `get_vertical_scroll` 每帧应用锚点。提交、首次进入或显式 End 粘底，手动上翻不被新输出抢走。
-## 2026-08-26 Anthropic-compatible 主动缓存断点【状态：首版已部署，首轮分叉修复待真 TUI】
+## 2026-08-26 Anthropic-compatible 主动缓存断点【状态：已部署并通过真 TUI】
 
 - 当前原生工具循环每次都复用稳定工具清单、首条真实任务和不断增长的历史，但旧 backend 没有发任何
   `cache_control`。真实 MiniMax-M2.7 child 的 82 次调用累计 4,225,275 input，cache write 为 0，不能再用
@@ -1799,7 +1799,12 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   第一次请求就建立工具/prompt 缓存，后续继续推进 history 断点。这个类型区别属于 provider 协议事实，
   不依赖任务正文、模型判断或界面状态。
 - 同部署配置的直连 MiniMax-M2.7 探针已证明协议可用：首次写 10,551 tokens，第二次读 10,541 tokens。
-  因此真 TUI 仍必须在二层候选部署后复验，探针不能替代完整 Agent 运行证据。
+  `df95d27` 的 193 项 focused 与严格 gate 已通过、推送并部署 `.7` 唯一 Gateway；fresh TUI
+  `ma-cache-firstturn-r34` 首请求真实写 25,999、读 12,313 tokens，两个普通后续回合继续读 37,234 与
+  46,972。协议探针与完整 Agent 主链现已互相印证。
 - 会话运行时 的 session-scoped `prompt_cache_key` 证明稳定会话前缀应由底座承担；具体 wire 字段继续服从当前
   Anthropic-compatible 协议。真机是否有效只读 provider usage ledger 的 cache-write/cache-read，不根据
   延迟、上下文百分比或自然语言推断。
+- 同 thread 的 `compact_generation=0` 与 69.1k→46.3k Context 回落并不冲突：终态工具折叠只替换下一轮
+  的模型可见投影，完整 archive 与 exact refs 保留，Compact 权威代数不变；最后主轮仍有 40,527
+  provider cache-read。该边界继续由结构化 fold/ledger 裁决，不要求 Context 数字单调递增。

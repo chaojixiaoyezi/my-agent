@@ -1,14 +1,17 @@
 # Gateway Progress
 
-## 2026-08-26 Anthropic native 首轮缓存身份（本地候选）
+## 2026-08-26 Anthropic native 首轮缓存身份（已部署真机验证）
 
 - `69bf2ec` 部署后的 fresh TUI 权威账本显示前三次 MiniMax-M2.7 调用仍为 0 cache-write/read；同配置的
   脱敏请求组装和直连重复前缀探针分别证明断点已加载、供应商能写 10,551 并读 10,541 tokens。
 - 根因不在 Gateway、Key 或供应商，而是 native 第一轮空 IR 被 `_native_provider_messages()` 压成 `None`，
   backend 将它误作普通 text。当前保留 `[]=native empty`、`None=text`，使首轮 prompt/tools 也进入唯一
   Anthropic cache 投影；Compact、canonical IR 与任务状态不变。
-- 9 个直接相关测试文件 193 项通过。待当前真 TUI 任务安全终态后完成严格 gate、唯一 Gateway 部署与
-  fresh provider usage 复验；直连探针不能替代 Agent 真链证据。
+- 9 个直接相关测试文件 193 项和本地严格 gate 通过；`df95d27` 已推送并部署 `.7`。旧任务先安全终态，
+  随后只重启唯一 Gateway；`/status` 为 running，模型 MiniMax-M2.7，Python Gateway 进程精确为 1。
+- fresh `ma-cache-firstturn-r34` 首请求 3 次物理调用真实得到 25,999 cache-creation、12,313 cache-read；
+  同 thread 两个普通后续回合继续得到 37,234 与 46,972 cache-read。canonical generation 仍为 0，
+  69.1k→46.3k 的终态折叠没有伪造 Compact，也没有切断 provider 缓存。
 
 ## 2026-08-25 assistant 终态折叠、缓存稳定前缀与 Compact 回执刷新（已部署真机验证）
 

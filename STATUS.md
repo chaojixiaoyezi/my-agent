@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-26 Anthropic-compatible 主动缓存（首版已部署，首轮分叉修复待真 TUI）
+## 2026-08-26 Anthropic-compatible 主动缓存（已部署并通过真 TUI）
 
 - `.7` 唯一 Gateway 的旧 HEAD 长 TUI `ma-97468f3-longchain-r27` 已到终态，耗时约 3 小时 59 分。
   主代理与 19 个 child 合计 1,156 次 MiniMax-M2.7 物理调用、46,024,438 accounted input、
@@ -20,14 +20,17 @@
   同配置直连 MiniMax-M2.7 的两次重复前缀探针分别返回 10,551 cache-creation，以及 10,541 cache-read +
   10 cache-creation。端点、Key 与 usage 解析均正常，故障收敛到主运行链。
 - 根因是 `_native_provider_messages()` 把 native 首轮空历史 `[]` 压成 `None`，backend 随即按普通 text
-  请求跳过缓存。当前二层候选保留结构化区别：`None` 只代表 text，native 首轮明确传 `[]`，从第一次
+  请求跳过缓存。`df95d27` 保留结构化区别：`None` 只代表 text，native 首轮明确传 `[]`，从第一次
   模型请求就缓存稳定 prompt 与工具清单；不增加 fallback，也不改变 Compact 或任务状态。
 - backend 继续只给 Anthropic-compatible 原生多轮链投影三个 copy-on-write `cache_control` 断点：
   稳定工具尾、首条真实 prompt、最新历史块。普通 text 请求、canonical native IR、Compact generation 与
   任务状态均不改变；`anthropic_prompt_cache_enabled` 是唯一开关。
-- 二层候选 9 个直接相关测试文件 193 项通过。当前真实调研任务仍运行在旧 Gateway 进程，待它安全终态后再
-  跑完整 focused 与严格 gate、推送、只重启唯一 Gateway，并以 fresh child 的 provider cache-write/
-  cache-read 账本作为最终真机标准。
+- 9 个直接相关测试文件 193 项、本地严格 gate 全部通过；`df95d27` 已推送并快进部署 `.7`，旧任务安全
+  终态后只重启唯一 Gateway。`/status` 返回 running，模型为 MiniMax-M2.7，进程精确为 1。
+- fresh TUI `ma-cache-firstturn-r34` 的首个真实请求包含 3 次物理模型调用：7,875 accounted input、
+  25,999 cache-creation、12,313 cache-read。随后同 thread 的两个普通后续任务又分别得到
+  46,047/37,234 与 21,878/46,972 cache-creation/cache-read，证明首轮建缓存和跨回合复用均已进入
+  Agent 主链。canonical `compact_generation=0`；Context 69.1k→46.3k 是终态工具折叠，不是漏记 Compact。
 
 ## 2026-08-25 跨回合工具终态折叠、缓存稳定前缀与 Compact 回执刷新（已部署真机验证）
 

@@ -16,6 +16,8 @@ python3 -m pytest \
   agent_py_agent/tests/test_backends_incomplete_response.py \
   agent_py_agent/tests/test_config_validation.py \
   agent_py_agent/tests/test_config_normalize.py \
+  agent_py_agent/tests/test_native_runtime_guidance_forwarding.py \
+  agent_py_agent/tests/test_native_middle_guidance_forwarding.py \
   -q --tb=short
 ```
 
@@ -29,8 +31,9 @@ python3 -m pytest \
 - 部署后的真 TUI 必须从 provider usage ledger 观察到先 cache-write、后 cache-read，不能用 Context 或
   Compact 数字替代该证据。
 
-首版 174 项和严格 gate 已通过并以 `69bf2ec` 部署。fresh TUI 首轮权威账本仍为 0 cache-write/read，
-二层分叉修复的 9 个直接相关测试文件 193 项通过。本轮改动远低于 10,000 行，不跑全仓 pytest。
+首版 174 项和严格 gate 已通过并以 `69bf2ec` 部署。fresh TUI 首轮权威账本仍为 0 cache-write/read；
+二层分叉修复 `df95d27` 的 9 个直接相关测试文件 193 项、本地严格 gate、推送和 `.7` 单 Gateway 部署均
+已完成。本轮改动远低于 10,000 行，按约定不跑全仓 pytest。
 
 真机协议探针（同一部署代码、同一配置、同一 MiniMax-M2.7 端点，不输出 Key 或 prompt）：
 
@@ -38,6 +41,16 @@ python3 -m pytest \
 - 第一次重复前缀请求：10,551 cache-creation、0 cache-read；
 - 第二次：10 cache-creation、10,541 cache-read；
 - fresh Agent 主轮前三次：46,269 input、0 cache-creation、0 cache-read，因 native `[]` 被压成 `None`。
+
+部署后二层真 TUI（`ma-cache-firstturn-r34`，同一 `.7` 唯一 Gateway）：
+
+- fresh 首请求 3 次物理调用：7,875 accounted input、1,810 output、25,999 cache-creation、
+  12,313 cache-read，模型为 MiniMax-M2.7；
+- 同 thread 完成 8 子代理调研后，连续两个普通后续任务的 provider 账分别为
+  46,047 cache-creation / 37,234 cache-read 与 21,878 / 46,972；
+- thread 权威 `compact_generation=0`、无 checkpoint。TUI 69.1k→46.3k→36.9k 的回落来自既有
+  `conversation_terminal_tool_fold.v1`，不能计成 Compact，也没有破坏 cache-read；
+- Gateway `/status` 为 running，测试期间模型配置为 MiniMax-M2.7，Gateway Python 进程精确为 1。
 
 真 TUI 旧版对照样本（`ma-97468f3-longchain-r27`）：
 
@@ -52,7 +65,10 @@ python3 -m pytest \
   子命令、`--help` 退出码、callback return value、ANSI style、`open_file("-")`。
 
 该真任务的产物失败只作为底座样本，未由测试者修改任何复刻产物文件。同一普通中文
-prompt 已在 `会话运行时-m27-click-r31` 启动 会话运行时 + MiniMax-M2.7 对照，结论以对照终态再归因。
+会话运行时 + MiniMax-M2.7 的 r31/r33 因测试适配器丢失 namespace 子工具而无效；修复测试适配器的通用
+namespace 双向转换后，`会话运行时-m27-click-r36` 已真实执行 namespaced `spawn_agent/wait_agent/list_agents`。
+其 child 首轮又把工具调用吐成普通 `<minimax:tool_call>` 文本，作为 会话运行时+该模型兼容样本单列，不能
+反推 my-agent 缓存失败。
 
 ## 2026-08-25 子代理业务产物与宿主交接文件隔离
 
