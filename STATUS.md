@@ -1,5 +1,17 @@
 # STATUS
 
+## 2026-08-25 当前回合 Todo 与物理 Window 粘底（本地候选）
+
+- 同一长 session 的多阶段任务暴露两层展示问题：完整 task-path ledger 被直接当成当前 Todo，导致追加任务
+  仍挂上一阶段清单；TUI 切主/子页面或提交后虽把 control cursor 设到底部，prompt_toolkit Window 的物理
+  scroll 仍可能留在旧位置。
+- 当前候选保留完整耐久 ledger，新增宿主写入的
+  `display_plan(generation_id/revision/item_ids)`：同一 conversation request 续片合并，新的普通用户回合换代；
+  tool progress、activity、child detail 和最终 notice 均携带身份，TUI 清旧代并拒绝迟到/倒退快照。
+- 主/子 transcript 各自的 typed anchor 已接入 `Window.get_vertical_scroll`；362 项相关 focused 通过（2 xfail），
+  另 95 项 Compact/TUI 回归通过。主代理当前约 68k/128k（53%），低于 90%（约 115.2k）触发线，
+  `compact 0` 是权威 thread 的正确次数，不是漏显示。待严格 gate、推送、唯一 Gateway 部署和同 session 真测。
+
 ## 2026-08-25 DNS 瞬断直接杀死两小时 child（本地候选）
 
 - `.7` 的 `ma-97468f3-longchain-r27` 中 worker-6 已运行 1:56:09、完成 3 次 Compact，随后一次

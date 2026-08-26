@@ -413,18 +413,30 @@ def _publish_background_activity(
     subagents = value.get("subagents")
     if not isinstance(subagents, list | tuple):
         subagents = None
+    progress_items = value.get("task_progress_items")
+    task_progress = (
+        {
+            "items": progress_items,
+            "generation_id": value.get("task_progress_generation_id"),
+            "plan_revision": value.get("task_progress_plan_revision"),
+        }
+        if isinstance(progress_items, list | tuple)
+        else None
+    )
     changed = bool(
         updater(
             count,
-            compact_count=compact_count,
-            main_activity=value.get("main_activity"),
-            subagents=subagents,
-            task_progress_items=value.get("task_progress_items"),
-            hidden_subagent_count=hidden_count,
-            projection_ok=value.get("subagent_projection_ok") is not False,
-            task_progress_projection_ok=(
-                value.get("task_progress_projection_ok") is not False
-            ),
+            {
+                "compact_count": compact_count,
+                "main_activity": value.get("main_activity"),
+                "subagents": subagents,
+                "task_progress": task_progress,
+                "hidden_subagent_count": hidden_count,
+                "projection_ok": value.get("subagent_projection_ok") is not False,
+                "task_progress_projection_ok": (
+                    value.get("task_progress_projection_ok") is not False
+                ),
+            },
         )
     )
     row_updater = getattr(agent_navigation, "update_rows", None)
@@ -502,7 +514,11 @@ def _publish_background_notice_row(
     progress_items = row.get("task_progress_items")
     progress_publisher = getattr(tui_runtime, "publish_task_progress_snapshot", None)
     if isinstance(progress_items, list | tuple) and callable(progress_publisher):
-        progress_publisher(progress_items)
+        progress_publisher(
+            progress_items,
+            generation_id=row.get("task_progress_generation_id"),
+            plan_revision=row.get("task_progress_plan_revision"),
+        )
     if str(row.get("display_kind") or "") == "assistant_response":
         publisher = getattr(tui_runtime, "publish_background_response", None)
         if callable(publisher):

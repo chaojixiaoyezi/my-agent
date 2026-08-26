@@ -25,7 +25,11 @@ from ..subagents.services.control_plane_projection import (
     runtime_compact_count,
     runtime_context_token_count,
 )
-from ..task_progress import read_task_progress_report
+from ..task_progress import (
+    read_task_progress_report,
+    task_progress_display_identity,
+    task_progress_display_items,
+)
 from .agent_transcript import read_agent_transcript_events
 from .background_transcript import BackgroundTranscriptSink
 from .channels import project_user_reply, redact_host_absolute_paths
@@ -280,6 +284,8 @@ class ConversationAgentActivity:
     main_activity: dict[str, object] | None = None
     subagents: tuple[dict[str, object], ...] = ()
     task_progress_items: tuple[dict[str, object], ...] = ()
+    task_progress_generation_id: str = ""
+    task_progress_plan_revision: int = 0
     hidden_subagent_count: int = 0
     active_task_projection_ok: bool = True
     subagent_projection_ok: bool = True
@@ -297,6 +303,11 @@ class ConversationAgentActivity:
             "main_activity": dict(self.main_activity or {}),
             "subagents": [dict(row) for row in self.subagents],
             "task_progress_items": [dict(row) for row in self.task_progress_items],
+            "task_progress_generation_id": str(self.task_progress_generation_id or ""),
+            "task_progress_plan_revision": max(
+                0,
+                int(self.task_progress_plan_revision or 0),
+            ),
             "hidden_subagent_count": max(0, int(self.hidden_subagent_count or 0)),
             "active_task_projection_ok": bool(self.active_task_projection_ok),
             "subagent_projection_ok": bool(self.subagent_projection_ok),
@@ -342,7 +353,12 @@ def conversation_agent_activity(
         set(display_task_ids),
         conversation_store=store,
     )
-    progress_items, progress_warnings = _task_progress_items_from_links(
+    (
+        progress_items,
+        progress_generation_id,
+        progress_plan_revision,
+        progress_warnings,
+    ) = _task_progress_items_from_links(
         agent,
         display_links,
         preferred_task_id=_conversation_workspace_task_id(store, thread_id),
@@ -360,6 +376,8 @@ def conversation_agent_activity(
         ),
         subagents=tuple(visible),
         task_progress_items=progress_items,
+        task_progress_generation_id=progress_generation_id,
+        task_progress_plan_revision=progress_plan_revision,
         hidden_subagent_count=max(0, len(rows) - len(visible)),
         active_task_projection_ok=not link_warnings,
         subagent_projection_ok=not run_warnings,
@@ -443,7 +461,12 @@ def conversation_agent_view(
         task,
         conversation_store=store,
     )
-    progress_items, progress_warnings = _task_progress_items_for_run(
+    (
+        progress_items,
+        progress_generation_id,
+        progress_plan_revision,
+        progress_warnings,
+    ) = _task_progress_items_for_run(
         agent,
         selected,
         hidden_item_ids=_row_run_ids(rows),
@@ -476,6 +499,8 @@ def conversation_agent_view(
         "children": rows[:_MAX_PROJECTED_SUBAGENTS],
         "hidden_child_count": max(0, len(rows) - _MAX_PROJECTED_SUBAGENTS),
         "task_progress_items": list(progress_items),
+        "task_progress_generation_id": progress_generation_id,
+        "task_progress_plan_revision": progress_plan_revision,
         "transcript_events": list(transcript.get("events") or []),
         "event_cursor": max(0, _safe_int(transcript.get("cursor"))),
         "events_truncated": bool(transcript.get("truncated")),
@@ -579,24 +604,41 @@ def task_progress_items_for_task(
     store: object,
     task_id: str,
 ) -> tuple[dict[str, object], ...]:
+    items, _generation_id, _plan_revision = task_progress_projection_for_task(
+        agent,
+        store,
+        task_id,
+    )
+    return items
+
+
+# LLM: Final notices need the same rows and opaque display identity as live
+# activity polling. This adapter exposes no lifecycle authority and delegates to
+# the exact task-link/task-path projection used by conversation_agent_activity.
+# 函数用途: 读取后台最终回复对应的 Todo 快照、回合标识和修订号。
+def task_progress_projection_for_task(
+    agent: object,
+    store: object,
+    task_id: str,
+) -> tuple[tuple[dict[str, object], ...], str, int]:
     loader = getattr(store, "load_task_link", None)
     if not callable(loader) or not str(task_id or "").strip():
-        return ()
+        return (), "", 0
     try:
         link = loader(str(task_id).strip())
     except Exception:
-        return ()
+        return (), "", 0
     rows, _run_warnings = _direct_subagent_rows(
         agent,
         {str(task_id).strip()},
         conversation_store=store,
     )
-    items, _warnings = _task_progress_items_from_links(
+    items, generation_id, plan_revision, _warnings = _task_progress_items_from_links(
         agent,
         [link] if link else [],
         hidden_item_ids=_row_run_ids(rows),
     )
-    return items
+    return items, generation_id, plan_revision
 
 
 # LLM: The ConversationThread workspace_task_id is the canonical Todo owner when
@@ -610,10 +652,10 @@ def _task_progress_items_from_links(
     *,
     preferred_task_id: str = "",
     hidden_item_ids: set[str] | None = None,
-) -> tuple[tuple[dict[str, object], ...], list[str]]:
+) -> tuple[tuple[dict[str, object], ...], str, int, list[str]]:
     candidates = [link for link in links if link is not None]
     if not candidates:
-        return (), []
+        return (), "", 0, []
     preferred = str(preferred_task_id or "").strip()
     link = next(
         (
@@ -632,14 +674,15 @@ def _task_progress_items_from_links(
     task_path = str(getattr(link, "task_path", "") or "").strip()
     owner_root = _owner_runtime_root(agent)
     if not task_path or owner_root is None:
-        return (), []
+        return (), "", 0, []
     ledger_id = task_path_progress_ledger_id(task_path)
     progress, load_error = read_task_progress_report(owner_root, ledger_id)
     if load_error:
-        return (), ["task_progress_load_error"]
-    raw_items = progress.get("items") if isinstance(progress, dict) else None
+        return (), "", 0, ["task_progress_load_error"]
+    raw_items = task_progress_display_items(progress) if isinstance(progress, dict) else None
     if not isinstance(raw_items, list | tuple):
-        return (), []
+        return (), "", 0, []
+    generation_id, plan_revision = task_progress_display_identity(progress)
     hidden = hidden_item_ids or set()
     rows: list[dict[str, object]] = []
     for item in raw_items:
@@ -657,7 +700,7 @@ def _task_progress_items_from_links(
         )
         if len(rows) >= _MAX_PROJECTED_PROGRESS_ITEMS:
             break
-    return tuple(rows), []
+    return tuple(rows), generation_id, plan_revision, []
 
 
 # LLM: Todo ownership is an exact join to ConversationThread.workspace_task_id.
@@ -996,16 +1039,17 @@ def _task_progress_items_for_run(
     run_id: str,
     *,
     hidden_item_ids: set[str] | None = None,
-) -> tuple[tuple[dict[str, object], ...], list[str]]:
+) -> tuple[tuple[dict[str, object], ...], str, int, list[str]]:
     owner_root = _owner_runtime_root(agent)
     if owner_root is None:
-        return (), []
+        return (), "", 0, []
     progress, load_error = read_task_progress_report(owner_root, str(run_id or "").strip())
     if load_error:
-        return (), ["task_progress_load_error"]
-    raw_items = progress.get("items") if isinstance(progress, dict) else None
+        return (), "", 0, ["task_progress_load_error"]
+    raw_items = task_progress_display_items(progress) if isinstance(progress, dict) else None
     if not isinstance(raw_items, list | tuple):
-        return (), []
+        return (), "", 0, []
+    generation_id, plan_revision = task_progress_display_identity(progress)
     hidden = hidden_item_ids or set()
     rows = [
         {
@@ -1018,7 +1062,7 @@ def _task_progress_items_for_run(
         and _bounded_text(item.get("id"), limit=128)
         and _bounded_text(item.get("id"), limit=128) not in hidden
     ][:_MAX_PROJECTED_PROGRESS_ITEMS]
-    return tuple(rows), []
+    return tuple(rows), generation_id, plan_revision, []
 
 
 # LLM: Only the canonical child ConversationThread assistant tail can become a
@@ -1124,4 +1168,5 @@ __all__ = [
     "conversation_agent_activity",
     "conversation_agent_view",
     "task_progress_items_for_task",
+    "task_progress_projection_for_task",
 ]

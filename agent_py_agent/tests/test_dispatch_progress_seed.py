@@ -62,6 +62,8 @@ def test_seed_creates_only_real_subagent_items(tmp_path):
     assert seed == {
         "run_id": "run-seed-1",
         "seeded": 2,
+        "generation_id": "run-seed-1",
+        "plan_revision": 1,
         "items": [
             {
                 "id": "subagent-aa11",
@@ -94,6 +96,8 @@ def test_create_subagents_seed_exposes_todo_snapshot_to_tui() -> None:
         "task_progress_seed": {
             "run_id": "run-main",
             "seeded": 1,
+            "generation_id": "",
+            "plan_revision": 0,
             "items": [
                 {"id": "child-1", "title": "实现游戏引擎", "status": "in_progress"}
             ],
@@ -130,6 +134,8 @@ def test_create_subagents_result_envelope_preserves_bounded_todo_snapshot() -> N
         "task_progress_seed": {
             "run_id": "run-main",
             "seeded": 1,
+            "generation_id": "",
+            "plan_revision": 0,
             "items": [
                 {"id": "child-1", "title": "实现游戏引擎", "status": "in_progress"}
             ],
@@ -178,6 +184,8 @@ def test_seed_reuses_existing_todo_items_for_explicit_covers(tmp_path):
     assert seed == {
         "run_id": "run-seed-1",
         "seeded": 0,
+        "generation_id": "run-seed-1",
+        "plan_revision": 1,
         "items": [
             {"id": "2", "title": "游戏核心引擎", "status": "pending"},
             {"id": "3", "title": "植物系统", "status": "pending"},

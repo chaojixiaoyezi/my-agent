@@ -14,7 +14,10 @@ from ..task_progress import (
     invalid_coverage_statuses,
     invalid_item_statuses,
     read_task_progress,
+    task_progress_display_identity,
+    task_progress_display_items,
     task_progress_status_is_closed,
+    with_task_progress_display_plan,
     write_task_progress,
 )
 from ..tooling.models import (
@@ -34,7 +37,11 @@ from .orchestration.dispatch_progress_seed import (
 from .orchestration.tool_specs import build_task_progress_model_spec
 from .runner.context import current_subagent_run_id
 from .runtime.owner_roots import runtime_owner_root
-from .runtime.task_identity import durable_task_id, progress_ledger_id
+from .runtime.task_identity import (
+    durable_task_id,
+    progress_display_generation_id,
+    progress_ledger_id,
+)
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -91,7 +98,15 @@ class TaskProgressTool(BaseTool):
                 return status_error
             if identity_error := _invalid_new_item_identity_result(root, run_id, params):
                 return identity_error
-            written_payload = write_task_progress(root, run_id, params)
+            written_payload = write_task_progress(
+                root,
+                run_id,
+                with_task_progress_display_plan(
+                    params,
+                    generation_id=progress_display_generation_id(self.agent),
+                    item_ids=_updated_item_ids(params),
+                ),
+            )
             _reconcile_completed_child_covers_before_read(self.agent, root, run_id)
             reconcile_completed_child_items(self.agent, root, run_id)
             payload = read_task_progress(root, run_id)
@@ -103,11 +118,46 @@ class TaskProgressTool(BaseTool):
             reconcile_completed_child_items(self.agent, root, run_id)
             payload = read_task_progress(root, run_id)
         payload = _with_execution_guidance(payload)
+        display_items = task_progress_display_items(payload)
+        generation_id, plan_revision = task_progress_display_identity(payload)
+        model_payload = dict(payload)
+        model_payload.pop("display_plan", None)
         return ToolHandlerOutcome(
             "task_progress",
             True,
-            json.dumps(payload, ensure_ascii=False, indent=2),
+            json.dumps(model_payload, ensure_ascii=False, indent=2),
+            result_envelope={
+                "task_progress_projection": {
+                    "generation_id": generation_id,
+                    "plan_revision": plan_revision,
+                    "items": [
+                        {
+                            "id": str(item.get("id") or ""),
+                            "title": str(item.get("title") or ""),
+                            "status": str(item.get("status") or "pending"),
+                        }
+                        for item in display_items[:128]
+                        if isinstance(item, dict)
+                    ],
+                }
+            },
         )
+
+
+# LLM: The model may update a subset of the durable ledger in one turn. Only
+# exact item ids from that structured call seed the display plan; summaries,
+# titles and prose never select rows.
+# 函数用途: 取出本次 task_progress 写入明确涉及的待办 ID。
+def _updated_item_ids(params: dict[str, object]) -> list[str]:
+    items = params.get("items")
+    values = items if isinstance(items, list | tuple) else ()
+    return list(
+        dict.fromkeys(
+            str(item.get("id") or "").strip()
+            for item in values
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        )
+    )
 
 
 # LLM: Open progress remains advisory, but the model needs the same 会话运行时

@@ -260,6 +260,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self.max_diagnostics = max(1, int(max_diagnostics or 1))
         self.max_stable_blocks = max(1, int(max_stable_blocks or 1))
         self._stable_ids: set[str] = set()
+        self._task_progress_generation_id = ""
+        self._task_progress_plan_revision = 0
         self._handlers: dict[str, Callable[[TuiEvent], None]] = {
             "session_started": self._handle_session_started,
             "connection_started": self._handle_connection_started,
@@ -268,6 +270,9 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "background_activity_updated": self._handle_background_activity_updated,
             "background_activity_completed": self._handle_background_activity_completed,
             "task_progress_snapshot": self._handle_task_progress_snapshot,
+            "task_progress_generation_started": (
+                self._handle_task_progress_generation_started
+            ),
             "user_message": self._handle_user_message,
             "system_message": self._handle_system_message,
             "interrupt_notice": self._handle_system_message,
@@ -434,6 +439,20 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     def _handle_task_progress_snapshot(self, event: TuiEvent) -> None:
         self._consume_task_progress_items(event)
 
+    # LLM: Only an explicit dequeued-turn event may advance the expected Todo
+    # generation. This is presentation state: clearing the block cannot alter the
+    # durable ledger, child status, completion, or scheduling.
+    # 函数用途: 开始新用户回合时收起上一轮 Todo，并拒绝随后迟到的旧快照。
+    def _handle_task_progress_generation_started(self, event: TuiEvent) -> None:
+        generation_id = str(
+            event.payload.get("task_progress_generation_id") or ""
+        ).strip()
+        if not generation_id:
+            raise ValueError("task_progress_generation_id required")
+        self._task_progress_generation_id = generation_id
+        self._task_progress_plan_revision = 0
+        self.active_blocks.pop("todo:task_progress", None)
+
     # LLM: 用户消息始终直接进入稳定历史，不能留在 active 后被模型终态覆盖。
     # 函数用途: 追加一个用户输入块。
     def _handle_user_message(self, event: TuiEvent) -> None:
@@ -576,23 +595,58 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         # task_progress 工具: 更新 todo 面板块(□/☑/● 自动打钩)
         self._consume_task_progress_items(event)
 
-    # LLM: task_progress_items is a replace-all snapshot. An absent/wrongly typed
-    # field preserves the prior projection, while an explicit empty list removes
-    # it; this distinction prevents completed background tasks leaving stale Todo.
-    # 函数用途: 用结构化快照替换 Todo；明确空列表会收起旧清单。
+    # LLM: task_progress_items is a replace-all snapshot within one exact opaque
+    # generation. A mismatched/older projection is ignored, absent data preserves
+    # the prior block, and an explicit matching empty list removes it.
+    # 函数用途: 用当前用户回合的结构化快照替换 Todo，并拦住上一轮迟到数据。
     def _consume_task_progress_items(self, event: TuiEvent) -> None:
         items = event.payload.get("task_progress_items")
         if not isinstance(items, list):
             return
+        incoming_generation = str(
+            event.payload.get("task_progress_generation_id") or ""
+        ).strip()
+        expected_generation = self._task_progress_generation_id
+        if expected_generation and incoming_generation != expected_generation:
+            return
+        if incoming_generation and not expected_generation:
+            self._task_progress_generation_id = incoming_generation
+        incoming_revision = _nonnegative_int(
+            event.payload.get("task_progress_plan_revision"),
+            0,
+        )
+        if (
+            incoming_generation
+            and incoming_generation == self._task_progress_generation_id
+            and incoming_revision < self._task_progress_plan_revision
+        ):
+            return
+        if incoming_generation:
+            self._task_progress_plan_revision = max(
+                self._task_progress_plan_revision,
+                incoming_revision,
+            )
         if not items:
             self.active_blocks.pop("todo:task_progress", None)
             return
-        self._update_todo_block(items, event.seq)
+        self._update_todo_block(
+            items,
+            event.seq,
+            generation_id=incoming_generation,
+            plan_revision=incoming_revision,
+        )
 
     # LLM: todo 面板是 task_progress 账本的持续投影; 每次 items 更新替换整块
     # (block 内容即快照, 不增量合并, 避免跨轮残留旧项)。
     # 函数用途: 更新 todo 面板块(role=todo)。
-    def _update_todo_block(self, items: list[dict[str, Any]], seq: int) -> None:
+    def _update_todo_block(
+        self,
+        items: list[dict[str, Any]],
+        seq: int,
+        *,
+        generation_id: str = "",
+        plan_revision: int = 0,
+    ) -> None:
         clean = [
             {
                 "id": str(item.get("id") or ""),
@@ -607,6 +661,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         metadata = {**existing.metadata} if existing is not None else {}
         metadata["items"] = clean
         metadata["updated_at"] = seq
+        metadata["task_progress_generation_id"] = str(generation_id or "")
+        metadata["task_progress_plan_revision"] = max(0, int(plan_revision or 0))
         self.active_blocks[block_id] = TuiBlock(
             block_id=block_id,
             kind="task_progress",

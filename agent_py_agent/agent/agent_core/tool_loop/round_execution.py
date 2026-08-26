@@ -1236,10 +1236,8 @@ def _task_progress_items_from_output(output: object) -> list[dict[str, object]] 
 def _task_progress_items_from_mapping(
     payload: Mapping[str, object],
 ) -> list[dict[str, object]] | None:
-    items = payload.get("items")
-    if not isinstance(items, list):
-        seed = payload.get("task_progress_seed")
-        items = seed.get("items") if isinstance(seed, Mapping) else None
+    projection = _task_progress_projection_from_mapping(payload)
+    items = projection.get("items") if projection is not None else None
     if not isinstance(items, list):
         return None
     clean: list[dict[str, object]] = []
@@ -1254,6 +1252,22 @@ def _task_progress_items_from_mapping(
             }
         )
     return clean if clean else None
+
+
+# LLM: A task_progress handler envelope and a create_subagents seed use two
+# named containers but the same bounded display contract. The explicit current
+# projection wins over full model-visible ledger items; prose is never parsed.
+# 函数用途: 从工具结果中找到当前回合的 Todo 展示快照。
+def _task_progress_projection_from_mapping(
+    payload: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    projection = payload.get("task_progress_projection")
+    if isinstance(projection, Mapping):
+        return projection
+    seed = payload.get("task_progress_seed")
+    if isinstance(seed, Mapping):
+        return seed
+    return payload if isinstance(payload.get("items"), list) else None
 
 
 # LLM: The event projection contains typed public progress only; canonical Todo
@@ -1297,6 +1311,12 @@ def _structured_tool_progress(
             items = _task_progress_items_from_result(event.result)
             if items is not None:
                 payload["task_progress_items"] = items
+            generation_id, plan_revision = _task_progress_identity_from_result(
+                event.result
+            )
+            if generation_id:
+                payload["task_progress_generation_id"] = generation_id
+                payload["task_progress_plan_revision"] = plan_revision
     if event.started_at is not None:
         payload["elapsed_seconds"] = round(
             max(0.0, time.monotonic() - event.started_at),
@@ -1318,6 +1338,24 @@ def _task_progress_items_from_result(
         else None
     )
     return items if items is not None else _task_progress_items_from_output(result.output)
+
+
+# LLM: Generation identity comes only from the handler's structured envelope;
+# legacy textual output may still provide rows but cannot claim stale-plan fencing.
+# 函数用途: 读取工具结果中的 Todo 回合标识与修订号。
+def _task_progress_identity_from_result(result: ToolResult) -> tuple[str, int]:
+    handler_details = result.metadata.get("handler_details")
+    if not isinstance(handler_details, Mapping):
+        return "", 0
+    projection = _task_progress_projection_from_mapping(handler_details)
+    if projection is None:
+        return "", 0
+    generation_id = str(projection.get("generation_id") or "").strip()
+    try:
+        revision = max(0, int(projection.get("plan_revision") or 0))
+    except (TypeError, ValueError):
+        revision = 0
+    return generation_id, revision
 
 
 def _public_progress_text(

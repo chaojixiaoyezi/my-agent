@@ -27,11 +27,18 @@ from ...subagents.models import (
 from ...task_progress import (
     progress_path,
     read_task_progress,
+    task_progress_display_identity,
+    task_progress_display_items,
     task_progress_status_is_closed,
+    with_task_progress_display_plan,
     write_task_progress,
 )
 from ..runner.context import current_subagent_run_id
-from ..runtime.task_identity import durable_task_id, progress_ledger_id
+from ..runtime.task_identity import (
+    durable_task_id,
+    progress_display_generation_id,
+    progress_ledger_id,
+)
 
 _MAX_BINDING_OPEN_TARGETS = 24
 
@@ -84,9 +91,13 @@ def _seed(agent: object, tasks: list) -> dict[str, Any] | None:
         for item in current.get("items", [])
         if isinstance(item, dict)
     }
-    covered_existing = any(
-        set(_task_covers(task)).intersection(existing_ids)
-        for task in tasks
+    covered_ids = list(
+        dict.fromkeys(
+            item_id
+            for task in tasks
+            for item_id in _task_covers(task)
+            if item_id in existing_ids
+        )
     )
     items = [
         _task_item(task)
@@ -94,22 +105,27 @@ def _seed(agent: object, tasks: list) -> dict[str, Any] | None:
         if not set(_task_covers(task)).intersection(existing_ids)
     ]
     items = [item for item in items if item["id"] and item["id"] not in existing_ids]
-    if not items:
-        if covered_existing:
-            return {
-                "run_id": run_id,
-                "seeded": 0,
-                "items": _visible_progress_items(current),
-            }
+    display_ids = [*covered_ids, *(str(item.get("id") or "") for item in items)]
+    if not items and not covered_ids:
         return None
     written = write_task_progress(
         root,
         run_id,
-        {"items": items, "summary": f"已派 {len(tasks)} 个子代理并登记为待办"},
+        with_task_progress_display_plan(
+            {
+                "items": items,
+                "summary": f"已派 {len(tasks)} 个子代理并登记为待办",
+            },
+            generation_id=progress_display_generation_id(agent),
+            item_ids=display_ids,
+        ),
     )
+    generation_id, plan_revision = task_progress_display_identity(written)
     return {
         "run_id": run_id,
         "seeded": len(items),
+        "generation_id": generation_id,
+        "plan_revision": plan_revision,
         "items": _visible_progress_items(written),
     }
 
@@ -124,7 +140,7 @@ def _visible_progress_items(progress: dict[str, Any]) -> list[dict[str, str]]:
             "title": str(item.get("title") or ""),
             "status": str(item.get("status") or "pending"),
         }
-        for item in progress.get("items", [])[:64]
+        for item in task_progress_display_items(progress)[:64]
         if isinstance(item, dict)
     ]
 

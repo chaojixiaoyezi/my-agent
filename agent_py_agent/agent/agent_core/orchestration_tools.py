@@ -536,6 +536,8 @@ def _create_subagents_success(payload: dict[str, object]) -> ToolHandlerOutcome:
         envelope["task_progress_seed"] = {
             "run_id": str(progress_seed.get("run_id") or ""),
             "seeded": _positive_limit(progress_seed.get("seeded")),
+            "generation_id": str(progress_seed.get("generation_id") or ""),
+            "plan_revision": _positive_limit(progress_seed.get("plan_revision")),
             "items": [
                 {
                     "id": str(item.get("id") or ""),

@@ -193,7 +193,13 @@ def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
         except Exception as exc:  # noqa: BLE001 - submission failure still closes this queued turn.
             prepare_error = exc
         _tui_update_running_state(cfg, job)
-        turn_adapter = runtime.begin_turn(job.request_id)
+        turn_adapter = runtime.begin_turn(
+            job.request_id,
+            task_progress_generation_id=(
+                str(getattr(job, "gateway_request_id", "") or "").strip()
+                or job.request_id
+            ),
+        )
         agent_response_text = ""
         response_recorded = False
         summary = TuiTurnSummary(ok=False, error="TUI worker did not produce a result")

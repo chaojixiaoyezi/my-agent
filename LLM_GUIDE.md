@@ -101,6 +101,11 @@
 - `task_progress(action=read)` 默认只读当前 active turn 的 canonical 账本。模型若把当前结构化
   `task_id` 显式填进 `run_id`，该值只作为当前账本别名并经过共享 task-path resolver；只有与当前任务
   不同的明确 run id 才按历史账本精确读取。不能让 request/task id 在后台续片中旁生一份空 Todo。
+- canonical `task_progress.v1` 继续保存同一长期 task-path 的完整软计划历史；TUI/Web 的当前清单另读账本内
+  host-owned `display_plan(generation_id/revision/item_ids)`。普通用户回合以 exact conversation request id
+  换代并只展示本代明确更新/派工的 ids，同一 lifecycle wake/child 续片沿原代补项。前端在 dequeue 时先
+  登记期望代次，旧后台轮或最终 notice 的迟到快照不能把上一阶段 Todo 顶回来；该投影不删除历史项、不参与
+  完成、恢复或验收。没有 `display_plan` 的升级中任务仍兼容展示完整旧账本。
 - 模型侧旧 `raise_event` 已删除。进展、工具活动、阻塞、权限申请和终态都由宿主从真实 runner/thread
   事件写入；模型不能靠自报事件证明自己还活着。子代理 canonical state 会保存有界的“模型响应中 / 正在
   使用工具 / 工具成功或失败”短状态，不保存 prompt、response、工具输出或隐式推理正文。
@@ -143,6 +148,9 @@
   `conversation/live_tool_compact.py` 适配到同一账本，provider overflow 也不得账外删工具对。TUI/Web/SQLite
   只读 generation；presentation/no-save 临时窗口事件不计数，旧 durable apply/attribute 不回读。live 摘要
   请求必须保持“原任务 user 在前、native history 居中、synthetic Compact user 最后”的 会话运行时 顺序。
+- TUI transcript 的 follow/离尾状态属于每个 main/child 页面各自的 process-local viewport。提交有效消息、
+  首次进入新页面或显式回到底部时，prompt_toolkit `Window.get_vertical_scroll` 必须把 control 的尾部锚点
+  落到真实窗口；手动滚轮/PgUp 离尾后保持原阅读位置，不因后台输出或切换页面复用旧 Window scroll。
 
 ---
 

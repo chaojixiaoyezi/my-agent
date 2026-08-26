@@ -1,5 +1,15 @@
 # Subagent Progress
 
+## 2026-08-25 当前回合 Todo 与真实 Window 粘底（本地候选）
+
+- 同一长 session 的七路调研、两个小追加和 Click→Go 复刻证明完整 task-path 账本不能直接等于当前底部 Todo；
+  r27/r28/r29 的历史项会跨阶段累积。当前候选保留完整 ledger，新增 exact conversation request display plan，
+  tool result、后台 activity、child detail 和最终 notice 统一携带 generation/revision。
+- TUI 新回合先清上一代，旧 poll/notice 迟到时按结构化身份丢弃；不解析标题、不删除历史、不改变完成语义。
+- 切主/子页面和提交后“control cursor 已到底但真实窗口没到底”的第二层问题，按 终端交互 repin 行为把锚点
+  接到 prompt_toolkit `get_vertical_scroll`。相关 task-progress/conversation/TUI/renderer/worker focused 已过，
+  待严格 gate 和 `.7` 唯一 Gateway 同一 session 真机复验。
+
 ## 2026-08-25 同批显式 output 范围祖先冲突（本地候选）
 
 - `ma-97468f3-longchain-r27` 部署 leaf 角色提示后，r28 父级仍把骨架 worker 的结构化 `output_files`

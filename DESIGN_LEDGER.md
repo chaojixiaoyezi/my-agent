@@ -1729,3 +1729,17 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `ma-53498c1-http-pool-r24` 约 1 秒启动并完成 MiniMax-M2.7 真调用。9 个 TUI 自然轮询时只创建 5 个
   `gateway-http_*` worker、旧 request thread 为 0，12 秒 RSS 约 132.7 -> 131.7 MB。该证据只证明当前
   有界实现与短时稳定，不把 12 秒观察写成长期内存无泄漏结论。
+## 2026-08-25 长期进度账本与当前回合 Todo 分层【状态：本地 focused 通过，待 `.7` 真机】
+
+- 问题：同一长期 task-path 连续经历调研、追问、复刻和返工时，canonical `task_progress.v1` 必须保留恢复所需
+  的完整历史；旧 TUI 却直接投影全部 items，导致新阶段仍显示上一轮 `4/7`，迟到的后台 notice 还能再次覆盖。
+- 对照：会话运行时 app-server 的 `TurnPlanUpdatedNotification` 明确携带 exact `turn_id`，TUI 的 `on_plan_update`
+  接受一份本 turn 完整 plan；终端交互 在用户消息提交 commit 后调用 `repinScroll/scrollToBottom`，手动
+  scroll-away 才冻结 viewport。
+- 决策：不拆第二本进度账、不按标题/状态/时间猜阶段。完整 items 仍是唯一 durable 软账本；旁挂 host-owned
+  `display_plan={generation_id, revision, item_ids}` 只负责显示。普通 conversation request 换代，同一 root
+  lifecycle wake 和 child continuation 沿原 exact request；同代结构化写入合并 ids，修订号只在集合变化时递增。
+- 边界：Todo 投影不参与任务结束、验收、调度、权限或 Compact；旧账没有 display plan 时继续展示完整 items。
+  TUI reducer 只接受当前期望 generation 且不倒退 revision 的快照，最终 notice 也携带同一身份。
+- 视窗：每个 main/child store 仍保存自己的 follow/cursor；真实 prompt_toolkit Window 通过公开
+  `get_vertical_scroll` 每帧应用锚点。提交、首次进入或显式 End 粘底，手动上翻不被新输出抢走。

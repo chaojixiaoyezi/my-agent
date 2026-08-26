@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 
+from ...conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+
 # LLM: This module is the sole owner of progress-ledger identity derivation.
 # Callers may carry durable task ids or task paths, but must not reproduce the
 # task-path fingerprint algorithm elsewhere.
@@ -130,9 +132,34 @@ def progress_ledger_id(agent: object, params: object, *, scoped_id: str = "") ->
     return ""
 
 
+# LLM: The display generation is the originating ordinary conversation request,
+# not the durable task/workspace id. Background lifecycle slices must therefore
+# keep the inherited conversation_request_id while unrelated follow-up turns get
+# a fresh generation without splitting the canonical progress ledger.
+# 函数用途: 生成 Todo 当前回合展示标识，让同一长期账本的多轮计划可分开显示。
+def progress_display_generation_id(agent: object, params: object | None = None) -> str:
+    current = params or getattr(agent, "_current_run_params", None)
+    attributes = getattr(current, "task_attributes", None) if current is not None else None
+    if isinstance(attributes, dict):
+        inherited = str(attributes.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
+        if inherited:
+            return inherited
+    for value in (
+        getattr(current, "request_id", "") if current is not None else "",
+        getattr(current, "run_id", "") if current is not None else "",
+        getattr(agent, "_current_request_id", ""),
+        getattr(agent, "_main_agent_run_id", ""),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
 __all__ = [
     "conversation_task_progress_ledger_id",
     "durable_task_id",
+    "progress_display_generation_id",
     "progress_ledger_id",
     "run_scope_task_id",
     "task_path_progress_ledger_id",

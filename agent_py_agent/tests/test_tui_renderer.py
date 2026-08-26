@@ -1043,15 +1043,17 @@ def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:
     ]
     runtime.update_background_activity(
         1,
-        subagents=[
-            {
-                "run_id": "child-analysis",
-                "name": "analysis",
-                "status": "DONE",
-                "attempts": 1,
-                "progress_item_ids": ["b"],
-            }
-        ],
+        {
+            "subagents": [
+                {
+                    "run_id": "child-analysis",
+                    "name": "analysis",
+                    "status": "DONE",
+                    "attempts": 1,
+                    "progress_item_ids": ["b"],
+                }
+            ]
+        },
     )
     frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
     assert not any("任务清单" in line for line in _frame_lines(frame))
@@ -1095,14 +1097,16 @@ def test_todo_header_reports_active_child_not_represented_by_visible_items() -> 
     )
     runtime.update_background_activity(
         1,
-        subagents=[
-            {
-                "run_id": "child-residual",
-                "name": "build-fixer-5",
-                "status": "RUNNING",
-                "progress_item_ids": [],
-            }
-        ],
+        {
+            "subagents": [
+                {
+                    "run_id": "child-residual",
+                    "name": "build-fixer-5",
+                    "status": "RUNNING",
+                    "progress_item_ids": [],
+                }
+            ]
+        },
     )
 
     frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=100))
@@ -1114,14 +1118,16 @@ def test_todo_header_reports_active_child_not_represented_by_visible_items() -> 
 
     runtime.update_background_activity(
         1,
-        subagents=[
-            {
-                "run_id": "child-residual",
-                "name": "build-fixer-5",
-                "status": "RUNNING",
-                "progress_item_ids": ["verify"],
-            }
-        ],
+        {
+            "subagents": [
+                {
+                    "run_id": "child-residual",
+                    "name": "build-fixer-5",
+                    "status": "RUNNING",
+                    "progress_item_ids": ["verify"],
+                }
+            ]
+        },
     )
     linked_frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=100))
     linked_text = "\n".join(

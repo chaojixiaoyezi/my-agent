@@ -52,6 +52,90 @@ def test_delta_without_start_and_unknown_kind_fail_closed() -> None:
     ]
 
 
+def test_todo_generation_clears_old_turn_and_rejects_late_snapshot() -> None:
+    store = TuiStateStore()
+    seq = _sequencer()
+    store.publish(
+        seq.emit(
+            "task_progress_snapshot",
+            "updated",
+            "todo-snapshot",
+            {
+                "task_progress_items": [
+                    {"id": "old", "title": "旧任务", "status": "in_progress"}
+                ],
+                "task_progress_generation_id": "turn-old",
+                "task_progress_plan_revision": 3,
+            },
+        )
+    )
+    assert any(block.role == "todo" for block in store.snapshot().active_blocks)
+
+    store.publish(
+        seq.emit(
+            "task_progress_generation_started",
+            "started",
+            "todo-generation",
+            {
+                "task_progress_generation_id": "turn-new",
+                "task_progress_plan_revision": 0,
+            },
+        )
+    )
+    assert not any(block.role == "todo" for block in store.snapshot().active_blocks)
+
+    store.publish(
+        seq.emit(
+            "task_progress_snapshot",
+            "updated",
+            "todo-snapshot-old-late",
+            {
+                "task_progress_items": [
+                    {"id": "old", "title": "旧任务", "status": "done"}
+                ],
+                "task_progress_generation_id": "turn-old",
+                "task_progress_plan_revision": 4,
+            },
+        )
+    )
+    assert not any(block.role == "todo" for block in store.snapshot().active_blocks)
+
+    store.publish(
+        seq.emit(
+            "task_progress_snapshot",
+            "updated",
+            "todo-snapshot-new",
+            {
+                "task_progress_items": [
+                    {"id": "new", "title": "新任务", "status": "in_progress"}
+                ],
+                "task_progress_generation_id": "turn-new",
+                "task_progress_plan_revision": 5,
+            },
+        )
+    )
+    todo = next(block for block in store.snapshot().active_blocks if block.role == "todo")
+    assert [item["id"] for item in todo.metadata["items"]] == ["new"]
+    assert todo.metadata["task_progress_generation_id"] == "turn-new"
+
+    store.publish(
+        seq.emit(
+            "task_progress_snapshot",
+            "updated",
+            "todo-snapshot-new-stale",
+            {
+                "task_progress_items": [
+                    {"id": "stale", "title": "旧修订", "status": "done"}
+                ],
+                "task_progress_generation_id": "turn-new",
+                "task_progress_plan_revision": 4,
+            },
+        )
+    )
+    todo = next(block for block in store.snapshot().active_blocks if block.role == "todo")
+    assert [item["id"] for item in todo.metadata["items"]] == ["new"]
+
+
 def test_terminal_response_file_can_restore_complete_block() -> None:
     store = TuiStateStore()
     seq = _sequencer()

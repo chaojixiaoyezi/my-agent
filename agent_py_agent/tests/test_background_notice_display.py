@@ -47,7 +47,10 @@ def test_gateway_background_notice_carries_final_task_progress(tmp_path: Path) -
 
     from agent_py_agent.agent.conversation.runtime import _record_background_notice
     from agent_py_agent.agent.conversation.store import ConversationStore
-    from agent_py_agent.agent.task_progress import write_task_progress
+    from agent_py_agent.agent.task_progress import (
+        with_task_progress_display_plan,
+        write_task_progress,
+    )
 
     owner_root = tmp_path / "owner"
     store = ConversationStore(tmp_path / "conversations")
@@ -74,7 +77,11 @@ def test_gateway_background_notice_carries_final_task_progress(tmp_path: Path) -
     write_task_progress(
         owner_root,
         ledger_id,
-        {"items": [{"id": "qa", "title": "整合测试", "status": "done"}]},
+        with_task_progress_display_plan(
+            {"items": [{"id": "qa", "title": "整合测试", "status": "done"}]},
+            generation_id="turn-final",
+            item_ids=["qa"],
+        ),
     )
     report = SimpleNamespace(
         thread_id=thread.thread_id,
@@ -98,6 +105,8 @@ def test_gateway_background_notice_carries_final_task_progress(tmp_path: Path) -
     assert row["task_progress_items"] == [
         {"id": "qa", "title": "整合测试", "status": "done"}
     ]
+    assert row["task_progress_generation_id"] == "turn-final"
+    assert row["task_progress_plan_revision"] == 1
 
 
 def test_gateway_skips_internal_or_empty_background_notice(tmp_path: Path) -> None:
@@ -157,6 +166,8 @@ def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
                 "task_progress_items": [
                     {"id": "qa", "title": "整合测试", "status": "done"}
                 ],
+                "task_progress_generation_id": "generation-final",
+                "task_progress_plan_revision": 4,
             },
             ensure_ascii=False,
         )
@@ -165,7 +176,7 @@ def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
     )
 
     published: list[str] = []
-    progress_snapshots: list[list[dict[str, object]]] = []
+    progress_snapshots: list[tuple[list[dict[str, object]], str, int]] = []
 
     class _Store:
         root = store_root
@@ -174,8 +185,16 @@ def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
             return SimpleNamespace(thread_id=thread_id), None
 
     class _Runtime:
-        def publish_task_progress_snapshot(self, items):
-            progress_snapshots.append(list(items))
+        def publish_task_progress_snapshot(
+            self,
+            items,
+            *,
+            generation_id="",
+            plan_revision=0,
+        ):
+            progress_snapshots.append(
+                (list(items), str(generation_id), int(plan_revision))
+            )
 
         def publish_background_response(self, text, *, thread_id=""):
             published.append(text)
@@ -188,7 +207,11 @@ def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
     assert len(published) == 1
     assert published[0] == "子代理已完成，后台自动汇总完成。"
     assert progress_snapshots == [
-        [{"id": "qa", "title": "整合测试", "status": "done"}]
+        (
+            [{"id": "qa", "title": "整合测试", "status": "done"}],
+            "generation-final",
+            4,
+        )
     ]
     # 第二次消费同文件：已 seen，不重复发布
     _consume_background_notices(_Agent(), "session-1", _Runtime(), [None], seen)
@@ -257,6 +280,8 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
                     "task_progress_items": [
                         {"id": "qa", "title": "整合测试", "status": "done"}
                     ],
+                    "task_progress_generation_id": "generation-http",
+                    "task_progress_plan_revision": 2,
                     "task_progress_projection_ok": True,
                 },
                 "notices": [
@@ -276,23 +301,19 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
         def update_background_activity(
             self,
             count,
-            *,
-            compact_count,
-            main_activity,
-            subagents,
-            task_progress_items,
-            hidden_subagent_count,
-            projection_ok,
-            task_progress_projection_ok,
+            snapshot,
         ):
+            task_progress = snapshot["task_progress"]
             published.append(
-                f"active:{count}:{compact_count}:{subagents[0]['run_id']}:{task_progress_items[0]['id']}:"
-                f"{hidden_subagent_count}:{projection_ok}:{task_progress_projection_ok}:"
-                f"{bool(main_activity)}"
+                f"active:{count}:{snapshot['compact_count']}:{snapshot['subagents'][0]['run_id']}:"
+                f"{task_progress['items'][0]['id']}:{snapshot['hidden_subagent_count']}:"
+                f"{snapshot['projection_ok']}:{snapshot['task_progress_projection_ok']}:"
+                f"{bool(snapshot['main_activity'])}:{task_progress['generation_id']}:"
+                f"{task_progress['plan_revision']}"
             )
             return True
 
-        def publish_task_progress_snapshot(self, _items):
+        def publish_task_progress_snapshot(self, _items, **_kwargs):
             return True
 
         def publish_background_response(self, text, *, thread_id=""):
@@ -306,7 +327,9 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
     assert fetched[0]["after"] == 0.0
     assert fetched[0]["event_after"] == 0
     assert len(published) == 2
-    assert published[0] == "active:2:3:child-1:qa:0:True:True:False"
+    assert published[0] == (
+        "active:2:3:child-1:qa:0:True:True:False:generation-http:2"
+    )
     assert published[1] == "HTTP 后台完成通知测试。"
     # 游标推进后不重复
     assert _consume_background_notices(
@@ -1041,12 +1064,14 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     ]
     assert runtime.update_background_activity(
         1,
-        compact_count=3,
-        main_activity={"context_usage": context_usage},
-        subagents=children,
-        task_progress_items=progress_items,
+        {
+            "compact_count": 3,
+            "main_activity": {"context_usage": context_usage},
+            "subagents": children,
+            "task_progress": {"items": progress_items},
+        },
     ) is True
-    assert runtime.update_background_activity(1, subagents=children) is False
+    assert runtime.update_background_activity(1, {"subagents": children}) is False
     snapshot = runtime.store.snapshot()
     active = [block for block in snapshot.active_blocks if block.role == "background"]
     assert len(active) == 1
@@ -1082,7 +1107,10 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     assert "/stop 停止后台任务" in fragments_text(frame.footer)
 
     changed_children = [dict(children[0], context_tokens=14000), children[1]]
-    assert runtime.update_background_activity(1, subagents=changed_children) is True
+    assert runtime.update_background_activity(
+        1,
+        {"subagents": changed_children},
+    ) is True
 
     narrow = render_tui_snapshot(
         runtime.store.snapshot(),
@@ -1149,13 +1177,15 @@ def test_long_main_activity_stays_on_one_terminal_line() -> None:
     runtime = TuiRuntime("session-long-main-activity")
     assert runtime.update_background_activity(
         1,
-        main_activity={
-            "phase": "thinking",
-            "activity": (
-                "The user wants me to finalize the complete game and verify every file "
-                "before creating the final response"
-            ),
-            "started_at": 100.0,
+        {
+            "main_activity": {
+                "phase": "thinking",
+                "activity": (
+                    "The user wants me to finalize the complete game and verify every file "
+                    "before creating the final response"
+                ),
+                "started_at": 100.0,
+            }
         },
     ) is True
 
@@ -1185,15 +1215,17 @@ def test_main_activity_elapsed_never_falls_back_to_old_panel_start() -> None:
     runtime = TuiRuntime("session-main-clock")
     assert runtime.update_background_activity(
         1,
-        main_activity={},
-        subagents=[
-            {
-                "run_id": "child-live",
-                "name": "worker",
-                "status": "RUNNING",
-                "created_at": 990.0,
-            }
-        ],
+        {
+            "main_activity": {},
+            "subagents": [
+                {
+                    "run_id": "child-live",
+                    "name": "worker",
+                    "status": "RUNNING",
+                    "created_at": 990.0,
+                }
+            ],
+        },
     ) is True
     snapshot = runtime.store.snapshot()
     background = next(

@@ -261,7 +261,7 @@ def test_completed_root_roster_stays_selectable_but_does_not_animate() -> None:
     runtime = TuiRuntime("nav-completed-roster")
     done = _row("child-done", status="DONE")
 
-    assert runtime.update_background_activity(0, subagents=[done]) is True
+    assert runtime.update_background_activity(0, {"subagents": [done]}) is True
     assert runtime.needs_periodic_refresh() is False
     frame = render_tui_snapshot(
         runtime.store.snapshot(),
@@ -271,7 +271,7 @@ def test_completed_root_roster_stays_selectable_but_does_not_animate() -> None:
     assert any("›" in fragments_text(line) for line in frame.agent_lines)
     assert "Enter 查看" in fragments_text(frame.footer)
 
-    assert runtime.update_background_activity(0, subagents=[]) is True
+    assert runtime.update_background_activity(0, {"subagents": []}) is True
     assert not any(
         block.role == "background" for block in runtime.store.snapshot().active_blocks
     )
@@ -282,7 +282,7 @@ def test_hidden_ninth_child_scrolls_into_panel_and_enter_opens_same_run() -> Non
     navigation = TuiAgentNavigationState(root)
     rows = [_row(f"child-{index}") for index in range(1, 10)]
     navigation.update_rows("", rows)
-    root.update_background_activity(9, subagents=rows)
+    root.update_background_activity(9, {"subagents": rows})
 
     for _ in rows:
         assert navigation.move_selection(1) is True
@@ -306,7 +306,13 @@ def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:
     running = TuiRuntime("nav-footer-running")
     running.update_background_activity(
         1,
-        main_activity={"task_id": "child-a", "phase": "running", "activity": "编写代码"},
+        {
+            "main_activity": {
+                "task_id": "child-a",
+                "phase": "running",
+                "activity": "编写代码",
+            }
+        },
     )
     running_frame = render_tui_snapshot(
         running.store.snapshot(),
@@ -337,7 +343,13 @@ def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:
     terminal = TuiRuntime("nav-footer-terminal")
     terminal.update_background_activity(
         0,
-        main_activity={"task_id": "child-a", "phase": "completed", "activity": "已完成"},
+        {
+            "main_activity": {
+                "task_id": "child-a",
+                "phase": "completed",
+                "activity": "已完成",
+            }
+        },
     )
     terminal_frame = render_tui_snapshot(
         terminal.store.snapshot(),

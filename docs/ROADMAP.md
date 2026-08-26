@@ -57,11 +57,17 @@ runner 把当前 role `prompt_zh` 直接丢弃，worker 实际从未看到共享
 
 ### 新阶段仍展示上一份已关闭 Todo
 
-状态：真实样本已确认，待本轮复制链自然结束后对照 会话运行时 active-turn plan 展示再修
+状态：本地候选 focused 通过，待严格 gate、推送、`.7` 单 Gateway 同一长 session 复验
 
 解决问题：`ma-97468f3-longchain-r27` 已进入独立验收失败后的三路修复，底部 child 面板正确显示三名
 RUNNING，固定 Todo 却仍显示上一轮调研的 `完成 4/7`（实际 4 done + 3 skipped）。这是旧 task-path 计划
 投影，不是当前修复进度；不能按标题猜阶段，也不能清掉仍属同一 active turn 的真计划。
+
+当前进展：对照 会话运行时 `update_plan` 的 exact turn notification，canonical task-path 账本保留全部历史，新增
+host-owned `display_plan` 只列当前 conversation request 的 exact item ids。同一 lifecycle wake 继续原代，
+下一普通用户回合换代；TUI 在 dequeue 时先清旧 Todo，并按代次/修订拒绝迟到 activity/notice。与此同时按
+终端交互 `repinScroll` 补了 prompt_toolkit Window 的显式垂直滚动落点，提交与页面切换能真实粘底，手动
+上翻仍不抢滚动。相关 focused 集合已通过，尚不能冒充真 TUI 验收。
 
 ### DNS 瞬断不能终止长代理
 

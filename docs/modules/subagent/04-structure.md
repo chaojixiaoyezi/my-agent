@@ -6,6 +6,18 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-25 长期进度账本与当前回合展示计划
+
+- task-path `task_progress.v1` 继续保存跨阶段完整历史，是唯一耐久进度事实；TUI/Web 当前清单只是投影，不能
+  删除旧项或重新定义完成状态。
+- 宿主在普通 conversation request 开始时以 exact request id 建立 `display_plan`，`task_progress` 与
+  `create_subagents` 只把本次结构化更新涉及的 item ids 加入同一代。lifecycle wake/child continuation 继承
+  同一 request id，新普通用户回合才换代。
+- activity poll、tool result、child detail 和 final notice 都携带 `generation_id + revision`。客户端先清新代，
+  再拒绝其它代或更低 revision 的迟到快照；没有 display plan 的旧 ledger 仍展示全部项，便于滚动升级。
+- display identity 只治理展示新鲜度，不参与派工、完成、验收或恢复。Compact 次数仍独立读取 conversation/
+  child canonical thread generation，不能由 Todo 代次或可见历史推算。
+
 ## 2026-08-25 lifecycle mailbox 接收者边界
 
 - `root_task_id/parent_run_id` 是血缘事实，不是广播订阅。根 child 的 completion/capability wake 只属于 exact

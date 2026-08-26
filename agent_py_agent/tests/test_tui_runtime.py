@@ -68,6 +68,46 @@ def test_direct_turn_stream_tool_and_final_keep_order_and_no_duplicate() -> None
     assert snapshot.status.tool_rounds == 1
 
 
+def test_begin_turn_uses_canonical_generation_and_clears_previous_todo() -> None:
+    runtime = TuiRuntime("session-generation")
+    runtime.publish_task_progress_snapshot(
+        [{"id": "old", "title": "旧任务", "status": "in_progress"}],
+        generation_id="gateway-old",
+        plan_revision=2,
+    )
+    assert any(
+        block.role == "todo" for block in runtime.store.snapshot().active_blocks
+    )
+
+    runtime.begin_turn(
+        "chat-local-new",
+        task_progress_generation_id="gateway-new",
+    )
+
+    assert not any(
+        block.role == "todo" for block in runtime.store.snapshot().active_blocks
+    )
+    runtime.publish_task_progress_snapshot(
+        [{"id": "old", "title": "旧任务", "status": "done"}],
+        generation_id="gateway-old",
+        plan_revision=3,
+    )
+    assert not any(
+        block.role == "todo" for block in runtime.store.snapshot().active_blocks
+    )
+    runtime.publish_task_progress_snapshot(
+        [{"id": "new", "title": "新任务", "status": "in_progress"}],
+        generation_id="gateway-new",
+        plan_revision=1,
+    )
+    todo = next(
+        block
+        for block in runtime.store.snapshot().active_blocks
+        if block.role == "todo"
+    )
+    assert [item["id"] for item in todo.metadata["items"]] == ["new"]
+
+
 def test_recovered_history_is_visible_without_requeueing_prompts() -> None:
     runtime = TuiRuntime("session-history")
     runtime.publish_session(version="0.3.0", model="fixture", workspace="/tmp")

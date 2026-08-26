@@ -70,6 +70,8 @@ _TOOL_PAYLOAD_FIELDS = frozenset(
         "failure_stage",
         "error_code",
         "task_progress_items",
+        "task_progress_generation_id",
+        "task_progress_plan_revision",
     }
 )
 _CONTEXT_COMPACTION_FIELDS = frozenset(

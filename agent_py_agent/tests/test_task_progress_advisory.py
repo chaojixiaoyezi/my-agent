@@ -11,7 +11,13 @@ from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.agent.task_progress import write_task_progress
+from agent_py_agent.agent.task_progress import (
+    merge_task_progress,
+    task_progress_display_identity,
+    task_progress_display_items,
+    with_task_progress_display_plan,
+    write_task_progress,
+)
 
 
 class _CaptureBackend:
@@ -179,3 +185,96 @@ def test_closed_progress_item_requires_explicit_correction_to_reopen(tmp_path) -
     assert created.ok is True
     assert json.loads(implicit.output)["items"][0]["status"] == "done"
     assert json.loads(corrected.output)["items"][0]["status"] == "in_progress"
+
+
+def test_display_plan_switches_turn_without_deleting_durable_history() -> None:
+    first = merge_task_progress(
+        {},
+        with_task_progress_display_plan(
+            {
+                "items": [
+                    {"id": "old-a", "title": "旧任务 A", "status": "done"},
+                    {"id": "old-b", "title": "旧任务 B", "status": "done"},
+                ]
+            },
+            generation_id="turn-old",
+            item_ids=["old-a", "old-b"],
+        ),
+        run_id="durable-task",
+    )
+    second = merge_task_progress(
+        first,
+        with_task_progress_display_plan(
+            {
+                "items": [
+                    {"id": "new-a", "title": "新任务 A", "status": "in_progress"}
+                ]
+            },
+            generation_id="turn-new",
+            item_ids=["new-a"],
+        ),
+        run_id="durable-task",
+    )
+    third = merge_task_progress(
+        second,
+        with_task_progress_display_plan(
+            {
+                "items": [
+                    {"id": "new-b", "title": "新任务 B", "status": "pending"}
+                ]
+            },
+            generation_id="turn-new",
+            item_ids=["new-b"],
+        ),
+        run_id="durable-task",
+    )
+    reconciled = merge_task_progress(
+        third,
+        {"items": [{"id": "new-a", "status": "done"}]},
+        run_id="durable-task",
+    )
+
+    assert [item["id"] for item in reconciled["items"]] == [
+        "old-a",
+        "old-b",
+        "new-a",
+        "new-b",
+    ]
+    assert [item["id"] for item in task_progress_display_items(reconciled)] == [
+        "new-a",
+        "new-b",
+    ]
+    assert task_progress_display_identity(reconciled) == ("turn-new", 3)
+
+
+def test_task_progress_tool_emits_only_current_turn_display_projection(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    agent = _agent(tmp_path)
+    agent._main_agent_run_id = "run-main"
+    agent._current_run_params = SimpleNamespace(
+        request_id="attempt-current",
+        run_id="run-main",
+        task_id="run-main",
+        task_attributes={"conversation_request_id": "gateway-turn-current"},
+    )
+    outcome = TaskProgressTool(agent).execute(
+        {
+            "action": "update",
+            "items": [
+                {"id": "current", "title": "当前任务", "status": "in_progress"}
+            ],
+        }
+    )
+
+    assert outcome.ok is True
+    assert "display_plan" not in json.loads(outcome.output)
+    assert outcome.result_envelope == {
+        "task_progress_projection": {
+            "generation_id": "gateway-turn-current",
+            "plan_revision": 1,
+            "items": [
+                {"id": "current", "title": "当前任务", "status": "in_progress"}
+            ],
+        }
+    }

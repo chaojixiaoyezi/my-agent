@@ -108,6 +108,53 @@ def test_scrolling_down_to_last_line_restores_sticky_follow() -> None:
     assert updated.cursor_position.y == updated.line_count - 1
 
 
+def test_window_scroll_follows_each_agent_store_anchor_after_switch() -> None:
+    root = TuiStateStore()
+    child = TuiStateStore()
+    root_seq = TuiEventSequencer("root-scroll", clock=lambda: 3.0)
+    child_seq = TuiEventSequencer("child-scroll", clock=lambda: 4.0)
+    for index in range(12):
+        root.publish(
+            root_seq.emit(
+                "system_message",
+                "completed",
+                f"root-{index}",
+                {"text": f"root line {index}"},
+            )
+        )
+    for index in range(18):
+        child.publish(
+            child_seq.emit(
+                "system_message",
+                "completed",
+                f"child-{index}",
+                {"text": f"child line {index}"},
+            )
+        )
+    view = make_tui_transcript_view(
+        root,
+        lambda width: TuiRenderContext(width=width),
+    )
+
+    root_content = view.control.create_content(60, 5)
+    view.window._scroll(root_content, 60, 5)
+    assert view.window.vertical_scroll == root_content.line_count - 5
+    view.home()
+    root_home = view.control.create_content(60, 5)
+    view.window._scroll(root_home, 60, 5)
+    assert view.window.vertical_scroll == 0
+
+    view.set_state_store(child)
+    child_content = view.control.create_content(60, 5)
+    view.window._scroll(child_content, 60, 5)
+    assert view.window.vertical_scroll == child_content.line_count - 5
+
+    view.set_state_store(root)
+    restored = view.control.create_content(60, 5)
+    view.window._scroll(restored, 60, 5)
+    assert view.window.vertical_scroll == 0
+
+
 def test_agent_store_switch_restores_each_viewport_without_cross_view_selection() -> None:
     root_store = TuiStateStore()
     child_store = TuiStateStore()

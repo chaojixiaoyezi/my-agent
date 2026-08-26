@@ -564,6 +564,80 @@ def test_conversation_agent_activity_projects_canonical_task_progress(tmp_path: 
     )
 
 
+def test_conversation_activity_projects_only_current_display_generation(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+        task_progress_projection_for_task,
+    )
+    from agent_py_agent.agent.task_progress import (
+        with_task_progress_display_plan,
+        write_task_progress,
+    )
+
+    owner_root = tmp_path / "owner"
+    task_path = str(tmp_path / "project" / "long-task")
+    ledger_id = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
+    write_task_progress(
+        owner_root,
+        ledger_id,
+        with_task_progress_display_plan(
+            {
+                "items": [
+                    {"id": "old", "title": "旧阶段", "status": "done"}
+                ]
+            },
+            generation_id="turn-old",
+            item_ids=["old"],
+        ),
+    )
+    write_task_progress(
+        owner_root,
+        ledger_id,
+        with_task_progress_display_plan(
+            {
+                "items": [
+                    {"id": "new", "title": "当前阶段", "status": "in_progress"}
+                ]
+            },
+            generation_id="turn-new",
+            item_ids=["new"],
+        ),
+    )
+    link = SimpleNamespace(
+        task_id="task-live",
+        task_path=task_path,
+        status="active",
+        created_at=20.0,
+    )
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: ([link], []),
+        load_task_link=lambda _task_id: link,
+    )
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_root),
+        subagents=SimpleNamespace(
+            list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[])
+        ),
+    )
+
+    activity = conversation_agent_activity(agent, store, "thread-progress")
+
+    assert list(activity.task_progress_items) == [
+        {"id": "new", "title": "当前阶段", "status": "in_progress"}
+    ]
+    assert activity.task_progress_generation_id == "turn-new"
+    assert activity.task_progress_plan_revision == 2
+    assert task_progress_projection_for_task(agent, store, "task-live") == (
+        ({"id": "new", "title": "当前阶段", "status": "in_progress"},),
+        "turn-new",
+        2,
+    )
+
+
 def test_task_progress_projection_keeps_workspace_root_when_children_are_newer(
     tmp_path: Path,
 ) -> None:

@@ -19,7 +19,10 @@ from ..runtime_errors import compact_error_message
 from ..settings.config import DEFAULT_EXECUTION_PERSISTENCE
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.role_templates import active_model_subagent_tools
-from .agent_activity import BackgroundMainActivitySink, task_progress_items_for_task
+from .agent_activity import (
+    BackgroundMainActivitySink,
+    task_progress_projection_for_task,
+)
 from .authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
@@ -3630,11 +3633,18 @@ def _record_background_notice(
     if not root or delivery_status not in {"sent", "not_applicable"} or not content:
         return
     try:
-        progress_items = task_progress_items_for_task(
-            agent,
-            store,
-            str(getattr(report, "task_id", "") or ""),
-        ) if agent is not None else ()
+        if agent is not None:
+            (
+                progress_items,
+                progress_generation_id,
+                progress_plan_revision,
+            ) = task_progress_projection_for_task(
+                agent,
+                store,
+                str(getattr(report, "task_id", "") or ""),
+            )
+        else:
+            progress_items, progress_generation_id, progress_plan_revision = (), "", 0
         notices_dir = Path(root) / "notices"
         notices_dir.mkdir(parents=True, exist_ok=True)
         line = _json.dumps(
@@ -3648,6 +3658,8 @@ def _record_background_notice(
                 "created_at": report.created_at,
                 "delivery_status": delivery_status,
                 "task_progress_items": [dict(item) for item in progress_items],
+                "task_progress_generation_id": progress_generation_id,
+                "task_progress_plan_revision": progress_plan_revision,
             },
             ensure_ascii=False,
         )

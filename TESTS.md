@@ -1,5 +1,33 @@
 # TESTS
 
+## 2026-08-25 当前回合 Todo、真实 Window 粘底与 Compact 计数
+
+同一长 conversation 会把完整 task-path 进度账本跨回合保留，但底部 Todo 只能显示当前普通用户回合明确
+写入/派工的项；迟到的上一回合 poll/notice 也不能把旧清单刷回来。主/子页面的 control 锚点必须通过
+prompt_toolkit `Window.get_vertical_scroll` 落到真实窗口，提交有效消息后才能可靠回到底部。定向命令：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_task_progress_advisory.py \
+  agent_py_agent/tests/test_task_progress_tool_dispatch_reconcile.py \
+  agent_py_agent/tests/test_dispatch_progress_seed.py \
+  agent_py_agent/tests/test_conversation_agent_activity.py \
+  agent_py_agent/tests/test_tui_view_model.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_tui_view.py \
+  agent_py_agent/tests/test_tui_agent_navigation.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  agent_py_agent/tests/test_background_notice_display.py \
+  agent_py_agent/tests/test_tool_round_execution.py \
+  agent_py_agent/tests/test_gateway_verbose_progress.py \
+  agent_py_agent/tests/test_tui_worker_paths.py \
+  agent_py_agent/tests/test_background_main_agent_runtime.py -q --tb=short
+```
+
+当前 362 项通过（含 2 项既有 xfail）。另以 95 项 Compact/TUI 组合回归确认：状态条次数只来自成功提交的
+`ConversationThread.compact_generation`；`68k/128k=53%` 低于配置的 `90%` 压缩点（约 115.2k），此时
+`compact 0` 是正确事实，不按屏幕历史长度、临时进度或模型文字推断。
+
 ## 2026-08-25 显式 output_files 祖先冲突必须整批返工
 
 真实 r28 批次同时声明 `/internal`、`/internal/core` 和 `/internal/param`，三个 child 均已启动并在 4 分钟内

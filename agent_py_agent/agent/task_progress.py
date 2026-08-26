@@ -21,6 +21,9 @@ TASK_PROGRESS_STATUS_INVALID = "TASK_PROGRESS_STATUS_INVALID"
 _FACT_FIELDS = ("id", "title", "status", "notes", "result", "outcome", "conclusion", "decision", "summary")
 _RESULT_FIELDS = ("result", "outcome", "conclusion", "decision", "summary")
 _EXPLICIT_OVERWRITE_KEYS = ("correction", "overwrite", "replace")
+_DISPLAY_PLAN_KEY = "display_plan"
+_DISPLAY_PLAN_UPDATE_KEY = "_display_plan_update"
+_DISPLAY_PLAN_MAX_ITEMS = 128
 
 
 @dataclass(frozen=True)
@@ -199,6 +202,9 @@ def normalize_task_progress(payload: dict[str, Any], *, run_id: str) -> dict[str
     ref = str(payload.get("ref") or "").strip()
     if ref:
         normalized["ref"] = ref
+    display_plan = _normalize_display_plan(payload.get(_DISPLAY_PLAN_KEY))
+    if display_plan:
+        normalized[_DISPLAY_PLAN_KEY] = display_plan
     return normalized
 
 
@@ -224,7 +230,124 @@ def merge_task_progress(existing: dict[str, Any], update: dict[str, Any], *, run
         payload["quality_hints"] = hints
     if coverage["targets"] or coverage["goal"] or coverage["dimensions"]:
         payload["coverage"] = coverage
+    display_plan = _merge_display_plan(
+        base.get(_DISPLAY_PLAN_KEY),
+        update.get(_DISPLAY_PLAN_UPDATE_KEY),
+    )
+    if display_plan:
+        payload[_DISPLAY_PLAN_KEY] = display_plan
     return payload
+
+
+# LLM: Only host code may attach this private update key. Model-facing schemas
+# reject it, and merge_task_progress persists a bounded generation/id projection
+# beside (never instead of) the complete durable ledger.
+# 函数用途: 给一次进度写入附上当前回合的 Todo 展示项，不删除历史进度。
+def with_task_progress_display_plan(
+    update: dict[str, Any],
+    *,
+    generation_id: object,
+    item_ids: object,
+) -> dict[str, Any]:
+    generation = str(generation_id or "").strip()[:240]
+    if not generation:
+        return dict(update)
+    values = item_ids if isinstance(item_ids, list | tuple) else ()
+    selected = dedupe_strings(
+        [
+            str(item).strip()[:128]
+            for item in values
+            if str(item or "").strip()
+        ]
+    )[:_DISPLAY_PLAN_MAX_ITEMS]
+    return {
+        **dict(update),
+        _DISPLAY_PLAN_UPDATE_KEY: {
+            "generation_id": generation,
+            "item_ids": selected,
+        },
+    }
+
+
+# LLM: Display consumers receive the current generation's exact ids in durable
+# ledger order. Legacy ledgers without a display_plan keep their previous all-items
+# projection so upgrades do not erase an already running task.
+# 函数用途: 读取当前用户回合应显示的 Todo 子集，历史项仍留在完整账本里。
+def task_progress_display_items(progress: dict[str, Any]) -> list[dict[str, Any]]:
+    normalized = normalize_task_progress(
+        progress,
+        run_id=str(progress.get("run_id") or ""),
+    )
+    items = [dict(item) for item in normalized.get("items", []) if isinstance(item, dict)]
+    plan = _normalize_display_plan(normalized.get(_DISPLAY_PLAN_KEY))
+    if not plan:
+        return items
+    selected_ids = set(plan["item_ids"])
+    return [item for item in items if str(item.get("id") or "") in selected_ids]
+
+
+# LLM: Surfaces need the opaque generation and monotonic plan revision only for
+# stale-projection rejection; neither value controls task lifecycle or completion.
+# 函数用途: 返回 Todo 展示代次和修订号，供 TUI/Web 拒绝上一轮快照。
+def task_progress_display_identity(progress: dict[str, Any]) -> tuple[str, int]:
+    plan = _normalize_display_plan(progress.get(_DISPLAY_PLAN_KEY))
+    if not plan:
+        return "", 0
+    return str(plan["generation_id"]), int(plan["revision"])
+
+
+# LLM: Normalization is intentionally closed over scalars and bounded ids. A
+# malformed projection is ignored while the full task ledger remains readable.
+# 函数用途: 清洗持久化的 Todo 展示计划。
+def _normalize_display_plan(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    generation = str(value.get("generation_id") or "").strip()[:240]
+    if not generation:
+        return {}
+    raw_ids = value.get("item_ids")
+    values = raw_ids if isinstance(raw_ids, list | tuple) else ()
+    item_ids = dedupe_strings(
+        [
+            str(item).strip()[:128]
+            for item in values
+            if str(item or "").strip()
+        ]
+    )[:_DISPLAY_PLAN_MAX_ITEMS]
+    try:
+        revision = max(1, int(value.get("revision") or 1))
+    except (TypeError, ValueError):
+        revision = 1
+    return {
+        "generation_id": generation,
+        "revision": revision,
+        "item_ids": item_ids,
+    }
+
+
+# LLM: A different structured conversation generation replaces only the display
+# id set and advances its revision. Further writes from the same active turn may
+# extend that set without creating another generation; unrelated reconciliation
+# writes carry no private update and preserve it unchanged.
+# 函数用途: 合并 Todo 展示计划，新用户回合换页、同回合继续补项。
+def _merge_display_plan(existing: object, incoming: object) -> dict[str, Any]:
+    current = _normalize_display_plan(existing)
+    update = _normalize_display_plan(incoming)
+    if not update:
+        return current
+    if not current or current["generation_id"] != update["generation_id"]:
+        return {
+            **update,
+            "revision": int(current.get("revision") or 0) + 1,
+        }
+    merged_ids = dedupe_strings(
+        [*current["item_ids"], *update["item_ids"]]
+    )[:_DISPLAY_PLAN_MAX_ITEMS]
+    return {
+        "generation_id": current["generation_id"],
+        "revision": current["revision"] + (merged_ids != current["item_ids"]),
+        "item_ids": merged_ids,
+    }
 
 
 def normalize_coverage(payload: dict[str, Any]) -> dict[str, Any]:
@@ -734,7 +857,10 @@ __all__ = [
     "read_task_progress",
     "read_task_progress_report",
     "task_progress_summary",
+    "task_progress_display_identity",
+    "task_progress_display_items",
     "invalid_item_statuses",
     "invalid_coverage_statuses",
     "write_task_progress",
+    "with_task_progress_display_plan",
 ]

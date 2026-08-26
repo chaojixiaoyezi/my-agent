@@ -278,15 +278,24 @@ class TuiAgentNavigationState:
         }
         runtime.update_background_activity(
             0 if terminal else 1,
-            compact_count=max(0, _safe_int(row.get("compact_count"))),
-            main_activity=main_activity,
-            subagents=children,
-            task_progress_items=payload.get("task_progress_items"),
-            hidden_subagent_count=max(0, _safe_int(payload.get("hidden_child_count"))),
-            projection_ok=True,
-            task_progress_projection_ok=isinstance(
-                payload.get("task_progress_items"), list | tuple
-            ),
+            {
+                "compact_count": max(0, _safe_int(row.get("compact_count"))),
+                "main_activity": main_activity,
+                "subagents": children,
+                "task_progress": {
+                    "items": payload.get("task_progress_items"),
+                    "generation_id": payload.get("task_progress_generation_id"),
+                    "plan_revision": payload.get("task_progress_plan_revision"),
+                },
+                "hidden_subagent_count": max(
+                    0,
+                    _safe_int(payload.get("hidden_child_count")),
+                ),
+                "projection_ok": True,
+                "task_progress_projection_ok": isinstance(
+                    payload.get("task_progress_items"), list | tuple
+                ),
+            },
         )
         with self._lock:
             self._event_cursors[selected] = max(

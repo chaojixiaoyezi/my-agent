@@ -233,6 +233,7 @@ class TuiTranscriptControl(UIControl):
         self.follow = True
         self.cursor_line = 0
         self._line_count = 1
+        self._last_render_height = 1
         self._unseen_baseline: frozenset[str] | None = None
         self._unseen_block_ids: frozenset[str] = frozenset()
         self._selection: TuiTextSelection | None = None
@@ -259,7 +260,6 @@ class TuiTranscriptControl(UIControl):
     # LLM: create_content 每次只取共享 frame 引用，不拼整份字符串；空 transcript 仍返回一行合法 UIContent。
     # 函数用途: 生成 prompt_toolkit 当前宽度的行访问器和滚动光标。
     def create_content(self, width: int, height: int) -> UIContent:
-        del height
         lines = self.provider.frame(width).transcript_lines or ((),)
         visible_block_ids = _counted_message_block_ids(
             self.provider.state_store.snapshot()
@@ -272,6 +272,7 @@ class TuiTranscriptControl(UIControl):
             self._selection_width = width
             self._last_lines = tuple(lines)
             self._line_count = len(lines)
+            self._last_render_height = max(1, int(height or 1))
             if self.follow:
                 self.cursor_line = len(lines) - 1
                 self._unseen_baseline = None
@@ -289,6 +290,17 @@ class TuiTranscriptControl(UIControl):
             cursor_position=Point(x=0, y=cursor_line),
             show_cursor=False,
         )
+
+    # LLM: The non-focusable normal Window cannot reliably infer a newly restored
+    # page's top row from its previous internal scroll. This callback derives the
+    # top row only from this control's typed anchor and current render height.
+    # 函数用途: 每帧把主/子代理各自的滚动锚点落实到真实 Window，跟随时固定在页底。
+    def preferred_vertical_scroll(self, _window: Window) -> int:
+        with self._lock:
+            line_count = max(1, self._line_count)
+            height = max(1, self._last_render_height)
+            anchor = max(0, min(line_count - 1, self.cursor_line))
+        return max(0, min(line_count - height, anchor - height + 1))
 
     # LLM: inline Application 需要内容的真实 preferred height；上限由 prompt_toolkit 可用高度裁剪，不复制行正文。
     # 函数用途: 让短 transcript 紧贴输入框，长 transcript 使用当前终端可用区域。
@@ -638,6 +650,7 @@ def make_tui_transcript_view(
     control = TuiTranscriptControl(provider)
     window = Window(
         content=control,
+        get_vertical_scroll=control.preferred_vertical_scroll,
         wrap_lines=False,
         dont_extend_height=True,
         always_hide_cursor=True,
@@ -647,6 +660,7 @@ def make_tui_transcript_view(
     modal_control = TuiTranscriptControl(provider)
     modal_window = Window(
         content=modal_control,
+        get_vertical_scroll=modal_control.preferred_vertical_scroll,
         wrap_lines=False,
         dont_extend_height=False,
         always_hide_cursor=True,

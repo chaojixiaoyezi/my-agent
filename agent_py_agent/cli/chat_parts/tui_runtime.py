@@ -6,7 +6,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ...agent.common.opaque_id import validate_opaque_id
@@ -331,6 +331,38 @@ class _TuiPermissionController:
         )
 
 
+# LLM: This projection is a sanitized, display-only Todo snapshot. Generation
+# and revision reject stale UI updates but never control durable task lifecycle.
+# 类用途: 把 Todo 行、是否已知、所属用户回合和计划修订号作为一个不可拆分的显示值。
+@dataclass(frozen=True)
+class _TuiTaskProgressProjection:
+    items: tuple[dict[str, object], ...] = ()
+    known: bool = False
+    generation_id: str = ""
+    plan_revision: int = 0
+
+
+# LLM: Controller state is replaced atomically under the owning runtime lock so
+# activity rows, Todo projection, counters, and visibility cannot mix poll frames.
+# 类用途: 保存底部 Working 区一次完整、已清洗的界面状态。
+@dataclass(frozen=True)
+class _TuiBackgroundActivityState:
+    count: int = 0
+    started_at: float = 0.0
+    compact_count: int = 0
+    main_activity: dict[str, object] = field(default_factory=dict)
+    subagents: tuple[dict[str, object], ...] = ()
+    task_progress: _TuiTaskProgressProjection = field(
+        default_factory=_TuiTaskProgressProjection
+    )
+    hidden_subagent_count: int = 0
+
+    # LLM: Visibility is a pure display derivation; it cannot close or revive a task.
+    # 函数用途: 判断底部 Working 区当前是否应挂在界面上。
+    def visible(self) -> bool:
+        return bool(self.count > 0 or self.main_activity or self.subagents)
+
+
 # LLM: This controller is runtime-owned and only factors the removable
 # background display state out of TuiRuntime; it shares the runtime lock,
 # sequencer, and store and must never become a second activity authority.
@@ -340,21 +372,14 @@ class _TuiBackgroundActivityController:
     # 函数用途: 绑定唯一 TuiRuntime，并初始化空闲显示状态。
     def __init__(self, owner: TuiRuntime) -> None:
         self._owner = owner
-        self._count = 0
-        self._started_at = 0.0
-        self._main_activity: dict[str, object] = {}
-        self._subagents: tuple[dict[str, object], ...] = ()
-        self._task_progress_items: tuple[dict[str, object], ...] = ()
-        self._task_progress_known = False
-        self._hidden_subagent_count = 0
-        self._compact_count = 0
+        self._state = _TuiBackgroundActivityState()
 
     # LLM: Poll cadence may read only the typed count already accepted by this controller. The
     # value is display liveness, not task scheduling or completion authority.
     # 函数用途: 返回最近一次有效活动快照是否表明还有后台主任务。
     def is_active(self) -> bool:
         with self._owner._lock:
-            return self._count > 0
+            return self._state.count > 0
 
     # LLM: Count, one focused-agent row, and direct-child rows share one display
     # projection. A valid zero count retains terminal rows for read-only
@@ -363,101 +388,33 @@ class _TuiBackgroundActivityController:
     def update(
         self,
         active_task_count: int,
-        *,
-        compact_count: int | None = None,
-        main_activity: object | None = None,
-        subagents: object | None = None,
-        task_progress_items: object | None = None,
-        hidden_subagent_count: int = 0,
-        projection_ok: bool = True,
-        task_progress_projection_ok: bool = True,
+        snapshot: object | None = None,
     ) -> bool:
         count = max(0, int(active_task_count or 0))
-        next_compact_count = (
-            self._compact_count
-            if compact_count is None
-            else max(0, int(compact_count or 0))
-        )
         owner = self._owner
         block_id = f"background-activity:{owner.session_id}"
         with owner._lock:
-            if main_activity is not None:
-                next_main_activity = _normalize_main_activity(main_activity)
-            elif count > 0:
-                next_main_activity = self._main_activity
-            else:
-                next_main_activity = {}
-            if projection_ok and subagents is not None:
-                next_subagents = _normalize_subagent_activity_rows(subagents)
-                next_hidden_count = max(0, int(hidden_subagent_count or 0))
-            elif count > 0:
-                next_subagents = self._subagents
-                next_hidden_count = self._hidden_subagent_count
-            else:
-                next_subagents = ()
-                next_hidden_count = 0
-            if task_progress_projection_ok and task_progress_items is not None:
-                next_task_progress_items = _normalize_task_progress_items(
-                    task_progress_items
-                )
-                next_task_progress_known = True
-            else:
-                next_task_progress_items = self._task_progress_items
-                next_task_progress_known = self._task_progress_known
-            was_visible = bool(
-                self._count > 0 or self._main_activity or self._subagents
-            )
-            is_visible = bool(count > 0 or next_main_activity or next_subagents)
-            if (
-                count == self._count
-                and next_main_activity == self._main_activity
-                and next_subagents == self._subagents
-                and next_task_progress_items == self._task_progress_items
-                and next_task_progress_known == self._task_progress_known
-                and next_hidden_count == self._hidden_subagent_count
-                and next_compact_count == self._compact_count
-            ):
+            current = self._state
+            next_state = _next_background_activity_state(current, count, snapshot)
+            if next_state == current:
                 return False
-            if not was_visible and is_visible:
-                self._started_at = time.time()
+            if not current.visible() and next_state.visible():
+                next_state = replace(next_state, started_at=time.time())
                 kind, phase = "background_activity_started", "started"
-            elif is_visible:
+            elif next_state.visible():
                 kind, phase = "background_activity_updated", "updated"
             else:
                 kind, phase = "background_activity_completed", "completed"
-            self._count = count
-            self._main_activity = next_main_activity
-            self._subagents = next_subagents
-            self._task_progress_items = next_task_progress_items
-            self._task_progress_known = next_task_progress_known
-            self._hidden_subagent_count = next_hidden_count
-            self._compact_count = next_compact_count
-            context_usage = next_main_activity.get("context_usage")
+            self._state = next_state
             owner._publish(
                 kind,
                 phase,
                 block_id,
-                {
-                    "active_task_count": count,
-                    "compact_count": next_compact_count,
-                    "started_at": self._started_at,
-                    "main_activity": dict(next_main_activity),
-                    "subagents": [dict(row) for row in next_subagents],
-                    **_task_progress_payload(
-                        next_task_progress_items,
-                        known=next_task_progress_known,
-                    ),
-                    "hidden_subagent_count": next_hidden_count,
-                    **(
-                        {"context_usage": dict(context_usage)}
-                        if isinstance(context_usage, dict)
-                        else {}
-                    ),
-                },
+                _background_activity_payload(next_state),
                 request_id=f"background:{owner.session_id}",
             )
-            if not is_visible:
-                self._started_at = 0.0
+            if not next_state.visible():
+                self._state = replace(next_state, started_at=0.0)
         return True
 
 
@@ -495,6 +452,94 @@ _SUBAGENT_ACTIVITY_FIELDS = frozenset(
         "ended_at",
     }
 )
+
+
+# LLM: Poll snapshots are normalized as one frame. Missing fields retain active
+# values only where the prior contract did; invalid subagent/progress projections
+# cannot clear a known-good frame.
+# 函数用途: 将一次 Gateway/本地活动轮询整理成下一份原子底部状态。
+def _next_background_activity_state(
+    current: _TuiBackgroundActivityState,
+    count: int,
+    value: object,
+) -> _TuiBackgroundActivityState:
+    snapshot = value if isinstance(value, Mapping) else {}
+    compact_count = (
+        current.compact_count
+        if snapshot.get("compact_count") is None
+        else _nonnegative_int(snapshot.get("compact_count"))
+    )
+    main_value = snapshot.get("main_activity")
+    main_activity = (
+        _normalize_main_activity(main_value)
+        if main_value is not None
+        else current.main_activity if count > 0 else {}
+    )
+    if snapshot.get("projection_ok", True) is not False and snapshot.get(
+        "subagents"
+    ) is not None:
+        subagents = _normalize_subagent_activity_rows(snapshot.get("subagents"))
+        hidden_count = _nonnegative_int(snapshot.get("hidden_subagent_count"))
+    elif count > 0:
+        subagents = current.subagents
+        hidden_count = current.hidden_subagent_count
+    else:
+        subagents, hidden_count = (), 0
+    task_progress = current.task_progress
+    if snapshot.get("task_progress_projection_ok", True) is not False:
+        projected = _normalize_task_progress_projection(snapshot.get("task_progress"))
+        if projected is not None:
+            task_progress = projected
+    return _TuiBackgroundActivityState(
+        count=count,
+        started_at=current.started_at,
+        compact_count=compact_count,
+        main_activity=main_activity,
+        subagents=subagents,
+        task_progress=task_progress,
+        hidden_subagent_count=hidden_count,
+    )
+
+
+# LLM: A progress frame is valid only when it explicitly contains a typed list;
+# empty is authoritative, while absent/wrongly typed remains unknown to callers.
+# 函数用途: 清洗一份带回合标识的 Todo 投影，保留明确空列表语义。
+def _normalize_task_progress_projection(
+    value: object,
+) -> _TuiTaskProgressProjection | None:
+    if not isinstance(value, Mapping) or not isinstance(
+        value.get("items"), list | tuple
+    ):
+        return None
+    return _TuiTaskProgressProjection(
+        items=_normalize_task_progress_items(value.get("items")),
+        known=True,
+        generation_id=str(value.get("generation_id") or "").strip()[:240],
+        plan_revision=_nonnegative_int(value.get("plan_revision")),
+    )
+
+
+# LLM: Event payload construction reads one immutable state and exposes only the
+# same bounded public fields accepted by the reducer.
+# 函数用途: 将底部 Working 状态转换成单条 typed TUI 事件。
+def _background_activity_payload(
+    state: _TuiBackgroundActivityState,
+) -> dict[str, object]:
+    context_usage = state.main_activity.get("context_usage")
+    return {
+        "active_task_count": state.count,
+        "compact_count": state.compact_count,
+        "started_at": state.started_at,
+        "main_activity": dict(state.main_activity),
+        "subagents": [dict(row) for row in state.subagents],
+        **_task_progress_payload(state.task_progress),
+        "hidden_subagent_count": state.hidden_subagent_count,
+        **(
+            {"context_usage": dict(context_usage)}
+            if isinstance(context_usage, dict)
+            else {}
+        ),
+    }
 
 
 # LLM: Main activity is an authenticated scalar-only Gateway projection. Nested
@@ -553,13 +598,15 @@ def _normalize_task_progress_items(value: object) -> tuple[dict[str, object], ..
 # list so the reducer can clear stale state.
 # 函数用途: 生成 Todo 快照事件字段，并保留“没数据”和“明确为空”的区别。
 def _task_progress_payload(
-    items: tuple[dict[str, object], ...],
-    *,
-    known: bool,
+    projection: _TuiTaskProgressProjection,
 ) -> dict[str, object]:
-    if not known:
+    if not projection.known:
         return {}
-    return {"task_progress_items": [dict(row) for row in items]}
+    return {
+        "task_progress_items": [dict(row) for row in projection.items],
+        "task_progress_generation_id": projection.generation_id,
+        "task_progress_plan_revision": projection.plan_revision,
+    }
 
 
 # LLM: Periodic animation is enabled only by typed task_progress status; titles and
@@ -624,43 +671,71 @@ class _TuiBackgroundActivityRuntimeMixin:
     def update_background_activity(
         self,
         active_task_count: int,
-        *,
-        compact_count: int | None = None,
-        main_activity: object | None = None,
-        subagents: object | None = None,
-        task_progress_items: object | None = None,
-        hidden_subagent_count: int = 0,
-        projection_ok: bool = True,
-        task_progress_projection_ok: bool = True,
+        snapshot: object | None = None,
     ) -> bool:
-        return self._background_activity.update(
-            active_task_count,
-            compact_count=compact_count,
-            main_activity=main_activity,
-            subagents=subagents,
-            task_progress_items=task_progress_items,
-            hidden_subagent_count=hidden_subagent_count,
-            projection_ok=projection_ok,
-            task_progress_projection_ok=task_progress_projection_ok,
-        )
+        return self._background_activity.update(active_task_count, snapshot)
 
     # LLM: A final background notice may arrive after the active-task block was
     # removed. A typed empty sequence is an authoritative clear, while a value
     # of the wrong type is absent/invalid and must not disturb the last snapshot.
     # 函数用途: 在后台最终回复显示前替换清单；明确空清单会清掉过期 Todo。
-    def publish_task_progress_snapshot(self, items: object) -> bool:
+    def publish_task_progress_snapshot(
+        self,
+        items: object,
+        *,
+        generation_id: object = "",
+        plan_revision: object = 0,
+    ) -> bool:
         if not isinstance(items, list | tuple):
             return False
         normalized = _normalize_task_progress_items(items)
+        normalized_generation = str(generation_id or "").strip()[:240]
+        normalized_revision = _nonnegative_int(plan_revision)
+        projection = _TuiTaskProgressProjection(
+            items=normalized,
+            known=True,
+            generation_id=normalized_generation,
+            plan_revision=normalized_revision,
+        )
         with self._lock:
-            self._background_activity._task_progress_items = normalized
-            self._background_activity._task_progress_known = True
+            self._background_activity._state = replace(
+                self._background_activity._state,
+                task_progress=projection,
+            )
             self._publish(
                 "task_progress_snapshot",
                 "updated",
                 f"task-progress:{self.session_id}",
-                {"task_progress_items": [dict(row) for row in normalized]},
+                _task_progress_payload(projection),
                 request_id=f"task-progress:{self.session_id}",
+            )
+        return True
+
+    # LLM: A dequeued ordinary turn is the only client event allowed to replace
+    # the visible Todo generation. It clears presentation immediately but does
+    # not mutate the durable task_progress ledger or decide task completion.
+    # 函数用途: 新一轮用户任务开始时清掉上一轮清单，并登记接下来只接收哪一代快照。
+    def activate_task_progress_generation(self, generation_id: object) -> bool:
+        normalized = str(generation_id or "").strip()[:240]
+        if not normalized:
+            return False
+        with self._lock:
+            self._background_activity._state = replace(
+                self._background_activity._state,
+                task_progress=_TuiTaskProgressProjection(
+                    known=True,
+                    generation_id=normalized,
+                ),
+            )
+            self._publish(
+                "task_progress_generation_started",
+                "started",
+                f"task-progress-generation:{self.session_id}",
+                {
+                    "task_progress_generation_id": normalized,
+                    "task_progress_plan_revision": 0,
+                },
+                request_id=normalized,
             )
         return True
 
@@ -1090,7 +1165,12 @@ class TuiRuntime(_TuiBackgroundActivityRuntimeMixin):
 
     # LLM: begin_turn 每 request 只创建一次 adapter，重复 worker dequeue 返回同对象但不重放 turn_started。
     # 函数用途: 从队列切换为运行中回合，并启动 thinking 活动块。
-    def begin_turn(self, request_id: str) -> TuiTurnEventAdapter:
+    def begin_turn(
+        self,
+        request_id: str,
+        *,
+        task_progress_generation_id: str = "",
+    ) -> TuiTurnEventAdapter:
         normalized = _required_request_id(request_id)
         with self._lock:
             existing = self._turns.get(normalized)
@@ -1109,6 +1189,9 @@ class TuiRuntime(_TuiBackgroundActivityRuntimeMixin):
                 self._queued_prompts.pop(queue_id, None)
             adapter = TuiTurnEventAdapter(self, normalized)
             self._turns[normalized] = adapter
+            self.activate_task_progress_generation(
+                task_progress_generation_id or normalized
+            )
             adapter.start()
             return adapter
 
@@ -1908,6 +1991,8 @@ def _tool_payload(progress: dict[str, Any]) -> dict[str, Any]:
         # 白名单漏掉导致 TUI todo 面板永远收不到数据。必须与 reducer 的
         # _update_todo_block 消费端对齐。
         "task_progress_items",
+        "task_progress_generation_id",
+        "task_progress_plan_revision",
     }
     payload = {key: progress[key] for key in allowed if key in progress}
     if str(progress.get("phase") or "").strip().lower() == "started" and progress.get("detail"):
