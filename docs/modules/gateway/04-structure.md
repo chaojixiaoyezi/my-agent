@@ -137,7 +137,9 @@ audit Agent 为空而回退 daemon cwd。
   `子代理运行中 N`；该数字不进入 Todo 完成数、不写回 ledger，也不从展示文案猜关联。
 - transcript 的 `follow` 仍是每个 main/child viewport 的 process-local 展示状态：被动事件仅在原本位于尾部
   时自动推进，用户上翻后保留阅读位置。一次通过输入长度与 child 只读检查的真实提交则复用唯一 `end()`
-  显式 return-to-live；无效输入不能移动 viewport，命令/消息也不创建第二个滚动事实源。
+  显式 return-to-live；空输入且当前 viewport 已离尾时，`Down` 同样先复用该 `end()`，已经贴底时才进入
+  child selection/history。按键层只读 typed `follow`，不解析未读提示文案；无效输入不能移动 viewport，
+  命令/消息也不创建第二个滚动事实源。
 
 ## 回合终态与 Compact 进度投影
 

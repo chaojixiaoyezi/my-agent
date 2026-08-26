@@ -17,6 +17,18 @@
 
 ## 下一版优先级
 
+### 空输入 ↓ 返回未读消息尾部
+
+状态：本地候选 73 项 focused、语法、changed-file Ruff 与 diff check 通过；待 r37 长任务终态后部署真 TUI
+
+解决问题：当前主/子代理正文离开底部后会正确保留阅读位置并显示 `N new messages ↓`，但输入为空时普通
+`↓` 先进入 child 选择/history，无法像用户预期一样回到最新消息；只有 `Ctrl+End` 能到达。
+
+当前进展：复用每个 viewport 既有 typed `follow` 和唯一 `end()`；输入有字时编辑器行为不变，空输入且离尾
+时第一次 `↓` 先回底，已经贴底时才继续选择 child/history。实现不解析 footer 文案、不合并 main/child
+滚动状态，也不改 Gateway 消息、会话历史或任务状态。当前 r37 仍在真实长任务中，必须先让它自然终态，再
+快进部署唯一 Gateway，用 fresh TUI 验证“离尾→新消息→↓回底→再次↓选择 child”。
+
 ### 跨回合工具终态折叠与缓存稳定前缀
 
 状态：`7b14e34` + `ff94d61` 已推送、部署并完成 `.7` 单 Gateway 原长 TUI；该切片已完成

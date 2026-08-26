@@ -1,5 +1,24 @@
 # TESTS
 
+## 2026-08-26 空输入 ↓ 返回当前视口最新消息
+
+真实 TUI `ma-tool-progress-r37-mario` 已先复现：进入 child 后 `Ctrl+Home`，等待新事件出现
+`1 new message ↓`；`Ctrl+End` 能回底，普通 `↓` 无动作。回归必须分别证明：输入有字时仍按 ASCII/CJK
+视觉折行移动；空输入且 `follow=false` 时第一次 `↓` 只调用当前 main/child 的统一 `end()`，不移动 child
+selection；`follow=true` 时下一次 `↓` 仍能选择 child。当前定向命令：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_tui_input.py \
+  agent_py_agent/tests/test_tui_view.py \
+  agent_py_agent/tests/test_tui_agent_navigation.py \
+  agent_py_agent/tests/test_tui_prompt_toolkit_pipe.py \
+  -q --tb=short
+```
+
+本地 73 项已通过，并通过 changed-file 语法、Ruff 与 `git diff --check`；真机仍须等现有长任务终态后只重启
+唯一 Gateway，再由 fresh TUI 验证真实键序列，旧进程里的已加载按键不能作为新代码证据。
+
 ## 2026-08-26 大工具参数生成期间的脱敏 TUI 进度
 
 目标：证明 Anthropic `input_json_delta` 在完整 tool_use 形成前也能给用户持续的计数反馈，同时绝不泄露

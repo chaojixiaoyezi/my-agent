@@ -1,5 +1,17 @@
 # STATUS
 
+## 2026-08-26 空输入 ↓ 优先返回最新消息（本地候选，待长任务终态后部署）
+
+- `.7` 的 `ma-tool-progress-r37-mario` 在 child 详情页用 `Ctrl+Home` 离尾后，新事件到达时正确保留旧位置并
+  显示 `1 new message ↓`；`Ctrl+End` 能回底，但普通 `↓` 被 child 选择/history 分支提前消费，用户看起来像
+  是“提示有新消息却下不去”。这不是历史丢失，也不是 Gateway 消息未送达。
+- 对照 终端交互 的单一 sticky scroll/`scrollToBottom` 和 会话运行时 的 editor/pager 分层后，当前候选保留输入
+  有字时的视觉折行、逻辑行和 history；只有输入为空且当前 main/child viewport 的 typed `follow=false` 时，
+  第一次 `↓` 复用现有 `end()`，优先回到最新消息。已经在尾部时，`↓` 仍选择 child 或浏览历史。
+- 按键层不解析 `N new messages` 文案或未读计数；普通/详情视图经唯一 `is_following()` 读取当前视口事实。
+  4 个直接相关文件当前 73 项 focused、语法、changed-file Ruff 与 diff check 已通过；待 r37 长任务自然终态
+  后快进部署唯一 Gateway，再用 fresh TUI 复现“离尾→新消息→↓回底→再次↓选择 child”。
+
 ## 2026-08-26 大工具参数生成期可见进度（已部署并通过真 TUI）
 
 - `.7` 的 `ma-cache-firstturn-r34` 在 Click→TypeScript 长任务中抓到：`source-reader-1` 说“开始写第一块”后

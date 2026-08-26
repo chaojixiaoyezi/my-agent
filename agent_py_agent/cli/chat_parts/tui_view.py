@@ -315,6 +315,12 @@ class TuiTranscriptControl(UIControl):
         line_count = len(self.provider.frame(width).transcript_lines) or 1
         return min(line_count, max(1, int(max_available_height or 1)))
 
+    # LLM: 按键路由可以读取既有视口 follow 位，但不能从 footer 文案、光标坐标或未读数量反推该状态。
+    # 函数用途: 告诉输入按键层当前正文页是否正在跟随最新消息，不改变滚动位置。
+    def is_following(self) -> bool:
+        with self._lock:
+            return bool(self.follow)
+
     # LLM: Upward/manual movement breaks sticky-tail, while a downward move that reaches the
     # current last rendered line restores it. This mirrors 终端交互's isSticky contract and
     # must clear unseen state without relying on footer text.
@@ -599,6 +605,11 @@ class TuiTranscriptView:
     # 函数用途: 取得当前可见 transcript 的滚动锚点。
     def current_line(self) -> int:
         return self._active_control().current_line()
+
+    # LLM: 普通与详情正文模式只暴露一个当前视口 follow 事实；调用方必须经此入口读取，不能直接探入两个 control。
+    # 函数用途: 返回当前可见主/子代理正文是否贴着最新消息，供统一按键路由判断。
+    def is_following(self) -> bool:
+        return self._active_control().is_following()
 
     # LLM: Ctrl-C 只能读取当前普通/modal viewport 的选区；空选区必须让上层继续走中断或退出语义。
     # 函数用途: 返回当前可见 transcript 的鼠标选中文本。

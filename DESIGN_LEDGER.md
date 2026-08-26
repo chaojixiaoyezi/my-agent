@@ -242,7 +242,9 @@
   `N new messages ↓` 是带 typed mouse handler 的按钮，左键释放与 Ctrl-End 共用 `move_end()` 恢复 follow-tail，
   不从显示文字反向解析未读状态。被动到达的新输出不得抢走用户正在阅读的位置；但一次通过长度/只读门的
   真实用户提交是明确的 return-to-live 动作，必须对当前 main/child viewport 调用同一 `end()`，让这条用户
-  消息和后续回复立即可见。空输入、超限消息与终态 child 的拒绝输入不能借此改变滚动位置。
+  消息和后续回复立即可见。空输入且当前 viewport 已离尾时，第一次 `Down` 也必须先复用同一 `end()` 返回
+  最新消息；已经跟随尾部时才继续选择 child 或浏览较新 history。该优先级只读 typed `follow`，不能解析
+  `N new messages` 文案；超限消息与终态 child 的拒绝输入不能借此改变滚动位置。
 - 工具是否展示给模型与能否执行必须共用一次 `ToolRegistry.runtime_snapshot`。像 `send_message` 这类依赖
   当前 owner 外部通道的工具，availability 必须在每轮用结构化 provider/target/root/capability 判定；没有
   proactive route 时从 schema、tool search 和调用快照同时移除，但实现仍留在唯一 registry。不能先暴露

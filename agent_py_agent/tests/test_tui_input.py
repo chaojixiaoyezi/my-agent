@@ -243,6 +243,74 @@ def test_up_down_moves_across_soft_wrapped_rows_before_history() -> None:
     assert buffer.cursor_position == 5
 
 
+def test_empty_down_returns_detached_transcript_live_before_agent_selection() -> None:
+    input_area = TextArea(multiline=True)
+    end_calls: list[bool] = []
+    selection_moves: list[int] = []
+    redraws: list[bool] = []
+    params = SimpleNamespace(
+        input_area=input_area,
+        transcript_area=SimpleNamespace(
+            is_following=lambda: False,
+            end=lambda: end_calls.append(True),
+        ),
+        transcript_follow_ref=[False],
+        agent_navigation=SimpleNamespace(
+            move_selection=lambda delta: selection_moves.append(delta) or True,
+        ),
+        exit_armed_at_ref=[1.0],
+        eof_armed_at_ref=[1.0],
+        escape_armed_at_ref=[1.0],
+        escape_armed_text_ref=[""],
+    )
+    event = SimpleNamespace(
+        arg=1,
+        app=SimpleNamespace(invalidate=lambda: redraws.append(True)),
+    )
+
+    tui_keybindings._handle_down_keybinding(event, params)
+
+    assert end_calls == [True]
+    assert selection_moves == []
+    assert params.transcript_follow_ref == [True]
+    assert params.exit_armed_at_ref == [0.0]
+    assert redraws == [True]
+
+
+def test_empty_down_at_live_tail_still_selects_child_agent() -> None:
+    input_area = TextArea(multiline=True)
+    end_calls: list[bool] = []
+    selection_moves: list[int] = []
+    redraws: list[bool] = []
+    params = SimpleNamespace(
+        input_area=input_area,
+        transcript_area=SimpleNamespace(
+            is_following=lambda: True,
+            end=lambda: end_calls.append(True),
+        ),
+        transcript_follow_ref=[True],
+        agent_navigation=SimpleNamespace(
+            move_selection=lambda delta: selection_moves.append(delta) or True,
+        ),
+        exit_armed_at_ref=[1.0],
+        eof_armed_at_ref=[1.0],
+        escape_armed_at_ref=[1.0],
+        escape_armed_text_ref=[""],
+    )
+    event = SimpleNamespace(
+        arg=1,
+        app=SimpleNamespace(invalidate=lambda: redraws.append(True)),
+    )
+
+    tui_keybindings._handle_down_keybinding(event, params)
+
+    assert end_calls == []
+    assert selection_moves == [1]
+    assert params.transcript_follow_ref == [True]
+    assert params.exit_armed_at_ref == [0.0]
+    assert redraws == [True]
+
+
 def test_wrapped_cursor_navigation_uses_terminal_width_for_cjk() -> None:
     buffer = Buffer()
     buffer.set_document(Document("甲乙丙丁", cursor_position=1), bypass_readonly=True)

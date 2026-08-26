@@ -1,5 +1,14 @@
 # Gateway Progress
 
+## 2026-08-26 空输入 ↓ 返回当前视口尾部（本地候选）
+
+- r37 真 TUI 的 child 视图证明 canonical 历史和新事件都在：`Ctrl+Home` 离尾后出现 `1 new message ↓`，
+  `Ctrl+End` 可达最新消息；缺口仅是普通 `↓` 被空输入的 child/history 导航提前消费。
+- 当前候选让普通和详情 transcript 通过唯一 `is_following()` 暴露 typed follow 位。输入为空且离尾时，
+  `↓` 复用既有 `end()`；已贴底或输入有字时保持原编辑、selection 和 history 行为。
+- 该改动只影响本地 TUI 展示状态，不读 footer 文案，不改 Gateway、ConversationStore、消息投递、Compact
+  或任务控制。4 个相关测试文件 73 项及语法/Ruff/diff 已通过，待现有长任务终态后单 Gateway 真机复验。
+
 ## 2026-08-26 provider 大工具参数临时进度（已部署真机验证）
 
 - 真 TUI 已把“约 4 分钟没事件但 TLS 持续收包”收敛为 Anthropic parser 的完整块缓冲，而不是 Gateway

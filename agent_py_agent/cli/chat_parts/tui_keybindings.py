@@ -1921,12 +1921,16 @@ def _dispatch_active_interrupt(event, params: TuiCreateKeybindingsParams) -> Non
     event.app.invalidate()
 
 
-# LLM: Down 必须先按当前渲染宽度走软折视觉行；到视觉底边后才委托 Buffer 处理下一逻辑行或较新 history。
-# 函数用途: 在屏幕折出的第 2、3 行间向下移动，到末行后再回到较新的历史或原草稿。
+# LLM: Down 保留编辑器导航；但输入框为空且正文已离尾时，必须先回到实时尾部，再处理子代理选择或历史。
+# 函数用途: 输入有字时逐视觉行向下；输入为空且正在看旧消息时，先回到最新消息，再允许选择子代理。
 def _handle_down_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     buffer = params.input_area.buffer
     if buffer.complete_state is not None:
         move_completion_selection(buffer, event.arg)
+        event.app.invalidate()
+        return
+    if not str(buffer.text or "") and _return_detached_transcript_to_live(params):
+        _reset_exit_arms(params)
         event.app.invalidate()
         return
     if not str(buffer.text or ""):
@@ -1948,6 +1952,17 @@ def _handle_down_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
         event.app.invalidate()
         return
     buffer.auto_down(count=event.arg)
+
+
+# LLM: 当前视口的 typed follow 位是唯一优先级事实；footer 文案和未读数量都只是展示，禁止在这里反向解析。
+# 函数用途: 空输入按下方向键时，如果用户正停在旧消息，就复用统一跳底入口并报告已处理。
+def _return_detached_transcript_to_live(params: TuiCreateKeybindingsParams) -> bool:
+    area = getattr(params, "transcript_area", None)
+    following = getattr(area, "is_following", None)
+    if not callable(following) or bool(following()):
+        return False
+    _scroll_transcript_end(params)
+    return True
 
 
 # LLM: Ctrl-P/N 与箭头共用 completion index；菜单关闭时退回 Buffer 历史/多行移动，不建立第二导航状态。

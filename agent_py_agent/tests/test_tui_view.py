@@ -64,13 +64,16 @@ def test_manual_scroll_anchor_does_not_jump_when_new_event_arrives() -> None:
     control = TuiTranscriptControl(provider)
     first = control.create_content(40, 5)
     assert first.cursor_position.y == first.line_count - 1
+    assert control.is_following() is True
     control.move(-4)
     anchored = control.create_content(40, 5).cursor_position.y
+    assert control.is_following() is False
     assert control.scroll_indicator() == "Jump to bottom"
     store.publish(seq.emit("system_message", "completed", "system-new", {"text": "new"}))
     after = control.create_content(40, 5)
     assert after.cursor_position.y == anchored
     control.move_end()
+    assert control.is_following() is True
     assert control.create_content(40, 5).cursor_position.y == after.line_count - 1
     assert control.scroll_indicator() is None
 
