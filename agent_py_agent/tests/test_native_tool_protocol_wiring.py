@@ -11,7 +11,14 @@ from agent_py_agent.agent.agent_core.native_tool_protocol import (
     resolve_native_tools,
     select_tool_protocol,
 )
-from agent_py_agent.agent.tooling.models import ToolModelSpec
+from agent_py_agent.agent.model_guidance import ACTION_AUTHORIZATION_GUIDANCE
+from agent_py_agent.agent.tooling.models import (
+    EffectResolverPolicy,
+    ToolModelSpec,
+    ToolRuntime,
+    ToolRuntimePolicy,
+    ToolRuntimeSnapshot,
+)
 from agent_py_agent.agent.tooling.registry import _tool_call_protocol
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 
@@ -276,3 +283,84 @@ def test_resolve_native_tools_uses_typed_discovery_state():
             "runtime_snapshot": "snapshot",
         }
     ]
+
+
+class _SnapshotRegistry:
+    def __init__(self, snapshot: ToolRuntimeSnapshot) -> None:
+        self.snapshot = snapshot
+
+    def model_visible_specs(self, **kwargs):
+        assert kwargs["runtime_snapshot"] is self.snapshot
+        return list(self.snapshot.specs)
+
+
+# LLM: 测试夹具必须让 model spec 与 runtime effect 保持同一 typed snapshot，不能按名称伪造副作用。
+# 函数用途: 构造一个纯只读、命令混合、参数混合和纯写入工具各一个的最小真实快照。
+def _effect_guidance_snapshot() -> tuple[list[ToolModelSpec], ToolRuntimeSnapshot]:
+    specs = [
+        _fake_spec("read_file", {"path": "文件路径"}),
+        _fake_spec("run_command", {"command": "命令"}),
+        _fake_spec("process_session", {"action": "poll 或 stop"}),
+        _fake_spec("write_file", {"path": "文件路径"}),
+    ]
+    policies = [
+        ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("read_only")),
+        ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy(
+                "read_only",
+                strategy="command",
+                command_parameter="command",
+            )
+        ),
+        ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy(
+                "read_only",
+                by_parameter=(
+                    ("action", (("poll", "read_only"), ("stop", "mutating"))),
+                ),
+            )
+        ),
+        ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("mutating")),
+    ]
+    runtimes = tuple(
+        ToolRuntime(
+            model_spec=spec,
+            runtime_policy=policy,
+            handler=SimpleNamespace(model_spec=spec),
+        )
+        for spec, policy in zip(specs, policies, strict=True)
+    )
+    snapshot = ToolRuntimeSnapshot(
+        run_id="run-effect-guidance",
+        runtimes=runtimes,
+        available_tool_names=frozenset(spec.name for spec in specs),
+        unavailable_tools=(),
+        allowed_tools=None,
+    )
+    return specs, snapshot
+
+
+def test_resolve_native_tools_adds_soft_authorization_only_to_effectful_tools():
+    specs, snapshot = _effect_guidance_snapshot()
+    agent = _agent(protocol="native", native_supported=True)
+    agent.tools = _SnapshotRegistry(snapshot)
+    params = SimpleNamespace(
+        allowed_tools=None,
+        loaded_tool_names=set(),
+        tool_runtime_snapshot=snapshot,
+        tool_protocol_snapshot=select_tool_protocol(agent, run_id="run-effect-guidance"),
+    )
+
+    tools = resolve_native_tools(agent, params)
+
+    by_name = {tool["name"]: tool for tool in tools or []}
+    assert "授权边界" not in by_name["read_file"]["description"]
+    for name in ("run_command", "process_session", "write_file"):
+        description = by_name[name]["description"]
+        assert description.startswith(f"{name} desc")
+        assert description.count("只有用户明确要求相应的修改") == 1
+        assert description.endswith(ACTION_AUTHORIZATION_GUIDANCE)
+        assert "只要求查看、核对、确认、检查、诊断、解释、比较、对比或汇报" in description
+        assert "任何工具若无法只读使用就不要调用" in description
+    assert by_name["run_command"]["input_schema"] == specs[1].input_schema
+    assert snapshot.specs == tuple(specs)

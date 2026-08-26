@@ -20,11 +20,24 @@ python3 -m pytest \
 ```
 
 首版收集 203 项，结果为 196 passed、7 个既有 xfail，且本地严格 gate 通过；但部署后的正确 cwd fresh TUI
-仍生成矛盾结论，并擅自启动服务，所以明确判失败。第二候选新增断言：`0.0.0.0/localhost` 不能证明另一
-机器可达、没有目标观察点必须写未验证、只读核对不能产生修改动作，而且该段排在用户任务和运行事实之后。
-第二候选 203 项仍为 196 passed、7 个既有 xfail；`py_compile`、全项目 Ruff、doc-sync、strict code-size、
-diff 和 clean-package 全部通过。本轮远低于 10,000 行，不跑全仓 pytest。真机仍必须重发普通中文要求，
-只看 prompt 单测或测试机 localhost 结果不能冒充跨机验证。
+仍生成矛盾结论并擅自启动服务，所以明确判失败。第二候选新增跨观察点反例并放到完整输入末尾；同样
+203 项为 196 passed、7 个既有 xfail，严格 gate 通过。部署后 `ma-evidence-r41-readonly` 的最终结论已能
+明确区分本机已验证与另一机器未验证，但仍擅自启动服务，因此只通过“如实汇报”，未通过“只读行动”。
+
+第三候选不解析用户正文、不关闭工具，只在原生 Schema 投影中读取 canonical `ToolRuntimePolicy`：纯
+`read_only` 工具保持原说明，command strategy、默认 mutating/dangerous 或参数可升为副作用的工具追加
+`model_guidance.py` 中同一动作授权段。定向回归还必须证明原 ToolModelSpec 与 input_schema 没有被改写：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_native_tool_protocol_wiring.py \
+  agent_py_agent/tests/test_prompting_builder.py \
+  agent_py_agent/tests/test_backends_tool_schema.py \
+  -q --tb=short
+```
+
+当前为 217 passed、7 个既有 xfail；严格 gate 和真 TUI 待办。本轮远低于 10,000 行，不跑全仓 pytest。
+真机仍必须重发普通中文要求，只看 prompt 单测或测试机 localhost 结果不能冒充跨机验证。
 
 ## 2026-08-26 空输入 ↓ 返回当前视口最新消息
 

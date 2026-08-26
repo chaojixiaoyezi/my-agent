@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_py_agent.agent.memory_store import MemoryRecord
+from agent_py_agent.agent.model_guidance import ACTION_AUTHORIZATION_GUIDANCE
 from agent_py_agent.agent.prompting_parts.builder import (
     PromptBuilder,
     PromptBuildRequest,
@@ -317,8 +318,10 @@ class TestBuildBasic:
             assert "不证明另一台机器、真实用户或外部网络能够连接" in prompt
             assert "结论必须明确写“未验证”" in prompt
             assert "还差哪个具体复核步骤" in prompt
-            assert "用户只要求检查、确认、诊断、解释、对比或汇报时保持只读" in prompt
-            assert "不要写文件、改配置、启动或停止服务、创建任务或派子代理" in prompt
+            assert prompt.count(ACTION_AUTHORIZATION_GUIDANCE) == 1
+            assert "只要求查看、核对、确认、检查、诊断、解释、比较、对比或汇报" in prompt
+            assert "任何工具若无法只读使用就不要调用" in prompt
+            assert "不得写文件、改配置、启动或停止服务、安装或部署" in prompt
             assert prompt.index("确认服务是否可用") < prompt.index(
                 "# Verification Evidence Boundary"
             )

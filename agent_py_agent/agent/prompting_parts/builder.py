@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..capability.persona_repository import PersonaRepository, PersonaRepositoryError
 from ..common import agent_time
+from ..model_guidance import VERIFICATION_EVIDENCE_BOUNDARY
 from ..settings import AgentConfig
 from .memory_context import memory_context_text
 
@@ -32,15 +33,6 @@ if TYPE_CHECKING:
 
 _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
-_VERIFICATION_EVIDENCE_BOUNDARY = (
-    "每次行动和最终回复前重新核对验证与授权边界。只把目标观察点真实执行到的结果写成已验证："
-    "当前主机的进程或端口存在、绑定 `0.0.0.0`、localhost 或本机地址成功，只证明当前主机这一观察点，"
-    "不证明另一台机器、真实用户或外部网络能够连接；模拟器、替代环境、局部入口和单一身份同理，"
-    "都不能外推到完整端到端。没有来自目标观察点的真实结果时，结论必须明确写“未验证”，"
-    "不得写“能用”“可达”“通过”或“应该可用”，只说明已经验证了什么和还差哪个具体复核步骤。"
-    "用户只要求检查、确认、诊断、解释、对比或汇报时保持只读；除非用户同时明确要求修复、启动或部署，"
-    "否则不要写文件、改配置、启动或停止服务、创建任务或派子代理。"
-)
 
 
 @dataclass
@@ -187,7 +179,7 @@ class PromptBuilder:
             f"{_tools.tool_recommendations_section or default_recommendations}\n\n"
             f"{task_and_transcript}\n\n"
             f"{_tools.execution_facts_section}\n\n"
-            f"# Verification Evidence Boundary\n{_VERIFICATION_EVIDENCE_BOUNDARY}\n"
+            f"# Verification Evidence Boundary\n{VERIFICATION_EVIDENCE_BOUNDARY}\n"
         )
 
     def read_home_context(self, user_prompt: str) -> list[str]:

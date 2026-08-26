@@ -7,10 +7,12 @@ agent/verification/
 `-- runtime.py         # 共用工具执行出口的唯一接线
 ```
 
-模型提示侧不另建验收状态机：`agent/prompting_parts/builder.py` 在每个 root/delegated 完整 Prompt 的最末
-统一放入一次证据与只读授权边界，使它排在用户任务、工具目录和当前运行事实之后。该文本只影响模型行动
-与陈述，不能创建 verification event、改变状态或授权探测；`system_prompt_override` 只替换角色身份，
-不会移除这条共享边界。
+模型提示侧不另建验收状态机：`agent/model_guidance.py` 是证据与动作授权软提示的唯一正文；
+`agent/prompting_parts/builder.py` 在每个 root/delegated 完整 Prompt 的最末放入一次，使它排在用户任务、
+工具目录和当前运行事实之后。`agent/agent_core/native_tool_protocol.py` 只读取同一轮
+`ToolRuntimeSnapshot`，把动作授权段追加给 command strategy、默认 mutating/dangerous 或参数可升为副作用
+的工具；纯 read-only 工具保持原说明。两处文本只影响模型行动与陈述，不能创建 verification event、改变
+状态、禁用工具或授权探测；`system_prompt_override` 只替换角色身份，不会移除这条共享边界。
 
 Compact 不建立第二套验证链。live tool-context 与 archive 共用一个有界 `model_summary` 投影：
 归档记录还保存 tool round/index、operation、failure stage、handler executed、refs 和输出信任策略。
