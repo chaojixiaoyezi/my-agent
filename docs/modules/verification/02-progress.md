@@ -1,5 +1,17 @@
 # Verification：开发推进
 
+## 2026-08-26 主/子代理共用验证证据边界（本地候选）
+
+- r38 真实任务证明 canonical 工具事实没有丢：测试机本机服务监听 `0.0.0.0:8765` 且 localhost 200，开发机
+  跨机连接被 firewalld 拒绝；问题是模型把局部证据外推成更大结论。明确纠正的普通中文 follow-up 仍复现，
+  因此不靠继续堆用户提示解决。
+- 对照 会话运行时 `protocol/src/prompts/base_instructions/default.md` 的可执行计划、针对性验证与无法运行时提供复核
+  步骤，当前由 `PromptBuilder` 在 System 后统一放一份通用 `Verification Evidence Boundary`。主代理和所有
+  使用 `system_prompt_override` 的 child 都经过该入口，Compact 后续轮也自然保留。
+- 该规则只约束模型如何表述证据，不识别 HTTP、防火墙或任何任务类型，不解析完成正文，不执行外部探测，
+  不写结构化状态，也不恢复机器完成门。Prompt/子代理相关 203 项为 196 passed、7 个既有 xfail，本地严格
+  gate 通过，真机状态待部署复验。
+
 ## 2026-08-25 后台续片不再丢失 succeeded operation
 
 - 真机 root 首次 `create_subagents` 的 canonical 结果已经有 succeeded operation，但外置工具索引没有保存

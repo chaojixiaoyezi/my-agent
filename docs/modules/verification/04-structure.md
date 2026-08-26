@@ -7,6 +7,10 @@ agent/verification/
 `-- runtime.py         # 共用工具执行出口的唯一接线
 ```
 
+模型提示侧不另建验收状态机：`agent/prompting_parts/builder.py` 在每个 root/delegated 完整 Prompt 的 System
+之后统一放入一次证据边界。该文本只影响模型陈述，不能创建 verification event、改变状态或授权探测；
+`system_prompt_override` 只替换角色身份，不会移除这条共享边界。
+
 Compact 不建立第二套验证链。live tool-context 与 archive 共用一个有界 `model_summary` 投影：
 归档记录还保存 tool round/index、operation、failure stage、handler executed、refs 和输出信任策略。
 恢复时 reducer 直接消费这份同源投影；完整正文仍只在当前 owner/task artifact，旧摘要与读取游标都不能

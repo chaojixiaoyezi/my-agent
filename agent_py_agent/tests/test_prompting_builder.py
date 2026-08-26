@@ -298,6 +298,25 @@ class TestBuildBasic:
 
         assert "# System\nsubagent system prompt" in result
         assert "root system prompt" not in result
+        assert "# Verification Evidence Boundary" in result
+
+    def test_build_limits_root_and_delegated_claims_to_observed_boundary(self, tmp_path):
+        """主代理和使用独立 system prompt 的子代理都只能汇报亲自验证到的范围。"""
+        builder = PromptBuilder(AgentConfig(), tmp_path)
+
+        root_prompt = builder.build("确认服务是否可用", [])
+        delegated_prompt = builder.build(
+            "确认服务是否可用",
+            [],
+            system_prompt_override="focused delegated runner",
+        )
+
+        for prompt in (root_prompt, delegated_prompt):
+            assert prompt.count("# Verification Evidence Boundary") == 1
+            assert "本机、替代环境、模拟器、局部入口或单一身份通过，只证明该边界" in prompt
+            assert "不能外推到另一台机器、真实用户、外部网络或服务" in prompt
+            assert "必须明确标为未验证" in prompt
+            assert "还差哪个具体入口或环境的复核步骤" in prompt
 
     def test_build_no_memories(self, tmp_path):
         config = AgentConfig()

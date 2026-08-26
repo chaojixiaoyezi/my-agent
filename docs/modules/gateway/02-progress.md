@@ -1,13 +1,16 @@
 # Gateway Progress
 
-## 2026-08-26 空输入 ↓ 返回当前视口尾部（本地候选）
+## 2026-08-26 空输入 ↓ 返回当前视口尾部（已部署真机验证）
 
 - r37 真 TUI 的 child 视图证明 canonical 历史和新事件都在：`Ctrl+Home` 离尾后出现 `1 new message ↓`，
   `Ctrl+End` 可达最新消息；缺口仅是普通 `↓` 被空输入的 child/history 导航提前消费。
 - 当前候选让普通和详情 transcript 通过唯一 `is_following()` 暴露 typed follow 位。输入为空且离尾时，
   `↓` 复用既有 `end()`；已贴底或输入有字时保持原编辑、selection 和 history 行为。
 - 该改动只影响本地 TUI 展示状态，不读 footer 文案，不改 Gateway、ConversationStore、消息投递、Compact
-  或任务控制。4 个相关测试文件 73 项及语法/Ruff/diff 已通过，待现有长任务终态后单 Gateway 真机复验。
+  或任务控制。6 个相关文件 145 项及本地严格 gate 通过；`814cc3b` 已部署 `.7` 唯一 Gateway。
+- fresh `ma-scroll-r38-resume` 在 3.5 秒内恢复原复杂会话；主视图真实完成
+  `Ctrl+Home → Down 回底 → Down 选择 child`，终态 child 也完成 `Ctrl+Home → Down` 独立回底。恢复页显示
+  MiniMax-M2.7，随后普通中文 follow-up 立即入屏并触发真实流式 Thinking。
 
 ## 2026-08-26 provider 大工具参数临时进度（已部署真机验证）
 

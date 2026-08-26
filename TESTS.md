@@ -1,5 +1,28 @@
 # TESTS
 
+## 2026-08-26 模型验证结论不能越过实际观察边界
+
+真实反例：测试机本机 HTTP 200、监听所有接口，但开发机跨机连接被 firewalld 拒绝；MiniMax-M2.7 在原任务
+和明确纠正 follow-up 中都误报“局域网能用”。回归不模拟 HTTP/防火墙语义，只证明所有 root/delegated
+Prompt 都恰好收到一份通用证据边界，使用独立 `system_prompt_override` 也不能绕过：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_prompting.py \
+  agent_py_agent/tests/test_prompting_builder.py \
+  agent_py_agent/tests/test_runner_prompts.py \
+  agent_py_agent/tests/test_subagent_prompt_contract.py \
+  agent_py_agent/tests/test_subagent_context_bundle_prompting.py \
+  agent_py_agent/tests/test_native_prompt_no_text_protocol_leak.py \
+  agent_py_agent/tests/test_runtime_guidance.py \
+  agent_py_agent/tests/test_integration_coverage_context.py \
+  -q --tb=short
+```
+
+当前收集 203 项，结果为 196 passed、7 个既有 xfail；`py_compile`、全项目 Ruff、doc-sync、strict code-size、
+diff 和 clean-package 也通过。真实验收必须在部署后的单 Gateway fresh TUI 中重发普通中文复核要求；只看
+prompt 单测或测试机 localhost 结果都不能反过来冒充跨机验证。本轮代码量远低于 10,000 行，不跑全仓 pytest。
+
 ## 2026-08-26 空输入 ↓ 返回当前视口最新消息
 
 真实 TUI `ma-tool-progress-r37-mario` 已先复现：进入 child 后 `Ctrl+Home`，等待新事件出现
@@ -16,8 +39,12 @@ python3 -m pytest \
   -q --tb=short
 ```
 
-本地 73 项已通过，并通过 changed-file 语法、Ruff 与 `git diff --check`；真机仍须等现有长任务终态后只重启
-唯一 Gateway，再由 fresh TUI 验证真实键序列，旧进程里的已加载按键不能作为新代码证据。
+四个最小文件 73 项通过；再加入 renderer/runtime 的相关组合共 145 项通过，并通过语法、全项目 Ruff、
+doc-sync、strict code-size、diff 与 clean-package。改动远低于 10,000 行，未跑全仓 pytest。
+
+`814cc3b` 已部署 `.7` 唯一 Gateway。fresh `ma-scroll-r38-resume` 精确恢复既有复杂会话后，主视图真实键序列
+`Ctrl+Home → Down` 回底，第二次 `Down` 选择第一名 child；终态 child 视图也以 `Ctrl+Home → Down` 回到
+自己的最终回复。随后普通中文 follow-up 立即入屏并触发 MiniMax-M2.7 流式 Thinking，旧 TUI 进程不作为证据。
 
 ## 2026-08-26 大工具参数生成期间的脱敏 TUI 进度
 

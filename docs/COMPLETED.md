@@ -1,5 +1,11 @@
 # COMPLETED
 
+- 2026-08-26 `814cc3b` 让空输入 `Down` 先读取当前 main/child viewport 的 typed `follow`：离尾时复用
+  唯一 `end()` 返回最新消息，已贴底时才继续 child selection/history；输入有字的视觉折行行为不变，也不
+  解析 `N new messages` 文案。145 项相关 TUI 回归与本地严格 gate 通过，已推送并快进部署 `.7` 唯一
+  Gateway。fresh `ma-scroll-r38-resume` 在 3.5 秒内恢复复杂会话；主视图真实证明
+  `Ctrl+Home → Down 回底 → Down 选择 child`，终态 child 也证明 `Ctrl+Home → Down` 只回自己的尾部。
+
 - 2026-08-26 `8c11eab` 将 Anthropic `input_json_delta` 的脱敏工具名、阶段、累计字符数和耗时接入
   Gateway rich/后台 main/child 与 TUI transient block；半截 JSON、正文、命令、路径和凭据不离开 parser，
   也不提前创建 ToolCall、执行 handler 或改变 Compact/任务状态。8 个相关文件 195 项与本地严格 gate

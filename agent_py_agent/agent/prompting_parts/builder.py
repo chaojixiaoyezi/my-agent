@@ -32,6 +32,13 @@ if TYPE_CHECKING:
 
 _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
+_VERIFICATION_EVIDENCE_BOUNDARY = (
+    "验证结论必须严格停留在你亲自观察到的证据边界：本进程、本机、替代环境、模拟器、"
+    "局部入口或单一身份通过，只证明该边界，不能外推到另一台机器、真实用户、外部网络或服务、"
+    "其他身份或完整端到端也通过。若当前工具、权限或环境不能观察用户要求的边界，必须明确标为未验证，"
+    "说明已经验证了什么，以及还差哪个具体入口或环境的复核步骤；配置或代码看起来正确、按理可用、"
+    "局部成功，都不能写成目标已经验证。"
+)
 
 
 @dataclass
@@ -114,6 +121,10 @@ class PromptBuilder:
                 chunks.append(chunk)
         return chunks
 
+    # LLM: Every root and delegated model turn must receive the same evidence
+    # boundary even when a caller supplies a focused system_prompt_override.
+    # Keep this as soft model guidance; never turn it into a host completion gate.
+    # 函数用途: 拼出完整模型输入，并统一提醒主代理和子代理只按亲自验证到的范围下结论。
     def build(
         self,
         user_prompt: str = "",
@@ -165,6 +176,7 @@ class PromptBuilder:
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
         return (
             f"# System\n{system_prompt}\n\n"
+            f"# Verification Evidence Boundary\n{_VERIFICATION_EVIDENCE_BOUNDARY}\n\n"
             f"# Related Memory\n{memory_text}\n\n"
             f"# Owner Scope\n{owner_scope}\n\n"
             f"# Dynamic Prompt Files\n{dynamic or '（无）'}\n\n"
