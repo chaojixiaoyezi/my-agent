@@ -14,6 +14,7 @@ from ...agent.contracts.tool_approval import (
     ToolApprovalDecision,
     ToolApprovalRequest,
 )
+from ...agent.conversation.tool_input_progress import ToolInputProgressEventProjector
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventSequencer
 from .tui_view_model import TuiStateStore
 
@@ -25,6 +26,9 @@ _BACKGROUND_TRANSCRIPT_KINDS = frozenset(
         "thinking_started",
         "thinking_delta",
         "thinking_completed",
+        "tool_input_started",
+        "tool_input_progress",
+        "tool_input_completed",
         "tool_started",
         "tool_progress",
         "tool_completed",
@@ -880,7 +884,7 @@ class _TuiBackgroundActivityRuntimeMixin:
             block
             for block in self.store.snapshot().active_blocks
             if block.block_id.startswith(prefix)
-            and block.role in {"assistant", "thinking", "tool", "compact"}
+            and block.role in {"assistant", "thinking", "tool_input", "tool", "compact"}
         )
         for block in active:
             attempt_suffix = block.block_id[len(prefix) :].split(":", 1)[0]
@@ -888,6 +892,9 @@ class _TuiBackgroundActivityRuntimeMixin:
             if block.role == "tool":
                 kind = "tool_completed" if phase == "completed" else "tool_failed"
                 payload = {"ok": phase == "completed"}
+            elif block.role == "tool_input":
+                kind = "tool_input_completed"
+                payload = {}
             elif block.role == "compact":
                 kind = (
                     "conversation_compaction_completed"
@@ -1341,6 +1348,16 @@ class TuiTurnEventAdapter:
         self._output_chars = 0
         self._output_bytes = 0
         self._tool_blocks: set[str] = set()
+        self._tool_input_projector = ToolInputProgressEventProjector(
+            block_prefix=f"tool-input:{request_id}",
+            event_writer=lambda kind, phase, block_id, payload: self.runtime._publish(
+                kind,
+                phase,
+                block_id,
+                dict(payload),
+                request_id=self.request_id,
+            ),
+        )
         self._runtime_progress_index = 0
         self._interrupt_requested = False
         self._finished = False
@@ -1501,6 +1518,13 @@ class TuiTurnEventAdapter:
             )
         return True
 
+    # LLM: callback 只接收共享脱敏合同，并通过 transient projector 生成可删除
+    # block；它不能创建工具调用或把参数计数写入业务状态。
+    # 函数用途: 在本地或 Gateway TUI 中实时显示大工具参数仍在生成。
+    def write_tool_input_progress(self, value: object) -> bool:
+        with self._lock:
+            return self._tool_input_projector.publish(value)
+
     # LLM: 完整 thinking 事件到达时若流式增量块已活动，直接冻结（完整文本覆盖增量，
     # 不重复建块）；无活动块时按旧契约一次性 started+completed。
     # 函数用途: 收口一次模型调用的思考块（流式增量或一次性全文）。
@@ -1612,12 +1636,15 @@ class TuiTurnEventAdapter:
                 self._compact_payload = {}
             return True
 
-    # LLM: progress 只读取结构化 event；legacy_text 参数为旧调用兼容但不得参与 phase/tool/id 决策。
-    # 函数用途: 发布工具开始、进度和终态，并在工具前冻结助手 commentary、保留全局活动 spinner。
+    # LLM: progress 只读取结构化 event；真实 started 先清参数临时行，legacy_text
+    # 参数为旧调用兼容但不得参与 phase/tool/id 决策。
+    # 函数用途: 收起参数进度，发布工具生命周期并冻结工具前助手 commentary。
     def write_progress(self, event: dict[str, object], legacy_text: str = "") -> None:
         del legacy_text
         progress = dict(event or {})
         with self._lock:
+            if str(progress.get("phase") or "").strip().lower() == "started":
+                self._tool_input_projector.clear()
             self._complete_active_assistant(process=True)
             self._publish_tool_progress(progress)
 
@@ -1626,13 +1653,15 @@ class TuiTurnEventAdapter:
     def on_gateway_event(self, payload: dict[str, Any]) -> bool:
         return _consume_gateway_turn_event(self, payload)
 
-    # LLM: finalize 只使用结构化 summary，保证 active block 先 terminal，再 status，最后 turn terminal 且仅一次。
-    # 函数用途: 完成、失败或中断当前回合。
+    # LLM: finalize 只使用结构化 summary，并先清所有易失参数行，保证 active
+    # block 先 terminal，再 status，最后 turn terminal 且仅一次。
+    # 函数用途: 清理临时展示后完成、失败或中断当前回合。
     def finalize(self, summary: TuiTurnSummary) -> None:
         with self._lock:
             if self._finished:
                 return
             self._permissions.cancel_pending()
+            self._tool_input_projector.clear()
             self._close_compact_if_active(
                 phase="interrupted" if summary.interrupted else "failed"
             )
@@ -1879,6 +1908,11 @@ def _consume_gateway_turn_event(
         )
     if kind == "thinking_delta":
         return adapter.write_thinking_delta(str(payload.get("text") or ""))
+    if kind == "tool_input_progress":
+        return adapter.write_tool_input_progress(payload.get("progress"))
+    if kind == "tool_input_reset":
+        with adapter._lock:
+            return bool(adapter._tool_input_projector.clear())
     if kind == "assistant_final":
         final_text = str(payload.get("text") or "")
         adapter.write_model(final_text)

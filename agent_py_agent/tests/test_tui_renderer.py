@@ -323,6 +323,48 @@ def test_thinking_tool_and_permission_use_typed_phase() -> None:
     assert frame.footer == ()
 
 
+def test_tool_input_progress_replaces_generic_spinner_with_counter() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("tool-input-render", clock=lambda: 100.0)
+    store.publish(seq.emit("turn_started", "started", "turn"))
+    store.publish(seq.emit("thinking_started", "started", "thinking"))
+    store.publish(
+        seq.emit(
+            "tool_input_started",
+            "started",
+            "tool-input",
+            {
+                "tool": "write_file",
+                "stream_index": 0,
+                "received_chars": 0,
+                "started_at": 90.0,
+            },
+        )
+    )
+    store.publish(
+        seq.emit(
+            "tool_input_progress",
+            "updated",
+            "tool-input",
+            {
+                "tool": "write_file",
+                "stream_index": 0,
+                "received_chars": 12_345,
+            },
+        )
+    )
+
+    frame = render_tui_snapshot(
+        store.snapshot(),
+        TuiRenderContext(width=80, now=105.0, spinner_index=1),
+    )
+    texts = _frame_lines(frame)
+    assert "✢ 正在准备 Write 参数 · 12.3k chars · 15s" in texts
+    assert not any("Working" in text or "Thinking" in text for text in texts)
+    styles = {style for line in frame.transcript_lines for style, _text, *_ in line}
+    assert "class:tui-spinner-highlight" in styles
+
+
 def test_long_user_prompt_is_bounded_only_in_display_projection() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("long-user", clock=lambda: 25.0)

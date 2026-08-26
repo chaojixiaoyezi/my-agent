@@ -207,6 +207,71 @@ def test_tool_permission_and_result_keep_one_block_identity() -> None:
     assert completed.stable_blocks[0].detail == "fixture-tool-ok"
 
 
+def test_tool_input_progress_updates_then_disappears_without_stable_history() -> None:
+    store = TuiStateStore()
+    seq = _sequencer()
+    block_id = "tool-input:request-1:1"
+    store.publish(
+        seq.emit(
+            "tool_input_started",
+            "started",
+            block_id,
+            {
+                "tool": "write_file",
+                "stream_index": 0,
+                "received_chars": 0,
+                "started_at": 10.0,
+            },
+        )
+    )
+    store.publish(
+        seq.emit(
+            "tool_input_progress",
+            "updated",
+            block_id,
+            {
+                "tool": "write_file",
+                "stream_index": 0,
+                "received_chars": 12_345,
+            },
+        )
+    )
+
+    active = store.snapshot().active_blocks
+    assert len(active) == 1
+    assert active[0].role == "tool_input"
+    assert active[0].metadata["received_chars"] == 12_345
+
+    store.publish(seq.emit("tool_input_completed", "completed", block_id))
+    snapshot = store.snapshot()
+    assert snapshot.active_blocks == ()
+    assert snapshot.stable_blocks == ()
+
+
+def test_real_tool_start_clears_stale_tool_input_progress() -> None:
+    store = TuiStateStore()
+    seq = _sequencer()
+    store.publish(
+        seq.emit(
+            "tool_input_started",
+            "started",
+            "tool-input:request-1:stale",
+            {"tool": "write_file", "received_chars": 8_192},
+        )
+    )
+    store.publish(
+        seq.emit(
+            "tool_started",
+            "started",
+            "tool:request-1:1:1",
+            {"tool": "write_file"},
+        )
+    )
+
+    active = store.snapshot().active_blocks
+    assert [block.role for block in active] == ["tool"]
+
+
 def test_permission_selection_and_feedback_are_typed_overlay_state() -> None:
     store = TuiStateStore()
     seq = _sequencer()

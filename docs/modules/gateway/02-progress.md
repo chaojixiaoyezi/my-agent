@@ -1,5 +1,17 @@
 # Gateway Progress
 
+## 2026-08-26 provider 大工具参数临时进度（本地候选）
+
+- 真 TUI 已把“约 4 分钟没事件但 TLS 持续收包”收敛为 Anthropic parser 的完整块缓冲，而不是 Gateway
+  进程/锁/idle timeout 故障。当前候选从 `input_json_delta` 只抽取工具名、流内序号、阶段和累计字符数，
+  1 秒/8K 合批后送 rich 客户端；原始 `partial_json` 始终留在 parser 内。
+- `BufferedChunkStreamWriter` 只在 `rich_transcript=true` 时写 `tool_input_progress`，并在真实 retry/tool 边界
+  发送有状态 reset；后台 main/child 则复用有界 transcript event。TUI reducer 的 transient block 在
+  ready/reset/turn terminal 后删除，不进入 stable history。
+- 该路径不创建/修补 ToolCall，不提前触发审批或 handler，不刷新任务/Compact/验收，也不改变 provider
+  timeout。8 个相关测试文件 195 项、Ruff 和 strict code-size 已通过；部署与真 TUI 复验等待当前 Click
+  长任务安全终态，期间 `.7` 仍只有一个旧 HEAD Gateway。
+
 ## 2026-08-26 Anthropic native 首轮缓存身份（已部署真机验证）
 
 - `69bf2ec` 部署后的 fresh TUI 权威账本显示前三次 MiniMax-M2.7 调用仍为 0 cache-write/read；同配置的

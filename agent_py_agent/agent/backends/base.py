@@ -130,6 +130,9 @@ class BaseBackend:
     """所有后端适配器都要实现的基类接口。"""
 
     name = "base"
+    # 只有确实能从 provider 流中取得结构化工具参数 delta 的后端才开启；
+    # 上层据此避免给第三方/fake backend 传入未知关键字。
+    supports_tool_input_progress = False
 
     def provider_context_window_tokens(self) -> int:
         """Return provider-advertised context capacity, or zero when unavailable."""
@@ -148,6 +151,9 @@ class BaseBackend:
             observed_at=_utc_now_iso(),
         )
 
+    # LLM: Base signature 只声明可选 observer 合同；具体 backend 未显式声明
+    # capability 时，上层不得传入 tool-input callback。
+    # 函数用途: 定义所有模型后端共用的生成入口与可选流式观察器。
     def generate(
         self,
         prompt: str,
@@ -156,6 +162,7 @@ class BaseBackend:
         tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
+        on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
     ) -> ModelResponse:
         """Generate one assistant response for the supplied prompt.
 
@@ -167,6 +174,9 @@ class BaseBackend:
         tool_use IR translated to Anthropic ``messages``). When supplied it
         replaces the single ``{"role":"user","content":prompt}`` turn; ``prompt``
         still feeds the system/task instructions. Text-protocol callers omit it.
+
+        ``on_tool_input_progress`` is an optional display observer for backends
+        that explicitly declare support; it never receives tool arguments.
         """
         raise NotImplementedError
 
@@ -769,6 +779,7 @@ class AnthropicCompatibleBackend(HttpBackend):
     """适配 Anthropic 风格的 `/v1/messages` 接口。"""
 
     name = "anthropic_compatible"
+    supports_tool_input_progress = True
 
     def _tool_endpoint(self) -> str:
         return self.api_base + "/v1/messages"
@@ -781,6 +792,9 @@ class AnthropicCompatibleBackend(HttpBackend):
         super().__init__(options)
         self.anthropic_version = anthropic_version
 
+    # LLM: Anthropic-compatible 是当前唯一声明工具参数 delta 能力的后端；
+    # callback 只透传累计计数，不能改变 payload、tool choice 或响应解析。
+    # 函数用途: 调用 Anthropic messages，并可选上报工具参数生成进度。
     def generate(
         self,
         prompt: str,
@@ -790,6 +804,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         messages: list[dict[str, Any]] | None = None,
         thinking_disabled: bool = False,
         on_thinking_delta: Callable[[str], None] | None = None,
+        on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
     ) -> ModelResponse:
         """Call the Anthropic-compatible messages endpoint.
 
@@ -797,6 +812,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         native 协议（``messages`` 非空）：保留第一轮真实发送的 ``user=prompt``，再接结构化
         IR 翻出的 assistant(tool_use)/user(tool_result) 序列。不能把同一 prompt 在续轮改成
         system；否则历史失去原始 user turn，严格 OpenAI chat template 会拒绝工具结果续轮。
+        工具参数 callback 只接收 parser 生成的累计字符计数，不参与 tool_use 解析或执行。
         """
         return self._generate_request(
             prompt,
@@ -806,6 +822,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             messages=messages,
             thinking_disabled=thinking_disabled,
             on_thinking_delta=on_thinking_delta,
+            on_tool_input_progress=on_tool_input_progress,
         )
 
     def generate_structured(
@@ -895,6 +912,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         temperature: float | None = None,
         thinking_disabled: bool = False,
         on_thinking_delta: Callable[[str], None] | None = None,
+        on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
     ) -> ModelResponse:
         payload: dict[str, Any] = {
             "model": self.model_name,
@@ -934,6 +952,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                 headers,
                 on_chunk=on_chunk,
                 on_thinking_delta=on_thinking_delta,
+                on_tool_input_progress=on_tool_input_progress,
             )
         return self._generate_non_stream(payload, headers)
 
@@ -984,14 +1003,15 @@ class AnthropicCompatibleBackend(HttpBackend):
             stop_reason=str(obj.get("stop_reason") or ""),
         )
 
-    # LLM: 流式 Anthropic 响应由 StreamCompletion 带回完整有序 assistant 块；thinking 块不得混入 on_chunk 或用户正文。
-    # 函数用途: 收集一次流式 Anthropic-compatible 响应，并保留下一轮工具调用所需的内部历史。
+    # LLM: 流式 Anthropic 响应由 StreamCompletion 带回完整有序 assistant 块；thinking/工具参数计数各走显式 observer，均不得混入 on_chunk 或用户正文。
+    # 函数用途: 收集一次流式 Anthropic-compatible 响应，并保留下一轮工具调用所需的内部历史与脱敏展示进度。
     def _generate_stream(
         self,
         payload: dict[str, Any],
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
+        on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
     ) -> ModelResponse:
         """Parse Anthropic SSE and retry the same stream path once when no text is visible."""
         text, usage, blocks, completion = "", {}, [], StreamCompletion()
@@ -1001,6 +1021,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                 headers,
                 on_chunk,
                 on_thinking_delta=on_thinking_delta,
+                on_tool_input_progress=on_tool_input_progress,
             )
             if _incomplete_stop_reason(completion.stop_reason):
                 # 截断：保留文本、丢弃工具块、标记 truncated（工具循环下一轮继续，
@@ -1032,6 +1053,9 @@ class AnthropicCompatibleBackend(HttpBackend):
             stop_reason=completion.stop_reason,
         )
 
+    # LLM: 单次物理流必须把同一个脱敏 observer 交给 collector；重试边界
+    # 仍由上层 _generate_stream 掌权，不能在此创建工具或重试状态。
+    # 函数用途: 读取并收集一条 Anthropic SSE 响应。
     def _stream_text_once(
         self,
         payload: dict[str, Any],
@@ -1039,12 +1063,14 @@ class AnthropicCompatibleBackend(HttpBackend):
         on_chunk: Callable[[str], None] | None,
         *,
         on_thinking_delta: Callable[[str], None] | None = None,
+        on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
     ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
         return collect_anthropic_stream_with_completion(
             lines("/v1/messages", payload, headers),
             on_chunk=on_chunk,
             on_thinking_delta=on_thinking_delta,
+            on_tool_input_progress=on_tool_input_progress,
         )
 
 

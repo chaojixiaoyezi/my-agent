@@ -1,5 +1,36 @@
 # TESTS
 
+## 2026-08-26 大工具参数生成期间的脱敏 TUI 进度
+
+目标：证明 Anthropic `input_json_delta` 在完整 tool_use 形成前也能给用户持续的计数反馈，同时绝不泄露
+半截 JSON/文件正文，不提前执行工具，也不把临时行冻结为历史。定向命令：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_backends_native_tool_use.py \
+  agent_py_agent/tests/test_tool_model_generation.py \
+  agent_py_agent/tests/test_gateway_verbose_progress.py \
+  agent_py_agent/tests/test_background_notice_display.py \
+  agent_py_agent/tests/test_conversation_agent_activity.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_tui_view_model.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  -q --tb=short
+```
+
+当前 195 项通过。覆盖点：
+
+- 9,000 字符工具参数只外发 `started/streaming/ready` 与累计字符数，真实完整 input 仍只在 stop 后交给工具层；
+- 首条、每秒/每 8,192 字符和 ready 合批，展示 callback 失败不改变 provider 响应；
+- rich Gateway chunk、后台 main/child ring 和本地 TUI 使用同一公开白名单，未知 `partial_json`、路径和正文
+  不能落盘或进入 reducer；普通非 rich 客户端保持旧协议；
+- reducer 只维护 `role=tool_input` 易失块，ready/reset/真实 tool/turn terminal 后删除且 stable history 为空；
+- renderer 隐藏同阶段笼统 Thinking，显示灰色动画工具名、累计字符数与耗时，缓存键只读取展示字段。
+
+本轮另通过 Ruff 与 strict code-size；改动远少于 10,000 行，遵守约定不跑全仓 pytest。真 TUI 复验必须
+等待 `ma-cache-firstturn-r34` 当前长任务安全终态，再只重启 `.7` 唯一 Gateway，用能生成大 write 参数的
+普通中文任务观察临时行与后续真实 Write/diff 卡片交接。
+
 ## 2026-08-26 Anthropic-compatible 原生主动缓存
 
 目标：证明主动缓存只改变 provider payload 投影，不污染 canonical messages/tools、不伪造 Compact，并能

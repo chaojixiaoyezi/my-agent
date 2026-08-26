@@ -122,6 +122,7 @@ agent_py_agent/
 |   |   |-- agent_activity.py          # active task link + canonical child run 到 TUI/Web 共用有界活动投影
 |   |   |-- agent_transcript.py        # 子代理跨进程公开过程事件的 owner 存储、游标和有界裁剪
 |   |   |-- background_transcript.py  # 后台 main 的有界易失 typed 过程事件环；只供 TUI/Web 实时展示
+|   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
 |   |   |-- agent_thread.py            # child/grandchild 独立 thread、逐 attempt transcript 与统一 Compact 适配
 |   |   |-- agent_thread_store.py      # agent thread 精确 ID 物化、身份冲突与运行目录校验
 |   |   |-- closeout.py                # 收口状态机 decide_closeout(四改之 2): 终态 done/cancelled/wait_human/wait_handoff/resume_round

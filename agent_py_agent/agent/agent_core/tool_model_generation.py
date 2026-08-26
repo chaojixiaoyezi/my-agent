@@ -759,6 +759,28 @@ def _publish_transport_retry(sink_owner: object, event: dict[str, object]) -> No
         return
 
 
+# LLM: 只有 backend 明确声明支持且当前确有原生工具 surface 时，才把宿主
+# typed sink 传入；这个判断不能靠 backend 名称或用户 prompt 文本。
+# 函数用途: 选择本轮是否启用 provider 工具参数生成进度回调。
+def _tool_input_progress_callback(backend: object, state: _ModelGenerationState):
+    params = getattr(state, "params", None)
+    sink = getattr(
+        getattr(params, "effective_on_chunk", None),
+        "write_tool_input_progress",
+        None,
+    )
+    if (
+        callable(sink)
+        and bool(getattr(backend, "supports_tool_input_progress", False))
+        and state.tools is not None
+    ):
+        return sink
+    return None
+
+
+# LLM: 仅把 backend 明确声明支持的 provider 增量 callback 传给具备 typed sink
+# 的宿主；fake/旧后端与 text-only 调用必须保持原关键字形态。
+# 函数用途: 按当前原生工具、思考和展示能力组装参数并调用一次模型后端。
 def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
     params = getattr(state, "params", None)
@@ -773,6 +795,7 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     )
     # 只在宿主 writer 提供 thinking 增量入口时透传；旧后端/测试 fake 不接收该参数。
     thinking_delta = thinking_sink if callable(thinking_sink) else None
+    tool_input_progress = _tool_input_progress_callback(backend, state)
     _generate_started = time.monotonic()
     if state.tools is None and state.messages is None:
         kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
@@ -783,6 +806,8 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
         kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
         if thinking_delta is not None:
             kwargs["on_thinking_delta"] = thinking_delta
+        if tool_input_progress is not None:
+            kwargs["on_tool_input_progress"] = tool_input_progress
         if state.tools is not None:
             kwargs["tools"] = state.tools
             tool_choice = state.tool_choice or ToolChoice.auto()

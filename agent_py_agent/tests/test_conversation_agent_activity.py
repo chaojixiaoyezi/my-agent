@@ -433,6 +433,27 @@ def test_background_main_activity_sink_projects_real_stage_for_active_task() -> 
     assert activity.main_activity["activity"] == "先核对子代理结果，再整合最终页面。"
     assert activity.main_activity["context_usage"]["current_tokens"] == 42_100
     assert "prompt" not in activity.main_activity["context_usage"]
+    assert sink.write_tool_input_progress(
+        {
+            "schema": "provider_tool_input_progress.v1",
+            "phase": "started",
+            "stream_index": 0,
+            "tool": "write_file",
+            "received_chars": 0,
+            "partial_json": "must not cross",
+        }
+    )
+    activity = conversation_agent_activity(agent, store, "thread-main")
+    assert activity.main_activity["activity"] == "正在准备 write_file 参数"
+    sink.write_tool_input_progress(
+        {
+            "schema": "provider_tool_input_progress.v1",
+            "phase": "ready",
+            "stream_index": 0,
+            "tool": "write_file",
+            "received_chars": 12_000,
+        }
+    )
     sink.write_progress({"tool": "run_command", "phase": "started"})
     activity = conversation_agent_activity(agent, store, "thread-main")
     assert activity.main_activity["activity"] == "正在使用 run_command"

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .channels import project_user_reply, redact_host_absolute_paths
+from .tool_input_progress import ToolInputProgressSinkMixin
 
 BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
 BACKGROUND_TRANSCRIPT_MAX_EVENTS = 1024
@@ -38,6 +39,9 @@ BACKGROUND_TRANSCRIPT_EVENT_KINDS = frozenset(
         "thinking_started",
         "thinking_delta",
         "thinking_completed",
+        "tool_input_started",
+        "tool_input_progress",
+        "tool_input_completed",
         "tool_started",
         "tool_progress",
         "tool_completed",
@@ -152,7 +156,7 @@ class _ThinkingDeltaBatcher:
 # model text until a real tool boundary so the durable final reply is not shown
 # twice, and it never changes the scalar main activity or business lifecycle.
 # 类用途: 把一次后台主代理回调转换成灰色过程、实时思考、工具结果和 diff 展示事件。
-class BackgroundTranscriptSink:
+class BackgroundTranscriptSink(ToolInputProgressSinkMixin):
     # LLM: Construction allocates one display-only turn identity; canonical task
     # and thread ids are inputs, while the generated request id is not authority.
     # 函数用途: 为一次后台续轮创建事件块编号和内部缓冲区。
@@ -289,8 +293,9 @@ class BackgroundTranscriptSink:
         elif phase != "started":
             self._event("tool_progress", "updated", block_id, public)
 
-    # LLM: Retry display contains typed counters only. Raw exception, endpoint,
-    # credential, and provider response never enter this public event.
+    # LLM: Retry display contains typed counters only and first clears any
+    # incomplete provider-parameter row. Raw exception, endpoint, credential,
+    # and provider response never enter this public event.
     # 函数用途: 追加一条灰色模型重连提示。
     def write_provider_retry(
         self,
@@ -299,6 +304,7 @@ class BackgroundTranscriptSink:
         total: int,
         delay_seconds: float,
     ) -> None:
+        self._clear_tool_input_progress()
         self._retry_index += 1
         self._event(
             "system_message",
@@ -373,11 +379,12 @@ class BackgroundTranscriptSink:
         )
         return True
 
-    # LLM: Finish freezes an incomplete explicit thinking block but deliberately
-    # drops the remaining candidate model segment; the durable background notice
-    # is the sole owner-facing final response.
+    # LLM: Finish freezes an incomplete explicit thinking block, clears transient
+    # provider-parameter rows, and deliberately drops the remaining candidate
+    # model segment; the durable background notice is the sole owner-facing final response.
     # 函数用途: 收口后台展示流，避免最终回复与持久通知重复显示。
     def finish(self) -> None:
+        self._clear_tool_input_progress()
         if self._thinking_active:
             self.write_thinking(self._thinking_text)
         self._model_text = ""

@@ -34,6 +34,7 @@ from .agent_transcript import read_agent_transcript_events
 from .background_transcript import BackgroundTranscriptSink
 from .channels import project_user_reply, redact_host_absolute_paths
 from .models import THREAD_TASK_LINK_ACTIVE_STATUS
+from .tool_input_progress import public_tool_input_progress
 
 _SCHEMA_VERSION = "conversation_agent_activity.v5"
 _MAX_PROJECTED_SUBAGENTS = 64
@@ -95,6 +96,19 @@ class BackgroundMainActivitySink:
         published = self._transcript.write_thinking_delta(text)
         if published:
             self._publish("thinking", "思考中")
+        return published
+
+    # LLM: 大工具参数只通过共享脱敏计数投影进入正文；main 标量活动行不
+    # 保存参数内容，也不把这一阶段当成真实工具已经开始。
+    # 函数用途: 显示后台主代理仍在生成工具参数，并刷新 main 活动提示。
+    def write_tool_input_progress(self, value: dict[str, object]) -> bool:
+        public = public_tool_input_progress(value)
+        if not public:
+            return False
+        published = self._transcript.write_tool_input_progress(public)
+        if published and str(public.get("phase") or "") != "ready":
+            tool = _bounded_text(public.get("tool"), limit=80) or "工具"
+            self._publish("thinking", f"正在准备 {tool} 参数")
         return published
 
     # LLM: Thinking text is bounded and whitespace-normalized for display; it

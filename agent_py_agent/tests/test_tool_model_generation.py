@@ -826,3 +826,33 @@ def test_isolated_presentation_turn_does_not_stream_thinking_delta():
     _do_backend_generate(backend, "prompt", state)
 
     assert "on_thinking_delta" not in backend.seen[-1]
+
+
+def test_native_tool_turn_passes_tool_input_progress_only_to_capable_backend():
+    from agent_py_agent.agent.agent_core.tool_model_generation import _do_backend_generate
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+
+    class Sink:
+        def write_tool_input_progress(self, _value: object) -> None:
+            return None
+
+    class CapableBackend(_KwargRecordingBackend):
+        supports_tool_input_progress = True
+
+    state = SimpleNamespace(
+        tools=[{"name": "write_file", "description": "write"}],
+        tool_choice=ToolChoice.auto("native"),
+        messages=[],
+        on_chunk=None,
+        params=SimpleNamespace(
+            context_scope="shared",
+            effective_on_chunk=Sink(),
+        ),
+    )
+    capable = CapableBackend()
+    _do_backend_generate(capable, "prompt", state)
+    assert callable(capable.seen[-1]["on_tool_input_progress"])
+
+    ordinary = _KwargRecordingBackend()
+    _do_backend_generate(ordinary, "prompt", state)
+    assert "on_tool_input_progress" not in ordinary.seen[-1]

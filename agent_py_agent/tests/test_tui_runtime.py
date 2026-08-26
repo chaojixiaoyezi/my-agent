@@ -776,3 +776,47 @@ def test_gateway_thinking_delta_streams_into_active_block_with_timer() -> None:
     assert len(settled) == 1
     assert settled[0].text == "完整思考"
     assert settled[0].metadata.get("duration_seconds") == 12.0
+
+
+def test_gateway_tool_input_progress_is_transient_and_resettable() -> None:
+    runtime = TuiRuntime("session-tool-input")
+    runtime.enqueue_prompt("request-tool-input", "write", queued=False)
+    turn = runtime.begin_turn("request-tool-input")
+
+    assert turn.on_gateway_event(
+        {
+            "kind": "tool_input_progress",
+            "progress": {
+                "schema": "provider_tool_input_progress.v1",
+                "phase": "started",
+                "stream_index": 0,
+                "tool": "write_file",
+                "received_chars": 0,
+            },
+        }
+    )
+    assert turn.on_gateway_event(
+        {
+            "kind": "tool_input_progress",
+            "progress": {
+                "schema": "provider_tool_input_progress.v1",
+                "phase": "streaming",
+                "stream_index": 0,
+                "tool": "write_file",
+                "received_chars": 9_000,
+            },
+        }
+    )
+    active = [
+        block
+        for block in runtime.store.snapshot().active_blocks
+        if block.role == "tool_input"
+    ]
+    assert len(active) == 1
+    assert active[0].metadata["received_chars"] == 9_000
+
+    assert turn.on_gateway_event({"kind": "tool_input_reset"})
+    assert not any(
+        block.role == "tool_input"
+        for block in runtime.store.snapshot().active_blocks
+    )

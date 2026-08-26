@@ -539,6 +539,57 @@ def test_collect_with_tools_returns_text_usage_and_blocks():
     assert blocks == [{"id": "toolu_9", "name": "read_file", "input": {"path": "README.md"}}]
 
 
+def test_large_tool_input_stream_emits_batched_counters_without_partial_json():
+    content = "x" * 9_000
+    partial_json = json.dumps({"content": content})
+    lines = [
+        json.dumps(
+            {
+                "type": "content_block_start",
+                "index": 3,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_large",
+                    "name": "write_file",
+                    "input": {},
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 3,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": partial_json,
+                },
+            }
+        ),
+        json.dumps({"type": "content_block_stop", "index": 3}),
+        json.dumps({"type": "message_stop"}),
+    ]
+    progress: list[dict[str, object]] = []
+
+    _text, _usage, blocks, _completion = collect_anthropic_stream_with_completion(
+        lines,
+        on_tool_input_progress=progress.append,
+    )
+
+    assert [item["phase"] for item in progress] == ["started", "streaming", "ready"]
+    assert progress[-1]["received_chars"] == len(partial_json)
+    assert all(item["tool"] == "write_file" for item in progress)
+    public_text = json.dumps(progress, ensure_ascii=False)
+    assert content not in public_text
+    assert "partial_json" not in public_text
+    assert blocks == [
+        {
+            "id": "toolu_large",
+            "name": "write_file",
+            "input": {"content": content},
+        }
+    ]
+
+
 def test_stream_completion_preserves_thinking_text_tool_order_without_exposing_thinking():
     chunks: list[str] = []
 
@@ -586,6 +637,21 @@ def test_stream_generate_returns_tool_use_blocks():
         {"id": "toolu_9", "name": "read_file", "input": {"path": "README.md"}}
     ]
     assert captured["payload"]["tools"] == _TOOLS
+
+
+def test_stream_backend_forwards_tool_input_progress_callback():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=True))
+    backend.request_stream = lambda path, payload, headers: _tool_use_sse_lines()
+    progress: list[dict[str, object]] = []
+
+    response = backend.generate(
+        "read README",
+        tools=_TOOLS,
+        on_tool_input_progress=progress.append,
+    )
+
+    assert response.tool_use_blocks
+    assert [item["phase"] for item in progress] == ["started", "ready"]
 
 
 def test_stream_native_request_uses_the_same_prompt_cache_projection():

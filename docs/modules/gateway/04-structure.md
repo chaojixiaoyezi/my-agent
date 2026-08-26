@@ -1,5 +1,19 @@
 # Gateway Structure
 
+## provider 工具参数生成进度
+
+- `backends/stream_parsers.py` 继续独占 Anthropic `partial_json` 累积与 stop 后解析；同一 StreamEvent 只附带
+  `provider_tool_input_progress.v1` 的阶段、stream index、tool name 和累计字符数。`usage_metadata.py` 在
+  provider 层按首条、1 秒/8,192 字符、ready 合批，observer 异常 fail-open。
+- `conversation/tool_input_progress.py` 是公开 schema 与 transient block identity 的唯一合同。
+  `BackgroundTranscriptSink`、后台 main 和直接 TUI 复用 projector；Gateway 前台只传同一白名单后的 rich
+  chunk。任何调用方都拿不到 partial JSON、文件内容、命令、路径或凭据。
+- `tui_view_model.py` 的 `tool_input` role 只存在于 active blocks；`tool_input_completed` 直接删除，不冻结历史。
+  `tui_block_renderer.py` 将其画成灰色动画计数行并暂时隐藏笼统 Thinking。真实 `tool_started` 与 turn terminal
+  另有兜底清理，因此丢一条易失 ready 也不会留下永久 Working。
+- 这套投影不属于 tool protocol：只有完整 `content_block_stop` 后形成的既有 tool_use block 才能进入
+  ToolCall、权限和 handler；字符数/ready 不参与任务状态、完成裁决、恢复、Compact、缓存或 timeout。
+
 ## 跨回合工具终态折叠
 
 - `request_execution._persist_gateway_assistant_result` 从本轮 `archive_tool_calls` 构造唯一

@@ -6,6 +6,8 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from ..conversation.tool_input_progress import TOOL_INPUT_PROGRESS_SCHEMA
+
 
 # LLM: 流事件同时承载用户可见文本、规范化工具调用和仅供下一轮回放的厂商原生 assistant 块；三类消费者必须彼此隔离。
 # 类用途: 表示一条解析后的模型流事件，供文本展示、工具执行和内部历史分别读取。
@@ -18,6 +20,8 @@ class StreamEvent:
     holds ``{"id","name","input"}``. Text/usage consumers ignore it.
     ``thinking_content`` carries live thinking deltas for rich transcript sinks;
     text/usage consumers ignore it.
+    ``tool_input_progress`` contains counters only; partial tool JSON never leaves
+    this parser through the display callback.
     """
 
     content: str = ""
@@ -25,6 +29,7 @@ class StreamEvent:
     tool_use_block: dict[str, Any] | None = None
     assistant_content_block: dict[str, Any] | None = None
     thinking_content: str = ""
+    tool_input_progress: dict[str, Any] | None = None
 
 
 # 截断检测的常量:Anthropic message_delta.stop_reason 取这些值时，表示模型在写完整
@@ -163,12 +168,17 @@ def anthropic_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
             break
         if event_type == "message_delta":
             stop_reason = str(obj.get("delta", {}).get("stop_reason", "") or "") or stop_reason
-        block = tool_acc.consume(event_type, obj)
+        block, tool_input_progress = tool_acc.consume(event_type, obj)
         assistant_block = assistant_acc.consume(event_type, obj)
-        if block is not None or assistant_block is not None:
+        if (
+            block is not None
+            or assistant_block is not None
+            or tool_input_progress is not None
+        ):
             yield StreamEvent(
                 tool_use_block=block,
                 assistant_content_block=assistant_block,
+                tool_input_progress=tool_input_progress,
             )
             continue
         text = obj.get("delta", {}).get("text", "") if event_type == "content_block_delta" else ""
@@ -218,16 +228,52 @@ class _AnthropicToolUseAccumulator:
             return True
         return self._last_parse_failed
 
-    def consume(self, event_type: str, obj: dict[str, Any]) -> dict[str, Any] | None:
+    # LLM: 返回的 progress 只能含累计字符数等结构化计数；partial_json 必须始终
+    # 留在该累积器内部，直到 stop 后解析成真正 tool_use block。
+    # 函数用途: 吃入一条 Anthropic 工具块事件，同时给展示层提供不含参数正文的进度。
+    def consume(
+        self,
+        event_type: str,
+        obj: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         if event_type == "content_block_start":
             self._on_start(obj)
-            return None
+            return None, self._progress_payload("started")
         if event_type == "content_block_delta":
+            before = len(self._buffer)
             self._on_delta(obj)
-            return None
+            progress = (
+                self._progress_payload("streaming")
+                if len(self._buffer) > before
+                else None
+            )
+            return None, progress
         if event_type == "content_block_stop":
-            return self._on_stop(obj)
-        return None
+            progress = (
+                self._progress_payload("ready")
+                if self._index is not None and obj.get("index") == self._index
+                else None
+            )
+            return self._on_stop(obj), progress
+        return None, None
+
+    # LLM: stream_index、tool 和 buffer 长度是唯一允许外发的 provider 事实；
+    # tool_use id 与缓冲正文都不进入 payload，避免意外形成第二份工具调用合同。
+    # 函数用途: 为当前尚未闭合的工具块生成一条脱敏进度快照。
+    def _progress_payload(self, phase: str) -> dict[str, Any] | None:
+        if self._index is None:
+            return None
+        try:
+            stream_index = max(0, int(self._index))
+        except (TypeError, ValueError):
+            return None
+        return {
+            "schema": TOOL_INPUT_PROGRESS_SCHEMA,
+            "phase": phase,
+            "stream_index": stream_index,
+            "tool": self._name or "Tool",
+            "received_chars": len(self._buffer),
+        }
 
     def _on_start(self, obj: dict[str, Any]) -> None:
         block = obj.get("content_block")

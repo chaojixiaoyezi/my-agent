@@ -288,6 +288,9 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "thinking_started": self._handle_block_started,
             "thinking_delta": self._handle_block_delta,
             "thinking_completed": self._handle_block_completed,
+            "tool_input_started": self._handle_tool_input_started,
+            "tool_input_progress": self._handle_tool_input_progress,
+            "tool_input_completed": self._handle_tool_input_completed,
             "tool_started": self._handle_tool_started,
             "tool_progress": self._handle_tool_progress,
             "tool_completed": self._handle_tool_terminal,
@@ -569,9 +572,11 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     def _handle_block_completed(self, event: TuiEvent) -> None:
         self._freeze_block(event, role=_role_for_kind(event.kind))
 
-    # LLM: tool_started 只使用结构化 tool/title/detail 字段，不解析 legacy 文本。
-    # 函数用途: 创建一个运行中的工具卡片。
+    # LLM: tool_started 只使用结构化 tool/title/detail 字段，并先清同轮易失
+    # 参数行；不解析 legacy 文本，也不把参数 ready 当工具开始。
+    # 函数用途: 收起参数生成提示并创建一个运行中的工具卡片。
     def _handle_tool_started(self, event: TuiEvent) -> None:
+        self._clear_tool_input_blocks()
         if event.block_id in self._stable_ids or event.block_id in self.active_blocks:
             self.record_diagnostic("BLOCK_RESTART_REJECTED", event)
             return
@@ -580,6 +585,54 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             role="tool",
             phase="started",
         )
+
+    # LLM: 该 block 只显示 provider 参数生成活性，不能复用 tool role 或进入
+    # stable 历史；payload 已在共享合同处移除所有参数正文。
+    # 函数用途: 创建一条可动画、可原位删除的“正在准备工具参数”临时行。
+    def _handle_tool_input_started(self, event: TuiEvent) -> None:
+        if event.block_id in self._stable_ids or event.block_id in self.active_blocks:
+            self.record_diagnostic("BLOCK_RESTART_REJECTED", event)
+            return
+        self.active_blocks[event.block_id] = self._block_from_event(
+            event,
+            role="tool_input",
+            phase="started",
+        )
+
+    # LLM: 进度更新只能覆盖累计字符计数和工具名等公开元数据；它既不
+    # 冻结 block，也不能推进真实工具或回合状态。
+    # 函数用途: 原位刷新工具参数生成量，避免长写入期间看起来卡死。
+    def _handle_tool_input_progress(self, event: TuiEvent) -> None:
+        block = self.active_blocks.get(event.block_id)
+        if block is None or block.role != "tool_input":
+            self.record_diagnostic("TOOL_INPUT_PROGRESS_WITHOUT_START", event)
+            return
+        self.active_blocks[event.block_id] = replace(
+            block,
+            phase="updated",
+            title=str(event.payload.get("tool") or block.title),
+            updated_seq=event.seq,
+            metadata={**block.metadata, **_public_metadata(event.payload)},
+        )
+
+    # LLM: ready/clear 仅删除易失进度块，绝不追加一条“工具已完成”的稳定
+    # 历史；迟到事件允许幂等忽略，避免重试/终态竞态制造诊断噪声。
+    # 函数用途: 参数闭合、重试或回合结束时收起临时行。
+    def _handle_tool_input_completed(self, event: TuiEvent) -> None:
+        block = self.active_blocks.get(event.block_id)
+        if block is not None and block.role == "tool_input":
+            self.active_blocks.pop(event.block_id, None)
+
+    # LLM: 清理范围严格限定 role=tool_input；真实 tool/thinking/assistant
+    # active block 不能被一次 provider 参数边界误删。
+    # 函数用途: 在真实工具开始或回合终态时兜底清除所有参数临时行。
+    def _clear_tool_input_blocks(self) -> None:
+        for block_id in tuple(
+            block_id
+            for block_id, block in self.active_blocks.items()
+            if block.role == "tool_input"
+        ):
+            self.active_blocks.pop(block_id, None)
 
     # LLM: tool_progress 只能更新同一 active tool id；output/detail 都由上游脱敏/有界投影提供。
     # 函数用途: 更新工具卡的阶段、摘要和结果预览。
@@ -779,9 +832,12 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             event,
         )
 
-    # LLM: turn 状态只由 kind 映射，payload 文案不参与 running/failed/interrupted 判断。
-    # 函数用途: 更新当前回合状态和事件时间。
+    # LLM: turn 状态只由 kind 映射；终态先清易失参数行，payload 文案不参与
+    # running/failed/interrupted 判断。
+    # 函数用途: 收口临时展示并更新当前回合状态和事件时间。
     def _handle_turn_status(self, event: TuiEvent) -> None:
+        if event.kind in {"turn_completed", "turn_failed", "turn_interrupted"}:
+            self._clear_tool_input_blocks()
         self.status = _status_for_turn_event(self.status, event)
 
     # LLM: status_updated 只接受显式数值/模式字段，不能从格式化统计行反解析。
@@ -1031,6 +1087,8 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "process",
         "active_task_count",
         "hidden_subagent_count",
+        "stream_index",
+        "received_chars",
     }
     metadata = {key: payload[key] for key in allowed if key in payload}
     raw_subagents = payload.get("subagents")

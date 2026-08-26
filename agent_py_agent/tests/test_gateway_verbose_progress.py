@@ -396,6 +396,48 @@ def test_rich_gateway_provider_retry_is_immediate_structured_runtime_progress(tm
     assert "api_base" not in json.dumps(rows, ensure_ascii=False)
 
 
+def test_rich_gateway_tool_input_progress_keeps_only_public_counters(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True)
+
+    assert writer.write_tool_input_progress(
+        {
+            "schema": "provider_tool_input_progress.v1",
+            "phase": "started",
+            "stream_index": 2,
+            "tool": "write_file",
+            "received_chars": 0,
+            "partial_json": '{"path":"/root/secret","content":"private"}',
+        }
+    )
+    assert writer.write_tool_input_progress(
+        {
+            "schema": "provider_tool_input_progress.v1",
+            "phase": "ready",
+            "stream_index": 2,
+            "tool": "write_file",
+            "received_chars": 12_345,
+        }
+    )
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [row["kind"] for row in rows] == [
+        "tool_input_progress",
+        "tool_input_progress",
+    ]
+    assert rows[-1]["progress"] == {
+        "schema": "provider_tool_input_progress.v1",
+        "phase": "ready",
+        "stream_index": 2,
+        "tool": "write_file",
+        "received_chars": 12_345,
+    }
+    serialized = json.dumps(rows, ensure_ascii=False)
+    assert "partial_json" not in serialized
+    assert "/root/secret" not in serialized
+    assert "private" not in serialized
+
+
 def test_model_generation_prefers_typed_model_chunk_sink() -> None:
     model_chunks: list[str] = []
     generic_chunks: list[str] = []

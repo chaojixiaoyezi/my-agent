@@ -256,7 +256,7 @@ class TuiRenderContext:
         )
 
 
-# LLM: frame provider 必须复用 renderer 的可见上下文规则；wall clock 仅在活动 connection/thinking/background/compact 真正改变画面时进入 key。
+# LLM: frame provider 必须复用 renderer 的可见上下文规则；wall clock 仅在活动 connection/thinking/background/compact/tool-input 真正改变画面时进入 key。
 # 函数用途: 生成一次完整 TUI 画面所需的上下文缓存键，避免空闲长会话被动画时钟反复重绘。
 def tui_render_context_key(
     snapshot: TuiViewSnapshot,
@@ -292,6 +292,11 @@ def tui_render_context_key(
         )
         for block in snapshot.active_blocks
         if block.role == "compact"
+    )
+    tool_input_animation = tuple(
+        (block.block_id, _tool_input_animation_key(block, context))
+        for block in snapshot.active_blocks
+        if block.role == "tool_input"
     )
     todo_animation = (
         context.spinner_index % len(SPINNER_GLYPHS)
@@ -330,6 +335,7 @@ def tui_render_context_key(
         thinking_animation,
         background_animation,
         compact_animation,
+        tool_input_animation,
         todo_animation,
     )
 
@@ -355,7 +361,7 @@ class TuiRenderCacheStats:
     entries: int
 
 
-# LLM: 流式活动块（phase=delta/active thinking）每帧 seq 都变，渲染 miss 后若每次都全量
+# LLM: 流式活动块（phase=delta/active thinking/compact/tool-input）每帧 seq 都变，渲染 miss 后若每次都全量
 # 重渲染，万字级正文在 show_all 展开/滚动时每帧数十毫秒拖垮事件循环。短时间窗内复用
 # 最近一次渲染，增量 0.15s 后自然追上，稳定块不受影响。
 # 函数用途: 判断 block 是否处于逐帧更新的流式活动状态。
@@ -365,7 +371,7 @@ _LIVE_BLOCK_RENDER_THROTTLE_SECONDS = 0.15
 def _is_live_stream_block(block: TuiBlock) -> bool:
     if block.phase == "delta":
         return True
-    return block.role in {"thinking", "compact"} and block.phase not in TERMINAL_RENDER_PHASES
+    return block.role in {"thinking", "compact", "tool_input"} and block.phase not in TERMINAL_RENDER_PHASES
 
 
 # LLM: TuiBlockRenderCache 只缓存 immutable block 输出；key 含 updated_seq/宽度/显示模式，绝不跨语义版本复用。
@@ -520,9 +526,9 @@ def _sanitize_formatted_line(line: FormattedLine) -> FormattedLine:
     return tuple(sanitized)
 
 
-# LLM: 终端交互 hides foreground thinking while permission or a visible
-# assistant stream is active. Main background activity is appended separately
-# after this selection, matching SpinnerWithVerb at the transcript tail.
+# LLM: 终端交互 hides foreground thinking while permission, compact, provider
+# tool-input progress, or a visible assistant stream is active. Main background
+# activity is appended separately after this selection, matching SpinnerWithVerb.
 # 函数用途: 选择本帧应显示在可滚动正文末尾的前台思考活动块。
 def _visible_activity_blocks(
     snapshot: TuiViewSnapshot,
@@ -531,6 +537,8 @@ def _visible_activity_blocks(
     if snapshot.permission is not None:
         return ()
     if any(block.role == "compact" for block in snapshot.active_blocks):
+        return ()
+    if any(block.role == "tool_input" for block in snapshot.active_blocks):
         return ()
     has_visible_assistant_stream = any(
         block.role == "assistant"
@@ -560,6 +568,8 @@ def _render_block(block: TuiBlock, context: TuiRenderContext) -> tuple[Formatted
         return _render_thinking(block, context)
     if block.role == "compact":
         return _render_compact_progress(block, context)
+    if block.role == "tool_input":
+        return _render_tool_input_progress(block, context)
     if block.role == "tool":
         return _render_tool(block, context)
     if block.role == "todo":
@@ -914,7 +924,7 @@ def _render_interrupt_notice(
     )
 
 
-# LLM: cache key 不包含不影响该 block 的状态；活动 thinking 才读取 spinner，session 才读取品牌元数据。
+# LLM: cache key 不包含不影响该 block 的状态；活动 thinking/tool-input 才读取各自 spinner/clock，session 才读取品牌元数据。
 # 函数用途: 生成一个精确且可哈希的 block 渲染版本键。
 def _block_cache_key(block: TuiBlock, context: TuiRenderContext) -> tuple[Any, ...]:
     key: tuple[Any, ...] = (
@@ -935,6 +945,12 @@ def _block_cache_key(block: TuiBlock, context: TuiRenderContext) -> tuple[Any, .
         key += _background_animation_key(block, context)
     if block.role == "compact" and block.phase not in {"completed", "failed", "interrupted"}:
         key += (context.spinner_index % len(SPINNER_GLYPHS),)
+    if block.role == "tool_input" and block.phase not in {
+        "completed",
+        "failed",
+        "interrupted",
+    }:
+        key += _tool_input_animation_key(block, context)
     if block.role == "todo":
         key += (context.todos_expanded,)
         if _todo_has_in_progress_items(block.metadata.get("items")):
@@ -955,6 +971,31 @@ def _thinking_animation_key(
         int(_spinner_elapsed_seconds(context)),
         context.output_tokens,
         _spinner_is_stalled(context),
+    )
+
+
+# LLM: 工具参数活动行只按动画帧、已接收计数和自身起点秒数失效缓存；
+# 不借用全局 spinner 的 token/stall 语义。
+# 函数用途: 生成大工具参数临时行的最小动画缓存键。
+def _tool_input_animation_key(
+    block: TuiBlock,
+    context: TuiRenderContext,
+) -> tuple[Any, ...]:
+    try:
+        started_at = max(0.0, float(block.metadata.get("started_at") or 0.0))
+        received_chars = max(0, int(block.metadata.get("received_chars") or 0))
+    except (TypeError, ValueError):
+        started_at = 0.0
+        received_chars = 0
+    elapsed = (
+        int(max(0.0, context.now - started_at))
+        if context.now > 0 and started_at > 0
+        else 0
+    )
+    return (
+        context.spinner_index % len(SPINNER_GLYPHS),
+        received_chars,
+        elapsed,
     )
 
 
@@ -1270,6 +1311,35 @@ def _render_compact_progress(
             ("class:tui-spinner-highlight", glyph + " "),
             ("class:tui-thinking", "Compacting context "),
             ("class:tui-thinking", f"[{meter}] {percent}% · {stage}"),
+        ),
+        width=context.width,
+        continuation_prefix=(("class:tui-thinking", "  "),),
+    )
+
+
+# LLM: 该行只能读取已脱敏的工具名/累计字符数与 display timestamp；它不
+# 展示参数片段，也不把 ready/字符量解释为工具执行或任务完成。
+# 函数用途: 在大 write/apply_patch 参数仍生成时显示一条 终端交互 风格动画进度。
+def _render_tool_input_progress(
+    block: TuiBlock,
+    context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
+    tool = _tool_display_name(block.title or str(block.metadata.get("tool") or "Tool"))
+    try:
+        received_chars = max(0, int(block.metadata.get("received_chars") or 0))
+        started_at = max(0.0, float(block.metadata.get("started_at") or 0.0))
+    except (TypeError, ValueError):
+        received_chars = 0
+        started_at = 0.0
+    details = [f"{_format_compact_number(received_chars)} chars"]
+    if context.now > 0 and started_at > 0:
+        details.append(_format_duration(max(0.0, context.now - started_at)))
+    return wrap_fragments(
+        (
+            ("class:tui-spinner-highlight", glyph + " "),
+            ("class:tui-thinking", f"正在准备 {tool} 参数"),
+            ("class:tui-muted", f" · {' · '.join(details)}"),
         ),
         width=context.width,
         continuation_prefix=(("class:tui-thinking", "  "),),

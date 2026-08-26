@@ -1,14 +1,19 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from ..conversation.tool_input_progress import TOOL_INPUT_PROGRESS_SCHEMA
 from .stream_parsers import (
     StreamCompletion,
     anthropic_stream_events,
     openai_stream_events,
 )
+
+_TOOL_INPUT_PROGRESS_FLUSH_SECONDS = 1.0
+_TOOL_INPUT_PROGRESS_FLUSH_CHARS = 8_192
 
 
 def usage_dict(value: object) -> dict[str, Any]:
@@ -97,10 +102,14 @@ def collect_anthropic_stream_with_tools(
     return text, usage, blocks
 
 
+# LLM: 该收集器是 Anthropic 文本/思考/工具块与脱敏参数进度的分流边界；
+# callback 失败不得影响完整响应，原始工具 JSON 只能留给 parser/tool block。
+# 函数用途: 收集一次 Anthropic SSE 的正文、用量、工具块和完整性，并合批发送展示计数。
 def collect_anthropic_stream_with_completion(
     lines: Iterable[str],
     on_chunk: Callable[[str], None] | None = None,
     on_thinking_delta: Callable[[str], None] | None = None,
+    on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
     """Like ``collect_anthropic_stream_with_tools`` but also returns the stream's
     ``StreamCompletion`` health check (truncation detection for the native path).
@@ -110,18 +119,24 @@ def collect_anthropic_stream_with_completion(
     open). Text/3-tuple callers are unaffected.
     ``on_thinking_delta`` receives live thinking deltas for rich transcript sinks;
     text/usage callers ignore it.
+    ``on_tool_input_progress`` receives only tool name/index/phase/cumulative
+    character counters, batched before leaving this collector.
     """
     parts: list[str] = []
     accumulated = ""
     previous_raw = ""
     usage: dict[str, Any] = {}
     blocks: list[dict[str, Any]] = []
+    tool_input_emitter = _ToolInputProgressEmitter(on_tool_input_progress)
     events = anthropic_stream_events(lines)
     completion = StreamCompletion()
     while True:
         event, completion, done = _next_stream_event(events, completion)
         if done:
             break
+        progress = getattr(event, "tool_input_progress", None)
+        if progress is not None:
+            tool_input_emitter.accept(progress)
         block = getattr(event, "tool_use_block", None)
         if block is not None:
             blocks.append(block)
@@ -144,6 +159,58 @@ def collect_anthropic_stream_with_completion(
         accumulated += chunk
         _emit_chunk(on_chunk, chunk)
     return accumulated, usage, blocks, completion
+
+
+# LLM: 该对象只抑制过密的展示回调，不能吞掉 started/ready，也不能把原始
+# partial JSON 放进状态；显示 callback 的异常不得改变真实模型响应。
+# 类用途: 将 Anthropic 工具参数逐 delta 计数合成首条、每秒/每 8K 和收口进度。
+class _ToolInputProgressEmitter:
+    # LLM: callback 是可选 UI observer；所有节流状态按一次物理响应收口，不能
+    # 持久化或跨模型请求复用。
+    # 函数用途: 为一次流式响应初始化工具参数展示节流器。
+    def __init__(
+        self,
+        callback: Callable[[dict[str, object]], None] | None,
+    ) -> None:
+        self.callback = callback if callable(callback) else None
+        self._last_chars: dict[int, int] = {}
+        self._last_emitted_at: dict[int, float] = {}
+
+    # LLM: accept 只依据 typed phase/count/time 决定是否显示；任何 observer
+    # 失败都必须 fail-open，让完整 tool_use 继续由 parser 正常返回。
+    # 函数用途: 接收一条计数快照，并在达到合批边界时安全通知界面。
+    def accept(self, value: object) -> None:
+        if self.callback is None or not isinstance(value, dict):
+            return
+        phase = str(value.get("phase") or "").strip().lower()
+        try:
+            stream_index = max(0, int(value.get("stream_index") or 0))
+            received_chars = max(0, int(value.get("received_chars") or 0))
+        except (TypeError, ValueError):
+            return
+        now = time.monotonic()
+        previous_chars = self._last_chars.get(stream_index, 0)
+        previous_at = self._last_emitted_at.get(stream_index, 0.0)
+        should_emit = (
+            phase in {"started", "ready"}
+            or received_chars - previous_chars >= _TOOL_INPUT_PROGRESS_FLUSH_CHARS
+            or now - previous_at >= _TOOL_INPUT_PROGRESS_FLUSH_SECONDS
+        )
+        if not should_emit:
+            return
+        public = {
+            "schema": TOOL_INPUT_PROGRESS_SCHEMA,
+            "phase": phase,
+            "stream_index": stream_index,
+            "tool": str(value.get("tool") or "Tool")[:80],
+            "received_chars": received_chars,
+        }
+        try:
+            self.callback(public)
+        except Exception:
+            return
+        self._last_chars[stream_index] = received_chars
+        self._last_emitted_at[stream_index] = now
 
 
 def _next_stream_event(events: Any, completion: StreamCompletion) -> tuple[Any, StreamCompletion, bool]:

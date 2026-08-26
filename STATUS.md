@@ -1,5 +1,23 @@
 # STATUS
 
+## 2026-08-26 大工具参数生成期可见进度（本地候选，等待长任务终态部署）
+
+- `.7` 的 `ma-cache-firstturn-r34` 在 Click→TypeScript 长任务中抓到：`source-reader-1` 说“开始写第一块”后
+  约 4 分钟没有 transcript 事件，但 runner、TLS 连接和收包字节持续增长，最终一次写出 56,876 字节/
+  2,150 行文档。根因不是锁或 Gateway 卡死，而是 Anthropic `input_json_delta` 直到
+  `content_block_stop` 才形成完整工具调用，旧界面期间只能显示笼统 Working。
+- 对照 会话运行时 的 `ToolCallInputDelta`/500ms patch diff consumer，以及 终端交互 的
+  `streamingToolUses` 后，当前候选在 parser 内只生成 `tool/stream_index/phase/received_chars`，按首条、
+  每 1 秒或每 8,192 字符、ready 合批；半截 JSON、文件正文、命令、路径和凭据均不进入公开事件。
+- Gateway 前台、后台 main、child 与本地 TUI 共用 `provider_tool_input_progress.v1` 和临时 block 生命周期；
+  界面显示灰色动画“正在准备 Write 参数 · 12.3k chars”，ready、重试、真实工具开始或回合终态后直接收起，
+  不留下“工具已完成”历史。它不创建 ToolCall、不执行 handler，也不改变超时、Compact、任务或完成裁决。
+- 8 个直接相关测试文件共 195 项通过，Ruff 与 strict code-size 已通过；当前生产/测试改动远低于 10,000 行，
+  不跑全仓 pytest。唯一 Gateway 仍保持旧部署，不在 3 个实现 child 运行中重启。
+- 同场长任务现已完成 source/test/architecture/基础模块 4 个阶段，另外 3 个实现 child 运行中；后三者均已
+  真实 Compact 1 次，主代理 Context 约 52.6k、Compact 0。会话运行时+MiniMax-M2.7 r36 对照在 1:46 后停下：
+  child 无产物，主代理违背“不能自己做”后仍未开始复刻；该失败仅记作模型/adapter 对照，不照抄其行为。
+
 ## 2026-08-26 Anthropic-compatible 主动缓存（已部署并通过真 TUI）
 
 - `.7` 唯一 Gateway 的旧 HEAD 长 TUI `ma-97468f3-longchain-r27` 已到终态，耗时约 3 小时 59 分。

@@ -74,6 +74,7 @@ from ..conversation.run_claim import (
     claim_heartbeat_interval_seconds,
     conversation_run_lane,
 )
+from ..conversation.tool_input_progress import public_tool_input_progress
 from ..ingestion.source_binding import public_audit_source_bindings
 from ..subagents.runner_completion_wake import SUBAGENT_COMPLETION_SCHEMA_VERSION
 from ..tooling.operation_verification import public_operation_verification
@@ -210,6 +211,7 @@ class BufferedChunkStreamWriter:
     _model_delta_chars: int = 0
     _last_model_delta_flush_at: float = field(default_factory=time.monotonic)
     _commentary_emitted: bool = False
+    _tool_input_active: bool = False
     _identifier_redactions: tuple[tuple[object, str], ...] = ()
     _observed_tool_rounds: int = 0
     interactive_approvals: bool = False
@@ -319,8 +321,9 @@ class BufferedChunkStreamWriter:
             },
         )
 
-    # LLM: rich transcript 可保留已脱敏的 output/display；普通客户端继续按 verbose 合同裁剪，display 一律不外发。
-    # 函数用途: 在工具边界冻结模型说明，并写入一条结构化工具进度事件。
+    # LLM: rich transcript 可保留已脱敏的 output/display；真实 tool start 先
+    # 清 provider 参数临时行。普通客户端继续按 verbose 合同裁剪，display 一律不外发。
+    # 函数用途: 在工具边界收起参数进度、冻结模型说明，并写入结构化工具事件。
     def write_progress(self, event: dict[str, object], legacy_text: str) -> None:
         try:
             observed_round = int(event.get("round") or 0)
@@ -329,6 +332,7 @@ class BufferedChunkStreamWriter:
         self._observed_tool_rounds = max(self._observed_tool_rounds, observed_round)
         self.flush()
         if event.get("phase") == "started":
+            self._reset_tool_input_progress()
             self._write_model_commentary_at_boundary()
         progress = dict(event)
         if not self.rich_transcript:
@@ -384,6 +388,35 @@ class BufferedChunkStreamWriter:
             },
         )
 
+    # LLM: 该出口只接受共享白名单后的累计字符计数；raw partial JSON、路径、
+    # 命令和凭据不得写入 chunk 文件，普通非 rich 客户端保持完全不可见。
+    # 函数用途: 向真实 TUI 流式发送“模型正在准备工具参数”的临时进度。
+    def write_tool_input_progress(self, value: object) -> bool:
+        if not self.rich_transcript:
+            return False
+        public = public_tool_input_progress(value)
+        if not public:
+            return False
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "tool_input_progress",
+                "progress": public,
+            },
+        )
+        self._tool_input_active = str(public.get("phase") or "") != "ready"
+        return True
+
+    # LLM: reset 只能在当前 writer 确实公开过未闭合参数块时发送，避免普通
+    # retry/tool 事件多出无意义行；该布尔仍只是易失显示状态。
+    # 函数用途: 收起当前 TUI 的工具参数临时行，并清除 writer 本地标记。
+    def _reset_tool_input_progress(self) -> bool:
+        if not self.rich_transcript or not self._tool_input_active:
+            return False
+        self._tool_input_active = False
+        write_chunk_event(self.chunk_path, {"kind": "tool_input_reset"})
+        return True
+
     # LLM: provider retry 只向显式 rich 客户端公开有界结构化进度；原始异常和 endpoint 不得进入公开 chunk。
     # 函数用途: 在传输层或模型回合退避期间立即显示重连次数和等待秒数。
     def write_provider_retry(
@@ -403,6 +436,7 @@ class BufferedChunkStreamWriter:
         wait_seconds = max(0.0, round(float(delay_seconds or 0.0), 1))
         layer = "连接" if retry_scope == "transport" else "模型回合"
         self.flush()
+        self._reset_tool_input_progress()
         write_chunk_event(
             self.chunk_path,
             {

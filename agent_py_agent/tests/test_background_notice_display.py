@@ -478,6 +478,70 @@ def test_background_transcript_sink_reuses_free_code_diff_renderer() -> None:
     assert any("class:tui-diff-add" in fragment[0] for fragment in new_line)
 
 
+def test_background_tool_input_progress_is_transient_and_redacted() -> None:
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BackgroundTranscriptSink,
+        read_background_transcript_events,
+    )
+
+    agent = SimpleNamespace()
+    sink = BackgroundTranscriptSink(
+        agent,
+        thread_id="thread-tool-input",
+        task_id="task-tool-input",
+    )
+    assert sink.write_tool_input_progress(
+        {
+            "schema": "provider_tool_input_progress.v1",
+            "phase": "started",
+            "stream_index": 0,
+            "tool": "write_file",
+            "received_chars": 0,
+            "partial_json": "secret body",
+        }
+    )
+    assert sink.write_tool_input_progress(
+        {
+            "schema": "provider_tool_input_progress.v1",
+            "phase": "streaming",
+            "stream_index": 0,
+            "tool": "write_file",
+            "received_chars": 16_384,
+        }
+    )
+    assert sink.write_tool_input_progress(
+        {
+            "schema": "provider_tool_input_progress.v1",
+            "phase": "ready",
+            "stream_index": 0,
+            "tool": "write_file",
+            "received_chars": 20_000,
+        }
+    )
+
+    page = read_background_transcript_events(
+        agent,
+        thread_id="thread-tool-input",
+        after=0,
+    )
+    assert [row["kind"] for row in page["events"]] == [
+        "tool_input_started",
+        "tool_input_progress",
+        "tool_input_completed",
+    ]
+    serialized = json.dumps(page, ensure_ascii=False)
+    assert "secret body" not in serialized
+    assert "partial_json" not in serialized
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("session-tool-input")
+    assert runtime.publish_background_transcript_events(page["events"]) == 3
+    snapshot = runtime.store.snapshot()
+    assert not any(block.role == "tool_input" for block in snapshot.active_blocks)
+    assert snapshot.stable_blocks == ()
+    assert snapshot.diagnostics == ()
+
+
 def test_background_thinking_deltas_are_batched_before_tui_transport(monkeypatch) -> None:
     """逐 token 思考先合批，首片即时可见且完整终态仍能恢复全部正文。"""
     from agent_py_agent.agent.conversation import background_transcript
