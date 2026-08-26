@@ -53,7 +53,7 @@ session 先补齐这次调研，再连续做两个小追加和多子代理复刻
 
 ### Leaf 角色行为与共享工作区修改纪律
 
-状态：`85433d4` 第一层已部署；r31 暴露工具缺口，第二层本地 focused 通过，待当前长任务安全点部署
+状态：`85433d4` 第一层已部署；r31 暴露工具缺口，第二层 `1082ccf` 已推送，待当前长任务安全点部署
 
 解决问题：Click→Go 复刻的 worker-2 被分配 examples，却扩到 `internal/core`、覆盖兄弟文件，并在局部补丁
 失败后用 `head/write_file/mv/heredoc` 整文件重写。对照 会话运行时 `core/src/agent/role.rs` 后确认，本项目 leaf

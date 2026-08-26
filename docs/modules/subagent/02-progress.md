@@ -45,7 +45,7 @@
   focused 35 项通过并随 `85433d4` 部署。r28 状态文件和 child TUI 已证明当前 worker 提示真实注入；该批
   后续冲突来自父级主动声明的祖先范围，已转入上方第二层结构化预检候选。
 
-## 2026-08-25 Leaf 局部编辑工具与补丁失配反馈（本地候选）
+## 2026-08-25 Leaf 局部编辑工具与补丁失配反馈（`1082ccf` 已推送，待部署）
 
 - r31 首个 TypeScript worker 已看到共享工作区/局部修改纪律，但它的真实 `allowed_tools` 只有
   `write_file/apply_patch`；仓库现成的 `edit_file` 没进入直属 child、递归 leaf 或内置角色快照。补丁期望行
