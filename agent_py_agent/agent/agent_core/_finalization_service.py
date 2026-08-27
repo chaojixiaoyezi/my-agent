@@ -674,7 +674,11 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
 # 函数用途: 为未完成的主会话安排续跑；子代理只保存断点并交回自己的 runner 续派。
 def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext) -> None:
     """Resume explicit persistent root work after a structured turn boundary."""
-    if not ctx.do_save:
+    source = str(ctx.source or "").strip().lower()
+    # Background lifecycle slices deliberately use ``save=False`` because the
+    # conversation transcript is already the authority.  That presentation/
+    # archive choice must not also disable the active-turn continuation gate.
+    if not ctx.do_save and source != "background_main_agent":
         return
     if str(ctx.context_scope or "").strip().lower() == "task_local":
         return
@@ -708,7 +712,6 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
     # 直跑传 chat/cli_run,HTTP 适配器传 http:<channel>,cli_* 是预留前缀;
     # 排除法比旧白名单 {gateway,chat,cli_run} 更健壮(任何前台形态都不漏)。
     # 后台唤醒轮/子代理收口按 policy interval 自然触发,不抢占资源。
-    source = str(ctx.source or "").strip().lower()
     foreground = (
         source.startswith("cli_")
         or source.startswith("http:")
@@ -724,9 +727,26 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
         )
         return
     # 普通任务(无 /goal):只有轮限/失败等宿主结构化 unfinished
-    # 状态才进入持久恢复链；task_progress 账本不参与。后台唤醒轮本身是
-    # 「读状态、给回执」语义，不能再排一个相同唤醒。
+    # 状态才进入持久恢复链；task_progress 账本不参与。多数后台轮只是
+    # 「读状态、给回执」，不能派生同类空转唤醒；但 child lifecycle 工作片
+    # 开始时已确认全部直属 child 终态后，主代理正在执行的是原 active turn
+    # 的整合阶段。此时工具轮边界不能把整项任务遗留在 active+无 executor。
     if source == "background_main_agent":
+        from ..conversation.authority import (
+            CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
+        )
+
+        sampled_phase = str(
+            attrs.get(CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR) or ""
+        ).strip()
+        if sampled_phase != "subagents_terminal":
+            return
+        ensure_ordinary_task_resume(
+            agent,
+            task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
+            thread_id=thread_id,
+            due_now=True,
+        )
         return
     from .runtime.task_identity import progress_ledger_id
 

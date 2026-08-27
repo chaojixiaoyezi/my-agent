@@ -250,6 +250,11 @@
   它们继续阻止 root closeout 和用户可见最终回复，直到后续有界批次完整读取。该边界对照 会话运行时
   `forward_child_completion_to_parent` 与 session mailbox；“canonical child 都终态”只决定可以开始整合，
   不等于模型已经看过所有完成信封。
+- child lifecycle 后台工作片开始时冻结的 typed phase 同时约束收口续接：仍有 child、没有 child 或状态
+  未知时不得从 finalization 新建普通轮询；全部直属 child 已终态后，该工作片就是原 root active turn 的
+  整合片。若它因宿主结构化工具轮/上下文边界 unfinished，必须以 exact durable root task id 登记有界续接，
+  不能因后台 `save=False`（避免重复 transcript/archive）而丢掉执行器。该续接不读取模型正文、不把普通
+  Todo 升格为完成门，也不重新采样树；对照 会话运行时 active turn 在内部工具边界后继续运行的语义。
 - 后台 scheduler 只有在该 thread/task 没有 linked live turn 时才能启动一个续接 turn；续接仍加载完整 thread compact 与消息尾部，并额外读取精确 task 的运行状态。任务已 completed/cancelled/interrupted/abandoned/superseded 时，排队的定时或生命周期 wake 直接作废，不能复活任务。canonical task writer 提交上述不可复活终态时，必须在同一提交路径立即停用 exact task 的全部 progress policy；scheduler 的终态扫描只保留为旧账本、崩溃竞态和升级数据的防御兜底，不能成为正常退休时机，也不能误停同 thread 的其它任务。
 - task workspace 下只保留 progress、canonical state 和证据 refs 等结构化运行事实，不生成 task compact、task rollup package 或第二份主代理上下文。main、child、grandchild 的持久上下文压缩都只认各自 thread JSON 的 summary + cursor + generation + checkpoint；active turn 因 context pressure 续跑时，原生 ToolCall/ToolResult 的成对回收必须先在同一 owner Compact ledger 写 checkpoint，再推进该 ConversationThread generation，随后继续同一 turn。task-local workspace、工具和 Memory 仍按 run 隔离，但不得恢复旧 `memory_archive` continuation 或第二套计数。
 - 所有位于消息开头的 `/XXXX` 都先进入统一 typed command dispatcher；支持的命令由程序执行，

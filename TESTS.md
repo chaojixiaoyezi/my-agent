@@ -1,5 +1,26 @@
 # TESTS
 
+## 2026-08-28 后台 child 终态整合跨工具轮续接
+
+回归必须覆盖同一结构化 gate 的正反两面：
+
+- `background_main_agent + save=False + TOOL_ROUND_LIMIT_REACHED + subagents_terminal` 使用
+  `conversation_task_id` 登记 `due_now=True` 的 ordinary resume；后台 attempt id 不能替代 durable root。
+- phase 为 `subagents_active/no_subagents/subagent_state_unknown/缺失` 时零 policy，避免轮询、状态未知时
+  猜测和普通回执自我唤醒；task-local child 仍只由自己的 runner 续跑。
+- 该判断只读工作片开始时冻结的 typed phase，不在模型运行后再读树，也不解析模型回复。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_run_audit_terminal.py \
+  agent_py_agent/tests/test_background_main_agent_runtime.py \
+  agent_py_agent/tests/test_tools/test_tool_loop.py \
+  -q --tb=short
+```
+
+以上组合 focused 已通过，保留既有 xfail/xpass；提交前继续执行 Ruff、doc sync、strict code-size、diff 与
+clean-package。真实验收只从 fresh `.10` MiniMax-M2.7 TUI 发一次原样长任务，不能人工补“继续”冒充通过。
+
 ## 2026-08-27 Compact 有效代次与终态 progress policy
 
 本轮回归钉住两条底层合同：

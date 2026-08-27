@@ -514,6 +514,80 @@ def test_removed_required_action_gate_does_not_resume_ordinary_task(monkeypatch)
     assert ordinary.calls == []
 
 
+@pytest.mark.parametrize(
+    "sampled_phase",
+    ["", "no_subagents", "subagents_active", "subagent_state_unknown"],
+)
+def test_background_unfinished_slice_does_not_poll_without_terminal_children(
+    monkeypatch,
+    sampled_phase,
+):
+    """普通后台回执或仍有 child 的工作片不能自行制造轮询 policy。"""
+    from agent_py_agent.agent.conversation.authority import (
+        CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
+    )
+
+    goal, ordinary = _patch_resume(monkeypatch)
+    ctx = _ctx(
+        source="background_main_agent",
+        do_save=False,
+        task_attributes={
+            "conversation_thread_id": "thread-1",
+            "conversation_task_id": "task-root",
+            CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR: sampled_phase,
+        },
+        final_response=SimpleNamespace(
+            text="本工作片达到工具轮上限",
+            backend="test",
+            runtime_status="unfinished",
+            runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+            runtime_source="tool_loop",
+        ),
+    )
+
+    _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
+
+    assert goal.calls == []
+    assert ordinary.calls == []
+
+
+def test_background_terminal_child_integration_resumes_exact_active_task(monkeypatch):
+    """全部 child 终态后的整合片段越过工具轮边界时必须立即续接原任务。"""
+    from agent_py_agent.agent.conversation.authority import (
+        CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
+    )
+
+    goal, ordinary = _patch_resume(monkeypatch)
+    ctx = _ctx(
+        source="background_main_agent",
+        do_save=False,
+        task_id="background-attempt-id",
+        task_attributes={
+            "conversation_thread_id": "thread-1",
+            "conversation_task_id": "task-root",
+            CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR: "subagents_terminal",
+        },
+        final_response=SimpleNamespace(
+            text="本工作片达到工具轮上限",
+            backend="test",
+            runtime_status="unfinished",
+            runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+            runtime_source="tool_loop",
+        ),
+    )
+
+    _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
+
+    assert goal.calls == []
+    assert ordinary.calls == [
+        {
+            "task_id": "task-root",
+            "thread_id": "thread-1",
+            "due_now": True,
+        }
+    ]
+
+
 # ------------------------------------------------- 协议违规落账（2026-08-14 双CLI复刻实证）
 
 

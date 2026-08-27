@@ -1,6 +1,27 @@
 # STATUS
 
-## 2026-08-27 Compact 有效提交与终态续作退休（本地候选通过，待 `.10` 真 TUI）
+## 2026-08-28 子代理终态后的后台整合续接（本地候选通过，待 `.10` 真 TUI）
+
+- `.10` 的 MiniMax-M2.7 Ripgrep 换语言复刻已让三名 child 全部自然 `DONE`；主代理随后真实进行整合、安装、
+  版本与测试检查，但后台工作片在 `TOOL_ROUND_LIMIT_REACHED` 收口后停在 active task，且没有 live executor
+  或 enabled progress policy。根因是 finalization 同时受 `save=False` 与
+  `source=background_main_agent` 两道无条件返回影响，把 transcript 保存策略误当成 active-turn 生命周期。
+- 当前候选复用本轮开始时已有的
+  `conversation_background_subagent_phase_at_start`：只有精确 `subagents_terminal` 才为原 durable root
+  登记立即到期、受既有预算限制的 ordinary resume；仍有 child、没有 child、状态读取失败和任意普通后台
+  回执均不创建 policy。它不解析“完成/继续”等正文，也不刷新第二次树状态。
+- 主代理收口、后台 runtime 与工具循环组合 focused 已通过；部署后必须用真实 TUI 证明整合跨过至少一个
+  工具轮边界后自动继续并自然交付。旧已停工作片不会由代码改动倒推重放，验收使用 fresh 原样任务。
+
+## 2026-08-28 Compact 有效代次与终态 policy 真机复验完成
+
+- `.10` `ma-110-native-cache-r2` 在 `61a0a9e` 部署后提交的 generation 5 为
+  `148,304 → 14,145`，低于 180,000 触发线；旧 `195,457 → 195,267` 这类无效候选不再推进代数。
+- 紧接 Compact 的普通追问无需重读即可回答，provider 账为 24,394 ordinary input、31,600 cache-read、
+  107 output；按普通输入 5、缓存 0.1/1，两档相对全普通输入分别节省约 55.31%/45.15%。已完成任务的旧
+  ordinary resume policy 同时为 disabled。该项已移入 `docs/COMPLETED.md`。
+
+## 2026-08-27 Compact 有效提交与终态续作退休（历史候选，已于 2026-08-28 真机完成）
 
 - `.10` 的长会话 `ma-110-native-cache-r2` 暴露了真实假计数：一次 `live_tool_ir` 记录为
   `195,457 → 195,267`，压缩后仍高于 180k 触发线，却推进了 Compact generation；随后同一压力又触发
@@ -11,8 +32,8 @@
   原 IR，Compact 次数保持不变。
 - 同一候选还把 progress policy 的正常退休移到 canonical task 终态提交点：completed/interrupted 等
   不可复活终态会立即停用 exact task 的策略，同 thread 其它任务不受影响；scheduler 终态扫描只处理
-  升级旧账本和极窄竞态。相关 Compact/Store/Gateway/后台 runtime focused 已通过；`.7` 慢模型长任务继续
-  原样自然运行，本轮不会为部署中断它。
+  升级旧账本和极窄竞态。相关 Compact/Store/Gateway/后台 runtime focused 已通过；`.10` 真机结果见上方
+  2026-08-28 完成记录，`.7` 慢模型长任务继续原样自然运行。
 
 ## 2026-08-27 跨完成回合缓存、慢模型与派工真 TUI（`.10` 已通过；`.7` 仍自然运行）
 

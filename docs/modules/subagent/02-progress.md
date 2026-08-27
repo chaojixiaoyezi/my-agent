@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-08-28 child 全终态后的主代理整合续接（本地候选）
+
+- Ripgrep 换语言复刻真机中三名 child 都已 `DONE`，main 的后台整合片真实执行 14 次模型调用和多项安装/
+  测试工具后触达 `TOOL_ROUND_LIMIT_REACHED`；旧 `save=False + background_main_agent` 排除让 task 保持
+  active，却没有 executor/policy，复现“子代理完成后主代理消失”。
+- 当前 finalization 复用工作片开始时冻结的 exact child phase：只有 `subagents_terminal` 才按 durable root
+  立即登记有界 ordinary resume；active/no-child/unknown 均不轮询。该判断不扫正文、不重读 child 树，
+  child 自己仍只归 task-local runner。
+- 主代理收口、后台调度和工具循环组合 focused 已通过；待 `.10` 唯一 Gateway fresh MiniMax-M2.7 TUI
+  跨一次真实工具轮边界验收，不能给旧停住任务人工补“继续”算自动恢复。
+
 ## 2026-08-27 子代理会话历史进入统一 native messages（本地候选）
 
 - 子代理原先把自己已结束的 thread history 渲染进 `inject`，导致每次恢复/Compact 都改写 canonical IR 前的
