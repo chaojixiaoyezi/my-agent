@@ -98,11 +98,12 @@ provider capabilities/target validator 和唯一 `DeliveryService`。
 
 ### `prompting_parts/`
 
-Prompt 构造层。放系统 prompt、记忆、工具目录、推荐工具、工具 transcript、未来上下文压缩策略。
+Prompt 构造层。放系统 prompt、记忆、工具目录、推荐工具、工具 transcript，以及不解析正文的 typed
+stable/volatile provider 缓存布局；真正 Compact 仍归 conversation/memory archive 主链。
 
-允许：把上下文拼成模型可见文本、prompt 文件读取、上下文预算策略。
+允许：把上下文拼成模型可见文本、prompt 文件读取、上下文预算策略、为 provider adapter 标记稳定前缀。
 
-不允许：直接执行工具、直接改记忆、直接处理 gateway 文件队列。
+不允许：直接执行工具、直接改记忆、直接处理 gateway 文件队列、按标题或用户自然语言猜缓存边界。
 
 ### `settings/`
 

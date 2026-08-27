@@ -15,6 +15,7 @@ from agent_py_agent.agent.prompting_parts.builder import (
     _strip_empty_markdown_sections,
     project_runtime_workspace_context,
 )
+from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -737,6 +738,43 @@ class TestBuildFullPrompt:
         result = builder.build("my user task", [])
         assert "# User Task" in result
         assert "my user task" in result
+
+    def test_native_prompt_exposes_typed_stable_cache_prefix_without_losing_content(
+        self,
+        tmp_path,
+    ):
+        config = AgentConfig(system_prompt="stable system", prompt_files=[])
+        builder = PromptBuilder(config, tmp_path)
+        result = builder.build(
+            "current task",
+            [MemoryRecord(role="user", content="volatile memory")],
+            inject=["volatile conversation"],
+            workspace_context_override="volatile clock",
+            tools=ToolSections(
+                tool_catalog_section="# Tools\n- stable tool",
+                tool_recommendations_section="# Recommended Tools\n- volatile choice",
+                execution_facts_section="# Current Turn Execution Facts\nvolatile fact",
+                native_tool_use=True,
+            ),
+        )
+
+        layout = prompt_cache_layout(result)
+
+        assert layout is not None
+        assert "stable system" in layout.stable_prefix
+        assert "# Owner Scope" in layout.stable_prefix
+        assert "stable tool" in layout.stable_prefix
+        assert "current task" not in layout.stable_prefix
+        assert "volatile memory" not in layout.stable_prefix
+        assert "volatile clock" not in layout.stable_prefix
+        assert "volatile conversation" not in layout.stable_prefix
+        assert "volatile memory" in layout.volatile_suffix
+        assert "volatile clock" in layout.volatile_suffix
+        assert "volatile conversation" in layout.volatile_suffix
+        assert "current task" in layout.volatile_suffix
+        assert "volatile choice" in layout.volatile_suffix
+        assert "volatile fact" in layout.volatile_suffix
+        assert str(result) == layout.render()
 
     def test_build_with_tool_transcript_section(self, tmp_path):
         config = AgentConfig()

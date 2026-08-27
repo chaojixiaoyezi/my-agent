@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from ..capability.persona_repository import PersonaRepository, PersonaRepositoryError
 from ..common import agent_time
 from ..settings import AgentConfig
+from .cache_layout import CacheStructuredPrompt
 from .memory_context import memory_context_text
 
 if TYPE_CHECKING:
@@ -114,10 +115,9 @@ class PromptBuilder:
                 chunks.append(chunk)
         return chunks
 
-    # LLM: Every root and delegated model turn must receive the same evidence
-    # boundary even when a caller supplies a focused system_prompt_override.
-    # Keep this as soft model guidance; never turn it into a host completion gate.
-    # 函数用途: 拼出完整模型输入，并统一提醒主代理和子代理只按亲自验证到的范围下结论。
+    # LLM: Every root and delegated model turn must receive the same evidence boundary. Native
+    # prompts additionally carry a typed stable/volatile layout; never infer that boundary from prose.
+    # 函数用途: 拼出完整模型输入；原生工具协议下同时标出可复用稳定前缀，但不删减任何正文。
     def build(
         self,
         user_prompt: str = "",
@@ -167,6 +167,25 @@ class PromptBuilder:
         )
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
+        if _tools.native_tool_use:
+            return CacheStructuredPrompt(
+                _native_cache_stable_prefix(
+                    system_prompt=system_prompt,
+                    owner_scope=owner_scope,
+                    dynamic=dynamic,
+                    tool_catalog=_tools.tool_catalog_section or default_tools,
+                ),
+                _native_cache_volatile_suffix(
+                    memory_text=memory_text,
+                    workspace_context=workspace_context,
+                    injected=injected,
+                    tool_recommendations=(
+                        _tools.tool_recommendations_section or default_recommendations
+                    ),
+                    task_and_transcript=task_and_transcript,
+                    execution_facts=_tools.execution_facts_section,
+                ),
+            )
         return (
             f"# System\n{system_prompt}\n\n"
             f"# Related Memory\n{memory_text}\n\n"
@@ -190,6 +209,46 @@ class PromptBuilder:
         """Freeze date/time and workspace facts for one model turn."""
 
         return _workspace_context_text(self, facts_only=facts_only)
+
+
+# LLM: Stable native content is restricted to run-invariant instructions, owner scope, prompt files,
+# persona/skill metadata, and the textual tool catalog. Request memory, clocks and history stay out.
+# 函数用途: 组装原生模型请求可跨轮复用的固定前缀，供供应商缓存断点使用。
+def _native_cache_stable_prefix(
+    *,
+    system_prompt: str,
+    owner_scope: str,
+    dynamic: str,
+    tool_catalog: str,
+) -> str:
+    return (
+        f"# System\n{system_prompt}\n\n"
+        f"# Owner Scope\n{owner_scope}\n\n"
+        f"# Dynamic Prompt Files\n{dynamic or '（无）'}\n\n"
+        f"{tool_catalog}"
+    )
+
+
+# LLM: Volatile native content must retain every request-varying fact in its original semantic
+# form; splitting for cache economics is not authorization to trim conversation or execution state.
+# 函数用途: 组装每轮都会变化的记忆、时间、会话历史、当前任务和执行事实。
+def _native_cache_volatile_suffix(
+    *,
+    memory_text: str,
+    workspace_context: str,
+    injected: str,
+    tool_recommendations: str,
+    task_and_transcript: str,
+    execution_facts: str,
+) -> str:
+    return (
+        f"# Related Memory\n{memory_text}\n\n"
+        f"# Workspace Context\n{workspace_context}\n\n"
+        f"# Runtime Injection\n{injected or '（无）'}\n\n"
+        f"{tool_recommendations}\n\n"
+        f"{task_and_transcript}\n\n"
+        f"{execution_facts}\n"
+    )
 
 
 # LLM: This projection must describe the exact ToolRegistry cwd.  Internal

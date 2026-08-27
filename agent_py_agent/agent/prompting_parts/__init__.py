@@ -8,5 +8,12 @@ from __future__ import annotations
 """
 
 from .builder import PromptBuilder, ToolSections
+from .cache_layout import CacheStructuredPrompt, PromptCacheLayout, prompt_cache_layout
 
-__all__ = ["PromptBuilder", "ToolSections"]
+__all__ = [
+    "CacheStructuredPrompt",
+    "PromptBuilder",
+    "PromptCacheLayout",
+    "ToolSections",
+    "prompt_cache_layout",
+]

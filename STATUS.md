@@ -1,5 +1,21 @@
 # STATUS
 
+## 2026-08-27 原生稳定 system 缓存分层（MiniMax 真 TUI 已通过；长任务矩阵进行中）
+
+- `.7` 唯一 Gateway 上用透明代理只记录长度、哈希和 cache marker，未记录 prompt 或 Key。旧链连续请求的
+  tools/system 哈希不变，首条 user prompt 却从约 31KB→33KB→45KB；模型账出现 24,790 cache-write / 0 read，
+  下一轮只能读到约 14,140 的工具前缀并重新写 11,386，根因是稳定规则与动态会话拼成同一缓存块。
+- 当前候选用 `CacheStructuredPrompt` 保留完整字符串，同时附带 typed stable/volatile 布局。Anthropic native
+  把约 23KB 的 System、Owner Scope、Persona/Prompt Files、Skill 索引和文本工具目录移入顶层 system 缓存块；
+  记忆、时间、Conversation、当前任务和执行事实仍完整放在 user 动态尾部。text、关闭缓存、canonical IR、
+  Compact、归档和权限不变。
+- `ma-cache-probe-minimax-r60` 修复后第三个连续回合为 5,959 uncached input、19,300 cache-read、0 cache-write，
+  对照首个 25,192 全输入回合约缓存 76.6% 的输入。按输入 5、缓存 0.1/1 两档，单轮样本成本分别下降约
+  74.8%/61.0%；模型仍能准确回答前文，指纹证明 stable system/tools 不变而动态 user 正常增长。
+- Prompt/cache/native IR/Compact 组合定向测试当前 140 项通过；严格 gate、文档检查与 my-agent 本地模型长任务、
+  my-agent MiniMax、会话运行时 MiniMax、终端交互 MiniMax 同 prompt 矩阵仍在进行。改动远低于 10,000 行，不跑
+  全仓 pytest。
+
 ## 2026-08-26 长期会话、TUI 时序、任务目录与网络事实（已部署真机验证；LAN/启动仍有遗留）
 
 - 工具前后 commentary 改为同一 request 的 typed assistant parts，final 独立标记；长过程和最终报告直接进入

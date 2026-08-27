@@ -18,6 +18,7 @@ from agent_py_agent.agent.backends.usage_metadata import (
     collect_anthropic_stream_with_completion,
     collect_anthropic_stream_with_tools,
 )
+from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 
 _DEFAULT_OPTIONS = BackendOptions(
     api_base="https://api.example.com",
@@ -146,6 +147,54 @@ def test_native_prompt_cache_marks_prompt_and_latest_history_without_mutating_in
     assert tools == original_tools
 
 
+def test_native_prompt_cache_uses_only_typed_stable_prefix_for_split_prompt():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=False))
+    captured: dict[str, object] = {}
+    messages = [
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "prior assistant"}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "volatile runtime guidance"}],
+        },
+    ]
+    original_messages = deepcopy(messages)
+
+    def fake_request_json(path, payload, headers):
+        del path, headers
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "continue"}]}
+
+    backend.request_json = fake_request_json
+    backend.generate(
+        CacheStructuredPrompt("stable instructions", "changing conversation tail"),
+        tools=_TOOLS,
+        messages=messages,
+        request_options=ProviderRequestOptions(
+            system_instruction="host authorization policy",
+        ),
+    )
+
+    payload = captured["payload"]
+    assert payload["system"] == [
+        {"type": "text", "text": "host authorization policy"},
+        {
+            "type": "text",
+            "text": "stable instructions",
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    assert payload["messages"][0] == {
+        "role": "user",
+        "content": "changing conversation tail",
+    }
+    assert "cache_control" not in payload["messages"][-1]["content"][-1]
+    assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert messages == original_messages
+
+
 def test_native_prompt_cache_can_be_disabled_for_incompatible_endpoints():
     backend = AnthropicCompatibleBackend(
         replace(_options(stream_enabled=False), prompt_cache_enabled=False),
@@ -162,6 +211,37 @@ def test_native_prompt_cache_can_be_disabled_for_incompatible_endpoints():
 
     assert captured["payload"]["messages"] == [
         {"role": "user", "content": "root prompt"}
+    ]
+    assert captured["payload"]["tools"] == _TOOLS
+
+
+def test_disabled_cache_keeps_structured_prompt_as_one_complete_user_message():
+    backend = AnthropicCompatibleBackend(
+        replace(_options(stream_enabled=False), prompt_cache_enabled=False),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_request_json(path, payload, headers):
+        del path, headers
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    backend.request_json = fake_request_json
+    backend.generate(
+        CacheStructuredPrompt("stable instructions", "changing conversation tail"),
+        tools=_TOOLS,
+        messages=[],
+        request_options=ProviderRequestOptions(
+            system_instruction="host authorization policy",
+        ),
+    )
+
+    assert captured["payload"]["system"] == "host authorization policy"
+    assert captured["payload"]["messages"] == [
+        {
+            "role": "user",
+            "content": "stable instructions\n\nchanging conversation tail",
+        }
     ]
     assert captured["payload"]["tools"] == _TOOLS
 

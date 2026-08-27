@@ -1877,7 +1877,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 当前原生工具循环每次都复用稳定工具清单、首条真实任务和不断增长的历史，但旧 backend 没有发任何
   `cache_control`。真实 MiniMax-M2.7 child 的 82 次调用累计 4,225,275 input，cache write 为 0，不能再用
   当前 Context 数字或 Compact generation 代替 provider 成本事实。
-- Anthropic 协议的唯一投影入口位于 `backends/anthropic_prompt_cache.py`。它按 provider 规定的
+- Anthropic 协议的唯一投影入口位于 `backends/anthropic_prompt_cache.py`。首版按 provider 规定的
   tools → prompt → messages 顺序，最多使用三个宿主断点：最后一个工具、首条 prompt、最新可缓存历史块。
   所有修改都是 copy-on-write，不污染 canonical native IR，也不让展示、缓存或 Compact 互相取得裁决权。
 - 该能力只在调用方显式传入 `messages` 的原生多轮链启用；普通 text/auxiliary 单次请求保持旧 payload。
@@ -1897,6 +1897,30 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 同 thread 的 `compact_generation=0` 与 69.1k→46.3k Context 回落并不冲突：终态工具折叠只替换下一轮
   的模型可见投影，完整 archive 与 exact refs 保留，Compact 权威代数不变；最后主轮仍有 40,527
   provider cache-read。该边界继续由结构化 fold/ledger 裁决，不要求 Context 数字单调递增。
+
+## 2026-08-27 原生稳定 system 前缀与动态会话尾部分层【状态：MiniMax 真 TUI 已通过；长任务矩阵待完成】
+
+- `.7` 同一真 TUI 的脱敏请求指纹证明：25 个工具和顶层宿主 system 的哈希连续不变，但旧首条 user prompt
+  在同一请求的工具轮里从约 31KB 增到 33KB，普通下一回合又变成约 45KB。变化来源是相关记忆、当前时间、
+  Conversation 热尾、当前任务和执行事实；它们与约 23KB 的系统规则、Persona、Skill 索引和工具目录被绑在
+  一个文本块里。MiniMax 因而只能复用工具前缀，并反复创建约 11K 动态 prompt 缓存。
+- `prompting_parts/cache_layout.py` 新增 `CacheStructuredPrompt`：它的字符串值仍是完整 prompt，归档、token
+  统计、非 Anthropic 后端和关闭缓存的路径一字不丢；附带的 `PromptCacheLayout` 才是机器可读边界，不解析
+  标题、用户正文或模型语言。稳定段只含 System、Owner Scope、Prompt Files/Persona/Skill 元数据与文本工具
+  目录；相关记忆、Workspace 时间、Runtime Injection/Conversation、推荐工具、当前任务和执行事实全部留在
+  动态段。
+- Anthropic-compatible 原生链把稳定段放进顶层 `system` 的独立 text block，并只在该块写
+  `cache_control`；当前动态段仍作为完整 user 消息发送。工具尾断点继续保留。由于当前动态 user 消息位于
+  native IR 历史之前，继续给最新历史打断点只会形成不可复用写入，所以结构化分层路径不再创建该断点；
+  普通字符串调用方仍保留旧投影。该变化不删除消息、不做摘要、不推进 Compact，也不改变 owner/task 权限。
+- `ma-cache-probe-minimax-r60` 的同 thread 真回合中，首个新布局请求为 25,192 普通输入；下一轮为
+  5,897 普通输入、13,967 cache-read、5,333 cache-write；再下一轮稳定 system 与 tools 均命中，得到
+  5,959 普通输入、19,300 cache-read、0 cache-write。请求指纹同时证明 system/tools 哈希不变、动态 user
+  哈希按真实对话增长；模型能继续准确引用前文。
+- 按用户指定单价，未命中基线 `25,192 * 5`；稳定命中轮在“输入 5、缓存 0.1”时成本约下降 74.8%，在
+  “输入 5、缓存 1”时约下降 61.0%。这些百分比只对应本次 MiniMax 样本；不同模型、TTL、容量淘汰和长会话
+  仍必须读取 provider usage ledger。下一阶段用同一长多子代理 prompt 分别验证 my-agent 本地模型/
+  MiniMax，以及 会话运行时/终端交互 的 MiniMax 对照，不用屏幕 Context 猜成本。
 
 ## 2026-08-27 缓存热尾、冷折叠与本地搜索空结果合同【状态：已部署；热期真 TUI 通过，冷边界长等待中】
 

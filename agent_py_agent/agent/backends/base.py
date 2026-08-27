@@ -19,7 +19,10 @@ from typing import Any
 
 from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
-from .anthropic_prompt_cache import anthropic_messages_with_optional_cache
+from .anthropic_prompt_cache import (
+    anthropic_messages_with_optional_cache,
+    anthropic_prompt_cache_projection,
+)
 from .errors import (
     ProviderConfigurationError,
     ProviderRecoverableError,
@@ -979,17 +982,26 @@ class AnthropicCompatibleBackend(HttpBackend):
             ),
             "temperature": self.temperature if temperature is None else float(temperature),
         }
-        if system_instruction:
-            payload["system"] = system_instruction
+        cache_projection = anthropic_prompt_cache_projection(
+            system_instruction=system_instruction,
+            prompt=prompt,
+            cache_enabled=self.prompt_cache_enabled,
+            native_messages=messages is not None,
+        )
+        if cache_projection.system:
+            payload["system"] = cache_projection.system
         if thinking_disabled:
             # LLM: 兼容 Anthropic 官方 thinking 参数；不识别该字段的端点(如 MiniMax)静默忽略。
             payload["thinking"] = {"type": "disabled"}
         selected_tools = _tools_for_choice(tools, tool_choice)
         payload["messages"], selected_tools = anthropic_messages_with_optional_cache(
-            prompt=prompt,
+            prompt=cache_projection.prompt,
             messages=messages,
             tools=selected_tools,
             cache_enabled=self.prompt_cache_enabled,
+            stable_system_cache_active=(
+                cache_projection.stable_system_cache_active
+            ),
         )
         if selected_tools:
             from .tool_protocol_adapter import anthropic_tool_choice

@@ -4,10 +4,56 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
+
+from ..prompting_parts.cache_layout import prompt_cache_layout
 
 _EPHEMERAL_CACHE_CONTROL = {"type": "ephemeral"}
 _CACHEABLE_CONTENT_TYPES = frozenset({"text", "tool_use", "tool_result"})
+
+
+# LLM: This projection is the only place that may move a typed stable prefix into Anthropic's
+# system blocks; the volatile prompt and caller-owned system text remain byte-for-byte intact.
+# 类用途: 保存 Anthropic 请求最终使用的 system、动态 prompt 和缓存布局启用状态。
+@dataclass(frozen=True)
+class AnthropicPromptCacheProjection:
+    system: str | list[dict[str, Any]]
+    prompt: str
+    stable_system_cache_active: bool = False
+
+
+# LLM: Only a typed CacheStructuredPrompt on a native cache-enabled request may become a cached
+# system prefix. Plain strings, text protocol and disabled cache preserve their legacy shape.
+# 函数用途: 把稳定规则移到供应商 system 缓存块，并让当前会话、时间和任务继续留在动态用户消息。
+def anthropic_prompt_cache_projection(
+    *,
+    system_instruction: str,
+    prompt: str,
+    cache_enabled: bool,
+    native_messages: bool,
+) -> AnthropicPromptCacheProjection:
+    layout = prompt_cache_layout(prompt)
+    if not (cache_enabled and native_messages and layout is not None and layout.stable_prefix):
+        return AnthropicPromptCacheProjection(
+            system=str(system_instruction or ""),
+            prompt=str(prompt or ""),
+        )
+    system_blocks: list[dict[str, Any]] = []
+    if system_instruction:
+        system_blocks.append({"type": "text", "text": str(system_instruction)})
+    system_blocks.append(
+        {
+            "type": "text",
+            "text": layout.stable_prefix,
+            "cache_control": dict(_EPHEMERAL_CACHE_CONTROL),
+        }
+    )
+    return AnthropicPromptCacheProjection(
+        system=system_blocks,
+        prompt=layout.volatile_suffix,
+        stable_system_cache_active=True,
+    )
 
 
 # LLM: This is the only Anthropic message projection selector. Disabled and ordinary text paths
@@ -19,12 +65,14 @@ def anthropic_messages_with_optional_cache(
     messages: list[dict[str, Any]] | None,
     tools: list[dict[str, Any]],
     cache_enabled: bool,
+    stable_system_cache_active: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if cache_enabled and messages is not None:
         return anthropic_native_payload_with_cache(
             prompt=prompt,
             messages=messages,
             tools=tools,
+            stable_system_cache_active=stable_system_cache_active,
         )
     if messages:
         prepared_messages = (
@@ -36,19 +84,28 @@ def anthropic_messages_with_optional_cache(
     return [{"role": "user", "content": prompt}], tools
 
 
-# LLM: The returned payload uses at most three host-owned breakpoints: final tool, immutable
-# initial prompt, and newest cacheable history block. Inputs are copy-on-write and stay untouched.
-# 函数用途: 给一次原生多轮请求的工具、固定提示和最新历史增加主动缓存断点。
+# LLM: Structured prompts cache only the stable prefix plus tools because their volatile suffix
+# precedes IR history; legacy callers retain the existing latest-history breakpoint behavior.
+# 函数用途: 给原生多轮请求添加可复用缓存断点，并避免把每轮变化的动态尾部反复写成无效缓存。
 def anthropic_native_payload_with_cache(
     *,
     prompt: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    stable_system_cache_active: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not prompt and not messages:
         return [{"role": "user", "content": ""}], _mark_final_tool(tools)
-    prepared_messages = _prompt_prefixed_messages(prompt, messages)
-    if messages:
+    prepared_messages = _prompt_prefixed_messages(
+        prompt,
+        messages,
+        cache_prompt=not stable_system_cache_active,
+    )
+    if (
+        messages
+        and not stable_system_cache_active
+        and prompt_cache_layout(prompt) is None
+    ):
         _mark_latest_cacheable_history_block(
             prepared_messages,
             history_start=1 if prompt else 0,
@@ -56,15 +113,38 @@ def anthropic_native_payload_with_cache(
     return prepared_messages, _mark_final_tool(tools)
 
 
-# LLM: The original task prompt is the immutable first native user turn. Represent it as an
-# Anthropic text block so cache_control is protocol-valid without changing its text or position.
-# 函数用途: 保留首条真实用户提示的位置，并把它作为长期稳定的缓存前缀。
+# LLM: A typed layout becomes two ordered text blocks and only its stable block is cacheable.
+# Ordinary strings retain the legacy one-block projection for third-party callers and tests.
+# 函数用途: 把首条原生用户提示投影为供应商文本块；有结构化边界时只缓存固定前缀。
 def _prompt_prefixed_messages(
     prompt: str,
     messages: list[dict[str, Any]],
+    *,
+    cache_prompt: bool = True,
 ) -> list[dict[str, Any]]:
     if not prompt:
         return list(messages)
+    if not cache_prompt:
+        return [{"role": "user", "content": str(prompt)}, *messages]
+    layout = prompt_cache_layout(prompt)
+    if layout is not None:
+        content: list[dict[str, Any]] = []
+        if layout.stable_prefix:
+            content.append(
+                {
+                    "type": "text",
+                    "text": layout.stable_prefix,
+                    "cache_control": dict(_EPHEMERAL_CACHE_CONTROL),
+                }
+            )
+        if layout.volatile_suffix:
+            content.append(
+                {
+                    "type": "text",
+                    "text": layout.volatile_suffix,
+                }
+            )
+        return [{"role": "user", "content": content}, *messages]
     return [
         {
             "role": "user",
@@ -138,6 +218,8 @@ def _mark_final_tool(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "AnthropicPromptCacheProjection",
+    "anthropic_prompt_cache_projection",
     "anthropic_messages_with_optional_cache",
     "anthropic_native_payload_with_cache",
 ]

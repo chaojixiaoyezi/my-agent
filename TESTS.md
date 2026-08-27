@@ -223,7 +223,7 @@ python3 -m pytest \
 515 chars/5s 增长到 3.0k chars/29s，55s 后完整工具卡创建 5 个 child，临时行自动删除；没有半截 JSON、
 提前执行、重复卡片或 stable history 残留。
 
-## 2026-08-26 Anthropic-compatible 原生主动缓存
+## 2026-08-26/27 Anthropic-compatible 原生主动缓存与稳定 system 分层
 
 目标：证明主动缓存只改变 provider payload 投影，不污染 canonical messages/tools、不伪造 Compact，并能
 通过唯一配置开关兼容不支持 `cache_control` 的端点。
@@ -237,6 +237,7 @@ python3 -m pytest \
   agent_py_agent/tests/test_backends_message_adapter.py \
   agent_py_agent/tests/test_native_tool_use_ir_messages_flow.py \
   agent_py_agent/tests/test_backends_incomplete_response.py \
+  agent_py_agent/tests/test_prompting_builder.py \
   agent_py_agent/tests/test_config_validation.py \
   agent_py_agent/tests/test_config_normalize.py \
   agent_py_agent/tests/test_native_runtime_guidance_forwarding.py \
@@ -246,17 +247,33 @@ python3 -m pytest \
 
 覆盖点：
 
-- native 首轮在稳定工具尾、首条真实 prompt 上标断点，续轮另在最新 text/tool_use/tool_result 块标断点；
+- 普通字符串调用方保留稳定工具尾、首条 prompt 与最新历史的旧 copy-on-write 断点；
+- `CacheStructuredPrompt` 的完整字符串必须等于 stable+volatile 正文；stable 只允许系统规则、owner scope、
+  Persona/Prompt Files/Skill 索引和文本工具目录，记忆、时间、Conversation、当前任务与执行事实必须在 volatile；
+- Anthropic native 把 typed stable 段投影到顶层 system 独立缓存块，volatile 只作普通 user 消息；该路径不再
+  给位于动态 user 后面的最新 IR 打无效断点，tools 尾断点继续保留；
 - native 首轮即使 IR 历史为空也必须保留 `messages=[]`，不能压成代表 text 请求的 `None`；
 - copy-on-write 后输入 messages/tools 与 canonical IR 保持逐字段不变；
 - `messages=None` 的普通 text 请求和空 prompt 的旧请求形态不变；
 - 配置关闭后 payload 不出现 `cache_control`，YAML 与 dataclass 默认一致；
+- 配置关闭后 typed prompt 必须仍以一个完整 user 字符串发送，不能丢 stable 段或改变顶层 system 字符串；
 - 部署后的真 TUI 必须从 provider usage ledger 观察到先 cache-write、后 cache-read，不能用 Context 或
   Compact 数字替代该证据。
 
 首版 174 项和严格 gate 已通过并以 `69bf2ec` 部署。fresh TUI 首轮权威账本仍为 0 cache-write/read；
 二层分叉修复 `df95d27` 的 9 个直接相关测试文件 193 项、本地严格 gate、推送和 `.7` 单 Gateway 部署均
 已完成。本轮改动远低于 10,000 行，按约定不跑全仓 pytest。
+
+2026-08-27 stable/volatile 三层复验：
+
+- 修复前 `ma-cache-probe-minimax-r60` 同一组 25 tools/system 的 SHA-256 连续相同，首条 user prompt 仍从
+  约 31KB→33KB→45KB；账本出现 24,790 cache-write/0 read，后续只读 14,140 tools 并重写 11,386；
+- 修复后透明代理只记录长度、SHA-256 与 marker，system 的宿主块/stable 块以及 tools 连续完全相同，
+  动态 user 块按真实会话从 25,079 bytes 增到 25,117 bytes；
+- 首个新布局回合 25,192 普通 input；第二轮 5,897 input / 13,967 read / 5,333 write；第三轮
+  5,959 input / 19,300 read / 0 write，且模型准确续接前文；
+- 当前 prompt/cache/native IR/Compact 组合 140 项通过。长多子代理的 my-agent 本地/MiniMax 与
+  会话运行时/终端交互 MiniMax 对照仍属本轮后续，不用该短诊断链冒充长任务验收。
 
 真机协议探针（同一部署代码、同一配置、同一 MiniMax-M2.7 端点，不输出 Key 或 prompt）：
 

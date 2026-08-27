@@ -94,6 +94,14 @@ MiniMax/Anthropic 兼容链继续命中 cache-read。
 唯一串和四字段。本机 4000/8901 路径在约 70/310 秒均命中 12,288 cached tokens，但两者共用一个 OMLX
 后端；待办转为不同真实 provider、负载/容量淘汰和更长会话校准，不能把本机五分钟下界外推为统一 TTL。
 
+2026-08-27 又补齐普通后续轮的稳定 system 前缀：旧 prompt 把约 23KB 的固定规则/Persona/Skill/工具目录
+与每轮变化的记忆、时间、Conversation 和执行事实绑成一个 user 块，导致只命中 tools、反复写约 11K 动态
+缓存。当前 typed `CacheStructuredPrompt` 保留完整字符串，但 Anthropic native 把固定段放进顶层 system
+缓存块，动态段继续完整作为 user；不裁剪历史、不推进 Compact。`.7` r60 第三个连续回合已为
+5,959 input / 19,300 cache-read / 0 cache-write，对照首轮 25,192 input；按输入 5、缓存 0.1/1 分别省约
+74.8%/61.0%。该切片本身已通过，下一步仍要用同一个长多子代理 prompt 跑 my-agent 本地/MiniMax、会话运行时
+MiniMax、终端交互 MiniMax，比较耗时、缓存、Compact、子代理和交付；短诊断链不能冒充长任务结论。
+
 扩展 Compact 回归还复现了 HEAD 既有的 child 终态反转：同一 request/run 在 overflow 后先落一次累计模型账，
 Compact 继续成功后再以同 event id 写更大的累计账，Store 正确 fail closed 却导致成功 child 被标失败。当前按
 物理调用游标生成事件 id，并在唯一 Store 锁内把累计快照减去既有增量；精确重放核对原快照指纹，缓存读写

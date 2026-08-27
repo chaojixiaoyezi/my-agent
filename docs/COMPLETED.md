@@ -1,5 +1,13 @@
 # COMPLETED
 
+- 2026-08-27 完成 Anthropic-compatible 原生 prompt 的稳定 system/动态 user 分层：新增 typed
+  `CacheStructuredPrompt`，完整字符串仍供归档、token 统计、text/关闭缓存路径使用；Anthropic native 只把
+  System、Owner Scope、Persona/Prompt Files/Skill 索引和文本工具目录放进顶层 system 缓存块，记忆、时间、
+  Conversation、当前任务和执行事实不裁剪、不摘要。140 项 prompt/cache/native IR/Compact focused 通过，
+  `.7` 唯一 Gateway 的 `ma-cache-probe-minimax-r60` 真回合从 25,192 全输入收敛为 5,959 普通 input +
+  19,300 cache-read、0 cache-write；按输入 5、缓存 0.1/1，样本成本分别下降约 74.8%/61.0%。长多子代理
+  my-agent 本地/MiniMax 与 会话运行时/终端交互 MiniMax 矩阵作为下一阶段验收继续进行。
+
 - 2026-08-27 已部署把立即终态折叠升级为 `conversation_terminal_tool_fold.v2`：同一 main/child 回合
   一次固定写入 hot-tail、cold-fold 和 typed deadline，默认 300 秒内保留较完整热尾，过期后才切短折叠；
   V1 持久行恒按 cold 兼容，Compact 代数和 owner archive 不变。`search_text` 同时明确为本地连续字面/正则
