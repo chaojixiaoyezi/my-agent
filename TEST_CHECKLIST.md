@@ -34,18 +34,20 @@
 - [x] 主代理 `compact N` 只读成功提交的 `ConversationThread.compact_generation`，子代理读自己的 canonical
   generation；进度百分比、屏幕历史和模型正文不计数。128k 窗口、90% 压缩点下，68k（53%）显示
   `compact 0` 正常；95 项 Compact/TUI 组合回归通过。
-- [ ] 同一 request 的工具前后 commentary 以 `assistant_part_id=commentary:N` 完整落账，final 使用
+- [x] 同一 request 的工具前后 commentary 以 `assistant_part_id=commentary:N` 完整落账，final 使用
   `assistant_part_id=final`；恢复/配对不重复、不丢段，长报告无需 `Ctrl+O` 即可直接看到。多次模型调用的
   thinking 各自按时间顺序封口，空首块消失，终态不留 spinner；滚轮每格只移动一行。完整相关 focused
-  与本地严格 gate 已通过，仍须 `.7` fresh MiniMax-M2.7 TUI 复验。
-- [ ] 普通 user/assistant 历史不得按固定字符数裁剪；预算回收只移除最老的完整消息，真正旧前缀替换只由
+  与本地严格 gate 已通过；`.7` r54/r55 已实测思考、工具过程和最终长报告直接显示，终态 Working 撤下。
+- [x] 普通 user/assistant 历史不得按固定字符数裁剪；预算回收只移除最老的完整消息，真正旧前缀替换只由
   Conversation Compact 执行。provider ledger 应持续记录 cache-read。价格样本在缓存价 0.1/1 时分别为
-  `1,811,699.1`/`2,023,236`，不得用屏幕 Context 猜缓存命中。
-- [ ] 任务晋升后 main/child/grandchild 的默认 cwd、产品写根和相对 output ref 全部落同一
+  `1,811,699.1`/`2,023,236`，不得用屏幕 Context 猜缓存命中；真机已有 42,107、12,987、17,019 等
+  provider cache-read 记录，r55 的 105.8k→下一轮约 43--50k 已核对为终态工具折叠而非漏记 Compact。
+- [x] 任务晋升后 main/child/grandchild 的默认 cwd、产品写根和相对 output ref 全部落同一
   `<owner_home>/tasks/<task_path>/`；不得继承 daemon `/root`、客户端临时 cwd 或另造 child 家目录。
 - [ ] `process_session(network_status)` 只读 exact managed process tree listener 和主机防火墙显式规则；
   non-loopback 监听仍显示外部探针必需。`.7` 真机必须由 Mac 实际请求验证，失败时 Agent 不得声称局域网可达，
-  测试者不得旁路改防火墙。
+  测试者不得旁路改防火墙。r55 已通过“不误报”部分：localhost 是真实游戏，Mac 外部请求失败，模型只报
+  `unverified_external_probe_required`；因为目标 LAN 访问仍失败，本项保持未勾选。
 
 - [ ] 长 main/child 遇到异常链中的 typed `socket.gaierror` 时，普通 JSON 与流式 provider 请求都先按
   2/5/15 秒有界退避，耗尽后保持 transient 供模型轮恢复；不得因一次 DNS 抖动终止数小时任务，也不得把
@@ -334,11 +336,12 @@
 - [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop`、`/goal ...`、`/verbose ...` 都由统一系统命令入口处理；任何未知 `/XXXX` fail-closed，不进入普通队列、transcript 或模型。
 - [ ] 已有 linked live turn 时 `/btw` 只注入该 turn、不发第二个 wake，也不泄漏到下一任务；`/stop` 不判断聊天/任务，直接按当前窗口的精确 request id 打断模型读取、清掉未消费 steer、停止子树，不停止 Gateway，也不影响其他用户会话。
 - [ ] `/stop` 后 transcript、compact、memory 和 task workspace 保留；用户后续自然说“继续”时，模型用精确 task id 重开原现场，不创建第二个任务目录。
-- [ ] 同一 TUI/IM thread 的普通任务自然 `completed` 后，下一条消息在首个
+- [x] 同一 TUI/IM thread 的普通任务自然 `completed` 后，下一条消息在首个
   `promotes_task` 工具处建立新 successor id，但必须继承同一 canonical task root；
   旧 link 保持终态；sticky root 必须在首个模型采样前成为模型、工具、审批和沙箱共同的 cwd，不能等到
   handler pre-gate 才切换。模型不得因为相对路径失败而搜索、复制旧产物到新空目录。r55 已证明 identity
-  与 task_path 续接，但首条后台命令仍服务空启动目录；当前候选待部署后复验。
+  与 task_path 续接；`1e4c64d` 部署后同一 r55 复验首个 `ls -la bbb`、审批、bwrap 和服务进程 cwd 均为
+  原 task root，三个独立终态 request 的 `task_path` 精确相同，localhost 正文也不再是空目录列表。
 - [ ] `/goal` 每 thread 只允许一个未结束目标，pause/resume/edit/clear 保留正确任务身份；active goal 的 `/stop` 只暂停，complete/blocked 仅由精确 scoped 工具写入。
 - [ ] `/audit` 只在显式前缀激活，guarantee/window 沿子代理结构化继承；普通 prompt、goal、summary 中的 `/audit` 文字不激活 watch 保证。
 - [ ] 同一 Agent 的前台聊天和后台续跑并发时，prompt、request id、task workspace 和 tool-loop params 不串；已销毁 Agent 不留下可被 object-id 复用的旧状态。

@@ -19,7 +19,7 @@
 
 ### 主/子代理验证结论与受管后台动作边界
 
-状态：既有 approval/session 主链已部署；`network_status` 只读候选已写入当前 worktree，待严格 gate、部署和独立客户端探针
+状态：approval/session/`network_status` 主链已部署；不误报合同真机通过，真实 LAN 可达性仍失败
 
 解决问题：真实超级玛丽任务中，模型把测试机本机 HTTP 200 和 `0.0.0.0` 监听错误说成另一台电脑已经能
 访问；即使用户明确要求“不能就说真实原因、不要把本机访问说成局域网访问”，后续模型仍重复误报。
@@ -38,15 +38,16 @@ Gateway/TUI 只按显式 capability lease 领取；主代理与多个 child 共�
 current-attempt 门后唤醒原 ToolCall。无界面、断线、取消和损坏全部 fail closed。下一步必须在 `.7` 唯一
 Gateway 的 fresh MiniMax-M2.7 TUI 中证明：未批准前无副作用，面板标出 child，批准后同一调用原地成功。
 
-当前候选继续补齐“服务活着”和“用户能访问”之间的事实缺口：`process_session(network_status)` 只读取
+当前实现继续区分“服务活着”和“用户能访问”：`process_session(network_status)` 只读取
 exact managed session 进程树持有的 Linux listener，并查询 firewalld 的显式端口规则；loopback、
 non-loopback、未显式放行和未知分别返回。任何结果都保留
-`unverified_external_probe_required`，不会改防火墙或把本机 HTTP 200 升级为局域网成功。部署后必须由 Mac
-对 `.7` 的目标端口真实请求，与 TUI 内投影对账；失败就是验收失败样本，不旁路开端口。
+`unverified_external_probe_required`，不会改防火墙或把本机 HTTP 200 升级为局域网成功。r55 已由 Mac
+真实请求 `.7:8765` 并得到连接失败；模型保持未验证，故“诚实报告”通过、LAN 可达性本身未通过。本轮未
+旁路开端口；后续应把网络/防火墙诊断作为独立运维验收，不再改模型语义掩盖失败。
 
 ### 长期会话完整正文、思考时序与 canonical task root
 
-状态：`1e91935`、`1b75762` 已推送并部署；r55 复验又发现终态后续轮首采样 cwd 晚切，当前候选已修复并待部署
+状态：`1e91935`、`1b75762`、`1e4c64d` 已推送部署；长期正文、时序与 sticky cwd 已真机通过
 
 解决问题：主/子代理工具前过程和最终长报告曾被活动块折叠，用户要按 `Ctrl+O` 才能看到；多次模型调用的
 thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消息还有固定 12K 裁剪，既可能丢长期 TUI/IM
@@ -60,8 +61,10 @@ thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消
 490K/400K。首个 `promotes_task` 动作后，main/child/grandchild 的 cwd 与写根统一切到
 `<owner_home>/tasks/<task_path>/`。r55 第一段 5 名 child 全部自然完成、final 直接展示；第二段 successor
 身份与 `task_path` 已正确续接，但模型首采样仍看到旧 TUI 启动 cwd，第一条后台命令因此服务了空 `bbb`。
-当前候选让 non-detached sticky root 在模型首采样前成为唯一 `execution_cwd`，terminal link 仍不复活；
-下一步只用 `.7` 单 Gateway、MiniMax-M2.7 的原 r55/new turn 验证审批命令、进程 cwd 与游戏文件同根。
+`1e4c64d` 让 non-detached sticky root 在模型首采样前成为唯一 `execution_cwd`，terminal link 仍不复活。
+原 r55 的同提示复验中，首个列表、审批、bwrap 和服务进程全部使用原 task root，localhost 返回真实游戏；
+三个独立 completed run 的 `task_path` 精确相同。该切片完成，剩余独立问题是 LAN 外部失败、Gateway 冷启动
+约 30 秒，以及 main 在“只协调”任务里仍亲自改功能文件。
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 

@@ -1,5 +1,12 @@
 # COMPLETED
 
+- 2026-08-27 `1e91935`、`1b75762`、`1e4c64d` 完成长 TUI 正文/思考时序、完整消息边界、单行滚轮、
+  canonical task root 与终态 sticky cwd 首采样绑定。完整 focused 与本地严格 gate 通过，已推送并部署 `.7`
+  唯一 Gateway。fresh r55 的 5 名 child 自然完成、main 自动接棒、final 直接显示；同一 thread 三个独立
+  completed request 精确复用一个 task path，后续轮首个列表、审批、bwrap 和 Python cwd 均在原 task root，
+  localhost 返回真实游戏 HTML。Mac 对 `192.0.2.7:8765` 仍失败且模型只报未验证，因此 LAN 可达性、
+  Gateway 约 30 秒冷启动和 main 的协调软纪律不在此完成项内。
+
 - 2026-08-26 `8f50d19` 将显式后台命令从 one-shot main/child runner 改归 owner conversation session：
   detached host 持有原 bwrap 与 `--die-with-parent`，owner 沙箱外 `managed_process_session.v1` 保存 exact
   scope、store root、PID 出生指纹和单调终态；登记失败先回收，runner 退出后仍守日志上限，主机崩溃不

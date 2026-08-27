@@ -1684,3 +1684,10 @@ test_run_task_workspace_writer.py` 完整定向通过；其中 completed/interru
 真机仍只允许 `.7` 一个 Gateway、MiniMax-M2.7 和 fresh tmux。启动前先公开 tmux 名称和 attach 命令；
 测试者只通过普通中文 TUI prompt 驱动被测 Agent，不旁路补产物、改防火墙或执行任务。Mac 到测试机的真实
 HTTP 请求必须与 TUI 内 `network_status` 对账，本机监听成功但外部失败时最终报告必须保持未验证/不可达。
+
+`1e4c64d` 已完成上述 focused 与严格 gate，推送并部署 `.7` 唯一 Gateway。原
+`ma-r55-terminal-sticky-retest` 的同一普通中文启动提示复验中，模型首个 `ls -la bbb`、审批 cwd、bwrap
+与 Python 进程 cwd 均直接落到原 canonical task root；三个连续终态 request 使用不同 task id，却精确复用
+同一个 `task_path`。localhost HTTP 正文是游戏 HTML，最终报告直接显示且 Working 撤下。Mac 外部探针仍
+连接失败，模型保持 `unverified_external_probe_required`，所以这里只通过“路径连续性与不误报”合同，
+不把 LAN 可达性记为通过。main 在第一段整合时仍亲自修改功能文件，也只作为协调软纪律失败样本保留。

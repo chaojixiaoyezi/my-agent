@@ -1,14 +1,16 @@
 # Gateway Progress
 
-## 2026-08-27 终态 sticky cwd 在首采样前生效（本地候选）
+## 2026-08-27 终态 sticky cwd 在首采样前生效（已部署真机验证）
 
 - r55 证明 terminal successor 已继承原 task id lineage 与 task path，但模型第一轮仍先看到客户端启动 cwd；
   第一条 `run_command` 把这个旧目录写成绝对路径，后续 pre-handler promotion 已无法修正命令。
 - `_gateway_task_attributes` 现在把 exact non-detached sticky `task_path` 直接投影为本轮
   `conversation_execution_cwd/runtime_workspace_roots`，使模型 Workspace Context、工具、审批和进程共用
   一个 cwd。completed 仍不预填 live `conversation_task_id/run_workspace`，纯聊天不会复活旧任务。
-- completed/interrupted × read/list/search/find/write 的 10 项首工具回归已先红后绿；待本地严格 gate、推送、
-  `.7` 唯一 Gateway 部署和原 TUI 后续轮验证后台进程 cwd 与游戏正文。
+- completed/interrupted × read/list/search/find/write 的 10 项首工具回归已先红后绿；完整 focused 与严格
+  gate 通过，`1e4c64d` 已推送并部署 `.7` 唯一 Gateway。原 r55 同提示复验的首个列表、审批、bwrap 与
+  Python cwd 都在原 task root，localhost 正文为游戏 HTML；三个连续终态 request 的 `task_path` 精确相同。
+  Mac 外部连接仍失败，模型保持未验证，故网络可达性不计为本切片通过项。
 
 ## 2026-08-26 owner TUI 子代理审批桥（本地候选）
 

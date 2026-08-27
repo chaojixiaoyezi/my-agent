@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-26 长期会话、TUI 时序、任务目录与网络事实（本地候选）
+## 2026-08-26 长期会话、TUI 时序、任务目录与网络事实（已部署真机验证；LAN/启动仍有遗留）
 
 - 工具前后 commentary 改为同一 request 的 typed assistant parts，final 独立标记；长过程和最终报告直接进入
   transcript，不再依赖 `Ctrl+O`，也不再按固定 12K 裁剪。普通历史仅从最老完整消息边界收缩，真正 Compact
@@ -27,21 +27,23 @@
   workspace/store/writer 完整定向 150 项已通过，第二次 Ruff、doc sync、strict code-size、diff 和
   clean-package 严格 gate 全绿；`1b75762` 已推送部署。
 - fresh `ma-r55-terminal-sticky-retest` 第一段再次证明 5 名 child 自然结束、main 自动接棒、最终报告直接
-  可见，真实产物与 successor identity 均在原 canonical task root。第二段又抓到更底层的一拍延迟：
-  completed sticky 的 `task_path` 已被 successor 正确继承，但首个模型采样仍收到 TUI 启动 cwd；第一条
-  `run_command` 因而把空启动目录 `/bbb` 写成绝对路径，审批后才发生 promotion，无法再改已经生成的命令。
-  当前候选把 exact non-detached sticky root 在首采样前投影为 `conversation_execution_cwd` 与唯一 runtime
-  root，同时不预填 terminal live id/run workspace。对应 completed/interrupted × 5 工具回归已先红后绿；
-  待严格 gate、推送、单 Gateway 部署后在同一 TUI 追加启动任务复验。
+  可见；第二段抓到 completed sticky 虽已继承 `task_path`，首个模型采样却仍看到 TUI 启动 cwd 的一拍延迟。
+  `1e4c64d` 已在首采样前投影 exact non-detached sticky root，同时不预填 terminal live id/run workspace；
+  completed/interrupted × 5 首工具回归、完整 focused 与严格 gate 均通过，已推送并部署 `.7`。
+- 同一 r55 再次输入完全相同的启动提示后，模型第一条 `ls -la bbb` 已直接看到六份真实游戏文件；审批面板、
+  bwrap 与 Python 服务 cwd 均落在原 canonical task root。原任务及修复前/后的两个 successor 都是独立
+  `completed` run，且三者 `task_path` 精确相同。远端 localhost 返回《超级玛丽》HTML，不再是空目录列表；
+  最终报告直接显示且 Working 正常撤下。
 - r54 的 Context 从当轮 83.6k 回到下轮 39.5k 不是 Compact 或丢聊天：canonical transcript
   仍完整保留 10 条 user/commentary/final，变小的是已完成回合中的巨型 write/read 工具载荷，
   它们按已接受的终态折叠合同转为有界、可核对投影。该折叠不推进 generation，不冒充 Compact。
 - r55 第一段在 105.8k/128k（83%）自然结束，仍低于 115.2k 压缩线，因此 `compact 0` 正确。第二段首轮
   约 43.5k 是上一工具长链终态折叠后的模型可见压力，不是未记账 Compact；价格仍按 provider cache-read
   唯一账本核算，缓存命中单价 0.1/1 两档分别使用 `1,811,699.1/2,023,236`。
-- r55 的 `network_status` 正确给出 `unverified_external_probe_required`，模型也明确没有把本机 200 升级为
-  局域网已验证；Mac 对 `192.0.2.7:8765` 实测连接失败。它仍把空目录 HTTP 200 说成“游戏已就绪”，
-  根因就是上述 cwd 晚切；修复后还需同时核对 HTTP 正文确为游戏而不是目录页。
+- r55 的 `network_status` 正确给出 `unverified_external_probe_required`，模型没有把本机 200 升级为局域网
+  已验证；修复后远端 localhost 正文也已核对为游戏。但 Mac 对 `192.0.2.7:8765` 仍连接失败，所以真实
+  LAN 可达性未通过，不能写成已完成；本轮也没有旁路改防火墙。唯一 Gateway 重启约 30 秒才监听，仍明显
+  高于 1--4 秒目标，作为独立启动性能问题保留。
 
 ## 2026-08-26 后台进程改归 conversation session 托管（已部署真机通过）
 
