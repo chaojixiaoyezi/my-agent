@@ -287,8 +287,15 @@ OpenAI-compatible 本地模型真 TUI 首次复验与回归：
 - 工具调用续轮只在 assistant 同时含真实 tool calls 时回放 `reasoning_content`，普通文本轮不加供应商扩展
   字段；未知响应字段不进入 canonical IR；
 - 首批三个直接文件 90 项通过；扩大到 backend、incomplete、message adapter、native、Gateway streaming、
-  thinking spinner 与 tool stream boundary 的 10 个文件共 180 项仍全绿。fresh
-  `ma-cache-long-local-r64` 已从同一自然语言长提示进入 `create_subagents`，最终账本另在终态记录。
+  thinking spinner 与 tool stream boundary 的 10 个文件共 207 项仍全绿。fresh
+  `ma-cache-long-local-r64` 已从同一自然语言长提示进入 `create_subagents`；主代理首段权威账本为
+  77,244 input / 40,960 cached / 0 write / 2,740 output，缓存占约 53.03%，证明 OpenAI-compatible
+  追加前缀真实命中；按输入 5、缓存 0.1/1，相对全普通输入分别节省约 51.97%/42.42%；
+- r64 不是成功样本：约 1 小时 41 分内只创建 轻量运行时/工具运行时 两名 child，轻量运行时 遇到本地端点 600 秒流总墙钟
+  超时，工具运行时 未自然结束，余下六项未派出；最终从同一 TUI `/stop`，root=`PAUSED`、child 均
+  `CANCELLED`。超时和取消调用没有最终 provider usage，所以上述账只作成本下界；任务完成度按失败记录；
+- 停止前 main 约 43.2k/262.1k、child 约 67.1k/51.8k，均未到 90% 压缩点，因此 `compact 0` 正确，
+  不能把长墙钟时间当作应该 Compact 的证据。
 
 真机协议探针（同一部署代码、同一配置、同一 MiniMax-M2.7 端点，不输出 Key 或 prompt）：
 

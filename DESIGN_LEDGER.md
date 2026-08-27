@@ -1898,7 +1898,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   的模型可见投影，完整 archive 与 exact refs 保留，Compact 权威代数不变；最后主轮仍有 40,527
   provider cache-read。该边界继续由结构化 fold/ledger 裁决，不要求 Context 数字单调递增。
 
-## 2026-08-27 原生 prompt 的三段追加式缓存【状态：MiniMax 长任务复验中】
+## 2026-08-27 原生 prompt 的三段追加式缓存【状态：双 provider 已取证；本地长任务失败样本保留】
 
 - `.7` 同一真 TUI 的脱敏请求指纹证明：25 个工具和顶层宿主 system 的哈希连续不变，但旧首条 user prompt
   在同一请求的工具轮里从约 31KB 增到 33KB，普通下一回合又变成约 45KB。变化来源是相关记忆、当前时间、
@@ -1935,6 +1935,11 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `delta.reasoning_content` 只作为展示增量和白名单 assistant history：第一段正文/工具或流结束形成 typed
   complete；普通 assistant 文本不携带扩展字段，只有工具调用续轮按 DeepSeek/Qwen 兼容合同回放
   `reasoning_content`。该事件不进入用户 prompt、任务状态、权限或工具裁决。
+- 本地模型 r64 的首段 provider 账为 77,244 input / 40,960 cached / 0 write / 2,740 output，证明同一
+  追加布局也能被 OpenAI-compatible KV 前缀命中；两档价格相对全普通输入分别节省约 51.97%/42.42%。
+  该任务随后因一个 child 的 600 秒流总墙钟超时和另一个 child 的长时间未完成而由测试者从 TUI `/stop`，
+  所以成本只能作为已回执调用的下界，功能完成度必须判失败。缓存命中、provider 可用、模型吞吐和任务
+  编排是四个独立事实，任何一个都不能替另一个宣告通过。
 
 ## 2026-08-27 缓存热尾、冷折叠与本地搜索空结果合同【状态：已部署；热期真 TUI 通过，冷边界长等待中】
 

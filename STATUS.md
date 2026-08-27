@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-27 原生追加式 prompt 缓存（本地模型长任务复验中）
+## 2026-08-27 原生追加式 prompt 缓存（双 provider 真 TUI 已取证；本地长任务未完成）
 
 - `.7` 唯一 Gateway 上用透明代理只记录长度、哈希和 cache marker，未记录 prompt 或 Key。旧链连续请求的
   tools/system 哈希不变，首条 user prompt 却从约 31KB→33KB→45KB；模型账出现 24,790 cache-write / 0 read，
@@ -31,8 +31,18 @@
   `OpenAICompatibleBackend.generate()` 不接受统一 `on_thinking_delta`。当前候选按 会话运行时 的 typed
   reasoning event 与 DeepSeek Harness/工具运行时 的 `reasoning_content` 分流补齐统一 backend 合同：
   增量思考先于正文展示、正文/工具或流结束时封口，工具调用轮只回放白名单思考字段。90 项直接相关
-  回归以及扩大后的 180 项 backend/stream/TUI 回归均已通过；fresh `ma-cache-long-local-r64` 已使用完整
-  普通中文长提示进入真实子代理阶段。
+  回归以及扩大后的 207 项 backend/stream/TUI 回归均已通过。
+- fresh `ma-cache-long-local-r64` 使用同一普通中文长提示真实运行约 1 小时 41 分。主代理首段 4 个已回执
+  provider 调用累计 77,244 input，其中 40,960 cached、0 cache-write、2,740 output，缓存占约 53.03%；
+  按普通输入 5、缓存 0.1/1，相对全普通输入分别节省约 51.97%/42.42%。该账不包含未返回最终 usage 的
+  超时/取消调用，所以只能作为缓存命中和成本下界，不能冒充整个任务总成本。
+- 本地模型实际只创建 轻量运行时/工具运行时 两名 child：轻量运行时 在真实工作约 67 分钟后触发本地端点 600 秒流总墙钟
+  超时，工具运行时 仍运行；余下六项一直没有派出。测试者最终只经 TUI `/stop` 收口，root 为 `PAUSED`、
+  两名 child 为 `CANCELLED`，没有完整横向报告。没有 Compact 属正常边界：停止前 main 约 43.2k、
+  两名 child 约 67.1k/51.8k，均低于 262.1k 模型的 90% 压缩点。
+- 测试机现已恢复 `/root/.my-agent/config/testbox-single-gateway.yaml`；唯一监听 PID `1476971`，有效配置为
+  `anthropic_compatible + MiniMax-M2.7`。本地模型失败样本保留原 tmux 和 canonical task 供复核，不通过
+  新 Gateway 自动续跑。
 
 ## 2026-08-26 长期会话、TUI 时序、任务目录与网络事实（已部署真机验证；LAN/启动仍有遗留）
 

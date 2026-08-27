@@ -4,8 +4,9 @@
   不得按标题、用户正文或模型语言猜边界。Anthropic 必须保持「固定 user → append-only IR → 当前事实」且只有
   一个最新历史断点；OpenAI-compatible 保持同样顺序供 KV 缓存。Workspace 必须在动态尾部；关闭缓存/text
   路径不得丢正文，canonical IR 与 Compact 不变。本地 focused 已通过；`.7` r62 终态账本已有
-  6,097,485 cache-read，仍待本地模型真 TUI 同 prompt 终态验收后勾选。OpenAI-compatible 还必须接受
-  统一 thinking observer；有 `reasoning_content` 时思考增量、封口、正文顺序和工具续轮回放均不得丢失。
+  6,097,485 cache-read；本地 r64 首段也有 40,960 cached，但长任务因本地流 600 秒超时且只派出两名
+  child 而失败，故仍不能勾选。OpenAI-compatible 还必须接受统一 thinking observer；有
+  `reasoning_content` 时思考增量、封口、正文顺序和工具续轮回放均不得丢失。
 
 - [x] child capability grant 与 exact tool approval 继续分账；child 的实际 `BackgroundTranscriptSink` 遇到
   `ask` 时必须把完整 request 上送所属 owner TUI，并阻塞原 ToolCall。main 与多个 child 的确认共用一个
