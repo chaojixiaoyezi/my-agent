@@ -450,6 +450,11 @@ def _prepare_native_compact_plan(
         return None
     base_params = replace(params, tool_ir_history=[])
     base_tokens = model_visible_context_tokens(agent, base_params, prompt)
+    # 已完成会话前缀自己就达到触发线时，删当前 turn 的工具往返也不可能形成有效候选。
+    # 让后续统一 preflight 发出 context_overflow，由 Gateway 的整段 transcript Compact
+    # 替换旧历史；不要先烧一次 live summary 再提交一个仍超线的虚假 generation。
+    if base_tokens >= limit:
+        return None
     target = min(limit - 1, base_tokens + int(policy.recent_tail_tokens or 0))
     binding, summary = _live_compact_binding_and_summary(agent, params, policy)
     return _NativeCompactPlan(
@@ -521,12 +526,24 @@ def _apply_native_compact_plan(
         if dropped:
             if plan.semantic_summary:
                 replace_compaction_summary_ir(params, plan.semantic_summary)
-            dropped = _settle_native_ir_window(
-                agent=agent,
+            dropped, after_tokens = _settle_native_ir_window(
                 params=params,
                 estimator=estimator,
-                plan=plan,
+                target=plan.target_tokens,
                 dropped=dropped,
+            )
+            if after_tokens >= plan.trigger_tokens:
+                # 摘要本身或必须保留的最新工具往返仍使完整请求超线。这个候选没有
+                # 生效，恢复原 IR 后交给 transcript Compact；generation 不能前进。
+                params.tool_ir_history[:] = original_ir
+                params.tool_context[:] = original_tool_context
+                return 0
+            return _commit_and_publish_native_compact(
+                agent,
+                params,
+                plan,
+                dropped=dropped,
+                after_tokens=after_tokens,
             )
         return dropped
     except Exception as exc:
@@ -536,24 +553,36 @@ def _apply_native_compact_plan(
         raise
 
 
-# LLM: Settling continues pairwise reduction until summary plus handoff also fit the exact
-# provider-visible target, then emits one typed reduction fact for the same operation.
-# 函数用途: 把压缩后的摘要和保留工具往返一起重新计量，必要时继续成对裁剪并记录最终数字。
+# LLM: Settling is a pure in-memory candidate step. It must not commit a generation or publish an
+# event until the caller verifies the full provider-visible request is below the shared trigger.
+# 函数用途: 把摘要和保留工具往返重新计量，继续成对裁剪，并返回尚未提交的候选数字。
 def _settle_native_ir_window(
     *,
-    agent: object,
     params: ToolLoopExecuteParams,
     estimator: Callable[[], int],
-    plan: _NativeCompactPlan,
+    target: int,
     dropped: int,
-) -> int:
+) -> tuple[int, int]:
     dropped = _reduce_native_ir_to_target(
         params,
         estimator=estimator,
-        target=plan.target_tokens,
+        target=target,
         dropped=dropped,
     )
-    after_tokens = estimator()
+    return dropped, estimator()
+
+
+# LLM: A live-tool generation becomes durable and visible only after the complete candidate has
+# passed the same trigger used by preflight. Checkpoint/CAS remains before the UI projection.
+# 函数用途: 提交已经验证有效的运行中 Compact，并把同一代次和 token 数投给 TUI。
+def _commit_and_publish_native_compact(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    plan: _NativeCompactPlan,
+    *,
+    dropped: int,
+    after_tokens: int,
+) -> int:
     preserved_pairs = _native_tool_result_count(params)
     canonical_generation = _commit_native_ir_generation(
         agent,

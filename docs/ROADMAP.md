@@ -17,6 +17,21 @@
 
 ## 下一版优先级
 
+### Compact 只计真正生效的代次，终态任务立即停止后台续作
+
+状态：本地实现与 focused 通过，待 `.10` 唯一 Gateway 真 TUI 复验
+
+解决问题：长会话里曾出现 `195,457 → 195,267` 仍高于 180k 压缩线却显示 Compact 次数增加，随后又做
+一次 transcript Compact；另一个现象是任务已经完成，底部 Working/后台续作策略仍可能等到 scheduler
+下一轮才收起。前者让次数失真并浪费摘要调用，后者让用户误以为主代理还在工作。
+
+当前进展：live-tool Compact 现在先区分“已结束历史前缀已经超线”和“当前 turn 工具 IR 可以释放压力”。
+前一种直接交给统一 transcript Compact；后一种先在内存生成完整候选并按 provider-visible 总请求复算，
+仍未低于同一触发线就恢复原 IR，不写 checkpoint、不推进 generation、不发布成功。任务状态 writer 在
+提交不可复活终态后立即停用 exact task 的全部 progress policy，scheduler 仅保留竞态/旧数据兜底。
+下一步在 `.10` 继续原 MiniMax-M2.7 长会话跨过压缩点，核对每一代 `after_tokens < trigger_tokens`、无双摘要
+和终态 policy 已停用；`.7` 慢模型样本自然结束前不重启。
+
 ### 主/子代理验证结论与受管后台动作边界
 
 状态：approval/session/`network_status` 主链已部署；不误报合同真机通过，真实 LAN 可达性仍失败

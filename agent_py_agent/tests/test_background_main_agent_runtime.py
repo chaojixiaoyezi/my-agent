@@ -306,10 +306,10 @@ def test_subagent_wake_provider_prompt_keeps_original_task_after_runtime_injecti
     )
 
     assert len(backend.prompts) == 1
-    prompt = backend.prompts[0]
+    prompt = backend.provider_texts[0]
     continuation_at = prompt.index("[active-turn-continuation]")
     user_task_at = prompt.index(f"# User Task\n{objective}")
-    assert continuation_at < user_task_at
+    assert user_task_at < continuation_at
     assert "A subagent lifecycle event resumed this same task" in prompt
 
 
@@ -1243,17 +1243,48 @@ def _native_probe(self):
     )
 
 
+def _provider_message_text(kwargs: dict) -> str:
+    """把测试后端实际收到的 native messages 展开成可断言文本。"""
+    parts: list[str] = []
+    for message in list(kwargs.get("messages") or []):
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+            continue
+        for block in list(content or []):
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif isinstance(block, dict):
+                parts.append(json.dumps(block, ensure_ascii=False, sort_keys=True))
+    return "\n".join(parts)
+
+
+def _provider_tool_names(kwargs: dict) -> set[str]:
+    """读取真实 native tools schema 中的工具名，不从诊断 prompt 猜工具可用性。"""
+    return {
+        str(item.get("name") or "")
+        for item in list(kwargs.get("tools") or [])
+        if isinstance(item, dict) and str(item.get("name") or "")
+    }
+
+
 class _CapturingBackend:
     name = "capturing"
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.provider_texts: list[str] = []
+        self.tool_names: list[set[str]] = []
 
     def probe_tool_capability(self):
         return _native_probe(self)
 
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
+        self.provider_texts.append(_provider_message_text(kwargs))
+        self.tool_names.append(_provider_tool_names(kwargs))
         return ModelResponse(text="后台主代理已检查任务树，并给出阶段汇报。", backend=self.name)
 
 
@@ -1262,12 +1293,14 @@ class _NaturalCompletionBackend:
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.provider_texts: list[str] = []
 
     def probe_tool_capability(self):
         return _native_probe(self)
 
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
+        self.provider_texts.append(_provider_message_text(kwargs))
         return ModelResponse(text="任务全部完成。", backend=self.name)
 
 
@@ -1429,6 +1462,7 @@ class _MidTurnLifecycleBackend:
         self.fail_after_injection = fail_after_injection
         self.calls = 0
         self.prompts: list[str] = []
+        self.provider_texts: list[str] = []
         self.signal = None
 
     def probe_tool_capability(self):
@@ -1437,6 +1471,7 @@ class _MidTurnLifecycleBackend:
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.calls += 1
         self.prompts.append(prompt)
+        self.provider_texts.append(_provider_message_text(kwargs))
         if self.calls == 1:
             self.signal = self.store.raise_wake_signal(
                 {
@@ -1449,8 +1484,9 @@ class _MidTurnLifecycleBackend:
                 }
             )
             return ModelResponse(text="这是子代理完成前生成的旧状态。", backend=self.name)
-        assert "[RUNTIME_TASK_EVENTS]" in prompt
-        assert "child-mid-turn" in prompt
+        provider_text = _provider_message_text(kwargs)
+        assert "[RUNTIME_TASK_EVENTS]" in provider_text
+        assert "child-mid-turn" in provider_text
         if self.fail_after_injection:
             raise RuntimeError("provider failed after runtime event injection")
         return ModelResponse(text="已接收子代理的新结果并继续整合。", backend=self.name)
@@ -1497,7 +1533,7 @@ def test_background_runtime_reports_corrupt_thread_before_running_model(tmp_path
 
 
 def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
@@ -1548,10 +1584,10 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
 
     assert len(reports) == 1
     assert len(backend.prompts) == 1
-    assert "每小时帮我看一次进展" in backend.prompts[0]
-    assert "inspect_agent_tree" not in backend.prompts[0]
-    assert "create_subagents" in backend.prompts[0]
-    assert "dispatch_subagents" not in backend.prompts[0]
+    assert "每小时帮我看一次进展" in backend.provider_texts[0]
+    assert "inspect_agent_tree" not in backend.tool_names[0]
+    assert "create_subagents" in backend.tool_names[0]
+    assert "dispatch_subagents" not in backend.tool_names[0]
     sent = channels.adapter("internal").sent_messages
     assert sent[0].target == "thread-1"
     assert "后台主代理已检查任务树" in sent[0].content
@@ -2010,7 +2046,7 @@ def test_task_continuation_uses_the_same_thread_history_and_compact(tmp_path) ->
     )
 
     reports = scheduler.tick(now=77.0)
-    prompt = backend.prompts[0]
+    prompt = backend.provider_texts[0]
 
     assert len(reports) == 1
     assert "请完成任务甲的七天晚餐方案" in prompt
@@ -3570,7 +3606,7 @@ def test_unknown_old_task_preserves_event_without_blocking_new_task_on_same_thre
     assert len(first_reports) == 1
     assert first_reports[0].task_id == new_task_id
     assert len(backend.prompts) == 1
-    assert "新任务子代理已经结束" in backend.prompts[0]
+    assert "新任务子代理已经结束" in backend.provider_texts[0]
     assert [
         item.observation_id for item in store.unhandled_observations_requiring_main(limit=0)
     ] == [old_observation.observation_id]
@@ -3798,7 +3834,7 @@ def test_scheduled_turn_accepts_mid_turn_child_event_without_starting_second_mai
     assert backend.calls == 2
     assert "RUNTIME_TASK_EVENTS" not in backend.prompts[0]
     assert backend.signal is not None
-    assert backend.signal.wake_signal_id in backend.prompts[1]
+    assert backend.signal.wake_signal_id in backend.provider_texts[1]
     assert reports[0].response == "已接收子代理的新结果并继续整合。"
     assert store.pending_wake_signals() == []
     claim = store.load_background_run_claim(thread.thread_id)
@@ -4133,10 +4169,10 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
     assert len(reports) == 1
     assert len(backend.prompts) == 1
     for index in range(1, 5):
-        assert f"第{index}个子代理的最终结论" in backend.prompts[0]
-        assert f"/tmp/child-{index}/final_report.md" in backend.prompts[0]
-    assert '"event_count": 4' in backend.prompts[0]
-    assert '"events": [' in backend.prompts[0]
+        assert f"第{index}个子代理的最终结论" in backend.provider_texts[0]
+        assert f"/tmp/child-{index}/final_report.md" in backend.provider_texts[0]
+    assert '\"event_count\": 4' in backend.provider_texts[0]
+    assert '\"events\": [' in backend.provider_texts[0]
     assert store.pending_wake_signals() == []
     assert reports[0].delivery_status == "sent"
 
@@ -4222,7 +4258,7 @@ def test_successful_completion_mailbox_drains_every_sibling_under_prompt_pressur
             break
         all_reports.extend(scheduler.tick(now=40.0 + tick))
 
-    rendered_prompts = "\n".join(backend.prompts)
+    rendered_prompts = "\n".join(backend.provider_texts)
     for index in range(1, 8):
         assert f"第{index}个子代理的最终结论" in rendered_prompts
         assert f"/tmp/child-{index}/final_report.md" in rendered_prompts
@@ -5157,13 +5193,13 @@ def test_aggregate_capacity_wake_runs_one_owner_model_turn(tmp_path) -> None:
 
     assert len(reports) == 1
     assert len(backend.prompts) == 1
-    assert "typed Audit capacity event" in backend.prompts[0]
-    assert '"capacity_state": "alert"' in backend.prompts[0]
-    assert '"pending": 8642' in backend.prompts[0]
-    assert '"records_per_second": 41.0' in backend.prompts[0]
-    assert "OLD_FALSE_NO_BACKLOG" not in backend.prompts[0]
-    assert "## Recent Messages" not in backend.prompts[0]
-    assert "## Agent Tree Snapshot" not in backend.prompts[0]
+    assert "typed Audit capacity event" in backend.provider_texts[0]
+    assert '\"capacity_state\": \"alert\"' in backend.provider_texts[0]
+    assert '\"pending\": 8642' in backend.provider_texts[0]
+    assert '\"records_per_second\": 41.0' in backend.provider_texts[0]
+    assert "OLD_FALSE_NO_BACKLOG" not in backend.provider_texts[0]
+    assert "## Recent Messages" not in backend.provider_texts[0]
+    assert "## Agent Tree Snapshot" not in backend.provider_texts[0]
     assert reports[0].delivery_status == "sent"
     assert len(channels.adapter("feishu").sent_messages) == 1
 
@@ -5701,6 +5737,10 @@ def test_scheduler_retires_terminal_task_progress_policy_without_model_call(
             "now": 11.0,
         }
     )
+    store.update_task_status(
+        {"task_id": "task-1", "status": terminal_status, "now": 70.0}
+    )
+    # 模拟升级前残留账本或终态提交后的极窄竞态：调度器仍须结构化兜底退休。
     policy = store.set_progress_policy(
         {
             "thread_id": thread.thread_id,
@@ -5711,8 +5751,6 @@ def test_scheduler_retires_terminal_task_progress_policy_without_model_call(
             "now": 12.0,
         }
     )
-    store.update_task_status({"task_id": "task-1", "status": terminal_status, "now": 70.0})
-
     reports = scheduler.tick(now=100.0)
 
     assert reports == []
@@ -6138,7 +6176,7 @@ def test_scheduler_runs_one_duplicate_progress_policy_per_target(tmp_path) -> No
 
 
 def test_urgent_wake_uses_full_background_tool_profile(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
@@ -6168,16 +6206,14 @@ def test_urgent_wake_uses_full_background_tool_profile(tmp_path) -> None:
             "now": 20.0,
         }
     )
-    prompt = backend.prompts[0]
-
-    assert "create_subagents" in prompt
-    assert "dispatch_subagents" not in prompt
+    assert "create_subagents" in backend.tool_names[0]
+    assert "dispatch_subagents" not in backend.tool_names[0]
 
 
 def test_background_runtime_uses_configured_allowed_tools(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
-            enable_tools=False,
+            enable_tools=True,
             memory_path="memory.jsonl",
             background_main_agent_allowed_tools=["inspect_agent_tree", "send_guidance"],
         ),
@@ -6214,17 +6250,15 @@ def test_background_runtime_uses_configured_allowed_tools(tmp_path) -> None:
     )
 
     scheduler.tick(now=73.0)
-    prompt = backend.prompts[0]
-
-    assert "inspect_agent_tree" not in prompt
-    assert "send_guidance" in prompt
-    assert "dispatch_subagents" not in prompt
-    assert "create_subagents" not in prompt
+    assert "inspect_agent_tree" not in backend.tool_names[0]
+    assert "send_guidance" in backend.tool_names[0]
+    assert "dispatch_subagents" not in backend.tool_names[0]
+    assert "create_subagents" not in backend.tool_names[0]
 
 
 def test_background_runtime_applies_owner_disabled_tools(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        AgentConfig(enable_tools=True, memory_path="memory.jsonl"),
         tmp_path,
     )
     agent.owner_policy = type(
@@ -6254,15 +6288,13 @@ def test_background_runtime_applies_owner_disabled_tools(tmp_path) -> None:
             "now": 20.0,
         }
     )
-    prompt = backend.prompts[0]
-
-    assert "create_subagents: 创建" not in prompt
-    assert "dispatch_subagents: 推进" not in prompt
-    assert "removed_tools" in prompt
+    assert "create_subagents" not in backend.tool_names[0]
+    assert "dispatch_subagents" not in backend.tool_names[0]
+    assert "removed_tools" in backend.provider_texts[0]
 
 
 def test_background_runtime_applies_wake_policy_snapshot(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
@@ -6291,11 +6323,8 @@ def test_background_runtime_applies_wake_policy_snapshot(tmp_path) -> None:
             "now": 20.0,
         }
     )
-    prompt = backend.prompts[0]
-
-    assert "inspect_agent_tree" not in prompt
-    assert "dispatch_subagents: 只有需要推进" not in prompt
-    assert "create_subagents: 创建" not in prompt
+    # inspect_agent_tree 已从主链删除；快照不能把一个不存在的旧工具重新注入。
+    assert backend.tool_names[0] == set()
 
 
 def test_background_context_budget_truncates_large_messages(tmp_path) -> None:
@@ -6339,7 +6368,7 @@ def test_background_context_budget_truncates_large_messages(tmp_path) -> None:
     )
 
     reports = scheduler.tick(now=73.0)
-    prompt = backend.prompts[0]
+    prompt = backend.provider_texts[0]
 
     assert len(reports) == 1
     assert "A" * 2000 not in prompt
@@ -6398,7 +6427,7 @@ def test_scheduler_recovers_due_policy_after_process_restart(tmp_path) -> None:
     reports = scheduler.tick(now=3703.0)
 
     assert len(reports) == 1
-    assert "一小时后继续检查" in backend.prompts[0]
+    assert "一小时后继续检查" in backend.provider_texts[0]
     assert channels.adapter("feishu").sent_messages[0].target == "chat-1"
 
 
@@ -6755,7 +6784,7 @@ def test_background_prompt_includes_recovery_snapshot_for_previous_failed_claim(
     )
 
     scheduler.tick(now=7.0)
-    prompt = backend.prompts[0]
+    prompt = backend.provider_texts[0]
 
     assert "Recovery Snapshot" in prompt
     assert '"previous_claim_status": "failed"' in prompt
@@ -7077,10 +7106,10 @@ def test_failed_policy_run_records_backoff_and_retires_after_three(tmp_path) -> 
 
 
 def test_successful_policy_run_resets_failure_accounting(tmp_path) -> None:
-    """问题6成功半边:policy run 成功 → failure_count 清零,退避账复原。
+    """问题6成功半边:policy run 成功 → failure_count 清零，终态任务立即退休策略。
 
     先造 1 次失败账,再换能成功的 backend 跑一轮 → metadata.failure_count==0,
-    排期回到正常 interval(不再带旧失败历史减速)。
+    同时由任务终态提交点停用 policy，不等 scheduler 下一轮扫描。
     """
     from agent_py_agent.agent.conversation.runtime import (
         BackgroundMainAgentRuntime,
@@ -7140,9 +7169,9 @@ def test_successful_policy_run_resets_failure_accounting(tmp_path) -> None:
     assert report is not None  # run 成功
     after = store.get_progress_policy(policy.policy_id)
     assert after.metadata["failure_count"] == 0  # 失败账清零复原
-    assert after.enabled is True
+    assert after.enabled is False
     # 排期只受既有「无进展退避」(echo backend 无工具调用 → streak=1 → interval×2)
-    # 影响,失败账已归零不带退避;两种账独立:streak 管无进展,失败账管连续失败。
+    # 影响，失败账已归零不带退避；任务已经终态，因此该时间只作历史审计。
     assert after.metadata["no_progress_streak"] == 1
     assert after.next_due_at == 40.0 + 30 * 2
 

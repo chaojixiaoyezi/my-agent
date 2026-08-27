@@ -1,5 +1,19 @@
 # STATUS
 
+## 2026-08-27 Compact 有效提交与终态续作退休（本地候选通过，待 `.10` 真 TUI）
+
+- `.10` 的长会话 `ma-110-native-cache-r2` 暴露了真实假计数：一次 `live_tool_ir` 记录为
+  `195,457 → 195,267`，压缩后仍高于 180k 触发线，却推进了 Compact generation；随后同一压力又触发
+  transcript Compact。用户看到的次数因此比真正释放上下文的次数多，也额外支付了一次摘要调用。
+- 当前候选对齐 会话运行时 的“替换完整会话历史后再继续采样”边界：已结束会话前缀自己达到触发线时，跳过
+  无能为力的 live-tool 摘要，直接让统一 preflight/Gateway transcript Compact 接管；其它 live 候选先在
+  内存里完成摘要、成对回收和完整请求重估，只有低于同一触发线才 checkpoint/CAS/发布。无效候选恢复
+  原 IR，Compact 次数保持不变。
+- 同一候选还把 progress policy 的正常退休移到 canonical task 终态提交点：completed/interrupted 等
+  不可复活终态会立即停用 exact task 的策略，同 thread 其它任务不受影响；scheduler 终态扫描只处理
+  升级旧账本和极窄竞态。相关 Compact/Store/Gateway/后台 runtime focused 已通过；`.7` 慢模型长任务继续
+  原样自然运行，本轮不会为部署中断它。
+
 ## 2026-08-27 跨完成回合缓存、慢模型与派工真 TUI（`.10` 已通过；`.7` 仍自然运行）
 
 - `2b98dde` 先落慢流和派工底座：流式调用取消隐式总墙钟，只保留 request-local first-event 与 rolling idle；

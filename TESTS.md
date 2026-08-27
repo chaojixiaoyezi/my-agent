@@ -1,5 +1,30 @@
 # TESTS
 
+## 2026-08-27 Compact 有效代次与终态 progress policy
+
+本轮回归钉住两条底层合同：
+
+- 已结束 provider history 自己达到压缩线时，live-tool IR 不调用摘要、不改 IR、不推进 generation，统一
+  preflight 必须返回 context pressure 交给 transcript Compact；live 摘要候选即使已经成对删旧工具，只要
+  完整下一次请求仍未低于同一触发线，也必须原样回滚且不发布 Compact。
+- canonical task link 进入 completed/interrupted 等不可复活终态时，立即退休 exact task 的所有 enabled
+  progress policy；同 thread 其它任务继续启用，scheduler 仍能清理升级前残留 policy。测试后端检查真实
+  native messages/tools，而不再从不会发送给 provider 的诊断 prompt 推断上下文或工具能力。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py \
+  agent_py_agent/tests/test_conversation_store.py \
+  agent_py_agent/tests/test_gateway_conversation_compact.py \
+  agent_py_agent/tests/test_context_pressure_native_trigger.py \
+  agent_py_agent/tests/test_gateway_chat_conversation_context.py \
+  agent_py_agent/tests/test_background_main_agent_runtime.py \
+  -q --tb=short
+```
+
+以上共收集 316 项；代码推送前必须再取得完整退出码，并运行 Ruff、doc sync、strict code-size、diff 与
+clean-package。真实验收继续使用 `.10` MiniMax-M2.7 TUI；`.7` 当前慢模型长任务不能为部署而中断。
+
 ## 2026-08-27 慢流、active covers 与缓存注入边界
 
 本轮回归同时钉住三个底层事实：

@@ -1,5 +1,12 @@
 # COMPLETED
 
+- 2026-08-27 完成 Compact 有效代次与终态续作收口：live-tool 候选只有在完整 provider-visible 请求低于
+  同一触发线后才 checkpoint/CAS/发布；旧会话前缀已超线或摘要候选仍超线时不再虚增 generation，分别
+  交给 transcript Compact 或原样回滚。canonical task 进入不可复活终态时立即停用 exact task progress
+  policy，scheduler 只作旧账本/竞态兜底。同步把旧后台测试从诊断 prompt 迁到真实 native messages/tools
+  出站面；316 项相关 focused（2 项既有 xfail）与本地严格 gate 全绿，真实 `.10` TUI 复验仍按 ROADMAP
+  执行。
+
 - 2026-08-27 `2ca6e6c` 完成普通主代理与递归 child 的跨回合 canonical messages 缓存前缀：Gateway/child
   ConversationStore 先冻结 committed Compact summary 与完整消息边界尾部，runtime 再按已结束历史、当前
   user、本轮工具 IR 的时间顺序发送；记忆召回、推荐、工作区、wake 和执行事实只放动态尾。当前 user 的

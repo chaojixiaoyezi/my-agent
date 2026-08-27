@@ -2098,6 +2098,13 @@ class ConversationTaskStore(ConversationModelUsageStore):
             link.thread_id, task_id, link.status, current
         )
         _sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
+        if (
+            str(link.status or "").strip().lower()
+            in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES
+        ):
+            retire_policies = getattr(self, "disable_task_progress_policies", None)
+            if callable(retire_policies):
+                retire_policies(task_id, now=current)
         return link
 
     # LLM: Goal edits update display intent only and preserve task/thread/workspace identity.
@@ -4963,6 +4970,27 @@ class ConversationProgressStore(ConversationWakeStore):
         updated = replace(policy, enabled=False, last_report_at=current)
         write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())
         return updated
+
+    # LLM: The canonical task lifecycle writer calls this exact-task cleanup on every terminal or
+    # interrupted transition. Scheduler suppression remains a defensive race/legacy-data backstop.
+    # 函数用途: 立即停用一个任务名下全部仍启用的后台续作策略，防止终态任务再次唤醒模型。
+    def disable_task_progress_policies(
+        self,
+        task_id: str,
+        *,
+        now: float | None = None,
+    ) -> tuple[str, ...]:
+        selected_task_id = str(task_id or "").strip()
+        if not selected_task_id:
+            return ()
+        retired: list[str] = []
+        policies, _load_errors = self.list_progress_policies_report(enabled_only=True)
+        for policy in policies:
+            if str(policy.task_id or "").strip() != selected_task_id:
+                continue
+            if self.disable_progress_policy(policy.policy_id, now=now) is not None:
+                retired.append(policy.policy_id)
+        return tuple(retired)
 
     def expedite_progress_policy(
         self, policy_id: str, *, due_at: float, reason: str = "", now: float | None = None

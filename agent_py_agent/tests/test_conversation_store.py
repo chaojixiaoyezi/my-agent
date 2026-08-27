@@ -565,6 +565,56 @@ def test_update_task_status_keeps_thread_binding(tmp_path) -> None:
     assert stored_thread.active_task_ids == ()
 
 
+@pytest.mark.parametrize("terminal_status", ["completed", "interrupted"])
+def test_update_task_status_immediately_retires_exact_task_policies(
+    tmp_path,
+    terminal_status,
+) -> None:
+    """终态提交点立即退休本任务 policy，不等待下一次 scheduler tick。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "terminal-policy-cleanup",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "任务一", "now": 2.0}
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-2", "goal": "任务二", "now": 2.0}
+    )
+    first = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "now": 3.0,
+        }
+    )
+    second = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-2",
+            "interval_seconds": 60,
+            "now": 3.0,
+        }
+    )
+
+    store.update_task_status(
+        {"task_id": "task-1", "status": terminal_status, "now": 4.0}
+    )
+
+    assert store.get_progress_policy(first.policy_id).enabled is False
+    assert store.get_progress_policy(second.policy_id).enabled is True
+    assert store.due_progress_policies(now=100.0) == [
+        store.get_progress_policy(second.policy_id)
+    ]
+
+
 def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(
