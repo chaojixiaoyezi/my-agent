@@ -162,9 +162,6 @@ class PromptBuilder:
             if request.workspace_context_override is None
             else request.workspace_context_override
         )
-        task_and_transcript = _task_and_transcript_section(
-            self.config, request.user_prompt, _transcript_tool_context(_tools)
-        )
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
         if _tools.native_tool_use:
@@ -176,18 +173,19 @@ class PromptBuilder:
                     tool_catalog=_tools.tool_catalog_section or default_tools,
                 ),
                 _native_cache_volatile_suffix(
-                    workspace_context=workspace_context,
-                    injected=injected,
-                    execution_facts=_tools.execution_facts_section,
-                ),
-                stable_user_prefix=_native_cache_stable_user_prefix(
                     memory_text=memory_text,
                     tool_recommendations=(
                         _tools.tool_recommendations_section or default_recommendations
                     ),
-                    task_and_transcript=task_and_transcript,
+                    workspace_context=workspace_context,
+                    injected=injected,
+                    execution_facts=_tools.execution_facts_section,
                 ),
+                canonical_user_turn=f"# User Task\n{request.user_prompt}",
             )
+        task_and_transcript = _task_and_transcript_section(
+            self.config, request.user_prompt, _transcript_tool_context(_tools)
+        )
         return (
             f"# System\n{system_prompt}\n\n"
             f"# Related Memory\n{memory_text}\n\n"
@@ -231,32 +229,21 @@ def _native_cache_stable_prefix(
     )
 
 
-# LLM: This run-stable initial user message sits before native IR so each new tool round extends
-# the prior provider prefix. Runtime injections are excluded because wake/resume facts may change.
-# 函数用途: 组装当前 run 固定的记忆、工具建议和用户任务，不混入会变化的运行注入。
-def _native_cache_stable_user_prefix(
+# LLM: Memory recall, task-specific recommendations, workspace provisioning, wake/resume
+# injections, and execution facts may all change between completed turns. They stay after the
+# append-only native conversation/tool IR so they cannot invalidate an already cached history.
+# 函数用途: 组装本轮辅助上下文，作为规范会话消息和工具历史之后的动态尾部发送。
+def _native_cache_volatile_suffix(
     *,
     memory_text: str,
     tool_recommendations: str,
-    task_and_transcript: str,
-) -> str:
-    return (
-        f"# Related Memory\n{memory_text}\n\n"
-        f"{tool_recommendations}\n\n"
-        f"{task_and_transcript}"
-    )
-
-
-# LLM: Workspace provisioning, wake/resume injections, and execution facts may change while the
-# run lives. They stay after append-only IR so they cannot invalidate an already cached history prefix.
-# 函数用途: 组装工作区、运行注入和执行事实，作为消息历史之后的最新用户上下文发送。
-def _native_cache_volatile_suffix(
-    *,
     workspace_context: str,
     injected: str,
     execution_facts: str,
 ) -> str:
     return (
+        f"# Related Memory\n{memory_text}\n\n"
+        f"{tool_recommendations}\n\n"
         f"# Workspace Context\n{workspace_context}\n\n"
         f"# Runtime Injection\n{injected or '（无）'}\n\n"
         f"{execution_facts}\n"

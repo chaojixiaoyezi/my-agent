@@ -14,6 +14,8 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
     model_visible_context_tokens,
     should_compact_before_more_tool_output,
 )
+from agent_py_agent.agent.backends.tool_ir import UserTurn
+from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolContentBlock,
     ToolResult,
@@ -133,3 +135,31 @@ def test_context_estimate_counts_only_a_real_provider_system_channel() -> None:
     capable_tokens = model_visible_context_tokens(capable, params, "hello")
 
     assert capable_tokens > legacy_tokens
+
+
+def test_native_cache_diagnostic_user_turn_is_not_counted_twice() -> None:
+    agent = _agent("native")
+    params = _params(
+        "native",
+        save=True,
+        history=[UserTurn("# User Task\ncurrent")],
+    )
+    without_diagnostic_copy = CacheStructuredPrompt(
+        "stable",
+        "dynamic",
+    )
+    with_diagnostic_copy = CacheStructuredPrompt(
+        "stable",
+        "dynamic",
+        canonical_user_turn="# User Task\ncurrent",
+    )
+
+    assert model_visible_context_tokens(
+        agent,
+        params,
+        with_diagnostic_copy,
+    ) == model_visible_context_tokens(
+        agent,
+        params,
+        without_diagnostic_copy,
+    )

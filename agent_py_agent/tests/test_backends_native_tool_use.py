@@ -261,6 +261,48 @@ def test_native_prompt_cache_marks_stable_user_snapshot_before_first_volatile_ta
     ]
 
 
+def test_native_canonical_user_is_sent_once_through_structured_messages():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=False))
+    captured: dict[str, object] = {}
+
+    def fake_request_json(path, payload, headers):
+        del path, headers
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "continue"}]}
+
+    backend.request_json = fake_request_json
+    canonical = "# User Task\nsecond task"
+    backend.generate(
+        CacheStructuredPrompt(
+            "stable instructions",
+            "changing conversation facts",
+            canonical_user_turn=canonical,
+        ),
+        tools=_TOOLS,
+        messages=[
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": canonical}],
+            }
+        ],
+    )
+
+    payload = captured["payload"]
+    assert sum(
+        block.get("text") == canonical
+        for message in payload["messages"]
+        for block in message.get("content", [])
+    ) == 1
+    assert payload["messages"][0]["content"] == [
+        {
+            "type": "text",
+            "text": canonical,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": "changing conversation facts"},
+    ]
+
+
 def test_typed_prompt_projection_never_drops_stable_user_text_without_system_split():
     prompt = CacheStructuredPrompt(
         "stable instructions",
@@ -381,15 +423,16 @@ def test_disabled_cache_keeps_structured_prompt_as_one_complete_user_message():
         ),
     )
 
-    assert captured["payload"]["system"] == "host authorization policy"
+    assert captured["payload"]["system"] == (
+        "host authorization policy\n\nstable instructions"
+    )
     assert captured["payload"]["messages"] == [
         {
             "role": "user",
-            "content": (
-                "stable instructions\n\n"
-                "stable task snapshot\n\n"
-                "changing conversation tail"
-            ),
+            "content": [
+                {"type": "text", "text": "stable task snapshot"},
+                {"type": "text", "text": "changing conversation tail"},
+            ],
         }
     ]
     assert captured["payload"]["tools"] == _TOOLS

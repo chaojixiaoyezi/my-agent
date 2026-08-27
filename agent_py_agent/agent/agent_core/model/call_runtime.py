@@ -39,7 +39,7 @@ from .usage import (
 def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, object]:
     agent = getattr(request, "agent", None)
     ledger = model_call_ledger(agent)
-    prompt = str(getattr(request, "prompt", "") or "")
+    prompt = getattr(request, "prompt", "") or ""
     params = getattr(request, "params", None)
     # 记账口径与统一可见口径对齐（门槛1）：text 协议恒等，native 协议计入
     # IR messages/pending guidance/tools —— 首 token 预算按出站可见量估计，

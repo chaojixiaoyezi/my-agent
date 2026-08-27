@@ -37,6 +37,7 @@ class _OverflowThenCompleteChildBackend:
     def __init__(self, *, overflow_once: bool = True):
         self.overflow_once = overflow_once
         self.model_prompts: list[str] = []
+        self.model_messages: list[list[dict]] = []
         self.summary_prompts: list[str] = []
 
     def generate(self, prompt: str, on_chunk=None, **kwargs):
@@ -47,6 +48,7 @@ class _OverflowThenCompleteChildBackend:
                 backend=self.name,
             )
         self.model_prompts.append(prompt)
+        self.model_messages.append(list(kwargs.get("messages") or []))
         if self.overflow_once and len(self.model_prompts) == 1:
             return ModelResponse(
                 text="provider reported context pressure",
@@ -92,6 +94,7 @@ class _WriteThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
 
     def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.model_prompts.append(prompt)
+        self.model_messages.append(list(kwargs.get("messages") or []))
         if len(self.model_prompts) == 1:
             if on_chunk is not None:
                 on_chunk("我先写入子代理负责的文件。")
@@ -166,7 +169,10 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     assert len(backend.model_prompts) == 2
     assert len(backend.summary_prompts) == 1
     assert "# Agent Thread Context" in backend.model_prompts[-1]
-    assert "旧轮次已完成现状核对" in backend.model_prompts[-1]
+    assert "旧轮次已完成现状核对" in json.dumps(
+        backend.model_messages[-1],
+        ensure_ascii=False,
+    )
     assert updated is not None
     assert updated.compact_generation == 1
     assert updated.compact_checkpoint_id
@@ -252,10 +258,12 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
     )
 
     assert followup.compact_generation == 0
-    assert "conversation-terminal-tool-fold" in followup.injection
-    assert "我先写入子代理负责的文件。" in followup.injection
-    assert "write_file" in followup.injection
-    assert "call-child-write-1" in followup.injection
+    assert followup.history_seed is not None
+    history = json.dumps(followup.history_seed.messages, ensure_ascii=False)
+    assert "conversation-terminal-tool-fold" in history
+    assert "我先写入子代理负责的文件。" in history
+    assert "write_file" in history
+    assert "call-child-write-1" in history
 
 
 def test_subagent_preflight_compacts_large_completed_history_before_sampling(
@@ -298,7 +306,10 @@ def test_subagent_preflight_compacts_large_completed_history_before_sampling(
     assert result.ok
     assert len(backend.summary_prompts) == 1
     assert len(backend.model_prompts) == 1
-    assert "Earlier Agent Summary (generation 1)" in backend.model_prompts[0]
+    assert "Earlier Conversation Summary (generation 1)" in json.dumps(
+        backend.model_messages[0],
+        ensure_ascii=False,
+    )
     assert thread is not None
     assert thread.compact_generation == 1
 

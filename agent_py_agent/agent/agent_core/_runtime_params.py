@@ -107,6 +107,9 @@ class ToolLoopExecuteParams:
     active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
     # Gateway-only typed callback serializes reservation/submission with exact-turn close.
     active_turn_transition_callback: object = None
+    # Completed conversation history stays separate from the current run's tool IR. The seed is
+    # immutable and already bounded/compacted by ConversationStore.
+    conversation_history_seed: object = None
     # Progressive disclosure: an explicit tool_search selection makes these
     # already-authorized deferred tools visible to the next model call only.
     loaded_tool_names: set[str] = field(default_factory=set)

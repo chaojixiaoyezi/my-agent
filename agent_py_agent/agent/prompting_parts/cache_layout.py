@@ -2,30 +2,33 @@ from __future__ import annotations
 
 """Provider-neutral prompt layout for append-only native prompt caching.
 
-The runtime still sees one ordinary string.  Typed attributes let a provider
-adapter keep stable system text and a run-stable initial user message ahead of
-append-only native history, while placing request-varying facts at the tail.
+The string value remains a complete diagnostic/archive projection. Native provider adapters
+receive the canonical current user turn through structured messages, so they omit the matching
+canonical user text from the prompt adjunct and place only request-varying facts last.
 """
 
 from dataclasses import dataclass
 
 
-# LLM: This immutable projection is the only structured description of native prompt ordering;
-# adapters may relocate typed parts but must send all three without parsing prose.
-# 类用途: 保存稳定 system、稳定首条用户消息和动态尾部，避免靠标题或自然语言猜缓存边界。
+# LLM: This immutable projection is the only structured description of native prompt ordering.
+# Adapters may relocate typed parts, and may omit canonical_user_turn only when the same turn is
+# already present in native messages; they must never infer boundaries by parsing prose.
+# 类用途: 保存稳定 system、兼容首条用户段、当前用户诊断副本和动态尾部，避免靠标题猜缓存边界。
 @dataclass(frozen=True)
 class PromptCacheLayout:
     stable_prefix: str
     volatile_suffix: str
     stable_user_prefix: str = ""
+    canonical_user_turn: str = ""
 
     # LLM: Rendering must be lossless because text backends and archives consume the same full
     # string even when they ignore provider-specific message placement.
-    # 函数用途: 按模型原本应看到的顺序还原完整 prompt。
+    # 函数用途: 按完整诊断/归档口径还原 prompt；原生适配器会去掉 messages 中已有的当前用户副本。
     def render(self) -> str:
         return _join_prompt_parts(
             self.stable_prefix,
             self.stable_user_prefix,
+            self.canonical_user_turn,
             self.volatile_suffix,
         )
 
@@ -43,11 +46,13 @@ class CacheStructuredPrompt(str):
         volatile_suffix: str,
         *,
         stable_user_prefix: str = "",
+        canonical_user_turn: str = "",
     ) -> CacheStructuredPrompt:
         layout = PromptCacheLayout(
             stable_prefix=str(stable_prefix or ""),
             volatile_suffix=str(volatile_suffix or ""),
             stable_user_prefix=str(stable_user_prefix or ""),
+            canonical_user_turn=str(canonical_user_turn or ""),
         )
         value = super().__new__(cls, layout.render())
         value.cache_layout = layout

@@ -22,11 +22,13 @@ class AnthropicPromptCacheProjection:
     prompt: str
     stable_user_prefix: str = ""
     stable_system_cache_active: bool = False
+    structured_native_layout_active: bool = False
 
 
-# LLM: Only a typed CacheStructuredPrompt on a native cache-enabled request may become a cached
-# system prefix. Plain strings, text protocol and disabled cache preserve their legacy shape.
-# 函数用途: 把稳定规则移到供应商 system 缓存块，并让当前会话、时间和任务继续留在动态用户消息。
+# LLM: Any typed native layout is split into stable system and volatile adjunct even when cache
+# markers are disabled, so its canonical user turn remains solely in messages. Cache-enabled
+# requests additionally mark the stable system block; plain strings and text protocol stay legacy.
+# 函数用途: 拆分稳定规则与动态事实；启用缓存时再给稳定 system 加供应商断点。
 def anthropic_prompt_cache_projection(
     *,
     system_instruction: str,
@@ -35,26 +37,34 @@ def anthropic_prompt_cache_projection(
     native_messages: bool,
 ) -> AnthropicPromptCacheProjection:
     layout = prompt_cache_layout(prompt)
-    if not (cache_enabled and native_messages and layout is not None and layout.stable_prefix):
+    if not (native_messages and layout is not None and layout.stable_prefix):
         return AnthropicPromptCacheProjection(
             system=str(system_instruction or ""),
             prompt=str(prompt or ""),
         )
-    system_blocks: list[dict[str, Any]] = []
-    if system_instruction:
-        system_blocks.append({"type": "text", "text": str(system_instruction)})
-    system_blocks.append(
-        {
-            "type": "text",
-            "text": layout.stable_prefix,
-            "cache_control": dict(_EPHEMERAL_CACHE_CONTROL),
-        }
-    )
+    if cache_enabled:
+        system_blocks: str | list[dict[str, Any]] = []
+        if system_instruction:
+            system_blocks.append({"type": "text", "text": str(system_instruction)})
+        system_blocks.append(
+            {
+                "type": "text",
+                "text": layout.stable_prefix,
+                "cache_control": dict(_EPHEMERAL_CACHE_CONTROL),
+            }
+        )
+    else:
+        system_blocks = "\n\n".join(
+            text
+            for text in (str(system_instruction or ""), str(layout.stable_prefix or ""))
+            if text
+        )
     return AnthropicPromptCacheProjection(
         system=system_blocks,
         prompt=layout.volatile_suffix,
         stable_user_prefix=layout.stable_user_prefix,
-        stable_system_cache_active=True,
+        stable_system_cache_active=bool(cache_enabled),
+        structured_native_layout_active=True,
     )
 
 
@@ -69,7 +79,19 @@ def anthropic_messages_with_optional_cache(
     cache_enabled: bool,
     stable_user_prefix: str = "",
     stable_system_cache_active: bool = False,
+    structured_native_layout_active: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if structured_native_layout_active and messages is not None:
+        prepared_messages = _append_only_structured_messages(
+            stable_user_prefix=stable_user_prefix,
+            messages=messages,
+            volatile_suffix=prompt,
+            mark_cache=cache_enabled,
+        )
+        return (
+            prepared_messages,
+            _mark_final_tool(tools) if cache_enabled else list(tools),
+        )
     if cache_enabled and messages is not None:
         return anthropic_native_payload_with_cache(
             prompt=prompt,
@@ -117,14 +139,16 @@ def anthropic_native_payload_with_cache(
     return prepared_messages, _mark_final_tool(tools)
 
 
-# LLM: Native structured requests must keep the run-stable initial user message before canonical
-# IR, advance one message cache marker to the newest history prefix, then append volatile facts.
-# 函数用途: 按“固定任务快照→追加工具历史→本轮事实”顺序组装消息，并保持调用方历史不变。
+# LLM: Native structured requests receive chronological conversation/current-turn/tool IR from
+# the caller, advance one message cache marker to its newest reusable prefix, then append volatile
+# facts. stable_user_prefix exists only for legacy typed callers and must not duplicate IR users.
+# 函数用途: 按“规范历史与当前消息→本轮动态事实”组装消息，并保持调用方历史不变。
 def _append_only_structured_messages(
     *,
     stable_user_prefix: str,
     messages: list[dict[str, Any]],
     volatile_suffix: str,
+    mark_cache: bool = True,
 ) -> list[dict[str, Any]]:
     prepared: list[dict[str, Any]] = []
     if stable_user_prefix:
@@ -135,7 +159,7 @@ def _append_only_structured_messages(
             }
         )
     prepared.extend(messages)
-    if prepared:
+    if prepared and mark_cache:
         _mark_latest_cacheable_history_block(prepared, history_start=0)
     return _append_volatile_user_text(prepared, volatile_suffix)
 

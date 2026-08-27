@@ -66,7 +66,9 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     GatewayWorkspaceScopeError,
     _append_gateway_conversation_message,
     _gateway_conversation_context,
+    _gateway_conversation_history_seed,
     _gateway_injections,
+    _gateway_message_work_scope,
     _gateway_run_params,
     _gateway_run_task_attributes,
     _gateway_task_attributes,
@@ -324,8 +326,10 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
     assert second.thread_id == first.thread_id
     assert agent.conversation_store.thread_for_task("gw-second") is None
     section = _gateway_injections({"inject": []}, second)[0]
-    assert "你好，我叫小叶子" in section
-    assert "你好，小叶子。" in section
+    history_seed = _gateway_conversation_history_seed(second)
+    assert history_seed is not None
+    assert ("user", "你好，我叫小叶子") in history_seed.messages
+    assert ("assistant", "你好，小叶子。") in history_seed.messages
     assert "active_root_task_id" not in section
 
 
@@ -484,7 +488,13 @@ def test_audit_prepare_projection_does_not_use_global_compact_or_sibling_artifac
     }
 
     section = _gateway_injections(request, conversation)[0]
-    assert "当前 Audit 自己的普通上下文" in section
+    history_seed = _gateway_conversation_history_seed(
+        conversation,
+        work_scope=_gateway_message_work_scope(request),
+    )
+    assert history_seed is not None
+    assert history_seed.messages == (("user", "当前 Audit 自己的普通上下文"),)
+    assert history_seed.compact_summary == ""
     assert "旧 Audit 的 captured 规则" not in section
     assert "old-audit-profile.md" not in section
     assert "旧普通任务" not in section
@@ -1228,10 +1238,11 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
     )
     assert claim is not None
     original_run = agent.run
-    observed: dict[str, str] = {}
+    observed: dict[str, object] = {}
 
     def capture_fresh_history(prompt, *, params=None, **kwargs):
         observed["injection"] = "\n".join(str(item) for item in params.inject)
+        observed["history"] = tuple(params.conversation_history_seed.messages)
         return original_run(prompt, params=params, **kwargs)
 
     monkeypatch.setattr(agent, "run", capture_fresh_history)
@@ -1274,7 +1285,10 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
 
     assert result.response
     assert time.monotonic() - started >= 0.1
-    assert "后台上一轮刚刚写入的最终事实" in observed["injection"]
+    assert (
+        "assistant",
+        "后台上一轮刚刚写入的最终事实",
+    ) in observed["history"]
     latest = agent.conversation_store.load_background_run_claim(current.thread_id)
     assert latest["status"] == "finished"
     assert latest["task_id"] == "gateway:gw-after-wait"
@@ -1300,6 +1314,7 @@ def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path,
     release_first = threading.Event()
     second_entered = threading.Event()
     second_injection: list[str] = []
+    second_history: list[tuple[str, str]] = []
     errors: list[BaseException] = []
 
     def controlled_run(prompt, *, params=None, **kwargs):
@@ -1308,6 +1323,7 @@ def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path,
             assert release_first.wait(timeout=2)
         if prompt == "第二轮随后运行":
             second_injection.extend(str(item) for item in params.inject)
+            second_history.extend(params.conversation_history_seed.messages)
             second_entered.set()
         return original_run(prompt, params=params, **kwargs)
 
@@ -1343,7 +1359,7 @@ def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path,
     assert not second.is_alive()
     assert errors == []
     assert second_entered.is_set()
-    assert "第一轮先运行" in "\n".join(second_injection)
+    assert ("user", "第一轮先运行") in second_history
     thread = _conversation_context(agent, {"conversation": conversation}, "inspect", "检查")
     rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
     assert [row.metadata["gateway_request_id"] for row in rows] == [

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from ...backends import ModelResponse, is_provider_context_window_error
 from ...memory_archive import estimate_tokens
 from ...model_guidance import provider_system_instruction
+from ...prompting_parts.cache_layout import prompt_cache_layout
 from ..native_tool_protocol import native_tool_use_active, resolve_native_tools
 from ..runtime.context_compactor import runtime_compact_policy
 
@@ -62,7 +63,7 @@ class ModelVisibleContextSnapshot:
 def model_visible_context_snapshot(
     agent: object,
     params: object | None,
-    prompt: str,
+    prompt: object,
 ) -> ModelVisibleContextSnapshot:
     protocol, current, components = _model_visible_context_components(
         agent,
@@ -102,9 +103,9 @@ def model_visible_context_budget(
     """
     resolved_params = params if params is not None else getattr(agent, "_current_run_params", None)
     resolved_prompt = (
-        str(prompt)
+        prompt
         if prompt is not None
-        else str(getattr(agent, "_current_user_prompt", "") or "")
+        else getattr(agent, "_current_user_prompt", "") or ""
     )
     snapshot = model_visible_context_snapshot(agent, resolved_params, resolved_prompt)
     window = snapshot.context_window_tokens
@@ -148,7 +149,7 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
     window = policy.context_window_tokens
     if window <= 0:
         return None
-    prompt = str(getattr(request, "prompt", "") or "")
+    prompt = getattr(request, "prompt", "") or ""
     prompt_tokens = model_visible_context_tokens(
         getattr(request, "agent", None),
         getattr(request, "params", None),
@@ -185,7 +186,7 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
 # tool schemas count even before the first tool call; otherwise an empty IR history makes a large
 # fixed schema disappear from the compact decision.
 # 函数用途: 统一统计文字 prompt、原生工具 schema、原生工具消息和待转发运行时引导。
-def model_visible_context_tokens(agent: object, params: object, prompt: str) -> int:
+def model_visible_context_tokens(agent: object, params: object, prompt: object) -> int:
     return _model_visible_context_components(agent, params, prompt)[1]
 
 
@@ -195,7 +196,7 @@ def model_visible_context_tokens(agent: object, params: object, prompt: str) -> 
 def _model_visible_context_components(
     agent: object,
     params: object | None,
-    prompt: str,
+    prompt: object,
 ) -> tuple[str, int, dict[str, int]]:
     system_instruction = provider_system_instruction(getattr(agent, "backend", None))
     if not native_tool_use_active(params):
@@ -235,9 +236,10 @@ def _model_visible_context_components(
         already_forwarded,
     )
     tools = resolve_native_tools(agent, params) or []
+    provider_prompt = _native_provider_prompt_adjunct(prompt)
     payload = {
         "system_instruction": system_instruction,
-        "initial_user_prompt": str(prompt or ""),
+        "prompt_adjunct": provider_prompt,
         "messages": messages,
         "pending_runtime_guidance": guidance,
         "tools": tools,
@@ -250,7 +252,7 @@ def _model_visible_context_components(
                 "prompt_tokens",
                 {
                     "system_instruction": system_instruction,
-                    "user_prompt": str(prompt or ""),
+                    "prompt_adjunct": provider_prompt,
                 },
             ),
             ("messages_tokens", messages),
@@ -259,6 +261,25 @@ def _model_visible_context_components(
         ),
     )
     return "native", current, components
+
+
+# LLM: CacheStructuredPrompt keeps the canonical current user turn in its diagnostic string, but
+# native adapters send that turn through messages. Estimation must omit only that typed duplicate;
+# plain strings and every stable/dynamic prompt adjunct remain counted exactly once.
+# 函数用途: 取得原生后端实际发送的非消息提示部分，避免状态条和 Compact 误把当前任务算两遍。
+def _native_provider_prompt_adjunct(prompt: object) -> str:
+    layout = prompt_cache_layout(prompt)
+    if layout is None:
+        return str(prompt or "")
+    return "\n\n".join(
+        part
+        for part in (
+            layout.stable_prefix,
+            layout.stable_user_prefix,
+            layout.volatile_suffix,
+        )
+        if part
+    )
 
 
 # LLM: The estimator has per-object overhead and rounding, so independently estimated categories
@@ -307,7 +328,7 @@ def _request_save_enabled(request: object) -> bool:
 # LLM: 该安全点与 preflight 共用同一 trigger_tokens；禁止为工具轮增加第二个 digest/ceiling 状态机。
 # 函数用途: 工具轮准备继续读取或执行大输出前，检查是否应先压缩，避免再把内容塞进已达阈值的上下文。
 def should_compact_before_more_tool_output(
-    agent: object, params: object, current_prompt: str
+    agent: object, params: object, current_prompt: object
 ) -> bool:
     if not _params_save_enabled(agent, params):
         return False
@@ -325,7 +346,7 @@ def should_compact_before_more_tool_output(
     # estimate_tokens(prompt) 恒为静态前缀(≈9K), 永远到不了阈值 → compact 永不触发
     # (ma 双线 36 轮仍 archive_events=0 实锤)。改用与 preflight 同口径的
     # model_visible_context_tokens: native 下含 IR messages/tools/guidance。
-    return model_visible_context_tokens(agent, params, str(current_prompt or "")) >= threshold
+    return model_visible_context_tokens(agent, params, current_prompt or "") >= threshold
 
 
 # LLM: 请求参数优先，Agent 配置兜底；这个顺序要与模型 preflight 保持一致。

@@ -68,7 +68,10 @@ from ..conversation.history_index import (
     ensure_thread_history_indexed,
     index_conversation_message,
 )
-from ..conversation.models import is_audit_background_transcript_entry
+from ..conversation.models import (
+    ConversationHistorySeed,
+    is_audit_background_transcript_entry,
+)
 from ..conversation.run_claim import (
     ConversationRunLaneRequest,
     claim_heartbeat_interval_seconds,
@@ -1619,6 +1622,10 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
             context.request_id,
             str(request.get("execution_attempt_id") or "").strip() or context.request_id,
         ),
+        conversation_history_seed=_gateway_conversation_history_seed(
+            conversation,
+            work_scope=_gateway_message_work_scope(request),
+        ),
         conversation_task_binding_callback=_GatewayTaskBindingWriter(
             context.request_path,
             context.request_id,
@@ -1667,6 +1674,7 @@ def _gateway_injections(request: dict, conversation: _GatewayConversationContext
     section = _conversation_prompt_section(
         conversation,
         work_scope=_gateway_message_work_scope(request),
+        include_transcript=False,
     )
     audit_prepare_section = _audit_prepare_prompt_section(request)
     audit_runtime_section = _audit_runtime_prompt_section(request)
@@ -1676,6 +1684,33 @@ def _gateway_injections(request: dict, conversation: _GatewayConversationContext
         *([audit_prepare_section] if audit_prepare_section else []),
         *([audit_runtime_section] if audit_runtime_section else []),
     ]
+
+
+# LLM: The Gateway has already applied Compact and whole-message windowing before this edge.
+# Native runtime must receive exactly that projection, not reload the raw transcript or parse
+# the rendered conversation section back into roles.
+# 函数用途: 把本轮已经裁定好的摘要和历史消息封装成模型运行时的只读会话种子。
+def _gateway_conversation_history_seed(
+    conversation: _GatewayConversationContext,
+    *,
+    work_scope: dict[str, object] | None = None,
+) -> ConversationHistorySeed | None:
+    if not conversation.thread_id:
+        return None
+    return ConversationHistorySeed(
+        compact_summary=(
+            ""
+            if _is_scoped_audit_prepare(work_scope)
+            else str(conversation.compact_summary or "")
+        ),
+        compact_generation=max(0, int(conversation.compact_generation or 0)),
+        messages=tuple(
+            (str(role or ""), str(content or ""))
+            for role, content in conversation.history
+            if str(role or "").strip().lower() in {"user", "assistant"}
+            and str(content or "")
+        ),
+    )
 
 
 def _gateway_message_work_scope(request: object) -> dict[str, object]:
@@ -2657,6 +2692,7 @@ def _conversation_prompt_section(
     conversation: _GatewayConversationContext,
     *,
     work_scope: dict[str, object] | None = None,
+    include_transcript: bool = True,
 ) -> str:
     if not conversation.thread_id:
         return ""
@@ -2673,7 +2709,7 @@ def _conversation_prompt_section(
                 "- Unscoped ordinary dialogue and rows attributed to this exact Audit remain visible below; the Current Audit Preparation Scope is authoritative.",
             ]
         )
-    if conversation.compact_summary and not scoped_audit_prepare:
+    if include_transcript and conversation.compact_summary and not scoped_audit_prepare:
         lines.extend(
             [
                 "- 以下摘要来自同一用户、同一会话中更早的已结束对话。原始逐条记录仍是事实源。",
@@ -2687,7 +2723,7 @@ def _conversation_prompt_section(
         conversation,
         scoped_audit_prepare=scoped_audit_prepare,
     )
-    if conversation.history:
+    if include_transcript and conversation.history:
         lines.extend(
             [
                 "- 以下是同一会话中已经结束的历史对话，仅用于理解指代和偏好。",

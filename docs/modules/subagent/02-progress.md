@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-08-27 子代理会话历史进入统一 native messages（本地候选）
+
+- 子代理原先把自己已结束的 thread history 渲染进 `inject`，导致每次恢复/Compact 都改写 canonical IR 前的
+  prompt 大块。现在 `prepare_subagent_thread_turn` 仍使用同一 ConversationStore/Compact 权威，但只交付
+  immutable `ConversationHistorySeed`；runtime 与主代理共用 committed summary → completed messages →
+  current user → current-turn tools 顺序。
+- terminal tool fold 在 seed 冻结前按 typed metadata 投影，完整 archive/refs、child 独立 generation 和
+  owner/write boundary 均不变。overflow 后重试仍使用同一个 child thread，不生成第二套摘要或跨 child 历史。
+- child/grandchild Compact、工具终态折叠与原生消息 focused 已通过；真实慢模型 r65 已运行超过旧 600 秒
+  墙钟而未被 timeout 误杀，仍待其自然终态后再部署最终缓存版本。
+
 ## 2026-08-27 active covers 与 replacement 启动闸（本地候选）
 
 - r62 中原 child 在 capability grant 后已恢复，同一父级仍补建相同 `covers=["2"]` 的替身；旧预检只看

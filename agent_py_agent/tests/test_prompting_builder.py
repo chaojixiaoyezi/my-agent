@@ -768,11 +768,10 @@ class TestBuildFullPrompt:
         assert "volatile memory" not in layout.stable_prefix
         assert "volatile clock" not in layout.stable_prefix
         assert "volatile conversation" not in layout.stable_prefix
-        assert "volatile memory" in layout.stable_user_prefix
-        assert "volatile clock" not in layout.stable_user_prefix
-        assert "volatile conversation" not in layout.stable_user_prefix
-        assert "current task" in layout.stable_user_prefix
-        assert "volatile choice" in layout.stable_user_prefix
+        assert layout.stable_user_prefix == ""
+        assert layout.canonical_user_turn == "# User Task\ncurrent task"
+        assert "volatile memory" in layout.volatile_suffix
+        assert "volatile choice" in layout.volatile_suffix
         assert "volatile clock" in layout.volatile_suffix
         assert "volatile conversation" in layout.volatile_suffix
         assert "volatile fact" in layout.volatile_suffix
@@ -802,6 +801,41 @@ class TestBuildFullPrompt:
         assert second_layout is not None
         assert first_layout.stable_prefix == second_layout.stable_prefix
         assert first_layout.stable_user_prefix == second_layout.stable_user_prefix
+        assert first_layout.canonical_user_turn == second_layout.canonical_user_turn
+        assert first_layout.volatile_suffix != second_layout.volatile_suffix
+
+    def test_native_new_task_changes_only_message_and_dynamic_tail(self, tmp_path):
+        """普通后续任务不得改写 system/tool 固定前缀。"""
+        config = AgentConfig(system_prompt="stable system", prompt_files=[])
+        builder = PromptBuilder(config, tmp_path)
+
+        first = builder.build(
+            "first task",
+            [MemoryRecord(role="user", content="first recall")],
+            tools=ToolSections(
+                tool_catalog_section="# Tools\n- stable tool",
+                tool_recommendations_section="# Recommended Tools\n- first choice",
+                native_tool_use=True,
+            ),
+        )
+        second = builder.build(
+            "second task",
+            [MemoryRecord(role="user", content="second recall")],
+            tools=ToolSections(
+                tool_catalog_section="# Tools\n- stable tool",
+                tool_recommendations_section="# Recommended Tools\n- second choice",
+                native_tool_use=True,
+            ),
+        )
+        first_layout = prompt_cache_layout(first)
+        second_layout = prompt_cache_layout(second)
+
+        assert first_layout is not None
+        assert second_layout is not None
+        assert first_layout.stable_prefix == second_layout.stable_prefix
+        assert first_layout.stable_user_prefix == second_layout.stable_user_prefix == ""
+        assert first_layout.canonical_user_turn == "# User Task\nfirst task"
+        assert second_layout.canonical_user_turn == "# User Task\nsecond task"
         assert first_layout.volatile_suffix != second_layout.volatile_suffix
 
     def test_build_with_tool_transcript_section(self, tmp_path):

@@ -1,10 +1,11 @@
 # TEST CHECKLIST
 
-- [ ] Native prompt 必须用 typed `CacheStructuredPrompt` 表达稳定 system、run 固定首条 user 与动态尾部，
-  不得按标题、用户正文或模型语言猜边界。Anthropic 必须保持「固定 user → append-only IR → 当前事实」且只有
-  一个最新历史断点；OpenAI-compatible 保持同样顺序供 KV 缓存。Workspace 必须在动态尾部；关闭缓存/text
-  路径不得丢正文，canonical IR 与 Compact 不变。lifecycle wake/恢复/插话的 `runtime_injections` 也必须只在
-  IR 后动态尾部，不能改写稳定 user。流式请求必须使用 request-local first-event + rolling idle，持续有效
+- [ ] Native prompt 必须用 typed `CacheStructuredPrompt` 表达稳定 system、仅供诊断的 current-user 副本与
+  动态尾部，不得按标题、用户正文或模型语言猜边界。真实 wire 必须保持「committed summary/已结束消息 →
+  当前 user → append-only 当前轮 IR → 当前事实」，当前 user 只发送一次；Anthropic 只有一个最新历史断点，
+  OpenAI-compatible 保持相同时间顺序供 KV 缓存。Workspace 必须在动态尾部；关闭缓存/text 路径不得丢正文，
+  canonical IR 与 Compact 不变。lifecycle wake/恢复/插话的 `runtime_injections` 也必须只在 IR 后动态尾部，
+  不能改写旧会话消息。流式请求必须使用 request-local first-event + rolling idle，持续有效
   data 不受固定总墙钟误杀；默认 10,800 秒 max 只给极大慢输入，小请求仍按 token 估算。
   本地 focused 已通过；`.7` r62 终态账本已有
   6,097,485 cache-read；本地 r64 首段也有 40,960 cached，但长任务因本地流 600 秒超时且只派出两名

@@ -107,6 +107,17 @@ class MessageLogEntry:
         )
 
 
+# LLM: This immutable projection is the only provider-facing seed for completed conversation
+# history. It carries already-bounded raw turns plus one committed Compact summary; runtime
+# adapters may change role encoding but must not re-read or re-window the transcript.
+# 类用途: 把已经由会话层裁定好的摘要和完整历史消息交给模型运行时，避免再拼成每轮变化的大段字符串。
+@dataclass(frozen=True)
+class ConversationHistorySeed:
+    compact_summary: str = ""
+    compact_generation: int = 0
+    messages: tuple[tuple[str, str], ...] = ()
+
+
 def is_audit_background_transcript_entry(entry: MessageLogEntry) -> bool:
     """Return whether one visible transcript row belongs to detached Audit delivery."""
 

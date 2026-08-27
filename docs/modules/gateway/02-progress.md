@@ -1,5 +1,18 @@
 # Gateway Progress
 
+## 2026-08-27 跨普通回合的 canonical messages 缓存前缀（本地候选）
+
+- MiniMax 长任务结束后的普通追问虽然能正确回忆，但旧 Gateway 把 transcript 渲染进每轮变化的 runtime
+  injection，provider 账出现 `cache-read=0`。当前 Gateway 只生成一次已经 Compact/完整消息裁剪后的
+  `ConversationHistorySeed`；native runtime 按旧 summary/历史、当前 user、本轮工具 IR 的时间顺序投影，
+  text runtime 从同一 seed 渲染，双方不再各自回读 transcript。
+- `CacheStructuredPrompt` 保留完整诊断字符串；Anthropic/OpenAI 原生适配器省略其中已在 messages 出现的
+  current-user 副本，防止 token 与上下文压力重复计算。记忆召回、推荐工具、工作区、wake/runtime injection
+  和执行事实统一放在消息尾部；只有真正 Compact 才替换旧消息前缀。
+- main/child 相关 native、Gateway、Compact、上下文压力和模型账 focused 已通过；待部署 `.10` 后在原
+  `ma-110-dispatch-cache-r1` 同一会话连续发普通中文追问，以 provider usage 证明第二个新布局回合出现
+  cache-read；不能用模型记得内容或屏幕 Context 代替。
+
 ## 2026-08-27 慢模型首事件与滚动 idle 分相（本地候选）
 
 - r64 的本地模型 child 持续工作后仍被 600 秒固定流总墙钟误杀；这不是进程、Gateway 或模型完全静默。

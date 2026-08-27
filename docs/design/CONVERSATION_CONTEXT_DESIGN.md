@@ -80,14 +80,18 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 
 ```text
 稳定 system + 稳定 tools
-→ 当前 run 固定的首条 user（记忆/会话快照/原始任务）
-→ append-only canonical IR（assistant/tool/user steer）
-→ 当前工作区与本次执行事实
+→ 已提交 Compact summary + 已结束的完整 user/assistant 尾部
+→ 当前 user
+→ append-only 当前轮 assistant/tool/user steer IR
+→ 当前 recall、推荐工具、工作区、wake/runtime injection 与执行事实
 ```
 
 Anthropic 请求只推进一个 message-level `cache_control`，该断点始终位于最新可缓存历史块；
-当前事实在它之后。OpenAI-compatible 投影不伪造 `cache_control`，但保持同样顺序，让本地模型服务器
-自己根据 token 前缀复用 KV。任务工作区会在首工具前后变化，因此必须放在动态尾部；这不是对上下文的裁剪。
+当前事实在它之后。普通回合结束后，上一轮 current user 与 assistant 会从同一 ConversationStore
+逐字重建到下一轮 messages；不得把 transcript 再渲染进每轮变化的 runtime injection，也不得同时在 prompt
+和 messages 发送当前 user。OpenAI-compatible 投影不伪造 `cache_control`，但保持相同时间顺序，让本地
+模型服务器复用尽可能长的 KV 前缀。任务工作区会在首工具前后变化，因此必须放在动态尾部；这不是对上下文
+的裁剪。只有真正 Compact 可以把旧 messages 前缀一次替换为新的 committed summary，之后重新建立稳定前缀。
 
 ## Turn scheduling boundary
 

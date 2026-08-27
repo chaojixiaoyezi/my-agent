@@ -8,8 +8,11 @@
   是 request-local，不能修改共享 backend，`first_event/stream_idle/wall_clock` 分账。
 - 同一直属父级已有活动 child 占用 exact covers 时，后续批次除非显式 replacement，否则任何 run 落盘前
   整批拒绝；接管关系预检失败零创建，edge 落账失败的新 child 启动前取消。
-- `runtime_injections` 位于 append-only native IR 后的动态尾部；只改变 wake 内容时稳定 system 与首条 user
-  前缀逐字不变。共享 task root 的 output 声明不再成为目录锁，越过父 workspace 仍硬拒绝。
+- Gateway/child 已结束历史通过同一 immutable `ConversationHistorySeed` 进入 canonical messages，顺序为
+  committed summary → completed user/assistant → exact current user → current-turn IR；当前 user 不得同时在
+  typed prompt 与 messages 发送。`runtime_injections` 位于 append-only native IR 后的动态尾部；只改变 wake
+  内容或开始普通下一任务时，旧 system/tools/messages 前缀不得被重写。共享 task root 的 output 声明不再
+  成为目录锁，越过父 workspace 仍硬拒绝。
 
 ```bash
 python3 -m pytest \
@@ -31,7 +34,7 @@ python3 -m pytest \
   -q --tb=short
 ```
 
-上述组合 focused 已通过（保留 1 个既有 xfail）。真实验收仍必须分别通过 `.7` 本地慢模型和 `.10`
+上述组合 focused 已通过（保留既有 xfail）。真实验收仍必须分别通过 `.7` 本地慢模型和 `.10`
 MiniMax-M2.7 的 fresh TUI 长多子代理任务；不能用 loopback SSE 或短提示冒充长任务通过。
 
 ## 2026-08-26 子代理具体工具审批回送所属 TUI

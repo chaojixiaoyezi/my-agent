@@ -1227,13 +1227,17 @@ def test_conversation_compact_keeps_persona_and_related_memory_in_next_prompt(tm
     )
 
     assert compacted.compact_generation == 1
-    assert "# Earlier Conversation Summary" in rendered
+    history_seed = params.conversation_history_seed
+    assert history_seed is not None
+    assert history_seed.compact_summary == compacted.compact_summary
+    assert history_seed.compact_generation == 1
     assert "人格原则：耐心、直接。" in rendered
     assert "称呼用户为青禾。" in rendered
     assert "长期暗号是白鹭湾" in rendered
-    assert "旧消息 0" not in rendered
-    assert "旧消息 19 user" in rendered
-    assert "旧消息 19 assistant" in rendered
+    history_text = "\n".join(content for _role, content in history_seed.messages)
+    assert "旧消息 0" not in history_text
+    assert "旧消息 19 user" in history_text
+    assert "旧消息 19 assistant" in history_text
 
 
 def test_conversation_search_index_does_not_cross_owner_local_stores(tmp_path) -> None:

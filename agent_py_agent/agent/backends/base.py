@@ -564,7 +564,7 @@ class OpenAICompatibleBackend(HttpBackend):
     def _tool_endpoint(self) -> str:
         return self.api_base + "/chat/completions"
 
-    # LLM: OpenAI-compatible 传输必须保持 system -> 初始 user -> 原生工具历史的固定顺序；
+    # LLM: OpenAI-compatible 传输必须保持 system -> 规范会话/当前 user -> 原生工具历史的追加顺序；
     # reasoning observer 是展示事件边界，不能进入 prompt、状态或工具裁决。
     # 函数用途: 调用 chat/completions，把宿主规则放入真正的 role=system 消息，并转发兼容端点的思考流。
     def generate(
@@ -821,7 +821,7 @@ def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any
 
 # LLM: Plain prompts preserve legacy ordering. Typed cache layouts must mirror 会话运行时
 # append-only order so local OpenAI-compatible KV caches can reuse history without cache_control.
-# 函数用途: 把统一原生消息转换成 OpenAI 顺序；typed prompt 使用固定任务→历史→动态事实。
+# 函数用途: 把统一原生消息转换成 OpenAI 顺序；typed prompt 使用稳定 system→规范消息→动态事实。
 def _openai_messages_from_native(
     messages: list[dict[str, Any]],
     *,
@@ -848,8 +848,8 @@ def _openai_messages_from_native(
     return translated
 
 
-# LLM: System and initial user prefixes are byte-stable within one run; native history extends
-# them, and request-varying facts are appended last. Never parse headings to create this order.
+# LLM: The system prefix and caller-supplied chronological messages are byte-stable until a real
+# Compact boundary; request-varying facts append last. Never parse headings to create this order.
 # 函数用途: 为没有显式 cache_control 的 OpenAI 兼容端点构造可做 token 前缀复用的消息序列。
 def _openai_messages_from_cache_layout(
     messages: list[dict[str, Any]],
@@ -1216,6 +1216,9 @@ class AnthropicCompatibleBackend(HttpBackend):
             stable_user_prefix=cache_projection.stable_user_prefix,
             stable_system_cache_active=(
                 cache_projection.stable_system_cache_active
+            ),
+            structured_native_layout_active=(
+                cache_projection.structured_native_layout_active
             ),
         )
         if selected_tools:

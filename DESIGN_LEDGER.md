@@ -1905,12 +1905,14 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   Conversation 热尾、当前任务和执行事实；它们与约 23KB 的系统规则、Persona、Skill 索引和工具目录被绑在
   一个文本块里。MiniMax 因而只能复用工具前缀，并反复创建约 11K 动态 prompt 缓存。
 - `prompting_parts/cache_layout.py` 的 `CacheStructuredPrompt` 仍以普通字符串保留完整 prompt，
-  同时用 `PromptCacheLayout` 明示三个机器边界：`stable_prefix`、`stable_user_prefix`和
-  `volatile_suffix`。边界不解析标题、用户正文或模型语言。稳定 system 只含 System、Owner Scope、
-  Prompt Files/Persona/Skill 与文本工具目录；run 固定 user 含本轮记忆快照、Conversation/Runtime
-  Injection、推荐工具和原始用户任务；任务工作区与本次执行事实留在动态尾部。
-- Anthropic-compatible 的唯一 wire 顺序是 `system/tools -> stable initial user -> canonical IR ->
-  volatile facts`。顶层 system 和 tools 各有一个稳定断点，message 级只有一个断点，它在每轮
+  同时用 `PromptCacheLayout` 明示四个机器边界：`stable_prefix`、兼容旧调用方的
+  `stable_user_prefix`、仅供完整诊断/归档的 `canonical_user_turn` 与 `volatile_suffix`。边界不解析标题、
+  用户正文或模型语言。稳定 system 只含 System、Owner Scope、Prompt Files/Persona/Skill 与文本工具目录；
+  当前 user 只通过 canonical messages 发送一次；记忆召回、推荐工具、任务工作区、Conversation/Runtime
+  Injection 与本次执行事实留在动态尾部。
+- Anthropic-compatible 的唯一 wire 顺序是 `system/tools -> committed summary/completed messages ->
+  current user -> current-turn canonical IR -> volatile facts`。顶层 system 和 tools 各有一个稳定断点，
+  message 级只有一个断点，它在每轮
   copy-on-write 移到最新可缓存历史块；动态事实永远在该断点之后。这适配 终端交互
   `addCacheBreakpoints` 的单 message marker，也保留 会话运行时 的旧输入前缀先于新输入原则。
   OpenAI-compatible 无 `cache_control`，但使用同样的消息顺序供本地服务器 KV 前缀缓存。
@@ -1971,11 +1973,16 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   协调元数据和父 workspace 上界检查，不是目录锁；真正同文件写冲突继续由 goal 中的 disjoint write set
   软纪律和工具事实处理。安全硬门只保留越过父工作区、冒充身份和危险写入。
 
-## 2026-08-27 运行注入缓存边界与模型目录参考快照【状态：布局 focused 已通过；catalog 暂不参与运行】
+## 2026-08-27 跨完成回合缓存边界与模型目录参考快照【状态：布局 focused 已通过；真 TUI cache-read 待复验】
 
-- 生命周期 wake、恢复和普通插话会变化，不能留在 native history 之前的 `stable_user_prefix`。当前布局
-  固定为 stable system/tools → run 固定首条 user → append-only IR → volatile workspace/runtime injection/
-  execution facts。注入内容没有删除，只移动到动态尾部；不同 wake 的旧 system/user 字节前缀保持相同。
+- 生命周期 wake、恢复、记忆召回和普通插话会变化，不能留在 native history 之前。Gateway/child 会话层先
+  交付一份已经 Compact、按完整消息边界收缩的 `ConversationHistorySeed`；runtime 按 committed summary →
+  completed user/assistant → exact current user → current-turn tool IR 组装 canonical messages。当前 user 在
+  `CacheStructuredPrompt` 字符串里只留诊断副本，原生 provider 明确省略该副本，因此 wire 只发送一次。
+  workspace/runtime injection/recommendations/execution facts 全部追加在 messages 后；不同 wake 或普通新任务
+  不再重写旧会话前缀。text 协议从同一 seed 渲染一次历史，不能回读 transcript 形成第二套窗口。
+- main、child 与 grandchild 走同一合同；普通自然回执等 isolated 辅助轮默认不携带任务历史，避免把长期工具
+  上下文复制进第二次表达调用。只有真正 Conversation Compact 可以替换旧前缀并推进 generation。
 - 最新型号先记录在 `docs/architecture/MODEL_CATALOG_SNAPSHOT.md`，明确它不是 allowlist、路由或价格事实。
   当前 provider 未知型号继续透传，实时 `/models`/详情优先。未来目录按用户显式配置 > provider 发现 >
   随版本种子合并，并把 thinking、sampling、reasoning replay 等差异放入声明式 compat 或 provider adapter，

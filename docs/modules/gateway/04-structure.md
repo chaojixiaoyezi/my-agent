@@ -1,5 +1,20 @@
 # Gateway Structure
 
+## 会话历史与 provider 缓存前缀
+
+- `request_execution._gateway_conversation_context` 先通过 Conversation Compact 取得唯一 committed summary
+  与完整消息边界收缩后的 raw tail；`_gateway_conversation_history_seed` 再把这份结果冻结为 immutable
+  `ConversationHistorySeed`。Gateway 不把 transcript 重复渲染进 `runtime_injections`，runtime 也不重新读取
+  ConversationStore。
+- native runtime 的固定时间顺序是 committed summary、已结束 user/assistant、当前 user、本轮
+  ToolCall/ToolResult 与插话；text runtime 从同一个 seed 只渲染一次。`CacheStructuredPrompt` 的当前 user
+  字符串只服务诊断/归档，provider adapter 在 native messages 已携带该 turn 时必须省略副本。
+- 记忆召回、推荐工具、工作区、wake/runtime injection 和执行事实属于本次请求的动态尾部，不得移动到旧
+  messages 之前。普通回合只追加消息，真正 Compact 才能以 committed summary 一次替换旧前缀并推进
+  generation；TUI Context、模型正文或字符数不能充当 cache-read 证据。
+- child/grandchild 通过各自 ConversationThread 生成相同 seed，保持 thread、Compact、workspace 与权限独立。
+  presentation-only 辅助调用默认不携带长期历史，避免一次任务上下文被复制到第二个模型表达轮。
+
 ## 模型流式存活边界
 
 - `backends/gateway_helpers.py` 为每个请求分别保存短 connect、first-event 和 rolling idle。响应头与首个有效

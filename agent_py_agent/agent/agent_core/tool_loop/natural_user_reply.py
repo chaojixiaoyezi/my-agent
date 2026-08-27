@@ -89,6 +89,11 @@ def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopEx
         tool_ir_history=(
             params.tool_ir_history if preserve_execution_evidence else []
         ),
+        conversation_history_seed=(
+            params.conversation_history_seed
+            if preserve_execution_evidence
+            else None
+        ),
         delivery_contract=None,
         context_scope="isolated",
         consume_pending_turn_input=False,

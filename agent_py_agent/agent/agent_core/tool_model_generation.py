@@ -357,8 +357,8 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     返回 ``[]``，让 backend 保留“这是原生会话”的结构化事实，并从首个模型
     请求开始缓存稳定 prompt 与工具清单；不能把空 native 历史压成 text 路径。
     ``tool_context`` 有尚未转发的宿主指引时，继续返回结构化 user 消息。
-    backend 会把 run 固定的首条 user 放在 IR 前，把每轮执行事实放在 IR 后；本函数只提供
-    中间按时间追加的 canonical history，不能在这里重排或重复 prompt。
+    当前 user、已结束会话和本轮工具往返都已按时间顺序进入 IR；backend 只在其后追加
+    每轮动态事实。本函数不能重排消息，也不能把 prompt 中的诊断副本再次发给 provider。
     """
     if not native_tool_use_active(params):
         return None

@@ -40,6 +40,9 @@ class RunParams:
     # by this live request.  It is runtime state, never prompt text or persisted
     # task metadata, and survives ``dataclasses.replace`` continuations.
     conversation_task_binding_callback: object = None
+    # The conversation layer supplies one immutable, already-bounded completed transcript seed.
+    # Native protocol maps it to provider messages; text protocol renders it once.
+    conversation_history_seed: object = None
     # CLI 自动续跑契约(2026-08-14 根因3 设计 v2): 首轮创建后贯穿所有续跑轮,
     # 保证同一 task/run/thread 链路(不每轮隐式生成新根)。
     # - continuation_seq: 0=首轮, 1..N=续跑轮(事件账本/终态分层用)
@@ -102,6 +105,7 @@ class RuntimeLoopParams:
     active_turn_transition_callback: object = None
     tool_runtime_snapshot: object = None
     tool_protocol_snapshot: object = None
+    conversation_history_seed: object = None
 
 
 @dataclass

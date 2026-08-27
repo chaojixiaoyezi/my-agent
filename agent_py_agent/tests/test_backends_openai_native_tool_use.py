@@ -254,6 +254,36 @@ def test_openai_typed_first_turn_merges_stable_and_volatile_user_text() -> None:
     ]
 
 
+def test_openai_typed_canonical_user_is_sent_once_through_messages() -> None:
+    backend = OpenAICompatibleBackend(_OPTIONS)
+    captured = {}
+
+    def request_json(path, payload, headers):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}
+
+    backend.request_json = request_json
+    canonical = "# User Task\nsecond task"
+    backend.generate(
+        CacheStructuredPrompt(
+            "stable model rules",
+            "changing execution facts",
+            canonical_user_turn=canonical,
+        ),
+        messages=[{"role": "user", "content": canonical}],
+    )
+
+    sent = captured["payload"]["messages"]
+    assert sum(message.get("content", "").count(canonical) for message in sent) == 1
+    assert sent == [
+        {"role": "system", "content": "stable model rules"},
+        {
+            "role": "user",
+            "content": f"{canonical}\n\nchanging execution facts",
+        },
+    ]
+
+
 def test_openai_stream_accumulates_fragmented_native_tool_arguments() -> None:
     backend = OpenAICompatibleBackend(replace(_OPTIONS, stream_enabled=True))
     backend.request_stream = lambda path, payload, headers: [

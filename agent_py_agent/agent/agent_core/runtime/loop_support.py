@@ -120,6 +120,7 @@ def _runtime_loop_params(
         active_turn_transition_callback=params.active_turn_transition_callback,
         tool_runtime_snapshot=prepared.tool_runtime_snapshot,
         tool_protocol_snapshot=prepared.tool_protocol_snapshot,
+        conversation_history_seed=params.conversation_history_seed,
     )
 
 
@@ -757,6 +758,55 @@ def _loop_attempt_id(agent, params: object) -> str:
     return current_subagent_attempt_id(agent) or str(params.attempt_id or "").strip()
 
 
+# LLM: Native history starts with the ConversationStore projection, then the exact current user
+# turn, then any current-run carried handoff/input. This order is the cache contract: completed
+# turns remain byte-stable and only genuine Compact may replace their prefix.
+# 函数用途: 把已结束会话、当前任务和本轮续接输入按真实时间顺序变成原生消息 IR。
+def _native_initial_tool_ir_history(
+    params: RuntimeLoopParams,
+    *,
+    carried_handoff: str,
+    carried_user_inputs: list[str],
+) -> list[object]:
+    from ...backends.tool_ir import AssistantTurn, CompactionSummary, UserTurn
+
+    history: list[object] = []
+    seed = params.conversation_history_seed
+    summary = str(getattr(seed, "compact_summary", "") or "").strip()
+    generation = max(0, int(getattr(seed, "compact_generation", 0) or 0))
+    if summary:
+        history.append(
+            CompactionSummary(
+                f"# Earlier Conversation Summary (generation {generation})\n{summary}"
+            )
+        )
+    for item in tuple(getattr(seed, "messages", ()) or ()):
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            continue
+        role = str(item[0] or "").strip().lower()
+        content = str(item[1] or "")
+        if not content:
+            continue
+        if role == "user":
+            history.append(UserTurn(_native_user_task_text(content)))
+        elif role == "assistant":
+            history.append(AssistantTurn(text=content))
+    current = str(params.user_prompt or "")
+    if current:
+        history.append(UserTurn(_native_user_task_text(current)))
+    if carried_handoff:
+        history.append(CompactionSummary(carried_handoff))
+    history.extend(UserTurn(text) for text in carried_user_inputs if str(text or ""))
+    return history
+
+
+# LLM: Historical and current ordinary user turns use one deterministic provider representation;
+# do not mix recalled memory, workspace clocks, or tool recommendations into this cache identity.
+# 函数用途: 给普通用户消息加固定任务标题，使下一轮重建出的历史与上一轮缓存前缀完全一致。
+def _native_user_task_text(value: object) -> str:
+    return f"# User Task\n{str(value or '')}"
+
+
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = seed.params
     archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
@@ -774,7 +824,6 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     active_turn_user_input_texts_carried = active_turn_user_input_texts(active_turn_user_inputs)
     tool_ir_history: list[object] = []
     if getattr(seed.tool_protocol_snapshot, "source_protocol", "") == "native":
-        from ...backends.tool_ir import CompactionSummary, UserTurn
         from ...memory_archive.compact_semantic_summary import semantic_summary_config
         from ..tool_context.window import native_carried_tool_handoff
 
@@ -783,9 +832,11 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
             archive_tool_calls,
             max_chars=semantic_summary_config(agent).max_input_chars,
         )
-        if handoff:
-            tool_ir_history.append(CompactionSummary(handoff))
-        tool_ir_history.extend(UserTurn(text) for text in active_turn_user_input_texts_carried)
+        tool_ir_history = _native_initial_tool_ir_history(
+            params,
+            carried_handoff=handoff,
+            carried_user_inputs=active_turn_user_input_texts_carried,
+        )
     tool_context.extend(
         f"[ACTIVE_TURN_USER_INPUT]\n{text}" for text in active_turn_user_input_texts_carried
     )
@@ -833,6 +884,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         tool_ir_history=tool_ir_history,
         active_turn_user_inputs=active_turn_user_inputs,
         active_turn_transition_callback=params.active_turn_transition_callback,
+        conversation_history_seed=params.conversation_history_seed,
         context_scope=params.context_scope,
         loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names},
         workspace_context_snapshot=_workspace_context_snapshot(agent, params),

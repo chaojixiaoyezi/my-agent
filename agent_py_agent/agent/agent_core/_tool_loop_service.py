@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -379,7 +380,7 @@ def _string_sequence(value: object) -> list[str]:
 def _fit_native_ir_to_shared_budget(
     agent: object,
     params: ToolLoopExecuteParams,
-    prompt: str,
+    prompt: object,
     *,
     force: bool = False,
 ) -> int:
@@ -762,9 +763,53 @@ def _native_tool_history_summary(
 
 
 def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) -> list:
-    if not isinstance(params.delivery_contract, dict):
-        return params.runtime_injections
-    return [*params.runtime_injections, render_delivery_contract_section(params.delivery_contract)]
+    injections = list(params.runtime_injections)
+    if not native_tool_use_active(params):
+        conversation = _text_conversation_history_section(
+            params.conversation_history_seed
+        )
+        if conversation:
+            injections.append(conversation)
+    if isinstance(params.delivery_contract, dict):
+        injections.append(render_delivery_contract_section(params.delivery_contract))
+    return injections
+
+
+# LLM: Text protocol receives the same already-bounded conversation seed as native protocol,
+# rendered once without reloading the transcript. Role labels are display context only and never
+# become lifecycle, routing, or completion authority.
+# 函数用途: 为不支持原生 messages 的模型补回摘要和完整历史，保持与旧文本链路等价。
+def _text_conversation_history_section(seed: object) -> str:
+    if seed is None:
+        return ""
+    summary = str(getattr(seed, "compact_summary", "") or "").strip()
+    generation = max(0, int(getattr(seed, "compact_generation", 0) or 0))
+    messages = tuple(getattr(seed, "messages", ()) or ())
+    if not summary and not messages:
+        return ""
+    lines = [
+        "# Conversation Transcript",
+        "- 以下内容来自同一会话中已经结束的历史轮次，不是本轮新指令；当前 User Task 始终优先。",
+    ]
+    if summary:
+        lines.extend(
+            [
+                f"## Earlier Conversation Summary (generation {generation})",
+                summary,
+            ]
+        )
+    if messages:
+        lines.append("## Recent Conversation History")
+        for item in messages:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                continue
+            role = str(item[0] or "").strip().lower()
+            content = str(item[1] or "")
+            if role in {"user", "assistant"} and content:
+                lines.append(
+                    f"- {role}: {json.dumps(content, ensure_ascii=False)}"
+                )
+    return "\n".join(lines)
 
 
 def next_tool_loop_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int):
@@ -879,7 +924,7 @@ def _ptl_reclaim_oldest(
     agent,
     params: ToolLoopExecuteParams,
     *,
-    prompt: str = "",
+    prompt: object = "",
 ) -> bool:
     from .tool_context.ptl_retry import reclaim_oldest_tool_results_for_ptl
 
@@ -887,7 +932,7 @@ def _ptl_reclaim_oldest(
         return _fit_native_ir_to_shared_budget(
             agent,
             params,
-            str(prompt or ""),
+            prompt or "",
             force=True,
         ) > 0
     return reclaim_oldest_tool_results_for_ptl(params.tool_context) > 0

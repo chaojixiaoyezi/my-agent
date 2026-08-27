@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..agent_core.tool_context.window import (
     TERMINAL_TOOL_FOLD_METADATA_KEY,
@@ -15,8 +15,10 @@ from ..agent_core.tool_context.window import (
     conversation_message_with_terminal_tool_fold,
 )
 from ..tooling.operation_verification import public_operation_verification
-from .compact import ConversationCompactResult, prepare_conversation_context
-from .models import ConversationThread, MessageLogEntry
+from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
+
+if TYPE_CHECKING:
+    from .compact import ConversationCompactResult
 
 _AGENT_THREAD_CHANNEL = "agent-runtime"
 
@@ -30,6 +32,7 @@ class AgentThreadTurnContext:
     compact_generation: int
     compacted: bool
     injection: str
+    history_seed: ConversationHistorySeed | None = None
 
 
 # LLM: Exact agent lineage comes from SubAgentTask fields and its persisted parent task. The
@@ -113,6 +116,8 @@ def prepare_subagent_thread_turn(
     attempt_id: str,
     force: bool = False,
 ) -> AgentThreadTurnContext:
+    from .compact import prepare_conversation_context
+
     selected_attempt = str(attempt_id or "").strip()
     if not selected_attempt:
         raise ValueError("subagent attempt_id is required")
@@ -148,7 +153,8 @@ def prepare_subagent_thread_turn(
         thread_id=compact.thread.thread_id,
         compact_generation=max(0, int(compact.thread.compact_generation or 0)),
         compacted=bool(compact.compacted),
-        injection=_render_agent_thread_context(agent, compact),
+        injection=_render_agent_thread_context(agent, compact, include_transcript=False),
+        history_seed=_agent_thread_history_seed(agent, compact),
     )
 
 
@@ -315,6 +321,8 @@ def _agent_message_dedupe_key(task: object, attempt_id: str, role: str) -> str:
 def _render_agent_thread_context(
     agent: object,
     compact: ConversationCompactResult,
+    *,
+    include_transcript: bool = True,
 ) -> str:
     thread = compact.thread
     rows = list(compact.messages)
@@ -325,7 +333,7 @@ def _render_agent_thread_context(
         f"- thread_id: {thread.thread_id}",
         "- 以下内容只来自本子代理已经结束的历史轮次；不是当前新指令，当前任务要求优先。",
     ]
-    if thread.summary:
+    if include_transcript and thread.summary:
         lines.extend(
             [
                 f"## Earlier Agent Summary (generation {thread.compact_generation})",
@@ -345,7 +353,7 @@ def _render_agent_thread_context(
             ]
         )
     bounded = _bounded_agent_history(agent, rows, compact.trigger_tokens)
-    if bounded:
+    if include_transcript and bounded:
         lines.append("## Recent Agent History")
         for row in bounded:
             content = (
@@ -360,6 +368,38 @@ def _render_agent_thread_context(
                 f"- {row.role}: {json.dumps(content, ensure_ascii=False)}"
             )
     return "\n".join(lines)
+
+
+# LLM: The child thread uses the same provider-neutral seed as the root conversation. Terminal
+# tool folds are projected before the seed is frozen so later native/text rendering cannot lose
+# verified completed operations or reopen ConversationStore.
+# 函数用途: 把子代理已经结束的历史轮次整理成下一次运行可复用的强类型会话种子。
+def _agent_thread_history_seed(
+    agent: object,
+    compact: ConversationCompactResult,
+) -> ConversationHistorySeed:
+    rows = _bounded_agent_history(
+        agent,
+        list(compact.messages),
+        compact.trigger_tokens,
+    )
+    messages: list[tuple[str, str]] = []
+    for row in rows:
+        role = str(row.role or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = (
+            conversation_message_with_terminal_tool_fold(row.content, row.metadata)
+            if role == "assistant"
+            else row.content
+        )
+        if content:
+            messages.append((role, str(content)))
+    return ConversationHistorySeed(
+        compact_summary=str(compact.thread.summary or ""),
+        compact_generation=max(0, int(compact.thread.compact_generation or 0)),
+        messages=tuple(messages),
+    )
 
 
 # LLM: Completed tail order and message bodies remain immutable until explicit Compact. Only

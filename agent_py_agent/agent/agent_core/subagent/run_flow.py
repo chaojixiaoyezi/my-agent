@@ -335,6 +335,7 @@ def _subagent_model_run_params(
         root_user_prompt=prompt,
         carried_archive_tool_calls=list(iteration.carried_archive_tool_calls),
         carried_active_turn_user_inputs=list(iteration.carried_active_turn_user_inputs),
+        conversation_history_seed=iteration.current.history_seed,
         on_chunk=iteration.transcript_sink,
     )
 

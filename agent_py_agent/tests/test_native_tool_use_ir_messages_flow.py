@@ -19,10 +19,15 @@ import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import _record_tool_call
+from agent_py_agent.agent.agent_core.runtime.loop_support import (
+    _native_initial_tool_ir_history,
+)
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
 from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
 from agent_py_agent.agent.backends.base import AnthropicCompatibleBackend, BackendOptions
+from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.backends.tool_ir import ToolResult
+from agent_py_agent.agent.conversation.models import ConversationHistorySeed
 from agent_py_agent.agent.prompting_parts.builder import PromptBuilder, ToolSections
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import (
@@ -392,6 +397,41 @@ def test_builder_native_drops_tool_record_text(tmp_path):
     assert "TASK" in native_prompt
     # text protocol: the transcript IS folded (unchanged behavior).
     assert "SECRET-BODY" in text_prompt
+
+
+def test_native_completed_conversation_precedes_current_user_without_rewriting() -> None:
+    seed = ConversationHistorySeed(
+        compact_summary="更早轮次摘要",
+        compact_generation=2,
+        messages=(
+            ("user", "第一轮问题"),
+            ("assistant", "第一轮答复"),
+        ),
+    )
+    params = SimpleNamespace(
+        conversation_history_seed=seed,
+        user_prompt="第二轮问题",
+    )
+
+    history = _native_initial_tool_ir_history(
+        params,
+        carried_handoff="",
+        carried_user_inputs=[],
+    )
+    messages = AnthropicMessageAdapter().to_provider_messages(history)
+
+    assert [message["role"] for message in messages] == [
+        "user",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert messages[1]["content"] == [
+        {"type": "text", "text": "# User Task\n第一轮问题"}
+    ]
+    assert messages[-1]["content"] == [
+        {"type": "text", "text": "# User Task\n第二轮问题"}
+    ]
 
 
 # --- compact prep: integer-pair drop interface (Step 3/4 contract) ------------
