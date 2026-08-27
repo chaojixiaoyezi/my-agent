@@ -636,9 +636,9 @@ def _manager_workspace_attrs(manager: Any) -> dict[str, object]:
     return attrs
 
 
-# LLM: Per-turn conversation cwd/roots outrank the shared manager fallback, but only after
-# create_policy copied the host-validated structured fields. Never infer scope from goal text.
-# 函数用途: 生成子代理最终任务属性；单 Gateway 下让每个 TUI 的 child 留在各自项目目录。
+# LLM: A promoted run_workspace task root outranks conversation cwd and manager fallback.
+# This preserves one owner/task boundary across main, child, grandchild, and one Gateway.
+# 函数用途: 生成子代理最终任务属性，让每个 TUI 的整棵代理树留在自己的任务目录。
 def _task_attrs_for_create(manager: Any, params: CreateRunParams) -> dict[str, object]:
     from ...conversation.authority import (
         conversation_execution_cwd,
@@ -647,15 +647,26 @@ def _task_attrs_for_create(manager: Any, params: CreateRunParams) -> dict[str, o
 
     attributes = dict(params.attributes or {})
     workspace_attrs = _manager_workspace_attrs(manager)
-    cwd = conversation_execution_cwd(attributes)
+    run_workspace = attributes.get("run_workspace")
+    task_root = (
+        str(run_workspace.get("task_root") or "").strip()
+        if isinstance(run_workspace, dict)
+        else ""
+    )
+    cwd = task_root or conversation_execution_cwd(attributes)
     if cwd:
         try:
             workspace_attrs["workspace_root"] = str(
                 Path(cwd).expanduser().resolve(strict=False)
             )
+            roots = (
+                (task_root,)
+                if task_root
+                else conversation_runtime_workspace_roots(attributes)
+            )
             workspace_attrs["workspace_roots"] = [
                 str(Path(item).expanduser().resolve(strict=False))
-                for item in conversation_runtime_workspace_roots(attributes)
+                for item in roots
             ]
         except OSError:
             pass

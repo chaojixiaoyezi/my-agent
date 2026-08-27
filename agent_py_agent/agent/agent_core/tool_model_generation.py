@@ -441,13 +441,14 @@ def _forwarded_guidance_seen(params: object) -> set:
     return seen
 
 
-# LLM: 该收尾完成 chunk/filter、模型账本和 trace；仅把 provider 明确标注的 thinking 块交给可选 rich sink，绝不公开签名/redacted 块或从正文推断思考。
-# 函数用途: 统一收尾一次模型调用，把可折叠思考投给支持的 TUI，再将响应交回工具循环。
+# LLM: Provider full-thinking must be published before the chunk filter flushes assistant text;
+# otherwise a non-streaming thinking block appears after its answer and breaks transcript order.
+# 函数用途: 先收口一次模型调用的显式思考，再刷新正文、账本与 trace。
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
-    state.chunk_filter.finish()
     response = _recover_unclosed_long_write_response(request, response)
-    record_model_call_finished(state.ledger, state.call_id, response)
     _publish_provider_thinking(request, state, response)
+    state.chunk_filter.finish()
+    record_model_call_finished(state.ledger, state.call_id, response)
     trace_runner_model_response_received(
         RunnerModelStageTraceRequest(
             agent=request.agent,

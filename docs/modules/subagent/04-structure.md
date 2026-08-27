@@ -735,3 +735,13 @@ End。selection 与最近渲染行不跨 store 保留，避免复制到另一代
 隔离。单调整数 cursor、原子追加、条数/字节裁剪用于跨进程增量展示；该流允许丢失或裁剪，不能替代 run、
 attempt、Compact generation、权限和交付事实。`Esc` 只发停止当前代理，`Ctrl+G` 只弹出前端 view stack，
 这两个动作不能在任何层共享副作用。
+
+## Canonical task workspace and assistant parts
+
+父会话首个 `promotes_task` 动作后，`run_workspace.task_root` 是整棵代理树唯一默认 cwd。创建策略、写根预检、
+runner task attrs、相对 `output_files` 和孙代理继承都先读该 root；只有尚未晋升时才读 Gateway 校验过的
+thread/client cwd。child 不能从 goal、绝对路径或 manager daemon root 扩大/更换这个范围。
+
+每个 child provider turn 可产生 `commentary:1..N` 与一个 `final` assistant part。part id 由宿主按真实工具
+边界生成并参与幂等键；commentary 保留完整用户可见正文，final 承载 terminal tool fold 与运行终态 metadata。
+历史投影保留全部 part，但轮次预览只把 final 当终答，不能把过程消息误当成第二个任务或完成事实。

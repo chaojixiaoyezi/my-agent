@@ -25,7 +25,6 @@ TOOL_INT_FIELDS = (
     ("chat_history_assistant_preview_chars", 0, None),
     ("conversation_history_max_turns", 1, None),
     ("conversation_history_max_chars", 1000, None),
-    ("conversation_history_message_max_chars", 1000, None),
     ("conversation_terminal_tool_fold_max_chars", 1000, 48_000),
     ("chat_transcript_max_chars", 1000, None),
     ("chat_collapse_preview_lines", 0, None),

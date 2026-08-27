@@ -34,6 +34,18 @@
 - [x] 主代理 `compact N` 只读成功提交的 `ConversationThread.compact_generation`，子代理读自己的 canonical
   generation；进度百分比、屏幕历史和模型正文不计数。128k 窗口、90% 压缩点下，68k（53%）显示
   `compact 0` 正常；95 项 Compact/TUI 组合回归通过。
+- [ ] 同一 request 的工具前后 commentary 以 `assistant_part_id=commentary:N` 完整落账，final 使用
+  `assistant_part_id=final`；恢复/配对不重复、不丢段，长报告无需 `Ctrl+O` 即可直接看到。多次模型调用的
+  thinking 各自按时间顺序封口，空首块消失，终态不留 spinner；滚轮每格只移动一行。完整相关 focused
+  与本地严格 gate 已通过，仍须 `.7` fresh MiniMax-M2.7 TUI 复验。
+- [ ] 普通 user/assistant 历史不得按固定字符数裁剪；预算回收只移除最老的完整消息，真正旧前缀替换只由
+  Conversation Compact 执行。provider ledger 应持续记录 cache-read。价格样本在缓存价 0.1/1 时分别为
+  `1,811,699.1`/`2,023,236`，不得用屏幕 Context 猜缓存命中。
+- [ ] 任务晋升后 main/child/grandchild 的默认 cwd、产品写根和相对 output ref 全部落同一
+  `<owner_home>/tasks/<task_path>/`；不得继承 daemon `/root`、客户端临时 cwd 或另造 child 家目录。
+- [ ] `process_session(network_status)` 只读 exact managed process tree listener 和主机防火墙显式规则；
+  non-loopback 监听仍显示外部探针必需。`.7` 真机必须由 Mac 实际请求验证，失败时 Agent 不得声称局域网可达，
+  测试者不得旁路改防火墙。
 
 - [ ] 长 main/child 遇到异常链中的 typed `socket.gaierror` 时，普通 JSON 与流式 provider 请求都先按
   2/5/15 秒有界退避，耗尽后保持 transient 供模型轮恢复；不得因一次 DNS 抖动终止数小时任务，也不得把
@@ -52,7 +64,7 @@
   或字符阈值合批，完整终态仍恢复全部正文。47 项 focused 已通过，待 `.7` 唯一 Gateway 与同一长 session
   普通追加轮证明 TUI 不再数分钟停在旧工具后一次性追赶。
 - [x] `run_command(run_in_background=true)` 返回的 session 必须能由同一用户会话通过
-  `process_session list/status/wait/stop` 管理；wait 不派生 shell sleep，另一 TUI/owner 即使猜到 id 也看不到
+  `process_session list/status/wait/network_status/stop` 管理；wait 不派生 shell sleep，另一 TUI/owner 即使猜到 id 也看不到
   日志、不能停止。默认 coding role、动态 capability grant 和旧任务恢复也必须自动补齐该依赖，owner 显式
   禁用仍优先。后台命令必须归 conversation session，不归 one-shot child runner；原 runner 退出后 detached
   host 继续持有 bwrap，受保护记录按 scope/store/PID 出生指纹水合，终态不回退。50 项 shell/process 与

@@ -1349,6 +1349,8 @@ class ShellTool(BaseTool):
                 "命令已在后台运行。用 process_session 的 status/wait/list/stop 动作管理；"
                 "需要结果时用 wait 有界等待，不要运行 sleep 轮询。"
                 "也可以用 read_file 读取 output_file 的完整日志。"
+                "如果这是网络服务，用 process_session network_status 核对监听和防火墙；"
+                "本机成功不能证明局域网可达。"
             ),
         }
         return ToolHandlerOutcome(

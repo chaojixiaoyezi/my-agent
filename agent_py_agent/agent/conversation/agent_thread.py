@@ -152,10 +152,9 @@ def prepare_subagent_thread_turn(
     )
 
 
-# LLM: Only the terminal result of one concrete attempt becomes assistant transcript. Typed
-# runtime/operation facts and one immutable terminal tool fold remain metadata; retries reuse the
-# same dedupe identity and later turns consume the fold without copying raw provider pairs.
-# 函数用途: 子代理一轮结束后幂等保存正文与工具终态折叠，供下一轮续接或真正 Compact 使用。
+# LLM: Tool-boundary-confirmed assistant parts and the terminal result are persisted in exact
+# order with distinct typed dedupe identities. Runtime facts/tool fold stay only on the final.
+# 函数用途: 子代理一轮结束后先保存完整过程回复，再保存最终正文与工具折叠供续接/Compact。
 def append_subagent_thread_result(
     agent: object,
     task: object,
@@ -167,9 +166,17 @@ def append_subagent_thread_result(
     thread = ensure_subagent_thread(manager, task)
     if thread is None:
         raise RuntimeError("subagent ConversationStore is unavailable")
+    _append_subagent_thread_commentaries(
+        agent,
+        task,
+        thread_id=thread.thread_id,
+        attempt_id=attempt_id,
+        values=getattr(result, "assistant_commentary_messages", None),
+    )
     metadata = _agent_turn_metadata(task, attempt_id)
     metadata.update(
         {
+            "assistant_part_id": "final",
             "runtime_status": str(
                 getattr(result, "runtime_status", "ok") or "ok"
             ).strip(),
@@ -197,6 +204,46 @@ def append_subagent_thread_result(
         },
         dedupe_key=_agent_message_dedupe_key(task, attempt_id, "assistant"),
     )
+
+
+# LLM: Commentary append uses the same child thread and exact attempt but separate host-authored
+# part identities. It never attaches terminal operation/tool-fold metadata to process prose.
+# 函数用途: 按顺序幂等保存子代理工具边界前的完整过程回复。
+def _append_subagent_thread_commentaries(
+    agent: object,
+    task: object,
+    *,
+    thread_id: str,
+    attempt_id: str,
+    values: object,
+) -> None:
+    if not isinstance(values, (list, tuple)):
+        return
+    for index, content in enumerate(values, start=1):
+        text = str(content or "").strip()
+        if not text:
+            continue
+        commentary_metadata = _agent_turn_metadata(task, attempt_id)
+        commentary_metadata.update(
+            {
+                "assistant_part_id": f"commentary:{index}",
+                "process": True,
+            }
+        )
+        agent.conversation_store.append_message_once(
+            {
+                "thread_id": thread_id,
+                "role": "assistant",
+                "content": text,
+                "channel": _AGENT_THREAD_CHANNEL,
+                "metadata": commentary_metadata,
+            },
+            dedupe_key=_agent_message_dedupe_key(
+                task,
+                attempt_id,
+                f"assistant-commentary-{index}",
+            ),
+        )
 
 
 # LLM: Project cwd is inherited from structured manager/task workspace facts. Internal agent
@@ -315,19 +362,15 @@ def _render_agent_thread_context(
     return "\n".join(lines)
 
 
-# LLM: Completed tail order is preserved while oldest rows are dropped to fit the shared
-# conversation token-derived display budget. No lifecycle or resume decision uses this clipping.
-# 函数用途: 按会话配置限制单条和总历史大小，优先保留最近完成的子代理轮次。
+# LLM: Completed tail order and message bodies remain immutable until explicit Compact. Only
+# complete oldest rows may be dropped from this legacy rendering bound; no row is clipped.
+# 函数用途: 按总历史预算保留最近完整的子代理轮次，预算不足时整条淘汰旧消息。
 def _bounded_agent_history(
     agent: object,
     rows: list[MessageLogEntry],
     trigger_tokens: int,
 ) -> tuple[MessageLogEntry, ...]:
     config = getattr(agent, "config", None)
-    per_message = max(
-        1000,
-        int(getattr(config, "conversation_history_message_max_chars", 12_000) or 12_000),
-    )
     configured_total = max(
         1000,
         int(getattr(config, "conversation_history_max_chars", 48_000) or 48_000),
@@ -344,12 +387,8 @@ def _bounded_agent_history(
             if row.role == "assistant"
             else str(row.content or "")
         )
-        content = _clip_middle(content, per_message)
-        remaining = total_limit - used
-        if remaining <= 0:
+        if selected and used + len(content) > total_limit:
             break
-        if len(content) > remaining:
-            content = _clip_middle(content, remaining)
         selected.append(
             MessageLogEntry(
                 message_id=row.message_id,
@@ -369,21 +408,6 @@ def _bounded_agent_history(
         used += len(content)
     selected.reverse()
     return tuple(selected)
-
-
-# LLM: Middle clipping preserves both the instruction prefix and the newest outcome suffix.
-# 函数用途: 单条历史过长时保留首尾并明确标出省略部分。
-def _clip_middle(content: str, limit: int) -> str:
-    if len(content) <= limit:
-        return content
-    marker = "\n…[中间内容已折叠]…\n"
-    if limit <= len(marker) + 2:
-        return content[: max(0, limit)]
-    head = (limit - len(marker)) // 2
-    tail = limit - len(marker) - head
-    return f"{content[:head]}{marker}{content[-tail:]}"
-
-
 __all__ = [
     "AgentThreadTurnContext",
     "append_subagent_thread_result",

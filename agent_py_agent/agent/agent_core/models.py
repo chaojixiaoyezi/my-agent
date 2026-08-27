@@ -21,6 +21,8 @@ class AgentRunResult:
     # delivery additions.  Stream renderers use this typed boundary instead of
     # guessing from natural-language content.
     model_response: str = ""
+    # Tool-boundary-confirmed assistant parts that preceded the terminal response.
+    assistant_commentary_messages: list[str] | None = None
     tool_rounds: int = 0
     executed_tools: list[str] | None = None
     archive_tool_calls: list[dict[str, object]] | None = None

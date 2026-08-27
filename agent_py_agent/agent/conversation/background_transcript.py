@@ -188,6 +188,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         self._thinking_active = False
         self._thinking_delta_batcher = _ThinkingDeltaBatcher()
         self._model_text = ""
+        self._committed_commentary: list[str] = []
         self._tool_blocks: set[str] = set()
         self._retry_index = 0
         self._active_input_index = 0
@@ -207,15 +208,15 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     def complete_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
         _emit_active_input_consumed(self, client_message_ids)
 
-    # LLM: Candidate answer deltas stay private until a subsequent tool start
-    # proves that segment was process commentary rather than the committed final.
+    # LLM: Candidate answer deltas stay private until a subsequent tool start proves that
+    # segment was commentary. Provider output bounds already cap this text, so no second 12K
+    # clipping layer may silently remove a detailed report from durable history.
     # 函数用途: 暂存模型过程文字，等待真实工具边界后再显示。
     def write_model(self, text: str) -> None:
         value = str(text or "")
-        if not value or len(self._model_text) >= BACKGROUND_TRANSCRIPT_TEXT_LIMIT:
+        if not value:
             return
-        remaining = BACKGROUND_TRANSCRIPT_TEXT_LIMIT - len(self._model_text)
-        self._model_text += value[:remaining]
+        self._model_text += value
 
     # LLM: Provider thinking deltas are explicit public thinking, not hidden
     # reasoning. Each accepted piece is host-path-redacted and bounded before it
@@ -390,6 +391,12 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
             self.write_thinking(self._thinking_text)
         self._model_text = ""
 
+    # LLM: This immutable projection contains only segments promoted at real tool boundaries;
+    # callers persist it before the terminal response using typed assistant part ids.
+    # 函数用途: 返回本轮已经确认的过程回复，供主/子代理会话在下一轮继续看到完整上下文。
+    def assistant_commentary_messages(self) -> tuple[str, ...]:
+        return tuple(self._committed_commentary)
+
     # LLM: Failure follows the same display cleanup as finish. Runtime exception
     # classification and recovery remain in the background scheduler.
     # 函数用途: 后台轮失败时关闭临时思考并丢弃未确认的候选回复。
@@ -414,13 +421,14 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         )
 
     # LLM: Only a real tool-start boundary promotes tentative model text to a
-    # gray process block; this mirrors Gateway rich commentary and avoids final duplication.
-    # 函数用途: 把工具调用前的模型说明冻结成可折叠灰色过程消息。
+    # complete gray process block; this mirrors Gateway rich commentary and avoids final duplication.
+    # 函数用途: 把工具调用前的模型说明冻结成完整灰色过程消息并登记为正式 commentary。
     def _flush_model_commentary(self) -> None:
-        content = public_background_transcript_text(self._model_text)
+        content = public_background_transcript_text(self._model_text, limit=0)
         self._model_text = ""
         if not content:
             return
+        self._committed_commentary.append(content)
         self._assistant_index += 1
         self._event(
             "assistant_completed",
@@ -666,13 +674,15 @@ def read_background_transcript_events(
         }
 
 
-# LLM: Model-authored display text passes through the same user-reply projection
-# and host-path redaction as Gateway rich commentary before entering the ring.
-# 函数用途: 将完整思考或过程说明整理成有界、可公开展示的正文。
+# LLM: Model-authored text always passes through user projection and host-path redaction.
+# A positive limit bounds volatile thinking; zero preserves committed assistant prose intact.
+# 函数用途: 整理可公开正文；limit=0 时不做第二层字符裁剪。
 def public_background_transcript_text(value: object, *, limit: int = 12_000) -> str:
     projected = project_user_reply(str(value or "")).content
     content = redact_host_absolute_paths(projected).strip()
-    max_chars = max(1, int(limit or BACKGROUND_TRANSCRIPT_TEXT_LIMIT))
+    max_chars = max(0, int(limit))
+    if max_chars == 0:
+        return content
     if len(content) <= max_chars:
         return content
     keep_head = max_chars * 2 // 3

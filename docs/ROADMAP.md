@@ -19,7 +19,7 @@
 
 ### 主/子代理验证结论与受管后台动作边界
 
-状态：`c8a01f7` 第七层已部署并证明 capability grant 不能代替批准；第八候选 179 项 focused 通过，待严格 gate、部署和 child 真 TUI
+状态：既有 approval/session 主链已部署；`network_status` 只读候选已写入当前 worktree，待严格 gate、部署和独立客户端探针
 
 解决问题：真实超级玛丽任务中，模型把测试机本机 HTTP 200 和 `0.0.0.0` 监听错误说成另一台电脑已经能
 访问；即使用户明确要求“不能就说真实原因、不要把本机访问说成局域网访问”，后续模型仍重复误报。
@@ -37,6 +37,29 @@ grant 后经 `controlled_exec` 直接 Popen 同一服务。第七候选把 grant
 Gateway/TUI 只按显式 capability lease 领取；主代理与多个 child 共享一个 FIFO，决定经过现有 owner/root/
 current-attempt 门后唤醒原 ToolCall。无界面、断线、取消和损坏全部 fail closed。下一步必须在 `.7` 唯一
 Gateway 的 fresh MiniMax-M2.7 TUI 中证明：未批准前无副作用，面板标出 child，批准后同一调用原地成功。
+
+当前候选继续补齐“服务活着”和“用户能访问”之间的事实缺口：`process_session(network_status)` 只读取
+exact managed session 进程树持有的 Linux listener，并查询 firewalld 的显式端口规则；loopback、
+non-loopback、未显式放行和未知分别返回。任何结果都保留
+`unverified_external_probe_required`，不会改防火墙或把本机 HTTP 200 升级为局域网成功。部署后必须由 Mac
+对 `.7` 的目标端口真实请求，与 TUI 内投影对账；失败就是验收失败样本，不旁路开端口。
+
+### 长期会话完整正文、思考时序与 canonical task root
+
+状态：当前 worktree 已实现，完整相关 focused 与本地严格 gate 全绿；待推送、部署和 fresh 真 TUI
+
+解决问题：主/子代理工具前过程和最终长报告曾被活动块折叠，用户要按 `Ctrl+O` 才能看到；多次模型调用的
+thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消息还有固定 12K 裁剪，既可能丢长期 TUI/IM
+历史，又会改写 provider 缓存前缀。任务晋升后 child 还可能继承 daemon `/root` 或客户端 cwd，产物落错家。
+
+当前进展：每个 provider thinking 独立按时间顺序封口，空首块用 typed discard 删除；工具边界 commentary
+以 `assistant_part_id=commentary:N` 完整落账，final 用 `assistant_part_id=final`，长报告直接展示，滚轮一格
+一行。普通 user/assistant 不再按固定字符数截断，预算只从最老完整消息边界回收，真正 Compact 才替换旧
+前缀。按样本 `B=357,639/H=235,041`，普通价 5、缓存价 0.1/1 时成本分别为
+`1,811,699.1/2,023,236`，相对全不命中节省 38.86%/31.73%；破坏 100K 稳定前缀会额外花
+490K/400K。首个 `promotes_task` 动作后，main/child/grandchild 的 cwd 与写根统一切到
+`<owner_home>/tasks/<task_path>/`。下一步只用 `.7` 单 Gateway、MiniMax-M2.7 的 fresh tmux 验证完整历史、
+多模型块时序、连续任务缓存账和产物实际路径。
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 

@@ -265,6 +265,7 @@ class SimpleAgentRuntimeMixin:
             context_scope=str(getattr(rp, "context_scope", "default") or "default"),
             active_turn_user_inputs=list(params.active_turn_user_inputs or []),
             tool_runtime_evidence=dict(params.tool_runtime_evidence or {}),
+            on_chunk=rp.on_chunk,
         )
 
     # LLM: Programmatic/admin remember must traverse the same Candidate and Promotion services as

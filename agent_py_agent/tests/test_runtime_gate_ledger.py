@@ -437,10 +437,10 @@ def test_write_boundary_carries_current_task_workspace_roots(tmp_path):
     assert boundary["allowed_write_roots"] == [str(task_root / "work"), str(task_root / "output")]
 
 
-# LLM: A promoted local Gateway task must retain the same project cwd used by
-# its foreground turn; task work/output directories cannot replace that grant.
-# 函数用途: 复现主代理后台整合时写项目文件被拒绝的问题，验证 cwd 和写权限保持一致。
-def test_local_main_conversation_keeps_project_cwd_writable_after_promotion(tmp_path):
+# LLM: A promoted local Gateway task replaces the daemon/client cwd with the canonical owner
+# task root. Work/output remain exact subroots while the task root permits user-named directories.
+# 函数用途: 验证主代理与子代理晋升后都只能在同一个 owner/task 目录工作。
+def test_local_main_conversation_uses_task_root_after_promotion(tmp_path):
     service_cwd = tmp_path / "service"
     project_cwd = tmp_path / "project"
     task_root = tmp_path / "home" / "tasks" / "today" / "task"
@@ -467,12 +467,12 @@ def test_local_main_conversation_keeps_project_cwd_writable_after_promotion(tmp_
 
     boundary = write_boundary_with_runtime_ledger(agent, params)
 
-    assert boundary["execution_cwd"] == str(project_cwd.resolve())
-    assert boundary["execution_workspace_roots"] == [str(project_cwd.resolve())]
+    assert boundary["execution_cwd"] == str(task_root.resolve())
+    assert boundary["execution_workspace_roots"] == [str(task_root.resolve())]
     assert boundary["allowed_write_roots"] == [
         str(task_root / "work"),
         str(task_root / "output"),
-        str(project_cwd.resolve()),
+        str(task_root.resolve()),
     ]
 
 

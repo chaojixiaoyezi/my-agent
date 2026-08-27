@@ -13,6 +13,8 @@ from .authority import (
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
     CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR,
     CONVERSATION_CANCELLATION_SCOPE_ATTR,
+    CONVERSATION_EXECUTION_CWD_ATTR,
+    CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
     CONVERSATION_WORK_DURATION_ATTR,
@@ -353,10 +355,15 @@ def _remember_conversation_workspace(store: object, link: object) -> bool:
     )
 
 
+# LLM: First promotion rebases provider-generated paths from the trusted client cwd into the
+# canonical owner/task workspace. Later reselection rebases from the previous task root.
+# 函数用途: 切换本轮唯一任务目录，并登记已有工具参数需要从哪个旧根重定向。
 def _set_current_task_workspace(agent: object, attrs: dict[str, object], workspace: Path) -> None:
-    previous_workspace = _workspace_task_root(attrs.get("run_workspace")) or str(
-        getattr(agent, "_current_run_task_workspace", "") or ""
-    ).strip()
+    previous_workspace = (
+        _workspace_task_root(attrs.get("run_workspace"))
+        or str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
+        or str(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR) or "").strip()
+    )
     if previous_workspace and previous_workspace != str(workspace):
         attrs["conversation_rebase_from_task_root"] = previous_workspace
     attrs["run_workspace"] = {
@@ -364,6 +371,8 @@ def _set_current_task_workspace(agent: object, attrs: dict[str, object], workspa
         "output_dir": str(workspace / "output"),
         "work_dir": str(workspace / "work"),
     }
+    attrs[CONVERSATION_EXECUTION_CWD_ATTR] = str(workspace)
+    attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = [str(workspace)]
     # 一轮内后续工具仍持有同一个 agent；同步唯一当前工作区，确保派工、finding 与
     # 动态 write boundary 不会继续引用本轮刚创建的占位目录。
     agent._current_run_task_workspace = str(workspace)

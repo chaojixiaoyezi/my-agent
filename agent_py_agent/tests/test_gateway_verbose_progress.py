@@ -625,6 +625,37 @@ def test_model_deltas_flush_before_commentary_boundary(tmp_path) -> None:
     assert kinds.index("model_delta") < kinds.index("tool_progress")
 
 
+def test_full_thinking_precedes_pending_assistant_delta(tmp_path) -> None:
+    """非流式完整思考必须排在同次模型回复前，不能在正文后闪现。"""
+    path = tmp_path / "thinking-before-answer.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(
+        path,
+        rich_transcript=True,
+        flush_chars=10_000,
+        flush_interval_seconds=999,
+    )
+    writer.write_model("最终正文")
+    writer.write_thinking("先核对事实", duration_seconds=2.0)
+    writer.close()
+
+    kinds = [row["kind"] for row in _rows(path)]
+    assert kinds.index("assistant_thinking") < kinds.index("model_delta")
+
+
+def test_committed_commentary_is_not_clipped_by_display_limit(tmp_path) -> None:
+    """工具边界确认的过程回复属于会话正文，不能套用思考区 12K 展示上限。"""
+    path = tmp_path / "long-commentary.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True)
+    commentary = "阶段报告" + "甲" * 20_000 + "完整结尾"
+    writer.write_model(commentary)
+    writer.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "开始"},
+        "legacy",
+    )
+
+    assert writer.assistant_commentary_messages() == (commentary,)
+
+
 def test_model_deltas_are_redacted_and_steering_clears_pending(tmp_path) -> None:
     path = tmp_path / "request.chunks.jsonl"
     writer = BufferedChunkStreamWriter(path, rich_transcript=True, flush_chars=4)

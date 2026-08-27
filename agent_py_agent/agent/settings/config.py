@@ -534,7 +534,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     chat_history_assistant_preview_chars: int = 500
     conversation_history_max_turns: int = 20
     conversation_history_max_chars: int = 48_000
-    conversation_history_message_max_chars: int = 12_000
     conversation_terminal_tool_fold_enabled: bool = True
     conversation_terminal_tool_fold_max_chars: int = 6_000
     chat_transcript_max_chars: int = 500_000

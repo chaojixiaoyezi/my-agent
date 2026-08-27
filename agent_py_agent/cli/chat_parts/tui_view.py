@@ -485,10 +485,10 @@ class TuiTranscriptControl(UIControl):
     # 函数用途: 支持滚轮浏览、有起止边界的鼠标拖选，以及选中后右键直接复制。
     def mouse_handler(self, mouse_event: MouseEvent):
         if mouse_event.event_type == MouseEventType.SCROLL_UP:
-            self.move(-3)
+            self.move(-1)
             return None
         if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
-            self.move(3)
+            self.move(1)
             return None
         if _handle_transcript_right_copy(self, mouse_event):
             return None

@@ -838,6 +838,7 @@ class BackgroundMainAgentRuntime:
             delivery_artifacts,
             message_tool_deliveries,
             operation_verification,
+            assistant_commentaries,
         ) = self._run_agent(
             thread,
             request,
@@ -882,6 +883,7 @@ class BackgroundMainAgentRuntime:
                 response,
                 delivery_artifacts=delivery_artifacts,
                 operation_verification=operation_verification,
+                assistant_commentaries=assistant_commentaries,
                 deliver=deliver,
                 delivery_reason=delivery_reason,
                 route_supports_transcript=route_supports_transcript,
@@ -991,6 +993,7 @@ class BackgroundMainAgentRuntime:
         tuple[dict[str, object], ...],
         tuple[dict[str, object], ...],
         dict[str, object],
+        tuple[str, ...],
     ]:
         resolved_goal_context = goal_context or _goal_runtime_context(
             self.agent,
@@ -1022,6 +1025,11 @@ class BackgroundMainAgentRuntime:
             if isinstance(item, dict)
         )
         operation_verification = _public_result_operation_verification(result)
+        assistant_commentaries = tuple(
+            text
+            for value in (getattr(result, "assistant_commentary_messages", None) or ())
+            if (text := str(value or "").strip())
+        )
         return (
             str(getattr(result, "response", "") or ""),
             len(calls),
@@ -1030,6 +1038,7 @@ class BackgroundMainAgentRuntime:
             artifacts,
             deliveries,
             operation_verification,
+            assistant_commentaries,
         )
 
     def _record_response(
@@ -1040,6 +1049,7 @@ class BackgroundMainAgentRuntime:
         *,
         delivery_artifacts: tuple[dict[str, object], ...] = (),
         operation_verification: dict[str, object] | None = None,
+        assistant_commentaries: tuple[str, ...] = (),
         deliver: bool,
         delivery_reason: str,
         route_supports_transcript: bool | None = None,
@@ -1126,6 +1136,7 @@ class BackgroundMainAgentRuntime:
             transcript_record=transcript_record,
             evidence_refs=evidence_refs,
             message_metadata=message_metadata,
+            assistant_commentaries=assistant_commentaries,
         )
         return committed_content, delivery_status
 
@@ -1230,19 +1241,42 @@ def _commit_background_response(
     transcript_record: bool,
     evidence_refs: tuple[str, ...],
     message_metadata: dict[str, object],
+    assistant_commentaries: tuple[str, ...] = (),
 ) -> None:
     """Persist only a provider-committed or authoritative local delivery."""
 
     if delivery_status != "sent" and not transcript_record:
         return
+    delivery_key = _background_delivery_idempotency_key(request)
+    for index, commentary in enumerate(assistant_commentaries, start=1):
+        text = str(commentary or "").strip()
+        if not text:
+            continue
+        commentary_request = {
+            "thread_id": request.thread_id,
+            "role": "assistant",
+            "content": text,
+            "channel": delivery_context.channel,
+            "metadata": {
+                **message_metadata,
+                "assistant_part_id": f"commentary:{index}",
+                "process": True,
+            },
+        }
+        if delivery_key:
+            runtime.store.append_message_once(
+                commentary_request,
+                dedupe_key=f"owner_delivery:{delivery_key}:commentary:{index}",
+            )
+        else:
+            runtime.store.append_message(commentary_request)
     message_request = {
         "thread_id": request.thread_id,
         "role": "assistant",
         "content": committed_content,
         "channel": delivery_context.channel,
-        "metadata": message_metadata,
+        "metadata": {**message_metadata, "assistant_part_id": "final"},
     }
-    delivery_key = _background_delivery_idempotency_key(request)
     if delivery_key:
         message_entry = runtime.store.append_message_once(
             message_request,
@@ -2483,16 +2517,20 @@ def _background_task_attributes(
     return attributes or None
 
 
-# LLM: A background wake is a new active turn of the same conversation. Copy the
-# exact Gateway-validated thread cwd/root snapshot into that turn, matching 会话运行时
-# TurnContext inheritance; hidden task storage and daemon cwd must never replace it.
-# 函数用途: 让子代理完成后的自动续跑仍在用户启动 TUI 时的项目目录工作，并让后续派工继承同一目录。
+# LLM: Thread cwd seeds only taskless/pre-promotion turns. An exact task link has already
+# installed the canonical task root and must never be overwritten by the older client snapshot.
+# 函数用途: 无任务后台轮继承可信启动目录；已有任务的自动续跑保留唯一 owner/task 目录。
 def _apply_background_thread_workspace_attributes(
     attributes: dict[str, object],
     *,
     thread: ConversationThread | None,
 ) -> None:
     if thread is None or not str(attributes.get("conversation_thread_id") or "").strip():
+        return
+    run_workspace = attributes.get("run_workspace")
+    if isinstance(run_workspace, dict) and str(
+        run_workspace.get("task_root") or ""
+    ).strip():
         return
     cwd = str(getattr(thread, "cwd", "") or "").strip()
     if not cwd:
@@ -2520,6 +2558,9 @@ def _sampled_or_current_subagent_phase(
     return phase
 
 
+# LLM: An exact durable task link reconstructs the same canonical cwd used by foreground
+# promotion. Thread/client cwd is pre-task context only and cannot outrank the selected task.
+# 函数用途: 把后台唤醒绑定到原任务目录、标题和运行属性，供工具、子代理和恢复共用。
 def _apply_background_task_link_attributes(
     attributes: dict[str, object],
     *,
@@ -2540,11 +2581,15 @@ def _apply_background_task_link_attributes(
     if task_path:
         root = Path(task_path).expanduser().resolve(strict=False)
         if root.exists():
+            # 持久后台轮从 exact task link 重建与前台晋升相同的唯一 cwd；
+            # 旧 thread client cwd 只用于任务开始前，不能在 wake 时重新取得优先级。
             attributes["run_workspace"] = {
                 "task_root": str(root),
                 "output_dir": str(root / "output"),
                 "work_dir": str(root / "work"),
             }
+            attributes[CONVERSATION_EXECUTION_CWD_ATTR] = str(root)
+            attributes[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = [str(root)]
     for field, attr_name in (
         ("work_kind", "conversation_work_kind"),
         ("work_name", "conversation_work_name"),

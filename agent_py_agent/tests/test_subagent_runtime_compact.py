@@ -93,8 +93,10 @@ class _WriteThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
     def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.model_prompts.append(prompt)
         if len(self.model_prompts) == 1:
+            if on_chunk is not None:
+                on_chunk("我先写入子代理负责的文件。")
             return ModelResponse(
-                text="",
+                text="我先写入子代理负责的文件。",
                 backend=self.name,
                 tool_use_blocks=[
                     {
@@ -234,7 +236,12 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
     assert parent_link is not None
     assert parent_link.thread_id == parent_thread.thread_id
     assert child_thread is not None
-    assert [row.role for row in child_rows] == ["user", "assistant"]
+    assert [row.role for row in child_rows] == ["user", "assistant", "assistant"]
+    assert [row.metadata.get("assistant_part_id") for row in child_rows[1:]] == [
+        "commentary:1",
+        "final",
+    ]
+    assert child_rows[1].content == "我先写入子代理负责的文件。"
     assert child_rows[-1].metadata["terminal_tool_fold"]["tool_call_count"] == 1
 
     followup = prepare_subagent_thread_turn(
@@ -246,6 +253,7 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
 
     assert followup.compact_generation == 0
     assert "conversation-terminal-tool-fold" in followup.injection
+    assert "我先写入子代理负责的文件。" in followup.injection
     assert "write_file" in followup.injection
     assert "call-child-write-1" in followup.injection
 

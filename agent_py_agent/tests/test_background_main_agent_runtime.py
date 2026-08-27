@@ -49,7 +49,7 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     }
 
 
-def test_background_auto_continuation_keeps_gateway_thread_project_cwd(tmp_path) -> None:
+def test_background_auto_continuation_uses_canonical_task_root(tmp_path) -> None:
     from agent_py_agent.agent.agent_core.orchestration.create_policy import (
         _primary_workspace_root,
     )
@@ -102,17 +102,15 @@ def test_background_auto_continuation_keeps_gateway_thread_project_cwd(tmp_path)
         thread=persisted_thread,
     )
 
-    assert params.task_attributes[CONVERSATION_EXECUTION_CWD_ATTR] == str(
-        project_root.resolve()
-    )
+    assert params.task_attributes[CONVERSATION_EXECUTION_CWD_ATTR] == str(task_root.resolve())
     assert params.task_attributes[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [
-        str(project_root.resolve())
+        str(task_root.resolve())
     ]
     boundary = write_boundary_with_runtime_ledger(agent, params)
-    assert boundary["execution_cwd"] == str(project_root.resolve())
+    assert boundary["execution_cwd"] == str(task_root.resolve())
     agent._current_run_params = params
     try:
-        assert _primary_workspace_root(agent) == project_root.resolve()
+        assert _primary_workspace_root(agent) == task_root.resolve()
     finally:
         delattr(agent, "_current_run_params")
 
@@ -632,6 +630,48 @@ def test_background_response_persists_public_operation_verification(tmp_path) ->
     assert "private-operation" not in serialized
 
 
+def test_background_response_persists_commentary_before_final(tmp_path) -> None:
+    """后台主代理的工具边界过程回复与 final 按 typed part 顺序进入同一会话。"""
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-parts",
+            "channel": "internal",
+            "channel_conversation_id": "thread-parts",
+            "channel_user_id": "user-parts",
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+
+    runtime._record_response(
+        BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            reason="scheduled_progress_report",
+        ),
+        DeliveryContext(
+            channel="internal",
+            target="thread-parts",
+            thread_id=thread.thread_id,
+        ),
+        "最终报告",
+        assistant_commentaries=("先读代码", "再核对测试"),
+        deliver=True,
+        delivery_reason="scheduled_progress_report",
+    )
+
+    rows = store.recent_messages(thread.thread_id, limit=0)
+    assert [row.content for row in rows] == ["先读代码", "再核对测试", "最终报告"]
+    assert [row.metadata.get("assistant_part_id") for row in rows] == [
+        "commentary:1",
+        "commentary:2",
+        "final",
+    ]
+
+
 def test_internal_audit_report_commits_source_refs_after_transcript_append(
     tmp_path,
     monkeypatch,
@@ -796,6 +836,7 @@ def test_internal_audit_finding_run_uses_transcript_fallback_and_handles_wake(
             (),
             (),
             {},
+            (),
         ),
     )
     recorded: list[tuple[tuple[str, ...], str, str]] = []
@@ -900,6 +941,7 @@ def test_chat_audit_finding_commits_to_transcript_and_handles_wake(
             (),
             (),
             {},
+            (),
         ),
     )
     recorded: list[tuple[tuple[str, ...], str, str]] = []
@@ -988,6 +1030,7 @@ def test_chat_transcript_persists_delivery_service_redaction(
             (),
             (),
             {},
+            (),
         ),
     )
     monkeypatch.setattr(
@@ -1077,7 +1120,7 @@ def test_internal_audit_finding_empty_reply_remains_retryable(
     monkeypatch.setattr(
         runtime,
         "_run_agent",
-        lambda *_args, **_kwargs: ("", 0, 0, 0, (), (), {}),
+        lambda *_args, **_kwargs: ("", 0, 0, 0, (), (), {}, ()),
     )
 
     report = runtime.run_once(
@@ -2905,6 +2948,7 @@ def test_audit_finding_message_tool_delivery_is_mirrored_once_with_evidence(
                 },
             ),
             {},
+            (),
         ),
     )
     sent = runtime.run_once(request)
@@ -2969,6 +3013,7 @@ def test_audit_finding_without_message_tool_delivery_stays_internal_and_retryabl
             (),
             (),
             {},
+            (),
         ),
     )
 

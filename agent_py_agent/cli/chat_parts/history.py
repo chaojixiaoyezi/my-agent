@@ -108,8 +108,9 @@ def _load_thin_gateway_chat_history(
     )
 
 
-# LLM: 配对只接受 cli_chat 行、显式 gateway_request_id 和 user→assistant 角色；背景投递、残缺轮和未知角色不进入前台恢复历史。
-# 函数用途: 将按时间排列的消息账本行整理成完整问答回合。
+# LLM: Paired preview selects only assistant_part_id=final (legacy missing means final).
+# Commentary remains in the full transcript/context but cannot replace the terminal turn preview.
+# 函数用途: 将按时间排列的消息账本整理成最终问答预览，不让过程回复顶掉最终回复。
 def _paired_gateway_chat_turns(
     rows: list[object],
     *,
@@ -139,7 +140,11 @@ def _paired_gateway_chat_turns(
             if request_id not in user_by_request:
                 request_order.append(request_id)
             user_by_request[request_id] = content
-        elif role == "assistant" and request_id in user_by_request:
+        elif (
+            role == "assistant"
+            and request_id in user_by_request
+            and str(metadata.get("assistant_part_id") or "final") == "final"
+        ):
             assistant_by_request[request_id] = content
     complete = tuple(
         (user_by_request[request_id], assistant_by_request[request_id])

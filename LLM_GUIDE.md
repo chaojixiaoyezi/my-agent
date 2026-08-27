@@ -22,9 +22,11 @@
 ## 2026-08-23 当前运行基线
 
 - 普通工具的 `workspace:*` 只是当前 turn 调度/审计事实，不进入跨 run 持久
-  `resource_locks`；父子代理可共享 cwd 和交付路径。operation 幂等/replay、精确
-  `logical:*` 互斥、active turn、owner 墙、write boundary 和沙箱仍保留。本地可信
-  CLI/TUI 使用启动 cwd；远程用户仍强制进入各自 `owner_home`，两者不得混同。
+  `resource_locks`；父子代理共享同一 canonical task root 和交付路径。operation 幂等/replay、精确
+  `logical:*` 互斥、active turn、owner 墙、write boundary 和沙箱仍保留。任务晋升前，本地可信 CLI/TUI
+  可以使用经 Gateway 校验的启动 cwd；首个工作动作晋升任务后，main、child、grandchild 的默认 cwd
+  统一切到 `<owner_home>/tasks/<task_path>/`。远程用户始终只在各自 owner home 下，任何代理都不得继承
+  单 Gateway daemon 的 `/root`。
 - 模型成本统计复用唯一 `ModelCallLedger`，按 request/run 累计 provider input/output/
   cache-read/cache-creation，明细裁剪不截断总账。无 provider usage 时按结构化估算
   单独计数。TUI `ctx` 只表示当前上下文压力，不得当成任务累计消耗。
@@ -160,9 +162,20 @@
   provider-visible Context 快照；下一次真实模型调用再刷新精确数字，不能继续显示旧 `compact 0`，也不能
   为刷新界面额外调用模型或从成功文案反解析代数。TUI 启动、恢复或空闲轮询时，即使当前没有 Working 块，
   也必须消费 activity snapshot 中的 canonical generation；同一 session 的代数只能单调增加，迟到旧帧不能回退。
+- 工具边界前后的 assistant commentary 是正式用户可见消息：同一 request 用
+  `assistant_part_id=commentary:N` 逐段完整落账，最终回复用 `assistant_part_id=final`。历史预览只把 final
+  配成该轮答复，但不能把 commentary 隐藏到 `Ctrl+O` 或按固定字符数裁掉；普通历史仅允许按最老的完整消息
+  边界收缩投影，真正旧前缀替换只发生在 Compact。工具原始大输出继续走 reducer/archive。
+- 缓存成本只按 provider ledger 核算。缓存创建没有独立单价时按普通输入 5；样本
+  `B=357,639`（普通输入+缓存创建）、`H=235,041`（缓存命中）时，缓存价 0.1/1 的总成本分别为
+  `1,811,699.1`/`2,023,236`，相对全部普通输入 `2,963,400` 节省约 38.86%/31.73%。任意改写
+  100,000 token 稳定前缀会额外损失 490,000/400,000 计价单位，所以普通轮 append-only 优先于小幅裁剪。
 - TUI transcript 的 follow/离尾状态属于每个 main/child 页面各自的 process-local viewport。提交有效消息、
   首次进入新页面或显式回到底部时，prompt_toolkit `Window.get_vertical_scroll` 必须把 control 的尾部锚点
   落到真实窗口；手动滚轮/PgUp 离尾后保持原阅读位置，不因后台输出或切换页面复用旧 Window scroll。
+- TUI thinking 按 provider 调用逐块保持时间顺序：有正文的活动块留在其真实位置，空 spinner 才固定在底部；
+  assistant 正文到达前先封口当前 thinking。多个模型调用不得覆盖上一块，空首块通过 typed discard 删除。
+  工具前 commentary 和最终长报告默认完整显示；`Ctrl+O` 只负责展开被折叠的工具细节。滚轮一格移动一行。
 
 ---
 

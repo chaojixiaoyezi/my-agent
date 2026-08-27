@@ -63,13 +63,52 @@ def test_direct_turn_stream_tool_and_final_keep_order_and_no_duplicate() -> None
         ("user", "hello", ""),
         ("assistant", "I will check.", ""),
         ("tool", "", "ok"),
-        ("thinking", "", ""),
         ("assistant", "Final", ""),
     ]
     assert snapshot.active_blocks == ()
     assert snapshot.status.phase == "idle"
     assert snapshot.status.context_tokens == 100
     assert snapshot.status.tool_rounds == 1
+
+
+def test_multiple_provider_thinking_blocks_keep_chronological_order() -> None:
+    """每次 provider 调用的思考都独立留在对应回复之前，不能被后一次覆盖。"""
+    runtime = TuiRuntime("session-multi-thinking")
+    turn = runtime.begin_turn("request-thinking")
+
+    turn.write_thinking_delta("先检查")
+    turn.write_model("准备读文件。")
+    turn.write_progress(
+        {"round": 1, "call_index": 1, "tool": "read_file", "phase": "started"}
+    )
+    turn.write_progress(
+        {
+            "round": 1,
+            "call_index": 1,
+            "tool": "read_file",
+            "phase": "finished",
+            "ok": True,
+            "output": "ok",
+        }
+    )
+    turn.write_thinking_delta("再整合")
+    turn.write_model("最终答案")
+    runtime.complete_turn(
+        "request-thinking",
+        TuiTurnSummary(response_text="最终答案", context_tokens=200, tool_rounds=1),
+    )
+
+    visible = [
+        (block.role, block.text)
+        for block in runtime.store.snapshot().stable_blocks
+    ]
+    assert visible == [
+        ("thinking", "先检查"),
+        ("assistant", "准备读文件。"),
+        ("tool", ""),
+        ("thinking", "再整合"),
+        ("assistant", "最终答案"),
+    ]
 
 
 def test_begin_turn_uses_canonical_generation_and_clears_previous_todo() -> None:
@@ -341,17 +380,14 @@ def test_turn_activity_survives_stream_and_tools_until_structured_terminal() -> 
 
     turn.write_model("你好abc")
     streaming = runtime.store.snapshot()
-    assert {block.role for block in streaming.active_blocks} == {
-        "assistant",
-        "thinking",
-    }
+    assert {block.role for block in streaming.active_blocks} == {"assistant"}
     assert streaming.status.output_tokens >= 3
 
     turn.write_progress(
         {"round": 1, "call_index": 1, "tool": "run_command", "phase": "started"}
     )
     using_tool = runtime.store.snapshot()
-    assert {block.role for block in using_tool.active_blocks} == {"thinking", "tool"}
+    assert {block.role for block in using_tool.active_blocks} == {"tool"}
 
     turn.write_progress(
         {
@@ -362,9 +398,7 @@ def test_turn_activity_survives_stream_and_tools_until_structured_terminal() -> 
             "ok": True,
         }
     )
-    assert [block.role for block in runtime.store.snapshot().active_blocks] == [
-        "thinking"
-    ]
+    assert runtime.store.snapshot().active_blocks == ()
 
     runtime.complete_turn(
         "request-activity",

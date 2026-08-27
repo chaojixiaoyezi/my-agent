@@ -1342,12 +1342,11 @@ def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path,
     ]
 
 
-def test_gateway_model_history_keeps_long_message_tail_instead_of_ui_preview(tmp_path):
+def test_gateway_model_history_keeps_complete_long_message_until_compact(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
-            conversation_history_message_max_chars=1200,
             conversation_history_max_chars=5000,
         ),
         tmp_path,
@@ -1372,9 +1371,49 @@ def test_gateway_model_history_keeps_long_message_tail_instead_of_ui_preview(tmp
 
     followup = _conversation_context(agent, request, "gw-long-2", "产物在哪？")
     history_text = "\n".join(content for _role, content in followup.history)
-    assert "中间内容已折叠" in history_text
+    assert "中间内容已折叠" not in history_text
+    assert "中间" * 2000 in history_text
     assert "/output/final-report.md" in history_text
     assert "暗号是青黛" in history_text
+
+
+def test_gateway_history_keeps_typed_commentary_and_final_from_same_request(tmp_path):
+    """同一请求的过程回复与最终回复使用 part id 去重，并按顺序进入后续上下文。"""
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "cli",
+            "channel_conversation_id": "cli-assistant-parts",
+            "channel_user_id": "local-user",
+            "canonical_user_id": "local-user",
+        }
+    }
+    current = _conversation_context(agent, request, "gw-parts-1", "开始")
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "cli"}},
+        current,
+        request_id="gw-parts-1",
+        role="assistant",
+        content="我先检查已有实现。",
+        assistant_part_id="commentary:1",
+    )
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "cli"}},
+        current,
+        request_id="gw-parts-1",
+        role="assistant",
+        content="检查完成，结果如下。",
+        assistant_part_id="final",
+    )
+
+    followup = _conversation_context(agent, request, "gw-parts-2", "继续")
+    assistant_rows = [content for role, content in followup.history if role == "assistant"]
+    assert assistant_rows == ["我先检查已有实现。", "检查完成，结果如下。"]
 
 
 def test_gateway_ordinary_history_excludes_detached_audit_deliveries(tmp_path):
@@ -3989,7 +4028,7 @@ def test_gateway_followup_subagent_lineage_uses_active_task_root(tmp_path):
     assert create_params.depth == 1
 
 
-def test_gateway_subagent_relative_outputs_use_validated_client_cwd(tmp_path):
+def test_gateway_subagent_relative_outputs_use_promoted_task_root(tmp_path):
     service_root = tmp_path / "service"
     client_root = tmp_path / "client-project"
     task_root = tmp_path / "home" / "task"
@@ -4032,11 +4071,11 @@ def test_gateway_subagent_relative_outputs_use_validated_client_cwd(tmp_path):
         delattr(agent, "_current_run_params")
 
     assert create_params.attributes["output_refs"] == [
-        str((client_root / "bbb" / "index.html").resolve())
+        str((task_root / "bbb" / "index.html").resolve())
     ]
 
 
-def test_gateway_subagent_inherits_validated_client_workspace_without_output_files(
+def test_gateway_subagent_inherits_promoted_task_workspace_without_output_files(
     tmp_path,
 ):
     service_root = tmp_path / "service"
@@ -4074,14 +4113,14 @@ def test_gateway_subagent_inherits_validated_client_workspace_without_output_fil
     finally:
         delattr(agent, "_current_run_params")
 
-    client_root_text = str(client_root.resolve())
-    assert create_params.extra_write_roots == [client_root_text]
-    assert task.attributes["workspace_root"] == client_root_text
-    assert task.attributes["workspace_roots"] == [client_root_text]
-    assert client_root_text in task.allowed_write_roots
-    assert context.context_bundle["workspace_refs"]["owner_workspace_dir"] == client_root_text
-    assert context.write_boundary["execution_cwd"] == client_root_text
-    assert client_root_text in context.write_boundary["allowed_write_roots"]
+    task_root_text = str(task_root.resolve())
+    assert create_params.extra_write_roots == [task_root_text]
+    assert task.attributes["workspace_root"] == task_root_text
+    assert task.attributes["workspace_roots"] == [task_root_text]
+    assert task_root_text in task.allowed_write_roots
+    assert context.context_bundle["workspace_refs"]["owner_workspace_dir"] == task_root_text
+    assert context.write_boundary["execution_cwd"] == task_root_text
+    assert task_root_text in context.write_boundary["allowed_write_roots"]
 
 
 def test_gateway_subagent_records_originating_conversation_request(tmp_path):

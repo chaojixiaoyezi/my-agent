@@ -25,6 +25,9 @@ python3 -m pytest \
   -q --tb=short
 ```
 
+上述完整相关 focused 已通过，保留 2 个既有 xfail；本轮净改动远低于 10,000 行，按项目约定未追加全仓
+pytest。全项目 Ruff、doc sync、strict code-size、diff 与 clean-package 门均通过。
+
 当前 179 项 focused 与严格 gate 全部通过，`d29caab` 已推送并部署 `.7` 唯一 Gateway。fresh
 `ma-evidence-r52-child-owner-approval-fresh` 已证明 child Yes、exact Yes always 与 No；面板显示 child，
 批准前无副作用，批准后原调用续跑。本轮生产/测试改动远低于 10,000 行，未跑全仓 pytest。
@@ -1414,9 +1417,10 @@ provider overflow 强制 Compact、上一代摘要合并、checkpoint-before-CAS
 `prompt + messages` 的首指令顺序时，fake 必须像 MiniMax 真机一样返回普通续写并让测试失败。还必须用
 已经绑定父 conversation task 的真实工作工具回归证明：child `agent_thread_id` 不覆盖继承的
 `conversation_thread_id`，父 task link 不变，child 写入成功且消息只进入 child thread；禁止只用不调用工具
-的 fake backend 掩盖 task-thread 重绑定冲突。另用 `output_files` 为空的 Gateway 会话回归证明：直接 child
-仍继承 host-validated client cwd/runtime roots，`owner_workspace_dir`、`execution_cwd`、产品写根和工具围栏
-全部指向当前 TUI 项目，不能退回单 Gateway 的 daemon 仓库。
+的 fake backend 掩盖 task-thread 重绑定冲突。另用 `output_files` 为空的 Gateway 会话回归证明：任务晋升前
+只把 host-validated client cwd 当启动上下文；晋升后 main 与直接 child 的 `owner_workspace_dir`、
+`execution_cwd`、产品写根和工具围栏全部指向同一个 owner-scoped canonical task root，不能退回单 Gateway
+的 daemon 仓库、客户端临时目录或另造 child 家目录。
 内部 child 状态路径的 shell 拒绝还必须覆盖两层：ShellTool 返回
 `WRONG_STATUS_SURFACE + effect_outcome=not_started`；经过 canonical authorized dispatch 后即使
 `handler_executed=true`，operation 仍归确定性 `failed` 而非 `unknown`。模型应收到原拒绝原因后换用
@@ -1611,3 +1615,41 @@ python3 -m pytest agent_py_agent/tests/test_tui_agent_navigation.py agent_py_age
 真机验收必须使用 `.7` 唯一 Gateway、MiniMax-M2.7 和已有历史累计超过八名 child 的 exact resume。启动前
 公开 tmux 名称；在 root 空输入状态连续按 `↓`，每次选中行必须可见，第九名出现后 `Enter` 进入的页面名称
 必须与该高亮行一致，再用 `Ctrl+G` 返回。测试者不得给模型补消息或修改被测任务产物。
+
+## 2026-08-26 思考/完整正文、缓存稳定前缀、canonical task root 与网络事实
+
+本轮 focused 必须覆盖：多次 provider thinking 块按时间顺序保留、空首块 typed discard、assistant 正文前
+封口 thinking；工具边界 commentary 与 final 用同一 request 的不同 `assistant_part_id` 完整落账，配对预览
+仍选择 final，长正文不按固定字符数截断；普通历史只按完整消息边界收缩。滚轮一次只移动一行。
+
+工作区回归必须证明首个 `promotes_task` 动作后 main、child 与相对 output ref 都指向 exact
+`<owner_home>/tasks/<task_path>/`，不继承 daemon `/root` 或客户端临时 cwd。后台服务回归必须证明
+`process_session(network_status)` 只返回 exact session 进程树的 listener，区分 loopback/non-loopback，
+主机防火墙缺少显式端口规则时不宣称局域网可达；外部探针仍是独立验收。
+
+推荐 focused 入口：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  agent_py_agent/tests/test_tui_view.py \
+  agent_py_agent/tests/test_tui_view_model.py \
+  agent_py_agent/tests/test_gateway_verbose_progress.py \
+  agent_py_agent/tests/test_gateway_chat_conversation_context.py \
+  agent_py_agent/tests/test_gateway_streaming.py \
+  agent_py_agent/tests/test_background_notice_display.py \
+  agent_py_agent/tests/test_conversation_agent_activity.py \
+  agent_py_agent/tests/test_process_sessions.py \
+  agent_py_agent/tests/test_runtime_gate_ledger.py \
+  agent_py_agent/tests/test_tool_round_execution.py \
+  -q --tb=short
+```
+
+成本验收使用 provider usage 的同一份样本：`B=357,639`、`H=235,041`。普通输入/缓存创建按 5、缓存命中
+按 0.1 时应为 `1,811,699.1`；缓存命中按 1 时应为 `2,023,236`；全部不命中为 `2,963,400`。
+该数学只证明价格影响，缓存是否命中仍须由 provider 的 cache-read 账本证明。
+
+真机仍只允许 `.7` 一个 Gateway、MiniMax-M2.7 和 fresh tmux。启动前先公开 tmux 名称和 attach 命令；
+测试者只通过普通中文 TUI prompt 驱动被测 Agent，不旁路补产物、改防火墙或执行任务。Mac 到测试机的真实
+HTTP 请求必须与 TUI 内 `network_status` 对账，本机监听成功但外部失败时最终报告必须保持未验证/不可达。

@@ -288,6 +288,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "thinking_started": self._handle_block_started,
             "thinking_delta": self._handle_block_delta,
             "thinking_completed": self._handle_block_completed,
+            "thinking_discarded": self._handle_block_discarded,
             "tool_input_started": self._handle_tool_input_started,
             "tool_input_progress": self._handle_tool_input_progress,
             "tool_input_completed": self._handle_tool_input_completed,
@@ -571,6 +572,16 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # 函数用途: 将 assistant/thinking 活动块原子冻结为稳定历史。
     def _handle_block_completed(self, event: TuiEvent) -> None:
         self._freeze_block(event, role=_role_for_kind(event.kind))
+
+    # LLM: discarded 仅删除同 identity 的空易失块；它不能删除稳定历史，也不能把
+    # 未知 block 当作成功，以免迟到事件抹掉已经可见的思考内容。
+    # 函数用途: 当模型没有提供显式思考时，移除初始等待动画而不留下空历史行。
+    def _handle_block_discarded(self, event: TuiEvent) -> None:
+        if event.block_id in self._stable_ids:
+            self.record_diagnostic("DISCARD_STABLE_BLOCK_REJECTED", event)
+            return
+        if self.active_blocks.pop(event.block_id, None) is None:
+            self.record_diagnostic("DISCARD_WITHOUT_ACTIVE_BLOCK", event)
 
     # LLM: tool_started 只使用结构化 tool/title/detail 字段，并先清同轮易失
     # 参数行；不解析 legacy 文本，也不把参数 ready 当工具开始。

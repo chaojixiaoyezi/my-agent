@@ -207,6 +207,12 @@ class BackgroundMainActivitySink:
         self._transcript.finish()
         self._publish("waiting", "等待后续事件")
 
+    # LLM: Background main finalization reads only the transcript sink's typed,
+    # tool-boundary-confirmed segments; scalar activity text is never promoted.
+    # 函数用途: 把后台主代理已经确认的过程回复交给会话持久化层。
+    def assistant_commentary_messages(self) -> tuple[str, ...]:
+        return self._transcript.assistant_commentary_messages()
+
     # LLM: Fail is a liveness hint only. The real exception/retry/task state is
     # still owned by the background runtime and structured lifecycle stores.
     # 函数用途: 后台主代理轮异常退出时让 main 行显示真实失败阶段。

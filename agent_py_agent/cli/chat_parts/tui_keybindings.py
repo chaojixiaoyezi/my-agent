@@ -292,8 +292,8 @@ def _register_scroll_bindings(
     )
     kb.add(keys.ControlHome, filter=scroll_active)(lambda e: _scroll_transcript_home(params))
     kb.add(keys.ControlEnd, filter=scroll_active)(lambda e: _scroll_transcript_end(params))
-    kb.add(keys.ScrollUp, filter=scroll_active)(lambda e: _scroll_transcript(params, -3))
-    kb.add(keys.ScrollDown, filter=scroll_active)(lambda e: _scroll_transcript(params, 3))
+    kb.add(keys.ScrollUp, filter=scroll_active)(lambda e: _scroll_transcript(params, -1))
+    kb.add(keys.ScrollDown, filter=scroll_active)(lambda e: _scroll_transcript(params, 1))
 
 
 # LLM: 全局 bindings 只接管已接通的 会话运行时/终端交互 映射；普通 Emacs 编辑键继续交给 TextArea 默认 key map。

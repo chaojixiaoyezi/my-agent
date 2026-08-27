@@ -170,6 +170,7 @@ agent_py_agent/
 |   |   |-- background_process_host.py # 脱离 one-shot runner 的后台命令托管、日志上限与退出事实
 |   |   |-- process_registry.py       # 受保护记录的进程缓存、水合、PID 身份核对与完整后代树终止
 |   |   |-- process_session_store.py  # owner 沙箱外的后台 session 权威记录、锁和单调终态
+|   |   |-- process_network_status.py # exact 受管进程树监听、防火墙显式规则与外部探针边界的只读投影
 |   |   |-- process_sessions.py       # owner+TUI 会话隔离的后台命令查询、等待与停止工具
 |   |   |-- shell.py                  # run_command、超时/中断与有界 pipe drain
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref

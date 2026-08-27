@@ -232,11 +232,10 @@ def _attach_task_workspace_roots(boundary: dict[str, object], params: object) ->
             boundary["allowed_write_roots"] = [work_dir, output_dir]
 
 
-# LLM: A local/admin conversation keeps one 会话运行时 project cwd before and
-# after task promotion. Hidden task work/output roots are additional runtime
-# storage, not a replacement permission boundary. Remote owner task walls and
-# transient Audit scopes run later and may deliberately narrow this grant.
-# 函数用途: 让本地主会话进入后台任务后仍能在启动时的项目目录继续读写，避免模型被迫绕到额外测试目录。
+# LLM: Before task promotion the host-validated client cwd is effective. After promotion the
+# canonical owner/task root replaces it for cwd and permissions; the daemon launch directory
+# must never remain an ambient write grant for main or children.
+# 函数用途: 普通聊天沿用启动目录；真正开始任务后把执行与读写范围收口到唯一任务目录。
 def _attach_main_conversation_execution_cwd(
     boundary: dict[str, object],
     agent: object,
@@ -256,7 +255,11 @@ def _attach_main_conversation_execution_cwd(
     ):
         return
     tools = getattr(agent, "tools", None)
-    project_cwd = _resolved_path(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR))
+    task_workspace = _run_workspace(params)
+    promoted_task_root = _resolved_path(task_workspace.get("task_root"))
+    project_cwd = promoted_task_root or _resolved_path(
+        attrs.get(CONVERSATION_EXECUTION_CWD_ATTR)
+    )
     if project_cwd is None:
         project_cwd = _resolved_path(getattr(tools, "workspace_root", None))
     if project_cwd is None:
@@ -267,7 +270,11 @@ def _attach_main_conversation_execution_cwd(
         return
     cwd_text = str(project_cwd)
     boundary["execution_cwd"] = cwd_text
-    requested_roots = _string_list(attrs.get(CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR))
+    requested_roots = (
+        []
+        if promoted_task_root is not None
+        else _string_list(attrs.get(CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR))
+    )
     execution_roots: list[str] = []
     for value in [cwd_text, *requested_roots]:
         root = _resolved_path(value)

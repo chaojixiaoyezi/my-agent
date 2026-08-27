@@ -44,6 +44,8 @@ class FinalizeContext:
     context_scope: str = "default"
     active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
     tool_runtime_evidence: dict[str, object] = field(default_factory=dict)
+    # Typed sink used only to retrieve tool-boundary-confirmed assistant parts.
+    on_chunk: object = None
 
 
 # LLM: ToolLoopExecuteParams 是工具调用的 run 级事实源；临时批准/拒绝只能由当前审批等待链追加，不能来自模型参数。

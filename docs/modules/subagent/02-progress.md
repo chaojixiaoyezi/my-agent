@@ -1586,3 +1586,12 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
   snapshot。218 项直接 focused 与严格 gate 通过并部署 `.7` 唯一 Gateway；原样 Prompt 2 的 tmux
   `ma-91a1c3d-child-full-r17` 已真实显示 child 完整 prompt、灰色 thinking/process、工具卡/代码，`Ctrl+O`
   未跳 root，`Ctrl+G` 才返回 main。三名 child 的事件文件均出现配对 tool started/completed。
+
+## 2026-08-26 子代理完整 commentary 与 canonical task root 候选
+
+- 工具边界前已确认的 child assistant 正文不再只存在于易失展示流：runner result 携带有序
+  `assistant_commentary_messages`，ConversationStore 用 `assistant_part_id=commentary:N` 在 final 前落账；final
+  独立标记，终态工具折叠只挂 final。后续 child turn 因此能看到完整过程与最终回复，不靠短 description。
+- 普通 child/grandchild 在父任务晋升后统一继承 `<owner_home>/tasks/<task_path>/`。旧的“继承客户端项目
+  cwd”只适用于任务晋升前启动上下文；不得继承 Gateway daemon `/root`，也不得另造 `child_outputs`。
+- 当前 child Compact/后台主代理 focused 已通过，仍待严格 gate 和 `.7` fresh MiniMax-M2.7 真 TUI 验证。

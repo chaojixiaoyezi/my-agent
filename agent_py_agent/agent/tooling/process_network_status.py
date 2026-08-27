@@ -1,0 +1,236 @@
+from __future__ import annotations
+
+"""Structured listener and host-firewall observations for managed processes."""
+
+# LLM: This module observes only host-owned process/socket/firewall facts for one already
+# authorized managed session. It never changes firewall rules and never declares remote reachability.
+# 模块用途: 查询受管后台服务监听在哪些地址、主机防火墙是否显式放行，并明确区分本机与局域网证据。
+
+import ipaddress
+import os
+import shutil
+import socket
+import subprocess
+from pathlib import Path
+from typing import Any
+
+NETWORK_STATUS_SCHEMA = "managed_process_network_status.v1"
+_LISTEN_STATE = "0A"
+_FIREWALL_TIMEOUT_SECONDS = 1.5
+
+
+# LLM: Remote reachability always needs an independent observer. Local listener and firewall
+# observations are additive evidence only and cannot be promoted into a successful LAN claim.
+# 函数用途: 为一条已授权后台会话生成结构化网络状态，不做任何配置修改。
+def managed_process_network_status(
+    record: object,
+    *,
+    requested_port: int = 0,
+) -> dict[str, Any]:
+    port = max(0, min(65_535, int(requested_port or 0)))
+    process_status = str(getattr(record, "status", "") or "unknown")
+    bindings, observation = _managed_listener_bindings(record, requested_port=port)
+    non_loopback = [row for row in bindings if row["scope"] == "non_loopback"]
+    if process_status != "running":
+        reachability = "process_not_running"
+    elif not bindings:
+        reachability = "not_listening"
+    elif not non_loopback:
+        reachability = "loopback_only"
+    else:
+        reachability = "unverified_external_probe_required"
+    return {
+        "schema": NETWORK_STATUS_SCHEMA,
+        "session_id": str(getattr(record, "session_id", "") or ""),
+        "process_status": process_status,
+        "requested_port": port,
+        "listener_observation": observation,
+        "listener_bindings": bindings,
+        "host_firewall": _host_firewall_observation(non_loopback),
+        "lan_reachability": reachability,
+        "external_probe_required": reachability == "unverified_external_probe_required",
+        "evidence_boundary": (
+            "监听 0.0.0.0、本机端口存在或本机请求成功都不等于局域网可达；"
+            "只有另一台目标机器的真实连接结果才能把 lan_reachability 改成已验证。"
+        ),
+    }
+
+
+# LLM: Linux /proc ownership is joined by socket inode across the exact managed process tree.
+# Unsupported platforms return an explicit observation state instead of guessing from command text.
+# 函数用途: 找出当前受管进程及其后代真正持有的 TCP 监听地址。
+def _managed_listener_bindings(
+    record: object,
+    *,
+    requested_port: int,
+) -> tuple[list[dict[str, object]], str]:
+    if os.name != "posix" or not Path("/proc/net/tcp").exists():
+        return [], "unsupported_on_host"
+    pids = _process_tree_pids(
+        int(getattr(record, "pid", 0) or 0),
+        int(getattr(record, "child_pid", 0) or 0),
+    )
+    inodes = _socket_inodes(pids)
+    if not inodes:
+        return [], "observed_no_owned_listener"
+    rows: list[dict[str, object]] = []
+    for path, family in ((Path("/proc/net/tcp"), socket.AF_INET), (Path("/proc/net/tcp6"), socket.AF_INET6)):
+        rows.extend(
+            _proc_tcp_listeners(
+                path,
+                family=family,
+                owned_inodes=inodes,
+                requested_port=requested_port,
+            )
+        )
+    rows.sort(key=lambda row: (int(row["port"]), str(row["host"])))
+    return rows, "observed" if rows else "observed_no_matching_listener"
+
+
+# LLM: Descendant discovery is bounded to live /proc identities and never follows a PID outside
+# the exact child relation. Missing/racing process files simply reduce observability.
+# 函数用途: 收集后台 host、沙箱启动器与真实服务进程的 PID 集合。
+def _process_tree_pids(host_pid: int, child_pid: int) -> set[int]:
+    pending = [pid for pid in (host_pid, child_pid) if pid > 0]
+    seen: set[int] = set()
+    while pending and len(seen) < 4096:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        children_path = Path(f"/proc/{pid}/task/{pid}/children")
+        try:
+            raw = children_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for value in raw.split():
+            try:
+                child = int(value)
+            except ValueError:
+                continue
+            if child > 0 and child not in seen:
+                pending.append(child)
+    return seen
+
+
+# LLM: Socket inode links are kernel facts. Permission/race failures are ignored per fd while
+# preserving the distinction between an empty observation and an unsupported host.
+# 函数用途: 从受管进程树的 fd 链接收集 socket inode。
+def _socket_inodes(pids: set[int]) -> set[str]:
+    inodes: set[str] = set()
+    for pid in pids:
+        fd_root = Path(f"/proc/{pid}/fd")
+        try:
+            entries = tuple(fd_root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                target = os.readlink(entry)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target.endswith("]"):
+                inodes.add(target[8:-1])
+    return inodes
+
+
+# LLM: /proc parsing accepts only LISTEN rows whose inode belongs to the managed tree. Malformed
+# kernel rows are skipped and no port/address is inferred from the launch command.
+# 函数用途: 解析一个 TCP 表并返回属于受管进程的监听地址。
+def _proc_tcp_listeners(
+    path: Path,
+    *,
+    family: socket.AddressFamily,
+    owned_inodes: set[str],
+    requested_port: int,
+) -> list[dict[str, object]]:
+    try:
+        lines = path.read_text(encoding="ascii").splitlines()[1:]
+    except OSError:
+        return []
+    bindings: list[dict[str, object]] = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 10 or fields[3] != _LISTEN_STATE or fields[9] not in owned_inodes:
+            continue
+        try:
+            address_hex, port_hex = fields[1].split(":", 1)
+            port = int(port_hex, 16)
+            host = _proc_address(address_hex, family)
+        except (OSError, ValueError):
+            continue
+        if requested_port and port != requested_port:
+            continue
+        bindings.append(
+            {
+                "host": host,
+                "port": port,
+                "scope": "loopback" if ipaddress.ip_address(host).is_loopback else "non_loopback",
+            }
+        )
+    return bindings
+
+
+# LLM: Linux exposes IPv4 words little-endian and IPv6 as four little-endian 32-bit words.
+# Conversion is deterministic and rejects unknown address widths.
+# 函数用途: 把 /proc 十六进制地址转换成人能读懂的 IP。
+def _proc_address(value: str, family: socket.AddressFamily) -> str:
+    raw = bytes.fromhex(value)
+    if family == socket.AF_INET:
+        if len(raw) != 4:
+            raise ValueError("invalid IPv4 proc address")
+        return socket.inet_ntop(family, raw[::-1])
+    if len(raw) != 16:
+        raise ValueError("invalid IPv6 proc address")
+    reordered = b"".join(raw[index : index + 4][::-1] for index in range(0, 16, 4))
+    return socket.inet_ntop(family, reordered)
+
+
+# LLM: firewalld inspection is read-only and intentionally conservative. No explicit port rule
+# does not prove blocking because services/nftables/upstream devices may still decide traffic.
+# 函数用途: 查询非回环监听端口是否被活动 firewalld zone 显式放行。
+def _host_firewall_observation(
+    bindings: list[dict[str, object]],
+) -> dict[str, object]:
+    ports = sorted({int(row["port"]) for row in bindings})
+    binary = shutil.which("firewall-cmd")
+    if not ports:
+        return {"status": "not_applicable", "ports": []}
+    if not binary:
+        return {"status": "not_detected", "ports": ports}
+    if _firewall_command(binary, "--state") != "running":
+        return {"status": "not_running", "ports": ports}
+    active = _firewall_command(binary, "--get-active-zones")
+    zones = [line.strip() for line in active.splitlines() if line and not line[:1].isspace()]
+    allowed: list[dict[str, object]] = []
+    for zone in zones:
+        for port in ports:
+            answer = _firewall_command(binary, f"--zone={zone}", f"--query-port={port}/tcp")
+            if answer == "yes":
+                allowed.append({"zone": zone, "port": port, "protocol": "tcp"})
+    return {
+        "status": "explicitly_allowed" if allowed else "not_explicitly_allowed",
+        "ports": ports,
+        "active_zones": zones,
+        "explicit_rules": allowed,
+    }
+
+
+# LLM: This helper runs only fixed read-only firewalld arguments assembled from integer ports
+# and discovered zone names. Timeout or command failure returns no observation, never approval.
+# 函数用途: 有界执行一条只读 firewall-cmd 查询并返回标准输出。
+def _firewall_command(binary: str, *arguments: str) -> str:
+    try:
+        result = subprocess.run(
+            [binary, *arguments],
+            capture_output=True,
+            text=True,
+            timeout=_FIREWALL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip()
+
+
+__all__ = ["NETWORK_STATUS_SCHEMA", "managed_process_network_status"]

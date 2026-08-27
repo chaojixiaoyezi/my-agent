@@ -25,6 +25,13 @@ compact summary、精确消息/字节 cursor、generation、live checkpoint poin
 范围或原生工具调用 ID、近期尾部、工具事实、前后 token 和前代指针；只有 thread 指向它才表示该代已提交，
 孤立 checkpoint 不获得 live authority。
 
+同一模型 request 可以产生多段用户可见 assistant 消息。每次工具边界前已经完整生成的 commentary 以
+`assistant_part_id=commentary:N` 顺序追加，最终答复以 `assistant_part_id=final` 追加；repair/dedupe 用
+`request_id + assistant_part_id` 幂等，旧记录缺 part id 时只兼容为 final。会话配对预览把 final 与 user
+配成一轮，但 transcript/TUI 仍完整展示 commentary。普通 user/assistant 正文不按 12,000 字符等任意上限
+截断；上下文投影超出软预算时只从最老的完整消息边界移除，至少保留最新完整项。原始大工具输出继续由
+tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替。
+
 上下文生命周期是：
 
 1. 解析 owner 和稳定 thread。
@@ -51,6 +58,23 @@ compact summary、精确消息/字节 cursor、generation、live checkpoint poin
 事实；主代理始终只压缩自己的 thread history。每个子代理本身是独立 agent，因此拥有独立
 `agent_thread_id` 和相同的 summary/generation/checkpoint 状态机；它不生成根任务级 compact 包，也不注入
 另一份主 thread。孙代理递归遵守同一规则。
+
+## Cache economics
+
+费用只使用 provider ledger 的 typed `input/cache_creation/cache_read`，不从屏幕 Context 或字符数倒推。
+缓存创建没有独立价格时按普通输入单价 5 保守计。当前样本为：
+
+- 普通输入与缓存创建合计 `B = 173,507 + 184,132 = 357,639`。
+- 缓存命中 `H = 235,041`。
+- 缓存价为 `p` 时，总成本 `C = 5B + pH`。
+- `p = 0.1`：`C = 1,811,699.1`；相对全部按普通输入的 `2,963,400` 节省
+  `1,151,700.9`，约 `38.86%`。
+- `p = 1`：`C = 2,023,236`；节省 `940,164`，约 `31.73%`。
+
+这些数字是按用户给定单价得到的比例计价单位，不擅自解释成人民币或美元。若某轮任意改写了原本可缓存的
+100,000 token 稳定前缀，其边际额外成本是 `(5-p)×100,000`：两种价格分别为 `490,000` 和
+`400,000`。因此普通轮必须保持已提交历史 append-only；仅真正 Compact 才允许一次性替换旧前缀。是否实际
+命中仍只看 provider usage，不能把“看起来前缀相同”写成缓存成功。
 
 ## Turn scheduling boundary
 
@@ -118,7 +142,8 @@ guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩�
 
 - 每条用户消息直接成为新的 active turn；无需选择、关闭或新建普通任务。
 - 普通 `task_progress` 只允许 `read/update`，是模型可选的恢复笔记，不是会话或任务控制器。
-- sticky workspace 自动延续 cwd；上一执行已终态时，首个工作工具在相同 cwd 创建本轮执行身份。
+- sticky workspace 自动延续 canonical task root；上一执行已终态时，首个工作工具在同一 task-path lineage
+  创建本轮执行身份。
 - 不解析“继续、重来、第二步”等自然语言来猜 task id 或控制生命周期。
 - 若文件变更工具已经携带显式绝对目标，且所有变更目标只落在同一 thread 的一个旧 task 内，统一工具
   runtime 可以把这一结构化路径事实用于精确 workspace binding；读操作、相对路径、跨多个 task 或有
@@ -126,9 +151,12 @@ guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩�
 - workspace binding 只改变本轮结构化 cwd/lineage；模型历史仍是同一 thread。
 - 完成、停止、取消和 supersede 只改变 task record，不切换聊天 lane。
 
-`run_command` 与新建 PTY 没有显式 `working_dir` 时，从本轮结构化选中的 `task_root` 启动；调用者显式
-指定目录时仍以显式值为准，最终路径继续经过 workspace/sandbox 验证。这个默认值不检查命令文字或用户
-措辞，行为与 会话运行时 turn cwd、通道运行时 workspaceDir 的过程工具边界一致。
+任务晋升前的普通对话可以使用 Gateway 校验过的 client cwd。首个 `promotes_task` 动作创建或复用
+`<owner_home>/tasks/<task_path>/` 后，该目录成为 main、child、grandchild 的唯一默认 execution cwd 与产品
+写根；后续轮由 `ConversationThread.workspace_task_id` 复用它。`run_command` 与新建 PTY 没有显式
+`working_dir` 时从该 task root 启动；调用者显式指定目录时仍必须落在结构化允许根并经过 sandbox 验证。
+不得从 Gateway daemon 的 `/root`、模型文字、`child_outputs` 猜工作区，也不得让 child 另选家目录。这个
+默认值不检查命令文字或用户措辞，适配 会话运行时 turn cwd 的单一事实源，同时落实本项目 owner 多租户边界。
 
 子代理继承父任务的结构化引用，但只能关闭自己的 exact task link，不能关闭父根任务。
 
@@ -166,18 +194,24 @@ artifacts 相互隔离。唯一公共文件区是管理员发布的 `~/.my-agent
 
 ## References checked
 
-- 会话运行时 current checkout `32329b289d05`:
-  `会话运行时-rs/core/src/session/session.rs`, `session/turn.rs`, `tasks/compact.rs`, `compact.rs`,
-  `thread_manager.rs`. Adopted one thread history, steer as current-turn input, interrupt without thread loss,
-  compact replacing the same history, bounded recent user context and explicit before/after compact accounting.
+- 会话运行时 current checkout `578c1b22`:
+  `会话运行时-rs/core/src/context_manager/history.rs`, `session/session.rs`, `session/turn.rs`, `tasks/compact.rs`,
+  `compact.rs`, `thread_manager.rs`. Adopted one thread history, steer as current-turn input, interrupt without
+  thread loss, tool-output-only truncation, whole-item paired removal, compact replacing the same history,
+  bounded recent user context and explicit before/after compact accounting.
   The remaining nonblocking-wait lifecycle difference is recorded above.
 - 通道运行时: stable channel/session identity, active-run control, parent-only child aggregation and typed delivery
   boundaries were checked. Its product-specific session defaults were not copied.
 - 长期助手 current checkout `4be38125af06`: gateway conversation keys, protected recent tail,
   persisted ineffective/failure guards, cancellation/commit fence, memory provider separation and
   shutdown/recovery boundaries were checked. Its compression algorithm and profile-wide memory layout were not copied.
-- 终端交互 current checkout `7dc15d6`: bounded messages-to-keep, before/after token accounting,
-  compact boundary events and repeated-failure circuit were checked. Its TypeScript session/storage layout was not copied.
+- 终端交互 current checkout `6b25ab6`: `src/services/compact/microCompact.ts` keeps local messages unchanged on the
+  cached path and removes tool results through API-layer cache edits; bounded messages-to-keep, before/after token
+  accounting, compact boundary events and repeated-failure circuit were also checked. Its TypeScript layout was not copied.
+- DeepSeek Harness current checkout: `docs/subsystems/compaction.md` and
+  `packages/compaction/compaction-basic/src/{region,summarizer,index}.ts` were checked for append-only event logging,
+  one surface replacement, priced recent-tail retention, tool-pair-balanced boundaries and prefix-cache-aligned summary
+  requests. Its Cordis service/event layout was not copied.
 
 The adaptation is limited to Python interfaces, owner-scoped file storage and my-agent runtime types. No
 Feishu-specific context branch or natural-language task classifier is part of this design.

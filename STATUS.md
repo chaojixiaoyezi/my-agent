@@ -1,5 +1,21 @@
 # STATUS
 
+## 2026-08-26 长期会话、TUI 时序、任务目录与网络事实（本地候选）
+
+- 工具前后 commentary 改为同一 request 的 typed assistant parts，final 独立标记；长过程和最终报告直接进入
+  transcript，不再依赖 `Ctrl+O`，也不再按固定 12K 裁剪。普通历史仅从最老完整消息边界收缩，真正 Compact
+  才替换旧前缀。
+- thinking 现在按每次 provider 调用独立封口，空首块 typed discard；有正文的思考留在真实时序位置，
+  assistant 正文到达前先封口，终态不留空 spinner。物理滚轮每格由三行改成一行。
+- 首个工作动作晋升任务后，main/child/grandchild 默认 cwd、写根和相对 output ref 统一切到
+  `<owner_home>/tasks/<task_path>/`；不再继承单 Gateway daemon `/root` 或客户端临时 cwd。
+- `process_session(network_status)` 只读 exact 受管进程树 listener 与 firewalld 显式端口规则，任何
+  non-loopback 结果仍要求另一台机器真实探测，工具不会自动改防火墙或宣称局域网成功。
+- 完整相关 focused 已通过（2 个既有 xfail）；全项目 Ruff、doc sync、strict code-size、diff 与
+  clean-package 严格 gate 全绿。待推送、`.7` 单 Gateway 部署和 fresh MiniMax-M2.7 真 TUI。价格样本按
+  普通输入 5、缓存价 0.1/1 分别为
+  `1,811,699.1/2,023,236`，缓存是否命中仍只认 provider cache-read。
+
 ## 2026-08-26 后台进程改归 conversation session 托管（已部署真机通过）
 
 - `d29caab` 已推送并部署 `.7` 唯一 Gateway。fresh
@@ -281,7 +297,7 @@
 - `.7` Rust 复刻现场中，`run_command(run_in_background=true)` 明示可用
   `process_status/list_processes/kill_process`，实际 Tool Registry 一个也没有注册，模型只能用
   `sleep 60 && cat log` 轮询。这不是 MiniMax 慢，而是底座向模型承诺了不存在的工具。
-- 当前候选新增一个统一 `process_session`，支持 `list/status/wait/stop`；wait 在一个工具调用内有界等待真实
+- 当前候选新增一个统一 `process_session`，支持 `list/status/wait/network_status/stop`；wait 在一个工具调用内有界等待真实
   Popen/PID，不创建 shell sleep。run_command 返回提示、`PROCESS_NOT_FOUND` 恢复建议和实际工具名已一致。
 - 共享 Gateway 中的后台记录按可信 `owner + conversation session + owner home` 精确隔离，模型不能传 scope；
   错误会话既看不到日志，也不能停止进程。7 项新 focused 与既有 shell focused 合计 46 项全部通过，待当前长

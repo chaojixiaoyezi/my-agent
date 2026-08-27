@@ -148,8 +148,9 @@ def memory_record_payload(record: Any) -> dict[str, object]:
     }
 
 
-# LLM: 配对必须要求同一 request id 的 user 先于 assistant，后台审计投递和残缺轮一律排除。
-# 函数用途: 将会话消息账本整理成按时间排列的完整问答回合。
+# LLM: Paired client history uses only the typed final assistant part; process commentary stays
+# available in canonical history but cannot become the one-line terminal answer projection.
+# 函数用途: 将会话消息账本整理成最终问答回合，不让过程段覆盖最终回复。
 def _paired_history_turns(
     rows: list[object],
     *,
@@ -173,7 +174,11 @@ def _paired_history_turns(
             if request_id not in user_by_request:
                 request_order.append(request_id)
             user_by_request[request_id] = content
-        elif role == "assistant" and request_id in user_by_request:
+        elif (
+            role == "assistant"
+            and request_id in user_by_request
+            and str(metadata.get("assistant_part_id") or "final") == "final"
+        ):
             assistant_by_request[request_id] = content
     complete = tuple(
         {

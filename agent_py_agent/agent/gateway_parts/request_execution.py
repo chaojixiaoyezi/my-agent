@@ -211,6 +211,7 @@ class BufferedChunkStreamWriter:
     _model_delta_chars: int = 0
     _last_model_delta_flush_at: float = field(default_factory=time.monotonic)
     _commentary_emitted: bool = False
+    _committed_commentary: list[str] = field(default_factory=list)
     _tool_input_active: bool = False
     _identifier_redactions: tuple[tuple[object, str], ...] = ()
     _observed_tool_rounds: int = 0
@@ -349,15 +350,15 @@ class BufferedChunkStreamWriter:
             },
         )
 
-    # LLM: 只允许 provider 明确返回的 thinking 文本进入 rich TUI；签名、redacted_thinking 和普通客户端均不得经过此出口。
-    # 函数用途: 将一次模型调用的可展示思考写成独立、默认折叠的 Gateway 事件。
+    # LLM: Full thinking is emitted before pending assistant deltas. The model-generation
+    # finalizer owns this order; calling the general flush here would invert it again.
+    # 函数用途: 将一次模型调用的可展示思考先写成独立 Gateway 事件，再由调用方刷新正文。
     def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> None:
         if not self.rich_transcript:
             return
         content = self._public_model_text(text, max_chars=12_000)
         if not content:
             return
-        self.flush()
         write_chunk_event(
             self.chunk_path,
             {
@@ -596,17 +597,25 @@ class BufferedChunkStreamWriter:
         self.flush()
         close_chunk_stream(self.chunk_path)
 
-    # LLM: rich transcript 每个真实工具边界都可发布一段；普通客户端仍严格限制为首段，末轮正文留给 canonical final response。
-    # 函数用途: 脱敏并发布当前已经由工具边界确认的模型过程说明。
+    # LLM: The returned copy contains only tool-boundary-confirmed assistant messages. It is
+    # the typed handoff into ConversationStore and never includes an uncommitted final candidate.
+    # 函数用途: 返回本轮已经确认的过程回复，供最终收口按原顺序持久化到长期会话。
+    def assistant_commentary_messages(self) -> tuple[str, ...]:
+        return tuple(self._committed_commentary)
+
+    # LLM: rich transcript 每个真实工具边界都可发布一段；普通客户端仍严格限制为首段，
+    # 但已确认正文必须完整保留并进入 canonical history，末轮正文留给 final response。
+    # 函数用途: 脱敏、记录并发布当前已经由工具边界确认的模型过程说明。
     def _write_model_commentary_at_boundary(self) -> None:
         if (self._commentary_emitted and not self.rich_transcript) or not self._model_segment:
             return
         raw = "".join(self._model_segment)
         self._model_segment.clear()
-        content = self._public_model_text(raw, max_chars=12_000)
+        content = self._public_model_text(raw, max_chars=0)
         if not content:
             return
         self._commentary_emitted = True
+        self._committed_commentary.append(content)
         write_chunk_event(
             self.chunk_path,
             {
@@ -615,15 +624,16 @@ class BufferedChunkStreamWriter:
             },
         )
 
-    # LLM: 所有模型过程文本共用这一脱敏和长度边界；不能让 thinking 绕过 commentary 的路径/结构化标识保护。
-    # 函数用途: 生成适合写入公开 chunk 的有界模型文本。
+    # LLM: All public model text shares redaction. A positive max applies only to volatile
+    # display-only thinking; zero preserves committed assistant prose for transcript/Compact.
+    # 函数用途: 生成公开模型文本；max_chars=0 时保留完整已确认回复。
     def _public_model_text(self, text: object, *, max_chars: int) -> str:
         projection = project_user_reply(str(text or ""))
         content = redact_structured_identifiers(
             redact_host_absolute_paths(projection.content),
             self._identifier_redactions,
         ).strip()
-        if len(content) <= max_chars:
+        if max_chars <= 0 or len(content) <= max_chars:
             return content
         head = max_chars * 2 // 3
         tail = max_chars - head
@@ -1291,6 +1301,14 @@ def _persist_gateway_assistant_result(
     )
     channel_delivery["operation_verification"] = operation_verification
     result.channel_delivery = channel_delivery
+    commentaries_persisted = _persist_gateway_assistant_commentaries(
+        context,
+        conversation,
+        result,
+    )
+    if not commentaries_persisted:
+        result.conversation_persist_degraded = True
+        result.conversation_persist_error = "assistant commentary append deferred for repair"
     if not _append_gateway_conversation_message(
         context.agent,
         context.request,
@@ -1301,6 +1319,7 @@ def _persist_gateway_assistant_result(
         delivery_artifacts=channel_delivery["artifacts"],
         operation_verification=channel_delivery.get("operation_verification"),
         terminal_tool_fold=terminal_tool_fold,
+        assistant_part_id="final",
     ):
         _queue_gateway_conversation_repair(
             context.agent,
@@ -1312,10 +1331,56 @@ def _persist_gateway_assistant_result(
             delivery_artifacts=channel_delivery["artifacts"],
             operation_verification=channel_delivery.get("operation_verification"),
             terminal_tool_fold=terminal_tool_fold,
+            assistant_part_id="final",
         )
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
     return result
+
+
+# LLM: Only typed tool-boundary commentary captured by the run sink may become additional
+# assistant parts. Each part has its own structured identity; content length/order is not guessed.
+# 函数用途: 在最终回复前按原顺序持久化模型已确认的过程回复，让后续连续任务保留完整上下文。
+def _persist_gateway_assistant_commentaries(
+    context: _GatewayAskRunContext,
+    conversation: _GatewayConversationContext,
+    result: object,
+) -> bool:
+    raw_messages = getattr(result, "assistant_commentary_messages", None)
+    if not isinstance(raw_messages, (list, tuple)):
+        return True
+    identifiers = _gateway_identifier_redactions(context, conversation, result=result)
+    all_persisted = True
+    for index, raw in enumerate(raw_messages, start=1):
+        projection = project_user_reply(str(raw or ""))
+        content = redact_structured_identifiers(
+            redact_host_absolute_paths(projection.content),
+            identifiers,
+        ).strip()
+        if not content:
+            continue
+        part_id = f"commentary:{index}"
+        if _append_gateway_conversation_message(
+            context.agent,
+            context.request,
+            conversation,
+            request_id=context.request_id,
+            role="assistant",
+            content=content,
+            assistant_part_id=part_id,
+        ):
+            continue
+        _queue_gateway_conversation_repair(
+            context.agent,
+            context.request,
+            conversation,
+            request_id=context.request_id,
+            role="assistant",
+            content=content,
+            assistant_part_id=part_id,
+        )
+        all_persisted = False
+    return all_persisted
 
 
 _IDENTIFIER_PUBLIC_LABELS = {
@@ -2826,8 +2891,9 @@ def _append_recent_artifacts_prompt(
         lines.append(f"- {json.dumps(artifact, ensure_ascii=False, sort_keys=True)}")
 
 
-# LLM: 读取旧 assistant 时再次应用 user projection，兼容升级前已落盘的内部完成协议。
-# 函数用途: 返回同一 thread 的有界用户可见历史，不把机器协议重新注入模型。
+# LLM: User/assistant prose stays byte-stable until explicit Compact. This selector may drop
+# complete oldest messages to fit a legacy bound, but it must never rewrite a message prefix.
+# 函数用途: 返回同一 thread 的有界完整消息历史，不把机器协议或滑动截断重新注入模型。
 def _gateway_conversation_history(
     agent: SimpleAgent,
     thread_id: str,
@@ -2847,10 +2913,6 @@ def _gateway_conversation_history(
     total_chars = max(
         1000,
         int(getattr(config, "conversation_history_max_chars", 48_000) or 48_000),
-    )
-    message_chars = max(
-        1000,
-        int(getattr(config, "conversation_history_message_max_chars", 12_000) or 12_000),
     )
     supplied_rows = isinstance(rows, (list, tuple))
     if supplied_rows:
@@ -2881,7 +2943,7 @@ def _gateway_conversation_history(
         if role == "assistant":
             content = project_user_reply(content).content
             content = conversation_message_with_terminal_tool_fold(content, metadata)
-        candidates.append((role, _clip_conversation_message(content, message_chars)))
+        candidates.append((role, content))
     history_chars = total_chars
     history_messages = max_turns * 2
     if supplied_rows:
@@ -2975,17 +3037,9 @@ def _metadata_operation_verification(value: object) -> dict[str, object]:
     return public_operation_verification(value)
 
 
-def _clip_conversation_message(content: str, limit: int) -> str:
-    if len(content) <= limit:
-        return content
-    marker = "\n…[中间内容已折叠]…\n"
-    if limit <= len(marker) + 2:
-        return content[:limit]
-    head = (limit - len(marker)) // 2
-    tail = limit - len(marker) - head
-    return f"{content[:head]}{marker}{content[-tail:]}"
-
-
+# LLM: Cache-stable history eviction removes only complete oldest entries. The newest complete
+# entry is retained even if it alone exceeds a legacy char bound so Compact can summarize it.
+# 函数用途: 从尾部选择完整消息，预算不足时停止加入更老消息，不截断任何一条正文。
 def _latest_conversation_messages(
     candidates: list[tuple[str, str]],
     *,
@@ -2995,12 +3049,10 @@ def _latest_conversation_messages(
     selected: list[tuple[str, str]] = []
     used = 0
     for role, content in reversed(candidates[-max_messages:]):
-        remaining = max_chars - used
-        if remaining <= 0:
+        if selected and used + len(content) > max_chars:
             break
-        bounded = _clip_conversation_message(content, remaining)
-        selected.append((role, bounded))
-        used += len(bounded)
+        selected.append((role, content))
+        used += len(content)
     selected.reverse()
     return tuple(selected)
 
@@ -3020,6 +3072,7 @@ def _append_gateway_conversation_message(
     delivery_artifacts: object = (),
     operation_verification: object = None,
     terminal_tool_fold: object = None,
+    assistant_part_id: str = "final",
 ) -> bool:
     if not conversation.thread_id or not content:
         return not conversation.thread_id
@@ -3031,16 +3084,18 @@ def _append_gateway_conversation_message(
         rows, errors = store.recent_messages_report(conversation.thread_id, limit=100)
         if errors:
             raise OSError("conversation message ledger could not be read reliably")
+        normalized_part_id = (
+            str(assistant_part_id or "final").strip() or "final"
+            if role == "assistant"
+            else ""
+        )
         if any(
-            str(getattr(row, "role", "") or "") == role
-            and (
-                str((getattr(row, "metadata", {}) or {}).get("gateway_request_id") or "")
-                == request_id
-                or (
-                    role == "user"
-                    and channel_message_id
-                    and str(getattr(row, "channel_message_id", "") or "") == channel_message_id
-                )
+            _gateway_message_matches_part(
+                row,
+                role=role,
+                request_id=request_id,
+                channel_message_id=channel_message_id,
+                assistant_part_id=normalized_part_id,
             )
             for row in rows
         ):
@@ -3051,6 +3106,8 @@ def _append_gateway_conversation_message(
             "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
         }
         entry_metadata.update(_gateway_message_work_scope(request))
+        if role == "assistant":
+            entry_metadata["assistant_part_id"] = normalized_part_id
         if role == "assistant" and operation_verification is not None:
             entry_metadata["operation_verification"] = _metadata_operation_verification(
                 operation_verification
@@ -3107,6 +3164,7 @@ def _queue_gateway_conversation_repair(
     delivery_artifacts: object = (),
     operation_verification: object = None,
     terminal_tool_fold: object = None,
+    assistant_part_id: str = "final",
 ) -> None:
     store = getattr(agent, "conversation_store", None)
     root = getattr(store, "root", None)
@@ -3120,6 +3178,9 @@ def _queue_gateway_conversation_repair(
         "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
     }
     repair_metadata.update(_gateway_message_work_scope(request))
+    normalized_part_id = str(assistant_part_id or "final").strip() or "final"
+    if role == "assistant":
+        repair_metadata["assistant_part_id"] = normalized_part_id
     if role == "assistant" and operation_verification is not None:
         repair_metadata["operation_verification"] = _metadata_operation_verification(
             operation_verification
@@ -3136,7 +3197,13 @@ def _queue_gateway_conversation_repair(
         "channel_message_id": "",
         "metadata": repair_metadata,
     }
-    path = Path(root) / "message_repairs" / f"{request_id}-{role}.json"
+    # Keep the legacy final filename so an upgrade can consume already queued repairs.
+    # Additional commentary parts receive their own non-colliding typed suffix.
+    if role == "assistant" and normalized_part_id != "final":
+        filename = f"{request_id}-{role}-{normalized_part_id.replace(':', '-')}.json"
+    else:
+        filename = f"{request_id}-{role}.json"
+    path = Path(root) / "message_repairs" / filename
     try:
         from .io import write_json_file
 
@@ -3171,10 +3238,16 @@ def _repair_gateway_conversation_messages(
                 continue
             request_id = str((payload.get("metadata") or {}).get("gateway_request_id") or "")
             role = str(payload.get("role") or "")
+            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            part_id = str(metadata.get("assistant_part_id") or "final").strip() or "final"
             already_written = any(
-                str(getattr(row, "role", "") or "") == role
-                and str((getattr(row, "metadata", {}) or {}).get("gateway_request_id") or "")
-                == request_id
+                _gateway_message_matches_part(
+                    row,
+                    role=role,
+                    request_id=request_id,
+                    channel_message_id=str(payload.get("channel_message_id") or ""),
+                    assistant_part_id=part_id,
+                )
                 for row in rows
             )
             if not already_written:
@@ -3182,6 +3255,34 @@ def _repair_gateway_conversation_messages(
             path.unlink()
         except Exception as exc:
             load_errors.append(_conversation_error(exc, "gateway.conversation.repair.append"))
+
+
+# LLM: Dedupe uses request plus a host-authored assistant part id. Legacy assistant rows without
+# the additive field are treated as the final part; ordinary user message identity is unchanged.
+# 函数用途: 判断一条已有消息是否与准备追加的用户消息或助手分段是同一条。
+def _gateway_message_matches_part(
+    row: object,
+    *,
+    role: str,
+    request_id: str,
+    channel_message_id: str,
+    assistant_part_id: str,
+) -> bool:
+    if str(getattr(row, "role", "") or "") != role:
+        return False
+    metadata = getattr(row, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    same_request = str(metadata.get("gateway_request_id") or "") == request_id
+    if role == "assistant":
+        row_part = str(metadata.get("assistant_part_id") or "final").strip() or "final"
+        return same_request and row_part == assistant_part_id
+    return bool(
+        same_request
+        or (
+            channel_message_id
+            and str(getattr(row, "channel_message_id", "") or "") == channel_message_id
+        )
+    )
 
 
 def _conversation_error(exc: BaseException, context: str) -> dict:

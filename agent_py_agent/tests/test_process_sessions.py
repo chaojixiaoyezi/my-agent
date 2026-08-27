@@ -227,6 +227,65 @@ def test_process_session_follows_background_command_tool_profiles() -> None:
     assert "process_session" not in READ_ONLY_SUBAGENT_TOOLS
 
 
+def test_managed_network_status_never_promotes_local_listener_to_lan_success(
+    monkeypatch,
+) -> None:
+    """0.0.0.0 与主机放行都只是本机证据，仍必须由另一台机器真实探测。"""
+    from agent_py_agent.agent.tooling import process_network_status
+
+    monkeypatch.setattr(
+        process_network_status,
+        "_managed_listener_bindings",
+        lambda _record, requested_port: (
+            [{"host": "0.0.0.0", "port": requested_port, "scope": "non_loopback"}],
+            "observed",
+        ),
+    )
+    monkeypatch.setattr(
+        process_network_status,
+        "_host_firewall_observation",
+        lambda _bindings: {
+            "status": "explicitly_allowed",
+            "ports": [3000],
+            "active_zones": ["public"],
+            "explicit_rules": [{"zone": "public", "port": 3000, "protocol": "tcp"}],
+        },
+    )
+
+    payload = process_network_status.managed_process_network_status(
+        SimpleNamespace(session_id="bg-network", status="running"),
+        requested_port=3000,
+    )
+
+    assert payload["schema"] == "managed_process_network_status.v1"
+    assert payload["lan_reachability"] == "unverified_external_probe_required"
+    assert payload["external_probe_required"] is True
+    assert payload["host_firewall"]["status"] == "explicitly_allowed"
+
+
+def test_managed_network_status_reports_loopback_only(monkeypatch) -> None:
+    """只监听 127.0.0.1 时直接指出局域网不可用，不运行防火墙写操作。"""
+    from agent_py_agent.agent.tooling import process_network_status
+
+    monkeypatch.setattr(
+        process_network_status,
+        "_managed_listener_bindings",
+        lambda _record, requested_port: (
+            [{"host": "127.0.0.1", "port": requested_port, "scope": "loopback"}],
+            "observed",
+        ),
+    )
+
+    payload = process_network_status.managed_process_network_status(
+        SimpleNamespace(session_id="bg-loopback", status="running"),
+        requested_port=8080,
+    )
+
+    assert payload["lan_reachability"] == "loopback_only"
+    assert payload["external_probe_required"] is False
+    assert payload["host_firewall"] == {"status": "not_applicable", "ports": []}
+
+
 def test_background_session_outlives_one_shot_launcher_and_is_rehydrated(tmp_path: Path) -> None:
     """子代理式短命 Python 进程退出后，另一个进程仍能查询并停止同一后台会话。"""
 

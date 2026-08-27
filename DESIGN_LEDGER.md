@@ -50,7 +50,9 @@
   原 bwrap argv 和 `--die-with-parent`，但由 detached managed host 成为直接父进程；runner 退出后服务继续，
   host 退出时沙箱后代仍收口。跨进程唯一事实是 owner 沙箱外的 `managed_process_session.v1`，PID 必须配
   出生指纹，owner/conversation/store root 必须精确匹配，终态单调且落盘失败先回收进程。模型仍只通过
-  `process_session` 管理，不自动重启命令。详细设计见
+  `process_session` 管理，不自动重启命令。`process_session(network_status)` 只投影该 session 进程树真实持有的
+  监听地址与主机防火墙显式放行事实；绑定 `0.0.0.0`、本机 HTTP 成功或端口存在都不能冒充另一台机器可达，
+  外部连通仍必须由目标网络中的独立探针验证，工具不得为通过验收自动改防火墙。详细设计见
   `docs/design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md`。
 - 普通可恢复工具错误按 会话运行时 的 `RespondToModel` 语义回到当前模型继续修正：同工具同类失败达到
   提示阈值只能注入换参数、换工具或拆步骤的强返工提示，不能按次数结束 turn。精确同参机械重试可由
@@ -78,6 +80,11 @@
   ToolCall/ToolResult 或 thinking signature。真正 Conversation Compact 才把折叠纳入摘要、推进
   `compact_generation` 与 transcript source-message 计数；`compact_source_tool_pairs` 继续只表示运行中 native IR
   真压缩掉的完整工具对，终态折叠的回合/调用数必须独立展示，不能冒充 Compact 或重复累计。
+- 助手在工具调用前后的过程说明是用户可见的正式 transcript，不是临时进度。Gateway 按同一 request 的
+  `assistant_part_id=commentary:N` 逐段完整追加，最终答复使用 `assistant_part_id=final`；恢复、配对预览和
+  历史投影只把 `final` 当该轮最终答复，但不得删除 commentary。普通消息不再按任意字符数截断；预算不足时
+  只能从最老的完整消息边界淘汰投影，真正历史替换仍只由 Conversation Compact 完成。工具原始大输出继续
+  走 tool-result reducer/archive，不能用裁剪用户或助手正文来代替。
 - 同一 request/run 在 provider overflow 后可能先收口失败响应、提交 Conversation Compact，再继续调用模型；
   `ModelCallLedger` 对这个 scope 给出累计快照，持久 `ConversationModelUsageStore` 必须按
   `physical_model_attempt_count` 游标原子换算成 append-only 增量。每个增量事件保存原累计快照指纹，精确重放
@@ -90,6 +97,12 @@
   不按新预算重写旧轮；真正 Compact 才允许替换历史前缀。cache-read/cache-write 只读 provider 账本。
   idle/resume activity snapshot 仍是代数水合事实，不能因为没有 Working block 就丢弃；同一 runtime 内
   `compact_generation` 单调不减，避免手动回执之后到达的旧轮询帧把次数改回 0。
+- 缓存经济性按 provider 真实 usage 分账，不用字符估算冒充。缓存创建未单独定价时保守按普通输入 5 计；
+  对样本普通输入加缓存创建 `B=357,639`、缓存命中 `H=235,041`，总成本为 `5B+pH`：缓存价 `p=0.1`
+  时为 `1,811,699.1`，`p=1` 时为 `2,023,236`，全部按普通输入则为 `2,963,400`，分别节省约
+  `38.86%` 与 `31.73%`。若普通裁剪改写了 100,000 token 的稳定前缀，一次额外缓存失效成本为
+  `(5-p)×100,000`，即 `490,000` 或 `400,000`；因此普通轮保持 append-only，只有真正 Compact 才一次性
+  替换旧前缀。以上是按用户给定单价的比例单位，不擅自换算货币。
 - 供应商额度耗尽、明确不可用或健康探测失败时，正式运行面立即切到已配置且探活成功的本地模型，禁止
   为等待刷新而让任务空转；本地首选端口和供应商刷新时刻来自显式配置，不从错误正文或自然语言猜测。
   只有当前没有 live request、到达配置刷新点且供应商探活成功时才安全切回，模型切换不得创建第二个
@@ -139,11 +152,12 @@
   `root_task_id/parent_agent_id/run_id` 授权的只读公开投影，要么不向模型宣称它可以读取。禁止把内部
   agent 状态路径作为可操作 ref 暴露后再由 `Read` 拒绝，也禁止为绕过拒绝而开放整个 runner 状态目录。
   `completion_message` 仍是有界主链输入，公开详情只补深挖能力，不复制生命周期或完成事实源。
-- 会话运行时 式 cwd 与运行台账严格分离：Gateway/会话及其所有后代的普通相对路径统一从用户启动时的项目
-  cwd 解析；隐藏 task root 只保存状态，只有显式 `work/...`、`output/...` 才进入内部任务命名空间。
-  `allowed_write_roots` 只决定能否写，不能反向选择 cwd；只有宿主写入的 `execution_cwd` 可覆盖工具
-  Registry 的项目根。本地/admin 主会话晋升为持久任务后仍必须保留同一个项目 cwd 写权，不能只剩隐藏
-  work/output；远程 owner task wall、task-local child 和 transient Audit 仍可按结构化身份继续收窄。
+- cwd 与运行台账严格分离，但持久工作开始后只认一个 owner-scoped canonical task root：任务晋升前的普通
+  对话可以使用 Gateway 校验过的 client cwd；首个 `promotes_task` 动作创建或复用
+  `<owner_home>/tasks/<task_path>/` 后，main、child、grandchild 的默认 `execution_cwd`、产品写根和相对路径
+  都切到该 task root。后续普通轮通过 thread 的 `workspace_task_id` 复用同一根；不得重新继承 Gateway daemon
+  的 `/root`、客户端临时 cwd 或另造 `child_outputs`。显式工作目录仍须落在结构化允许根内，
+  `allowed_write_roots` 只授权范围，不从自然语言或模型给出的绝对路径反向选择 cwd。
 - interrupt 是父子边上的显式控制事实，自动重试资格不能否决父级的打断。会话的
   `active_task_ids` 是可恢复候选索引，不等于正在运行数量；TUI Working 只统计 task-link
   `status=active`，而 `/stop` 选择当前 thread 的 typed root 后递归停止运行域。

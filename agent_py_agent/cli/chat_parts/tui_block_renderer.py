@@ -267,11 +267,16 @@ def tui_render_context_key(
         if any(block.role == "connection" for block in snapshot.active_blocks)
         else None
     )
-    active_activity = tuple(
+    active_thinking = tuple(
         block
         for block in snapshot.active_blocks
         if block.role == "thinking"
         and block.phase not in TERMINAL_RENDER_PHASES
+    )
+    # 已经有正文的思考属于真实 transcript，按 created_seq 留在对应 assistant
+    # 前面；只有尚无正文的等待 spinner 固定在底部。
+    active_activity = tuple(
+        block for block in active_thinking if not (block.text or block.detail)
     )
     visible_activity = _visible_activity_blocks(snapshot, active_activity)
     thinking_animation = tuple(
@@ -430,12 +435,19 @@ def render_tui_snapshot(
     cache: TuiBlockRenderCache | None = None,
 ) -> TuiRenderFrame:
     lines: list[FormattedLine] = []
-    active_activity = tuple(
+    active_thinking = tuple(
         block
         for block in snapshot.active_blocks
         if block.role == "thinking"
         and block.phase not in TERMINAL_RENDER_PHASES
     )
+    active_activity = tuple(
+        block for block in active_thinking if not (block.text or block.detail)
+    )
+    suppress_all_thinking = bool(snapshot.permission) or any(
+        block.role in {"compact", "tool_input"} for block in snapshot.active_blocks
+    )
+    fixed_thinking = active_thinking if suppress_all_thinking else active_activity
     fixed_background_ids = {
         block.block_id
         for block in snapshot.active_blocks
@@ -448,7 +460,7 @@ def render_tui_snapshot(
         if block.role == "todo"
     }
     active_activity_ids = {
-        block.block_id for block in active_activity
+        block.block_id for block in fixed_thinking
     } | fixed_background_ids | fixed_todo_ids
     visible_activity = _visible_activity_blocks(snapshot, active_activity)
     blocks = sorted(
@@ -526,9 +538,8 @@ def _sanitize_formatted_line(line: FormattedLine) -> FormattedLine:
     return tuple(sanitized)
 
 
-# LLM: 终端交互 hides foreground thinking while permission, compact, provider
-# tool-input progress, or a visible assistant stream is active. Main background
-# activity is appended separately after this selection, matching SpinnerWithVerb.
+# LLM: Empty waiting spinners follow 终端交互 and disappear behind a visible assistant stream;
+# explicit thinking text stays in chronological transcript order and is never removed/reinserted.
 # 函数用途: 选择本帧应显示在可滚动正文末尾的前台思考活动块。
 def _visible_activity_blocks(
     snapshot: TuiViewSnapshot,
@@ -1175,8 +1186,9 @@ def _render_user(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
     return tuple(_fill_line(line, context.width, "class:tui-user-fill") for line in wrapped)
 
 
-# LLM: assistant marker 与 Markdown 只做视觉组合，Markdown token 不获得 block phase 或业务控制权。
-# 函数用途: 渲染带 ● marker 的助手 Markdown 块；工具边界前的过程段默认折叠为摘要。
+# LLM: assistant marker 与 Markdown 只做视觉组合；typed process 仍是完整会话消息，
+# 不能因为后面还有工具调用就默认折成一行并藏掉详细汇报。
+# 函数用途: 渲染带 ● marker 的完整助手 Markdown 块，过程段与最终段都直接可读。
 def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     content_width = max(1, context.width - 2)
     text = _bounded_render_text(
@@ -1202,16 +1214,7 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
             line = _append_terminal_role(line, "class:tui-muted")
         lines.append(((style, marker), *line))
         first_content = False
-    rendered = tuple(lines or [(("class:tui-assistant-marker", "●"),)])
-    if (
-        block.metadata.get("process")
-        and not context.detailed_transcript
-        and not context.show_all
-    ):
-        content = [line for line in rendered if fragments_text(line)]
-        if len(content) > 1:
-            return (*content[:1], _tool_hidden_line(len(content) - 1, context))
-    return rendered
+    return tuple(lines or [(("class:tui-assistant-marker", "●"),)])
 
 
 # LLM: thinking 展开/折叠只由 context mode 与 typed phase 决定，正文内容不能触发展开。

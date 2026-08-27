@@ -438,6 +438,27 @@ def test_visible_assistant_stream_hides_global_activity_spinner() -> None:
     assert not any(text.startswith(("✻ ", "✢ ", "✶ ")) for text in texts)
 
 
+def test_visible_assistant_keeps_prior_thinking_text_in_order() -> None:
+    """已收到正文的思考不是等待动画；正文开始后仍应保留在原时序位置。"""
+    store = TuiStateStore()
+    seq = TuiEventSequencer("streaming-thinking", clock=lambda: 200.0)
+    store.publish(seq.emit("turn_started", "started", "turn"))
+    store.publish(seq.emit("thinking_started", "started", "thinking"))
+    store.publish(
+        seq.emit("thinking_delta", "delta", "thinking", {"text": "正在核对底座"})
+    )
+    store.publish(seq.emit("assistant_started", "started", "assistant"))
+    store.publish(seq.emit("assistant_delta", "delta", "assistant", {"text": "开始修改"}))
+
+    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
+    texts = _frame_lines(frame)
+
+    assert any("正在核对底座" in text for text in texts)
+    assert texts.index(next(text for text in texts if "正在核对底座" in text)) < texts.index(
+        "● 开始修改"
+    )
+
+
 def test_completed_thinking_collapses_and_detailed_mode_expands() -> None:
     """终端交互 对齐：completed 思考默认展开内容（灰色常显），
     超长（>50 行）才折叠提示；detailed 模式全量展开。"""

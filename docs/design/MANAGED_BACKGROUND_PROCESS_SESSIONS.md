@@ -1,6 +1,7 @@
 # 受管后台进程会话
 
-状态：`8f50d19` 已部署 `.7` 唯一 Gateway，fresh r53 MiniMax-M2.7 真机验收通过。
+状态：后台 session 主链 `8f50d19` 已部署 `.7` 唯一 Gateway并通过 fresh r53 MiniMax-M2.7 真机验收；
+`network_status` 只读可达性投影已在当前 worktree 实现，待本地严格 gate、部署与独立客户端探针验收。
 
 ## 解决问题
 
@@ -32,7 +33,7 @@ run_command(run_in_background=true)
        -> bwrap --die-with-parent --new-session
             -> 用户命令及其后代
   -> managed_process_session.v1 受保护记录
-  -> process_session list/status/wait/stop
+  -> process_session list/status/wait/network_status/stop
 ```
 
 关键点：不删除 `bwrap --die-with-parent`。以前它指向短命 agent runner；现在它指向专门的 managed host。
@@ -65,6 +66,16 @@ run_command(run_in_background=true)
 - host 真正退出后才读取状态文件补命令 exit code；状态文件从不提供授权、PID 或 scope。
 - stop 对 host 与已快照后代做 TERM、宽限、KILL，随后持久化 killed。
 
+### `process_network_status.py`
+
+- 只接受已经通过 owner/conversation scope 校验的 exact managed session；不扫描或控制无关进程。
+- Linux `/proc` 下用 session 进程树的 socket inode 识别该树真正持有的 TCP listener，区分 loopback 与
+  non-loopback；端口参数只筛选观测结果，不授予访问权。
+- firewalld 可用时只执行固定的只读 `--state` / `--query-port`，报告“显式放行”“未显式放行”或“未知”；
+  service rule、nftables、云安全组、路由、NAT 和上游网络未被观察时不得推断。
+- non-loopback listener 只证明服务接受非回环地址，不证明另一台机器能连接。结果固定要求独立外部探针，
+  工具不自动开放端口、不重启服务、不发网络请求。
+
 ## 权威记录
 
 `managed_process_session.v1` 至少包含：
@@ -79,6 +90,10 @@ run_command(run_in_background=true)
 
 模型只能提供 `session_id` 和 action。store root 与访问 scope 都由 ToolRegistry/ToolExecutor 注入，不能由
 模型覆盖。错误 scope 与不存在继续统一返回 `PROCESS_NOT_FOUND`。
+
+`network_status` 返回 `managed_process_network_status.v1`，包含精确 session、可选端口、进程树 listener、
+绑定范围、主机防火墙显式规则和 `external_reachability=unverified_external_probe_required`。只有来自另一
+机器/目标网络的真实请求才可把“局域网可达”写成已验证；本工具本身永远不生成该成功结论。
 
 ## 失败和回收
 
@@ -106,10 +121,16 @@ run_command(run_in_background=true)
 3. 权威目录位于 owner sandbox 外，终态不能回退，损坏记录 fail closed。
 4. 原 runner 退出后日志上限仍生效。
 5. 后台短命命令能保存真实退出码；停止完整进程树不留后代。
+6. `network_status` 只返回 exact session 进程树的 listener；loopback 与 non-loopback 不混淆，主机防火墙
+   没有显式 port rule 时保持保守状态，且任何结果都要求外部探针。
 
 真机必须使用 `.7` 的一个 Gateway、MiniMax-M2.7 和 fresh TUI：child 经 owner TUI 批准后启动本地 HTTP
 服务；child 和 root 工作片自然结束至少十秒后端口仍监听，随后同一用户会话可由 `process_session`
 查询/停止。测试者只给一次普通中文任务并观察，不替被测 agent 补服务或产物。
+
+新增可达性验收还必须从测试者所在 Mac 对目标 IP/端口真实发请求，并与 TUI 内的
+`process_session(network_status)` 对账。若本机监听成功而 Mac 失败，任务必须报告“服务本机已启动、局域网
+未验证/不可达”及已观察到的防火墙事实，不能继续宣称完成；测试者也不能为了让用例通过旁路修改防火墙。
 
 `ma-evidence-r53-child-process-session` 已完成该验收：审批前 8769 关闭，Yes 后 child DONE；child DONE 至少
 27 秒、root final 至少 12 秒后 HTTP 仍为 200 且正文含 r53。另一 Python 进程从 owner sandbox 外的

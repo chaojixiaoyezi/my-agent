@@ -1272,11 +1272,21 @@ def _primary_workspace_output_dir(agent) -> Path | None:
     return (root / "output").resolve(strict=False)
 
 
-# LLM: Child output defaults inherit the current Gateway-validated project cwd. Falling back to
-# the daemon registry root is allowed only when no typed conversation cwd exists.
-# 函数用途: 返回当前主代理派子代理时使用的项目根目录，保证相对输入输出落在发起 TUI 的目录。
+# LLM: Once promoted, child defaults inherit the canonical task root. Client cwd is only the
+# pre-task fallback and must not leak daemon/home write authority into delegated work.
+# 函数用途: 返回派子代理使用的任务目录；尚未晋升时才回退到已验证的 TUI 启动目录。
 def _primary_workspace_root(agent) -> Path | None:
-    root = conversation_execution_cwd(current_conversation_task_attributes(agent))
+    current_attrs = current_conversation_task_attributes(agent)
+    workspace = current_attrs.get("run_workspace")
+    root = (
+        str(workspace.get("task_root") or "").strip()
+        if isinstance(workspace, dict)
+        else ""
+    )
+    if not root:
+        root = str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
+    if not root:
+        root = conversation_execution_cwd(current_attrs)
     if not root:
         root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(
             agent,
@@ -1479,25 +1489,27 @@ def _json_child_items(value: object) -> list[object]:
     return []
 
 
-# LLM: 新建 child 同时继承当前 host-validated conversation id、cwd 和 workspace
-# roots；这些字段来自 active turn，禁止从 goal 或模型 attributes 猜测。
-# 函数用途: 给新建子代理附上父会话身份和真实项目目录，供工作区、工具与恢复共用。
+# LLM: 新建 child 先提升当前任务，再继承 canonical conversation id、task cwd 和
+# workspace roots；仅在尚未晋升时使用 host-validated client cwd，禁止从 goal 猜测。
+# 函数用途: 给新建子代理附上父会话身份和唯一任务目录，供工作区、工具与恢复共用。
 def add_current_conversation_attrs(attrs: dict[str, object], agent) -> None:
     if agent is None:
         return
-    _inherit_current_conversation_workspace_attrs(attrs, agent)
     current = getattr(agent, "_current_run_params", None)
     raw_task_id = getattr(current, "task_id", "") if current is not None else ""
     if not isinstance(raw_task_id, str):
+        _inherit_current_conversation_workspace_attrs(attrs, agent)
         return
     task_id = raw_task_id.strip()
     if not task_id:
+        _inherit_current_conversation_workspace_attrs(attrs, agent)
         return
     # create_subagents 是结构化“开始任务”事实：此时才把自然语言会话提升为任务，
     # 不要求用户输入触发词，也不在普通聊天入站时预先绑定。
     from ...conversation.task_promotion import promote_current_conversation_task
 
     promoted = promote_current_conversation_task(agent)
+    _inherit_current_conversation_workspace_attrs(attrs, agent)
     if promoted is not None:
         attrs.setdefault("conversation_thread_id", promoted.thread_id)
         attrs.setdefault("conversation_task_id", promoted.task_id)
@@ -1516,20 +1528,33 @@ def add_current_conversation_attrs(attrs: dict[str, object], agent) -> None:
     _attach_thread_attrs(attrs, thread, task_id)
 
 
-# LLM: 会话运行时 child keeps the parent turn cwd and permission roots even though it owns a
-# distinct model thread. Only structured current-turn facts may overwrite these keys.
-# 函数用途: 把父级当前 TUI/CLI 已验证的 cwd 与工作区根复制给直接 child，并自然沿子孙链传递。
+# LLM: Child cwd/roots come from the parent's promoted run_workspace or its thread-local
+# canonical task binding. The pre-promotion client cwd is a fallback only; descendants never
+# regain the daemon home root while attributes are being assembled.
+# 函数用途: 把父级当前唯一任务目录复制给直接 child，并沿子孙链保持同一隔离范围。
 def _inherit_current_conversation_workspace_attrs(
     attrs: dict[str, object],
     agent: object,
 ) -> None:
     current_attrs = current_conversation_task_attributes(agent)
-    cwd = conversation_execution_cwd(current_attrs)
+    workspace = current_attrs.get("run_workspace")
+    task_root = (
+        str(workspace.get("task_root") or "").strip()
+        if isinstance(workspace, dict)
+        else ""
+    )
+    if not task_root:
+        task_root = str(
+            getattr(agent, "_current_run_task_workspace", "") or ""
+        ).strip()
+    cwd = task_root or conversation_execution_cwd(current_attrs)
     if not cwd:
         return
     attrs[CONVERSATION_EXECUTION_CWD_ATTR] = cwd
-    attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = list(
-        conversation_runtime_workspace_roots(current_attrs)
+    attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = (
+        [task_root]
+        if task_root
+        else list(conversation_runtime_workspace_roots(current_attrs))
     )
 
 

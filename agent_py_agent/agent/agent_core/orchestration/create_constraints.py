@@ -125,14 +125,24 @@ def delegated_product_write_roots(agent: object) -> tuple[str, ...]:
     return tuple(_direct_parent_product_write_roots(agent))
 
 
-# LLM: A root child inherits only the Gateway-validated active conversation roots; the
-# shared Gateway repository root is a fallback when no client workspace fact exists.
-# 函数用途: 读取当前 TUI/CLI 的真实项目根，供普通直接 child 默认继承读写权限。
+# LLM: After promotion a root child inherits the one canonical task root, never the earlier
+# client/daemon cwd. Before promotion only, host-validated conversation roots remain the fallback.
+# 函数用途: 读取当前主代理的任务目录，供普通直接 child 继承同一个 owner/task 隔离范围。
 def _current_conversation_product_write_roots(agent: object) -> list[str]:
+    attrs = current_conversation_task_attributes(agent)
+    workspace = attrs.get("run_workspace") if isinstance(attrs, dict) else None
+    task_root = (
+        str(workspace.get("task_root") or "").strip()
+        if isinstance(workspace, dict)
+        else ""
+    )
+    if not task_root:
+        task_root = _current_task_root(agent)
+    task_path = _resolved_path(task_root)
+    if task_path is not None:
+        return [str(task_path)]
     roots: list[str] = []
-    for raw in conversation_runtime_workspace_roots(
-        current_conversation_task_attributes(agent)
-    ):
+    for raw in conversation_runtime_workspace_roots(attrs):
         path = _resolved_path(raw)
         if path is not None:
             roots.append(str(path))

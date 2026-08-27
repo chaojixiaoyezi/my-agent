@@ -324,6 +324,7 @@ class FinalizationService:
             backend=ctx.final_response.backend,
             used_memories=len(ctx.memories),
             model_response=honest_text,
+            assistant_commentary_messages=_assistant_commentary_messages(ctx.on_chunk),
             tool_rounds=ctx.tool_rounds,
             executed_tools=ctx.executed_tools,
             archive_tool_calls=ctx.archive_tool_calls,
@@ -364,6 +365,26 @@ class FinalizationService:
                 self._agent, ctx, params.token_ledger, request_id=params.run_request_id
             ),
         )
+
+
+# LLM: Commentary authority comes only from a sink method that records real tool boundaries;
+# arbitrary callbacks and model text cannot opt themselves into durable conversation history.
+# 函数用途: 从本轮流接收器读取按顺序确认的助手过程消息，缺少能力时返回空列表。
+def _assistant_commentary_messages(on_chunk: object) -> list[str]:
+    reader = getattr(on_chunk, "assistant_commentary_messages", None)
+    if not callable(reader):
+        return []
+    try:
+        values = reader()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return []
+    if not isinstance(values, (list, tuple)):
+        return []
+    return [
+        text
+        for value in values
+        if (text := str(value or "").strip())
+    ]
 
 
 # LLM: finalization only submits a typed reason to the one Curator state; it never runs a

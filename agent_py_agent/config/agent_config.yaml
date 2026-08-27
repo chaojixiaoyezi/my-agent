@@ -879,10 +879,9 @@ vision_max_tokens: 1024
 chat_history_max_turns: 20
 chat_history_assistant_preview_chars: 500
 # Agent 模型使用的同会话历史预算，与上面的界面展示预览严格分开。
-# 总量优先保留最新消息；单条过长时保留头尾，避免丢掉结论、路径和用户要求的后半段。
+# 总量不足时只整条淘汰最旧消息；普通用户/助手正文不做滑动头尾截断，达到阈值后统一 Compact。
 conversation_history_max_turns: 20
 conversation_history_max_chars: 48000
-conversation_history_message_max_chars: 12000
 # 普通回合结束后，把本轮工具轨迹一次性折叠进 assistant metadata，供后续轮继续使用。
 # 这不是 Compact，不增加 compact 次数；折叠内容确定后不再改写，便于命中 provider 前缀缓存。
 conversation_terminal_tool_fold_enabled: true

@@ -591,7 +591,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   用户中断、后台 kill 和日志上限都复用 registry 的完整后代树终止；POSIX 会快照后代及进程出生标识，覆盖
   bwrap `--new-session` 建出的嵌套 session。shell 只负责 2 秒有界 pipe drain，不能用无界
   `communicate()` 等待可能被孙进程继承的 stdout/stderr。后台启动把 host 注入的 owner/TUI session scope
-  冻结进记录；模型只通过统一 `process_session` list/status/wait/stop 续接，不能用可猜 session id 跨用户读
+  冻结进记录；模型只通过统一 `process_session` list/status/wait/network_status/stop 续接，不能用可猜 session id 跨用户读
   日志或停止，也不再用 shell sleep 轮询。子代理最终工具快照把它作为 `run_command` 的依赖闭包，覆盖动态
   capability grant 与旧任务恢复；owner 显式禁用列表仍做最后收窄。
 - `agent/gateway_parts/scoped_locks.py`：机器级【进程单例】锁（pid+进程启动时间判归属，

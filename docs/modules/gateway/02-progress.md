@@ -2320,3 +2320,16 @@
 - 同一冻结 summary 同时进入 owner/thread 的 append-only 用量账本。后台 main 即使不保存普通 transcript
   也要留下真实调用成本；无可信 thread identity 时明确跳过，不从 cwd、prompt 或模型正文猜归属。
 - 该字段只做观测和对照测试，不改变请求状态、Compact 阈值、任务完成、授权或计费执行。
+
+## 2026-08-26 完整助手分段、缓存稳定历史与网络事实候选
+
+- Gateway rich sink 在每个真实工具边界把完整 commentary 登记到 result；持久化按
+  `gateway_request_id + assistant_part_id` 去重，`commentary:N` 先落、`final` 后落。repair 文件也按 part
+  分开，旧无 part 记录只兼容为 final。长过程/报告不再受 thinking 的 12K 展示上限。
+- `_gateway_conversation_history` 删除单条消息中部裁剪，只在 legacy 总预算不足时整条淘汰最老消息；正常
+  canonical supplied rows 仍按真实 Compact 预算进入。会话配对预览过滤 commentary，只选 final，避免列表
+  中一条 user 被过程回复误配，同时 transcript/TUI 保留全部正文。
+- 任务 link 已存在时，后台 wake 从 exact `task_path` 重建 cwd/roots，并阻止 thread 的旧 client cwd 覆盖；
+  无任务轮才继承 client cwd。
+- `process_session(network_status)` 新增 exact session listener/firewalld 只读投影，任何 non-loopback 结果仍
+  要求外部探针，不改端口规则、不把本机成功写成局域网成功。当前待严格 gate、部署和真 TUI/独立 Mac 探测。

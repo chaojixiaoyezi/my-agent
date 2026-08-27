@@ -23,6 +23,7 @@ from .models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from .process_network_status import managed_process_network_status
 from .process_registry import process_access_scope, process_registry
 from .process_session_store import process_session_store_root
 
@@ -31,33 +32,39 @@ _MAX_WAIT_SECONDS = 30.0
 
 
 # LLM: process_session 是 run_command(run_in_background=true) 的唯一续接入口；
-# list/status/wait 只读，stop 通过结构化 action 进入危险操作门。新增动作时必须同步
+# list/status/wait/network_status 只读，stop 通过结构化 action 进入危险操作门。新增动作时必须同步
 # effect mapping、schema、scope 测试和 run_command 返回提示。
-# 类用途: 用一个统一工具列出、查看、短暂等待或停止当前 TUI 会话的后台命令。
+# 类用途: 用一个统一工具列出、查看、核对网络、短暂等待或停止当前 TUI 会话的后台命令。
 class ProcessSessionTool(BaseTool):
     model_spec = ToolModelSpec(
         name="process_session",
         description=(
             "管理 run_command(run_in_background=true) 启动的后台命令，"
-            "支持 list/status/wait/stop；等待时不要另跑 sleep。"
+            "支持 list/status/wait/network_status/stop；服务对外可达必须用 network_status 区分监听、主机防火墙与外部验证。"
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "status", "wait", "stop"],
+                    "enum": ["list", "status", "wait", "network_status", "stop"],
                     "description": "后台进程动作。",
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "status/wait/stop 所需的后台 session id。",
+                    "description": "status/wait/network_status/stop 所需的后台 session id。",
                 },
                 "timeout_seconds": {
                     "type": "number",
                     "minimum": 0,
                     "maximum": _MAX_WAIT_SECONDS,
                     "description": "wait 最多等待秒数，默认 5，最大 30。",
+                },
+                "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "network_status 可选端口；填写后只核对这个端口是否由该受管进程监听。",
                 },
             },
             "required": ["action"],
@@ -69,6 +76,7 @@ class ProcessSessionTool(BaseTool):
                 "后台构建、下载或服务启动后查看状态和日志尾部",
                 "需要有界等待后台命令完成时",
                 "需要停止当前会话启动的后台命令时",
+                "需要确认服务监听范围、主机防火墙和局域网验证边界时",
             ),
             avoid_when=(
                 "一次性命令直接使用 run_command",
@@ -86,6 +94,7 @@ class ProcessSessionTool(BaseTool):
             examples=(
                 '{"tool":"process_session","action":"status","session_id":"bg-1-..."}',
                 '{"tool":"process_session","action":"wait","session_id":"bg-1-...","timeout_seconds":10}',
+                '{"tool":"process_session","action":"network_status","session_id":"bg-1-...","port":3000}',
                 '{"tool":"process_session","action":"stop","session_id":"bg-1-..."}',
             ),
         ),
@@ -99,6 +108,7 @@ class ProcessSessionTool(BaseTool):
                     ("list", "read_only"),
                     ("status", "read_only"),
                     ("wait", "read_only"),
+                    ("network_status", "read_only"),
                     ("stop", "dangerous"),
                 ),
             ),),
@@ -148,10 +158,10 @@ class ProcessSessionTool(BaseTool):
             if load_errors:
                 payload["load_errors"] = load_errors
             return self._ok(payload)
-        if action not in {"status", "wait", "stop"}:
+        if action not in {"status", "wait", "network_status", "stop"}:
             return self._error(
                 "TOOL_INVALID_ARGUMENTS",
-                "action 必须是 list/status/wait/stop",
+                "action 必须是 list/status/wait/network_status/stop",
             )
         session_id = str(params.get("session_id") or "").strip()
         if not session_id:
@@ -161,6 +171,13 @@ class ProcessSessionTool(BaseTool):
             )
         if action == "status":
             result = process_registry.status(session_id, scope, store_root)
+        elif action == "network_status":
+            result = self._network_status(
+                session_id,
+                params.get("port"),
+                scope,
+                store_root,
+            )
         elif action == "stop":
             result = process_registry.kill(session_id, scope, store_root)
         else:
@@ -172,6 +189,31 @@ class ProcessSessionTool(BaseTool):
                 f"当前用户会话中不存在后台进程: {session_id}",
             )
         return self._ok(result)
+
+    # LLM: Session scope is checked by the registry before process/PID facts reach the network
+    # observer. The observer is read-only and always leaves LAN reachability externally unverified.
+    # 函数用途: 查询当前受管服务的监听与防火墙事实，不修改防火墙或伪造跨机器成功。
+    @staticmethod
+    def _network_status(
+        session_id: str,
+        port_value: object,
+        scope: object,
+        store_root: object,
+    ) -> dict[str, object] | None:
+        summary = process_registry.status(session_id, scope, store_root)
+        if summary is None:
+            return None
+        record = process_registry.get(session_id, scope, store_root)
+        if record is None:
+            return None
+        try:
+            port = int(port_value or 0)
+        except (TypeError, ValueError):
+            port = 0
+        return {
+            "process": summary,
+            "network": managed_process_network_status(record, requested_port=port),
+        }
 
     # LLM: wait 上限必须小于工具运行时 timeout，避免模型一次调用长期占住主链；
     # 非法值回到稳定默认值而不是传给 time/Popen。
