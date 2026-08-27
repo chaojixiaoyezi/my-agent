@@ -8,8 +8,9 @@
   current user → current-turn tools 顺序。
 - terminal tool fold 在 seed 冻结前按 typed metadata 投影，完整 archive/refs、child 独立 generation 和
   owner/write boundary 均不变。overflow 后重试仍使用同一个 child thread，不生成第二套摘要或跨 child 历史。
-- child/grandchild Compact、工具终态折叠与原生消息 focused 已通过；真实慢模型 r65 已运行超过旧 600 秒
-  墙钟而未被 timeout 误杀，仍待其自然终态后再部署最终缓存版本。
+- child/grandchild Compact、工具终态折叠与原生消息 focused 已通过；`.10` MiniMax 主链的八名 child 已
+  全部终态且没有第九名替身。真实慢模型 r65 已运行超过旧 600 秒墙钟而未被 timeout 误杀，仍待其自然终态
+  后再部署最终缓存版本。
 
 ## 2026-08-27 active covers 与 replacement 启动闸（本地候选）
 

@@ -9,9 +9,10 @@
 - `CacheStructuredPrompt` 保留完整诊断字符串；Anthropic/OpenAI 原生适配器省略其中已在 messages 出现的
   current-user 副本，防止 token 与上下文压力重复计算。记忆召回、推荐工具、工作区、wake/runtime injection
   和执行事实统一放在消息尾部；只有真正 Compact 才替换旧消息前缀。
-- main/child 相关 native、Gateway、Compact、上下文压力和模型账 focused 已通过；待部署 `.10` 后在原
-  `ma-110-dispatch-cache-r1` 同一会话连续发普通中文追问，以 provider usage 证明第二个新布局回合出现
-  cache-read；不能用模型记得内容或屏幕 Context 代替。
+- main/child 相关 native、Gateway、Compact、上下文压力和模型账 focused 已通过。`.10` 原
+  `ma-110-dispatch-cache-r1` 同一长会话部署后连续两个普通中文追问分别得到 24,168/24,388 provider
+  cache-read，第二轮只发生 1 个物理调用且准确续接上一排序；不能用模型记得内容或屏幕 Context 代替该
+  provider usage 证据。
 
 ## 2026-08-27 慢模型首事件与滚动 idle 分相（本地候选）
 

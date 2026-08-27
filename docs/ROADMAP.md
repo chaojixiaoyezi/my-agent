@@ -72,7 +72,7 @@ thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 
-状态：V1/V2 均已部署真机；追加式缓存双 provider 已取证，本地模型长任务失败待独立修复
+状态：V1/V2 与跨完成回合 messages 已部署 `.10` 真机；`.7` 慢模型长任务仍自然运行
 
 解决问题：同一长 TUI 中，当前模型可见上下文从 60 多 K 回落到 50 多 K，但 canonical thread 仍为
 `compact 0`。权威账本证明没有漏记 Compact；真实缺口是普通回合结束后 native ToolCall/ToolResult 只保留
@@ -118,9 +118,12 @@ child；轻量运行时 遇到 600 秒流总墙钟超时，工具运行时 未�
 
 当前本地候选已按 会话运行时 拆掉流式固定总墙钟：动态 first-event 与 rolling idle 分相，预算作为 request-local
 option 传入，不修改共享 backend；默认慢速估算 200/20 token/s、最大 10,800 秒，可覆盖约 1M 输入的极慢
-prefill。`runtime_injections` 同时从 native 固定 user 前缀移到 IR 后动态尾部，避免 lifecycle wake 改写既有
-缓存前缀。超时、prompt/cache、native IR 相关 focused 已通过，仍需在 `.7` 本地慢模型和 `.10`
-MiniMax-M2.7 的真实 TUI 长多子代理任务中验证总时长、首包、idle、停止和 provider usage。
+prefill。Gateway/child 已把 committed summary、已结束 user/assistant 与当前 user 作为 canonical messages
+顺序发送；`runtime_injections`、memory、推荐和 workspace 位于 IR 后动态尾部，不再把 transcript 重复塞进
+变化 prompt。`.10` 原长会话部署后两个普通追问分别得到 24,168/24,388 provider cache-read，第二轮按两档
+价格节省约 66.12%/53.98%。`.7` r65 在 42 分钟时仍有七名 child 运行、没有固定墙钟 timeout，已证明
+跨过旧 600 秒边界；仍需等待自然终态后核对完整产物、恢复 MiniMax 唯一 Gateway，并继续 会话运行时/终端交互
+MiniMax 同题对照，不能用当前存活样本冒充完成度。
 
 r62 的第九名替身已定位为 `planned_dispatch.v2` 未检查已有直属兄弟的 active covers。候选协议升为 v3：
 活动直属 run 持续占用 exact covers，只有显式 replacement 可接管；创建复检、PLANNING 落账和 takeover edge

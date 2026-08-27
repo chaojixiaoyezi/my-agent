@@ -1,5 +1,14 @@
 # COMPLETED
 
+- 2026-08-27 `2ca6e6c` 完成普通主代理与递归 child 的跨回合 canonical messages 缓存前缀：Gateway/child
+  ConversationStore 先冻结 committed Compact summary 与完整消息边界尾部，runtime 再按已结束历史、当前
+  user、本轮工具 IR 的时间顺序发送；记忆召回、推荐、工作区、wake 和执行事实只放动态尾。当前 user 的
+  typed prompt 副本不再重复发送或重复计 token，text/native 也不再各自读取一遍历史。相关 12 个测试文件
+  的扩大 focused 通过（保留既有 xfail），Ruff、doc sync、strict code-size、diff 和 wheel 边界通过。
+  `.10` 原 `ma-110-dispatch-cache-r1` 长会话部署后两次自然追加分别命中 24,168/24,388 cache-read；第二次
+  只有 1 个物理调用且正确续接上一排序。该完成项只表示缓存/历史底座已进真实主链，不把 6/8 调研内容质量
+  或仍运行中的 `.7` 慢模型长任务冒充完成。
+
 - 2026-08-27 补齐 OpenAI-compatible 后端的统一 thinking observer 合同：首次本地模型真 TUI 的 typed
   `on_thinking_delta` 参数错误已先红后绿；Chat Completions 的 `reasoning_content` 现在与正文分流，
   在正文/工具或流结束处只封口一次，工具调用续轮只回放白名单思考字段，未知扩展不进 canonical IR。

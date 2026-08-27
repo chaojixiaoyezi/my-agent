@@ -285,17 +285,18 @@ python3 -m pytest \
 覆盖点：
 
 - 普通字符串调用方保留稳定工具尾、首条 prompt 与最新历史的旧 copy-on-write 断点；
-- `CacheStructuredPrompt` 的完整字符串必须等于 stable system + stable user + volatile 正文；
-  stable system 只允许系统规则、owner scope、Persona/Prompt Files/Skill 和文本工具目录；stable user
-  可含 run 固定的记忆、Conversation、推荐工具与用户任务；会首工具后变化的 Workspace 和每次执行事实必须在 volatile；
-- Anthropic native 必须是 stable initial user → canonical IR → volatile facts，始终只有一个
+- `CacheStructuredPrompt` 的完整诊断字符串必须无损包含 stable system、兼容 user 段、current-user 副本与
+  volatile 正文；stable system 只允许系统规则、owner scope、Persona/Prompt Files/Skill 和文本工具目录；
+  current user 通过 canonical messages 发送，记忆、Conversation 运行事实、推荐工具、Workspace 和执行事实
+  必须在 volatile；
+- Anthropic native 必须是 committed summary/已结束消息 → current user → current-turn IR → volatile facts，始终只有一个
   message-level 断点并向最新历史推进；tools/system 断点继续保留；
 - OpenAI-compatible native 必须投影成同样的追加顺序，且不生成 Anthropic 专用字段；
 - native 首轮即使 IR 历史为空也必须保留 `messages=[]`，不能压成代表 text 请求的 `None`；
 - copy-on-write 后输入 messages/tools 与 canonical IR 保持逐字段不变；
 - `messages=None` 的普通 text 请求和空 prompt 的旧请求形态不变；
 - 配置关闭后 payload 不出现 `cache_control`，YAML 与 dataclass 默认一致；
-- 配置关闭后 typed prompt 必须仍以一个完整 user 字符串发送，不能丢 stable 段或改变顶层 system 字符串；
+- 配置关闭后 typed prompt 仍须无损发送全部段落，但 current user 不能因关闭缓存而在 prompt/messages 重复；
 - 部署后的真 TUI 必须从 provider usage ledger 观察到先 cache-write、后 cache-read，不能用 Context 或
   Compact 数字替代该证据。
 

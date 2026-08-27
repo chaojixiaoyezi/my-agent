@@ -1,5 +1,27 @@
 # STATUS
 
+## 2026-08-27 跨完成回合缓存、慢模型与派工真 TUI（`.10` 已通过；`.7` 仍自然运行）
+
+- `2b98dde` 先落慢流和派工底座：流式调用取消隐式总墙钟，只保留 request-local first-event 与 rolling idle；
+  active covers、replacement edge 和共享工作区也统一走结构化创建门。`.10` 的
+  `ma-110-dispatch-cache-r1` 用用户原八项目调研 prompt 一次创建 8 名 child，全部进入终态，没有第九名
+  替身、provider retry 或 timeout；主任务约 11 分 38 秒。业务质量仍只有 6 份深报告，轻量运行时/终端交互 两份
+  只写了“未找到”，因此底座派工通过不等于调研内容完整。
+- 同一 `.10` 长会话在旧布局下追加普通追问时能正确回忆，但该轮账为 33,562 普通 input、0 cache-read，
+  根因是 Gateway 把已结束 transcript 放进每轮变化的 runtime injection，下一轮没有把上一 user/assistant
+  作为 canonical messages 前缀。`2ca6e6c` 新增 immutable `ConversationHistorySeed`：main/child 均按
+  committed summary → completed user/assistant → current user → current-turn IR → volatile facts 发送；native
+  provider 省略 typed prompt 中的 current-user 诊断副本，text 协议从同一 seed 只渲染一次。
+- 原 tmux 原 thread 部署后连续两个普通中文追加任务均由 `MiniMax-M2.7` 正常完成。第一轮 2 次物理调用为
+  52,466 普通 input、24,168 cache-read、0 cache-write、943 output；第二轮只 1 次调用，为 11,759 普通
+  input、24,388 cache-read、0 cache-write、390 output，且能直接续接上一轮排序。第二轮按输入 5、缓存
+  0.1/1，相对全部普通输入分别节省约 66.12%/53.98%。这是 provider usage 证据，不以回答正确或屏幕
+  Context 冒充命中。
+- `.7` `ma-107-slow-stream-r65` 使用本地慢模型跑同一八项目长任务，42 分钟时仍有 7 名 child 正常运行、
+  1 名 child 为 typed BLOCKED，主代理继续接收工具事件；它已明显跨过旧 600 秒固定墙钟且没有 timeout 或
+  重复替身。该样本尚未自然终态，因此只证明健康慢流存活，不能提前写成任务完成，也不能此时重启唯一
+  Gateway。自然结束后再恢复 `testbox-single-gateway.yaml + MiniMax-M2.7` 并做 fresh 实际调用验收。
+
 ## 2026-08-27 原生追加式 prompt 缓存（双 provider 真 TUI 已取证；本地长任务未完成）
 
 - `.7` 唯一 Gateway 上用透明代理只记录长度、哈希和 cache marker，未记录 prompt 或 Key。旧链连续请求的
@@ -10,8 +32,9 @@
   4,696,945 普通 input / 1,286,446 cache-read / 21,118 cache-write，按输入 5、缓存 0.1/1
   相对全部普通输入只省约 21.0%/17.1%。
 - 对照 会话运行时 会话级 `prompt_cache_key` + 旧历史前缀，以及 终端交互 每次只把一个 message
-  断点向最新历史推进，当前 typed 布局改为三段：稳定 system、run 固定的首条 user、每轮动态尾部。
-  Anthropic 的真实 wire 顺序为「稳定 system/tools → 固定 user → append-only IR → 动态事实」，
+  断点向最新历史推进，当前 typed 布局明确分出稳定 system、canonical messages、当前 user 诊断副本和
+  每轮动态尾部。Anthropic 的真实 wire 顺序为「稳定 system/tools → committed summary/已结束消息 →
+  当前 user → append-only 当前轮 IR → 动态事实」，
   并且始终只有一个 message 断点；OpenAI-compatible 也用同样顺序供本地 KV 前缀复用。
   任务工作区会在首工具前后从 pending 变成真实路径，因此明确留在 IR 后的动态尾部。
   正文、历史、归档、Compact 和权限没有被删减或重写。

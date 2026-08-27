@@ -9,7 +9,8 @@
   data 不受固定总墙钟误杀；默认 10,800 秒 max 只给极大慢输入，小请求仍按 token 估算。
   本地 focused 已通过；`.7` r62 终态账本已有
   6,097,485 cache-read；本地 r64 首段也有 40,960 cached，但长任务因本地流 600 秒超时且只派出两名
-  child 而失败，故仍不能勾选。OpenAI-compatible 还必须接受统一 thinking observer；有
+  child 而失败。新 `.10` 原长会话两个普通追问已命中 24,168/24,388 cache-read；`.7` r65 已跨旧 600 秒
+  继续运行但尚未终态，故仍不能勾选。OpenAI-compatible 还必须接受统一 thinking observer；有
   `reasoning_content` 时思考增量、封口、正文顺序和工具续轮回放均不得丢失。
 
 - [x] child capability grant 与 exact tool approval 继续分账；child 的实际 `BackgroundTranscriptSink` 遇到

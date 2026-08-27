@@ -169,8 +169,9 @@
   provider-visible Context 快照；下一次真实模型调用再刷新精确数字，不能继续显示旧 `compact 0`，也不能
   为刷新界面额外调用模型或从成功文案反解析代数。TUI 启动、恢复或空闲轮询时，即使当前没有 Working 块，
   也必须消费 activity snapshot 中的 canonical generation；同一 session 的代数只能单调增加，迟到旧帧不能回退。
-- 原生请求固定顺序为稳定 system/tools、run 固定首条 user、append-only native IR、当前动态尾部。生命周期
-  wake、后续插话和恢复注入只能进入 IR 后的动态尾部，不能改写历史之前的固定 user 前缀。流式超时拆成
+- 原生请求固定顺序为稳定 system/tools、committed Compact summary、已结束 user/assistant、当前 user、
+  append-only 当前轮 native IR、当前动态尾部。当前 user 只能在 wire messages 出现一次；生命周期 wake、
+  后续插话和恢复注入只能进入 IR 后的动态尾部，不能改写旧会话前缀。流式超时拆成
   connect、动态首事件和滚动 idle：首条有效 SSE data 后每个有效事件重置 idle，健康慢流没有隐式总墙钟；
   非流式总预算继续有界，显式 `/stop` 必须能打断连接、首包、流间隔和退避。
 - 工具边界前后的 assistant commentary 是正式用户可见消息：同一 request 用
