@@ -1,14 +1,16 @@
 # Gateway Progress
 
-## 2026-08-27 thinking block-stop 先于正文（本地候选）
+## 2026-08-27 thinking block-stop 先于正文（已部署真机验证）
 
 - r55 原始 chunk 的最后一轮为 `thinking_delta* -> model_delta* -> assistant_thinking`，所以 TUI 已在正文开始
   时封口增量块，迟到全文又在 final 后创建第二块；这是 producer 顺序错误，不是模型完成后再次思考。
 - 对照 会话运行时 reasoning delta/final 同 item 生命周期与 终端交互 `content_block_stop` 后，Anthropic collector
-  在原 thinking block stop 发布完整终态；backend capability 控制新 callback，已发布的物理调用跳过 response
-  fallback。TUI 只为旧 chunk 消费一次迟到终态，不以文本相等判断去重。
-- collector 顺序、response 不重放、旧流最终块三条失败优先回归已先红后绿；待完整 focused、严格 gate、
-  推送、`.7` 唯一 Gateway 部署及原 r55/新请求双重复验。
+  在原 thinking block stop 调用同一 observer 的 typed `complete`；backend capability 控制该方法，已发布的
+  物理调用跳过 response fallback。TUI 只为旧 chunk 消费一次迟到终态，不以文本相等判断去重。
+- collector 顺序、response 不重放、旧流最终块三条失败优先回归已先红后绿；完整 focused 与严格 gate
+  通过。`ae3fd1e` 已推送、快进部署 `.7`，原位重启后唯一 Gateway PID `1416524`、模型 MiniMax-M2.7。
+- 恢复 `ma-r55-terminal-sticky-retest` 后用普通中文发起真实请求：chunk 2--94 为 thinking delta，95 为唯一
+  thinking terminal，96--117 才是正文；TUI 显示一块灰色 Thought 后接 final，最底稳定块为 assistant。
 
 ## 2026-08-27 终态 sticky cwd 在首采样前生效（已部署真机验证）
 

@@ -1,5 +1,11 @@
 # COMPLETED
 
+- 2026-08-27 `ae3fd1e` 修复流式 thinking 在 final 后复制：Anthropic collector 在原
+  `content_block_stop` 调用同一观察器的 typed `complete`，同一物理调用不再由 response fallback 重放；
+  TUI 对旧 Gateway 的迟到完整终态只消费一次。完整 focused 与本地严格 gate 通过，已推送并部署 `.7`
+  唯一 Gateway PID `1416524`。原 `ma-r55-terminal-sticky-retest` 恢复后的真实 MiniMax-M2.7 请求只有一个
+  `assistant_thinking`，它严格早于正文；屏幕最底稳定块是 assistant final。
+
 - 2026-08-27 `1e91935`、`1b75762`、`1e4c64d` 完成长 TUI 正文/思考时序、完整消息边界、单行滚轮、
   canonical task root 与终态 sticky cwd 首采样绑定。完整 focused 与本地严格 gate 通过，已推送并部署 `.7`
   唯一 Gateway。fresh r55 的 5 名 child 自然完成、main 自动接棒、final 直接显示；同一 thread 三个独立

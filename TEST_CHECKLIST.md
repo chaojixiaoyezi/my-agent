@@ -34,12 +34,12 @@
 - [x] 主代理 `compact N` 只读成功提交的 `ConversationThread.compact_generation`，子代理读自己的 canonical
   generation；进度百分比、屏幕历史和模型正文不计数。128k 窗口、90% 压缩点下，68k（53%）显示
   `compact 0` 正常；95 项 Compact/TUI 组合回归通过。
-- [ ] 同一 request 的工具前后 commentary 以 `assistant_part_id=commentary:N` 完整落账，final 使用
+- [x] 同一 request 的工具前后 commentary 以 `assistant_part_id=commentary:N` 完整落账，final 使用
   `assistant_part_id=final`；恢复/配对不重复、不丢段，长报告无需 `Ctrl+O` 即可直接看到。多次模型调用的
   thinking 各自按时间顺序封口，空首块消失，终态不留 spinner；滚轮每格只移动一行。完整相关 focused
-  与本地严格 gate 已通过；`.7` r54/r55 已实测过程和长报告直接显示，但 r55 最后一轮又发现流式完整
-  thinking 在 final 后迟到并复制。当前 block-stop producer 修复和旧流兼容回归已转绿，待 `.7` 真 TUI
-  确认最后稳定块为 assistant 后再重新勾选。
+  与本地严格 gate 已通过；`.7` r54/r55 已实测过程和长报告直接显示。`ae3fd1e` 又把流式完整 thinking
+  收到 provider 原 block-stop：新真请求的唯一 `assistant_thinking` 严格早于首个 `model_delta`，TUI 最底
+  稳定块为 assistant final；旧流 `thinking_delta -> model_delta -> assistant_thinking` 回放也只保留一块。
 - [x] 普通 user/assistant 历史不得按固定字符数裁剪；预算回收只移除最老的完整消息，真正旧前缀替换只由
   Conversation Compact 执行。provider ledger 应持续记录 cache-read。价格样本在缓存价 0.1/1 时分别为
   `1,811,699.1`/`2,023,236`，不得用屏幕 Context 猜缓存命中；真机已有 42,107、12,987、17,019 等

@@ -1698,9 +1698,9 @@ r55 原始 chunk 第 223--228 条是 `thinking_delta`，229--236 条已经是最
 同内容 `assistant_thinking`。这会让 TUI 先因正文冻结增量思考，再把迟到全文当成新块追加到 final 后。
 回归必须覆盖：
 
-- Anthropic collector 在 thinking 的原 `content_block_stop` 调用 `on_thinking_complete`，且严格早于下一
-  text callback；
-- 只有显式声明 `supports_thinking_completion` 的 backend 才收到新 callback，fake/旧后端调用形态不变；
+- Anthropic collector 在 thinking 的原 `content_block_stop` 调用同一 delta observer 的 typed `complete`，
+  且严格早于下一 text callback；普通 callable、fake 与旧后端调用形态不变；
+- 只有显式声明 `supports_thinking_completion` 的 backend 才附加完成方法；
 - 同一物理调用已经发布 stream completion 后，response 级 `assistant_content_blocks` fallback 不再重放；
 - TUI 重放旧 chunk 时，`thinking_delta -> model_delta -> assistant_thinking` 只保留一个原位 thinking，最后
   一个稳定块仍是 assistant final。
@@ -1716,3 +1716,7 @@ python3 -m pytest \
   agent_py_agent/tests/test_background_notice_display.py \
   -q --tb=short
 ```
+
+以上完整 focused 与 Ruff、doc sync、strict code-size、diff、clean-package 严格 gate 已通过。
+`ae3fd1e` 推送部署 `.7` 唯一 Gateway 后，原 r55 会话中新 MiniMax-M2.7 请求的 chunk 2--94 为
+`thinking_delta`、95 为唯一 `assistant_thinking`、96--117 为 `model_delta`；真实 TUI 最后一块为 final。
