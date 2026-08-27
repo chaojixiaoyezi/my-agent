@@ -336,7 +336,9 @@
 - [ ] `/stop` 后 transcript、compact、memory 和 task workspace 保留；用户后续自然说“继续”时，模型用精确 task id 重开原现场，不创建第二个任务目录。
 - [ ] 同一 TUI/IM thread 的普通任务自然 `completed` 后，下一条消息在首个
   `promotes_task` 工具处建立新 successor id，但必须继承同一 canonical task root；
-  旧 link 保持终态，模型不得因为相对路径失败而搜索、复制旧产物到新空目录。
+  旧 link 保持终态；sticky root 必须在首个模型采样前成为模型、工具、审批和沙箱共同的 cwd，不能等到
+  handler pre-gate 才切换。模型不得因为相对路径失败而搜索、复制旧产物到新空目录。r55 已证明 identity
+  与 task_path 续接，但首条后台命令仍服务空启动目录；当前候选待部署后复验。
 - [ ] `/goal` 每 thread 只允许一个未结束目标，pause/resume/edit/clear 保留正确任务身份；active goal 的 `/stop` 只暂停，complete/blocked 仅由精确 scoped 工具写入。
 - [ ] `/audit` 只在显式前缀激活，guarantee/window 沿子代理结构化继承；普通 prompt、goal、summary 中的 `/audit` 文字不激活 watch 保证。
 - [ ] 同一 Agent 的前台聊天和后台续跑并发时，prompt、request id、task workspace 和 tool-loop params 不串；已销毁 Agent 不留下可被 object-id 复用的旧状态。

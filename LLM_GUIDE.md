@@ -45,6 +45,10 @@
   合理假设都会造成实质偏离、越权或不可逆风险的关键缺口才问一个简短问题。该纪律不解析用户正文、不生成
   机器状态、不恢复完成验收；发布 YAML 与 dataclass 默认值必须逐字一致，用户仍可通过唯一
   `system_prompt` 配置入口覆盖。
+- 会话一旦已有 exact non-detached sticky task，Gateway 必须在下一轮第一次模型采样前把该 canonical
+  task root 投影为唯一 `conversation_execution_cwd/runtime_workspace_roots`；模型 Workspace Context、工具
+  write boundary、审批路径和实际进程 cwd 必须同值。terminal link 仍不预填旧 live task id 或
+  `run_workspace`，首个 `promotes_task` 工具只负责创建 successor，不再承担“临执行才切 cwd”。
 - 子代理完成、阻塞或能力申请唤醒不是一条新用户任务，而是原 root active turn 的后续工作片。必须从
   exact thread/task link 恢复原始 objective 和 task path：原始 objective 继续占据 `User Task` /
   `root_user_prompt`，结构化 wake 只作为 runtime continuation 注入。该 root 自己的 canonical tool-output

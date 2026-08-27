@@ -1816,9 +1816,10 @@ def _audit_runtime_prompt_section(request: dict) -> str:
     )
 
 
-# LLM: Stamp the exact sticky workspace lineage on every turn.  Promotion creates a fresh ordinary
-# execution over terminal history, while an exact paused /goal may resume in place.
-# 函数用途: 生成本轮结构化会话参数；同一会话直接续用目录，无需让模型选择历史任务。
+# LLM: Stamp the exact sticky workspace as the turn cwd before the first model sample while
+# keeping terminal lifecycle identity separate. Promotion may create a fresh execution later,
+# but every model/tool/approval path must already resolve relative paths from this one cwd.
+# 函数用途: 生成本轮结构化会话参数；先进入同一任务目录，再按首个工作工具建立本轮执行身份。
 def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict | None:
     attrs: dict[str, object] = {}
     if conversation.thread_id:
@@ -1831,16 +1832,20 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
         )
     if conversation.workspace_task is not None:
         task = conversation.workspace_task
+        # 会话运行时 在模型采样前就把 session/turn cwd 固定下来，shell、审批与模型看到
+        # 的目录完全一致。本项目的 owner 隔离要求 sticky task root 在持久工作开始后
+        # 取得同样权威；client cwd 只属于任务晋升前，不能在 completed 后续轮重新冒头。
+        attrs[CONVERSATION_EXECUTION_CWD_ATTR] = task.task_path
+        attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = [task.task_path]
         attrs[CONVERSATION_WORKSPACE_TASK_ID_ATTR] = task.task_id
         attrs[CONVERSATION_WORKSPACE_TASK_STATUS_ATTR] = task.status
         attrs[CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR] = task.execution_running
         attrs[CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR] = (
             task.execution_state_available
         )
-        # 终态任务(completed 等)不预填旧的 live task 身份：纯聊天不得复活
-        # 旧任务。但 workspace_task_id 仍是 thread 的持久 cwd；本轮首个
-        # promotes_task 工具会由 task_promotion 以新 request/task 身份在同一
-        # task_path 建立 successor，旧终态不变，也不复制目录。
+        # 终态任务(completed 等)不预填旧的 live task 身份或 run_workspace：纯聊天
+        # 不得复活/归档旧任务。但上面的 execution_cwd 已在首采样前指向 sticky root；
+        # 本轮首个 promotes_task 工具再以新 request/task 身份在同一路径建立 successor。
         if str(task.status or "").strip().lower() in {"active", "interrupted"}:
             attrs["conversation_task_id"] = task.task_id
             attrs["run_workspace"] = {
@@ -2834,11 +2839,10 @@ def _safe_nonnegative_int(value: object) -> int:
         return 0
 
 
-# LLM: The sticky task link carries lifecycle and internal-state continuity,
-# not cwd authority.  会话运行时 keeps cwd on the turn context, so never expose the
-# hidden task_path here as the project directory; Workspace Context already
-# publishes the real tool cwd.
-# 函数用途: 告诉模型同一会话的任务状态是否仍在运行，但不把内部台账目录冒充当前工作目录。
+# LLM: Sticky selection already becomes the host-authored turn cwd in task attributes, matching
+# 会话运行时's one cwd for model, tools and approvals. This section only explains lifecycle and must
+# neither repeat the private path nor create a second workspace authority.
+# 函数用途: 告诉模型同一会话的任务状态是否仍在运行；实际目录只由 Workspace Context 展示一次。
 def _append_current_workspace_prompt(
     lines: list[str],
     workspace: _GatewayWorkspaceSelection | None,
@@ -2858,7 +2862,7 @@ def _append_current_workspace_prompt(
     lines.extend(
         [
             "## Current Task Runtime",
-            "- 这是该 thread 跨轮继承的任务状态，不改变 Workspace Context 中的真实 cwd。",
+            "- 这是该 thread 跨轮继承的任务状态；实际 cwd 以 Workspace Context 的唯一值为准。",
             "- 普通聊天、代码修改和其他工作都在同一个会话历史里；当前 User Task 直接决定本轮做什么。",
             "- 不要要求用户选择、开始、完成或关闭历史任务。task_progress 只是可选进度笔记，不控制后续轮次。",
             lifecycle_guidance,

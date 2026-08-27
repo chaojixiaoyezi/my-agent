@@ -25,10 +25,23 @@
   terminal-successor 链，新 request 错建空目录，模型遂去搜索并复制旧 `bbb`。当前修复让
   completed/interrupted 都以新 execution/task id 继承同一 thread cwd，旧终态不变。
   workspace/store/writer 完整定向 150 项已通过，第二次 Ruff、doc sync、strict code-size、diff 和
-  clean-package 严格 gate 全绿；待部署与 fresh 两轮 TUI 复验。
+  clean-package 严格 gate 全绿；`1b75762` 已推送部署。
+- fresh `ma-r55-terminal-sticky-retest` 第一段再次证明 5 名 child 自然结束、main 自动接棒、最终报告直接
+  可见，真实产物与 successor identity 均在原 canonical task root。第二段又抓到更底层的一拍延迟：
+  completed sticky 的 `task_path` 已被 successor 正确继承，但首个模型采样仍收到 TUI 启动 cwd；第一条
+  `run_command` 因而把空启动目录 `/bbb` 写成绝对路径，审批后才发生 promotion，无法再改已经生成的命令。
+  当前候选把 exact non-detached sticky root 在首采样前投影为 `conversation_execution_cwd` 与唯一 runtime
+  root，同时不预填 terminal live id/run workspace。对应 completed/interrupted × 5 工具回归已先红后绿；
+  待严格 gate、推送、单 Gateway 部署后在同一 TUI 追加启动任务复验。
 - r54 的 Context 从当轮 83.6k 回到下轮 39.5k 不是 Compact 或丢聊天：canonical transcript
   仍完整保留 10 条 user/commentary/final，变小的是已完成回合中的巨型 write/read 工具载荷，
   它们按已接受的终态折叠合同转为有界、可核对投影。该折叠不推进 generation，不冒充 Compact。
+- r55 第一段在 105.8k/128k（83%）自然结束，仍低于 115.2k 压缩线，因此 `compact 0` 正确。第二段首轮
+  约 43.5k 是上一工具长链终态折叠后的模型可见压力，不是未记账 Compact；价格仍按 provider cache-read
+  唯一账本核算，缓存命中单价 0.1/1 两档分别使用 `1,811,699.1/2,023,236`。
+- r55 的 `network_status` 正确给出 `unverified_external_probe_required`，模型也明确没有把本机 200 升级为
+  局域网已验证；Mac 对 `192.0.2.7:8765` 实测连接失败。它仍把空目录 HTTP 200 说成“游戏已就绪”，
+  根因就是上述 cwd 晚切；修复后还需同时核对 HTTP 正文确为游戏而不是目录页。
 
 ## 2026-08-26 后台进程改归 conversation session 托管（已部署真机通过）
 

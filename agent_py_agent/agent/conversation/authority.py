@@ -54,8 +54,9 @@ CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR = "conversation_workspace_executio
 CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR = (
     "conversation_workspace_execution_state_available"
 )
-# The client project cwd is a trusted thread setting, not a model-selected task path. Gateway
-# validation persists it and projects it into each foreground/background turn.
+# The Gateway-hosted effective cwd is a trusted turn setting: before durable work it is the
+# validated client cwd; once a sticky task exists it is that canonical owner/task root. Model
+# prose and tool arguments never choose or override it.
 CONVERSATION_EXECUTION_CWD_ATTR = "conversation_execution_cwd"
 CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR = "conversation_runtime_workspace_roots"
 
@@ -86,9 +87,9 @@ def current_conversation_task_attributes(agent: object) -> dict[str, object]:
     return delegated if isinstance(delegated, dict) else {}
 
 
-# LLM: The Gateway-validated client cwd is the only per-thread override for relative path
-# semantics. Callers must not fall back to prompt text, task titles, or hidden task_root fields.
-# 函数用途: 从当前会话属性读取 TUI/CLI 指定并由 Gateway 校验过的真实工作目录。
+# LLM: This is the one Gateway-hosted cwd for relative-path semantics. It is either the validated
+# pre-task client cwd or the selected canonical task root; callers never derive it from prose.
+# 函数用途: 从当前会话属性读取本轮模型、工具和审批共同使用的唯一工作目录。
 def conversation_execution_cwd(attributes: object) -> str:
     if not isinstance(attributes, Mapping):
         return ""

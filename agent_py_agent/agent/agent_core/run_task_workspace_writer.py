@@ -710,11 +710,10 @@ def _workspace_work_dir_from_mapping(value: object, key: str) -> str:
 #   收编进 lessons/workspace.md,按需召回而非每轮灌输。改动时同步检查
 #   home_memory_seeds 的 workspace lesson 与 tests/test_run_task_workspace_writer。
 # 函数用途: 告诉模型本轮任务的目录事实(在哪读、往哪交),一眼看完不啰嗦。
-# LLM: Conversation turns mirror 会话运行时: the user/project cwd is model-visible,
-# while task_root/output/work remain host-private bookkeeping.  Standalone runs
-# retain their explicit delivery workspace because no interactive cwd contract
-# exists after the process returns.
-# 函数用途: 按运行形态展示真实工作目录；会话不再把隐藏任务台账目录说成项目目录。
+# LLM: Conversation turns mirror 会话运行时 by exposing one host-authored effective cwd. Before task
+# promotion it is the validated client cwd; after sticky selection it is the canonical owner/task
+# root. output/work remain private bookkeeping. Standalone runs keep the delivery layout.
+# 函数用途: 按运行形态展示唯一真实工作目录；会话中的相对路径始终从当前有效 cwd 解析。
 def _workspace_prompt_section(
     paths,
     *,
@@ -750,10 +749,10 @@ def _workspace_prompt_section(
     )
 
 
-# LLM: A Gateway/IM conversation has a persistent user cwd even after its
-# internal task workspace is materialized.  cli_run owns a standalone delivery
-# workspace and deliberately keeps the legacy output/work presentation.
-# 函数用途: 判断本轮是否应隐藏内部任务目录，只向模型展示会话的用户工作目录。
+# LLM: A Gateway/IM conversation exposes its persistent effective cwd (client cwd before work,
+# canonical task root afterwards) without separately advertising output/work bookkeeping.
+# cli_run remains a standalone delivery run.
+# 函数用途: 判断本轮是否使用会话式单 cwd 展示，而不是单次运行的交付目录展示。
 def _conversation_workspace_uses_user_cwd(params: object) -> bool:
     source = str(getattr(params, "source", "") or "").strip().lower()
     if source == "cli_run":
@@ -807,9 +806,9 @@ def _task_attributes_with_workspace(attrs: object, paths) -> dict:
     return result
 
 
-# LLM: Relative user paths must resolve from the Gateway-validated thread cwd when present. The
-# process-level registry root is only the standalone/legacy fallback and must not leak into TUI tasks.
-# 函数用途: 返回本轮用户看到的项目根目录，供任务目录提示和交付路径换算共用。
+# LLM: Relative user paths resolve from the Gateway-hosted effective cwd: validated client cwd
+# before work and canonical sticky task root afterwards. Process root is only a standalone fallback.
+# 函数用途: 返回本轮唯一有效工作目录，供提示、工具和交付路径换算共用。
 def _primary_workspace_root(agent, params: object | None = None) -> Path:
     current = params if params is not None else getattr(agent, "_current_run_params", None)
     root = conversation_execution_cwd(getattr(current, "task_attributes", None))

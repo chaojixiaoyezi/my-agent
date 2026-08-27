@@ -256,7 +256,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 ## 2026-07-28 工作目录、task lifecycle 与 model attempt
 
 - `request_execution._gateway_task_attributes` 把 sticky workspace 与 live `conversation_task_id`
-  分栏。终态 link 只投影 cwd/status；active link 只有在结构化执行状态允许时才成为当前执行身份。
+  分栏。exact non-detached sticky `task_path` 在模型首采样前投影为唯一 `conversation_execution_cwd` 与
+  runtime root；终态 link 只投影 cwd/status、不预填 live id/run workspace，active/interrupted 才携带当前
+  执行身份。这样 shell 参数、审批路径、write boundary 和实际进程 cwd 不会晚于模型一步切换。
 - `conversation.task_promotion` 在终态 workspace 上用当前 request id 建立幂等 successor，旧 link 不改；
   successor 的 goal 来自本轮精确 user prompt，终态 link 只贡献 sticky cwd，不能把旧 goal 带进新的
   background continuation；本轮输入缺失时不创建 successor。`/goal` 的精确持久记录是唯一允许原 id resume 的例外。`run_task_workspace_writer` 只在本轮工作工具已

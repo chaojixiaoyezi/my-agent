@@ -3227,10 +3227,13 @@ def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first
         assert attrs["conversation_task_id"] == "task-original"
         assert attrs["run_workspace"]["task_root"] == str(workspace.resolve())
     else:
-        # completed 只暴露 sticky cwd 事实，不预填旧 live 身份；首个
-        # promotes_task 工具再建新 execution successor。
+        # completed 只暴露 sticky cwd 事实，不预填旧 live 身份或运行台账；首个
+        # promotes_task 工具再建新 execution successor。cwd 必须在模型首采样前
+        # 已经是 sticky root，否则第一条 shell 会把绝对路径写成旧客户端启动目录。
         assert "conversation_task_id" not in attrs
         assert "run_workspace" not in attrs
+    assert attrs[CONVERSATION_EXECUTION_CWD_ATTR] == str(workspace.resolve())
+    assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [str(workspace.resolve())]
     assert CONVERSATION_TASK_TURN_ACTIVE_ATTR not in attrs
     assert before.status == prior_status
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False

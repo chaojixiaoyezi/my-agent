@@ -155,7 +155,9 @@
 - cwd 与运行台账严格分离，但持久工作开始后只认一个 owner-scoped canonical task root：任务晋升前的普通
   对话可以使用 Gateway 校验过的 client cwd；首个 `promotes_task` 动作创建或复用
   `<owner_home>/tasks/<task_path>/` 后，main、child、grandchild 的默认 `execution_cwd`、产品写根和相对路径
-  都切到该 task root。后续普通轮通过 thread 的 `workspace_task_id` 复用同一根；不得重新继承 Gateway daemon
+  都切到该 task root。后续普通轮通过 thread 的 `workspace_task_id` 复用同一根，并在第一次模型采样前就把
+  该 root 投影为 turn `execution_cwd`；旧 terminal link 仍只贡献目录、不恢复 live task 身份，首个工作工具
+  再建立本轮 successor。模型、工具、审批和沙箱不得先看到 client cwd、执行时才晚一步切目录。不得重新继承 Gateway daemon
   的 `/root`、客户端临时 cwd 或另造 `child_outputs`。显式工作目录仍须落在结构化允许根内，
   `allowed_write_roots` 只授权范围，不从自然语言或模型给出的绝对路径反向选择 cwd。
 - interrupt 是父子边上的显式控制事实，自动重试资格不能否决父级的打断。会话的

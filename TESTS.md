@@ -1655,6 +1655,16 @@ python3 -m pytest \
 `bbb` 及主要 JS/HTML 全部落在 exact owner task root。第二条「继续启动」消息又精确复现了
 completed sticky 被错分流到新目录：`list_files bbb` 先失败，模型随后搜索旧目录并复制产物。
 
+`1b75762` 部署后的 fresh `ma-r55-terminal-sticky-retest` 已证明 successor task id 和 canonical
+`task_path` 相同，但第二轮第一条后台命令仍指向 TUI 启动 cwd 的空 `bbb`。这是“模型首采样在前、工具
+pre-handler promotion 在后”的时序缺口，不是 task link 再次分叉。回归新增以下要求：
+
+- exact non-detached sticky workspace 一旦存在，`_gateway_task_attributes` 必须在本轮首采样前把其
+  `task_path` 设为 `conversation_execution_cwd` 和唯一 runtime root；
+- terminal link 不得因此预填旧 `conversation_task_id` 或 `run_workspace`，纯聊天仍不激活/归档任务；
+- active/interrupted/completed 的模型 Workspace Context、工具 write boundary、审批显示 cwd 和实际进程
+  cwd 必须一致；不能先向模型展示客户端启动目录，再期待 handler 执行时重写命令字符串。
+
 回归要求：
 
 - 同一 thread 的 sticky root 已 `completed` 或 `interrupted` 时，新 request 必须保持旧 link
@@ -1664,6 +1674,8 @@ completed sticky 被错分流到新目录：`list_files bbb` 先失败，模型�
 - 新 successor 的 goal 只能来自当前 user prompt，不得复制旧 goal；空当前 prompt 仍
   fail-closed；
 - 纯聊天不预填旧 live task 身份、不复活旧终态；sticky 只在首个真工作工具处生效。
+- 纯聊天虽然不激活任务，但模型和只读上下文已进入 sticky cwd；“建立 successor”与“确定 cwd”是两个
+  结构化阶段，不能为了懒建 task 而让 cwd 晚一拍。
 
 修复后 `test_gateway_chat_conversation_context.py + test_conversation_store.py +
 test_run_task_workspace_writer.py` 完整定向通过；其中 completed/interrupted × 5 类首工具的精确组合为
