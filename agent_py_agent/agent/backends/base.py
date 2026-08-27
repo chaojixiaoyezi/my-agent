@@ -146,6 +146,9 @@ class BaseBackend:
     # 只有确实能从 provider 流中取得结构化工具参数 delta 的后端才开启；
     # 上层据此避免给第三方/fake backend 传入未知关键字。
     supports_tool_input_progress = False
+    # 只有能在 provider content block stop 处给出思考终态的后端才开启；
+    # 上层据此保证终态先于后续正文，并避免给旧 backend 传入未知关键字。
+    supports_thinking_completion = False
     # 只有把宿主规则送进供应商真实 system/developer 通道的后端才能开启；上层据此避免给旧 fake 传新参数。
     supports_system_instructions = False
     # 只有理解 ProviderRequestOptions 的后端才能开启；旧 fake 不接收新请求控制对象。
@@ -198,8 +201,9 @@ class BaseBackend:
         remains the original user turn while the system instruction stays separate.
         Text-protocol callers omit it.
 
-        ``on_tool_input_progress`` is an optional display observer for backends
-        that explicitly declare support; it never receives tool arguments.
+        ``on_thinking_delta`` may be a callable observer that also exposes a
+        ``complete(text)`` method. ``on_tool_input_progress`` is a separate typed
+        display observer. Neither changes model history or tool execution.
         """
         raise NotImplementedError
 
@@ -827,6 +831,7 @@ class AnthropicCompatibleBackend(HttpBackend):
 
     name = "anthropic_compatible"
     supports_tool_input_progress = True
+    supports_thinking_completion = True
 
     def _tool_endpoint(self) -> str:
         return self.api_base + "/v1/messages"
@@ -839,9 +844,9 @@ class AnthropicCompatibleBackend(HttpBackend):
         super().__init__(options)
         self.anthropic_version = anthropic_version
 
-    # LLM: Anthropic-compatible 是当前唯一声明工具参数 delta 能力的后端；
-    # callback 只透传累计计数，不能改变 payload、tool choice 或响应解析。
-    # 函数用途: 调用 Anthropic messages，并可选上报工具参数生成进度。
+    # LLM: Anthropic-compatible 声明工具参数 delta 与 thinking block-stop 两项能力；
+    # callback 只投影 typed 展示边界，不能改变 payload、tool choice、历史或响应解析。
+    # 函数用途: 调用 Anthropic messages，并可选上报思考终态和工具参数生成进度。
     def generate(
         self,
         prompt: str,
@@ -860,7 +865,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         IR 翻出的 assistant(tool_use)/user(tool_result) 序列。不能把同一 prompt 在续轮改成
         system；否则历史失去原始 user turn，严格 OpenAI chat template 会拒绝工具结果续轮。
         独立 ``request_options.system_instruction`` 始终走 Anthropic 顶层 system 字段，不改变上述 user 历史。
-        工具参数 callback 只接收 parser 生成的累计字符计数，不参与 tool_use 解析或执行。
+        思考 observer 的 ``complete`` 只接收完成块正文；工具参数 callback 只接收累计字符计数，均不参与工具执行。
         """
         provider_options = request_options or ProviderRequestOptions()
         return self._generate_request(
@@ -947,8 +952,9 @@ class AnthropicCompatibleBackend(HttpBackend):
             max_output_tokens=max_tokens,
         )
 
-    # LLM: This is the single Anthropic payload builder for regular and bounded auxiliary calls.
-    # 函数用途: 组装并发送 Anthropic-compatible 请求，保证两类入口只在本次输出上限上有差别。
+    # LLM: This is the single Anthropic payload builder; stream observers pass through unchanged
+    # and never enter the provider payload or create a second response path.
+    # 函数用途: 组装并发送 Anthropic-compatible 请求，同时原样传递可选流式展示观察器。
     def _generate_request(
         self,
         prompt: str,
@@ -1056,8 +1062,9 @@ class AnthropicCompatibleBackend(HttpBackend):
             stop_reason=str(obj.get("stop_reason") or ""),
         )
 
-    # LLM: 流式 Anthropic 响应由 StreamCompletion 带回完整有序 assistant 块；thinking/工具参数计数各走显式 observer，均不得混入 on_chunk 或用户正文。
-    # 函数用途: 收集一次流式 Anthropic-compatible 响应，并保留下一轮工具调用所需的内部历史与脱敏展示进度。
+    # LLM: 流式 Anthropic 响应由 StreamCompletion 带回完整有序 assistant 块；thinking delta/block-stop 与
+    # 工具参数计数各走显式 observer，均不得混入 on_chunk、用户正文或重复 response fallback。
+    # 函数用途: 收集流式响应、保留内部历史，并按供应商块顺序投影思考和工具参数进度。
     def _generate_stream(
         self,
         payload: dict[str, Any],
@@ -1106,9 +1113,9 @@ class AnthropicCompatibleBackend(HttpBackend):
             stop_reason=completion.stop_reason,
         )
 
-    # LLM: 单次物理流必须把同一个脱敏 observer 交给 collector；重试边界
-    # 仍由上层 _generate_stream 掌权，不能在此创建工具或重试状态。
-    # 函数用途: 读取并收集一条 Anthropic SSE 响应。
+    # LLM: 单次物理流必须把 delta、block-stop 与参数 observer 一起交给 collector；重试边界
+    # 仍由上层 _generate_stream 掌权，不能在此创建工具、展示重放或重试状态。
+    # 函数用途: 读取并收集一条 Anthropic SSE 响应，并保留供应商原始块顺序。
     def _stream_text_once(
         self,
         payload: dict[str, Any],

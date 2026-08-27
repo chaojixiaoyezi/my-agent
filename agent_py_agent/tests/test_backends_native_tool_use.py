@@ -624,6 +624,30 @@ def test_stream_completion_preserves_thinking_text_tool_order_without_exposing_t
     ]
 
 
+def test_stream_thinking_completion_precedes_first_text_callback():
+    """thinking block stop 必须先于后续 text delta 到达展示层。"""
+    events: list[tuple[str, str]] = []
+
+    class ThinkingObserver:
+        def __call__(self, text: str) -> None:
+            events.append(("thinking_delta", text))
+
+        def complete(self, text: str) -> None:
+            events.append(("thinking_completed", text))
+
+    collect_anthropic_stream_with_completion(
+        _thinking_tool_sse_lines(),
+        on_chunk=lambda text: events.append(("text", text)),
+        on_thinking_delta=ThinkingObserver(),
+    )
+
+    assert events == [
+        ("thinking_delta", "先读"),
+        ("thinking_completed", "先读"),
+        ("text", "开始"),
+    ]
+
+
 def test_legacy_collect_anthropic_stream_ignores_tool_use_blocks():
     # The text-protocol collector must keep its old 2-tuple contract.
     text, usage = collect_anthropic_stream(_tool_use_sse_lines())

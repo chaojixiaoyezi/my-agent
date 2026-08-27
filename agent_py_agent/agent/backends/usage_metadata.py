@@ -103,8 +103,8 @@ def collect_anthropic_stream_with_tools(
 
 
 # LLM: 该收集器是 Anthropic 文本/思考/工具块与脱敏参数进度的分流边界；
-# callback 失败不得影响完整响应，原始工具 JSON 只能留给 parser/tool block。
-# 函数用途: 收集一次 Anthropic SSE 的正文、用量、工具块和完整性，并合批发送展示计数。
+# thinking complete 必须在原 content_block_stop 处先于后续正文发布，任一 callback 失败不得影响完整响应。
+# 函数用途: 收集一次 Anthropic SSE 的正文、用量、工具块和完整性，并按块边界发送思考终态与展示计数。
 def collect_anthropic_stream_with_completion(
     lines: Iterable[str],
     on_chunk: Callable[[str], None] | None = None,
@@ -119,6 +119,9 @@ def collect_anthropic_stream_with_completion(
     open). Text/3-tuple callers are unaffected.
     ``on_thinking_delta`` receives live thinking deltas for rich transcript sinks;
     text/usage callers ignore it.
+    A structured ``on_thinking_delta`` observer may expose ``complete(text)``;
+    it receives the completed block at the exact ``content_block_stop`` boundary,
+    before any later text block is observed. Plain callback compatibility remains.
     ``on_tool_input_progress`` receives only tool name/index/phase/cumulative
     character counters, batched before leaving this collector.
     """
@@ -128,6 +131,7 @@ def collect_anthropic_stream_with_completion(
     usage: dict[str, Any] = {}
     blocks: list[dict[str, Any]] = []
     tool_input_emitter = _ToolInputProgressEmitter(on_tool_input_progress)
+    thinking_complete = getattr(on_thinking_delta, "complete", None)
     events = anthropic_stream_events(lines)
     completion = StreamCompletion()
     while True:
@@ -141,6 +145,18 @@ def collect_anthropic_stream_with_completion(
         if block is not None:
             blocks.append(block)
             continue
+        assistant_block = getattr(event, "assistant_content_block", None)
+        if (
+            isinstance(assistant_block, dict)
+            and assistant_block.get("type") == "thinking"
+            and callable(thinking_complete)
+        ):
+            thinking_text = str(assistant_block.get("thinking") or "")
+            if thinking_text:
+                try:
+                    thinking_complete(thinking_text)
+                except Exception:
+                    pass
         event_usage = getattr(event, "usage", None)
         if event_usage:
             usage = merge_usage(usage, event_usage)

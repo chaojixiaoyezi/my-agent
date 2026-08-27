@@ -970,6 +970,12 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   客户端保持原有最小公开面。支持的 TUI 才接收逐模型轮 commentary、provider 明示 `type=thinking` 正文和
   工具 `display`。signature、`redacted_thinking`、普通 text 与未知 handler envelope 字段不得冒充思考或
   穿透公开事件。
+- thinking 生命周期按供应商 typed content block 顺序收口：`thinking_delta* -> content_block_stop ->
+  thinking_completed -> text_delta*`。该 terminal 必须在 parser/collector 的 block-stop 处发布，不能等完整
+  response 返回后再补到 final 后面。response 的 `assistant_content_blocks` 只在 backend 没声明 block-stop
+  observer 时兜底；流内已经收口就不得重放。旧 Gateway 的迟到完整 thinking 只能消费为前一活动块的兼容
+  terminal，不得创建新的底部块。该边界对照 会话运行时 reasoning delta/final 的同 item 生命周期与 终端交互
+  在 `content_block_stop` 原子生成完成 assistant block 的做法，不使用正文相等判断去重。
 - 文件和命令展示以 handler 结构化事实为唯一来源：`edit_file`、覆盖式 `write_file`、单/多文件
   `apply_patch` 生成有界行号 diff；新文件生成十行预览；`run_command` 分开投影 stdout、stderr 与退出码。
   renderer 只负责颜色、折叠和宽度，不能从 output 文案反解增删行或成功状态。

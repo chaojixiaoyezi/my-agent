@@ -7,6 +7,10 @@
   才替换旧前缀。
 - thinking 现在按每次 provider 调用独立封口，空首块 typed discard；有正文的思考留在真实时序位置，
   assistant 正文到达前先封口，终态不留空 spinner。物理滚轮每格由三行改成一行。
+- r55 用户复查发现最后一次流式调用仍是 `thinking_delta* -> model_delta* -> assistant_thinking`：TUI 在正文
+  开始时已冻结增量块，迟到全文遂成为 final 后第二个思考。当前本地修复直接在 Anthropic
+  `content_block_stop` 发布完成边界，response fallback 看到同一物理调用已收口就跳过；TUI 另对旧 chunk
+  的一次性迟到终态 fail-closed。两个失败优先回归已先红后绿，待完整 focused、部署和真 TUI 复验。
 - 首个工作动作晋升任务后，main/child/grandchild 默认 cwd、写根和相对 output ref 统一切到
   `<owner_home>/tasks/<task_path>/`；不再继承单 Gateway daemon `/root` 或客户端临时 cwd。
 - `process_session(network_status)` 只读 exact 受管进程树 listener 与 firewalld 显式端口规则，任何

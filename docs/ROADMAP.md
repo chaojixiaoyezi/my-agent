@@ -47,7 +47,7 @@ non-loopback、未显式放行和未知分别返回。任何结果都保留
 
 ### 长期会话完整正文、思考时序与 canonical task root
 
-状态：`1e91935`、`1b75762`、`1e4c64d` 已推送部署；长期正文、时序与 sticky cwd 已真机通过
+状态：sticky cwd 已真机通过；final 后重复 thinking 的 block-stop 修复为本地候选
 
 解决问题：主/子代理工具前过程和最终长报告曾被活动块折叠，用户要按 `Ctrl+O` 才能看到；多次模型调用的
 thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消息还有固定 12K 裁剪，既可能丢长期 TUI/IM
@@ -64,7 +64,10 @@ thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消
 `1e4c64d` 让 non-detached sticky root 在模型首采样前成为唯一 `execution_cwd`，terminal link 仍不复活。
 原 r55 的同提示复验中，首个列表、审批、bwrap 和服务进程全部使用原 task root，localhost 返回真实游戏；
 三个独立 completed run 的 `task_path` 精确相同。该切片完成，剩余独立问题是 LAN 外部失败、Gateway 冷启动
-约 30 秒，以及 main 在“只协调”任务里仍亲自改功能文件。
+约 30 秒，以及 main 在“只协调”任务里仍亲自改功能文件。用户随后在同一 r55 指出最后稳定块仍是思考；
+原始 chunk 证明完整 `assistant_thinking` 晚于最终 `model_delta`。当前候选把 Anthropic block-stop 变成 typed
+完成回调，流内完成后禁止 response fallback 重放，并让 TUI 兼容消费一次旧迟到终态。待 `.7` 原 TUI
+恢复/新轮同时确认历史不重复、未来事件顺序为 thinking terminal 在正文前。
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 

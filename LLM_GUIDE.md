@@ -178,8 +178,10 @@
   首次进入新页面或显式回到底部时，prompt_toolkit `Window.get_vertical_scroll` 必须把 control 的尾部锚点
   落到真实窗口；手动滚轮/PgUp 离尾后保持原阅读位置，不因后台输出或切换页面复用旧 Window scroll。
 - TUI thinking 按 provider 调用逐块保持时间顺序：有正文的活动块留在其真实位置，空 spinner 才固定在底部；
-  assistant 正文到达前先封口当前 thinking。多个模型调用不得覆盖上一块，空首块通过 typed discard 删除。
-  工具前 commentary 和最终长报告默认完整显示；`Ctrl+O` 只负责展开被折叠的工具细节。滚轮一格移动一行。
+  Anthropic-compatible 必须在原 `content_block_stop` 发布 typed thinking terminal，再允许后续 text delta。
+  response 级完整 thinking 只给不支持该边界的后端兜底，不能在 final 后重放；旧流的迟到终态也只能消费
+  一次，不能新建底部思考。多个模型调用不得覆盖上一块，空首块通过 typed discard 删除。工具前 commentary
+  和最终长报告默认完整显示；`Ctrl+O` 只负责展开被折叠的工具细节。滚轮一格移动一行。
 
 ---
 

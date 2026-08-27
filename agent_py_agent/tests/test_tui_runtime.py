@@ -965,6 +965,31 @@ def test_gateway_thinking_delta_streams_into_active_block_with_timer() -> None:
     assert settled[0].metadata.get("duration_seconds") == 12.0
 
 
+def test_late_full_thinking_after_answer_does_not_create_duplicate_bottom_block() -> None:
+    runtime = TuiRuntime("session-late-thinking")
+    runtime.enqueue_prompt("request-late-thinking", "verify", queued=False)
+    turn = runtime.begin_turn("request-late-thinking")
+
+    turn.on_gateway_event({"kind": "thinking_delta", "text": "先核对事实"})
+    turn.on_gateway_event({"kind": "model_delta", "text": "最终答案"})
+    assert not turn.on_gateway_event(
+        {
+            "kind": "assistant_thinking",
+            "text": "先核对事实",
+            "duration_seconds": 10.0,
+        }
+    )
+    runtime.complete_turn(
+        "request-late-thinking",
+        TuiTurnSummary(response_text="最终答案", ok=True),
+    )
+
+    stable = runtime.store.snapshot().stable_blocks
+    assert [block.role for block in stable] == ["user", "thinking", "assistant"]
+    assert [block.text for block in stable if block.role == "thinking"] == ["先核对事实"]
+    assert stable[-1].role == "assistant"
+
+
 def test_gateway_tool_input_progress_is_transient_and_resettable() -> None:
     runtime = TuiRuntime("session-tool-input")
     runtime.enqueue_prompt("request-tool-input", "write", queued=False)

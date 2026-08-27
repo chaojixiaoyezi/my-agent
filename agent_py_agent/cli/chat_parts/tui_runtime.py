@@ -1342,6 +1342,7 @@ class TuiTurnEventAdapter:
         self._thinking_index = 0
         self._thinking_text = ""
         self._thinking_started_at = 0.0
+        self._late_thinking_completion_expected = False
         self._compact_active = False
         self._compact_block_id = ""
         self._compact_payload: dict[str, object] = {}
@@ -1474,7 +1475,8 @@ class TuiTurnEventAdapter:
         if not text:
             return False
         with self._lock:
-            self._complete_thinking()
+            if self._complete_thinking():
+                self._late_thinking_completion_expected = True
             self._ensure_assistant_started()
             self.runtime._publish(
                 "assistant_delta",
@@ -1492,6 +1494,7 @@ class TuiTurnEventAdapter:
     # 函数用途: 确认补充消息已经进入当前模型回合，并把等待提示变成正式用户消息。
     def begin_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
         with self._lock:
+            self._late_thinking_completion_expected = False
             self._complete_active_assistant()
             self.runtime.promote_active_turn_inputs(
                 client_message_ids,
@@ -1530,12 +1533,15 @@ class TuiTurnEventAdapter:
         with self._lock:
             return self._tool_input_projector.publish(value)
 
-    # LLM: 完整 thinking 事件到达时若流式增量块已活动，直接冻结（完整文本覆盖增量）；
-    # 无活动块说明这是新的 provider 调用，必须先建块再冻结以保留真实时序。
-    # 函数用途: 收口一次模型调用的思考块（流式增量或一次性全文）。
+    # LLM: 完整 thinking 事件优先冻结活动增量块；若正文已经封口了同一块，迟到终态只能被消费一次，
+    # 不能在正文后创建第二个 thinking。真正下一轮由新 delta 或工具边界清掉该兼容标记。
+    # 函数用途: 收口一次模型调用的思考块，并丢弃旧 Gateway 在正文后补发的重复全文。
     def finalize_thinking(self, text: str, *, duration_seconds: float = 0.0) -> bool:
         with self._lock:
             content = str(text or "")
+            if not self._thinking_active and self._late_thinking_completion_expected:
+                self._late_thinking_completion_expected = False
+                return False
             if not content and not self._thinking_active:
                 return False
             self._ensure_thinking_started()
@@ -1649,6 +1655,7 @@ class TuiTurnEventAdapter:
         del legacy_text
         progress = dict(event or {})
         with self._lock:
+            self._late_thinking_completion_expected = False
             if str(progress.get("phase") or "").strip().lower() == "started":
                 self._tool_input_projector.clear()
             self._complete_active_assistant(process=True)
@@ -1711,12 +1718,12 @@ class TuiTurnEventAdapter:
         self._compact_block_id = ""
         self._compact_payload = {}
 
-    # LLM: thinking terminal 携带完整思考文本与真实耗时；初始等待块没有收到任何
-    # 显式 thinking 时必须走 typed discard，不能冻结为空历史或造成首段正文前闪烁。
-    # 函数用途: 关闭当前等待模型的 thinking block。
-    def _complete_thinking(self) -> None:
+    # LLM: thinking terminal 携带完整思考文本与真实耗时；返回值只表示本次确实关闭了活动块，
+    # 供 assistant transition 标记旧 Gateway 可能迟到的全文终态；空 spinner 仍走 typed discard。
+    # 函数用途: 关闭当前等待模型的 thinking block，并告知调用方是否发生了真实状态转换。
+    def _complete_thinking(self) -> bool:
         if not self._thinking_active:
-            return
+            return False
         if not self._thinking_text:
             self.runtime._publish(
                 "thinking_discarded",
@@ -1726,7 +1733,7 @@ class TuiTurnEventAdapter:
                 request_id=self.request_id,
             )
             self._thinking_active = False
-            return
+            return True
         elapsed = max(0.0, time.time() - self._thinking_started_at)
         self.runtime._publish(
             "thinking_completed",
@@ -1740,6 +1747,7 @@ class TuiTurnEventAdapter:
         )
         self._thinking_active = False
         self._thinking_text = ""
+        return True
 
     # LLM: Initial turn start owns index 0; every later provider call increments exactly once
     # when its first explicit thinking delta/full block arrives. No assistant text is inspected.
@@ -1747,6 +1755,7 @@ class TuiTurnEventAdapter:
     def _ensure_thinking_started(self) -> None:
         if self._thinking_active:
             return
+        self._late_thinking_completion_expected = False
         self._thinking_index += 1
         self.thinking_block_id = f"thinking:{self.request_id}:{self._thinking_index}"
         self._thinking_started_at = time.time()

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import partial
 from queue import Empty, Queue
 from threading import Thread
 
@@ -102,6 +103,8 @@ class _ModelGenerationState:
     system_instruction: str = ""
     # 仅用于富 TUI 的人类可读耗时；不参与模型 timeout、重试或工具状态判断。
     started_at: float = 0.0
+    # provider block-stop observer 已发布的 typed 展示边界；只用于抑制同一物理调用的 response fallback 重放。
+    stream_observer_events: set[str] = field(default_factory=set)
 
 
 # LLM: 这是工具模型轮的统一生成入口；preflight compact、成本和完成追踪必须保持同一路径，变更要同步生成测试。
@@ -460,14 +463,16 @@ def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerati
     return response
 
 
-# LLM: 可见思考只接受 assistant_content_blocks 中 type=thinking 的 thinking 字段；signature、redacted_thinking、tool_use 与普通 text 均禁止进入此投影。
-# 函数用途: 向声明支持的流式接收器发布一次完整、默认折叠的模型思考。
+# LLM: response 级完整思考只在流内 block-stop 尚未发布时兜底；仍只接受 type=thinking，禁止签名、redacted、tool_use 与普通 text。
+# 函数用途: 为不支持流内思考终态的后端补发一次完整、默认折叠的模型思考。
 def _publish_provider_thinking(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
     response: object,
 ) -> None:
     if not _provider_thinking_projection_enabled(request.params):
+        return
+    if "thinking_completed" in getattr(state, "stream_observer_events", set()):
         return
     sink = getattr(request.params.effective_on_chunk, "write_thinking", None)
     if not callable(sink):
@@ -487,6 +492,63 @@ def _publish_provider_thinking(
         text,
         duration_seconds=max(0.0, time.monotonic() - state.started_at),
     )
+
+
+# LLM: 该观察器只读取宿主显式 thinking sink；complete 仅在 backend 声明 block-stop 能力时附加，旧后端仍收到普通 callable。
+# 函数用途: 为一次模型调用组装向后兼容的思考增量/完成观察器。
+def _thinking_stream_observer(backend: object, state: object):
+    params = getattr(state, "params", None)
+    if not _provider_thinking_projection_enabled(params):
+        return None
+    sink_owner = getattr(params, "effective_on_chunk", None)
+    delta_sink = getattr(sink_owner, "write_thinking_delta", None)
+    complete_sink = getattr(sink_owner, "write_thinking", None)
+    if bool(getattr(backend, "supports_thinking_completion", False)) and callable(
+        complete_sink
+    ):
+        complete = partial(_publish_streamed_thinking_completion, state, complete_sink)
+        return _ThinkingStreamObserver(delta_sink, complete)
+    return delta_sink if callable(delta_sink) else None
+
+
+# LLM: block-stop 的完整思考是本次物理调用的显示终态；标记必须先写，再调用 sink，避免重入路径重复 fallback。
+# 函数用途: 在供应商思考块结束时立即封口 TUI 块，并记录本轮无需在 response 收尾再次发布。
+def _publish_streamed_thinking_completion(state: object, sink: object, text: str) -> None:
+    content = str(text or "")
+    if not content:
+        return
+    events = getattr(state, "stream_observer_events", None)
+    if isinstance(events, set):
+        events.add("thinking_completed")
+    sink(
+        content,
+        duration_seconds=max(
+            0.0,
+            time.monotonic() - float(getattr(state, "started_at", 0.0) or 0.0),
+        ),
+    )
+
+
+# LLM: 该对象复用旧 on_thinking_delta 单参数接口并增加 typed complete 方法；不能缓存正文或参与模型历史。
+# 类用途: 把思考增量与供应商块结束边界合成一个向后兼容的流观察器。
+class _ThinkingStreamObserver:
+    # LLM: 两个 sink 都来自同一宿主回合；complete sink 已绑定物理调用状态，不能跨调用复用。
+    # 函数用途: 保存当前模型调用的思考增量和完成回调。
+    def __init__(self, delta_sink: object, complete_sink: object) -> None:
+        self._delta_sink = delta_sink
+        self._complete_sink = complete_sink
+
+    # LLM: callable 形态保持旧 backend/collector 的 delta 合同；无 delta sink 时只静默等待 terminal。
+    # 函数用途: 转发一段实时思考增量。
+    def __call__(self, text: str) -> None:
+        if callable(self._delta_sink):
+            self._delta_sink(text)
+
+    # LLM: 只有支持 provider block-stop 的 collector 会调用；不得在 response 收尾二次触发。
+    # 函数用途: 转发当前完整思考块的结束事件。
+    def complete(self, text: str) -> None:
+        if callable(self._complete_sink):
+            self._complete_sink(text)
 
 
 # LLM: Only an actual task turn may project provider reasoning. The structured
@@ -764,8 +826,8 @@ def _publish_transport_retry(sink_owner: object, event: dict[str, object]) -> No
         return
 
 
-# LLM: 只有 backend 明确声明支持且当前确有原生工具 surface 时，才把宿主
-# typed sink 传入；这个判断不能靠 backend 名称或用户 prompt 文本。
+# LLM: 只有 backend 明确声明支持且当前确有原生工具 surface 时，才把工具参数 sink 传入；
+# thinking block-stop 另用独立 capability，两个判断都不能靠 backend 名称或 prompt 文本。
 # 函数用途: 选择本轮是否启用 provider 工具参数生成进度回调。
 def _tool_input_progress_callback(backend: object, state: _ModelGenerationState):
     params = getattr(state, "params", None)
@@ -783,23 +845,12 @@ def _tool_input_progress_callback(backend: object, state: _ModelGenerationState)
     return None
 
 
-# LLM: 仅把 backend 明确声明支持的 provider 增量 callback 传给具备 typed sink
-# 的宿主；fake/旧后端与 text-only 调用必须保持原关键字形态。
+# LLM: 仅把 backend 明确声明支持的 provider 增量/终态 callback 传给具备 typed sink
+# 的宿主；fake/旧后端保持原关键字形态，流内思考终态不能在 response 收尾处重放。
 # 函数用途: 按当前原生工具、思考和展示能力组装参数并调用一次模型后端。
 def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
-    params = getattr(state, "params", None)
-    thinking_sink = (
-        getattr(
-            getattr(params, "effective_on_chunk", None),
-            "write_thinking_delta",
-            None,
-        )
-        if _provider_thinking_projection_enabled(params)
-        else None
-    )
-    # 只在宿主 writer 提供 thinking 增量入口时透传；旧后端/测试 fake 不接收该参数。
-    thinking_delta = thinking_sink if callable(thinking_sink) else None
+    thinking_observer = _thinking_stream_observer(backend, state)
     tool_input_progress = _tool_input_progress_callback(backend, state)
     system_instruction = str(getattr(state, "system_instruction", "") or "")
     provider_options_supported = bool(
@@ -812,14 +863,14 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
             kwargs["request_options"] = ProviderRequestOptions(
                 system_instruction=system_instruction
             )
-        if thinking_delta is not None:
-            kwargs["on_thinking_delta"] = thinking_delta
+        if thinking_observer is not None:
+            kwargs["on_thinking_delta"] = thinking_observer
         result = backend.generate(prompt, **kwargs)
     else:
         kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
         thinking_disabled = False
-        if thinking_delta is not None:
-            kwargs["on_thinking_delta"] = thinking_delta
+        if thinking_observer is not None:
+            kwargs["on_thinking_delta"] = thinking_observer
         if tool_input_progress is not None:
             kwargs["on_tool_input_progress"] = tool_input_progress
         if state.tools is not None:

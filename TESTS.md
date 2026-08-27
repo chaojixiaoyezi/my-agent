@@ -1691,3 +1691,28 @@ HTTP 请求必须与 TUI 内 `network_status` 对账，本机监听成功但外�
 同一个 `task_path`。localhost HTTP 正文是游戏 HTML，最终报告直接显示且 Working 撤下。Mac 外部探针仍
 连接失败，模型保持 `unverified_external_probe_required`，所以这里只通过“路径连续性与不误报”合同，
 不把 LAN 可达性记为通过。main 在第一段整合时仍亲自修改功能文件，也只作为协调软纪律失败样本保留。
+
+## 2026-08-27 流式 thinking 必须在正文前原位收口
+
+r55 原始 chunk 第 223--228 条是 `thinking_delta`，229--236 条已经是最终 `model_delta`，第 237 条才出现
+同内容 `assistant_thinking`。这会让 TUI 先因正文冻结增量思考，再把迟到全文当成新块追加到 final 后。
+回归必须覆盖：
+
+- Anthropic collector 在 thinking 的原 `content_block_stop` 调用 `on_thinking_complete`，且严格早于下一
+  text callback；
+- 只有显式声明 `supports_thinking_completion` 的 backend 才收到新 callback，fake/旧后端调用形态不变；
+- 同一物理调用已经发布 stream completion 后，response 级 `assistant_content_blocks` fallback 不再重放；
+- TUI 重放旧 chunk 时，`thinking_delta -> model_delta -> assistant_thinking` 只保留一个原位 thinking，最后
+  一个稳定块仍是 assistant final。
+
+失败优先的三条精确回归已先红后绿；完整 focused 入口为：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_backends_native_tool_use.py \
+  agent_py_agent/tests/test_tool_model_generation.py \
+  agent_py_agent/tests/test_gateway_verbose_progress.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_background_notice_display.py \
+  -q --tb=short
+```

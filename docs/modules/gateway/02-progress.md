@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-08-27 thinking block-stop 先于正文（本地候选）
+
+- r55 原始 chunk 的最后一轮为 `thinking_delta* -> model_delta* -> assistant_thinking`，所以 TUI 已在正文开始
+  时封口增量块，迟到全文又在 final 后创建第二块；这是 producer 顺序错误，不是模型完成后再次思考。
+- 对照 会话运行时 reasoning delta/final 同 item 生命周期与 终端交互 `content_block_stop` 后，Anthropic collector
+  在原 thinking block stop 发布完整终态；backend capability 控制新 callback，已发布的物理调用跳过 response
+  fallback。TUI 只为旧 chunk 消费一次迟到终态，不以文本相等判断去重。
+- collector 顺序、response 不重放、旧流最终块三条失败优先回归已先红后绿；待完整 focused、严格 gate、
+  推送、`.7` 唯一 Gateway 部署及原 r55/新请求双重复验。
+
 ## 2026-08-27 终态 sticky cwd 在首采样前生效（已部署真机验证）
 
 - r55 证明 terminal successor 已继承原 task id lineage 与 task path，但模型第一轮仍先看到客户端启动 cwd；

@@ -227,6 +227,60 @@ def test_model_finish_projects_only_explicit_thinking_blocks() -> None:
     assert captured[0][1] >= 2.0
 
 
+def test_streamed_thinking_completion_is_not_replayed_after_answer() -> None:
+    """流内 thinking 终态已发布后，response fallback 不得在正文后重复发布。"""
+    from agent_py_agent.agent.agent_core.tool_model_generation import _do_backend_generate
+
+    events: list[tuple[str, str]] = []
+
+    class Sink:
+        def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> None:
+            del duration_seconds
+            events.append(("thinking", text))
+
+    class Backend:
+        supports_thinking_completion = True
+        supports_provider_request_options = False
+
+        def generate(self, prompt: str, on_chunk=None, **kwargs):
+            del prompt
+            observer = kwargs.get("on_thinking_delta")
+            complete = getattr(observer, "complete", None)
+            if callable(complete):
+                complete("先核对事实")
+            if callable(on_chunk):
+                on_chunk("最终答案")
+            return SimpleNamespace(
+                assistant_content_blocks=[
+                    {"type": "thinking", "thinking": "先核对事实"},
+                    {"type": "text", "text": "最终答案"},
+                ]
+            )
+
+    sink = Sink()
+    params = SimpleNamespace(
+        context_scope="task_local",
+        effective_on_chunk=sink,
+    )
+    state = SimpleNamespace(
+        tools=None,
+        tool_choice=None,
+        messages=None,
+        on_chunk=lambda text: events.append(("text", text)),
+        params=params,
+        started_at=time.monotonic(),
+        stream_observer_events=set(),
+        system_instruction="",
+    )
+    response = _do_backend_generate(Backend(), "prompt", state)
+    _publish_provider_thinking(SimpleNamespace(params=params), state, response)
+
+    assert events == [
+        ("thinking", "先核对事实"),
+        ("text", "最终答案"),
+    ]
+
+
 def test_presentation_only_model_finish_never_projects_provider_thinking() -> None:
     captured: list[str] = []
 
