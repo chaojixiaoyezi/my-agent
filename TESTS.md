@@ -248,10 +248,12 @@ python3 -m pytest \
 覆盖点：
 
 - 普通字符串调用方保留稳定工具尾、首条 prompt 与最新历史的旧 copy-on-write 断点；
-- `CacheStructuredPrompt` 的完整字符串必须等于 stable+volatile 正文；stable 只允许系统规则、owner scope、
-  Persona/Prompt Files/Skill 索引和文本工具目录，记忆、时间、Conversation、当前任务与执行事实必须在 volatile；
-- Anthropic native 把 typed stable 段投影到顶层 system 独立缓存块，volatile 只作普通 user 消息；该路径不再
-  给位于动态 user 后面的最新 IR 打无效断点，tools 尾断点继续保留；
+- `CacheStructuredPrompt` 的完整字符串必须等于 stable system + stable user + volatile 正文；
+  stable system 只允许系统规则、owner scope、Persona/Prompt Files/Skill 和文本工具目录；stable user
+  可含 run 固定的记忆、Conversation、推荐工具与用户任务；会首工具后变化的 Workspace 和每次执行事实必须在 volatile；
+- Anthropic native 必须是 stable initial user → canonical IR → volatile facts，始终只有一个
+  message-level 断点并向最新历史推进；tools/system 断点继续保留；
+- OpenAI-compatible native 必须投影成同样的追加顺序，且不生成 Anthropic 专用字段；
 - native 首轮即使 IR 历史为空也必须保留 `messages=[]`，不能压成代表 text 请求的 `None`；
 - copy-on-write 后输入 messages/tools 与 canonical IR 保持逐字段不变；
 - `messages=None` 的普通 text 请求和空 prompt 的旧请求形态不变；

@@ -768,11 +768,12 @@ class TestBuildFullPrompt:
         assert "volatile memory" not in layout.stable_prefix
         assert "volatile clock" not in layout.stable_prefix
         assert "volatile conversation" not in layout.stable_prefix
-        assert "volatile memory" in layout.volatile_suffix
+        assert "volatile memory" in layout.stable_user_prefix
+        assert "volatile clock" not in layout.stable_user_prefix
+        assert "volatile conversation" in layout.stable_user_prefix
+        assert "current task" in layout.stable_user_prefix
+        assert "volatile choice" in layout.stable_user_prefix
         assert "volatile clock" in layout.volatile_suffix
-        assert "volatile conversation" in layout.volatile_suffix
-        assert "current task" in layout.volatile_suffix
-        assert "volatile choice" in layout.volatile_suffix
         assert "volatile fact" in layout.volatile_suffix
         assert str(result) == layout.render()
 

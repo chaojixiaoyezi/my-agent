@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+from agent_py_agent.agent.backends import anthropic_prompt_cache
 from agent_py_agent.agent.backends.base import (
     AnthropicCompatibleBackend,
     BackendOptions,
@@ -41,6 +42,18 @@ _TOOLS = [
 
 def _options(**overrides) -> BackendOptions:
     return replace(_DEFAULT_OPTIONS, **overrides)
+
+
+def _count_cache_markers(messages: list[dict[str, object]]) -> int:
+    count = 0
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        count += sum(
+            isinstance(block, dict) and "cache_control" in block for block in content
+        )
+    return count
 
 
 # --- non-stream tool_use parsing -------------------------------------------
@@ -169,7 +182,11 @@ def test_native_prompt_cache_uses_only_typed_stable_prefix_for_split_prompt():
 
     backend.request_json = fake_request_json
     backend.generate(
-        CacheStructuredPrompt("stable instructions", "changing conversation tail"),
+        CacheStructuredPrompt(
+            "stable instructions",
+            "changing conversation tail",
+            stable_user_prefix="stable task snapshot",
+        ),
         tools=_TOOLS,
         messages=messages,
         request_options=ProviderRequestOptions(
@@ -188,11 +205,135 @@ def test_native_prompt_cache_uses_only_typed_stable_prefix_for_split_prompt():
     ]
     assert payload["messages"][0] == {
         "role": "user",
-        "content": "changing conversation tail",
+        "content": [{"type": "text", "text": "stable task snapshot"}],
     }
-    assert "cache_control" not in payload["messages"][-1]["content"][-1]
+    assert payload["messages"][1] == messages[0]
+    assert payload["messages"][2] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "volatile runtime guidance",
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"type": "text", "text": "changing conversation tail"},
+        ],
+    }
     assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral"}
     assert messages == original_messages
+
+
+def test_native_prompt_cache_marks_stable_user_snapshot_before_first_volatile_tail():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=False))
+    captured: dict[str, object] = {}
+
+    def fake_request_json(path, payload, headers):
+        del path, headers
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "continue"}]}
+
+    backend.request_json = fake_request_json
+    backend.generate(
+        CacheStructuredPrompt(
+            "stable instructions",
+            "first execution facts",
+            stable_user_prefix="stable task snapshot",
+        ),
+        tools=_TOOLS,
+        messages=[],
+        request_options=ProviderRequestOptions(
+            system_instruction="host authorization policy",
+        ),
+    )
+
+    assert captured["payload"]["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "stable task snapshot",
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"type": "text", "text": "first execution facts"},
+            ],
+        }
+    ]
+
+
+def test_typed_prompt_projection_never_drops_stable_user_text_without_system_split():
+    prompt = CacheStructuredPrompt(
+        "stable instructions",
+        "changing execution facts",
+        stable_user_prefix="stable task snapshot",
+    )
+
+    projected = anthropic_prompt_cache._prompt_prefixed_messages(prompt, [])
+
+    assert [block["text"] for block in projected[0]["content"]] == [
+        "stable instructions",
+        "stable task snapshot",
+        "changing execution facts",
+    ]
+
+
+def test_native_prompt_cache_advances_one_message_marker_after_append_only_history():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=False))
+    payloads: list[dict[str, object]] = []
+
+    def fake_request_json(path, payload, headers):
+        del path, headers
+        payloads.append(payload)
+        return {"content": [{"type": "text", "text": "continue"}]}
+
+    backend.request_json = fake_request_json
+    backend.generate(
+        CacheStructuredPrompt(
+            "stable instructions",
+            "facts one",
+            stable_user_prefix="stable task snapshot",
+        ),
+        tools=_TOOLS,
+        messages=[],
+    )
+    history = [
+        {"role": "assistant", "content": [{"type": "text", "text": "plan"}]},
+        {"role": "user", "content": [{"type": "text", "text": "tool result"}]},
+    ]
+    original_history = deepcopy(history)
+    backend.generate(
+        CacheStructuredPrompt(
+            "stable instructions",
+            "facts two",
+            stable_user_prefix="stable task snapshot",
+        ),
+        tools=_TOOLS,
+        messages=history,
+    )
+
+    first_messages = payloads[0]["messages"]
+    second_messages = payloads[1]["messages"]
+    assert first_messages[0]["content"][0] == {
+        "type": "text",
+        "text": "stable task snapshot",
+        "cache_control": {"type": "ephemeral"},
+    }
+    assert second_messages[0] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "stable task snapshot"}],
+    }
+    assert second_messages[-1]["content"] == [
+        {
+            "type": "text",
+            "text": "tool result",
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": "facts two"},
+    ]
+    assert _count_cache_markers(first_messages) == 1
+    assert _count_cache_markers(second_messages) == 1
+    assert payloads[0]["system"] == payloads[1]["system"]
+    assert history == original_history
 
 
 def test_native_prompt_cache_can_be_disabled_for_incompatible_endpoints():
@@ -228,7 +369,11 @@ def test_disabled_cache_keeps_structured_prompt_as_one_complete_user_message():
 
     backend.request_json = fake_request_json
     backend.generate(
-        CacheStructuredPrompt("stable instructions", "changing conversation tail"),
+        CacheStructuredPrompt(
+            "stable instructions",
+            "changing conversation tail",
+            stable_user_prefix="stable task snapshot",
+        ),
         tools=_TOOLS,
         messages=[],
         request_options=ProviderRequestOptions(
@@ -240,7 +385,11 @@ def test_disabled_cache_keeps_structured_prompt_as_one_complete_user_message():
     assert captured["payload"]["messages"] == [
         {
             "role": "user",
-            "content": "stable instructions\n\nchanging conversation tail",
+            "content": (
+                "stable instructions\n\n"
+                "stable task snapshot\n\n"
+                "changing conversation tail"
+            ),
         }
     ]
     assert captured["payload"]["tools"] == _TOOLS

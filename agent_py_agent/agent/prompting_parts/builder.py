@@ -176,14 +176,16 @@ class PromptBuilder:
                     tool_catalog=_tools.tool_catalog_section or default_tools,
                 ),
                 _native_cache_volatile_suffix(
-                    memory_text=memory_text,
                     workspace_context=workspace_context,
+                    execution_facts=_tools.execution_facts_section,
+                ),
+                stable_user_prefix=_native_cache_stable_user_prefix(
+                    memory_text=memory_text,
                     injected=injected,
                     tool_recommendations=(
                         _tools.tool_recommendations_section or default_recommendations
                     ),
                     task_and_transcript=task_and_transcript,
-                    execution_facts=_tools.execution_facts_section,
                 ),
             )
         return (
@@ -229,24 +231,34 @@ def _native_cache_stable_prefix(
     )
 
 
-# LLM: Volatile native content must retain every request-varying fact in its original semantic
-# form; splitting for cache economics is not authorization to trim conversation or execution state.
-# 函数用途: 组装每轮都会变化的记忆、时间、会话历史、当前任务和执行事实。
-def _native_cache_volatile_suffix(
+# LLM: This run-stable initial user message sits before native IR so each new tool round extends
+# the prior provider prefix instead of rebuilding memory, conversation snapshot, and task text.
+# 函数用途: 组装当前 run 固定的记忆、会话快照、工具建议和用户任务。
+def _native_cache_stable_user_prefix(
     *,
     memory_text: str,
-    workspace_context: str,
     injected: str,
     tool_recommendations: str,
     task_and_transcript: str,
-    execution_facts: str,
 ) -> str:
     return (
         f"# Related Memory\n{memory_text}\n\n"
-        f"# Workspace Context\n{workspace_context}\n\n"
         f"# Runtime Injection\n{injected or '（无）'}\n\n"
         f"{tool_recommendations}\n\n"
-        f"{task_and_transcript}\n\n"
+        f"{task_and_transcript}"
+    )
+
+
+# LLM: Workspace provisioning can change once after the first tool call, while execution facts
+# change every call; both stay after append-only IR so neither invalidates the task/history prefix.
+# 函数用途: 组装当前工作区事实和本轮执行事实，作为消息历史之后的最新用户上下文发送。
+def _native_cache_volatile_suffix(
+    *,
+    workspace_context: str,
+    execution_facts: str,
+) -> str:
+    return (
+        f"# Workspace Context\n{workspace_context}\n\n"
         f"{execution_facts}\n"
     )
 

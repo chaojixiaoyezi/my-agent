@@ -181,12 +181,12 @@ agent_py_agent/
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   `-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
 |   |-- prompting_parts/               # prompt 构造
-|   |   |-- builder.py                 # 完整 prompt 与 native 稳定 system/动态 user 布局构造
-|   |   |-- cache_layout.py            # 不解析正文的 typed prompt 缓存边界与完整字符串投影
+|   |   |-- builder.py                 # 完整 prompt 与 native 三段追加式缓存布局构造
+|   |   |-- cache_layout.py            # typed 稳定 system/user、动态尾部与完整字符串投影
 |   |   `-- memory_context.py          # 非权威、可转义且可统一剥离的召回记忆信封
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
 |   `-- backends/                      # 模型后端适配、run 固定协议/tool_choice、原生工具历史与结构化生成
-|       |-- anthropic_prompt_cache.py  # Anthropic tools/system/message 主动缓存断点与动态 user 投影
+|       |-- anthropic_prompt_cache.py  # Anthropic tools/system/最新 history 断点与追加式 user 投影
 |       |-- base.py                    # 各 provider HTTP 请求、流式解析与统一 Backend 工厂
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归

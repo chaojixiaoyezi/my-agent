@@ -11,6 +11,7 @@ from agent_py_agent.agent.backends.base import (
     ProviderRequestOptions,
 )
 from agent_py_agent.agent.backends.errors import ProviderResponseError
+from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 
 _OPTIONS = BackendOptions(
     api_base="https://api.example.com/v1",
@@ -150,6 +151,104 @@ def test_openai_empty_native_history_keeps_system_before_original_user_prompt() 
     assert captured["payload"]["messages"] == [
         {"role": "system", "content": "host authorization policy"},
         {"role": "user", "content": "original user prompt"},
+    ]
+
+
+def test_openai_typed_cache_layout_keeps_history_before_volatile_facts() -> None:
+    backend = OpenAICompatibleBackend(_OPTIONS)
+    captured = {}
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "read_file",
+                    "input": {"path": "README.md"},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": "file contents",
+                    "is_error": False,
+                }
+            ],
+        },
+    ]
+
+    def request_json(path, payload, headers):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}
+
+    backend.request_json = request_json
+    backend.generate(
+        CacheStructuredPrompt(
+            "stable model rules",
+            "changing execution facts",
+            stable_user_prefix="stable task snapshot",
+        ),
+        tools=_TOOLS,
+        messages=messages,
+        request_options=ProviderRequestOptions(
+            system_instruction="host authorization policy"
+        ),
+    )
+
+    assert captured["payload"]["messages"] == [
+        {
+            "role": "system",
+            "content": "host authorization policy\n\nstable model rules",
+        },
+        {"role": "user", "content": "stable task snapshot"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path": "README.md"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "file contents"},
+        {"role": "user", "content": "changing execution facts"},
+    ]
+
+
+def test_openai_typed_first_turn_merges_stable_and_volatile_user_text() -> None:
+    backend = OpenAICompatibleBackend(_OPTIONS)
+    captured = {}
+
+    def request_json(path, payload, headers):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}
+
+    backend.request_json = request_json
+    backend.generate(
+        CacheStructuredPrompt(
+            "stable model rules",
+            "changing execution facts",
+            stable_user_prefix="stable task snapshot",
+        ),
+        messages=[],
+    )
+
+    assert captured["payload"]["messages"] == [
+        {"role": "system", "content": "stable model rules"},
+        {
+            "role": "user",
+            "content": "stable task snapshot\n\nchanging execution facts",
+        },
     ]
 
 

@@ -76,6 +76,19 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 `400,000`。因此普通轮必须保持已提交历史 append-only；仅真正 Compact 才允许一次性替换旧前缀。是否实际
 命中仍只看 provider usage，不能把“看起来前缀相同”写成缓存成功。
 
+原生工具链的 provider 顺序必须保持：
+
+```text
+稳定 system + 稳定 tools
+→ 当前 run 固定的首条 user（记忆/会话快照/原始任务）
+→ append-only canonical IR（assistant/tool/user steer）
+→ 当前工作区与本次执行事实
+```
+
+Anthropic 请求只推进一个 message-level `cache_control`，该断点始终位于最新可缓存历史块；
+当前事实在它之后。OpenAI-compatible 投影不伪造 `cache_control`，但保持同样顺序，让本地模型服务器
+自己根据 token 前缀复用 KV。任务工作区会在首工具前后变化，因此必须放在动态尾部；这不是对上下文的裁剪。
+
 ## Turn scheduling boundary
 
 同一 thread 仍只有一条历史，实际新建的 Gateway 请求按顺序执行；同一工具循环内到达的新用户输入按

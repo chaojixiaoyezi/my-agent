@@ -1,11 +1,10 @@
 # TEST CHECKLIST
 
-- [x] Anthropic-compatible native prompt 必须用 typed `CacheStructuredPrompt` 区分稳定 system 与动态 user，
-  不得按标题、用户正文或模型语言猜边界；稳定段只含系统规则、owner scope、Persona/Prompt Files/Skill 索引
-  与文本工具目录，记忆、时间、Conversation、当前任务和执行事实仍完整发送。关闭缓存/text 路径不得丢正文，
-  canonical IR 与 Compact 不变。140 项组合 focused 通过；`.7` `ma-cache-probe-minimax-r60` 第三个连续回合
-  真实得到 5,959 input、19,300 cache-read、0 cache-write，对照首轮 25,192 input；按输入 5、缓存 0.1/1
-  分别省约 74.8%/61.0%。
+- [ ] Native prompt 必须用 typed `CacheStructuredPrompt` 表达稳定 system、run 固定首条 user 与动态尾部，
+  不得按标题、用户正文或模型语言猜边界。Anthropic 必须保持「固定 user → append-only IR → 当前事实」且只有
+  一个最新历史断点；OpenAI-compatible 保持同样顺序供 KV 缓存。Workspace 必须在动态尾部；关闭缓存/text
+  路径不得丢正文，canonical IR 与 Compact 不变。本地 focused 已通过；`.7` r62 进行中账本已显示
+  cache-read 占主体，仍待终态 MiniMax 与本地模型真 TUI 同 prompt 验收后勾选。
 
 - [x] child capability grant 与 exact tool approval 继续分账；child 的实际 `BackgroundTranscriptSink` 遇到
   `ask` 时必须把完整 request 上送所属 owner TUI，并阻塞原 ToolCall。main 与多个 child 的确认共用一个

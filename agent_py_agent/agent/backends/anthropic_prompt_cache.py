@@ -20,6 +20,7 @@ _CACHEABLE_CONTENT_TYPES = frozenset({"text", "tool_use", "tool_result"})
 class AnthropicPromptCacheProjection:
     system: str | list[dict[str, Any]]
     prompt: str
+    stable_user_prefix: str = ""
     stable_system_cache_active: bool = False
 
 
@@ -52,6 +53,7 @@ def anthropic_prompt_cache_projection(
     return AnthropicPromptCacheProjection(
         system=system_blocks,
         prompt=layout.volatile_suffix,
+        stable_user_prefix=layout.stable_user_prefix,
         stable_system_cache_active=True,
     )
 
@@ -65,6 +67,7 @@ def anthropic_messages_with_optional_cache(
     messages: list[dict[str, Any]] | None,
     tools: list[dict[str, Any]],
     cache_enabled: bool,
+    stable_user_prefix: str = "",
     stable_system_cache_active: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if cache_enabled and messages is not None:
@@ -72,6 +75,7 @@ def anthropic_messages_with_optional_cache(
             prompt=prompt,
             messages=messages,
             tools=tools,
+            stable_user_prefix=stable_user_prefix,
             stable_system_cache_active=stable_system_cache_active,
         )
     if messages:
@@ -92,20 +96,20 @@ def anthropic_native_payload_with_cache(
     prompt: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    stable_user_prefix: str = "",
     stable_system_cache_active: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not prompt and not messages:
         return [{"role": "user", "content": ""}], _mark_final_tool(tools)
-    prepared_messages = _prompt_prefixed_messages(
-        prompt,
-        messages,
-        cache_prompt=not stable_system_cache_active,
-    )
-    if (
-        messages
-        and not stable_system_cache_active
-        and prompt_cache_layout(prompt) is None
-    ):
+    if stable_system_cache_active:
+        prepared_messages = _append_only_structured_messages(
+            stable_user_prefix=stable_user_prefix,
+            messages=messages,
+            volatile_suffix=prompt,
+        )
+    else:
+        prepared_messages = _prompt_prefixed_messages(prompt, messages)
+    if messages and not stable_system_cache_active and prompt_cache_layout(prompt) is None:
         _mark_latest_cacheable_history_block(
             prepared_messages,
             history_start=1 if prompt else 0,
@@ -113,9 +117,58 @@ def anthropic_native_payload_with_cache(
     return prepared_messages, _mark_final_tool(tools)
 
 
-# LLM: A typed layout becomes two ordered text blocks and only its stable block is cacheable.
+# LLM: Native structured requests must keep the run-stable initial user message before canonical
+# IR, advance one message cache marker to the newest history prefix, then append volatile facts.
+# 函数用途: 按“固定任务快照→追加工具历史→本轮事实”顺序组装消息，并保持调用方历史不变。
+def _append_only_structured_messages(
+    *,
+    stable_user_prefix: str,
+    messages: list[dict[str, Any]],
+    volatile_suffix: str,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    if stable_user_prefix:
+        prepared.append(
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": stable_user_prefix}],
+            }
+        )
+    prepared.extend(messages)
+    if prepared:
+        _mark_latest_cacheable_history_block(prepared, history_start=0)
+    return _append_volatile_user_text(prepared, volatile_suffix)
+
+
+# LLM: Appending volatile text after the sole message marker preserves the cached prefix. Merge
+# into an existing user message only copy-on-write so consecutive user messages stay provider-safe.
+# 函数用途: 把本轮变化事实接到消息尾；末条已是 user 时追加文本块，否则新建 user 消息。
+def _append_volatile_user_text(
+    messages: list[dict[str, Any]],
+    volatile_suffix: str,
+) -> list[dict[str, Any]]:
+    if not volatile_suffix:
+        return messages
+    volatile_block = {"type": "text", "text": str(volatile_suffix)}
+    if not messages or str(messages[-1].get("role") or "") != "user":
+        return [*messages, {"role": "user", "content": [volatile_block]}]
+    prepared = list(messages)
+    message = prepared[-1]
+    content = message.get("content")
+    if isinstance(content, str):
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": content}]
+    elif isinstance(content, list):
+        blocks = list(content)
+    else:
+        blocks = []
+    blocks.append(volatile_block)
+    prepared[-1] = {**message, "content": blocks}
+    return prepared
+
+
+# LLM: A typed layout becomes ordered text blocks and only its leading stable block is cacheable.
 # Ordinary strings retain the legacy one-block projection for third-party callers and tests.
-# 函数用途: 把首条原生用户提示投影为供应商文本块；有结构化边界时只缓存固定前缀。
+# 函数用途: 把 typed prompt 的全部段落无损投影为供应商文本块。
 def _prompt_prefixed_messages(
     prompt: str,
     messages: list[dict[str, Any]],
@@ -135,6 +188,13 @@ def _prompt_prefixed_messages(
                     "type": "text",
                     "text": layout.stable_prefix,
                     "cache_control": dict(_EPHEMERAL_CACHE_CONTROL),
+                }
+            )
+        if layout.stable_user_prefix:
+            content.append(
+                {
+                    "type": "text",
+                    "text": layout.stable_user_prefix,
                 }
             )
         if layout.volatile_suffix:

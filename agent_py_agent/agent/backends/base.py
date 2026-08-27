@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from ..prompting_parts.cache_layout import prompt_cache_layout
 from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
 from .anthropic_prompt_cache import (
@@ -712,8 +713,9 @@ def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any
     return translated
 
 
-# LLM: system 必须始终位于首条消息，初始 user prompt 必须恰好一次且先于 assistant/tool 历史。
-# 函数用途: 把统一原生消息转换成 OpenAI 顺序，同时保持空 prompt 和空历史的合法形态。
+# LLM: Plain prompts preserve legacy ordering. Typed cache layouts must mirror 会话运行时
+# append-only order so local OpenAI-compatible KV caches can reuse history without cache_control.
+# 函数用途: 把统一原生消息转换成 OpenAI 顺序；typed prompt 使用固定任务→历史→动态事实。
 def _openai_messages_from_native(
     messages: list[dict[str, Any]],
     *,
@@ -722,6 +724,15 @@ def _openai_messages_from_native(
 ) -> list[dict[str, Any]]:
     """Translate IR while preserving the first-turn user message across tool rounds."""
 
+    layout = prompt_cache_layout(initial_user_prompt)
+    if layout is not None:
+        return _openai_messages_from_cache_layout(
+            messages,
+            stable_system_prefix=layout.stable_prefix,
+            stable_user_prefix=layout.stable_user_prefix,
+            volatile_suffix=layout.volatile_suffix,
+            system_instruction=system_instruction,
+        )
     translated: list[dict[str, Any]] = []
     if system_instruction:
         translated.append({"role": "system", "content": system_instruction})
@@ -729,6 +740,54 @@ def _openai_messages_from_native(
     for message in messages:
         translated.extend(_openai_message_from_native(message))
     return translated
+
+
+# LLM: System and initial user prefixes are byte-stable within one run; native history extends
+# them, and request-varying facts are appended last. Never parse headings to create this order.
+# 函数用途: 为没有显式 cache_control 的 OpenAI 兼容端点构造可做 token 前缀复用的消息序列。
+def _openai_messages_from_cache_layout(
+    messages: list[dict[str, Any]],
+    *,
+    stable_system_prefix: str,
+    stable_user_prefix: str,
+    volatile_suffix: str,
+    system_instruction: str,
+) -> list[dict[str, Any]]:
+    translated: list[dict[str, Any]] = []
+    system_text = "\n\n".join(
+        text
+        for text in (str(system_instruction or ""), str(stable_system_prefix or ""))
+        if text
+    )
+    if system_text:
+        translated.append({"role": "system", "content": system_text})
+    if stable_user_prefix:
+        translated.append({"role": "user", "content": str(stable_user_prefix)})
+    for message in messages:
+        translated.extend(_openai_message_from_native(message))
+    return _append_openai_volatile_user_text(translated, volatile_suffix)
+
+
+# LLM: Merge only with an existing trailing user message; tool and assistant ordering must remain
+# untouched so provider tool-call pairing stays valid.
+# 函数用途: 把本轮变化事实放到 OpenAI 消息尾部，并避免无意义的连续 user 消息。
+def _append_openai_volatile_user_text(
+    messages: list[dict[str, Any]],
+    volatile_suffix: str,
+) -> list[dict[str, Any]]:
+    text = str(volatile_suffix or "")
+    if not text:
+        return messages
+    if messages and messages[-1].get("role") == "user":
+        prepared = list(messages)
+        tail = prepared[-1]
+        prior = str(tail.get("content") or "")
+        prepared[-1] = {
+            **tail,
+            "content": f"{prior}\n\n{text}" if prior else text,
+        }
+        return prepared
+    return [*messages, {"role": "user", "content": text}]
 
 
 def _openai_message_from_native(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -999,6 +1058,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             messages=messages,
             tools=selected_tools,
             cache_enabled=self.prompt_cache_enabled,
+            stable_user_prefix=cache_projection.stable_user_prefix,
             stable_system_cache_active=(
                 cache_projection.stable_system_cache_active
             ),

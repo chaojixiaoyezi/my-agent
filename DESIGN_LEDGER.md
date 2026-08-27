@@ -1898,21 +1898,25 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   的模型可见投影，完整 archive 与 exact refs 保留，Compact 权威代数不变；最后主轮仍有 40,527
   provider cache-read。该边界继续由结构化 fold/ledger 裁决，不要求 Context 数字单调递增。
 
-## 2026-08-27 原生稳定 system 前缀与动态会话尾部分层【状态：MiniMax 真 TUI 已通过；长任务矩阵待完成】
+## 2026-08-27 原生 prompt 的三段追加式缓存【状态：MiniMax 长任务复验中】
 
 - `.7` 同一真 TUI 的脱敏请求指纹证明：25 个工具和顶层宿主 system 的哈希连续不变，但旧首条 user prompt
   在同一请求的工具轮里从约 31KB 增到 33KB，普通下一回合又变成约 45KB。变化来源是相关记忆、当前时间、
   Conversation 热尾、当前任务和执行事实；它们与约 23KB 的系统规则、Persona、Skill 索引和工具目录被绑在
   一个文本块里。MiniMax 因而只能复用工具前缀，并反复创建约 11K 动态 prompt 缓存。
-- `prompting_parts/cache_layout.py` 新增 `CacheStructuredPrompt`：它的字符串值仍是完整 prompt，归档、token
-  统计、非 Anthropic 后端和关闭缓存的路径一字不丢；附带的 `PromptCacheLayout` 才是机器可读边界，不解析
-  标题、用户正文或模型语言。稳定段只含 System、Owner Scope、Prompt Files/Persona/Skill 元数据与文本工具
-  目录；相关记忆、Workspace 时间、Runtime Injection/Conversation、推荐工具、当前任务和执行事实全部留在
-  动态段。
-- Anthropic-compatible 原生链把稳定段放进顶层 `system` 的独立 text block，并只在该块写
-  `cache_control`；当前动态段仍作为完整 user 消息发送。工具尾断点继续保留。由于当前动态 user 消息位于
-  native IR 历史之前，继续给最新历史打断点只会形成不可复用写入，所以结构化分层路径不再创建该断点；
-  普通字符串调用方仍保留旧投影。该变化不删除消息、不做摘要、不推进 Compact，也不改变 owner/task 权限。
+- `prompting_parts/cache_layout.py` 的 `CacheStructuredPrompt` 仍以普通字符串保留完整 prompt，
+  同时用 `PromptCacheLayout` 明示三个机器边界：`stable_prefix`、`stable_user_prefix`和
+  `volatile_suffix`。边界不解析标题、用户正文或模型语言。稳定 system 只含 System、Owner Scope、
+  Prompt Files/Persona/Skill 与文本工具目录；run 固定 user 含本轮记忆快照、Conversation/Runtime
+  Injection、推荐工具和原始用户任务；任务工作区与本次执行事实留在动态尾部。
+- Anthropic-compatible 的唯一 wire 顺序是 `system/tools -> stable initial user -> canonical IR ->
+  volatile facts`。顶层 system 和 tools 各有一个稳定断点，message 级只有一个断点，它在每轮
+  copy-on-write 移到最新可缓存历史块；动态事实永远在该断点之后。这适配 终端交互
+  `addCacheBreakpoints` 的单 message marker，也保留 会话运行时 的旧输入前缀先于新输入原则。
+  OpenAI-compatible 无 `cache_control`，但使用同样的消息顺序供本地服务器 KV 前缀缓存。
+- 工作区不得进入稳定 user：同一 run 的首次请求看到 pending，首个工具后才看到 canonical
+  task root，这是结构化状态转换而非可猜的文案。它留在 IR 后既不污染稳定前缀，也不丢失模型必需的当前路径。
+  完整文本、canonical IR、归档、Compact、owner/task 权限均不变。
 - `ma-cache-probe-minimax-r60` 的同 thread 真回合中，首个新布局请求为 25,192 普通输入；下一轮为
   5,897 普通输入、13,967 cache-read、5,333 cache-write；再下一轮稳定 system 与 tools 均命中，得到
   5,959 普通输入、19,300 cache-read、0 cache-write。请求指纹同时证明 system/tools 哈希不变、动态 user
@@ -1921,6 +1925,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   “输入 5、缓存 1”时约下降 61.0%。这些百分比只对应本次 MiniMax 样本；不同模型、TTL、容量淘汰和长会话
   仍必须读取 provider usage ledger。下一阶段用同一长多子代理 prompt 分别验证 my-agent 本地模型/
   MiniMax，以及 会话运行时/终端交互 的 MiniMax 对照，不用屏幕 Context 猜成本。
+- r61 仅有 system/tools 稳定时，161 次调用共 4,696,945 普通 input / 1,286,446 read /
+  21,118 write，两档缓存价只节省约 21.0%/17.1%。r62 开启追加式 IR 后，截至已结账的
+  131 次调用为 354,625 普通 input / 3,576,645 read / 286,660 write，暂时节省 83.1%/67.8%。
+  r62 尚未终态，这组数据只是方向证据，最终文档必须用终态账本替换。
 
 ## 2026-08-27 缓存热尾、冷折叠与本地搜索空结果合同【状态：已部署；热期真 TUI 通过，冷边界长等待中】
 

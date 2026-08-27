@@ -1,20 +1,27 @@
 # STATUS
 
-## 2026-08-27 原生稳定 system 缓存分层（MiniMax 真 TUI 已通过；长任务矩阵进行中）
+## 2026-08-27 原生追加式 prompt 缓存（MiniMax 长任务复验中）
 
 - `.7` 唯一 Gateway 上用透明代理只记录长度、哈希和 cache marker，未记录 prompt 或 Key。旧链连续请求的
   tools/system 哈希不变，首条 user prompt 却从约 31KB→33KB→45KB；模型账出现 24,790 cache-write / 0 read，
   下一轮只能读到约 14,140 的工具前缀并重新写 11,386，根因是稳定规则与动态会话拼成同一缓存块。
-- 当前候选用 `CacheStructuredPrompt` 保留完整字符串，同时附带 typed stable/volatile 布局。Anthropic native
-  把约 23KB 的 System、Owner Scope、Persona/Prompt Files、Skill 索引和文本工具目录移入顶层 system 缓存块；
-  记忆、时间、Conversation、当前任务和执行事实仍完整放在 user 动态尾部。text、关闭缓存、canonical IR、
-  Compact、归档和权限不变。
+- r60 只分出稳定 system 后，短链能命中 system/tools，但 r61 的 161 次真实长工具循环暴露了第二个问题：
+  每轮变化的 user 大块仍位于 canonical IR 之前，历史追加会被它破坏。r61 总账为
+  4,696,945 普通 input / 1,286,446 cache-read / 21,118 cache-write，按输入 5、缓存 0.1/1
+  相对全部普通输入只省约 21.0%/17.1%。
+- 对照 会话运行时 会话级 `prompt_cache_key` + 旧历史前缀，以及 终端交互 每次只把一个 message
+  断点向最新历史推进，当前 typed 布局改为三段：稳定 system、run 固定的首条 user、每轮动态尾部。
+  Anthropic 的真实 wire 顺序为「稳定 system/tools → 固定 user → append-only IR → 动态事实」，
+  并且始终只有一个 message 断点；OpenAI-compatible 也用同样顺序供本地 KV 前缀复用。
+  任务工作区会在首工具前后从 pending 变成真实路径，因此明确留在 IR 后的动态尾部。
+  正文、历史、归档、Compact 和权限没有被删减或重写。
 - `ma-cache-probe-minimax-r60` 修复后第三个连续回合为 5,959 uncached input、19,300 cache-read、0 cache-write，
   对照首个 25,192 全输入回合约缓存 76.6% 的输入。按输入 5、缓存 0.1/1 两档，单轮样本成本分别下降约
   74.8%/61.0%；模型仍能准确回答前文，指纹证明 stable system/tools 不变而动态 user 正常增长。
-- Prompt/cache/native IR/Compact 组合定向测试当前 140 项通过；严格 gate、文档检查与 my-agent 本地模型长任务、
-  my-agent MiniMax、会话运行时 MiniMax、终端交互 MiniMax 同 prompt 矩阵仍在进行。改动远低于 10,000 行，不跑
-  全仓 pytest。
+- 本地 typed layout / Anthropic / OpenAI-compatible / native IR 定向测试已通过。r62 仍在同一
+  `.7` Gateway 真 TUI 中运行；截至 131 次已结账调用，当前为 354,625 普通 input /
+  3,576,645 cache-read / 286,660 cache-write，两档价格暂时节省约 83.1%/67.8%。这是进行中样本，
+  必须等 root 终态后重算；本地模型及 会话运行时/终端交互 对照仍要合并到最终矩阵。
 
 ## 2026-08-26 长期会话、TUI 时序、任务目录与网络事实（已部署真机验证；LAN/启动仍有遗留）
 
