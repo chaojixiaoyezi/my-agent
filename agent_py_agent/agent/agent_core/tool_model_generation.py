@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from functools import partial
 from queue import Empty, Queue
 from threading import Thread
@@ -18,6 +19,7 @@ from ..concurrency.interrupt import (
     set_interrupt,
 )
 from ..model_guidance import provider_system_instruction
+from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..tooling.runtime_contracts import ToolChoice
 from ._runtime_params import ToolLoopExecuteParams
 from .model.call_runtime import (
@@ -40,12 +42,16 @@ from .model.context_pressure import (
 from .native_tool_protocol import native_tool_use_active, resolve_native_tools
 from .runner.stage_trace import (
     RunnerModelStageTraceRequest,
+    RunnerModelStreamActivityTraceRequest,
+    RunnerProviderRetryTraceRequest,
     trace_runner_model_request_failed,
     trace_runner_model_request_started,
     trace_runner_model_response_received,
+    trace_runner_model_stream_active,
+    trace_runner_provider_retry_scheduled,
 )
-from .tool_ir_guidance import append_runtime_guidance_user_message
-from .tool_ir_history import native_tool_ir_history
+from .tool_ir_guidance import unforwarded_runtime_guidance
+from .tool_ir_history import native_tool_ir_history, record_runtime_facts_turn_ir
 from .tool_stream import (
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,
@@ -57,6 +63,7 @@ from .tool_stream import (
 
 _TOOL_STREAM_POLL_SECONDS = 0.05
 _MODEL_INTERRUPT_DRAIN_SECONDS = 1.0
+_RUNNER_STREAM_ACTIVITY_STATE_KEY = "_runner_model_stream_activity_projection"
 
 
 @dataclass(frozen=True)
@@ -91,6 +98,7 @@ class _ModelGenerationState:
     chunk_filter: ToolBoundaryChunkFilter
     ledger: object
     call_id: str
+    tool_rounds: int
     first_token_timeout_seconds: float
     on_chunk: object
     retry_sink: object
@@ -110,6 +118,7 @@ class _ModelGenerationState:
 # LLM: 这是工具模型轮的统一生成入口；preflight compact、成本和完成追踪必须保持同一路径，变更要同步生成测试。
 # 函数用途: 在上下文预检后调用模型，记录真实 native 工具使用和成本，再完成本轮响应归档。
 def generate_model_response(request: ModelGenerateParams):
+    request = _materialize_native_prompt_facts(request)
     if preflight := preflight_context_pressure_response(request):
         return preflight
     _trace_model_start(request)
@@ -119,6 +128,26 @@ def generate_model_response(request: ModelGenerateParams):
     response, final_state = _generate_or_recover_context_pressure(request, state)
     _record_run_cost(request, response)  # 审计 #19/#2:真实 USD 成本累计到 owner/run 维度
     return _finish_model_generation(request, final_state, response)
+
+
+# LLM: A typed native prompt's volatile suffix must enter the canonical IR before provider
+# submission. The backend then receives an empty volatile adjunct, so every later tool request
+# literally extends the earlier messages instead of moving changed facts behind newer results.
+# 函数用途: 把本次原生请求的动态事实固化为追加式消息，并返回不再重复携带这些事实的 prompt。
+def _materialize_native_prompt_facts(request: ModelGenerateParams) -> ModelGenerateParams:
+    if not native_tool_use_active(request.params):
+        return request
+    layout = prompt_cache_layout(request.prompt)
+    if layout is None:
+        return request
+    record_runtime_facts_turn_ir(request.params, layout.volatile_suffix)
+    provider_prompt = CacheStructuredPrompt(
+        layout.stable_prefix,
+        "",
+        stable_user_prefix=layout.stable_user_prefix,
+        canonical_user_turn=layout.canonical_user_turn,
+    )
+    return replace(request, prompt=provider_prompt)
 
 
 def _record_run_cost(request: ModelGenerateParams, response: object) -> None:
@@ -318,6 +347,11 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         call_id=call_id,
         chunk_filter=chunk_filter,
         first_token_estimate=first_token_estimate,
+        activity_callback=partial(
+            _publish_runner_model_stream_activity,
+            request,
+            stream_kind="output",
+        ),
     )
     tools = resolve_native_tools(request.agent, request.params)
     tool_choice = _model_turn_tool_choice(request.params, tools)
@@ -328,6 +362,7 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         chunk_filter=chunk_filter,
         ledger=ledger,
         call_id=call_id,
+        tool_rounds=request.tool_rounds,
         first_token_timeout_seconds=first_token_estimate.timeout_seconds,
         on_chunk=on_chunk,
         retry_sink=request.params.effective_on_chunk,
@@ -350,6 +385,74 @@ def _begin_model_turn_identity(params: object, tool_rounds: int) -> str:
     return turn_id
 
 
+# LLM: Semantic model deltas become a throttled no-content child-state heartbeat. The exact text
+# continues only to the existing TUI sink/model ledger; this projection stores phase and counts.
+# 函数用途: 在慢模型持续输出时定期刷新子代理状态，避免用户把长推理误认为卡死。
+def _publish_runner_model_stream_activity(
+    request: ModelGenerateParams,
+    chunk: object,
+    *,
+    stream_kind: str,
+) -> None:
+    content_chars = len(str(chunk or ""))
+    if content_chars <= 0:
+        return
+    params = request.params
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    try:
+        from ..capability.runtime_config_reload import capability_config_for_agent
+
+        config = capability_config_for_agent(request.agent)
+        if not bool(
+            getattr(config, "subagent_stream_activity_projection_enabled", True)
+        ):
+            return
+        interval = max(
+            1.0,
+            float(getattr(config, "subagent_stream_activity_interval_seconds", 15)),
+        )
+    except Exception:
+        interval = 15.0
+    now = time.monotonic()
+    turn_id = str(state.get("_current_model_turn_id") or "")
+    previous = state.get(_RUNNER_STREAM_ACTIVITY_STATE_KEY)
+    previous = previous if isinstance(previous, dict) else {}
+    kind = str(stream_kind or "output").strip().lower()
+    same_stream = (
+        str(previous.get("turn_id") or "") == turn_id
+        and str(previous.get("stream_kind") or "") == kind
+    )
+    try:
+        last_emitted = float(previous.get("last_emitted_monotonic") or 0.0)
+    except (TypeError, ValueError):
+        last_emitted = 0.0
+    try:
+        previous_chars = max(0, int(previous.get("observed_chars") or 0))
+    except (TypeError, ValueError):
+        previous_chars = 0
+    total_chars = (previous_chars if same_stream else 0) + content_chars
+    state[_RUNNER_STREAM_ACTIVITY_STATE_KEY] = {
+        "turn_id": turn_id,
+        "stream_kind": kind,
+        "last_emitted_monotonic": last_emitted,
+        "observed_chars": total_chars,
+    }
+    if same_stream and now - last_emitted < interval:
+        return
+    state[_RUNNER_STREAM_ACTIVITY_STATE_KEY]["last_emitted_monotonic"] = now
+    trace_runner_model_stream_active(
+        RunnerModelStreamActivityTraceRequest(
+            agent=request.agent,
+            params=params,
+            tool_rounds=request.tool_rounds,
+            stream_kind=kind,
+            observed_chars=total_chars,
+        )
+    )
+
+
 def _native_provider_messages(agent: object, params: object) -> list[dict] | None:
     """native 下把 IR 历史和宿主运行时指引翻成厂商原生 messages。
 
@@ -357,32 +460,36 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     返回 ``[]``，让 backend 保留“这是原生会话”的结构化事实，并从首个模型
     请求开始缓存稳定 prompt 与工具清单；不能把空 native 历史压成 text 路径。
     ``tool_context`` 有尚未转发的宿主指引时，继续返回结构化 user 消息。
-    当前 user、已结束会话和本轮工具往返都已按时间顺序进入 IR；backend 只在其后追加
-    每轮动态事实。本函数不能重排消息，也不能把 prompt 中的诊断副本再次发给 provider。
+    已结束会话在 provider_history_messages，本轮 user、工具往返和动态运行事实按时间顺序
+    进入 IR；本函数只拼接这两段，不能重排消息或把 prompt 中的诊断副本再次发给 provider。
     """
     if not native_tool_use_active(params):
         return None
     history = getattr(params, "tool_ir_history", None)
     from ..backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
 
-    messages = AnthropicMessageAdapter().to_provider_messages(history) if history else []
+    seen = _forwarded_guidance_seen(params)
+    guidance = unforwarded_runtime_guidance(
+        getattr(params, "tool_context", None),
+        seen,
+    )
+    if guidance:
+        record_runtime_facts_turn_ir(params, "\n\n".join(guidance))
+        history = getattr(params, "tool_ir_history", None)
+    prior = [
+        deepcopy(item)
+        for item in list(getattr(params, "provider_history_messages", None) or [])
+        if isinstance(item, dict)
+    ]
+    current = AnthropicMessageAdapter().to_provider_messages(history) if history else []
+    messages = [*prior, *current]
     # Step 4 最后防线：发请求前再扫一遍孤儿（Step3 的整对回收漏了截断/异常中断/subagent
     # 提前结束/resume 等边界时，IR 仍可能残留「有 tool_use 无配对 tool_result」或反之）。
     # Anthropic 对孤儿一律 HTTP 400，这道 sweep 给孤儿 tool_use 补 stub、剔除孤儿
     # tool_result，保证出站永不带孤儿。
     messages = strip_orphaned_tool_blocks(messages)
-    # 把 tool_context 里的非工具运行时指引作为收尾 user 文本消息接回 native
-    # messages；IR 承载真实工具往返和 current-turn UserTurn，其他策略、运行事件与
-    # 进度文本不会自动进入 IR。
-    # 用跨轮持有的 seen 去重集合（存 live_archive_state，随 params 在工具循环里复用同一
-    # 实例）走「全表未转发」口径：不只转发尾部，**夹在工具往返中间**、被后续 [tool-record]
-    # 越过的指引（护栏/进度/deferred 通知等）也能到达
-    # native 模型，靠精确文本去重保证每条只发一次，绝不逐轮重复。
-    messages = append_runtime_guidance_user_message(
-        messages,
-        getattr(params, "tool_context", None),
-        seen=_forwarded_guidance_seen(params),
-    )
+    # 非工具运行时指引已经在翻译前写入 RuntimeFactsTurn；后续请求会永久带着它，
+    # 不再出现“首轮发送、下一轮因 seen 去重反而消失”的瞬态消息。
     return messages
 
 
@@ -504,12 +611,24 @@ def _thinking_stream_observer(backend: object, state: object):
     sink_owner = getattr(params, "effective_on_chunk", None)
     delta_sink = getattr(sink_owner, "write_thinking_delta", None)
     complete_sink = getattr(sink_owner, "write_thinking", None)
+    activity_sink = partial(
+        _publish_runner_model_stream_activity,
+        ModelGenerateParams(
+            agent=getattr(state, "agent", None),
+            params=params,
+            prompt="",
+            tool_rounds=int(getattr(state, "tool_rounds", 0) or 0),
+        ),
+        stream_kind="thinking",
+    )
     if bool(getattr(backend, "supports_thinking_completion", False)) and callable(
         complete_sink
     ):
         complete = partial(_publish_streamed_thinking_completion, state, complete_sink)
-        return _ThinkingStreamObserver(delta_sink, complete)
-    return delta_sink if callable(delta_sink) else None
+        return _ThinkingStreamObserver(delta_sink, complete, activity_sink)
+    if callable(delta_sink):
+        return _ThinkingStreamObserver(delta_sink, None, activity_sink)
+    return None
 
 
 # LLM: block-stop 的完整思考是本次物理调用的显示终态；标记必须先写，再调用 sink，避免重入路径重复 fallback。
@@ -535,13 +654,21 @@ def _publish_streamed_thinking_completion(state: object, sink: object, text: str
 class _ThinkingStreamObserver:
     # LLM: 两个 sink 都来自同一宿主回合；complete sink 已绑定物理调用状态，不能跨调用复用。
     # 函数用途: 保存当前模型调用的思考增量和完成回调。
-    def __init__(self, delta_sink: object, complete_sink: object) -> None:
+    def __init__(
+        self,
+        delta_sink: object,
+        complete_sink: object,
+        activity_sink: object = None,
+    ) -> None:
         self._delta_sink = delta_sink
         self._complete_sink = complete_sink
+        self._activity_sink = activity_sink
 
     # LLM: callable 形态保持旧 backend/collector 的 delta 合同；无 delta sink 时只静默等待 terminal。
     # 函数用途: 转发一段实时思考增量。
     def __call__(self, text: str) -> None:
+        if callable(self._activity_sink):
+            self._activity_sink(text)
         if callable(self._delta_sink):
             self._delta_sink(text)
 
@@ -785,6 +912,7 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
 
     def _observe_provider_attempt(event: dict[str, object]) -> None:
         record_model_provider_attempt(state.ledger, state.call_id, event)
+        _trace_transport_retry(state, event)
         _publish_transport_retry(state.retry_sink, event)
 
     # 全局在飞 LLM 并发闸(T4 层4):默认关=nullcontext 零变化;配了 LLM_MAX_INFLIGHT 才封顶,
@@ -833,6 +961,28 @@ def _publish_transport_retry(sink_owner: object, event: dict[str, object]) -> No
         return
 
 
+# LLM: The durable retry projection reads only the transport observer's typed retry fields and
+# cannot influence whether another request is attempted. Provider error bodies stay in the ledger.
+# 函数用途: 在真正安排退避时更新当前子代理状态，后台任务也能看见正在第几次重连。
+def _trace_transport_retry(
+    state: _ModelGenerationState,
+    event: dict[str, object],
+) -> None:
+    if event.get("status") != "failed" or event.get("retry_scheduled") is not True:
+        return
+    trace_runner_provider_retry_scheduled(
+        RunnerProviderRetryTraceRequest(
+            agent=state.agent,
+            params=state.params,
+            tool_rounds=state.tool_rounds,
+            attempt=int(event.get("retry_attempt") or 1),
+            total=int(event.get("retry_total") or 1),
+            delay_seconds=float(event.get("retry_wait_seconds") or 0.0),
+            error_type=str(event.get("error_type") or ""),
+        )
+    )
+
+
 # LLM: 只有 backend 明确声明支持且当前确有原生工具 surface 时，才把工具参数 sink 传入；
 # thinking block-stop 另用独立 capability，两个判断都不能靠 backend 名称或 prompt 文本。
 # 函数用途: 选择本轮是否启用 provider 工具参数生成进度回调。
@@ -848,8 +998,30 @@ def _tool_input_progress_callback(backend: object, state: _ModelGenerationState)
         and bool(getattr(backend, "supports_tool_input_progress", False))
         and state.tools is not None
     ):
-        return sink
+        return partial(_publish_tool_input_progress, state, sink)
     return None
+
+
+# LLM: Tool-input progress forwards the provider's already-sanitized typed projection and emits
+# the same throttled no-content runner activity used by text/reasoning streams.
+# 函数用途: 同时更新工具参数生成状态并把原有进度对象交给 TUI sink。
+def _publish_tool_input_progress(
+    state: _ModelGenerationState,
+    sink: object,
+    payload: dict[str, object],
+) -> None:
+    request = ModelGenerateParams(
+        agent=state.agent,
+        params=state.params,
+        prompt="",
+        tool_rounds=state.tool_rounds,
+    )
+    _publish_runner_model_stream_activity(
+        request,
+        str(payload.get("received_chars") or ""),
+        stream_kind="tool_input",
+    )
+    sink(payload)
 
 
 # LLM: 仅把 backend 明确声明支持的 provider 增量/终态 callback 传给具备 typed sink

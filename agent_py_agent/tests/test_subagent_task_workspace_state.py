@@ -50,6 +50,7 @@ def test_subagent_save_does_not_overwrite_main_task_workspace_state(tmp_path) ->
     assert state["run_id"] == "run-main"
     assert state["task_id"] == "分析 all-agent"
     assert state["child_run_ids"] == [child.id]
+    assert isinstance(state["updated_at"], float)
     assert "父任务摘要" in (work / "summaries" / "current_summary.md").read_text(encoding="utf-8")
     assert run_state["run_id"] == child.id
     assert run_state["task_id"] == "run-main"

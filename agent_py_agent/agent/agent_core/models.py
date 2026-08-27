@@ -111,3 +111,6 @@ class AgentRunResult:
     # Internal continuation carrier for real user turns delivered while this
     # durable task was already running. Gateway public projections ignore it.
     active_turn_user_inputs: list[dict[str, object]] | None = None
+    # Internal provider-neutral history for this completed turn. Channel responses exclude it;
+    # owner-scoped conversation metadata consumes it for exact native replay.
+    canonical_native_messages: list[dict[str, object]] | None = None

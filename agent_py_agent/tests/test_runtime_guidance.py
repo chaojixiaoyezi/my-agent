@@ -43,8 +43,16 @@ from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     pending_natural_user_reply,
     queue_natural_user_reply,
 )
+from agent_py_agent.agent.agent_core.tool_model_generation import (
+    _native_provider_messages,
+)
 from agent_py_agent.agent.backends import ModelResponse, ProviderResponseError
-from agent_py_agent.agent.backends.tool_ir import UserTurn
+from agent_py_agent.agent.backends.base import (
+    AnthropicCompatibleBackend,
+    BackendOptions,
+    OpenAICompatibleBackend,
+)
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_AUDIT_PREPARE_ATTR,
@@ -1175,9 +1183,6 @@ def test_text_protocol_keeps_steer_in_transcript_without_building_native_ir(tmp_
     assert "# Runtime Injection\n（无）" in prompt
 
 
-@pytest.mark.xfail(
-    reason="EXEC-31b: native 下 natural-user-reply 经 IR 消息注入, 不再出现在 prompt 文本; 断言待适配"
-)
 def test_model_authored_receipt_cannot_consume_active_task_guidance(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     entry = agent.conversation_store.append_guidance(
@@ -1197,23 +1202,24 @@ def test_model_authored_receipt_cannot_consume_active_task_guidance(tmp_path) ->
 
     receipt_params = natural_user_reply_model_params(params)
     receipt_prompt = build_tool_loop_prompt(agent, receipt_params)
+    receipt_messages = _native_provider_messages(agent, receipt_params)
 
     assert receipt_params.consume_pending_turn_input is False
     assert entry.message not in receipt_prompt
+    assert entry.message not in json.dumps(receipt_messages, ensure_ascii=False)
     assert agent.conversation_store.pending_guidance("task", "task-1")
     assert discard_pending_natural_user_reply(params) is True
 
     task_prompt = build_tool_loop_prompt(agent, params)
+    task_messages = _native_provider_messages(agent, params)
 
-    assert entry.message in task_prompt
+    assert entry.message not in task_prompt
+    assert entry.message in json.dumps(task_messages, ensure_ascii=False)
     assert agent.conversation_store.pending_guidance("task", "task-1")
     assert acknowledge_injected_turn_input(agent, params, now=11.0) == 1
     assert agent.conversation_store.pending_guidance("task", "task-1") == []
 
 
-@pytest.mark.xfail(
-    reason="EXEC-31b: native 下 natural-user-reply 经 IR 消息注入, 不再出现在 prompt 文本; 断言待适配"
-)
 def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     prompts: list[str] = []
@@ -1224,8 +1230,9 @@ def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_pat
         def generate(self, prompt: str, on_chunk=None, **kwargs):
             del on_chunk
             prompts.append(prompt)
+            wire = json.dumps(kwargs.get("messages") or [], ensure_ascii=False)
             if len(prompts) == 1:
-                assert "[natural-user-reply]" in prompt
+                assert "[natural-user-reply]" in wire
                 agent.conversation_store.append_guidance(
                     {
                         "target_type": "task",
@@ -1235,8 +1242,8 @@ def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_pat
                     }
                 )
                 return ModelResponse(text="这是一条已经过期的派工回执。", backend=self.name)
-            assert "[natural-user-reply]" not in prompt
-            assert "把最新补充真正用于当前任务。" in prompt
+            assert "[natural-user-reply]" not in wire
+            assert "把最新补充真正用于当前任务。" in wire
             return ModelResponse(text="已按最新补充继续当前任务。", backend=self.name)
 
     agent.backend = SteerDuringReceiptBackend()
@@ -1254,9 +1261,6 @@ def test_steer_arriving_during_receipt_generation_discards_stale_receipt(tmp_pat
     assert agent.conversation_store.pending_guidance("task", "task-1") == []
 
 
-@pytest.mark.xfail(
-    reason="EXEC-31b: native 下 natural-user-reply 经 IR 消息注入, 不再出现在 prompt 文本; 断言待适配"
-)
 def test_steer_survives_empty_stale_provider_response_in_same_turn(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     prompts: list[str] = []
@@ -1280,7 +1284,8 @@ def test_steer_survives_empty_stale_provider_response_in_same_turn(tmp_path) -> 
                     "OpenAI-compatible 流式响应没有文本或工具调用",
                     error_code="MODEL_EMPTY_RESPONSE",
                 )
-            assert "停止继续搜索，直接用已有资料收口。" in prompt
+            wire = json.dumps(kwargs.get("messages") or [], ensure_ascii=False)
+            assert "停止继续搜索，直接用已有资料收口。" in wire
             assert "上一轮模型接口返回了空文本" not in prompt
             return ModelResponse(text="已按刚才的补充完成收口。", backend=self.name)
 
@@ -1361,6 +1366,89 @@ def test_natural_reply_prompt_treats_fact_carrier_as_invisible(tmp_path) -> None
     assert "不要告诉用户你收到了结构化信息" in prompt
     assert "不要把 operation、verification、envelope" in prompt
     assert "请根据上面的结构化事实" not in prompt
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai"])
+@pytest.mark.parametrize("preserve_execution_evidence", [False, True])
+def test_natural_reply_facts_reach_native_provider_wire_once(
+    tmp_path,
+    provider: str,
+    preserve_execution_evidence: bool,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", subagent_workspace="subs"),
+        tmp_path,
+    )
+    original_ir = [
+        UserTurn("# User Task\n原主轮任务"),
+        AssistantTurn(text="原主轮已经取得的执行证据"),
+    ]
+    params = _tool_loop_params(
+        task_id="task-1",
+        tool_ir_history=list(original_ir),
+    )
+    marker = f"wire-fact-{provider}-{'preserve' if preserve_execution_evidence else 'thin'}"
+    queue_natural_user_reply(
+        params,
+        kind=("audit_prepare_result" if preserve_execution_evidence else "background_dispatch"),
+        facts={"reply_is_interim": True, "wire_marker": marker},
+    )
+
+    reply_params = natural_user_reply_model_params(params)
+    prompt = build_tool_loop_prompt(agent, reply_params)
+    messages = _native_provider_messages(agent, reply_params)
+
+    assert messages is not None
+    assert reply_params.tool_ir_history is not params.tool_ir_history
+    if preserve_execution_evidence:
+        assert reply_params.tool_ir_history[:-1] == original_ir
+    else:
+        assert len(reply_params.tool_ir_history) == 1
+        assert "原主轮任务" not in str(messages)
+    assert isinstance(reply_params.tool_ir_history[-1], UserTurn)
+    assert marker in reply_params.tool_ir_history[-1].text
+    assert params.tool_ir_history == original_ir
+
+    captured: dict[str, object] = {}
+    options = BackendOptions(
+        api_base="https://api.example.com/v1",
+        api_key="key",
+        model_name="test-model",
+        max_tokens=128,
+        stream_enabled=False,
+    )
+    if provider == "anthropic":
+        backend = AnthropicCompatibleBackend(options)
+
+        def request_json(path, payload, headers):
+            del path, headers
+            captured["payload"] = payload
+            return {"content": [{"type": "text", "text": "已收到"}]}
+
+    else:
+        backend = OpenAICompatibleBackend(options)
+
+        def request_json(path, payload, headers):
+            del path, headers
+            captured["payload"] = payload
+            return {
+                "choices": [
+                    {"message": {"content": "已收到"}, "finish_reason": "stop"}
+                ]
+            }
+
+    backend.request_json = request_json
+    backend.generate(prompt, messages=messages, tools=[])
+
+    wire_text = json.dumps(
+        captured["payload"]["messages"],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert wire_text.count("[natural-user-reply]") == 1
+    assert wire_text.count(marker) == 1
+    assert ("原主轮任务" in wire_text) is preserve_execution_evidence
+    assert ("原主轮已经取得的执行证据" in wire_text) is preserve_execution_evidence
 
 
 def test_open_subagents_queue_interim_reply_without_reading_model_prose() -> None:

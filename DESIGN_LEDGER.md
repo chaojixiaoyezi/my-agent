@@ -2026,3 +2026,26 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   的条件下仍准确复述首轮唯一搜索串和 backend/status/scan_complete/hint_code，证明 cold 投影未丢该轮
   继续工作所需事实。该功能正确性不冒充 provider cache 命中；对应 MiniMax 普通后续轮账本实际为 0
   cache-read，缓存经济性结论仍只使用上述本地受控 A/B。
+
+## 2026-08-28 完成回合原生历史、慢流活动与 Compact 用量收口【状态：本地 focused 已通过，双机最终验收中】
+
+- 对照 会话运行时 `core/src/context_manager/history.rs` 与 `core/src/session/turn.rs`：会话先持久保存 typed
+  `ResponseItem`，只有 provider 出站边界才做协议转换；正文、推理和工具参数 delta 都是 typed event，
+  Compact 是替换旧历史的唯一入口。本项目适配为 `conversation_native_messages.v1`：每个完成回合在最终
+  assistant metadata 保存该回合 exact user/assistant/tool_call/tool_result 消息，下一轮在同一完整消息窗口
+  里直接回放。可见 transcript 仍是用户/助手正文，不承担从散文猜回工具结构的职责。
+- 每轮会变化的 workspace、memory、推荐工具和运行事实不再以“临时 prompt 尾巴”出现后又消失；首次出站前
+  转成 typed `RuntimeFactsTurn`，此后与工具结果按时间顺序只追加。这样第二轮及以后保留逐字节相同的旧
+  system/tools/messages 前缀，供应商可以复用缓存，同时后续任务不会因隐藏裁剪而丢掉上一轮工具事实。
+- 慢模型的正文、思考与工具参数流按配置间隔投影无正文 heartbeat，provider transport 的结构化退避也写
+  当前 child 状态。它们只改变 TUI/Web 可观察性，不取得停止、完成、重试或权限裁决权；正常持续 SSE 没有
+  固定总墙钟，仍由 first-event、rolling idle、显式停止和 provider 终态收口。
+- 所有 carried/live/thread Compact 摘要调用现在通过 `auxiliary_call.py` 进入唯一 `ModelCallLedger`、HTTP
+  attempt observer、全局并发闸和成本指标。删除摘要层额外 daemon-thread deadline：该旧计时器无法取消
+  已经发出的 HTTP，请求超时后会在后台继续消耗额度，并让慢模型摘要永远被丢弃。现在辅助调用只服从统一
+  provider 首包/流空闲/请求超时，异常或 provider timeout 再回退机械摘要。
+- `work/state.json.updated_at` 固定为 Unix 秒浮点数；`activated_at/finished_at` 继续使用 ISO 字符串。父级与
+  child 状态投影不再把同一字段在两种类型间来回覆盖，跨进程 heartbeat/排序可以使用一个稳定合同。
+- 新型号只进入 `docs/architecture/MODEL_CATALOG_SNAPSHOT.md` 的带日期参考快照。通道运行时 最新目录再次证明
+  endpoint/计划差异会改变可用型号、thinking 映射和 context；本轮不把它们升级为 runtime allowlist，
+  未知 provider 型号继续透传，后续再单独设计“用户配置 > 实时发现 > 版本种子”的声明式目录。

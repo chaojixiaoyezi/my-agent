@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -88,6 +89,7 @@ class _RunWorkspaceTerminal:
     verification: str
     run_id: str
     finished_at: str
+    updated_at: float
 
 
 def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePaths:
@@ -111,6 +113,7 @@ def finish_run_workspace(request: FinishRunWorkspaceRequest) -> RunWorkspacePath
         verification=verification,
         run_id=str(request.run_id or request.request_id or request.task_id or "").strip(),
         finished_at=str(request.finished_at or _now_iso()),
+        updated_at=time.time(),
     )
     if not identity or not _finish_identity_matches(identity, request):
         return None
@@ -159,7 +162,7 @@ def _finished_state_payload(
         "runtime_source": str(request.runtime_source or ""),
         "terminal_run_id": terminal.run_id,
         "finished_at": terminal.finished_at,
-        "updated_at": terminal.finished_at,
+        "updated_at": terminal.updated_at,
     }
     if terminal.status == "DONE":
         updated["progress"] = 1.0
@@ -271,6 +274,9 @@ def _workspace_identity_payload(request: EnsureRunWorkspaceRequest, paths: RunWo
     }
 
 
+# LLM: work/state.json shares one numeric Unix-seconds timestamp contract with task-workspace
+# projection writers. Human-readable activation/finish times remain in their dedicated ISO fields.
+# 函数用途: 创建主任务运行状态；updated_at 固定为浮点时间，避免子代理写入时来回变类型。
 def _task_state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]:
     run_id = str(request.run_id or request.request_id or request.task_id or "").strip()
     return {
@@ -286,7 +292,7 @@ def _task_state_payload(request: EnsureRunWorkspaceRequest) -> dict[str, object]
         "artifact_refs": [],
         "evidence_refs": [],
         "child_run_ids": [],
-        "updated_at": _now_iso(),
+        "updated_at": time.time(),
     }
 
 

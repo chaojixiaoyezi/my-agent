@@ -1,5 +1,16 @@
 # Memory Progress
 
+## 2026-08-28 Compact 辅助模型调用纳入统一用量账本
+
+- carried archive 与 live native history 的语义摘要不再绕过主模型调用账本；它们现在复用
+  `ModelCallLedger`、供应商 attempt observer、全局并发准入和同一成本指标，真实 Compact 开销能够随
+  对应 request/run/task 一起核算。
+- 已删除 Compact 自己的 daemon-thread 20 秒截止与对应配置。慢模型摘要只服从供应商传输层的有界超时，
+  不会出现主线程已回退、后台 HTTP 仍继续消耗额度的“孤儿请求”。供应商超时或空结果仍严格回退机械历史，
+  不删除原生工具事实。
+- 连续 Compact 只替换上一代 thread summary；带稳定 schema marker 的 active-turn carried handoff 会继续
+  保留，当前真实任务在 wire 上只发送一次。聚焦回归覆盖二次 Compact、慢摘要和辅助调用用量登记。
+
 ## 2026-08-25 后台续片保留副作用操作终态
 
 - 真机 `create_subagents` 的原始 tool artifact 已有 `tool_operation.status=succeeded`，但旧 index 没保存该

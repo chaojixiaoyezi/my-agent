@@ -265,6 +265,7 @@ class SimpleAgentRuntimeMixin:
             context_scope=str(getattr(rp, "context_scope", "default") or "default"),
             active_turn_user_inputs=list(params.active_turn_user_inputs or []),
             tool_runtime_evidence=dict(params.tool_runtime_evidence or {}),
+            canonical_native_messages=list(params.canonical_native_messages or []),
             on_chunk=rp.on_chunk,
         )
 

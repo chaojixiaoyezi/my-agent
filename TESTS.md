@@ -8,11 +8,14 @@
   是 request-local，不能修改共享 backend，`first_event/stream_idle/wall_clock` 分账。
 - 同一直属父级已有活动 child 占用 exact covers 时，后续批次除非显式 replacement，否则任何 run 落盘前
   整批拒绝；接管关系预检失败零创建，edge 落账失败的新 child 启动前取消。
-- Gateway/child 已结束历史通过同一 immutable `ConversationHistorySeed` 进入 canonical messages，顺序为
-  committed summary → completed user/assistant → exact current user → current-turn IR；当前 user 不得同时在
-  typed prompt 与 messages 发送。`runtime_injections` 位于 append-only native IR 后的动态尾部；只改变 wake
-  内容或开始普通下一任务时，旧 system/tools/messages 前缀不得被重写。共享 task root 的 output 声明不再
-  成为目录锁，越过父 workspace 仍硬拒绝。
+- Gateway/child 已结束历史通过同一 immutable `ConversationHistorySeed` 进入 canonical messages。完成回合
+  保存 exact user/assistant/tool_call/tool_result 信封；下一轮按 committed summary → completed native messages
+  → exact current user → current-turn IR 追加，不再把工具历史降级成散文，也不把 current user 同时发两次。
+  runtime facts 在第一次出现时固化成 `RuntimeFactsTurn`，后续工具轮只追加，旧 system/tools/messages 前缀
+  不重写。共享 task root 的 output 声明不再成为目录锁，越过父 workspace 仍硬拒绝。
+- 慢模型只要仍有正文、思考或工具参数 delta，子代理状态会按 15 秒节流刷新“持续响应/思考/生成参数”；
+  连接退避显示 typed 尝试次数。状态只保存阶段和计数，不保存模型正文。Compact 摘要也进入统一模型调用账，
+  并删除了无法取消、超时后仍在后台耗费额度的第二摘要线程计时器。
 
 ```bash
 python3 -m pytest \
@@ -31,11 +34,15 @@ python3 -m pytest \
   agent_py_agent/tests/test_backends_openai_native_tool_use.py \
   agent_py_agent/tests/test_backends_native_tool_use.py \
   agent_py_agent/tests/test_native_tool_use_ir_messages_flow.py \
+  agent_py_agent/tests/test_compact_semantic_summary.py \
+  agent_py_agent/tests/test_subagent_debug_trace.py \
+  agent_py_agent/tests/test_run_task_workspace_writer.py \
   -q --tb=short
 ```
 
-上述组合 focused 已通过（保留既有 xfail）。真实验收仍必须分别通过 `.7` 本地慢模型和 `.10`
-MiniMax-M2.7 的 fresh TUI 长多子代理任务；不能用 loopback SSE 或短提示冒充长任务通过。
+本轮生产与测试改动约两千行，未达到项目约定的 10,000 行全仓 pytest 触发线。最终提交前仍需重跑上述直接相关
+focused 与严格 gate；真实验收必须分别通过 `.7` 本地慢模型和 `.10` MiniMax-M2.7 的 fresh TUI 长多子代理
+任务，不能用 loopback SSE 或短提示冒充长任务通过。
 
 ## 2026-08-26 子代理具体工具审批回送所属 TUI
 

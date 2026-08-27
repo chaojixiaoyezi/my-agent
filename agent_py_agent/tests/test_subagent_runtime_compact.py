@@ -168,7 +168,7 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     assert result.ok
     assert len(backend.model_prompts) == 2
     assert len(backend.summary_prompts) == 1
-    assert "# Agent Thread Context" in backend.model_prompts[-1]
+    assert "# Agent Thread Context" not in backend.model_prompts[-1]
     assert "旧轮次已完成现状核对" in json.dumps(
         backend.model_messages[-1],
         ensure_ascii=False,

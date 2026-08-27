@@ -730,15 +730,6 @@ class TimeoutFieldsService:
         out["runner_timeout_seconds"] = value
         if warn:
             warnings.append(warn)
-        value, warn = CoercionService.coerce_float(
-            "memory_compact_semantic_summary_timeout_seconds",
-            out.get("memory_compact_semantic_summary_timeout_seconds"),
-            defaults.memory_compact_semantic_summary_timeout_seconds,
-            min_val=0.0, max_val=None,
-        )
-        out["memory_compact_semantic_summary_timeout_seconds"] = value
-        if warn:
-            warnings.append(warn)
         return out, warnings
 
 

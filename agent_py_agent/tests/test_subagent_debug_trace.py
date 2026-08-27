@@ -494,6 +494,92 @@ def test_runner_stage_trace_persists_bounded_live_activity(tmp_path) -> None:
     assert len(failed.attributes["recent_runtime_activity"]) <= 6
 
 
+def test_runner_stream_and_retry_activity_are_content_free(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.runner.stage_trace import (
+        RunnerModelStreamActivityTraceRequest,
+        RunnerProviderRetryTraceRequest,
+        trace_runner_model_stream_active,
+        trace_runner_provider_retry_scheduled,
+    )
+
+    manager = SubAgentManager(tmp_path / "subs", debug_trace_level=0)
+    task = manager.create_run(goal="child", thought="", plan=["work"])
+    task.status = "RUNNING"
+    task.runner_active_attempt_id = "attempt-child"
+    manager.save(task)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=task.id)
+    params = SimpleNamespace(run_id=task.id)
+
+    trace_runner_model_stream_active(
+        RunnerModelStreamActivityTraceRequest(
+            agent=agent,
+            params=params,
+            tool_rounds=7,
+            stream_kind="thinking",
+            observed_chars=321,
+        )
+    )
+    streaming = manager.load(task.id)
+    assert streaming.current_step == "模型持续思考中"
+    assert streaming.attributes["runtime_activity"]["observed_chars"] == 321
+
+    trace_runner_provider_retry_scheduled(
+        RunnerProviderRetryTraceRequest(
+            agent=agent,
+            params=params,
+            tool_rounds=7,
+            attempt=2,
+            total=5,
+            delay_seconds=25,
+            error_type="ProviderTransientError",
+        )
+    )
+    retrying = manager.load(task.id)
+    assert retrying.current_step == "模型连接重试 2/5，等待 25 秒"
+    public = json.dumps(retrying.attributes["runtime_activity"], ensure_ascii=False)
+    assert "secret" not in public
+    assert "ProviderTransientError" in public
+
+
+def test_runner_stream_projection_is_throttled_per_model_phase(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core import tool_model_generation
+    from agent_py_agent.agent.agent_core.tool_model_generation import (
+        ModelGenerateParams,
+        _publish_runner_model_stream_activity,
+    )
+
+    manager = SubAgentManager(tmp_path / "subs", debug_trace_level=0)
+    task = manager.create_run(goal="child", thought="", plan=["work"])
+    task.status = "RUNNING"
+    task.runner_active_attempt_id = "attempt-child"
+    manager.save(task)
+    agent = SimpleNamespace(
+        subagents=manager,
+        _current_subagent_run_id=task.id,
+        root=tmp_path,
+    )
+    params = SimpleNamespace(
+        run_id=task.id,
+        live_archive_state={"_current_model_turn_id": "turn-1"},
+    )
+    request = ModelGenerateParams(agent=agent, params=params, prompt="", tool_rounds=3)
+    observed_times = iter((100.0, 101.0, 116.0))
+    monkeypatch.setattr(tool_model_generation.time, "monotonic", lambda: next(observed_times))
+
+    _publish_runner_model_stream_activity(request, "first-secret", stream_kind="output")
+    first = manager.load(task.id)
+    first_recent = list(first.attributes["recent_runtime_activity"])
+    _publish_runner_model_stream_activity(request, "second-secret", stream_kind="output")
+    second = manager.load(task.id)
+    assert second.attributes["recent_runtime_activity"] == first_recent
+
+    _publish_runner_model_stream_activity(request, "third-secret", stream_kind="output")
+    third = manager.load(task.id)
+    assert len(third.attributes["recent_runtime_activity"]) == len(first_recent) + 1
+    assert third.attributes["runtime_activity"]["observed_chars"] == 37
+    assert "secret" not in json.dumps(third.attributes["runtime_activity"])
+
+
 def _running_trace_hierarchy(manager: SubAgentManager, old: float):
     root = manager.create_run(goal="root", thought="root", plan=["root"], role="coordinator")
     parent = manager.create_run(

@@ -40,7 +40,10 @@ from agent_py_agent.agent.agent_core.tool_ir_compact import (
     reclaim_oldest_native_ir_pairs,
     tool_use_ids_for_tool_records,
 )
-from agent_py_agent.agent.agent_core.tool_ir_history import drop_tool_call_pairs
+from agent_py_agent.agent.agent_core.tool_ir_history import (
+    drop_tool_call_pairs,
+    replace_compaction_summary_ir,
+)
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
 from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
 from agent_py_agent.agent.backends.message_adapter import (
@@ -695,6 +698,32 @@ def test_shared_native_window_reuses_semantic_summary_across_repeated_pressure(t
     assert str(messages).count("真实 rg=/opt/reference/rg") == 1
     assert model_visible_context_tokens(agent, params, "base-prompt") < 18_000
     _assert_no_orphans(messages)
+
+
+def test_second_compact_replaces_thread_summary_but_preserves_carried_handoff():
+    params = _params()
+    params.tool_ir_history.extend(
+        [
+            UserTurn("# User Task\n继续当前任务"),
+            CompactionSummary(
+                "[active-turn-tool-handoff]\n"
+                "- schema_version: active-turn-tool-handoff.v1\n"
+                "- HANDOFF-SECOND-COMPACT"
+            ),
+            AssistantTurn(text="working"),
+        ]
+    )
+
+    assert replace_compaction_summary_ir(params, "summary-generation-1") is True
+    assert replace_compaction_summary_ir(params, "summary-generation-2") is True
+
+    summaries = [
+        item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
+    ]
+    assert len(summaries) == 2
+    assert summaries[0].text.startswith("[active-turn-tool-handoff]")
+    assert summaries[1].text == "summary-generation-2"
+    assert "summary-generation-1" not in str(params.tool_ir_history)
 
 
 # === Step 3: PTL reclaim → IR integer-pair drop ==============================

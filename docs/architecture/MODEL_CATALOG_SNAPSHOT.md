@@ -15,13 +15,13 @@ API Key、base URL 私有值或用户套餐信息。
 
 | Provider | 参考型号 | 需要保留的协议差异 |
 |---|---|---|
-| OpenAI | `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` | 三者均支持 reasoning；OpenAI 官方目录给出 1.05M context、128K max output。请求参数必须继续按 provider 能力投影，不能只按型号字符串猜。 |
+| OpenAI | `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` | 三者均支持 reasoning；OpenAI 官方目录给出 1.05M 原生 context、128K max output，通道运行时 当前 manifest 另把活跃运行预算设为 272K。请求参数必须继续按 provider 能力投影，不能只按型号字符串猜。 |
 | Anthropic | `claude-opus-5`、`claude-sonnet-5`、`claude-fable-5`、`claude-mythos-5` | 通道运行时 当前目录把这些型号标为 1M context、128K output；thinking 是否可关闭和 effort 映射不同，后续应进入声明式 compat。 |
 | MiniMax | `MiniMax-M3`、`MiniMax-M2.7`、`MiniMax-M2.7-highspeed` | M3 使用原生 Anthropic thinking；M2.7 兼容流可能使用 `reasoning_content`，不能共用一条按名字硬猜的解析分支。 |
-| DeepSeek | `deepseek-v4-pro`、`deepseek-v4-flash` | thinking 工具续轮需要正确回放或剥离 `reasoning_content`；旧 `deepseek-chat/reasoner` 不应继续作为新配置示例。 |
-| Moonshot | `kimi-k3`、`kimi-k2.7-code`、`kimi-k2.7-code-highspeed` | K3 使用 `reasoning_effort`；K2.7 thinking 常开且要求省略若干采样/thinking 参数。 |
-| Qwen | `qwen3.7-plus`、`qwen3.7-max`、`qwen3.6-plus`、`qwen3-coder-plus`、`qwen3-coder-next` | 型号能否使用取决于 Standard/Coding Plan endpoint；目录存在不等于当前凭据可用。 |
-| Z.AI | `glm-5.2`、`glm-5.1` | GLM-5.2 的 reasoning 档位与 endpoint 套餐有关；未知 `glm-5*` 应允许 provider 发现后透传。 |
+| DeepSeek | `deepseek-v4-pro`、`deepseek-v4-flash` | thinking 工具续轮需要正确回放或剥离 `reasoning_content`；旧 `deepseek-chat`、`deepseek-reasoner` 不应继续作为新配置示例。 |
+| Moonshot | `kimi-k3`、`kimi-k2.7-code`、`kimi-k2.7-code-highspeed` | K3 使用 `reasoning_effort`，并移除固定的 temperature、top_p、n、presence/frequency penalty；K2.7 原生 thinking 常开，要求同时省略 `thinking` 与 `reasoning_effort`。 |
+| Qwen | `qwen3.7-plus`、`qwen3.7-max`、`qwen3.6-plus`、`qwen3.6-flash`、`qwen3.5-plus`、`qwen3-coder-plus`、`qwen3-coder-next` | 型号能否使用取决于 Standard/Coding Plan endpoint；目录存在不等于当前凭据可用。 |
+| Z.AI | `glm-5.3`、`glm-5.3-flash`、`glm-5.2`；`glm-5.1` 仅兼容旧配置 | Coding Plan 当前默认 GLM-5.3，General API 当前默认 GLM-5.2；GLM-5.2 的 thinking 档位为 `off/low/high/max`，endpoint 决定可用及默认型号。未知 `glm-5*` 仍应允许 provider 发现后透传。 |
 
 ## 后续运行时目录方向
 
@@ -29,7 +29,7 @@ API Key、base URL 私有值或用户套餐信息。
 
 - 标准键保存 `provider + model_id`，endpoint 与凭据继续只来自用户本地 provider 配置。
 - 合并优先级建议为：用户显式配置 > provider 实时发现 > 随版本发布的种子元数据。
-- 最小字段包括 `status/replaced_by`、输入模态、reasoning、context、max output、thinking 映射、compat、
+- 最小字段包括 `status/replaced_by`、输入模态、reasoning、native context、runtime context cap、max output、thinking 映射、compat、
   pricing source 与 checked_at。
 - 未知型号默认透传；缺少价格只影响估算，不得阻止调用或改变任务状态。
 - Gateway 启动时生成一次不可变目录快照，单个 run 不因后台目录刷新而中途换协议。
@@ -38,6 +38,7 @@ API Key、base URL 私有值或用户套餐信息。
 ## 来源
 
 - [OpenAI 官方模型目录](https://developers.openai.com/api/docs/models)
+- [通道运行时 OpenAI provider manifest](（外部资料链接已移出发布文档）)
 - [通道运行时 MiniMax provider](（外部资料链接已移出发布文档）)
 - [通道运行时 DeepSeek provider](（外部资料链接已移出发布文档）)
 - [通道运行时 Anthropic provider](（外部资料链接已移出发布文档）)

@@ -135,12 +135,16 @@ def _publish_subagent_context_usage(
     )
 
 
+# LLM: The model ledger owns token/first-event accounting. An optional status callback receives
+# the same non-empty delta but its failure is isolated and cannot interrupt provider streaming.
+# 函数用途: 统一记录模型流活动、过滤工具边界，并可通知慢模型状态投影。
 def observed_chunk_filter(
     *,
     ledger: ModelCallLedger,
     call_id: str,
     chunk_filter: ToolBoundaryChunkFilter,
     first_token_estimate: object,
+    activity_callback: object = None,
 ):
     seen_first_token = False
 
@@ -156,6 +160,11 @@ def observed_chunk_filter(
                     output_tokens_seen=estimate_tokens(chunk),
                 )
             )
+        if chunk and callable(activity_callback):
+            try:
+                activity_callback(chunk)
+            except Exception:
+                pass
         chunk_filter(chunk)
 
     return _on_chunk

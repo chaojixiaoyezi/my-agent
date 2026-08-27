@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
-"""能力路由配置加载工具。
+"""能力路由与子代理运行投影配置加载工具。
 
-这个模块专门放 skill / tool / 子代理授权 / 能力上抛相关配置。
+这个模块专门放 skill / tool / 子代理授权、能力上抛和子代理运行状态投影相关配置。
 它刻意和 `agent_config.yaml` 分开，避免主配置文件越来越像一个杂物间。
 """
 
@@ -15,7 +15,7 @@ from ..settings.config import load_simple_yaml
 
 @dataclass
 class CapabilityConfig:
-    """能力路由配置总表。
+    """能力路由与子代理运行配置总表。
 
     数字限制项统一约定：0 表示不限制。
     这样用户可以先只打开关键限制，其余细节等系统成熟后再慢慢调。"""
@@ -31,6 +31,10 @@ class CapabilityConfig:
     subagent_due_check_interval: int = 0
     subagent_min_evidence_for_done: int = 1
     subagent_no_progress_attempt_limit: int = 4
+    # 慢模型流式活动投影：只写时间、阶段和字符计数，不保存正文。
+    subagent_stream_activity_projection_enabled: bool = True
+    # 同一模型流阶段写 canonical child state 的最小间隔，避免逐 token 落盘。
+    subagent_stream_activity_interval_seconds: int = 15
     # 失败自省自动拆分：should_split + 拆分建议存在时自动 split_task 重新派工。
     # 默认关闭——拆分会创建新任务并改变原任务状态，需用户显式开启。
     subagent_failure_auto_split_enabled: bool = False

@@ -347,13 +347,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。0 表示沿用内置默认。
     memory_compact_auto_continue_max_depth: int = 50
     # compact 续跑时对卸掉的中段历史做一次 LLM 语义摘要（短板6，长期助手 trajectory_compressor
-    # 蓝本）：默认开，保护首尾、只摘要中段；摘要失败/超时/无 backend 一律静默回退机械重建，
-    # 不影响 compact/resume 正常路径与可恢复性。enabled=false 即完全关闭、走纯机械重建。
+    # 蓝本）：默认开，保护首尾、只摘要中段；异常、供应商超时或无 backend 时回退机械重建。
+    # 摘要不另设不可取消线程超时，直接沿用统一模型传输超时。enabled=false 即完全关闭。
     memory_compact_semantic_summary_enabled: bool = True
     memory_compact_semantic_summary_protect_head: int = 2
     memory_compact_semantic_summary_protect_tail: int = 6
     memory_compact_semantic_summary_min_middle: int = 4
-    memory_compact_semantic_summary_timeout_seconds: float = 20.0
     memory_compact_semantic_summary_max_input_chars: int = 12000
     memory_artifact_default_read_chars: int = 4000
     memory_archive_preview_level_0_chars: int = 2048

@@ -128,6 +128,7 @@ class FinalizeParams:
     main_context_bundle_markdown_path: str = ""
     active_turn_user_inputs: list[dict[str, object]] | None = None
     tool_runtime_evidence: dict[str, object] | None = None
+    canonical_native_messages: list[dict[str, object]] | None = None
 
 
 @dataclass
@@ -155,6 +156,7 @@ class RuntimeLoopResult:
     archive_tool_calls: list[dict[str, object]]
     active_turn_user_inputs: list[dict[str, object]]
     tool_runtime_evidence: dict[str, object]
+    canonical_native_messages: list[dict[str, object]]
 
 
 @dataclass

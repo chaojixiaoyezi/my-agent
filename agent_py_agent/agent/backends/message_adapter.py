@@ -25,11 +25,23 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from .tool_ir import AssistantTurn, CompactionSummary, ToolCall, ToolResult, UserTurn
+from .tool_ir import (
+    AssistantTurn,
+    CompactionSummary,
+    RuntimeFactsTurn,
+    ToolCall,
+    ToolResult,
+    UserTurn,
+)
 
 # 历史里一项是一轮 assistant、当前 turn 用户输入，或一批工具结果。
 HistoryItem = (
-    AssistantTurn | CompactionSummary | UserTurn | ToolResult | Sequence[ToolResult]
+    AssistantTurn
+    | CompactionSummary
+    | RuntimeFactsTurn
+    | UserTurn
+    | ToolResult
+    | Sequence[ToolResult]
 )
 
 
@@ -80,6 +92,8 @@ def _as_tool_results(item: HistoryItem) -> list[ToolResult] | None:
         return None
     if isinstance(item, CompactionSummary):
         return None
+    if isinstance(item, RuntimeFactsTurn):
+        return None
     if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
         results = list(item)
         if results and all(isinstance(result, ToolResult) for result in results):
@@ -96,6 +110,13 @@ def _flush_results(messages: list[dict[str, Any]], pending_results: list[dict[st
 
 def _append_non_result_message(messages: list[dict[str, Any]], item: HistoryItem) -> None:
     if isinstance(item, CompactionSummary):
+        text = str(item.text or "")
+        if text.strip():
+            messages.append(
+                {"role": "user", "content": [{"type": "text", "text": text}]}
+            )
+        return
+    if isinstance(item, RuntimeFactsTurn):
         text = str(item.text or "")
         if text.strip():
             messages.append(

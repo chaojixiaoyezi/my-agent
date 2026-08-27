@@ -116,6 +116,7 @@ class ConversationHistorySeed:
     compact_summary: str = ""
     compact_generation: int = 0
     messages: tuple[tuple[str, str], ...] = ()
+    canonical_messages: tuple[dict[str, Any], ...] = ()
 
 
 def is_audit_background_transcript_entry(entry: MessageLogEntry) -> bool:

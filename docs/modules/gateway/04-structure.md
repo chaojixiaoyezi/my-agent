@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## 完成回合 canonical native envelope
+
+- `gateway_parts/request_execution.py` 在同一次最终化中写入用户可见 transcript、canonical native envelope 和
+  artifact refs。`conversation/native_history.py` 只接收结构化 `UserTurn/AssistantTurn/ToolCall/ToolResult`
+  事实，序列化时保持 provider 顺序与 call id；它不是第二份会话，也不从模型正文猜工具语义。
+- 下一轮先由 ConversationStore 选择同一批有界 rows，再从每个 assistant transcript metadata 恢复 envelope；
+  旧行没有 envelope 时只保留原展示文本。当前 user 与 runtime facts 由本轮 IR 单独追加，因此已完成前缀保持
+  append-only，供应商 prompt cache 可以跨普通追问复用。
+- `conversation/compact.py` 是历史替换的唯一入口：成功 checkpoint/CAS 后才用新 summary 代替旧前缀；普通
+  final、后台 wake、自然语言插话和 TUI 重连不得暗中重写既有 envelope。
+
 ## 会话历史与 provider 缓存前缀
 
 - `request_execution._gateway_conversation_context` 先通过 Conversation Compact 取得唯一 committed summary

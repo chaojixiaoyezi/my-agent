@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 
 from ...conversation.active_turn_input import (
@@ -149,6 +150,7 @@ def _finalize_params(
         main_context_bundle_markdown_path=prepared.main_context_bundle_markdown_path,
         active_turn_user_inputs=loop_result.active_turn_user_inputs,
         tool_runtime_evidence=loop_result.tool_runtime_evidence,
+        canonical_native_messages=loop_result.canonical_native_messages,
     )
 
 
@@ -590,6 +592,10 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             loop_params.live_archive_state,
             final_response,
         ),
+        canonical_native_messages=_completed_turn_native_messages(
+            loop_params,
+            final_response,
+        ),
     )
 
 
@@ -758,39 +764,19 @@ def _loop_attempt_id(agent, params: object) -> str:
     return current_subagent_attempt_id(agent) or str(params.attempt_id or "").strip()
 
 
-# LLM: Native history starts with the ConversationStore projection, then the exact current user
-# turn, then any current-run carried handoff/input. This order is the cache contract: completed
-# turns remain byte-stable and only genuine Compact may replace their prefix.
-# 函数用途: 把已结束会话、当前任务和本轮续接输入按真实时间顺序变成原生消息 IR。
+# LLM: Current-turn IR starts at the exact user task. Completed conversation messages are carried
+# separately as provider_history_messages so finalization persists only the new turn. Carried
+# handoff/input then append in real chronology.
+# 函数用途: 把当前任务和本轮续接输入按真实时间顺序变成只属于本轮的原生消息 IR。
 def _native_initial_tool_ir_history(
     params: RuntimeLoopParams,
     *,
     carried_handoff: str,
     carried_user_inputs: list[str],
 ) -> list[object]:
-    from ...backends.tool_ir import AssistantTurn, CompactionSummary, UserTurn
+    from ...backends.tool_ir import CompactionSummary, UserTurn
 
     history: list[object] = []
-    seed = params.conversation_history_seed
-    summary = str(getattr(seed, "compact_summary", "") or "").strip()
-    generation = max(0, int(getattr(seed, "compact_generation", 0) or 0))
-    if summary:
-        history.append(
-            CompactionSummary(
-                f"# Earlier Conversation Summary (generation {generation})\n{summary}"
-            )
-        )
-    for item in tuple(getattr(seed, "messages", ()) or ()):
-        if not isinstance(item, (tuple, list)) or len(item) != 2:
-            continue
-        role = str(item[0] or "").strip().lower()
-        content = str(item[1] or "")
-        if not content:
-            continue
-        if role == "user":
-            history.append(UserTurn(_native_user_task_text(content)))
-        elif role == "assistant":
-            history.append(AssistantTurn(text=content))
     current = str(params.user_prompt or "")
     if current:
         history.append(UserTurn(_native_user_task_text(current)))
@@ -798,6 +784,75 @@ def _native_initial_tool_ir_history(
         history.append(CompactionSummary(carried_handoff))
     history.extend(UserTurn(text) for text in carried_user_inputs if str(text or ""))
     return history
+
+
+# LLM: Completed native messages remain byte-stable until Conversation Compact. New envelopes
+# retain exact tool calls/results; legacy rows are converted once from the bounded role/text seed.
+# 函数用途: 生成当前 run 之前的原生消息前缀，并把已提交 Compact 摘要固定放在最前面。
+def _native_provider_history_messages(params: RuntimeLoopParams) -> list[dict[str, object]]:
+    from ...backends.message_adapter import AnthropicMessageAdapter
+    from ...backends.tool_ir import AssistantTurn, CompactionSummary, UserTurn
+
+    seed = params.conversation_history_seed
+    if seed is None:
+        return []
+    prefix_items: list[object] = []
+    summary = str(getattr(seed, "compact_summary", "") or "").strip()
+    generation = max(0, int(getattr(seed, "compact_generation", 0) or 0))
+    if summary:
+        prefix_items.append(
+            CompactionSummary(
+                f"# Earlier Conversation Summary (generation {generation})\n{summary}"
+            )
+        )
+    adapter = AnthropicMessageAdapter()
+    prefix = adapter.to_provider_messages(prefix_items) if prefix_items else []
+    canonical = [
+        deepcopy(item)
+        for item in tuple(getattr(seed, "canonical_messages", ()) or ())
+        if isinstance(item, dict)
+    ]
+    if canonical:
+        return [*prefix, *canonical]
+    legacy: list[object] = []
+    for item in tuple(getattr(seed, "messages", ()) or ()):
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            continue
+        role = str(item[0] or "").strip().lower()
+        content = str(item[1] or "")
+        if role == "user" and content:
+            legacy.append(UserTurn(_native_user_task_text(content)))
+        elif role == "assistant" and content:
+            legacy.append(AssistantTurn(text=content))
+    return [*prefix, *adapter.to_provider_messages(legacy)]
+
+
+# LLM: Persist only this run's provider-neutral IR plus the terminal assistant response. The
+# prior-thread prefix is excluded; ConversationStore and Compact own its lifetime.
+# 函数用途: 整理一轮结束后可供下一轮精确回放的原生消息，包括工具调用、结果和最终回复。
+def _completed_turn_native_messages(
+    params: ToolLoopExecuteParams,
+    final_response: object,
+) -> list[dict[str, object]]:
+    from ...backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
+    from ...backends.tool_ir import AssistantTurn
+    from ..native_tool_protocol import native_tool_use_active
+
+    if not native_tool_use_active(params):
+        return []
+    history = list(getattr(params, "tool_ir_history", None) or [])
+    blocks = [
+        deepcopy(item)
+        for item in list(getattr(final_response, "assistant_content_blocks", None) or [])
+        if isinstance(item, dict)
+    ]
+    has_tool_use = any(str(item.get("type") or "") == "tool_use" for item in blocks)
+    final_text = str(getattr(final_response, "text", "") or "")
+    if not has_tool_use and (final_text or blocks):
+        history.append(AssistantTurn(text=final_text, content_blocks=blocks))
+    return strip_orphaned_tool_blocks(
+        AnthropicMessageAdapter().to_provider_messages(history)
+    )
 
 
 # LLM: Historical and current ordinary user turns use one deterministic provider representation;
@@ -818,7 +873,13 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     #   - executed_tools：归零 → 重试守卫/完成软提醒看不到历史，会重复劝退或重复读。
     #   - tool_context：归零 → 历史轨迹丢失（_has_previous_tool_context 等守卫失明）。
     # 这是已有 pending_deferred 重建（_live_archive_state_from_carried_archive_tool_calls）的同源补全。
-    reconstructed = _reconstructed_runtime_state(archive_tool_calls, agent=agent)
+    reconstructed = _reconstructed_runtime_state(
+        archive_tool_calls,
+        agent=agent,
+        request_id=params.request_id,
+        run_id=params.run_id,
+        task_id=params.task_id,
+    )
     tool_context: list[str] = reconstructed.tool_context
     active_turn_user_inputs = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
     active_turn_user_input_texts_carried = active_turn_user_input_texts(active_turn_user_inputs)
@@ -882,6 +943,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         save=params.save,
         live_archive_state=live_archive_state,
         tool_ir_history=tool_ir_history,
+        provider_history_messages=_native_provider_history_messages(params),
         active_turn_user_inputs=active_turn_user_inputs,
         active_turn_transition_callback=params.active_turn_transition_callback,
         conversation_history_seed=params.conversation_history_seed,
@@ -933,7 +995,12 @@ class _ReconstructedRuntimeState:
 
 
 def _reconstructed_runtime_state(
-    records: list[dict[str, object]], *, agent: object = None
+    records: list[dict[str, object]],
+    *,
+    agent: object = None,
+    request_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
 ) -> _ReconstructedRuntimeState:
     """从 carried 的 archive 记录重建 compact 续跑要保留的四项运行时状态（H1）。
 
@@ -962,7 +1029,12 @@ def _reconstructed_runtime_state(
     mechanical_entries = [_reconstructed_tool_context_entry(record) for record in valid_records]
     return _ReconstructedRuntimeState(
         tool_context=_tool_context_with_optional_semantic_summary(
-            valid_records, mechanical_entries, agent
+            valid_records,
+            mechanical_entries,
+            agent,
+            request_id=request_id,
+            run_id=run_id,
+            task_id=task_id,
         ),
         tool_rounds=len(valid_records),
         one_shot_tool_calls={
@@ -1019,7 +1091,13 @@ def _carried_loaded_tool_names(record: dict[str, object]) -> set[str]:
 
 
 def _tool_context_with_optional_semantic_summary(
-    records: list[dict[str, object]], mechanical_entries: list[str], agent: object
+    records: list[dict[str, object]],
+    mechanical_entries: list[str],
+    agent: object,
+    *,
+    request_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
 ) -> list[str]:
     """中段语义摘要的薄接线：可用则折叠中段，否则原样返回机械逐条列表（失败必回退）。
 
@@ -1044,6 +1122,10 @@ def _tool_context_with_optional_semantic_summary(
             mechanical_entries=mechanical_entries,
             config=config,
             backend=getattr(agent, "backend", None),
+            agent=agent,
+            request_id=request_id,
+            run_id=run_id,
+            task_id=task_id,
         )
     )
     if outcome is None:

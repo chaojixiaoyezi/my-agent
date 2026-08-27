@@ -21,14 +21,25 @@ from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParam
 from agent_py_agent.agent.agent_core._tool_loop_service import _record_tool_call
 from agent_py_agent.agent.agent_core.runtime.loop_support import (
     _native_initial_tool_ir_history,
+    _native_provider_history_messages,
 )
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
-from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
+from agent_py_agent.agent.agent_core.tool_model_generation import (
+    ModelGenerateParams,
+    _materialize_native_prompt_facts,
+    _native_provider_messages,
+)
 from agent_py_agent.agent.backends.base import AnthropicCompatibleBackend, BackendOptions
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
-from agent_py_agent.agent.backends.tool_ir import ToolResult
-from agent_py_agent.agent.conversation.models import ConversationHistorySeed
+from agent_py_agent.agent.backends.tool_ir import ToolResult, UserTurn
+from agent_py_agent.agent.conversation.models import ConversationHistorySeed, MessageLogEntry
+from agent_py_agent.agent.conversation.native_history import (
+    CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
+    canonical_native_messages_envelope,
+    provider_history_messages_from_rows,
+)
 from agent_py_agent.agent.prompting_parts.builder import PromptBuilder, ToolSections
+from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
@@ -418,7 +429,10 @@ def test_native_completed_conversation_precedes_current_user_without_rewriting()
         carried_handoff="",
         carried_user_inputs=[],
     )
-    messages = AnthropicMessageAdapter().to_provider_messages(history)
+    messages = [
+        *_native_provider_history_messages(params),
+        *AnthropicMessageAdapter().to_provider_messages(history),
+    ]
 
     assert [message["role"] for message in messages] == [
         "user",
@@ -432,6 +446,107 @@ def test_native_completed_conversation_precedes_current_user_without_rewriting()
     assert messages[-1]["content"] == [
         {"type": "text", "text": "# User Task\n第二轮问题"}
     ]
+
+
+def test_native_dynamic_facts_make_later_tool_request_append_only(tmp_path) -> None:
+    agent = _native_agent(tmp_path)
+    params = _params()
+    params.tool_ir_history.append(UserTurn("# User Task\n检查仓库"))
+
+    first_request = _materialize_native_prompt_facts(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=CacheStructuredPrompt("stable", "runtime-facts-1"),
+            tool_rounds=0,
+        )
+    )
+    assert first_request.prompt.cache_layout.volatile_suffix == ""
+    first_messages = _native_provider_messages(agent, params)
+    assert first_messages is not None
+
+    _record(
+        agent,
+        params,
+        tool_rounds=1,
+        idx=1,
+        tool_name="read_file",
+        call_id="call-prefix-1",
+        arguments={"path": "README.md"},
+        output="ok",
+    )
+    second_request = _materialize_native_prompt_facts(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=CacheStructuredPrompt("stable", "runtime-facts-2"),
+            tool_rounds=1,
+        )
+    )
+    assert second_request.prompt.cache_layout.volatile_suffix == ""
+    second_messages = _native_provider_messages(agent, params)
+    assert second_messages is not None
+
+    assert second_messages[: len(first_messages)] == first_messages
+    assert "runtime-facts-2" in str(second_messages[-1])
+    assert sum("runtime-facts-1" in str(message) for message in second_messages) == 1
+
+
+def test_completed_native_tool_turn_round_trips_through_conversation_metadata(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
+        _completed_turn_native_messages,
+    )
+
+    agent = _native_agent(tmp_path)
+    params = _params()
+    params.tool_ir_history.append(UserTurn("# User Task\n第一轮"))
+    _record(
+        agent,
+        params,
+        tool_rounds=1,
+        idx=1,
+        tool_name="read_file",
+        call_id="call-persist-1",
+        arguments={"path": "README.md"},
+        output="文件内容",
+    )
+    completed = _completed_turn_native_messages(
+        params,
+        SimpleNamespace(text="第一轮完成", assistant_content_blocks=[]),
+    )
+    envelope = canonical_native_messages_envelope(completed)
+    rows = [
+        MessageLogEntry(
+            message_id="m-user",
+            thread_id="thread-1",
+            role="user",
+            content="第一轮",
+            metadata={"conversation_request_id": "req-1"},
+        ),
+        MessageLogEntry(
+            message_id="m-assistant",
+            thread_id="thread-1",
+            role="assistant",
+            content="第一轮完成",
+            metadata={
+                "conversation_request_id": "req-1",
+                CANONICAL_NATIVE_MESSAGES_METADATA_KEY: envelope,
+            },
+        ),
+    ]
+
+    replayed = provider_history_messages_from_rows(rows)
+    assert list(replayed) == completed
+    assert any("tool_use" in str(message) for message in replayed)
+    assert any("tool_result" in str(message) for message in replayed)
+
+    next_params = _params()
+    next_params.provider_history_messages.extend(replayed)
+    next_params.tool_ir_history.append(UserTurn("# User Task\n第二轮"))
+    next_messages = _native_provider_messages(agent, next_params)
+    assert next_messages is not None
+    assert next_messages[: len(replayed)] == list(replayed)
+    assert "第二轮" in str(next_messages[-1])
 
 
 # --- compact prep: integer-pair drop interface (Step 3/4 contract) ------------

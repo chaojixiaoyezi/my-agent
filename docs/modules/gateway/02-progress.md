@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-08-28 完成回合原生历史与缓存前缀收口
+
+- Gateway 每轮最终化时同时生成 legacy transcript、canonical native envelope 与 artifact projection；三者
+  来自同一批有界 conversation rows。下一轮的 `system/tools/messages` 前缀不再从展示文本重新推断工具调用，
+  已完成的 assistant tool call/result 以原生配对历史精确回放。
+- 当前用户输入与本轮 append-only runtime facts 只出现在当前 turn IR，旧轮事实留在 canonical envelope；
+  自然语言追问不会重写历史前缀。真实 MiniMax 同线程后续轮已从 `cache-read=0` 恢复为 provider 命中，
+  Compact 仍是唯一允许替换旧历史前缀的状态迁移。
+- Gateway 对 legacy 展示历史和 canonical native history 使用同一个 bounded row selection，避免一侧已裁剪而
+  另一侧仍无限增长。历史缺失或旧数据没有 envelope 时 fail-soft 到现有 transcript，不伪造 tool pair。
+
 ## 2026-08-27 跨普通回合的 canonical messages 缓存前缀（本地候选）
 
 - MiniMax 长任务结束后的普通追问虽然能正确回忆，但旧 Gateway 把 transcript 渲染进每轮变化的 runtime

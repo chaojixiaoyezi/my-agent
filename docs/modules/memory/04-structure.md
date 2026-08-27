@@ -25,6 +25,9 @@
 
 - `agent/memory_archive/compact_semantic_summary.py` 是 carried archive 续跑摘要与运行中
   native IR 摘要共用的语义摘要入口，但不拥有 Compact 状态、工具执行或完成判定。
+- 摘要后端调用统一经 `agent/agent_core/model/auxiliary_call.py` 包装，复用当前 agent 的
+  `ModelCallLedger`、provider attempt observer、全局 admission 和指标；Compact 不再拥有第二套线程超时
+  或隐形调用计数。调用持续时间由 backend/provider 已配置的网络超时负责收口。
 - 运行中真实 turn 的摘要输入由“上一代 ConversationThread 完整摘要 + 本次 native 工具
   历史 + 当前任务”组成，输出是可独立替代上一代的完整摘要，不是只描述本次增量的片段。
 - provider 消息顺序固定为“真实任务 user → native history → synthetic Compact user 指令”。这是 会话运行时
@@ -34,6 +37,9 @@
   已提交的代次和 token 前后值。
 - 辅助、不保存的展示回合可以继续使用临时摘要并静默退回机械窗口；持久且正文权威的
   main/child/grandchild 不能在摘要失败后先删除历史，必须整体失败并恢复原 native IR。
+- 同一个 `CompactionSummary` 容器里的 thread summary 与 active-turn carried handoff 以稳定 schema marker
+  区分；二次 Compact 只删除 exact 上一代 thread summary，不能吞掉 carried handoff。当前任务由首条
+  provider user message 唯一承载，Compact synthetic user 只放摘要指令与上一代 summary。
 - 摘要不是执行事实源。精确副作用和交付仍以 raw archive、operation ledger、artifact
   registry、任务工作区和真实文件为准。
 

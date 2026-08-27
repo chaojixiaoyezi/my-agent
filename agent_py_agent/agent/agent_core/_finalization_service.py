@@ -361,6 +361,7 @@ class FinalizationService:
             operation_verification=operation_verification,
             tool_runtime_evidence=dict(ctx.tool_runtime_evidence or {}),
             active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
+            canonical_native_messages=list(ctx.canonical_native_messages or []),
             **compact_auto_cycle_fields(
                 self._agent, ctx, params.token_ledger, request_id=params.run_request_id
             ),

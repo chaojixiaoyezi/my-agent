@@ -291,6 +291,7 @@ def test_finish_run_workspace_rejects_a_different_run_identity(tmp_path):
     state = json.loads(paths.state_json.read_text(encoding="utf-8"))
     assert finished is None
     assert state["status"] == "RUNNING"
+    assert isinstance(state["updated_at"], float)
     assert "finished_at" not in state
 
 
@@ -334,6 +335,7 @@ def test_finish_run_workspace_is_idempotent_and_appends_one_terminal_event(tmp_p
     ]
     assert state["status"] == "BLOCKED"
     assert state["runtime_status"] == "context_overflow"
+    assert isinstance(state["updated_at"], float)
     assert [event["event_type"] for event in events].count("run_workspace_finished") == 1
 
 

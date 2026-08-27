@@ -2,7 +2,8 @@
 
 覆盖契约:
   - 语义摘要生成 + 折叠中段、保护首尾;
-  - LLM 失败/超时/空结果 → 严格回退机械路径(中段 preview 一条不丢);
+  - LLM 失败/供应商超时/空结果 → 严格回退机械路径(中段 preview 一条不丢);
+  - 慢摘要不被第二个无法取消的线程计时器丢弃;
   - 开关控制(enabled=false 关闭);
   - 记录太少/无 backend → 回退机械;
   - 压缩率/调用数/错误数统计;
@@ -11,7 +12,6 @@
 
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import (
@@ -19,8 +19,17 @@ from agent_py_agent.agent.agent_core.runtime.loop_models import (
     RuntimeToolLoopSeed,
 )
 from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
-from agent_py_agent.agent.backends.base import ModelResponse
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn
+from agent_py_agent.agent.backends.base import (
+    AnthropicCompatibleBackend,
+    BackendOptions,
+    ModelResponse,
+    OpenAICompatibleBackend,
+)
+from agent_py_agent.agent.backends.tool_ir import (
+    AssistantTurn,
+    CompactionSummary,
+    UserTurn,
+)
 from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
     LiveToolHistorySummaryRequest,
     SemanticSummaryConfig,
@@ -97,8 +106,8 @@ class _SlowBackend:
     name = "slow"
 
     def generate(self, prompt, on_chunk=None):
-        time.sleep(2.0)
-        return ModelResponse(text="太慢了不该被采用", backend=self.name)
+        del prompt, on_chunk
+        return ModelResponse(text="慢模型完成的摘要也应被采用", backend=self.name)
 
 
 class _LiveSummaryBackend:
@@ -253,13 +262,50 @@ def test_backend_empty_result_falls_back_to_mechanical_path() -> None:
     assert outcome is None  # 空摘要 == 失败 → 回退机械
 
 
-def test_summary_timeout_falls_back_to_mechanical_path() -> None:
+def test_slow_summary_uses_provider_timeout_instead_of_orphan_thread_deadline() -> None:
     records = _records(15)
-    config = SemanticSummaryConfig(timeout_seconds=0.05)  # 0.05s 必然小于 backend 的 2s sleep
 
-    outcome = summarize_carried_tool_context(_request(records, _mechanical(records), config=config, backend=_SlowBackend()))
+    outcome = summarize_carried_tool_context(
+        _request(records, _mechanical(records), backend=_SlowBackend())
+    )
 
-    assert outcome is None  # 超时 → 回退机械,不会卡死 compact
+    assert outcome is not None
+    assert "慢模型完成的摘要也应被采用" in outcome[0][2]
+
+
+def test_production_semantic_summary_is_recorded_in_model_call_ledger() -> None:
+    records = _records(15)
+    backend = _StubBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(
+            model_name="summary-test",
+            max_tokens=256,
+            my_agent_owner_id="owner-test",
+        ),
+    )
+
+    outcome = summarize_carried_tool_context(
+        SemanticSummaryRequest(
+            records=records,
+            mechanical_entries=_mechanical(records),
+            config=SemanticSummaryConfig(),
+            backend=backend,
+            agent=agent,
+            request_id="req-summary-1",
+            run_id="run-summary-1",
+            task_id="task-summary-1",
+        )
+    )
+
+    assert outcome is not None
+    records = agent._model_call_ledger.records()
+    assert len(records) == 1
+    assert records[0].status == "finished"
+    assert records[0].request_id == "req-summary-1"
+    assert records[0].run_id == "run-summary-1"
+    assert records[0].metadata["purpose"] == "compact_carried_summary"
+    assert records[0].metadata["auxiliary"] is True
 
 
 def test_live_tool_history_summary_reuses_native_messages_and_preserves_refs() -> None:
@@ -300,6 +346,52 @@ def test_live_tool_history_summary_reuses_native_messages_and_preserves_refs() -
     assert "完整替代摘要" not in str(backend.messages[:-1])
 
 
+def test_live_compact_anthropic_payload_has_task_once_and_instruction_last() -> None:
+    captured: dict[str, object] = {}
+    backend = AnthropicCompatibleBackend(_capture_options("claude-test"))
+
+    def request_json(_path, payload, _headers):
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "第二代摘要"}], "usage": {}}
+
+    backend.request_json = request_json
+    summary = summarize_live_tool_history(_second_compact_request(backend))
+
+    assert summary.startswith(_SUMMARY_MARK)
+    messages = captured["payload"]["messages"]
+    payload_text = str(messages)
+    assert payload_text.count("TASK-EXACT-ONE") == 1
+    assert payload_text.count("HANDOFF-MUST-STAY") == 1
+    assert payload_text.count("PREVIOUS-THREAD-SUMMARY") == 1
+    assert messages[-1]["role"] == "user"
+    assert "完整替代摘要" in str(messages[-1]["content"])
+
+
+def test_live_compact_openai_payload_has_task_once_and_instruction_last() -> None:
+    captured: dict[str, object] = {}
+    backend = OpenAICompatibleBackend(_capture_options("gpt-test"))
+
+    def request_json(_path, payload, _headers):
+        captured["payload"] = payload
+        return {
+            "choices": [
+                {"message": {"content": "第二代摘要"}, "finish_reason": "stop"}
+            ]
+        }
+
+    backend.request_json = request_json
+    summary = summarize_live_tool_history(_second_compact_request(backend))
+
+    assert summary.startswith(_SUMMARY_MARK)
+    messages = captured["payload"]["messages"]
+    payload_text = str(messages)
+    assert payload_text.count("TASK-EXACT-ONE") == 1
+    assert payload_text.count("HANDOFF-MUST-STAY") == 1
+    assert payload_text.count("PREVIOUS-THREAD-SUMMARY") == 1
+    assert messages[-1]["role"] == "user"
+    assert "完整替代摘要" in str(messages[-1]["content"])
+
+
 def test_live_tool_history_summary_failure_returns_empty_for_mechanical_fallback() -> None:
     history = [AssistantTurn(text="working")]
 
@@ -311,6 +403,42 @@ def test_live_tool_history_summary_failure_returns_empty_for_mechanical_fallback
     )
 
     assert summary == ""
+
+
+def _capture_options(model_name: str) -> BackendOptions:
+    return BackendOptions(
+        api_base="https://provider.invalid/v1",
+        api_key="test-key",
+        model_name=model_name,
+        max_tokens=1024,
+        stream_enabled=False,
+        prompt_cache_enabled=True,
+    )
+
+
+def _second_compact_request(backend: object) -> LiveToolHistorySummaryRequest:
+    previous = f"{_SUMMARY_MARK} PREVIOUS-THREAD-SUMMARY"
+    call = canonical_history_call(
+        "read_file",
+        {"path": "/srv/project/state.json"},
+        call_id="toolu_second_compact",
+    )
+    return LiveToolHistorySummaryRequest(
+        history=[
+            CompactionSummary(previous),
+            UserTurn("# User Task\nTASK-EXACT-ONE"),
+            CompactionSummary(
+                "[active-turn-tool-handoff]\n"
+                "- schema_version: active-turn-tool-handoff.v1\n"
+                "- HANDOFF-MUST-STAY"
+            ),
+            AssistantTurn(text="继续检查", tool_calls=[call]),
+            canonical_history_result(call, '{"status":"running"}'),
+        ],
+        backend=backend,
+        task_prompt="TASK-EXACT-ONE",
+        previous_summary=previous,
+    )
 
 
 def test_reconstructed_runtime_state_falls_back_when_summary_backend_raises() -> None:
@@ -456,7 +584,7 @@ def test_stats_record_errors_on_empty_summary() -> None:
     )
 
     stats = SemanticSummaryStats()
-    text = _generate_summary(lambda _prompt: "", "中段内容", 5.0, stats)
+    text = _generate_summary(lambda _prompt: "", "中段内容", stats)
     assert text == ""
     assert stats.summary_calls == 1
     assert stats.summary_errors == 1
@@ -474,7 +602,6 @@ def test_semantic_summary_config_reads_agent_config() -> None:
         memory_compact_semantic_summary_protect_head=3,
         memory_compact_semantic_summary_protect_tail=9,
         memory_compact_semantic_summary_min_middle=5,
-        memory_compact_semantic_summary_timeout_seconds=12.5,
         memory_compact_semantic_summary_max_input_chars=8000,
     )
     parsed = semantic_summary_config(SimpleNamespace(config=config))
@@ -482,7 +609,6 @@ def test_semantic_summary_config_reads_agent_config() -> None:
     assert parsed.protect_head == 3
     assert parsed.protect_tail == 9
     assert parsed.min_middle == 5
-    assert parsed.timeout_seconds == 12.5
     assert parsed.max_input_chars == 8000
 
 

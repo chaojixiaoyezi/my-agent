@@ -4,11 +4,13 @@ import json
 from dataclasses import replace
 
 from ...backends import ModelResponse
+from ...backends.tool_ir import UserTurn
 from ...conversation.user_visible_text import (
     contains_internal_protocol,
     sanitize_user_visible_text,
 )
 from .._runtime_params import ToolLoopExecuteParams
+from ..native_tool_protocol import native_tool_use_active
 
 _STATE_KEY = "_pending_natural_user_reply"
 _MAX_GENERATION_ATTEMPTS = 2
@@ -55,7 +57,8 @@ def pending_natural_user_reply(params: ToolLoopExecuteParams) -> dict[str, objec
 
 # LLM: 表达轮保留 system persona 和 owner 的 SOUL/USER/AGENTS，但不再把原任务放在
 #   提示词最尾；否则 MiniMax 等模型会把“写一句回执”错当成“重新执行原任务”，
-#   并再次吐出工具协议。结构化回复事实成为这个零工具短轮唯一的 User Task。
+#   并再次吐出工具协议。结构化回复事实必须作为唯一末尾 UserTurn 进入
+#   native wire；CacheStructuredPrompt.canonical_user_turn 只是诊断副本，不能代替真实 messages。
 # 函数用途: 构造低延迟、零工具、不重做原任务的临时模型参数视图。
 def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopExecuteParams:
     """Return a deliberately thin no-tools view for one user-facing model reply."""
@@ -86,8 +89,15 @@ def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopEx
         # payloads into a second generation.
         tool_context=(params.tool_context if preserve_execution_evidence else []),
         allowed_tools=[],
-        tool_ir_history=(
-            params.tool_ir_history if preserve_execution_evidence else []
+        tool_ir_history=_natural_reply_tool_ir_history(
+            params,
+            guidance=guidance,
+            preserve_execution_evidence=preserve_execution_evidence,
+        ),
+        provider_history_messages=(
+            list(params.provider_history_messages)
+            if preserve_execution_evidence
+            else []
         ),
         conversation_history_seed=(
             params.conversation_history_seed
@@ -98,6 +108,28 @@ def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopEx
         context_scope="isolated",
         consume_pending_turn_input=False,
     )
+
+
+# LLM: native 表达轮的 User Task 权威在 IR messages，不在 prompt 的诊断字符串。
+#   保留执行证据时必须复制原 IR 再追加回执，不得修改主轮的共享 list。
+# 函数用途: 为零工具表达轮构造唯一末尾用户消息，并保持重复构造幂等。
+def _natural_reply_tool_ir_history(
+    params: ToolLoopExecuteParams,
+    *,
+    guidance: str,
+    preserve_execution_evidence: bool,
+) -> list[object]:
+    if not native_tool_use_active(params):
+        return list(params.tool_ir_history) if preserve_execution_evidence else []
+    canonical = f"# User Task\n{str(guidance or '')}"
+    history = list(params.tool_ir_history) if preserve_execution_evidence else []
+    history = [
+        item
+        for item in history
+        if not (isinstance(item, UserTurn) and item.text == canonical)
+    ]
+    history.append(UserTurn(canonical))
+    return history
 
 
 def discard_pending_natural_user_reply(params: ToolLoopExecuteParams) -> bool:

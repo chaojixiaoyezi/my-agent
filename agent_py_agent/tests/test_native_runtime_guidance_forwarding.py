@@ -6,8 +6,9 @@ from __future__ import annotations
 丢掉（工具往返改由 IR messages 承载），但 ``tool_context`` 里还累积着一大类**不是工具
 调用**的系统指引——运行时策略、任务状态更新、工具护栏和问句逃逸守卫等。这些不进 IR、
 又被旁路掉，于是 native 模型完全收不到「当前结构化状态 / 下一步该做什么」。本测试锁死
-修复：``_native_provider_messages`` 把这类尾部指引接成一条收尾 user
-文本消息，且只接「最后一条工具记录之后」的指引，绝不重复折回已在 IR 里的工具往返。
+修复：``_native_provider_messages`` 把尚未进入 IR 的指引按真实时间写成
+``RuntimeFactsTurn``。后续请求继续原样回放这条历史，保证消息前缀只追加、不移动；
+它不会再次写入第二份，也不会折回已经在 IR 里的工具往返。
 """
 
 from pathlib import Path
@@ -195,10 +196,11 @@ def test_native_provider_messages_forwards_first_turn_guidance_without_ir(tmp_pa
             ],
         }
     ]
-    # The exact guidance is sent only once across model retries.
-    # Native empty history remains [] so the backend can cache the first stable
-    # prompt/tool prefix; only text protocol uses None.
-    assert _native_provider_messages(agent, params) == []
+    # The exact guidance is recorded only once, but stays visible on every later
+    # request as immutable history so the provider receives an append-only prefix.
+    second = _native_provider_messages(agent, params)
+    assert second == first
+    assert len(params.tool_ir_history) == 1
 
 
 def test_text_protocol_unaffected_by_guidance_forwarding(tmp_path):

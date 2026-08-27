@@ -72,6 +72,11 @@ from ..conversation.models import (
     ConversationHistorySeed,
     is_audit_background_transcript_entry,
 )
+from ..conversation.native_history import (
+    CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
+    canonical_native_messages_envelope,
+    provider_history_messages_from_rows,
+)
 from ..conversation.run_claim import (
     ConversationRunLaneRequest,
     claim_heartbeat_interval_seconds,
@@ -813,6 +818,7 @@ class _GatewayConversationContext:
     verbose_level: str = "off"
     scope: ConversationScope | None = None
     history: tuple[tuple[str, str], ...] = ()
+    canonical_history_messages: tuple[dict[str, object], ...] = ()
     recent_artifacts: tuple[dict[str, object], ...] = ()
     workspace_task: _GatewayWorkspaceSelection | None = None
     # LLM: These are bounded, exact-root terminal child deliveries from the observation ledger;
@@ -822,6 +828,17 @@ class _GatewayConversationContext:
     thread_goal: dict[str, object] | None = None
     named_work: tuple[dict[str, str], ...] = ()
     load_errors: tuple[dict, ...] = ()
+
+
+# LLM: This is a bounded projection of one durable transcript row. It preserves structured
+# metadata for native-history replay while allowing the public assistant body to be redacted.
+# 类用途: 保存进入下一轮模型上下文的一条历史消息，正文可投影但结构化回合信息不丢失。
+@dataclass(frozen=True)
+class _GatewayHistoryRow:
+    message_id: str
+    role: str
+    content: str
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1322,6 +1339,7 @@ def _persist_gateway_assistant_result(
         delivery_artifacts=channel_delivery["artifacts"],
         operation_verification=channel_delivery.get("operation_verification"),
         terminal_tool_fold=terminal_tool_fold,
+        canonical_native_messages=getattr(result, "canonical_native_messages", None),
         assistant_part_id="final",
     ):
         _queue_gateway_conversation_repair(
@@ -1334,6 +1352,7 @@ def _persist_gateway_assistant_result(
             delivery_artifacts=channel_delivery["artifacts"],
             operation_verification=channel_delivery.get("operation_verification"),
             terminal_tool_fold=terminal_tool_fold,
+            canonical_native_messages=getattr(result, "canonical_native_messages", None),
             assistant_part_id="final",
         )
         result.conversation_persist_degraded = True
@@ -1710,6 +1729,11 @@ def _gateway_conversation_history_seed(
             if str(role or "").strip().lower() in {"user", "assistant"}
             and str(content or "")
         ),
+        canonical_messages=tuple(
+            dict(message)
+            for message in conversation.canonical_history_messages
+            if isinstance(message, dict)
+        ),
     )
 
 
@@ -2000,7 +2024,7 @@ def _gateway_conversation_context(
             force=force_compact,
         )
     )
-    history, recent_artifacts = _gateway_conversation_refs(
+    history, canonical_history_messages, recent_artifacts = _gateway_conversation_refs(
         agent,
         thread.thread_id,
         inputs.request_id,
@@ -2042,6 +2066,7 @@ def _gateway_conversation_context(
         verbose_level=thread.verbose_level,
         scope=scope,
         history=history,
+        canonical_history_messages=canonical_history_messages,
         recent_artifacts=recent_artifacts,
         workspace_task=workspace_task,
         subagent_completions=subagent_completions,
@@ -2632,8 +2657,9 @@ def _gateway_workspace_has_artifacts(path: str) -> bool:
         return False
 
 
-# LLM: 对话正文和产物引用都来自同一 thread，但保持两种 typed 结果，禁止把 path 混进历史正文。
-# 函数用途: 读取本轮所需的有界历史与近期产物引用。
+# LLM: Visible prose, canonical provider replay and artifact refs come from one bounded thread
+# row selection but remain three typed outputs; paths and native envelopes never enter prose.
+# 函数用途: 一次读取本轮共用的有界正文、原生消息前缀和近期产物引用。
 def _gateway_conversation_refs(
     agent: SimpleAgent,
     thread_id: str,
@@ -2643,8 +2669,12 @@ def _gateway_conversation_refs(
     history_rows: object = None,
     history_token_budget: int = 0,
     work_scope: dict[str, object] | None = None,
-) -> tuple[tuple[tuple[str, str], ...], tuple[dict[str, object], ...]]:
-    history = _gateway_conversation_history(
+) -> tuple[
+    tuple[tuple[str, str], ...],
+    tuple[dict[str, object], ...],
+    tuple[dict[str, object], ...],
+]:
+    selected_rows = _gateway_conversation_history_rows(
         agent,
         thread_id,
         request_id,
@@ -2653,8 +2683,10 @@ def _gateway_conversation_refs(
         token_budget=history_token_budget,
         work_scope=work_scope,
     )
+    history = tuple((row.role, row.content) for row in selected_rows)
+    canonical_history = provider_history_messages_from_rows(selected_rows)
     artifacts = _gateway_recent_artifacts(agent, thread_id, request_id, load_errors)
-    return history, artifacts
+    return history, canonical_history, artifacts
 
 
 def _ensure_gateway_conversation_index(
@@ -2943,6 +2975,32 @@ def _gateway_conversation_history(
     token_budget: int = 0,
     work_scope: dict[str, object] | None = None,
 ) -> tuple[tuple[str, str], ...]:
+    selected_rows = _gateway_conversation_history_rows(
+        agent,
+        thread_id,
+        current_request_id,
+        load_errors,
+        rows=rows,
+        token_budget=token_budget,
+        work_scope=work_scope,
+    )
+    return tuple((row.role, row.content) for row in selected_rows)
+
+
+# LLM: Select complete durable rows once for both visible transcript and canonical native replay.
+# The same whole-message window must feed both projections or the provider cache prefix can diverge
+# from what the user sees after Compact/windowing.
+# 函数用途: 读取并筛选完整会话行，同时保留原生工具历史所需的结构化 metadata。
+def _gateway_conversation_history_rows(
+    agent: SimpleAgent,
+    thread_id: str,
+    current_request_id: str,
+    load_errors: list[dict],
+    *,
+    rows: object = None,
+    token_budget: int = 0,
+    work_scope: dict[str, object] | None = None,
+) -> tuple[_GatewayHistoryRow, ...]:
     store = getattr(agent, "conversation_store", None)
     config = getattr(agent, "config", None)
     max_turns = max(
@@ -2966,7 +3024,7 @@ def _gateway_conversation_history(
             load_errors.append(_conversation_error(exc, "gateway.conversation.messages"))
             return ()
         load_errors.extend(error for error in errors if isinstance(error, dict))
-    candidates: list[tuple[str, str]] = []
+    candidates: list[_GatewayHistoryRow] = []
     for row in message_rows:
         role = str(getattr(row, "role", "") or "").strip().lower()
         metadata = getattr(row, "metadata", None)
@@ -2982,17 +3040,44 @@ def _gateway_conversation_history(
         if role == "assistant":
             content = project_user_reply(content).content
             content = conversation_message_with_terminal_tool_fold(content, metadata)
-        candidates.append((role, content))
+        candidates.append(
+            _GatewayHistoryRow(
+                message_id=str(getattr(row, "message_id", "") or ""),
+                role=role,
+                content=content,
+                metadata=dict(metadata),
+            )
+        )
     history_chars = total_chars
     history_messages = max_turns * 2
     if supplied_rows:
         history_chars = max(history_chars, max(0, int(token_budget)) * 3)
         history_messages = max(history_messages, len(candidates))
-    return _latest_conversation_messages(
+    return _latest_conversation_rows(
         candidates,
         max_messages=history_messages,
         max_chars=history_chars,
     )
+
+
+# LLM: Native-history replay uses the identical whole-row tail policy as legacy prose history.
+# Never truncate a row or strip its metadata envelope merely to satisfy the legacy char estimate.
+# 函数用途: 从尾部选择完整历史行，给正文和原生工具消息共用同一个窗口。
+def _latest_conversation_rows(
+    candidates: list[_GatewayHistoryRow],
+    *,
+    max_messages: int,
+    max_chars: int,
+) -> tuple[_GatewayHistoryRow, ...]:
+    selected: list[_GatewayHistoryRow] = []
+    used = 0
+    for row in reversed(candidates[-max_messages:]):
+        if selected and used + len(row.content) > max_chars:
+            break
+        selected.append(row)
+        used += len(row.content)
+    selected.reverse()
+    return tuple(selected)
 
 
 # LLM: 近期产物只从当前 thread 的 assistant metadata 或旧版完整完成协议恢复；普通对话文字不获此权威。
@@ -3111,6 +3196,7 @@ def _append_gateway_conversation_message(
     delivery_artifacts: object = (),
     operation_verification: object = None,
     terminal_tool_fold: object = None,
+    canonical_native_messages: object = None,
     assistant_part_id: str = "final",
 ) -> bool:
     if not conversation.thread_id or not content:
@@ -3155,6 +3241,12 @@ def _append_gateway_conversation_message(
             fold = dict(terminal_tool_fold)
             if fold:
                 entry_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
+        if role == "assistant":
+            native_envelope = canonical_native_messages_envelope(
+                canonical_native_messages
+            )
+            if native_envelope:
+                entry_metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = native_envelope
         entry = store.append_message(
             {
                 "thread_id": conversation.thread_id,
@@ -3203,6 +3295,7 @@ def _queue_gateway_conversation_repair(
     delivery_artifacts: object = (),
     operation_verification: object = None,
     terminal_tool_fold: object = None,
+    canonical_native_messages: object = None,
     assistant_part_id: str = "final",
 ) -> None:
     store = getattr(agent, "conversation_store", None)
@@ -3228,6 +3321,12 @@ def _queue_gateway_conversation_repair(
         fold = dict(terminal_tool_fold)
         if fold:
             repair_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
+    if role == "assistant":
+        native_envelope = canonical_native_messages_envelope(
+            canonical_native_messages
+        )
+        if native_envelope:
+            repair_metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = native_envelope
     payload = {
         "thread_id": conversation.thread_id,
         "role": role,

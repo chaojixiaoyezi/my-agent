@@ -44,6 +44,7 @@ class FinalizeContext:
     context_scope: str = "default"
     active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
     tool_runtime_evidence: dict[str, object] = field(default_factory=dict)
+    canonical_native_messages: list[dict[str, object]] = field(default_factory=list)
     # Typed sink used only to retrieve tool-boundary-confirmed assistant parts.
     on_chunk: object = None
 
@@ -89,6 +90,10 @@ class ToolLoopExecuteParams:
     # （AssistantTurn / ToolResult / UserTurn / CompactionSummary）；text 协议下恒为空，
     # 由 message_adapter 翻成厂商原生 messages。详见 agent_core/tool_ir_history.py。
     tool_ir_history: list = field(default_factory=list)
+    # LLM: Completed prior turns stay separate from current-turn IR so finalization can persist
+    # only the new turn while provider requests still receive one chronological message list.
+    # 字段用途: 保存已结束会话回合的原生消息前缀，当前 run 只在其后追加新 IR。
+    provider_history_messages: list[dict[str, object]] = field(default_factory=list)
     system_prompt_override: str | None = None
     context_scope: str = "default"
     delivery_contract: dict | None = None

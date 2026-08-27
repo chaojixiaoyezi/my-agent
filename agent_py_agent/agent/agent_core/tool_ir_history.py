@@ -15,7 +15,7 @@ text 协议路径一字不动。
     AssistantTurn(text=该轮模型文本, tool_calls=[ToolCall, ...])
     ToolResult, ToolResult, ...        # 紧随其后、与上面调用一一配对的回执
     UserTurn(text=运行中补充输入)       # 留在到达时的准确时间位置
-    CompactionSummary(text=续接摘要)    # 替换已经回收的旧工具往返，始终最多一条
+    CompactionSummary(text=续接摘要)    # thread/live 摘要最多一条；carried handoff 独立保留
 
 实现要点：
 - 每个工具调用先 ``_ensure_assistant_turn`` 拿到/新建「本轮」的 AssistantTurn，把
@@ -28,8 +28,9 @@ text 协议路径一字不动。
   turn 里删 ToolCall、历史里删配对的 ToolResult），保持配对不变量。
 - ``UserTurn`` 不属于工具结果窗口，工具 compact 不得删除；需要缩短时由上层 active-turn/thread
   compact 处理。
-- ``CompactionSummary`` 不属于第二条 compact 路线；它只是同一 IR 历史里旧工具往返的
-  replacement item，每次压缩原位替换旧摘要。
+- ``CompactionSummary`` 不属于第二条 compact 路线；thread/live summary 是同一 IR 历史里旧工具
+  往返的 replacement item，每次压缩原位替换；带稳定 schema marker 的 carried handoff 是另一条
+  当前 turn 交接事实，不能被 replacement 连带删除。
 
 为什么 content 用「结构化结果的精简文本」而不是原始 ``output`` 全文：tool_result 的
 ``content`` 仍是字符串，必须既保留模型可读的结果，又不把几十 KB 正文塞回 messages。
@@ -40,7 +41,12 @@ text 协议路径一字不动。
 from copy import deepcopy
 from typing import Any
 
-from ..backends.tool_ir import AssistantTurn, CompactionSummary, UserTurn
+from ..backends.tool_ir import (
+    AssistantTurn,
+    CompactionSummary,
+    RuntimeFactsTurn,
+    UserTurn,
+)
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 
 
@@ -64,15 +70,53 @@ def record_user_turn_ir(params: object, text: str) -> None:
     native_tool_ir_history(params).append(UserTurn(content))
 
 
-# LLM: compact 摘要与真实 UserTurn 类型分开；每次安装替换旧摘要并留在同一 IR 历史，
-# 后续轮持续可见，不能依赖只发送一次的 runtime guidance。
-# 函数用途: 在最近工具尾部之前安装唯一一条当前 turn 压缩摘要。
+# LLM: A dynamic prompt suffix becomes an append-only typed history item before provider
+# submission. Exact duplicate facts are emitted once per run; changed facts append at their real
+# chronology point and are never moved behind later tool calls on a subsequent request.
+# 函数用途: 把本次调用新增的运行事实写入原生历史，并对同一 run 的完全相同事实去重。
+def record_runtime_facts_turn_ir(params: object, text: str) -> bool:
+    content = str(text or "")
+    if not content.strip():
+        return False
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(state, dict):
+        seen = state.get("_native_runtime_facts_seen")
+        if not isinstance(seen, set):
+            seen = set()
+            state["_native_runtime_facts_seen"] = seen
+        if content in seen:
+            return False
+        seen.add(content)
+    elif any(
+        isinstance(item, RuntimeFactsTurn) and item.text == content
+        for item in native_tool_ir_history(params)
+    ):
+        return False
+    native_tool_ir_history(params).append(RuntimeFactsTurn(content))
+    return True
+
+
+# LLM: compact 摘要与真实 UserTurn 类型分开；每次安装只替换 thread/live summary，
+# schema-marked carried handoff 是当前 turn 的独立事实，必须原位保留到后续压缩代次。
+# 函数用途: 在最近工具尾部之前安装唯一一条当前 turn 压缩摘要，并保留运行交接摘要。
 def replace_compaction_summary_ir(params: object, text: str) -> bool:
     content = str(text or "").strip()
     if not content:
         return False
     history = native_tool_ir_history(params)
-    history[:] = [item for item in history if not isinstance(item, CompactionSummary)]
+    replacement = CompactionSummary(content)
+    rebuilt: list[Any] = []
+    installed = False
+    for item in history:
+        if isinstance(item, CompactionSummary) and not _is_carried_tool_handoff_summary(item):
+            if not installed:
+                rebuilt.append(replacement)
+                installed = True
+            continue
+        rebuilt.append(item)
+    history[:] = rebuilt
+    if installed:
+        return True
     insert_at = next(
         (
             index
@@ -81,8 +125,16 @@ def replace_compaction_summary_ir(params: object, text: str) -> bool:
         ),
         len(history),
     )
-    history.insert(insert_at, CompactionSummary(content))
+    history.insert(insert_at, replacement)
     return True
+
+
+# LLM: Multiple projections still share CompactionSummary for compatibility. The stable schema
+# marker, not natural-language content, separates a carried active-turn handoff from replaceable
+# thread/live summaries until the IR gains a dedicated typed variant.
+# 函数用途: 识别 compact 续跑带入的工具交接摘要，避免第二次压缩把它当旧 thread summary 删除。
+def _is_carried_tool_handoff_summary(item: CompactionSummary) -> bool:
+    return str(item.text or "").startswith("[active-turn-tool-handoff]")
 
 
 # LLM: 开轮时要把后端清洗后的有序 content blocks 与可见 text 一起落到同一 AssistantTurn，避免下一工具轮丢失 reasoning 签名。
@@ -255,6 +307,7 @@ __all__ = [
     "drop_tool_call_pairs",
     "native_tool_ir_history",
     "open_assistant_turn_ir",
+    "record_runtime_facts_turn_ir",
     "replace_compaction_summary_ir",
     "record_tool_call_ir",
 ]

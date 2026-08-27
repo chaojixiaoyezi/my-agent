@@ -1,6 +1,6 @@
-# 能力路由配置文件
+# 能力路由与子代理运行状态配置文件
 # 说明：
-# - 这里管的是“子代理/工具/skill 遇到不会做的事时，能不能向上级申请能力”。
+# - 这里管能力申请，以及子代理运行时的 compact/活动投影等专属行为。
 # - 普通用户不需要配置每个子代理能用什么工具；默认由系统和 LLM 根据任务判断。
 # - 只使用当前配置项；新增能力开关需要写进本文件和 AgentConfig。
 
@@ -29,3 +29,12 @@ subagent_failure_auto_split_enabled: false
 # - 任务 depth 达到该值后不再自动拆分（防止拆分链无限加深）。
 # - 0: 不限制深度（按统一约定 0 表示不限制；不建议生产使用）。
 subagent_failure_split_max_depth: 2
+
+# 是否把慢模型仍在持续返回流数据投影到子代理状态。
+# - true: TUI/Web 能区分“模型很慢但仍有数据”和“完全没有活动”；只写阶段和计数，不写正文。
+# - false: 只保留模型请求开始/结束和工具边界这些离散状态。
+subagent_stream_activity_projection_enabled: true
+
+# 慢模型流式活动最短刷新间隔（秒）。
+# 默认 15 秒，避免每个 token 都写文件；小于 1 的值运行时按 1 秒处理。
+subagent_stream_activity_interval_seconds: 15

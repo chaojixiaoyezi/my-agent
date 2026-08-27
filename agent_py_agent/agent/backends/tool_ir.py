@@ -45,6 +45,15 @@ class CompactionSummary:
     text: str
 
 
+# LLM: RuntimeFactsTurn is a chronological provider-visible input item. Unlike UserTurn it is
+# host-produced and cannot authorize work; keeping it typed lets later requests retain the exact
+# prior prompt suffix instead of moving changing facts ahead of already completed tool calls.
+# 类用途: 保存某次模型调用前由底座追加的运行事实，使后续工具轮保持严格的追加式消息前缀。
+@dataclass(frozen=True)
+class RuntimeFactsTurn:
+    text: str
+
+
 # LLM: AssistantTurn 是原生工具历史的单一 assistant 事实；content_blocks 只保存后端白名单清洗后的有序块，不能直接作为用户正文。
 # 类用途: 保存一轮模型的可见文字、工具调用，以及下一轮厂商协议要求回放的内部内容块。
 @dataclass(frozen=True)
@@ -63,6 +72,7 @@ class AssistantTurn:
 __all__ = [
     "AssistantTurn",
     "CompactionSummary",
+    "RuntimeFactsTurn",
     "ToolCall",
     "ToolResult",
     "UserTurn",

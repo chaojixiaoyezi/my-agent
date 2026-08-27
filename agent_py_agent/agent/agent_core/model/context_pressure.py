@@ -220,11 +220,19 @@ def _model_visible_context_components(
     from ..tool_ir_guidance import unforwarded_runtime_guidance
 
     history = list(getattr(params, "tool_ir_history", None) or [])
-    messages = (
+    current_messages = (
         AnthropicMessageAdapter().to_provider_messages(history)
         if history
         else []
     )
+    messages = [
+        *[
+            item
+            for item in list(getattr(params, "provider_history_messages", None) or [])
+            if isinstance(item, dict)
+        ],
+        *current_messages,
+    ]
     state = getattr(params, "live_archive_state", None)
     already_forwarded = (
         set(state.get("_forwarded_runtime_guidance", set()))

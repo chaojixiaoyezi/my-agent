@@ -321,6 +321,38 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
         request_id="gw-first",
         role="assistant",
         content="你好，小叶子。",
+        canonical_native_messages=[
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "# User Task\n你好，我叫小叶子"}],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call-memory-1",
+                        "name": "read_file",
+                        "input": {"path": "PROFILE.md"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-memory-1",
+                        "content": "小叶子",
+                        "is_error": False,
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "你好，小叶子。"}],
+            },
+        ],
     )
     second = _conversation_context(agent, request, "gw-second", "我叫什么？")
     assert second.thread_id == first.thread_id
@@ -330,6 +362,13 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
     assert history_seed is not None
     assert ("user", "你好，我叫小叶子") in history_seed.messages
     assert ("assistant", "你好，小叶子。") in history_seed.messages
+    assert [message["role"] for message in history_seed.canonical_messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert "call-memory-1" in str(history_seed.canonical_messages)
     assert "active_root_task_id" not in section
 
 

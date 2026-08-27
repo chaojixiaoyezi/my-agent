@@ -16,6 +16,11 @@ from ..agent_core.tool_context.window import (
 )
 from ..tooling.operation_verification import public_operation_verification
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
+from .native_history import (
+    CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
+    canonical_native_messages_envelope,
+    provider_history_messages_from_rows,
+)
 
 if TYPE_CHECKING:
     from .compact import ConversationCompactResult
@@ -200,6 +205,11 @@ def append_subagent_thread_result(
     )
     if terminal_tool_fold:
         metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = terminal_tool_fold
+    native_envelope = canonical_native_messages_envelope(
+        getattr(result, "canonical_native_messages", None)
+    )
+    if native_envelope:
+        metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = native_envelope
     return agent.conversation_store.append_message_once(
         {
             "thread_id": thread.thread_id,
@@ -399,6 +409,7 @@ def _agent_thread_history_seed(
         compact_summary=str(compact.thread.summary or ""),
         compact_generation=max(0, int(compact.thread.compact_generation or 0)),
         messages=tuple(messages),
+        canonical_messages=provider_history_messages_from_rows(rows),
     )
 
 

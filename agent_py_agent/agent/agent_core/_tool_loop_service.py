@@ -724,9 +724,9 @@ def _native_tool_call_ids(params: ToolLoopExecuteParams) -> tuple[str, ...]:
     )
 
 
-# LLM: native 压缩摘要复用 memory_archive 的唯一通用语义摘要后端；它只生成同一 IR
-# 的 replacement item，不创建 task/session compact 或新的事实账本。
-# 函数用途: 在旧工具对尚未回收时生成可持续回放的当前 turn 续接摘要。
+# LLM: native compact passes the full typed IR to the memory-archive summarizer; that boundary
+# removes only duplicate task/thread projections and must retain an independent carried handoff.
+# 函数用途: 在旧工具对尚未回收时生成可持续回放的当前 turn 续接摘要，并保留真实交接上下文。
 def _native_tool_history_summary(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -740,12 +740,6 @@ def _native_tool_history_summary(
     )
 
     history = list(getattr(params, "tool_ir_history", None) or [])
-    if previous_summary:
-        # 上一代完整摘要已经通过 typed ConversationThread.summary 单独送入；从当前 IR
-        # 去掉其 CompactionSummary 投影，避免同一摘要在一次压缩请求里出现两遍。
-        from ..backends.tool_ir import CompactionSummary
-
-        history = [item for item in history if not isinstance(item, CompactionSummary)]
     if _native_tool_result_count(params) <= 1:
         return ""
     config = semantic_summary_config(agent)
@@ -755,6 +749,10 @@ def _native_tool_history_summary(
         LiveToolHistorySummaryRequest(
             history=history,
             backend=getattr(agent, "backend", None),
+            agent=agent,
+            request_id=str(getattr(params, "request_id", "") or ""),
+            run_id=str(getattr(params, "run_id", "") or ""),
+            task_id=str(getattr(params, "task_id", "") or ""),
             task_prompt=str(getattr(params, "user_prompt", "") or ""),
             previous_summary=str(previous_summary or ""),
             max_output_chars=config.max_input_chars,

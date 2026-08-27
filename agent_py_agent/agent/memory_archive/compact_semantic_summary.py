@@ -24,12 +24,14 @@ from __future__ import annotations
     ``CompactionSummary`` replacement item 替换同一 IR 中已回收的旧工具往返。两者共用同一
     摘要后端,都不创建第二份会话、任务或 compact 状态。事实源(raw archive / runtime_fact /
     work_state / artifact registry)一律不动,compact 包可恢复性不受影响。
+  - 当前 IR 还用同一 ``CompactionSummary`` 容器承载 thread summary 与 carried tool handoff；
+    live Compact 只替换前者，后者靠稳定 schema marker 分类并跨第二次压缩继续保留。
   - 中段的失败/未知副作用不会只交给模型摘要:它们会额外形成一条结构化事实块，避免摘要
     漏掉“部分操作已完成、部分操作失败或结果未知”后让续跑模型误报全成功或重复执行。
   - archive 的 preview 进入摘要模型前沿用原工具的信任/脱敏投影；compact 不会把外部网页、
     MCP 或工具归档正文重新升级成指令，也不会另建一份判断外部来源的名单。
   - carried archive 恢复仍遵守**失败必回退机械路径**:配置关、记录太少、无可用 backend、
-    摘要调用异常/超时/空结果时返回 None,调用方按原
+    摘要调用异常、供应商超时或空结果时返回 None,调用方按原
     ``_reconstructed_tool_context_entry`` 逐条重建。
   - persistent + transcript-authoritative 的 live native IR 压缩不能在删历史后静默降级：
     本模块用空串报告摘要失败，由调用方在变更 IR 前失败，或在 checkpoint/CAS 失败时恢复
@@ -37,7 +39,6 @@ from __future__ import annotations
 """
 
 import logging
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -50,7 +51,6 @@ _LOGGER = logging.getLogger(__name__)
 _DEFAULT_PROTECT_HEAD = 2
 _DEFAULT_PROTECT_TAIL = 6
 _DEFAULT_MIN_MIDDLE = 4
-_DEFAULT_TIMEOUT_SECONDS = 20.0
 _DEFAULT_MAX_INPUT_CHARS = 12_000
 # 单条中段记录进摘要 prompt 时的正文上限(保留头尾的截断,避免一条巨型输出
 # 撑爆摘要输入)。
@@ -108,7 +108,6 @@ class SemanticSummaryConfig:
     protect_head: int = _DEFAULT_PROTECT_HEAD
     protect_tail: int = _DEFAULT_PROTECT_TAIL
     min_middle: int = _DEFAULT_MIN_MIDDLE
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS
     max_input_chars: int = _DEFAULT_MAX_INPUT_CHARS
 
 
@@ -124,6 +123,10 @@ class SemanticSummaryRequest:
     mechanical_entries: list[str]
     config: SemanticSummaryConfig
     backend: Any = None
+    agent: Any = None
+    request_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
 
 
 # LLM: A live summary request carries both the previous canonical summary and current native IR.
@@ -134,6 +137,10 @@ class LiveToolHistorySummaryRequest:
 
     history: list[Any]
     backend: Any
+    agent: Any = None
+    request_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
     task_prompt: str = ""
     previous_summary: str = ""
     max_output_chars: int = _DEFAULT_MAX_INPUT_CHARS
@@ -147,9 +154,6 @@ def semantic_summary_config(agent: object) -> SemanticSummaryConfig:
         protect_head=_int_field(config, "memory_compact_semantic_summary_protect_head", _DEFAULT_PROTECT_HEAD),
         protect_tail=_int_field(config, "memory_compact_semantic_summary_protect_tail", _DEFAULT_PROTECT_TAIL),
         min_middle=_int_field(config, "memory_compact_semantic_summary_min_middle", _DEFAULT_MIN_MIDDLE),
-        timeout_seconds=_float_field(
-            config, "memory_compact_semantic_summary_timeout_seconds", _DEFAULT_TIMEOUT_SECONDS
-        ),
         max_input_chars=_int_field(
             config, "memory_compact_semantic_summary_max_input_chars", _DEFAULT_MAX_INPUT_CHARS
         ),
@@ -174,10 +178,9 @@ def summarize_carried_tool_context(
         return None
 
 
-# LLM: live compact 复用现有摘要后端，并等待该后端自身已有界 request_timeout 的调用完成；
-# 摘要只替换同一 native IR 的旧工具对，raw archive、operation ledger、thread transcript 与
-# task workspace 仍是事实源。
-# 函数用途: 对即将回收的完整原生工具历史生成一条可持续回放的非权威续接摘要。
+# LLM: live compact reuses the bounded backend request and emits one current task at the first user
+# turn plus one final synthetic compact instruction; carried handoff remains an independent IR fact.
+# 函数用途: 对即将回收的完整原生工具历史生成一条可持续回放的非权威续接摘要，并固定 wire 顺序。
 def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     try:
         if not request.history:
@@ -187,13 +190,23 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
             strip_orphaned_tool_blocks,
         )
 
+        task_prompt = str(request.task_prompt or "继续当前任务。")
+        compact_history = _live_compact_history(
+            request.history,
+            task_prompt=task_prompt,
+            previous_summary=request.previous_summary,
+        )
         messages = strip_orphaned_tool_blocks(
-            AnthropicMessageAdapter().to_provider_messages(request.history)
+            AnthropicMessageAdapter().to_provider_messages(compact_history)
         )
         generate = _resolve_generate_with_messages(
             request.backend,
             messages,
-            initial_user_prompt=(request.task_prompt or "继续当前任务。"),
+            initial_user_prompt=task_prompt,
+            agent=request.agent,
+            request_id=request.request_id,
+            run_id=request.run_id,
+            task_id=request.task_id,
         )
         if generate is None or not messages:
             return ""
@@ -203,10 +216,7 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
         # leave an orphan summary call consuming quota beside the resumed turn.
         summary = _safe_generate(
             generate,
-            _live_summary_prompt(
-                request.task_prompt,
-                request.previous_summary,
-            ),
+            _live_summary_prompt(request.previous_summary),
         ).strip()
         if not summary:
             return ""
@@ -222,6 +232,64 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
             exc_info=True,
         )
         return ""
+
+
+# LLM: Compact wire may contain one canonical current task, one prior thread summary, and an
+# independent carried active-turn handoff. Remove only the duplicate current-task projection and
+# prior thread summary; schema-marked carried handoff is a distinct fact and must survive.
+# 函数用途: 为 live Compact 整理原生历史，确保当前任务只由 backend 首条 user prompt 发送一次，
+# 上一代 thread summary 只在末尾 Compact 指令里发送，而本轮 carried handoff 原位保留。
+def _live_compact_history(
+    history: list[Any],
+    *,
+    task_prompt: str,
+    previous_summary: str,
+) -> list[Any]:
+    from ..backends.tool_ir import CompactionSummary, UserTurn
+
+    items = list(history)
+    canonical_task = f"# User Task\n{str(task_prompt or '')}"
+    task_index = next(
+        (
+            index
+            for index in range(len(items) - 1, -1, -1)
+            if isinstance(items[index], UserTurn)
+            and str(items[index].text or "") == canonical_task
+        ),
+        -1,
+    )
+    if task_index >= 0:
+        del items[task_index]
+
+    previous = str(previous_summary or "").strip()
+    if not previous:
+        return items
+    return [
+        item
+        for item in items
+        if not _is_previous_thread_summary(item, previous, CompactionSummary)
+    ]
+
+
+# LLM: CompactionSummary currently carries several structural projections. Classification is based
+# only on canonical schema markers/exact prior summary bytes, never on model prose or task wording.
+# 函数用途: 判断一条摘要是否只是已经由 ConversationThread.summary 单独携带的上一代摘要。
+def _is_previous_thread_summary(
+    item: Any,
+    previous_summary: str,
+    summary_type: type,
+) -> bool:
+    if not isinstance(item, summary_type):
+        return False
+    text = str(getattr(item, "text", "") or "").strip()
+    if text.startswith("[active-turn-tool-handoff]"):
+        return False
+    if text == previous_summary:
+        return True
+    return (
+        text.startswith("# Earlier Conversation Summary (generation ")
+        and text.endswith(f"\n{previous_summary}")
+    )
 
 
 # LLM: 摘要可折叠普通过程，但中段非成功副作用必须另以精确事实块保留，失败时仍回退机械列表。
@@ -249,7 +317,13 @@ def _summarize_or_none(
     stats.tail_records = tail_n
     stats.middle_records = len(middle_records)
 
-    generate = _resolve_generate(request.backend)
+    generate = _resolve_generate(
+        request.backend,
+        agent=request.agent,
+        request_id=request.request_id,
+        run_id=request.run_id,
+        task_id=request.task_id,
+    )
     if generate is None:
         stats.skip_reason = "no_backend"
         return None
@@ -260,9 +334,9 @@ def _summarize_or_none(
         return None
 
     stats.attempted = True
-    summary_text = _generate_summary(generate, content, config.timeout_seconds, stats)
+    summary_text = _generate_summary(generate, content, stats)
     if not summary_text.strip():
-        # 摘要调用失败/超时/空结果 → 严格回退机械路径（不折叠中段、不留占位），保证"LLM 摘要
+        # 摘要调用失败/供应商超时/空结果 → 严格回退机械路径（不折叠中段、不留占位），保证"LLM 摘要
         # 失败 == 现有机械 compact 路径"，中段记录的逐条 preview 一条不丢。
         stats.fallback_used = True
         stats.skip_reason = stats.skip_reason or "summary_unavailable"
@@ -415,45 +489,18 @@ def _nonnegative_int(value: object) -> int:
 
 
 def _generate_summary(
-    generate: Callable[[str], str], content: str, timeout_seconds: float, stats: SemanticSummaryStats
+    generate: Callable[[str], str], content: str, stats: SemanticSummaryStats
 ) -> str:
-    """调一次摘要模型;失败/超时/空结果返回 ""(调用方用兜底文案)。统计 calls/errors。"""
+    """调一次摘要模型；失败/空结果返回空串，调用方使用机械兜底。"""
     prompt = _summary_prompt(content)
     stats.summary_calls += 1
-    text = _generate_with_timeout(generate, prompt, timeout_seconds)
+    text = _safe_generate(generate, prompt)
     summary = (text or "").strip()
     if not summary:
         stats.summary_errors += 1
         return ""
     stats.succeeded = True
     return summary
-
-
-def _generate_with_timeout(generate: Callable[[str], str], prompt: str, timeout_seconds: float) -> str:
-    """在工作线程里跑 ``generate(prompt)``,超时则放弃(不杀线程,只不等它)。
-
-    backend.generate 是同步阻塞调用;用线程 + join(timeout) 给摘要设硬超时,避免一次卡死的
-    摘要请求把整个 compact 续跑拖死。超时后线程可能仍在后台跑,但其结果被丢弃,不影响主链路。
-    """
-    try:
-        budget = float(timeout_seconds)
-    except (TypeError, ValueError):
-        budget = _DEFAULT_TIMEOUT_SECONDS
-    if budget <= 0:
-        return _safe_generate(generate, prompt)
-
-    box: dict[str, str] = {}
-
-    def _worker() -> None:
-        box["text"] = _safe_generate(generate, prompt)
-
-    thread = threading.Thread(target=_worker, name="compact-semantic-summary", daemon=True)
-    thread.start()
-    thread.join(budget)
-    if thread.is_alive():
-        _LOGGER.debug("compact semantic summary timed out after %ss", budget)
-        return ""
-    return box.get("text", "")
 
 
 def _safe_generate(generate: Callable[[str], str], prompt: str) -> str:
@@ -464,7 +511,14 @@ def _safe_generate(generate: Callable[[str], str], prompt: str) -> str:
         return ""
 
 
-def _resolve_generate(backend: Any) -> Callable[[str], str] | None:
+def _resolve_generate(
+    backend: Any,
+    *,
+    agent: Any = None,
+    request_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
+) -> Callable[[str], str] | None:
     """把任意 backend 包成 ``(prompt)->str``;无 generate 能力返回 None(=回退机械)。
 
     carried archive 摘要刻意只用文本协议形态(``generate(prompt)``),不带 tools/messages,
@@ -477,7 +531,24 @@ def _resolve_generate(backend: Any) -> Callable[[str], str] | None:
         return None
 
     def _call(prompt: str) -> str:
-        response = generate(prompt)
+        if agent is not None:
+            from ..agent_core.model.auxiliary_call import (
+                AuxiliaryModelCallRequest,
+                generate_auxiliary_model_response,
+            )
+
+            response = generate_auxiliary_model_response(
+                AuxiliaryModelCallRequest(
+                    agent=agent,
+                    prompt=prompt,
+                    request_id=request_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    purpose="compact_carried_summary",
+                )
+            )
+        else:
+            response = generate(prompt)
         return str(getattr(response, "text", response) or "")
 
     return _call
@@ -491,6 +562,10 @@ def _resolve_generate_with_messages(
     messages: list[dict[str, Any]],
     *,
     initial_user_prompt: str,
+    agent: Any = None,
+    request_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
 ) -> Callable[[str], str] | None:
     """把历史放在前面，并把 Compact 要求作为最后一条 synthetic user 消息。
 
@@ -513,7 +588,25 @@ def _resolve_generate_with_messages(
         # tool_ir_history 从首个 assistant/tool call 开始，不含本 turn 的原始 user prompt。
         # 继续用 backend 的 prompt 参数把真实任务放在最前，既满足 provider 角色顺序，也让
         # Compact 指令仍然稳定位于整段历史最后。
-        response = generate(initial_user_prompt, messages=compact_messages)
+        if agent is not None:
+            from ..agent_core.model.auxiliary_call import (
+                AuxiliaryModelCallRequest,
+                generate_auxiliary_model_response,
+            )
+
+            response = generate_auxiliary_model_response(
+                AuxiliaryModelCallRequest(
+                    agent=agent,
+                    prompt=initial_user_prompt,
+                    messages=compact_messages,
+                    request_id=request_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    purpose="compact_live_tool_summary",
+                )
+            )
+        else:
+            response = generate(initial_user_prompt, messages=compact_messages)
         return str(getattr(response, "text", response) or "")
 
     return _call
@@ -546,12 +639,10 @@ def _summary_prompt(content: str) -> str:
     )
 
 
-# LLM: The prompt requests one replacement summary, not a delta, so each canonical generation can
-# supersede the previous one without duplicating or losing transcript history.
-# 函数用途: 组合旧会话摘要与当前任务，要求模型生成下一代可独立使用的完整续接摘要。
-def _live_summary_prompt(task_prompt: str, previous_summary: str = "") -> str:
-    task = _clip(str(task_prompt or "").strip(), 4_000)
-    task_block = f"\n\n当前任务：\n{task}" if task else ""
+# LLM: The prompt requests one replacement summary, not a delta. The current task already occupies
+# the wire's first user turn, so this final instruction must never copy it into a second location.
+# 函数用途: 把上一代 thread summary 放入末尾 Compact 指令，要求模型生成可独立续接的新摘要。
+def _live_summary_prompt(previous_summary: str = "") -> str:
     previous = _clip(str(previous_summary or "").strip(), 12_000)
     previous_block = (
         f"\n\n上一代会话摘要（必须合并进本次完整替代摘要）：\n{previous}"
@@ -568,7 +659,7 @@ def _live_summary_prompt(task_prompt: str, previous_summary: str = "") -> str:
         "当前文件、目录、命令、模型或服务位置；精确路径、ID、URL、端口、哈希和测试数字；"
         "尚未解决的问题、正在进行的步骤以及下一步。"
         "不要改写或缩短不透明标识，不要把推测写成事实。"
-        f"{previous_block}{task_block}"
+        f"{previous_block}"
     )
 
 
@@ -591,16 +682,6 @@ def _int_field(config: object, name: str, default: int) -> int:
         return default
     try:
         return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _float_field(config: object, name: str, default: float) -> float:
-    value = getattr(config, name, None)
-    if value is None:
-        return default
-    try:
-        return float(value)
     except (TypeError, ValueError):
         return default
 

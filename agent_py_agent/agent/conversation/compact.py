@@ -33,6 +33,7 @@ from .models import (
     MessageLogEntry,
     is_audit_background_transcript_entry,
 )
+from .native_history import provider_history_messages_from_rows
 
 if TYPE_CHECKING:
     from ..agent_core.runtime.context_compactor import RuntimeCompactPolicy
@@ -107,6 +108,9 @@ class _CompactRunRequest:
     projected_tokens: int
     forced: bool
     attempted_at: float
+    request_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
     custom_instructions: str = ""
     progress_callback: Callable[[dict[str, object]], object] | None = None
 
@@ -220,6 +224,20 @@ def prepare_conversation_context(
         projected_tokens=projected,
         forced=bool(force),
         attempted_at=attempted_at,
+        request_id=(
+            str(exclude_request_id or "").strip()
+            or f"conversation-compact:{current.thread_id}:{current.compact_generation + 1}"
+        ),
+        run_id=str(
+            (
+                current.metadata.get("agent_run_id")
+                if isinstance(current.metadata, dict)
+                else ""
+            )
+            or current.workspace_task_id
+            or ""
+        ).strip(),
+        task_id=str(current.workspace_task_id or "").strip(),
         custom_instructions=str(custom_instructions or "").strip(),
         progress_callback=progress_callback,
     )
@@ -452,6 +470,9 @@ def _build_compact_candidate(
         evidence,
         compact_rows,
         custom_instructions=request.custom_instructions,
+        request_id=request.request_id,
+        run_id=request.run_id,
+        task_id=request.task_id,
     )
     projected_after = _projected_context_tokens(
         request.agent,
@@ -627,9 +648,10 @@ def _without_current_request_suffix(
     return rows[:end]
 
 
-# LLM: The projection counts exactly what the next request carries, including immutable terminal
-# folds attached to assistant rows. It must not reserve future output or re-summarize old folds.
-# 函数用途: 估算下一轮实际送入模型的摘要、消息、工具终态折叠和当前输入，用于唯一 Compact 阈值。
+# LLM: The projection counts both the legacy prose path and the canonical native-tool path, then
+# uses the larger estimate. This prevents persisted tool calls/results from bypassing Compact
+# without charging the same turn twice when an envelope replaces its visible transcript rows.
+# 函数用途: 估算下一轮实际送入模型的摘要、原生工具历史和当前输入，用于唯一 Compact 阈值。
 def _projected_context_tokens(
     agent: SimpleAgent,
     summary: str,
@@ -646,14 +668,15 @@ def _projected_context_tokens(
     foreground_rows = [
         row for row in rows if not is_audit_background_transcript_entry(row)
     ]
-    return estimate_tokens(
+    common = {
+        "base_prompt": base,
+        "conversation_summary": summary,
+        "conversation_operation_evidence": operation_evidence or {},
+        "conversation_recent_operation_evidence": recent_operation_evidence or {},
+    }
+    legacy_tokens = estimate_tokens(
         {
-            "base_prompt": base,
-            "conversation_summary": summary,
-            "conversation_operation_evidence": operation_evidence or {},
-            "conversation_recent_operation_evidence": (
-                recent_operation_evidence or {}
-            ),
+            **common,
             "conversation_messages": [
                 {
                     "role": row.role,
@@ -668,6 +691,15 @@ def _projected_context_tokens(
             ],
         }
     )
+    native_tokens = estimate_tokens(
+        {
+            **common,
+            "conversation_native_messages": provider_history_messages_from_rows(
+                foreground_rows
+            ),
+        }
+    )
+    return max(legacy_tokens, native_tokens)
 
 
 # LLM: Summary prose is soft context; structured operation evidence remains separate authority.
@@ -679,6 +711,9 @@ def _summarize(
     rows: list[MessageLogEntry],
     *,
     custom_instructions: str = "",
+    request_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
 ) -> str:
     foreground_rows = [
         row for row in rows if not is_audit_background_transcript_entry(row)
@@ -714,7 +749,21 @@ def _summarize(
             transcript,
         ]
     )
-    response = agent.backend.generate(prompt)
+    from ..agent_core.model.auxiliary_call import (
+        AuxiliaryModelCallRequest,
+        generate_auxiliary_model_response,
+    )
+
+    response = generate_auxiliary_model_response(
+        AuxiliaryModelCallRequest(
+            agent=agent,
+            prompt=prompt,
+            request_id=request_id,
+            run_id=run_id,
+            task_id=task_id,
+            purpose="conversation_compact_summary",
+        )
+    )
     summary = str(getattr(response, "text", "") or "").strip()
     if not summary:
         raise RuntimeError("conversation compact backend returned an empty summary")

@@ -35,6 +35,8 @@ class TestCapabilityConfigDefaults:
         assert config.capability_candidate_limit == 5
         assert config.capability_alternative_max_attempts == 3
         assert config.subagent_no_progress_attempt_limit == 4
+        assert config.subagent_stream_activity_projection_enabled is True
+        assert config.subagent_stream_activity_interval_seconds == 15
 
     def test_capability_config_zero_means_unlimited(self):
         """验证 0 表示不限制。"""
@@ -132,6 +134,7 @@ class TestLoadCapabilityConfig:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write("enable_capability_routing: true\n")
             f.write("capability_grant_expires_after_task: false\n")
+            f.write("subagent_stream_activity_projection_enabled: false\n")
             f.flush()
             path = Path(f.name)
 
@@ -139,6 +142,7 @@ class TestLoadCapabilityConfig:
             config = load_capability_config(path)
             assert config.enable_capability_routing is True
             assert config.capability_grant_expires_after_task is False
+            assert config.subagent_stream_activity_projection_enabled is False
         finally:
             path.unlink()
 

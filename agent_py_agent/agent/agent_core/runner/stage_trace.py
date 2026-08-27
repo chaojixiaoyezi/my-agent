@@ -41,6 +41,32 @@ class RunnerModelContextUsageTraceRequest:
     usage: dict[str, object]
 
 
+# LLM: Streaming activity carries counts and transport phase only; model text/reasoning and tool
+# JSON are forbidden so the canonical child state stays a safe status projection.
+# 类用途: 表示慢模型仍在持续输出哪类数据，让 TUI/Web 能区分“慢”与“卡死”。
+@dataclass(frozen=True)
+class RunnerModelStreamActivityTraceRequest:
+    agent: Any
+    params: Any
+    tool_rounds: int
+    stream_kind: str
+    observed_chars: int = 0
+
+
+# LLM: Retry activity is derived only from the provider attempt observer's typed fields. Error
+# bodies and credentials must never enter the child-state projection.
+# 类用途: 表示一次模型连接即将按退避策略重试，供子代理状态栏显示尝试次数和等待时间。
+@dataclass(frozen=True)
+class RunnerProviderRetryTraceRequest:
+    agent: Any
+    params: Any
+    tool_rounds: int
+    attempt: int
+    total: int
+    delay_seconds: float
+    error_type: str = ""
+
+
 @dataclass(frozen=True)
 class RunnerToolStageTraceRequest:
     agent: Any
@@ -110,6 +136,51 @@ def trace_runner_model_request_failed(request: RunnerModelStageTraceRequest) -> 
             payload={
                 "error_type": exc.__class__.__name__,
                 "error_preview": str(exc),
+            },
+        )
+    )
+
+
+# LLM: The caller throttles this hot-path event before it reaches persistence. This function
+# performs the same exact-run identity check and bounded projection as other runner stages.
+# 函数用途: 把模型正文、思考或工具参数仍在流动的事实写进当前子代理状态。
+def trace_runner_model_stream_active(
+    request: RunnerModelStreamActivityTraceRequest,
+) -> None:
+    kind = str(request.stream_kind or "output").strip().lower()
+    if kind not in {"output", "thinking", "tool_input"}:
+        kind = "output"
+    _trace_runner_stage(
+        RunnerStageTraceBundle(
+            agent=request.agent,
+            event_type="runner_model_stream_active",
+            params=request.params,
+            tool_rounds=request.tool_rounds,
+            payload={
+                "stream_kind": kind,
+                "observed_chars": max(0, int(request.observed_chars or 0)),
+            },
+        )
+    )
+
+
+# LLM: Retry notices update observability only; provider retry authority remains the transport
+# observer and its retry_scheduled field. This projection cannot start or suppress a retry.
+# 函数用途: 把模型连接退避重试投影为当前子代理的可见运行状态。
+def trace_runner_provider_retry_scheduled(
+    request: RunnerProviderRetryTraceRequest,
+) -> None:
+    _trace_runner_stage(
+        RunnerStageTraceBundle(
+            agent=request.agent,
+            event_type="runner_provider_retry_scheduled",
+            params=request.params,
+            tool_rounds=request.tool_rounds,
+            payload={
+                "attempt": max(1, int(request.attempt or 1)),
+                "total": max(1, int(request.total or 1)),
+                "delay_seconds": max(0.0, float(request.delay_seconds or 0.0)),
+                "error_type": str(request.error_type or "")[:80],
             },
         )
     )
@@ -283,6 +354,7 @@ def _persist_runner_activity(manager: Any, task: Any, bundle: RunnerStageTraceBu
         "tool": tool,
         "tool_round": int(bundle.tool_rounds or 0),
         "at": now,
+        **_runner_activity_public_fields(bundle),
     }
     items.append(entry)
     attrs["runtime_activity"] = entry
@@ -299,6 +371,26 @@ def _persist_runner_activity(manager: Any, task: Any, bundle: RunnerStageTraceBu
             run_id=str(getattr(task, "id", "") or ""),
         )
     return task
+
+
+# LLM: Only explicit numeric/enumerated fields may accompany the short activity summary. Prompt,
+# response, tool arguments/output and provider error bodies are never copied from detail payloads.
+# 函数用途: 为流式状态和重试状态保留可展示数字，不把模型或工具正文写进 canonical state。
+def _runner_activity_public_fields(bundle: RunnerStageTraceBundle) -> dict[str, object]:
+    payload = bundle.payload if isinstance(bundle.payload, dict) else {}
+    if bundle.event_type == "runner_model_stream_active":
+        return {
+            "stream_kind": str(payload.get("stream_kind") or "output")[:24],
+            "observed_chars": max(0, _int_value(payload.get("observed_chars"))),
+        }
+    if bundle.event_type == "runner_provider_retry_scheduled":
+        return {
+            "attempt": max(1, _int_value(payload.get("attempt"))),
+            "total": max(1, _int_value(payload.get("total"))),
+            "delay_seconds": max(0.0, _float_value(payload.get("delay_seconds"))),
+            "error_type": str(payload.get("error_type") or "")[:80],
+        }
+    return {}
 
 
 # LLM: 活动摘要只由 typed stage 与工具名生成；禁止摘抄 prompt、response、工具输出或模型思考正文。
@@ -319,6 +411,19 @@ def _runner_activity_summary(bundle: RunnerStageTraceBundle) -> tuple[str, str]:
     if bundle.event_type == "runner_model_request_failed":
         error_type = str(payload.get("error_type") or "模型错误").strip()
         return f"模型请求失败：{error_type}", ""
+    if bundle.event_type == "runner_model_stream_active":
+        kind = str(payload.get("stream_kind") or "output")
+        if kind == "thinking":
+            return "模型持续思考中", ""
+        if kind == "tool_input":
+            return "模型正在生成工具参数", ""
+        return "模型持续响应中", ""
+    if bundle.event_type == "runner_provider_retry_scheduled":
+        attempt = max(1, _int_value(payload.get("attempt")))
+        total = max(1, _int_value(payload.get("total")))
+        delay = max(0.0, _float_value(payload.get("delay_seconds")))
+        wait_text = f"{delay:g} 秒" if delay else "稍后"
+        return f"模型连接重试 {attempt}/{total}，等待 {wait_text}", ""
     if bundle.event_type == "runner_tool_call_started":
         tool = str(payload.get("tool") or "").strip()
         return (f"正在使用工具：{tool}" if tool else "正在使用工具"), tool
@@ -393,6 +498,15 @@ def _int_value(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+# LLM: Status rendering tolerates malformed persisted numeric fields without changing lifecycle.
+# 函数用途: 把重试等待时间安全转换为非异常浮点数。
+def _float_value(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _detail_trace_payload(manager: Any, task: Any, bundle: RunnerStageTraceBundle) -> dict[str, Any]:
