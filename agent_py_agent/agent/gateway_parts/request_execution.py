@@ -1837,11 +1837,10 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
         attrs[CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR] = (
             task.execution_state_available
         )
-        # 终态任务(completed 等)只保留状态提示,不预填本轮任务身份与工作目录:
-        # 问题1 真机(2026-08-09)celery 完成后 click/jinja2/requests 等新任务
-        # 消息全被吸进 celery 旧目录——sticky 无条件预填身份,新任务继承旧身份
-        # 与旧目录。仅 live 任务(active/interrupted=暂停待恢复)可被新消息承接,
-        # 与 promote 回落链同一把尺;completed 等终态不预填,新任务走独立目录。
+        # 终态任务(completed 等)不预填旧的 live task 身份：纯聊天不得复活
+        # 旧任务。但 workspace_task_id 仍是 thread 的持久 cwd；本轮首个
+        # promotes_task 工具会由 task_promotion 以新 request/task 身份在同一
+        # task_path 建立 successor，旧终态不变，也不复制目录。
         if str(task.status or "").strip().lower() in {"active", "interrupted"}:
             attrs["conversation_task_id"] = task.task_id
             attrs["run_workspace"] = {

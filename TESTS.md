@@ -1650,6 +1650,25 @@ python3 -m pytest \
 按 0.1 时应为 `1,811,699.1`；缓存命中按 1 时应为 `2,023,236`；全部不命中为 `2,963,400`。
 该数学只证明价格影响，缓存是否命中仍须由 provider 的 cache-read 账本证明。
 
+`ma-r54-context-workspace-network` 在 `.7` 唯一 Gateway/MiniMax-M2.7 上完成了一次原始
+超级玛丽多子代理任务：5 名 child 自然完成，main 自动恢复并在界面直接交付长报告；
+`bbb` 及主要 JS/HTML 全部落在 exact owner task root。第二条「继续启动」消息又精确复现了
+completed sticky 被错分流到新目录：`list_files bbb` 先失败，模型随后搜索旧目录并复制产物。
+
+回归要求：
+
+- 同一 thread 的 sticky root 已 `completed` 或 `interrupted` 时，新 request 必须保持旧 link
+  终态，以新 successor task id 续接同一 `task_path`；
+- `read_file/list_files/search_text/find_files/write_file` 任一首个 `promotes_task` 工具都要
+  使 `run_workspace.task_root`、agent 当前 cwd 和四份 run identity 投影同步换代；
+- 新 successor 的 goal 只能来自当前 user prompt，不得复制旧 goal；空当前 prompt 仍
+  fail-closed；
+- 纯聊天不预填旧 live task 身份、不复活旧终态；sticky 只在首个真工作工具处生效。
+
+修复后 `test_gateway_chat_conversation_context.py + test_conversation_store.py +
+test_run_task_workspace_writer.py` 完整定向通过；其中 completed/interrupted × 5 类首工具的精确组合为
+10 条，再加直接 promotion 和普通新轮续接回归均通过。
+
 真机仍只允许 `.7` 一个 Gateway、MiniMax-M2.7 和 fresh tmux。启动前先公开 tmux 名称和 attach 命令；
 测试者只通过普通中文 TUI prompt 驱动被测 Agent，不旁路补产物、改防火墙或执行任务。Mac 到测试机的真实
 HTTP 请求必须与 TUI 内 `network_status` 对账，本机监听成功但外部失败时最终报告必须保持未验证/不可达。

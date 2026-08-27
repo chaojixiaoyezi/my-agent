@@ -81,26 +81,20 @@ def promote_current_conversation_task(
         selected = _materialize_promoted_workspace(agent, current, existing, task_goal=goal) or existing
         return _activate_current_conversation_task(store, current, attrs, selected)
     if not child_run_id:
-        # 每轮 /ask 派生新请求 id(req_2→req_3→…),精确 id 无 active link 时
-        # 回落线程持久化的 workspace_task_id(上一轮晋升时 select_workspace_task
-        # 写入的 sticky cwd):续接同一任务身份与同一目录,避免「影子任务」
-        # (问题5: 新请求另建 task link+新目录,原任务永久无终态、两任务分裂)。
+        # 每轮 /ask 都有新请求 id，但同一 thread 的 workspace_task_id 是类似
+        # 会话运行时 thread cwd 的持久工作区指针。旧执行已 completed 时也只换一个
+        # 新 active-turn/task 身份，不换目录；否则用户在同一 TUI/IM 说「继续」会
+        # 在新空目录里找不到上轮产物，甚至让模型自行搜索和复制旧目录。
         candidate = _sticky_workspace_task_id(store, thread_id) or explicit_task_id
         if candidate:
             reusable = _reusable_conversation_workspace_link(store, thread_id, candidate)
-            # 仅 live(active/interrupted)任务承接新消息身份与目录;completed 等
-            # 终态任务不再吸附(问题1:新任务消息吸进旧任务目录,新 req id 配旧
-            # task_path)。终态 sticky 走下方新建分支,新任务独立目录。
-            if reusable is not None and is_live_conversation_workspace(reusable) and not _detached_named_work_link(reusable):
+            if reusable is not None and not _detached_named_work_link(reusable):
                 bound = bind_current_conversation_workspace(agent, candidate)
                 if bound is not None:
                     return bound
-                # 续接失败(如旧任务仍被 policy/claim 驱动执行中):不另建影子任务,
-                # 本轮工作步骤由 workspace execution blocker 拦截,等旧执行收束。
+                # 精确 sticky 续接失败时不另建影子目录。active 任务由
+                # execution blocker 收口；terminal 任务则由新执行代 successor 原子换代。
                 return None
-            # 终态 sticky(completed 等)且本轮连目标文本都没有:不凭空新建任务
-            # (fails closed,与终态续接空目标失败同语义);有目标文本才走下方
-            # 新建分支,新任务独立目录。
             if not str(
                 goal
                 or getattr(current, "root_user_prompt", "")

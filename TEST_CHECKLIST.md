@@ -334,6 +334,9 @@
 - [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop`、`/goal ...`、`/verbose ...` 都由统一系统命令入口处理；任何未知 `/XXXX` fail-closed，不进入普通队列、transcript 或模型。
 - [ ] 已有 linked live turn 时 `/btw` 只注入该 turn、不发第二个 wake，也不泄漏到下一任务；`/stop` 不判断聊天/任务，直接按当前窗口的精确 request id 打断模型读取、清掉未消费 steer、停止子树，不停止 Gateway，也不影响其他用户会话。
 - [ ] `/stop` 后 transcript、compact、memory 和 task workspace 保留；用户后续自然说“继续”时，模型用精确 task id 重开原现场，不创建第二个任务目录。
+- [ ] 同一 TUI/IM thread 的普通任务自然 `completed` 后，下一条消息在首个
+  `promotes_task` 工具处建立新 successor id，但必须继承同一 canonical task root；
+  旧 link 保持终态，模型不得因为相对路径失败而搜索、复制旧产物到新空目录。
 - [ ] `/goal` 每 thread 只允许一个未结束目标，pause/resume/edit/clear 保留正确任务身份；active goal 的 `/stop` 只暂停，complete/blocked 仅由精确 scoped 工具写入。
 - [ ] `/audit` 只在显式前缀激活，guarantee/window 沿子代理结构化继承；普通 prompt、goal、summary 中的 `/audit` 文字不激活 watch 保证。
 - [ ] 同一 Agent 的前台聊天和后台续跑并发时，prompt、request id、task workspace 和 tool-loop params 不串；已销毁 Agent 不留下可被 object-id 复用的旧状态。

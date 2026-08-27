@@ -11,10 +11,24 @@
   `<owner_home>/tasks/<task_path>/`；不再继承单 Gateway daemon `/root` 或客户端临时 cwd。
 - `process_session(network_status)` 只读 exact 受管进程树 listener 与 firewalld 显式端口规则，任何
   non-loopback 结果仍要求另一台机器真实探测，工具不会自动改防火墙或宣称局域网成功。
-- 完整相关 focused 已通过（2 个既有 xfail）；全项目 Ruff、doc sync、strict code-size、diff 与
-  clean-package 严格 gate 全绿。待推送、`.7` 单 Gateway 部署和 fresh MiniMax-M2.7 真 TUI。价格样本按
+- 第一批完整相关 focused 已通过（2 个既有 xfail）；全项目 Ruff、doc sync、strict code-size、diff 与
+  clean-package 严格 gate 全绿。`1e91935` 已推送、快进部署 `.7`，原位重启后只有一个
+  Gateway PID `1402986`、127.0.0.1:8420，模型仍为 MiniMax-M2.7。价格样本按
   普通输入 5、缓存价 0.1/1 分别为
   `1,811,699.1/2,023,236`，缓存是否命中仍只认 provider cache-read。
+- fresh 真 TUI `ma-r54-context-workspace-network` 只输入用户原始超级玛丽提示词：5 名 child
+  全部一次自然完成，main 自动醒来整合；`bbb` 与 6 份主要产物全部位于
+  `/root/.my-agent/owners/local/main/tasks/2026-08-27/gwreq-1787801861-f62ac11a83ab4d6/`，思考、
+  工具、Todo、child token 和最终长报告均直接显示。最终 main 约 83.6k/128k，没有触发
+  115.2k 压缩线，`compact 0` 正确。
+- 同 TUI 第二条普通消息抓到一个真缺口：旧 root 已 completed 后，上层 promotion 没有进入已有
+  terminal-successor 链，新 request 错建空目录，模型遂去搜索并复制旧 `bbb`。当前修复让
+  completed/interrupted 都以新 execution/task id 继承同一 thread cwd，旧终态不变。
+  workspace/store/writer 完整定向 150 项已通过，第二次 Ruff、doc sync、strict code-size、diff 和
+  clean-package 严格 gate 全绿；待部署与 fresh 两轮 TUI 复验。
+- r54 的 Context 从当轮 83.6k 回到下轮 39.5k 不是 Compact 或丢聊天：canonical transcript
+  仍完整保留 10 条 user/commentary/final，变小的是已完成回合中的巨型 write/read 工具载荷，
+  它们按已接受的终态折叠合同转为有界、可核对投影。该折叠不推进 generation，不冒充 Compact。
 
 ## 2026-08-26 后台进程改归 conversation session 托管（已部署真机通过）
 
