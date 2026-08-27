@@ -184,7 +184,7 @@ child、角色、授权和写围栏；会话运行时 式补丁错误有界回�
 
 ### 新阶段仍展示上一份已关闭 Todo
 
-状态：`4425618` 已推送、部署并由 `.7` 单 Gateway 同一长 session 真机收口
+状态：`4425618` 的已关闭旧阶段清理已真机收口；未完成项跨普通续话保留的补丁 focused 通过，待 `.10` 部署复验
 
 解决问题：`ma-97468f3-longchain-r27` 已进入独立验收失败后的三路修复，底部 child 面板正确显示三名
 RUNNING，固定 Todo 却仍显示上一轮调研的 `完成 4/7`（实际 4 done + 3 skipped）。这是旧 task-path 计划
@@ -196,6 +196,12 @@ host-owned `display_plan` 只列当前 conversation request 的 exact item ids�
 终端交互 `repinScroll` 补了 prompt_toolkit Window 的显式垂直滚动落点，提交与页面切换能真实粘底，手动
 上翻仍不抢滚动。362 项 focused（2 xfail）及严格 gate 通过；原 `ma-97468f3-longchain-r27` 原位 resume 后，
 两轮追加均清掉旧 `完成 24/35`，PageUp 离底可见 `Jump to bottom ↓`，下一次 Enter 立即回底且 Working 收口。
+
+`.10` 的 `ma-110-native-cache-r2` 又暴露相反边界：同一长期调研还有未完成 Todo，用户续话后模型只增量更新
+3 个 id，TUI 错显为 `完成 3/3`，而主账本 17 项仍完整。当前候选在换代时保留所有 canonical 非终态 id，
+再合并本轮显式触碰 id；上一阶段已关闭且本轮未触碰的历史仍会消失。它不解析“继续”等自然语言，也不让
+Todo 取得任务完成权威。task-progress、activity、notice、派工与 TUI 八文件 167 项 focused 及本地严格
+gate 已通过；待部署后用普通中文续话核对四行窗口仍含进行中和下一待办。
 
 ### DNS 瞬断不能终止长代理
 

@@ -1850,6 +1850,11 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 决策：不拆第二本进度账、不按标题/状态/时间猜阶段。完整 items 仍是唯一 durable 软账本；旁挂 host-owned
   `display_plan={generation_id, revision, item_ids}` 只负责显示。普通 conversation request 换代，同一 root
   lifecycle wake 和 child continuation 沿原 exact request；同代结构化写入合并 ids，修订号只在集合变化时递增。
+- 2026-08-28 的 `.10` Prompt 3 续话复现了增量写入缺口：主账本仍有 17 项，下一普通回合只更新 3 个已完成
+  id 后，TUI 被缩成 `完成 3/3`，其余未完成项实际没有丢。对照 会话运行时 `update_plan` 每次传完整 plan，以及
+  终端交互 `TaskListV2` 从持久清单优先选择最近完成、进行中和待办，当前换代只淘汰上一代已经关闭且本轮
+  未触碰的历史项；canonical ledger 中所有非终态 id 与本轮显式触碰 id 自动进入新 display plan。同代继续
+  增量合并。这个连续性只读结构化 status/id，不解析用户续话或标题，也不改变任务状态、完成、调度和验收。
 - 边界：Todo 投影不参与任务结束、验收、调度、权限或 Compact；旧账没有 display plan 时继续展示完整 items。
   TUI reducer 只接受当前期望 generation 且不倒退 revision 的快照，最终 notice 也携带同一身份。
 - 视窗：每个 main/child store 仍保存自己的 follow/cursor；真实 prompt_toolkit Window 通过公开

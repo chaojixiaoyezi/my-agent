@@ -233,6 +233,7 @@ def merge_task_progress(existing: dict[str, Any], update: dict[str, Any], *, run
     display_plan = _merge_display_plan(
         base.get(_DISPLAY_PLAN_KEY),
         update.get(_DISPLAY_PLAN_UPDATE_KEY),
+        ledger_items=merged_items,
     )
     if display_plan:
         payload[_DISPLAY_PLAN_KEY] = display_plan
@@ -325,23 +326,39 @@ def _normalize_display_plan(value: object) -> dict[str, Any]:
     }
 
 
-# LLM: A different structured conversation generation replaces only the display
-# id set and advances its revision. Further writes from the same active turn may
-# extend that set without creating another generation; unrelated reconciliation
-# writes carry no private update and preserve it unchanged.
-# 函数用途: 合并 Todo 展示计划，新用户回合换页、同回合继续补项。
-def _merge_display_plan(existing: object, incoming: object) -> dict[str, Any]:
+# LLM: A different structured conversation generation drops closed historical
+# rows, but every canonical open row survives the switch alongside ids explicitly
+# touched by the new turn. This mirrors full-plan surfaces without making partial
+# model updates delete unfinished work; prose never participates in continuity.
+# 函数用途: 合并 Todo 展示计划；新回合清掉已关闭旧项，但继续显示账本中所有未完成项。
+def _merge_display_plan(
+    existing: object,
+    incoming: object,
+    *,
+    ledger_items: object,
+) -> dict[str, Any]:
     current = _normalize_display_plan(existing)
     update = _normalize_display_plan(incoming)
     if not update:
         return current
+    values = ledger_items if isinstance(ledger_items, list | tuple) else ()
+    open_ids = [
+        str(item.get("id") or "").strip()[:128]
+        for item in values
+        if isinstance(item, dict)
+        and str(item.get("id") or "").strip()
+        and not task_progress_status_is_closed(item.get("status"))
+    ]
     if not current or current["generation_id"] != update["generation_id"]:
         return {
             **update,
+            "item_ids": dedupe_strings(
+                [*update["item_ids"], *open_ids]
+            )[:_DISPLAY_PLAN_MAX_ITEMS],
             "revision": int(current.get("revision") or 0) + 1,
         }
     merged_ids = dedupe_strings(
-        [*current["item_ids"], *update["item_ids"]]
+        [*current["item_ids"], *update["item_ids"], *open_ids]
     )[:_DISPLAY_PLAN_MAX_ITEMS]
     return {
         "generation_id": current["generation_id"],

@@ -187,18 +187,23 @@ def test_closed_progress_item_requires_explicit_correction_to_reopen(tmp_path) -
     assert json.loads(corrected.output)["items"][0]["status"] == "in_progress"
 
 
-def test_display_plan_switches_turn_without_deleting_durable_history() -> None:
+def test_display_plan_switch_keeps_open_rows_without_closed_history() -> None:
     first = merge_task_progress(
         {},
         with_task_progress_display_plan(
             {
                 "items": [
                     {"id": "old-a", "title": "旧任务 A", "status": "done"},
+                    {
+                        "id": "still-open",
+                        "title": "跨回合继续工作",
+                        "status": "in_progress",
+                    },
                     {"id": "old-b", "title": "旧任务 B", "status": "done"},
                 ]
             },
             generation_id="turn-old",
-            item_ids=["old-a", "old-b"],
+            item_ids=["old-a", "still-open", "old-b"],
         ),
         run_id="durable-task",
     )
@@ -236,11 +241,13 @@ def test_display_plan_switches_turn_without_deleting_durable_history() -> None:
 
     assert [item["id"] for item in reconciled["items"]] == [
         "old-a",
+        "still-open",
         "old-b",
         "new-a",
         "new-b",
     ]
     assert [item["id"] for item in task_progress_display_items(reconciled)] == [
+        "still-open",
         "new-a",
         "new-b",
     ]
