@@ -1065,6 +1065,53 @@ def test_search_text_python_fallback_reports_incomplete_scan_limit(
     assert result.result_envelope["page_window"]["scan_limited"] is True
     assert result.result_envelope["page_window"]["scanned_files"] == 2
     assert result.result_envelope["page_window"]["scan_limit_reason"] == "file_limit"
+    facts = result.result_envelope["search_result"]
+    assert facts["schema"] == "local_text_search.v1"
+    assert facts["status"] == "incomplete"
+    assert facts["hint_code"] == "LOCAL_SCAN_INCOMPLETE"
+    assert facts["backend"] == "python"
+    assert facts["scan_complete"] is False
+
+
+def test_search_text_no_match_exposes_local_literal_contract(
+    tmp_path: Path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("class ExactIdentifier:\n    pass\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=10)
+    monkeypatch.setattr(search_mod.shutil, "which", lambda _name: None)
+
+    result = tool.execute({"query": "find the semantic meaning of ExactIdentifier"})
+
+    assert result.ok
+    facts = result.result_envelope["search_result"]
+    assert facts == {
+        "schema": "local_text_search.v1",
+        "scope": "local_workspace",
+        "source_path": ".",
+        "match_mode": "literal",
+        "ignore_case": False,
+        "backend": "python",
+        "status": "no_matches",
+        "hint_code": "LOCAL_LITERAL_NO_MATCH",
+        "returned": 0,
+        "scan_complete": True,
+        "scanned_files": 1,
+        "scanned_files_known": True,
+        "suggested_actions": [
+            "verify_local_path",
+            "shorten_query",
+            "use_explicit_regex",
+            "use_web_search_for_internet_scope",
+        ],
+    }
+    assert "searched_path: ." in result.output
+    assert "scan_complete: true" in result.output
+    assert "本工具" not in result.output
+    assert "不联网" in result.output
+    assert "更短的精确标识符" in result.output
 
 
 def test_search_text_rg_reader_stops_when_tool_token_is_cancelled(
@@ -1177,6 +1224,12 @@ def test_search_text_treats_rg_no_matches_as_empty_result(tmp_path: Path, monkey
 
     assert result.ok
     assert "没有找到匹配项" in result.output
+    facts = result.result_envelope["search_result"]
+    assert facts["status"] == "no_matches"
+    assert facts["hint_code"] == "LOCAL_LITERAL_NO_MATCH"
+    assert facts["backend"] == "rg"
+    assert facts["scan_complete"] is True
+    assert "scan_complete: true" in result.output
 
 
 def test_list_files_supports_limit_offset_depth_and_glob(tmp_path: Path):

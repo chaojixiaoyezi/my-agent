@@ -72,11 +72,12 @@
   只允许白名单字段进入 provider replay，工具 id/name/input 仍以 canonical ToolCall 为权威；compact 或
   其他结构化裁剪一旦改变签名覆盖的内容，就必须丢弃对应 provider blocks 并回落到无签名的规范历史，
   不能伪造、拼接或向用户泄露 reasoning。
-- 普通回合结束时允许做一次 会话运行时/终端交互 式工具终态折叠，但它不是 Compact：宿主只从该回合
-  canonical tool archive 生成有界、脱敏、带计数和 refs 的 `conversation_terminal_tool_fold.v1`，与 assistant
-  消息同一次落入唯一 ConversationStore。后续轮只读这份不可变折叠，不重新总结、不按当前窗口改写旧行；
-  因而既保留“做过什么、哪里核验、不要重放副作用”的续做事实，也让历史保持 append-only 稳定前缀以利用
-  provider cache。完整原始输出继续只在 owner archive，最近折叠保留有限明细，不能伪造已删除的
+- 普通回合结束时允许做一次 会话运行时/终端交互 式工具终态投影，但它不是 Compact：宿主只从该回合
+  canonical tool archive 生成有界、脱敏、带计数和 refs 的 `conversation_terminal_tool_fold.v2`，与 assistant
+  消息同一次落入唯一 ConversationStore。V2 metadata 同时固定生成 hot-tail 与 cold-fold，并保存结构化切换时间；
+  缓存热期只读较完整的固定 hot-tail，过期后只读固定 cold-fold，整个生命周期不重新总结、不改写落盘旧行。
+  因而既保留“做过什么、哪里核验、不要重放副作用”的续做事实，也避免刚结束的追问主动破坏可复用前缀。
+  旧 `v1` 是显式持久数据兼容入口且恒按 cold-fold 读取。完整原始输出继续只在 owner archive，不能伪造已删除的
   ToolCall/ToolResult 或 thinking signature。真正 Conversation Compact 才把折叠纳入摘要、推进
   `compact_generation` 与 transcript source-message 计数；`compact_source_tool_pairs` 继续只表示运行中 native IR
   真压缩掉的完整工具对，终态折叠的回合/调用数必须独立展示，不能冒充 Compact 或重复累计。
@@ -893,6 +894,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 终端交互已收敛到 prompt_toolkit alternate screen：多行/反斜杠换行、FileHistory/Ctrl-R、slash/path
   completion、bracketed paste、单槽 stash、canonical queue、双 Esc/Ctrl-C/Ctrl-D、scroll/follow/unseen、
   transcript/search、mouse、resize、title 和 `?` help 都只修改 typed UI/intent state。
+- FileHistory 只写入 owner-scoped `session_workspace/<session_id>/input_history`；不得在项目根创建
+  `.chat_history`。这与 canonical session 的用户隔离一致，也避免 `search_text` 把当前提示词误当项目源码命中。
 - renderer 已覆盖欢迎卡、用户头尾 10k 显示裁剪、Markdown/table/code/diff、thinking 折叠、全局 spinner
   metrics/stall、工具卡、审批 overlay、compact generation 边界和错误/中断；流式 assistant 可见时隐藏
   spinner，工具活跃时不误判 stalled。
@@ -1894,3 +1897,39 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 同 thread 的 `compact_generation=0` 与 69.1k→46.3k Context 回落并不冲突：终态工具折叠只替换下一轮
   的模型可见投影，完整 archive 与 exact refs 保留，Compact 权威代数不变；最后主轮仍有 40,527
   provider cache-read。该边界继续由结构化 fold/ledger 裁决，不要求 Context 数字单调递增。
+
+## 2026-08-27 缓存热尾、冷折叠与本地搜索空结果合同【状态：已部署；热期真 TUI 通过，冷边界长等待中】
+
+- 对照 终端交互 `microCompact` 的时间门：缓存仍热时保持历史不动，确定冷却后才清旧工具结果。当前适配不另造
+  provider cache 状态，而把同一已结束回合一次落成 `conversation_terminal_tool_fold.v2`：`hot_text`、
+  `text`（cold fold）和 `fold_after_epoch` 都只写一次。读取投影在默认 300 秒热期内保持固定 hot-tail，之后
+  一次切到固定 cold-fold；`0` 可显式恢复立即折叠，配置上限为 86,400 秒。该切换不推进
+  `compact_generation`，不读模型文案，也不复制 owner archive 的完整原始输出。
+- 300 秒是保守默认值，不宣称所有 provider 的缓存寿命相同。不同端点应以相同前缀的 provider
+  `cached_tokens/cache-read/cache-write` 账本校准；延迟和 Context 百分比只能辅助观察。`127.0.0.1:8901`
+  本地模型按真实 V2 约 6k 冷热投影 A/B：hot 第二轮 14,998 input / 14,336 cached，立即 cold 为
+  15,072 / 12,288。普通输入价 5、缓存价 0.1/1 时，hot 成本分别为 4,743.6/17,646，cold 为
+  15,148.8/26,208；热期分别节省约 68.7%/32.7%。该样本证明当前投影的即时经济性，不证明长期 TTL。
+  另一唯一前缀在 prime 完成后等待 55 秒再追问，9,025 input 中仍有 8,192 cached。进一步用 endpoint 专属
+  固定前缀分别走 `127.0.0.1:8901` 直连与 `127.0.0.1:4000` LiteLLM 入口，约 70 秒和约 310 秒的
+  12.6k prompt 均命中 12,288 cached tokens，证明当前本机 OMLX cache 至少保留五分钟。4000 实际仍转发
+  8901，因此这是两条 API 路径、一个底层缓存，不冒充两个独立 provider TTL，也不把 310 秒写成过期点。
+- `search_text` 仍是本地字面/正则搜索，不按自然语言猜联网意图。模型合同明确“本地、连续原文、非语义、非
+  联网”；每次结果追加 `local_text_search.v1` typed envelope，记录 source path、match mode、backend、
+  complete/status/hint code。完整 no-match 与扫描不全分开；模型可据 `LOCAL_LITERAL_NO_MATCH`、
+  `LOCAL_REGEX_NO_MATCH`、`LOCAL_SCAN_INCOMPLETE` 改路径、缩短标识符、使用显式正则或改用 web_search，
+  但宿主不自动拆词、不自动联网，也不把“没命中”升级成“源码不存在”。
+- MiniMax-M2.7 三个真实 native tool-choice 探针分别证明：未下载的 GitHub 调研选择 `web_search`；本地精确
+  `PromptBuilder` 选择 `search_text(query=PromptBuilder,literal=true)`；收到 typed local no-match 后改用
+  `web_search(代理运行时 github repository)`。这些只验证模型合同/修复方向，部署后的完整 TUI 仍需 fresh
+  session 验证真实工具输出、ConversationStore 热尾和 provider usage。
+- fresh TUI 第二轮曾在模型调用前报 `CONVERSATION_PERSISTENCE_UNAVAILABLE`。结构化诊断定位为 sticky
+  workspace 已存在但该 thread 尚无 `observations/*.jsonl`：按需创建的可选账本缺失被错算成 I/O 损坏。
+  参考 会话运行时 对可选文件 `NotFound` 返回默认空状态的边界，ConversationStore 现在只把“文件不存在”投影为空
+  observations；同样按需创建的 exact-target guidance queue 缺失也为空。已经存在但不可读或行损坏仍保留
+  load error 并阻止静默丢事实。该修复不放宽消息 transcript、task link、Compact checkpoint 或 guidance
+  receipt 等权威文件的失败语义。
+- `.7` fresh r59 首轮 V2 deadline 过后，结构化投影明确为 `cold_fold`；同一 MiniMax-M2.7 TUI 在不调用工具
+  的条件下仍准确复述首轮唯一搜索串和 backend/status/scan_complete/hint_code，证明 cold 投影未丢该轮
+  继续工作所需事实。该功能正确性不冒充 provider cache 命中；对应 MiniMax 普通后续轮账本实际为 0
+  cache-read，缓存经济性结论仍只使用上述本地受控 A/B。

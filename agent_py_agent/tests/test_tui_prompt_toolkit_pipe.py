@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import threading
+from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
 
@@ -16,7 +17,11 @@ from prompt_toolkit.output.vt100 import Vt100_Output
 from agent_py_agent.cli.chat_parts.tui_agent_navigation import TuiAgentNavigationState
 from agent_py_agent.cli.chat_parts.tui_params import MakeTuiAppParams
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
-from agent_py_agent.cli.chat_parts.tui_ui_setup import _prepare_tui_app_parts, make_tui_app
+from agent_py_agent.cli.chat_parts.tui_ui_setup import (
+    _prepare_tui_app_parts,
+    _tui_input_history_path,
+    make_tui_app,
+)
 
 
 def _app_params(
@@ -29,7 +34,11 @@ def _app_params(
     return MakeTuiAppParams(
         agent=SimpleNamespace(
             root=tmp_path,
-            config=SimpleNamespace(agent_name="my-agent", model_name="fixture"),
+            config=SimpleNamespace(
+                agent_name="my-agent",
+                model_name="fixture",
+                session_workspace=str(tmp_path / "owner-sessions"),
+            ),
         ),
         state_lock=threading.Lock(),
         is_running_ref=[False],
@@ -52,6 +61,16 @@ def _app_params(
         tui_runtime=runtime,
         agent_navigation=agent_navigation,
     )
+
+
+def test_tui_input_history_lives_in_owner_session_not_project(tmp_path) -> None:
+    runtime = TuiRuntime("history-session")
+    params = _app_params(tmp_path / "project", runtime)
+
+    history_path = _tui_input_history_path(params)
+
+    assert history_path == tmp_path / "project" / "owner-sessions" / "pipe-session" / "input_history"
+    assert history_path != Path(params.agent.root) / ".chat_history"
 
 
 def test_real_prompt_toolkit_pipe_handles_wrapped_arrows_and_bracketed_paste(tmp_path) -> None:

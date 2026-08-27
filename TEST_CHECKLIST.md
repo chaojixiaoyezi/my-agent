@@ -12,12 +12,13 @@
   完整 execution-context 只供宿主审计，prompt 只拿安全 write boundary/context bundle；attempt 恢复只见
   checkpoint/summary/task。父—子—孙相关 102 项 focused 与本地严格 gate 已通过，待 `.7` 新 child 真 TUI。
 
-- [x] main/child 每个已结束工具回合只生成一次不可变 `conversation_terminal_tool_fold.v1`；下一轮能看到
-  有界、脱敏工具索引/近期摘要/exact refs，完整输出仍只在 owner archive。旧折叠不得每轮重写，
+- [ ] main/child 每个已结束工具回合只生成一次不可变 `conversation_terminal_tool_fold.v2` metadata；默认
+  300 秒内读取固定 hot-tail，过期后读取固定 cold-fold，旧 V1 恒按 cold 兼容。完整输出仍只在 owner archive，
+  冷热阶段内部不得每轮重写，
   `/context` 必须把折叠回合/调用数与真正 `compact N` 分开；真正 Compact 能吸收折叠。overflow→Compact→
   继续回复的累计模型账必须按物理调用游标写增量，不能复用事件 id 或重复累计 cache-read。289 项 focused
-  与本地严格 gate 已过；`.7` 唯一 Gateway 的 MiniMax-M2.7 连续轮已准确续接两次 Read，provider 回执分别
-  有 42,107 与 12,987 cache-read，随后手动 Compact generation 1 把 45,639 降到 15,029。
+  旧 V1 的 289 项与 `.7` MiniMax-M2.7 连续轮已准确续接两次 Read；V2 本地 32 项和真实模型 A/B 已通过，
+  待部署 fresh TUI 验证一分钟追问、超时切 cold、main/child 同账与 provider usage 后再勾选。
 - [x] 手动 `/compact` 成功后，HTTP/operation receipt 必须把 canonical `task_status.compact_generation` 原样
   交给 TUI；不能解析中文回执猜次数。TUI 应立即显示 Compact 边界和新代数、撤下压缩前 Context 数字，
   并由下一次真实模型调用刷新 provider-visible 用量，不能为刷新界面额外请求模型。idle/resume 即使没有
@@ -87,6 +88,10 @@
   其它 workspace、孙代理和 `runner_result_json/output_json` 不得串入。
 - [ ] 没有 `rg` 的远端宽目录 `search_text` 能被 `/stop` 及时打断；默认 content 页命中后不扫描余下目录，
   无命中超出 20,000 文件/10 秒时明确标注 `scan_limited`，不得显示成完整“没有找到”。
+- [x] `search_text` 模型合同只表示已有本地文件的字面/正则搜索；每次返回 `local_text_search.v1` 的 exact
+  path/mode/backend/complete/status/hint。完整 no-match 与 scan incomplete 必须分开，GitHub/互联网任务改用
+  web_search，宿主不自动分词或猜路由。32 项组合 focused、MiniMax-M2.7 三例 tool-choice 与 fresh r59
+  no-match→普通追问均通过；typed `scan_complete` 已进入真实工具卡和下一轮历史。
 - [ ] 同一个 fresh TUI 默认鼠标模式下，滚轮/PgUp/Ctrl+Home 历史、中文左键拖选自动复制和右键重复复制
   同时可用；完整右键 down/up 与仅 release 两种序列都只复制一次，选区高亮不被清除。真实 tmux 版本必须
   用 `list-commands` 证明写穿参数存在；普通 tmux 使用 `set-buffer -w`，不得再 mock 不存在的

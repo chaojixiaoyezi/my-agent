@@ -28,9 +28,10 @@
 - 长 session 的 `compact 0` 与 60k→50k 回落同时成立：没有真正 Compact，普通回合末尾的 native 工具对却也
   没进入下一轮。这会让 main/child 忘记已完成操作，并让用户误以为次数或上下文显示坏了。
 - 对照 会话运行时 完整 ResponseItem history 和 终端交互 cache-aware microcompact，main/child 共用
-  `conversation_terminal_tool_fold.v1`：从本轮 canonical archive 一次生成脱敏、有界工具索引、近期摘要、refs
+  `conversation_terminal_tool_fold.v2`：从本轮 canonical archive 一次生成脱敏、有界 hot-tail、cold-fold、refs
   与防重放提示，和 assistant metadata 同账；公开正文不变，完整原输出不复制出 owner archive。
-- 下一轮只附加读取这份不可变折叠，旧前缀不重写；真正 Conversation Compact 才将其纳入摘要。
+- 下一轮按 typed deadline 读取固定 hot-tail 或 cold-fold，阶段内部旧前缀不重写；旧 V1 恒按 cold-fold；真正
+  Conversation Compact 才将其纳入摘要。
   `/context` 单列当前尾部折叠回合/调用数，`compact_generation` 与 live native IR source pairs 继续各自权威。
 - 扩展回归在未改 HEAD 快照也复现 overflow→Compact→继续回复的用量 event id 冲突。当前 ConversationStore
   在唯一追加锁内将 request/run 累计快照转为按物理调用游标的新增加量，并以原快照 digest 守幂等；成功续跑
@@ -184,6 +185,9 @@
 - `search_text` 没有 `rg` 时改为流式 Python 遍历；命中页满足后立即返回，不再先物化整棵文件树。
   后备扫描最多 20,000 个文件或 10 秒，触发后返回 typed `scan_limited` 与中文“未完整覆盖”提示，要求缩小
   `path/file_glob` 或安装 `rg`；`rg` 子进程注册同一 cancellation token 的终止回调。
+- 2026-08-27 本地搜索合同进一步收口：工具说明明确只搜已有本地文件，默认 query 是连续字面原文，不联网、
+  不分词、不做语义检索。`local_text_search.v1` envelope 统一返回 path/match mode/backend/complete/status/hint；
+  complete no-match 与 scan incomplete 分开，模型可缩短标识符、改正则/路径或显式换 web_search，宿主不猜。
 - child 详情的 canonical 终态优先于陈旧 `current_tool/current_step`，终态到达即封口遗留 thinking/tool/
   Compact 块、停止动画并按 `ended_at` 冻结耗时。TUI 鼠标模式继续同时保留滚轮历史和应用内拖选复制，
   并兼容只转发右键 release 的 SSH/tmux/终端组合。

@@ -2584,6 +2584,9 @@ class ConversationObservationStore(ConversationTaskStore):
         )
         return events
 
+    # LLM: An observation ledger is append-on-first-use; absence is an authoritative empty
+    # collection, while unreadable or malformed existing rows remain explicit load errors.
+    # 函数用途: 读取会话观察事件；尚未产生任何观察时正常返回空列表，不把未创建文件误报成会话损坏。
     def recent_observations_report(
         self,
         thread_id: str,
@@ -2592,8 +2595,11 @@ class ConversationObservationStore(ConversationTaskStore):
         include_handled: bool = True,
     ) -> tuple[list[ObservationEvent], list[dict[str, Any]]]:
         handled = self._read_observation_handled()
+        path = self._observation_path(thread_id)
+        if not path.exists():
+            return [], []
         report = read_jsonl_report(
-            self._observation_path(thread_id),
+            path,
             context="conversation.observations.read",
         )
         events, parse_errors = _observation_events(report.rows, handled)
@@ -3815,6 +3821,9 @@ class ConversationGuidanceStore(ConversationObservationStore):
         )
         return entries
 
+    # LLM: Guidance queues are append-on-first-use. A missing exact-target queue is empty;
+    # unreadable or malformed existing queues remain explicit delivery-state errors.
+    # 函数用途: 读取指定对象的补充消息；从未收到过补充时返回空列表，不把未创建队列误报成损坏。
     def recent_guidance_report(
         self,
         target_type: str,
@@ -3829,8 +3838,11 @@ class ConversationGuidanceStore(ConversationObservationStore):
                 {"code": "GUIDANCE_TARGET_TYPE_INVALID", "target_type": str(target_type or "")}
             ]
         delivered = self._read_guidance_delivered()
+        path = self._guidance_path(normalized_type, str(target_id))
+        if not path.exists():
+            return [], []
         report = read_jsonl_report(
-            self._guidance_path(normalized_type, str(target_id)),
+            path,
             context="conversation.guidance.read",
         )
         entries, parse_errors = _guidance_entries(report.rows, delivered)

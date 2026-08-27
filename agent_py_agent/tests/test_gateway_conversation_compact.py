@@ -161,6 +161,34 @@ def test_true_compact_counts_and_summarizes_terminal_tool_fold() -> None:
     assert "call-folded-write" in backend.prompts[0]
 
 
+def test_true_compact_reads_only_one_active_v2_terminal_tool_fold_projection() -> None:
+    row = MessageLogEntry(
+        message_id="msg-folded-v2",
+        thread_id="thread-fold-v2",
+        role="assistant",
+        content="本轮完成。",
+        metadata={
+            "terminal_tool_fold": {
+                "schema": "conversation_terminal_tool_fold.v2",
+                "tool_call_count": 1,
+                "successful_tool_call_count": 1,
+                "non_successful_tool_call_count": 0,
+                "text": "[conversation-terminal-tool-fold]\n- projection: cold_fold",
+                "hot_text": "[conversation-terminal-tool-fold]\n- projection: hot_tail",
+                "fold_after_epoch": 9_999_999_999,
+            }
+        },
+    )
+
+    structured = _summary_content(row)
+    terminal_fold = structured["terminal_tool_fold"]
+
+    assert terminal_fold["projection"] == "hot_tail"
+    assert "projection: hot_tail" in terminal_fold["text"]
+    assert "hot_text" not in terminal_fold
+    assert "fold_after_epoch" not in terminal_fold
+
+
 def test_context_inspection_uses_the_automatic_compact_policy_without_writing(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=20_000)
     request = _request("ou_context")

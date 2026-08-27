@@ -272,7 +272,7 @@ python3 -m pytest \
 - 同 thread 完成 8 子代理调研后，连续两个普通后续任务的 provider 账分别为
   46,047 cache-creation / 37,234 cache-read 与 21,878 / 46,972；
 - thread 权威 `compact_generation=0`、无 checkpoint。TUI 69.1k→46.3k→36.9k 的回落来自既有
-  `conversation_terminal_tool_fold.v1`，不能计成 Compact，也没有破坏 cache-read；
+  `conversation_terminal_tool_fold.v1`（当前 V2 读取器显式兼容为 cold-fold），不能计成 Compact，也没有破坏 cache-read；
 - Gateway `/status` 为 running，测试期间模型配置为 MiniMax-M2.7，Gateway Python 进程精确为 1。
 
 真 TUI 旧版对照样本（`ma-97468f3-longchain-r27`）：
@@ -319,7 +319,7 @@ closeout、旧 bundle 二次过滤、恢复清单过滤、显式同名业务文�
 ## 2026-08-25 跨回合工具终态折叠与缓存连续性
 
 普通回合的工具历史不能在下一轮无痕消失，也不能为保留历史而把大段原始结果每次重发。每个完成回合只生成
-一次确定性、有界、脱敏的 `conversation_terminal_tool_fold.v1`，下一轮读取同一份不可变 metadata；真正
+一次有界、脱敏的 `conversation_terminal_tool_fold.v2` metadata，内含固定 hot-tail/cold-fold/deadline；真正
 Compact 才摘要并推进 generation。主代理、子代理、配置、上下文计量与摘要消费的定向命令：
 
 ```bash
@@ -344,6 +344,47 @@ child overflow→Compact→继续回复：会话用量从同 scope 累计快照�
 event id 异值复用失败，provider cache-read/cache-write 不重复累计。原长真 TUI 两次真实 provider 回执分别
 出现 42,107 与 12,987 cache-read token，且后一轮能准确续接前轮两次 Read；手动 Compact generation 1
 把 45,639 降到 15,029，并吸收 98 条消息，不能只用本地估算冒充缓存证据。
+
+2026-08-27 V2 热尾与本地搜索空结果补充回归：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_runtime_context_pressure.py \
+  agent_py_agent/tests/test_gateway_conversation_compact.py \
+  agent_py_agent/tests/test_gateway_chat_conversation_context.py \
+  agent_py_agent/tests/test_subagent_runtime_compact.py \
+  agent_py_agent/tests/test_tools/test_filesystem_tools.py \
+  agent_py_agent/tests/test_tooling_filesystem.py \
+  agent_py_agent/tests/test_core_tools_precise_schema.py \
+  -k 'terminal_tool_fold or search_text' -q --tb=short
+```
+
+当前 32 项通过；另有 20 项最小定向批次通过。覆盖同一 V2 metadata 在 deadline 前选固定 hot-tail、之后选
+fixed cold-fold、V1 持久数据恒按 cold 读取、配置 0..86,400 秒边界，以及 `search_text` 的
+`local_text_search.v1` path/match-mode/backend/complete/status/hint。完整 no-match 不再和 Python 扫描上限混淆。
+
+本地模型 `127.0.0.1:8901/v1` 的精确 V2 A/B（相同长前缀、相同约 6k 投影）账本：hot 第二轮
+`14,998 input / 14,336 cached`，立即 cold 为 `15,072 / 12,288`。普通输入价 5、缓存价 0.1 时成本为
+4,743.6 对 15,148.8；缓存价 1 时为 17,646 对 26,208，hot 分别节省约 68.7%/32.7%。这证明即时
+经济性和缓存命中，不证明所有端点共享 TTL。`127.0.0.1:4000/v1` 当前要求鉴权且以测试凭证返回
+`No connected db`，没有把它计作有效模型样本。
+独立 55 秒间隔探针的 follow-up 为 `9,025 input / 8,192 cached / 833 uncached`。后续 endpoint 专属固定
+前缀探针中，`8901` 直连和带本机配置鉴权的 `4000` LiteLLM 入口在 immediate、约 70 秒、约 310 秒均从
+约 12,64x prompt tokens 命中 12,288 cached tokens。两条地址共用同一 OMLX 后端，因此只证明当前本机缓存
+至少五分钟，不证明不同 provider TTL 相同，也不把 310 秒当成失效点。
+
+MiniMax-M2.7 真实 native tool-choice 三例均返回 `stop_reason=tool_use`：未下载 GitHub 仓库选
+`web_search`；本地精确类名选 `search_text(query=PromptBuilder,literal=true)`；收到 typed local no-match 后
+改选 `web_search(代理运行时 github repository)`。该探针不替代部署后的 fresh TUI/ConversationStore 验收。
+
+`.7` 部署后的原 `ma-hotfold-search-v2-r58` 第二轮曾在模型调用前失败。精确 load report 证明唯一错误是尚未
+产生任何事件的 `observations/<thread>.jsonl` 不存在；这类账本本来就是 append-on-first-use。修复后缺失返回
+空集合，存在但损坏继续报错。Gateway/context/store 相关 140 项 focused 全通过，另有损坏账本的 8 项保护
+回归。原 r58 同 thread 重发和 fresh `ma-hotfold-search-v2-r59` 的工具轮→普通追问均由 MiniMax-M2.7 完成；
+r59 两轮 request 均为 done、同一 thread、项目树无 `.chat_history`，首轮 assistant metadata 为
+`conversation_terminal_tool_fold.v2` 且 hot/cold/deadline 齐全。
+超过该 deadline 后，结构化 selector 返回 `projection=cold_fold`；同一 r59 再次不调用工具，仍准确复述唯一
+搜索串与四个 typed 字段。随后唯一 Gateway 重启，TUI 自动重连并继续正常回复。
 
 手动 Compact 的 typed 回执与缓存稳定前缀补充回归：
 

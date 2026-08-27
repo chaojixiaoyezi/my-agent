@@ -14,6 +14,7 @@ from ..agent_core.tool_context.window import (
     TERMINAL_TOOL_FOLD_METADATA_KEY,
     conversation_message_with_terminal_tool_fold,
     conversation_terminal_tool_fold,
+    conversation_terminal_tool_fold_projection,
 )
 from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
@@ -845,14 +846,14 @@ def _nonnegative_int(value: object) -> int:
         return 0
 
 
-# LLM: Compact input keeps prose, operation facts, and deterministic terminal folds in separate
-# fields; it must never infer execution state from localized prose or silently drop folded calls.
+# LLM: Compact input keeps prose, operation facts, and exactly one active terminal-fold projection
+# in separate fields; it must never duplicate inactive hot/cold text or infer state from prose.
 # 函数用途: 为摘要模型保留正文、权威操作核验和跨回合工具折叠，供真正 Compact 一次性吸收。
 def _summary_content(row: MessageLogEntry) -> object:
     content = project_user_reply(row.content).content if row.role == "assistant" else row.content
     metadata = row.metadata if isinstance(row.metadata, dict) else {}
     verification = metadata.get("operation_verification")
-    terminal_tool_fold = conversation_terminal_tool_fold(
+    terminal_tool_fold = conversation_terminal_tool_fold_projection(
         metadata.get(TERMINAL_TOOL_FOLD_METADATA_KEY)
     )
     structured: dict[str, object] = {"content": content}

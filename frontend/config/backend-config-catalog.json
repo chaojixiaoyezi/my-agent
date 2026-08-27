@@ -1618,7 +1618,7 @@
           {
             "key": "conversation_terminal_tool_fold_enabled",
             "label": "conversation_terminal_tool_fold_enabled（conversation terminal tool fold enabled）",
-            "description": "普通回合结束后，把本轮工具轨迹一次性折叠进 assistant metadata，供后续轮继续使用。 这不是 Compact，不增加 compact 次数；折叠内容确定后不再改写，便于命中 provider 前缀缓存。",
+            "description": "普通回合结束后，把本轮工具轨迹一次性写进 assistant metadata，供后续轮继续使用。 这不是 Compact，不增加 compact 次数；metadata 只写一次，读取时按热期选择固定投影。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -1650,6 +1650,25 @@
             "order": 282,
             "min": 0,
             "max": 2000000
+          },
+          {
+            "key": "conversation_terminal_tool_hot_tail_seconds",
+            "label": "conversation_terminal_tool_hot_tail_seconds（conversation terminal tool hot tail seconds）",
+            "description": "缓存仍可能有效时保留更完整的有界工具尾巴；过期后才切换成短折叠。0 表示立即短折叠；不同模型/网关应按 provider usage 账本校准。",
+            "type": "number",
+            "defaultValue": 300,
+            "currentValue": 300,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "值越大，短间隔追问越容易复用完整前缀，但缓存已经失效后也会重发更多有界工具细节。",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 283,
+            "min": 0,
+            "max": 86400
           }
         ]
       },

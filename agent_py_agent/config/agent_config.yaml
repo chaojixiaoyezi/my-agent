@@ -468,9 +468,10 @@ timezone: ""
 week_start: "monday"
 
 # 会话工作区：
-# - 会话持久化目录，存储 session.json 和会话级别的上下文文件
+# - 会话持久化目录，存储 session.json、TUI 输入历史和会话级别的上下文文件
 # - 每个会话对应一个目录：<session_workspace>/{session_id}/
 # - session.json 包含会话元数据：session_id、user_id、created_at、updated_at、last_active_channel、metadata
+# - TUI 输入历史固定写在对应会话目录，不写进项目工作区，避免污染源码搜索和项目产物
 session_workspace: ""
 
 # 长期主代理线程工作区：
@@ -882,11 +883,14 @@ chat_history_assistant_preview_chars: 500
 # 总量不足时只整条淘汰最旧消息；普通用户/助手正文不做滑动头尾截断，达到阈值后统一 Compact。
 conversation_history_max_turns: 20
 conversation_history_max_chars: 48000
-# 普通回合结束后，把本轮工具轨迹一次性折叠进 assistant metadata，供后续轮继续使用。
-# 这不是 Compact，不增加 compact 次数；折叠内容确定后不再改写，便于命中 provider 前缀缓存。
+# 普通回合结束后，把本轮工具轨迹一次性写进 assistant metadata，供后续轮继续使用。
+# 这不是 Compact，不增加 compact 次数；metadata 只写一次，读取时按下面的热期选择固定投影。
 conversation_terminal_tool_fold_enabled: true
 # 折叠只保留有界工具索引、最近结果和精确引用；完整输出继续留在 owner 工具归档中按需读取。
 conversation_terminal_tool_fold_max_chars: 6000
+# 缓存仍可能有效时保留更完整的有界工具尾巴；过期后才切换成短折叠，避免一分钟内追问就主动破坏热前缀。
+# 0 表示立即短折叠。不同模型/网关缓存时长可能不同，应按 provider cache-read 账本校准，不按延迟猜测。
+conversation_terminal_tool_hot_tail_seconds: 300
 chat_transcript_max_chars: 500000
 chat_collapse_preview_lines: 12
 chat_collapse_preview_chars: 900

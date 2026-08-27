@@ -57,6 +57,20 @@ def test_observation_and_wake_signal_are_durable_and_idempotent(tmp_path) -> Non
     assert store.recent_observations(thread.thread_id)[0].handled_at == 30.0
 
 
+def test_missing_observation_ledger_is_an_empty_collection(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = _thread(store)
+
+    observations, load_errors = store.recent_observations_report(
+        thread.thread_id,
+        limit=0,
+    )
+
+    assert observations == []
+    assert load_errors == []
+    assert not store._observation_path(thread.thread_id).exists()
+
+
 def test_combined_observation_wake_publishes_wake_first_and_links_both_sides(
     tmp_path, monkeypatch
 ) -> None:

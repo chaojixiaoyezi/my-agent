@@ -536,6 +536,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     conversation_history_max_chars: int = 48_000
     conversation_terminal_tool_fold_enabled: bool = True
     conversation_terminal_tool_fold_max_chars: int = 6_000
+    # 已结束工具回合在这段缓存热期内保留更完整的有界投影，过期后才切换为短折叠。
+    # 0 表示立即使用短折叠；不同 provider 的缓存寿命应通过真实 usage 账本校准。
+    conversation_terminal_tool_hot_tail_seconds: int = 300
     chat_transcript_max_chars: int = 500_000
     chat_collapse_preview_lines: int = 12
     chat_collapse_preview_chars: int = 900

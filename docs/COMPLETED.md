@@ -1,5 +1,15 @@
 # COMPLETED
 
+- 2026-08-27 已部署把立即终态折叠升级为 `conversation_terminal_tool_fold.v2`：同一 main/child 回合
+  一次固定写入 hot-tail、cold-fold 和 typed deadline，默认 300 秒内保留较完整热尾，过期后才切短折叠；
+  V1 持久行恒按 cold 兼容，Compact 代数和 owner archive 不变。`search_text` 同时明确为本地连续字面/正则
+  搜索，并用 `local_text_search.v1` 区分完整 no-match 与扫描不全。32 项组合 focused、20 项最小定向与
+  MiniMax-M2.7 三例 tool-choice 通过；本地模型精确 A/B 证明热尾在缓存价 0.1/1 时分别比立即 cold 省约
+  68.7%/32.7%。`.7` fresh `ma-hotfold-search-v2-r59` 已用 MiniMax-M2.7 完成真实本地 no-match 和同 thread
+  普通追问，四个 typed 字段均可准确续接；项目树不再产生 `.chat_history`。deadline 后 selector 已实际
+  切为 cold-fold，同一 TUI 仍准确复述唯一串与全部字段。本机两条 API 路径在约 310 秒仍命中 12,288-token
+  固定前缀块；本轮尚未提交或推送，更长时效和不同 provider 校准仍留在 ROADMAP。
+
 - 2026-08-27 `ae3fd1e` 修复流式 thinking 在 final 后复制：Anthropic collector 在原
   `content_block_stop` 调用同一观察器的 typed `complete`，同一物理调用不再由 response fallback 重放；
   TUI 对旧 Gateway 的迟到完整终态只消费一次。完整 focused 与本地严格 gate 通过，已推送并部署 `.7`

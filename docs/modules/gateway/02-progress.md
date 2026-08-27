@@ -74,8 +74,8 @@
 ## 2026-08-25 assistant 终态折叠、缓存稳定前缀与 Compact 回执刷新（已部署真机验证）
 
 - Gateway 完成回合仍只向用户保存原 assistant 正文；同一条消息 metadata 新增一次从 canonical archive 构造的
-  `conversation_terminal_tool_fold.v1`。下一轮历史按原顺序附加这份不可变、有界、脱敏投影，不复制完整
-  ToolCall/ToolResult，也不重新总结旧轮，因此历史前缀稳定且 provider cache 可继续复用。
+  `conversation_terminal_tool_fold.v2`。V2 一次保存固定 hot-tail/cold-fold/deadline；默认 300 秒内读取热尾，
+  过期后读取短折叠，不复制完整 ToolCall/ToolResult，也不重新总结旧轮。旧 V1 恒按 cold-fold 兼容。
 - `/context` 单列当前未压缩尾部的 fold 回合/调用数，普通折叠不推进 `compact_generation`；真正 Compact 才
   吸收它。消息 repair 使用完全相同的 metadata，不能因正常落账失败而丢掉续接事实。
 - HEAD 基线可复现 overflow→Compact→成功继续时 model-usage event id 异值冲突。`7b14e34` finalizer 用物理调用累计

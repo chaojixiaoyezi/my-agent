@@ -231,6 +231,20 @@ def test_two_real_agent_runs_do_not_cross_prompt_task_or_workspace(tmp_path, mon
         assert other not in workspace
 
 
+def test_missing_guidance_queue_is_an_empty_collection(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+
+    entries, load_errors = store.pending_guidance_report(
+        "request",
+        "request-without-guidance",
+        limit=0,
+    )
+
+    assert entries == []
+    assert load_errors == []
+    assert not store._guidance_path("request", "request-without-guidance").exists()
+
+
 def test_conversation_guidance_can_be_delivered_once(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(

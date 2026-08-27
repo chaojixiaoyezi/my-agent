@@ -57,16 +57,18 @@ from .models import (
 )
 
 _SEARCH_TEXT_USE_CASES = [
-    "想找某个函数、类、配置项出现在哪些文件里",
-    "先全局搜索，再决定读哪几个文件",
+    "想在已经存在的本地工作区里找某个函数、类、配置项出现在哪些文件里",
+    "先按精确标识符或正则搜索本地代码，再决定读哪几个文件",
     "大文件或长记录要逐项汇总时，先定位章节/检查点/锚点，再用 read_file 读取命中附近源片段",
 ]
 _SEARCH_TEXT_AVOID_WHEN = [
     "已经知道具体文件并且要看上下文时，直接 read_file 更合适",
     "需要证明完整覆盖 source 时，search_text 只能定位，不能替代 read_file/read_artifact 证据",
+    "需要查互联网、GitHub 上尚未下载的仓库或语义答案时，应使用 web_search/联网工具；本工具只搜本地文件",
+    "query 是一句自然语言问题而不是文件中连续出现的原文时，先改成标识符、短字面片段或显式正则",
 ]
 _SEARCH_TEXT_PARAMETERS = {
-    "query": "要搜索的文本",
+    "query": "本地文件中要搜索的连续文本或正则",
     "path": "从哪个目录开始搜，默认是工作区根目录",
     "limit": "本次最多返回多少条匹配，默认使用工具配置上限",
     "offset": "跳过前多少条匹配，用于分页，默认 0",
@@ -78,8 +80,8 @@ _SEARCH_TEXT_PARAMETERS = {
     "include_ignored": "是否搜索 .git/node_modules 等常见噪声目录，默认 false",
 }
 _SEARCH_TEXT_PARAMETER_DETAILS = {
-    "query": "必填，默认按文本包含关系匹配；需要正则时传 literal=false。",
-    "path": "可选，把搜索范围缩小到某个子目录时更高效。",
+    "query": "必填；literal=true 时整段 query 必须作为连续原文出现，不做分词、语义检索或联网搜索；需要正则时传 literal=false。",
+    "path": "可选，只能是当前工作区内已经存在的文件或目录；源码尚未下载时先获取正确 checkout。",
     "limit": "分页大小；命中很多时先看小批量，再用 next_offset 继续。",
     "offset": "上一页返回 next_offset 后，下一次传入这里继续看。",
     "file_glob": "按文件名或工作区相对路径过滤，例如 *.py、docs/*.md。",
@@ -145,6 +147,9 @@ class AppendItemHitsRequest:
     hit_budget: int
 
 
+# LLM: This model contract must keep local lexical search distinct from internet/semantic research;
+# tool routing may use hints, but runtime matching stays controlled only by typed parameters.
+# 函数用途: 声明本地文本搜索的精确参数、适用范围和空结果修复提示，避免模型把它当搜索引擎。
 def build_search_text_model_spec() -> ToolModelSpec:
     properties: dict[str, dict[str, Any]] = {
         name: {"type": "string", "description": _SEARCH_TEXT_PARAMETER_DETAILS[name]}
@@ -167,7 +172,10 @@ def build_search_text_model_spec() -> ToolModelSpec:
     )
     return ToolModelSpec(
         name="search_text",
-        description="在工作区里搜索纯文本，适合找函数名、配置项、章节标记、日志锚点和大文件里的候选范围。",
+        description=(
+            "只在当前本地工作区文件中做字面或正则匹配，适合找函数名、配置项、章节标记和日志锚点；"
+            "不联网、不分词、不做语义搜索，默认 query 必须作为连续原文出现。"
+        ),
         input_schema={
             "type": "object",
             "properties": properties,
@@ -178,7 +186,7 @@ def build_search_text_model_spec() -> ToolModelSpec:
             category="filesystem",
             use_cases=tuple(_SEARCH_TEXT_USE_CASES),
             avoid_when=tuple(_SEARCH_TEXT_AVOID_WHEN),
-            keywords=("搜索", "查找", "关键字", "grep", "rg", "全文检索", "文本匹配"),
+            keywords=("本地搜索", "代码搜索", "文件搜索", "关键字", "grep", "rg", "文本匹配"),
             examples=tuple(_SEARCH_TEXT_EXAMPLES),
         ),
     )
@@ -245,18 +253,21 @@ class SearchTextTool(FileSystemTool):
             if counts is None:
                 scan_state = SearchScanState(started_at=time.monotonic())
                 counts = self._collect_counts(target, request, matcher, scan_state)
+            result_envelope = _search_result_envelope(
+                self,
+                target,
+                request,
+                total_items=len(counts),
+                scan_state=scan_state,
+            )
             result = ToolHandlerOutcome(
                 "search_text",
                 True,
-                _with_scan_notice(render_match_counts(counts, request), scan_state),
-                result_envelope={
-                    "page_window": self._page_window(
-                        target,
-                        request,
-                        total_items=len(counts),
-                        scan_state=scan_state,
-                    )
-                },
+                _with_search_result_guidance(
+                    render_match_counts(counts, request),
+                    result_envelope,
+                ),
+                result_envelope=result_envelope,
             )
             return _search_result_with_source_projection(result, target, counts)
         scan_state = None
@@ -266,18 +277,21 @@ class SearchTextTool(FileSystemTool):
             hits = self._collect_hits(target, request, matcher, scan_state)
         if request.output_mode == "files_with_matches":
             total_items = len(dict.fromkeys(hit.rel for hit in hits))
+            result_envelope = _search_result_envelope(
+                self,
+                target,
+                request,
+                total_items=total_items,
+                scan_state=scan_state,
+            )
             result = ToolHandlerOutcome(
                 "search_text",
                 True,
-                _with_scan_notice(render_files_with_matches(hits, request), scan_state),
-                result_envelope={
-                    "page_window": self._page_window(
-                        target,
-                        request,
-                        total_items=total_items,
-                        scan_state=scan_state,
-                    )
-                },
+                _with_search_result_guidance(
+                    render_files_with_matches(hits, request),
+                    result_envelope,
+                ),
+                result_envelope=result_envelope,
             )
             return _search_result_with_source_projection(
                 result,
@@ -285,36 +299,42 @@ class SearchTextTool(FileSystemTool):
                 (hit.rel for hit in hits),
             )
         if request.output_mode == "line_numbers":
+            result_envelope = _search_result_envelope(
+                self,
+                target,
+                request,
+                total_items=len(hits),
+                scan_state=scan_state,
+            )
             result = ToolHandlerOutcome(
                 "search_text",
                 True,
-                _with_scan_notice(render_line_numbers(hits, request), scan_state),
-                result_envelope={
-                    "page_window": self._page_window(
-                        target,
-                        request,
-                        total_items=len(hits),
-                        scan_state=scan_state,
-                    )
-                },
+                _with_search_result_guidance(
+                    render_line_numbers(hits, request),
+                    result_envelope,
+                ),
+                result_envelope=result_envelope,
             )
             return _search_result_with_source_projection(
                 result,
                 target,
                 (hit.rel for hit in hits),
             )
+        result_envelope = _search_result_envelope(
+            self,
+            target,
+            request,
+            total_items=len(hits),
+            scan_state=scan_state,
+        )
         result = ToolHandlerOutcome(
             "search_text",
             True,
-            _with_scan_notice(self._render_content_hits(hits, request), scan_state),
-            result_envelope={
-                "page_window": self._page_window(
-                    target,
-                    request,
-                    total_items=len(hits),
-                    scan_state=scan_state,
-                )
-            },
+            _with_search_result_guidance(
+                self._render_content_hits(hits, request),
+                result_envelope,
+            ),
+            result_envelope=result_envelope,
         )
         return _search_result_with_source_projection(
             result,
@@ -499,6 +519,59 @@ class SearchTextTool(FileSystemTool):
         return payload
 
 
+# LLM: No-match and incomplete-search decisions come only from typed execution facts. The
+# envelope does not infer repository absence or auto-route based on natural-language queries.
+# 函数用途: 统一记录本地搜索范围、匹配方式、后端和覆盖状态，让模型知道空结果究竟代表什么。
+def _search_result_envelope(
+    tool: SearchTextTool,
+    target: Path,
+    request: SearchRequest,
+    *,
+    total_items: int,
+    scan_state: SearchScanState | None,
+) -> dict[str, object]:
+    page_window = tool._page_window(
+        target,
+        request,
+        total_items=total_items,
+        scan_state=scan_state,
+    )
+    scan_limited = bool(scan_state and scan_state.limited)
+    if scan_limited:
+        status = "incomplete"
+        hint_code = "LOCAL_SCAN_INCOMPLETE"
+        suggested_actions = ["narrow_path", "set_file_glob", "install_rg"]
+    elif total_items > 0:
+        status = "matches"
+        hint_code = ""
+        suggested_actions = []
+    else:
+        status = "no_matches"
+        hint_code = "LOCAL_LITERAL_NO_MATCH" if request.literal else "LOCAL_REGEX_NO_MATCH"
+        suggested_actions = ["verify_local_path", "shorten_query"]
+        if request.literal:
+            suggested_actions.append("use_explicit_regex")
+        suggested_actions.append("use_web_search_for_internet_scope")
+    return {
+        "page_window": page_window,
+        "search_result": {
+            "schema": "local_text_search.v1",
+            "scope": "local_workspace",
+            "source_path": tool.display_path(target),
+            "match_mode": "literal" if request.literal else "regex",
+            "ignore_case": request.ignore_case,
+            "backend": "python" if scan_state is not None else "rg",
+            "status": status,
+            "hint_code": hint_code,
+            "returned": page_window["returned"],
+            "scan_complete": bool(page_window["complete"]),
+            "scanned_files": scan_state.candidates if scan_state is not None else 0,
+            "scanned_files_known": scan_state is not None,
+            "suggested_actions": suggested_actions,
+        },
+    }
+
+
 # LLM: The fallback limit is an objective liveness fence, not a no-match claim;
 # callers must expose an incomplete result and ask the model to narrow scope.
 # 函数用途: 在 Python 后备搜索扫描文件过多或耗时过久前停止继续遍历。
@@ -515,17 +588,46 @@ def _admit_fallback_candidate(state: SearchScanState) -> bool:
     return True
 
 
-# LLM: A bounded fallback result must never masquerade as complete coverage;
-# this notice is derived solely from typed scan state.
-# 函数用途: 在后备搜索提前停止时追加可操作提示，要求缩小目录或使用 rg。
-def _with_scan_notice(text: str, state: SearchScanState | None) -> str:
-    if state is None or not state.limited:
+# LLM: Model-visible repair guidance is a display of the typed search_result envelope. It may
+# distinguish local no-match from incomplete coverage, but it must not infer source absence or
+# silently turn a lexical query into semantic/internet search.
+# 函数用途: 空结果时说明实际搜了哪里、怎么匹配和下一步怎么改；有命中时保持原输出简洁。
+def _with_search_result_guidance(
+    text: str,
+    result_envelope: dict[str, object],
+) -> str:
+    facts = result_envelope.get("search_result")
+    facts = facts if isinstance(facts, dict) else {}
+    status = str(facts.get("status") or "")
+    if status == "matches":
         return text
-    return (
-        f"{text}\n\n"
-        f"搜索未完整覆盖：Python 后备扫描已在 {state.candidates} 个文件处停止"
-        f"（{state.limit_reason}）。请缩小 path/file_glob，或安装 rg 后重试。"
-    )
+    lines = [
+        text,
+        "",
+        "[local-search-result]",
+        f"- status: {status or 'unknown'}",
+        f"- hint_code: {facts.get('hint_code', '')}",
+        f"- searched_path: {facts.get('source_path', '')}",
+        f"- match_mode: {facts.get('match_mode', '')}",
+        f"- backend: {facts.get('backend', '')}",
+        f"- scan_complete: {str(bool(facts.get('scan_complete', False))).lower()}",
+        "- scope: 仅限本地工作区文件；不联网，也不按语义回答问题",
+    ]
+    if status == "incomplete":
+        page_window = result_envelope.get("page_window")
+        page_window = page_window if isinstance(page_window, dict) else {}
+        lines.extend(
+            [
+                f"- scanned_files: {facts.get('scanned_files', 0)}",
+                f"- scan_limit_reason: {page_window.get('scan_limit_reason', '')}",
+                "- next: 搜索未完整覆盖；请缩小 path/file_glob 或安装 rg 后重试，不能据此认定本地完全无匹配",
+            ]
+        )
+    else:
+        lines.append(
+            "- next: 先确认本地 checkout/path，再用更短的精确标识符或显式正则重试；联网范围请使用 web_search"
+        )
+    return "\n".join(lines)
 
 
 def _search_result_with_source_projection(

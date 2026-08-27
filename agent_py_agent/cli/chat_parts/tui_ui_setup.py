@@ -11,6 +11,7 @@ from typing import Any
 
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 
+from ...agent.common.opaque_id import validate_opaque_id
 from .rendering import set_tui_output_sink
 from .tui_block_renderer import TuiRenderContext
 from .tui_input import (
@@ -438,6 +439,23 @@ def _configure_escape_timeouts(application: Any) -> None:
     application.timeoutlen = ESCAPE_SEQUENCE_TIMEOUT_SECONDS
 
 
+# LLM: FileHistory belongs to the canonical owner-scoped session workspace, never the
+# project workspace; keep the validated session ID as the only per-session path segment.
+# 函数用途: 返回当前 TUI 会话的输入历史文件，避免用户刚输入的提示词污染项目搜索和产物目录。
+def _tui_input_history_path(params: MakeTuiAppParams) -> Path:
+    session_id = validate_opaque_id(
+        str(params.current_session_id or "default").strip() or "default",
+        kind="session_id",
+    )
+    session_root = str(
+        getattr(getattr(params.agent, "config", None), "session_workspace", "")
+        or ""
+    ).strip()
+    if not session_root:
+        raise RuntimeError("TUI 输入历史缺少 owner-scoped session_workspace")
+    return Path(session_root).expanduser() / session_id / "input_history"
+
+
 # LLM: 组件束只保存同一 Application 的 typed runtime、state、controls 和 filters；不得被用作第二状态源或跨 app 复用。
 # 类用途: 汇总界面组装和按键注册共同使用的控件与模式条件。
 @dataclass(frozen=True)
@@ -473,7 +491,7 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     title_controller = TuiTerminalTitleController(
         str(getattr(params.agent.config, "agent_name", "my-agent") or "my-agent")
     )
-    history_file = Path(params.agent.root) / ".chat_history"
+    history_file = _tui_input_history_path(params)
     history_file.parent.mkdir(parents=True, exist_ok=True)
     input_area = _make_input_area(str(history_file), runtime, Path(params.agent.root))
     _wire_help_dismiss_on_input(input_area, interaction, params.agent_navigation)

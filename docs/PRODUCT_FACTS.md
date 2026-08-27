@@ -39,12 +39,17 @@
 
 ## 2026-08-25 跨回合工具终态折叠与缓存稳定前缀
 
-- **状态：稳定（`7b14e34` + `ff94d61` 已部署 `.7` 单 Gateway 并完成原长 TUI 验证）**。普通 main/child 工具回合结束时，从 canonical
-  archive 一次生成有界、脱敏、确定性的 `conversation_terminal_tool_fold.v1`，与 assistant 正文同一条
-  ConversationStore 消息落账。用户可见正文不拼接折叠；下一模型轮才从 metadata 读取。
+- **状态：V1 稳定部署；V2 已部署并通过 fresh 真 TUI 功能验收**。普通 main/child 工具回合结束时，从 canonical
+  archive 一次生成有界、脱敏的 `conversation_terminal_tool_fold.v2`，与 assistant 正文同一条
+  ConversationStore 消息落账。V2 同时固定保存 hot-tail、cold-fold 和结构化切换时间；默认 300 秒热期内
+  读取较完整热尾，过期后读取短折叠。旧 V1 显式兼容且恒按 cold-fold 读取。用户可见正文不拼接该投影。
+- 按需创建的 `observations/<thread>.jsonl` 或 exact-target guidance queue 尚不存在表示“当前没有对应事件”，
+  不是会话损坏；存在但不可读或行损坏仍作为结构化 load error fail closed。该边界避免 sticky workspace 的
+  普通第二轮在模型调用前误报 `CONVERSATION_PERSISTENCE_UNAVAILABLE`，不放宽消息、task link、guidance
+  receipt 或 Compact checkpoint 的读取失败。
 - 该折叠是 会话运行时 完整 ResponseItem 历史与 终端交互 cache-aware microcompact 之间的适配：完整工具输出继续
   由 owner archive 掌权，prompt 只带工具顺序、状态、有限参数结构、近期摘要和 refs。已结束旧回合不重新
-  总结，历史保持 append-only 稳定前缀，供兼容 provider 自动复用 cache-read。
+  总结；热期和冷期内部各自保持固定前缀，唯一一次切换只由 typed deadline 决定，供兼容 provider 复用 cache-read。
 - 普通折叠不推进 Compact generation，也不重复累计运行中 native IR 已真压掉的 tool pairs。`/context` 单列
   当前未压缩尾部的折叠回合/工具调用数；真正 Conversation Compact 才把折叠吸收进 summary 并推进 generation。
 - 同一 request/run 经 provider overflow 做 Compact 后继续时，内存 `ModelCallLedger` 的累计快照由会话存储按
@@ -61,6 +66,10 @@
   丢掉了水合值。`ff94d61` 让 idle/resume frame 更新 status，并在 controller/reducer 两层保持代数单调；
   服务端 ConversationThread 仍是唯一权威，客户端只保留该 session 已观察到的最大 generation。原 tmux 已
   验证 generation 1 恢复、generation 2 即时刷新，以及新摘要首轮后下一普通轮命中 17,019 cache-read。
+- V2 本地模型精确 A/B 的第二轮账本为 hot `14,998 input / 14,336 cached`、立即 cold
+  `15,072 / 12,288`；普通输入价 5、缓存价 0.1/1 时，hot 分别比 cold 省约 68.7%/32.7%。该结果只证明
+  当前投影的即时经济性。独立 55 秒追问仍有 `8,192/9,025` cached；不同 provider 的实际 TTL 仍需分别
+  以 usage 账本测量，不能写成统一常数或声称 300 秒以上已经验证。
 
 ## 2026-08-25 长 session 当前回合 Todo 与滚动锚点
 

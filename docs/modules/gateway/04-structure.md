@@ -17,15 +17,17 @@
 ## 跨回合工具终态折叠
 
 - `request_execution._persist_gateway_assistant_result` 从本轮 `archive_tool_calls` 构造唯一
-  `conversation_terminal_tool_fold.v1`，与公开 assistant 正文同一次写入 ConversationStore metadata；repair
+  `conversation_terminal_tool_fold.v2`，与公开 assistant 正文同一次写入 ConversationStore metadata；repair
   队列携带同一份值。用户 transcript、channel delivery 和最终正文不拼接该投影。
-- `_gateway_conversation_context` 读取 raw tail 时只对 provider-facing assistant history 附加已落盘 fold；
-  旧 metadata 不重新预算或重写，所以同一历史前缀跨轮保持字节稳定。完整输出继续由 owner archive 掌权，
+- V2 metadata 同时固定保存有界 hot-tail、cold-fold 与 typed deadline。`_gateway_conversation_context` 读取 raw
+  tail 时，默认 300 秒热期内附加 hot-tail，过期后附加 cold-fold；它不重写 metadata、不调用模型，也不推进
+  Compact。旧 V1 只按 cold-fold 读取。完整输出继续由 owner archive 掌权，
   operation/artifact refs 继续是副作用与产物事实源。
 - `conversation/compact.py` 计量并摘要正文加 fold，但普通 fold 不推进 generation。当前尾部 fold 次数与
   `compact_source_tool_pairs` 分栏，后者仍只表示运行中 native IR 真压掉的完整工具对。
-- 普通续轮 history 只在末尾追加新 user/assistant/fold，旧前缀不得按新预算重写，以便兼容 provider 自动
-  命中 cache-read。真正 Compact 才原子替换旧 history 为 checkpoint summary；替换后的新前缀继续保持稳定。
+- 普通续轮 history 只在末尾追加新 user/assistant/fold；冷热期内部的旧前缀不得按新预算重写。唯一一次
+  hot→cold 变化只允许发生在配置的 cache-cold deadline，真正 Compact 才原子替换旧 history 为 checkpoint
+  summary；替换后的新前缀继续保持稳定。
 - 手动 `/compact` 的 Gateway 控制结果把 canonical generation 放在 typed `task_status`，operation receipt
   原样保存，CLI adapter 只恢复结构化字段。TUI 收到成功代数后发布 `compact_boundary`、撤下失效的压缩前
   Context snapshot，并显示“下次模型调用刷新”；下一次真实模型 preflight 才写入新用量，不为 UI 单独发模型请求。

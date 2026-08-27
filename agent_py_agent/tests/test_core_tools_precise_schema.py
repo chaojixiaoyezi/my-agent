@@ -9,13 +9,18 @@ from pathlib import Path
 def test_search_text_numeric_and_bool_params_precise():
     from agent_py_agent.agent.tooling._filesystem_search import build_search_text_model_spec
 
-    p = build_search_text_model_spec().input_schema["properties"]
+    spec = build_search_text_model_spec()
+    p = spec.input_schema["properties"]
     assert p["limit"]["type"] == "integer"
     assert p["offset"]["type"] == "integer"
     assert p["context"]["type"] == "integer"
     assert p["literal"]["type"] == "boolean"
     assert p["ignore_case"]["type"] == "boolean"
     assert p["include_ignored"]["type"] == "boolean"
+    assert "只在当前本地工作区" in spec.description
+    assert "不联网" in spec.description
+    assert "不做语义搜索" in spec.description
+    assert "连续原文" in p["query"]["description"]
 
 
 def test_run_command_timeout_and_background_precise():

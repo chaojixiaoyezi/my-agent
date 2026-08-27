@@ -85,6 +85,11 @@ def test_terminal_tool_fold_defaults_match_shipped_config() -> None:
         == shipped.conversation_terminal_tool_fold_max_chars
         == 6_000
     )
+    assert (
+        defaults.conversation_terminal_tool_hot_tail_seconds
+        == shipped.conversation_terminal_tool_hot_tail_seconds
+        == 300
+    )
 
 
 def test_terminal_tool_fold_config_is_normalized_and_bounded() -> None:
@@ -92,21 +97,31 @@ def test_terminal_tool_fold_config_is_normalized_and_bounded() -> None:
         {
             "conversation_terminal_tool_fold_enabled": "false",
             "conversation_terminal_tool_fold_max_chars": "2400",
+            "conversation_terminal_tool_hot_tail_seconds": "120",
         }
     )
 
     assert warnings == []
     assert normalized["conversation_terminal_tool_fold_enabled"] is False
     assert normalized["conversation_terminal_tool_fold_max_chars"] == 2_400
+    assert normalized["conversation_terminal_tool_hot_tail_seconds"] == 120
 
     fallback, warnings = normalize_agent_config(
-        {"conversation_terminal_tool_fold_max_chars": "999999"}
+        {
+            "conversation_terminal_tool_fold_max_chars": "999999",
+            "conversation_terminal_tool_hot_tail_seconds": "999999",
+        }
     )
 
     assert any("conversation_terminal_tool_fold_max_chars" in item for item in warnings)
     assert (
         fallback["conversation_terminal_tool_fold_max_chars"]
         == AgentConfig().conversation_terminal_tool_fold_max_chars
+    )
+    assert any("conversation_terminal_tool_hot_tail_seconds" in item for item in warnings)
+    assert (
+        fallback["conversation_terminal_tool_hot_tail_seconds"]
+        == AgentConfig().conversation_terminal_tool_hot_tail_seconds
     )
 
 

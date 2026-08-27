@@ -72,17 +72,27 @@ thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 
-状态：`7b14e34` + `ff94d61` 已推送、部署并完成 `.7` 单 Gateway 原长 TUI；该切片已完成
+状态：V1/V2 均已部署真机；V2 本地搜索、热期与 cold 边界续接均通过，待不同 provider 长期校准
 
 解决问题：同一长 TUI 中，当前模型可见上下文从 60 多 K 回落到 50 多 K，但 canonical thread 仍为
 `compact 0`。权威账本证明没有漏记 Compact；真实缺口是普通回合结束后 native ToolCall/ToolResult 只保留
 最终 assistant 正文，工具历史无痕退出下一轮。用户认可合理终态折叠，但要求保留续做事实并合理利用缓存。
 
-实现边界：每个 main/child 回合从 canonical archive 一次生成不可变、有界、脱敏的 typed fold，与 assistant
-消息同账落盘；下一轮按原顺序追加投影，近期细节与 exact refs 保留，原始长输出仍按需读取。折叠不推进
+实现边界：每个 main/child 回合从 canonical archive 一次生成不可变、有界、脱敏的 typed metadata，与 assistant
+消息同账落盘；V2 同时固定保存热尾、冷折叠与切换时间，默认 300 秒内读取热尾，过期后读取冷折叠，旧 V1
+恒按冷折叠兼容。近期细节与 exact refs 保留，原始长输出仍按需读取。折叠不推进
 Compact；真正 Compact 才汇总这些 fold 并推进 generation/transcript source-message；运行中 native IR 已压掉的
 完整工具对继续单独计数，不能把同一次调用重复算两遍。历史旧前缀不按每轮预算重新改写，以便
-MiniMax/Anthropic 兼容链继续命中 cache-read。需补主/子共享回归、Compact 计量与真 TUI 连续轮证据。
+MiniMax/Anthropic 兼容链继续命中 cache-read。
+
+本地 V2 精确投影 A/B 已由 `127.0.0.1:8901` 的 provider usage 证明：热尾第二轮 14,998 input 中
+14,336 cached；立即 cold 15,072 input 中 12,288 cached。按普通价 5、缓存价 0.1/1，热尾分别比立即 cold
+省约 68.7%/32.7%。32 项折叠/搜索 focused 通过；MiniMax-M2.7 真实 native 探针能在未下载 GitHub 仓库、
+本地精确类名与 local no-match 三种场景分别选 `web_search/search_text/web_search`。fresh r59 的真实工具轮和
+热期普通追问均成功，V2 hot/cold/deadline 已同 assistant 消息落账；原 r58 第二轮失败也已定位并修复为
+“缺失可选 observation ledger = 空集合”。deadline 后 selector 已明确返回 cold-fold，同一 r59 仍准确记住
+唯一串和四字段。本机 4000/8901 路径在约 70/310 秒均命中 12,288 cached tokens，但两者共用一个 OMLX
+后端；待办转为不同真实 provider、负载/容量淘汰和更长会话校准，不能把本机五分钟下界外推为统一 TTL。
 
 扩展 Compact 回归还复现了 HEAD 既有的 child 终态反转：同一 request/run 在 overflow 后先落一次累计模型账，
 Compact 继续成功后再以同 event id 写更大的累计账，Store 正确 fail closed 却导致成功 child 被标失败。当前按

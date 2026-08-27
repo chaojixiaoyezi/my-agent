@@ -19,6 +19,7 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
 from agent_py_agent.agent.agent_core.tool_context.window import (
     build_conversation_terminal_tool_fold,
     conversation_message_with_terminal_tool_fold,
+    conversation_terminal_tool_fold_projection,
     window_tool_context_params,
 )
 from agent_py_agent.agent.conversation.authority import (
@@ -52,23 +53,99 @@ def test_terminal_tool_fold_is_deterministic_bounded_and_redacted() -> None:
         for index in range(12)
     ]
 
-    first = build_conversation_terminal_tool_fold(agent, records)
-    second = build_conversation_terminal_tool_fold(agent, records)
-    rendered = conversation_message_with_terminal_tool_fold(
+    first = build_conversation_terminal_tool_fold(agent, records, built_at_epoch=1_000)
+    second = build_conversation_terminal_tool_fold(agent, records, built_at_epoch=1_000)
+    rendered_hot = conversation_message_with_terminal_tool_fold(
         "本轮完成。",
         {"terminal_tool_fold": first},
+        current_epoch=1_200,
     )
+    rendered_cold = conversation_message_with_terminal_tool_fold(
+        "本轮完成。",
+        {"terminal_tool_fold": first},
+        current_epoch=1_301,
+    )
+    hot_projection = conversation_terminal_tool_fold_projection(first, current_epoch=1_200)
+    cold_projection = conversation_terminal_tool_fold_projection(first, current_epoch=1_301)
 
     assert first == second
-    assert first["schema"] == "conversation_terminal_tool_fold.v1"
+    assert first["schema"] == "conversation_terminal_tool_fold.v2"
     assert first["tool_call_count"] == 12
     assert first["successful_tool_call_count"] == 11
     assert first["non_successful_tool_call_count"] == 1
     assert len(str(first["text"])) <= 1_400
-    assert "terminal-fold-secret-value" not in str(first["text"])
+    assert len(str(first["hot_text"])) <= 1_400
+    assert first["fold_after_epoch"] == 1_300
+    assert "terminal-fold-secret-value" not in str(first)
     assert "call-0" in str(first["text"])
-    assert "conversation-terminal-tool-fold" in rendered
-    assert rendered.startswith("本轮完成。")
+    assert "projection: hot_tail" in rendered_hot
+    assert "projection: cold_fold" in rendered_cold
+    assert rendered_hot.startswith("本轮完成。")
+    assert hot_projection["projection"] == "hot_tail"
+    assert cold_projection["projection"] == "cold_fold"
+    assert "hot_text" not in hot_projection
+    assert "fold_after_epoch" not in hot_projection
+
+
+def test_terminal_tool_fold_v1_is_read_as_cold_without_hot_tail() -> None:
+    legacy = {
+        "schema": "conversation_terminal_tool_fold.v1",
+        "tool_call_count": 1,
+        "successful_tool_call_count": 1,
+        "non_successful_tool_call_count": 0,
+        "text": "[conversation-terminal-tool-fold]\n- legacy-cold-fold",
+    }
+
+    rendered = conversation_message_with_terminal_tool_fold(
+        "旧会话正文",
+        {"terminal_tool_fold": legacy},
+        current_epoch=1,
+    )
+
+    assert "legacy-cold-fold" in rendered
+    assert "hot_tail" not in rendered
+
+
+def test_terminal_tool_hot_tail_preserves_more_recent_detail_than_cold_fold() -> None:
+    marker = "HOT-TAIL-RECENT-DETAIL"
+    agent = SimpleNamespace(config=AgentConfig())
+    fold = build_conversation_terminal_tool_fold(
+        agent,
+        [
+            {
+                "tool": "read_file",
+                "ok": True,
+                "scoped_call_id": "call-rich-summary",
+                "model_summary": ("较长但仍有用的工具细节" * 80) + marker,
+            }
+        ],
+        built_at_epoch=1_000,
+    )
+
+    hot = conversation_terminal_tool_fold_projection(fold, current_epoch=1_100)
+    cold = conversation_terminal_tool_fold_projection(fold, current_epoch=1_400)
+
+    assert marker in hot["text"]
+    assert marker not in cold["text"]
+    assert hot["projection"] == "hot_tail"
+    assert cold["projection"] == "cold_fold"
+
+
+def test_terminal_tool_hot_tail_zero_uses_cold_fold_immediately() -> None:
+    agent = SimpleNamespace(
+        config=AgentConfig(conversation_terminal_tool_hot_tail_seconds=0)
+    )
+    fold = build_conversation_terminal_tool_fold(
+        agent,
+        [{"tool": "read_file", "ok": True, "scoped_call_id": "call-cold-now"}],
+        built_at_epoch=1_000,
+    )
+
+    projection = conversation_terminal_tool_fold_projection(fold, current_epoch=1_000)
+
+    assert fold["hot_text"] == ""
+    assert fold["fold_after_epoch"] == 1_000
+    assert projection["projection"] == "cold_fold"
 
 
 def test_terminal_tool_fold_can_be_disabled_without_changing_public_body() -> None:

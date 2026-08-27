@@ -560,6 +560,18 @@ def _append_completion_observation(
     )
 
 
+def test_gateway_followup_with_workspace_and_no_observations_stays_available(tmp_path):
+    agent, request, thread_id = _completion_followup_fixture(tmp_path)
+
+    followup = _conversation_context(agent, request, "gw-followup", "继续上一轮")
+
+    assert followup.thread_id == thread_id
+    assert followup.workspace_task is not None
+    assert followup.subagent_completions == {}
+    assert followup.load_errors == ()
+    assert not agent.conversation_store._observation_path(thread_id).exists()
+
+
 def test_gateway_followup_receives_exact_root_child_completion_inputs(tmp_path):
     agent, request, thread_id = _completion_followup_fixture(tmp_path)
     append = partial(_append_completion_observation, agent, thread_id)

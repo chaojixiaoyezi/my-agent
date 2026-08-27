@@ -9,11 +9,12 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 ## 2026-08-25 main/child 跨回合工具终态折叠
 
 - 每条 agent ConversationThread 继续独立；父子不复制 transcript。某个 main/child 回合结束后，宿主仅从
-  该回合 canonical archive 生成一次 `conversation_terminal_tool_fold.v1`，写进同一 assistant metadata。
+  该回合 canonical archive 生成一次 `conversation_terminal_tool_fold.v2`，写进同一 assistant metadata。
 - fold 是模型续接投影，不是第二账本、ToolCall/ToolResult 伪造物或 Compact。公开正文、TUI transcript 与
   channel delivery 保持原样；完整工具输出、操作事实和产物继续分别由 owner archive、operation ledger 和
   artifact refs 掌权。
-- 下一轮按历史原顺序附加同一不可变 fold，避免反复总结旧内容破坏 provider 缓存前缀。真正 Compact 才把
+- V2 一次固定生成 hot-tail、cold-fold 和 deadline；缓存热期附加热尾，过期后附加短折叠，旧 V1 恒按
+  cold-fold 兼容。真正 Compact 才把
   fold 纳入摘要并推进 generation；`compact_source_tool_pairs` 只累计运行中 native IR 真压掉的完整工具对，
   当前尾部 fold 的回合/调用数单独投影，禁止双计数。
 - `ModelCallLedger` 仍提供 exact request/run 的累计调用快照；每次运行收口以物理调用累计数作为 cursor，
