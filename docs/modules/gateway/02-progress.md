@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-08-27 慢模型首事件与滚动 idle 分相（本地候选）
+
+- r64 的本地模型 child 持续工作后仍被 600 秒固定流总墙钟误杀；这不是进程、Gateway 或模型完全静默。
+  会话运行时 的 Responses SSE 对每次下一事件单独做 idle，通道运行时 另分 first-event 与后续 gap。
+- 当前候选删除流式固定总墙钟，保留 connect、按本轮输入量估算的 request-local first-event 与首事件后的
+  rolling idle。有效 SSE data 到达后，watchdog 和 socket 都切回稳定 `request_timeout`；空行/注释不续命。
+- 默认慢速估算 200 token/s prefill、20 token/s output、安全系数 2、最大 10,800 秒，支持约 1M 输入的
+  极慢预填充；小请求仍按 token 量得到短预算。共享 backend 字段不再被并发 main/child 临时修改。
+- fake transport、真实 loopback SSE、账本 stage 与 backend/native 相关 focused 已通过；待 `.7` 本地慢模型
+  和 `.10` MiniMax-M2.7 真 TUI 长任务验证健康长流、真实停止和 provider usage。
+
 ## 2026-08-27 thinking block-stop 先于正文（已部署真机验证）
 
 - r55 原始 chunk 的最后一轮为 `thinking_delta* -> model_delta* -> assistant_thinking`，所以 TUI 已在正文开始

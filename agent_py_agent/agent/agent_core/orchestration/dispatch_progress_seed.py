@@ -65,7 +65,7 @@ COVERS_PARENT_LEDGER_UNKNOWN_NOTE = (
     '用 task_progress(action=read, run_id=ledger_run_id 的值) 查正确的清单项 id 后重绑。'
 )
 
-PLANNED_DISPATCH_CONTRACT_VERSION = "planned_dispatch.v2"
+PLANNED_DISPATCH_CONTRACT_VERSION = "planned_dispatch.v3"
 
 
 def seed_dispatch_task_progress(agent: object, tasks: list) -> dict[str, Any] | None:
@@ -187,14 +187,22 @@ def planned_dispatch_contract(agent: object, items: list) -> dict[str, Any] | No
         and not _target_has_open_checks(target)
     ]
     open_id_set = set(open_ids)
+    parent_id = current_subagent_run_id(agent) or _run_task_id(agent) or run_id
+    active_cover_owners = _active_direct_cover_owners(agent, parent_id)
     (
         unbound_indexes,
         unknown_by_item,
         unavailable_by_item,
         duplicate_bindings,
-    ) = _planned_binding_issues(items, known_ids=known_ids, open_ids=open_id_set)
+        active_bindings,
+    ) = _planned_binding_issues(
+        items,
+        known_ids=known_ids,
+        open_ids=open_id_set,
+        active_cover_owners=active_cover_owners,
+    )
     valid = not any(
-        (unknown_by_item, unavailable_by_item, duplicate_bindings)
+        (unknown_by_item, unavailable_by_item, duplicate_bindings, active_bindings)
     )
     return {
         "schema_version": PLANNED_DISPATCH_CONTRACT_VERSION,
@@ -210,6 +218,7 @@ def planned_dispatch_contract(agent: object, items: list) -> dict[str, Any] | No
         "unknown_covers_by_item": unknown_by_item,
         "unavailable_covers_by_item": unavailable_by_item,
         "duplicate_covers": duplicate_bindings,
+        "active_covers_by_item": active_bindings,
         "valid": valid,
     }
 
@@ -223,14 +232,25 @@ def _planned_binding_issues(
     *,
     known_ids: set[str],
     open_ids: set[str],
-) -> tuple[list[int], list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    active_cover_owners: dict[str, list[str]],
+) -> tuple[
+    list[int],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+]:
     unbound: list[int] = []
     unknown: list[dict[str, object]] = []
     unavailable: list[dict[str, object]] = []
+    active: list[dict[str, object]] = []
     owners: dict[str, list[int]] = {}
     for index, item in enumerate(items):
         params = getattr(item, "params", None)
         covers = _params_covers(params) if isinstance(params, dict) else []
+        replacements = (
+            set(_params_replacement_ids(params)) if isinstance(params, dict) else set()
+        )
         if not covers:
             unbound.append(index)
             continue
@@ -246,12 +266,51 @@ def _planned_binding_issues(
             unavailable.append({"index": index, "ids": list(dict.fromkeys(unavailable_ids))})
         for target_id in dict.fromkeys(covers):
             owners.setdefault(target_id, []).append(index)
+            occupied_by = [
+                run_id
+                for run_id in active_cover_owners.get(target_id, [])
+                if run_id not in replacements
+            ]
+            if occupied_by:
+                active.append(
+                    {
+                        "index": index,
+                        "id": target_id,
+                        "run_ids": occupied_by,
+                    }
+                )
     duplicates = [
         {"id": target_id, "item_indexes": indexes}
         for target_id, indexes in owners.items()
         if len(indexes) > 1
     ]
-    return unbound, unknown, unavailable, duplicates
+    return unbound, unknown, unavailable, duplicates, active
+
+
+# LLM: Existing cover ownership is decided only from canonical direct-child lineage,
+# exact covers ids, and typed run status. Goal/title similarity is deliberately ignored.
+# 函数用途: 找出同一个父代理下仍占用 Todo 的旧 child，阻止后续唤醒重复派同一项。
+def _active_direct_cover_owners(agent: object, parent_id: str) -> dict[str, list[str]]:
+    manager = getattr(agent, "subagents", None)
+    if manager is None or not parent_id:
+        return {}
+    try:
+        tasks = list(manager.list_runs())
+    except (AttributeError, OSError, TypeError, ValueError):
+        return {}
+    closed = {TaskStatus.DONE.value, *SUBAGENT_HANDLED_TERMINAL_STATUSES}
+    owners: dict[str, list[str]] = {}
+    for task in tasks:
+        if str(getattr(task, "parent_id", "") or "").strip() != parent_id:
+            continue
+        if task_status_in(getattr(task, "status", ""), closed):
+            continue
+        run_id = str(getattr(task, "id", "") or "").strip()
+        if not run_id:
+            continue
+        for target_id in dict.fromkeys(_task_covers(task)):
+            owners.setdefault(target_id, []).append(run_id)
+    return owners
 
 
 # LLM: Dispatch-seeded Todo rows are identified only by exact canonical child
@@ -659,6 +718,16 @@ def _params_covers(params: dict[str, Any]) -> list[str]:
     if not isinstance(covers, list | tuple):
         return []
     return [str(item).strip() for item in covers if str(item or "").strip()]
+
+
+# LLM: Replacement authorization is an explicit run-id list; callers may not infer it
+# from a new goal, a matching cover, or a failed/blocked display label.
+# 函数用途: 读取本次派工明确声明要接管的旧子代理编号。
+def _params_replacement_ids(params: dict[str, Any]) -> list[str]:
+    values = params.get("replacement_for_run_ids")
+    if not isinstance(values, list | tuple):
+        return []
+    return [str(item).strip() for item in values if str(item or "").strip()]
 
 
 def _task_item(task: object) -> dict[str, str]:

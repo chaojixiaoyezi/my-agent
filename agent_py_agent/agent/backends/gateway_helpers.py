@@ -83,6 +83,8 @@ _HTTP_ERROR_DETAIL_ATTR = "_my_agent_provider_error_detail"
 _PROVIDER_ATTEMPT_OBSERVER = threading.local()
 
 
+# LLM: One immutable envelope owns all per-attempt transport budgets; callers must not mutate shared backend timeout state.
+# 类用途: 保存一次 provider HTTP 请求及 connect、首事件和滚动 idle 参数。
 @dataclass(frozen=True)
 class GatewayRequest:
     """Immutable request envelope for one provider HTTP call."""
@@ -92,8 +94,11 @@ class GatewayRequest:
     path: str
     payload: dict[str, Any]
     headers: dict[str, str]
-    timeout: int
+    timeout: float
     connect_timeout: float = 10.0
+    # 首个 SSE data 可以包含排队和长 prompt prefill，预算与后续事件空闲分开。
+    # None 表示沿用 timeout；该字段只影响当前请求，不能修改共享 backend。
+    first_event_timeout: float | None = None
 
     @property
     def url(self) -> str:
@@ -211,6 +216,8 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         if _provider_is_interrupted():
             raise InterruptedError("模型接口流式请求已被用户停止") from exc
+        if _is_timeout_exception(exc):
+            raise _stream_timeout_error(request, "first_event") from exc
         raise _runtime_network_error(exc, request) from exc
 
 
@@ -221,31 +228,39 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
         with _provider_interrupt_callback(response_guard.abort):
             if _provider_is_interrupted():
                 raise InterruptedError("模型接口流式请求已被用户停止")
-            # 门槛3补证(steward seq1533-1): idle/watchdog/wall 共用同一 monotonic
-            # cutoff——start 一次起算, wall_deadline 显式传入, idle 初始与其同基准,
-            # 不再「watchdog 与 _iter_sse_data_lines 分别起算时间」。
-            # 门槛2 终审边界①(seq1622-1): watchdog 构造不再独立调用
-            # time.monotonic(), 初始 idle deadline 由调用方传入同一 start 派生
-            # 的 wall_deadline——watchdog/parser 全链路同一 cutoff 起点。
-            start = time.monotonic()
-            wall_deadline = start + _stream_deadline_offset(request.timeout)
+            # 会话运行时 对每次 stream.next() 使用 idle timeout：首包可按 prompt
+            # 大小给更长预算，首条有效 data 到达后统一回到常规空闲窗口。
+            # 持续有效 data 不得再被整次请求的总墙钟误杀；真正停止由 /stop、
+            # provider 断流或完整空闲窗口负责。
+            initial_deadline = time.monotonic() + _stream_first_event_timeout(request)
             watchdog = _StreamIdleWatchdog(
-                response_guard, request.timeout, idle_deadline=wall_deadline
+                response_guard,
+                request.timeout,
+                idle_deadline=initial_deadline,
             )
             watchdog.start()
+
+            # LLM: Only a valid SSE data record transitions the request from prefill budget to steady-state idle.
+            # 函数用途: 首条及后续有效 data 到达时同时刷新 watchdog，并把 socket 切回常规空闲超时。
+            def _touch_data_line() -> None:
+                watchdog.touch()
+                _set_response_read_timeout(resp, request.timeout)
+
             try:
                 yield from _iter_sse_data_lines(
                     resp,
                     timeout=request.timeout,
                     url=request.url,
-                    on_data_line=watchdog.touch,
-                    wall_deadline=wall_deadline,
+                    on_data_line=_touch_data_line,
+                    initial_deadline=initial_deadline,
                 )
                 if watchdog.timed_out:
-                    raise _stream_idle_timeout_error(request)
+                    raise _stream_timeout_error(request, watchdog.timeout_stage)
             except (OSError, ValueError) as exc:
                 if watchdog.timed_out:
-                    raise _stream_idle_timeout_error(request) from exc
+                    raise _stream_timeout_error(request, watchdog.timeout_stage) from exc
+                if _is_timeout_exception(exc):
+                    raise _stream_timeout_error(request, watchdog.timeout_stage) from exc
                 raise
             except AttributeError as exc:
                 # ``HTTPResponse.close()`` may clear the buffered reader while
@@ -256,7 +271,7 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
                 # teardown caused it; a genuine provider/parser AttributeError
                 # must remain visible as a programmer bug.
                 if watchdog.timed_out:
-                    raise _stream_idle_timeout_error(request) from exc
+                    raise _stream_timeout_error(request, watchdog.timeout_stage) from exc
                 if _provider_is_interrupted():
                     raise InterruptedError("模型接口流式请求已被用户停止") from exc
                 raise
@@ -264,15 +279,10 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
                 watchdog.cancel()
 
 
+# LLM: The watchdog closes only the current response and changes from first-event to rolling-idle after valid data.
+# 类用途: 在底层读取阻塞时提供可中断的首包/事件间空闲计时，不限制健康流的累计时长。
 class _StreamIdleWatchdog:
-    """Close one blocked response only after a full idle interval.
-
-    门槛2 终审边界①(seq1622-1): idle deadline 模型——初始 deadline 由调用方
-    传入(与 parser 的 wall_deadline 同一 start 派生值), data 触达后按与
-    parser 同一 offset 公式(`_stream_deadline_offset`)滚动。watchdog 不再
-    构造时独立调用 time.monotonic() 起算, 与 parser 全链路同一 cutoff 起点;
-    <1s 预算 floor 也由同一 offset 合同承载(parser 侧同 floor, 无分叉)。
-    """
+    """Close one blocked response only after the active phase's full idle interval."""
 
     def __init__(
         self,
@@ -288,15 +298,18 @@ class _StreamIdleWatchdog:
         self._timer: threading.Timer | None = None
         self._cancelled = False
         self._timed_out = False
+        self._seen_data = False
 
     def start(self) -> None:
         with self._lock:
             self._schedule_locked(self._idle_deadline - time.monotonic())
 
+    # LLM: A touch is valid only for parsed SSE data and atomically switches the watchdog into rolling-idle phase.
+    # 函数用途: 记录真实模型事件并延长下一事件的空闲截止时间。
     def touch(self) -> None:
         with self._lock:
             if not self._cancelled:
-                # 与 parser 的 idle_deadline 重置同一公式: now + offset
+                self._seen_data = True
                 self._idle_deadline = time.monotonic() + self._timeout
 
     def cancel(self) -> None:
@@ -311,6 +324,14 @@ class _StreamIdleWatchdog:
     def timed_out(self) -> bool:
         with self._lock:
             return self._timed_out
+
+    # LLM: Stage is derived from typed data observation, never from exception text or elapsed-time guesses.
+    # 函数用途: 告诉账本超时发生在首事件前，还是首事件后的流空闲阶段。
+    @property
+    def timeout_stage(self) -> str:
+        """Return whether the blocked read died before or after the first data event."""
+        with self._lock:
+            return "stream_idle" if self._seen_data else "first_event"
 
     def _check(self) -> None:
         with self._lock:
@@ -332,7 +353,15 @@ class _StreamIdleWatchdog:
         timer.start()
 
 
-def _stream_idle_timeout_error(request: GatewayRequest) -> ProviderTimeoutError:
+# LLM: Convert watchdog/parser phase into the closed timeout-stage vocabulary used by the model-call ledger.
+# 函数用途: 为首事件和流空闲生成一致的结构化超时异常与用户可读诊断。
+def _stream_timeout_error(request: GatewayRequest, stage: str) -> ProviderTimeoutError:
+    if stage == "first_event":
+        return ProviderTimeoutError(
+            "模型接口等待首个流式事件超时: "
+            f"first_event_timeout={_stream_first_event_timeout(request):g}s url={request.url}",
+            stage="first_event",
+        )
     return ProviderTimeoutError(
         f"模型接口流式响应空闲超时: request_timeout={request.timeout}s url={request.url}",
         stage="stream_idle",
@@ -519,7 +548,7 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
     """
 
     connect_timeout = _bounded_connect_timeout(request)
-    read_timeout = max(1.0, float(request.timeout or 0))
+    read_timeout = _request_initial_read_timeout(request)
     open_guard = _GatewayOpenGuard()
     transport_options = _SplitTimeoutOptions(connect_timeout, read_timeout, open_guard)
     opener = urllib.request.build_opener(
@@ -570,9 +599,30 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _bounded_connect_timeout(request: GatewayRequest) -> float:
-    read_timeout = max(1.0, float(request.timeout or 0))
+    read_timeout = _request_initial_read_timeout(request)
     configured = max(0.2, float(request.connect_timeout or 0))
     return min(configured, read_timeout)
+
+
+# LLM: The initial socket window may be longer than steady-state SSE idle, but only for this immutable request.
+# 函数用途: 计算响应头和首个事件共用的初始读取窗口，不修改共享 backend 配置。
+def _request_initial_read_timeout(request: GatewayRequest) -> float:
+    idle_timeout = _stream_deadline_offset(request.timeout)
+    if request.first_event_timeout is None:
+        return idle_timeout
+    return max(idle_timeout, _stream_deadline_offset(request.first_event_timeout))
+
+
+# LLM: After the first valid SSE data line, reset the live socket from prefill budget to normal idle without replacing the response object.
+# 函数用途: 首包到达后把 socket 读取超时切回常规流式空闲窗口。
+def _set_response_read_timeout(response: Any, timeout: int | float) -> None:
+    transport = _stdlib_response_socket(response)
+    if transport is None:
+        return
+    try:
+        transport.settimeout(_stream_deadline_offset(timeout))
+    except (OSError, ValueError):
+        return
 
 
 # LLM: open guard 只保存当前 attempt 的连接引用并串行化 abort/release；它不能跨 attempt 复用或替代 response guard。
@@ -1061,45 +1111,42 @@ def _stream_deadline(timeout: int | float) -> float:
     return time.monotonic() + _stream_deadline_offset(timeout)
 
 
+# LLM: Keep first-event timing request-local so concurrent main/subagent calls cannot overwrite a shared backend timeout.
+# 函数用途: 返回当前请求等待首个 SSE data 的预算；未单独配置时沿用常规空闲窗口。
+def _stream_first_event_timeout(request: GatewayRequest) -> float:
+    """Return the request-local first SSE event budget."""
+    return _request_initial_read_timeout(request)
+
+
 # LLM: Check the current execution's interrupt flag at every SSE boundary before exposing provider data to higher layers.
 # 函数用途: 逐行读取 SSE 数据，并在每个安全点检查超时与用户停止。
 def _iter_sse_data_lines(
     response,
     *,
-    timeout: int,
+    timeout: int | float,
     url: str,
     on_data_line,
-    wall_deadline: float | None = None,
+    initial_deadline: float | None = None,
 ) -> Iterator[str]:
-    # 门槛3补证: 显式 wall_deadline 时 idle 初始与其共用同一 cutoff(同基准,
-    # 由 _stream_with_watchdog 一次 start 起算); 未显式时按进入时点兜底。
-    if wall_deadline is None:
-        wall_deadline = time.monotonic() + _stream_deadline_offset(timeout)
-    idle_deadline = wall_deadline
-    # 门槛3: 总墙钟硬顶(=effective 值)。data 行只重置 idle_deadline 不动
-    # wall_deadline——持续 data 续命下, 墙钟预算是唯一能掐断流的总时长硬顶
-    # (修掉「有 data 就永远等」的窗口)。
+    if initial_deadline is None:
+        initial_deadline = time.monotonic() + _stream_deadline_offset(timeout)
+    idle_deadline = initial_deadline
+    seen_data = False
     for raw_line in response:
         if _provider_is_interrupted():
             raise InterruptedError("模型接口流式请求已被用户停止")
-        # idle 检查在前保持门槛2 语义(保活空行=stream_idle), wall 在后只拦
-        # 「data 持续续命超总预算」——同刻到期时 idle 赢, 不回归既有锁定。
         if time.monotonic() > idle_deadline:
+            stage = "stream_idle" if seen_data else "first_event"
+            label = "流式响应空闲" if seen_data else "等待首个流式事件"
             raise ProviderTimeoutError(
-                f"模型接口流式响应空闲超时: request_timeout={timeout}s url={url}",
-                stage="stream_idle",
-            )
-        if time.monotonic() > wall_deadline:
-            raise ProviderTimeoutError(
-                f"模型接口流式响应总墙钟超时: request_timeout={timeout}s url={url}",
-                # 门槛3: transport 总墙钟预算耗尽与墙钟守卫线程同族(总时长
-                # 超预算), 均为真实抛出路径, 按 wall_clock 落账。
-                stage="wall_clock",
+                f"模型接口{label}超时: timeout={timeout}s url={url}",
+                stage=stage,
             )
         # provider 流里可能混入坏字节/非 UTF-8 切片(分块边界把多字节字符截断),
         # 用 errors="replace" 兜底,不让单行解码异常崩掉整条流式响应。
         line = raw_line.decode("utf-8", "replace").strip()
         if _is_sse_data_line(line):
+            seen_data = True
             on_data_line()
             idle_deadline = _stream_deadline(timeout)
             yield line[5:].strip()

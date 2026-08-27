@@ -12,8 +12,8 @@ _CREATE_DEPENDENCY_ORDER_RULE = (
 _CREATE_DISJOINT_WRITE_SCOPE_RULE = (
     "并行编码任务必须拆成互不重叠的文件或模块写入范围，并在每项 goal 里写清共同目标目录和该项独占范围；"
     "会修改同一文件、同一模块，或职责宽到会覆盖兄弟项的工作不能放进同一批。"
-    "output_files 可辅助说明交付范围；省略时宿主不猜，若同批多项主动提供，则相同路径或祖先/子目录重叠"
-    "会在创建前整批退回供你重拆。它仍不是完整写集、权限或机器锁。"
+    "output_files 可辅助说明交付范围；省略时宿主不猜。它不是完整写集、权限或机器锁，"
+    "同批 child 可以共享父级 task root；是否会修改同一文件仍由你按 goal 中的职责边界判断并分批。"
 )
 _CREATE_USE_CASES = [
     "任务能拆成 2+ 个可并行的独立子任务(各自跑、不互相等)——一个一个派、每个一句 goal，或一次用 items 列多个且每项含独立 goal，并行推进省主代理上下文",
@@ -26,7 +26,7 @@ _CREATE_PARAMETERS = {
     "goal": "只派一个子代理时必填，写这个子代理的完整目标；使用 items 批量派工时可选，只作整批说明，不替代每项自己的 goal",
     "items": (
         "一次派多个可同时立即运行、彼此不等结果的任务时使用；每项必须自带独立 goal，顶层 goal 可省略。"
-        "编码项还必须有互不重叠的文件或模块写入范围。只派一个时直接传 goal"
+        "编码项还必须在 goal 中说明互不重叠的文件或模块写入职责；可共享同一父级 task root。只派一个时直接传 goal"
     ),
     "description": "可选的 3-12 字职责短标题，只说明这个子代理大概负责什么，供 TUI/Web 单行展示",
     "role": "子代理角色模板 id，默认 worker",
@@ -37,7 +37,7 @@ _CREATE_PARAMETERS = {
     "covers": '可选的 task_progress exact-id 映射（普通 items 或 coverage.targets，例如 ["req-03"]）；只有 child 与仍 open 项确实是同一工作时才填，DONE 后系统按 id 打勾。省略时 child 用自己的 run_id 记进度，不关闭现有项',
     "plan": "子代理初始步骤",
     "input_refs": "交给子代理读取的文件、URL 或 artifact refs",
-    "output_files": "可选目标产物，用于交付归属和冲突提示；不是权限或完整写集，提供时必须位于当前 workspace，且同批各项不得声明相同或祖先/子目录范围",
+    "output_files": "可选目标产物，用于交付归属和协调提示；不是权限、完整写集或机器锁，提供时必须位于当前 workspace，同批可共享父级 task root",
     "artifact_refs": "已有交付物或参考产物引用",
     "replacement_for_run_ids": "新子代理要接管的旧 run_id",
     "related_finding_id": "可选；把本次委派关联到当前会话中已经持久化的一个 Audit finding。程序只校验关系，是否调查和怎样调查仍由你决定",
@@ -62,10 +62,10 @@ _CREATE_PARAMETER_DETAILS = {
     "allowed_skills": "可选 Skill 名称或 stable_id 列表；创建时会解析为不可变快照引用，未知或禁用项整批拒绝。",
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
     "output_files": (
-        "可选；用户明确保存路径时用于保留交付身份与冲突范围。它不是权限、完整写集或创建前置条件，"
+        "可选；用户明确保存路径时用于保留交付身份与协调线索。它不是权限、完整写集或创建前置条件，"
         "普通 child 的父级工作区写权仍由宿主继承；提供时必须位于当前 workspace。阅读/分析目录是 input_refs。"
-        "同批多个 item 主动提供时必须互不重叠；相同路径或祖先/子目录会整批返回 not_started，"
-        "应缩窄每项独占范围或改为分批。"
+        "同批多个 item 可以声明共同 task root；宿主不会把路径相同或祖先关系当成目录锁。"
+        "真正可能改同一文件或模块时，仍应在 goal 中缩窄独占范围或改为分批。"
         "协作阶段的中间产物优先放当前任务 work/child_outputs 或工具返回的默认路径；"
         "output_dir 更适合最终交付，或用户明确要求放到某个普通输出目录时使用。"
     ),

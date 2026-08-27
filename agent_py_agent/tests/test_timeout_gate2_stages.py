@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-"""第1项 B 门槛2 验收测试: 超时 stage 三值区分 + provider_wall 兼容读取 + elapsed 证据。
+"""第1项 B 门槛2 验收测试: 超时 stage 分相 + provider_wall 兼容读取 + elapsed 证据。
 
-steward seq 1500 细化要求(门槛2): stream_idle/wall_clock/provider_declared stage
+steward seq 1500 细化要求(门槛2): first_event/stream_idle/wall_clock/provider_declared stage
 + provider_wall 兼容读取。A 锁定测试(test_timeout_budget_locked.py)已同步更新
 2 条契约: 参数层暴露 elapsed_seconds 但绝不暴露原始时间戳。
 
 三来源行为测的构造(实证确认):
 - stream_idle: SSE 保活空行(非 data 行, socket 永不超时) + data 行空闲超时
-- provider_declared: SSE 首行后完全静默, socket read 超时先于 SSE deadline 触发
+- first_event: 流式响应头或首个 data 未在首事件预算内到达
+- provider_declared: 非流式或连接层由 provider/socket 明确报告的超时
 - wall_clock: 非 stream 后端 + generate 挂起, 墙钟守卫线程超时
 """
 
@@ -232,9 +233,9 @@ class _SSEHandler(BaseHTTPRequestHandler):
         self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
         if self.path == "/noreply":
             # 连接建立但从不发 HTTP 响应头: 客户端阻塞在读头, read 超时
-            # -> provider 网络层超时(provider_declared)。watchdog 尚未启动
+            # -> 流式首事件超时(first_event)。watchdog 尚未启动
             # (响应头未到, _stream_with_watchdog 在 guard 建立后才 start),
-            # 无竞态, 确定性走 provider_declared。
+            # 无竞态, transport 入口按流式阶段归一为 first_event。
             try:
                 time.sleep(3)
             finally:
@@ -300,10 +301,10 @@ def _call_stream(
     return time.monotonic() - started, exc
 
 
-def test_sse_noreply_raises_provider_declared(sse_server: ThreadingHTTPServer) -> None:
-    """连接建立但响应头永不到达: 网络层 read 超时 -> stage=provider_declared。"""
+def test_sse_noreply_raises_first_event(sse_server: ThreadingHTTPServer) -> None:
+    """连接建立但响应头永不到达: 流式首事件预算超时 -> stage=first_event。"""
     elapsed, exc = _call_stream(sse_server, "/noreply", timeout=1)
-    assert exc.stage == "provider_declared"
+    assert exc.stage == "first_event"
     assert elapsed < 3.0
     assert elapsed >= 0.8
 
@@ -321,7 +322,7 @@ def test_sse_keepalive_without_data_raises_stream_idle(
 class _BlockingBackend:
     name = "blocking-test-backend"
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **_kwargs) -> ModelResponse:
         time.sleep(0.5)  # 挂起 > request_timeout -> 墙钟守卫掐断
         return ModelResponse(text="late response", backend=self.name)
 
@@ -383,7 +384,7 @@ def test_stream_backend_delegates_to_transport_not_wall_guard() -> None:
         stream_enabled = True
         stream_timeout_is_idle = True
 
-        def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        def generate(self, prompt: str, on_chunk=None, **_kwargs) -> ModelResponse:
             time.sleep(0.05)
             return ModelResponse(text="ok", backend=self.name)
 
@@ -464,8 +465,8 @@ def test_stage_contract_closed_unknown_rejected() -> None:
 
 
 def test_stage_contract_all_known_accepted() -> None:
-    """四个合法 stage(三值+legacy provider_wall)全部可构造。"""
-    for stage in ("stream_idle", "wall_clock", "provider_declared", "provider_wall"):
+    """五个合法 stage(四个当前值+legacy provider_wall)全部可构造。"""
+    for stage in ("first_event", "stream_idle", "wall_clock", "provider_declared", "provider_wall"):
         err = ProviderTimeoutError("t", stage=stage)
         assert err.stage == stage
 

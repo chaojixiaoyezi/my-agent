@@ -405,7 +405,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     result_check_timeout_seconds: int = 120
     dynamic_timeout_safety_margin: float = 2.0
     dynamic_timeout_min: int = 30
-    dynamic_timeout_max: int = 600
+    dynamic_timeout_max: int = 10800
+    # 未取得稳定 probe 样本时的保守吞吐估计；只用于本次请求的首包/非流式预算。
+    estimated_prefill_tokens_per_second: float = 200.0
+    estimated_output_tokens_per_second: float = 20.0
     # 门槛4: probe 统计参数——每点最小样本数/滑窗上限/异常值去极值开关
     probe_min_samples: int = 2
     probe_window_samples: int = 5

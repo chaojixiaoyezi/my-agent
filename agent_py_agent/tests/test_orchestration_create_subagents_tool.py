@@ -535,6 +535,66 @@ class TestCreateSubagentsToolStartControls:
             {"source_run_id": source.id, "replacement_run_id": replacement_id, "status": "recorded"}
         ]
 
+    def test_replacement_preflight_rejects_other_parent_without_creating(self, tmp_path):
+        """不能跨父级接管；预检失败前不产生 replacement 记录。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+        manager = SubAgentManager(tmp_path, workspace_root=tmp_path)
+        source = manager.create_run(goal="别的任务", thought="执行", plan=["做"], role="worker")
+        source.parent_id = "other-parent"
+        manager.save(source)
+        agent = SimpleNamespace(
+            config=SimpleNamespace(enable_subagents=True, max_subagents=10, access_mode="workspace-write"),
+            subagents=manager,
+            tools=SimpleNamespace(specs=lambda: []),
+        )
+
+        result = CreateSubagentsTool(agent).execute(
+            {
+                "goal": "错误跨树接管",
+                "replacement_for_run_ids": [source.id],
+                "defer_start": True,
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is False
+        assert payload["error_code"] == "SUBAGENT_REPLACEMENT_INVALID"
+        assert len(manager.list_runs()) == 1
+
+    def test_replacement_record_failure_cancels_new_child_before_start(self, tmp_path, monkeypatch):
+        """接管边落账失败时，新 child 必须终态取消且不能发布启动。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+        manager = SubAgentManager(tmp_path, workspace_root=tmp_path)
+        source = manager.create_run(goal="旧任务", thought="执行", plan=["做"], role="worker")
+
+        def fail_record(*_args, **_kwargs):
+            raise OSError("state store unavailable")
+
+        monkeypatch.setattr(manager, "record_takeover", fail_record)
+        agent = SimpleNamespace(
+            config=SimpleNamespace(enable_subagents=True, max_subagents=10, access_mode="workspace-write"),
+            subagents=manager,
+            tools=SimpleNamespace(specs=lambda: []),
+        )
+
+        result = CreateSubagentsTool(agent).execute(
+            {
+                "goal": "接管旧任务",
+                "replacement_for_run_ids": [source.id],
+            }
+        )
+        payload = json.loads(result.output)
+        replacement = next(task for task in manager.list_runs() if task.id != source.id)
+
+        assert result.ok is False
+        assert payload["error_code"] == "SUBAGENT_REPLACEMENT_RECORD_FAILED"
+        assert replacement.status == "CANCELLED"
+        assert replacement.attributes["creation_abort"]["code"] == payload["error_code"]
+
 class TestCreateSubagentsToolConfigDefaults:
     """测试 create_subagents 对轻量配置对象的默认值兜底。"""
 

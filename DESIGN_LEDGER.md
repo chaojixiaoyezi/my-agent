@@ -1941,6 +1941,49 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   所以成本只能作为已回执调用的下界，功能完成度必须判失败。缓存命中、provider 可用、模型吞吐和任务
   编排是四个独立事实，任何一个都不能替另一个宣告通过。
 
+## 2026-08-27 慢模型流式存活合同【状态：本地候选已通过 focused，双机真 TUI 待验】
+
+- 解决问题：本地慢模型持续返回有效 SSE 数据，旧底层仍把同一个 `request_timeout=600` 同时当滚动 idle
+  和整次总墙钟，健康 child 在工作约 67 分钟后被固定墙钟误杀。128K 输入按 200 token/s 预填充约需
+  640 秒，单纯把 600 改成更大的固定总时长仍会在更长上下文或慢输出上重复失败。
+- 对照 会话运行时 `responses.rs` 的逐 `stream.next()` idle 合同和 通道运行时 的 first-event/idle 分相，流式请求
+  只保留短 connect、按本轮输入量估算的 first-event 与首事件后的 rolling idle；每条有效 SSE `data:`
+  重置 idle，空行或注释不算进展。健康流没有隐式 total wall，停止依赖 `/stop`、provider 断流或完整
+  idle 窗口；非流式请求仍使用有界总预算。
+- 动态首事件预算是 request-local option，不再改共享 backend 的 `request_timeout`，因此同 Gateway 的
+  main/child 并发调用不会互相覆盖。默认估算为 prefill 200 token/s、output 20 token/s、安全系数 2，
+  上限 10,800 秒，可覆盖约 1M 输入的极慢预填充；小请求仍按本轮 token 量得到较小预算。
+- 超时账本把 `first_event`、`stream_idle` 和非流式 `wall_clock` 分开，恢复或重试只能读取 typed stage，
+  不解析错误正文。流已经产生工具调用或副作用后仍不得无脑重放整轮。
+
+## 2026-08-27 活动 covers 占用与 会话运行时 式共享工作区【状态：本地候选已通过 focused，真 TUI 待验】
+
+- 解决问题：真实 r62 中原 工具运行时 child 从 capability 阻塞恢复并继续运行，root 又创建一名相同
+  `covers=["2"]` 的“替身”，形成九名 child 和额外 token 消耗。旧 `planned_dispatch.v2` 只查新批次内
+  重复，不查已有直属兄弟；replacement edge 写失败后，新 child 也可能仍被启动。
+- `planned_dispatch.v3` 只读同一 exact parent 的直属兄弟。PLANNING/PENDING/RUNNING/BLOCKED/PAUSED
+  持续占用其 exact covers；新 item 若未用 `replacement_for_run_ids` 明确引用占用 run，则整批在任何 child
+  落盘前返回 `active_covers_by_item`。不按标题、goal 或自然语言相似度猜重复。
+- owner/task 的短创建 guard 只包围“容量/占用复检 → 创建 PLANNING 记录 → 写 takeover edge”，不包围
+  child 运行。replacement 必须属于同一直属父级、尚未被接管且同批唯一；任一 edge 未落账，新 child 在
+  发布启动前结构化取消并返回 typed error。
+- 同时撤销旧的 output 目录重叠硬门。会话运行时 允许 sidecar 共享同一项目工作区，`output_files` 只是可选
+  协调元数据和父 workspace 上界检查，不是目录锁；真正同文件写冲突继续由 goal 中的 disjoint write set
+  软纪律和工具事实处理。安全硬门只保留越过父工作区、冒充身份和危险写入。
+
+## 2026-08-27 运行注入缓存边界与模型目录参考快照【状态：布局 focused 已通过；catalog 暂不参与运行】
+
+- 生命周期 wake、恢复和普通插话会变化，不能留在 native history 之前的 `stable_user_prefix`。当前布局
+  固定为 stable system/tools → run 固定首条 user → append-only IR → volatile workspace/runtime injection/
+  execution facts。注入内容没有删除，只移动到动态尾部；不同 wake 的旧 system/user 字节前缀保持相同。
+- 最新型号先记录在 `docs/architecture/MODEL_CATALOG_SNAPSHOT.md`，明确它不是 allowlist、路由或价格事实。
+  当前 provider 未知型号继续透传，实时 `/models`/详情优先。未来目录按用户显式配置 > provider 发现 >
+  随版本种子合并，并把 thinking、sampling、reasoning replay 等差异放入声明式 compat 或 provider adapter，
+  不在核心链散落型号字符串判断。
+- 该快照核对了 OpenAI 官方 GPT-5.6 Sol/Terra/Luna，以及 通道运行时 当前 MiniMax M3/M2.7、DeepSeek V4、
+  模型助手 5、Kimi K3/K2.7、Qwen 3.7 和 GLM-5.2 代表型号。endpoint、headers、凭据和账号可用性仍只来自
+  用户本地配置与 provider 实时事实，远端目录不得取得这些权限。
+
 ## 2026-08-27 缓存热尾、冷折叠与本地搜索空结果合同【状态：已部署；热期真 TUI 通过，冷边界长等待中】
 
 - 对照 终端交互 `microCompact` 的时间门：缓存仍热时保持历史不动，确定冷却后才清旧工具结果。当前适配不另造

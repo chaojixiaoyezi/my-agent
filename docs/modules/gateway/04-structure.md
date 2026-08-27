@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## 模型流式存活边界
+
+- `backends/gateway_helpers.py` 为每个请求分别保存短 connect、first-event 和 rolling idle。响应头与首个有效
+  SSE data 使用按本轮输入量估算的首事件窗口；第一条 data 后把 socket 与 watchdog 一起切回普通 idle。
+- 有效 `data:` 才刷新 liveness；SSE 注释、空行和半行不能续命。流式路径没有隐式 total wall，健康慢流
+  可以跨小时；非流式调用仍由模型线程有界墙钟守卫。
+- `ProviderRequestOptions.first_event_timeout_seconds` 是 request-local，不修改共享 `HttpBackend`。主代理、
+  child 和孙代理共用同一条 typed 请求合同，超时按 `first_event/stream_idle/wall_clock` 落唯一调用账本。
+- `/stop` 仍通过 provider interrupt callback 关闭 connect/header/body/退避中的当前 attempt；超时分相不得
+  变成关闭取消能力或无限重试。
+
 ## provider 工具参数生成进度
 
 - `backends/stream_parsers.py` 继续独占 Anthropic `partial_json` 累积与 stop 后解析；同一 StreamEvent 只附带

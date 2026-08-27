@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..capability.skill_snapshot import SkillSnapshotError
+from ..common.json_io import locked_json_path
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..settings.defaults import default_config_int
 from ..subagents.services.base import CreateRunParams
@@ -62,7 +65,12 @@ from .orchestration.planned_delegation import (
     PLANNED_DELEGATION_ERROR_CODE,
     planned_delegation_failure,
 )
-from .orchestration.replacements import record_create_replacements
+from .orchestration.replacements import (
+    cancel_unstarted_replacement_tasks,
+    record_create_replacements,
+    replacement_records_allow_start,
+    validate_create_replacements,
+)
 from .orchestration.shared_context import append_parent_shared_context
 from .orchestration.tool_grants import (
     CODING_SUBAGENT_TOOLS,
@@ -278,7 +286,8 @@ def execute_create_subagents_service(
     """Create audit/runtime children without pretending an internal service call is a model tool call."""
 
     try:
-        return _execute_create_subagents(agent, params)
+        with _create_subagents_transaction(agent):
+            return _execute_create_subagents(agent, params)
     except Exception as exc:
         # create_subagents 在真实 dispatch 路径上会偶发崩溃(真机 B1/R3:合法 goal+output_files
         # 调用也抛异常,堆栈没落到任何日志,模型只看到无信息、retryable=False 的 UNKNOWN_ERROR 兜底码
@@ -300,6 +309,16 @@ def execute_create_subagents_service(
             "换最简单的写法重试:只传一个 goal、先别带 output_files 等附加字段。别因此就改回自己写。",
             error_code="TOOL_INVALID_ARGUMENTS",
         )
+
+
+# LLM: One owner-local file guard serializes only create preflight/materialization;
+# child runtime remains fully parallel and never holds this lock.
+# 函数用途: 防止两个并发唤醒同时越过 covers/容量预检并重复创建，派工完成即释放。
+def _create_subagents_transaction(agent: object):
+    workspace = getattr(getattr(agent, "subagents", None), "workspace", None)
+    if not isinstance(workspace, str | Path):
+        return nullcontext()
+    return locked_json_path(Path(workspace) / ".create-subagents.guard")
 
 # LLM: All root child creation modes converge here. A single child requires goal;
 # a batch is authoritative through each item goal and may omit redundant top-level
@@ -356,6 +375,8 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
         return invalid
     run_params = _indexed_single_run_params(agent, run_params)
     task_params = [run_params]
+    if invalid := _replacement_preflight_result(agent, task_params):
+        return invalid
     return _created_tasks_result(
         agent,
         _resolve_task_params(agent, task_params),
@@ -416,6 +437,8 @@ def _created_tasks_result(
 ) -> ToolHandlerOutcome:
     tasks = [item.task for item in resolutions]
     replacement_records = record_create_replacements(agent, tasks)
+    if replacement_records and not replacement_records_allow_start(replacement_records):
+        return _replacement_record_failure_result(agent, resolutions, replacement_records)
     lifecycle = publish_created_subagents(CreatedSubagentLifecycleRequest(agent, tasks, request_params))
     relation_fence = fence_inactive_audit_investigations(agent, tasks)
     payload = create_subagents_payload(
@@ -484,6 +507,8 @@ def _execute_items(
     if validation:
         return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
     task_params = _indexed_item_run_params(agent, capped)
+    if invalid := _replacement_preflight_result(agent, task_params):
+        return invalid
     resolutions = _resolve_task_params(agent, task_params)
     return _created_items_result(CreatedItemsResultRequest(
         agent=agent,
@@ -499,6 +524,12 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolHandlerOutc
     for task in tasks:
         request.agent.subagents.save(task)
     replacement_records = record_create_replacements(request.agent, tasks)
+    if replacement_records and not replacement_records_allow_start(replacement_records):
+        return _replacement_record_failure_result(
+            request.agent,
+            request.resolutions,
+            replacement_records,
+        )
     payload_request = _items_payload_request(request.request_params, request.capped_items)
     lifecycle = publish_created_subagents(CreatedSubagentLifecycleRequest(request.agent, tasks, payload_request))
     relation_fence = fence_inactive_audit_investigations(request.agent, tasks)
@@ -523,6 +554,64 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolHandlerOutc
     if binding := dispatch_coverage_binding(request.agent, tasks):
         payload["coverage_binding"] = binding
     return _create_subagents_success(payload)
+
+
+# LLM: Replacement source validation runs after full parameter normalization but
+# before any run id, workspace, authority row, or lifecycle event is materialized.
+# 函数用途: 把无效接管关系作为整批未启动错误返回，避免先造 child 再发现旧 run 不可接管。
+def _replacement_preflight_result(
+    agent: SimpleAgent,
+    task_params: list[CreateRunParams],
+) -> ToolHandlerOutcome | None:
+    issues = validate_create_replacements(agent, task_params)
+    if not issues:
+        return None
+    payload = {
+        "ok": False,
+        "error_code": "SUBAGENT_REPLACEMENT_INVALID",
+        "error": "接管关系无效；本批没有创建任何子代理。",
+        "issues": issues,
+        "next_action": {
+            "action": "repair_replacement_run_ids_and_retry",
+            "retry_tool": "create_subagents",
+        },
+    }
+    return ToolHandlerOutcome(
+        "create_subagents",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="SUBAGENT_REPLACEMENT_INVALID",
+        effect_outcome="not_started",
+    )
+
+
+# LLM: Lifecycle publication is forbidden after a replacement edge write fails;
+# newly created records are fenced terminal and their failure remains structured.
+# 函数用途: 接管落账异常时取消尚未启动的新 child，并向模型返回可恢复的明确错误。
+def _replacement_record_failure_result(
+    agent: SimpleAgent,
+    resolutions: list[CreateTaskResolution],
+    records: list[dict[str, object]],
+) -> ToolHandlerOutcome:
+    cancelled = cancel_unstarted_replacement_tasks(agent.subagents, resolutions, records)
+    payload = {
+        "ok": False,
+        "error_code": "SUBAGENT_REPLACEMENT_RECORD_FAILED",
+        "error": "接管关系未全部落账；本批新 child 均未启动。",
+        "replacement_records": records,
+        "creation_fence": cancelled,
+        "next_action": {
+            "action": "retry_after_replacement_state_recovers",
+            "retry_tool": "create_subagents",
+        },
+    }
+    return ToolHandlerOutcome(
+        "create_subagents",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="SUBAGENT_REPLACEMENT_RECORD_FAILED",
+        effect_outcome="not_started",
+    )
 
 
 # LLM: The compact result envelope preserves typed scheduling and bounded Todo

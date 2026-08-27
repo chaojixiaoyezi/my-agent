@@ -52,7 +52,7 @@ agent_py_agent/
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |-- orchestration/              # 四个递归直属控制工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
 |   |   |   |-- coordinator_policy.py # 主代理/多层 coordinator 共用的 会话运行时 式派工后职责软合同
-|   |   |   `-- planned_delegation.py # 已有 Todo 时，创建前原子校验 exact covers、编码写入集合和父级 workspace 上界
+|   |   |   `-- planned_delegation.py # 已有 Todo 时，创建前原子校验 active exact covers 与父级 workspace 上界
 |   |   |-- agent_tree/status.py        # `/status`、TUI、恢复与诊断共用的内部代理树投影（不是模型工具）
 |   |   |-- _finalization_service.py   # 保留模型最终正文并记录 turn_end.reason
 |   |   |-- tool_loop/natural_user_reply.py # 派工/续跑/完成共用的无工具 LLM 用户回复出口
@@ -256,6 +256,7 @@ docs/
 |-- design/AGENT_FOUNDATION_CAPABILITY_AUDIT_20260718.md # 自我描述、Shared、Memory、Persona、Compact、Skill、Workflow、配额、隐私和完成质量审计
 |-- design/P2_SCALE_ROLLOUT_DR_OWNER_STORE.md # 灰度/灾备/Owner store/24h proof 事实
 |-- architecture/BOUNDARY_RULES.md      # 分层和写入边界
+|-- architecture/MODEL_CATALOG_SNAPSHOT.md # 当前模型型号与未来声明式目录边界的可审计参考快照
 |-- architecture/MODULE_OWNERSHIP.md    # 当前模块归属
 |-- architecture/MY_AGENT_HOME_LAYOUT.md# owner home 布局
 |-- modules/                            # 分模块结构和进展

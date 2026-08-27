@@ -3,18 +3,17 @@ from __future__ import annotations
 """第1项 A 阶段行为锁定测试(无行为变更, 只固化当前超时预算事实)。
 
 锁定对象(steward seq 1453 审计意见 A 阶段):
-  1. text 协议下记账口径 == 统一可见口径(estimate_tokens(prompt) 恒等)
+  1. text 协议下记账口径包含真实出站的 system instruction 与用户 prompt
   2. native 协议下记账口径低估 IR(messages 不计入 estimate_tokens(prompt))
   3. 首 token 预算的 min clamp 与 effective=max(base, dynamic) 公式
   4. stream 后端 transport_owns_timeout=True -> 墙钟守卫不参与(掐断者是 idle 语义)
-  5. SSE idle: 无数据行约 request.timeout 秒掐断; 周期 data 行重置 idle deadline
-     但总墙钟预算(wall_deadline, 门槛3)不被 data 重置, 超预算即掐(wall_clock)
-  6. ProviderTimeoutError 在 ledger 记为 timed_out + stage(stream_idle/wall_clock/provider_declared)
+  5. SSE 首包与后续 idle 分相；周期有效 data 重置 deadline 且不受固定总墙钟误杀
+  6. ProviderTimeoutError 在 ledger 记为 timed_out + typed stage
   7. ModelCallTimeoutParams 只带 call_id/timeout_seconds/timeout_stage/elapsed_seconds/idle_silence_seconds(无原始时间戳)
 
 门槛2 更新 2/3: 原「无 elapsed 证据」锁定改为「参数层只暴露 elapsed, 不暴露时间戳」。
-门槛3 更新 5: 原「data 无限续命」锁定升级为「data 续命 idle + 总墙钟硬顶」——语义
-转变由先固化再改预告, 本文件按新语义变红后同步升级(见 test_sse_periodic_data_*)。
+慢模型修复更新 5: 删除会误杀健康长流的总墙钟硬顶；有效 data 只滚动 idle，
+整轮停止由用户中断、provider 断流或完整空闲窗口负责。
 
 B 阶段修恢复/证据字段时, 本文件 6/7 将按预期变红 -> 正是「先固化再改」的意义。
 """
@@ -68,8 +67,10 @@ from agent_py_agent.tests._tool_runtime_harness import (
 _PROD_TIMEOUT = dict(
     request_timeout=240,
     dynamic_timeout_min=30.0,
-    dynamic_timeout_max=600.0,
+    dynamic_timeout_max=10800.0,
     dynamic_timeout_safety_margin=2.0,
+    estimated_prefill_tokens_per_second=200.0,
+    estimated_output_tokens_per_second=20.0,
     max_tokens=8192,
 )
 
@@ -147,11 +148,17 @@ PROMPT = "请继续处理项目并产出最终报告。" * 30
 # ---------------------------------------------------------------- 1. 口径恒等/低估
 
 def test_text_protocol_ledger_matches_unified() -> None:
-    """text 协议: 记账口径 estimate_tokens(prompt) 与统一可见口径恒等。"""
+    """text 协议: 记账口径包含真实出站的 system instruction 与用户 prompt。"""
     agent = _agent(protocol="text")
     params = _params(protocol="text", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=8, body_chars=400)
-    assert model_visible_context_tokens(agent, params, PROMPT) == estimate_tokens(PROMPT)
+    expected = estimate_tokens(
+        {
+            "system_instruction": "",
+            "user_prompt": PROMPT,
+        }
+    )
+    assert model_visible_context_tokens(agent, params, PROMPT) == expected
 
 
 @pytest.mark.xfail(
@@ -181,8 +188,8 @@ def test_native_protocol_unified_counts_ir() -> None:
     assert estimate_tokens(PROMPT) * 5 <= unified
 
 
-def test_native_small_ir_both_clamped_to_floor() -> None:
-    """小 IR 下记账与统一口径都被 min clamp 到 30s -> effective 相同(低估被 clamp 掩盖)。"""
+def test_native_small_ir_uses_full_visible_context_for_first_event_budget() -> None:
+    """即使总请求预算仍由 base 托底，首包估算也必须随真实 IR 变大。"""
     agent = _agent(protocol="native")
     params = _params(protocol="native", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=8, body_chars=400)
@@ -196,10 +203,10 @@ def test_native_small_ir_both_clamped_to_floor() -> None:
         FirstTokenTimeoutParams(input_tokens=unified, ledger=ModelCallLedger(), options=options)
     )
     assert ft_ledger.timeout_seconds == pytest.approx(options.min_timeout_seconds)
-    assert ft_unified.timeout_seconds == pytest.approx(options.min_timeout_seconds)
-    assert effective_model_request_timeout_seconds(agent, ft_ledger.timeout_seconds) == pytest.approx(
-        effective_model_request_timeout_seconds(agent, ft_unified.timeout_seconds)
-    )
+    assert ft_unified.timeout_seconds >= ft_ledger.timeout_seconds
+    ledger_budget = effective_model_request_timeout_seconds(agent, ft_ledger.timeout_seconds)
+    unified_budget = effective_model_request_timeout_seconds(agent, ft_unified.timeout_seconds)
+    assert unified_budget >= ledger_budget
 
 
 def test_effective_timeout_is_max_of_base_and_dynamic() -> None:
@@ -215,9 +222,9 @@ def test_effective_timeout_is_max_of_base_and_dynamic() -> None:
         backend=SimpleNamespace(name="plain", max_tokens=512, stream_enabled=False, stream_timeout_is_idle=False)
     )
     assert effective_model_request_timeout_seconds(small, estimate.timeout_seconds) == pytest.approx(240.0)
-    # 分支 2: 生产 max_tokens=8192 -> output_gen≈273s -> dynamic=303 > base -> effective=303
+    # 分支 2: 慢模型按 20 token/s 估算，8192 输出约 410s，dynamic≈440s。
     prod = _agent(protocol="text")
-    assert effective_model_request_timeout_seconds(prod, estimate.timeout_seconds) == pytest.approx(303.1, abs=0.2)
+    assert effective_model_request_timeout_seconds(prod, estimate.timeout_seconds) == pytest.approx(439.6, abs=0.2)
 
 
 # ---------------------------------------------------------------- 2. stream 墙钟守卫不参与
@@ -309,30 +316,18 @@ def test_sse_silence_cut_off_after_request_timeout(sse_server: ThreadingHTTPServ
     assert elapsed >= 0.8
 
 
-def test_sse_periodic_data_resets_idle_deadline(sse_server: ThreadingHTTPServer) -> None:
-    """周期 data 行只重置 idle deadline: 总墙钟预算(wall_deadline)不被重置。
-
-    门槛3 前锁定语义为「data 无限续命」; 门槛3 升级为「data 续命 idle,
-    但总墙钟预算到顶仍掐断(持续 data 超总预算)」——/live 总时长 1.5s
-    > timeout=1 的 wall 预算, 掐断为 wall_clock。idle 重置的正向行为由
-    test_sse_periodic_data_within_wall_budget_completes 保留(timeout=5)。
-    """
+def test_sse_periodic_data_can_outlive_idle_window(sse_server: ThreadingHTTPServer) -> None:
+    """每条有效 data 都重置 idle，健康慢流总时长超过单窗也能完成。"""
     elapsed, lines, exc = _call_stream(sse_server, "/live", timeout=1)
-    assert lines >= 1  # 已收多行(每 0.3s 一行), 后因总墙钟预算耗尽被掐
-    assert isinstance(exc, ProviderTimeoutError)
-    assert exc.stage == "wall_clock"  # 门槛3: data 续命下唯一能掐的是总墙钟
-    assert elapsed < 3.0  # 掐断时间≈timeout=1(墙钟预算), 非 server 自然结束
-    assert elapsed >= 0.8
+    assert lines == 6
+    assert exc is None
+    assert elapsed >= 1.2
 
 
-def test_sse_periodic_data_within_wall_budget_completes(
+def test_sse_periodic_data_with_generous_idle_completes(
     sse_server: ThreadingHTTPServer,
 ) -> None:
-    """周期 data 行重置 idle deadline: 总时长(<wall 预算)内正常收完不掐断。
-
-    保留门槛2 锁定语义的正向面: 只要总墙钟预算未耗尽, data 续命使流
-    不被 idle 掐断(总时长 1.5s 仍 > 单次 data 间隔, 靠 idle 续命收完)。
-    """
+    """更宽 idle 同样正常完成，证明合同不依赖旧 wall budget。"""
     elapsed, lines, exc = _call_stream(sse_server, "/live", timeout=5)
     assert lines == 6
     assert exc is None
@@ -449,8 +444,8 @@ def test_ledger_timeout_rejects_unknown_stage() -> None:
 
 
 def test_ledger_timeout_accepts_all_known_stages() -> None:
-    """边界②: 四值(三值+legacy provider_wall)全部可写入, 含 legacy 兼容读取。"""
-    for stage in ("stream_idle", "wall_clock", "provider_declared", "provider_wall"):
+    """边界②: 五值(四个当前值+legacy provider_wall)全部可写入, 含 legacy 兼容读取。"""
+    for stage in ("first_event", "stream_idle", "wall_clock", "provider_declared", "provider_wall"):
         ledger = ModelCallLedger()
         ledger.started(
             ModelCallStartedParams(

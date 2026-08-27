@@ -44,10 +44,13 @@ class ProviderRequestRejectedError(ProviderConfigurationError):
         self.details = details
 
 
+# LLM: Provider timeout stage is a closed machine contract shared with the ledger; user-facing text never selects recovery behavior.
+# 类用途: 表示模型请求在哪个结构化等待阶段超时，供退避、恢复和诊断统一使用。
 class ProviderTimeoutError(ProviderRecoverableError):
     """The provider did not return before the configured request timeout.
 
-    ``stage`` 区分超时来源（门槛2）：``stream_idle``（SSE 数据流空闲掐断）、
+    ``stage`` 区分超时来源：``first_event``（响应头/首个 SSE data 等待超时）、
+    ``stream_idle``（首包后的 SSE 数据流空闲掐断）、
     ``wall_clock``（本进程墙钟守卫线程超时）、``provider_declared``（provider
     网络层声明的 connect/read 超时）。旧调用不传时保持 ``provider_wall``
     （历史语义兼容读取，读取端按 wall_clock 族处理）。
@@ -64,7 +67,7 @@ class ProviderTimeoutError(ProviderRecoverableError):
         if stage not in self._KNOWN_STAGES:
             raise ValueError(
                 f"未知 ProviderTimeoutError stage: {stage!r} "
-                f"(合法: stream_idle/wall_clock/provider_declared/provider_wall)"
+                f"(合法: first_event/stream_idle/wall_clock/provider_declared/provider_wall)"
             )
         super().__init__(message)
         self.stage = stage

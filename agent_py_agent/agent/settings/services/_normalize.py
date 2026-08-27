@@ -557,6 +557,18 @@ class SubagentAdvancedFieldsService:
         )
         out["dynamic_timeout_safety_margin"] = value
         _append_warning(warnings, warn)
+        for name in (
+            "estimated_prefill_tokens_per_second",
+            "estimated_output_tokens_per_second",
+        ):
+            value, warn = CoercionService.coerce_float(
+                name,
+                out.get(name),
+                getattr(defaults, name),
+                min_val=1.0,
+            )
+            out[name] = value
+            _append_warning(warnings, warn)
         timeouts, warn = _normalize_runner_timeout_by_role(
             out.get("runner_timeout_by_role", defaults.runner_timeout_by_role)
         )

@@ -64,6 +64,25 @@ def _bounded_output_tokens(configured: int, requested: int | None) -> int:
     return max(1, min(configured, int(requested)))
 
 
+# LLM: Request-local stream controls are forwarded only when present so legacy/fake stream callables keep their established signature.
+# 函数用途: 调用真实或测试流入口；只有本轮确有独立首包预算时才附加新参数。
+def _request_stream_lines(
+    lines,
+    path: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    first_event_timeout_seconds: float | None,
+):
+    if first_event_timeout_seconds is None:
+        return lines(path, payload, headers)
+    return lines(
+        path,
+        payload,
+        headers,
+        first_event_timeout_seconds=first_event_timeout_seconds,
+    )
+
+
 # LLM: 这是所有模型后端返回给运行时的唯一响应合同；新增内部历史字段时必须保证不会进入用户可见正文，并同步原生工具循环测试。
 # 类用途: 统一保存模型正文、用量、工具调用和厂商原生历史块，供后续工具轮继续使用。
 @dataclass
@@ -127,14 +146,16 @@ class _OpenAIGenerateRequest:
     response_schema: dict[str, Any] | None = None
     json_object: bool = False
     max_output_tokens: int | None = None
+    first_event_timeout_seconds: float | None = None
 
 
-# LLM: 供应商级请求控制集中在 typed options；新增高优先级规则或协议开关时不能继续扩张 generate 参数列表。
-# 类用途: 携带一次模型请求的宿主 system 指令和供应商思考开关，不混入用户正文或工具历史。
+# LLM: 供应商级请求控制集中在 typed options；首包预算必须保持 request-local，不能通过修改共享 backend 传递。
+# 类用途: 携带一次模型请求的宿主 system 指令、思考开关和首个流式事件等待预算，不混入用户正文或工具历史。
 @dataclass(frozen=True)
 class ProviderRequestOptions:
     system_instruction: str = ""
     thinking_disabled: bool = False
+    first_event_timeout_seconds: float | None = None
 
 
 # 原生工具能力探针的最大尝试次数(弱模型偶发无视强制 tool_choice 回散文,
@@ -450,18 +471,55 @@ class HttpBackend(BaseBackend):
 
         return post_json(self._gateway_request(path, payload, headers))
 
+    # LLM: Streaming collection forwards request-local first-event budget without changing backend-wide idle configuration.
+    # 函数用途: 发起并完整收集一条流式 provider 请求，供非增量调用方使用。
     def request_stream(
-        self, path: str, payload: dict[str, Any], headers: dict[str, str]
+        self,
+        path: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        *,
+        first_event_timeout_seconds: float | None = None,
     ) -> list[str]:
         """Send a streaming request and collect all data lines."""
-        return post_stream(self._gateway_request(path, payload, headers))
+        return post_stream(
+            self._gateway_request(
+                path,
+                payload,
+                headers,
+                first_event_timeout_seconds=first_event_timeout_seconds,
+            )
+        )
 
-    def request_stream_iter(self, path: str, payload: dict[str, Any], headers: dict[str, str]):
+    # LLM: The iterator preserves provider data order and per-request first-event timing for live consumers.
+    # 函数用途: 发起流式请求并逐条交付 data，使 TUI 能实时显示正文、思考和工具参数进度。
+    def request_stream_iter(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        *,
+        first_event_timeout_seconds: float | None = None,
+    ):
         """Send a streaming request and yield data lines as they arrive."""
-        yield from post_stream_iter(self._gateway_request(path, payload, headers))
+        yield from post_stream_iter(
+            self._gateway_request(
+                path,
+                payload,
+                headers,
+                first_event_timeout_seconds=first_event_timeout_seconds,
+            )
+        )
 
+    # LLM: This is the only adapter from backend state plus request-local options into the immutable transport envelope.
+    # 函数用途: 组装一次 GatewayRequest，同时保留稳定 idle 和本轮独立首事件预算。
     def _gateway_request(
-        self, path: str, payload: dict[str, Any], headers: dict[str, str]
+        self,
+        path: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        *,
+        first_event_timeout_seconds: float | None = None,
     ) -> GatewayRequest:
         """Build the immutable gateway request envelope used by all HTTP calls."""
         return GatewayRequest(
@@ -472,6 +530,7 @@ class HttpBackend(BaseBackend):
             headers=headers,
             timeout=self.request_timeout,
             connect_timeout=self.connect_timeout,
+            first_event_timeout=first_event_timeout_seconds,
         )
 
     # LLM: 供应商上下文窗口只从模型 metadata API 的结构化字段读取；失败或字段缺失返回 0，
@@ -529,6 +588,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 tools=tools,
                 tool_choice=tool_choice,
                 messages=messages,
+                first_event_timeout_seconds=provider_options.first_event_timeout_seconds,
             )
         )
 
@@ -617,6 +677,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 headers,
                 on_chunk=request.on_chunk,
                 on_thinking_delta=request.on_thinking_delta,
+                first_event_timeout_seconds=request.first_event_timeout_seconds,
             )
         obj = self.request_json("/chat/completions", payload, headers)
         return _openai_non_stream_response(
@@ -634,11 +695,18 @@ class OpenAICompatibleBackend(HttpBackend):
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
+        first_event_timeout_seconds: float | None = None,
     ) -> ModelResponse:
         """Parse OpenAI SSE and concatenate delta.content chunks."""
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
         text, usage, blocks, completion = collect_openai_stream_with_completion(
-            lines("/chat/completions", openai_stream_payload(payload), headers),
+            _request_stream_lines(
+                lines,
+                "/chat/completions",
+                openai_stream_payload(payload),
+                headers,
+                first_event_timeout_seconds,
+            ),
             on_chunk=on_chunk,
             on_thinking_delta=on_thinking_delta,
         )
@@ -1025,6 +1093,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             thinking_disabled=provider_options.thinking_disabled,
             on_thinking_delta=on_thinking_delta,
             on_tool_input_progress=on_tool_input_progress,
+            first_event_timeout_seconds=provider_options.first_event_timeout_seconds,
         )
 
     def generate_structured(
@@ -1117,6 +1186,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         thinking_disabled: bool = False,
         on_thinking_delta: Callable[[str], None] | None = None,
         on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
+        first_event_timeout_seconds: float | None = None,
     ) -> ModelResponse:
         payload: dict[str, Any] = {
             "model": self.model_name,
@@ -1169,6 +1239,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                 on_chunk=on_chunk,
                 on_thinking_delta=on_thinking_delta,
                 on_tool_input_progress=on_tool_input_progress,
+                first_event_timeout_seconds=first_event_timeout_seconds,
             )
         return self._generate_non_stream(payload, headers)
 
@@ -1229,6 +1300,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         on_chunk: Callable[[str], None] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
         on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
+        first_event_timeout_seconds: float | None = None,
     ) -> ModelResponse:
         """Parse Anthropic SSE and retry the same stream path once when no text is visible."""
         text, usage, blocks, completion = "", {}, [], StreamCompletion()
@@ -1239,6 +1311,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                 on_chunk,
                 on_thinking_delta=on_thinking_delta,
                 on_tool_input_progress=on_tool_input_progress,
+                first_event_timeout_seconds=first_event_timeout_seconds,
             )
             if _incomplete_stop_reason(completion.stop_reason):
                 # 截断：保留文本、丢弃工具块、标记 truncated（工具循环下一轮继续，
@@ -1281,10 +1354,17 @@ class AnthropicCompatibleBackend(HttpBackend):
         *,
         on_thinking_delta: Callable[[str], None] | None = None,
         on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
+        first_event_timeout_seconds: float | None = None,
     ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
         return collect_anthropic_stream_with_completion(
-            lines("/v1/messages", payload, headers),
+            _request_stream_lines(
+                lines,
+                "/v1/messages",
+                payload,
+                headers,
+                first_event_timeout_seconds,
+            ),
             on_chunk=on_chunk,
             on_thinking_delta=on_thinking_delta,
             on_tool_input_progress=on_tool_input_progress,

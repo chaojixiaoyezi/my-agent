@@ -27,6 +27,7 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
 )
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
 from agent_py_agent.agent.memory_archive import estimate_tokens
+from agent_py_agent.agent.model_guidance import provider_system_instruction
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
     canonical_history_result,
@@ -36,7 +37,7 @@ from agent_py_agent.tests._tool_runtime_harness import (
 _PROD_TIMEOUT = dict(
     request_timeout=240,
     dynamic_timeout_min=30.0,
-    dynamic_timeout_max=600.0,
+    dynamic_timeout_max=10800.0,
     dynamic_timeout_safety_margin=2.0,
     max_tokens=8192,
 )
@@ -130,11 +131,17 @@ PROMPT = "请继续处理项目并产出最终报告。" * 30
 # ---------------------------------------------------------------- 口径恒等/对齐
 
 def test_start_record_text_identity_with_ir_rounds() -> None:
-    """text 协议: 多轮 IR 后记账口径仍 == estimate_tokens(prompt) 恒等。"""
+    """text 协议: 多轮 IR 后记账仍等于真实 system + user 出站面。"""
     agent = _agent(protocol="text")
     params = _params(protocol="text", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=8, body_chars=400)
-    assert _recorded_input_tokens(agent, params, PROMPT) == estimate_tokens(PROMPT)
+    expected = estimate_tokens(
+        {
+            "system_instruction": provider_system_instruction(agent.backend),
+            "user_prompt": PROMPT,
+        }
+    )
+    assert _recorded_input_tokens(agent, params, PROMPT) == expected
 
 
 def test_start_record_native_accounting_matches_unified() -> None:

@@ -116,6 +116,18 @@ child；轻量运行时 遇到 600 秒流总墙钟超时，工具运行时 未�
 双 provider 证据已经成立，但本地模型长任务的超时、派工吞吐和取消调用 usage 下界仍是独立待办，不能
 用缓存命中替代任务通过。
 
+当前本地候选已按 会话运行时 拆掉流式固定总墙钟：动态 first-event 与 rolling idle 分相，预算作为 request-local
+option 传入，不修改共享 backend；默认慢速估算 200/20 token/s、最大 10,800 秒，可覆盖约 1M 输入的极慢
+prefill。`runtime_injections` 同时从 native 固定 user 前缀移到 IR 后动态尾部，避免 lifecycle wake 改写既有
+缓存前缀。超时、prompt/cache、native IR 相关 focused 已通过，仍需在 `.7` 本地慢模型和 `.10`
+MiniMax-M2.7 的真实 TUI 长多子代理任务中验证总时长、首包、idle、停止和 provider usage。
+
+r62 的第九名替身已定位为 `planned_dispatch.v2` 未检查已有直属兄弟的 active covers。候选协议升为 v3：
+活动直属 run 持续占用 exact covers，只有显式 replacement 可接管；创建复检、PLANNING 落账和 takeover edge
+进入同一短 guard，接管落账失败的新 child 在启动前取消。按 会话运行时 共享 workspace 边界，旧 output 祖先/
+相同路径硬拒绝已撤销，只保留父 workspace 上界；写集冲突继续是模型软分工，不恢复目录锁。派工 focused
+已通过，仍需 `.10` fresh TUI 复验 capability 恢复后不再重复补派。
+
 当前 `.7` 同一长 TUI 的新七路调研再次证明 7 个 child 都真实 `DONE`，但 root 最终只收到 3 份并错误收口。
 逐条 wake 账本已定位到更底层的接收者串线：前 6 条 completion 在兄弟 child 仍运行时被其 task-local
 模型安全点读取并确认，只有最后一条留给主代理。当前候选按 会话运行时 的 exact parent session mailbox 收口：

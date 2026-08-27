@@ -345,8 +345,28 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint=(
-            "本批尚未创建任何子代理；按结果中的 required_repairs 修正 exact covers 与"
-            "父级 workspace 内互不重叠的 output_files 后，保持用户原始约束重新派工。"
+            "本批尚未创建任何子代理；按结果中的 required_repairs 修正 exact covers、"
+            "活动直属占用或越过父级 workspace 的 output_files 后，保持用户原始约束重新派工。"
+        ),
+    ),
+    "SUBAGENT_REPLACEMENT_INVALID": ErrorContract(
+        code="SUBAGENT_REPLACEMENT_INVALID",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "接管必须精确引用同一直属父级下尚未被接管的 run_id；按 issues 修正"
+            " replacement_for_run_ids 后整批重试。"
+        ),
+    ),
+    "SUBAGENT_REPLACEMENT_RECORD_FAILED": ErrorContract(
+        code="SUBAGENT_REPLACEMENT_RECORD_FAILED",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint=(
+            "接管边未全部写入，新的 replacement 已在启动前取消；先恢复子代理状态存储，"
+            "再按原结构化接管关系重试。"
         ),
     ),
     "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED": ErrorContract(

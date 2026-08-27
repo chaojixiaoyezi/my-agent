@@ -3,7 +3,10 @@
 - [ ] Native prompt 必须用 typed `CacheStructuredPrompt` 表达稳定 system、run 固定首条 user 与动态尾部，
   不得按标题、用户正文或模型语言猜边界。Anthropic 必须保持「固定 user → append-only IR → 当前事实」且只有
   一个最新历史断点；OpenAI-compatible 保持同样顺序供 KV 缓存。Workspace 必须在动态尾部；关闭缓存/text
-  路径不得丢正文，canonical IR 与 Compact 不变。本地 focused 已通过；`.7` r62 终态账本已有
+  路径不得丢正文，canonical IR 与 Compact 不变。lifecycle wake/恢复/插话的 `runtime_injections` 也必须只在
+  IR 后动态尾部，不能改写稳定 user。流式请求必须使用 request-local first-event + rolling idle，持续有效
+  data 不受固定总墙钟误杀；默认 10,800 秒 max 只给极大慢输入，小请求仍按 token 估算。
+  本地 focused 已通过；`.7` r62 终态账本已有
   6,097,485 cache-read；本地 r64 首段也有 40,960 cached，但长任务因本地流 600 秒超时且只派出两名
   child 而失败，故仍不能勾选。OpenAI-compatible 还必须接受统一 thinking observer；有
   `reasoning_content` 时思考增量、封口、正文顺序和工具续轮回放均不得丢失。
@@ -66,6 +69,10 @@
 - [ ] 批量编码 `create_subagents.items` 必须由模型写清同一个目标目录和互不重叠的文件/模块边界；职责宽到
   会覆盖兄弟项或会修改同一文件/模块时应分批。该项只靠 会话运行时 式软派工纪律，不恢复 cwd/目录锁、不解析
   goal 猜写集；13 项 focused 已通过，待唯一 Gateway 部署后的下一轮真实复刻验证派工参数。
+- [ ] 同一直属父级已有 PLANNING/PENDING/RUNNING/BLOCKED/PAUSED child 占用 exact covers 时，新的
+  `create_subagents` 必须在任何 run 落盘前整批拒绝；只有显式 `replacement_for_run_ids` 可以接管。
+  replacement source 必须同父、唯一且未被接管，edge 落账失败的新 child 启动前取消。同批 output 可共享
+  父级 task root，不形成目录锁，越过父 workspace 仍拒绝。focused 已通过，待 `.10` fresh 真 TUI。
 - [ ] 逐个结束的 sibling child 即使共享 `root_task_id`，运行中的 `task_local` 安全点也不得读取或确认主代理
   lifecycle mailbox；每份 completion 必须保持 pending 直到 exact conversation parent 消费。focused 已用
   “child 零注入/零 ack，随后 parent 成功消费同一 id”覆盖，待原 `ma-97468f3-longchain-r27` 的七份调研

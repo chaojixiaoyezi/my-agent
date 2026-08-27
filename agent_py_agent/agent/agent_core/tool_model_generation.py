@@ -744,10 +744,16 @@ def _poll_generation_result(
         return None
 
 
+# LLM: Streaming providers own request-local first-event/idle timing; non-stream providers alone may use the outer total guard.
+# 函数用途: 按后端传输类型调用模型，并避免慢流通过修改共享 timeout 影响并发请求。
 def _generate_backend_response(
     request: ModelGenerateParams, state: _ModelGenerationState, timeout: float
 ):
     backend = request.agent.backend
+    # 流式传输通过 ProviderRequestOptions 获得 request-local 首包预算，并保留
+    # backend.request_timeout 作为稳定的事件间 idle。共享实例不能被并发请求临时改写。
+    if _transport_owns_stream_idle_timeout(request.agent):
+        return _invoke_backend_generate(backend, request.prompt, state)
     original = getattr(backend, "request_timeout", None)
     if timeout <= 0 or original is None:
         return _invoke_backend_generate(backend, request.prompt, state)
@@ -857,12 +863,18 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     provider_options_supported = bool(
         getattr(backend, "supports_provider_request_options", False)
     )
+    first_event_timeout = (
+        max(0.0, float(state.first_token_timeout_seconds))
+        if bool(getattr(backend, "stream_enabled", False))
+        else None
+    )
     _generate_started = time.monotonic()
     if state.tools is None and state.messages is None:
         kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
-        if system_instruction and provider_options_supported:
+        if provider_options_supported and (system_instruction or first_event_timeout is not None):
             kwargs["request_options"] = ProviderRequestOptions(
-                system_instruction=system_instruction
+                system_instruction=system_instruction,
+                first_event_timeout_seconds=first_event_timeout,
             )
         if thinking_observer is not None:
             kwargs["on_thinking_delta"] = thinking_observer
@@ -879,12 +891,15 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
             tool_choice = state.tool_choice or ToolChoice.auto()
             kwargs["tool_choice"] = tool_choice
             thinking_disabled = tool_choice.mode != "auto"
-        if provider_options_supported and (system_instruction or thinking_disabled):
+        if provider_options_supported and (
+            system_instruction or thinking_disabled or first_event_timeout is not None
+        ):
             # LLM: 强制 tool_choice(specific/required/none)必须同时关思考——部分兼容端点
             # (如 工具运行时 zen)在思考模式下拒绝强制工具选择；typed options 避免继续扩张公开签名。
             kwargs["request_options"] = ProviderRequestOptions(
                 system_instruction=system_instruction,
                 thinking_disabled=thinking_disabled,
+                first_event_timeout_seconds=first_event_timeout,
             )
         if state.messages is not None:
             kwargs["messages"] = state.messages

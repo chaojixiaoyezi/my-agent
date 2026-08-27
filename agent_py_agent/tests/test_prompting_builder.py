@@ -770,12 +770,39 @@ class TestBuildFullPrompt:
         assert "volatile conversation" not in layout.stable_prefix
         assert "volatile memory" in layout.stable_user_prefix
         assert "volatile clock" not in layout.stable_user_prefix
-        assert "volatile conversation" in layout.stable_user_prefix
+        assert "volatile conversation" not in layout.stable_user_prefix
         assert "current task" in layout.stable_user_prefix
         assert "volatile choice" in layout.stable_user_prefix
         assert "volatile clock" in layout.volatile_suffix
+        assert "volatile conversation" in layout.volatile_suffix
         assert "volatile fact" in layout.volatile_suffix
         assert str(result) == layout.render()
+
+    def test_native_runtime_injection_change_preserves_cacheable_prefix(self, tmp_path):
+        """恢复/唤醒事实变化时，system 与任务前缀字节必须保持一致。"""
+        config = AgentConfig(system_prompt="stable system", prompt_files=[])
+        builder = PromptBuilder(config, tmp_path)
+
+        first = builder.build(
+            "same task",
+            [],
+            inject=["wake event one"],
+            tools=ToolSections(native_tool_use=True),
+        )
+        second = builder.build(
+            "same task",
+            [],
+            inject=["wake event two"],
+            tools=ToolSections(native_tool_use=True),
+        )
+        first_layout = prompt_cache_layout(first)
+        second_layout = prompt_cache_layout(second)
+
+        assert first_layout is not None
+        assert second_layout is not None
+        assert first_layout.stable_prefix == second_layout.stable_prefix
+        assert first_layout.stable_user_prefix == second_layout.stable_user_prefix
+        assert first_layout.volatile_suffix != second_layout.volatile_suffix
 
     def test_build_with_tool_transcript_section(self, tmp_path):
         config = AgentConfig()

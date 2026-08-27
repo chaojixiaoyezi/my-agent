@@ -54,7 +54,8 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert item_schema["required"] == ["goal"]
     assert item_schema["properties"]["description"]["maxLength"] == 240
     assert item_schema["properties"]["output_files"]["type"] == "array"
-    assert "交付身份与冲突范围" in spec.parameter_descriptions["output_files"]
+    assert "交付身份与协调线索" in spec.parameter_descriptions["output_files"]
+    assert "同批多个 item 可以声明共同 task root" in spec.parameter_descriptions["output_files"]
     assert "角色就变为协调者" in spec.description
     assert "不要重做已经委派的任务" in spec.description
     assert "replacement child" in spec.description
@@ -63,7 +64,7 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "并行编码任务必须拆成互不重叠的文件或模块写入范围" in spec.description
     assert "共同目标目录和该项独占范围" in spec.description
     assert "互不重叠的文件或模块范围" in item_schema["properties"]["goal"]["description"]
-    assert "祖先/子目录重叠会在创建前整批退回" in spec.description
+    assert "同批 child 可以共享父级 task root" in spec.description
     assert "不是完整写集、权限或机器锁" in spec.description
     assert "顶层 goal 只是可选批次说明" in spec.description
 

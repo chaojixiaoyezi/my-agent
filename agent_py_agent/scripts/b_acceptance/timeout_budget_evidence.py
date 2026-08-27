@@ -77,11 +77,11 @@ from agent_py_agent.tests._tool_runtime_harness import (  # noqa: E402
 )
 
 # 生产配置值(config.py): request_timeout=240, dynamic_timeout_min=30,
-# dynamic_timeout_max=600, dynamic_timeout_safety_margin=2.0, max_output_tokens=8192
+# dynamic_timeout_max=10800, dynamic_timeout_safety_margin=2.0, max_output_tokens=8192
 _PROD_TIMEOUT_CONFIG = dict(
     request_timeout=240,
     dynamic_timeout_min=30.0,
-    dynamic_timeout_max=600.0,
+    dynamic_timeout_max=10800.0,
     dynamic_timeout_safety_margin=2.0,
     max_tokens=8192,
 )

@@ -1,5 +1,39 @@
 # TESTS
 
+## 2026-08-27 慢流、active covers 与缓存注入边界
+
+本轮回归同时钉住三个底层事实：
+
+- 流式请求只有动态 first-event 与 rolling idle，没有会误杀持续有效 SSE data 的固定总墙钟；首事件预算
+  是 request-local，不能修改共享 backend，`first_event/stream_idle/wall_clock` 分账。
+- 同一直属父级已有活动 child 占用 exact covers 时，后续批次除非显式 replacement，否则任何 run 落盘前
+  整批拒绝；接管关系预检失败零创建，edge 落账失败的新 child 启动前取消。
+- `runtime_injections` 位于 append-only native IR 后的动态尾部；只改变 wake 内容时稳定 system 与首条 user
+  前缀逐字不变。共享 task root 的 output 声明不再成为目录锁，越过父 workspace 仍硬拒绝。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_stream_timeout_contract.py \
+  agent_py_agent/tests/test_gateway_helpers.py \
+  agent_py_agent/tests/test_timeout_gate2_stages.py \
+  agent_py_agent/tests/test_timeout_budget_locked.py \
+  agent_py_agent/tests/test_tool_model_generation.py \
+  agent_py_agent/tests/test_dispatch_progress_seed.py \
+  agent_py_agent/tests/test_orchestration_tools.py \
+  agent_py_agent/tests/test_orchestration_create_subagents_tool.py \
+  agent_py_agent/tests/test_orchestration_create_subagents_idempotency.py \
+  agent_py_agent/tests/test_orchestration_create_subagents_items.py \
+  agent_py_agent/tests/test_prompting_builder.py \
+  agent_py_agent/tests/test_prompting.py \
+  agent_py_agent/tests/test_backends_openai_native_tool_use.py \
+  agent_py_agent/tests/test_backends_native_tool_use.py \
+  agent_py_agent/tests/test_native_tool_use_ir_messages_flow.py \
+  -q --tb=short
+```
+
+上述组合 focused 已通过（保留 1 个既有 xfail）。真实验收仍必须分别通过 `.7` 本地慢模型和 `.10`
+MiniMax-M2.7 的 fresh TUI 长多子代理任务；不能用 loopback SSE 或短提示冒充长任务通过。
+
 ## 2026-08-26 子代理具体工具审批回送所属 TUI
 
 第七层安全修复正确让 `controlled_exec(apply=true)` 在 child capability grant 后仍停在

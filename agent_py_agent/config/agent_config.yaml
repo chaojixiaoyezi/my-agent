@@ -340,7 +340,14 @@ runner_timeout_by_role: []
 runner_auto_concurrency: 8
 dynamic_timeout_safety_margin: 2.0
 dynamic_timeout_min: 30
-dynamic_timeout_max: 600
+dynamic_timeout_max: 10800
+# 没有足够实测 probe 样本时使用的保守吞吐估计：
+# - prefill 只决定当前请求等待首个有效流事件的预算；
+# - output 只决定非流式请求总预算；流式输出只受滚动 idle 和显式 /stop 约束。
+# 200/20 与 10800 秒上限可覆盖约 1M 输入、数百 token/s 预填充的极慢场景；
+# 小请求仍按真实 token 估算，不会一律等待 3 小时。
+estimated_prefill_tokens_per_second: 200.0
+estimated_output_tokens_per_second: 20.0
 # 门槛4: probe 统计参数(动态超时探针估计)。
 # - probe_min_samples: 每个 probe token 点最少样本数, 不足则回退 fixed-rate 估计。
 # - probe_window_samples: 滑窗上限, 每点最多取最近 N 条样本(防陈旧样本主导)。
@@ -603,7 +610,8 @@ api_key_env: "AGENT_API_KEY"
 # 模型名称
 model_name: "deepseek-v4-flash"
 
-# HTTP 请求总超时秒数；超时会记录为 provider_timeout，runner 会按有上限的失败策略重试。
+# HTTP 基础超时秒数：非流式请求把它当总时长下限；流式请求把它当首包后的滚动空闲窗口。
+# 首包等待会根据本轮输入量单独扩展，健康流式输出不会再被这个值当作整次总墙钟强杀。
 request_timeout: 240
 
 # 允许模型最多生成多少 token

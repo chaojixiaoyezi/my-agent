@@ -177,11 +177,11 @@ class PromptBuilder:
                 ),
                 _native_cache_volatile_suffix(
                     workspace_context=workspace_context,
+                    injected=injected,
                     execution_facts=_tools.execution_facts_section,
                 ),
                 stable_user_prefix=_native_cache_stable_user_prefix(
                     memory_text=memory_text,
-                    injected=injected,
                     tool_recommendations=(
                         _tools.tool_recommendations_section or default_recommendations
                     ),
@@ -232,33 +232,33 @@ def _native_cache_stable_prefix(
 
 
 # LLM: This run-stable initial user message sits before native IR so each new tool round extends
-# the prior provider prefix instead of rebuilding memory, conversation snapshot, and task text.
-# 函数用途: 组装当前 run 固定的记忆、会话快照、工具建议和用户任务。
+# the prior provider prefix. Runtime injections are excluded because wake/resume facts may change.
+# 函数用途: 组装当前 run 固定的记忆、工具建议和用户任务，不混入会变化的运行注入。
 def _native_cache_stable_user_prefix(
     *,
     memory_text: str,
-    injected: str,
     tool_recommendations: str,
     task_and_transcript: str,
 ) -> str:
     return (
         f"# Related Memory\n{memory_text}\n\n"
-        f"# Runtime Injection\n{injected or '（无）'}\n\n"
         f"{tool_recommendations}\n\n"
         f"{task_and_transcript}"
     )
 
 
-# LLM: Workspace provisioning can change once after the first tool call, while execution facts
-# change every call; both stay after append-only IR so neither invalidates the task/history prefix.
-# 函数用途: 组装当前工作区事实和本轮执行事实，作为消息历史之后的最新用户上下文发送。
+# LLM: Workspace provisioning, wake/resume injections, and execution facts may change while the
+# run lives. They stay after append-only IR so they cannot invalidate an already cached history prefix.
+# 函数用途: 组装工作区、运行注入和执行事实，作为消息历史之后的最新用户上下文发送。
 def _native_cache_volatile_suffix(
     *,
     workspace_context: str,
+    injected: str,
     execution_facts: str,
 ) -> str:
     return (
         f"# Workspace Context\n{workspace_context}\n\n"
+        f"# Runtime Injection\n{injected or '（无）'}\n\n"
         f"{execution_facts}\n"
     )
 

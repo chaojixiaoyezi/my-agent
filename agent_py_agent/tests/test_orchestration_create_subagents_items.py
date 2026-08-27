@@ -227,8 +227,8 @@ class TestCreateSubagentsItemsMode:
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 2
 
-    def test_items_reject_declared_parent_and_child_output_scopes_atomically(self):
-        """显式产物范围存在祖先/子目录重叠时必须整批返工，不能先启动互相覆盖的 worker。"""
+    def test_items_allow_declared_parent_and_child_output_scopes_for_coordination(self):
+        """共享工作区的祖先/子目录关系是协作信息，不是机器拒绝派工的理由。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
@@ -252,36 +252,15 @@ class TestCreateSubagentsItemsMode:
             ],
         })
 
-        payload = json.loads(result.output)
-        assert result.ok is False
-        assert result.reported_error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
-        assert result.effect_outcome == "not_started"
-        assert payload["overlapping_output_files"] == [
-            {
-                "left_index": 0,
-                "left_output_file": "replica/internal",
-                "right_index": 1,
-                "right_output_file": "replica/internal/core",
-                "reason": "same_or_nested_output_scope",
-            },
-            {
-                "left_index": 0,
-                "left_output_file": "replica/internal",
-                "right_index": 2,
-                "right_output_file": "replica/internal/param",
-                "reason": "same_or_nested_output_scope",
-            },
-        ]
-        assert payload["next_action"]["required_repairs"][-1]["action"] == (
-            "split_overlapping_output_scopes"
-        )
-        assert mock_agent.subagents.create_run.call_count == 0
+        assert result.ok is True
+        assert mock_agent.subagents.create_run.call_count == 3
 
-    def test_items_reject_equivalent_declared_output_file_spellings(self):
-        """同一路径的 `./` 写法差异不能绕过同批冲突预检。"""
+    def test_items_allow_equivalent_declared_output_file_spellings(self):
+        """同一路径的不同写法仍可由共享工作区 worker 协调处理。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _agent()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行编写报告",
             "items": [
@@ -290,12 +269,8 @@ class TestCreateSubagentsItemsMode:
             ],
         })
 
-        payload = json.loads(result.output)
-        assert result.ok is False
-        assert payload["overlapping_output_files"][0]["reason"] == (
-            "same_or_nested_output_scope"
-        )
-        assert mock_agent.subagents.create_run.call_count == 0
+        assert result.ok is True
+        assert mock_agent.subagents.create_run.call_count == 2
 
     def test_items_allow_similar_but_disjoint_declared_output_paths(self):
         """目录名只是字符串前缀但路径段不同，不得误判成祖先范围冲突。"""

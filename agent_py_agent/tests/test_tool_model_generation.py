@@ -725,7 +725,7 @@ def test_effective_model_timeout_includes_output_generation_budget():
         backend=SimpleNamespace(max_tokens=1200),
     )
 
-    assert _effective_model_request_timeout_seconds(dynamic_agent, 30) == 70
+    assert _effective_model_request_timeout_seconds(dynamic_agent, 30) == 90
 
 
 def test_model_generate_applies_dynamic_timeout_to_backend_request():
@@ -753,6 +753,41 @@ def test_model_generate_applies_dynamic_timeout_to_backend_request():
     assert response.text == "ok"
     assert backend.seen_timeout > 40
     assert backend.request_timeout == 1
+
+
+def test_stream_model_uses_request_local_first_event_budget_without_backend_mutation():
+    backend = _KwargRecordingBackend()
+    backend.stream_enabled = True
+    backend.stream_timeout_is_idle = True
+    backend.supports_provider_request_options = True
+    backend.request_timeout = 7
+    backend.max_tokens = 1200
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(
+            request_timeout=7,
+            dynamic_timeout_min=1,
+            dynamic_timeout_max=10800,
+            dynamic_timeout_safety_margin=2,
+            estimated_prefill_tokens_per_second=200,
+            estimated_output_tokens_per_second=20,
+        ),
+        _current_subagent_run_id="",
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=_tool_loop_params(),
+            prompt="hello" * 20_000,
+            tool_rounds=0,
+        )
+    )
+
+    assert response.text == "ok"
+    options = backend.seen[0]["request_options"]
+    assert options.first_event_timeout_seconds > backend.request_timeout
+    assert backend.request_timeout == 7
 
 
 class _KwargRecordingBackend:

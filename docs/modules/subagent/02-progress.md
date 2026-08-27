@@ -1,5 +1,18 @@
 # Subagent Progress
 
+## 2026-08-27 active covers 与 replacement 启动闸（本地候选）
+
+- r62 中原 child 在 capability grant 后已恢复，同一父级仍补建相同 `covers=["2"]` 的替身；旧预检只看
+  新批次内部，无法识别活动直属兄弟。当前 `planned_dispatch.v3` 只按 exact parent、typed status 和 covers
+  找占用者，不按 goal/title 猜重复；除非 item 显式声明接管该 run，否则整批零创建。
+- owner/task 短 guard 把容量/占用复检、PLANNING 落账与 takeover edge 串在同一创建事务内，但 child
+  运行不持锁。replacement source 必须是同一直属父级、尚未被接管且同批唯一；edge 失败时新 child 在
+  lifecycle 发布前进入 CANCELLED，并保存 `creation_abort` 事实。
+- 对照 会话运行时 共享项目工作区，旧 output 相同/祖先路径硬拒绝已撤销。`output_files` 只检查父 workspace
+  上界并提供协调线索，不是目录锁；并行写职责仍由模型在 goal 中拆成 disjoint write set。
+- dispatch/orchestration 相关 focused 已通过；待 `.10` MiniMax-M2.7 fresh 真 TUI 验证授权恢复、后续插话
+  和多批派工都不再创建同 cover 替身。
+
 ## 2026-08-26 child exact tool approval 上送 owner TUI（本地候选）
 
 - r51 证明 capability grant 与具体批准分账后，child 的危险调用能正确停在 handler 前；但后台 sink 没有

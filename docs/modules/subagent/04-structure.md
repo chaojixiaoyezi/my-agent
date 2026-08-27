@@ -83,7 +83,8 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   互不重叠的文件/模块写入范围，宽职责或同文件修改必须分批。总说明、items 参数和 item goal 描述复用
   同一常量；`output_files` 仍是可选提示，不变成完整写集、权限、锁或运行时验收。
 - `tool_specs.py::build_create_subagents_model_spec` 把软合同放进 provider 可见 schema/description；
-  `planned_delegation.py` 只核对调用者主动填写的 output 是否完全相同或互为祖先/子路径，冲突则整批
+  `planned_delegation.py` 只核对调用者主动填写的 output 是否仍在父级 workspace；同批相同或祖先路径
+  允许共享 task root，不形成目录锁。活动直属 child 对 exact covers 的占用由 planned dispatch v3 整批
   `not_started`。执行器不解析自然语言顺序、不把 role 当依赖事实、不猜未声明写入，也不增加完成裁决。
 
 ## 2026-08-25 当前任务 Todo 的显式读别名

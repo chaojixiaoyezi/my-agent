@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from ...contracts.model_call_ledger import ModelCallLedger, ModelCallRecord
 
 
+# LLM: First-event estimation parameters are pure request-planning inputs; they never mutate backend transport state.
+# 类用途: 保存首 token 预算所需的吞吐、上下限与 probe 采样策略。
 @dataclass(frozen=True)
 class FirstTokenTimeoutOptions:
-    estimated_prefill_tokens_per_second: float = 400.0
+    estimated_prefill_tokens_per_second: float = 200.0
     base_first_token_seconds: float = 3.0
     safety_margin: float = 1.5
     min_timeout_seconds: float = 5.0

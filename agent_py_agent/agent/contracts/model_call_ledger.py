@@ -16,7 +16,7 @@ from typing import Any
 # 否则旁路调用可写入未登记 stage 污染账本语义。四值 = 三值 + legacy
 # provider_wall(历史兼容读取, 读取端按 wall_clock 族处理)。
 TIMEOUT_STAGES = frozenset(
-    {"stream_idle", "wall_clock", "provider_declared", "provider_wall"}
+    {"first_event", "stream_idle", "wall_clock", "provider_declared", "provider_wall"}
 )
 
 

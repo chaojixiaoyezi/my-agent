@@ -588,18 +588,17 @@ class TestPostStream:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        with pytest.raises(ProviderTimeoutError, match="流式响应空闲超时"):
+        with pytest.raises(ProviderTimeoutError) as err:
             post_stream(_request())
+        assert err.value.stage == "first_event"
 
     @patch("agent_py_agent.agent.backends.gateway_helpers.time.monotonic")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
-    def test_stream_data_resets_idle_timeout_beyond_total_wall_time(
+    def test_stream_data_resets_idle_timeout_without_total_wall_limit(
         self, mock_urlopen, mock_monotonic
     ):
-        # 门槛3 语义: data 行续命 idle_deadline, 但总墙钟预算(request timeout=30)
-        # 不被 data 重置。时钟序列: 第 1 行检查在 20s(预算内, data 续命),
-        # 第 2 行检查在 45s(已超 30s 总预算) -> wall_clock 掐断。
-        # 门槛3 前该断言为 len==2(data 无限续命), 新语义下超预算即掐。
+        # 会话运行时 idle 语义：第 1 行在 20s 到达后把 deadline 延到 50s；
+        # 第 2 行在整次请求已过 45s 时仍正常接收，不存在固定 30s 总墙钟。
         mock_monotonic.side_effect = [0, 0, 20, 20, 20, 45, 45, 45]
         mock_response = MagicMock()
         mock_response.__iter__ = MagicMock(
@@ -609,12 +608,9 @@ class TestPostStream:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        from agent_py_agent.agent.backends.errors import ProviderTimeoutError
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
 
-        with pytest.raises(ProviderTimeoutError) as err:
-            post_stream(_request())
-        assert err.value.stage == "wall_clock"
+        assert len(post_stream(_request())) == 2
 
 
 class TestPostStreamIter:
@@ -744,8 +740,9 @@ def test_stream_watchdog_aborts_hanging_stream():
         return_value=HangingResponse(),
     ):
         start = _t.monotonic()
-        with pytest.raises(ProviderTimeoutError, match="流式响应空闲超时"):
+        with pytest.raises(ProviderTimeoutError) as err:
             list(post_stream(req))
+        assert err.value.stage == "first_event"
         elapsed = _t.monotonic() - start
     assert closed.is_set(), "看门狗应关闭卡住的流"
     assert elapsed < 5, f"看门狗应在 ~timeout(1s) 内解除冻结,实际 {elapsed:.1f}s"
@@ -793,8 +790,9 @@ def test_stream_watchdog_shuts_down_stdlib_socket_when_response_close_cannot_can
             "agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen",
             return_value=BufferedSocketResponse(),
         ):
-            with pytest.raises(ProviderTimeoutError, match="流式响应空闲超时"):
+            with pytest.raises(ProviderTimeoutError) as err:
                 list(post_stream(request))
+            assert err.value.stage == "first_event"
         elapsed = time.monotonic() - started
     finally:
         peer_release.cancel()
@@ -834,8 +832,9 @@ def test_stream_watchdog_maps_reader_teardown_attribute_error_to_typed_timeout()
         "agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen",
         return_value=ReaderCloseRaceResponse(),
     ):
-        with pytest.raises(ProviderTimeoutError, match="流式响应空闲超时"):
+        with pytest.raises(ProviderTimeoutError) as err:
             list(post_stream(request))
+        assert err.value.stage == "first_event"
 
     assert closed.is_set()
 

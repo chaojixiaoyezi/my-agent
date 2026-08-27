@@ -482,9 +482,16 @@ def has_dynamic_timeout_config(agent: object) -> bool:
     return any(hasattr(config, name) for name in ("dynamic_timeout_min", "dynamic_timeout_max", "dynamic_timeout_safety_margin"))
 
 
+# LLM: Runtime timeout options come only from normalized config and feed request-local first-event estimation.
+# 函数用途: 从当前代理配置读取慢模型首事件预算参数，供主代理和各级子代理共用。
 def first_token_timeout_options(agent: object) -> FirstTokenTimeoutOptions:
     config = getattr(agent, "config", None)
     return FirstTokenTimeoutOptions(
+        estimated_prefill_tokens_per_second=float_config(
+            config,
+            "estimated_prefill_tokens_per_second",
+            200.0,
+        ),
         safety_margin=float_config(config, "dynamic_timeout_safety_margin", 1.5),
         min_timeout_seconds=float_config(config, "dynamic_timeout_min", 5.0),
         max_timeout_seconds=float_config(config, "dynamic_timeout_max", 120.0),
@@ -533,11 +540,18 @@ def max_output_tokens(agent: object) -> int:
         return 0
 
 
+# LLM: Non-stream total budgeting may estimate full output time; stream liveness must not use this as a hidden wall clock.
+# 函数用途: 按最大输出 token 与保守速度估算非流式生成时间。
 def _output_generation_timeout_seconds(agent: object) -> float:
     tokens = max_output_tokens(agent)
     if tokens <= 0:
         return 0.0
-    return tokens / 30.0
+    config = getattr(agent, "config", None)
+    rate = max(
+        1.0,
+        float_config(config, "estimated_output_tokens_per_second", 20.0),
+    )
+    return tokens / rate
 
 
 def _clamp_dynamic_request_timeout(value: float, options: FirstTokenTimeoutOptions) -> float:

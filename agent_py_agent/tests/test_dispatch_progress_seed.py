@@ -596,7 +596,7 @@ def test_planned_dispatch_validates_only_supplied_exact_open_covers(tmp_path):
     contract = planned_dispatch_contract(_autobind_agent(tmp_path), items)
 
     assert contract["valid"] is False
-    assert contract["schema_version"] == "planned_dispatch.v2"
+    assert contract["schema_version"] == "planned_dispatch.v3"
     assert contract["binding_mode"] == "optional_exact"
     assert contract["open_target_ids"] == ["impl-core"]
     assert contract["unbound_item_indexes"] == [2]
@@ -653,6 +653,50 @@ def test_planned_dispatch_rejects_duplicate_child_bindings(tmp_path):
     assert contract["duplicate_covers"] == [
         {"id": "impl-core", "item_indexes": [0, 1]}
     ]
+
+
+def test_planned_dispatch_rejects_cover_owned_by_active_direct_child(tmp_path):
+    """跨批次同一 exact cover 只能由旧 child 继续，或由新 item 显式接管。"""
+    from agent.agent_core.orchestration.dispatch_progress_seed import planned_dispatch_contract
+    from agent.task_progress import write_task_progress
+
+    write_task_progress(
+        tmp_path,
+        "run-seed-1",
+        {"items": [{"id": "impl-core", "title": "实现核心", "status": "in_progress"}]},
+    )
+    active = SimpleNamespace(
+        id="subagent-active",
+        parent_id="run-seed-1",
+        status="RUNNING",
+        attributes={"covers": ["impl-core"]},
+    )
+    agent = _autobind_agent(tmp_path)
+    agent.subagents = SimpleNamespace(list_runs=lambda: [active])
+
+    duplicate = planned_dispatch_contract(
+        agent,
+        [_item("重复实现核心", {"covers": ["impl-core"]})],
+    )
+    replacement = planned_dispatch_contract(
+        agent,
+        [
+            _item(
+                "显式接管核心",
+                {
+                    "covers": ["impl-core"],
+                    "replacement_for_run_ids": ["subagent-active"],
+                },
+            )
+        ],
+    )
+
+    assert duplicate["valid"] is False
+    assert duplicate["active_covers_by_item"] == [
+        {"index": 0, "id": "impl-core", "run_ids": ["subagent-active"]}
+    ]
+    assert replacement["valid"] is True
+    assert replacement["active_covers_by_item"] == []
 
 
 def test_planned_dispatch_excludes_exact_seeded_child_rows(tmp_path):
