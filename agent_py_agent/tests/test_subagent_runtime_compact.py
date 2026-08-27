@@ -115,6 +115,42 @@ class _WriteThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
         return ModelResponse(text="子代理写入完成。", backend=self.name)
 
 
+class _OverflowThenListThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
+    name = "overflow-list-then-complete-child"
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
+        if prompt.startswith("You maintain a conversation summary"):
+            self.summary_prompts.append(prompt)
+            return ModelResponse(
+                text="旧轮次已压缩；继续使用同一子代理执行权。",
+                backend=self.name,
+            )
+        self.model_prompts.append(prompt)
+        self.model_messages.append(list(kwargs.get("messages") or []))
+        if len(self.model_prompts) == 1:
+            return ModelResponse(
+                text="provider reported context pressure",
+                backend=self.name,
+                runtime_status="context_overflow",
+                runtime_reason="context_overflow",
+                runtime_source="provider_error",
+                usage={"input_tokens": 90_000, "output_tokens": 10},
+            )
+        if len(self.model_prompts) == 2:
+            return ModelResponse(
+                text="压缩后继续读取当前工作区。",
+                backend=self.name,
+                tool_use_blocks=[
+                    {
+                        "id": "call-child-list-after-compact",
+                        "name": "list_files",
+                        "input": {"path": "."},
+                    }
+                ],
+            )
+        return ModelResponse(text="压缩后工具调用成功，子任务完成。", backend=self.name)
+
+
 def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     tmp_path: Path,
 ) -> None:
@@ -183,6 +219,53 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     assert _file_bytes(agent.memory.path) == owner_memory_before
     assert not (run_home / "compactions").exists()
     assert not (run_home / "recovery").exists()
+
+
+def test_subagent_compact_retry_keeps_exact_attempt_authorized_for_later_tools(
+    tmp_path: Path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            enable_tools=True,
+            my_agent_home=str(tmp_path / "home"),
+            tool_context_ptl_retry_max=0,
+            model_context_window_tokens=128_000,
+            memory_compact_auto_trigger_percent=90,
+        ),
+        tmp_path,
+    )
+    task = agent.subagents.create_run(
+        goal="上下文压缩后继续调用工具并完成子任务",
+        thought="同一 attempt 内续接。",
+        plan=["触发压缩", "继续调用工具", "完成"],
+        role="worker",
+        allowed_tools=["list_files"],
+    )
+    for role, content in (
+        ("user", "上一轮已经完成了初始目录核对。"),
+        ("assistant", "目录事实已经记录，可以继续后续工具步骤。"),
+    ):
+        agent.conversation_store.append_message(
+            {
+                "thread_id": task.agent_thread_id,
+                "role": role,
+                "content": content,
+                "metadata": {"conversation_request_id": "prior-attempt"},
+            }
+        )
+    backend = _OverflowThenListThenCompleteChildBackend()
+    agent.backend = backend
+
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    updated = agent.subagents.load(task.id)
+    ledger = updated.attributes.get("tool_failure_ledger", {})
+    assert result.ok
+    assert len(backend.model_prompts) == 3
+    assert updated.status == "DONE"
+    assert ledger.get("failures") == []
+    assert "TOOL_AUTHORITY_CONTEXT_MISSING" not in updated.result
 
 
 def test_child_transcript_thread_does_not_rebind_parent_conversation_task(

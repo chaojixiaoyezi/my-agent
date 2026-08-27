@@ -431,6 +431,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - provider 实报 overflow 的 native PTL 也调用上述完整预算事务，不再按 20% 在账外删工具对。摘要、checkpoint
   或 CAS 失败时 `_tool_loop_service` 恢复压缩前 IR/tool-context 并走同一 thread failure circuit；只有
   presentation/no-save 回合保留不计数的临时窗口事件。
+- child runner 对 provider/preflight `context_overflow` 的 Compact 重试属于同一 active attempt：通用
+  `agent.run()` 在 `context_scope=task_local` 且 `conversation_transcript_authoritative=true` 时不提前 settle，
+  外层 runner 用同一 exact attempt 继续，最终返回后再由 child lifecycle 唯一收口。其它非终态仍关闭旧
+  attempt、下轮显式创建新 attempt；工具权限门不接受已经终态的身份，也不会在 Compact 后静默重开。
 - 历史上已经删除的子代理专属 service、查树推动、session continue-packet 和多重索引不得因迁移复活；
   新 thread 只替换 Compact/会话持久层，不改变 `run_id/parent_run_id/root_run_id` 生命周期权威。
 - 当前 task 的结构化 goal 和 next actions 是恢复后的最高任务权威；旧摘要、归档包装和读取游标只能

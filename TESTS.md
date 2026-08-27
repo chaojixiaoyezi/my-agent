@@ -1,5 +1,28 @@
 # TESTS
 
+## 2026-08-28 子代理 Compact 后 exact attempt 仍可调用工具
+
+回归从真实 `.10` 失败链还原一条完整 child 生命周期：先在自己的 ConversationThread 形成历史，provider
+返回 typed `context_overflow`，宿主完成一次 Compact，然后同一 child 继续调用 `list_files` 并最终结束。
+断言必须同时证明：
+
+- Compact generation 真实推进，后续模型采样仍复用原 exact attempt；
+- 工具失败账没有 `TOOL_AUTHORITY_CONTEXT_MISSING`，最终 child 为 `DONE`；
+- 只有 authoritative `task_local` overflow 延迟收口，普通主代理、非权威 task-local、最终成功/失败和取消
+  仍走原审计终态合同，不能靠重开 attempt 或放宽工具门变绿。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_subagent_runtime_compact.py \
+  agent_py_agent/tests/test_run_audit_terminal.py \
+  agent_py_agent/tests/test_subagent_runtime_guards.py \
+  -q --tb=short
+```
+
+新端到端回归先红后绿；提交前还需完成上述组合、Ruff、doc sync、strict code-size、diff 与 clean-package。
+真机验收只认 `.10` 唯一 Gateway 的 fresh MiniMax-M2.7 长任务中 child `compact >= 1` 后出现成功工具结果，
+不能只看模型最终文字。
+
 ## 2026-08-28 后台 child 终态整合跨工具轮续接
 
 回归必须覆盖同一结构化 gate 的正反两面：

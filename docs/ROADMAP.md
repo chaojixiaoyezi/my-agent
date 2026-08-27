@@ -17,6 +17,19 @@
 
 ## 下一版优先级
 
+### 子代理 ConversationThread Compact 后保持同一执行权
+
+状态：本地实现与定向回归通过，待 `.10` 唯一 Gateway 真 TUI 复验
+
+解决问题：真实长 child 达到上下文阈值后，外层 runner 会压缩自己的 ConversationThread 并在同一 attempt
+继续；旧通用收口却先把该 attempt 标为 done，导致压缩后的所有工具调用被安全门判为失权。界面仍显示
+child 在工作，模型也继续思考，但实际已经无法读写，最终既慢又失败。
+
+当前进展：只把 authoritative `task_local` 的 typed `context_overflow` 视作 attempt 内部 Compact 边界，
+通用 `agent.run()` 暂不收口；child runner 最终返回时仍由唯一生命周期结案。权限门、取消、失败和普通
+`unfinished/blocked` 语义均不改变。下一步部署 `.10` 后用真实长复刻任务验证 child Compact 后仍能继续
+工具调用并自然终态；不得用短 fake prompt 冒充真机通过。
+
 ### 子代理终态后的主代理整合工作片持续续跑
 
 状态：本地实现与 focused 通过，待 `.10` 唯一 Gateway 真 TUI 复验

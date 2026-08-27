@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
+from ..conversation.authority import conversation_transcript_is_authoritative
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
 from ._compression_service import CompressionService
 from ._finalization_service import FinalizationService
@@ -494,12 +495,33 @@ def _settle_main_agent_run_status(
         pass
 
 
+# LLM: ConversationThread owns task_local Compact retries inside one delegated attempt; this
+# boundary must leave that exact authority running until the outer child lifecycle truly ends.
+# Keep the gate structural and narrow: never infer continuation from model text or reopen an
+# already settled attempt.
+# 函数用途: 判断当前返回是否只是子代理同一尝试内的压缩续接点，此时暂不结案执行凭证。
+def _task_local_compact_retry_keeps_attempt_open(params: RunParams, result: object) -> bool:
+    return (
+        str(getattr(params, "context_scope", "") or "").strip().lower() == "task_local"
+        and conversation_transcript_is_authoritative(
+            getattr(params, "task_attributes", None)
+        )
+        and str(getattr(result, "runtime_status", "") or "").strip().lower()
+        == "context_overflow"
+    )
+
+
+# LLM: This closeout owns standalone/main terminalization, but a delegated authoritative
+# ConversationThread Compact boundary is only an internal retry signal and must stay open.
+# 函数用途: 在一次模型运行真正结束时收口权威 run/attempt；子代理压缩续接点不提前收口。
 def _settle_main_agent_run(agent, params: RunParams, result) -> None:
     """正常返回路径收口：runtime_status=='ok' → 'done'，否则透传终态。
 
     CLI 一次性 run（source=cli_run）结束后非终态（blocked/unfinished 等）兜底
     落 failed，杜绝 attempt 悬挂——见 _settle_main_agent_run_status 注释。
     """
+    if _task_local_compact_retry_keeps_attempt_open(params, result):
+        return
     runtime_status = str(getattr(result, "runtime_status", "") or "").strip()
     _settle_main_agent_run_status(
         agent,

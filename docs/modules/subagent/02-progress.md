@@ -1,5 +1,17 @@
 # Subagent Progress
 
+## 2026-08-28 child Compact 后 exact attempt 执行权（本地候选）
+
+- `.10` Ripgrep 复刻的两名 child 在 provider/preflight overflow 后都成功推进自己的 Compact，但通用
+  `agent.run()` 同时把 exact attempt 提前 settle；外层 runner 继续后，`list_files` 等工具被现有安全门以
+  `TOOL_AUTHORITY_CONTEXT_MISSING` 拒绝。问题不是模型停止，也不是工具门过严，而是 Compact 与 attempt
+  生命周期的所有权冲突。
+- 对照 会话运行时 active turn 的内联 Compact loop，authoritative task-local overflow 现在保持同一 attempt
+  running；child runner 在真正终态时再唯一收口。实现不重开、复活或冒充旧 attempt，也不根据自然语言
+  判断“还要继续”。
+- 真实链路回归已先红后绿，Compact 后同一 child 成功调用 `list_files` 并自然 DONE；待严格 gate、推送与
+  `.10` 单 Gateway MiniMax-M2.7 长 TUI 复验。
+
 ## 2026-08-28 child 全终态后的主代理整合续接（本地候选）
 
 - Ripgrep 换语言复刻真机中三名 child 都已 `DONE`，main 的后台整合片真实执行 14 次模型调用和多项安装/

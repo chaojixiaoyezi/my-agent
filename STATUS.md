@@ -1,5 +1,18 @@
 # STATUS
 
+## 2026-08-28 子代理 Compact 后执行权续接（本地复现已修，待 `.10` 真 TUI）
+
+- `.10` 的真实 Ripgrep 换语言复刻里，两名 child 都先触发 ConversationThread Compact，随后继续生成
+  `list_files` 等工具调用，却统一收到 `TOOL_AUTHORITY_CONTEXT_MISSING`。权威 SQLite 证据显示同一
+  attempt 在 `runtime_status=context_overflow` 返回时已被通用 `agent.run()` 误结案，外层 child runner
+  虽按设计继续同一 attempt，工具安全门只能正确拒绝失效身份。
+- 当前候选对齐 会话运行时 active turn 内联 Compact：只有 authoritative `task_local` 的 typed
+  `context_overflow` 暂不结案 exact attempt，由 child runner 压缩后继续；最终完成、失败、取消及其它
+  可恢复返回仍沿原外层生命周期收口。没有重开旧 attempt，也没有放宽 current-attempt 权限门。
+- 新回归先稳定复现“Compact 后第一次工具被拒”，修复后同一 exact attempt 能继续调用真实 `list_files`
+  并自然 `DONE`；子代理 Compact、审计终态和运行权限相关定向回归已通过。待严格 gate、推送并在 `.10`
+  唯一 Gateway 的 fresh MiniMax-M2.7 长任务中观察至少一次 child `compact >= 1` 后继续成功调用工具。
+
 ## 2026-08-28 子代理终态后的后台整合续接（本地候选通过，待 `.10` 真 TUI）
 
 - `.10` 的 MiniMax-M2.7 Ripgrep 换语言复刻已让三名 child 全部自然 `DONE`；主代理随后真实进行整合、安装、

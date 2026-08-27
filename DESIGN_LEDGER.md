@@ -91,6 +91,13 @@
   `physical_model_attempt_count` 游标原子换算成 append-only 增量。每个增量事件保存原累计快照指纹，精确重放
   幂等、同 id 异值 fail closed；input/output/cache-read/cache-write 与 provider/estimated 分区均只累计新增值。
   禁止把第二份累计快照整条相加，也禁止复用 scope-only event id 让一次正常 Compact 续跑变成数据冲突。
+- delegated `task_local` 的 authoritative ConversationThread 在 provider/preflight overflow 后，由 child
+  runner 在同一个 exact `AgentAttempt` 内提交 Compact 并继续采样，对齐 会话运行时 active turn 内联压缩后
+  `continue` 的生命周期。这个 `context_overflow` 只是内部压缩边界，不得让通用 `agent.run()` 提前调用
+  `settle_agent_attempt` 撤销工具执行权；直到 child runner 真正完成、失败、取消或返回其它可恢复终态，才由
+  外层生命周期统一收口。该例外只认 `context_scope=task_local`、
+  `conversation_transcript_authoritative=true` 和 `runtime_status=context_overflow` 三项结构化事实，不解析模型
+  正文、不重开已经终态的 attempt，也不放宽 Tool Gateway 的 current-attempt 校验。
 - Compact 完成后的界面同步沿用 会话运行时 的 typed compact/token event 与 终端交互 的即时 post-compact state
   replacement：手动控制回执携带 canonical `task_status.compact_generation`，TUI 只据此推进次数。压缩前最后
   一份 provider-visible Context 快照立即失效并撤下，固定行保留真实代数和“下次模型调用刷新”；不得继续
