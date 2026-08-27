@@ -42,7 +42,9 @@
   两名 child 约 67.1k/51.8k，均低于 262.1k 模型的 90% 压缩点。
 - 测试机现已恢复 `/root/.my-agent/config/testbox-single-gateway.yaml`；唯一监听 PID `1476971`，有效配置为
   `anthropic_compatible + MiniMax-M2.7`。本地模型失败样本保留原 tmux 和 canonical task 供复核，不通过
-  新 Gateway 自动续跑。
+  新 Gateway 自动续跑。重启后直接复用 r62 长会话做只读证据复核：4 秒内出现思考并完整读取旧报告，
+  6 次真实调用为 31,378 普通 input / 138,444 cache-read / 47,165 cache-write / 2,609 output，重启后的
+  模型、长会话与缓存续接均有 provider 回执；按两档价格相对全普通输入分别节省约 62.53%/51.04%。
 
 ## 2026-08-26 长期会话、TUI 时序、任务目录与网络事实（已部署真机验证；LAN/启动仍有遗留）
 

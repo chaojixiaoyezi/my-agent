@@ -296,6 +296,10 @@ OpenAI-compatible 本地模型真 TUI 首次复验与回归：
   `CANCELLED`。超时和取消调用没有最终 provider usage，所以上述账只作成本下界；任务完成度按失败记录；
 - 停止前 main 约 43.2k/262.1k、child 约 67.1k/51.8k，均未到 90% 压缩点，因此 `compact 0` 正确，
   不能把长墙钟时间当作应该 Compact 的证据。
+- 恢复 MiniMax 单 Gateway 后，不另起重复长任务，而在已自然终态的 r62 长会话发一条只读证据复核追问；
+  4 秒内开始思考，随后列出三处原报告证据不足及 exact 报告路径。该轮 6 次 provider 调用为
+  31,378 input / 138,444 cache-read / 47,165 cache-write / 2,609 output，证明重启后模型、历史与缓存均续接；
+  屏幕 Context 从 78.3k 到 44.0k/58.1k，`compact 0` 不变，仍是终态工具折叠而非 Compact。
 
 真机协议探针（同一部署代码、同一配置、同一 MiniMax-M2.7 端点，不输出 Key 或 prompt）：
 

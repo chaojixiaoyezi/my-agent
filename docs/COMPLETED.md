@@ -6,7 +6,8 @@
   10 个 backend/stream/TUI 相关文件 207 项与本地严格 gate 全绿；候选已部署 `.7` 唯一 Gateway。
   fresh `ma-cache-long-local-r64` 首段真实命中 40,960 cached token，证明本地 KV 缓存链可用；其后长任务
   因一个 child 600 秒流超时、另一个未结束而由 TUI `/stop`，功能失败与成本下界继续留在 ROADMAP，
-  不写成完整任务通过。测试机唯一 Gateway 已恢复 MiniMax-M2.7。
+  不写成完整任务通过。测试机唯一 Gateway 已恢复 MiniMax-M2.7；重启后复用 r62 长会话只读核对旧报告，
+  4 秒开始思考且 6 次真实调用命中 138,444 cache-read，证明模型、历史和缓存续接正常。
 
 - 2026-08-27 完成 Anthropic-compatible 原生 prompt 的稳定 system/动态 user 分层：新增 typed
   `CacheStructuredPrompt`，完整字符串仍供归档、token 统计、text/关闭缓存路径使用；Anthropic native 只把
