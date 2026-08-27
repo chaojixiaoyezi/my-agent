@@ -72,7 +72,7 @@ thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 
-状态：V1/V2 均已部署真机；V2 本地搜索、热期与 cold 边界续接均通过，待不同 provider 长期校准
+状态：V1/V2 均已部署真机；追加式缓存 MiniMax 长任务已终态，本地模型长任务复验中
 
 解决问题：同一长 TUI 中，当前模型可见上下文从 60 多 K 回落到 50 多 K，但 canonical thread 仍为
 `compact 0`。权威账本证明没有漏记 Compact；真实缺口是普通回合结束后 native ToolCall/ToolResult 只保留
@@ -106,6 +106,12 @@ MiniMax、终端交互 MiniMax，比较耗时、缓存、Compact、子代理和�
 Compact 继续成功后再以同 event id 写更大的累计账，Store 正确 fail closed 却导致成功 child 被标失败。当前按
 物理调用游标生成事件 id，并在唯一 Store 锁内把累计快照减去既有增量；精确重放核对原快照指纹，缓存读写
 和 provider/estimated 分区不双计。该修复不改变 Compact 次数、task 状态或 provider cache 协议。
+
+同 prompt 的 r62 MiniMax 长任务已自然终态：201 次物理调用为 438,162 普通 input、6,097,485
+cache-read、553,087 cache-write、117,003 output，两档价格相对全普通输入节省约 84.30%/68.81%。
+OpenAI-compatible 本地模型首次真 TUI 在请求发出前因 `generate` 缺少统一 thinking observer 参数失败；
+当前候选已按 会话运行时 typed reasoning 事件与 DeepSeek Harness/工具运行时 `reasoning_content` 适配补齐接口、
+流式封口和工具轮回放，fresh r64 已进入子代理执行。待 r64 终态后才能关闭本地/provider 矩阵条目。
 
 当前 `.7` 同一长 TUI 的新七路调研再次证明 7 个 child 都真实 `DONE`，但 root 最终只收到 3 份并错误收口。
 逐条 wake 账本已定位到更底层的接收者串线：前 6 条 completion 在兄弟 child 仍运行时被其 task-local

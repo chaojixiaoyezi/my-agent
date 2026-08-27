@@ -87,6 +87,7 @@ def test_openai_native_history_translates_tool_calls_and_results() -> None:
         {
             "role": "assistant",
             "content": [
+                {"type": "thinking", "thinking": "I should inspect the file."},
                 {"type": "text", "text": "checking"},
                 {
                     "type": "tool_use",
@@ -127,6 +128,7 @@ def test_openai_native_history_translates_tool_calls_and_results() -> None:
     sent = captured["payload"]["messages"]
     assert sent[0] == {"role": "system", "content": "host authorization policy"}
     assert sent[1] == {"role": "user", "content": "original user prompt"}
+    assert sent[2]["reasoning_content"] == "I should inspect the file."
     assert sent[2]["tool_calls"][0]["function"]["arguments"] == '{"path": "README.md"}'
     assert sent[3] == {"role": "tool", "tool_call_id": "call_1", "content": "file contents"}
 

@@ -72,6 +72,7 @@ def openai_stream_contents(lines: Iterable[str]) -> Iterator[str]:
 
 def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
     tool_acc = _OpenAIToolCallAccumulator()
+    reasoning_parts: list[str] = []
     saw_done = False
     finish_reason = ""
     for line in lines:
@@ -86,8 +87,12 @@ def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         delta = choice.get("delta", {}) if isinstance(choice.get("delta"), dict) else {}
         tool_acc.consume(delta.get("tool_calls"))
         content = delta.get("content")
+        reasoning = delta.get("reasoning_content")
         finish_reason = str(choice.get("finish_reason") or "") or finish_reason
         usage = _usage_dict(obj.get("usage"))
+        if isinstance(reasoning, str) and reasoning:
+            reasoning_parts.append(reasoning)
+            yield StreamEvent(thinking_content=reasoning)
         if content or usage:
             yield StreamEvent(content=str(content or ""), usage=usage or None)
     blocks, parse_failed = tool_acc.finish()
@@ -97,6 +102,11 @@ def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         saw_message_stop=saw_done,
         stop_reason=finish_reason,
         open_tool_buffer=parse_failed,
+        assistant_content_blocks=(
+            ({"type": "thinking", "thinking": "".join(reasoning_parts)},)
+            if reasoning_parts
+            else ()
+        ),
     )
 
 

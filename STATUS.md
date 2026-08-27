@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-27 原生追加式 prompt 缓存（MiniMax 长任务复验中）
+## 2026-08-27 原生追加式 prompt 缓存（本地模型长任务复验中）
 
 - `.7` 唯一 Gateway 上用透明代理只记录长度、哈希和 cache marker，未记录 prompt 或 Key。旧链连续请求的
   tools/system 哈希不变，首条 user prompt 却从约 31KB→33KB→45KB；模型账出现 24,790 cache-write / 0 read，
@@ -18,10 +18,21 @@
 - `ma-cache-probe-minimax-r60` 修复后第三个连续回合为 5,959 uncached input、19,300 cache-read、0 cache-write，
   对照首个 25,192 全输入回合约缓存 76.6% 的输入。按输入 5、缓存 0.1/1 两档，单轮样本成本分别下降约
   74.8%/61.0%；模型仍能准确回答前文，指纹证明 stable system/tools 不变而动态 user 正常增长。
-- 本地 typed layout / Anthropic / OpenAI-compatible / native IR 定向测试已通过。r62 仍在同一
-  `.7` Gateway 真 TUI 中运行；截至 131 次已结账调用，当前为 354,625 普通 input /
-  3,576,645 cache-read / 286,660 cache-write，两档价格暂时节省约 83.1%/67.8%。这是进行中样本，
-  必须等 root 终态后重算；本地模型及 会话运行时/终端交互 对照仍要合并到最终矩阵。
+- r62 已在同一 `.7` Gateway 真 TUI 自然终态：201 次物理调用共 438,162 普通 input、
+  6,097,485 cache-read、553,087 cache-write、117,003 output，provider retry 为 0；按输入 5、
+  缓存 0.1/1，相对全部普通输入分别节省约 84.30%/68.81%。任务历时约 37 分 10 秒，原八名 child
+  均完成，但 工具运行时 首次被权限门阻塞后 root 同时恢复原 child 又创建替身，最终形成九名 child，
+  这属于独立的重复补派浪费，不能算缓存层收益。
+- 会话运行时/MiniMax 对照约 3 分 27 秒退出，创建约六名 child，但工作目录为空、TUI 无完整 final；其本地
+  adapter 丢弃 provider usage，不能把账本 0 当成零消耗。终端交互/MiniMax 约 5 分 18 秒完成八名
+  child 并给出终端汇报，但无落盘报告，627 条 usage 累计 10,109,604 普通 input、5,526,407
+  cache-read、36,428 cache-create、57,642 output，且把 轻量运行时 等项目识别错，速度不能冒充完成质量。
+- 首次本地模型 TUI `ma-cache-long-local-r63` 在 provider 请求前失败，结构化错误为
+  `OpenAICompatibleBackend.generate()` 不接受统一 `on_thinking_delta`。当前候选按 会话运行时 的 typed
+  reasoning event 与 DeepSeek Harness/工具运行时 的 `reasoning_content` 分流补齐统一 backend 合同：
+  增量思考先于正文展示、正文/工具或流结束时封口，工具调用轮只回放白名单思考字段。90 项直接相关
+  回归以及扩大后的 180 项 backend/stream/TUI 回归均已通过；fresh `ma-cache-long-local-r64` 已使用完整
+  普通中文长提示进入真实子代理阶段。
 
 ## 2026-08-26 长期会话、TUI 时序、任务目录与网络事实（已部署真机验证；LAN/启动仍有遗留）
 

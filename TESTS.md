@@ -277,6 +277,19 @@ python3 -m pytest \
 - 当前 prompt/cache/native IR/Compact 组合 140 项通过。长多子代理的 my-agent 本地/MiniMax 与
   会话运行时/终端交互 MiniMax 对照仍属本轮后续，不用该短诊断链冒充长任务验收。
 
+OpenAI-compatible 本地模型真 TUI 首次复验与回归：
+
+- `ma-cache-long-local-r63` 在模型 HTTP 请求前直接终止，Gateway terminal request 的结构化错误为
+  `TypeError: OpenAICompatibleBackend.generate() got an unexpected keyword argument 'on_thinking_delta'`；
+  这证明后端公开接口不一致，不能归因于模型慢、上下文溢出或缓存失效；
+- `OpenAICompatibleBackend` 现在接受统一 observer，流式解析 `delta.reasoning_content`，并保证完整思考
+  在第一段正文/工具或流结束时只封口一次；非流式响应仍由安全白名单 assistant block 走统一 fallback；
+- 工具调用续轮只在 assistant 同时含真实 tool calls 时回放 `reasoning_content`，普通文本轮不加供应商扩展
+  字段；未知响应字段不进入 canonical IR；
+- 首批三个直接文件 90 项通过；扩大到 backend、incomplete、message adapter、native、Gateway streaming、
+  thinking spinner 与 tool stream boundary 的 10 个文件共 180 项仍全绿。fresh
+  `ma-cache-long-local-r64` 已从同一自然语言长提示进入 `create_subagents`，最终账本另在终态记录。
+
 真机协议探针（同一部署代码、同一配置、同一 MiniMax-M2.7 端点，不输出 Key 或 prompt）：
 
 - 脱敏 payload 组装：`cache_enabled=True`，message/tool 各一个 `cache_control`；

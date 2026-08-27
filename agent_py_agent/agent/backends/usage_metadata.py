@@ -48,12 +48,21 @@ def collect_openai_stream(
 def collect_openai_stream_with_completion(
     lines: Iterable[str],
     on_chunk: Callable[[str], None] | None = None,
+    on_thinking_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
+    """收集 OpenAI-compatible SSE，并把 reasoning_content 与正文分流。
+
+    支持 ``complete(text)`` 的观察器会在第一段正文/工具块之前或流结束时收到一次
+    思考终态；普通 callback 只接收增量。任何展示回调异常都不能中断模型响应。
+    """
     parts: list[str] = []
     accumulated = ""
     previous_raw = ""
     usage: dict[str, Any] = {}
     blocks: list[dict[str, Any]] = []
+    thinking_parts: list[str] = []
+    thinking_closed = False
+    thinking_complete = getattr(on_thinking_delta, "complete", None)
     events = openai_stream_events(lines)
     completion = StreamCompletion()
     while True:
@@ -62,14 +71,33 @@ def collect_openai_stream_with_completion(
             break
         block = getattr(event, "tool_use_block", None)
         if block is not None:
+            thinking_closed = _complete_openai_thinking(
+                thinking_parts,
+                thinking_complete,
+                already_closed=thinking_closed,
+            )
             blocks.append(block)
             continue
         event_usage = getattr(event, "usage", None)
         if event_usage:
             usage = merge_usage(usage, event_usage)
+        thinking = str(getattr(event, "thinking_content", "") or "")
+        if thinking:
+            thinking_parts.append(thinking)
+            if callable(on_thinking_delta):
+                try:
+                    on_thinking_delta(thinking)
+                except Exception:
+                    pass
+            continue
         content = str(getattr(event, "content", "") or "")
         if not content:
             continue
+        thinking_closed = _complete_openai_thinking(
+            thinking_parts,
+            thinking_complete,
+            already_closed=thinking_closed,
+        )
         chunk = _stream_delta(previous_raw, accumulated, content)
         previous_raw = content
         if not chunk:
@@ -77,7 +105,31 @@ def collect_openai_stream_with_completion(
         parts.append(chunk)
         accumulated += chunk
         _emit_chunk(on_chunk, chunk)
+    _complete_openai_thinking(
+        thinking_parts,
+        thinking_complete,
+        already_closed=thinking_closed,
+    )
     return accumulated, usage, blocks, completion
+
+
+# LLM: Chat Completions 没有统一 reasoning block-stop；只允许在正文/工具开始或流结束的
+# typed 边界封口一次，callback 异常不能污染 provider 结果。
+# 函数用途: 把累计的 OpenAI-compatible 思考文本结束成一块用户可见历史。
+def _complete_openai_thinking(
+    parts: list[str],
+    complete: object,
+    *,
+    already_closed: bool,
+) -> bool:
+    if already_closed or not parts:
+        return already_closed
+    if callable(complete):
+        try:
+            complete("".join(parts))
+        except Exception:
+            pass
+    return True
 
 
 def collect_anthropic_stream(

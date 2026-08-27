@@ -1926,9 +1926,15 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   仍必须读取 provider usage ledger。下一阶段用同一长多子代理 prompt 分别验证 my-agent 本地模型/
   MiniMax，以及 会话运行时/终端交互 的 MiniMax 对照，不用屏幕 Context 猜成本。
 - r61 仅有 system/tools 稳定时，161 次调用共 4,696,945 普通 input / 1,286,446 read /
-  21,118 write，两档缓存价只节省约 21.0%/17.1%。r62 开启追加式 IR 后，截至已结账的
-  131 次调用为 354,625 普通 input / 3,576,645 read / 286,660 write，暂时节省 83.1%/67.8%。
-  r62 尚未终态，这组数据只是方向证据，最终文档必须用终态账本替换。
+  21,118 write，两档缓存价只节省约 21.0%/17.1%。r62 开启追加式 IR 后自然终态，201 次调用为
+  438,162 普通 input / 6,097,485 read / 553,087 write / 117,003 output；按输入 5、缓存 0.1/1，
+  相对全部普通输入分别节省约 84.30%/68.81%。r62 额外出现一个重复替身 child，故调用数和用量不是
+  理想最小值，账本仍按真实物理调用完整计入。
+- 所有 `BaseBackend.generate` 实现必须接受统一的 thinking observer，是否产生事件由真实 provider 协议
+  决定，不能因某后端不返回思考就省略公开接口参数。OpenAI-compatible Chat Completions 的
+  `delta.reasoning_content` 只作为展示增量和白名单 assistant history：第一段正文/工具或流结束形成 typed
+  complete；普通 assistant 文本不携带扩展字段，只有工具调用续轮按 DeepSeek/Qwen 兼容合同回放
+  `reasoning_content`。该事件不进入用户 prompt、任务状态、权限或工具裁决。
 
 ## 2026-08-27 缓存热尾、冷折叠与本地搜索空结果合同【状态：已部署；热期真 TUI 通过，冷边界长等待中】
 

@@ -120,6 +120,7 @@ class _OpenAIGenerateRequest:
     prompt: str
     system_instruction: str = ""
     on_chunk: Callable[[str], None] | None = None
+    on_thinking_delta: Callable[[str], None] | None = None
     tools: list[dict[str, Any]] | None = None
     tool_choice: ToolChoice | None = None
     messages: list[dict[str, Any]] | None = None
@@ -497,12 +498,16 @@ class OpenAICompatibleBackend(HttpBackend):
     """适配 OpenAI-compatible `/chat/completions` 接口。"""
 
     name = "openai_compatible"
+    # OpenAI-compatible chat 流没有统一 block-stop，但 reasoning_content 在首段正文或
+    # 流结束时有确定边界；适配器会在该边界调用同一 typed complete observer。
+    supports_thinking_completion = True
 
     def _tool_endpoint(self) -> str:
         return self.api_base + "/chat/completions"
 
-    # LLM: OpenAI-compatible 传输必须保持 system -> 初始 user -> 原生工具历史的固定顺序。
-    # 函数用途: 调用 chat/completions，并把宿主规则放入真正的 role=system 消息。
+    # LLM: OpenAI-compatible 传输必须保持 system -> 初始 user -> 原生工具历史的固定顺序；
+    # reasoning observer 是展示事件边界，不能进入 prompt、状态或工具裁决。
+    # 函数用途: 调用 chat/completions，把宿主规则放入真正的 role=system 消息，并转发兼容端点的思考流。
     def generate(
         self,
         prompt: str,
@@ -510,6 +515,7 @@ class OpenAICompatibleBackend(HttpBackend):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
         request_options: ProviderRequestOptions | None = None,
     ) -> ModelResponse:
         """Call the OpenAI-compatible chat completion endpoint."""
@@ -519,6 +525,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 prompt=prompt,
                 system_instruction=provider_options.system_instruction,
                 on_chunk=on_chunk,
+                on_thinking_delta=on_thinking_delta,
                 tools=tools,
                 tool_choice=tool_choice,
                 messages=messages,
@@ -560,7 +567,8 @@ class OpenAICompatibleBackend(HttpBackend):
             )
         )
 
-    # LLM: payload 角色由 typed request 字段决定；prompt 标题和模型正文都不能提升成 system。
+    # LLM: payload 角色由 typed request 字段决定；prompt 标题和模型正文都不能提升成 system，
+    # reasoning_content 只经观察器与白名单历史块离开适配器。
     # 函数用途: 组装一次 OpenAI-compatible 请求并选择流式或非流式解析。
     def _generate(self, request: _OpenAIGenerateRequest) -> ModelResponse:
         payload = {
@@ -604,7 +612,12 @@ class OpenAICompatibleBackend(HttpBackend):
             "Authorization": f"Bearer {self.api_key}",
         }
         if self.stream_enabled:
-            return self._generate_stream(payload, headers, on_chunk=request.on_chunk)
+            return self._generate_stream(
+                payload,
+                headers,
+                on_chunk=request.on_chunk,
+                on_thinking_delta=request.on_thinking_delta,
+            )
         obj = self.request_json("/chat/completions", payload, headers)
         return _openai_non_stream_response(
             obj,
@@ -612,17 +625,27 @@ class OpenAICompatibleBackend(HttpBackend):
             tools_requested=bool(tools),
         )
 
+    # LLM: reasoning_content 与正文必须走不同观察器，并在正文/工具或流结束前封口思考块；
+    # 回调失败不能改变模型响应和工具执行。
+    # 函数用途: 解析 OpenAI SSE，同时流式展示正文与兼容模型返回的思考过程。
     def _generate_stream(
         self,
         payload: dict[str, Any],
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Parse OpenAI SSE and concatenate delta.content chunks."""
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
         text, usage, blocks, completion = collect_openai_stream_with_completion(
             lines("/chat/completions", openai_stream_payload(payload), headers),
             on_chunk=on_chunk,
+            on_thinking_delta=on_thinking_delta,
+        )
+        assistant_blocks = _openai_assistant_content_blocks(
+            reasoning=_openai_reasoning_from_completion(completion),
+            text=text,
+            tool_blocks=blocks,
         )
         if _incomplete_stop_reason(completion.stop_reason):
             # 截断：保留已收文本，丢弃工具调用块（截断的工具调用不能安全执行），
@@ -632,6 +655,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 backend=self.name,
                 usage=usage,
                 tool_use_blocks=[],
+                assistant_content_blocks=assistant_blocks,
                 truncated=True,
                 stop_reason=completion.stop_reason,
             )
@@ -645,6 +669,7 @@ class OpenAICompatibleBackend(HttpBackend):
             backend=self.name,
             usage=usage,
             tool_use_blocks=blocks,
+            assistant_content_blocks=assistant_blocks,
             truncated=completion.truncated,
             stop_reason=completion.stop_reason,
         )
@@ -659,9 +684,12 @@ def _openai_non_stream_response(
     try:
         choice = obj["choices"][0]
         message = choice["message"]
-        if "content" not in message and "tool_calls" not in message:
-            raise ValueError("message has neither content nor tool_calls")
+        if not any(
+            field in message for field in ("content", "tool_calls", "reasoning_content")
+        ):
+            raise ValueError("message has neither content, reasoning, nor tool_calls")
         text = str(message.get("content") or "")
+        reasoning = str(message.get("reasoning_content") or "")
         blocks, malformed = _openai_tool_use_blocks(message)
     except Exception as exc:
         raise ProviderResponseError(
@@ -675,6 +703,11 @@ def _openai_non_stream_response(
             backend=backend_name,
             usage=usage_dict(obj.get("usage")),
             tool_use_blocks=[],
+            assistant_content_blocks=_openai_assistant_content_blocks(
+                reasoning=reasoning,
+                text=text,
+                tool_blocks=[],
+            ),
             truncated=True,
             stop_reason=finish_reason,
         )
@@ -688,6 +721,11 @@ def _openai_non_stream_response(
         backend=backend_name,
         usage=usage_dict(obj.get("usage")),
         tool_use_blocks=blocks,
+        assistant_content_blocks=_openai_assistant_content_blocks(
+            reasoning=reasoning,
+            text=text,
+            tool_blocks=blocks,
+        ),
         truncated=malformed,
         stop_reason=finish_reason,
     )
@@ -807,13 +845,60 @@ def _openai_message_from_native(message: dict[str, Any]) -> list[dict[str, Any]]
 
 def _openai_assistant_messages(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     texts = [str(block.get("text") or "") for block in blocks if block.get("type") == "text"]
+    reasoning = [
+        str(block.get("thinking") or "")
+        for block in blocks
+        if block.get("type") == "thinking"
+    ]
     calls = [_openai_function_call(block) for block in blocks if block.get("type") == "tool_use"]
     if texts or calls:
         message: dict[str, Any] = {"role": "assistant", "content": "".join(texts) or None}
         if calls:
             message["tool_calls"] = calls
+            reasoning_text = "".join(reasoning)
+            if reasoning_text:
+                # DeepSeek/Qwen 的 OpenAI-compatible 合同只要求在工具调用轮回放
+                # reasoning_content；普通 assistant 文本不加扩展字段，兼容严格端点。
+                message["reasoning_content"] = reasoning_text
         return [message]
     return []
+
+
+# LLM: OpenAI-compatible reasoning/text/tool_calls 进入 canonical IR 前只能经过这一白名单，
+# 未知 message 字段不得原样回放到后续请求。
+# 函数用途: 把一次 Chat Completions 回复整理成可显示、可续接的有序 assistant 块。
+def _openai_assistant_content_blocks(
+    *,
+    reasoning: str,
+    text: str,
+    tool_blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    if reasoning:
+        blocks.append({"type": "thinking", "thinking": reasoning})
+    if text:
+        blocks.append({"type": "text", "text": text})
+    blocks.extend(
+        {
+            "type": "tool_use",
+            "id": str(block.get("id") or ""),
+            "name": str(block.get("name") or ""),
+            "input": dict(block.get("input") or {}),
+        }
+        for block in tool_blocks
+    )
+    return blocks
+
+
+# LLM: StreamCompletion 只允许携带白名单 assistant blocks；本帮助函数只读取 thinking，
+# 不接受正文、工具参数或未知 provider 扩展字段。
+# 函数用途: 从 OpenAI-compatible 流收尾事实中取得完整思考文本。
+def _openai_reasoning_from_completion(completion: StreamCompletion) -> str:
+    return "".join(
+        str(block.get("thinking") or "")
+        for block in completion.assistant_content_blocks
+        if isinstance(block, dict) and block.get("type") == "thinking"
+    )
 
 
 def _openai_function_call(block: dict[str, Any]) -> dict[str, Any]:

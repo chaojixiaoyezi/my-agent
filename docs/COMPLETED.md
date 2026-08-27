@@ -1,5 +1,11 @@
 # COMPLETED
 
+- 2026-08-27 补齐 OpenAI-compatible 后端的统一 thinking observer 合同：首次本地模型真 TUI 的 typed
+  `on_thinking_delta` 参数错误已先红后绿；Chat Completions 的 `reasoning_content` 现在与正文分流，
+  在正文/工具或流结束处只封口一次，工具调用续轮只回放白名单思考字段，未知扩展不进 canonical IR。
+  10 个 backend/stream/TUI 相关文件 180 项与本地严格 gate 全绿；候选已部署 `.7` 唯一 Gateway，fresh
+  `ma-cache-long-local-r64` 已进入真实多子代理调研。完整本地/MiniMax/会话运行时/终端交互 矩阵仍留在 ROADMAP。
+
 - 2026-08-27 完成 Anthropic-compatible 原生 prompt 的稳定 system/动态 user 分层：新增 typed
   `CacheStructuredPrompt`，完整字符串仍供归档、token 统计、text/关闭缓存路径使用；Anthropic native 只把
   System、Owner Scope、Persona/Prompt Files/Skill 索引和文本工具目录放进顶层 system 缓存块，记忆、时间、

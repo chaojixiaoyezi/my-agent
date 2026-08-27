@@ -308,6 +308,47 @@ class TestOpenAICompatibleBackend:
             "after-second",
         ]
 
+    def test_generate_stream_separates_openai_reasoning_before_visible_text(self):
+        backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="qwen"))
+        events: list[str] = []
+
+        class ThinkingObserver:
+            def __call__(self, content: str) -> None:
+                events.append(f"thinking-{content}")
+
+            def complete(self, content: str) -> None:
+                events.append(f"thinking-complete-{content}")
+
+        def request_stream_iter(path, payload, headers):
+            del path, payload, headers
+            yield json.dumps(
+                {"choices": [{"delta": {"reasoning_content": "think"}}]}
+            )
+            yield json.dumps(
+                {"choices": [{"delta": {"reasoning_content": "ing"}}]}
+            )
+            yield json.dumps({"choices": [{"delta": {"content": "answer"}}]})
+            yield "[DONE]"
+
+        backend.request_stream_iter = request_stream_iter
+        response = backend.generate(
+            "test prompt",
+            on_chunk=lambda content: events.append(f"text-{content}"),
+            on_thinking_delta=ThinkingObserver(),
+        )
+
+        assert events == [
+            "thinking-think",
+            "thinking-ing",
+            "thinking-complete-thinking",
+            "text-answer",
+        ]
+        assert response.text == "answer"
+        assert response.assistant_content_blocks == [
+            {"type": "thinking", "thinking": "thinking"},
+            {"type": "text", "text": "answer"},
+        ]
+
     def test_generate_stream_normalizes_cumulative_openai_chunks(self):
         backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
         chunks: list[str] = []
