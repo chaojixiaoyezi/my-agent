@@ -343,7 +343,7 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     remaining_results = [
         item for item in params.tool_ir_history if isinstance(item, ToolResult)
     ]
-    assert 1 <= len(remaining_results) < 4
+    assert remaining_results == []
     assert "tool_context_window_overflow" not in params.live_archive_state
     assert (
         preflight_context_pressure_response(
@@ -361,7 +361,7 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     _assert_no_orphans(messages)
     tool_use, _ = _message_block_ids(messages)
     assert "toolu_1" not in tool_use
-    assert "toolu_8" in tool_use
+    assert "toolu_8" not in tool_use
     summaries = [
         item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
     ]
@@ -552,10 +552,10 @@ def test_native_window_defers_when_completed_history_consumes_recovery_headroom(
     assert pressure.runtime_status == "context_overflow"
 
 
-def test_native_window_rolls_back_candidate_below_trigger_but_above_recovery_target(
+def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
     tmp_path,
 ):
-    """薄摘要即使勉强低于 90% 也不提交，避免下一工具轮立刻再次 Compact。"""
+    """完整摘要覆盖最新巨型回执后可释放最后一对，避免假失败和立即重压。"""
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(
         {
@@ -582,6 +582,7 @@ def test_native_window_rolls_back_candidate_below_trigger_but_above_recovery_tar
     params = replace(
         _params(),
         save=True,
+        effective_on_chunk=(sink := _ContextCompactionSink()),
         provider_history_messages=[
             {
                 "role": "user",
@@ -598,14 +599,16 @@ def test_native_window_rolls_back_candidate_below_trigger_but_above_recovery_tar
 
     prompt = build_tool_loop_prompt(agent, params)
 
-    assert params.tool_ir_history == before_ir
+    assert params.tool_ir_history != before_ir
     assert summary_calls == [True]
-    assert store.load_thread(thread.thread_id).compact_generation == 0
-    pressure = preflight_context_pressure_response(
+    updated = store.load_thread(thread.thread_id)
+    assert updated is not None and updated.compact_generation == 1
+    assert sink.progress_rows[-1]["phase"] == "completed"
+    assert sink.progress_rows[-1]["after_tokens"] <= 8_100
+    assert preflight_context_pressure_response(
         SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=10)
-    )
-    assert pressure is not None
-    assert pressure.runtime_status == "context_overflow"
+    ) is None
+    _assert_no_orphans(_native_provider_messages(agent, params))
 
 
 def test_native_window_rolls_back_summary_that_still_exceeds_trigger(tmp_path):

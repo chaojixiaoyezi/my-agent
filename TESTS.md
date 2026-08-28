@@ -8,7 +8,8 @@
 
 Compact 回归必须覆盖：live/transcript 都低于同一 recovery target；每次尝试有独立 operation id；live 失败后
 后备进度仍显示；child transcript 收到 start/progress/completed；手动 `/compact` 入 outbox 后保持活动块，
-真实回执才收口。
+真实回执才收口。普通无摘要窗口必须保留最新工具对；完整替代摘要已覆盖本轮工具历史时，必须允许回收
+最后一对巨型回执，并证明 checkpoint/generation 成功、provider IR 无孤儿且不再立即触发 overflow。
 
 ```bash
 python3 -m pytest \
@@ -35,8 +36,11 @@ python3 -m pytest \
   -q --tb=short
 ```
 
-上述两组本地均通过；生产与测试改动少于 10,000 行，按项目约定不跑全仓 pytest。真机只使用 `.7` 唯一
-Gateway 与 MiniMax-M2.7，启动 fresh TUI 前必须先报告 tmux 名称和观察命令。
+上述两组本地均通过；追加的 Compact/TUI 组合共 185 项通过。生产与测试改动少于 10,000 行，按项目约定
+不跑全仓 pytest。真机只使用 `.7` 唯一 Gateway 与 MiniMax-M2.7，启动 fresh TUI 前必须先报告 tmux 名称和
+观察命令。当前真机官方超级玛丽任务证明：启动 cwd 不越过 owner home、5/5 child 自然完成、主 Compact
+`26,496 → 8,912` 且 child generation 达到 2、最终正文直显；最后一对巨型回执回收另由 exact focused
+回归锁定，避免用旁路修改被测产物来伪造通过。
 
 ## 2026-08-28 后台权威工作片 Compact、notice 与有界 handoff
 

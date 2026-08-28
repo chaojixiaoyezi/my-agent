@@ -612,6 +612,7 @@ def _apply_native_compact_plan(
             estimator=estimator,
             target=plan.target_tokens,
             dropped=dropped,
+            summary_covers_window=bool(plan.semantic_summary),
         )
         _emit_native_compact_progress(
             params,
@@ -657,12 +658,14 @@ def _settle_native_ir_window(
     estimator: Callable[[], int],
     target: int,
     dropped: int,
+    summary_covers_window: bool,
 ) -> tuple[int, int]:
     dropped = _reduce_native_ir_to_target(
         params,
         estimator=estimator,
         target=target,
         dropped=dropped,
+        summary_covers_window=summary_covers_window,
     )
     return dropped, estimator()
 
@@ -744,14 +747,16 @@ def _log_native_compact(
     )
 
 
-# LLM: Re-estimation includes the replacement summary and marker, and still removes only pairs.
-# 函数用途: 把摘要也计入预算，若仍超目标就继续成对删最旧工具往返直到稳定。
+# LLM: Re-estimation includes the replacement summary and marker. Once that complete summary is
+# installed, even the newest pair may be released; without a summary ordinary windowing must keep it.
+# 函数用途: 把摘要计入预算；完整摘要已经替代旧历史时，必要时连最后一对巨型回执也成对回收。
 def _reduce_native_ir_to_target(
     params: ToolLoopExecuteParams,
     *,
     estimator: Callable[[], int],
     target: int,
     dropped: int,
+    summary_covers_window: bool,
 ) -> int:
     record_native_ir_window(
         params,
@@ -764,6 +769,7 @@ def _reduce_native_ir_to_target(
             params,
             max_tokens=max(1, target),
             token_estimator=estimator,
+            preserve_newest_pair=not summary_covers_window,
         )
         if additional <= 0:
             break

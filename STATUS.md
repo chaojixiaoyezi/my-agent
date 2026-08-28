@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-28 Owner WorkspaceOnly、管理员 Full Access 与 Compact 动画（本地候选）
+## 2026-08-28 Owner WorkspaceOnly、管理员 Full Access 与 Compact 动画（`.7` 真 TUI 已通过）
 
 - 默认本地管理员与外部用户都从自己的 owner home 工作，不再继承启动 shell/Gateway cwd。只有结构化
   `local/main` 且配置为 `full-access` 才可越界；远程用户不能自提权，Full 父代理的 child 仍收窄。
@@ -9,8 +9,15 @@
 - 修复单 Gateway 并发 handler 串权限，以及子代理拿到项目写根后又被运行时过滤、相对路径落内部状态目录的
   根因。权限/沙箱 focused 全过（含平台相关 skip），子代理真实文件写入回归已通过。
 - Compact 候选现在必须降到带 recent-tail 余量的恢复目标；主自动、child 与手动 `/compact` 都有持续动画。
-  live 失败与 transcript 后备使用不同 operation id，不再互相吞进度。相关 focused 183 项通过。
-- 待完成文档/严格本地 gate、推送和 `.7` 单 Gateway MiniMax-M2.7 真 TUI 验收。
+  无摘要的轻量窗口仍保留最新工具对；完整替代摘要已经生成后，允许连最后一对巨型回执一起成对回收，
+  避免 `115.4k → 108.1k` 这类仍高于 `103.7k` 恢复线的假失败。相关 Compact/TUI focused 185 项通过。
+- `.7` 唯一 Gateway 的 MiniMax-M2.7 真 TUI 从 `/root` 启动后仍显示并使用
+  `/root/.my-agent/owners/local/main`。官方超级玛丽提示词创建 5 名 child，5/5 自然 DONE，产物为 owner home
+  下 `bbb/index.html`；主 thread 手动 Compact 显示真实 5% 动画并完成 `26,496 → 8,912`、generation 1，
+  最长 child 自动 Compact 2 次后继续工作并完成。主代理最终汇报直接出现，不需要 `Ctrl+O`。
+- 同一真机账本的主 thread 共 26 次物理模型调用：普通输入 323,871、cache-read 813,531、cache-write
+  167,556、输出 8,766，全部为 provider usage、失败/重试均为 0；因此先前普通后续轮 `cache-read=0`
+  没有复现。缓存结论只认这份结构化账本，不从 Context 显示倒推。
 
 ## 2026-08-28 后台真实 Compact、最终回复通知与有界续片（本地候选）
 
