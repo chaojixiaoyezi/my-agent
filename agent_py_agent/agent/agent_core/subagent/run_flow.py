@@ -194,16 +194,25 @@ def _run_subagent_model_turn(
     attempt_id: str,
 ):
     agent = lifecycle.agent
-    current = prepare_subagent_thread_turn(
-        agent,
-        task,
-        prompt=prompt,
-        attempt_id=attempt_id,
-    )
     carried_archive_tool_calls: list[dict[str, object]] = []
     carried_active_turn_user_inputs: list[dict[str, object]] = []
-    transcript_sink = _open_subagent_transcript_sink(agent, task, current, attempt_id)
+    thread = ensure_subagent_thread(getattr(agent, "subagents", None), task)
+    if thread is None:
+        raise RuntimeError("subagent ConversationStore is unavailable")
+    transcript_sink = _open_subagent_transcript_sink(agent, task, thread, attempt_id)
+    compact_progress = (
+        transcript_sink.write_conversation_compact_progress
+        if transcript_sink is not None
+        else None
+    )
     try:
+        current = prepare_subagent_thread_turn(
+            agent,
+            task,
+            prompt=prompt,
+            attempt_id=attempt_id,
+            progress_callback=compact_progress,
+        )
         for _attempt in range(8):
             run_params = _subagent_model_run_params(
                 context=context,
@@ -230,31 +239,16 @@ def _run_subagent_model_turn(
                 if transcript_sink is not None:
                     transcript_sink.finish()
                 return result
-            released_input_ids = release_active_turn_inputs_for_compact(agent, run_params)
-            result_archive = [
-                dict(item)
-                for item in list(getattr(result, "archive_tool_calls", None) or [])
-                if isinstance(item, dict)
-            ]
-            from ..runtime_mixin import _result_added_tool_progress
-
-            made_tool_progress = _result_added_tool_progress(
+            (
+                carried_archive_tool_calls,
+                carried_active_turn_user_inputs,
+                made_progress,
+            ) = _next_subagent_overflow_carry(
+                agent,
                 run_params,
                 result,
-                result_archive,
-            )
-            if result_archive:
-                carried_archive_tool_calls = result_archive
-            prior_active_turn_inputs = list(carried_active_turn_user_inputs)
-            carried_active_turn_user_inputs = exclude_active_turn_user_input_ids(
-                merge_active_turn_user_inputs(
-                    carried_active_turn_user_inputs,
-                    getattr(result, "active_turn_user_inputs", None),
-                ),
-                released_input_ids,
-            )
-            made_guidance_progress = (
-                carried_active_turn_user_inputs != prior_active_turn_inputs
+                carried_archive_tool_calls,
+                carried_active_turn_user_inputs,
             )
             refreshed = prepare_subagent_thread_turn(
                 agent,
@@ -262,10 +256,11 @@ def _run_subagent_model_turn(
                 prompt=prompt,
                 attempt_id=attempt_id,
                 force=True,
+                progress_callback=compact_progress,
             )
             if (
                 refreshed.compact_generation <= current.compact_generation
-                and not (made_tool_progress or made_guidance_progress)
+                and not made_progress
             ):
                 raise RuntimeError("subagent thread cannot compact the overflowing context")
             current = refreshed
@@ -276,6 +271,41 @@ def _run_subagent_model_turn(
         raise
     finally:
         _trim_subagent_transcript(agent, task, enabled=transcript_sink is not None)
+
+
+# LLM: Overflow retries may carry only typed tool progress and active-turn input records. Keep
+# release filtering here so a Compact retry cannot replay completed tools or consumed guidance.
+# 函数用途: 合并一次子代理超限轮次的结构化进度，并报告下一轮是否还有可继续的新增事实。
+def _next_subagent_overflow_carry(
+    agent,
+    run_params: RunParams,
+    result: object,
+    carried_archive_tool_calls: list[dict[str, object]],
+    carried_active_turn_user_inputs: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], bool]:
+    released_input_ids = release_active_turn_inputs_for_compact(agent, run_params)
+    result_archive = [
+        dict(item)
+        for item in list(getattr(result, "archive_tool_calls", None) or [])
+        if isinstance(item, dict)
+    ]
+    from ..runtime_mixin import _result_added_tool_progress
+
+    made_tool_progress = _result_added_tool_progress(
+        run_params,
+        result,
+        result_archive,
+    )
+    next_archive = result_archive or carried_archive_tool_calls
+    next_inputs = exclude_active_turn_user_input_ids(
+        merge_active_turn_user_inputs(
+            carried_active_turn_user_inputs,
+            getattr(result, "active_turn_user_inputs", None),
+        ),
+        released_input_ids,
+    )
+    made_guidance_progress = next_inputs != carried_active_turn_user_inputs
+    return next_archive, next_inputs, made_tool_progress or made_guidance_progress
 
 
 # LLM: Public display setup is explicitly best effort and must remain separate from

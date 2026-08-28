@@ -95,6 +95,7 @@ def _nonnegative_int(value: object) -> int:
 def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[str, object] | None:
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
+    _attach_effective_owner_scope(merged, agent, params)
     _attach_runtime_approved_actions(merged, params)
     _attach_task_workspace_roots(merged, params)
     _attach_main_conversation_execution_cwd(merged, agent, params)
@@ -103,8 +104,9 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     if extra_roots:
         existing = _string_list(merged.get("allowed_write_roots"))
         merged["allowed_write_roots"] = list(dict.fromkeys([*existing, *extra_roots]))
-    _attach_remote_owner_task_write_scope(merged, agent, params)
+    _attach_owner_task_write_scope(merged, agent, params)
     _attach_transient_named_work_write_scope(merged, agent, params)
+    _attach_owner_control_write_guards(merged, agent)
     guardrail_rows = tool_guardrail_records(agent)
     if guardrail_rows:
         merged["tool_guardrail_records"] = _merged_tool_guardrail_rows(
@@ -149,6 +151,19 @@ def _attach_runtime_approved_actions(
         seen.add(key)
     if combined:
         boundary["approved_actions"] = combined
+
+
+# LLM: A Full Access parent still creates WorkspaceOnly children. This per-run owner wall is a
+# host fact consumed by ToolExecutor and request-local handlers; it cannot come from model args.
+# 函数用途: 把当前主/子代理真正生效的 owner 边界写进本轮不可变工具权限快照。
+def _attach_effective_owner_scope(
+    boundary: dict[str, object],
+    agent: object,
+    params: object,
+) -> None:
+    owner_scope = _effective_owner_scope(agent, params)
+    if owner_scope:
+        boundary["effective_owner_scope_root"] = owner_scope
 
 
 # LLM: 去重 key 覆盖批准身份全部安全字段；仅 tool/idempotency 相同不能合并不同参数或 operation。
@@ -235,12 +250,17 @@ def _attach_task_workspace_roots(boundary: dict[str, object], params: object) ->
 # LLM: Before task promotion the host-validated client cwd is effective. After promotion the
 # canonical owner/task root replaces it for cwd and permissions; the daemon launch directory
 # must never remain an ambient write grant for main or children.
-# 函数用途: 普通聊天沿用启动目录；真正开始任务后把执行与读写范围收口到唯一任务目录。
+# 函数用途: 主会话默认使用 owner home；真正开始任务后把执行与读写范围收口到唯一任务目录。
 def _attach_main_conversation_execution_cwd(
     boundary: dict[str, object],
     agent: object,
     params: object,
 ) -> None:
+    context_scope = _text(getattr(params, "context_scope", "default")).lower() or "default"
+    if context_scope in {"task_local", "control_plane"}:
+        # 子代理 cwd 已由 runner_context 的结构化项目写合同给出。这里若再用内部
+        # run_workspace.task_root 覆盖，就会把用户项目相对路径错误写进状态目录。
+        return
     attrs = getattr(params, "task_attributes", None)
     has_typed_client_cwd = bool(
         isinstance(attrs, dict)
@@ -268,6 +288,16 @@ def _attach_main_conversation_execution_cwd(
         )
     if project_cwd is None:
         return
+    owner_scope = _resolved_path(getattr(tools, "owner_scope_root", None))
+    if owner_scope is not None and not _is_relative_to(project_cwd, owner_scope):
+        # 升级前落盘的旧 thread 可能仍带 Gateway daemon cwd。WorkspaceOnly 下只能
+        # 回到当前 owner home；不能让一条历史属性重新授予 /root 或源码树权限。
+        tool_workspace = _resolved_path(getattr(tools, "workspace_root", None))
+        project_cwd = (
+            tool_workspace
+            if tool_workspace is not None and _is_relative_to(tool_workspace, owner_scope)
+            else owner_scope
+        )
     cwd_text = str(project_cwd)
     boundary["execution_cwd"] = cwd_text
     requested_roots = (
@@ -278,57 +308,64 @@ def _attach_main_conversation_execution_cwd(
     execution_roots: list[str] = []
     for value in [cwd_text, *requested_roots]:
         root = _resolved_path(value)
-        if root is not None and str(root) not in execution_roots:
+        if root is None:
+            continue
+        if owner_scope is not None and not _is_relative_to(root, owner_scope):
+            continue
+        if str(root) not in execution_roots:
             execution_roots.append(str(root))
     boundary["execution_workspace_roots"] = execution_roots
-    provider = _text(getattr(getattr(agent, "config", None), "my_agent_owner_provider", "")).lower()
-    owner_scope = _text(getattr(tools, "owner_scope_root", ""))
-    if provider not in ("", "local") and owner_scope:
+    if owner_scope is not None:
         return
     roots = _string_list(boundary.get("allowed_write_roots"))
     boundary["allowed_write_roots"] = list(dict.fromkeys([*roots, *execution_roots]))
 
 
-def _attach_remote_owner_task_write_scope(
+# LLM: WorkspaceOnly grants a main turn the current owner's whole home, while task-local child
+# turns keep their narrower inherited task roots. Full Access is represented by a missing owner
+# wall and must not be inferred from provider names or prompt text.
+# 函数用途: 给主代理开放自己的完整用户目录，同时保持子代理只写当前任务的结构化范围。
+def _attach_owner_task_write_scope(
     boundary: dict[str, object],
     agent: object,
     params: object,
 ) -> None:
-    """把远程普通 owner 的通用写工具收窄到当前任务，local/admin 保持原有权限。"""
+    """Apply the canonical owner-home/main and task-local/child write scopes."""
 
-    # LLM: provider、owner_scope_root、task_root 都是运行时结构化事实；不能从用户自然语言
-    # 猜“是不是续做旧任务”。同一 owner 可以读取旧任务作参考，但普通文件工具和 shell 只写
-    # 当前已选任务。admin bypass 会把 owner_scope_root 置空，因此显式高权限豁免不受影响。
-    # 人类: 飞书同一用户的多个任务共用 owner home，owner 墙只能防串用户，不能防串任务；
-    # 这里补第二层任务墙，避免新任务拿绝对路径回写兄弟任务目录。
-    provider = _text(getattr(getattr(agent, "config", None), "my_agent_owner_provider", "")).lower()
-    owner_scope = _text(getattr(getattr(agent, "tools", None), "owner_scope_root", ""))
-    task_root_text = _text(boundary.get("task_root"))
-    if provider in ("", "local") or not owner_scope or not task_root_text:
+    owner_scope = _effective_owner_scope(agent, params)
+    if not owner_scope:
+        scope = _text(getattr(params, "context_scope", "default")).lower() or "default"
+        if scope not in {"task_local", "control_plane"} and _is_local_full_access(agent):
+            # Full Access is intentionally not a workspace allowlist. The path policy and
+            # catastrophic-command guard remain, while model arguments may name an external path.
+            boundary.pop("allowed_write_roots", None)
         return
 
     owner_root = _resolved_path(owner_scope)
-    task_root = _resolved_path(task_root_text)
-    if owner_root is None or task_root is None or not _is_strict_task_root(task_root, owner_root):
-        # 显式空白名单与“键缺失”不同：write_boundary 会 fail-closed；shell 则把 owner home
-        # 只读挂载。这样畸形/伪造 task_root 不会悄悄退回“整个 owner home 可写”。
+    if owner_root is None:
         boundary["allowed_write_roots"] = []
         return
 
-    if _is_main_conversation_task_run(params):
-        # A foreground turn can start as ordinary chat and promote/select a task
-        # after the tool loop is already running.  The live structured
-        # run_workspace is then authoritative, just as 会话运行时 rebuilds tools from
-        # the current TurnContext cwd/workspace_roots and 通道运行时 prepares each
-        # attempt from effectiveCwd/effectiveWorkspace.  Reusing the request's
-        # bootstrap roots here would leave the main agent bound to its old cwd.
-        # task_local/control_plane runs are deliberately excluded below so a
-        # child agent's narrower grant is never widened to the parent task root.
-        boundary["allowed_write_roots"] = _main_task_write_roots(
-            boundary,
-            task_root=task_root,
-            owner_root=owner_root,
-        )
+    scope = _text(getattr(params, "context_scope", "default")).lower() or "default"
+    if scope not in {"task_local", "control_plane"}:
+        # 用户自己的 owner home 是 WorkspaceOnly 的完整产品工作区。任务目录、旧项目和
+        # 用户直接放在 home 下的文件都可写；框架控制面由 forbidden_write_roots 另行保护。
+        boundary["allowed_write_roots"] = [str(owner_root)]
+        return
+
+    task_root_text = _text(boundary.get("task_root"))
+    if not task_root_text:
+        boundary["allowed_write_roots"] = []
+        return
+    task_root = _resolved_path(task_root_text)
+    if owner_root is None or task_root is None or not _is_strict_task_root(
+        task_root,
+        owner_root,
+        agent,
+    ):
+        # 显式空白名单与“键缺失”不同：write_boundary 会 fail-closed；shell 则把 owner home
+        # 只读挂载。这样畸形/伪造 task_root 不会悄悄退回“整个 owner home 可写”。
+        boundary["allowed_write_roots"] = []
         return
 
     if _is_exact_subagent_workspace_rebase(params, task_root):
@@ -340,59 +377,90 @@ def _attach_remote_owner_task_write_scope(
         boundary["allowed_write_roots"] = [str(task_root)]
         return
 
-    # 已有的结构化授权通常来自子代理分工，可能比 task_root 更窄；保留其窄权限，但过滤掉
-    # 兄弟任务或 owner 其他目录，绝不因追加 task_root 而把子代理权限反向放大。
+    product_roots = [
+        candidate
+        for raw in _string_list(boundary.get("product_write_roots"))
+        if (candidate := _resolved_path(raw)) is not None
+        and _is_relative_to(candidate, owner_root)
+    ]
+    # 已有的结构化授权可能是内部 task 子树，也可能是父代理明确分配的用户项目根。
+    # 后者必须同时出现在 product_write_roots 且位于 owner home 内；这样既不吞掉共享
+    # 项目写权，也不会把一个畸形 allowed_write_roots 单独当成授权来源。
     scoped: list[str] = []
     for raw in existing_roots:
         candidate = _resolved_path(raw)
-        if candidate is not None and _is_relative_to(candidate, task_root):
+        if candidate is not None and (
+            _is_relative_to(candidate, task_root)
+            or any(_is_relative_to(candidate, root) for root in product_roots)
+        ):
             text = str(candidate)
             if text not in scoped:
                 scoped.append(text)
     boundary["allowed_write_roots"] = scoped
 
 
-def _main_task_write_roots(
+# LLM: Owner home contains both user files and host-authoritative policy/control files. The main
+# WorkspaceOnly root may be writable, but these exact existing control paths stay read-only and
+# are propagated to both filesystem tools and process sandboxes through one boundary field.
+# 函数用途: 保护当前 owner 的权限、配额和运行账本，防止模型靠改框架元数据给自己提权。
+def _attach_owner_control_write_guards(
     boundary: dict[str, object],
-    *,
-    task_root: Path,
-    owner_root: Path,
-) -> list[str]:
-    """Return the host-authored writable areas for a provider task turn.
-
-    The task root is the stable cwd/read container.  Product files belong in
-    ``output`` and transient work belongs in ``work``; granting the whole root
-    lets models create parallel ad-hoc project directories beside those two
-    canonical locations.  Keep an explicit requested output directory only
-    when the structured workspace contract places it inside the same owner.
-    """
-
-    roots: list[str] = []
-    for key, expected in (
-        ("task_output_dir", task_root / "output"),
-        ("task_work_dir", task_root / "work"),
+    agent: object,
+) -> None:
+    owner_scope = _text(boundary.get("effective_owner_scope_root"))
+    if not owner_scope:
+        return
+    home = getattr(agent, "home_paths", None)
+    protected: list[str] = []
+    for name in (
+        "owner_permissions_json",
+        "owner_quota_json",
+        "owner_retention_json",
+        "owner_memory_policy_json",
+        "owner_skill_policy_json",
+        "owner_tool_policy_json",
+        "owner_runs_dir",
+        "owner_agents_dir",
+        "owner_compact_dir",
+        "owner_data_dir",
+        "owner_logs_dir",
+        "owner_capability_requests_dir",
+        "owner_temporary_grants_dir",
+        "owner_audit_log_jsonl",
     ):
-        raw = _text(boundary.get(key))
-        candidate = _resolved_path(raw) if raw else None
-        if candidate != expected.resolve(strict=False):
-            continue
-        text = str(candidate)
-        if text not in roots:
-            roots.append(text)
+        path = _resolved_path(getattr(home, name, None))
+        if path is not None and str(path) not in protected:
+            protected.append(str(path))
+    if protected:
+        existing = _string_list(boundary.get("forbidden_write_roots"))
+        boundary["forbidden_write_roots"] = list(dict.fromkeys([*existing, *protected]))
 
-    requested_text = _text(boundary.get("user_requested_output_dir"))
-    requested = _resolved_path(requested_text) if requested_text else None
-    owner_tasks = (owner_root / "tasks").resolve(strict=False)
-    if (
-        requested is not None
-        and requested != owner_root
-        and _is_relative_to(requested, owner_root)
-        and not _is_relative_to(requested, owner_tasks)
-    ):
-        text = str(requested)
-        if text not in roots:
-            roots.append(text)
-    return roots
+
+# LLM: The registry's owner wall describes the main agent. Task-local descendants additionally
+# use SubAgentManager.owner_scope_root so an administrator's Full Access never leaks downward.
+# 函数用途: 返回当前工具调用真正生效的 owner home 边界，主代理可为空，子代理始终恢复自己的家目录墙。
+def _effective_owner_scope(agent: object, params: object) -> str:
+    scope = _text(getattr(params, "context_scope", "default")).lower() or "default"
+    if scope in {"task_local", "control_plane"}:
+        child_scope = _text(getattr(getattr(agent, "subagents", None), "owner_scope_root", ""))
+        if child_scope:
+            return child_scope
+    return _text(getattr(getattr(agent, "tools", None), "owner_scope_root", ""))
+
+
+# LLM: Full Access is a host configuration of the local/main identity, not the absence of a path
+# by itself and never a claim parsed from chat text.
+# 函数用途: 判断本轮主代理是否拥有真正的本机全盘权限，供文件与命令写边界保持一致。
+def _is_local_full_access(agent: object) -> bool:
+    home = getattr(agent, "home_paths", None)
+    provider = _text(getattr(home, "owner_provider", "")).lower()
+    owner_kind = _text(getattr(home, "owner_kind", "")).lower()
+    access = (
+        _text(getattr(getattr(agent, "config", None), "access_mode", "workspace-write"))
+        .lower()
+        .replace("_", "-")
+    )
+    return provider in {"", "local"} and owner_kind in {"", "main"} and access == "full-access"
 
 
 def _is_main_conversation_task_run(params: object) -> bool:
@@ -439,9 +507,25 @@ def _resolved_path(raw: object) -> Path | None:
         return None
 
 
-def _is_strict_task_root(task_root: Path, owner_root: Path) -> bool:
-    tasks_root = (owner_root / "tasks").resolve(strict=False)
-    return task_root != tasks_root and _is_relative_to(task_root, tasks_root)
+# LLM: A child task root is valid only below one of the host-owned task namespaces: the public
+# owner tasks tree or this manager's canonical subagent workspace. An arbitrary owner subfolder
+# cannot become task authority merely because it is inside the owner wall.
+# 函数用途: 核对子代理内部任务目录是否来自框架的标准任务命名空间。
+def _is_strict_task_root(
+    task_root: Path,
+    owner_root: Path,
+    agent: object,
+) -> bool:
+    task_namespaces = [(owner_root / "tasks").resolve(strict=False)]
+    manager_workspace = _resolved_path(
+        getattr(getattr(agent, "subagents", None), "workspace", None)
+    )
+    if manager_workspace is not None and _is_relative_to(manager_workspace, owner_root):
+        task_namespaces.append((manager_workspace / "tasks").resolve(strict=False))
+    return any(
+        task_root != namespace and _is_relative_to(task_root, namespace)
+        for namespace in task_namespaces
+    )
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

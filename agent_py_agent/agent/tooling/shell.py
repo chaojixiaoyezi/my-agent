@@ -234,6 +234,9 @@ def _path_inside_any_root(path: Path, roots: list[Path]) -> bool:
     return False
 
 
+# LLM: Relative cwd values resolve against the canonical workspace, never process cwd. Owner scope
+# is checked before command access mode, and a per-turn root may only narrow—not widen—that scope.
+# 函数用途: 裁决命令实际工作目录，阻止普通用户或子代理借 working_dir 跳出自己的工作区。
 def _working_dir_from_params(
     params: dict[str, Any],
     workspace_root: Path,
@@ -244,6 +247,9 @@ def _working_dir_from_params(
 ) -> Path | ToolHandlerOutcome:
     working_dir = str(params.get("working_dir", "")).strip()
     target = Path(working_dir).expanduser() if working_dir else workspace_root
+    if not target.is_absolute():
+        target = workspace_root / target
+    target = target.resolve(strict=False)
     if not target.is_dir():
         field = "working_dir" if working_dir else "workspace_root"
         return ToolHandlerOutcome(
@@ -253,21 +259,24 @@ def _working_dir_from_params(
             error_code="PATH_NOT_FOUND",
         )
     mode = _normalize_access_mode(access_mode)
+    # owner wall is stronger than both a model-provided working_dir and a per-turn workspace
+    # projection. A normal user cannot turn full-access text or an injected root into host access.
+    if path_access_policy is not None and path_access_policy.owner_scope_root is not None:
+        decision = path_access_policy.check(target)
+        roots = workspace_roots or [workspace_root]
+        if not decision.allowed or not _path_inside_any_root(target, roots):
+            return ToolHandlerOutcome(
+                "run_command",
+                False,
+                "COMMAND_ACCESS_DENIED: 当前 owner 只能在自己的 WorkspaceOnly 范围内执行命令。",
+                error_code=decision.code or "PATH_OUTSIDE_WORKSPACE",
+            )
+        return target
     if mode == "full-access":
         return target
     roots = workspace_roots or [workspace_root]
     if _path_inside_any_root(target, roots):
         return target.resolve()
-    # LLM: owner-scoped shell 的 working_dir 只能来自 workspace_roots；本轮显式授权根由
-    #   registry 临时注入。禁止 PathAccessPolicy 的全局公共区放行变成额外可写挂载。
-    # 人类: 否则把 service-cwd 填进 working_dir，bwrap 会把它挂成可写目录。
-    if path_access_policy is not None and path_access_policy.owner_scope_root is not None:
-        return ToolHandlerOutcome(
-            "run_command",
-            False,
-            "COMMAND_ACCESS_DENIED: 多用户 owner 只能在当前任务工作区或结构化授权目录执行命令。",
-            error_code="PATH_OUTSIDE_WORKSPACE",
-        )
     if mode == "workspace-write":
         policy = path_access_policy or PathAccessPolicy.from_values()
         decision = policy.check(target)
@@ -591,6 +600,13 @@ def _sandbox_read_roots(params: dict[str, Any]) -> tuple[Path, ...] | None:
     return _sandbox_roots(params, "__sandbox_read_roots")
 
 
+# LLM: These roots are host-authored deny overlays, not model arguments. Process sandboxes apply
+# them after broader writable roots so owner control metadata cannot be changed indirectly.
+# 函数用途: 读取当前命令必须保持只读的 owner 控制面路径。
+def _sandbox_protected_write_paths(params: dict[str, Any]) -> tuple[Path, ...] | None:
+    return _sandbox_roots(params, "__sandbox_protected_write_paths")
+
+
 def _sandbox_roots(
     params: dict[str, Any],
     key: str,
@@ -627,6 +643,7 @@ def _sandbox_exec(
     protected_persona_root: object = None,
     write_roots: tuple[Path, ...] | None = None,
     read_roots: tuple[Path, ...] | None = None,
+    protected_write_paths: tuple[Path, ...] | None = None,
 ) -> tuple[Any, bool]:
     """把命令包进 attempt 沙箱（G6 接线）。
 
@@ -635,21 +652,23 @@ def _sandbox_exec(
     任务目录承担）、shared_workspace=owner home（只读底图）。
     单租户（owner_home 空）：full_access 档（bwrap 整根 bind / Seatbelt 不
     deny file-write），文件权限语义与宿主一致，隔离=网关统一+进程隔离。
-    protected_persona_root 非空（哪怕 owner_home 空）→ 非 full_access：
-    persona 文件强制只读。
+    protected_persona_root 只形成更精确的只读覆盖；它不会把已解除 owner 墙的
+    Full Access 降回 WorkspaceOnly。
     """
     from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec
     from .sandbox import strict_posix_shell_argv
 
     owner_text = str(owner_home or "").strip()
     persona_text = str(protected_persona_root or "").strip()
-    full_access = not owner_text and not persona_text
+    # Full Access is the absence of an owner wall. Persona and control metadata remain more
+    # specific read-only overlays; they must not silently downgrade the rest of the filesystem.
+    full_access = not owner_text
     if owner_text:
         owner = Path(owner_text).expanduser().resolve(strict=False)
         shared = owner
         base = owner
     elif persona_text:
-        # persona 只读要求=有隔离要求：以任务目录为底图，persona 根只读。
+        # Full Access 仍需要一个稳定字段承载 persona 精确只读覆盖；这不是 owner 墙。
         owner = Path(persona_text).expanduser().resolve(strict=False)
         shared = owner
         base = Path(persona_text).expanduser().resolve(strict=False)
@@ -668,6 +687,11 @@ def _sandbox_exec(
         ),
         extra_write_roots=tuple(Path(r).expanduser().resolve(strict=False) for r in (write_roots or ())),
         public_read_roots=tuple(Path(r).expanduser().resolve(strict=False) for r in (read_roots or ())),
+        protected_write_paths=tuple(
+            Path(r).expanduser().resolve(strict=False)
+            for r in (protected_write_paths or ())
+        ),
+        implicit_attempt_write_roots=write_roots is None,
         full_access=full_access,
     )
     sandbox = AttemptExecutionSandbox(spec)
@@ -690,7 +714,7 @@ def _spawn_background_process(
     protected_persona_root: object = None,
     write_roots: tuple[Path, ...] | None = None,
     read_roots: tuple[Path, ...] | None = None,
-    max_log_bytes: int = _MAX_BG_LOG_BYTES,
+    protected_write_paths: tuple[Path, ...] | None = None,
 ) -> HostedBackgroundProcess:
     if owner_home or protected_persona_root or os.name == "posix":
         exec_arg, use_shell = _sandbox_exec(
@@ -700,6 +724,7 @@ def _spawn_background_process(
             protected_persona_root,
             write_roots,
             read_roots,
+            protected_write_paths,
         )
         if use_shell or not isinstance(exec_arg, list):
             raise OSError("managed background sandbox must provide argv execution")
@@ -708,7 +733,7 @@ def _spawn_background_process(
             cwd=target,
             log_path=log_path,
             env=_subprocess_text_env(owner_home),
-            max_log_bytes=max_log_bytes,
+            max_log_bytes=_MAX_BG_LOG_BYTES,
         )
     if os.name == "nt":
         return start_background_process_host(
@@ -716,7 +741,7 @@ def _spawn_background_process(
             cwd=target,
             log_path=log_path,
             env=_subprocess_text_env(owner_home),
-            max_log_bytes=max_log_bytes,
+            max_log_bytes=_MAX_BG_LOG_BYTES,
         )
     from .sandbox import strict_posix_shell_argv
 
@@ -725,7 +750,7 @@ def _spawn_background_process(
         cwd=target,
         log_path=log_path,
         env=_subprocess_text_env(owner_home),
-        max_log_bytes=max_log_bytes,
+        max_log_bytes=_MAX_BG_LOG_BYTES,
     )
 
 
@@ -896,6 +921,7 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
             internal_parameters=(
                 "__sandbox_write_roots",
                 "__sandbox_read_roots",
+                "__sandbox_protected_write_paths",
                 "__access_mode",
                 "__run_scope",
             ),
@@ -1036,6 +1062,7 @@ class ShellTool(BaseTool):
             )
         sandbox_write_roots = _sandbox_write_roots(params)
         sandbox_read_roots = _sandbox_read_roots(params)
+        sandbox_protected_paths = _sandbox_protected_write_paths(params)
         target = self._execution_target(params, command)
         if isinstance(target, ToolHandlerOutcome):
             return target
@@ -1045,6 +1072,7 @@ class ShellTool(BaseTool):
                 target,
                 sandbox_write_roots,
                 sandbox_read_roots,
+                sandbox_protected_paths,
                 process_access_scope(
                     params.get("__run_scope"),
                     self.path_access_policy.owner_scope_root,
@@ -1056,6 +1084,7 @@ class ShellTool(BaseTool):
             timeout,
             sandbox_write_roots,
             sandbox_read_roots,
+            sandbox_protected_paths,
         )
 
     def _execution_target(
@@ -1086,6 +1115,7 @@ class ShellTool(BaseTool):
         timeout: int,
         sandbox_write_roots: tuple[Path, ...] | None,
         sandbox_read_roots: tuple[Path, ...] | None,
+        sandbox_protected_paths: tuple[Path, ...] | None,
     ) -> ToolHandlerOutcome:
         try:
             artifact_snapshots = snapshot_ready_artifacts(self.workspace_root)
@@ -1107,6 +1137,7 @@ class ShellTool(BaseTool):
             timeout,
             sandbox_write_roots,
             sandbox_read_roots,
+            sandbox_protected_paths,
         )
         display = process_facts.pop("_display", None)
         try:
@@ -1208,6 +1239,7 @@ class ShellTool(BaseTool):
         timeout: int,
         sandbox_write_roots: tuple[Path, ...] | None,
         sandbox_read_roots: tuple[Path, ...] | None,
+        sandbox_protected_paths: tuple[Path, ...] | None,
     ) -> tuple[str, bool, str, dict[str, object]]:
         try:
             result = self._run_command(
@@ -1216,6 +1248,7 @@ class ShellTool(BaseTool):
                 timeout,
                 sandbox_write_roots,
                 sandbox_read_roots,
+                sandbox_protected_paths,
             )
             output = _format_process_result(result, self.max_output_chars)
             ok = result.returncode == 0
@@ -1278,6 +1311,7 @@ class ShellTool(BaseTool):
         target: Path,
         sandbox_write_roots: tuple[Path, ...] | None,
         sandbox_read_roots: tuple[Path, ...] | None,
+        sandbox_protected_paths: tuple[Path, ...] | None,
         access_scope: ProcessAccessScope,
     ) -> ToolHandlerOutcome:
         try:
@@ -1301,6 +1335,7 @@ class ShellTool(BaseTool):
                 self.protected_persona_root,
                 sandbox_write_roots,
                 sandbox_read_roots,
+                sandbox_protected_paths,
             )
         except SandboxUnavailable as exc:
             return ToolHandlerOutcome(
@@ -1367,6 +1402,7 @@ class ShellTool(BaseTool):
         timeout: int,
         sandbox_write_roots: tuple[Path, ...] | None = None,
         sandbox_read_roots: tuple[Path, ...] | None = None,
+        sandbox_protected_paths: tuple[Path, ...] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return _run_shell_command(
             self,
@@ -1375,6 +1411,7 @@ class ShellTool(BaseTool):
             timeout,
             sandbox_write_roots,
             sandbox_read_roots,
+            sandbox_protected_paths,
         )
 
 
@@ -1385,6 +1422,7 @@ def _run_shell_command(
     timeout: int,
     sandbox_write_roots: tuple[Path, ...] | None,
     sandbox_read_roots: tuple[Path, ...] | None,
+    sandbox_protected_paths: tuple[Path, ...] | None,
 ) -> subprocess.CompletedProcess[str]:
     # G6：POSIX（macOS/Linux）一律经 attempt 沙箱路径（单租户=full_access 档）；
     # Windows 单租户保留宿主 powershell（Attempt 网关不支持该平台，owner-scoped
@@ -1401,6 +1439,7 @@ def _run_shell_command(
             timeout,
             sandbox_write_roots,
             sandbox_read_roots,
+            sandbox_protected_paths,
         )
     if os.name == "nt":
         proc = subprocess.Popen(
@@ -1430,6 +1469,7 @@ def _run_attempt_sandboxed_shell_command(
     timeout: int,
     sandbox_write_roots: tuple[Path, ...] | None,
     sandbox_read_roots: tuple[Path, ...] | None,
+    sandbox_protected_paths: tuple[Path, ...] | None,
 ) -> subprocess.CompletedProcess[str]:
     owner_home = tool.path_access_policy.owner_scope_root
     exec_arg, use_shell = _sandbox_exec(
@@ -1439,6 +1479,7 @@ def _run_attempt_sandboxed_shell_command(
         tool.protected_persona_root,
         sandbox_write_roots,
         sandbox_read_roots,
+        sandbox_protected_paths,
     )
     try:
         proc = subprocess.Popen(

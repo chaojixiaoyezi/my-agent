@@ -2,8 +2,8 @@
 
 - Linux：bwrap/namespace（复用 agent.tooling.sandbox 的挂载构造与自检）。
 - macOS：Seatbelt（sandbox-exec）SBPL profile。
-- 共享 workspace / owner 系统状态只读或不可见；仅 attempt view + staging
-  可写（E.4/E.5）。
+- 共享 workspace / owner 系统状态只读或不可见；独立 attempt 默认只写 view + staging，
+  生产进程有显式写边界时只写该边界，cwd 可以保持只读（E.4/E.5）。
 - readiness 失败（E.6）：任何可能写文件的 shell/build/test/child 进程
   handler=0，抛 SandboxUnavailableError（SANDBOX_UNAVAILABLE）；绝不退回
   "只设 cwd" 的宿主 shell（E.7）。
@@ -48,9 +48,12 @@ class SandboxUnavailableError(SandboxUnavailable):
     """
 
 
+# LLM: AttemptSandboxSpec separates readable cwd from explicit writable roots. Production process
+# tools must set implicit_attempt_write_roots=False whenever a host write boundary is present.
+# 类用途: 描述一次命令可读、可写、受保护和网络范围，供 Linux/macOS 共用。
 @dataclass(frozen=True)
 class AttemptSandboxSpec:
-    """attempt 级沙箱合同：attempt view 与 staging 可写，其余只读/不可见。"""
+    """attempt 级沙箱合同：独立 attempt 写 view/staging；生产调用服从显式写根。"""
 
     attempt_view: Path       # 本 attempt 唯一可写工作根（E.1）
     staging_root: Path       # 发布源 staging 区（H 节），可写
@@ -64,6 +67,10 @@ class AttemptSandboxSpec:
     protected_persona_root: Path | None = None  # SOUL/USER/AGENTS.md 强制只读
     extra_write_roots: tuple[Path, ...] = ()  # __sandbox_write_roots 结构化授权根
     public_read_roots: tuple[Path, ...] = ()  # __sandbox_read_roots 只读根
+    protected_write_paths: tuple[Path, ...] = ()  # forbidden_write_roots，最后覆盖为只读
+    # Standalone attempt views are writable by definition. Production shell sets False whenever
+    # an explicit write-boundary list exists, so a read-only cwd never becomes an implicit RW root.
+    implicit_attempt_write_roots: bool = True
 
 
 class AttemptExecutionSandbox:
@@ -209,22 +216,30 @@ class AttemptExecutionSandbox:
     # task work 临时根；必须先于 attempt_view，避免 build_bwrap_argv 把项目 cwd 当 /tmp 后端。
     # 函数用途: 为 Linux 组装 bwrap 参数，并让任务临时区与当前项目目录分离。
     def _linux_argv(self, command_argv: list[str]) -> list[str]:
+        implicit_roots = (
+            (self.spec.attempt_view, self.spec.staging_root)
+            if self.spec.implicit_attempt_write_roots
+            else ()
+        )
         spec = SandboxSpec(
             owner_home=self.spec.owner_home,
             workspace=self.spec.attempt_view,
             public_ro_roots=self.spec.public_read_roots,
             write_roots=(
                 *self.spec.extra_write_roots,
-                self.spec.attempt_view,
-                self.spec.staging_root,
+                *implicit_roots,
             ),
             bwrap_path=self.spec.bwrap_path,
             protected_persona_root=self.spec.protected_persona_root,
+            read_only_paths=self.spec.protected_write_paths,
             full_access=self.spec.full_access,
             network_access=self.spec.network_access,
         )
         return [*build_bwrap_argv(spec), "--", *command_argv]
 
+    # LLM: macOS argv must be built from the same explicit write roots and protected overlays as
+    # Linux; never infer write permission from attempt_view/cwd when the boundary is explicit.
+    # 函数用途: 为 macOS 命令生成 Seatbelt 包装参数。
     def _macos_argv(self, command_argv: list[str]) -> list[str]:
         sandbox_exec = self.spec.macos_sandbox_exec or shutil.which("sandbox-exec")
         if not sandbox_exec:
@@ -236,6 +251,9 @@ class AttemptExecutionSandbox:
             staging=self.spec.staging_root,
             shared=self.spec.shared_workspace,
             protected_persona_root=self.spec.protected_persona_root,
+            write_roots=self.spec.extra_write_roots,
+            protected_write_paths=self.spec.protected_write_paths,
+            implicit_attempt_write_roots=self.spec.implicit_attempt_write_roots,
             full_access=self.spec.full_access,
         )
         return [sandbox_exec, "-p", profile, "--", *command_argv]
@@ -293,6 +311,9 @@ class AttemptExecutionSandbox:
             pass
 
     # ------------------------------------------------------ macOS SBPL 构造
+    # LLM: The profile is a pure projection of structured sandbox facts. Full Access omits the
+    # broad write deny but still applies precise persona/control-path denies.
+    # 函数用途: 生成 Seatbelt 规则，区分 WorkspaceOnly 写根与 Full Access 精确只读覆盖。
     @staticmethod
     def _macos_profile(
         *,
@@ -300,6 +321,9 @@ class AttemptExecutionSandbox:
         staging: Path,
         shared: Path,
         protected_persona_root: Path | None = None,
+        write_roots: tuple[Path, ...] = (),
+        protected_write_paths: tuple[Path, ...] = (),
+        implicit_attempt_write_roots: bool = True,
         full_access: bool = False,
     ) -> str:
         """Seatbelt 策略：默认放行（mach/网络/进程语义同 bwrap：隔离文件为主）
@@ -312,19 +336,26 @@ class AttemptExecutionSandbox:
         区内仍以更精确的 literal deny 强制只读。"""
         if full_access:
             lines = ["(version 1)", "(allow default)"]
+            lines.extend(_readonly_path_denies(protected_write_paths))
             persona_denies = _persona_file_literal_denies(protected_persona_root)
             if persona_denies:
                 lines.extend(persona_denies)
             return "\n".join(lines)
-        write_roots = [str(attempt_view.resolve()), str(staging.resolve())]
+        effective_write_roots = [str(path.resolve()) for path in write_roots]
+        if implicit_attempt_write_roots:
+            effective_write_roots.extend(
+                (str(attempt_view.resolve()), str(staging.resolve()))
+            )
+        effective_write_roots = list(dict.fromkeys(effective_write_roots))
         lines = [
             "(version 1)",
             "(allow default)",
             "(deny file-write*)",
             '(allow file-write* (subpath "/dev") (literal "/dev/null")'
-            + "".join(f' (subpath {json.dumps(root)})' for root in write_roots)
+            + "".join(f' (subpath {json.dumps(root)})' for root in effective_write_roots)
             + ")",
         ]
+        lines.extend(_readonly_path_denies(protected_write_paths))
         persona_denies = _persona_file_literal_denies(protected_persona_root)
         if persona_denies:
             # literal 比 subpath 精确，Seatbelt 同精确度取首条 → deny 优先于
@@ -354,6 +385,28 @@ def _persona_file_literal_denies(protected_persona_root: Path | None) -> list[st
             denies.append(
                 f"(deny file-write* (literal {json.dumps(str(candidate.resolve()))}))"
             )
+    return denies
+
+
+# LLM: Seatbelt needs explicit deny rules for host control metadata because broader owner-home
+# write grants are allowed. Directories use subpath+literal; files use literal.
+# 函数用途: 把 forbidden_write_roots 转成比宽泛写入白名单更具体的 macOS 只读规则。
+def _readonly_path_denies(paths: tuple[Path, ...]) -> list[str]:
+    denies: list[str] = []
+    seen: set[Path] = set()
+    for raw in paths:
+        try:
+            path = Path(raw).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if path in seen or not path.exists():
+            continue
+        seen.add(path)
+        encoded = json.dumps(str(path))
+        if path.is_dir():
+            denies.append(f"(deny file-write* (literal {encoded}) (subpath {encoded}))")
+        else:
+            denies.append(f"(deny file-write* (literal {encoded}))")
     return denies
 
 

@@ -129,6 +129,8 @@ class SandboxSpec:
     write_roots: tuple[Path, ...] | None = None
     bwrap_path: str | None = None
     protected_persona_root: Path | None = None
+    # Host-authored control metadata remains read-only even when a broader parent root is writable.
+    read_only_paths: tuple[Path, ...] = ()
     full_access: bool = False
     # Most owner commands intentionally retain network access.  Pure helper
     # programs (for example a learned source request/response adapter) can opt
@@ -155,6 +157,7 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
             "/",
             "/",
         ]
+        _append_readonly_mounts(argv, spec.read_only_paths)
         _append_persona_readonly_mounts(argv, spec.protected_persona_root or spec.owner_home)
         argv += ["--chdir", str(spec.workspace)]
         return argv
@@ -184,6 +187,10 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     # 无 write_roots(单租户 full_access)时保持 workspace 目录(旧行为, /tmp 即宿主)。
     if spec.write_roots:
         tmp_root = Path(spec.write_roots[0]) / ".sandbox-tmp"
+    elif spec.write_roots is not None:
+        # Explicit empty write scope means cwd is read-only. Framework-owned owner/tmp remains
+        # the only scratch mount; never create .sandbox-tmp inside the read-only source tree.
+        tmp_root = Path(spec.owner_home) / "tmp" / ".sandbox-tmp"
     else:
         tmp_root = spec.workspace / ".sandbox-tmp"
     tmp_root.mkdir(parents=True, exist_ok=True)
@@ -228,6 +235,9 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     for root in write_roots:
         if root.exists():
             argv += ["--bind", str(root), str(root)]
+    # Broad owner-home write access must not include host-authoritative policy and ledgers.
+    # Apply these mounts after writable roots so the more specific read-only paths win.
+    _append_readonly_mounts(argv, spec.read_only_paths)
     # 无论 owner home 当前是 rw 还是 ro，都把需要真人确认的长期人格文件明确覆盖成
     # 只读挂载。update_persona 在宿主进程执行，不走 shell，确认后的正式写入仍可完成。
     _append_persona_readonly_mounts(
@@ -274,6 +284,22 @@ def _append_persona_readonly_mounts(argv: list[str], root: Path) -> None:
         protected = root / name
         if protected.is_file():
             argv += ["--ro-bind", str(protected), str(protected)]
+
+
+# LLM: Read-only subpaths are host-authored and applied after every writable bind. Missing paths
+# cannot be mounted; canonical owner control files/directories are seeded before agent creation.
+# 函数用途: 把可写父目录里的权限配置和运行账本重新覆盖成只读挂载。
+def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
+    seen: set[Path] = set()
+    for raw in paths:
+        try:
+            path = Path(raw).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if path in seen or not path.exists():
+            continue
+        seen.add(path)
+        argv += ["--ro-bind", str(path), str(path)]
 
 
 # LLM: 所有 POSIX shell 命令都必须经此入口，保证管道任一阶段失败会成为命令失败。

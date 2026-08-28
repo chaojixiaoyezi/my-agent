@@ -870,6 +870,7 @@ def test_background_transcript_projects_numeric_compact_events() -> None:
             {
                 "schema": "conversation_compaction_progress.v1",
                 "generation": 2,
+                "operation_id": "transcript:background-2",
                 "phase": phase,
                 "stage": stage,
                 "percent": percent,

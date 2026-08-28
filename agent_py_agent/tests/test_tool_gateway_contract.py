@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.agent.tooling.registry_invoke import (
+    RegistryToolInvokeRequest,
+    _request_local_tool_for_invocation,
+)
 from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
@@ -51,6 +55,23 @@ def _execute(
     )
 
 
+def _invoke_request_for_scope(
+    registry: ToolRegistry,
+    root: Path,
+    owner_scope_root: Path,
+) -> RegistryToolInvokeRequest:
+    return RegistryToolInvokeRequest(
+        tool_name="run_command",
+        arguments={},
+        tools=registry.tools,
+        workspace_root=root,
+        workspace_roots=[root],
+        allowed_tools=None,
+        write_boundary={},
+        owner_scope_root=str(owner_scope_root),
+    )
+
+
 def test_tool_gateway_rejects_shell_alias(tmp_path: Path):
     result = _execute(
         _registry(tmp_path),
@@ -64,6 +85,76 @@ def test_tool_gateway_rejects_shell_alias(tmp_path: Path):
     assert result.ok is False
     assert result.tool_name == "shell"
     assert result.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
+
+
+def test_concurrent_invocations_use_request_local_shell_and_terminal_scopes(tmp_path: Path):
+    owner_a = tmp_path / "owners" / "a"
+    owner_b = tmp_path / "owners" / "b"
+    owner_a.mkdir(parents=True)
+    owner_b.mkdir(parents=True)
+    registry = _registry(owner_a)
+    shared_shell = registry.tools["run_command"]
+    shared_terminal = registry.tools["terminal_session"]
+
+    request_a = _invoke_request_for_scope(registry, owner_a, owner_a)
+    request_b = _invoke_request_for_scope(registry, owner_b, owner_b)
+    shell_a = _request_local_tool_for_invocation(
+        shared_shell,
+        request=request_a,
+        workspace_roots=[owner_a],
+    )
+    shell_b = _request_local_tool_for_invocation(
+        shared_shell,
+        request=request_b,
+        workspace_roots=[owner_b],
+    )
+    terminal_request = RegistryToolInvokeRequest(
+        **{
+            **request_b.__dict__,
+            "tool_name": "terminal_session",
+        }
+    )
+    terminal_b = _request_local_tool_for_invocation(
+        shared_terminal,
+        request=terminal_request,
+        workspace_roots=[owner_b],
+    )
+
+    assert shell_a is not shared_shell and shell_b is not shared_shell
+    assert shell_a.path_access_policy.owner_scope_root == owner_a.resolve()
+    assert shell_b.path_access_policy.owner_scope_root == owner_b.resolve()
+    assert shared_shell.path_access_policy.owner_scope_root is None
+    assert terminal_b is not shared_terminal
+    assert terminal_b.shell_tool is not shared_terminal.shell_tool
+    assert terminal_b.shell_tool.path_access_policy.owner_scope_root == owner_b.resolve()
+
+
+def test_concurrent_web_invocations_do_not_mutate_shared_private_host_grants(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    shared_web = registry.tools["web_fetch"]
+    request = RegistryToolInvokeRequest(
+        tool_name="web_fetch",
+        arguments={},
+        tools=registry.tools,
+        workspace_root=tmp_path,
+        workspace_roots=[tmp_path],
+        allowed_tools=None,
+        write_boundary={},
+    )
+
+    scoped_web = _request_local_tool_for_invocation(
+        shared_web,
+        request=request,
+        workspace_roots=[tmp_path],
+    )
+    scoped_web.allowed_private_hosts = ("192.168.1.7",)
+    scoped_web.allow_private_resolution = True
+
+    assert scoped_web is not shared_web
+    assert tuple(shared_web.allowed_private_hosts) == ()
+    assert shared_web.allow_private_resolution is None
 
 
 def test_tool_gateway_hides_controlled_exec_from_default_catalog(tmp_path: Path):

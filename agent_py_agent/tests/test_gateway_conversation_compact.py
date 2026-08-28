@@ -673,7 +673,7 @@ def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_p
         assert thread is not None
         with pytest.raises(
             ConversationCompactError,
-            match="did not fit below",
+            match="did not reach the configured recovery target",
         ):
             prepare_conversation_context(
                 agent,

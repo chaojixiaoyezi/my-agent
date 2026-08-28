@@ -1,5 +1,17 @@
 # STATUS
 
+## 2026-08-28 Owner WorkspaceOnly、管理员 Full Access 与 Compact 动画（本地候选）
+
+- 默认本地管理员与外部用户都从自己的 owner home 工作，不再继承启动 shell/Gateway cwd。只有结构化
+  `local/main` 且配置为 `full-access` 才可越界；远程用户不能自提权，Full 父代理的 child 仍收窄。
+- 用户自己的 owner home 文件可用，宿主权限/配额/账本等控制面只读；文件隔离不关闭外网。Full 管理员只在
+  用户明确指定外部路径或系统排障时离开 home，涉及其他 owner 要明确点名并默认少改，这一层只作软提示。
+- 修复单 Gateway 并发 handler 串权限，以及子代理拿到项目写根后又被运行时过滤、相对路径落内部状态目录的
+  根因。权限/沙箱 focused 全过（含平台相关 skip），子代理真实文件写入回归已通过。
+- Compact 候选现在必须降到带 recent-tail 余量的恢复目标；主自动、child 与手动 `/compact` 都有持续动画。
+  live 失败与 transcript 后备使用不同 operation id，不再互相吞进度。相关 focused 183 项通过。
+- 待完成文档/严格本地 gate、推送和 `.7` 单 Gateway MiniMax-M2.7 真 TUI 验收。
+
 ## 2026-08-28 后台真实 Compact、最终回复通知与有界续片（本地候选）
 
 - `.10` fresh `ma-110-c8a2ece-compact-r1` 的主代理后台工具历史已经真实触发

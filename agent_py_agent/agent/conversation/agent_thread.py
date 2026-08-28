@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -120,6 +121,7 @@ def prepare_subagent_thread_turn(
     prompt: str,
     attempt_id: str,
     force: bool = False,
+    progress_callback: Callable[[dict[str, object]], object] | None = None,
 ) -> AgentThreadTurnContext:
     from .compact import prepare_conversation_context
 
@@ -153,6 +155,7 @@ def prepare_subagent_thread_turn(
         current_prompt=str(prompt or ""),
         exclude_request_id=selected_attempt,
         force=bool(force),
+        progress_callback=progress_callback,
     )
     return AgentThreadTurnContext(
         thread_id=compact.thread.thread_id,

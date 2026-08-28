@@ -66,6 +66,17 @@
 - 这套投影不属于 tool protocol：只有完整 `content_block_stop` 后形成的既有 tool_use block 才能进入
   ToolCall、权限和 handler；字符数/ready 不参与任务状态、完成裁决、恢复、Compact、缓存或 timeout。
 
+## Owner WorkspaceOnly 与管理员 Full Access
+
+- 每个 Gateway 请求先冻结结构化 owner 身份和 owner home。WorkspaceOnly 的文件、Shell、PTY 与 LSP 都以
+  owner home 为硬墙，进程启动 cwd 不是权限来源；这道文件墙不关闭外网，网络仍由工具自己的网络合同裁决。
+- `full-access` 只有 `local/main` 管理员配置可以生效。远程 owner 即使复制配置或在正文里声称管理员也会降为
+  WorkspaceOnly；Full 主代理创建 child/grandchild 时重新加 owner 墙，并只保留结构化 task/product 写根。
+- Full 模式下的外部路径意图属于 prompt 软约束：用户明确指定外部目录或系统排障时才离开 owner home；涉及
+  其他 owner 必须明确点名，默认先只读、尽量少改。自然语言永远不负责授权，真正裁决只读 owner/config/boundary。
+- owner home 内用户文件可正常使用，但 `permissions/quota/retention/policy`、运行账本、Compact 与审计目录作为
+  宿主控制面保持只读。每次工具调用复制 request-local handler/path policy，单 Gateway 多 TUI 不共享可变权限。
+
 ## 跨回合工具终态折叠
 
 - `request_execution._persist_gateway_assistant_result` 从本轮 `archive_tool_calls` 构造唯一

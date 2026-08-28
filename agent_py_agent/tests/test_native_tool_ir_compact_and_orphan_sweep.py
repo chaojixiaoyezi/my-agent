@@ -499,6 +499,115 @@ def test_native_window_defers_when_completed_history_alone_reaches_trigger(tmp_p
     assert pressure.runtime_status == "context_overflow"
 
 
+def test_native_window_defers_when_completed_history_consumes_recovery_headroom(tmp_path):
+    """旧会话虽低于 90% 但已吃掉恢复余量时，不先烧一次必重压的 live summary。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "history-consumes-headroom",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(
+        _params(),
+        save=True,
+        provider_history_messages=[
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "H" * 25_000}],
+            }
+        ],
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+    )
+    base_tokens = model_visible_context_tokens(
+        agent,
+        replace(params, tool_ir_history=[]),
+        "base-prompt",
+    )
+    assert 8_100 <= base_tokens < 9_000
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    before_ir = list(params.tool_ir_history)
+
+    prompt = build_tool_loop_prompt(agent, params)
+
+    assert params.tool_ir_history == before_ir
+    assert agent.backend.calls == []
+    assert store.load_thread(thread.thread_id).compact_generation == 0
+    pressure = preflight_context_pressure_response(
+        SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=6)
+    )
+    assert pressure is not None
+    assert pressure.runtime_status == "context_overflow"
+
+
+def test_native_window_rolls_back_candidate_below_trigger_but_above_recovery_target(
+    tmp_path,
+):
+    """薄摘要即使勉强低于 90% 也不提交，避免下一工具轮立刻再次 Compact。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "thin-live-candidate",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    summary_calls: list[bool] = []
+
+    def thin_summary(*_args, **_kwargs):
+        summary_calls.append(True)
+        return SimpleNamespace(text="S" * 200)
+
+    agent.backend.generate = thin_summary
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(
+        _params(),
+        save=True,
+        provider_history_messages=[
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "H" * 20_000}],
+            }
+        ],
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+    )
+    _record_large_write_calls(agent, params, start=1, stop=10, chars=3_000)
+    before_ir = list(params.tool_ir_history)
+
+    prompt = build_tool_loop_prompt(agent, params)
+
+    assert params.tool_ir_history == before_ir
+    assert summary_calls == [True]
+    assert store.load_thread(thread.thread_id).compact_generation == 0
+    pressure = preflight_context_pressure_response(
+        SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=10)
+    )
+    assert pressure is not None
+    assert pressure.runtime_status == "context_overflow"
+
+
 def test_native_window_rolls_back_summary_that_still_exceeds_trigger(tmp_path):
     """摘要或最新工具对过大时不提交 generation，也不丢当前 IR。"""
     store = ConversationStore(tmp_path / "conversations")

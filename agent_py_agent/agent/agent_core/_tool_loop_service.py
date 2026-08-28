@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -147,11 +148,13 @@ class _NativeCompactPlan:
     policy: object
     binding: object | None
     trigger_tokens: int
+    recovery_target_tokens: int
     target_tokens: int
     before_tokens: int
     before_call_ids: tuple[str, ...]
     semantic_summary: str
     progress_generation: int
+    progress_operation_id: str
     forced: bool
 
 
@@ -452,13 +455,24 @@ def _prepare_native_compact_plan(
         return None
     base_params = replace(params, tool_ir_history=[])
     base_tokens = model_visible_context_tokens(agent, base_params, prompt)
-    # 已完成会话前缀自己就达到触发线时，删当前 turn 的工具往返也不可能形成有效候选。
-    # 让后续统一 preflight 发出 context_overflow，由 Gateway 的整段 transcript Compact
-    # 替换旧历史；不要先烧一次 live summary 再提交一个仍超线的虚假 generation。
-    if base_tokens >= limit:
+    recent_tail_tokens = max(1, int(policy.recent_tail_tokens or 0))
+    recovery_target = (
+        max(1, int(policy.recovery_target_tokens or 0))
+        if limit == int(policy.trigger_tokens or 0)
+        else max(1, limit - recent_tail_tokens)
+    )
+    # 已完成会话前缀若已经吃掉恢复目标，删当前 turn 的工具往返也无法留出一段完整
+    # 近期工作空间。交给 Gateway 的 transcript Compact 替换旧历史，不先烧 live
+    # summary 再提交一个下一轮必然重压的薄 generation。
+    if base_tokens >= recovery_target:
         return None
-    target = min(limit - 1, base_tokens + int(policy.recent_tail_tokens or 0))
-    binding, summary, progress_generation = _live_compact_binding_and_summary(
+    target = min(recovery_target, base_tokens + recent_tail_tokens)
+    (
+        binding,
+        summary,
+        progress_generation,
+        progress_operation_id,
+    ) = _live_compact_binding_and_summary(
         agent,
         params,
         policy,
@@ -470,11 +484,13 @@ def _prepare_native_compact_plan(
         policy=policy,
         binding=binding,
         trigger_tokens=limit,
+        recovery_target_tokens=recovery_target,
         target_tokens=target,
         before_tokens=before_tokens,
         before_call_ids=before_call_ids,
         semantic_summary=summary,
         progress_generation=progress_generation,
+        progress_operation_id=progress_operation_id,
         forced=force,
     )
 
@@ -490,7 +506,7 @@ def _live_compact_binding_and_summary(
     before_tokens: int,
     trigger_tokens: int,
     source_messages: int,
-) -> tuple[object | None, str, int]:
+) -> tuple[object | None, str, int, str]:
     from ..conversation.live_tool_compact import (
         record_live_tool_compact_failure,
         resolve_live_tool_compact_binding,
@@ -502,8 +518,10 @@ def _live_compact_binding_and_summary(
         policy=policy,
     )
     progress_generation = _native_compact_progress_generation(params, binding)
+    progress_operation_id = f"live-tool:{uuid.uuid4().hex}"
     progress = {
         "generation": progress_generation,
+        "operation_id": progress_operation_id,
         "before_tokens": before_tokens,
         "trigger_tokens": trigger_tokens,
         "source_messages": source_messages,
@@ -524,7 +542,7 @@ def _live_compact_binding_and_summary(
     )
     summary = _summarize_live_compact(agent, params, binding, progress)
     if binding is None or summary:
-        return binding, summary, progress_generation
+        return binding, summary, progress_generation, progress_operation_id
     from ..conversation.compact_guard import ConversationCompactError
 
     error = ConversationCompactError(
@@ -543,7 +561,7 @@ def _summarize_live_compact(
     agent: object,
     params: ToolLoopExecuteParams,
     binding: object | None,
-    progress: dict[str, int],
+    progress: dict[str, object],
 ) -> str:
     from ..conversation.live_tool_compact import record_live_tool_compact_failure
 
@@ -602,8 +620,9 @@ def _apply_native_compact_plan(
             percent=65,
             **_native_compact_progress_values(plan, after_tokens=after_tokens),
         )
-        if after_tokens >= plan.trigger_tokens:
-            # 摘要或必须保留的最新往返仍超线：恢复原 IR，交给 transcript Compact。
+        if after_tokens > plan.recovery_target_tokens:
+            # 摘要或必须保留的最新往返未腾出一整段近期工作空间：恢复原 IR，交给
+            # transcript Compact。只低于触发线但仍贴线的薄结果不能推进 generation。
             _restore_native_compact_candidate(params, original_ir, original_tool_context)
             _emit_native_compact_failed(params, plan, after_tokens=after_tokens)
             return 0
@@ -649,8 +668,9 @@ def _settle_native_ir_window(
 
 
 # LLM: A live-tool generation becomes durable and visible only after the complete candidate has
-# passed the same trigger used by preflight. Checkpoint/CAS remains before the UI projection.
-# 函数用途: 提交已经验证有效的运行中 Compact，并把同一代次和 token 数投给 TUI。
+# reached its recovery target with one recent-tail budget below the trigger. Checkpoint/CAS
+# remains before the UI projection.
+# 函数用途: 只提交已经腾出完整近期工作空间的运行中 Compact，并把同一代次和 token 数投给 TUI。
 def _commit_and_publish_native_compact(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -709,11 +729,14 @@ def _log_native_compact(
 ) -> None:
     _LOGGER.info(
         "native tool history compacted: before_tokens=%d after_tokens=%d "
-        "trigger_tokens=%d dropped_pairs=%d preserved_pairs=%d "
+        "trigger_tokens=%d target_tokens=%d recovery_target_tokens=%d "
+        "dropped_pairs=%d preserved_pairs=%d "
         "semantic_summary=%s summary_chars=%d",
         plan.before_tokens,
         after_tokens,
         plan.trigger_tokens,
+        plan.target_tokens,
+        plan.recovery_target_tokens,
         dropped,
         preserved_pairs,
         bool(plan.semantic_summary),
@@ -824,9 +847,10 @@ def _native_compact_progress_values(
     plan: _NativeCompactPlan,
     *,
     after_tokens: int = 0,
-) -> dict[str, int]:
+) -> dict[str, object]:
     return {
         "generation": plan.progress_generation,
+        "operation_id": plan.progress_operation_id,
         "before_tokens": plan.before_tokens,
         "after_tokens": max(0, int(after_tokens or 0)),
         "trigger_tokens": plan.trigger_tokens,
@@ -863,6 +887,7 @@ def _emit_native_compact_progress(
     stage: str,
     percent: int,
     generation: int,
+    operation_id: str,
     before_tokens: int,
     trigger_tokens: int,
     source_messages: int,
@@ -878,6 +903,7 @@ def _emit_native_compact_progress(
         "stage": str(stage),
         "percent": min(100, max(0, int(percent or 0))),
         "generation": max(1, int(generation or 1)),
+        "operation_id": str(operation_id or "").strip(),
         "before_tokens": max(0, int(before_tokens or 0)),
         "after_tokens": max(0, int(after_tokens or 0)),
         "trigger_tokens": max(0, int(trigger_tokens or 0)),

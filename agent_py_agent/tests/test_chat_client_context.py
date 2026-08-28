@@ -8,6 +8,12 @@ from types import SimpleNamespace
 import pytest
 
 
+def _config_with_access_mode(tmp_path, access_mode: str) -> str:
+    path = tmp_path / f"agent-{access_mode}.yaml"
+    path.write_text(f"access_mode: {access_mode}\n", encoding="utf-8")
+    return str(path)
+
+
 def test_chat_module_import_does_not_load_full_agent_core() -> None:
     """Fast chat dispatch must not import SimpleAgent before route selection."""
     script = (
@@ -32,17 +38,16 @@ def test_gateway_chat_client_resolves_owner_runtime_without_full_agent(
     from agent_py_agent.cli.chat_client_context import make_gateway_chat_client
 
     home = tmp_path / "home"
-    workspace = tmp_path / "workspace"
     monkeypatch.setenv("MY_AGENT_HOME", str(home))
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
-    args = SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root=str(workspace))
+    args = SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root="")
 
     client = make_gateway_chat_client(args)
 
     assert client.gateway_client_only is True
-    assert client.root == workspace.resolve()
     assert client.home_paths.owner_home_dir == home / "owners" / "local" / "main"
+    assert client.root == client.home_paths.owner_home_dir.resolve()
     assert str(client.config.gateway_workspace).startswith(str(client.home_paths.owner_workspace_dir))
     assert not hasattr(client, "full_agent")
     with pytest.raises(AttributeError):
@@ -54,7 +59,6 @@ def test_gateway_chat_clients_in_different_projects_share_one_owner_service(
     monkeypatch,
 ) -> None:
     """Different TUI cwd values must share transport but retain project-scoped state."""
-    from agent_py_agent.cli.bootstrap import DEFAULT_CONFIG
     from agent_py_agent.cli.chat_client_context import make_gateway_chat_client
 
     home = tmp_path / "home"
@@ -66,11 +70,12 @@ def test_gateway_chat_clients_in_different_projects_share_one_owner_service(
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
 
+    config_path = _config_with_access_mode(tmp_path, "full-access")
     first = make_gateway_chat_client(
-        SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root=str(first_workspace))
+        SimpleNamespace(config=config_path, workspace_root=str(first_workspace))
     )
     second = make_gateway_chat_client(
-        SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root=str(second_workspace))
+        SimpleNamespace(config=config_path, workspace_root=str(second_workspace))
     )
 
     expected_gateway = (
@@ -88,6 +93,27 @@ def test_gateway_chat_clients_in_different_projects_share_one_owner_service(
     assert first.config.local_store_path != second.config.local_store_path
     assert first.root == first_workspace.resolve()
     assert second.root == second_workspace.resolve()
+
+
+def test_gateway_chat_client_rejects_external_workspace_without_full_access(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Starting a TUI from /root or another project cannot silently widen WorkspaceOnly."""
+    from agent_py_agent.cli.bootstrap import DEFAULT_CONFIG
+    from agent_py_agent.cli.chat_client_context import make_gateway_chat_client
+
+    home = tmp_path / "home"
+    external = tmp_path / "external"
+    external.mkdir()
+    monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
+    monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
+
+    with pytest.raises(ValueError, match="WorkspaceOnly"):
+        make_gateway_chat_client(
+            SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root=str(external))
+        )
 
 
 def test_gateway_chat_client_posts_typed_session_lifecycle(monkeypatch, tmp_path) -> None:

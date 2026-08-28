@@ -12,6 +12,13 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
 from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_scope_root
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation.agent_thread import prepare_subagent_thread_turn
+from agent_py_agent.agent.conversation.agent_transcript import (
+    read_agent_transcript_events,
+)
+from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_EXECUTION_CWD_ATTR,
+    CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.services.control_plane_projection import (
@@ -279,13 +286,15 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
         ),
         tmp_path,
     )
+    workspace = agent.home_paths.owner_home_dir / "project"
+    workspace.mkdir(parents=True)
     parent_thread = agent.conversation_store.get_or_create_thread(
         {
             "canonical_user_id": "local/main",
             "channel": "tui",
             "channel_conversation_id": "parent-chat",
             "channel_user_id": "local-user",
-            "cwd": str(tmp_path),
+            "cwd": str(workspace),
         }
     )
     parent_task_id = "root-conversation-task"
@@ -295,7 +304,7 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
             "task_id": parent_task_id,
             "goal": "parent task",
             "status": "active",
-            "task_path": str(tmp_path),
+            "task_path": str(workspace),
         }
     )
     task = agent.subagents.create_run(
@@ -305,12 +314,12 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
         role="worker",
         root_id=parent_task_id,
         allowed_tools=["write_file"],
-        extra_write_roots=[str(tmp_path)],
+        extra_write_roots=[str(workspace)],
         attributes={
             "conversation_thread_id": parent_thread.thread_id,
             "conversation_task_id": parent_task_id,
-            "workspace_root": str(tmp_path),
-            "workspace_roots": [str(tmp_path)],
+            CONVERSATION_EXECUTION_CWD_ATTR: str(workspace),
+            CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR: [str(workspace)],
         },
     )
     agent.backend = _WriteThenCompleteChildBackend()
@@ -321,7 +330,7 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
     child_thread = agent.conversation_store.load_thread(task.agent_thread_id)
     child_rows = agent.conversation_store.recent_messages(task.agent_thread_id, limit=0)
     assert result.ok
-    assert (tmp_path / "child-owned.txt").read_text(encoding="utf-8") == "child output\n"
+    assert (workspace / "child-owned.txt").read_text(encoding="utf-8") == "child output\n"
     assert parent_link is not None
     assert parent_link.thread_id == parent_thread.thread_id
     assert child_thread is not None
@@ -395,6 +404,25 @@ def test_subagent_preflight_compacts_large_completed_history_before_sampling(
     )
     assert thread is not None
     assert thread.compact_generation == 1
+    progress_page = read_agent_transcript_events(agent, run_id=task.id, after=0)
+    compact_events = [
+        row
+        for row in progress_page["events"]
+        if str(row.get("kind") or "").startswith("conversation_compaction_")
+    ]
+    assert compact_events[0]["kind"] == "conversation_compaction_started"
+    assert compact_events[-1]["kind"] == "conversation_compaction_completed"
+    assert all(
+        row["kind"] == "conversation_compaction_progress"
+        for row in compact_events[1:-1]
+    )
+    assert len(compact_events) >= 3
+    operation_ids = {
+        str(row.get("payload", {}).get("operation_id") or "")
+        for row in compact_events
+    }
+    assert len(operation_ids) == 1
+    assert next(iter(operation_ids)).startswith("transcript:")
 
 
 def test_child_and_grandchild_materialize_independent_agent_threads(

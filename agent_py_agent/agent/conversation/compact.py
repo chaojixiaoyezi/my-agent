@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -108,6 +109,7 @@ class _CompactRunRequest:
     projected_tokens: int
     forced: bool
     attempted_at: float
+    operation_id: str
     request_id: str = ""
     run_id: str = ""
     task_id: str = ""
@@ -224,6 +226,7 @@ def prepare_conversation_context(
         projected_tokens=projected,
         forced=bool(force),
         attempted_at=attempted_at,
+        operation_id=f"transcript:{uuid.uuid4().hex}",
         request_id=(
             str(exclude_request_id or "").strip()
             or f"conversation-compact:{current.thread_id}:{current.compact_generation + 1}"
@@ -379,9 +382,9 @@ def render_conversation_context_usage(
     return "\n".join(lines)
 
 
-# LLM: Candidate partitions are tried without state mutation; only a candidate below the exact
-# trigger reaches the commit helper.
-# 函数用途: 依次尝试“保留近期完整尾部”和“无尾部”候选，找到可用候选后提交一次。
+# LLM: Candidate partitions are tried without state mutation; only a candidate at or below the
+# shared recovery target reaches commit, leaving one complete recent-tail budget before trigger.
+# 函数用途: 依次尝试近期尾部分区，只提交能真正腾出下一段工作空间的候选。
 def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # LLM: A provider-pressure retry must replace the whole completed prefix once. Repeatedly
     # protecting and then re-compacting the same tail creates checkpoint churn without helping
@@ -427,7 +430,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             percent=measure_percent,
             after_tokens=candidate.projected_tokens_after,
         )
-        if candidate.projected_tokens_after >= request.policy.trigger_tokens:
+        if candidate.projected_tokens_after > request.policy.recovery_target_tokens:
             continue
         try:
             return _commit_compact_candidate(request, candidate)
@@ -441,7 +444,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             raise
 
     error = ConversationCompactError(
-        "conversation compact candidate did not fit below the configured threshold",
+        "conversation compact candidate did not reach the configured recovery target",
         code="COMPACT_CANDIDATE_TOO_LARGE",
     )
     record_compact_failure(
@@ -579,6 +582,7 @@ def _emit_compact_progress(
         "stage": str(stage),
         "percent": min(100, max(0, int(percent or 0))),
         "generation": max(0, int(request.thread.compact_generation or 0)) + 1,
+        "operation_id": request.operation_id,
         "before_tokens": max(0, int(request.projected_tokens or 0)),
         "after_tokens": max(0, int(after_tokens or 0)),
         "trigger_tokens": max(0, int(request.policy.trigger_tokens or 0)),

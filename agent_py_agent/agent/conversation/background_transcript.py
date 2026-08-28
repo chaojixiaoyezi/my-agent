@@ -342,8 +342,8 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         )
         return True
 
-    # LLM: Durable Compact display consumes only its frozen numeric schema. The
-    # generation and phase select one block; summary and archived messages stay private.
+    # LLM: Durable Compact display consumes only its frozen safe schema. The operation id and
+    # phase select one block, so a failed live attempt cannot hide a transcript fallback.
     # 函数用途: 原位发布后台会话 Compact 的开始、进度、完成或失败阶段。
     def write_conversation_compact_progress(self, value: Mapping[str, object]) -> bool:
         if value.get("schema") != "conversation_compaction_progress.v1":
@@ -351,6 +351,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         phase = str(value.get("phase") or "").strip().lower()
         stage = str(value.get("stage") or "").strip().lower()
         generation = _nonnegative_int(value.get("generation"))
+        operation_id = str(value.get("operation_id") or "").strip()[:128]
         if (
             generation <= 0
             or phase not in {"started", "progress", "completed", "failed"}
@@ -359,6 +360,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
             return False
         payload = {
             "generation": generation,
+            "operation_id": operation_id or f"legacy:{generation}",
             "phase": phase,
             "stage": stage,
             "percent": min(100, _nonnegative_int(value.get("percent"))),
@@ -376,7 +378,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         self._event(
             kind,
             event_phase,
-            f"{self.request_id}:conversation-compact:{generation}",
+            f"{self.request_id}:conversation-compact:{payload['operation_id']}",
             payload,
         )
         return True

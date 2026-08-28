@@ -372,6 +372,9 @@ def _memory_text(memories: list[MemoryRecord]) -> str:
     return memory_context_text(memories)
 
 
+# LLM: This prose guides behavior only. Permission is decided by the structured owner/full-access
+# profile; never parse a user sentence or this text to grant a path.
+# 函数用途: 用大白话告诉模型默认在哪工作、何时才应离开管理员自己的目录，以及跨用户时要少改动。
 def _owner_scope_text(builder: PromptBuilder) -> str:
     """Describe the already-resolved owner boundary without exposing its identifier."""
 
@@ -383,13 +386,20 @@ def _owner_scope_text(builder: PromptBuilder) -> str:
             "除非有结构化的写入者证据，否则不要把群组事实说成是当前成员本人曾经写入或说过。"
             "这个群会话绝不能直接访问任何成员的私人空间或其他群的空间；"
             "成员要共享私人内容时，必须把内容复制、上传或通过受控分享进入当前群的共享空间。"
+            "可在当前群的 owner home 内处理项目；外部网络不受 WorkspaceOnly 文件边界影响。"
         )
     if owner_kind == "user":
         return (
             "当前资料边界是这个用户的私人空间。这里的长期偏好、历史记忆、任务和成果只属于当前用户；"
             "绝不能读取、引用或推断其他用户或群聊的私有信息。"
+            "可在当前用户的 owner home 内自由处理自己的项目；外部网络不受 WorkspaceOnly 文件边界影响。"
         )
-    return "当前资料边界是本地主空间；只使用这里的长期偏好、历史记忆、任务和成果。"
+    return (
+        "当前资料边界是本地管理员自己的 owner home，默认始终在这里工作；不要把启动 TUI 时的进程目录"
+        "当成任务目录。只有 Full Access 已由宿主开启，并且用户明确指定外部路径或明确要求排查系统问题时，"
+        "才离开自己的 owner home。涉及其他用户目录时也必须有用户明确要求；无需额外反问授权，但默认优先"
+        "只读，只修改用户明确要求的范围，并尽量少改。WorkspaceOnly 只限制本机文件范围，不限制外部网络。"
+    )
 
 
 def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> str:

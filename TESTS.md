@@ -1,5 +1,43 @@
 # TESTS
 
+## 2026-08-28 WorkspaceOnly/Full Access 与 Compact 恢复余量
+
+权限回归必须覆盖：默认本地/远程 owner home、显式 local/main Full、远程 Full 降权、owner 策略只收窄、
+控制面只读、Full 父级 child 恢复 owner wall、子代理保留明确项目根、request-local Shell/PTY/网络 handler，
+以及 WorkspaceOnly 外部 cwd 拒绝。文件墙与网络开关分离。
+
+Compact 回归必须覆盖：live/transcript 都低于同一 recovery target；每次尝试有独立 operation id；live 失败后
+后备进度仍显示；child transcript 收到 start/progress/completed；手动 `/compact` 入 outbox 后保持活动块，
+真实回执才收口。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_main_owner_scope_default.py \
+  agent_py_agent/tests/test_remote_owner_workspace_scope.py \
+  agent_py_agent/tests/test_path_access_owner_scope.py \
+  agent_py_agent/tests/test_credential_file_denylist.py \
+  agent_py_agent/tests/test_chat_client_context.py \
+  agent_py_agent/tests/test_gateway_chat_conversation_context.py \
+  agent_py_agent/tests/test_runtime_gate_ledger.py \
+  agent_py_agent/tests/test_sandbox.py \
+  agent_py_agent/tests/test_attempt_sandbox.py \
+  agent_py_agent/tests/test_tool_gateway_contract.py \
+  -q --tb=short
+
+python3 -m pytest \
+  agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py \
+  agent_py_agent/tests/test_gateway_conversation_compact.py \
+  agent_py_agent/tests/test_gateway_streaming.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_tui_input.py \
+  agent_py_agent/tests/test_background_notice_display.py \
+  agent_py_agent/tests/test_subagent_runtime_compact.py \
+  -q --tb=short
+```
+
+上述两组本地均通过；生产与测试改动少于 10,000 行，按项目约定不跑全仓 pytest。真机只使用 `.7` 唯一
+Gateway 与 MiniMax-M2.7，启动 fresh TUI 前必须先报告 tmux 名称和观察命令。
+
 ## 2026-08-28 后台权威工作片 Compact、notice 与有界 handoff
 
 回归必须证明三条独立合同：

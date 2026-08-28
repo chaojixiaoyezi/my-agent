@@ -259,6 +259,36 @@ def test_read_root_is_mounted_before_nested_write_carveout(tmp_path) -> None:
     assert argv[argv.index("--chdir") + 1] == str(shared)
 
 
+def test_owner_control_metadata_overrides_broad_owner_write_mount(tmp_path) -> None:
+    """A writable owner home still mounts its host-authoritative policy file read-only last."""
+    home = tmp_path / "owners" / "local" / "main"
+    policy = home / "permissions.json"
+    home.mkdir(parents=True)
+    policy.write_text("{}", encoding="utf-8")
+
+    argv = build_bwrap_argv(
+        SandboxSpec(
+            owner_home=home,
+            workspace=home,
+            write_roots=(home,),
+            read_only_paths=(policy,),
+            bwrap_path="/fake/bwrap",
+        )
+    )
+
+    owner_write_index = next(
+        index
+        for index, item in enumerate(argv)
+        if item == "--bind" and argv[index + 1] == str(home)
+    )
+    policy_read_index = next(
+        index
+        for index, item in enumerate(argv)
+        if item == "--ro-bind" and argv[index + 1] == str(policy)
+    )
+    assert owner_write_index < policy_read_index
+
+
 def test_owner_scoped_shell_fails_closed_without_bwrap(tmp_path, monkeypatch) -> None:
     """owner-scoped 命令缺平台沙箱时必须拒绝，不能返回 shell=True 宿主执行。
 

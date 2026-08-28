@@ -517,6 +517,9 @@ def _durable_operation_scopes(scopes: tuple[str, ...]) -> tuple[str, ...]:
     )
 
 
+# LLM: Handler invocation must receive the exact owner wall already authorized by ActionPolicy;
+# it cannot fall back to mutable registry state when concurrent TUI requests use different owners.
+# 函数用途: 把已通过权限门的调用转成不可变 registry 执行请求。
 def _invoke_request(
     request: ToolExecutorRequest,
     call: ToolCall,
@@ -536,6 +539,7 @@ def _invoke_request(
         write_boundary=request.write_boundary,
         path_access_mode=request.path_access_mode,
         path_dangerous_roots=list(request.path_dangerous_roots),
+        owner_scope_root=request.owner_scope_root,
         runtime_snapshot=request.runtime_snapshot,
         owner_type=request.owner_type,
         runtime=runtime,

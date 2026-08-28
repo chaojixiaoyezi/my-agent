@@ -693,6 +693,55 @@ def _normalize_subagent_activity_rows(
 # TuiRuntime's sequencer/store and must not acquire independent lifecycle state.
 # 类用途: 为 TuiRuntime 提供已提交 Compact 边界的唯一公开发布入口。
 class _TuiConversationBoundaryRuntimeMixin:
+    # LLM: Manual `/compact` cannot stream server-internal percentages over its control POST, but
+    # its persisted client operation is a real lifecycle fact. Keep one honest indeterminate block
+    # active from outbox enqueue/restore until the canonical receipt resolves.
+    # 函数用途: 手动压缩命令一进入可靠 outbox 就显示持续动画，慢模型期间不再像卡死。
+    def publish_manual_compact_started(self, operation_id: str) -> None:
+        selected = str(operation_id or "").strip()[:128]
+        if not selected:
+            raise ValueError("manual compact operation id is required")
+        self._publish(
+            "conversation_compaction_started",
+            "started",
+            f"manual-compact:{self.session_id}:{selected}",
+            {
+                "operation_id": f"manual:{selected}",
+                "phase": "started",
+                "stage": "preparing",
+                "percent": 5,
+            },
+        )
+
+    # LLM: Only the durable control receipt may close a manual Compact block. Success removes the
+    # spinner before publish_compact_boundary advances generation; rejection/unknown freezes an
+    # explicit failure without pretending that the transcript changed.
+    # 函数用途: 根据手动压缩的真实控制回执结束动画，成功与失败分别收口。
+    def publish_manual_compact_terminal(
+        self,
+        operation_id: str,
+        *,
+        succeeded: bool,
+    ) -> None:
+        selected = str(operation_id or "").strip()[:128]
+        if not selected:
+            raise ValueError("manual compact operation id is required")
+        self._publish(
+            (
+                "conversation_compaction_completed"
+                if succeeded
+                else "conversation_compaction_failed"
+            ),
+            "completed" if succeeded else "failed",
+            f"manual-compact:{self.session_id}:{selected}",
+            {
+                "operation_id": f"manual:{selected}",
+                "phase": "completed" if succeeded else "failed",
+                "stage": "completed" if succeeded else "failed",
+                "percent": 100,
+            },
+        )
+
     # LLM: Manual control completion and streamed auto-compact share one typed boundary. The
     # generation comes from the canonical thread; display text cannot advance compact state.
     # 函数用途: 将一次已提交的会话 Compact 立即同步到历史和固定状态栏，不等待下一次模型调用。
@@ -1609,8 +1658,8 @@ class TuiTurnEventAdapter:
         if not payload:
             return False
         phase = str(payload["phase"])
-        generation = int(payload["generation"])
-        block_id = f"conversation-compact:{self.request_id}:{generation}"
+        operation_id = str(payload["operation_id"])
+        block_id = f"conversation-compact:{self.request_id}:{operation_id}"
         with self._lock:
             if phase == "started":
                 if self._compact_active:
@@ -2170,12 +2219,14 @@ def _tui_conversation_compact_progress_payload(
     generation = _nonnegative_int(value.get("generation"))
     if generation <= 0:
         return {}
+    operation_id = str(value.get("operation_id") or "").strip()[:128]
     return {
         "schema": "conversation_compaction_progress.v1",
         "phase": phase,
         "stage": stage,
         "percent": min(100, _nonnegative_int(value.get("percent"))),
         "generation": generation,
+        "operation_id": operation_id or f"legacy:{generation}",
         "before_tokens": _nonnegative_int(value.get("before_tokens")),
         "after_tokens": _nonnegative_int(value.get("after_tokens")),
         "trigger_tokens": _nonnegative_int(value.get("trigger_tokens")),

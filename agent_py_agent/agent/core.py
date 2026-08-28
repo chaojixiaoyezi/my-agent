@@ -136,7 +136,6 @@ from .user_space.runtime_paths import (
     apply_runtime_paths_to_config,
     resolve_runtime_paths_for_agent,
 )
-from .user_space.temporary_grants import has_active_capability_grant
 
 
 def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
@@ -365,9 +364,10 @@ class SimpleAgent(
 
         self.home_paths = _resolve_home_paths(config)
         self.owner_policy = resolve_effective_owner_policy(self.home_paths)
-        # LLM: prompt 和工具必须共享同一份结构化工作区事实。远程 owner 只能看到自己的
-        #   owner home；本地管理员仍使用启动项目目录。不要再从 self.root 各自推导。
-        # 人类: 先算一次唯一工作区，避免提示词说 service-cwd、工具实际写 owner home。
+        # LLM: prompt 和工具必须共享同一份结构化工作区事实。所有未获 Full Access 的
+        # owner（含本地管理员）都以自己的 owner home 为唯一 workspace；进程启动 cwd
+        # 不是权限来源。不要再从 self.root 各自推导。
+        # 人类: 先算一次唯一工作区，避免从 /root 启动 TUI 就把 /root 误当任务目录。
         self.effective_workspace_root, self.effective_workspace_roots = _effective_workspace_scope(
             self, config
         )
@@ -671,10 +671,14 @@ def _register_owner_ref_if_possible(paths, owner) -> None:
         return
 
 
+# LLM: Child agents inherit the parent's effective project roots but never inherit an absent
+# owner wall from an administrator's Full Access session. Child permissions are independently
+# capped to WorkspaceWrite and stay inside the structured owner/task scope.
+# 函数用途: 创建子代理管理器；共享任务工作区事实，但不把管理员的全盘权限递归传给下级。
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
-    # 远程 scoped owner 的子代理与主代理同规:工作区=owner home(见 _remote_owner_workspace_override)。
-    scoped_workspace = _remote_owner_workspace_override(agent, agent.config)
-    workspace_root, workspace_roots = scoped_workspace or (agent.root, agent.workspace_roots)
+    workspace_root = agent.effective_workspace_root
+    workspace_roots = agent.effective_workspace_roots
+    child_owner_scope_root = str(getattr(agent.home_paths, "owner_home_dir", "") or "")
     manager = SubAgentManager(
         paths["subagent_workspace"],
         local_store=agent.local_store,
@@ -690,62 +694,73 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         owner_home_dir=str(getattr(agent.home_paths, "owner_home_dir", "") or ""),
         # B 切片：配置显式执行模式透传（空 = 挂载逻辑按 home 推断，兼容存量）。
         execution_mode=str(getattr(agent.config, "execution_mode", "") or ""),
-        owner_scope_root=str(
-            getattr(getattr(agent, "path_access_policy", None), "owner_scope_root", "") or ""
-        ),
+        owner_scope_root=child_owner_scope_root,
         owner_policy_snapshot=agent.owner_policy.to_dict(),
     )
     manager.home_paths = agent.home_paths
     return manager
 
 
-# F11④ 多用户隔离 / admin 降权:main/admin(终端·主代理)也默认 owner-scoped(只看/写自己
-#   owner home 子树 + .my-agent 顶层公共区;别人 owner home 由 owner 墙拦,未授权绝对路径由
-#   写边界明确拒绝)。普通 owner(owner_id 非 main)本就 owner-scoped,行为不变。owner_home_dir 已按 owner
-#   解析(main→owners/local/main),空(无 home 上下文)= 不隔离=向后兼容。源码/工作区在
-#   workspace_roots 内、不在 .my-agent home 下,owner 墙不碰它们,降权不误伤合法操作。
-_ADMIN_BYPASS_CAPABILITY = "owner.full_access"
+# F11④ 多用户隔离 / admin 降权：任何 owner 默认只看/写自己的 owner home 与 shared。
+# 本地 local/main 是结构化管理员身份，但只有显式 full-access 配置才解除 owner 墙；
+# 普通 owner 即使私自把配置写成 full-access 也会降回 workspace-write。旧的临时 grant
+# 在长驻 Gateway 中会在构造时冻结、到期后仍保留权限，因此不再作为 Full Access 来源。
 
 
+# LLM: Local/main is the only administrator identity. Full Access must be an explicit structured
+# config value; remote owner configuration and natural-language claims cannot lift the owner wall.
+# 函数用途: 统一裁决 owner 硬边界和命令权限档位，供工作区、文件工具、Shell 与 Gateway 共用。
 def _resolve_owner_scope_and_access(agent: SimpleAgent, config: AgentConfig) -> tuple[str, str]:
-    """返回 (owner_scope_root, access_mode)。默认降权到自己 owner home;持有有效 admin bypass
-    临时授权(owner.full_access,active 未过期)时解除降权——owner_scope_root="" 恢复看所有 owner,
-    shell access_mode 提到 full-access 恢复全权运维。无 home 上下文(owner_home_dir 空)保持不隔离。"""
+    """返回 (owner_scope_root, access_mode)。
+
+    owner home 是普通用户和默认管理员的硬边界。只有 local/main 管理员显式请求
+    full-access 才同时解除 owner 墙和 shell 限制；其他 owner 不能仅靠自己的配置
+    文本或 owner 目录内文件提权。
+    """
     owner_scope_root = str(getattr(agent.home_paths, "owner_home_dir", "") or "")
-    if owner_scope_root and _has_admin_bypass_grant(agent.home_paths):
-        return "", "full-access"
-    return owner_scope_root, config.access_mode
+    requested_access = str(getattr(config, "access_mode", "workspace-write") or "workspace-write")
+    requested_access = requested_access.strip().lower().replace("_", "-")
+    if requested_access not in {"restricted", "workspace-write", "full-access"}:
+        requested_access = "workspace-write"
+    if requested_access == "full-access":
+        if _is_local_admin_owner(agent.home_paths):
+            return "", "full-access"
+        requested_access = "workspace-write"
+    policy_access = str(
+        getattr(getattr(agent, "owner_policy", None), "shell_access_mode", "") or ""
+    ).strip().lower().replace("_", "-")
+    requested_access = _narrower_access_mode(requested_access, policy_access)
+    return owner_scope_root, requested_access
 
 
-def _has_admin_bypass_grant(home_paths: object) -> bool:
-    # bypass 授权读 my-agent home 根下的 admin_grants 目录(owner-scoped agent 写不到的上级目录),
-    # 不读 owner 自己的 temporary_grants——否则降权后 owner"自己家随便造"就能自写一张 full_access
-    # 自提权(自授权漏洞)。require_expiry=True:bypass 高权限必须临时,无有效过期时间一律无效。
-    directory = getattr(home_paths, "admin_grants_dir", None)
-    if directory is None:
-        return False
-    try:
-        return has_active_capability_grant(
-            Path(directory), _ADMIN_BYPASS_CAPABILITY, require_expiry=True
-        )
-    except Exception:  # noqa: BLE001 - 授权读取失败按「无 bypass」处理(保持降权,安全侧默认)
-        return False
+# LLM: Host-admin identity is a structured local/main fact, never a username parsed from chat
+# text. Remote identities remain owner-scoped even if their display/user id says "admin".
+# 函数用途: 判断当前 owner 是否为本机 TUI 的默认管理员身份。
+def _is_local_admin_owner(home_paths: object) -> bool:
+    provider = str(getattr(home_paths, "owner_provider", "") or "").strip().lower()
+    owner_kind = str(getattr(home_paths, "owner_kind", "") or "").strip().lower()
+    return provider in {"", "local"} and owner_kind in {"", "main"}
 
 
-# 真机逃逸实锤(2026-07-02,飞书用户建站):owner 池把网关的 root(部署机上=源码树)原样传给
-#   每个远程用户的 scoped agent → 源码树成了该用户的 workspace_root;而上面 F11 的 owner 墙对
-#   workspace_roots 内的路径【有意豁免】(CLI 主代理要在项目目录里干活),两者叠加=飞书用户的
-#   子代理把 35+ 个建站文件直接写进源码树(/root/my-agent-src/frontend)。修:远程 provider 的
-#   scoped agent 工作区收缩为 owner home 本身(其任务工作区/交付/记忆全在其下,源码树不再是它
-#   的合法工作区);main/admin(local provider,终端在项目目录干活)不受影响;admin bypass
-#   (owner_scope_root 已解除)保持全权语义。
-def _remote_owner_workspace_override(
+# LLM: Per-owner policy can only narrow a non-Full host configuration. Unknown policy values are
+# ignored rather than treated as grants, and Full Access is decided before this helper.
+# 函数用途: 从全局请求和 owner 策略中选出更严格的 Shell 权限档位。
+def _narrower_access_mode(requested: str, owner_policy: str) -> str:
+    rank = {"restricted": 0, "workspace-write": 1, "full-access": 2}
+    if owner_policy not in rank:
+        return requested
+    if requested not in rank:
+        return owner_policy
+    return min((requested, owner_policy), key=rank.__getitem__)
+
+
+# LLM: Process cwd never grants workspace authority. While the owner wall exists, both local and
+# remote agents use owner home; only a local/main Full Access registry may retain an explicit root.
+# 函数用途: 为 WorkspaceOnly 身份把默认工作区收回 owner home，避免从 /root 启动就污染系统目录。
+def _owner_scoped_workspace_override(
     agent: SimpleAgent, config: AgentConfig
 ) -> tuple[Path, list[Path]] | None:
-    """远程通道 scoped owner(provider≠local)时返回 (owner_home, [owner_home]);否则 None。"""
-    provider = str(getattr(config, "my_agent_owner_provider", "") or "").strip().lower()
-    if provider in ("", "local"):
-        return None
+    """owner 墙有效时返回 (owner_home, [owner_home])；Full Access 时返回 None。"""
     owner_scope_root, _access_mode = _resolve_owner_scope_and_access(agent, config)
     if not owner_scope_root:
         return None
@@ -753,6 +768,8 @@ def _remote_owner_workspace_override(
     return owner_home, [owner_home]
 
 
+# LLM: Prompt, filesystem tools and process tools must consume this one normalized workspace view.
+# 函数用途: 返回当前代理唯一有效的主工作区和根列表。
 def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple[Path, list[Path]]:
     """返回 prompt、文件工具和 shell 共用的唯一有效工作区。"""
     workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
@@ -760,7 +777,7 @@ def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple
         workspace_root,
         *[root for root in agent.workspace_roots if root != agent.root],
     ]
-    if scoped_workspace := _remote_owner_workspace_override(agent, config):
+    if scoped_workspace := _owner_scoped_workspace_override(agent, config):
         return scoped_workspace
     return workspace_root, workspace_roots
 
@@ -771,6 +788,9 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
     workspace_root = agent.effective_workspace_root
     workspace_roots = agent.effective_workspace_roots
     owner_scope_root, access_mode = _resolve_owner_scope_and_access(agent, config)
+    effective_path_access_mode = (
+        "full" if access_mode == "full-access" and not owner_scope_root else config.path_access_mode
+    )
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=workspace_root,
@@ -806,7 +826,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             vector_search_enabled=config.tool_vector_search_enabled,
             shell_tool_timeout=config.tool_shell_timeout,
             shell_tool_output_max_chars=config.tool_shell_output_max_chars,
-            path_access_mode=config.path_access_mode,
+            path_access_mode=effective_path_access_mode,
             path_dangerous_roots=config.path_dangerous_roots,
             access_mode=access_mode,
             tool_write_inline_max_chars=config.tool_write_inline_max_chars,

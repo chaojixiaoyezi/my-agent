@@ -40,7 +40,8 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 4. 正常达到阈值时，先尝试把旧段压成候选并保留最多 4 个近期完整回合；近期尾部不超过精确触发点
    的 10%，且硬上限为 20,000 token。若完整下一轮投影仍超阈值，再尝试压缩全部旧段。若供应商
    已经返回上下文压力，则一次压缩当前请求之前的完整旧段，不把同一近期尾部反复压成多代 checkpoint。
-5. 候选只有在完整下一轮投影低于同一个配置阈值时才可提交。提交先写完整 owner-scoped checkpoint，
+5. 候选只有在完整下一轮投影低于 `触发线 - recent-tail 预算` 的恢复目标时才可提交，为下一段完整近期对话
+   留出余量，避免刚压完就再次触发。提交先写完整 owner-scoped checkpoint，
    再用一次 generation CAS 原子推进 summary/cursor/checkpoint pointer；任何失败都保留原 live 状态。
 6. 同一 thread 连续三次 compact 失败后冷却 300 秒，避免每条消息重复消耗模型；冷却后半开尝试，
    成功提交即清零。该状态不删除 transcript，也不改变 task、memory 或 persona。
@@ -53,6 +54,8 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 8. live-tool 摘要、checkpoint 或 CAS 失败时，原生 IR 与 tool-context 恢复到压缩前，thread 只增加同一个失败
    熔断事实。presentation/no-save 辅助回合可做临时窗口整理，但不得推进 generation 或冒充 `compact N`。
 9. `/status`、TUI 和 Web 只显示 thread 的一个 compact generation；消息段压缩与 live-tool 压缩都推进它。
+   每次真实尝试另有唯一 operation id，live 失败后的 transcript 后备不会复用失败 block；main/child 自动
+   Compact 都发送 typed 进度。手动 `/compact` 在持久 outbox 入队后保留转圈块，真实回执才结束。
 
 任务工作区不保存第二套 compact。`work/state.json`、任务进度和子代理 canonical state 只是结构化运行
 事实；主代理始终只压缩自己的 thread history。每个子代理本身是独立 agent，因此拥有独立
@@ -168,7 +171,8 @@ guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩�
 - workspace binding 只改变本轮结构化 cwd/lineage；模型历史仍是同一 thread。
 - 完成、停止、取消和 supersede 只改变 task record，不切换聊天 lane。
 
-任务晋升前的普通对话可以使用 Gateway 校验过的 client cwd。首个 `promotes_task` 动作创建或复用
+任务晋升前的普通对话默认使用结构化 owner home；进程启动 cwd 或未获 Full Access 的外部 client cwd
+不会成为权限。首个 `promotes_task` 动作创建或复用
 `<owner_home>/tasks/<task_path>/` 后，该目录成为 main、child、grandchild 的唯一默认 execution cwd 与产品
 写根；后续轮由 `ConversationThread.workspace_task_id` 复用它。`run_command` 与新建 PTY 没有显式
 `working_dir` 时从该 task root 启动；调用者显式指定目录时仍必须落在结构化允许根并经过 sandbox 验证。
@@ -197,9 +201,12 @@ LocalStore 派生索引，由 `session_search` 按需查回；索引不是第二
 
 ## Multi-user boundary
 
-远程 owner 只能访问自己的 owner home。用户、群组的 transcript、USER.md、SOUL.md、memory、tasks 和
-artifacts 相互隔离。唯一公共文件区是管理员发布的 `~/.my-agent/shared/`，用于 shared skills/tools/workflows；
-随 wheel 发布的 builtin tools/skills 本身也是公共产品能力。自然语言路径不能越过 owner 边界。
+所有 WorkspaceOnly owner（包括本地管理员）只能访问自己的完整 owner home。用户、群组的 transcript、
+USER.md、SOUL.md、memory、tasks 和 artifacts 相互隔离；这道文件墙不关闭外网。只有结构化
+`local/main + full-access` 能访问外部目录，普通/远程 owner 无法靠配置副本或自然语言提权；Full 父级的
+child 仍恢复 owner/task 墙。唯一公共文件区是管理员发布的 `~/.my-agent/shared/`，用于 shared
+skills/tools/workflows；随 wheel 发布的 builtin tools/skills 本身也是公共产品能力。Full 模式下，明确外部
+路径或系统排障、其他 owner 必须点名、默认只读少改都属于软行为提示，不替代结构化权限。
 
 ## Subagents and user-visible delivery
 

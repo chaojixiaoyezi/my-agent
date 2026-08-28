@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..concurrency.interrupt import register_interrupt_callback
+from ..path_access_policy import PathAccessPolicy
 from .cancellation import ToolCancelled, bind_cancellation_token
 from .controlled_exec import ControlledExecToolRequest, execute_controlled_exec_tool
 from .models import (
@@ -40,6 +41,9 @@ _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES = {"run_command", "terminal_session", "lsp"}
 _BOUNDARY_CONTEXT_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES | _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES
 
 
+# LLM: This request is the immutable per-invocation permission snapshot. Shared registry handlers
+# must never be mutated from its workspace, owner, or private-network fields.
+# 类用途: 将一次工具调用的参数、工作区、owner 墙和运行快照固定在一起。
 @dataclass(frozen=True)
 class RegistryToolInvokeRequest:
     tool_name: str
@@ -51,6 +55,7 @@ class RegistryToolInvokeRequest:
     write_boundary: dict[str, object] | None
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
+    owner_scope_root: str = ""
     runtime_snapshot: ToolRuntimeSnapshot | None = None
     owner_type: str = "main_agent"
     cancellation_token: object | None = None
@@ -177,7 +182,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
             handler_executed=False,
         )
 
-    execution_tool = _filesystem_tool_for_invocation(
+    execution_tool = _request_local_tool_for_invocation(
         tool,
         request=request,
         workspace_roots=workspace_roots,
@@ -215,23 +220,52 @@ def _with_effective_registry_workspace(
     return replace(request, workspace_root=selected)
 
 
-def _filesystem_tool_for_invocation(
+# LLM: Registry handlers are shared across concurrent TUI requests. Any request-scoped workspace
+# or private-network field must be applied to a shallow copy; Terminal also needs its nested
+# ShellTool copied so one request cannot mutate another request's permissions.
+# 函数用途: 为本次工具调用复制带可变权限字段的 handler，避免单 Gateway 并发串目录或私网授权。
+def _request_local_tool_for_invocation(
     tool: BaseTool,
     *,
     request: RegistryToolInvokeRequest,
     workspace_roots: list[Path] | None,
 ) -> BaseTool:
-    """Return a request-local filesystem view without mutating shared tools."""
+    """Return a request-local handler view without mutating the shared registry."""
 
-    if (
-        request.tool_name not in _BOUNDARY_FILESYSTEM_TOOL_NAMES
-        or not hasattr(tool, "workspace_root")
-    ):
+    terminal_shell = (
+        getattr(tool, "shell_tool", None)
+        if request.tool_name == "terminal_session"
+        else None
+    )
+    needs_workspace_copy = request.tool_name in _BOUNDARY_CONTEXT_TOOL_NAMES and (
+        hasattr(tool, "workspace_root") or hasattr(terminal_shell, "workspace_root")
+    )
+    needs_network_copy = hasattr(tool, "allowed_private_hosts") or hasattr(
+        tool, "allow_private_resolution"
+    )
+    if not needs_workspace_copy and not needs_network_copy:
         return tool
     scoped = copy(tool)
-    scoped.workspace_root = request.workspace_root
-    if workspace_roots is not None and hasattr(scoped, "workspace_roots"):
-        scoped.workspace_roots = list(workspace_roots)
+    if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool"):
+        scoped.shell_tool = copy(scoped.shell_tool)
+    if needs_workspace_copy:
+        workspace_target = (
+            scoped.shell_tool
+            if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool")
+            else scoped
+        )
+        workspace_target.workspace_root = request.workspace_root
+        if workspace_roots is not None and hasattr(workspace_target, "workspace_roots"):
+            workspace_target.workspace_roots = list(workspace_roots)
+    dynamic_policy = PathAccessPolicy.from_values(
+        mode=request.path_access_mode,
+        dangerous_roots=request.path_dangerous_roots,
+        owner_scope_root=request.owner_scope_root,
+    )
+    if hasattr(scoped, "path_access_policy"):
+        scoped.path_access_policy = dynamic_policy
+    if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool"):
+        scoped.shell_tool.path_access_policy = dynamic_policy
     return scoped
 
 
@@ -520,6 +554,11 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
         params["__sandbox_read_roots"] = [
             str(root) for root in request.sandbox_read_roots
         ]
+        if request.tool_name in {"run_command", "terminal_session"}:
+            params["__sandbox_protected_write_paths"] = _boundary_path_strings(
+                request.write_boundary,
+                "forbidden_write_roots",
+            )
         raw_write_roots = request.write_boundary.get("allowed_write_roots")
         if isinstance(raw_write_roots, (list, tuple)):
             # 文件工具已有 validate_write_boundary；shell 内部的重定向/open/cp 无法从
@@ -552,6 +591,16 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
         if scope_mode:
             params["__artifact_read_scope_mode"] = scope_mode
     return params
+
+
+# LLM: Internal sandbox paths come only from the already-authenticated host boundary. Keep their
+# order stable for reproducible permission snapshots and omit malformed scalar values.
+# 函数用途: 把边界里的路径列表规范成传给进程沙箱的字符串数组。
+def _boundary_path_strings(boundary: dict[str, object], key: str) -> list[str]:
+    raw = boundary.get(key)
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return list(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
 
 
 # LLM: 第一项只承担 /tmp 挂载根的选择，不扩大 allowed_write_roots 集合；只有 task_work_dir

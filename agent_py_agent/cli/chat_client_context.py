@@ -24,7 +24,12 @@ from ..agent.user_space.runtime_paths import (
     apply_runtime_paths_to_config,
     resolve_runtime_paths_for_agent,
 )
-from .workspace_resolution import explicit_workspace_root, resolve_workspace_roots
+from .workspace_resolution import (
+    explicit_workspace_root,
+    owner_home_workspace_root,
+    resolve_workspace_roots,
+    validate_requested_workspace_roots,
+)
 
 # LLM: Gateway chat clients need config, owner-scoped paths, and UI metadata—not a model backend,
 # tool registry, scheduler, memory curator, or subagent runtime. Every operation stays on an
@@ -448,12 +453,17 @@ def make_gateway_chat_client(args) -> GatewayChatClientAgent:
     explicit_root = explicit_workspace_root(args)
     if explicit_root is not None:
         config.workspace_root = str(explicit_root)
-    roots = resolve_workspace_roots(config, args.config)
-    root = roots[0]
-    root.mkdir(parents=True, exist_ok=True)
     base_home = home_paths(configured_home_root(config))
     owner = resolve_owner_home(base_home.root, owner_identity_from_config(config))
     scoped_home = home_paths_with_owner(base_home, owner)
+    roots = resolve_workspace_roots(
+        config,
+        args.config,
+        current_dir=owner_home_workspace_root(config),
+    )
+    validate_requested_workspace_roots(config, roots)
+    root = roots[0]
+    root.mkdir(parents=True, exist_ok=True)
     resolution = resolve_runtime_paths_for_agent(config, root, scoped_home)
     apply_runtime_paths_to_config(config, resolution)
     return GatewayChatClientAgent(args, config, root, roots, scoped_home)

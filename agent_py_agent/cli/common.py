@@ -30,8 +30,10 @@ from .bootstrap import (
 )
 from .workspace_resolution import (
     explicit_workspace_root,
+    owner_home_workspace_root,
     resolve_workspace_root,
     resolve_workspace_roots,
+    validate_requested_workspace_roots,
 )
 
 CHAT_PROMPT = "你> "
@@ -44,7 +46,12 @@ def make_agent(args) -> SimpleAgent:
     explicit_root = explicit_workspace_root(args)
     if explicit_root is not None:
         config.workspace_root = str(explicit_root)
-    roots = resolve_workspace_roots(config, args.config)
+    roots = resolve_workspace_roots(
+        config,
+        args.config,
+        current_dir=owner_home_workspace_root(config),
+    )
+    validate_requested_workspace_roots(config, roots)
     return SimpleAgent(config, roots[0], workspace_roots=roots)
 
 

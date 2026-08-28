@@ -148,6 +148,9 @@ class FileSystemTool(BaseTool):
             return nullcontext(None)
         return self.owner_quota.reserve(changes)
 
+    # LLM: PathAccessPolicy is the hard owner wall. Per-turn workspace roots may narrow paths but
+    # never authorize a path outside owner home; only an admin Full Access registry has no scope.
+    # 函数用途: 把相对路径落到当前工具目录，并先经过 owner/full-access 统一权限裁决。
     def resolve_path(self, raw_path: str | Path) -> Path:
 
         raw_text = _required_path(raw_path)
@@ -160,13 +163,6 @@ class FileSystemTool(BaseTool):
             raise ValueError("路径解析失败，请检查路径是否有效。") from exc
         decision = self.path_access_policy.check(candidate)
         if decision.allowed:
-            return candidate
-        # owner 默认只见自己 home + shared；但 capability/delivery contract 可以把
-        # 一个 owner 外目录结构化加入本轮 workspace_roots。只放行这一种明确授权，
-        # 凭据文件和其他 owner 边界的专用拒绝码仍不可绕过。
-        if decision.code == "PATH_OWNER_SCOPE_BLOCKED" and any(
-            _path_is_under(candidate, root) for root in self.workspace_roots
-        ):
             return candidate
         hint = _workspace_typo_error(raw_text, self.workspace_root, self.workspace_roots)
         if hint:

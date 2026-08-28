@@ -239,7 +239,7 @@
   时，创建前原子退回让模型缩窄或分批；省略时宿主不猜，运行时也不得解析 goal 或扫描 diff 自动裁决。
 - gateway 请求进入终态归档时，response 的 `done/interrupted/failed` 是最终状态权威；processing lease 只提供 owner/attempt/heartbeat 等运行字段，不能覆盖终态。归档目录、请求 JSON、response 与 `/status` 必须表达同一事实。
 - 恢复任务后，新的 request/run id 只表示这次执行尝试，不得成为新的任务事实源。模型可见的 main context bundle 摘要不裸露这些本轮运行 id；完整值留在 JSON 事实源，只有结构化选择既有任务后才显示 `selected_conversation_task_id`。default 主代理的 guidance、task_progress 工具、需求/派工 seed、coverage、wait、监督提醒、workspace 懒建和 delivery closeout 必须统一读取结构化 `conversation_task_id`；task_local 子代理仍按自己的 run id 隔离。该解析只保留一个共享实现，禁止各模块复制一套优先级。`task_progress` 的显式 read 若收到的正是当前 typed task id，必须把它归一成当前 task-path 账本；只有不同的 exact id 才能读取其它历史 run。conversation task link 是生命周期权威，`work/state.json` 是同一 task path 的 owner-local 投影；完成、停止、取消等结构化状态迁移必须同步投影，且目标与解析后的状态文件都必须位于当前 `owner_home/tasks/` 的精确 task 根内。路径越界、符号链接、身份不一致或文件损坏时只告警、不得覆盖别的任务目录。
-- 租户可见路径默认取最小权限：远程 owner 只能读写自己的 owner home，另外可读组织明确发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板和旧顶层私有目录一律拒绝。外部目录只能由当前轮的结构化 capability/delivery contract 精确加入 workspace roots，不能由模型给出绝对路径自我授权；该授权也不能覆盖凭据文件或其他 owner 拒绝。随 wheel 发布的基础 tools/skills 是公共产品能力，shared 只用于组织显式共享的 skills/tools/role templates；个人 USER/SOUL、记忆、任务和产物不得由 shared 或 full mode 绕过。
+- 租户可见路径默认取最小权限：本地与远程 owner 的 WorkspaceOnly 都只读写自己的完整 owner home，另外可读组织明确发布的 `~/.my-agent/shared/`；进程启动 cwd、其他 user/group owner、根模板和旧顶层私有目录一律不自动授权。只有结构化 `local/main + full-access` 可解除 owner 墙，普通/远程 owner 不能靠配置副本或自然语言提权；Full 管理员访问其他 owner 仍要求本轮用户明确点名。普通子代理始终恢复 owner/task 写墙。随 wheel 发布的基础 tools/skills 是公共产品能力，shared 只用于组织显式共享的 skills/tools/role templates；个人 USER/SOUL、记忆、任务和产物不得由 shared 绕过。
 - 普通通道上下文必须在同一结构化 scope 内“累计 transcript → 自动 compact → 继续累计”：raw transcript 永不因 compact 改写或删除，thread JSON 的 summary+cursor+generation+checkpoint pointer 是唯一 live compact 状态；旧消息只进入该 owner 的 LocalStore 派生检索索引。每次先生成不改状态的候选，再按完整下一轮输入验证低于精确阈值，随后先写 owner-scoped 完整恢复 checkpoint，最后以一次 generation CAS 同时提交 summary/cursor/checkpoint；失败候选、checkpoint 写失败或 CAS 冲突都不得推进游标。正常达到配置阈值时允许在同一历史尾部保留有界的近期完整 user/assistant 回合，过大时退回压缩全部旧段；供应商已经返回上下文压力时则一次替换本轮之前的完整旧段，禁止把同一受保护尾部连续压成多代 checkpoint。这不是第二份 history，也不能让固定最近轮数重新成为遗忘边界。连续失败只更新同一 thread 的 typed failure circuit，三次后短暂冷却，成功提交清零，禁止每条新消息重复空烧摘要模型。
 - 同一 owner/thread 只有一份模型历史。聊天、文件工作、子代理协调、定时唤醒和普通小任务都继续使用同一 thread 的 summary + raw tail；task link、workspace、progress、wake 与子代理树只是结构化运行事实，不得过滤、替换或复制 transcript。普通 Gateway 请求按会话顺序执行，当前 turn 结束或耐久续轮启动后仍继续同一历史，不能创建平行“聊天上下文”。
 - 子代理 lifecycle wake 是同一 root active turn 的耐久工作片，不是 synthetic wake 文案发起的新任务。后台
@@ -2095,3 +2095,20 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   foreground slice；若后台正整合一个事件，只等待该片释放共享 conversation lane，不等待所有 child 终态。
   后续 TUI 应把“主代理工作中”和“主代理等待子代理”分相展示，数据必须来自 active turn/run claim 与直属
   child 状态，不能从动画或文案猜测。
+
+## 2026-08-28 Owner WorkspaceOnly、管理员 Full Access 与 Compact 恢复余量【状态：本地 focused 已通过，`.7` 真 TUI 待验】
+
+- 所有 owner（包括本地管理员）的默认工作区统一为自己的 owner home，`workspace_root` 留空不再继承进程
+  启动 cwd。普通/远程 owner 无法自行开启 Full Access；只有结构化 `local/main` 与配置
+  `access_mode=full-access` 同时成立才解除 owner 墙。文件系统隔离与外网能力是两条独立合同。
+- Full Access 仍以 owner home 为默认行为锚点。用户明确指定外部路径或要求系统排障时可以离开；访问其他
+  owner 还要由用户明确点名，并默认先只读、尽量少改。该规则只进入 prompt 软提示，绝不解析正文授予权限。
+- owner home 中普通用户文件可读写，宿主权限、配额、保留策略、运行账本、Compact 与审计路径保持只读。
+  Full 主代理创建 child/grandchild 时重新恢复 owner 墙，并只保留内部 task 根和父级明确分配的
+  `product_write_roots`；子代理 cwd 使用用户项目根，不能被内部状态目录覆盖。
+- 单 Gateway 的共享工具 handler 不再在调用间原地改 workspace、owner 或私网字段；每次调用使用独立权限
+  快照与 request-local handler。这样并发 TUI/owner 不会因时序互相串目录或网络授权。
+- Conversation Compact 的有效候选必须低于 `trigger_tokens - recent_tail_tokens`，为下一段近期对话留下完整
+  恢复余量，避免压缩抖动。每次 live/transcript 尝试使用独立 operation id，因此 live 失败不会吞掉后备
+  transcript 进度；child 把同一 typed 进度写入自己的公开 transcript。手动 `/compact` 从耐久 outbox 入队
+  到真实回执期间保持诚实的转圈块，只有 canonical 成功/失败回执才能结束动画和推进 generation。

@@ -257,6 +257,22 @@ def test_manual_compact_boundary_retires_stale_context_and_updates_generation() 
     assert "45,639 → 15,029" in snapshot.stable_blocks[-1].text
 
 
+def test_manual_compact_has_active_animation_until_receipt() -> None:
+    runtime = TuiRuntime("manual-compact-progress")
+
+    runtime.publish_manual_compact_started("control-one")
+
+    active = runtime.store.snapshot().active_blocks
+    assert len(active) == 1
+    assert active[0].role == "compact"
+    assert active[0].metadata["stage"] == "preparing"
+    assert active[0].metadata["percent"] == 5
+
+    runtime.publish_manual_compact_terminal("control-one", succeeded=True)
+
+    assert runtime.store.snapshot().active_blocks == ()
+
+
 def test_idle_activity_snapshot_hydrates_compact_count_and_cannot_regress() -> None:
     runtime = TuiRuntime("resumed-compact-runtime")
 
@@ -315,6 +331,7 @@ def test_gateway_conversation_compact_progress_updates_one_active_block_then_bou
     base = {
         "schema": "conversation_compaction_progress.v1",
         "generation": 3,
+        "operation_id": "transcript:compact-3",
         "before_tokens": 118_400,
         "after_tokens": 0,
         "trigger_tokens": 115_200,
@@ -371,6 +388,48 @@ def test_gateway_conversation_compact_progress_updates_one_active_block_then_bou
     ) is True
     assert runtime.store.snapshot().stable_blocks[-1].kind == "compact_boundary"
     assert runtime.store.snapshot().status.compact_count == 3
+
+
+def test_failed_live_compact_does_not_hide_transcript_fallback_progress() -> None:
+    """Different operation ids may reuse one not-yet-committed generation in the same turn."""
+    runtime = TuiRuntime("conversation-compact-fallback")
+    runtime.enqueue_prompt("compact-fallback", "go", queued=False)
+    turn = runtime.begin_turn("compact-fallback")
+    base = {
+        "schema": "conversation_compaction_progress.v1",
+        "generation": 2,
+        "before_tokens": 118_400,
+        "after_tokens": 0,
+        "trigger_tokens": 115_200,
+        "source_messages": 60,
+    }
+
+    for phase, stage, percent in (
+        ("started", "preparing", 5),
+        ("failed", "failed", 0),
+    ):
+        assert turn.write_conversation_compact_progress(
+            {
+                **base,
+                "operation_id": "live-tool:attempt-a",
+                "phase": phase,
+                "stage": stage,
+                "percent": percent,
+            }
+        )
+    assert turn.write_conversation_compact_progress(
+        {
+            **base,
+            "operation_id": "transcript:attempt-b",
+            "phase": "started",
+            "stage": "preparing",
+            "percent": 5,
+        }
+    )
+
+    snapshot = runtime.store.snapshot()
+    assert any(block.role == "compact" for block in snapshot.active_blocks)
+    assert any(block.phase == "failed" for block in snapshot.stable_blocks)
 
 
 def test_turn_activity_survives_stream_and_tools_until_structured_terminal() -> None:

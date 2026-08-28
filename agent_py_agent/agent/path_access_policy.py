@@ -99,21 +99,14 @@ class PathAccessPolicy:
             roots = tuple(root for root in roots if root is not None)
         return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope)
 
+    # LLM: This is the canonical read/path fence. Owner scope is stronger than path mode; inside
+    # the owner's own home no filename heuristic applies, and explicit admin full mode is open.
+    # 函数用途: 判断一个已解析目标是否位于当前 owner 或管理员允许访问的路径范围。
     def check(self, path: str | Path) -> PathAccessDecision:
         try:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
-        # 选项1-B 凭据文件 denylist(按文件名,任何位置——含 owner 自己家,home 豁免不覆盖它;
-        # 抄 长期助手 file_safety):.env 家族/凭据文件每每装 API key、DB 密码,文件工具不该读写它们
-        # (要看结构用 .env.example)。.env.example 放行(安全模板)。
-        if _is_credential_filename(resolved.name):
-            return PathAccessDecision(
-                False,
-                "PATH_CREDENTIAL_FILE_BLOCKED",
-                f"禁止读写凭据文件(可能含 API key/密码): target={resolved}；如需看结构请用 .env.example。",
-                resolved.name,
-            )
         # owner 隔离是租户边界，不是普通安全模式。远程 owner 的文件可见面
         # 只有自己 home + shared；不仅是 .my-agent 里的其他目录，宿主其他位置也默认拒绝。
         # 必须先于 full 判定，避免 path_access_mode=full 变成跨租户/跨宿主读权。
@@ -123,10 +116,18 @@ class PathAccessPolicy:
             else _my_agent_home_root()
         )
         if self.owner_scope_root is not None:
-            if home_root is not None and _is_relative_to(resolved, home_root):
-                return self._owner_scope_decision(resolved, home_root)
+            # WorkspaceOnly 的唯一硬边界就是 owner home。用户自己的文件（包含项目自用
+            # .env/认证配置）不再被第二层文件名 denylist 误伤；凭据仍不会被日志主动输出，
+            # 也不能借此跨到其他 owner 或宿主目录。
             if _is_relative_to(resolved, self.owner_scope_root):
                 return PathAccessDecision(True)
+            if home_root is not None and _is_relative_to(resolved, home_root):
+                decision = self._owner_scope_decision(resolved, home_root)
+                if not decision.allowed:
+                    return decision
+                if _is_credential_filename(resolved.name):
+                    return _credential_file_decision(resolved)
+                return decision
             return PathAccessDecision(
                 False,
                 "PATH_OWNER_SCOPE_BLOCKED",
@@ -135,6 +136,10 @@ class PathAccessPolicy:
             )
         if self.mode == PATH_ACCESS_MODE_FULL:
             return PathAccessDecision(True)
+        # 无 owner wall 的 legacy normal 模式仍保护常见凭据文件；显式 Full Access 与
+        # owner 自己家已在上方结构化放行，不靠自然语言猜授权。
+        if _is_credential_filename(resolved.name):
+            return _credential_file_decision(resolved)
         # my-agent 自己的数据目录(home,默认 ~/.my-agent,可经 MY_AGENT_HOME 覆盖)豁免 dangerous_roots:
         # agent 写自己的产物/记忆/审计天经地义。否则 root 用户场景下 /root 被列危险目录,会误伤
         # /root/.my-agent/.../output(agent 自己的产物目录)。豁免精确到 home 子树——/root/.ssh 等敏感
@@ -158,7 +163,7 @@ class PathAccessPolicy:
         - 自己 owner home 子树 → 放行(自己家随便读写);
         - shared/ → 放行公共 skills/scripts 等只读/受管能力区；内置工具来自代码 registry，
           管理员扩展工具来自显式安装的 plugin，不从 shared Markdown/目录自动执行；
-        - admin_grants/ → 拦(admin 级 bypass 授权目录,owner 降权不可自授权);
+        - admin_grants/ → 拦(宿主保留的控制目录，owner 不能写入或借此改变权限);
         - owners/ 下但不是自己的 → 拦(别人的家,PATH_CROSS_OWNER_BLOCKED);
         - 其余 .my-agent 顶层事实源全部拦；共享能力只有 shared/ 一个权威位置。
         """
@@ -170,12 +175,12 @@ class PathAccessPolicy:
             return PathAccessDecision(True)
         admin_grants_root = home_root / "admin_grants"
         if _is_relative_to(resolved, admin_grants_root):
-            # admin bypass 授权目录:owner-scoped agent 一律拦(防自授权),与 ①归一/bwrap 三重堵。
-            # 框架启动判 bypass、真人 admin 写授权都不经此 policy → 不受影响。
+            # 这是历史布局中仍保留的宿主控制目录，不再是 Full Access 的运行时来源。
+            # owner-scoped agent 仍一律拦，避免用户通过写控制面文件改变自己的权限。
             return PathAccessDecision(
                 False,
                 "PATH_ADMIN_GRANTS_BLOCKED",
-                f"禁止访问 admin 授权目录(降权用户不可自授权): target={resolved}",
+                f"禁止访问宿主保留的 admin_grants 控制目录: target={resolved}",
                 str(admin_grants_root),
             )
         owners_root = home_root / "owners"
@@ -192,6 +197,18 @@ class PathAccessPolicy:
             f"当前用户只能访问自己的数据目录和 shared 公共能力区: target={resolved}",
             str(home_root),
         )
+
+
+# LLM: Credential denial is a legacy/unscoped normal-mode guard. Owner-home and explicit full
+# access decisions must be made before calling it so filename heuristics never become authority.
+# 函数用途: 生成统一的凭据文件拒绝结果，供未处于 owner 私有区或 Full Access 的路径使用。
+def _credential_file_decision(resolved: Path) -> PathAccessDecision:
+    return PathAccessDecision(
+        False,
+        "PATH_CREDENTIAL_FILE_BLOCKED",
+        f"禁止读写凭据文件(可能含 API key/密码): target={resolved}；如需看结构请用 .env.example。",
+        resolved.name,
+    )
 
 
 def normalize_path_access_mode(value: object) -> str:

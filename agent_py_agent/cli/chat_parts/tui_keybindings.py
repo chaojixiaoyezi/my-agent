@@ -1000,6 +1000,7 @@ def _tui_submit_control_operation(
     from .tui_control_delivery import TuiControlOperationEntry
 
     message_id = new_id("control")
+    runtime = _required_tui_runtime(params)
     try:
         _ensure_control_operation_reconciler(params).enqueue(
             TuiControlOperationEntry(
@@ -1010,12 +1011,14 @@ def _tui_submit_control_operation(
             )
         )
     except Exception:
-        _required_tui_runtime(params).set_notice(
+        runtime.set_notice(
             "Control operation could not be saved",
             duration_seconds=2.5,
         )
         return True
-    _required_tui_runtime(params).set_notice(
+    if command.kind == "compact":
+        runtime.publish_manual_compact_started(message_id)
+    runtime.set_notice(
         "Confirming control operation…",
         duration_seconds=1.2,
     )
@@ -1096,7 +1099,9 @@ def _ensure_control_operation_reconciler(
 
     # LLM: Restart restoration is a notice only; command/result text stays in the server receipt.
     # 函数用途: TUI 重启时提示仍有控制操作正在对账。
-    def on_restore(_entry) -> None:
+    def on_restore(entry) -> None:
+        if entry.command_kind == "compact":
+            runtime.publish_manual_compact_started(entry.message_id)
         runtime.set_notice("Restoring control confirmation…", duration_seconds=2.0)
 
     # LLM: A successful compact consumes only the typed canonical generation returned by Gateway;
@@ -1106,9 +1111,18 @@ def _ensure_control_operation_reconciler(
         if entry.command_kind == "stop":
             runtime.set_notice(result.message or "Stop request completed", duration_seconds=2.0)
             return
-        if entry.command_kind == "compact" and result.ok and result.status is not None:
-            generation = result.status.compact_generation
-            if generation is not None and generation > 0:
+        if entry.command_kind == "compact":
+            generation = (
+                result.status.compact_generation
+                if result.ok and result.status is not None
+                else None
+            )
+            succeeded = generation is not None and generation > 0
+            runtime.publish_manual_compact_terminal(
+                entry.message_id,
+                succeeded=succeeded,
+            )
+            if succeeded:
                 runtime.publish_compact_boundary(
                     generation,
                     text=result.message,
@@ -1118,7 +1132,12 @@ def _ensure_control_operation_reconciler(
 
     # LLM: Terminal uncertainty is never rendered as success or retried with a fresh id.
     # 函数用途: 告知用户控制副作用无法确认且系统不会自动重复执行。
-    def on_terminal_unknown(_entry, result) -> None:
+    def on_terminal_unknown(entry, result) -> None:
+        if entry.command_kind == "compact":
+            runtime.publish_manual_compact_terminal(
+                entry.message_id,
+                succeeded=False,
+            )
         runtime.set_notice(
             result.message or "Control result is unknown · not repeated",
             duration_seconds=3.0,
@@ -1126,7 +1145,12 @@ def _ensure_control_operation_reconciler(
 
     # LLM: Id conflicts are quarantined; the client cannot bypass them by silently making a new id.
     # 函数用途: 提示控制消息身份冲突并停止自动重试。
-    def on_conflict(_entry) -> None:
+    def on_conflict(entry) -> None:
+        if entry.command_kind == "compact":
+            runtime.publish_manual_compact_terminal(
+                entry.message_id,
+                succeeded=False,
+            )
         runtime.set_notice("Control identity conflict · not repeated", duration_seconds=3.0)
 
     # LLM: Transient outbox errors leave canonical rows untouched and keep the sole worker alive.

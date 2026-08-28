@@ -31,6 +31,7 @@ from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolResult,
     ToolSuccessFacts,
 )
+from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary
 
 
 def test_local_store_persists_runtime_gate_records_for_replay(tmp_path):
@@ -552,7 +553,7 @@ def test_live_task_workspace_replaces_stale_bootstrap_workspace_roots(tmp_path):
     assert boundary["task_work_dir"] == str(task_root / "work")
 
 
-def test_remote_owner_write_boundary_is_scoped_to_current_task(tmp_path):
+def test_workspace_only_main_write_boundary_is_whole_owner_home(tmp_path):
     owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
     task_root = owner_home / "tasks" / "2026-07-16" / "current-task"
     agent = SimpleNamespace(
@@ -567,7 +568,144 @@ def test_remote_owner_write_boundary_is_scoped_to_current_task(tmp_path):
 
     boundary = write_boundary_with_runtime_ledger(agent, params)
 
-    assert boundary["allowed_write_roots"] == [str(task_root.resolve())]
+    assert boundary["allowed_write_roots"] == [str(owner_home.resolve())]
+
+
+def test_workspace_only_owner_control_metadata_stays_read_only(tmp_path):
+    owner_home = tmp_path / "owners" / "local" / "main"
+    permissions = owner_home / "permissions.json"
+    owner_home.mkdir(parents=True)
+    permissions.write_text("{}", encoding="utf-8")
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="local"),
+        home_paths=SimpleNamespace(
+            owner_home_dir=owner_home,
+            owner_permissions_json=permissions,
+        ),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+
+    boundary = write_boundary_with_runtime_ledger(
+        agent,
+        _loop_params(write_boundary={}),
+    )
+    error = validate_write_boundary(
+        "write_file",
+        {"path": str(permissions)},
+        workspace_root=owner_home,
+        workspace_roots=(owner_home,),
+        path_access_mode="normal",
+        path_dangerous_roots=(),
+        write_boundary=boundary,
+    )
+
+    assert boundary["allowed_write_roots"] == [str(owner_home.resolve())]
+    assert str(permissions.resolve()) in boundary["forbidden_write_roots"]
+    assert error is not None and "forbidden_write_roots" in error
+
+
+def test_local_full_access_main_has_no_workspace_write_allowlist(tmp_path):
+    owner_home = tmp_path / "owners" / "local" / "main"
+    external_task = tmp_path / "external" / "task"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(
+            my_agent_owner_provider="local",
+            access_mode="full-access",
+        ),
+        home_paths=SimpleNamespace(
+            owner_home_dir=owner_home,
+            owner_provider="local",
+            owner_kind="main",
+        ),
+        tools=SimpleNamespace(owner_scope_root="", workspace_root=external_task),
+        local_store=None,
+    )
+    params = _loop_params(
+        write_boundary={},
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(external_task),
+                "output_dir": str(external_task / "output"),
+                "work_dir": str(external_task / "work"),
+            }
+        },
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert "effective_owner_scope_root" not in boundary
+    assert "allowed_write_roots" not in boundary
+
+
+def test_full_access_parent_child_restores_owner_wall_and_narrow_task_scope(tmp_path):
+    owner_home = tmp_path / "owners" / "local" / "main"
+    task_root = owner_home / "tasks" / "2026-08-27" / "task"
+    child_root = task_root / "work" / "agents" / "child-1"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(
+            my_agent_owner_provider="local",
+            access_mode="full-access",
+        ),
+        home_paths=SimpleNamespace(
+            owner_home_dir=owner_home,
+            owner_provider="local",
+            owner_kind="main",
+        ),
+        tools=SimpleNamespace(owner_scope_root=""),
+        subagents=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        context_scope="task_local",
+        write_boundary={"allowed_write_roots": [str(child_root)]},
+        task_attributes={"run_workspace": {"task_root": str(task_root)}},
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["effective_owner_scope_root"] == str(owner_home.resolve())
+    assert boundary["allowed_write_roots"] == [str(child_root.resolve())]
+
+
+def test_child_runtime_task_keeps_explicit_owner_project_root(tmp_path):
+    owner_home = tmp_path / "owners" / "local" / "main"
+    manager_workspace = owner_home / "workspace" / "runtime" / "tree" / "subagents"
+    task_root = manager_workspace / "tasks" / "task-1"
+    project_root = owner_home / "projects" / "game"
+    sibling_root = owner_home / "projects" / "unassigned"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(
+            my_agent_owner_provider="local",
+            access_mode="workspace-write",
+        ),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        subagents=SimpleNamespace(
+            owner_scope_root=str(owner_home),
+            workspace=manager_workspace,
+        ),
+        local_store=None,
+    )
+    params = _loop_params(
+        context_scope="task_local",
+        write_boundary={
+            "allowed_write_roots": [
+                str(task_root / "work" / "agents" / "child-1"),
+                str(project_root),
+                str(sibling_root),
+            ],
+            "product_write_roots": [str(project_root)],
+        },
+        task_attributes={"run_workspace": {"task_root": str(task_root)}},
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["effective_owner_scope_root"] == str(owner_home.resolve())
+    assert boundary["allowed_write_roots"] == [
+        str((task_root / "work" / "agents" / "child-1").resolve()),
+        str(project_root.resolve()),
+    ]
 
 
 def test_remote_main_conversation_rebases_stale_bootstrap_write_scope(tmp_path):
@@ -597,10 +735,7 @@ def test_remote_main_conversation_rebases_stale_bootstrap_write_scope(tmp_path):
     boundary = write_boundary_with_runtime_ledger(agent, params)
 
     assert boundary["task_root"] == str(task_root)
-    assert boundary["allowed_write_roots"] == [
-        str((task_root / "output").resolve()),
-        str((task_root / "work").resolve()),
-    ]
+    assert boundary["allowed_write_roots"] == [str(owner_home.resolve())]
 
 
 def test_remote_main_conversation_keeps_structured_owner_output_override(tmp_path):
@@ -628,11 +763,7 @@ def test_remote_main_conversation_keeps_structured_owner_output_override(tmp_pat
 
     boundary = write_boundary_with_runtime_ledger(agent, params)
 
-    assert boundary["allowed_write_roots"] == [
-        str((task_root / "output").resolve()),
-        str((task_root / "work").resolve()),
-        str(requested.resolve()),
-    ]
+    assert boundary["allowed_write_roots"] == [str(owner_home.resolve())]
 
 
 def test_remote_main_conversation_rejects_output_override_outside_owner(tmp_path):
@@ -660,10 +791,7 @@ def test_remote_main_conversation_rejects_output_override_outside_owner(tmp_path
 
     boundary = write_boundary_with_runtime_ledger(agent, params)
 
-    assert boundary["allowed_write_roots"] == [
-        str((task_root / "output").resolve()),
-        str((task_root / "work").resolve()),
-    ]
+    assert boundary["allowed_write_roots"] == [str(owner_home.resolve())]
 
 
 def test_remote_main_conversation_does_not_reopen_owner_or_sibling_task(tmp_path):
@@ -693,10 +821,7 @@ def test_remote_main_conversation_does_not_reopen_owner_or_sibling_task(tmp_path
 
         boundary = write_boundary_with_runtime_ledger(agent, params)
 
-        assert boundary["allowed_write_roots"] == [
-            str((task_root / "output").resolve()),
-            str((task_root / "work").resolve()),
-        ]
+        assert boundary["allowed_write_roots"] == [str(owner_home.resolve())]
 
 
 def test_remote_owner_empty_legacy_scope_is_replaced_by_current_task(tmp_path):
@@ -714,7 +839,7 @@ def test_remote_owner_empty_legacy_scope_is_replaced_by_current_task(tmp_path):
 
     boundary = write_boundary_with_runtime_ledger(agent, params)
 
-    assert boundary["allowed_write_roots"] == [str(task_root.resolve())]
+    assert boundary["allowed_write_roots"] == [str(owner_home.resolve())]
 
 
 def test_remote_owner_keeps_narrow_child_grant_and_drops_sibling_task(tmp_path):
@@ -728,6 +853,7 @@ def test_remote_owner_keeps_narrow_child_grant_and_drops_sibling_task(tmp_path):
         local_store=None,
     )
     params = _loop_params(
+        context_scope="task_local",
         write_boundary={"allowed_write_roots": [str(child_root), str(sibling_root)]},
         task_attributes={"run_workspace": {"task_root": str(task_root)}},
     )
@@ -799,6 +925,7 @@ def test_remote_owner_invalid_task_root_fails_closed(tmp_path):
         local_store=None,
     )
     params = _loop_params(
+        context_scope="task_local",
         write_boundary={},
         task_attributes={"run_workspace": {"task_root": str(owner_home / "workspace")}},
     )

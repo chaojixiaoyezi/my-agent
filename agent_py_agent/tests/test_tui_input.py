@@ -483,6 +483,31 @@ def test_gateway_btw_enters_durable_control_outbox_with_exact_turn() -> None:
     assert entry.message_id.startswith("control-")
 
 
+def test_gateway_manual_compact_starts_visible_progress_after_durable_enqueue() -> None:
+    runtime = TuiRuntime("control-compact-submit")
+    captured: list[object] = []
+
+    class Reconciler:
+        def enqueue(self, entry) -> None:
+            captured.append(entry)
+
+    params = SimpleNamespace(
+        use_gateway=True,
+        state_lock=threading.Lock(),
+        is_running_ref=[False],
+        running_request_id_ref=[""],
+        tui_runtime=runtime,
+        control_operation_reconciler=Reconciler(),
+    )
+
+    assert tui_keybindings._tui_submit_control_operation(params, "/compact")
+    assert captured[0].command_kind == "compact"
+    active = runtime.store.snapshot().active_blocks
+    assert len(active) == 1
+    assert active[0].role == "compact"
+    assert active[0].metadata["percent"] == 5
+
+
 def test_gateway_stop_is_not_sent_before_exact_turn_is_bound() -> None:
     runtime = TuiRuntime("control-submitting")
 

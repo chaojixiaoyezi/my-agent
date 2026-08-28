@@ -1,5 +1,20 @@
 # Gateway Progress
 
+## 2026-08-28 WorkspaceOnly/Full Access 与完整 Compact 动画
+
+- 本地 TUI、外部 owner、文件工具和进程工具现在共享同一 owner home 硬边界；空工作区不再继承 Gateway/TUI
+  启动 cwd。只有结构化 `local/main + full-access` 可访问外部路径，远程 owner 配置会降权；子代理无论父级
+  是否 Full 都恢复 owner/task 范围。文件墙不关闭网络。
+- Full 管理员的 prompt 只增加行为提示：明确外部路径或系统排障才离开 home，其他 owner 必须点名且默认
+  只读/少改。提示不负责授权。owner 控制面文件继续只读，普通用户自己的文件（含自己的配置）可正常使用。
+- 单 Gateway 共享 registry 的 workspace、path policy 与私网字段改为 request-local 副本，避免多 TUI 并发串权。
+  子代理内部 task state 与用户项目根分离：相对路径继续落用户项目，内部账本目录只负责状态。
+- Compact 统一加入一段 recent-tail 恢复余量；候选未降到恢复目标就不推进 generation。live 尝试与 transcript
+  后备使用独立 operation id，失败块不再遮住后备进度；child Compact 进入 child transcript。手动 `/compact`
+  从 outbox 入队起显示持续动画，真实回执后才成功收起或冻结失败。
+- 本地权限/沙箱 focused 与主/子/manual Compact focused 均已通过；生产改动未达 10,000 行，不跑全仓 pytest，
+  推送前仍执行 Ruff、doc sync、strict code-size、diff 与 clean-package 严格门。
+
 ## 2026-08-28 后台三车道统一最终回执与会话 Compact 权威
 
 - `.10` 真任务证明 due policy 已提交最终 assistant/任务终态，但附着 TUI 没有 notice；旧实现只在 child

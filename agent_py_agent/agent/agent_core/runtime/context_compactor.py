@@ -24,6 +24,7 @@ class RuntimeCompactPolicy:
     context_window_tokens: int
     trigger_percent: int
     trigger_tokens: int
+    recovery_target_tokens: int
     allow_persistent_apply: bool
     recent_tail_max_turns: int
     recent_tail_tokens: int
@@ -44,24 +45,27 @@ def runtime_compact_policy(
 ) -> RuntimeCompactPolicy:
     window = resolve_model_context_window_tokens(agent)
     percent = compact_trigger_percent(getattr(getattr(agent, "config", None), "memory_compact_auto_trigger_percent", None))
+    trigger_tokens = compact_trigger_tokens(window, percent)
+    recent_tail_tokens = min(
+        DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP,
+        max(
+            1,
+            int(trigger_tokens * (DEFAULT_COMPACT_RECENT_TAIL_PERCENT / 100.0)),
+        ),
+    )
     return RuntimeCompactPolicy(
         context_window_tokens=window,
         trigger_percent=percent,
-        trigger_tokens=compact_trigger_tokens(window, percent),
+        trigger_tokens=trigger_tokens,
+        recovery_target_tokens=compact_recovery_target_tokens(
+            trigger_tokens,
+            recent_tail_tokens,
+        ),
         allow_persistent_apply=(
             bool(save) or conversation_transcript_is_authoritative(task_attributes)
         ),
         recent_tail_max_turns=DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS,
-        recent_tail_tokens=min(
-            DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP,
-            max(
-                1,
-                int(
-                    compact_trigger_tokens(window, percent)
-                    * (DEFAULT_COMPACT_RECENT_TAIL_PERCENT / 100.0)
-                ),
-            ),
-        ),
+        recent_tail_tokens=recent_tail_tokens,
         failure_threshold=DEFAULT_COMPACT_FAILURE_THRESHOLD,
         failure_cooldown_seconds=DEFAULT_COMPACT_FAILURE_COOLDOWN_SECONDS,
     )
@@ -87,6 +91,18 @@ def compact_trigger_tokens(context_window_tokens: int, trigger_percent: int) -> 
     return max(1, int(context_window_tokens * (compact_trigger_percent(trigger_percent) / 100.0)))
 
 
+# LLM: Every live-tool and transcript Compact must settle below this same target so the next
+# complete recent-tail budget does not immediately trigger another generation.
+# 函数用途: 从触发线中预留一整段近期对话空间，计算压缩后必须达到的恢复目标。
+def compact_recovery_target_tokens(
+    trigger_tokens: int,
+    recent_tail_tokens: int,
+) -> int:
+    if trigger_tokens <= 0:
+        return 0
+    return max(1, int(trigger_tokens) - max(1, int(recent_tail_tokens or 0)))
+
+
 __all__ = [
     "DEFAULT_COMPACT_TRIGGER_PERCENT",
     "DEFAULT_COMPACT_FAILURE_COOLDOWN_SECONDS",
@@ -95,6 +111,7 @@ __all__ = [
     "DEFAULT_COMPACT_RECENT_TAIL_PERCENT",
     "DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP",
     "RuntimeCompactPolicy",
+    "compact_recovery_target_tokens",
     "compact_trigger_percent",
     "compact_trigger_tokens",
     "runtime_compact_policy",

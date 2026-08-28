@@ -31,6 +31,7 @@ from .sandbox import SandboxUnavailable
 from .shell import (
     ShellTool,
     _sandbox_exec,
+    _sandbox_protected_write_paths,
     _sandbox_read_roots,
     _sandbox_write_roots,
     _subprocess_text_env,
@@ -42,6 +43,9 @@ _MAX_WRITE_BYTES = 64_000
 _DEFAULT_READ_BYTES = 32_000
 
 
+# LLM: A PTY session stores the immutable permission snapshot captured at start; later reads and
+# writes must present the same scope and cannot attach to another owner's process.
+# 类用途: 保存一个交互终端进程、增量输出以及启动时的权限边界。
 @dataclass
 class PtySession:
     session_id: str
@@ -78,17 +82,24 @@ class PtySession:
             return chunk, next_cursor, truncated
 
 
+# LLM: This value is the canonical equality key for PTY ownership and filesystem boundaries.
+# 类用途: 冻结 PTY 启动时的 owner、可读、可写和受保护路径。
 @dataclass(frozen=True)
 class PtyAccessScope:
     owner_home: str
     write_roots: tuple[str, ...] | None
     read_roots: tuple[str, ...] | None
+    protected_write_paths: tuple[str, ...] | None
 
 
+# LLM: Normalize every PTY scope path before comparing session ownership; missing lists retain
+# their distinct "not constrained by this field" meaning instead of becoming empty deny lists.
+# 函数用途: 把工具边界规范成可稳定比较的 PTY 权限快照。
 def _pty_access_scope(
     owner_home: object,
     write_roots: tuple[Any, ...] | None,
     read_roots: tuple[Any, ...] | None = None,
+    protected_write_paths: tuple[Any, ...] | None = None,
 ) -> PtyAccessScope:
     owner = ""
     if owner_home:
@@ -103,19 +114,36 @@ def _pty_access_scope(
         normalized_read_roots = tuple(
             sorted({str(Path(root).expanduser().resolve(strict=False)) for root in read_roots})
         )
+    normalized_protected = None
+    if protected_write_paths is not None:
+        normalized_protected = tuple(
+            sorted(
+                {
+                    str(Path(root).expanduser().resolve(strict=False))
+                    for root in protected_write_paths
+                }
+            )
+        )
     return PtyAccessScope(
         owner_home=owner,
         write_roots=normalized_roots,
         read_roots=normalized_read_roots,
+        protected_write_paths=normalized_protected,
     )
 
 
+# LLM: The process-wide registry may hold sessions from concurrent TUI requests, so every lookup
+# and mutation must validate the immutable PtyAccessScope before touching a process.
+# 类用途: 统一登记、读写和关闭有界交互终端，防止跨用户接管。
 class PtySessionRegistry:
     def __init__(self) -> None:
         self._sessions: dict[str, PtySession] = {}
         self._counter = 0
         self._lock = threading.Lock()
 
+    # LLM: Capture the complete access scope at spawn and pass every filesystem field into the
+    # same AttemptExecutionSandbox used by non-interactive shell commands.
+    # 函数用途: 在当前请求权限下启动 PTY，并把受保护路径一起锁定到会话。
     def start(
         self,
         command: str,
@@ -123,6 +151,7 @@ class PtySessionRegistry:
         owner_home: object = None,
         write_roots: tuple[Path, ...] | None = None,
         read_roots: tuple[Path, ...] | None = None,
+        protected_write_paths: tuple[Path, ...] | None = None,
     ) -> PtySession:
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
@@ -134,13 +163,19 @@ class PtySessionRegistry:
                 raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSIONS}")
             self._counter += 1
             session_id = f"pty-{self._counter}-{int(time.time())}"
-        access_scope = _pty_access_scope(owner_home, write_roots, read_roots)
+        access_scope = _pty_access_scope(
+            owner_home,
+            write_roots,
+            read_roots,
+            protected_write_paths,
+        )
         exec_arg, use_shell = _sandbox_exec(
             command,
             target,
             owner_home,
             write_roots=write_roots,
             read_roots=read_roots,
+            protected_write_paths=protected_write_paths,
         )
         master_fd, slave_fd = pty.openpty()
         try:
@@ -303,7 +338,12 @@ class TerminalSessionTool(BaseTool):
         ),
         output_policy=OutputPolicy(trust="external_data"),
         input_policy=ToolInputPolicy(
-            internal_parameters=("__sandbox_write_roots", "__sandbox_read_roots", "__access_mode"),
+            internal_parameters=(
+                "__sandbox_write_roots",
+                "__sandbox_read_roots",
+                "__sandbox_protected_write_paths",
+                "__access_mode",
+            ),
             trusted_parameter_bindings=((
                 "working_dir",
                 TrustedParameterBinding(
@@ -339,11 +379,15 @@ class TerminalSessionTool(BaseTool):
     def workspace_roots(self, roots: list[Path]) -> None:
         self.shell_tool.workspace_roots = roots
 
+    # LLM: PTY follow-up actions must reconstruct the exact host-only scope from internal params;
+    # model-visible arguments alone can never select a session.
+    # 函数用途: 为启动、读、写和关闭生成同一份 PTY 边界键。
     def _access_scope(self, params: dict[str, Any]) -> PtyAccessScope:
         return _pty_access_scope(
             self.shell_tool.path_access_policy.owner_scope_root,
             _sandbox_write_roots(params),
             _sandbox_read_roots(params),
+            _sandbox_protected_write_paths(params),
         )
 
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
@@ -358,6 +402,9 @@ class TerminalSessionTool(BaseTool):
             return self._close(params)
         return self._error("TOOL_INVALID_ARGUMENTS", "action 必须是 start/write/read/close")
 
+    # LLM: Start is the only PTY process-spawn boundary; command policy, cwd policy, sandbox roots
+    # and protected control paths must all be resolved before the registry sees the command.
+    # 函数用途: 校验命令和目录后启动受沙箱保护的交互进程。
     def _start(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         command_result = self.shell_tool._parse_command(params)
         if isinstance(command_result, ToolHandlerOutcome):
@@ -371,6 +418,7 @@ class TerminalSessionTool(BaseTool):
             )
         write_roots = _sandbox_write_roots(params)
         read_roots = _sandbox_read_roots(params)
+        protected_write_paths = _sandbox_protected_write_paths(params)
         target = self.shell_tool._execution_target(params, command)
         if isinstance(target, ToolHandlerOutcome):
             return self._error(target.error_code, target.output)
@@ -381,6 +429,7 @@ class TerminalSessionTool(BaseTool):
                 self.shell_tool.path_access_policy.owner_scope_root,
                 write_roots,
                 read_roots,
+                protected_write_paths,
             )
         except SandboxUnavailable as exc:
             return self._error("SANDBOX_UNAVAILABLE", str(exc))

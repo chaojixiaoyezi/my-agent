@@ -1,7 +1,8 @@
-"""F11④ 自授权漏洞验收:owner-scoped agent 无法自写一张 bypass 授权。
+"""宿主控制目录隔离验收:owner-scoped agent 无法写入 admin_grants。
 
 端到端走 canonical Tool Gateway:owner-scoped(降权)场景下用 write_file 写
-`<my_agent_home>/admin_grants/grant_x.json`(想给自己发 owner.full_access)必须明确拒绝。
+`<my_agent_home>/admin_grants/grant_x.json`(尝试伪造 owner.full_access)必须明确拒绝。
+该目录不再是 Full Access 的运行时来源，但仍是宿主保留路径，不能让 owner 写入。
 显式绝对路径不能静默改写到其他位置后谎报成功。
 """
 

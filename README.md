@@ -316,6 +316,13 @@ repo 内 `data/*` 只保留测试 fixture 或显式指定路径用途，不再�
 如果配置里显式把 `local_store_path`、`subagent_workspace`、`gateway_workspace`
 等改成非默认路径，这些显式路径仍会生效；默认新任务、记忆、gateway 和子代理状态都归当前 owner home。
 
+本地 TUI 的结构化身份默认为 `local/main`，但默认权限仍是 WorkspaceOnly：无论从哪个 shell 目录启动，
+相对路径都从自己的 owner home（或任务建立后的项目目录）解析，不会把 `/root`、源码树等启动目录自动变成
+工作区。普通/远程用户只能使用自己的 owner home；文件权限不限制正常外网访问。只有本机 `local/main`
+显式配置 `access_mode: full-access` 后才可访问外部目录，且子代理仍保持 owner/task 范围。Full Access 下，
+模型只有在用户明确指定外部路径或要求系统排障时才离开自己的 home；涉及其他 owner 目录还需用户明确点名，
+默认先只读并尽量少改。这里的自然语言规则只是行为约束，真正权限只认结构化身份和配置。
+
 ```bash
 my-agent memory-list --limit 20
 # 查看最近 20 条长期记忆；不调用模型。

@@ -172,7 +172,10 @@ def test_owner_scoped_write_cannot_use_public_my_agent_directory(tmp_path, monke
     assert allowed.ok is True
 
 
-def test_owner_scoped_write_allows_structured_temporary_root(tmp_path, monkeypatch) -> None:
+def test_owner_scoped_write_cannot_be_widened_by_mutating_workspace_roots(
+    tmp_path,
+    monkeypatch,
+) -> None:
     from agent_py_agent.agent.tooling._filesystem_read import filesystem_access_options
     from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool, WriteFileToolOptions
 
@@ -188,7 +191,26 @@ def test_owner_scoped_write_allows_structured_temporary_root(tmp_path, monkeypat
     )
     tool.workspace_roots = [owner.resolve(), external.resolve()]
 
-    result = tool.execute({"path": str(external / "report.md"), "content": "ok"})
+    result = tool.execute({"path": str(external / "report.md"), "content": "no"})
 
-    assert result.ok is True
-    assert (external / "report.md").read_text(encoding="utf-8") == "ok"
+    assert result.ok is False
+    assert result.error_code in {"TOOL_INVALID_ARGUMENTS", "WRITE_FORBIDDEN"}
+    assert not (external / "report.md").exists()
+
+
+def test_owner_scope_allows_owner_project_credentials(tmp_path, monkeypatch) -> None:
+    """WorkspaceOnly treats every file in the owner's own home as user-owned data."""
+    home = _home(tmp_path, monkeypatch)
+    owner = home / "owners" / "providers" / "feishu" / "users" / "A"
+    policy = PathAccessPolicy.from_values(owner_scope_root=str(owner))
+
+    assert policy.check(owner / "projects" / "demo" / ".env").allowed
+    assert policy.check(owner / "projects" / "demo" / "auth.json").allowed
+
+
+def test_explicit_full_mode_allows_external_credentials(tmp_path, monkeypatch) -> None:
+    """The local administrator's explicit Full Access is not narrowed by filename heuristics."""
+    policy = PathAccessPolicy.from_values(mode="full", owner_scope_root="")
+
+    assert policy.check(tmp_path / "external" / ".env").allowed
+    assert policy.check("/etc/passwd").allowed

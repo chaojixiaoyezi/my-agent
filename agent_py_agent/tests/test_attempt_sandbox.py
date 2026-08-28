@@ -340,9 +340,8 @@ def test_sandbox_exec_unscoped_uses_full_access_but_still_sandboxed(tmp_path):
         }
 
 
-def test_sandbox_exec_persona_only_scope_is_not_full_access(tmp_path):
-    """G6：owner_home 空但 protected_persona_root 非空 = 有隔离要求 → 非 full_access，
-    persona 文件在 macOS Seatbelt profile 中有 literal deny。"""
+def test_full_access_keeps_persona_readonly_without_downgrading_host_access(tmp_path):
+    """Persona is a precise read-only overlay, not a reason to downgrade Full Access."""
     if not IS_MACOS:
         pytest.skip("macOS Seatbelt profile 检查")
     from agent_py_agent.agent.attempt.sandbox import AttemptExecutionSandbox
@@ -357,10 +356,90 @@ def test_sandbox_exec_persona_only_scope_is_not_full_access(tmp_path):
         staging=target,
         shared=persona,
         protected_persona_root=persona,
+        full_access=True,
     )
-    assert "(deny file-write*)" in profile
+    assert "(deny file-write*)" not in profile
     soul = persona / "SOUL.md"
     assert f'(deny file-write* (literal "{soul}"))' in profile
+
+
+def test_linux_full_access_with_persona_binds_host_and_ro_overlays_persona(tmp_path):
+    from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
+
+    target = tmp_path / "external"
+    persona = tmp_path / "owner"
+    target.mkdir()
+    persona.mkdir()
+    (persona / "SOUL.md").write_text("# SOUL\n", encoding="utf-8")
+    sandbox = AttemptExecutionSandbox(
+        AttemptSandboxSpec(
+            attempt_view=target,
+            staging_root=target,
+            shared_workspace=persona,
+            owner_home=persona,
+            protected_persona_root=persona,
+            full_access=True,
+            bwrap_path="/fake/bwrap",
+        )
+    )
+    sandbox._platform = "Linux"
+    sandbox._ready = SandboxReadiness(True, "SANDBOX_READY", "ok")
+
+    argv = sandbox.build_argv(["true"])
+
+    bind_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--bind"
+    }
+    ro_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--ro-bind"
+    }
+    assert ("/", "/") in bind_pairs
+    assert (str(persona / "SOUL.md"), str(persona / "SOUL.md")) in ro_pairs
+
+
+def test_linux_explicit_write_roots_do_not_make_readonly_cwd_writable(tmp_path):
+    """A source cwd may be readable and executable without becoming an implicit write root."""
+    from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
+
+    owner = tmp_path / "owner"
+    source = tmp_path / "source"
+    output = owner / "tasks" / "t1" / "work"
+    for path in (owner, source, output):
+        path.mkdir(parents=True)
+    sandbox = AttemptExecutionSandbox(
+        AttemptSandboxSpec(
+            attempt_view=source,
+            staging_root=source,
+            shared_workspace=owner,
+            owner_home=owner,
+            extra_write_roots=(output,),
+            public_read_roots=(source,),
+            implicit_attempt_write_roots=False,
+            bwrap_path="/fake/bwrap",
+        )
+    )
+    sandbox._platform = "Linux"
+    sandbox._ready = SandboxReadiness(True, "SANDBOX_READY", "ok")
+
+    argv = sandbox.build_argv(["true"])
+
+    bind_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--bind"
+    }
+    ro_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--ro-bind"
+    }
+    assert (str(source), str(source)) in ro_pairs
+    assert (str(source), str(source)) not in bind_pairs
+    assert (str(output), str(output)) in bind_pairs
 
 
 def test_sandbox_exec_rejects_shared_workspace_write(tmp_path):

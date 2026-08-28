@@ -143,6 +143,21 @@ class TestPromptBuilderInit:
         assert "当前 owner" not in rendered
         assert "ou_must_not_appear" not in rendered
 
+    def test_local_admin_owner_scope_explains_soft_full_access_behavior(self, tmp_path):
+        builder = PromptBuilder(
+            AgentConfig(prompt_files=[]),
+            tmp_path,
+            home_paths=SimpleNamespace(owner_kind="main", owner_id="main"),
+        )
+
+        rendered = builder.build(user_prompt="继续", memories=[])
+
+        assert "默认始终在这里工作" in rendered
+        assert "用户明确指定外部路径" in rendered
+        assert "涉及其他用户目录时也必须有用户明确要求" in rendered
+        assert "默认优先只读" in rendered
+        assert "不限制外部网络" in rendered
+
 
 def test_strip_empty_markdown_sections_keeps_real_persona_entries() -> None:
     content = (

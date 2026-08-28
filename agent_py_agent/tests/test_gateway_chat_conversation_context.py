@@ -155,7 +155,11 @@ def test_gateway_thread_uses_validated_client_cwd_and_keeps_it_on_next_turn(tmp_
     project_root = tmp_path / "project"
     project_root.mkdir()
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            access_mode="full-access",
+        ),
         service_root,
     )
     conversation = {
@@ -192,6 +196,31 @@ def test_gateway_thread_uses_validated_client_cwd_and_keeps_it_on_next_turn(tmp_
     assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [
         str(project_root.resolve())
     ]
+
+
+def test_gateway_workspace_only_rejects_external_client_cwd(tmp_path):
+    external = tmp_path / "external"
+    external.mkdir()
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path / "service",
+    )
+
+    with pytest.raises(GatewayWorkspaceScopeError, match="WorkspaceOnly"):
+        _conversation_context(
+            agent,
+            {
+                "conversation": {
+                    "channel": "chat",
+                    "channel_conversation_id": "workspace-only-external",
+                    "channel_user_id": "local-agent",
+                    "canonical_user_id": "local-agent",
+                },
+                "workspace": {"cwd": str(external), "roots": [str(external)]},
+            },
+            "gw-workspace-only-external",
+            "普通工作区不应来自启动目录",
+        )
 
 
 def test_gateway_rejects_relative_client_cwd_before_conversation_turn(tmp_path):

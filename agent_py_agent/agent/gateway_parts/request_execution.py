@@ -739,12 +739,15 @@ def _public_conversation_compact_progress_payload(value: object) -> dict[str, ob
         or stage not in _CONVERSATION_COMPACT_PROGRESS_STAGES
     ):
         return {}
+    generation = _safe_nonnegative_int(value.get("generation"))
+    operation_id = str(value.get("operation_id") or "").strip()[:128]
     return {
         "schema": _CONVERSATION_COMPACT_PROGRESS_SCHEMA,
         "phase": phase,
         "stage": stage,
         "percent": min(100, _safe_nonnegative_int(value.get("percent"))),
-        "generation": _safe_nonnegative_int(value.get("generation")),
+        "generation": generation,
+        "operation_id": operation_id or f"legacy:{generation}",
         "before_tokens": _safe_nonnegative_int(value.get("before_tokens")),
         "after_tokens": _safe_nonnegative_int(value.get("after_tokens")),
         "trigger_tokens": _safe_nonnegative_int(value.get("trigger_tokens")),
@@ -2109,10 +2112,9 @@ def _load_gateway_thread(
     return thread, None
 
 
-# LLM: Only a local owner may replace its thread cwd. Paths come from the structured ingress
-# workspace field, must be absolute existing directories, and cwd must stay inside one declared
-# runtime root. Remote adapters continue in their owner-home workspace and cannot submit host cwd.
-# 函数用途: 校验客户端这轮希望使用的目录，并返回可安全持久化到会话的 cwd/roots。
+# LLM: Only a local structured admin whose owner wall is already lifted may persist an external
+# thread cwd. Paths are host-validated facts, but their mere presence never grants access.
+# 函数用途: 校验客户端这轮希望使用的目录；WorkspaceOnly 用户只能提交自己 owner home 内路径，管理员 Full Access 才能提交外部目录。
 def _gateway_request_workspace_scope(
     agent: object,
     request: dict[str, object],
@@ -2142,6 +2144,17 @@ def _gateway_request_workspace_scope(
         roots.append(cwd)
     if not any(_path_is_within(cwd, root) for root in roots):
         raise GatewayWorkspaceScopeError("workspace.cwd 不在声明的 roots 内")
+    owner_scope_text = str(
+        getattr(getattr(agent, "tools", None), "owner_scope_root", "") or ""
+    ).strip()
+    if owner_scope_text:
+        owner_scope = Path(owner_scope_text).expanduser().resolve(strict=False)
+        if not _path_is_within(cwd, owner_scope) or any(
+            not _path_is_within(root, owner_scope) for root in roots
+        ):
+            raise GatewayWorkspaceScopeError(
+                "当前身份处于 WorkspaceOnly；外部目录只有本机管理员开启 Full Access 后才能使用"
+            )
     return str(cwd), tuple(str(path) for path in roots)
 
 

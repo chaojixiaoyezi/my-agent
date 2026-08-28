@@ -747,6 +747,10 @@ class ToolRegistry:
             self.workspace_roots,
             write_boundary,
         )
+        boundary = write_boundary if isinstance(write_boundary, dict) else {}
+        effective_owner_scope = str(
+            boundary.get("effective_owner_scope_root") or self.owner_scope_root or ""
+        ).strip()
         return ToolExecutor().execute(
             ToolExecutorRequest(
                 call=call,
@@ -755,7 +759,7 @@ class ToolRegistry:
                 workspace_roots=invocation_roots,
                 path_access_mode=self.path_access_mode,
                 path_dangerous_roots=tuple(self.path_dangerous_roots),
-                owner_scope_root=self.owner_scope_root,
+                owner_scope_root=effective_owner_scope,
                 write_boundary=write_boundary,
                 runtime_guard_policy=self.runtime_guard_policy,
                 operation_store=self.operation_store,

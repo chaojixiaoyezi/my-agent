@@ -68,9 +68,11 @@ def list_temporary_grants_report(home: MyAgentHomePaths, *, status: str = "") ->
 
 
 def grants_report_for_dir(directory: Path, *, status: str = "") -> TemporaryGrantsReport:
-    """从任意授权目录读取 grants(同一 JSON 格式)。owner 临时授权读 owner 目录,F11④ 的
-    admin bypass 授权读 my-agent home 根下的 admin_grants 目录(owner 写不到的上级目录)。
-    目录不存在时 glob 返回空、不报错。"""
+    """从指定目录读取同一 JSON 格式的临时授权记录。
+
+    该函数只负责解析历史与 owner 临时授权数据，不赋予 Full Access；管理员 Full Access
+    只能由本地 main 入口的结构化 access_mode 决定。目录不存在时 glob 返回空、不报错。
+    """
     wanted = str(status or "").strip()
     grants: list[OwnerTemporaryGrant] = []
     load_errors: list[dict[str, object]] = []
