@@ -1,13 +1,14 @@
 # Subagent Progress
 
-## 2026-08-28 Todo 标题的额外 child 语义（本地候选）
+## 2026-08-28 Todo 标题的额外 child 语义（`.10` 真 TUI 已通过）
 
 - 真 TUI 同时有 6 名活动 child 时，4 名已映射当前 Todo、2 名未映射；旧标题“子代理运行中 2”容易被理解
   为总数错误，实际底部 roster 与 canonical status 都是 6。
-- 当前仅改为“另有 2 个子代理运行中”，明确这是 Todo 之外的补充数；exact `progress_item_ids` 映射、Todo
-  状态投影和代理面板均不改变。定向回归通过，待 `.10` 真 TUI。
+- 当前仅改为“另有 N 个子代理运行中”，明确这是 Todo 之外的补充数；exact `progress_item_ids` 映射、Todo
+  状态投影和代理面板均不改变。`c8a2ece` 的 `.10` fresh 真 TUI 一次创建 8 名 child 后正确显示“另有 8 个”，
+  定向回归与真机均通过。
 
-## 2026-08-28 child Compact 后 exact attempt 执行权（本地候选）
+## 2026-08-28 child Compact 后 exact attempt 执行权（`.10` 真 TUI 已通过）
 
 - `.10` Ripgrep 复刻的两名 child 在 provider/preflight overflow 后都成功推进自己的 Compact，但通用
   `agent.run()` 同时把 exact attempt 提前 settle；外层 runner 继续后，`list_files` 等工具被现有安全门以
@@ -16,8 +17,9 @@
 - 对照 会话运行时 active turn 的内联 Compact loop，authoritative task-local overflow 现在保持同一 attempt
   running；child runner 在真正终态时再唯一收口。实现不重开、复活或冒充旧 attempt，也不根据自然语言
   判断“还要继续”。
-- 真实链路回归已先红后绿，Compact 后同一 child 成功调用 `list_files` 并自然 DONE；待严格 gate、推送与
-  `.10` 单 Gateway MiniMax-M2.7 长 TUI 复验。
+- 真实链路回归已先红后绿，Compact 后同一 child 成功调用 `list_files` 并自然 DONE。`cc4764e` 随
+  `c8a2ece` 部署 `.10` 单 Gateway 后，工具运行时 child 在同一 exact attempt 提交 generation 1，再成功执行
+  `run_command` 并自然 DONE；fresh task 中没有 `TOOL_AUTHORITY_CONTEXT_MISSING`。
 
 ## 2026-08-28 child 全终态后的主代理整合续接（本地候选）
 
@@ -39,8 +41,9 @@
 - terminal tool fold 在 seed 冻结前按 typed metadata 投影，完整 archive/refs、child 独立 generation 和
   owner/write boundary 均不变。overflow 后重试仍使用同一个 child thread，不生成第二套摘要或跨 child 历史。
 - child/grandchild Compact、工具终态折叠与原生消息 focused 已通过；`.10` MiniMax 主链的八名 child 已
-  全部终态且没有第九名替身。真实慢模型 r65 已运行超过旧 600 秒墙钟而未被 timeout 误杀，仍待其自然终态
-  后再部署最终缓存版本。
+  全部终态且没有第九名替身。真实慢模型 r65 已运行超过旧 600 秒墙钟而未被 timeout 误杀；持续 8 小时以上
+  仍无有效推进后按用户要求从 TUI `/stop`，5 名活动 child 同步停止，不再等待自然终态。`.7` Gateway 已恢复
+  唯一 MiniMax-M2.7 配置，后续真机矩阵不再使用该慢模型。
 
 ## 2026-08-27 active covers 与 replacement 启动闸（本地候选）
 

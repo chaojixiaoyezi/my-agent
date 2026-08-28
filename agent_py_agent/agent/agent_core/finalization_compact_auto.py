@@ -34,7 +34,12 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
     trigger = _compact_trigger_from_runtime(ctx)
     if _should_return_after_continuation(ctx, trigger):
         return _compact_auto_continuation_return_fields()
-    policy = runtime_compact_policy(agent, save=ctx.do_save, context_scope=ctx.context_scope)
+    policy = runtime_compact_policy(
+        agent,
+        save=ctx.do_save,
+        context_scope=ctx.context_scope,
+        task_attributes=ctx.task_attributes,
+    )
     cycle = run_memory_compact_auto_cycle(
         runtime_scope_root(
             agent,

@@ -200,9 +200,14 @@ class _SummaryBackend:
 class _ContextCompactionSink:
     def __init__(self) -> None:
         self.rows: list[dict[str, object]] = []
+        self.progress_rows: list[dict[str, object]] = []
 
     def write_context_compaction(self, value: dict[str, object]) -> bool:
         self.rows.append(dict(value))
+        return True
+
+    def write_conversation_compact_progress(self, value: dict[str, object]) -> bool:
+        self.progress_rows.append(dict(value))
         return True
 
 
@@ -423,6 +428,14 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
         "dropped_pairs",
         "preserved_pairs",
     }
+    assert [row["stage"] for row in sink.progress_rows] == [
+        "preparing",
+        "summarizing",
+        "measuring",
+        "completed",
+    ]
+    assert [row["percent"] for row in sink.progress_rows] == [5, 20, 65, 100]
+    assert {row["generation"] for row in sink.progress_rows} == {1}
     build_tool_loop_prompt(agent, params)
 
     assert len(_message_block_ids(_native_provider_messages(agent, params))[0]) == remaining
@@ -635,6 +648,7 @@ def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
             CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
             "conversation_thread_id": thread.thread_id,
         },
+        effective_on_chunk=(sink := _ContextCompactionSink()),
     )
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
     before_ir = list(params.tool_ir_history)
@@ -648,6 +662,12 @@ def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
     assert updated.compact_generation == 0
     assert updated.compact_checkpoint_id == ""
     assert updated.compact_consecutive_failures == 1
+    assert [row["stage"] for row in sink.progress_rows] == [
+        "preparing",
+        "summarizing",
+        "failed",
+    ]
+    assert not any(row["phase"] == "completed" for row in sink.progress_rows)
 
 
 def test_persistent_native_window_restores_ir_when_compact_cas_fails(
@@ -677,6 +697,7 @@ def test_persistent_native_window_restores_ir_when_compact_cas_fails(
             CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
             "conversation_thread_id": thread.thread_id,
         },
+        effective_on_chunk=(sink := _ContextCompactionSink()),
     )
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
     before_ir = list(params.tool_ir_history)
@@ -702,6 +723,8 @@ def test_persistent_native_window_restores_ir_when_compact_cas_fails(
     )
     assert orphan_candidate["status"] == "validated_candidate"
     assert orphan_candidate["checkpoint_id"] != updated.compact_checkpoint_id
+    assert sink.progress_rows[-1]["stage"] == "failed"
+    assert not any(row["phase"] == "completed" for row in sink.progress_rows)
 
 
 def test_shared_native_window_stays_stable_across_repeated_pressure(tmp_path):
@@ -868,7 +891,9 @@ def test_ptl_loop_helper_native_drops_ir_text_drops_text(tmp_path):
     assert _ptl_reclaim_oldest(text_agent, text_params) is True
 
 
-def test_native_provider_overflow_forces_same_conversation_compact_ledger(tmp_path):
+def test_authoritative_no_save_provider_overflow_commits_same_conversation_compact(
+    tmp_path,
+):
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(
         {
@@ -886,11 +911,13 @@ def test_native_provider_overflow_forces_same_conversation_compact_ledger(tmp_pa
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
     params = replace(
         _params(),
-        save=True,
+        # Background main slices save their final through ConversationStore, not Agent.run.
+        save=False,
         task_attributes={
             CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
             "conversation_thread_id": thread.thread_id,
         },
+        effective_on_chunk=(sink := _ContextCompactionSink()),
     )
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
 
@@ -908,6 +935,16 @@ def test_native_provider_overflow_forces_same_conversation_compact_ledger(tmp_pa
     assert checkpoint["source_kind"] == "live_tool_ir"
     assert checkpoint["forced"] is True
     assert checkpoint["checkpoint_id"] == updated.compact_checkpoint_id
+    assert [row["stage"] for row in sink.progress_rows] == [
+        "preparing",
+        "summarizing",
+        "measuring",
+        "checkpointing",
+        "committing",
+        "completed",
+    ]
+    assert [row["percent"] for row in sink.progress_rows] == [5, 20, 65, 82, 92, 100]
+    assert {row["generation"] for row in sink.progress_rows} == {1}
 
 
 # === Step 3: text-entry → tool_use id mapping (round/index join) ==============

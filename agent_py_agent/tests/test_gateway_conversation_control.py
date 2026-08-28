@@ -3584,12 +3584,12 @@ def test_promote_resumes_exact_active_sticky_task_without_shadow_link(tmp_path) 
     assert str(links[0].status).strip().lower() == "active"
 
 
-def test_promote_completed_sticky_task_starts_fresh_workspace(tmp_path) -> None:
-    """终态(completed)sticky 任务不再吸附新消息:新消息开新任务、新目录(问题1
-    真机 2026-08-09:celery 完成后 click/jinja2/requests 等新任务消息全被吸进
-    celery 旧目录——新 req id 配旧 task_path)。原任务保持终态;「同一任务续做
-    同目录」由工具路径保留:模型显式写入旧任务目录时 bind_current_conversation_
-    workspace 走 _continue_terminal_link_as_new_execution(同 cwd 新执行代数)。"""
+def test_promote_completed_sticky_task_starts_new_execution_in_same_workspace(tmp_path) -> None:
+    """终态 sticky 只换新执行身份，不丢同一 thread 的持久工作目录。
+
+    这与 会话运行时 thread cwd 一致：上一任务保持 completed，新消息取得新 task id，
+    但用户继续在同一 TUI/IM 工作时仍能直接看到旧产物，不去空目录重新搜索。
+    """
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
@@ -3626,7 +3626,7 @@ def test_promote_completed_sticky_task_starts_fresh_workspace(tmp_path) -> None:
 
     assert promoted is not None
     assert promoted.task_id == "req-second"  # 新执行代数
-    assert promoted.task_path != str(task_dir)  # 新任务新目录,不再吸附旧目录
+    assert promoted.task_path == str(task_dir)  # 新执行身份，thread cwd 不变
     links = agent.conversation_store.task_links(thread.thread_id)
     by_id = {item.task_id: item for item in links}
     assert str(by_id["req-first"].status).strip().lower() == "completed"  # 原任务保持终态

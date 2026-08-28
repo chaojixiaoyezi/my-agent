@@ -1293,9 +1293,9 @@ def _render_compact_progress(
 ) -> tuple[FormattedLine, ...]:
     if block.phase in {"failed", "interrupted"}:
         label = (
-            "Context compaction interrupted"
+            "上下文压缩已中断"
             if block.phase == "interrupted"
-            else "Context compaction failed"
+            else "上下文压缩失败，原上下文已保留"
         )
         return wrap_fragments(
             (("class:tui-error", label),),
@@ -1304,7 +1304,16 @@ def _render_compact_progress(
             continuation_prefix=(("class:tui-error", "  "),),
         )
     percent = min(100, max(0, int(block.metadata.get("percent") or 0)))
-    stage = str(block.metadata.get("stage") or "preparing").replace("_", " ")
+    stage_key = str(block.metadata.get("stage") or "preparing")
+    stage = {
+        "preparing": "准备中",
+        "summarizing": "正在生成摘要",
+        "measuring": "正在重新计量",
+        "checkpointing": "正在写恢复点",
+        "committing": "正在提交",
+        "completed": "已完成",
+        "failed": "失败",
+    }.get(stage_key, "处理中")
     bar_width = min(24, max(8, context.width - 48))
     filled = min(bar_width, max(0, int(round(percent * bar_width / 100))))
     meter = "━" * filled + "─" * (bar_width - filled)
@@ -1312,7 +1321,7 @@ def _render_compact_progress(
     return wrap_fragments(
         (
             ("class:tui-spinner-highlight", glyph + " "),
-            ("class:tui-thinking", "Compacting context "),
+            ("class:tui-thinking", "正在压缩上下文 "),
             ("class:tui-thinking", f"[{meter}] {percent}% · {stage}"),
         ),
         width=context.width,

@@ -1,5 +1,13 @@
 # COMPLETED
 
+- 2026-08-28 `cc4764e` + `c8a2ece` 完成 child Compact 执行权与 Todo 额外计数收口：authoritative
+  `task_local` 的 typed `context_overflow` 只作为同一 active attempt 的内联 Compact 边界，不再由通用
+  `agent.run()` 提前结案；其它终态、取消、失败与普通可恢复返回的收口不变。Todo 标题只把未映射当前
+  清单项的活动 child 写成“另有 N 个子代理运行中”，不冒充 roster 总数。相关 focused 与本地严格 gate
+  全绿并推送；`.10` 唯一 Gateway 的 fresh `ma-110-c8a2ece-compact-r1` 一次派出 8 名 child，真实显示
+  “另有 8 个”，工具运行时 child 在同一 `attempt-1787877717-487f5d43` 提交 generation 1 后又成功执行
+  `run_command` 并自然 `DONE`，fresh task 中 `TOOL_AUTHORITY_CONTEXT_MISSING` 为 0。
+
 - 2026-08-28 完成 Compact 有效代次与终态续作收口：live-tool 候选只有在完整 provider-visible 请求低于
   同一触发线后才 checkpoint/CAS/发布；旧会话前缀已超线或摘要候选仍超线时不再虚增 generation，分别
   交给 transcript Compact 或原样回滚。canonical task 进入不可复活终态时立即停用 exact task progress

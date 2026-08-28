@@ -32,6 +32,7 @@ from .authority import (
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+    CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from .control_commands import conversation_request_interrupt_name
 from .models import (
@@ -2470,6 +2471,11 @@ def _background_task_attributes(
             _background_delivery_evidence_refs(request)
         )
     if task_id:
+        # Background slices commit their model-authored commentary/final through
+        # _commit_background_response instead of Agent.run(save=True).  They still
+        # own the exact ConversationThread and must advance its canonical Compact
+        # generation while working; save=False only avoids a duplicate reply write.
+        attributes[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] = True
         active_turn_request_ids = _background_active_turn_request_ids(request)
         attributes.update(
             {
@@ -3716,6 +3722,23 @@ def _record_background_notice(
         )
 
 
+# LLM: Every background execution lane must publish through this one report boundary. Appending
+# only to the scheduler return list is insufficient because an attached TUI consumes the durable
+# notice projection, while the ConversationStore remains the transcript authority.
+# 函数用途: 统一登记后台轮结果并通知正在观察的 TUI；通知失败不影响已提交的会话回复。
+def _append_background_report(
+    scheduler: BackgroundMainAgentScheduler,
+    reports: list[BackgroundMainAgentReport],
+    report: BackgroundMainAgentReport,
+) -> None:
+    reports.append(report)
+    _record_background_notice(
+        scheduler.store,
+        report,
+        agent=scheduler.runtime.agent,
+    )
+
+
 def _consume_wake_signal_batch(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3738,16 +3761,8 @@ def _consume_wake_signal_batch(
     if report is None:
         _defer_failed_wake_batch(scheduler, wake_batch, execution_signal, current)
         return
-    reports.append(report)
-    # S-BG1：后台主代理轮（子代理完成唤醒/能力获批续跑等）完成后写一条
-    # notices 记录（conversations/notices/{thread_id}.notices.jsonl），TUI
-    # 监视线程据此把"后台已自动汇总"显示到屏幕（真机实测：后台轮在跑但
-    # TUI 无事件驱动不刷新，用户看不到子代理完成后的自动汇总）。
-    _record_background_notice(
-        scheduler.store,
-        report,
-        agent=scheduler.runtime.agent,
-    )
+    # S-BG1：所有后台车道都经统一出口写 notices；不能只让 child wake 可见。
+    _append_background_report(scheduler, reports, report)
     if _is_scheduler_wake_signal(signal):
         return
     reported.add(report.thread_id)
@@ -4282,7 +4297,7 @@ def _consume_observation_batches(
             partial(scheduler._run_observation_batch, thread_id, selected, now=current),
         )
         if report is not None:
-            reports.append(report)
+            _append_background_report(scheduler, reports, report)
             reported.add(report.thread_id)
 
 
@@ -4372,7 +4387,7 @@ def _consume_due_policies(
             partial(scheduler._run_due_policy, policy, now=current),
         )
         if report:
-            reports.append(report)
+            _append_background_report(scheduler, reports, report)
 
 
 def _gateway_consume_policy_cas(store: object, policy: ProgressPolicy, *, now: float) -> bool:

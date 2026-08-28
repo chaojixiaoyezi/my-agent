@@ -2044,7 +2044,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   继续工作所需事实。该功能正确性不冒充 provider cache 命中；对应 MiniMax 普通后续轮账本实际为 0
   cache-read，缓存经济性结论仍只使用上述本地受控 A/B。
 
-## 2026-08-28 完成回合原生历史、慢流活动与 Compact 用量收口【状态：本地 focused 已通过，双机最终验收中】
+## 2026-08-28 完成回合原生历史、慢流活动与 Compact 用量收口【状态：`.10` MiniMax 已通过，`.7` 慢模型样本已主动停止】
 
 - 对照 会话运行时 `core/src/context_manager/history.rs` 与 `core/src/session/turn.rs`：会话先持久保存 typed
   `ResponseItem`，只有 provider 出站边界才做协议转换；正文、推理和工具参数 delta 都是 typed event，
@@ -2061,8 +2061,37 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   attempt observer、全局并发闸和成本指标。删除摘要层额外 daemon-thread deadline：该旧计时器无法取消
   已经发出的 HTTP，请求超时后会在后台继续消耗额度，并让慢模型摘要永远被丢弃。现在辅助调用只服从统一
   provider 首包/流空闲/请求超时，异常或 provider timeout 再回退机械摘要。
+- `.10` fresh `ma-110-c8a2ece-compact-r1` 已证明 child 的 canonical generation 1 不会关闭 active attempt：
+  工具运行时 child 在同一 exact attempt 的 Compact checkpoint 之后继续成功执行验证命令并自然 DONE；这条
+  真机证据与 focused 回归共同关闭旧 `TOOL_AUTHORITY_CONTEXT_MISSING` 缺口。`.7` 的本地慢模型样本最终
+  持续 8 小时以上，跨过旧 600 秒墙钟但长期无有效推进；用户明确要求停止后，经 TUI `/stop` 让 5 名活动
+  child 同步进入停止终态，派发进程退出，Gateway 恢复唯一 MiniMax-M2.7 配置。以后真实 TUI、会话运行时 与
+  终端交互 对照统一使用 MiniMax-M2.7；慢模型数据只保留为超慢传输/活性失败样本，不再作为持续验收矩阵。
 - `work/state.json.updated_at` 固定为 Unix 秒浮点数；`activated_at/finished_at` 继续使用 ISO 字符串。父级与
   child 状态投影不再把同一字段在两种类型间来回覆盖，跨进程 heartbeat/排序可以使用一个稳定合同。
 - 新型号只进入 `docs/architecture/MODEL_CATALOG_SNAPSHOT.md` 的带日期参考快照。通道运行时 最新目录再次证明
   endpoint/计划差异会改变可用型号、thinking 映射和 context；本轮不把它们升级为 runtime allowlist，
   未知 provider 型号继续透传，后续再单独设计“用户配置 > 实时发现 > 版本种子”的声明式目录。
+
+## 2026-08-28 后台工作片的会话权威、可见回执与有界 handoff【状态：本地 focused 已通过，`.10` 真 TUI 待验】
+
+- 对照 会话运行时 `session/turn.rs` 的统一 active-turn/TurnComplete 事件边界和 终端交互 的单一 reactive message
+  投影：后台 child wake、observation 与 progress policy 都必须经同一 report→notice 出口。过去只有 child
+  wake 写 notice，定时续作已经把最终 assistant 正文提交到 ConversationStore，附着 TUI 却永远收不到；
+  当前三个执行车道统一发布，suppressed/空正文仍由既有 notice 合同过滤。
+- `Agent.run(save=False)` 在后台只表示“最终回复由 `_commit_background_response` 保存，避免重复写一遍旧
+  memory/archive 路径”，不表示该工作片没有 ConversationThread 权威。拥有 exact task/thread 的后台片显式
+  带 `conversation_transcript_authoritative=true`，与前台一样可在同一 CAS/checkpoint 上提交 live-tool
+  Compact；孤立表达、展示和辅助调用仍不能落盘或推进 generation。
+- carried tool archive 继续只传结构化调用事实。大 `write_file.content` 复用 live-prompt reducer，保留路径、
+  模式、长度、hash 与短 preview，不把数万字正文复制进每个工作片；工具索引超过预算时保留有界头部和最新
+  尾部，并用显式中段省略计数连接，避免最终 write/status 被旧 read 挤掉。
+- transcript Compact 和 live-tool Compact 共用 `conversation_compaction_progress.v1` 展示协议。后者从开始调用
+  可能很慢的摘要模型前即发布稳定 generation/block id，只在真实的准备、摘要、重新计量、checkpoint、CAS
+  与完成边界推进 5/20/65/82/92/100；TUI 在阶段间只转 spinner，不按墙钟虚构百分比。失败会恢复原 IR 并
+  明确结束活动块，进度 callback 断开不能影响 checkpoint 或 CAS。
+- `Working` 是整棵任务树的活动投影，不等价于“主模型请求正在进行”。普通用户输入若命中 live foreground
+  turn，会在当前 provider 调用后的最近安全点作为 typed steer 注入；父代理已让出等 child 时则开启新的
+  foreground slice；若后台正整合一个事件，只等待该片释放共享 conversation lane，不等待所有 child 终态。
+  后续 TUI 应把“主代理工作中”和“主代理等待子代理”分相展示，数据必须来自 active turn/run claim 与直属
+  child 状态，不能从动画或文案猜测。

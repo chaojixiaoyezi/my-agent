@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ...conversation.authority import conversation_transcript_is_authoritative
 from ..model.context_window import resolve_model_context_window_tokens
 
 # LLM: These defaults define one provider-neutral runtime compact policy shared by root and child
@@ -31,9 +32,15 @@ class RuntimeCompactPolicy:
 
 
 # LLM: Resolve every durable compact limit from the model/config snapshot once per invocation.
-# 函数用途: 为主代理或子代理生成同一口径的压缩策略；子代理默认继承主配置。
+# Transcript authority may permit a canonical Compact even when save=False only suppresses the
+# legacy memory/final-response write path; auxiliary no-save calls still remain non-persistent.
+# 函数用途: 为主代理或子代理生成同一口径的压缩策略；会话权威回合即使由别处负责保存回复，也能提交真实压缩。
 def runtime_compact_policy(
-    agent: object, *, save: bool = True, context_scope: str = "default"
+    agent: object,
+    *,
+    save: bool = True,
+    context_scope: str = "default",
+    task_attributes: object = None,
 ) -> RuntimeCompactPolicy:
     window = resolve_model_context_window_tokens(agent)
     percent = compact_trigger_percent(getattr(getattr(agent, "config", None), "memory_compact_auto_trigger_percent", None))
@@ -41,7 +48,9 @@ def runtime_compact_policy(
         context_window_tokens=window,
         trigger_percent=percent,
         trigger_tokens=compact_trigger_tokens(window, percent),
-        allow_persistent_apply=bool(save),
+        allow_persistent_apply=(
+            bool(save) or conversation_transcript_is_authoritative(task_attributes)
+        ),
         recent_tail_max_turns=DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS,
         recent_tail_tokens=min(
             DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP,

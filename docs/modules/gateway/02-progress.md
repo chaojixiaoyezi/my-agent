@@ -1,5 +1,19 @@
 # Gateway Progress
 
+## 2026-08-28 后台三车道统一最终回执与会话 Compact 权威
+
+- `.10` 真任务证明 due policy 已提交最终 assistant/任务终态，但附着 TUI 没有 notice；旧实现只在 child
+  wake 车道调用 `_record_background_notice`。当前 child wake、observation、due policy 都经统一
+  `_append_background_report`，可交付正文使用既有 `background_notice.v2`，suppressed/空正文不变。
+- 后台 main 使用 `save=False` 只是避免 `Agent.run` 与 `_commit_background_response` 双写最终回复。只要工作片
+  携带 exact task/thread 并标记 transcript authoritative，它就与前台共享 ConversationThread Compact
+  checkpoint/CAS；普通辅助 no-save 仍不允许落盘。focused 已覆盖 policy 正反面和真实 overflow 提交。
+- carried 工具恢复统一缩减大参数并保留最新尾部，使后台续片不再反复发送整份文件正文，也不会在超限时
+  丢掉最后 write/status。待 `.10` fresh 真 TUI 复验 footer generation、直接 final 与后续模型连续性。
+- 原有进度条只由 transcript Compact 发事件；live-tool Compact 结束前长期没有可见阶段。当前它也从摘要
+  开始前发布同一 typed progress，按真实 pipeline 原位更新，TUI 中文显示 spinner、进度条和当前阶段；
+  child 的 BackgroundTranscriptSink 与 main 的 Gateway writer 复用相同事件，不新增前端计数事实源。
+
 ## 2026-08-28 完成回合原生历史与缓存前缀收口
 
 - Gateway 每轮最终化时同时生成 legacy transcript、canonical native envelope 与 artifact projection；三者
@@ -33,8 +47,9 @@
   rolling idle。有效 SSE data 到达后，watchdog 和 socket 都切回稳定 `request_timeout`；空行/注释不续命。
 - 默认慢速估算 200 token/s prefill、20 token/s output、安全系数 2、最大 10,800 秒，支持约 1M 输入的
   极慢预填充；小请求仍按 token 量得到短预算。共享 backend 字段不再被并发 main/child 临时修改。
-- fake transport、真实 loopback SSE、账本 stage 与 backend/native 相关 focused 已通过；待 `.7` 本地慢模型
-  和 `.10` MiniMax-M2.7 真 TUI 长任务验证健康长流、真实停止和 provider usage。
+- fake transport、真实 loopback SSE、账本 stage 与 backend/native 相关 focused 已通过；`.7` r65 已证明有效
+  慢流不会被 600 秒误杀，也证明“连接仍活着”不能冒充任务推进。持续 8 小时以上后已按用户要求从 TUI
+  `/stop`；后续真实长任务和 会话运行时/终端交互 对照统一使用 MiniMax-M2.7。
 
 ## 2026-08-27 thinking block-stop 先于正文（已部署真机验证）
 

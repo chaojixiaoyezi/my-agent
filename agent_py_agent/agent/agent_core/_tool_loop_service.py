@@ -151,6 +151,7 @@ class _NativeCompactPlan:
     before_tokens: int
     before_call_ids: tuple[str, ...]
     semantic_summary: str
+    progress_generation: int
     forced: bool
 
 
@@ -423,6 +424,7 @@ def _native_compact_policy(agent: object, params: ToolLoopExecuteParams) -> obje
         agent,
         save=bool(save),
         context_scope=str(params.context_scope or "default"),
+        task_attributes=params.task_attributes,
     )
 
 
@@ -456,7 +458,14 @@ def _prepare_native_compact_plan(
     if base_tokens >= limit:
         return None
     target = min(limit - 1, base_tokens + int(policy.recent_tail_tokens or 0))
-    binding, summary = _live_compact_binding_and_summary(agent, params, policy)
+    binding, summary, progress_generation = _live_compact_binding_and_summary(
+        agent,
+        params,
+        policy,
+        before_tokens=before_tokens,
+        trigger_tokens=limit,
+        source_messages=len(before_call_ids) * 2,
+    )
     return _NativeCompactPlan(
         policy=policy,
         binding=binding,
@@ -465,6 +474,7 @@ def _prepare_native_compact_plan(
         before_tokens=before_tokens,
         before_call_ids=before_call_ids,
         semantic_summary=summary,
+        progress_generation=progress_generation,
         forced=force,
     )
 
@@ -476,7 +486,11 @@ def _live_compact_binding_and_summary(
     agent: object,
     params: ToolLoopExecuteParams,
     policy: object,
-) -> tuple[object | None, str]:
+    *,
+    before_tokens: int,
+    trigger_tokens: int,
+    source_messages: int,
+) -> tuple[object | None, str, int]:
     from ..conversation.live_tool_compact import (
         record_live_tool_compact_failure,
         resolve_live_tool_compact_binding,
@@ -487,13 +501,30 @@ def _live_compact_binding_and_summary(
         task_attributes=params.task_attributes,
         policy=policy,
     )
-    summary = _native_tool_history_summary(
-        agent,
+    progress_generation = _native_compact_progress_generation(params, binding)
+    progress = {
+        "generation": progress_generation,
+        "before_tokens": before_tokens,
+        "trigger_tokens": trigger_tokens,
+        "source_messages": source_messages,
+    }
+    _emit_native_compact_progress(
         params,
-        previous_summary=(binding.thread.summary if binding is not None else ""),
+        phase="started",
+        stage="preparing",
+        percent=5,
+        **progress,
     )
+    _emit_native_compact_progress(
+        params,
+        phase="progress",
+        stage="summarizing",
+        percent=20,
+        **progress,
+    )
+    summary = _summarize_live_compact(agent, params, binding, progress)
     if binding is None or summary:
-        return binding, summary
+        return binding, summary, progress_generation
     from ..conversation.compact_guard import ConversationCompactError
 
     error = ConversationCompactError(
@@ -501,7 +532,37 @@ def _live_compact_binding_and_summary(
         code="COMPACT_EMPTY_SUMMARY",
     )
     record_live_tool_compact_failure(binding, error)
+    _emit_native_compact_progress(params, phase="failed", stage="failed", percent=0, **progress)
     raise error
+
+
+# LLM: Summary failure shares the live Compact circuit and closes the already-visible progress
+# block before propagating. Mechanical fallback remains valid only when the caller has no binding.
+# 函数用途: 调用运行中 Compact 摘要模型，并在失败时恢复为明确的进度终态。
+def _summarize_live_compact(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    binding: object | None,
+    progress: dict[str, int],
+) -> str:
+    from ..conversation.live_tool_compact import record_live_tool_compact_failure
+
+    try:
+        return _native_tool_history_summary(
+            agent,
+            params,
+            previous_summary=(binding.thread.summary if binding is not None else ""),
+        )
+    except Exception as exc:
+        record_live_tool_compact_failure(binding, exc)
+        _emit_native_compact_progress(
+            params,
+            phase="failed",
+            stage="failed",
+            percent=0,
+            **progress,
+        )
+        raise
 
 
 # LLM: Mutation is transactional in memory: any summary/checkpoint/CAS failure restores both IR
@@ -523,34 +584,49 @@ def _apply_native_compact_plan(
             max_tokens=max(1, plan.target_tokens),
             token_estimator=estimator,
         )
-        if dropped:
-            if plan.semantic_summary:
-                replace_compaction_summary_ir(params, plan.semantic_summary)
-            dropped, after_tokens = _settle_native_ir_window(
-                params=params,
-                estimator=estimator,
-                target=plan.target_tokens,
-                dropped=dropped,
-            )
-            if after_tokens >= plan.trigger_tokens:
-                # 摘要本身或必须保留的最新工具往返仍使完整请求超线。这个候选没有
-                # 生效，恢复原 IR 后交给 transcript Compact；generation 不能前进。
-                params.tool_ir_history[:] = original_ir
-                params.tool_context[:] = original_tool_context
-                return 0
-            return _commit_and_publish_native_compact(
-                agent,
-                params,
-                plan,
-                dropped=dropped,
-                after_tokens=after_tokens,
-            )
-        return dropped
+        if not dropped:
+            _emit_native_compact_failed(params, plan)
+            return 0
+        if plan.semantic_summary:
+            replace_compaction_summary_ir(params, plan.semantic_summary)
+        dropped, after_tokens = _settle_native_ir_window(
+            params=params,
+            estimator=estimator,
+            target=plan.target_tokens,
+            dropped=dropped,
+        )
+        _emit_native_compact_progress(
+            params,
+            phase="progress",
+            stage="measuring",
+            percent=65,
+            **_native_compact_progress_values(plan, after_tokens=after_tokens),
+        )
+        if after_tokens >= plan.trigger_tokens:
+            # 摘要或必须保留的最新往返仍超线：恢复原 IR，交给 transcript Compact。
+            _restore_native_compact_candidate(params, original_ir, original_tool_context)
+            _emit_native_compact_failed(params, plan, after_tokens=after_tokens)
+            return 0
+        return _commit_and_publish_native_compact(
+            agent, params, plan, dropped=dropped, after_tokens=after_tokens
+        )
     except Exception as exc:
-        params.tool_ir_history[:] = original_ir
-        params.tool_context[:] = original_tool_context
+        _restore_native_compact_candidate(params, original_ir, original_tool_context)
         record_live_tool_compact_failure(plan.binding, exc)
+        _emit_native_compact_failed(params, plan)
         raise
+
+
+# LLM: Rollback restores both provider IR and its mechanical guidance projection atomically from
+# the caller's snapshots; it never writes ConversationStore or changes the Compact circuit.
+# 函数用途: 有效候选未形成或提交失败时恢复压缩前的完整当前回合上下文。
+def _restore_native_compact_candidate(
+    params: ToolLoopExecuteParams,
+    original_ir: list[object],
+    original_tool_context: list[str],
+) -> None:
+    params.tool_ir_history[:] = original_ir
+    params.tool_context[:] = original_tool_context
 
 
 # LLM: Settling is a pure in-memory candidate step. It must not commit a generation or publish an
@@ -584,11 +660,30 @@ def _commit_and_publish_native_compact(
     after_tokens: int,
 ) -> int:
     preserved_pairs = _native_tool_result_count(params)
+    if plan.binding is not None:
+        _emit_native_compact_progress(
+            params,
+            phase="progress",
+            stage="checkpointing",
+            percent=82,
+            **_native_compact_progress_values(plan, after_tokens=after_tokens),
+        )
     canonical_generation = _commit_native_ir_generation(
         agent,
         params,
         plan,
         after_tokens=after_tokens,
+    )
+    completed_generation = canonical_generation or plan.progress_generation
+    _emit_native_compact_progress(
+        params,
+        phase="completed",
+        stage="completed",
+        percent=100,
+        **{
+            **_native_compact_progress_values(plan, after_tokens=after_tokens),
+            "generation": completed_generation,
+        },
     )
     _publish_native_ir_compaction(
         agent,
@@ -600,6 +695,18 @@ def _commit_and_publish_native_compact(
         preserved_pairs=preserved_pairs,
         canonical_generation=canonical_generation,
     )
+    _log_native_compact(plan, after_tokens, dropped, preserved_pairs)
+    return dropped
+
+
+# LLM: Logging receives only numeric counters and summary length; summary content never enters logs.
+# 函数用途: 记录一次已完成工具历史 Compact 的计量结果，便于性能和成本排查。
+def _log_native_compact(
+    plan: _NativeCompactPlan,
+    after_tokens: int,
+    dropped: int,
+    preserved_pairs: int,
+) -> None:
     _LOGGER.info(
         "native tool history compacted: before_tokens=%d after_tokens=%d "
         "trigger_tokens=%d dropped_pairs=%d preserved_pairs=%d "
@@ -612,7 +719,6 @@ def _commit_and_publish_native_compact(
         bool(plan.semantic_summary),
         len(plan.semantic_summary),
     )
-    return dropped
 
 
 # LLM: Re-estimation includes the replacement summary and marker, and still removes only pairs.
@@ -683,9 +789,105 @@ def _commit_native_ir_generation(
             request_id=params.request_id,
             attempt_id=params.attempt_id,
             forced=plan.forced,
+            after_checkpoint=lambda: _emit_native_compact_progress(
+                params,
+                phase="progress",
+                stage="committing",
+                percent=92,
+                **_native_compact_progress_values(plan, after_tokens=after_tokens),
+            ),
         ),
     )
     return max(0, int(updated_thread.compact_generation or 0))
+
+
+# LLM: The display generation must be chosen before a potentially slow summary call and must
+# match the canonical CAS generation when a thread binding exists. Ephemeral no-save reductions
+# use only the current turn-local counter and never mutate ConversationStore.
+# 函数用途: 为运行中 Compact 的开始、进度和结束事件预先生成同一个稳定块编号。
+def _native_compact_progress_generation(
+    params: ToolLoopExecuteParams,
+    binding: object | None,
+) -> int:
+    if binding is not None:
+        return max(0, int(getattr(binding.thread, "compact_generation", 0) or 0)) + 1
+    state = params.live_archive_state
+    if isinstance(state, dict):
+        return max(0, int(state.get("_native_ir_compact_generation") or 0)) + 1
+    return 1
+
+
+# LLM: All stages for one native Compact reuse these exact counters and block generation; callers
+# may override only generation after a successful canonical CAS confirms the same next value.
+# 函数用途: 生成运行中 Compact 每个进度事件共用的公开数字，避免阶段间字段漂移。
+def _native_compact_progress_values(
+    plan: _NativeCompactPlan,
+    *,
+    after_tokens: int = 0,
+) -> dict[str, int]:
+    return {
+        "generation": plan.progress_generation,
+        "before_tokens": plan.before_tokens,
+        "after_tokens": max(0, int(after_tokens or 0)),
+        "trigger_tokens": plan.trigger_tokens,
+        "source_messages": len(plan.before_call_ids) * 2,
+    }
+
+
+# LLM: A failed candidate terminates its existing progress block with the same identity. This is
+# display-only and must be called only after the caller has preserved or restored the original IR.
+# 函数用途: 统一结束失败的运行中 Compact 进度条，避免异常路径留下永久动画。
+def _emit_native_compact_failed(
+    params: ToolLoopExecuteParams,
+    plan: _NativeCompactPlan,
+    *,
+    after_tokens: int = 0,
+) -> bool:
+    return _emit_native_compact_progress(
+        params,
+        phase="failed",
+        stage="failed",
+        percent=0,
+        **_native_compact_progress_values(plan, after_tokens=after_tokens),
+    )
+
+
+# LLM: Live-tool and transcript Compact share one content-free progress schema. Milestones come
+# only from real pipeline boundaries; callback failures are display failures and cannot alter IR,
+# checkpoint, CAS, task status, or retry behavior.
+# 函数用途: 把运行中工具历史 Compact 的真实阶段送进主代理或子代理 TUI 进度条。
+def _emit_native_compact_progress(
+    params: ToolLoopExecuteParams,
+    *,
+    phase: str,
+    stage: str,
+    percent: int,
+    generation: int,
+    before_tokens: int,
+    trigger_tokens: int,
+    source_messages: int,
+    after_tokens: int = 0,
+) -> bool:
+    sink = params.effective_on_chunk
+    writer = getattr(sink, "write_conversation_compact_progress", None)
+    if not callable(writer):
+        return False
+    payload = {
+        "schema": "conversation_compaction_progress.v1",
+        "phase": str(phase),
+        "stage": str(stage),
+        "percent": min(100, max(0, int(percent or 0))),
+        "generation": max(1, int(generation or 1)),
+        "before_tokens": max(0, int(before_tokens or 0)),
+        "after_tokens": max(0, int(after_tokens or 0)),
+        "trigger_tokens": max(0, int(trigger_tokens or 0)),
+        "source_messages": max(0, int(source_messages or 0)),
+    }
+    try:
+        return writer(payload) is not False
+    except Exception:
+        _LOGGER.debug("native compact progress projection failed", exc_info=True)
+        return False
 
 
 # LLM: The event projects a committed ConversationThread generation when available; auxiliary

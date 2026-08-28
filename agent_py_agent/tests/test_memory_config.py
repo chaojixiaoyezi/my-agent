@@ -8,8 +8,12 @@ from agent_py_agent.agent.agent_core.model.context_window import resolve_model_c
 from agent_py_agent.agent.agent_core.runtime.context_compactor import (
     compact_trigger_percent,
     compact_trigger_tokens,
+    runtime_compact_policy,
 )
 from agent_py_agent.agent.backends import get_backend
+from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
+)
 from agent_py_agent.agent.settings import load_config
 from agent_py_agent.agent.settings.memory import MemorySettings, normalize_memory_settings
 
@@ -159,6 +163,23 @@ def test_runtime_compact_policy_percent_parser_matches_config_semantics():
     assert compact_trigger_percent(40) == 50
     assert compact_trigger_percent(120) == 100
     assert compact_trigger_tokens(200_000, 70) == 140_000
+
+
+def test_runtime_compact_policy_allows_authoritative_no_save_turn() -> None:
+    agent = SimpleNamespace(
+        config=SimpleNamespace(memory_compact_auto_trigger_percent=90),
+        backend=SimpleNamespace(context_window_tokens=128_000),
+    )
+
+    auxiliary = runtime_compact_policy(agent, save=False)
+    authoritative = runtime_compact_policy(
+        agent,
+        save=False,
+        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+    )
+
+    assert auxiliary.allow_persistent_apply is False
+    assert authoritative.allow_persistent_apply is True
 
 
 def test_model_context_window_config_reaches_http_backend(tmp_path):

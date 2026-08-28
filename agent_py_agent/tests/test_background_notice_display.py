@@ -1,8 +1,8 @@
-"""S-BG1 回归：后台主代理轮完成 → notices 文件 → TUI 显示。
+"""S-BG1 回归：任一后台主代理车道完成 → notices 文件 → TUI 显示。
 
 真机实锤（s2-fast）：子代理完成后父代理在后台自动续跑汇总，但 TUI 无事件
 驱动不刷新——用户看不到"后台已自动汇总"。修复：
-1. gateway 在后台轮 report 产生后写 conversations/notices/{thread_id}.notices.jsonl
+1. gateway 在 child wake、observation、due policy 任一后台轮 report 产生后写 notices
 2. TUI 监视线程周期读取并以普通 assistant 消息显示已提交的后台最终回复
 """
 

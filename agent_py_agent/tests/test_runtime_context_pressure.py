@@ -17,6 +17,7 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
     safe_inline_tool_result_tokens,
 )
 from agent_py_agent.agent.agent_core.tool_context.window import (
+    _bounded_carried_tool_index,
     build_conversation_terminal_tool_fold,
     conversation_message_with_terminal_tool_fold,
     conversation_terminal_tool_fold_projection,
@@ -33,6 +34,32 @@ from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapsh
 class _AgentStub:
     config = AgentConfig(auto_save_memory=True)
     backend = SimpleNamespace(context_window_tokens=128_000, name="fake")
+
+
+def test_carried_tool_index_keeps_latest_action_when_middle_is_omitted() -> None:
+    records = [
+        {
+            "tool": "read_file",
+            "ok": True,
+            "parameters": {"path": f"src/old-{index}.py"},
+        }
+        for index in range(120)
+    ]
+    records.append(
+        {
+            "tool": "write_file",
+            "ok": True,
+            "parameters": {"path": "reports/latest.md", "mode": "overwrite"},
+        }
+    )
+
+    rendered = "\n".join(_bounded_carried_tool_index(records, 1_200))
+
+    assert len(rendered) <= 1_200
+    assert "omitted_middle_tool_index_entries" in rendered
+    assert "121: tool=write_file status=ok" in rendered
+    assert "reports/latest.md" not in rendered  # scalar values stay behind typed parameter keys
+    assert "parameter_keys=path,mode" in rendered
 
 
 def test_terminal_tool_fold_is_deterministic_bounded_and_redacted() -> None:

@@ -549,44 +549,93 @@ def _recent_entries_within_budget(entries: list[str], max_chars: int) -> list[st
     return list(reversed(selected))
 
 
-# LLM: The index is chronology metadata only. Nested arguments are already width/depth bounded and
-# redacted by the durable tool index; include them only when they carry structural relationships.
-# 函数用途: 生成按执行顺序排列的紧凑工具索引，并为 Todo/covers 等嵌套参数保留有限细节。
+# LLM: The index is chronology metadata only. When it exceeds its budget, keep a bounded head and
+# tail with an explicit middle omission so the newest write/status cannot disappear behind older
+# reads. Nested arguments remain redacted and width/depth bounded by the durable tool index.
+# 函数用途: 生成按执行顺序排列的紧凑工具索引；超长时同时保留开头和最新动作，并明确标出中段省略。
 def _bounded_carried_tool_index(records: list[dict], max_chars: int) -> list[str]:
-    lines: list[str] = []
-    used = 0
-    omitted = 0
-    for index, record in enumerate(records, 1):
-        tool = str(record.get("tool") or "unknown").strip() or "unknown"
-        status = "ok" if record.get("ok") is True else "error"
-        ref = _archive_ref(record)
-        params = record.get("parameters")
-        params = params if isinstance(params, dict) else {}
-        redacted_params = redact_sensitive_value(params)
-        params = redacted_params if isinstance(redacted_params, dict) else {}
-        nested = any(isinstance(value, (dict, list, tuple)) for value in params.values())
+    all_lines = [
+        _carried_tool_index_line(index, record)
+        for index, record in enumerate(records, 1)
+    ]
+    if len("\n".join(all_lines)) <= max_chars:
+        return all_lines
+    return _bounded_carried_tool_index_head_tail(all_lines, max_chars)
+
+
+# LLM: One chronology line exposes only bounded typed keys or already-redacted nested structure;
+# scalar parameter values and unbounded refs never enter the carried index.
+# 函数用途: 将一条归档工具记录转换成紧凑索引行，供后续统一做头尾截断。
+def _carried_tool_index_line(index: int, record: dict) -> str:
+    tool = str(record.get("tool") or "unknown").strip() or "unknown"
+    status = "ok" if record.get("ok") is True else "error"
+    ref = _archive_ref(record)
+    raw_params = record.get("parameters")
+    raw_params = raw_params if isinstance(raw_params, dict) else {}
+    redacted = redact_sensitive_value(raw_params)
+    params = redacted if isinstance(redacted, dict) else {}
+    nested = any(isinstance(value, (dict, list, tuple)) for value in params.values())
+    if nested:
+        detail = " params=" + json.dumps(
+            params,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )[:800]
+    elif params:
+        detail = " parameter_keys=" + ",".join(str(key) for key in params)[:240]
+    else:
         detail = ""
-        if nested:
-            detail = " params=" + json.dumps(
-                params,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )[:800]
-        elif params:
-            detail = " parameter_keys=" + ",".join(str(key) for key in params)[:240]
-        line = f"  - {index}: tool={tool} status={status}"
-        if ref:
-            line += f" ref={ref[:240]}"
-        line += detail
-        if lines and used + len(line) + 1 > max_chars:
-            omitted = len(records) - index + 1
+    ref_text = f" ref={ref[:240]}" if ref else ""
+    return f"  - {index}: tool={tool} status={status}{ref_text}{detail}"
+
+
+# LLM: Head and tail selection works on pre-bounded lines and never reorders chronology. The
+# explicit omission marker owns the gap count, while an oversized edge line is safely truncated.
+# 函数用途: 在总预算内保留工具索引开头和最新尾部，并标出中间省略了多少项。
+def _bounded_carried_tool_index_head_tail(
+    all_lines: list[str],
+    max_chars: int,
+) -> list[str]:
+    marker_template = "  - omitted_middle_tool_index_entries: {}"
+    # 头部、marker、尾部之间最多有两个换行；预算在选边之前先统一预留。
+    available = max(1, max_chars - len(marker_template.format(len(all_lines))) - 2)
+    head_budget = max(1, available // 2)
+    tail_budget = max(1, available - head_budget)
+    head: list[tuple[int, str]] = []
+    used = 0
+    for index, line in enumerate(all_lines):
+        cost = len(line) + (1 if head else 0)
+        if head and used + cost > head_budget:
             break
-        lines.append(line)
-        used += len(line) + 1
-    if omitted:
-        lines.append(f"  - omitted_later_tool_index_entries: {omitted}")
-    return lines
+        selected = line[:head_budget] if not head and len(line) > head_budget else line
+        head.append((index, selected))
+        used += len(selected) + (1 if len(head) > 1 else 0)
+        if used >= head_budget:
+            break
+
+    tail: list[tuple[int, str]] = []
+    used = 0
+    head_indexes = {index for index, _line in head}
+    for index in range(len(all_lines) - 1, -1, -1):
+        if index in head_indexes:
+            break
+        line = all_lines[index]
+        cost = len(line) + (1 if tail else 0)
+        if tail and used + cost > tail_budget:
+            break
+        selected = line[:tail_budget] if not tail and len(line) > tail_budget else line
+        tail.append((index, selected))
+        used += len(selected) + (1 if len(tail) > 1 else 0)
+        if used >= tail_budget:
+            break
+    tail.reverse()
+    omitted = max(0, len(all_lines) - len(head) - len(tail))
+    return [
+        *(line for _index, line in head),
+        marker_template.format(omitted),
+        *(line for _index, line in tail),
+    ]
 
 
 # LLM: Prefer the existing semantic compact item, then retain the newest mechanical records. This

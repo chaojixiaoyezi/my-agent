@@ -74,6 +74,7 @@ def model_visible_context_snapshot(
         agent,
         save=_params_save_enabled(agent, params),
         context_scope=str(getattr(params, "context_scope", "") or "default"),
+        task_attributes=getattr(params, "task_attributes", None),
     )
     window = max(0, int(policy.context_window_tokens or 0))
     trigger = max(0, int(policy.trigger_tokens or 0))
@@ -145,6 +146,7 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
         getattr(request, "agent", None),
         save=_request_save_enabled(request),
         context_scope=str(getattr(params, "context_scope", "") or "default"),
+        task_attributes=getattr(params, "task_attributes", None),
     )
     window = policy.context_window_tokens
     if window <= 0:
@@ -338,15 +340,16 @@ def _request_save_enabled(request: object) -> bool:
 def should_compact_before_more_tool_output(
     agent: object, params: object, current_prompt: object
 ) -> bool:
-    if not _params_save_enabled(agent, params):
+    policy = runtime_compact_policy(
+        agent,
+        save=_params_save_enabled(agent, params),
+        context_scope=str(getattr(params, "context_scope", "") or "default"),
+        task_attributes=getattr(params, "task_attributes", None),
+    )
+    if not policy.allow_persistent_apply:
         return False
     if not _has_previous_tool_context(params):
         return False
-    policy = runtime_compact_policy(
-        agent,
-        save=True,
-        context_scope=str(getattr(params, "context_scope", "") or "default"),
-    )
     threshold = int(policy.trigger_tokens or 0)
     if threshold <= 0:
         return False

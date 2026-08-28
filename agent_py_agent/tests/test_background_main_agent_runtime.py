@@ -20,6 +20,7 @@ from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
+    CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
@@ -46,6 +47,7 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
         "conversation_task_id": "task-1",
         CONVERSATION_REQUEST_ID_ATTR: "task-1",
         CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
+        CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
     }
 
 
@@ -1591,6 +1593,10 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     sent = channels.adapter("internal").sent_messages
     assert sent[0].target == "thread-1"
     assert "后台主代理已检查任务树" in sent[0].content
+    notice_path = store.root / "notices" / f"{thread.thread_id}.notices.jsonl"
+    notice = json.loads(notice_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert notice["reason"] == "scheduled_progress_report"
+    assert notice["content"] == reports[0].response
 
 
 def test_thread_goal_turn_with_no_tool_calls_stops_auto_continuation(tmp_path) -> None:

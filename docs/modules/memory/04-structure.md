@@ -35,8 +35,13 @@
 - `agent/conversation/live_tool_compact.py` 才负责把这份摘要连同精确移除/保留的 tool-call
   ID 写入 checkpoint，并通过 ConversationStore 的同一 CAS 推进 generation；TUI 只投影
   已提交的代次和 token 前后值。
-- 辅助、不保存的展示回合可以继续使用临时摘要并静默退回机械窗口；持久且正文权威的
-  main/child/grandchild 不能在摘要失败后先删除历史，必须整体失败并恢复原 native IR。
+- `_tool_loop_service` 在摘要、计量、checkpoint 与 CAS 的实际边界发送同一个 content-free progress block；
+  `LiveToolCompactCommitRequest.after_checkpoint` 只允许在 checkpoint 已成功、CAS 尚未开始时发 committing
+  milestone，异常被吞掉，不能反噬会话提交。进度条和 spinner 是投影，不是第二本 Compact 账。
+- `save` 与 transcript authority 是两个结构化事实：前者决定 `Agent.run` 是否写旧式回复/记忆，后者决定
+  当前 exact thread 是否拥有 Compact CAS。后台 main 由 ConversationStore 另行提交回复，因此可以
+  `save=False + authoritative=true`；辅助、不保存且非权威的展示回合仍只能临时摘要。任何正文权威的
+  main/child/grandchild 都不能在摘要失败后先删除历史，必须整体失败并恢复原 native IR。
 - 同一个 `CompactionSummary` 容器里的 thread summary 与 active-turn carried handoff 以稳定 schema marker
   区分；二次 Compact 只删除 exact 上一代 thread summary，不能吞掉 carried handoff。当前任务由首条
   provider user message 唯一承载，Compact synthetic user 只放摘要指令与上一代 summary。
@@ -53,6 +58,9 @@
   参数和 artifact refs。工具参数使用限深、限宽、凭据脱敏的 JSON 投影，Todo items、批量派工 items 与
   typed covers 不得因嵌套而变成空数组。大输出正文仍留在 owner 私有 artifact，按需读取；索引损坏时
   fail-soft 回到已有 task/transcript 上下文，但不得编造已执行事实。
+- 恢复到 live prompt 时再次经过同一大参数 reducer，`write_file.content` 只留下路径、模式、长度、hash 和
+  短 preview；chronology index 超限时使用 bounded head + newest tail，并显式记录中段省略数量。完整正文
+  只能按 artifact ref 读取，不能因下一工作片启动而整份回灌。
 - 工具首次 externalize 时同时写入宿主确认的 bounded `tool_execution` 与 `tool_operation`。carried record
   将它们恢复到现有 handler/failure/operation status 字段，供同一 active turn 的 operation verification
   原样核对；任意诊断私有字段和工具正文不进入索引，没有 typed operation 终态时继续 fail-closed。

@@ -262,6 +262,36 @@ def test_compact_carried_create_subagents_keeps_structured_child_recovery_facts(
     assert "padding" not in carried
 
 
+def test_compact_carried_large_write_keeps_path_but_omits_full_content() -> None:
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
+        _reconstructed_tool_context_entry,
+    )
+
+    content = "UNIQUE-LARGE-WRITE-BODY\n" * 1_500
+    carried = _reconstructed_tool_context_entry(
+        {
+            "tool": "write_file",
+            "ok": True,
+            "parameters": {
+                "tool": "write_file",
+                "path": "reports/final.md",
+                "mode": "overwrite",
+                "content": content,
+            },
+            "output_hash": "sha256:typed-output",
+            "handler_executed": True,
+        }
+    )
+
+    assert "tool_call_1: tool=write_file" in carried
+    assert "reports/final.md" in carried
+    assert "mode: overwrite" in carried
+    assert "<large text omitted" in carried
+    assert "sha256=" in carried
+    assert content not in carried
+    assert len(carried) < 2_000
+
+
 def test_tool_output_index_preserves_failed_tool_status(tmp_path: Path) -> None:
     record = externalize_tool_output_record(
         ExternalizeToolOutputRequest(

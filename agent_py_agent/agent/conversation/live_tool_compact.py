@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -53,10 +54,12 @@ class LiveToolCompactCommitRequest:
     request_id: str
     attempt_id: str
     forced: bool = False
+    after_checkpoint: Callable[[], None] | None = None
 
 
-# LLM: Only a save-enabled transcript-authoritative turn may persist a live-tool Compact.
-# Agent threads take precedence over inherited parent conversation ids by explicit typed identity.
+# LLM: Only a policy-approved transcript-authoritative turn may persist a live-tool Compact.
+# save=True and an exact authoritative background slice are the two valid policy paths; agent
+# threads take precedence over inherited parent conversation ids by explicit typed identity.
 # 函数用途: 找到当前 main/child/grandchild 自己的压缩线程；辅助展示回合返回空，不写账。
 def resolve_live_tool_compact_binding(
     agent: SimpleAgent,
@@ -123,6 +126,12 @@ def commit_live_tool_compact(
             forced=bool(request.forced),
         ),
     )
+    if request.after_checkpoint is not None:
+        try:
+            request.after_checkpoint()
+        except Exception:
+            # 进度投影不是 Compact 权威；即使 TUI 已断开也必须继续完成同一 CAS。
+            pass
     return binding.store.update_compact_state(
         binding.thread.thread_id,
         commit=ConversationCompactCommit(

@@ -1,5 +1,16 @@
 # Memory Progress
 
+## 2026-08-28 后台权威 Compact 与 carried 大参数收口
+
+- `RuntimeCompactPolicy` 不再用 `save` 单独判断持久资格：exact ConversationThread 的 authoritative 后台片
+  即使 `save=False`，也能通过原 checkpoint/CAS 提交代次；普通辅助轮保持临时裁剪且不能写账。
+- 后台恢复的大 `write_file.content` 复用现有 live prompt reducer，正文改为 chars/bytes/hash/preview；有界
+  工具索引保留开头和最新尾部，中间写明确 omission。focused 覆盖大正文不回灌、最新动作仍可见和
+  no-save policy 正反面。
+- live-tool Compact 现在从语义摘要前到 CAS 后发布真实阶段进度，与 transcript Compact 共用同一公开 schema；
+  summary 很慢时 spinner 继续刷新但百分比停在当前 milestone，不以墙钟伪造推进。callback 只读、fail-open，
+  不改变失败回滚、checkpoint 或 generation。
+
 ## 2026-08-28 Compact 辅助模型调用纳入统一用量账本
 
 - carried archive 与 live native history 的语义摘要不再绕过主模型调用账本；它们现在复用

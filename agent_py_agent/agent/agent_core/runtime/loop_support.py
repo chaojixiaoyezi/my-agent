@@ -30,6 +30,7 @@ from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import CompressionContext, ToolLoopExecuteParams
 from .._tool_loop_service import ToolLoopService
 from ..parameters import _one_shot_tool_call_keys
+from ..tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
     CompressionLoopResult,
@@ -1156,9 +1157,10 @@ def _carried_one_shot_keys(record: dict[str, object]) -> set[str]:
     return _one_shot_tool_call_keys(payload)
 
 
-# LLM: compact continuation may rebuild only typed archive fields; redact nested credentials and
-# never infer effect state from preview prose.
-# 函数用途: 把一条归档工具记录脱敏后恢复为模型/守卫可读文本，并保留失败、未知与重放事实。
+# LLM: Compact continuation may rebuild only typed archive fields. Reuse the live prompt payload
+# reducer after redaction so large write bodies stay behind hashes/previews instead of being copied
+# verbatim into every background slice; effect state still comes only from typed archive fields.
+# 函数用途: 把一条归档工具记录脱敏、限长后恢复为模型/守卫可读文本，并保留路径、失败、未知与重放事实。
 def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
     payload = record.get("parameters")
     payload = payload if isinstance(payload, dict) else {"tool": str(record.get("tool") or "")}
@@ -1168,11 +1170,8 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
     payload = projected_payload if isinstance(projected_payload, dict) else {}
     status = "ok" if record.get("ok") else "error"
     tool_name = str(record.get("tool") or payload.get("tool") or "unknown")
-    payload_lines = "\n".join(
-        f"- {key}: {value}"
-        for key, value in payload.items()
-        if key not in {"tool", "call_id"} and str(value).strip()
-    )
+    payload.setdefault("tool", tool_name)
+    payload_lines = render_tool_payload_for_live_prompt(payload)
     model_summary = str(record.get("model_summary") or "").strip()
     result_lines = [model_summary] if model_summary else [f"[tool={tool_name}; status={status}]"]
     preview = str(record.get("output_preview") or "").strip()

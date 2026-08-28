@@ -1,5 +1,35 @@
 # TESTS
 
+## 2026-08-28 后台权威工作片 Compact、notice 与有界 handoff
+
+回归必须证明三条独立合同：
+
+- `save=False + conversation_transcript_authoritative=true` 可以提交 exact ConversationThread 的 live-tool
+  Compact；普通 no-save 辅助轮仍不能推进 generation。
+- child wake、observation 和 due policy 的可交付 report 共用唯一 notice 出口；当前至少用 due policy 端到端
+  断言真实 notice 文件、reason 和 assistant 内容，底层 helper 继续覆盖过滤与故障 fail-open。
+- carried 大 write 正文只留下路径/模式/hash/preview；工具索引超限时保留最新动作，不再 oldest-first 截掉尾部。
+- live-tool Compact 从慢摘要调用前创建与 transcript Compact 相同 schema 的活动块；非权威临时裁剪必须依次
+  发布 `5/20/65/100`，权威 checkpoint/CAS 路径还必须发布 `82/92`。同一 generation 原位更新，TUI 中文
+  进度条显示真实 stage，结束后收起；回调失败不得改变 Compact 结果。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_memory_config.py \
+  agent_py_agent/tests/test_runtime_context_pressure.py \
+  agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py \
+  agent_py_agent/tests/test_tool_output_externalizer.py \
+  agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py \
+  agent_py_agent/tests/test_background_notice_display.py \
+  agent_py_agent/tests/test_background_main_agent_runtime.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  -q --tb=short
+```
+
+上述组合本地已通过（保留既有 xfail）；真机仍必须从 fresh `.10` MiniMax-M2.7 TUI 观察 canonical
+`compact_generation >= 1`、Compact 后继续工作以及最终 assistant 正文无需 `Ctrl+O` 直接出现。`.7` 慢模型
+样本已经用户授权从 TUI `/stop`，后续 `.7/.10`、会话运行时 与 终端交互 的真实对照统一使用 MiniMax-M2.7。
+
 ## 2026-08-28 Todo 标题区分总 roster 与额外 child
 
 Todo 标题中的 child 数只统计没有被当前可见 Todo 项代表的活动 child，不是下方代理面板总数。渲染回归
@@ -33,7 +63,10 @@ python3 -m pytest \
 
 新端到端回归先红后绿；提交前还需完成上述组合、Ruff、doc sync、strict code-size、diff 与 clean-package。
 真机验收只认 `.10` 唯一 Gateway 的 fresh MiniMax-M2.7 长任务中 child `compact >= 1` 后出现成功工具结果，
-不能只看模型最终文字。
+不能只看模型最终文字。`c8a2ece` 部署后的 `ma-110-c8a2ece-compact-r1` 已满足该门：工具运行时 child 的
+checkpoint 在 `2026-08-28T00:47:42Z` 提交 generation 1；同一
+`attempt-1787877717-487f5d43` 于 `00:47:53Z` 又得到 `run_command status=ok/tool_success=true`，随后自然
+`DONE`。fresh task 全目录没有 `TOOL_AUTHORITY_CONTEXT_MISSING`。
 
 ## 2026-08-28 后台 child 终态整合跨工具轮续接
 
@@ -79,7 +112,8 @@ python3 -m pytest \
 ```
 
 以上共收集 316 项；代码推送前必须再取得完整退出码，并运行 Ruff、doc sync、strict code-size、diff 与
-clean-package。真实验收继续使用 `.10` MiniMax-M2.7 TUI；`.7` 当前慢模型长任务不能为部署而中断。
+clean-package。真实验收继续使用 `.10` MiniMax-M2.7 TUI；`.7` 的慢模型长样本已经主动停止，恢复
+MiniMax-M2.7 后才允许开启下一轮真实 TUI。
 
 ## 2026-08-27 慢流、active covers 与缓存注入边界
 
@@ -122,8 +156,8 @@ python3 -m pytest \
 ```
 
 本轮生产与测试改动约两千行，未达到项目约定的 10,000 行全仓 pytest 触发线。最终提交前仍需重跑上述直接相关
-focused 与严格 gate；真实验收必须分别通过 `.7` 本地慢模型和 `.10` MiniMax-M2.7 的 fresh TUI 长多子代理
-任务，不能用 loopback SSE 或短提示冒充长任务通过。
+focused 与严格 gate；r65 已保留本地慢模型跨旧 600 秒边界但长期无推进的失败样本。后续真实验收按用户最新
+要求统一使用 `.7/.10` MiniMax-M2.7 fresh TUI，不能用 loopback SSE 或短提示冒充长任务通过。
 
 ## 2026-08-26 子代理具体工具审批回送所属 TUI
 

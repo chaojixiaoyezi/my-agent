@@ -435,6 +435,8 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `agent.run()` 在 `context_scope=task_local` 且 `conversation_transcript_authoritative=true` 时不提前 settle，
   外层 runner 用同一 exact attempt 继续，最终返回后再由 child lifecycle 唯一收口。其它非终态仍关闭旧
   attempt、下轮显式创建新 attempt；工具权限门不接受已经终态的身份，也不会在 Compact 后静默重开。
+- `.10` fresh MiniMax-M2.7 真机已验证该结构：工具运行时 child 的 generation 1 checkpoint 与 Compact 后
+  `run_command status=ok` 都携带 exact `attempt-1787877717-487f5d43`，最终才进入 DONE；同 task 权限错误为 0。
 - 历史上已经删除的子代理专属 service、查树推动、session continue-packet 和多重索引不得因迁移复活；
   新 thread 只替换 Compact/会话持久层，不改变 `run_id/parent_run_id/root_run_id` 生命周期权威。
 - 当前 task 的结构化 goal 和 next actions 是恢复后的最高任务权威；旧摘要、归档包装和读取游标只能

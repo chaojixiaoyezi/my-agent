@@ -1,14 +1,32 @@
 # STATUS
 
-## 2026-08-28 Todo 标题的额外子代理计数（本地候选）
+## 2026-08-28 后台真实 Compact、最终回复通知与有界续片（本地候选）
+
+- `.10` fresh `ma-110-c8a2ece-compact-r1` 的主代理后台工具历史已经真实触发
+  `131.8k → 104.9k / removed 18 tool pairs`，但 footer 仍为 `compact 0`。根因是后台用
+  `Agent.run(save=False)` 避免重复保存最终回复，旧 Compact policy 却把它误解为“不允许提交会话代次”，
+  只做了当前进程内裁剪。当前候选以 exact `conversation_transcript_authoritative` 区分会话权威后台片和普通
+  no-save 辅助调用；前者写唯一 checkpoint/CAS，后者仍不落盘。
+- 同一真实任务的最终正文已进入 ConversationStore、task 也为 DONE，但附着 TUI 没显示。该回复来自 due
+  progress policy；旧代码只有 child wake 车道写 `background_notice.v2`。当前 child wake、observation、
+  due policy 三路统一经一个 report/notice 出口，避免“模型已答完但屏幕只停在最后一段思考”。
+- 跨后台片恢复不再携带完整大 `write_file.content`；它使用统一大输出 reducer，并在工具索引超限时保留
+  最早边界和最新动作。相关 Compact、上下文压力、后台 runtime、notice 和 carried archive focused 已通过，
+  待推送部署后用 `.10` fresh MiniMax-M2.7 长 TUI 同时验证 generation、最终正文直显与请求体积。
+- 旧进度条只覆盖 transcript Compact，真任务这次发生的是 live-tool Compact，因此用户只在结束后看到一行
+  `Tool history compacted`。当前两类 Compact 共用同一活动进度块：真实阶段为准备、摘要、计量、checkpoint、
+  CAS、完成；阶段间 spinner 持续动画，百分比不按耗时猜。主/子代理渲染回归已通过，真 TUI 待部署验证。
+
+## 2026-08-28 Todo 标题的额外子代理计数（`.10` 真 TUI 已通过）
 
 - `.10` 长任务同时有 6 名 child 运行，其中 4 名已通过 exact `progress_item_ids` 映射到 Todo，2 名只是额外
   修复任务。旧标题写成“子代理运行中 2”，但下方 roster 正确列出 6 名，用户会误以为总数冲突。
 - 事实源和计数没有错：该数字本来只表示“未被当前 Todo 行代表的活动 child”。对照 终端交互 把 Todo 与
-  agent progress 分开的展示边界，当前候选只把标题改成“另有 2 个子代理运行中”，不改 roster、派工、状态
-  或 Todo 映射。定向渲染回归已通过，待随下一次 `.10` 单 Gateway 部署做真实 TUI 复验。
+  agent progress 分开的展示边界，当前实现只把标题改成“另有 N 个子代理运行中”，不改 roster、派工、状态
+  或 Todo 映射。`c8a2ece` 已部署 `.10` 唯一 Gateway；fresh `ma-110-c8a2ece-compact-r1` 在一次创建 8 名
+  child 后真实显示“完成 0/9 · 另有 8 个子代理运行中”，定向渲染回归与真 TUI 均通过。
 
-## 2026-08-28 子代理 Compact 后执行权续接（本地复现已修，待 `.10` 真 TUI）
+## 2026-08-28 子代理 Compact 后执行权续接（`.10` 真 TUI 已通过）
 
 - `.10` 的真实 Ripgrep 换语言复刻里，两名 child 都先触发 ConversationThread Compact，随后继续生成
   `list_files` 等工具调用，却统一收到 `TOOL_AUTHORITY_CONTEXT_MISSING`。权威 SQLite 证据显示同一
@@ -18,8 +36,10 @@
   `context_overflow` 暂不结案 exact attempt，由 child runner 压缩后继续；最终完成、失败、取消及其它
   可恢复返回仍沿原外层生命周期收口。没有重开旧 attempt，也没有放宽 current-attempt 权限门。
 - 新回归先稳定复现“Compact 后第一次工具被拒”，修复后同一 exact attempt 能继续调用真实 `list_files`
-  并自然 `DONE`；子代理 Compact、审计终态和运行权限相关定向回归已通过。待严格 gate、推送并在 `.10`
-  唯一 Gateway 的 fresh MiniMax-M2.7 长任务中观察至少一次 child `compact >= 1` 后继续成功调用工具。
+  并自然 `DONE`；子代理 Compact、审计终态和运行权限相关定向回归已通过。`cc4764e` 随 `c8a2ece` 部署
+  `.10` 唯一 Gateway 后，fresh `ma-110-c8a2ece-compact-r1` 的 工具运行时 child 在 exact
+  `attempt-1787877717-487f5d43` 于 `00:47:42Z` 提交 generation 1，随后仍以同一 attempt 在
+  `00:47:53Z` 成功执行 `run_command` 并自然 `DONE`；整个 fresh task 的结构化账本中该权限错误为 0。
 
 ## 2026-08-28 子代理终态后的后台整合续接（本地候选通过，待 `.10` 真 TUI）
 
@@ -73,12 +93,12 @@
   input、24,388 cache-read、0 cache-write、390 output，且能直接续接上一轮排序。第二轮按输入 5、缓存
   0.1/1，相对全部普通输入分别节省约 66.12%/53.98%。这是 provider usage 证据，不以回答正确或屏幕
   Context 冒充命中。
-- `.7` `ma-107-slow-stream-r65` 使用本地慢模型跑同一八项目长任务，42 分钟时仍有 7 名 child 正常运行、
-  1 名 child 为 typed BLOCKED，主代理继续接收工具事件；它已明显跨过旧 600 秒固定墙钟且没有 timeout 或
-  重复替身。该样本尚未自然终态，因此只证明健康慢流存活，不能提前写成任务完成，也不能此时重启唯一
-  Gateway。自然结束后再恢复 `testbox-single-gateway.yaml + MiniMax-M2.7` 并做 fresh 实际调用验收。
+- `.7` `ma-107-slow-stream-r65` 使用本地慢模型跑同一八项目长任务，最终持续 8 小时以上：它跨过旧 600 秒
+  固定墙钟且没有 timeout 或重复替身，但 5 名 child 长期无有效推进，属于“传输仍活着、任务实际卡住”。
+  用户授权后已从同一 TUI `/stop`，活动 child 全部进入停止终态、派发进程退出；唯一 Gateway 随后恢复
+  `testbox-single-gateway.yaml + MiniMax-M2.7`。以后真实 my-agent/会话运行时/终端交互 测试统一使用 MiniMax-M2.7。
 
-## 2026-08-27 原生追加式 prompt 缓存（双 provider 真 TUI 已取证；本地长任务未完成）
+## 2026-08-27 原生追加式 prompt 缓存（双 provider 真 TUI 已取证；本地慢模型保留失败样本）
 
 - `.7` 唯一 Gateway 上用透明代理只记录长度、哈希和 cache marker，未记录 prompt 或 Key。旧链连续请求的
   tools/system 哈希不变，首条 user prompt 却从约 31KB→33KB→45KB；模型账出现 24,790 cache-write / 0 read，

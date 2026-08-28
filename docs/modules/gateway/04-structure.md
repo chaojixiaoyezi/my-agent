@@ -11,6 +11,21 @@
 - `conversation/compact.py` 是历史替换的唯一入口：成功 checkpoint/CAS 后才用新 summary 代替旧前缀；普通
   final、后台 wake、自然语言插话和 TUI 重连不得暗中重写既有 envelope。
 
+## 后台工作片的统一发布边界
+
+- child wake、observation 与 due progress policy 可以用不同触发源运行，但结果统一进入
+  `conversation.runtime._append_background_report`。它先保留 scheduler report，再走唯一 notice projector；
+  ConversationStore 仍是正文权威，notice 只是附着 TUI/渠道读取的新消息投影。
+- exact background task slice 会设置 `conversation_transcript_authoritative=true`。它的 `save=False` 只关闭
+  `Agent.run` 的旧式回复/记忆保存，不能关闭该 ConversationThread 的 live-tool Compact；presentation-only
+  或没有 exact thread 的 no-save 调用仍无 Compact 写权。
+- transcript 与 live-tool Compact 都只向客户端发送 `conversation_compaction_progress.v1` 的阶段、百分比、
+  generation 和 token 计数。live-tool 在慢摘要前创建块，在真实 checkpoint 后才进入 committing；TUI 不读
+  日志文案猜进度。完成块收起后保留原有 content-free Compact 结果行，失败块明确原 IR 已恢复。
+- 同 thread 前台与后台模型工作片共用 durable run claim，一次只执行一个真实 slice。用户普通输入命中 live
+  foreground 时作为 typed steer 在最近 provider 安全点进入；父代理已经让出等待 child 时，新 foreground
+  slice 不等待所有 child，最多等待正在执行的单个后台片释放 lane。
+
 ## 会话历史与 provider 缓存前缀
 
 - `request_execution._gateway_conversation_context` 先通过 Conversation Compact 取得唯一 committed summary

@@ -69,6 +69,7 @@ class ContextOverflowThenCaptureBackend:
 
     def __init__(self):
         self.prompts: list[str] = []
+        self.messages: list[list[dict[str, object]] | None] = []
 
     def probe_tool_capability(self):
         from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
@@ -82,6 +83,8 @@ class ContextOverflowThenCaptureBackend:
 
     def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.prompts.append(prompt)
+        messages = kwargs.get("messages")
+        self.messages.append(messages if isinstance(messages, list) else None)
         if len(self.prompts) == 1:
             return ModelResponse(
                 text="context overflow before completion",
@@ -604,16 +607,17 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
     assert result.memory_compact_auto_continued is True
     assert result.memory_compact_auto_continued_from_apply_id
     second_prompt = backend.prompts[1]
+    second_messages = json.dumps(backend.messages[1], ensure_ascii=False)
     assert "# Home Entry: LONG-TERM WORKING AGREEMENT" in second_prompt
     assert "# Home Entry: ASSISTANT PERSONA" in second_prompt
     assert "# Home Entry: CURRENT USER OR GROUP PROFILE" in second_prompt
     assert "# Home Entry: memory.md" not in second_prompt
     assert "关键记忆：不要重做已完成步骤。" not in second_prompt
-    assert second_prompt.index("# Home Entry: LONG-TERM WORKING AGREEMENT") < second_prompt.index(
-        "# Compact Auto Continuation"
-    )
-    assert "继续当前任务的未完成部分" in second_prompt
-    assert "Do not redo completed work" in second_prompt
+    assert "# Compact Auto Continuation" not in second_prompt
+    assert "# Compact Auto Continuation" in second_messages
+    assert "继续当前任务的未完成部分" in second_messages
+    assert "Do not redo completed work" in second_messages
+    assert "# Home Entry: LONG-TERM WORKING AGREEMENT" not in second_messages
 
 
 def test_run_auto_compact_continuation_reuses_original_task_workspace(tmp_path):
@@ -1511,7 +1515,11 @@ def test_run_auto_compact_apply_continues_with_optional_work_notes_missing(tmp_p
     assert len(backend.prompts) == 2
     assert result.memory_compact_auto_continued is True
     assert result.memory_compact_auto_continued_from_apply_id
-    assert "# Compact Auto Continuation" in backend.prompts[1]
+    assert "# Compact Auto Continuation" not in backend.prompts[1]
+    assert "# Compact Auto Continuation" in json.dumps(
+        backend.messages[1],
+        ensure_ascii=False,
+    )
 
 
 def test_run_auto_compact_normal_final_returns_without_auto_continuation(tmp_path):
@@ -1722,14 +1730,16 @@ def test_compact_continuation_restores_native_handoff_without_fabricated_tool_pa
         _seed_for_carried(carried, source_protocol="native"),
     )
 
-    assert len(loop_params.tool_ir_history) == 1
-    assert isinstance(loop_params.tool_ir_history[0], CompactionSummary)
-    assert "active-turn-tool-handoff.v1" in loop_params.tool_ir_history[0].text
-    assert "tool=read_file status=ok" in loop_params.tool_ir_history[0].text
-    assert "/src/a.py" in loop_params.tool_ir_history[0].text
+    assert len(loop_params.tool_ir_history) == 2
+    assert isinstance(loop_params.tool_ir_history[1], CompactionSummary)
+    assert "active-turn-tool-handoff.v1" in loop_params.tool_ir_history[1].text
+    assert "tool=read_file status=ok" in loop_params.tool_ir_history[1].text
+    assert "/src/a.py" in loop_params.tool_ir_history[1].text
     messages = AnthropicMessageAdapter().to_provider_messages(loop_params.tool_ir_history)
     assert messages[0]["role"] == "user"
-    assert "active-turn-tool-handoff.v1" in messages[0]["content"][0]["text"]
+    assert messages[0]["content"][0]["text"] == "# User Task\n继续做当前任务"
+    assert messages[1]["role"] == "user"
+    assert "active-turn-tool-handoff.v1" in messages[1]["content"][0]["text"]
     # 守卫仍使用机械 tool_context；provider 只看摘要 IR，不回放伪造的 tool_use。
     assert loop_params.tool_context
 
@@ -1780,7 +1790,10 @@ def test_compact_continuation_carries_active_turn_user_input_as_real_native_turn
 
     assert continued.carried_active_turn_user_inputs == [packet]
     assert loop_params.active_turn_user_inputs == [packet]
-    assert loop_params.tool_ir_history == [UserTurn(packet["text"])]
+    assert loop_params.tool_ir_history == [
+        UserTurn("# User Task\n继续做当前任务"),
+        UserTurn(packet["text"]),
+    ]
     assert loop_params.tool_context == [f"[ACTIVE_TURN_USER_INPUT]\n{packet['text']}"]
 
 
@@ -1823,14 +1836,16 @@ def test_native_carried_handoff_precedes_real_active_turn_user_input():
     )
 
     assert [type(item) for item in loop_params.tool_ir_history] == [
+        UserTurn,
         CompactionSummary,
         UserTurn,
     ]
-    assert '"id":"commands"' in loop_params.tool_ir_history[0].text
-    assert "must-not-enter-handoff" not in loop_params.tool_ir_history[0].text
-    assert "<redacted>" in loop_params.tool_ir_history[0].text
-    assert loop_params.tool_ir_history[1].text == packet["text"]
-    assert packet["text"] not in loop_params.tool_ir_history[0].text
+    assert loop_params.tool_ir_history[0].text == "# User Task\n继续做当前任务"
+    assert '"id":"commands"' in loop_params.tool_ir_history[1].text
+    assert "must-not-enter-handoff" not in loop_params.tool_ir_history[1].text
+    assert "<redacted>" in loop_params.tool_ir_history[1].text
+    assert loop_params.tool_ir_history[2].text == packet["text"]
+    assert packet["text"] not in loop_params.tool_ir_history[1].text
 
 
 def test_native_carried_handoff_is_bounded_by_existing_compact_summary_budget():
@@ -1867,7 +1882,7 @@ def test_native_carried_handoff_is_bounded_by_existing_compact_summary_budget():
         _seed_for_carried(carried, source_protocol="native"),
     )
 
-    handoff = loop_params.tool_ir_history[0]
+    handoff = loop_params.tool_ir_history[1]
     assert isinstance(handoff, CompactionSummary)
     assert len(handoff.text) <= 12_000
     assert "archived_tool_call_count: 80" in handoff.text

@@ -17,26 +17,17 @@
 
 ## 下一版优先级
 
-### Todo 标题明确区分额外 child 与代理总数
+### 主代理“正在调用模型”与“等待子代理”展示分相
 
-状态：本地文案修复与定向回归通过，待 `.10` 真 TUI
+状态：设计中
 
-解决问题：Todo 行只需额外提示没有映射到清单项的活动 child，但旧文案“子代理运行中 2”看起来像总数，
-与下方 6 行真实 roster 冲突。当前改成“另有 2 个子代理运行中”，保留 终端交互 式 Todo/agent panel 分层，
-不改变任何运行状态、计数来源或派工行为。
+解决问题：当前 `Working · main` 是整棵任务树仍活跃的展示，父代理已经结束当前工作片、只等 child 时也会
+继续闪动；用户因此误以为主模型一直占用，进而担心这时发的新消息必须等所有 child 完成。实际消息不会等
+全体 child：live foreground 在当前 provider 安全点接收，父代理已让出时开新 foreground slice，后台正整合
+时最多等待那个 slice 释放共享 lane。
 
-### 子代理 ConversationThread Compact 后保持同一执行权
-
-状态：本地实现与定向回归通过，待 `.10` 唯一 Gateway 真 TUI 复验
-
-解决问题：真实长 child 达到上下文阈值后，外层 runner 会压缩自己的 ConversationThread 并在同一 attempt
-继续；旧通用收口却先把该 attempt 标为 done，导致压缩后的所有工具调用被安全门判为失权。界面仍显示
-child 在工作，模型也继续思考，但实际已经无法读写，最终既慢又失败。
-
-当前进展：只把 authoritative `task_local` 的 typed `context_overflow` 视作 attempt 内部 Compact 边界，
-通用 `agent.run()` 暂不收口；child runner 最终返回时仍由唯一生命周期结案。权限门、取消、失败和普通
-`unfinished/blocked` 语义均不改变。下一步部署 `.10` 后用真实长复刻任务验证 child Compact 后仍能继续
-工具调用并自然终态；不得用短 fake prompt 冒充真机通过。
+下一步只改展示投影：用 typed active turn/run claim 与直属 child 状态区分“主代理工作中”“等待子代理”，
+不得从 `Working` 文案、动画帧或模型回复推断调度状态，也不改变现有插话、队列和 child 生命周期。
 
 ### 子代理终态后的主代理整合工作片持续续跑
 
