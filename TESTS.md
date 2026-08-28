@@ -1,5 +1,17 @@
 # TESTS
 
+## 2026-08-28 Todo 标题区分总 roster 与额外 child
+
+Todo 标题中的 child 数只统计没有被当前可见 Todo 项代表的活动 child，不是下方代理面板总数。渲染回归
+必须显示“另有 N 个子代理运行中”；一旦 child 通过 exact `progress_item_ids` 映射到可见 Todo，该提示消失，
+Todo 自身状态原位变化。标题不从名称、goal 或行位置猜关联。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_tui_renderer.py::test_todo_header_reports_active_child_not_represented_by_visible_items \
+  -q --tb=short
+```
+
 ## 2026-08-28 子代理 Compact 后 exact attempt 仍可调用工具
 
 回归从真实 `.10` 失败链还原一条完整 child 生命周期：先在自己的 ConversationThread 形成历史，provider

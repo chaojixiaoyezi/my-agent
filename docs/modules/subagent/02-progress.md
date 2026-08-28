@@ -1,5 +1,12 @@
 # Subagent Progress
 
+## 2026-08-28 Todo 标题的额外 child 语义（本地候选）
+
+- 真 TUI 同时有 6 名活动 child 时，4 名已映射当前 Todo、2 名未映射；旧标题“子代理运行中 2”容易被理解
+  为总数错误，实际底部 roster 与 canonical status 都是 6。
+- 当前仅改为“另有 2 个子代理运行中”，明确这是 Todo 之外的补充数；exact `progress_item_ids` 映射、Todo
+  状态投影和代理面板均不改变。定向回归通过，待 `.10` 真 TUI。
+
 ## 2026-08-28 child Compact 后 exact attempt 执行权（本地候选）
 
 - `.10` Ripgrep 复刻的两名 child 在 provider/preflight overflow 后都成功推进自己的 Compact，但通用

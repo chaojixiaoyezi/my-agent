@@ -1216,7 +1216,7 @@ def test_todo_header_reports_active_child_not_represented_by_visible_items() -> 
     frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=100))
     todo_text = "\n".join(fragments_text(line) for line in frame.todo_lines)
 
-    assert "完成 2/2 · 子代理运行中 1" in todo_text
+    assert "完成 2/2 · 另有 1 个子代理运行中" in todo_text
     assert "修复残留构建问题" not in todo_text
     assert any("build-fixer-5" in fragments_text(line) for line in frame.agent_lines)
 
@@ -1238,7 +1238,7 @@ def test_todo_header_reports_active_child_not_represented_by_visible_items() -> 
         fragments_text(line) for line in linked_frame.todo_lines
     )
     assert "完成 1/2 · 进行中 1" in linked_text
-    assert "子代理运行中" not in linked_text
+    assert "另有" not in linked_text
 
 
 def test_todo_panel_empty_items_renders_nothing() -> None:

@@ -1,5 +1,13 @@
 # STATUS
 
+## 2026-08-28 Todo 标题的额外子代理计数（本地候选）
+
+- `.10` 长任务同时有 6 名 child 运行，其中 4 名已通过 exact `progress_item_ids` 映射到 Todo，2 名只是额外
+  修复任务。旧标题写成“子代理运行中 2”，但下方 roster 正确列出 6 名，用户会误以为总数冲突。
+- 事实源和计数没有错：该数字本来只表示“未被当前 Todo 行代表的活动 child”。对照 终端交互 把 Todo 与
+  agent progress 分开的展示边界，当前候选只把标题改成“另有 2 个子代理运行中”，不改 roster、派工、状态
+  或 Todo 映射。定向渲染回归已通过，待随下一次 `.10` 单 Gateway 部署做真实 TUI 复验。
+
 ## 2026-08-28 子代理 Compact 后执行权续接（本地复现已修，待 `.10` 真 TUI）
 
 - `.10` 的真实 Ripgrep 换语言复刻里，两名 child 都先触发 ConversationThread Compact，随后继续生成

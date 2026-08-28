@@ -1527,7 +1527,7 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
         _safe_render_int(block.metadata.get("unrepresented_active_child_count")),
     )
     if unrepresented_active_child_count:
-        title += f" · 子代理运行中 {unrepresented_active_child_count}"
+        title += f" · 另有 {unrepresented_active_child_count} 个子代理运行中"
     if hidden_count:
         title += "（Ctrl+T 展开）"
     elif context.todos_expanded and len(public_items) > TODO_COLLAPSED_MAX_ITEMS:
