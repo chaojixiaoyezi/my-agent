@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.runtime.loop_models import (
     RuntimeLoopParams,
     RuntimeToolLoopSeed,
@@ -97,7 +99,8 @@ class _RaisingBackend:
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt, on_chunk=None):
+    def generate(self, prompt, on_chunk=None, messages=None):
+        del prompt, on_chunk, messages
         self.calls += 1
         raise RuntimeError("summary backend down")
 
@@ -392,17 +395,46 @@ def test_live_compact_openai_payload_has_task_once_and_instruction_last() -> Non
     assert "完整替代摘要" in str(messages[-1]["content"])
 
 
-def test_live_tool_history_summary_failure_returns_empty_for_mechanical_fallback() -> None:
-    history = [AssistantTurn(text="working")]
+def test_live_tool_history_empty_response_uses_bounded_typed_fallback() -> None:
+    backend = _LiveSummaryBackend(text="")
+    call = canonical_history_call(
+        "write_file",
+        {"path": "/srv/project/result.txt", "content": "x" * 4_000},
+        call_id="toolu_empty_compact",
+    )
+    history = [
+        UserTurn("用户补充：保留最新测试结果"),
+        AssistantTurn(text="正在写最终文件", tool_calls=[call]),
+        canonical_history_result(call, "written /srv/project/result.txt"),
+    ]
 
     summary = summarize_live_tool_history(
         LiveToolHistorySummaryRequest(
             history=history,
-            backend=_RaisingBackend(),
+            backend=backend,
+            task_prompt="继续 /srv/project 的长期任务",
+            max_output_chars=1_400,
         )
     )
 
-    assert summary == ""
+    assert summary.startswith("[compact-mechanical-fallback]")
+    assert "继续 /srv/project" in summary
+    assert "toolu_empty_compact" in summary
+    assert "status=succeeded" in summary
+    assert "保留最新测试结果" in summary
+    assert len(summary) <= 1_400
+
+
+def test_live_tool_history_summary_transport_failure_propagates() -> None:
+    history = [AssistantTurn(text="working")]
+
+    with pytest.raises(RuntimeError, match="summary backend down"):
+        summarize_live_tool_history(
+            LiveToolHistorySummaryRequest(
+                history=history,
+                backend=_RaisingBackend(),
+            )
+        )
 
 
 def _capture_options(model_name: str) -> BackendOptions:

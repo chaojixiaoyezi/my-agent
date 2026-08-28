@@ -10,7 +10,11 @@
   根因。权限/沙箱 focused 全过（含平台相关 skip），子代理真实文件写入回归已通过。
 - Compact 候选现在必须降到带 recent-tail 余量的恢复目标；主自动、child 与手动 `/compact` 都有持续动画。
   无摘要的轻量窗口仍保留最新工具对；完整替代摘要已经生成后，允许连最后一对巨型回执一起成对回收，
-  避免 `115.4k → 108.1k` 这类仍高于 `103.7k` 恢复线的假失败。相关 Compact/TUI focused 185 项通过。
+  避免 `115.4k → 108.1k` 这类仍高于 `103.7k` 恢复线的假失败。
+- fresh 长 TUI 又捕获到一次 MiniMax Compact 请求正常结束但正文为空；旧逻辑把它升级成红色
+  `COMPACT_EMPTY_SUMMARY` 并打断主代理。当前底座区分 transport 异常与 completed-empty：前者仍回滚，
+  后者不重试，直接从 typed IR/结构化 operation evidence 生成有界机械续接摘要并正常提交；它不判断任务
+  完成，也不替代 archive、账本和真实文件。权限与 Compact/TUI 两组 focused 共 536 项通过、9 项按平台跳过。
 - `.7` 唯一 Gateway 的 MiniMax-M2.7 真 TUI 从 `/root` 启动后仍显示并使用
   `/root/.my-agent/owners/local/main`。官方超级玛丽提示词创建 5 名 child，5/5 自然 DONE，产物为 owner home
   下 `bbb/index.html`；主 thread 手动 Compact 显示真实 5% 动画并完成 `26,496 → 8,912`、generation 1，

@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from .store import ConversationStore
 
 _MAX_COMPACT_OPERATION_EVENTS = 32
+_EMPTY_RESPONSE_FALLBACK_MAX_CHARS = 12_000
 _VERIFICATION_COUNT_KEYS = (
     "succeeded",
     "failed",
@@ -707,7 +708,9 @@ def _projected_context_tokens(
 
 
 # LLM: Summary prose is soft context; structured operation evidence remains separate authority.
-# 函数用途: 让当前模型把旧摘要和新旧段合并为一份可读摘要，空结果直接失败。
+# A completed provider request with no text uses a bounded transcript projection, while transport
+# exceptions still propagate and leave the cursor/checkpoint untouched.
+# 函数用途: 让当前模型把旧摘要和新旧段合并为可读摘要；模型空回复时机械保留事实，真正调用异常仍失败。
 def _summarize(
     agent: SimpleAgent,
     previous_summary: str,
@@ -770,8 +773,80 @@ def _summarize(
     )
     summary = str(getattr(response, "text", "") or "").strip()
     if not summary:
-        raise RuntimeError("conversation compact backend returned an empty summary")
+        return _mechanical_conversation_summary(
+            previous_summary,
+            operation_evidence,
+            foreground_rows,
+        )
     return summary
+
+
+# LLM: This empty-response fallback reads only the prior summary, sanitized transcript projection,
+# and structured operation evidence already selected for this Compact candidate. It cannot decide
+# task completion or replace the separate authoritative operation-evidence field.
+# 函数用途: 摘要模型正常结束却没输出正文时，生成有界的会话续接包，避免空回复把长期会话打断。
+def _mechanical_conversation_summary(
+    previous_summary: str,
+    operation_evidence: dict[str, object],
+    rows: list[MessageLogEntry],
+) -> str:
+    lines = [
+        "[conversation-compact-mechanical-fallback]",
+        "- schema_version: conversation-compact-mechanical-fallback.v1",
+        "- reason: compact provider completed without summary text",
+        "- authority: non-authoritative conversation continuation; structured operation evidence and raw transcript remain authoritative",
+    ]
+    prior = " ".join(str(previous_summary or "").split())
+    if prior:
+        lines.append(f"- previous_summary: {_clip_compact_field(prior, 3_000)}")
+    evidence = json.dumps(
+        operation_evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    lines.append(f"- operation_evidence: {_clip_compact_field(evidence, 3_000)}")
+    lines.append("- chronological_transcript:")
+    for index, row in enumerate(rows, start=1):
+        content = json.dumps(
+            _summary_content(row),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        lines.append(
+            f"  - {index}: role={row.role} content={_clip_compact_field(content, 1_200)}"
+        )
+    return _bounded_compact_text(
+        "\n".join(lines),
+        _EMPTY_RESPONSE_FALLBACK_MAX_CHARS,
+    )
+
+
+# LLM: Individual fallback values are single-line bounded projections and never parsed as state.
+# 函数用途: 限制机械会话摘要中的单项长度，防止一条旧消息吃掉整个续接预算。
+def _clip_compact_field(value: object, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 12)].rstrip() + "...[clipped]"
+
+
+# LLM: Global fallback truncation retains both the oldest task context and newest conversation
+# facts, with an explicit middle omission rather than silent head-only loss.
+# 函数用途: 将机械会话摘要限制在固定预算内，同时保留开头背景和末尾最新对话。
+def _bounded_compact_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    marker = "\n...[conversation compact middle omitted]...\n"
+    budget = max(0, limit - len(marker))
+    head_chars = int(budget * 0.45)
+    tail_chars = budget - head_chars
+    return (
+        text[:head_chars].rstrip()
+        + marker
+        + (text[-tail_chars:].lstrip() if tail_chars > 0 else "")
+    )
 
 
 # LLM: compact 可以压缩自然语言，但不能压缩掉或改写程序记录的操作终态；该账本只合并

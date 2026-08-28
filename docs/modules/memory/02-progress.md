@@ -17,8 +17,9 @@
   `ModelCallLedger`、供应商 attempt observer、全局并发准入和同一成本指标，真实 Compact 开销能够随
   对应 request/run/task 一起核算。
 - 已删除 Compact 自己的 daemon-thread 20 秒截止与对应配置。慢模型摘要只服从供应商传输层的有界超时，
-  不会出现主线程已回退、后台 HTTP 仍继续消耗额度的“孤儿请求”。供应商超时或空结果仍严格回退机械历史，
-  不删除原生工具事实。
+  不会出现主线程已回退、后台 HTTP 仍继续消耗额度的“孤儿请求”。供应商超时/调用异常仍恢复原历史并进入
+  失败熔断；请求正常完成但正文为空时不重复调用模型，而从 typed IR 构造有界机械摘要后提交，不删除原生
+  工具事实，也不把空正文升级成主任务失败。
 - 连续 Compact 只替换上一代 thread summary；带稳定 schema marker 的 active-turn carried handoff 会继续
   保留，当前真实任务在 wire 上只发送一次。聚焦回归覆盖二次 Compact、慢摘要和辅助调用用量登记。
 
@@ -58,8 +59,9 @@
   ConversationThread 的上一代完整摘要与本次待回收工具往返合并成下一代替代摘要；
   不再只生成一份脱离会话代次的临时摘要。
 - 持久、会话正文权威的真实 turn 必须在摘要成功后写 Compact checkpoint，并通过同一
-  ConversationThread CAS 推进 generation；摘要为空、checkpoint 失败或 CAS 冲突时恢复
-  原 native IR，并累计同一 Compact 失败熔断事实。
+  ConversationThread CAS 推进 generation；摘要 transport/调用异常、checkpoint 失败或 CAS 冲突时恢复
+  原 native IR，并累计同一 Compact 失败熔断事实。只有调用已经正常结束但 text 为空时，才由 typed
+  UserTurn/ToolCall/ToolResult/refs 形成有界机械替代摘要，不重试且不进入失败熔断。
 - raw archive、operation ledger、artifact registry 和真实文件仍是执行事实源；语义摘要
   只负责让下一模型轮知道已经做过什么、还缺什么，不能单独证明任务完成。
 - `.7` 原样 Prompt 4 真机已证明 worker-3 在 119,295 tokens 提交 generation 1 并降到 36,586；但摘要模型

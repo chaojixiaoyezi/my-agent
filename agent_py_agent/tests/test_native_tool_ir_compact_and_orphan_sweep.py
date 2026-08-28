@@ -197,6 +197,19 @@ class _SummaryBackend:
         )
 
 
+class _EmptySummaryBackend:
+    name = "anthropic_compatible"
+
+    def __init__(self, context_window_tokens: int):
+        self.context_window_tokens = context_window_tokens
+        self.calls = []
+
+    def generate(self, prompt, on_chunk=None, tools=None, messages=None):
+        del on_chunk, tools
+        self.calls.append((prompt, list(messages or [])))
+        return SimpleNamespace(text="")
+
+
 class _ContextCompactionSink:
     def __init__(self) -> None:
         self.rows: list[dict[str, object]] = []
@@ -734,6 +747,53 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
     final_text = "".join(str(block.get("text") or "") for block in final_blocks)
     assert first.summary in final_text
     assert "摘要-1" not in str(agent.backend.calls[-1][1][:-1])
+
+
+def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "compact-empty-response",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _EmptySummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(
+        _params(),
+        user_prompt="继续现有项目并保留 checkpoint",
+        save=True,
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+        effective_on_chunk=(sink := _ContextCompactionSink()),
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+
+    build_tool_loop_prompt(agent, params)
+
+    updated = store.load_thread(thread.thread_id)
+    summaries = [
+        item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
+    ]
+    assert updated is not None
+    assert updated.compact_generation == 1
+    assert updated.compact_consecutive_failures == 0
+    assert updated.compact_source_tool_pairs > 0
+    assert len(agent.backend.calls) == 1
+    assert len(summaries) == 1
+    assert summaries[0].text.startswith("[compact-mechanical-fallback]")
+    assert "checkpoint" in summaries[0].text
+    assert sink.progress_rows[-1]["phase"] == "completed"
+    assert not any(row["phase"] == "failed" for row in sink.progress_rows)
 
 
 def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):

@@ -41,7 +41,11 @@
 - `save` 与 transcript authority 是两个结构化事实：前者决定 `Agent.run` 是否写旧式回复/记忆，后者决定
   当前 exact thread 是否拥有 Compact CAS。后台 main 由 ConversationStore 另行提交回复，因此可以
   `save=False + authoritative=true`；辅助、不保存且非权威的展示回合仍只能临时摘要。任何正文权威的
-  main/child/grandchild 都不能在摘要失败后先删除历史，必须整体失败并恢复原 native IR。
+  main/child/grandchild 都不能在摘要 transport/调用失败后先删除历史，必须整体失败并恢复原 native IR。
+- completed-empty 与调用失败是两个合同：前者表示 provider 请求和用量账都已正常结束，只从 typed IR 生成
+  `compact-mechanical-fallback.v1` 的有界非权威续接投影并继续 checkpoint/CAS；后者仍抛错、恢复 IR 并累计
+  熔断。transcript Compact 对 completed-empty 使用 raw row + structured operation evidence 的同类有界投影。
+  两种机械投影都不判断完成、不授权路径、不替代 archive、operation ledger、artifact 或真实文件。
 - 同一个 `CompactionSummary` 容器里的 thread summary 与 active-turn carried handoff 以稳定 schema marker
   区分；二次 Compact 只删除 exact 上一代 thread summary，不能吞掉 carried handoff。当前任务由首条
   provider user message 唯一承载，Compact synthetic user 只放摘要指令与上一代 summary。

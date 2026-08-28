@@ -34,10 +34,12 @@ from __future__ import annotations
     摘要调用异常、供应商超时或空结果时返回 None,调用方按原
     ``_reconstructed_tool_context_entry`` 逐条重建。
   - persistent + transcript-authoritative 的 live native IR 压缩不能在删历史后静默降级：
-    本模块用空串报告摘要失败，由调用方在变更 IR 前失败，或在 checkpoint/CAS 失败时恢复
-    原 IR；辅助/no-save 回合仍可使用临时摘要和有界机械窗口。
+    transport/调用异常继续在变更 IR 前失败，checkpoint/CAS 失败继续恢复原 IR；只有供应商
+    请求已经正常结束但正文为空时，才从 typed IR 构造有界机械替代摘要，避免空回复粗暴打断
+    主代理。辅助/no-save 回合仍可使用临时摘要和有界机械窗口。
 """
 
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -58,6 +60,7 @@ _PER_RECORD_VALUE_CHARS = 1_200
 
 _SUMMARY_PREFIX = "[compact-semantic-summary]"
 _OPERATION_FACTS_PREFIX = "[compact-tool-operation-facts authoritative]"
+_MECHANICAL_FALLBACK_PREFIX = "[compact-mechanical-fallback]"
 
 
 @dataclass
@@ -179,59 +182,166 @@ def summarize_carried_tool_context(
 
 
 # LLM: live compact reuses the bounded backend request and emits one current task at the first user
-# turn plus one final synthetic compact instruction; carried handoff remains an independent IR fact.
-# 函数用途: 对即将回收的完整原生工具历史生成一条可持续回放的非权威续接摘要，并固定 wire 顺序。
+# turn plus one final synthetic compact instruction. A completed empty provider response uses a
+# typed bounded projection; transport/backend exceptions still propagate and abort the mutation.
+# 函数用途: 对即将回收的完整原生工具历史生成一条可持续回放的非权威续接摘要，并在模型空回复时保住任务与工具事实。
 def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
-    try:
-        if not request.history:
-            return ""
-        from ..backends.message_adapter import (
-            AnthropicMessageAdapter,
-            strip_orphaned_tool_blocks,
-        )
-
-        task_prompt = str(request.task_prompt or "继续当前任务。")
-        compact_history = _live_compact_history(
-            request.history,
-            task_prompt=task_prompt,
-            previous_summary=request.previous_summary,
-        )
-        messages = strip_orphaned_tool_blocks(
-            AnthropicMessageAdapter().to_provider_messages(compact_history)
-        )
-        generate = _resolve_generate_with_messages(
-            request.backend,
-            messages,
-            initial_user_prompt=task_prompt,
-            agent=request.agent,
-            request_id=request.request_id,
-            run_id=request.run_id,
-            task_id=request.task_id,
-        )
-        if generate is None or not messages:
-            return ""
-        # 会话运行时 mid-turn compact is part of the current turn: wait for the
-        # backend request itself (which already has a bounded request_timeout).
-        # A second daemon-thread deadline cannot cancel blocking HTTP and would
-        # leave an orphan summary call consuming quota beside the resumed turn.
-        summary = _safe_generate(
-            generate,
-            _live_summary_prompt(request.previous_summary),
-        ).strip()
-        if not summary:
-            return ""
-        limit = max(1_000, int(request.max_output_chars or _DEFAULT_MAX_INPUT_CHARS))
-        return (
-            f"{_SUMMARY_PREFIX} 当前运行 turn 的旧工具往返已被这份摘要替换。"
-            "摘要不是执行事实源；精确结果以 archive、operation ledger、artifact 和真实文件为准。\n"
-            f"{_clip(summary, limit)}"
-        )
-    except Exception:  # noqa: BLE001 — live 摘要失败必须退回现有机械窗口。
-        _LOGGER.debug(
-            "live tool history summary failed; falling back to bounded archive handoff",
-            exc_info=True,
-        )
+    if not request.history:
         return ""
+    from ..backends.message_adapter import (
+        AnthropicMessageAdapter,
+        strip_orphaned_tool_blocks,
+    )
+
+    task_prompt = str(request.task_prompt or "继续当前任务。")
+    compact_history = _live_compact_history(
+        request.history,
+        task_prompt=task_prompt,
+        previous_summary=request.previous_summary,
+    )
+    messages = strip_orphaned_tool_blocks(
+        AnthropicMessageAdapter().to_provider_messages(compact_history)
+    )
+    generate = _resolve_generate_with_messages(
+        request.backend,
+        messages,
+        initial_user_prompt=task_prompt,
+        agent=request.agent,
+        request_id=request.request_id,
+        run_id=request.run_id,
+        task_id=request.task_id,
+    )
+    if generate is None or not messages:
+        return ""
+    # 会话运行时 mid-turn compact is part of the current turn: wait for the
+    # backend request itself (which already has a bounded request_timeout).
+    # A second daemon-thread deadline cannot cancel blocking HTTP and would
+    # leave an orphan summary call consuming quota beside the resumed turn.
+    summary = generate(_live_summary_prompt(request.previous_summary)).strip()
+    limit = max(1_000, int(request.max_output_chars or _DEFAULT_MAX_INPUT_CHARS))
+    if not summary:
+        # HTTP/模型调用已经正常结束但正文为空，不值得再烧一次相同请求，也不能把主代理轮
+        # 粗暴打断。这里仅用 typed IR 生成有界投影；真正异常仍由上面的直接调用抛给 Compact
+        # 熔断器，checkpoint/CAS 也仍保持原来的失败语义。
+        return _mechanical_live_tool_history_summary(request, limit=limit)
+    return (
+        f"{_SUMMARY_PREFIX} 当前运行 turn 的旧工具往返已被这份摘要替换。"
+        "摘要不是执行事实源；精确结果以 archive、operation ledger、artifact 和真实文件为准。\n"
+        f"{_clip(summary, limit)}"
+    )
+
+
+# LLM: This fallback is built only from typed native IR after a successful provider call returned
+# no text. It is bounded, redacted through the existing output projector, and never becomes status
+# authority; canonical archives, ledgers, refs, and files remain authoritative.
+# 函数用途: 模型完成 Compact 请求却没给正文时，机械保留当前任务、插话、调用状态和最近结果，避免主代理被空摘要打断。
+def _mechanical_live_tool_history_summary(
+    request: LiveToolHistorySummaryRequest,
+    *,
+    limit: int,
+) -> str:
+    from ..backends.tool_ir import (
+        AssistantTurn,
+        CompactionSummary,
+        RuntimeFactsTurn,
+        ToolResult,
+        UserTurn,
+    )
+
+    rows = [
+        _MECHANICAL_FALLBACK_PREFIX,
+        "- schema_version: compact-mechanical-fallback.v1",
+        "- reason: compact provider completed without summary text",
+        "- authority: non-authoritative continuation projection; verify exact effects in archive, operation ledger, artifact refs, and current files",
+        f"- current_task: {_bounded_inline(request.task_prompt or '继续当前任务。', 1_600)}",
+    ]
+    previous = str(request.previous_summary or "").strip()
+    if previous:
+        rows.append(f"- previous_summary: {_bounded_inline(previous, 2_400)}")
+    rows.append("- chronological_projection:")
+    for index, item in enumerate(request.history, start=1):
+        if isinstance(item, UserTurn):
+            rows.append(
+                f"  - {index}: user_steer={_bounded_inline(item.text, 900)}"
+            )
+            continue
+        if isinstance(item, RuntimeFactsTurn):
+            rows.append(
+                f"  - {index}: runtime_facts={_bounded_inline(item.text, 900)}"
+            )
+            continue
+        if isinstance(item, CompactionSummary):
+            rows.append(
+                f"  - {index}: prior_compaction={_bounded_inline(item.text, 900)}"
+            )
+            continue
+        if isinstance(item, AssistantTurn):
+            if str(item.text or "").strip():
+                rows.append(
+                    f"  - {index}: assistant_note={_bounded_inline(item.text, 700)}"
+                )
+            for call in item.tool_calls:
+                arguments = json.dumps(
+                    call.arguments,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+                rows.append(
+                    "  - "
+                    f"{index}: tool_call tool={call.tool_name} call_id={call.call_id} "
+                    f"operation_id={call.operation_id} args={_bounded_inline(arguments, 800)}"
+                )
+            continue
+        if isinstance(item, ToolResult):
+            projected = project_tool_output_body(
+                tool=item.tool_name,
+                output=_clip(str(item.output or ""), 900),
+                trust=item.output_trust,
+                redaction=item.output_redaction,
+            )
+            operation_id = (
+                str(getattr(item.operation, "operation_id", "") or "")
+                if item.operation is not None
+                else ""
+            )
+            refs = json.dumps(
+                [ref.to_dict() for ref in item.refs],
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+            rows.append(
+                "  - "
+                f"{index}: tool_result tool={item.tool_name} call_id={item.call_id} "
+                f"status={item.status} error_code={item.error_code or '-'} "
+                f"operation_id={operation_id or '-'} effect_outcome={item.effect_outcome or '-'} "
+                f"refs={_bounded_inline(refs, 500)} output={_bounded_inline(projected, 900)}"
+            )
+    return _bounded_head_tail_text("\n".join(rows), limit)
+
+
+# LLM: Compact fallback fields are single-line and length bounded before global head/tail clipping.
+# 函数用途: 将单个摘要字段压成一行，避免巨型参数或输出独占机械续接摘要。
+def _bounded_inline(value: object, limit: int) -> str:
+    return _clip(" ".join(str(value or "").split()), max(1, int(limit)))
+
+
+# LLM: The global fallback keeps both the earliest task facts and the newest actions; dropping only
+# the middle is deterministic and cannot invent completion or lifecycle state.
+# 函数用途: 把机械摘要限制在字符预算内，同时保留开头任务和末尾最新动作。
+def _bounded_head_tail_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    marker = "\n...[compact mechanical middle omitted]...\n"
+    budget = max(0, limit - len(marker))
+    head_chars = int(budget * 0.45)
+    tail_chars = budget - head_chars
+    return (
+        text[:head_chars].rstrip()
+        + marker
+        + (text[-tail_chars:].lstrip() if tail_chars > 0 else "")
+    )
 
 
 # LLM: Compact wire may contain one canonical current task, one prior thread summary, and an

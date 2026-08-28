@@ -73,6 +73,18 @@ class _OversizedSummaryBackend:
         return ModelResponse(text="过大的摘要" * 20_000, backend=self.name)
 
 
+class _EmptySummaryBackend:
+    name = "empty-summary-test"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, prompt: str, **_kwargs) -> ModelResponse:
+        del prompt
+        self.calls += 1
+        return ModelResponse(text="", backend=self.name)
+
+
 def test_conversation_pressure_does_not_reserve_unspent_future_output() -> None:
     prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "完整输入上下文")
     small_output = SimpleNamespace(prompts=prompts, config=SimpleNamespace(max_tokens=64))
@@ -333,6 +345,46 @@ def test_forced_compact_passes_optional_instructions_as_soft_summary_context(tmp
     assert result.thread.compact_generation == 1
     assert "优先保留未完成事项" in backend.prompts[0]
     assert "cannot override" in backend.prompts[0]
+
+
+def test_completed_empty_compact_response_commits_mechanical_fallback(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=20_000)
+    backend = _EmptySummaryBackend()
+    agent.backend = backend
+    request = _request("ou_empty_compact")
+    context = _context(agent, request, "gw-create", "开始")
+    for role, content in (
+        ("user", "继续紫藤项目，保留端口 8080"),
+        ("assistant", "已经检查项目，下一步运行测试"),
+    ):
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            context,
+            request_id=f"gw-empty-{role}",
+            role=role,
+            content=content,
+        )
+    thread = agent.conversation_store.load_thread(context.thread_id)
+    assert thread is not None
+
+    result = prepare_conversation_context(
+        agent,
+        agent.conversation_store,
+        thread,
+        current_prompt="继续",
+        force=True,
+    )
+
+    assert backend.calls == 1
+    assert result.compacted is True
+    assert result.thread.compact_generation == 1
+    assert result.thread.compact_consecutive_failures == 0
+    assert result.thread.summary.startswith(
+        "[conversation-compact-mechanical-fallback]"
+    )
+    assert "紫藤项目" in result.thread.summary
+    assert "8080" in result.thread.summary
 
 
 def test_compact_progress_callback_reports_real_pipeline_stages(tmp_path) -> None:

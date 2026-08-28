@@ -154,8 +154,11 @@ class TestPromptBuilderInit:
 
         assert "默认始终在这里工作" in rendered
         assert "用户明确指定外部路径" in rendered
+        assert "明确要求排查系统问题" in rendered
         assert "涉及其他用户目录时也必须有用户明确要求" in rendered
+        assert "无需额外反问授权" in rendered
         assert "默认优先只读" in rendered
+        assert "只修改用户明确要求的范围" in rendered
         assert "不限制外部网络" in rendered
 
 
