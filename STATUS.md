@@ -16,9 +16,13 @@
   后者不重试，直接从 typed IR/结构化 operation evidence 生成有界机械续接摘要并正常提交；它不判断任务
   完成，也不替代 archive、账本和真实文件。权限与 Compact/TUI 两组 focused 共 536 项通过、9 项按平台跳过。
 - `422dd7a` fresh 长 TUI 随后又抓到另一类假红字：live-tool 摘要候选没达到恢复线后已经完整恢复原 IR，
-  canonical Compact 失败数仍为 0，4/4 child、5/5 Todo 和主代理最终回复也都正常完成。当前本地候选新增
+  canonical Compact 失败数仍为 0，4/4 child、5/5 Todo 和主代理最终回复也都正常完成。`f6d58c0` 已发布
   `superseded/candidate_discarded` 展示终态；它静默收起动画、不推进代次、不熔断，并允许下一次 transcript
   Compact 使用同一 generation。真实摘要、checkpoint、CAS 异常仍保留红色失败。
+- `.7` fresh `ma-f6d58c0-compact-superseded-r3` 用官方超级玛丽提示词完成真验收：约 1.4 秒启动，目录固定
+  local/main owner home；8/8 child DONE、Todo 10/10、最终回复直显。live 候选 20% 后无红字并继续工作，
+  后续真实 Compact 提交 generation 1，失败数 0、source tool pairs 8。主 thread 的 provider 账为 26 次
+  MiniMax-M2.7 调用、387,142 input、781,428 cache-read、152,988 cache-write、16,237 output，零重试/失败。
 - `.7` 唯一 Gateway 的 MiniMax-M2.7 真 TUI 从 `/root` 启动后仍显示并使用
   `/root/.my-agent/owners/local/main`。官方超级玛丽提示词创建 5 名 child，5/5 自然 DONE，产物为 owner home
   下 `bbb/index.html`；主 thread 手动 Compact 显示真实 5% 动画并完成 `26,496 → 8,912`、generation 1，

@@ -17,6 +17,9 @@
   异常仍走红色 `failed`，两者不能混成同一种用户提示。
 - 本地权限/沙箱 focused 与主/子/manual Compact focused 均已通过；生产改动未达 10,000 行，不跑全仓 pytest，
   推送前仍执行 Ruff、doc sync、strict code-size、diff 与 clean-package 严格门。
+- `.7` fresh `ma-f6d58c0-compact-superseded-r3` 已用官方多子代理超级玛丽任务复验：8/8 child、Todo 10/10、
+  终态 DONE；live 候选退出不再出现红字，后续 canonical Compact generation 1、failure count 0，模型继续记得
+  全部文件与验证步骤。测试期间始终只有一个 `ma-gateway-f6d58c0-minimax`。
 
 ## 2026-08-28 后台三车道统一最终回执与会话 Compact 权威
 

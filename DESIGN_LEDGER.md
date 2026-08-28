@@ -2128,5 +2128,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   323,871 ordinary input、813,531 cache-read、167,556 cache-write、8,766 output，零 provider retry/failure。
 - `422dd7a` fresh `.7` 官方超级玛丽长任务再次 4/4 child DONE、5/5 Todo 完成并直接汇报；主线程手动
   Compact generation 1。自动 live-tool 候选在约 83% 时因恢复余量不足完整回滚，旧 TUI 错画两次红色
-  “压缩失败”，但 canonical failure count 为 0 且任务正常完成；上述 `superseded` 状态就是该真样本的
-  底层修正，待新版本部署后复验不再出现红字。
+  “压缩失败”，但 canonical failure count 为 0 且任务正常完成；上述 `superseded` 状态就是该真样本的根因。
+- `f6d58c0` fresh `.7` 用同一官方提示再次验收：从 `/root` 启动约 1.4 秒进入 local/main owner home，8/8
+  child 自然 DONE、Todo 10/10、最终正文直显。live 候选 20% 后静默回到工作，没有红字；随后真正 Compact
+  提交 generation 1，Context 回落后模型仍准确续接 8 名 child、文件清单和验证步骤。canonical failure
+  count 为 0、source tool pairs 为 8；主 thread 的 26 次 MiniMax-M2.7 provider 调用全部成功、零重试。

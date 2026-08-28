@@ -48,6 +48,11 @@ python3 -m pytest \
 `26,496 → 8,912` 且 child generation 达到 2、最终正文直显；最后一对巨型回执回收另由 exact focused
 回归锁定，避免用旁路修改被测产物来伪造通过。
 
+`f6d58c0` 发布后，fresh `.7` TUI `ma-f6d58c0-compact-superseded-r3` 再次运行官方超级玛丽提示词：8/8 child
+自然 DONE、Todo 10/10、最终正文直显。live 候选在 20% 后以 superseded 静默退出、没有红色失败；后续真实
+Compact 提交 generation 1，canonical failure count 0、source tool pairs 8，且模型在 Context 回落后仍保留
+完整任务、child 文件和验证下一步。单 Gateway、MiniMax-M2.7、owner home 启动边界均再次通过。
+
 ## 2026-08-28 后台权威工作片 Compact、notice 与有界 handoff
 
 回归必须证明三条独立合同：
