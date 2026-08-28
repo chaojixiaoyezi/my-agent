@@ -12,6 +12,9 @@ Compact 回归必须覆盖：live/transcript 都低于同一 recovery target；�
 最后一对巨型回执，并证明 checkpoint/generation 成功、provider IR 无孤儿且不再立即触发 overflow。摘要
 transport 异常必须恢复原 IR 并累加失败熔断；供应商正常完成但 text 为空时，live/transcript 都必须只消费
 这一次模型调用，用 typed IR/raw transcript + operation evidence 生成有界机械续接摘要并推进有效 generation。
+候选完成计量后仍高于 recovery target 时，必须恢复原 IR、保持 failure count 不变并发布
+`superseded/candidate_discarded`；TUI 要静默撤下该块，不得冻结红色失败，随后同代 transcript operation 必须
+仍能启动。真正的摘要 transport、checkpoint 与 CAS 异常继续发布 `failed`。
 
 ```bash
 python3 -m pytest \

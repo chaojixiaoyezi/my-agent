@@ -299,6 +299,31 @@ def test_conversation_compact_progress_is_rich_only_and_content_free(tmp_path):
     assert "prompt" not in row["compact_progress"]
 
 
+def test_conversation_compact_superseded_crosses_gateway_as_typed_terminal(tmp_path):
+    """未采用候选通过同一无正文 schema 结束动画，不会被 Gateway 丢成悬挂块。"""
+    paths = _make_paths(tmp_path)
+    chunk_path = gateway_chunk_path(paths, "compact-superseded")
+    writer = BufferedChunkStreamWriter(chunk_path, rich_transcript=True)
+    value = {
+        "schema": "conversation_compaction_progress.v1",
+        "phase": "superseded",
+        "stage": "candidate_discarded",
+        "percent": 0,
+        "generation": 4,
+        "operation_id": "live-tool:test-operation",
+        "before_tokens": 118_400,
+        "after_tokens": 109_000,
+        "trigger_tokens": 115_200,
+        "source_messages": 80,
+    }
+
+    assert writer.write_conversation_compact_progress(value) is True
+
+    row = json.loads(chunk_path.read_text(encoding="utf-8").strip())
+    assert row["kind"] == "conversation_compaction_progress"
+    assert row["compact_progress"] == value
+
+
 def test_noninteractive_gateway_permission_fails_closed_without_waiting(tmp_path):
     paths = _make_paths(tmp_path)
     chunk_path = gateway_chunk_path(paths, "permission-disabled")

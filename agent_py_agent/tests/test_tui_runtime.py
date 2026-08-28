@@ -432,6 +432,52 @@ def test_failed_live_compact_does_not_hide_transcript_fallback_progress() -> Non
     assert any(block.phase == "failed" for block in snapshot.stable_blocks)
 
 
+def test_superseded_live_compact_retires_silently_before_transcript_fallback() -> None:
+    """未采用的 live 候选不留红字，并立即允许同代 transcript Compact 接管。"""
+    runtime = TuiRuntime("conversation-compact-superseded")
+    runtime.enqueue_prompt("compact-superseded", "go", queued=False)
+    turn = runtime.begin_turn("compact-superseded")
+    base = {
+        "schema": "conversation_compaction_progress.v1",
+        "generation": 2,
+        "before_tokens": 118_400,
+        "after_tokens": 0,
+        "trigger_tokens": 115_200,
+        "source_messages": 60,
+    }
+
+    for phase, stage, percent in (
+        ("started", "preparing", 5),
+        ("progress", "measuring", 65),
+        ("superseded", "candidate_discarded", 0),
+    ):
+        assert turn.write_conversation_compact_progress(
+            {
+                **base,
+                "operation_id": "live-tool:attempt-a",
+                "phase": phase,
+                "stage": stage,
+                "percent": percent,
+            }
+        )
+
+    retired = runtime.store.snapshot()
+    assert not any(block.role == "compact" for block in retired.active_blocks)
+    assert not any(block.role == "compact" for block in retired.stable_blocks)
+    assert turn.write_conversation_compact_progress(
+        {
+            **base,
+            "operation_id": "transcript:attempt-b",
+            "phase": "started",
+            "stage": "preparing",
+            "percent": 5,
+        }
+    )
+    assert any(
+        block.role == "compact" for block in runtime.store.snapshot().active_blocks
+    )
+
+
 def test_turn_activity_survives_stream_and_tools_until_structured_terminal() -> None:
     runtime = TuiRuntime("session-activity")
     runtime.enqueue_prompt("request-activity", "go", queued=False)

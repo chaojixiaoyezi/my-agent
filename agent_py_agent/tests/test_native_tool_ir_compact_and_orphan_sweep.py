@@ -625,7 +625,7 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
 
 
 def test_native_window_rolls_back_summary_that_still_exceeds_trigger(tmp_path):
-    """摘要或最新工具对过大时不提交 generation，也不丢当前 IR。"""
+    """摘要或最新工具对过大时不提交 generation、不丢 IR，也不误报失败。"""
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(
         {
@@ -646,6 +646,7 @@ def test_native_window_rolls_back_summary_that_still_exceeds_trigger(tmp_path):
     params = replace(
         _params(),
         save=True,
+        effective_on_chunk=(sink := _ContextCompactionSink()),
         provider_history_messages=[
             {
                 "role": "user",
@@ -663,7 +664,12 @@ def test_native_window_rolls_back_summary_that_still_exceeds_trigger(tmp_path):
     prompt = build_tool_loop_prompt(agent, params)
 
     assert params.tool_ir_history == before_ir
-    assert store.load_thread(thread.thread_id).compact_generation == 0
+    updated = store.load_thread(thread.thread_id)
+    assert updated.compact_generation == 0
+    assert updated.compact_consecutive_failures == 0
+    assert sink.progress_rows[-1]["phase"] == "superseded"
+    assert sink.progress_rows[-1]["stage"] == "candidate_discarded"
+    assert not any(row["phase"] in {"completed", "failed"} for row in sink.progress_rows)
     pressure = preflight_context_pressure_response(
         SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=6)
     )

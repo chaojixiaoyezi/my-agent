@@ -52,6 +52,7 @@ BACKGROUND_TRANSCRIPT_EVENT_KINDS = frozenset(
         "conversation_compaction_started",
         "conversation_compaction_progress",
         "conversation_compaction_completed",
+        "conversation_compaction_superseded",
         "conversation_compaction_failed",
         "compact_boundary",
     }
@@ -97,6 +98,7 @@ _CONVERSATION_COMPACT_STAGES = frozenset(
         "checkpointing",
         "committing",
         "completed",
+        "candidate_discarded",
         "failed",
     }
 )
@@ -343,8 +345,8 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         return True
 
     # LLM: Durable Compact display consumes only its frozen safe schema. The operation id and
-    # phase select one block, so a failed live attempt cannot hide a transcript fallback.
-    # 函数用途: 原位发布后台会话 Compact 的开始、进度、完成或失败阶段。
+    # phase select one block, so an ineffective live candidate cannot hide a transcript fallback.
+    # 函数用途: 原位发布后台会话 Compact 的开始、进度、完成、候选放弃或失败阶段。
     def write_conversation_compact_progress(self, value: Mapping[str, object]) -> bool:
         if value.get("schema") != "conversation_compaction_progress.v1":
             return False
@@ -354,7 +356,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         operation_id = str(value.get("operation_id") or "").strip()[:128]
         if (
             generation <= 0
-            or phase not in {"started", "progress", "completed", "failed"}
+            or phase not in {"started", "progress", "completed", "superseded", "failed"}
             or stage not in _CONVERSATION_COMPACT_STAGES
         ):
             return False
@@ -373,6 +375,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
             "started": ("conversation_compaction_started", "started"),
             "progress": ("conversation_compaction_progress", "updated"),
             "completed": ("conversation_compaction_completed", "completed"),
+            "superseded": ("conversation_compaction_superseded", "interrupted"),
             "failed": ("conversation_compaction_failed", "failed"),
         }[phase]
         self._event(

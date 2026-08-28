@@ -1312,6 +1312,7 @@ def _render_compact_progress(
         "checkpointing": "正在写恢复点",
         "committing": "正在提交",
         "completed": "已完成",
+        "candidate_discarded": "继续当前任务",
         "failed": "失败",
     }.get(stage_key, "处理中")
     bar_width = min(24, max(8, context.width - 48))

@@ -903,6 +903,57 @@ def test_background_transcript_projects_numeric_compact_events() -> None:
     assert not any(block.role == "compact" for block in snapshot.active_blocks)
 
 
+def test_background_superseded_compact_candidate_leaves_no_failure_block() -> None:
+    """后台 live 候选放弃后只结束动画，不冻结红色失败，也不占住下一次 Compact。"""
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BackgroundTranscriptSink,
+        read_background_transcript_events,
+    )
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    agent = SimpleNamespace()
+    sink = BackgroundTranscriptSink(
+        agent,
+        thread_id="thread-background-superseded",
+        task_id="task-background-superseded",
+    )
+    base = {
+        "schema": "conversation_compaction_progress.v1",
+        "generation": 1,
+        "operation_id": "live-tool:background-a",
+        "before_tokens": 118_000,
+        "after_tokens": 109_000,
+        "trigger_tokens": 115_200,
+        "source_messages": 80,
+    }
+    assert sink.write_conversation_compact_progress(
+        {**base, "phase": "started", "stage": "preparing", "percent": 5}
+    )
+    assert sink.write_conversation_compact_progress(
+        {
+            **base,
+            "phase": "superseded",
+            "stage": "candidate_discarded",
+            "percent": 0,
+        }
+    )
+
+    page = read_background_transcript_events(
+        agent,
+        thread_id="thread-background-superseded",
+        after=0,
+    )
+    assert [row["kind"] for row in page["events"]] == [
+        "conversation_compaction_started",
+        "conversation_compaction_superseded",
+    ]
+    runtime = TuiRuntime("session-background-superseded")
+    runtime.publish_background_transcript_events(page["events"])
+    snapshot = runtime.store.snapshot()
+    assert not any(block.role == "compact" for block in snapshot.active_blocks)
+    assert not any(block.role == "compact" for block in snapshot.stable_blocks)
+
+
 def test_tui_notice_loop_backs_off_and_resets_after_success(monkeypatch) -> None:
     """连续断线按 0.5/1/2 秒退避；成功后恢复 1 秒并重置退避。"""
     from agent_py_agent.cli.chat_parts import tui_threading

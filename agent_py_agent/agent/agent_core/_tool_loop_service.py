@@ -603,7 +603,7 @@ def _apply_native_compact_plan(
             token_estimator=estimator,
         )
         if not dropped:
-            _emit_native_compact_failed(params, plan)
+            _emit_native_compact_superseded(params, plan)
             return 0
         if plan.semantic_summary:
             replace_compaction_summary_ir(params, plan.semantic_summary)
@@ -625,7 +625,7 @@ def _apply_native_compact_plan(
             # 摘要或必须保留的最新往返未腾出一整段近期工作空间：恢复原 IR，交给
             # transcript Compact。只低于触发线但仍贴线的薄结果不能推进 generation。
             _restore_native_compact_candidate(params, original_ir, original_tool_context)
-            _emit_native_compact_failed(params, plan, after_tokens=after_tokens)
+            _emit_native_compact_superseded(params, plan, after_tokens=after_tokens)
             return 0
         return _commit_and_publish_native_compact(
             agent, params, plan, dropped=dropped, after_tokens=after_tokens
@@ -877,6 +877,25 @@ def _emit_native_compact_failed(
         params,
         phase="failed",
         stage="failed",
+        percent=0,
+        **_native_compact_progress_values(plan, after_tokens=after_tokens),
+    )
+
+
+# LLM: An ineffective in-memory candidate is a normal no-commit outcome, not a Compact failure.
+# Close its display operation without advancing generation or touching the failure circuit so a
+# later transcript attempt can own the same generation.
+# 函数用途: 工具历史候选没有腾出足够空间时静默收起进度条，继续原上下文或交给完整会话压缩。
+def _emit_native_compact_superseded(
+    params: ToolLoopExecuteParams,
+    plan: _NativeCompactPlan,
+    *,
+    after_tokens: int = 0,
+) -> bool:
+    return _emit_native_compact_progress(
+        params,
+        phase="superseded",
+        stage="candidate_discarded",
         percent=0,
         **_native_compact_progress_values(plan, after_tokens=after_tokens),
     )

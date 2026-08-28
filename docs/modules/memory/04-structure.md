@@ -38,6 +38,9 @@
 - `_tool_loop_service` 在摘要、计量、checkpoint 与 CAS 的实际边界发送同一个 content-free progress block；
   `LiveToolCompactCommitRequest.after_checkpoint` 只允许在 checkpoint 已成功、CAS 尚未开始时发 committing
   milestone，异常被吞掉，不能反噬会话提交。进度条和 spinner 是投影，不是第二本 Compact 账。
+- in-memory 候选未达到 recovery target 时用 `superseded/candidate_discarded` 关闭这一个 operation：它只撤销
+  展示块，不写 checkpoint、generation 或 failure circuit。后续 transcript attempt 用独立 operation id 接管；
+  `failed` 只代表摘要 transport、checkpoint、CAS 等真实故障。
 - `save` 与 transcript authority 是两个结构化事实：前者决定 `Agent.run` 是否写旧式回复/记忆，后者决定
   当前 exact thread 是否拥有 Compact CAS。后台 main 由 ConversationStore 另行提交回复，因此可以
   `save=False + authoritative=true`；辅助、不保存且非权威的展示回合仍只能临时摘要。任何正文权威的

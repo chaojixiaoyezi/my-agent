@@ -142,9 +142,11 @@ _CONTEXT_COMPACTION_FIELDS = (
     "dropped_pairs",
     "preserved_pairs",
 )
+# LLM: `superseded/candidate_discarded` closes an uncommitted live candidate without claiming
+# success or failure; clients must retire its spinner while canonical generation remains unchanged.
 _CONVERSATION_COMPACT_PROGRESS_SCHEMA = "conversation_compaction_progress.v1"
 _CONVERSATION_COMPACT_PROGRESS_PHASES = frozenset(
-    {"started", "progress", "completed", "failed"}
+    {"started", "progress", "completed", "superseded", "failed"}
 )
 _CONVERSATION_COMPACT_PROGRESS_STAGES = frozenset(
     {
@@ -154,6 +156,7 @@ _CONVERSATION_COMPACT_PROGRESS_STAGES = frozenset(
         "checkpointing",
         "committing",
         "completed",
+        "candidate_discarded",
         "failed",
     }
 )

@@ -192,12 +192,16 @@ class BackgroundMainActivitySink:
         return published
 
     # LLM: Durable Compact progress shares the foreground TUI block protocol;
-    # this callback does not write checkpoints or infer phase from display text.
-    # 函数用途: 把后台会话 Compact 的结构化进度送进正文进度块。
+    # this callback does not write checkpoints or infer phase from display text. A superseded
+    # candidate returns the scalar activity to ordinary work instead of leaving a false failure.
+    # 函数用途: 把后台会话 Compact 的结构化进度送进正文进度块，并在候选放弃后恢复普通工作提示。
     def write_conversation_compact_progress(self, value: dict[str, object]) -> bool:
         published = self._transcript.write_conversation_compact_progress(value)
         if published:
-            self._publish("compacting", "正在压缩会话上下文")
+            if str(value.get("phase") or "") == "superseded":
+                self._publish("working", "继续当前任务")
+            else:
+                self._publish("compacting", "正在压缩会话上下文")
         return published
 
     # LLM: Finish marks only rendering phase while the durable task link remains

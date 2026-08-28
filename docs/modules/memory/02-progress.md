@@ -10,6 +10,9 @@
 - live-tool Compact 现在从语义摘要前到 CAS 后发布真实阶段进度，与 transcript Compact 共用同一公开 schema；
   summary 很慢时 spinner 继续刷新但百分比停在当前 milestone，不以墙钟伪造推进。callback 只读、fail-open，
   不改变失败回滚、checkpoint 或 generation。
+- live-tool 候选计量后仍达不到 recovery target 时，原 IR 回滚并发布中性的
+  `superseded/candidate_discarded`：TUI 静默收起进度条，failure count/generation 都不变，同代 transcript
+  operation 可以继续。只有摘要 transport、checkpoint 或 CAS 的真实异常保留红色 `failed`。
 
 ## 2026-08-28 Compact 辅助模型调用纳入统一用量账本
 

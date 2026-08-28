@@ -42,7 +42,9 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
    已经返回上下文压力，则一次压缩当前请求之前的完整旧段，不把同一近期尾部反复压成多代 checkpoint。
 5. 候选只有在完整下一轮投影低于 `触发线 - recent-tail 预算` 的恢复目标时才可提交，为下一段完整近期对话
    留出余量，避免刚压完就再次触发。提交先写完整 owner-scoped checkpoint，
-   再用一次 generation CAS 原子推进 summary/cursor/checkpoint pointer；任何失败都保留原 live 状态。
+   再用一次 generation CAS 原子推进 summary/cursor/checkpoint pointer。候选无法达到恢复目标但原上下文已
+   完整恢复时，记录为展示态 `superseded/candidate_discarded`，不算失败、不推进 generation，也不占住后续
+   transcript Compact；摘要调用、checkpoint 或 CAS 的真实异常才进入失败熔断并保留原 live 状态。
 6. 同一 thread 连续三次 compact 失败后冷却 300 秒，避免每条消息重复消耗模型；冷却后半开尝试，
    成功提交即清零。该状态不删除 transcript，也不改变 task、memory 或 persona。
 7. 当前 active turn 的原生 ToolCall/ToolResult 达到同一阈值，或 provider 实报 overflow 时，只能成对回收。

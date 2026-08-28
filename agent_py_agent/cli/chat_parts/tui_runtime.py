@@ -39,6 +39,7 @@ _BACKGROUND_TRANSCRIPT_KINDS = frozenset(
         "conversation_compaction_started",
         "conversation_compaction_progress",
         "conversation_compaction_completed",
+        "conversation_compaction_superseded",
         "conversation_compaction_failed",
         "compact_boundary",
     }
@@ -1648,8 +1649,9 @@ class TuiTurnEventAdapter:
             )
         return True
 
-    # LLM: 会话 Compact 块只消费冻结 schema 的顺序事件，不根据显示文案推断开始、完成或失败。
-    # 函数用途: 将 Gateway 传来的持久会话 Compact 阶段更新为一个原位进度块。
+    # LLM: 会话 Compact 块只消费冻结 schema 的顺序事件，不根据显示文案推断开始、完成、
+    # superseded 或失败。superseded 仅结束候选展示，不推进 Compact generation。
+    # 函数用途: 将 Gateway 传来的会话 Compact 阶段更新为一个原位进度块，并静默收起未采用候选。
     def write_conversation_compact_progress(
         self,
         value: Mapping[str, object],
@@ -1682,6 +1684,8 @@ class TuiTurnEventAdapter:
                 kind, event_phase = "conversation_compaction_progress", "updated"
             elif phase == "completed":
                 kind, event_phase = "conversation_compaction_completed", "completed"
+            elif phase == "superseded":
+                kind, event_phase = "conversation_compaction_superseded", "interrupted"
             else:
                 kind, event_phase = "conversation_compaction_failed", "failed"
             self.runtime._publish(
@@ -1691,7 +1695,7 @@ class TuiTurnEventAdapter:
                 payload,
                 request_id=self.request_id,
             )
-            if phase in {"completed", "failed"}:
+            if phase in {"completed", "superseded", "failed"}:
                 self._compact_active = False
                 self._compact_block_id = ""
                 self._compact_payload = {}
@@ -2204,7 +2208,7 @@ def _tui_conversation_compact_progress_payload(
         return {}
     phase = str(value.get("phase") or "")
     stage = str(value.get("stage") or "")
-    if phase not in {"started", "progress", "completed", "failed"}:
+    if phase not in {"started", "progress", "completed", "superseded", "failed"}:
         return {}
     if stage not in {
         "preparing",
@@ -2213,6 +2217,7 @@ def _tui_conversation_compact_progress_payload(
         "checkpointing",
         "committing",
         "completed",
+        "candidate_discarded",
         "failed",
     }:
         return {}

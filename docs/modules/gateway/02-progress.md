@@ -12,6 +12,9 @@
 - Compact 统一加入一段 recent-tail 恢复余量；候选未降到恢复目标就不推进 generation。live 尝试与 transcript
   后备使用独立 operation id，失败块不再遮住后备进度；child Compact 进入 child transcript。手动 `/compact`
   从 outbox 入队起显示持续动画，真实回执后才成功收起或冻结失败。
+- live-tool 候选不足以达到恢复目标但原 IR 已恢复时，以 `superseded/candidate_discarded` 静默结束本次动画；
+  它不写失败熔断、不推进 generation，并释放同代 transcript operation。真实摘要调用、checkpoint 或 CAS
+  异常仍走红色 `failed`，两者不能混成同一种用户提示。
 - 本地权限/沙箱 focused 与主/子/manual Compact focused 均已通过；生产改动未达 10,000 行，不跑全仓 pytest，
   推送前仍执行 Ruff、doc sync、strict code-size、diff 与 clean-package 严格门。
 

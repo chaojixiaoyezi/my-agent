@@ -2112,6 +2112,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   恢复余量，避免压缩抖动。每次 live/transcript 尝试使用独立 operation id，因此 live 失败不会吞掉后备
   transcript 进度；child 把同一 typed 进度写入自己的公开 transcript。手动 `/compact` 从耐久 outbox 入队
   到真实回执期间保持诚实的转圈块，只有 canonical 成功/失败回执才能结束动画和推进 generation。
+- live-tool 候选无法达到恢复线但原 IR 已完整恢复时，属于 `superseded/candidate_discarded`，不是 Compact
+  失败：它不推进 generation、不写失败熔断，也不在 TUI 冻结红字；同代 transcript Compact 可立即接管。
+  只有摘要 transport、checkpoint 或 CAS 等真实异常才发布 `failed` 并留下失败证据。
 - 无摘要的普通 IR 窗口仍至少保留最新完整 ToolCall/ToolResult；完整 live Compact 摘要已经覆盖本轮全部工具
   历史后，最后一对也不再是机械保留项。若单条最新大回执妨碍达到恢复线，应将其成对移除，由摘要续接、
   owner archive/ref 保留精确原文；这与 会话运行时 用 ContextCompaction 替换完整旧 history 的边界一致。
@@ -2123,3 +2126,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - `.7` 唯一 Gateway 真 TUI 从 `/root` 启动仍落 local/main owner home；官方超级玛丽任务 5/5 child DONE，
   主 thread generation 1、最长 child generation 2，最终回复直显。主 thread provider 账为 26 次物理调用、
   323,871 ordinary input、813,531 cache-read、167,556 cache-write、8,766 output，零 provider retry/failure。
+- `422dd7a` fresh `.7` 官方超级玛丽长任务再次 4/4 child DONE、5/5 Todo 完成并直接汇报；主线程手动
+  Compact generation 1。自动 live-tool 候选在约 83% 时因恢复余量不足完整回滚，旧 TUI 错画两次红色
+  “压缩失败”，但 canonical failure count 为 0 且任务正常完成；上述 `superseded` 状态就是该真样本的
+  底层修正，待新版本部署后复验不再出现红字。

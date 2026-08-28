@@ -281,6 +281,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "conversation_compaction_started": self._handle_compact_started,
             "conversation_compaction_progress": self._handle_compact_progress,
             "conversation_compaction_completed": self._handle_compact_terminal,
+            "conversation_compaction_superseded": self._handle_compact_terminal,
             "conversation_compaction_failed": self._handle_compact_terminal,
             "assistant_started": self._handle_block_started,
             "assistant_delta": self._handle_block_delta,
@@ -522,14 +523,18 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             metadata={**block.metadata, **incoming},
         )
 
-    # LLM: 完成的进度块由 canonical compact_boundary 代替为稳定历史；失败/中断则冻结一条显示证据。
-    # 函数用途: 收起已完成 Compact 进度条，或保留失败提示。
+    # LLM: Completed is replaced by canonical compact_boundary; superseded means no candidate
+    # committed and is removed silently. Only a real failure/interruption freezes evidence.
+    # 函数用途: 收起已完成或未采用的 Compact 进度条，只为真实失败保留红色提示。
     def _handle_compact_terminal(self, event: TuiEvent) -> None:
         active = self.active_blocks.pop(event.block_id, None)
         if active is None:
             self.record_diagnostic("COMPACT_TERMINAL_WITHOUT_START", event)
             return
-        if event.kind == "conversation_compaction_completed":
+        if event.kind in {
+            "conversation_compaction_completed",
+            "conversation_compaction_superseded",
+        }:
             return
         failed = replace(
             active,
