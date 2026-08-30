@@ -2790,3 +2790,26 @@ ruff check \
   `blocking=false` 与 `never_auto_close_never_completion_gate`，不会新增模型轮或改变任务终态。
 - fresh TUI 必须使用唯一 Gateway + MiniMax-M2.7 和用户原样长任务；验收 root 在最终回复前自主调用
   `task_progress` 更新自己完成的最后一项，canonical 计划达到 9/9，且不能由宿主或测试者代写状态。
+
+### R111 fresh 真实结果：失败
+
+- 提交 `83b0df9` 部署到 `.10` 后，tmux `ma-r111-110-u274-todo-closeout` 只输入一次用户原样 Prompt 3。
+  初始计划为四个双项目调研项 + `整合报告`；四名 child 均携带 exact covers，TUI 正常从 0/5 到 4/5。
+- 初批报告中两份 completion message 明显停在“继续收集/准备写入”，root 没有草率交付，先后补派两批共四名
+  未绑定返工 child；界面保持 4/5 + 独立运行 child，没有错绑 integrate。八名 child 最终都 DONE，六名经历
+  `compact 1` 后继续；root 自己写出 `work/ai_agent_landscape_comparison.md`（22,938 字节）并最终回复。
+- 失败证据：整轮工具账只有初始一次 `task_progress`；最终 canonical 账本为 `done=4,pending=5,total=9`。四个
+  done 只是未绑定返工 child run-id，五个原计划项仍全 pending。TUI 的 4/5 来自 child 生命周期展示投影，
+  并未持久回 canonical。R111 因此不通过，最终报告存在不能替代 Todo 结构事实。
+
+## 2026-08-30 R112 后台 covers 对账同源
+
+- 原因回归：`task_progress` 工具读取前会持久化 exact covers 的 canonical DONE，后台 Task Runtime State 过去
+  只持久化未绑定 child run-id。测试新增显式 `task_root` 场景，锁住没有 `_current_run_params` 的后台 agent
+  也能把 covers 项写回同一本 task-path ledger。
+- 集成回归：创建 `tests + integrate` 两项，并放置 `sub-tests canonical DONE, covers=[tests]`；调用后台
+  `context_markdown` 后断言持久账本 tests=done、integrate=pending，`plan_continuation` 和
+  `task-progress-closeout-guidance.v1` 的 open ids 只剩 integrate。
+- 本地 focused：`test_dispatch_progress_seed.py + test_background_context_runtime_errors.py +
+  test_task_progress_advisory.py` 共 47 项通过。fresh 仍用唯一 Gateway、MiniMax-M2.7、原样 Prompt 3；不得由
+  测试者插话或手工改账，最终必须同时核对 TUI、工具记录和 canonical progress.json。

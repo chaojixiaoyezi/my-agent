@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from agent_py_agent.agent.conversation import ConversationStore
@@ -144,7 +145,10 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
         task_path_progress_ledger_id,
     )
     from agent_py_agent.agent.conversation.runtime import context_markdown
-    from agent_py_agent.agent.task_progress import write_task_progress
+    from agent_py_agent.agent.task_progress import (
+        read_task_progress_report,
+        write_task_progress,
+    )
 
     owner_root = tmp_path / "owner"
     store = ConversationStore(owner_root / "conversations")
@@ -171,8 +175,25 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
         {
             "summary": "实现完成，正在补真实测试",
             "next_action": "运行真实测试并修复失败",
-            "items": [{"id": "tests", "title": "真实测试", "status": "in_progress"}],
+            "items": [
+                {"id": "tests", "title": "真实测试", "status": "in_progress"},
+                {"id": "integrate", "title": "整合结果", "status": "pending"},
+            ],
         },
+    )
+    child_state = task_root / "work" / "agents" / "sub-tests" / "canonical_state.json"
+    child_state.parent.mkdir(parents=True, exist_ok=True)
+    child_state.write_text(
+        json.dumps(
+            {
+                "run_id": "sub-tests",
+                "parent_id": "task-demo",
+                "root_id": "task-demo",
+                "status": "DONE",
+                "attributes": {"covers": ["tests"]},
+            }
+        ),
+        encoding="utf-8",
     )
     write_task_progress(
         owner_root,
@@ -198,6 +219,7 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
     assert "运行真实测试并修复失败" in prompt
     assert '"schema_version": "plan-continuation.v1"' in prompt
     assert '"existing_item_ids": [\n      "tests"' in prompt
+    assert '"open_item_ids": [\n      "integrate"' in prompt
     assert '"reuse_policy": "reuse_existing_ids"' in prompt
     assert '"field": "items[].covers"' in prompt
     assert '"matching": "exact_id_only"' in prompt
@@ -205,8 +227,11 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
     assert '"independent_or_uncertain_rule": "omit_covers"' in prompt
     assert '"unbound_completion_followup"' in prompt
     assert '"schema_version": "task-progress-closeout-guidance.v1"' in prompt
-    assert '"open_item_ids": [\n      "tests"' in prompt
     assert '"host_behavior": "never_auto_close_never_completion_gate"' in prompt
+    persisted, _ = read_task_progress_report(owner_root, ledger_id)
+    by_id = {item["id"]: item for item in persisted["items"]}
+    assert by_id["tests"]["status"] == "done"
+    assert by_id["integrate"]["status"] == "pending"
     assert "这是旧请求编号下的错误账本" not in prompt
     assert "不应出现在后台上下文" not in prompt
     assert "task_rollup.json" not in prompt

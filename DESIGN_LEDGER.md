@@ -2863,7 +2863,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   researcher-9；该返工调用省略 `covers`，TUI 正确显示“`8/9 + 另有 1 个子代理运行中`”，没有错误占用
   唯一剩余的 `integrate`。这同时覆盖同工作 exact 绑定与不确定返工不乱绑两条边界。
 
-## 2026-08-30 主代理最终回复前的 Todo exact-id 软核对【状态：R111 本地定向通过，fresh TUI 待验】
+## 2026-08-30 主代理最终回复前的 Todo exact-id 软核对【状态：`83b0df9` 已部署，R111 fresh TUI 失败】
 
 - R110 最终结构账本证明 8 个子代理计划项都已按 covers 自动关闭，补派 child 也按真实 run id 单列 done；
   但 root 已写完并汇报 `final_comparison_report.md` 后，自己负责的 `integrate` 仍为 pending。终态 UI 收起
@@ -2875,3 +2875,21 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - `task_progress_closeout_guidance_enabled` 默认开启并可关闭额外模型上下文。该能力不增加隐藏模型调用、不
   拒绝 plain final、不自动打勾、不续跑普通任务，也不按标题、goal、final 文案或文件名推断完成；因此 Todo
   仍是模型自查而不是机器验收。fresh 验收必须看到模型自己调用 `task_progress` 关闭 root-owned 最后一项。
+- `.10` fresh TUI `ma-r111-110-u274-todo-closeout` 使用唯一 Gateway、MiniMax-M2.7，只输入一次原样 Prompt 3。
+  初次四名 child 的 `covers` 均准确，TUI 随生命周期显示到 4/5；六名长 child 发生一次 compact 后继续，最终
+  root 写出 22,938 字节整合报告并自然回复。但整轮只有初始一次 `task_progress`，canonical 仍把五个原项全部
+  保留为 pending，另有四个未绑定返工 child run-id 为 done。R111 的 closeout 软合同没有形成可验的最后更新，
+  因此不能记为通过。
+
+## 2026-08-30 后台唤醒与 task_progress 共用 covers 对账【状态：R112 本地定向通过，fresh TUI 待验】
+
+- R111 暴露的第一事实断点不是标题判断，而是两个读取入口不一致：`task_progress` 工具读取前会调用
+  `reconcile_completed_child_covers`，后台 `task_runtime_state` 却只对账未绑定 child run-id。TUI 依据 child
+  生命周期投影显示 4/5 时，后台模型上下文所依据的持久账本仍是原四项 pending，closeout 合同因此同时列出
+  五个 open id，削弱了“只收尾 root-owned integrate”的结构事实。
+- R112 为 covers 对账函数增加显式 `task_root` 输入，后台续轮在生成 Task Runtime State 前先运行同一函数，再
+  对账独立 child 行并重读账本。该路径只读取 canonical child `DONE`、lineage 和调用方原样 `covers`；不读取
+  goal、completion_message、最终正文或产物内容，也不判定 root 自己的整合项完成。
+- 定向回归构造“child DONE covers=research + root integrate pending”：后台上下文生成后，canonical research
+  已持久化 done，closeout 只列 integrate。下一轮 fresh TUI 仍须证明模型自己在最终回复前用 exact id 关闭
+  integrate；若继续忽略，不能用宿主自动打勾掩盖失败。

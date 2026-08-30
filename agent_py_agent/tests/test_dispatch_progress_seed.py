@@ -543,6 +543,55 @@ def test_done_child_covers_closes_plain_todo_exact_id(tmp_path):
     assert by_id["req-test"]["status"] == "pending"
 
 
+def test_done_child_covers_accepts_explicit_task_root_for_background_turn(tmp_path):
+    import json
+
+    from agent.agent_core.orchestration.dispatch_progress_seed import (
+        reconcile_completed_child_covers,
+    )
+    from agent.task_progress import read_task_progress, write_task_progress
+
+    task_root = tmp_path / "tasks" / "background"
+    agent = SimpleNamespace(home_paths=None, root=tmp_path)
+    write_task_progress(
+        tmp_path,
+        "task-path-ledger",
+        {
+            "items": [
+                {"id": "research", "title": "完成调研", "status": "pending"},
+                {"id": "integrate", "title": "整合报告", "status": "pending"},
+            ]
+        },
+    )
+    state = task_root / "work" / "agents" / "sub-research" / "canonical_state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps(
+            {
+                "run_id": "sub-research",
+                "parent_id": "root-run",
+                "root_id": "root-run",
+                "status": "DONE",
+                "attributes": {"covers": ["research"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    changed = reconcile_completed_child_covers(
+        agent,
+        tmp_path,
+        "task-path-ledger",
+        task_root=task_root,
+    )
+    progress = read_task_progress(tmp_path, "task-path-ledger")
+    by_id = {item["id"]: item for item in progress["items"]}
+
+    assert changed == ["research"]
+    assert by_id["research"]["status"] == "done"
+    assert by_id["integrate"]["status"] == "pending"
+
+
 def test_binding_none_when_no_coverage_ledger(tmp_path):
     from agent.agent_core.orchestration.dispatch_progress_seed import dispatch_coverage_binding
 

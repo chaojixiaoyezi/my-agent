@@ -9,7 +9,10 @@ second model history and never carry a separate compact package.
 from pathlib import Path
 from typing import Any
 
-from ..agent_core.orchestration.dispatch_progress_seed import reconcile_completed_child_items
+from ..agent_core.orchestration.dispatch_progress_seed import (
+    reconcile_completed_child_covers,
+    reconcile_completed_child_items,
+)
 from ..agent_core.runtime.owner_roots import runtime_owner_root
 from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
 from ..runtime_errors import runtime_error_report
@@ -27,10 +30,10 @@ from ..task_progress_guidance import (
 _PLAN_CONTINUATION_ID_LIMIT = 64
 
 
-# LLM: Background turns must read the same task-path progress ledger that main
-# tool calls write. The durable task id remains lineage identity only; optional
-# closeout guidance carries exact display ids without changing their state.
-# 函数用途: 汇总当前任务目录、状态、真实进度和可配置收尾软提示，供后台主代理续跑时读取。
+# LLM: Background turns must reconcile the same exact covers and task-path
+# ledger as task_progress reads. The durable task id remains lineage identity;
+# optional closeout guidance carries remaining display ids without changing them.
+# 函数用途: 先对账已完成子代理，再汇总当前任务目录、真实进度和收尾软提示供后台续跑。
 def task_runtime_state(
     *,
     agent: object,
@@ -48,6 +51,12 @@ def task_runtime_state(
     owner_root = runtime_owner_root(agent)
     ledger_id = (
         task_path_progress_ledger_id(getattr(link, "task_path", "")) or selected_id
+    )
+    reconcile_completed_child_covers(
+        agent,
+        owner_root,
+        ledger_id,
+        task_root=task_root,
     )
     reconcile_completed_child_items(
         agent,

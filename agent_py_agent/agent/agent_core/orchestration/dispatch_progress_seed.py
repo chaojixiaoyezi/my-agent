@@ -340,7 +340,13 @@ def _known_child_run_ids(agent: object) -> set[str]:
 # LLM: This is a best-effort projection from exact DONE descendants and their
 # structured covers ids; it never accepts the task or controls continuation.
 # 函数用途: 将子代理明确声明并已完成的覆盖项同步到父级软进度。
-def reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> list[str]:
+def reconcile_completed_child_covers(
+    agent: object,
+    root: Path,
+    run_id: str,
+    *,
+    task_root: Path | None = None,
+) -> list[str]:
     """Credit exact ``covers`` ids from DONE descendants into the parent progress ledger.
 
     This is task-progress bookkeeping, not task acceptance.  It reads only the canonical
@@ -348,7 +354,12 @@ def reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> 
     goals, and ordinary prose never participate.
     """
     try:
-        return _reconcile_completed_child_covers(agent, root, run_id)
+        return _reconcile_completed_child_covers(
+            agent,
+            root,
+            run_id,
+            task_root=task_root,
+        )
     except Exception:  # noqa: BLE001 - progress projection must never break a read
         logging.getLogger(__name__).warning("completed child covers reconcile failed", exc_info=True)
         return []
@@ -470,15 +481,21 @@ def _reconcile_completed_child_items(
 # LLM: A nested runner sees descendants of its exact run id; the root ledger is
 # already task-root scoped and may consider every canonical row under that root.
 # 函数用途: 核对子代理 covers 绑定并写回当前进度账本。
-def _reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> list[str]:
-    task_root = _current_task_root(agent)
-    if task_root is None:
+def _reconcile_completed_child_covers(
+    agent: object,
+    root: Path,
+    run_id: str,
+    *,
+    task_root: Path | None,
+) -> list[str]:
+    selected_root = task_root or _current_task_root(agent)
+    if selected_root is None:
         return []
     progress = read_task_progress(root, run_id)
     open_items, open_coverage_targets = _open_covers_targets(progress)
     if not open_items and not open_coverage_targets:
         return []
-    children = _canonical_child_rows(task_root)
+    children = _canonical_child_rows(selected_root)
     descendants = _relevant_descendant_ids(agent, children)
     credited_items: list[dict[str, object]] = []
     credited_targets: list[dict[str, object]] = []

@@ -271,8 +271,9 @@
   隐藏模型调用。R111 通过可配置的 `task-progress-closeout-guidance.v1`，在现有工具回执和后台 Task Runtime
   State 中给模型 current-generation exact open ids；模型在最终回复前自主更新已有证据完成的原 id，宿主不
   按标题/final/产物名猜完成。新项要求稳定 `id/title/status`，模型旧 pending 不能覆盖 canonical child DONE；
-  `covers` 仍只绑定 exact id。本地配置、工具回执和后台上下文定向回归已通过；待唯一 Gateway 的原样长任务
-  证明 root-owned 最后一项在 final 前由模型显式关闭后勾选。
+  `covers` 仍只绑定 exact id。R111 fresh 虽自然交付 22,938 字节报告，但最终五个原项仍全 pending，失败。
+  R112 已让后台 Task Runtime State 与工具读取共用 canonical DONE + exact covers 对账，本地 47 项通过；待
+  唯一 Gateway 的原样长任务证明 child 项真实持久关闭，且 root-owned 最后一项在 final 前由模型显式关闭。
 - [x] lifecycle/Compact 续跑的 durable tool index 保留有界递归且凭据脱敏的 JSON 参数；native 不伪造旧
   ToolCall/ToolResult，而是安装唯一有界 CompactionSummary handoff。真实 UserTurn 保持在 handoff 之后；
   Task Runtime State 暴露 canonical Todo exact ids 与 `create_subagents.items[].covers` 字段，宿主不按标题猜。

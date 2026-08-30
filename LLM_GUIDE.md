@@ -116,7 +116,9 @@
   不因 `pending/in_progress/unknown` 项拒绝正文、追加隐藏模型调用或自动续跑；开启
   `task_progress_closeout_guidance_enabled` 时，现有正常模型请求会在工具回执和后台 Task Runtime State 中收到
   当前展示代次的 exact open ids，提醒模型在最终回复前自主用 `task_progress` 关闭已有证据完成的原 id。
-  该提醒不按标题、final 文案或产物名猜完成，关闭与否仍由模型显式调用决定。清单继续进入同 thread 的
+  后台 Task Runtime State 在生成该提醒前，必须与 `task_progress` 读取入口共用 canonical child DONE + 显式
+  `covers` 对账，避免 TUI 已显示 child 完成而持久账本仍把原项列为 pending。该提醒不按标题、final 文案或
+  产物名猜完成，root 自己负责的项仍由模型显式调用关闭。清单继续进入同 thread 的
   下一回合、Compact 和 TUI，供模型或用户以后继续。只有显式 `/goal` 的 open plan、直属 child 等待、
   UNKNOWN 副作用、权限和取消各自保留 typed 生命周期。新账本项必须有稳定
   `id + title + status`，避免空白行。
