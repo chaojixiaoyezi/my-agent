@@ -277,3 +277,54 @@ def test_navigation_callback_restores_root_viewport_and_explains_native_scroll(
     assert restored.cursor_position.y == root_anchor
     assert "PgUp/Ctrl+Home" in root.notice()
     assert parts.interaction.snapshot().mouse_capture_enabled is False
+
+
+def test_first_child_visit_starts_at_prompt_then_revisit_restores_viewport(
+    tmp_path,
+) -> None:
+    root = TuiRuntime("navigation-child-first-visit")
+    navigation = TuiAgentNavigationState(root)
+    navigation.update_rows(
+        "",
+        [
+            {
+                "run_id": "child-prompt",
+                "parent_run_id": "",
+                "name": "child-prompt",
+                "status": "RUNNING",
+                "description": "首次详情视口验证",
+            }
+        ],
+    )
+    params = _app_params(tmp_path, root, agent_navigation=navigation)
+    parts = _prepare_tui_app_parts(params)
+
+    assert navigation.move_selection(1) is True
+    assert navigation.enter_selected() is True
+    child_runtime = navigation.active_runtime()
+    child_runtime.enqueue_prompt(
+        "agent-goal:child-prompt",
+        "先完整阅读这个子代理任务，再开始执行。",
+        queued=False,
+    )
+    for index in range(18):
+        child_runtime.write_console(f"child history {index}")
+
+    content = parts.transcript_view.control.create_content(60, 5)
+    parts.transcript_view.window._scroll(content, 60, 5)
+    first_line = "".join(
+        text for _style, text, *_handler in content.get_line(0)
+    )
+    assert "先完整阅读这个子代理任务" in first_line
+    assert parts.transcript_view.control.is_following() is False
+    assert parts.transcript_view.window.vertical_scroll == 0
+    assert parts.transcript_view.modal_control.create_content(60, 5).cursor_position.y == 0
+
+    parts.transcript_view.scroll(7)
+    saved_child_line = parts.transcript_view.current_line()
+    assert navigation.back() is True
+    assert navigation.enter_selected() is True
+
+    restored = parts.transcript_view.control.create_content(60, 5)
+    assert restored.cursor_position.y == saved_child_line
+    assert parts.transcript_view.control.is_following() is False

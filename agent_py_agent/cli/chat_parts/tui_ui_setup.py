@@ -519,9 +519,9 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
         view_depth_ref = [0]
 
         # LLM: A navigation switch delegates atomic store/viewport restoration to
-        # the transcript view. Returning in native-copy mode may surface one hint,
-        # but must not toggle terminal mouse tracking or overwrite an active receipt.
-        # 函数用途: 进入或返回代理页面，恢复该页面原滚动位置并提示如何查看历史。
+        # the transcript view. A never-seen child opens at its delegated prompt;
+        # returning restores its saved viewport and may surface one native-scroll hint.
+        # 函数用途: 首次进入子代理从任务提示词开始看，返回或重进时恢复各页面原滚动位置。
         def switch_agent_view(selected_runtime: TuiRuntime) -> None:
             snapshotter = getattr(params.agent_navigation, "snapshot", None)
             navigation_snapshot = snapshotter() if callable(snapshotter) else None
@@ -530,8 +530,12 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
                 int(getattr(navigation_snapshot, "depth", 0) or 0),
             )
             returning = next_depth < view_depth_ref[0]
+            entering = next_depth > view_depth_ref[0]
             view_depth_ref[0] = next_depth
-            transcript_view.set_state_store(selected_runtime.store)
+            transcript_view.set_state_store(
+                selected_runtime.store,
+                start_at_top_if_new=entering,
+            )
             if (
                 returning
                 and not interaction.snapshot().mouse_capture_enabled

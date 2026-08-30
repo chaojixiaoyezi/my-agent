@@ -28,15 +28,16 @@
 
 ### child 创建后的启动阶段、roster revision 与详情首事件可解释性
 
-状态：typed phase 与详情首屏已本地实现并通过 focused，待 `.7/.10` 多 TUI 重复验收
+状态：R109 typed phase 与首次 goal 视口已本地实现并通过 focused，待 fresh `.10` 真 TUI 复验
 
 解决问题：r56 中从主代理发出创建请求到 child runner 真正开始约 231.7 秒；期间 roster 可能长时间只显示
 “等待启动”，刚进入详情页又会暂时空白。用户无法区分 dispatcher 排队、进程启动、模型首事件慢还是投影
 revision 迟到，容易把慢模型当成死锁，也可能在看不见 prompt 时重复操作。
 
 当前候选已按 `queued → starting → waiting_first_event → running` 投影，并把首事件绑定到 exact run/attempt；
-完整 child goal 可读后先显示为 user block，goal/首事件暂未持久化时保留启动说明和 Working，不再画空白详情。
-下一步在 `.7/.10` 单 Gateway、多 owner、多 TUI 重复测慢首事件与切换详情，同时量化
+完整 child goal 可读后先显示为 user block，goal/首事件暂未持久化时保留启动说明和 Working；首次进入详情
+从 goal 顶部打开，返回或重访恢复该页面原位置，回到底部后继续自动跟随。下一步先用 fresh `.10` TUI
+证明无需 `Ctrl+Home` 即可看到 prompt，再在 `.7/.10` 单 Gateway、多 owner、多 TUI 重复测慢首事件并量化
 `dispatch accepted → runner process → owner activity revision → first durable transcript event` 四段。不能把 PENDING
 冒充 RUNNING，不能伪造 child prompt，也不能为了 UI 快而创建第二 runner。
 

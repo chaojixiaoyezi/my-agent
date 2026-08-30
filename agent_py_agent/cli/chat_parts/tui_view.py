@@ -50,6 +50,7 @@ class _TuiViewportState:
 
 
 _TAIL_VIEWPORT_STATE = _TuiViewportState(True, 0, 1, None, frozenset())
+_HEAD_VIEWPORT_STATE = _TuiViewportState(False, 0, 1, None, frozenset())
 
 
 # LLM: 右键复制 latch 只描述 mouse gesture，不读取选区或剪贴板；调用方仍分别持有正文/输入 authority。
@@ -183,6 +184,8 @@ class TuiFrameProvider:
 def _switch_transcript_control_store(
     control: TuiTranscriptControl,
     state_store: TuiStateStore,
+    *,
+    start_at_top_if_new: bool = False,
 ) -> None:
     if not isinstance(state_store, TuiStateStore):
         raise TypeError("state_store must be TuiStateStore")
@@ -196,7 +199,10 @@ def _switch_transcript_control_store(
             unseen_baseline=control._unseen_baseline,
             unseen_block_ids=control._unseen_block_ids,
         )
-        restored = control._viewport_by_store.get(state_store, _TAIL_VIEWPORT_STATE)
+        restored = control._viewport_by_store.get(
+            state_store,
+            _HEAD_VIEWPORT_STATE if start_at_top_if_new else _TAIL_VIEWPORT_STATE,
+        )
         control._state_store = state_store
         (
             control.follow,
@@ -246,11 +252,20 @@ class TuiTranscriptControl(UIControl):
         self._lock = threading.Lock()
 
     # LLM: A source switch saves only viewport state under the exact typed store,
-    # restores an existing page or initializes a new page at sticky tail, and
-    # always clears selection so text coordinates cannot cross agent boundaries.
-    # 函数用途: 切换主代理/子代理正文来源时分别保存和恢复各自的滚动位置。
-    def switch_state_store(self, state_store: TuiStateStore) -> None:
-        _switch_transcript_control_store(self, state_store)
+    # restores an existing page, and may initialize a never-seen child page at
+    # its prompt boundary. Selection coordinates never cross agent boundaries.
+    # 函数用途: 切换主代理/子代理正文来源；首次详情页可从提示词顶部打开，重访仍恢复原位置。
+    def switch_state_store(
+        self,
+        state_store: TuiStateStore,
+        *,
+        start_at_top_if_new: bool = False,
+    ) -> None:
+        _switch_transcript_control_store(
+            self,
+            state_store,
+            start_at_top_if_new=start_at_top_if_new,
+        )
 
     # LLM: modal transcript 必须可获得焦点以隔离普通输入 Buffer；control 本身仍只处理全局 keybindings，不接收正文编辑。
     # 函数用途: 允许 Layout 在 Ctrl-O 模式把键盘焦点放到 transcript viewport。
@@ -580,15 +595,27 @@ class TuiTranscriptView:
 
     # LLM: Agent navigation must switch the provider and both normal/modal
     # controls as one UI operation. Existing pages restore their own viewport;
-    # a first visit starts at tail without clearing either typed transcript.
-    # 函数用途: 在主代理和子代理页面之间切换正文，并保留每个页面自己的上翻位置。
-    def set_state_store(self, state_store: TuiStateStore) -> None:
+    # callers may anchor a never-seen detail page at its prompt without clearing
+    # either typed transcript or disabling later sticky-tail recovery.
+    # 函数用途: 在主代理和子代理页面之间切换正文，并保留每页位置；首次详情可从提示词顶部打开。
+    def set_state_store(
+        self,
+        state_store: TuiStateStore,
+        *,
+        start_at_top_if_new: bool = False,
+    ) -> None:
         if not isinstance(state_store, TuiStateStore):
             raise TypeError("state_store must be TuiStateStore")
         if self.provider.state_store is state_store:
             return
-        self.control.switch_state_store(state_store)
-        self.modal_control.switch_state_store(state_store)
+        self.control.switch_state_store(
+            state_store,
+            start_at_top_if_new=start_at_top_if_new,
+        )
+        self.modal_control.switch_state_store(
+            state_store,
+            start_at_top_if_new=start_at_top_if_new,
+        )
         self.provider.set_state_store(state_store)
 
     # LLM: scroll 委托 control 并由 setup/app invalidate，view 不持有 Application 反向引用。

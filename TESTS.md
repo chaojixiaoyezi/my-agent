@@ -1,5 +1,20 @@
 # TESTS
 
+## 2026-08-30 R109 child typed lifecycle 与首次详情视口
+
+- 对照 会话运行时 `core/src/agent/status.rs`、`tui/src/app/agent_status_feed.rs`、`tui/src/multi_agents.rs`，状态只由
+  `TurnStarted/Complete/Aborted/Error` 等 typed 事件推进；对照 终端交互 `REPL.tsx` 与 `Spinner.tsx`，动画只
+  跟真实 loading/running 事实，不从自然语言猜状态。
+- 本地回归覆盖：`queued/starting/waiting_first_event/running/waiting_descendants/terminal` 标签、终态撤下
+  Working、goal 成为 child 首个 user block、普通/modal 两个视口首次从顶部打开、主/子页面回切恢复独立
+  锚点。命令为 `python3 -m pytest agent_py_agent/tests/test_tui_view.py
+  agent_py_agent/tests/test_tui_agent_navigation.py agent_py_agent/tests/test_tui_prompt_toolkit_pipe.py
+  agent_py_agent/tests/test_tui_renderer.py -q --tb=short`，结果 87 passed。
+- 真 TUI 使用 `.10` 唯一 Gateway、MiniMax-M2.7 与原样八项目调研提示；客户端
+  `ma-r109-110-u272-subagent-phases` 已取得 8 个排队到运行、3 个终态、5 个继续运行的阶段证据。首次详情
+  失败样本证明后端 goal/69 条事件均完整，问题仅在首次物理视口贴尾。修复发布后必须换 fresh TUI，直接
+  Enter child 即看到完整提示词开头；不能用 `Ctrl+Home` 人工补救冒充修复通过。
+
 ## 2026-08-30 R108 收尾回归与真 TUI Compact
 
 - 唯一全仓诊断跑完后得到 11 个 failure；之后只按来源定向复测，没有再跑全仓。
