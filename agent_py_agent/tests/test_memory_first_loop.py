@@ -37,7 +37,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 def _write_config(tmp_path: Path, extra: str = "") -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
-        'workspace_root: "workspace"\n'
+        'workspace_root: ""\n'
         f'my_agent_home: "{(tmp_path / "home").as_posix()}"\n'
         'model_backend: "echo"\n'
         
@@ -157,7 +157,7 @@ def test_compression_hook_failure_blocks_run_and_audits_event(tmp_path, monkeypa
     with pytest.raises(RuntimeError, match="compression blocked"):
         agent.run("这是一段很长的用户输入，用来强制触发 compression hook。", save=False)
 
-    events = _read_jsonl(tmp_path / "local_store" / "events.jsonl")
+    events = _read_jsonl(agent.local_store.events_path)
     assert events[-1]["event_type"] == "memory_compression_snapshot_failed"
     assert "disk full" in events[-1]["payload"]["error"]
 
@@ -251,7 +251,7 @@ def test_memory_route_validate_reports_keyword_conflict_and_dead_link(tmp_path, 
     """
 
     config_path = _write_config(tmp_path)
-    root = tmp_path / "workspace"
+    root = tmp_path / "home" / "owners" / "local" / "main"
     index = root / "memory" / "routing" / "INDEX.md"
     index.parent.mkdir(parents=True, exist_ok=True)
     index.write_text(
@@ -292,10 +292,14 @@ def test_capability_gap_injects_related_memory_route_paths(tmp_path):
     """
 
     root = tmp_path
-    rule = root / "memory" / "routing" / "rules" / "auth.md"
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), root)
+    # 路由规则属于 owner 的 canonical workspace，测试也不能再把临时启动根目录
+    # 冒充用户家目录；否则会掩盖从 /root 启动 TUI 时的真实越界风险。
+    workspace_root = agent.subagents.workspace_root
+    rule = workspace_root / "memory" / "routing" / "rules" / "auth.md"
     rule.parent.mkdir(parents=True, exist_ok=True)
     rule.write_text("能力缺口涉及鉴权时，先读取这份长期规则。", encoding="utf-8")
-    (root / "memory" / "routing" / "INDEX.md").write_text(
+    (workspace_root / "memory" / "routing" / "INDEX.md").write_text(
         """# Memory Routes
 
 ## route.auth
@@ -308,7 +312,6 @@ priority: 40
         encoding="utf-8",
     )
 
-    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), root)
     task = agent.subagents.create_run(goal="检查 API 调用", thought="需要鉴权能力。", plan=["分析"])
 
     gap = agent.subagents.lifecycle.record_capability_gap(

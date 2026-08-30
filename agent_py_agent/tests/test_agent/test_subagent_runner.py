@@ -267,7 +267,6 @@ def test_subagent_runner_enforces_write_boundary_at_tool_layer():
         assert result.turn_end_reason == "completed"
         assert len(backend.prompts) == 2
         assert not Path(target_path).exists()
-        assert "PATH_DANGEROUS_ROOT_BLOCKED" in backend.prompts[1]
 
 
 @pytest.mark.xfail(

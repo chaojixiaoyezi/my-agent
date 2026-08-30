@@ -13,6 +13,7 @@ from ..subagents.services.hierarchy.scheduler import (
     HierarchyScheduleRequest,
     HierarchyScheduleResult,
 )
+from ..tooling.cancellation import raise_if_cancelled
 from ..tooling.models import ToolHandlerOutcome
 from .orchestration.create_constraints import resolved_extra_write_roots
 from .orchestration.create_context import create_context_manifest, create_context_packs
@@ -125,6 +126,9 @@ def _schedule_tool_params(params: dict[str, object]) -> dict[str, object]:
     return dict(params)
 
 
+# LLM: Recursive scheduling receives the same request-local cancellation check as ordinary tools;
+# the hierarchy domain calls it only between durable children and never owns a second stop token.
+# 函数用途: 构造递归派工请求，并把当前 TUI/IM 回合的停止安全点传给逐项调度器。
 def _schedule_request(request: ScheduleRequestBuildParams) -> HierarchyScheduleRequest:
     return HierarchyScheduleRequest(
         parent_run_id=request.parent_run_id,
@@ -133,6 +137,7 @@ def _schedule_request(request: ScheduleRequestBuildParams) -> HierarchyScheduleR
         requested_by=request.parent_run_id,
         max_children=_non_negative_int(request.raw_params.get("max_children"), default=0),
         max_depth=_schedule_max_depth(request.raw_params),
+        interrupt_check=raise_if_cancelled,
     )
 
 

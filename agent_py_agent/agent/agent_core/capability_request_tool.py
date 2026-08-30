@@ -1,4 +1,8 @@
 
+# LLM: 子代理能力申请只负责记录结构化缺口与安全范围；常规自动授权一旦改变
+# 可用工具集合，必须结束当前不可变工具快照，并在下一耐久工作片重建运行上下文。
+# 模块用途: 提供 child-only capability_request 工具，把常规沙箱内能力自动授权、
+# 外部能力交给直属父级裁决，并保证授权不会在旧工具快照中被误用。
 from __future__ import annotations
 
 import json
@@ -56,6 +60,9 @@ class CapabilityRequestTool(BaseTool):
         self.agent = agent
         self.model_spec = build_capability_request_model_spec()
 
+    # LLM: 自动授权成功后必须返回 context_refresh runtime transition；不能依赖模型
+    # 按提示主动结束，也不能原地修改当前 ToolRuntimeSnapshot。OPEN 请求继续走父级路由。
+    # 函数用途: 记录当前子代理的能力缺口，能安全自动批时落账并切到下一工作片。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         request = _capability_request_input(self.agent, params)
         if isinstance(request, ToolHandlerOutcome):
@@ -100,9 +107,11 @@ class CapabilityRequestTool(BaseTool):
             )
         payload = self._request_payload(request.run_id, record, auto_grant)
         payload.update(scope_resolution_payload(request.scope_resolution))
-        return _capability_ok(payload)
+        return _capability_ok(payload, refresh_runtime=auto_grant is not None)
 
-    # 函数用途: 按"自动批成/待父级裁决"两种结局构造工具响应(子代理模型照 message 行动)。
+    # LLM: 响应字段是能力申请状态的结构化事实；自动授权分支只说明宿主将刷新
+    # 上下文，不能再要求模型伪装 BLOCKED 或自行调度一个恢复流程。
+    # 函数用途: 按“自动批成/待父级裁决”两种结局构造工具响应，供模型和宿主共同消费。
     def _request_payload(self, run_id: str, record: object, auto_grant: object) -> dict[str, object]:
         if auto_grant is None:
             return {
@@ -119,11 +128,11 @@ class CapabilityRequestTool(BaseTool):
             "auto_granted": True,
             "granted_tools": list(getattr(auto_grant, "tools", []) or []),
             "granted_path_scope": list(getattr(auto_grant, "path_scope", []) or []),
-            "next_action": "finish_run_as_blocked_for_auto_redispatch",
+            "next_action": "runtime_context_refresh",
             "message": (
                 "常规能力已机制层自动授权（范围=你自己的任务沙箱）。授权在续跑时生效："
-                "请把当前 run 以 status=BLOCKED 正常收尾，写清已完成部分和下一步，"
-                "系统会自动带新权限续派你继续同一任务；不要伪造能力结果、不要原地重试。"
+                "宿主会在当前工具边界结束这份不可变工具快照，并自动从下一工作片带新权限"
+                "继续同一任务；不要伪造能力结果、不要在当前工作片原地重试。"
             ),
         }
 
@@ -297,8 +306,27 @@ def _capability_request_input_schema() -> dict[str, object]:
     }
 
 
-def _capability_ok(payload: dict[str, object]) -> ToolHandlerOutcome:
-    return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
+# LLM: runtime transition 是工具宿主的结构化控制事实；只有自动授权真的改变了
+# canonical grant 时才发布。普通 OPEN 申请不能伪造一个会立即续跑的刷新边界。
+# 函数用途: 生成能力申请成功回执，并在授权已生效时要求下一工作片重建工具快照。
+def _capability_ok(
+    payload: dict[str, object],
+    *,
+    refresh_runtime: bool = False,
+) -> ToolHandlerOutcome:
+    result_envelope: dict[str, object] = {}
+    if refresh_runtime:
+        result_envelope["runtime_transition"] = {
+            "kind": "context_refresh",
+            "reason": "capability_grant_applied",
+            "resume": "next_durable_slice",
+        }
+    return ToolHandlerOutcome(
+        _TOOL_NAME,
+        True,
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        result_envelope=result_envelope,
+    )
 
 
 def _capability_error(message: str, *, error_code: str) -> ToolHandlerOutcome:

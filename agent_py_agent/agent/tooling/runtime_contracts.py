@@ -38,6 +38,7 @@ _TOOL_RESULT_STATUSES = frozenset(
 )
 _SOURCE_PROTOCOLS = frozenset({"native", "text"})
 _TOOL_CHOICE_MODES = frozenset({"auto", "required", "specific", "none"})
+_LIVE_PROMPT_PROJECTION_KEY = "live_prompt_projection"
 
 
 @dataclass(frozen=True)
@@ -555,6 +556,23 @@ class ToolResult:
                 + json.dumps([ref.to_dict() for ref in self.refs], ensure_ascii=False)
             )
         return "\n".join(part for part in parts if part)
+
+    # LLM: Native provider history must use the same bounded projection as the text tool-context
+    # path. Only the host-side loop may attach this metadata; raw handler output remains archived.
+    # 函数用途: 给原生 tool_result 返回已经过外置、脱敏和恢复锚点处理的模型可见正文。
+    def render_for_model_prompt(self) -> str:
+        projected = self.metadata.get(_LIVE_PROMPT_PROJECTION_KEY)
+        if isinstance(projected, str) and projected.strip():
+            return projected
+        return self.render_for_prompt()
+
+    # LLM: Attach an ephemeral bounded model projection without changing canonical execution
+    # facts, refs, status or the durable raw-output archive record.
+    # 函数用途: 为当前原生工具历史绑定与文本链路完全一致的安全展示内容。
+    def with_live_prompt_projection(self, projected: str) -> ToolResult:
+        metadata = deepcopy(self.metadata)
+        metadata[_LIVE_PROMPT_PROJECTION_KEY] = str(projected or "")
+        return replace(self, metadata=metadata)
 
     def render_status_header(self) -> str:
         fields = [f"tool={self.tool_name}", f"status={self.status}"]

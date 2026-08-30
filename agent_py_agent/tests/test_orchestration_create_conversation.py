@@ -59,3 +59,40 @@ def test_conversation_bind_failure_is_reported_not_swallowed() -> None:
     assert errors[0]["context"] == "create_subagents.conversation.bind_task"
     assert errors[0]["category"] == "io"
     assert errors[0]["recoverable"] is True
+
+
+def test_conversation_bind_reconciles_a_cancel_that_landed_before_projection() -> None:
+    """停止可在慢批量创建途中先落 canonical；后绑的会话行不得复活为 active。"""
+
+    class RecordingConversationStore:
+        def __init__(self) -> None:
+            self.bound: list[dict[str, object]] = []
+            self.updated: list[dict[str, object]] = []
+
+        def bind_task(self, payload):
+            self.bound.append(dict(payload))
+            return SimpleNamespace(**payload)
+
+        def update_task_status(self, payload):
+            self.updated.append(dict(payload))
+            return SimpleNamespace(**payload)
+
+    task = SimpleNamespace(
+        id="run-cancelled-before-bind",
+        goal="分析架构",
+        status="PLANNING",
+        task_dir="/tmp/task",
+        attributes={"conversation_thread_id": "thread-1"},
+    )
+    canonical = SimpleNamespace(id=task.id, status="CANCELLED")
+    store = RecordingConversationStore()
+    agent = SimpleNamespace(
+        conversation_store=store,
+        subagents=SimpleNamespace(load=lambda run_id: canonical),
+    )
+
+    errors = _bind_tasks_to_conversation(agent, [task])
+
+    assert errors == []
+    assert store.bound[0]["status"] == "active"
+    assert store.updated == [{"task_id": task.id, "status": "cancelled"}]

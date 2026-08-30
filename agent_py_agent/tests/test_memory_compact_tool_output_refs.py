@@ -240,6 +240,46 @@ def test_carried_tool_call_records_restore_only_exact_root_scope(tmp_path: Path)
     assert records[1]["tool_operation_action"] == "execute"
 
 
+def test_carried_tool_call_records_keep_model_parameters_separate_from_host_bindings(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "work"
+    public_arguments = {
+        "artifact_ref": "run-web:fetch-1",
+        "mode": "tail",
+        "max_chars": 800,
+    }
+    externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=root,
+            tool="read_artifact",
+            call_id="read-tail-1",
+            output="copyright",
+            ok=True,
+            request_id="request-web",
+            conversation_request_id="request-web",
+            run_id="run-web",
+            task_id="task-web",
+            min_chars=1000,
+            parameters={
+                **public_arguments,
+                "run_id": "run-web",
+                "task_id": "task-web",
+                "request_id": "request-web",
+            },
+            model_parameters=public_arguments,
+        )
+    )
+
+    records = carried_tool_call_records(
+        root,
+        {"conversation_request_id": "request-web"},
+    )
+
+    assert records[0]["parameters"]["run_id"] == "run-web"
+    assert records[0]["model_parameters"] == public_arguments
+
+
 def test_carried_tool_call_records_restore_exact_conversation_turn_across_durable_task(
     tmp_path: Path,
 ) -> None:

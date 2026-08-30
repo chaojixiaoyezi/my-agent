@@ -131,6 +131,18 @@ def test_read_artifact_tool_reads_explicit_slice_from_registered_artifact(tmp_pa
     assert payload["ok"] is True
     assert payload["content"] == "cdefa"
     assert payload["truncated"] is True
+    assert payload["artifact_ref"] == "run-artifact:call-artifact"
+    assert payload["has_more_after"] is True
+    assert payload["next_read"] == {
+        "artifact_ref": "run-artifact:call-artifact",
+        "mode": "slice",
+        "offset": 7,
+        "max_chars": 5,
+    }
+    assert "artifact_path" not in payload
+    assert "run_id" not in payload
+    assert "task_id" not in payload
+    assert "request_id" not in payload
     assert payload["content_hash_verified"] is True
     assert payload["reads_artifact_body"] is True
 
@@ -162,6 +174,7 @@ def test_read_artifact_keeps_recovered_body_inside_data_boundary(tmp_path: Path)
     assert result.output_trust == "external_data"
     assert '<untrusted_tool_result source="read_artifact">' in rendered
     assert "untrusted-tool-result" in rendered
+    assert "[tool-output-archive-anchor]" not in rendered
     assert fake_key not in rendered
     assert "<redacted>" in rendered
 
@@ -206,6 +219,10 @@ def test_read_artifact_supports_head_tail_and_search_modes(tmp_path: Path) -> No
     assert tail["ok"] is True
     assert tail["read_mode"] == "tail"
     assert tail["content"] == "omega last"
+    assert tail["truncated"] is False
+    assert tail["has_more_before"] is True
+    assert tail["has_more_after"] is False
+    assert tail["window_end"] == len(content)
     assert search["ok"] is True
     assert search["read_mode"] == "search"
     assert search["search_query"] == "beta"
@@ -313,7 +330,8 @@ def test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name(tmp_p
 
     assert result.ok is True
     assert payload["ok"] is True
-    assert payload["artifact_path"] == str(artifact_path)
+    assert payload["artifact_ref"] == "run-artifact:call-artifact"
+    assert "artifact_path" not in payload
     assert payload["content"] == "abcdef"
 
 
@@ -342,7 +360,8 @@ def test_read_artifact_short_call_id_prefers_matching_run_scope(tmp_path: Path) 
     assert result.ok is True
     assert payload["ok"] is True
     assert payload["content"] == "old-run-output"
-    assert payload["run_id"] == "old-run"
+    assert payload["artifact_ref"] == "old-run:17-1"
+    assert "run_id" not in payload
 
 
 def test_read_artifact_short_call_id_without_matching_run_scope_is_rejected(
@@ -413,7 +432,7 @@ def test_read_artifact_preserves_ordinary_tool_archive_content(tmp_path: Path) -
     assert payload["content"] == text
 
 
-def test_read_file_reads_tool_output_artifact_content(tmp_path: Path) -> None:
+def test_read_file_redirects_tool_output_artifact_to_canonical_reader(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(
         tmp_path,
         content=(
@@ -440,26 +459,18 @@ def test_read_file_reads_tool_output_artifact_content(tmp_path: Path) -> None:
 
     result = _execute_tool(registry, "read_file", {"path": str(artifact_path)})
 
-    assert result.ok is True
-    assert "1: large-output" in result.output
-    assert "... 已截断" in result.output
-    assert '"kind": "tool_output"' not in result.output
-    assert result.output_trust == "external_data"
-    assert result.output_redaction == "default"
+    payload = _result_json(result)
 
-    rendered = render_tool_result_for_live_prompt(
-        result,
-        {"output_externalized": False},
-    )
-
-    assert rendered.count("<untrusted_tool_result") == 1
-    assert rendered.count("</untrusted_tool_result>") == 1
-    assert "</untrusted-tool-result>" in rendered
-    assert "opaque-artifact-secret" not in rendered
-    assert "api_key=<redacted>" in rendered
+    assert result.ok is False
+    assert result.error_code == "TOOL_OUTPUT_REQUIRES_READ_ARTIFACT"
+    assert result.retryable is False
+    assert payload["artifact_ref"] == artifact_path.name
+    assert payload["retry_same_tool"] is False
+    assert payload["suggested_tool_call"]["tool"] == "read_artifact"
+    assert "opaque-artifact-secret" not in result.output
 
 
-def test_read_file_artifact_wrapper_does_not_require_read_artifact_permission(tmp_path: Path) -> None:
+def test_read_file_artifact_wrapper_requires_read_artifact_surface(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(tmp_path, content="alpha\nbeta\n" * 20)
     registry = _registry(tmp_path)
 
@@ -470,12 +481,14 @@ def test_read_file_artifact_wrapper_does_not_require_read_artifact_permission(tm
         allowed_tools=["read_file"],
     )
 
-    assert result.ok is True
-    assert "2: beta" in result.output
-    assert "3: alpha" in result.output
+    payload = _result_json(result)
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_OUTPUT_REQUIRES_READ_ARTIFACT"
+    assert payload["suggested_tool_call"]["tool"] == "read_artifact"
 
 
-def test_read_file_plain_large_result_archive_keeps_external_projection(
+def test_read_file_plain_large_result_archive_uses_same_canonical_redirect(
     tmp_path: Path,
 ) -> None:
     artifact_path = tmp_path / "work" / "blobs" / "tool_outputs" / "web_fetch-demo.txt"
@@ -491,17 +504,12 @@ def test_read_file_plain_large_result_archive_keeps_external_projection(
 
     result = _execute_tool(registry, "read_file", {"path": str(artifact_path)})
 
-    assert result.ok is True
-    assert result.output_trust == "external_data"
-    assert result.output_redaction == "default"
-    rendered = render_tool_result_for_live_prompt(
-        result,
-        {"output_externalized": False},
-    )
-    assert rendered.count("<untrusted_tool_result") == 1
-    assert rendered.count("</untrusted_tool_result>") == 1
-    assert "</untrusted-tool-result>" in rendered
-    assert "opaque-plain-artifact-secret" not in rendered
+    payload = _result_json(result)
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_OUTPUT_REQUIRES_READ_ARTIFACT"
+    assert payload["artifact_ref"] == artifact_path.name
+    assert "opaque-plain-artifact-secret" not in result.output
 
 
 def test_read_file_ordinary_source_keeps_source_code_projection(tmp_path: Path) -> None:
@@ -522,7 +530,9 @@ def test_read_file_ordinary_source_keeps_source_code_projection(tmp_path: Path) 
     assert "<untrusted_tool_result" not in rendered
 
 
-def test_read_file_typo_to_tool_output_artifact_keeps_read_file_recovery(tmp_path: Path) -> None:
+def test_read_file_typo_to_tool_output_artifact_redirects_without_path_rebasing(
+    tmp_path: Path,
+) -> None:
     artifact_path = _write_externalized_tool_output(tmp_path, content="large-output" * 500)
     registry = ToolRegistry(
         ToolRegistryParams(
@@ -542,16 +552,20 @@ def test_read_file_typo_to_tool_output_artifact_keeps_read_file_recovery(tmp_pat
     result = _execute_tool(registry, "read_file", {"path": wrong_prefix})
 
     assert result.ok is False
-    assert "suspected_path_typo=true" in result.output
-    assert "read_file" in result.output
-    assert artifact_path.name in result.output
-    assert "suggested_target" in result.output
+    payload = _result_json(result)
+
+    assert result.error_code == "TOOL_OUTPUT_REQUIRES_READ_ARTIFACT"
+    assert payload["suspected_path_typo"] is True
+    assert payload["artifact_ref"] == artifact_path.name
+    assert payload["suggested_tool_call"]["tool"] == "read_artifact"
+    assert "suggested_target" not in result.output
 
 
 def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
         'workspace_root: "workspace"\n'
+        'access_mode: "full-access"\n'
         'model_backend: "echo"\n'
         'subagent_workspace: "subagents"\n'
         'local_store_path: "local_store/local.db"\n'
@@ -729,7 +743,8 @@ def test_registry_reads_current_subagent_artifact_from_typed_run_root(
 
     assert result.ok is True
     assert payload["content"] == "CURRENT-RUN-ARCHIVE"
-    assert payload["run_id"] == "stable-subagent"
+    assert payload["artifact_ref"] == "stable-subagent:pull-1"
+    assert "run_id" not in payload
 
 
 def _write_unexternalized_stub_record(root: Path, *, scoped_call_id: str, source: str = "") -> None:

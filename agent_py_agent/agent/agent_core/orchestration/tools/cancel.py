@@ -16,7 +16,12 @@ from ....subagents.authorization_gate import (
     authorize_operation,
 )
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
-from ....subagents.models import FailureType, normalize_task_status, task_status_in
+from ....subagents.models import (
+    SUBAGENT_RECOVERY_CLOSED_STATUSES,
+    FailureType,
+    normalize_task_status,
+    task_status_in,
+)
 from ....subagents.process_control import terminate_pid_with_escalation
 from ....subagents.runner_session_liveness import has_fresh_runner_session, runner_session_of
 from ....tooling.models import (
@@ -27,8 +32,7 @@ from ....tooling.models import (
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
-from ...runner.context import current_subagent_run_id
-from ..create_policy import _current_run_id
+from ..create_policy import current_orchestration_requester_run_id
 from ..tool_specs import build_cancel_subagents_model_spec
 
 if TYPE_CHECKING:
@@ -436,7 +440,10 @@ def _load_cancel_target(agent: SimpleAgent, run_id: str) -> dict[str, object]:
                 operation="cancel",
                 run_id=run_id,
                 requester_owner=_requester_owner(agent),
-                requester_run_id=_current_run_id(agent),
+                # 取消工具在 execute() 入口已按稳定父级做过直接下级校验；实际
+                # 落状态时必须复用同一身份。普通主代理后续消息会换 gwreq，
+                # 但它仍是创建这些 child 的同一个 conversation task。
+                requester_run_id=_model_requester_run_id(agent),
             ),
         )
         return {"run_id": run_id, "task": task}
@@ -452,7 +459,7 @@ def _requester_owner(agent: SimpleAgent) -> str:
 # 使用当前请求 run/task/request id，避免孙代理把自己误认成根主控。
 # 函数用途: 返回模型侧递归控制动作的当前代理身份。
 def _model_requester_run_id(agent: SimpleAgent) -> str:
-    return current_subagent_run_id(agent) or _current_run_id(agent)
+    return current_orchestration_requester_run_id(agent)
 
 
 # LLM: A model-facing generic cancellation tool cannot terminate the
@@ -494,32 +501,163 @@ def _dry_run_targets(targets: list[dict[str, object]]) -> list[dict[str, object]
 def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, object]:
     params = request.params
     reason = str(params.get("reason") or "cancel_subagents").strip()
-    return cancel_subagent_task(
+    cancel_request = CancelSubagentTaskRequest(
+        request.task,
+        reason,
+        bool(params.get("kill_process", True)),
+        "cancel_subagents",
+    )
+    # 根 /stop 已在 owner-local creation guard 内取得完整 request lineage；它会把
+    # 每个 exact run 传进来，不能在非可重入 guard 里再次展开同一子树。
+    if params.get("cascade_descendants") is False:
+        return cancel_subagent_task(agent, cancel_request)
+    return cancel_subagent_tree(agent, cancel_request)
+
+
+# LLM: Closing one authorized agent means closing its live spawn branch, matching 会话运行时
+# shutdown_agent_tree.  Broadcast exact runner-attempt interrupts across the known branch before
+# durable closeout so slow model calls do not serialize cancellation latency; then fence creation,
+# rescan canonical parent_id lineage, and close late descendants without touching ancestors or
+# siblings.
+# 函数用途: 终态关闭一个子代理及其仍可能运行或恢复的后代；先广播精确中断，再等待派工落盘并逐项写取消状态。
+def cancel_subagent_tree(
+    agent: SimpleAgent,
+    request: CancelSubagentTaskRequest,
+) -> dict[str, object]:
+    manager = getattr(agent, "subagents", None)
+    guard = getattr(manager, "creation_guard", None)
+    target_id = str(getattr(request.task, "id", "") or "").strip()
+
+    # 会话运行时 sends a native Shutdown to each live thread before forgetting it.  Our runner closeout
+    # also writes several durable projections, so signalling only inside that sequential write loop
+    # makes N slow model calls stop one after another.  Snapshotting here is only an interrupt
+    # fan-out: the guarded canonical rescan below remains the authority for which nodes are closed.
+    pre_signalled: dict[str, str] = {
+        target_id: _signal_subagent_attempt(agent, request.task),
+    }
+    try:
+        initial_tasks = list(manager.list_runs())
+    except Exception:
+        initial_tasks = []
+    initial_by_id = {
+        str(getattr(task, "id", "") or "").strip(): task for task in initial_tasks
+    }
+    for run_id in _subtree_ids(initial_tasks, target_id)[1:]:
+        task = initial_by_id.get(run_id)
+        if task is None or task_status_in(
+            getattr(task, "status", ""),
+            SUBAGENT_RECOVERY_CLOSED_STATUSES,
+        ):
+            continue
+        pre_signalled[run_id] = _signal_subagent_attempt(agent, task)
+
+    root_result = cancel_subagent_task(
         agent,
-        CancelSubagentTaskRequest(
-            request.task,
-            reason,
-            bool(params.get("kill_process", True)),
-            "cancel_subagents",
-        ),
+        request,
+        pre_signalled_thread_interrupt=pre_signalled.get(target_id),
     )
 
+    # LLM: This inner pass runs only after the target token has been signalled.  It reads the
+    # canonical ledger while creation is fenced and closes leaves before their parents; completed
+    # or already-handled descendants remain untouched and continue to carry their real result.
+    # 函数用途: 在创建事务稳定后找出目标分支的后代，并把仍可运行或恢复的节点逐个收口。
+    def close_descendants() -> dict[str, object]:
+        try:
+            tasks = list(manager.list_runs())
+        except Exception as exc:
+            return {
+                "cancelled": [],
+                "skipped": [],
+                "failed": [runtime_error_report(exc, context="cancel_subagents.descendants")],
+            }
+        descendant_ids = list(reversed(_subtree_ids(tasks, target_id)[1:]))
+        by_id = {str(getattr(task, "id", "") or "").strip(): task for task in tasks}
+        cancelled: list[dict[str, object]] = []
+        skipped: list[dict[str, object]] = []
+        failed: list[dict[str, object]] = []
+        for run_id in descendant_ids:
+            task = by_id.get(run_id)
+            if task is None:
+                continue
+            if task_status_in(
+                getattr(task, "status", ""),
+                SUBAGENT_RECOVERY_CLOSED_STATUSES,
+            ):
+                skipped.append(
+                    {"run_id": run_id, "status": str(getattr(task, "status", "") or "")}
+                )
+                continue
+            try:
+                thread_interrupt = pre_signalled.get(run_id)
+                if thread_interrupt is None:
+                    # This node landed after the first snapshot while a nested create transaction
+                    # was already in flight.  Signal it before its durable terminal writes too.
+                    thread_interrupt = _signal_subagent_attempt(agent, task)
+                cancelled.append(
+                    cancel_subagent_task(
+                        agent,
+                        CancelSubagentTaskRequest(
+                            task=task,
+                            reason=request.reason,
+                            kill_process=request.kill_process,
+                            source=request.source,
+                        ),
+                        pre_signalled_thread_interrupt=thread_interrupt,
+                    )
+                )
+            except Exception as exc:
+                failed.append(
+                    {
+                        "run_id": run_id,
+                        **runtime_error_report(
+                            exc,
+                            context="cancel_subagents.cancel_descendant",
+                        ),
+                    }
+                )
+        return {"cancelled": cancelled, "skipped": skipped, "failed": failed}
 
+    if callable(guard):
+        with guard():
+            descendant_result = close_descendants()
+    else:
+        descendant_result = close_descendants()
+    return {**root_result, "descendants": descendant_result}
+
+
+# LLM: This exact-run primitive signals one execution token or process before persisting its
+# attempt/terminal state. Branch-aware user/model close calls must use cancel_subagent_tree;
+# root-request stop may call this primitive for its already-resolved full lineage while holding
+# the non-reentrant creation guard.
+# 函数用途: 精确打断一个子代理执行体，再原子收口该节点的执行轮、终态、心跳和会话链接；本函数不自行遍历后代。
 def cancel_subagent_task(
     agent: SimpleAgent,
     request: CancelSubagentTaskRequest,
+    *,
+    pre_signalled_thread_interrupt: str | None = None,
 ) -> dict[str, object]:
     """Cancel one canonical run through the same lifecycle path as /stop tooling."""
     task = request.task
     reason = request.reason
     attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
-    if attempt_id:
-        task = agent.subagents.lifecycle.abandon_runner_attempt(task.id, attempt_id, reason=reason)
-    now = time.time()
+    # 会话运行时/终端交互 都先触发当前执行体的 cancellation token/AbortController，再做
+    # durable 收尾。这里同样先打断慢模型或工具，让它尽快释放 canonical state 锁；
+    # 否则 TUI 的停止请求会先堵在 attempt 落盘上，用户看到“结果无法确认”。
     pid_report = _terminate_task_pid(agent, task, request.kill_process)
     if pid_report.get("status") == "no_pid":
         # 线程形态没有 pid 可杀:走协作中断,工具循环在下个安全点体面收工。
-        pid_report["thread_interrupt"] = _interrupt_dispatch_thread(agent, task.id)
+        pid_report["thread_interrupt"] = (
+            pre_signalled_thread_interrupt
+            if pre_signalled_thread_interrupt is not None
+            else _interrupt_dispatch_thread(agent, task.id, attempt_id)
+        )
+    elif pre_signalled_thread_interrupt not in {None, "", "not_found"}:
+        # 共享/独占进程形态也可能同时注册精确 attempt token。保留这一事实，既避免
+        # 误杀同宿主兄弟，也让审计能证明模型调用已先收到协作中断。
+        pid_report["thread_interrupt"] = pre_signalled_thread_interrupt
+    if attempt_id:
+        task = agent.subagents.lifecycle.abandon_runner_attempt(task.id, attempt_id, reason=reason)
+    now = time.time()
     closed_request_ids = _close_pending_capability_requests(task, reason)
     findings_ledger, findings_recorded = _findings_ledger_snapshot(task)
     context = _CancellationContext(
@@ -536,6 +674,22 @@ def cancel_subagent_task(
     return _persist_cancelled_task(agent, task, context)
 
 
+# LLM: This helper only signals the exact active attempt and never writes lifecycle state. Tree
+# cancellation may call it for several related runs before any slow durable closeout; callers must
+# still use cancel_subagent_task to settle attempts, capability requests, projections and links.
+# 函数用途: 快速向一个子代理当前执行轮发送中断，用于树停止的第一阶段广播，不单独改变任务终态。
+def _signal_subagent_attempt(agent: SimpleAgent, task: SubAgentTask) -> str:
+    attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+    return _interrupt_dispatch_thread(
+        agent,
+        str(getattr(task, "id", "") or ""),
+        attempt_id,
+    )
+
+
+# LLM: Cancellation writes both the control receipt and the terminal runner-session projection in
+# one canonical save, so liveness readers cannot observe CANCELLED alongside a live lease.
+# 函数用途: 生成取消审计属性，并把当前 runner 会话同步标成已取消结束。
 def _cancelled_attributes(task: SubAgentTask, context: _CancellationContext) -> dict[str, object]:
     attrs = dict(getattr(task, "attributes", {}) or {})
     attrs["cancel_subagents"] = {
@@ -552,6 +706,13 @@ def _cancelled_attributes(task: SubAgentTask, context: _CancellationContext) -> 
         "findings_ledger": context.findings_ledger,
         "findings_recorded": context.findings_recorded,
     }
+    session = attrs.get("runner_session")
+    if isinstance(session, dict):
+        terminal_session = dict(session)
+        terminal_session["status"] = "cancelled"
+        terminal_session["heartbeat_at"] = context.now
+        terminal_session["ended_at"] = context.now
+        attrs["runner_session"] = terminal_session
     return attrs
 
 
@@ -638,9 +799,19 @@ def _close_pending_capability_requests(task: SubAgentTask, reason: str) -> list[
 # LLM: 进程终止统一走 subagents/process_control 的两阶段原语(SIGTERM 组→宽限→
 #   SIGKILL 升级),与出口孤儿回收同一手法;本函数只负责"要不要杀"的参数裁决。
 # 函数用途: 取消任务时按 kill_process 参数决定是否连后台进程一起收掉。
-# 函数用途: 按 run_id 找到 in-process 派工线程的登记名并递中断旗;
-#   返回 signaled/not_found(没登记=不是线程形态或线程已结束,无害)。
-def _interrupt_dispatch_thread(agent: SimpleAgent, run_id: str) -> str:
+# LLM: Prefer the exact runner-attempt cancellation token registered by the worker. The batch
+# dispatch thread is only a legacy fallback and must never be interrupted while it hosts siblings.
+# 函数用途: 先精确停止目标子代理这一执行轮；旧运行记录才回退到共享派工线程的安全判定。
+def _interrupt_dispatch_thread(
+    agent: SimpleAgent,
+    run_id: str,
+    attempt_id: str,
+) -> str:
+    normalized_attempt_id = str(attempt_id or "").strip()
+    if normalized_attempt_id and interrupt_by_name(
+        f"subagent-runner-attempt:{run_id}:{normalized_attempt_id}"
+    ):
+        return "attempt_signaled"
     registry = getattr(agent, "_background_subagent_dispatches", None)
     if not isinstance(registry, dict):
         return "not_found"
@@ -678,9 +849,10 @@ def _terminate_task_pid(
         }
     if siblings:
         # A subagents-dispatch process may host several runner attempts. The
-        # task attempt was fenced above, so this runner will stop at its next
-        # model/tool/commit boundary. Killing the shared PID here would also
-        # abort unrelated live tasks and force avoidable orphan recovery.
+        # task attempt is fenced immediately after this process decision, so
+        # this runner stops at its next model/tool/commit boundary. Killing the
+        # shared PID here would also abort unrelated live tasks and force
+        # avoidable orphan recovery.
         return {
             "status": "shared_host_cooperative",
             "pid": pid,
@@ -792,5 +964,6 @@ __all__ = [
     "CancelSubagentTaskRequest",
     "CancelSubagentsTool",
     "cancel_subagent_task",
+    "cancel_subagent_tree",
     "execute_cancel_subagents",
 ]

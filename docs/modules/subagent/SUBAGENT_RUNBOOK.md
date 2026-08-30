@@ -3,21 +3,23 @@
 ## 模型可见控制面
 
 主代理、子代理和孙代理共用同一递归关系，每一层只管理自己直接创建的下级。根主代理与结构化
-`can_spawn_children=true` 的 coordinator 可以看到下面四个入口：
+`can_spawn_children=true` 的 coordinator 可以看到下面五个入口：
 
 - `create_subagents`：创建一个或多个直接下级，成功后由宿主立即自动启动。
+- `list_agents`：按需只读查看当前可见代理树；不推进、不等待、不重试、不取消，正常等待时不要轮询。
 - `send_guidance`：像用户给主代理插入补充消息一样，只向一个正在运行的直属 child 追加普通上下文。
 - `cancel_subagents`：按精确 `run_id/run_ids` 打断或取消直属 child，不提供整树、状态筛选或越层操作。
 - `resolve_capability_requests`：批准或拒绝直属 child 的结构化权限申请；它不是催办、推进或验收工具。
 
-worker、researcher、tester、writer、bug-finder 等普通 leaf 不创建下级，所以四个直属控制入口全部从其
+worker、researcher、tester、writer、bug-finder 等普通 leaf 不创建下级，所以五个直属控制入口全部从其
 工具快照移除；leaf 只保留执行工具和给自己申请权限的 `capability_request`。某个 child 确实需要继续拆分
 时，应在创建时明确选择 coordinator，不能靠 goal、展示名或历史 grant 临时扩权。
 
-模型没有 `inspect_agent_tree`、`wait`、`dispatch_subagents` 或
+模型没有旧 `inspect_agent_tree`、`wait`、`dispatch_subagents` 或
 `schedule_child_subagents`，也没有自报进展的 `raise_event`。代码里的 dispatcher、heartbeat、
 orphan reconciler、observation/wake 和代理树 projection
-都是宿主底座：负责启动、租约、恢复、通知、`/status`、TUI 和诊断，不由模型手工推动。
+都是宿主底座：负责启动、租约、恢复、通知、`/status`、TUI 和诊断，不由模型手工推动。`list_agents`
+只是同一 projection 的 会话运行时 式只读适配，不恢复旧巡检/推动语义。
 
 默认同一 root 可保留 8 个未结束 child，终态会释放槽位；历史累计数量可以超过 8。批量
 `create_subagents` 默认不再另设“单次最多 4 个”，整批只按当前 root 可用槽位原子接受或拒绝。
@@ -42,9 +44,9 @@ orphan reconciler、observation/wake 和代理树 projection
 status、turn end、failure type、有界最终回复、正式 artifact/声明输出 refs 和待裁决请求；过长最终回复可按
 `final_report_ref` 继续读取。内部 runner result/output/response 文件不进入正常父模型 prompt。
 
-宿主内部 `agent_tree_status_payload` 会展示 run/parent/root、状态、heartbeat、当前步骤、失败原因和
-artifact refs，但这是运维状态投影，不是模型工具。用户可以通过 `/status` 和 TUI 看，恢复器也可以读；
-普通模型只消费创建回执和送到本层的 lifecycle event。
+宿主 `agent_tree_status_payload` 会展示 run/parent/root、状态、heartbeat、当前步骤、失败原因和 artifact
+refs。用户可以通过 `/status` 和 TUI 看，恢复器可以读，模型也能在用户询问或需要核对明确 run 时通过
+`list_agents` 读同一有界投影；正常工作仍只消费创建回执和送到本层的 lifecycle event，不靠轮询续跑。
 
 如果 child 是 `RUNNING`，说明 runner 已启动但尚未写回结果。provider/网络失败、进程崩溃、租约失活或
 明确超时由 heartbeat、typed retry 和 orphan reconciler 处理。它们只修执行可靠性，不判断工作质量。

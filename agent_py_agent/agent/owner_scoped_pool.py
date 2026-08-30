@@ -139,6 +139,15 @@ class OwnerScopedAgentPool:
         agent = self._builder(self._base_config, self._root, owner, self._workspace_roots)
         return self._store(key, agent, hard=hard)
 
+    # LLM: Read-only polling may inspect an already-loaded owner, but it must not
+    # create, promote, or LRU-touch an Agent. Real ingress/control paths continue
+    # to use get(); otherwise idle clients can keep cold owners resident forever.
+    # 函数用途: 只查看池里已经存在的用户 Agent；空闲状态刷新不会因此加载整套工具和记忆。
+    def peek(self, owner: Any) -> Any | None:
+        key = (owner.provider, owner.owner_kind, owner.owner_id)
+        with self._lock:
+            return self._hard_agents.get(key) or self._soft_agents.get(key)
+
     def _room_for_soft(self) -> bool:
         """锁内判断软 agent 是否有落点:软表非空可逐软腾位,或总容量未满。"""
         with self._lock:
@@ -208,6 +217,30 @@ class OwnerScopedAgentPool:
         并发 get/逐出影响;快照瞬时,遍历期间被逐出的 agent 仍在列表里(无害:多 tick 一次)。"""
         with self._lock:
             return [*self._hard_agents.values(), *self._soft_agents.values()]
+
+    # LLM: Background conversation/watch schedulers must only retain agents backed by
+    # hard durable work; soft curator-only instances are admitted separately by worker slots.
+    # 函数用途: 返回有前台请求、未完成任务或盯守事实的常驻 agent 快照。
+    def hard_agents(self) -> list[Any]:
+        """返回硬事实 agent 的线程安全快照，保持 LRU 顺序。"""
+        with self._lock:
+            return list(self._hard_agents.values())
+
+    # LLM: A completed low-priority curator releases only the exact soft instance it used;
+    # a concurrent hard promotion moves the instance out of this table and makes eviction a no-op.
+    # 函数用途: 记忆策展完成后释放临时软 agent；若期间用户重新活跃则保留其已升级实例。
+    def evict_soft_agent_id(self, agent_id: int) -> bool:
+        """按对象身份逐出软 agent；返回是否实际释放。"""
+        with self._lock:
+            matched_key = None
+            for key, agent in self._soft_agents.items():
+                if id(agent) == agent_id:
+                    matched_key = key
+                    break
+            if matched_key is not None:
+                self._soft_agents.pop(matched_key, None)
+                return True
+        return False
 
 
 class ActiveOwnerRegistry:

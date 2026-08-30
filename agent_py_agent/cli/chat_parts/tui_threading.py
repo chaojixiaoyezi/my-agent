@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from collections.abc import Mapping
@@ -114,7 +115,7 @@ def _background_notice_loop(
     agent_navigation: object | None = None,
     foreground_running_ref: list[bool] | None = None,
 ) -> None:
-    seen: set[float] = set()
+    seen: set[tuple[float, str]] = set()
     event_cursor = [0]
     failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
     while not stop_event.is_set():
@@ -166,7 +167,7 @@ def _consume_background_notices(
     session_id: str,
     tui_runtime: object,
     app_ref: list,
-    seen: set[float],
+    seen: set[tuple[float, str]],
     event_cursor_ref: list[int] | None = None,
     agent_navigation: object | None = None,
 ) -> bool:
@@ -205,7 +206,7 @@ def _consume_gateway_background_snapshot(
     session_id: str,
     tui_runtime: object,
     app_ref: list,
-    seen: set[float],
+    seen: set[tuple[float, str]],
     event_cursor: list[int],
     agent_navigation: object | None = None,
 ) -> bool:
@@ -215,7 +216,7 @@ def _consume_gateway_background_snapshot(
     try:
         payload = fetcher(
             session_id,
-            after=max(seen) if seen else 0.0,
+            after=max(key[0] for key in seen) if seen else 0.0,
             event_after=max(0, int(event_cursor[0] or 0)),
         )
     except Exception:
@@ -283,7 +284,7 @@ def _consume_local_background_snapshot(
     session_id: str,
     tui_runtime: object,
     app_ref: list,
-    seen: set[float],
+    seen: set[tuple[float, str]],
     event_cursor: list[int],
     agent_navigation: object | None = None,
 ) -> bool:
@@ -368,11 +369,12 @@ def _consume_local_background_snapshot(
 
 
 # LLM: Local notice parsing is a display-only bounded adapter. Invalid JSON and
-# duplicate typed timestamps are skipped without changing task/activity state.
+# duplicate notice identities are skipped without changing task/activity state;
+# equal timestamps remain legal because multiple background reports can share a tick.
 # 函数用途: 读取嵌入式 TUI 尚未显示的后台通知行。
 def _read_local_notice_rows(
     notices_path: Path,
-    seen: set[float],
+    seen: set[tuple[float, str]],
 ) -> list[dict[str, object]]:
     fresh: list[dict[str, object]] = []
     for line in notices_path.read_text(encoding="utf-8").splitlines():
@@ -384,10 +386,7 @@ def _read_local_notice_rows(
             continue
         if not isinstance(row, dict):
             continue
-        try:
-            key = float(row.get("created_at") or 0.0)
-        except (TypeError, ValueError):
-            key = 0.0
+        key = _background_notice_key(row)
         if key not in seen:
             fresh.append(row)
     return fresh
@@ -440,7 +439,7 @@ def _sync_local_agent_permissions(
     root_task_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
     if not callable(syncer) or not root_task_id:
         return False
-    from ...agent.subagents.tool_approval_bridge import (
+    from ...agent.conversation.agent_tool_approval import (
         list_pending_subagent_tool_approvals,
         renew_subagent_tool_approval_consumer,
         resolve_subagent_tool_approval,
@@ -604,17 +603,14 @@ def _consume_selected_agent_view(
 def _publish_background_notice_row(
     tui_runtime: object,
     row: dict[str, object],
-    seen: set[float],
+    seen: set[tuple[float, str]],
 ) -> None:
     summary = str(row.get("summary") or "").strip()
     content = str(row.get("content") or summary).strip()
     thread_id = str(row.get("thread_id") or "")
     if not content:
         return
-    try:
-        key = float(row.get("created_at") or 0.0)
-    except (TypeError, ValueError):
-        key = 0.0
+    key = _background_notice_key(row)
     if key in seen:
         return
     seen.add(key)
@@ -633,6 +629,29 @@ def _publish_background_notice_row(
         return
     notice_text = f"⚙ 后台更新：{summary}"
     tui_runtime.publish_background_notice(notice_text, thread_id=thread_id)
+
+
+# LLM: Explicit v2 notice ids are authoritative. Legacy rows fall back to a
+# content fingerprint paired with their timestamp so two distinct replies from
+# the same scheduler tick are both visible while exact replay stays idempotent.
+# 函数用途: 生成 TUI 后台通知去重键，兼容没有 notice_id 的历史文件。
+def _background_notice_key(row: Mapping[str, object]) -> tuple[float, str]:
+    try:
+        created_at = float(row.get("created_at") or 0.0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    notice_id = str(row.get("notice_id") or "").strip()
+    if notice_id:
+        return created_at, notice_id
+    raw = json.dumps(
+        dict(row),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+    return created_at, f"legacy-{digest}"
 
 
 # LLM: refresh loop 只在 runtime 报告存在可见动画/短提示时 invalidate；typed event 自带 redraw，空闲时必须零周期整屏重绘。

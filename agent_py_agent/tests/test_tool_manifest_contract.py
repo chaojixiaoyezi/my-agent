@@ -62,12 +62,13 @@ def test_tool_manifest_payload_uses_owner_scoped_permission_mode_for_non_root_ow
     read_spec = make_test_model_spec("read_file")
     snapshot = runtime_snapshot_for_model_specs(
         (read_spec,),
-        owner_type="task_local",
+        owner_type="user",
     )
 
     payload = tool_manifest_payload(snapshot)
 
     assert payload["permission_mode"] == "owner_scoped"
+    assert payload["visible_tools"] == ["read_file"]
     assert payload["tools"][0]["permission_mode"] == "owner_scoped"
 
 

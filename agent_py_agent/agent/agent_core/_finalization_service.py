@@ -5,6 +5,7 @@ import time as time_module
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from ..conversation.task_state import conversation_task_completed
 from ..memory_archive import (
     archive_run_turn,
@@ -746,15 +747,20 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
             task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
             thread_id=thread_id,
             due_now=True,
+            conversation_request_id=str(
+                attrs.get(CONVERSATION_REQUEST_ID_ATTR) or ""
+            ),
         )
         return
-    from .runtime.task_identity import progress_ledger_id
-
+    # 自动续跑必须保留真实 conversation task 身份。Todo 的 task-path 账本只
+    # 负责跨 turn 保存清单；把它交给 scheduler 会产生一个没有 task link 的
+    # 影子执行身份，后台醒来后所有工具都会绑定失败。
     ensure_ordinary_task_resume(
         agent,
-        task_id=str(progress_ledger_id(agent, ctx) or attrs.get("root_task_id") or ""),
+        task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
         thread_id=thread_id,
         due_now=foreground,
+        conversation_request_id=str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or ""),
     )
 
 

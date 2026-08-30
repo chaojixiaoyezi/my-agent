@@ -16,9 +16,9 @@ from ._filesystem_helpers import (
     _required_path,
 )
 from .filesystem_artifact_guard import (
+    ToolOutputArtifactRedirectError,
     is_tool_output_artifact_path,
-    mark_tool_output_artifact_result,
-    tool_output_artifact_content,
+    tool_output_artifact_read_redirect,
     tool_output_artifact_typo_hint,
 )
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
@@ -69,10 +69,20 @@ class TruncatedReadFooterRequest:
     next_offset: int | None = None
 
 
+# LLM: Keep ordinary file reads separate from registered tool-output wrappers; typed redirect
+# errors must survive path resolution with their dedicated recovery contract.
+# 函数用途: 校验 read_file 参数并读取普通文本；工具大输出则明确引导到 read_artifact。
 def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolHandlerOutcome:
     try:
         raw_path = _required_path(params.get("path"))
         target = tool.resolve_path(raw_path)
+    except ToolOutputArtifactRedirectError as exc:
+        return ToolHandlerOutcome(
+            "read_file",
+            False,
+            str(exc),
+            error_code="TOOL_OUTPUT_REQUIRES_READ_ARTIFACT",
+        )
     except ValueError as exc:
         return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     return _execute_read_file_request(ReadFileRequest(
@@ -110,7 +120,12 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
     if not target.exists():
         typo_hint = _missing_tool_artifact_typo_hint(request.tool, request.raw_path)
         if typo_hint:
-            return ToolHandlerOutcome("read_file", False, typo_hint, error_code="PATH_NOT_FOUND")
+            return ToolHandlerOutcome(
+                "read_file",
+                False,
+                typo_hint,
+                error_code="TOOL_OUTPUT_REQUIRES_READ_ARTIFACT",
+            )
         return missing_path_result(MissingPathRequest(
             tool_name="read_file",
             raw_path=request.raw_path,
@@ -122,6 +137,13 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
         ))
     if not target.is_file():
         return _not_file_result(request.tool, target)
+    if is_tool_output_artifact_path(target):
+        return ToolHandlerOutcome(
+            "read_file",
+            False,
+            tool_output_artifact_read_redirect(request.raw_path, target),
+            error_code="TOOL_OUTPUT_REQUIRES_READ_ARTIFACT",
+        )
     internal_ref = _internal_agent_status_ref(target)
     if internal_ref and not _readable_agent_final_report(target):
         return ToolHandlerOutcome(
@@ -130,16 +152,6 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
             json.dumps(internal_ref, ensure_ascii=False, indent=2),
             error_code="WRONG_STATUS_SURFACE",
         )
-    artifact_content = tool_output_artifact_content(target, request.tool.workspace_roots)
-    if artifact_content:
-        return mark_tool_output_artifact_result(
-            _numbered_text_result(artifact_content, request.params, request.max_chars)
-        )
-    if is_tool_output_artifact_path(target):
-        # Even a malformed/empty wrapper remains an external tool-output
-        # container. If normal file reading handles it below, it must not regain
-        # runtime/source-code trust merely because unwrapping failed.
-        return mark_tool_output_artifact_result(_ordinary_file_result(request))
     outcome = _ordinary_file_result(request)
     if redirected_from:
         outcome.result_envelope["path_resolution"] = {

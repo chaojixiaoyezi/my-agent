@@ -25,6 +25,44 @@ from agent_py_agent.cli.chat_parts.slash_command_types import SlashCommandContex
 from agent_py_agent.cli.chat_parts.slash_commands import handle_common_slash_command
 
 
+def test_slash_sessions_lists_only_current_owner_and_exact_resume_command(tmp_path) -> None:
+    from agent_py_agent.agent.session.manager import SessionManager
+
+    config = SimpleNamespace(
+        session_workspace=str(tmp_path / "sessions"),
+        user_id="owner-a",
+    )
+    manager = SessionManager(config)
+    older = manager.create_session(user_id="owner-a", channel="chat")
+    current = manager.create_session(user_id="owner-a", channel="tui")
+    manager.create_session(user_id="owner-b", channel="chat")
+    older.updated_at = 100.0
+    current.updated_at = 200.0
+    manager.save_session(older)
+    manager.save_session(current)
+    printed: list[str] = []
+
+    handled = handle_common_slash_command(
+        "/sessions",
+        ctx=SlashCommandContext(
+            agent=SimpleNamespace(config=config),
+            memory_limit=5,
+            runtime_inject=[],
+            prompt_files=[],
+            print_line=printed.append,
+            conversation_id=current.session_id,
+        ),
+    )
+
+    assert handled is True
+    rendered = "\n".join(printed)
+    assert current.session_id in rendered
+    assert f"{current.session_id}（当前）" in rendered
+    assert older.session_id in rendered
+    assert "owner-b" not in rendered
+    assert "my-agent resume <session_id>" in rendered
+
+
 def _command(text: str):
     command = parse_conversation_control(text)
     assert command is not None
@@ -104,6 +142,36 @@ def test_slash_stop_executes_without_printing_a_chat_reply() -> None:
     assert handled is True
     executor.assert_called_once()
     assert output == []
+
+
+def test_slash_remember_does_not_call_unknown_delivery_a_failure() -> None:
+    output: list[str] = []
+    agent = SimpleNamespace(
+        gateway_client_only=True,
+        request_memory=lambda **_kwargs: {
+            "ok": False,
+            "outcome": "unknown",
+            "error_code": "MEMORY_WRITE_RESULT_UNKNOWN",
+        },
+    )
+
+    handled = handle_common_slash_command(
+        "/remember 已确认内容",
+        ctx=SlashCommandContext(
+            agent=agent,
+            memory_limit=5,
+            runtime_inject=[],
+            prompt_files=[],
+            print_line=output.append,
+            conversation_id="session-1",
+        ),
+    )
+
+    assert handled is True
+    assert output == [
+        "记忆保存结果暂时无法确认；Gateway 可能已经写入，系统没有自动重复保存。"
+        "可用 /memory <关键词> 查询。"
+    ]
 
 
 def test_local_btw_is_scoped_to_current_request(tmp_path) -> None:
@@ -306,6 +374,84 @@ def test_gateway_btw_carries_stable_identity_and_exact_turn(monkeypatch) -> None
     assert result.delivery_status == "unknown"
     assert result.operation_id == "gwctl-msg-abc"
     assert result.guidance_dedupe_key == "guidance-key"
+
+
+def test_scoped_gateway_tui_control_and_receipt_keep_owner_identity(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+    from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
+
+    captured: list[object] = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "ok": True,
+                    "kind": "stop",
+                    "message": "stopped",
+                    "operation_id": "gwctl-owner",
+                    "control_state": "completed",
+                }
+            ).encode()
+
+    def fake_urlopen(request, timeout):
+        captured.append((request, timeout))
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = GatewayChatClientAgent(
+        SimpleNamespace(),
+        SimpleNamespace(
+            gateway_port=18420,
+            gateway_service_command_timeout_seconds=4,
+        ),
+        tmp_path,
+        [tmp_path],
+        SimpleNamespace(),
+        owner_identity=OwnerIdentity.provider_user("tui-test", "alice"),
+    )
+    execution = ChatControlExecution(
+        client,
+        True,
+        ChatControlState(False, 0, "", 0.0, "same-session"),
+    )
+
+    submitted = execute_chat_control(
+        execution,
+        _command("/stop"),
+        message_id="control-owner",
+        target_control_message_id="compact-control-owner",
+    )
+    reconciled = request_gateway_control_status(execution, "gwctl-owner")
+
+    post_request, post_timeout = captured[0]
+    get_request, get_timeout = captured[1]
+    post_headers = {str(key).casefold(): value for key, value in post_request.header_items()}
+    get_headers = {str(key).casefold(): value for key, value in get_request.header_items()}
+    payload = json.loads(post_request.data.decode("utf-8"))
+    assert payload["user_id"] == "alice"
+    assert payload["channel"] == "tui-test"
+    assert payload["conversation_id"] == "same-session"
+    assert payload["metadata"]["message_id"] == "control-owner"
+    assert payload["metadata"]["target_control_message_id"] == "compact-control-owner"
+    assert post_headers["x-user-id"] == get_headers["x-user-id"] == "alice"
+    assert post_headers["x-channel"] == get_headers["x-channel"] == "tui-test"
+    assert get_headers["x-conversation-id"] == "same-session"
+    assert post_timeout == 10.0
+    assert get_timeout == 2.0
+    assert submitted.ok is True
+    assert reconciled.operation_id == "gwctl-owner"
 
 
 def test_gateway_control_transport_retry_reuses_one_message_id(monkeypatch) -> None:

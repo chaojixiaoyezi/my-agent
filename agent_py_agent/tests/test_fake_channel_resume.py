@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
@@ -16,9 +18,11 @@ class _EchoOnceBackend:
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.messages: list[object] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs: object) -> ModelResponse:
         self.prompts.append(prompt)
+        self.messages.append(kwargs.get("messages"))
         return ModelResponse(text="我已恢复同一个会话上下文。", backend=self.name)
 
 
@@ -35,6 +39,7 @@ def test_fake_feishu_and_wechat_restore_same_thread_for_same_user(tmp_path) -> N
     second = messages.receive({'channel': "wechat", 'channel_conversation_id': "wechat-chat", 'channel_user_id': "wechat-user", 'canonical_user_id': "same-person", 'content': "继续刚刚那个长期任务，看看现在怎么样。", 'now': 20.0, 'run_background': True})
 
     assert first.thread_id == second.thread_id
-    assert "请记住这个长期任务" in backend.prompts[0]
-    assert "继续刚刚那个长期任务" in backend.prompts[0]
+    model_input = json.dumps(backend.messages[0], ensure_ascii=False)
+    assert "请记住这个长期任务" in model_input
+    assert "继续刚刚那个长期任务" in model_input
     assert channels.adapter("wechat").sent_messages[0].target == "wechat-chat"

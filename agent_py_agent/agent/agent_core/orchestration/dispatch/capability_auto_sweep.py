@@ -57,9 +57,7 @@ def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
     run_id = _signal_run_id(signal)
     if run_id:
         try:
-            grants = auto_grant_open_requests(
-                manager, run_id, extra_safe_roots=_manager_safe_roots(manager)
-            )
+            grants = auto_grant_open_requests(manager, run_id)
             summary["auto_granted"] = len(grants)
         except Exception:
             _LOGGER.warning("capability auto sweep grant failed (run_id=%s)", run_id, exc_info=True)
@@ -429,8 +427,8 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
         run_id = str(facts["run_id"])
         reason = str(facts["reason"])
         try:
-            _requeue_dead_running(manager, task, run_id, reason=reason)
-            reclaimed.append(facts)
+            if _requeue_dead_running(manager, task, run_id, reason=reason):
+                reclaimed.append(facts)
         except Exception:
             _LOGGER.warning("supervision reclaim failed (run_id=%s)", run_id, exc_info=True)
     return reclaimed
@@ -594,16 +592,32 @@ def _terminate_fully_stalled_source_hosts(
     return {pid: dict(terminate_pid_with_escalation(pid) or {}) for pid in sorted(host_pids)}
 
 
-# 函数用途: 单个宿主已死 run 的 requeue(abandon attempt → PENDING → 留结构化痕迹)。
+# LLM: Task-file and runtime.db attempts are two projections of one execution.
+# Never clear the task projection before runtime authority says the exact old
+# attempt is safely terminal; create_attempt must keep rejecting live duplicates.
+# 函数用途: 回收已确认假死的 runner；旧权威 attempt 安全封存后才改成待派状态。
 def _requeue_dead_running(
     manager: Any,
     task: Any,
     run_id: str,
     *,
     reason: str,
-) -> None:
+) -> bool:
     attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
     if attempt_id:
+        authority = manager.lifecycle.reconcile_dead_runner_attempt(
+            run_id,
+            attempt_id,
+            reason=f"supervision_{reason}_reclaim",
+        )
+        if not bool(authority.get("ready")):
+            _LOGGER.info(
+                "supervision requeue deferred (run_id=%s attempt_id=%s reason=%s)",
+                run_id,
+                attempt_id,
+                str(authority.get("reason") or "runtime_attempt_not_ready"),
+            )
+            return False
         manager.lifecycle.abandon_runner_attempt(
             run_id,
             attempt_id,
@@ -623,6 +637,7 @@ def _requeue_dead_running(
         refreshed,
         f"supervision: requeued RUNNING->PENDING reason={reason}",
     )
+    return True
 
 
 def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
@@ -805,7 +820,9 @@ def complete_settled_source_worker(agent: Any, task: Any) -> str:
         Path(str(attrs.get(AUDIT_SOURCE_OWNER_HOME_ATTR) or "")),
         str(attrs.get(AUDIT_SOURCE_WATCH_ID_ATTR) or ""),
     )
-    manager.save(current)
+    # 仅旧版由 watch-complete 控制事件误写成 CANCELLED 的来源 worker 可以跨过
+    # 终态单调保护；人工/管理员取消在上面的 closed-status 分支已经保持关闭。
+    manager.save(current, allow_terminal_reactivation=legacy_false_cancel)
     _sync_completed_source_worker_link(
         agent,
         run_id,
@@ -900,15 +917,6 @@ def _signal_run_id(signal: Any) -> str:
         getattr(signal, "source_agent_id", ""),
     )
     return next((text for value in candidates if (text := str(value or "").strip())), "")
-
-
-def _manager_safe_roots(manager: Any) -> tuple[str, ...]:
-    roots = []
-    for raw in (getattr(manager, "workspace_root", ""), getattr(manager, "workspace", "")):
-        text = str(raw or "").strip()
-        if text:
-            roots.append(text)
-    return tuple(roots)
 
 
 __all__ = [

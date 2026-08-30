@@ -1,4 +1,4 @@
-"""Process-shared approval bridge for one exact delegated-agent tool call."""
+"""Conversation-owned approval bridge for one exact delegated-agent tool call."""
 
 # LLM: This module is the sole durable authority for child-to-owner tool approval
 # handoff. One JSON record owns pending/decided state; TUI/Web projections may
@@ -13,14 +13,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..common.opaque_id import validate_opaque_id
-from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
-from ..gateway_parts.io import (
-    locked_file_transition,
-    read_json_file_report,
+from ..common.json_io import (
+    locked_json_path,
+    read_json_object_report,
     write_json_file_atomic,
 )
-from .models import SUBAGENT_ENDED_STATUSES, task_status_in
+from ..common.opaque_id import validate_opaque_id
+from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
+from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 
 SUBAGENT_TOOL_APPROVAL_SCHEMA = "subagent_tool_approval.v1"
 SUBAGENT_TOOL_APPROVAL_CONSUMER_SCHEMA = "subagent_tool_approval_consumer.v1"
@@ -115,8 +115,8 @@ def publish_subagent_tool_approval(
         request,
         created_at,
     )
-    with locked_file_transition(_transition_path(path)):
-        report = read_json_file_report(path, context="subagent.tool_approval.publish")
+    with locked_json_path(_transition_path(path)):
+        report = read_json_object_report(path, context="subagent.tool_approval.publish")
         if report.load_error is not None:
             raise OSError("subagent approval record is unreadable")
         if report.payload and not _same_pending_record(report.payload, payload):
@@ -143,7 +143,7 @@ def wait_for_subagent_tool_approval(
         if _cancelled(cancellation_token):
             _remove_exact_record(handle)
             return ToolApprovalDecision(handle.request.permission_id, "cancelled")
-        report = read_json_file_report(handle.path, context="subagent.tool_approval.wait")
+        report = read_json_object_report(handle.path, context="subagent.tool_approval.wait")
         if report.load_error is not None or not report.payload:
             return ToolApprovalDecision(handle.request.permission_id, "unavailable")
         decision = _record_decision(handle, report.payload)
@@ -200,7 +200,7 @@ def list_pending_subagent_tool_approvals(
         if not path.name.startswith(".")
     ]
     for path in paths[: max(1, int(limit or 1))]:
-        report = read_json_file_report(path, context="subagent.tool_approval.list")
+        report = read_json_object_report(path, context="subagent.tool_approval.list")
         public = _public_pending_record(agent, root, report.payload)
         if public is not None:
             rows.append(public)
@@ -226,8 +226,8 @@ def resolve_subagent_tool_approval(
     if request.binding.get("run_id") != selected or decision.permission_id != request.permission_id:
         raise ValueError("subagent approval decision binding mismatch")
     path = _approval_path(agent, root_task_id, selected, request.permission_id)
-    with locked_file_transition(_transition_path(path)):
-        report = read_json_file_report(path, context="subagent.tool_approval.resolve")
+    with locked_json_path(_transition_path(path)):
+        report = read_json_object_report(path, context="subagent.tool_approval.resolve")
         if report.load_error is not None or not _record_matches(
             report.payload,
             root_task_id,
@@ -412,7 +412,7 @@ def _decision_from_payload(payload: object) -> ToolApprovalDecision | None:
 # corrupt, or cross-root files; zero can only shorten waiting, never approve.
 # 函数用途: 读取最近一次交互界面领取审批请求的时间。
 def _consumer_seen_at(directory: Path, root_task_id: str) -> float:
-    report = read_json_file_report(directory / ".consumer.json", context="subagent.tool_approval.consumer")
+    report = read_json_object_report(directory / ".consumer.json", context="subagent.tool_approval.consumer")
     payload = report.payload
     if (
         report.load_error is not None
@@ -430,8 +430,8 @@ def _consumer_seen_at(directory: Path, root_task_id: str) -> float:
 # stored full identity still matches this waiter.
 # 函数用途: 消费、取消或无人接收后移除这一条精确临时审批记录。
 def _remove_exact_record(handle: SubagentToolApprovalHandle) -> None:
-    with locked_file_transition(_transition_path(handle.path)):
-        report = read_json_file_report(handle.path, context="subagent.tool_approval.remove")
+    with locked_json_path(_transition_path(handle.path)):
+        report = read_json_object_report(handle.path, context="subagent.tool_approval.remove")
         if _record_matches(report.payload, handle.root_task_id, handle.run_id, handle.request):
             try:
                 handle.path.unlink()

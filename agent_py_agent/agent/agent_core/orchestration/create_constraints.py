@@ -218,8 +218,16 @@ def _has_repair_write_intent(params: dict[str, object]) -> bool:
     return any(isinstance(pack, dict) and pack.get("kind") == "repair_contract" for pack in packs)
 
 
+# LLM: Before promotion this may expose the one host-validated workspace, but a promoted task
+# already owns its exact root and must never widen back to the whole owner home from an output ref.
+# 函数用途: 在尚无任务目录时补默认产品根；任务已晋升后保持当前任务的窄写入范围。
 def _default_workspace_product_root(agent: object, params: dict[str, object], goal: str) -> str:
     if not _structured_output_refs(params):
+        return ""
+    # 已晋升任务的父级写上界是 canonical task root。不能因为某个 output ref
+    # 恰好位于 owner home，便把整个用户家目录再次加入 child 写根；用户明确的
+    # 任务外输出仍由结构化 output/user_requested_output_dir 单独授权。
+    if _current_task_root(agent):
         return ""
     raw = getattr(getattr(agent, "subagents", None), "workspace_root", None)
     if not isinstance(raw, str | Path):

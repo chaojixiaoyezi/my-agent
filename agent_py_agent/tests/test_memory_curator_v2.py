@@ -348,9 +348,9 @@ def test_curator_prompt_requires_atomic_cross_scope_candidates() -> None:
     assert "一次性要求只能是 session/temporary" in prompt
     assert "不要输出 quote" in prompt
     assert "模型不得输出 promotion_mode" in prompt
-    assert "绝不能自动固化或替代审核" in prompt
+    assert "至少要跨不同任务/运行/日期出现 2 个独立证据组" in prompt
     assert "默认进审核，不自动晋升" not in prompt
-    assert "多次独立出现" in prompt
+    assert "独立证据组" in prompt
     assert '"message_ids": ["message-manifest-1"]' in prompt
     assert "不能遗漏、重复或加入清单外 ID" in prompt
 
@@ -1258,8 +1258,7 @@ def test_curator_interval_and_daily_finalize_use_same_state_and_service(tmp_path
 def test_pending_promotable_candidate_ids_only_picks_host_authorized_auto(
     tmp_path: Path,
 ) -> None:
-    """晋升兜底候选集(定版合同):只捞宿主已标 auto_eligible 的 user_explicit/tool_verified
-    事实;lesson(即使 target=lesson)与 model_inferred 事实一律不捞;缺省权限=manual 不捞。"""
+    """兜底选择正式用户事实与 lesson，自始至终排除无事实权威的模型猜测。"""
     from agent_py_agent.agent.memory_store.candidate_models import (
         CandidateObservation,
         MemoryScope,
@@ -1315,9 +1314,9 @@ def test_pending_promotable_candidate_ids_only_picks_host_authorized_auto(
 
     ids = service._pending_promotable_candidate_ids()
 
-    assert user_auto.candidate_id in ids  # 宿主已授权:唯一可捞
-    assert user_legacy_manual.candidate_id not in ids  # 缺省/legacy=manual_required:不捞
-    assert lesson.candidate_id not in ids  # lesson 专线已取消:一律 manual,不捞
+    assert user_auto.candidate_id in ids
+    assert user_legacy_manual.candidate_id in ids
+    assert lesson.candidate_id in ids
     assert inferred_fact.candidate_id not in ids  # model_inferred 事实:不捞
 
 
@@ -1351,9 +1350,8 @@ def test_curator_qualified_user_fact_still_auto_promotes(tmp_path: Path) -> None
     assert candidate.candidate_id in recorder.calls  # 兜底/提交后都提交自动晋升
 
 
-def test_curator_lesson_extraction_never_silently_promoted(tmp_path: Path) -> None:
-    """1227 反例:curator 提炼出的 lesson 候选一律 manual_required,
-    无论单次/重复出现都不会被 Curator 提交自动晋升。"""
+def test_curator_lesson_extraction_enters_autonomous_threshold_chain(tmp_path: Path) -> None:
+    """Curator 提炼 lesson 后提交自主晋升；真实 Promotion 层负责重复证据门槛。"""
     store, thread, message = _conversation(tmp_path)
     payload = _valid_output(thread.thread_id, message.message_id, message.content)
     payload["candidates"] = [
@@ -1390,15 +1388,15 @@ def test_curator_lesson_extraction_never_silently_promoted(tmp_path: Path) -> No
 
     assert result.status == "succeeded"
     candidate = service.candidate_service.list()[0]
-    assert candidate.promotion_mode == "manual_required"  # lesson 一律人工审核
-    assert recorder.calls == []  # 不提交自动晋升(selector 不捞+promotion 闸双拒)
-    assert candidate.status == "pending_review"  # 候选保留待人工审核
+    assert candidate.promotion_mode == "auto_eligible"
+    assert recorder.calls == [candidate.candidate_id]
+    assert candidate.status == "pending_review"
 
 
 @pytest.mark.parametrize(
-    ("candidate_changes", "expected_status"),
+    ("candidate_changes", "expected_status", "expected_callback"),
     [
-        ({"conflicts_with": ["memory-old"]}, "blocked_conflict"),
+        ({"conflicts_with": ["memory-old"]}, "blocked_conflict", False),
         (
             {
                 "scope": {
@@ -1410,15 +1408,17 @@ def test_curator_lesson_extraction_never_silently_promoted(tmp_path: Path) -> No
                 "valid_until": None,
             },
             "pending_review",
+            True,
         ),
     ],
 )
-def test_curator_incomplete_auto_conditions_stay_manual(
+def test_curator_incomplete_auto_conditions_stay_blocked_by_structured_gate(
     tmp_path: Path,
     candidate_changes: dict[str, object],
     expected_status: str,
+    expected_callback: bool,
 ) -> None:
-    """合格来源仍不足以授权；冲突或 temporary 缺 expiry 必须由宿主标人工审核。"""
+    """自主权限不绕过冲突/过期门；已结构化阻塞的候选不会进入回调。"""
     store, thread, message = _conversation(tmp_path)
     payload = _valid_output(thread.thread_id, message.message_id, message.content)
     payload["candidates"][0].update(candidate_changes)
@@ -1430,9 +1430,9 @@ def test_curator_incomplete_auto_conditions_stay_manual(
 
     assert result.status == "succeeded"
     candidate = service.candidate_service.list()[0]
-    assert candidate.promotion_mode == "manual_required"
+    assert candidate.promotion_mode == "auto_eligible"
     assert candidate.status == expected_status
-    assert recorder.calls == []
+    assert (candidate.candidate_id in recorder.calls) is expected_callback
 
 
 def test_reinjection_chain_never_grows_formal_memory(tmp_path: Path) -> None:

@@ -28,6 +28,18 @@ def test_adapter_is_messageadapter_subclass():
     assert isinstance(_adapter(), MessageAdapter)
 
 
+def test_native_tool_result_prefers_host_bounded_live_projection():
+    result = _result("toolu_projection", "RAW-WRAPPER-PATH").with_live_prompt_projection(
+        "BOUNDED-PREVIEW\nread_artifact_hint"
+    )
+
+    messages = _adapter().to_provider_messages([result])
+
+    block = messages[0]["content"][0]
+    assert block["content"] == "BOUNDED-PREVIEW\nread_artifact_hint"
+    assert "RAW-WRAPPER-PATH" not in block["content"]
+
+
 # --- outbound: assistant text + tool_use in the SAME message -----------------
 
 

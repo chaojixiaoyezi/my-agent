@@ -1,5 +1,173 @@
 # TESTS
 
+## 2026-08-30 R108 收尾回归与真 TUI Compact
+
+- 唯一全仓诊断跑完后得到 11 个 failure；之后只按来源定向复测，没有再跑全仓。
+  精确 11 项复测结果为 `10 passed, 1 xfailed`；xfail 是用户明确要求延后的 `AUDIT-02`。
+- 相邻回归文件覆盖 error taxonomy、Gateway 鉴权/会话控制、observation route、subagent
+  bundle/kernel/protocol、ToolExecutor 和 managed background，共 176 项全过。
+- 静态/发布门：Ruff PASS，`DOC_SYNC_PASS`，strict code-size `hard=0`，import-boundary
+  `findings=0`，`git diff --check` PASS，temp-index clean-package PASS。
+- 真 TUI：唯一 `ma-gateway-r108-110` + MiniMax-M2.7；客户端
+  `ma-matrix-r108-110-u271-compact-errors` 中先完成普通回合，再输入 `/compact`。界面显示
+  `正在压缩上下文` 进度条，结果为 `generation 1` / `11,595 → 9,186 tokens`，旧历史仍在；
+  最后 `/exit` 正常关闭 TUI，8420 仍只有 PID `3694064` 一个 Gateway listener。
+
+## 2026-08-30 R106/R107 单 Gateway 真实 TUI 矩阵
+
+所有输入均从 tmux 中的真实 TUI 发送普通中文；直接读取 JSON/文件/进程只用于核对模型汇报，不能替代产品
+验收。唯一 Gateway `ma-gateway-r106-110` 使用 MiniMax-M2.7；u256--u269 分属独立 owner：
+
+1. `/sessions` 只列当前 owner 并给精确 resume；WorkspaceOnly Shell 成功/失败都说明隔离视图。
+2. `list_agents` 只读 schema、Todo 与 4 child 精确联动、Goal create/get/update/complete。
+3. Schedule/Watch 完成 create/pause/resume/history/pull/delete/close；删除保留 typed tombstone，watch 保留 closed
+   审计记录，但 `current_run/next_run` 和后台 harvester 均不得继续活跃。
+4. capability child 从只读启动，申请 exact 单文件写权，下一 context snapshot 自行写出报告；详情页可查看
+   prompt、thinking、工具、final，`Ctrl+O` 不切 root，折叠后 `Ctrl+G` 返回。
+5. Skill 只选择并读取 2 个真实 `SKILL.md`；Memory 分开验证 USER 偏好与 formal personal fact，同 owner 新会话
+   召回、另一 owner 同时返回空；普通 Memory 不修改 SOUL，也不要求确认。
+6. `search_text` 验精确/不存在/大小写/大量结果 offset，配合 `read_artifact` 与分块读取核对首中尾文件。
+7. 长任务至少触发三次真实 Compact，要求每次显示进度动画、generation 单调增加、上下文回落后仍沿同一
+   task/owner 继续，最终客观核对 25 份输入和 400 行汇总。
+8. 递归 child 必须让 coordinator 创建至少两名孙代理；每个 `task_workspace_dir`、产物与状态路径都在同一
+   根任务下，父级直接读取声明产物，Gateway 不得再出现 `outside its owner task`。R106 取得失败样本；R107
+   fresh TUI 已验证 coordinator 与两名 depth-2 child 共用同一 canonical task root，父级可读三份产物且日志
+   零路径拒绝。
+
+资源采样必须同时列 exact 本轮 TUI PSS、全部 TUI PSS、Gateway PSS、runner inflight 与系统 available；结束
+后再采一遍空闲高水位。`.7` 只有恢复 SSH 后才能做 8GiB 同负载对照，不能拿历史值代替。
+
+本轮结果：R106 u256--u269 的 14 个场景均已取得终态或明确失败证据；长上下文用例真实完成 25 份输入、
+422 行总报告和 7 次 Compact。R107 `ma-matrix-r107-110-u270-nested-root` 另取得递归修复正证：Python/Go/
+coordinator summary 分别为 363/331/122 行，三个 agent state 的 `task_workspace_dir` 完全一致。R107 切换前
+远端 stage 上 workspace/write-boundary focused 全过；真实 TUI 仍是产品通过证据，focused 不替代它。
+
+## 2026-08-30 R105 多用户 TUI 功能与资源矩阵
+
+所有产品结论均从真实 TUI 普通中文输入取得；focused tests 只作开发护栏。单机保持一个 Gateway，每个用例
+使用不同 owner，启动前公开 tmux 名称。当前 `.10` 会话为 `ma-matrix-r105-110-u246-*` 至 `u255-*`：
+
+1. Skill：搜索索引、按需读取 2 个正文、生成审计报告；不逐个测试可增删 Skill 内容。
+2. 权限：自己工作区写入、外部 HTTPS、不可见宿主路径和宿主负证据；成功与失败都核对结构化 scope。
+3. Memory/工作区：三个唯一事实写入后精确搜索；另一个 owner 不可见；任务目录保持 input/work/output 规划。
+4. 子代理控制：4 child 运行时给 exact child 插话、取消另一个、其余继续；父代理立即收到用户消息，不等待
+   全体 child。取消 child 后父代理可为未覆盖职责另派新 child，但旧 attempt 必须保持 CANCELLED。
+5. PTY/进程：真实审批、交互 Python、后台 HTTP 启停、端口残留核对；工具账本另覆盖大文件分块、搜索、
+   补丁、故意错误恢复、网络和 managed background。
+6. 会话与 Compact：`/status`、`/context`、`/effort`、多阶段连续任务；R106 另以 fresh TUI 验 `/sessions` 和
+   WorkspaceOnly 成功回执，不能用本地测试替代。
+
+本地候选定向命令：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_sandbox.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_chat_control_runtime.py agent_py_agent/tests/test_tui_input.py -q --tb=short
+```
+
+前者 26 passed，后者 72 项通过。累计改动超过 10,000 行，本轮收尾允许且只执行一次全仓 pytest；在此之前
+继续 focused，避免重复浪费。
+
+## 2026-08-29 exact child 停止与远程工具清单真 TUI 验收
+
+本轮必须同时覆盖“用户看到什么”和“底层最后写成什么”，不能只用 HTTP 200 或模型口头说明判定通过：
+
+1. 在同一 Gateway 创建至少三名直属 child，分别用详情页 Esc 和主代理自然语言触发
+   `cancel_subagents`；核对 exact run/attempt 被 signal，兄弟状态不变。
+2. 在停止受理后继续观察 canonical store，确认 `accepted` 最终进入 `CANCELLED`，旧 runner snapshot 与
+   heartbeat 不能把终态写回 RUNNING；重复 stop 必须复用同一受理事实。
+3. 让普通远程 user 用自然语言明确“只调用一次 `list_tools`”；核对工具结果、模型列举、provider Schema
+   都来自同一 `ToolRuntimeSnapshot`。清单不能为空，也不能出现 root-only、内部或当前环境 unavailable 工具。
+4. 每次真机只保留一个 Gateway，并同时核对 TUI 顶栏、provider usage 和 listener，而不是用不存在的
+   `/health` JSON 合同猜服务是否正常。
+
+真机记录：r56 TUI `ma-fullcov-r56-stop-ack-retest`，child
+`subagent-1787994403-6708c63b`，accepted 约 6.06 秒、canonical terminal 约 9.62 秒；r57 TUI
+`ma-fullcov-r57-list-tools`，request `gwreq-1787995416-c5e8b37d4bfe41cbbf03eda6bf63eedd`，一次
+`list_tools` 返回 30 visible/30 executable。r57 两次物理 MiniMax 调用约 112 秒，慢点在模型请求，不在
+清单 handler；该样本有 cache creation 28,990、cache read 18,667、output 500。
+
+定向回归：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_gateway_agent_control_service.py \
+  agent_py_agent/tests/test_orchestration_cancel_subagents_tool.py \
+  agent_py_agent/tests/test_runner_session_pool.py \
+  agent_py_agent/tests/test_chat_client_context.py \
+  agent_py_agent/tests/test_tool_manifest_contract.py \
+  agent_py_agent/tests/test_tool_runtime_scope.py \
+  agent_py_agent/tests/test_tool_progressive_disclosure.py \
+  -q --tb=short
+```
+
+结果为 74 passed；测试机单独运行 manifest/runtime-scope 为 12 passed。真实 IM、fresh capability 审批链、
+active Audit、Windows PTY、macOS 右键与浏览器依赖缺失场景继续记未覆盖，不能由上述 focused 冒充通过。
+
+## 2026-08-29 单 Gateway 双用户隔离与 Shell 可见范围
+
+多用户回归不能只检查文件工具。至少两个不同 owner 的真实 TUI 必须同时连接同一个 Gateway，分别验证：
+自己的文件写/读/改、自己的 `run_command` 写/读、文件工具跨 owner 读写在 handler 前拒绝、跨 owner
+`working_dir` 在 handler 前拒绝，以及命令文本内嵌另一个 owner 的绝对路径时由 OS 沙箱隐藏且没有宿主副作用。
+最后一种不能解析任意 shell 文本猜权限；它必须返回 `owner_workspace_only`、
+`external_host_paths_hidden=true`、`host_path_absence_proven=false`，防模型把沙箱内 `ENOENT` 说成宿主路径不存在。
+
+`run_command` 已返回最终退出码，模型工具说明禁止追加 `; echo $?` 或其他恒成功后缀遮蔽前序失败。测试仍需
+保留这个反例：若供应商自行遮蔽，底座只能诚实记录最终 shell 退出码，不能从 stdout 文本反推副作用；下一
+fresh 回合应使用未遮蔽命令得到 `COMMAND_FAILED`，operation ledger 为 failed，目标文件不存在。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_sandbox.py \
+  agent_py_agent/tests/test_path_access_owner_scope.py \
+  agent_py_agent/tests/test_main_owner_scope_default.py \
+  agent_py_agent/tests/test_remote_owner_workspace_scope.py \
+  -q --tb=short
+```
+
+本地与 `.7` 同组均为 49 项通过。真实 TUI 为 `ma-fullcov-r48-u10-isolation`、
+`ma-fullcov-r48-u11-isolation`，唯一 Gateway `ma-gateway-fullcov-r38` 使用 MiniMax-M2.7；最终 request
+`gwreq-1787985268-fd590c551b054c53afb1947caee696a0` 返回 `COMMAND_FAILED/return_code=1`，模型逐项
+说明三项 sandbox scope，宿主核对没有 `cross-shell-u10-r49b.txt`。
+
+## 2026-08-28 旧验收链与无副作用 package import 退役
+
+开发护栏覆盖两组事实：fresh runtime.db 不再创建 `tasks.status`、`task_runs.current_contract_id`、
+`acceptance_contracts` 或 `validator_operations`，repository 也不再暴露 `closeout_task_run`；同时任意先导入
+`conversation.agent_thread` 都不能因 `agent_core/__init__.py` 提前装载 subagent runtime 而循环失败。存量库
+旧列/表不做破坏性 DROP，仍需由真实升级样本证明新代码完全不读写它们。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_runtime_db_main_chain.py \
+  agent_py_agent/tests/test_runtime_db_delivery.py \
+  agent_py_agent/tests/test_runtime_db.py \
+  agent_py_agent/tests/test_runtime_db_operations.py \
+  agent_py_agent/tests/test_runtime_db_recover_stale.py \
+  agent_py_agent/tests/test_subagent_lifecycle_service.py \
+  agent_py_agent/tests/test_agent/test_subagent_lifecycle.py \
+  agent_py_agent/tests/test_conversation_agent_activity.py \
+  agent_py_agent/tests/test_conversation_store.py \
+  agent_py_agent/tests/test_gateway_agent_control_service.py \
+  agent_py_agent/tests/test_subagent_persistence_service.py \
+  agent_py_agent/tests/test_subagent_runtime_compact.py \
+  -q --tb=short
+```
+
+这些 pytest/静态检查只算开发护栏，不算产品验收。最终最低标准是：部署到测试机唯一 Gateway，模型固定
+MiniMax-M2.7，以提前公开名称的 fresh tmux 启动真实 TUI，通过普通中文提示完成一次工具/子代理/自然终稿
+链路，并确认没有第二套 acceptance 硬门、循环导入或退出异常。
+
+### 2026-08-29 零调用旧判官清理补充
+
+8 份历史 Gateway coverage 只用来找候选，不能把 Feishu、WeCom、Windows、迁移或管理 CLI 的 TUI 0%
+直接判死。删除必须再满足：全仓生产 import/动态注册检索为零、只有模块自己的测试引用、现行 typed 主链已有
+唯一替代。按此标准删除旧 `acceptance_contract`、`target_coverage_ledger`、`subagent_outputs`、
+`recovery_batches`、`progress_fingerprint` 和旧 `dispatch/progress_payload`，并同步删除只验证这些孤立实现的测试。
+
+验证顺序：先跑受影响的 contract/dispatch/import focused tests，再跑一次全仓 pytest；随后执行 Ruff、文档同步、
+strict code-size、diff 与 clean-package。最终仍必须在 `.7` 的唯一 Gateway、MiniMax-M2.7、提前公开 tmux 名称的
+真实 TUI 长任务中验证八路 child、Compact、主代理整合和自然终稿；coverage 只证明执行到哪里，不替代 TUI。
+
 ## 2026-08-28 WorkspaceOnly/Full Access 与 Compact 恢复余量
 
 权限回归必须覆盖：默认本地/远程 owner home、显式 local/main Full、远程 Full 降权、owner 策略只收窄、
@@ -14,7 +182,10 @@ transport 异常必须恢复原 IR 并累加失败熔断；供应商正常完成
 这一次模型调用，用 typed IR/raw transcript + operation evidence 生成有界机械续接摘要并推进有效 generation。
 候选完成计量后仍高于 recovery target 时，必须恢复原 IR、保持 failure count 不变并发布
 `superseded/candidate_discarded`；TUI 要静默撤下该块，不得冻结红色失败，随后同代 transcript operation 必须
-仍能启动。真正的摘要 transport、checkpoint 与 CAS 异常继续发布 `failed`。
+仍能启动。真正的摘要 transport、checkpoint 与 CAS 异常继续发布 `failed`。live 摘要还必须通过
+`compact-live-handoff.v1` 固定结构校验：缺字段、只有“下一步”短句，或包含供应商私有工具协议/XML 调用时，
+只能退回 typed IR 的 `compact-mechanical-fallback.v1`；伪工具正文不得执行、不得进入下一轮续接。明确只读、
+不要修改或不要落盘的研究任务必须在对话中交付，不能被通用“研究要写报告”软提示反向诱导创建文件。
 
 ```bash
 python3 -m pytest \
@@ -32,6 +203,7 @@ python3 -m pytest \
 
 python3 -m pytest \
   agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py \
+  agent_py_agent/tests/test_compact_semantic_summary.py \
   agent_py_agent/tests/test_gateway_conversation_compact.py \
   agent_py_agent/tests/test_gateway_streaming.py \
   agent_py_agent/tests/test_tui_runtime.py \
@@ -40,6 +212,11 @@ python3 -m pytest \
   agent_py_agent/tests/test_subagent_runtime_compact.py \
   -q --tb=short
 ```
+
+2026-08-29 新增两类真实反例：MiniMax-M2.7 在 live Compact 中返回了
+`<minimax:tool_call><invoke name="write_file">...`，以及只返回“数据已核对，写入报告”的半句动作。focused
+回归要求两者都使用 typed fallback，保留当前任务、用户只读限制、真实 call id/result，并排除伪路径和伪工具
+标签。真实 TUI 复验还要核对 Compact 后不重读同一批文件、不创建被禁止的报告、最终正文直接可见。
 
 上述两组本地均通过；本轮权限与 Compact/TUI 两组 focused 共 536 项通过、9 项按平台跳过。生产与测试改动
 少于 10,000 行，按项目约定
@@ -301,7 +478,7 @@ r44 不通过。第六候选必须证明：
 
 - `SandboxPolicy.uncontained_by_parameter` 只能引用同一工具 schema 已声明字段；
 - `terminal_session.start` 未批准时 `ask` 且 handler 不执行；
-- `write/read/close` 复用已批准 PTY，不重复弹窗；
+- `list/write/read/resize/close` 复用已批准 PTY，不重复弹窗；
 - manifest 完整投影 uncontained mapping，不在 ActionPolicy 按工具名猜。
 
 扩大后共 293 项 focused 全部通过；语法、全项目 Ruff、doc-sync、strict
@@ -1477,18 +1654,17 @@ UI 验收前提，参考客户端使用 loopback deterministic Anthropic fixture
 process sandbox 回归需证明 canonical `task_work_dir/.sandbox-tmp` 承载 `/tmp`，项目 cwd 不出现
 `.sandbox-tmp`，owner-scoped 环境的 `TMPDIR=/tmp`、`XDG_CACHE_HOME=/tmp/.cache`。
 
-写后验证新鲜度回归必须覆盖“verify 成功→workspace mutation→read/search→plain final”仍产生一次软核对；
-同一 verification event 不循环提醒，执行新的真实 verify 后才能形成新周期。验证 envelope 必须从
+写后验证新鲜度回归必须覆盖“verify 成功→workspace mutation→read/search→plain final”的 stale 事实仍能
+进入下一次模型上下文和审计 metadata，但不得覆盖 plain final 或自动追加模型调用。验证 envelope 必须从
 `metadata.handler_details` 读回。模型调用账本还必须证明明细超过 `max_records` 后 request/run 的 logical、
 physical、provider attempt/retry、status 与 input/output/cache-read/cache-write token 累计不截断；
 真实 provider usage 与估算调用必须分开计数，旧任务 response 的 128 不能再当精确总数。
 
-完成收口与 operation 审计要分层回归：`succeeded mutation -> not_started tail` 仍保留 partial 审计，
-但 no-effect 尾部不能触发整项 `OPERATION_INCOMPLETE`。末尾 `failed/not_started` 与 plain final 冲突时，
-必须先把 `completion_conflict.v1` 和被拒绝草稿送回同一 active turn，原工具 schema 仍可调用；至少覆盖
-“第一轮返工调用修复工具并形成 succeeded”“连续两次只口头完成后才安全收口”“新的失败 call id 不重置
-全 turn 返工预算”。`unknown/cancelled/incomplete/unverified` 不得进入通用带工具返工，显式 required action
-仍使用自己的结构化 gate，不能借该路径绕过。owner-scoped shell 环境还必须证明 `TMPDIR=/tmp`、`XDG_CACHE_HOME=/tmp/.cache`、
+完成收口与 operation 审计要分层回归：`succeeded mutation -> not_started tail`、failed 和 unknown 都继续
+留在 typed operation ledger；普通模型看过这些结果并给出 plain final 后立即自然结束，不得出现隐藏
+completion conflict、Todo closeout 或 stale followup。模型在正常下一次采样中主动调用修复工具仍应可用；
+`unknown/cancelled/incomplete` 的执行期安全门和显式 required action 继续使用自己的结构化 gate，不能借删除
+普通完成判官而绕过。owner-scoped shell 环境还必须证明 `TMPDIR=/tmp`、`XDG_CACHE_HOME=/tmp/.cache`、
 `NPM_CONFIG_CACHE=/tmp/.cache/npm`，同时 `HOME` 只读边界和凭据擦洗不变。
 
 终端交互 命令/输入追补至少覆盖：`/context` 使用自动 compact 同一估算而不写状态；手动 `/compact` 取得
@@ -2017,3 +2193,527 @@ python3 -m pytest \
 以上完整 focused 与 Ruff、doc sync、strict code-size、diff、clean-package 严格 gate 已通过。
 `ae3fd1e` 推送部署 `.7` 唯一 Gateway 后，原 r55 会话中新 MiniMax-M2.7 请求的 chunk 2--94 为
 `thinking_delta`、95 为唯一 `assistant_thinking`、96--117 为 `model_delta`；真实 TUI 最后一块为 final。
+
+## 2026-08-28 TUI 功能逐项与可达覆盖验收
+
+真实验收以 `.7` 的唯一 Gateway、MiniMax-M2.7 和事先公开名称的 tmux TUI 为准。测试按
+`TUI_EXTREME_TEST_MATRIX.md` 的功能编号逐项执行，不用一个大 prompt 代替输入、历史、命令、滚动、复制、
+流式过程、工具、子代理、Compact、恢复和安全边界各自的操作证据。Gateway 与 TUI 同时用 coverage 启动，
+覆盖报告用于发现尚未经过真实入口的实现；不能把行覆盖率等同于功能正确。
+
+短时 footer notice 必须在截止时主动触发最后一次重绘：到期前保持动画刷新，到期后的第一 tick 清空文字并
+额外 invalidate 一帧，随后空闲时停止周期刷新。定向回归入口：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_tui_threading.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  -q --tb=short
+```
+
+TUI 无法天然触达的 Feishu/WeCom 回调、Windows 专属路径、损坏数据库迁移等入口必须在最终矩阵单列为
+“TUI 不可达”，可补 focused 测试，但不得伪称已经由 TUI 操作覆盖。
+
+输入历史还要覆盖“同一进程刚提交”的消息：写入 FileHistory 后必须重置 prompt_toolkit 的 working-lines
+快照，空输入 Up 立即取回本轮最后一条（含多行），Down 恢复提交前空草稿；只改 Document 文本而不重置
+历史游标不算通过。对应完整应用回归位于 `test_tui_prompt_toolkit_pipe.py`。
+
+`/remember` 与 `/memory` 必须通过真实 TUI 单独操作。记忆请求在后台执行，输入框在慢存储期间仍可继续
+编辑；写响应丢失只显示“结果未知”，不得显示确定失败或自动重复写。默认 `quota.v2.max_disk_mb=0` 下不得
+调用 owner 全树用量扫描；旧未修改 100GB seed 升级为 0，管理员自定义非零策略仍保留并继续执行配额门。
+focused 回归入口：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_chat_client_context.py \
+  agent_py_agent/tests/test_chat_control_runtime.py \
+  agent_py_agent/tests/test_tui_input.py \
+  agent_py_agent/tests/test_home_layout.py \
+  agent_py_agent/tests/test_owner_policy_and_grants.py \
+  agent_py_agent/tests/test_owner_memory_skills_effective_flags.py \
+  agent_py_agent/tests/test_owner_quota.py \
+  -q --tb=short
+```
+
+首个文件写入还必须验证“真实 handler 所用 cwd”，不能只断言晋升后的 attrs。真实 TUI 已复现：首个
+`write_file` 写在 owner 根，而随后 `apply_patch` 按新 task root 查找并报 `PATH_NOT_FOUND`。回归现在同时
+覆盖相对路径与模型在晋升前生成的 owner-root 绝对路径，要求一次调用内按以下顺序完成：结构化任务晋升 →
+同步 `run_workspace/execution_cwd/runtime roots/rebase source` → 重建 call 与 write boundary → policy/handler。
+取消发生在执行前时不得因这条准备链创建 task。定向入口为：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_gateway_chat_conversation_context.py::test_first_gateway_mutation_executes_in_promoted_task_workspace \
+  agent_py_agent/tests/test_runtime_gate_ledger.py \
+  -q --tb=short
+```
+
+普通工具失败必须同时验证“工具事实”和“turn 是否自然结束”。真实 TUI 用明确要求的 `exit 7` 证明：工具已
+准确返回 stdout/stderr/return code 后，旧 completion conflict 仍额外调用模型 5 次并留下 Working。回归现要求：
+
+- 第一次模型调用发出失败工具，第二次模型调用看见真实结果后给出 plain final，随后立即结束；
+- operation verification 仍保存 `failed`，但不能把模型 final 改成 `OPERATION_INCOMPLETE`；
+- 模型若在第二次采样主动选择另一修复工具，仍可继续同一 active turn，修复成功后再自然 final；
+- Todo open、写后验证 stale 和较早失败只能留在 prompt/ledger 供模型判断，不能在 plain final 后自动注入
+  provider call；UNKNOWN 副作用、权限、危险路径和取消门保持 fail-closed。
+
+定向入口：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_current_turn_execution.py \
+  agent_py_agent/tests/test_runtime_guidance.py \
+  agent_py_agent/tests/test_cli_resume_contract.py \
+  agent_py_agent/tests/test_config_validation.py \
+  -q --tb=short
+```
+## 2026-08-28 TUI `/btw` 单次终稿与 slash 目录回归
+
+- `test_tui_runtime.py` 新增 Gateway consumed 回执晚于 `model_delta` 的真实顺序：补充用户消息晋升后，终态
+  summary 只能留下一个 assistant block，不能重复整段最终回复。
+- `test_tui_input.py` 固定显式 `/btw` 在进入持久 control outbox 的同时生成可见 pending steer，并覆盖
+  `/expand`、`/expand last`、`/expand N` 与未知参数；帮助目录继续作为补全和中文说明唯一事实源。
+- 本切片初版运行 `test_tui_runtime.py test_tui_input.py test_tui_control_delivery.py` 共 89 项通过；随后增加
+  “`assistant_final` 先到、consumed 后到”顺序回归，并与 renderer 一起共 129 项通过。`test_tui_stateful.py`
+  需要 Hypothesis，当前本地与测试机 venv 均未安装，未把 collection error 冒充用例失败。
+- `.7` fresh `ma-cleanup-welcome-r6` 已验中文欢迎页、`/help`、`/audit resume` 与 `/expand last`；
+  `ma-cleanup-steer-order-r7` 已验运行中 pending、accepted、正确历史位置、单次终稿和空闲 rejected 三态。
+
+## 2026-08-28 Rich TUI `/context` 单一事实源回归
+
+- `test_tui_renderer.py` 固定详细报告直接消费与底栏相同的 `TuiContextUsage`，覆盖 native 分类、无快照、
+  window/trigger/compact generation；`test_tui_input.py` 固定 `/context` 不进入 Gateway control reconciler。
+- 相关 renderer/input/runtime/control/compact 共 167 项通过；Ruff、文档同步、strict code-size 与 diff check 通过。
+- `.7` fresh `ma-cleanup-context-r8` 用 MiniMax-M2.7 普通回合生成真实 preflight 快照后执行 `/context`：详情
+  `30,563/128,000（23.9%）` 与同屏底栏 `~30.6k/128.0k · 24%`、90% 压缩点、compact 0 一致。
+
+## 2026-08-28 后台 session handle 与真实 listener PID 回归
+
+- `test_process_sessions.py` 与 `test_shell_background.py` 共 25 项在本地 Mac 和 `.7` Linux 测试机通过：
+  模型可见启动/状态只保留稳定 `session_id`，持久 record 内部 PID 不变；`/proc/net/tcp` 的 socket inode
+  owner 精确投影为排序后的 `listener_pids`，并携带宿主权威/沙箱可能不可见的结构化说明。
+- 旧跨进程测试补齐当前 protected-path 参数，并用沙箱内可见的标准命令代替仓库 venv 绝对路径；这是测试
+  合同修复，不改变生产沙箱根。Ruff、doc sync、strict code-size、diff check 本地通过。
+- `.7` fresh `ma-cleanup-process-pid-r10` 使用 MiniMax-M2.7 启动 0.0.0.0:18083：工具返回
+  `listener_pids=[1563961]`，宿主 `ss` 同为 1563961，最终把 `bg-...` 管理句柄与 OS listener PID 分开，
+  没有再用沙箱 `ps/lsof` 反证，并明确外部局域网未验证。
+- r9 自动 compact 的事实与底栏 `compact 0` 相悖、session approval 未按界面字面复用、模型首轮仍附 `&`
+  及一次路径双重嵌套均作为独立开放问题记录，不因 PID 主合同通过而隐去。
+
+## 2026-08-28 Gateway 客户端断连回归
+
+- `test_gateway_http.py` 明确覆盖 EPIPE、ECONNRESET、ECONNABORTED 三种正常客户端离开；同时钉死 ENOSPC
+  与 JSON 序列化错误必须继续抛出。`test_gateway_bounded_http_server.py` 继续覆盖 worker 复用、过载和停机回收，
+  两文件共 25 项通过。
+- `.7` 唯一 Gateway PID 1564837 下启动 fresh `ma-cleanup-brokenpipe-r11`，从 TUI 提交普通 MiniMax 请求后
+  0.35 秒输入 `/exit`。客户端 tmux 正常退出，后台请求 `gwreq-1787928364-...` 仍在 6.175 秒后 status=done，
+  Gateway 当前启动段没有新增 BrokenPipe traceback；历史计数前后均为 9。
+
+## 2026-08-28 Gateway 权威状态与 Audit 表达轮回归
+
+- `test_gateway_status_tool.py` 5 项固定 validated PID、真实 8420/status endpoint、MiniMax-M2.7/config identity、
+  旧生命周期异常排除、零新字节不冒充 quiet，以及 model tool 不返回原始日志或 API key。
+- `test_gateway_commands.py` 与上述文件合计 32 项通过；`test_runtime_guidance.py -k 'natural_reply or audit_prepare'`
+  相关 12 项通过、1 个既有 xfail。表达轮首个越权工具被回注为配对失败，二次越权不提拔前言。
+- `.7` `ma-cleanup-audit-r12/r13` 使用相同 Audit 普通中文需求：请求
+  `gwreq-1787934530-...`、`gwreq-1787934724-...` 都只调用一次 `gateway_status`，不扫描端口且完整收口。
+  `gwreq-1787934789-...` 原样返回 `MiniMax-M2.7 / 8420 / running`；`gwreq-1787934949-...` 返回本生命周期
+  `quiet / 132 bytes / 0 exceptions`。测试期间始终为单一 Gateway listener。
+
+## 2026-08-28 Compact 精确事实续接回归
+
+- `test_gateway_conversation_compact.py` 新增“摘要 backend 故意漏掉网页标题”的失败优先用例：Compact 结果仍须
+  保留用户原请求与 assistant final 中的 `Welcome to Python.org`，并排除带
+  `assistant_part_id=commentary:*` 的过程话。
+- 第二条回归连续生成两代摘要，要求旧网页标题与新 `result.txt` 两行同时存在，规范锚点标题只出现一次，
+  同一 final 不重复。已有 operation evidence 测试同步改为允许非权威锚点后缀，权威操作账仍排在其后裁决。
+- 12K 小窗口长中文历史回归继续通过，证明锚点预算会缩小且不会让 Compact 候选错过 recovery target；空模型
+  回复仍走机械摘要并附同一有界锚点。
+- 本地定向入口：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_gateway_conversation_compact.py -q --tb=short
+ruff check agent_py_agent/agent/conversation/compact.py agent_py_agent/tests/test_gateway_conversation_compact.py
+```
+
+- `.7` fresh `ma-cleanup-compact-r23` 已用 MiniMax-M2.7 建立网页标题、三行文件与交付字段，手动
+  `/compact` 显示 indeterminate 动画并提交 generation 1；随后明确禁止工具的追问一次答全。canonical
+  `thread-ce7d87bd859a499f` summary 为 1447 字符、唯一 landmark heading、七项值均命中，终轮
+  operation count 为 0；测试期间仍只有 PID 1584804 监听 127.0.0.1:8420。
+
+## 2026-08-28 Gateway 会话级工具审批回归
+
+- `test_gateway_verbose_progress.py` 不再复用同一个 writer 制造假通过：第一轮 writer 接收
+  `approved_session`，第二轮新 writer 绑定同一 Agent cache/scope，必须不调用等待桥、不得发布新的
+  `permission_requested`，只留下 `permission_resolved/session_cached=true`。
+- 同文件覆盖精确 scope 与 LRU：cwd 或 access 模式变化得到不同 digest；每作用域和作用域总数超限时淘汰
+  最旧记录，淘汰后的行为是重新询问而不是默认批准。
+- `test_tui_renderer.py` 固定审批框和工具等待子行全部中文：`是否继续执行？`、`等待授权…`、`Esc 取消`、
+  `Tab 补充说明`。
+- 本地与 `.7` 定向命令均为 78 项通过，Ruff 通过：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_gateway_verbose_progress.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  -q --tb=short
+```
+
+- `.7` fresh `ma-cleanup-approval-r26`：18476 首轮请求
+  `gwreq-1787945550-4e1536ab165d4cf2bedc530fe66e2a85` 显式选择 session；相同参数后续请求
+  `gwreq-1787945597-85d86cda206b4bdf89253cd526adf9d8` 没有 approval overlay，chunk 只有 cached
+  resolved；18477 反例 `gwreq-1787945634-93c7cb5387224cb080b9aaa6b9b630e7` 重新询问并取消。
+
+## 2026-08-29 后台命令立即退出不得冒充启动成功
+
+- `test_shell_background.py` 固定三种首结果：长命令在 0.5 秒观察期后仍活着，返回
+  `status=started/session_id` 且不公开 OS PID；立即零退出返回 `status=exited/exit_code=0/output_tail`；立即
+  非零退出返回 `COMMAND_FAILED/effect_outcome=failed/status=exited` 和真实退出码、日志尾部。
+- `test_process_sessions.py` 的后台命令改为沙箱内可见且长于观察期的标准命令，继续覆盖有界 wait、跨进程
+  水合、稳定 session handle 和完整进程树 stop。观察期只增加约 0.5 秒，不把正常后台服务阻塞到终态。
+- 本地与 `.7` 定向命令均为 27 项通过，Ruff 通过：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_tools/test_shell_background.py \
+  agent_py_agent/tests/test_process_sessions.py \
+  -q --tb=short
+ruff check \
+  agent_py_agent/agent/tooling/shell.py \
+  agent_py_agent/tests/test_tools/test_shell_background.py \
+  agent_py_agent/tests/test_process_sessions.py
+```
+
+- `.7` fresh `ma-cleanup-background-r27`：首次 `gwreq-1787946133-...` 启动 18478 并返回稳定 session；第二次
+  `gwreq-1787946178-...` 复用同会话审批，但工具在 1.01 秒进度内明确失败，模型最终报告端口占用和
+  `exit_code=1`，没有把第二个 session 当作运行中服务。测试后 18474--18478 均无监听。
+
+## 2026-08-29 直属 child 当前快照、终态 Todo 与过程灰色真 TUI
+
+- `test_runtime_guidance.py` 覆盖 7 DONE/1 RUNNING 后刷新为 8 DONE、排除其它 root、child 只看自己的
+  grandchild、部分加载错误不得宣称 all-terminal、Compact/rebuild 重建以及稳定状态字节完全一致。
+- `test_conversation_store.py` 固定 task link 的 typed status/current_step 同步到 canonical state 和派生
+  current summary；`test_conversation_agent_activity.py` 固定终态只清空 display plan，不删 child roster 或
+  durable ledger；`test_tui_renderer.py` 固定 process Markdown 全部灰色而 final 保持正文色。
+- 本地组合 focused 与 Ruff 均通过：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_runtime_guidance.py \
+  agent_py_agent/tests/test_conversation_agent_activity.py \
+  agent_py_agent/tests/test_conversation_store.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  -q --tb=short
+ruff check \
+  agent_py_agent/agent/agent_core/runtime/guidance.py \
+  agent_py_agent/agent/agent_core/_tool_loop_service.py \
+  agent_py_agent/agent/conversation/agent_activity.py \
+  agent_py_agent/agent/conversation/store.py \
+  agent_py_agent/cli/chat_parts/tui_block_renderer.py
+```
+
+- `.7` 单 Gateway fresh `ma-cleanup-compact-tree-r35` 使用 MiniMax-M2.7 和原样 Prompt 3：一次创建 8 个 child；
+  child 数按 8→5→2→1→0 收敛；通道运行时 child 从约 113.4k 触发真实 Compact，降到约 63.7k、行内
+  `compact 1` 后自然 DONE；main 新工作片明确收到 8 个 exact DONE id，同轮读取全部 8 份报告，写出
+  321 行/10,888 bytes 的 `reports/横向对比报告.md` 并自然最终回复。终屏 Working 与 stale `完成 0/9`
+  Todo 均收起，8 个完成 child 行仍可进入；`work/state.json` 和 `work/summaries/current_summary.md` 同为 DONE。
+
+## 2026-08-29 PTY resize/list 与 exact conversation scope
+
+- `test_pty_sessions.py` 用真实 Python REPL 钉住：start 只返回稳定 `pty-...` 而不公开 OS PID；同 scope list
+  只见本会话；`resize(columns=100, rows=30)` 经内核回读为 100×30；write/read cursor 与 close 继续正常。
+  scope equality 新增 conversation id 反例，同 owner、同目录但另一 TUI 会话不能列出、读写或关闭该 PTY。
+- `test_tool_runtime_unification.py` 扩展既有 transport 合同：start 仍需 exact approval；随后
+  list/write/read/resize/close 都走同一已批准 session transport，不重复弹窗。工具 Schema、manifest 与
+  handler action 一致，未知 action 继续在 handler 前失败。
+- r28 修复前证据：`gwreq-1787946826-bad6befe2a34419dab0ff231148fae45` 的第 7 工具轮因编造 list action
+  返回 `TOOL_INVALID_ARGUMENTS`；模型写入 resize ESC 后，PTY 内核仍报告 80×24，却在最终表中写“成功”。
+  `.7` fresh r29 原样复验请求 `gwreq-1787947377-1b918742122e4a0baf68204faead62b4` 已直接返回 list 和
+  100×30 内核尺寸，最终不出现 OS PID；工具轮从 10 降为 6，PTY close 后无活动会话残留。
+
+## 2026-08-29 同 TUI 连续 slash 与真实 `/stop`
+
+- `.7` `ma-cleanup-terminal-r29` 在完成 PTY 长链后继续原会话：`/remember` 写入代号/颜色/编号，`/memory`
+  立即检索命中；普通模型回合在 canonical task root 创建 `prompt-r29.txt`，随后相对路径
+  `/prompt-file prompt-r29.txt` 成功装入；`/show-prompt 请只回答：R29` 展示最终 prompt，并得到
+  `R29 [PROMPT-R29]`。这证明 slash、task-relative prompt file 和同会话连续工作未因前一任务丢失。
+- 随后普通中文要求执行 30 秒前台等待，工具真实开始后从同一输入框提交 `/stop`；TUI 在期限前进入
+  interrupted、恢复输入，宿主 `pgrep` 无残留 sleep，唯一 Gateway PID 1595234 未重启。请求
+  `gwreq-1787947706-5aa0fb7aad384da0a879057ba7bbfe45` 的工具终态为已执行但结果未知，未冒充成功。
+- 中断中文投影的 renderer/runtime/view-model 与 control 定向回归共 119 项通过；`.7` fresh r30 请求
+  `gwreq-1787947950-297362d6af4f46d58bbb9b7c3cf29489` 再次中断真实运行工具，已显示
+  `已中断 · 接下来希望 my-agent 怎么做？`，输入恢复且无 sleep 残留，不是静态 fixture 自证。
+
+## 2026-08-29 同 TUI `/goal` 完整生命周期
+
+- 继续使用 `.7` 的 `ma-cleanup-stop-r30`，通过真实输入依次执行创建、查询、暂停、修改、恢复、再次查询、
+  具名清除和清除后查询；目标名为 `tui-r31`，没有绕过 TUI 修改持久状态。
+- 目标运行时提交 `/goal` 能立即返回“运行中”和已用时间；`pause` 后底部 Working 消失，`resume` 后恢复；
+  修改后的目标正文在查询中保持一致。具名 clear 返回 `Goal“tui-r31”已停止。`，随后查询明确
+  `当前没有持续目标。`。
+- 该轮同时证明控制消息不会等待后台主代理或所有子工作完成才被接收；目标 clear 后没有遗留 active goal，
+  唯一 Gateway 仍为 PID 1595234。普通任务仍不自动进入 `/goal`，本测试没有改变该产品边界。
+
+## 2026-08-29 子代理 owner workspace 可写祖先冲突回归
+
+- 修复前真实证据来自 `.7` `ma-cleanup-subagents-r31`：八个 child 的
+  `allowed_write_roots` 都位于 `/root/.my-agent/owners/local/main/...`，默认 deny 却含 `/root`；长期助手 与 会话运行时
+  child 的 `git clone` 在正式 task/agent 根均返回 `Read-only file system`，转到沙箱 `/tmp` 才能继续。
+- focused 回归必须证明 `_default_forbidden_write_roots()` 不再含宿主 home 本身，同时仍含
+  `Desktop`、`Downloads`、`.ssh`；已有 local workspace exact reconciliation、remote explicit deny 和 bwrap
+  read-only carveout 测试继续通过。
+- `.7` fresh 验收必须从新 TUI 新建 child，因为已创建任务的权限合同是不可变历史。child 应能在自己的
+  canonical agent workspace 写 sentinel/clone；尝试 `.ssh` 必须仍失败，唯一 Gateway 与 MiniMax-M2.7 不变。
+
+## 2026-08-29 同轮工具批次不丢调用回归
+
+- `test_tool_round_chunks_excess_calls_without_fake_failures` 固定
+  `max_tool_calls_per_round=2` 并一次提交 5 个读取，断言 5 个 handler 全部执行、5 个结果均为真实成功、
+  上下文中不再出现“剩余调用没有执行”。
+- `test_parallel_batch_limits_cap_segments_without_dropping_calls` 分别覆盖
+  `max_parallel_tool_calls` 和历史 `max_tool_calls_per_round`：并发峰值都为 2，但 5 个结果仍按 provider 顺序
+  完整记录。取消、Compact 与耐久上下文切换的原有未启动结果测试继续保留，不能因本修复放掉客观中断。
+- `test_subagents_active_receipt_keeps_root_turn_interrupted` 断言主代理等待 child 的自然回执为
+  `unfinished/SUBAGENTS_ACTIVE/subagent_lifecycle`，共享 turn-end 归一为 `interrupted`，不能再被任务链接当作
+  普通 completed。
+- 真实验收必须在 `.7` 唯一 Gateway、MiniMax-M2.7 和事先公开的 fresh tmux 中原样运行八路调研 Prompt 3；
+  重点核对 main 是否把同一次 8 个报告读取实际执行成 4+4、完整整合后才 final，不能用 fake backend 代替。
+
+## 2026-08-29 effective workspace 与运行目录单一事实源回归
+
+- `test_workspace_only_constructor_roots_share_one_effective_runtime_home` 使用同一 owner home 和两个不同的
+  constructor cwd 创建 `SimpleAgent`，断言两者的 effective workspace、subagent workspace、conversation
+  workspace 与 local store 完全相同。这个用例专门防止 CLI、Gateway worker 和直接构造入口各算一套
+  child/runtime 家，不能只断言每条路径“都在 owner 目录里”。
+- `test_gateway_request_runtime_errors.py` 与 `test_recovery_code_policy.py` 同跑，固定
+  `GATEWAY_WORKSPACE_INVALID` 已进入统一 taxonomy、不可原样重试并给出
+  `FIX_PATH_WITHIN_ALLOWED_ROOTS`；这只测试结构化恢复合同，不用错误文案决定权限。
+- 与 child debug/hierarchy 合并后的专门命令运行到 100%、exit 0，保留一个既有平台 skip：
+
+```bash
+.venv/bin/python -m pytest \
+  agent_py_agent/tests/test_owner_resolver.py \
+  agent_py_agent/tests/test_subagent_debug_trace.py \
+  agent_py_agent/tests/test_subagent_hierarchy_cli_e2e.py \
+  agent_py_agent/tests/test_gateway_request_runtime_errors.py \
+  agent_py_agent/tests/test_recovery_code_policy.py \
+  -q --tb=short
+```
+
+- 本轮唯一一次有效全仓 pytest 已在更早阶段跑到 100% 并暴露 39 项失败；修复后只精确复测失败来源和相关
+  功能簇，不重复再烧一次全仓。Ruff、doc sync、strict code-size、diff、import boundary 已通过；9 个新增
+  正式文件尚未加入真实 index，直接 clean-package 因此如实拒绝，使用只存活于临时目录的 Git index 模拟
+  “本轮完整候选已暂存”后 clean-package 通过，真实 index 保持为空。
+- `.7` 单 Gateway fresh `ma-cleanup-owner-runtime-r36` 从 `/root` 启动约 0.7 秒即显示 owner home，使用原样
+  超级玛丽 Prompt 2；首批 4 名 child 和后续 integrator 共 5/5 DONE，全部 execution cwd 指向同一 canonical
+  task，runtime scope 均为 `main-d9283fde2e2d`。主代理在 child 完成后自然整合并 final，Working/Todo 收起、
+  roster 保留。产物 5 文件、3,120 行、108,338 bytes，4 个 JS 通过 `node --check`；Playwright 因测试机缺
+  `libgbm.so.1` 无法启动，所以只确认 TUI、路径、生命周期、静态引用与语法，不宣称浏览器交互已通过。
+- r36 任务共 45 次 MiniMax-M2.7 provider 调用：普通 input 35,602、cache-read 1,003,935、cache-write
+  360,893、output 46,771，retry/failed/timed-out 均为 0。主 thread 最高可见约 92.3k，低于 115.2k
+  Compact 触发点，因此 `compact 0` 是正确事实，不把终态折叠造成的可见 Context 下降误记成 Compact。
+
+## 2026-08-29 Owner 自主记忆、child 启动阶段与全仓失败精确收口
+
+- Memory/Persona 主链固定：USER、AGENTS、长期 fact/event/project、Lesson/HOT 在结构化证据、owner scope、
+  CAS、quota 和冲突门内自主写；只有 SOUL 需要本人确认。双 owner 集成用例写入相近 subject 和 AGENTS 条目，
+  断言候选、正式记忆和 Persona 路径互不可见；`/audit` 未改。
+- child activity 固定 `queued/starting/waiting_first_event/running`，首个公开事件必须属于当前 exact attempt；
+  child 详情在 goal/首事件到达前保留启动说明和 Working，goal 可读后先显示完整用户任务，不再空白。
+- 本轮改动超过 10,000 行，因此只执行一次完整 pytest。有效 `.venv` 全仓运行到 100% 后暴露 16 个失败；
+  其中旧测试仍读取废弃的 constructor-root `subs/local_store` 路径，已改为 canonical manager/store 路径；
+  另外修复 capability 裁决续跑和旧 Audit 误取消纠正被终态保护挡住、validator 错误码漏注册。16 个失败节点
+  与相关文件组合复跑 29 项全部通过，随后 Memory/Persona/TUI/生命周期/归档/错误合同组合 focused 518 项
+  全部通过；不再重复全仓 pytest。
+- 本地静态验收已通过 `ruff check agent_py_agent scripts`、`py_compile`、import-boundary 0 finding 与
+  `git diff --check`。doc sync、strict code-size、clean-package 和 `.7/.10` 单 Gateway 多 TUI 真机复验见后续
+  同节追加结果，未完成前不把候选标记为已发布。
+
+## 2026-08-29 R63--R64 在途派工停止与并发资源矩阵
+
+- `ma-matrix-r63-110-u19-stop-race-auto` 使用普通中文要求一次创建 8 名 child；有界观察器只在 TUI 出现真实
+  `create_subagents` 后约 1 秒经该 TUI 输入 `/stop`。结构化验收为：root request `interrupted`、8 个 canonical
+  child 全部 `CANCELLED`、8 个 conversation task link 全部 `cancelled`、无 `*continue*` link、无 child PID，
+  TUI 最终显示 8 行“已停止”。这证明 r63 的 active-turn promotion fence 与 late-bind reconcile 正确；旧路径
+  从 stop 到最后 child 终态约 53 秒，不能把终态正确冒充为延迟已解决。
+- r64 在 root `_resolve_task_params`、批量 save、conversation bind、lifecycle publish/auto-start 以及递归 hierarchy
+  scheduler 的每个 durable child 边界复用统一 `CancellationToken`；`ToolCancelled` 不再被 broad exception 错写成
+  `TOOL_INVALID_ARGUMENTS`。focused 覆盖“第一项落盘后 token 翻转只保留一个 canonical prefix、零 publish”和
+  “递归 schedule 第一名后中断不再创建其余 child”。
+- 定向命令已通过：`test_orchestration_create_subagents_tool.py`、`test_orchestration_create_conversation.py`、
+  `test_gateway_chat_conversation_context.py`、`test_gateway_conversation_control.py`、全部
+  `test_subagent_hierarchy_*.py`、create workspace/coordinator/cancel 组合，以及相关 Ruff/PyCompile。没有重复跑全仓。
+- 同一 Gateway 新增真实 TUI：`.7` 的 `ma-matrix-r64-107-u9-queue-research`、
+  `ma-matrix-r64-107-u10-pvz-regression`；`.10` 的 `ma-matrix-r64-110-u20-project-port`、
+  `u21-architecture-research`、`u22-long-memory`、`u23-memory-isolation-probe`。`.7` 从 8 境加到 10 个 TUI 后
+  TUI RSS 约 666MB、唯一 Gateway 约 335MB、整机仍约 5.66GB available；活跃 4+5 child 后 Gateway 约 378MB，
+  没有重现清理前 100 多个陈旧 tmux 导致的 5GB 级占用。
+- `u22` 在 4 child 运行时自主把“青黛月桥”写入该 owner 的 USER 与 long-term memory，SOUL 未修改；用户插话
+  立即显示并在约 47 秒后准确回复，child 同时从 4 个推进到 2 个。全新 owner `u23` 明确回答无该记忆，证明
+  同 Gateway 记忆隔离。`u9` 未被提示强制派工也自行创建 4 child，主 thread 已真实显示 `compact 1`；旧长任务
+  `u8/u12` 主 thread 均为 `compact 2`，child 也有独立 compact 代数。
+
+## 2026-08-29 R65 手动 Compact 精确中断合同
+
+- 失败基线来自真实 TUI `ma-matrix-r64-107-u13-capability-chain`：手动 `/compact` 动画出现约 16ms 后按 Esc，
+  Compact 仍完成 generation 1，证明旧 TUI 没把手动控制操作纳入 Esc 目标。
+- 新回归覆盖五层：TUI runtime 只从公开 typed `operation_id` 找当前手动 Compact；Esc 持久提交带
+  `target_control_message_id` 的 `/stop`；control receipt 跨 HTTP/磁盘保存该目标；服务端只在同一认证
+  user/channel/conversation 下命中 exact interrupt；摘要 provider 收到中断后 generation、checkpoint 引用和
+  两条原始历史均保持不变。
+- 控制 outbox 另有阻塞竞态回归：普通 worker 已卡在 Compact POST 时，exact stop 的 durable urgent dispatch
+  仍在 0.5 秒窗口内发出；两条 operation 各自只完成一次，最终 outbox 为空。这个测试防止“代码里有 stop，
+  实际却排在被停止请求后面”的假修复。
+- 当前定向结果：control/TUI/Gateway 六文件组合 219 passed；Compact、checkpoint、failure circuit、Gateway
+  context 与 create/cancel 子代理组合 151 passed；相关 PyCompile、Ruff 与 `git diff --check` 通过。未重复跑全仓。
+- 真实验收必须部署到 `.7` 唯一 Gateway，再从事先公开的 fresh tmux 产生足够长历史，执行 `/compact`，动画
+  出现后按一次 Esc；验收同时读取 TUI、control receipt、model-call ledger 和 canonical thread generation，
+  并用下一条普通问题确认旧历史仍可读。focused 不能冒充该真机结果。
+
+## 2026-08-29 R68--R70 本机 owner、递归停止、会话恢复与双机资源矩阵
+
+- 产品 focused：
+
+```bash
+.venv/bin/python -m pytest \
+  agent_py_agent/tests/test_scoped_owner_inprocess_autostart.py \
+  agent_py_agent/tests/test_orchestration_background_dispatch.py \
+  agent_py_agent/tests/test_gateway_per_user_scoping.py \
+  agent_py_agent/tests/test_session_owner_isolation.py \
+  agent_py_agent/tests/test_chat_client_context.py \
+  -q --tb=short
+```
+
+  结果 43 passed；相关 Ruff 与 `git diff --check` 通过。覆盖 `local-agent -> local/main`、显式
+  `local/user`、`local/group`、双用户 tasks/memory/sessions/subagents/local store 物理隔离，以及 scoped
+  owner 自动派工不再丢身份。
+- `.7` 唯一 Gateway `ma-gateway-memory-phase-r69`，MiniMax-M2.7；真实 TUI：
+  `ma-matrix-r68-107-u25-owner-memory`、`u26-owner-isolation`、`u27-history-resume`、
+  `u28-recursive-stop`。U25/U26 的 USER、task、session、child 均落不同
+  `owners/providers/local/users/<id>/`；U25 代号“青铜海鸥-7319”未进入 U26，U26 只持有自己的“白桦罗盘-2846”。
+- U28 fresh 协调者创建 4 个孙代理；在协调者详情页按 Esc 后，2/4/6 秒采样仍如实显示分段收口，协调者约
+  6 秒取消，四个孙代理最迟约 14 秒全部取消。验收读取 canonical state，不用屏幕文案代替终态。
+- U27 session `sess_1788019070_66909cfd` 正常 `/exit` 后以
+  `ma-matrix-r70-107-u27-history-reopen` + `--session-id` 重开，完整最终回复和三个已完成 child 立即可滚动查看；
+  后续普通中文要求零工具复述，准确返回 Python 3.11.6、根分区剩余 3.7G、9 个 TCP listener、`report.md`
+  与“玄武书签-9035”。owner audit 对该 request 只有 user/assistant 行，没有 tool_call。
+- 资源采样必须同时记录 `free -h`、Gateway RSS/线程数、所有 `chat --gateway` RSS、对照进程和
+  `/metrics` 的 runner/tick gauges。`.7` 关闭 17 个旧 TUI 后 used 2.6G→约 1.7G；保留 10 个 TUI 约
+  656M、Gateway 约 315--381M、available 约 5.5--5.7G。`.10` 新增 U39--U46 后 used 约 5.1G、available
+  约 10G，不能用 tmux 数量单独解释 Gateway 高水位。
+- `.10` 新增真实 TUI：`ma-matrix-r69-110-u39-schedule-watch`、`u40-large-output`、
+  `u41-capability-approval`、`u42-owner-memory`、`ma-matrix-r70-110-u43-goal-lifecycle`、
+  `u44-guidance-consume`、`u45-process-pty-stress`、`u46-search-skill-repeat`。全部使用同一 Gateway 和
+  MiniMax-M2.7；测试仍在进行时必须保留 PARTIAL/OPEN，不能因为模型最终说完成就记 PASS。
+- 测试编排操作项：首次向 `.7` 复制 U27 follow-up prompt 时远端测试提示目录不存在，`scp` 失败；创建专用
+  `/root/my-agent-test-prompts/` 后重试成功。该失败没有进入产品请求、没有改 owner 数据，记录为 harness
+  prerequisite，不能冒充 TUI/Gateway 故障。
+
+## 2026-08-29 R86--R91：常驻对象、终态 guidance 与 capability 快照刷新
+
+- owner soft-curator 切片：owner pool、Gateway maintenance、Memory curator 相关 focused 共 149 项通过；部署
+  `.10` 后唯一 Gateway 初始 RSS 从约 509--521MiB 降到约 185--224MiB，owner 磁盘事实与活跃调度未删除。
+- 重启 execution lock 切片：dead PID + start-token 的立即接管、未知工具副作用、live/unprovable fail-closed
+  相关 focused 共 201 项通过。只有客观证明原 holder 已死才接管；未完成 mutation 仍保持 DIRTY/UNKNOWN。
+- child 能力边界与继续执行提示：R88 focused 68 项、R89 focused 86 项通过；root 工具清单隐藏 child-only
+  工具，read-only child 仍保留 `capability_request`，主代理提示不再把“下一步会做”冒充当前已经完成。
+- 终态 guidance：R90 focused 111 项通过；真 TUI
+  `ma-matrix-r90-110-u89-terminal-guidance` 中 child 先写文件并 DONE，随后主代理对 exact run 调用
+  `send_guidance`，收到 `SUBAGENT_GUIDANCE_TARGET_TERMINAL`，磁盘没有 pending guidance，run 未复活。
+- capability 快照刷新定向命令：
+
+  ```bash
+  python3 -m pytest \
+    agent_py_agent/tests/test_capability_auto_grant.py \
+    agent_py_agent/tests/test_subagent_capability_request_tool.py \
+    agent_py_agent/tests/test_resolve_capability_requests_tool.py \
+    agent_py_agent/tests/test_tool_round_execution.py -q --tb=short
+  ruff check agent_py_agent/agent/agent_core/capability_request_tool.py \
+    agent_py_agent/tests/test_capability_auto_grant.py
+  python3 -m py_compile agent_py_agent/agent/agent_core/capability_request_tool.py
+  git diff --check -- agent_py_agent/agent/agent_core/capability_request_tool.py \
+    agent_py_agent/tests/test_capability_auto_grant.py
+  ```
+
+  结果：69 passed；Ruff、PyCompile、diff check 全部通过。没有运行全仓 pytest，本切片远低于额外全仓门的
+  10,000 行阈值。
+- R91 fresh 真 TUI `ma-matrix-r91-110-u94-capability-refresh`：main 只创建输入并派 researcher；child 从
+  read-only snapshot 读取文件、调用 `capability_request`、跨 `context_refresh` 续片后自行写出
+  `report-capability-refresh.md`（1,562 bytes），最终 DONE、重试 1、compact 0。该 owner 归档中
+  `TOOL_UNAVAILABLE` 为 0，主代理只核对两个文件存在。
+- 同轮功能 TUI：U90 自主 Memory 检索并在唯一一次 TUI 确认后修改 SOUL；U91 完成两份大 Web 文档的
+  `head/middle/tail/EOF` 读取和报告；U92 完成 PTY 与受管后台 HTTP 的 start/read/resize/list/wait/network/
+  stop/close；U93 完成四个一级 child 报告，但四个孙代理因管理员级 grant 未在 TUI 浮出审批而缺失，保留为
+  OPEN，不按主代理“整合完成”算全通过。
+- R91 U95 只读取两个代码审阅 Skill，复现并修复循环队列边界错误，写 3,373-byte 报告；U96 八个
+  researcher 全部自然 DONE，8 份独立报告和 9,395-byte 整合报告客观存在；U97 两个连续回合只形成一个
+  task root，零 Compact 准确召回 `长河-9713` 并原位更新 phase-two。三路均从真实 TUI 输入普通中文完成。
+- 资源采样：R91 唯一 Gateway PID `2704961`；22 个 `chat --gateway` TUI 合计约 1,899MiB、平均 86.3MiB，
+  Gateway 约 275MiB，5 个 终端交互 对照约 1,674MiB，LiteLLM 约 302MiB；整机 15GiB 中 available 约
+  10GiB。`.7` 当前 ICMP 间歇可达但 22 端口拒绝，故本轮不能宣称取得 8G 机器当前 RSS，只保留上一轮
+  “17 个旧 TUI 清理后下降约 1GiB”的可复验历史样本。
+
+## 2026-08-29 R92 child 结果耐久交接与 30 路 TUI 资源扩展
+
+- 回归把四条直属 `subagent-completion.v1` 写入同一 root，先标记 handled，再追加 30 条大体积后续观察把它们
+  挤出普通 Recent Observations，最后触发 `scheduled_progress_report`。在 2,200 token 的后台总预算下仍断言
+  四个 exact `final_report_ref` 全部存在、长正文已裁短、孙代理和私有 runner payload 不可见。
+- 定向命令：
+
+  ```bash
+  python3 -m pytest \
+    agent_py_agent/tests/test_background_main_agent_runtime.py \
+    agent_py_agent/tests/test_background_main_wake_recall.py \
+    agent_py_agent/tests/test_gateway_chat_conversation_context.py \
+    agent_py_agent/tests/test_conversation_wake_events.py \
+    agent_py_agent/tests/test_integration_coverage_context.py \
+    agent_py_agent/tests/test_runtime_parameter_config.py -q --tb=short
+  ```
+
+  全部通过，保留 2 个既有 xfail；相关 PyCompile、Ruff 与 selected `git diff --check` 通过。没有重复跑全仓
+  pytest，本切片远低于约 10,000 行额外全仓门。
+- `.10` 唯一 Gateway R92 fresh `ma-matrix-r92-110-u98-child-handoff`：四名 child 4/4 DONE，每条完成观察均有
+  非空 `completion_message` 与可读 `final_report_ref`；主代理写出 7,448-byte
+  `output/python-four-modules.md` 并自然 final，任务归档中 `WRONG_STATUS_SURFACE=0`。
+- 旧失败 `ma-matrix-r89-110-u85-compact-interrupt` 收到普通中文“继续完成”后，在主 thread `compact 1` 的
+  同一会话中读回四份既有结果并给出最终对照表，证明旧任务也可恢复，不是只让 fresh 样例通过。
+- 新增 U99--U105 七路真实 TUI，覆盖 Goal、Schedule/Watch、Search、活跃 child guidance、Memory+Compact 和
+  双 owner 隔离。启动后共 30 个 TUI：合计 RSS 约 2,516.9MiB、PSS 约 2,100.9MiB、Private 约
+  2,089.6MiB，平均 PSS 约 70MiB；唯一 Gateway 在并发开工时 PSS 约 345.6MiB，整机 available 约 9.7GiB。
+  `.7` 仍 ping 全丢且 SSH 超时，当前 8GiB 机器证据继续标环境阻塞，不能拿旧 `used` 冒充现值。
+
+## 2026-08-30 R99 被动 owner 投影、索引压紧与 79 TUI 重连压力
+
+- 本地定向验收（未跑全仓）：
+
+  ```bash
+  python3 -m pytest \
+    agent_py_agent/tests/test_owner_scoped_pool.py \
+    agent_py_agent/tests/test_background_notice_display.py \
+    agent_py_agent/tests/test_gateway_agent_control_service.py \
+    agent_py_agent/tests/test_home_global_index.py \
+    agent_py_agent/tests/test_home_maintenance.py -q --tb=short
+
+  python3 -m pytest \
+    agent_py_agent/tests/test_gateway_http.py \
+    agent_py_agent/tests/test_gateway_per_user_scoping.py \
+    agent_py_agent/tests/test_home_maintenance.py -q --tb=short
+  ```
+
+  第一组 79 passed，第二组 45 passed + 1 skipped；七个相关产品文件 PyCompile 通过，相关产品/测试文件
+  Ruff 通过。远端按 R98 现有代码移植最小补丁后，owner pool/global-index/home-maintenance 基线 36 项通过。
+- R99 修复前 `.10` 有 69 个 `chat --gateway` TUI，合计 PSS `4,859,509KiB`（约 4.63GiB），唯一 Gateway
+  PSS `610,107KiB`（约 595.8MiB）。`py-spy` 证明 16 个 HTTP worker 大量在 `/client/notices` 里构造完整
+  scoped Agent，并因 79 个不同 owner 超过 64 容量形成 LRU 反复构造。
+- 部署最小修复、同时让 69 个旧 TUI 重连后，Gateway PSS 约 189.1MiB，10 次 `/status` 为
+  4--13ms。再以 10 个 fresh owner 同时提交 MiniMax-M2.7 真实中长任务，全部在 TUI 立即进入
+  Thinking/Working，Gateway PSS 约 228.1MiB，20 次 status 最慢约 0.21s，`pending=0/processing=10`。
+- 现场全局索引原始约 1.4GiB，在停止唯一 Gateway 且队列归零后备份到
+  `/home/my-agent-r99-backup-20260830T1155/index`，然后从 168 owner、555 task、555 run、1062 agent 权威目录
+  重建为 2340 行、约 814KiB，`load_errors=0`。备份校验值保留，可精确恢复。
+- fresh TUI 名称为 `ma-matrix-r99-110-u152-*` 至 `u161-*`，覆盖 Memory、长历史、文件流水线、
+  工具错误恢复、8 child、递归 child、Skill 路由、受管后台进程、owner 隔离和长会话 Compact。U157 的
+  coordinator 已真实显示“等待下级”，是 R98.1 的 fresh 复验通过证据。
+- `.7` 当前 ICMP 丢包且 22 端口拒绝连接，本轮不宣称拿到 8GiB 机器新样本。过往 `.7` 的约 1GiB
+  下降来自关闭 17 个已结束但仍驻留的 TUI；本轮 `.10` 再次量化到 69 个 TUI 合计约 4.63GiB，证明
+  8GiB 机器必须限制同时常驻窗口数，但这不等于按用户启动多 Gateway。

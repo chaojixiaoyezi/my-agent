@@ -446,6 +446,9 @@ def _runtime_workspace_roots(value: object) -> tuple[str, ...]:
     return tuple(str(item) for item in items if str(item or "").strip())
 
 
+# LLM: One background slice report separates delivery receipt from exact durable task lifecycle;
+# scheduler callers must never equate a model response with completion while task_status is active.
+# 类用途: 汇总后台主代理一片工作的回复、工具统计、投递结果和结构化任务状态。
 @dataclass(frozen=True)
 class BackgroundMainAgentReport:
     thread_id: str
@@ -467,6 +470,9 @@ class BackgroundMainAgentReport:
     # A durable wake remains pending until its required side effect has a
     # committed receipt. Ordinary background turns keep the default.
     wake_handled: bool = True
+    # The exact conversation task link is the scheduler's completion authority. A model slice may
+    # return while this remains active because durable child/lifecycle work will continue later.
+    task_status: str = ""
 
 
 # LLM: One immutable event preserves the model-call summary produced by one

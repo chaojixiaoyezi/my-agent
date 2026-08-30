@@ -136,9 +136,11 @@ def test_native_messages_forward_middle_guidance_then_dedupe_across_calls():
     # seen 已登记这条指引
     assert len(_forwarded_guidance_seen(params)) == 1
 
-    # 第二次（同一 params，live_archive_state 跨轮存活）→ 不再二次转发同一指引
+    # 第二次仍保留已经进入 canonical IR 的同一条 RuntimeFactsTurn，但不会再
+    # 追加第二份；这样既不丢事实，也不因每轮重建动态尾部破坏缓存前缀。
     second = _native_provider_messages(agent, params)
-    assert [m["role"] for m in second] == ["assistant", "user"]
+    assert [m["role"] for m in second] == ["assistant", "user", "user"]
+    assert sum("结构化失败事实" in str(message) for message in second) == 1
 
 
 def test_native_messages_forward_new_guidance_but_not_old():

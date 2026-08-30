@@ -14,6 +14,7 @@ from typing import Any
 from ...memory_routing import load_routes, match_routes, resolve_required_paths
 from ...runtime_errors import runtime_error_report
 from ..capability_request_identity import find_equivalent_capability_request
+from ..capability_scope import ensure_grant_path_scope_within_owner
 from ..models import (
     SUBAGENT_WAKE_STATUSES,
     CapabilityGap,
@@ -37,6 +38,9 @@ from .lifecycle_runner_attempts import (
 )
 from .lifecycle_runner_attempts import (
     prepare_runner_attempt as prepare_runner_attempt_for_manager,
+)
+from .lifecycle_runner_attempts import (
+    reconcile_dead_runner_attempt as reconcile_dead_runner_attempt_for_manager,
 )
 
 
@@ -68,6 +72,7 @@ class RecordCapabilityGapParams:
 
     missing_capability: str
     why_failed: str
+    request_id: str = ""
     gap_type: str = "generic"
     attempted_skills: list[str] | None = None
     attempted_tools: list[str] | None = None
@@ -132,35 +137,132 @@ class SubAgentLifecycleService:
     def __init__(self, manager: Any):
         self.manager = manager
 
+    # LLM: Equivalent capability requests are deduplicated against the latest canonical state in
+    # one mutate transaction; request prose never acts as lifecycle authority beyond identity data.
+    # 函数用途: 原子登记子代理的能力申请，并复用已经存在的等价申请避免重复排队。
     def record_capability_request(
         self,
         run_id: str,
         params: RecordCapabilityRequestParams,
     ) -> CapabilityRequest:
-        task = self.manager.load(run_id)
-        if existing := find_equivalent_capability_request(task.capability_requests, params):
-            return existing
-        request = build_capability_request(run_id, params)
-        task.capability_requests.append(request)
-        task.updated_at = time.time()
-        self.manager.save(task)
-        return request
+        committed_request: list[CapabilityRequest] = []
 
+        # LLM: Equivalence and append must observe the latest canonical request list under one
+        # guard; otherwise two simultaneous tool calls can create duplicate OPEN requests.
+        # 函数用途: 在权威锁内复用等价能力申请，确实没有时才新增一条。
+        def _request_reducer(task: SubAgentTask) -> None:
+            request = find_equivalent_capability_request(task.capability_requests, params)
+            if request is None:
+                request = build_capability_request(run_id, params)
+                task.capability_requests.append(request)
+                task.updated_at = time.time()
+            committed_request.append(request)
+
+        self.manager.mutate(run_id, _request_reducer)
+        return committed_request[0]
+
+    # LLM: A grant and its exact request resolution are one lifecycle mutation. Keep the request
+    # terminal before the canonical save so persistence can advance a settled blocked attempt to
+    # PENDING; callers may still repeat the same resolution without creating duplicate grants.
+    # 函数用途: 给子代理授权时同步结清对应申请，并让已经结束的阻塞轮次重新进入待执行队列。
     def record_capability_grant(
         self,
         run_id: str,
         params: RecordCapabilityGrantParams,
     ) -> CapabilityGrant:
-        task = self.manager.load(run_id)
-        grant = build_capability_grant(run_id, params)
-        task.capability_grants.append(grant)
-        task.allowed_skills = _merge_list(task.allowed_skills, grant.skills)
-        task.allowed_tools = _merge_list(task.allowed_tools, grant.tools)
-        task.updated_at = time.time()
-        self.manager.save(task)
-        _reopen_capability_blocked_conversation_link(self.manager, task)
-        return grant
+        committed_grant: list[CapabilityGrant] = []
 
+        # LLM: This reducer executes only inside persistence.mutate and may touch capability fields
+        # plus the grant timestamp; it must not perform network calls or nested canonical saves.
+        # 函数用途: 在权威锁内幂等写入一条授权、结清对应申请并合并允许的工具和技能。
+        def _grant_reducer(task: SubAgentTask) -> None:
+            grant = next(
+                (
+                    item
+                    for item in task.capability_grants
+                    if str(item.request_id or "").strip()
+                    == str(params.request_id or "").strip()
+                ),
+                None,
+            )
+            if grant is None:
+                grant = build_capability_grant(run_id, params)
+            ensure_grant_path_scope_within_owner(
+                self.manager,
+                task,
+                list(getattr(grant, "path_scope", []) or []),
+            )
+            if grant not in task.capability_grants:
+                task.capability_grants.append(grant)
+            for request in task.capability_requests:
+                if str(request.id or "").strip() == str(params.request_id or "").strip():
+                    current_status = str(request.status or "").strip()
+                    if current_status not in {"OPEN", "GRANTED"}:
+                        raise ValueError(
+                            f"capability_request_already_resolved:{current_status}"
+                        )
+                    request.status = "GRANTED"
+            task.allowed_skills = _merge_list(task.allowed_skills, grant.skills)
+            task.allowed_tools = _merge_list(task.allowed_tools, grant.tools)
+            task.updated_at = time.time()
+            committed_grant.append(grant)
+
+        task = self.manager.mutate(run_id, _grant_reducer)
+        _reopen_capability_blocked_conversation_link(self.manager, task)
+        return committed_grant[0]
+
+    # LLM: An existing grant may resolve another request only after a route has proven structural
+    # coverage. Bind that exact grant id into the request audit fields under the canonical guard;
+    # never create a duplicate grant or perform a detached status-only save.
+    # 函数用途: 用已经存在且已核实覆盖范围的授权原子结清另一条申请，并保留授权来源关联。
+    def resolve_request_with_existing_grant(
+        self,
+        run_id: str,
+        request_id: str,
+        grant_id: str,
+    ) -> CapabilityGrant:
+        committed_grant: list[CapabilityGrant] = []
+
+        # LLM: This reducer trusts only exact ids supplied by the structured router and confirms
+        # both records still exist in the latest canonical state before changing request status.
+        # 函数用途: 在权威锁内核对申请和已有授权，写入覆盖关系并合并实际允许能力。
+        def _existing_grant_reducer(task: SubAgentTask) -> None:
+            grant = next(
+                (item for item in task.capability_grants if item.id == grant_id),
+                None,
+            )
+            request = next(
+                (item for item in task.capability_requests if item.id == request_id),
+                None,
+            )
+            if grant is None or request is None:
+                raise ValueError("capability_existing_grant_resolution_missing_record")
+            ensure_grant_path_scope_within_owner(
+                self.manager,
+                task,
+                list(getattr(grant, "path_scope", []) or []),
+            )
+            current_status = str(request.status or "").strip()
+            if current_status not in {"OPEN", "GRANTED"}:
+                raise ValueError(
+                    f"capability_request_already_resolved:{current_status}"
+                )
+            request.status = "GRANTED"
+            constraints = dict(request.constraints or {})
+            constraints["covered_by_grant_id"] = grant.id
+            request.constraints = constraints
+            task.allowed_skills = _merge_list(task.allowed_skills, grant.skills)
+            task.allowed_tools = _merge_list(task.allowed_tools, grant.tools)
+            task.updated_at = time.time()
+            committed_grant.append(grant)
+
+        task = self.manager.mutate(run_id, _existing_grant_reducer)
+        _reopen_capability_blocked_conversation_link(self.manager, task)
+        return committed_grant[0]
+
+    # LLM: A gap and its exact request terminal status are one mutation. Memory-route discovery is
+    # computed before the lock, while only typed records and paths are committed inside it.
+    # 函数用途: 原子登记能力缺口并结清对应申请，同时挂入后续需要读取的记忆规则路径。
     def record_capability_gap(
         self,
         run_id: str,
@@ -171,15 +273,44 @@ class SubAgentLifecycleService:
         gap = build_capability_gap(
             BuildCapabilityGapInput(run_id, task.goal, params, memory_routes, injected_rule_paths)
         )
-        task.capability_gaps.append(gap)
-        if injected_rule_paths:
-            task.context_manifest.required_read_paths = _merge_list(
-                task.context_manifest.required_read_paths,
-                injected_rule_paths,
+        committed_gap: list[CapabilityGap] = []
+
+        # LLM: Gap append and exact request resolution share one canonical reducer. A request that
+        # already reached another terminal decision rejects this late conflicting resolution.
+        # 函数用途: 原子记录能力缺口、结清对应申请并合并需要继续读取的规则路径。
+        def _gap_reducer(current: SubAgentTask) -> None:
+            existing = next(
+                (
+                    item
+                    for item in current.capability_gaps
+                    if params.request_id
+                    and str(item.request_id or "").strip()
+                    == str(params.request_id or "").strip()
+                ),
+                None,
             )
-        task.updated_at = time.time()
-        self.manager.save(task)
-        return gap
+            selected = existing or gap
+            if existing is None:
+                current.capability_gaps.append(gap)
+            for request in current.capability_requests:
+                if str(request.id or "").strip() != str(params.request_id or "").strip():
+                    continue
+                current_status = str(request.status or "").strip()
+                if current_status not in {"OPEN", "GAP"}:
+                    raise ValueError(
+                        f"capability_request_already_resolved:{current_status}"
+                    )
+                request.status = "GAP"
+            if injected_rule_paths:
+                current.context_manifest.required_read_paths = _merge_list(
+                    current.context_manifest.required_read_paths,
+                    injected_rule_paths,
+                )
+            current.updated_at = time.time()
+            committed_gap.append(selected)
+
+        self.manager.mutate(run_id, _gap_reducer)
+        return committed_gap[0]
 
     def record_evidence(
         self,
@@ -246,6 +377,23 @@ class SubAgentLifecycleService:
     def abandon_runner_attempt(self, run_id: str, attempt_id: str, *, reason: str = "") -> SubAgentTask:
         return abandon_runner_attempt_for_manager(self.manager, run_id, attempt_id, reason=reason)
 
+    # LLM: This is the only task-lifecycle bridge from a dead runner-session
+    # projection to runtime.db attempt authority; ready=False forbids requeue.
+    # 函数用途: 在孤儿监督重新排队前，确认旧 runner attempt 已经安全结算。
+    def reconcile_dead_runner_attempt(
+        self,
+        run_id: str,
+        attempt_id: str,
+        *,
+        reason: str = "",
+    ) -> dict[str, object]:
+        return reconcile_dead_runner_attempt_for_manager(
+            self.manager,
+            run_id,
+            attempt_id,
+            reason=reason,
+        )
+
     def _match_memory_routes(
         self,
         missing_capability: str,
@@ -277,6 +425,10 @@ class SubAgentLifecycleService:
             return [], [_memory_route_load_error(report)]
 
 
+# LLM: This projection update follows only the exact grant path. Canonical persistence may already
+# have reduced BLOCKED to PENDING; both states are accepted here, while expected_status=blocked
+# prevents a concurrent cancel/stop from being resurrected.
+# 函数用途: 能力授权落盘后，仅把对应子代理被阻塞的会话链接恢复为可继续调度状态。
 def _reopen_capability_blocked_conversation_link(manager: Any, task: SubAgentTask) -> None:
     """Reactivate only the exact blocked child link unlocked by a grant.
 
@@ -287,9 +439,13 @@ def _reopen_capability_blocked_conversation_link(manager: Any, task: SubAgentTas
     ``/stop`` or terminal transition from being resurrected.
     """
 
-    if not task_status_in(getattr(task, "status", ""), {"BLOCKED"}):
+    task_status = str(getattr(task, "status", "") or "").strip().upper()
+    if task_status not in {"BLOCKED", "PENDING"}:
         return
-    if str(getattr(task, "failure_type", "") or "").strip().lower() != "capability_request":
+    if task_status == "BLOCKED" and (
+        str(getattr(task, "failure_type", "") or "").strip().lower()
+        != "capability_request"
+    ):
         return
     store = getattr(manager, "conversation_store", None)
     update = getattr(store, "update_task_status", None)

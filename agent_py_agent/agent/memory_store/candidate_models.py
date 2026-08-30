@@ -53,9 +53,9 @@ PROPOSED_ACTIONS = frozenset({"add", "replace", "remove", "merge", "none"})
 PROMOTION_TARGETS = frozenset(
     {"user", "long_term", "lesson", "hot", "soul", "agents", "none"}
 )
-# 晋升权限由宿主入口确定性计算并持久化到候选；模型文本/Schema 不能声明或升权。
-# auto_eligible=候选可走自动晋升路径（仍受 Promotion 双重核验）；manual_required=必须
-# 人工 approved + automatic=False 才能晋升。缺失/空按 manual_required fail-closed。
+# 晋升权限由宿主按结构化 target/type/origin/action 确定性计算，模型文本/Schema 不能声明。
+# auto_eligible=可由当前 owner 的 Agent 自主尝试（仍受证据、CAS、冲突、门槛和注入扫描）；
+# manual_required 只保留给 SOUL 或根本不具备正式落点权威的候选。
 PROMOTION_MODES = frozenset({"auto_eligible", "manual_required"})
 CANDIDATE_STATUSES = frozenset(
     {
@@ -411,6 +411,90 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# LLM: Promotion authority is derived only from typed candidate fields. SOUL always remains
+# manual; formal user facts still require user_explicit authority, while lessons/HOT and AGENTS
+# may be maintained autonomously and remain protected by their target repositories.
+# 函数用途: 统一判断一个候选能否进入模型自主晋升链，避免 remember、curator 和子代理各写一套规则。
+def host_promotion_mode(candidate: object) -> str:
+    values = candidate if isinstance(candidate, dict) else None
+    candidate_type = str(
+        (values.get("candidate_type") if values is not None else getattr(candidate, "candidate_type", ""))
+        or ""
+    ).strip().lower()
+    origin = str(
+        (values.get("origin") if values is not None else getattr(candidate, "origin", ""))
+        or ""
+    ).strip().lower()
+    target = str(
+        (
+            values.get("promotion_target")
+            if values is not None
+            else getattr(candidate, "promotion_target", "")
+        )
+        or ""
+    ).strip().lower()
+    action = str(
+        (
+            values.get("proposed_action")
+            if values is not None
+            else getattr(candidate, "proposed_action", "")
+        )
+        or ""
+    ).strip().lower()
+    if target in {"", "none"} and (
+        origin == "user_explicit"
+        and candidate_type in {"long_term_fact", "event", "project"}
+    ):
+        target = "long_term"
+    if action not in {"add", "replace", "remove", "merge"}:
+        return "manual_required"
+    if target == "long_term":
+        return (
+            "auto_eligible"
+            if origin in {"user_explicit", "tool_verified"}
+            and candidate_type in {"long_term_fact", "event", "project"}
+            else "manual_required"
+        )
+    if target == "user":
+        return (
+            "auto_eligible"
+            if origin == "user_explicit"
+            and candidate_type in {"user_profile", "user_preference"}
+            else "manual_required"
+        )
+    if target == "agents":
+        return (
+            "auto_eligible"
+            if candidate_type == "working_agreement"
+            and origin in {"user_explicit", "tool_verified", "model_inferred", "reviewed"}
+            else "manual_required"
+        )
+    if target == "lesson":
+        return (
+            "auto_eligible"
+            if action == "add"
+            and candidate_type == "lesson"
+            and origin
+            in {
+                "user_explicit",
+                "tool_verified",
+                "model_inferred",
+                "subagent_lesson",
+                "reviewed",
+            }
+            else "manual_required"
+        )
+    if target == "hot":
+        return (
+            "auto_eligible"
+            if action == "add"
+            and candidate_type == "hot_rule"
+            and origin in {"user_explicit", "tool_verified", "model_inferred", "reviewed"}
+            else "manual_required"
+        )
+    return "manual_required"
+
+
 # LLM: 每次读写都走同一完整 Schema 校验，禁止某个入口接受另一套弱字段。
 # 函数用途: 验证持久候选的所有枚举、引用、范围、时间和状态历史。
 def validate_candidate(candidate: MemoryCandidate) -> None:
@@ -428,13 +512,12 @@ def validate_candidate(candidate: MemoryCandidate) -> None:
         raise ValueError(f"unsupported promotion_target: {candidate.promotion_target}")
     if candidate.status not in CANDIDATE_STATUSES:
         raise ValueError(f"unsupported candidate status: {candidate.status}")
-    # 晋升权限 fail-closed:legacy/新记录缺失或空一律归一 manual_required,
-    # 非空非法值严格拒绝;权限不参与 candidate_id/observation key/身份对比。
+    # 非空非法值严格拒绝；合法旧权限按当前宿主策略重算。这样升级前被一刀切为
+    # manual_required 的非 SOUL 候选不会永久等用户，安全/证据门仍在 Promotion 层。
     mode = str(candidate.promotion_mode or "").strip().lower()
-    if not mode:
-        candidate.promotion_mode = "manual_required"
-    elif mode not in PROMOTION_MODES:
+    if mode and mode not in PROMOTION_MODES:
         raise ValueError(f"unsupported promotion_mode: {mode}")
+    candidate.promotion_mode = host_promotion_mode(candidate)
     content = str(candidate.content or "").strip()
     if not content:
         if candidate.status not in TERMINAL_CANDIDATE_STATUSES:
@@ -504,6 +587,7 @@ __all__ = [
     "SCOPE_TYPES",
     "TERMINAL_CANDIDATE_STATUSES",
     "candidate_transition_allowed",
+    "host_promotion_mode",
     "normalize_iso_time",
     "normalize_reference_list",
     "normalize_string_list",

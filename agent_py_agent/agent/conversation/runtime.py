@@ -2,6 +2,7 @@
 # 模块用途: 处理会话后台事件、子代理完成唤醒、上下文投影、任务状态和消息投递。
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from functools import partial
@@ -15,6 +16,10 @@ from ..backends.errors import (
     is_provider_usage_limit_error,
 )
 from ..concurrency.interrupt import register_interruptible
+from ..contracts.subagent_completion import (
+    DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
+    subagent_completion_context_from_observations,
+)
 from ..runtime_errors import compact_error_message
 from ..settings.config import DEFAULT_EXECUTION_PERSISTENCE
 from ..settings.runtime_guard_config import runtime_guard_int
@@ -54,6 +59,8 @@ def _scheduled_continuation_prompt(reason: str) -> str:
         "This is a continuation turn for the same durable task, not a new user "
         "message. Use the persisted objective, Active Wake Signal, task state, "
         "available tools, and evidence references to decide the next useful action. "
+        "When Subagent Completion Inputs are present, consume their bounded final "
+        "messages or exact final_report_ref values instead of guessing managed paths. "
         "Cursors, queues, permissions, coverage, cancellation state, and source "
         "references are runtime boundaries; they do not prescribe analysis, "
         "delegation, review, or reporting. Do not repeat work already proved "
@@ -912,6 +919,7 @@ class BackgroundMainAgentRuntime:
             delivery_status=delivery_status,
             delivery_reason=delivery_reason,
             wake_handled=wake_handled,
+            task_status=_background_task_link_status(self.agent, request, store=self.store),
         )
 
     def redeliver_cached_wake(
@@ -974,6 +982,7 @@ class BackgroundMainAgentRuntime:
             delivery_status=delivery_status,
             delivery_reason="cached_owner_delivery_retry",
             wake_handled=wake_handled,
+            task_status=_background_task_link_status(self.agent, request, store=self.store),
         )
 
     # LLM: 调用方传入的 GoalRuntimeContext 是本轮唯一采样；禁止在模型调用前再次刷新 child phase。
@@ -1592,9 +1601,9 @@ def _channel_attachments(
     return tuple(attachments)
 
 
-# LLM: 子代理公开回复只服从本轮开始时冻结的树阶段与当前终态事实；根 task link 是恢复账，
-#   不能重新变成普通任务的完成验收器。采样后才结束的 child 必须由下一条 wake 开新轮。
-# 函数用途: 决定后台模型回复是否进入用户会话，屏蔽部分进度并放行新鲜的最终汇总。
+# LLM: 子代理公开回复只服从本轮开始时冻结的树阶段与当前终态事实；能力申请/授权是
+#   内部控制事件，不能冒充助手回复。采样后才结束的 child 必须由下一条 wake 开新轮。
+# 函数用途: 决定后台模型回复是否进入用户会话，隐藏内部能力流转和过期进度，只放行新鲜终态汇总。
 def _background_delivery_decision(
     agent: object,
     request: BackgroundRunRequest,
@@ -1630,6 +1639,13 @@ def _background_delivery_decision(
         return False, "thread_goal_continuation_internal"
     if goal_status == "active" and reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return False, "thread_goal_lifecycle_internal"
+    if reason in {"subagent_capability_request_open", "subagent_capability_granted"}:
+        # 会话运行时 treats child approvals as active-turn control events, not assistant replies.
+        # Our durable wake still lets the parent route the request or continue the exact child,
+        # but publishing that intermediate model draft races the child runner and can place an
+        # already-stale "still waiting" paragraph below newer TUI activity.  The live child panel
+        # remains the owner-visible progress source; the terminal runner wake owns the final report.
+        return False, f"{reason}_internal"
     if reason == "user_guidance" and not task_completed:
         # /btw already has a deterministic control acknowledgement.  Applying the
         # guidance is an internal continuation; a second model status paragraph is
@@ -2782,6 +2798,10 @@ def context_markdown(
     )
     sections = [
         ("Active Wake Signal", bounded.get("active_wake_signal") or {}),
+        (
+            "Subagent Completion Inputs",
+            bounded.get("subagent_completions") or {},
+        ),
         ("Conversation Thread", bounded.get("thread") or {}),
         ("Runtime Load Errors", bounded.get("load_errors") or []),
         ("Task Runtime State", bounded.get("task_runtime_state") or {}),
@@ -2931,10 +2951,16 @@ def _bounded_context(
             load_errors=load_errors,
         )
     )
+    subagent_completions = (
+        {}
+        if narrow_audit_event
+        else _background_subagent_completion_context(state)
+    )
     return bounded_background_context_payload(
         BackgroundContextPayloadRequest(
             bundle=bundle,
             active_wake_signal=active_wake_signal,
+            subagent_completions=subagent_completions,
             pending_wake_signals=pending_wake_signals,
             task_runtime_state=task_state,
             agent_tree=agent_tree,
@@ -2943,6 +2969,47 @@ def _bounded_context(
             budget=background_context_budget_from_config(config),
         )
     )
+
+
+# LLM: 会话运行时 keeps each child final answer in the parent session history. This runtime adapts that
+# contract to the durable observation ledger: every later background slice for the same exact root
+# gets the current direct-child completion projection, not only the one lifecycle wake that arrived.
+# 函数用途: 读取当前根任务的直属子代理完成信封，供定时进度轮和恢复轮继续整合精确结果。
+def _background_subagent_completion_context(
+    state: _BackgroundContextLoad,
+) -> dict[str, object]:
+    task_id = str(state.task_id or "").strip()
+    if not task_id:
+        return {}
+    try:
+        observations, load_errors = state.store.recent_observations_report(
+            state.thread.thread_id,
+            limit=0,
+            include_handled=True,
+        )
+        state.load_errors.extend(load_errors)
+    except Exception as exc:
+        state.load_errors.append(
+            runtime_error_report(
+                exc,
+                context="background_context.subagent_completions",
+            )
+        )
+        return {}
+    context, issues = subagent_completion_context_from_observations(
+        observations,
+        root_task_ids={task_id},
+        workspace_task_id=task_id,
+        visible_limit=DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
+    )
+    state.load_errors.extend(
+        runtime_error_report(
+            ValueError(issue),
+            context="background_context.subagent_completions",
+        )
+        for issue in issues
+    )
+    return context
 
 
 def _narrow_audit_event_bundle(
@@ -3667,7 +3734,9 @@ def _skip_pending_wake_signal(
 
 
 # LLM: This projection records only user-deliverable background owner replies.
-# It carries the exact projected content but never becomes delivery or completion authority.
+# Each committed reply receives a content-addressed id and a commit timestamp;
+# the scheduler's sampled `now` remains source metadata because several reports
+# can share it. The projection never becomes delivery or completion authority.
 # 函数用途: 把后台主代理已提交给用户边界的回复写成 TUI 可消费的普通助手消息事件。
 def _record_background_notice(
     store: object,
@@ -3698,15 +3767,23 @@ def _record_background_notice(
             progress_items, progress_generation_id, progress_plan_revision = (), "", 0
         notices_dir = Path(root) / "notices"
         notices_dir.mkdir(parents=True, exist_ok=True)
+        source_created_at = float(getattr(report, "created_at", 0.0) or 0.0)
+        notice_id = _background_notice_id(
+            report,
+            content=content,
+            delivery_status=delivery_status,
+        )
         line = _json.dumps(
             {
                 "schema_version": "background_notice.v2",
+                "notice_id": notice_id,
                 "display_kind": "assistant_response",
                 "thread_id": report.thread_id,
                 "reason": str(report.reason or ""),
                 "content": content,
                 "summary": content[:500],
-                "created_at": report.created_at,
+                "created_at": time.time(),
+                "source_created_at": source_created_at,
                 "delivery_status": delivery_status,
                 "task_progress_items": [dict(item) for item in progress_items],
                 "task_progress_generation_id": progress_generation_id,
@@ -3720,6 +3797,34 @@ def _record_background_notice(
         logging.getLogger(__name__).warning(
             "background notice write failed (thread=%s)", report.thread_id, exc_info=True
         )
+
+
+# LLM: A notice id identifies one committed owner reply independently of wall
+# clock collisions. It uses only already-public routing/content fields and is
+# stable across projection retries of the same report.
+# 函数用途: 为后台最终回复生成稳定去重编号，避免同一秒多条消息互相覆盖。
+def _background_notice_id(
+    report: BackgroundMainAgentReport,
+    *,
+    content: str,
+    delivery_status: str,
+) -> str:
+    raw = json.dumps(
+        {
+            "thread_id": str(getattr(report, "thread_id", "") or ""),
+            "task_id": str(getattr(report, "task_id", "") or ""),
+            "reason": str(getattr(report, "reason", "") or ""),
+            "content": str(content or ""),
+            "source_created_at": float(
+                getattr(report, "created_at", 0.0) or 0.0
+            ),
+            "delivery_status": str(delivery_status or ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"notice-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]}"
 
 
 # LLM: Every background execution lane must publish through this one report boundary. Appending
@@ -4837,6 +4942,7 @@ class _BackgroundSchedulerTickMixin:
         if self.scheduler_service is None:
             return
         try:
+            self.scheduler_service.reconcile_waiting_runs(now=now)
             self.scheduler_service.enqueue_ready_runs(
                 now=now,
                 limit=self._config_limit("conversation_pending_wake_limit"),
@@ -5084,6 +5190,15 @@ def _finish_scheduler_wake_claim(
         scheduler.scheduler_service.release(claim, now=time.time())
         scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
         return None
+    if str(report.task_status or "").strip().lower() == "active":
+        waiting = scheduler.scheduler_service.park_waiting(
+            claim,
+            response=report.response,
+            delivery_status=report.delivery_status,
+            delivery_reason=report.delivery_reason,
+            now=time.time(),
+        )
+        return report if waiting is not None else None
     terminal = scheduler.scheduler_service.finish(
         claim,
         status="done",
@@ -5122,6 +5237,11 @@ def _complete_wake_report(
         scheduler._continue_thread_goal(signal, report=report, now=now)
     if lifecycle_reason == "subagent_runner_finished":
         _ensure_goal_progress_wake_chain(scheduler, signal, now=now)
+    if scheduler.scheduler_service is not None:
+        scheduler.scheduler_service.reconcile_waiting_run(
+            str(signal.root_task_id or ""),
+            now=now,
+        )
     return report
 
 
@@ -5933,7 +6053,7 @@ def _next_no_progress_streak(policy: ProgressPolicy, report: BackgroundMainAgent
 
 def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
     metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
-    return {
+    payload: dict[str, object] = {
         "kind": "progress_policy_due",
         "reason": "scheduled_progress_report",
         "policy_id": policy.policy_id,
@@ -5943,6 +6063,16 @@ def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
         "registered_by_tool": str(metadata.get("tool") or ""),
         "watch_run_id": str(metadata.get("watch_run_id") or ""),
     }
+    conversation_request_id = str(
+        metadata.get(CONVERSATION_REQUEST_ID_ATTR) or ""
+    ).strip()
+    if conversation_request_id:
+        # task_id 是持久调度身份，conversation_request_id 是同一普通用户回合的
+        # Todo/工具轨迹展示代次。二者必须并存，不能拿 task-path 或 task_id 冒充后者。
+        payload["metadata"] = {
+            CONVERSATION_REQUEST_ID_ATTR: conversation_request_id,
+        }
+    return payload
 
 
 def _progress_policy_run_reason(policy: ProgressPolicy) -> str:
@@ -6108,6 +6238,7 @@ def ensure_ordinary_task_resume(
     now: float | None = None,
     due_now: bool = False,
     limit: int | None = None,
+    conversation_request_id: str = "",
 ) -> bool:
     """Schedule bounded automatic resumption for an ordinary unfinished task.
 
@@ -6127,6 +6258,7 @@ def ensure_ordinary_task_resume(
     if not thread_id:
         return False
     current = now if now is not None else time.time()
+    conversation_request_id = str(conversation_request_id or "").strip()
     resume_limit = _ordinary_task_resume_limit(agent, limit)
     matching = [
         policy
@@ -6147,10 +6279,13 @@ def ensure_ordinary_task_resume(
     if matching:
         # 先顺延再 expedite 到 now:mark_progress_reported 记账 resume_used+1,
         # expedite 单调提前,最终 due=now 立即拉起。
+        metadata_updates: dict[str, object] = {"resume_used": used + 1}
+        if conversation_request_id:
+            metadata_updates[CONVERSATION_REQUEST_ID_ATTR] = conversation_request_id
         selected_store.mark_progress_reported(
             matching[0].policy_id,
             now=current,
-            metadata_updates={"resume_used": used + 1},
+            metadata_updates=metadata_updates,
         )
         selected_store.expedite_progress_policy(
             matching[0].policy_id,
@@ -6167,6 +6302,15 @@ def ensure_ordinary_task_resume(
         )
         or 0
     )
+    policy_metadata: dict[str, object] = {
+        "kind": "ordinary_task_resume",
+        "tool": "task_round_resume",
+        "resume_used": 1,
+        "resume_limit": resume_limit,
+        "reason": "普通任务轮限/失败软收口自动续跑",
+    }
+    if conversation_request_id:
+        policy_metadata[CONVERSATION_REQUEST_ID_ATTR] = conversation_request_id
     policy = selected_store.set_progress_policy(
         {
             "thread_id": thread_id,
@@ -6175,13 +6319,7 @@ def ensure_ordinary_task_resume(
             "route_channel": "internal",
             "route_target": "",
             "now": current,
-            "metadata": {
-                "kind": "ordinary_task_resume",
-                "tool": "task_round_resume",
-                "resume_used": 1,
-                "resume_limit": resume_limit,
-                "reason": "普通任务轮限/失败软收口自动续跑",
-            },
+            "metadata": policy_metadata,
         }
     )
     if due_now:
@@ -6284,6 +6422,8 @@ def _progress_policy_suppression_reason(
         return "subagent_runner_owned_policy"
     if _policy_task_link_is_terminal(store, policy):
         return "terminal_task_link"
+    if _ordinary_resume_task_link_is_missing_or_inactive(store, policy):
+        return "ordinary_resume_task_link_missing_or_inactive"
     if _cli_claim_holds_policy(policy, now=now):
         return "cli_claim_held"  # 双席复核硬门2: gateway 与 CLI 同读同一 claim
     if _progress_policy_is_stale(policy, now=now):
@@ -6380,6 +6520,37 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
         ):
             return True
     return False
+
+
+# LLM: ordinary-task auto-resume authority is the exact active ThreadTaskLink;
+# a durable policy is only a timer/index and must never resurrect a missing,
+# cross-thread, or inactive task.  Stores without an exact-link API are test or
+# legacy adapters, so preserve their previous behavior instead of guessing.
+# 函数用途: 检查普通任务续跑提醒是否已经失去对应的活任务；丢失或失活时让调度器退休提醒，
+# 避免旧对话被反复唤醒并产生过期进度和无效模型费用。
+def _ordinary_resume_task_link_is_missing_or_inactive(
+    store: object,
+    policy: ProgressPolicy,
+) -> bool:
+    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+    if str(metadata.get("kind") or "") != "ordinary_task_resume":
+        return False
+    loader = getattr(store, "load_task_link", None)
+    if not callable(loader):
+        return False
+    try:
+        link = loader(str(policy.task_id or "").strip())
+    except Exception:
+        # 读取损坏会由 store 的结构化诊断通道报告；这里不猜测任务已结束，
+        # 以免一次暂时性 I/O 错误永久退休仍在工作的任务。
+        return False
+    if link is None:
+        return True
+    return bool(
+        str(getattr(link, "thread_id", "") or "").strip() != policy.thread_id
+        or str(getattr(link, "task_id", "") or "").strip() != policy.task_id
+        or str(getattr(link, "status", "") or "").strip().lower() != "active"
+    )
 
 
 def _claimed_background_task_is_terminal(
@@ -6527,6 +6698,7 @@ _RETIRE_SUPPRESSION_REASONS = frozenset(
         "durable_audit_root_policy",
         "removed_dispatch_supervision_policy",
         "subagent_runner_owned_policy",
+        "ordinary_resume_task_link_missing_or_inactive",
     }
 )
 
@@ -6640,13 +6812,9 @@ CONTINUABLE_REASONS = frozenset(
         # 仅 response_decision 对全 TOOL_CALL_UNCLOSED violations 产生此
         # reason, 其他协议违规仍 blocked fail-closed。
         "TOOL_CALL_UNCLOSED",
-        # EXEC-26 长任务复刻真机(2026-08-16): ma-a 写 4 个 .go(813 行)后收口,
-        # 最后一步写操作未验证成功 → OPERATION_INCOMPLETE RC=2, 但不在续跑
-        # 白名单 → CLI 直接退出, 已写代码白费。对照 会话运行时/轻量运行时 任务循环持续到
-        # 交付、无中途放弃出口。以下三类"未完成"同属返工门 unfinished 族,
-        # 应自动续跑(结构门按 source/status 精确放行):
-        "OPERATION_INCOMPLETE",
-        "NO_DELIVERY_ARTIFACT_PRODUCED",
+        # 只有工具轮硬边界、协议截断或上下文溢出这类宿主无法自然完成的工作片
+        # 才能自动续跑。单个工具失败已经作为 typed result 返回同一模型；模型给出
+        # plain final 后不得再由机器覆盖结论或另起返工轮。
         "MODEL_RESPONSE_TRUNCATED",
         # EXEC-28 阶段二 ma-b 真机: 写码 92 轮后工具上下文 398K 字符溢出,
         # preflight 收口 context_overflow RC=2 不在白名单 → 直接退出, 已写
@@ -6678,13 +6846,7 @@ def should_continue_task(final_response: object) -> tuple[bool, str]:
             source == "tool_protocol_adapter" and status == "unfinished"
         ):
             return False, reason or "not_continuable"
-        # EXEC-26 结构门: 三个新增 reason 只由各自的工具/收口 gate 在
-        # unfinished 收口产生, 精确约束 source/status 防其他路径误标放行。
-        if reason == "OPERATION_INCOMPLETE" and not (
-            source == "tool_runtime" and status == "unfinished"
-        ):
-            return False, reason or "not_continuable"
-        if reason in {"NO_DELIVERY_ARTIFACT_PRODUCED", "MODEL_RESPONSE_TRUNCATED"} and not (
+        if reason == "MODEL_RESPONSE_TRUNCATED" and not (
             source == "tool_loop" and status == "unfinished"
         ):
             return False, reason or "not_continuable"

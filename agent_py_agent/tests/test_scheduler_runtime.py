@@ -8,9 +8,15 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentScheduler,
     FakeDeliveryService,
 )
-from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
+from agent_py_agent.agent.conversation.runtime import (
+    BackgroundRunRequest,
+    _finish_scheduler_wake_claim,
+    _run_params,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest
+from agent_py_agent.agent.scheduler.service import SchedulerRunClaim
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -20,7 +26,13 @@ class _Backend:
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None, on_thinking_delta=None) -> ModelResponse:
+    def generate(
+        self,
+        prompt: str,
+        on_chunk=None,
+        on_thinking_delta=None,
+        **_kwargs: object,
+    ) -> ModelResponse:
         del on_chunk, on_thinking_delta
         self.prompts.append(prompt)
         return ModelResponse(text="已按计划完成。", backend=self.name)
@@ -76,6 +88,34 @@ def test_durable_schedule_run_uses_stable_run_identity_and_full_owner_tools() ->
     }
 
 
+def test_scheduler_wake_uses_run_id_as_durable_root_task(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-root-id",
+            "channel_user_id": "user-1",
+            "now": 900.0,
+        }
+    )
+    _create_job(agent, thread.thread_id, "root-id")
+
+    wake_ids = agent.scheduler_service.enqueue_ready_runs(now=1_000)
+
+    assert len(wake_ids) == 1
+    signals = store.pending_wake_signals()
+    assert len(signals) == 1
+    signal = signals[0]
+    run_id = str(signal.metadata["scheduler_run_id"])
+    assert signal.root_task_id == run_id
+    assert run_id.startswith("srun_")
+
+
 def test_two_due_jobs_in_one_thread_both_execute_and_close_history(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
@@ -117,6 +157,99 @@ def test_two_due_jobs_in_one_thread_both_execute_and_close_history(tmp_path) -> 
     assert len(history) == 2
     assert {row["status"] for row in history} == {"done"}
     assert len(channels.adapter("internal").sent_messages) == 2
+
+
+def test_scheduled_run_waits_for_same_task_terminal_before_history_close(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-waiting",
+            "channel_user_id": "user-1",
+            "now": 900.0,
+        }
+    )
+    _create_job(agent, thread.thread_id, "child-backed")
+    run = agent.scheduler_repository.reserve_due_runs(now=1_000)[0]
+    claimed = agent.scheduler_repository.claim_run(
+        str(run["run_id"]),
+        lease_seconds=300,
+        now=1_001,
+    )
+    assert claimed is not None
+    claim = SchedulerRunClaim(
+        run_id=str(run["run_id"]),
+        claim_id=str(claimed["claim_id"]),
+        run=claimed,
+    )
+    agent.scheduler_repository.mark_run_running(
+        claim.run_id,
+        claim.claim_id,
+        now=1_002,
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": claim.run_id,
+            "goal": "等待四个子代理并整合报告",
+            "now": 1_002,
+        }
+    )
+
+    report = BackgroundMainAgentReport(
+        thread_id=thread.thread_id,
+        task_id=claim.run_id,
+        reason="scheduled_job_due",
+        response="子代理仍在运行",
+        route_channel="internal",
+        route_target="",
+        created_at=1_003,
+        delivery_status="suppressed",
+        delivery_reason="nonterminal_children",
+        wake_handled=True,
+        task_status="active",
+    )
+    returned = _finish_scheduler_wake_claim(
+        SimpleNamespace(
+            scheduler_service=agent.scheduler_service,
+            _wake_retry_after={},
+        ),
+        SimpleNamespace(wake_signal_id="wake-waiting"),
+        report,
+        claim=claim,
+        now=1_003,
+    )
+
+    assert returned is report
+    waiting = agent.scheduler_repository.get_active_run(claim.run_id)
+    assert waiting is not None
+    assert waiting["status"] == "waiting"
+    assert waiting["claim_id"] == ""
+    history, errors = agent.scheduler_repository.history(limit=10)
+    assert errors == []
+    assert history == []
+    active, errors = agent.scheduler_repository.active_runs_by_job()
+    assert errors == []
+    assert next(iter(active.values()))["status"] == "waiting"
+    assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=1_004) is None
+
+    store.update_task_status(
+        {"task_id": claim.run_id, "status": "completed", "now": 1_005}
+    )
+    # Gateway 启动/轮询时走批量对账；这条路径保证一次生命周期通知丢失后，
+    # 重启仍会从同一个 task link 收敛，而不是让 waiting 永久悬挂。
+    settled = agent.scheduler_service.reconcile_waiting_runs(now=1_006)
+
+    assert settled == [claim.run_id]
+    assert agent.scheduler_repository.get_active_run(claim.run_id) is None
+    history, errors = agent.scheduler_repository.history(limit=10)
+    assert errors == []
+    assert [row["status"] for row in history] == ["done"]
 
 
 def test_scheduled_message_tool_delivery_is_mirrored_once_without_fallback_send(

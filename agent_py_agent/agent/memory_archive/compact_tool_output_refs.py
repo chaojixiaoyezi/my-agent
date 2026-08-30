@@ -7,7 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .tool_output_externalizer import tool_output_index_paths_for_lookup
+from ..common.tool_output_paths import tool_output_index_paths_for_lookup
+from .tool_output_externalizer import model_visible_tool_parameters
 
 _INTERNAL_LEDGER_TOOLS = {"task_progress"}
 
@@ -46,6 +47,9 @@ def tool_call_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[
     return [_tool_call_ref(row) for row in rows if _is_tool_call_row(row) and _matches_scope(row, scope)]
 
 
+# LLM: Restore refs retain execution parameters for machine recovery and model_parameters for any
+# later prompt projection; neither view may silently overwrite the other.
+# 函数用途: 从 Compact 恢复包提取外置工具输出引用及两套参数视图。
 def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, Any]]:
     source_refs = restore_refs.get("source_refs", {}) if isinstance(restore_refs.get("source_refs"), dict) else {}
     items = source_refs.get("tool_outputs", []) if isinstance(source_refs.get("tool_outputs"), list) else []
@@ -58,6 +62,7 @@ def tool_output_artifact_refs(restore_refs: dict[str, Any]) -> list[dict[str, An
             "scoped_call_id": str(item.get("scoped_call_id", "") or ""),
             "source_path": str(item.get("source_input") or ""),
             "parameters": dict(item.get("parameters", {}) if isinstance(item.get("parameters"), dict) else {}),
+            "model_parameters": model_visible_tool_parameters(item),
             "ok": item.get("ok"),
             "status": str(item.get("status") or ""),
             "error_code": str(item.get("error_code") or ""),
@@ -176,6 +181,7 @@ def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
         "parameters": dict(row.get("parameters") or {})
         if isinstance(row.get("parameters"), dict)
         else {},
+        "model_parameters": model_visible_tool_parameters(row),
         "ok": row.get("ok") is True,
         "status": str(row.get("status") or ""),
         "error_code": str(row.get("error_code") or ""),
@@ -230,6 +236,9 @@ def _attach_carried_operation_facts(
         record["tool_operation_replayed"] = value.get("replayed") is True
 
 
+# LLM: A source ref is machine-facing provenance but may later feed model projections, so preserve
+# the provider-authored view explicitly beside the execution arguments.
+# 函数用途: 把工具输出索引行转换成 Compact 使用的来源引用。
 def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(row.get("path") or ""))
     return {
@@ -243,6 +252,7 @@ def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
         "source_input": str(row.get("source_input") or ""),
         "source_path": str(row.get("source_input") or ""),
         "parameters": dict(row.get("parameters", {}) if isinstance(row.get("parameters"), dict) else {}),
+        "model_parameters": model_visible_tool_parameters(row),
         "request_id": str(row.get("request_id", "") or ""),
         "conversation_request_id": str(row.get("conversation_request_id", "") or ""),
         "run_id": str(row.get("run_id", "") or ""),
@@ -257,6 +267,8 @@ def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# LLM: Small-call refs follow the same dual-view contract as externalized outputs.
+# 函数用途: 把未外置正文的工具调用索引行转换成 Compact 引用。
 def _tool_call_ref(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": "tool_call",
@@ -266,6 +278,7 @@ def _tool_call_ref(row: dict[str, Any]) -> dict[str, Any]:
         "source_input": str(row.get("source_input") or ""),
         "source_path": str(row.get("source_input") or ""),
         "parameters": dict(row.get("parameters", {}) if isinstance(row.get("parameters"), dict) else {}),
+        "model_parameters": model_visible_tool_parameters(row),
         "request_id": str(row.get("request_id", "") or ""),
         "conversation_request_id": str(row.get("conversation_request_id", "") or ""),
         "run_id": str(row.get("run_id", "") or ""),

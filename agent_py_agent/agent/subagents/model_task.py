@@ -354,3 +354,7 @@ class SubAgentTask:
     channel_checks: list[ChannelProbeCheck] = field(default_factory=list)
     channel_probe_file: str = ""
     attributes: dict[str, object] = field(default_factory=dict)
+    # LLM: Monotonic canonical revision for exact read-modify-write transactions. It is host-owned
+    # and must never be inferred from model text, timestamps, projection versions, or file mtimes.
+    # 字段用途: 标记子代理权威状态版本，供并发裁决检测旧快照和记录提交先后；放在末尾保留旧位置参数兼容性。
+    state_revision: int = 0

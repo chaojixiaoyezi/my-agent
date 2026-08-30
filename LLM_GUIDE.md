@@ -107,11 +107,10 @@
   `ordinary_task_resume` 或租用主代理后台回合。任何误指向 child task id 的旧后台 policy/wake 都在
   调用模型前关闭并由 child runner 接管，主代理不能携带 child 身份或权限运行。一次 runner 结果重新
   落为 `PENDING` 时只释放该 run 的启动占位；共享批次宿主 PID 仍活着不能阻止这个 child 立即续派。
-- `task_progress` 是当前模型的软计划/记事账本，不是业务质量验收器。普通模型准备自然 final 时，若自己
-  留下 `pending/in_progress/unknown` exact 项，宿主按 会话运行时 stop hook 在同一 active turn 有界核对一次；
-  模型继续使用原工具，或按原 id 关项/标记真实 blocked。核对耗尽仍 open 时本轮 typed blocked，不能把
-  durable task 写成 DONE；它不扫描正文、代码、测试或产物，也不创建 `ordinary_task_resume`。显式
-  `/goal`、Compact 和 typed 子代理/控制事件仍各走自己的既有生命周期。新账本项必须有稳定
+- `task_progress` 是当前模型的软计划/记事账本，不是业务质量验收器。普通模型给出 plain final 时，宿主
+  不因 `pending/in_progress/unknown` 项拒绝正文、追加隐藏模型调用或自动续跑；清单继续进入同 thread 的
+  下一回合、Compact 和 TUI，供模型或用户以后继续。只有显式 `/goal` 的 open plan、直属 child 等待、
+  UNKNOWN 副作用、权限和取消各自保留 typed 生命周期。新账本项必须有稳定
   `id + title + status`，避免空白行。
 - `task_progress(action=read)` 默认只读当前 active turn 的 canonical 账本。模型若把当前结构化
   `task_id` 显式填进 `run_id`，该值只作为当前账本别名并经过共享 task-path resolver；只有与当前任务

@@ -12,12 +12,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..common.json_io import write_json_file_atomic
 from .home_layout_v2 import v2_home_directories, v2_home_path_fields, v2_seed_files, v2_seed_jsons
 from .home_memory_seeds import (
     default_memory_hot_md,
     default_memory_md,
     default_memory_route_index_md,
 )
+from .owner_policy_seed_payloads import default_quota_payload
 from .persona_templates import AGENTS_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE
 
 DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
@@ -196,6 +198,7 @@ def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
         _write_seed_file(path, content)
     for path, payload in v2_seed_jsons(paths):
         _write_seed_json(path, payload)
+    _upgrade_default_quota_policy(paths)
     _sync_skill_index(paths)
     _sync_declarative_indexes(paths)
     _cleanup_legacy_dirs(paths)
@@ -305,6 +308,25 @@ def _write_seed_json(path: Path, payload: Mapping[str, object]) -> None:
     if path.exists():
         return
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+# LLM: Only the byte-for-byte semantic legacy seed may migrate automatically. Any custom quota
+# value is administrator policy and must remain untouched even when it equals a common round number.
+# 函数用途: 把未修改过的 quota.v1 默认 100GB 应用扫描迁移成 quota.v2 默认不限容量。
+def _upgrade_default_quota_policy(paths: MyAgentHomePaths) -> None:
+    legacy_default = {
+        "schema_version": "quota.v1",
+        "max_active_agents": 1000,
+        "max_subagents": 50,
+        "max_depth": 4,
+        "max_disk_mb": 102400,
+    }
+    try:
+        payload = json.loads(paths.owner_quota_json.read_text(encoding="utf-8"))
+        if payload == legacy_default:
+            write_json_file_atomic(paths.owner_quota_json, default_quota_payload())
+    except (OSError, json.JSONDecodeError):
+        return
 
 
 def safe_task_slug(task_name: str, *, max_chars: int = 80) -> str:

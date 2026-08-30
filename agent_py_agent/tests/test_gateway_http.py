@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Tests for gateway HTTP service."""
 
+import errno
 import json
 import socket
 import threading
@@ -64,6 +65,29 @@ def find_free_port() -> int:
     return port
 
 
+class _ResponseWriter:
+    def __init__(self, error: OSError | None) -> None:
+        self.error = error
+
+    def write(self, payload: bytes) -> int:
+        if self.error is not None:
+            raise self.error
+        return len(payload)
+
+
+def _response_handler_double(error: OSError | None):
+    from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPHandler
+
+    handler = object.__new__(GatewayHTTPHandler)
+    handler.command = "POST"
+    handler.close_connection = False
+    handler.send_response = MagicMock()
+    handler.send_header = MagicMock()
+    handler.end_headers = MagicMock()
+    handler.wfile = _ResponseWriter(error)
+    return handler
+
+
 class TestGatewayHTTPHandler:
     """Test HTTP handler methods."""
 
@@ -107,6 +131,40 @@ class TestGatewayHTTPHandler:
         for t in threads:
             t.join()
         assert len(set(out)) == len(out) == 4000
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            BrokenPipeError(errno.EPIPE, "client closed"),
+            ConnectionResetError(errno.ECONNRESET, "client reset"),
+            ConnectionAbortedError(errno.ECONNABORTED, "client aborted"),
+        ],
+    )
+    def test_send_json_treats_only_client_disconnect_as_normal(self, error: OSError):
+        from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPHandler
+
+        handler = _response_handler_double(error)
+
+        GatewayHTTPHandler._send_json(handler, 200, {"ok": True})
+
+        assert handler.close_connection is True
+        handler.send_header.assert_any_call("Connection", "close")
+
+    def test_send_json_does_not_hide_unrelated_io_failure(self):
+        from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPHandler
+
+        handler = _response_handler_double(OSError(errno.ENOSPC, "disk full"))
+
+        with pytest.raises(OSError, match="disk full"):
+            GatewayHTTPHandler._send_json(handler, 200, {"ok": True})
+
+    def test_send_json_does_not_hide_serialization_failure(self):
+        from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPHandler
+
+        handler = _response_handler_double(None)
+
+        with pytest.raises(TypeError):
+            GatewayHTTPHandler._send_json(handler, 200, {"bad": object()})
 
     def test_build_ask_request_carries_conversation_context(self):
         from agent_py_agent.agent.gateway_parts.http_handlers import (

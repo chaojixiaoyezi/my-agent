@@ -422,6 +422,97 @@ def test_supervision_reclaims_running_with_dead_worker(tmp_path: Path, monkeypat
     assert calls and dead.id in calls[0]
 
 
+def test_managed_supervision_waits_for_live_runtime_attempt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    owner_home = tmp_path / "owner"
+    manager = SubAgentManager(
+        tmp_path / "subagents",
+        owner_id="tui-test/recovery-wait",
+        owner_home_dir=str(owner_home),
+    )
+    task = manager.create_run(
+        goal="wait for runtime authority",
+        thought="recovery",
+        plan=["resume"],
+        depth=1,
+    )
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    prepared.attributes = {
+        **dict(prepared.attributes or {}),
+        "runner_session": {
+            **_session(age_seconds=120.0),
+            "run_id": task.id,
+            "worker_pid": 999999999,
+        },
+    }
+    manager.save(prepared)
+    calls = _capture_auto_start(monkeypatch)
+
+    summary = capability_auto_sweep.supervise_stalled_orphans(
+        _agent(tmp_path, manager)
+    )
+
+    assert summary["running_reclaimed"] == 0
+    assert manager.load(task.id).status == "RUNNING"
+    assert manager.runtime_db.get_attempt(prepared.runner_active_attempt_id)["status"] == "running"
+    assert calls == []
+
+
+def test_managed_supervision_settles_dead_attempt_before_requeue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    owner_home = tmp_path / "owner"
+    manager = SubAgentManager(
+        tmp_path / "subagents",
+        owner_id="tui-test/recovery-requeue",
+        owner_home_dir=str(owner_home),
+    )
+    task = manager.create_run(
+        goal="requeue after runtime fence",
+        thought="recovery",
+        plan=["resume"],
+        depth=1,
+    )
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    old_attempt_id = prepared.runner_active_attempt_id
+    prepared.attributes = {
+        **dict(prepared.attributes or {}),
+        "runner_session": {
+            **_session(age_seconds=120.0),
+            "run_id": task.id,
+            "worker_pid": 999999999,
+        },
+    }
+    manager.save(prepared)
+    with manager.runtime_db.transaction() as conn:
+        conn.execute(
+            "UPDATE resource_locks SET pid = ?, start_token = '', lease_expires_at = ? "
+            "WHERE attempt_id = ?",
+            (999999999, time.time() - 1000, old_attempt_id),
+        )
+    calls = _capture_auto_start(monkeypatch)
+
+    summary = capability_auto_sweep.supervise_stalled_orphans(
+        _agent(tmp_path, manager)
+    )
+
+    assert summary["running_reclaimed"] == 1
+    recovered = manager.load(task.id)
+    assert recovered.status == "PENDING"
+    assert old_attempt_id in recovered.runner_abandoned_attempt_ids
+    assert manager.runtime_db.get_attempt(old_attempt_id)["status"] == "cancelled"
+    assert calls and calls[0] == [task.id]
+    resumed = manager.lifecycle.prepare_runner_attempt(task.id)
+    assert resumed.runner_active_attempt_id != old_attempt_id
+    authority = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert authority is not None
+    assert int(authority["current_attempt_generation"]) == 2
+    assert manager.runtime_db.get_attempt(resumed.runner_active_attempt_id)["status"] == "running"
+
+
 def test_cross_generation_inprocess_session_ignores_reused_pid(tmp_path: Path, monkeypatch) -> None:
     manager = SubAgentManager(tmp_path / "subagents")
     frozen = _make_child(

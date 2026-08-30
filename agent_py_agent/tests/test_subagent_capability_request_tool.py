@@ -175,10 +175,31 @@ def test_top_level_worker_can_request_capability(tmp_path):
 def test_capability_request_tool_is_registered_for_simple_agent(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
 
-    specs = {spec.name: spec for spec in agent.tools.specs(include_orchestration=True)}
+    root_specs = {spec.name: spec for spec in agent.tools.specs(include_orchestration=True)}
+    child_specs = {
+        spec.name: spec
+        for spec in agent.tools.specs(
+            allowed_tools=["capability_request"],
+            include_orchestration=True,
+        )
+    }
 
-    assert "capability_request" in specs
-    assert specs["capability_request"].category == "orchestration"
+    assert "capability_request" in agent.tools.tools
+    assert "capability_request" not in root_specs
+    assert child_specs["capability_request"].category == "orchestration"
+
+
+def test_root_tool_search_cannot_rediscover_child_only_capability_request(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    snapshot = agent.tools.runtime_snapshot(run_id="gateway-request")
+
+    hits = agent.tools.search_deferred_specs(
+        "正式能力申请 capability request",
+        runtime_snapshot=snapshot,
+    )
+
+    assert "capability_request" not in snapshot.available_tool_names
+    assert all(spec.name != "capability_request" for spec in hits)
 
 
 def test_capability_request_tool_role_default_still_requires_parent_scope(tmp_path):

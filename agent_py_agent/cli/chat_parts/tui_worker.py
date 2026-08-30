@@ -178,8 +178,9 @@ def _tui_prepare_gateway_job(cfg: TuiWorkerConfig, job: Any) -> None:
     _submit_new_gateway_job(cfg, job, turn_inject)
 
 
-# LLM: worker 对每个 dequeue 精确 begin/finalize 一次；任何路径异常也必须以 structured failed summary 收口。
-# 函数用途: 后台循环串行处理聊天任务直到 stop_event。
+# LLM: worker 对每个 dequeue 精确 begin/finalize 一次；show-prompt 轮在 begin 时声明延迟回答正文，
+# 其余轮继续逐 token 显示；任何路径异常也必须以 structured failed summary 收口。
+# 函数用途: 后台循环串行处理聊天任务，必要时保证完整 prompt 先于最终回答显示。
 def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
     runtime = _required_runtime(cfg)
     while not cfg.stop_event.is_set():
@@ -199,6 +200,7 @@ def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
                 str(getattr(job, "gateway_request_id", "") or "").strip()
                 or job.request_id
             ),
+            defer_assistant_display=bool(getattr(job, "show_prompt", False)),
         )
         agent_response_text = ""
         response_recorded = False

@@ -18,15 +18,15 @@ def default_permissions_payload() -> dict[str, object]:
     }
 
 
-# LLM: quota 数字是 owner 资源上界；运行时仍由统一 quota enforcer 执行。
-# 函数用途: 返回新 owner 的默认并发、深度和磁盘配额。
+# LLM: quota 数字是 owner 资源上界；磁盘 0 明确表示不启用应用层全树扫描，非零值才由统一 quota enforcer 执行。
+# 函数用途: 返回新 owner 的默认并发、深度和可选磁盘配额；用户空间默认不限制容量。
 def default_quota_payload() -> dict[str, object]:
     return {
-        "schema_version": "quota.v1",
+        "schema_version": "quota.v2",
         "max_active_agents": 1000,
         "max_subagents": 50,
         "max_depth": 4,
-        "max_disk_mb": 102400,
+        "max_disk_mb": 0,
     }
 
 

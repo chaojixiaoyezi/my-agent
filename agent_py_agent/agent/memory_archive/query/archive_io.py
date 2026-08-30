@@ -91,6 +91,9 @@ def _read_archive_file(layer: str, path: Path) -> list[dict[str, Any]]:
     return records
 
 
+# LLM: Query normalization must preserve typed operation/effect identity from raw events while
+# retaining the original payload for diagnostics; these fields are evidence, not prose aliases.
+# 函数用途: 把一条原始归档记录整理成查询接口的统一字段，并保留工具操作的结构化证据。
 def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dict[str, Any]) -> dict[str, Any]:
 
     derived = _derived_archive_fields(payload)
@@ -112,6 +115,9 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
         "is_dispatch": bool(payload.get("is_dispatch", False)),
         "tool_name": str(payload.get("tool_name", "") or ""),
         "tool_success": payload.get("tool_success"),
+        "operation_id": str(payload.get("operation_id", "") or ""),
+        "effect_outcome": str(payload.get("effect_outcome", "") or ""),
+        "source_ref": str(payload.get("source_ref", "") or ""),
         "source": str(payload.get("source") or derived.get("source") or ""),
         "archive_level": _archive_level_value(payload.get("archive_level", 3)),
         "created_at": created_at,

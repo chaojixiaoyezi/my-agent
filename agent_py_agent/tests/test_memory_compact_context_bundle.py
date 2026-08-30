@@ -79,7 +79,7 @@ def _write_home_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     home = tmp_path / "home"
     config_path.write_text(
-        'workspace_root: "workspace"\n'
+        'workspace_root: ""\n'
         f'my_agent_home: "{home}"\n'
         'model_backend: "echo"\n'
         

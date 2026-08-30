@@ -97,8 +97,11 @@ class GatewayAskParams:
     include_prompt: bool = False
     resume_context: bool | None = None
     chat_session_id: str = ""
+    channel: str = LOCAL_CHAT_CHANNEL
     channel_user_id: str = LOCAL_AGENT_USER_ID
     canonical_user_id: str = LOCAL_AGENT_USER_ID
+    channel_chat_type: str = ""
+    channel_chat_id: str = ""
     agent: SimpleAgent | None = field(default=None, repr=False)
     system_task: dict[str, object] | None = None
     interactive_approvals: bool = False
@@ -148,7 +151,12 @@ def submit_gateway_ask(
     )
     if workspace:
         payload["workspace"] = workspace
-    payload["conversation"] = _gateway_conversation_payload(params)
+    conversation = _gateway_conversation_payload(params)
+    payload["conversation"] = conversation
+    # File-queue clients do not have HTTP headers, so the same structured ingress identity must
+    # travel in the canonical request body. Owner routing reads these fields, never prompt text.
+    payload["user_id"] = str(params.canonical_user_id or params.channel_user_id)
+    payload["metadata"] = _gateway_identity_metadata(params, conversation)
     request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)
     if params.agent is not None:
@@ -192,11 +200,35 @@ def _normalized_gateway_prompt(params: GatewayAskParams) -> tuple[str, dict[str,
 def _gateway_conversation_payload(params: GatewayAskParams) -> dict[str, str]:
     session_id = str(params.chat_session_id or _DEFAULT_GATEWAY_CLI_SESSION_ID)
     return {
-        "channel": LOCAL_CHAT_CHANNEL if params.chat_session_id else "gateway-cli",
+        "channel": (
+            str(params.channel or LOCAL_CHAT_CHANNEL)
+            if params.chat_session_id
+            else "gateway-cli"
+        ),
         "channel_conversation_id": session_id,
         "channel_user_id": str(params.channel_user_id or LOCAL_AGENT_USER_ID),
         "canonical_user_id": str(params.canonical_user_id or LOCAL_AGENT_USER_ID),
     }
+
+
+# LLM: Owner routing for queued asks must use the same typed metadata as HTTP admission. Group
+# discriminators remain explicit provider facts and are never inferred from a conversation id.
+# 函数用途: 构造文件队列请求的可信通道身份，供单 Gateway 选择正确用户或群工作区。
+def _gateway_identity_metadata(
+    params: GatewayAskParams,
+    conversation: dict[str, str],
+) -> dict[str, str]:
+    metadata = {"channel": str(conversation.get("channel") or "gateway-cli")}
+    chat_type = str(params.channel_chat_type or "").strip().lower()
+    chat_id = str(params.channel_chat_id or "").strip()
+    if chat_type and chat_id:
+        metadata.update(
+            {
+                "channel_chat_type": chat_type,
+                "channel_chat_id": chat_id,
+            }
+        )
+    return metadata
 
 
 # LLM: Client cwd is a typed per-thread execution setting, separate from the owner-level Gateway

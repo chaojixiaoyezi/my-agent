@@ -46,7 +46,7 @@ tool、artifact 和 conversation 事实，不增加自然语言硬判断或 IM �
 | FR-001 | 通道 installed/configured/health/current-bound 必须由统一 registry snapshot 投影 | Must |
 | FR-002 | Skill 必须由唯一服务构建逐轮不可变的 builtin/shared/owner/workspace snapshot | Must |
 | FR-003 | Memory 保留 owner JSONL 权威源，并支持稳定 ID 的 add/list/replace/remove/batch | Must |
-| FR-004 | Persona 保留 USER 自主更新、SOUL/AGENTS 确认边界，并补版本、并发和加载诊断 | Must |
+| FR-004 | Persona 保留 USER/AGENTS 自主更新、仅 SOUL 确认的边界，并补版本、并发和加载诊断 | Must |
 | FR-005 | Scheduler 必须 owner-scoped、持久、可恢复，并支持 create/list/update/pause/resume/delete/run-now/history | Must |
 | FR-006 | 可复用 Workflow 迁移为 Skill + 普通 typed task/subagent 组合，删除重复 Workflow 执行链 | Must |
 | FR-007 | 所有工具、Skill、Memory、Persona、Scheduler 与子代理继承同一不可扩大的 owner 权限 | Must |
@@ -128,7 +128,7 @@ tool、artifact 和 conversation 事实，不增加自然语言硬判断或 IM �
 - [x] 能力自述四层状态来自实际 registry 与当前结构化 binding；聚焦回归和完整本地 CI 通过，待部署真测。
 - [x] builtin/shared/owner/workspace Skill 同一 snapshot 主链通过，旧重复加载链已删除；231 项相关聚焦回归、新增隔离/继承测试和完整本地 CI 通过，待部署真测。
 - [x] Memory 保留 owner JSONL 单一权威源，稳定 ID CRUD/batch、并发、过期、索引过滤与 owner/group 隔离通过聚焦回归和完整本地 CI，待部署真测。
-- [x] Persona 保留 USER 自主与 SOUL/AGENTS 确认边界，版本/CAS/回滚、受控加载、确认后并发冲突、owner/group 隔离通过聚焦回归和完整本地 CI，待部署真测。
+- [x] Persona 保留 USER/AGENTS 自主与仅 SOUL 确认的边界，版本/CAS/回滚、受控加载、确认后并发冲突、owner/group 隔离通过聚焦回归；新边界待完整门与部署真测。
 - [x] Scheduler 重启恢复、去重 claim、用户/群组隔离和同 thread 唤醒已通过聚焦回归；全局 due-owner
   投影在 1.10 重启与 135-owner 场景完成时延反证，真实 Feishu 自动兜底和消息工具主动投递均为单 run/
   单出站/单 transcript。owner JSON 账本仍是唯一权威；完整本地 CI 已通过，待精确提交 wheel 部署。

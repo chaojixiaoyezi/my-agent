@@ -9,9 +9,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from agent.contracts.idempotency import operation_idempotency_key
 from agent.ingestion import watch_state as ws
 from agent.ingestion.watch_tool import WatchStreamTool
 from agent.tooling.runtime_contracts import ProviderToolCapability, ToolProtocolSnapshot
+
+from agent_py_agent.agent.ingestion import watch_state as canonical_ws
+from agent_py_agent.agent.ingestion.watch_tool import (
+    WatchStreamTool as CanonicalWatchStreamTool,
+)
+from agent_py_agent.agent.local_storage import LocalStore as CanonicalLocalStore
+from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
 
 def _text_protocol_snapshot(run_id: str) -> ToolProtocolSnapshot:
@@ -68,6 +76,16 @@ def _tool(owner_home: Path, source: _FakeSource) -> WatchStreamTool:
     return tool
 
 
+def _canonical_tool(owner_home: Path, source: _FakeSource) -> CanonicalWatchStreamTool:
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test")
+    )
+    tool = CanonicalWatchStreamTool(agent)
+    tool.allow_private_resolution = True
+    tool._fetch_json = source.handle
+    return tool
+
+
 def _payload(result) -> dict:
     assert result.ok, result.output
     return json.loads(result.output)
@@ -82,6 +100,118 @@ def test_watch_stream_requires_explicit_action(owner_home) -> None:
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
     assert "不会把缺失动作猜成 pull" in result.output
+
+
+def test_configure_missing_content_fails_before_operation_claim(
+    owner_home, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(canonical_ws, "registry", canonical_ws.WatchRegistry())
+    tool = _canonical_tool(owner_home, _FakeSource())
+    store = CanonicalLocalStore(tmp_path / "operations.db", enable_fts=False)
+    operation_id = "tool_call:watch-attempt:watch-call"
+
+    execution = execute_canonical_test_call(
+        tmp_path,
+        tools={"watch_stream": tool},
+        tool_name="watch_stream",
+        arguments={"action": "configure", "watch_id": "ws-missing-content"},
+        run_id="watch-run",
+        attempt_id="watch-attempt",
+        operation_id=operation_id,
+        idempotency_key=operation_idempotency_key("watch-attempt", operation_id),
+        operation_store=store,
+        operation_store_required=True,
+    )
+
+    result = execution.result
+    assert result.ok is False
+    assert result.error_code == "TOOL_PARAMETER_REQUIRED"
+    assert result.failure_stage == "validation"
+    assert result.handler_executed is False
+    assert result.effect_outcome == "not_started"
+    assert result.operation is None
+    assert "running" not in execution.states
+    assert store.list_tool_operations(run_id="watch-run") == []
+
+
+def test_valid_configure_still_claims_once_and_updates_watch(
+    owner_home, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(canonical_ws, "registry", canonical_ws.WatchRegistry())
+    source = _FakeSource()
+    tool = _canonical_tool(owner_home, source)
+    opened = _payload(
+        tool.execute(
+            {
+                "action": "open",
+                "url": "http://127.0.0.1:9/pull?since=<next>&limit=<limit>",
+            }
+        )
+    )
+    store = CanonicalLocalStore(tmp_path / "operations.db", enable_fts=False)
+    operation_id = "tool_call:watch-attempt:watch-configure"
+
+    execution = execute_canonical_test_call(
+        tmp_path,
+        tools={"watch_stream": tool},
+        tool_name="watch_stream",
+        arguments={
+            "action": "configure",
+            "watch_id": opened["watch_id"],
+            "judgment_note": "只记录结构化测试事件",
+        },
+        run_id="watch-run",
+        attempt_id="watch-attempt",
+        operation_id=operation_id,
+        idempotency_key=operation_idempotency_key("watch-attempt", operation_id),
+        operation_store=store,
+        operation_store_required=True,
+    )
+
+    assert execution.result.ok is True
+    assert execution.result.handler_executed is True
+    records = store.list_tool_operations(run_id="watch-run")
+    assert len(records) == 1
+    assert records[0].status == "succeeded"
+    persisted = canonical_ws.load_state(owner_home, opened["watch_id"])
+    assert persisted is not None
+    assert persisted.judgment_note == "只记录结构化测试事件"
+
+
+def test_preclaim_validator_fault_fails_closed_without_operation(
+    owner_home, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(canonical_ws, "registry", canonical_ws.WatchRegistry())
+    tool = _canonical_tool(owner_home, _FakeSource())
+    store = CanonicalLocalStore(tmp_path / "operations.db", enable_fts=False)
+
+    def _broken_validator(_params, _context):
+        raise RuntimeError("validator boom")
+
+    tool.validate_invocation = _broken_validator
+    execution = execute_canonical_test_call(
+        tmp_path,
+        tools={"watch_stream": tool},
+        tool_name="watch_stream",
+        arguments={
+            "action": "configure",
+            "watch_id": "ws-validator-fault",
+            "judgment_note": "不会执行",
+        },
+        run_id="watch-fault-run",
+        attempt_id="watch-fault-attempt",
+        operation_store=store,
+        operation_store_required=True,
+    )
+
+    result = execution.result
+    assert result.ok is False
+    assert result.error_code == "TOOL_ERROR"
+    assert result.metadata["reported_error_code"] == "TOOL_INVOCATION_VALIDATOR_FAILED"
+    assert result.failure_stage == "validation"
+    assert result.handler_executed is False
+    assert result.effect_outcome == "not_started"
+    assert store.list_tool_operations(run_id="watch-fault-run") == []
 
 
 class _SingleTaskManager:

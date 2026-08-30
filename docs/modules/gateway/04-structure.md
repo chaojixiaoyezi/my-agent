@@ -1,5 +1,17 @@
 # Gateway Structure
 
+## 工具目录与停止入口的单一事实
+
+- `ToolRuntimeSnapshot` 在 request/run 边界完成 owner、显式 allowlist、availability 和 exposure 收敛。
+  `tool_manifest_payload` 只读取其中 `model_visible` runtimes；它不得回读全局 registry，也不得拿主体
+  `owner_type` 去匹配代理角色。provider specs、`tool_search`、`list_tools`、ActionPolicy 和 Executor 因而看到
+  同一集合，执行时的 owner/path/effect/approval 门保持不变。
+- agent-stop HTTP 入口只负责同步授权、终态短路、幂等 admission 和启动唯一后台工作；
+  `conversation.agent_control` 的 canonical cancel 仍是写终态的唯一入口。响应必须携带 accepted/terminal
+  typed 状态，客户端不能把 transport timeout 当业务拒绝，也不能把 accepted 当 terminal。
+- exact child runner 的 session、snapshot 保存和 heartbeat 在每次写入前读取 canonical state；发现更新的
+  终态立即退出。显式 recovery 的 reopen 标志只在结构化 user-stop 恢复路径传入，普通保存默认 false。
+
 ## 完成回合 canonical native envelope
 
 - `gateway_parts/request_execution.py` 在同一次最终化中写入用户可见 transcript、canonical native envelope 和
@@ -68,6 +80,23 @@
   ToolCall、权限和 handler；字符数/ready 不参与任务状态、完成裁决、恢复、Compact、缓存或 timeout。
 
 ## Owner WorkspaceOnly 与管理员 Full Access
+
+- owner-scoped Shell 的结构化 cwd 先由 path policy 校验，命令正文仍交给 OS 沙箱，不解析重定向、管道或
+  任意字符串中的路径。另一 owner/未授权宿主路径不会被挂载，因此进程内 `ENOENT`/`EACCES` 只证明当前
+  scope 不可访问。Shell 结果无论成功失败都向模型投影 `owner_workspace_only`、
+  `external_host_paths_hidden=true`、`host_path_absence_proven=false`；该投影解释可见性，不参与授权、
+  operation 终态或副作用裁决。
+- `run_command` 的唯一机器退出事实仍是 shell 最终 return code。供应商若在失败动作后追加恒成功命令，底座
+  不从 stdout 或自然语言猜中间动作；model spec 明确要求直接使用工具自带退出码，避免 `; echo $?` 遮蔽。
+
+## 会话发现与恢复边界
+
+- `/sessions` 从当前 owner 的 `SessionManager` 读取 canonical 会话记录，倒序、有界展示并生成精确
+  `my-agent resume <session_id>`；坏记录只计数，不中断其余列表。命令不写 transcript、不调用模型、不触碰
+  其他 owner。
+- 当前 TUI 不支持只替换 session id 的原地切换。完整 picker 需要像 会话运行时/终端交互 一样同时重建
+  transcript、active turn、Compact、task link、权限和视图滚动状态；在该合同落地前，退出再 resume 是唯一
+  正确恢复路径。
 
 - 每个 Gateway 请求先冻结结构化 owner 身份和 owner home。WorkspaceOnly 的文件、Shell、PTY 与 LSP 都以
   owner home 为硬墙，进程启动 cwd 不是权限来源；这道文件墙不关闭外网，网络仍由工具自己的网络合同裁决。
@@ -163,7 +192,9 @@ accept backlog 与在途请求上限均为 128，16 个 daemon worker 在进程�
 handler 内的 owner/thread 鉴权、turn 串行、operation 幂等或状态权威。停机时未开始的排队连接会被取消
 并关闭，正在执行的 daemon handler 不得拖住 Gateway 退出。JSON 与 metrics 响应统一声明
 `Connection: close`，防止空闲 keep-alive 永久占用固定 worker；后台 notice 请求 2 秒无响应仍由客户端转入
-退避，避免一个失联窗口长期占住连接。
+退避，避免一个失联窗口长期占住连接。JSON/metrics 的 header/body 写回共用唯一 transport boundary：只将
+EPIPE、ECONNRESET、ECONNABORTED 解释为客户端已离开并结束该 socket；已经进入 handler 的持久业务照常
+收尾。序列化失败和其它 OSError 继续进入 server error path，不能用断连收口掩盖产品错误。
 
 多用户公平分层处理：未鉴权 socket 只受全局 16/128 transport 上限约束，不能相信 header 猜 owner；handler
 鉴权以后，模型任务沿 `GatewayAdmission` 的每用户/全局/同会话三层准入进入持久队列，后台会话再按 owner
@@ -191,6 +222,10 @@ audit Agent 为空而回退 daemon cwd。
   `ConversationThread` 上读取 active task link，再通过 `conversation/agent_activity.py` 从 canonical run
   账本投影这些 root 的 depth=1/parent 精确直属 child，与 after-cursor 之后的 notice rows 一次返回。
   客户端不能指定 thread/root id，也不能从通知正文推断活跃状态。
+- notice 是高频被动投影，不是 owner Agent 的加载入口。已驻留 owner 通过
+  `OwnerScopedAgentPool.peek()` 查询，冷 owner 返回 `ok=true/owner_state=cold` 的空活动投影；该路径
+  不构造 Agent、不提升 hard residency、不触碰 LRU。历史、Memory、消息、控制和工具继续走
+  `resolve_gateway_scope_agent()` 的完整身份/权限装配，不能为了省内存改成 cold lookup。
 - `cli/chat_parts/tui_threading.py` 只有在 `ok=true` 时消费该快照；传输或解析失败保持当前投影，避免把
   “暂时查不到”伪造成任务结束。直连本地模式调用同一个只读 activity projector。
 - `TuiRuntime`、reducer 和 renderer 只维护一个 session-scoped `background` 活动块。前台 thinking 优先，
@@ -273,7 +308,7 @@ audit Agent 为空而回退 daemon cwd。
   后者才按 exact `tool_name/run_id/operation_id/idempotency_key/args_hash` 批准一次具体副作用。
   `controlled_exec` 当前经 `subprocess.Popen` 执行且没有 OS sandbox，因此声明 `sandbox=none`；即使 grant
   完整匹配，`apply=true` 仍必须进入同一 ToolExecutor/permission bridge，未批准时 handler 不运行。
-- `agent/subagents/tool_approval_bridge.py` 是后台 child 到 owner UI 的唯一 pending/decision 账本。记录位于
+- `agent/conversation/agent_tool_approval.py` 是后台 child 到 owner UI 的唯一 pending/decision 账本。记录位于
   owner ConversationStore 的 root/run 哈希路径，发布、决定和清理共用 exact transition lock；
   `.consumer.json` 只表示显式交互客户端的短租约，不是批准。无租约、取消、终态、损坏和 identity mismatch
   全部关闭式失败。
@@ -334,6 +369,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   background continuation；本轮输入缺失时不创建 successor。`/goal` 的精确持久记录是唯一允许原 id resume 的例外。`run_task_workspace_writer` 只在本轮工作工具已
   设置 active 标志后归档 task workspace，普通 chat 不因有 sticky cwd 被误记成任务。task-local child
   携带父 conversation id 只作 lineage，不进入这条主会话防双执行判断。
+- 新会话没有 sticky workspace 时仍保持惰性晋升，但首个 `promotes_task` 工具必须在冻结该调用的
+  write boundary、审批 cwd、沙箱根和 handler cwd 之前完成晋升。materialize 后由 conversation seam 原子同步
+  `run_workspace`、`conversation_execution_cwd`、runtime roots 和旧 cwd rebase source，再重建当前 call；
+  不能只让第二个工具看到新目录。该顺序与 会话运行时 在工具前固定 `TurnContext.cwd` 的边界一致，普通纯聊天
+  不因此创建任务目录。
 - `user_space.run_workspace.activate_run_workspace` 是新建与复用 task 目录的同一激活入口。它原子更新
   当前执行在 `task.yaml`、`run_workspace.json`、`state.json` 和 artifact manifest 的投影，保留
   `output/`、既有 artifact 条目与 append-only timeline；相同 request/run/task 重入幂等。旧
@@ -352,13 +392,13 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 ## 2026-07-27 工具轮窗口与持久会话 Compact 的边界
 
 - `agent_core._tool_loop_service.build_tool_loop_prompt` 是主代理、子代理和 Gateway conversation
-  共用的每轮模型输入入口；文字协议使用 `tool_context.window` 的字符近似，原生协议使用
+  共用的每轮模型输入入口；文字协议使用 `conversation.tool_context_window` 的字符近似，原生协议使用
   `model_visible_context_tokens` 的完整模型输入 token 估算。两者读取同一
   `RuntimeCompactPolicy`，但不再把字符数误当成原生 IR 的预算。
 - 原生入口达到精确配置阈值时，`tool_ir_compact.compact_native_ir_to_token_budget` 只从最旧
   ToolCall/ToolResult 整对回收，保留最新一对和所有运行中 `UserTurn`。回收前复用
   `memory_archive.compact_semantic_summary` 读取同一 native messages，并用最多一条
-  `CompactionSummary` 替换旧段；后续压缩原位替换旧摘要。`tool_context.window` 仍只写一条
+  `CompactionSummary` 替换旧段；后续压缩原位替换旧摘要。`conversation.tool_context_window` 仍只写一条
   有界 archive handoff。summary、handoff marker 和近期尾部共同进入同一完整 token 预算，
   都不是第二个 Compact ledger。
 - Gateway 的 `conversation/compact.py` 当前只管理 owner/thread 持久 transcript 的
@@ -448,9 +488,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/tooling/registry_invoke.py`、`agent/tooling/write_boundary.py`：相对 `output/...`、`work/...`
   只按当前结构化任务目录解析；显式绝对路径不改写，直接以原目标进入 owner/allowed roots/危险目录
   硬门。旧 escape-relocate 静默搬运链已经删除，因此一次拒绝不会伪装成写到另一位置的成功。
-- `agent/agent_core/_finalization_service.py`、`agent_core/subagent_outputs.py`：普通任务最终回复直接来自模型；
-  子代理结果和 artifact refs 只作为当前 request/run/task 的结构化事实交给主代理汇总，不再生成完成 marker
-  或独立验收报告。后台轮按真实 `params.task_id` 认领子代理，任务目录的可读标题只作旧数据兼容。
+- `agent/agent_core/_finalization_service.py` 与子代理 typed result/event 主链：普通任务最终回复直接来自模型；
+  子代理自然结果和 artifact refs 只作为当前 request/run/task 的结构化事实交给主代理汇总，不再生成完成
+  marker、目标覆盖判官或独立验收报告。后台轮按真实 `params.task_id` 认领子代理，任务目录的可读标题只作
+  旧数据兼容。
 - `agent/conversation/user_visible_text.py`：所有用户出口共用的内部协议净化器，覆盖 bracket tool block、
   XML function/tool envelope、模型以工具名直接降级成 XML 标签以及截断尾块；不得由各 IM adapter 另建
   deny list。
@@ -606,8 +647,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/delivery/service.py`：普通最终回复、后台主动消息和显式发送的统一出口；组合可信
   `DeliveryContext` 与无收件人的 `ReplyEnvelope`，净化正文后走原生 text/reply/image/file API，
   返回 `DeliveryReceipt` 并对相同失败做有界去重。
-- `agent/user_space/owner_quota.py`：owner 结构化写入口的跨进程准入锁；在锁内扫描当前 logical bytes，
-  按完整 multi-file mutation 的最终字节判断，策略/usage/lock 不可读时 fail-closed。
+- `agent/user_space/owner_quota.py`：管理员显式非零磁盘上限的跨进程准入锁；`max_disk_mb=0` 表示不限制并
+  直接退出热路径，不扫描 owner 全树。启用时在锁内按完整 multi-file mutation 的最终字节判断，
+  policy/usage/lock 不可读时 fail-closed。
 - `agent/user_space/home_retention.py`：只按 typed retention policy、terminal authority 和时间生成/执行
   plan；task/scratch 使用执行前状态复验、trash tombstone、legal hold 和 audit。
 - `agent/user_space/owner_maintenance.py`：记录 owner 上次维护尝试/成功和结果；损坏 policy 不执行删除。
@@ -624,9 +666,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   commentary/final-delivery 分离只作为边界对照，my-agent 仍由同一个模型回复投影负责正文安全。
 - `agent/conversation/runtime.py`：后台唤醒继续使用内部协议做运行裁决，但在写普通 assistant transcript
   和返回后台 report 前必须经过同一 user-facing projection；原始内部协议只交投递服务做抑制判定，
-  不得进入 compact 或 owner-local 会话搜索。自动派工监督使用 `progress_fingerprint.py` 的结构化状态
-  指纹；无 material delta 时只顺延 policy，不调用 LLM，显式 wait/数据巡检不受影响。后台根任务轮按
-  durable task id 注册协作中断，发送前抑制 cancelled/abandoned/superseded 任务的迟到正文。
+  不得进入 compact 或 owner-local 会话搜索。主/子代理续接只消费 typed child lifecycle wake、active-turn
+  input 和真实工具进展，不再运行一套无人接线的全树进度指纹判官。后台根任务轮按 durable task id 注册
+  协作中断，发送前抑制 cancelled/abandoned/superseded 任务的迟到正文。
 - `agent/capability/channel_message_tool.py`：主代理唯一 `send_message` 工具。收件人由 scoped owner
   决定，附件必须通过 task registry、owner 边界、ready 状态与 hash 校验；执行前占位和结果重放由
   通用 tool operation 账本负责，不再维护消息工具自己的第二份回执。
@@ -862,7 +904,7 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
 
 ## Agent View And Control Service
 
-`gateway_parts/agent_control_service.py` 是 TUI 与未来 Web 查看/控制代理树的唯一 Gateway domain 入口。
+`conversation/agent_control.py` 是 TUI、Gateway 与未来 Web 查看/控制代理树的唯一通道中立入口。
 `view` 先用 owner、conversation root 与 canonical ancestry 证明 exact run 属于当前树，再返回
 `conversation_agent_view.v1`；结束 attempt 不影响历史可见性。`guidance` 和 `stop` 在相同只读证明之后继续
 执行 mutation gate，必须命中当前 active binding，不能凭历史关系修改已经结束或被替换的 run。
@@ -878,3 +920,30 @@ HTTP handler 只负责可信来源、`GatewayControlScope`、字段类型和错�
 child 的 `active_turn_input_consumed` 展示事件另行确认；stop 调用现有 `cancel_subagent_task`。客户端返回父视图只是
 本地 navigation stack 变化，不会调用 stop；`Esc` 才向当前 exact run 发停止。终态 resume 不属于这组三个
 入口，后续若实现必须另设显式 typed 合同。
+
+## 模型可见的本机 Gateway 诊断面
+
+`agent/tooling/gateway_status.py` 是本机管理员主代理唯一的模型可见 Gateway 诊断工具。它不接受路径、PID 或
+端口参数，而从当前 Agent 的 canonical Gateway paths 读取 validated PID、state、heartbeat 与 hot queue。
+`main_agent` 之外的 owner registry 不注册该工具，因此多用户请求不能读取宿主 PID、配置路径或全局日志。
+
+`gateway_parts/status_rendering.py::gateway_runtime_snapshot` 是 CLI/工具可共同复用的结构化投影。Gateway 每次
+启动把实际 config/model/bind/port 与 `log_start_offset_bytes` 写进 state；日志诊断只扫描该偏移后的有界尾部，
+只返回计数，不返回日志正文。`no_new_log_bytes` 与 `quiet` 必须分开：前者表示没有文件观察证据，后者表示已
+观察到本生命周期日志且没有异常签名。以上均为只读观测，不能反向改变任务、请求或进程终态。
+
+## 本机多用户 thin TUI 的 owner 路由
+
+所有 thin TUI 都连接基础 `local/main` 的同一个 Gateway 服务目录和 8420 listener，但请求身份不因此合并。
+客户端把配置中的 `OwnerIdentity` 投影为结构化 `channel/user_id/chat_id`；Gateway 仅把固定
+`user_id=local-agent` 的 `local/chat/cli/http` 历史入口留在 base Agent。显式
+`channel=local,user_id!=local-agent` 必须进入 `OwnerScopedAgentPool`，群组使用 chat id，个人使用 user id。
+
+scoped Agent 的 effective owner home 是 tasks、Memory、Persona、sessions、subagents、LocalStore 与审计的
+共同根。请求正文中的 cwd、模型文字和 TUI 启动目录都不能覆盖它。客户端 probe 的仍是 base Gateway paths；
+请求执行的则是 scoped Agent，这两个事实必须同时成立。
+
+子代理后台 autostart 只有 exact `local/main` 使用基础 config 的 durable subprocess。任何其它 owner 都在当前
+Gateway 内使用已绑定 owner 的 daemon dispatcher；原因是旧 subprocess 协议没有序列化请求级 owner，直接
+复用会静默退回 `local/main`。daemon 只持有运行执行体，canonical task/attempt/lease/recovery 继续落该 owner
+磁盘，Gateway 重启由统一恢复链接管。该规则按结构化 provider/kind/id 判定，不按 provider 名称粗分。

@@ -93,6 +93,16 @@ class ToolExecutorRequest:
     output_archiver: Callable[[ToolCall, object], ToolOutputProjection] | None = None
 
 
+# LLM: Pre-handler exits reuse the authorized call's immutable input sources/start time and the
+# mutable lifecycle trace. Bundling them prevents the failure helper from becoming a parallel API.
+# 类用途: 保存一次已授权工具执行在进入 handler 前共用的计时、输入来源和状态轨迹。
+@dataclass(frozen=True)
+class _AuthorizedExecutionProgress:
+    sources: tuple[ToolInputSource, ...]
+    started_at: float
+    states: list[str]
+
+
 class ToolExecutor:
     def __init__(self, policy: ActionPolicy | None = None) -> None:
         self.policy = policy or ActionPolicy()
@@ -192,27 +202,31 @@ def _execute_authorized(
     states: list[str],
 ) -> ToolExecution:
     """Execute a call only after normalization and ActionPolicy authorization."""
+    progress = _AuthorizedExecutionProgress(sources, started_at, states)
     states.append("approved")
     if decision.sandbox_plan:
         states.append("sandbox_prepared")
+    validation_outcome = _preclaim_validation_outcome(request, call, runtime)
+    if validation_outcome is not None:
+        return _pre_handler_failure_execution(
+            request,
+            call,
+            runtime,
+            decision,
+            progress,
+            validation_outcome,
+        )
     if request.pre_handler_gate is not None:
         gate_outcome = request.pre_handler_gate(call)
         if gate_outcome is not None:
-            states.append("failed")
-            projection = _project_output(request, call, runtime, gate_outcome)
-            result = _canonical_result(
+            return _pre_handler_failure_execution(
+                request,
                 call,
                 runtime,
                 decision,
+                progress,
                 gate_outcome,
-                projection,
-                duration_ms=_elapsed_ms(started_at),
-                input_sources=sources,
             )
-            if result.failure_stage == ToolFailureStage.PERSISTENCE.value:
-                states.append("persistence_failed")
-            states.extend(("reconciled", "persisted", "projected"))
-            return ToolExecution(call, decision, result, tuple(states))
     states.append("running")
     outcome = _invoke_with_operation_policy(request, call, runtime, decision)
     states.append("succeeded" if outcome.ok else _outcome_state(outcome))
@@ -230,6 +244,83 @@ def _execute_authorized(
     if result.failure_stage == ToolFailureStage.PERSISTENCE.value:
         states.append("persistence_failed")
     states.extend(("persisted", "projected"))
+    return ToolExecution(call, decision, result, tuple(states))
+
+
+# LLM: 条件参数校验必须在 mutating operation claim 前完成；validator 是 deny-only 纯校验器，
+# 任何异常或错误地返回成功都 fail-closed，不能退回 handler 后再把确定性错误误报成 unknown。
+# 函数用途: 执行工具自己的条件参数校验，并统一补齐“未进入 handler、未触发副作用”的事实。
+def _preclaim_validation_outcome(
+    request: ToolExecutorRequest,
+    call: ToolCall,
+    runtime: ToolRuntime,
+) -> ToolHandlerOutcome | None:
+    try:
+        outcome = runtime.handler.validate_invocation(
+            _handler_arguments(request, call, runtime),
+            ToolInvocationContext(
+                runtime_snapshot=request.runtime_snapshot,
+                cancellation_token=request.cancellation_token,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - validator 故障必须在副作用前 fail-closed
+        _LOGGER.exception(
+            "tool preclaim validator failed: tool=%s run=%s turn=%s",
+            call.tool_name,
+            call.run_id,
+            call.turn_id,
+        )
+        outcome = ToolHandlerOutcome(
+            call.tool_name,
+            False,
+            f"工具调用参数校验器故障，已在执行前拒绝：{type(exc).__name__}",
+            error_code="TOOL_ERROR",
+            reported_error_code="TOOL_INVOCATION_VALIDATOR_FAILED",
+        )
+    if outcome is None:
+        return None
+    if not isinstance(outcome, ToolHandlerOutcome) or outcome.ok:
+        outcome = ToolHandlerOutcome(
+            call.tool_name,
+            False,
+            "工具调用参数校验器返回了非法结果，已在执行前拒绝",
+            error_code="TOOL_ERROR",
+            reported_error_code="TOOL_INVOCATION_VALIDATOR_CONTRACT_BROKEN",
+        )
+    outcome.effect_outcome = "not_started"
+    return apply_tool_execution_facts(
+        outcome,
+        failure_stage=ToolFailureStage.VALIDATION,
+        handler_executed=False,
+    )
+
+
+# LLM: validator 与既有 pre_handler_gate 共用同一 canonical 投影/持久化出口；调用方传入的
+# outcome 已携带权威 failure_stage，不能在这里猜测或把未执行失败升级成副作用 unknown。
+# 函数用途: 把 handler 前失败转换成完整 ToolExecution，保持状态序列和输出归档一致。
+def _pre_handler_failure_execution(
+    request: ToolExecutorRequest,
+    call: ToolCall,
+    runtime: ToolRuntime,
+    decision: ActionDecision,
+    progress: _AuthorizedExecutionProgress,
+    outcome: ToolHandlerOutcome,
+) -> ToolExecution:
+    states = progress.states
+    states.append("failed")
+    projection = _project_output(request, call, runtime, outcome)
+    result = _canonical_result(
+        call,
+        runtime,
+        decision,
+        outcome,
+        projection,
+        duration_ms=_elapsed_ms(progress.started_at),
+        input_sources=progress.sources,
+    )
+    if result.failure_stage == ToolFailureStage.PERSISTENCE.value:
+        states.append("persistence_failed")
+    states.extend(("reconciled", "persisted", "projected"))
     return ToolExecution(call, decision, result, tuple(states))
 
 

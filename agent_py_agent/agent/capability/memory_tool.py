@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..conversation.authority import (
@@ -46,15 +46,21 @@ def build_remember_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="remember",
         description=(
-            "管理需要跨会话复用的具体事实、事件和项目知识。新增先进入统一候选并核验证据；"
+            "管理需要正式持久化并按明确 scope 召回的具体事实、事件和项目知识。"
+            "session scope 的寿命只跟当前真实会话走，不得另填 valid_from/valid_until；"
+            "需要按时间过期时使用 temporary scope。新增先进入统一候选并核验证据；"
             "无冲突的 user_explicit/tool_verified 新事实可按保守策略晋升。模型推断、替换和删除只形成候选，"
-            "等待统一审核。用户画像、称呼和长期沟通偏好使用 update_persona；教训使用候选到 lesson 链。"
+            "等待统一审核。用户亲口提供或明确要求保存的内容必须使用 user_explicit，即使同轮工具也验证过；"
+            "只有事实本身来自成功工具结果时才使用 tool_verified，并提交该调用的精确 evidence_refs。"
+            "个人记忆默认写入当前 owner 的 personal 范围，调用时省略 scope 即可；不要把用户 ID 当 scope_key。"
+            "用户画像、称呼和长期沟通偏好使用 update_persona；教训使用候选到 lesson 链。"
         ),
         input_schema=_remember_input_schema(scope_schema, operation_schema),
         hints=ToolModelHints(
             category="capability",
             use_cases=(
                 "用户明确要求长期记住一个具体事实、事件或项目知识",
+                "用户明确要求只在当前会话记住一个具体事实",
                 "成功工具结果证明了适合跨会话复用的事实",
                 "列出正式长期记忆，取得稳定 entry_id 后提出替换或删除",
             ),
@@ -65,6 +71,8 @@ def build_remember_model_spec() -> ToolModelSpec:
             ),
             keywords=("记住", "remember", "长期事实", "项目知识", "事件"),
             examples=(
+                '{"tool":"remember","action":"add","content":"用户偏好先看风险再看方案",'
+                '"kind":"fact","origin":"user_explicit","subject_key":"preference.answer_order"}',
                 '{"tool":"remember","action":"add","content":"moneywise 项目使用 UTC 保存时间",'
                 '"kind":"project","origin":"user_explicit","subject_key":"project.moneywise.timezone",'
                 '"scope":{"scope_type":"project","scope_key":"project:moneywise"}}',
@@ -74,9 +82,10 @@ def build_remember_model_spec() -> ToolModelSpec:
     )
 
 
-# LLM: Scope is one reusable typed object for single and batch operations; natural-language
-# content cannot add or reinterpret scope keys.
-# 函数用途: 构造 remember 的结构化 scope Schema。
+# LLM: Scope is one reusable typed object for single and batch operations. Fixed personal and
+# current-session identities are host-bound, so the model supplies only scope_type for them;
+# dynamic organization/project/task identities still require an exact typed scope_key.
+# 函数用途: 构造 remember 的结构化范围；个人和当前会话不用模型猜内部编号，动态范围仍显式填写键。
 def _remember_scope_schema() -> dict[str, object]:
     return {
         "type": "object",
@@ -96,7 +105,10 @@ def _remember_scope_schema() -> dict[str, object]:
             },
             "scope_key": {
                 "type": "string",
-                "description": "稳定范围键，例如 personal、company、project:moneywise。",
+                "description": (
+                    "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；"
+                    "global 只能写 global；公司、项目等使用 company:<id>、project:<id>。"
+                ),
             },
             "applies_when": {
                 "type": "string",
@@ -107,7 +119,7 @@ def _remember_scope_schema() -> dict[str, object]:
                 "description": "可选排除条件，不参与范围身份判断。",
             },
         },
-        "required": ["scope_type", "scope_key"],
+        "required": ["scope_type"],
         "additionalProperties": False,
     }
 
@@ -185,9 +197,16 @@ def _remember_parameter_descriptions() -> dict[str, str]:
         "origin": "user_explicit、tool_verified 或 model_inferred；不能从正文猜。",
         "evidence_refs": "tool_verified 的当前成功工具 operation/call/artifact 引用。",
         "subject_key": "稳定主题键；同主题同 scope 不允许静默新增冲突事实。",
-        "scope": "结构化适用范围，含 scope_type 和 scope_key。",
+        "scope": (
+            "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。"
+            "当前会话只写 scope_type=session，宿主绑定真实 thread；"
+            "只有公司、项目、任务类型或临时范围才需要显式 scope_key。"
+        ),
         "valid_from": "可选带时区 ISO 生效时间。",
-        "valid_until": "可选带时区 ISO 失效时间；temporary scope 必须填写。",
+        "valid_until": (
+            "可选带时区 ISO 失效时间；temporary scope 必须填写；"
+            "session scope 禁止填写，其寿命由真实会话决定。"
+        ),
         "operations": "batch 的操作数组；整批只原子进入统一候选账本。",
     }
 
@@ -247,7 +266,7 @@ class RememberTool(BaseTool):
         if action == "list":
             return _memory_list_result(memory)
         operations = _memory_operations(params, action)
-        prepared = _prepare_observations(self.agent, memory, operations, source_action=action)
+        prepared = _prepare_observations(self.agent, memory, operations)
         if isinstance(prepared, ToolHandlerOutcome):
             return prepared
         candidates = getattr(self.agent, "memory_candidates", None)
@@ -264,31 +283,33 @@ class RememberTool(BaseTool):
             return _memory_error(f"候选写入失败: {exc}", "MEMORY_CANDIDATE_WRITE_FAILED")
         promotion_results: list[dict[str, object]] = []
         active_changed = False
-        for operation, candidate in zip(operations, observed, strict=True):
-            # 持久候选权限是最终事实源：同一候选只要曾被 manual_required 吸收，后来即使
-            # 从单条 add 入口重放也不能再次尝试自动晋升。入口形态条件继续作为纵深校验。
+        for candidate in observed:
+            # 候选持久化后的宿主权限是唯一事实源；batch/replace/remove 也逐项走相同
+            # 证据、精确目标、CAS 与冲突门，不再因为入口形态要求用户人工审核。
             can_auto = (
-                action == "add"
-                and len(operations) == 1
-                and str(operation.get("action") or "") == "add"
-                and str(getattr(candidate, "promotion_mode", "") or "").strip().lower()
+                str(getattr(candidate, "promotion_mode", "") or "").strip().lower()
                 == "auto_eligible"
             )
             if not can_auto:
                 promotion_results.append(
-                    {
-                        "candidate_id": candidate.candidate_id,
-                        "promoted": False,
-                        "status": candidate.status,
-                        "reason_code": "REVIEW_REQUIRED",
-                        "promotion_ref": "",
-                    }
+                    _promotion_result_with_scope(
+                        {
+                            "candidate_id": candidate.candidate_id,
+                            "promoted": False,
+                            "status": candidate.status,
+                            "reason_code": "REVIEW_REQUIRED",
+                            "promotion_ref": "",
+                        },
+                        candidate,
+                    )
                 )
                 continue
             result = promotion.promote(candidate.candidate_id, automatic=True)
-            payload = result.to_dict()
+            payload = _promotion_result_with_scope(result.to_dict(), candidate)
             promotion_results.append(payload)
-            active_changed = active_changed or bool(payload.get("promoted"))
+            # ALREADY_PROMOTED 表示幂等命中既有正式条目，不得误报成本轮又改了一次记忆。
+            active_changed = active_changed or payload.get("reason_code") == "PROMOTED"
+        required_repairs = _remember_required_repairs(promotion_results)
         return ToolHandlerOutcome(
             "remember",
             True,
@@ -298,7 +319,13 @@ class RememberTool(BaseTool):
                     "action": action,
                     "active_memory_changed": active_changed,
                     "results": promotion_results,
-                    "hint": _remember_result_hint(action, active_changed),
+                    "required_repairs": required_repairs,
+                    "hint": _remember_result_hint(
+                        action,
+                        active_changed,
+                        required_repairs,
+                        promotion_results,
+                    ),
                 },
                 ensure_ascii=False,
             ),
@@ -339,8 +366,6 @@ def _prepare_observations(
     agent: object,
     memory: object,
     operations: list[dict[str, object]],
-    *,
-    source_action: str = "add",
 ) -> list[CandidateObservation] | ToolHandlerOutcome:
     if not operations:
         return _memory_error("operations 必须是非空数组", "TOOL_INVALID_ARGUMENTS", not_started=True)
@@ -350,22 +375,8 @@ def _prepare_observations(
         if isinstance(prepared, ToolHandlerOutcome):
             return prepared
         observations.append(prepared)
-    # 宿主确定性赋权(与 execute 的 can_auto 同规则,这里持久化到候选):仅顶层非 batch 的
-    # 单条 add 且 user_explicit/tool_verified 可自动;batch 即使一条、replace/remove、
-    # model_inferred/persona 一律 manual_required。模型任何文本不能改该权限。
-    single_add_auto = (
-        str(source_action or "").strip().lower() == "add"
-        and len(operations) == 1
-        and str(operations[0].get("action") or "").strip().lower() == "add"
-        and str(operations[0].get("origin") or "").strip().lower()
-        in {"user_explicit", "tool_verified"}
-    )
-    if single_add_auto:
-        observations[0] = replace(observations[0], promotion_mode="auto_eligible")
-    else:
-        observations = [
-            replace(item, promotion_mode="manual_required") for item in observations
-        ]
+    # CandidateService 统一按 target/type/origin/action 赋宿主权限；这里不再按“单条还是
+    # batch”复制第二套策略，模型也没有 promotion_mode 输入字段。
     return observations
 
 
@@ -390,7 +401,7 @@ def _prepare_observation(
     if isinstance(body, ToolHandlerOutcome):
         return body
     content, _tags = body
-    domain = _validated_domain_fields(operation, target, index=index)
+    domain = _validated_domain_fields(agent, operation, target, index=index)
     if isinstance(domain, ToolHandlerOutcome):
         return domain
     provenance = _observation_provenance(agent, operation, origin=origin, content=content)
@@ -520,10 +531,11 @@ class _MemoryDomainFields:
     scope: MemoryScope
 
 
-# LLM: Target scope/subject cannot be changed by a replace/remove request, and temporary scope
-# always carries an explicit expiry.
+# LLM: Target scope/subject cannot be changed by a replace/remove request. Temporary scope always
+# carries an explicit expiry, while session scope lifetime is exclusively host/thread-owned.
 # 函数用途: 校验候选的 subject_key、kind 和 scope。
 def _validated_domain_fields(
+    agent: object,
     operation: dict[str, object],
     target: object | None,
     *,
@@ -551,11 +563,30 @@ def _validated_domain_fields(
             not_started=True,
         )
     try:
-        scope = _operation_scope(operation, target_attributes=attributes)
+        scope = _operation_scope(
+            agent,
+            operation,
+            target_attributes=attributes,
+        )
     except ValueError as exc:
-        return _memory_error(str(exc), "TOOL_INVALID_ARGUMENTS", not_started=True)
+        return _memory_error(
+            str(exc),
+            "TOOL_INVALID_ARGUMENTS",
+            hint=_remember_scope_repair_hint(),
+            not_started=True,
+        )
     if scope.scope_type == "temporary" and not str(operation.get("valid_until") or "").strip():
         return _memory_error("temporary scope 必须提供 valid_until。", "TOOL_INVALID_ARGUMENTS", not_started=True)
+    if scope.scope_type == "session" and any(
+        str(operation.get(field) or "").strip()
+        for field in ("valid_from", "valid_until")
+    ):
+        return _memory_error(
+            "session scope 的生效与失效由当前真实会话决定，不能填写 valid_from/valid_until。",
+            "TOOL_INVALID_ARGUMENTS",
+            hint="移除 valid_from/valid_until 后重试；需要按时间过期时使用 temporary scope。",
+            not_started=True,
+        )
     return _MemoryDomainFields(subject_key, kind, scope)
 
 
@@ -632,9 +663,12 @@ def _observation_provenance(
     )
 
 
-# LLM: Replace/remove inherit typed scope only from the exact formal target; add requires explicit structured scope.
-# 函数用途: 校验新增范围，或从目标条目的结构化属性恢复范围。
+# LLM: Replace/remove inherit typed scope only from the exact formal target. A missing scope on
+# add is host-bound to this owner's fixed personal key, matching 长期助手/通道运行时's profile-owned
+# memory namespace; dynamic company/project/session keys remain explicit and strictly typed.
+# 函数用途: 新增未写范围时安全落到当前用户 personal；非个人范围仍校验 typed key，替换/删除继承正式记录。
 def _operation_scope(
+    agent: object,
     operation: dict[str, object],
     *,
     target_attributes: dict[str, object],
@@ -651,7 +685,55 @@ def _operation_scope(
         if requested not in (None, "") and MemoryScope.from_value(requested) != authoritative:
             raise ValueError("scope 与 entry_id 的正式记录不一致。")
         return authoritative
+    if requested in (None, ""):
+        return MemoryScope("personal", "personal")
+    if isinstance(requested, dict):
+        scope_type = str(requested.get("scope_type") or "").strip().lower()
+        scope_key = str(requested.get("scope_key") or "").strip()
+        applies_when = str(requested.get("applies_when") or "").strip()
+        excludes_when = str(requested.get("excludes_when") or "").strip()
+        if scope_type == "personal":
+            if scope_key and scope_key != "personal":
+                raise ValueError("personal scope_key 必须省略或等于 'personal'")
+            return MemoryScope("personal", "personal", applies_when, excludes_when)
+        if scope_type == "session":
+            current_key = _current_session_scope_key(agent)
+            if scope_key:
+                from ..memory_store.scope_contract import canonical_scope_key
+
+                if canonical_scope_key("session", scope_key) != current_key:
+                    raise ValueError("session scope 只能绑定当前真实会话，不能指定其它 session")
+            return MemoryScope("session", current_key, applies_when, excludes_when)
     return MemoryScope.for_new_observation(requested)
+
+
+# LLM: Current-session memory authority comes only from typed run attributes established by the
+# Gateway/conversation runtime. User prose and model-provided aliases such as "current" never
+# select a session, and a missing runtime identity fails closed.
+# 函数用途: 把当前结构化 thread/session 身份变成规范 session scope key，供同会话记忆写入与召回共用。
+def _current_session_scope_key(agent: object) -> str:
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    session_id = str(
+        attrs.get("session_id") or attrs.get("conversation_thread_id") or ""
+    ).strip()
+    if not session_id:
+        raise ValueError("当前运行缺少可验证的 session 身份，不能写 session scope")
+    from ..memory_store.scope_contract import canonical_scope_key
+
+    return canonical_scope_key("session", session_id)
+
+
+# LLM: Scope repair text is only a model-facing correction hint. The host still validates the
+# structured scope and never derives owner identity or write authority from this prose.
+# 函数用途: 范围参数不合法时明确告诉模型个人记忆可省略 scope，避免拿用户 ID 反复猜内部键。
+def _remember_scope_repair_hint() -> str:
+    return (
+        "个人记忆请省略 scope；当前会话记忆只写 "
+        '{"scope_type":"session"}，两者身份都由宿主绑定；'
+        "session 不填写 valid_from/valid_until；项目/公司等非个人范围才提供对应 typed scope_key。"
+    )
 
 
 # LLM: user_explicit evidence resolves the exact current Gateway request in ConversationStore, never a text search guess.
@@ -843,14 +925,110 @@ def _memory_error(
     )
 
 
-# LLM: Result hints explain whether only candidates or formal facts changed; they are not machine state.
-# 函数用途: 给模型一条不会误报正式保存的简短说明。
-def _remember_result_hint(action: str, active_changed: bool) -> str:
+# LLM: Each remember result must expose the host-resolved recall boundary beside the physical
+# promotion result. The canonical store name must never be interpreted as cross-session scope.
+# 函数用途: 给一条晋升结果补上正式记忆的真实召回范围，避免模型把统一落库误说成跨会话长期记忆。
+def _promotion_result_with_scope(
+    payload: dict[str, object],
+    candidate: object,
+) -> dict[str, object]:
+    result = dict(payload)
+    raw_scope = getattr(candidate, "scope", None)
+    scope = dict(raw_scope) if isinstance(raw_scope, dict) else {}
+    scope_type = str(scope.get("scope_type") or "").strip().lower()
+    recall_policy = {
+        "session": "current_session_only",
+        "personal": "same_owner_across_sessions",
+        "project": "matching_project_only",
+        "company": "matching_company_only",
+        "global": "matching_global_scope",
+        "temporary": "matching_temporary_scope",
+    }.get(scope_type, "matching_typed_scope")
+    result["memory_scope"] = {
+        "scope_type": scope_type,
+        "scope_key": str(scope.get("scope_key") or ""),
+        "automatic_recall": recall_policy,
+        "storage_authority": "canonical_formal_memory",
+    }
+    return result
+
+
+# LLM: Result hints summarize typed repairs and recall scopes already projected beside each
+# promotion result. They are explanation only and never widen machine authority.
+# 函数用途: 说明正式记忆是否变化及其召回边界；失败时要求模型按结构化修复项重试。
+def _remember_result_hint(
+    action: str,
+    active_changed: bool,
+    required_repairs: list[dict[str, object]],
+    promotion_results: list[dict[str, object]],
+) -> str:
     if active_changed:
-        return "精确证据和保守策略已通过，正式长期记忆已更新。"
-    if action == "batch":
-        return "整批候选已原子写入；batch 不做部分自动晋升，等待统一审核。"
-    return "候选已记录，但正式长期记忆未改变；请依据 reason_code 走审核或补证据。"
+        scope_types = {
+            str((item.get("memory_scope") or {}).get("scope_type") or "")
+            for item in promotion_results
+            if isinstance(item.get("memory_scope"), dict)
+        }
+        if scope_types == {"session"}:
+            return (
+                "精确证据和安全门已通过，正式记忆已更新；"
+                "这些条目只在当前会话自动召回。promoted 仅表示写入权威记忆库，"
+                "不表示跨会话生效。"
+            )
+        if scope_types == {"personal"}:
+            return "精确证据和安全门已通过，当前用户的个人正式记忆已自主更新。"
+        return (
+            "精确证据和安全门已通过，正式记忆已按每条 memory_scope 自主更新；"
+            "物理存储位置不扩大自动召回范围。"
+        )
+    if required_repairs:
+        return (
+            f"{action} 候选已记录，但对应 memory_scope 的正式记忆未改变；"
+            "按 required_repairs 补齐真实来源后重试，不能把缺证据说成等待用户确认。"
+        )
+    return (
+        f"{action} 候选已记录，但对应 memory_scope 的正式记忆未改变；"
+        "请依据 reason_code 补证据、修正精确目标或解决冲突。"
+    )
+
+
+# LLM: Repairs are derived only from stable promotion reason codes; prose never changes authority.
+# 函数用途: 把缺消息或缺工具证据转换成模型可执行的结构化重试要求。
+def _remember_required_repairs(
+    promotion_results: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    repairs: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for result in promotion_results:
+        reason_code = str(result.get("reason_code") or "").strip()
+        if reason_code in seen:
+            continue
+        if reason_code in {"TOOL_EVIDENCE_MISSING", "TOOL_EVIDENCE_NOT_SUCCEEDED"}:
+            repairs.append(
+                {
+                    "reason_code": reason_code,
+                    "action": "retry_remember",
+                    "required_fields": ["origin", "evidence_refs"],
+                    "origin_rule": (
+                        "用户亲口提供或明确要求保存时使用 user_explicit；"
+                        "事实来自成功工具结果时使用 tool_verified 并提交精确 evidence_refs。"
+                    ),
+                }
+            )
+            seen.add(reason_code)
+        elif reason_code in {
+            "USER_MESSAGE_EVIDENCE_MISSING",
+            "USER_MESSAGE_EVIDENCE_INVALID",
+        }:
+            repairs.append(
+                {
+                    "reason_code": reason_code,
+                    "action": "retry_remember",
+                    "required_fields": ["origin"],
+                    "origin_rule": "只有当前真实用户明确提供或要求保存时才能使用 user_explicit。",
+                }
+            )
+            seen.add(reason_code)
+    return repairs
 
 
 # LLM: Tag normalization is display/retrieval metadata only; tags never select scope or authorization.

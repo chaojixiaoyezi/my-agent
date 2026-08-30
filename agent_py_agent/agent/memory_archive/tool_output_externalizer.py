@@ -24,6 +24,7 @@ from typing import Any
 
 from ..common.log_redaction import redact_sensitive_value
 from ..common.path_segments import safe_path_segment
+from ..common.tool_output_paths import tool_output_root
 from ..settings.defaults import default_agent_config
 from ..tooling.models import ToolFailureStage
 from ..tooling.output_projection import (
@@ -43,6 +44,9 @@ _SAFE_PARAMETER_MAX_DEPTH = 4
 _SAFE_PARAMETER_MAX_ITEMS = 20
 
 
+# LLM: The request deliberately carries two parameter views: execution parameters may contain
+# host bindings, while model_parameters is the only durable provider-replay authority.
+# 类用途: 描述一次工具输出归档，并分开保存实际执行参数与模型原始参数。
 @dataclass(frozen=True)
 class ExternalizeToolOutputRequest:
     root: str | Path
@@ -63,6 +67,7 @@ class ExternalizeToolOutputRequest:
     min_chars: int = -1
     preview_chars: int = -1
     parameters: dict[str, Any] | None = None
+    model_parameters: dict[str, Any] | None = None
     result_envelope: dict[str, Any] | None = None
 
 
@@ -79,7 +84,7 @@ def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dic
         if not record.get("output_externalized") and not record.get("source_output_archived"):
             _append_tool_call_index(request, record, digest)
         return record
-    if _output_requires_recovery_artifact(output, resolved):
+    if _output_requires_recovery_artifact(output, resolved, request.result_envelope):
         path = _write_output_artifact(request, output, digest)
         # _write_output_artifact 内部已 _append_index 写 kind=tool_output 行
         # (带 path)——这里不需要再补 tool_call 行, 否则同 path 双行会破坏
@@ -145,12 +150,22 @@ def _output_meets_archive_threshold(output: str, min_chars: int) -> bool:
     return max(len(output), len(output.encode("utf-8"))) >= threshold
 
 
+# LLM: 显式可恢复要求与全局大小阈值同属归档决策事实；工具只能请求保留完整输出，不能指定宿主路径。
+# 函数用途: 判断当前完整输出是否必须落成可分页读取的归档，即使它尚未达到全局大输出阈值。
 def _output_requires_recovery_artifact(
     output: str,
     limits: _ResolvedOutputLimits,
+    result_envelope: object = None,
 ) -> bool:
     """Keep a recovery anchor whenever the carried preview cannot hold the body."""
 
+    policy = (
+        result_envelope.get("tool_output_policy")
+        if isinstance(result_envelope, dict)
+        else None
+    )
+    if isinstance(policy, dict) and policy.get("requires_recovery_artifact") is True:
+        return bool(output)
     return _output_meets_archive_threshold(output, limits.min_chars) or len(output) > max(
         0,
         limits.preview_chars,
@@ -164,6 +179,9 @@ def _request_status(request: ExternalizeToolOutputRequest) -> str:
     return "ok" if request.ok else "error"
 
 
+# LLM: Base records keep model parameters bounded/redacted beside host execution metadata; callers
+# may enrich the returned record but must not collapse the two parameter views.
+# 函数用途: 构造工具输出归档的基础记录和安全预览。
 def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str, *, preview_chars: int) -> dict[str, Any]:
     created_at = datetime.now(tz=timezone.utc).isoformat()
     _trust, redaction = tool_output_projection_policy(request.result_envelope)
@@ -190,12 +208,20 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "output_size_bytes": len(output.encode("utf-8")),
         "output_externalized": False,
         "output_path": "",
+        "model_parameters": _safe_parameters(
+            request.model_parameters
+            if request.model_parameters is not None
+            else request.parameters
+        ),
         "created_at": created_at,
     }
     record.update(_result_envelope_index_metadata(request.result_envelope))
     return record
 
 
+# LLM: Artifact bodies are owner-scoped audit evidence. Persist both parameter views, then append
+# the same bounded metadata to the canonical lookup index before returning the path.
+# 函数用途: 把完整大输出及其执行、模型参数写入归档文件和索引。
 def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, digest: str) -> Path:
     path = _artifact_path(request, digest)
     created_at = datetime.now(tz=timezone.utc).isoformat()
@@ -215,6 +241,11 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "run_id": request.run_id,
         "task_id": request.task_id,
         "parameters": _safe_parameters(request.parameters),
+        "model_parameters": _safe_parameters(
+            request.model_parameters
+            if request.model_parameters is not None
+            else request.parameters
+        ),
         **_result_envelope_index_metadata(request.result_envelope),
         "source_input": _source_input(request.parameters),
         "sha256": digest,
@@ -228,6 +259,9 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
     return path
 
 
+# LLM: The append-only index is the cross-process recovery source; model_parameters must survive
+# independently from execution parameters without copying raw output content.
+# 函数用途: 为一份已外置工具输出追加可检索、可续跑的轻量索引行。
 def _append_index(path: Path, payload: dict[str, Any]) -> None:
     record = {
         "version": TOOL_OUTPUT_INDEX_SCHEMA.version,
@@ -245,6 +279,7 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "error_code": str(payload.get("error_code") or ""),
         "reported_error_code": str(payload.get("reported_error_code") or ""),
         "parameters": _safe_parameters(payload.get("parameters")),
+        "model_parameters": _safe_parameters(payload.get("model_parameters")),
         **_index_metadata_from_record(payload),
         "source_input": str(payload.get("source_input") or ""),
         "path": str(path),
@@ -257,6 +292,9 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+# LLM: Small outputs still need the same dual-parameter recovery contract even though no artifact
+# body is written; keep this row append-only and content-free.
+# 函数用途: 为无需外置正文的小工具调用追加轻量索引行。
 def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[str, Any], digest: str) -> None:
     created_at = str(record.get("created_at") or datetime.now(tz=timezone.utc).isoformat())
     payload = {
@@ -277,6 +315,11 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
             record.get("reported_error_code") or request.reported_error_code or ""
         ).strip(),
         "parameters": _safe_parameters(request.parameters),
+        "model_parameters": _safe_parameters(
+            request.model_parameters
+            if request.model_parameters is not None
+            else request.parameters
+        ),
         **_index_metadata_from_record(record),
         "source_input": _source_input(request.parameters),
         "path": "",
@@ -299,38 +342,6 @@ def _artifact_path(request: ExternalizeToolOutputRequest, digest: str) -> Path:
             f"{safe_path_segment(request.call_id, default='item', replacement='_')}-{digest[:12]}.json"
         )
     )
-
-
-def tool_output_root(root: str | Path) -> Path:
-    return Path(root) / "blobs" / "tool_outputs"
-
-
-def tool_output_roots_for_lookup(root: str | Path) -> tuple[Path, ...]:
-    base = Path(root)
-    roots = [tool_output_root(base)]
-    tasks_root = base / "tasks"
-    if tasks_root.is_dir():
-        roots.extend(sorted(tasks_root.glob("*/*/work/blobs/tool_outputs")))
-    return _unique_paths(roots)
-
-
-def tool_output_index_paths_for_lookup(root: str | Path) -> tuple[Path, ...]:
-    return tuple(item / "index.jsonl" for item in tool_output_roots_for_lookup(root))
-
-
-def _unique_paths(paths: list[Path]) -> tuple[Path, ...]:
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for path in paths:
-        try:
-            resolved = path.expanduser().resolve(strict=False)
-        except OSError:
-            continue
-        key = str(resolved)
-        if key not in seen:
-            seen.add(key)
-            unique.append(resolved)
-    return tuple(unique)
 
 
 def _preview(output: str, max_chars: int) -> str:
@@ -487,6 +498,45 @@ def _safe_parameters(value: Any) -> dict[str, Any]:
         if safe_item is not _UNSAFE_PARAMETER:
             result[text_key] = safe_item
     return result
+
+
+# LLM: Model replay must prefer the explicitly persisted provider payload. Legacy rows may derive
+# it only from value-free input provenance; trusted/default host additions are never model input.
+# 函数用途: 从工具归档中取得可回放给模型的参数，并兼容尚未写入 model_parameters 的旧索引。
+def model_visible_tool_parameters(record: Any) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        return {}
+    explicit = record.get("model_parameters")
+    if isinstance(explicit, dict):
+        return _safe_parameters(explicit)
+    parameters = _safe_parameters(record.get("parameters"))
+    sources = record.get("input_sources")
+    if not isinstance(sources, list | tuple):
+        return parameters
+    public_names = {
+        name
+        for item in sources
+        if isinstance(item, dict)
+        and str(item.get("source") or "")
+        in {"model_proposed", "caller_supplied", "trusted_context_verified"}
+        and (name := _top_level_parameter_name(item.get("path")))
+    }
+    return {
+        key: value
+        for key, value in parameters.items()
+        if str(key) in public_names
+    }
+
+
+# LLM: Input provenance paths are JSONPath-like top-level fields. Reject nested/quoted forms here
+# instead of guessing because a wrong extraction could expose a host-only binding during replay.
+# 函数用途: 从形如 $.field 的来源路径中安全取出顶层参数名。
+def _top_level_parameter_name(value: Any) -> str:
+    path = str(value or "").strip()
+    if not path.startswith("$."):
+        return ""
+    name = path[2:]
+    return name if name and name.replace("_", "").isalnum() else ""
 
 
 # LLM: 持久索引只保存执行/操作生命周期、字段路径、来源类别和结构化引用，
@@ -693,7 +743,5 @@ def _scoped_call_id(request: ExternalizeToolOutputRequest) -> str:
 __all__ = [
     "ExternalizeToolOutputRequest",
     "externalize_tool_output_record",
-    "tool_output_index_paths_for_lookup",
-    "tool_output_root",
-    "tool_output_roots_for_lookup",
+    "model_visible_tool_parameters",
 ]

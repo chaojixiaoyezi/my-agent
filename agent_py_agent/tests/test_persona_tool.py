@@ -56,35 +56,65 @@ def test_update_persona_is_not_exposed_in_named_audit_prepare(tmp_path):
     assert "task-scoped" in availability.reason
 
 
-def test_update_persona_targets_soul_and_agents_use_exact_approval_binding(tmp_path):
+def test_update_persona_soul_uses_exact_approval_binding(tmp_path):
     agent, soul, _user, agents = _agent_with_paths(tmp_path)
-    for target, content in (("soul", "语气偏活泼"), ("agents", "产物用 HTML")):
-        tool = UpdatePersonaTool(agent)
-        arguments = {"target": target, "content": content}
-        first = execute_canonical_test_call(
-            tmp_path,
-            tools={"update_persona": tool},
-            tool_name="update_persona",
-            arguments=arguments,
-        )
-        assert first.result.status == "approval_required"
-        assert first.result.handler_executed is False
-        binding = {
-            **dict(first.decision.approval_request or {}),
-            "approval_id": f"approval-{target}",
-            "status": "APPROVED",
-        }
-        approved = execute_canonical_test_call(
-            tmp_path,
-            tools={"update_persona": tool},
-            tool_name="update_persona",
-            arguments=arguments,
-            write_boundary={"approved_actions": [binding]},
-        )
-        assert approved.result.ok is True
-        assert approved.result.handler_executed is True
+    tool = UpdatePersonaTool(agent)
+    arguments = {"target": "soul", "content": "语气偏活泼"}
+    first = execute_canonical_test_call(
+        tmp_path,
+        tools={"update_persona": tool},
+        tool_name="update_persona",
+        arguments=arguments,
+    )
+    assert first.result.status == "approval_required"
+    assert first.result.handler_executed is False
+    binding = {
+        **dict(first.decision.approval_request or {}),
+        "approval_id": "approval-soul",
+        "status": "APPROVED",
+    }
+    approved = execute_canonical_test_call(
+        tmp_path,
+        tools={"update_persona": tool},
+        tool_name="update_persona",
+        arguments=arguments,
+        write_boundary={"approved_actions": [binding]},
+    )
+    assert approved.result.ok is True
+    assert approved.result.handler_executed is True
     assert "语气偏活泼" in soul.read_text(encoding="utf-8")
+    assert "产物用 HTML" not in agents.read_text(encoding="utf-8")
+
+
+def test_update_persona_agents_is_autonomous_without_approval(tmp_path):
+    agent, _soul, _user, agents = _agent_with_paths(tmp_path)
+
+    execution = execute_canonical_test_call(
+        tmp_path,
+        tools={"update_persona": UpdatePersonaTool(agent)},
+        tool_name="update_persona",
+        arguments={"target": "agents", "content": "产物用 HTML"},
+    )
+
+    assert execution.result.ok is True
+    assert execution.result.handler_executed is True
+    assert execution.decision.resolved_effect == "mutating"
     assert "产物用 HTML" in agents.read_text(encoding="utf-8")
+
+
+def test_update_persona_soul_read_is_read_only_without_approval(tmp_path):
+    agent, _soul, _user, _agents = _agent_with_paths(tmp_path)
+
+    execution = execute_canonical_test_call(
+        tmp_path,
+        tools={"update_persona": UpdatePersonaTool(agent)},
+        tool_name="update_persona",
+        arguments={"action": "list", "target": "soul"},
+    )
+
+    assert execution.result.ok is True
+    assert execution.result.handler_executed is True
+    assert execution.decision.resolved_effect == "read_only"
 
 
 def test_update_persona_soul_agents_cannot_use_model_confirmed_flag(tmp_path):
@@ -207,6 +237,24 @@ def test_update_persona_rejects_invalid_rollback_version_at_tool_boundary(tmp_pa
     )
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+
+
+def test_update_persona_rolls_first_change_back_to_version_zero(tmp_path):
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    tool = UpdatePersonaTool(agent)
+    original = user.read_text(encoding="utf-8")
+
+    added = tool.execute({"target": "user", "content": "沟通偏好:先给结论"})
+    history = tool.execute({"action": "history", "target": "user"})
+    rolled_back = tool.execute(
+        {"action": "rollback", "target": "user", "rollback_version": 0}
+    )
+
+    assert added.ok is True
+    assert [row["version"] for row in json.loads(history.output)["versions"]] == [0, 1]
+    assert rolled_back.ok is True
+    assert json.loads(rolled_back.output)["version"] == 2
+    assert user.read_text(encoding="utf-8") == original
 
 
 def test_update_persona_accepts_concise_paraphrase_with_exact_user_quote(tmp_path):

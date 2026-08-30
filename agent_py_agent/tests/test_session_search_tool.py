@@ -86,6 +86,32 @@ class TestDiscoveryMode:
         p = _payload(tool.execute({"query": "推送模式", "limit": 999}))
         assert p["count"] <= 20
 
+    def test_memory_hit_exposes_typed_recall_scope(self, tmp_path):
+        """记忆索引的嵌套 attributes 必须投影到检索结果，供模型区分会话与个人记忆。"""
+        store = _store(tmp_path)
+        store.upsert_record(
+            source_type="memory",
+            source_id="scoped-memory",
+            title="会话校验词",
+            content="苍穹折页-420871",
+            metadata={
+                "role": "user",
+                "attributes": {
+                    "scope_type": "session",
+                    "scope_key": "session:thread-example",
+                },
+            },
+        )
+
+        p = _payload(_tool(store).execute({"query": "苍穹折页"}))
+
+        assert p["count"] == 1
+        assert p["results"][0]["scope"] == {
+            "role": "user",
+            "scope_type": "session",
+            "scope_key": "session:thread-example",
+        }
+
 
 class TestScrollMode:
     def test_scroll_returns_window_around_anchor(self, tmp_path):

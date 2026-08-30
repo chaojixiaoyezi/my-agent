@@ -46,7 +46,13 @@ class PatchTargetMissingError(ValueError):
 def _build_apply_patch_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="apply_patch",
-        description="应用结构化文本补丁，适合局部修改、新增、删除或移动文本文件。",
+        description=(
+            "应用 Codex 格式文本补丁。每个文件头必须写成 *** Update File: <相对路径> "
+            "（冒号后一个空格），Update 的每个正文行必须以 +、- 或一个真实空格开头。"
+            "例如保留末行 last line 并在后面追加 appended line：\n"
+            "*** Begin Patch\n*** Update File: notes.txt\n-last line\n+last line\n"
+            "+appended line\n*** End Patch"
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -54,9 +60,13 @@ def _build_apply_patch_model_spec() -> ToolModelSpec:
                     "type": "string",
                     "description": (
                         "严格使用 Codex apply_patch 语法：第一行必须是 *** Begin Patch；"
-                        "变更段使用 *** Add File、*** Update File 或 *** Delete File；"
+                        "每个变更头必须把相对路径写在同一行，格式严格为 "
+                        "*** Add File: <path>、*** Update File: <path> 或 "
+                        "*** Delete File: <path>（冒号后有一个空格）；"
                         "仅 Update File 可紧跟 *** Move to；新增/删除/上下文行分别以 +、-、空格开头；"
-                        "最后一行必须是 *** End Patch。不要使用 ---/+++ 统一 diff。"
+                        "Update 不能是空段；末尾追加时把最后一行同时作为 -/+ 上下文，"
+                        "再在 + 版本后写新增行；最后一行必须是 *** End Patch。"
+                        "不要使用 ---/+++ 统一 diff。"
                     ),
                 }
             },
@@ -77,8 +87,9 @@ def _build_apply_patch_model_spec() -> ToolModelSpec:
             ),
             keywords=("patch", "apply patch", "修改文件", "局部编辑", "新增文件", "删除文件"),
             examples=(
-                '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Add File: notes.txt\\n+hello\\n*** End Patch\\n"}',
+                '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Update File: notes.txt\\n-last line\\n+last line\\n+appended line\\n*** End Patch\\n"}',
                 '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Update File: notes.txt\\n-old\\n+new\\n*** End Patch\\n"}',
+                '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Add File: notes.txt\\n+hello\\n*** End Patch\\n"}',
                 '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Delete File: obsolete.txt\\n*** End Patch\\n"}',
             ),
         ),
@@ -202,13 +213,18 @@ def _parse_patch_change(lines: list[str], index: int) -> tuple[dict[str, Any], i
     if line.startswith("*** Update File: "):
         return _parse_update_file(lines, index)
     raise ValueError(
-        f"未知补丁段: {line}；应使用 *** Add File:、*** Update File: "
-        "或 *** Delete File:（*** Move to: 只能紧跟 Update File）"
+        f"未知补丁段: {line}。文件头必须把相对路径写在同一行，且冒号后保留一个空格；"
+        "例如：*** Update File: notes.txt。完整最小示例："
+        "*** Begin Patch\\n*** Update File: notes.txt\\n-old\\n+new\\n*** End Patch"
     )
 
 
+# LLM: Add headers require a non-empty relative path and at least one + line, matching 会话运行时's add_line+ grammar; empty files should use write_file explicitly.
+# 函数用途: 解析新增文件段；缺路径或没有任何新增行时给模型可直接照抄的格式错误。
 def _parse_add_file(lines: list[str], index: int) -> tuple[dict[str, Any], int]:
     path = lines[index].removeprefix("*** Add File: ").strip()
+    if not path:
+        raise ValueError("Add File 缺少相对路径；正确格式：*** Add File: notes.txt")
     body: list[str] = []
     index += 1
     while index < len(lines) - 1 and not lines[index].startswith("*** "):
@@ -216,12 +232,20 @@ def _parse_add_file(lines: list[str], index: int) -> tuple[dict[str, Any], int]:
             raise ValueError(f"新增文件 {path} 的内容行必须以 + 开头")
         body.append(lines[index][1:])
         index += 1
+    if not body:
+        raise ValueError(
+            f"Add File 段不能为空: {path}；文件内容的每一行都必须以 + 开头"
+        )
     content = "\n".join(body) + ("\n" if body else "")
     return {"type": "add", "path": path, "content": content}, index
 
 
+# LLM: Update headers require a path and a real mutation (or an explicit move); rejecting no-op sections prevents false succeeded operations and mirrors 会话运行时's empty-hunk contract.
+# 函数用途: 解析更新/移动段；空补丁不能伪装成成功，并用完整追加示例帮助模型一次修对。
 def _parse_update_file(lines: list[str], index: int) -> tuple[dict[str, Any], int]:
     path = lines[index].removeprefix("*** Update File: ").strip()
+    if not path:
+        raise ValueError("Update File 缺少相对路径；正确格式：*** Update File: notes.txt")
     index += 1
     move_to, index = _parse_optional_move(lines, index)
     old: list[str] = []
@@ -229,6 +253,12 @@ def _parse_update_file(lines: list[str], index: int) -> tuple[dict[str, Any], in
     while index < len(lines) - 1 and not lines[index].startswith("*** "):
         _append_update_line(lines[index], old, new)
         index += 1
+    if not move_to and old == new:
+        raise ValueError(
+            f"Update File 段不能为空或只有未变上下文: {path}。"
+            "替换示例：-old\\n+new；末尾追加示例："
+            "-last line\\n+last line\\n+appended line"
+        )
     return {"type": "update", "path": path, "move_to": move_to, "old": old, "new": new}, index
 
 
@@ -238,6 +268,8 @@ def _parse_optional_move(lines: list[str], index: int) -> tuple[str, int]:
     return "", index
 
 
+# LLM: Update line parsing remains byte-explicit and safe; malformed lines get a complete prefixed-line example instead of a vague parser error that causes blind retries.
+# 函数用途: 把一行 Update 补丁分到旧内容、新内容或共同上下文；漏写前缀时直接说明空格也是语法的一部分。
 def _append_update_line(current: str, old: list[str], new: list[str]) -> None:
     if current == "":
         old.append("")
@@ -255,7 +287,11 @@ def _append_update_line(current: str, old: list[str], new: list[str]) -> None:
         return
     if current.startswith("@@"):
         return
-    raise ValueError(f"无法解析补丁行: {current}")
+    raise ValueError(
+        f"无法解析 Update 补丁行: {current}。每行必须以 +（新增）、-（删除）"
+        "或一个真实空格（未变化上下文）开头；例如：-old\\n+new。"
+        "不要直接写没有前缀的文件正文。"
+    )
 
 
 def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool) -> list[str]:

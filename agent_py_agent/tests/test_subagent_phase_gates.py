@@ -8,9 +8,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchContext
-from agent_py_agent.agent.agent_core.orchestration.dispatch.progress_payload import (
-    _progress_payload,
-)
 from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_batches import (
     _runner_candidates_for_context,
 )
@@ -181,20 +178,3 @@ def test_explicit_run_ids_keep_named_upstream_output_refs_in_same_wave(tmp_path)
     selected = _runner_candidates_for_context([report, analysis, collect], ctx, runner_max_attempts=1)
 
     assert [task.id for task in selected] == ["report", "analysis", "collect"]
-
-
-def test_progress_payload_surfaces_blocked_children():
-    tasks = [
-        _runner_task("done", "worker"),
-        _runner_task("blocked", "worker"),
-    ]
-    tasks[0].status = "DONE"
-    tasks[0].verification_status = "VERIFIED"
-    tasks[1].status = "BLOCKED"
-    tasks[1].verification_status = "FAILED"
-
-    payload = _progress_payload("parent", tasks)["direct_children"]
-
-    assert payload["has_unfinished"] is False
-    assert payload["has_failures"] is True
-    assert payload["failed_run_ids"] == ["blocked"]

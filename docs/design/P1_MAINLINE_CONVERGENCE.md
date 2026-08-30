@@ -39,8 +39,9 @@ my-agent → ensure gateway → chat client → gateway request → agent runtim
 
 - 语义检索：工具完整说明进入 embedding，工具目录变化时重建缓存，查询按 cosine 召回并与关键词合并；
   `list_tools.tool_retrieval` 报告 enabled/configured/ready/provider/last_error。
-- PTY：单一 `terminal_session` 工具提供 start/write/read/close，输出有界且使用增量 cursor；复用
-  shell 工作区、危险命令和 owner bwrap 策略。
+- PTY：单一 `terminal_session` 工具提供 list/start/write/read/resize/close，输出有界且使用增量 cursor；
+  resize 通过 POSIX `TIOCSWINSZ` 后回读内核尺寸，不用 ESC 文本猜结果；所有已有会话动作按可信
+  owner/conversation/工作区 scope 隔离，并复用 shell 危险命令和 owner bwrap 策略。
 - LSP：单一 `lsp` 工具惰性启动管理员配置的 stdio server，运行 initialize/request/didOpen/
   diagnostics/shutdown；文档路径只允许工作区，owner server 同样进入 bwrap。
 - OpenAI native：内部继续使用一套 ToolSpec 与 ToolCall/ToolResult IR，在 provider 边界翻译为

@@ -219,3 +219,76 @@ def test_schedule_mutations_require_version_and_run_now_is_durable(tmp_path) -> 
     run = _payload(tool.execute({"action": "run_now", "job_id": job["job_id"]}))["run"]
     assert run["status"] == "queued"
     assert run["run_id"].startswith("srun_")
+
+    fetched = _payload(tool.execute({"action": "get", "job_id": job["job_id"]}))
+    assert fetched["job"]["current_run"]["run_id"] == run["run_id"]
+    assert fetched["job"]["current_run"]["status"] == "queued"
+    listed = _payload(tool.execute({"action": "list"}))
+    assert listed["jobs"][0]["current_run"]["run_id"] == run["run_id"]
+    assert listed["load_error_codes"] == []
+
+    claimed = agent.scheduler_repository.claim_run(
+        run["run_id"],
+        lease_seconds=300,
+        now=100.0,
+    )
+    assert claimed is not None
+    agent.scheduler_repository.mark_run_running(
+        run["run_id"],
+        claimed["claim_id"],
+        now=101.0,
+    )
+    agent.scheduler_repository.park_run_waiting(
+        run["run_id"],
+        claimed["claim_id"],
+        now=102.0,
+    )
+    waiting = _payload(tool.execute({"action": "get", "job_id": job["job_id"]}))
+    assert waiting["job"]["current_run"]["status"] == "waiting"
+    assert waiting["job"]["current_run"]["waiting_since"]
+
+
+def test_schedule_stale_version_is_not_started_instead_of_unknown(tmp_path) -> None:
+    """CAS 冲突发生在写入前，必须允许模型读取新 version 后安全换参重试。"""
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        _operation_status_for_result,
+    )
+
+    agent = _agent(tmp_path)
+    tool = ScheduleTool(agent)
+    created = _payload(
+        tool.execute(
+            {
+                "action": "create",
+                "name": "stale-version",
+                "prompt": "验证冲突",
+                "schedule_kind": "every",
+                "every_seconds": 600,
+            }
+        )
+    )["job"]
+    paused = _payload(
+        tool.execute(
+            {
+                "action": "pause",
+                "job_id": created["job_id"],
+                "expected_version": created["version"],
+            }
+        )
+    )["job"]
+
+    conflict = tool.execute(
+        {
+            "action": "delete",
+            "job_id": created["job_id"],
+            "expected_version": created["version"],
+        }
+    )
+
+    assert conflict.ok is False
+    assert conflict.error_code == "SCHEDULER_CONFLICT"
+    assert conflict.effect_outcome == "not_started"
+    assert _operation_status_for_result(conflict) == "failed"
+    current = _payload(tool.execute({"action": "get", "job_id": created["job_id"]}))["job"]
+    assert current["status"] == "paused"
+    assert current["version"] == paused["version"]

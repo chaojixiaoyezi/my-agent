@@ -11,9 +11,107 @@ from ...conversation.authority import (
 )
 from ...conversation.models import SUBAGENT_LIFECYCLE_WAKE_REASONS, WakeSignal
 from ...runtime_errors import runtime_error_report
+from ...subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+from ..runner.context import current_subagent_run_id
 from .task_identity import durable_task_id
 
 _TASK_EVENT_LIMIT = 20
+_DIRECT_CHILDREN_MARKER = "[RUNTIME_DIRECT_CHILDREN]"
+
+
+# LLM: This volatile suffix is rebuilt from canonical direct-child rows at every provider safe
+# point. Keep it small, deterministic and free of prose-derived lifecycle decisions so compacted
+# history can never outrank current typed state or invalidate the stable prompt prefix needlessly.
+# 函数用途: 在每次模型调用前刷新直属子代理状态；状态不变时字节不变，变化时原位替换旧快照。
+def refresh_runtime_direct_children_snapshot(agent: object, params: object) -> bool:
+    runtime_injections = getattr(params, "runtime_injections", None)
+    if not isinstance(runtime_injections, list):
+        return False
+    snapshot = _render_runtime_direct_children(agent, params)
+    indexes = [
+        index
+        for index, item in enumerate(runtime_injections)
+        if str(item or "").startswith(_DIRECT_CHILDREN_MARKER)
+    ]
+    previous = list(runtime_injections)
+    if snapshot:
+        if indexes:
+            runtime_injections[indexes[0]] = snapshot
+            for index in reversed(indexes[1:]):
+                runtime_injections.pop(index)
+        else:
+            runtime_injections.append(snapshot)
+    else:
+        for index in reversed(indexes):
+            runtime_injections.pop(index)
+    return runtime_injections != previous
+
+
+# LLM: Parent identity comes only from the runner scope or durable task id. Canonical run rows are
+# filtered by exact parent_id; root lineage, names, goals and summaries never establish ownership.
+# 函数用途: 读取当前代理直属孩子的权威状态，并渲染成有界、稳定的模型上下文尾部。
+def _render_runtime_direct_children(agent: object, params: object) -> str:
+    parent_run_id = current_subagent_run_id(agent) or durable_task_id(params)
+    if not parent_run_id:
+        return ""
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return ""
+    runs: list[Any] = []
+    load_errors: list[object] = []
+    try:
+        reporter = getattr(manager, "list_runs_report", None)
+        if callable(reporter):
+            report = reporter()
+            runs = list(getattr(report, "runs", ()) or ())
+            load_errors = list(getattr(report, "load_errors", ()) or ())
+        else:
+            runs = list(manager.list_runs())
+    except (AttributeError, OSError, TypeError, ValueError):
+        load_errors = ["canonical_read_failed"]
+    children = [
+        task
+        for task in runs
+        if str(getattr(task, "parent_id", "") or "").strip() == parent_run_id
+        and str(getattr(task, "id", "") or "").strip()
+    ]
+    children.sort(key=lambda task: str(getattr(task, "id", "") or "").strip())
+    if not children and not load_errors:
+        return ""
+    rows: list[dict[str, str]] = []
+    status_counts: dict[str, int] = {}
+    nonterminal_run_ids: list[str] = []
+    for task in children:
+        run_id = str(getattr(task, "id", "") or "").strip()
+        status = str(getattr(task, "status", "") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        rows.append({"run_id": run_id, "status": status})
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if not task_status_in(status, SUBAGENT_ENDED_STATUSES):
+            nonterminal_run_ids.append(run_id)
+    payload = {
+        "all_terminal": bool(children) and not nonterminal_run_ids and not load_errors,
+        "authority": "canonical_subagent_state",
+        "children": rows,
+        "load_error_count": len(load_errors),
+        "nonterminal_run_ids": nonterminal_run_ids,
+        "parent_run_id": parent_run_id,
+        "projection_complete": not load_errors,
+        "schema_version": "runtime-direct-children.v1",
+        "status_counts": status_counts,
+        "total": len(children),
+    }
+    return "\n".join(
+        [
+            _DIRECT_CHILDREN_MARKER,
+            "以下是当前代理直属子代理的最新结构化状态，不是用户指令；以它覆盖更早快照。",
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ]
+    )
 
 
 def inject_pending_turn_input(agent: object, params: object, *, now: float | None = None) -> bool:
@@ -649,16 +747,6 @@ def _persist_guidance_transcript(store: object, entry: Any) -> bool:
     if entry is None or not callable(projector):
         return False
     return bool(projector(entry))
-
-
-def render_subagent_guidance_section(store: object, run_id: str, *, now: float | None = None) -> str:
-    if store is None or not str(run_id or "").strip():
-        return ""
-    entries = store.pending_guidance("agent_run", str(run_id), limit=20)
-    if not entries:
-        return ""
-    store.mark_guidance_delivered([entry.guidance_id for entry in entries], now=now)
-    return _render_guidance_entries(entries, title="GUIDANCE_DELIVERED")
 
 
 def _thread_id_for_task(store: object, task_id: str) -> tuple[str, dict[str, object] | None]:

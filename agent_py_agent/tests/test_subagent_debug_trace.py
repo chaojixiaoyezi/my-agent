@@ -385,7 +385,7 @@ def test_subagent_debug_trace_records_runner_model_and_tool_stages(tmp_path):
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
     assert result.ok
-    records = _trace_records(tmp_path / "subs")
+    records = _trace_records(agent.subagents.workspace)
     event_types = [record["event_type"] for record in records]
     assert event_types.count("runner_model_request_started") == 2
     assert event_types.count("runner_model_response_received") == 2
@@ -658,7 +658,7 @@ def test_subagent_debug_trace_level_four_records_stage_previews(tmp_path):
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
     assert result.ok
-    records = _trace_records(tmp_path / "subs")
+    records = _trace_records(agent.subagents.workspace)
     model_started = next(
         record for record in records if record["event_type"] == "runner_model_request_started"
     )
@@ -701,7 +701,7 @@ def test_subagent_debug_trace_level_five_writes_detail_refs(tmp_path):
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
     assert result.ok
-    records = _trace_records(tmp_path / "subs")
+    records = _trace_records(agent.subagents.workspace)
     model_started = next(
         record for record in records if record["event_type"] == "runner_model_request_started"
     )
@@ -746,7 +746,7 @@ def test_subagent_debug_trace_records_runner_model_request_failure(tmp_path):
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
     assert not result.ok
-    records = _trace_records(tmp_path / "subs")
+    records = _trace_records(agent.subagents.workspace)
     event_types = [record["event_type"] for record in records]
     assert "runner_model_request_started" in event_types
     assert "runner_model_request_failed" in event_types
@@ -781,7 +781,7 @@ def test_subagent_run_failure_classifies_provider_timeout(tmp_path):
     assert "模型接口请求超时" in result.message
     failed = next(
         record
-        for record in _trace_records(tmp_path / "subs")
+        for record in _trace_records(agent.subagents.workspace)
         if record["event_type"] == "runner_model_request_failed"
     )
     assert failed["error_type"] == "ProviderTimeoutError"
@@ -816,7 +816,7 @@ def test_subagent_run_failure_classifies_provider_transient(tmp_path, monkeypatc
     assert "模型接口临时断开" in result.message
     failed = next(
         record
-        for record in _trace_records(tmp_path / "subs")
+        for record in _trace_records(agent.subagents.workspace)
         if record["event_type"] == "runner_model_request_failed"
     )
     assert failed["error_type"] == "ProviderTransientError"

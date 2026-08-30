@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from .models import ToolHandlerOutcome
 
 _BLOB_TOOL_OUTPUT_ARTIFACT_PARTS = ("blobs", "tool_outputs")
+
+
+# LLM: This typed exception preserves a cross-tool recovery decision through generic path parsing.
+# 类用途: 标记目标是工具输出包装文件，调用方应改走 read_artifact 而非继续猜路径。
+class ToolOutputArtifactRedirectError(ValueError):
+    """Signal that a filesystem path must be consumed through read_artifact."""
 
 
 def is_tool_output_artifact_path(target: Path) -> bool:
@@ -21,55 +26,57 @@ def is_tool_output_artifact_path(target: Path) -> bool:
     return _path_has_parts(target, _BLOB_TOOL_OUTPUT_ARTIFACT_PARTS)
 
 
+# LLM: A typo that structurally targets the tool-output tree is a tool-surface redirect, not a
+# generic missing path; callers must preserve its dedicated error code.
+# 函数用途: 识别错误前缀下的工具输出包装路径，并生成 read_artifact 的恢复信息。
 def tool_output_artifact_typo_hint(
     raw_path: str,
-    workspace_root: Path,
+    _workspace_root: Path,
     suggested: str,
-    allowed_tools: list[str] | None = None,
+    _allowed_tools: list[str] | None = None,
 ) -> str:
     suggested_path = Path(suggested)
     if not is_tool_output_artifact_path(suggested_path):
         return ""
-    return (
-        "路径疑似拼写错误，已拒绝访问。"
-        f" suspected_path_typo=true target={raw_path} workspace_root={workspace_root}"
-        f" suggested_target={suggested}。"
-        " 这是路径拼写错误，不是权限缺口；但目标是已外置的 tool-output artifact 文件。"
-        " 请继续用 read_file 读取 suggested_target；read_file 会读取 artifact 正文并按行分页，"
-        "同时保留其外部工具来源边界。"
+    return tool_output_artifact_read_redirect(
+        raw_path,
+        suggested_path,
+        suspected_path_typo=True,
     )
 
 
-def tool_output_artifact_content(target: Path, roots: list[Path]) -> str:
-    if target.suffix.lower() != ".json" or not is_tool_output_artifact_path(target):
-        return ""
-    for root in roots:
-        artifact_root = root / Path(*_BLOB_TOOL_OUTPUT_ARTIFACT_PARTS)
-        try:
-            target.relative_to(artifact_root.resolve(strict=False))
-        except ValueError:
-            continue
-        return _tool_output_content_from_json(target)
-    return ""
+# LLM: Tool-output wrappers have one model-facing reader. Return a logical basename ref so an
+# incorrect absolute prefix cannot be recursively rebased into the current task directory.
+# 函数用途: 把普通文件读取重定向到 read_artifact，并给出可直接照抄的结构化调用。
+def tool_output_artifact_read_redirect(
+    raw_path: str,
+    candidate: Path,
+    *,
+    suspected_path_typo: bool = False,
+) -> str:
+    artifact_ref = candidate.name or Path(raw_path).name
+    payload = {
+        "ok": False,
+        "error": "TOOL_OUTPUT_REQUIRES_READ_ARTIFACT",
+        "requested_path": raw_path,
+        "suspected_path_typo": suspected_path_typo,
+        "recovery_tool": "read_artifact",
+        "artifact_ref": artifact_ref,
+        "retry_same_tool": False,
+        "suggested_tool_call": {
+            "tool": "read_artifact",
+            "artifact_ref": artifact_ref,
+            "offset": 0,
+            "max_chars": 4000,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _path_has_parts(path: Path, parts: tuple[str, ...]) -> bool:
     values = path.parts
     size = len(parts)
     return any(tuple(values[index:index + size]) == parts for index in range(0, len(values) - size + 1))
-
-
-def _tool_output_content_from_json(target: Path) -> str:
-    try:
-        payload: Any = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    if payload.get("kind") != "tool_output":
-        return ""
-    content = payload.get("content")
-    return content if isinstance(content, str) else ""
 
 
 def mark_tool_output_artifact_result(result: ToolHandlerOutcome) -> ToolHandlerOutcome:
@@ -81,12 +88,3 @@ def mark_tool_output_artifact_result(result: ToolHandlerOutcome) -> ToolHandlerO
         result.result_envelope["tool_output_policy"] = policy
     policy.update({"trust": "external_data", "redaction": "default"})
     return result
-
-
-def allowed_tools_hint_param(params: dict[str, object]) -> list[str] | None:
-    value = params.get("__allowed_tools")
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return [str(item) for item in value if str(item).strip()]
-    return []

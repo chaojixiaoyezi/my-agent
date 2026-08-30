@@ -1,4 +1,4 @@
-"""人格写入边界：三件套统一走 update_persona；USER 自主写，SOUL/AGENTS 需确认。"""
+"""人格写入边界：三件套统一走 update_persona；USER/AGENTS 自主写，只有 SOUL 需确认。"""
 
 from __future__ import annotations
 

@@ -10,7 +10,10 @@ from ..tooling.executor import ToolOutputProjection
 from ..tooling.models import ToolHandlerOutcome, output_policy_for_outcome
 from ..tooling.output_projection import project_tool_output_body
 from ..tooling.runtime_contracts import ToolCall, ToolContentBlock, ToolResultRef
-from .run_task_workspace_writer import current_run_task_work_dir, current_run_task_workspace_root
+from .run_task_workspace_writer import (
+    current_run_task_workspace_root,
+    current_run_tool_output_archive_root,
+)
 from .runtime.owner_roots import runtime_owner_root
 from .tool_loop.recovery import runtime_run_id, runtime_run_scope
 from .tool_loop.round_execution import ToolCallRecordParams
@@ -19,14 +22,16 @@ from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 _MODEL_SUMMARY_MAX_CHARS = 12_000
 
 
-# LLM: Raw tool output must be archived together with host-owned execution and operation facts
-# before the later in-memory record is enriched; background slices restore only this durable index.
-# 函数用途: 归档工具原始输出和执行终态，确保子代理唤醒后的续轮不会把已成功操作误判为未核验。
+# LLM: Raw tool output must be archived together with host-owned execution/operation facts and a
+# separate provider-authored parameter view before the later in-memory record is enriched.
+# 函数用途: 归档工具原始输出、执行终态和模型原始参数，供后台续轮安全恢复而不回灌宿主字段。
 def archive_tool_output_projection(
     agent: object,
     params: object,
     call: ToolCall,
     outcome: ToolHandlerOutcome,
+    *,
+    model_call: ToolCall | None = None,
 ) -> ToolOutputProjection:
     """Archive the raw handler body before any model-facing projection is applied."""
 
@@ -40,10 +45,13 @@ def archive_tool_output_projection(
     trust = output_policy.trust if output_policy is not None else "runtime"
     redaction = output_policy.redaction if output_policy is not None else "default"
     envelope = _archive_result_envelope(outcome.result_envelope, outcome)
-    envelope["tool_output_policy"] = {
-        "trust": trust,
-        "redaction": redaction,
-    }
+    policy = (
+        dict(envelope.get("tool_output_policy") or {})
+        if isinstance(envelope.get("tool_output_policy"), dict)
+        else {}
+    )
+    policy.update({"trust": trust, "redaction": redaction})
+    envelope["tool_output_policy"] = policy
     request = ExternalizeToolOutputRequest(
         root=_tool_output_archive_root(agent, params),
         tool=call.tool_name,
@@ -59,6 +67,7 @@ def archive_tool_output_projection(
         min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
         preview_chars=_config_int(agent, "tool_output_preview_chars"),
         parameters=dict(call.arguments),
+        model_parameters=dict((model_call or call).arguments),
         result_envelope=envelope,
     )
     output_record = externalize_tool_output_record(request)
@@ -154,6 +163,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
             min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
             preview_chars=_config_int(agent, "tool_output_preview_chars"),
             parameters=dict(record.call.arguments),
+            model_parameters=dict(record.model_visible_call.arguments),
             result_envelope=_archive_result_envelope(
                 _result_details(record.result),
                 record.result,
@@ -162,6 +172,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
         output_record = externalize_tool_output_record(request)
         output_record.update(write_tool_output_fail_safe_checkpoint(request))
     output_record["parameters"] = dict(record.call.arguments)
+    output_record["model_parameters"] = dict(record.model_visible_call.arguments)
     # The round/index pair is runtime authority for ephemeral tool discovery:
     # a tool loaded by tool_search is pending only until the next model turn.
     # Persist it on the carried record so a compact continuation can distinguish
@@ -230,11 +241,11 @@ def _config_int(agent: object, key: str) -> int:
         return default_config_int(key)
 
 
+# LLM: Delegate to the per-run cached root; recomputing from a newly promoted task would orphan
+# refs written earlier in the same active turn.
+# 函数用途: 返回本轮固定不漂移的工具输出归档目录。
 def _tool_output_archive_root(agent: object, params: object) -> Path:
-    work_dir = current_run_task_work_dir(agent, params)
-    if work_dir is not None:
-        return work_dir
-    return runtime_owner_root(agent)
+    return current_run_tool_output_archive_root(agent, params)
 
 
 # LLM: Tool archive rows need the originating ordinary conversation turn even when a

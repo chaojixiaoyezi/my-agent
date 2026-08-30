@@ -14,6 +14,7 @@ def test_read_only_subagent_tools_contains_read_tools():
     assert "list_files" in READ_ONLY_SUBAGENT_TOOLS
     assert "read_file" in READ_ONLY_SUBAGENT_TOOLS
     assert "search_text" in READ_ONLY_SUBAGENT_TOOLS
+    assert "capability_request" in READ_ONLY_SUBAGENT_TOOLS
     assert "write_file" not in READ_ONLY_SUBAGENT_TOOLS
     assert "apply_patch" not in READ_ONLY_SUBAGENT_TOOLS
     assert "run_command" not in READ_ONLY_SUBAGENT_TOOLS

@@ -125,6 +125,9 @@ def _policy_may_change_state(policy: ToolRuntimePolicy) -> bool:
         effect != "read_only"
         for _field_name, variants in resolver.by_parameter
         for _value, effect in variants
+    ) or any(
+        effect != "read_only"
+        for _conditions, effect in resolver.by_parameter_combinations
     )
 
 

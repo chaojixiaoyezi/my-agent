@@ -15,7 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..common.json_io import read_json_object_report
-from .candidate_models import CandidateObservation, MemoryScope, utc_now_iso
+from .candidate_models import CandidateObservation, host_promotion_mode, utc_now_iso
 from .candidates import CandidateService
 from .curator_backend import (
     CuratorModelTimeoutError,
@@ -541,14 +541,15 @@ class _CuratorExecutionMixin:
         committed: CuratorBatchCommit,
         extra_warnings: tuple[str, ...],
     ) -> CuratorRunResult:
-        # 权限合同:提交后的自动晋升同样只消费宿主已标 auto_eligible 的候选
-        # (与 _pending_promotable_candidate_ids 同判据,不重复走 selector 而直接过滤);
-        # lesson/hot/subagent/model_inferred 的 manual_required 候选永不回调晋升。
+        # 提交后的自动晋升只消费宿主按结构化字段标出的 auto_eligible 候选；
+        # SOUL 和无正式权威的候选仍不会进入回调。
         promotable = [
             item.candidate_id
             for item in committed.candidates
             if str(getattr(item, "promotion_mode", "") or "").strip().lower()
             == "auto_eligible"
+            and str(getattr(item, "status", "") or "").strip().lower()
+            in {"pending_review", "approved"}
         ]
         promoted, promotion_warnings = self._promote_eligible(promotable)
         warnings = (
@@ -578,25 +579,22 @@ class _CuratorExecutionMixin:
     # LLM: 晋升只消费已提交候选 ID;失败与已成功事务隔离且保持可重试。
     # 函数用途: 执行保守自动晋升并返回数量和稳定警告码。
     def _pending_promotable_candidate_ids(self, *, limit: int = 32) -> list[str]:
-        """已落库、待晋升的合格候选 ID(纯结构化:只读 pending_review 状态;失败静默返空)。
-        LLM: 只取宿主已标 auto_eligible 的 user_explicit/tool_verified long_term 候选;
-        lesson/hot/subagent/model_inferred 一律 manual_required,永不出现在选择器。
+        """已落库、待自主晋升或待门槛重试的候选 ID；失败时静默返空。
+
+        LLM: Selection trusts only persisted host promotion_mode and typed status. Target-specific
+        evidence, threshold, CAS and SOUL confirmation remain PromotionService responsibilities.
         """
         try:
-            rows = self.candidate_service.list(statuses={"pending_review"}, limit=limit)
+            rows = self.candidate_service.list(
+                statuses={"pending_review", "approved"},
+                limit=limit,
+            )
             ids: list[str] = []
             for row in rows:
-                origin = str(getattr(row, "origin", "") or "").strip().lower()
-                target = str(getattr(row, "promotion_target", "") or "").strip().lower()
                 mode = str(getattr(row, "promotion_mode", "") or "").strip().lower()
-                # 权限闸:非 auto_eligible(含 legacy 归一 manual_required)一律不选。
                 if mode != "auto_eligible":
                     continue
-                # user_explicit/tool_verified:target 为空或 long_term 都算可晋升候选——
-                # promote 入口会把 target=none 的 user_explicit 长期事实补成 long_term
-                # (模型偶发漏写 target,宿主确定性补全)。model_inferred/Persona 一律排除。
-                if origin in {"user_explicit", "tool_verified"} and target in {"", "none", "long_term"}:
-                    ids.append(str(getattr(row, "candidate_id", "") or ""))
+                ids.append(str(getattr(row, "candidate_id", "") or ""))
             return ids
         except Exception:
             return []
@@ -882,20 +880,17 @@ def _prepare_outputs(
         draft.to_daily_event(curator_run_id=context.run_id, extracted_at=extracted_at)
         for draft in extraction.daily_events
     )
-    # 宿主确定性补全:模型偶发漏写 promotion_target 时,对"用户明确要求记住的长期事实/事件候选"
-    # (user_explicit + long_term_fact/event + 空 target)补成 long_term——这是用户显式表达,符合
-    # 自主晋升语义;不补 model_inferred/Persona/lesson 等(那些必须人工)。同时按定版合同给
-    # 每条提炼候选确定性赋 promotion_mode(合格 user/tool 新 long_term fact/event/project→
-    # auto_eligible,其余一律 manual_required)。纯结构化规则,不猜正文,模型 Schema 不暴露该字段。
+    # 宿主确定性补全漏写的 user_explicit 长期目标，并通过共享权限函数给每条候选赋权；
+    # 模型 Schema 不暴露 promotion_mode，正文和 confidence 均不参与权限判断。
     candidates = tuple(
         _fill_candidate_promotion_authority(item) for item in extraction.candidates
     )
     return _PreparedOutputs(daily, candidates, cursor, tuple(extraction.warnings))
 
 
-# LLM: 宿主只根据验证后的结构化来源、证据、动作、目标、范围和冲突赋权；正文与 confidence
-# 不参与权限判断，model_inferred/Persona/lesson/HOT 永远不能获得自动权限。
-# 函数用途: 返回 promotion_target 补全及 fail-closed promotion_mode 赋权后的候选 observation。
+# LLM: Host authority comes from the shared typed candidate policy. This adapter only fills the
+# one deterministic missing long-term target and never inspects prose or confidence.
+# 函数用途: 补全默认长期目标，并调用统一宿主策略设置自主晋升权限。
 def _fill_candidate_promotion_authority(item: object) -> object:
     target = str(getattr(item, "promotion_target", "") or "").strip().lower()
     origin = str(getattr(item, "origin", "") or "").strip().lower()
@@ -903,34 +898,7 @@ def _fill_candidate_promotion_authority(item: object) -> object:
     if not target and origin == "user_explicit" and ctype in {"long_term_fact", "event"}:
         item = replace(item, promotion_target="long_term")
         target = "long_term"
-    scope = MemoryScope.from_value(getattr(item, "scope", None))
-    evidence_complete = (
-        origin == "user_explicit"
-        and bool(getattr(item, "source_message_refs", ()))
-    ) or (
-        origin == "tool_verified"
-        and bool(getattr(item, "source_tool_refs", ()))
-    )
-    temporary_has_expiry = (
-        scope.scope_type != "temporary"
-        or bool(str(getattr(item, "valid_until", "") or "").strip())
-    )
-    # 权限：只有证据完整、范围可落、无冲突的 user/tool 新长期事实才可进入自动路径；
-    # Promotion 仍会重新核验真实 message/tool evidence、冲突和 expiry。
-    auto_eligible = (
-        origin in {"user_explicit", "tool_verified"}
-        and ctype in {"long_term_fact", "event", "project"}
-        and bool(str(getattr(item, "subject_key", "") or "").strip())
-        and str(getattr(item, "proposed_action", "") or "").strip().lower() == "add"
-        and target == "long_term"
-        and not str(getattr(item, "target_entry_id", "") or "").strip()
-        and not tuple(getattr(item, "conflicts_with", ()) or ())
-        and evidence_complete
-        and temporary_has_expiry
-    )
-    if auto_eligible:
-        return replace(item, promotion_mode="auto_eligible")
-    return replace(item, promotion_mode="manual_required")
+    return replace(item, promotion_mode=host_promotion_mode(item))
 
 
 # LLM: Lease recovery metadata is copied from the host-generated lease only and never inferred

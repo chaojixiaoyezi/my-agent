@@ -159,6 +159,81 @@ class TestCreateSubagentsToolWorkspaceDefaults:
 class TestCreateSubagentsToolTaskWorkspaceGuards:
     """测试当前 task workspace 下的追加派工和协作输出边界。"""
 
+    def test_nested_child_inherits_parent_canonical_run_workspace(self, tmp_path):
+        """孙代理继续落父任务根，不能在 manager runtime 下另造第二棵任务树。"""
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import (
+            create_task_attributes,
+        )
+        from agent_py_agent.agent.agent_core.runner.context import (
+            restore_current_subagent_context,
+            set_current_subagent_context,
+        )
+
+        task_root = (
+            tmp_path
+            / "home"
+            / "owners"
+            / "providers"
+            / "tui"
+            / "users"
+            / "u1"
+            / "tasks"
+            / "2026-08-30"
+            / "gwreq-root"
+        )
+        parent_attrs = {
+            "run_workspace": {
+                "task_root": str(task_root),
+                "work_dir": str(task_root / "work"),
+                "output_dir": str(task_root / "output"),
+            }
+        }
+        agent = SimpleNamespace()
+        previous = set_current_subagent_context(
+            agent,
+            run_id="subagent-parent",
+            attempt_id="attempt-parent",
+            task_attributes=parent_attrs,
+        )
+        try:
+            attrs = create_task_attributes(
+                {
+                    "goal": "创建孙代理",
+                    "attributes": {
+                        "run_workspace": {
+                            "task_root": str(tmp_path / "wrong-manager-runtime-root")
+                        }
+                    },
+                },
+                agent,
+            )
+        finally:
+            restore_current_subagent_context(agent, previous)
+
+        assert attrs["run_workspace"] == parent_attrs["run_workspace"]
+        assert attrs["conversation_execution_cwd"] == str(task_root)
+        assert attrs["conversation_runtime_workspace_roots"] == [str(task_root)]
+
+        from agent_py_agent.agent.subagents.manager import SubAgentManager
+        from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+        manager = SubAgentManager(tmp_path / "manager-runtime")
+        nested = manager.create_run(
+            params=CreateRunParams(
+                goal="孙代理写同一任务产物",
+                thought="沿父级任务根工作",
+                plan=["读取父级输入", "写入父级 output"],
+                root_id="gwreq-root",
+                parent_id="subagent-parent",
+                depth=2,
+                attributes=attrs,
+            )
+        )
+
+        assert nested.task_workspace_dir == str(task_root)
+        assert nested.agent_run_workspace_dir.startswith(str(task_root / "work" / "agents"))
+        assert not nested.task_workspace_dir.startswith(str(tmp_path / "manager-runtime"))
+
     def test_allows_second_batch_while_task_workspace_children_active(self, tmp_path):
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
         from agent_py_agent.agent.core import SimpleAgent
@@ -232,11 +307,11 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
             ["read_file", "write_file"],
         )
 
-        expected = str((task_root / "output" / "codex-analysis.md").resolve(strict=False))
+        expected = str((workspace / "output" / "codex-analysis.md").resolve(strict=False))
+        # 显式绝对路径保持身份，不能静默搬家；它是否可写由后续结构化权限门裁决。
         assert params.attributes["output_refs"] == [expected]
         assert params.extra_write_roots == [
-            str((task_root / "output").resolve(strict=False)),
-            str(workspace.resolve(strict=False)),
+            str(task_root.resolve(strict=False)),
         ]
 
     def test_normalizes_workspace_relative_current_task_output_refs(self, tmp_path):
@@ -353,9 +428,9 @@ class TestCreateSubagentsToolRelativeOutputResolution:
             ["read_file", "write_file"],
         )
 
-        expected = str((workspace / "report_by_helper1.md").resolve(strict=False))
+        expected = str((task_root / "report_by_helper1.md").resolve(strict=False))
         assert params.attributes["output_refs"] == [expected]
-        assert params.extra_write_roots == [str(workspace.resolve(strict=False))]
+        assert params.extra_write_roots == [str(task_root.resolve(strict=False))]
 
     def test_explicit_output_prefix_keeps_task_internal_output(self, tmp_path):
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
@@ -442,13 +517,13 @@ class TestCreateSubagentsToolRelativeOutputResolution:
         assert params.attributes["output_refs"] == [expected]
         assert params.extra_write_roots == [
             str((current_task / "output").resolve(strict=False)),
-            str(workspace.resolve(strict=False)),
+            str(current_task.resolve(strict=False)),
         ]
 
 
 class TestCreateSubagentsToolTaskOutputRebasing:
-    def test_rebases_goal_only_stale_owner_task_project_dir(self, tmp_path):
-        """Goal 里明确但未结构化的旧任务 output 路径也绑定到当前任务。"""
+    def test_goal_only_path_does_not_create_structured_output_authority(self, tmp_path):
+        """Goal 正文只能提示模型，不能自动生成 output refs 或写权限。"""
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
@@ -481,14 +556,10 @@ class TestCreateSubagentsToolTaskOutputRebasing:
             ["read_file", "write_file"],
         )
 
-        expected = str((current_task / "output" / "project").resolve(strict=False))
-        assert str(invented) not in params.goal
-        assert expected in params.goal
-        assert params.attributes["output_refs"] == [expected]
-        assert params.extra_write_roots == [
-            str((current_task / "output").resolve(strict=False)),
-            str(workspace.resolve(strict=False)),
-        ]
+        assert str(invented) in params.goal
+        assert params.attributes.get("output_refs", []) == []
+        assert str(invented) not in params.extra_write_roots
+        assert params.extra_write_roots == [str(current_task.resolve(strict=False))]
 
     def test_goal_path_normalization_keeps_explicit_user_output_dir(self, tmp_path):
         """结构化 user_requested_output_dir 是管理员/用户显式选择，不得偷偷改写。"""

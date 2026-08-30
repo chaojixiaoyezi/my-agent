@@ -16,6 +16,7 @@ from ..agent.settings.services.runtime_config_env import apply_runtime_config_en
 from ..agent.user_space.home_layout import home_paths
 from ..agent.user_space.home_root import configured_home_root
 from ..agent.user_space.owner_resolver import (
+    OwnerIdentity,
     home_paths_with_owner,
     owner_identity_from_config,
     resolve_owner_home,
@@ -59,18 +60,104 @@ class ActiveTurnInputResult:
     disposition: str = ""
 
 
+# LLM: Identity projection is a pure transport helper shared by HTTP headers and JSON bodies.
+# It must use only the typed owner identity and never infer an owner from a conversation id.
+# 函数用途: 把当前 TUI 的 owner 身份转换成单 Gateway 使用的用户、通道和群聊字段。
+def _gateway_request_identity(owner_identity: OwnerIdentity) -> dict[str, str]:
+    if owner_identity == OwnerIdentity.local_main():
+        user_id, channel = "local-agent", "chat"
+    else:
+        user_id, channel = str(owner_identity.owner_id), str(owner_identity.provider)
+    identity = {"user_id": user_id, "channel": channel}
+    if owner_identity.owner_kind == "group":
+        identity.update(
+            {
+                "channel_chat_type": "group",
+                "channel_chat_id": str(owner_identity.owner_id),
+            }
+        )
+    return identity
+
+
+# LLM: HTTP authentication and body audit fields consume the exact same typed projection.
+# 函数用途: 生成当前用户访问本机单 Gateway 时统一使用的请求头。
+def _gateway_headers(
+    owner_identity: OwnerIdentity,
+    *,
+    json_body: bool = False,
+    conversation_id: str = "",
+) -> dict[str, str]:
+    identity = _gateway_request_identity(owner_identity)
+    headers = {
+        "X-User-Id": identity["user_id"],
+        "X-Channel": identity["channel"],
+    }
+    if identity.get("channel_chat_type") == "group":
+        headers.update(
+            {
+                "X-Channel-Chat-Type": "group",
+                "X-Channel-Chat-Id": identity["channel_chat_id"],
+            }
+        )
+    selected_conversation = str(conversation_id or "").strip()
+    if selected_conversation:
+        headers["X-Conversation-Id"] = selected_conversation
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+# LLM: Body identity mirrors authenticated headers; caller payloads are copied and group metadata
+# is extended without mutating the original mapping.
+# 函数用途: 给请求正文补上当前用户身份，避免不同 TUI 都退化成 local-agent。
+def _with_client_identity(
+    owner_identity: OwnerIdentity,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    identity = _gateway_request_identity(owner_identity)
+    normalized = dict(payload)
+    normalized.update({"user_id": identity["user_id"], "channel": identity["channel"]})
+    if identity.get("channel_chat_type") == "group":
+        raw_metadata = normalized.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+        metadata.update(
+            {
+                "channel_chat_type": "group",
+                "channel_chat_id": identity["channel_chat_id"],
+            }
+        )
+        normalized["metadata"] = metadata
+    return normalized
+
+
 # LLM: The structured marker is consumed only by client-side adapters. Missing attributes remain
 # AttributeError so an accidental server-only call cannot silently allocate a second runtime.
 # 类用途: 保存聊天界面所需配置和路径，并通过显式 Gateway 请求完成客户端操作。
 class GatewayChatClientAgent:
     gateway_client_only = True
 
-    def __init__(self, args, config, root: Path, workspace_roots: list[Path], scoped_home) -> None:
+    def __init__(
+        self,
+        args,
+        config,
+        root: Path,
+        workspace_roots: list[Path],
+        scoped_home,
+        *,
+        owner_identity: OwnerIdentity | None = None,
+    ) -> None:
         del args
         self.config = config
         self.root = root
         self.workspace_roots = workspace_roots
         self.home_paths = scoped_home
+        self.owner_identity = owner_identity or OwnerIdentity.local_main()
+
+    # LLM: HTTP requests and file-queue asks must consume this exact identity projection. Keeping
+    # a public typed projection prevents the idle-submit path from falling back to local-agent.
+    # 函数用途: 返回薄 TUI 提交任何 Gateway 请求时统一使用的用户、通道和群聊身份。
+    def gateway_request_identity(self) -> dict[str, str]:
+        return _gateway_request_identity(self.owner_identity)
 
     # LLM: Session lifecycle is submitted to the already running Gateway's typed HTTP contract,
     # preserving owner resolution without constructing another local MemoryCuratorService.
@@ -83,12 +170,13 @@ class GatewayChatClientAgent:
             "channel": "chat",
             "conversation_id": str(session_id or "default"),
         }
-        status, body = self._post_gateway_json("/ask", payload, timeout=1.0)
+        status, body = self.post_gateway_json("/ask", payload, timeout=1.0)
         return status == 202 and body.get("disposition") == "memory_curator_request"
 
     # LLM: Memory commands are executed by the already initialized owner Agent in Gateway; the
-    # client sends only operation/content/query and exact conversation identity.
-    # 函数用途: 查询最近记忆、搜索记忆或显式保存一条事实，并返回结构化结果。
+    # client sends only operation/content/query and exact conversation identity. A lost remember
+    # response is UNKNOWN rather than failed because the Gateway may have committed the write.
+    # 函数用途: 查询最近记忆、搜索记忆或显式保存一条事实；写回执丢失时明确返回结果未知。
     def request_memory(
         self,
         *,
@@ -98,7 +186,7 @@ class GatewayChatClientAgent:
         content: str = "",
         limit: int = 5,
     ) -> dict[str, object]:
-        _status, body = self._post_gateway_json(
+        status, body = self.post_gateway_json(
             "/client/memory",
             {
                 "operation": operation,
@@ -112,13 +200,26 @@ class GatewayChatClientAgent:
             },
             timeout=10.0,
         )
-        return body or {"ok": False, "error_code": "GATEWAY_UNAVAILABLE"}
+        if body:
+            return {**body, "http_status": status}
+        if str(operation or "").strip().lower() == "remember":
+            return {
+                "ok": False,
+                "outcome": "unknown",
+                "http_status": status,
+                "error_code": "MEMORY_WRITE_RESULT_UNKNOWN",
+            }
+        return {
+            "ok": False,
+            "http_status": status,
+            "error_code": "GATEWAY_UNAVAILABLE",
+        }
 
     # LLM: Resume history comes from the same owner ConversationStore used by Gateway turns; the
     # terminal must not open that store or create a local full Agent.
     # 函数用途: 读取一个聊天会话最近的完整问答回合。
     def request_chat_history(self, session_id: str, *, max_turns: int) -> dict[str, object]:
-        _status, body = self._post_gateway_json(
+        _status, body = self.post_gateway_json(
             "/client/history",
             {
                 "limit": max(1, int(max_turns or 1)),
@@ -146,7 +247,7 @@ class GatewayChatClientAgent:
         event_after: int = 0,
     ) -> dict[str, object]:
         # 后台状态只是易失展示；2 秒仍无响应就交给 TUI 退避，不能让每个窗口长期占住连接。
-        _status, body = self._post_gateway_json(
+        _status, body = self.post_gateway_json(
             "/client/notices",
             {
                 "after": max(0.0, float(after or 0.0)),
@@ -178,7 +279,7 @@ class GatewayChatClientAgent:
         run_id: str,
         event_after: int = 0,
     ) -> dict[str, object]:
-        _status, body = self._post_gateway_json(
+        _status, body = self.post_gateway_json(
             "/client/agent-view",
             {
                 "user_id": "local-agent",
@@ -202,7 +303,7 @@ class GatewayChatClientAgent:
         message: str,
         message_id: str,
     ) -> dict[str, object]:
-        status, body = self._post_gateway_json(
+        status, body = self.post_gateway_json(
             "/client/agent-guidance",
             {
                 "user_id": "local-agent",
@@ -232,7 +333,7 @@ class GatewayChatClientAgent:
         request: dict[str, object],
         decision: dict[str, object],
     ) -> dict[str, object]:
-        status, body = self._post_gateway_json(
+        status, body = self.post_gateway_json(
             "/client/agent-permission",
             {
                 "user_id": "local-agent",
@@ -250,9 +351,10 @@ class GatewayChatClientAgent:
             "error_code": "GATEWAY_UNAVAILABLE",
         }
 
-    # LLM: Esc in a child view maps to one exact canonical cancellation request;
-    # the client never selects a process, pid, role name, or visible row index.
-    # 函数用途: 请求停止当前正在查看的子代理。
+    # LLM: Esc in a child view maps to one exact owner-scoped cancellation request; the client
+    # never selects a process, pid, role name, or visible row index. The Gateway acknowledges
+    # admission quickly while canonical terminal state continues asynchronously.
+    # 函数用途: 请求停止当前正在查看的子代理，并接收服务端的快速排队回执。
     def request_agent_stop(
         self,
         session_id: str,
@@ -260,7 +362,7 @@ class GatewayChatClientAgent:
         run_id: str,
         operation_id: str,
     ) -> dict[str, object]:
-        status, body = self._post_gateway_json(
+        status, body = self.post_gateway_json(
             "/client/agent-stop",
             {
                 "user_id": "local-agent",
@@ -269,7 +371,7 @@ class GatewayChatClientAgent:
                 "run_id": str(run_id or "").strip(),
                 "operation_id": str(operation_id or "").strip(),
             },
-            timeout=2.0,
+            timeout=10.0,
         )
         return {**body, "http_status": status} if body else {
             "ok": False,
@@ -305,18 +407,21 @@ class GatewayChatClientAgent:
                 "expected_turn_id": turn_id,
             },
         }
-        workspace = self._workspace_payload()
+        workspace = self.gateway_request_workspace()
         if workspace:
             payload["workspace"] = workspace
         if execution_options is not None:
             payload.update(execution_options.to_payload())
-        status, body = self._post_gateway_json("/ask", payload, timeout=2.0)
+        status, body = self.post_gateway_json("/ask", payload, timeout=2.0)
         return _active_turn_input_result(status, body)
 
-    # LLM: The thin client reports its cwd on queued turns without using that cwd to locate the
-    # daemon. Gateway service identity stays owner-scoped while the server validates this setting.
-    # 函数用途: 返回当前 TUI 希望本会话使用的工作目录和可见根目录。
-    def _workspace_payload(self) -> dict[str, object]:
+    # LLM: Only local-main may propose a host cwd. A scoped user already selects its canonical
+    # owner home through authenticated identity; serializing that path as a remote-owner cwd
+    # override would cross the Gateway's hard authority boundary and break every first request.
+    # 函数用途: 本机管理员返回显式会话目录；普通用户省略目录，由 Gateway 固定到自己的家目录。
+    def gateway_request_workspace(self) -> dict[str, object]:
+        if self.owner_identity != OwnerIdentity.local_main():
+            return {}
         return gateway_request_workspace_payload(self.root, self.workspace_roots)
 
     # LLM: Once POST returns the stable ingress id, all later reconciliation is read-only. This
@@ -326,27 +431,32 @@ class GatewayChatClientAgent:
         stable_id = str(request_id or "").strip()
         if not stable_id:
             return ActiveTurnInputResult(ActiveTurnInputDelivery.UNKNOWN)
-        status, body = self._get_gateway_json(
+        status, body = self.get_gateway_json(
             f"/input-status/{stable_id}",
             timeout=2.0,
         )
         return _active_turn_input_result(status, body)
 
-    # LLM: This is the sole HTTP reader for lightweight client status contracts; authentication
-    # headers match the POST path and transport errors remain typed UNKNOWN at the caller.
-    # 函数用途: 从本机 Gateway 读取一个 JSON 状态对象。
-    def _get_gateway_json(
+    # LLM: This is the sole HTTP reader for lightweight client status contracts. Callers that
+    # query a conversation-scoped receipt must pass that exact conversation id as authentication;
+    # transport errors remain typed UNKNOWN at the caller.
+    # 函数用途: 从本机 Gateway 读取 JSON 状态，并可携带精确会话身份完成权限校验。
+    def get_gateway_json(
         self,
         path: str,
         *,
         timeout: float,
+        conversation_id: str = "",
     ) -> tuple[int, dict[str, object]]:
         port = int(getattr(self.config, "gateway_port", 0) or 0)
         if port <= 0:
             return 0, {}
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}{path}",
-            headers={"X-User-Id": "local-agent", "X-Channel": "chat"},
+            headers=_gateway_headers(
+                self.owner_identity,
+                conversation_id=conversation_id,
+            ),
         )
         try:
             with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:
@@ -360,7 +470,7 @@ class GatewayChatClientAgent:
     # LLM: This is the sole HTTP writer for the lightweight chat context. It returns safe empty
     # state on transport/JSON failure and never falls back to local Agent services.
     # 函数用途: 向本机 Gateway 发送一条 JSON 请求，并返回 HTTP 状态和对象响应。
-    def _post_gateway_json(
+    def post_gateway_json(
         self,
         path: str,
         payload: dict[str, object],
@@ -370,14 +480,11 @@ class GatewayChatClientAgent:
         port = int(getattr(self.config, "gateway_port", 0) or 0)
         if port <= 0:
             return 0, {}
+        normalized_payload = _with_client_identity(self.owner_identity, payload)
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}{path}",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "X-User-Id": "local-agent",
-                "X-Channel": "chat",
-            },
+            data=json.dumps(normalized_payload, ensure_ascii=False).encode("utf-8"),
+            headers=_gateway_headers(self.owner_identity, json_body=True),
         )
         try:
             with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:
@@ -445,16 +552,18 @@ def _http_error_json(exc: urllib.error.HTTPError) -> tuple[int, dict[str, object
     return int(exc.code), payload if isinstance(payload, dict) else {}
 
 
-# LLM: Reuse canonical config layers, home precedence, owner identity, and runtime-path resolver.
+# LLM: Reuse canonical config layers and owner paths, but bind all thin clients to the local-main
+# process service. The scoped owner still owns sessions/workspace/memory and travels in HTTP auth.
 # This function may create the workspace directory but must not initialize model/tool services.
-# 函数用途: 根据现有命令参数构造一个与后台 Gateway 指向同一 owner/workspace 的轻量客户端。
+# 函数用途: 构造连接同一个后台 Gateway、但会话和工作目录属于当前用户的轻量客户端。
 def make_gateway_chat_client(args) -> GatewayChatClientAgent:
     config = apply_runtime_config_environment(load_config(args.config))
     explicit_root = explicit_workspace_root(args)
     if explicit_root is not None:
         config.workspace_root = str(explicit_root)
     base_home = home_paths(configured_home_root(config))
-    owner = resolve_owner_home(base_home.root, owner_identity_from_config(config))
+    owner_identity = owner_identity_from_config(config)
+    owner = resolve_owner_home(base_home.root, owner_identity)
     scoped_home = home_paths_with_owner(base_home, owner)
     roots = resolve_workspace_roots(
         config,
@@ -464,9 +573,24 @@ def make_gateway_chat_client(args) -> GatewayChatClientAgent:
     validate_requested_workspace_roots(config, roots)
     root = roots[0]
     root.mkdir(parents=True, exist_ok=True)
+    base_owner = resolve_owner_home(base_home.root, OwnerIdentity.local_main())
+    base_scoped_home = home_paths_with_owner(base_home, base_owner)
+    shared_gateway_workspace = resolve_runtime_paths_for_agent(
+        config,
+        base_owner.home_dir,
+        base_scoped_home,
+    ).paths["gateway_workspace"]
     resolution = resolve_runtime_paths_for_agent(config, root, scoped_home)
     apply_runtime_paths_to_config(config, resolution)
-    return GatewayChatClientAgent(args, config, root, roots, scoped_home)
+    config.gateway_workspace = str(shared_gateway_workspace)
+    return GatewayChatClientAgent(
+        args,
+        config,
+        root,
+        roots,
+        scoped_home,
+        owner_identity=owner_identity,
+    )
 
 
 __all__ = [

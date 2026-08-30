@@ -395,6 +395,7 @@ def _request_deferred_until_later(request: _PendingGatewayRequest) -> bool:
 
 _OWNER_POOL_LOCK = threading.Lock()
 _BASE_OWNER_CHANNELS = frozenset({"local", "cli", "chat", "gateway-cli", "http"})
+_LOCAL_MAIN_USER_IDS = frozenset({"local-agent"})
 
 
 class OwnerScopeUnavailableError(RuntimeError):
@@ -454,6 +455,22 @@ def _resolve_request_agent_for_owner(agent, owner):
         ) from exc
 
 
+# LLM: Passive projections may reuse an already resident owner Agent, but must
+# not create one or record a hard active-owner fact. Mutation and model work must
+# continue through _resolve_request_agent_for_owner so security state is loaded.
+# 函数用途: 给空闲状态查询复用已加载的用户 Agent；冷用户直接返回空，不触发完整初始化。
+def _resolve_loaded_request_agent_for_owner(agent, owner):
+    from ..user_space.owner_resolver import owner_identity_from_config
+
+    base_owner = owner_identity_from_config(getattr(agent, "config", None))
+    if owner == base_owner:
+        return agent
+    pool = getattr(agent, "_owner_pool", None)
+    if pool is None:
+        return None
+    return pool.peek(owner)
+
+
 def _is_remote_channel_request(request_payload: dict) -> bool:
     metadata = request_payload.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -481,7 +498,8 @@ def _owner_from_request(agent, request_payload: dict):
     """从结构化通道身份构造 per-user 或 per-group owner；匿名/缺字段返回 None。
 
     p2p/private 使用发件 user_id；群聊使用通道提供的 chat_id。决策只认 adapter 传来的结构化
-    chat_type/chat_id，不从 conversation_id 或自然语言猜测。
+    chat_type/chat_id，不从 conversation_id 或自然语言猜测。本机 thin TUI 也可以显式携带
+    ``local/user/<id>``；只有固定的 ``local-agent`` 才代表基础 ``local/main``。
     """
     meta = (
         request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
@@ -490,18 +508,22 @@ def _owner_from_request(agent, request_payload: dict):
     channel = str(meta.get("channel") or "").strip()
     if not user_id or user_id == "anonymous" or not channel:
         return None
-    # 本机 CLI/HTTP 是基础 owner 的不同入口，不是外部身份提供商。`/ask`
-    # 通过文件队列进入时原本就落在基础 owner；控制请求带齐本机身份头后也必须
-    # 解析到同一个 owner，否则 /status、/stop、命名任务 clear 会查错目录。
-    if channel.casefold() in _BASE_OWNER_CHANNELS:
+    normalized_channel = channel.casefold()
+    # chat/cli/http 仍是基础 owner 的不同内部入口。local 则同时承担两种结构化身份：
+    # local-agent 是基础 local/main；local + 其他显式 user_id 是本机多用户 thin TUI。
+    # 两者不能只按 channel 合并，否则客户端虽已投影 owner，服务端仍会把记忆、任务、
+    # 会话和子代理全部写回 local/main，形成真实串户。
+    if normalized_channel in _BASE_OWNER_CHANNELS and (
+        normalized_channel != "local" or user_id.casefold() in _LOCAL_MAIN_USER_IDS
+    ):
         return None
     from ..user_space.owner_resolver import OwnerIdentity
 
     chat_type = str(meta.get("channel_chat_type") or "").strip().lower()
     chat_id = str(meta.get("channel_chat_id") or "").strip()
     if chat_type not in {"", "p2p", "private"} and chat_id:
-        return OwnerIdentity.provider_group(channel, chat_id)
-    return OwnerIdentity.provider_user(channel, user_id)
+        return OwnerIdentity.provider_group(normalized_channel, chat_id)
+    return OwnerIdentity.provider_user(normalized_channel, user_id)
 
 
 def _config_without_runtime_paths(agent):
@@ -793,7 +815,10 @@ def _finish_claimed_gateway_request(
     )
     if not archive_result.terminal_committed:
         return
-    from .recovery import repair_gateway_chunk_projection
+    from .recovery import (
+        mark_gateway_terminal_projection_complete,
+        repair_gateway_chunk_projection,
+    )
 
     try:
         repair_gateway_chunk_projection(paths, request_id, response)
@@ -805,6 +830,14 @@ def _finish_claimed_gateway_request(
     # 不能因“文件存在”反过来成为终态权威。
     write_json_file_atomic(response_path, response)
     append_gateway_history_once(paths, response)
+    try:
+        mark_gateway_terminal_projection_complete(paths, request_id, response)
+    except Exception as exc:
+        # 完成标记只是可重建加速索引；主请求已经由 canonical terminal 封口，不能因
+        # 标记写失败反过来把成功回合改成失败。后台 projector 会继续补齐。
+        from .logging import _report_gateway_side_effect_error
+
+        _report_gateway_side_effect_error("archive_gateway_terminal_marker", request_id, exc)
 
 
 def terminalize_unhandled_claimed_gateway_request(

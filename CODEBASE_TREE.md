@@ -44,29 +44,27 @@ agent_py_agent/
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- turn_end.py                     # 主/子代理共用的六种宿主轮结束原因
 |   |-- model_guidance.py               # 完整 Prompt 与有副作用工具共用的验证/授权软提示唯一正文
-|   |-- agent_core/                     # 主代理运行时、工具循环、编排工具、closeout
+|   |-- agent_core/                     # 无副作用包入口；主代理运行时、工具循环、编排与自然回合收口实现
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
 |   |   |-- runtime/                    # 单 child guidance、active-turn compact carrier、sleep 闹钟与 loop support
 |   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
-|   |   |-- model/                      # 统一模型调用账、动态超时、上下文压力与辅助调用入口
-|   |   |   `-- auxiliary_call.py       # Compact 等非工具循环调用共用记账、传输退避、并发闸和成本统计
+|   |   |-- model/                      # 主工具循环的统一模型调用账、动态超时、上下文压力与成本统计
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
-|   |   |-- orchestration/              # 四个递归直属控制工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
+|   |   |-- orchestration/              # 创建、只读状态、消息、取消、授权五个递归直属工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
 |   |   |   |-- coordinator_policy.py # 主代理/多层 coordinator 共用的 会话运行时 式派工后职责软合同
+|   |   |   |-- tools/list_agents.py  # 会话运行时 式只读代理树查询；复用 canonical 投影，不推进或取消下级
 |   |   |   `-- planned_delegation.py # 已有 Todo 时，创建前原子校验 active exact covers 与父级 workspace 上界
 |   |   |-- agent_tree/status.py        # `/status`、TUI、恢复与诊断共用的内部代理树投影（不是模型工具）
 |   |   |-- _finalization_service.py   # 保留模型最终正文并记录 turn_end.reason
 |   |   |-- tool_loop/natural_user_reply.py # 派工/续跑/完成共用的无工具 LLM 用户回复出口
 |   |   |-- tool_loop/completion.py     # 工具上限、截断与递归 child 创建后的结构化让出
-|   |   |-- tool_loop/plan_closeout.py  # canonical Todo 尚未核对时的 会话运行时 式同轮停止钩子
 |   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout；context.py 也隔离共享 Agent 的 thread-local 运行态
 |   |-- subagents/
 |   |   |-- manager.py                  # 子代理 root manager：初始化、基础生命周期、服务组合
 |   |   |-- kernel.py                   # 子代理树快照
 |   |   |-- manager_work_orders.py      # 工单路径、默认文件、校验
 |   |   |-- models.py                   # 子代理数据模型
-|   |   |-- tool_approval_bridge.py     # child exact ToolApprovalRequest 的 owner 耐久记录、consumer 租约与决定等待
 |   |   |-- process_control.py          # 后台进程治理原语：存活探测/两阶段终止（SIGTERM→SIGKILL）
 |   |   |-- direct_parent_lifecycle.py # 直属父子等待、事件唤醒、同批合并与结果上下文
 |   |   |-- tool_failure_ledger.py      # 系统级工具失败账本：archive ok=False 摘要 -> attributes/对账投影
@@ -86,8 +84,8 @@ agent_py_agent/
 |   |   |-- patch/                     # patch review/apply 底层实现
 |   |   |-- execution/                 # 测试执行和记录
 |   |   `-- static_site/               # 静态站点检查
-|   |-- user_space/                    # owner home、task workspace、policy、quota、doctor、自动 retention
-|   |   |-- owner_quota.py             # 结构化写入口的 owner 跨进程配额锁与整批最终字节准入
+|   |-- user_space/                    # owner home、task workspace、policy、可选 quota、doctor、自动 retention
+|   |   |-- owner_quota.py             # 显式非零磁盘上限的跨进程配额锁；0 时退出热路径
 |   |   |-- home_retention.py          # 结构化终态/时间清理、二次校验、trash tombstone 与 legal hold
 |   |   `-- owner_maintenance.py       # owner 维护间隔、状态记录与自动执行控制
 |   |-- memory_store/                  # owner 长期事实、候选、每日经历、策展、晋升与维护的唯一主链
@@ -112,9 +110,9 @@ agent_py_agent/
 |   |-- memory_push.py                 # planner/runner 决策点只召回正式 Lesson/HOT，并复用唯一 memory-context 信封
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源；ledger_redaction.py 精确擦除已删事实但保留幂等身份
-|   |-- runtime_db/                     # SQLite 运行事实源：wake_queue 闹钟字条账本(schema.py 建表+repository.py 读写)
+|   |-- runtime_db/                     # SQLite 运行事实源：Task 身份、TaskRun/AgentRun/Attempt 生命周期、wake 与投递账本
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
-|   |   |-- agent_control_service.py   # owner 树内代理详情、运行中 guidance 与精确停止的共用控制面
+|   |   |-- approval_session.py        # owner/thread/cwd/权限精确作用域的有界进程内工具审批缓存
 |   |   |-- bounded_http_server.py     # 单 Gateway 固定 daemon worker、128 在途上限与过载 503 背压
 |   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
 |   |   |-- control_operation_service.py # slash 控制副作用前置回执、幂等重放与 unknown 对账
@@ -126,7 +124,11 @@ agent_py_agent/
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- agent_activity.py          # active task link + canonical child run 到 TUI/Web 共用有界活动投影
 |   |   |-- agent_transcript.py        # 子代理跨进程公开过程事件的 owner 存储、游标和有界裁剪
+|   |   |-- agent_control.py           # owner 树内代理详情、运行中 guidance 与精确停止的通道中立控制面
+|   |   |-- agent_tool_approval.py     # child exact ToolApprovalRequest 的 owner 耐久记录、consumer 租约与决定等待
 |   |   |-- background_transcript.py  # 后台 main/child 的有界 typed 过程事件环与 child 工具审批 sink
+|   |   |-- auxiliary_model_call.py   # Compact 等会话辅助模型调用的统一记账、退避、并发闸和成本统计
+|   |   |-- tool_context_window.py    # text/native 共用的有界工具历史窗口与稳定前缀投影
 |   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
 |   |   |-- agent_thread.py            # child/grandchild 独立 thread、逐 attempt transcript 与统一 Compact 适配
 |   |   |-- agent_thread_store.py      # agent thread 精确 ID 物化、身份冲突与运行目录校验
@@ -152,12 +154,14 @@ agent_py_agent/
 |   |   `-- ingress.py                 # POST 前 durable ingress、冲突隔离与单线程全链恢复
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
-|   |   `-- audit_activation.py        # 显式 `/audit` 前缀 -> guarantee/window 结构化激活
+|   |   |-- audit_activation.py        # 显式 `/audit` 前缀 -> guarantee/window 结构化激活
+|   |   `-- tool_output_paths.py       # Memory/工具共用的 owner/task 输出归档与索引路径权威
 |   |-- concurrency/                   # 重试/退避（jittered backoff）、锁、per-thread 协作中断
 |   |-- owner_object_store.py          # scale owner PG/RLS manifest + versioned S3，Pod 盘只作缓存
 |   |-- scale_runtime.py               # scale role/release channel/S3 配置 fail-closed
 |   |-- continuous_monitor_entry.py    # 真实 wall-clock 异构来源 proof 长守入口
-|   |-- contracts/                     # 稳定协议、错误分类（taxonomy+provider 九类分类器）、验收合同
+|   |-- contracts/                     # 安全/协议/错误分类与格式校验合同；无旧任务质量 acceptance 判官
+|   |   |-- subagent_completion.py     # Gateway/后台续片共用的中立 child 完成信封与直属结果投影
 |   |   |-- tool_approval.py           # 工具审批 request/decision/binding 与跨层调用身份协议
 |   |   `-- tool_input_schema.py       # 工具参数有限 JSON Schema 纠正/完整校验与脱敏问题路径
 |   |-- tooling/                       # 唯一 ToolRuntime/ActionPolicy/ToolExecutor、写入边界与结果投影
@@ -175,6 +179,7 @@ agent_py_agent/
 |   |   |-- process_session_store.py  # owner 沙箱外的后台 session 权威记录、锁和单调终态
 |   |   |-- process_network_status.py # exact 受管进程树监听、防火墙显式规则与外部探针边界的只读投影
 |   |   |-- process_sessions.py       # owner+TUI 会话隔离的后台命令查询、等待与停止工具
+|   |   |-- gateway_status.py         # 本机管理员读取唯一 Gateway 身份、端点、队列和本生命周期日志摘要
 |   |   |-- shell.py                  # run_command、超时/中断与有界 pipe drain
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
@@ -232,6 +237,7 @@ agent_py_agent/
 |   |-- test_tool_input_completion_provenance.py # 有限补参、来源账目、伪造拒绝和旧旁路删除回归
 |   |-- test_tool_input_schema.py      # 强类型纠正、嵌套/组合/边界规则与显式 Schema fail-closed
 |   |-- test_process_sessions.py       # 后台命令有界等待、进程树停止与 owner/TUI 会话隔离回归
+|   |-- test_gateway_status_tool.py    # Gateway 权威身份、端点与生命周期日志诊断回归
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
 |   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
 |   `-- test_check_clean_package.py    # untracked、运行目录和 tar/wheel 制品门
@@ -248,6 +254,7 @@ deploy/
 `-- k8s/                              # stable/canary、Gateway route、migration、monitor 与 DR 清单
 docs/
 |-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
+|-- audits/TUI_FUNCTION_AUDIT_20260828.md # 真实 TUI 逐功能结果、问题根因、修复影响与复验证据账
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
 |-- design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md # 后台命令 host 所有权、跨进程记录与安全回收设计
 |-- design/FEATURE-20260818-终端交互-tui-parity.md # 终端交互 TUI Python 原生复刻的用户行为、事件架构与验收规格

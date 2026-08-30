@@ -144,6 +144,32 @@ def read_agent_transcript_events(
     }
 
 
+# LLM: Startup presentation may distinguish PendingInit-like work only when the exact active
+# attempt has emitted a public typed event. The bounded tail lookup is display-only, owner-rooted,
+# and cannot promote status, heartbeat, completion, or retry authority.
+# 函数用途: 判断某个子代理的当前执行尝试是否已经产生首条公开过程事件，避免旧尝试让新尝试冒充运行中。
+def agent_transcript_attempt_has_events(
+    agent: object,
+    *,
+    run_id: str,
+    attempt_id: str,
+) -> bool:
+    selected = validate_opaque_id(run_id, kind="run_id")
+    attempt = validate_opaque_id(attempt_id, kind="attempt_id")
+    path = agent_transcript_path(agent, selected)
+    report = read_jsonl_tail_report(
+        path,
+        context="conversation.agent_transcript.attempt_started",
+        limit=8,
+    )
+    request_id = f"bg-agent:{selected}:{attempt}"
+    return any(
+        _valid_agent_transcript_row(row, selected)
+        and str(row.get("request_id") or "") == request_id
+        for row in report.rows
+    )
+
+
 # LLM: Explicit finalization trims the optional display stream only. It cannot
 # delete the canonical child transcript, result, task, or Compact checkpoint.
 # 函数用途: 子代理一轮结束后把展示文件裁成最近 1024 条，限制长期磁盘占用。
@@ -210,6 +236,7 @@ def _safe_int(value: object) -> int:
 
 __all__ = [
     "AGENT_TRANSCRIPT_MAX_EVENTS",
+    "agent_transcript_attempt_has_events",
     "agent_transcript_path",
     "append_agent_transcript_event",
     "begin_agent_transcript_turn",

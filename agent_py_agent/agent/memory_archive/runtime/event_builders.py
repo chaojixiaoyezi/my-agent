@@ -73,6 +73,9 @@ class _ToolEventFields:
     tool_success: bool | None
     status: str
     error_code: str
+    operation_id: str
+    effect_outcome: str
+    source_ref: str
     metadata: dict[str, Any]
     metadata_text: str
     content_hash: str
@@ -190,6 +193,9 @@ def _tool_raw_event(
         tool_name=fields.tool_name,
         tool_call_id=fields.tool_call_id,
         tool_success=fields.tool_success,
+        operation_id=fields.operation_id,
+        effect_outcome=fields.effect_outcome,
+        source_ref=fields.source_ref,
         content_preview=_preview(fields.metadata_text, ctx.archive_level, ctx.preview_limits),
         content_path=str(fields.metadata.get("output_path") or fields.metadata.get("content_path") or ""),
         content_hash=fields.content_hash,
@@ -200,6 +206,9 @@ def _tool_raw_event(
     return event
 
 
+# LLM: Tool archive fields come from the canonical execution envelope. Keep operation id,
+# outcome and source ref typed so later Memory verification never has to infer them from text.
+# 函数用途: 从工具调用信封提取归档需要的名称、终态、操作编号、结果引用和摘要元数据。
 def _tool_event_fields(
     tool_call: dict[str, Any],
     *,
@@ -212,6 +221,18 @@ def _tool_event_fields(
     tool_success = _first_bool(tool_call, "tool_success", "ok")
     status = _tool_status(tool_call, tool_success)
     error_code = _first_text(tool_call, "error_code", "code")
+    operation = tool_call.get("tool_operation")
+    operation = operation if isinstance(operation, dict) else {}
+    operation_id = _first_text(tool_call, "operation_id") or _first_text(
+        operation,
+        "operation_id",
+    )
+    effect_outcome = _first_text(tool_call, "effect_outcome")
+    source_ref = _first_text(tool_call, "effect_source_ref", "result_ref") or _first_text(
+        operation,
+        "result_ref",
+        "reconciliation_source_ref",
+    )
     metadata = _tool_metadata(
         tool_call,
         facts=_ToolFacts(
@@ -230,6 +251,9 @@ def _tool_event_fields(
         tool_success=tool_success,
         status=status,
         error_code=error_code,
+        operation_id=operation_id,
+        effect_outcome=effect_outcome,
+        source_ref=source_ref,
         metadata=metadata,
         metadata_text=_stable_display_json(metadata),
         content_hash=_content_hash(_canonical_json(tool_call)),

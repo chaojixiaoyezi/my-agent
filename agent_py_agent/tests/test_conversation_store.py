@@ -828,6 +828,18 @@ def test_task_link_lifecycle_projects_to_owner_workspace_state(tmp_path) -> None
     task_root = tmp_path / "owner" / "tasks" / "2026-07-16" / "task-one"
     state_path = task_root / "work" / "state.json"
     state_path.parent.mkdir(parents=True)
+    summary_path = task_root / "work" / "summaries" / "current_summary.md"
+    summary_path.parent.mkdir(parents=True)
+    summary_path.write_text(
+        "# Current Summary\n\n"
+        "- task_id: task-1\n"
+        "- primary_run_id: task-1\n"
+        "- status: RUNNING\n"
+        "- current_step: waiting_for_child_runs\n\n"
+        "## Latest\n\n"
+        "子代理已登记，等待父任务汇总。\n",
+        encoding="utf-8",
+    )
     state_path.write_text(
         json.dumps({"version": 1, "task_id": "task-1", "status": "RUNNING"}),
         encoding="utf-8",
@@ -847,6 +859,7 @@ def test_task_link_lifecycle_projects_to_owner_workspace_state(tmp_path) -> None
         {"task_id": "task-1", "status": "completed", "expected_status": "active", "now": 3.0}
     )
     completed = json.loads(state_path.read_text(encoding="utf-8"))
+    completed_summary = summary_path.read_text(encoding="utf-8")
     store.update_task_status(
         {"task_id": "task-1", "status": "active", "expected_status": "completed", "now": 4.0}
     )
@@ -854,11 +867,19 @@ def test_task_link_lifecycle_projects_to_owner_workspace_state(tmp_path) -> None
         {"task_id": "task-1", "status": "interrupted", "expected_status": "active", "now": 5.0}
     )
     interrupted = json.loads(state_path.read_text(encoding="utf-8"))
+    interrupted_summary = summary_path.read_text(encoding="utf-8")
 
     assert completed["status"] == "DONE"
+    assert completed["current_step"] == "DONE"
     assert completed["updated_at"] == "1970-01-01T00:00:03+00:00"
+    assert "- status: DONE" in completed_summary
+    assert "- current_step: DONE" in completed_summary
+    assert "子代理已登记，等待父任务汇总。" in completed_summary
     assert interrupted["status"] == "PAUSED"
+    assert interrupted["current_step"] == "PAUSED"
     assert interrupted["updated_at"] == "1970-01-01T00:00:05+00:00"
+    assert "- status: PAUSED" in interrupted_summary
+    assert "- current_step: PAUSED" in interrupted_summary
 
 
 def test_task_link_lifecycle_does_not_overwrite_another_workspace_identity(tmp_path) -> None:

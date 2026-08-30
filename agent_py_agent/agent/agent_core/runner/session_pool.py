@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...runtime_errors import runtime_error_report
+from ...subagents.models import (
+    SUBAGENT_RECOVERY_CLOSED_STATUSES,
+    TaskStatus,
+)
 
 
 @dataclass(frozen=True)
@@ -73,21 +77,30 @@ def _new_runner_session(lease: RunnerSessionPoolLease) -> dict[str, object]:
     }
 
 
+# LLM: Heartbeats stop themselves when the canonical lifecycle rejects a stale live-session
+# projection; retryable persistence errors still keep the loop alive for the next interval.
+# 函数用途: 周期刷新 runner 会话，任务已进入不可恢复终态时立即停止继续写心跳。
 def _heartbeat_loop(lease: RunnerSessionPoolLease, session: dict[str, object], stop_event: threading.Event) -> None:
     interval = max(0.2, float(lease.interval_seconds or 5.0))
     while not stop_event.wait(interval):
-        _record_runner_session(lease, session, status="running")
+        if not _record_runner_session(lease, session, status="running"):
+            return
 
 
+# LLM: This is the sole session-pool write adapter. False means canonical terminal state fenced
+# this lease and callers must stop heartbeats; transient storage errors remain retryable True.
+# 函数用途: 写一拍 runner-session 状态，并告诉心跳线程该执行轮是否仍有资格继续。
 def _record_runner_session(
     lease: RunnerSessionPoolLease,
     session: dict[str, object],
     *,
     status: str,
     error: dict[str, object] | None = None,
-) -> None:
+) -> bool:
     try:
         task = lease.manager.load(lease.run_id)
+        if _runner_session_update_is_stale_for_terminal_task(task, status):
+            return False
         now = time.time()
         current = dict(session)
         current["status"] = status
@@ -108,11 +121,13 @@ def _record_runner_session(
         task.updated_at = now
         narrow_writer = getattr(type(lease.manager), "save_runner_session", None)
         if callable(narrow_writer):
-            lease.manager.save_runner_session(lease.run_id, current, now=now)
+            if lease.manager.save_runner_session(lease.run_id, current, now=now) is False:
+                return False
         else:
             # Compatibility for embedders/test doubles with the historical
             # load/save manager surface only.
             lease.manager.save(task)
+        return True
     except Exception:
         # 容忍:这是周期性 heartbeat,在后台线程里跑;单次 load/save 失败不能传播——
         # 否则会打死 heartbeat 线程/整轮 run,下一拍会重试。但不再无声:记日志可查
@@ -123,7 +138,24 @@ def _record_runner_session(
             status,
             exc_info=True,
         )
-        return
+        return True
+
+
+# LLM: Once the canonical task is recovery-closed, an old heartbeat cannot keep its runner
+# session alive. DONE accepts only the worker's final completed receipt; cancelled/abandoned/
+# taken-over tasks keep the terminal session written by their lifecycle controller.
+# 函数用途: 判断当前 runner-session 更新是否来自已经失效的旧执行轮。
+def _runner_session_update_is_stale_for_terminal_task(
+    task: object,
+    requested_status: str,
+) -> bool:
+    status = str(getattr(task, "status", "") or "").strip().upper()
+    if status not in SUBAGENT_RECOVERY_CLOSED_STATUSES:
+        return False
+    return not (
+        status == TaskStatus.DONE.value
+        and str(requested_status or "").strip().lower() == "completed"
+    )
 
 
 __all__ = ["RunnerSessionPoolLease", "runner_session_lease"]

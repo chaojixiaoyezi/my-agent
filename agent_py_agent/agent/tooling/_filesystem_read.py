@@ -18,7 +18,10 @@ from ._filesystem_helpers import (
     _normalized_workspace_roots,
     _required_path,
 )
-from .filesystem_artifact_guard import tool_output_artifact_typo_hint
+from .filesystem_artifact_guard import (
+    ToolOutputArtifactRedirectError,
+    tool_output_artifact_typo_hint,
+)
 from .filesystem_read_file import execute_read_file
 from .models import (
     BaseTool,
@@ -50,7 +53,6 @@ _COMMON_FILE_DISCOVERY_IGNORES = frozenset(
 _READ_FILE_USE_CASES = [
     "查看某个 Python 文件、配置文件或 Markdown 文档",
     "定位报错后，按行阅读相关代码",
-    "读取工具返回的大输出保存路径或 tool-output artifact 包装路径",
     "读取超大单行文本时，用 offset/max_chars 分段继续",
     "大文件已用 search_text 定位章节/锚点后，读取锚点附近源片段作为事实证据",
 ]
@@ -62,7 +64,7 @@ _READ_FILE_PARAMETERS = {
     "max_chars": "本次最多返回多少字符，可选；不会超过系统默认上限",
 }
 _READ_FILE_PARAMETER_DETAILS = {
-    "path": "相对工作区的文本文件路径，或系统返回的安全大输出路径；必须是文件而不是目录。",
+    "path": "相对工作区的普通文本文件路径；已外置 tool-output 必须改用 read_artifact。",
     "start_line": "从第几行开始读，默认从第 1 行开始。",
     "end_line": "读到第几行结束，包含该行；不传时默认读到文件结尾。",
     "offset": "当文件是一整行大文本或返回 next_offset 时，下一次传入 offset 继续读。",
@@ -166,6 +168,12 @@ class FileSystemTool(BaseTool):
             return candidate
         hint = _workspace_typo_error(raw_text, self.workspace_root, self.workspace_roots)
         if hint:
+            if tool_output_artifact_typo_hint(
+                raw_text,
+                self.workspace_root,
+                suggest_workspace_typo_target(raw_text, self.workspace_roots),
+            ):
+                raise ToolOutputArtifactRedirectError(hint)
             raise ValueError(hint)
         raise PathAccessError(decision.message or "路径访问被拒绝。")
 
@@ -265,11 +273,14 @@ def filesystem_access_options(
     )
 
 
+# LLM: This surface reads user/workspace text only; registered tool-output wrappers belong to the
+# logical read_artifact surface so path rebasing cannot become a second recovery protocol.
+# 类用途: 提供普通文本文件读取能力，不直接读取底座保存的工具输出包装文件。
 class ReadFileTool(FileSystemTool):
 
     model_spec = ToolModelSpec(
         name="read_file",
-        description="读取文本文件内容；普通文件、大工具输出路径和历史产物路径都优先用这个入口。默认一次返回整个文件——理解或复刻一个源码文件时直接读全文，不要自己分段反复读同一个文件；只有文件极大（几十万字符以上）或只需确认某几行时才用 start_line/end_line/max_chars。可直接读任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录/文件，无需 shell 或额外授权——不要为读取输入文件提 capability_request。",
+        description="读取普通文本文件内容；已外置 tool-output 的包装文件只能用 read_artifact，不能用本工具。默认一次返回整个文件——理解或复刻一个源码文件时直接读全文，不要自己分段反复读同一个文件；只有文件极大（几十万字符以上）或只需确认某几行时才用 start_line/end_line/max_chars。可直接读任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录/文件，无需 shell 或额外授权——不要为读取输入文件提 capability_request。",
         input_schema={
             "type": "object",
             "properties": {

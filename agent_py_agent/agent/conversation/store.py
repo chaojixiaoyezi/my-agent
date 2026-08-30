@@ -11,12 +11,13 @@ import math
 import threading
 import time
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import write_text_file_atomic
 from ..gateway_parts.daemon_metadata import build_process_identity, process_identity_is_live
 from ..gateway_parts.io import (
     locked_file_transition,
@@ -1273,11 +1274,17 @@ def _sync_task_workspace_status(
         updated = dict(data)
         updated["task_id"] = link.task_id
         updated["status"] = projected_status
+        updated["current_step"] = projected_status
         updated["updated_at"] = datetime.fromtimestamp(current, timezone.utc).isoformat()
         return updated
 
     try:
-        update_json_file_atomic(state_path, updater, require_existing=True)
+        updated_state = update_json_file_atomic(state_path, updater, require_existing=True)
+        _sync_task_workspace_summary_status(
+            task_root,
+            state_path.parent / "summaries" / "current_summary.md",
+            updated_state,
+        )
     except (DataCorruptionError, OSError, TypeError, ValueError) as exc:
         _STORE_LOGGER.warning(
             "task workspace state sync failed(task=%s,status=%s): %s",
@@ -1285,6 +1292,42 @@ def _sync_task_workspace_status(
             projected_status,
             exc,
         )
+
+
+# LLM: current_summary.md is a derived human/model view of canonical state.json. This writer may
+# mirror typed lifecycle fields only; it must never parse the old prose to decide status or task
+# completion, and it must reject symlink escapes from the validated task root.
+# 函数用途: 任务状态切换后原子刷新摘要里的 status/current_step，避免 Compact 读到旧占位状态。
+def _sync_task_workspace_summary_status(
+    task_root: Path,
+    summary_path: Path,
+    state: dict[str, Any],
+) -> None:
+    if not summary_path.is_file():
+        return
+    if summary_path.is_symlink() or summary_path.parent.is_symlink():
+        raise ValueError("task workspace summary path cannot use symbolic links")
+    summary_path.resolve(strict=False).relative_to(task_root)
+    status = str(state.get("status") or "UNKNOWN").strip().upper() or "UNKNOWN"
+    lines = summary_path.read_text(encoding="utf-8").splitlines()
+    next_lines: list[str] = []
+    status_found = False
+    step_found = False
+    for line in lines:
+        if line.startswith("- status:"):
+            next_lines.append(f"- status: {status}")
+            status_found = True
+        elif line.startswith("- current_step:"):
+            next_lines.append(f"- current_step: {status}")
+            step_found = True
+        else:
+            next_lines.append(line)
+    if not status_found or not step_found:
+        return
+    next_text = "\n".join(next_lines) + ("\n" if lines else "")
+    current_text = summary_path.read_text(encoding="utf-8")
+    if next_text != current_text:
+        write_text_file_atomic(summary_path, next_text)
 
 
 def _merged_task_link(
@@ -2720,6 +2763,131 @@ def _guidance_input_digest(request: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+# LLM: Receipt rebind changes only host-owned attempt routing. Reconstructing the semantic request
+# here keeps the input digest and duplicate-ingress validation aligned after recovery.
+# 函数用途: 从持久 guidance 记录重建幂等指纹所需的稳定输入字段。
+def _guidance_request_from_entry(entry: GuidanceEntry) -> dict[str, Any]:
+    return {
+        "target_type": entry.target_type,
+        "target_id": entry.target_id,
+        "message": entry.message,
+        "sender": entry.sender,
+        "priority": entry.priority,
+        "delivery": entry.delivery,
+        "metadata": dict(entry.metadata) if isinstance(entry.metadata, dict) else {},
+    }
+
+
+# LLM: Only pending/reserved rows proven to belong to a dead attempt reach this helper. It records
+# the structured lineage and resets every provider-bound field before the new attempt may claim it.
+# 函数用途: 生成一条安全改绑到恢复 attempt 的待处理插话回执。
+def _rebound_guidance_receipt(
+    receipt: GuidanceOnceReceipt,
+    *,
+    old_turn_id: str,
+    recovered_turn_id: str,
+) -> GuidanceOnceReceipt:
+    metadata = dict(receipt.entry.metadata) if isinstance(receipt.entry.metadata, dict) else {}
+    metadata["expected_turn_id"] = recovered_turn_id
+    entry = replace(receipt.entry, metadata=metadata)
+    migration = dict(receipt.migration)
+    history = list(migration.get("turn_rebinds") or [])
+    history.append(
+        {
+            "from_turn_id": old_turn_id,
+            "to_turn_id": recovered_turn_id,
+            "reason": "dead_attempt_before_provider_submission",
+            "rebound_at": time.time(),
+        }
+    )
+    migration["turn_rebinds"] = history[-20:]
+    return replace(
+        receipt,
+        input_digest=_guidance_input_digest(_guidance_request_from_entry(entry)),
+        status="pending",
+        entry=entry,
+        updated_at=time.time(),
+        attempt_id="",
+        submission_id="",
+        submitted_at=0.0,
+        migration=migration,
+    )
+
+
+# LLM: Legacy runner-prompt injection marked delivery before provider I/O. Such rows cannot be
+# replayed safely; migrate them to explicit submission-unknown instead of pretending consumption.
+# 函数用途: 把旧版“拼提示词即送达”的模糊状态封存为已提交但结果未知，阻止恢复时重复插话。
+def _legacy_prompt_submission_unknown_receipt(
+    receipt: GuidanceOnceReceipt,
+    *,
+    old_turn_id: str,
+    delivered_at: float,
+) -> GuidanceOnceReceipt:
+    migration = dict(receipt.migration)
+    migration["legacy_runner_prompt_delivery"] = {
+        "turn_id": old_turn_id,
+        "decision": "provider_submission_unknown_no_replay",
+        "observed_at": time.time(),
+    }
+    return replace(
+        receipt,
+        status="submitted",
+        updated_at=time.time(),
+        attempt_id=receipt.attempt_id or old_turn_id,
+        submission_id=f"legacy-runner-prompt-unknown:{receipt.entry.guidance_id}",
+        submitted_at=max(float(delivered_at), 1e-9),
+        migration=migration,
+    )
+
+
+# LLM: Queue JSONL is the immutable ingress record while a pending receipt may move between
+# physical attempts. Permit only that one host-owned metadata difference; all user semantics and
+# identities must remain byte-equivalent.
+# 函数用途: 校验恢复改绑后的权威回执仍与最初队列记录表示同一条用户消息。
+def _guidance_queue_entry_matches_receipt(
+    queued: GuidanceEntry,
+    receipt_entry: GuidanceEntry,
+) -> bool:
+    if queued.to_dict() == receipt_entry.to_dict():
+        return True
+    queued_payload = queued.to_dict()
+    receipt_payload = receipt_entry.to_dict()
+    queued_metadata = dict(queued_payload.get("metadata") or {})
+    receipt_metadata = dict(receipt_payload.get("metadata") or {})
+    queued_turn = str(queued_metadata.pop("expected_turn_id", "") or "").strip()
+    receipt_turn = str(receipt_metadata.pop("expected_turn_id", "") or "").strip()
+    queued_payload["metadata"] = queued_metadata
+    receipt_payload["metadata"] = receipt_metadata
+    return bool(queued_turn and receipt_turn) and queued_payload == receipt_payload
+
+
+# LLM: Only receipt-authored rebind lineage may authorize stale projection repair. Malformed
+# migration data fails closed instead of allowing an arbitrary old turn index to be overwritten.
+# 函数用途: 提取一条补充消息曾经绑定过的旧 attempt，并校验迁移链最终指向当前 attempt。
+def _guidance_rebound_from_turn_ids(receipt: GuidanceOnceReceipt) -> set[str]:
+    history = receipt.migration.get("turn_rebinds") if receipt.migration else None
+    if history is None:
+        return set()
+    if not isinstance(history, list):
+        raise DataCorruptionError("conversation guidance rebind history is invalid")
+    metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+    current_turn = str(metadata.get("expected_turn_id") or "").strip()
+    old_turns: set[str] = set()
+    last_target = ""
+    for item in history:
+        if not isinstance(item, dict):
+            raise DataCorruptionError("conversation guidance rebind record is invalid")
+        old_turn = str(item.get("from_turn_id") or "").strip()
+        new_turn = str(item.get("to_turn_id") or "").strip()
+        if not old_turn or not new_turn or old_turn == new_turn:
+            raise DataCorruptionError("conversation guidance rebind turn ids are invalid")
+        old_turns.add(old_turn)
+        last_target = new_turn
+    if history and (not current_turn or last_target != current_turn):
+        raise DataCorruptionError("conversation guidance rebind target is inconsistent")
+    return old_turns
+
+
 # LLM: The embedded entry, not the stored digest string, reconstructs receipt identity. Server-only
 # dedupe metadata is removed exactly as append does, while target/message and state combinations are
 # validated before any queue repair can trust the row.
@@ -2733,15 +2901,7 @@ def _validate_guidance_once_receipt(
     metadata = dict(entry.metadata) if isinstance(entry.metadata, dict) else {}
     if str(metadata.get("dedupe_key") or "").strip() != receipt.dedupe_key:
         raise DataCorruptionError("conversation guidance receipt metadata key mismatch")
-    reconstructed = {
-        "target_type": entry.target_type,
-        "target_id": entry.target_id,
-        "message": entry.message,
-        "sender": entry.sender,
-        "priority": entry.priority,
-        "delivery": entry.delivery,
-        "metadata": metadata,
-    }
+    reconstructed = _guidance_request_from_entry(entry)
     if (
         normalize_guidance_target_type(entry.target_type) != entry.target_type
         or not str(entry.target_id or "").strip()
@@ -2834,9 +2994,7 @@ class ConversationGuidanceStore(ConversationObservationStore):
                         f"conversation guidance dedupe key reused with different input: {key}"
                     )
                 if receipt.status in {"pending", "reserved", "submitted"}:
-                    self._ensure_guidance_turn_receipt_index(receipt)
-                    self._ensure_guidance_input_receipt_index(receipt)
-                    self._ensure_guidance_once_entry(receipt.entry)
+                    self._repair_guidance_once_projections(receipt)
                 return receipt.entry
             metadata = request.get("metadata")
             prepared_request = {
@@ -2855,9 +3013,7 @@ class ConversationGuidanceStore(ConversationObservationStore):
                 updated_at=time.time(),
             )
             write_json_file_atomic(receipt_path, receipt.to_dict())
-            self._ensure_guidance_turn_receipt_index(receipt)
-            self._ensure_guidance_input_receipt_index(receipt)
-            self._ensure_guidance_once_entry(entry)
+            self._repair_guidance_once_projections(receipt)
             return entry
 
     # LLM: Receipt lookup repairs a prepared-but-not-appended row before exposing state. Missing
@@ -2876,9 +3032,7 @@ class ConversationGuidanceStore(ConversationObservationStore):
             if receipt.dedupe_key != key:
                 raise DataCorruptionError("conversation guidance receipt key mismatch")
             if receipt.status in {"pending", "reserved", "submitted"}:
-                self._ensure_guidance_turn_receipt_index(receipt)
-                self._ensure_guidance_input_receipt_index(receipt)
-                self._ensure_guidance_once_entry(receipt.entry)
+                self._repair_guidance_once_projections(receipt)
             delivered = self._read_guidance_delivered().get(receipt.entry.guidance_id, 0.0)
             return replace(receipt, entry=replace(receipt.entry, delivered_at=delivered))
 
@@ -3371,6 +3525,197 @@ class ConversationGuidanceStore(ConversationObservationStore):
                     summary["errors"] += 1
         return summary
 
+    # LLM: A recovered child may inherit only guidance that provably never crossed the provider
+    # boundary. Exact dead-attempt ids come from RuntimeDB/task authority; submitted rows remain
+    # delivery-unknown and legacy prompt-time delivery markers are conservatively migrated there.
+    # 函数用途: 子代理崩溃重启时，把尚未提交模型的插话安全改绑到新 attempt，避免消息永久卡住或重复执行。
+    def rebind_unsubmitted_guidance_for_recovered_turn(
+        self,
+        target_type: str,
+        target_id: str,
+        *,
+        dead_turn_ids: list[str] | tuple[str, ...] | set[str],
+        recovered_turn_id: str,
+    ) -> dict[str, Any]:
+        normalized_type = normalize_guidance_target_type(target_type)
+        normalized_target = str(target_id or "").strip()
+        recovered = str(recovered_turn_id or "").strip()
+        dead = {
+            str(item or "").strip()
+            for item in dead_turn_ids
+            if str(item or "").strip() and str(item or "").strip() != recovered
+        }
+        summary: dict[str, Any] = {
+            "rebound": 0,
+            "rebound_guidance_ids": [],
+            "legacy_submission_unknown": 0,
+            "submitted_unknown": 0,
+            "errors": 0,
+        }
+        if not normalized_type or not normalized_target or not recovered or not dead:
+            return summary
+        entries, load_errors = self.recent_guidance_report(
+            normalized_type,
+            normalized_target,
+            limit=0,
+            include_delivered=True,
+        )
+        summary["errors"] += len(load_errors)
+        with ExitStack() as stack:
+            for turn_id in sorted({*dead, recovered}):
+                stack.enter_context(self.guidance_turn_transition_guard(turn_id))
+            for turn_id in sorted(dead):
+                summary["errors"] += self._repair_committed_guidance_submission_batches_locked(
+                    turn_id
+                )
+            self._rebind_guidance_entries_locked(
+                entries,
+                dead_turn_ids=dead,
+                recovered_turn_id=recovered,
+                summary=summary,
+            )
+        return summary
+
+    # LLM: Caller holds all old/new turn guards. Per-entry receipt failures stay isolated and are
+    # counted so one corrupt historical row cannot mutate or hide another user's valid message.
+    # 函数用途: 批量执行已加锁的插话恢复，并把每种结果累计进同一结构化摘要。
+    def _rebind_guidance_entries_locked(
+        self,
+        entries: list[GuidanceEntry],
+        *,
+        dead_turn_ids: set[str],
+        recovered_turn_id: str,
+        summary: dict[str, Any],
+    ) -> None:
+        for entry in entries:
+            outcome = self._safe_rebind_one_unsubmitted_guidance(
+                entry,
+                dead_turn_ids=dead_turn_ids,
+                recovered_turn_id=recovered_turn_id,
+            )
+            if outcome == "error":
+                summary["errors"] += 1
+            elif outcome == "rebound":
+                summary["rebound"] += 1
+                summary["rebound_guidance_ids"].append(entry.guidance_id)
+            elif outcome:
+                summary[outcome] += 1
+
+    # LLM: Receipt corruption is reported to the batch summary rather than escaping mid-loop;
+    # the outer lifecycle still fails closed when the resulting error count is nonzero.
+    # 函数用途: 安全执行单条插话改绑，将异常折成明确的 error 结果供上层统一处理。
+    def _safe_rebind_one_unsubmitted_guidance(
+        self,
+        entry: GuidanceEntry,
+        *,
+        dead_turn_ids: set[str],
+        recovered_turn_id: str,
+    ) -> str:
+        try:
+            return self._rebind_one_unsubmitted_guidance(
+                entry,
+                dead_turn_ids=dead_turn_ids,
+                recovered_turn_id=recovered_turn_id,
+            )
+        except Exception:
+            return "error"
+
+    # LLM: Caller holds both old/new turn guards. The receipt lock is the final authority fence;
+    # queue JSONL stays immutable while active reads project the receipt's rebound entry.
+    # 函数用途: 原子处理一条待恢复插话，区分安全改绑、旧旁路投递不明和已提交不明三种结果。
+    def _rebind_one_unsubmitted_guidance(
+        self,
+        entry: GuidanceEntry,
+        *,
+        dead_turn_ids: set[str],
+        recovered_turn_id: str,
+    ) -> str:
+        metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+        dedupe_key = str(metadata.get("dedupe_key") or "").strip()
+        if not dedupe_key:
+            return ""
+        receipt_path = self._guidance_dedupe_path(dedupe_key)
+        transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+        with locked_file_transition(transition):
+            receipt = self._read_guidance_once_receipt(receipt_path)
+            if receipt is None or receipt.entry.guidance_id != entry.guidance_id:
+                raise DataCorruptionError("conversation guidance receipt entry mismatch")
+            receipt_metadata = (
+                dict(receipt.entry.metadata)
+                if isinstance(receipt.entry.metadata, dict)
+                else {}
+            )
+            old_turn_id = str(receipt_metadata.get("expected_turn_id") or "").strip()
+            if old_turn_id not in dead_turn_ids:
+                return ""
+            if receipt.status == "submitted":
+                return (
+                    "legacy_submission_unknown"
+                    if receipt.migration.get("legacy_runner_prompt_delivery")
+                    else "submitted_unknown"
+                )
+            if receipt.status not in {"pending", "reserved"}:
+                return ""
+            if receipt.status == "reserved" and receipt.attempt_id != old_turn_id:
+                raise DataCorruptionError("reserved guidance attempt does not match dead turn")
+            delivered_at = float(
+                self._read_guidance_delivered().get(receipt.entry.guidance_id) or 0.0
+            )
+            if delivered_at > 0:
+                migrated = _legacy_prompt_submission_unknown_receipt(
+                    receipt,
+                    old_turn_id=old_turn_id,
+                    delivered_at=delivered_at,
+                )
+                write_json_file_atomic(receipt_path, migrated.to_dict())
+                return "legacy_submission_unknown"
+            rebound = _rebound_guidance_receipt(
+                receipt,
+                old_turn_id=old_turn_id,
+                recovered_turn_id=recovered_turn_id,
+            )
+            write_json_file_atomic(receipt_path, rebound.to_dict())
+            self._ensure_guidance_turn_receipt_index(rebound)
+            self._rebind_guidance_input_receipt_index(
+                rebound,
+                old_turn_id=old_turn_id,
+            )
+            _unlink_quietly(self._guidance_turn_index_path(old_turn_id, dedupe_key))
+            return "rebound"
+
+    # LLM: Gateway input reverse refs are lookup projections. Rebinding may update only the exact
+    # same dedupe key/old turn pair; any conflicting payload remains corruption.
+    # 函数用途: 同步更新普通消息回执的反向索引，保证恢复后查询指向新的子代理 attempt。
+    def _rebind_guidance_input_receipt_index(
+        self,
+        receipt: GuidanceOnceReceipt,
+        *,
+        old_turn_id: str,
+    ) -> None:
+        metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+        input_request_id = str(metadata.get("gateway_input_request_id") or "").strip()
+        if not input_request_id:
+            return
+        path = self._guidance_input_index_path(input_request_id)
+        report = read_json_file_report(path, context="conversation.guidance_input_index.rebind")
+        if report.load_error is not None:
+            raise DataCorruptionError("conversation guidance input index is unreadable")
+        payload = report.payload
+        if payload and (
+            str(payload.get("dedupe_key") or "") != receipt.dedupe_key
+            or str(payload.get("expected_turn_id") or "") != old_turn_id
+        ):
+            raise DataCorruptionError("conversation guidance input index conflicts")
+        write_json_file_atomic(
+            path,
+            {
+                "schema_version": "conversation_guidance_input_ref.v1",
+                "gateway_input_request_id": input_request_id,
+                "dedupe_key": receipt.dedupe_key,
+                "expected_turn_id": str(metadata.get("expected_turn_id") or ""),
+            },
+        )
+
     # LLM: Caller holds the exact turn guard; per-receipt locks retain retry idempotency while the
     # bounded turn index prevents one corrupt historical receipt from poisoning every close.
     # 函数用途: 在已持有回合锁时逐条结算当前回合索引。
@@ -3694,9 +4039,10 @@ class ConversationGuidanceStore(ConversationObservationStore):
                 errors += 1
         return errors
 
-    # LLM: Receipt reads distinguish missing files from corrupt payloads; corruption can never be
-    # interpreted as a retry miss that creates another guidance row.
-    # 函数用途: 在已持有该回执 transition lock 时读取并校验 JSON。
+    # LLM: Receipt reads distinguish missing files from corrupt payloads. A legacy delivered-side
+    # marker proves old prompt injection but not provider acknowledgement, so it is migrated to
+    # submission-unknown here before any claimant can replay it.
+    # 函数用途: 在已持有 transition lock 时读取校验回执，并封存旧版已送达但未结算的模糊状态。
     def _read_guidance_once_receipt(self, path: Path) -> GuidanceOnceReceipt | None:
         report = read_json_file_report(path, context="conversation.guidance_once.read")
         if report.load_error is not None:
@@ -3710,7 +4056,27 @@ class ConversationGuidanceStore(ConversationObservationStore):
         receipt = GuidanceOnceReceipt.from_dict(report.payload)
         if report.payload.get("schema_version") != "conversation_guidance_once.v4":
             write_json_file_atomic(path, receipt.to_dict())
+        delivered_at = float(
+            self._read_guidance_delivered().get(receipt.entry.guidance_id) or 0.0
+        )
+        if delivered_at > 0 and receipt.status in {"pending", "reserved"}:
+            metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+            receipt = _legacy_prompt_submission_unknown_receipt(
+                receipt,
+                old_turn_id=str(metadata.get("expected_turn_id") or "").strip(),
+                delivered_at=delivered_at,
+            )
+            write_json_file_atomic(path, receipt.to_dict())
         return receipt
+
+    # LLM: Receipt is authoritative and every lookup repairs its append-only queue plus lookup
+    # projections. Rebind cleanup runs last so a crash always leaves at least one discoverable ref.
+    # 函数用途: 一次性修复补充消息的队列和索引投影，收口恢复改绑过程中的半写入状态。
+    def _repair_guidance_once_projections(self, receipt: GuidanceOnceReceipt) -> None:
+        self._ensure_guidance_turn_receipt_index(receipt)
+        self._ensure_guidance_input_receipt_index(receipt)
+        self._ensure_guidance_once_entry(receipt.entry)
+        self._retire_rebound_guidance_turn_indexes(receipt)
 
     # LLM: This projection is repaired whenever an active receipt is opened. Terminalization can
     # therefore inspect only one exact turn; corrupt refs are isolated to that turn.
@@ -3754,10 +4120,33 @@ class ConversationGuidanceStore(ConversationObservationStore):
         if report.load_error is not None:
             raise DataCorruptionError("conversation guidance input index is unreadable")
         if report.payload:
-            if report.payload != expected:
+            if report.payload == expected:
+                return
+            existing_turn = str(report.payload.get("expected_turn_id") or "").strip()
+            rebound_from = _guidance_rebound_from_turn_ids(receipt)
+            same_identity = (
+                report.payload.get("schema_version")
+                == "conversation_guidance_input_ref.v1"
+                and str(report.payload.get("gateway_input_request_id") or "").strip()
+                == input_request_id
+                and str(report.payload.get("dedupe_key") or "").strip()
+                == receipt.dedupe_key
+            )
+            if not same_identity or existing_turn not in rebound_from:
                 raise DataCorruptionError("conversation guidance input index conflicts")
-            return
         write_json_file_atomic(index_path, expected)
+
+    # LLM: Old turn refs are disposable projections retained only until the new turn, reverse
+    # input ref, and immutable queue have all been repaired. Receipt migration proves exact scope.
+    # 函数用途: 清除恢复改绑留下的旧 attempt 索引，避免旧回合结算时误报损坏。
+    def _retire_rebound_guidance_turn_indexes(self, receipt: GuidanceOnceReceipt) -> None:
+        metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+        current_turn = str(metadata.get("expected_turn_id") or "").strip()
+        for old_turn in _guidance_rebound_from_turn_ids(receipt):
+            if old_turn and old_turn != current_turn:
+                _unlink_quietly(
+                    self._guidance_turn_index_path(old_turn, receipt.dedupe_key)
+                )
 
     # LLM: Recovery follows one exact owner-scoped reverse index and never scans prose or all
     # historical receipts to guess which steer belongs to a Gateway input.
@@ -3781,10 +4170,15 @@ class ConversationGuidanceStore(ConversationObservationStore):
         ):
             raise DataCorruptionError("conversation guidance input index is invalid")
         dedupe_key = str(report.payload.get("dedupe_key") or "").strip()
-        turn_id = str(report.payload.get("expected_turn_id") or "").strip()
         if not dedupe_key:
             raise DataCorruptionError("conversation guidance input index has no receipt key")
-        return self.guidance_once_receipt(dedupe_key), turn_id
+        receipt = self.guidance_once_receipt(dedupe_key)
+        metadata = (
+            receipt.entry.metadata
+            if receipt is not None and isinstance(receipt.entry.metadata, dict)
+            else {}
+        )
+        return receipt, str(metadata.get("expected_turn_id") or "").strip()
 
     # LLM: Recovery compares the exact prepared entry before appending. A duplicate id with
     # different content is corruption, while an identical row is a successful crash replay.
@@ -3805,7 +4199,9 @@ class ConversationGuidanceStore(ConversationObservationStore):
             if str(row.get("guidance_id") or "") == entry.guidance_id
         ]
         if matches:
-            if any(item.to_dict() != entry.to_dict() for item in matches) or len(matches) != 1:
+            if len(matches) != 1 or not _guidance_queue_entry_matches_receipt(
+                matches[0], entry
+            ):
                 raise DataCorruptionError(
                     f"conversation guidance id has conflicting rows: {entry.guidance_id}"
                 )
@@ -3857,8 +4253,9 @@ class ConversationGuidanceStore(ConversationObservationStore):
             pending_entries: list[GuidanceEntry] = []
             for item in entries:
                 try:
-                    if self._guidance_entry_is_pending(item):
-                        pending_entries.append(item)
+                    pending = self._canonical_pending_guidance_entry(item)
+                    if pending is not None:
+                        pending_entries.append(pending)
                 except Exception as exc:
                     error = runtime_error_report(exc, context="conversation.guidance.receipt")
                     error["guidance_id"] = item.guidance_id
@@ -3867,18 +4264,24 @@ class ConversationGuidanceStore(ConversationObservationStore):
         selected = entries if limit <= 0 else entries[-limit:]
         return selected, [*report.load_errors, *parse_errors]
 
-    # LLM: For idempotent ingress the receipt, not the delivered side index, is authoritative.
+    # LLM: For idempotent ingress the receipt, not immutable queue JSONL or the delivered side
+    # index, is authoritative. A recovery rebind therefore projects the canonical receipt entry.
     # Non-idempotent internal guidance keeps the established delivered-index behavior.
-    # 函数用途: 判断一条 guidance 是否仍可被运行时读取，拒绝和已消费记录不会再次注入。
-    def _guidance_entry_is_pending(self, entry: GuidanceEntry) -> bool:
+    # 函数用途: 返回仍可注入的权威 guidance；已消费、已拒绝和提交结果未知的记录不会再次出现。
+    def _canonical_pending_guidance_entry(
+        self,
+        entry: GuidanceEntry,
+    ) -> GuidanceEntry | None:
         metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
         dedupe_key = str(metadata.get("dedupe_key") or "").strip()
         if not dedupe_key:
-            return entry.delivered_at <= 0
+            return entry if entry.delivered_at <= 0 else None
         receipt = self.guidance_once_receipt(dedupe_key)
         if receipt is None or receipt.entry.guidance_id != entry.guidance_id:
             raise DataCorruptionError("conversation guidance receipt entry mismatch")
-        return receipt.status == "pending"
+        if receipt.status != "pending":
+            return None
+        return replace(receipt.entry, delivered_at=entry.delivered_at)
 
     def pending_guidance(
         self, target_type: str, target_id: str, *, limit: int = 20

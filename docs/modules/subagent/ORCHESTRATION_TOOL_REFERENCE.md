@@ -7,7 +7,7 @@
 用途：让当前代理创建一个或多个直接下级。主代理、子代理和孙代理都使用这一个入口；创建后立即由宿主启动。
 
 工具面按结构化角色决定：根主代理和 `can_spawn_children=true` 的 coordinator 才有
-create/guidance/cancel/resolve 四个直属下级控制入口；普通 leaf 不带这些入口，只执行自己的任务并可用
+create/list/guidance/cancel/resolve 五个直属下级控制入口；普通 leaf 不带这些入口，只执行自己的任务并可用
 `capability_request` 请求自身所需权限。需要下一层协作时，应把该 child 明确创建为 coordinator。
 
 关键原则：
@@ -56,13 +56,15 @@ create/guidance/cancel/resolve 四个直属下级控制入口；普通 leaf 不�
 `items` 式的明确批量派工，不保留复制同一份可写任务的模型入口，也不保留
 “goal 或 items 二选一、因此两者都可空”的漏洞。
 
-## 宿主内部代理树投影（不是模型工具）
+## list_agents 与 canonical 代理树投影
 
-用途：给 `/status`、TUI、恢复器和运维诊断只读投影主代理、子代理、孙代理状态树。
+用途：按需只读列出当前代理可见的主代理、子代理和孙代理状态。它复用 `/status`、TUI、恢复器和运维诊断
+已有的 `agent_tree_status_payload`，不另建状态表。
 
-旧 `InspectAgentTreeTool`、模型 Schema 和公开导出已删除。内部代码直接调用
-`agent_tree_status_payload`；它不会创建、推动或验收任务，也不能重新包装成模型工具。正常运行的 child
-自主继续，并用 lifecycle event 把进展、阻塞和结束通知直接父级。
+旧 `InspectAgentTreeTool`、宽参数 Schema 和公开导出已删除。新的 `list_agents` 只接受可选 `run_id`，返回
+有界 owner-scoped 快照；它不会创建、推动、等待、重试、取消或验收任务。子代理调用时仍由当前
+`run_id` 硬收窄到自己的子树，不能靠参数查看兄弟或其它 owner。正常运行的 child 自主继续，并用 lifecycle
+event 把进展、阻塞和结束通知直接父级；模型不能循环调用 `list_agents` 充当 wait。
 
 子代理状态、进度、channel 状态和内部 refs 以这个内部 projection 为运维状态面。普通文件工具和
 shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`final_report.md`、
@@ -72,16 +74,16 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 `primary_artifact_refs` 或声明产物，不要继续猜内部目录。
 运行中或规划中的子代理不会把内部 `final_report.md` 放入父代理的 `read_order`；只有完成后
 缺少更好的结构化产物时，它才会作为兜底审计 refs 出现在读取顺序里。
-模型没有查询入口，也不要用 shell 的 `sleep` 或另建巡检代理。child 的生命周期事件会直接唤醒父级；
-用户需要了解情况时由 `/status` 读取同一内部 projection。
+模型只有这个按需只读入口，也不要用 shell 的 `sleep`、另建巡检代理或反复查询。child 的生命周期事件会
+直接唤醒父级；用户需要了解情况时，`/status`、TUI 与 `list_agents` 读取同一 projection。
 
 ## inspect_collaboration
 
 用途：只读查看协作 case，或列出当前/指定代理的待处理协作请求。
 
 它不是子代理运行状态面。没有待处理协作请求时返回正常空结果，不把“没有请求”当工具失败；
-它不能代替子代理状态面；如果目标实际是 child，模型应使用创建回执/生命周期事件中的 refs，或等待宿主
-继续通知，不能跳转到已经删除的巡检工具。
+它不能代替子代理状态面；如果目标实际是 child，模型应等待宿主生命周期事件，或在用户明确询问时按需
+调用 `list_agents`，不能创建巡检代理。
 
 ## 内部自动启动（不是模型工具）
 

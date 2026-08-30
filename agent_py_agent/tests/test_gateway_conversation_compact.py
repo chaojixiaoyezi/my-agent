@@ -7,6 +7,7 @@ import pytest
 
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation.compact import (
+    ConversationCompactOptions,
     _merge_compact_operation_evidence,
     _projected_context_tokens,
     _summarize,
@@ -27,6 +28,7 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _conversation_prompt_section,
     _gateway_conversation_context,
     _gateway_run_params,
+    _GatewayAskRunContext,
     _GatewayConversationContext,
     _GatewayConversationLoadRequest,
     _GatewayRunParamsRequest,
@@ -336,9 +338,10 @@ def test_forced_compact_passes_optional_instructions_as_soft_summary_context(tmp
         agent,
         agent.conversation_store,
         thread,
-        current_prompt="",
-        force=True,
-        custom_instructions="优先保留未完成事项",
+        options=ConversationCompactOptions(
+            force=True,
+            custom_instructions="优先保留未完成事项",
+        ),
     )
 
     assert result.compacted is True
@@ -372,8 +375,7 @@ def test_completed_empty_compact_response_commits_mechanical_fallback(tmp_path) 
         agent,
         agent.conversation_store,
         thread,
-        current_prompt="继续",
-        force=True,
+        options=ConversationCompactOptions(current_prompt="继续", force=True),
     )
 
     assert backend.calls == 1
@@ -385,6 +387,90 @@ def test_completed_empty_compact_response_commits_mechanical_fallback(tmp_path) 
     )
     assert "紫藤项目" in result.thread.summary
     assert "8080" in result.thread.summary
+
+
+def test_compact_keeps_exact_user_and_final_answer_landmarks_when_model_omits_them() -> None:
+    backend = _SummaryBackend()
+    agent = SimpleNamespace(backend=backend)
+    rows = [
+        MessageLogEntry(
+            message_id="msg-user-title",
+            thread_id="thread-landmarks",
+            role="user",
+            content="请告诉我 Python 官网页面标题。",
+        ),
+        MessageLogEntry(
+            message_id="msg-commentary-title",
+            thread_id="thread-landmarks",
+            role="assistant",
+            content="我正在抓取网页，请稍候。",
+            metadata={"assistant_part_id": "commentary:1"},
+        ),
+        MessageLogEntry(
+            message_id="msg-final-title",
+            thread_id="thread-landmarks",
+            role="assistant",
+            content="页面标题是 Welcome to Python.org。",
+            metadata={"assistant_part_id": "final"},
+        ),
+    ]
+
+    summary = _summarize(agent, "", {}, rows)
+
+    assert summary.startswith("用户的暗号是紫藤")
+    assert "Exact Conversation Landmarks (non-authoritative)" in summary
+    assert '- user: "请告诉我 Python 官网页面标题。"' in summary
+    assert '- assistant_final: "页面标题是 Welcome to Python.org。"' in summary
+    assert "我正在抓取网页，请稍候" not in summary
+
+
+def test_compact_landmarks_survive_later_generation_without_suffix_duplication() -> None:
+    backend = _SummaryBackend()
+    agent = SimpleNamespace(backend=backend)
+    first = _summarize(
+        agent,
+        "",
+        {},
+        [
+            MessageLogEntry(
+                message_id="msg-old-user",
+                thread_id="thread-landmarks",
+                role="user",
+                content="网页标题是什么？",
+            ),
+            MessageLogEntry(
+                message_id="msg-old-final",
+                thread_id="thread-landmarks",
+                role="assistant",
+                content="Welcome to Python.org",
+                metadata={"assistant_part_id": "final"},
+            ),
+        ],
+    )
+    second = _summarize(
+        agent,
+        first,
+        {},
+        [
+            MessageLogEntry(
+                message_id="msg-new-user",
+                thread_id="thread-landmarks",
+                role="user",
+                content="result.txt 有哪两行？",
+            ),
+            MessageLogEntry(
+                message_id="msg-new-final",
+                thread_id="thread-landmarks",
+                role="assistant",
+                content="第一行 first-line，第二行 second-line。",
+                metadata={"assistant_part_id": "final"},
+            ),
+        ],
+    )
+
+    assert second.count("## Exact Conversation Landmarks (non-authoritative)") == 1
+    assert second.count('- assistant_final: "Welcome to Python.org"') == 1
+    assert '- assistant_final: "第一行 first-line，第二行 second-line。"' in second
 
 
 def test_compact_progress_callback_reports_real_pipeline_stages(tmp_path) -> None:
@@ -409,9 +495,11 @@ def test_compact_progress_callback_reports_real_pipeline_stages(tmp_path) -> Non
         agent,
         agent.conversation_store,
         thread,
-        current_prompt="继续",
-        force=True,
-        progress_callback=lambda payload: events.append(dict(payload)),
+        options=ConversationCompactOptions(
+            current_prompt="继续",
+            force=True,
+            progress_callback=lambda payload: events.append(dict(payload)),
+        ),
     )
 
     assert result.compacted is True
@@ -731,8 +819,7 @@ def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_p
                 agent,
                 agent.conversation_store,
                 thread,
-                current_prompt="继续",
-                force=True,
+                options=ConversationCompactOptions(current_prompt="继续", force=True),
             )
     calls_before_circuit = backend.calls
     thread = agent.conversation_store.load_thread(context.thread_id)
@@ -742,7 +829,7 @@ def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_p
         agent,
         agent.conversation_store,
         thread,
-        current_prompt="普通短消息仍可继续",
+        options=ConversationCompactOptions(current_prompt="普通短消息仍可继续"),
     )
     assert normal_context.compacted is False
     assert backend.calls == calls_before_circuit
@@ -751,8 +838,7 @@ def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_p
             agent,
             agent.conversation_store,
             thread,
-            current_prompt="继续",
-            force=True,
+            options=ConversationCompactOptions(current_prompt="继续", force=True),
         )
     stored = agent.conversation_store.load_thread(context.thread_id)
 
@@ -802,8 +888,7 @@ def test_compact_circuit_half_opens_after_cooldown_and_success_resets_it(tmp_pat
         agent,
         agent.conversation_store,
         thread,
-        current_prompt="继续",
-        force=True,
+        options=ConversationCompactOptions(current_prompt="继续", force=True),
     )
     stored = agent.conversation_store.load_thread(context.thread_id)
 
@@ -844,8 +929,7 @@ def test_checkpoint_write_failure_does_not_commit_candidate(tmp_path, monkeypatc
             agent,
             agent.conversation_store,
             thread,
-            current_prompt="继续",
-            force=True,
+            options=ConversationCompactOptions(current_prompt="继续", force=True),
         )
     stored = agent.conversation_store.load_thread(context.thread_id)
 
@@ -1041,7 +1125,8 @@ def test_compact_keeps_operation_evidence_outside_conflicting_model_summary(tmp_
         force_compact=True,
     )
 
-    assert followup.compact_summary == "助手已经成功删除海王星项目记忆。"
+    assert followup.compact_summary.startswith("助手已经成功删除海王星项目记忆。")
+    assert "Exact Conversation Landmarks (non-authoritative)" in followup.compact_summary
     evidence = followup.compact_operation_evidence
     assert evidence["schema"] == "conversation_operation_evidence.v1"
     assert evidence["coverage"] == "complete"
@@ -1223,7 +1308,9 @@ def test_gateway_thread_marks_runtime_context_as_conversation_scoped(tmp_path) -
     agent = _agent(tmp_path, context_tokens=1_000_000)
     request = _request()
     conversation = _context(agent, request, "gw-context", "开始")
-    context = SimpleNamespace(
+    context = _GatewayAskRunContext(
+        agent=agent,
+        request=request,
         request_id="gw-context",
         request_path=tmp_path / "request.json",
         response_path=tmp_path / "response.json",
@@ -1262,7 +1349,9 @@ def test_conversation_compact_keeps_persona_and_related_memory_in_next_prompt(tm
     compacted = _gateway_conversation_context(
         _GatewayConversationLoadRequest(agent, request, "gw-current", current_prompt)
     )
-    context = SimpleNamespace(
+    context = _GatewayAskRunContext(
+        agent=agent,
+        request=request,
         request_id="gw-current",
         request_path=tmp_path / "request.json",
         response_path=tmp_path / "response.json",

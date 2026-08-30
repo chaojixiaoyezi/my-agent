@@ -106,3 +106,60 @@ def test_capability_grant_does_not_resurrect_stopped_conversation_child():
             item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)
         }
         assert links[task.id].status == "cancelled"
+
+
+def test_capability_grant_advances_settled_child_and_reopens_blocked_link():
+    from agent_py_agent.agent.subagents.services.lifecycle import (
+        RecordCapabilityGrantParams,
+        RecordCapabilityRequestParams,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", subagent_workspace="subs"),
+            Path(td),
+        )
+        task = agent.subagents.create_run(goal="授权后续跑", allowed_tools=["read_file"])
+        request = agent.subagents.lifecycle.record_capability_request(
+            task.id,
+            RecordCapabilityRequestParams(
+                problem="需要写自己的任务目录",
+                needed_capability="filesystem",
+                requested_tools=["write_file"],
+            ),
+        )
+        thread = agent.conversation_store.get_or_create_thread(
+            {
+                "canonical_user_id": "user-1",
+                "channel": "feishu",
+                "channel_conversation_id": "conversation-resume",
+                "channel_user_id": "user-1",
+            }
+        )
+        agent.conversation_store.bind_task(
+            {"thread_id": thread.thread_id, "task_id": task.id, "goal": task.goal}
+        )
+        blocked = agent.subagents.load(task.id)
+        blocked.status = "BLOCKED"
+        blocked.failure_type = "capability_request"
+        blocked.runner_attempts = 1
+        blocked.runner_active_attempt_id = ""
+        agent.subagents.save(blocked)
+        agent.conversation_store.update_task_status(
+            {"task_id": task.id, "status": "blocked", "expected_status": "active"}
+        )
+
+        agent.subagents.lifecycle.record_capability_grant(
+            task.id,
+            RecordCapabilityGrantParams(request_id=request.id, tools=["write_file"]),
+        )
+
+        loaded = agent.subagents.load(task.id)
+        links = {
+            item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)
+        }
+        assert loaded.status == "PENDING"
+        assert loaded.failure_type == ""
+        assert loaded.capability_requests[0].status == "GRANTED"
+        assert loaded.runner_active_attempt_id == ""
+        assert links[task.id].status == "active"

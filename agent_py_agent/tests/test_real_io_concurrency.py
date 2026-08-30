@@ -39,12 +39,19 @@ from pathlib import Path
 import pytest
 
 import agent_py_agent
+from agent_py_agent.agent.concurrency.exceptions import ConcurrencyConflictError
 from agent_py_agent.agent.gateway_parts.scoped_locks import (
     acquire_scoped_lock,
     release_scoped_lock,
 )
 from agent_py_agent.agent.io.jsonl import append_jsonl
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.models import CapabilityGrant, CapabilityRequest
+from agent_py_agent.agent.subagents.services.lifecycle import (
+    RecordCapabilityGapParams,
+    RecordCapabilityGrantParams,
+    RecordCapabilityRequestParams,
+)
 
 # ---------------------------------------------------------------------------
 # 共用小工具:真实线程编排(被测对象一律真实实现,这里只做线程管理)
@@ -125,6 +132,317 @@ def test_concurrent_save_same_task_keeps_canonical_state_atomic(tmp_path: Path) 
     assert reloaded.latest_summary in expected_summaries, (
         f"latest_summary 不是任何线程写入的完整值,疑似交错损坏: {reloaded.latest_summary[:120]!r}"
     )
+
+
+def test_stale_capability_writer_cannot_reopen_settled_runner_attempt(tmp_path: Path) -> None:
+    """迟到的能力授权副本只能合并授权账，不能把已收口 attempt 改回 RUNNING。"""
+
+    manager = _fresh_manager(tmp_path)
+    task = manager.create_run(goal="能力授权与 runner 收口竞态", thought="t", plan=["p1"])
+    run_id = task.id
+
+    # 两个并发写者都从 attempt 尚未收口的同一版 canonical state 起步。
+    stale_capability_writer = manager.load(run_id)
+    stale_capability_writer.status = "RUNNING"
+    stale_capability_writer.runner_active_attempt_id = "attempt-race-1"
+    stale_capability_writer.capability_requests = [
+        CapabilityRequest(
+            id="capreq-race-1",
+            from_run_id=run_id,
+            problem="需要在自己的任务目录写文件",
+            needed_capability="filesystem",
+            requested_tools=["write_file"],
+            status="GRANTED",
+        )
+    ]
+    stale_capability_writer.capability_grants = [
+        CapabilityGrant(
+            id="capgrant-race-1",
+            request_id="capreq-race-1",
+            grant_to_run_id=run_id,
+            tools=["write_file"],
+        )
+    ]
+    stale_capability_writer.allowed_tools = [*stale_capability_writer.allowed_tools, "write_file"]
+
+    settled_runner = manager.load(run_id)
+    settled_runner.status = "BLOCKED"
+    settled_runner.turn_end_reason = "blocked"
+    settled_runner.failure_type = "capability_request"
+    settled_runner.result = "runner 已结构化收口，等待授权后续派"
+    settled_runner.runner_attempts = 1
+    settled_runner.runner_active_attempt_id = ""
+    settled_runner.runner_last_attempt_at = 123.0
+    settled_runner.capability_requests = [
+        CapabilityRequest(
+            id="capreq-race-1",
+            from_run_id=run_id,
+            problem="需要在自己的任务目录写文件",
+            needed_capability="filesystem",
+            requested_tools=["write_file"],
+            status="OPEN",
+        )
+    ]
+    manager.save(settled_runner)
+
+    # 精确复现真机顺序：runner_result 先落盘，持有旧副本的授权写者后落盘。
+    manager.save(stale_capability_writer)
+    reloaded = manager.load(run_id)
+
+    assert reloaded.status == "PENDING"
+    assert reloaded.turn_end_reason == "blocked"
+    assert reloaded.failure_type == ""
+    assert reloaded.result == "runner 已结构化收口，等待授权后续派"
+    assert reloaded.runner_attempts == 1
+    assert reloaded.runner_active_attempt_id == ""
+    assert reloaded.runner_last_attempt_at == 123.0
+    assert reloaded.allowed_tools.count("write_file") == 1
+    assert [item.id for item in reloaded.capability_grants] == ["capgrant-race-1"]
+    assert reloaded.capability_requests[0].status == "GRANTED"
+
+
+def test_runner_result_writer_keeps_capability_granted_after_its_load(tmp_path: Path) -> None:
+    """runner 收尾若早已 load，晚于它落盘的授权仍必须保留在同一 canonical state。"""
+
+    manager = _fresh_manager(tmp_path)
+    task = manager.create_run(goal="runner 旧读与授权新写竞态", thought="t", plan=["p1"])
+    run_id = task.id
+
+    stale_runner_writer = manager.load(run_id)
+    stale_runner_writer.status = "BLOCKED"
+    stale_runner_writer.turn_end_reason = "blocked"
+    stale_runner_writer.failure_type = "capability_request"
+    stale_runner_writer.result = "runner 收口"
+    stale_runner_writer.runner_attempts = 1
+    stale_runner_writer.runner_active_attempt_id = ""
+    stale_runner_writer.capability_requests = [
+        CapabilityRequest(
+            id="capreq-race-2",
+            from_run_id=run_id,
+            problem="需要写文件",
+            needed_capability="filesystem",
+            requested_tools=["write_file"],
+            status="OPEN",
+        )
+    ]
+
+    capability_writer = manager.load(run_id)
+    capability_writer.capability_requests = [
+        CapabilityRequest(
+            id="capreq-race-2",
+            from_run_id=run_id,
+            problem="需要写文件",
+            needed_capability="filesystem",
+            requested_tools=["write_file"],
+            status="GRANTED",
+        )
+    ]
+    capability_writer.capability_grants = [
+        CapabilityGrant(
+            id="capgrant-race-2",
+            request_id="capreq-race-2",
+            grant_to_run_id=run_id,
+            tools=["write_file"],
+        )
+    ]
+    capability_writer.allowed_tools = [*capability_writer.allowed_tools, "write_file"]
+    manager.save(capability_writer)
+
+    # 反向时序：授权先提交，早已读取旧状态的 runner 收尾后提交。
+    manager.save(stale_runner_writer)
+    reloaded = manager.load(run_id)
+
+    assert reloaded.status == "PENDING"
+    assert reloaded.failure_type == ""
+    assert reloaded.runner_attempts == 1
+    assert reloaded.capability_requests[0].status == "GRANTED"
+    assert [item.id for item in reloaded.capability_grants] == ["capgrant-race-2"]
+    assert reloaded.allowed_tools.count("write_file") == 1
+
+
+@pytest.mark.parametrize(
+    ("canonical_status", "stale_status"),
+    [("GRANTED", "GAP"), ("GAP", "GRANTED")],
+)
+def test_capability_terminal_decision_is_monotonic_and_grant_is_idempotent(
+    tmp_path: Path,
+    canonical_status: str,
+    stale_status: str,
+) -> None:
+    """同一申请的首个终态不能被旧副本翻转，重复 grant 也只能保留一份。"""
+
+    manager = _fresh_manager(tmp_path)
+    task = manager.create_run(goal="能力终态冲突", thought="t", plan=["p1"])
+    run_id = task.id
+    stale = manager.load(run_id)
+    canonical = manager.load(run_id)
+    for snapshot, status, grant_id in (
+        (canonical, canonical_status, "capgrant-canonical"),
+        (stale, stale_status, "capgrant-stale"),
+    ):
+        snapshot.capability_requests = [
+            CapabilityRequest(
+                id="capreq-terminal-race",
+                from_run_id=run_id,
+                problem="需要写文件",
+                needed_capability="filesystem",
+                status=status,
+            )
+        ]
+        snapshot.capability_grants = [
+            CapabilityGrant(
+                id=grant_id,
+                request_id="capreq-terminal-race",
+                grant_to_run_id=run_id,
+                tools=["write_file"],
+            )
+        ]
+    manager.save(canonical)
+    manager.save(stale)
+
+    reloaded = manager.load(run_id)
+    assert reloaded.capability_requests[0].status == canonical_status
+    assert [item.id for item in reloaded.capability_grants] == ["capgrant-canonical"]
+
+
+def test_canonical_mutate_serializes_reducers_and_rejects_old_revision(
+    tmp_path: Path,
+) -> None:
+    """typed mutate 必须保留每个并发增量，并让旧 expected revision 明确冲突。"""
+
+    manager = _fresh_manager(tmp_path)
+    task = manager.create_run(goal="原子 reducer", thought="t", plan=["p1"])
+    initial_revision = task.state_revision
+
+    def worker(index: int) -> None:
+        def reducer(current) -> None:
+            attrs = dict(current.attributes or {})
+            values = list(attrs.get("mutation_values") or [])
+            values.append(index)
+            attrs["mutation_values"] = values
+            current.attributes = attrs
+
+        manager.mutate(task.id, reducer)
+
+    errors = _run_threads(worker, 8)
+    assert errors == []
+    reloaded = manager.load(task.id)
+    assert sorted(reloaded.attributes["mutation_values"]) == list(range(8))
+    assert reloaded.state_revision == initial_revision + 8
+
+    with pytest.raises(ConcurrencyConflictError, match="并发冲突"):
+        manager.mutate(
+            task.id,
+            lambda current: setattr(current, "latest_summary", "不应提交"),
+            expected_revision=initial_revision,
+        )
+    assert manager.load(task.id).latest_summary != "不应提交"
+
+
+def test_concurrent_equivalent_capability_requests_create_one_open_record(
+    tmp_path: Path,
+) -> None:
+    """并发提交同一结构化能力需求时，canonical 中只能有一条 OPEN 申请。"""
+
+    manager = _fresh_manager(tmp_path)
+    task = manager.create_run(goal="能力申请去重", thought="t", plan=["p1"])
+    params = RecordCapabilityRequestParams(
+        problem="需要写当前任务文件",
+        needed_capability="filesystem",
+        requested_tools=["write_file"],
+        path_scope=[str(tmp_path)],
+    )
+    returned_ids: list[str] = []
+    ids_guard = threading.Lock()
+
+    def worker(_index: int) -> None:
+        request = manager.lifecycle.record_capability_request(task.id, params)
+        with ids_guard:
+            returned_ids.append(request.id)
+
+    errors = _run_threads(worker, 8)
+    reloaded = manager.load(task.id)
+    assert errors == []
+    assert len(set(returned_ids)) == 1
+    assert len(reloaded.capability_requests) == 1
+    assert reloaded.capability_requests[0].status == "OPEN"
+
+
+def test_capability_grant_and_gap_conflict_cannot_flip_first_terminal_decision(
+    tmp_path: Path,
+) -> None:
+    """同一申请先 GRANTED 后到 GAP 时，迟到裁决必须失败且不能翻转权威终态。"""
+
+    manager = _fresh_manager(tmp_path)
+    task = manager.create_run(goal="能力裁决冲突", thought="t", plan=["p1"])
+    request = manager.lifecycle.record_capability_request(
+        task.id,
+        RecordCapabilityRequestParams(
+            problem="需要写文件",
+            needed_capability="filesystem",
+        ),
+    )
+    manager.lifecycle.record_capability_grant(
+        task.id,
+        RecordCapabilityGrantParams(
+            request_id=request.id,
+            tools=["write_file"],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="already_resolved:GRANTED"):
+        manager.lifecycle.record_capability_gap(
+            task.id,
+            RecordCapabilityGapParams(
+                request_id=request.id,
+                missing_capability="filesystem",
+                why_failed="迟到的冲突裁决",
+            ),
+        )
+
+    reloaded = manager.load(task.id)
+    assert reloaded.capability_requests[0].status == "GRANTED"
+    assert len(reloaded.capability_grants) == 1
+    assert reloaded.capability_gaps == []
+
+
+def test_capability_gap_and_late_grant_cannot_flip_first_terminal_decision(
+    tmp_path: Path,
+) -> None:
+    """同一申请先 GAP 后到授权时，迟到授权必须失败且不能扩大实际权限。"""
+
+    manager = _fresh_manager(tmp_path)
+    task = manager.create_run(goal="能力裁决反向冲突", thought="t", plan=["p1"])
+    request = manager.lifecycle.record_capability_request(
+        task.id,
+        RecordCapabilityRequestParams(
+            problem="需要写文件",
+            needed_capability="filesystem",
+        ),
+    )
+    manager.lifecycle.record_capability_gap(
+        task.id,
+        RecordCapabilityGapParams(
+            request_id=request.id,
+            missing_capability="filesystem",
+            why_failed="当前边界不允许",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="already_resolved:GAP"):
+        manager.lifecycle.record_capability_grant(
+            task.id,
+            RecordCapabilityGrantParams(
+                request_id=request.id,
+                tools=["special_writer"],
+            ),
+        )
+
+    reloaded = manager.load(task.id)
+    assert reloaded.capability_requests[0].status == "GAP"
+    assert reloaded.capability_grants == []
+    assert len(reloaded.capability_gaps) == 1
+    assert "special_writer" not in reloaded.allowed_tools
 
 
 # ---------------------------------------------------------------------------

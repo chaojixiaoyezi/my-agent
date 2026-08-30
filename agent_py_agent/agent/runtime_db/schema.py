@@ -12,6 +12,10 @@
 投影库任何字段不得反向决定权威状态（A.2）。
 """
 
+# LLM: schema 只为长期 Task 身份和真实执行/工具/投递状态建表；退役功能的
+# 旧列或旧表可留在存量 SQLite 中，但不得再由新库创建或被运行时读取。
+# 模块用途: 创建并幂等迁移每个 owner 的 runtime.db 运行事实表。
+
 from __future__ import annotations
 
 import sqlite3
@@ -43,7 +47,6 @@ _BASE_RUNTIME_SQL = (
         conversation_task_id TEXT NOT NULL DEFAULT '',
         title TEXT NOT NULL DEFAULT '',
         goal TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'active',
         created_at REAL NOT NULL,
         updated_at REAL NOT NULL
     )
@@ -56,7 +59,6 @@ _BASE_RUNTIME_SQL = (
         created_at REAL NOT NULL,
         updated_at REAL NOT NULL,
         metadata_json TEXT NOT NULL DEFAULT '{}',
-        current_contract_id TEXT NOT NULL DEFAULT '',
         closed_at REAL NOT NULL DEFAULT 0
     )
     """,
@@ -191,7 +193,7 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_resource_locks_lease ON resource_locks(lease_expires_at)",
     # 资源 mutation 账（G.12）：canonical scope + version + MUTATING/STABLE/DIRTY。
-    # unknown/unscoped 写置 DIRTY → reconcile 前阻止发布/验收/交付（G.14）。
+    # unknown/unscoped 写置 DIRTY → reconcile 前阻止发布等不可逆动作（G.14）。
     """
     CREATE TABLE IF NOT EXISTS resource_mutations (
         mutation_id TEXT PRIMARY KEY,
@@ -287,56 +289,6 @@ _BASE_RUNTIME_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_wake_queue_due ON wake_queue(status, next_due_at)",
     "CREATE INDEX IF NOT EXISTS idx_wake_queue_task ON wake_queue(root_task_id)",
     # idx_wake_queue_lease 在迁移末尾确保（新列可能由迁移 ALTER 补上，此处建会失败）
-    # ---------------------------------------------------------------- R3（I 节）
-    # AcceptanceContract（I.2/I.6）：dispatch 前由框架编译、校验、冻结，
-    # 不可变；current_contract_id 在 task_runs 上 CAS 防分叉。模型只能
-    # propose assertions（I.1）；command/cwd/working_dir/裸程序结构性
-    # 不进契约（I.3），只作 inert evidence（I.4，读取不触发 subprocess）。
-    """
-    CREATE TABLE IF NOT EXISTS acceptance_contracts (
-        contract_id TEXT PRIMARY KEY,
-        task_run_id TEXT NOT NULL,
-        attempt_id TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'FROZEN',
-        compiled_json TEXT NOT NULL DEFAULT '{}',
-        digest TEXT NOT NULL,
-        inert_legacy_json TEXT NOT NULL DEFAULT '{}',
-        frozen_at REAL NOT NULL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_contracts_task_run ON acceptance_contracts(task_run_id)",
-    # ValidatorOperation（A.8/I.8/I.9）：每次 validator 执行追到具体
-    # attempt；记录 code digest/argv/env/artifact digests/stdout/stderr。
-    # status：VERIFIED/FAILED/UNAVAILABLE/BLOCKED（sandbox 不可用 fail
-    # closed，不降级为 advisory）。
-    # G2 补尾：assertion_key 为断言稳定标识（validator_ref::artifact_kind，
-    # 编译时生成），行级绑定具体断言——同契约同 ref 不同 kind 的多断言
-    # 可区分（3.txt「不能只记 validator_ref」）；空 = 升级前的旧行（按
-    # ref 兜底匹配，见 closeout 判定）。
-    """
-    CREATE TABLE IF NOT EXISTS validator_operations (
-        operation_id TEXT PRIMARY KEY,
-        attempt_id TEXT NOT NULL,
-        agent_run_id TEXT NOT NULL,
-        contract_id TEXT NOT NULL DEFAULT '',
-        assertion_key TEXT NOT NULL DEFAULT '',
-        validator_ref TEXT NOT NULL,
-        validator_kind TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'PENDING',
-        code_digest TEXT NOT NULL DEFAULT '',
-        argv_json TEXT NOT NULL DEFAULT '[]',
-        env_json TEXT NOT NULL DEFAULT '{}',
-        artifact_digests_json TEXT NOT NULL DEFAULT '[]',
-        stdout_text TEXT NOT NULL DEFAULT '',
-        stderr_text TEXT NOT NULL DEFAULT '',
-        exit_code INTEGER NOT NULL DEFAULT -1,
-        started_at REAL NOT NULL DEFAULT 0,
-        settled_at REAL NOT NULL DEFAULT 0,
-        created_at REAL NOT NULL,
-        updated_at REAL NOT NULL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_validator_ops_attempt ON validator_operations(attempt_id)",
     # ---------------------------------------------------------------- R4（K 节）
     # Outbox（K.3/K.4/K.6）：同库状态用本地事务；跨进程/外部副作用走
     # at-least-once 投递 + effect_key 去重，不宣称 exactly-once（K.2）。
@@ -398,11 +350,6 @@ _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
         ),
     ),
     (
-        "current_contract_id",
-        "task_runs",
-        "ALTER TABLE task_runs ADD COLUMN current_contract_id TEXT NOT NULL DEFAULT ''",
-    ),
-    (
         "closed_at",
         "task_runs",
         "ALTER TABLE task_runs ADD COLUMN closed_at REAL NOT NULL DEFAULT 0",
@@ -432,12 +379,6 @@ _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
         "artifact_records",
         "ALTER TABLE artifact_records RENAME COLUMN artifact_id TO artifact_record_id",
     ),
-    # G2 补尾：validator operation 绑定断言标识（旧库补列，新库 CREATE 已带）。
-    (
-        "assertion_key",
-        "validator_operations",
-        "ALTER TABLE validator_operations ADD COLUMN assertion_key TEXT NOT NULL DEFAULT ''",
-    ),
 )
 
 
@@ -451,6 +392,9 @@ def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool
         return False
 
 
+# LLM: RuntimeSchemaMixin 只向前补当前仍被消费的列；禁止为了清理旧库而
+# 自动 DROP，避免升级时破坏用户历史，旧 acceptance 表仅作为惰性遗留数据。
+# 类用途: 初始化 runtime.db、执行安全的幂等迁移并提供 SQLite 连接。
 class RuntimeSchemaMixin:
     """连接与建表。模式对齐 local_storage.schema（WAL+外键+busy_timeout）。"""
 
@@ -461,9 +405,12 @@ class RuntimeSchemaMixin:
             self._apply_runtime_migrations(conn)
             conn.commit()
 
+    # LLM: 迁移只补当前代码仍消费的列；旧功能残表保留为惰性历史，不能在
+    # 启动时做破坏性清库。
+    # 函数用途: 幂等升级存量 runtime.db，并处理并发初始化竞态。
     @staticmethod
     def _apply_runtime_migrations(conn: sqlite3.Connection) -> None:
-        """幂等迁移存量库（R1/R2 建的库无 current_contract_id）。
+        """幂等迁移存量库，只补当前运行时仍需要的列。
 
         并发安全：多个连接可能同时初始化同一库（Gateway/后台 worker 共用
         owner 权威库）。目标态是「列存在」：

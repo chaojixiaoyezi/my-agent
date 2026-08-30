@@ -1,6 +1,7 @@
 """Shared helpers for web tooling tests."""
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -44,6 +45,59 @@ class TestWebFetchTool:
         assert "[Docs](/docs)" in first.output
         assert second.result_envelope["cache"]["hit"] is True
         mock_urlopen.assert_called_once()
+
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
+    def test_web_fetch_decodes_gzip_text_before_formatting(self, mock_urlopen, tmp_path: Path):
+        """HTTP gzip 正文必须先解压，再进入 HTML/Markdown 和大输出归档链。"""
+        from agent_py_agent.agent.tooling.web import WebFetchTool
+
+        html = b"<html><head><title>Compressed Page</title></head><body><h1>Hello</h1></body></html>"
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {
+            "Content-Type": "text/html; charset=utf-8",
+            "content-encoding": "gzip",
+        }
+        mock_response.read.return_value = gzip.compress(html)
+        mock_urlopen.return_value = (MagicMock(), mock_response)
+
+        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver, artifact_root=tmp_path)
+        result = tool.execute({"url": "https://example.com/compressed", "format": "markdown"})
+
+        assert result.ok is True
+        assert "# Hello" in result.output
+        assert "\ufffd" not in result.output
+
+    @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
+    def test_web_fetch_rejects_corrupt_gzip_instead_of_rendering_garbage(self, mock_urlopen, tmp_path: Path):
+        """损坏的压缩正文应结构化失败，不能用替换字符伪装成成功文本。"""
+        from agent_py_agent.agent.tooling.web import WebFetchTool
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {"Content-Type": "text/plain", "Content-Encoding": "gzip"}
+        mock_response.read.return_value = b"not-a-gzip-stream"
+        mock_urlopen.return_value = (MagicMock(), mock_response)
+
+        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver, artifact_root=tmp_path)
+        result = tool.execute({"url": "https://example.com/corrupt"})
+
+        assert result.ok is False
+        assert result.error_code == "NETWORK_REQUEST_FAILED"
+        assert "压缩数据损坏" in result.output
+
+    def test_web_fetch_decompressed_body_keeps_hard_size_limit(self):
+        """很小的压缩体也不能把超过预算的实体正文送进模型上下文。"""
+        from agent_py_agent.agent.tooling.web_fetch_runtime import _decode_response_body
+
+        compressed = gzip.compress(b"x" * 4096)
+
+        try:
+            _decode_response_body(compressed, {"Content-Encoding": "gzip"}, 128)
+        except OverflowError:
+            pass
+        else:
+            raise AssertionError("oversized decompressed response must be rejected")
 
     @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_binary_response_is_saved_as_artifact(self, mock_urlopen, tmp_path: Path):
@@ -154,4 +208,3 @@ class TestWebFetchTool:
         assert "status=201" in result.output
         assert result.result_envelope["http_effect"] == "mutating"
         assert "idempotency_key" in result.result_envelope["advisories"]
-

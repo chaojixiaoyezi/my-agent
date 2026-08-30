@@ -37,7 +37,7 @@ class _RateLimitedThenHealthyBackend:
         self.fail_times = fail_times
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **_kwargs: object) -> ModelResponse:
         self.calls += 1
         if self.calls <= self.fail_times:
             raise ProviderTransientError('HTTP 429: rate_limit_error "已达到 Token Plan 用量上限"')
@@ -47,7 +47,7 @@ class _RateLimitedThenHealthyBackend:
 class _CrashingBackend:
     name = "crashing"
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **_kwargs: object) -> ModelResponse:
         raise RuntimeError("real programmer bug")
 
 
@@ -59,7 +59,7 @@ class _QuotaExhaustedThenHealthyBackend:
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **_kwargs: object) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             raise ProviderQuotaExhaustedError("HTTP 429: insufficient_quota")

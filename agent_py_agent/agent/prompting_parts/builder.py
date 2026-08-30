@@ -250,10 +250,10 @@ def _native_cache_volatile_suffix(
     )
 
 
-# LLM: This projection must describe the exact ToolRegistry cwd.  Internal
-# task/output/work paths may be omitted by conversation callers and must never
-# be inferred back from prose or the frozen snapshot.
-# 函数用途: 把冻结的工作区提示更新为本轮真实 cwd 与模型可见写入范围。
+# LLM: This projection must describe the exact ToolRegistry cwd. Permission roots are
+# not placement hints: 会话运行时 exposes one turn cwd separately from its sandbox profile,
+# so a broader owner wall must never compete with the cwd as the default destination.
+# 函数用途: 把冻结的工作区提示更新为本轮真实 cwd，并明确“权限范围不等于默认落点”。
 def project_runtime_workspace_context(
     snapshot: str,
     *,
@@ -288,10 +288,16 @@ def project_runtime_workspace_context(
                 if task_work_dir:
                     projected.append(f"- task_work_dir: {task_work_dir}（过程文件）")
                 if roots:
-                    projected.append(f"- 当前允许写入目录: {', '.join(roots)}")
+                    projected.append(
+                        f"- 权限允许写入目录（不代表默认落点）: {', '.join(roots)}"
+                    )
                 projected.append(relative_line)
                 projected.append(
                     "- 文件工具和 shell 使用同一个 cwd；用户指定的普通相对路径直接按 cwd 解析。"
+                )
+                projected.append(
+                    "- 普通新任务中，用户没有明确指定位置的文件和目录只以当前工具工作目录为默认落点；"
+                    "更宽的用户空间仅表示可以访问已有资料，不要因此把新产物散落到其根目录。"
                 )
                 inserted = True
                 continue
@@ -471,8 +477,9 @@ def _workspace_context_text(
         "才按需使用 task_progress 或草稿。不要为了形式单独建立检查点，也不要把内部记录动作反复当作用户进度回复。",
         "- task_progress 是模型可选的当前运行清单；它不选择会话、不切换工作区，"
         "也不会让普通任务自动续跑或阻止下一条用户消息。",
-        "- 分析、调查、排查、取证、研究、对比这类有实质发现的任务，得出结论后要把发现、依据和结论写成报告文件交付再收尾，"
-        "不能只在对话里口头汇报就算完成；只有纯问答、闲聊、一次性查值这类本就没有交付物的任务，才不必写文件。",
+        "- 分析、调查、排查、取证、研究、对比这类有实质发现的任务，得出结论后通常要把发现、依据和结论写成报告文件交付再收尾，"
+        "不能只在对话里口头汇报就算完成；但用户明确要求只读、不要修改、不要落盘或只在对话中回答时，必须服从本轮要求，"
+        "不能创建报告文件，也不能把写报告文件列入 task_progress。只有纯问答、闲聊、一次性查值这类本就没有交付物的任务，才不必写文件。",
         "- 当前工具工作目录、owner/session/thread/request/task 等标识和字段名只用于内部执行；"
         "对用户说明资料归属时，用‘你的私人空间’或‘当前群的共享空间’等普通说法，不复述宿主路径或内部标识。",
         "- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；"
@@ -486,6 +493,9 @@ def _transcript_tool_context(tools: ToolSections) -> list[str]:
     return [] if tools.native_tool_use else (tools.tool_context or [])
 
 
+# LLM: 工具历史之后的尾部指令是慢/长上下文模型最后看到的执行边界；必须明确说明
+# 无工具正文会结束 active turn，但不能解析模型正文、读取 Todo 来替模型裁决完成。
+# 函数用途: 把用户任务、已执行工具记录和“继续还是最终回复”的模型纪律拼成最后一段。
 def _task_and_transcript_section(config: AgentConfig, user_prompt: str, tool_context: list[str]) -> str:
     from ..agent_core.tool_context.microcompact import (
         DEFAULT_MICROCOMPACT_KEEP_RECENT,
@@ -510,7 +520,10 @@ def _task_and_transcript_section(config: AgentConfig, user_prompt: str, tool_con
         "# Continue From Tool Transcript\n"
         "从最新的工具结果继续推进，不要重新开始任务。"
         "如果某个工具调用已经成功，不要重复调用同一个工具和同一组参数；"
-        "直接使用已有结果进入下一步，或在证据足够时给出最终答案。"
+        "直接使用已有结果进入下一步，或在工作确已完成、没有下一项动作时给出最终答案。"
+        "注意：一条不含工具调用的助手正文会立即结束当前 active turn；"
+        "只要你仍准备检查、生成、修改、验证或汇总，就必须在这一轮同时调用对应工具，"
+        "不能只写‘接下来会继续’之类的进度句后停下。"
     )
 
 

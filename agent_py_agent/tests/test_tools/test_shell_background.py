@@ -1,6 +1,6 @@
 """run_command 后台执行钉子(P0-2 对照能力补齐:持久/后台 shell)。
 
-钉死契约:run_in_background 启动后台进程立即返回 pid+output_file 不阻塞;
+钉死契约:run_in_background 启动后台进程立即返回 session_id+output_file 不阻塞;
 输出落 .background_jobs/ 日志;registry 留痕;参数各形态识别;同步模式不受影响。
 """
 
@@ -12,19 +12,65 @@ from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
 from agent_py_agent.agent.tooling.process_registry import process_registry
+from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.agent.tooling.shell import (
     ShellTool,
     _contains_unmanaged_background_operator,
     _wants_background,
 )
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_test_call,
+    runtime_snapshot_for_tools,
+)
 
 
-def test_background_start_returns_pid_and_output_file(tmp_path):
-    res = ShellTool(tmp_path).execute({"command": "echo started; sleep 0.2; echo done", "run_in_background": True})
+def _background_policy_decision(tmp_path: Path, command: str):
+    tool = ShellTool(tmp_path)
+    snapshot = runtime_snapshot_for_tools({tool.model_spec.name: tool}, run_id="run-bg")
+    call: ToolCall = canonical_test_call(
+        snapshot,
+        tool.model_spec.name,
+        {"command": command, "run_in_background": True},
+    )
+    return ActionPolicy().decide(
+        ActionPolicyRequest(
+            call=call,
+            runtime_snapshot=snapshot,
+            workspace_root=tmp_path,
+            workspace_roots=(tmp_path,),
+            owner_scope_root=str(tmp_path),
+        )
+    )
+
+
+def test_managed_background_command_uses_same_sandbox_without_false_approval(tmp_path):
+    decision = _background_policy_decision(
+        tmp_path,
+        'python3 -c "import time; time.sleep(2)"',
+    )
+
+    assert decision.status == "allow"
+    assert decision.sandbox_plan["mode"] == "required"
+
+
+def test_managed_background_still_rejects_destructive_command(tmp_path):
+    decision = _background_policy_decision(tmp_path, "rm -rf /tmp/forbidden")
+
+    assert decision.status == "deny"
+    assert "COMMAND_DESTRUCTIVE_DELETE_BLOCKED" in decision.reason_codes
+
+
+def test_background_start_returns_session_handle_and_output_file(tmp_path):
+    res = ShellTool(tmp_path).execute(
+        {"command": "echo started; sleep 1; echo done", "run_in_background": True}
+    )
     assert res.ok
     payload = json.loads(res.output)
-    assert payload["status"] == "started" and payload["pid"] > 0
+    assert payload["status"] == "started" and payload["session_id"].startswith("bg-")
+    assert "pid" not in payload and "process_pid" not in payload
+    assert "唯一稳定" in payload["hint"]
     out = Path(payload["output_file"])
     assert out.parent.name == ".background_jobs"
     deadline = time.monotonic() + 5
@@ -41,7 +87,37 @@ def test_background_does_not_block(tmp_path):
         {"command": 'python3 -c "import time; time.sleep(1); print(1)"', "run_in_background": True}
     )
     elapsed = time.monotonic() - start
-    assert res.ok and elapsed < 0.8, f"后台模式不得阻塞,实际耗时 {elapsed:.2f}s"
+    assert res.ok and elapsed < 1.2, f"后台模式不得长时间阻塞,实际耗时 {elapsed:.2f}s"
+
+
+def test_background_immediate_success_returns_terminal_result(tmp_path):
+    res = ShellTool(tmp_path).execute(
+        {"command": "printf immediate-ok", "run_in_background": True}
+    )
+
+    assert res.ok is True
+    payload = json.loads(res.output)
+    assert payload["status"] == "exited"
+    assert payload["exit_code"] == 0
+    assert "immediate-ok" in payload["output_tail"]
+    assert "不要说服务已启动" in payload["hint"]
+
+
+def test_background_immediate_failure_is_not_reported_started(tmp_path):
+    res = ShellTool(tmp_path).execute(
+        {
+            "command": 'python3 -c "import sys; print(\'startup-boom\'); sys.exit(23)"',
+            "run_in_background": True,
+        }
+    )
+
+    assert res.ok is False
+    assert res.error_code == "COMMAND_FAILED"
+    assert res.effect_outcome == "failed"
+    payload = json.loads(res.output)
+    assert payload["status"] == "exited"
+    assert payload["exit_code"] == 23
+    assert "startup-boom" in payload["output_tail"]
 
 
 def test_background_records_registry(tmp_path):

@@ -34,6 +34,7 @@ _ROW_SCALAR_FIELDS = frozenset(
         "name",
         "role",
         "status",
+        "lifecycle_phase",
         "description",
         "goal",
         "activity",
@@ -153,8 +154,14 @@ class TuiAgentNavigationState:
             runtime = self._runtime_for_locked(selected)
             callback = self._view_change
             has_snapshot = selected in self._goal_published
+            lifecycle_phase = str(
+                self._rows_by_run.get(selected, {}).get("lifecycle_phase") or ""
+            )
         if not has_snapshot:
-            runtime.set_notice("正在载入子代理详情…", duration_seconds=1.5)
+            runtime.set_notice(
+                _agent_startup_notice(lifecycle_phase),
+                duration_seconds=2.5,
+            )
         if callback is not None:
             callback(runtime)
         runtime.store.invalidate()
@@ -253,19 +260,34 @@ class TuiAgentNavigationState:
             runtime.enqueue_prompt(f"agent-goal:{selected}", goal, queued=False)
             with self._lock:
                 self._goal_published.add(selected)
+        with self._lock:
+            goal_published = selected in self._goal_published
         terminal = bool(payload.get("terminal"))
         status = str(row.get("status") or "").strip().upper()
+        lifecycle_phase = str(row.get("lifecycle_phase") or "").strip().lower()
         events = payload.get("transcript_events")
         if isinstance(events, list | tuple):
             runtime.publish_background_transcript_events(events)
-        runtime.set_notice("")
+        if terminal or goal_published or bool(events) or final_response:
+            runtime.set_notice("")
+        else:
+            # 轮询会续上这个短 notice；一旦 goal/首事件到达立即清除。这样既不新增
+            # 持久状态，也不会因为首个不完整快照把详情页变成无解释白屏。
+            runtime.set_notice(
+                _agent_startup_notice(lifecycle_phase),
+                duration_seconds=2.5,
+            )
         if terminal:
             runtime.settle_agent_transcript(selected, status=status)
         if final_response and final_response != prior_final:
             runtime.publish_background_response(final_response, thread_id=selected)
         main_activity = {
             "task_id": selected,
-            "phase": _agent_activity_phase(status, terminal),
+            "phase": _agent_activity_phase(
+                status,
+                terminal,
+                lifecycle_phase=lifecycle_phase,
+            ),
             "activity": str(row.get("activity") or "").strip(),
             "started_at": row.get("created_at", 0.0),
             "updated_at": row.get("updated_at", 0.0),
@@ -382,14 +404,32 @@ def _navigation_rows(
 # LLM: Activity phase is a display mapping from canonical status/terminal facts;
 # it cannot change the run state or decide success.
 # 函数用途: 选择详情页主 Working 行的动画或终态样式。
-def _agent_activity_phase(status: str, terminal: bool) -> str:
+def _agent_activity_phase(
+    status: str,
+    terminal: bool,
+    *,
+    lifecycle_phase: str = "",
+) -> str:
     if not terminal:
-        return "running"
+        phase = str(lifecycle_phase or "").strip().lower()
+        return phase if phase in {"queued", "starting", "waiting_first_event"} else "running"
     if status == "DONE":
         return "completed"
     if status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
         return "failed"
     return "interrupted"
+
+
+# LLM: Startup copy is selected only from the authenticated lifecycle_phase scalar. It is a
+# transient TUI notice and must never infer status from task text, timestamps, or spinner frames.
+# 函数用途: 在子代理详情尚无 prompt/事件时，用大白话持续解释当前启动阶段。
+def _agent_startup_notice(lifecycle_phase: str) -> str:
+    return {
+        "queued": "子代理已创建，正在排队…",
+        "starting": "子代理正在启动执行器…",
+        "waiting_first_event": "子代理已开始，正在等待模型首个响应…",
+        "running": "子代理正在运行，正在载入首段详情…",
+    }.get(str(lifecycle_phase or "").strip().lower(), "正在载入子代理详情…")
 
 
 # LLM: Numeric coercion affects display counters/cursors only.

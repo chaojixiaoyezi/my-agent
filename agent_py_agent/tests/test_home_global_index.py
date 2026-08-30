@@ -33,6 +33,30 @@ def test_global_index_records_owner_and_task_refs(tmp_path: Path):
     assert home.global_index_active_tasks_jsonl.exists()
 
 
+def test_global_index_skips_unchanged_projection_rows(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space.home_indexes import (
+        TaskIndexRef,
+        register_task_ref,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path)
+    ref = TaskIndexRef(
+        owner_id=home.owner_id,
+        task_id="task-stable",
+        task_path=home.owner_tasks_dir / "task-stable",
+        status="running",
+        title="稳定任务",
+    )
+
+    register_task_ref(home, ref)
+    register_task_ref(home, ref)
+    assert len(home.global_index_active_tasks_jsonl.read_text(encoding="utf-8").splitlines()) == 1
+
+    register_task_ref(home, TaskIndexRef(**{**ref.__dict__, "status": "done"}))
+    assert len(home.global_index_active_tasks_jsonl.read_text(encoding="utf-8").splitlines()) == 2
+
+
 def test_global_index_latest_refs_ignore_stale_duplicate_paths(tmp_path: Path):
     from agent_py_agent.agent.user_space.home_indexes import (
         TaskIndexRef,

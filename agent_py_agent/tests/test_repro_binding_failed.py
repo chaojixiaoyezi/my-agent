@@ -271,7 +271,7 @@ def test_executor_running_blocks_writing_tools_only(tmp_path):
     # run_command 在无 bwrap 测试环境被 availability 隐藏,不在快照中;契约
     # 测试验证声明驱动机制本身,写类集合取快照内必在的文件系统写工具。
     writing = {"write_file", "edit_file", "apply_patch"}
-    exempt = {"read_file", "list_files", "cancel_subagents", "inspect_agent_tree"}
+    exempt = {"read_file", "list_files", "cancel_subagents", "send_guidance"}
     # 先写工具后豁免工具:豁免工具 promote 成功后同轮 TURN_ACTIVE 置位,后续
     # 写工具放行——「首轮绑定后同轮放行」是既有语义,与声明无关,避免串扰。
     for tool_name in sorted(writing) + sorted(exempt):

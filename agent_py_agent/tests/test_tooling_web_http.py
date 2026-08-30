@@ -57,9 +57,11 @@ class TestWebFetchTool:
         result = tool.execute({"url": "https://api.example.com/large", "max_chars": 300})
 
         assert result.ok is True
-        body = result.output.split("\n\n", 1)[1].split("\n... 已截断", 1)[0]
+        body = result.model_visible_output().split("\n\n", 1)[1].split("\n... 已截断", 1)[0]
         assert body == "b" * 300
-        assert "已截断" in result.output
+        assert "已截断" in result.model_visible_output()
+        assert result.output.endswith("b" * 1000)
+        assert result.result_envelope["tool_output_policy"]["requires_recovery_artifact"] is True
 
     @patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned")
     def test_web_fetch_post(self, mock_urlopen, tmp_path: Path):

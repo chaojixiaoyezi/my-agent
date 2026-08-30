@@ -6,6 +6,7 @@ from agent_py_agent.agent.backends.errors import (
     ProviderTimeoutError,
     ProviderTransientError,
 )
+from agent_py_agent.agent.runtime_db.operations import RuntimeExecutionBusyError
 from agent_py_agent.agent.runtime_errors import DataCorruptionError, runtime_error_report
 
 
@@ -70,6 +71,18 @@ def test_provider_request_rejection_is_configuration_error_not_programmer_bug() 
     assert payload["recoverable"] is False
     assert payload["category"] == "provider_configuration"
     assert payload["error_type"] == "ProviderRequestRejectedError"
+    assert payload["category"] != "programmer_bug"
+
+
+def test_live_execution_lock_conflict_is_recoverable_busy_not_programmer_bug() -> None:
+    payload = runtime_error_report(
+        RuntimeExecutionBusyError("another live attempt owns the lock"),
+        context="gateway_background_main.iteration",
+    )
+
+    assert payload["recoverable"] is True
+    assert payload["category"] == "runtime_busy"
+    assert payload["error_type"] == "RuntimeExecutionBusyError"
     assert payload["category"] != "programmer_bug"
 
 

@@ -91,6 +91,11 @@ def describe_tool_concurrency(
     effect_fields = {
         name for name, _variants in policy.effect_resolver.by_parameter
     }
+    effect_fields.update(
+        name
+        for conditions, _effect in policy.effect_resolver.by_parameter_combinations
+        for name, _value in conditions
+    )
     if policy.effect_resolver.command_parameter:
         effect_fields.add(policy.effect_resolver.command_parameter)
     resource_fields = set(policy.resource_scopes.parameter_names)

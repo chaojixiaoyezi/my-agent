@@ -6,6 +6,17 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## Exact stop admission 与 terminal fencing
+
+- `enqueue_agent_stop` 在调用线程内完成 exact owner/conversation/parent/run 鉴权和终态短路，然后按稳定键
+  去重并启动唯一 daemon cancel；它返回 typed accepted，不直接写 CANCELLED。真正终态仍由现有 canonical
+  cancel service、attempt interrupt、manager 和 persistence 收口。
+- `cancel_subagents` 优先解析 exact child，再使用 durable conversation task identity；短生命周期 request id
+  不能覆盖父级身份。signal 只针对该 attempt，siblings 不进入停止集合。
+- persistence 默认 `allow_terminal_reactivation=False`；保存 runner snapshot 前如发现 canonical store 已有
+  更新终态，就恢复该终态而不是覆盖。普通 heartbeat 同样在 terminal 时退出。只有显式结构化 user-stop
+  recovery 才可传 true，不能从自然语言“继续”或旧状态标签猜复活。
+
 ## 2026-08-25 main/child 跨回合工具终态折叠
 
 - 每条 agent ConversationThread 继续独立；父子不复制 transcript。某个 main/child 回合结束后，宿主仅从
@@ -197,20 +208,13 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   request status 投影为 `PENDING`，当前 runner session 退出后复用 exact-run durable auto-start。真正仍 OPEN
   的 request 才保持 `BLOCKED/等待父级授权`。
 
-## 2026-08-23 普通计划停止核对入口
+## 2026-08-23 普通计划停止核对入口【状态：2026-08-28 已退役】
 
-- `agent_core/tool_loop/plan_closeout.py` 是普通 root/child 自然 final 前的唯一清单一致性入口；它使用
-  `progress_ledger_id + runtime_owner_root` 读取与 `task_progress` 工具相同的 canonical 账本。
-- 该入口位于活动 child、命名 Audit、真实工具失败/未知副作用等专用收口之后，只返回 `ignore / continue /
-  block`。`continue` 仍在原工具循环和原 active turn；`block` 写 typed turn-end，不创建 progress policy、
-  新 task 或 runner。
-- closeout 状态只存在当前 `live_archive_state`，配置次数有界；不存在这份状态时 fail-open，避免旧调用方
-  形成无限提醒。原生协议通过 runtime-guidance user message 把核对包送给 provider。
-- 该入口已随 `e94f8ec` 发布并部署；focused 已证明核对包真实进入下一次 provider messages。fresh r19
-  在 final 前自行关闭全部 Todo，因此只证明正常关闭路径无回归，不算 open-Todo 分支的直接真机覆盖。
-- 2026-08-24 r9 首次直接命中真机缺口：后台 main 的 `save=False` 被入口误当成辅助 no-save 轮，导致
-  task-path ledger 仍 open 也跳过核对。`save` 现只保留 archive 含义；Gateway/TUI 与后台 main 无论是否存档
-  都走同一入口，辅助轮仍由 `context_scope/work_kind` 等结构字段排除。
+- 历史 `agent_core/tool_loop/plan_closeout.py` 会在模型已给出 plain final 后再次读取 Todo，并强制同轮返工或
+  把整个 turn 改成 blocked。它把模型工作记忆升级成了第二套完成判官，与当前开发铁律和 会话运行时 自然 turn
+  边界冲突，现已连同配置项和专用测试物理删除。
+- `task_progress` 仍是 canonical 计划事实，继续供模型、Compact、resume 和 TUI 展示使用；它不再覆盖模型
+  最终回复，也不自动创建额外 model call。显式 `/goal`、直属 child 等待和 UNKNOWN 副作用安全门不受影响。
 
 ## 2026-08-22 lifecycle wake 的 root active-turn 续接
 
@@ -284,7 +288,7 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 ## 2026-08-26 子代理具体工具审批
 
 - `conversation/background_transcript.py::BackgroundTranscriptSink` 通过
-  `subagents/tool_approval_bridge.py::SubagentToolApprovalSinkMixin` 获得 child `request_permission`；
+  `conversation/agent_tool_approval.py::SubagentToolApprovalSinkMixin` 获得 child `request_permission`；
   它只发布并等待共享 `ToolApprovalRequest/Decision`，不拥有 ActionPolicy 或 handler 执行权。
 - pending record 的身份来自 canonical child task/root 与 request 完整 binding。显示名、goal、工具说明、
   TUI 行号和 feedback 都不能决定授权；child 终态行不再投影。
@@ -633,6 +637,12 @@ root/status/整树筛选，也不能越过 child 代管孙代理。取消会写 
 工具只处理 canonical loader 能读取且直接父子授权通过的 run。父级说明取消/接管原因后，可以继续汇总，
 或用 `create_subagents` 创建替代执行者。
 
+合法取消一个节点时，生命周期范围是该 exact 节点及其存活后代，不是只改一行状态。实现对齐 会话运行时
+`shutdown_agent_tree`：先 signal 目标 attempt，阻止在途 `create_subagents` 继续扩张；随后等待 owner-local
+创建事务，按 canonical `parent_id/root_id` 重读该分支并关闭后代。模型仍只能点名直属 child，用户控制面仍需
+证明目标属于当前 owner/conversation；子树收口不能赋予越层选择权，也不得影响目标的祖先或兄弟。根
+`/stop` 已经持有同一创建事务并拿到 exact request lineage，因此使用不再重取 guard 的内部批量路径。
+
 takeover replacement 的来源权威入口是 `context_bundle.takeover`：创建时由
 `services/takeover/refs.py::source_handoff` 生成有界结构化快照，包含 source run id、状态、
 未完成步骤、摘要、阻塞项和 refs。模型不应使用普通文件工具读取 canonical/checkpoint 等
@@ -749,6 +759,11 @@ attempt、Compact generation、权限和交付事实。`Esc` 只发停止当前�
 父会话首个 `promotes_task` 动作后，`run_workspace.task_root` 是整棵代理树唯一默认 cwd。创建策略、写根预检、
 runner task attrs、相对 `output_files` 和孙代理继承都先读该 root；只有尚未晋升时才读 Gateway 校验过的
 thread/client cwd。child 不能从 goal、绝对路径或 manager daemon root 扩大/更换这个范围。
+
+递归创建的具体收口点是
+`agent_core/orchestration/create_policy.py::_inherit_current_conversation_workspace_attrs`：它不仅复制
+`conversation_execution_cwd/runtime_workspace_roots`，还必须复制父级完整 `run_workspace` 并重新派生
+`work_dir/output_dir`。manager runtime 只保存调度器自身状态，永远不能成为普通孙代理的新 task root。
 
 每个 child provider turn 可产生 `commentary:1..N` 与一个 `final` assistant part。part id 由宿主按真实工具
 边界生成并参与幂等键；commentary 保留完整用户可见正文，final 承载 terminal tool fold 与运行终态 metadata。

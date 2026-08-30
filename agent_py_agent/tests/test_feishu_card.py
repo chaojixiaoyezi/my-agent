@@ -1,10 +1,12 @@
-"""飞书人设确认卡片单测:卡片 JSON 构造、lark 回调对象归一化、以及核心回调逻辑 apply_card_action
-(confirm→真的 append 进 owner 的 SOUL/AGENTS.md;decline/找不到→不写;重复 confirm→只写一次)。
+"""飞书 SOUL 确认卡片单测:卡片 JSON 构造、lark 回调对象归一化、以及核心回调逻辑 apply_card_action
+(confirm→写进 owner 的 SOUL.md;decline/找不到→不写;重复 confirm→只写一次)。
 真机没法测真人点按钮(护栏禁止给真实用户发消息),所以回调逻辑靠模拟 card.action payload 的单测覆盖。"""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.adapter.feishu_card import (
     apply_card_action,
@@ -31,11 +33,6 @@ def test_build_card_has_two_buttons_carrying_token_and_choice():
         "confirm": "tok123",
         "decline": "tok123",
     }  # 两按钮 action.value 都带同一 token
-
-
-def test_build_card_agents_label():
-    card = build_persona_confirm_card("t", "agents", "产物用 HTML")
-    assert "AGENTS" in card["elements"][0]["text"]["content"]
 
 
 # --------------------------------------------------------------------------- lark 回调归一化
@@ -113,10 +110,6 @@ def _owner_soul(root, owner_id="ou_owner"):
     return resolve_owner_home(root, OwnerIdentity.provider_user("feishu", owner_id)).soul_md
 
 
-def _owner_agents(root, owner_id="ou_owner"):
-    return resolve_owner_home(root, OwnerIdentity.provider_user("feishu", owner_id)).agents_md
-
-
 def test_confirm_appends_to_owner_soul(tmp_path):
     token = _pending(tmp_path, target="soul", content="语气偏活泼")
     result = apply_card_action({"token": token, "choice": "confirm"}, tmp_path, "ou_owner")
@@ -127,11 +120,9 @@ def test_confirm_appends_to_owner_soul(tmp_path):
     assert persona_pending.load(tmp_path, token) is None
 
 
-def test_confirm_appends_to_owner_agents(tmp_path):
-    token = _pending(tmp_path, target="agents", content="产物用 HTML")
-    result = apply_card_action({"token": token, "choice": "confirm"}, tmp_path, "ou_owner")
-    assert result["wrote"] is True
-    assert "产物用 HTML" in _owner_agents(tmp_path).read_text(encoding="utf-8")
+def test_agents_cannot_enter_obsolete_confirmation_queue(tmp_path):
+    with pytest.raises(ValueError, match="only SOUL"):
+        _pending(tmp_path, target="agents", content="产物用 HTML")
 
 
 def test_decline_does_not_write(tmp_path):

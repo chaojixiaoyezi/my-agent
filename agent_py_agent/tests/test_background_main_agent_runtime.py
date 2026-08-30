@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -51,6 +52,45 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     }
 
 
+def test_ordinary_resume_wake_preserves_foreground_request_generation() -> None:
+    """普通任务 policy 的持久 task id 与前台 Todo 展示代次必须同时保留。"""
+
+    from agent_py_agent.agent.conversation.models import ProgressPolicy
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_task_attributes,
+        _progress_policy_wake_payload,
+    )
+
+    policy = ProgressPolicy(
+        policy_id="policy-1",
+        thread_id="thread-1",
+        task_id="task-1",
+        interval_seconds=60,
+        next_due_at=61.0,
+        metadata={
+            "kind": "ordinary_task_resume",
+            CONVERSATION_REQUEST_ID_ATTR: "gwreq-2",
+        },
+    )
+    wake = _progress_policy_wake_payload(policy)
+    attrs = _background_task_attributes(
+        policy.thread_id,
+        BackgroundRunRequest(
+            thread_id=policy.thread_id,
+            task_id=policy.task_id,
+            reason="scheduled_progress_report",
+            wake_signal=wake,
+        ),
+        None,
+    )
+
+    assert wake["metadata"] == {CONVERSATION_REQUEST_ID_ATTR: "gwreq-2"}
+    assert attrs is not None
+    assert attrs["conversation_task_id"] == "task-1"
+    assert attrs[CONVERSATION_REQUEST_ID_ATTR] == "gwreq-2"
+
+
 def test_background_auto_continuation_uses_canonical_task_root(tmp_path) -> None:
     from agent_py_agent.agent.agent_core.orchestration.create_policy import (
         _primary_workspace_root,
@@ -62,14 +102,14 @@ def test_background_auto_continuation_uses_canonical_task_root(tmp_path) -> None
 
     service_root = tmp_path / "gateway-service"
     project_root = tmp_path / "tui-project"
-    task_root = tmp_path / "home" / "tasks" / "task-1"
     project_root.mkdir()
-    (task_root / "output").mkdir(parents=True)
-    (task_root / "work").mkdir()
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         service_root,
     )
+    task_root = Path(agent.home_paths.owner_home_dir) / "tasks" / "task-1"
+    (task_root / "output").mkdir(parents=True)
+    (task_root / "work").mkdir()
     store = agent.conversation_store
     thread = store.get_or_create_thread(
         {
@@ -1099,6 +1139,57 @@ def test_unknown_external_audit_route_remains_retryable() -> None:
         resolved_route_supports_proactive=False,
         resolved_route_supports_transcript=False,
     ) == (False, "audit_finding_delivery_unavailable")
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["subagent_capability_request_open", "subagent_capability_granted"],
+)
+def test_capability_lifecycle_turns_are_internal_until_terminal_child_report(
+    tmp_path,
+    reason,
+) -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "capability-internal",
+            "channel_user_id": "user-1",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "goal": "完成最小权限写入",
+            "status": "active",
+        }
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id="task-root",
+        reason=reason,
+        wake_signal={
+            "root_task_id": "task-root",
+            "source_agent_id": "child-1",
+            "metadata": {"run_id": "child-1"},
+        },
+    )
+
+    assert _background_delivery_decision(agent, request, store=store) == (
+        False,
+        f"{reason}_internal",
+    )
 
 
 def test_internal_audit_finding_empty_reply_remains_retryable(
@@ -4183,6 +4274,123 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
     assert reports[0].delivery_status == "sent"
 
 
+def test_scheduled_continuation_keeps_direct_child_results_after_wakes_are_consumed(
+    tmp_path,
+) -> None:
+    """后续进度轮仍应拿到 exact child 结果，不能退回内部目录猜测。"""
+
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        context_markdown,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            background_context_max_total_tokens=2200,
+            background_context_max_string_chars=240,
+        ),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-scheduled-child-results",
+            "channel_user_id": "user-1",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "goal": "整合四名子代理的研究结论",
+        }
+    )
+    completion_observation_ids: list[str] = []
+    for index in range(1, 5):
+        event = store.append_observation(
+            {
+                "thread_id": thread.thread_id,
+                "event_type": "subagent_runner_finished",
+                "summary": f"第 {index} 名子代理完成",
+                "source_agent_id": f"child-{index}",
+                "parent_agent_id": "task-root",
+                "root_task_id": "task-root",
+                "requires_main_agent": True,
+                "metadata": {
+                    "task_id": f"child-{index}",
+                    "status": "DONE",
+                    "completion_schema_version": "subagent-completion.v1",
+                    "completion_message": f"第 {index} 份精确研究结论" + ("甲" * 600),
+                    "final_report_ref": f"/workspace/child-{index}/final_report.md",
+                    "runner_result_json": "private-runner-payload",
+                },
+                "now": 20.0 + index,
+            }
+        )
+        completion_observation_ids.append(event.observation_id)
+    store.mark_observations_handled(completion_observation_ids, now=30.0)
+    # 把完成事件挤出普通 Recent Observations 的尾部窗口，复现真实长任务中的后续定时轮。
+    for index in range(30):
+        store.append_observation(
+            {
+                "thread_id": thread.thread_id,
+                "event_type": "progress_snapshot",
+                "summary": "后续运行状态" + ("乙" * 300),
+                "root_task_id": "task-root",
+                "requires_main_agent": False,
+                "now": 40.0 + index,
+            }
+        )
+    store.append_observation(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "subagent_runner_finished",
+            "summary": "孙代理完成但不得越级",
+            "source_agent_id": "grandchild-1",
+            "parent_agent_id": "child-1",
+            "root_task_id": "task-root",
+            "requires_main_agent": True,
+            "metadata": {
+                "task_id": "grandchild-1",
+                "status": "DONE",
+                "completion_schema_version": "subagent-completion.v1",
+                "completion_message": "孙代理私有结果",
+                "final_report_ref": "/workspace/grandchild-1/final_report.md",
+            },
+            "now": 80.0,
+        }
+    )
+
+    rendered = context_markdown(
+        agent=agent,
+        store=store,
+        thread=store.load_thread(thread.thread_id),
+        request=BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            task_id="task-root",
+            reason="scheduled_progress_report",
+            wake_signal={
+                "wake_signal_id": "wake-progress",
+                "thread_id": thread.thread_id,
+                "root_task_id": "task-root",
+                "reason": "scheduled_progress_report",
+            },
+        ),
+    )
+
+    assert "## Subagent Completion Inputs" in rendered
+    for index in range(1, 5):
+        assert f'"task_id": "child-{index}"' in rendered
+        assert f"/workspace/child-{index}/final_report.md" in rendered
+    assert "孙代理私有结果" not in rendered
+    assert "/workspace/grandchild-1/final_report.md" not in rendered
+    assert "private-runner-payload" not in rendered
+
+
 def _seed_seven_completion_wakes(agent, store, thread_id: str) -> None:
     """写入七个终态 child 和七份带长正文/精确报告引用的完成信封。"""
     for index in range(1, 8):
@@ -5573,6 +5781,57 @@ def test_scheduler_retires_stale_missed_progress_policy_without_model_call(tmp_p
     # 早已超出 catchup 宽限(>2h)的 stale 策略应被退休(enabled=False),不再续命。
     # 旧行为 mark_progress_reported 把 next_due 重置成 now+interval,下个间隔又变 runnable 发 LLM
     # 进度汇报,无限 churn 占满 gateway worker。退休=从 due 扫描里彻底消失。
+    retired = store.get_progress_policy(policy.policy_id)
+    assert retired is not None and retired.enabled is False
+
+
+def test_scheduler_retires_ordinary_resume_when_exact_task_link_is_missing(tmp_path) -> None:
+    """普通续跑 policy 不能在任务链接已清理后继续唤醒旧线程。"""
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = ConversationStore(tmp_path / "conversations")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-orphan-resume",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "gwreq-finished-and-removed",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-orphan-resume",
+            "now": 11.0,
+            "metadata": {
+                "kind": "ordinary_task_resume",
+                "tool": "task_round_resume",
+                "resume_used": 1,
+                "resume_limit": 3,
+            },
+        }
+    )
+
+    reports = scheduler.tick(now=71.0)
+
+    assert reports == []
+    assert backend.prompts == []
+    assert scheduler.last_progress_policy_suppressed == [
+        {
+            "policy_id": policy.policy_id,
+            "thread_id": thread.thread_id,
+            "task_id": "gwreq-finished-and-removed",
+            "reason": "ordinary_resume_task_link_missing_or_inactive",
+        }
+    ]
     retired = store.get_progress_policy(policy.policy_id)
     assert retired is not None and retired.enabled is False
 

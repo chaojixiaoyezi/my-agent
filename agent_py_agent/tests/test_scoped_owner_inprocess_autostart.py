@@ -9,9 +9,14 @@ from agent_py_agent.agent.agent_core.orchestration.background.dispatch import (
 )
 
 
-def _agent(model_backend="minimax", provider=""):
+def _agent(model_backend="minimax", provider="", owner_kind="main", owner_id="main"):
     return SimpleNamespace(
-        config=SimpleNamespace(model_backend=model_backend, my_agent_owner_provider=provider)
+        config=SimpleNamespace(
+            model_backend=model_backend,
+            my_agent_owner_provider=provider,
+            my_agent_owner_kind=owner_kind,
+            my_agent_owner_id=owner_id,
+        )
     )
 
 
@@ -27,6 +32,26 @@ def test_scoped_feishu_owner_uses_inprocess():
 def test_base_local_owner_still_uses_subprocess():
     """base owner(local)行为不变,仍走 durable 子进程。"""
     assert _use_inprocess_autostart(_agent(provider="local")) is False
+
+
+def test_scoped_local_user_uses_inprocess():
+    """单 Gateway 的 local/user TUI 必须保留当前 owner，不能用 base config 起错子进程。"""
+    assert (
+        _use_inprocess_autostart(
+            _agent(provider="local", owner_kind="user", owner_id="alice")
+        )
+        is True
+    )
+
+
+def test_scoped_local_group_uses_inprocess():
+    """本机结构化群组与本机用户遵守同一 owner 传递合同。"""
+    assert (
+        _use_inprocess_autostart(
+            _agent(provider="local", owner_kind="group", owner_id="team-a")
+        )
+        is True
+    )
 
 
 def test_no_provider_still_uses_subprocess():

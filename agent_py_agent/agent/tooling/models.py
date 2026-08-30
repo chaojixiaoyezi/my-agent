@@ -219,6 +219,9 @@ def tool_schema_hash(schema: dict[str, Any]) -> str:
 class EffectResolverPolicy:
     default_effect: str = "read_only"
     by_parameter: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
+    by_parameter_combinations: tuple[
+        tuple[tuple[tuple[str, str], ...], str], ...
+    ] = ()
     strategy: str = "declared"
     command_parameter: str = ""
 
@@ -263,10 +266,34 @@ class EffectResolverPolicy:
             if not normalized_variants:
                 raise ValueError(f"effect parameter mapping is empty: {field_name}")
             normalized_mappings.append((field_name, tuple(normalized_variants)))
+        normalized_combinations: list[tuple[tuple[tuple[str, str], ...], str]] = []
+        seen_combinations: set[tuple[tuple[str, str], ...]] = set()
+        for raw_conditions, raw_resolved in self.by_parameter_combinations:
+            conditions: list[tuple[str, str]] = []
+            seen_condition_fields: set[str] = set()
+            for raw_field_name, raw_value in raw_conditions:
+                field_name = str(raw_field_name or "").strip()
+                if not field_name or field_name in seen_condition_fields:
+                    raise ValueError("invalid effect combination parameter fields")
+                seen_condition_fields.add(field_name)
+                conditions.append((field_name, str(raw_value)))
+            normalized_conditions = tuple(sorted(conditions))
+            resolved = str(raw_resolved or "").strip().lower()
+            if not normalized_conditions or normalized_conditions in seen_combinations:
+                raise ValueError("invalid or duplicate effect parameter combination")
+            if resolved not in {"read_only", "mutating", "dangerous"}:
+                raise ValueError(f"invalid combination-resolved effect: {resolved}")
+            seen_combinations.add(normalized_conditions)
+            normalized_combinations.append((normalized_conditions, resolved))
         object.__setattr__(self, "default_effect", effect)
         object.__setattr__(self, "strategy", strategy)
         object.__setattr__(self, "command_parameter", command_parameter)
         object.__setattr__(self, "by_parameter", tuple(normalized_mappings))
+        object.__setattr__(
+            self,
+            "by_parameter_combinations",
+            tuple(normalized_combinations),
+        )
 
 
 @dataclass(frozen=True)
@@ -515,6 +542,12 @@ def tool_effect_for_runtime_policy(
         mapping = {str(key): str(effect).strip().lower() for key, effect in variants}
         if value in mapping:
             matched.append(mapping[value])
+    for conditions, effect in resolver.by_parameter_combinations:
+        if all(
+            _parameter_variant(values.get(field_name)) == expected
+            for field_name, expected in conditions
+        ):
+            matched.append(effect)
     if not matched:
         return resolver.default_effect
     rank = {"read_only": 0, "mutating": 1, "dangerous": 2}
@@ -622,7 +655,7 @@ class ToolHandlerOutcome:
     # LLM: prompt 结果必须同时展示工具状态与权威操作生命周期，不能只把提供方正文当终态。
     # 函数用途: 把一次工具结果渲染给下一轮模型，保留失败恢复动作和副作用核对引用。
     def render_for_prompt(self) -> str:
-        parts = [self.render_status_header(), self.output]
+        parts = [self.render_status_header(), self.model_visible_output()]
         if not self.ok and self.recovery_hint:
             # recovery_hint comes only from the host-owned error taxonomy.  It is
             # therefore safe to show to the next model turn, unlike arbitrary
@@ -635,6 +668,15 @@ class ToolHandlerOutcome:
             )
         parts.append(self.render_execution_facts())
         return "\n".join(parts)
+
+    # LLM: handler 可把完整正文留在 output 供统一归档，同时用有界 live_prompt_output 声明模型视图；该字段不是归档真相。
+    # 函数用途: 返回当前模型应看到的工具正文预览；没有单独声明时继续使用原始 output。
+    def model_visible_output(self) -> str:
+        policy = self.result_envelope.get("tool_output_policy")
+        if isinstance(policy, dict) and "live_prompt_output" in policy:
+            value = policy.get("live_prompt_output")
+            return str(value) if value is not None else ""
+        return self.output
 
     def render_status_header(self) -> str:
         """Render the backward-compatible tool status and operation header."""
@@ -795,10 +837,12 @@ class ToolAvailability:
         return cls(available=False, error_code=error_code, reason=str(reason or "").strip())
 
 
+# LLM: exposure 只描述工具是否进入模型表面；owner/user/group 权限已经在同一
+# ToolRuntimeSnapshot 构造时收敛，禁止在目录投影里用主体类型做第二次白名单过滤。
+# 类用途: 标记某个已授权运行时是否向模型展示，避免把用户身份和代理角色混成一套枚举。
 @dataclass(frozen=True)
 class ToolExposure:
     model_visible: bool = True
-    owner_types: tuple[str, ...] = ("main_agent", "task_local")
 
 
 @dataclass(frozen=True)
@@ -892,6 +936,14 @@ def _validate_runtime_policy(
             field_name,
             "effect resolver",
         )
+    for conditions, _effect in resolver.by_parameter_combinations:
+        for field_name, _value in conditions:
+            _require_public_input_parameter(
+                model_spec,
+                public_names,
+                field_name,
+                "combined effect resolver",
+            )
     if resolver.command_parameter:
         _require_public_input_parameter(
             model_spec,
@@ -1194,6 +1246,17 @@ class HybridToolRetriever:
 class BaseTool:
     model_spec: ToolModelSpec
     runtime_policy: ToolRuntimePolicy
+
+    # LLM: 该 hook 只校验规范化后的完整调用形状，必须纯函数式、无网络/文件/状态副作用；
+    # 返回失败会在 operation claim 和 handler 之前终止。业务状态、权限和结果判定不得塞进这里。
+    # 函数用途: 让平面 JSON Schema 无法表达的条件必填、互斥参数在真正执行前报清楚。
+    def validate_invocation(
+        self,
+        params: dict[str, Any],
+        context: ToolInvocationContext,
+    ) -> ToolHandlerOutcome | None:
+        _ = (params, context)
+        return None
 
     # LLM: 默认就绪避免为几十个纯本地工具写空检查；可选后端工具按结构化配置覆盖。
     # 函数用途: 返回不触发网络、进程或业务写入的当前就绪状态。

@@ -1,7 +1,10 @@
-
+# LLM: Missing-path recovery is a bounded convenience layer, never an implicit full-workspace
+# search. Keep ordinary file-tool failures fast; exhaustive discovery belongs to explicit tools.
+# 模块用途: 给路径不存在错误补充少量安全候选，同时保证大型工作区里也能迅速返回。
 from __future__ import annotations
 
 import os
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,7 +24,19 @@ _DISCOVERY_IGNORES = frozenset({
     "venv",
 })
 
-_MAX_VISITED_PER_ROOT = 20_000
+_MAX_VISITED_PER_REQUEST = 1_024
+_MAX_DIRECTORIES_PER_REQUEST = 128
+_MAX_ENTRIES_PER_DIRECTORY = 256
+_MAX_DISCOVERY_DEPTH = 8
+
+
+# LLM: One budget is shared by parent probing and every workspace root so multiple roots cannot
+# multiply recovery work. This state is request-local and must never be persisted or reused.
+# 类用途: 记录一次缺失路径候选搜索还允许查看多少目录项和目录。
+@dataclass
+class CandidateScanBudget:
+    remaining_entries: int = _MAX_VISITED_PER_REQUEST
+    remaining_directories: int = _MAX_DIRECTORIES_PER_REQUEST
 
 
 @dataclass(frozen=True)
@@ -88,6 +103,9 @@ def missing_path_result(request: MissingPathRequest) -> ToolHandlerOutcome:
     )
 
 
+# LLM: Candidate discovery is intentionally best-effort and bounded. A miss without candidates
+# is valid; callers direct the model to explicit list/search tools instead of blocking the turn.
+# 函数用途: 在固定小预算内查找少量相似路径，找不到时立即返回空列表。
 def suggest_missing_path_candidates(
     *,
     raw_path: str,
@@ -102,10 +120,13 @@ def suggest_missing_path_candidates(
         return []
     query = CandidateQuery(raw_name=raw_name, target=target, expected_kind=expected_kind)
     scored: dict[Path, int] = {}
-    _score_parent_siblings(scored, target.parent, query, roots)
+    budget = CandidateScanBudget()
+    _score_parent_siblings(scored, target.parent, query, roots, budget, limit=limit)
     for root in roots:
-        _score_tree_candidates(scored, root, query)
-        if _enough_exact_candidates(scored, limit):
+        if budget.remaining_entries <= 0 or budget.remaining_directories <= 0:
+            break
+        _score_tree_candidates(scored, root, query, budget, limit=limit)
+        if _enough_exact_candidates(scored, limit) or budget.remaining_entries <= 0:
             break
     ranked = sorted(scored.items(), key=lambda item: (-item[1], len(item[0].parts), item[0].as_posix()))
     return [path for path, _score in ranked[:limit]]
@@ -129,44 +150,95 @@ def _render_missing_path(recovery: MissingPathRecovery, *, retry_tool: str) -> s
     return "\n".join(lines)
 
 
+# LLM: Parent probing uses the same request budget as tree discovery. Never materialize all
+# children of a directory because a single generated or dependency directory may be enormous.
+# 函数用途: 有上级目录时优先查看附近项目，但只读固定数量的目录项。
 def _score_parent_siblings(
     scored: dict[Path, int],
     parent: Path,
     query: CandidateQuery,
     roots: list[Path],
+    budget: CandidateScanBudget,
+    *,
+    limit: int,
 ) -> None:
-    if not parent.exists() or not parent.is_dir() or not _is_under_any_root(parent, roots):
+    if (
+        budget.remaining_entries <= 0
+        or budget.remaining_directories <= 0
+        or not parent.exists()
+        or not parent.is_dir()
+        or not _is_under_any_root(parent, roots)
+    ):
         return
+    budget.remaining_directories -= 1
     try:
-        siblings = list(parent.iterdir())
+        iterator = os.scandir(parent)
     except OSError:
         return
-    for item in siblings:
-        _score_candidate(scored, item, query, bonus=10)
+    with iterator:
+        for index, entry in enumerate(iterator):
+            if index >= _MAX_ENTRIES_PER_DIRECTORY or budget.remaining_entries <= 0:
+                break
+            budget.remaining_entries -= 1
+            if entry.name in _DISCOVERY_IGNORES:
+                continue
+            _score_candidate(scored, Path(entry.path), query, bonus=10)
+            if _enough_exact_candidates(scored, limit):
+                break
 
 
-def _score_tree_candidates(scored: dict[Path, int], root: Path, query: CandidateQuery) -> None:
-    for item in _walk_candidate_items(root, query.expected_kind):
+# LLM: A breadth-first traversal gives nearby task artifacts a chance before entering a large
+# repository. It shares a global budget and exits as soon as enough exact candidates exist.
+# 函数用途: 在工作区浅层按广度优先寻找候选，避免深陷第一个大型仓库。
+def _score_tree_candidates(
+    scored: dict[Path, int],
+    root: Path,
+    query: CandidateQuery,
+    budget: CandidateScanBudget,
+    *,
+    limit: int,
+) -> None:
+    for item in _walk_candidate_items(root, query.expected_kind, budget):
         _score_candidate(scored, item, query, bonus=_part_overlap(query.target, item))
+        if _enough_exact_candidates(scored, limit):
+            return
 
 
-def _walk_candidate_items(root: Path, expected_kind: str):
-    visited = 0
+# LLM: Traversal must not follow directory symlinks and must cap total entries, directories,
+# per-directory fanout and depth. These are hard latency bounds, not search-quality promises.
+# 函数用途: 以小预算遍历可能的候选项，工作区再大也不会无限扫描。
+def _walk_candidate_items(
+    root: Path,
+    expected_kind: str,
+    budget: CandidateScanBudget,
+):
     include_dirs = expected_kind in {"directory", "any"}
     include_files = expected_kind in {"file", "any"}
-    for current_root, dirnames, filenames in os.walk(root):
-        dirnames[:] = [name for name in dirnames if name not in _DISCOVERY_IGNORES]
-        current = Path(current_root)
-        names = []
-        if include_dirs:
-            names.extend(dirnames)
-        if include_files:
-            names.extend(filenames)
-        for name in names:
-            visited += 1
-            yield current / name
-            if visited >= _MAX_VISITED_PER_ROOT:
-                return
+    pending: deque[tuple[Path, int]] = deque([(root, 0)])
+    while pending and budget.remaining_entries > 0 and budget.remaining_directories > 0:
+        current, depth = pending.popleft()
+        budget.remaining_directories -= 1
+        try:
+            iterator = os.scandir(current)
+        except OSError:
+            continue
+        with iterator:
+            for index, entry in enumerate(iterator):
+                if index >= _MAX_ENTRIES_PER_DIRECTORY or budget.remaining_entries <= 0:
+                    break
+                budget.remaining_entries -= 1
+                if entry.name in _DISCOVERY_IGNORES:
+                    continue
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    is_file = entry.is_file(follow_symlinks=False)
+                except OSError:
+                    continue
+                item = Path(entry.path)
+                if is_dir and depth < _MAX_DISCOVERY_DEPTH:
+                    pending.append((item, depth + 1))
+                if (include_dirs and is_dir) or (include_files and is_file):
+                    yield item
 
 
 def _score_candidate(

@@ -1,5 +1,19 @@
 # Memory Progress
 
+## 2026-08-29 自主维护与 owner 隔离收口
+
+- `promotion_mode` 改为宿主按 typed target/type/origin/action 重算，旧 batch、replace/remove 或历史
+  `manual_required` 不再把非 SOUL 候选永久黏在人工队列；模型也不能通过输出该字段取得或撤销写入权。
+- `remember` 的 add/batch/replace/remove 统一走 Candidate → Promotion，同样执行 message/tool evidence、
+  exact entry ID、scope、冲突、CAS、quota 与注入扫描；只有真实 `PROMOTED` 才报告本轮记忆已改变，
+  `ALREADY_PROMOTED` 幂等重放不再误报二次修改。
+- USER/AGENTS 由当前 owner 的 Agent 经唯一 `update_persona` 自主维护；只有 SOUL 的写、删、回滚进入用户
+  确认。飞书待确认记录也只接受 SOUL，基础文件、patch、shell 与管理员 full-access 不能形成旁路。
+- lesson/HOT 继续依赖结构化证据和阈值自主晋升：单次模型推断不会直接成为正式教训，跨任务/运行/日期的
+  独立证据满足门槛后才提交。每个 owner 使用自己的候选、正式记忆、Persona、daily、lesson 与 HOT 路径。
+- focused 回归覆盖自主 CRUD、候选旧值升级、SOUL 保持人工、Persona effect 审批、飞书 SOUL-only、
+  owner A/B 自主写入互不串线和幂等重放；真实 MiniMax 多 owner TUI 仍是最终产品验收。
+
 ## 2026-08-28 后台权威 Compact 与 carried 大参数收口
 
 - `RuntimeCompactPolicy` 不再用 `save` 单独判断持久资格：exact ConversationThread 的 authoritative 后台片
@@ -13,6 +27,13 @@
 - live-tool 候选计量后仍达不到 recovery target 时，原 IR 回滚并发布中性的
   `superseded/candidate_discarded`：TUI 静默收起进度条，failure count/generation 都不变，同代 transcript
   operation 可以继续。只有摘要 transport、checkpoint 或 CAS 的真实异常保留红色 `failed`。
+- 工具归档现在显式分开 provider 原始 `model_parameters` 与宿主执行 `parameters`。run/task/request/cwd 等
+  host binding 仍可用于审计、幂等和恢复，但 carried 摘要、native replay 与后续模型可见投影只读取前者；
+  旧索引只在 value-free `input_sources` 能证明字段来自模型/调用方时才回退提取，不能把宿主默认值带回模型。
+- 大输出归档发生在模型预览裁剪之前；即使正文没达到全局阈值，只要工具结果声明
+  `requires_recovery_artifact=true`，完整结果也先写 owner 私有 artifact，再给模型短 preview 和逻辑 ref。
+  `read_artifact` 的 slice/head/tail 明确返回 `total_chars/has_more_before/has_more_after`；tail 已到真实 EOF，
+  不再因“省略了前缀”误发下一页读取。
 
 ## 2026-08-28 Compact 辅助模型调用纳入统一用量账本
 
@@ -25,6 +46,16 @@
   工具事实，也不把空正文升级成主任务失败。
 - 连续 Compact 只替换上一代 thread summary；带稳定 schema marker 的 active-turn carried handoff 会继续
   保留，当前真实任务在 wire 上只发送一次。聚焦回归覆盖二次 Compact、慢摘要和辅助调用用量登记。
+
+## 2026-08-29 live Compact 摘要形状校验
+
+- 真实 MiniMax-M2.7 长链证明，仅在 prompt 里写“不要调用工具”不够：摘要请求曾返回原始
+  `<minimax:tool_call>`，程序又把它当交接正文写入 generation 5；下一轮因此误以为报告已写并从头重读。
+- live 摘要现在必须以 `compact-live-handoff.v1` 开头，并按顺序包含当前进度、用户约束、完成、失败、未决和
+  下一步六栏。缺栏、过短动作句或工具协议全部视为不可用摘要，从同一 typed IR 生成有界机械交接；不会重复
+  请求模型，也不会执行或回放摘要中的伪动作。
+- 该校验只守上下文完整性，不判断任务质量或完成。archive、operation ledger、artifact 与真实文件继续是
+  精确事实源；摘要 transport 异常仍回滚并进入原 Compact failure circuit。
 
 ## 2026-08-25 后台续片保留副作用操作终态
 

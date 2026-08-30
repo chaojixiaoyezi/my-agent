@@ -72,15 +72,16 @@ def test_run_command_wires_owner_scope_to_env(tmp_path, monkeypatch) -> None:
     home。测试替换隔离启动参数只为观察子进程 env，不代表产品存在无沙箱降级路径。"""
     monkeypatch.setattr(
         "agent_py_agent.agent.tooling.shell._sandbox_exec",
-        lambda command, target, owner_home, protected_root=None, write_roots=None, read_roots=None: (
+        lambda command, target, owner_home, protected_root=None, write_roots=None,
+        read_roots=None, protected_write_paths=None: (
             command,
             True,
         ),
     )
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / ".my-agent"))
     owner_home = tmp_path / ".my-agent" / "owners" / "local" / "main"
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = owner_home / "workspace"
+    workspace.mkdir(parents=True)
     tool = ShellTool(
         workspace,
         options=ShellToolOptions(workspace_roots=[workspace], owner_scope_root=str(owner_home)),

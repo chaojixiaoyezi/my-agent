@@ -207,6 +207,13 @@ def test_archive_live_tool_round_writes_before_turn_finalization():
                     "tool": "web_search",
                     "id": "7-1",
                     "ok": True,
+                    "operation_id": "operation-7-1",
+                    "effect_outcome": "confirmed",
+                    "effect_source_ref": "tool-operation://run-live/operation-7-1",
+                    "tool_operation": {
+                        "operation_id": "operation-7-1",
+                        "status": "succeeded",
+                    },
                     "parameters": {"query": "weekly stars"},
                     "output_preview": "search results",
                 },
@@ -221,6 +228,9 @@ def test_archive_live_tool_round_writes_before_turn_finalization():
         assert "搜索最近一周" in records[0]["content_preview"]
         assert records[1]["tool_name"] == "web_search"
         assert records[1]["tool_success"] is True
+        assert records[1]["operation_id"] == "operation-7-1"
+        assert records[1]["effect_outcome"] == "confirmed"
+        assert records[1]["source_ref"] == "tool-operation://run-live/operation-7-1"
         assert assistant.event_count == 1
         assert tool.event_count == 1
 

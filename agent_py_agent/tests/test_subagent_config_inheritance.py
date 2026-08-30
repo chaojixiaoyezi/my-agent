@@ -43,7 +43,7 @@ def test_subagent_runner_reuses_parent_agent_object():
     """run_flow 的模型回合必须走 lifecycle.agent.run（同一 agent 对象），
     不允许为子代理另建 backend/model/config。"""
     src = (AGENT_ROOT / "agent_core" / "subagent" / "run_flow.py").read_text(encoding="utf-8")
-    assert "lifecycle.agent.run(" in src
+    assert "result = agent.run(" in src
     forbidden = ["SimpleAgent(", "load_config(", "make_backend(", "AgentConfig("]
     offenders = [marker for marker in forbidden if marker in src]
     assert offenders == [], f"子代理 run_flow 不应自建 agent/config/backend: {offenders}"

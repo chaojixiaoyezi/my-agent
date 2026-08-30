@@ -20,6 +20,7 @@ from agent_py_agent.agent.auth.middleware import AuthMiddleware
 from agent_py_agent.agent.gateway_parts.bounded_http_server import (
     GatewayBoundedHTTPServer,
 )
+from agent_py_agent.agent.gateway_parts.daemon_control import write_pid_record
 from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServer,
     GatewayHTTPServerParams,
@@ -33,10 +34,12 @@ class _Paths:
         self.inbox = self.root / "requests" / "pending"
         self.processing = self.root / "requests" / "processing"
         self.responses = self.root / "responses"
+        self.pid = self.root / "gateway.pid"
         self.stop_request = self.root / "gateway_stop.request"
         self.state = self.root / "gateway_state.json"
         for p in (self.inbox, self.processing, self.responses):
             p.mkdir(parents=True, exist_ok=True)
+        write_pid_record(self.pid)
 
 
 def _free_port() -> int:

@@ -6,6 +6,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+# LLM: This module normalizes only host-declared workspace aliases before policy and execution.
+# It must never infer paths from prose or widen the boundary; absolute canonical paths remain
+# idempotent and every rewritten path is still checked by the normal read/write policy.
+# 模块用途: 把 output/work/workspace 和当前 tasks/... 地址转成唯一物理路径，避免重复拼接任务目录。
+
 _TASK_WORKSPACE_RELATIVE_PATH_TOOL_NAMES = {
     "apply_patch",
     "edit_file",
@@ -21,8 +26,12 @@ _READ_BOUNDARY_TOOL_NAMES = {
     "read_file",
     "search_text",
 }
+_MODEL_OWNER_HOME_ALIAS = "~/.my-agent/owner"
 
 
+# LLM: This is the sole argument canonicalizer for task workspace aliases. Keep it pure and
+# ensure callers still run authorization, hashing, sandboxing, and handlers after normalization.
+# 函数用途: 在工具执行前统一路径别名，包括补丁头里的文件路径。
 def canonicalize_task_workspace_arguments(
     tool_name: str,
     arguments: dict[str, Any],
@@ -115,11 +124,19 @@ def _task_workspace_relative_path(
     boundary: dict[str, object],
 ) -> str:
     text = str(raw or "").strip()
-    if not text or _is_absolute_or_home_path(text):
+    if not text:
         return ""
     normalized = text.replace("\\", "/")
     while normalized.startswith("./"):
         normalized = normalized[2:]
+    owner_alias_path = _model_owner_home_alias_path(normalized, boundary)
+    if owner_alias_path:
+        return owner_alias_path
+    if _is_absolute_or_home_path(normalized):
+        return ""
+    current_task_path = _current_task_alias_path(normalized, boundary)
+    if current_task_path:
+        return current_task_path
     for prefix, root_key in (
         ("output", "task_output_dir"),
         ("work", "task_work_dir"),
@@ -132,6 +149,66 @@ def _task_workspace_relative_path(
         )
         if rewritten:
             return rewritten
+    return ""
+
+
+# LLM: The public owner-home token is only a reversible display alias. Resolve it from the
+# host-authored effective owner wall and leave the resulting path to the normal read/write
+# policy; never derive owner authority from the alias text itself.
+# 函数用途: 将界面脱敏后的 ~/.my-agent/owner 地址还原到当前用户家目录，避免模型复用展示路径时找错目录。
+def _model_owner_home_alias_path(
+    normalized: str,
+    boundary: dict[str, object],
+) -> str:
+    if normalized == _MODEL_OWNER_HOME_ALIAS:
+        suffix_parts: tuple[str, ...] = ()
+    elif normalized.startswith(_MODEL_OWNER_HOME_ALIAS + "/"):
+        suffix_parts = tuple(normalized[len(_MODEL_OWNER_HOME_ALIAS) + 1 :].split("/"))
+    else:
+        return ""
+    if any(not part or part in {".", ".."} for part in suffix_parts):
+        return ""
+    root_text = str(boundary.get("effective_owner_scope_root") or "").strip()
+    if not root_text:
+        return ""
+    try:
+        owner_root = Path(root_text).expanduser().resolve(strict=False)
+        candidate = owner_root.joinpath(*suffix_parts).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    if not _is_relative_to(candidate, owner_root):
+        return ""
+    return str(candidate)
+
+
+# LLM: Model-visible owner-relative task addresses are aliases only when their exact tasks/...
+# prefix matches the host-authored current task root. This prevents cwd/tasks/... duplication
+# without treating arbitrary relative paths as owner-home authority.
+# 函数用途: 将当前任务的 tasks/日期/任务名/... 地址幂等地还原为真实路径。
+def _current_task_alias_path(
+    normalized: str,
+    boundary: dict[str, object],
+) -> str:
+    parts = tuple(part for part in normalized.split("/") if part)
+    if not parts or parts[0] != "tasks" or any(part in {".", ".."} for part in parts):
+        return ""
+    root_text = str(boundary.get("task_root") or "").strip()
+    if not root_text:
+        return ""
+    try:
+        task_root = Path(root_text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    root_parts = task_root.parts
+    task_indexes = [index for index, part in enumerate(root_parts) if part == "tasks"]
+    if not task_indexes:
+        return ""
+    for index in reversed(task_indexes):
+        alias_parts = root_parts[index:]
+        if tuple(parts[: len(alias_parts)]) != alias_parts:
+            continue
+        suffix = parts[len(alias_parts) :]
+        return str((task_root.joinpath(*suffix)).resolve(strict=False))
     return ""
 
 

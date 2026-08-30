@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..tool_output_externalizer import (
+from ...common.tool_output_paths import (
     tool_output_index_paths_for_lookup,
     tool_output_roots_for_lookup,
 )
@@ -123,6 +123,9 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
     return base
 
 
+# LLM: The reader may retain host-only path/scope facts for CLI and audit, but it must also expose a
+# stable logical ref so the tool layer can project a path-free continuation contract.
+# 函数用途: 组装读取成功的完整宿主事实，并附上后续模型可安全复用的逻辑引用。
 def _success_base_payload(
     read: _RegisteredArtifactRead,
     payload: dict[str, Any],
@@ -134,6 +137,11 @@ def _success_base_payload(
     return {
         "ok": True,
         "artifact_ref": artifact_ref,
+        "canonical_artifact_ref": str(
+            record.get("scoped_call_id")
+            or record.get("call_id")
+            or artifact_ref
+        ),
         "artifact_path": str(read.path),
         "kind": "tool_output",
         "tool": str(payload.get("tool") or record.get("tool") or ""),
@@ -148,15 +156,27 @@ def _success_base_payload(
     }
 
 
+# LLM: Model-facing callers need explicit window direction. Tail reads reach the real end even when
+# they omit a prefix, while slice/head expose next_offset only when more content follows.
+# 函数用途: 把正文读取结果转换成不含糊的窗口与续读信息。
 def _success_content_payload(read_result: ArtifactContentReadResult) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "read_mode": read_result.mode,
         "content_offset": read_result.offset,
         "content_max_chars": read_result.max_chars,
         "content_chars": len(read_result.content),
+        "total_chars": read_result.total_chars,
+        "has_more_before": read_result.has_more_before,
+        "has_more_after": read_result.has_more_after,
         "truncated": read_result.truncated,
         "content": read_result.content,
     }
+    if read_result.mode != "search":
+        payload["window_start"] = read_result.offset
+        payload["window_end"] = read_result.offset + len(read_result.content)
+        if read_result.has_more_after:
+            payload["next_offset"] = payload["window_end"]
+    return payload
 
 def _find_index_record(
     root: Path,

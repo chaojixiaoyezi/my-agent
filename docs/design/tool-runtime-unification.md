@@ -164,6 +164,14 @@ class ToolRuntimeSnapshot:
 Registry 拒绝重复名称。prompt、tool search、provider schema、ActionPolicy 和 Executor 都只拿 snapshot；
 后续 progressive disclosure 只能从 snapshot 中做减法/短时曝光，不能回读全局注册表扩权。
 
+`owner_type` 是当前主体/权限展示事实，不是工具的代理角色白名单。snapshot 构造时已经完成 owner scope、
+allowlist、availability 与 exposure 的收敛；manifest 和 `list_tools` 只能筛 `model_visible`，不能再用
+`user/group/local` 去匹配 `main_agent/task_local`。因此 `ToolExposure` 当前只保留 `model_visible`；执行权限
+仍由 snapshot、ActionPolicy 和 Executor 决定。2026-08-29 的 `.7` 真 TUI 反例证明二次过滤会让远程 user
+清单变成 0，而 provider 仍收到同快照中的工具 Schema；删除该死字段后清单为 30/30，owner-scoped 权限和
+不可用工具隐藏保持不变。该语义对齐 会话运行时 的 Direct/Deferred/Hidden exposure 与 registry/spec plan/router
+单链，而不是新增一套主体枚举。
+
 ### 4.4 Canonical ToolCall
 
 ```python

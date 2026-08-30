@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
+from ..subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ..subagents.services.control_plane_projection import (
     runtime_compact_count,
@@ -30,13 +31,19 @@ from ..task_progress import (
     task_progress_display_identity,
     task_progress_display_items,
 )
-from .agent_transcript import read_agent_transcript_events
+from .agent_transcript import (
+    agent_transcript_attempt_has_events,
+    read_agent_transcript_events,
+)
 from .background_transcript import BackgroundTranscriptSink
 from .channels import project_user_reply, redact_host_absolute_paths
-from .models import THREAD_TASK_LINK_ACTIVE_STATUS
+from .models import (
+    THREAD_TASK_LINK_ACTIVE_STATUS,
+    THREAD_TASK_LINK_INACTIVE_STATUSES,
+)
 from .tool_input_progress import public_tool_input_progress
 
-_SCHEMA_VERSION = "conversation_agent_activity.v5"
+_SCHEMA_VERSION = "conversation_agent_activity.v6"
 _MAX_PROJECTED_SUBAGENTS = 64
 _MAX_PROJECTED_PROGRESS_ITEMS = 128
 _ACTIVITY_TEXT_LIMIT = 240
@@ -54,6 +61,17 @@ _CONTEXT_USAGE_TOKEN_FIELDS = (
 _MAIN_ACTIVITY_STATE_ATTR = "_conversation_main_activity_projection"
 _MAIN_ACTIVITY_LOCK_ATTR = "_conversation_main_activity_projection_lock"
 _MAIN_ACTIVITY_SETUP_LOCK = threading.Lock()
+_MAIN_ACTIVITY_LIVE_PHASES = frozenset(
+    {
+        "compacting",
+        "responding",
+        "retrying",
+        "running",
+        "thinking",
+        "tool",
+        "working",
+    }
+)
 
 
 # LLM: This sink publishes one scalar activity row and delegates public rich
@@ -377,6 +395,21 @@ def conversation_agent_activity(
         set(display_task_ids),
         conversation_store=store,
     )
+    main_activity = _conversation_main_activity(
+        agent,
+        thread_id,
+        active_links,
+        workspace_task_id=workspace_task_id,
+    )
+    live_task_ids, execution_warnings = _live_activity_task_ids(
+        agent,
+        store,
+        thread_id,
+        active_links,
+        rows,
+        main_activity,
+        subagent_projection_ok=not run_warnings,
+    )
     (
         progress_items,
         progress_generation_id,
@@ -388,16 +421,15 @@ def conversation_agent_activity(
         preferred_task_id=_conversation_workspace_task_id(store, thread_id),
         hidden_item_ids=_row_run_ids(rows),
     )
+    # 已结束任务仍保留子代理名册供进入查看，但不再把模型未勾选的旧 Todo 画成“正在做”。
+    # 空快照沿用同一 generation/revision，TUI 可精确收起面板而不改写持久账本。
+    if display_links and all(_task_link_is_inactive(link) for link in display_links):
+        progress_items = ()
     visible = rows[:_MAX_PROJECTED_SUBAGENTS]
     return ConversationAgentActivity(
-        active_task_count=len(active_task_ids),
+        active_task_count=len(live_task_ids),
         compact_count=compact_count,
-        main_activity=_conversation_main_activity(
-            agent,
-            thread_id,
-            active_links,
-            workspace_task_id=workspace_task_id,
-        ),
+        main_activity=main_activity,
         subagents=tuple(visible),
         task_progress_items=progress_items,
         task_progress_generation_id=progress_generation_id,
@@ -408,10 +440,86 @@ def conversation_agent_activity(
         task_progress_projection_ok=not progress_warnings,
         warnings=tuple(
             dict.fromkeys(
-                (*link_warnings, *run_warnings, *progress_warnings, *compact_warnings)
+                (
+                    *link_warnings,
+                    *run_warnings,
+                    *execution_warnings,
+                    *progress_warnings,
+                    *compact_warnings,
+                )
             )
         ),
     )
+
+
+# LLM: TUI liveness follows the active-turn boundary, not the resumable
+# ThreadTaskLink index. Exact thread claims/policies, nonterminal direct children,
+# and a volatile live main phase may keep a row active; a waiting row plus a fully
+# terminal child roster must become idle without mutating the durable task link.
+# 函数用途: 判断哪些主任务此刻真有执行器或未结束子代理，避免任务记录仍 active 时底部永久闪 Working。
+def _live_activity_task_ids(
+    agent: object,
+    store: object,
+    thread_id: str,
+    active_links: list[object],
+    rows: list[dict[str, object]],
+    main_activity: dict[str, object],
+    *,
+    subagent_projection_ok: bool,
+) -> tuple[set[str], list[str]]:
+    del agent
+    active_ids = {
+        str(getattr(link, "task_id", "") or "").strip()
+        for link in active_links
+        if str(getattr(link, "task_id", "") or "").strip()
+    }
+    if not active_ids:
+        return set(), []
+
+    warnings: list[str] = []
+    execution_ids: set[str] = set()
+    execution_state_known = False
+    execution_reader_available = callable(
+        getattr(store, "list_progress_policies_report", None)
+    ) and callable(getattr(store, "load_background_run_claim_report", None))
+    try:
+        if not execution_reader_available:
+            raise AttributeError("conversation execution readers unavailable")
+        from .task_promotion import conversation_thread_execution_state
+
+        state = conversation_thread_execution_state(store, thread_id)
+        execution_state_known = state.get("state_available") is True
+        raw_running = state.get("running_task_ids")
+        if isinstance(raw_running, list | tuple | set):
+            execution_ids.update(
+                str(item).strip() for item in raw_running if str(item).strip()
+            )
+        if execution_reader_available and not execution_state_known:
+            warnings.append("conversation_execution_state_unavailable")
+    except Exception:
+        if execution_reader_available:
+            warnings.append("conversation_execution_state_unavailable")
+
+    live_ids = active_ids & execution_ids
+    for row in rows:
+        status = str(row.get("status") or "").strip().upper()
+        if task_status_in(status, SUBAGENT_ENDED_STATUSES):
+            continue
+        root_task_id = str(row.get("root_task_id") or "").strip()
+        if root_task_id in active_ids:
+            live_ids.add(root_task_id)
+
+    main_task_id = str(main_activity.get("task_id") or "").strip()
+    main_phase = str(main_activity.get("phase") or "").strip().lower()
+    if main_task_id in active_ids and main_phase in _MAIN_ACTIVITY_LIVE_PHASES:
+        live_ids.add(main_task_id)
+
+    # A broken child or execution projection must not falsely announce idle.
+    # Real ConversationStore reads are exact; lightweight test/legacy adapters
+    # intentionally keep the previous conservative behavior.
+    if not execution_state_known or not subagent_projection_ok:
+        live_ids.update(active_ids)
+    return live_ids, warnings
 
 
 # LLM: The main row is bound to ConversationThread.workspace_task_id, which is the
@@ -479,7 +587,7 @@ def conversation_agent_view(
     if manager is None or not selected:
         raise FileNotFoundError(selected or "subagent")
     task = manager.load(selected)
-    row = _subagent_row(task, conversation_store=store)
+    row = _subagent_row(agent, task, conversation_store=store)
     rows, warnings = _child_subagent_rows(
         agent,
         task,
@@ -508,7 +616,7 @@ def conversation_agent_view(
         ["agent_transcript_load_error"] if transcript.get("load_errors") else []
     )
     return {
-        "schema_version": "conversation_agent_view.v1",
+        "schema_version": "conversation_agent_view.v2",
         "ok": True,
         "agent": {
             **row,
@@ -516,7 +624,10 @@ def conversation_agent_view(
                 getattr(task, "goal", "") or getattr(task, "description", ""),
                 limit=_AGENT_PROMPT_TEXT_LIMIT,
             ),
-            "activity": _subagent_current_activity(task),
+            "activity": _subagent_current_activity(
+                task,
+                lifecycle_phase=str(row.get("lifecycle_phase") or ""),
+            ),
             "context_usage": _subagent_context_usage(task),
         },
         "terminal": terminal,
@@ -662,7 +773,19 @@ def task_progress_projection_for_task(
         [link] if link else [],
         hidden_item_ids=_row_run_ids(rows),
     )
+    if _task_link_is_inactive(link):
+        return (), generation_id, plan_revision
     return items, generation_id, plan_revision
+
+
+# LLM: Todo visibility follows only the typed ConversationTaskLink lifecycle. This presentation
+# helper never closes ledger rows, accepts task quality, or infers completion from assistant prose.
+# 函数用途: 判断任务链接是否已结束，以便终态仍保留子代理名册但收起误导性的活动清单。
+def _task_link_is_inactive(link: object) -> bool:
+    return (
+        str(getattr(link, "status", "") or "").strip().lower()
+        in THREAD_TASK_LINK_INACTIVE_STATUSES
+    )
 
 
 # LLM: The ConversationThread workspace_task_id is the canonical Todo owner when
@@ -808,7 +931,7 @@ def _direct_subagent_rows(
         selected.append(task)
     selected.sort(key=_subagent_sort_key)
     rows = [
-        _subagent_row(task, conversation_store=conversation_store)
+        _subagent_row(agent, task, conversation_store=conversation_store)
         for task in selected
     ]
     return rows, warnings
@@ -843,7 +966,7 @@ def _child_subagent_rows(
     ]
     selected.sort(key=_subagent_sort_key)
     return [
-        _subagent_row(task, conversation_store=conversation_store)
+        _subagent_row(agent, task, conversation_store=conversation_store)
         for task in selected
     ], warnings
 
@@ -980,11 +1103,13 @@ def _subagent_sort_key(task: object) -> tuple[int, float, str]:
 # and runtime activity prose. Explicit covers ids support display joins only.
 # 函数用途: 把直属子代理压成界面需要的职责短标题、状态、上下文用量与 Todo 关联。
 def _subagent_row(
+    agent: object,
     task: object,
     *,
     conversation_store: object | None = None,
 ) -> dict[str, object]:
     status = str(getattr(task, "status", "") or "").strip().upper()
+    lifecycle_phase = _subagent_lifecycle_phase(agent, task, status=status)
     return {
         "run_id": str(getattr(task, "id", "") or ""),
         "root_task_id": str(getattr(task, "root_id", "") or ""),
@@ -996,6 +1121,7 @@ def _subagent_row(
         ),
         "role": _bounded_text(getattr(task, "role", ""), limit=80),
         "status": status,
+        "lifecycle_phase": lifecycle_phase,
         "description": _subagent_description(task),
         "attempts": max(0, _safe_int(getattr(task, "runner_attempts", 0))),
         "context_tokens": max(0, runtime_context_token_count(task)),
@@ -1023,7 +1149,11 @@ def _subagent_context_usage(task: object) -> dict[str, object]:
 # LLM: Activity text is presentation-only and comes from typed tool/current-step
 # fields with status fallbacks. It cannot decide whether the run is alive or done.
 # 函数用途: 用一句短话说明当前子代理正在做什么，供详情页 Working 行显示。
-def _subagent_current_activity(task: object) -> str:
+def _subagent_current_activity(
+    task: object,
+    *,
+    lifecycle_phase: str = "",
+) -> str:
     status = str(getattr(task, "status", "") or "").strip().upper()
     terminal_activity = {
         "DONE": "已完成",
@@ -1038,6 +1168,14 @@ def _subagent_current_activity(task: object) -> str:
     }.get(status)
     if terminal_activity:
         return terminal_activity
+    startup_activity = {
+        "queued": "等待调度",
+        "starting": "正在启动执行器",
+        "waiting_first_event": "等待模型首个响应",
+        "waiting_descendants": "等待直属子代理完成",
+    }.get(str(lifecycle_phase or "").strip().lower())
+    if startup_activity:
+        return startup_activity
     tool = _bounded_text(getattr(task, "current_tool", ""), limit=80)
     if tool:
         return f"正在使用 {tool}"
@@ -1053,6 +1191,45 @@ def _subagent_current_activity(task: object) -> str:
         "PENDING": "等待启动",
         "RUNNING": "运行中",
     }.get(status, "状态未知")
+
+
+# LLM: This presentation phase distinguishes initialization, active turns and child waiting using only
+# canonical task status, the durable direct-child wait marker, and the exact active-attempt public
+# event stream. It never uses elapsed time, prose, or context-token estimates and cannot schedule.
+# 函数用途: 区分子代理排队、启动、等待模型首事件、等待直属下级和真正运行，供 TUI/Web 如实显示。
+def _subagent_lifecycle_phase(
+    agent: object,
+    task: object,
+    *,
+    status: str,
+) -> str:
+    if status == "PLANNING":
+        return "queued"
+    if status == "PENDING":
+        if parent_wait_blocks_dispatch(task):
+            return "waiting_descendants"
+        return "starting"
+    if status == "RUNNING":
+        run_id = str(getattr(task, "id", "") or "").strip()
+        attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+        if run_id and attempt_id:
+            try:
+                if not agent_transcript_attempt_has_events(
+                    agent,
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                ):
+                    return "waiting_first_event"
+            except (OSError, RuntimeError, TypeError, ValueError):
+                return "waiting_first_event"
+        return "running"
+    if status == "BLOCKED":
+        return "waiting_input"
+    if status == "PAUSED":
+        return "paused"
+    if task_status_in(status, SUBAGENT_ENDED_STATUSES):
+        return "terminal"
+    return "unknown"
 
 
 # LLM: A child Todo ledger is selected only by its exact run id, which is the

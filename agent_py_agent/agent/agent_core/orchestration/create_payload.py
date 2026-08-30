@@ -190,9 +190,10 @@ def _operation_contract(
     }
 
 
-# LLM: Create receipts never recommend a polling tool. The host owns runner
-# start/recovery and wakes only the direct parent with a typed lifecycle event.
-# 函数用途: 告诉父代理接下来等哪个宿主事件，不产生查询工具调用。
+# LLM: Create receipts never recommend polling. Like 会话运行时 spawn_agent, a root
+# parent may use a direct-child control tool immediately in the same active turn,
+# then yield; host lifecycle events remain the only automatic wake authority.
+# 函数用途: 告诉父代理可立刻追加消息或停止子代理；没有控制动作时再等待宿主生命周期事件，不产生轮询调用。
 def _next_action(
     tasks,
     request_params: dict[str, object],
@@ -222,7 +223,12 @@ def _next_action(
         return {
             "action": "await_lifecycle_event",
             "run_ids": run_ids,
-            "reason": "create_subagents 已把本批 run 交给后台调度；结束本回合，进展、阻塞或完成时宿主会唤醒直接父级。",
+            "immediate_control_tools": ["send_guidance", "cancel_subagents"],
+            "reason": (
+                "create_subagents 已把本批 run 交给后台调度；若本轮还有追加要求或纠偏，"
+                "现在可直接使用 send_guidance，随后结束本回合。否则直接等待，"
+                "进展、阻塞或完成时宿主会唤醒直接父级；不要轮询。"
+            ),
         }
     return {
         "action": "await_lifecycle_event",

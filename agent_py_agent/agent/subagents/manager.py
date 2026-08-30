@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..common.json_io import locked_json_path
 from .kernel import SubagentKernelMixin
 from .manager_work_orders import (
     build_work_order_paths,
@@ -91,6 +92,13 @@ class SubAgentManager(SubagentKernelMixin):
         params = params or _init_params_from_kwargs(locals())
         _init_manager_state(self, workspace, params)
         _attach_services(self)
+
+    # LLM: Every root or recursive child creation and every stop-side late-child reconciliation
+    # must share this owner-local transaction boundary. Callers may wait on it, but must not hold
+    # it while waiting for a model, child process, or user approval.
+    # 函数用途: 返回当前 owner 的子代理创建事务锁，避免停止操作漏掉正在落盘的迟到子代理。
+    def creation_guard(self):
+        return locked_json_path(Path(self.workspace) / ".create-subagents.guard")
 
     @property
     def _indexing_service(self):
@@ -230,19 +238,49 @@ class SubAgentManager(SubagentKernelMixin):
     def list_runs_for_root_report(self, root_task_id):
         return self.persistence.list_runs_for_root_report(root_task_id)
 
-    def save(self, task: SubAgentTask) -> None:
-        self.persistence.save(task)
+    # LLM: Ordinary callers cannot reopen a recovery-closed run. Only an exact structured
+    # same-run continuation or lifecycle repair may opt in; keep this flag narrow and never
+    # infer it from text.
+    # 函数用途: 保存子代理权威状态；默认保护终态，只有明确的同一任务续跑/纠错入口才允许重新运行。
+    def save(
+        self,
+        task: SubAgentTask,
+        *,
+        allow_terminal_reactivation: bool = False,
+    ) -> None:
+        self.persistence.save(
+            task,
+            allow_terminal_reactivation=allow_terminal_reactivation,
+        )
 
+    # LLM: Critical lifecycle domains use persistence.mutate so reducers observe and commit one
+    # exact canonical revision under the shared cross-process guard; callers must keep them short.
+    # 函数用途: 原子修改一个子代理的最新权威状态，供授权、收口和控制事件避免并发丢更新。
+    def mutate(
+        self,
+        run_id: str,
+        reducer,
+        *,
+        expected_revision: int | None = None,
+    ) -> SubAgentTask:
+        return self.persistence.mutate(
+            run_id,
+            reducer,
+            expected_revision=expected_revision,
+        )
+
+    # LLM: Preserve the persistence service's boolean lease-fence result for session-pool loops.
+    # 函数用途: 保存轻量 runner 心跳，并返回该旧执行轮是否仍允许继续刷新。
     def save_runner_session(
         self,
         run_id: str,
         session: dict[str, object],
         *,
         now: float,
-    ) -> None:
+    ) -> bool:
         """Write the runner lease fact without invoking a full task save."""
 
-        self.persistence.save_runner_session(run_id, session, now=now)
+        return self.persistence.save_runner_session(run_id, session, now=now)
 
     def save_hierarchy_links(self, task: SubAgentTask) -> None:
         self.persistence.save(task, preserve_child_links=False)

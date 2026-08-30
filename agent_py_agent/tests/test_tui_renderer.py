@@ -8,6 +8,7 @@ from agent_py_agent.cli.chat_parts.tui_block_renderer import (
     TuiBlockRenderCache,
     TuiRenderContext,
     TuiRenderFrame,
+    render_tui_context_usage_report,
     render_tui_snapshot,
     sanitize_tui_render_frame,
 )
@@ -217,8 +218,8 @@ def test_narrow_frame_never_exceeds_width_and_uses_single_column_card() -> None:
     )
     assert all(display_width_fragments(line) <= 58 for line in frame.transcript_lines)
     texts = _frame_lines(frame)
-    assert any("Welcome back!" in text for text in texts)
-    assert not any("Recent activity" in text for text in texts)
+    assert any("欢迎回来！" in text for text in texts)
+    assert not any("最近活动" in text for text in texts)
 
 
 def test_welcome_card_renders_bunny_girl_terminal_avatar_styles() -> None:
@@ -310,16 +311,16 @@ def test_thinking_tool_and_permission_use_typed_phase() -> None:
     assert not any(text.startswith(("✻ ", "✢ ", "✶ ")) for text in texts)
     assert not any("⎿\u00a0Tip:" in text for text in texts)
     assert "● Bash" in texts
-    assert "  ⎿ Waiting for permission…" in texts
+    assert "  ⎿ 等待授权…" in texts
     assert overlay[:6] == [
         "─" * 80,
         " Bash command",
         "   printf fixture",
-        " Do you want to proceed?",
+        " 是否继续执行？",
         "❯ 1. Yes",
         "  2. No",
     ]
-    assert overlay[-1] == " Esc to cancel · Tab to amend"
+    assert overlay[-1] == " Esc 取消 · Tab 补充说明"
     assert frame.footer == ()
 
 
@@ -786,12 +787,69 @@ def test_pending_and_queued_inputs_stay_fixed_above_composer() -> None:
 
     assert not any("排队消息" in line or "当前任务补充" in line for line in transcript_text)
     assert fixed_text == [
-        "• Messages to be submitted after next tool call",
+        "• 将在下一次工具调用后送入当前回合",
         "  ↳ 当前任务补充",
-        "• Queued follow-up inputs",
+        "• 已排队的后续消息",
         "  ↳ 排队消息",
-        "    ↑ edit queued messages",
+        "    ↑ 取回并编辑排队消息",
     ]
+    assert all(display_width_fragments(line) <= 80 for line in frame.input_status_lines)
+
+    terminal_frame = render_tui_snapshot(
+        store.snapshot(),
+        TuiRenderContext(
+            width=80,
+            focused_agent_run_id="subagent-1",
+            focused_agent_status="DONE",
+        ),
+    )
+    terminal_fixed = [
+        fragments_text(line) for line in terminal_frame.input_status_lines
+    ]
+    assert terminal_fixed[:2] == [
+        "• 子代理已结束；以下插话未获模型消费确认，不会自动重发",
+        "  ↳ 当前任务补充",
+    ]
+
+
+def test_input_receipt_flood_collapses_without_changing_canonical_queue() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("queue-flood-render", clock=lambda: 50.0)
+    for index in range(7):
+        store.publish(
+            seq.emit(
+                "steer_added",
+                "queued",
+                f"steer:{index}",
+                {"message_id": f"steer-{index}", "text": f"补充消息 {index}"},
+            )
+        )
+    for index in range(100):
+        store.publish(
+            seq.emit(
+                "queue_added",
+                "queued",
+                f"queue:{index}",
+                {
+                    "queue_id": f"queue:{index}",
+                    "text": f"排队消息 {index}",
+                    "priority": "next",
+                },
+            )
+        )
+
+    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
+    lines = [fragments_text(line) for line in frame.input_status_lines]
+
+    assert lines == [
+        "• 等待当前回合接收（7 条）",
+        "  ↳ 补充消息 0",
+        "• 已排队的后续消息（100 条）",
+        "  ↳ 排队消息 0",
+        "    ↑ 取回并编辑排队消息",
+    ]
+    assert len(store.snapshot().pending_steers) == 7
+    assert len(store.snapshot().queued_inputs) == 100
     assert all(display_width_fragments(line) <= 80 for line in frame.input_status_lines)
 
 
@@ -869,6 +927,38 @@ def test_compact_count_stays_visible_while_provider_context_snapshot_refreshes()
     assert [fragments_text(line) for line in frame.input_status_lines] == [
         "  ◉ Context 将在下次模型调用时刷新 · compact 3"
     ]
+
+
+def test_context_report_reuses_the_fixed_strip_snapshot() -> None:
+    usage = TuiContextUsage(
+        current_tokens=31_400,
+        context_window_tokens=128_000,
+        compact_trigger_tokens=115_200,
+        prompt_tokens=8_000,
+        messages_tokens=6_000,
+        runtime_guidance_tokens=400,
+        tool_schema_tokens=17_000,
+        estimated=True,
+        protocol="native",
+    )
+
+    report = render_tui_context_usage_report(usage, compact_count=2)
+
+    assert "31,400 / 128,000 tokens（24.5%）" in report
+    assert "固定与本轮提示：8,000 tokens" in report
+    assert "对话与工具消息：6,000 tokens" in report
+    assert "待注入运行说明：400 tokens" in report
+    assert "工具定义：17,000 tokens" in report
+    assert "115,200 tokens（90.0%）" in report
+    assert "已完成 compact：2 次" in report
+
+
+def test_context_report_without_snapshot_is_explicitly_unknown() -> None:
+    report = render_tui_context_usage_report(None, compact_count=3)
+
+    assert "尚无最近一次模型调用前的真实快照" in report
+    assert "底部 Context 使用同一份数据" in report
+    assert "已完成 compact：3 次" in report
 
 
 def test_manual_compact_boundary_keeps_structured_generation_and_display_details() -> None:
@@ -994,6 +1084,40 @@ def test_conversation_compaction_renders_real_stage_progress_and_hides_thinking_
     assert "78% · 正在写恢复点" in rendered
     assert not any("Working" in line or "Thinking" in line for line in _frame_lines(frame))
     assert store.snapshot().active_blocks[-1].metadata["percent"] == 78
+
+
+def test_manual_compaction_renders_moving_indeterminate_bar_without_fake_percent() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("manual-compact-progress", clock=lambda: 12.0)
+    store.publish(
+        seq.emit(
+            "conversation_compaction_started",
+            "started",
+            "manual-compact:req:1",
+            {
+                "generation": 1,
+                "percent": 0,
+                "stage": "preparing",
+                "indeterminate": True,
+            },
+        )
+    )
+
+    first = render_tui_snapshot(
+        store.snapshot(),
+        TuiRenderContext(width=100, spinner_index=1),
+    )
+    second = render_tui_snapshot(
+        store.snapshot(),
+        TuiRenderContext(width=100, spinner_index=5),
+    )
+    first_text = "\n".join(_frame_lines(first))
+    second_text = "\n".join(_frame_lines(second))
+
+    assert "正在压缩上下文" in first_text
+    assert "处理中" in first_text
+    assert "%" not in first_text
+    assert first_text != second_text
 
 
 def test_question_help_footer_maps_only_real_tui_shortcuts() -> None:
@@ -1408,3 +1532,49 @@ def test_assistant_fold_hint_is_gray() -> None:
     ]
     assert visible_fragments
     assert all(style.endswith("class:tui-muted") for style, _text in visible_fragments)
+
+
+def test_assistant_process_block_is_entirely_gray_but_final_is_not() -> None:
+    """typed process 的 marker 和 Markdown 正文都应浅灰，终稿仍保持正文色。"""
+    store = TuiStateStore()
+    seq = TuiEventSequencer("assistant-process-color", clock=lambda: 100.0)
+    store.publish(
+        seq.emit(
+            "assistant_completed",
+            "completed",
+            "assistant-process",
+            {
+                "text": "正在整合 **8 份报告**\n\n完成后会给出对比。",
+                "process": True,
+            },
+        )
+    )
+    store.publish(
+        seq.emit(
+            "assistant_completed",
+            "completed",
+            "assistant-final",
+            {"text": "最终对比已完成。"},
+        )
+    )
+
+    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
+    process_fragments = [
+        (style, text)
+        for line in frame.transcript_lines
+        if "正在整合" in fragments_text(line) or "完成后会" in fragments_text(line)
+        for style, text in line
+        if text.strip()
+    ]
+    final_fragments = [
+        (style, text)
+        for line in frame.transcript_lines
+        if "最终对比已完成" in fragments_text(line)
+        for style, text in line
+        if text.strip()
+    ]
+
+    assert process_fragments
+    assert all(style.endswith("class:tui-muted") for style, _text in process_fragments)
+    assert final_fragments
+    assert any(not style.endswith("class:tui-muted") for style, _text in final_fragments)

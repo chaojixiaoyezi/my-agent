@@ -31,6 +31,9 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+_TERMINAL_PROJECTION_MARKER_SCHEMA = "gateway_terminal_projection_complete.v1"
+
+
 @dataclass(frozen=True)
 class _RecoveryContext:
     now: float
@@ -366,7 +369,128 @@ def _recover_committed_terminal_processing(
     repair_gateway_chunk_projection(paths, request_id, terminal_response)
     write_json_file_atomic(gateway_response_path(paths, request_id), terminal_response)
     append_gateway_history_once(paths, terminal_response)
+    mark_gateway_terminal_projection_complete(paths, request_id, terminal_response)
     return "archived"
+
+
+# LLM: The canonical terminal archive remains the sole completion authority. This marker is only
+# a rebuildable acknowledgement that every derived projection was checked once for the exact
+# canonical file version; changing or deleting a projection invalidates the fast path.
+# 函数用途: 记录某个终态请求的展示目录和 response 已完整落盘，避免后台永久重复修复。
+def mark_gateway_terminal_projection_complete(
+    paths: GatewayPaths,
+    request_id: str,
+    terminal_response: dict,
+) -> Path:
+    selected = str(request_id or "").strip()
+    if not selected:
+        raise ValueError("gateway terminal projection marker requires request_id")
+    canonical = paths.terminal / f"{selected}.json"
+    canonical_report = read_json_file_report(
+        canonical,
+        context="gateway.recovery.terminal_marker.canonical",
+    )
+    if canonical_report.load_error is not None or not canonical_report.payload:
+        raise DataCorruptionError(
+            f"canonical gateway terminal archive is unreadable: {selected}"
+        )
+    if canonical_report.payload.get("terminal_response") != terminal_response:
+        raise DataCorruptionError(
+            f"gateway terminal response conflicts with canonical archive: {selected}"
+        )
+    target = gateway_terminal_projection_folder(paths, terminal_response)
+    projection = target / canonical.name
+    projection_report = read_json_file_report(
+        projection,
+        context="gateway.recovery.terminal_marker.projection",
+    )
+    if (
+        projection_report.load_error is not None
+        or not projection_report.payload
+        or not _same_gateway_terminal_outcome(
+            canonical_report.payload,
+            projection_report.payload,
+        )
+    ):
+        raise DataCorruptionError(
+            f"gateway terminal outcome projection is incomplete: {selected}"
+        )
+    response_path = gateway_response_path(paths, selected)
+    response_report = read_json_file_report(
+        response_path,
+        context="gateway.recovery.terminal_marker.response",
+    )
+    if response_report.load_error is not None or response_report.payload != terminal_response:
+        raise DataCorruptionError(
+            f"gateway terminal response projection is incomplete: {selected}"
+        )
+    marker = _terminal_projection_marker_path(paths, selected)
+    write_json_file_atomic(
+        marker,
+        {
+            "schema_version": _TERMINAL_PROJECTION_MARKER_SCHEMA,
+            "request_id": selected,
+            "projection_folder": target.name,
+            "canonical_stamp": _terminal_projection_file_stamp(canonical),
+            "projection_stamp": _terminal_projection_file_stamp(projection),
+            "response_stamp": _terminal_projection_file_stamp(response_path),
+            "updated_at": time.time(),
+        },
+    )
+    return marker
+
+
+# LLM: A marker may skip expensive conversation/history reconciliation only while all three exact
+# files still match the versions observed after the successful projection transaction.
+# 函数用途: 快速判断终态投影是否仍完整；任何损坏、缺失或版本变化都回到正常修复路径。
+def _terminal_projection_marker_matches(paths: GatewayPaths, canonical: Path) -> bool:
+    marker_report = read_json_file_report(
+        _terminal_projection_marker_path(paths, canonical.stem),
+        context="gateway.recovery.terminal_marker.read",
+    )
+    marker = marker_report.payload
+    if marker_report.load_error is not None or not marker:
+        return False
+    folder_name = str(marker.get("projection_folder") or "").strip()
+    target = (
+        paths.done
+        if folder_name == paths.done.name
+        else paths.failed
+        if folder_name == paths.failed.name
+        else None
+    )
+    if target is None:
+        return False
+    projection = target / canonical.name
+    response_path = gateway_response_path(paths, canonical.stem)
+    return bool(
+        marker.get("schema_version") == _TERMINAL_PROJECTION_MARKER_SCHEMA
+        and str(marker.get("request_id") or "").strip() == canonical.stem
+        and marker.get("canonical_stamp")
+        == _terminal_projection_file_stamp(canonical)
+        and marker.get("projection_stamp")
+        == _terminal_projection_file_stamp(projection)
+        and marker.get("response_stamp")
+        == _terminal_projection_file_stamp(response_path)
+    )
+
+
+# LLM: File stamps are projection freshness hints, never task-completion authority. Missing files
+# use an explicit zero stamp so marker validation fails closed without raising in the hot loop.
+# 函数用途: 返回投影文件的大小与纳秒修改时间，用于低成本发现丢失或外部改写。
+def _terminal_projection_file_stamp(path: Path) -> dict[str, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"size": 0, "mtime_ns": 0}
+    return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+
+# LLM: Marker filenames reuse the already validated canonical request filename and live only under
+# projection_state; they are indexes and may be deleted to force a complete repair pass.
+# 函数用途: 返回单个终态请求的可重建投影完成标记路径。
+def _terminal_projection_marker_path(paths: GatewayPaths, request_id: str) -> Path:
+    return paths.root / "projection_state" / "terminal_complete" / f"{request_id}.json"
 
 
 # LLM: The live dispatcher walks canonical terminal authorities in bounded rotating pages. Repair
@@ -400,6 +524,8 @@ def repair_gateway_terminal_projections(
     ordered = candidates[start:] + candidates[:start]
     selected = ordered[: max(1, int(limit or 1))]
     for canonical in selected:
+        if _terminal_projection_marker_matches(paths, canonical):
+            continue
         report = read_json_file_report(
             canonical,
             context="gateway.recovery.terminal_projector.read",

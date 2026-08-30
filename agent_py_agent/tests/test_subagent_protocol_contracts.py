@@ -51,7 +51,10 @@ def test_task_envelope_v1_contains_address_tool_and_write_contract(tmp_path: Pat
     assert payload["schema_version"] == "subagent_task_envelope.v1"
     assert payload["address"]["lineage"] == [root.id, _child.id, leaf.id]
     assert payload["goal"] == leaf.goal
-    assert payload["tool_contract"]["allowed_tools"] == ["read_file", "write_file", "controlled_exec"]
+    assert payload["tool_contract"]["allowed_tools"] == manager.load(leaf.id).allowed_tools
+    assert {"read_file", "write_file", "controlled_exec"}.issubset(
+        payload["tool_contract"]["allowed_tools"]
+    )
     assert payload["tool_contract"]["controlled_exec_grant_ids"] == ["grant-exec"]
     assert payload["write_contract"]["product_write_roots"] == [str(tmp_path / "build")]
     assert payload["write_contract"]["allowed_write_roots"] == [
@@ -121,9 +124,11 @@ def test_tool_preflight_reports_missing_tool_and_write_root_without_stripping_ba
     task.acceptance_checks = ["build/index.html 存在"]
     manager.save(task)
 
+    envelope = build_task_envelope(manager.load(task.id), all_tasks=manager.list_runs())
+    allowed = set(envelope.tool_contract["allowed_tools"])
     result = run_tool_preflight(
-        build_task_envelope(manager.load(task.id), all_tasks=manager.list_runs()),
-        available_tools={"read_file", "write_file"},
+        envelope,
+        available_tools=allowed - {"controlled_exec"},
     )
 
     assert result.ok is False
@@ -134,7 +139,7 @@ def test_tool_preflight_reports_missing_tool_and_write_root_without_stripping_ba
         "controlled_exec_grant_missing",
     ]
     assert all(issue.kind == "ToolContractError" for issue in result.issues)
-    assert result.effective_tools == ["read_file", "write_file"]
+    assert set(result.effective_tools) == allowed - {"controlled_exec"}
 
 
 def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> None:

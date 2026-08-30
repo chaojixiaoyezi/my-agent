@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -11,6 +12,7 @@ from typing import Any
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventJournal
 
 TERMINAL_BLOCK_PHASES = frozenset({"completed", "failed", "interrupted"})
+_LOGGER = logging.getLogger(__name__)
 
 
 # LLM: TuiBlock 是纯显示投影，metadata 只能携带脱敏/有界字段和 canonical refs，不能成为业务状态源。
@@ -785,9 +787,10 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         if len(self.pending_steers) == before:
             self.record_diagnostic("STEER_ID_NOT_FOUND", event)
 
-    # LLM: Promotion requires an existing exact pending id and atomically replaces its fixed
-    # receipt with one stable user block in the active turn's event order.
-    # 函数用途: 模型运行时确认收到补充消息后，将它从等待区移入对话历史。
+    # LLM: Promotion requires an existing exact pending id and keeps the original local submit
+    # sequence. A late Gateway receipt must place the user row before later output from the same
+    # request instead of appending it after the already-frozen final.
+    # 函数用途: 模型运行时确认收到补充消息后，按原提交位置把它从等待区移入对话历史。
     def _handle_steer_promoted(self, event: TuiEvent) -> None:
         message_id = str(event.payload.get("message_id") or "").strip()
         pending = next(
@@ -804,10 +807,39 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             event,
             payload={**event.payload, "text": pending.text},
         )
-        self._append_stable(
+        block = replace(
             self._block_from_event(promoted, role="user", phase="completed"),
-            promoted,
+            created_seq=pending.seq,
         )
+        self._insert_promoted_user(block, promoted)
+
+    # LLM: This insertion is intentionally scoped to one promoted user message and one request.
+    # Global stable ordering remains completion-ordered, while a delayed transport receipt may
+    # move only ahead of same-turn blocks that began after the user's real local submission.
+    # 函数用途: 把迟到确认的插话插到同回合后续思考/工具/回答之前，不重排其他历史块。
+    def _insert_promoted_user(self, block: TuiBlock, event: TuiEvent) -> None:
+        if block.block_id in self._stable_ids:
+            self.record_diagnostic("STABLE_BLOCK_REPLAY", event)
+            return
+        request_id = str(event.request_id or "").strip()
+        insert_at = len(self.stable_blocks)
+        if request_id:
+            request_prefixes = tuple(
+                f"{kind}:{request_id}:"
+                for kind in ("assistant", "thinking", "tool", "tool-input", "compact")
+            )
+            for index, existing in enumerate(self.stable_blocks):
+                if (
+                    existing.block_id.startswith(request_prefixes)
+                    and existing.created_seq > block.created_seq
+                ):
+                    insert_at = index
+                    break
+        self._stable_ids.add(block.block_id)
+        self.stable_blocks.insert(insert_at, block)
+        overflow = len(self.stable_blocks) - self.max_stable_blocks
+        if overflow > 0:
+            del self.stable_blocks[:overflow]
 
     # LLM: queue item 身份必须来自 canonical queue id；重复 id 不可追加第二份输入。
     # 函数用途: 按优先级和 seq 加入一条排队输入。
@@ -929,8 +961,10 @@ class TuiStateStore:
         self._lock = threading.Lock()
         self._subscribers: list[Callable[[], None]] = []
 
-    # LLM: publish 的 journal append 与 reducer apply 必须原子，duplicate/rejected 不触发状态重复变化。
-    # 函数用途: 发布一条事件并通知界面刷新。
+    # LLM: Journal/reducer mutation is canonical, while redraw subscribers are best-effort UI
+    # notifications. A closed or broken renderer must never turn an already-applied business event
+    # into a failed delivery receipt or make a durable control outbox replay forever.
+    # 函数用途: 原子发布状态事件，再尽力通知界面刷新；单个重绘失败不会反咬业务状态。
     def publish(self, event: TuiEvent) -> JournalAppendResult:
         with self._lock:
             result = self.journal.append(event)
@@ -940,7 +974,10 @@ class TuiStateStore:
                 self.reducer.record_diagnostic(result.reason.upper(), event)
             subscribers = tuple(self._subscribers) if result.accepted else ()
         for callback in subscribers:
-            callback()
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 - redraw is explicitly weaker than canonical state
+                _LOGGER.debug("TUI redraw subscriber failed", exc_info=True)
         return result
 
     # LLM: snapshot 在 reducer 锁域内复制，避免 UI 看见一半应用的事件。
@@ -1092,6 +1129,7 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "workspace",
         "compact_generation",
         "generation",
+        "operation_id",
         "before_tokens",
         "after_tokens",
         "trigger_tokens",
@@ -1099,6 +1137,7 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "preserved_pairs",
         "stage",
         "percent",
+        "indeterminate",
         "source_messages",
         "process",
         "active_task_count",
@@ -1141,6 +1180,7 @@ _PUBLIC_SUBAGENT_FIELDS = frozenset(
         "name",
         "role",
         "status",
+        "lifecycle_phase",
         "description",
         "attempts",
         "context_tokens",
@@ -1188,9 +1228,9 @@ def _public_subagent_rows(value: list[object] | tuple[object, ...]) -> list[dict
 def _tool_terminal_detail(event: TuiEvent, active: TuiBlock) -> str:
     error_code = str(event.payload.get("error_code") or "").strip().upper()
     if error_code == "APPROVAL_REJECTED":
-        return "User rejected tool use"
+        return "用户拒绝了工具调用"
     if error_code == "CANCELLED" or event.phase == "interrupted":
-        return "Interrupted"
+        return "已中断"
     return str(
         event.payload.get("output")
         or event.payload.get("detail")

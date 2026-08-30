@@ -40,8 +40,8 @@ def test_subagents():
         agent = SimpleAgent(cfg, root)
         tasks = agent.spawn_subagents("做一个 CLI", 5)
         assert len(tasks) == 2
-        assert (root / "subs" / tasks[0].id / "task.json").exists()
-        assert (root / "subs" / tasks[0].id / "run.json").exists()
+        assert (agent.subagents.workspace / tasks[0].id / "task.json").exists()
+        assert (agent.subagents.workspace / tasks[0].id / "run.json").exists()
         assert tasks[0].root_id == tasks[0].id
         assert Path(tasks[0].status_file).exists()
         assert Path(tasks[0].work_log_file).exists()

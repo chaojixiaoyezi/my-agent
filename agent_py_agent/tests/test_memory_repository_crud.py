@@ -184,16 +184,7 @@ def test_remember_tool_crud_uses_stable_ids(tmp_path: Path) -> None:
         }
     )
     replacement_result = json.loads(replaced.output)["results"][0]
-    assert replacement_result["reason_code"] == "REVIEW_REQUIRED"
-    assert agent.memory.all()[0].version == 1
-    agent.memory_promotion.review(
-        replacement_result["candidate_id"],
-        approved=True,
-        reviewer="test-admin",
-    )
-    assert agent.memory_promotion.promote(
-        replacement_result["candidate_id"], reviewer="test-admin"
-    ).promoted
+    assert replacement_result["reason_code"] == "PROMOTED"
     assert agent.memory.all()[0].version == 2
 
     bind_user_message("remove", "删除项目青竹这条长期记忆")
@@ -206,14 +197,7 @@ def test_remember_tool_crud_uses_stable_ids(tmp_path: Path) -> None:
     )
     assert removed.ok
     removal_result = json.loads(removed.output)["results"][0]
-    agent.memory_promotion.review(
-        removal_result["candidate_id"],
-        approved=True,
-        reviewer="test-admin",
-    )
-    assert agent.memory_promotion.promote(
-        removal_result["candidate_id"], reviewer="test-admin"
-    ).promoted
+    assert removal_result["reason_code"] == "PROMOTED"
     assert agent.memory.all() == []
 
 

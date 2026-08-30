@@ -1,5 +1,98 @@
 # DESIGN LEDGER
 
+## 2026-08-30 孙代理必须继承父任务的 canonical run workspace【状态：R107 真 TUI 通过】
+
+- `.10` R106 fresh TUI `ma-matrix-r106-110-u261-nested` 中，coordinator 创建两名孙代理；Go/Rust 产物落在
+  根任务 `output/nested-research/`，Python 产物却落到
+  `<owner_home>/workspace/runtime/.../subagents/tasks/...`。Gateway 同时持续报告
+  `durable work path is outside its owner task and audit roots`，coordinator 因而读不到声明路径并自行补写。
+- 根因不是读路径恢复或 owner 墙太严，而是递归创建只继承了 `conversation_execution_cwd/roots`，没有把父级
+  host-owned `run_workspace.task_root/work_dir/output_dir` 覆盖到孙代理 attributes；manager 随后用自己的内部
+  runtime root 另造第二棵任务树。
+- 对齐 会话运行时 的显式 session/turn cwd 与 rollout state：任务晋升后，整棵代理树只认父级 canonical task root。
+  `_inherit_current_conversation_workspace_attrs()` 现在复制父级完整 `run_workspace`，并以父级事实覆盖模型传入的
+  nested `run_workspace`；不能为消日志而把整个 owner runtime 放进允许根。
+- 回归同时构造恶意/过期 nested workspace 和真实 depth-2 run，断言 task workspace、agent run 目录、cwd 与
+  runtime roots 都仍位于父任务根。本地 workspace/orchestration 组合已通过；只有 R107 fresh 真 TUI 同题证明
+  两名孙代理产物都落同一 output、父级可直接读取且 Gateway 零路径拒绝后，才升级为完成。
+- R107 `ma-matrix-r107-110-u270-nested-root` 已取得该正证：coordinator 和两名 depth-2 child
+  的 `task_workspace_dir` 完全一致，三份产物为 363/331/122 行，Gateway 零路径拒绝。
+
+## 2026-08-30 会话发现与 WorkspaceOnly 成功回执【状态：本地合同通过，R106 真 TUI 待复验】
+
+- `/sessions` 只投影当前 owner 的 canonical `SessionManager` 记录，按更新时间倒序给出最近 10 条、当前标记与
+  精确 `my-agent resume <session_id>`。它不扫描别的 owner，不从正文猜标题，也不在一个仍运行的 TUI 内只换
+  `session_id`；会话运行时/终端交互 的原地 picker 都会重建完整 app/thread 状态，当前版本先提供诚实的发现入口。
+- owner-scoped Shell 的成功和失败回执都必须携带相同 `sandbox_scope`。沙箱内 `touch /root/x` 返回 0 只表示
+  隔离根视图中成功，不能证明宿主 `/root/x` 存在；该说明属于结构化结果投影，不解析命令正文、不改变授权、
+  OS sandbox、退出码、幂等或副作用裁决。
+- TUI/tmux 是长驻客户端：只要 tmux 会话未退出，对应 Python TUI 进程与历史视图就会保留；Gateway 不应把
+  观察轮询物化为冷 owner。资源判断必须分开记录 Gateway、活跃 runner、闲置 TUI 和其它 会话运行时/终端交互
+  对照进程，不能只拿整机 used 内存推断 Gateway 泄漏。
+
+## 2026-08-30 工具输出路径是跨 Memory 域的中立小权威【状态：本地边界通过】
+
+- Memory Promotion 只需要核验 owner 内工具索引元数据，却反向导入了 Memory Archive 的完整 externalizer，
+  触发 `LAYER_BOUNDARY_FORBIDDEN`。路径布局已移到 `agent/common/tool_output_paths.py`；Archive 负责写正文和
+  schema，Store 只读索引，二者不再互相依赖。
+- 写入仍只有 `<root>/blobs/tool_outputs` 一个 canonical 位置；owner 历史任务 lookup 仍有界为
+  `tasks/*/*/work/blobs/tool_outputs`。这次只移动路径计算，不迁移、不复制、不删除任何 owner 数据。
+
+## 2026-08-29 手动 Compact 是可中断 active task【状态：本地合同已通过，`.7` 真 TUI 待复验】
+
+- 真机 `ma-matrix-r64-107-u13-capability-chain` 在已有约 85.9k Context 的空闲会话执行 `/compact`：动画出现后
+  立即按 `Esc`，摘要仍继续约 14 秒并提交 generation 1。根因不是供应商慢，而是手动 Compact 运行在持久
+  control POST 中，普通 `is_running` 没有绑定它；Esc 因而没有精确目标，控制 outbox 的唯一普通 worker 也会
+  被该长 POST 占住。
+- 对齐 会话运行时 `TaskKind::Compact`/active task 的取消语义：手动 Compact 以
+  `authenticated user + channel + conversation + original control message id` 生成精确、脱敏的进程内中断名。
+  Esc 只停止这条 Compact，不回退到主任务、子代理或其他 owner。供应商连接复用同一 interrupt callback
+  主动关闭；摘要候选在模型调用前后、checkpoint 前后和 canonical CAS 前复核中断。
+- 精确 Compact stop 先进入原有 durable control outbox，再走一次有界紧急派发；它不能排在自己要停止的
+  blocking Compact POST 后面。紧急派发与普通 worker 共用同一 message-id in-flight claim，传输不确定时仍由
+  普通退避车道用同一 ID 对账，不生成第二副作用。
+- 用户中断是 typed `COMPACT_INTERRUPTED`，不是 provider failure、lane busy 或自然语言猜测。中断不推进
+  generation/cursor，不写 compact failure 熔断；最多留下未被 canonical thread 引用的恢复点候选，后续可由
+  retention 清理。TUI 保留“上下文压缩已中断”的终态，旧历史继续可用。
+- R108 已把控制面实际使用的 `COMPACT_TURN_ACTIVE/LANE_BUSY/INTERRUPTED/FAILED`
+  与两个 exact-stop 码全部注册到唯一恢复分类表，避免落入 `UNKNOWN_ERROR`。R108 真 TUI 再次证明
+  进度条、generation 提交与旧历史保留正常；此注册不改 Compact 事务语义。
+
+## 2026-08-29 子代理关闭按精确分支收口【状态：R64 真 TUI 失败样本已取得，底座修复中】
+
+- 真机 `ma-matrix-r64-107-u12-recursive-stop` 证明：用户进入协调子代理详情页按 `Esc` 后，协调节点形成
+  `CANCELLED`，但其 8 个直属孙代理的 canonical `status_mirror` 仍为 `RUNNING`。这不是 TUI 刷新延迟，
+  而是当前 `agent_control -> cancel_subagent_task` 只处理 exact run，没有收口它拥有的存活后代。
+- 关闭语义对齐 会话运行时 `AgentControl.close_agent -> shutdown_agent_tree -> live_thread_spawn_descendants`：
+  控制目标仍由 `owner + conversation root + exact run_id` 授权，但副作用范围是“目标节点及其存活后代”，
+  不包含祖先和兄弟。实现先 signal exact target，使正在派工的模型/工具停止继续创建；再等待 owner-local
+  `creation_guard`，重读 canonical lineage，并逐个关闭已落盘后代。自然语言名称、描述和 TUI 行号都不能
+  参与子树选择。
+- 模型侧仍只能点名自己的直属 child，不能越层点名孙代理；一旦合法关闭直属 child，其后代作为该 child
+  的运行域一起收口。用户控制面可以在已授权的树内进入任意后代，关闭该节点的分支。根 `/stop` 已经按
+  exact request lineage 取得全树并持有同一创建事务，不再嵌套获取非可重入 guard。
+- `create_subagents` 收到结构化 cancellation token 后，工具终态必须显示“已中断/已有持久前缀由停止链
+  收口”，不能降成“副作用是否完成未知”。它仍是失败/取消而非成功，不取得自动重放权；只有 generic
+  handler 异常或账本无法证明终态时才保留 `TOOL_OPERATION_OUTCOME_UNKNOWN`。
+
+## 2026-08-29 工具清单单一快照与子代理停止两阶段语义【状态：`.7` 真 TUI 通过】
+
+- `ToolRuntimeSnapshot.runtimes` 是某个 exact run 在 owner、显式 allowlist、availability 和渐进披露收敛后的
+  唯一工具集合。`list_tools`/manifest、provider Schema、ActionPolicy 和 Executor 只能投影或消费这份快照，
+  不得在展示层再拿 `owner_type=user/group/local` 去匹配 `main_agent/task_local` 之类代理角色。两类身份不是
+  同一维度；混用会造成“模型能调用工具，但清单显示 0 个”的分裂事实。
+- `ToolExposure` 只表达是否进入模型表面；owner 边界继续由 snapshot 构造、path policy、effect/approval 和
+  Executor 守住。该收口对照 会话运行时 `tool_executor.rs` 的 `Direct/Deferred/DirectModelOnly/Hidden`、
+  `registry.rs`/`spec_plan.rs`/`router.rs` 的同一注册表链，不借修清单之名扩大权限。
+- 子代理停止分成两个 typed 阶段：HTTP 同步完成 owner/parent/exact-run 鉴权、幂等受理后可返回
+  `accepted`；唯一后台 canonical cancel 再做 exact attempt signal、持久终态和索引收口。`accepted` 不等于
+  `CANCELLED`，TUI 必须继续观察终态；重复停止复用同一受理键。旧 runner snapshot/heartbeat 遇到更新的
+  terminal state 必须停止，只有显式结构化 recovery 才能 opt-in reopen。
+- 真机证据：r56 的 Esc 在约 6.06 秒得到受理、约 9.62 秒形成 canonical terminal，未再误报“无法确认”；
+  r57 远程 `owner_type=user` 的 `list_tools` 返回 30 visible/30 executable，内部、root-only 和环境不可用工具
+  仍未暴露。完整事件、失败样本和覆盖缺口记录于
+  `docs/audits/TUI_FUNCTION_AUDIT_20260828.md`。
+
 当前设计铁律：
 
 - 产品能力状态只认 `docs/PRODUCT_FACTS.md`；代码存在、测试存在、历史计划打勾都不能自动升级为稳定能力。
@@ -8,11 +101,19 @@
   Gateway，以真实暴露队列、公平性、活动回合、恢复和资源争用问题；禁止用“每个用例一个 Gateway”
   规避共享底座问题。需要验证重启、崩溃或断连时，只能顺序操纵这一个实例；进程内 fake/合同单测不属于
   额外真实 Gateway。
+- Shell 权限不解析任意命令正文中的路径。结构化 `working_dir`/write roots 先过 owner policy，正文再由
+  会话运行时 式 OS sandbox 执行；未挂载路径的 `ENOENT` 不能证明宿主目标不存在。owner-scoped 失败或 stderr
+  结果必须携带 `file_scope=owner_workspace_only`、`external_host_paths_hidden=true`、
+  `host_path_absence_proven=false` 供模型诚实解释，但不能反向改变授权或 operation 终态。最终退出码只认
+  进程事实，禁止从 `echo $?` 文本猜中间动作；model spec 应避免供应商用恒成功后缀遮蔽失败。
 - 单 Gateway 的后台执行最小车道是 `owner + durable thread_id`，不是 owner。同 thread 的前台、
   子代理唤醒、policy 和 scheduled continuation 继续共用唯一持久 run claim 单飞；不同 thread
   必须能有界并发，不得因同一用户的另一个长后台回合而饿死。Gateway 只做无模型的
   ready-thread 规划，全局池与 per-owner 上限均由显式配置约束，持久来源与 claim 仍是调度权威。
 - 自然语言负责沟通，结构化事实负责决策；prompt、summary、报告正文、guidance 和角色描述不能直接改变运行时状态、权限、验收或派工。
+- Compact 的模型摘要同样是不可信自然语言：运行中工具历史只接受固定版本的纯文本 handoff 形状，缺栏、
+  空泛动作句或任何供应商工具调用协议都退回 typed IR 机械投影。摘要中的 `write_file`/`run_command` 文本永远
+  不获得工具执行权，也不能证明动作完成；这条校验不恢复任务质量机器判官。
 - 安全门可以硬，业务质量门默认软；危险路径、危险命令、越权和客观产物错误可以硬拦，任务深度、覆盖充分性和报告质量进入 warning、返工提示或 closeout。
 - 模型的验证结论必须停留在亲自观察到的证据边界：本机、替代环境、模拟器、局部入口或单一身份成功，
   只能证明该范围，不能外推到另一机器、真实用户、外部网络/服务、其他身份或完整端到端。当前工具、权限
@@ -31,7 +132,8 @@
   `dangerous`。sandbox 是否真包住副作用只读同一 `SandboxPolicy.uncontained_by_parameter`；
   `run_in_background=true` 和 `terminal_session.action=start` 均不被当前 bwrap 包住，因为它共享主机
   网络，进程也越过单次 handler 存活。审批只认现有 exact binding，不从命令字符串或
-  用户自然语言推断意图。PTY `write/read/close` 只运输/关闭已经审批创建的 session，对齐
+  用户自然语言推断意图。PTY `list/write/read/resize/close` 只投影、运输、调尺寸或关闭已经审批创建的
+  session，对齐
   会话运行时 `write_stdin` 不再触发第二次命令审批；一次性前台命令和已有灾难命令硬拒绝保持原语义。
 - 子代理 capability grant 与用户副作用批准是正交合同：grant 只限定可见工具、command allowlist、
   path/network scope，不得生成、隐含或替代具体 tool/run/operation/args 的 exact approval。会话运行时 child
@@ -50,8 +152,10 @@
   原 bwrap argv 和 `--die-with-parent`，但由 detached managed host 成为直接父进程；runner 退出后服务继续，
   host 退出时沙箱后代仍收口。跨进程唯一事实是 owner 沙箱外的 `managed_process_session.v1`，PID 必须配
   出生指纹，owner/conversation/store root 必须精确匹配，终态单调且落盘失败先回收进程。模型仍只通过
-  `process_session` 管理，不自动重启命令。`process_session(network_status)` 只投影该 session 进程树真实持有的
-  监听地址与主机防火墙显式放行事实；绑定 `0.0.0.0`、本机 HTTP 成功或端口存在都不能冒充另一台机器可达，
+  `process_session` 的稳定 `session_id` 管理，不公开 managed host/命令入口 PID 让模型猜资源所有者，也不自动
+  重启命令。`process_session(network_status)` 按 socket inode 投影该 session 进程树真实持有的监听地址和
+  `listener_pids`；这是宿主内核观测，命令沙箱内 `ps/lsof` 看不到不能推翻。主机防火墙显式放行、绑定
+  `0.0.0.0`、本机 HTTP 成功或端口存在都不能冒充另一台机器可达，
   外部连通仍必须由目标网络中的独立探针验证，工具不得为通过验收自动改防火墙。详细设计见
   `docs/design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md`。
 - 普通可恢复工具错误按 会话运行时 的 `RespondToModel` 语义回到当前模型继续修正：同工具同类失败达到
@@ -346,6 +450,9 @@
   `BACKGROUND_PROCESS_MODE_REQUIRED + not_started` 拒绝；不能让前台 shell 退出后留下无账进程，也不能把
   同一条命令内部的短暂探活当成服务已经持久运行。普通 `2>&1` 重定向和引号内的 `&` 不受影响。
 - 所有普通最终回复、后台主动消息和显式 `send_message` 共用 `DeliveryService`：可信 `DeliveryContext` 单独持有 channel/target/reply_to，`ReplyEnvelope` 永远不带收件人；adapter/capabilities/target validator 只能通过 `ChannelAdapterRegistry` 注册，新增 IM 不得在投递主流程增加平台分支。
+- Gateway 的 JSON/metrics 短连接写回只把明确的 EPIPE、ECONNRESET、ECONNABORTED 认作“客户端已离开”；
+  该事实只结束当前 socket 传输，不回写任务失败、不取消已进入 handler 的持久请求。JSON 编码、磁盘、业务
+  I/O 和其它 OSError 仍沿统一 error path 暴露，禁止用宽泛 `except OSError` 掩盖服务端故障。
 - 副作用超时不等于失败也不等于可重试：通用 Tool Gateway 必须把可能已经发生但没有终态的调用持久化为 `unknown`。`operation` 作用域只重放同一调用身份；`business` 作用域由工具从 typed owner/request/目标/规范参数生成跨调用稳定键。只有带 `source_ref` 的目标系统结构化核对能把 unknown 收口为 succeeded/failed，或在证明 not_started 后原子重开；没有核对能力就保持 fail-closed。provider 原生幂等键只由可信 DeliveryContext 下发，Feishu 的同一分片/附件重试必须复用同一个 UUID。
 - 多个外部写组成普通任务时不增加通用 Saga、第二份事务账本或自动补偿器。对照 会话运行时
   `会话运行时-rs/core/src/tools/lifecycle.rs` / `parallel.rs` 与 长期助手 `agent/tool_executor.py` /
@@ -366,7 +473,7 @@
   跨 Pod、旧格式或身份不足时必须等待 TTL，不能把“当前容器看不见 PID”当作已死。
 - Gateway SIGTERM/SIGINT 必须先写 typed stop request 与轻量 forensics（signal、pid/ppid、父命令、systemd
   环境），再复用现有 stop-file drain；计划 stop 已存在时只能追加 observed，不能改写为异常退出。
-- 人格三件套只有 `update_persona` 一个写入口：USER 可由 Agent 自主维护，SOUL/AGENTS 必须用户确认；基础文件、patch、shell 和 admin full-access sandbox 均不得形成旁路。
+- 人格三件套只有 `update_persona` 一个写入口：USER/AGENTS 可由当前 owner 的 Agent 自主维护，只有 SOUL 修改必须由该 owner 用户确认；基础文件、patch、shell 和 admin full-access sandbox 均不得形成旁路。
 - Harvester cursor 是一批事件已完成 engine、spool、audit 的提交水位，不是网络读取进度预告；批内任一步失败都必须保留旧 cursor 以便重试，禁止先推进游标再处理造成静默丢事件。
 - `/audit` 高频判读复用同一 watch/spool/structured-output 主链，不建立第二套 Agent、Memory、
   Compact 或角色运行时。模型调用批次由结构化的等待时间、累计条数、累计数据量任一条件触发；
@@ -413,11 +520,16 @@
 - planner/runner 决策点的主动教训召回只读正式 Lesson/HOT，并与普通运行复用唯一
   `<memory-context>`。旧 `memory_push` 的 lesson 枚举、trigger_conditions、long-term
   `kind=lesson_*` 写读路径和 `[相关记忆提示]` 已删除；失败自省只能提交待审 Candidate。
-- Persona 当前正文只有 owner 的 SOUL/USER/AGENTS 三个权威文件，全部读取和变更必须经过同一个 `PersonaRepository`。版本 ledger/backups 只用于 CAS、审计和回滚；USER 只按当前用户原话自主维护，SOUL/AGENTS 仍需确认，确认期间 SHA 漂移必须拒绝覆盖。不得恢复直接文件写旁路或增加 IM 专用人格状态。
+- Persona 当前正文只有 owner 的 SOUL/USER/AGENTS 三个权威文件，全部读取和变更必须经过同一个 `PersonaRepository`。版本 ledger/backups 只用于 CAS、审计和回滚；USER/AGENTS 由当前 owner 的 Agent 在结构化证据、scope 与 CAS 约束内自主维护，只有 SOUL 需要该 owner 用户确认，确认期间 SHA 漂移必须拒绝覆盖。不得恢复直接文件写旁路或增加 IM 专用人格状态。
 - 用户级持久定时只有 owner `data/scheduler/` 中的 `SchedulerRepository` 一份 job/run 事实源。`schedule` 是唯一 action tool，at/every/cron 均为 typed schema；到期 run 使用 CAS、先推进 next-run、claim TTL 和 heartbeat，并返回原 owner/thread 的同一代理主链。`clock.sleep` 只服务模型明确需要的时间等待；子代理完成依赖生命周期事件，不再有 wait/巡场工具，也不能形成第二 scheduler。对照 通道运行时 `src/cron/types.ts`/`schedule.ts`/`service/timer.ts` 与 长期助手 `cron/jobs.py`/`scheduler.py`/`tools/cronjob_tools.py`，不从用户文本推断身份、任务或时间状态。
 - 可复用 Workflow 只有一种表达：Skill 提供方法，当前 thread 的 `task_progress` 保存计划，原生子代理工具显式创建和派发执行者。旧 `subagent_workflows` package、mode/config/CLI、extension hook 和 shared workflow index 已删除；不得恢复第二套 transcript、planner/router、自动批量扩张或模板执行 runtime。该边界对照 会话运行时 `turn_context.rs` 的逐轮 Skills snapshot、`plan.rs`/`plan_spec.rs` 的 typed plan 更新和 `multi_agents_spec.rs` 的显式 spawn，以及 模型助手 Code `plugins/feature-dev` 通过 command/agent prompt 调用原生 Todo/agent 能力的做法。
 - 普通代码任务只有一份 owner-local 被动验证证据：公共工具出口按 `ToolCallEnvelope.scope.root_task_id` 记录项目 manifest 中的精确规范命令、真实 exit 与 targeted/full；成功文件写使旧证据 stale。它参考 长期助手 `verification_evidence.py`/`verify_hooks.py` 的被动账本，但不移植 stop hook，不执行测试、不阻止完成、不恢复普通任务验收器；模型继续按 会话运行时 的真实 tool-result 事实自然收口。
-- 主代理普通正文不是机器事实：当本轮已有持久 `task_progress` 且仍有 open item 时，模型的第一版 plain final 只作为可丢弃草稿；运行时参考 终端交互 `TaskUpdateTool` 的 structural verification nudge，在同一个工具循环中追加结构化 `open_count` 软核对。下一轮仍持有原工具能力，可读/更新清单或继续工作。提醒按 `executed_tools` 的真实工具进展段去重：同一进展段只消费一次，提醒后若又产生真实工具动作，后续 plain final 可再获得一次核对；没有新增工具动作时不得循环提醒。普通任务仍由模型正常结束，不以可能过期的清单形成完成硬门；只有显式持久 `/goal` 保留 open-plan `unfinished` 生命周期和 continuation。全链不解析“完成”等自然语言、不扫描目录、不执行验收。
+- 主代理普通正文不是机器事实，普通 `task_progress` 也不是宿主判官：模型给出 plain final 后当前 turn
+  直接自然结束；即使清单仍有 open item，运行时也不丢弃草稿、不追加 hidden reconciliation provider call、
+  不改成 typed blocked 或 ordinary continuation。清单继续作为同 thread 的模型工作笔记进入历史、Compact
+  和 TUI。只有显式持久 `/goal` 保留 open-plan `unfinished` 生命周期与 continuation；全链不解析“完成”等
+  自然语言、不扫描目录、不执行机器质量验收。2026-08-23 的 终端交互 式 stop nudge 已于 2026-08-28
+  按用户决定删除，历史真机失败样本只作设计沿革，不再代表当前产品语义。
 - 子代理工具能力只能继承父代理当前 run 的工具快照并继续做减法：所有普通 leaf 角色都移除
   `create_subagents/send_guidance/cancel_subagents/resolve_capability_requests` 四个直属下级控制入口；
   只有结构化角色模板明确 `can_spawn_children=true` 的 coordinator，且父级本来拥有对应能力时，才保留
@@ -429,7 +541,7 @@
   文件/模块范围，不覆盖或撤销兄弟改动；已有文本局部修改先用 `apply_patch`，上下文未命中时重读最小片段
   再重试，不能用整文件重写绕过冲突。该纪律不恢复 workspace 锁或自然语言机器裁决。
 - 模型调用观测区分 logical turn、物理 model attempt 与 provider HTTP attempt；每次 provider 重试、模型级重试、失败、超时和最终状态写入同一线程安全账本，并投影到 runtime facts 与内部 Gateway result。观测回调不得读取 key/body，也不得改变真实请求结果。
-- owner quota 的唯一应用层锁序是 `owner quota -> repository/file lock -> mutation`。文件工具、Memory、Persona、Scheduler 和 Skill draft 必须在同一 owner lock 内按完整 multi-file mutation 的最终字节准入；策略、用量或锁不可读时 fail-closed。应用门不能冒充 filesystem quota：Shell/PTY/LSP 任意进程写盘必须由正式部署的 filesystem/project/container quota 硬限制。
+- owner 磁盘配额是管理员可选能力，`max_disk_mb=0` 表示不限制且不得扫描 owner 全树；只有显式非零上限才启用 `owner quota -> repository/file lock -> mutation` 的应用层锁序。启用时文件工具、Memory、Persona、Scheduler 和 Skill draft 必须在同一 owner lock 内按完整 multi-file mutation 的最终字节准入，策略、用量或锁不可读时 fail-closed。应用门不能冒充 filesystem quota：Shell/PTY/LSP 任意进程写盘必须由正式部署的 filesystem/project/container quota 硬限制。
 - owner retention 只依据 typed policy、terminal authority 和 timestamp；task/scratch 执行前必须二次校验，先移入 owner trash 并写 tombstone，再按期限删除。owner/task legal hold、损坏 policy 或状态漂移均跳过并留审计。Gateway 只用 cursor 有界扫描 owner，不为清理实例化 Agent。
 - Shared/Skill、Memory/Persona、scheduler、Workflow、隐私和验证证据的详细审计见 `docs/design/AGENT_FOUNDATION_CAPABILITY_AUDIT_20260718.md`。用户已于 2026-07-18 明确确认按规划逐项实现；权威功能规格为 `docs/design/FEATURE-20260718-agent-foundation-convergence.md`，当前本地实现完成，待完整 CI、提交、部署和真实验证。实现必须逐切片迁移并删除旧主链，不允许增加 IM 专项或自然语言硬判断。
 
@@ -503,12 +615,14 @@
   只负责 runner 启动、租约、恢复和有界重试。
 - 已删除无人使用的 `SubagentDispatchEnvelope` 与 decoder 分支。宿主为自动启动子进程保留内部
   `subagents-dispatch` 入口，但普通状态页、doctor 和模型 prompt 都不再要求用户或模型手动催跑。
-- 父级日常模型动作只保留创建直接下级、给一个直接下级插入补充消息、打断/取消一个直接下级，
-  以及裁决该直接下级的结构化 capability 请求。`inspect_agent_tree` 继续作为 `/status`、诊断、恢复和
-  TUI 投影的内部只读能力，但从普通模型工具箱移除；父级不靠查树、shell `sleep` 或周期调用推动 child。
+- 父级日常模型动作只保留创建直接下级、按需只读查看当前可见代理树、给一个直接下级插入补充消息、
+  打断/取消一个直接下级，以及裁决该直接下级的结构化 capability 请求。旧 `inspect_agent_tree` 的宽参数
+  工具已删除；`list_agents` 只是 会话运行时 式有界只读适配，复用 `/status`、诊断、恢复和 TUI 的同一 canonical
+  投影，不启动、推进、等待、重试或取消 child。父级不靠查树、shell `sleep` 或周期调用推动 child；正常
+  等待仍只消费宿主生命周期事件，只有用户问状态或需要核对明确 run 时才按需读一次。
   子代理、孙代理和根的差异只由 `run_id/parent_run_id/root_run_id`、工作区和递减权限表达，每一层只管理
   自己的直接下级。
-- 这四个直属控制入口不是每个 child 的固定工具。根主代理和结构化
+- 这五个直属控制入口不是每个 child 的固定工具。根主代理和结构化
   `can_spawn_children=true` 的 coordinator 才持有；worker/researcher/tester/writer/bug-finder 等 leaf
   只执行自己的任务和必要的 `capability_request`。若某一层需要再拆分，父级应把它明确创建成
   coordinator，而不是给普通 leaf 塞一组永远用不到的管理工具。
@@ -662,7 +776,7 @@
   冻结不重复/旧 Gateway 回退/process 标记/终稿覆盖）、plain projection fail-closed 均已补；
   gateway/tui/chat 切片 1137 passed。
 
-## 2026-08-13 P2-5 SecretStore 决策：停用（DEPRECATED，不接线）
+## 2026-08-13 P2-5 SecretStore 决策：停用（已于 2026-08-28 物理删除）
 
 HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用」。
 决策=停用（owner 授权执行席位决策，记录在案）：
@@ -674,11 +788,12 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 停用理由：接线涉及 provider key 解析链大改面（embedding key / 各
   provider key 解析入口 + 配置开关 + 测试），收益低于风险；「支持加密
   密钥库」承诺暂不兑现，如实文档声明避免误导。
-- 落地：secret_store.py 类 docstring 标注 DEPRECATED（不得新增生产调用
-  方，保留代码作回滚/后续切片参考）；如需启用必须先写设计并接线真实
-  消费点。
-- 验收：生产 grep 无新消费点；test_secret_store*.py 保留（类未删，测试
-  继续有效，验证既有行为不回归）。
+- 2026-08-28 收口：在再次证明生产零消费点后，删除 `secret_store.py` 与两份
+  只验证废弃实现的测试，不再把死代码当回滚方案。embedding 继续只接受上层
+  注入的 resolver；飞书/企业微信加密回调仍使用 `cryptography`，已发布的
+  `secrets` extra 名称暂留作安装接口兼容。
+- 如未来重新引入密钥存储，必须作为新的设计从真实 provider/adapter 消费链
+  接入，不能复活旧类或复制旧文件。
 
 ## 2026-08-15 attempt 级 UNKNOWN 结构化终态 + 人工恢复路径（双席 seq1947 核对点3 / seq1948 证据4）
 
@@ -1026,7 +1141,11 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   由 ROADMAP 移入完成。后续 aiohttp→Go 任务在最后一批源码修改后重新 build、跑过 29 项行为测试并完成
   HTTP 200 E2E，验证新鲜度也已闭环；测试者没有旁路补产物。
 
-## 2026-08-18 收口效果权威、会话运行时 式返工与 owner-scoped 构建缓存【状态：代码已修复；真机返工复验中】
+## 2026-08-18 收口效果权威、会话运行时 式返工与 owner-scoped 构建缓存【状态：收口返工部分已于 2026-08-28 退役】
+
+- 历史 `completion_conflict.v1`、`OPERATION_INCOMPLETE` 和写后验证 followup 会在模型 plain final 后继续
+  驱动模型，已被 2026-08-28 真 TUI 证明会误伤用户故意要求的非零退出码。以下条目仅保留历史背景；
+  owner-scoped 构建缓存仍有效，completion 返工结论不再代表当前实现。
 
 - operation ledger 是完整审计事实，不等于“最后一条记录覆盖整项任务”的完成裁决。`not_started` 已经
   结构化证明 handler 未执行、没有副作用，因此末尾连续 no-effect 尝试不能推翻此前最近一项 succeeded
@@ -2133,3 +2252,578 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   child 自然 DONE、Todo 10/10、最终正文直显。live 候选 20% 后静默回到工作，没有红字；随后真正 Compact
   提交 generation 1，Context 回落后模型仍准确续接 8 名 child、文件清单和验证步骤。canonical failure
   count 为 0、source tool pairs 为 8；主 thread 的 26 次 MiniMax-M2.7 provider 调用全部成功、零重试。
+
+## 2026-08-28 运行时旧机器验收与内部 re-export 退役【状态：代码与 fresh 真 TUI 已验】
+
+- 对照 会话运行时 `会话运行时-rs/core/src/session/turn.rs` 与 `会话运行时-rs/protocol/src/protocol.rs`：模型不再请求工具且
+  没有待处理输入时，自然结束当前 turn 并产出最后一条 assistant message；执行错误、停止和工具副作用
+  仍由结构化事件收口，不再另设一套业务质量验收数据库决定“能否回复用户”。
+- 本项目中 `agent/acceptance/`、`RuntimeAcceptanceMixin`、`closeout_task_run()`、
+  `acceptance_contracts/validator_operations` 经生产调用检索均为零消费；它们与现行自然完成主链重复，且会把
+  TaskRun、业务验收和最终消息投递绑成第二套硬门。本轮物理删除实现、只服务它们的测试与状态常量。
+- `Task` 只保存可跨多轮复用的 owner/thread/goal 身份；停止、完成、失败、恢复只属于
+  `TaskRun/AgentRun/AgentAttempt`。新库不再创建 `tasks.status`、`task_runs.current_contract_id` 或旧验收表。
+  存量 SQLite 的多余列/表不参与读写，但升级时不自动 DROP，避免破坏用户历史与回滚证据。
+- 安全收口没有删除：路径/owner 权限、危险命令、审批、工具执行结果、UNKNOWN 副作用、资源锁、发布事实、
+  outbox/inbox 幂等仍按结构化合同硬守；删掉的只是任务内容质量和最终回复的第二套机器判官。
+- `agent_core/__init__.py` 改为无副作用包入口，`agent/core.py` 从权威实现模块直接导入；同时删除无人消费的
+  私有 helper re-export。这样导入 `conversation.agent_thread` 不会提前装载整套 subagent runtime，消除了
+  过去靠偶然导入顺序遮住的循环依赖。
+- 真 TUI `gwreq-1787921095-5775e23884254defb09f0dbafc7ef1ef` 又定位出剩余机器判官：用户明确要求
+  `exit 7` 并如实汇报，模型已得到正确 stdout/stderr/return code，却被 `completion_conflict` 连续打回，
+  共 5 次物理模型调用、42.6 秒、141,905 cache-read tokens，最后还把 task 留在 Waiting/Working。
+- 当前进一步删除 `plan_closeout.py`、completion conflict/prior unresolved/stale verification 自动 followup、
+  `task_progress_closeout_repair_attempts` 和 `OPERATION_INCOMPLETE` 自动续跑兼容。模型仍在每个工具结果后正常
+  获得下一次采样，可自主换方法；一旦给出 plain final，宿主只保存 operation/Todo 审计事实，不覆盖正文、
+  不再调用模型。UNKNOWN 副作用、owner/path 权限、危险操作、取消和幂等安全门保持原位。
+- fresh TUI `ma-cleanup-natural-final-r4` 原样复验 `gwreq-1787922555-f7d04fed2d02409485791dc4aa17193e`：
+  MiniMax-M2.7 只执行一次 `exit 7`，operation verification 仍为 `failed`，但模型第二次采样直接如实回复；
+  2 次物理调用、1 工具轮、0 provider retry、11.476 秒，runtime `ok`、turn `completed`，TUI 立即清除
+  Working。这同时证明自然结束没有吞掉失败事实，也没有放宽工具执行或权限边界。
+
+## 2026-08-28 TUI 补充消息可见性与单次终稿【状态：focused 与 fresh 真 TUI 已验】
+
+- 对照 终端交互 `src/utils/messageQueueManager.ts` 与
+  `src/components/PromptInput/PromptInputQueuedCommands.tsx`：用户在运行中提交的内容先进入有稳定身份的可见队列，
+  后续消费只改变同一项状态；流式重绘使用稳定 message identity，不能因为回执迟到再造一条最终消息。
+- my-agent 的显式 `/btw` 原本已有 exact-turn、持久 outbox 和三态回执，但没有投影成 pending user row；Gateway
+  `active_turn_input_consumed` 又在 provider delta 后到达客户端，却调用了仅适用于本地采样前边界的 assistant
+  切段入口，导致 summary 把相同 response 新建第二块。本轮保留所有投递/幂等事实，只修投影：提交即显示、
+  accepted 原位晋升、rejected 撤下并说明、late consumed 不切正文块。
+- Gateway 的 consumed 行可能晚于 `assistant_final`；因此“原位晋升”必须保留用户本地提交 seq，并只在同一个
+  request 内插到提交后才开始的思考/工具/终稿之前。不能按网络回执到达时间 append，也不能全局重排旧历史。
+- 同轮将 slash 目录中文化、补齐 `/audit resume`，并让共享 `/expand` parser 实现帮助中已经承诺的显式
+  `last`。这些改动不进入模型 prompt，不改变会话保存、Compact、权限或 Gateway 控制语义。
+- `.7` 的 `ma-cleanup-steer-order-r7` 在真实 15 秒前台工具中插入补充：排队态立即显示中文，消费后用户行位于
+  第二次思考与唯一终稿之前；空闲 `/btw` 明确中文拒绝。客户端只改变投影，Gateway/模型输入继续使用原消息 ID。
+
+## 2026-08-28 Rich TUI `/context` 与底栏单一快照【状态：focused 与 fresh 真 TUI 已验】
+
+- 对照 会话运行时 `chatwidget/status_controls.rs`：详细 status 和底栏都读取同一个 `ChatWidget.token_info`，而不是一个
+  读服务端通知、另一个重新估算历史。my-agent rich TUI 现在同样只展开 active `TuiRuntime.status.context_usage`。
+- 这份 `model_visible_context_usage.v1` 来自真实 provider preflight，并与 Compact 使用同一 window/trigger；详情只
+  把总量、固定与本轮提示、对话与工具消息、待注入运行说明、工具定义换成中文说明，不读取或复制任何正文。
+- `/context` 是客户端只读显示，不建 control outbox、不请求模型、不修改会话。Compact boundary 后旧快照会被
+  清除，界面明确等待下一次真实调用刷新，避免把压缩前数据继续当当前事实。
+- `.7` `ma-cleanup-context-r8` 同屏实证：详情 `30,563/128,000（23.9%）`，底栏
+  `~30.6k/128.0k · 24%`，压缩点 90%、compact 0 一致。
+
+## 2026-08-28 Owner 磁盘配额退出默认热路径与 TUI 记忆异步回执【状态：focused 已通过，`.7` 真 TUI 复验中】
+
+- 用户自己的 owner home 默认不设磁盘容量上限；`quota.v2.max_disk_mb=0` 是结构化“不限制”，因此 Memory、
+  Persona、Scheduler 和文件工具的普通写入不再为每个文件动作遍历整个 owner。只有管理员显式配置非零值
+  时才启用原有精确扫描门；损坏 quota policy 继续 fail-closed。
+- `ensure_my_agent_home` 只迁移字段完全等于旧 `quota.v1` 默认模板的 100GB 策略；任何管理员改过的数值或
+  字段都保留。父 owner 有非零上限而 child 写 0 时，child 继承父上限，不能借“不限制”扩大权限。
+- 对照 会话运行时/终端交互 没有“每次普通写入都全 workspace 扫盘”的热路径；规模部署若需要硬容量隔离，应
+  使用 filesystem/project/container quota。应用层可选门只提供提前拒绝和结构化错误，不冒充 OS 硬配额。
+- Gateway TUI 的 `/memory`、`/remember` 改在后台线程调用同一 slash dispatcher，慢磁盘/Gateway 不再冻结
+  输入循环。丢失 `/remember` HTTP 响应属于 `MEMORY_WRITE_RESULT_UNKNOWN`：界面明确提示可能已提交且不
+  自动重复写，不再把未知副作用谎报成失败。
+
+## 2026-08-28 Gateway 权威状态工具与表达轮拒绝回注【状态：focused 与 `.7` 真 TUI 已验】
+
+- 当前唯一 Gateway 的身份不能由模型从 `ps/ss`、常见端口或 `/health` 猜。`gateway_status` 直接复用
+  validated PID record、state、heartbeat 和 hot queue；state 在每次进程启动时持久化实际 config path、
+  model、bind host、port 与日志生命周期字节偏移。工具只在本机 `main_agent` registry 注册，远程 user/group
+  owner 不获得宿主 PID、配置和日志路径。
+- `identity` 是模型名、PID、process birth token 和配置来源的唯一结构化位置，并排在工具结果开头；这些值
+  可以原样复述但不能参与任务完成、权限或恢复裁决。r12 暴露 MiniMax 把 M2.7 抄成 M2.2 后，没有增加机器
+  判官，而是缩短、去重并前置权威身份；r13 已逐字复述 `MiniMax-M2.7 / 8420 / running`。
+- 日志诊断只读取状态中记录的本次启动 byte offset 后最多 64 KiB，并仅返回异常类型计数、行数和覆盖范围，
+  不把原始日志、请求正文或 secret 放进模型上下文。零新增字节明确为 `no_new_log_bytes`，不能冒充 quiet；
+  只有实际观察到当前生命周期字节且无异常签名才是 `quiet`。
+- 对照 会话运行时 `tools/registry.rs` 与 `tools/events.rs` 的 `FunctionCallError::RespondToModel`：表达专用自然回复轮
+  如果仍产生 tool_use，宿主不执行 handler，而把 AssistantTurn 与成对
+  `TOOL_CHOICE_VIOLATION/handler_executed=false/effect_outcome=not_started` ToolResult 回注后重采样。第二次
+  仍越权时返回完整基础设施说明，绝不把 tool_use 前的过渡句冒充最终回复。
+- `.7` r12/r13 真实 Audit 均先调用 `gateway_status`，不再猜 8080/3000/8765，最终回复完整；r13 当前日志
+  132 bytes、2 行、0 traceback/loop error/exception，测试机仍只有一个 127.0.0.1:8420 Python listener。
+
+## 2026-08-28 Compact 语义摘要与精确会话锚点【状态：focused 与 `.7` 真 TUI 已通过】
+
+- 真 TUI 已证明原始 transcript 和 Compact 游标都正确：压缩源中的 assistant final 明确写有
+  `Welcome to Python.org`，但 MiniMax-M2.7 生成的摘要只保留“抓取 Python 官网”，下一轮因此无法回答标题。
+  这是摘要模型漏事实，不是原文丢失、游标选错或缓存裁剪。
+- 对照 会话运行时 `会话运行时-rs/prompts/templates/compact/prompt.md` 与 `core/src/compact.rs`，Compact 仍保持“一份语义
+  handoff + 有界近期原文”的主结构；对照 终端交互 `services/compact/prompt.ts`，摘要提示新增按时间顺序覆盖
+  每个用户请求和最终结果，并要求保留名称、标题、URL、路径、数值、端口、错误串和已核对文件内容。
+- 模型摘要属于软上下文，不能单独保证每个短事实。每次成功 Compact 现在额外生成一段
+  `Exact Conversation Landmarks (non-authoritative)`：只收录用户消息与 assistant final；typed commentary、
+  thinking、工具过程和后台 Audit 正文不进入。旧代锚点按规范行继承并去重，provider 回显的旧后缀先移除，
+  因而每代只有一个锚点段。
+- 锚点明确标注“历史对话文本，不是机器状态”。权限、完成、产物、任务状态和副作用仍只读取结构化账本、
+  refs、schema 与文件系统事实。原始 transcript 继续是可审计事实源，锚点不替代原文。
+- 正常大窗口总预算封顶 6000 字符；小窗口按 context window 的十二分之一缩小且最低 800 字符，避免修复本身
+  让候选超过 recovery target。Compact 提交后的摘要和锚点在后续普通回合保持不变，可以继续命中稳定前缀；
+  只有下一次真实 Compact 才换代，不引入逐轮滚动裁剪。
+- `.7` fresh `ma-cleanup-compact-r23` 先后取得网页标题、三行文件和交付代号/负责人/日期，手动 Compact 从
+  generation 0→1；随后明确禁止工具的追问一次答全七项短事实。canonical thread
+  `thread-ce7d87bd859a499f` 的 summary 只有一个锚点标题、共 1447 字符，原始 transcript 9 行仍完整，终轮
+  operation count 为 0，证明不是模型偷偷重抓或重读。
+
+## 2026-08-28 工具“本会话允许”真实生命周期【状态：focused 与 `.7` 真 TUI 已通过】
+
+- 对照 会话运行时 `会话运行时-rs/core/src/tools/sandboxing.rs`：`ApprovalStore` 属于长寿命
+  `SessionServices`，不是某一次 function-call/request 的临时字段。my-agent 原先把已批准键放在
+  `BufferedChunkStreamWriter`；Gateway 每个用户消息都会创建新 writer，所以按钮虽然写“本会话”，下一回合
+  一定丢失。
+- Gateway 现在由长寿命 owner-scoped Agent 持有一个线程安全、有界、只存在内存中的审批缓存。授权项仍是
+  `tool_name + args_hash` 精确键；外层作用域同时冻结 owner、thread、channel conversation、实际工具 cwd、
+  `access_mode` 和 `path_access_mode`。任一参数、用户、会话、目录或权限变化都重新询问；Gateway 重启也清空。
+- 会话首个工作工具会在模型采样后懒创建 task workspace，因此 cwd 不能在请求开始时冻结。审批入口在真正
+  等待用户时从 thread-local canonical run workspace 取目录；这样第一回合批准与后续 sticky task 回合使用
+  同一个作用域，同时不牺牲“换目录重新询问”的安全边界。
+- 缓存最多保留 256 个作用域、每作用域 128 个精确调用，LRU 淘汰只会多弹一次授权，不会扩大权限。命中时
+  不再发布 `permission_requested`，避免界面闪一下已自动通过的审批框；工具执行与 operation ledger 仍照常
+  记录真实调用。
+- `.7` fresh `ma-cleanup-approval-r26` 实证：首次 18476 命令选择“本会话允许同一操作”；下一回合同一
+  args hash 只发布 `permission_resolved/session_cached=true` 并直接执行；改为 18477 后重新出现全中文授权框，
+  Esc 取消且未执行。测试期间仍只有 PID 1590194 监听 127.0.0.1:8420。
+
+## 2026-08-29 后台命令启动观察期【状态：focused 与 `.7` 真 TUI 已通过】
+
+- `.7` r26 暴露一个独立底层缺口：18478 已被第一个受管 HTTP 服务占用时，第二个 managed host 仍能先生成
+  新 `session_id`，旧 `run_command` 随即返回 `status=started`；真实子进程稍后才以端口冲突退出，模型因而
+  错报“服务已启动”。这不是模型完成判断问题，而是工具把“记录创建成功”冒充“启动观察成功”。
+- 对照 会话运行时 `会话运行时-rs/core/src/unified_exec/process_manager.rs`：首次 exec 在有界 yield 内收集输出；短命令
+  直接返回 `exit_code` 且不保留 live process id，只有观察期后仍存活才返回可续接进程。本项目保留既有
+  detached host 和 durable session，增加 0.5 秒 canonical `process_registry.wait` 启动观察，不另造状态源。
+- 观察期后仍为 running 才返回 `status=started/session_id`；期内零退出返回成功的 `status=exited`，非零退出
+  返回 `COMMAND_FAILED/effect_outcome=failed`，两者都带 `exit_code/output_tail`。这只回答进程是否仍活着，
+  不把存活推断成端口已监听或局域网可达；后者仍由 `process_session network_status` 和外部探针裁决。
+- `.7` fresh `ma-cleanup-background-r27`：首次请求 `gwreq-1787946133-...` 启动 18478；完全相同参数的第二次
+  请求 `gwreq-1787946178-...` 命中 session approval，但在约 1 秒工具进度内返回
+  `COMMAND_FAILED`，最终逐字报告 `Address already in use` 与 `exit_code=1`。相关后台进程均从所属 TUI
+  清理，单 Gateway 拓扑未变。
+
+## 2026-08-29 PTY 会话列举、真实 resize 与会话隔离【状态：focused 与 `.7` fresh 已通过】
+
+- `.7` `ma-cleanup-terminal-r28` 用普通中文要求完成 REPL 读写、100×30 调整、列举和停止。旧 Schema 只有
+  `start/write/read/close`：模型先编造 `list` action 被参数门拒绝，又向 REPL 写入
+  `ESC[8;30;100t`，工具只确认字节写入；内核随后仍报告 80×24，模型却把“已发送”写成成功。这是 PTY
+  控制合同缺口，不能靠提示模型谨慎来修。
+- 对照 会话运行时 app-server `process/resizePty` 与 `会话运行时_utils_pty::resize_raw_pty`：窗口调整走
+  `TIOCSWINSZ`，并由 connection-scoped process handle 选中会话。本项目在唯一 `terminal_session` 增加
+  `list/resize`，resize 接受结构化 `columns/rows`，调用内核 ioctl 后回读实际尺寸；ESC 文本不再冒充尺寸事实。
+- PTY scope 继续冻结 owner home、读写根和受保护路径，并新增 executor 注入的可信 conversation id；列表、
+  读写、resize、close 都要求 exact scope，相同 session id 不能跨用户、跨 TUI 会话接管。模型可见结果只保留
+  `pty-...` 稳定句柄，不再暴露 OS PID；list 上限继承进程内 32 session 硬上限。
+- start 仍是唯一新建进程/审批边界；既有 session 的 list/read/write/resize/close 继续按同一 transport
+  生命周期执行，不重复制造命令审批。Windows ConPTY 仍不在当前支持范围内。
+- `.7` fresh `ma-cleanup-terminal-r29` 用与 r28 完全相同的自然语言请求和 MiniMax-M2.7：单次 start 审批后，
+  6 个工具轮依次完成写、增量读、结构化 resize+list 和 close；list 返回唯一 `python3` 会话、100×30、
+  running，最终只引用 `pty-1-1787947404`，没有 OS PID 或参数失败。请求为
+  `gwreq-1787947377-1b918742122e4a0baf68204faead62b4`，测试时唯一 Gateway PID 1595234。
+
+## 2026-08-29 TUI 中断终态中文投影【状态：focused 与 `.7` fresh 已通过】
+
+- `.7` `ma-cleanup-terminal-r29` 在真实 `sleep 30` 工具运行中提交 `/stop`，请求在 30 秒前进入 interrupted，
+  输入框恢复且宿主无残留 sleep；但 transcript 固定显示英文
+  `Interrupted · What should my-agent do instead?`，展开的工具拒绝/中断 fallback 也仍是英文。
+- 中断权威仍是 typed `turn_interrupted/CANCELLED`，本轮只把三个用户可见投影改为
+  `已中断 · 接下来希望 my-agent 怎么做？`、`用户拒绝了工具调用` 和 `已中断`。不解析模型正文，不改变
+  `/stop`、Esc、cancellation token、工具 operation reconciliation 或 interrupted transcript 的排序/样式。
+- 对照 终端交互 `InterruptedByUser.tsx` 的专用 dim transcript row 与 会话运行时
+  `chatwidget/input_restore.rs` 的 typed interrupted notice：继续保留专用灰色行，不把中断伪装成 assistant final；
+  中文化只适配本项目用户界面规范。
+- `.7` fresh `ma-cleanup-stop-r30` 在 MiniMax-M2.7 已发起真实 `sleep 30` 后提交 `/stop`，界面立即显示
+  `已中断 · 接下来希望 my-agent 怎么做？` 并恢复输入；宿主无残留 sleep，唯一 Gateway PID 1595234 未变。
+  请求为 `gwreq-1787947950-297362d6af4f46d58bbb9b7c3cf29489`。
+
+## 2026-08-29 持久 `/goal` 控制面真 TUI 复验【状态：`.7` 同会话通过】
+
+- `/goal` 继续只是当前 thread 上的显式持久目标 overlay，不是普通任务的前置模式，也不创建第二份用户会话。
+  创建、查询、暂停、修改、恢复和清除都读取同一 typed goal 状态；控制命令不依赖模型正文，也不等待当前
+  后台回合自然结束。
+- `.7` `ma-cleanup-stop-r30` 对 `tui-r31` 完成全生命周期：运行中查询立即返回，pause 终止 Working 投影，
+  edit 保留目标身份并更新正文，resume 恢复，具名 clear 后再次查询为“当前没有持续目标”。这证明用户可在
+  主代理后台等待时立即控制它，而不是等子代理或慢模型全部返回。
+- 本轮只有验证和文档登记，没有新增 goal 兼容入口、自然语言状态解析或普通任务自动续跑；权限、task link
+  和目标身份仍以既有结构化状态为唯一事实源。
+
+## 2026-08-29 子代理 owner workspace 写权限祖先冲突【状态：focused 与 `.7` fresh 八路任务已通过】
+
+- `.7` `ma-cleanup-subagents-r31` 的八路真实调研首次暴露：每个 child 都有结构化
+  `allowed_write_roots`，但默认 `forbidden_write_roots` 同时含宿主 `Path.home()`。测试机 owner workspace 位于
+  `/root/.my-agent/...`，bubblewrap 按安全顺序在可写根后重挂 deny，因而 `/root` 把所有合法 child/task 根
+  一并变成只读；模型只能把 Git 源码转存到沙箱 `/tmp`，无法写正式报告。
+- 对照 会话运行时 `linux-sandbox/src/bwrap.rs::create_filesystem_args`：写权限由显式 writable roots 正向授予，
+  只读 carveout 应是 writable root 里的更具体敏感子路径；不能用一个更宽祖先否定全部授权子根。本项目继续
+  由 `allowed_write_roots` 守总边界，默认 deny 删除冗余的宿主 home 祖先，只保留 `Desktop`、`Downloads`、
+  `.ssh`。因此不会开放 owner workspace 之外的路径，敏感子目录仍在所有 writable bind 之后重挂只读。
+- 这是权限合同生成修复，不按任务文本猜目录，也不降低 remote owner、非管理员或 workspace-only 的上界。
+  现有已经持久化的错误 child 合同不就地篡改；部署后必须新建真实 TUI/child 复验自己的任务目录可写、
+  `.ssh` 仍不可写、父级目录仍按结构化 write roots 决定。
+- `.7` `ma-cleanup-subagent-write-r32` 使用用户给定的 Prompt 3 新建 8 个 child；每个 child 都能在自己的
+  canonical task/agent workspace clone、读代码和写报告，没有再出现 `Read-only file system` 或转写 `/tmp`。
+  child 插话还明确回报 `.ssh` 为禁止根并继续工作。相关策略本地 178 项、测试机 182 项 focused 通过。
+
+## 2026-08-29 嵌套 task root 的路径重定向幂等【状态：已部署，`.7` fresh 长任务复验中】
+
+- r32 又锁定一条与权限无关的路径错误：模型原始工具参数是 owner 根下的
+  `research/pi_report.md`，第一次从 owner 根重定向到正式 task root 完全正确；同一 admitted call 在后续
+  预处理/归档再经过转换时，因为正式 task root 本身位于 owner 根之下，旧字符串替换又在它前面加了一层
+  task root，形成 `<task>/tasks/<date>/<task>/research/...`。
+- 路径重定向现在是幂等变换：扫描每个完整 source 前缀时，先按路径/文本边界识别当前位置是否已经是精确
+  target 或其后代；已转换片段保持原样，尚未转换片段才替换。它支持同一段 goal 中多个独立路径，不会把
+  `task-1-copy` 之类相似名称错当 target。
+- 这仍是 host-validated source/target 的结构化适配，不从 prompt 猜任务名，不改 allowed roots，也不把其它
+  task 的路径自动映射到当前 task。32 项 tool-round focused 已通过；r33 使用同一 Prompt 3 检查真实 child
+  goal/output 和 main 回读只出现一层 task root。
+
+## 2026-08-29 缺失路径候选的有界快速失败【状态：已部署，`.7` fresh 长任务复验中】
+
+- r32 的 8 个 child 已全部终态，main 整合时并行读取 5 份预想报告，其中两个文件名不存在；Gateway 随后
+  22 分钟停在 `正在使用 read_file`。`py-spy` 证明两个工具线程都在
+  `filesystem_path_recovery._walk_candidate_items -> os.walk`，各自递归扫描含 8 个完整 Git 仓库的 task 树，
+  父轮又等待整个 future 批次。这不是 provider 慢、模型没回复或 workspace 锁。
+- 对照 会话运行时 app-server：普通 `fs/readFile` 直接返回文件系统错误；模糊文件搜索是单独、可取消的能力，不能
+  隐式绑定到每个读取失败。本项目保留“至多 5 个安全候选”的友好差异，但把它降为严格 best-effort：父目录
+  探测与所有 workspace roots 共用 1024 个目录项、128 个目录预算；单目录最多 256 项、深度最多 8；遍历改为
+  广度优先，不会深陷第一个大型仓库，也不跟随目录符号链接。
+- 预算耗尽或没有候选时立即返回 `PATH_NOT_FOUND`，明确让模型调用 `list_files/search_text`。显式工具仍承担
+  完整搜索，自动恢复不承诺穷举，因此减少的是隐式猜测覆盖率，不是文件、历史或权限。82 项本地/测试机
+  focused 已通过；r33 继续用真实长任务核对 Gateway 无工具线程长挂。
+
+## 2026-08-29 零调用旧判官与孤立投影物理清理【状态：实现已删除，严格 gate 待跑】
+
+- 合并 8 个历史 Gateway coverage data 后，先按入口和全仓 import 反查区分“当前 TUI 不会走但仍属正式通道”
+  与“任何生产入口都没有调用者”。Feishu/WeCom/Windows/迁移/管理 CLI 等前者继续保留，不能拿 TUI 0%
+  当删除依据。
+- 后者共 7 个实现：旧 `acceptance_contract` 机器判官、944 行 `target_coverage_ledger` 内容覆盖判官、无人调用的
+  `subagent_outputs` 产物判官、`recovery_batches` 旧恢复批次、`progress_fingerprint` 旧后台指纹、旧
+  `dispatch/progress_payload` 子代理投影，以及只验证目标覆盖判官自身的 769 行测试。它们全仓只有自测引用，
+  与当前自然完成、typed child lifecycle、TUI activity 和显式恢复工具重复，现已物理删除。
+- `acceptance_contract` 的测试引用和 `contract_layers` 分类同步删除；用户要求、约束和验收标准仍可作为模型
+  上下文，artifact 格式可打开、owner/path/危险命令/审批/UNKNOWN 副作用等客观安全门也继续保留。删除的是
+  无消费者的第二判断链，不是安全或真实工具事实。
+- 过期文档不再声称 runtime 使用 `subagent_outputs.py/progress_fingerprint.py`；code-size baseline 也移除已删除
+  测试的三条历史项。下一步由 focused、一次全仓 pytest、严格代码尺寸/文档/打包 gate 和 `.7` r33 真 TUI
+  共同证明没有隐藏动态导入。
+
+## 2026-08-29 通道控制与共享合同依赖归位【状态：本地 focused 通过，严格 gate 待跑】
+
+- `gateway_parts`、`subagents` 和 `memory_archive` 不再反向导入 `agent_core` 或彼此的业务实现。代理查看/插话/
+  停止归到 `conversation/agent_control.py`，child 工具审批归到
+  `conversation/agent_tool_approval.py`，工具窗口归到 `conversation/tool_context_window.py`，Compact 辅助模型
+  调用归到 `conversation/auxiliary_model_call.py`，完成信封版本归到中立
+  `contracts/subagent_completion.py`。
+- 不保留旧模块转发壳；所有生产调用和测试直接改读新权威入口。`scripts/check_import_boundaries.py` 从 11 个
+  finding 降为 0，避免 Gateway/child/UI 今后再次通过反向依赖绑定具体执行层。
+- 这些移动不改变 HTTP、TUI、审批、Compact 或 child 完成协议，只清理模块所有权。结构变化已同步
+  `CODEBASE_TREE.md` 和 gateway/memory/subagent 结构文档。
+
+## 2026-08-29 会话运行时 式同轮工具全量执行与批次削峰【状态：focused 与 `.7` r34 已通过】
+
+- 真实 Prompt 3 在八个 child 全部完成后暴露：模型同一 assistant turn 提交 8 个报告读取，旧宿主按
+  `background_max_tool_calls_per_round=4` 只执行前 4 个，并给后 4 个制造
+  `TOOL_CALL_LIMIT_DEFERRED` 失败。MiniMax 根据这些假失败自然回复“下轮继续”，root 因而停止整合。
+- 会话运行时 对照路径是 `会话运行时-rs/core/src/session/turn.rs::try_run_sampling_request/drain_in_flight` 与
+  `会话运行时-rs/core/src/tools/parallel.rs::ToolCallRuntime`：流中每个已接收工具都进入 `FuturesOrdered`，并发安全
+  只由运行 gate 控制；下一次采样前 drain 所有 in-flight 结果，不存在“超过并发数就伪造未执行失败”。
+- 本项目据此把历史字段 `max_tool_calls_per_round` 收成“单次并发执行批大小”。正数只把一个 provider 工具轮
+  分为连续小批，全部 admitted calls 仍在同轮执行并按 provider 顺序记录；0/空值不增加这个批大小限制。
+  真实取消、审批拒绝、Compact 或耐久上下文切换仍可为尚未启动调用写各自客观 typed 结果。
+- 等待直属 child 的根代理自然回执同时改为
+  `runtime_status=unfinished / runtime_reason=SUBAGENTS_ACTIVE / turn_end=interrupted`；这只修正生命周期投影，
+  不从正文判断完成，也不恢复已删除的机器质量验收器。
+- `.7` fresh `ma-cleanup-batch-r34` 用原样 Prompt 3：8 个 child 全部 DONE 后，main 同一 provider 工具轮的
+  8 次读取按 4+4 全部执行，没有 `TOOL_CALL_LIMIT_DEFERRED`，随后写出 13,563 bytes、9 节、220+ 行报告并
+  自然回复。该轮也暴露了下一节单独收口的旧生命周期快照和终态 Todo 展示问题。
+
+## 2026-08-29 provider safe point 的直属 child 当前快照与终态 TUI 收口【状态：focused 与 `.7` r35 已通过】
+
+- r34 原样八路调研虽然已经证明同轮 8 次报告读取会按 4+4 全部执行，但 main 在 Compact/后台续片后仍短暂
+  读取到启动时的 Recovery Snapshot；派生 `work/summaries/current_summary.md` 也可能停在 RUNNING。旧历史因此
+  会让模型在 canonical 8 个 child 均 DONE 后再次怀疑数量或寻找过期路径。生命周期事实不能依赖摘要模型是否
+  恰好保留，更不能解析 goal、标题、报告正文或目录推断。
+- 对照 会话运行时 `core/src/agent/status.rs` 的 typed status 派生与 `core/src/agent/control.rs` 的 completion watcher，
+  每次 provider safe point 现在从 canonical exact-parent child rows 原位刷新一份有界
+  `[RUNTIME_DIRECT_CHILDREN]` JSON。快照只含 parent、总数、状态计数、all-terminal、非终态 ids 和每个 exact
+  run id/status；其它 root、兄弟和孙级不会混入，部分读取失败时 `projection_complete=false` 且不得宣称全部
+  终态。状态不变时序列化字节完全相同，因此不会为了“刷新”持续改写稳定缓存前缀。
+- canonical task link 提交终态时，`work/state.json` 的 status/current_step 与派生
+  `current_summary.md` 同步投影；Markdown 仍不是权威，写失败也不能反向改写 typed link/state。Compact、恢复或
+  新工作片重新组 prompt 时会重建当前快照，历史 Recovery Snapshot 只能作为旧背景，不能覆盖新 typed facts。
+- 没有显式 `covers` 时宿主继续不按标题猜 Todo 完成项；但 typed task link 已终态后，TUI 的当前
+  display-plan projection 变为空，完整 durable task_progress 不删除，8 个 child roster 仍可导航。这解决最终
+  回复后仍显示 `完成 0/9` 的假运行感，同时没有恢复机器验收或替模型打勾。
+- typed assistant `process` 的全部 Markdown fragment 统一使用 muted style，final 仍用正文色；修复的是
+  renderer 内层 fragment 覆盖外层灰色的问题，不延迟流式输出、不改 transcript 或模型请求。
+- `.7` fresh `ma-cleanup-compact-tree-r35` 使用 MiniMax-M2.7 和原样 Prompt 3：child 数从 8→5→2→1→0 单调
+  收敛；通道运行时 child 在 113.4k 后真实 Compact 到 63.7k、`compact 1` 并完成；main 明确列出 8 个 exact ids
+  均 DONE，一次读取全部 8 份报告，写出 321 行/10,888 bytes 的横向报告并自然最终回复。终屏 Working、Todo
+  均收起，8 个完成 child 行保留；canonical `work/state.json` 与 current summary 均为 DONE。
+
+## 2026-08-29 effective workspace 是 durable runtime 唯一路径身份【状态：focused 与 `.7` r36 已通过】
+
+- WorkspaceOnly 的进程 cwd、CLI 启动目录和 `SimpleAgent(root=...)` constructor 参数都不是 owner 身份或权限
+  来源。它们可以帮助定位启动文件，但 prompt、文件/进程工具、Conversation、SubAgent、LocalStore 和
+  Collaboration 必须共同消费权限裁决后的 `effective_workspace_root`；不能有一半使用 owner home、另一半
+  仍对原始 root 做 workspace hash。
+- 本轮发现的分叉正是用户看到“主代理找错子代理家”的底层原因：CLI 从一个 cwd 创建 Agent、内部 worker 或
+  测试代码从另一个 cwd 直接构造时，旧实现生成两个
+  `<owner>/workspace/runtime/workspaces/<scope-id>/`。两边各自都合法，却互相看不到 child、会话和工具账本，
+  模型只能猜不存在的 `child_outputs` 或重新搜索。
+- 对照代码已读到 会话运行时
+  `会话运行时-rs/core/src/会话运行时_thread.rs::ThreadConfigSnapshot` 的权威 cwd/environment 快照，以及
+  `会话运行时-rs/exec/src/lib.rs` 的 config cwd 解析。适配后的 `SimpleAgent` 先一次计算 effective workspace，再用
+  同一值解析 durable runtime paths；直接构造与 CLI/Gateway worker 因此不再产生第二套运行家。
+- 显式 absolute runtime override 仍然是结构化配置事实，Full Access 明确选择的外部 workspace 也继续形成独立
+  scope；本改动不搬迁、不删除旧数据，不把自然语言目录名当身份，也不放宽 owner/path/sandbox 权限。
+- `GATEWAY_WORKSPACE_INVALID` 同步进入唯一 error taxonomy，分类为不可原样重试的 path 错误，恢复动作是
+  `FIX_PATH_WITHIN_ALLOWED_ROOTS`。客户端 cwd 是否允许仍由结构化 owner policy 判定，错误文案不参与授权。
+- 专门回归用同一个 owner home、两个不同 constructor root 创建 Agent，固定 effective workspace、subagent、
+  conversation 和 local store 三类路径完全相同；子代理 hierarchy/debug、Gateway request 与错误码全量注册
+  focused 同时通过。真机 r36 从 `/root` 启动约 0.7 秒即显示 owner home 和 MiniMax-M2.7；首批 4 个 child
+  与后续 integrator 全部落在 `main-d9283fde2e2d` 运行 scope 和同一 canonical task，5/5 自然 DONE。main
+  只读取/核对 child 产物后直接 final，Working/Todo 收起而 roster 保留，全程没有旁路搬文件或补产物。
+- r36 主 thread 最高可见 Context 约 92.3k，仍低于 128k×90%=115.2k 的 Compact 触发线，因此
+  `compact 0` 正确；child 终态折叠后下一工作片显示约 52.5k 不是 Compact 丢历史，最终同一 thread 又随
+  整合事实增长到 78.8k。任务 45 次 provider 调用合计 cache-read 1,003,935、cache-write 360,893、普通
+  input 35,602、output 46,771，retry/failed/timed-out 均为 0，说明该路径统一没有破坏 MiniMax 缓存主链。
+
+## 2026-08-29 子代理启动可观察阶段与详情首屏【状态：本地实现/focused 通过，真 TUI 待验】
+
+- 对照 会话运行时 `core/src/agent/status.rs` 的 `PendingInit -> TurnStarted/Running` 与 终端交互
+  `REPL.tsx` 在 API、teammate 和通知队列期间持续保留 spinner，子代理展示不能把“记录已创建”直接画成
+  “正在运行”，也不能在完整 prompt/首个公开事件到达前清空载入提示。
+- TUI/Web 共用投影只读结构化事实：`PLANNING=queued`、`PENDING=starting`、当前 attempt 已进入
+  `RUNNING` 但还没有该 attempt 的公开 transcript event 时为 `waiting_first_event`，出现首个 typed event 后
+  才是 `running`；终态、暂停和等待输入继续读 canonical status。阶段只用于展示，不改变调度、重试、完成或
+  heartbeat 裁决。
+- 进入 child 后，完整 `task.goal` 一旦可读立即成为第一条 user block；在 goal 和首事件都尚未到达时，详情页
+  持续显示当前结构化启动阶段与 Working 行，不能出现无解释白屏。旧 attempt 的事件不能让新 attempt 冒充已
+  开始输出，阶段判断必须同时绑定 exact run id 与 active attempt id。
+
+## 2026-08-29 Owner 自主 Memory 与 SOUL 单独确认【状态：本地实现/focused 通过，真 TUI 待验】
+
+- 每个用户自己的 Agent 自主维护自己的长期 Memory、Daily、Lesson/HOT、USER 与 AGENTS；这些写入不要求
+  用户逐条确认。只有 `SOUL.md` 修改必须由该 owner 本人确认。`/audit` 的产品语义本轮保持不变。
+- “自主”不等于跨权或信任自然语言：候选、正式记忆、Persona、索引、备份和恢复都必须从同一个结构化
+  `owner_id` 解析到该 owner home，写入继续经过 scope、证据 refs、CAS、quota、注入扫描与路径墙；同一
+  Gateway、同一模型或相似 subject key 都不能让 A owner 读取、合并、替换或删除 B owner 的记录。
+- 非 SOUL 候选由 Curator/Promotion 主链自动推进；USER 仍只接受可回查的当前 owner 用户消息事实，工具事实
+  仍需成功终态，Lesson/HOT 仍需独立证据次数，replace/remove 仍需 exact target id，冲突仍需模型在后续
+  Curator 轮给出结构化修正，不能用正文猜覆盖目标。SOUL 候选单独保持确认状态并绑定确认时的 SHA/CAS。
+- 该边界参考 长期助手 profile 的 `MEMORY.md/USER.md/SOUL.md/session` 全隔离与 通道运行时 每个 agent workspace
+  的自动 memory flush，但保留本项目更严格的 owner 事实源和单一 Promotion/Persona 写入口，不增加直接文件
+  写旁路、共享全局记忆或 IM 专用记忆库。
+
+## 2026-08-29 同一 child 的结构化续跑可窄穿终态保护【状态：本地 focused 通过，真 TUI 待验】
+
+- 普通保存继续把 DONE/CANCELLED/ABANDONED/TAKEN_OVER 视为单调终态，旧 runner 的心跳、工具结果和进度
+  快照都不能把它写回运行态。只有宿主已经掌握 exact run id 的结构化同一任务续跑/生命周期纠错入口，才可
+  显式设置 `allow_terminal_reactivation`；普通文字“继续”、模型口头状态或模糊标题都没有这项权限。
+- capability_request 全部闭合且没有活 runner 时，原 run 可从旧版误写的 DONE 回到 PENDING；人工取消、
+  ABANDONED 和 TAKEN_OVER 仍保持关闭。Audit 来源 worker 只有 `cancel_subagents.reason` 精确等于历史
+  `conversation_lifecycle:audit_source_watch_complete` 且 watch ledger 已 settled 时，才可把旧误取消纠正为
+  DONE/VERIFIED；管理员/人工取消不受影响。
+- 工具执行前 validator 的宿主故障与非法返回分别登记为
+  `TOOL_INVOCATION_VALIDATOR_FAILED` 和 `TOOL_INVOCATION_VALIDATOR_CONTRACT_BROKEN`，两者都表示 handler 未
+  执行、不可把相同调用当普通参数错误盲重试，应保留结构化报码上报底座。
+
+## 2026-08-29 在途递归派工与 `/stop` 共用 active-turn 取消边界【状态：根层真 TUI 通过；递归安全点待 fresh TUI】
+
+- 对照 会话运行时 `会话运行时-rs/core/src/tasks/mod.rs::abort_all_tasks`：停止先取走 exact active turn 并触发当前执行体的
+  cancellation token，随后等待耐久收尾；旧执行体不得在取消之后建立 continuation 或发布新的工作。my-agent
+  保留 owner/thread/task 文件事实源，但不能让 `create_subagents` 在早期取消检查后继续晋升、绑定或启动 child。
+- Gateway 的 task promotion 与 `/stop` 复用 exact turn transition lock。若该 turn 已关闭，工作工具在 handler 前
+  返回 typed `CANCELLED/effect_outcome=not_started`，不能建立 `-continue-`；会话 child link 只做 canonical
+  SubAgentTask 的投影，绑定后必须复读终态，迟到 bind 不得把 CANCELLED 复活成 active。
+- 根代理和递归 child 共用 manager-owned `creation_guard` 与当前 Tool Gateway cancellation token。批量派工在
+  每个 durable child 之间检查同一 token；停止后剩余项不再落盘，已经落盘的前缀保留 request/parent/root
+  结构身份，由异步 stop reconciler 在 guard 释放后复读谱系并统一取消。取消回调不持有模型、runner 或用户审批，
+  child 真正运行继续并行。
+- r63 `.10` TUI `ma-matrix-r63-110-u19-stop-race-auto` 在真实 `create_subagents(items=8)` 后 1 秒收到 `/stop`：
+  parent link 为 `interrupted`，8 个已落盘 child 的 canonical 状态和 conversation link 均为 cancelled，无
+  `-continue-`、无 child 进程、主界面未复活 Working。该旧版本仍花约 53 秒等待整批落盘并逐项收口；r64
+  增加逐项 cancellation safe point，需 Gateway 重启后的 fresh 根/递归 TUI 量化剩余延迟。
+
+## 2026-08-29 本机 thin TUI 的真实 owner 身份与 scoped 派工【状态：focused 与 `.7` 单 Gateway 真 TUI 已通过】
+
+- `channel=local` 不是天然等于共享管理员。只有结构化 `user_id=local-agent` 代表历史基础身份
+  `local/main`；本机客户端显式携带的其它 user id 必须解析成 `local/user/<id>`，结构化群组则解析成
+  `local/group/<chat_id>`。任务、会话、Memory、Persona、LocalStore、子代理运行目录和审计全部从这一个
+  `OwnerIdentity` 派生，不能因请求来自 loopback HTTP 或同一 Gateway 就退回 `local/main`。
+- scoped owner 的子代理自动启动不能复用只携带基础 `--config/--workspace-root` 的后台子进程入口。该进程会
+  丢失请求时冻结的 owner，重新装配成 `local/main`，于是去错误目录找 run 并永久排队。精确
+  `local/main` 继续使用 durable 子进程；所有其它 owner（包括 `local/user`、`local/group` 和外部 provider）
+  使用持有当前 scoped Agent 的 Gateway 内 daemon dispatcher。任务、attempt、lease 与恢复仍落持久事实源，
+  Gateway 重启继续由统一 recovery 接管。
+- 该分流只认结构化 provider/kind/id，不按自然语言、目录名或“是不是本机”猜身份；客户端仍连接同一个 8420
+  Gateway，不能为不同用户再起 Gateway。focused 覆盖 base、local user/group、两个用户物理目录隔离和客户端
+  HTTP/file-queue 身份；`.7` fresh U25--U28 进一步证明四个用户任务、Memory 和递归 child 均落各自 owner 家。
+- 递归停止真机从协调 child 详情页按 Esc：约 6 秒协调者先进入 `CANCELLED`，约 14 秒四个孙代理全部
+  `CANCELLED`，其它 owner 未受影响。U27 正常退出后按 exact session id 重开，完整最终回复与三个 child 名册
+  立即恢复；后续禁止工具的复述轮准确返回四类事实和校验短语，审计中该 request 零 tool call。
+
+## 2026-08-29 多 TUI 内存水位与运行对象驻留【状态：真机已量化；Gateway idle eviction 仅审计未改】
+
+- `.7` 8G 机器清理 17 个已结束但仍驻留 tmux 的旧 TUI 后，已用内存约从 2.6G 降到 1.6--1.8G、available
+  升到约 5.5--5.7G。保留 10 个真实 TUI 合计 RSS 约 656M，唯一 Gateway 在多用户/递归任务峰后约
+  315--381M，另有 终端交互 对照约 159M；没有证据表明单 Gateway 本身占掉数 GB。
+- `.10` 16G 机器保留 8 路长期任务并新增 8 路功能链后，已用约 4.8--5.1G、available 约 10G；其中唯一
+  Gateway 约 1.0G，采样时仍有 6--17 个真实 child runner 和后台 owner tick，另有多套 会话运行时/终端交互
+  对照进程。测试窗口数量、在飞上下文和对照程序必须分开记账，不能把整机 used 都归因于 Gateway。
+- 当前 `OwnerScopedAgentPool` 已有容量 64 的有界 LRU，但 Python allocator 会保留已触达的高水位页，任务结束
+  后 RSS 不保证立刻回落。对照 会话运行时 `core/src/agent/control/residency.rs` 只逐出已终态且没有 active turn/
+  mailbox 的 resident child，以及 通道运行时 ACP runtime cache 的 idle TTL + active-turn fencing；在证明对象数
+  持续增长前不新增拍脑袋 TTL。若后续要逐出，必须先以 typed active turn、pending input、未完成 child 和
+  owner wake 证明可卸载，保留磁盘事实并增加 pool size/eviction 可观测指标，不能只按时间杀活跃 Agent。
+
+## 2026-08-30 被动轮询不得物化冷 owner，全局索引是可替换投影【状态：R99 `.10` 单 Gateway 真 TUI 通过；`.7` 环境阻塞】
+
+- 对照 会话运行时 `会话运行时-rs/core/src/thread_manager.rs` 与
+  `core/src/agent/control/residency.rs`：冷 thread 的查询不因 UI 刷新创建完整执行引擎，驻留卸载还必须同时看
+  terminal/error/interrupted、无 active turn 和无 pending mailbox。my-agent 因此将 `/client/notices` 限定为纯被动投影：
+  base owner 或已驻留 owner 只读查询，冷 owner 返回 `owner_state=cold` 与空活动投影；不记录 active owner、
+  不触碰 LRU、不构造 Agent。真实消息、历史、Memory、控制和工具执行仍走唯一完整 owner 解析，权限没有放宽。
+- R99 修复前，`.10` 上 69 个不同 owner TUI 的 notice poll 会超过 64 容量并形成“构造→逐出→下一拍再构造”；
+  16 个 HTTP worker 大量停在 Agent 初始化，Gateway PSS 约 `595.8MiB`，`/status` 曾超时。修复重启后同样 69 个
+  TUI 同时重连，Gateway PSS 约 `189.1MiB`，10 次 status 为 `4--13ms`；再启动 10 个不同 owner 的 MiniMax-M2.7
+  真实模型任务时 PSS 约 `228.1MiB`，20 次 status 最慢约 `0.21s`，队列没有再被轮询占满。
+- `global_index/*.jsonl` 只是 owner home 真实任务/run/agent 状态的可丢弃查找投影，不是 append-only 事件账本。
+  运行时以去掉 `updated_at` 的结构化指纹只写真实变化；`home-index-rebuild --apply` 在同一文件锁内原子替换
+  四份当前快照，不再往旧重复历史后追加一整份。`.10` 现场四份索引约 `1.4GiB`，备份后从 168 owner、
+  555 task、555 run、1062 agent 权威目录无错重建为约 `814KiB`，`load_errors=0`。
+- 这一切片没有用 TTL 猜测杀活跃 Agent，也没有删除 owner Memory、会话或任务。真正活跃卸载仍需按
+  会话运行时 的 active-turn/mailbox 门做后续切片；不能因为一次状态轮询没找到驻留对象就伪造任务终态。
+
+## 2026-08-29 owner 后台常驻对象分为 hard/soft 两类【状态：focused 与 `.10` 单 Gateway 真机通过】
+
+- Gateway 的 scheduler、durable wake、活跃 thread 与 runner 是 hard residency：只要结构化工作仍活跃就必须
+  常驻，不能按时间或 RSS 猜测逐出。Memory Curator 是 soft residency：没有当前维护工作时只保留磁盘事实，
+  到 owner 真正到期时再惰性构造，完成后从进程内 owner pool 逐出。
+- 旧实现会在每次 owner maintenance 扫描时为大量历史 owner 提前物化完整 Agent/Curator；即使 owner 当天没有
+  记忆候选，Python 对象和 provider 依赖也会留在唯一 Gateway。现在 `OwnerScopedAgentPool` 显式提供 hard
+  agents 与 exact soft-agent eviction，维护循环只让 hard owners 参与 scheduler tick；Curator 按批次有界轮转。
+- 这不是靠固定 TTL 杀 Agent，也不删除 owner home、Memory、会话或任务。任何活跃 turn、未决输入、child、
+  wake 与 scheduler 继续由 canonical 账本保护。`.10` 部署前唯一 Gateway RSS 约 509--521MiB，部署后初始
+  约 185--224MiB；R91 下 22 路 TUI 和八子代理压力启动后 Gateway 约 275MiB，证明降的是无工作常驻对象，
+  不是把 TUI 或用户数据挪到第二进程。
+
+## 2026-08-29 终态 child 不接受伪 guidance 队列【状态：focused 与 `.10` 真 TUI 通过】
+
+- `send_guidance` 只表示给仍可消费下一安全点的直属 child 排入补充输入。DONE、CANCELLED、ABANDONED、
+  TAKEN_OVER 等终态没有 runner consumer；旧实现仍返回“已排队”会让用户误以为终态 child 收到了消息，并
+  留下永远无人消费的 pending 文件。
+- 当前入口只接受 `PLANNING/PENDING/RUNNING/BLOCKED`。终态返回
+  `SUBAGENT_GUIDANCE_TARGET_TERMINAL`，暂停/失败/超时等无活动 consumer 的状态返回
+  `SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING`，两者均不写 guidance 文件、不复活 run。
+- 这与 会话运行时 的 `send_message`/`followup_task` 分工一致：给活代理插话和让已结束代理开始一个新 turn 是两种
+  控制语义。后者若产品以后需要，应单独建立 exact-run follow-up 合同，不能复用一条假 pending queue。
+
+## 2026-08-29 capability grant 必须跨不可变工具快照续片【状态：focused 与 `.10` fresh TUI 通过】
+
+- 每个 provider 工作片的工具清单是不可变 `ToolRuntimeSnapshot`。常规 `capability_request` 自动授权会先把
+  canonical grant 写入任务，但旧 runner 仍在同一模型批次使用旧 snapshot；模型紧接着调用刚获批的
+  `write_file` 会得到 `TOOL_UNAVAILABLE`，反复重试后甚至 DONE 却缺报告。
+- 对照 会话运行时 `会话运行时-rs/core/src/session/mcp.rs` 与 `tools/spec_plan.rs`：工具 router 从当次
+  `TurnContext` 构造，能力变化不在旧 router 上原地打补丁。my-agent 复用现有通用
+  `runtime_transition.kind=context_refresh`：grant 落账后结束当前工具边界，剩余同批调用延后，下一 durable
+  slice 从 canonical grants 重建 execution context 和 ToolRuntimeSnapshot。
+- 普通 OPEN 申请仍等待直属父级裁决，不发布 refresh；当前快照不因模型文字、失败重试或未落盘意图变化。
+  `.10` fresh `ma-matrix-r91-110-u94-capability-refresh` 中 researcher 从只读启动，读取输入、申请单文件写权限，
+  下一工作片自行写出 1,562-byte 报告；该 owner 归档中 `TOOL_UNAVAILABLE` 为 0，主代理没有代写。
+
+## 2026-08-29 直属 child 最终回复是父会话的耐久继续输入【状态：R92 已部署，旧任务恢复与 fresh TUI 通过】
+
+- 对照 会话运行时 `core/src/context/inter_agent_completion_message.rs`、
+  `session/mod.rs::forward_child_completion_to_parent`、`agent/control.rs` 与
+  `session_prefix.rs::format_inter_agent_completion_message`：child 的最终回复会进入父 session，不能只存在于
+  一次性 wake 或临时 Recent Observations 窗口。
+- my-agent 继续以 `subagent-completion.v1` observation 为唯一事实源，不复制第二份业务状态。前台续轮和后台
+  scheduled/recovery 续片共用 `contracts/subagent_completion.py` 的中立投影，只接收 exact root、exact
+  direct parent、匹配 schema 与匹配 child identity 的完成信封。
+- 上下文压力可以缩短 `completion_message`、减少次要输出引用数量，但不能裁掉已选 child 身份或截断
+  `final_report_ref`。私有 `runner_result_json/output_json` 永远不进入模型上下文，孙代理结果也不能越级进入
+  root 主代理。
+- 真实失败 U85 的四份 DONE 报告原本都已落盘并被第一次 completion wake 消费；稍后的
+  `scheduled_progress_report` 只剩终态数量，导致模型猜 `work/agents` 并被安全门拒绝。R92 后同一旧 TUI 在
+  `compact 1` 后读回四份结果并自然 final；fresh U98 四名 child 4/4 DONE，主代理直接整合出
+  `output/python-four-modules.md`，没有 `WRONG_STATUS_SURFACE`。
+- 该修复不改变 child 完成判定、不把报告正文变成机器状态、不放宽内部状态面读取，也不要求主代理持续占用
+  provider；它只保证每个后续安全工作片仍能获得已经交付给父级的精确结果。
+
+## 2026-08-30 根代理创建 child 后保留同轮控制机会【状态：R93 已部署，fresh TUI 通过】
+
+- 对照 会话运行时 的普通工具循环，根代理成功创建 child 后不应被宿主立刻强制结束当前模型工作片；模型需要能在
+  同一 active turn 继续给刚创建的直属 child 发送一次精确 guidance，或取消错误派工。只有 child 自己创建
+  下一层时仍结束当前 task-local 工作片，避免父子 runner 身份混用。
+- `create_subagents` 的结构化结果明确提示可立即使用 `send_guidance` / `cancel_subagents`，但不自动替模型
+  发送消息、不轮询 child，也不改变 child 的启动与完成状态。fresh U109 已在同一模型工作片创建两名 child
+  并分别发送不同补充要求，两名 child 的最终报告均包含对应补充事实。
+
+## 2026-08-30 personal/session Memory 由宿主绑定真实身份与寿命【状态：R95 已部署，fresh 双 TUI 通过】
+
+- `remember` 省略 scope 时只写当前 owner 的 personal 范围；模型只声明 `session` 类型时，宿主绑定当前
+  Gateway conversation thread。模型不得提供个人 owner key，也不得把另一个 thread id 冒充当前会话。
+- formal Memory 仍只有一份 canonical store；`memory_scope` 说明该条记录的 scope、自动召回范围与存储权威，
+  `session_search` 同步投影这些字段。显式历史搜索可以按用户要求找到旧会话内容，但这不等于把旧 session
+  Memory 自动注入新会话。
+- session 的寿命跟 canonical thread 走，不能由模型把“当前会话”猜成当天 23:59。`valid_from` /
+  `valid_until` 与 session 同时出现时返回结构化参数错误；需要日历时间过期必须改用 temporary scope。该门
+  只校验结构字段，不解析用户正文，也不删除或缩短长期对话历史。
+
+## 2026-08-30 大型工作最终交付采用 会话运行时 式软沟通纪律【状态：已进入默认提示；R106 记录 provider 不遵循样本】
+
+- 对照 会话运行时 default prompt 的 teammate update 和 终端交互 的 cold-reader communication：大型、多步骤或
+  长工具链结束时，最终回复应使用完整句子，独立说明已做内容、关键验证、交付位置和仍未验证/阻塞的风险；
+  不能只留下“任务已完成”、半句标题或以冒号结尾的开头。
+- 这只进入默认模型提示，作为用户沟通软纪律。宿主不解析最终正文、不按中文短语打回、不追加隐藏判官调用，
+  也不把报告长度、Todo 数量或模型自称完成升级为机器状态。完成、权限、工具副作用和 child 生命周期继续只读
+  结构化事实；provider 真截断仍由 typed stop/stream 合同处理。
+- 当前 YAML 与 dataclass 默认提示已经包含 会话运行时 同义的“已知未完成部分仍可推进时持续工作”和 终端交互
+  同义的“不能把半成品说成完成”，R106 远端配置正文 SHA 与本地一致。MiniMax 仍两次把以冒号结尾的未来
+  计划作为普通 final，说明软提示只能降低概率、不能成为机器保证；同会话普通追问可继续且 Compact/任务身份
+  未丢。该样本保留为 provider 遵循缺陷，不恢复最终正文解析、自动验收或隐藏续跑判官。
+
+## 2026-08-30 capability grant 不能扩大 owner 权限上界【状态：R96 已部署，fresh 正反 TUI 通过】
+
+- 对照 会话运行时 `会话运行时-rs/protocol/src/permissions.rs`：运行时附加 root 只能在当前文件系统策略支持的范围内生效，
+  工作区外写权限不能靠一次局部授权绕开顶层 policy。my-agent 的 `owner_scope_root` 同样是租户硬墙；语义
+  CapabilityRouter、直属父级显式 grant、已有 grant 复用和 lifecycle 最终落账都没有资格把它扩大。
+- 申请携带 `path_scope/cwd_scope` 时，授权链先使用结构化路径与当前 manager 的 exact owner root 做规范化判定。
+  scoped owner 的越界路径直接结清为 typed capability `GAP`，写入错误码和 rejected paths；不得生成 grant、
+  不得发布 grant wake，也不得重派同一 child。普通用户正文、目录名字和模型理由不参与权限判断。
+- 任务工作区内及 owner 自己家内的正常授权保持原语义；无 owner wall 的本机管理员继续受既有 workspace roots、
+  path mode 与显式 Full Access 约束。lifecycle 作为最后一道防线再次拒绝越界 path scope，防止未来旁路调用者
+  绕过路由检查写入一张实际上永远无法执行的授权。
+- 该收口解决真实 U116 的“硬墙拒绝 -> 语义路由批准 -> grant wake -> 再次硬墙拒绝”循环。它不把安全拒绝
+  伪装成模型失败，也不替父代理修改目标路径；父代理只会收到结构化 gap，随后可按已有权限调整分工或向用户
+  说明真正阻塞。
+
+## 2026-08-30 同一 Gateway 回合跨 Compact 续跑保留 active-turn 身份【状态：R97 已部署，fresh TUI 通过】
+
+- 对照 会话运行时 `会话运行时-rs/core/src/session/turn.rs`：上下文压力触发 Compact 后仍由同一个 active turn 继续，只有
+  无后续工作时才发出 TurnComplete；终端交互 的 REPL 也从 active session 事实投影 busy/idle，不用一个已过期
+  的定时策略重新猜测主代理是否还在工作。
+- my-agent 的首段执行会在工作工具晋升时把 exact request -> thread/task 绑定写进 Gateway 请求文件。旧实现没有
+  同步更新当前内存 request；同一请求跨内联 Compact 重建 `RunParams` 后，只看见 sticky task cwd，却丢失了
+  `conversation_task_turn_active`。第二段可以完成工具和最终回复，但不能在终态提交点关闭 task 与其
+  `ordinary_task_resume` policy，稍后 scheduler 会再次认领旧策略，表现为“已经最终回复，Working 又复活”。
+- 现在唯一 task-binding writer 原子写入请求文件成功后，也同步相同结构事实到当前内存请求；重建参数时仅当
+  `request_id/thread_id/task_id` 三者都与当前 active task 精确匹配，才恢复本轮 active-turn 权限。后续用户请求、
+  后台唤醒或只继承同一工作目录的请求不能取得该权限。
+- 终态仍由结构化 task/child/guidance/wake 事实决定，不解析“完成了”之类模型正文。正常完成会立即把 exact task
+  标成 completed，并由 ConversationStore 同一提交点禁用该 task 的进度/续跑策略，从而让 TUI 保持 idle；
+  Compact 续跑本身不会新建影子 Gateway，也不会放宽 owner 权限。
+- `.10` 的 fresh MiniMax-M2.7 TUI U142 在 115,858 token preflight 压力后沿同一 request 续跑并正常最终回复；
+  终态后观察超过 10 分钟，task 保持 completed、thread 的 active task 为空、progress policy 保持 disabled，
+  三份审计均无 `scheduled_progress_report`，消息文件也没有二次写入，未再出现“最终回复后 Working 复活”。
+
+## 2026-08-30 coordinator 等待孙代理必须区别于首次启动【状态：R98.1 修正结构事实，fresh TUI 待复验】
+
+- 会话运行时 分开 `PendingInit`、`Running` 和 `CollabWaiting` 事件；子代理已经完成一次模型/工具工作片并派出直属下级
+  后，不应继续显示为从未开始的“启动中”。真实 U141 的 coordinator 已创建两名孙代理，自己的 typed
+  `turn_end_reason=SUBAGENTS_ACTIVE`、runner attempt 已 completed，但 canonical task 为 PENDING 等待下一安全片，
+  旧展示仅看 PENDING，持续二十多分钟误画“启动中”。
+- R98 首次 fresh U143 证明 `turn_end_reason` 的 canonical 值是通用 `interrupted`，`SUBAGENTS_ACTIVE` 只属于
+  当轮 runtime reason，不是可持久复读的 lifecycle 枚举；直接据后者做投影会继续误画“启动中”，因此该版
+  没有通过真 TUI 验收，不能记作完成。
+- TUI/Web 活动投影改为复用调度器同一 `parent_wait_blocks_dispatch()`：只有 PENDING 且存在 schema 正确、
+  `state=waiting`、携带 exact run ids 的 durable `direct_child_wait` 才显示动态“等待下级”。初次 PENDING 仍
+  显示“启动中”，RUNNING 且尚无首事件仍显示“等待模型”。错误文案、`runner_last_error` 和伪造 reason 都
+  不取得展示权威；该投影也不改变 runner 状态、恢复、父子完成或调度。

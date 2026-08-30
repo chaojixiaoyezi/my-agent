@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""task_progress stays advisory while ordinary final gets one same-turn reconciliation."""
+"""task_progress stays advisory and never adds a hidden ordinary-task model turn."""
 
 import json
 
@@ -56,7 +56,7 @@ def _agent(tmp_path) -> SimpleAgent:
     )
 
 
-def test_open_progress_ledger_reconciles_once_without_cross_turn_resume(tmp_path) -> None:
+def test_open_progress_ledger_does_not_reconcile_or_resume_ordinary_final(tmp_path) -> None:
     agent = _agent(tmp_path)
     backend = _CaptureBackend()
     agent.backend = backend
@@ -82,15 +82,13 @@ def test_open_progress_ledger_reconciles_once_without_cross_turn_resume(tmp_path
         task_id="task-progress-run",
     )
 
-    assert len(backend.prompts) == 2
+    assert len(backend.prompts) == 1
     assert "task-progress-closeout-reconciliation" not in json.dumps(
         backend.messages[0], ensure_ascii=False
     )
-    assert "task-progress-closeout-reconciliation" in json.dumps(
-        backend.messages[1], ensure_ascii=False
-    )
-    assert result.runtime_status == "blocked"
-    assert result.runtime_reason == "TASK_PROGRESS_RECONCILIATION_EXHAUSTED"
+    assert result.response == "这一回合的最终回复。"
+    assert result.runtime_status == "ok"
+    assert result.runtime_reason == ""
     assert not hasattr(result, "task_progress_auto_continued")
 
 
@@ -187,7 +185,7 @@ def test_closed_progress_item_requires_explicit_correction_to_reopen(tmp_path) -
     assert json.loads(corrected.output)["items"][0]["status"] == "in_progress"
 
 
-def test_display_plan_switch_keeps_open_rows_without_closed_history() -> None:
+def test_display_plan_switch_hides_unrelated_open_history_without_deleting_it() -> None:
     first = merge_task_progress(
         {},
         with_task_progress_display_plan(
@@ -247,7 +245,6 @@ def test_display_plan_switch_keeps_open_rows_without_closed_history() -> None:
         "new-b",
     ]
     assert [item["id"] for item in task_progress_display_items(reconciled)] == [
-        "still-open",
         "new-a",
         "new-b",
     ]

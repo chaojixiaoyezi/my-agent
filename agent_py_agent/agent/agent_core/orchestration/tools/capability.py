@@ -21,6 +21,10 @@ from ....subagents.authorization_gate import (
     OperationRequest,
     authorize_direct_child_operation,
 )
+from ....subagents.capability_scope import (
+    partition_capability_paths_by_owner,
+    resolve_capability_scope_path,
+)
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
 from ....subagents.models import (
     SUBAGENT_ENDED_STATUSES,
@@ -39,8 +43,7 @@ from ....tooling.models import (
     ToolRuntimePolicy,
 )
 from ....tooling.write_boundary import WRITE_TOOL_ORDER
-from ...runner.context import current_subagent_run_id
-from ..create_policy import _current_run_id
+from ..create_policy import current_orchestration_requester_run_id
 from ..tool_specs import build_resolve_capability_requests_model_spec
 
 if TYPE_CHECKING:
@@ -103,8 +106,8 @@ class ResolveCapabilityRequestsTool(BaseTool):
         self.agent = agent
 
     # LLM: 工具响应必须是结构化 JSON（resolved/errors），失败也要给出机器可读原因；
-    #   不要把自然语言判断混进裁决路径。持久化顺序契约：先 save 请求状态，再逐条落
-    #   grant（record_capability_grant 内部重新加载，顺序反了旧副本会覆盖 grants）。
+    # grant 由 record_capability_grant 在同一个 canonical reducer 内结清 request，deny
+    # 才保存当前 task 快照，避免授权和 runner 收口互相覆盖。
     # 函数用途: 解析参数、裁决每条未决请求、落盘并发 wake。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         run_id = str(params.get("run_id") or "").strip()
@@ -143,7 +146,8 @@ class ResolveCapabilityRequestsTool(BaseTool):
             return _no_pending_result(task, run_id, decision)
         ctx = _ResolveContext(task=task, decision=decision, params=params, reason=reason)
         resolved, errors, pending_grants = self._judge_pending(ctx, pending)
-        self.agent.subagents.save(task)
+        if decision == "deny":
+            self.agent.subagents.save(task)
         self._persist_grants(ctx, pending_grants)
         task = self.agent.subagents.load(run_id)
         continuation = _queue_resolved_child_continuation(
@@ -217,10 +221,9 @@ class ResolveCapabilityRequestsTool(BaseTool):
             )
             record["grant_id"] = grant.id
 
-    # LLM: grant 裁决（标记阶段，不落盘）。write_roots 围栏是客观事实硬门：目录必须在
-    #   任务工作区或主代理 workspace 内。filesystem 类授权自动并入写工具，否则 path_scope
-    #   在运行时不生效（见 runner_context_service._granted_filesystem_write_roots 的 tools 要求）。
-    # 函数用途: 校验一条 grant 并标记请求状态，返回结构化裁决记录（grant 落盘在 execute）。
+    # LLM: Grant judgment is side-effect free. write_roots remains an objective hard boundary;
+    # request status and grant are committed together later by record_capability_grant.
+    # 函数用途: 校验一条授权并生成结构化裁决记录，真正结清申请由后续原子落账完成。
     def _mark_grant(self, ctx: _ResolveContext, request: Any) -> dict[str, object]:
         requested_roots = _string_list(ctx.params.get("write_roots")) or _string_list(getattr(request, "path_scope", []))
         allowed_roots, rejected_roots = self._partition_safe_roots(ctx.task, requested_roots)
@@ -244,7 +247,6 @@ class ResolveCapabilityRequestsTool(BaseTool):
             }
         if allowed_roots:
             tools = list(dict.fromkeys([*tools, *_FILESYSTEM_WRITE_TOOLS]))
-        request.status = "GRANTED"
         record: dict[str, object] = {
             "ok": True,
             "request_id": request.id,
@@ -258,14 +260,27 @@ class ResolveCapabilityRequestsTool(BaseTool):
             record["rejected_write_roots"] = rejected_roots
         return record
 
+    # LLM: The owner wall is evaluated before broader task/agent roots. Any owner violation rejects
+    # the whole requested path set, preventing a misleading partial grant and retry loop.
     # 函数用途: 把申请目录按安全围栏分成可授权/越界两组。
     def _partition_safe_roots(self, task: Any, roots: list[str]) -> tuple[list[str], list[str]]:
+        owner_decision = partition_capability_paths_by_owner(
+            self.agent.subagents,
+            task,
+            roots,
+        )
+        if owner_decision.rejected_paths:
+            return [], list(owner_decision.rejected_paths)
         safe_roots = _safe_grant_roots(self.agent, task)
         allowed: list[str] = []
         rejected: list[str] = []
-        for raw in roots:
-            target = Path(raw).expanduser().resolve(strict=False)
-            bucket = allowed if any(_is_relative_to(target, base) for base in safe_roots) else rejected
+        for raw in owner_decision.allowed_paths:
+            target = resolve_capability_scope_path(self.agent.subagents, task, raw)
+            bucket = (
+                allowed
+                if target is not None and any(_is_relative_to(target, base) for base in safe_roots)
+                else rejected
+            )
             if raw not in bucket:
                 bucket.append(raw)
         return allowed, rejected
@@ -391,12 +406,13 @@ def _known_children_hint(agent: Any) -> str:
 # 根主代理没有 runner 身份时兜底，不能让子代理借根请求越级裁决孙代理。
 # 函数用途: 返回当前模型可代表的代理 run id。
 def _model_requester_run_id(agent: Any) -> str:
-    return current_subagent_run_id(agent) or _current_run_id(agent)
+    return current_orchestration_requester_run_id(agent)
 
 
 # LLM: capability 裁决是继续同一 child turn 的结构化控制事实。只要所有未决
-# 请求已闭合且没有活 runner，就把原 run 重排为 PENDING；绝不复活用户已经
-# cancel/abandon/takeover 的 run，也不根据模型回复文字猜测是否应该继续。
+# 请求已闭合且没有活 runner，就把原 run 重排为 PENDING；这是终态单调保护允许的
+# 窄例外，但绝不复活用户已经 cancel/abandon/takeover 的 run，也不根据模型回复
+# 文字猜测是否应该继续。
 # 函数用途: 把已完成的授权裁决转换成同一子代理的自动续跑状态。
 def _queue_resolved_child_continuation(
     agent: Any,
@@ -448,7 +464,7 @@ def _queue_resolved_child_continuation(
         ],
     }
     task.attributes = attrs
-    agent.subagents.save(task)
+    agent.subagents.save(task, allow_terminal_reactivation=True)
     _reactivate_child_conversation_link(agent, run_id)
     return {
         "status": "queued",

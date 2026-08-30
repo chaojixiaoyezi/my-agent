@@ -92,6 +92,28 @@ class TestPromptBuilderInit:
         assert f"task_work_dir: {work_dir}" in projected
         assert "current_local_time:" in projected
         assert projected.count("相对路径默认相对当前工具工作目录") == 1
+        assert "权限允许写入目录（不代表默认落点）" in projected
+        assert "只以当前工具工作目录为默认落点" in projected
+
+    def test_runtime_workspace_projection_does_not_present_owner_home_as_default(self, tmp_path):
+        owner_root = tmp_path / "owners" / "u1"
+        task_root = owner_root / "tasks" / "2026-08-30" / "task-a"
+        builder = PromptBuilder(
+            AgentConfig(prompt_files=[]),
+            tmp_path / "service-cwd",
+            workspace_root=owner_root,
+        )
+
+        projected = project_runtime_workspace_context(
+            builder.snapshot_workspace_context(),
+            effective_cwd=str(task_root),
+            allowed_write_roots=[str(owner_root)],
+        )
+
+        assert f"当前工具工作目录（仅供执行定位）: {task_root}" in projected
+        assert f"权限允许写入目录（不代表默认落点）: {owner_root}" in projected
+        assert "当前允许写入目录" not in projected
+        assert "更宽的用户空间仅表示可以访问已有资料" in projected
 
     def test_pending_conversation_workspace_exposes_relative_write_aliases(self, tmp_path):
         builder = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path)
@@ -224,6 +246,8 @@ class TestReadPromptFiles:
         assert "同一轮立即调用对应工具" in result[0]
         assert "主代理只能协调 / 不准自己写 / 只能由子代理执行" in result[0]
         assert "不能成为主代理静默接管功能实现的授权" in result[0]
+        assert "让一个刚回来的用户也能单独看懂" in result[0]
+        assert "不要只回复“任务已完成”" in result[0]
 
     def test_legacy_default_prompt_alias_falls_back_to_builtin(self, tmp_path):
         builder = PromptBuilder(AgentConfig(prompt_files=["prompts/default.md"]), tmp_path)
@@ -413,8 +437,10 @@ class TestBuildBasic:
         assert "不要为了形式单独建立检查点" in result
         assert "不要把内部记录动作反复当作用户进度回复" in result
         assert "task_progress 是模型可选的当前运行清单" in result
-        # 分析/取证/研究类有实质发现的任务，必须把结论写成报告文件落地，不能只口头汇报就算完成
-        assert "得出结论后要把发现、依据和结论写成报告文件交付再收尾" in result
+        # 分析/取证/研究类通常落报告，但本轮用户的明确只读/不落盘要求优先。
+        assert "得出结论后通常要把发现、依据和结论写成报告文件交付再收尾" in result
+        assert "用户明确要求只读、不要修改、不要落盘或只在对话中回答时" in result
+        assert "不能创建报告文件，也不能把写报告文件列入 task_progress" in result
         # 但纯问答/查值类本就无交付物，不强行文件化（保留原有保护，避免噪音）
         assert "只有纯问答、闲聊、一次性查值这类本就没有交付物的任务，才不必写文件" in result
 
@@ -555,6 +581,7 @@ class TestBuildToolContext:
         )
         assert "# Tool Transcript" in result
         assert "Continue From Tool Transcript" in result
+        assert "一条不含工具调用的助手正文会立即结束当前 active turn" in result
 
     def test_build_multiple_tool_context_entries(self, tmp_path):
         config = AgentConfig()

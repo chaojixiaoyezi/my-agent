@@ -61,6 +61,22 @@ def without_tool_call_after_limit(
                 "不要总结或宣告完成。"
             ),
         )
+    if reason == "unknown_outcome":
+        return replace(
+            response,
+            text=(
+                "工具副作用的最终结果暂时无法确认，系统已停止继续调用工具，避免重复执行。"
+                "请只根据已有记录说明已经确认和仍待人工核对的事项，不要宣告完成。"
+            ),
+        )
+    if reason == "no_action_gate":
+        return replace(
+            response,
+            text=(
+                "当前回合没有已确认需要执行的动作，系统没有执行模型继续提出的工具调用。"
+                "请如实说明现状，不要把未执行的操作写成已完成。"
+            ),
+        )
     return replace(
         response,
         text=(
@@ -185,10 +201,13 @@ def _int_value(value: object) -> int:
         return 0
 
 
+# LLM: Recovery guidance is model-facing and may use only provider-authored arguments; trusted
+# runtime bindings remain in the execution/audit call and must not leak into the next prompt.
+# 函数用途: 在长内容写入失败时追加恢复说明，并沿用模型原始目标而不是宿主内部参数。
 def append_long_content_recovery_context(record: ToolCallRecordParams) -> None:
     context = long_content_recovery_context(
         LongContentRecoveryRequest(
-            payload=record.payload,
+            payload=record.model_payload,
             result_tool=record.result.tool_name,
             result_ok=record.result.ok,
             result_error_code=record.result.error_code,

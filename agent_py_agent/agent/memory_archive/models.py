@@ -59,6 +59,9 @@ class CompressionSnapshot:
         return asdict(self)
 
 
+# LLM: RawMemoryEvent is the append-only archive contract. New execution facts must remain
+# optional for old rows and round-trip through to_dict without converting prose into authority.
+# 类用途: 保存一条原始会话或工具事件，供后续查询、压缩和记忆证据核验。
 @dataclass
 class RawMemoryEvent:
 
@@ -77,6 +80,9 @@ class RawMemoryEvent:
     tool_name: str = ""
     tool_call_id: str = ""
     tool_success: bool | None = None
+    operation_id: str = ""
+    effect_outcome: str = ""
+    source_ref: str = ""
     content_preview: str = ""
     content_path: str = ""
     content_hash: str = ""

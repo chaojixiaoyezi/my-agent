@@ -25,7 +25,7 @@ from agent_py_agent.cli.parser import build_parser
 def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
-        'workspace_root: "workspace"\n'
+        'workspace_root: ""\n'
         f'my_agent_home: "{tmp_path / "home"}"\n'
         'model_backend: "echo"\n'
         'subagent_workspace: "subagents"\n'
@@ -38,7 +38,7 @@ def _write_config(tmp_path: Path) -> Path:
 
 
 def _workspace(config_path: Path) -> Path:
-    return config_path.parent / "workspace"
+    return config_path.parent / "home" / "owners" / "local" / "main"
 
 
 def _home_root(config_path: Path) -> Path:
@@ -46,7 +46,7 @@ def _home_root(config_path: Path) -> Path:
 
 
 def _archive_root_for_workspace(root: Path) -> Path:
-    return root.parent / "home" / "owners" / "local" / "main"
+    return root
 
 
 def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
@@ -117,7 +117,7 @@ def _write_cross_day_handoff_fixture(root: Path, *, run_id: str) -> None:
 def _make_echo_agent(root: Path) -> SimpleAgent:
     return SimpleAgent(
         AgentConfig(
-            my_agent_home=str(root.parent / "home"),
+            my_agent_home=str(root.parents[2]),
             model_backend="echo",
             subagent_workspace="subagents",
             local_store_path="local_store/local.db",

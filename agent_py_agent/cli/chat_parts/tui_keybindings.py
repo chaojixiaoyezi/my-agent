@@ -399,7 +399,7 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
     if text == "/back" and _navigate_agent_back(params):
         _repin_transcript_after_submit(params)
         _remember_input(params.input_area, text)
-        _set_input_draft(params, TuiDraft("", 0))
+        _reset_input_after_submit(params)
         _reset_exit_arms(params)
         _restore_stash_after_submit(params)
         event.app.invalidate()
@@ -417,7 +417,7 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         return
     _repin_transcript_after_submit(params)
     _remember_input(params.input_area, text)
-    _set_input_draft(params, TuiDraft("", 0))
+    _reset_input_after_submit(params)
     _reset_exit_arms(params)
     if active_agent_id and text == "/stop":
         _dispatch_agent_interrupt(event, params, active_agent_id)
@@ -437,6 +437,10 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         _restore_stash_after_submit(params)
         event.app.invalidate()
         return
+    if _tui_submit_gateway_memory_command(event, params, text):
+        _restore_stash_after_submit(params)
+        event.app.invalidate()
+        return
     if _tui_handle_command(params=_handle_command_params(params, text)):
         if params.stop_event.is_set():
             event.app.exit()
@@ -449,6 +453,45 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         return
     _tui_enqueue_job(params, text, display_text=display_text)
     _restore_stash_after_submit(params)
+
+
+# LLM: Gateway memory I/O may traverse or update durable owner state and must never block the
+# prompt_toolkit input loop. The worker still calls the one shared slash dispatcher, so TUI and
+# plain mode keep identical result wording and memory semantics.
+# 函数用途: 在后台执行 /memory 与 /remember，让用户在慢磁盘或慢 Gateway 时仍可继续操作 TUI。
+def _tui_submit_gateway_memory_command(
+    event: Any,
+    params: TuiCreateKeybindingsParams,
+    text: str,
+) -> bool:
+    normalized = str(text or "").strip()
+    if normalized != "/memory" and not normalized.startswith(("/memory ", "/remember ")):
+        return False
+    if not bool(getattr(params, "use_gateway", False)):
+        return False
+    if getattr(getattr(params, "agent", None), "gateway_client_only", False) is not True:
+        return False
+    runtime = _required_tui_runtime(params)
+    app = event.app
+    runtime.set_notice(
+        "正在保存记忆…" if normalized.startswith("/remember ") else "正在读取记忆…",
+        duration_seconds=2.0,
+    )
+    command_params = _handle_command_params(params, normalized)
+
+    # LLM: The daemon owns no alternate state or retry loop; it invokes exactly one canonical
+    # command and lets the memory transport report success, deterministic failure, or unknown.
+    # 函数用途: 执行一次记忆命令并通知界面重绘，不占用输入线程。
+    def execute() -> None:
+        _tui_handle_command(params=command_params)
+        app.invalidate()
+
+    threading.Thread(
+        target=execute,
+        name="my-agent-tui-memory-command",
+        daemon=True,
+    ).start()
+    return True
 
 
 # LLM: A valid user submit is an explicit return-to-live action like 终端交互's
@@ -495,6 +538,20 @@ def _remember_input(input_area: Any, text: str) -> None:
     append = getattr(history, "append_string", None)
     if callable(append):
         append(text)
+
+
+# LLM: A submitted prompt must reset prompt_toolkit's mutable working-lines snapshot after the
+# durable history append. Merely replacing Document text leaves same-session entries outside the
+# buffer's history cursor even though FileHistory already contains them. Stash/queue restoration
+# continues to use _set_input_draft because those operations are edits, not submissions.
+# 函数用途: 提交后清空输入并重建历史游标，让本次 TUI 刚发送的消息立即可用 Up/Down 取回。
+def _reset_input_after_submit(params: TuiCreateKeybindingsParams) -> None:
+    from prompt_toolkit.document import Document
+
+    buffer = params.input_area.buffer
+    buffer.cancel_completion()
+    _required_interaction(params).install_draft(TuiDraft("", 0))
+    buffer.reset(document=Document("", cursor_position=0))
 
 
 # LLM: interaction dependency 必须是 setup 创建的同一实例；缺失时禁止静默退化为无 stash/search 的另一条输入路径。
@@ -968,11 +1025,10 @@ def _tui_attach_gateway_job(
     params.jobs.put(job)
 
 
-# LLM: Valid Gateway slash controls enter a durable operation outbox before HTTP. `/btw` always
-# needs the exact live turn. `/stop` also pins a currently submitting/running turn, but after the
-# foreground turn has yielded it may carry an empty turn id so the server can stop the sole typed
-# live task in this conversation; ambiguous task sets still fail closed on the server.
-# 函数用途: 持久提交 TUI 控制命令；前台插话精确绑回合，后台任务也能被 `/stop` 安全停止。
+# LLM: Mutating Gateway slash controls enter a durable operation outbox before HTTP. `/btw` binds
+# an exact live turn; Esc during manual Compact binds that typed control message instead of falling
+# through to a foreground/background task. Ambiguous task sets still fail closed server-side.
+# 函数用途: 展示同源上下文，或持久提交带精确回合/Compact 目标的 TUI 控制命令。
 def _tui_submit_control_operation(
     params: TuiCreateKeybindingsParams,
     text: str,
@@ -984,6 +1040,22 @@ def _tui_submit_control_operation(
     command = parse_conversation_control(text, reject_unknown_slash=True)
     if command is None or not command.valid:
         return False
+    if command.kind == "context":
+        from .tui_block_renderer import render_tui_context_usage_report
+
+        runtime = _active_tui_runtime(params)
+        status = runtime.store.snapshot().status
+        runtime.write_console(
+            render_tui_context_usage_report(
+                status.context_usage,
+                compact_count=status.compact_count,
+            )
+        )
+        return True
+    runtime = _required_tui_runtime(params)
+    target_control_message_id = ""
+    if command.kind == "stop":
+        target_control_message_id = runtime.active_manual_compact_control_message_id()
     expected_turn_id = ""
     if command.kind in {"steer", "stop"}:
         with params.state_lock:
@@ -992,7 +1064,7 @@ def _tui_submit_control_operation(
         exact_turn_required = command.kind == "steer" or running
         if exact_turn_required and (not running or not expected_turn_id):
             _required_tui_runtime(params).set_notice(
-                "No exact active turn yet · command not sent",
+                "当前没有可精确绑定的运行回合，命令未发送",
                 duration_seconds=2.5,
             )
             return True
@@ -1000,28 +1072,44 @@ def _tui_submit_control_operation(
     from .tui_control_delivery import TuiControlOperationEntry
 
     message_id = new_id("control")
-    runtime = _required_tui_runtime(params)
+    if command.kind == "steer":
+        runtime.enqueue_active_turn_input(message_id, str(command.value or "").strip())
+    entry = TuiControlOperationEntry(
+        message_id=message_id,
+        command_text=str(text or "").strip(),
+        command_kind=command.kind,
+        expected_turn_id=expected_turn_id,
+        target_control_message_id=target_control_message_id,
+    )
     try:
-        _ensure_control_operation_reconciler(params).enqueue(
-            TuiControlOperationEntry(
-                message_id=message_id,
-                command_text=str(text or "").strip(),
-                command_kind=command.kind,
-                expected_turn_id=expected_turn_id,
+        reconciler = _ensure_control_operation_reconciler(params)
+        if command.kind == "compact":
+            reconciler.enqueue(
+                entry,
+                on_persisted_before_dispatch=lambda persisted: (
+                    runtime.publish_manual_compact_started(persisted.message_id)
+                ),
             )
-        )
+        else:
+            reconciler.enqueue(entry)
     except Exception:
+        if command.kind == "steer":
+            runtime.cancel_active_turn_input(message_id)
         runtime.set_notice(
-            "Control operation could not be saved",
+            "控制操作无法保存，命令未发送",
             duration_seconds=2.5,
         )
         return True
-    if command.kind == "compact":
-        runtime.publish_manual_compact_started(message_id)
-    runtime.set_notice(
-        "Confirming control operation…",
-        duration_seconds=1.2,
-    )
+    # 会话运行时 的 /status 会立即落一张稳定状态卡；异步刷新不会再把“正在刷新”
+    # 留在 footer。这里的状态快照仍由 Gateway 返回，但只读查询不显示成待确认
+    # 的副作用操作，避免空闲 TUI 在下一次重绘前一直挂着误导性提示。
+    if command.kind != "status":
+        runtime.set_notice(
+            "补充消息已排队，等待当前回合安全点接收…"
+            if command.kind == "steer"
+            else "正在确认控制操作…",
+            duration_seconds=2.5 if command.kind == "steer" else 1.2,
+        )
     return True
 
 
@@ -1075,6 +1163,7 @@ def _ensure_control_operation_reconciler(
             execution,
             command,
             message_id=entry.message_id,
+            target_control_message_id=entry.target_control_message_id,
         )
 
     # LLM: Status requests use only the persisted server operation id and cannot resend command text.
@@ -1102,14 +1191,42 @@ def _ensure_control_operation_reconciler(
     def on_restore(entry) -> None:
         if entry.command_kind == "compact":
             runtime.publish_manual_compact_started(entry.message_id)
+        elif entry.command_kind == "steer":
+            command = parse_conversation_control(
+                entry.command_text,
+                reject_unknown_slash=True,
+            )
+            if command is not None and command.valid:
+                try:
+                    runtime.enqueue_active_turn_input(
+                        entry.message_id,
+                        str(command.value or "").strip(),
+                    )
+                except KeyError:
+                    pass
         runtime.set_notice("Restoring control confirmation…", duration_seconds=2.0)
 
-    # LLM: A successful compact consumes only the typed canonical generation returned by Gateway;
-    # prose remains display text and cannot advance status. Other controls keep the console path.
-    # 函数用途: 展示控制结果，并让手动 Compact 立即刷新历史边界和固定状态栏。
+    # LLM: Compact command completion and transcript mutation are separate typed facts. ``ok``
+    # closes the command without an error (including an empty-history no-op); only a positive
+    # canonical generation may advance the visible compact boundary. Prose never changes state.
+    # 函数用途: 展示控制结果；无需压缩时正常收口，真正提交时才刷新历史边界和固定状态栏。
     def on_complete(entry, result) -> None:
         if entry.command_kind == "stop":
-            runtime.set_notice(result.message or "Stop request completed", duration_seconds=2.0)
+            # 后台主回合已经让出时没有 turn_interrupted 事件；只用短 notice 会在
+            # 子代理名单刷新前消失，让用户看不出 /stop 是否生效。沿用 会话运行时 的
+            # 稳定历史反馈：只投影服务端回执，不据文案猜测任何 run 已到终态。
+            runtime.write_console(result.message or "停止请求已完成。")
+            return
+        if entry.command_kind == "steer":
+            if result.delivery_status == "accepted":
+                runtime.promote_active_turn_inputs(
+                    (entry.message_id,),
+                    request_id=entry.expected_turn_id,
+                )
+                runtime.set_notice("补充消息已进入当前回合", duration_seconds=2.0)
+            else:
+                runtime.cancel_active_turn_input(entry.message_id)
+                runtime.write_console(result.message or "补充消息未进入当前回合。")
             return
         if entry.command_kind == "compact":
             generation = (
@@ -1117,12 +1234,12 @@ def _ensure_control_operation_reconciler(
                 if result.ok and result.status is not None
                 else None
             )
-            succeeded = generation is not None and generation > 0
             runtime.publish_manual_compact_terminal(
                 entry.message_id,
-                succeeded=succeeded,
+                succeeded=result.ok,
+                interrupted=result.error_code == "COMPACT_INTERRUPTED",
             )
-            if succeeded:
+            if generation is not None and generation > 0:
                 runtime.publish_compact_boundary(
                     generation,
                     text=result.message,
@@ -1146,6 +1263,8 @@ def _ensure_control_operation_reconciler(
     # LLM: Id conflicts are quarantined; the client cannot bypass them by silently making a new id.
     # 函数用途: 提示控制消息身份冲突并停止自动重试。
     def on_conflict(entry) -> None:
+        if entry.command_kind == "steer":
+            runtime.cancel_active_turn_input(entry.message_id)
         if entry.command_kind == "compact":
             runtime.publish_manual_compact_terminal(
                 entry.message_id,
@@ -1557,7 +1676,13 @@ def _dispatch_agent_interrupt(
         except Exception:
             result = {"ok": False}
         if isinstance(result, dict) and result.get("ok") is True:
-            runtime.set_notice("停止请求已执行", duration_seconds=1.8)
+            status = str(result.get("status") or "").strip()
+            message = (
+                "这个子代理已经停止"
+                if status == "already_terminal"
+                else "停止请求已接收，正在收口…"
+            )
+            runtime.set_notice(message, duration_seconds=2.4)
         else:
             runtime.set_notice(
                 "停止结果暂时无法确认；系统没有自动重复执行",
@@ -1590,6 +1715,18 @@ def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None
         queued = int(params.pending_jobs_ref[0] or 0) > 0
     if running:
         _dispatch_active_interrupt(event, params)
+        return
+    runtime = _required_tui_runtime(params)
+    background_active = getattr(runtime, "has_active_background_task", None)
+    if callable(background_active) and background_active():
+        # 会话运行时 的中断动作绑定当前 active turn，而不是只看 composer worker 是否
+        # 正在流式输出。后台等待子代理时本地 worker 已空闲，但 canonical task 仍
+        # 活动，所以 Ctrl-C 仍需走同一个 typed `/stop`。
+        if bool(getattr(params, "use_gateway", False)):
+            _tui_submit_control_operation(params, "/stop")
+        else:
+            _tui_handle_command(params=_handle_command_params(params, "/stop"))
+        event.app.invalidate()
         return
     if queued and _restore_editable_queue(params):
         event.app.invalidate()
@@ -1826,11 +1963,26 @@ def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None
             return
         _dispatch_agent_interrupt(event, params, active_agent_id)
         return
+    if _required_tui_runtime(params).active_manual_compact_control_message_id():
+        _tui_submit_control_operation(params, "/stop")
+        event.app.invalidate()
+        return
     with params.state_lock:
         running = bool(params.is_running_ref[0])
         queued = int(params.pending_jobs_ref[0] or 0) > 0
     if running:
         _dispatch_active_interrupt(event, params)
+        return
+    runtime = _required_tui_runtime(params)
+    background_active = getattr(runtime, "has_active_background_task", None)
+    if callable(background_active) and background_active():
+        # 会话运行时 的 Esc 始终中断当前 active turn；后台等待子代理时本地 worker 已
+        # 空闲，但 canonical task 仍活动，因此不能让 Esc 静默退化成空操作。
+        if bool(getattr(params, "use_gateway", False)):
+            _tui_submit_control_operation(params, "/stop")
+        else:
+            _tui_handle_command(params=_handle_command_params(params, "/stop"))
+        event.app.invalidate()
         return
     if queued and _restore_editable_queue(params):
         event.app.invalidate()
@@ -1843,7 +1995,7 @@ def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None
                 int(buffer.cursor_position),
             )
             _remember_input(params.input_area, _required_interaction(params).expand_draft(draft))
-            _set_input_draft(params, TuiDraft("", 0))
+            _reset_input_after_submit(params)
             _required_tui_runtime(params).set_notice("")
             _reset_exit_arms(params)
         else:

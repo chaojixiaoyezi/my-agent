@@ -239,6 +239,44 @@ def test_reconciler_stuck_owner_does_not_delay_base_or_other_owner(
     assert not thread.is_alive()
 
 
+def test_reconciler_does_not_sweep_memory_curator_only_owner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_agent, _owner, _scoped = _scoped_restart_fixture(tmp_path)
+    hard_owner = OwnerIdentity.provider_user("feishu", "u-running")
+    soft_owner = OwnerIdentity.provider_user("feishu", "u-memory-only")
+    registry = shared_active_owner_registry(base_agent)
+    registry.record(hard_owner, hard=True)
+    registry.record(soft_owner, hard=False)
+    monkeypatch.setattr(
+        gateway_loops,
+        "_gateway_agent_from_context",
+        lambda _context: base_agent,
+    )
+    reconciler = gateway_loops._GatewayOrphanReconciler(
+        _context(base_agent, tmp_path)
+    )
+    monkeypatch.setattr(reconciler, "_seed_owner_registry", lambda: None)
+    monkeypatch.setattr(
+        reconciler,
+        "_ensure_owner_pool",
+        lambda: SimpleNamespace(get=lambda owner: owner),
+    )
+    labels: list[str] = []
+
+    def _sweep(_agent, label: str) -> dict[str, object]:
+        labels.append(label)
+        return {"owner": label}
+
+    monkeypatch.setattr(reconciler, "_sweep", _sweep)
+
+    reports = reconciler.tick()
+
+    assert labels == ["base", "feishu/user/u-running"]
+    assert [report["owner"] for report in reports] == labels
+
+
 def test_reconciler_does_not_replay_completed_runner_session(
     tmp_path: Path,
     monkeypatch,

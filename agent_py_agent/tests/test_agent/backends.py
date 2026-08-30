@@ -7,6 +7,8 @@ parent-planner dispatch).
 测试专用后端类，模拟不同场景下模型返回的内容，让测试不依赖真实 LLM。
 """
 
+import json
+
 from agent_py_agent.agent.backends import BaseBackend, ModelResponse
 
 
@@ -268,7 +270,12 @@ class BoundaryWriteSubagentBackend(_TestNativeBackend):
                 ],
             )
 
-        assert "PATH_DANGEROUS_ROOT_BLOCKED" in prompt or "runtime gate denied" in prompt
+        native_messages = json.dumps(kwargs.get("messages") or [], ensure_ascii=False)
+        assert (
+            "PATH_DANGEROUS_ROOT_BLOCKED" in native_messages
+            or "PATH_OWNER_SCOPE_BLOCKED" in native_messages
+            or "runtime gate denied" in native_messages
+        )
         return ModelResponse(
             text=(
                 "[SUBAGENT_RESULT]\n"

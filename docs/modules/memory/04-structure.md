@@ -6,7 +6,7 @@
 
 - 正式长期记忆：`owners/local/main/memory/long_term/memory.jsonl`（晋升后的正式事实）。
 - 日常记忆：`memory/daily/`（按日），`memory/lessons/`（经验教训）。
-- 候选：`memory/candidates.jsonl`（待审核，晋升前不具事实权威）。
+- 候选：`memory/candidates.jsonl`（待结构化证据/冲突/阈值核验，晋升前不具事实权威；只有 SOUL 候选等待用户确认）。
 - recovery snapshot：`memory/hooks/YYYY-MM-DD.jsonl`（运行经历归档的轻量恢复线索）。
 - 运行事实（runtime facts）与 raw archive：由 `run --save` 写，`memory-resume`
   据此恢复上下文；与 `ConversationStore`（transcript/guidance/goal）分开。
@@ -18,6 +18,11 @@
 - 记忆晋升、候选审核、HOT/lesson 写入走 `AgentConfig` 开关与统一 Candidate/Curator
   链，入口收敛在 memory 模块；CLI 普通 run 不直接把对话正文写进正式长期记忆
   （`--no-save` 关闭本次运行归档，ConversationStore 与审计仍照常）。
+- `promotion_mode` 由宿主根据 typed target/type/origin/action 每次重算，不接受模型或旧账本把
+  自主候选永久降为人工。长期事实、USER、AGENTS、lesson 与 HOT 在满足各自证据、精确目标、冲突、
+  阈值、CAS、quota 和注入扫描后自主提交；只有 SOUL 进入 owner 用户确认链。
+- 所有 active/candidate/daily/lesson/HOT/persona 路径都从当前 owner 的 `HomePaths` 解析。共享 Gateway
+  只调度多个 owner，绝不共享这些仓库；投影、索引和恢复包不得把其它 owner 的正文带入当前模型。
 - `memory_path` 等路径由 home 解析统一给出（显式配置 > MY_AGENT_HOME 环境变量 >
   ~/.my-agent 兜底），记忆模块不自行猜测 owner home。
 
@@ -25,7 +30,7 @@
 
 - `agent/memory_archive/compact_semantic_summary.py` 是 carried archive 续跑摘要与运行中
   native IR 摘要共用的语义摘要入口，但不拥有 Compact 状态、工具执行或完成判定。
-- 摘要后端调用统一经 `agent/agent_core/model/auxiliary_call.py` 包装，复用当前 agent 的
+- 摘要后端调用统一经 `agent/conversation/auxiliary_model_call.py` 包装，复用当前 agent 的
   `ModelCallLedger`、provider attempt observer、全局 admission 和指标；Compact 不再拥有第二套线程超时
   或隐形调用计数。调用持续时间由 backend/provider 已配置的网络超时负责收口。
 - 运行中真实 turn 的摘要输入由“上一代 ConversationThread 完整摘要 + 本次 native 工具
@@ -49,6 +54,9 @@
   `compact-mechanical-fallback.v1` 的有界非权威续接投影并继续 checkpoint/CAS；后者仍抛错、恢复 IR 并累计
   熔断。transcript Compact 对 completed-empty 使用 raw row + structured operation evidence 的同类有界投影。
   两种机械投影都不判断完成、不授权路径、不替代 archive、operation ledger、artifact 或真实文件。
+- 非空 provider 正文也不能自动成为 live handoff：只接受以 `compact-live-handoff.v1` 开头、六个固定语义栏
+  完整且不含供应商工具协议的纯文本。非法正文与 completed-empty 一样使用 typed IR 机械投影，但 reason
+  区分 `provider_empty_summary` 与 `provider_invalid_summary_shape`，便于审计而不把模型文本升级为机器状态。
 - 同一个 `CompactionSummary` 容器里的 thread summary 与 active-turn carried handoff 以稳定 schema marker
   区分；二次 Compact 只删除 exact 上一代 thread summary，不能吞掉 carried handoff。当前任务由首条
   provider user message 唯一承载，Compact synthetic user 只放摘要指令与上一代 summary。
@@ -62,9 +70,11 @@
   `conversation_request_id` 读取，保留 append 顺序，并以 `scoped_call_id` 去重；新行显式保存 turn id，
   旧行仅以同值 `request_id` 兼容，其它 task、同 task 的其它 turn 和 child workspace 不扫描。
 - 恢复记录沿既有 `carried_archive_tool_calls` 进入工具循环，重建已执行工具、one-shot key、工具轮基线、
-  参数和 artifact refs。工具参数使用限深、限宽、凭据脱敏的 JSON 投影，Todo items、批量派工 items 与
-  typed covers 不得因嵌套而变成空数组。大输出正文仍留在 owner 私有 artifact，按需读取；索引损坏时
-  fail-soft 回到已有 task/transcript 上下文，但不得编造已执行事实。
+  参数和 artifact refs。索引同时保存宿主执行 `parameters` 与 provider 原始 `model_parameters`：前者只给
+  宿主审计、恢复和幂等使用，后者才允许进入 carried 摘要或模型 replay。两者都使用限深、限宽、凭据脱敏
+  的 JSON 投影，Todo items、批量派工 items 与 typed covers 不得因嵌套而变成空数组。旧索引只有在
+  `input_sources` 能证明字段来源时才提取模型视图。大输出正文仍留在 owner 私有 artifact，按需读取；
+  索引损坏时 fail-soft 回到已有 task/transcript 上下文，但不得编造已执行事实。
 - 恢复到 live prompt 时再次经过同一大参数 reducer，`write_file.content` 只留下路径、模式、长度、hash 和
   短 preview；chronology index 超限时使用 bounded head + newest tail，并显式记录中段省略数量。完整正文
   只能按 artifact ref 读取，不能因下一工作片启动而整份回灌。
@@ -76,6 +86,18 @@
   请求持续可见，但不推进 ConversationThread generation，不增加 TUI `compact N`，也不获得副作用权威。
 - 这条链只解决同一 active turn 跨后台工作片的连续性，不新建 Compact 账本，不推进 generation，也不让
   自然语言计划获得机器权威。
+
+## Artifact 分页与大输出恢复
+
+- 完整工具输出先交给唯一 externalizer 判定和归档，再产生模型 preview；工具可以用结构化
+  `tool_output_policy.requires_recovery_artifact=true` 要求保留完整正文，但不能指定宿主路径。全局大小阈值
+  和预览容量仍是另两条通用触发条件。
+- artifact 索引为模型提供稳定逻辑 `canonical_artifact_ref`；物理 `artifact_path` 仅供宿主 CLI/审计，TUI
+  进度和模型参数不得泄漏它。读取窗口统一返回 `window_start/window_end/total_chars` 与前后剩余方向；只有
+  `has_more_after=true` 才提供 `next_offset`。tail 读取即使省略前缀也表示已经到 EOF，search 的截断只代表
+  匹配展示上限，不代表正文还有下一页。
+- 原始 artifact、append-only index 和 operation ledger 继续是事实源；模型 preview、摘要和逻辑 ref 只是
+  有界续接材料，不能证明工具成功、任务完成或授权路径。
 
 ## 2026-08-17 测试适配记录
 

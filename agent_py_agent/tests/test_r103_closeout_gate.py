@@ -263,6 +263,29 @@ def test_b_create_attempt_takes_over_expired_dead_holder_lock(repo, tmp_path):
     assert lock["holder_instance"] == other.instance_id
 
 
+def test_b_create_attempt_immediately_takes_over_unexpired_dead_holder(repo, tmp_path):
+    """Gateway 已确认旧 PID 死亡时立即换代，不能再白等租期和宽限期。"""
+    _, _, run = _make_task_with_run(repo)
+    first = repo.create_attempt(run["agent_run_id"])
+    _insert_exec_lock(
+        repo,
+        agent_run_id=run["agent_run_id"],
+        holder_instance="dead-holder",
+        attempt_id=first["attempt_id"],
+        generation=1,
+        lease_expires_at=time.time() + 3600,
+        pid=999999,
+        start_token="dead-token",
+    )
+
+    other = _other_repo(tmp_path)
+    attempt = other.create_attempt(run["agent_run_id"])
+
+    assert attempt["attempt_generation"] == 2
+    lock = repo.lock_for_scope(_exec_scope(run["agent_run_id"]))
+    assert lock["holder_instance"] == other.instance_id
+
+
 # =================================================================== C. 旧 worker 越 fence
 # takeover（接管换代）后，旧 attempt 的 renew/settle 必须被拒且留痕。
 

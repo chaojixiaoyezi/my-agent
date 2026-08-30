@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -367,6 +366,21 @@ def _current_conversation_task_id(agent) -> str:
     return str(attrs.get("conversation_task_id") or "").strip()
 
 
+# LLM: Recursive controls represent the stable agent edge, not the latest Gateway request.
+# A subagent runner is its own actor; an ordinary main-agent follow-up keeps the exact
+# conversation task that originally parented its children. Only a task without either fact may
+# fall back to the current request/run id. Keep create/guidance/cancel/capability on this seam.
+# 函数用途: 返回当前代理在创建、插话、停止和权限裁决时使用的稳定父级编号。
+def current_orchestration_requester_run_id(agent) -> str:
+    from ..runner.context import current_subagent_run_id
+
+    return (
+        current_subagent_run_id(agent)
+        or _current_conversation_task_id(agent)
+        or _current_run_id(agent)
+    )
+
+
 def explicit_root_allowed_tools(allowed_tools: list[str] | None) -> list[str] | None:
     if allowed_tools is None:
         return None
@@ -674,14 +688,8 @@ def _normalize_owner_home_output_refs(
         owner_home = Path(raw_owner_home).expanduser().resolve(strict=False)
     except OSError:
         return False
-    _seed_owner_task_output_refs(updated, owner_home)
-    replacements: dict[str, str] = {}
-
     def mapper(text: str) -> str | None:
-        mapped = _owner_home_task_output_ref(text, owner_home, task_root, task_output_dir)
-        if mapped is not None and mapped != text:
-            replacements[text] = mapped
-        return mapped
+        return _owner_home_task_output_ref(text, owner_home, task_root, task_output_dir)
 
     changed = False
     for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
@@ -692,8 +700,6 @@ def _normalize_owner_home_output_refs(
             updated[key] = value
             changed = True
     changed = _map_nested_owner_output_refs(updated, mapper) or changed
-    if replacements:
-        _rewrite_output_ref_mentions(updated, replacements)
     return changed
 
 
@@ -753,58 +759,6 @@ def _owner_home_task_output_ref(
             tail = parts[output_index + 1 :]
             suffix = Path(*tail) if tail else Path()
     return str((task_output_dir / suffix).resolve(strict=False))
-
-
-def _seed_owner_task_output_refs(updated: dict[str, object], owner_home: Path) -> None:
-    explicit_refs = _owner_task_output_path_tokens(
-        (updated.get("goal"), updated.get("thought"), updated.get("plan")),
-        owner_home,
-    )
-    if explicit_refs:
-        existing_refs = params_output_refs({"output_refs": updated.get("output_refs")})
-        updated["output_refs"] = list(dict.fromkeys([*existing_refs, *explicit_refs]))
-
-
-def _owner_task_output_path_tokens(value: object, owner_home: Path) -> list[str]:
-    texts: list[str] = []
-    if isinstance(value, str):
-        texts.append(value)
-    elif isinstance(value, (list, tuple)):
-        texts.extend(item for item in value if isinstance(item, str))
-    if not texts:
-        return []
-    prefix = re.escape(str(owner_home).rstrip("/"))
-    pattern = re.compile(prefix + r"/tasks/[^\s`\"'“”‘’<>]+")
-    tokens: list[str] = []
-    trailing = ",.;:!?，。；：！？）)]}】》"
-    for match in pattern.finditer("\n".join(texts)):
-        token = match.group(0).rstrip(trailing)
-        parts = Path(token).parts
-        if "output" not in parts or token in tokens:
-            continue
-        tokens.append(token)
-    return tokens
-
-
-def _rewrite_output_ref_mentions(updated: dict[str, object], replacements: dict[str, str]) -> None:
-    for key in ("goal", "thought", "plan"):
-        if key in updated:
-            updated[key] = _replace_output_ref_mentions(updated[key], replacements)
-
-
-def _replace_output_ref_mentions(value: object, replacements: dict[str, str]) -> object:
-    if isinstance(value, str):
-        text = value
-        for source, target in sorted(
-            replacements.items(), key=lambda item: len(item[0]), reverse=True
-        ):
-            text = text.replace(source, target)
-        return text
-    if isinstance(value, list):
-        return [_replace_output_ref_mentions(item, replacements) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_replace_output_ref_mentions(item, replacements) for item in value)
-    return value
 
 
 def _normalize_current_task_workspace_refs(
@@ -1528,10 +1482,10 @@ def add_current_conversation_attrs(attrs: dict[str, object], agent) -> None:
     _attach_thread_attrs(attrs, thread, task_id)
 
 
-# LLM: Child cwd/roots come from the parent's promoted run_workspace or its thread-local
-# canonical task binding. The pre-promotion client cwd is a fallback only; descendants never
-# regain the daemon home root while attributes are being assembled.
-# 函数用途: 把父级当前唯一任务目录复制给直接 child，并沿子孙链保持同一隔离范围。
+# LLM: Child cwd/roots and the canonical run_workspace come from the parent's promoted task.
+# The pre-promotion client cwd is only a fallback; descendants must keep the same task root so
+# persistence, recovery, and conversation task links never materialize a second manager-local tree.
+# 函数用途: 把父级当前唯一任务目录复制给直接 child，并沿子孙链保持同一任务和隔离范围。
 def _inherit_current_conversation_workspace_attrs(
     attrs: dict[str, object],
     agent: object,
@@ -1550,6 +1504,18 @@ def _inherit_current_conversation_workspace_attrs(
     cwd = task_root or conversation_execution_cwd(current_attrs)
     if not cwd:
         return
+    if task_root:
+        inherited_workspace = dict(workspace) if isinstance(workspace, dict) else {}
+        inherited_workspace.update(
+            {
+                "task_root": task_root,
+                "work_dir": str(Path(task_root) / "work"),
+                "output_dir": str(Path(task_root) / "output"),
+            }
+        )
+        # Parent task scope is a host-owned fact.  Do not let a nested model-provided
+        # attributes object replace it with the SubAgentManager's internal runtime root.
+        attrs["run_workspace"] = inherited_workspace
     attrs[CONVERSATION_EXECUTION_CWD_ATTR] = cwd
     attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = (
         [task_root]

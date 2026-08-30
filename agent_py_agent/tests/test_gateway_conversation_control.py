@@ -2140,6 +2140,7 @@ def test_selected_task_is_persisted_on_the_live_gateway_request(tmp_path) -> Non
     payload = json.loads(request_path.read_text(encoding="utf-8"))
     assert selected is not None
     assert payload["conversation_runtime"] == {
+        "request_id": "req-turn",
         "thread_id": thread.thread_id,
         "task_id": "task-existing",
         "task_path": selected.task_path,
@@ -2811,6 +2812,28 @@ def test_manual_compact_uses_canonical_checkpoint_lane_and_custom_instructions(t
     assert "优先保留未完成事项" in prompts[0]
 
 
+def test_manual_compact_without_history_is_a_successful_noop(tmp_path) -> None:
+    """空会话不调用模型、不推进代次，也不能冒充压缩失败。"""
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+
+    result = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/compact"),
+        _scope(),
+    )
+
+    assert result.ok is True
+    assert result.status is None
+    assert result.message == "当前会话还没有可压缩的历史。"
+    assert agent.conversation_store.list_threads() == []
+
+
 def test_manual_compact_rejects_a_live_turn_and_effort_never_fakes_a_setting(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
@@ -2845,6 +2868,96 @@ def test_manual_compact_rejects_a_live_turn_and_effort_never_fakes_a_setting(tmp
     assert "未改变任何模型参数" in effort.message
     assert effort_status.ok is True
     assert "供应商管理推理强度" in effort_status.message
+
+
+def test_manual_compact_stop_interrupts_provider_and_preserves_generation(tmp_path) -> None:
+    entered = threading.Event()
+    results: list[object] = []
+
+    class BlockingSummaryBackend:
+        name = "blocking-summary-test"
+
+        def generate(self, _prompt: str, **_kwargs) -> ModelResponse:
+            entered.set()
+            while not is_interrupted():
+                time.sleep(0.01)
+            raise InterruptedError("provider connection closed by exact compact stop")
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            model_context_window_tokens=20_000,
+            gateway_per_user_owner_scoping=False,
+        ),
+        tmp_path,
+    )
+    agent.backend = BlockingSummaryBackend()
+    paths = gateway_paths(agent)
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "u-1",
+            "channel": "feishu",
+            "channel_conversation_id": "c-1",
+            "channel_user_id": "u-1",
+        }
+    )
+    for role in ("user", "assistant"):
+        agent.conversation_store.append_message(
+            {
+                "thread_id": thread.thread_id,
+                "role": role,
+                "content": f"中断前必须保留的 {role} 历史",
+                "channel": "feishu",
+            }
+        )
+    compact_scope = GatewayControlScope(
+        "u-1",
+        "feishu",
+        "c-1",
+        metadata={"message_id": "compact-control-1"},
+    )
+
+    worker = threading.Thread(
+        target=lambda: results.append(
+            execute_gateway_conversation_control(
+                agent,
+                paths,
+                _command("/compact"),
+                compact_scope,
+            )
+        )
+    )
+    worker.start()
+    assert entered.wait(timeout=2)
+
+    stop = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/stop"),
+        GatewayControlScope(
+            "u-1",
+            "feishu",
+            "c-1",
+            metadata={
+                "message_id": "compact-stop-1",
+                "target_control_message_id": "compact-control-1",
+            },
+        ),
+    )
+    worker.join(timeout=2)
+
+    assert stop.ok is True
+    assert stop.delivery_status == "accepted"
+    assert not worker.is_alive()
+    assert len(results) == 1
+    compact_result = results[0]
+    assert compact_result.ok is False
+    assert compact_result.error_code == "COMPACT_INTERRUPTED"
+    unchanged = agent.conversation_store.load_thread(thread.thread_id)
+    assert unchanged is not None
+    assert unchanged.compact_generation == 0
+    assert unchanged.compact_checkpoint_id == ""
+    assert len(agent.conversation_store.recent_messages(thread.thread_id, limit=10)) == 2
 
 
 def test_stop_persists_and_signals_only_matching_request(tmp_path) -> None:
@@ -3061,6 +3174,37 @@ def test_status_and_stop_follow_typed_request_lineage_to_subagents(tmp_path) -> 
     assert status.status is not None
     assert status.status.subagent_total == 1
     assert status.status.subagent_running == 1
+    assert stopped.ok is True
+    assert agent.subagents.load(child.id).status == "CANCELLED"
+
+
+def test_stop_reconciles_child_created_by_inflight_transaction(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.processing / "req-late-child.json", _request("req-late-child"))
+
+    with agent.subagents.creation_guard():
+        stopped = execute_gateway_conversation_control(
+            agent,
+            paths,
+            _command("/stop"),
+            _scope(),
+        )
+        child = agent.subagents.create_run(
+            goal="模拟已进入 handler 的迟到派工",
+            thought="停止线程必须等创建事务退出后复读谱系",
+            plan=["落盘", "等待停止侧收口"],
+            attributes={CONVERSATION_REQUEST_ID_ATTR: "req-late-child"},
+        )
+
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and agent.subagents.load(child.id).status != "CANCELLED":
+        time.sleep(0.01)
+
     assert stopped.ok is True
     assert agent.subagents.load(child.id).status == "CANCELLED"
 

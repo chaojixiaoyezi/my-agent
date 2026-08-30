@@ -1,66 +1,39 @@
+"""composition root for SimpleAgent runtime, tools, memory, gateway, and subagents."""
+
+# LLM: core.py 只装配 SimpleAgent 的当前主链；拆出的私有 helper 必须由所属
+# 模块直接导入，不在这里保留无人消费的旧 re-export 兼容面。
+# 模块用途: 组装模型后端、工具、记忆、会话和子代理，生成可运行的 SimpleAgent。
+
 from __future__ import annotations
 
 import os
 from dataclasses import replace
-
-"""composition root for SimpleAgent runtime, tools, memory, gateway, and subagents."""
-
 from pathlib import Path
 
-from .agent_core import (
-    AgentRunResult,
+from .agent_core.capability_request_tool import CapabilityRequestTool
+from .agent_core.models import AgentRunResult
+from .agent_core.orchestration.dispatch.mixin import SimpleAgentDispatchMixin
+from .agent_core.orchestration_tools import (
+    CODING_SUBAGENT_TOOLS,
+    READ_ONLY_SUBAGENT_TOOLS,
     CancelSubagentsTool,
-    CapabilityRequestTool,
     CreateSubagentsTool,
+    ListAgentsTool,
     ResolveCapabilityRequestsTool,
-    SendGuidanceTool,
-    SimpleAgentDispatchMixin,
-    SimpleAgentRuntimeMixin,
-    SimpleAgentSubagentMixin,
-    TaskProgressTool,
     execute_cancel_subagents,
 )
-from .agent_core.orchestration.dispatch.lock import _DispatchWatchLock
-from .agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS, READ_ONLY_SUBAGENT_TOOLS
 from .agent_core.parameters import (
     ONE_SHOT_TOOL_NAMES,
-    _bool_param,
-    _non_negative_int,
-    _one_shot_tool_call_key,
-    _positive_int,
 )
 from .agent_core.planner_service import (
     PARENT_PLANNER_READ_TOOLS,
 )
-from .agent_core.planner_service import (
-    build_parent_planner_prompt as _build_parent_planner_prompt,
-)
-from .agent_core.planner_service import (
-    build_parent_planner_state as _build_parent_planner_state,
-)
-from .agent_core.planner_service import (
-    combine_runner_instruction as _combine_runner_instruction,
-)
-from .agent_core.planner_service import (
-    task_state_for_planner as _task_state_for_planner,
-)
 from .agent_core.runner.context import ThreadLocalAgentAttribute, current_subagent_run_id
-from .agent_core.runner.dispatch import (
-    RETRYABLE_RUNNER_FAILURE_TYPES,
-    _dispatch_patch_review_run_ids,
-    _dispatch_runner_candidates,
-    _is_dispatch_runner_candidate,
-    _limit_items,
-    _resolve_runner_concurrency,
-    _run_subagent_worker,
-    _runner_dispatch_record,
-    _runner_failure_type,
-    _runner_max_attempts,
-    _runner_retry_reason,
-    _task_has_runner_patches,
-)
-from .agent_core.runner.prompts import _build_subagent_runner_prompt
+from .agent_core.runtime.guidance_tool import SendGuidanceTool
 from .agent_core.runtime.owner_roots import runtime_owner_root
+from .agent_core.runtime_mixin import SimpleAgentRuntimeMixin
+from .agent_core.subagent_mixin import SimpleAgentSubagentMixin
+from .agent_core.task_progress_tool import TaskProgressTool
 from .backends import get_backend
 from .capability import CapabilityRouter, from_tool_model_spec
 from .capability.channel_message_tool import SendMessageTool
@@ -121,6 +94,7 @@ from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService,
 from .settings import AgentConfig
 from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
+from .tooling.gateway_status import GatewayStatusTool
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .user_space.home_indexes import register_owner_ref
 from .user_space.home_layout import ensure_my_agent_home
@@ -250,6 +224,7 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
             tool_verifier=LocalStoreToolEvidenceVerifier(
                 agent.local_store,
                 owner_id=str(agent.home_paths.owner_id or "local/main"),
+                owner_root=agent.home_paths.owner_home_dir,
             ),
         ),
         policy=MemoryPromotionPolicy(
@@ -372,8 +347,12 @@ class SimpleAgent(
             self, config
         )
         self.owner_quota = _build_owner_quota_enforcer(self)
+        # LLM: Durable runtime paths must hash and resolve from the same effective workspace used
+        # by prompts and tools. Using the constructor's process/root hint here creates a second
+        # subagent/conversation home that CLI workers cannot find under WorkspaceOnly.
+        # 人类: 子代理、会话和本地账本跟随已经裁决过的工作区，不能再偷偷使用启动目录。
         self.runtime_path_resolution = resolve_runtime_paths_for_agent(
-            config, self.root, self.home_paths
+            config, self.effective_workspace_root, self.home_paths
         )
         paths = self.runtime_path_resolution.paths
         apply_runtime_paths_to_config(config, self.runtime_path_resolution)
@@ -529,6 +508,9 @@ class SimpleAgent(
                 "status": ["PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"],
                 "reason": reason,
                 "kill_process": True,
+                # 调用方已经在唯一 creation_guard 内复读完整 request lineage；
+                # 每个 exact run 只收口一次，避免非可重入 guard 嵌套。
+                "cascade_descendants": False,
             }
         )
 
@@ -943,6 +925,10 @@ def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
 # LLM: 主代理通用工作工具在这里统一注册；send_message 是唯一通道发送入口，不增加平台专用旁路。
 # 函数用途: 把编排、检索、记忆、消息和协作工具装入主代理 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
+    # Gateway 状态包含宿主 PID、配置和日志路径，只向本机管理员主代理提供；普通 owner
+    # 不注册这项能力，从工具快照源头避免跨用户泄露。
+    if str(getattr(agent.tools, "owner_type", "") or "") == "main_agent":
+        agent.tools.register(GatewayStatusTool(agent))
     agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(TaskProgressTool(agent))
     agent.tools.register(GetGoalTool(agent))
@@ -975,6 +961,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     if not agent.config.enable_subagents:
         return
     agent.tools.register(CreateSubagentsTool(agent))
+    agent.tools.register(ListAgentsTool(agent))
     agent.tools.register(CancelSubagentsTool(agent))
     agent.tools.register(SendGuidanceTool(agent))
     agent.tools.register(ResolveCapabilityRequestsTool(agent))
@@ -987,6 +974,7 @@ __all__ = [
     "ResolveCapabilityRequestsTool",
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
+    "ListAgentsTool",
     "ONE_SHOT_TOOL_NAMES",
     "PARENT_PLANNER_READ_TOOLS",
     "READ_ONLY_SUBAGENT_TOOLS",

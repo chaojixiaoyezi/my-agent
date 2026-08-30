@@ -75,6 +75,7 @@ def test_subagent_runner_uses_task_scoped_soft_persistence_discipline():
             role="worker",
         )
     )
+    assert "不要以“现在开始/接下来会/马上写入/随后验证”这类未来动作结束回复" in prompt
 
     assert "只要直接父级当前 goal 仍有你已知的未完成部分" in prompt
     assert "只要当前用户目标仍有你已知的未完成部分" not in prompt

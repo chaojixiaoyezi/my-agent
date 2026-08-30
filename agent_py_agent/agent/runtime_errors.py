@@ -12,6 +12,7 @@ from .backends.errors import (
     is_provider_timeout_error,
     is_provider_transient_error,
 )
+from .runtime_db.operations import RuntimeExecutionBusyError
 
 _MAX_ERROR_TEXT = 300
 
@@ -107,6 +108,16 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
                 getattr(exc, "category", "recoverable_runtime"),
                 "运行时读取失败；请根据错误类型刷新状态、重试读取或请求上级接管。",
                 "recoverable runtime failure",
+            ),
+            context=context,
+        )
+    if isinstance(exc, RuntimeExecutionBusyError):
+        return _report(
+            exc,
+            _template(
+                "runtime_busy",
+                "当前任务已有存活执行者持有执行权；系统会保留待办并稍后重试，不要把它当成任务失败。",
+                "live execution owner holds the run lock; retry after it yields",
             ),
             context=context,
         )

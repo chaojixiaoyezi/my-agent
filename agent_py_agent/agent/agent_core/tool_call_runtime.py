@@ -1,6 +1,11 @@
 
 from __future__ import annotations
 
+"""LLM: 所有模型工具必须经过同一运行时准备、任务晋升、权限和审计执行缝隙。
+
+模块用途: 在真正调用工具前冻结工作目录、活动回合和结构化运行事实，再统一记录执行结果。
+"""
+
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -56,6 +61,15 @@ class ToolCallRuntimeRequest:
             "call_id": self.call.call_id,
             **self.call.arguments,
         }
+
+    # LLM: Archive and provider replay use this call only; guards and handlers continue to use
+    # ``call`` so rebased paths and trusted bindings remain execution authority.
+    # 函数用途: 取得模型最初提交的工具调用，供归档保存安全回放视图。
+    @property
+    def model_call(self) -> ToolCall:
+        """Return the provider-authored call carried beside the executable call."""
+
+        return self.request.model_call or self.call
 
 
 def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
@@ -117,17 +131,33 @@ def _audit_source_worker_tool_scope_result(
 
 
 # LLM: 最终 Tool Gateway 调用必须携带模型看到的同一 run 快照，不能在执行时重新扩大工具宇宙。
+# 首个工作工具还必须在生成 write boundary/cwd 之前完成会话任务晋升，否则 handler 会继续
+# 使用晋升前的 owner 根目录，而同轮后续工具已经切到 task root，造成一次请求两个工作目录。
 # 函数用途: 执行并审计一个已追踪工具调用，同时维护任务晋升、幂等记录和被动验收事实。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     from .tool_call_archive_record import archive_tool_output_projection
     from .tool_loop.recovery import runtime_run_scope
 
+    runtime_request, prepared_promotion_outcome = _prepare_traced_tool_runtime_request(
+        runtime_request
+    )
+
     def pre_handler_gate(call):
         # B 切片：外层 fence 已删除（authority_context 懒建/open/close 写路径
         # 由 OperationStore selector + ManagedOperationStore 权威门取代，见
         # tooling/executor._require_operation_authority 与
-        # runtime_db/managed_operation_store.require_authority）。
-        return _pre_handler_gate(replace(runtime_request, call=call))
+        # runtime_db/managed_operation_store.require_authority）。任务晋升已在 boundary
+        # 冻结前完成；预算、重复调用和 runner 身份 guard 仍只在 canonical executor
+        # 完成规范化/授权后运行一次，避免审批重入时重复扣减预算。
+        prepared_request = replace(runtime_request, call=call)
+        outcome = guarded_tool_call_result(prepared_request) or prepared_promotion_outcome
+        if outcome is None:
+            return None
+        return apply_tool_execution_facts(
+            outcome,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
 
     one_shot_keys = _one_shot_tool_call_keys(runtime_request.payload)
     execution = runtime_request.agent.tools.execute_tool(
@@ -153,6 +183,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
             runtime_request.request.params,
             call,
             outcome,
+            model_call=runtime_request.model_call,
         ),
     )
     result = execution.result
@@ -170,22 +201,31 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     return execution
 
 
-def _pre_handler_gate(runtime_request: ToolCallRuntimeRequest) -> ToolHandlerOutcome | None:
-    guard_result = guarded_tool_call_result(runtime_request)
-    if guard_result is not None:
-        return apply_tool_execution_facts(
-            guard_result,
-            failure_stage=ToolFailureStage.RUNTIME_GATE,
-            handler_executed=False,
-        )
-    promotion_error = _promote_conversation_task_for_work_tool(runtime_request)
-    if promotion_error is None:
-        return None
-    return apply_tool_execution_facts(
-        promotion_error,
-        failure_stage=ToolFailureStage.RUNTIME_GATE,
-        handler_executed=False,
+# LLM: 会话运行时 resolves one TurnContext cwd before policy, approval, sandbox and handler execution.
+# This adapter preserves my-agent's lazy task activation while rebuilding the current call from the
+# newly bound workspace before any execution boundary is frozen. Runtime guards stay at the normalized
+# handler seam and cancellation remains side-effect free.
+# 函数用途: 在首个工作工具执行前完成任务晋升和路径重定向，避免首个工具落错目录。
+def _prepare_traced_tool_runtime_request(
+    runtime_request: ToolCallRuntimeRequest,
+) -> tuple[ToolCallRuntimeRequest, ToolHandlerOutcome | None]:
+    token = getattr(runtime_request.request.params, "cancellation_token", None)
+    cancelled = bool(token and getattr(token, "cancelled", False))
+    promotion_outcome = (
+        None
+        if cancelled
+        else _promote_conversation_task_for_work_tool(runtime_request)
     )
+    if cancelled or promotion_outcome is not None:
+        return runtime_request, promotion_outcome
+    from .tool_loop.round_execution import _bound_conversation_workspace_call
+
+    rebound = _bound_conversation_workspace_call(
+        runtime_request.agent,
+        runtime_request.call,
+        params=runtime_request.request.params,
+    )
+    return replace(runtime_request, call=rebound), None
 
 
 def _required_action_for_call(runtime_request: ToolCallRuntimeRequest) -> object | None:
@@ -213,6 +253,9 @@ def _record_passive_verification(
     return record_tool_verification(agent, call, result)
 
 
+# LLM: Promotion is one active-turn mutation. Gateway callers must hold their exact turn
+# transition around the whole bind; local callers without that host capability execute directly.
+# 函数用途: 首个工作工具把普通对话晋升为持久任务；若用户已经停止则不产生任何续接任务。
 def _promote_conversation_task_for_work_tool(
     runtime_request: ToolCallRuntimeRequest,
 ) -> ToolHandlerOutcome | None:
@@ -277,7 +320,32 @@ def _promote_conversation_task_for_work_tool(
             ),
         )
 
-    promoted = promote_current_conversation_task(runtime_request.agent)
+    # Gateway 的 active-turn T 锁必须覆盖「检查仍在运行 -> 建立/续接 task link ->
+    # 把绑定写回热请求」整个晋升事务。否则 /stop 可在早期 cancellation 检查之后
+    # 把原任务置 interrupted，而本线程又紧接着建立一个 -continue- active link，
+    # 让已停止的主代理重新显示 Working。普通本地运行没有该 callback，保持原路径。
+    transition = getattr(
+        runtime_request.request.params,
+        "active_turn_transition_callback",
+        None,
+    )
+    try:
+        promoted = (
+            transition(
+                "task_promotion",
+                lambda: promote_current_conversation_task(runtime_request.agent),
+            )
+            if callable(transition)
+            else promote_current_conversation_task(runtime_request.agent)
+        )
+    except InterruptedError:
+        return ToolHandlerOutcome(
+            tool_name or "conversation_task_binding",
+            False,
+            "CANCELLED: 当前回合已停止，本次工作步骤没有启动。",
+            error_code="CANCELLED",
+            effect_outcome="not_started",
+        )
     if promoted is not None or not conversation_thread_id:
         return None
     return ToolHandlerOutcome(

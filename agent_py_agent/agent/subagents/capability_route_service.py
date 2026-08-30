@@ -1,7 +1,8 @@
 
+# LLM: Capability route records project semantic matches into typed GRANT/GAP facts. Owner path
+# boundaries are resolved before any grant and remain visible in structured report fields.
+# 模块用途: 生成、持久化和展示子代理能力路由的授权或缺口记录。
 from __future__ import annotations
-
-"""Helpers for capability request routing records and report persistence."""
 
 import json
 import time
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from ..io import append_jsonl
 from .capability_scope import (
+    CapabilityPathScopeDecision,
     escalation_chain,
     existing_delete_trash_grant,
     gap_attempted_tools,
@@ -77,6 +79,21 @@ class CapabilityNoHitsParams:
     request: CapabilityRequest
     query: str
     hits: list[CapabilitySearchHit]
+    apply: bool
+
+
+# LLM: This bundle carries an already computed owner-wall decision into the record builder; it must
+# never accept free-form authorization text as a substitute.
+# 类用途: 封装一条越过用户目录边界的能力申请及其路由上下文。
+@dataclass(frozen=True)
+class CapabilityOwnerScopeGapParams:
+    """Owner-wall rejection inputs for one capability request."""
+
+    task: SubAgentTask
+    request: CapabilityRequest
+    query: str
+    hits: list[CapabilitySearchHit]
+    decision: CapabilityPathScopeDecision
     apply: bool
 
 
@@ -155,6 +172,7 @@ def record_capability_route_gap(
         RecordCapabilityGapParams(
             missing_capability=request.needed_capability,
             why_failed="CapabilityRouter 没有找到匹配的 skill/tool card。",
+            request_id=request.id,
             gap_type=request.capability_type,
             attempted_tools=gap_attempted_tools(request),
             needed_outputs=[request.expected_output] if request.expected_output else [],
@@ -164,7 +182,6 @@ def record_capability_route_gap(
             next_record_refs=[f"capability_request:{request.id}"],
         ),
     )
-    _mark_capability_request_status(manager, task.id, request.id, "GAP")
     return CapabilityRouteRecord(
         id=_new_id("route"),
         run_id=task.id,
@@ -195,6 +212,77 @@ def route_capability_no_hits(manager, params: CapabilityNoHitsParams) -> Capabil
         params.request,
         query=params.query,
         hits=params.hits,
+        created_at=now,
+    )
+
+
+# LLM: An owner-wall violation is an objective typed GAP, not a semantic no-hit and never a grant.
+# Applying it closes the exact OPEN request as GAP without publishing a grant wake.
+# 函数用途: 把越过用户目录边界的能力申请记成结构化缺口，终止无效的授权重跑循环。
+def route_capability_owner_scope_gap(
+    manager,
+    params: CapabilityOwnerScopeGapParams,
+) -> CapabilityRouteRecord:
+    now = time.time()
+    rejected = list(params.decision.rejected_paths)
+    constraints = scoped_constraints(params.request)
+    constraints.update(
+        {
+            "route_rejection_code": "CAPABILITY_PATH_OUTSIDE_OWNER_SCOPE",
+            "owner_scope_root": params.decision.owner_scope_root,
+            "rejected_path_scope": ",".join(rejected),
+        }
+    )
+    request_scope = request_scope_snapshot(params.request)
+    request_scope["scope_resolution"] = {
+        "status": "rejected",
+        "error_code": "CAPABILITY_PATH_OUTSIDE_OWNER_SCOPE",
+        "owner_scope_root": params.decision.owner_scope_root,
+        "rejected_paths": rejected,
+    }
+    if not params.apply:
+        return CapabilityRouteRecord(
+            id=_new_id("route"),
+            run_id=params.task.id,
+            request_id=params.request.id,
+            status="WOULD_GAP",
+            dry_run=True,
+            query=params.query,
+            candidate_count=len(params.hits),
+            reasons=["CAPABILITY_PATH_OUTSIDE_OWNER_SCOPE"],
+            request_scope=request_scope,
+            grant_scope={"constraints": constraints},
+            message="申请目录越过当前 owner 权限上界；apply 时会记录 capability gap，不会授权或唤醒重跑。",
+            created_at=now,
+        )
+    gap = manager.lifecycle.record_capability_gap(
+        params.task.id,
+        RecordCapabilityGapParams(
+            missing_capability=params.request.needed_capability,
+            why_failed="CAPABILITY_PATH_OUTSIDE_OWNER_SCOPE：申请目录越过当前 owner 权限上界。",
+            request_id=params.request.id,
+            gap_type=params.request.capability_type,
+            attempted_tools=gap_attempted_tools(params.request),
+            needed_outputs=[params.request.expected_output] if params.request.expected_output else [],
+            requested_scope=request_scope,
+            constraints=constraints,
+            escalation_chain=escalation_chain(params.task, params.request),
+            next_record_refs=[f"capability_request:{params.request.id}"],
+        ),
+    )
+    return CapabilityRouteRecord(
+        id=_new_id("route"),
+        run_id=params.task.id,
+        request_id=params.request.id,
+        status="GAP",
+        dry_run=False,
+        query=params.query,
+        candidate_count=len(params.hits),
+        reasons=["CAPABILITY_PATH_OUTSIDE_OWNER_SCOPE"],
+        request_scope=request_scope,
+        grant_scope={"constraints": constraints},
+        gap_id=gap.id,
+        message="申请目录越过当前 owner 权限上界，已记录 capability gap；未授权且不会唤醒重跑。",
         created_at=now,
     )
 
@@ -240,6 +328,9 @@ def route_would_capability_grant(params: WouldCapabilityGrantParams) -> Capabili
     )
 
 
+# LLM: Reusing an existing capability still creates/returns an exact grant bound to the current
+# request through the atomic lifecycle reducer; a detached status-only save is forbidden.
+# 函数用途: 用已有受控授权覆盖当前申请，并原子结清申请后生成路由记录。
 def route_existing_capability_grant(manager, params: ExistingCapabilityGrantParams) -> CapabilityRouteRecord:
     reasons = ["已有 controlled_exec grant；删除命令应通过 task_trash 处理，不进入 shell 白名单。"]
     granted_skills = list(getattr(params.grant, "skills", []) or [])
@@ -258,7 +349,11 @@ def route_existing_capability_grant(manager, params: ExistingCapabilityGrantPara
                 reasons=reasons,
             )
         )
-    _mark_capability_request_status(manager, params.task.id, params.request.id, "GRANTED")
+    grant = manager.lifecycle.resolve_request_with_existing_grant(
+        params.task.id,
+        params.request.id,
+        str(getattr(params.grant, "id", "") or ""),
+    )
     routed_task = manager.load(params.task.id)
     manager.actions._append_task_work_log(
         routed_task,
@@ -275,11 +370,14 @@ def route_existing_capability_grant(manager, params: ExistingCapabilityGrantPara
             granted_tools=granted_tools,
             selected_cards=selected_cards,
             reasons=reasons,
-            grant=params.grant,
+            grant=grant,
         )
     )
 
 
+# LLM: A new routed grant is committed by the same atomic lifecycle reducer that resolves the
+# request; do not add a second request-status save after this call.
+# 函数用途: 把路由命中的工具和技能原子授权给当前申请，并生成可审计路由结果。
 def route_capability_apply(manager, params: RouteCapabilityApplyParams) -> CapabilityRouteRecord:
     grant = manager.lifecycle.record_capability_grant(
         params.task.id,
@@ -291,7 +389,6 @@ def route_capability_apply(manager, params: RouteCapabilityApplyParams) -> Capab
             hit_count=len(params.selected_hits),
         ),
     )
-    _mark_capability_request_status(manager, params.task.id, params.request.id, "GRANTED")
     routed_task = manager.load(params.task.id)
     manager.actions._append_task_work_log(
         routed_task,
@@ -402,15 +499,6 @@ def write_capability_route_report_files(
     if apply:
         for record in report.records:
             _append_capability_route_log(manager, record)
-
-
-def _mark_capability_request_status(manager, run_id: str, request_id: str, status: str) -> None:
-    task = manager.load(run_id)
-    for request in task.capability_requests:
-        if request.id == request_id:
-            request.status = status
-    task.updated_at = time.time()
-    manager.save(task)
 
 
 def _append_capability_route_log(manager, record: CapabilityRouteRecord) -> None:

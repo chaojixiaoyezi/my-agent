@@ -106,6 +106,7 @@ class CapabilityGap:
     missing_capability: str
     source_task: str
     why_failed: str
+    request_id: str = ""
     gap_type: str = "generic"
     attempted_skills: list[str] = field(default_factory=list)
     attempted_tools: list[str] = field(default_factory=list)

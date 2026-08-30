@@ -440,6 +440,77 @@ def test_apply_patch_rejects_unmatched_context(tmp_path: Path) -> None:
     assert "edit_file" in result.output
 
 
+def test_apply_patch_rejects_empty_update_like_codex(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("hello\n", encoding="utf-8")
+    tool = ApplyPatchTool(workspace)
+
+    result = tool.execute(
+        {
+            "patch": (
+                "*** Begin Patch\n"
+                "*** Update File: notes.txt\n"
+                "*** End Patch\n"
+            )
+        }
+    )
+
+    assert not result.ok
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "不能为空" in result.output
+    assert "末尾追加示例" in result.output
+    assert (workspace / "notes.txt").read_text(encoding="utf-8") == "hello\n"
+
+
+def test_apply_patch_header_error_shows_exact_spacing_and_complete_example(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = ApplyPatchTool(workspace)
+
+    result = tool.execute(
+        {
+            "patch": (
+                "*** Begin Patch\n"
+                "*** Update File:notes.txt\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            )
+        }
+    )
+
+    assert not result.ok
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "冒号后保留一个空格" in result.output
+    assert "*** Update File: notes.txt" in result.output
+    assert "*** Begin Patch" in result.output
+
+
+def test_apply_patch_unprefixed_update_line_explains_all_prefixes(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("old\n", encoding="utf-8")
+    tool = ApplyPatchTool(workspace)
+
+    result = tool.execute(
+        {
+            "patch": (
+                "*** Begin Patch\n"
+                "*** Update File: notes.txt\n"
+                "old\n"
+                "*** End Patch\n"
+            )
+        }
+    )
+
+    assert not result.ok
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "一个真实空格" in result.output
+    assert "-old\\n+new" in result.output
+    assert "不要直接写没有前缀" in result.output
+
+
 # LLM: GUIDE-01(2026-08-15 轻量运行时 对照真机): owner 模式写外部路径被拦时, 错误消息必须带
 # 具体可用写入位置(workspace_roots + owner home), 模型无需探索即知可写位置, 防止
 # "声称写了但实际无产物"的假完成。同模型在无限制的 轻量运行时 上直接成功, 差异在系统引导。

@@ -12,7 +12,6 @@ from pathlib import Path
 from ..common.json_io import locked_json_path, read_json_object_report
 
 _QUOTA_LOCK_BASENAME = ".owner-quota"
-_DEFAULT_MAX_DISK_MB = 102_400
 _NATIVE_USAGE_SCAN_TIMEOUT_SECONDS = 15.0
 
 
@@ -122,11 +121,11 @@ class OwnerQuotaEnforcer:
     def admission(self) -> Iterator[OwnerQuotaAdmission]:
         """Hold the owner gate while a repository computes and applies a mutation."""
 
+        if not self.policy_available:
+            raise OwnerQuotaUnavailable("owner quota policy is unavailable")
         if self.max_bytes <= 0:
             yield OwnerQuotaAdmission(self, enabled=False)
             return
-        if not self.policy_available:
-            raise OwnerQuotaUnavailable("owner quota policy is unavailable")
         with _locked_owner_quota(self._lock_anchor):
             yield OwnerQuotaAdmission(self, enabled=True)
 
@@ -147,7 +146,7 @@ def owner_quota_enforcer_from_policy(
     Feishu confirmation callbacks do not own a ``SimpleAgent`` instance, but
     they still mutate the same owner Persona authority.  Reading that owner's
     structured quota file here keeps those callbacks on the same gate.  A
-    malformed policy is fail-closed; a missing file uses the seeded product
+    malformed policy is fail-closed; a missing limit uses the seeded unlimited
     default, matching ``resolve_effective_owner_policy``.
     """
 
@@ -158,12 +157,10 @@ def owner_quota_enforcer_from_policy(
     try:
         max_disk_mb = int(raw)
     except (TypeError, ValueError):
-        max_disk_mb = _DEFAULT_MAX_DISK_MB
-    if max_disk_mb <= 0:
-        max_disk_mb = _DEFAULT_MAX_DISK_MB
+        max_disk_mb = 0
     return OwnerQuotaEnforcer(
         root,
-        max_bytes=max_disk_mb * 1024 * 1024,
+        max_bytes=max(0, max_disk_mb) * 1024 * 1024,
         policy_available=report.load_error is None,
     )
 

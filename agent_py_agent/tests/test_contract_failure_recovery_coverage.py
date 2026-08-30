@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from agent_py_agent.agent.contracts.acceptance_contract import AcceptanceResult
 from agent_py_agent.agent.contracts.approval_gate import ApprovalGateDecision
 from agent_py_agent.agent.contracts.artifact_acceptance_models import (
     ArtifactAcceptanceReport,
@@ -85,17 +84,12 @@ def test_runtime_contract_validation_failures_return_recovery() -> None:
         _assert_recovery(result)
 
 
-def test_acceptance_reports_include_recovery_when_rejected() -> None:
+def test_artifact_and_evidence_reports_include_recovery_when_rejected() -> None:
     reports = [
         ArtifactAcceptanceReport(
             ok=False,
             artifact_ref="outputs/missing.md",
             findings=[ArtifactFinding("ARTIFACT_MISSING", "hard", "missing")],
-        ),
-        AcceptanceResult(
-            ok=False,
-            status="rejected",
-            findings=[{"code": "ACCEPTANCE_ARTIFACTS_FAILED", "ok": False, "severity": "hard"}],
         ),
         EvidenceContractReport(ok=False, summary={}, findings=[{"code": "EVIDENCE_SOURCE_UNREADABLE"}]),
     ]

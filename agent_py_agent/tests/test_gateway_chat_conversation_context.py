@@ -9,7 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.agent_core._runtime_params import ArchiveRunParams
+from agent_py_agent.agent.agent_core._runtime_params import (
+    ArchiveRunParams,
+    ToolLoopExecuteParams,
+)
 from agent_py_agent.agent.agent_core.orchestration.create_policy import (
     add_current_conversation_attrs,
     create_run_params,
@@ -28,7 +31,9 @@ from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
     ToolCallRuntimeRequest,
     _promote_conversation_task_for_work_tool,
+    execute_traced_tool_call,
 )
+from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallExecuteParams
 from agent_py_agent.agent.common.audit_activation import AUDIT_ATTR, AUDIT_DEADLINE_ATTR
 from agent_py_agent.agent.conversation.audit_lifecycle import (
     audit_scope_payload,
@@ -56,6 +61,7 @@ from agent_py_agent.agent.conversation.task_promotion import (
     promote_current_conversation_task,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts.io import write_json_file
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.request_errors import (
     ConversationPersistenceError,
@@ -72,10 +78,12 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _gateway_run_params,
     _gateway_run_task_attributes,
     _gateway_task_attributes,
+    _GatewayActiveTurnTransition,
     _GatewayAskRunContext,
     _GatewayConversationContext,
     _GatewayConversationLoadRequest,
     _GatewayRunParamsRequest,
+    _GatewayTaskBindingWriter,
     _GatewayWorkspaceSelection,
     _register_named_system_task,
     _run_gateway_ask,
@@ -196,6 +204,7 @@ def test_gateway_thread_uses_validated_client_cwd_and_keeps_it_on_next_turn(tmp_
     assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [
         str(project_root.resolve())
     ]
+    assert attrs["session_id"] == second.thread_id
 
 
 def test_gateway_workspace_only_rejects_external_client_cwd(tmp_path):
@@ -1057,6 +1066,91 @@ def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path,
     assert result.response == "压缩后继续得到的自然回复"
     assert [row.content for row in rows if row.role == "assistant"][-1] == result.response
     assert all("RUN_CONTEXT_PRESSURE" not in row.content for row in rows)
+
+
+def test_same_gateway_request_keeps_task_turn_authority_after_inline_compact(
+    tmp_path,
+):
+    """同一请求 Compact 续跑必须能关闭任务和旧唤醒策略，不能最终回复后再次 Working。"""
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request_id = "gw-compact-task-owner"
+    request = {
+        "id": request_id,
+        "prompt": "执行长任务",
+        "conversation": {
+            "channel": "gateway-cli",
+            "channel_conversation_id": "compact-task-owner",
+            "channel_user_id": "local-agent",
+            "canonical_user_id": "local-agent",
+        },
+    }
+    conversation = _conversation_context(agent, request, request_id, request["prompt"])
+    request_path = tmp_path / "gateway" / "processing" / f"{request_id}.json"
+    request_path.parent.mkdir(parents=True)
+    write_json_file(request_path, request)
+    context = _GatewayAskRunContext(
+        agent,
+        request,
+        request_path,
+        tmp_path / "gateway" / "responses" / f"{request_id}.json",
+        request_id,
+        lambda _chunk: None,
+    )
+    first_params = _gateway_run_params(
+        _GatewayRunParamsRequest(request, context, conversation, request["prompt"])
+    )
+    agent._current_run_params = first_params
+    try:
+        link = promote_current_conversation_task(agent)
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert link is not None
+    runtime = request.get("conversation_runtime")
+    assert runtime == {
+        "request_id": request_id,
+        "thread_id": conversation.thread_id,
+        "task_id": link.task_id,
+        "task_path": link.task_path,
+    }
+    stored_request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert stored_request["conversation_runtime"] == runtime
+    policy = agent.conversation_store.set_progress_policy(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": link.task_id,
+            "interval_seconds": 60,
+        }
+    )
+
+    refreshed = _conversation_context(agent, request, request_id, request["prompt"])
+    retry_attrs = _gateway_run_task_attributes(refreshed, request, request_id)
+    assert retry_attrs is not None
+    assert retry_attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] is True
+
+    foreign_request = {
+        **request,
+        "id": "gw-foreign-turn",
+        "conversation_runtime": dict(runtime),
+    }
+    foreign_attrs = _gateway_run_task_attributes(
+        refreshed,
+        foreign_request,
+        "gw-foreign-turn",
+    )
+    assert foreign_attrs is not None
+    assert foreign_attrs.get(CONVERSATION_TASK_TURN_ACTIVE_ATTR) is not True
+
+    assert complete_current_conversation_task(
+        agent,
+        retry_attrs,
+        source="gateway",
+    )
+    assert agent.conversation_store.load_task_link(link.task_id).status == "completed"
+    assert agent.conversation_store.get_progress_policy(policy.policy_id).enabled is False
 
 
 def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcript(
@@ -3384,6 +3478,179 @@ def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first
     assert 'task_id: "gw-followup"' in (new_workspace / "work" / "task.yaml").read_text(
         encoding="utf-8"
     )
+
+
+def test_stopped_gateway_turn_cannot_create_a_continuation_during_tool_promotion(tmp_path):
+    """Gateway T 锁已进入 closing 后，迟到工作工具不能建立 -continue- 活跃任务。"""
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "local-agent",
+            "channel": "gateway-cli",
+            "channel_conversation_id": "promotion-stop-race",
+            "channel_user_id": "local-agent",
+        }
+    )
+    workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "stopped-race"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-before-stop",
+            "goal": "派八个子代理分析架构",
+            "status": "active",
+            "task_path": str(workspace),
+        }
+    )
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": thread.thread_id, "task_id": "task-before-stop"}
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-before-stop", "status": "interrupted"}
+    )
+
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    request_id = "gw-promotion-stop-race"
+    attempt_id = "attempt-promotion-stop-race"
+    request_path = paths.processing / f"{request_id}.json"
+    write_json_file(
+        request_path,
+        {
+            "id": request_id,
+            "request_id": request_id,
+            "status": "processing",
+            "execution_attempt_id": attempt_id,
+            "turn_phase": "closing",
+            "cancel_requested": True,
+        },
+    )
+    attrs = {"conversation_thread_id": thread.thread_id}
+    params = RunParams(
+        request_id=request_id,
+        run_id=request_id,
+        task_id=request_id,
+        attempt_id=attempt_id,
+        source="gateway",
+        root_user_prompt="继续派子代理",
+        task_attributes=attrs,
+        active_turn_transition_callback=_GatewayActiveTurnTransition(
+            request_path,
+            request_id,
+            attempt_id,
+        ),
+        conversation_task_binding_callback=_GatewayTaskBindingWriter(
+            request_path,
+            request_id,
+        ),
+    )
+    agent._current_run_params = params
+    try:
+        outcome = _promote_work_tool(agent, params, {"tool": "list_files", "path": "."})
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert outcome is not None and outcome.error_code == "CANCELLED"
+    links = agent.conversation_store.task_links(thread.thread_id)
+    assert [(link.task_id, link.status) for link in links] == [
+        ("task-before-stop", "interrupted")
+    ]
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert "conversation_runtime" not in payload
+
+
+@pytest.mark.parametrize("path_mode", ["relative", "initial_absolute"])
+def test_first_gateway_mutation_executes_in_promoted_task_workspace(tmp_path, path_mode):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    owner_home = Path(agent.home_paths.owner_home_dir)
+    request = {
+        "conversation": {
+            "channel": "gateway-cli",
+            "channel_conversation_id": "first-mutation-cwd",
+            "channel_user_id": "local-agent",
+            "canonical_user_id": "local-agent",
+        },
+        "workspace": {"cwd": str(owner_home), "roots": [str(owner_home)]},
+    }
+    conversation = _conversation_context(
+        agent,
+        request,
+        "gw-first-mutation",
+        "创建首个文件",
+    )
+    attrs = _gateway_task_attributes(conversation)
+    assert attrs is not None and "run_workspace" not in attrs
+    initial_cwd = Path(str(attrs[CONVERSATION_EXECUTION_CWD_ATTR]))
+    snapshot = agent.tools.runtime_snapshot(run_id="gw-first-mutation")
+    params = ToolLoopExecuteParams(
+        user_prompt="创建首个文件",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        write_boundary=None,
+        task_attributes=attrs,
+        request_id="gw-first-mutation",
+        run_id="gw-first-mutation",
+        task_id="gw-first-mutation",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+        root_user_prompt="创建首个文件",
+        source="gateway",
+        context_scope="conversation",
+        tool_runtime_snapshot=snapshot,
+    )
+    requested_path = (
+        "first-tool.txt"
+        if path_mode == "relative"
+        else str(initial_cwd / "first-tool.txt")
+    )
+    call = canonical_test_call(
+        snapshot,
+        "write_file",
+        {"path": requested_path, "content": "canonical task cwd\n"},
+        call_id="first-mutation-write",
+        attempt_id="first-mutation-attempt",
+    )
+    runtime_request = ToolCallRuntimeRequest(
+        agent,
+        ToolCallExecuteParams(params, 1, 1, call),
+        call,
+    )
+    # 本用例只验 cwd 原子切换；完整 ManagedOperationStore authority 由专门测试覆盖。
+    agent.tools.operation_store = None
+    agent.tools.operation_store_required = False
+    agent._current_run_params = params
+    agent._current_run_task_workspace = str(initial_cwd)
+    try:
+        execution = execute_traced_tool_call(runtime_request)
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert execution.result.ok is True
+    task_root = Path(attrs["run_workspace"]["task_root"])
+    assert task_root != initial_cwd
+    assert (task_root / "first-tool.txt").read_text(encoding="utf-8") == (
+        "canonical task cwd\n"
+    )
+    assert not (initial_cwd / "first-tool.txt").exists()
+    assert attrs[CONVERSATION_EXECUTION_CWD_ATTR] == str(task_root)
+    assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [str(task_root)]
+    if path_mode == "initial_absolute":
+        assert execution.call.arguments["path"] == str(task_root / "first-tool.txt")
 
 
 def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_path):

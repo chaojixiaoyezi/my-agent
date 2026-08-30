@@ -185,6 +185,43 @@ def test_linux_admission_scan_falls_back_when_find_is_not_supported(
     assert owner_quota._owner_usage_bytes_for_admission(owner) == 5
 
 
+def test_zero_quota_policy_disables_hot_path_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_py_agent.agent.user_space import owner_quota
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    (owner / "quota.json").write_text(
+        '{"schema_version":"quota.v2","max_disk_mb":0}\n',
+        encoding="utf-8",
+    )
+    enforcer = owner_quota.owner_quota_enforcer_from_policy(owner)
+    monkeypatch.setattr(
+        owner_quota,
+        "_owner_usage_bytes_for_admission",
+        lambda _root: (_ for _ in ()).throw(AssertionError("unlimited policy must not scan")),
+    )
+
+    with enforcer.admission() as admission:
+        assert admission.enabled is False
+        assert admission.check([owner_quota.OwnerQuotaChange(owner / "x", 1)]) is None
+
+
+def test_unreadable_quota_policy_remains_fail_closed(tmp_path: Path) -> None:
+    from agent_py_agent.agent.user_space import owner_quota
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    (owner / "quota.json").write_text("{bad-json}\n", encoding="utf-8")
+    enforcer = owner_quota.owner_quota_enforcer_from_policy(owner)
+
+    with pytest.raises(owner_quota.OwnerQuotaUnavailable, match="policy is unavailable"):
+        with enforcer.admission():
+            pass
+
+
 def test_write_file_quota_is_cross_tool_instance_and_cross_thread_safe(tmp_path: Path) -> None:
     from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool, WriteFileToolOptions
 
@@ -294,7 +331,7 @@ def test_apply_patch_rejects_over_quota_batch_before_first_file_changes(tmp_path
     assert not (owner / "b.txt").exists()
 
 
-def test_write_outside_owner_root_does_not_consume_owner_quota(tmp_path: Path) -> None:
+def test_workspace_write_cannot_escape_owner_root_before_quota_check(tmp_path: Path) -> None:
     from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool, WriteFileToolOptions
 
     owner = tmp_path / "owner"
@@ -309,8 +346,9 @@ def test_write_outside_owner_root_does_not_consume_owner_quota(tmp_path: Path) -
 
     result = tool.execute({"path": "repo.txt", "content": "outside-owner"})
 
-    assert result.ok
-    assert (workspace / "repo.txt").read_text(encoding="utf-8") == "outside-owner"
+    assert not result.ok
+    assert result.error_code == "WRITE_FORBIDDEN"
+    assert not (workspace / "repo.txt").exists()
 
 
 def test_max_active_agents_caps_main_plus_live_subagents() -> None:

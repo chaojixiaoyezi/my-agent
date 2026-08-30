@@ -103,6 +103,119 @@ def test_cancel_model_cannot_skip_child_and_cancel_grandchild(tmp_path):
     assert agent.subagents.load(grandchild.id).status == "RUNNING"
 
 
+def test_cancel_direct_child_closes_its_live_descendant_branch(tmp_path):
+    """模型合法关闭直属 child 时，孙代理随该分支收口，父级和兄弟不受影响。"""
+    from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
+        CancelSubagentsTool,
+    )
+    from agent_py_agent.agent.agent_core.runner.context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    parent, child, done_sibling = _create_cancel_tree(agent)
+    grandchild = agent.subagents.create_run(
+        goal="孙任务",
+        thought="分支取消测试",
+        plan=["运行"],
+        parent_id=child.id,
+        root_id=parent.id,
+    )
+    grandchild.status = "RUNNING"
+    agent.subagents.save(grandchild)
+    previous = set_current_subagent_context(agent, run_id=parent.id)
+    try:
+        result = CancelSubagentsTool(agent).execute(
+            {"run_id": child.id, "reason": "关闭这一执行分支"}
+        )
+    finally:
+        restore_current_subagent_context(agent, previous)
+
+    assert result.ok is True, result.output
+    assert agent.subagents.load(parent.id).status == "RUNNING"
+    assert agent.subagents.load(child.id).status == "CANCELLED"
+    assert agent.subagents.load(grandchild.id).status == "CANCELLED"
+    assert agent.subagents.load(done_sibling.id).status == "DONE"
+
+
+def test_cancel_tree_broadcasts_attempt_interrupts_before_durable_closeout(
+    tmp_path,
+    monkeypatch,
+):
+    """慢模型分支先全部收到 attempt 中断，再串行写各节点终态。"""
+    from agent_py_agent.agent.agent_core.orchestration.tools import cancel as cancel_module
+    from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
+        CancelSubagentTaskRequest,
+        cancel_subagent_tree,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    parent, child, _done_sibling = _create_cancel_tree(agent)
+    grandchild = agent.subagents.create_run(
+        goal="孙任务",
+        thought="广播中断顺序测试",
+        plan=["保持运行"],
+        parent_id=child.id,
+        root_id=parent.id,
+    )
+    child.runner_active_attempt_id = "attempt-child"
+    grandchild.status = "RUNNING"
+    grandchild.runner_active_attempt_id = "attempt-grandchild"
+    agent.subagents.save(child)
+    agent.subagents.save(grandchild)
+
+    events: list[tuple[str, str]] = []
+
+    def interrupt(name: str) -> bool:
+        events.append(("signal", name))
+        return True
+
+    original_abandon = agent.subagents.lifecycle.abandon_runner_attempt
+
+    def abandon(run_id: str, attempt_id: str, *, reason: str):
+        events.append(("close", run_id))
+        return original_abandon(run_id, attempt_id, reason=reason)
+
+    monkeypatch.setattr(cancel_module, "interrupt_by_name", interrupt)
+    monkeypatch.setattr(agent.subagents.lifecycle, "abandon_runner_attempt", abandon)
+
+    cancel_subagent_tree(
+        agent,
+        CancelSubagentTaskRequest(
+            task=agent.subagents.load(child.id),
+            reason="停止慢模型分支",
+            source="test",
+        ),
+    )
+
+    child_signal = (
+        "signal",
+        f"subagent-runner-attempt:{child.id}:attempt-child",
+    )
+    grandchild_signal = (
+        "signal",
+        f"subagent-runner-attempt:{grandchild.id}:attempt-grandchild",
+    )
+    assert child_signal in events
+    assert grandchild_signal in events
+    first_close = next(index for index, event in enumerate(events) if event[0] == "close")
+    assert events.index(child_signal) < first_close
+    assert events.index(grandchild_signal) < first_close
+    assert agent.subagents.load(child.id).status == "CANCELLED"
+    assert agent.subagents.load(grandchild.id).status == "CANCELLED"
+
+
 def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
@@ -168,6 +281,56 @@ def test_cancel_subagents_tool_can_interrupt_retryable_child(tmp_path):
     assert result.ok is True
     assert loaded.status == "CANCELLED"
     assert loaded.failure_type == "cancelled"
+
+
+def test_cancel_subagents_main_followup_keeps_stable_parent_identity(tmp_path):
+    """主代理换了 Gateway 请求号后仍能停止同一会话任务创建的直接子代理。"""
+
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
+        CancelSubagentsTool,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    child = agent.subagents.create_run(
+        params=CreateRunParams(
+            goal="调研 OpenClaw",
+            thought="等待主代理控制",
+            plan=["调研"],
+            allowed_tools=["read_file"],
+            parent_id="conversation-task-root",
+            root_id="conversation-task-root",
+        )
+    )
+    child.status = "RUNNING"
+    agent.subagents.save(child)
+    previous = getattr(agent, "_current_run_params", None)
+    had_previous = hasattr(agent, "_current_run_params")
+    agent._current_run_params = SimpleNamespace(
+        run_id="gwreq-followup",
+        task_id="gwreq-followup",
+        request_id="gwreq-followup",
+        task_attributes={"conversation_task_id": "conversation-task-root"},
+    )
+    try:
+        result = CancelSubagentsTool(agent).execute(
+            {"run_id": child.id, "reason": "用户本轮明确停止"}
+        )
+    finally:
+        if had_previous:
+            agent._current_run_params = previous
+        else:
+            del agent._current_run_params
+
+    assert result.ok is True, result.output
+    assert agent.subagents.load(child.id).status == "CANCELLED"
 
 
 def test_cancel_subagents_tool_allows_cancellation_after_same_run_retry_exhausted(tmp_path):
@@ -327,6 +490,7 @@ def test_cancel_subagents_tool_filters_by_root_and_status(tmp_path):
             "root_id": parent.id,
             "status": ["RUNNING", "PLANNING"],
             "reason": "清理子树",
+            "cascade_descendants": False,
         }
     )
     payload = json.loads(result.output)
@@ -491,6 +655,10 @@ def test_cancel_subagents_never_signals_gateway_pid_for_in_process_runner(tmp_pa
     assert signalled == []
     assert payload["cancelled"][0]["pid_report"]["status"] == "no_pid"
     assert "thread_interrupt" in payload["cancelled"][0]["pid_report"]
+    loaded = agent.subagents.load(task.id)
+    assert loaded.status == "CANCELLED"
+    assert loaded.attributes["runner_session"]["status"] == "cancelled"
+    assert loaded.attributes["runner_session"]["ended_at"] > 0
 
 
 def test_cancel_subagents_signals_fresh_subprocess_runner_pid(tmp_path, monkeypatch):
@@ -675,6 +843,133 @@ def test_cancel_subagents_does_not_interrupt_shared_in_process_dispatch(
 
     assert second.ok is True
     assert interrupted == ["my-agent-launch-shared"]
+
+
+def test_cancel_subagents_interrupts_exact_attempt_without_stopping_shared_host(
+    tmp_path,
+    monkeypatch,
+):
+    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    tasks = [
+        agent.subagents.create_run(
+            params=CreateRunParams(
+                goal=f"共享线程精确取消 {index}",
+                thought="取消隔离测试",
+                plan=["运行"],
+                allowed_tools=["read_file"],
+            )
+        )
+        for index in range(2)
+    ]
+    for index, task in enumerate(tasks):
+        task.status = "RUNNING"
+        task.runner_active_attempt_id = f"attempt-{index}"
+        task.attributes = {
+            **dict(task.attributes or {}),
+            "runner_session": _fresh_runner_session(
+                worker_pid=4242,
+                in_process=True,
+            ),
+        }
+        agent.subagents.save(task)
+    agent._background_subagent_dispatches = {
+        "launch-shared": {
+            "run_ids": [task.id for task in tasks],
+            "thread_name": "my-agent-launch-shared",
+        }
+    }
+    interrupted: list[str] = []
+    monkeypatch.setattr(
+        cancel,
+        "interrupt_by_name",
+        lambda name: interrupted.append(name) or name.endswith("attempt-0"),
+    )
+
+    result = _execute_host_cancel_subagents(
+        agent,
+        {
+            "run_id": tasks[0].id,
+            "reason": "只停止精确执行轮",
+        },
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert interrupted == [
+        f"subagent-runner-attempt:{tasks[0].id}:attempt-0",
+    ]
+    assert (
+        payload["cancelled"][0]["pid_report"]["thread_interrupt"]
+        == "attempt_signaled"
+    )
+    assert agent.subagents.load(tasks[0].id).status == "CANCELLED"
+    assert agent.subagents.load(tasks[1].id).status == "RUNNING"
+
+
+def test_cancel_subagents_signals_exact_attempt_before_persisting_abandon(
+    tmp_path,
+    monkeypatch,
+):
+    from agent_py_agent.agent.agent_core.orchestration.tools import cancel
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    task = agent.subagents.create_run(
+        params=CreateRunParams(
+            goal="慢模型精确停止",
+            thought="验证先发中断再落盘",
+            plan=["运行"],
+            allowed_tools=["read_file"],
+        )
+    )
+    task.status = "RUNNING"
+    task.runner_active_attempt_id = "attempt-order"
+    task.attributes = {
+        **dict(task.attributes or {}),
+        "runner_session": _fresh_runner_session(
+            worker_pid=4242,
+            in_process=True,
+        ),
+    }
+    agent.subagents.save(task)
+    observed: list[str] = []
+    original_abandon = agent.subagents.lifecycle.abandon_runner_attempt
+
+    def interrupt(name: str) -> bool:
+        observed.append(f"interrupt:{name}")
+        return True
+
+    def abandon(run_id: str, attempt_id: str, *, reason: str = ""):
+        observed.append(f"abandon:{run_id}:{attempt_id}")
+        return original_abandon(run_id, attempt_id, reason=reason)
+
+    monkeypatch.setattr(cancel, "interrupt_by_name", interrupt)
+    monkeypatch.setattr(agent.subagents.lifecycle, "abandon_runner_attempt", abandon)
+
+    result = _execute_host_cancel_subagents(
+        agent,
+        {"run_id": task.id, "reason": "用户停止慢模型"},
+    )
+
+    assert result.ok is True
+    assert observed == [
+        f"interrupt:subagent-runner-attempt:{task.id}:attempt-order",
+        f"abandon:{task.id}:attempt-order",
+    ]
+    assert agent.subagents.load(task.id).status == "CANCELLED"
 
 
 def test_cancel_subagents_missing_runner_topology_fails_closed(tmp_path, monkeypatch):

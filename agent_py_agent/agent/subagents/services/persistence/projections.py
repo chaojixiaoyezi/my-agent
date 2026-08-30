@@ -187,6 +187,10 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: 
     write_json_file_atomic(root / "refs.json", refs)
 
 
+# LLM: A descendant owns only its run/agent projections. A standalone manager
+# root (id == root_id) may seed its own task row, but child goals/statuses must
+# never race to overwrite the shared parent task's title or lifecycle.
+# 函数用途: 登记子代理运行和代理引用；只有独立根运行才登记自己的任务行。
 def register_owner_runtime_indexes(manager: Any, task: SubAgentTask) -> None:
     home_paths = getattr(manager, "home_paths", None)
     if home_paths is None:
@@ -196,7 +200,7 @@ def register_owner_runtime_indexes(manager: Any, task: SubAgentTask) -> None:
     task_path = str(getattr(task, "task_workspace_dir", "") or "").strip()
     run_path = str(getattr(task, "agent_run_workspace_dir", "") or task.task_dir or "").strip()
     try:
-        if task_path:
+        if task.id == task_id and task_path:
             register_task_ref(
                 home_paths,
                 TaskIndexRef(

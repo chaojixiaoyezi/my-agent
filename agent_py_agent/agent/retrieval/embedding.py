@@ -6,7 +6,7 @@
 自建优先:
 - ``LocalHashingEmbedder``:纯 Python、零依赖、确定性——signed feature hashing,默认/兜底/测试。
 - ``OpenAICompatibleEmbedder``:调 ``/embeddings`` 端点拿真语义向量。注意——这**不是引入库**,
-  只是个 stdlib ``urllib`` 写的 HTTP 客户端(my-agent 自建);密钥经 Phase 1 SecretStore by-ref 解析。
+  只是个 stdlib ``urllib`` 写的 HTTP 客户端(my-agent 自建);密钥由调用方注入的 resolver 解析。
   端点抖动抛 ``EmbeddingError``,调用方降级到 BM25,绝不让检索崩。
 """
 
@@ -216,8 +216,11 @@ class MiniMaxEmbedder:
         return _parse_vectors(payload.get("vectors"), len(texts))  # 守卫:数量/形状不符→EmbeddingError
 
 
+# LLM: embedding 不拥有密钥存储；只调用上层注入的 resolver，异常不得泄露
+# source 或密钥正文。
+# 函数用途: 把配置中的密钥引用解析成调用 embedding 端点所需的值。
 def _resolve_api_key(source: str, secret_resolver: Any) -> str:
-    """经 secret_resolver(接 Phase 1 SecretStore.resolve_source)解析密钥;失败/无解析器 → 空。"""
+    """经调用方注入的 secret_resolver 解析密钥；失败或无解析器时返回空。"""
     if not source or not callable(secret_resolver):
         return ""
     try:

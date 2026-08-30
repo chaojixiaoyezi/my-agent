@@ -20,7 +20,7 @@ from agent_py_agent.agent.tooling.sandbox import (
     probe_sandbox,
     wrap_shell_command,
 )
-from agent_py_agent.agent.tooling.shell import _sandbox_exec
+from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions, _sandbox_exec
 
 
 def _spec(tmp_path):
@@ -306,8 +306,6 @@ def test_owner_scoped_shell_fails_closed_without_bwrap(tmp_path, monkeypatch) ->
 
 
 def test_owner_scoped_shell_is_hidden_when_bwrap_is_unavailable(tmp_path, monkeypatch) -> None:
-    from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
-
     monkeypatch.setattr(
         "agent_py_agent.agent.attempt.sandbox.AttemptExecutionSandbox._READINESS_CACHE",
         {},
@@ -324,6 +322,107 @@ def test_owner_scoped_shell_is_hidden_when_bwrap_is_unavailable(tmp_path, monkey
     assert availability.available is False
     assert availability.error_code == "SANDBOX_UNAVAILABLE"
     assert "attempt 沙箱" in availability.reason
+
+
+def test_owner_scoped_shell_failure_explains_hidden_host_paths(tmp_path, monkeypatch) -> None:
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    tool = ShellTool(
+        owner,
+        options=ShellToolOptions(owner_scope_root=str(owner)),
+    )
+    monkeypatch.setattr(
+        tool,
+        "_run_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["bash"],
+            returncode=1,
+            stdout="",
+            stderr="bash: /hidden/other-owner: No such file or directory\n",
+        ),
+    )
+
+    result = tool.execute({"command": "test -e /hidden/other-owner", "working_dir": str(owner)})
+
+    assert result.ok is False
+    assert result.error_code == "COMMAND_FAILED"
+    assert "未挂载路径的不存在、拒绝或沙箱内成功都不能证明宿主路径状态" in result.output
+    assert result.result_envelope["sandbox"] == {
+        "file_scope": "owner_workspace_only",
+        "external_host_paths_hidden": True,
+        "host_path_absence_proven": False,
+    }
+
+
+def test_owner_scoped_shell_stderr_keeps_scope_fact_when_command_masks_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    tool = ShellTool(
+        owner,
+        options=ShellToolOptions(owner_scope_root=str(owner)),
+    )
+    monkeypatch.setattr(
+        tool,
+        "_run_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["bash"],
+            returncode=0,
+            stdout="exit=1\n",
+            stderr="bash: /hidden/other-owner: No such file or directory\n",
+        ),
+    )
+
+    result = tool.execute(
+        {
+            "command": "false; echo exit=$?",
+            "working_dir": str(owner),
+        }
+    )
+
+    assert result.ok is True
+    assert "host_path_absence_proven=false" in result.output
+    assert result.result_envelope["sandbox"]["external_host_paths_hidden"] is True
+
+
+def test_owner_scoped_shell_success_explains_isolated_absolute_paths(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    tool = ShellTool(
+        owner,
+        options=ShellToolOptions(owner_scope_root=str(owner)),
+    )
+    monkeypatch.setattr(
+        tool,
+        "_run_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["bash"],
+            returncode=0,
+            stdout="uid=0(root)\nEXIT_CODE:0\n",
+            stderr="",
+        ),
+    )
+
+    result = tool.execute(
+        {
+            "command": "whoami",
+            "working_dir": str(owner),
+        }
+    )
+
+    assert result.ok is True
+    assert "uid=0、/root 或其它绝对路径都不代表宿主权限" in result.output
+    assert "只有结构化授权写根内的结果会持久化到宿主" in result.output
+    assert result.result_envelope["sandbox"] == {
+        "file_scope": "owner_workspace_only",
+        "external_host_paths_hidden": True,
+        "host_path_absence_proven": False,
+    }
 
 
 def test_unscoped_shell_availability_tracks_attempt_sandbox(tmp_path, monkeypatch) -> None:

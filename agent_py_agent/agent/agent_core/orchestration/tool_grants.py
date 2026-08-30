@@ -25,6 +25,8 @@ READ_ONLY_SUBAGENT_TOOLS = [
     "skill_search",
     "web_search",
     "web_fetch",
+    # 只读限制约束的是业务工具；能力申请属于父子控制面，必须始终可达。
+    "capability_request",
 ]
 _CODING_TOOL_PRESETS = {"coding"}
 

@@ -55,6 +55,9 @@ _CONTENT_OUTPUT_TOOLS = {
 }
 
 
+# LLM: A tool record keeps the executed call and the provider-authored call separate. Host-completed
+# identity/path bindings belong to execution/audit only and must never be replayed as model input.
+# 类用途: 保存一次工具执行的双视图：底座实际执行参数用于账本，模型原始参数用于后续上下文回放。
 @dataclass(frozen=True)
 class ToolCallRecordParams:
     __test__: ClassVar[bool] = False
@@ -65,6 +68,7 @@ class ToolCallRecordParams:
     call: ToolCall
     result: ToolResult
     execution_states: tuple[str, ...] = ()
+    model_call: ToolCall | None = None
 
     @property
     def payload(self) -> dict[str, object]:
@@ -72,7 +76,22 @@ class ToolCallRecordParams:
 
         return _tool_call_payload(self.call)
 
+    @property
+    def model_visible_call(self) -> ToolCall:
+        """Return only the provider-authored call for prompt/native-history replay."""
 
+        return self.model_call or self.call
+
+    @property
+    def model_payload(self) -> dict[str, object]:
+        """Project the provider-authored arguments without host-only completion fields."""
+
+        return _tool_call_payload(self.model_visible_call)
+
+
+# LLM: This immutable execution request carries the admitted call identity into the sole executor;
+# callers must not mutate it while approval or parallel scheduling is in flight.
+# 类用途: 固定一条即将执行的工具调用及其轮次位置，供权限、并发和执行链共用。
 @dataclass(frozen=True)
 class ToolCallExecuteParams:
     __test__: ClassVar[bool] = False
@@ -81,6 +100,7 @@ class ToolCallExecuteParams:
     tool_rounds: int
     idx: int
     call: ToolCall
+    model_call: ToolCall | None = None
 
 
 @dataclass(frozen=True)
@@ -122,8 +142,12 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     before_context_count = len(getattr(request.params, "tool_context", []) or [])
     _append_assistant_tool_round_context(request)
     calls = [
-        _bound_conversation_workspace_call(request.agent, call)
-        for call in _calls_for_this_execution_round(request)
+        _bound_conversation_workspace_call(
+            request.agent,
+            call,
+            params=request.params,
+        )
+        for call in request.calls
     ]
     # no-action 结构化闸(复核 seq 339):评估判 informational(requires_action=False)
     # 时模型仍提出的 ToolCall 一律不进 handler——全部转结构化拦截结果
@@ -158,9 +182,6 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         if progress.deferred_reason:
             break
         position += 1
-    _record_round_limit_deferred_calls(request, processed_count=len(calls))
-    if len(calls) < len(request.calls) and not progress.deferred_reason:
-        progress.deferred_reason = "达到宿主设置的单轮工具调用上限"
     _append_deferred_tool_call_notice(
         request,
         handled_count=progress.handled_count,
@@ -236,6 +257,7 @@ def _gate_all_calls_for_no_action(
                 call,
                 result,
                 ("received", "gated", "persisted", "projected"),
+                model_call=_model_visible_call(request, idx, call),
             )
         )
     if streak >= _NO_ACTION_GATE_HALT_LIMIT:
@@ -370,7 +392,13 @@ def _execute_serial_step(
         )
     else:
         execution = request.execute_one(
-            ToolCallExecuteParams(request.params, request.tool_rounds, idx, call)
+            ToolCallExecuteParams(
+                request.params,
+                request.tool_rounds,
+                idx,
+                call,
+                model_call=_model_visible_call(request, idx, call),
+            )
         )
         execution = _resolve_tool_approval(request, idx, call, execution)
     wrote_output, transition = _record_execution(request, idx, started_at, execution)
@@ -451,6 +479,7 @@ def _resolve_tool_approval(
                 request.tool_rounds,
                 idx,
                 original_call,
+                model_call=_model_visible_call(request, idx, original_call),
             )
         )
         if decision.feedback:
@@ -588,6 +617,8 @@ class _ParallelThreadContext:
     task_attributes: dict[str, object] | None
 
 
+# LLM: Provider 已提交的全部调用都必须获得真实终态；两个配置只限制一次并发批次大小，不能截掉同一 assistant turn 的尾部调用。
+# 函数用途: 计算下一段可并发执行的调用范围；超出批大小的调用留在当前工具轮中，下一批紧接着继续执行。
 def _parallel_segment_end(
     request: ToolRoundExecutionRequest,
     calls: list[ToolCall],
@@ -595,7 +626,7 @@ def _parallel_segment_end(
 ) -> int:
     descriptors = []
     position = start
-    parallel_limit = _max_parallel_tool_calls(request)
+    parallel_limit = _effective_parallel_batch_limit(request)
     # 0=不限制(与 max_tool_rounds 显式 0 同约定);正数=该上限(EXEC-01)。
     while position < len(calls) and (
         parallel_limit <= 0 or position - start < parallel_limit
@@ -618,6 +649,20 @@ def _parallel_segment_end(
         descriptors.append(descriptor)
         position += 1
     return position
+
+
+# LLM: ``max_tool_calls_per_round`` 是历史公开字段；当前只把它解释为执行批大小，与 会话运行时 的 admission/parallel gate 一样不得制造未执行 ToolResult。
+# 函数用途: 合并普通并发上限和后台切片批大小，取最小正数；0 表示对应配置不限制。
+def _effective_parallel_batch_limit(request: ToolRoundExecutionRequest) -> int:
+    limits = [
+        value
+        for value in (
+            _max_parallel_tool_calls(request),
+            _tool_execution_batch_size(request),
+        )
+        if value > 0
+    ]
+    return min(limits) if limits else 0
 
 
 def _execute_parallel_segment(
@@ -682,7 +727,13 @@ def _execute_parallel_call(
         )
     try:
         return request.execute_one(
-            ToolCallExecuteParams(request.params, request.tool_rounds, idx, call)
+            ToolCallExecuteParams(
+                request.params,
+                request.tool_rounds,
+                idx,
+                call,
+                model_call=_model_visible_call(request, idx, call),
+            )
         )
     finally:
         if previous_runner is not None:
@@ -774,6 +825,7 @@ def _record_execution(
             call,
             result,
             execution.states,
+            model_call=_model_visible_call(request, idx, call),
         )
     )
     # 会话运行时 式循环中，写任何文件（包括历史 output.json）都只是工具结果；
@@ -820,12 +872,24 @@ def _runtime_transition_after_tool(
     return {"kind": kind, "reason": reason, "resume": resume}
 
 
-def _bound_conversation_workspace_call(agent: object, call: ToolCall) -> ToolCall:
+# LLM: Tool execution owns the exact immutable turn parameters.  Always pass that snapshot into
+# workspace rebasing; the shared Agent thread-local is compatibility only for older direct callers.
+# 函数用途: 用本条工具请求自己的任务目录改写旧 cwd，避免并发 Gateway 线程读错临时上下文。
+def _bound_conversation_workspace_call(
+    agent: object,
+    call: ToolCall,
+    *,
+    params: object | None = None,
+) -> ToolCall:
     """统一改写绑定前 prompt 遗留的占位目录，避免账本续上而产物另起目录。"""
     from ...conversation.task_promotion import rebase_bound_conversation_workspace_params
 
     projected = {"tool": call.tool_name, **call.arguments}
-    rebased = rebase_bound_conversation_workspace_params(agent, projected)
+    rebased = rebase_bound_conversation_workspace_params(
+        agent,
+        projected,
+        params=params,
+    )
     if not isinstance(rebased, dict):
         return call
     arguments = {
@@ -863,8 +927,28 @@ def _record_unstarted_calls(
                     "persisted",
                     "projected",
                 ),
+                model_call=_model_visible_call(request, idx, call),
             )
         )
+
+
+# LLM: Provider history must replay the exact admitted model arguments, while execution may carry
+# rebased paths and trusted bindings. Position plus call identity is the only accepted pairing.
+# 函数用途: 按本轮原始调用位置取回模型真正提交的参数，避免把宿主补充字段回灌给模型。
+def _model_visible_call(
+    request: ToolRoundExecutionRequest,
+    idx: int,
+    execution_call: ToolCall,
+) -> ToolCall:
+    position = max(0, int(idx or 0) - 1)
+    if position < len(request.calls):
+        candidate = request.calls[position]
+        if (
+            candidate.call_id == execution_call.call_id
+            and candidate.tool_name == execution_call.tool_name
+        ):
+            return candidate
+    return execution_call
 
 
 # 函数用途: 中断时给本工具一条结构化"已中断"结果(模型可读懂并收尾)。
@@ -1057,46 +1141,9 @@ def _runtime_transition_deferred_result(call: ToolCall) -> ToolResult:
     )
 
 
-def _record_round_limit_deferred_calls(
-    request: ToolRoundExecutionRequest,
-    *,
-    processed_count: int,
-) -> None:
-    if processed_count >= len(request.calls):
-        return
-    # Keep provider order intact. The helper uses ``start_idx`` as both the
-    # one-based record index and slice point, so passing an already-sliced tail
-    # would slice twice and silently leave calls without terminal results.
-    calls = [_bound_conversation_workspace_call(request.agent, call) for call in request.calls]
-    _record_unstarted_calls(
-        request,
-        calls,
-        start_idx=processed_count + 1,
-        result_factory=_tool_call_limit_deferred_result,
-        phase="deferred",
-        status="超过本轮上限",
-    )
-
-
-def _tool_call_limit_deferred_result(call: ToolCall) -> ToolResult:
-    return ToolResult.failed(
-        call,
-        "TOOL_CALL_LIMIT_DEFERRED: 本轮调用数量超过宿主上限；本调用没有执行，请在下一模型轮按最新事实重新发起。",
-        error_code="TOOL_CALL_LIMIT_DEFERRED",
-        failure_stage="runtime_gate",
-    )
-
-
-def _calls_for_this_execution_round(
-    request: ToolRoundExecutionRequest,
-) -> list[ToolCall]:
-    limit = _max_tool_calls_per_round(request)
-    if limit <= 0 or len(request.calls) <= limit:
-        return request.calls
-    return request.calls[:limit]
-
-
-def _max_tool_calls_per_round(request: ToolRoundExecutionRequest) -> int:
+# LLM: 该历史字段现在只限制一次宿主并发批次；调用总数由 provider turn 决定，所有 admitted calls 都必须在再次采样模型前执行或得到客观取消/compact 结果。
+# 函数用途: 读取每批工具执行数量，后台可用较小值削峰，但不能借此丢弃同轮后续调用。
+def _tool_execution_batch_size(request: ToolRoundExecutionRequest) -> int:
     value = _task_attribute_int(request, "max_tool_calls_per_round")
     if value is None:
         value = _agent_config_int(request.agent, "max_tool_calls_per_round")
@@ -1295,7 +1342,7 @@ def _structured_tool_progress(
             payload["failure_stage"] = event.result.failure_stage
         if event.result.error_code:
             payload["error_code"] = event.result.error_code
-        output = _public_progress_text(event, event.result.output, max_chars=1600)
+        output = _tool_progress_output(event)
         if output:
             payload["output"] = output
         handler_details = event.result.metadata.get("handler_details")
@@ -1323,6 +1370,19 @@ def _structured_tool_progress(
             3,
         )
     return payload
+
+
+# LLM: 外置工具结果的物理 blob 路径只供宿主归档；TUI 进度最多展示稳定 scoped call id，不能把路径当用户结果。
+# 函数用途: 为工具完成卡生成安全短摘要；普通结果显示正文，外置结果显示可识别的逻辑引用。
+def _tool_progress_output(event: ToolProgressEvent) -> str:
+    result = event.result
+    if result is None:
+        return ""
+    archive = result.metadata.get("archive_output_record")
+    if isinstance(archive, Mapping) and archive.get("output_externalized") is True:
+        scoped_call_id = str(archive.get("scoped_call_id") or "").strip()
+        return scoped_call_id or "完整输出已安全归档"
+    return _public_progress_text(event, result.output, max_chars=1600)
 
 
 # LLM: Result envelopes are the durable source for Todo snapshots after large
@@ -1489,9 +1549,11 @@ def _finished_status(result: ToolResult) -> str:
     return "完成" if result.ok else f"失败({result.error_code or 'ERROR'})"
 
 
+# LLM: 工具卡首选模型原始公共参数做摘要，不能从输出正文或宿主补全字段反推；新增工具只加无敏感值的显式参数。
+# 函数用途: 从常见工具参数中挑一个短描述，让执行中和完成后的卡片都说明正在操作什么。
 def _payload_progress_detail(call: ToolCall) -> str:
     payload = call.arguments
-    for key in ("path", "artifact_ref", "root_id", "run_id", "status", "scope"):
+    for key in ("path", "url", "query", "artifact_ref", "root_id", "run_id", "status", "scope"):
         value = str(payload.get(key) or "").strip()
         if value:
             return _shorten(value)
@@ -1501,6 +1563,9 @@ def _payload_progress_detail(call: ToolCall) -> str:
     items = payload.get("items")
     if isinstance(items, list):
         return f"items={len(items)}"
+    urls = payload.get("urls")
+    if isinstance(urls, list):
+        return f"urls={len(urls)}"
     return ""
 
 

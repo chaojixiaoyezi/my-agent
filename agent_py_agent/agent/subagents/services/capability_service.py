@@ -1,6 +1,7 @@
+# LLM: This service routes only OPEN typed requests. Objective owner-scope violations become GAP
+# before semantic card selection and can never create a grant or continuation wake.
+# 模块用途: 为子代理能力申请匹配工具/技能，并把无法授权的范围记录为结构化缺口。
 from __future__ import annotations
-
-"""Capability request routing service for subagent tasks."""
 
 from typing import TYPE_CHECKING
 
@@ -9,6 +10,7 @@ from agent_py_agent.agent.capability.config import CapabilityConfig
 
 from ..capability_route_service import (
     CapabilityNoHitsParams,
+    CapabilityOwnerScopeGapParams,
     ExistingCapabilityGrantParams,
     RouteCapabilityApplyParams,
     WouldCapabilityGrantParams,
@@ -16,11 +18,16 @@ from ..capability_route_service import (
     extract_selected_hits_data,
     route_capability_apply,
     route_capability_no_hits,
+    route_capability_owner_scope_gap,
     route_existing_capability_grant,
     route_would_capability_grant,
     write_capability_route_report_files,
 )
-from ..capability_scope import existing_delete_trash_grant
+from ..capability_scope import (
+    effective_request_path_scope,
+    existing_delete_trash_grant,
+    partition_capability_paths_by_owner,
+)
 from ..model_capabilities import capability_request_counts_as_open
 from ..models import CapabilityRequest, SubAgentCapabilityRouteOptions, SubAgentTask
 from ..policies import _capability_request_query, _select_capability_hits
@@ -92,6 +99,9 @@ class SubAgentCapabilityService:
         write_capability_route_report_files(self.manager, report, apply=options.apply)
         return report
 
+    # LLM: Owner scope is checked before existing-grant reuse or semantic hit application. Keep
+    # this ordering so no broad historical grant can bypass the current tenant boundary.
+    # 函数用途: 路由一条能力申请，越过用户目录时直接记缺口，否则再匹配或复用能力卡。
     def _route_capability_request(
         self,
         task: SubAgentTask,
@@ -102,6 +112,23 @@ class SubAgentCapabilityService:
         selected_hits: list[CapabilitySearchHit],
         apply: bool,
     ) -> CapabilityRouteRecord:
+        scope_decision = partition_capability_paths_by_owner(
+            self.manager,
+            task,
+            effective_request_path_scope(request),
+        )
+        if scope_decision.rejected_paths:
+            return route_capability_owner_scope_gap(
+                self.manager,
+                CapabilityOwnerScopeGapParams(
+                    task=task,
+                    request=request,
+                    query=query,
+                    hits=hits,
+                    decision=scope_decision,
+                    apply=apply,
+                ),
+            )
         selected_hits = _hits_matching_requested_scope(request, selected_hits)
         selected_cards, granted_skills, granted_tools, reasons = extract_selected_hits_data(selected_hits)
         if existing_grant := existing_delete_trash_grant(task, request):

@@ -27,6 +27,7 @@ from .models import (
     ToolRuntimePolicy,
     TrustedParameterBinding,
 )
+from .process_registry import process_access_scope
 from .sandbox import SandboxUnavailable
 from .shell import (
     ShellTool,
@@ -41,6 +42,8 @@ _MAX_SESSIONS = 32
 _MAX_BUFFER_BYTES = 1_000_000
 _MAX_WRITE_BYTES = 64_000
 _DEFAULT_READ_BYTES = 32_000
+_MAX_TERMINAL_COLUMNS = 1000
+_MAX_TERMINAL_ROWS = 1000
 
 
 # LLM: A PTY session stores the immutable permission snapshot captured at start; later reads and
@@ -87,6 +90,7 @@ class PtySession:
 @dataclass(frozen=True)
 class PtyAccessScope:
     owner_home: str
+    conversation_id: str
     write_roots: tuple[str, ...] | None
     read_roots: tuple[str, ...] | None
     protected_write_paths: tuple[str, ...] | None
@@ -100,6 +104,7 @@ def _pty_access_scope(
     write_roots: tuple[Any, ...] | None,
     read_roots: tuple[Any, ...] | None = None,
     protected_write_paths: tuple[Any, ...] | None = None,
+    run_scope: object = None,
 ) -> PtyAccessScope:
     owner = ""
     if owner_home:
@@ -126,6 +131,7 @@ def _pty_access_scope(
         )
     return PtyAccessScope(
         owner_home=owner,
+        conversation_id=process_access_scope(run_scope, owner).conversation_id,
         write_roots=normalized_roots,
         read_roots=normalized_read_roots,
         protected_write_paths=normalized_protected,
@@ -134,7 +140,7 @@ def _pty_access_scope(
 
 # LLM: The process-wide registry may hold sessions from concurrent TUI requests, so every lookup
 # and mutation must validate the immutable PtyAccessScope before touching a process.
-# 类用途: 统一登记、读写和关闭有界交互终端，防止跨用户接管。
+# 类用途: 统一登记、列出、读写、调尺寸和关闭有界交互终端，防止跨用户或跨会话接管。
 class PtySessionRegistry:
     def __init__(self) -> None:
         self._sessions: dict[str, PtySession] = {}
@@ -152,6 +158,7 @@ class PtySessionRegistry:
         write_roots: tuple[Path, ...] | None = None,
         read_roots: tuple[Path, ...] | None = None,
         protected_write_paths: tuple[Path, ...] | None = None,
+        run_scope: object = None,
     ) -> PtySession:
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
@@ -168,6 +175,7 @@ class PtySessionRegistry:
             write_roots,
             read_roots,
             protected_write_paths,
+            run_scope,
         )
         exec_arg, use_shell = _sandbox_exec(
             command,
@@ -209,6 +217,18 @@ class PtySessionRegistry:
         threading.Thread(target=self._drain, args=(session,), daemon=True).start()
         return session
 
+    # LLM: Listing is an exact-scope projection over the bounded in-memory registry; never expose
+    # sessions from another owner/conversation or use session-id knowledge as authorization.
+    # 函数用途: 列出当前可信用户会话能访问的交互终端，包括已结束终端的真实状态。
+    def list(self, access_scope: PtyAccessScope) -> list[PtySession]:
+        with self._lock:
+            sessions = [
+                session
+                for session in self._sessions.values()
+                if session.access_scope == access_scope
+            ]
+        return sorted(sessions, key=lambda item: (item.started_at, item.session_id))
+
     def get(self, session_id: str, access_scope: PtyAccessScope | None = None) -> PtySession | None:
         with self._lock:
             session = self._sessions.get(session_id)
@@ -230,6 +250,28 @@ class PtySessionRegistry:
         if session is None or session.closed or session.process.poll() is not None:
             return session
         os.write(session.master_fd, data)
+        session.last_active_at = time.time()
+        return session
+
+    # LLM: PTY geometry changes must use the kernel TIOCSWINSZ control, matching 会话运行时 resizePty;
+    # terminal escape bytes are ordinary application output and must never stand in for this fact.
+    # 函数用途: 调整当前可信会话里指定 PTY 的字符行列，并让交互程序收到真实窗口尺寸变化。
+    def resize(
+        self,
+        session_id: str,
+        columns: int,
+        rows: int,
+        access_scope: PtyAccessScope | None = None,
+    ) -> PtySession | None:
+        session = self.get(session_id, access_scope)
+        if session is None or session.closed or session.process.poll() is not None:
+            return session
+        import fcntl
+        import struct
+        import termios
+
+        packed = struct.pack("HHHH", rows, columns, 0, 0)
+        fcntl.ioctl(session.master_fd, termios.TIOCSWINSZ, packed)
         session.last_active_at = time.time()
         return session
 
@@ -287,45 +329,83 @@ class PtySessionRegistry:
 pty_session_registry = PtySessionRegistry()
 
 
-# LLM: terminal_session 必须将 start 视为一次新的可持久命令授权；write/read/close 只操作已批准会话。
+# LLM: terminal_session 必须将 start 视为一次新的可持久命令授权；list/write/read/resize/close
+# 只操作当前可信会话里已批准的 PTY，不暴露系统 PID。
 # 类用途: 启动并操作真实 PTY，供必须有 TTY/stdin 的交互命令使用。
 class TerminalSessionTool(BaseTool):
     """Start and interact with a real pseudoterminal session."""
 
     model_spec = ToolModelSpec(
         name="terminal_session",
-        description="启动并操作真实 PTY 交互终端会话，支持 start/write/read/close。",
+        description=(
+            "启动并操作真实 PTY 交互终端会话，支持 list/start/write/read/resize/close。"
+            "resize 必须使用结构化 columns/rows；发送终端 ESC 文本不能代替真实尺寸调整。"
+        ),
         input_schema={
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["start", "write", "read", "close"], "description": "要执行的终端会话动作。"},
-                "session_id": {"type": "string", "description": "write/read/close 所需 PTY session id。"},
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "start", "write", "read", "resize", "close"],
+                    "description": "要执行的终端会话动作。",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "write/read/resize/close 所需 PTY session id。",
+                },
                 "command": {"type": "string", "description": "start 所需命令。"},
-                "working_dir": {"type": "string", "description": "start 的工作目录；省略时使用本轮可信有效目录。"},
+                "working_dir": {
+                    "type": "string",
+                    "description": "start 的工作目录；省略时使用本轮可信有效目录。",
+                },
                 "data": {"type": "string", "description": "write 写入的文本。"},
                 "append_newline": {"type": "boolean", "description": "write 后是否追加换行。"},
                 "cursor": {"type": "integer", "minimum": 0, "description": "read 的增量游标。"},
-                "max_bytes": {"type": "integer", "minimum": 1, "maximum": _MAX_BUFFER_BYTES, "description": "read 最多返回的字节数。"},
+                "max_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": _MAX_BUFFER_BYTES,
+                    "description": "read 最多返回的字节数。",
+                },
+                "columns": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": _MAX_TERMINAL_COLUMNS,
+                    "description": "resize 后的终端列数。",
+                },
+                "rows": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": _MAX_TERMINAL_ROWS,
+                    "description": "resize 后的终端行数。",
+                },
             },
             "required": ["action"],
             "additionalProperties": False,
         },
         hints=ToolModelHints(
             category="shell",
-            use_cases=("CLI 必须检测 TTY、显示交互提示或接收 stdin 时", "需要向长驻 REPL、调试器或交互安装器持续写入输入并读取输出时"),
-            avoid_when=("一次性非交互命令继续使用 run_command", "纯后台批处理使用 run_command(run_in_background=true)"),
+            use_cases=(
+                "CLI 必须检测 TTY、显示交互提示或接收 stdin 时",
+                "需要向长驻 REPL、调试器或交互安装器持续写入输入并读取输出时",
+            ),
+            avoid_when=(
+                "一次性非交互命令继续使用 run_command",
+                "纯后台批处理使用 run_command(run_in_background=true)",
+            ),
             keywords=("pty", "terminal", "interactive", "stdin", "repl", "交互终端"),
             examples=(
                 '{"tool":"terminal_session","action":"start","command":"python -q"}',
                 '{"tool":"terminal_session","action":"write","session_id":"pty-1-...","data":"print(42)","append_newline":true}',
                 '{"tool":"terminal_session","action":"read","session_id":"pty-1-...","cursor":0}',
+                '{"tool":"terminal_session","action":"resize","session_id":"pty-1-...","columns":100,"rows":30}',
             ),
         ),
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy(
             "dangerous",
-            by_parameter=(("action", (("read", "read_only"),)),),
+            by_parameter=(("action", (("list", "read_only"), ("read", "read_only"))),),
         ),
         sandbox_policy=SandboxPolicy(
             "required",
@@ -343,14 +423,17 @@ class TerminalSessionTool(BaseTool):
                 "__sandbox_read_roots",
                 "__sandbox_protected_write_paths",
                 "__access_mode",
+                "__run_scope",
             ),
-            trusted_parameter_bindings=((
-                "working_dir",
-                TrustedParameterBinding(
-                    source_refs=("registry.effective_cwd",),
-                    when=(("action", "start"),),
+            trusted_parameter_bindings=(
+                (
+                    "working_dir",
+                    TrustedParameterBinding(
+                        source_refs=("registry.effective_cwd",),
+                        when=(("action", "start"),),
+                    ),
                 ),
-            ),),
+            ),
         ),
         promotes_task=True,
         mutates_workspace=True,
@@ -367,9 +450,7 @@ class TerminalSessionTool(BaseTool):
         write_boundary: dict[str, Any] | None,
         workspace_root: Path,
     ) -> tuple[str, ...]:
-        return self.shell_tool.effective_write_roots(
-            arguments, write_boundary, workspace_root
-        )
+        return self.shell_tool.effective_write_roots(arguments, write_boundary, workspace_root)
 
     @property
     def workspace_roots(self) -> list[Path]:
@@ -381,26 +462,49 @@ class TerminalSessionTool(BaseTool):
 
     # LLM: PTY follow-up actions must reconstruct the exact host-only scope from internal params;
     # model-visible arguments alone can never select a session.
-    # 函数用途: 为启动、读、写和关闭生成同一份 PTY 边界键。
+    # 函数用途: 为列出、启动、读、写、调尺寸和关闭生成同一份 PTY 边界键。
     def _access_scope(self, params: dict[str, Any]) -> PtyAccessScope:
         return _pty_access_scope(
             self.shell_tool.path_access_policy.owner_scope_root,
             _sandbox_write_roots(params),
             _sandbox_read_roots(params),
             _sandbox_protected_write_paths(params),
+            params.get("__run_scope"),
         )
 
+    # LLM: Action dispatch is the sole model-facing PTY control switch. Keep schema, effect
+    # mapping and this dispatch synchronized so invalid actions fail before any host mutation.
+    # 函数用途: 按结构化 action 分发交互终端的列出、启动、读写、调尺寸和关闭操作。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip().lower()
+        if action == "list":
+            return self._list(params)
         if action == "start":
             return self._start(params)
         if action == "write":
             return self._write(params)
         if action == "read":
             return self._read(params)
+        if action == "resize":
+            return self._resize(params)
         if action == "close":
             return self._close(params)
-        return self._error("TOOL_INVALID_ARGUMENTS", "action 必须是 start/write/read/close")
+        return self._error(
+            "TOOL_INVALID_ARGUMENTS",
+            "action 必须是 list/start/write/read/resize/close",
+        )
+
+    # LLM: List output is bounded by the registry session cap and contains stable logical handles,
+    # not OS PIDs. Status is sampled from each exact-scope process at projection time.
+    # 函数用途: 显示当前用户会话创建过的交互终端及其运行状态和真实终端尺寸。
+    def _list(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        sessions = pty_session_registry.list(self._access_scope(params))
+        return self._ok(
+            {
+                "sessions": [_pty_session_summary(session) for session in sessions],
+                "count": len(sessions),
+            }
+        )
 
     # LLM: Start is the only PTY process-spawn boundary; command policy, cwd policy, sandbox roots
     # and protected control paths must all be resolved before the registry sees the command.
@@ -430,6 +534,7 @@ class TerminalSessionTool(BaseTool):
                 write_roots,
                 read_roots,
                 protected_write_paths,
+                params.get("__run_scope"),
             )
         except SandboxUnavailable as exc:
             return self._error("SANDBOX_UNAVAILABLE", str(exc))
@@ -439,7 +544,6 @@ class TerminalSessionTool(BaseTool):
             {
                 "status": "running",
                 "session_id": session.session_id,
-                "pid": session.process.pid,
                 "cursor": 0,
             }
         )
@@ -488,6 +592,51 @@ class TerminalSessionTool(BaseTool):
             }
         )
 
+    # LLM: Resize validates dimensions before the registry touches the fd and reports the kernel
+    # geometry read back from the PTY. A write acknowledgement is not evidence of a resize.
+    # 函数用途: 用结构化行列数调整一个运行中的交互终端，并回报内核实际采用的尺寸。
+    def _resize(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        session_id = str(params.get("session_id") or "").strip()
+        try:
+            columns = int(params.get("columns"))
+            rows = int(params.get("rows"))
+        except (TypeError, ValueError):
+            return self._error(
+                "TOOL_INVALID_ARGUMENTS",
+                "resize 需要 session_id、columns 和 rows",
+            )
+        if (
+            not session_id
+            or not 1 <= columns <= _MAX_TERMINAL_COLUMNS
+            or not 1 <= rows <= _MAX_TERMINAL_ROWS
+        ):
+            return self._error(
+                "TOOL_INVALID_ARGUMENTS",
+                "resize 的 columns/rows 必须在 1-1000 之间",
+            )
+        try:
+            session = pty_session_registry.resize(
+                session_id,
+                columns,
+                rows,
+                self._access_scope(params),
+            )
+        except OSError as exc:
+            return self._error("COMMAND_FAILED", str(exc))
+        if session is None:
+            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
+        if session.process.poll() is not None or session.closed:
+            return self._error("COMMAND_FAILED", f"PTY session 已结束: {session_id}")
+        actual = os.get_terminal_size(session.master_fd)
+        return self._ok(
+            {
+                "status": "resized",
+                "session_id": session_id,
+                "columns": actual.columns,
+                "rows": actual.lines,
+            }
+        )
+
     def _close(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
         session = pty_session_registry.close(session_id, self._access_scope(params))
@@ -502,10 +651,35 @@ class TerminalSessionTool(BaseTool):
         )
 
     def _ok(self, payload: dict[str, Any]) -> ToolHandlerOutcome:
-        return ToolHandlerOutcome(self.model_spec.name, True, json.dumps(payload, ensure_ascii=False))
+        return ToolHandlerOutcome(
+            self.model_spec.name, True, json.dumps(payload, ensure_ascii=False)
+        )
 
     def _error(self, code: str, message: str) -> ToolHandlerOutcome:
         return ToolHandlerOutcome(self.model_spec.name, False, message, error_code=code)
+
+
+# LLM: This projection is the only model-visible PTY listing shape. Keep OS process identifiers
+# private and derive size/status from the live exact-scope session instead of cached narration.
+# 函数用途: 把一个交互终端整理成列表可读的稳定句柄、状态、命令和实际尺寸。
+def _pty_session_summary(session: PtySession) -> dict[str, object]:
+    status = (
+        "closed" if session.closed else ("running" if session.process.poll() is None else "exited")
+    )
+    try:
+        size = os.get_terminal_size(session.master_fd)
+        columns, rows = size.columns, size.lines
+    except OSError:
+        columns, rows = None, None
+    return {
+        "session_id": session.session_id,
+        "status": status,
+        "command": session.command,
+        "columns": columns,
+        "rows": rows,
+        "started_at": session.started_at,
+        "last_active_at": session.last_active_at,
+    }
 
 
 __all__ = ["PtySessionRegistry", "TerminalSessionTool", "pty_session_registry"]

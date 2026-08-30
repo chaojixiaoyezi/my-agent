@@ -9,6 +9,7 @@ from prompt_toolkit.buffer import Buffer, CompletionState
 from prompt_toolkit.document import Document
 from prompt_toolkit.widgets import TextArea
 
+from agent_py_agent.agent.conversation.control_commands import ConversationControlResult
 from agent_py_agent.cli.chat_parts import tui_keybindings
 from agent_py_agent.cli.chat_parts.chat_style import CHAT_RESPONSE_STYLE_INJECT
 from agent_py_agent.cli.chat_parts.plain_state import ChatJob
@@ -131,6 +132,74 @@ def test_escape_stops_focused_child_and_ctrl_g_back_only_navigates(monkeypatch) 
     tui_keybindings._handle_agent_back_keybinding(event, params)
     assert back_calls == [True]
     assert stopped == ["child-a"]
+
+
+def test_escape_targets_active_manual_compact_control_message() -> None:
+    runtime = TuiRuntime("manual-compact-escape")
+    runtime.publish_manual_compact_started("compact-control-1")
+    captured: list[object] = []
+
+    class Reconciler:
+        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+            captured.append(entry)
+            if on_persisted_before_dispatch is not None:
+                on_persisted_before_dispatch(entry)
+
+    app = SimpleNamespace(invalidate=lambda: None)
+    params = SimpleNamespace(
+        input_area=TextArea(multiline=True),
+        agent_navigation=None,
+        tui_runtime=runtime,
+        use_gateway=True,
+        state_lock=threading.Lock(),
+        is_running_ref=[False],
+        pending_jobs_ref=[0],
+        running_request_id_ref=[""],
+        control_operation_reconciler=Reconciler(),
+        escape_armed_at_ref=[0.0],
+        escape_armed_text_ref=[""],
+    )
+
+    tui_keybindings._handle_escape_keybinding(SimpleNamespace(app=app), params)
+
+    assert len(captured) == 1
+    assert captured[0].command_kind == "stop"
+    assert captured[0].expected_turn_id == ""
+    assert captured[0].target_control_message_id == "compact-control-1"
+
+
+def test_escape_stops_canonical_background_task_while_local_worker_is_idle() -> None:
+    runtime = TuiRuntime("background-escape")
+    runtime.update_background_activity(1, {"main_activity": {"phase": "waiting"}})
+    captured: list[object] = []
+
+    class Reconciler:
+        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+            del on_persisted_before_dispatch
+            captured.append(entry)
+
+    app = SimpleNamespace(invalidate_calls=0)
+    app.invalidate = lambda: setattr(app, "invalidate_calls", app.invalidate_calls + 1)
+    params = SimpleNamespace(
+        input_area=TextArea(multiline=True),
+        agent_navigation=None,
+        tui_runtime=runtime,
+        use_gateway=True,
+        state_lock=threading.Lock(),
+        is_running_ref=[False],
+        pending_jobs_ref=[0],
+        running_request_id_ref=[""],
+        control_operation_reconciler=Reconciler(),
+        escape_armed_at_ref=[0.0],
+        escape_armed_text_ref=[""],
+    )
+
+    tui_keybindings._handle_escape_keybinding(SimpleNamespace(app=app), params)
+
+    assert len(captured) == 1
+    assert captured[0].command_kind == "stop"
+    assert captured[0].expected_turn_id == ""
+    assert app.invalidate_calls == 1
 
 
 def test_queued_placeholder_is_display_only() -> None:
@@ -459,8 +528,10 @@ def test_gateway_btw_enters_durable_control_outbox_with_exact_turn() -> None:
     captured: list[object] = []
 
     class Reconciler:
-        def enqueue(self, entry) -> None:
+        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
             captured.append(entry)
+            if on_persisted_before_dispatch is not None:
+                on_persisted_before_dispatch(entry)
 
     params = SimpleNamespace(
         use_gateway=True,
@@ -481,6 +552,19 @@ def test_gateway_btw_enters_durable_control_outbox_with_exact_turn() -> None:
     assert entry.command_text == "/btw 先检查现有结果"
     assert entry.expected_turn_id == "gwreq-exact"
     assert entry.message_id.startswith("control-")
+    pending = runtime.store.snapshot().pending_steers
+    assert [(item.message_id, item.text) for item in pending] == [
+        (entry.message_id, "先检查现有结果")
+    ]
+
+
+def test_expand_parser_accepts_documented_explicit_last() -> None:
+    from agent_py_agent.cli.chat_parts.slash_commands import parse_expand_target
+
+    assert parse_expand_target("/expand") == "last"
+    assert parse_expand_target("/expand last") == "last"
+    assert parse_expand_target("/expand 2") == "2"
+    assert parse_expand_target("/expand unknown") is None
 
 
 def test_gateway_manual_compact_starts_visible_progress_after_durable_enqueue() -> None:
@@ -488,8 +572,10 @@ def test_gateway_manual_compact_starts_visible_progress_after_durable_enqueue() 
     captured: list[object] = []
 
     class Reconciler:
-        def enqueue(self, entry) -> None:
+        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
             captured.append(entry)
+            assert on_persisted_before_dispatch is not None
+            on_persisted_before_dispatch(entry)
 
     params = SimpleNamespace(
         use_gateway=True,
@@ -505,7 +591,164 @@ def test_gateway_manual_compact_starts_visible_progress_after_durable_enqueue() 
     active = runtime.store.snapshot().active_blocks
     assert len(active) == 1
     assert active[0].role == "compact"
-    assert active[0].metadata["percent"] == 5
+    assert active[0].metadata["percent"] == 0
+    assert active[0].metadata["indeterminate"] is True
+
+
+def test_gateway_manual_compact_fast_terminal_cannot_overtake_start() -> None:
+    runtime = TuiRuntime("control-compact-fast-terminal")
+
+    class Reconciler:
+        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+            assert on_persisted_before_dispatch is not None
+            on_persisted_before_dispatch(entry)
+            runtime.publish_manual_compact_terminal(entry.message_id, succeeded=True)
+
+    params = SimpleNamespace(
+        use_gateway=True,
+        state_lock=threading.Lock(),
+        is_running_ref=[False],
+        running_request_id_ref=[""],
+        tui_runtime=runtime,
+        control_operation_reconciler=Reconciler(),
+    )
+
+    assert tui_keybindings._tui_submit_control_operation(params, "/compact")
+    snapshot = runtime.store.snapshot()
+    assert snapshot.active_blocks == ()
+    assert all(
+        item.get("code") != "COMPACT_TERMINAL_WITHOUT_START"
+        for item in snapshot.diagnostics
+    )
+
+
+def test_gateway_manual_compact_noop_closes_without_failure(tmp_path) -> None:
+    runtime = TuiRuntime("control-compact-noop")
+    stop_event = threading.Event()
+    stop_event.set()
+    params = SimpleNamespace(
+        agent=SimpleNamespace(),
+        use_gateway=True,
+        current_session_id="session-noop",
+        paths=SimpleNamespace(root=tmp_path),
+        stop_event=stop_event,
+        tui_runtime=runtime,
+        control_operation_reconciler=None,
+    )
+    reconciler = tui_keybindings._ensure_control_operation_reconciler(params)
+    entry = SimpleNamespace(
+        message_id="control-compact-noop",
+        command_kind="compact",
+    )
+    runtime.publish_manual_compact_started(entry.message_id)
+
+    reconciler.on_complete(
+        entry,
+        ConversationControlResult(
+            "compact",
+            True,
+            "当前会话还没有可压缩的历史。",
+        ),
+    )
+
+    snapshot = runtime.store.snapshot()
+    assert snapshot.active_blocks == ()
+    assert snapshot.status.compact_count == 0
+    assert all(block.role != "compact" for block in snapshot.stable_blocks)
+    assert any(
+        block.role == "system" and "还没有可压缩的历史" in block.text
+        for block in snapshot.stable_blocks
+    )
+
+
+def test_gateway_context_uses_current_tui_snapshot_without_control_request() -> None:
+    runtime = TuiRuntime("control-context-local-snapshot")
+    turn = runtime.begin_turn("gwreq-context")
+    assert turn.write_context_usage(
+        {
+            "schema": "model_visible_context_usage.v1",
+            "estimated": True,
+            "context_window_tokens": 128_000,
+            "compact_trigger_tokens": 115_200,
+            "current_tokens": 42_100,
+            "prompt_tokens": 8_700,
+            "messages_tokens": 16_000,
+            "runtime_guidance_tokens": 400,
+            "tool_schema_tokens": 17_000,
+            "protocol": "native",
+        }
+    )
+
+    class Reconciler:
+        def enqueue(self, _entry) -> None:
+            raise AssertionError("/context must not create a second Gateway estimate")
+
+    params = SimpleNamespace(
+        use_gateway=True,
+        state_lock=threading.Lock(),
+        is_running_ref=[True],
+        running_request_id_ref=["gwreq-context"],
+        tui_runtime=runtime,
+        agent_navigation=None,
+        control_operation_reconciler=Reconciler(),
+    )
+
+    assert tui_keybindings._tui_submit_control_operation(params, "/context")
+    snapshot = runtime.store.snapshot()
+    assert snapshot.status.context_usage is not None
+    reports = [block.text for block in snapshot.stable_blocks if block.role == "system"]
+    assert len(reports) == 1
+    assert "42,100 / 128,000 tokens（32.9%）" in reports[0]
+    assert "对话与工具消息：16,000 tokens" in reports[0]
+
+
+def test_gateway_memory_command_runs_outside_input_thread(monkeypatch) -> None:
+    runtime = TuiRuntime("memory-command")
+    targets: list[object] = []
+    handled: list[object] = []
+    invalidations: list[bool] = []
+
+    class FakeThread:
+        def __init__(self, *, target, name, daemon):
+            assert name == "my-agent-tui-memory-command"
+            assert daemon is True
+            targets.append(target)
+
+        def start(self) -> None:
+            return None
+
+    monkeypatch.setattr(tui_keybindings.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        tui_keybindings,
+        "_handle_command_params",
+        lambda _params, text: ("command", text),
+    )
+    monkeypatch.setattr(
+        tui_keybindings,
+        "_tui_handle_command",
+        lambda *, params: handled.append(params) or True,
+    )
+    params = SimpleNamespace(
+        use_gateway=True,
+        agent=SimpleNamespace(gateway_client_only=True),
+        tui_runtime=runtime,
+    )
+    event = SimpleNamespace(
+        app=SimpleNamespace(invalidate=lambda: invalidations.append(True)),
+    )
+
+    assert tui_keybindings._tui_submit_gateway_memory_command(
+        event,
+        params,
+        "/remember 不阻塞输入",
+    )
+    assert handled == []
+    assert "正在保存记忆" in runtime.notice()
+
+    targets[0]()
+
+    assert handled == [("command", "/remember 不阻塞输入")]
+    assert invalidations == [True]
 
 
 def test_gateway_stop_is_not_sent_before_exact_turn_is_bound() -> None:
@@ -525,7 +768,7 @@ def test_gateway_stop_is_not_sent_before_exact_turn_is_bound() -> None:
     )
 
     assert tui_keybindings._tui_submit_control_operation(params, "/stop")
-    assert "No exact active turn" in runtime.notice()
+    assert "当前没有可精确绑定的运行回合" in runtime.notice()
 
 
 def test_gateway_stop_without_foreground_turn_targets_background_task() -> None:
@@ -549,6 +792,60 @@ def test_gateway_stop_without_foreground_turn_targets_background_task() -> None:
     assert len(captured) == 1
     assert captured[0].command_kind == "stop"
     assert captured[0].expected_turn_id == ""
+
+
+def test_gateway_status_does_not_show_mutating_confirmation_notice() -> None:
+    runtime = TuiRuntime("control-status-no-confirmation")
+    captured: list[object] = []
+
+    class Reconciler:
+        def enqueue(self, entry) -> None:
+            captured.append(entry)
+
+    params = SimpleNamespace(
+        use_gateway=True,
+        state_lock=threading.Lock(),
+        is_running_ref=[False],
+        running_request_id_ref=[""],
+        tui_runtime=runtime,
+        control_operation_reconciler=Reconciler(),
+    )
+
+    assert tui_keybindings._tui_submit_control_operation(params, "/status")
+    assert len(captured) == 1
+    assert captured[0].command_kind == "status"
+    assert runtime.notice() == ""
+
+
+def test_gateway_stop_completion_is_stable_transcript_feedback(tmp_path) -> None:
+    runtime = TuiRuntime("control-stop-stable-feedback")
+    stop_event = threading.Event()
+    stop_event.set()
+    params = SimpleNamespace(
+        agent=SimpleNamespace(),
+        use_gateway=True,
+        current_session_id="session-stop",
+        paths=SimpleNamespace(root=tmp_path),
+        stop_event=stop_event,
+        tui_runtime=runtime,
+        control_operation_reconciler=None,
+    )
+    reconciler = tui_keybindings._ensure_control_operation_reconciler(params)
+    entry = SimpleNamespace(message_id="control-stop-one", command_kind="stop")
+
+    reconciler.on_complete(
+        entry,
+        ConversationControlResult(
+            "stop",
+            True,
+            "停止请求已接收，正在收口。",
+        ),
+    )
+
+    assert any(
+        block.role == "system" and "停止请求已接收" in block.text
+        for block in runtime.store.snapshot().stable_blocks
+    )
 
 
 def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue() -> None:

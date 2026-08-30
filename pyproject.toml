@@ -29,8 +29,8 @@ dev = [
   "pyte>=0.8.2,<0.9",  # 仅开发验收：成熟 VTXXX 屏幕模拟器用于 PTY ANSI checkpoint 重放，产品运行时不依赖
   "ruff>=0.8",
 ]
-# Phase 1 加密密钥库:at-rest 加密的唯一外部库(stdlib 无 AES、密码学不能自建)。
-# 可选——不装则 SecretStore 降级到 0o600+base64 并诚实标注 encrypted=false。
+# 飞书/企业微信加密事件回调需要的密码学原语（stdlib 无 AES、密码学不能自建）。
+# `secrets` extra 名为已发布安装接口，暂保兼容；已退休的 SecretStore 不再消费它。
 secrets = [
   "cryptography>=42.0",
 ]

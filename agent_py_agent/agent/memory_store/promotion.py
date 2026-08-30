@@ -7,12 +7,24 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 
-from ..capability.persona_repository import PersonaMutationRequest, PersonaRepository
-from .candidate_models import MemoryCandidate, MemoryScope, normalize_reference_list
+from ..capability.persona_repository import (
+    PersonaMutationRequest,
+    PersonaRepository,
+    persona_entry_id,
+)
+from ..common.json_io import read_jsonl_objects_report
+from ..common.tool_output_paths import tool_output_index_paths_for_lookup
+from .candidate_models import (
+    MemoryCandidate,
+    MemoryScope,
+    host_promotion_mode,
+    normalize_reference_list,
+)
 from .candidates import CandidateService
 from .jsonl import JsonlMemory, MemoryRecord
 from .lessons import HotRuleRepository, LessonRepository
@@ -44,6 +56,8 @@ class VerifiedToolEvidence:
     terminal_status: str
     canonical_ref: dict[str, object]
     effect_outcome: str = ""
+    # 参数只供本次证据核对，不进入 Candidate/promotion_ref 或对模型回放。
+    parameters: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
 
 # LLM: Protocol 是 Memory 对工具模块的唯一依赖面，具体 ledger/状态字段仍归 Tool Agent。
@@ -105,57 +119,177 @@ class MemoryPromotionPolicy:
     hot_min_occurrences: int = 3
 
 
-# LLM: This adapter reads the Tool Agent's authoritative runtime gate ledger; it does not infer success from archive prose.
-# 类用途: 按 owner/run/operation 精确核验工具成功终态，并返回可保存的最小规范引用。
+# LLM: This adapter prefers the runtime gate ledger and uses the canonical owner tool-output
+# index only for exact legacy call identities that predate operation_id in raw audit rows.
+# 类用途: 按 owner/run/operation 或唯一的 run/call 归档核验工具成功终态。
 class LocalStoreToolEvidenceVerifier:
-    # LLM: owner_id 是不可变核验边界，runtime gate ledger 由执行层每轮工具执行后机器写入。
-    # 函数用途: 初始化 runtime gate ledger 的只读 Memory 适配器。
-    def __init__(self, ledger_store: object, *, owner_id: str) -> None:
+    # LLM: owner_id is the immutable verification wall; owner_root is read-only and may expose
+    # only canonical blobs/tool_outputs indexes for legacy evidence completion.
+    # 函数用途: 初始化工具账本与 owner 私有归档的只读 Memory 适配器。
+    def __init__(
+        self,
+        ledger_store: object,
+        *,
+        owner_id: str,
+        owner_root: str | Path | None = None,
+    ) -> None:
         self.ledger_store = ledger_store
         self.owner_id = str(owner_id or "").strip()
+        self.owner_root = (
+            Path(owner_root).expanduser().resolve(strict=False)
+            if str(owner_root or "").strip()
+            else None
+        )
 
-    # LLM: Claimed status/effect fields in the candidate are advisory; the runtime gate ledger is authoritative.
-    # 函数用途: 查一条工具执行观测记录，只有执行层判定 succeeded 时才通过。
+    # LLM: Candidate status/effect fields are advisory. Exact ledger evidence wins; the archive
+    # fallback requires one unique run/call/tool identity plus typed succeeded operation facts.
+    # 函数用途: 核验一条工具引用，仅真实成功终态通过。
     def verify(self, ref: dict[str, object]) -> VerifiedToolEvidence | None:
         owner_id = str(ref.get("owner_id") or "").strip()
         run_id = str(ref.get("run_id") or "").strip()
         operation_id = str(ref.get("operation_id") or "").strip()
+        if not self.owner_id or owner_id != self.owner_id or not run_id:
+            return None
         reader = getattr(self.ledger_store, "get_runtime_gate_ledger", None)
-        if (
-            not callable(reader)
-            or not self.owner_id
-            or owner_id != self.owner_id
-            or not run_id
-            or not operation_id
-        ):
+        record = None
+        if operation_id and callable(reader):
+            try:
+                record = reader(run_id=run_id, operation_id=operation_id)
+            except Exception:
+                record = None
+        if record is not None:
+            return _verified_runtime_gate_record(self.owner_id, ref, record)
+        return self._verify_owner_tool_archive(ref, run_id=run_id)
+
+    # LLM: Legacy raw audit rows may omit operation_id even though the owner tool index retained
+    # it. Resolve only a single exact invocation identity; ambiguity and malformed JSON fail closed.
+    # 函数用途: 从 owner 工具输出索引补核验旧 run/call/tool 引用。
+    def _verify_owner_tool_archive(
+        self,
+        ref: dict[str, object],
+        *,
+        run_id: str,
+    ) -> VerifiedToolEvidence | None:
+        if self.owner_root is None:
             return None
-        try:
-            record = reader(run_id=run_id, operation_id=operation_id)
-        except Exception:
+        call_id = str(ref.get("tool_call_id") or ref.get("call_id") or "").strip()
+        tool_name = str(ref.get("tool_name") or ref.get("tool") or "").strip()
+        claimed_operation_id = str(ref.get("operation_id") or "").strip()
+        if not call_id or not tool_name:
             return None
-        if record is None:
+        matches = _owner_tool_archive_matches(
+            self.owner_root,
+            run_id=run_id,
+            call_id=call_id,
+            tool_name=tool_name,
+            operation_id=claimed_operation_id,
+        )
+        by_identity: dict[str, dict[str, object]] = {}
+        for item in matches:
+            identity = str(item.get("scoped_call_id") or f"{run_id}:{call_id}").strip()
+            by_identity[identity] = item
+        if len(by_identity) != 1:
             return None
-        successful = str(record.status or "").strip().lower() == "succeeded"
-        effect_outcome = "confirmed" if successful else "unknown"
-        canonical = {
-            "owner_id": self.owner_id,
-            "run_id": str(record.run_id),
-            "operation_id": str(record.operation_id),
-            "tool": str(record.tool),
-            "status": str(record.status),
-        }
-        call_id = str(ref.get("call_id") or "").strip()
-        if call_id:
-            canonical["call_id"] = call_id
-        effect_source_ref = str(ref.get("effect_source_ref") or "").strip()
-        if effect_source_ref:
-            canonical["effect_source_ref"] = effect_source_ref
+        row = next(iter(by_identity.values()))
+        operation = row.get("tool_operation")
+        execution = row.get("tool_execution")
+        if not isinstance(operation, dict) or not isinstance(execution, dict):
+            return None
+        resolved_operation_id = str(operation.get("operation_id") or "").strip()
+        successful = (
+            row.get("ok") is True
+            and str(row.get("status") or "").strip().lower()
+            in {"ok", "done", "succeeded"}
+            and str(operation.get("status") or "").strip().lower() == "succeeded"
+            and execution.get("handler_executed") is True
+            and bool(resolved_operation_id)
+        )
+        parameters = row.get("parameters")
         return VerifiedToolEvidence(
             successful=successful,
-            terminal_status=str(record.status or ""),
-            canonical_ref=canonical,
-            effect_outcome=effect_outcome,
+            terminal_status="succeeded" if successful else "failed",
+            canonical_ref={
+                "owner_id": self.owner_id,
+                "run_id": run_id,
+                "operation_id": resolved_operation_id,
+                "call_id": call_id,
+                "tool": tool_name,
+                "status": "succeeded" if successful else str(row.get("status") or ""),
+                "source": "tool_output_index",
+            },
+            effect_outcome="confirmed" if successful else "unknown",
+            parameters=dict(parameters) if isinstance(parameters, dict) else {},
         )
+
+
+# LLM: The adapter explicitly migrates legacy ledger terminal label "done" to canonical
+# ToolResult label "succeeded"; no other aliases or prose are accepted.
+# 函数用途: 将一条 runtime gate 记录投影成 Memory 的规范工具证据。
+def _verified_runtime_gate_record(
+    owner_id: str,
+    ref: dict[str, object],
+    record: object,
+) -> VerifiedToolEvidence:
+    raw_status = str(getattr(record, "status", "") or "").strip().lower()
+    successful = raw_status in {"succeeded", "done"}
+    terminal_status = "succeeded" if successful else raw_status
+    parameters = getattr(record, "parameters", {})
+    canonical = {
+        "owner_id": owner_id,
+        "run_id": str(getattr(record, "run_id", "") or ""),
+        "operation_id": str(getattr(record, "operation_id", "") or ""),
+        "tool": str(getattr(record, "tool", "") or ""),
+        "status": terminal_status,
+    }
+    call_id = str(ref.get("call_id") or ref.get("tool_call_id") or "").strip()
+    if call_id:
+        canonical["call_id"] = call_id
+    effect_source_ref = str(ref.get("effect_source_ref") or "").strip()
+    if effect_source_ref:
+        canonical["effect_source_ref"] = effect_source_ref
+    return VerifiedToolEvidence(
+        successful=successful,
+        terminal_status=terminal_status,
+        canonical_ref=canonical,
+        effect_outcome="confirmed" if successful else "unknown",
+        parameters=dict(parameters) if isinstance(parameters, dict) else {},
+    )
+
+
+# LLM: Index lookup is owner-root bounded and returns metadata rows only; raw output bodies and
+# physical artifact contents never enter Memory promotion verification.
+# 函数用途: 读取 owner 内所有规范工具索引并筛选精确调用。
+def _owner_tool_archive_matches(
+    owner_root: Path,
+    *,
+    run_id: str,
+    call_id: str,
+    tool_name: str,
+    operation_id: str,
+) -> list[dict[str, object]]:
+    matches: list[dict[str, object]] = []
+    for path in tool_output_index_paths_for_lookup(owner_root):
+        report = read_jsonl_objects_report(
+            path,
+            context="memory_promotion.tool_output_index",
+        )
+        if report.load_errors:
+            continue
+        for row in report.records:
+            operation = row.get("tool_operation")
+            row_operation_id = (
+                str(operation.get("operation_id") or "").strip()
+                if isinstance(operation, dict)
+                else ""
+            )
+            if (
+                str(row.get("run_id") or "").strip() == run_id
+                and str(row.get("call_id") or "").strip() == call_id
+                and str(row.get("tool") or "").strip() == tool_name
+                and (not operation_id or row_operation_id == operation_id)
+            ):
+                matches.append(dict(row))
+    return matches
 
 
 # LLM: verifier 流式查一条真实消息并核验 thread/role/hash/quote，不把整段原话返回调用方。
@@ -369,7 +503,9 @@ class _PromotionCommitMixin:
             return "memory/long_term/memory.jsonl#" + target + ":removed"
         raise ValueError("long_term promotion proposed_action must be add/replace/remove/merge")
 
-    # LLM: USER 只允许 user_explicit；SOUL/AGENTS 还必须带本次显式 confirmed，不接受后台自动确认。
+    # LLM: USER facts require user_explicit evidence and SOUL alone requires current-turn
+    # confirmation. AGENTS may be maintained autonomously but still uses the same owner path,
+    # exact-entry CAS, quota, version history, and injection scanner.
     # 函数用途: 通过唯一 PersonaRepository 提交人格目标。
     def _commit_persona(
         self,
@@ -379,10 +515,10 @@ class _PromotionCommitMixin:
         reviewer: str,
         confirmed: bool,
     ) -> str:
-        if candidate.origin != "user_explicit":
-            raise ValueError("Persona promotion requires user_explicit evidence")
-        if target in {"soul", "agents"} and not confirmed:
-            raise ValueError("SOUL/AGENTS promotion requires explicit user confirmation")
+        if target in {"user", "soul"} and candidate.origin != "user_explicit":
+            raise ValueError(f"{target.upper()} promotion requires user_explicit evidence")
+        if target == "soul" and not confirmed:
+            raise ValueError("SOUL promotion requires explicit user confirmation")
         if target == "user" and candidate.candidate_type not in {
             "user_profile",
             "user_preference",
@@ -399,6 +535,10 @@ class _PromotionCommitMixin:
             raise ValueError("Persona promotion action is unsupported")
         scope = MemoryScope.from_value(candidate.scope)
         content = _scoped_persona_content(candidate.content, scope) if action != "remove" else ""
+        if action == "add":
+            adopted = self._adopt_existing_persona_tool_write(candidate, target=target)
+            if adopted:
+                return adopted
         quote = next(
             (str(ref.get("quote") or "") for ref in candidate.source_message_refs if str(ref.get("quote") or "")),
             "",
@@ -410,12 +550,65 @@ class _PromotionCommitMixin:
                 content=content,
                 entry_id=candidate.target_entry_id,
                 source_quote=quote,
-                confirmed=confirmed or target == "user",
+                confirmed=confirmed or target in {"user", "agents"},
                 source=f"memory-promotion:{reviewer}:{candidate.candidate_id}",
             )
         )
         entry_id = str(result.get("entry_id") or candidate.target_entry_id)
         return f"{target.upper()}.md#{entry_id or result.get('sha256', '')}"
+
+    # LLM: When update_persona already committed the same deterministic entry in this turn, the
+    # curator must adopt that exact entry instead of writing its paraphrase. Every check is typed:
+    # verified tool, exact parameters, deterministic id, and current repository entry.
+    # 函数用途: 识别已由 update_persona 正式写入的同一条人格事实并复用其引用。
+    def _adopt_existing_persona_tool_write(
+        self,
+        candidate: MemoryCandidate,
+        *,
+        target: str,
+    ) -> str:
+        target_entry_id = str(candidate.target_entry_id or "").strip()
+        if not target_entry_id or not candidate.source_tool_refs:
+            return ""
+        report = self.persona.list_entries(target)
+        entries = report.get("entries")
+        current_entries = entries if isinstance(entries, list) else []
+        for ref in candidate.source_tool_refs:
+            verified = self.tool_verifier.verify(ref)
+            if verified is None or not _is_successful_persona_add(verified, target=target):
+                continue
+            direct_content = str(verified.parameters.get("content") or "").strip()
+            if not direct_content or persona_entry_id(target, direct_content) != target_entry_id:
+                continue
+            if any(
+                isinstance(entry, dict)
+                and str(entry.get("entry_id") or "").strip() == target_entry_id
+                and str(entry.get("content") or "").strip() == direct_content
+                for entry in current_entries
+            ):
+                return f"{target.upper()}.md#{target_entry_id}"
+        return ""
+
+
+# LLM: Persona adoption trusts only canonical verifier output and exact structured parameters;
+# candidate prose, model status words, and semantic similarity never authorize reuse.
+# 函数用途: 判断核验后的工具证据是否为目标人格文件的成功 add。
+def _is_successful_persona_add(
+    verified: VerifiedToolEvidence,
+    *,
+    target: str,
+) -> bool:
+    canonical_tool = str(verified.canonical_ref.get("tool") or "").strip()
+    action = str(verified.parameters.get("action") or "add").strip().lower()
+    actual_target = str(verified.parameters.get("target") or "").strip().lower()
+    return (
+        verified.successful
+        and verified.terminal_status == "succeeded"
+        and verified.effect_outcome not in {"", "unknown", "not_started"}
+        and canonical_tool == "update_persona"
+        and action == "add"
+        and actual_target == target
+    )
 
 
 # LLM: PromotionService 不解析聊天意图；只消费已审核 Candidate 和两个 typed verifier。
@@ -467,7 +660,8 @@ class MemoryPromotionService(_PromotionCommitMixin):
             promotion_target=promotion_target,
         )
 
-    # LLM: automatic 只允许无冲突 user_explicit/tool_verified 的新长期事实；其他目标都必须先人工审核。
+    # LLM: Automatic promotion covers every host-authorized non-SOUL target. Evidence, exact
+    # mutation ids, conflicts, thresholds, temporary expiry and target repositories still fail closed.
     # 函数用途: 核验证据并提交一个候选的正式落点。
     def promote(
         self,
@@ -537,9 +731,8 @@ class MemoryPromotionService(_PromotionCommitMixin):
             )
         return self._finalize_promotion(candidate, reviewer, promotion_ref)
 
-    # LLM: 宿主确定性补全:模型/来源偶发漏写 promotion_target 时,对"用户明确要求记住的长期事实/事件候选"
-    # (user_explicit + long_term_fact/event + 空 target)补成 long_term——这是用户显式表达,符合
-    # 自主晋升语义;model_inferred/Persona/lesson/HOT 一律不补(必须人工审核)。纯结构化规则。
+    # LLM: 宿主确定性补全仅修复 user_explicit 长期事实遗漏的 target；Persona、lesson、HOT
+    # 必须由各自生产入口显式声明结构化 target，不能靠正文猜测，也不代表它们需要人工审核。
     # 函数用途: 空 target 的 user_explicit 长期事实候选补 default long_term。
     def _fill_default_target(
         self,
@@ -571,7 +764,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
                 candidate.candidate_id,
                 "approved",
                 reviewer=reviewer,
-                review_note="conservative_v1 自动策略：精确证据、无替换、仅长期事实。",
+                review_note="owner_autonomous_v1：结构化权威与安全门通过。",
             )
         return candidate
 
@@ -684,47 +877,35 @@ class MemoryPromotionService(_PromotionCommitMixin):
         )
 
 
-# LLM: automatic policy 是固定机器条件；不使用 confidence 阈值或“看起来像事实”的文本判断。
-# 函数用途: 返回空表示可自动晋升，否则返回稳定原因码。
+# LLM: Automatic policy consumes the shared host authority result plus exact mutation/conflict/scope
+# facts. It never uses confidence, prose, elapsed time, or a model-authored approval claim.
+# 函数用途: 返回空表示非 SOUL 候选可自主尝试正式写入，否则返回稳定阻塞码。
 def _automatic_policy_block(candidate: MemoryCandidate) -> str:
-    # lesson 自动专线已按定版删除:lesson/hot/subagent/model_inferred 一律 manual_required,
-    # 重复出现/多证据组只是人工批准后的晋升门槛,不替代审核;自动路径对它们天然拒绝。
-    if candidate.origin not in {"user_explicit", "tool_verified"}:
-        return "AUTO_POLICY_ORIGIN_REQUIRES_REVIEW"
-    # 宿主确定性补全:模型/来源偶发把 promotion_target 写成 none/空,但对 user_explicit 的
-    # long_term_fact/event/project(用户明确要求记住的长期事实)按 long_term 处理——这是用户显式
-    # 表达,符合自主晋升语义。model_inferred/Persona/lesson/HOT 不在此列(必须人工)。
-    target = str(candidate.promotion_target or "").strip().lower()
-    if target in {"", "none"}:
-        if candidate.origin == "user_explicit" and candidate.candidate_type in _LONG_TERM_TARGET_TYPES:
-            target = "long_term"
-    if target != "long_term":
-        return "AUTO_POLICY_TARGET_REQUIRES_REVIEW"
-    if candidate.candidate_type not in _LONG_TERM_TARGET_TYPES:
-        return "AUTO_POLICY_TYPE_REQUIRES_REVIEW"
-    if candidate.proposed_action != "add" or candidate.target_entry_id:
-        return "AUTO_POLICY_MUTATION_REQUIRES_REVIEW"
+    if host_promotion_mode(candidate) != "auto_eligible":
+        return "AUTO_POLICY_AUTHORITY_REQUIRES_REVIEW"
+    if candidate.proposed_action in {"replace", "remove", "merge"} and not candidate.target_entry_id:
+        return "AUTO_POLICY_EXACT_TARGET_REQUIRED"
     if candidate.conflicts_with:
-        return "AUTO_POLICY_CONFLICT_REQUIRES_REVIEW"
+        return "AUTO_POLICY_CONFLICT_UNRESOLVED"
     scope = MemoryScope.from_value(candidate.scope)
     if scope.scope_type == "temporary" and not candidate.valid_until:
         return "AUTO_POLICY_TEMPORARY_REQUIRES_EXPIRY"
     return ""
 
 
-# LLM: Human review may accept an inference as a lesson, but it cannot manufacture user fact or
-# Persona authority, and temporary/session instructions can never become a durable USER profile.
-# 函数用途: 返回任何审核或后台来源都不能绕过的事实与 Persona 权威阻塞码。
+# LLM: No review or autonomous path can manufacture formal user facts or SOUL authority.
+# AGENTS is intentionally model-maintainable, while temporary/session instructions still cannot
+# become a durable USER profile.
+# 函数用途: 返回模型自主或人工路径都不能绕过的正式事实与 SOUL/USER 权威阻塞码。
 def _absolute_authority_block(candidate: MemoryCandidate) -> str:
     if candidate.origin == "model_inferred" and candidate.promotion_target in {
         "long_term",
         "user",
         "soul",
-        "agents",
     }:
         return "MODEL_INFERRED_FORMAL_AUTHORITY_FORBIDDEN"
     if (
-        candidate.promotion_target in {"user", "soul", "agents"}
+        candidate.promotion_target in {"user", "soul"}
         and candidate.origin != "user_explicit"
     ):
         return "PERSONA_USER_EXPLICIT_REQUIRED"

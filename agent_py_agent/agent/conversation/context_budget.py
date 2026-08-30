@@ -32,6 +32,7 @@ class BackgroundContextPayloadRequest:
     active_wake_signal: dict[str, Any] | None
     pending_wake_signals: list[dict[str, Any]]
     agent_tree: dict[str, Any]
+    subagent_completions: dict[str, object] | None = None
     task_runtime_state: dict[str, Any] = field(default_factory=dict)
     recovery_snapshot: dict[str, Any] | None = None
     load_errors: list[dict[str, Any]] = field(default_factory=list)
@@ -69,6 +70,10 @@ def _bounded_payload(
         "thread": _bounded_value(request.bundle.get("thread"), limits),
         "active_wake_signal": _bounded_active_wake_signal(
             request.active_wake_signal or {},
+            limits,
+        ),
+        "subagent_completions": _bounded_subagent_completions(
+            request.subagent_completions or {},
             limits,
         ),
         "messages": _bounded_top_level_list(
@@ -305,6 +310,105 @@ def _bounded_active_wake_signal(
     ordered = {key: row[key] for key in ordered_keys if key in row}
     ordered.update({key: item for key, item in row.items() if key not in ordered})
     return _bounded_observation(ordered, active_budget)
+
+
+# LLM: Child result refs are durable continuation inputs, like 会话运行时 inter-agent completion
+# messages. Total-context pressure may shorten prose or reduce secondary ref lists, but it must
+# keep every already-selected child identity and its exact canonical final_report_ref.
+# 函数用途: 在后台提示预算收缩时保护直属子代理交接清单，避免后续定时轮只见终态却丢失报告入口。
+def _bounded_subagent_completions(
+    value: object,
+    budget: BackgroundContextBudget,
+) -> dict[str, Any]:
+    row = dict(value) if isinstance(value, dict) else {}
+    items = [item for item in _list(row.get("items")) if isinstance(item, dict)]
+    if not items:
+        return {}
+    ref_limit = max(1, min(20, int(budget.max_list_items or 0)))
+    bounded_items = [
+        _bounded_subagent_completion_item(item, budget, ref_limit=ref_limit)
+        for item in items
+    ]
+    return {
+        "schema": str(row.get("schema") or ""),
+        "workspace_task_id": str(row.get("workspace_task_id") or ""),
+        "completion_root_task_ids": [
+            str(item)
+            for item in _list(row.get("completion_root_task_ids"))[:ref_limit]
+            if str(item or "").strip()
+        ],
+        "total": _safe_nonnegative_int(row.get("total")),
+        "visible_count": len(bounded_items),
+        "omitted_count": _safe_nonnegative_int(row.get("omitted_count")),
+        "items": bounded_items,
+    }
+
+
+# LLM: This is a field-selecting public projection, not a generic dict truncation. Never expose
+# private runner payloads, and never clip the host-generated final report path into an unusable ref.
+# 函数用途: 压缩一名直属子代理的完成正文，同时保留状态、身份和可直接读取的精确报告路径。
+def _bounded_subagent_completion_item(
+    value: dict[str, Any],
+    budget: BackgroundContextBudget,
+    *,
+    ref_limit: int,
+) -> dict[str, Any]:
+    message = str(value.get("completion_message") or "")
+    preview = _clip(message, max(24, int(budget.max_string_chars or 0)))
+    item: dict[str, Any] = {
+        "task_id": str(value.get("task_id") or ""),
+        "root_task_id": str(value.get("root_task_id") or ""),
+        "status": str(value.get("status") or ""),
+        "turn_end_reason": str(value.get("turn_end_reason") or ""),
+        "failure_type": str(value.get("failure_type") or ""),
+        "completion_schema_version": str(
+            value.get("completion_schema_version") or ""
+        ),
+        "completion_message": preview,
+        "final_report_ref": str(value.get("final_report_ref") or ""),
+        "declared_output_refs": _exact_ref_slice(
+            value.get("declared_output_refs"),
+            limit=ref_limit,
+        ),
+        "artifact_refs": _exact_ref_slice(
+            value.get("artifact_refs"),
+            limit=ref_limit,
+        ),
+        "observed_at": value.get("observed_at", 0.0),
+    }
+    if preview != message:
+        item["completion_message_truncated"] = True
+        item["completion_message_original_chars"] = len(message)
+    elif value.get("completion_message_truncated") is True:
+        item["completion_message_truncated"] = True
+        item["completion_message_original_tokens"] = _safe_nonnegative_int(
+            value.get("completion_message_original_tokens")
+        )
+    return item
+
+
+# LLM: Exact ref strings are machine-usable inputs. Limit only their count under prompt pressure;
+# clipping individual paths would turn an authoritative reference into an invalid guess.
+# 函数用途: 保留少量完整路径或 URI，并去重空值。
+def _exact_ref_slice(value: object, *, limit: int) -> list[str]:
+    refs: list[str] = []
+    for item in _list(value):
+        ref = str(item or "").strip()
+        if ref and ref not in refs:
+            refs.append(ref)
+        if len(refs) >= max(1, int(limit or 0)):
+            break
+    return refs
+
+
+# LLM: Budget metadata is untrusted persisted input; normalize counts without letting malformed
+# values abort context construction or become negative omission facts.
+# 函数用途: 将上下文投影里的计数安全转换为非负整数。
+def _safe_nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _bounded_task_runtime_state(

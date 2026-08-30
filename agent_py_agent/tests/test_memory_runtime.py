@@ -33,14 +33,9 @@ def _promote_formal_route(agent: SimpleAgent) -> str:
             )
         )
     assert candidate is not None
-    agent.memory_promotion.review(
-        candidate.candidate_id,
-        approved=True,
-        reviewer="runtime-test",
-    )
     result = agent.memory_promotion.promote(
         candidate.candidate_id,
-        reviewer="runtime-test",
+        automatic=True,
     )
     assert result.promoted is True
     return result.promotion_ref.split("#", 1)[0]

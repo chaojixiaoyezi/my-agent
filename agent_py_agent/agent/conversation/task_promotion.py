@@ -149,6 +149,10 @@ def _activate_current_conversation_task(
     return link if _publish_current_request_task_binding(current, link) else None
 
 
+# LLM: Materialization must publish one atomic workspace fact set. The generic workspace writer
+# fills run_workspace/delivery refs, while this conversation seam also owns execution_cwd,
+# runtime roots and provider-path rebase metadata; never leave those projections split.
+# 函数用途: 为刚晋升的会话任务创建或复用目录，并同步本轮所有工具与子代理使用的唯一工作区。
 def _materialize_promoted_workspace(
     agent: object,
     current: object,
@@ -158,6 +162,13 @@ def _materialize_promoted_workspace(
 ):
     """把已晋升会话任务绑定到真实 workspace；失败时保留任务链接但不伪造路径。"""
     attrs = getattr(current, "task_attributes", None)
+    pre_materialize_workspace = (
+        _workspace_task_root(attrs.get("run_workspace"))
+        or str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
+        or str(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR) or "").strip()
+        if isinstance(attrs, dict)
+        else ""
+    )
     inherited = _selected_task_workspace(getattr(link, "task_path", ""))
     if inherited is not None and isinstance(attrs, dict):
         # 链接已持有既有目录(续接/新执行代数继承原目录):先填进本轮工作区,
@@ -173,6 +184,13 @@ def _materialize_promoted_workspace(
         return None
     if workspace is None:
         return None
+    if isinstance(attrs, dict):
+        _set_current_task_workspace(
+            agent,
+            attrs,
+            Path(workspace).expanduser().resolve(strict=False),
+            rebase_from=pre_materialize_workspace,
+        )
     store = getattr(agent, "conversation_store", None)
     if store is None:
         return link
@@ -352,8 +370,14 @@ def _remember_conversation_workspace(store: object, link: object) -> bool:
 # LLM: First promotion rebases provider-generated paths from the trusted client cwd into the
 # canonical owner/task workspace. Later reselection rebases from the previous task root.
 # 函数用途: 切换本轮唯一任务目录，并登记已有工具参数需要从哪个旧根重定向。
-def _set_current_task_workspace(agent: object, attrs: dict[str, object], workspace: Path) -> None:
-    previous_workspace = (
+def _set_current_task_workspace(
+    agent: object,
+    attrs: dict[str, object],
+    workspace: Path,
+    *,
+    rebase_from: str = "",
+) -> None:
+    previous_workspace = str(rebase_from or "").strip() or (
         _workspace_task_root(attrs.get("run_workspace"))
         or str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
         or str(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR) or "").strip()
@@ -1117,9 +1141,17 @@ def _workspace_task_root(value: object) -> str:
     return str(value.get("task_root") or "").strip()
 
 
-def rebase_bound_conversation_workspace_params(agent: object, value: object) -> object:
+# LLM: Exact tool-request params are the authority, mirroring 会话运行时 TurnContext propagation.
+# The Agent thread-local remains a compatibility fallback only for direct legacy callers.
+# 函数用途: 按当前工具请求携带的任务目录重定向旧路径，避免共享 Gateway 并发时读错会话。
+def rebase_bound_conversation_workspace_params(
+    agent: object,
+    value: object,
+    *,
+    params: object | None = None,
+) -> object:
     """Rebase structured tool arguments from this turn's placeholder into the bound task root."""
-    current = getattr(agent, "_current_run_params", None)
+    current = params if params is not None else getattr(agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None)
     if not isinstance(attrs, dict):
         return value
@@ -1142,9 +1174,79 @@ def _rebase_workspace_value(value: object, source: str, target: str) -> object:
     if value == source:
         return target
     # 只替换完整目录前缀；不会把相似任务 id（如 req_1 与 req_10）误改。
-    return value.replace(f"{source}/", f"{target}/").replace(
-        f"{source}\\", f"{target}\\"
-    )
+    # 正式 task root 通常就在占位 owner root 之下，因此重试/归档再走一次
+    # 本函数时，必须保护已经以 target 开头的片段，不能叠加第二层目录。
+    rebased = _rebase_workspace_text(value, source, target, separator="/")
+    return _rebase_workspace_text(rebased, source, target, separator="\\")
+
+
+# LLM: Rebase may run more than once for the same admitted call; exact target path spans are
+# protected before replacing source prefixes so the transform is idempotent even when target is
+# nested below source. Arbitrary prose can contain multiple independent path spans.
+# 函数用途: 在一段工具参数文字中安全替换路径，已转换的正式目录再处理也不会变。
+def _rebase_workspace_text(value: str, source: str, target: str, *, separator: str) -> str:
+    source_prefix = f"{source}{separator}"
+    if source_prefix not in value:
+        return value
+    target_prefix = f"{target}{separator}"
+    pieces: list[str] = []
+    cursor = 0
+    while True:
+        index = value.find(source_prefix, cursor)
+        if index < 0:
+            pieces.append(value[cursor:])
+            break
+        pieces.append(value[cursor:index])
+        if _workspace_text_starts_with_target(value, index, target, separator=separator):
+            pieces.append(target)
+            cursor = index + len(target)
+            continue
+        pieces.append(target_prefix)
+        cursor = index + len(source_prefix)
+    return "".join(pieces)
+
+
+# LLM: Boundary checking distinguishes the selected target itself/descendants from a merely
+# similar path segment such as ``task-1-copy``; punctuation after a path counts as prose boundary.
+# 函数用途: 判断当前位置是否已经是正式任务路径，避免错把相似名称当成已转换。
+def _workspace_text_starts_with_target(
+    value: str,
+    index: int,
+    target: str,
+    *,
+    separator: str,
+) -> bool:
+    if not value.startswith(target, index):
+        return False
+    end = index + len(target)
+    if end >= len(value):
+        return True
+    next_char = value[end]
+    return next_char in {
+        separator,
+        "/",
+        "\\",
+        " ",
+        "\t",
+        "\r",
+        "\n",
+        '"',
+        "'",
+        "`",
+        ")",
+        "]",
+        "}",
+        ">",
+        ",",
+        ".",
+        ";",
+        ":",
+        "，",
+        "。",
+        "；",
+        "：",
+        "、",
+    }
 
 
 __all__ = [

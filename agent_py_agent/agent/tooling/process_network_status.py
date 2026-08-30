@@ -46,10 +46,17 @@ def managed_process_network_status(
         "requested_port": port,
         "listener_observation": observation,
         "listener_bindings": bindings,
+        "listener_pid_evidence": {
+            "source": "host_kernel_process_tree",
+            "authority": "observed",
+            "sandbox_visibility": "may_be_hidden",
+        },
         "host_firewall": _host_firewall_observation(non_loopback),
         "lan_reachability": reachability,
         "external_probe_required": reachability == "unverified_external_probe_required",
         "evidence_boundary": (
+            "listener_pids 来自宿主机内核对受管进程树的观测；run_command 沙箱可能看不到这些 PID，"
+            "沙箱内 ps/lsof 无结果不能推翻该监听事实。"
             "监听 0.0.0.0、本机端口存在或本机请求成功都不等于局域网可达；"
             "只有另一台目标机器的真实连接结果才能把 lan_reachability 改成已验证。"
         ),
@@ -70,8 +77,8 @@ def _managed_listener_bindings(
         int(getattr(record, "pid", 0) or 0),
         int(getattr(record, "child_pid", 0) or 0),
     )
-    inodes = _socket_inodes(pids)
-    if not inodes:
+    inode_owners = _socket_inode_owners(pids)
+    if not inode_owners:
         return [], "observed_no_owned_listener"
     rows: list[dict[str, object]] = []
     for path, family in ((Path("/proc/net/tcp"), socket.AF_INET), (Path("/proc/net/tcp6"), socket.AF_INET6)):
@@ -79,7 +86,7 @@ def _managed_listener_bindings(
             _proc_tcp_listeners(
                 path,
                 family=family,
-                owned_inodes=inodes,
+                owned_inodes=inode_owners,
                 requested_port=requested_port,
             )
         )
@@ -113,11 +120,12 @@ def _process_tree_pids(host_pid: int, child_pid: int) -> set[int]:
     return seen
 
 
-# LLM: Socket inode links are kernel facts. Permission/race failures are ignored per fd while
-# preserving the distinction between an empty observation and an unsupported host.
-# 函数用途: 从受管进程树的 fd 链接收集 socket inode。
-def _socket_inodes(pids: set[int]) -> set[str]:
-    inodes: set[str] = set()
+# LLM: Socket inode links are kernel facts. Preserve their owning PIDs so a
+# listener can name the actual resource holder instead of a launcher ancestor.
+# Permission/race failures are ignored per fd and never become guessed ownership.
+# 函数用途: 从受管进程树的 fd 链接收集 socket inode 及其真实持有进程号。
+def _socket_inode_owners(pids: set[int]) -> dict[str, set[int]]:
+    owners: dict[str, set[int]] = {}
     for pid in pids:
         fd_root = Path(f"/proc/{pid}/fd")
         try:
@@ -130,8 +138,8 @@ def _socket_inodes(pids: set[int]) -> set[str]:
             except OSError:
                 continue
             if target.startswith("socket:[") and target.endswith("]"):
-                inodes.add(target[8:-1])
-    return inodes
+                owners.setdefault(target[8:-1], set()).add(pid)
+    return owners
 
 
 # LLM: /proc parsing accepts only LISTEN rows whose inode belongs to the managed tree. Malformed
@@ -141,7 +149,7 @@ def _proc_tcp_listeners(
     path: Path,
     *,
     family: socket.AddressFamily,
-    owned_inodes: set[str],
+    owned_inodes: dict[str, set[int]],
     requested_port: int,
 ) -> list[dict[str, object]]:
     try:
@@ -166,6 +174,7 @@ def _proc_tcp_listeners(
                 "host": host,
                 "port": port,
                 "scope": "loopback" if ipaddress.ip_address(host).is_loopback else "non_loopback",
+                "listener_pids": sorted(owned_inodes[fields[9]]),
             }
         )
     return bindings
@@ -198,14 +207,17 @@ def _host_firewall_observation(
         return {"status": "not_applicable", "ports": []}
     if not binary:
         return {"status": "not_detected", "ports": ports}
-    if _firewall_command(binary, "--state") != "running":
+    if _firewall_command(binary, ("--state",)) != "running":
         return {"status": "not_running", "ports": ports}
-    active = _firewall_command(binary, "--get-active-zones")
+    active = _firewall_command(binary, ("--get-active-zones",))
     zones = [line.strip() for line in active.splitlines() if line and not line[:1].isspace()]
     allowed: list[dict[str, object]] = []
     for zone in zones:
         for port in ports:
-            answer = _firewall_command(binary, f"--zone={zone}", f"--query-port={port}/tcp")
+            answer = _firewall_command(
+                binary,
+                (f"--zone={zone}", f"--query-port={port}/tcp"),
+            )
             if answer == "yes":
                 allowed.append({"zone": zone, "port": port, "protocol": "tcp"})
     return {
@@ -219,7 +231,7 @@ def _host_firewall_observation(
 # LLM: This helper runs only fixed read-only firewalld arguments assembled from integer ports
 # and discovered zone names. Timeout or command failure returns no observation, never approval.
 # 函数用途: 有界执行一条只读 firewall-cmd 查询并返回标准输出。
-def _firewall_command(binary: str, *arguments: str) -> str:
+def _firewall_command(binary: str, arguments: tuple[str, ...]) -> str:
     try:
         result = subprocess.run(
             [binary, *arguments],

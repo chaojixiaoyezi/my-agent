@@ -250,6 +250,60 @@ def test_native_record_coexists_with_text_tool_context(tmp_path):
     assert any("[tool-record" in str(item) for item in params.tool_context), "text track must still be written"
 
 
+def test_native_history_replays_only_provider_authored_tool_arguments(tmp_path):
+    agent = _native_agent(tmp_path)
+    params = _params()
+    public_arguments = {
+        "artifact_ref": "run-web:fetch-1",
+        "mode": "tail",
+        "max_chars": 800,
+    }
+    execution_arguments = {
+        **public_arguments,
+        "run_id": "run-web",
+        "task_id": "task-web",
+        "request_id": "request-web",
+    }
+    model_call = canonical_history_call(
+        "read_artifact",
+        public_arguments,
+        call_id="toolu_safe",
+        run_id=params.run_id,
+        turn_id=f"{params.run_id}:round-1",
+        attempt_id=params.request_id,
+    )
+    execution_call = canonical_history_call(
+        "read_artifact",
+        execution_arguments,
+        call_id="toolu_safe",
+        run_id=params.run_id,
+        turn_id=f"{params.run_id}:round-1",
+        attempt_id=params.request_id,
+    )
+    result = canonical_history_result(
+        execution_call,
+        '{"ok": true, "content": "Copyright ©2001-2026"}',
+    )
+
+    _record_tool_call(
+        agent,
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=1,
+            idx=1,
+            call=execution_call,
+            result=result,
+            model_call=model_call,
+        ),
+    )
+
+    messages = _native_provider_messages(agent, params)
+    assert messages[0]["content"][0]["input"] == public_arguments
+    assert "run_id" not in params.tool_context[-1]
+    assert params.archive_tool_calls[-1]["parameters"] == execution_arguments
+    assert params.archive_tool_calls[-1]["model_parameters"] == public_arguments
+
+
 # --- real id stamping back onto the result ------------------------------------
 
 

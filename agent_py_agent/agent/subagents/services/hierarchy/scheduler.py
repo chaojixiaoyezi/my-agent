@@ -97,22 +97,28 @@ def _explicit_limit_reason(parent: SubAgentTask, request: HierarchyScheduleReque
     return ""
 
 
-# LLM: Apply exactly the names and ordinals prepared in the build request so a
-# later nested batch cannot reset display identities to one.
-# 函数用途: 把层级调度计划逐项解析为真实 child，并汇总创建或复用结果。
+# LLM: Apply exactly the names and ordinals prepared in the build request so a later nested batch
+# cannot reset display identities to one.  A host cancellation check runs only between durable
+# children; any partial prefix remains canonical for stop-side lineage reconciliation.
+# 函数用途: 逐项创建递归下级，在每个安全点响应停止，再汇总本次真实创建或复用结果。
 def _apply_result(
     manager: Any,
     build: HierarchyResultBuildRequest,
 ) -> HierarchyScheduleResult:
     parent = build.parent
     request = build.request
-    resolutions = [
-        _resolve_child(manager, parent, spec, sibling_index=index)
-        for index, spec in enumerate(
-            request.child_specs,
-            start=build.sibling_start_index,
+    resolutions: list[ScheduledChildResolution] = []
+    for index, spec in enumerate(
+        request.child_specs,
+        start=build.sibling_start_index,
+    ):
+        if request.interrupt_check is not None:
+            request.interrupt_check()
+        resolutions.append(
+            _resolve_child(manager, parent, spec, sibling_index=index)
         )
-    ]
+    if request.interrupt_check is not None:
+        request.interrupt_check()
     return applied_schedule_result(build, resolutions)
 
 

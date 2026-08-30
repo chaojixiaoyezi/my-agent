@@ -13,7 +13,9 @@ import threading
 import types
 from pathlib import Path
 
+from agent_py_agent.agent.tooling import _filesystem_find as find_mod
 from agent_py_agent.agent.tooling import _filesystem_search as search_mod
+from agent_py_agent.agent.tooling import filesystem_path_recovery as path_recovery_mod
 from agent_py_agent.agent.tooling._filesystem_find import FindFilesTool
 from agent_py_agent.agent.tooling._filesystem_list import ListFilesTool
 from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
@@ -586,6 +588,52 @@ def test_read_file_missing_path_returns_workspace_candidates_not_a_dead_end(tmp_
     assert str(outside) not in result.output
     assert "candidate_paths" in result.output
     assert "请用 read_file 重新读取确认" in result.output
+
+
+def test_missing_path_recovery_does_not_sink_into_one_large_repository(tmp_path: Path):
+    """LLM: bounded breadth-first recovery must keep checking sibling directories.
+
+    新手说明:
+    一个仓库里即使有成百上千个文件，读错路径也不能卡住，更不能因此漏掉旁边的报告。
+    """
+    workspace = tmp_path / "workspace"
+    large_repo = workspace / "large-repo"
+    report_dir = workspace / "reports"
+    large_repo.mkdir(parents=True)
+    report_dir.mkdir()
+    for index in range(path_recovery_mod._MAX_ENTRIES_PER_DIRECTORY + 20):
+        (large_repo / f"generated-{index:04d}.txt").write_text("x", encoding="utf-8")
+    report = report_dir / "finding_report.md"
+    report.write_text("real report", encoding="utf-8")
+
+    candidates = path_recovery_mod.suggest_missing_path_candidates(
+        raw_path="stale/child/finding_report.md",
+        target=workspace / "stale" / "child" / "finding_report.md",
+        workspace_roots=[workspace],
+        expected_kind="file",
+    )
+
+    assert report.resolve() in candidates
+
+
+def test_missing_path_recovery_honors_one_global_entry_budget(tmp_path: Path):
+    """LLM: every root and directory must consume the same hard request-local budget."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for index in range(20):
+        child = workspace / f"dir-{index:02d}"
+        child.mkdir()
+        for item in range(20):
+            (child / f"item-{item:02d}.txt").write_text("x", encoding="utf-8")
+    budget = path_recovery_mod.CandidateScanBudget(
+        remaining_entries=17,
+        remaining_directories=3,
+    )
+
+    discovered = list(path_recovery_mod._walk_candidate_items(workspace, "file", budget))
+
+    assert len(discovered) <= 17
+    assert budget.remaining_entries == 0 or budget.remaining_directories == 0
 
 
 def test_list_and_search_missing_path_return_recovery_candidates(tmp_path: Path):
@@ -1398,6 +1446,61 @@ def test_find_files_returns_structured_page_window_when_more_matches_remain(tmp_
         "returned": 2,
         "next_offset": 2,
         "complete": False,
+    }
+
+
+def test_find_files_python_fallback_stops_after_page_sentinel(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name in ("a.py", "b.py"):
+        (workspace / name).write_text(name, encoding="utf-8")
+    walked_second_directory = False
+
+    def fake_walk(_target):
+        nonlocal walked_second_directory
+        yield str(workspace), [], ["a.py", "b.py"]
+        walked_second_directory = True
+        raise AssertionError("分页已足够时不应继续遍历后续目录")
+
+    monkeypatch.setattr(find_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(find_mod.os, "walk", fake_walk)
+    tool = FindFilesTool(workspace, max_matches=20)
+
+    result = tool.execute({"pattern": "*.py", "path": ".", "limit": 1})
+
+    assert result.ok
+    assert "a.py" in result.output
+    assert "next_offset=1" in result.output
+    assert walked_second_directory is False
+    assert result.result_envelope["file_search_result"]["backend"] == "python"
+
+
+def test_find_files_python_fallback_reports_incomplete_scan(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (workspace / name).write_text(name, encoding="utf-8")
+    monkeypatch.setattr(find_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(find_mod, "_FALLBACK_SCAN_MAX_FILES", 2)
+    tool = FindFilesTool(workspace, max_matches=20)
+
+    result = tool.execute({"pattern": "*.py", "path": "."})
+
+    assert result.ok
+    assert "未完整覆盖" in result.output
+    assert "没有找到匹配文件" not in result.output
+    assert result.result_envelope["page_window"]["complete"] is False
+    assert result.result_envelope["file_search_result"] == {
+        "schema": "local_file_search.v1",
+        "scope": "local_workspace",
+        "source_path": ".",
+        "backend": "python",
+        "status": "incomplete",
+        "scan_complete": False,
+        "scanned_files": 2,
+        "scanned_files_known": True,
+        "scan_limit_reason": "file_limit",
+        "suggested_actions": ["narrow_path", "use_specific_pattern"],
     }
 
 

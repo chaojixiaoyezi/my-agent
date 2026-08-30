@@ -39,14 +39,9 @@ def _promote_formal_route(agent: SimpleAgent) -> str:
             )
         )
     assert candidate is not None
-    agent.memory_promotion.review(
-        candidate.candidate_id,
-        approved=True,
-        reviewer="runtime-test",
-    )
     result = agent.memory_promotion.promote(
         candidate.candidate_id,
-        reviewer="runtime-test",
+        automatic=True,
     )
     assert result.promoted is True
     return result.promotion_ref.split("#", 1)[0]
@@ -84,7 +79,7 @@ class RuntimeOverflowBackend:
 
 class SequenceUsageBackend:
     name = "sequence-usage"
-    context_window_tokens = 20_000
+    context_window_tokens = 100_000
 
     def probe_tool_capability(self):
         from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
@@ -323,7 +318,7 @@ def test_run_uses_provider_usage_for_active_compact_budget_not_cumulative(tmp_pa
     )
     backend = SequenceUsageBackend(
         [
-            {"input_tokens": 19_000, "output_tokens": 200},
+            {"input_tokens": 95_000, "output_tokens": 200},
             {"input_tokens": 500, "output_tokens": 200},
         ]
     )
@@ -332,7 +327,7 @@ def test_run_uses_provider_usage_for_active_compact_budget_not_cumulative(tmp_pa
     first = agent.run("第一轮很大，但这里由 provider usage 表示真实输入。", save=False)
     second = agent.run("第二轮很小，不应因为历史累计 token 再次触发 compact。", save=False)
 
-    assert 19_200 <= first.turn_token_estimate < 19_300
+    assert 95_200 <= first.turn_token_estimate < 95_300
     assert first.memory_compact_suggested is True
     assert 700 <= second.turn_token_estimate < 800
     assert second.cumulative_token_estimate >= first.turn_token_estimate + second.turn_token_estimate

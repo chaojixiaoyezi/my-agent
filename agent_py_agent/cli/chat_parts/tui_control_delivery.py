@@ -24,15 +24,16 @@ from ...agent.gateway_parts.io import (
 _CONTROL_OUTBOX_SCHEMA = "tui_control_operation_outbox.v1"
 
 
-# LLM: One row freezes the exact command and expected turn observed at Enter time. Retry timing
-# and operation id are transport state; neither may alter the command digest.
-# 类用途: 保存一条尚未完成对账的 TUI 控制命令及其稳定身份。
+# LLM: One row freezes the exact command plus expected turn or manual-Compact target observed at
+# Enter/Esc time. Retry timing and operation id are transport state; neither may alter identity.
+# 类用途: 保存一条尚未完成对账的 TUI 控制命令、精确目标和稳定身份。
 @dataclass(frozen=True)
 class TuiControlOperationEntry:
     message_id: str
     command_text: str
     command_kind: str
     expected_turn_id: str = ""
+    target_control_message_id: str = ""
     operation_id: str = ""
     attempts: int = 0
     next_attempt_at: float = 0.0
@@ -45,6 +46,7 @@ class TuiControlOperationEntry:
             "command_text": self.command_text,
             "command_kind": self.command_kind,
             "expected_turn_id": self.expected_turn_id,
+            "target_control_message_id": self.target_control_message_id,
             "operation_id": self.operation_id,
             "attempts": self.attempts,
             "next_attempt_at": self.next_attempt_at,
@@ -64,6 +66,9 @@ class TuiControlOperationEntry:
             command_text=str(payload.get("command_text") or "").strip(),
             command_kind=str(payload.get("command_kind") or "").strip(),
             expected_turn_id=str(payload.get("expected_turn_id") or "").strip(),
+            target_control_message_id=str(
+                payload.get("target_control_message_id") or ""
+            ).strip(),
             operation_id=str(payload.get("operation_id") or "").strip(),
             attempts=attempts,
             next_attempt_at=next_attempt_at,
@@ -73,9 +78,10 @@ class TuiControlOperationEntry:
         return entry
 
 
-# LLM: One session-level worker owns retry timing. It re-POSTs only before an operation id is
-# known, always with the original message id; afterwards it can only poll the server receipt.
-# 类用途: 统一处理本会话所有待确认控制命令并在终态后通知 TUI。
+# LLM: One session-level worker owns normal retry timing. An exact manual-Compact stop receives a
+# single persisted urgent dispatch so it cannot queue behind the blocking Compact POST it must
+# cancel; one shared in-flight claim still prevents duplicate side effects.
+# 类用途: 统一处理控制命令对账，并让精确 Compact 停止绕过被停止请求占用的普通队列。
 class TuiControlOperationReconciler:
     # LLM: Construction restores rows before starting the sole daemon; disk errors are surfaced
     # through on_error and never replaced by an empty outbox.
@@ -109,6 +115,7 @@ class TuiControlOperationReconciler:
         self.maximum_delay = max(self.initial_delay, float(maximum_delay))
         self._wake = threading.Event()
         self._lock = threading.RLock()
+        self._inflight_message_ids: set[str] = set()
         self._worker: threading.Thread | None = None
         try:
             restored = self._read_entries()
@@ -121,9 +128,19 @@ class TuiControlOperationReconciler:
             self._ensure_worker_started()
 
     # LLM: Persist-before-send and same-id comparison prevent a second command from borrowing a
-    # durable operation identity after response loss.
-    # 函数用途: 保存一条新控制命令并唤醒统一对账线程。
-    def enqueue(self, entry: TuiControlOperationEntry) -> None:
+    # durable operation identity after response loss. A local start projection may run only after
+    # the row is durable and while both transition locks still exclude every dispatcher.
+    # 函数用途: 保存一条新控制命令，在派发前原子发布可选开始状态，再唤醒统一对账线程。
+    def enqueue(
+        self,
+        entry: TuiControlOperationEntry,
+        *,
+        on_persisted_before_dispatch: Callable[
+            [TuiControlOperationEntry], None
+        ]
+        | None = None,
+    ) -> None:
+        callback_error: Exception | None = None
         with self._lock, locked_file_transition(self._transition_path()):
             entries = self._read_entries_locked()
             existing = entries.get(entry.message_id)
@@ -133,7 +150,16 @@ class TuiControlOperationReconciler:
                 raise ValueError("TUI control message id was reused with different input")
             entries[entry.message_id] = existing or entry
             self._write_entries_locked(entries)
+            if on_persisted_before_dispatch is not None:
+                try:
+                    on_persisted_before_dispatch(existing or entry)
+                except Exception as exc:  # noqa: BLE001 - durable row must survive UI callback failure
+                    callback_error = exc
+        if callback_error is not None:
+            self.on_error(callback_error)
         self._ensure_worker_started()
+        if entry.target_control_message_id:
+            self._dispatch_urgent(entry)
         self._wake.set()
 
     # LLM: Lazy creation keeps empty TUI sessions thread-free and guarantees one worker per
@@ -163,7 +189,8 @@ class TuiControlOperationReconciler:
                 for entry in due[:32]:
                     if self.stop_event.is_set():
                         return
-                    self._reconcile_one(entry)
+                    if self._claim_entry(entry.message_id):
+                        self._reconcile_claimed(entry)
                 remaining = self._read_entries()
                 next_due = min(
                     (entry.next_attempt_at for entry in remaining.values()),
@@ -175,6 +202,43 @@ class TuiControlOperationReconciler:
                 timeout = min(self.maximum_delay, max(self.initial_delay, 0.25))
             self._wake.wait(timeout)
             self._wake.clear()
+
+    # LLM: The urgent lane is allowed only for a structured exact Compact target. It performs one
+    # normal reconciliation attempt after the durable row exists; retry/backoff ownership remains
+    # with the sole session worker and no fresh operation identity is ever generated.
+    # 函数用途: 立即派发一次精确 Compact 停止，避免它排在仍阻塞的 Compact 请求后面。
+    def _dispatch_urgent(self, entry: TuiControlOperationEntry) -> None:
+        if self.stop_event.is_set() or not self._claim_entry(entry.message_id):
+            return
+        threading.Thread(
+            target=self._reconcile_claimed,
+            args=(entry,),
+            name=f"tui-control-interrupt-{entry.message_id[-8:]}",
+            daemon=True,
+        ).start()
+
+    # LLM: General and urgent lanes share one in-process claim per durable message id so callback,
+    # removal, POST and status GET cannot run twice concurrently for the same control operation.
+    # 函数用途: 尝试领取一条控制消息的本次对账权。
+    def _claim_entry(self, message_id: str) -> bool:
+        with self._lock:
+            if message_id in self._inflight_message_ids:
+                return False
+            self._inflight_message_ids.add(message_id)
+            return True
+
+    # LLM: Every claimed reconciliation releases its in-process claim in finally and wakes the
+    # normal worker, allowing a transport-unknown urgent attempt to continue its persisted retry.
+    # 函数用途: 执行一次已领取的对账并在结束后恢复普通退避调度。
+    def _reconcile_claimed(self, entry: TuiControlOperationEntry) -> None:
+        try:
+            self._reconcile_one(entry)
+        except Exception as exc:  # noqa: BLE001 - durable row remains for the normal retry lane
+            self.on_error(exc)
+        finally:
+            with self._lock:
+                self._inflight_message_ids.discard(entry.message_id)
+            self._wake.set()
 
     # LLM: A known operation id irrevocably switches the row to GET-only reconciliation. Completed,
     # terminal_unknown, conflict, and rejected are structural states, not inferred from message text.
@@ -224,18 +288,22 @@ class TuiControlOperationReconciler:
             )
         )
 
-    # LLM: Callback may repeat after a process crash but the server operation can never repeat;
-    # callbacks are limited to idempotent local notice/console projections.
-    # 函数用途: 执行终态界面动作，成功后删除对应 outbox 行。
+    # LLM: A terminal server receipt is the authority for removing the durable row. Completion
+    # callbacks are display-only projections, so their failure is reported but cannot retain the
+    # row and replay an already-completed operation forever. Disk removal failure still retries.
+    # 函数用途: 收到终态回执后尽力更新界面并删除 outbox；界面失败不重复业务操作。
     def _finish(self, message_id: str, callback: Callable[[], None]) -> bool:
+        callback_error: Exception | None = None
         try:
             callback()
-        except Exception:
-            return False
+        except Exception as exc:  # noqa: BLE001 - terminal business receipt remains authoritative
+            callback_error = exc
         with self._lock, locked_file_transition(self._transition_path()):
             entries = self._read_entries_locked()
             entries.pop(message_id, None)
             self._write_entries_locked(entries)
+        if callback_error is not None:
+            self.on_error(callback_error)
         return True
 
     # LLM: Backoff updates replace only a still-present row with the same immutable client id.
@@ -302,14 +370,17 @@ class TuiControlOperationReconciler:
 
 
 # LLM: Stable identity excludes operation/backoff fields so transport progress may update without
-# permitting command or exact-turn drift.
-# 函数用途: 返回控制 outbox 行不可变身份。
-def _control_entry_identity(entry: TuiControlOperationEntry) -> tuple[str, str, str, str]:
+# permitting command, exact-turn, or manual-Compact target drift.
+# 函数用途: 返回控制 outbox 行包含精确目标的不可变身份。
+def _control_entry_identity(
+    entry: TuiControlOperationEntry,
+) -> tuple[str, str, str, str, str]:
     return (
         entry.message_id,
         entry.command_text,
         entry.command_kind,
         entry.expected_turn_id,
+        entry.target_control_message_id,
     )
 
 

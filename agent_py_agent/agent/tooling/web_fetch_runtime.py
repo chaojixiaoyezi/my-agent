@@ -1,4 +1,7 @@
 
+# LLM: 本模块是 web_fetch 的受限 HTTP 传输与正文格式化边界；响应解码、大小上限和 SSRF 逐跳校验必须保持在同一条主链。
+# 模块用途: 安全抓取网页/API，解压常见 HTTP 正文，并把文本预览或二进制产物整理成统一工具结果。
+
 from __future__ import annotations
 
 import http.client
@@ -8,6 +11,7 @@ import re
 import socket
 import ssl
 import urllib.error
+import zlib
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -32,6 +36,7 @@ _TEXTUAL_CONTENT_MARKERS = (
     "javascript",
     "x-www-form-urlencoded",
 )
+_SUPPORTED_CONTENT_ENCODINGS = frozenset({"identity", "gzip", "x-gzip", "deflate"})
 
 
 @dataclass(frozen=True)
@@ -206,8 +211,9 @@ def _do_hop(hop: _HopReq, format_http_error) -> _HopOutcome:
             conn.close()
 
 
+# LLM: 请求头在这里完成协议级默认值；不得覆盖调用者显式 header，也不得绕过固定 IP 连接。
+# 函数用途: 向校验过的目标 IP 发起一次可取消请求，并声明本底座能够安全解压的响应编码。
 def _send_pinned(hop: _HopReq) -> tuple[http.client.HTTPConnection, Any]:
-    """Open one pinned hop while making a blocked request cancellable."""
 
     conn = _open_pinned(hop.target, hop.request.timeout)
     try:
@@ -215,7 +221,8 @@ def _send_pinned(hop: _HopReq) -> tuple[http.client.HTTPConnection, Any]:
             if cancellation_requested():
                 raise ToolCancelled("cancelled")
             headers = dict(hop.request.headers)
-            headers.setdefault("Host", hop.target.host)
+            _setdefault_header(headers, "Host", hop.target.host)
+            _setdefault_header(headers, "Accept-Encoding", "gzip, deflate")
             conn.request(
                 hop.request.method,
                 _request_path(hop.url),
@@ -228,16 +235,107 @@ def _send_pinned(hop: _HopReq) -> tuple[http.client.HTTPConnection, Any]:
         raise
 
 
+# LLM: HTTP header 名称不区分大小写；新增默认头时必须使用本入口，避免生成语义重复的大小写变体。
+# 函数用途: 仅在调用者没有提供同名请求头时加入默认值。
+def _setdefault_header(headers: dict[str, str], name: str, value: str) -> None:
+    lowered = name.lower()
+    if any(str(existing).lower() == lowered for existing in headers):
+        return
+    headers[name] = value
+
+
+# LLM: 读取上限同时约束传输体和解压后的实体体；任何编码失败都必须成为结构化工具失败，不能把压缩字节替换解码进模型上下文。
+# 函数用途: 读取并按 Content-Encoding 解压一次 HTTP 响应，超过上限、编码不支持或正文损坏时给出明确错误。
 def _finalize_hop(hop: _HopReq, resp: Any, format_http_error) -> RawResponseParts | ToolHandlerOutcome:
     body = resp.read(hop.request.max_bytes + 1)
     if len(body) > hop.request.max_bytes:
         return ToolHandlerOutcome(hop.request.tool, False, f"响应体过大，最多 {hop.request.max_bytes} 字节", error_code="ARTIFACT_TOO_LARGE")
+    try:
+        body = _decode_response_body(body, resp.headers, hop.request.max_bytes)
+    except OverflowError:
+        return ToolHandlerOutcome(
+            hop.request.tool,
+            False,
+            f"响应解压后过大，最多 {hop.request.max_bytes} 字节",
+            error_code="ARTIFACT_TOO_LARGE",
+        )
+    except LookupError as exc:
+        return ToolHandlerOutcome(
+            hop.request.tool,
+            False,
+            f"响应使用了不支持的 Content-Encoding: {exc}",
+            error_code="NETWORK_REQUEST_FAILED",
+        )
+    except ValueError:
+        return ToolHandlerOutcome(
+            hop.request.tool,
+            False,
+            "响应正文压缩数据损坏，无法安全解码",
+            error_code="NETWORK_REQUEST_FAILED",
+        )
     if resp.status >= 400:
         err = urllib.error.HTTPError(hop.url, resp.status, resp.reason or "", resp.headers, io.BytesIO(body))
         return format_http_error(hop.request.tool, err, _MIN_RESPONSE_PREVIEW_CHARS)
     return RawResponseParts(resp.status, resp.headers, body, hop.url)
 
 
+# LLM: Content-Encoding 按服务端应用顺序的逆序解码，并在每一层维持同一个实体大小硬上限。
+# 函数用途: 解开 gzip/deflate HTTP 正文；空正文和 identity 原样返回，未知编码明确拒绝。
+def _decode_response_body(body: bytes, headers: Any, max_bytes: int) -> bytes:
+    if not body:
+        return body
+    raw_encoding = _header_value(headers, "Content-Encoding")
+    encodings = tuple(part.strip().lower() for part in raw_encoding.split(",") if part.strip())
+    decoded = body
+    for encoding in reversed(encodings):
+        if encoding == "identity":
+            continue
+        if encoding not in _SUPPORTED_CONTENT_ENCODINGS:
+            raise LookupError(encoding)
+        if encoding in {"gzip", "x-gzip"}:
+            decoded = _inflate_limited(decoded, 16 + zlib.MAX_WBITS, max_bytes)
+            continue
+        try:
+            decoded = _inflate_limited(decoded, zlib.MAX_WBITS, max_bytes)
+        except ValueError:
+            decoded = _inflate_limited(decoded, -zlib.MAX_WBITS, max_bytes)
+    return decoded
+
+
+# LLM: HTTPMessage 与测试字典都可能承载响应头；查找必须保持 RFC 大小写不敏感语义。
+# 函数用途: 从任意响应头容器中读取指定字段，兼容普通字典的不同大小写。
+def _header_value(headers: Any, name: str) -> str:
+    value = headers.get(name, "") if hasattr(headers, "get") else ""
+    if value not in (None, ""):
+        return str(value)
+    lowered = name.lower()
+    items = headers.items() if hasattr(headers, "items") else ()
+    for key, candidate in items:
+        if str(key).lower() == lowered:
+            return str(candidate or "")
+    return ""
+
+
+# LLM: zlib 的 max_length 和 eof 状态共同构成解压炸弹/截断数据边界；不得改回一次性 decompress。
+# 函数用途: 在固定字节预算内解压一层 gzip/deflate 数据，并区分超限和损坏两类失败。
+def _inflate_limited(body: bytes, window_bits: int, max_bytes: int) -> bytes:
+    decoder = zlib.decompressobj(window_bits)
+    try:
+        decoded = decoder.decompress(body, max_bytes + 1)
+        if len(decoded) > max_bytes or decoder.unconsumed_tail:
+            raise OverflowError
+        decoded += decoder.flush(max_bytes + 1 - len(decoded))
+    except zlib.error as exc:
+        raise ValueError("invalid compressed response") from exc
+    if len(decoded) > max_bytes:
+        raise OverflowError
+    if not decoder.eof:
+        raise ValueError("truncated compressed response")
+    return decoded
+
+
+# LLM: 完整文本必须留在 outcome.output 交给统一外置层；max_chars 只形成模型预览，不能在 handler 内永久丢掉尾部。
+# 函数用途: 把已解码响应格式化为完整工具正文，并在正文较长时附上可恢复的短预览策略。
 def format_fetch_result(request: FetchFormatRequest) -> ToolHandlerOutcome:
     content_type = content_type_from_headers(request.response.headers)
     if not is_textual_response(request.response.headers):
@@ -257,20 +355,40 @@ def format_fetch_result(request: FetchFormatRequest) -> ToolHandlerOutcome:
     output_format = effective_fetch_format(request.fmt, request.response.headers)
     content = content_for_format(output_format, body, request.response.headers)
     truncated = len(content) > request.max_chars
-    output = (
+    full_output = (
         f"status={request.response.status}\n"
         f"content_type={content_type}\n"
         f"format={output_format}\n"
-        f"truncated={str(truncated).lower()}\n\n"
-        f"{content[:request.max_chars]}"
+        "truncated=false\n\n"
+        f"{content}"
     )
+    envelope: dict[str, Any] = {
+        "cache": {"hit": request.cache_hit},
+        "format": output_format,
+        "url": request.url,
+        "preview": {
+            "truncated": truncated,
+            "max_chars": request.max_chars,
+            "full_chars": len(content),
+        },
+    }
     if truncated:
-        output += "\n... 已截断"
+        live_output = (
+            f"status={request.response.status}\n"
+            f"content_type={content_type}\n"
+            f"format={output_format}\n"
+            "truncated=true\n\n"
+            f"{content[:request.max_chars]}\n... 已截断"
+        )
+        envelope["tool_output_policy"] = {
+            "live_prompt_output": live_output,
+            "requires_recovery_artifact": True,
+        }
     return ToolHandlerOutcome(
         request.tool,
         True,
-        output,
-        result_envelope={"cache": {"hit": request.cache_hit}, "format": output_format, "url": request.url},
+        full_output,
+        result_envelope=envelope,
     )
 
 

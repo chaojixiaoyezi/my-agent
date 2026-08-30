@@ -12,6 +12,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.core import SimpleAgent
@@ -49,8 +51,8 @@ def test_subagent_channel_probe_report():
         assert report.summary["total"] == 2
         assert report.summary["OK"] == 1
         assert report.summary["BROKEN"] == 1
-        assert (root / "subs" / "subagent_channel_probe.json").exists()
-        assert (root / "subs" / "SUBAGENT_CHANNEL_PROBE.md").exists()
+        assert (agent.subagents.workspace / "subagent_channel_probe.json").exists()
+        assert (agent.subagents.workspace / "SUBAGENT_CHANNEL_PROBE.md").exists()
 
 
 def _make_stale_task(agent):
@@ -126,8 +128,8 @@ def test_subagent_action_plan_dry_run():
         assert (broken.id, "probe_or_repair_channel") in actions
         assert actions[(request_task.id, "route_capability_request")].escalation_target == "capability_router"
         assert all(item.dry_run for item in report.actions)
-        assert (root / "subs" / "subagent_action_plan.json").exists()
-        assert (root / "subs" / "SUBAGENT_ACTION_PLAN.md").exists()
+        assert (agent.subagents.workspace / "subagent_action_plan.json").exists()
+        assert (agent.subagents.workspace / "SUBAGENT_ACTION_PLAN.md").exists()
 
 
 def test_subagent_action_apply_takeover():
@@ -288,8 +290,8 @@ def test_subagent_action_apply_repairs_work_order():
 
         assert report.records[0].ok
         assert Path(task.output_json).exists()
-        assert (root / "subs" / "subagent_action_apply_report.json").exists()
-        assert (root / "subs" / "SUBAGENT_ACTION_APPLY.md").exists()
+        assert (agent.subagents.workspace / "subagent_action_apply_report.json").exists()
+        assert (agent.subagents.workspace / "SUBAGENT_ACTION_APPLY.md").exists()
 
 
 def _record_scoped_web_fetch(agent, task_id: str, root: Path):
@@ -332,7 +334,8 @@ def test_subagent_capability_route_grants_tool():
             thought="需要 HTTP 工具。",
             plan=["请求能力"],
         )
-        request = _record_scoped_web_fetch(agent, task.id, root)
+        grant_root = Path(task.task_workspace_dir)
+        request = _record_scoped_web_fetch(agent, task.id, grant_root)
         router = CapabilityRouter(
             config=CapabilityConfig(capability_candidate_limit=3, capability_grant_max_tools=1),
             tool_specs=agent.tools.specs(),
@@ -350,10 +353,10 @@ def test_subagent_capability_route_grants_tool():
         assert routed.capability_requests[0].status == "GRANTED"
         assert routed.capability_grants
         assert "web_fetch" in routed.allowed_tools
-        _assert_scoped_http_grant(routed, applied, root)
-        assert (root / "subs" / "subagent_capability_route_report.json").exists()
-        assert (root / "subs" / "SUBAGENT_CAPABILITY_ROUTE.md").exists()
-        assert (root / "subs" / "subagent_capability_route_log.jsonl").exists()
+        _assert_scoped_http_grant(routed, applied, grant_root)
+        assert (agent.subagents.workspace / "subagent_capability_route_report.json").exists()
+        assert (agent.subagents.workspace / "SUBAGENT_CAPABILITY_ROUTE.md").exists()
+        assert (agent.subagents.workspace / "subagent_capability_route_log.jsonl").exists()
 
 
 def test_subagent_capability_route_grants_skill():
@@ -445,6 +448,87 @@ def test_subagent_capability_route_creates_gap_when_no_match():
         assert report.records[0].request_scope["capability_type"] == "mcp"
 
 
+def test_subagent_capability_route_turns_owner_scope_violation_into_gap_without_wake():
+    """语义路由命中工具也不能批准 owner 外路径，更不能唤醒同一 child 重跑。"""
+    with tempfile.TemporaryDirectory() as td:
+        host_root = Path(td)
+        owner_root = host_root / "owners" / "alice"
+        owner_root.mkdir(parents=True)
+        agent = SimpleAgent(AgentConfig(subagent_workspace="subs"), owner_root)
+        agent.subagents.owner_scope_root = str(owner_root)
+        task = agent.subagents.create_run(
+            goal="检查宿主全局配置",
+            thought="请求文件工具",
+            plan=["申请权限"],
+        )
+        request = agent.subagents.lifecycle.record_capability_request(
+            task.id,
+            RecordCapabilityRequestParams(
+                problem="需要读取宿主全局配置",
+                needed_capability="read_file",
+                capability_type="filesystem",
+                requested_tools=["read_file"],
+                path_scope=[str(host_root)],
+            ),
+        )
+        router = CapabilityRouter(
+            config=CapabilityConfig(capability_candidate_limit=3),
+            tool_specs=agent.tools.specs(),
+        )
+
+        report = agent.subagents.capability.write_capability_route_report(
+            router,
+            apply=True,
+            run_ids=[task.id],
+        )
+        routed = agent.subagents.load(task.id)
+
+        assert report.records[0].status == "GAP"
+        assert report.records[0].reasons == ["CAPABILITY_PATH_OUTSIDE_OWNER_SCOPE"]
+        assert report.records[0].request_scope["scope_resolution"]["rejected_paths"] == [str(host_root)]
+        assert next(item for item in routed.capability_requests if item.id == request.id).status == "GAP"
+        assert routed.capability_grants == []
+        assert routed.capability_gaps[0].constraints["route_rejection_code"] == "CAPABILITY_PATH_OUTSIDE_OWNER_SCOPE"
+        assert "capability_grant_wake" not in routed.attributes
+
+
+def test_lifecycle_rejects_direct_out_of_owner_grant_as_defense_in_depth():
+    """绕过显式与语义路由直接写 grant 时，canonical lifecycle 仍必须拒绝。"""
+    from agent_py_agent.agent.subagents.capability_scope import CapabilityOwnerScopeViolation
+
+    with tempfile.TemporaryDirectory() as td:
+        host_root = Path(td)
+        owner_root = host_root / "owners" / "alice"
+        owner_root.mkdir(parents=True)
+        agent = SimpleAgent(AgentConfig(subagent_workspace="subs"), owner_root)
+        agent.subagents.owner_scope_root = str(owner_root)
+        task = agent.subagents.create_run(goal="越界授权测试", thought="", plan=["申请"])
+        request = agent.subagents.lifecycle.record_capability_request(
+            task.id,
+            RecordCapabilityRequestParams(
+                problem="申请宿主目录",
+                needed_capability="read_file",
+                path_scope=[str(host_root)],
+            ),
+        )
+
+        with pytest.raises(CapabilityOwnerScopeViolation) as raised:
+            agent.subagents.lifecycle.record_capability_grant(
+                task.id,
+                RecordCapabilityGrantParams(
+                    request_id=request.id,
+                    tools=["read_file"],
+                    path_scope=[str(host_root)],
+                    reason="模拟旁路调用",
+                ),
+            )
+
+        assert raised.value.decision.rejected_paths == (str(host_root),)
+        reloaded = agent.subagents.load(task.id)
+        assert reloaded.capability_requests[0].status == "OPEN"
+        assert reloaded.capability_grants == []
+
+
 def test_subagent_execution_context_uses_only_grants():
     """LLM: Verifies execution context only includes granted tools/skills, not all."""
     with tempfile.TemporaryDirectory() as td:
@@ -476,6 +560,7 @@ def test_subagent_execution_context_uses_only_grants():
         assert payload["allowed_skills"] == ["api-check"]
         assert payload["granted_cards"][0]["name"] == "web_fetch"
         assert "write_file" not in payload["allowed_tools"]
-        assert payload["pending_requests"][0]["status"] == "OPEN"
+        assert payload["pending_requests"] == []
+        assert agent.subagents.load(task.id).capability_requests[0].status == "GRANTED"
         assert "不要读取或展开全局 skill/tool registry" in "\n".join(payload["instructions"])
         assert "SUBAGENT EXECUTION CONTEXT" in markdown and "web_fetch" in markdown

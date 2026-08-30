@@ -96,6 +96,7 @@ def test_run_wake_signal_passes_owner_route():
     s._observation_route = lambda _tid: ("feishu", "ou_owner")
     s._pre_wake_capability_sweep = lambda *a, **k: None
     s._wake_retry_after = {}
+    s.scheduler_service = None
 
     def _fake_run_claimed(params):
         captured.update(params)

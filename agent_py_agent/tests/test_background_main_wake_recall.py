@@ -50,7 +50,7 @@ class _CapturingBackend:
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **_kwargs: object) -> ModelResponse:
         self.prompts.append(prompt)
         return ModelResponse(text="子代理跑完了，这是主代理的整合汇总。", backend=self.name)
 
@@ -343,7 +343,7 @@ def test_supervisor_periodically_recovers_base_and_active_owner_watches(
 
     class Pool:
         @staticmethod
-        def active_agents():
+        def hard_agents():
             return [scoped, scoped]
 
     recovered: list[object] = []
@@ -561,7 +561,7 @@ def test_real_scheduler_runs_two_background_threads_for_same_owner(tmp_path) -> 
             self._lock = threading.Lock()
             self._calls = 0
 
-        def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        def generate(self, prompt: str, on_chunk=None, **_kwargs: object) -> ModelResponse:
             with self._lock:
                 self._calls += 1
                 call = self._calls

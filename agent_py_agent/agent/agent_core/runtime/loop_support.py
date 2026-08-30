@@ -12,6 +12,7 @@ from ...conversation.authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
 )
 from ...memory_archive import build_auto_resume_context
+from ...memory_archive.tool_output_externalizer import model_visible_tool_parameters
 from ...memory_routing import (
     RouteContextOptions,
     RoutedMemoryContext,
@@ -886,8 +887,8 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     active_turn_user_input_texts_carried = active_turn_user_input_texts(active_turn_user_inputs)
     tool_ir_history: list[object] = []
     if getattr(seed.tool_protocol_snapshot, "source_protocol", "") == "native":
+        from ...conversation.tool_context_window import native_carried_tool_handoff
         from ...memory_archive.compact_semantic_summary import semantic_summary_config
-        from ..tool_context.window import native_carried_tool_handoff
 
         handoff = native_carried_tool_handoff(
             tool_context,
@@ -1008,7 +1009,8 @@ def _reconstructed_runtime_state(
     - executed_tools：成功且工具名真实（非解析错误/unknown）的记录，按顺序回填工具名——口径
       与 ``_record_tool_call`` 里 ``record.params.executed_tools.append`` 完全一致。
     - one_shot_tool_calls：成功的一次性编排工具记录，用 ``_one_shot_tool_call_key`` 从记录的
-      ``parameters``（即原始 payload）回填——与 live 去重 gate（``tool_call_runtime``）同一把钥匙，
+      ``model_parameters``（provider 原始 payload）回填——与 live 去重 gate
+      （``tool_call_runtime``）同一把钥匙，
       所以 live 会拦的同 payload，续跑也会拦，去重不破。
     - tool_rounds：archive 记录不存轮号，用记录数作保守代理（轮数 ≤ 调用数），保证续跑不把
       ``max_tool_rounds`` 预算清零（宁可略高估、绝不低估，预算只会更紧不会被放大）。
@@ -1143,16 +1145,19 @@ def _carried_executed_tool_name(record: dict[str, object]) -> str:
     return tool_name
 
 
+# LLM: Rebuild one-shot dedupe keys from provider-authored arguments only; trusted/default host
+# completion fields are execution facts and cannot change the model-intent identity.
+# 函数用途: 从续跑归档恢复一次性编排工具的原始意图去重键。
 def _carried_one_shot_keys(record: dict[str, object]) -> set[str]:
     """成功的一次性编排工具记录返回全部去重 key，否则空集合。"""
     if not bool(record.get("ok")):
         return set()
-    params = record.get("parameters")
-    if not isinstance(params, dict):
+    params = model_visible_tool_parameters(record)
+    if not params:
         return set()
     payload = dict(params)
-    # archive 的 parameters 即原始 payload（含 "tool" 控制键）；缺失时用记录顶层 tool 兜底，
-    # 让 _one_shot_tool_call_keys 能识别这是不是一次性编排工具。
+    # model_parameters 是 provider 原始 payload；旧索引仅按结构化 input_sources 回退。
+    # 缺失时用记录顶层 tool 兜底，让去重键与 live 模型调用保持同一口径。
     payload.setdefault("tool", str(record.get("tool") or ""))
     return _one_shot_tool_call_keys(payload)
 
@@ -1162,8 +1167,8 @@ def _carried_one_shot_keys(record: dict[str, object]) -> set[str]:
 # verbatim into every background slice; effect state still comes only from typed archive fields.
 # 函数用途: 把一条归档工具记录脱敏、限长后恢复为模型/守卫可读文本，并保留路径、失败、未知与重放事实。
 def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
-    payload = record.get("parameters")
-    payload = payload if isinstance(payload, dict) else {"tool": str(record.get("tool") or "")}
+    payload = model_visible_tool_parameters(record)
+    payload = payload or {"tool": str(record.get("tool") or "")}
     from ...common.log_redaction import redact_sensitive_value
 
     projected_payload = redact_sensitive_value(payload)

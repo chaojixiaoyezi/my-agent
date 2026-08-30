@@ -52,8 +52,24 @@ USER_MESSAGE_TAIL_CHARS = 2_500
 SPINNER_METRICS_AFTER_SECONDS = 30.0
 SPINNER_STALL_AFTER_SECONDS = 3.0
 PENDING_INPUT_PREVIEW_LINE_LIMIT = 3
+# LLM: 少量回执保持完整预览；超过阈值后必须切成固定摘要，避免大量排队输入把
+# prompt_toolkit HSplit 的最小高度撑过终端并退化成 `Window too small`。
+# 常量用途: 控制输入框附近何时从逐条预览切换为有界队列摘要，不改变真实队列内容。
+INPUT_RECEIPT_EXPANDED_ITEM_LIMIT = 4
 TODO_COLLAPSED_MAX_ITEMS = 4
 TERMINAL_RENDER_PHASES = frozenset({"completed", "failed", "interrupted"})
+FOCUSED_AGENT_TERMINAL_STATUSES = frozenset(
+    {
+        "DONE",
+        "FAILED",
+        "BLOCKED",
+        "CHANNEL_ERROR",
+        "TIMEOUT",
+        "CANCELLED",
+        "ABANDONED",
+        "TAKEN_OVER",
+    }
+)
 SPINNER_GLYPHS = ("✻", "✢", "✶")
 SPINNER_WORDS = (
     "Working",
@@ -633,17 +649,7 @@ def _render_background_activity(
     focused_status = context.focused_agent_status
     focused_terminal = bool(
         context.focused_agent_run_id
-        and focused_status
-        in {
-            "DONE",
-            "FAILED",
-            "BLOCKED",
-            "CHANNEL_ERROR",
-            "TIMEOUT",
-            "CANCELLED",
-            "ABANDONED",
-            "TAKEN_OVER",
-        }
+        and focused_status in FOCUSED_AGENT_TERMINAL_STATUSES
     )
     ended_at = _safe_render_float(main_activity.get("ended_at"))
     elapsed_end = ended_at if focused_terminal and ended_at > 0 else context.now
@@ -803,7 +809,18 @@ def _render_subagent_activity_row(
     context: TuiRenderContext,
 ) -> tuple[FormattedLine, ...]:
     status = str(row.get("status") or "").strip().upper()
-    icon, label, style = _subagent_status_display(status)
+    lifecycle_phase = str(row.get("lifecycle_phase") or "").strip().lower()
+    icon, label, style = _subagent_status_display(
+        status,
+        lifecycle_phase=lifecycle_phase,
+    )
+    if lifecycle_phase in {
+        "starting",
+        "waiting_first_event",
+        "waiting_descendants",
+        "running",
+    }:
+        icon = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
     raw_name = sanitize_terminal_text(
         str(row.get("name") or row.get("role") or "subagent").strip() or "subagent"
     )
@@ -865,11 +882,22 @@ def _render_subagent_activity_row(
 # LLM: Status-to-style mapping is a pure display projection of the canonical
 # enum. Unknown values stay neutral and visibly unknown.
 # 函数用途: 把子代理结构化状态映射为图标、中文标签和颜色。
-def _subagent_status_display(status: str) -> tuple[str, str, str]:
+def _subagent_status_display(
+    status: str,
+    *,
+    lifecycle_phase: str = "",
+) -> tuple[str, str, str]:
+    phase = str(lifecycle_phase or "").strip().lower()
+    if status == "PLANNING" or phase == "queued":
+        return "○", "排队中", "class:tui-subagent-pending"
+    if phase == "waiting_descendants":
+        return "●", "等待下级", "class:tui-subagent-running"
+    if status == "PENDING" or phase == "starting":
+        return "○", "启动中", "class:tui-subagent-pending"
+    if status == "RUNNING" and phase == "waiting_first_event":
+        return "●", "等待模型", "class:tui-subagent-running"
     if status == "RUNNING":
         return "●", "运行中", "class:tui-subagent-running"
-    if status in {"PLANNING", "PENDING"}:
-        return "○", "等待启动", "class:tui-subagent-pending"
     if status == "DONE":
         return "✓", "已完成", "class:tui-subagent-done"
     if status in {"BLOCKED", "PAUSED"}:
@@ -1026,18 +1054,18 @@ def _background_animation_key(
     )
 
 
-# LLM: 欢迎卡保持 终端交互 95 列上限和宽/窄两种结构，品牌/版本/模型/目录使用 my-agent 显式映射。
-# 函数用途: 渲染启动欢迎卡和一行使用提示。
+# LLM: 欢迎卡保持 终端交互 95 列上限和宽/窄两种结构，品牌/版本/模型/目录使用 my-agent 显式映射，用户文案统一为中文。
+# 函数用途: 渲染中文启动欢迎卡和一行使用提示。
 def _render_welcome(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     version = str(block.metadata.get("version") or context.version)
-    model = str(block.metadata.get("model") or context.model_name or "Model unavailable")
+    model = str(block.metadata.get("model") or context.model_name or "模型不可用")
     workspace = str(block.metadata.get("workspace") or context.workspace or ".")
     card_width = min(WELCOME_CARD_MAX_WIDTH, context.width)
     if card_width >= 80:
         lines = _wide_welcome_card(context.agent_name, version, model, workspace, card_width)
     else:
         lines = _narrow_welcome_card(context.agent_name, version, model, workspace, card_width)
-    tip_text = "/help shows commands · /status shows current session"
+    tip_text = "/help 查看命令 · /status 查看当前会话"
     tip_padding = " " * max(0, context.width - display_width_text("  ↑ " + tip_text))
     lines.extend(
         [
@@ -1065,17 +1093,17 @@ def _wide_welcome_card(
     right_width = card_width - left_width - 3
     lines = [_welcome_header(agent_name, version, card_width)]
     left_rows: tuple[FormattedLine, ...] = (
-        (("class:tui-strong", "Welcome back!"),),
+        (("class:tui-strong", "欢迎回来！"),),
         *TERMINAL_BUNNY_AVATAR,
         (("class:tui-muted", f"{model} · API" if model else "API"),),
         (("class:tui-muted", workspace),),
     )
     right_rows = (
-        ("Recent activity", "class:tui-welcome-heading"),
-        ("No recent activity", "class:tui-muted"),
+        ("最近活动", "class:tui-welcome-heading"),
+        ("暂无最近活动", "class:tui-muted"),
         (" " + "─" * max(0, right_width - 2) + " ", "class:tui-accent"),
-        ("What's new", "class:tui-welcome-heading"),
-        ("Use /help to explore my-agent commands", "class:tui-muted"),
+        ("新内容", "class:tui-welcome-heading"),
+        ("输入 /help 查看 my-agent 命令", "class:tui-muted"),
     )
     for row_index, left in enumerate(left_rows):
         right, right_style = right_rows[row_index] if row_index < len(right_rows) else ("", "")
@@ -1108,7 +1136,7 @@ def _narrow_welcome_card(
         else TERMINAL_BUNNY_AVATAR_COMPACT
     )
     rows: tuple[FormattedLine, ...] = (
-        (("class:tui-strong", "Welcome back!"),),
+        (("class:tui-strong", "欢迎回来！"),),
         (),
         *avatar,
         (),
@@ -1187,8 +1215,9 @@ def _render_user(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
 
 
 # LLM: assistant marker 与 Markdown 只做视觉组合；typed process 仍是完整会话消息，
-# 不能因为后面还有工具调用就默认折成一行并藏掉详细汇报。
-# 函数用途: 渲染带 ● marker 的完整助手 Markdown 块，过程段与最终段都直接可读。
+# 不能因为后面还有工具调用就默认折成一行并藏掉详细汇报；process 的每个正文
+# fragment 必须追加 muted 终端角色，不能只染前面的圆点。
+# 函数用途: 渲染带 ● marker 的完整助手 Markdown 块，过程段整段浅灰，最终段保持正文色。
 def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     content_width = max(1, context.width - 2)
     text = _bounded_render_text(
@@ -1198,19 +1227,20 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
     markdown_lines = render_markdown(text, MarkdownRenderContext(width=content_width))
     lines: list[FormattedLine] = []
     first_content = True
+    process = bool(block.metadata.get("process"))
     for line in markdown_lines:
         if not fragments_text(line):
             lines.append(())
             continue
         marker = "● " if first_content else "  "
         fold_hint = _is_fold_hint_line(line)
-        if (first_content and block.metadata.get("process")) or fold_hint:
+        if (first_content and process) or fold_hint:
             style = "class:tui-muted"
         else:
             style = "class:tui-assistant-marker" if first_content else ""
-        if fold_hint:
-            # 终端交互 的快捷键提示是整行 dim；只给 marker 上色会让真正的提示文字
-            # 继续继承普通 Markdown 正文颜色。
+        if process or fold_hint:
+            # 终端交互 的过程说明/快捷键提示是整行 dim；只给 marker 上色会让真正
+            # 的文字继续继承普通 Markdown 正文颜色。
             line = _append_terminal_role(line, "class:tui-muted")
         lines.append(((style, marker), *line))
         first_content = False
@@ -1285,8 +1315,10 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
     return tuple(lines)
 
 
-# LLM: durable compact 进度只展示底层回调的结构化阶段/百分比；进度条不得根据墙钟虚构。
-# 函数用途: 在 Compact 运行时显示闪动图标、真实阶段和百分比。
+# LLM: Durable Compact renders provider-backed milestones only. Manual control operations cannot
+# stream server stages, so they use an explicitly indeterminate moving bar rather than a fake
+# percentage; renderer time never becomes compact authority.
+# 函数用途: 在 Compact 运行时显示动画；有真实阶段时显示百分比，手动压缩只显示不定进度。
 def _render_compact_progress(
     block: TuiBlock,
     context: TuiRenderContext,
@@ -1316,14 +1348,29 @@ def _render_compact_progress(
         "failed": "失败",
     }.get(stage_key, "处理中")
     bar_width = min(24, max(8, context.width - 48))
-    filled = min(bar_width, max(0, int(round(percent * bar_width / 100))))
-    meter = "━" * filled + "─" * (bar_width - filled)
+    indeterminate = block.metadata.get("indeterminate") is True
+    if indeterminate:
+        pulse_width = min(5, max(3, bar_width // 4))
+        travel = max(1, bar_width - pulse_width)
+        cycle = travel * 2
+        offset = context.spinner_index % cycle
+        start = offset if offset <= travel else cycle - offset
+        meter = (
+            "─" * start
+            + "━" * pulse_width
+            + "─" * (bar_width - start - pulse_width)
+        )
+        progress_text = "处理中"
+    else:
+        filled = min(bar_width, max(0, int(round(percent * bar_width / 100))))
+        meter = "━" * filled + "─" * (bar_width - filled)
+        progress_text = f"{percent}% · {stage}"
     glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
     return wrap_fragments(
         (
             ("class:tui-spinner-highlight", glyph + " "),
             ("class:tui-thinking", "正在压缩上下文 "),
-            ("class:tui-thinking", f"[{meter}] {percent}% · {stage}"),
+            ("class:tui-thinking", f"[{meter}] {progress_text}"),
         ),
         width=context.width,
         continuation_prefix=(("class:tui-thinking", "  "),),
@@ -2008,7 +2055,7 @@ def _render_permission(
         )
     lines.extend(
         wrap_fragments(
-            (("", "Do you want to proceed?"),),
+            (("", "是否继续执行？"),),
             width=context.width,
             first_prefix=(("", " "),),
             continuation_prefix=(("", " "),),
@@ -2029,9 +2076,9 @@ def _render_permission(
         )
     selected_option = permission.options[permission.selected_index]
     feedback_enabled = bool(selected_option.get("feedback_type"))
-    hint = " Esc to cancel"
+    hint = " Esc 取消"
     if feedback_enabled and not permission.feedback_mode:
-        hint += " · Tab to amend"
+        hint += " · Tab 补充说明"
     lines.extend(
         wrap_fragments(
             (("class:tui-muted", hint.strip()),),
@@ -2051,10 +2098,20 @@ def _render_input_status(
     context: TuiRenderContext,
 ) -> tuple[FormattedLine, ...]:
     lines: list[FormattedLine] = []
-    if snapshot.pending_steers:
-        lines.extend(_render_pending_steers(snapshot.pending_steers, context))
-    if snapshot.queued_inputs:
-        lines.extend(_render_queue(snapshot.queued_inputs, context))
+    receipt_count = len(snapshot.pending_steers) + len(snapshot.queued_inputs)
+    if receipt_count > INPUT_RECEIPT_EXPANDED_ITEM_LIMIT:
+        lines.extend(
+            _render_compact_input_receipts(
+                snapshot.pending_steers,
+                snapshot.queued_inputs,
+                context,
+            )
+        )
+    else:
+        if snapshot.pending_steers:
+            lines.extend(_render_pending_steers(snapshot.pending_steers, context))
+        if snapshot.queued_inputs:
+            lines.extend(_render_queue(snapshot.queued_inputs, context))
     if context.context_usage is not None:
         lines.extend(
             _render_context_usage(
@@ -2315,6 +2372,66 @@ def _render_context_usage(
     )
 
 
+# LLM: `/context` in rich TUI must render the exact same TuiContextUsage object as the fixed
+# strip. It may explain numeric components but must not recompute history or compact policy.
+# 函数用途: 把底部状态栏正在使用的上下文快照展开成普通用户看得懂的详细中文报告。
+def render_tui_context_usage_report(
+    usage: TuiContextUsage | None,
+    *,
+    compact_count: int = 0,
+) -> str:
+    compact = max(0, int(compact_count or 0))
+    if usage is None:
+        return (
+            "上下文：尚无最近一次模型调用前的真实快照。\n"
+            "发送一条普通消息后，/context 会与底部 Context 使用同一份数据刷新。\n"
+            f"已完成 compact：{compact} 次"
+        )
+    current = max(0, int(usage.current_tokens or 0))
+    window = max(0, int(usage.context_window_tokens or 0))
+    trigger = max(0, int(usage.compact_trigger_tokens or 0))
+    percent = current * 100.0 / window if window > 0 else 0.0
+    filled = min(20, max(0, int(round(min(100.0, percent) / 5.0))))
+    meter = "█" * filled + "░" * (20 - filled)
+    accuracy = "估算" if usage.estimated else "供应商计量"
+    lines = [
+        "上下文用量（与底部状态栏同一份最近快照）",
+        (
+            f"总量（{accuracy}）：{meter} {current:,} / {window:,} tokens"
+            f"（{percent:.1f}%）"
+            if window > 0
+            else f"总量（{accuracy}）：{current:,} tokens；模型窗口未知"
+        ),
+    ]
+    if usage.protocol == "native":
+        lines.extend(
+            (
+                f"固定与本轮提示：{max(0, int(usage.prompt_tokens or 0)):,} tokens",
+                f"对话与工具消息：{max(0, int(usage.messages_tokens or 0)):,} tokens",
+                f"待注入运行说明：{max(0, int(usage.runtime_guidance_tokens or 0)):,} tokens",
+                f"工具定义：{max(0, int(usage.tool_schema_tokens or 0)):,} tokens",
+            )
+        )
+    else:
+        lines.append(
+            f"合并后的提示输入：{max(0, int(usage.prompt_tokens or current)):,} tokens"
+        )
+        lines.append("当前接口未把消息、运行说明和工具定义可靠拆开。")
+    if trigger > 0:
+        trigger_percent = trigger * 100.0 / window if window > 0 else 0.0
+        remaining = max(0, trigger - current)
+        state = "已到压缩点" if remaining == 0 else f"还差约 {remaining:,} tokens"
+        lines.append(
+            f"自动 compact 压缩点：{trigger:,} tokens"
+            + (f"（{trigger_percent:.1f}%）" if window > 0 else "")
+            + f"；{state}"
+        )
+    else:
+        lines.append("自动 compact 压缩点：当前模型窗口不足，暂无法计算")
+    lines.append(f"已完成 compact：{compact} 次")
+    return "\n".join(lines)
+
+
 # LLM: Color bands are projections of the runtime-owned compact line: safe below 80% of the
 # trigger, warning near it, and danger at/above it. They never trigger compaction themselves.
 # 函数用途: 根据实际 compact 线选择上下文状态颜色，只影响显示。
@@ -2330,18 +2447,28 @@ def _context_usage_style(current: int, trigger: int, window: int) -> str:
 
 
 # LLM: Pending steer receipts stay fixed above the composer while scrolled history continues to
-# move. The muted line is display state only; promotion still requires the exact typed event.
-# 函数用途: 显示等待模型真正收到的当前任务补充消息及其未确认状态。
+# move. A terminal child changes only the truthful label: absence of a consumed event cannot be
+# presented as future delivery or promoted to user history.
+# 函数用途: 显示尚未获模型消费确认的补充消息；子代理结束后明确标为不再自动重发。
 def _render_pending_steers(
     pending_steers: tuple[TuiPendingSteer, ...],
     context: TuiRenderContext,
 ) -> tuple[FormattedLine, ...]:
     if context.width < 4:
         return ()
+    child_terminal = bool(
+        context.focused_agent_run_id
+        and context.focused_agent_status in FOCUSED_AGENT_TERMINAL_STATUSES
+    )
+    label = (
+        "子代理已结束；以下插话未获模型消费确认，不会自动重发"
+        if child_terminal
+        else "将在下一次工具调用后送入当前回合"
+    )
     lines: list[FormattedLine] = []
     lines.extend(
         wrap_fragments(
-            (("class:tui-muted", "Messages to be submitted after next tool call"),),
+            (("class:tui-muted", label),),
             width=context.width,
             first_prefix=(("class:tui-muted", "• "),),
             continuation_prefix=(("class:tui-muted", "  "),),
@@ -2352,9 +2479,51 @@ def _render_pending_steers(
     return tuple(lines)
 
 
-# LLM: queue renderer uses reducer order and stays in the fixed composer-adjacent pane. It must
-# not disappear when the user scrolls away from the transcript bottom.
-# 函数用途: 把运行中排队的下一回合输入固定显示在输入框上方。
+# LLM: A receipt flood stays fully authoritative in TuiViewSnapshot, while this projection keeps
+# only one bounded preview per group. It mirrors 终端交互's queue-placeholder geometry and must
+# never delete, reorder, consume, or acknowledge an underlying input.
+# 函数用途: 当补充消息和后续队列很多时压成最多五行摘要，保证小终端仍能显示正文与输入框。
+def _render_compact_input_receipts(
+    pending_steers: tuple[TuiPendingSteer, ...],
+    queued_inputs: tuple[TuiQueuedInput, ...],
+    context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    if context.width < 4:
+        return ()
+    child_terminal = bool(
+        context.focused_agent_run_id
+        and context.focused_agent_status in FOCUSED_AGENT_TERMINAL_STATUSES
+    )
+    lines: list[FormattedLine] = []
+
+    def append_single_line(text: str, *, italic: bool = False) -> None:
+        style = "class:tui-muted italic" if italic else "class:tui-muted"
+        leading_spaces = len(str(text or "")) - len(str(text or "").lstrip(" "))
+        fitted = _fit_text(
+            " " * leading_spaces + " ".join(str(text or "").split()),
+            context.width,
+            "left",
+        ).rstrip()
+        lines.append(((style, fitted),) if fitted else ())
+
+    if pending_steers:
+        pending_label = (
+            "• 子代理已结束；插话未获消费确认"
+            if child_terminal
+            else "• 等待当前回合接收"
+        )
+        append_single_line(f"{pending_label}（{len(pending_steers)} 条）")
+        append_single_line(f"  ↳ {pending_steers[0].text}")
+    if queued_inputs:
+        append_single_line(f"• 已排队的后续消息（{len(queued_inputs)} 条）")
+        append_single_line(f"  ↳ {queued_inputs[0].text}", italic=True)
+        append_single_line("    ↑ 取回并编辑排队消息")
+    return tuple(lines)
+
+
+# LLM: queue renderer uses reducer order and stays in the fixed composer-adjacent pane. Chinese
+# display copy must not disappear when the user scrolls away from the transcript bottom.
+# 函数用途: 把运行中排队的下一回合输入用中文固定显示在输入框上方。
 def _render_queue(
     queued_inputs: tuple[TuiQueuedInput, ...],
     context: TuiRenderContext,
@@ -2364,7 +2533,7 @@ def _render_queue(
     lines: list[FormattedLine] = []
     lines.extend(
         wrap_fragments(
-            (("class:tui-muted", "Queued follow-up inputs"),),
+            (("class:tui-muted", "已排队的后续消息"),),
             width=context.width,
             first_prefix=(("class:tui-muted", "• "),),
             continuation_prefix=(("class:tui-muted", "  "),),
@@ -2374,7 +2543,7 @@ def _render_queue(
         lines.extend(_render_pending_input_message(item.text, context, italic=True))
     lines.extend(
         wrap_fragments(
-            (("class:tui-muted", "↑ edit queued messages"),),
+            (("class:tui-muted", "↑ 取回并编辑排队消息"),),
             width=context.width,
             first_prefix=(("class:tui-muted", "    "),),
             continuation_prefix=(("class:tui-muted", "    "),),
@@ -2506,13 +2675,13 @@ def _render_help_footer(width: int) -> FormattedLine:
 # 函数用途: 返回工具子行内容。
 def _tool_status_text(block: TuiBlock) -> str:
     if block.phase == "waiting_permission":
-        return "Waiting for permission…"
+        return "等待授权…"
     if block.phase in {"started", "delta", "running"}:
         return block.detail or "Running…"
     if block.phase == "failed":
         return block.detail or "Failed"
     if block.phase == "interrupted":
-        return block.detail or "Interrupted"
+        return block.detail or "已中断"
     return block.detail or "Done"
 
 
@@ -2637,6 +2806,7 @@ __all__ = [
     "TuiRenderCacheStats",
     "TuiRenderContext",
     "TuiRenderFrame",
+    "render_tui_context_usage_report",
     "render_tui_snapshot",
     "sanitize_tui_render_frame",
 ]

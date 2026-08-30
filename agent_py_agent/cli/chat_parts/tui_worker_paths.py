@@ -81,11 +81,6 @@ def _submit_gateway_job(ctx: Any):
 def _submit_new_gateway_job(cfg: Any, job: Any, turn_inject: list[str]):
     from .gateway_client import ChatRequestContent, submit_chat_request
 
-    audit_agent = (
-        None
-        if getattr(cfg.agent, "gateway_client_only", False) is True
-        else cfg.agent
-    )
     request_id, chunk_path, _response_path = submit_chat_request(
         cfg.paths,
         content=ChatRequestContent(
@@ -100,7 +95,7 @@ def _submit_new_gateway_job(cfg: Any, job: Any, turn_inject: list[str]):
             interactive_approvals=job.tool_approval,
             rich_transcript=job.rich_transcript,
         ),
-        agent=audit_agent,
+        agent=cfg.agent,
         workspace_root=getattr(cfg.agent, "root", ""),
         workspace_roots=getattr(cfg.agent, "workspace_roots", None),
     )

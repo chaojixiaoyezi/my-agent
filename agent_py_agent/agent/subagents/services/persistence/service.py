@@ -13,18 +13,22 @@ import copy
 import json
 import threading
 import time
-from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable, Iterable
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 from ....common.json_io import locked_json_path, read_json_object_report, write_json_file_atomic
 from ....common.opaque_id import validate_opaque_id
 from ....common.value_parsing import sequence_strings
+from ....concurrency.exceptions import ConcurrencyConflictError
 from ....runtime_db.operations import directory_id_for_opaque
 from ....runtime_errors import runtime_error_report
+from ...model_capabilities import capability_request_requires_parent_resolution
 from ...models import (
+    CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES,
     SUBAGENT_FAILED_RESULT_STATUSES,
+    SUBAGENT_RECOVERY_CLOSED_STATUSES,
     CapabilityGap,
     CapabilityGrant,
     CapabilityRequest,
@@ -336,7 +340,16 @@ class SubAgentPersistenceService:
                 for stale in [rid for rid in self._run_cache if rid not in seen]:
                     self._run_cache.pop(stale, None)
 
-    def save(self, task: SubAgentTask, *, preserve_child_links: bool = True) -> None:
+    # LLM: This is the canonical full-state write boundary. Closed lifecycle facts are monotonic;
+    # only a structured same-run continuation or lifecycle-repair caller may explicitly reopen one.
+    # 函数用途: 原子保存子代理权威状态及派生投影，并阻止旧线程把终态写回运行态。
+    def save(
+        self,
+        task: SubAgentTask,
+        *,
+        preserve_child_links: bool = True,
+        allow_terminal_reactivation: bool = False,
+    ) -> None:
         """Persist a task as JSON plus human-readable Markdown."""
 
         _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
@@ -344,26 +357,61 @@ class SubAgentPersistenceService:
         # 用独立 guard 串行化；不能直接锁 canonical_state.json，因为原子写入
         # 自己还会取该路径的非可重入锁。
         with locked_json_path(_canonical_state_guard_path(self.workspace, task)):
-            previous_locked = _existing_locked_files(self, task)
-            if preserve_child_links:
-                _merge_existing_child_links(self, task)
-                _merge_existing_takeover_state(self, task)
-            _project_closed_audit_source_state(task)
-            # P3-1 锁生命周期(R5a 实锤):save 是落盘唯一权威口——无论锁来自模型参数、
-            # takeover 透传还是合并,这里统一剔除"锁住自己交付目标"的派工矛盾并记账。
-            now = time.time()
-            sanitize_self_locked_delivery_targets(task, now)
-            record_locked_files_change(task, previous_locked, now)
-            task_dir, owner_projection = _prepare_and_write_state(self, task)
-            sync_derived_projections(self.manager, task, task_dir, owner_projection)
+            if _restore_newer_closed_state(
+                self,
+                task,
+                allow_terminal_reactivation=allow_terminal_reactivation,
+            ):
+                return
+            _merge_concurrent_capability_and_runner_state(self, task)
+            _persist_task_inside_guard(
+                self,
+                task,
+                preserve_child_links=preserve_child_links,
+            )
 
+    # LLM: Reducers run against the latest canonical task while holding the same cross-process
+    # guard used by save and runner-session heartbeats. Keep reducers deterministic and bounded;
+    # network/model calls and unrelated filesystem work must remain outside this critical section.
+    # 函数用途: 在同一把文件锁内完成“读取最新状态、结构化修改、递增版本、写回”，避免旧快照覆盖。
+    def mutate(
+        self,
+        run_id: str,
+        reducer: Callable[[SubAgentTask], None],
+        *,
+        expected_revision: int | None = None,
+        preserve_child_links: bool = True,
+    ) -> SubAgentTask:
+        normalized_run_id = validate_opaque_id(run_id, kind="run_id")
+        initial = self.load(normalized_run_id)
+        with locked_json_path(_canonical_state_guard_path(self.workspace, initial)):
+            task = self.load(normalized_run_id)
+            actual_revision = max(0, int(task.state_revision or 0))
+            if expected_revision is not None and actual_revision != int(expected_revision):
+                raise ConcurrencyConflictError(
+                    task_id=normalized_run_id,
+                    expected_version=int(expected_revision),
+                    actual_version=actual_revision,
+                )
+            reducer(task)
+            _advance_granted_capability_resume_state(task)
+            _persist_task_inside_guard(
+                self,
+                task,
+                preserve_child_links=preserve_child_links,
+            )
+            return copy.deepcopy(task)
+
+    # LLM: Narrow runner-session persistence may update only the newest canonical payload and
+    # returns False when a recovery-closed lifecycle fences the old lease.
+    # 函数用途: 轻量保存 runner 心跳；终态后拒绝旧会话继续冒充运行中。
     def save_runner_session(
         self,
         run_id: str,
         session: dict[str, object],
         *,
         now: float,
-    ) -> None:
+    ) -> bool:
         """Persist runner liveness without rebuilding task projections."""
 
         run_id = validate_opaque_id(run_id, kind="run_id")
@@ -373,6 +421,8 @@ class SubAgentPersistenceService:
         initial_task = self.task_from_payload(_read_state_payload(locator_path))
         with locked_json_path(_canonical_state_guard_path(self.workspace, initial_task)):
             payload = _read_state_payload(locator_path)
+            if _runner_session_write_is_stale_for_closed_task(payload, session):
+                return False
             _merge_runner_session_payload(payload, session, now=now)
             canonical_ref = _canonical_state_ref_from_payload(payload)
             if not canonical_ref:
@@ -384,6 +434,7 @@ class SubAgentPersistenceService:
             if locator:
                 locator["updated_at"] = now
                 write_json_file_atomic(locator_path, locator)
+        return True
 
 
 def _canonical_state_guard_path(workspace: Path, task: SubAgentTask) -> Path:
@@ -397,6 +448,33 @@ def _canonical_state_guard_path(workspace: Path, task: SubAgentTask) -> Path:
         return workspace / run_id / ".canonical_state.guard"
     task_dir = str(getattr(task, "task_dir", "") or "").strip()
     return workspace / (Path(task_dir).name if task_dir else "unknown-run") / ".canonical_state.guard"
+
+
+# LLM: Call only while holding .canonical_state.guard. This is the common commit tail for legacy
+# full-state save and typed mutate: it increments the host revision once, preserves hierarchy and
+# takeover projections, sanitizes locks, writes canonical state, then refreshes derived views.
+# 函数用途: 在已持有权威锁时完成一次子代理状态提交，并统一递增版本和刷新派生投影。
+def _persist_task_inside_guard(
+    service: SubAgentPersistenceService,
+    task: SubAgentTask,
+    *,
+    preserve_child_links: bool,
+) -> None:
+    previous_locked = _existing_locked_files(service, task)
+    if preserve_child_links:
+        _merge_existing_child_links(service, task)
+        _merge_existing_takeover_state(service, task)
+    _project_closed_audit_source_state(task)
+    now = time.time()
+    sanitize_self_locked_delivery_targets(task, now)
+    record_locked_files_change(task, previous_locked, now)
+    try:
+        existing_revision = int(service.load(task.id).state_revision or 0)
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+        existing_revision = 0
+    task.state_revision = max(existing_revision, int(task.state_revision or 0)) + 1
+    task_dir, owner_projection = _prepare_and_write_state(service, task)
+    sync_derived_projections(service.manager, task, task_dir, owner_projection)
 
 
 def _canonical_state_ref_from_payload(payload: dict[str, Any]) -> str:
@@ -432,6 +510,24 @@ def _merge_runner_session_payload(
     payload["attributes"] = attrs
     payload["heartbeat_at"] = now
     payload["updated_at"] = now
+
+
+# LLM: This narrow heartbeat path bypasses full task save, so it must repeat the same terminal
+# fence using canonical payload fields. It may never turn a cancelled/abandoned/taken-over lease
+# live again; DONE accepts only the final completed session receipt.
+# 函数用途: 拒绝终态之后迟到的启动或心跳窄写，避免界面和恢复器继续把已结束子代理看成活跃。
+def _runner_session_write_is_stale_for_closed_task(
+    payload: dict[str, Any],
+    session: dict[str, object],
+) -> bool:
+    task_status = str(payload.get("status") or "").strip().upper()
+    if task_status not in SUBAGENT_RECOVERY_CLOSED_STATUSES:
+        return False
+    session_status = str(session.get("status") or "").strip().lower()
+    return not (
+        task_status == TaskStatus.DONE.value
+        and session_status == "completed"
+    )
 
 
 def _directory_id_for_task(service: SubAgentPersistenceService, task: SubAgentTask) -> str:
@@ -717,6 +813,204 @@ def _merge_existing_child_links(service: SubAgentPersistenceService, task: SubAg
     except (FileNotFoundError, json.JSONDecodeError, TypeError):
         return
     task.child_ids = _unique_strings([*existing.child_ids, *task.child_ids])
+
+
+# LLM: Capability records form an independent append-only domain and are merged on every full save.
+# runner_attempts is the monotonic generation fence: an older writer may add a capability delta,
+# but cannot replace lifecycle/result/attempt facts settled by a newer runner generation.
+# 函数用途: 双向保留并发授权账，并阻止旧副本把已收口的子代理改回运行中。
+def _merge_concurrent_capability_and_runner_state(
+    service: SubAgentPersistenceService,
+    task: SubAgentTask,
+) -> bool:
+    try:
+        existing = service.load(task.id)
+    except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        return False
+    incoming_requests = copy.deepcopy(task.capability_requests)
+    incoming_grants = copy.deepcopy(task.capability_grants)
+    incoming_gaps = copy.deepcopy(task.capability_gaps)
+    incoming_allowed_skills = list(task.allowed_skills)
+    incoming_allowed_tools = list(task.allowed_tools)
+    incoming_required_paths = list(task.context_manifest.required_read_paths)
+    incoming_hint_paths = list(task.context_manifest.hint_read_paths)
+    incoming_updated_at = float(task.updated_at or 0.0)
+
+    existing_runner_is_newer = int(existing.runner_attempts or 0) > int(
+        task.runner_attempts or 0
+    )
+    incoming_is_control_terminal = (
+        str(task.status or "").strip().upper() in SUBAGENT_RECOVERY_CLOSED_STATUSES
+    )
+    if existing_runner_is_newer and not incoming_is_control_terminal:
+        for item in fields(task):
+            setattr(task, item.name, copy.deepcopy(getattr(existing, item.name)))
+    # capability 是独立的 append-only 域。canonical 永远是冲突裁决基线，旧 writer
+    # 只能补新 request/grant/gap 或把 OPEN 推进到终态，不能翻转已落盘的终态。
+    task.capability_requests = _merge_capability_requests(
+        existing.capability_requests,
+        incoming_requests,
+    )
+    task.capability_grants = _merge_capability_grants(
+        existing.capability_grants,
+        incoming_grants,
+    )
+    task.capability_gaps = _merge_records_by_id(
+        existing.capability_gaps,
+        incoming_gaps,
+    )
+    task.allowed_skills = _unique_strings(
+        [*existing.allowed_skills, *incoming_allowed_skills]
+    )
+    task.allowed_tools = _unique_strings(
+        [*existing.allowed_tools, *incoming_allowed_tools]
+    )
+    task.context_manifest.required_read_paths = _unique_strings(
+        [
+            *existing.context_manifest.required_read_paths,
+            *incoming_required_paths,
+        ]
+    )
+    task.context_manifest.hint_read_paths = _unique_strings(
+        [*existing.context_manifest.hint_read_paths, *incoming_hint_paths]
+    )
+    task.updated_at = max(
+        float(task.updated_at or 0.0),
+        incoming_updated_at,
+        float(existing.updated_at or 0.0),
+    )
+    _advance_granted_capability_resume_state(task)
+    return existing_runner_is_newer and not incoming_is_control_terminal
+
+
+# LLM: A settled attempt with fully resolved capability requests is dispatch-ready, not blocked.
+# This reducer uses only typed status, attempt, request, gap, and grant facts; legacy BLOCKED plus
+# grant remains readable but every new canonical write advances it to the single PENDING state.
+# 函数用途: 授权已齐且旧执行轮已安全收口时，把子代理原子推进到待续跑状态。
+def _advance_granted_capability_resume_state(task: SubAgentTask) -> bool:
+    if str(task.status or "").strip().upper() != TaskStatus.BLOCKED.value:
+        return False
+    if str(task.failure_type or "").strip() not in CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES:
+        return False
+    if str(task.runner_active_attempt_id or "").strip():
+        return False
+    if int(task.runner_attempts or 0) <= 0 or not task.capability_grants:
+        return False
+    if any(
+        capability_request_requires_parent_resolution(item.status)
+        for item in task.capability_requests
+    ):
+        return False
+    if any(str(item.status or "").strip() == "OPEN" for item in task.capability_gaps):
+        return False
+    task.status = TaskStatus.PENDING.value
+    task.failure_type = ""
+    task.ended_at = 0.0
+    task.progress = min(float(task.progress or 0.0), 0.99)
+    return True
+
+
+# LLM: Capability records are append-only identities. Existing canonical order remains stable and
+# an incoming record replaces only the same id so a concurrent grant/gap is retained exactly once.
+# 函数用途: 按结构化 id 合并能力授权和缺口记录，避免并发写丢账或重复。
+def _merge_records_by_id(existing: list[Any], incoming: list[Any]) -> list[Any]:
+    merged = [copy.deepcopy(item) for item in existing]
+    positions = {
+        str(getattr(item, "id", "") or "").strip(): index
+        for index, item in enumerate(merged)
+        if str(getattr(item, "id", "") or "").strip()
+    }
+    for item in incoming:
+        record_id = str(getattr(item, "id", "") or "").strip()
+        if record_id and record_id in positions:
+            merged[positions[record_id]] = copy.deepcopy(item)
+            continue
+        if record_id:
+            positions[record_id] = len(merged)
+        merged.append(copy.deepcopy(item))
+    return merged
+
+
+# LLM: One capability request may have only one durable grant identity. Canonical records win;
+# a stale or retried writer carrying a different generated grant id for the same request is
+# ignored, while grants for distinct requests remain append-only.
+# 函数用途: 按 request_id 幂等合并授权，避免并发或重试给同一申请生成两份权限账。
+def _merge_capability_grants(
+    existing: list[CapabilityGrant],
+    incoming: list[CapabilityGrant],
+) -> list[CapabilityGrant]:
+    merged = [copy.deepcopy(item) for item in existing]
+    seen = {
+        str(item.request_id or "").strip() or str(item.id or "").strip()
+        for item in merged
+    }
+    for item in incoming:
+        identity = str(item.request_id or "").strip() or str(item.id or "").strip()
+        if identity and identity in seen:
+            continue
+        if identity:
+            seen.add(identity)
+        merged.append(copy.deepcopy(item))
+    return merged
+
+
+# LLM: Request lifecycle is monotonic within the capability domain. Canonical terminal decisions
+# win conflicts; an incoming writer may only advance canonical OPEN to one current terminal state.
+# 函数用途: 合并同一能力申请的状态，确保已授权/缺口/关闭不会被旧 OPEN 状态覆盖。
+def _merge_capability_requests(
+    existing: list[CapabilityRequest],
+    incoming: list[CapabilityRequest],
+) -> list[CapabilityRequest]:
+    merged = [copy.deepcopy(item) for item in existing]
+    positions = {
+        str(item.id or "").strip(): index
+        for index, item in enumerate(merged)
+        if str(item.id or "").strip()
+    }
+    terminal = {"GRANTED", "GAP", "CLOSED"}
+    for item in incoming:
+        request_id = str(item.id or "").strip()
+        if not request_id or request_id not in positions:
+            if request_id:
+                positions[request_id] = len(merged)
+            merged.append(copy.deepcopy(item))
+            continue
+        current = merged[positions[request_id]]
+        current_status = str(current.status or "").strip()
+        incoming_status = str(item.status or "").strip()
+        if current_status in terminal:
+            continue
+        if incoming_status in terminal:
+            merged[positions[request_id]] = copy.deepcopy(item)
+    return merged
+
+
+# LLM: Canonical recovery-closed status is monotonic at the final shared persistence boundary.
+# A caller may explicitly reactivate only an exact structured same-run continuation or lifecycle
+# repair; ordinary stale progress/heartbeat/result snapshots must be replaced by canonical state.
+# 函数用途: 防止已完成、已取消、已放弃或已接管的子代理被旧线程写回运行中，同时让调用者立刻看到真实终态。
+def _restore_newer_closed_state(
+    service: SubAgentPersistenceService,
+    task: SubAgentTask,
+    *,
+    allow_terminal_reactivation: bool,
+) -> bool:
+    if allow_terminal_reactivation:
+        return False
+    try:
+        existing = service.load(task.id)
+    except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        return False
+    existing_status = str(existing.status or "").strip().upper()
+    incoming_status = str(task.status or "").strip().upper()
+    if (
+        existing_status not in SUBAGENT_RECOVERY_CLOSED_STATUSES
+        or incoming_status == existing_status
+    ):
+        return False
+    for item in fields(task):
+        setattr(task, item.name, copy.deepcopy(getattr(existing, item.name)))
+    return True
 
 
 # 函数用途: 读上一份落盘状态的 locked_files(锁变更账本的对比基准;首存返回 None)。

@@ -47,6 +47,15 @@ gateway 文件协议层。放 gateway 路径、JSON 队列 IO、进程状态、p
 
 不允许：CLI 参数解析、chat UI、模型后端实现。
 
+### `conversation/`
+
+通道中立的 owner/thread 会话域。放 transcript、active turn、Compact、任务关联，以及 TUI/Web/IM 共用的
+代理控制和 child 工具审批账本。
+
+允许：会话历史、控制事件、代理详情/插话/停止、审批 request/decision、Compact 辅助模型调用与展示窗口。
+
+不允许：HTTP 文件队列、CLI 控件、子代理 runner 实现、工具 handler 或从自然语言判断生命周期。
+
 ### `delivery/`
 
 外部 IM 统一投递层。放可信 `DeliveryContext`、无收件人的 `ReplyEnvelope`、adapter registry、
@@ -142,11 +151,12 @@ conversation/memory archive 主链。
 3. 它是不是子代理领域规则？放 `subagents/`。
 4. 它是不是工具实现或工具安全边界？放 `tooling/`。
 5. 它是不是 gateway 文件协议？放 `gateway_parts/`。
-6. 它是不是外部 IM 回复、主动消息或附件投递？放 `delivery/`。
-7. 它是不是本地事实源持久化？放 `local_storage/`。
-8. 它是不是记忆存储？放 `memory_store/`。
-9. 它是不是 prompt 上下文构造？放 `prompting_parts/`。
-10. 它是不是配置 schema？放 `settings/`。
-11. 它只是很底层、无业务含义的文件 I/O 原语？放 `io/`。
+6. 它是不是通道中立的 thread/transcript/Compact/代理控制？放 `conversation/`。
+7. 它是不是外部 IM 回复、主动消息或附件投递？放 `delivery/`。
+8. 它是不是本地事实源持久化？放 `local_storage/`。
+9. 它是不是记忆存储？放 `memory_store/`。
+10. 它是不是 prompt 上下文构造？放 `prompting_parts/`。
+11. 它是不是配置 schema？放 `settings/`。
+12. 它只是很底层、无业务含义的文件 I/O 原语？放 `io/`。
 
 如果都不是，先写清楚变化原因，再决定是否需要新目录；不要塞进 `utils/common/shared`。

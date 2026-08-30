@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """LLM: owner 人格三件套只能经 update_persona 修改，所有基础写工具共用本模块判定。
 
-模块用途: 阻止 write/edit/patch/shell 绕过 USER 自主写与 SOUL/AGENTS 用户确认链。
+模块用途: 阻止 write/edit/patch/shell 绕过 USER/AGENTS 自主写入口与 SOUL 用户确认链。
 """
 
 from pathlib import Path
@@ -94,7 +94,7 @@ def _persona_runtime_redirect_error(
     return (
         "SOUL.md、USER.md、AGENTS.md 不能通过基础文件、补丁或 shell 工具修改；"
         "本次没有发生任何变更。请改用 update_persona：USER 画像可由当前 owner 的 Agent 结构化更新；"
-        "SOUL/AGENTS 走用户确认链。工具失败后不得向用户宣称修改成功。"
+        "AGENTS 可由 Agent 自主更新，只有 SOUL 走用户确认链。工具失败后不得向用户宣称修改成功。"
     )
 
 
@@ -116,9 +116,14 @@ def _persona_approval_write_error(target: Path, protected_root: Path | None = No
             "USER.md 是用户画像和偏好的权威文件，不能用基础文件或 shell 直接修改。"
             "请使用 update_persona target=user；该操作可由 Agent 自主完成，不需要用户确认。"
         )
+    if target.name == "AGENTS.md":
+        return (
+            "AGENTS.md 是当前 owner 的长期工作约定，不能用基础文件或 shell 直接修改。"
+            "请使用 update_persona target=agents；该操作可由 Agent 自主完成。"
+        )
     return (
-        f"{target.name} 是需要用户同意的长期设定，不能用基础文件或 shell 直接修改。"
-        "请使用 update_persona 的用户确认链。"
+        "SOUL.md 是需要用户同意的长期性格设定，不能用基础文件或 shell 直接修改。"
+        "请使用 update_persona target=soul 的用户确认链。"
     )
 
 

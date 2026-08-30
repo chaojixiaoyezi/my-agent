@@ -37,6 +37,12 @@ from .io import (
 from .paths import GatewayPaths
 
 _CONTROL_OPERATION_SCHEMA = "gateway_control_operation.v2"
+_CONTROL_INPUT_DIGEST_LEGACY_VERSION = 1
+_CONTROL_INPUT_DIGEST_CURRENT_VERSION = 2
+_CONTROL_INPUT_DIGEST_VERSIONS = {
+    _CONTROL_INPUT_DIGEST_LEGACY_VERSION,
+    _CONTROL_INPUT_DIGEST_CURRENT_VERSION,
+}
 _CONTROL_OPERATION_STATES = {
     "prepared",
     "executing",
@@ -51,6 +57,7 @@ _CONTROL_RESULT_PROJECTION_FIELDS = {
     "request_id",
     "delivery_status",
     "guidance_dedupe_key",
+    "error_code",
     "task_status",
 }
 
@@ -67,9 +74,10 @@ class GatewayControlOperationConflict(ValueError):
     pass
 
 
-# LLM: This file is the sole transport-level fact for one control operation. Command-specific
-# stores remain the effect authority; ``terminal_unknown`` never claims that an effect failed.
-# 类用途: 保存控制命令的固定身份、执行阶段、结果和无法确认的错误事实。
+# LLM: This file is the sole transport-level fact for one control operation. It freezes an exact
+# turn or manual-Compact target when present; command-specific stores remain effect authority and
+# ``terminal_unknown`` never claims that an effect failed.
+# 类用途: 保存控制命令的固定身份、精确目标、执行阶段、结果和无法确认的错误事实。
 @dataclass(frozen=True)
 class GatewayControlOperationReceipt:
     operation_id: str
@@ -87,8 +95,10 @@ class GatewayControlOperationReceipt:
     owner_ref_digest: str
     client_message_id: str
     expected_turn_id: str
+    target_control_message_id: str
     all_user_access: bool
     state: str
+    input_digest_version: int = _CONTROL_INPUT_DIGEST_CURRENT_VERSION
     result: dict[str, Any] = field(default_factory=dict)
     error: dict[str, Any] = field(default_factory=dict)
     updated_at: float = 0.0
@@ -114,8 +124,10 @@ class GatewayControlOperationReceipt:
             "owner_ref_digest": self.owner_ref_digest,
             "client_message_id": self.client_message_id,
             "expected_turn_id": self.expected_turn_id,
+            "target_control_message_id": self.target_control_message_id,
             "all_user_access": self.all_user_access,
             "state": self.state,
+            "input_digest_version": self.input_digest_version,
             "updated_at": self.updated_at,
         }
         if self.result:
@@ -140,6 +152,17 @@ class GatewayControlOperationReceipt:
             raise DataCorruptionError("gateway control operation result is invalid")
         if "error" in data and not isinstance(data.get("error"), dict):
             raise DataCorruptionError("gateway control operation error is invalid")
+        raw_digest_version = data.get("input_digest_version")
+        if raw_digest_version is None:
+            digest_version = 0
+        elif isinstance(raw_digest_version, bool) or not isinstance(
+            raw_digest_version, int
+        ):
+            raise DataCorruptionError("gateway control operation digest version is invalid")
+        elif raw_digest_version not in _CONTROL_INPUT_DIGEST_VERSIONS:
+            raise DataCorruptionError("gateway control operation digest version is unsupported")
+        else:
+            digest_version = raw_digest_version
         receipt = cls(
             operation_id=str(data.get("operation_id") or "").strip(),
             input_digest=str(data.get("input_digest") or "").strip(),
@@ -156,14 +179,22 @@ class GatewayControlOperationReceipt:
             owner_ref_digest=str(data.get("owner_ref_digest") or "").strip(),
             client_message_id=str(data.get("client_message_id") or "").strip(),
             expected_turn_id=str(data.get("expected_turn_id") or "").strip(),
+            target_control_message_id=str(
+                data.get("target_control_message_id") or ""
+            ).strip(),
             all_user_access=bool(data.get("all_user_access", False)),
             state=state,
+            input_digest_version=digest_version,
             result=dict(data.get("result")) if isinstance(data.get("result"), dict) else {},
             error=dict(data.get("error")) if isinstance(data.get("error"), dict) else {},
             updated_at=_control_operation_timestamp(data.get("updated_at")),
         )
-        _validate_control_operation_receipt(receipt)
-        return receipt
+        matched_digest_version = _validate_control_operation_receipt(receipt)
+        return (
+            replace(receipt, input_digest_version=matched_digest_version)
+            if receipt.input_digest_version == 0
+            else receipt
+        )
 
 
 # LLM: Receipt filenames expose neither provider message ids nor conversation names.
@@ -210,17 +241,11 @@ def gateway_control_operation_identity(
     identity = _control_operation_identity_payload(scope, message_id)
     identity_json = _canonical_json(identity)
     operation_id = "gwctl-msg-" + hashlib.sha256(identity_json.encode("utf-8")).hexdigest()[:32]
-    operation_input = {
-        **identity,
-        "command_text": str(command_text or "").strip(),
-        "expected_turn_id": str(scope.metadata.get("expected_turn_id") or "").strip(),
-        "channel_chat_type": str(
-            scope.metadata.get("channel_chat_type") or ""
-        ).strip().lower(),
-        "channel_chat_id": str(scope.metadata.get("channel_chat_id") or "").strip(),
-        "all_user_access": bool(scope.all_user_access),
-    }
-    input_digest = hashlib.sha256(_canonical_json(operation_input).encode("utf-8")).hexdigest()
+    input_digest = _control_operation_input_digest(
+        scope,
+        command_text,
+        version=_CONTROL_INPUT_DIGEST_CURRENT_VERSION,
+    )
     return operation_id, input_digest
 
 
@@ -523,6 +548,9 @@ def _load_or_prepare_control_operation_locked(
         owner_ref_digest=_owner_ref_digest(scope.resolved_owner),
         client_message_id=str(scope.metadata.get("message_id") or "").strip(),
         expected_turn_id=str(scope.metadata.get("expected_turn_id") or "").strip(),
+        target_control_message_id=str(
+            scope.metadata.get("target_control_message_id") or ""
+        ).strip(),
         all_user_access=bool(scope.all_user_access),
         state="prepared",
         updated_at=time.time(),
@@ -543,6 +571,7 @@ def _receipt_scope(receipt: GatewayControlOperationReceipt) -> GatewayControlSco
         metadata={
             "message_id": receipt.client_message_id,
             "expected_turn_id": receipt.expected_turn_id,
+            "target_control_message_id": receipt.target_control_message_id,
             "channel_chat_type": receipt.channel_chat_type,
             "channel_chat_id": receipt.channel_chat_id,
         },
@@ -551,10 +580,11 @@ def _receipt_scope(receipt: GatewayControlOperationReceipt) -> GatewayControlSco
     )
 
 
-# LLM: Every read recomputes the same id/digest used at prepare time and enforces state/result
-# invariants so a modified JSON file cannot become an authoritative replay.
-# 函数用途: 检查控制回执的身份、摘要、时间和终态字段是否自洽。
-def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt) -> None:
+# LLM: Every read recomputes the versioned id/digest used at prepare time and enforces state/result
+# invariants. Rows written before exact Compact targets existed may use legacy digest v1 only when
+# the target remains empty; field expansion can never weaken tamper detection.
+# 函数用途: 检查控制回执身份、版本化摘要、时间和终态字段，并返回匹配的摘要版本。
+def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt) -> int:
     if not all(
         (
             receipt.operation_id,
@@ -573,11 +603,33 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
     ):
         raise DataCorruptionError("gateway control operation identity is incomplete")
     scope = _receipt_scope(receipt)
-    expected_id, expected_digest = gateway_control_operation_identity(
-        scope,
-        receipt.command_text,
+    identity = _control_operation_identity_payload(scope, receipt.client_message_id)
+    expected_id = "gwctl-msg-" + hashlib.sha256(
+        _canonical_json(identity).encode("utf-8")
+    ).hexdigest()[:32]
+    candidate_versions = (
+        (receipt.input_digest_version,)
+        if receipt.input_digest_version in _CONTROL_INPUT_DIGEST_VERSIONS
+        else (
+            _CONTROL_INPUT_DIGEST_CURRENT_VERSION,
+            _CONTROL_INPUT_DIGEST_LEGACY_VERSION,
+        )
     )
-    if receipt.operation_id != expected_id or receipt.input_digest != expected_digest:
+    matched_digest_version = 0
+    for version in candidate_versions:
+        if (
+            version == _CONTROL_INPUT_DIGEST_LEGACY_VERSION
+            and receipt.target_control_message_id
+        ):
+            continue
+        if receipt.input_digest == _control_operation_input_digest(
+            scope,
+            receipt.command_text,
+            version=version,
+        ):
+            matched_digest_version = version
+            break
+    if receipt.operation_id != expected_id or matched_digest_version == 0:
         raise DataCorruptionError("gateway control operation digest conflicts with its content")
     owner = _receipt_owner_identity(receipt)
     if receipt.owner_ref_digest != _owner_ref_digest(owner):
@@ -595,6 +647,7 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
         raise DataCorruptionError("unknown gateway control operation is invalid")
     if not math.isfinite(receipt.updated_at) or receipt.updated_at < 0:
         raise DataCorruptionError("gateway control operation timestamp is invalid")
+    return matched_digest_version
 
 
 # LLM: Result dictionaries remain an effect-service projection, but identity and delivery fields
@@ -608,7 +661,7 @@ def _validate_control_operation_result(receipt: GatewayControlOperationReceipt) 
         raise DataCorruptionError("gateway control operation result ok is invalid")
     if not isinstance(result.get("message"), str):
         raise DataCorruptionError("gateway control operation result message is invalid")
-    for key in ("request_id", "guidance_dedupe_key"):
+    for key in ("request_id", "guidance_dedupe_key", "error_code"):
         if key in result and not isinstance(result.get(key), str):
             raise DataCorruptionError(f"gateway control operation result {key} is invalid")
     delivery_status = result.get("delivery_status", "")
@@ -635,6 +688,35 @@ def _control_operation_identity_payload(
         "conversation_id": str(scope.conversation_id or "").strip(),
         "message_id": str(message_id or "").strip(),
     }
+
+
+# LLM: Digest versions freeze exact signed fields. Version 1 predates manual-Compact target
+# identity; version 2 signs that target. Never silently add fields to an existing version again.
+# 函数用途: 按指定合同版本计算控制输入摘要，保证升级后仍能读旧账且新字段不能被篡改。
+def _control_operation_input_digest(
+    scope: GatewayControlScope,
+    command_text: str,
+    *,
+    version: int,
+) -> str:
+    if version not in _CONTROL_INPUT_DIGEST_VERSIONS:
+        raise ValueError("gateway control operation digest version is unsupported")
+    message_id = str(scope.metadata.get("message_id") or "").strip()
+    operation_input: dict[str, object] = {
+        **_control_operation_identity_payload(scope, message_id),
+        "command_text": str(command_text or "").strip(),
+        "expected_turn_id": str(scope.metadata.get("expected_turn_id") or "").strip(),
+        "channel_chat_type": str(
+            scope.metadata.get("channel_chat_type") or ""
+        ).strip().lower(),
+        "channel_chat_id": str(scope.metadata.get("channel_chat_id") or "").strip(),
+        "all_user_access": bool(scope.all_user_access),
+    }
+    if version >= _CONTROL_INPUT_DIGEST_CURRENT_VERSION:
+        operation_input["target_control_message_id"] = str(
+            scope.metadata.get("target_control_message_id") or ""
+        ).strip()
+    return hashlib.sha256(_canonical_json(operation_input).encode("utf-8")).hexdigest()
 
 
 # LLM: Owner refs use a separate integrity digest so authenticated client input can be replayed

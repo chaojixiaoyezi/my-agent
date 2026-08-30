@@ -9,7 +9,7 @@ from pathlib import Path
 def _write_config(tmp_path: Path, home: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
-        f'workspace_root: "{tmp_path / "workspace"}"\n'
+        'workspace_root: ""\n'
         f'my_agent_home: "{home}"\n'
         'model_backend: "echo"\n'
         'prompt_files: []\n',
@@ -308,6 +308,14 @@ def test_home_index_rebuild_recreates_task_run_and_agent_refs(tmp_path: Path) ->
     assert [ref["task_id"] for ref in latest_task_refs(home, owner_id=home.owner_id)] == ["task-rebuild"]
     assert [ref["run_id"] for ref in latest_run_refs(home, owner_id=home.owner_id)] == ["run-rebuild"]
     assert [ref["agent_id"] for ref in latest_agent_refs(home, owner_id=home.owner_id)] == ["agent-rebuild"]
+    assert len(home.global_index_active_tasks_jsonl.read_text(encoding="utf-8").splitlines()) == 1
+
+    home.global_index_active_tasks_jsonl.write_text(
+        home.global_index_active_tasks_jsonl.read_text(encoding="utf-8") * 20,
+        encoding="utf-8",
+    )
+    rebuild_home_indexes(home, apply=True)
+    assert len(home.global_index_active_tasks_jsonl.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_home_index_rebuild_reports_corrupt_task_state(tmp_path: Path) -> None:

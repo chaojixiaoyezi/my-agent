@@ -563,27 +563,6 @@
       "name": "test_subagent_save_with_child_root_id_keeps_parent_workspace_identity"
     },
     {
-      "identity": "function:agent_py_agent/tests/test_target_coverage_ledger.py:test_directory_tree_coverage_requires_candidate_ratio",
-      "severity": "high-risk",
-      "kind": "function",
-      "path": "agent_py_agent/tests/test_target_coverage_ledger.py",
-      "name": "test_directory_tree_coverage_requires_candidate_ratio"
-    },
-    {
-      "identity": "function:agent_py_agent/tests/test_target_coverage_ledger.py:test_full_source_read_window_is_not_deduped_by_later_search_text",
-      "severity": "high-risk",
-      "kind": "function",
-      "path": "agent_py_agent/tests/test_target_coverage_ledger.py",
-      "name": "test_full_source_read_window_is_not_deduped_by_later_search_text"
-    },
-    {
-      "identity": "function:agent_py_agent/tests/test_target_coverage_ledger.py:test_target_coverage_requires_read_files_under_source_directory",
-      "severity": "soft",
-      "kind": "function",
-      "path": "agent_py_agent/tests/test_target_coverage_ledger.py",
-      "name": "test_target_coverage_requires_read_files_under_source_directory"
-    },
-    {
       "identity": "function:agent_py_agent/tests/test_tool_context_ptl_retry.py:test_tool_loop_falls_back_to_compact_when_disabled",
       "severity": "high-risk",
       "kind": "function",

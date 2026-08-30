@@ -107,6 +107,7 @@ memory_top_k: 5
 # - max_input_chars: 单批模型输入字符上限；长工具输出只传预览和引用。
 # - timeout_seconds: 单次后台模型调用超时秒数。
 # - max_retries: Schema、超时或模型错误后的有界重试次数；失败不推进游标。
+# - workers: 记忆策展独立后台车道的全局并发数；超出的 owner 保留在登记表，下一拍继续，不抢主会话线程。
 # - daily_finalize_hour: owner 当地时间每天收尾小时，取值 0-23。
 # - auto_promotion_policy: 自动晋升机器策略版本；conservative_v1 只允许精确证据、无冲突的新长期事实。
 # - lesson_min_occurrences: 普通教训晋升所需最少独立观察次数，默认 2。
@@ -120,6 +121,7 @@ memory_curator_batch_message_limit: 80
 memory_curator_max_input_chars: 40000
 memory_curator_timeout_seconds: 90
 memory_curator_max_retries: 1
+memory_curator_workers: 2
 memory_curator_daily_finalize_hour: 23
 memory_curator_auto_promotion_policy: "conservative_v1"
 memory_lesson_min_occurrences: 2
@@ -650,6 +652,8 @@ stream_enabled: true
 #   unknown_command_budget(200 次/10 分钟)、compact 防抖负责有界保护。
 # - 显式正数仍可限制,显式 0 才是真正不限制;单任务临时覆盖由任务属性显式传入。
 max_tool_rounds:
+# 单次并发执行批次的工具数量；空值=不额外限制，正数=分批削峰，0=不限制。
+# 这个值不截断模型已经提交的调用；同一工具轮会分批全部执行后再采样模型。
 max_tool_calls_per_round:
 # 单轮内并行执行工具的数量上限（EXEC-01，默认 8）：
 # - 空值=用代码默认 8（对齐 工具运行时/会话运行时 常见并行度，防一次性工具过多烧上下文）。
@@ -659,10 +663,6 @@ max_parallel_tool_calls:
 # 协议违规的修复机会次数（默认 2 = 3 次尝试后才 break）。模型输出格式偶发抖动
 # （工具调用混进正文/代码块）时，多给两次机会能显著提高长任务成活率。
 max_protocol_repairs: 2
-# 模型准备自然收尾但自己维护的 task_progress 仍有开放项时，在同一个 active turn
-# 返给模型核对的次数。默认 1；0=关闭。只核对 exact id/status，不扫描代码、测试或产物，
-# 也不会另起后台续跑任务。
-task_progress_closeout_repair_attempts: 1
 tool_agent_budget_window_seconds:
 tool_agent_budget_max_calls:
 

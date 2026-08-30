@@ -128,7 +128,8 @@ def _assert_core_context_bundle(bundle, task) -> None:
     assert bundle.goal == "实现流程状态结算页"
     assert bundle.plan == ["读取现有项目", "实现结算页", "写测试"]
     assert bundle.constraints["forbidden_write_roots"] == ["/System"]
-    assert bundle.permissions["allowed_tools"] == ["read_file", "write_file"]
+    # allowed_tools 是持久能力账本：普通 worker 的基础工具不会被旧快照缩掉。
+    assert {"read_file", "write_file"}.issubset(bundle.permissions["allowed_tools"])
 
 
 def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
@@ -145,7 +146,9 @@ def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert bundle.task_packet["schema_version"] == "subagent_task_packet.v1"
     assert bundle.task_packet["run_id"] == task.id
     assert bundle.task_packet["role"] == "worker"
-    assert bundle.task_packet["tool_contract"]["allowed_tools"] == ["read_file", "write_file"]
+    assert bundle.task_packet["tool_contract"]["allowed_tools"] == bundle.permissions[
+        "allowed_tools"
+    ]
     write_roots = bundle.task_packet["write_contract"]["allowed_write_roots"]
     assert write_roots[:2] == [bundle.workspace_refs["task_root"], bundle.workspace_refs["agent_work_dir"]]
     assert str(tmp_path / task.id / "artifacts") not in write_roots

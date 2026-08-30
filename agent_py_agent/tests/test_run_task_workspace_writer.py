@@ -1,6 +1,37 @@
 from __future__ import annotations
 
 
+def test_tool_output_archive_root_stays_fixed_when_turn_is_promoted(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        TOOL_OUTPUT_ARCHIVE_ROOT_ATTR,
+        current_run_tool_output_archive_root,
+    )
+
+    owner = tmp_path / "owners" / "local" / "main"
+    task = owner / "tasks" / "2026-08-29" / "demo"
+    attrs: dict[str, object] = {}
+    agent = SimpleNamespace(
+        root=owner,
+        home_paths=SimpleNamespace(owner_home_dir=owner),
+        subagents=None,
+    )
+    params = SimpleNamespace(task_attributes=attrs, context_scope="default", run_id="run-a")
+
+    first = current_run_tool_output_archive_root(agent, params)
+    attrs["run_workspace"] = {
+        "task_root": str(task),
+        "output_dir": str(task / "output"),
+        "work_dir": str(task / "work"),
+    }
+    second = current_run_tool_output_archive_root(agent, params)
+
+    assert first == owner.resolve(strict=False)
+    assert second == first
+    assert attrs[TOOL_OUTPUT_ARCHIVE_ROOT_ATTR] == str(first)
+
+
 def test_optional_llm_task_title_uses_short_json_and_sanitizes() -> None:
     from types import SimpleNamespace
 
@@ -409,6 +440,8 @@ def test_attach_run_task_workspace_context_preserves_user_requested_output_root(
 
 
 def test_attach_run_task_workspace_context_resolves_relative_user_output_root_to_project(tmp_path):
+    from pathlib import Path
+
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
         attach_run_task_workspace_context,
     )
@@ -440,8 +473,9 @@ def test_attach_run_task_workspace_context_resolves_relative_user_output_root_to
 
     workspace = updated.task_attributes["run_workspace"]
     artifact = updated.delivery_contract["artifacts"][0]
-    expected_root = str((repo / "lab_outputs" / "compact-stress").resolve(strict=False))
-    expected_report = str((repo / "lab_outputs" / "compact-stress" / "report.md").resolve(strict=False))
+    owner_home = Path(agent.home_paths.owner_home_dir)
+    expected_root = str((owner_home / "lab_outputs" / "compact-stress").resolve(strict=False))
+    expected_report = str((owner_home / "lab_outputs" / "compact-stress" / "report.md").resolve(strict=False))
     assert artifact["preferred_path"] == expected_report
     assert artifact["allowed_output_roots"] == [expected_root]
     assert workspace["output_dir"] != expected_root

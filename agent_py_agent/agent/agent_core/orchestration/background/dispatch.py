@@ -175,16 +175,24 @@ def _use_inprocess_autostart(agent) -> bool:
     config = getattr(agent, "config", None)
     if str(getattr(config, "model_backend", "") or "").strip() == "echo":
         return True
-    # 隔离 owner(飞书等 per-用户 scoped owner)真飞书多用户实锤:auto-start 子进程命令只带
-    # --config/--workspace-root、不带 owner 身份,子进程重新解析 config 丢成默认 base owner
-    # (local/main)→ 跑错 owner home、找不到这批 run_id → 不派 runner → 子代理永卡"创建工单"。
-    # 这类 owner 改走进程内线程派工:用进程内已是正确 owner 的 scoped agent(owner 不跨进程边界),
+    # 隔离 owner（飞书以及本机 local/user thin TUI）真机实锤：auto-start 子进程命令只带
+    # 基础 --config/--workspace-root，不带本次请求冻结的 owner 身份；子进程会重新解析成
+    # local/main，跑错 owner home、找不到这批 run_id，子代理因此永久卡在“排队中”。
+    # 不能只按 provider 判断，因为 local 同时包含 local/main 与 local/user。这里复用唯一
+    # OwnerIdentity 解析，所有非 local/main owner 都改走进程内线程派工：用进程内已经正确
+    # scoped 的 agent（owner 不跨进程边界），
     # 线程在常驻 Gateway 进程里自然活得过单条请求。线程必须是 daemon：任务、attempt 和
     # 租约都已持久化并有旧进程 fencing，Gateway 重启后由统一恢复接管；反而让一个卡住的
-    # provider 调用作为 non-daemon 阻塞进程退出，会让服务无法完成安全重启。base owner
-    # (provider 空/local)仍走 durable 子进程,行为不变。
-    provider = str(getattr(config, "my_agent_owner_provider", "") or "").strip().lower()
-    return bool(provider) and provider != "local"
+    # provider 调用作为 non-daemon 阻塞进程退出，会让服务无法完成安全重启。只有精确
+    # local/main 仍走 durable 子进程，行为不变。
+    raw_provider = str(getattr(config, "my_agent_owner_provider", "") or "").strip()
+    if not raw_provider:
+        return False
+
+    from ....user_space.owner_resolver import owner_identity_from_config
+
+    owner = owner_identity_from_config(config)
+    return not (owner.provider == "local" and owner.owner_kind == "main")
 
 
 def _captured_backend_override(agent) -> object | None:

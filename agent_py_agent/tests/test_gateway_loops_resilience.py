@@ -172,7 +172,10 @@ def _curator_supervisor(*, base_calls, scoped_calls, running=()) -> object:
     from agent_py_agent.cli import gateway_loops
 
     base_agent = SimpleNamespace(
-        config=SimpleNamespace(owner_maintenance_scan_interval_seconds=60),
+        config=SimpleNamespace(
+            owner_maintenance_scan_interval_seconds=60,
+            memory_curator_workers=2,
+        ),
         memory_curator=SimpleNamespace(run_if_due=lambda: base_calls.append(1)),
         owner_id="local",
     )
@@ -180,17 +183,21 @@ def _curator_supervisor(*, base_calls, scoped_calls, running=()) -> object:
         memory_curator=SimpleNamespace(run_if_due=lambda: scoped_calls.append(1)),
         owner_id="owner-a",
     )
-    pool = SimpleNamespace(active_agents=lambda: [scoped_agent])
+    pool = SimpleNamespace(
+        hard_agents=lambda: [scoped_agent],
+        evict_soft_agent_id=lambda _agent_id: False,
+    )
 
     supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
     supervisor._base_agent = base_agent
     supervisor._owner_pool = pool
+    supervisor._registry = SimpleNamespace(soft_snapshot=lambda: [])
     supervisor._curator_inflight = {}
     supervisor._next_curator_run_at = 0.0
     supervisor._curator_quota_count = 0
     supervisor._curator_quota_date = ""
     supervisor._curator_quota_path = None
-    supervisor._get_executor = lambda: SimpleNamespace(
+    supervisor._get_curator_executor = lambda: SimpleNamespace(
         submit=lambda fn, *args: _ImmediateFuture(fn, args)
     )
     supervisor._curator_inflight.update({id(agent): _RunningFuture() for agent in running})
@@ -237,12 +244,166 @@ def test_background_main_supervisor_curator_dedupes_and_isolates_failures(monkey
     assert base_calls == [1] and scoped_calls == [1]  # base 被唤醒,scoped 仍在跑被跳过
 
 
+def test_memory_curator_uses_separate_bounded_lane() -> None:
+    from agent_py_agent.cli import gateway_loops
+
+    agents = [
+        SimpleNamespace(
+            memory_curator=SimpleNamespace(run_if_due=lambda: None),
+            owner_id=f"owner-{index}",
+        )
+        for index in range(4)
+    ]
+    base_agent = SimpleNamespace(
+        config=SimpleNamespace(
+            owner_maintenance_scan_interval_seconds=60,
+            memory_curator_workers=2,
+        ),
+        memory_curator=SimpleNamespace(run_if_due=lambda: None),
+        owner_id="base",
+    )
+    submitted: list[str] = []
+
+    class _CapturingExecutor:
+        def submit(self, _fn, agent, _label):
+            submitted.append(agent.owner_id)
+            return _RunningFuture()
+
+    supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._base_agent = base_agent
+    supervisor._owner_pool = SimpleNamespace(
+        hard_agents=lambda: agents,
+        evict_soft_agent_id=lambda _agent_id: False,
+    )
+    supervisor._registry = SimpleNamespace(soft_snapshot=lambda: [])
+    supervisor._curator_inflight = {}
+    supervisor._next_curator_run_at = 0.0
+    supervisor._curator_quota_count = 0
+    supervisor._curator_quota_date = ""
+    supervisor._curator_quota_path = None
+    supervisor._get_curator_executor = lambda: _CapturingExecutor()
+    supervisor._get_executor = lambda: (_ for _ in ()).throw(
+        AssertionError("curator must not consume the conversation executor")
+    )
+
+    supervisor._run_due_curators()
+
+    assert submitted == ["base", "owner-0"]
+    assert len(supervisor._curator_inflight) == 2
+
+
+def test_scheduler_sync_does_not_materialize_curator_only_owners() -> None:
+    """纯记忆 owner 只保留轻量身份，不能在 scheduler 同步时批量构建完整 Agent。"""
+    from agent_py_agent.cli import gateway_loops
+
+    soft_owner = SimpleNamespace(provider="test", owner_kind="user", owner_id="soft-1")
+    built: list[str] = []
+    pool = SimpleNamespace(
+        get=lambda owner, **_kwargs: built.append(owner.owner_id),
+        hard_agents=lambda: [],
+    )
+    supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._registry = SimpleNamespace(
+        snapshot=lambda: [soft_owner],
+        hard_snapshot=lambda: [],
+        soft_snapshot=lambda: [soft_owner],
+    )
+    supervisor._owner_pool = pool
+    supervisor._owner_schedulers = {}
+    supervisor._channels = SimpleNamespace()
+
+    supervisor._sync_owner_schedulers()
+
+    assert built == []
+    assert supervisor._owner_schedulers == {}
+
+
+def test_curator_soft_owner_materialization_is_worker_bounded_and_rotates() -> None:
+    """软 owner 只按空闲工位构建，完成后释放，并从下一位继续轮转。"""
+    from agent_py_agent.cli import gateway_loops
+
+    owners = [
+        SimpleNamespace(provider="test", owner_kind="user", owner_id=f"soft-{index}")
+        for index in range(5)
+    ]
+    built: list[str] = []
+    soft_agents: dict[str, object] = {}
+
+    def _get(owner, *, hard=False):
+        assert hard is False
+        agent = SimpleNamespace(
+            memory_curator=SimpleNamespace(run_if_due=lambda: None),
+            owner_id=owner.owner_id,
+        )
+        built.append(owner.owner_id)
+        soft_agents[owner.owner_id] = agent
+        return agent
+
+    def _evict(agent_id):
+        for owner_id, agent in list(soft_agents.items()):
+            if id(agent) == agent_id:
+                soft_agents.pop(owner_id)
+                return True
+        return False
+
+    submitted: list[str] = []
+
+    class _CapturingExecutor:
+        def submit(self, _fn, agent, _label):
+            submitted.append(agent.owner_id)
+            return _RunningFuture()
+
+    base_agent = SimpleNamespace(
+        config=SimpleNamespace(
+            owner_maintenance_scan_interval_seconds=60,
+            memory_curator_workers=2,
+        ),
+        memory_curator=SimpleNamespace(run_if_due=lambda: None),
+        owner_id="base",
+    )
+    supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._base_agent = base_agent
+    supervisor._owner_pool = SimpleNamespace(
+        get=_get,
+        hard_agents=lambda: [],
+        evict_soft_agent_id=_evict,
+    )
+    supervisor._registry = SimpleNamespace(soft_snapshot=lambda: owners)
+    supervisor._curator_inflight = {}
+    supervisor._curator_soft_agent_ids = set()
+    supervisor._curator_candidate_cursor = 0
+    supervisor._next_curator_run_at = 0.0
+    supervisor._curator_quota_count = 0
+    supervisor._curator_quota_date = ""
+    supervisor._curator_quota_path = None
+    supervisor._get_curator_executor = lambda: _CapturingExecutor()
+
+    supervisor._run_due_curators()
+
+    assert submitted == ["base", "soft-0"]
+    assert built == ["soft-0"]
+    assert list(soft_agents) == ["soft-0"]
+
+    for key in list(supervisor._curator_inflight):
+        supervisor._curator_inflight[key] = _ImmediateFuture(lambda: None, ())
+    supervisor._next_curator_run_at = 0.0
+    supervisor._run_due_curators()
+
+    assert "soft-0" not in soft_agents
+    assert submitted[-2:] == ["soft-1", "soft-2"]
+    assert built == ["soft-0", "soft-1", "soft-2"]
+    assert len(soft_agents) == 2
+
+
 def _quota_supervisor(tmp_path, *, base_calls, scoped_calls):
     """构造配额可注入的 supervisor:base 常规车道、scoped 紧急车道(pending reason)。"""
     from agent_py_agent.cli import gateway_loops
 
     base_agent = SimpleNamespace(
-        config=SimpleNamespace(owner_maintenance_scan_interval_seconds=60),
+        config=SimpleNamespace(
+            owner_maintenance_scan_interval_seconds=60,
+            memory_curator_workers=2,
+        ),
         memory_curator=SimpleNamespace(run_if_due=lambda: base_calls.append(1)),
         owner_id="local",
         home_paths=SimpleNamespace(owner_home_dir=""),
@@ -259,17 +420,21 @@ def _quota_supervisor(tmp_path, *, base_calls, scoped_calls):
         owner_id="owner-a",
         home_paths=SimpleNamespace(owner_home_dir=str(scoped_home)),
     )
-    pool = SimpleNamespace(active_agents=lambda: [scoped_agent])
+    pool = SimpleNamespace(
+        hard_agents=lambda: [scoped_agent],
+        evict_soft_agent_id=lambda _agent_id: False,
+    )
 
     supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
     supervisor._base_agent = base_agent
     supervisor._owner_pool = pool
+    supervisor._registry = SimpleNamespace(soft_snapshot=lambda: [])
     supervisor._curator_inflight = {}
     supervisor._next_curator_run_at = 0.0
     supervisor._curator_quota_count = 0
     supervisor._curator_quota_date = ""
     supervisor._curator_quota_path = None
-    supervisor._get_executor = lambda: SimpleNamespace(
+    supervisor._get_curator_executor = lambda: SimpleNamespace(
         submit=lambda fn, *args: _ImmediateFuture(fn, args)
     )
     return supervisor, base_agent, scoped_agent

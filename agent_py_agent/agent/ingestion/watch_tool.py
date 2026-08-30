@@ -159,9 +159,10 @@ def _action_parameter_error(action: str, params: dict[str, Any]) -> str:
     return f"action={action} 不接受这些参数：{rendered}；请只提交该 action 的参数"
 
 
+# LLM: This class is the thin model-tool facade; durable queue, verdict, transport, and rendering
+# algorithms live in module helpers so action routing cannot accumulate a second state machine.
+# 类用途: 把摄取层的盯守动作暴露给模型；每路数据流的游标和状态按 owner 持久化并可重启续接。
 class WatchStreamTool(BaseTool):
-    # 类用途: 把摄取层(结构化预聚合/初筛/背压)暴露成模型工具;每路数据流一个 watch,
-    #   游标+引擎状态跨轮持久(进程内注册表+owner 盘上快照),重启从游标续。
     def __init__(self, agent: object) -> None:
         self.agent = agent
         surfaces = (
@@ -225,6 +226,28 @@ class WatchStreamTool(BaseTool):
         """The role-specific schema narrows actions; the read surface stays usable."""
 
         return ToolAvailability.ready()
+
+    # LLM: watch 的公开 schema 因 provider 兼容保持扁平；这里仅补 action 条件形状，
+    # 必须在 operation claim 前纯校验，不能读取/修改 watch 状态或执行任何来源请求。
+    # 函数用途: 提前指出某个 action 多传了别的动作参数，或 configure 没给配置内容。
+    def validate_invocation(self, params, context) -> ToolHandlerOutcome | None:
+        _ = context
+        action = str(params.get("action") or "").strip().lower()
+        parameter_error = _action_parameter_error(action, params)
+        if parameter_error:
+            return _err(
+                parameter_error,
+                "TOOL_INVALID_ARGUMENTS",
+                reported_code="TOOL_ACTION_PARAMETER_MISMATCH",
+            )
+        if action == "configure" and params.get("spec") is None and params.get(
+            "judgment_note"
+        ) is None:
+            return _err(
+                "configure 至少给 spec 或 judgment_note 之一",
+                "TOOL_PARAMETER_REQUIRED",
+            )
+        return None
 
     def effective_resource_scopes(
         self,
@@ -387,113 +410,12 @@ class WatchStreamTool(BaseTool):
             if harvested is not None:
                 return harvested
         with state.lock:
-            return self._pull_locked(state, max_wait)
-
-    def _pull_locked(self, state: WatchState, max_wait: float) -> ToolHandlerOutcome:
-        deadline = time.time() + max_wait
-        aggregate = {"seen": 0, "pages": 0, "waited_rounds": 0}
-        while True:
-            digest = self._drain_and_digest(state, aggregate)
-            if digest is None:
-                return _source_error_result(state)
-            if digest.candidates or time.time() >= deadline:
-                break
-            aggregate["waited_rounds"] += 1
-            time.sleep(min(state.tuning.poll_interval_seconds, max(0.1, deadline - time.time())))
-        extras = {"seen_this_call": aggregate["seen"], "pages_this_call": aggregate["pages"]}
-        return _ok_payload(render_pull_payload(state, digest, extras))
-
-    def _drain_and_digest(self, state: WatchState, aggregate: dict[str, int]):
-        from .sources import (
-            apply_cursor_page_feedback,
-            drain_watch_source,
-            persist_file_fragment,
-        )
-        from .watch_feedback import consume_feedback_inbox
-
-        # inline 模式引擎属主在 pull 侧:同样先消费反馈收件箱(与 harvester 拍同语义)。
-        consume_feedback_inbox(state, time.time())
-        # content_mode(冷启动/passthrough 全量直通)inline 回落路一次 process 整批不分片——
-        # 不钳会把整条存量一次抬给模型(与 harvester 记录尺寸同一把尺,防单 pull 洪泛
-        # rubber-stamp)。判据与 harvester.is_content_mode 一致(直通关时走结构化降维、不钳)。
-        from .harvester import content_batch_size, is_content_mode
-
-        max_events = state.tuning.max_events_per_pull
-        if is_content_mode(state):
-            max_events = min(max_events, content_batch_size(state.tuning))
-        budget = DrainBudget(
-            max_events=max_events,
-            page_limit=state.tuning.page_limit,
-            deadline=time.time() + _HTTP_TIMEOUT_SECONDS,
-        )
-        drain = drain_watch_source(state, self._fetch_json, budget)
-        apply_cursor_page_feedback(state, drain)
-        if not drain.error and not persist_file_fragment(state, drain):
-            drain.error = "未完成记录片段无法持久化，未推进游标"
-            drain.error_code = "SOURCE_FRAGMENT_PERSIST_FAILED"
-        state.totals["pulls"] += 1
-        if drain.error:
-            state.totals["http_errors"] += 1
-            state.last_error = drain.error
-            state.last_error_code = drain.error_code or "NETWORK_REQUEST_FAILED"
-            persist_state(state)
-            return None
-        _absorb_drain(state, drain, aggregate)
-        # 冷启动直通与 harvester 路同契约:本源还没 configure 出 spec 时判据没学出来,存量
-        # 不能靠结构规则筛(根因2)——inline 回落路(harvester 起不来时)也必须整批 full_read,
-        # 否则回落一次就把存量要紧事筛掉。configure 后转 spec 驱动(passthrough 自带无条件直通)。
-        cold_start = state.source_spec is None
-        digest = state.engine.process(drain.events, time.time(), cold_start=cold_start)
-        persist_state(state)
-        audit_append(state, build_audit_record(drain, digest))
-        return digest
+            return _pull_locked(self, state, max_wait)
 
     def _verdict(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
-        """/audit 保证档的逐条结论签收:判读工把手里批的逐条结论交回来销账(ack-on-judge)。
-        非保证档调用如实拒绝(那条路是 ack-on-next-pull,没有欠账可销)。"""
-        state = _state_for(self, owner_home, params)
-        if isinstance(state, ToolHandlerOutcome):
-            return state
-        if not state.audit_guarantee:
-            return _err(
-                "本路不是 /audit 保证档:结论签收仅保证档适用(非保证档下一次 pull 即确认)",
-                "TOOL_INVALID_ARGUMENTS",
-            )
-        request = _verdict_tool_request(params)
-        if isinstance(request, ToolHandlerOutcome):
-            return request
-        # Initial settlement and later review are the same source-worker
-        # authority surface.  A replaced/stale attempt may inspect history but
-        # must never append a newer projection after its lease has been fenced.
-        source_authority, authorization_error = _source_worker_authority(
-            self.agent,
-            state,
-        )
-        if authorization_error is not None:
-            return authorization_error
-        run_id = self._current_run_id()
-        bound = _bound_runtime_verdicts(self, state, request, run_id)
-        if isinstance(bound, ToolHandlerOutcome):
-            return bound
-        verdicts, output_observation = bound
-        from .harvester import submit_verdicts
-
-        result = submit_verdicts(
-            state,
-            consumer=run_id,
-            verdicts=verdicts,
-            delivery_ref=request.delivery_ref or None,
-            source_authority=source_authority,
-            **output_observation,
-        )
-        return _render_verdict_tool_result(
-            self,
-            state,
-            request,
-            verdicts,
-            result,
-            run_id=run_id,
-        )
+        # LLM: This facade delegates to the one verdict settlement implementation below.
+        # 函数用途: 将 Audit 批次逐条结论交给持久签收逻辑处理。
+        return _execute_watch_verdict(self, owner_home, params)
 
     def _status(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
         state = _state_for(self, owner_home, params)
@@ -504,52 +426,9 @@ class WatchStreamTool(BaseTool):
         return _ok_payload(_status_payload(state, agent=self.agent))
 
     def _inspect(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
-        """按 ack_id 只读找回 /audit 原始日志和逐条结论，不推进游标、不改变任务状态。"""
-        inspect_params = dict(params)
-        source_ref = str(inspect_params.get("source_ref") or "").strip()
-        if source_ref:
-            matched = _AUDIT_SOURCE_REF_RE.fullmatch(source_ref)
-            if matched is None:
-                return _err(
-                    "inspect 的 source_ref 不是有效 Audit 记录引用",
-                    "TOOL_INVALID_ARGUMENTS",
-                )
-            ref_watch_id = matched.group("watch_id")
-            ref_ack_id = matched.group("ack_id")
-            explicit_watch_id = str(inspect_params.get("watch_id") or "").strip()
-            explicit_ack_id = str(inspect_params.get("ack_id") or "").strip()
-            if (
-                explicit_watch_id
-                and explicit_watch_id != ref_watch_id
-                or explicit_ack_id
-                and explicit_ack_id != ref_ack_id
-            ):
-                return _err(
-                    "inspect 的 source_ref 与显式 watch_id/ack_id 不一致",
-                    "TOOL_INVALID_ARGUMENTS",
-                    reported_code="AUDIT_SOURCE_REF_MISMATCH",
-                )
-            inspect_params["watch_id"] = ref_watch_id
-            inspect_params["ack_id"] = ref_ack_id
-        state = _state_for(self, owner_home, inspect_params)
-        if isinstance(state, ToolHandlerOutcome):
-            return state
-        if not state.audit_guarantee:
-            return _err(
-                "本路不是 /audit 保证档，没有逐条审计账可查",
-                "TOOL_INVALID_ARGUMENTS",
-            )
-        ack_id = str(inspect_params.get("ack_id") or "").strip()
-        if not ack_id:
-            return _err("inspect 缺 ack_id", "TOOL_PARAMETER_REQUIRED")
-        from .harvester import inspect_audit_record
-
-        payload = inspect_audit_record(state, ack_id)
-        return (
-            _ok_payload({"action": "inspect", **payload})
-            if payload.get("ok")
-            else _err(str(payload.get("error") or "审计记录不存在"), "TOOL_INVALID_ARGUMENTS")
-        )
+        # LLM: Inspection is read-only and stays separate from verdict settlement or cursor moves.
+        # 函数用途: 按记录引用读取 Audit 原始记录和既有结论。
+        return _inspect_watch_record(self, owner_home, params)
 
     def _close(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
         state = _state_for(self, owner_home, params)
@@ -594,24 +473,9 @@ class WatchStreamTool(BaseTool):
         )
 
     def _harvester_fetch(self):
-        """收割线程用的 fetch:把【当下在场的出站授权】钉进闭包。
-
-        allowed_private_hosts 由调用层每次工具调用临时热注入、调用返回即还原为空——
-        收割线程跨调用长命,若直接用绑定方法,调用窗口之外的拉流全被出站闸拦
-        (真机实锤:六路各 58~116 个 NETWORK_PRIVATE_HOST_BLOCKED 间歇断粮;其一
-        子代理拉取变稀后收割彻底冻结,读游标掉出源滚动缓冲=真丢数据)。
-        watch 本就是 owner 明确授权后才 open 得进来的(open 有同一道闸),钉住
-        开启/续拉时刻的授权语义正确;撤销授权后的下一次 open/pull 会用新授权重钉。"""
-        override = self.__dict__.get("_fetch_json")
-        if override is not None:
-            return override  # 实例级注入(测试假源/自定义拉取)优先,保持既有接缝
-        hosts = tuple(self.allowed_private_hosts or ())
-        allow_resolution = self.allow_private_resolution
-
-        def _fetch(request: SourceHttpRequest) -> tuple[bool, object, str]:
-            return self._fetch_json_pinned(request, hosts, allow_resolution)
-
-        return _fetch
+        # LLM: Keep this injectable method for fake sources while delegating authority capture.
+        # 函数用途: 为长寿命收割线程固定本次已经授权的网络边界。
+        return _harvester_fetch(self)
 
     def _fetch_json_pinned(
         self,
@@ -619,39 +483,16 @@ class WatchStreamTool(BaseTool):
         hosts: tuple[str, ...],
         allow_resolution: bool | None,
     ) -> tuple[bool, object, str]:
-        response = fetch_raw_response(
-            FetchRawRequest(
-                tool=_TOOL_NAME,
-                url=request.url,
-                method=request.method,
-                headers=dict(request.headers),
-                data=request.data,
-                timeout=_HTTP_TIMEOUT_SECONDS,
-            ),
-            format_http_error=_format_http_error,
-            resolve_pin=lambda pin_url: self._resolve_pin_with(pin_url, hosts, allow_resolution),
-        )
-        if isinstance(response, ToolHandlerOutcome):
-            return False, response.output, response.error_code
-        try:
-            return True, json.loads(response.body.decode("utf-8", "replace")), ""
-        except json.JSONDecodeError as exc:
-            return False, f"响应不是 JSON: {exc}", "SOURCE_ENVELOPE_INVALID"
+        # LLM: Response decoding and per-redirect pinning share the module transport helper.
+        # 函数用途: 在固定授权边界内抓取并解析一份 JSON 来源响应。
+        return _fetch_json_pinned(self, request, hosts, allow_resolution)
 
     def _resolve_pin_with(
         self, url: str, hosts: tuple[str, ...], allow_resolution: bool | None
     ) -> PinResult:
-        """与 web_fetch 同款:解析一次→过网络安全闸→pin 校验过的 IP(重定向逐跳重查)。"""
-        try:
-            resolved = tuple(
-                str(ip) for ip in _default_network_resolver(urlsplit(url).hostname or "")
-            )
-        except Exception:
-            resolved = ()
-        err = _network_safety_error(_TOOL_NAME, url, lambda _h: resolved, hosts, allow_resolution)
-        if err is not None:
-            return PinResult(None, err)
-        return PinResult(resolved[0] if resolved else None, None)
+        # LLM: Redirects must pass this same network gate; never reuse an unvalidated DNS result.
+        # 函数用途: 解析并校验一个来源 URL，返回可固定连接的 IP。
+        return _resolve_watch_pin(url, hosts, allow_resolution)
 
     def _owner_home(self) -> Path | None:
         raw = str(
@@ -661,6 +502,264 @@ class WatchStreamTool(BaseTool):
 
     def _current_run_id(self) -> str:
         return _current_run_id(self.agent)
+
+
+# LLM: Inline pull keeps one lock across source drain, digest, and payload projection so its cursor
+# cannot race the background harvester. This helper is the only inline polling loop.
+# 函数用途: 在等待额度内持续拉取来源，直到出现候选或达到截止时间。
+def _pull_locked(
+    tool: WatchStreamTool,
+    state: WatchState,
+    max_wait: float,
+) -> ToolHandlerOutcome:
+    deadline = time.time() + max_wait
+    aggregate = {"seen": 0, "pages": 0, "waited_rounds": 0}
+    while True:
+        digest = _drain_and_digest(tool, state, aggregate)
+        if digest is None:
+            return _source_error_result(state)
+        if digest.candidates or time.time() >= deadline:
+            break
+        aggregate["waited_rounds"] += 1
+        time.sleep(
+            min(
+                state.tuning.poll_interval_seconds,
+                max(0.1, deadline - time.time()),
+            )
+        )
+    extras = {
+        "seen_this_call": aggregate["seen"],
+        "pages_this_call": aggregate["pages"],
+    }
+    return _ok_payload(render_pull_payload(state, digest, extras))
+
+
+# LLM: Drain persistence must succeed before the source cursor can become authoritative. The model
+# digest is downstream of that durable fragment and cannot compensate for a failed write.
+# 函数用途: 拉取一批来源记录、持久化未完成片段并交给规则引擎生成候选。
+def _drain_and_digest(
+    tool: WatchStreamTool,
+    state: WatchState,
+    aggregate: dict[str, int],
+):
+    from .harvester import content_batch_size, is_content_mode
+    from .sources import (
+        apply_cursor_page_feedback,
+        drain_watch_source,
+        persist_file_fragment,
+    )
+    from .watch_feedback import consume_feedback_inbox
+
+    consume_feedback_inbox(state, time.time())
+    max_events = state.tuning.max_events_per_pull
+    if is_content_mode(state):
+        max_events = min(max_events, content_batch_size(state.tuning))
+    budget = DrainBudget(
+        max_events=max_events,
+        page_limit=state.tuning.page_limit,
+        deadline=time.time() + _HTTP_TIMEOUT_SECONDS,
+    )
+    drain = drain_watch_source(state, tool._fetch_json, budget)
+    apply_cursor_page_feedback(state, drain)
+    if not drain.error and not persist_file_fragment(state, drain):
+        drain.error = "未完成记录片段无法持久化，未推进游标"
+        drain.error_code = "SOURCE_FRAGMENT_PERSIST_FAILED"
+    state.totals["pulls"] += 1
+    if drain.error:
+        state.totals["http_errors"] += 1
+        state.last_error = drain.error
+        state.last_error_code = drain.error_code or "NETWORK_REQUEST_FAILED"
+        persist_state(state)
+        return None
+    _absorb_drain(state, drain, aggregate)
+    digest = state.engine.process(
+        drain.events,
+        time.time(),
+        cold_start=state.source_spec is None,
+    )
+    persist_state(state)
+    audit_append(state, build_audit_record(drain, digest))
+    return digest
+
+
+# LLM: Verdict settlement consumes only typed source-worker authority, delivery refs, and verdict
+# rows. A stale attempt may inspect history but cannot append a newer durable projection.
+# 函数用途: 校验并签收保证档的一批逐条结论，返回真实欠账和交付结果。
+def _execute_watch_verdict(
+    tool: WatchStreamTool,
+    owner_home: Path,
+    params: dict[str, Any],
+) -> ToolHandlerOutcome:
+    state = _state_for(tool, owner_home, params)
+    if isinstance(state, ToolHandlerOutcome):
+        return state
+    if not state.audit_guarantee:
+        return _err(
+            "本路不是 /audit 保证档:结论签收仅保证档适用(非保证档下一次 pull 即确认)",
+            "TOOL_INVALID_ARGUMENTS",
+        )
+    request = _verdict_tool_request(params)
+    if isinstance(request, ToolHandlerOutcome):
+        return request
+    source_authority, authorization_error = _source_worker_authority(
+        tool.agent,
+        state,
+    )
+    if authorization_error is not None:
+        return authorization_error
+    run_id = tool._current_run_id()
+    bound = _bound_runtime_verdicts(tool, state, request, run_id)
+    if isinstance(bound, ToolHandlerOutcome):
+        return bound
+    verdicts, output_observation = bound
+    from .harvester import submit_verdicts
+
+    result = submit_verdicts(
+        state,
+        consumer=run_id,
+        verdicts=verdicts,
+        delivery_ref=request.delivery_ref or None,
+        source_authority=source_authority,
+        **output_observation,
+    )
+    return _render_verdict_tool_result(
+        tool,
+        state,
+        request,
+        verdicts,
+        result,
+        run_id=run_id,
+    )
+
+
+# LLM: Inspect resolves one canonical audit source ref and remains read-only; it never acknowledges
+# a row, advances a cursor, or mutates task state.
+# 函数用途: 按 source_ref 或 watch_id 加 ack_id 读取一条已持久化 Audit 记录。
+def _inspect_watch_record(
+    tool: WatchStreamTool,
+    owner_home: Path,
+    params: dict[str, Any],
+) -> ToolHandlerOutcome:
+    inspect_params = dict(params)
+    source_ref = str(inspect_params.get("source_ref") or "").strip()
+    if source_ref:
+        matched = _AUDIT_SOURCE_REF_RE.fullmatch(source_ref)
+        if matched is None:
+            return _err(
+                "inspect 的 source_ref 不是有效 Audit 记录引用",
+                "TOOL_INVALID_ARGUMENTS",
+            )
+        ref_watch_id = matched.group("watch_id")
+        ref_ack_id = matched.group("ack_id")
+        explicit_watch_id = str(inspect_params.get("watch_id") or "").strip()
+        explicit_ack_id = str(inspect_params.get("ack_id") or "").strip()
+        if (
+            explicit_watch_id
+            and explicit_watch_id != ref_watch_id
+            or explicit_ack_id
+            and explicit_ack_id != ref_ack_id
+        ):
+            return _err(
+                "inspect 的 source_ref 与显式 watch_id/ack_id 不一致",
+                "TOOL_INVALID_ARGUMENTS",
+                reported_code="AUDIT_SOURCE_REF_MISMATCH",
+            )
+        inspect_params["watch_id"] = ref_watch_id
+        inspect_params["ack_id"] = ref_ack_id
+    state = _state_for(tool, owner_home, inspect_params)
+    if isinstance(state, ToolHandlerOutcome):
+        return state
+    if not state.audit_guarantee:
+        return _err(
+            "本路不是 /audit 保证档，没有逐条审计账可查",
+            "TOOL_INVALID_ARGUMENTS",
+        )
+    ack_id = str(inspect_params.get("ack_id") or "").strip()
+    if not ack_id:
+        return _err("inspect 缺 ack_id", "TOOL_PARAMETER_REQUIRED")
+    from .harvester import inspect_audit_record
+
+    payload = inspect_audit_record(state, ack_id)
+    if payload.get("ok"):
+        return _ok_payload({"action": "inspect", **payload})
+    return _err(
+        str(payload.get("error") or "审计记录不存在"),
+        "TOOL_INVALID_ARGUMENTS",
+    )
+
+
+# LLM: A background harvester must capture the exact network grant present when it starts. Later
+# tool-call cleanup cannot silently remove that already-authorized source boundary.
+# 函数用途: 固定当前私网主机授权并返回供收割线程长期使用的抓取函数。
+def _harvester_fetch(tool: WatchStreamTool):
+    override = tool.__dict__.get("_fetch_json")
+    if override is not None:
+        return override
+    hosts = tuple(tool.allowed_private_hosts or ())
+    allow_resolution = tool.allow_private_resolution
+
+    def _fetch(request: SourceHttpRequest) -> tuple[bool, object, str]:
+        return tool._fetch_json_pinned(request, hosts, allow_resolution)
+
+    return _fetch
+
+
+# LLM: The raw fetch and JSON decode use the same redirect-aware pin callback as web_fetch.
+# 函数用途: 在给定授权主机集合内拉取并解析 JSON，错误时返回结构化错误码。
+def _fetch_json_pinned(
+    tool: WatchStreamTool,
+    request: SourceHttpRequest,
+    hosts: tuple[str, ...],
+    allow_resolution: bool | None,
+) -> tuple[bool, object, str]:
+    response = fetch_raw_response(
+        FetchRawRequest(
+            tool=_TOOL_NAME,
+            url=request.url,
+            method=request.method,
+            headers=dict(request.headers),
+            data=request.data,
+            timeout=_HTTP_TIMEOUT_SECONDS,
+        ),
+        format_http_error=_format_http_error,
+        resolve_pin=lambda pin_url: tool._resolve_pin_with(
+            pin_url,
+            hosts,
+            allow_resolution,
+        ),
+    )
+    if isinstance(response, ToolHandlerOutcome):
+        return False, response.output, response.error_code
+    try:
+        return True, json.loads(response.body.decode("utf-8", "replace")), ""
+    except json.JSONDecodeError as exc:
+        return False, f"响应不是 JSON: {exc}", "SOURCE_ENVELOPE_INVALID"
+
+
+# LLM: Resolve once, validate the entire resolved set, and pin the accepted IP; every redirect
+# repeats this helper so DNS changes cannot bypass the network boundary.
+# 函数用途: 解析来源地址并通过 web_fetch 同款网络安全闸，返回可固定连接的 IP。
+def _resolve_watch_pin(
+    url: str,
+    hosts: tuple[str, ...],
+    allow_resolution: bool | None,
+) -> PinResult:
+    try:
+        resolved = tuple(
+            str(ip) for ip in _default_network_resolver(urlsplit(url).hostname or "")
+        )
+    except Exception:
+        resolved = ()
+    error = _network_safety_error(
+        _TOOL_NAME,
+        url,
+        lambda _host: resolved,
+        hosts,
+        allow_resolution,
+    )
+    if error is not None:
+        return PinResult(None, error)
+    return PinResult(resolved[0] if resolved else None, None)
 
 
 @dataclass(frozen=True)
@@ -2995,6 +3094,22 @@ class _SpoolPullBudget:
     record_limit: int | None
 
 
+# LLM: One spool projection snapshot keeps queue facts, rendering limits, and objective visibility
+# aligned; callers cannot accidentally mix fields from different pull attempts.
+# 类用途: 打包一次持久队列交付所需的状态、记录、积压和上下文预算。
+@dataclass(frozen=True)
+class _SpoolPullRenderRequest:
+    state: WatchState
+    records: list[dict[str, Any]]
+    backlog: dict[str, Any]
+    harvester: dict[str, Any]
+    model_event_max_tokens: int = 0
+    requested_records: int | None = None
+    effective_record_limit: int | None = None
+    safe_batch_tokens: int = 0
+    include_audit_objective: bool = True
+
+
 def _spool_pull_budget(request: _SpoolPullRequest) -> _SpoolPullBudget:
     if not request.state.audit_guarantee:
         return _SpoolPullBudget({}, 0, 0, 0, request.candidate_limit)
@@ -3046,15 +3161,19 @@ def _render_claimed_spool_pull(
             # 收割者在本进程:落一次快照(消费时间戳进盘,供 idle 判定和恢复观测)。
             persist_state(state)
         payload = _render_spool_pull(
-            state,
-            records,
-            backlog,
-            harvester_block(state),
-            model_event_max_tokens=budget.target_tokens,
-            requested_records=request.candidate_limit,
-            effective_record_limit=budget.record_limit,
-            safe_batch_tokens=budget.target_tokens,
-            include_audit_objective=not _source_scoped_audit_actor(request.tool.agent),
+            _SpoolPullRenderRequest(
+                state=state,
+                records=records,
+                backlog=backlog,
+                harvester=harvester_block(state),
+                model_event_max_tokens=budget.target_tokens,
+                requested_records=request.candidate_limit,
+                effective_record_limit=budget.record_limit,
+                safe_batch_tokens=budget.target_tokens,
+                include_audit_objective=not _source_scoped_audit_actor(
+                    request.tool.agent
+                ),
+            )
         )
         if state.audit_guarantee:
             context_error = _commit_audit_pull_context(request, budget, records, payload)
@@ -3556,28 +3675,45 @@ def _attach_redelivery_notes(payload: dict[str, Any], backlog: dict[str, Any]) -
 
 # LLM: This projection exposes every durable row in stream order; it never ranks or settles business meaning.
 # 函数用途: 把持久队列中的完整候选批交给当前 Agent，只有单条超出上下文时才生成带标记视图。
-def _render_spool_pull(
-    state: WatchState,
-    records: list[dict[str, Any]],
-    backlog: dict[str, Any],
-    harvester: dict[str, Any],
-    model_event_max_tokens: int = 0,
-    requested_records: int | None = None,
-    effective_record_limit: int | None = None,
-    safe_batch_tokens: int = 0,
-    include_audit_objective: bool = True,
-) -> dict[str, Any]:
+def _render_spool_pull(request: _SpoolPullRenderRequest) -> dict[str, Any]:
     """spool 消费批 → 模型载荷；工具只交付记录，不自动判读、上报或决定委派。"""
-    newest = records[-1] if records else {}
-    delivery_ref = str(backlog.get("delivery_ref") or "").strip()
+    candidate_rows, delivery_ref = _spool_candidate_rows(request)
+    # 积压口径=未判完(未读+在途)再扣掉本批刚交到模型手里的:交付≠判完,消费者死在
+    # 判读中途的批不消失;但"你手里这批"不算"还堆着的",否则清账信号永远差一批。
+    backlog_beyond_this_call = max(
+        0,
+        int(
+            request.backlog.get(
+                "candidates_unjudged",
+                request.backlog.get("candidates_unread"),
+            )
+            or 0
+        )
+        - len(candidate_rows),
+    )
+    payload = _spool_pull_base_payload(request, candidate_rows, backlog_beyond_this_call)
+    _attach_spool_batch_context(request, payload, candidate_rows, delivery_ref)
+    _attach_spool_pull_notes(request, payload, backlog_beyond_this_call)
+    return payload
+
+
+# LLM: Candidate rendering preserves durable stream order and adds verdict tokens only for one
+# guaranteed-delivery ref; it never ranks or drops records by content.
+# 函数用途: 将持久候选转换为本轮模型可见记录，并返回对应交付引用。
+def _spool_candidate_rows(
+    request: _SpoolPullRenderRequest,
+) -> tuple[list[dict[str, Any]], str]:
+    delivery_ref = str(request.backlog.get("delivery_ref") or "").strip()
     durable_rows = [
-        row for record in records for row in record.get("candidates") or [] if isinstance(row, dict)
+        row
+        for record in request.records
+        for row in record.get("candidates") or []
+        if isinstance(row, dict)
     ]
-    candidate_rows_this_call: list[dict[str, Any]] = []
-    if state.audit_guarantee and delivery_ref:
+    if request.state.audit_guarantee and delivery_ref:
         from .harvester import audit_verdict_token
 
-        candidate_rows_this_call = [
+        rows = [
             {
                 "verdict_token": audit_verdict_token(
                     delivery_ref,
@@ -3585,28 +3721,36 @@ def _render_spool_pull(
                 ),
                 **candidate_model_view(
                     row,
-                    max_event_tokens=model_event_max_tokens,
+                    max_event_tokens=request.model_event_max_tokens,
                     include_triage=False,
                 ),
             }
             for row in durable_rows
         ]
-    else:
-        candidate_rows_this_call = [
+        return rows, delivery_ref
+    return (
+        [
             candidate_model_view(
                 row,
-                max_event_tokens=model_event_max_tokens,
+                max_event_tokens=request.model_event_max_tokens,
             )
             for row in durable_rows
-        ]
-    # 积压口径=未判完(未读+在途)再扣掉本批刚交到模型手里的:交付≠判完,消费者死在
-    # 判读中途的批不消失;但"你手里这批"不算"还堆着的",否则清账信号永远差一批。
-    backlog_beyond_this_call = max(
-        0,
-        int(backlog.get("candidates_unjudged", backlog.get("candidates_unread")) or 0)
-        - len(candidate_rows_this_call),
+        ],
+        delivery_ref,
     )
-    payload = {
+
+
+# LLM: The base payload contains transport, coverage, and queue facts only; audit settlement fields
+# are attached later from the same immutable render request.
+# 函数用途: 组装持久队列 pull 的公共载荷和覆盖账。
+def _spool_pull_base_payload(
+    request: _SpoolPullRenderRequest,
+    candidate_rows: list[dict[str, Any]],
+    backlog_beyond_this_call: int,
+) -> dict[str, Any]:
+    state = request.state
+    newest = request.records[-1] if request.records else {}
+    return {
         "ok": True,
         "action": "pull",
         "watch_id": state.watch_id,
@@ -3614,68 +3758,97 @@ def _render_spool_pull(
         "source_envelope": public_source_envelope(state.source_envelope),
         "source_spec_configured": bool(state.source_spec) and not state.audit_guarantee,
         "candidates": (
-            candidate_rows_this_call
+            candidate_rows
             if state.audit_guarantee
-            else order_candidate_rows(candidate_rows_this_call)
+            else order_candidate_rows(candidate_rows)
         ),
         "suppressed_groups": list(newest.get("suppressed_groups") or []),
         "suppressed_groups_total": int(newest.get("suppressed_groups_total") or 0),
-        "suppressed_events_this_call": sum(int(r.get("suppressed_events") or 0) for r in records),
+        "suppressed_events_this_call": sum(
+            int(row.get("suppressed_events") or 0) for row in request.records
+        ),
         "overflow": {
-            "count": sum(int(r.get("overflow_count") or 0) for r in records),
+            "count": sum(
+                int(row.get("overflow_count") or 0) for row in request.records
+            ),
             "note": "达标但超出单批候选上限的事件(完整清单在审计账 watch_state/*.audit.ndjson)",
             "sample_stream_pos": [],
         },
         "coverage": coverage_block(
             state,
             {
-                "spool_backlog_records": int(backlog.get("records_unread") or 0),
+                "spool_backlog_records": int(
+                    request.backlog.get("records_unread") or 0
+                ),
                 "spool_backlog_candidates": backlog_beyond_this_call,
             },
         ),
         "watch": watch_block(state),
         "engine_totals": dict(state.engine.totals),
-        "harvester": harvester,
+        "harvester": request.harvester,
         # 档位一眼可见(默认档也显示 false):治真机"以为开了 /audit 实际跑 triage"的静默失效。
         "audit_guarantee": bool(state.audit_guarantee),
         "guidance": AUDIT_PULL_GUIDANCE if state.audit_guarantee else PULL_GUIDANCE,
     }
-    if state.audit_guarantee:
+
+
+# LLM: Batch context is measured from the exact rendered rows, never estimated from source byte
+# counts or model prose; delivery_ref is exposed only for guaranteed audit settlement.
+# 函数用途: 为保证档补上本批真实字节、token、记录上限和交付引用。
+def _attach_spool_batch_context(
+    request: _SpoolPullRenderRequest,
+    payload: dict[str, Any],
+    candidate_rows: list[dict[str, Any]],
+    delivery_ref: str,
+) -> None:
+    if request.state.audit_guarantee:
         from ..memory_archive import estimate_tokens
 
         rendered_bytes = len(
             json.dumps(
-                candidate_rows_this_call,
+                candidate_rows,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
         )
-        estimated_tokens = estimate_tokens(candidate_rows_this_call)
+        estimated_tokens = estimate_tokens(candidate_rows)
+        safe_tokens = max(0, int(request.safe_batch_tokens))
         payload["batch_context"] = {
-            "requested_records": requested_records,
-            "effective_record_limit": effective_record_limit,
-            "delivered_records": len(candidate_rows_this_call),
+            "requested_records": request.requested_records,
+            "effective_record_limit": request.effective_record_limit,
+            "delivered_records": len(candidate_rows),
             "rendered_bytes": rendered_bytes,
             "estimated_input_tokens": estimated_tokens,
             "estimated_input_k_tokens": round(estimated_tokens / 1000.0, 2),
-            "safe_batch_tokens": max(0, int(safe_batch_tokens)),
-            "safe_batch_k_tokens": round(max(0, int(safe_batch_tokens)) / 1000.0, 2),
+            "safe_batch_tokens": safe_tokens,
+            "safe_batch_k_tokens": round(safe_tokens / 1000.0, 2),
             "bounded_by_complete_record_bytes": bool(
-                requested_records is not None
-                and len(candidate_rows_this_call) < requested_records
-                and estimated_tokens >= max(1, int(safe_batch_tokens * 0.8))
+                request.requested_records is not None
+                and len(candidate_rows) < request.requested_records
+                and estimated_tokens >= max(1, int(safe_tokens * 0.8))
             ),
         }
         if delivery_ref:
             payload["delivery_ref"] = delivery_ref
+
+
+# LLM: Warning and progress annotations derive only from structured queue counters and watch state;
+# they cannot settle verdicts or change which candidates were delivered.
+# 函数用途: 给 pull 载荷补充来源错误、重投、过载、高频命中和继续等待提示。
+def _attach_spool_pull_notes(
+    request: _SpoolPullRenderRequest,
+    payload: dict[str, Any],
+    backlog_beyond_this_call: int,
+) -> None:
+    state = request.state
     if state.last_error:
         payload["last_source_error"] = state.last_error
     attach_audit_receipt(
         payload,
         state,
-        include_objective=include_audit_objective,
+        include_objective=request.include_audit_objective,
     )
-    _attach_redelivery_notes(payload, backlog)
+    _attach_redelivery_notes(payload, request.backlog)
     # 过载如实标注(P1 反乱报):未判积压(未读+在途)扣掉手里这批仍 ≥ 一个判读口粮 →
     # 挂 overload 块,明确"别为追进度批量乱报、宁可如实留积压"。纯积压计数触发,不判内容。
     from .harvester import overload_threshold
@@ -3684,19 +3857,23 @@ def _render_spool_pull(
         payload,
         backlog_beyond_this_call,
         threshold=overload_threshold(state.tuning),
-        backpressure_active=bool(harvester.get("backpressure_active")),
+        backpressure_active=bool(request.harvester.get("backpressure_active")),
     )
     attach_judgment_note(payload, state)
     # 高频命中类调查告警(spool 路):合并本消费批各记录的告警,与 inline pull 同契约;
     # 内容规则减负账同批汇总(命中数,零静默)。
     attach_frequent_hit_alert(
         payload,
-        merge_frequent_hits([record.get("frequent_hits") or [] for record in records]),
+        merge_frequent_hits(
+            [record.get("frequent_hits") or [] for record in request.records]
+        ),
     )
-    attach_content_rules_count(payload, sum(int(r.get("normal_rule_hits") or 0) for r in records))
+    attach_content_rules_count(
+        payload,
+        sum(int(row.get("normal_rule_hits") or 0) for row in request.records),
+    )
     # 续蹲/清账信号(spool 路补齐):此前只 inline 路调用,真机主路(spool 消费)拿不到
     attach_source_progress(payload)
-    return payload
 
 
 def _close_payload(state: WatchState) -> dict[str, Any]:

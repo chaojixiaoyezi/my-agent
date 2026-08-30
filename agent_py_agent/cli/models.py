@@ -9,7 +9,7 @@ from __future__ import annotations
 子代理命令先把 argparse namespace 收成这里的 options，再调用业务层。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -50,12 +50,18 @@ class GatewayStartOptions:
     workspace_root: str = ""
 
 
+# LLM: This immutable value follows one exact Gateway process generation from setup through
+# cleanup. Identity/start time scope stop markers; the log byte offset scopes diagnostics.
+# 类用途: 保存一次 Gateway 运行的进程身份、启动时刻、配置和日志边界，防止快速重启串代。
 @dataclass(frozen=True)
 class GatewayRunContext:
 
     agent: Any
     paths: Any
     config_path: Path
+    log_start_offset_bytes: int = 0
+    process_identity: dict[str, object] = field(default_factory=dict)
+    process_started_at: float = 0.0
 
 
 @dataclass(frozen=True)

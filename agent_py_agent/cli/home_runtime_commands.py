@@ -32,7 +32,11 @@ def add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
     home_retention.set_defaults(func=cmd_home_retention)
 
     home_index_rebuild = sub.add_parser("home-index-rebuild", help="预览或重建 owner/task/run/agent 全局索引")
-    home_index_rebuild.add_argument("--apply", action="store_true", help="实际追加新索引行；不传时只预览")
+    home_index_rebuild.add_argument(
+        "--apply",
+        action="store_true",
+        help="用当前权威状态原子替换并压紧索引；不传时只预览",
+    )
     home_index_rebuild.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     home_index_rebuild.set_defaults(func=cmd_home_index_rebuild)
 

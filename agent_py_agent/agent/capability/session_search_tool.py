@@ -220,15 +220,26 @@ def _shape_record(rec: LocalSearchResult, *, anchor_id: str | None = None, previ
     return entry
 
 
+# LLM: Search projections must preserve typed memory scope from the nested canonical attributes.
+# Physical owner isolation is already enforced by the selected LocalStore; this metadata only
+# lets the model distinguish current-session memory from cross-session personal memory.
+# 函数用途: 从历史索引元数据提取会话定位和记忆召回范围，避免检索命中被模型误判成全局记忆。
 def _history_scope(metadata: object) -> dict[str, str]:
     if not isinstance(metadata, dict):
         return {}
     allowed = ("thread_id", "message_id", "role", "channel")
-    return {
+    result = {
         key: str(metadata.get(key) or "")
         for key in allowed
         if str(metadata.get(key) or "").strip()
     }
+    attributes = metadata.get("attributes")
+    if isinstance(attributes, dict):
+        for key in ("scope_type", "scope_key", "applies_when", "excludes_when"):
+            value = str(attributes.get(key) or "").strip()
+            if value:
+                result[key] = value
+    return result
 
 
 # 函数用途: 截取围绕首个 query 词的正文片段(命中不到就取开头),控制 payload 体积。

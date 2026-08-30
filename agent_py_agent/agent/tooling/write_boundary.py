@@ -27,6 +27,7 @@ _INTERNAL_OUTPUT_JSON_NAME = "output.json"
 _WRITE_SCOPE_BOUNDARY_KEYS = frozenset(
     {
         "allowed_write_roots",
+        "capability_write_roots",
         "forbidden_write_roots",
         "locked_files",
         "output_json",
@@ -53,6 +54,9 @@ def _path_text(raw_path: object, *, label: str = "path") -> str:
     return text
 
 
+# LLM: Dangerous-path policy applies to every filesystem mutation; the narrower task boundary
+# is optional, but once any structured scope field exists, missing/empty allowed roots fail closed.
+# 函数用途: 在文件写入前先守全局危险路径，再按当前任务的结构化允许、禁止和锁定范围裁决。
 def validate_write_boundary(
     tool_name: str,
     params: dict[str, Any],
@@ -69,8 +73,7 @@ def validate_write_boundary(
 
     if not isinstance(params, dict):
         return "写入被阻止: 工具参数必须是 JSON 对象。"
-    if not _boundary_enforces_write_scope(write_boundary):
-        return ""
+    enforces_scope = _boundary_enforces_write_scope(write_boundary)
 
     raw_paths = declared_write_paths(tool_name, params)
     if not raw_paths:
@@ -90,11 +93,13 @@ def validate_write_boundary(
         access_decision = path_policy.check(target)
         if not access_decision.allowed:
             return f"写入被阻止: {access_decision.message}"
+        if not enforces_scope:
+            continue
         allowed_error = _allowed_boundary_error(
             target,
             allowed_roots,
             workspace_root,
-            scope_declared="allowed_write_roots" in write_boundary,
+            scope_declared=_boundary_enforces_write_scope(write_boundary),
         )
         if allowed_error:
             return allowed_error
@@ -110,9 +115,12 @@ def validate_write_boundary(
     return ""
 
 
+# LLM: Runtime audit metadata alone must not invent a workspace allowlist, while any genuine
+# path-boundary field activates fail-closed write-scope enforcement.
+# 函数用途: 区分“只有运行账本”与“已经声明路径围栏”的边界对象。
 def _boundary_enforces_write_scope(write_boundary: dict[str, object]) -> bool:
     if not write_boundary:
-        return True
+        return False
     return any(key in write_boundary for key in _WRITE_SCOPE_BOUNDARY_KEYS)
 
 

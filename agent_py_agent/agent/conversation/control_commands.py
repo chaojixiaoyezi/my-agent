@@ -7,6 +7,8 @@ from __future__ import annotations
 只负责传递命令，不各自猜测“停止”“纠偏”“查看状态”是什么意思。
 """
 
+import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass
 from typing import Literal
@@ -104,9 +106,10 @@ class NamedConversationWorkStatus:
     elapsed_seconds: float = 0.0
 
 
-# LLM: Control responses keep task status and transport delivery status separate; ``ok`` reports
-# command semantics while delivery_status preserves accepted/rejected/unknown for retry safety.
-# 类用途: 表示一条会话控制命令的结构化结果，并在跨进程边界保留投递三态。
+# LLM: Control responses keep task status, transport delivery, and typed error identity separate;
+# ``ok`` reports command semantics while error_code distinguishes interrupt/busy/failure without
+# parsing the localized display message.
+# 类用途: 表示一条会话控制命令的结构化结果，并在跨进程边界保留投递三态和错误码。
 @dataclass(frozen=True)
 class ConversationControlResult:
     kind: ControlKind
@@ -118,6 +121,7 @@ class ConversationControlResult:
     guidance_dedupe_key: str = ""
     operation_id: str = ""
     control_state: str = ""
+    error_code: str = ""
 
     # LLM: HTTP/IM boundaries receive a plain typed projection, never a dataclass repr.
     # 函数用途：把控制结果转换成可以安全跨进程传输的普通字典。
@@ -136,6 +140,8 @@ class ConversationControlResult:
             payload["operation_id"] = self.operation_id
         if self.control_state:
             payload["control_state"] = self.control_state
+        if self.error_code:
+            payload["error_code"] = self.error_code
         if self.status is not None:
             task_status = asdict(self.status)
             task_status["task"] = redact_host_absolute_paths(str(task_status.get("task") or ""))
@@ -435,6 +441,30 @@ def conversation_request_interrupt_name(request_id: object) -> str:
     return f"conversation-request:{str(request_id or '').strip()}"
 
 
+# LLM: Manual Compact cancellation is scoped by authenticated channel identity, conversation, and
+# the original opaque client message id.  The digest is process-local routing data, never a user
+# or owner lookup, and prevents one TUI from naming another user's Compact worker.
+# 函数用途：为一条手动 Compact 控制操作生成不泄露用户标识的进程内中断登记名。
+def conversation_compact_interrupt_name(
+    user_id: object,
+    channel: object,
+    conversation_id: object,
+    client_message_id: object,
+) -> str:
+    identity = json.dumps(
+        {
+            "user_id": str(user_id or "").strip(),
+            "channel": str(channel or "").strip(),
+            "conversation_id": str(conversation_id or "").strip(),
+            "client_message_id": str(client_message_id or "").strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "conversation-compact:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
 # LLM: Status is rendered only from typed runtime facts; guidance text/history is intentionally absent.
 # 函数用途：把当前任务状态整理成用户能直接读懂、且不泄露内部命令和路径的文本。
 def render_conversation_task_status(status: ConversationTaskStatus) -> str:
@@ -516,6 +546,7 @@ __all__ = [
     "ConversationTaskStatus",
     "NamedConversationWorkStatus",
     "conversation_task_attributes",
+    "conversation_compact_interrupt_name",
     "conversation_request_interrupt_name",
     "parse_conversation_control",
     "parse_conversation_command",

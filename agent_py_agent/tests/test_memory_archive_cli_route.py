@@ -26,7 +26,7 @@ from agent_py_agent.cli.parser import build_parser
 def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
-        'workspace_root: "workspace"\n'
+        'workspace_root: ""\n'
         f'my_agent_home: "{(tmp_path / "home").as_posix()}"\n'
         'model_backend: "echo"\n'
         'subagent_workspace: "subagents"\n'
@@ -39,7 +39,7 @@ def _write_config(tmp_path: Path) -> Path:
 
 
 def _workspace(config_path: Path) -> Path:
-    return config_path.parent / "workspace"
+    return config_path.parent / "home" / "owners" / "local" / "main"
 
 
 def _home_root(config_path: Path) -> Path:
@@ -47,7 +47,7 @@ def _home_root(config_path: Path) -> Path:
 
 
 def _archive_root_for_workspace(root: Path) -> Path:
-    return root.parent / "home" / "owners" / "local" / "main"
+    return root
 
 
 def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:

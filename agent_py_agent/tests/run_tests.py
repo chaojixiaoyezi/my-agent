@@ -284,7 +284,7 @@ if chat.stderr:
     print(chat.stderr)
 assert chat.returncode == 0
 assert "交互循环已启动" in chat.stdout
-assert "Remembered: 循环测试记忆" in chat.stdout
+assert "已记住：循环测试记忆" in chat.stdout
 assert "subagent-" in chat.stdout
 
 print("ALL_TESTS_PASS")

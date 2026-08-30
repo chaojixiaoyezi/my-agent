@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from ...common.id_generator import new_id as _framework_new_id
+from ...runtime_errors import DataCorruptionError
 from ..models import (
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
     SubAgentTask,
@@ -18,6 +19,9 @@ from .recovery.strategy import (
 )
 
 
+# LLM: Starting an attempt must bind RuntimeDB identity and may reopen CANCELLED only when the
+# structured conversation_user_stop eligibility contract proves this exact run is resumable.
+# 函数用途: 为子代理准备新的执行轮；普通终态拒绝重启，用户主动停止的同一 run 可显式续跑。
 def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = "") -> SubAgentTask:
     task = manager.load(run_id)
     resumable_user_stop = user_stopped_run_is_resumable(task)
@@ -31,6 +35,7 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
     attempt_id, runtime_task_id = _runtime_attempt_identity(manager, task)
     if not attempt_id:
         attempt_id = _framework_new_id("attempt_id")
+    _recover_unsubmitted_agent_guidance(manager, task, attempt_id)
     now = time.time()
     task.status = "RUNNING"
     task.verification_status = "UNVERIFIED"
@@ -43,7 +48,10 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
     _record_runner_recovery_preflight(task, strategy, previous)
     if runtime_task_id:
         _persist_runtime_task_id(task, runtime_task_id)
-    manager.save(task)
+    manager.save(
+        task,
+        allow_terminal_reactivation=resumable_user_stop,
+    )
     if (
         not task_status_in(task.status, {TaskStatus.RUNNING.value})
         or task.runner_active_attempt_id != attempt_id
@@ -148,6 +156,94 @@ def abandon_runner_attempt(
     return task
 
 
+# LLM: Dead-runner supervision must reconcile the exact runtime.db attempt before
+# it clears the task-file attempt and exposes the run to auto-start. Keep the
+# duplicate-start rejection in create_attempt intact; UNKNOWN remains a hard stop.
+# 函数用途: 核对子代理旧执行轮是否已经安全封存，只有安全终态或未启动态才允许重新排队。
+def reconcile_dead_runner_attempt(
+    manager: object,
+    run_id: str,
+    attempt_id: str,
+    *,
+    reason: str = "",
+) -> dict[str, object]:
+    repo = getattr(manager, "runtime_db", None)
+    normalized_attempt_id = str(attempt_id or "").strip()
+    if repo is None or not normalized_attempt_id:
+        return {"ready": True, "reason": "legacy_unmanaged"}
+    run = repo.agent_run_for_run_id(str(run_id or "").strip())
+    if run is None:
+        return {"ready": True, "reason": "legacy_unregistered"}
+    current_attempt_id = str(run["current_attempt_id"] or "").strip()
+    if current_attempt_id != normalized_attempt_id:
+        return {
+            "ready": False,
+            "reason": "runtime_attempt_mismatch",
+            "current_attempt_id": current_attempt_id,
+        }
+    recovery_block = repo.agent_run_recovery_block_for_run_id(run_id)
+    if recovery_block is not None:
+        return {
+            "ready": False,
+            "reason": str(
+                recovery_block.get("reason") or "authority_recovery_blocked"
+            ),
+            "recovery_block": recovery_block,
+        }
+    attempt = repo.get_attempt(normalized_attempt_id)
+    status = str(attempt["status"] or "").strip() if attempt is not None else ""
+    safe_statuses = {"pending", "done", "failed", "cancelled", "recovered"}
+    if status in safe_statuses:
+        return {"ready": True, "reason": "runtime_attempt_safe", "status": status}
+    if status != "running":
+        return {
+            "ready": False,
+            "reason": "runtime_attempt_not_reclaimable",
+            "status": status,
+        }
+    result = repo.reclaim_orphaned_attempt(
+        normalized_attempt_id,
+        operator="subagent-supervision",
+        reason=str(reason or "dead_runner_recovery"),
+    )
+    recovery_block = repo.agent_run_recovery_block_for_run_id(run_id)
+    if recovery_block is not None:
+        return {
+            "ready": False,
+            "reason": str(
+                recovery_block.get("reason") or "authority_recovery_blocked"
+            ),
+            "recovery_block": recovery_block,
+            "reclaim": result,
+        }
+    current = repo.agent_run_for_run_id(run_id)
+    current_id = (
+        str(current["current_attempt_id"] or "").strip()
+        if current is not None
+        else ""
+    )
+    if current_id != normalized_attempt_id:
+        return {
+            "ready": False,
+            "reason": "runtime_attempt_changed_during_reclaim",
+            "current_attempt_id": current_id,
+            "reclaim": result,
+        }
+    attempt = repo.get_attempt(normalized_attempt_id)
+    status = str(attempt["status"] or "").strip() if attempt is not None else ""
+    ready = status in safe_statuses
+    return {
+        "ready": ready,
+        "reason": (
+            "runtime_attempt_safe"
+            if ready
+            else str(result.get("reason") or "runtime_attempt_busy")
+        ),
+        "status": status,
+        "reclaim": result,
+    }
+
+
 def _runtime_attempt_identity(manager: object, task: SubAgentTask) -> tuple[str, str]:
     """MANAGED 下把 runner attempt 落到权威链（seq 253 闭合）。
 
@@ -185,6 +281,87 @@ def _runtime_authority_task_id(task: SubAgentTask) -> str:
     if not isinstance(authority, dict):
         return ""
     return str(authority.get("task_id") or "").strip()
+
+
+# LLM: Attempt recovery may transfer only receipt states that never reached provider I/O. The
+# ConversationStore owns the atomic mailbox transition; this lifecycle seam supplies exact dead
+# attempt ids from RuntimeDB and persists only a bounded diagnostic projection on the task.
+# 函数用途: 子代理启动恢复轮次前，安全接续尚未提交模型的用户插话并记录恢复数量。
+def _recover_unsubmitted_agent_guidance(
+    manager: object,
+    task: SubAgentTask,
+    recovered_attempt_id: str,
+) -> None:
+    store = getattr(manager, "conversation_store", None)
+    rebind = getattr(store, "rebind_unsubmitted_guidance_for_recovered_turn", None)
+    dead_attempt_ids = _rebindable_previous_attempt_ids(
+        manager,
+        task,
+        recovered_attempt_id,
+    )
+    if not callable(rebind) or not dead_attempt_ids:
+        return
+    summary = rebind(
+        "agent_run",
+        str(task.id or ""),
+        dead_turn_ids=dead_attempt_ids,
+        recovered_turn_id=recovered_attempt_id,
+    )
+    if int(summary.get("errors") or 0) > 0:
+        raise DataCorruptionError(
+            f"subagent guidance recovery failed: run_id={task.id} "
+            f"errors={summary.get('errors')}"
+        )
+    if not any(
+        int(summary.get(key) or 0) > 0
+        for key in ("rebound", "legacy_submission_unknown", "submitted_unknown")
+    ):
+        return
+    attributes = dict(getattr(task, "attributes", {}) or {})
+    attributes["guidance_recovery"] = {
+        "recovered_attempt_id": recovered_attempt_id,
+        "dead_attempt_ids": list(dead_attempt_ids),
+        "rebound": int(summary.get("rebound") or 0),
+        "legacy_submission_unknown": int(
+            summary.get("legacy_submission_unknown") or 0
+        ),
+        "submitted_unknown": int(summary.get("submitted_unknown") or 0),
+        "observed_at": time.time(),
+    }
+    task.attributes = attributes
+
+
+# LLM: UNKNOWN/running/pending attempts are deliberately excluded: their provider or execution
+# outcome is not proven dead. RuntimeDB ancestry outranks task-file abandoned projections, while
+# unmanaged mode may use only its explicit abandoned-attempt ledger.
+# 函数用途: 列出同一子代理中已安全结束、允许把未提交插话接到新轮次的旧 attempt。
+def _rebindable_previous_attempt_ids(
+    manager: object,
+    task: SubAgentTask,
+    recovered_attempt_id: str,
+) -> tuple[str, ...]:
+    recovered = str(recovered_attempt_id or "").strip()
+    repo = getattr(manager, "runtime_db", None)
+    if repo is None:
+        return tuple(
+            sorted(
+                {
+                    str(item or "").strip()
+                    for item in task.runner_abandoned_attempt_ids
+                    if str(item or "").strip() and str(item or "").strip() != recovered
+                }
+            )
+        )
+    run = repo.agent_run_for_run_id(str(task.id or "").strip())
+    if run is None:
+        return ()
+    safe_statuses = {"done", "failed", "cancelled", "recovered"}
+    return tuple(
+        str(row["attempt_id"] or "").strip()
+        for row in repo.attempts_for_run(str(run["agent_run_id"] or "").strip())
+        if str(row["attempt_id"] or "").strip() != recovered
+        and str(row["status"] or "").strip().lower() in safe_statuses
+    )
 
 
 def _persist_runtime_task_id(task: SubAgentTask, task_id: str) -> None:

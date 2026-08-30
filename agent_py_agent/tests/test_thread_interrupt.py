@@ -296,10 +296,10 @@ def test_cancel_signals_dispatch_thread_by_run_id():
         }
     )
     with register_interruptible("t-cancel-target"):
-        assert _interrupt_dispatch_thread(agent, "run-a") == "signaled"
+        assert _interrupt_dispatch_thread(agent, "run-a", "") == "signaled"
         assert is_interrupted() is True
-    assert _interrupt_dispatch_thread(agent, "run-miss") == "not_found"
-    assert _interrupt_dispatch_thread(SimpleNamespace(), "run-a") == "not_found", "无登记表不崩"
+    assert _interrupt_dispatch_thread(agent, "run-miss", "") == "not_found"
+    assert _interrupt_dispatch_thread(SimpleNamespace(), "run-a", "") == "not_found", "无登记表不崩"
 
 
 def test_foreground_shell_stops_when_conversation_is_interrupted(tmp_path):

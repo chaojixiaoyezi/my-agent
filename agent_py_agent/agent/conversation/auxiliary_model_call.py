@@ -8,14 +8,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from ...backends.gateway_helpers import provider_attempt_observer
-from ...contracts.model_call_ledger import (
-    ModelCallActivityParams,
-    ModelCallFirstTokenParams,
-    ModelCallStartedParams,
-)
-from ...memory_archive import estimate_tokens
-from .call_runtime import (
+from ..agent_core.model.call_runtime import (
     max_output_tokens,
     model_call_ledger,
     model_name,
@@ -23,6 +16,13 @@ from .call_runtime import (
     record_model_call_finished,
     record_model_provider_attempt,
 )
+from ..backends.gateway_helpers import provider_attempt_observer
+from ..contracts.model_call_ledger import (
+    ModelCallActivityParams,
+    ModelCallFirstTokenParams,
+    ModelCallStartedParams,
+)
+from ..memory_archive import estimate_tokens
 
 # LLM: This module is the one accounting/admission boundary for real model calls made outside the
 # main tool loop. It must never own Compact state or infer request identity from prompt prose.
@@ -119,9 +119,9 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
     label = type(backend).__name__
     response: object | None = None
     try:
-        from ...llm_scale.hot_path import global_llm_admission_slot
-        from ...observability.concurrency_metrics import llm_inflight
-        from .llm_metrics import record_llm_call
+        from ..agent_core.model.llm_metrics import record_llm_call
+        from ..llm_scale.hot_path import global_llm_admission_slot
+        from ..observability.concurrency_metrics import llm_inflight
 
         with provider_attempt_observer(_observe_provider_attempt):
             with global_llm_admission_slot():
@@ -139,7 +139,7 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
     except Exception as exc:
         record_model_call_failed(ledger, call_id, exc)
         try:
-            from .llm_metrics import record_llm_call
+            from ..agent_core.model.llm_metrics import record_llm_call
 
             record_llm_call(label, time.monotonic() - started_at, None, ok=False)
         except Exception:
@@ -194,7 +194,7 @@ def _record_auxiliary_cost(
     response: object,
 ) -> None:
     try:
-        from .llm_metrics import record_llm_cost, record_run_cost
+        from ..agent_core.model.llm_metrics import record_llm_cost, record_run_cost
 
         model = model_name(request.agent)
         record_llm_cost(model, response)

@@ -67,6 +67,7 @@ def test_quadrant_both_enabled_by_default(tmp_path: Path) -> None:
     policy = _resolve(home)
     assert policy.memory_enabled is True
     assert policy.skills_enabled is True
+    assert policy.max_disk_mb == 0
     assert policy.to_dict()["memory"] == {"enabled": True}
     assert policy.to_dict()["skills"]["enabled"] is True
 
@@ -131,6 +132,7 @@ def test_child_and_inherits_parent_switches(tmp_path: Path) -> None:
     all_open = resolve_effective_owner_policy(home, parent_policy=_parent_policy())
     assert all_open.memory_enabled is True
     assert all_open.skills_enabled is True
+    assert all_open.max_disk_mb == 1024
 
 
 def test_skill_snapshot_empty_when_skills_disabled(tmp_path, skill_catalog_factory) -> None:

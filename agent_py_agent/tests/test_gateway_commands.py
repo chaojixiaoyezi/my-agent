@@ -137,6 +137,36 @@ class TestCmdGatewayStop:
             result = cmd_gateway_stop(args)
             assert result == 0
 
+    def test_gateway_stop_targets_exact_running_process(self, tmp_path: Path):
+        """运行中 Gateway 的停止文件必须携带精确 PID 身份。"""
+        from agent_py_agent.cli.gateway_process import cmd_gateway_stop
+
+        args = MagicMock(
+            config=str(tmp_path / "config.yaml"),
+            timeout=1.0,
+            kill=False,
+            reason="测试精确停止",
+        )
+        mock_agent = MagicMock()
+        mock_agent.config.gateway_stop_timeout = 5
+        paths = SimpleNamespace(
+            root=tmp_path,
+            pid=tmp_path / "gateway.pid",
+            stop_request=tmp_path / "gateway.stop",
+        )
+
+        with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=paths), \
+             patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=43210), \
+             patch("agent_py_agent.cli.gateway_process.wait_for_pid_exit", return_value=True), \
+             patch("agent_py_agent.cli.gateway_process.log_gateway_event"):
+            assert cmd_gateway_stop(args) == 0
+
+        payload = json.loads(paths.stop_request.read_text(encoding="utf-8"))
+        assert payload["reason"] == "测试精确停止"
+        assert payload["target_process"]["pid"] == 43210
+        assert payload["source"] == "gateway_cli"
+
 
 class TestCmdGatewayStatus:
     """测试 cmd_gateway_status 命令。"""
@@ -485,8 +515,63 @@ class TestGatewayRunStateHelpers:
             timer.cancel()
 
         assert time.monotonic() - started >= 0.02
-        assert report == {"summary": "stop requested"}
+        assert report == {"summary": "stop requested", "stop_request": {}}
         agent.watch_subagents.assert_not_called()
+
+    def test_gateway_service_loop_ignores_previous_process_stop(self, tmp_path: Path):
+        """上一代 PID 的停止文件不会结束新 Gateway，直到本代请求到达。"""
+        import threading
+
+        from agent_py_agent.cli.gateway_process import _run_gateway_service_loop
+        from agent_py_agent.cli.models import GatewayRunContext
+
+        stop_path = tmp_path / "gateway.stop"
+        stop_path.write_text(
+            json.dumps(
+                {
+                    "requested_at": 200.0,
+                    "reason": "old gateway stop",
+                    "target_process": {"host_id": "host-a", "pid": 111, "start_time": 10},
+                }
+            ),
+            encoding="utf-8",
+        )
+        context = GatewayRunContext(
+            agent=MagicMock(),
+            paths=SimpleNamespace(stop_request=stop_path),
+            config_path=tmp_path / "config.yaml",
+            process_identity={"host_id": "host-a", "pid": 222, "start_time": 20},
+            process_started_at=100.0,
+        )
+
+        def write_current_stop() -> None:
+            stop_path.write_text(
+                json.dumps(
+                    {
+                        "requested_at": 300.0,
+                        "reason": "current gateway stop",
+                        "target_process": {"host_id": "host-a", "pid": 222, "start_time": 20},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        timer = threading.Timer(0.05, write_current_stop)
+        timer.start()
+        try:
+            report = _run_gateway_service_loop(context)
+        finally:
+            timer.cancel()
+
+        assert report["stop_request"]["reason"] == "current gateway stop"
+
+    def test_gateway_setup_rejects_overlapping_live_process(self, tmp_path: Path):
+        """直接 gateway run 不能覆盖仍存活的旧 Gateway PID 记录。"""
+        from agent_py_agent.cli.gateway_process import _cmd_gateway_run_setup
+
+        with patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=98765):
+            with pytest.raises(RuntimeError, match="gateway already running pid=98765"):
+                _cmd_gateway_run_setup(MagicMock(), SimpleNamespace(pid=tmp_path / "gateway.pid"))
 
 
 class TestCmdGatewayLogs:

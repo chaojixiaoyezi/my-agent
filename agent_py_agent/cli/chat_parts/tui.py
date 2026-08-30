@@ -58,23 +58,26 @@ CONTEXT_WINDOW = 200_000
 COLLAPSE_PREVIEW_CHARS = 900
 
 
+# LLM: rich TUI 展开只读已保存的完整回复；解析规则来自共享 slash parser，展示文案
+# 不得另造一套参数合同或英文 fallback。
+# 函数用途: 展开最后一条或指定编号的完整助手回复。
 def _tui_handle_expand_command(raw: str, assistant_outputs: list[str]) -> bool:
     from .input_loop import parse_expand_target
 
     target = parse_expand_target(raw)
     if target is None:
-        _cprint("Usage: /expand [last|number]")
+        _cprint("用法：/expand [last|编号]")
         return True
     if not assistant_outputs:
-        _cprint("No assistant responses are available to expand.")
+        _cprint("当前没有可展开的助手回复。")
         return True
     index = len(assistant_outputs) if target == "last" else int(target)
     if index < 1 or index > len(assistant_outputs):
-        _cprint(f"No assistant response #{index}; current count is {len(assistant_outputs)}.")
+        _cprint(f"没有编号为 {index} 的助手回复；当前共有 {len(assistant_outputs)} 条。")
         return True
-    _cprint(f"===== ASSISTANT RESPONSE #{index} =====")
+    _cprint(f"===== 助手回复 #{index} =====")
     _cprint(assistant_outputs[index - 1])
-    _cprint("===== END RESPONSE =====")
+    _cprint("===== 回复结束 =====")
     return True
 
 

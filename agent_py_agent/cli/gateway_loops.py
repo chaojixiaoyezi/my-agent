@@ -363,6 +363,7 @@ _BACKGROUND_OWNER_WORKERS = 8
 # 同 owner 后台会话并发上限：一条长会话不再占住整个 owner，但也不允许
 # 一个 owner 用大量待处理会话占满全局后台模型池。
 _BACKGROUND_THREADS_PER_OWNER = 4
+_MEMORY_CURATOR_WORKERS = 2
 _BASE_SCHEDULER_KEY = "base"
 # 调度器存活心跳节流(秒):>5 分钟没更新即疑死,配合 systemd 快速定位。
 _HEARTBEAT_INTERVAL_SECONDS = 60
@@ -408,6 +409,22 @@ def _background_threads_per_owner(agent: object) -> int:
     except (TypeError, ValueError):
         return _BACKGROUND_THREADS_PER_OWNER
     return parsed if parsed > 0 else _BACKGROUND_THREADS_PER_OWNER
+
+
+# LLM: Memory extraction has its own bounded lane so low-priority owner backlog
+# cannot consume the conversation wake executor; invalid values retain the safe default.
+# 函数用途: 读取单 Gateway 同时运行的记忆策展数量，超出的 owner 留待下一轮。
+def _memory_curator_workers(agent: object) -> int:
+    value = getattr(
+        getattr(agent, "config", None),
+        "memory_curator_workers",
+        _MEMORY_CURATOR_WORKERS,
+    )
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return _MEMORY_CURATOR_WORKERS
+    return parsed if parsed > 0 else _MEMORY_CURATOR_WORKERS
 
 
 # LLM: This mixin owns only process-local planning/execution slots; durable
@@ -513,14 +530,19 @@ class _BackgroundThreadLaneSupervisorMixin:
             )
         return self._executor
 
-    # LLM: Shutdown cancels only queued process-local submissions; durable sources
-    # remain pending and running claims retain their normal recovery semantics.
-    # 函数用途: 停止后台会话线程池，不删除持久任务。
+    # LLM: Shutdown cancels only queued process-local submissions in both lanes;
+    # durable conversation and curator sources remain pending for restart recovery.
+    # 函数用途: 停止主会话与记忆策展线程池，不删除任何持久任务或记忆游标。
     def shutdown(self) -> None:
-        executor = self._executor
+        executors = (
+            getattr(self, "_executor", None),
+            getattr(self, "_curator_executor", None),
+        )
         self._executor = None
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
+        self._curator_executor = None
+        for executor in executors:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
 
     # LLM: One failed conversation lane is logged and isolated; it cannot terminate
     # the supervisor or consume another thread's durable source.
@@ -566,6 +588,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         # 后台整合按 owner + thread 分车道。持久 run claim 保证同会话单飞，
         # 进程内 in-flight 去重防止同一 thread 重复提交；不同 thread 可在有界池中并发。
         self._executor: object | None = None
+        # 记忆策展走独立低优先级车道；不能占满主会话/child lifecycle wake 的工位。
+        self._curator_executor: object | None = None
         # 会话运行时 的 active turn 是 thread-scoped；这里也以 durable thread_id 作最小运行车道。
         self._inflight: dict[object, object] = {}
         # 磁盘级唤醒发现(治「睡死叫不醒」§1):登记表是进程内易失结构,网关重启清零、
@@ -584,6 +608,10 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         # 后台记忆策展唤醒:节流扫描 + 独立 in-flight 去重(见 _run_due_curators)。
         self._next_curator_run_at = 0.0
         self._curator_inflight: dict[object, object] = {}
+        # 纯记忆 owner 只在拿到 curator worker 后临时实例化；完成即逐出，避免历史用户常驻吃内存。
+        self._curator_soft_agent_ids: set[int] = set()
+        # 轮转游标让 base、硬 owner 与软 owner 共用有限工位而不饿死后排。
+        self._curator_candidate_cursor = 0
         # 策展每日全局配额(见 _run_due_curators):记账落盘到 global_index_dir,重启不丢。
         self._curator_quota_path: Path | None = None
         self._curator_quota_count = 0
@@ -686,6 +714,9 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         if page.seeded:
             print(f"[gateway-background-main] wake-pending owners seeded from disk: {page.seeded}", flush=True)
 
+    # LLM: Conversation schedulers are retained only for registry hard facts;
+    # curator-only owners are materialized later inside the bounded memory lane.
+    # 函数用途: 同步真正有前台、任务或盯守工作的 owner 会话调度器。
     def _sync_owner_schedulers(self) -> None:
         # 登记本唯一入口:registry snapshot(controller claim_due_owners / wake seed 分页种回)。
         # 曾经的磁盘全量策展扫(186+ owner 全进池)已被登记本替代——全量扫把 64 容量 LRU 池
@@ -696,19 +727,15 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         pool = self._ensure_owner_pool()
         if pool is None:
             return
-        # 硬事实 owner(待消费 wake/到期 policy/未完成子代理/盯守路/调度活)必进池,软(curator)靠后:
-        # 池满时软 owner 的 get 返回 None,跳过建 scheduler——软活可以等,硬活不能饿死。
+        # 硬事实 owner(待消费 wake/到期 policy/未完成子代理/盯守路/调度活)必进池。
+        # 纯 curator 软 owner 不需要会话 scheduler，也不能在这里批量构建完整 Agent；
+        # 它们只在 _run_due_curators 真正拿到有限 worker 时临时进入池。
         for owner in self._registry.hard_snapshot():
             try:
                 pool.get(owner, hard=True)
             except Exception as exc:
                 _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
-        for owner in self._registry.soft_snapshot():
-            try:
-                pool.get(owner, hard=False)
-            except Exception as exc:
-                _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
-        active = {id(agent): agent for agent in pool.active_agents()}
+        active = {id(agent): agent for agent in pool.hard_agents()}
         for key in list(self._owner_schedulers):
             if key not in active and not self._active_threads_for_owner(key):
                 self._owner_schedulers.pop(key, None)  # scoped agent 被 LRU 逐出且没在跑 → 丢弃其调度器
@@ -716,6 +743,9 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             if key not in self._owner_schedulers:
                 self._owner_schedulers[key] = _build_background_scheduler(scoped_agent, self._channels)
 
+    # LLM: Watch recovery inspects only hard owner agents because a persisted
+    # active watch is itself a hard registry fact and curator-only owners cannot own one.
+    # 函数用途: 为当前确有盯守任务的 owner 恢复采集器，不唤醒纯记忆 owner。
     def _recover_active_watch_harvesters(self, *, now: float | None = None) -> int:
         """Reacquire active named-Audit collectors for active owner lanes.
 
@@ -736,7 +766,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         pool = getattr(self, "_owner_pool", None)
         if pool is not None:
             try:
-                agents.extend(pool.active_agents())
+                agents.extend(pool.hard_agents())
             except Exception as exc:
                 _print_gateway_loop_error(
                     "gateway_watch_recovery.owner_pool",
@@ -763,14 +793,17 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                 )
         return ensured
 
+    # LLM: Curator candidates are admitted lazily into a dedicated bounded lane;
+    # a rotating cursor and post-run soft eviction bound memory without losing owners.
+    # 函数用途: 公平轮转各用户的记忆整理，最多只加载实际可运行的 worker 数量。
     def _run_due_curators(self) -> None:
-        """后台记忆策展唤醒:对 base + 每个活跃 scoped owner 周期调 run_if_due(节流60s)。
+        """后台记忆策展唤醒:按有限 worker 轮转 base、硬 owner 与纯策展软 owner。
 
         只负责「按时唤醒」:到期判断/租约/失败退避/journal 回滚全在 run_if_due 内部,
         调度器不做重复判断(curator.py:164 run_if_due 自带 pending/turn/interval/daily 触发)。
-        提取批次的 LLM 调用可能耗时几十秒,必须丢线程池并独立 in-flight 去重——否则按
-        _submit_owner_ticks 的教训(真机:单 owner 长 turn 占死单后台线程,饿死其他 owner)
-        会把全部 owner 的整合 tick 饿死。单 owner 异常只记录不中断其他 owner(健壮性)。
+        提取批次的 LLM 调用可能耗时几十秒,必须丢进独立有界线程池并做 in-flight 去重。
+        它不能复用主会话后台池：历史 owner 积压曾同时占满 8 个工位，让真实 child lifecycle
+        wake 排在记忆整理之后。单 owner 异常只记录不中断其他 owner(健壮性)。
 
         每日全局配额(LLM 提取烧钱,防失控):紧急车道(pending reason/active lease,事故必办)
         不受配额约束;常规车道(interval/daily/turn 轮询,归档类晚一天无害)占用配额,
@@ -782,28 +815,26 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self._next_curator_run_at = now + _positive_int_config(
             self._base_agent, "owner_maintenance_scan_interval_seconds", default=60
         )
-        for key in list(self._curator_inflight):
-            future = self._curator_inflight[key]
-            if getattr(future, "done", lambda: True)():
-                self._curator_inflight.pop(key, None)
-        agents = [self._base_agent]
+        soft_agent_ids = getattr(self, "_curator_soft_agent_ids", set())
+        self._curator_soft_agent_ids = soft_agent_ids
         pool = getattr(self, "_owner_pool", None)
-        if pool is not None:
-            try:
-                agents.extend(pool.active_agents())
-            except Exception as exc:
-                _print_gateway_loop_error("gateway_memory_curator.owner_pool", "memory-curator", exc)
-        for agent in agents:
-            key = id(agent)
-            if key in self._curator_inflight:
-                continue  # 该 owner 上一轮 curator 还在跑(LLM 提取中)→ 不重复提交
-            if not _agent_memory_enabled(agent):
-                continue  # owner memory_policy 总闸关闭:curator 不调度(effective flag,与 skill 对称)
-            if not self._curator_has_pending_reason(agent) and not self._curator_quota_available():
-                continue  # 常规车道已到当日全局限额 → 顺延明天(紧急车道不受配额约束)
-            self._curator_inflight[key] = self._get_executor().submit(
-                self._safe_run_curator, agent, str(getattr(agent, "owner_id", "local"))
-            )
+        _retire_finished_curators(self, soft_agent_ids, pool)
+        available = max(
+            0,
+            _memory_curator_workers(self._base_agent) - len(self._curator_inflight),
+        )
+        if available <= 0:
+            return
+        candidates = _curator_candidates(self, pool)
+        if not candidates:
+            return
+        self._curator_candidate_cursor = _submit_due_curators(
+            self,
+            candidates,
+            available,
+            soft_agent_ids,
+            pool,
+        )
 
     def _curator_daily_quota(self) -> int:
         return _positive_int_config(self._base_agent, "curator_daily_quota", default=_CURATOR_DAILY_QUOTA)
@@ -868,6 +899,17 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             self._curator_quota_record_consumed()
         return result
 
+    # LLM: This executor is a separate low-priority capacity lane; queued
+    # conversation wake work must never wait behind memory extraction calls.
+    # 函数用途: 惰性创建记忆策展专用线程池，并按配置限制全 Gateway 并发。
+    def _get_curator_executor(self) -> object:
+        if self._curator_executor is None:
+            self._curator_executor = DurableDaemonThreadPoolExecutor(
+                max_workers=_memory_curator_workers(self._base_agent),
+                thread_name_prefix="memory-curator",
+            )
+        return self._curator_executor
+
     def _ensure_owner_pool(self) -> object | None:
         if self._owner_pool is not None:
             return self._owner_pool
@@ -879,6 +921,175 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             _print_gateway_loop_error("gateway_background_main.owner_pool", "background-main", exc)
             self._owner_pool = None
         return self._owner_pool
+
+
+# LLM: Finished curator futures are retired before capacity is computed. Soft
+# owner agents are evicted only after their exact future ends; hard/base agents
+# remain resident and every eviction failure stays diagnostic-only.
+# 函数用途: 清掉已结束的记忆策展 future，并释放这轮临时加载的软 owner agent。
+def _retire_finished_curators(
+    supervisor: object,
+    soft_agent_ids: set[object],
+    pool: object | None,
+) -> None:
+    inflight = getattr(supervisor, "_curator_inflight", {})
+    for key, future in list(inflight.items()):
+        if not getattr(future, "done", lambda: True)():
+            continue
+        inflight.pop(key, None)
+        if key not in soft_agent_ids:
+            continue
+        soft_agent_ids.discard(key)
+        _evict_soft_curator_agent(pool, key)
+
+
+# LLM: Soft eviction is memory hygiene, never an authority or scheduler gate.
+# A failed eviction must not block another owner's curator lane.
+# 函数用途: 尝试释放一个软 owner agent；失败只写诊断，不打断后台循环。
+def _evict_soft_curator_agent(pool: object | None, key: object) -> None:
+    if pool is None:
+        return
+    try:
+        pool.evict_soft_agent_id(key)
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_memory_curator.soft_evict", str(key), exc)
+
+
+# LLM: Candidate order is the fairness input: base agent, resident hard owners,
+# then bounded registry snapshots. The rotating cursor owns fairness, not this
+# collector, so this function never filters by due state or quota.
+# 函数用途: 收集本轮可轮转的基础 agent、硬 owner agent 与软 owner 身份。
+def _curator_candidates(
+    supervisor: object,
+    pool: object | None,
+) -> list[tuple[str, object]]:
+    candidates: list[tuple[str, object]] = [("agent", supervisor._base_agent)]
+    if pool is not None:
+        try:
+            candidates.extend(("agent", agent) for agent in pool.hard_agents())
+        except Exception as exc:
+            _print_gateway_loop_error(
+                "gateway_memory_curator.owner_pool",
+                "memory-curator",
+                exc,
+            )
+    candidates.extend(("owner", owner) for owner in supervisor._registry.soft_snapshot())
+    return candidates
+
+
+# LLM: A soft owner identity is materialized through the one owner pool; base
+# and hard candidates are already agents. Construction failure is isolated to
+# the exact owner and never converted into a fake no-op curator result.
+# 函数用途: 把候选 owner 身份按需加载成 agent，并标记它是否需要稍后软释放。
+def _resolve_curator_candidate(
+    kind: str,
+    candidate: object,
+    pool: object | None,
+) -> tuple[object | None, bool]:
+    if kind != "owner":
+        return candidate, False
+    if pool is None:
+        return None, True
+    try:
+        return pool.get(candidate, hard=False), True
+    except Exception as exc:
+        _print_gateway_loop_error(
+            "gateway_memory_curator.owner_build",
+            str(getattr(candidate, "owner_id", "")),
+            exc,
+        )
+        return None, True
+
+
+# LLM: Admission reads only typed memory policy, pending reasons, quota, and
+# the exact in-flight map. Rejected soft candidates are evicted immediately;
+# no model prose or inferred task importance participates.
+# 函数用途: 判断一个 agent 本轮是否可提交记忆策展，并释放被策略跳过的软 agent。
+def _curator_candidate_is_admitted(
+    supervisor: object,
+    agent: object,
+    *,
+    is_soft: bool,
+    pool: object | None,
+) -> bool:
+    key = id(agent)
+    if key in supervisor._curator_inflight:
+        return False
+    memory_enabled = _agent_memory_enabled(agent)
+    quota_available = (
+        supervisor._curator_has_pending_reason(agent)
+        or supervisor._curator_quota_available()
+    )
+    if memory_enabled and quota_available:
+        return True
+    if is_soft:
+        _evict_soft_curator_agent(pool, key)
+    return False
+
+
+# LLM: Submission is the only helper that mutates the curator in-flight map.
+# A soft agent stays resident until its future finishes; submit failure evicts
+# it before re-raising so the supervisor retry sees a clean pool.
+# 函数用途: 把一个已准入 agent 提交到专用策展线程池，并登记去重 future。
+def _submit_curator_candidate(
+    supervisor: object,
+    agent: object,
+    *,
+    is_soft: bool,
+    soft_agent_ids: set[object],
+    pool: object | None,
+) -> None:
+    key = id(agent)
+    try:
+        future = supervisor._get_curator_executor().submit(
+            supervisor._safe_run_curator,
+            agent,
+            str(getattr(agent, "owner_id", "local")),
+        )
+    except Exception:
+        if is_soft:
+            _evict_soft_curator_agent(pool, key)
+        raise
+    supervisor._curator_inflight[key] = future
+    if is_soft:
+        soft_agent_ids.add(key)
+
+
+# LLM: This loop advances the persisted rotating cursor once per examined
+# candidate and consumes capacity only after a future is actually submitted.
+# 函数用途: 公平扫描候选并提交不超过 available 的记忆策展工作，返回下一轮游标。
+def _submit_due_curators(
+    supervisor: object,
+    candidates: list[tuple[str, object]],
+    available: int,
+    soft_agent_ids: set[object],
+    pool: object | None,
+) -> int:
+    index = int(getattr(supervisor, "_curator_candidate_cursor", 0) or 0) % len(candidates)
+    examined = 0
+    while available > 0 and examined < len(candidates):
+        kind, candidate = candidates[index]
+        index = (index + 1) % len(candidates)
+        examined += 1
+        agent, is_soft = _resolve_curator_candidate(kind, candidate, pool)
+        if agent is None:
+            continue
+        if not _curator_candidate_is_admitted(
+            supervisor,
+            agent,
+            is_soft=is_soft,
+            pool=pool,
+        ):
+            continue
+        _submit_curator_candidate(
+            supervisor,
+            agent,
+            is_soft=is_soft,
+            soft_agent_ids=soft_agent_ids,
+            pool=pool,
+        )
+        available -= 1
+    return index
 
 
 class _GatewayOwnerMaintenanceController:
@@ -1125,7 +1336,12 @@ class _GatewayOrphanReconciler:
         if now >= self._next_discovery_at:
             self._seed_owner_registry()
             self._next_discovery_at = now + self.interval
-        owners = self._registry.snapshot()
+        # Orphan supervision is a recovery controller, so it only consumes
+        # owners carrying hard runtime facts (unfinished run/task/watch/job or
+        # an interactive request). Memory-curator-only owners stay on their
+        # dedicated soft lane and must not trigger a full subagent filesystem
+        # sweep every interval.
+        owners = self._registry.hard_snapshot()
         active_keys = {self._owner_key(owner) for owner in owners}
         for key in list(self._owner_next_at):
             if key not in active_keys and key not in self._owner_inflight:
@@ -1177,7 +1393,9 @@ class _GatewayOrphanReconciler:
         pool = self._ensure_owner_pool()
         if pool is None:
             return reports
-        for owner in self._registry.snapshot():
+        # Keep the synchronous/test entry aligned with the long-running loop:
+        # soft curator work has its own scheduler and is not an orphan signal.
+        for owner in self._registry.hard_snapshot():
             label = "/".join(
                 (
                     str(getattr(owner, "provider", "") or ""),

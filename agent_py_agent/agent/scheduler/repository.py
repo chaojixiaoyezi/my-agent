@@ -45,7 +45,7 @@ _STORE_SCHEMA = "scheduler_store.v1"
 _JOB_SCHEMA = "scheduler_job.v1"
 _RUN_SCHEMA = "scheduler_run.v1"
 _JOB_STATUSES = frozenset({"active", "paused", "deleted"})
-_ACTIVE_RUN_STATUSES = frozenset({"queued", "claimed", "running"})
+_ACTIVE_RUN_STATUSES = frozenset({"queued", "claimed", "running", "waiting"})
 # P0-4(HANDOFF 文档线): unknown = 崩溃执行终态(进程死亡被证实后归类),
 # 与 done/failed/cancelled/skipped 并列, 终态不可改写。
 _TERMINAL_RUN_STATUSES = frozenset({"done", "failed", "cancelled", "skipped", "unknown"})
@@ -345,6 +345,23 @@ class _SchedulerRunOperations:
             run, _error = self._parse_run(store["runs"].get(str(run_id or "")))
         return deepcopy(run) if run is not None else None
 
+    # LLM: Schedule list/get surfaces must project live queued/claimed/running/waiting facts from
+    # the same owner ledger; callers must not infer activity from an empty last_run_at.
+    # 函数用途: 一次读取当前 owner 的全部在途定时执行，供状态展示区分排队、执行与等待后续事件。
+    def active_runs_by_job(self) -> tuple[dict[str, dict[str, object]], list[str]]:
+        with locked_json_path(self.store_path):
+            store = self._load_store_unlocked()
+            runs, errors = self._valid_runs(store)
+        active: dict[str, dict[str, object]] = {}
+        for run in sorted(
+            runs,
+            key=lambda item: (float(item.get("scheduled_for") or 0.0), str(item["run_id"])),
+        ):
+            if str(run.get("status") or "") not in _ACTIVE_RUN_STATUSES:
+                continue
+            active[str(run["job_id"])] = deepcopy(run)
+        return active, errors
+
     def attach_wake_signal(self, run_id: str, wake_signal_id: str) -> None:
         with self._mutation_scope() as (store, admission):
             run = self._require_run(store, run_id)
@@ -371,6 +388,8 @@ class _SchedulerRunOperations:
             if run is None:
                 return None
             expires = float(run.get("claim_expires_at") or 0.0)
+            if run["status"] == "waiting":
+                return None
             if run["status"] in {"claimed", "running"} and expires > current:
                 return None
             if run["status"] not in _ACTIVE_RUN_STATUSES:
@@ -458,18 +477,7 @@ class _SchedulerRunOperations:
         current = _now(result.now)
         with self._mutation_scope() as (store, admission):
             run = self._require_claim(store, run_id, claim_id)
-            terminal = {
-                **run,
-                "status": terminal_status,
-                "ended_at": current,
-                "updated_at": current,
-                "claim_expires_at": 0.0,
-                "response": result.response[:4000],
-                "delivery_status": result.delivery_status[:80],
-                "delivery_reason": result.delivery_reason[:160],
-                "error_code": result.error_code[:120],
-                "error_message": result.error_message[:500],
-            }
+            terminal = _terminal_run_payload(run, result, now=current)
             store["runs"].pop(run_id, None)
             job_id = str(run["job_id"])
             raw_job = store["jobs"].get(job_id)
@@ -537,6 +545,84 @@ class _SchedulerRunOperations:
             "load_error_codes": sorted(set(errors)),
             "schedule_kinds": sorted({str(job["schedule"]["kind"]) for job in jobs}),
         }
+
+
+# LLM: Waiting is a claim-free durable phase, separate from queued/claimed/running process work.
+# Keep every transition CAS-backed through the same owner store and exact scheduler run id.
+# 类用途: 管理模型工作片结束后、根任务仍在继续时的等待、重启对账读取和最终结算。
+class _SchedulerWaitingRunOperations:
+    # LLM: Restart reconciliation needs a bounded snapshot of runs whose model slice ended while
+    # their same-id conversation task stayed active. This is read-only and never scans task prose.
+    # 函数用途: 读取等待任务终态的定时执行，供 Gateway 生命周期对账。
+    def waiting_runs(self) -> tuple[list[dict[str, object]], list[str]]:
+        with locked_json_path(self.store_path):
+            store = self._load_store_unlocked()
+            runs, errors = self._valid_runs(store)
+        selected = [run for run in runs if str(run.get("status") or "") == "waiting"]
+        selected.sort(
+            key=lambda item: (
+                float(item.get("waiting_since") or item.get("started_at") or 0.0),
+                str(item["run_id"]),
+            )
+        )
+        return deepcopy(selected), errors
+
+    # LLM: A model slice may legitimately yield after spawning durable child work. Preserve the
+    # scheduler run as waiting without a live process claim; queued dispatch must never reclaim it.
+    # 函数用途: 主代理已派工但任务仍未终结时，把定时执行停在等待后续事件状态而不是误记完成。
+    def park_run_waiting(
+        self,
+        run_id: str,
+        claim_id: str,
+        *,
+        response: str = "",
+        delivery_status: str = "",
+        delivery_reason: str = "",
+        now: float | None = None,
+    ) -> dict[str, object]:
+        current = _now(now)
+        with self._mutation_scope() as (store, admission):
+            run = self._require_claim(store, run_id, claim_id)
+            waiting = {
+                **run,
+                "status": "waiting",
+                "claim_id": "",
+                "claim_expires_at": 0.0,
+                "waiting_since": current,
+                "response": str(response or "")[:4000],
+                "delivery_status": str(delivery_status or "")[:80],
+                "delivery_reason": str(delivery_reason or "")[:160],
+                "updated_at": current,
+            }
+            store["runs"][run_id] = waiting
+            self._write_store_unlocked(store, admission)
+        return deepcopy(waiting)
+
+    # LLM: Only the exact waiting scheduler run may be closed without a process claim. The caller
+    # must first prove the same-id durable conversation task reached a structured terminal state.
+    # 函数用途: 后续生命周期或重启对账确认任务终态后，结算等待中的定时执行。
+    def finish_waiting_run(
+        self,
+        run_id: str,
+        result: SchedulerRunFinish,
+    ) -> dict[str, object]:
+        terminal_status = result.status
+        if terminal_status not in _TERMINAL_RUN_STATUSES:
+            raise SchedulerConflictError(f"invalid terminal scheduler run status: {result.status}")
+        current = _now(result.now)
+        with self._mutation_scope() as (store, admission):
+            run = self._require_run(store, run_id)
+            if str(run.get("status") or "") != "waiting":
+                raise SchedulerConflictError("scheduler run is not waiting for task completion")
+            terminal = _terminal_run_payload(run, result, now=current)
+            store["runs"].pop(run_id, None)
+            job_id = str(run["job_id"])
+            raw_job = store["jobs"].get(job_id)
+            job, _error = self._parse_job(raw_job)
+            if job is not None:
+                store["jobs"][job_id] = _job_after_run(job, terminal, now=current)
+            self._write_store_unlocked(store, admission, history_records=[terminal])
+        return deepcopy(terminal)
 
 
 class _SchedulerStoreSupport:
@@ -798,7 +884,10 @@ class _SchedulerStoreSupport:
         cancelled: list[dict[str, object]] = []
         for run_id, raw in list(store["runs"].items()):
             run, _error = self._parse_run(raw)
-            if run is None or run["job_id"] != job_id or run["status"] == "running":
+            if run is None or run["job_id"] != job_id or run["status"] in {
+                "running",
+                "waiting",
+            }:
                 continue
             terminal = {
                 **run,
@@ -832,6 +921,7 @@ class _SchedulerStoreSupport:
 class SchedulerRepository(
     _SchedulerJobOperations,
     _SchedulerRunOperations,
+    _SchedulerWaitingRunOperations,
     _SchedulerStoreSupport,
 ):
     """Single owner-local facade over job, run, and store responsibilities."""
@@ -1121,6 +1211,30 @@ def _job_after_run(
             }
         )
     return updated
+
+
+# LLM: Claimed and waiting completion paths share this bounded terminal payload. Lifecycle
+# authority remains at their callers; this helper only normalizes persisted result fields.
+# 函数用途: 生成一条定时执行的统一终态记录，避免不同收口入口写出不同字段。
+def _terminal_run_payload(
+    run: dict[str, object],
+    result: SchedulerRunFinish,
+    *,
+    now: float,
+) -> dict[str, object]:
+    return {
+        **run,
+        "status": result.status,
+        "ended_at": now,
+        "updated_at": now,
+        "claim_id": "",
+        "claim_expires_at": 0.0,
+        "response": result.response[:4000],
+        "delivery_status": result.delivery_status[:80],
+        "delivery_reason": result.delivery_reason[:160],
+        "error_code": result.error_code[:120],
+        "error_message": result.error_message[:500],
+    }
 
 
 def _resume_next_run(job: dict[str, object], current: float) -> float:

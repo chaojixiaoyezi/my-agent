@@ -29,6 +29,7 @@ from .candidate_models import (
     MemoryCandidate,
     MemoryScope,
     candidate_transition_allowed,
+    host_promotion_mode,
     normalize_iso_time,
     normalize_reference_list,
     normalize_string_list,
@@ -567,8 +568,9 @@ def _new_candidate(
     )
 
 
-# LLM: 合并只增加独立证据和 occurrence；终态、审核结果和正式落点不能被后来的模型输出重置。
-# 函数用途: 将同一语义候选的新观察幂等合并到当前态。
+# LLM: Merge may repair only a missing-evidence origin when a new canonical ref supports the
+# replacement origin; terminal state, review decisions, and promotion refs remain immutable.
+# 函数用途: 幂等合并同一候选；仅允许被缺证据卡住的来源用新结构化消息/工具引用纠正。
 def _merge_candidate(
     current: MemoryCandidate,
     observation: CandidateObservation,
@@ -583,8 +585,11 @@ def _merge_candidate(
     is_new = observation_key not in observation_keys
     if is_new:
         observation_keys.append(observation_key)
-    return replace(
+    resolved_origin = _resolved_blocked_origin(current, observation)
+    origin_repaired = resolved_origin != current.origin
+    merged = replace(
         current,
+        origin=resolved_origin,
         evidence_refs=_merge_refs(current.evidence_refs, observation.evidence_refs),
         source_message_refs=_merge_refs(
             current.source_message_refs, observation.source_message_refs
@@ -599,12 +604,77 @@ def _merge_candidate(
         occurrence_count=len(observation_keys),
         confidence=max(float(current.confidence), float(observation.confidence)),
         conflicts_with=_merge_strings(current.conflicts_with, observation.conflicts_with),
-        promotion_mode=_merge_promotion_mode(
-            current.promotion_mode, observation.promotion_mode
-        ),
         observation_keys=observation_keys,
         updated_at=utc_now_iso() if is_new else current.updated_at,
     )
+    merged = replace(merged, promotion_mode=host_promotion_mode(merged))
+    if (
+        merged.status == "blocked_missing_evidence"
+        and _candidate_has_structural_evidence(merged)
+    ):
+        reopened_at = utc_now_iso()
+        repair_note = (
+            f"structured_origin_repaired:{current.origin}->{resolved_origin}"
+            if origin_repaired
+            else "structured_evidence_restored"
+        )
+        merged = replace(
+            merged,
+            status="pending_review",
+            reviewer="candidate-service",
+            review_note="结构化来源证据已补齐，重新进入自主晋升链。",
+            status_history=[
+                *merged.status_history,
+                _status_event(
+                    "pending_review",
+                    actor="candidate-service",
+                    note=repair_note,
+                    at=reopened_at,
+                ),
+            ],
+            updated_at=reopened_at,
+        )
+    return merged
+
+
+# LLM: A model label alone cannot rewrite provenance; correction requires the current candidate
+# to be blocked with no matching refs and the incoming origin to carry its own canonical refs.
+# 函数用途: 在缺证据终态下裁决能否把误标的 user_explicit/tool_verified 来源纠正为有真实引用的新来源。
+def _resolved_blocked_origin(
+    current: MemoryCandidate,
+    observation: CandidateObservation,
+) -> str:
+    incoming = str(observation.origin or "").strip().lower()
+    if (
+        current.status != "blocked_missing_evidence"
+        or incoming == current.origin
+        or incoming not in {"user_explicit", "tool_verified"}
+        or _candidate_has_structural_evidence(current)
+    ):
+        return current.origin
+    if incoming == "user_explicit" and observation.source_message_refs:
+        return incoming
+    if incoming == "tool_verified" and observation.source_tool_refs:
+        return incoming
+    return current.origin
+
+
+# LLM: This check only reopens a structurally missing-evidence candidate after exact references
+# have been merged. Cryptographic/message/tool verification remains exclusively in PromotionService.
+# 函数用途: 判断候选是否已补齐与来源类型匹配的最小结构化引用，以便自动重试而不是永久卡住。
+def _candidate_has_structural_evidence(candidate: object) -> bool:
+    origin = str(getattr(candidate, "origin", "") or "").strip().lower()
+    if origin == "user_explicit":
+        return bool(getattr(candidate, "source_message_refs", ()))
+    if origin == "tool_verified":
+        return bool(getattr(candidate, "source_tool_refs", ()))
+    if origin in {"subagent_finding", "subagent_lesson"}:
+        return bool(
+            getattr(candidate, "source_task_ids", ())
+            or getattr(candidate, "source_run_ids", ())
+            or getattr(candidate, "evidence_refs", ())
+        )
+    return True
 
 
 # LLM: 初始阻塞只依赖结构化来源/refs/action，不把 confidence 当事实证据。
@@ -651,7 +721,7 @@ def _normalize_observation(observation: CandidateObservation) -> CandidateObserv
         else MemoryScope.from_value(observation.scope)
     )
     promotion_target = str(observation.promotion_target or "none").strip().lower()
-    promotion_mode = str(observation.promotion_mode or "").strip().lower()
+    supplied_promotion_mode = str(observation.promotion_mode or "").strip().lower()
     if candidate_type not in CANDIDATE_TYPES:
         raise ValueError(f"unsupported candidate_type: {candidate_type}")
     if origin not in CANDIDATE_ORIGINS:
@@ -660,11 +730,9 @@ def _normalize_observation(observation: CandidateObservation) -> CandidateObserv
         raise ValueError(f"unsupported proposed_action: {proposed_action}")
     if promotion_target not in PROMOTION_TARGETS:
         raise ValueError(f"unsupported promotion_target: {promotion_target}")
-    # 晋升权限 fail-closed:入口忘赋值/legacy 空值一律归 manual_required,非空非法值拒绝。
-    if not promotion_mode:
-        promotion_mode = "manual_required"
-    elif promotion_mode not in PROMOTION_MODES:
-        raise ValueError(f"unsupported promotion_mode: {promotion_mode}")
+    # 非空非法值严格拒绝；合法旧值也由当前宿主合同重算，模型不能靠字段给自己升权。
+    if supplied_promotion_mode and supplied_promotion_mode not in PROMOTION_MODES:
+        raise ValueError(f"unsupported promotion_mode: {supplied_promotion_mode}")
     if not content or len(content) > 2_000:
         raise ValueError("candidate content must contain 1..2000 characters")
     if not subject_key and candidate_type not in {"event", "discard"}:
@@ -681,7 +749,7 @@ def _normalize_observation(observation: CandidateObservation) -> CandidateObserv
         origin=origin,
         proposed_action=proposed_action,
         promotion_target=promotion_target,
-        promotion_mode=promotion_mode,
+        promotion_mode=host_promotion_mode(observation),
         confidence=confidence,
         target_entry_id=str(observation.target_entry_id or "").strip(),
     )
@@ -700,17 +768,6 @@ def _merge_refs(
 # 函数用途: 合并来源 task/run/entry ID。
 def _merge_strings(current: list[str], incoming: object) -> list[str]:
     return normalize_string_list([*current, *normalize_string_list(incoming)])
-
-
-# LLM: 权限吸收只朝收紧方向单向进行:任一观察要求人工则整条保持 manual_required,
-# 后续 auto_eligible 观察不得把已 manual 的候选降权;空/未知值 fail-closed 归 manual。
-# 函数用途: 合并两次观察的晋升权限(manual_required 吸收优先)。
-def _merge_promotion_mode(current: str, incoming: str) -> str:
-    if current == "manual_required" or incoming == "manual_required":
-        return "manual_required"
-    if current == "auto_eligible" and incoming == "auto_eligible":
-        return "auto_eligible"
-    return "manual_required"
 
 
 # LLM: 状态历史只记录状态、actor、note 和时间，不复制候选正文。

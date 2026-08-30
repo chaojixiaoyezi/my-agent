@@ -22,6 +22,7 @@ from agent_py_agent.agent.tooling._filesystem_read import (
 from agent_py_agent.agent.tooling._filesystem_search import SearchTextTool
 from agent_py_agent.agent.tooling.executor import ToolOutputProjection
 from agent_py_agent.agent.tooling.models import BaseTool, ToolHandlerOutcome, ToolInvocationContext
+from agent_py_agent.agent.tooling.pty_sessions import TerminalSessionTool
 from agent_py_agent.agent.tooling.registry_invoke import (
     AuthorizedToolDispatchRequest,
     RegistryToolInvokeRequest,
@@ -440,6 +441,86 @@ def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) ->
         assert params["__sandbox_read_roots"] == [str(readable)]
         assert params["__access_mode"] == "workspace-write"
         assert "working_dir" not in params
+
+
+def test_owner_scoped_process_boundary_missing_write_roots_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """畸形 owner boundary 省略写根时，Shell/PTY 都必须得到显式空写根。"""
+
+    owner = tmp_path / "owner"
+    source = owner / "readonly-source"
+    source.mkdir(parents=True)
+    shell = ShellTool(
+        owner,
+        options=ShellToolOptions(owner_scope_root=str(owner)),
+    )
+    boundary = {
+        "execution_cwd": str(source),
+        "allowed_read_roots": [str(source)],
+    }
+    for tool_name, tool, tool_params in (
+        ("run_command", shell, {"command": "pwd"}),
+        ("terminal_session", TerminalSessionTool(shell), {"action": "start", "command": "pwd"}),
+    ):
+        params = _tool_params_with_runtime_boundary(
+            AuthorizedToolDispatchRequest(
+                tool_name=tool_name,
+                tool=tool,
+                tool_params=tool_params,
+                workspace_root=source,
+                write_boundary=boundary,
+                sandbox_read_roots=(source,),
+            )
+        )
+        assert params["__sandbox_write_roots"] == []
+
+
+def test_owner_scoped_process_without_boundary_keeps_workspace_default(
+    tmp_path: Path,
+) -> None:
+    """没有任务 boundary 的 WorkspaceOnly 主会话仍使用 owner-home 默认可写语义。"""
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    shell = ShellTool(
+        owner,
+        options=ShellToolOptions(owner_scope_root=str(owner)),
+    )
+    params = _tool_params_with_runtime_boundary(
+        AuthorizedToolDispatchRequest(
+            tool_name="run_command",
+            tool=shell,
+            tool_params={"command": "pwd"},
+            workspace_root=owner,
+            write_boundary=None,
+        )
+    )
+    assert "__sandbox_write_roots" not in params
+
+
+def test_full_access_boundary_missing_write_roots_keeps_host_write_semantics(
+    tmp_path: Path,
+) -> None:
+    """无 owner 墙的本地 Full Access 不因只读提示字段被静默降权。"""
+
+    source = tmp_path / "external-project"
+    source.mkdir()
+    shell = ShellTool(source, options=ShellToolOptions(owner_scope_root=""))
+    params = _tool_params_with_runtime_boundary(
+        AuthorizedToolDispatchRequest(
+            tool_name="run_command",
+            tool=shell,
+            tool_params={"command": "pwd"},
+            workspace_root=source,
+            write_boundary={
+                "execution_cwd": str(source),
+                "allowed_read_roots": [str(source)],
+            },
+            sandbox_read_roots=(source,),
+        )
+    )
+    assert "__sandbox_write_roots" not in params
 
 
 def test_process_tools_can_enter_read_root_without_promoting_it_to_write(

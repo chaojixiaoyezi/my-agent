@@ -3,7 +3,7 @@ from __future__ import annotations
 """Managed background process session and multi-user scope contracts."""
 
 import json
-import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
 from agent_py_agent.agent.tooling.process_registry import process_registry
 from agent_py_agent.agent.tooling.process_session_store import (
     PROCESS_SESSION_SCHEMA,
@@ -21,8 +22,10 @@ from agent_py_agent.agent.tooling.process_session_store import (
 from agent_py_agent.agent.tooling.process_sessions import ProcessSessionTool
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_test_call,
     execute_approved_registry_test_call,
     execute_registry_test_call,
+    runtime_snapshot_for_tools,
 )
 
 
@@ -53,6 +56,34 @@ def _registry(root: Path) -> ToolRegistry:
             operation_store_required=False,
         )
     )
+
+
+def test_owned_process_stop_is_session_continuation_not_second_approval(
+    tmp_path: Path,
+) -> None:
+    tool = ProcessSessionTool(owner_scope_root=tmp_path, workspace_root=tmp_path)
+    snapshot = runtime_snapshot_for_tools(
+        {tool.model_spec.name: tool},
+        run_id="run-owned-stop",
+    )
+    call = canonical_test_call(
+        snapshot,
+        tool.model_spec.name,
+        {"action": "stop", "session_id": "bg-owned"},
+    )
+
+    decision = ActionPolicy().decide(
+        ActionPolicyRequest(
+            call=call,
+            runtime_snapshot=snapshot,
+            workspace_root=tmp_path,
+            workspace_roots=(tmp_path,),
+            owner_scope_root=str(tmp_path),
+        )
+    )
+
+    assert decision.status == "allow"
+    assert decision.resolved_effect == "mutating"
 
 
 def _call(
@@ -91,11 +122,7 @@ def test_process_session_wait_replaces_shell_sleep_polling(tmp_path: Path) -> No
         "root_task_id": "task-a",
         "run_id": "run-a",
     }
-    command = (
-        f"{shlex.quote(sys.executable)} -c "
-        '"import time; print(\'started\', flush=True); '
-        "time.sleep(0.15); print('done', flush=True)\""
-    )
+    command = "printf 'started\\n'; sleep 0.8; printf 'done\\n'"
 
     started = _payload(
         _call(
@@ -106,6 +133,7 @@ def test_process_session_wait_replaces_shell_sleep_polling(tmp_path: Path) -> No
         )
     )
     assert started["status"] == "started"
+    assert "pid" not in started and "process_pid" not in started
     assert "process_session" in started["hint"]
     assert "sleep" in started["hint"]
 
@@ -126,6 +154,37 @@ def test_process_session_wait_replaces_shell_sleep_polling(tmp_path: Path) -> No
     assert finished["wait_timed_out"] is False
     assert "started" in finished["output_tail"]
     assert "done" in finished["output_tail"]
+    assert "pid" not in finished and "process_pid" not in finished
+
+
+def test_process_summary_uses_session_id_as_only_management_handle(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    scope = {
+        "owner_id": "owner-a",
+        "session_id": "thread-a",
+        "root_task_id": "task-a",
+        "run_id": "run-a",
+    }
+    started = _payload(
+        _call(
+            registry,
+            "run_command",
+            {"command": "echo managed", "run_in_background": True},
+            scope,
+        )
+    )
+
+    status = _payload(
+        _call(
+            registry,
+            "process_session",
+            {"action": "status", "session_id": started["session_id"]},
+            scope,
+        )
+    )
+
+    assert status["session_id"] == started["session_id"]
+    assert "pid" not in status and "process_pid" not in status
 
 
 def test_process_session_hides_other_tui_session(tmp_path: Path) -> None:
@@ -172,7 +231,7 @@ def test_process_session_stop_terminates_owned_process_tree(tmp_path: Path) -> N
         "root_task_id": "task-a",
         "run_id": "run-a",
     }
-    command = f"{shlex.quote(sys.executable)} -c \"import time; time.sleep(20)\""
+    command = "sleep 20"
     started = _payload(
         _call(
             registry,
@@ -258,6 +317,12 @@ def test_managed_network_status_never_promotes_local_listener_to_lan_success(
     )
 
     assert payload["schema"] == "managed_process_network_status.v1"
+    assert payload["listener_pid_evidence"] == {
+        "source": "host_kernel_process_tree",
+        "authority": "observed",
+        "sandbox_visibility": "may_be_hidden",
+    }
+    assert "ps/lsof" in payload["evidence_boundary"]
     assert payload["lan_reachability"] == "unverified_external_probe_required"
     assert payload["external_probe_required"] is True
     assert payload["host_firewall"]["status"] == "explicitly_allowed"
@@ -286,6 +351,35 @@ def test_managed_network_status_reports_loopback_only(monkeypatch) -> None:
     assert payload["host_firewall"] == {"status": "not_applicable", "ports": []}
 
 
+def test_proc_listener_reports_actual_socket_owner_pids(tmp_path: Path) -> None:
+    """监听行展示持有 socket 的真实 PID，不把托管 host 或命令入口冒充监听者。"""
+    from agent_py_agent.agent.tooling.process_network_status import _proc_tcp_listeners
+
+    proc_tcp = tmp_path / "tcp"
+    proc_tcp.write_text(
+        "  sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+        "   0: 00000000:46A1 00000000:0000 0A 00000000:00000000 "
+        "00:00000000 00000000 0 0 4242 1\n",
+        encoding="ascii",
+    )
+
+    bindings = _proc_tcp_listeners(
+        proc_tcp,
+        family=socket.AF_INET,
+        owned_inodes={"4242": {1552016, 1552015}},
+        requested_port=18081,
+    )
+
+    assert bindings == [
+        {
+            "host": "0.0.0.0",
+            "port": 18081,
+            "scope": "non_loopback",
+            "listener_pids": [1552015, 1552016],
+        }
+    ]
+
+
 def test_background_session_outlives_one_shot_launcher_and_is_rehydrated(tmp_path: Path) -> None:
     """子代理式短命 Python 进程退出后，另一个进程仍能查询并停止同一后台会话。"""
 
@@ -295,7 +389,7 @@ def test_background_session_outlives_one_shot_launcher_and_is_rehydrated(tmp_pat
         "root_task_id": "task-cross-process",
         "run_id": "subagent-cross-process",
     }
-    command = f"{shlex.quote(sys.executable)} -c \"import time; time.sleep(20)\""
+    command = "sleep 20"
     script = "\n".join(
         (
             "import json",
@@ -306,7 +400,7 @@ def test_background_session_outlives_one_shot_launcher_and_is_rehydrated(tmp_pat
             f"command = {command!r}",
             "tool = ShellTool(root)",
             "result = tool._start_background_command(",
-            "    command, root, None, None,",
+            "    command, root, None, None, None,",
             "    ProcessAccessScope('owner-cross-process', 'thread-cross-process', ''),",
             ")",
             "print(result.output, flush=True)",

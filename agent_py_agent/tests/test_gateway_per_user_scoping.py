@@ -65,6 +65,63 @@ def test_remote_anonymous_fails_closed_but_local_request_uses_base(tmp_path) -> 
         assert _resolve_request_agent(agent, _req("local-agent", channel)) is agent
 
 
+def test_local_thin_tui_user_resolves_to_physical_owner_scope(tmp_path) -> None:
+    """本机单 Gateway 下的显式 local/user 身份不能退化成共享 local/main。"""
+    agent = _agent(tmp_path, scoping=True)
+
+    alice = _resolve_request_agent(agent, _req("alice", "local"))
+
+    assert alice is not agent
+    assert alice.home_paths.owner_provider == "local"
+    assert alice.home_paths.owner_kind == "user"
+    assert alice.home_paths.owner_id.endswith("alice")
+    assert alice.effective_workspace_root == alice.home_paths.owner_home_dir
+    assert alice.home_paths.owner_tasks_dir == alice.home_paths.owner_home_dir / "tasks"
+    assert alice.home_paths.owner_memory_dir == alice.home_paths.owner_home_dir / "memory"
+    assert alice.config.session_workspace != agent.config.session_workspace
+    assert alice.local_store.db_path != agent.local_store.db_path
+
+
+def test_two_local_thin_tui_users_keep_tasks_memory_and_sessions_separate(tmp_path) -> None:
+    """同一 Gateway 的两个本机用户必须拥有互不重叠的持久目录。"""
+    agent = _agent(tmp_path, scoping=True)
+
+    alice = _resolve_request_agent(agent, _req("alice", "local"))
+    bob = _resolve_request_agent(agent, _req("bob", "local"))
+
+    assert alice is not bob
+    assert alice.home_paths.owner_home_dir != bob.home_paths.owner_home_dir
+    assert alice.home_paths.owner_tasks_dir != bob.home_paths.owner_tasks_dir
+    assert alice.home_paths.owner_memory_long_term_jsonl != bob.home_paths.owner_memory_long_term_jsonl
+    assert alice.config.session_workspace != bob.config.session_workspace
+    assert alice.config.subagent_workspace != bob.config.subagent_workspace
+    assert alice.effective_workspace_roots == [alice.home_paths.owner_home_dir]
+    assert bob.effective_workspace_roots == [bob.home_paths.owner_home_dir]
+
+
+def test_local_thin_tui_group_uses_group_owner_scope(tmp_path) -> None:
+    """本机群组测试身份沿用结构化 chat_id，不能误建成发件人个人目录。"""
+    agent = _agent(tmp_path, scoping=True)
+
+    scoped = _resolve_request_agent(
+        agent,
+        {
+            "user_id": "sender-a",
+            "metadata": {
+                "user_id": "sender-a",
+                "channel": "local",
+                "channel_chat_type": "group",
+                "channel_chat_id": "local-group-1",
+            },
+        },
+    )
+
+    assert scoped.home_paths.owner_provider == "local"
+    assert scoped.home_paths.owner_kind == "group"
+    assert scoped.home_paths.owner_id.endswith("local-group-1")
+    assert scoped.effective_workspace_root == scoped.home_paths.owner_home_dir
+
+
 def test_owner_pool_failure_does_not_fall_back_to_shared_agent(tmp_path, monkeypatch) -> None:
     agent = _agent(tmp_path, scoping=True)
 

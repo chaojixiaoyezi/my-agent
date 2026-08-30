@@ -268,11 +268,49 @@ def test_ensure_my_agent_home_creates_v2_owner_and_system_files(tmp_path: Path):
     assert schema["read_version"] == "my-agent-home.v2"
     assert permissions["filesystem"]["access_mode"] == "workspace-write"
     assert quota["max_subagents"] == 50
+    assert quota["schema_version"] == "quota.v2"
+    assert quota["max_disk_mb"] == 0
     assert paths.owner_skill_policy_json.exists()
     assert paths.owner_tool_policy_json.exists()
     assert paths.shared_indexes_skills_jsonl.exists()
     assert paths.linked_identities_jsonl.exists()
     assert paths.global_index_active_agents_jsonl.exists()
+
+
+def test_ensure_my_agent_home_upgrades_only_untouched_legacy_quota_seed(
+    tmp_path: Path,
+) -> None:
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    paths = ensure_my_agent_home(tmp_path)
+    legacy_default = {
+        "schema_version": "quota.v1",
+        "max_active_agents": 1000,
+        "max_subagents": 50,
+        "max_depth": 4,
+        "max_disk_mb": 102400,
+    }
+    paths.owner_quota_json.write_text(
+        json.dumps(legacy_default, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    ensure_my_agent_home(tmp_path)
+
+    assert json.loads(paths.owner_quota_json.read_text(encoding="utf-8")) == {
+        "schema_version": "quota.v2",
+        "max_active_agents": 1000,
+        "max_subagents": 50,
+        "max_depth": 4,
+        "max_disk_mb": 0,
+    }
+
+    custom = {**legacy_default, "max_disk_mb": 512}
+    paths.owner_quota_json.write_text(json.dumps(custom, sort_keys=True), encoding="utf-8")
+
+    ensure_my_agent_home(tmp_path)
+
+    assert json.loads(paths.owner_quota_json.read_text(encoding="utf-8")) == custom
 
 
 def test_cleanup_legacy_dirs_removes_empty_keeps_nonempty(tmp_path: Path):

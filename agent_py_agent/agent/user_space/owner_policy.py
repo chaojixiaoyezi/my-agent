@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import read_json_object_report
-from ..common.value_parsing import positive_int
+from ..common.value_parsing import non_negative_int, positive_int
 from .home_layout import MyAgentHomePaths
 from .owner_quota import owner_logical_usage_bytes
 from .temporary_grants import list_temporary_grants
@@ -174,8 +174,9 @@ def resolve_effective_owner_policy(
             parent_policy.max_depth if parent_policy else 0,
         ),
         max_disk_mb=_child_capped_limit(
-            _positive_int(quota.get("max_disk_mb"), 102400),
+            _non_negative_int(quota.get("max_disk_mb"), 0),
             parent_policy.max_disk_mb if parent_policy else 0,
+            zero_is_unlimited=True,
         ),
         disabled_tools=tuple(sorted(disabled_tools)),
         memory_enabled=memory_enabled,
@@ -272,9 +273,23 @@ def _positive_int(value: object, default: int) -> int:
     return positive_int(value, default=default) or default
 
 
-def _child_capped_limit(value: int, parent: int) -> int:
+def _non_negative_int(value: object, default: int) -> int:
+    return non_negative_int(value, default=default)
+
+
+# LLM: Most limits use zero as an ordinary lower bound, while disk quota uses zero as unlimited;
+# callers must opt into that semantic so child inheritance cannot accidentally widen a parent cap.
+# 函数用途: 合并当前 owner 与父 owner 的数字上限；磁盘模式下 0 表示不限制。
+def _child_capped_limit(
+    value: int,
+    parent: int,
+    *,
+    zero_is_unlimited: bool = False,
+) -> int:
     if parent <= 0:
         return value
+    if zero_is_unlimited and value <= 0:
+        return parent
     return min(value, parent)
 
 

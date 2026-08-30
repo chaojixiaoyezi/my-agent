@@ -1,5 +1,58 @@
 # COMPLETED
 
+- 2026-08-30 完成 R108 Compact 错误合同和严格门收尾：六个已在控制面使用的 typed
+  Compact code 已全部进入恢复分类表；相邻 176 项回归、Ruff、doc sync、strict code-size、
+  import-boundary、diff 与 clean-package 全过。`AUDIT-02` 按用户要求保留 strict xfail，未改
+  `/audit` 产品逻辑。`.10` 顺序部署后仍只有 `ma-gateway-r108-110` 一个 Gateway，
+  PID `3694064`，MiniMax-M2.7。fresh TUI 中 `/compact` 进度条可见，成功提交
+  `generation 1` 和 `11,595 → 9,186 tokens`，旧历史保留；客户端正常 `/exit`。本轮未提交、
+  未推送远端。
+
+- 2026-08-30 完成 R106 14 路单 Gateway 功能矩阵与 R107 递归工作区闭环。R106 长会话在同一 thread 内生成
+  25 份技术笔记（合计 11,832 行）和 422 行总报告，真实发生 7 次 Compact；会话、权限、Todo/child、Goal、
+  Schedule/Watch、Skill、Memory、capability、child 详情、控制与大输出搜索均取得 TUI/结构化证据。R106
+  孙代理路径错位失败样本未搬运或补写；R107 fresh TUI 中 coordinator 和两名 depth-2 child 共用唯一
+  canonical task root，交付 363/331/122 行三份可由父级直接读取的文件，Gateway 零路径拒绝。R107 仍只有
+  PID `3690272` 监听 8420，模型为 MiniMax-M2.7；本轮未提交、未推送。
+
+- 2026-08-30 完成本地 R106 两项底座候选：owner-scoped Shell 成功/失败统一携带隔离视图事实，避免模型把
+  沙箱内 `/root` 成功扩大成宿主副作用；新增 `/sessions` 只读列出当前 owner 最近会话与精确 resume 命令。
+  对照 会话运行时 bwrap 结构化 roots、会话运行时 resume picker 与 终端交互 ResumeTask；sandbox focused 26 passed，
+  chat/TUI focused 72 项通过。R106/R107 已补真实 TUI 正证；未提交、未推送。
+
+- 2026-08-29 完成 exact child 停止单调性、异步受理与工具清单单一快照收口：旧 runner 保存/heartbeat 不再
+  把已取消 child 写回 RUNNING；直接 Esc 和模型 `cancel_subagents` 都只终止指定 attempt，兄弟继续运行。
+  HTTP 先同步鉴权和幂等受理，再由唯一后台线程执行 canonical cancel，r56 真 TUI 从按键到 accepted 约
+  6.06 秒、到 terminal 约 9.62 秒，未再出现假“无法确认”。另修复远程 `owner_type=user` 被错误拿去匹配
+  agent role，导致 `list_tools` 为 0 的分裂事实；r57 MiniMax-M2.7 真 TUI 只调用一次 `list_tools`，返回
+  30 visible/30 executable 并准确列全，root-only、内部与环境不可用工具仍隐藏。相关本地组合 74 项、远端
+  定向 12 项通过；完整问题、测试、操作失误与未覆盖边界见 TUI 审计。本轮未提交、未推送。
+
+- 2026-08-29 完成双用户同 Gateway 文件/Shell 隔离的真实反证与错误语义收口：u10/u11 自己读写成功、跨
+  owner 文件和 cwd 拒绝、命令正文绝对路径由 bwrap 隐藏且宿主无越界文件。Shell 失败或 stderr 现在向模型
+  投影 owner-only 可见范围，避免把沙箱内 `ENOENT` 误报为宿主目录不存在；model spec 同时禁止用
+  `; echo $?` 遮蔽失败。fresh MiniMax-M2.7 TUI request 返回真实 `COMMAND_FAILED/return_code=1` 并正确
+  说明证据边界；本地/远端 49 项 focused 与静态检查通过。该完成项不宣称能解析任意 shell 正文，也不改变
+  OS sandbox、owner policy 或网络范围。
+
+- 2026-08-29 完成顽固旧代码瘦身与首轮真 TUI 总验收：物理删除旧 acceptance/coverage/closeout、无人调用的
+  恢复与子代理投影旁路，运行合同归位后 import-boundary finding 为 0；当前工作树累计 234 文件、
+  +6,787/-10,618 行。会话运行时 式同轮工具 drain、exact direct-child 当前快照、终态 summary/Todo 投影和
+  process 灰色展示均已落地。`.7` 单 Gateway、MiniMax-M2.7 的 r34/r35 两次原样八路调研都完成：r35
+  8 个 child 全部 DONE，1 个 child 在 113.4k 后 Compact 到 63.7k/`compact 1`，main 读取八份报告、写出
+  321 行/10,888 bytes 横向报告并自然最终回复；终屏 Working/Todo 收起而 child roster 保留。r36 又证明
+  从不同 cwd 启动的同一 WorkspaceOnly owner 不再分裂 durable runtime home；原样超级玛丽 Prompt 2 的
+  5/5 child 自然 DONE，产物 3,120 行，主代理只整合和汇报。唯一一次全仓诊断暴露的问题已按来源 focused
+  复测；Ruff、doc sync、strict code-size、diff、import-boundary 与临时索引 clean-package 严格门通过。
+  测试机缺浏览器 `libgbm.so.1`，因此游戏交互仍记 PARTIAL；本轮未提交、未推送远端。
+
+- 2026-08-28 完成第一轮顽固旧代码瘦身：物理删除零生产调用的 `agent/acceptance/`、runtime DB
+  acceptance mixin、三轴 `closeout_task_run`、废弃 SecretStore 及只验证这些死实现的测试；新 runtime.db
+  只让 Task 保存长期身份，把执行终态留在 TaskRun/AgentRun/Attempt，旧库多余表列保持惰性而不破坏性
+  DROP。`agent_core` 包初始化同步改成无副作用，composition root 改为直接导入具体模块，修掉删除旧
+  re-export 后暴露的循环导入。首批净删约 2.9k 行；runtime DB、子代理 thread/Compact focused 回归已通过，
+  最终产品验收按新最低标准继续使用单 Gateway、MiniMax-M2.7 真 TUI。
+
 - 2026-08-28 `cc4764e` + `c8a2ece` 完成 child Compact 执行权与 Todo 额外计数收口：authoritative
   `task_local` 的 typed `context_overflow` 只作为同一 active attempt 的内联 Compact 边界，不再由通用
   `agent.run()` 提前结案；其它终态、取消、失败与普通可恢复返回的收口不变。Todo 标题只把未映射当前
@@ -236,11 +289,10 @@
   owner 分库/分目录、远程 owner home、write boundary、sandbox、operation 幂等/replay 与逻辑锁保留。
   过期父目录锁不再拦截新 handler 的主链回归已通过；推送、`.7` 部署和真实 TUI 对照尚待完成。
 
-- 2026-08-23 `e94f8ec` 已完成普通计划 会话运行时 式同轮停止核对的严格 gate、推送和 `.7` 唯一 Gateway 部署；
-  native 回归证明 exact open 清单会进入下一次 provider messages，耗尽只 typed blocked。fresh Prompt 4
-  r19 的 5 名 child 全部自然 DONE，第五名在 113.8k 发生一次 canonical Compact 后继续，root 真实跑出
-  112 passed；但模型在 final 前自行关闭 8/8，故未直接触发停止钩子。生成 port 只有原项目约二十分之一的
-  生产代码，独立产物 TUI 因 App 未挂载 Screen 而白屏，不能算完整复刻。完整证据边界见 STATUS/ROADMAP。
+- 2026-08-23 `e94f8ec` 曾部署普通计划的同轮停止核对；该方案已在 2026-08-28 按用户决定退役，因为它会
+  用 open Todo 覆盖模型 plain final 并增加隐藏 provider 调用。历史 Prompt 4 r19、112 passed 和白屏证据
+  继续保留为任务样本，但 stop-nudge 不再是当前产品能力；现行语义见
+  `docs/modules/delivery/01-closeout.md` 与 `docs/ROADMAP.md`“普通计划的 会话运行时 式自然结束”。
 - 2026-08-23 Prompt 4 r18 证明可选 covers 后 root 能继续多批真实编码，但在 canonical Todo 仅完成 5/8、
   构建/测试仍 pending 且机器无 Rust/Cargo 时，普通 final 仍把 durable task 写成 DONE。本地切片已按 会话运行时
   stop hook 增加同一 active turn 的一次结构化清单核对；耗尽后只会 typed blocked，不另起自动续轮，也不
@@ -524,7 +576,7 @@
 - P0 收敛已完成本地验收：产品事实页、根目录 pytest、配置同步、Ruff、真实 blocker/advisory 报告语义、MCP effect 硬门、sandbox fail-closed 与未跟踪运行数据检查均已闭环；发布状态仍以 `docs/PRODUCT_FACTS.md` 为准。
 - P1 主链收敛已完成本地验收：完整 import 矩阵进入 CI，生产 wheel 剥离测试/offline harness，默认 gateway/正式入口/显式插件链收口，真实 embedding 工具检索、POSIX PTY、stdio LSP 与 OpenAI native tools 已接主链；真实生态与规模承诺仍按 `docs/PRODUCT_FACTS.md` 的部分可用/实验性边界描述。
 - P2 scale 主链接线已在当前工作树完成：显式 fail-closed profile、PG/ASGI/RLS、Redis 共享准入、OTLP、独立在线迁移 Job、真实 Agent worker 和 continuous-monitor proof 机制均已接线并做本机真依赖 smoke；十万用户、目标集群灰度和 24 小时真实异构来源仍未证明。
-- 普通 Feishu 对话与工作主链已收口：真实 chat/topic 多轮 transcript、跨会话隔离、同会话顺序执行、结构化任务选择/提升/完成、内置默认 prompt、USER 自主画像与 SOUL/AGENTS 卡片确认、首条消息不被密码 onboarding 吞掉、长任务异步可恢复回送均已落地；scale worker 复用同一执行链。
+- 普通 Feishu 对话与工作主链已收口：真实 chat/topic 多轮 transcript、跨会话隔离、同会话顺序执行、结构化任务选择/提升/完成、内置默认 prompt、USER/AGENTS 自主维护与 SOUL 单独确认、首条消息不被密码 onboarding 吞掉、长任务异步可恢复回送均已落地；scale worker 复用同一执行链。
 - 普通会话累计上下文已接入 owner/thread scope：复用现有 compact 阈值、token 估算和模型后端生成 thread summary，raw transcript 保留；旧聊天进入 owner-local `session_search` 索引。`/verbose off|on|full` 及 typed 工具进度复用持久化回送链，不重提任务。
 - 多 IM 投递底座已在当前工作树收敛：普通最终回复、后台主动消息和显式 `send_message` 共用 `DeliveryService`；收件上下文与回复信封分离，adapter/capabilities/target validator 统一注册，第二个 fake IM 契约无需修改投递主流程即可接入。生产第二平台与正式部署复验仍按产品事实页标注。
 - 普通会话即时控制已在当前工作树收敛：CLI/Feishu 共用 `/status`、`/btw` 和 `/stop`。`/btw` 作为当前
@@ -568,6 +620,33 @@
 - 真机复验继续暴露“结构化完成与 findings delta 同轮出现”时完成信号被 delta 遮住；当前工作树改为
   结构化完成优先，并且 IM 回复信封只携带已投影的人话，不再把内部完成块、结论账标记或宿主路径交给
   adapter。这样既不恢复内部碎碎念，也不会在产物已验收后静默吞掉父代理最终回复。
+
+## 2026-08-29 `.10` R86--R91 底座与真实 TUI 收口
+
+- Owner Memory Curator 改为惰性 soft residency：历史 owner 不再由 maintenance 无工作物化，活跃 scheduler/
+  wake/turn 仍为 hard residency。唯一 Gateway 初始 RSS 从约 509--521MiB 降到约 185--224MiB；R91 下
+  22 路 TUI 与压力任务同时运行时约 275MiB，仍只有一个 8420 listener。
+- dead execution lock 恢复改为 PID + process start token 客观判死后接管；未知旧读调用记 UNKNOWN，未知
+  mutation 记 DIRTY，live/unprovable holder 继续 fail closed。
+- `send_guidance` 不再向终态 child 写永不消费的假队列。R90 fresh TUI 已证明 DONE child 返回专用错误码、
+  无 pending 文件且不复活。
+- capability 自动授权现在以通用 `context_refresh` 结束旧不可变工具快照，并在下一 durable slice 重建工具
+  router。R91 fresh U94 已完成“只读 child → 申请单文件写权限 → 自行写 1,562-byte 报告”，归档中
+  `TOOL_UNAVAILABLE=0`。
+- 本轮 focused 分别通过 149、201、68、86、111 和 69 项；R91 相关 Ruff、PyCompile 与 diff check 通过。
+  未跑全仓 pytest，原因是当前切片远低于约 10,000 行全仓门，且用户要求减少无效全仓测试。
+
+## 2026-08-29 R92 直属 child 结果跨后台续片保持
+
+- 把前台 follow-up 和后台 scheduled/recovery 的 child 完成输入统一到中立
+  `contracts/subagent_completion.py` 投影；每个后续工作片都从 durable observation ledger 按 exact root 与
+  direct parent 重建，不再只依赖一次性 completion wake。
+- 后台上下文预算现在保护已选 child identity 与完整 `final_report_ref`，只允许缩短自然语言正文和减少次要
+  ref；私有 runner payload 与孙代理结果不会越级进入 root。
+- focused 六文件组合通过并保留 2 个既有 xfail；R92 已部署到 `.10` 的唯一 Gateway。fresh U98 4/4 child
+  完成并写出 7,448-byte 对照报告；旧失败 U85 在 `compact 1` 后也恢复整合并自然 final。
+- 七路新 TUI 启动后的 30 个 TUI 合计 PSS 约 2.10GiB，Gateway PSS 约 346MiB，整机 available 约 9.7GiB；
+  没有出现多 Gateway 或随窗口数成倍膨胀。`.7` 当前整机不可达，保留为环境恢复后的复测项。
 
 ## 2026-08-22 裸启动与恢复控制面收口（`.7` 已部署复验）
 

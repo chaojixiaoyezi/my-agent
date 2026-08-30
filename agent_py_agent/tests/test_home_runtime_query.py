@@ -24,7 +24,7 @@ from agent_py_agent.cli.parser import build_parser
 def _write_config(tmp_path: Path, home: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
-        f'workspace_root: "workspace"\n'
+        f'workspace_root: ""\n'
         f'my_agent_home: "{home}"\n'
         'model_backend: "echo"\n'
         'memory_path: "memory.jsonl"\n'

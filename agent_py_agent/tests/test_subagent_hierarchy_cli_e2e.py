@@ -16,7 +16,8 @@ from agent_py_agent.cli.parser import build_parser
 def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
-        'workspace_root: "."\n'
+        'workspace_root: ""\n'
+        f'my_agent_home: "{tmp_path / "home"}"\n'
         'model_backend: "echo"\n'
         'subagent_workspace: "subs"\n',
         encoding="utf-8",

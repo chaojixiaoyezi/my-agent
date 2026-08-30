@@ -38,8 +38,10 @@ def test_gateway_records_background_notice(tmp_path: Path) -> None:
     assert rows[0]["reason"] == "subagent_runner_finished"
     assert "子代理" in rows[0]["summary"]
     assert rows[0]["schema_version"] == "background_notice.v2"
+    assert rows[0]["notice_id"].startswith("notice-")
     assert rows[0]["display_kind"] == "assistant_response"
     assert rows[0]["content"] == report.response
+    assert rows[0]["source_created_at"] == report.created_at
 
 
 def test_gateway_background_notice_carries_final_task_progress(tmp_path: Path) -> None:
@@ -202,7 +204,7 @@ def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
     class _Agent:
         conversation_store = _Store()
 
-    seen: set[float] = set()
+    seen: set[tuple[float, str]] = set()
     _consume_background_notices(_Agent(), "session-1", _Runtime(), [None], seen)
     assert len(published) == 1
     assert published[0] == "子代理已完成，后台自动汇总完成。"
@@ -319,7 +321,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
         def publish_background_response(self, text, *, thread_id=""):
             published.append(text)
 
-    seen: set[float] = set()
+    seen: set[tuple[float, str]] = set()
     assert _consume_background_notices(
         _Agent(), "session-http", _Runtime(), [None], seen
     )
@@ -336,6 +338,89 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
         _Agent(), "session-http", _Runtime(), [None], seen
     )
     assert fetched[1]["after"] == 150.0
+
+
+def test_tui_keeps_distinct_background_replies_with_same_timestamp() -> None:
+    """同一 scheduler tick 的错误回执和最终交付都必须各显示一次。"""
+    from agent_py_agent.cli.chat_parts.tui_threading import (
+        _consume_background_notices,
+    )
+
+    published: list[str] = []
+    calls = [
+        [
+            {
+                "schema_version": "background_notice.v2",
+                "display_kind": "assistant_response",
+                "thread_id": "thread-same-time",
+                "content": "工具绑定暂时失败。",
+                "created_at": 150.0,
+            }
+        ],
+        [
+            {
+                "schema_version": "background_notice.v2",
+                "display_kind": "assistant_response",
+                "thread_id": "thread-same-time",
+                "content": "工具绑定暂时失败。",
+                "created_at": 150.0,
+            },
+            {
+                "schema_version": "background_notice.v2",
+                "display_kind": "assistant_response",
+                "thread_id": "thread-same-time",
+                "content": "任务完成，以下是最终交付。",
+                "created_at": 150.0,
+            },
+        ],
+    ]
+    fetched_after: list[float] = []
+
+    class _Agent:
+        def request_background_notices(self, _session_id, *, after, event_after):
+            fetched_after.append(after)
+            rows = calls.pop(0) if calls else []
+            return {
+                "ok": True,
+                "cursor": 150.0,
+                "transcript_events": [],
+                "event_cursor": event_after,
+                "active_task_count": 0,
+                "agent_activity": {
+                    "active_task_count": 0,
+                    "active_task_projection_ok": True,
+                    "subagent_projection_ok": True,
+                    "task_progress_projection_ok": True,
+                    "subagents": [],
+                    "task_progress_items": [],
+                },
+                "notices": rows,
+            }
+
+    class _Runtime:
+        def update_background_activity(self, *_args, **_kwargs):
+            return False
+
+        def publish_task_progress_snapshot(self, *_args, **_kwargs):
+            return False
+
+        def publish_background_response(self, text, *, thread_id=""):
+            del thread_id
+            published.append(text)
+
+    seen: set[tuple[float, str]] = set()
+    assert _consume_background_notices(
+        _Agent(), "session-same-time", _Runtime(), [None], seen
+    )
+    assert _consume_background_notices(
+        _Agent(), "session-same-time", _Runtime(), [None], seen
+    )
+
+    assert fetched_after == [0.0, 150.0]
+    assert published == [
+        "工具绑定暂时失败。",
+        "任务完成，以下是最终交付。",
+    ]
 
 
 def test_tui_notice_transport_failure_preserves_projection_and_reports_failure() -> None:
@@ -634,6 +719,7 @@ def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) 
         BackgroundTranscriptSink,
     )
     from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
     from agent_py_agent.agent.gateway_parts.http_handlers import (
         read_gateway_client_notices,
     )
@@ -675,7 +761,7 @@ def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) 
 
     first = read_gateway_client_notices(
         agent,
-        scope=SimpleNamespace(conversation_id="session-rich-cursor"),
+        scope=GatewayControlScope("local-agent", "chat", "session-rich-cursor"),
         after=0.0,
         event_after=0,
     )
@@ -689,7 +775,7 @@ def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) 
 
     second = read_gateway_client_notices(
         agent,
-        scope=SimpleNamespace(conversation_id="session-rich-cursor"),
+        scope=GatewayControlScope("local-agent", "chat", "session-rich-cursor"),
         after=0.0,
         event_after=first["event_cursor"],
     )
@@ -1054,6 +1140,7 @@ def test_tui_notice_loop_keeps_active_background_session_realtime(monkeypatch) -
 
 def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: Path) -> None:
     from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
     from agent_py_agent.agent.gateway_parts.http_handlers import (
         read_gateway_client_notices,
     )
@@ -1077,7 +1164,7 @@ def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: P
         }
     )
     agent = SimpleNamespace(conversation_store=store)
-    scope = SimpleNamespace(conversation_id="session-active")
+    scope = GatewayControlScope("local-agent", "chat", "session-active")
 
     active = read_gateway_client_notices(agent, scope=scope, after=0.0)
     assert active["ok"] is True
@@ -1111,6 +1198,80 @@ def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: P
     )
     interrupted = read_gateway_client_notices(agent, scope=scope, after=0.0)
     assert interrupted["active_task_count"] == 0
+
+
+def test_gateway_notice_snapshot_uses_resolved_owner_and_scope_identity(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts import http_handlers
+    from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
+
+    owner_store = ConversationStore(tmp_path / "owner-conversations")
+    owner_thread = owner_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-a",
+            "channel": "tui-test",
+            "channel_conversation_id": "session-owner",
+            "channel_user_id": "user-a",
+            "now": 1.0,
+        }
+    )
+    owner_store.bind_task(
+        {
+            "thread_id": owner_thread.thread_id,
+            "task_id": "task-owner",
+            "goal": "owner 后台任务",
+            "now": 2.0,
+        }
+    )
+    base_store = ConversationStore(tmp_path / "base-conversations")
+    base_agent = SimpleNamespace(conversation_store=base_store)
+    owner_agent = SimpleNamespace(conversation_store=owner_store)
+    scope = GatewayControlScope("user-a", "tui-test", "session-owner")
+    resolved: list[object] = []
+
+    def resolve(_base_agent, exact_scope):
+        resolved.append(exact_scope)
+        return owner_agent
+
+    monkeypatch.setattr(http_handlers, "resolve_loaded_gateway_scope_agent", resolve)
+
+    snapshot = http_handlers.read_gateway_client_notices(
+        base_agent,
+        scope=scope,
+        after=0.0,
+    )
+
+    assert resolved == [scope]
+    assert snapshot["ok"] is True
+    assert snapshot["active_task_count"] == 1
+    assert snapshot["agent_activity"]["active_task_count"] == 1
+
+
+def test_gateway_notice_cold_owner_does_not_materialize_agent(monkeypatch) -> None:
+    from agent_py_agent.agent.gateway_parts import http_handlers
+    from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
+
+    calls: list[GatewayControlScope] = []
+
+    def resolve(_base_agent, exact_scope):
+        calls.append(exact_scope)
+        return None
+
+    monkeypatch.setattr(http_handlers, "resolve_loaded_gateway_scope_agent", resolve)
+
+    snapshot = http_handlers.read_gateway_client_notices(
+        SimpleNamespace(),
+        scope=GatewayControlScope("cold-user", "local", "cold-session"),
+        after=0.0,
+    )
+
+    assert len(calls) == 1
+    assert snapshot["ok"] is True
+    assert snapshot["owner_state"] == "cold"
+    assert snapshot["active_task_count"] == 0
 
 
 def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:

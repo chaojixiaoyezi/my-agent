@@ -457,14 +457,15 @@ def test_is_active_running():
 def test_default_forbidden_write_roots_not_empty():
     """非空列表。"""
     roots = _default_forbidden_write_roots()
-    assert len(roots) >= 4
+    assert len(roots) >= 3
 
 
-def test_default_forbidden_write_roots_contains_home():
-    """包含主目录。"""
+def test_default_forbidden_write_roots_does_not_shadow_allowed_owner_workspace():
+    """宿主 home 祖先不能覆盖其下已授权 owner workspace。"""
     from pathlib import Path
     roots = _default_forbidden_write_roots()
-    assert any(str(Path.home()) in r for r in roots)
+    assert str(Path.home()) not in roots
+    assert str(Path.home() / ".ssh") in roots
 
 
 # ── 边界场景测试 ──────────────────────────────────────────────────────────

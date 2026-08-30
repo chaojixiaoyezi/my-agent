@@ -16,7 +16,12 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
 )
+from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+    pending_natural_user_reply,
+)
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_result_payload import (
     RecordRunnerResultParams,
@@ -28,6 +33,44 @@ class _ExplodingBackend:
 
     def generate(self, prompt: str, on_chunk=None):  # noqa: ARG002
         raise AssertionError("stale runner attempt must not call the model again")
+
+
+def test_runner_recovery_rebinds_pending_user_guidance_to_new_attempt(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", subagent_workspace="subs"),
+        tmp_path,
+    )
+    manager = agent.subagents
+    task = manager.create_run(goal="长任务", thought="", plan=["继续"])
+    first = manager.lifecycle.prepare_runner_attempt(task.id)
+    first_attempt = first.runner_active_attempt_id
+    entry = agent.conversation_store.append_guidance_once(
+        {
+            "target_type": "agent_run",
+            "target_id": task.id,
+            "message": "恢复后继续处理这条插话。",
+            "metadata": {"expected_turn_id": first_attempt},
+        },
+        dedupe_key="runner-recovery/message-1",
+    )
+    run = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert run is not None
+    settled = manager.runtime_db.settle_agent_attempt(
+        agent_run_id=str(run["agent_run_id"]),
+        attempt_id=first_attempt,
+    )
+    assert settled["settled"] is True
+    manager.lifecycle.abandon_runner_attempt(task.id, first_attempt, reason="gateway_restart")
+
+    recovered = manager.lifecycle.prepare_runner_attempt(task.id, retry_reason="gateway_restart")
+
+    assert recovered.runner_active_attempt_id != first_attempt
+    pending = agent.conversation_store.pending_guidance("agent_run", task.id)
+    assert [item.guidance_id for item in pending] == [entry.guidance_id]
+    assert pending[0].metadata["expected_turn_id"] == recovered.runner_active_attempt_id
+    recovery = recovered.attributes["guidance_recovery"]
+    assert recovery["rebound"] == 1
+    assert recovery["dead_attempt_ids"] == [first_attempt]
 
 
 def test_stale_attempt_guard_blocks_abandoned_runner_tools(tmp_path):
@@ -182,6 +225,67 @@ def test_late_done_result_cannot_overwrite_runtime_cancelled_attempt(tmp_path):
     assert result.ok is False
     assert "conflicting with runtime terminal fact" in result.message
     assert manager.load(task.id).status == "CANCELLED"
+
+
+def test_stale_runner_snapshot_cannot_reopen_cancelled_canonical_task(tmp_path):
+    manager = SubAgentManager(
+        tmp_path / "subs",
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    task = manager.create_run(goal="长任务", thought="模拟取消竞态", plan=["执行"])
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    stale = manager.load(task.id)
+    cancelled = manager.load(task.id)
+    cancelled.status = "CANCELLED"
+    cancelled.failure_type = "cancelled"
+    cancelled.runner_active_attempt_id = ""
+    cancelled.ended_at = 123.0
+    cancelled.attributes = {
+        **dict(cancelled.attributes or {}),
+        "cancel_subagents": {
+            "reason": "conversation_user_stop",
+            "previous_status": "RUNNING",
+        },
+    }
+    manager.save(cancelled)
+
+    stale.status = "RUNNING"
+    stale.runner_active_attempt_id = prepared.runner_active_attempt_id
+    stale.heartbeat_at = 456.0
+    manager.save(stale)
+
+    loaded = manager.load(task.id)
+    assert loaded.status == "CANCELLED"
+    assert loaded.failure_type == "cancelled"
+    assert loaded.runner_active_attempt_id == ""
+    assert loaded.ended_at == 123.0
+    assert loaded.attributes["cancel_subagents"]["reason"] == "conversation_user_stop"
+    assert stale.status == "CANCELLED"
+
+
+def test_structured_user_stop_can_explicitly_reactivate_same_run(tmp_path):
+    manager = SubAgentManager(
+        tmp_path / "subs",
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    task = manager.create_run(goal="长任务", thought="用户停止后续跑", plan=["执行"])
+    task.status = "CANCELLED"
+    task.failure_type = "cancelled"
+    task.attributes = {
+        **dict(task.attributes or {}),
+        "cancel_subagents": {
+            "reason": "conversation_user_stop",
+            "previous_status": "RUNNING",
+        },
+    }
+    manager.save(task)
+
+    resumed = manager.lifecycle.prepare_runner_attempt(task.id)
+
+    assert resumed.status == "RUNNING"
+    assert resumed.failure_type == ""
+    assert resumed.runner_active_attempt_id
+    assert manager.load(task.id).status == "RUNNING"
 
 
 def test_matching_done_result_projects_after_runtime_settlement(tmp_path):
@@ -412,6 +516,30 @@ def test_dispatch_round_returns_to_parent_when_child_report_exists(tmp_path):
     assert first is None
     assert second is None
     assert params.tool_context == []
+
+
+def test_root_create_keeps_same_turn_open_for_immediate_child_guidance() -> None:
+    params = _tool_loop_params("创建孩子后立刻补充要求。")
+    params.executed_tools.append("create_subagents")
+    agent = SimpleNamespace(
+        subagent_run_ids_for_request=lambda _task_id: ["child-1"],
+        subagents=SimpleNamespace(
+            list_runs=lambda: [SimpleNamespace(id="child-1", status="RUNNING")]
+        ),
+    )
+
+    response = completion_response_after_tool_round(
+        ToolRoundCompletionRequest(
+            agent=agent,
+            params=params,
+            response=ModelResponse(text="已创建孩子", backend="test"),
+            before_executed_count=1,
+            subagent_output_written=False,
+        )
+    )
+
+    assert response is None
+    assert pending_natural_user_reply(params) is None
 
 
 def test_task_local_context_refresh_ends_slice_without_another_model_round() -> None:

@@ -17,6 +17,7 @@ from ..conversation.authority import (
 )
 from ..local_storage import RuntimeGateLedgerRecord
 from ..tooling.runtime_contracts import tool_arguments_hash
+from .run_task_workspace_writer import current_run_tool_output_archive_root
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
 
 
@@ -98,6 +99,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     _attach_effective_owner_scope(merged, agent, params)
     _attach_runtime_approved_actions(merged, params)
     _attach_task_workspace_roots(merged, params)
+    _attach_tool_output_read_root(merged, agent, params)
     _attach_main_conversation_execution_cwd(merged, agent, params)
     # 配置级额外写根（additional_write_roots）：测试共享工作区等场景扩展沙箱写域。
     extra_roots = _string_list(getattr(getattr(agent, "config", None), "additional_write_roots", ()))
@@ -126,6 +128,25 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
             merged.get("tool_rate_limit_records"), rate_rows
         )
     return merged or boundary
+
+
+# LLM: Main runs and subagents need a stable read root matching the first archive write.
+# Preserve an explicit child-run root; otherwise bind the host-cached owner-scoped run root.
+# Missing canonical agent.root must fail closed by omitting this optional read authority, not by
+# guessing from cwd or crashing unrelated read-only/tool-policy calls.
+# 函数用途: 有明确用户根目录时让 read_artifact 读本轮大输出；缺根时不猜目录也不扩大权限。
+def _attach_tool_output_read_root(
+    boundary: dict[str, object],
+    agent: object,
+    params: object,
+) -> None:
+    if _text(boundary.get("artifact_read_root")):
+        return
+    if not _text(getattr(agent, "root", "")):
+        return
+    boundary["artifact_read_root"] = str(
+        current_run_tool_output_archive_root(agent, params)
+    )
 
 
 # LLM: runtime_approved_actions 只接受当前 ToolLoopExecuteParams 中已校验 dict，并与调用方批准列表按完整字段去重。
@@ -383,15 +404,23 @@ def _attach_owner_task_write_scope(
         if (candidate := _resolved_path(raw)) is not None
         and _is_relative_to(candidate, owner_root)
     ]
+    capability_roots = [
+        candidate
+        for raw in _string_list(boundary.get("capability_write_roots"))
+        if (candidate := _resolved_path(raw)) is not None
+        and _is_relative_to(candidate, owner_root)
+    ]
     # 已有的结构化授权可能是内部 task 子树，也可能是父代理明确分配的用户项目根。
-    # 后者必须同时出现在 product_write_roots 且位于 owner home 内；这样既不吞掉共享
-    # 项目写权，也不会把一个畸形 allowed_write_roots 单独当成授权来源。
+    # 后者必须同时出现在 product_write_roots 或 capability_write_roots 且位于 owner
+    # home 内；这样既不吞掉正式能力授权，也不会把一个畸形 allowed_write_roots 单独
+    # 当成授权来源。
     scoped: list[str] = []
     for raw in existing_roots:
         candidate = _resolved_path(raw)
         if candidate is not None and (
             _is_relative_to(candidate, task_root)
             or any(_is_relative_to(candidate, root) for root in product_roots)
+            or any(_is_relative_to(candidate, root) for root in capability_roots)
         ):
             text = str(candidate)
             if text not in scoped:

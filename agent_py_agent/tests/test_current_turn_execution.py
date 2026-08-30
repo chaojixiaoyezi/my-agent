@@ -11,10 +11,6 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling import BaseTool, ToolHandlerOutcome
 from agent_py_agent.agent.tooling.operation_verification import (
     build_operation_verification,
-    incomplete_final_mutation_facts,
-    post_failure_workspace_mutation_followup_facts,
-    post_failure_workspace_mutation_followup_signature,
-    prior_unresolved_mutation_facts,
     public_operation_verification,
     redact_executed_operation_labels,
     render_current_turn_execution_facts,
@@ -375,296 +371,6 @@ def test_plain_chat_without_operations_is_unchanged() -> None:
     assert redact_executed_operation_labels("只是聊聊天。", verification) == "只是聊聊天。"
 
 
-def test_only_an_unsuccessful_terminal_mutation_requires_reply_rewrite() -> None:
-    failed = {
-        "tool": "remember",
-        "call_id": "call-failed",
-        "operation_id": "operation-failed",
-        "ok": False,
-        "handler_executed": True,
-        "tool_operation_status": "failed",
-        "effect_outcome": "failed",
-        "error_code": "MEMORY_WRITE_FAILED",
-        "parameters": {"action": "add"},
-    }
-    facts = incomplete_final_mutation_facts(_agent(), [failed])
-
-    assert facts["latest_mutating_operation"] == {
-        "tool": "remember",
-        "action": "add",
-        "status": "failed",
-        "handler_executed": True,
-        "error_code": "MEMORY_WRITE_FAILED",
-        "effect_outcome": "failed",
-    }
-    assert facts["operation_verification"]["status"] == "failed"
-
-    succeeded = {
-        **failed,
-        "call_id": "call-succeeded",
-        "operation_id": "operation-succeeded",
-        "ok": True,
-        "tool_operation_status": "succeeded",
-        "effect_outcome": "succeeded",
-        "error_code": "",
-    }
-    assert incomplete_final_mutation_facts(_agent(), [failed, succeeded]) == {}
-
-
-def test_not_started_tail_keeps_prior_succeeded_effect_authoritative() -> None:
-    succeeded = {
-        "tool": "remember",
-        "call_id": "call-succeeded",
-        "operation_id": "operation-succeeded",
-        "ok": True,
-        "handler_executed": True,
-        "tool_operation_status": "succeeded",
-        "effect_outcome": "succeeded",
-        "parameters": {"action": "add"},
-    }
-    blocked = {
-        "tool": "remember",
-        "call_id": "call-blocked",
-        "operation_id": "operation-blocked",
-        "ok": False,
-        "handler_executed": False,
-        "failure_stage": "authorization",
-        "error_code": "ACTION_BLOCKED",
-        "effect_outcome": "not_started",
-        "parameters": {"action": "add"},
-    }
-
-    verification = build_operation_verification(_agent(), [succeeded, blocked])
-
-    assert verification["status"] == "partial"
-    assert verification["counts"]["succeeded"] == 1
-    assert verification["counts"]["not_started"] == 1
-    assert incomplete_final_mutation_facts(_agent(), [succeeded, blocked]) == {}
-    assert incomplete_final_mutation_facts(_agent(), [blocked])[
-        "latest_mutating_operation"
-    ]["status"] == "not_started"
-
-
-def test_unknown_tail_still_overrides_prior_succeeded_effect() -> None:
-    succeeded = {
-        "tool": "remember",
-        "call_id": "call-succeeded",
-        "operation_id": "operation-succeeded",
-        "ok": True,
-        "handler_executed": True,
-        "tool_operation_status": "succeeded",
-        "effect_outcome": "succeeded",
-        "parameters": {"action": "add"},
-    }
-    unknown = {
-        "tool": "remember",
-        "call_id": "call-unknown",
-        "operation_id": "operation-unknown",
-        "ok": False,
-        "handler_executed": True,
-        "tool_operation_status": "unknown",
-        "effect_outcome": "unknown",
-        "parameters": {"action": "add"},
-    }
-
-    facts = incomplete_final_mutation_facts(_agent(), [succeeded, unknown])
-
-    assert facts["latest_mutating_operation"]["status"] == "unknown"
-
-
-def test_prior_unknown_effect_survives_a_later_different_success() -> None:
-    unknown = {
-        "tool": "remember",
-        "call_id": "call-unknown",
-        "operation_id": "operation-unknown",
-        "ok": False,
-        "handler_executed": True,
-        "tool_operation_status": "unknown",
-        "effect_outcome": "unknown",
-        "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
-        "parameters": {"action": "add"},
-    }
-    succeeded = {
-        "tool": "remember",
-        "call_id": "call-succeeded",
-        "operation_id": "operation-succeeded",
-        "ok": True,
-        "handler_executed": True,
-        "tool_operation_status": "succeeded",
-        "effect_outcome": "succeeded",
-        "parameters": {"action": "replace"},
-    }
-
-    facts = prior_unresolved_mutation_facts(_agent(), [unknown, succeeded])
-
-    assert facts["schema"] == "prior_unresolved_mutation.v1"
-    assert facts["unresolved_operation_count"] == 1
-    assert facts["later_succeeded_operation_count"] == 1
-    assert facts["counts"]["unknown"] == 1
-    assert facts["unresolved_operations"][0]["call_id"] == "call-unknown"
-    assert facts["operation_verification"]["status"] == "uncertain"
-    assert prior_unresolved_mutation_facts(_agent(), [succeeded, unknown]) == {}
-
-
-def test_failed_call_then_final_workspace_write_requests_one_soft_followup() -> None:
-    records = [
-        {
-            "tool": "read_file",
-            "call_id": "call-failed-check",
-            "ok": False,
-            "handler_executed": True,
-            "error_code": "CHECK_FAILED",
-            "parameters": {},
-        },
-        {
-            "tool": "write_file",
-            "call_id": "call-fix",
-            "operation_id": "operation-fix",
-            "ok": True,
-            "handler_executed": True,
-            "tool_operation_status": "succeeded",
-            "parameters": {},
-        },
-    ]
-
-    facts = post_failure_workspace_mutation_followup_facts(_agent(), records)
-
-    assert facts == {
-        "schema": "post_failure_workspace_mutation_followup.v1",
-        "latest_workspace_mutation": {"tool": "write_file", "status": "succeeded"},
-        "prior_failed_call_count": 1,
-        "latest_prior_failure": {
-            "tool": "read_file",
-            "status": "failed",
-            "error_code": "CHECK_FAILED",
-        },
-        "tool_record_after_latest_mutation": False,
-    }
-
-
-def test_simple_workspace_write_and_post_write_check_do_not_request_followup() -> None:
-    simple_write = {
-        "tool": "write_file",
-        "call_id": "call-write",
-        "operation_id": "operation-write",
-        "ok": True,
-        "handler_executed": True,
-        "tool_operation_status": "succeeded",
-        "parameters": {},
-    }
-    failed = {
-        "tool": "read_file",
-        "call_id": "call-failed",
-        "ok": False,
-        "handler_executed": True,
-        "parameters": {},
-    }
-    check = {
-        "tool": "read_file",
-        "call_id": "call-check",
-        "ok": True,
-        "handler_executed": True,
-        "parameters": {},
-    }
-
-    assert post_failure_workspace_mutation_followup_facts(_agent(), [simple_write]) == {}
-    assert (
-        post_failure_workspace_mutation_followup_facts(
-            _agent(),
-            [failed, simple_write, check],
-        )
-        == {}
-    )
-
-
-def test_stale_verification_survives_reads_until_a_later_real_check() -> None:
-    root = "/tmp/project"
-    failed_check = {
-        "tool": "run_command",
-        "call_id": "call-test-failed",
-        "ok": False,
-        "handler_executed": True,
-        "error_code": "COMMAND_FAILED",
-        "parameters": {"command": "go test -v ."},
-        "tool_result_envelope": {
-            "verification_evidence": {
-                "id": 41,
-                "root": root,
-                "status": "failed",
-            }
-        },
-    }
-    fixed = {
-        "tool": "write_file",
-        "call_id": "call-fix",
-        "operation_id": "operation-fix",
-        "ok": True,
-        "handler_executed": True,
-        "tool_operation_status": "succeeded",
-        "parameters": {"path": f"{root}/example.go"},
-        "tool_result_envelope": {
-            "verification_state": [
-                {
-                    "root": root,
-                    "status": "stale",
-                    "last_verification_id": 41,
-                    "last_verification_status": "failed",
-                    "changed_paths": [f"{root}/example.go"],
-                }
-            ]
-        },
-    }
-    read_after_fix = {
-        "tool": "search_text",
-        "call_id": "call-read",
-        "ok": True,
-        "handler_executed": True,
-        "parameters": {"query": "func"},
-    }
-
-    facts = post_failure_workspace_mutation_followup_facts(
-        _agent(),
-        [failed_check, fixed, read_after_fix],
-    )
-
-    assert facts["schema"] == "post_failure_workspace_mutation_followup.v2"
-    assert facts["tool_record_count_after_latest_mutation"] == 1
-    assert facts["stale_workspace_verification"] == [
-        {
-            "root": root,
-            "status": "stale",
-            "last_verification_id": 41,
-            "last_verification_status": "failed",
-            "changed_path_count": 1,
-        }
-    ]
-    assert post_failure_workspace_mutation_followup_signature(facts).startswith(
-        "verification-cycle:"
-    )
-
-    passed_check = {
-        "tool": "run_command",
-        "call_id": "call-test-passed",
-        "ok": True,
-        "handler_executed": True,
-        "parameters": {"command": "go test -v ."},
-        "tool_result_envelope": {
-            "verification_evidence": {
-                "id": 42,
-                "root": root,
-                "status": "passed",
-            }
-        },
-    }
-    assert (
-        post_failure_workspace_mutation_followup_facts(
-            _agent(),
-            [failed_check, fixed, read_after_fix, passed_check],
-        )
-        == {}
-    )
-
-
 class _AlwaysFailMutationTool(BaseTool):
     model_spec = make_test_model_spec(
         "always_fail_mutation",
@@ -683,10 +389,9 @@ class _AlwaysFailMutationTool(BaseTool):
         )
 
 
-# LLM: This fake mutating tool proves that a completion-conflict continuation
-# still exposes the original tool surface and can establish a new succeeded
-# terminal effect in the same active turn.
-# 函数用途: 测试模型收到收口冲突后能继续调用工具，并用新的成功终态完成返工。
+# LLM: This successful tool is offered beside the failing tool so the model may
+# choose a repair naturally; the host must not manufacture a repair turn.
+# 类用途: 模拟模型看见失败回执后自主选择的修复动作。
 class _RepairMutationTool(BaseTool):
     model_spec = make_test_model_spec(
         "repair_mutation",
@@ -699,15 +404,11 @@ class _RepairMutationTool(BaseTool):
         return ToolHandlerOutcome(self.model_spec.name, True, '{"ok":true}')
 
 
-# LLM: Provider-facing assertions must inspect both the prompt and native
-# message projection because runtime guidance follows the active protocol.
-# 函数用途: 汇总 fake backend 本轮真正可见的提示，兼容文本和原生工具协议测试。
-def _model_visible_text(prompt: str, messages: object) -> str:
-    return prompt + "\n" + json.dumps(messages or [], ensure_ascii=False, sort_keys=True)
-
-
-class _FailedMutationFalseClaimBackend:
-    name = "failed-mutation-false-claim"
+# LLM: The backend deliberately requests a command-style failure and then
+# reports it as the requested observation. A third model call is a regression.
+# 类用途: 复现真 TUI 的预期非零退出码场景，验证模型最终回复不被机器验收覆盖。
+class _ExpectedFailureReportBackend:
+    name = "expected-failure-report"
     context_window_tokens = 200_000
 
     def probe_tool_capability(self):
@@ -722,10 +423,11 @@ class _FailedMutationFalseClaimBackend:
 
     def __init__(self) -> None:
         self.calls = 0
-        self.repair_turn_tool_counts: list[int] = []
 
+    # LLM: Call one emits the typed failure; call two is the plain final that must end the turn.
+    # 函数用途: 依次返回失败工具调用和如实汇报，任何额外调用都会让测试失败。
     def generate(self, prompt: str, on_chunk=None, tools=None, messages=None, **kwargs) -> ModelResponse:
-        del on_chunk
+        del prompt, on_chunk, tools, messages, kwargs
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
@@ -737,20 +439,17 @@ class _FailedMutationFalseClaimBackend:
                     "input": {},
                 }],
             )
-        if self.calls in {2, 3, 4}:
-            if self.calls >= 3:
-                visible = _model_visible_text(prompt, messages)
-                assert "completion_conflict.v1" in visible
-                assert f'\\"repair_attempt\\":{self.calls - 2}' in visible
-                assert "已经成功完成修改" in visible
-                self.repair_turn_tool_counts.append(len(list(tools or [])))
-            return ModelResponse(text="已经成功完成修改。", backend=self.name)
-        assert "[natural-user-reply]" in prompt
-        assert "operation_incomplete" in prompt
-        return ModelResponse(text="这次修改实际没有成功，当前请求尚未完成。", backend=self.name)
+        assert self.calls == 2
+        return ModelResponse(
+            text="命令按要求执行并返回退出码 7；这是被观察结果，不是模型服务失败。",
+            backend=self.name,
+        )
 
 
-def test_failed_final_mutation_gets_bounded_repair_before_fallback(tmp_path) -> None:
+# LLM: A typed failure remains in operation_verification, but plain final is the
+# 会话运行时 turn boundary and must not be converted into OPERATION_INCOMPLETE.
+# 函数用途: 验证预期失败只需一次工具轮和一次最终回复，不再触发五轮机器返工。
+def test_expected_failed_operation_keeps_model_natural_final(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
@@ -760,7 +459,7 @@ def test_failed_final_mutation_gets_bounded_repair_before_fallback(tmp_path) -> 
         tmp_path / "workspace",
     )
     agent.tools.register(_AlwaysFailMutationTool())
-    backend = _FailedMutationFalseClaimBackend()
+    backend = _ExpectedFailureReportBackend()
     agent.backend = backend
 
     result = agent.run(
@@ -771,20 +470,23 @@ def test_failed_final_mutation_gets_bounded_repair_before_fallback(tmp_path) -> 
         task_id="task-failed-mutation",
     )
 
-    assert backend.calls == 5
-    assert all(count > 0 for count in backend.repair_turn_tool_counts)
-    assert "已经成功完成修改" not in result.response
-    assert "实际没有成功" in result.response
-    assert result.runtime_status == "unfinished"
-    assert result.runtime_reason == "OPERATION_INCOMPLETE"
+    assert backend.calls == 2
+    assert result.response == "命令按要求执行并返回退出码 7；这是被观察结果，不是模型服务失败。"
+    assert result.runtime_status == "ok"
+    assert result.runtime_reason == ""
     assert result.operation_verification["status"] == "failed"
 
 
-class _FailedMutationRepairBackend(_FailedMutationFalseClaimBackend):
-    name = "failed-mutation-repair"
+# LLM: This backend proves natural model autonomy: after seeing the failed tool
+# result it may choose another tool itself, without host-injected conflict text.
+# 类用途: 模拟模型自主换方法修复，然后正常最终汇报。
+class _NaturalRepairBackend(_ExpectedFailureReportBackend):
+    name = "natural-repair"
 
+    # LLM: The second call directly chooses repair; no completion-conflict packet may be needed.
+    # 函数用途: 依次返回失败调用、修复调用和最终回复。
     def generate(self, prompt: str, on_chunk=None, tools=None, messages=None, **kwargs) -> ModelResponse:
-        del on_chunk
+        del prompt, on_chunk, tools, messages, kwargs
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
@@ -797,18 +499,6 @@ class _FailedMutationRepairBackend(_FailedMutationFalseClaimBackend):
                 }],
             )
         if self.calls == 2:
-            return ModelResponse(text="已经成功完成修改。", backend=self.name)
-        if self.calls == 3:
-            visible = _model_visible_text(prompt, messages)
-            assert "completion_conflict.v1" in visible
-            assert '\\"repair_attempt\\":1' in visible
-            assert "已经成功完成修改" in visible
-            available = {
-                str(item.get("name") or item.get("function", {}).get("name") or "")
-                for item in list(tools or [])
-                if isinstance(item, dict)
-            }
-            assert "repair_mutation" in available
             return ModelResponse(
                 text="",
                 backend=self.name,
@@ -818,16 +508,14 @@ class _FailedMutationRepairBackend(_FailedMutationFalseClaimBackend):
                     "input": {},
                 }],
             )
-        if self.calls == 4:
-            return ModelResponse(text="修复和复验已经完成。", backend=self.name)
-        assert self.calls == 5
-        visible = _model_visible_text(prompt, messages)
-        assert "prior_unresolved_reconciliation.v1" in visible
-        assert "修复和复验已经完成" in visible
+        assert self.calls == 3
         return ModelResponse(text="修复和复验已经完成。", backend=self.name)
 
 
-def test_failed_final_mutation_can_repair_with_tools_in_same_active_turn(tmp_path) -> None:
+# LLM: Natural repair remains possible because ordinary tool results continue
+# sampling the same active turn; only the post-final machine loop was removed.
+# 函数用途: 验证删掉机器验收后，模型仍能自己看到失败、换工具并完成修复。
+def test_failed_operation_can_still_be_repaired_naturally(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
@@ -838,7 +526,7 @@ def test_failed_final_mutation_can_repair_with_tools_in_same_active_turn(tmp_pat
     )
     agent.tools.register(_AlwaysFailMutationTool())
     agent.tools.register(_RepairMutationTool())
-    backend = _FailedMutationRepairBackend()
+    backend = _NaturalRepairBackend()
     agent.backend = backend
 
     result = agent.run(
@@ -849,7 +537,7 @@ def test_failed_final_mutation_can_repair_with_tools_in_same_active_turn(tmp_pat
         task_id="task-failed-mutation-repair",
     )
 
-    assert backend.calls == 5
+    assert backend.calls == 3
     assert result.response == "修复和复验已经完成。"
     assert result.runtime_status == "ok"
     assert result.operation_verification["status"] == "partial"

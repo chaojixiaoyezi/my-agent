@@ -45,7 +45,11 @@ from .registry_workspace import effective_registry_cwd
 from .runtime_contracts import ToolCall, ToolResult
 
 _allowed_tool_set = allowed_tool_set
-_DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec"})
+# LLM: 这两项都只允许宿主显式下发给受控 runner；普通 root 会话既不能直接
+# 调用，也不能经 tool_search 重新发现。capability_request 的 run_id 由 child
+# runner 注入，root 没有上级可申请，暴露后只会制造缺 run_id 的未知副作用账。
+# 常量用途: 把内部执行器和子代理专属能力申请入口从普通主代理工具面隐藏。
+_DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec", "capability_request"})
 
 
 def _agent_config_int(key: str) -> int:
@@ -87,7 +91,7 @@ class ToolRegistryParams:
         ""  # 多用户隔离 0 层:per-user agent 的 owner home;空=不隔离(单租户/主代理)
     )
     owner_type: str = "main_agent"
-    protected_persona_root: str = ""  # SOUL/AGENTS 单一受控写入口使用；admin bypass 也不清空
+    protected_persona_root: str = ""  # 三份 Persona 只走专用入口；admin bypass 也不清空
     owner_quota_max_bytes: int = 0
     owner_quota_policy_available: bool = True
     access_mode: str = "workspace-write"
@@ -193,20 +197,18 @@ class ListToolsTool(BaseTool):
         )
 
 
-# LLM: tool_search 只能在请求快照中检索，搜索结果永远不能扩大 allowed_tools 或恢复不可用工具。
-# 类用途: 从本轮已授权且已就绪的 deferred 工具中检索下一回合可展开的 Schema。
+# LLM: tool_search 只能在请求快照中检索；一次命中即为下一模型回合展开 Schema，但永远不能扩大 allowed_tools 或恢复不可用工具。
+# 类用途: 从本轮已授权且已就绪的 deferred 工具中搜索，并按 会话运行时 的单步协议为下一回合展开命中工具。
 class ToolSearchTool(BaseTool):
     """会话运行时 discovery for tools that are registered but not initially exposed."""
 
     _DEFAULT_SEARCH_LIMIT = 5
-    _MAX_LOAD_NAMES = 5
-    _SEARCH_DESCRIPTION_MAX_CHARS = 240
 
     model_spec = ToolModelSpec(
         name="tool_search",
         description=(
-            "按当前权限与实时可用性搜索尚未展开的工具。普通搜索只返回精简候选，不加载 Schema；"
-            "选定后再次调用并传 load_names，只有这些精确名称会在下一次模型调用临时展开。"
+            "按当前权限与实时可用性搜索尚未展开的工具。一次搜索即会在下一次模型调用中临时展开命中工具的 Schema，"
+            "不需要再次调用或填写选择参数。"
             "当任务需要 /goal 生命周期、外部协作、web、vision 或 MCP，而当前工具列表里没有对应工具时使用。"
         ),
         input_schema={
@@ -218,13 +220,6 @@ class ToolSearchTool(BaseTool):
                     "minimum": 1,
                     "maximum": 20,
                     "description": "可选。搜索时最多返回多少个精简候选，默认 5。",
-                },
-                "load_names": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 1,
-                    "maxItems": _MAX_LOAD_NAMES,
-                    "description": "可选。只填写上一次搜索结果中的精确工具名，最多 5 个；下一次模型调用临时展开。",
                 },
             },
             "required": ["query"],
@@ -240,7 +235,6 @@ class ToolSearchTool(BaseTool):
             keywords=("tool search", "工具搜索", "发现工具", "子代理", "goal", "协作"),
             examples=(
                 '{"tool":"tool_search","query":"创建并管理子代理","limit":5}',
-                '{"tool":"tool_search","query":"创建并管理子代理","load_names":["create_subagents"]}',
             ),
         ),
     )
@@ -259,7 +253,7 @@ class ToolSearchTool(BaseTool):
         return self._execute_snapshot(params, self.registry.runtime_snapshot())
 
     # LLM: 受限子代理只能搜索父级下发的快照子集，不能看到未授权工具名或说明。
-    # 函数用途: 使用统一请求快照完成工具搜索并返回可加载名称。
+    # 函数用途: 使用统一请求快照完成单步工具搜索并返回下一回合会展开的名称。
     def execute_scoped(
         self,
         params: dict[str, Any],
@@ -267,8 +261,8 @@ class ToolSearchTool(BaseTool):
     ) -> ToolHandlerOutcome:
         return self._execute_snapshot(params, context.runtime_snapshot)
 
-    # LLM: 搜索算法仍复用唯一 retriever；这里只注入运行快照，不维护第二套目录。
-    # 函数用途: 校验查询参数并在指定快照中检索 deferred specs。
+    # LLM: 搜索算法仍复用唯一 retriever；命中结果作为 typed envelope 交给下一模型回合，不得另造选择状态。
+    # 函数用途: 校验查询参数，并在指定快照中一次搜索、展开 deferred specs。
     def _execute_snapshot(
         self,
         params: dict[str, Any],
@@ -283,19 +277,11 @@ class ToolSearchTool(BaseTool):
             limit = 0
         if limit < 1 or limit > 20:
             return _tool_search_invalid_arguments("limit 必须在 1-20 之间")
-        if "load_names" in params:
-            return _load_deferred_tool_search_result(
-                self.registry,
-                params.get("load_names"),
-                snapshot,
-                max_load_names=self._MAX_LOAD_NAMES,
-            )
         return _search_deferred_tool_result(
             self.registry,
             query,
             limit=limit,
             snapshot=snapshot,
-            description_max_chars=self._SEARCH_DESCRIPTION_MAX_CHARS,
         )
 
 
@@ -308,30 +294,25 @@ def _tool_search_invalid_arguments(message: str) -> ToolHandlerOutcome:
     )
 
 
-def _load_deferred_tool_search_result(
+# LLM: 搜索结果必须同时携带文本协议 Schema 与 typed loaded names，以便原生与文本 Provider 共享单步语义。
+# 函数用途: 搜索最多 limit 个 deferred 工具，返回完整参数说明并标记为下一回合临时可见。
+def _search_deferred_tool_result(
     registry: Any,
-    requested: object,
-    snapshot: ToolRuntimeSnapshot,
+    query: str,
     *,
-    max_load_names: int,
+    limit: int,
+    snapshot: ToolRuntimeSnapshot,
 ) -> ToolHandlerOutcome:
-    if not isinstance(requested, list):
-        return _tool_search_invalid_arguments("load_names 必须是工具名列表")
-    names = list(dict.fromkeys(str(item or "").strip() for item in requested))
-    names = [name for name in names if name]
-    if not names or len(names) > max_load_names:
-        return _tool_search_invalid_arguments(
-            f"load_names 必须包含 1-{max_load_names} 个精确工具名"
-        )
-    specs = registry.select_deferred_specs(names, runtime_snapshot=snapshot)
+    specs = registry.search_deferred_specs(
+        query,
+        limit=limit,
+        runtime_snapshot=snapshot,
+    )
     loaded_names = [spec.name for spec in specs]
-    loaded_set = set(loaded_names)
     payload = {
         "schema_name": "tool_search_output",
-        "schema_version": 2,
-        "mode": "load",
-        # Text-protocol fallbacks need the selected schema in the tool result;
-        # native providers receive the same specs for exactly the next call.
+        "schema_version": 3,
+        "mode": "search_and_load",
         "tools": [
             {
                 "name": spec.name,
@@ -343,49 +324,12 @@ def _load_deferred_tool_search_result(
             for spec in specs
         ],
         "loaded_for_next_model_call": loaded_names,
-        "not_loaded": [name for name in names if name not in loaded_set],
     }
     return ToolHandlerOutcome(
         "tool_search",
         True,
         json.dumps(payload, ensure_ascii=False),
         result_envelope={"tool_search": {"loaded_tool_names": loaded_names}},
-    )
-
-
-def _search_deferred_tool_result(
-    registry: Any,
-    query: str,
-    *,
-    limit: int,
-    snapshot: ToolRuntimeSnapshot,
-    description_max_chars: int,
-) -> ToolHandlerOutcome:
-    specs = registry.search_deferred_specs(
-        query,
-        limit=limit,
-        runtime_snapshot=snapshot,
-    )
-    payload = {
-        "schema_name": "tool_search_output",
-        "schema_version": 2,
-        "mode": "search",
-        "tools": [
-            {
-                "name": spec.name,
-                "category": spec.category,
-                "description": str(spec.description or "")[:description_max_chars],
-            }
-            for spec in specs
-        ],
-        "loaded_for_next_model_call": [],
-        "next_step": "再次调用 tool_search，并在 load_names 中填写选中的精确工具名。",
-    }
-    return ToolHandlerOutcome(
-        "tool_search",
-        True,
-        json.dumps(payload, ensure_ascii=False),
-        result_envelope={"tool_search": {"loaded_tool_names": []}},
     )
 
 
@@ -623,22 +567,6 @@ class ToolRegistry:
         hits = self.retriever.search(str(query or ""), searchable, max(1, min(20, int(limit))))
         by_name = {spec.name: spec for spec in searchable}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
-
-    # LLM: 精确加载仍只能从同一个请求快照的 deferred 子集中做交集，名称参数不能创造权限。
-    # 函数用途: 按调用方给出的顺序选择本轮已授权且可用的 deferred 工具。
-    def select_deferred_specs(
-        self,
-        names: list[str],
-        *,
-        runtime_snapshot: ToolRuntimeSnapshot | None = None,
-    ) -> list[ToolModelSpec]:
-        specs = self.specs(
-            include_orchestration=True,
-            runtime_snapshot=runtime_snapshot,
-        )
-        deferred = set(self.catalog_deferred_categories)
-        by_name = {spec.name: spec for spec in specs if spec.category in deferred}
-        return [by_name[name] for name in names if name in by_name]
 
     # LLM: 文本协议目录与原生 Schema 共享同一快照，协议差异只影响渲染形式。
     # 函数用途: 把本轮工具快照渲染成有界文本目录。

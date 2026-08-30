@@ -1,7 +1,8 @@
 # 受管后台进程会话
 
-状态：后台 session 主链 `8f50d19` 已部署 `.7` 唯一 Gateway并通过 fresh r53 MiniMax-M2.7 真机验收；
-`network_status` 只读可达性投影已在当前 worktree 实现，待本地严格 gate、部署与独立客户端探针验收。
+状态：后台 session 主链和 `network_status` 只读投影已部署 `.7` 唯一 Gateway；fresh r53 验收了跨 runner
+存活/停止，fresh r10 验收了稳定 session handle、真实 listener PID 和外部探针边界，fresh r27 验收了
+启动观察期内的立即退出不会再被报告成“已启动”。
 
 ## 解决问题
 
@@ -33,6 +34,9 @@ run_command(run_in_background=true)
        -> bwrap --die-with-parent --new-session
             -> 用户命令及其后代
   -> managed_process_session.v1 受保护记录
+  -> 有界启动观察（0.5 秒）
+       -> 仍存活：status=started + stable session_id
+       -> 已退出：status=exited + exit_code + output_tail
   -> process_session list/status/wait/network_status/stop
 ```
 
@@ -70,7 +74,9 @@ run_command(run_in_background=true)
 
 - 只接受已经通过 owner/conversation scope 校验的 exact managed session；不扫描或控制无关进程。
 - Linux `/proc` 下用 session 进程树的 socket inode 识别该树真正持有的 TCP listener，区分 loopback 与
-  non-loopback；端口参数只筛选观测结果，不授予访问权。
+  non-loopback；每条绑定附真实持有 socket 的 `listener_pids`，端口参数只筛选观测结果，不授予访问权。
+- listener PID 是宿主内核对 exact managed tree 的权威只读观测；`run_command` 沙箱可能看不到宿主 PID，
+  因此沙箱内 `ps/lsof` 无结果不能推翻这条事实。
 - firewalld 可用时只执行固定的只读 `--state` / `--query-port`，报告“显式放行”“未显式放行”或“未知”；
   service rule、nftables、云安全组、路由、NAT 和上游网络未被观察时不得推断。
 - non-loopback listener 只证明服务接受非回环地址，不证明另一台机器能连接。结果固定要求独立外部探针，
@@ -88,17 +94,21 @@ run_command(run_in_background=true)
 - `command + cwd + output_file + host_state_file`
 - `status + exit_code + started_at + finished_at`
 
-模型只能提供 `session_id` 和 action。store root 与访问 scope 都由 ToolRegistry/ToolExecutor 注入，不能由
-模型覆盖。错误 scope 与不存在继续统一返回 `PROCESS_NOT_FOUND`。
+模型可见启动/状态结果只提供稳定 `session_id`，不公开上述 host/child 内部 PID。模型只能提供
+`session_id` 和 action；store root 与访问 scope 都由 ToolRegistry/ToolExecutor 注入，不能由模型覆盖。
+错误 scope 与不存在继续统一返回 `PROCESS_NOT_FOUND`。
 
 `network_status` 返回 `managed_process_network_status.v1`，包含精确 session、可选端口、进程树 listener、
-绑定范围、主机防火墙显式规则和 `external_reachability=unverified_external_probe_required`。只有来自另一
+`listener_pids`、宿主观测权威/沙箱可见性、绑定范围、主机防火墙显式规则和
+`lan_reachability=unverified_external_probe_required`。只有来自另一
 机器/目标网络的真实请求才可把“局域网可达”写成已验证；本工具本身永远不生成该成功结论。
 
 ## 失败和回收
 
 - host 未完成有界启动握手：返回 `COMMAND_FAILED`，回收该 host 树。
 - 受保护记录无法落盘：先回收 host，再返回失败；绝不留下“已经运行但无人能管”的服务。
+- 记录落盘后在 0.5 秒启动观察期内退出：同一次工具结果返回真实 `exit_code/output_tail`；非零退出为
+  `COMMAND_FAILED`，零退出为成功的 `status=exited`，两者都不能叫“后台运行中”。
 - 无法取得 PID 出生指纹：持久会话启动失败并回收，不能退化为只凭 PID 管理。
 - 日志超过上限：host 终止真实命令树并留下 `reason=log_limit_exceeded`。
 - agent runner/Gateway 退出：不自动杀已批准的受管会话；另一个同 scope 进程可重新水合。
@@ -122,7 +132,9 @@ run_command(run_in_background=true)
 4. 原 runner 退出后日志上限仍生效。
 5. 后台短命命令能保存真实退出码；停止完整进程树不留后代。
 6. `network_status` 只返回 exact session 进程树的 listener；loopback 与 non-loopback 不混淆，主机防火墙
-   没有显式 port rule 时保持保守状态，且任何结果都要求外部探针。
+   没有显式 port rule 时保持保守状态，listener PID 必须来自 socket inode owner，且任何结果都要求外部探针。
+7. 已占用端口、导入错误等立即失败必须在首个 `run_command` 结果中返回非零退出和日志尾部；只有越过
+   启动观察期仍存活的命令才返回 `status=started`。观察期必须有界，不能把正常长服务变成阻塞调用。
 
 真机必须使用 `.7` 的一个 Gateway、MiniMax-M2.7 和 fresh TUI：child 经 owner TUI 批准后启动本地 HTTP
 服务；child 和 root 工作片自然结束至少十秒后端口仍监听，随后同一用户会话可由 `process_session`
@@ -136,3 +148,14 @@ run_command(run_in_background=true)
 27 秒、root final 至少 12 秒后 HTTP 仍为 200 且正文含 r53。另一 Python 进程从 owner sandbox 外的
 `0600` 记录水合 `running`，错误 conversation 返回 `PROCESS_NOT_FOUND`；精确 stop 后 host 与 bwrap PID
 均消失、端口关闭、持久终态为 `killed`。一次性 launch spec 已删除，Gateway 全程只有一个。
+
+`ma-cleanup-process-pid-r10` 补充完成身份验收：模型只用 `bg-...` 作为管理句柄，`network_status` 返回
+`listener_pids=[1563961]`，与宿主 `ss` 的 18083 listener 一致；模型没有再用沙箱 `ps/lsof` 否定宿主事实，
+最终仍明确局域网未由另一台机器验证。r9 暴露的 compact 计数、路径双重 rebase 和审批复用问题单独留在
+`docs/audits/TUI_FUNCTION_AUDIT_20260828.md`，不混入本合同通过结论。
+
+`ma-cleanup-background-r27` 补充完成启动诚实性验收：18478 首次启动越过 0.5 秒观察期，返回
+`status=started` 和 `bg-1787946151-9c482822e21d4546`；同一会话第二次用完全相同参数启动时复用精确审批，
+但端口冲突在首个工具结果中直接成为 `COMMAND_FAILED/exit_code=1`，MiniMax-M2.7 明确回复
+`Address already in use`，没有再说第二个服务已经启动。测试结束后用各自 TUI 的 `process_session stop`
+清理 18474--18478，宿主核对已无监听。

@@ -602,11 +602,15 @@ def _publish_provider_thinking(
     )
 
 
-# LLM: 该观察器只读取宿主显式 thinking sink；complete 仅在 backend 声明 block-stop 能力时附加，旧后端仍收到普通 callable。
-# 函数用途: 为一次模型调用组装向后兼容的思考增量/完成观察器。
+# LLM: Only backends declaring the typed thinking-completion capability may receive this keyword;
+# untyped/fake/custom backends keep the historical generate call shape instead of failing at runtime.
+# 函数用途: 只给明确支持思考流边界的后端组装增量/完成观察器，旧后端不接收陌生参数。
 def _thinking_stream_observer(backend: object, state: object):
     params = getattr(state, "params", None)
-    if not _provider_thinking_projection_enabled(params):
+    supports_typed_thinking = bool(
+        getattr(backend, "supports_thinking_completion", False)
+    )
+    if not supports_typed_thinking or not _provider_thinking_projection_enabled(params):
         return None
     sink_owner = getattr(params, "effective_on_chunk", None)
     delta_sink = getattr(sink_owner, "write_thinking_delta", None)
@@ -621,9 +625,7 @@ def _thinking_stream_observer(backend: object, state: object):
         ),
         stream_kind="thinking",
     )
-    if bool(getattr(backend, "supports_thinking_completion", False)) and callable(
-        complete_sink
-    ):
+    if callable(complete_sink):
         complete = partial(_publish_streamed_thinking_completion, state, complete_sink)
         return _ThinkingStreamObserver(delta_sink, complete, activity_sink)
     if callable(delta_sink):

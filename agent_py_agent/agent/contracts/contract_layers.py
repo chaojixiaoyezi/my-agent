@@ -45,7 +45,6 @@ _CORE_PREFIXES = (
     "state_machine",
 )
 _CORE_NAMES = {
-    "acceptance_contract",
     "activity_timeout",
     "approval_gate",
     "contract_doctor",

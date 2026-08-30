@@ -14,11 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.tool_output_paths import tool_output_index_paths_for_lookup
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_schema_payload,
 )
-from .tool_output_externalizer import tool_output_index_paths_for_lookup
 
 CONTROL_PLANE_QUERY_SCHEMA = RuntimeMemorySchemaOptions("control_plane_query")
 CONTROL_PLANE_TASK_RUN_REF_SCHEMA = RuntimeMemorySchemaOptions("control_plane_task_run_ref")

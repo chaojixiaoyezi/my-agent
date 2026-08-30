@@ -129,6 +129,7 @@ python3 -m agent_py_agent chat --gateway
 
 ```text
 /help                  查看帮助
+/sessions              只读列出当前用户最近会话及精确 resume 命令；不切换正在运行的窗口
 /status                立即查看当前任务状态，并列出命名 Audit/Goal 的名称、运行时长和状态
 /btw <内容>            仅纠偏当前运行任务一次；不会带到下一任务
 /stop                  像停止按钮一样打断当前窗口正在执行的一轮及其子代理；命名 Audit/Goal 不受影响
@@ -393,10 +394,11 @@ python3 -m agent_py_agent adapter file --watch
 
 `/goal` 是同一会话上的持续目标层，不是新会话或新 Agent。旧的未命名 `/goal <目标>` 仍保持单目标兼容语义；显式 `/goal <时长> <名称> <任务>` 可以在同一 thread 中并存，每个 Goal 都有独立 task/goal ID、计时和续跑事件。Audit 只支持命名语法；名称是不含空格、最多 64 个字符、区分大小写的用户句柄，真正执行权来自当前 owner/thread 内稳定的 `audit_id`。每个 Audit 的资料位于 owner 自己的 `audits/<audit_id>/`，不会与普通 `tasks/` 或其他 Audit 混放。`prepare` 只把这一轮临时带入该目录，不建立第二份 transcript、Memory、Compact 或黏住的 Audit 模式；草稿与生效要求分别保存，明确发布后才切换，运行中的完整批次仍用旧要求完成。`/status` 只概览名称、已运行时长和状态；`/goal <名称> clear`、`/audit <名称> clear` 或主代理的结构化停止工具只影响精确同名项。告诉主代理名称即可停止唯一匹配项；若同名 Audit 和 Goal 同时存在，程序会拒绝猜测并要求指明类型。普通 `/stop` 仍只中断当前窗口，不删除 transcript、任务工作区或记忆，也不会停止命名 Audit/Goal。多个 Goal 同时存在时，普通聊天不会猜测其中某个是“当前目标”，精确后台续跑轮只读取自己的 Goal，因此不会把后台目标菜单污染进普通对话。只有消息开头的显式 `/audit` 命令能建立 Audit 范围；程序不从普通正文判断是否属于 Audit 或是否已经确认修改。
 
-默认安装使用飞书长连接并开启私聊密码卡；首次设置卡不会吞掉用户的第一条消息。`USER.md` 中的称呼、画像和稳定偏好可由 Agent 通过
-`update_persona` 直接维护，但每次只能变更一个单行事实，并必须携带当前这条用户消息中的逐字
-`source_quote`；画像值不在原文里就拒绝写入。`SOUL.md`/`AGENTS.md` 必须走同一工具的确认链，飞书用户
-点击卡片前不会写入。基础文件、补丁或 shell 直接碰人格文件会在任务晋升前被拒，并明确报告没有发生变更。
+默认安装使用飞书长连接并开启私聊密码卡；首次设置卡不会吞掉用户的第一条消息。`USER.md` 中的称呼、画像和稳定偏好，以及
+`AGENTS.md` 中的长期工作约定，都由当前 owner 的 Agent 通过 `update_persona` 自主维护；单项保持一个单行事实，
+USER 多项可用一次原子 `operations` 批量提交。可选 `source_quote` 只进入版本审计，不参与自然语言授权。
+只有 `SOUL.md` 的性格、语气和核心人设变更必须走确认链，飞书用户点击卡片前不会写入。基础文件、补丁或
+shell 直接碰三份人格文件都会在任务晋升前被拒，并明确报告没有发生变更。
 默认产品规则来自随包发布的 `builtin:prompts/default.md`，不依赖启动目录。
 
 前台 watch 调试入口：

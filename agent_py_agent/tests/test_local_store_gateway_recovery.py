@@ -21,6 +21,7 @@ from agent_py_agent.agent.gateway_parts import (
     submit_gateway_ask,
     write_json_file,
 )
+from agent_py_agent.agent.gateway_parts.recovery import repair_gateway_terminal_projections
 from agent_py_agent.agent.gateway_parts.request_worker import _iter_pending_request_paths
 from agent_py_agent.agent.io import append_jsonl
 from agent_py_agent.agent.local_storage import LocalStore
@@ -170,6 +171,51 @@ def test_gateway_startup_requeued_request_does_not_block_fresh_pending():
         assert (paths.done / fresh_path.name).exists()
         assert old_pending.exists()
         assert not (paths.responses / "gwreq-old.json").exists()
+
+
+def test_gateway_terminal_projector_skips_completed_projection(monkeypatch, tmp_path):
+    agent = _make_recovery_agent(tmp_path)
+    paths = gateway_paths(agent)
+    _ensure_gateway_dirs(paths)
+    request_id, _request_path, _created = submit_gateway_ask(
+        paths,
+        params=GatewayAskParams(prompt="终态投影只修复一次", save=False),
+    )
+    assert _process_gateway_requests(agent, paths, worker_id="marker-worker") == 1
+    marker_dir = paths.root / "projection_state" / "terminal_complete"
+    marker = marker_dir / f"{request_id}.json"
+    assert marker.exists()
+
+    def refuse_repeat(*_args, **_kwargs):
+        raise AssertionError("completed terminal projection must not replay")
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.gateway_parts.recovery._recover_committed_terminal_processing",
+        refuse_repeat,
+    )
+    projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=16)
+
+    assert projected == 0
+    assert errors == []
+
+
+def test_gateway_terminal_marker_invalidates_when_response_projection_changes(tmp_path):
+    agent = _make_recovery_agent(tmp_path)
+    paths = gateway_paths(agent)
+    _ensure_gateway_dirs(paths)
+    request_id, _request_path, _created = submit_gateway_ask(
+        paths,
+        params=GatewayAskParams(prompt="缺失投影必须自动补回", save=False),
+    )
+    assert _process_gateway_requests(agent, paths, worker_id="repair-worker") == 1
+    response_path = paths.responses / f"{request_id}.json"
+    response_path.unlink()
+
+    projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=16)
+
+    assert projected == 1
+    assert errors == []
+    assert response_path.exists()
 
 
 def test_gateway_worker_prioritizes_fresh_pending_over_due_recovery_request():

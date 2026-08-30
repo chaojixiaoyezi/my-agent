@@ -17,6 +17,78 @@
 
 ## 下一版优先级
 
+### TUI 常驻进程回收与两台测试机资源同负载对照
+
+状态：R105 `.10` 已分组采样，`.7` SSH 阻塞待恢复
+
+解决问题：tmux 会话未退出时 Python TUI 会长期保留，测试累计约 50 个客户端后其总 RSS 已大于 Gateway；
+如果只看整机 used，会误判为单 Gateway 内存泄漏。下一步在 `.7` 恢复后用相同 Gateway、owner 数、空闲/活跃
+比例和长任务负载，分别记录 Gateway PSS、TUI RSS、runner RSS、后台进程与 10 分钟空闲回落；再决定是否需要
+显式 idle close、会话管理提示或真正的进程修复。不得按墙钟杀仍有 active turn/child/审批/PTY 的客户端。
+
+### child 创建后的启动阶段、roster revision 与详情首事件可解释性
+
+状态：typed phase 与详情首屏已本地实现并通过 focused，待 `.7/.10` 多 TUI 重复验收
+
+解决问题：r56 中从主代理发出创建请求到 child runner 真正开始约 231.7 秒；期间 roster 可能长时间只显示
+“等待启动”，刚进入详情页又会暂时空白。用户无法区分 dispatcher 排队、进程启动、模型首事件慢还是投影
+revision 迟到，容易把慢模型当成死锁，也可能在看不见 prompt 时重复操作。
+
+当前候选已按 `queued → starting → waiting_first_event → running` 投影，并把首事件绑定到 exact run/attempt；
+完整 child goal 可读后先显示为 user block，goal/首事件暂未持久化时保留启动说明和 Working，不再画空白详情。
+下一步在 `.7/.10` 单 Gateway、多 owner、多 TUI 重复测慢首事件与切换详情，同时量化
+`dispatch accepted → runner process → owner activity revision → first durable transcript event` 四段。不能把 PENDING
+冒充 RUNNING，不能伪造 child prompt，也不能为了 UI 快而创建第二 runner。
+
+### Owner 自主 Memory 与 SOUL 单独确认
+
+状态：本地实现与 owner 隔离 focused 通过，待 `.7/.10` 真 TUI 验收
+
+解决问题：旧入口把 USER/AGENTS/长期记忆、Lesson/HOT 的部分合法维护也统一推到人工确认，用户长期使用时
+会积压候选；如果直接放开，又可能让模型跨 owner、无证据覆盖或把普通文本当机器授权。
+
+当前候选按结构化 target/type/origin/action 推导晋升模式：当前 owner 的长期事实、USER、AGENTS、Lesson/HOT
+在证据、scope、CAS、quota 和冲突门内自主推进；只有 `SOUL.md` 修改保留本人确认。候选与 Persona 全程从
+同一 owner home 解析，replace/remove 必须 exact target，旧的合法非 SOUL manual 候选可升级到当前主链；
+`/audit` 没有改。下一步用不同 owner 的真实 TUI 写入相近 subject，验证互不可见、幂等和重启后仍隔离。
+
+### fresh capability 审批链与剩余环境能力验收
+
+状态：focused/历史链有证据，当前全功能矩阵仍未 fresh TUI 完成
+
+解决问题：`capability_request → resolve_capability_requests → controlled_exec` 目前分别有合同回归和历史样本，
+但 R50--R57 没有一条同 fresh child、同 owner TUI 从请求、展示、批准到原调用续跑的完整证据；
+`publish_audit_update` 也缺 active Audit 成功样本，`send_message` 则因没有真实 IM channel 正确 unavailable。
+
+下一轮按完整审计的 35 工具矩阵补这三条，不用 fake/模型口述冒充。Windows ConPTY、macOS 右键复制和
+测试机 `libgbm.so.1` 浏览器依赖属于环境缺口，应在具备对应环境后单列验收，不反向写测试专用产品分支。
+
+### live Compact 摘要污染与只读任务写报告冲突
+
+状态：只读优先级已在 `.7` 真 TUI 通过；手动 Compact Esc 本地合同已修，待 fresh `.7` 真 TUI；live handoff
+结构校验待下一次自然触发
+
+解决问题：真实植物大战僵尸只读验收在 generation 5/6 连续 Compact 时，MiniMax-M2.7 先返回一段原始
+`<minimax:tool_call>` 伪写文件协议，后又只返回“写入验收报告”的半句。旧代码只检查非空，导致坏摘要进入
+下一轮，模型在 6/6 Todo 后从头重读；通用“研究必须写报告”提示还与用户明确“只读、不要写文件”冲突。
+
+当前候选要求 live handoff 使用固定 marker 和六个有序语义栏，拒绝工具协议、缺栏与过短动作句并退到 typed
+IR 机械投影；通用研究纪律明确服从本轮只读/不落盘要求。两个 focused 文件 91 项、PyCompile、Ruff 和
+`git diff --check` 已通过。部署后的原长 TUI 已连续两轮只读核对、纠正旧结论并直接最终回复，磁盘无报告
+文件；期间触发的是 transcript Compact generation 7，并非 live-tool，因此不能把 fixed handoff validator
+冒充真机已触发。随后手动 Compact 真机复现了 Esc 无目标、仍提交 generation 的独立缺口；当前候选已把
+Compact 登记为 exact cancellable operation，精确 stop 走 durable urgent lane，供应商断流并在 checkpoint/CAS
+前复核中断。下一次 fresh `.7` TUI 必须证明 Esc 后 generation 不变、原历史可继续回答，未完成前不宣称通过。
+
+### 代码瘦身第二轮：区分产品合同与离线评测脚手架
+
+状态：设计中
+
+解决问题：`agent/contracts/` 仍同时承载产品运行协议、错误分类、离线评测和历史 acceptance 命名模块；仅按
+文件名或单次 grep 批量删除，可能误伤仍由 CLI、测试或发布流程消费的合同，也会让测试代码继续混入发布包
+边界。下一轮先生成“生产导入 / CLI 导入 / 测试专用 / 文档历史”四类依赖清单，再迁移或删除已证实的测试专用
+产品文件。不得恢复本轮已退休的机器验收数据库，也不得为了缩行数删除结构化安全门。
+
 ### 主代理“正在调用模型”与“等待子代理”展示分相
 
 状态：设计中
@@ -96,6 +168,10 @@ thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消
 同一 typed observer 的完成边界，流内完成后禁止 response fallback 重放，并让 TUI 兼容消费一次旧迟到
 终态。完整 focused 与严格 gate 已通过，代码已推送并部署 `.7` 唯一 Gateway。原 r55 恢复后的新请求中，
 第 95 条唯一 `assistant_thinking` 严格早于第 96 条首个 `model_delta`，屏幕底部为 assistant final；该缺口完成。
+
+2026-08-30 R106 递归复验发现孙代理虽继承 cwd/roots，却可能丢失父级完整 `run_workspace`，从而在 manager
+runtime 另造任务树并把产物写错家。当前已让父级 canonical task root 覆盖 nested attributes；depth-2
+focused 与 R107 fresh TUI 均通过，所有孙代理产物同根、父级可读且 Gateway 零路径拒绝，本条重新标为完成。
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 
@@ -400,24 +476,19 @@ thread。`53498c1` 按 会话运行时 容量 128 的 bounded channel 适配为 
 真实调用成功，9 个 TUI 自然轮询只生成 5 个 `gateway-http_*` worker，旧 request thread 为 0，RSS 约
 132 MB 稳定。下一阶段回到用户给定长任务/会话运行时 对照矩阵，不再把本次 transport 故障混入正式评分。
 
-### 普通计划的 会话运行时 式同轮停止核对
+### 普通计划的 会话运行时 式自然结束
 
-状态：r9 已出现直接 open-Todo 真 TUI 失败；no-save 修复已过 focused/严格 gate，待发布和复验
+状态：2026-08-28 已删除 Todo/operation 的普通 final 后置机器判官，focused 通过，待真 TUI 复验
 
-解决问题：模型自己留下未完成 Todo 时，旧底座仍把普通 final 写成整个任务完成，造成“5/8 已做却
-DONE”的假收口。当前按 会话运行时 stop hook 在同一 active turn 有界返工一次；不扫描业务产物、不恢复机器
-验收、不自动新开下一轮。核对后仍有 open 项则诚实保留为 blocked，供用户在原 task 继续。
+模型自己留下 open Todo、测试失败或命令非零时，Todo 与 operation ledger 会继续作为下一次模型采样、
+Compact/resume 和 TUI 的结构化事实；它们不再覆盖 plain final，也不自动追加 provider call。历史
+`plan_closeout.py`、`completion_conflict.v1`、写后验证 followup 和 `OPERATION_INCOMPLETE` 续跑已物理删除。
+显式 `/goal`、直属 child 等待、UNKNOWN 副作用、危险路径、权限和幂等仍由各自结构化合同守住。
 
-当前进展：native provider-message、关清后完成、一次耗尽 blocked、只有 blocked、跳过专用生命周期和
-状态保持的 focused 回归已通过。fresh Prompt 4 r19 的 5 名 child 全部自然 DONE，且一名 child 在 113.8k
-真实 Compact 后继续；但模型在 final 前主动关闭 8/8 Todo，因此没有直接触发本钩子。r19 生成项目虽然
-自测 112 passed，独立真实启动却因 App 没有挂载已定义 Screen 而白屏；这属于模型计划/测试覆盖失真，
-不能通过恢复宿主 LOC、测试数或产物扫描来冒充通用质量裁判。下一条真实长任务自然出现 open Todo 时再补
-直接分支证据，不用玩具 prompt 或人工改账诱发。
-
-2026-08-24 r9 在 13/16 关闭、仍有 1 个 `in_progress` 和 2 个 `pending` 时由后台 main 假收口。根因不是
-task-path identity，而是 `save=False` 被错误用作生命周期排除条件；TUI/Gateway 和后台 main 正常都可能
-no-save。当前候选让 save 只控制 archive，真实任务轮仍做同轮核对；严格门后部署并用原样 Prompt 4 复验。
+直接证据是 `.7` 请求 `gwreq-1787921095-5775e23884254defb09f0dbafc7ef1ef`：用户故意要求 `exit 7`，
+旧门额外消耗 5 次模型调用、42.6 秒和 141,905 cache-read tokens 后仍显示 Working。候选代码的 fake
+provider 回归要求相同场景只发生“工具调用 + 模型 final”两次采样；下一步在唯一 Gateway 的 fresh TUI
+原样复测非零退出码，再继续后台进程、网络与中断矩阵。
 
 ### 单 Gateway 多 TUI 项目目录与正式提示词 2
 
@@ -738,6 +809,10 @@ Esc 停止并在终态只读回看。真实 Prompt 3 暴露 guidance 未绑定 e
 pending/running AgentAttempt 后再入账；默认容量同时从会话 6/单次 4/runner 4 收口为会话 8/单次 0/runner 8。
 fresh `ma-6d33228-p3-guidance8-r20` 已证明八名 child 同时运行，中文插话 exact receipt 最终 consumed 且 child
 继续工作，root/child 历史均可查看。
+R64 递归真机又暴露：在协调 child 详情页按 Esc 只关闭协调节点，8 个孙代理仍继续运行。当前按 会话运行时
+`shutdown_agent_tree` 收口为 exact branch cancel：先 signal 目标节点，再等同一 owner 创建事务退出并重读
+canonical lineage，关闭全部存活后代；祖先和兄弟不受影响。修复必须同时覆盖在途孙代理创建与取消工具
+展示，不能把结构化 user cancellation 误报成未知副作用。
 后续仍待做 interrupt 当前 turn 后可恢复、resume/start 同一 session、cancel/close 和 capability 裁决。
 root owner 可操作自己树内任意后代，模型代理仍只能管直属下级。
 每个写操作必须带幂等 `operation_id`、exact target、expected version/state 和 accepted/rejected/unknown 回执，
@@ -802,11 +877,9 @@ tools/subagents 均已完成聚焦验证；旧 workflow package/mode/config/CLI/
 compact，语义摘要另保留中段非成功副作用事实。完整门禁、本地 8899 基础 CLI、MiniMax 长链/极端
 CLI、1.10 双 Feishu owner scope 与真实出站均已通过；新的桌面客户端入站仍按产品事实页保留为外部
 验收边界。
-Fiber 真实长任务新增一个待发布切片：末尾 `return_code=143` 已被 operation 正确标为 failed，但模型仍按
-stdout 片段口头完成。当前候选已对照 会话运行时 active-turn/Stop-hook，把明确 failed/not_started 的 final 冲突
-改为最多两次的同轮带工具返工；unknown 等不确定副作用仍直接 fail-closed。本地结构化回归已通过，待
-`.13` 部署后用普通中文真实任务证明模型确实修正命令、产生新的 succeeded 终态且 TUI 不再先退回空输入框，
-通过后再移入完成事实。
+Fiber 历史 `return_code=143` 样本仍保留为模型判断失误证据，但不再由普通完成机器门强制返工。模型能在
+失败工具结果后的正常采样中自主修复；若它给出 plain final，turn 自然结束，operation ledger 继续如实标记
+failed 供用户、后续消息和审计查看。UNKNOWN 副作用仍直接 fail-closed，不能自动重放。
 极端 MiniMax CLI 发现并删除了旧“绝对路径写飞后静默搬进 task output”兼容层。显式绝对路径现在保留
 原目标身份，由唯一写边界返回明确成功或 `WRITE_FORBIDDEN`；相对 `output/`、`work/` 任务落位不变。
 修复后的真实链已在 CLI 和 1.10 正式 owner scope 验证“成功—拒绝—继续成功”及模型准确部分结果。
@@ -989,3 +1062,39 @@ Gateway 启动恢复；subagent supervision 使用内核 advisory lock，空/坏
 结果：`.7` 保持单 Gateway 与 MiniMax-M2.7，裸 TUI 在 1 秒采样点已出现输入框且无全局恢复提问；旧
 0 字节锁被同一 Gateway 重写为 v2 内核锁元数据。首轮 supervision 结构化记录 4 条复活、21 条父会话
 关闭取消和 5 条失联 runner 回收，随后 3 条真实 RUNNING 自然完成，没有手工批量改账。
+
+### 后台主代理的 capability 审批进入统一 TUI 面板
+
+状态：OPEN P1；安全门工作正常，用户交互链未闭环
+
+解决问题：一级 child 申请创建孙代理等管理员级能力时，直属主代理会调用
+`resolve_capability_requests(decision=grant)`；该 dangerous mutation 正确要求用户批准，但 background-main
+工作片目前只拿到 `APPROVAL_REQUIRED`，没有把 exact pending request 显示在当前 owner/thread 的 TUI
+审批面板。模型会反复尝试，用户却不知道需要自己决定。
+
+待做：参考 会话运行时 与 终端交互 的 durable permission request，把 background-main 的 exact tool call、child、
+能力范围、原因和 owner/thread 身份投影到现有统一面板；批准或拒绝后唤醒原调用。断线、无消费者、跨 owner
+和过期 attempt 必须 fail closed。不得因为测试需要自动批准孙代理、降低 full-access 门或解析模型文字授权。
+
+### 8G 测试机当前资源复测
+
+状态：环境恢复后执行
+
+解决问题：上一轮已证明 `.7` 的高 used 主要来自 17 个旧 TUI、对照进程和 page cache，清理后约下降 1GiB；
+本轮主机 ICMP 间歇可达但 SSH 22 拒绝、Gateway 8420 不可达，无法取得当前进程级 RSS。
+
+待做：SSH 恢复后不重启、不删任务，先记录 Gateway/TUI/runner/终端交互/LiteLLM 的数量与 RSS、`available`、
+swap、owner pool hard/soft 数和 10 分钟空闲回落，再决定是否还有真实泄漏。不得把整机 `used` 或旧快照当成
+当前 Gateway 占用。
+
+### 直属 child 结果跨后续工作片丢失
+
+状态：R92 已解决；focused、旧长任务恢复与 fresh TUI 均通过
+
+原问题：完成信封只在当次 lifecycle wake 和普通观察尾窗中可见。四名 child 已 DONE、报告存在且 wake 已
+handled 后，后续 scheduled progress 工作片只看到“全部终态”，看不到精确报告引用，模型便猜内部目录并被
+正确的状态面安全门拒绝。
+
+结果：前台与后台共用 exact-root 直属完成投影；后续 scheduled/recovery 续片继续获得有界最终回复和完整
+`final_report_ref`。U85 已在 `compact 1` 后恢复，U98 fresh 4/4 交付。后续不再为这条问题增加 fallback；
+只继续在 U99--U105 的长会话、并发 guidance、Search、Memory/Compact 与 owner 隔离中做回归观察。

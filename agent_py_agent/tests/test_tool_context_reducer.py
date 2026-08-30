@@ -234,6 +234,38 @@ def test_external_live_prompt_override_uses_same_projection_boundary():
     assert "opaque-live-secret" not in rendered
 
 
+def test_external_live_preview_keeps_stable_archive_recovery_anchor():
+    result = _result(
+        "web_fetch",
+        True,
+        "complete body that stays only in the archive",
+        result_envelope={
+            "tool_output_policy": {
+                "trust": "external_data",
+                "redaction": "default",
+                "live_prompt_output": "bounded preview... 已截断",
+                "requires_recovery_artifact": True,
+            }
+        },
+    )
+
+    rendered = render_tool_result_for_live_prompt(
+        result,
+        {
+            "output_externalized": True,
+            "artifact_ref": "/private/archive/blob.json",
+            "scoped_call_id": "web-run:web-call",
+            "output_hash": "abc",
+            "output_size_bytes": 4096,
+        },
+    )
+
+    assert "bounded preview... 已截断" in rendered
+    assert "complete body that stays only in the archive" not in rendered
+    assert '"artifact_ref": "web-run:web-call"' in rendered
+    assert "/private/archive/blob.json" not in rendered
+
+
 def test_externalized_external_preview_is_wrapped_but_archive_anchor_remains_outside():
     result = _result(
         "mcp__demo__read",

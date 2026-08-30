@@ -264,8 +264,27 @@ def _log_size(path: Path) -> int:
 # LLM: Host state is diagnostic lifecycle data, never an authorization source.
 # Atomic replacement prevents readers from observing a torn JSON document.
 # 函数用途: 原子写出 host 的 running/failed/exited 状态与真实子进程号。
-def _write_host_state(state_path: Path, *, status: str, **fields: object) -> None:
-    payload = {"schema": HOST_STATE_SCHEMA, "status": str(status), **fields}
+def _write_host_state(
+    state_path: Path,
+    *,
+    status: str,
+    child_pid: int | None = None,
+    started_at: float | None = None,
+    exit_code: int | None = None,
+    reason: str | None = None,
+    finished_at: float | None = None,
+    error_type: str | None = None,
+) -> None:
+    payload: dict[str, object] = {"schema": HOST_STATE_SCHEMA, "status": str(status)}
+    optional_fields: tuple[tuple[str, object | None], ...] = (
+        ("child_pid", child_pid),
+        ("started_at", started_at),
+        ("exit_code", exit_code),
+        ("reason", reason),
+        ("finished_at", finished_at),
+        ("error_type", error_type),
+    )
+    payload.update((key, value) for key, value in optional_fields if value is not None)
     try:
         write_json_file_atomic(state_path, payload)
         state_path.chmod(0o600)

@@ -75,10 +75,10 @@ class ChunkFilePollRequest:
     on_event: object | None = None
 
 
-# LLM: submit maps explicit content plus an optional typed client workspace into
-# GatewayAskParams. Audit ownership and execution cwd are separate inputs: a thin
-# client has no local audit Agent but must still send its real cwd.
-# 函数用途: 提交聊天请求并返回 request、chunk 和 response 路径；轻客户端可单独传当前工作目录。
+# LLM: submit maps one client context into identity/workspace facts and exposes a full Agent only
+# to the optional audit hook. A thin client must remain present for routing but never masquerade
+# as a local audit Agent or lose its scoped identity.
+# 函数用途: 提交聊天请求并返回 request、chunk 和 response 路径；薄客户端只供身份和目录投影。
 def submit_chat_request(
     paths,
     content: ChatRequestContent,
@@ -87,11 +87,11 @@ def submit_chat_request(
     workspace_root: object = "",
     workspace_roots: object = None,
 ) -> tuple[str, Path, Path]:
-    effective_workspace_root = workspace_root or getattr(agent, "root", "")
-    effective_workspace_roots = (
-        workspace_roots
-        if workspace_roots is not None
-        else getattr(agent, "workspace_roots", None)
+    identity = _gateway_submit_identity(agent)
+    workspace = _gateway_submit_workspace(
+        agent,
+        workspace_root=workspace_root,
+        workspace_roots=workspace_roots,
     )
     request_id, _, response_path = submit_gateway_ask(
         paths,
@@ -103,20 +103,63 @@ def submit_chat_request(
             include_prompt=content.show_prompt,
             resume_context=content.resume_context,
             chat_session_id=content.chat_session_id,
-            agent=agent,
+            channel=identity["channel"],
+            channel_user_id=identity["user_id"],
+            canonical_user_id=identity["user_id"],
+            channel_chat_type=identity.get("channel_chat_type", ""),
+            channel_chat_id=identity.get("channel_chat_id", ""),
+            agent=(
+                None
+                if getattr(agent, "gateway_client_only", False) is True
+                else agent
+            ),
             system_task=content.system_task,
             interactive_approvals=content.interactive_approvals,
             rich_transcript=content.rich_transcript,
-            workspace_root=str(effective_workspace_root or ""),
-            workspace_roots=[
-                str(item)
-                for item in (effective_workspace_roots or [])
-                if str(item or "").strip()
-            ],
+            workspace_root=str(workspace.get("cwd") or ""),
+            workspace_roots=[str(item) for item in workspace.get("roots", [])],
         ),
     )
     chunk_path = gateway_chunk_path(paths, request_id)
     return request_id, chunk_path, response_path
+
+
+# LLM: The thin-client identity projection is the sole source for queued chat ownership. Full
+# local Agents retain the historic local-agent/chat identity without inspecting paths or prose.
+# 函数用途: 为普通空闲提交取得和 HTTP 控制请求完全一致的用户及通道身份。
+def _gateway_submit_identity(agent: object) -> dict[str, str]:
+    projector = getattr(agent, "gateway_request_identity", None)
+    if callable(projector):
+        value = projector()
+        if isinstance(value, dict):
+            user_id = str(value.get("user_id") or "").strip()
+            channel = str(value.get("channel") or "").strip()
+            if user_id and channel:
+                return {str(key): str(item) for key, item in value.items() if str(item)}
+    return {"user_id": "local-agent", "channel": "chat"}
+
+
+# LLM: A scoped client deliberately returns no cwd so the Gateway chooses its authenticated owner
+# home. Local/full Agents may still submit an explicit project cwd through the canonical helper.
+# 函数用途: 决定本轮是否携带工作目录；普通用户不再把家目录误报成远程 cwd 覆盖。
+def _gateway_submit_workspace(
+    agent: object,
+    *,
+    workspace_root: object,
+    workspace_roots: object,
+) -> dict[str, object]:
+    projector = getattr(agent, "gateway_request_workspace", None)
+    if callable(projector):
+        value = projector()
+        return dict(value) if isinstance(value, dict) else {}
+    effective_root = workspace_root or getattr(agent, "root", "")
+    effective_roots = (
+        workspace_roots
+        if workspace_roots is not None
+        else getattr(agent, "workspace_roots", None)
+    )
+    roots = [str(item) for item in (effective_roots or []) if str(item or "").strip()]
+    return {"cwd": str(effective_root or ""), "roots": roots}
 
 
 # LLM: Polling ends only after a validated canonical terminal envelope appears. Chunk and response

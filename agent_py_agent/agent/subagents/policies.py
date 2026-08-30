@@ -401,10 +401,12 @@ def _execution_context_instructions() -> list[str]:
     ]
 def _is_active(status: str) -> bool:
     return not task_status_in(status, SUBAGENT_ENDED_STATUSES)
+# LLM: allowed_write_roots 已是正向写权限上界，不能再把其宿主祖先 Path.home()
+# 放进 deny；owner workspace 常位于该祖先之下，后置只读挂载会把合法子根全部盖掉。
+# 函数用途: 返回即使父工作区获准也必须保持只读的敏感家目录子路径。
 def _default_forbidden_write_roots() -> list[str]:
     home = Path.home()
     return [
-        str(home),
         str(home / "Desktop"),
         str(home / "Downloads"),
         str(home / ".ssh"),

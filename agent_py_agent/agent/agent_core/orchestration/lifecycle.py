@@ -1,9 +1,16 @@
 
 from __future__ import annotations
 
+"""LLM: 新建子代理的会话投影、父级等待和自动启动必须在一个生命周期出口汇合。
+
+模块用途: 子代理记录创建后统一登记到当前会话、进度和后台执行链，并修正并发终态投影。
+"""
+
 from dataclasses import dataclass
 
 from ...runtime_errors import runtime_error_report
+from ...subagents.models import TaskStatus, normalize_task_status
+from ...tooling.cancellation import raise_if_cancelled
 from .background.dispatch import auto_start_tasks
 from .run_scope import remember_orchestration_run_ids
 
@@ -35,9 +42,12 @@ def publish_created_subagents(
     """Register newly materialized subagents and optionally launch their runners."""
     tasks = [task for task in request.tasks if _task_id(task)]
     run_ids = [_task_id(task) for task in tasks]
+    raise_if_cancelled()
     conversation_bind_errors = _bind_tasks_to_conversation(request.agent, tasks)
+    raise_if_cancelled()
     remember_orchestration_run_ids(request.agent, run_ids)
     _mark_recursive_parent_wait(request, run_ids)
+    raise_if_cancelled()
     auto_start = auto_start_tasks(request.agent, tasks, request.request_params)
     return CreatedSubagentLifecycleResult(
         auto_start=auto_start,
@@ -69,6 +79,9 @@ def _mark_recursive_parent_wait(
         )
 
 
+# LLM: A child link is an addressable projection, never lifecycle authority. Binding must use
+# canonical task identity and reconcile a terminal state that raced ahead of this projection.
+# 函数用途: 把新子代理挂到父会话里供 TUI 查看，并避免已停止任务被迟到绑定显示成运行中。
 def _bind_tasks_to_conversation(agent: object, tasks: list[object]) -> list[dict[str, object]]:
     """Make local subagent run_ids addressable in the parent conversation thread."""
     store = getattr(agent, "conversation_store", None)
@@ -76,6 +89,7 @@ def _bind_tasks_to_conversation(agent: object, tasks: list[object]) -> list[dict
         return []
     bind_errors: list[dict[str, object]] = []
     for task in tasks:
+        raise_if_cancelled()
         attrs = getattr(task, "attributes", {}) or {}
         if not isinstance(attrs, dict):
             continue
@@ -89,8 +103,12 @@ def _bind_tasks_to_conversation(agent: object, tasks: list[object]) -> list[dict
                     "task_id": _task_id(task),
                     "goal": str(getattr(task, "goal", "") or ""),
                     "task_path": str(getattr(task, "task_dir", "") or ""),
+                    "status": _conversation_status_for_task(task) or "active",
                 }
             )
+            reconcile_error = _reconcile_bound_task_status(agent, store, task)
+            if reconcile_error is not None:
+                bind_errors.append(reconcile_error)
         except Exception as exc:
             bind_errors.append(
                 {
@@ -103,6 +121,62 @@ def _bind_tasks_to_conversation(agent: object, tasks: list[object]) -> list[dict
                 }
             )
     return bind_errors
+
+
+# LLM: Conversation links are projections of canonical SubAgentTask state. A cancellation may
+# land after task materialization but before this batch reaches bind_task, so reload after binding
+# and retire the projection when needed; bind_task must never become a resurrection seam.
+# 函数用途: 子代理会话行绑定后复读权威状态，修正“已取消子代理却仍显示运行中”的竞态。
+def _reconcile_bound_task_status(
+    agent: object,
+    store: object,
+    task: object,
+) -> dict[str, object] | None:
+    run_id = _task_id(task)
+    manager = getattr(agent, "subagents", None)
+    loader = getattr(manager, "load", None)
+    updater = getattr(store, "update_task_status", None)
+    if not run_id or not callable(loader) or not callable(updater):
+        return None
+    try:
+        canonical = loader(run_id)
+        status = _conversation_status_for_task(canonical)
+        if status:
+            updater({"task_id": run_id, "status": status})
+    except Exception as exc:
+        return {
+            "run_id": run_id,
+            "thread_id": str(
+                (getattr(task, "attributes", {}) or {}).get("conversation_thread_id")
+                if isinstance(getattr(task, "attributes", {}), dict)
+                else ""
+            ),
+            **runtime_error_report(
+                exc,
+                context="create_subagents.conversation.reconcile_status",
+            ),
+        }
+    return None
+
+
+# LLM: Only canonical terminal TaskStatus values may close a child conversation projection.
+# BLOCKED stays active/addressable for parent guidance; unknown values fail open to the normal
+# active bind and are surfaced by the canonical subagent state readers instead of guessed here.
+# 函数用途: 把子代理权威终态转换为会话索引使用的非活跃状态。
+def _conversation_status_for_task(task: object) -> str:
+    try:
+        status = normalize_task_status(getattr(task, "status", ""))
+    except ValueError:
+        return ""
+    return {
+        TaskStatus.DONE.value: "completed",
+        TaskStatus.CANCELLED.value: "cancelled",
+        TaskStatus.ABANDONED.value: "abandoned",
+        TaskStatus.TAKEN_OVER.value: "taken_over",
+        TaskStatus.FAILED.value: "failed",
+        TaskStatus.TIMEOUT.value: "timeout",
+        TaskStatus.CHANNEL_ERROR.value: "channel_error",
+    }.get(status, "")
 
 
 def _task_id(task: object) -> str:

@@ -38,10 +38,14 @@ from ..agent.gateway_parts import (
 from ..agent.gateway_parts.daemon_control import (
     _get_process_start_time,
     _utc_now_iso,
+    build_process_identity,
     get_running_pid,
     read_pid_record,
+    remove_gateway_stop_request_if_owned,
     remove_pid_file_if_owned,
+    stop_request_targets_process,
     write_pid_record,
+    write_targeted_gateway_stop_request,
 )
 from ..agent.gateway_parts.http_service import (
     GatewayHTTPServer,
@@ -103,9 +107,25 @@ def _gateway_run_context_from_args(request: _GatewayRunBuildRequest) -> GatewayR
         agent=request.agent,
         paths=request.paths,
         config_path=Path(args.config),
+        log_start_offset_bytes=_gateway_log_size(request.paths.log),
+        process_identity=build_process_identity(),
+        process_started_at=time.time(),
     )
 
 
+# LLM: 当前生命周期日志起点必须在同一个 Gateway 进程内按字节记录；诊断工具只能
+#   以它区分旧进程遗留噪声和本次运行新增噪声，读取失败按 0 明示降级。
+# 函数用途: 记录 Gateway 进入运行阶段时日志已有大小，供后续只检查本次生命周期。
+def _gateway_log_size(path: Path) -> int:
+    try:
+        return max(0, int(path.stat().st_size))
+    except OSError:
+        return 0
+
+
+# LLM: This is the canonical state-file projection for one live Gateway lifecycle. Keep endpoint,
+# config/model identity and log boundary here so CLI, HTTP and model tools read the same facts.
+# 函数用途: 生成 Gateway 当前运行状态文件，供健康检查和运维工具权威读取。
 def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "running") -> dict:
     context = request.context
     paths = context.paths
@@ -113,7 +133,6 @@ def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "ru
     return {
         "status": status,
         "pid": pid,
-        "started_at": time.time(),
         "gateway_workspace": str(paths.root),
         "subagent_workspace": str(agent.subagents.workspace),
         "task_continuation": "owner_scoped_event_driven",
@@ -121,10 +140,21 @@ def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "ru
         "failed_processing_requests": request.failed,
         "user_inflight_limit": max(1, int(getattr(agent.config, "gateway_user_inflight_limit", 8) or 8)),
         "global_inflight_limit": max(1, int(getattr(agent.config, "gateway_global_inflight_limit", 500) or 500)),
+        "config_path": str(context.config_path),
+        "model_name": str(getattr(agent.config, "model_name", "") or ""),
+        "http_bind_host": str(
+            getattr(agent.config, "gateway_bind_host", "127.0.0.1") or "127.0.0.1"
+        ),
         "http_port": request.http_port,
+        "log_start_offset_bytes": max(0, int(context.log_start_offset_bytes or 0)),
+        "process_identity": dict(context.process_identity or {}),
+        "started_at": float(context.process_started_at or time.time()),
     }
 
 
+# LLM: The structured event mirrors the same lifecycle identity as _build_run_state; it may add
+# event-only fields but must not invent a different endpoint, model or log offset.
+# 函数用途: 生成 Gateway 运行事件载荷，供审计日志记录本次生命周期的同一组事实。
 def _build_run_payload(request: GatewayThreadsRequest, pid: int, extra: dict | None = None) -> dict:
     context = request.context
     agent = context.agent
@@ -138,7 +168,15 @@ def _build_run_payload(request: GatewayThreadsRequest, pid: int, extra: dict | N
         "failed_processing_requests": request.failed,
         "user_inflight_limit": max(1, int(getattr(agent.config, "gateway_user_inflight_limit", 8) or 8)),
         "global_inflight_limit": max(1, int(getattr(agent.config, "gateway_global_inflight_limit", 500) or 500)),
+        "config_path": str(context.config_path),
+        "model_name": str(getattr(agent.config, "model_name", "") or ""),
+        "http_bind_host": str(
+            getattr(agent.config, "gateway_bind_host", "127.0.0.1") or "127.0.0.1"
+        ),
         "http_port": request.http_port,
+        "log_start_offset_bytes": max(0, int(context.log_start_offset_bytes or 0)),
+        "process_identity": dict(context.process_identity or {}),
+        "started_at": float(context.process_started_at or time.time()),
     }
     if extra:
         payload.update(extra)
@@ -152,10 +190,21 @@ def _clear_gateway_stop_request(paths) -> None:
         pass
 
 
-def _write_gateway_stop_request(paths, *, reason: str) -> None:
-    paths.stop_request.write_text(
-        json.dumps({"requested_at": time.time(), "reason": reason}, ensure_ascii=False),
-        encoding="utf-8",
+# LLM: CLI start/restart writes the same target-bound stop contract as HTTP, supervisor, and
+# signals. Never restore a presence-only marker that can terminate the successor process.
+# 函数用途: 向指定的当前 Gateway 进程写入一份不会串到下次启动的停止请求。
+def _write_gateway_stop_request(
+    paths: GatewayPaths,
+    *,
+    reason: str,
+    target_pid: int | None = None,
+) -> dict[str, object] | None:
+    return write_targeted_gateway_stop_request(
+        paths.pid,
+        paths.stop_request,
+        reason=reason,
+        target_pid=target_pid,
+        source="gateway_cli",
     )
 
 
@@ -251,10 +300,14 @@ def _recover_gateway_stale_attempts(agent: object) -> dict[str, object]:
     return {"run_ids": run_ids, "count": len(run_ids), "error": None}
 
 
-# LLM: Gateway setup is the single startup mutation boundary: recover durable queue claims and
-# stale runtime attempts, publish facts, then let controller threads own subsequent reconciliation.
-# 函数用途: 创建 Gateway 运行目录、调和上次崩溃遗留并写入本次 starting 状态。
+# LLM: Gateway setup is the single startup mutation boundary. It rejects an overlapping live
+# generation before touching state, then recovers durable queue claims and publishes startup facts.
+# 函数用途: 先阻止两个 Gateway 重叠运行，再创建目录、调和崩溃遗留并写入 starting 状态。
 def _cmd_gateway_run_setup(agent, paths):
+    pid = os.getpid()
+    existing_pid = get_running_pid(paths.pid)
+    if existing_pid and existing_pid != pid:
+        raise RuntimeError(f"gateway already running pid={existing_pid}")
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
     recovery = recover_gateway_processing_requests(
@@ -266,7 +319,6 @@ def _cmd_gateway_run_setup(agent, paths):
     )
     requeued = recovery["requeued"]
     attempt_recovery = _recover_gateway_stale_attempts(agent)
-    pid = os.getpid()
     write_pid_record(paths.pid)
     write_json_file(
         paths.state,
@@ -388,7 +440,11 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         remove_pid_file_if_owned(paths.pid)
     except OSError:
         pass
-    _clear_gateway_stop_request(paths)
+    remove_gateway_stop_request_if_owned(
+        paths.stop_request,
+        _gateway_context_process_identity(request.context),
+        process_started_at=request.context.process_started_at,
+    )
     _write_gateway_heartbeat(
         paths,
         request.context.agent,
@@ -418,6 +474,18 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
     return cleanup_payload
 
 
+# LLM: The context identity is captured before startup mutations. Tests/legacy embedders that did
+# not populate it fall back to this process, but production never derives identity from a PID file
+# that a successor may already have replaced.
+# 函数用途: 取得当前 Gateway 生命周期自身的进程指纹，供停止等待、分类和清理复用。
+def _gateway_context_process_identity(context: GatewayRunContext) -> dict[str, object]:
+    identity = dict(context.process_identity or {})
+    return identity or build_process_identity()
+
+
+# LLM: Service wait accepts only a stop marker matching this exact process generation. Stale or
+# malformed files remain observable on disk but cannot terminate a freshly started Gateway.
+# 函数用途: 等待真正发给当前 Gateway 的停止请求，忽略上一代遗留文件。
 def _run_gateway_service_loop(context: GatewayRunContext) -> object:
     """Keep the Gateway alive without running a global model-driven planner.
 
@@ -426,9 +494,17 @@ def _run_gateway_service_loop(context: GatewayRunContext) -> object:
     owner authority and can repeatedly spend model calls on stale local/main
     records, so the service thread only waits for the explicit stop record.
     """
-    while not context.paths.stop_request.exists():
+    process_identity = _gateway_context_process_identity(context)
+    while True:
+        if context.paths.stop_request.exists():
+            payload = read_json_file(context.paths.stop_request)
+            if stop_request_targets_process(
+                payload,
+                process_identity,
+                process_started_at=context.process_started_at,
+            ):
+                return {"summary": "stop requested", "stop_request": payload}
         time.sleep(0.25)
-    return {"summary": "stop requested"}
 
 
 # LLM: SIGTERM/SIGINT 不得再表现成“Python 正常消失”；handler 只写一份小型结构化停止请求，
@@ -453,12 +529,13 @@ def _restore_gateway_signal_handlers(previous: dict[int, object]) -> None:
         signal.signal(signum, handler)
 
 
-# LLM: 快照保留 signal、父进程和 systemd 环境事实；已有 stop request 时只追加 observed，
-# 不把管理员先发起的计划停止误标成外部异常，也不覆盖其原始 reason。
-# 函数用途: 原子写入可供 watch 和事后审计共同读取的信号停止请求。
+# LLM: 快照保留 signal、父进程和 systemd 环境事实；只有属于本代进程的已有停止请求
+# 才追加 observed，上一代遗留文件必须被本次 signal 的精确目标记录替换。
+# 函数用途: 原子写入绑定当前进程代次、可供等待和事后审计共同读取的信号停止请求。
 def _record_gateway_signal_stop_request(paths: GatewayPaths, signum: int) -> dict[str, object]:
     observed_at = time.time()
     existing = read_json_file(paths.stop_request) if paths.stop_request.exists() else {}
+    process_identity = build_process_identity()
     signal_name = signal.Signals(signum).name if signum in signal.Signals.__members__.values() else str(signum)
     snapshot: dict[str, object] = {
         "number": int(signum),
@@ -474,14 +551,19 @@ def _record_gateway_signal_stop_request(paths: GatewayPaths, signum: int) -> dic
         },
         "preexisting_stop_request": bool(existing),
     }
-    if existing:
-        payload = {**existing, "signal_observed": snapshot}
+    if existing and stop_request_targets_process(existing, process_identity):
+        payload = {
+            **existing,
+            "target_process": process_identity,
+            "signal_observed": snapshot,
+        }
     else:
         payload = {
             "requested_at": observed_at,
             "reason": f"received {signal_name}",
             "source": "signal",
             "planned": False,
+            "target_process": process_identity,
             "signal": snapshot,
         }
     write_json_file_atomic(paths.stop_request, payload)
@@ -505,8 +587,16 @@ def _classify_gateway_service_return(
         summary = str(report.get("summary") or "")
     else:
         summary = str(getattr(report, "summary", "") or "")
-    if context.paths.stop_request.exists():
+    stop_payload: dict[str, object] | None = None
+    if isinstance(report, dict) and isinstance(report.get("stop_request"), dict):
+        stop_payload = dict(report["stop_request"])
+    elif context.paths.stop_request.exists():
         stop_payload = read_json_file(context.paths.stop_request)
+    if stop_payload is not None and stop_request_targets_process(
+        stop_payload,
+        _gateway_context_process_identity(context),
+        process_started_at=context.process_started_at,
+    ):
         reason = str(stop_payload.get("reason") or "stop requested")
         if str(stop_payload.get("source") or "") == "signal":
             return _GatewayServiceTermination(
@@ -614,7 +704,11 @@ def cmd_gateway_start(args) -> int:
             print(f"start_time: {record.get('start_time')}")
         return 0
     if pid and is_pid_alive(pid) and args.force:
-        _write_gateway_stop_request(paths, reason="force restart before start")
+        _write_gateway_stop_request(
+            paths,
+            reason="force restart before start",
+            target_pid=pid,
+        )
         if not wait_for_pid_exit(pid, agent.config.gateway_stop_timeout):
             terminate_pid(pid)
             wait_for_pid_exit(pid, 5)
@@ -640,9 +734,9 @@ def cmd_gateway_run(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
+    run_context = _gateway_run_context_from_args(_GatewayRunBuildRequest(agent, paths, args))
     requeued, pid = _cmd_gateway_run_setup(agent, paths)
     http_port = getattr(agent.config, "gateway_port", 0) or 0
-    run_context = _gateway_run_context_from_args(_GatewayRunBuildRequest(agent, paths, args))
     stop_event, heartbeat_thread, request_thread, background_thread, http_server = _cmd_gateway_run_threads(
         GatewayThreadsRequest(context=run_context, requeued=requeued, failed=0, http_port=http_port)
     )
@@ -757,10 +851,16 @@ def cmd_gateway_stop(args) -> int:
         print("gateway 未在运行")
         return 0
 
-    paths.stop_request.write_text(
-        json.dumps({"requested_at": time.time(), "reason": args.reason or "user stop"}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    stop_payload = write_targeted_gateway_stop_request(
+        paths.pid,
+        paths.stop_request,
+        reason=args.reason or "user stop",
+        target_pid=pid,
+        source="gateway_cli",
     )
+    if stop_payload is None:
+        print(f"gateway stop target unavailable pid={pid}", file=sys.stderr)
+        return 2
     log_gateway_event(
         agent,
         "gateway_stop_requested",

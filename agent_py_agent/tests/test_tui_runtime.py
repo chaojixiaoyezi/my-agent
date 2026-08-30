@@ -266,11 +266,34 @@ def test_manual_compact_has_active_animation_until_receipt() -> None:
     assert len(active) == 1
     assert active[0].role == "compact"
     assert active[0].metadata["stage"] == "preparing"
-    assert active[0].metadata["percent"] == 5
+    assert active[0].metadata["percent"] == 0
+    assert active[0].metadata["indeterminate"] is True
 
     runtime.publish_manual_compact_terminal("control-one", succeeded=True)
 
     assert runtime.store.snapshot().active_blocks == ()
+
+
+def test_manual_compact_interruption_freezes_interrupted_without_generation() -> None:
+    runtime = TuiRuntime("manual-compact-interrupted")
+    runtime.publish_manual_compact_started("control-interrupted")
+
+    assert (
+        runtime.active_manual_compact_control_message_id()
+        == "control-interrupted"
+    )
+    runtime.publish_manual_compact_terminal(
+        "control-interrupted",
+        succeeded=False,
+        interrupted=True,
+    )
+
+    snapshot = runtime.store.snapshot()
+    assert runtime.active_manual_compact_control_message_id() == ""
+    assert snapshot.active_blocks == ()
+    assert snapshot.status.compact_count == 0
+    assert snapshot.stable_blocks[-1].role == "compact"
+    assert snapshot.stable_blocks[-1].phase == "interrupted"
 
 
 def test_idle_activity_snapshot_hydrates_compact_count_and_cannot_regress() -> None:
@@ -685,6 +708,54 @@ def test_active_turn_input_waits_for_exact_gateway_injection_confirmation() -> N
     ]
 
 
+def test_gateway_active_input_confirmation_does_not_duplicate_streamed_final() -> None:
+    runtime = TuiRuntime("session-steer-final")
+    runtime.enqueue_prompt("request-running", "原始任务", queued=False)
+    turn = runtime.begin_turn("request-running")
+    runtime.enqueue_active_turn_input("steer-local", "补充要求")
+    turn.write_model("只显示一次")
+
+    assert turn.on_gateway_event(
+        {
+            "kind": "active_turn_input_consumed",
+            "client_message_ids": ["steer-local"],
+        }
+    )
+    turn.finalize(TuiTurnSummary(response_text="只显示一次", ok=True))
+
+    assistant = [
+        block for block in runtime.store.snapshot().stable_blocks if block.role == "assistant"
+    ]
+    assert [block.text for block in assistant] == ["只显示一次"]
+
+
+def test_late_gateway_active_input_confirmation_keeps_submit_order() -> None:
+    runtime = TuiRuntime("session-steer-late-order")
+    runtime.enqueue_prompt("request-running", "原始任务", queued=False)
+    turn = runtime.begin_turn("request-running")
+    runtime.enqueue_active_turn_input("steer-local", "补充要求")
+    turn.on_gateway_event({"kind": "assistant_final", "text": "最终答复"})
+
+    assert turn.on_gateway_event(
+        {
+            "kind": "active_turn_input_consumed",
+            "client_message_ids": ["steer-local"],
+        }
+    )
+    turn.finalize(TuiTurnSummary(response_text="最终答复", ok=True))
+
+    visible = [
+        (block.role, block.text)
+        for block in runtime.store.snapshot().stable_blocks
+        if block.role in {"user", "assistant"}
+    ]
+    assert visible == [
+        ("user", "原始任务"),
+        ("user", "补充要求"),
+        ("assistant", "最终答复"),
+    ]
+
+
 def test_rejected_active_turn_input_can_be_removed_without_touching_queue() -> None:
     runtime = TuiRuntime("session-steer-rejected")
     runtime.enqueue_active_turn_input("steer-rejected", "补充")
@@ -729,7 +800,7 @@ def test_failed_and_interrupted_turns_are_structured() -> None:
         block.text
         for block in interrupted_snapshot.stable_blocks
         if block.kind == "interrupt_notice"
-    ] == ["Interrupted · What should my-agent do instead?"]
+    ] == ["已中断 · 接下来希望 my-agent 怎么做？"]
     assert interrupted.request_interrupt() is False
 
 
@@ -1039,6 +1110,30 @@ def test_finalize_overwrites_streamed_deltas_without_duplicate() -> None:
     assert len(assistant) == 1
     assert assistant[0].text == "最终答案"
     assert "process" not in assistant[0].metadata
+
+
+def test_deferred_assistant_display_waits_for_terminal_summary() -> None:
+    runtime = TuiRuntime("session-show-prompt-order")
+    runtime.enqueue_prompt("request-show-prompt", "inspect prompt", queued=False)
+    turn = runtime.begin_turn(
+        "request-show-prompt",
+        defer_assistant_display=True,
+    )
+
+    turn.on_gateway_event({"kind": "model_delta", "text": "最终"})
+    turn.on_gateway_event({"kind": "assistant_final", "text": "最终答案"})
+
+    assert _assistant_blocks(runtime) == []
+    runtime.write_console("===== FINAL PROMPT =====\nprompt\n===== RESPONSE =====")
+    runtime.complete_turn(
+        "request-show-prompt",
+        TuiTurnSummary(response_text="最终答案", ok=True),
+    )
+
+    blocks = runtime.store.snapshot().stable_blocks
+    prompt_index = next(index for index, block in enumerate(blocks) if "FINAL PROMPT" in block.text)
+    answer_index = next(index for index, block in enumerate(blocks) if block.text == "最终答案")
+    assert prompt_index < answer_index
 
 
 def test_gateway_thinking_delta_streams_into_active_block_with_timer() -> None:

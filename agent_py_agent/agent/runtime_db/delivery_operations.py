@@ -1,4 +1,4 @@
-"""R4 Delivery 权威操作（3.txt K 节 + 测试 17）。
+"""R4 Delivery 权威操作（3.txt K 节）。
 
 同库状态用本地事务（K.1）；跨进程/外部副作用不宣称 exactly-once
 （K.2），走 at-least-once outbox/inbox + effect_key 去重（K.4）：
@@ -9,21 +9,20 @@
   DEAD_LETTER，K.6 完整证据保留）。
 - reconcile（K.3）：provider query 确认实际副作用 —— confirmed 落
   ACKED；absent/unknown 回 PENDING 退避重试（宁可重发不可丢）。
-- closeout_task_run（K.5/测试 17）：三轴同库单事务收口 —— lifecycle
-  （task_runs.status + closed_at CAS 只收口一次）、acceptance（I.11：
-  required 全 VERIFIED 才可交付）、delivery（最终用户消息 effect_key
-  UNIQUE 只入队一次）。duplicate/乱序/ACK loss/restart 全部幂等。
 
 K.7：最终用户消息内容由模型按结构化事实生成，本模块只保证投递一次；
 确定性文本仍只用于 /status、/stop 等显式控制协议（工具层既有约束）。
 """
+
+# LLM: Delivery 只管理客观投递状态和 provider 回执；不得把业务质量、
+# 验收清单或模型完成文案重新变成发送最终回复的机器硬门。
+# 模块用途: 提供 owner runtime.db 的 outbox/inbox 幂等投递与查询能力。
 
 from __future__ import annotations
 
 import json
 import sqlite3
 import time
-import uuid
 from typing import Any
 
 from ..common.id_generator import new_id
@@ -31,7 +30,6 @@ from .operations import (
     INBOX_PROCESSED,
     INBOX_RECEIVED,
     MAX_DELIVERY_ATTEMPTS,
-    NOT_VERIFIED,
     OUTBOX_ACKED,
     OUTBOX_DEAD_LETTER,
     OUTBOX_FAILED,
@@ -41,8 +39,11 @@ from .operations import (
 )
 
 
+# LLM: 该 mixin 只保存消息投递事实；TaskRun 终态由 RuntimeRepository 的
+# 执行生命周期入口负责，避免投递与任务收口互相卡死。
+# 类用途: 为 RuntimeRepository 增加 outbox、inbox 和投递审计查询。
 class RuntimeDeliveryMixin:
-    """R4 outbox/inbox/收口（挂到 RuntimeRepository）。"""
+    """R4 outbox/inbox（挂到 RuntimeRepository）。"""
 
     # ------------------------------------------------------------ outbox
     def enqueue_outbox(
@@ -459,178 +460,16 @@ class RuntimeDeliveryMixin:
             "processed_at": row["processed_at"],
         }
 
-    # ------------------------------------------------------------ 收口（测试 17）
-    def closeout_task_run(
-        self,
-        *,
-        task_run_id: str,
-        final_message: dict[str, Any] | None = None,
-        now: float | None = None,
-    ) -> dict[str, Any]:
-        """三轴同库单事务收口（K.1/K.5 + I.11，测试 17）。
-
-        lifecycle：task_runs.status='done' + closed_at CAS（只收口一次）。
-        acceptance：required assertions 全部 VERIFIED 才允许收口（I.11：
-          WORK_DONE ≠ VERIFIED，无契约或未全过 → NOT_VERIFIED 拒绝）。
-        delivery：最终用户消息经 outbox 入队一次（effect_key
-          f"final:{task_run_id}" UNIQUE —— 重复收口/ACK 丢失重放都只发
-          一次；实际投递由投递工异步完成，at-least-once 不阻塞收口）。
-
-        幂等：closed_at>0 → 直接返回 already_closed（duplicate/restart）；
-        并发竞争由 closed_at CAS rowcount 裁决（乱序 completion 亦然）。
-        """
-        now = now if now is not None else time.time()
-        with self.transaction() as conn:
-            run = conn.execute(
-                "SELECT task_run_id, task_id, status, closed_at, current_contract_id FROM task_runs "
-                "WHERE task_run_id = ?",
-                (task_run_id,),
-            ).fetchone()
-            if run is None:
-                raise RuntimeConflictError(f"task_run 不存在: {task_run_id}")
-            if run["closed_at"] and float(run["closed_at"]) > 0:
-                return {
-                    "task_run_id": task_run_id,
-                    "already_closed": True,
-                    "closed_at": float(run["closed_at"]),
-                }
-            # ---- acceptance 轴（I.11）：required 全 VERIFIED 才可交付。
-            # 对照对象是契约冻结时要求的 required assertion 集合（compiled
-            # 的 assertions 恒为 I.5 升格后的 required 集合，非空），而不是
-            # validator_operations 里已跑过的行 —— 只跑了子集不能通过。
-            # G2 补尾：判定单位从 validator_ref 升级为 assertion_key——
-            # 同一契约下同 ref 不同 artifact_kind 是两条不同断言，必须
-            # 分别 VERIFIED 才算过（只验证其中一条 ≠ 全部通过）。
-            contract_id = str(run["current_contract_id"] or "")
-            required_keys: set[str] = set()
-            if contract_id:
-                c_row = conn.execute(
-                    "SELECT compiled_json FROM acceptance_contracts "
-                    "WHERE contract_id = ?",
-                    (contract_id,),
-                ).fetchone()
-                if c_row is not None:
-                    compiled = json.loads(c_row["compiled_json"] or "{}")
-                    for a in compiled.get("assertions", []):
-                        if not a.get("required"):
-                            continue
-                        ref = str(a.get("validator_ref") or "")
-                        if not ref:
-                            continue
-                        # 新契约带 assertion_key；旧契约（升级前冻结）现场按
-                        # 编译规则回退生成（确定性 key，与 compiler 一致）。
-                        required_keys.add(
-                            str(a.get("assertion_key") or "")
-                            or f"{ref}::{str(a.get('artifact_kind') or '').strip() or '*'}"
-                        )
-            # 无契约/契约无 required 断言 → 不可交付（fail-closed）。
-            if not required_keys:
-                raise RuntimeConflictError(
-                    f"{NOT_VERIFIED}: task_run {task_run_id} 无 required "
-                    f"acceptance（contract={contract_id or '无契约'}），不可成功交付"
-                )
-            rows = conn.execute(
-                "SELECT assertion_key, validator_ref, status FROM validator_operations "
-                "WHERE contract_id = ?",
-                (contract_id,),
-            ).fetchall()
-            # verified 单位：行级 key；升级前的旧行（key 空）按
-            # ref::* 通配认（kind 未知 → 匹配该 ref 的任意断言，兼容窗口）。
-            verified_keys = {
-                str(row["assertion_key"] or "")
-                or f"{str(row['validator_ref'])}::*"
-                for row in rows
-                if row["status"] == "VERIFIED"
-            }
-            verified_ref_wild = {
-                k.rsplit("::", 1)[0] for k in verified_keys if k.endswith("::*")
-            }
-
-            def _verified(key: str) -> bool:
-                return key in verified_keys or key.rsplit("::", 1)[0] in verified_ref_wild
-
-            missing = sorted(k for k in required_keys if not _verified(k))
-            if missing:
-                raise RuntimeConflictError(
-                    f"{NOT_VERIFIED}: task_run {task_run_id} 的 required acceptance "
-                    f"未全部 VERIFIED（contract={contract_id}，缺失: {missing}），不可成功交付"
-                )
-            # ---- delivery 轴（K.5）：最终用户消息 effect_key UNIQUE 只入队一次。
-            # owner 取 tasks 表真实 owner（outbox owner 供投递方按身份回执）。
-            owner_row = conn.execute(
-                "SELECT owner_id FROM tasks WHERE task_id = ?",
-                (str(run["task_id"]),),
-            ).fetchone()
-            owner_id = str(owner_row["owner_id"]) if owner_row is not None else ""
-            final_key = f"final:{task_run_id}"
-            if final_message is not None:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO outbox_entries(
-                        outbox_id, effect_key, owner_id, task_run_id, scope,
-                        payload_json, status, attempts, next_retry_at,
-                        created_at, updated_at)
-                    VALUES(?, ?, ?, ?, 'final_message', ?, 'PENDING', 0, 0, ?, ?)
-                    """,
-                    (
-                        new_id("outbox_id"),
-                        final_key,
-                        owner_id,
-                        task_run_id,
-                        json.dumps(final_message, ensure_ascii=False, sort_keys=True),
-                        now,
-                        now,
-                    ),
-                )
-            # ---- lifecycle 轴：CAS 只允许一次收口（并发/乱序以本次为准）。
-            cursor = conn.execute(
-                "UPDATE task_runs SET status = 'done', closed_at = ?, updated_at = ? "
-                "WHERE task_run_id = ? AND closed_at = 0",
-                (now, now, task_run_id),
-            )
-            if cursor.rowcount != 1:
-                # 另一事务已先收口（竞态窗口）→ 幂等视同已收口。
-                row2 = conn.execute(
-                    "SELECT closed_at FROM task_runs WHERE task_run_id = ?",
-                    (task_run_id,),
-                ).fetchone()
-                return {
-                    "task_run_id": task_run_id,
-                    "already_closed": True,
-                    "closed_at": float(row2["closed_at"]),
-                }
-            conn.execute(
-                """
-                INSERT INTO runtime_events(event_id, event_type, attempt_id,
-                                           agent_run_id, task_run_id, payload_json, created_at)
-                VALUES(?, 'closeout', '', '', ?, ?, ?)
-                """,
-                (
-                    uuid.uuid4().hex,  # 与既有 runtime_events 写入同源（repository.py）
-                    task_run_id,
-                    json.dumps(
-                        {"closed_at": now, "contract_id": contract_id},
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                    now,
-                ),
-            )
-        return {
-            "task_run_id": task_run_id,
-            "already_closed": False,
-            "closed_at": now,
-            "acceptance_ok": True,
-            "final_effect_key": final_key if final_message is not None else "",
-        }
-
+    # LLM: 只按 canonical task_run_id 读取 append-only 事件；不得从展示文案
+    # 或旧 closeout 事件名反推任务状态。
+    # 函数用途: 按顺序列出一次 TaskRun 的权威审计事件。
     def events_for_task_run(
         self, task_run_id: str, *, limit: int = 500
     ) -> list[dict[str, Any]]:
-        """A.8 审计：某 task_run 的权威事件流（含 closeout 收口证据）。
+        """A.8 审计：某 task_run 的权威事件流。
 
         按 task_run_id 追索（repository.events_for_attempt 只按 attempt_id，
-        closeout 事件挂在 task_run 级、attempt_id 为空）。字段形态与
+        task_run.closed 事件挂在 task_run 级、attempt_id 为空）。字段形态与
         conn_row_to_event 一致，避免从 delivery 反向 import repository
         造成循环导入。
         """

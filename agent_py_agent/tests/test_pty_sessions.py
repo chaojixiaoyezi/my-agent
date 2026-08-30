@@ -35,7 +35,29 @@ def _payload(result):
 def test_terminal_session_runs_real_interactive_pty(tmp_path: Path) -> None:
     tool = _tool(tmp_path)
     command = f"{shlex.quote(sys.executable)} -q"
-    started = _payload(tool.execute({"action": "start", "command": command}))
+    run_scope = {"owner_id": "owner-a", "session_id": "thread-a"}
+    started = _payload(
+        tool.execute({"action": "start", "command": command, "__run_scope": run_scope})
+    )
+    assert "pid" not in started
+
+    listed = _payload(tool.execute({"action": "list", "__run_scope": run_scope}))
+    assert listed["count"] == 1
+    assert listed["sessions"][0]["session_id"] == started["session_id"]
+    assert "pid" not in listed["sessions"][0]
+
+    resized = _payload(
+        tool.execute(
+            {
+                "action": "resize",
+                "session_id": started["session_id"],
+                "columns": 100,
+                "rows": 30,
+                "__run_scope": run_scope,
+            }
+        )
+    )
+    assert (resized["columns"], resized["rows"]) == (100, 30)
 
     written = _payload(
         tool.execute(
@@ -44,6 +66,7 @@ def test_terminal_session_runs_real_interactive_pty(tmp_path: Path) -> None:
                 "session_id": started["session_id"],
                 "data": "print(6 * 7)",
                 "append_newline": True,
+                "__run_scope": run_scope,
             }
         )
     )
@@ -60,6 +83,7 @@ def test_terminal_session_runs_real_interactive_pty(tmp_path: Path) -> None:
                     "action": "read",
                     "session_id": started["session_id"],
                     "cursor": cursor,
+                    "__run_scope": run_scope,
                 }
             )
         )
@@ -67,7 +91,15 @@ def test_terminal_session_runs_real_interactive_pty(tmp_path: Path) -> None:
         output += read["output"]
 
     assert "42" in output
-    closed = _payload(tool.execute({"action": "close", "session_id": started["session_id"]}))
+    closed = _payload(
+        tool.execute(
+            {
+                "action": "close",
+                "session_id": started["session_id"],
+                "__run_scope": run_scope,
+            }
+        )
+    )
     assert closed["status"] == "closed"
 
 
@@ -85,18 +117,30 @@ def test_terminal_session_requires_existing_session(tmp_path: Path) -> None:
     assert result.error_code == "PROCESS_NOT_FOUND"
 
 
-def test_terminal_session_carries_structured_write_roots_to_sandbox(tmp_path: Path, monkeypatch) -> None:
+def test_terminal_session_carries_structured_write_roots_to_sandbox(
+    tmp_path: Path, monkeypatch
+) -> None:
     task_root = tmp_path / "task"
     task_root.mkdir()
     captured: dict[str, object] = {}
 
-    def fake_start(command, target, owner_home=None, write_roots=None, read_roots=None):
+    def fake_start(
+        command,
+        target,
+        owner_home=None,
+        write_roots=None,
+        read_roots=None,
+        protected_write_paths=None,
+        run_scope=None,
+    ):
         captured.update(
             command=command,
             target=target,
             owner_home=owner_home,
             write_roots=write_roots,
             read_roots=read_roots,
+            protected_write_paths=protected_write_paths,
+            run_scope=run_scope,
         )
         raise OSError("captured")
 
@@ -119,15 +163,34 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(tmp_path: Pa
 def test_terminal_session_scope_rejects_other_task(tmp_path: Path) -> None:
     from agent_py_agent.agent.tooling.pty_sessions import _pty_access_scope
 
-    first = _pty_access_scope(tmp_path, (tmp_path / "task-a",))
-    same = _pty_access_scope(tmp_path, (tmp_path / "task-a",))
-    other = _pty_access_scope(tmp_path, (tmp_path / "task-b",))
+    first = _pty_access_scope(
+        tmp_path,
+        (tmp_path / "task-a",),
+        run_scope={"owner_id": "owner-a", "session_id": "thread-a"},
+    )
+    same = _pty_access_scope(
+        tmp_path,
+        (tmp_path / "task-a",),
+        run_scope={"owner_id": "owner-a", "session_id": "thread-a"},
+    )
+    other = _pty_access_scope(
+        tmp_path,
+        (tmp_path / "task-b",),
+        run_scope={"owner_id": "owner-a", "session_id": "thread-a"},
+    )
+    other_conversation = _pty_access_scope(
+        tmp_path,
+        (tmp_path / "task-a",),
+        run_scope={"owner_id": "owner-a", "session_id": "thread-b"},
+    )
     other_read = _pty_access_scope(
         tmp_path,
         (tmp_path / "task-a",),
         (tmp_path / "shared-b",),
+        run_scope={"owner_id": "owner-a", "session_id": "thread-a"},
     )
 
     assert first == same
     assert first != other
+    assert first != other_conversation
     assert first != other_read

@@ -584,6 +584,7 @@ def test_background_terminal_child_integration_resumes_exact_active_task(monkeyp
             "task_id": "task-root",
             "thread_id": "thread-1",
             "due_now": True,
+            "conversation_request_id": "",
         }
     ]
 

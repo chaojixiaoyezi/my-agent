@@ -131,10 +131,9 @@ def _shell_capability_requested(request: Any) -> bool:
     return capability_type in _SHELL_HINTS or needed in _SHELL_HINTS
 
 
-# LLM: 落账函数。顺序契约与 resolve_capability_requests 相同:先把请求状态 GRANTED
-#   落盘,再 record_capability_grant(其内部重新 load,顺序反了旧副本会覆盖 grants)。
-#   grant 的 request_scope.resolved_by 标 capability_auto_grant,与模型手批(
-#   resolve_capability_requests)/路由批(CapabilityRouter)在审计上可区分。
+# LLM: record_capability_grant is the sole atomic resolution boundary: it marks the exact request
+# GRANTED, appends one idempotent grant and updates dispatch readiness under the canonical guard.
+# Never pre-save a detached task snapshot here; that was the lost-update race with runner result.
 # 函数用途: 对一条 OPEN 申请执行机制层自动批;不符合判据或找不到请求返回 None。
 def auto_grant_routine_request(
     manager: Any,
@@ -150,8 +149,6 @@ def auto_grant_routine_request(
     assessment = assess_routine_capability_request(task, request, extra_safe_roots=extra_safe_roots)
     if not assessment.eligible:
         return None
-    request.status = "GRANTED"
-    manager.save(task)
     grant = manager.lifecycle.record_capability_grant(
         run_id,
         RecordCapabilityGrantParams(

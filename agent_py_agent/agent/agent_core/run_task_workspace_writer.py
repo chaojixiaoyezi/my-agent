@@ -25,6 +25,9 @@ from ..user_space.run_workspace import (
 )
 from ..user_space.task_title import concise_task_title, looks_like_machine_id
 from ._runtime_params import ArchiveRunParams
+from .runtime.owner_roots import runtime_owner_root
+
+TOOL_OUTPUT_ARCHIVE_ROOT_ATTR = "runtime_tool_output_archive_root"
 from .runtime.task_identity import durable_task_id
 
 
@@ -49,6 +52,41 @@ def current_run_task_work_dir(agent, params: object | None = None) -> Path | Non
             continue
     root = current_run_task_workspace_root(agent, params)
     return root / "work" if root is not None else None
+
+
+# LLM: One run must never switch tool-output indexes after task promotion. Cache the first
+# owner-scoped archive root in host task attributes and reject any forged/out-of-owner value.
+# 函数用途: 固定本轮工具大输出的唯一归档根，避免中途创建任务目录后旧 ref 立即失效。
+def current_run_tool_output_archive_root(agent, params: object | None = None) -> Path:
+    owner_root = runtime_owner_root(agent).expanduser().resolve(strict=False)
+    attrs = getattr(params, "task_attributes", None) if params is not None else None
+    stored = (
+        str(attrs.get(TOOL_OUTPUT_ARCHIVE_ROOT_ATTR) or "").strip()
+        if isinstance(attrs, dict)
+        else ""
+    )
+    if stored:
+        candidate = Path(stored).expanduser().resolve(strict=False)
+        if _path_is_within(candidate, owner_root):
+            return candidate
+    task_work = current_run_task_work_dir(agent, params)
+    candidate = task_work if task_work is not None else owner_root
+    candidate = candidate.expanduser().resolve(strict=False)
+    if not _path_is_within(candidate, owner_root):
+        candidate = owner_root
+    if isinstance(attrs, dict):
+        attrs[TOOL_OUTPUT_ARCHIVE_ROOT_ATTR] = str(candidate)
+    return candidate
+
+
+# LLM: Archive-root validation is structural and must not rely on string prefixes.
+# 函数用途: 判断候选归档根是否确实位于当前用户家目录内。
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 # LLM: Archive a conversation turn under its task only after a task-promoting tool activated that
@@ -1082,6 +1120,7 @@ def _artifact_declares_output_target(artifact: dict) -> bool:
 __all__ = [
     "attach_run_task_workspace_context",
     "current_run_task_work_dir",
+    "current_run_tool_output_archive_root",
     "current_run_task_workspace_root",
     "materialize_promoted_task_workspace",
     "write_run_task_workspace_if_needed",

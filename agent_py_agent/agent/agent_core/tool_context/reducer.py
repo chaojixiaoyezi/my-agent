@@ -142,8 +142,13 @@ def _output_redaction(result: ToolResult) -> str:
     return result.output_redaction
 
 
+# LLM: read_artifact already returns its source logical ref and exact next_read window. Appending a
+# second anchor for the reader call creates recursive recovery and must be skipped.
+# 函数用途: 给普通内联工具结果补归档锚点；artifact 读取结果直接保留自己的分页合同。
 def _inline_result_with_archive_anchor(result: ToolResult, archive_record: dict[str, object]) -> str:
     rendered = result.render_for_prompt()
+    if result.tool_name == "read_artifact":
+        return rendered
     artifact_ref = str(archive_record.get("artifact_ref") or archive_record.get("source_artifact_ref") or "").strip()
     scoped_call_id = str(archive_record.get("scoped_call_id") or "").strip()
     if not artifact_ref:
@@ -152,18 +157,22 @@ def _inline_result_with_archive_anchor(result: ToolResult, archive_record: dict[
         rendered,
         "[tool-output-archive-anchor]",
         f"- output_scoped_call_id: {scoped_call_id}",
-        f"- artifact_ref: {artifact_ref}",
-        "- artifact_ref_policy: live prompt kept the bounded tool output inline; use output_scoped_call_id/read_artifact only if more detail is needed.",
+        "- artifact_ref_policy: the physical blob path is host-only; use output_scoped_call_id/read_artifact if more detail is needed.",
     ]
     if scoped_call_id:
         lines.append(f"- read_artifact_hint: {_read_artifact_hint(scoped_call_id, archive_record)}")
     return "\n".join(lines)
 
 
+# LLM: Model calls carry only the logical ref; run/task/request identity is host-injected and must
+# not be copied out of prompt text as if it were model authority.
+# 函数用途: 生成模型可以直接照抄的最小 read_artifact 调用参数。
 def _read_artifact_hint(ref: str, archive_record: dict[str, object]) -> str:
-    payload = {"tool": "read_artifact", "artifact_ref": ref, "offset": 0, "max_chars": 4000}
-    for key in ("run_id", "task_id", "request_id"):
-        value = str(archive_record.get(key) or "")
-        if value:
-            payload[key] = value
+    # Runtime identity is injected by the host and is intentionally absent from the model call.
+    payload = {
+        "tool": "read_artifact",
+        "artifact_ref": ref,
+        "offset": 0,
+        "max_chars": 4000,
+    }
     return json.dumps(payload, ensure_ascii=False)

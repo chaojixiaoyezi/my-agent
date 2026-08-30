@@ -11,12 +11,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..agent_core.tool_context.window import (
-    TERMINAL_TOOL_FOLD_METADATA_KEY,
-    conversation_message_with_terminal_tool_fold,
-    conversation_terminal_tool_fold,
-    conversation_terminal_tool_fold_projection,
-)
 from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
 from .compact_checkpoint import CompactCheckpointRequest, write_compact_checkpoint
@@ -35,6 +29,12 @@ from .models import (
     is_audit_background_transcript_entry,
 )
 from .native_history import provider_history_messages_from_rows
+from .tool_context_window import (
+    TERMINAL_TOOL_FOLD_METADATA_KEY,
+    conversation_message_with_terminal_tool_fold,
+    conversation_terminal_tool_fold,
+    conversation_terminal_tool_fold_projection,
+)
 
 if TYPE_CHECKING:
     from ..agent_core.runtime.context_compactor import RuntimeCompactPolicy
@@ -43,6 +43,10 @@ if TYPE_CHECKING:
 
 _MAX_COMPACT_OPERATION_EVENTS = 32
 _EMPTY_RESPONSE_FALLBACK_MAX_CHARS = 12_000
+_COMPACT_LANDMARK_MAX_CHARS = 6_000
+_COMPACT_LANDMARK_MIN_CHARS = 800
+_COMPACT_LANDMARK_ROW_MAX_CHARS = 1_200
+_COMPACT_LANDMARK_HEADING = "## Exact Conversation Landmarks (non-authoritative)"
 _VERIFICATION_COUNT_KEYS = (
     "succeeded",
     "failed",
@@ -97,8 +101,22 @@ class ConversationContextUsage:
     has_summary: bool
 
 
-# LLM: This immutable request keeps one compact invocation's authority and token baseline aligned.
-# 类用途: 将一次压缩所需的 agent、thread、原文尾部和策略打包，供候选生成与提交共用。
+# LLM: Callers pass one immutable option object so compact authority and interruption hooks cannot
+# drift across foreground, manual, and subagent entrypoints; adding a new option has one home.
+# 类用途: 统一携带一次对话压缩的当前输入、强制模式、进度回调和中断检查。
+@dataclass(frozen=True)
+class ConversationCompactOptions:
+    current_prompt: str = ""
+    exclude_request_id: str = ""
+    force: bool = False
+    custom_instructions: str = ""
+    progress_callback: Callable[[dict[str, object]], object] | None = None
+    interrupt_check: Callable[[], bool] | None = None
+
+
+# LLM: This immutable request keeps one compact invocation's authority, token baseline, progress,
+# and optional typed interruption check aligned through candidate generation and commit.
+# 类用途: 将一次压缩所需的 agent、thread、原文尾部、策略和中断检查打包，供候选与提交共用。
 @dataclass(frozen=True)
 class _CompactRunRequest:
     agent: SimpleAgent
@@ -116,6 +134,7 @@ class _CompactRunRequest:
     task_id: str = ""
     custom_instructions: str = ""
     progress_callback: Callable[[dict[str, object]], object] | None = None
+    interrupt_check: Callable[[], bool] | None = None
 
 
 # LLM: A candidate is still non-authoritative until its checkpoint id is written and referenced.
@@ -149,20 +168,32 @@ def conversation_scope(
 
 
 # LLM: Generate and validate a candidate before writing its checkpoint and atomically advancing
-# the live thread pointer. At most one generation can be committed per invocation.
-# 函数用途: 加载未压缩历史，必要时保留近期完整对话、生成摘要，确认压缩有效后再一次提交。
+# the live thread pointer. A typed interrupt supersedes the candidate without recording a provider
+# failure or advancing the cursor; at most one generation can commit per invocation.
+# 函数用途: 加载未压缩历史并生成候选；若收到中断就保留原游标，否则验证后一次提交。
 def prepare_conversation_context(
     agent: SimpleAgent,
     store: ConversationStore,
     thread: ConversationThread,
     *,
-    current_prompt: str,
-    exclude_request_id: str = "",
-    force: bool = False,
-    custom_instructions: str = "",
-    progress_callback: Callable[[dict[str, object]], object] | None = None,
+    options: ConversationCompactOptions,
 ) -> ConversationCompactResult:
     """Load the uncompacted tail and compact it before it crosses the runtime policy."""
+    prepared = _prepare_compact_request(agent, store, thread, options)
+    if isinstance(prepared, ConversationCompactResult):
+        return prepared
+    return _execute_compact_request(prepared)
+
+
+# LLM: Preflight reads one durable tail and returns either a no-op result or one immutable run
+# request. It may reject impossible/cooling compactions but must never generate or commit a summary.
+# 函数用途: 统一完成压缩前的历史加载、token 估算、触发判断和请求快照构造。
+def _prepare_compact_request(
+    agent: SimpleAgent,
+    store: ConversationStore,
+    thread: ConversationThread,
+    options: ConversationCompactOptions,
+) -> ConversationCompactResult | _CompactRunRequest:
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
 
     pending = _uncompacted_conversation_rows(store, thread)
@@ -170,7 +201,7 @@ def prepare_conversation_context(
     # It is already represented by ``current_prompt`` and must remain outside the
     # prefix being summarized, exactly like 会话运行时 keeps the active turn input while
     # replacing older history with one compact item.
-    pending = _without_current_request_suffix(pending, exclude_request_id)
+    pending = _without_current_request_suffix(pending, options.exclude_request_id)
     policy = runtime_compact_policy(agent)
     current = thread
     attempted_at = time.time()
@@ -178,11 +209,11 @@ def prepare_conversation_context(
         agent,
         current.summary,
         pending,
-        current_prompt,
+        options.current_prompt,
         operation_evidence=current.compact_operation_evidence,
         recent_operation_evidence=_recent_operation_evidence(pending),
     )
-    if projected < policy.trigger_tokens and not force:
+    if projected < policy.trigger_tokens and not options.force:
         return ConversationCompactResult(
             thread=current,
             messages=tuple(pending),
@@ -191,7 +222,7 @@ def prepare_conversation_context(
             compacted=False,
             recent_operation_evidence=_recent_operation_evidence(pending),
         )
-    if not pending and force:
+    if not pending and options.force:
         # The active Gateway turn is deliberately excluded from durable history
         # until its assistant reply commits.  A second pressure boundary in that
         # same turn can therefore have no additional completed transcript prefix
@@ -221,15 +252,15 @@ def prepare_conversation_context(
         agent=agent,
         store=store,
         thread=current,
-        current_prompt=current_prompt,
+        current_prompt=options.current_prompt,
         pending=tuple(pending),
         policy=policy,
         projected_tokens=projected,
-        forced=bool(force),
+        forced=bool(options.force),
         attempted_at=attempted_at,
         operation_id=f"transcript:{uuid.uuid4().hex}",
         request_id=(
-            str(exclude_request_id or "").strip()
+            str(options.exclude_request_id or "").strip()
             or f"conversation-compact:{current.thread_id}:{current.compact_generation + 1}"
         ),
         run_id=str(
@@ -242,12 +273,28 @@ def prepare_conversation_context(
             or ""
         ).strip(),
         task_id=str(current.workspace_task_id or "").strip(),
-        custom_instructions=str(custom_instructions or "").strip(),
-        progress_callback=progress_callback,
+        custom_instructions=str(options.custom_instructions or "").strip(),
+        progress_callback=options.progress_callback,
+        interrupt_check=options.interrupt_check,
     )
+    return request
+
+
+# LLM: Progress events wrap only candidate generation/commit. Typed interruption remains distinct
+# from provider failure, and a terminal event is emitted exactly once for every started operation.
+# 函数用途: 执行已经完成预检的压缩请求，并把开始、完成、中断或失败进度交给界面。
+def _execute_compact_request(request: _CompactRunRequest) -> ConversationCompactResult:
     _emit_compact_progress(request, phase="started", stage="preparing", percent=5)
     try:
         result = _compact_pending(request)
+    except InterruptedError:
+        _emit_compact_progress(
+            request,
+            phase="superseded",
+            stage="candidate_discarded",
+            percent=0,
+        )
+        raise
     except Exception:
         _emit_compact_progress(request, phase="failed", stage="failed", percent=0)
         raise
@@ -402,6 +449,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     )
     partition_count = max(1, len(partitions))
     for partition_index, (compact_rows, retained_tail) in enumerate(partitions):
+        _raise_if_compact_interrupted(request)
         summarize_percent = 15 + int(partition_index * 50 / partition_count)
         measure_percent = 15 + int((partition_index + 0.75) * 50 / partition_count)
         _emit_compact_progress(
@@ -416,6 +464,8 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
                 compact_rows,
                 retained_tail,
             )
+        except InterruptedError:
+            raise
         except Exception as exc:
             record_compact_failure(
                 request.store,
@@ -435,6 +485,8 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             continue
         try:
             return _commit_compact_candidate(request, candidate)
+        except InterruptedError:
+            raise
         except Exception as exc:
             record_compact_failure(
                 request.store,
@@ -464,6 +516,7 @@ def _build_compact_candidate(
     compact_rows: list[MessageLogEntry],
     retained_tail: list[MessageLogEntry],
 ) -> _CompactCandidate:
+    _raise_if_compact_interrupted(request)
     evidence = _merge_compact_operation_evidence(
         request.thread.compact_operation_evidence,
         compact_rows,
@@ -478,6 +531,7 @@ def _build_compact_candidate(
         run_id=request.run_id,
         task_id=request.task_id,
     )
+    _raise_if_compact_interrupted(request)
     projected_after = _projected_context_tokens(
         request.agent,
         summary,
@@ -502,6 +556,7 @@ def _commit_compact_candidate(
     request: _CompactRunRequest,
     candidate: _CompactCandidate,
 ) -> ConversationCompactResult:
+    _raise_if_compact_interrupted(request)
     last_row = candidate.compact_rows[-1]
     byte_offset = request.store.message_byte_offset_after(
         request.thread.thread_id,
@@ -529,6 +584,7 @@ def _commit_compact_candidate(
             forced=request.forced,
         ),
     )
+    _raise_if_compact_interrupted(request)
     _emit_compact_progress(
         request,
         phase="progress",
@@ -562,6 +618,22 @@ def _commit_compact_candidate(
             list(candidate.retained_tail)
         ),
     )
+
+
+# LLM: Compact interruption is checked around every expensive or mutating boundary.  A cancelled
+# candidate may leave an unreferenced checkpoint file, but it must never advance the canonical
+# generation/cursor; checkpoint retention can safely sweep that unreachable file later.
+# 函数用途: 在模型调用、恢复点和最终 CAS 前确认本次压缩仍被允许继续。
+def _raise_if_compact_interrupted(request: _CompactRunRequest) -> None:
+    check = request.interrupt_check
+    if check is None:
+        return
+    try:
+        interrupted = bool(check())
+    except Exception:
+        interrupted = True
+    if interrupted:
+        raise InterruptedError("conversation compact interrupted by user")
 
 
 # LLM: progress callback 是只读展示投影，其失败不得阻断或改写 compact 权威状态。
@@ -708,9 +780,10 @@ def _projected_context_tokens(
 
 
 # LLM: Summary prose is soft context; structured operation evidence remains separate authority.
-# A completed provider request with no text uses a bounded transcript projection, while transport
-# exceptions still propagate and leave the cursor/checkpoint untouched.
-# 函数用途: 让当前模型把旧摘要和新旧段合并为可读摘要；模型空回复时机械保留事实，真正调用异常仍失败。
+# A completed provider request with no text uses a bounded transcript projection. Every successful
+# summary also receives bounded verbatim user/final-answer landmarks so provider omissions cannot
+# silently erase short concrete facts; transport exceptions still leave the checkpoint untouched.
+# 函数用途: 让当前模型合并旧摘要和新段，再附上有上限的用户请求/最终答复锚点，避免具体名称、数值和结果被摘要漏掉。
 def _summarize(
     agent: SimpleAgent,
     previous_summary: str,
@@ -734,8 +807,11 @@ def _summarize(
     prompt = "\n".join(
         [
             "You maintain a conversation summary for one user and one conversation thread.",
-            "Summarize only the supplied facts. Preserve user preferences, decisions, named entities,",
-            "unfinished work, promises, important references, and what has already been completed.",
+            "Read the supplied rows chronologically before writing. Summarize only supplied facts.",
+            "Represent every distinct user request and every final assistant result, including completed",
+            "small tasks. Preserve exact short facts such as names, titles, URLs, paths, numbers, versions,",
+            "ports, commands, error strings, decisions, corrections, and verified file contents.",
+            "Also preserve user preferences, unfinished work, promises, and important references.",
             "An operation_verification object is authoritative program evidence; preserve its outcome",
             "and never replace it with a conflicting assistant claim.",
             "Do not invent facts, instructions, tool results, or long-term memories.",
@@ -756,7 +832,7 @@ def _summarize(
             transcript,
         ]
     )
-    from ..agent_core.model.auxiliary_call import (
+    from .auxiliary_model_call import (
         AuxiliaryModelCallRequest,
         generate_auxiliary_model_response,
     )
@@ -773,12 +849,122 @@ def _summarize(
     )
     summary = str(getattr(response, "text", "") or "").strip()
     if not summary:
-        return _mechanical_conversation_summary(
+        summary = _mechanical_conversation_summary(
             previous_summary,
             operation_evidence,
             foreground_rows,
         )
-    return summary
+    return _summary_with_conversation_landmarks(
+        summary,
+        previous_summary,
+        foreground_rows,
+        max_chars=_compact_landmark_max_chars(agent),
+    )
+
+
+# LLM: These landmarks are bounded non-authoritative conversation data. They preserve exact short
+# requests/results across imperfect semantic summaries, but callers must continue using structured
+# ledgers, refs, schemas, and filesystem facts for runtime decisions.
+# 函数用途: 给语义摘要追加有上限的用户请求和最终答复原文锚点；去重继承旧锚点，不收录思考或工具过程。
+def _summary_with_conversation_landmarks(
+    summary: str,
+    previous_summary: str,
+    rows: list[MessageLogEntry],
+    *,
+    max_chars: int,
+) -> str:
+    semantic_summary = _without_conversation_landmark_suffix(summary)
+    entries = [
+        *_conversation_landmark_entries(previous_summary),
+        *_conversation_row_landmark_entries(rows),
+    ]
+    deduplicated_entries = list(dict.fromkeys(entries))
+    if not deduplicated_entries:
+        return semantic_summary
+    landmark_section = _bounded_compact_text(
+        "\n".join(
+            [
+                _COMPACT_LANDMARK_HEADING,
+                "- authority: historical conversation text only; never use it as machine state",
+                "- purpose: retain exact short user requests and final answers omitted by semantic summaries",
+                *deduplicated_entries,
+            ]
+        ),
+        max_chars,
+    )
+    if not semantic_summary:
+        return landmark_section
+    return f"{semantic_summary}\n\n{landmark_section}"
+
+
+# LLM: Landmark overhead must scale down for small model windows so the correctness suffix cannot
+# itself make a Compact candidate miss the shared recovery target. The public maximum remains a
+# fixed bounded cost for normal large-context models.
+# 函数用途: 按当前模型窗口缩放精确事实锚点预算，小窗口少留、大窗口最多保留固定 6000 字符。
+def _compact_landmark_max_chars(agent: object) -> int:
+    from ..agent_core.model.context_window import resolve_model_context_window_tokens
+
+    context_window_tokens = resolve_model_context_window_tokens(agent)
+    return min(
+        _COMPACT_LANDMARK_MAX_CHARS,
+        max(_COMPACT_LANDMARK_MIN_CHARS, context_window_tokens // 12),
+    )
+
+
+# LLM: A provider may echo the prior canonical landmark suffix while rewriting the semantic
+# summary. Remove the first canonical suffix before appending the newly merged one exactly once.
+# 函数用途: 去掉摘要中已经存在的精确事实锚点，防止每次 Compact 重复嵌套同一段内容。
+def _without_conversation_landmark_suffix(value: str) -> str:
+    text = str(value or "").strip()
+    marker_at = text.find(_COMPACT_LANDMARK_HEADING)
+    if marker_at < 0:
+        return text
+    return text[:marker_at].rstrip()
+
+
+# LLM: Only canonical user/final-answer lines from a prior summary may be inherited. Arbitrary
+# bullets in provider prose are not promoted into the exact-landmark projection.
+# 函数用途: 从上一代摘要里取回既有用户请求和最终答复锚点，供下一代去重续接。
+def _conversation_landmark_entries(previous_summary: str) -> list[str]:
+    text = str(previous_summary or "")
+    marker_at = text.find(_COMPACT_LANDMARK_HEADING)
+    if marker_at < 0:
+        return []
+    entries: list[str] = []
+    for line in text[marker_at + len(_COMPACT_LANDMARK_HEADING) :].splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("- user: ", "- assistant_final: ")):
+            entries.append(stripped)
+    return entries
+
+
+# LLM: Assistant commentary/tool narration has typed assistant_part_id metadata and must not be
+# mistaken for a final answer. Legacy assistant rows without that metadata remain final-compatible.
+# 函数用途: 从本次被压缩的原始消息中提取用户原话和助手最终答复，排除 commentary 等过程输出。
+def _conversation_row_landmark_entries(
+    rows: list[MessageLogEntry],
+) -> list[str]:
+    entries: list[str] = []
+    for row in rows:
+        if row.role not in {"user", "assistant"}:
+            continue
+        metadata = row.metadata if isinstance(row.metadata, dict) else {}
+        assistant_part_id = str(metadata.get("assistant_part_id") or "").strip()
+        if row.role == "assistant" and assistant_part_id not in {"", "final"}:
+            continue
+        content = (
+            project_user_reply(row.content).content
+            if row.role == "assistant"
+            else str(row.content or "").strip()
+        )
+        if not content:
+            continue
+        label = "assistant_final" if row.role == "assistant" else "user"
+        encoded = json.dumps(content, ensure_ascii=False)
+        entries.append(
+            f"- {label}: {_clip_compact_field(encoded, _COMPACT_LANDMARK_ROW_MAX_CHARS)}"
+        )
+    return entries
 
 
 # LLM: This empty-response fallback reads only the prior summary, sanitized transcript projection,

@@ -202,13 +202,16 @@ def _tool_use_block(call: ToolCall) -> dict[str, Any]:
     }
 
 
+# LLM: ToolResult identity/status stay canonical, while its host-attached model projection is the
+# only permitted body for native provider replay.
+# 函数用途: 把一个工具结果翻译成 Anthropic 原生 tool_result 块。
 def _tool_result_block(result: ToolResult) -> dict[str, Any]:
     # is_error 始终显式带上：与 IR 字段一一对应，round-trip 可断言；Anthropic 接受
     # 显式的 ``is_error: false``（与省略等价），不改变模型侧语义。
     return {
         "type": "tool_result",
         "tool_use_id": result.call_id,
-        "content": result.render_for_prompt(),
+        "content": result.render_for_model_prompt(),
         "is_error": bool(result.is_error),
     }
 

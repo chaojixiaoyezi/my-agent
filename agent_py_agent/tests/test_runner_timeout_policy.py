@@ -123,6 +123,65 @@ def test_timed_runner_interrupts_blocking_transport_after_attempt_is_fenced():
     assert result is timeout_result
 
 
+def test_non_timed_runner_registers_exact_attempt_interrupt_token():
+    from agent_py_agent.agent.agent_core.runner.worker import (
+        RunSubagentWorkerParams,
+        _run_subagent_worker_interruptibly,
+    )
+    from agent_py_agent.agent.concurrency.interrupt import (
+        interrupt_by_name,
+        wait_interruptibly,
+    )
+
+    started = threading.Event()
+    observed_attempt_ids: list[str] = []
+    result: dict[str, object] = {}
+
+    def _run_subagent(*, params):
+        observed_attempt_ids.append(params.attempt_id)
+        started.set()
+        wait_interruptibly(10)
+
+    worker = SimpleNamespace(
+        run_subagent=_run_subagent,
+        subagents=SimpleNamespace(
+            lifecycle=SimpleNamespace(
+                prepare_runner_attempt=lambda *_args, **_kwargs: SimpleNamespace(
+                    runner_active_attempt_id="attempt-normal"
+                ),
+            ),
+        ),
+    )
+    params = RunSubagentWorkerParams(
+        config=AgentConfig(),
+        root=MagicMock(),
+        run_id="run-normal",
+        instruction="wait",
+        dry_run=False,
+        max_cards=1,
+        probe=False,
+        retry_reason="",
+        timeout_seconds=0.0,
+    )
+
+    def _target() -> None:
+        try:
+            _run_subagent_worker_interruptibly(worker, params)
+        except InterruptedError:
+            result["interrupted"] = True
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    assert started.wait(1.0)
+
+    assert interrupt_by_name("subagent-runner-attempt:run-normal:attempt-normal") is True
+    thread.join(1.0)
+
+    assert result == {"interrupted": True}
+    assert observed_attempt_ids == ["attempt-normal"]
+    assert thread.is_alive() is False
+
+
 def test_audit_runner_uses_stream_inactivity_not_total_wall_time():
     import time
 

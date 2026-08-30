@@ -13,11 +13,13 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolCallRecordParams, ToolLoopService
+from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_output_projection
 from agent_py_agent.agent.agent_core.tool_context.call_reducer import (
     AssistantToolRoundContextRequest,
     render_assistant_tool_round_context,
     render_tool_payload_for_live_prompt,
 )
+from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.memory_archive.artifact.reader import (
     ReadToolOutputArtifactRequest,
     read_tool_output_artifact,
@@ -33,6 +35,7 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     externalize_tool_output_record,
 )
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
 from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolFailureFacts,
     ToolResult,
@@ -148,9 +151,17 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert "output_call_id: 1-1" in params.tool_context[-1]
     assert "output_scoped_call_id: run-tool:1-1" in params.tool_context[-1]
     assert '"read_artifact", "artifact_ref": "run-tool:1-1"' in params.tool_context[-1]
-    assert '"run_id": "run-tool"' in params.tool_context[-1]
+    assert '"run_id": "run-tool"' not in params.tool_context[-1]
     assert "完整工具输出已外置" in params.tool_context[-1]
     assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]
+    native_messages = AnthropicMessageAdapter().to_provider_messages(params.tool_ir_history)
+    native_result = native_messages[-1]["content"][0]["content"]
+    assert native_result == params.tool_context[-1].split(
+        "[tool-output-record round=1 index=1]\n",
+        1,
+    )[1]
+    assert str(artifact_path) not in native_result
+    assert '"read_artifact", "artifact_ref": "run-tool:1-1"' in native_result
 
 
 def test_tool_call_index_preserves_nested_plan_and_dispatch_parameters(tmp_path: Path) -> None:
@@ -199,6 +210,76 @@ def test_tool_call_index_preserves_nested_plan_and_dispatch_parameters(tmp_path:
         {"run_id": "root-run", "task_id": "root-run"},
     )
     assert carried[0]["parameters"] == params
+
+
+def test_explicit_preview_truncation_forces_recovery_artifact_below_global_threshold(
+    tmp_path: Path,
+) -> None:
+    """工具主动缩短模型预览时，完整正文必须仍可通过统一 artifact 合同恢复。"""
+
+    output = "header\n" + ("full-body-" * 100)
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="web_fetch",
+            call_id="web-small-preview",
+            output=output,
+            ok=True,
+            run_id="web-run",
+            task_id="web-task",
+            min_chars=100_000,
+            preview_chars=100_000,
+            result_envelope={
+                "tool_output_policy": {
+                    "live_prompt_output": "header\nfull-body-... 已截断",
+                    "requires_recovery_artifact": True,
+                }
+            },
+        )
+    )
+
+    assert record["output_externalized"] is True
+    artifact = json.loads(Path(record["output_path"]).read_text(encoding="utf-8"))
+    assert artifact["content"] == output
+
+
+def test_production_archiver_preserves_tool_preview_policy_when_adding_trust(
+    tmp_path: Path,
+) -> None:
+    """宿主补 trust/redaction 时不能覆盖工具声明的强制恢复归档事实。"""
+
+    params = _tool_loop_params(request_id="req-web", run_id="run-web", task_id="task-web")
+    call = canonical_history_call(
+        "web_fetch",
+        {"url": "https://example.com"},
+        call_id="web-call",
+        source_protocol="native",
+        run_id="run-web",
+        turn_id="run-web:round-1",
+        attempt_id="req-web",
+    )
+    outcome = ToolHandlerOutcome(
+        "web_fetch",
+        True,
+        "complete response below every global threshold",
+        result_envelope={
+            "tool_output_policy": {
+                "live_prompt_output": "bounded preview... 已截断",
+                "requires_recovery_artifact": True,
+            }
+        },
+    )
+
+    projection = archive_tool_output_projection(
+        SimpleNamespace(root=tmp_path, config=AgentConfig()),
+        params,
+        call,
+        outcome,
+    )
+    record = projection.metadata["archive_output_record"]
+
+    assert record["output_externalized"] is True
+    assert Path(record["output_path"]).is_file()
 
 
 def test_compact_carried_create_subagents_keeps_structured_child_recovery_facts(

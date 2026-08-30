@@ -310,29 +310,18 @@ def _background_shell_request(
     )
 
 
-def test_managed_background_command_needs_exact_approval_binding(tmp_path: Path) -> None:
+def test_managed_background_command_uses_required_sandbox_without_false_approval(
+    tmp_path: Path,
+) -> None:
     request, executed = _background_shell_request(tmp_path)
-    first = ToolExecutor().execute(request)
+    execution = ToolExecutor().execute(request)
 
-    assert first.decision.status == "ask"
-    assert first.decision.reason_codes == ("APPROVAL_REQUIRED",)
-    assert first.decision.resolved_effect == "dangerous"
-    assert first.decision.approval_request is not None
-    assert first.result.handler_executed is False
-    assert executed == []
-
-    binding = {
-        **dict(first.decision.approval_request),
-        "approval_id": "approval-background-server",
-        "status": "APPROVED",
-    }
-    second = ToolExecutor().execute(
-        replace(request, write_boundary={"approved_actions": [binding]})
-    )
-
-    assert second.decision.status == "allow"
-    assert second.decision.resolved_effect == "dangerous"
-    assert second.result.handler_executed is True
+    assert execution.decision.status == "allow"
+    assert execution.decision.reason_codes == ()
+    assert execution.decision.resolved_effect == "dangerous"
+    assert execution.decision.approval_request is None
+    assert execution.decision.sandbox_plan["mode"] == "required"
+    assert execution.result.handler_executed is True
     assert len(executed) == 1
     assert executed[0]["command"] == "python3 -m http.server 8765 --bind 0.0.0.0"
     assert executed[0]["run_in_background"] is True
@@ -417,8 +406,15 @@ def test_terminal_session_existing_transport_does_not_reprompt(tmp_path: Path) -
 
     for index, arguments in enumerate(
         (
+            {"action": "list"},
             {"action": "write", "session_id": "pty-approved", "data": "print(42)"},
             {"action": "read", "session_id": "pty-approved", "cursor": 0},
+            {
+                "action": "resize",
+                "session_id": "pty-approved",
+                "columns": 100,
+                "rows": 30,
+            },
             {"action": "close", "session_id": "pty-approved"},
         )
     ):
@@ -434,7 +430,13 @@ def test_terminal_session_existing_transport_does_not_reprompt(tmp_path: Path) -
         assert execution.decision.status == "allow"
         assert execution.result.handler_executed is True
 
-    assert [item["action"] for item in executed] == ["write", "read", "close"]
+    assert [item["action"] for item in executed] == [
+        "list",
+        "write",
+        "read",
+        "resize",
+        "close",
+    ]
 
 
 def test_write_boundary_denial_happens_before_operation_claim(tmp_path: Path) -> None:
@@ -657,7 +659,9 @@ def test_run_evidence_projects_exact_snapshots_choices_and_completion() -> None:
     assert "not projected" not in json.dumps(evidence)
 
 
-def test_required_action_lets_model_choose_and_keeps_choosing_after_evidence(tmp_path: Path) -> None:
+def test_required_action_lets_model_choose_and_keeps_choosing_after_evidence(
+    tmp_path: Path,
+) -> None:
     tool = _CountingTool(command=True)
     action = RequiredAction(
         action_id="required-1",
@@ -835,10 +839,7 @@ def test_required_action_open_with_execution_evidence_completes() -> None:
         layers=(),
         required_actions=(first, second),
     )
-    assert (
-        required_action_no_tool_decision(contract, has_succeeded_evidence=True)
-        == "complete"
-    )
+    assert required_action_no_tool_decision(contract, has_succeeded_evidence=True) == "complete"
     assert first.status == "satisfied"
     assert second.status == "satisfied"
 

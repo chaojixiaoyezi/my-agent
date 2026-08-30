@@ -12,6 +12,10 @@
 所有 ID 由 B.1 统一生成器（common.id_generator.new_id）铸造，本模块不手拼。
 """
 
+# LLM: runtime.db 只保存 Task 身份与 TaskRun/AgentRun/Attempt 的执行生命周期；
+# 禁止把已退休的机器验收合同或 Task 业务完成状态重新接回这个权威仓储。
+# 模块用途: 管理 owner 级任务身份、每次执行、代理树、工具操作和恢复状态。
+
 from __future__ import annotations
 
 import json
@@ -34,7 +38,6 @@ from ..scheduler.repository import (
 from ..scheduler.repository import (
     _process_state as _proc_state,
 )
-from .acceptance_operations import RuntimeAcceptanceMixin
 from .delivery_operations import RuntimeDeliveryMixin
 from .operations import (
     _ATTEMPT_TERMINAL_STATUSES,
@@ -52,6 +55,7 @@ from .operations import (
     OP_UNKNOWN,
     RUN_STATUS_LEGACY_CREATED,
     RuntimeConflictError,
+    RuntimeExecutionBusyError,
     RuntimeOperationsMixin,
     exec_lock_scope,
     holder_is_alive,
@@ -141,10 +145,12 @@ def _cancel_unstarted_tool_operations(
         )
 
 
+# LLM: RuntimeRepository 是 owner runtime.db 的唯一写入口；新增状态前必须区分
+# 长期 Task 身份与可停止、失败、恢复的 TaskRun/AgentRun/Attempt 执行状态。
+# 类用途: 为 Gateway、主代理和恢复器提供同一份 SQLite 运行事实源。
 class RuntimeRepository(
     RuntimeSchemaMixin,
     RuntimeOperationsMixin,
-    RuntimeAcceptanceMixin,
     RuntimeDeliveryMixin,
 ):
     """单 owner 权威库入口。每个 owner 一个实例（A.1）。"""
@@ -173,6 +179,9 @@ class RuntimeRepository(
             conn.close()
 
     # -------------------------------------------- A.4/A.5/A.6/A.9 主链写入
+    # LLM: 根运行创建新的 TaskRun，child 复用父 TaskRun；Task 本身只承载
+    # owner/thread/goal 等耐久身份，不写本次执行状态。
+    # 函数用途: 在一个事务里登记任务身份、运行、代理、首次尝试和委托关系。
     def record_run_creation(
         self,
         *,
@@ -239,8 +248,8 @@ class RuntimeRepository(
                         conn.execute(
                             """
                             INSERT INTO tasks(task_id, owner_id, thread_id, conversation_task_id,
-                                              title, goal, status, created_at, updated_at)
-                            VALUES(?, ?, ?, ?, '', ?, 'active', ?, ?)
+                                              title, goal, created_at, updated_at)
+                            VALUES(?, ?, ?, ?, '', ?, ?, ?)
                             """,
                             (task_id, owner_id, thread_id, conversation_task_id, goal, now, now),
                         )
@@ -332,6 +341,8 @@ class RuntimeRepository(
         }
 
     # ------------------------------------------------------------------ Task
+    # LLM: Task 是可跨多次执行复用的长期身份，运行终态只能写到 TaskRun。
+    # 函数用途: 新建一个 owner 级任务身份，供后续一次或多次 TaskRun 关联。
     def create_task(
         self,
         *,
@@ -349,8 +360,8 @@ class RuntimeRepository(
             conn.execute(
                 """
                 INSERT INTO tasks(task_id, owner_id, thread_id, conversation_task_id,
-                                  title, goal, status, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                                  title, goal, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (task_id, owner_id, thread_id, conversation_task_id, title, goal, now, now),
             )
@@ -740,8 +751,9 @@ class RuntimeRepository(
         执行权锁三态（scope=attempt-exec:{agent_run_id}，与 CAS 换代同事务）：
           - 缺失 → INSERT 锁（归属新 attempt）；
           - 本实例持有 → 换代（compact/账本续跑轮 = 同一 worker 续跑）；
-          - 他人持有且活跃 → RuntimeConflictError（并发双挂载恰一成功）；
-          - 超过宽限期且持主确认死亡 → 接管（删旧锁建新锁）。
+          - 他人持有且进程存活 → RuntimeExecutionBusyError（并发双挂载恰一成功）；
+          - PID/start token 确认持主死亡 → 立即接管（删旧锁建新锁）；
+          - 无法确认持主死亡 → fail-closed 保留旧锁。
         锁释放四元组（scope+holder_instance+attempt_id+attempt_generation），
         settle 终态即释放；takeover/接管同事务删旧锁。
 
@@ -852,7 +864,7 @@ class RuntimeRepository(
             if lock is not None:
                 holder = str(lock["holder_instance"] or "")
                 if holder != self.instance_id and not self._lock_is_takeoverable(lock, now):
-                    raise RuntimeConflictError(
+                    raise RuntimeExecutionBusyError(
                         f"执行权锁被 {holder} 持有（活跃），拒绝并发挂载: {scope}"
                     )
                 # 接管：删旧锁（同事务），新 attempt 成为唯一持锁者
@@ -985,18 +997,14 @@ class RuntimeRepository(
             return ""
 
     def _lock_is_takeoverable(self, lock: sqlite3.Row, now: float) -> bool:
-        """R1-03 锁接管判定：超宽限期且持主已确认死亡才可接管。
+        """R1-03 锁接管判定：持主已确认死亡即可立即接管。
 
-        lease 只是提示“应该再核对”，不是进程死亡证明。模型调用可能长于 lease，
-        活进程即使暂时没回到工具轮续租也必须继续持权；PID/start token 无法确认
-        死亡时一律保守拒绝。
+        lease 不是进程死亡证明，不能单独触发接管；反过来，PID/start token 已明确
+        证明旧 Gateway 死亡时也无需再白等 lease+grace。接管事务会把旧未完成工具
+        标 UNKNOWN、mutation 标 DIRTY，避免未知副作用被静默重放。活进程即使模型
+        调用长于 lease 仍继续持权；PID/start token 无法确认时一律保守拒绝。
+        ``now`` 保留为稳定内部签名，孤儿扫描仍在查询层单独使用 lease+grace 节流。
         """
-        lease_expired_beyond_grace = (
-            float(lock["lease_expires_at"] or 0)
-            < float(now) - EXEC_LOCK_GRACE_SECONDS
-        )
-        if not lease_expired_beyond_grace:
-            return False
         return not holder_is_alive(
             int(lock["pid"] or 0),
             str(lock["start_token"] or ""),
@@ -1005,7 +1013,7 @@ class RuntimeRepository(
     def has_active_exec_lock(self, agent_run_id: str, *, now: float | None = None) -> bool:
         """R1-03 驱动链 lease 感知：run 是否被活跃执行权锁持有。
 
-        活跃 = 锁存在且不可接管（尚未超宽限期，或持主仍存活）→ worker 在跑，
+        活跃 = 锁存在且持主仍存活/无法证死 → worker 在跑，
         发现层不得重复催。判定与 create_attempt 同一把尺（_lock_is_takeoverable）。
         """
         lock = self._runtime_connect().execute(
@@ -1598,6 +1606,9 @@ class RuntimeRepository(
             )
         return {"settled": True, "event_id": event_id}
 
+    # LLM: 此入口只结束一次 TaskRun 的执行生命周期；不得顺带关闭长期 Task，
+    # 也不得从模型正文、验收文案或产物质量推导机器终态。
+    # 函数用途: 把已由执行层确认的运行结果幂等写入 TaskRun，并留下关闭事件。
     def settle_task_run_terminal(
         self,
         *,
@@ -1608,13 +1619,12 @@ class RuntimeRepository(
         reason: str = "",
         now: float | None = None,
     ) -> dict[str, object]:
-        """task_run 任务级终态化（发现层账本自愈用，无 acceptance 轴）。
+        """将一次 TaskRun 执行投影到终态，供发现层账本自愈。
 
-        与 closeout_task_run 的区别：这是 run 已权威终态后把残留 task_run
-        投影终态的兜底（孤儿回收/收口闸的 settle 调用点不在交付链，没资格
-        走带 acceptance 轴的三轴收口）。closed_at=0 才写（CAS 幂等，并发/
-        重放以第一次为准）；写 task_run.closed 事件，与 agent_run.completed
-        对称可审计。
+        Task 是可长期续做的工作身份，本方法只结束当前 TaskRun；它不关闭
+        Task，也不读取模型正文、验收清单或产物质量。closed_at=0 才写
+        （CAS 幂等，并发/重放以第一次为准）；同时写 task_run.closed 事件，
+        与 agent_run.completed 对称可审计。
         """
         if str(status or "").strip() not in AGENT_RUN_TERMINAL_STATUSES:
             return {"settled": False, "reason": "invalid_status"}
@@ -1643,6 +1653,9 @@ class RuntimeRepository(
         return {"settled": True, "closed_at": now}
 
     # ------------------------------------------- R1-03 收口矩阵 + 孤儿兜底
+    # LLM: 这里只依据 tool operation 的结构化执行事实分类；UNKNOWN/EXECUTING
+    # 必须停手，业务完成度和最终答复由模型主链处理。
+    # 函数用途: 判断一次尝试能否安全归为完成、失败、取消或暂不裁决。
     def classify_attempt_closeout(self, attempt_id: str) -> str | None:
         """R1-03 收口矩阵五档（v5，纯结构化 op 状态分类）。
 
@@ -1659,8 +1672,8 @@ class RuntimeRepository(
         → 旧逻辑把它与可能已生效的 EXECUTING/UNKNOWN 同等判 None → 收口
         标 TOOL_OPERATION_OUTCOME_UNKNOWN → 任务 failed。未启动 op 的
         副作用可证明未发生，不该拖死可续跑任务。
-        执行层收口 ≠ 任务层收口：任务完成仍走 required_actions +
-        closeout_task_run + delivery 闸（本函数只裁决 attempt 执行痕迹）。
+        这里只裁决 attempt 的客观执行痕迹；最终回复和投递走各自现有主链，
+        不再经过已退休的机器验收合同。
         """
         with self._runtime_connection() as conn:
             attempt = conn.execute(

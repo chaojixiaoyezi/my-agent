@@ -156,3 +156,26 @@ def test_simple_agent_always_uses_owner_home_runtime(tmp_path: Path):
     assert agent.runtime_path_resolution.reason == "owner_home_runtime"
     assert agent.local_store.db_path.is_relative_to(owner_home / "workspace" / "runtime" / "workspaces")
     assert not (workspace / "data").exists()
+
+
+def test_workspace_only_constructor_roots_share_one_effective_runtime_home(tmp_path: Path):
+    """WorkspaceOnly 下启动目录不是身份；同 owner 的 CLI/直接构造必须找到同一运行账本。"""
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    home = tmp_path / "home"
+    first = SimpleAgent(
+        AgentConfig(my_agent_home=str(home), prompt_files=[]),
+        tmp_path / "cli-start-root",
+    )
+    second = SimpleAgent(
+        AgentConfig(my_agent_home=str(home), prompt_files=[]),
+        tmp_path / "direct-constructor-root",
+    )
+
+    owner_home = (home / "owners" / "local" / "main").resolve()
+    assert first.effective_workspace_root == owner_home
+    assert second.effective_workspace_root == owner_home
+    assert first.subagents.workspace == second.subagents.workspace
+    assert first.conversation_store.root == second.conversation_store.root
+    assert first.local_store.db_path == second.local_store.db_path

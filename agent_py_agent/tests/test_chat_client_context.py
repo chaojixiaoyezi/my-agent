@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,22 @@ import pytest
 def _config_with_access_mode(tmp_path, access_mode: str) -> str:
     path = tmp_path / f"agent-{access_mode}.yaml"
     path.write_text(f"access_mode: {access_mode}\n", encoding="utf-8")
+    return str(path)
+
+
+def _config_with_owner(tmp_path, *, provider: str, owner_id: str) -> str:
+    path = tmp_path / f"agent-{provider}-{owner_id}.yaml"
+    path.write_text(
+        "\n".join(
+            (
+                f'my_agent_owner_provider: "{provider}"',
+                'my_agent_owner_kind: "user"',
+                f'my_agent_owner_id: "{owner_id}"',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
     return str(path)
 
 
@@ -93,6 +110,206 @@ def test_gateway_chat_clients_in_different_projects_share_one_owner_service(
     assert first.config.local_store_path != second.config.local_store_path
     assert first.root == first_workspace.resolve()
     assert second.root == second_workspace.resolve()
+    assert first.gateway_request_workspace()["cwd"] == str(first_workspace.resolve())
+    assert second.gateway_request_workspace()["cwd"] == str(second_workspace.resolve())
+
+
+def test_scoped_gateway_chat_clients_share_base_gateway_but_keep_owner_runtime(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Different users must probe one Gateway while retaining separate owner state."""
+    from agent_py_agent.cli.chat import gateway_paths
+    from agent_py_agent.cli.chat_client_context import make_gateway_chat_client
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
+    monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
+
+    alice = make_gateway_chat_client(
+        SimpleNamespace(
+            config=_config_with_owner(tmp_path, provider="tui-test", owner_id="alice"),
+            workspace_root="",
+        )
+    )
+    bob = make_gateway_chat_client(
+        SimpleNamespace(
+            config=_config_with_owner(tmp_path, provider="tui-test", owner_id="bob"),
+            workspace_root="",
+        )
+    )
+
+    expected_gateway = (
+        home
+        / "owners"
+        / "local"
+        / "main"
+        / "workspace"
+        / "runtime"
+        / "services"
+        / "gateway"
+    )
+    assert gateway_paths(alice).root == expected_gateway
+    assert gateway_paths(bob).root == expected_gateway
+    assert alice.root != bob.root
+    assert alice.config.session_workspace != bob.config.session_workspace
+    # Scoped users already select their canonical owner home through authenticated
+    # identity. Sending it again as a host cwd override is both redundant and
+    # correctly rejected by the Gateway's remote-owner hard gate.
+    assert alice.gateway_request_workspace() == {}
+    assert bob.gateway_request_workspace() == {}
+
+
+def test_scoped_gateway_chat_client_sends_structured_owner_identity(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """One loopback Gateway must still receive the exact scoped user identity."""
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+    from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
+
+    captured: dict[str, object] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"ok": True, "turns": []}).encode()
+
+    def fake_urlopen(request, timeout):
+        captured["headers"] = dict(request.header_items())
+        captured["payload"] = json.loads(request.data.decode())
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = GatewayChatClientAgent(
+        SimpleNamespace(),
+        SimpleNamespace(gateway_port=18420),
+        tmp_path,
+        [tmp_path],
+        SimpleNamespace(),
+        owner_identity=OwnerIdentity.provider_user("tui-test", "alice"),
+    )
+
+    assert client.request_chat_history("same-session", max_turns=3)["ok"] is True
+    assert captured["payload"] == {
+        "limit": 3,
+        "user_id": "alice",
+        "channel": "tui-test",
+        "conversation_id": "same-session",
+    }
+    headers = {str(key).casefold(): value for key, value in captured["headers"].items()}
+    assert headers["x-user-id"] == "alice"
+    assert headers["x-channel"] == "tui-test"
+
+
+def test_local_user_gateway_chat_client_does_not_collapse_to_local_main(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """local/user thin TUI 必须把用户 ID 发给共享 Gateway，而非伪装成 local-agent。"""
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+    from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
+
+    captured: dict[str, object] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"ok": True, "turns": []}).encode()
+
+    def fake_urlopen(request, timeout):
+        captured["headers"] = dict(request.header_items())
+        captured["payload"] = json.loads(request.data.decode())
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = GatewayChatClientAgent(
+        SimpleNamespace(),
+        SimpleNamespace(gateway_port=18420),
+        tmp_path,
+        [tmp_path],
+        SimpleNamespace(),
+        owner_identity=OwnerIdentity.provider_user("local", "alice"),
+    )
+
+    assert client.request_chat_history("same-session", max_turns=3)["ok"] is True
+    assert captured["payload"] == {
+        "limit": 3,
+        "user_id": "alice",
+        "channel": "local",
+        "conversation_id": "same-session",
+    }
+    headers = {str(key).casefold(): value for key, value in captured["headers"].items()}
+    assert headers["x-user-id"] == "alice"
+    assert headers["x-channel"] == "local"
+
+
+def test_scoped_thin_tui_idle_ask_uses_owner_identity_without_workspace_override(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The file-queue ask path must match the scoped client's HTTP identity contract."""
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.cli.chat_client_context import make_gateway_chat_client
+    from agent_py_agent.cli.chat_parts.gateway_client import (
+        ChatRequestContent,
+        submit_chat_request,
+    )
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
+    monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
+    client = make_gateway_chat_client(
+        SimpleNamespace(
+            config=_config_with_owner(tmp_path, provider="tui-test", owner_id="alice"),
+            workspace_root="",
+        )
+    )
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    request_id, _chunk_path, _response_path = submit_chat_request(
+        paths,
+        ChatRequestContent(
+            prompt="隔离请求",
+            inject=[],
+            prompt_files=[],
+            save=True,
+            show_prompt=False,
+            resume_context=None,
+            chat_session_id="same-session",
+        ),
+        client,
+        workspace_root=client.root,
+        workspace_roots=client.workspace_roots,
+    )
+    payload = json.loads((paths.inbox / f"{request_id}.json").read_text(encoding="utf-8"))
+
+    assert "workspace" not in payload
+    assert payload["user_id"] == "alice"
+    assert payload["metadata"]["channel"] == "tui-test"
+    assert payload["conversation"] == {
+        "channel": "tui-test",
+        "channel_conversation_id": "same-session",
+        "channel_user_id": "alice",
+        "canonical_user_id": "alice",
+    }
 
 
 def test_gateway_chat_client_rejects_external_workspace_without_full_access(
@@ -217,6 +434,38 @@ def test_gateway_chat_client_memory_and_history_stay_on_typed_http(monkeypatch, 
     assert captured[0][0].endswith("/client/memory")
     assert captured[0][1]["conversation_id"] == "sess-test"
     assert captured[1][0].endswith("/client/history")
+
+
+def test_gateway_chat_client_reports_lost_memory_write_response_as_unknown(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(urllib.error.URLError("lost")),
+    )
+    client = GatewayChatClientAgent(
+        SimpleNamespace(),
+        SimpleNamespace(gateway_port=18420),
+        tmp_path,
+        [tmp_path],
+        SimpleNamespace(),
+    )
+
+    result = client.request_memory(
+        operation="remember",
+        session_id="sess-test",
+        content="may already be committed",
+    )
+
+    assert result == {
+        "ok": False,
+        "outcome": "unknown",
+        "http_status": 0,
+        "error_code": "MEMORY_WRITE_RESULT_UNKNOWN",
+    }
 
 
 def test_gateway_chat_client_posts_correlated_active_turn_input(monkeypatch, tmp_path) -> None:

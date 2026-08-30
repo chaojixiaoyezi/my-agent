@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..contracts.subagent_completion import SUBAGENT_COMPLETION_SCHEMA_VERSION
 from ..memory_archive.tokens import estimate_tokens
 from ..model_visible_refs import current_model_ref, current_model_ref_list
 from ..runtime_errors import runtime_error_report
@@ -20,7 +21,6 @@ from .models import (
 _LOGGER = logging.getLogger(__name__)
 _COMPLETION_MESSAGE_MAX_TOKENS = 1_000
 _COMPLETION_EVIDENCE_REF_LIMIT = 20
-SUBAGENT_COMPLETION_SCHEMA_VERSION = "subagent-completion.v1"
 
 
 # LLM: Root children publish a conversation wake; nested children never skip a

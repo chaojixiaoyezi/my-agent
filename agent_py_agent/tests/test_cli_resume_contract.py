@@ -171,14 +171,13 @@ def test_should_continue_task_truth_table():
         ("REPEATED_TOOL_FAILURE", "tool_loop", "unfinished"),
         # 2026-08-15: 未闭合工具块纯格式错误(整轮零执行已保证安全)可续跑
         ("TOOL_CALL_UNCLOSED", "tool_protocol_adapter", "unfinished"),
-        # EXEC-26/27: 工具/收口 gate 产生的"未完成"族同属返工门可续跑
-        ("OPERATION_INCOMPLETE", "tool_runtime", "unfinished"),
-        ("NO_DELIVERY_ARTIFACT_PRODUCED", "tool_loop", "unfinished"),
         ("MODEL_RESPONSE_TRUNCATED", "tool_loop", "unfinished"),
     ]
     not_continuable = [
         ("PROTOCOL_VIOLATION", "tool_protocol_adapter", "blocked"),
         ("TOOL_OPERATION_OUTCOME_UNKNOWN", "tool_loop", "unfinished"),
+        ("OPERATION_INCOMPLETE", "tool_runtime", "unfinished"),
+        ("NO_DELIVERY_ARTIFACT_PRODUCED", "tool_loop", "unfinished"),
         ("BLOCKED", "x", "blocked"),
         ("", "x", "ok"),
         ("REQUIRED_ACTION_HAS_NO_EVIDENCE", "other_source", "unfinished"),
@@ -792,6 +791,15 @@ def test_gateway_suppresses_cli_claimed_policy(tmp_path):
             "canonical_user_id": "u", "channel": "cli_run",
             "channel_conversation_id": "req-gw", "channel_user_id": "u",
             "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-gw",
+            "goal": "验证 CLI 与 Gateway 续跑互斥",
+            "status": "active",
+            "now": _time.time(),
         }
     )
     store.set_progress_policy(
@@ -1595,6 +1603,36 @@ def test_unknown_halt_reason_aligns_with_taxonomy(monkeypatch):
     final2 = resp2[1]
     assert final2.runtime_reason == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert should_continue_task(final2)[0] is False
+
+
+def test_tool_halt_summary_names_real_reason_instead_of_tool_round_limit(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_loop.recovery import (
+        without_tool_call_after_limit,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.backends.tool_protocol_adapter.canonical_tool_calls_from_response",
+        lambda _request: SimpleNamespace(calls=(object(),), violations=()),
+    )
+    params = SimpleNamespace(
+        tool_protocol_snapshot=SimpleNamespace(),
+        tool_runtime_snapshot=SimpleNamespace(),
+        run_id="run-1",
+        attempt_id="attempt-1",
+        request_id="request-1",
+        effective_contract_snapshot=SimpleNamespace(required_actions=()),
+    )
+    response = ModelResponse(text="仍想调用工具", backend="test")
+
+    unknown = without_tool_call_after_limit(params, response, reason="unknown_outcome")
+    no_action = without_tool_call_after_limit(params, response, reason="no_action_gate")
+
+    assert "副作用的最终结果暂时无法确认" in unknown.text
+    assert "没有已确认需要执行的动作" in no_action.text
+    assert "最大工具轮数" not in unknown.text + no_action.text
 
 
 def test_unknown_outcome_keeps_reported_output_preview(tmp_path):

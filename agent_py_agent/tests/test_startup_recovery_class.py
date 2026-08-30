@@ -114,7 +114,7 @@ class TestFormatActiveWorkSummary:
 
         result = format_active_work_summary(summary)
 
-        assert "没有进行中任务" in result
+        assert "没有近期未收口任务" in result
 
     def test_format_gateway_alive(self, tmp_path: Path):
         """Gateway 运行中时格式化。"""
@@ -154,7 +154,7 @@ class TestFormatActiveWorkSummary:
 
         result = format_active_work_summary(summary)
 
-        assert "进行中任务" in result
+        assert "近期未收口任务" in result
         assert "3" in result
 
     def test_format_stale_requests(self, tmp_path: Path):

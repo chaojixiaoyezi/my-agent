@@ -532,11 +532,13 @@ def test_is_active_running():
 
 # ── _default_forbidden_write_roots 测试 ────────────────────────────────────
 
-def test_default_forbidden_write_roots_contains_home():
-    """测试包含主目录。"""
+def test_default_forbidden_write_roots_protects_sensitive_subpaths_not_home_ancestor():
+    """正向 allowed roots 守总边界；默认 deny 只保留敏感子路径。"""
     roots = _default_forbidden_write_roots()
-    assert len(roots) >= 4
-    assert any(str(Path.home()) in r for r in roots)
+    assert str(Path.home()) not in roots
+    assert str(Path.home() / ".ssh") in roots
+    assert str(Path.home() / "Desktop") in roots
+    assert str(Path.home() / "Downloads") in roots
 
 
 # ── 边界场景测试 ──────────────────────────────────────────────────────────

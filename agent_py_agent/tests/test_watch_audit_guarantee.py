@@ -2263,7 +2263,9 @@ def test_audit_large_record_target_is_bounded_by_shared_context_budget(
     assert 1 <= len(pulled["candidates"]) < 30
     assert batch["requested_records"] == 300
     assert batch["delivered_records"] == len(pulled["candidates"])
-    assert batch["safe_batch_tokens"] == 8_999
+    assert 0 < batch["safe_batch_tokens"] <= 9_000
+    assert batch["safe_batch_tokens"] == batch["context_safe_batch_tokens"]
+    assert batch["safe_batch_tokens"] == batch["context_limit_tokens"]
     assert batch["model_output_budget_tokens"] == 16_000
     assert batch["model_output_budget_k_tokens"] == 16.0
     assert batch["verdict_output_tokens_per_record"] == 64

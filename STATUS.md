@@ -1,5 +1,114 @@
 # STATUS
 
+## 2026-08-30 R108 Compact 错误合同收尾（完成）
+
+- 本轮唯一一次全仓 pytest 暴露 11 项不一致：10 项已按当前结构化合同收口，
+  `/audit` 的旧兄弟来源提示撤销问题按用户要求记为 `AUDIT-02` strict xfail，本轮不改产品逻辑。
+  相邻模块 176 项回归全过；Ruff、doc sync、strict code-size、import boundary、diff 和临时索引
+  clean-package 均通过，没有重复跑全仓。
+- R108 只向 `ERROR_CONTRACTS` 补齐六个已在控制面使用的 Compact 码，没有改历史、游标、
+  代次或停止语义。`.10` 顺序替换后仍只有一个 Gateway：`ma-gateway-r108-110`，
+  PID `3694064`，MiniMax-M2.7，8420 端口就绪 3.36 秒。
+- fresh TUI `ma-matrix-r108-110-u271-compact-errors` 约 1.4 秒出首屏；普通回合后
+  `/compact` 实时显示进度条，成功提交 `generation 1`，上下文估算 `11,595 → 9,186`，
+  之前历史仍可见；`/exit` 后客户端正常退出，唯一 Gateway 继续运行。
+
+## 2026-08-30 R106 单 Gateway 14 路功能矩阵与 R107 递归复验（完成）
+
+- `.10` 唯一 Gateway 为 `ma-gateway-r106-110`，模型均为 MiniMax-M2.7。本轮 u256--u269 共 14 个 owner/TUI，
+  已覆盖 `/sessions`、WorkspaceOnly 回执、代理树、Todo/child、Goal、Schedule/Watch、真实 Compact、capability
+  快照刷新、child 详情、Skill、Memory、长任务控制和大输出搜索；新增 TUI 始终连接同一 8420 listener。
+- `/sessions`、沙箱语义、`list_agents`、Todo 4/4、capability grant 后同 run 续作、child 完整详情、Schedule/
+  Watch 清理、Skill 分层读取、personal Memory 跨会话/跨 owner 隔离、`search_text` 空结果/分页/分块均已有
+  TUI 与结构化副作用证据。长文本任务最终生成 25 份笔记（合计 11,832 行）和 422 行总报告；同一 thread
+  真实显示 7 次 Compact 动画并在每次上下文回落后继续，最终 canonical `compact_generation=7`。
+- R106 暴露一个通用缺陷：孙代理未继承父级完整 `run_workspace` 时会在 manager runtime 下另造任务树，导致
+  产物路径错位和 workspace-state 拒绝日志。R107 已部署到 `.10` 唯一 Gateway；fresh TUI
+  `ma-matrix-r107-110-u270-nested-root` 中 coordinator 与两名 depth-2 child 全部使用同一个 canonical task
+  root，分别交付 363/331 行报告，coordinator 读取后写出 122 行汇总；Gateway 零路径拒绝，缺陷已闭环。
+- MiniMax 多次把“接下来会继续”直接作为普通 final，并曾把 202 行总报告口头说成已经达标。宿主始终如实
+  记录自然终态且不伪造业务验收；测试者用同一 TUI 的普通用户消息继续，最终以 `wc -l=422` 收口。默认
+  system prompt 已与 会话运行时 一样明确“未完成就持续工作”，因此保留 provider 遵循失败证据，不恢复文本判官。
+- 资源复测：14 个 R106 TUI 合计 PSS `920,279KiB`，全机 67 个 TUI 合计 `4,160,487KiB`，Gateway
+  `552,671KiB`。14 个 TUI 正常 `/exit` 后全机客户端 PSS 降到 `3,247,459KiB`；旧 Gateway 高水位仍约
+  `557,795KiB`，顺序重启 R107 后回到约 `191,132KiB`，完成递归任务后约 `266,332KiB`。这证明主要占用
+  来自常驻客户端和进程内 owner 高水位，不是多 Gateway。R107 端口就绪 3.80 秒、fresh TUI banner 1.12 秒；
+  `.7` 当前 SSH 超时，不能用旧 8GiB 样本冒充实时值。
+
+## 2026-08-30 R105 多 owner 全底座矩阵与本地 R106 候选（进行中）
+
+- `.10` 始终复用唯一 `ma-gateway-r105-110`，模型为 MiniMax-M2.7；本轮新增 u246--u255 十个独立 owner
+  TUI，覆盖 Skill 渐进读取、WorkspaceOnly/外网、Memory 检索、工作区整理、运行中插话与 child 精确取消、
+  PTY/后台进程、工具账本/大输出、产物生命周期、能力申请以及 slash/context 连续性。
+- u247 证明文件硬墙没有越界：沙箱内 `/root` 写命令返回 0，但宿主文件不存在。旧成功回执没有声明隔离视图，
+  MiniMax 因而误报宿主写入成功；本地候选改为所有 owner-scoped Shell 结果统一携带三项 scope 事实，26 项
+  sandbox focused 通过。
+- 本地新增 `/sessions` 只读发现入口，当前 owner 最近会话可直接复制精确 resume 命令；72 项 chat/TUI
+  focused 通过。原地会话 picker 尚未实现，避免只换 ID 后把 transcript、Compact、task 和权限状态串线。
+- 资源采样：新增 6 路活跃 TUI 后 `.10` used 约 `5.3G`、available `9.8G`，继续增加 4 路后约 `5.5G`、
+  available `9.7G`；Gateway RSS 约 `688MiB`。现场约 50 个旧 tmux TUI 仍常驻，每个约 68--110MiB，是整机
+  占用的重要组成，不等于重复 Gateway。`.7` 当前 SSH 端口拒绝连接，恢复前不冒充取得实时对照。
+- 当前代码尚未部署为 R106、长任务尚未全部终态，因此这里只记录进行中事实；未提交、未推送。
+
+## 2026-08-29 精确取消、异步停止回执与远程工具清单（`.7` 已部署复验）
+
+- 测试机仍是唯一 8420 Gateway，当前 PID `1725815`，部署代次 r57；真实 TUI
+  `ma-fullcov-r57-list-tools` 顶栏和 provider ledger 均为 MiniMax-M2.7。
+- r53 先后验证直接 Esc 只取消 长期助手 child、模型 `cancel_subagents` 只取消 会话运行时 child，未命中兄弟；
+  terminal fencing 阻止旧 snapshot/heartbeat 复活已取消 attempt。r56 又证明停止入口先返回 typed
+  `accepted`、后台再写 canonical terminal，消除了实际已受理却显示“无法确认”的假失败。
+- `ToolRuntimeSnapshot.owner_type=user` 曾被 manifest 误当代理角色过滤条件，使远程 TUI 的 `list_tools`
+  返回 0，而 provider 仍能使用工具。当前 manifest 只投影 snapshot 中 `model_visible` 的 runtime，r57 返回
+  30/30；权限模式仍为 `owner_scoped`，没有暴露内部、root-only 或不可用工具。
+- 本地直接相关组合为 74 passed、Ruff 通过；测试机 manifest/runtime-scope 为 12 passed。未跑全仓 pytest，
+  因本轮增量远低于用户约定的 10,000 行门槛。fresh capability 审批链、active Audit 发布、真实 IM
+  `send_message`、Windows ConPTY、macOS 右键复制和测试机浏览器仍明确未覆盖；详见完整 TUI 审计。
+
+## 2026-08-29 双用户同 Gateway 隔离与 Shell 误导语义（`.7` 已部署复验）
+
+- `ma-fullcov-r48-u10-isolation` 与 `ma-fullcov-r48-u11-isolation` 同时连接唯一
+  `ma-gateway-fullcov-r38`。两边自己的文件/命令写读通过，文件跨 owner 读写和跨 owner cwd 在 handler 前
+  拒绝；命令正文内嵌另一 owner 路径由 bwrap 隐藏，宿主核对没有越界文件。
+- 旧结果只给进程内 `ENOENT`，MiniMax 曾误说“对方目录不存在”。现在失败或 stderr 非空的 owner shell
+  同时投影三项 scope 事实，fresh request `gwreq-1787985268-fd590c551b054c53afb1947caee696a0` 已返回
+  `COMMAND_FAILED/return_code=1`，模型明确说“不可访问，但不能证明宿主目录不存在”。
+- 首个回归样本还捕获到模型追加 `; echo $?` 遮蔽失败；model spec 已禁止此写法，机器层仍只认最终进程
+  return code，不解析 stdout 猜副作用。49 项本地与远端 focused、Ruff、PyCompile、diff check 通过；当前
+  Gateway PID `1695907`，MiniMax-M2.7，未提交、未推送。
+
+## 2026-08-29 顽固旧代码瘦身、运行目录单一事实源与真 TUI 收口（`.7` 已部署复验）
+
+- 当前工作树累计 234 文件、+6,787/-10,618 行；删除旧机器 acceptance/coverage/closeout、无人消费的恢复和
+  展示旁路，保留 owner/path/权限/危险命令/UNKNOWN/审批等客观安全门。模块合同归位后 import-boundary
+  finding 为 0；不是为了测试样例加分支。
+- r34 证明同一模型轮 8 个报告读取会按 4+4 全部执行后再采样；r35 证明每次 provider safe point 都从
+  canonical exact-parent rows 重建直属 child 当前快照，8→5→2→1→0 后 main 明确看到 8/8 DONE，不再被旧
+  Recovery Snapshot 或 current summary 带回旧数量。
+- r35 的 通道运行时 child 在约 113.4k 后真实 Compact 到约 63.7k、`compact 1` 并自然完成；main 写出
+  321 行/10,888 bytes 横向报告并直接最终回复。终屏 stale `完成 0/9` 与 Working 收起，8 个完成 child 行
+  保留；canonical state/current summary 同为 DONE。过程/思考为灰色，final 为正常正文色。
+- r36 修复 raw constructor cwd 与 effective owner workspace 各算一套 durable runtime home 的底层分叉。
+  从 `/root` 启动 fresh TUI 约 0.7 秒即显示 `/root/.my-agent/owners/local/main`；原样超级玛丽 Prompt 2 首批
+  4 名 child 和后续 integrator 共 5/5 DONE，main 没有代写功能，Working/Todo 收起而 roster 保留。产物
+  5 文件、3,120 行、108,338 bytes，4 个 JS 均通过 `node --check`；测试机缺 `libgbm.so.1`，浏览器交互验收
+  仍明确记作 PARTIAL，不能把静态/语法检查冒充可玩性通过。
+- 真 TUI 使用单一 `ma-gateway-cleanup-cov-r5` Gateway 与 MiniMax-M2.7；观察会话为
+  `ma-cleanup-owner-runtime-r36`，唯一 listener/Gateway PID 为 `1632252`。本轮唯一一次全仓 pytest 跑到
+  100% 后暴露 39 项旧合同断言和两个真实缺陷；修复后按约定只复测失败来源及相关功能簇，不重复全仓。
+  focused 均通过；Ruff、doc sync、strict code-size、diff、import-boundary 与临时索引 clean-package 严格门
+  均通过。实际 Git index 保持为空，当前只部署测试机，未提交、未推送远端。
+
+## 2026-08-28 第一轮代码瘦身（本地候选，真 TUI 待验）
+
+- 删除零生产调用的旧 acceptance 目录、runtime DB 验收 mixin/表/列新建路径、三轴 closeout 硬门、废弃
+  SecretStore 及对应死测试；当前净删除约 2.9k 行。
+- Task 已回到长期身份，执行状态只在 TaskRun/AgentRun/Attempt；路径权限、工具副作用、UNKNOWN、审批、
+  资源锁和投递幂等安全边界未放宽。存量库不破坏性删表，新代码只停止消费旧字段。
+- `agent_core` package import 已无副作用，composition root 直接读具体模块；删除旧私有 re-export 后暴露的
+  `conversation.agent_thread ↔ subagent.run_flow` 循环导入已由依赖方向修正，而非增加兼容层遮挡。
+- runtime DB 与子代理 thread/Compact 合计 216 项 focused 已通过；最终结论仍等待单 Gateway、
+  MiniMax-M2.7 真 TUI，启动前必须公开 tmux 名称。
+
 ## 2026-08-28 Owner WorkspaceOnly、管理员 Full Access 与 Compact 动画（`.7` 真 TUI 已通过）
 
 - 默认本地管理员与外部用户都从自己的 owner home 工作，不再继承启动 shell/Gateway cwd。只有结构化
@@ -1558,7 +1667,7 @@
   `.13`，因此 C17 由 `VERIFIED` 重开为 `IMPLEMENTED`。四个非 replica TUI 已发现空闲并立即续上第二轮，
   当前底部均显示 `esc to interrupt`。
 
-## 2026-08-18 Fiber 143 收口冲突与 会话运行时 式同轮返工候选
+## 2026-08-18 Fiber 143 收口冲突与 会话运行时 式同轮返工候选【状态：2026-08-28 已退役】
 
 - 已从 `.13` 的 owner runtime DB 复核真实操作，不是根据 TUI 文案推测：末尾 operation
   `tool_operation:713825…` 为 `FAILED`，结果含 `COMMAND_FAILED`、`failure_stage=execution`、
@@ -1572,6 +1681,8 @@
   `OPERATION_INCOMPLETE`，没有把 143 特判成功。已通过已知失败→同轮修复成功、两次忽略→安全收口、
   新 call id 不重置预算、unknown 不获工具返工和实际 143 字段分类的 focused tests。候选尚未部署 `.13`，
   因此此处不宣称真实 MiniMax 返工 E2E 已完成。
+- 2026-08-28 `.7` 的预期 `exit 7` 真 TUI 证明该候选会误判诊断任务，并额外产生 5 次模型调用、42.6 秒
+  和 141,905 cache-read tokens。当前实现已删除这套后置返工；以上只保留历史背景，不代表现行收口语义。
 
 ## 2026-08-18 上下文命令、输入视觉行与 Fiber 产物核验
 

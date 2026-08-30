@@ -279,6 +279,35 @@ def test_record_runner_result_keeps_tool_created_open_request_blocked(capability
     assert any("route_capability_request" in item for item in capability_task.blockers)
 
 
+def test_runner_result_counts_tool_created_granted_request_without_model_result_block(
+    capability_manager,
+    capability_task,
+):
+    """普通自然回复缺结果块时，runner 仍投影真实工具申请数。"""
+    capability_task.capability_requests.append(
+        CapabilityRequest(
+            id="capreq-tool-granted",
+            from_run_id=capability_task.id,
+            problem="需要写入任务报告。",
+            needed_capability="write_file",
+            requested_tools=["write_file"],
+            status="GRANTED",
+        )
+    )
+    capability_manager._tasks[capability_task.id] = capability_task
+
+    result = capability_manager.runner_result.record_runner_result(_rrr(
+        run_id="run-123",
+        dry_run=False,
+        ok=True,
+        message="runner 本轮结束: completed",
+        structured_output=SubAgentParsedOutput(found=False, ok=False),
+        response="已经写完报告。",
+    ))
+
+    assert result.capability_request_count == 1
+
+
 def test_unstructured_completed_turn_cannot_close_tool_created_open_request(
     capability_manager,
     capability_task,

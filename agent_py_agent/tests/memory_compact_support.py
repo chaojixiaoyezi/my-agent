@@ -20,7 +20,7 @@ from agent_py_agent.agent.memory_archive import (
 def write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
-        'workspace_root: "workspace"\n'
+        'workspace_root: ""\n'
         f'my_agent_home: "{(tmp_path / "home").as_posix()}"\n'
         'model_backend: "echo"\n'
         'subagent_workspace: "subagents"\n'

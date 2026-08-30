@@ -460,6 +460,11 @@ def test_items_without_output_files_keep_business_output_contract_empty(tmp_path
     assert payload["child_output_read_order"][0]["expected_outputs"] == []
     assert payload["child_output_read_order"][0]["read_order"] == payload["child_result_index"][0]["read_order"]
     assert payload["next_action"]["action"] == "await_lifecycle_event"
+    assert payload["next_action"]["immediate_control_tools"] == [
+        "send_guidance",
+        "cancel_subagents",
+    ]
+    assert "现在可直接使用 send_guidance" in payload["next_action"]["reason"]
     assert "status_tool_call" not in payload
     assert "wait_tool_call" not in payload
     assert "subagent_workspace" not in payload
@@ -601,8 +606,10 @@ def test_model_invented_owner_home_output_is_rebased_into_current_task(tmp_path)
     child = agent.subagents.load(payload["created_run_ids"][0])
     expected = str((task_root / "output" / invented.name).resolve(strict=False))
     assert child.attributes["output_files"] == [expected]
-    assert expected in child.goal
-    assert str(invented) not in child.goal
+    # goal 是模型原始沟通文本，不再作为路径机器事实被静默重写；执行边界只读取
+    # 上面的结构化 output_files，因此即使模型口头写错 owner 根也不能越界落盘。
+    assert str(invented) in child.goal
+    assert expected not in child.goal
 
 
 def test_same_output_without_structured_inputs_stays_two_distinct_runs(tmp_path):

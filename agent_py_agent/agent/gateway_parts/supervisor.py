@@ -1,7 +1,6 @@
 # Gateway supervisor health reporting
 from __future__ import annotations
 
-import json
 import os
 import signal
 import subprocess
@@ -22,6 +21,7 @@ from .daemon_control import (
     remove_pid_file,
     write_pid_file,
     write_runtime_status,
+    write_targeted_gateway_stop_request,
 )
 from .io import read_json_file_report
 from .paths import gateway_paths
@@ -122,7 +122,7 @@ def stop_gateway(supervisor, timeout: float = 20.0) -> bool:
         supervisor._log_info("Gateway already stopped")
         return True
     supervisor._log_info(f"Requesting gateway shutdown: pid={pid}")
-    _write_supervisor_stop_request(supervisor)
+    _write_supervisor_stop_request(supervisor, pid)
     if wait_for_pid_exit(pid, timeout):
         supervisor._log_info("Gateway stopped gracefully")
         return True
@@ -135,11 +135,16 @@ def stop_gateway(supervisor, timeout: float = 20.0) -> bool:
     return False
 
 
-def _write_supervisor_stop_request(supervisor) -> None:
-    supervisor._paths.stop_request.parent.mkdir(parents=True, exist_ok=True)
-    supervisor._paths.stop_request.write_text(
-        json.dumps({"requested_at": time.time(), "reason": "supervisor shutdown"}, ensure_ascii=False),
-        encoding="utf-8",
+# LLM: Supervisor shutdown shares the exact process-targeted stop contract with CLI and HTTP.
+# The PID observed by the health decision is carried through unchanged to prevent restart races.
+# 函数用途: 让 Supervisor 精确停止刚刚检查到的那一代 Gateway。
+def _write_supervisor_stop_request(supervisor, pid: int) -> dict[str, object] | None:
+    return write_targeted_gateway_stop_request(
+        supervisor._paths.pid,
+        supervisor._paths.stop_request,
+        reason="supervisor shutdown",
+        target_pid=pid,
+        source="gateway_supervisor",
     )
 
 

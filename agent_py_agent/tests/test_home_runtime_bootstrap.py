@@ -342,7 +342,9 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     assert payload["scope"]["request_id"] == "req-ctx"
     assert payload["scope"]["run_id"] == "run-ctx"
     assert payload["scope"]["task_id"] == "主代理任务"
-    assert payload["workspace_refs"]["primary_workspace_root"] == str(repo.resolve())
+    assert payload["workspace_refs"]["primary_workspace_root"] == str(
+        (home / "owners" / "local" / "main").resolve()
+    )
     assert payload["workspace_refs"]["my_agent_home"] == str(home.resolve())
     assert payload["workspace_refs"]["owner_home"] == str(
         (home / "owners" / "local" / "main").resolve()

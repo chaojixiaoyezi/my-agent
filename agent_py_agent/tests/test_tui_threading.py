@@ -26,7 +26,7 @@ class _RefreshDecisions:
 
 
 def test_runtime_periodic_refresh_stops_when_visible_animation_finishes(monkeypatch) -> None:
-    clock = iter([10.0, 10.2, 11.0, 11.2, 12.0])
+    clock = iter([10.0, 10.2, 11.0, 11.2, 12.0, 12.1])
     monkeypatch.setattr(
         "agent_py_agent.cli.chat_parts.tui_runtime.time.monotonic",
         lambda: next(clock),
@@ -38,6 +38,8 @@ def test_runtime_periodic_refresh_stops_when_visible_animation_finishes(monkeypa
     assert runtime.needs_periodic_refresh() is True
     runtime.resolve_connection_check(ok=True)
     runtime.set_notice("Saved", duration_seconds=0.5)
+    assert runtime.needs_periodic_refresh() is True
+    # 到期的第一帧仍需 invalidate，才能从真实终端上擦掉上一帧 footer。
     assert runtime.needs_periodic_refresh() is True
     assert runtime.needs_periodic_refresh() is False
 

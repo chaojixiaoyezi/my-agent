@@ -93,11 +93,34 @@ def test_remember_single_add_tool_verified_authorized_auto_but_evidence_gate_blo
     assert candidate.promotion_mode == "auto_eligible"
     assert candidate.status == "blocked_missing_evidence"
     assert payload["results"][0]["reason_code"] == "TOOL_EVIDENCE_MISSING"
+    assert payload["required_repairs"][0]["action"] == "retry_remember"
+    assert "不能把缺证据说成等待用户确认" in payload["hint"]
     assert agent.memory.all() == []
 
 
-def test_remember_batch_adds_never_auto_promote(tmp_path):
-    """矩阵2:batch 两条 add → 全部 manual_required,正式长期记忆 0 写入。"""
+def test_remember_repairs_mislabeled_tool_origin_with_current_user_evidence(tmp_path):
+    agent = _agent_with_current_user(tmp_path)
+    tool = RememberTool(agent)
+    common = {
+        "content": "moneywise 项目使用 UTC 保存时间",
+        "kind": "project",
+        "subject_key": "project.moneywise.timezone",
+        "scope": {"scope_type": "project", "scope_key": "project:moneywise"},
+    }
+
+    blocked = tool.execute({**common, "origin": "tool_verified"})
+    repaired = tool.execute({**common, "origin": "user_explicit"})
+
+    assert json.loads(blocked.output)["results"][0]["reason_code"] == "TOOL_EVIDENCE_MISSING"
+    assert json.loads(repaired.output)["active_memory_changed"] is True
+    candidate = agent.memory_candidates.list()[0]
+    assert candidate.origin == "user_explicit"
+    assert candidate.status == "promoted"
+    assert len(agent.memory.all()) == 1
+
+
+def test_remember_batch_adds_autonomously_promote_each_verified_fact(tmp_path):
+    """batch 只保证候选原子入账；每条合格事实随后自主通过同一证据门晋升。"""
     agent = _agent_with_current_user(tmp_path)
     result = RememberTool(agent).execute(
         {
@@ -124,20 +147,20 @@ def test_remember_batch_adds_never_auto_promote(tmp_path):
     )
     payload = json.loads(result.output)
     assert result.ok
-    assert payload["active_memory_changed"] is False
+    assert payload["active_memory_changed"] is True
     assert [item["reason_code"] for item in payload["results"]] == [
-        "REVIEW_REQUIRED",
-        "REVIEW_REQUIRED",
+        "PROMOTED",
+        "PROMOTED",
     ]
     candidates = agent.memory_candidates.list()
     assert len(candidates) == 2
-    assert {candidate.promotion_mode for candidate in candidates} == {"manual_required"}
-    assert {candidate.status for candidate in candidates} == {"pending_review"}
-    assert agent.memory.all() == []
+    assert {candidate.promotion_mode for candidate in candidates} == {"auto_eligible"}
+    assert {candidate.status for candidate in candidates} == {"promoted"}
+    assert len(agent.memory.all()) == 2
 
 
-def test_remember_batch_single_add_is_still_manual(tmp_path):
-    """矩阵2边界:batch 即使只含一条 add 也一律 manual_required,不自动晋升。"""
+def test_remember_batch_single_add_uses_same_autonomous_policy(tmp_path):
+    """入口形态不改变记忆权威；单项 batch 与普通 add 使用同一自主策略。"""
     agent = _agent_with_current_user(tmp_path)
     result = RememberTool(agent).execute(
         {
@@ -156,16 +179,16 @@ def test_remember_batch_single_add_is_still_manual(tmp_path):
     )
     payload = json.loads(result.output)
     assert result.ok
-    assert payload["active_memory_changed"] is False
-    assert payload["results"][0]["reason_code"] == "REVIEW_REQUIRED"
+    assert payload["active_memory_changed"] is True
+    assert payload["results"][0]["reason_code"] == "PROMOTED"
     candidate = agent.memory_candidates.list()[0]
-    assert candidate.promotion_mode == "manual_required"
-    assert candidate.status == "pending_review"
-    assert agent.memory.all() == []
+    assert candidate.promotion_mode == "auto_eligible"
+    assert candidate.status == "promoted"
+    assert len(agent.memory.all()) == 1
 
 
-def test_remember_manual_absorption_blocks_later_single_add_replay(tmp_path):
-    """持久权限是事实源：同一候选先经 batch 变 manual，单条 add 重放不得重新自动晋升。"""
+def test_remember_batch_then_single_replay_stays_idempotently_promoted(tmp_path):
+    """batch 不再污染长期权限；同一事实换入口重放仍只保留一条正式记忆。"""
     agent = _agent_with_current_user(tmp_path)
     operation = {
         "action": "add",
@@ -176,21 +199,21 @@ def test_remember_manual_absorption_blocks_later_single_add_replay(tmp_path):
         "scope": {"scope_type": "project", "scope_key": "project:moneywise"},
     }
     batch = RememberTool(agent).execute({"action": "batch", "operations": [operation]})
-    assert json.loads(batch.output)["results"][0]["reason_code"] == "REVIEW_REQUIRED"
+    assert json.loads(batch.output)["results"][0]["reason_code"] == "PROMOTED"
 
     replay = RememberTool(agent).execute({key: value for key, value in operation.items() if key != "action"})
     payload = json.loads(replay.output)
 
     assert payload["active_memory_changed"] is False
-    assert payload["results"][0]["reason_code"] == "REVIEW_REQUIRED"
+    assert payload["results"][0]["reason_code"] == "ALREADY_PROMOTED"
     candidate = agent.memory_candidates.list()[0]
-    assert candidate.promotion_mode == "manual_required"
+    assert candidate.promotion_mode == "auto_eligible"
     assert candidate.occurrence_count == 1
-    assert agent.memory.all() == []
+    assert len(agent.memory.all()) == 1
 
 
-def test_remember_replace_and_remove_never_auto_execute(tmp_path):
-    """矩阵3:replace/remove 只形成 manual_required 候选,不自动执行正式变更。"""
+def test_remember_replace_and_remove_autonomously_use_exact_entry_id(tmp_path):
+    """replace/remove 有精确 entry_id 和用户证据时自主执行，不再等待人工审核。"""
     agent = _agent_with_current_user(tmp_path)
     first = RememberTool(agent).execute(
         {
@@ -215,9 +238,9 @@ def test_remember_replace_and_remove_never_auto_execute(tmp_path):
     )
     replaced_payload = json.loads(replaced.output)
     assert replaced.ok
-    assert replaced_payload["active_memory_changed"] is False
-    assert replaced_payload["results"][0]["reason_code"] == "REVIEW_REQUIRED"
-    assert replaced_payload["results"][0]["status"] == "pending_review"
+    assert replaced_payload["active_memory_changed"] is True
+    assert replaced_payload["results"][0]["reason_code"] == "PROMOTED"
+    assert replaced_payload["results"][0]["status"] == "promoted"
 
     removed = RememberTool(agent).execute(
         {
@@ -228,23 +251,15 @@ def test_remember_replace_and_remove_never_auto_execute(tmp_path):
     )
     removed_payload = json.loads(removed.output)
     assert removed.ok
-    assert removed_payload["active_memory_changed"] is False
-    assert removed_payload["results"][0]["reason_code"] == "REVIEW_REQUIRED"
-    assert removed_payload["results"][0]["status"] == "pending_review"
+    assert removed_payload["active_memory_changed"] is True
+    assert removed_payload["results"][0]["reason_code"] == "PROMOTED"
+    assert removed_payload["results"][0]["status"] == "promoted"
 
     candidates = agent.memory_candidates.list()
     assert len(candidates) == 3
-    assert {candidate.promotion_mode for candidate in candidates} == {
-        "auto_eligible",
-        "manual_required",
-    }
-    manual = [candidate for candidate in candidates if candidate.promotion_mode == "manual_required"]
-    assert len(manual) == 2
-    assert {candidate.status for candidate in manual} == {"pending_review"}
-    # 正式记忆保持 1 条且内容未被 replace/remove 触碰。
-    formal = agent.memory.all()
-    assert len(formal) == 1
-    assert formal[0].content == "moneywise 项目使用 UTC 保存时间"
+    assert {candidate.promotion_mode for candidate in candidates} == {"auto_eligible"}
+    assert {candidate.status for candidate in candidates} == {"promoted"}
+    assert agent.memory.all() == []
 
 
 def test_remember_is_not_exposed_in_named_audit_prepare(tmp_path):
@@ -291,7 +306,112 @@ def test_remember_rejects_noncanonical_personal_scope_before_candidate_write(tmp
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
     assert result.effect_outcome == "not_started"
+    assert "个人记忆请省略 scope" in json.loads(result.output)["hint"]
     assert agent.memory_candidates.list() == []
+    assert agent.memory.all() == []
+
+
+def test_remember_omitted_scope_is_host_bound_to_owner_personal(tmp_path):
+    """普通个人记忆不要求模型猜 owner id 或内部 scope_key。"""
+
+    agent = _agent_with_current_user(tmp_path, "请记住我偏好先给风险再给方案")
+
+    result = RememberTool(agent).execute(
+        {
+            "content": "我偏好先给风险再给方案",
+            "kind": "fact",
+            "origin": "user_explicit",
+            "subject_key": "preference.answer_order",
+        }
+    )
+
+    payload = json.loads(result.output)
+    assert result.ok is True
+    assert payload["active_memory_changed"] is True
+    assert payload["results"][0]["memory_scope"] == {
+        "scope_type": "personal",
+        "scope_key": "personal",
+        "automatic_recall": "same_owner_across_sessions",
+        "storage_authority": "canonical_formal_memory",
+    }
+    assert "当前用户的个人正式记忆" in payload["hint"]
+    record = agent.memory.all()[0]
+    assert record.attributes["scope_type"] == "personal"
+    assert record.attributes["scope_key"] == "personal"
+
+
+def test_remember_session_scope_is_bound_to_current_thread(tmp_path):
+    """会话记忆只声明类型，真实 scope key 由当前 thread 身份生成。"""
+
+    agent = _agent_with_current_user(tmp_path, "请在本会话记住苍穹折页-420871")
+
+    result = RememberTool(agent).execute(
+        {
+            "content": "本会话校验词是苍穹折页-420871",
+            "kind": "fact",
+            "origin": "user_explicit",
+            "subject_key": "session.validation_word",
+            "scope": {"scope_type": "session"},
+        }
+    )
+
+    assert result.ok is True
+    payload = json.loads(result.output)
+    result_scope = payload["results"][0]["memory_scope"]
+    assert result_scope["scope_type"] == "session"
+    assert result_scope["scope_key"].startswith("session:thread-")
+    assert result_scope["automatic_recall"] == "current_session_only"
+    assert "只在当前会话自动召回" in payload["hint"]
+    assert "不表示跨会话生效" in payload["hint"]
+    record = agent.memory.all()[0]
+    assert record.attributes["scope_type"] == "session"
+    assert record.attributes["scope_key"].startswith("session:thread-")
+    assert record.expires_at == 0.0
+
+
+def test_remember_session_scope_rejects_model_invented_calendar_expiry(tmp_path):
+    """当前会话不是“今天”；模型不能用日历时间缩短宿主拥有的 thread 生命周期。"""
+
+    agent = _agent_with_current_user(tmp_path, "请只在本会话记住苍穹折页-420871")
+
+    result = RememberTool(agent).execute(
+        {
+            "content": "本会话校验词是苍穹折页-420871",
+            "kind": "fact",
+            "origin": "user_explicit",
+            "subject_key": "session.validation_word",
+            "scope": {"scope_type": "session"},
+            "valid_until": "2026-08-30T23:59:59+08:00",
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    payload = json.loads(result.output)
+    assert "当前真实会话决定" in payload["error"]
+    assert "temporary scope" in payload["hint"]
+    assert agent.memory_candidates.list() == []
+    assert agent.memory.all() == []
+
+
+def test_remember_session_scope_rejects_cross_thread_key(tmp_path):
+    """模型不能用 remember 向当前 thread 以外的 session 写记忆。"""
+
+    agent = _agent_with_current_user(tmp_path, "请在本会话记住苍穹折页-420871")
+
+    result = RememberTool(agent).execute(
+        {
+            "content": "本会话校验词是苍穹折页-420871",
+            "kind": "fact",
+            "origin": "user_explicit",
+            "subject_key": "session.validation_word",
+            "scope": {"scope_type": "session", "scope_key": "session:other"},
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "当前会话记忆只写" in json.loads(result.output)["hint"]
     assert agent.memory.all() == []
 
 

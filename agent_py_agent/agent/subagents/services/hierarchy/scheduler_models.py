@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ...models import SubAgentTask
@@ -29,6 +30,9 @@ class HierarchyChildSpec:
     attributes: dict[str, object] = field(default_factory=dict)
 
 
+# LLM: The scheduler request may carry a host-supplied cancellation safe point.  It is process-local,
+# excluded from equality/repr, and never persisted or interpreted as lifecycle authority.
+# 类用途: 描述一次递归派工；可选回调用于批量落盘之间及时响应当前回合的停止信号。
 @dataclass(frozen=True)
 class HierarchyScheduleRequest:
     parent_run_id: str
@@ -37,6 +41,11 @@ class HierarchyScheduleRequest:
     requested_by: str = "parent"
     max_children: int = 0
     max_depth: int = 0
+    interrupt_check: Callable[[], None] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True)

@@ -20,6 +20,18 @@ from .repository import (
 
 _SCHEDULER_WAKE_REASON = "scheduled_job_due"
 _DEFAULT_CLAIM_SECONDS = 300
+_TASK_STATUS_TO_RUN_STATUS = {
+    "completed": "done",
+    "done": "done",
+    "cancelled": "cancelled",
+    "interrupted": "cancelled",
+    "superseded": "cancelled",
+    "taken_over": "cancelled",
+    "abandoned": "failed",
+    "channel_error": "failed",
+    "failed": "failed",
+    "timeout": "failed",
+}
 
 
 @dataclass(frozen=True)
@@ -117,6 +129,9 @@ class SchedulerService:
         self.conversation_store = conversation_store
         self.skill_snapshot_provider = skill_snapshot_provider
 
+    # LLM: Every queued scheduler run is also the durable root task for its wake. Keep the
+    # run id in both typed wake identity and metadata so background lifecycle reads one authority.
+    # 函数用途: 预留到期执行并投递同一任务身份的会话唤醒，供 Gateway 后台实际运行。
     def enqueue_ready_runs(self, *, now: float | None = None, limit: int = 32) -> list[str]:
         current = float(time.time() if now is None else now)
         self.repository.reserve_due_runs(now=current, limit=limit)
@@ -130,6 +145,11 @@ class SchedulerService:
                 signal = self.conversation_store.raise_wake_signal(
                     {
                         "thread_id": str(run["thread_id"]),
+                        # 定时执行本身就是这次后台工作的唯一根任务。只把 run_id
+                        # 放在 metadata 会让 BackgroundRunRequest 变成 taskless，
+                        # 于是模型刚派完子代理时调度器读不到仍为 active 的任务链接，
+                        # 误把第一片模型回复结算成 done。
+                        "root_task_id": str(run["run_id"]),
                         "urgency": "normal",
                         "reason": _SCHEDULER_WAKE_REASON,
                         "summary": f"Scheduled job is ready: {run['name']}",
@@ -221,6 +241,84 @@ class SchedulerService:
             )
         except (SchedulerConflictError, SchedulerNotFoundError):
             return None
+
+    # LLM: The scheduler process claim ends when a model slice yields, but the same-id durable
+    # task may remain active while children or continuation events run. Preserve that distinction.
+    # 函数用途: 把仍有后续工作的定时执行转成等待态，停止进程租约但不写成完成。
+    def park_waiting(
+        self,
+        claim: SchedulerRunClaim,
+        *,
+        response: str = "",
+        delivery_status: str = "",
+        delivery_reason: str = "",
+        now: float | None = None,
+    ) -> dict[str, object] | None:
+        try:
+            return self.repository.park_run_waiting(
+                claim.run_id,
+                claim.claim_id,
+                response=response,
+                delivery_status=delivery_status,
+                delivery_reason=delivery_reason,
+                now=now,
+            )
+        except (SchedulerConflictError, SchedulerNotFoundError):
+            return None
+
+    # LLM: Reconciliation reads one exact conversation task link and closes only a matching
+    # waiting run. Missing, active, corrupt, or unknown task state stays fail-closed and active.
+    # 函数用途: 对账一条等待中的定时执行，在对应持久任务真正终结后才结算历史。
+    def reconcile_waiting_run(
+        self,
+        run_id: str,
+        *,
+        now: float | None = None,
+    ) -> dict[str, object] | None:
+        selected = str(run_id or "").strip()
+        if not selected:
+            return None
+        run = self.repository.get_active_run(selected)
+        if run is None or str(run.get("status") or "") != "waiting":
+            return None
+        try:
+            link = self.conversation_store.load_task_link(selected)
+        except Exception:  # noqa: BLE001 - unreadable task authority must keep the run active
+            return None
+        task_status = str(getattr(link, "status", "") or "").strip().lower()
+        terminal_status = _TASK_STATUS_TO_RUN_STATUS.get(task_status)
+        if terminal_status is None:
+            return None
+        error_code = "" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}"
+        try:
+            return self.repository.finish_waiting_run(
+                selected,
+                SchedulerRunFinish(
+                    status=terminal_status,
+                    response=str(run.get("response") or ""),
+                    delivery_status=str(run.get("delivery_status") or ""),
+                    delivery_reason=str(run.get("delivery_reason") or ""),
+                    error_code=error_code,
+                    error_message=(
+                        "" if terminal_status == "done" else f"scheduled task ended as {task_status}"
+                    ),
+                    now=now,
+                ),
+            )
+        except (SchedulerConflictError, SchedulerNotFoundError):
+            return None
+
+    # LLM: Gateway restart and missed lifecycle notifications converge by scanning only scheduler
+    # rows already typed as waiting, then applying the same exact-task reconciliation as live wakes.
+    # 函数用途: 批量对账当前 owner 的等待定时执行，保证重启后最终状态仍会收口。
+    def reconcile_waiting_runs(self, *, now: float | None = None) -> list[str]:
+        runs, _errors = self.repository.waiting_runs()
+        settled: list[str] = []
+        for run in runs:
+            run_id = str(run.get("run_id") or "")
+            if self.reconcile_waiting_run(run_id, now=now) is not None:
+                settled.append(run_id)
+        return settled
 
     def release(self, claim: SchedulerRunClaim, *, now: float | None = None) -> bool:
         return self.repository.release_run_claim(

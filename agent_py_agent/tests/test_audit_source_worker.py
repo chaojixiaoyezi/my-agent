@@ -872,6 +872,13 @@ def test_source_assignment_survives_reload_and_is_used_by_replacement_worker(
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "AUDIT-02 已按用户要求延后：持久层单调合并 hint_read_paths，"
+        "使来源 worker 中途绑定时无法撤销旧兄弟提示。"
+    ),
+)
 def test_existing_audit_child_is_adopted_as_the_exact_source_worker(
     tmp_path: Path,
 ) -> None:
@@ -941,9 +948,7 @@ def test_existing_audit_child_is_adopted_as_the_exact_source_worker(
         audit_id,
         state.watch_id,
     )
-    assert persisted.allowed_tools == [
-        "watch_stream",
-    ]
+    assert persisted.allowed_tools == list(AUDIT_SOURCE_BINDING_TOOLS)
     assert "write_file" not in persisted.allowed_tools
     assert "run_command" not in persisted.allowed_tools
     assert "output_files" not in persisted.attributes
@@ -1709,7 +1714,7 @@ def test_active_audit_revision_syncs_into_next_source_worker_slice(
     assert persisted.audit_run_prompt == "本次运行增加复核要求。"
 
 
-def test_active_audit_transport_revision_preserves_progress_and_updates_next_slice(
+def test_active_audit_transport_revision_preserves_progress_and_appends_next_slice_reads(
     tmp_path: Path,
 ) -> None:
     audit_id = "audit-source-transport-update"
@@ -1790,7 +1795,11 @@ def test_active_audit_transport_revision_preserves_progress_and_updates_next_sli
     assert updated.attributes["audit_source_profile_ref"] == (
         "work/sources/window-current.md"
     )
+    # required_read_paths 是并发能力域的单调账本：新切片追加当前输入，
+    # 不能由一个旧 writer 删掉已落盘的读授权。如需撤销，后续应走显式撤销合同。
     assert updated.context_manifest.required_read_paths == [
+        "work/sources/window-old.md",
+        "work/sources/window-old-fields.md",
         "work/sources/window-current.md",
         "work/sources/window-current-fields.md",
     ]

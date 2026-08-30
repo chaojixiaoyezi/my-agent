@@ -41,11 +41,6 @@ def test_agent_config_default_max_tokens_matches_shipped_config():
         is shipped.anthropic_prompt_cache_enabled
         is True
     )
-    assert (
-        AgentConfig().task_progress_closeout_repair_attempts
-        == shipped.task_progress_closeout_repair_attempts
-        == 1
-    )
 
 
 def test_card_and_prompt_defaults_match_shipped_config():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
 import threading
@@ -48,6 +49,7 @@ def _scope(
     expected_turn_id: str = "",
     channel_chat_type: str = "",
     channel_chat_id: str = "",
+    target_control_message_id: str = "",
 ):
     return GatewayControlScope(
         user_id="u-1",
@@ -58,6 +60,7 @@ def _scope(
             "expected_turn_id": expected_turn_id,
             "channel_chat_type": channel_chat_type,
             "channel_chat_id": channel_chat_id,
+            "target_control_message_id": target_control_message_id,
         },
     )
 
@@ -105,6 +108,121 @@ def test_control_operation_replays_completed_result_without_repeating_effect(
     assert replay.operation_id == first.operation_id
     assert replay.result == first.result
     assert gateway_control_operation_status_payload(replay)["message"] == "已开启。"
+
+
+def test_control_operation_preserves_exact_manual_compact_stop_target(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    paths = gateway_paths(agent)
+    observed_targets: list[str] = []
+
+    def execute(_agent, _paths, _command_value, scope):
+        observed_targets.append(
+            str(scope.metadata.get("target_control_message_id") or "")
+        )
+        return ConversationControlResult("stop", True, "stopping")
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.gateway_parts.control_operation_service."
+        "execute_gateway_conversation_control",
+        execute,
+    )
+
+    receipt = execute_gateway_control_operation(
+        agent,
+        paths,
+        _command("/stop"),
+        _scope(
+            message_id="stop-control-1",
+            target_control_message_id="compact-control-1",
+        ),
+        command_text="/stop",
+    )
+
+    assert receipt.target_control_message_id == "compact-control-1"
+    assert observed_targets == ["compact-control-1"]
+
+
+def test_control_operation_completed_receipt_preserves_typed_error_code(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    paths = gateway_paths(agent)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.gateway_parts.control_operation_service."
+        "execute_gateway_conversation_control",
+        lambda *_args: ConversationControlResult(
+            "compact",
+            False,
+            "interrupted",
+            error_code="COMPACT_INTERRUPTED",
+        ),
+    )
+
+    receipt = execute_gateway_control_operation(
+        agent,
+        paths,
+        _command("/compact"),
+        _scope(message_id="compact-interrupted"),
+        command_text="/compact",
+    )
+
+    assert gateway_control_operation_status_payload(receipt)["error_code"] == (
+        "COMPACT_INTERRUPTED"
+    )
+
+
+def test_control_operation_reads_legacy_digest_after_target_field_upgrade(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    paths = gateway_paths(agent)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.gateway_parts.control_operation_service."
+        "execute_gateway_conversation_control",
+        lambda *_args: ConversationControlResult("verbose", True, "done"),
+    )
+    receipt = execute_gateway_control_operation(
+        agent,
+        paths,
+        _command("/verbose on"),
+        _scope(message_id="legacy-control"),
+        command_text="/verbose on",
+    )
+    payload = receipt.to_dict()
+    payload.pop("input_digest_version")
+    payload.pop("target_control_message_id")
+    legacy_input = {
+        "user_id": payload["user_id"],
+        "channel": payload["channel"],
+        "conversation_id": payload["conversation_id"],
+        "message_id": payload["client_message_id"],
+        "command_text": payload["command_text"],
+        "expected_turn_id": payload["expected_turn_id"],
+        "channel_chat_type": payload["channel_chat_type"],
+        "channel_chat_id": payload["channel_chat_id"],
+        "all_user_access": payload["all_user_access"],
+    }
+    payload["input_digest"] = hashlib.sha256(
+        json.dumps(
+            legacy_input,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    restored = GatewayControlOperationReceipt.from_dict(payload)
+
+    assert restored.input_digest_version == 1
+    assert restored.target_control_message_id == ""
+    payload["target_control_message_id"] = "forged-target"
+    with pytest.raises(DataCorruptionError, match="digest conflicts"):
+        GatewayControlOperationReceipt.from_dict(payload)
 
 
 def test_live_control_operation_duplicate_and_status_return_executing_without_blocking(

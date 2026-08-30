@@ -107,7 +107,7 @@ def _add_candidate_commands(areas: argparse._SubParsersAction) -> None:
     promote.add_argument(
         "--confirmed",
         action="store_true",
-        help="确认受保护 Persona 变更；SOUL/AGENTS 仍需此前存在用户明确确认",
+        help="确认受保护的 SOUL 变更；USER/AGENTS 由所属 Agent 自主维护",
     )
     promote.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     promote.set_defaults(func=cmd_memory_candidates_promote)

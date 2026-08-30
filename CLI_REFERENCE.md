@@ -70,6 +70,7 @@ python -m agent_py_agent --help
 
 | 命令 | 作用 | 持久范围 |
 | --- | --- | --- |
+| `/sessions` | 按更新时间列出当前 owner 最近 10 个会话，标记当前会话，并给出精确 `my-agent resume <session_id>` 命令。 | 只读；不扫描其他 owner，不在运行中原地替换整套 TUI 状态。 |
 | `/status` | 立即显示当前任务、时长、排队、子代理、模型及可用的 compact/verbose 状态。 | 只读，不保存；不显示引导历史。 |
 | `/btw <补充要求>` | 给当前正在运行的任务补充一次要求；若模型正在生成，旧动作会先作废。 | 仅当前 request，投递一次后结束；不会进入下一任务。 |
 | `/stop` | 像停止按钮一样立即打断当前窗口正在执行的一轮，不区分聊天或任务；同时回收该轮活跃子代理。 | 当前 live request；保留 transcript、工作区、compact 和 memory，不停止 Gateway 服务。 |

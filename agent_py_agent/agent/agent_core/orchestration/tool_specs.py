@@ -251,6 +251,41 @@ def _task_progress_coverage_target_schema() -> dict[str, object]:
     }
 
 
+# LLM: list_agents is the sole model-visible read projection of the current
+# agent tree. Keep its schema smaller than the host status payload and do not
+# add dispatch, wait, retry, or cancellation parameters.
+# 函数用途: 构造只读查看当前代理树的最小模型合同。
+def build_list_agents_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
+        name="list_agents",
+        description=(
+            "只读列出当前代理可见的主代理、子代理和孙代理状态。它不会启动、推进、等待、重试或取消任何代理；"
+            "正常工作不需要轮询，宿主仍会在直属下级发生结构化生命周期事件时自动唤醒父级。"
+        ),
+        input_schema=_input_schema(
+            {
+                "run_id": "可选。查看一个已经知道的 run_id 及其子树；省略时查看当前任务可见代理树。",
+            },
+            {"run_id": {"type": "string"}},
+        ),
+        hints=_hints(
+            use_cases=(
+                "用户询问哪些子代理仍在运行、已完成、失败或阻塞",
+                "需要按结构化状态确认某个已知 run_id 的下级，而不是猜测或调用取消工具",
+            ),
+            avoid_when=(
+                "正常等待直属子代理时不要循环查询；等待宿主生命周期事件",
+                "要补充要求时用 send_guidance，要停止时用 cancel_subagents",
+            ),
+            keywords=("子代理状态", "谁在运行", "list agents", "agent tree", "进度"),
+            examples=(
+                '{"tool":"list_agents"}',
+                '{"tool":"list_agents","run_id":"subagent-1"}',
+            ),
+        ),
+    )
+
+
 # LLM: 模型取消合同只允许按 run_id 点名直接下级；子树扫描、
 # dry-run 查看与进程细节都属于宿主运维私有能力。
 # 函数用途: 构造 cancel_subagents 的最小模型参数合同。

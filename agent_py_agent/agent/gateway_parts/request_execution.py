@@ -18,15 +18,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams, release_active_turn_inputs_for_compact
-from ..agent_core.tool_context.window import (
-    TERMINAL_TOOL_FOLD_METADATA_KEY,
-    build_conversation_terminal_tool_fold,
-    conversation_message_with_terminal_tool_fold,
-)
 from ..common.audit_activation import (
     AUDIT_ATTR,
 )
 from ..concurrency.interrupt import is_interrupted
+from ..contracts.subagent_completion import (
+    DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
+    subagent_completion_context_from_observations,
+)
 from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
 from ..conversation.active_turn_input import (
     exclude_active_turn_user_input_ids,
@@ -42,6 +41,7 @@ from ..conversation.authority import (
     CONVERSATION_AUDIT_PREPARE_ATTR,
     CONVERSATION_EXECUTION_CWD_ATTR,
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
+    CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
     CONVERSATION_WORK_KIND_ATTR,
     CONVERSATION_WORK_NAME_ATTR,
@@ -56,6 +56,7 @@ from ..conversation.channels import (
     redact_structured_identifiers,
 )
 from ..conversation.compact import (
+    ConversationCompactOptions,
     ConversationScope,
     conversation_scope,
     prepare_conversation_context,
@@ -82,10 +83,19 @@ from ..conversation.run_claim import (
     claim_heartbeat_interval_seconds,
     conversation_run_lane,
 )
+from ..conversation.tool_context_window import (
+    TERMINAL_TOOL_FOLD_METADATA_KEY,
+    build_conversation_terminal_tool_fold,
+    conversation_message_with_terminal_tool_fold,
+)
 from ..conversation.tool_input_progress import public_tool_input_progress
 from ..ingestion.source_binding import public_audit_source_bindings
-from ..subagents.runner_completion_wake import SUBAGENT_COMPLETION_SCHEMA_VERSION
 from ..tooling.operation_verification import public_operation_verification
+from .approval_session import (
+    ToolApprovalSessionCache,
+    agent_tool_approval_session_cache,
+    tool_approval_session_scope,
+)
 from .audit_service import (
     AuditRequestCompletedParams,
     audit_request_completed,
@@ -121,8 +131,6 @@ _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS = 0.08
 _CHUNK_STREAM_FLUSH_CHARS = 128
 _GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
 _MAX_PROMPT_OPERATION_EVIDENCE_EVENTS = 4
-_MAX_PROMPT_SUBAGENT_COMPLETIONS = 12
-_CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA = "conversation-subagent-completions.v1"
 _CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
 _CONTEXT_USAGE_TOKEN_FIELDS = (
     "context_window_tokens",
@@ -228,9 +236,16 @@ class BufferedChunkStreamWriter:
     _observed_tool_rounds: int = 0
     interactive_approvals: bool = False
     rich_transcript: bool = False
-    # 会话级审批缓存（会话运行时 ApprovedForSession）：用户选"本次会话允许"后，
-    # 同工具同参数哈希的后续调用直接放行，不再弹确认框。
-    _session_approved_keys: set[str] = field(default_factory=set)
+    # Gateway request writer 不是会话本体；这里只绑定 owner Agent 持有的进程内缓存及
+    # 本轮已经解析完成的精确作用域，避免每个请求各自维护一份假“会话”状态。
+    _approval_session_cache: ToolApprovalSessionCache | None = field(
+        default=None,
+        repr=False,
+    )
+    _approval_session_scope_provider: Callable[[], str] | None = field(
+        default=None,
+        repr=False,
+    )
 
     def __call__(self, text: str) -> None:
         self.write(text)
@@ -264,6 +279,29 @@ class BufferedChunkStreamWriter:
     def set_verbose_level(self, level: str) -> None:
         normalized = str(level or "off").strip().lower()
         self._verbose_level = normalized if normalized in {"off", "on", "full"} else "off"
+
+    # LLM: Binding happens only after canonical owner/thread/cwd resolution and before the model
+    # can call tools. Request payload prose or tool arguments must never choose this scope.
+    # 函数用途: 把当前请求接到真实会话级审批缓存，供后续完全相同的调用复用一次授权。
+    def configure_approval_session(
+        self,
+        cache: ToolApprovalSessionCache,
+        scope_provider: Callable[[], str],
+    ) -> None:
+        self._approval_session_cache = cache
+        self._approval_session_scope_provider = scope_provider
+
+    # LLM: The canonical task workspace may be promoted after the first model sample. Resolve
+    # it at the approval boundary so first-turn and later-turn keys describe the same real cwd.
+    # 函数用途: 在工具真正请求授权时读取审批作用域；解析失败就禁用复用并重新询问。
+    def _current_approval_session_scope(self) -> str:
+        provider = self._approval_session_scope_provider
+        if provider is None:
+            return ""
+        try:
+            return str(provider() or "").strip()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return ""
 
     # LLM: steering 只清空未确认段并重开普通客户端首段额度；rich transcript 的逐轮语义保持不变。
     # 函数用途: 用户在活动回合补充输入后，为下一次模型说明建立新分段。
@@ -537,21 +575,22 @@ class BufferedChunkStreamWriter:
         if not self.interactive_approvals:
             return unavailable_gateway_permission_decision(request).to_dict()
         session_key = _permission_session_key(request)
-        if session_key and session_key in self._session_approved_keys:
-            # 会话级已批准：直接放行，不弹确认框（会话运行时 ApprovedForSession）。
+        approval_cache = self._approval_session_cache
+        approval_scope = self._current_approval_session_scope()
+        if (
+            session_key
+            and approval_cache is not None
+            and approval_cache.is_approved(approval_scope, session_key)
+        ):
+            # 会话级已批准：直接放行，不再发布 permission_requested，避免 TUI 闪一下
+            # 审批框；最终工具账本仍会记录这次真实执行。
             decision = ToolApprovalDecision(request.permission_id, "approved")
-            write_chunk_event(
-                self.chunk_path,
-                {
-                    "kind": "permission_requested",
-                    "permission": request.to_dict(),
-                },
-            )
             write_chunk_event(
                 self.chunk_path,
                 {
                     "kind": "permission_resolved",
                     **decision.to_dict(),
+                    "session_cached": True,
                 },
             )
             return decision.to_dict()
@@ -573,7 +612,8 @@ class BufferedChunkStreamWriter:
             session_key
             and str(decision.decision or "").strip().lower() == "approved_session"
         ):
-            self._session_approved_keys.add(session_key)
+            if approval_cache is not None:
+                approval_cache.approve(approval_scope, session_key)
         write_chunk_event(
             self.chunk_path,
             {
@@ -866,21 +906,43 @@ class _GatewayRunParamsRequest:
     carried_active_turn_user_inputs: tuple[dict[str, object], ...] = ()
 
 
+# LLM: This writer is the only bridge from a promoted conversation task back to the exact
+# claimed Gateway request. Keep the durable request file and the live request object identical,
+# otherwise an inline Compact retry loses active-turn authority and leaves wake policies alive.
+# 类用途: 把本轮刚建立的任务身份同时写入请求文件和当前内存请求，供同回合续跑与停止使用。
 @dataclass(frozen=True)
 class _GatewayTaskBindingWriter:
     """Publish live request -> durable task lineage for /status, /btw and /stop."""
 
     request_path: Path
     request_id: str
+    request: dict | None = None
 
     def __call__(self, link: object) -> bool:
-        return _persist_gateway_request_task_binding(
+        selected_thread_id = str(getattr(link, "thread_id", "") or "")
+        selected_task_id = str(getattr(link, "task_id", "") or "")
+        selected_task_path = str(getattr(link, "task_path", "") or "")
+        if isinstance(self.request, dict):
+            explicit_request_id = str(
+                self.request.get("id") or self.request.get("request_id") or ""
+            ).strip()
+            if explicit_request_id and explicit_request_id != self.request_id:
+                return False
+        updated = _persist_gateway_request_task_binding(
             self.request_path,
             self.request_id,
-            thread_id=str(getattr(link, "thread_id", "") or ""),
-            task_id=str(getattr(link, "task_id", "") or ""),
-            task_path=str(getattr(link, "task_path", "") or ""),
+            thread_id=selected_thread_id,
+            task_id=selected_task_id,
+            task_path=selected_task_path,
         )
+        if updated and isinstance(self.request, dict):
+            self.request["conversation_runtime"] = {
+                "request_id": self.request_id,
+                "thread_id": selected_thread_id,
+                "task_id": selected_task_id,
+                "task_path": selected_task_path,
+            }
+        return updated
 
 
 # LLM: This callback is the Gateway adaptation of 会话运行时's active_turn mutex. It validates the
@@ -1147,6 +1209,7 @@ def _execute_gateway_conversation_turn(
         _gateway_identifier_redactions(context, conversation),
     )
     _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level)
+    _configure_gateway_approval_session(context, conversation)
     if system_slash_command_name(prompt):
         raise SystemCommandRoutingError("系统命令必须在控制入口处理，不能进入模型执行队列")
     _register_named_system_task(context, conversation, prompt)
@@ -1165,6 +1228,67 @@ def _execute_gateway_conversation_turn(
         conversation,
     )
     return _persist_gateway_assistant_result(context, conversation, result)
+
+
+# LLM: Approval scope must match the same canonical sticky cwd passed to model/tool execution.
+# Missing owner, thread, or cwd disables reuse and therefore fails safe by prompting again.
+# 函数用途: 在模型开始前按用户、会话、任务目录和权限模式绑定“本会话允许”的真实生命周期。
+def _configure_gateway_approval_session(
+    context: _GatewayAskRunContext,
+    conversation: _GatewayConversationContext,
+) -> None:
+    configure = getattr(context.on_chunk, "configure_approval_session", None)
+    if not callable(configure):
+        return
+    scope = conversation.scope
+    owner_id = str(getattr(scope, "owner_id", "") or "").strip()
+    conversation_id = str(
+        getattr(scope, "channel_conversation_id", "") or ""
+    ).strip()
+    execution_cwd = (
+        str(conversation.workspace_task.task_path or "").strip()
+        if conversation.workspace_task is not None
+        else str(conversation.cwd or "").strip()
+    )
+    config = getattr(context.agent, "config", None)
+    if not owner_id or not conversation.thread_id or not execution_cwd:
+        return
+
+    # LLM: Thread-local run workspace changes only through canonical task promotion; resolving
+    # here avoids freezing the pre-promotion owner home into the whole session approval key.
+    # 函数用途: 每次审批时用当前工具实际工作的任务目录生成精确作用域。
+    def current_scope() -> str:
+        return tool_approval_session_scope(
+            owner_id=owner_id,
+            thread_id=conversation.thread_id,
+            conversation_id=conversation_id,
+            cwd=_gateway_approval_runtime_cwd(context.agent, execution_cwd),
+            access_mode=getattr(config, "access_mode", ""),
+            path_access_mode=getattr(config, "path_access_mode", ""),
+        )
+
+    configure(
+        agent_tool_approval_session_cache(context.agent),
+        current_scope,
+    )
+
+
+# LLM: Tool execution and approval must observe the same thread-local promoted workspace. The
+# immutable run attributes are a secondary source; the resolved conversation cwd is fallback only.
+# 函数用途: 取得当前工具调用真正使用的任务目录，解决首轮建任务后审批作用域前后不一致。
+def _gateway_approval_runtime_cwd(agent: object, fallback: str) -> str:
+    current_workspace = str(
+        getattr(agent, "_current_run_task_workspace", "") or ""
+    ).strip()
+    if current_workspace:
+        return current_workspace
+    params = getattr(agent, "_current_run_params", None)
+    attributes = getattr(params, "task_attributes", None)
+    if isinstance(attributes, dict):
+        runtime_cwd = str(attributes.get(CONVERSATION_EXECUTION_CWD_ATTR) or "").strip()
+        if runtime_cwd:
+            return runtime_cwd
+    return str(fallback or "").strip()
 
 
 def _register_named_system_task(
@@ -1654,6 +1778,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         conversation_task_binding_callback=_GatewayTaskBindingWriter(
             context.request_path,
             context.request_id,
+            context.request,
         ),
     )
 
@@ -1680,6 +1805,7 @@ def _persist_gateway_request_task_binding(
         if current_id != expected_id:
             return current
         current["conversation_runtime"] = {
+            "request_id": expected_id,
             "thread_id": selected_thread_id,
             "task_id": selected_task_id,
             "task_path": str(task_path or ""),
@@ -1889,6 +2015,9 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
     attrs: dict[str, object] = {}
     if conversation.thread_id:
         attrs["conversation_thread_id"] = conversation.thread_id
+        # 结构化 thread 是当前长期 IM/TUI 对话的耐久身份。Memory recall 自行 canonicalize
+        # 为 session:<thread_id>；模型和客户端都不需要也不能猜这个内部 scope key。
+        attrs["session_id"] = conversation.thread_id
         attrs[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] = True
     if conversation.cwd:
         attrs[CONVERSATION_EXECUTION_CWD_ATTR] = conversation.cwd
@@ -1952,6 +2081,9 @@ def _gateway_run_task_attributes(
         _gateway_task_attributes(conversation),
         request.get("system_task"),
     )
+    if _gateway_request_owns_active_task_turn(attrs, request, request_id):
+        attrs = dict(attrs or {})
+        attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] = True
     task_attrs = conversation_task_attributes(request.get("system_task"))
     if str(task_attrs.get("conversation_work_kind") or "").strip() != "audit":
         return attrs
@@ -1963,6 +2095,39 @@ def _gateway_run_task_attributes(
         scope,
         thread_id=conversation.thread_id,
         turn_request_id=request_id,
+    )
+
+
+# LLM: Inline Compact/provider retries may rebuild RunParams, but only the exact request that
+# durably published this thread/task binding may regain active-turn authority. A sticky task id
+# alone is insufficient because a later user turn or background wake can observe the same cwd.
+# 函数用途: 判断当前请求是否仍是该会话任务的原执行回合，避免续跑丢权或新请求冒充旧回合。
+def _gateway_request_owns_active_task_turn(
+    attrs: object,
+    request: object,
+    request_id: str,
+) -> bool:
+    selected = attrs if isinstance(attrs, dict) else {}
+    row = request if isinstance(request, dict) else {}
+    runtime = row.get("conversation_runtime")
+    if not isinstance(runtime, dict):
+        return False
+    exact_request_id = str(request_id or "").strip()
+    payload_request_id = str(row.get("id") or row.get("request_id") or "").strip()
+    binding_request_id = str(runtime.get("request_id") or "").strip()
+    if not exact_request_id:
+        return False
+    if payload_request_id and payload_request_id != exact_request_id:
+        return False
+    if binding_request_id and binding_request_id != exact_request_id:
+        return False
+    thread_id = str(selected.get("conversation_thread_id") or "").strip()
+    task_id = str(selected.get("conversation_task_id") or "").strip()
+    return bool(
+        thread_id
+        and task_id
+        and str(runtime.get("thread_id") or "").strip() == thread_id
+        and str(runtime.get("task_id") or "").strip() == task_id
     )
 
 
@@ -2204,10 +2369,12 @@ def _load_gateway_compact_context(
             inputs.agent,
             store,
             thread,
-            current_prompt=inputs.prompt,
-            exclude_request_id=inputs.request_id,
-            force=force,
-            progress_callback=_gateway_compact_progress_callback(inputs.on_chunk),
+            options=ConversationCompactOptions(
+                current_prompt=inputs.prompt,
+                exclude_request_id=inputs.request_id,
+                force=force,
+                progress_callback=_gateway_compact_progress_callback(inputs.on_chunk),
+            ),
         )
     except Exception as exc:
         load_errors.append(_conversation_error(exc, "gateway.conversation.compact"))
@@ -2353,42 +2520,20 @@ def _gateway_subagent_completion_context(
         )
         return {}
     load_errors.extend(error for error in errors if isinstance(error, dict))
-    latest_by_task: dict[str, tuple[float, dict[str, object]]] = {}
-    for event in observations:
-        projected = _gateway_subagent_completion_item(
-            event,
-            root_task_ids,
-            load_errors,
+    context, issues = subagent_completion_context_from_observations(
+        observations,
+        root_task_ids=root_task_ids,
+        workspace_task_id=workspace_task_id,
+        visible_limit=DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
+    )
+    load_errors.extend(
+        _conversation_error(
+            ValueError(issue),
+            "gateway.conversation.subagent_completions",
         )
-        if projected is None:
-            continue
-        task_id, observed_at, item = projected
-        latest_by_task[task_id] = (observed_at, item)
-    ordered = [
-        item
-        for _observed_at, item in sorted(
-            latest_by_task.values(),
-            key=lambda row: row[0],
-        )
-    ]
-    visible = ordered[-_MAX_PROMPT_SUBAGENT_COMPLETIONS:]
-    if not visible:
-        return {}
-    return {
-        "schema": _CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA,
-        "workspace_task_id": workspace_task_id,
-        "completion_root_task_ids": sorted(
-            {
-                str(item.get("root_task_id") or "")
-                for item in ordered
-                if str(item.get("root_task_id") or "")
-            }
-        ),
-        "total": len(ordered),
-        "visible_count": len(visible),
-        "omitted_count": max(0, len(ordered) - len(visible)),
-        "items": visible,
-    }
+        for issue in issues
+    )
+    return context
 
 
 # LLM: A continued foreground turn gets a new task id while retaining the same canonical task
@@ -2425,91 +2570,6 @@ def _gateway_workspace_lineage_task_ids(
     }
     selected.add(current_task_id)
     return selected
-
-
-# LLM: One observation becomes model-visible only when its typed event, exact workspace-lineage
-# root/direct parent, schema and duplicated child identity all agree. Mismatches are never guessed.
-# 函数用途: 校验并净化一条子代理完成事件，返回可安全放进父代理上下文的公开字段。
-def _gateway_subagent_completion_item(
-    event: object,
-    root_task_ids: set[str],
-    load_errors: list[dict],
-) -> tuple[str, float, dict[str, object]] | None:
-    if str(getattr(event, "event_type", "") or "") != "subagent_runner_finished":
-        return None
-    event_root_task_id = str(getattr(event, "root_task_id", "") or "").strip()
-    if event_root_task_id not in root_task_ids:
-        return None
-    if str(getattr(event, "parent_agent_id", "") or "").strip() != event_root_task_id:
-        return None
-    metadata = getattr(event, "metadata", {})
-    if not isinstance(metadata, dict):
-        return None
-    if (
-        str(metadata.get("completion_schema_version") or "")
-        != SUBAGENT_COMPLETION_SCHEMA_VERSION
-    ):
-        return None
-    source_task_id = str(getattr(event, "source_agent_id", "") or "").strip()
-    metadata_task_id = str(metadata.get("task_id") or "").strip()
-    if source_task_id and metadata_task_id and source_task_id != metadata_task_id:
-        load_errors.append(
-            _conversation_error(
-                ValueError(
-                    "subagent completion identity mismatch: "
-                    f"source={source_task_id}, metadata={metadata_task_id}"
-                ),
-                "gateway.conversation.subagent_completions",
-            )
-        )
-        return None
-    task_id = metadata_task_id or source_task_id
-    if not task_id:
-        return None
-    observed_at = float(getattr(event, "observed_at", 0.0) or 0.0)
-    item: dict[str, object] = {
-        "task_id": task_id,
-        "root_task_id": event_root_task_id,
-        "status": str(metadata.get("status") or ""),
-        "turn_end_reason": str(metadata.get("turn_end_reason") or ""),
-        "failure_type": str(metadata.get("failure_type") or ""),
-        "completion_schema_version": SUBAGENT_COMPLETION_SCHEMA_VERSION,
-        "completion_message": str(metadata.get("completion_message") or ""),
-        "final_report_ref": str(metadata.get("final_report_ref") or ""),
-        "declared_output_refs": _gateway_completion_refs(
-            metadata.get("declared_output_refs")
-        ),
-        "artifact_refs": _gateway_completion_refs(
-            metadata.get("artifact_refs"),
-            path_from_mapping=True,
-        ),
-        "observed_at": observed_at,
-    }
-    if metadata.get("completion_message_truncated") is True:
-        item["completion_message_truncated"] = True
-        item["completion_message_original_tokens"] = _safe_nonnegative_int(
-            metadata.get("completion_message_original_tokens")
-        )
-    return task_id, observed_at, item
-
-
-# LLM: Completion refs are an open-world list but only scalar refs or a legacy artifact mapping's
-# path may cross into the prompt. Extra mapping fields and duplicate/blank values stay private.
-# 函数用途: 把完成信封里的输出引用净化成最多二十个可读取路径或 URI。
-def _gateway_completion_refs(
-    value: object,
-    *,
-    path_from_mapping: bool = False,
-) -> list[str]:
-    refs: list[str] = []
-    for item in value if isinstance(value, list | tuple) else []:
-        candidate = item.get("path") if path_from_mapping and isinstance(item, dict) else item
-        ref = str(candidate or "").strip()
-        if ref and ref not in refs:
-            refs.append(ref)
-        if len(refs) >= 20:
-            break
-    return refs
 
 
 # LLM: Resolve the sticky workspace from ConversationThread.workspace_task_id. For pre-v3 records,

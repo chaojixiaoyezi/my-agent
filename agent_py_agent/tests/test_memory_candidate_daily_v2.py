@@ -315,25 +315,25 @@ def test_daily_concurrent_restart_replay_commits_one_event(tmp_path: Path) -> No
     assert [(item.sequence, item.previous_event_id) for item in rows] == [(1, "")]
 
 
-# ---- promotion_mode 权限合同(seq1227 定版) ----
-# 验收矩阵:持久化/吸收/身份隔离/legacy 归一/非法拒绝/越权重放。权限不进入
-# candidate_id 与 observation key,同事实不同权限重放不得增 occurrence、不得升权。
+# ---- promotion_mode 宿主自主权限合同 ----
+# 权限不进入 candidate_id/observation key；模型或旧记录携带的合法值不具备授权力，
+# 每次都由 typed target/type/origin/action 重算，SOUL 固定人工。
 
 
-def test_promotion_mode_persists_and_manual_absorbs_auto_unidirectionally(
+def test_promotion_mode_is_recomputed_from_host_fields_on_every_replay(
     tmp_path: Path,
 ) -> None:
-    """矩阵8:manual_required 吸收优先且单向——同观察重放 manual 后,再重放 auto 不得降权。"""
+    """同一正式事实即使携带旧 manual 值，也由当前宿主策略恢复自主权限。"""
     service = CandidateService(tmp_path / "candidates.jsonl")
     auto = replace(_user_observation(), promotion_mode="auto_eligible")
     manual = replace(auto, promotion_mode="manual_required")
 
     first = service.observe(auto)
     assert first.promotion_mode == "auto_eligible"
-    absorbed = service.observe(manual)  # 同 observation key,权限吸收为 manual
-    assert absorbed.promotion_mode == "manual_required"
-    downgrade_attempt = service.observe(auto)  # auto 重放不能把已 manual 候选降权
-    assert downgrade_attempt.promotion_mode == "manual_required"
+    absorbed = service.observe(manual)
+    assert absorbed.promotion_mode == "auto_eligible"
+    downgrade_attempt = service.observe(auto)
+    assert downgrade_attempt.promotion_mode == "auto_eligible"
     assert downgrade_attempt.candidate_id == first.candidate_id
 
 
@@ -350,24 +350,23 @@ def test_promotion_mode_not_in_identity_so_replay_keeps_occurrence(tmp_path: Pat
     assert len(replay.observation_keys) == 1
 
 
-def test_auto_replay_cannot_upgrade_manual_candidate(tmp_path: Path) -> None:
-    """矩阵9:manual_required 候选不会被同 key auto_eligible 重放升权(越权复用拒绝)。"""
+def test_supplied_manual_cannot_disable_host_autonomous_candidate(tmp_path: Path) -> None:
+    """promotion_mode 不是模型或旧入口的策略开关，正式用户事实仍按宿主合同自主。"""
     service = CandidateService(tmp_path / "candidates.jsonl")
     manual = replace(_user_observation(), promotion_mode="manual_required")
     auto = replace(manual, promotion_mode="auto_eligible")
 
     first = service.observe(manual)
-    assert first.promotion_mode == "manual_required"
+    assert first.promotion_mode == "auto_eligible"
     upgraded = service.observe(auto)
 
-    assert upgraded.promotion_mode == "manual_required"
+    assert upgraded.promotion_mode == "auto_eligible"
 
 
-def test_legacy_record_without_promotion_mode_normalizes_to_manual(
+def test_legacy_record_without_promotion_mode_uses_current_host_policy(
     tmp_path: Path,
 ) -> None:
-    """矩阵6+10:legacy 行缺 promotion_mode → 读取归一 manual_required(fail-closed);
-    schema_version 不 bump;candidate_id/refs/status_history 原样保留。"""
+    """旧行缺权限字段时重算策略，但不改 candidate 身份、证据或状态历史。"""
     from agent_py_agent.agent.memory_store.candidate_models import (
         CANDIDATE_SCHEMA_VERSION,
     )
@@ -388,12 +387,27 @@ def test_legacy_record_without_promotion_mode_normalizes_to_manual(
 
     loaded = service.list()[0]
 
-    assert loaded.promotion_mode == "manual_required"  # legacy 缺字段 fail-closed
+    assert loaded.promotion_mode == "auto_eligible"
     assert loaded.candidate_id == original.candidate_id  # ID 不重写
     assert loaded.schema_version == CANDIDATE_SCHEMA_VERSION  # 版本不 bump
     assert loaded.source_message_refs == original.source_message_refs  # refs 保留
     assert loaded.status_history == original.status_history  # 状态历史保留
     assert loaded.occurrence_count == 1
+
+
+def test_soul_candidate_remains_manual_regardless_of_supplied_mode(tmp_path: Path) -> None:
+    service = CandidateService(tmp_path / "candidates.jsonl")
+    soul = replace(
+        _user_observation(),
+        candidate_type="soul_change",
+        subject_key="persona.soul.voice",
+        promotion_target="soul",
+        promotion_mode="auto_eligible",
+    )
+
+    candidate = service.observe(soul)
+
+    assert candidate.promotion_mode == "manual_required"
 
 
 def test_invalid_promotion_mode_is_rejected(tmp_path: Path) -> None:

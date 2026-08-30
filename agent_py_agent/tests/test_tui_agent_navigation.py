@@ -15,7 +15,13 @@ from agent_py_agent.cli.chat_parts.tui_events import TuiEventSequencer
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 
 
-def _row(run_id: str, *, parent: str = "", status: str = "RUNNING") -> dict[str, object]:
+def _row(
+    run_id: str,
+    *,
+    parent: str = "",
+    status: str = "RUNNING",
+    lifecycle_phase: str = "running",
+) -> dict[str, object]:
     return {
         "run_id": run_id,
         "root_task_id": "task-root",
@@ -24,6 +30,7 @@ def _row(run_id: str, *, parent: str = "", status: str = "RUNNING") -> dict[str,
         "name": run_id,
         "role": "worker",
         "status": status,
+        "lifecycle_phase": lifecycle_phase,
         "description": f"处理 {run_id}",
         "attempts": 1,
         "context_tokens": 2_000,
@@ -259,7 +266,7 @@ def test_child_view_applies_live_events_todo_context_children_and_final() -> Non
 
 def test_completed_root_roster_stays_selectable_but_does_not_animate() -> None:
     runtime = TuiRuntime("nav-completed-roster")
-    done = _row("child-done", status="DONE")
+    done = _row("child-done", status="DONE", lifecycle_phase="terminal")
 
     assert runtime.update_background_activity(0, {"subagents": [done]}) is True
     assert runtime.needs_periodic_refresh() is False
@@ -295,11 +302,84 @@ def test_hidden_ninth_child_scrolls_into_panel_and_enter_opens_same_run() -> Non
     )
     rendered_rows = [fragments_text(line) for line in frame.agent_lines]
     assert not any("child-1 " in line for line in rendered_rows)
-    assert any("› ● child-9 " in line for line in rendered_rows)
+    assert any("› ✻ child-9 " in line for line in rendered_rows)
     assert any("还有 1 个子代理未展开" in line for line in rendered_rows)
-
     assert navigation.enter_selected() is True
     assert navigation.snapshot().active_run_id == "child-9"
+
+
+def test_enter_starting_child_shows_notice_until_goal_or_first_event() -> None:
+    root = TuiRuntime("nav-starting")
+    navigation = TuiAgentNavigationState(root)
+    row = _row(
+        "child-starting",
+        lifecycle_phase="waiting_first_event",
+    )
+    navigation.update_rows("", [row])
+    navigation.move_selection(1)
+
+    assert navigation.enter_selected() is True
+    runtime = navigation.active_runtime()
+    assert "等待模型首个响应" in runtime.notice()
+
+    payload = {
+        "ok": True,
+        "agent": {**row, "goal": "", "activity": "等待模型首个响应"},
+        "terminal": False,
+        "children": [],
+        "task_progress_items": [],
+        "transcript_events": [],
+        "event_cursor": 0,
+        "final_response": "",
+    }
+    assert navigation.apply_agent_view("child-starting", payload) is True
+    assert "等待模型首个响应" in runtime.notice()
+
+    payload["agent"] = {**payload["agent"], "goal": "实现地图加载器"}
+    assert navigation.apply_agent_view("child-starting", payload) is True
+    assert runtime.notice() == ""
+
+
+def test_subagent_startup_phase_changes_label_and_spinner_frame() -> None:
+    runtime = TuiRuntime("nav-startup-render")
+    row = _row(
+        "child-starting",
+        lifecycle_phase="waiting_first_event",
+    )
+    assert runtime.update_background_activity(1, {"subagents": [row]}) is True
+
+    first = render_tui_snapshot(
+        runtime.store.snapshot(),
+        TuiRenderContext(width=100, spinner_index=0),
+    )
+    second = render_tui_snapshot(
+        runtime.store.snapshot(),
+        TuiRenderContext(width=100, spinner_index=1),
+    )
+    first_text = "\n".join(fragments_text(line) for line in first.agent_lines)
+    second_text = "\n".join(fragments_text(line) for line in second.agent_lines)
+    assert "等待模型" in first_text
+    assert "✻" in first_text
+    assert "✢" in second_text
+
+
+def test_subagent_waiting_descendants_has_distinct_live_label() -> None:
+    runtime = TuiRuntime("nav-waiting-descendants")
+    row = _row(
+        "child-coordinator",
+        status="PENDING",
+        lifecycle_phase="waiting_descendants",
+    )
+    assert runtime.update_background_activity(1, {"subagents": [row]}) is True
+
+    frame = render_tui_snapshot(
+        runtime.store.snapshot(),
+        TuiRenderContext(width=100, spinner_index=0),
+    )
+    rendered = "\n".join(fragments_text(line) for line in frame.agent_lines)
+    assert "等待下级" in rendered
+    assert "✻" in rendered
+    assert "启动中" not in rendered
 
 
 def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:

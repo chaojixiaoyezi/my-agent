@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
@@ -77,6 +79,31 @@ def test_hierarchy_schedule_apply_builds_two_child_four_grandchild_tree(tmp_path
     loaded_root = manager.load(root.id)
     assert loaded_root.child_ids == first.created_run_ids
     assert sum(len(manager.load(child_id).child_ids) for child_id in first.created_run_ids) == 4
+
+
+def test_hierarchy_schedule_observes_host_cancellation_between_durable_children(tmp_path):
+    """递归批量派工在安全点停止，已落盘前缀保留且剩余 child 不再创建。"""
+    manager = SubAgentManager(tmp_path)
+    parent = manager.create_run(goal="parent", thought="split safely", plan=["plan"])
+    checks = 0
+
+    def interrupt_after_first_child() -> None:
+        nonlocal checks
+        checks += 1
+        if checks >= 2:
+            raise RuntimeError("interrupted")
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        manager.hierarchy.schedule_child_runs(
+            params=HierarchyScheduleRequest(
+                parent_run_id=parent.id,
+                child_specs=_child_specs(3),
+                apply=True,
+                interrupt_check=interrupt_after_first_child,
+            )
+        )
+
+    assert len(manager.load(parent.id).child_ids) == 1
 
 
 def test_hierarchy_schedule_repairs_literal_wildcard_names_with_default_display_name(tmp_path):

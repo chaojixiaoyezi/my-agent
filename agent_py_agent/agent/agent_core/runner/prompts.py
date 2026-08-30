@@ -44,6 +44,9 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
         "如果需要下级协作，必须使用授权的子代理编排工具；如果只是具体交付，就在授权写入边界内产出文件和证据。\n"
         f"{DEFAULT_DELEGATED_EXECUTION_PERSISTENCE}\n"
         "不要编造工具结果、run_id、文件内容、收口交给父级已经批准的事实。\n"
+        "持续执行纪律：在当前回合能继续推进时，必须继续使用现有工具，直到任务真正完成或出现真实阻塞；"
+        "不要以“现在开始/接下来会/马上写入/随后验证”这类未来动作结束回复。"
+        "如果最终回复里还存在你承诺要做的动作，就先执行该动作，再向父级交回结果。\n"
         "完成纪律：如果任务在 goal 或输出要求里点名了要产出的文件（明确给了产物路径），"
         "在你亲手把该文件真正写出来、并确认它存在之前，不要输出最终完成结果——"
         "继续调用写文件工具把它做出来。确实做不到就如实标记未完成或上抛能力请求，"
@@ -63,34 +66,6 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
     )
 
 
-def runtime_guidance_prompt_block(context: SubAgentExecutionContext) -> str:
-    bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
-    guidance = bundle.get("runtime_guidance")
-    if not isinstance(guidance, list) or not guidance:
-        return ""
-    lines = [
-        "## GUIDANCE_DELIVERED\n\n",
-        "以下是运行中追加给你的补充提示，只作为普通补充消息进入上下文。"
-        "运行时不会把这些文字解释成新的硬门，也不会自动替换当前用户消息。\n",
-    ]
-    for index, item in enumerate(guidance[:20], start=1):
-        if not isinstance(item, dict):
-            continue
-        message = str(item.get("message") or "").strip()
-        if not message:
-            continue
-        priority = str(item.get("priority") or "normal").strip() or "normal"
-        sender = str(item.get("sender") or "").strip()
-        guidance_id = str(item.get("guidance_id") or "").strip()
-        target_type = str(item.get("target_type") or "").strip()
-        target_id = str(item.get("target_id") or "").strip()
-        sender_text = f"; sender={sender}" if sender else ""
-        lines.append(
-            f"{index}. guidance_id={guidance_id}; target={target_type}:{target_id}; priority={priority}{sender_text}: {message}\n"
-        )
-    return "".join(lines) + "\n"
-
-
 def _build_subagent_runner_prompt(
     context: SubAgentExecutionContext,
     instruction: str = "",
@@ -102,7 +77,6 @@ def _build_subagent_runner_prompt(
     extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，如实说明缺少什么。"
     execution_contract = "\n".join(_runner_execution_contract_lines(context))
     context_gate = "\n".join(context_gate_prompt_lines(context.context_bundle))
-    guidance_block = runtime_guidance_prompt_block(context)
     return (
         "# SubAgent Runner Task\n\n"
         "你是一个被父代理授权的子代理，只能依据下面的执行上下文工作。\n"
@@ -113,7 +87,6 @@ def _build_subagent_runner_prompt(
         f"{execution_contract}\n\n"
         "## Context Bundle Gate\n\n"
         f"{context_gate}\n\n"
-        f"{guidance_block}"
         "## Execution Context JSON\n\n"
         "下面是瘦身后的执行摘要；完整上下文请按 refs 读取，不要让模型一次吞完整大 JSON。\n\n"
         "```json\n"
@@ -213,7 +186,6 @@ def _build_audit_source_runner_prompt(
             "complete_record_boundary": True,
         }
     extra = instruction.strip()
-    guidance = runtime_guidance_prompt_block(context)
     task_guide = (
         "这一条 source_id 的传输参数已由宿主绑定；只调用 watch_stream(action=open)，"
         "让工具网关补入精确参数。不要从 goal 或资料重新抄写地址，也不要创建或写入报告文件。"
@@ -251,7 +223,6 @@ def _build_audit_source_runner_prompt(
         "# Audit Source Worker Turn\n\n"
         f"下面是本来源当前工作片的最小上下文。{task_guide}\n\n"
         + (f"## Extra Instruction\n\n{extra}\n\n" if extra else "")
-        + guidance
         + "## Runtime Context\n\n```json\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
         + "\n```\n\n"

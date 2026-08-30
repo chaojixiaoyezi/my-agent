@@ -30,6 +30,7 @@ from typing import Any
 
 from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
 from .gateway_parts.io import update_json_file_atomic
+from .memory_store.candidate_models import host_promotion_mode
 from .runtime_db.repository import (
     AGENT_RUN_TERMINAL_STATUSES,
     RuntimeRepository,
@@ -314,9 +315,9 @@ def _has_pending_memory_curator_work(owner_home: Path) -> bool:
     return False
 
 
-# LLM: 候选文件是当前态唯一事实源(candidates.jsonl),发现层只读 status/origin 字段不解析正文。
-# 函数用途: 是否有用户确认待晋升(pending_review 且 user_explicit/tool_verified)的候选——
-# 有即策展活,与 run_if_due 晋升兜底同源(gateway_loops._has_pending_review_candidates 迁移)。
+# LLM: Candidate discovery reads only typed status/promotion fields. New records use the host-owned
+# promotion_mode; the narrow legacy fallback never inspects content and cannot grant formal authority.
+# 函数用途: 判断 owner 是否有待自主晋升或门槛重试的候选，以便 Gateway 重启后仍能唤醒策展器。
 def _has_pending_promotable_candidates(owner_home: Path) -> bool:
     path = owner_home / "memory" / "candidates.jsonl"
     if not path.is_file():
@@ -332,8 +333,19 @@ def _has_pending_promotable_candidates(owner_home: Path) -> bool:
                     continue
                 if not isinstance(record, dict):
                     continue
-                if str(record.get("status") or "").strip().lower() != "pending_review":
+                if str(record.get("status") or "").strip().lower() not in {
+                    "pending_review",
+                    "approved",
+                }:
                     continue
+                mode = str(record.get("promotion_mode") or "").strip().lower()
+                current_mode = host_promotion_mode(record)
+                if current_mode == "auto_eligible":
+                    return True
+                if mode == "manual_required":
+                    continue
+                # 升级前记录可能没有 promotion_mode。仅保留旧的明确事实来源唤醒语义；
+                # 真正权限会在 CandidateService/PromotionService 重新计算和核验。
                 origin = str(record.get("origin") or "").strip().lower()
                 if origin in {"user_explicit", "tool_verified"}:
                     return True

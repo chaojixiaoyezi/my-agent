@@ -102,10 +102,7 @@ def test_restricted_tool_search_cannot_load_ungranted_deferred_tools(tmp_path) -
     result = _execute(
         agent,
         "tool_search",
-        {
-            "query": "create_subagents 创建并管理子代理",
-            "load_names": ["create_subagents"],
-        },
+        {"query": "create_subagents 创建并管理子代理"},
         allowed_tools=["tool_search"],
     )
 
@@ -113,7 +110,7 @@ def test_restricted_tool_search_cannot_load_ungranted_deferred_tools(tmp_path) -
     assert result.metadata["handler_details"]["tool_search"]["loaded_tool_names"] == []
     payload = json.loads(result.output)
     assert payload["loaded_for_next_model_call"] == []
-    assert payload["not_loaded"] == ["create_subagents"]
+    assert payload["tools"] == []
 
 
 def test_registry_gates_and_handler_share_per_turn_client_cwd(tmp_path) -> None:
@@ -135,6 +132,7 @@ def test_registry_gates_and_handler_share_per_turn_client_cwd(tmp_path) -> None:
             "execution_cwd": str(client_root),
             "execution_workspace_roots": [str(client_root)],
             "allowed_write_roots": [str(client_root)],
+            "effective_owner_scope_root": str(tmp_path),
         },
         runtime_snapshot=snapshot,
     ).result
@@ -303,3 +301,5 @@ def test_list_tools_uses_resolved_remote_owner_type(tmp_path) -> None:
         result.metadata["handler_details"]["tool_output_policy"]["live_prompt_output"]
     )
     assert payload["permission_mode"] == "owner_scoped"
+    assert payload["visible_tool_count"] == 1
+    assert [item["name"] for item in payload["tools"]] == ["list_tools"]

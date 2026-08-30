@@ -78,6 +78,7 @@ def build_capability_gap(request: BuildCapabilityGapInput) -> CapabilityGap:
         missing_capability=params.missing_capability,
         source_task=request.task_goal,
         why_failed=params.why_failed,
+        request_id=str(getattr(params, "request_id", "") or ""),
         gap_type=params.gap_type,
         attempted_skills=params.attempted_skills or [],
         attempted_tools=params.attempted_tools or [],

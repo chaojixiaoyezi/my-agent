@@ -247,10 +247,13 @@ class TuiRuntimeStateMachine(RuleBasedStateMachine):
     @rule(text=_TERMINAL_TEXT, duration=st.integers(min_value=0, max_value=30))
     def publish_thinking(self, text: str, duration: int) -> None:
         assert self.active_adapter is not None
+        was_active = self.active_adapter._thinking_active
+        late_completion = self.active_adapter._late_thinking_completion_expected
+        expected = False if (not was_active and late_completion) else bool(text) or was_active
         assert self.active_adapter.write_thinking(
             text,
             duration_seconds=float(duration),
-        ) is bool(text.strip())
+        ) is expected
 
     @precondition(lambda self: self.active_adapter is not None)
     @rule(text=_TERMINAL_TEXT, ok=st.booleans())

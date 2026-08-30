@@ -175,6 +175,7 @@ class _HomeProviderConfigFields:
 class _ToolConfigFields:
     enable_tools: bool = True
     max_tool_rounds: int | None = None
+    # 历史字段名保留配置兼容；语义是一次并发执行批次大小，不是丢弃同轮尾部调用。
     max_tool_calls_per_round: int | None = None
     # 单轮内并行执行工具的数量上限(EXEC-01):空值=代码默认 8;正数=上限;
     # 0=不限制(与 max_tool_rounds 显式 0 同约定)。任务属性可单任务覆盖。
@@ -182,9 +183,6 @@ class _ToolConfigFields:
     # 模型输出格式偶发抖动（把工具调用写进正文/代码块/XML 标签）时，
     # 协议违规先给几次结构化修复机会再 break；1=只修一次就断（旧行为）。
     max_protocol_repairs: int = 2
-    # 模型准备自然收尾但自己仍有 open task_progress 时，同一 active turn 的
-    # 会话运行时 式核对次数；0=关闭。它不扫描产物、不验收质量，也不新开后台轮。
-    task_progress_closeout_repair_attempts: int = 1
     # 后台调度器的周期性孤儿 supervision(reconcile 兜底,零 LLM 成本):每隔此秒数巡查一次
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。
@@ -339,6 +337,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_curator_max_input_chars: int = 40_000
     memory_curator_timeout_seconds: int = 90
     memory_curator_max_retries: int = 1
+    # 记忆策展使用独立后台车道；限制并发可避免历史 owner 积压抢占主会话/子代理唤醒线程。
+    memory_curator_workers: int = 2
     memory_curator_daily_finalize_hour: int = 23
     memory_curator_auto_promotion_policy: str = "conservative_v1"
     memory_lesson_min_occurrences: int = 2

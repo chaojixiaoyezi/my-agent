@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import agent_py_agent.agent.conversation.store as conversation_store_module
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import (
@@ -17,9 +19,11 @@ class _CapturingBackend:
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.messages: list[object] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs: object) -> ModelResponse:
         self.prompts.append(prompt)
+        self.messages.append(kwargs.get("messages"))
         return ModelResponse(text="主代理已看到事件并决定下一步。", backend=self.name)
 
 
@@ -128,8 +132,9 @@ def test_urgent_wake_signal_wakes_main_agent_without_due_policy(tmp_path) -> Non
     assert reports[0].reason == "urgent_runtime_alert"  # 修 reason 透传后:报告带 signal 真实 reason(非泛泛 urgent_wake_signal)
     assert store.pending_wake_signals() == []
     assert store.mark_wake_signal_handled(signal.wake_signal_id, now=22.0) is None
-    assert "Pending Wake Signals" in backend.prompts[0]
-    assert "孙代理发现需要马上分析的异常日志" in backend.prompts[0]
+    model_input = json.dumps(backend.messages[0], ensure_ascii=False)
+    assert "Pending Wake Signals" in model_input
+    assert "孙代理发现需要马上分析的异常日志" in model_input
     assert channels.adapter("internal").sent_messages[0].content == "主代理已看到事件并决定下一步。"
 
 
@@ -176,5 +181,6 @@ def test_nonurgent_observation_requiring_main_agent_is_processed_on_next_tick(tm
     assert len(reports) == 1
     assert reports[0].reason == "observation_requires_main_agent"
     assert store.unhandled_observations_requiring_main() == []
-    assert "Recent Observations" in backend.prompts[0]
-    assert "非紧急但需要主代理二次判断" in backend.prompts[0]
+    model_input = json.dumps(backend.messages[0], ensure_ascii=False)
+    assert "Recent Observations" in model_input
+    assert "非紧急但需要主代理二次判断" in model_input

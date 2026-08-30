@@ -36,20 +36,16 @@
   operation。当前把 exact `conversation_request_id` 从 child canonical attributes 送到 completion wake，
   background verification 只恢复该 turn；旧索引只在 row request id 同值时兼容，不放宽 fail-closed。
 
-## 2026-08-18 Fiber 143 收口冲突返工
+## 2026-08-18 Fiber 143 收口冲突返工【状态：2026-08-28 已退役】
 
 - Fiber→TypeScript 前台最后一条 E2E `run_command` 实际完成 HTTP 请求后由清理命令收到 SIGTERM，权威
   operation 仍明确落为 `FAILED`：`COMMAND_FAILED / failure_stage=execution / handler_executed=true /
   effect_outcome=failed / return_code=143`。模型看到了完整回执，却依据 stdout 的成功片段输出“完成”；因此
   根因不是工具结果丢失，而是 completion 把冲突草稿直接切到无工具表达轮，模型没有机会修正命令并复验。
-- 对照 会话运行时 `session/turn.rs`、`hook_runtime.rs`、`protocol/items.rs` 和 Stop-hook E2E 后，已把明确
-  `failed/not_started` 的冲突改为同一 active turn 的 `completion_conflict.v1` continuation。原工具面保留，
-  同时给模型最近 typed 终态和被拒绝草稿；全 turn 最多两次。修复产生新的 succeeded operation 后自然收口，
-  两次仍只口头完成才进入 `OPERATION_INCOMPLETE`。
-- `unknown/cancelled/incomplete/unverified` 继续直接 fail-closed，不因这次体验修复恢复自动副作用重放。
-  本地 fake provider 回归已证明：已知失败可在第一个返工轮调用修复工具并以 `runtime_status=ok` 完成；连续
-  两次忽略冲突后才进入无工具未完成回复；unknown 从未收到 completion repair 工具轮。真实 `.13` 候选部署
-  与同类 143/非零退出返工仍待执行，因此当前只记本地机制通过，不记真机 E2E。
+- 当时把已知失败升级为 `completion_conflict.v1` 隐藏返工，误把 会话运行时 可选 Stop hook 当成默认完成判官。
+  2026-08-28 `.7` 真 TUI 用用户明确要求的 `exit 7` 证明该门会额外触发 5 次模型调用、42.6 秒和
+  141,905 cache-read tokens，随后仍遗留 Working。现已删除该返工链；模型仍可在看到失败结果后的正常下一次
+  采样中自主修复，但 plain final 不再被机器覆盖。UNKNOWN 副作用的执行期安全收口保持不变。
 
 ## 2026-08-18 aiohttp 真机闭环与 no-effect 尾部裁决
 
@@ -437,3 +433,14 @@
 - 两项服务复验 active、`NRestarts=0`、8420 只监听 loopback、队列为空。本轮 Feishu 请求来自可信
   localhost scope，真实出站不等于新的客户端入站；macOS 锁屏阻止桌面入站补证，因此文档明确保留这一
   外部验收边界。
+
+## 2026-08-28 首个工作工具 cwd 原子化候选
+
+- 真实 TUI 发现首个 `write_file` 仍按 owner 根执行，而任务晋升后的 `apply_patch` 已按 task root 查找，
+  形成同一会话两套工作目录。根因是会话 promotion 位于 canonical executor 的 late pre-handler gate，
+  但 write boundary、policy cwd 与参数规范化已经使用旧目录冻结。
+- 候选修复在唯一 traced-tool seam 先完成结构化 promotion，再同步
+  `run_workspace/execution_cwd/runtime roots/rebase source` 并重建当前 call；预算、重复调用、stale runner
+  与 authority guard 仍在 canonical executor 规范化后只运行一次。取消在准备前命中时不产生晋升副作用。
+- 相对路径与晋升前 owner-root 绝对路径两条 focused 回归均已通过；真实 MiniMax-M2.7 TUI 复验仍是
+  把 BUG-010 标为完成的必要条件。

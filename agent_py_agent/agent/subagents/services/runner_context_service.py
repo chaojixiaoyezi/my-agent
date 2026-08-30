@@ -137,6 +137,11 @@ class SubAgentRunnerContextService:
             "owner_workspace_dir": task_workspace_refs.get("owner_workspace_dir", ""),
             "role": task.role,
             "allowed_write_roots": allowed_write_roots,
+            # LLM: Keep capability roots distinct from ordinary task/product roots so the
+            # runtime scope reducer can preserve only host-authored grants without treating
+            # every allowed root as an authority source.
+            # 字段用途: 标出父代理正式批准的写目录，避免运行时二次收口时误删已授权路径。
+            "capability_write_roots": grant_write_roots,
             "allowed_read_roots": read_roots,
             # LLM: Exact modes are generic Tool Gateway controls activated only
             # by a fully typed source-worker identity, never by role/name text.
@@ -213,7 +218,6 @@ class SubAgentRunnerContextService:
         collaboration = collaboration_context_payload(self.manager, task)
         if collaboration:
             context_bundle["collaboration"] = collaboration
-        _attach_runtime_guidance(context_bundle, _runtime_guidance_context(self.manager, task.id))
         return SubAgentExecutionContext(
             **_execution_context_task_fields(task),
             allowed_skills=request.allowed_skills,
@@ -357,22 +361,6 @@ def _granted_filesystem_read_roots(task: object) -> list[str]:
     for grant in getattr(task, "capability_grants", []) or []:
         roots = _merge_list(roots, text_or_sequence_strings(getattr(grant, "path_scope", []) or []))
     return roots
-
-
-def _runtime_guidance_context(manager: object, run_id: str) -> list[dict[str, object]]:
-    store = getattr(manager, "conversation_store", None)
-    if store is None:
-        return []
-    entries = store.pending_guidance("agent_run", run_id, limit=20)
-    if not entries:
-        return []
-    store.mark_guidance_delivered([entry.guidance_id for entry in entries])
-    return [entry.to_dict() for entry in entries]
-
-
-def _attach_runtime_guidance(bundle: dict[str, object], guidance: list[dict[str, object]]) -> None:
-    if guidance:
-        bundle["runtime_guidance"] = guidance
 
 
 # LLM: This is the last model-execution seam for persisted task/grant tools; apply the canonical

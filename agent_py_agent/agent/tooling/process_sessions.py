@@ -32,15 +32,18 @@ _MAX_WAIT_SECONDS = 30.0
 
 
 # LLM: process_session 是 run_command(run_in_background=true) 的唯一续接入口；
-# list/status/wait/network_status 只读，stop 通过结构化 action 进入危险操作门。新增动作时必须同步
-# effect mapping、schema、scope 测试和 run_command 返回提示。
+# list/status/wait/network_status 只读，stop 是对已登记且通过 owner/session scope 校验的
+# 既有执行会话做状态变更，不是新起一条未隔离命令。新增动作时必须同步 effect mapping、
+# schema、scope 测试和 run_command 返回提示。
 # 类用途: 用一个统一工具列出、查看、核对网络、短暂等待或停止当前 TUI 会话的后台命令。
 class ProcessSessionTool(BaseTool):
     model_spec = ToolModelSpec(
         name="process_session",
         description=(
             "管理 run_command(run_in_background=true) 启动的后台命令，"
-            "支持 list/status/wait/network_status/stop；服务对外可达必须用 network_status 区分监听、主机防火墙与外部验证。"
+            "支持 list/status/wait/network_status/stop。session_id 是唯一稳定的管理句柄；"
+            "network_status 是宿主机对受管进程树的权威只读观测，run_command 沙箱可能看不到其中的监听 PID；"
+            "服务对外可达必须区分真实监听进程、主机防火墙与外部验证。"
         ),
         input_schema={
             "type": "object",
@@ -52,7 +55,10 @@ class ProcessSessionTool(BaseTool):
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "status/wait/network_status/stop 所需的后台 session id。",
+                    "description": (
+                        "status/wait/network_status/stop 所需的后台 session id；"
+                        "不要猜测或传操作系统 PID。"
+                    ),
                 },
                 "timeout_seconds": {
                     "type": "number",
@@ -82,6 +88,7 @@ class ProcessSessionTool(BaseTool):
                 "一次性命令直接使用 run_command",
                 "交互式 stdin/TTY 使用 terminal_session",
                 "不要用 run_command 执行 sleep 来轮询后台进程",
+                "不要用沙箱内 ps/lsof 重复否定 network_status 已观测到的 listener_pids",
             ),
             keywords=(
                 "background process",
@@ -109,7 +116,7 @@ class ProcessSessionTool(BaseTool):
                     ("status", "read_only"),
                     ("wait", "read_only"),
                     ("network_status", "read_only"),
-                    ("stop", "dangerous"),
+                    ("stop", "mutating"),
                 ),
             ),),
         ),

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 
 from ...backends import ModelResponse
-from ...backends.tool_ir import UserTurn
+from ...backends.tool_ir import AssistantTurn, UserTurn
 from ...conversation.user_visible_text import (
     contains_internal_protocol,
     sanitize_user_visible_text,
 )
+from ...tooling.runtime_contracts import ToolCall, ToolContentBlock, ToolResult
 from .._runtime_params import ToolLoopExecuteParams
 from ..native_tool_protocol import native_tool_use_active
 
@@ -121,7 +123,11 @@ def _natural_reply_tool_ir_history(
 ) -> list[object]:
     if not native_tool_use_active(params):
         return list(params.tool_ir_history) if preserve_execution_evidence else []
-    canonical = f"# User Task\n{str(guidance or '')}"
+    phase = pending_natural_user_reply(params) or {}
+    feedback = phase.get("rejected_tool_feedback")
+    feedback = feedback if isinstance(feedback, dict) else {}
+    original_guidance = str(feedback.get("guidance") or guidance or "")
+    canonical = f"# User Task\n{original_guidance}"
     history = list(params.tool_ir_history) if preserve_execution_evidence else []
     history = [
         item
@@ -129,7 +135,78 @@ def _natural_reply_tool_ir_history(
         if not (isinstance(item, UserTurn) and item.text == canonical)
     ]
     history.append(UserTurn(canonical))
+    history.extend(_rejected_tool_feedback_ir(params, feedback))
     return history
+
+
+# LLM: 表达轮的越权 tool_use 只能作为“模型提出但宿主未执行”的临时配对历史回放；
+#   这里不得调用 ToolRegistry、写工具账本或制造副作用，且每个 tool_use 必须有失败 ToolResult。
+# 函数用途: 把一次被拒绝的表达轮工具调用转换成厂商可续接的完整调用/失败回执对。
+def _rejected_tool_feedback_ir(
+    params: ToolLoopExecuteParams,
+    feedback: dict[str, object],
+) -> list[object]:
+    raw_calls = feedback.get("tool_calls")
+    if not isinstance(raw_calls, list) or not raw_calls:
+        return []
+    run_id = str(params.run_id or params.task_id or "natural-reply-run").strip()
+    state = _mutable_state(params) or {}
+    turn_id = str(feedback.get("turn_id") or state.get("_current_model_turn_id") or "").strip()
+    turn_id = turn_id or f"{run_id}:natural-user-reply"
+    attempt_id = str(params.attempt_id or params.request_id or run_id).strip()
+    calls: list[ToolCall] = []
+    results: list[ToolResult] = []
+    for index, raw in enumerate(raw_calls, start=1):
+        block = raw if isinstance(raw, dict) else {}
+        name = str(block.get("name") or "unavailable_tool").strip() or "unavailable_tool"
+        call_id = str(block.get("id") or f"natural-reply-rejected-{index}").strip()
+        arguments = block.get("input")
+        arguments = dict(arguments) if isinstance(arguments, dict) else {}
+        schema_digest = hashlib.sha256(
+            json.dumps(
+                {"name": name, "arguments": arguments},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        calls.append(
+            ToolCall(
+                call_id=call_id,
+                tool_name=name,
+                arguments=arguments,
+                source_protocol="native",
+                schema_hash=f"sha256:{schema_digest}",
+                run_id=run_id,
+                turn_id=turn_id,
+                attempt_id=attempt_id,
+            )
+        )
+        results.append(
+            ToolResult(
+                call_id=call_id,
+                tool_name=name,
+                status="failed",
+                content_blocks=(
+                    ToolContentBlock(
+                        "text",
+                        text=(
+                            "当前仅允许生成面向用户的自然语言回复；这个工具调用没有执行。"
+                            "请直接根据前一条事实说明写出完整回复，不要再次调用工具。"
+                        ),
+                    ),
+                ),
+                error_code="TOOL_CHOICE_VIOLATION",
+                handler_executed=False,
+                failure_stage="policy",
+                effect_outcome="not_started",
+                metadata={"natural_user_reply_only": True},
+            )
+        )
+    assistant_text = sanitize_user_visible_text(
+        str(feedback.get("assistant_text") or "")
+    ).content
+    return [AssistantTurn(text=assistant_text, tool_calls=calls), *results]
 
 
 def discard_pending_natural_user_reply(params: ToolLoopExecuteParams) -> bool:
@@ -180,16 +257,31 @@ def natural_user_reply_rejection_reason(
     return ""
 
 
-# LLM: 重写次数是本回复阶段的结构化计数，上限后抑制正文，避免坏输出无限耗费 token。
-# 函数用途: 记录一次不合格生成并判断是否还能再让同一模型重写一次。
+# LLM: 重写次数是本回复阶段的结构化计数；原生越权 tool_use 还要保存为未执行的
+#   配对失败回执供下一次模型续接，上限后绝不能把 tool_use 前言降级成最终回复。
+# 函数用途: 记录一次不合格生成、保存未执行工具反馈，并判断是否还能重写一次。
 def retry_natural_user_reply(
     params: ToolLoopExecuteParams,
     *,
     rejection_reason: str = "",
+    response: ModelResponse | None = None,
 ) -> bool:
     phase = pending_natural_user_reply(params)
     if phase is None:
         return False
+    if rejection_reason == "structured_tool_call" and response is not None:
+        phase["rejected_tool_feedback"] = {
+            "guidance": _reply_guidance(phase),
+            "assistant_text": str(response.text or ""),
+            "tool_calls": [
+                dict(item)
+                for item in list(response.tool_use_blocks or [])
+                if isinstance(item, dict)
+            ],
+            "turn_id": str(
+                (_mutable_state(params) or {}).get("_current_model_turn_id") or ""
+            ),
+        }
     attempts = max(0, int(phase.get("attempts") or 0)) + 1
     phase["attempts"] = attempts
     if rejection_reason:
@@ -212,23 +304,27 @@ def finish_natural_user_reply(
     kind = str(phase.get("kind") or "background_update")
     runtime_status, runtime_reason, runtime_source = _reply_runtime_state(kind)
     if not accepted:
-        # The presentation-only round never offers tools.  Some compatible
-        # providers nevertheless attach a structured tool_use block to an
-        # otherwise valid natural-language reply.  The first occurrence is
-        # still retried above; after the bounded retry, discard that
-        # unauthorized machine block and preserve only the sanitized prose
-        # (protocol envelopes stripped, same boundary as every user reply).
-        # This is a structural decision (no tools were authorized), not a
-        # guess based on the wording of the reply.
-        sanitized = sanitize_user_visible_text(response.text)
-        if rejection_reason == "structured_tool_call" and sanitized.content:
+        # A tool-bearing response's prose is normally a pre-tool transition,
+        # not a complete answer.  会话运行时 returns a rejected call as tool output
+        # and samples again; after our bounded retry, surface an infrastructure
+        # notice instead of promoting that transition to a false final reply.
+        if rejection_reason == "structured_tool_call":
+            lifecycle_is_nonterminal = runtime_status != "ok"
             return replace(
                 response,
-                text=sanitized.content,
-                runtime_status=runtime_status,
-                runtime_reason=runtime_reason,
+                text="这次回复没有完整生成，其中附带的操作没有执行。请重试查看结果。",
+                runtime_status=(
+                    runtime_status if lifecycle_is_nonterminal else "user_reply_unavailable"
+                ),
+                runtime_reason=(
+                    runtime_reason
+                    if lifecycle_is_nonterminal
+                    else "NATURAL_REPLY_TOOL_CALL_REJECTED"
+                ),
                 runtime_source=(
-                    runtime_source + "_unauthorized_tools_discarded"
+                    runtime_source
+                    if lifecycle_is_nonterminal
+                    else runtime_source + "_unauthorized_tools_rejected"
                 ),
                 tool_use_blocks=[],
             )
@@ -254,15 +350,17 @@ def finish_natural_user_reply(
     )
 
 
+# LLM: Interim lifecycle replies must remain nonterminal in the shared turn-end protocol; presentation prose cannot turn active descendants into a completed root turn.
+# 函数用途: 将自然回执的结构化种类映射成运行状态，保证等待子代理时主任务仍显示为可续跑。
 def _reply_runtime_state(kind: str) -> tuple[str, str, str]:
     if kind == "tool_round_limit":
         return "unfinished", "TOOL_ROUND_LIMIT_REACHED", "tool_loop"
+    if kind == "subagents_active":
+        return "unfinished", "SUBAGENTS_ACTIVE", "subagent_lifecycle"
     if kind == "named_work_active":
         return "unfinished", "NAMED_WORK_ACTIVE", "conversation_task"
     if kind in {"named_work_incomplete", "named_work_activation_incomplete"}:
         return "unfinished", "NAMED_WORK_INCOMPLETE", "conversation_task"
-    if kind == "operation_incomplete":
-        return "unfinished", "OPERATION_INCOMPLETE", "tool_runtime"
     if kind == "audit_prepare_pending":
         return "ok", "AUDIT_PREPARE_PENDING", "conversation_task"
     if kind == "audit_prepare_result":

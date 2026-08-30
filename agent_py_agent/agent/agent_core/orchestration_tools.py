@@ -11,11 +11,9 @@ import json
 import re
 from contextlib import nullcontext
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..capability.skill_snapshot import SkillSnapshotError
-from ..common.json_io import locked_json_path
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..settings.defaults import default_config_int
 from ..subagents.services.base import CreateRunParams
@@ -23,6 +21,7 @@ from ..subagents.services.hierarchy.scheduled_role import (
     agent_name_has_trailing_identifier,
     is_placeholder_agent_name,
 )
+from ..tooling.cancellation import ToolCancelled, raise_if_cancelled
 from ..tooling.models import (
     BaseTool,
     EffectResolverPolicy,
@@ -87,6 +86,7 @@ from .orchestration.tools.cancel import (
 from .orchestration.tools.capability import (
     ResolveCapabilityRequestsTool as ResolveCapabilityRequestsTool,
 )
+from .orchestration.tools.list_agents import ListAgentsTool as ListAgentsTool
 from .orchestration.write_guard import (
     ExternalWriteTargetRequest,
     external_write_target_error,
@@ -227,17 +227,47 @@ class CreateSubagentsTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
+    # LLM: Root and recursive creation share one owner-local transaction and one propagated tool
+    # cancellation token.  The lock ends before child runtime starts, so sibling execution remains
+    # parallel while /stop can reconcile every durable prefix of an in-flight nested batch.
+    # 函数用途: 创建当前代理的直属下级；无论主代理还是子代理派工，都能在停止安全点及时收口。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
-        if current_subagent_run_id(self.agent):
-            nested_params = _nested_create_params(self.agent, params)
-            if isinstance(nested_params, ToolHandlerOutcome):
-                return nested_params
-            return execute_child_creation(
-                self.agent,
-                nested_params,
-                tool_name="create_subagents",
-            )
-        return execute_create_subagents_service(self.agent, params)
+        try:
+            if current_subagent_run_id(self.agent):
+                nested_params = _nested_create_params(self.agent, params)
+                if isinstance(nested_params, ToolHandlerOutcome):
+                    return nested_params
+                with _create_subagents_transaction(self.agent):
+                    return execute_child_creation(
+                        self.agent,
+                        nested_params,
+                        tool_name="create_subagents",
+                    )
+            return execute_create_subagents_service(self.agent, params)
+        except ToolCancelled as exc:
+            return _cancelled_create_subagents_result(exc)
+
+
+# LLM: A propagated user/turn cancellation is a known interrupted create, not a generic handler
+# crash.  Mark the operation failed (never succeeded or replayable) and tell the stop controller
+# to reconcile any durable prefix; generic unknown remains reserved for genuinely unproven effects.
+# 函数用途: 把派工安全点收到的停止信号转换成明确“已中断”工具结果，避免界面误报副作用未知。
+def _cancelled_create_subagents_result(exc: ToolCancelled) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
+        "create_subagents",
+        False,
+        json.dumps(
+            {
+                "ok": False,
+                "error": str(exc) or "interrupted",
+                "status": "cancelled",
+                "message": "派工已中断；已落盘的子代理由当前停止链按结构化谱系收口。",
+            },
+            ensure_ascii=False,
+        ),
+        error_code="CANCELLED",
+        effect_outcome="failed",
+    )
 
 
 # LLM: A descendant uses the same one-of contract as the root: one non-empty
@@ -279,6 +309,10 @@ def _nested_create_params(
     }
 
 
+# LLM: Root child creation shares the current tool cancellation token.  ToolCancelled must
+# escape the diagnostic fallback so the canonical Tool Gateway records CANCELLED rather than
+# misclassifying an explicit /stop as an invalid model argument.
+# 函数用途: 在唯一创建事务里创建根子代理；用户停止时立即退出安全点并交给停止侧收口已落盘记录。
 def execute_create_subagents_service(
     agent: SimpleAgent,
     params: dict[str, object],
@@ -288,6 +322,8 @@ def execute_create_subagents_service(
     try:
         with _create_subagents_transaction(agent):
             return _execute_create_subagents(agent, params)
+    except ToolCancelled:
+        raise
     except Exception as exc:
         # create_subagents 在真实 dispatch 路径上会偶发崩溃(真机 B1/R3:合法 goal+output_files
         # 调用也抛异常,堆栈没落到任何日志,模型只看到无信息、retryable=False 的 UNKNOWN_ERROR 兜底码
@@ -312,13 +348,14 @@ def execute_create_subagents_service(
 
 
 # LLM: One owner-local file guard serializes only create preflight/materialization;
-# child runtime remains fully parallel and never holds this lock.
-# 函数用途: 防止两个并发唤醒同时越过 covers/容量预检并重复创建，派工完成即释放。
+# stop-side reconciliation also waits on this exact manager-owned boundary before
+# re-reading lineage. Child runtime remains fully parallel and never holds this lock.
+# 函数用途: 复用 manager 的唯一创建事务锁，防止并发重复创建和停止时漏掉迟到子代理。
 def _create_subagents_transaction(agent: object):
-    workspace = getattr(getattr(agent, "subagents", None), "workspace", None)
-    if not isinstance(workspace, str | Path):
+    guard = getattr(getattr(agent, "subagents", None), "creation_guard", None)
+    if not callable(guard):
         return nullcontext()
-    return locked_json_path(Path(workspace) / ".create-subagents.guard")
+    return guard()
 
 # LLM: All root child creation modes converge here. A single child requires goal;
 # a batch is authoritative through each item goal and may omit redundant top-level
@@ -429,12 +466,16 @@ def _prepare_single_mode(
     return allowed_tools, create_run_params(agent, params, goal, allowed_tools)
 
 
+# LLM: A cancellation after materialization but before publication must leave the record visible
+# to stop-side lineage reconciliation without binding or starting a new child execution.
+# 函数用途: 发布单个已创建子代理前再次检查停止信号，避免停止后仍启动后台执行。
 def _created_tasks_result(
     agent: SimpleAgent,
     resolutions: list[CreateTaskResolution],
     allowed_tools: list[str] | str | None,
     request_params: dict[str, object],
 ) -> ToolHandlerOutcome:
+    raise_if_cancelled()
     tasks = [item.task for item in resolutions]
     replacement_records = record_create_replacements(agent, tasks)
     if replacement_records and not replacement_records_allow_start(replacement_records):
@@ -519,10 +560,16 @@ def _execute_items(
     ))
 
 
+# LLM: Batch persistence is cancellation-aware between records.  Partial canonical records are
+# intentional and remain discoverable by exact request lineage; no late lifecycle publication is
+# allowed after the token flips.
+# 函数用途: 批量保存和发布子代理时逐项检查停止信号，让大批派工可以在安全点及时收口。
 def _created_items_result(request: CreatedItemsResultRequest) -> ToolHandlerOutcome:
     tasks = [item.task for item in request.resolutions]
     for task in tasks:
+        raise_if_cancelled()
         request.agent.subagents.save(task)
+    raise_if_cancelled()
     replacement_records = record_create_replacements(request.agent, tasks)
     if replacement_records and not replacement_records_allow_start(replacement_records):
         return _replacement_record_failure_result(
@@ -826,8 +873,17 @@ def _validate_single_goal(request: ValidateSingleGoalRequest) -> str:
     return target_error or ""
 
 
+# LLM: Resolve/materialize one child at a time and observe the already-propagated tool token
+# between durable records.  A partial prefix remains structurally linked to the request so the
+# asynchronous stop reconciler can cancel it after the creation guard is released.
+# 函数用途: 逐个创建子代理，并在每个安全点响应用户停止，避免仍把整批剩余任务落盘。
 def _resolve_task_params(agent: SimpleAgent, task_params: list[CreateRunParams]) -> list[CreateTaskResolution]:
-    return [resolve_create_run(agent.subagents, item) for item in task_params]
+    resolutions: list[CreateTaskResolution] = []
+    for item in task_params:
+        raise_if_cancelled()
+        resolutions.append(resolve_create_run(agent.subagents, item))
+    raise_if_cancelled()
+    return resolutions
 
 
 def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | None:

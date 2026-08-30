@@ -257,10 +257,23 @@ def _request_local_tool_for_invocation(
         workspace_target.workspace_root = request.workspace_root
         if workspace_roots is not None and hasattr(workspace_target, "workspace_roots"):
             workspace_target.workspace_roots = list(workspace_roots)
+    configured_policy = getattr(
+        scoped.shell_tool
+        if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool")
+        else scoped,
+        "path_access_policy",
+        None,
+    )
+    # 请求可以把 owner 墙收得更窄，但缺失的请求字段绝不能擦掉注册时已有的
+    # owner 墙。生产调用通常显式携带该值；保留更严格的 handler 配置可让低层
+    # 调用、旧快照或不完整自定义入口继续 fail closed，而不会变成跨 owner 读取。
+    effective_owner_scope = request.owner_scope_root or getattr(
+        configured_policy, "owner_scope_root", ""
+    )
     dynamic_policy = PathAccessPolicy.from_values(
         mode=request.path_access_mode,
         dangerous_roots=request.path_dangerous_roots,
-        owner_scope_root=request.owner_scope_root,
+        owner_scope_root=effective_owner_scope,
     )
     if hasattr(scoped, "path_access_policy"):
         scoped.path_access_policy = dynamic_policy
@@ -567,6 +580,19 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
                 request.write_boundary,
                 raw_write_roots,
             )
+        elif request.tool_name in {"run_command", "terminal_session"}:
+            # owner-scoped 进程一旦携带结构化 boundary，漏写 allowed_write_roots
+            # 只能解释为“没有授权写根”，不能回落成 cwd 隐式可写。没有 boundary 的
+            # WorkspaceOnly 主会话仍沿既有 owner-home 语义；无 owner 墙的 Full Access
+            # 也继续由宿主权限决定，二者都不会进入这个 fail-closed 分支。
+            sandbox_tool = (
+                getattr(request.tool, "shell_tool", request.tool)
+                if request.tool_name == "terminal_session"
+                else request.tool
+            )
+            path_policy = getattr(sandbox_tool, "path_access_policy", None)
+            if getattr(path_policy, "owner_scope_root", None) is not None:
+                params["__sandbox_write_roots"] = []
     if request.tool_name == "read_artifact":
         _copy_boundary_path(
             BoundaryPathCopyRequest(

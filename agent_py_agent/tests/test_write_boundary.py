@@ -167,7 +167,7 @@ class TestValidateWriteBoundaryInvalidParams:
 
 
 class TestValidateWriteBoundaryAllowedRoots:
-    def test_missing_allowed_write_roots_no_longer_blocks(self, tmp_path):
+    def test_empty_runtime_boundary_does_not_enforce_write_scope(self, tmp_path):
         result = validate_write_boundary(
             "write_file",
             {"path": "file.txt"},
@@ -175,6 +175,15 @@ class TestValidateWriteBoundaryAllowedRoots:
             write_boundary={},
         )
         assert result == ""
+
+    def test_structured_boundary_missing_allowed_write_roots_fails_closed(self, tmp_path):
+        result = validate_write_boundary(
+            "write_file",
+            {"path": "file.txt"},
+            workspace_root=tmp_path,
+            write_boundary={"task_dir": str(tmp_path / "task")},
+        )
+        assert "按安全默认拒绝写入" in result
 
     def test_explicit_empty_allowed_write_roots_fails_closed(self, tmp_path):
         result = validate_write_boundary(

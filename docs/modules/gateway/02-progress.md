@@ -1,5 +1,46 @@
 # Gateway Progress
 
+## 2026-08-30 R105 十 owner 功能矩阵与 R106 本地候选
+
+- `.10` 唯一 Gateway 同时承载 u246--u255；新增 10 路 TUI 后仍有约 9.7GiB available。Gateway RSS 约
+  688MiB，单个常驻 TUI 约 68--110MiB；tmux 未退出时客户端进程保留是当前明确生命周期，不把它计成第二
+  Gateway。`.7` 当前 SSH 端口拒绝连接，待恢复后再做 8GiB 同负载分组对照。
+- u247 捕获成功命令的隔离视图误导：沙箱内绝对 `/root` 写入返回 0，而宿主无文件。R106 候选让所有
+  owner-scoped Shell 回执都投影 `owner_workspace_only/external_host_paths_hidden/host_path_absence_proven`，
+  不改变文件墙或网络。
+- `/sessions` 候选使用当前 owner 的 canonical session store，只读给出最近记录和精确 resume 命令。
+  终端交互/会话运行时 对照都有完整 app state 重建；本轮不以只换 session id 的伪 picker冒充原地切换。
+
+## 2026-08-29 停止受理与工具清单单一快照（`.7` 真 TUI 已通过）
+
+- `/agents/<run>/stop` 不再同步等待完整持久化收口：入口先完成 owner、conversation、parent 和 exact run
+  鉴权，以唯一幂等键受理，再由一条后台 canonical cancel 完成 attempt signal、终态和索引更新。TUI 只把
+  `accepted` 解释为“停止请求已接收”，继续读取真实 terminal，不能提前画成已停止。
+- persistence/runner session 对 terminal state 加单调保护：旧 snapshot 与普通 heartbeat 不得把
+  CANCELLED/DONE/FAILED 写回活动态；只有显式 user-stop recovery 可 opt-in reopen。r56 真 TUI 的 accepted
+  约 6.06 秒、terminal 约 9.62 秒，未再出现客户端超时后的假“无法确认”。
+- `list_tools` 与 provider Schema 现共同投影 exact `ToolRuntimeSnapshot`。旧 manifest 把远程
+  `owner_type=user` 错当代理角色二次过滤，结果清单 0、模型却能调用；删除该二次白名单后，r57 普通用户
+  返回 30 visible/30 executable，权限仍是 owner-scoped，内部/root-only/unavailable 工具仍隐藏。
+- 当前单 Gateway PID `1725815`，MiniMax-M2.7；本地组合 74 项、测试机定向 12 项通过。过程和未覆盖项见
+  `docs/audits/TUI_FUNCTION_AUDIT_20260828.md`。
+
+## 2026-08-29 双用户同 Gateway 的文件、Shell 与错误语义隔离
+
+- `.7` 同时启动 `fullcov-r48-u10` 与 `fullcov-r48-u11` 两个 owner TUI，始终复用唯一 8420 Gateway。
+  两边自己的文件工具和 Shell 写读均成功，反向文件读写、跨 owner `working_dir` 均结构化拒绝；命令文本
+  内嵌另一 owner 绝对路径时由 bwrap 不挂载目标，两个方向都没有生成越界文件。
+- bwrap 隐藏目标会让进程看到 `ENOENT`，旧模型据此误报“对方目录未初始化”。对照 会话运行时
+  `会话运行时-rs/core/src/exec.rs` 与 `unified_exec/process.rs` 后保留 OS sandbox 主链，不增加任意 shell 文本路径
+  解析；owner-scoped Shell 在失败或存在 stderr 时改为投影 `file_scope=owner_workspace_only`、
+  `external_host_paths_hidden=true`、`host_path_absence_proven=false`。
+- 首轮真实回归又发现 MiniMax 在失败命令后追加 `; echo $?`，导致最后一个 echo 把最终退出码变成 0。
+  工具说明已明确禁止用恒成功后缀检查状态；不把 stdout 中的数字当机器状态。fresh request
+  `gwreq-1787985268-fd590c551b054c53afb1947caee696a0` 保留真实 `return_code=1`，operation failed，模型
+  正确说明“当前不可访问，但不能证明宿主路径不存在”。
+- 本地与测试机 49 项权限/沙箱 focused、Ruff、PyCompile 和 diff check 通过；生产改动未达 10,000 行，不跑
+  全仓 pytest。测试过程、反例和宿主负证据继续记在 `docs/audits/TUI_FUNCTION_AUDIT_20260828.md`。
+
 ## 2026-08-28 WorkspaceOnly/Full Access 与完整 Compact 动画
 
 - 本地 TUI、外部 owner、文件工具和进程工具现在共享同一 owner home 硬边界；空工作区不再继承 Gateway/TUI
@@ -236,6 +277,11 @@
   `ma-53498c1-http-pool-r24` 约 1 秒进入首页，明确显示 MiniMax-M2.7，普通中文真实模型请求成功。9 个 TUI
   自然轮询时 `py-spy` 只见 `gateway-http_0..4`，没有 `process_request_thread`；12 秒 RSS 从约 132.7 MB
   降至 131.7 MB，8420 始终只有一个 listener。该短观察证明有界结构生效，不冒充长期无泄漏证明。
+- 2026-08-28 补齐短连接断连收口：此前 `/client/notices` 客户端先离开会让 stdlib 打印整段
+  `BrokenPipeError`。现在 JSON 与 metrics 共用精确 socket 写回边界，只静默结束 EPIPE/ECONNRESET/
+  ECONNABORTED；其它 I/O 与编码失败仍抛出。25 项 HTTP/固定池 focused 通过；fresh
+  `ma-cleanup-brokenpipe-r11` 在普通模型请求提交 0.35 秒后从 TUI `/exit`，原请求仍 6.175 秒自然 done，
+  新 Gateway 启动段新增 BrokenPipe 栈为 0。
 
 ## 2026-08-24 child guidance exact-turn 入账（已部署真 TUI）
 
@@ -455,9 +501,9 @@
 
 - aiohttp→Go 真机请求精确累计 60 次 logical/model/provider HTTP attempt，零 provider retry；最终源码复制
   后自主 build、通过 29 项测试并完成 HTTP 200 E2E，EXEC-44 的 verification stale 修复由此闭环。
-- 该请求最后一个可选清理命令在 handler 前被安全策略拒绝。旧 Gateway presentation 把
-  `not_started` 尾部和历史失败改写为整项 `OPERATION_INCOMPLETE`；现以最近 effect-bearing mutation
-  为收口权威，完整 partial ledger 继续保留。unknown/failed 等真实效果和仅有 blocked 尾部仍阻断。
+- 该请求最后一个可选清理命令在 handler 前被安全策略拒绝。后续曾用 effect-bearing mutation 再做一层
+  `OPERATION_INCOMPLETE` 收口，但 2026-08-28 真 TUI 证明预期非零退出也会被误打回五轮。当前只保留完整
+  operation ledger；模型看过工具结果并给出 plain final 后自然结束，UNKNOWN 副作用仍由执行期安全门收口。
 - 模型调用累计不再受 128 条明细上限影响；aiohttp response 与 chunks 对账为 60/60/60、retry=0，证明
   request aggregate 进入真实 Gateway result。Fiber→TypeScript 后续以 188/188/188、retry=0、186 工具轮
   结束；测试者只从 TUI/队列观察并核验产物，没有修改任务文件。
@@ -1443,6 +1489,16 @@
   完整本地 CI 通过。Shell/PTY/LSP 任意进程写盘仍须正式部署的 filesystem/project quota 兜底；
   1.10 尚待收口。
 
+## 2026-08-28 owner 磁盘配额默认不限与记忆命令非阻塞
+
+- 真 TUI `/remember` 暴露一次保存会连续触发 Candidate observe/review/promote 三次 owner 全树扫描；`.7`
+  当前 owner 约 14GB、26 万文件，单扫约 2 秒，客户端 10 秒后断开但 Gateway 随后完成写入，造成界面报
+  `GATEWAY_UNAVAILABLE` 而 `/memory` 实际可查到。
+- 新 owner 使用 `quota.v2`，`max_disk_mb=0` 表示不限制且不进入扫描/配额锁。初始化只把完全未改的旧
+  `quota.v1` 100GB seed 迁移为 0；显式非零管理员策略继续走原门，坏 policy 继续 fail-closed。
+- TUI 的 `/memory`、`/remember` 使用后台 worker 调用原 dispatcher，输入线程不再等待 HTTP；remember
+  响应丢失返回 `MEMORY_WRITE_RESULT_UNKNOWN` 并提示用户查询，不自动重放可能已经提交的写入。
+
 ## 2026-07-17 单一 thread 历史收口
 
 - 复核 会话运行时 当前实现后，Gateway 收敛为一个 owner/thread 和一份 summary + raw tail。聊天、文件工作、
@@ -1846,8 +1902,8 @@
   boundary 明确声明的外部输出根会临时加入本轮写入范围。
 - root systemd 进程的宿主 home 放宽只用于无 owner scope 的本地管理员；Feishu 等远程 owner 保留
   `/root` dangerous-root 拒绝边界，只以精确 owner home 白名单读取自己的数据，避免宿主身份扩大租户权限。
-- Feishu 默认长连接、私聊密码卡默认开启；SOUL/AGENTS 修改必须由发起人点击确认卡片，USER 偏好
-  仍可由 Agent 直接维护。首次设置卡不吞首条消息。默认 prompt 使用包内 `builtin:` 资源，不受
+- Feishu 默认长连接、私聊密码卡默认开启；只有 SOUL 修改必须由发起人点击确认卡片，USER/AGENTS
+  由所属 Agent 通过专用入口自主维护。首次设置卡不吞首条消息。默认 prompt 使用包内 `builtin:` 资源，不受
   service cwd 影响。
 - 普通对话 transcript 不再重复写 owner-global dialogue memory；历史 dialogue 在检索层先扩量后
   排除，避免把有效 preference/lesson 挤出 top-k。
@@ -2429,3 +2485,12 @@
   无任务轮才继承 client cwd。
 - `process_session(network_status)` 新增 exact session listener/firewalld 只读投影，任何 non-loopback 结果仍
   要求外部探针，不改端口规则、不把本机成功写成局域网成功。当前待严格 gate、部署和真 TUI/独立 Mac 探测。
+
+## 2026-08-28 Gateway 权威诊断与 Audit 完整收口
+
+- 已新增本机 `main_agent` 专属只读 `gateway_status`，直接返回唯一 Gateway 的 validated process identity、
+  127.0.0.1:8420、MiniMax-M2.7、config、heartbeat、hot queue 和本生命周期日志计数；普通 owner 不注册。
+- 表达专用回复轮的未授权 tool_use 已按 会话运行时 风格回注为未执行失败 ToolResult，再由模型完整收口；达到上限
+  也不会把工具前过渡句当终稿。
+- `.7` `ma-cleanup-audit-r12/r13` 已真实复验：不再猜端口、不再输出半句，精确身份与日志计数均通过；单
+  Gateway 拓扑保持不变。

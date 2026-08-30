@@ -85,6 +85,8 @@ def _assert_verified_response(
 class _OneShotHarnessAgent:
     def __init__(self, tools):
         self.tools = tools
+        self.root = Path(tempfile.gettempdir())
+        self.effective_workspace_root = self.root
 
 
 def _canonical_test_call(
@@ -510,15 +512,15 @@ def test_tool_loop_reuses_one_workspace_context_snapshot_across_model_rounds(tmp
 def test_tool_loop_projects_live_promoted_workspace_from_same_write_boundary(tmp_path):
     service_cwd = tmp_path / "service-cwd"
     service_cwd.mkdir()
-    task_root = tmp_path / "owners" / "u1" / "tasks" / "task-a"
-    output_dir = task_root / "output"
-    work_dir = task_root / "work"
-    output_dir.mkdir(parents=True)
-    work_dir.mkdir()
     agent = SimpleAgent(
         _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
         service_cwd,
     )
+    task_root = Path(agent.home_paths.owner_home_dir) / "tasks" / "task-a"
+    output_dir = task_root / "output"
+    work_dir = task_root / "work"
+    output_dir.mkdir(parents=True)
+    work_dir.mkdir()
     params = ToolLoopExecuteParams(
         user_prompt="写一个小项目",
         memories=[],
@@ -1481,7 +1483,7 @@ def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
 
         result = agent.run("读取 notes", save=False)
 
-        assert result.response == ""
+        assert result.response == "这次回复没有完整生成，其中附带的操作没有执行。请重试查看结果。"
         assert "[TOOL_CALL]" not in result.response
         assert result.tool_rounds == 1
         assert result.runtime_status == "unfinished"
@@ -1533,6 +1535,7 @@ def test_tool_round_limit_schedules_ordinary_task_resume(tmp_path):
         task_attributes={
             "conversation_thread_id": thread.thread_id,
             "conversation_task_id": "task-limit",
+            "conversation_request_id": "gwreq-limit",
         },
         source="cli_gateway",  # 前台形态之一(前缀匹配),固定创建路径语义
     )
@@ -1547,11 +1550,14 @@ def test_tool_round_limit_schedules_ordinary_task_resume(tmp_path):
     assert link.status == "active"
     policies = agent.conversation_store.list_progress_policies(enabled_only=True)
     assert len(policies) == 1
-    assert policies[0].task_id == "task-limit" or policies[0].task_id.startswith("task-path:")
+    # 执行续跑身份必须是 durable conversation task；task-path 只属于 Todo
+    # 账本，不能交给 scheduler，否则后台轮无法恢复 task link。
+    assert policies[0].task_id == "task-limit"
     assert policies[0].metadata["kind"] == "ordinary_task_resume"
     assert policies[0].metadata["tool"] == "task_round_resume"
     assert policies[0].metadata["resume_used"] == 1
     assert policies[0].metadata["resume_limit"] == 3
+    assert policies[0].metadata["conversation_request_id"] == "gwreq-limit"
     # due_now expedite: next_due_at 提前到当前,调度器下一 tick 即拉起续跑。
     assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]
 
@@ -1704,7 +1710,6 @@ def test_ordinary_task_resume_available_cli_run_requires_active_goal(tmp_path):
     assert _ordinary_task_resume_available(agent, params()) is False
 
 
-@pytest.mark.xfail(reason="EXEC-31b: native 下 natural-user-reply 经 IR 消息注入, 不再出现在 prompt 文本; 断言待适配")
 def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
     """LLM: 普通任务续跑预算耗尽后 policy 退休,调度器不再拉起,等用户显式「继续」。
 
@@ -1729,9 +1734,8 @@ def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
             "channel_user_id": "user-1",
         }
     )
-    # 预置 policy 的归属 key 必须与调度侧同一把:普通任务续跑 policy 按
-    # progress_ledger_id(task-path:<目录指纹>)登记,收口按同一 key 匹配——
-    # durable task_id 形态的 policy 在产品中不存在(真机 2026-08-09 实证)。
+    # 进度账本可以按 task-path 跨 turn 复用，但自动续跑 policy 必须按真实
+    # conversation task 寻址；两类身份不能再合并成一个 key。
     task_path = str(tmp_path / "task-limit-workspace")
     agent.conversation_store.bind_task(
         {
@@ -1742,11 +1746,10 @@ def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
             "task_path": task_path,
         }
     )
-    ledger_key = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
     agent.conversation_store.set_progress_policy(
         {
             "thread_id": thread.thread_id,
-            "task_id": ledger_key,
+            "task_id": "task-limit",
             "interval_seconds": 180,
             "route_channel": "internal",
             "route_target": "",
@@ -1998,13 +2001,13 @@ def test_ordinary_task_open_progress_gets_one_same_turn_reconciliation(
         source=source,
     )
 
-    assert len(backend.prompts) == 2
+    assert len(backend.prompts) == 1
     assert result.response == "当前这轮已经结束。"
-    assert result.runtime_status == "blocked"
-    assert result.runtime_reason == "TASK_PROGRESS_RECONCILIATION_EXHAUSTED"
-    assert result.runtime_source == "task_progress"
+    assert result.runtime_status == "ok"
+    assert result.runtime_reason == ""
+    assert result.runtime_source == ""
     current = agent.conversation_store.load_thread(thread.thread_id)
-    assert current is not None and current.active_task_ids == ("task-ordinary-open-progress",)
+    assert current is not None and current.active_task_ids == ()
     links = agent.conversation_store.task_links(thread.thread_id)
-    assert len(links) == 1 and links[0].status == "active"
+    assert len(links) == 1 and links[0].status == "completed"
     assert agent.conversation_store.list_progress_policies(enabled_only=True) == []

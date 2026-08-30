@@ -44,28 +44,37 @@ class ChatControlExecution:
     state: ChatControlState
 
 
-# LLM: CLI dispatch preserves the shared command contract while swapping only its runtime backend.
-# 函数用途：按当前 chat 是 Gateway 模式还是本地模式执行同一条控制命令。
+# LLM: CLI dispatch preserves the shared command contract while swapping only its runtime backend;
+# an optional manual-Compact target is transport metadata and never parsed from command prose.
+# 函数用途：按本地或 Gateway 模式执行控制命令，并可携带精确 Compact 停止目标。
 def execute_chat_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
     *,
     message_id: str = "",
+    target_control_message_id: str = "",
 ) -> ConversationControlResult:
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
     if execution.use_gateway:
-        return _execute_gateway_control(execution, command, message_id=message_id)
+        return _execute_gateway_control(
+            execution,
+            command,
+            message_id=message_id,
+            target_control_message_id=target_control_message_id,
+        )
     return _execute_local_control(execution, command)
 
 
-# LLM: Gateway CLI controls use the same /control endpoint and conversation identity as IM adapters.
-# 函数用途：向本机 Gateway 提交即时控制，不进入普通任务队列。
+# LLM: Gateway CLI controls use the thin client's sole HTTP writer when available, preserving
+# scoped owner identity and an optional exact Compact target in typed metadata across retries.
+# 函数用途：向本机 Gateway 提交即时控制，保证多用户身份和精确停止目标不在传输层漂移。
 def _execute_gateway_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
     *,
     message_id: str = "",
+    target_control_message_id: str = "",
 ) -> ConversationControlResult:
     port = int(getattr(getattr(execution.agent, "config", None), "gateway_port", 0) or 0)
     if port <= 0:
@@ -86,29 +95,42 @@ def _execute_gateway_control(
             "expected_turn_id": expected_turn_id,
         },
     }
+    selected_control_target = str(target_control_message_id or "").strip()
+    if selected_control_target:
+        payload["metadata"]["target_control_message_id"] = selected_control_target
     timeout = _gateway_control_timeout(execution, command)
     body: dict[str, object] = {}
     last_error: BaseException | None = None
-    for _attempt in range(2):
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{port}/control",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "X-User-Id": "local-agent",
-                "X-Channel": "chat",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                decoded = json.loads(response.read().decode("utf-8", "replace"))
-                body = decoded if isinstance(decoded, dict) else {}
+    post_json = getattr(execution.agent, "post_gateway_json", None)
+    if callable(post_json):
+        for _attempt in range(2):
+            status, decoded = post_json("/control", payload, timeout=timeout)
+            if int(status or 0) > 0:
+                body = dict(decoded) if isinstance(decoded, dict) else {}
+                body["_http_status"] = int(status)
                 break
-        except urllib.error.HTTPError as exc:
-            body = _http_error_body(exc)
-            return _gateway_control_result_from_body(command.kind, body)
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-            last_error = exc
+            last_error = OSError("gateway client transport returned no status")
+    else:
+        for _attempt in range(2):
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/control",
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-User-Id": "local-agent",
+                    "X-Channel": "chat",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    decoded = json.loads(response.read().decode("utf-8", "replace"))
+                    body = decoded if isinstance(decoded, dict) else {}
+                    break
+            except urllib.error.HTTPError as exc:
+                body = _http_error_body(exc)
+                return _gateway_control_result_from_body(command.kind, body)
+            except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+                last_error = exc
     if not body:
         return ConversationControlResult(
             command.kind,
@@ -119,9 +141,9 @@ def _execute_gateway_control(
     return _gateway_control_result_from_body(command.kind, body)
 
 
-# LLM: Polling a stable control operation is read-only; it never resubmits the command text or
-# invents a new client message id after a TUI/adapter reconnect.
-# 函数用途: 按 Gateway 返回的 operation_id 查询控制命令最终状态。
+# LLM: Polling a stable control operation is read-only and authenticates both owner and exact
+# conversation. An operation id locates a receipt but never substitutes for either scope fact.
+# 函数用途: 按 Gateway 返回的 operation_id、当前 TUI 身份和精确会话查询最终状态。
 def request_gateway_control_status(
     execution: ChatControlExecution,
     operation_id: str,
@@ -136,33 +158,55 @@ def request_gateway_control_status(
             operation_id=stable_id,
             control_state="transport_unknown",
         )
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/control-status/{stable_id}",
-        headers={"X-User-Id": "local-agent", "X-Channel": "chat"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=2.0) as response:
-            decoded = json.loads(response.read().decode("utf-8", "replace"))
-            body = decoded if isinstance(decoded, dict) else {}
-    except urllib.error.HTTPError as exc:
-        body = _http_error_body(exc)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError):
-        return ConversationControlResult(
-            "unsupported",
-            False,
-            "控制操作状态暂时无法读取。",
-            operation_id=stable_id,
-            control_state="transport_unknown",
+    get_json = getattr(execution.agent, "get_gateway_json", None)
+    if callable(get_json):
+        status, decoded = get_json(
+            f"/control-status/{stable_id}",
+            timeout=2.0,
+            conversation_id=execution.state.session_id or "default",
         )
+        if int(status or 0) <= 0:
+            return ConversationControlResult(
+                "unsupported",
+                False,
+                "控制操作状态暂时无法读取。",
+                operation_id=stable_id,
+                control_state="transport_unknown",
+            )
+        body = dict(decoded) if isinstance(decoded, dict) else {}
+        body["_http_status"] = int(status)
+    else:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/control-status/{stable_id}",
+            headers={
+                "X-User-Id": "local-agent",
+                "X-Channel": "chat",
+                "X-Conversation-Id": execution.state.session_id or "default",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=2.0) as response:
+                decoded = json.loads(response.read().decode("utf-8", "replace"))
+                body = decoded if isinstance(decoded, dict) else {}
+        except urllib.error.HTTPError as exc:
+            body = _http_error_body(exc)
+        except (urllib.error.URLError, OSError, json.JSONDecodeError):
+            return ConversationControlResult(
+                "unsupported",
+                False,
+                "控制操作状态暂时无法读取。",
+                operation_id=stable_id,
+                control_state="transport_unknown",
+            )
     return _gateway_control_result_from_body(
         str(body.get("kind") or "unsupported"),
         body,
     )
 
 
-# LLM: Control HTTP responses preserve operation identity and delivery state separately from the
-# user-facing message; callers must never infer retry safety from ``ok`` or prose.
-# 函数用途: 把控制 HTTP 字典恢复成共享 ConversationControlResult。
+# LLM: Control HTTP responses preserve operation identity, delivery state, and error_code
+# separately from localized prose; callers must never infer interruption or retry safety from text.
+# 函数用途: 把控制 HTTP 字典恢复成含结构化错误码的共享 ConversationControlResult。
 def _gateway_control_result_from_body(
     fallback_kind: str,
     body: dict[str, object],
@@ -192,6 +236,7 @@ def _gateway_control_result_from_body(
         guidance_dedupe_key=str(body.get("guidance_dedupe_key") or ""),
         operation_id=str(body.get("operation_id") or ""),
         control_state=control_state,
+        error_code=error_code,
     )
 
 

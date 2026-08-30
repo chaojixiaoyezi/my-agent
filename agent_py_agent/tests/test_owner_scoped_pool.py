@@ -49,6 +49,22 @@ def test_same_owner_is_cached_not_rebuilt(tmp_path) -> None:
     assert pool.active_count() == 1
 
 
+def test_peek_never_builds_or_touches_lru(tmp_path) -> None:
+    pool, builds = _counting_pool(tmp_path, max_agents=2)
+    owner_a = OwnerIdentity.provider_user("feishu", "a")
+    owner_b = OwnerIdentity.provider_user("feishu", "b")
+    missing = OwnerIdentity.provider_user("feishu", "missing")
+    agent_a = pool.get(owner_a)
+    pool.get(owner_b)
+
+    assert pool.peek(missing) is None
+    assert pool.peek(owner_a) is agent_a
+    assert len(builds) == 2
+
+    pool.get(OwnerIdentity.provider_user("feishu", "c"))
+    assert pool.peek(owner_a) is None
+
+
 # ---------- 池逻辑(替身 builder,免建真 agent) ----------
 
 def _counting_pool(tmp_path, *, max_agents: int):
@@ -255,6 +271,29 @@ def test_pool_active_agents_lists_hard_before_soft(tmp_path) -> None:
     pool.get(OwnerIdentity.provider_user("feishu", "h2"))
 
     assert [a.owner_id for a in pool.active_agents()] == ["h1", "h2", "s1", "s2"]
+
+
+def test_pool_hard_agents_excludes_curator_only_soft_instances(tmp_path) -> None:
+    pool, _ = _counting_pool(tmp_path, max_agents=8)
+    pool.get(OwnerIdentity.provider_user("feishu", "soft"), hard=False)
+    hard = pool.get(OwnerIdentity.provider_user("feishu", "hard"), hard=True)
+
+    assert pool.hard_agents() == [hard]
+    assert pool.active_count() == 2
+
+
+def test_pool_soft_eviction_preserves_concurrent_hard_promotion(tmp_path) -> None:
+    pool, _ = _counting_pool(tmp_path, max_agents=8)
+    owner = OwnerIdentity.provider_user("feishu", "curator-owner")
+    soft = pool.get(owner, hard=False)
+
+    assert pool.evict_soft_agent_id(id(soft)) is True
+    assert pool.active_count() == 0
+
+    promoted = pool.get(owner, hard=False)
+    assert pool.get(owner, hard=True) is promoted
+    assert pool.evict_soft_agent_id(id(promoted)) is False
+    assert pool.hard_agents() == [promoted]
 
 
 # ---------- config owner 覆盖 ----------

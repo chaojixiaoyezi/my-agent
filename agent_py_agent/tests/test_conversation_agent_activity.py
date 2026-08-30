@@ -20,6 +20,8 @@ def _run(run_id: str, **overrides: object) -> SimpleNamespace:
         "description": "",
         "attributes": {},
         "runner_attempts": 1,
+        "runner_active_attempt_id": "",
+        "turn_end_reason": "",
         "agent_thread_id": f"thread-{run_id}",
         "agent_run_workspace_dir": "",
         "created_at": 10.0,
@@ -118,7 +120,7 @@ def test_conversation_agent_activity_projects_only_active_roots_direct_children(
     assert "activity" not in activity.subagents[0]
     assert "current_tool" not in activity.subagents[0]
     assert "goal" not in activity.subagents[0]
-    assert payload["schema_version"] == "conversation_agent_activity.v5"
+    assert payload["schema_version"] == "conversation_agent_activity.v6"
     assert payload["compact_count"] == 3
     assert payload["active_task_projection_ok"] is True
     assert payload["subagent_projection_ok"] is True
@@ -258,6 +260,276 @@ def test_conversation_agent_activity_retains_completed_child_roster() -> None:
     assert [row["run_id"] for row in activity.subagents] == ["child-done"]
     assert activity.main_activity == {}
     assert activity.compact_count == 2
+
+
+def test_active_task_link_without_executor_or_open_children_is_display_idle(
+    tmp_path: Path,
+) -> None:
+    """可续接的 active 链接不是 会话运行时 式 active turn，终态名册保留但 Working 收起。"""
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-idle",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-live",
+            "goal": "已完成当前执行，但保留目录供后续继续",
+            "now": 11.0,
+        }
+    )
+    store.select_workspace_task(
+        {"thread_id": thread.thread_id, "task_id": "task-live"}
+    )
+    manager = SimpleNamespace(
+        list_runs_report=lambda: SimpleNamespace(
+            runs=[_run("child-done", status="DONE", ended_at=20.0)],
+            load_errors=[],
+        )
+    )
+
+    activity = conversation_agent_activity(
+        SimpleNamespace(subagents=manager),
+        store,
+        thread.thread_id,
+    )
+
+    assert store.load_task_link("task-live").status == "active"
+    assert activity.active_task_count == 0
+    assert [row["run_id"] for row in activity.subagents] == ["child-done"]
+    assert activity.main_activity["phase"] == "waiting"
+
+
+def test_running_child_waits_for_exact_active_attempt_first_event(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+    from agent_py_agent.agent.conversation.agent_transcript import (
+        append_agent_transcript_event,
+        begin_agent_transcript_turn,
+    )
+
+    task = _run(
+        "child-starting",
+        runner_active_attempt_id="attempt-current",
+    )
+    store = SimpleNamespace(
+        root=tmp_path,
+        active_task_links_report=lambda _thread_id: (
+            [SimpleNamespace(task_id="task-live", status="active")],
+            [],
+        ),
+    )
+    manager = SimpleNamespace(
+        list_runs_report=lambda: SimpleNamespace(runs=[task], load_errors=[])
+    )
+    agent = SimpleNamespace(subagents=manager, conversation_store=store)
+
+    waiting = conversation_agent_activity(agent, store, "thread-1")
+    assert waiting.subagents[0]["lifecycle_phase"] == "waiting_first_event"
+
+    old_request = begin_agent_transcript_turn(
+        agent,
+        run_id=task.id,
+        attempt_id="attempt-old",
+    )
+    assert append_agent_transcript_event(
+        agent,
+        thread_id="thread-child-starting",
+        task_id=task.id,
+        request_id=old_request,
+        kind="thinking_started",
+        phase="started",
+        block_id=f"{old_request}:thinking",
+        payload={},
+    ) == 1
+    still_waiting = conversation_agent_activity(agent, store, "thread-1")
+    assert still_waiting.subagents[0]["lifecycle_phase"] == "waiting_first_event"
+
+    current_request = begin_agent_transcript_turn(
+        agent,
+        run_id=task.id,
+        attempt_id="attempt-current",
+    )
+    assert append_agent_transcript_event(
+        agent,
+        thread_id="thread-child-starting",
+        task_id=task.id,
+        request_id=current_request,
+        kind="thinking_started",
+        phase="started",
+        block_id=f"{current_request}:thinking",
+        payload={},
+    ) == 2
+    running = conversation_agent_activity(agent, store, "thread-1")
+    assert running.subagents[0]["lifecycle_phase"] == "running"
+
+
+def test_pending_coordinator_with_active_descendants_is_not_shown_as_starting(
+    tmp_path,
+) -> None:
+    """已派出孙代理的 coordinator 在安全等待，不应继续冒充尚未启动。"""
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+
+    coordinator = _run(
+        "child-coordinator",
+        status="PENDING",
+        turn_end_reason="interrupted",
+        attributes={
+            "direct_child_wait": {
+                "schema_version": "direct-child-wait.v1",
+                "state": "waiting",
+                "run_ids": ["grandchild-a", "grandchild-b"],
+            }
+        },
+    )
+    store = SimpleNamespace(
+        root=tmp_path,
+        active_task_links_report=lambda _thread_id: (
+            [SimpleNamespace(task_id="task-live", status="active")],
+            [],
+        ),
+    )
+    manager = SimpleNamespace(
+        list_runs_report=lambda: SimpleNamespace(runs=[coordinator], load_errors=[])
+    )
+
+    activity = conversation_agent_activity(
+        SimpleNamespace(subagents=manager, conversation_store=store),
+        store,
+        "thread-1",
+    )
+
+    assert activity.subagents[0]["lifecycle_phase"] == "waiting_descendants"
+
+
+def test_pending_coordinator_does_not_infer_descendant_wait_from_prose_or_reason(
+    tmp_path,
+) -> None:
+    """没有 canonical 等待标记时，旧错误文字和非协议 reason 都不能取得展示权威。"""
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+
+    coordinator = _run(
+        "child-coordinator",
+        status="PENDING",
+        turn_end_reason="SUBAGENTS_ACTIVE",
+        runner_last_error="runner 本轮结束: interrupted (SUBAGENTS_ACTIVE)",
+        attributes={
+            "direct_child_wait": {
+                "schema_version": "malformed",
+                "state": "waiting",
+                "run_ids": ["grandchild-a"],
+            }
+        },
+    )
+    store = SimpleNamespace(
+        root=tmp_path,
+        active_task_links_report=lambda _thread_id: (
+            [SimpleNamespace(task_id="task-live", status="active")],
+            [],
+        ),
+    )
+    manager = SimpleNamespace(
+        list_runs_report=lambda: SimpleNamespace(runs=[coordinator], load_errors=[])
+    )
+
+    activity = conversation_agent_activity(
+        SimpleNamespace(subagents=manager, conversation_store=store),
+        store,
+        "thread-1",
+    )
+
+    assert activity.subagents[0]["lifecycle_phase"] == "starting"
+
+
+def test_completed_task_retains_child_roster_but_clears_stale_todo(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+        task_progress_projection_for_task,
+    )
+    from agent_py_agent.agent.task_progress import (
+        with_task_progress_display_plan,
+        write_task_progress,
+    )
+
+    owner_root = tmp_path / "owner"
+    task_path = str(tmp_path / "project" / "finished-task")
+    ledger_id = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
+    write_task_progress(
+        owner_root,
+        ledger_id,
+        with_task_progress_display_plan(
+            {
+                "items": [
+                    {"id": "research", "title": "调研项目", "status": "in_progress"},
+                    {"id": "report", "title": "整合报告", "status": "pending"},
+                ]
+            },
+            generation_id="turn-finished",
+            item_ids=["research", "report"],
+        ),
+    )
+    link = SimpleNamespace(
+        task_id="task-finished",
+        thread_id="thread-finished",
+        task_path=task_path,
+        status="completed",
+        created_at=20.0,
+    )
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: ([], []),
+        load_thread_report=lambda _thread_id: (
+            SimpleNamespace(compact_generation=1, workspace_task_id="task-finished"),
+            None,
+        ),
+        load_task_link_report=lambda _task_id: (link, None),
+        load_task_link=lambda _task_id: link,
+    )
+    child = _run(
+        "child-done",
+        root_id="task-finished",
+        parent_id="task-finished",
+        status="DONE",
+        ended_at=30.0,
+    )
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_root),
+        subagents=SimpleNamespace(
+            list_runs_report=lambda: SimpleNamespace(runs=[child], load_errors=[])
+        ),
+    )
+
+    activity = conversation_agent_activity(agent, store, "thread-finished")
+
+    assert activity.active_task_count == 0
+    assert [row["run_id"] for row in activity.subagents] == ["child-done"]
+    assert activity.task_progress_items == ()
+    assert activity.task_progress_generation_id == "turn-finished"
+    assert activity.task_progress_plan_revision == 1
+    assert task_progress_projection_for_task(agent, store, "task-finished") == (
+        (),
+        "turn-finished",
+        1,
+    )
 
 
 def test_conversation_agent_view_reads_exact_child_state_and_final_reply(

@@ -18,6 +18,7 @@ from ..contracts.gates.tool_guardrail import (
     consecutive_same_failure_count,
     failure_class_of_result,
 )
+from ..conversation.tool_context_window import record_native_ir_window, window_tool_context_params
 from ..prompting_parts.builder import ToolSections, project_runtime_workspace_context
 from ..runtime_db.operations import exec_lock_scope
 from ..settings.runtime_guard_config import runtime_guard_int
@@ -37,6 +38,7 @@ from .runtime.guidance import (
     acknowledge_injected_turn_input,
     has_pending_turn_input,
     inject_pending_turn_input,
+    refresh_runtime_direct_children_snapshot,
     restore_injected_turn_input_for_provider_retry,
 )
 from .runtime.live_archive import (
@@ -51,7 +53,6 @@ from .tool_call_runtime import (
 )
 from .tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .tool_context.reducer import render_tool_result_for_live_prompt
-from .tool_context.window import record_native_ir_window, window_tool_context_params
 from .tool_guard.call_guardrail import (
     clear_consecutive_failure_segment,
     record_tool_guard_observation,
@@ -77,13 +78,10 @@ from .tool_ir_history import record_tool_call_ir, replace_compaction_summary_ir
 from .tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
-    queue_followup_after_post_failure_workspace_mutation,
     queue_interim_reply_for_active_named_work,
     queue_interim_reply_for_open_subagents,
     queue_interim_reply_for_tool_round_limit,
-    queue_reconciliation_for_prior_unresolved_operations,
     queue_reply_for_audit_prepare,
-    queue_reply_for_incomplete_final_mutation,
     task_local_wait_response_for_open_subagents,
 )
 from .tool_loop.natural_user_reply import (
@@ -94,7 +92,6 @@ from .tool_loop.natural_user_reply import (
     pending_natural_user_reply,
     retry_natural_user_reply,
 )
-from .tool_loop.plan_closeout import decide_open_plan_closeout
 from .tool_loop.recovery import (
     append_long_content_recovery_context,
     without_tool_call_after_limit,
@@ -236,6 +233,9 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
 # preflight; do not bypass this entry for Gateway conversations or child agents.
 # 函数用途: 组装本轮工具模型输入，并在真正调用模型前用统一 Compact 配置压住可见上下文。
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
+    # 子代理状态是当前运行事实，不属于可被 compact 摘要冻结的历史。每次 provider 安全点
+    # 原位刷新一个稳定的小尾巴；状态没变时字节不变，保留前缀缓存命中。
+    refresh_runtime_direct_children_snapshot(agent, params)
     if params.consume_pending_turn_input:
         inject_pending_turn_input(agent, params)
     window_tool_context_params(agent, params)
@@ -1145,7 +1145,11 @@ def _natural_user_reply_step(
         pending_natural_user_reply(params),
     )
     accepted = not rejection_reason
-    if not accepted and retry_natural_user_reply(params, rejection_reason=rejection_reason):
+    if not accepted and retry_natural_user_reply(
+        params,
+        rejection_reason=rejection_reason,
+        response=response,
+    ):
         return "retry", response
     return "finish", finish_natural_user_reply(
         params,
@@ -1382,24 +1386,6 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
                 tool_rounds=tool_rounds,
             ):
                 continue
-            if queue_reply_for_incomplete_final_mutation(
-                service._agent,
-                params,
-                response=final_response,
-                tool_rounds=tool_rounds,
-            ):
-                continue
-            if queue_reconciliation_for_prior_unresolved_operations(
-                service._agent,
-                params,
-                response=final_response,
-            ):
-                continue
-            if queue_followup_after_post_failure_workspace_mutation(
-                service._agent,
-                params,
-            ):
-                continue
             if queue_reply_for_audit_prepare(
                 service._agent,
                 params,
@@ -1407,16 +1393,9 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
                 tool_rounds=tool_rounds,
             ):
                 continue
-            plan_closeout = decide_open_plan_closeout(
-                service._agent,
-                params,
-                final_response,
-            )
-            if plan_closeout.action == "continue":
-                continue
-            if plan_closeout.action == "block":
-                final_response = plan_closeout.response or final_response
-                break
+            # 会话运行时 式自然收口：模型看过本轮真实工具结果后给出 plain final，
+            # 当前 turn 就结束。operation/task_progress 继续作为审计和工作记忆，
+            # 不能据此覆盖正文、强制返工或另起后台续跑。
         verdict, routed_response = _routed_action_step(action)
         if verdict == "continue":
             continue
@@ -1819,7 +1798,7 @@ def _ordinary_task_resume_available(agent, params: ToolLoopExecuteParams) -> boo
             return True
         store = getattr(agent, "conversation_store", None)
         source = str(getattr(params, "source", "") or "").strip()
-        from .runtime.task_identity import progress_ledger_id
+        from .runtime.task_identity import durable_task_id
 
         if source == "cli_run":
             # EXEC-39: CLI 正常不自动续跑——只有 active goal 才可能自动续
@@ -1842,7 +1821,10 @@ def _ordinary_task_resume_available(agent, params: ToolLoopExecuteParams) -> boo
             ).strip().lower() != "active":
                 return False
         else:
-            task_id = str(progress_ledger_id(agent, params) or "").strip()
+            # 自动续跑恢复的是一个真实执行任务，不是 Todo 的存储位置。
+            # 同一 workspace 可以跨多个用户 turn 复用 task-path 账本，但
+            # scheduler 只能拿 conversation_task_id 恢复本轮执行上下文。
+            task_id = str(durable_task_id(params) or "").strip()
         if store is None or not callable(getattr(store, "list_progress_policies", None)):
             return None
         if not task_id:
@@ -2191,6 +2173,9 @@ def _final_response_after_no_action_gate(
     return final_prompt, final_response
 
 
+# LLM: Archive once, then feed the same bounded projection to text and native histories before any
+# later compact/window logic; do not let raw result refs bypass this choke point.
+# 函数用途: 记录一次工具调用、更新运行事实，并把安全结果投影续入下一轮模型上下文。
 def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     from ..contracts.required_actions import settle_required_action
 
@@ -2225,13 +2210,13 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     result_rendered = render_tool_result_for_live_prompt(record.result, archive_record)
     record.params.tool_context.append(
         f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
-        f"{render_tool_payload_for_live_prompt(payload)}\n"
+        f"{render_tool_payload_for_live_prompt(record.model_payload)}\n"
         f"[tool-output-record round={record.tool_rounds} index={record.idx}]\n"
         f"{result_rendered}"
     )
     # 灰度双轨：native 下同时把这次「调用+结果」记进结构化 IR 历史（与上面的文本
     # tool_context 共存），供出站翻成原生 messages；text 协议下完全不走这里。
-    _record_tool_call_ir_if_native(record)
+    _record_tool_call_ir_if_native(record, result_rendered)
     if guardrail_hint:
         record.params.tool_context.append(f"[tool-loop-guardrail-hint]\n{guardrail_hint}")
     append_long_content_recovery_context(record)
@@ -2255,17 +2240,21 @@ def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[s
     params.loaded_tool_names.update(str(item).strip() for item in names if str(item).strip())
 
 
+# LLM: Native history must carry the reducer output, never the raw executor projection; otherwise
+# large-output refs bypass the canonical read_artifact recovery contract.
+# 函数用途: 把工具调用与有界、可恢复的结果正文追加到原生模型历史。
 def _record_tool_call_ir_if_native(
     record: ToolCallRecordParams,
+    result_rendered: str,
 ) -> None:
-    """Append the exact canonical pair; IDs are never synthesized at record time."""
+    """Append the exact canonical pair with the shared bounded model projection."""
     if not native_tool_use_active(record.params):
         return
     record_tool_call_ir(
         record.params,
         tool_rounds=record.tool_rounds,
-        call=record.call,
-        result=record.result,
+        call=record.model_visible_call,
+        result=record.result.with_live_prompt_projection(result_rendered),
     )
 
 

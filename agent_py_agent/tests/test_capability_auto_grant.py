@@ -132,10 +132,18 @@ def test_capability_request_tool_auto_grants_without_waking_parent():
         payload = json.loads(result.output)
         assert payload["auto_granted"] is True
         assert payload["status"] == "GRANTED"
+        assert payload["next_action"] == "runtime_context_refresh"
         assert "run_command" in payload["granted_tools"]
+        assert result.result_envelope["runtime_transition"] == {
+            "kind": "context_refresh",
+            "reason": "capability_grant_applied",
+            "resume": "next_durable_slice",
+        }
         reloaded = agent.subagents.load(task.id)
         assert reloaded.capability_requests[0].status == "GRANTED"
         assert reloaded.capability_grants
+        refreshed_context = agent.subagents.runner_context.build_execution_context(task.id)
+        assert "run_command" in refreshed_context.allowed_tools
         # 自动批不该再以 requires_main_agent=True 吵醒主代理(那是未决申请的通道)。
         store = getattr(agent, "conversation_store", None)
         if store is not None:
@@ -162,6 +170,7 @@ def test_capability_request_tool_keeps_special_request_open_for_parent():
         payload = json.loads(result.output)
         assert "auto_granted" not in payload
         assert payload["status"] == "OPEN"
+        assert "runtime_transition" not in result.result_envelope
         reloaded = agent.subagents.load(task.id)
         assert reloaded.capability_requests[0].status == "OPEN"
 
@@ -205,6 +214,43 @@ def test_wake_sweep_auto_grants_and_redispatches():
         assert dispatch_params.include_run_ids == [task.id]
         reloaded = agent.subagents.load(task.id)
         assert reloaded.capability_requests[0].status == "GRANTED"
+
+
+def test_wake_sweep_does_not_treat_owner_home_as_task_sandbox():
+    """唤醒兜底只能自动授权 task root，不能把 owner home 当成子代理沙箱。"""
+    with tempfile.TemporaryDirectory() as td:
+        agent, task = _agent_and_task(td)
+        owner_memory = Path(agent.subagents.workspace_root) / "memory"
+        request = _record_request(
+            agent,
+            task,
+            path_scope=[str(owner_memory)],
+            requested_tools=["write_file"],
+            requested_commands=[],
+            capability_type="tool",
+            needed_capability="write_file",
+        )
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.capability_auto_sweep import (
+            auto_capability_sweep,
+        )
+
+        agent.dispatch_subagents = lambda *_args, **_kwargs: SimpleNamespace(records=[])
+        summary = auto_capability_sweep(
+            agent,
+            SimpleNamespace(
+                metadata={"run_id": task.id},
+                source_agent_id=task.id,
+                reason="subagent_capability_request_open",
+            ),
+        )
+
+        assert summary["auto_granted"] == 0
+        reloaded = agent.subagents.load(task.id)
+        statuses = {item.id: item.status for item in reloaded.capability_requests}
+        assert statuses[request.id] == "OPEN"
+        assert reloaded.capability_grants == []
 
 
 def test_audit_source_wake_uses_durable_background_autostart(monkeypatch):

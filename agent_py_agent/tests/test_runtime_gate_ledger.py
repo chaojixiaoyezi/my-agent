@@ -708,6 +708,39 @@ def test_child_runtime_task_keeps_explicit_owner_project_root(tmp_path):
     ]
 
 
+def test_child_runtime_task_keeps_host_granted_capability_root(tmp_path):
+    owner_home = tmp_path / "owners" / "providers" / "tui" / "users" / "alice"
+    task_root = owner_home / "tasks" / "2026-08-30" / "task-1"
+    child_root = task_root / "work" / "agents" / "child-1"
+    granted_root = owner_home / "workspace" / "approved-project"
+    ungranted_root = owner_home / "workspace" / "other-project"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="tui"),
+        tools=SimpleNamespace(owner_scope_root=str(owner_home)),
+        subagents=SimpleNamespace(owner_scope_root=str(owner_home)),
+        local_store=None,
+    )
+    params = _loop_params(
+        context_scope="task_local",
+        write_boundary={
+            "allowed_write_roots": [
+                str(child_root),
+                str(granted_root),
+                str(ungranted_root),
+            ],
+            "capability_write_roots": [str(granted_root)],
+        },
+        task_attributes={"run_workspace": {"task_root": str(task_root)}},
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["allowed_write_roots"] == [
+        str(child_root.resolve()),
+        str(granted_root.resolve()),
+    ]
+
+
 def test_remote_main_conversation_rebases_stale_bootstrap_write_scope(tmp_path):
     owner_home = tmp_path / "owners" / "providers" / "feishu" / "users" / "alice"
     task_root = owner_home / "tasks" / "2026-07-18" / "selected-task"

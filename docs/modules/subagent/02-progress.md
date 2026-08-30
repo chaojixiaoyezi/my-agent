@@ -1,5 +1,15 @@
 # Subagent Progress
 
+## 2026-08-29 精确停止单调性通过，启动阶段仍需可解释
+
+- r53 三名 child 同时运行时，从详情页 Esc 只让 长期助手 child 进入 CANCELLED；后续主代理自然语言调用
+  `cancel_subagents` 只让 会话运行时 child 终止，兄弟不受影响。旧 runner snapshot/heartbeat 未再复活终态。
+- r56 对慢停止链补了异步受理：TUI 约 6.06 秒显示“停止请求已接收”，约 9.62 秒形成 canonical terminal，
+  用户不再看到实际成功却报“无法确认”。accepted 与 terminal 仍分开，避免把后台持久化失败隐藏成成功。
+- 仍有两个真实观察缺口：child 从派工到 runner start 的样本约 231.7 秒，roster 期间只显示等待启动；刚进入
+  新 child 详情时，首条 durable prompt/event 到达前会空白。下一轮先量化 dispatch/process/activity/first-event
+  四阶段，再增加 typed phase 占位；不得假造 Running 或 prompt。
+
 ## 2026-08-28 Todo 标题的额外 child 语义（`.10` 真 TUI 已通过）
 
 - 真 TUI 同时有 6 名活动 child 时，4 名已映射当前 Todo、2 名未映射；旧标题“子代理运行中 2”容易被理解
@@ -434,20 +444,16 @@
   typed blocked focused 回归已随发布通过；后续等待真实重型任务自然留下 open 项，不能人工改账或用玩具
   prompt 诱发，也不能把本次产品缺口变成宿主 LOC/测试/界面质量验收器。
 
-## 2026-08-23 r18 普通计划同轮停止核对（本地候选）
+## 2026-08-23 r18 普通计划同轮停止核对【状态：2026-08-28 已退役】
 
 - `2d03803` 部署后的 fresh r18 中，root 已关闭 5/8 Todo；构建、自动测试、端到端验证仍 pending，机器也
   没有 Rust/Cargo，但模型 final 声称完整生成，普通 finalization 又把 root durable workspace 写成 DONE。
   这不是产物验收失败，而是模型自己的 canonical 计划与宿主生命周期相互矛盾。
-- 对照 会话运行时 `run_turn_stop_hooks`，新 `agent_core/tool_loop/plan_closeout.py` 只读取当前 exact
-  `task_progress`，在普通 root/child 自然 final 前同轮返一次 id/title/status。模型可继续、用 exact id
-  关闭，或记录真实 blocked；核对耗尽仍 open 时返回 typed blocked，保留原 thread/task/workspace 供用户
-  继续。它跳过 `/goal`、Audit、isolated/control-plane 和已有专用 child/失败收口，不创建后台续轮。
-- 该入口不读 final 文案、源码、LOC、测试、产物或 evidence，不替模型判断业务质量。配置
-  `task_progress_closeout_repair_attempts` 默认 1、设 0 可关；原生协议回归必须证明结构化提醒实际进入下一次
-  provider messages，而不只是让调用计数加一。另将未绑定 child 与失败工具的展示短句改为真实语义。
+- 当时增加的 `plan_closeout.py` 虽不读正文或源码，仍会在模型 plain final 后强制增加 provider call，并能把
+  整个 turn 改成 blocked；这仍属于机器完成判定。2026-08-28 已按 会话运行时 自然结束语义删除该入口、配置和
+  专用测试，Todo 只保留为模型工作记忆与 TUI 投影。
 
-## 2026-08-24 r9 no-save 停止核对缺口（本地修复候选）
+## 2026-08-24 r9 no-save 停止核对缺口【状态：随入口一并退役】
 
 - r9 后台 main 收尾时 canonical Todo 为 13/16，仍有 `in_progress/pending`，却输出完成并把 durable root
   关闭。最后一轮工具账没有更新 Todo，说明不是 UI 延迟或展示旧快照。
@@ -760,9 +766,9 @@
   `interrupted/SUBAGENTS_ACTIVE` 让出，同批成功收齐只恢复一次，失败或 capability 阻塞立即恢复；
   孙代理事件只恢复直属父级，父级上下文直接带有界 `direct_children` status/result refs。
 - `task_progress` 现在只是软记事账本。普通任务的跨轮自动 continuation 模块、配置和深度状态已经删除；
-  open 项不会另开后台任务或触发业务质量验收。r18 后，模型准备自然 final 时会在同一 active turn 有界
-  核对一次自己留下的 exact open 项；耗尽后 typed blocked 而不是 durable DONE。新项必须有稳定
-  `id/title/status`，更新返回前以 canonical child run id 重新对账，避免模型旧状态覆盖真实 DONE。
+  open 项不会另开后台任务、触发业务质量验收或追加隐藏模型核对。r18 曾加入的同 turn stop-nudge 已在
+  2026-08-28 按用户决定退役；普通 plain final 现在直接结束，清单继续留给同 thread 后续回合和 TUI。
+  新项必须有稳定 `id/title/status`，更新返回前以 canonical child run id 重新对账，避免模型旧状态覆盖真实 DONE。
 - `be531a8` 后的原样 TUI 样本一次创建 4 个 child，但所有 child 继承的 `/root`
   又被默认 home deny 同层拒绝，导致 `WRITE_FORBIDDEN -> capability_request`。候选修复不改
   通用“同层 deny 胜出”规则，而是在创建 local/unmanaged task 时调和精确的 inherited workspace
@@ -1657,3 +1663,25 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
 - 普通 child/grandchild 在父任务晋升后统一继承 `<owner_home>/tasks/<task_path>/`。旧的“继承客户端项目
   cwd”只适用于任务晋升前启动上下文；不得继承 Gateway daemon `/root`，也不得另造 `child_outputs`。
 - 当前 child Compact/后台主代理 focused 已通过，仍待严格 gate 和 `.7` fresh MiniMax-M2.7 真 TUI 验证。
+
+## 2026-08-29 在途创建停止围栏与递归取消安全点
+
+- 根 `create_subagents` 的 promotion 与 Gateway `/stop` 已复用 exact active-turn transition；停止后不能再建立
+  continuation。child conversation bind 会从 canonical task 读取初始终态，并在落账后复读一次，消除
+  “canonical 已取消、详情链接却迟到 active”的复活缝。
+- manager `creation_guard` 现在同时包住主代理与递归 child 的创建事务；统一工具 cancellation token 在每个
+  durable child 之间检查。剩余未落盘项即时停止，已落盘前缀由 stop reconciler 复读 exact lineage 后取消，
+  不增加轮询、文本判断或另一套孙代理停止工具。
+- 根层真实 `.10` TUI 已证明 parent/8 child/link/进程全部正确收口且无 Working 复活；旧代码仍需约 53 秒完成
+  全批落盘和取消。逐项安全点已通过 root/hierarchy/Gateway focused 并同步到 `.7/.10` 待启用文件，待当前长
+  TUI 到安全节点后单次重启 Gateway，再用 fresh root 与递归 TUI 测停止延迟。
+
+## 2026-08-30 孙代理 canonical run workspace 继承
+
+- R106 U261 证明仅继承 cwd/roots 不够：一个 depth-2 child 在 manager runtime 另造 task root，产物存在但
+  直接父级按声明路径不可读，Gateway 的 workspace-state guard 同时拒绝该 durable path。
+- 创建策略现在从当前 parent runner context 读取 host-owned `run_workspace.task_root`，重建同一
+  `work_dir/output_dir` 并覆盖 nested 输入；只有任务尚未晋升时才使用 conversation cwd fallback。
+- 本地回归创建真实 depth-2 `SubAgentManager` run，断言 task workspace 等于父任务根、agent 私有目录位于
+  `work/agents/`，不会落到 manager runtime。R107 fresh TUI 已验证三层状态和产物同根、父级可读、Gateway
+  零路径拒绝；旧 R106 失败产物保持原位作证。

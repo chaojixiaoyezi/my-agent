@@ -22,6 +22,13 @@ from ..conversation.agent_activity import (
     ConversationAgentActivity,
     conversation_agent_activity,
 )
+from ..conversation.agent_control import (
+    AgentControlError,
+    enqueue_agent_stop,
+    read_agent_view,
+    resolve_agent_permission,
+    send_agent_guidance,
+)
 from ..conversation.background_transcript import read_background_transcript_events
 from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..conversation.control_commands import (
@@ -31,13 +38,6 @@ from ..conversation.control_commands import (
     parse_conversation_task_command,
 )
 from ..runtime_errors import DataCorruptionError, runtime_error_report
-from .agent_control_service import (
-    GatewayAgentControlError,
-    read_gateway_agent_view,
-    resolve_gateway_agent_permission,
-    send_gateway_agent_guidance,
-    stop_gateway_agent,
-)
 from .client_service import execute_gateway_client_memory, read_gateway_client_history
 from .control_operation_service import (
     GatewayControlOperationConflict,
@@ -51,8 +51,11 @@ from .control_service import (
     GatewayControlScope,
     active_turn_guidance_dedupe_key,
     request_gateway_memory_curator_lifecycle,
+    resolve_gateway_scope_agent,
+    resolve_loaded_gateway_scope_agent,
     steer_active_conversation_if_running,
 )
+from .daemon_control import get_running_pid, write_targeted_gateway_stop_request
 from .input_delivery_service import (
     bind_gateway_input_active_locked,
     gateway_input_guidance_binding,
@@ -1028,62 +1031,52 @@ def handle_client_notices(handler, server) -> None:
     handler._send_json(200, result)
 
 
-# LLM: View requests reuse trusted-source middleware and GatewayControlScope;
-# run_id is authorized against the resolved conversation root in the shared service.
-# 函数用途: 返回当前用户有权查看的一个子代理详情和增量过程事件。
+# LLM: View requests reuse trusted-source middleware and one owner-resolved
+# GatewayControlScope. The base Gateway agent must never read a scoped user's run.
+# 函数用途: 从当前用户自己的 Agent 返回一个子代理详情和增量过程事件。
 def handle_client_agent_view(handler, server) -> None:
     body = _read_agent_control_body(handler, server)
     if body is None:
         return
-    user_id, channel = _request_channel(handler)
     try:
-        result = read_gateway_agent_view(
-            server.agent,
-            scope=_gateway_control_scope(
-                handler,
-                body,
-                user_id=user_id,
-                channel=channel,
-            ),
+        owner_agent, scope = _agent_control_context(handler, server, body)
+        result = read_agent_view(
+            owner_agent,
+            scope=scope,
             run_id=str(body.get("run_id") or ""),
             after=max(0, _safe_request_int(body.get("event_after"))),
         )
-    except GatewayAgentControlError as exc:
+    except AgentControlError as exc:
         _send_agent_control_error(handler, exc)
         return
     handler._send_json(200, result)
 
 
-# LLM: Guidance accepts ordinary user text only through the idempotent agent
-# mailbox service. It cannot be interpreted as a slash command or main turn.
-# 函数用途: 将一条补充消息投递给当前会话树内的指定子代理。
+# LLM: Guidance accepts ordinary user text only through the exact owner's
+# idempotent mailbox service. It cannot fall back to the base Gateway owner.
+# 函数用途: 将补充消息排进当前用户会话树内的指定子代理。
 def handle_client_agent_guidance(handler, server) -> None:
     body = _read_agent_control_body(handler, server)
     if body is None:
         return
-    user_id, channel = _request_channel(handler)
     try:
-        result = send_gateway_agent_guidance(
-            server.agent,
-            scope=_gateway_control_scope(
-                handler,
-                body,
-                user_id=user_id,
-                channel=channel,
-            ),
+        owner_agent, scope = _agent_control_context(handler, server, body)
+        result = send_agent_guidance(
+            owner_agent,
+            scope=scope,
             run_id=str(body.get("run_id") or ""),
             message=str(body.get("message") or ""),
             message_id=str(body.get("message_id") or ""),
         )
-    except GatewayAgentControlError as exc:
+    except AgentControlError as exc:
         _send_agent_control_error(handler, exc)
         return
     handler._send_json(202, result)
 
 
-# LLM: The handler forwards only mappings to the owner-scoped approval service;
-# missing or scalar request/decision bodies fail before any durable mutation.
-# 函数用途: 把 TUI/Web 的子代理工具审批决定写回原始等待调用。
+# LLM: The handler forwards only mappings to the exact owner's approval service;
+# missing/scalar bodies and owner-resolution failures end before durable mutation.
+# 函数用途: 把 TUI/Web 的子代理工具审批决定写回当前用户的原始等待调用。
 def handle_client_agent_permission(handler, server) -> None:
     body = _read_agent_control_body(handler, server)
     if body is None:
@@ -1093,50 +1086,41 @@ def handle_client_agent_permission(handler, server) -> None:
     if not isinstance(request, dict) or not isinstance(decision, dict):
         handler._send_json(400, {"error": "request and decision are required"})
         return
-    user_id, channel = _request_channel(handler)
     try:
-        result = resolve_gateway_agent_permission(
-            server.agent,
-            scope=_gateway_control_scope(
-                handler,
-                body,
-                user_id=user_id,
-                channel=channel,
-            ),
+        owner_agent, scope = _agent_control_context(handler, server, body)
+        result = resolve_agent_permission(
+            owner_agent,
+            scope=scope,
             run_id=str(body.get("run_id") or ""),
             request=request,
             decision=decision,
         )
-    except GatewayAgentControlError as exc:
+    except AgentControlError as exc:
         _send_agent_control_error(handler, exc)
         return
     handler._send_json(200, result)
 
 
-# LLM: Stop accepts one exact run and opaque operation id. The shared service
-# handles terminal idempotency and the canonical process/lifecycle cancellation.
-# 函数用途: 停止当前会话树内用户正在查看的子代理。
+# LLM: Stop accepts one exact run and opaque operation id after resolving the exact owner. The
+# transport returns 202 once the owner-scoped worker is admitted; canonical cancellation remains
+# asynchronous so slow projection flushes cannot turn a successful Esc into a false timeout.
+# 函数用途: 快速接收当前用户对子代理的停止请求，终态由同一底层取消服务后台收口。
 def handle_client_agent_stop(handler, server) -> None:
     body = _read_agent_control_body(handler, server)
     if body is None:
         return
-    user_id, channel = _request_channel(handler)
     try:
-        result = stop_gateway_agent(
-            server.agent,
-            scope=_gateway_control_scope(
-                handler,
-                body,
-                user_id=user_id,
-                channel=channel,
-            ),
+        owner_agent, scope = _agent_control_context(handler, server, body)
+        result = enqueue_agent_stop(
+            owner_agent,
+            scope=scope,
             run_id=str(body.get("run_id") or ""),
             operation_id=str(body.get("operation_id") or ""),
         )
-    except GatewayAgentControlError as exc:
+    except AgentControlError as exc:
         _send_agent_control_error(handler, exc)
         return
-    handler._send_json(200, result)
+    handler._send_json(202 if result.get("status") == "accepted" else 200, result)
 
 
 # LLM: All agent-control endpoints share identical transport validation;
@@ -1159,6 +1143,39 @@ def _read_agent_control_body(handler, server) -> dict[str, object] | None:
     return body
 
 
+# LLM: All delegated-agent HTTP operations must resolve the authenticated owner
+# once, then pass that exact Agent and the unchanged scope through view/mutation.
+# Resolution failure is fail-closed and can never fall back to server.agent.
+# 函数用途: 为查看、插话、审批和停止统一找到当前用户自己的 Agent 与会话作用域。
+def _agent_control_context(
+    handler,
+    server,
+    body: dict[str, object],
+) -> tuple[object, GatewayControlScope]:
+    user_id, channel = _request_channel(handler)
+    scope = _gateway_control_scope(
+        handler,
+        body,
+        user_id=user_id,
+        channel=channel,
+    )
+    try:
+        owner_agent = resolve_gateway_scope_agent(server.agent, scope)
+    except Exception as exc:
+        raise AgentControlError(
+            503,
+            "AGENT_OWNER_UNAVAILABLE",
+            "当前用户的子代理状态暂时不可用。",
+        ) from exc
+    if owner_agent is None:
+        raise AgentControlError(
+            503,
+            "AGENT_OWNER_UNAVAILABLE",
+            "当前用户的子代理状态暂时不可用。",
+        )
+    return owner_agent, scope
+
+
 # LLM: Integer coercion is used only for display pagination and cannot affect
 # run identity, permission, or lifecycle transitions.
 # 函数用途: 将过程事件游标安全转换成非负整数。
@@ -1172,7 +1189,7 @@ def _safe_request_int(value: object) -> int:
 # LLM: Public control errors expose stable status/code/message fields only;
 # nested exceptions and filesystem details never cross HTTP.
 # 函数用途: 将子代理控制服务拒绝转换成结构化响应。
-def _send_agent_control_error(handler, error: GatewayAgentControlError) -> None:
+def _send_agent_control_error(handler, error: AgentControlError) -> None:
     handler._send_json(
         max(400, int(error.status or 500)),
         {
@@ -1191,13 +1208,12 @@ def _send_agent_control_error(handler, error: GatewayAgentControlError) -> None:
 def read_gateway_client_notices(
     agent: object,
     *,
-    scope: object,
+    scope: GatewayControlScope,
     after: float,
     event_after: int = 0,
     interactive_approvals: bool = False,
 ) -> dict[str, object]:
     """返回当前 thread 的活动投影、后台过程事件与 after 之后的通知。"""
-    from ..conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
     from ..conversation.store import ConversationStore
 
     conversation_id = str(getattr(scope, "conversation_id", "") or "").strip()
@@ -1207,7 +1223,24 @@ def read_gateway_client_notices(
             event_after,
             error="conversation_id required",
         )
-    store = getattr(agent, "conversation_store", None)
+    try:
+        owner_agent = resolve_loaded_gateway_scope_agent(agent, scope)
+    except Exception:
+        return _empty_gateway_notice_response(
+            after,
+            event_after,
+            error="owner scope unavailable",
+        )
+    if owner_agent is None:
+        payload = _empty_gateway_notice_response(
+            after,
+            event_after,
+            ok=True,
+            agent_activity=ConversationAgentActivity().to_dict(),
+        )
+        payload["owner_state"] = "cold"
+        return payload
+    store = getattr(owner_agent, "conversation_store", None)
     if not isinstance(store, ConversationStore):
         return _empty_gateway_notice_response(
             after,
@@ -1216,9 +1249,9 @@ def read_gateway_client_notices(
         )
     try:
         thread, _error = store.resolve_thread_report(
-            channel=LOCAL_CHAT_CHANNEL,
+            channel=str(scope.channel or "").strip(),
             channel_conversation_id=conversation_id,
-            channel_user_id=LOCAL_AGENT_USER_ID,
+            channel_user_id=str(scope.user_id or "").strip(),
         )
     except Exception as exc:
         return _empty_gateway_notice_response(
@@ -1235,16 +1268,16 @@ def read_gateway_client_notices(
         )
     thread_id = str(getattr(thread, "thread_id", "") or "")
     permission_requests = _gateway_agent_permission_requests(
-        agent,
+        owner_agent,
         thread,
         interactive_approvals=interactive_approvals,
     )
     transcript = read_background_transcript_events(
-        agent,
+        owner_agent,
         thread_id=thread_id,
         after=event_after,
     )
-    activity = conversation_agent_activity(agent, store, thread_id)
+    activity = conversation_agent_activity(owner_agent, store, thread_id)
     activity_payload = activity.to_dict()
     active_task_count = activity.active_task_count
     notices_path = Path(store.root) / "notices" / f"{thread_id}.notices.jsonl"
@@ -1318,7 +1351,7 @@ def _gateway_agent_permission_requests(
     root_task_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
     if not root_task_id:
         return []
-    from ..subagents.tool_approval_bridge import (
+    from ..conversation.agent_tool_approval import (
         list_pending_subagent_tool_approvals,
         renew_subagent_tool_approval_consumer,
     )
@@ -1337,9 +1370,11 @@ def _gateway_agent_permission_requests(
         return []
 
 
-# LLM: Notice files are append-only delivery projections. This reader filters
-# only by the typed created_at cursor and cannot affect activity or transcript
-# event cursors; malformed individual rows are skipped without guessing prose.
+# LLM: Notice files are append-only delivery projections. The inclusive time
+# cursor deliberately replays rows at the boundary because separate committed
+# notices may share one scheduler timestamp; the client deduplicates by typed
+# notice_id (or a legacy content fingerprint). This reader cannot affect activity
+# or transcript event cursors, and malformed rows are skipped without guessing prose.
 # 函数用途: 读取通知文件中 after 之后的合法行，并返回新游标和文件读取状态。
 def _read_background_notice_rows(
     notices_path: Path,
@@ -1366,7 +1401,7 @@ def _read_background_notice_rows(
             created = float(row.get("created_at") or 0.0)
         except (TypeError, ValueError):
             created = 0.0
-        if created > after:
+        if created >= after:
             notices.append(row)
             cursor = max(cursor, created)
     return notices, cursor, True
@@ -1603,6 +1638,9 @@ def _first_conversation_id(payload: dict) -> str:
     return ""
 
 
+# LLM: HTTP shutdown is admin-only and must target the PID generation currently recorded by this
+# Gateway. A presence-only file can poison the next service-manager restart and is forbidden.
+# 函数用途: 接收本机管理员停止请求，并把它精确投递给当前 Gateway 进程。
 def handle_stop(handler, server) -> None:
     if require_admin_handler(handler):
         return  # 停网关需管理员:已发 403(鉴权未接线时返回 False,回环本机请求放行)
@@ -1610,10 +1648,17 @@ def handle_stop(handler, server) -> None:
         handler._send_json(500, {"error": "server not initialized"})
         return
     server.paths.root.mkdir(parents=True, exist_ok=True)
-    server.paths.stop_request.write_text(
-        json.dumps({"requested_at": time.time(), "reason": "http stop request"}, ensure_ascii=False),
-        encoding="utf-8",
+    pid = get_running_pid(server.paths.pid, cleanup_stale=False)
+    payload = write_targeted_gateway_stop_request(
+        server.paths.pid,
+        server.paths.stop_request,
+        reason="http stop request",
+        target_pid=pid,
+        source="gateway_http",
     )
+    if payload is None:
+        handler._send_json(409, {"error": "gateway process identity unavailable"})
+        return
     handler._send_json(200, {"status": "stopping"})
 
 

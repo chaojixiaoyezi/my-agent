@@ -38,6 +38,29 @@ def test_assistant_stream_freezes_once_without_duplicate_final() -> None:
     assert snapshot.stable_blocks[0].phase == "completed"
 
 
+def test_redraw_subscriber_failure_cannot_reject_applied_event() -> None:
+    store = TuiStateStore()
+    seq = _sequencer()
+
+    def broken_redraw() -> None:
+        raise RuntimeError("renderer is already closed")
+
+    store.subscribe(broken_redraw)
+    result = store.publish(
+        seq.emit(
+            "system_message",
+            "completed",
+            "system:receipt",
+            {"text": "业务回执已经提交"},
+        )
+    )
+
+    assert result.accepted
+    assert [block.text for block in store.snapshot().stable_blocks] == [
+        "业务回执已经提交"
+    ]
+
+
 def test_delta_without_start_and_unknown_kind_fail_closed() -> None:
     store = TuiStateStore()
     seq = _sequencer()
@@ -381,7 +404,7 @@ def test_permission_selection_and_feedback_are_typed_overlay_state() -> None:
     )
     rejected = store.snapshot().stable_blocks[-1]
     assert rejected.phase == "failed"
-    assert rejected.detail == "User rejected tool use"
+    assert rejected.detail == "用户拒绝了工具调用"
 
 
 def test_queue_is_priority_then_fifo_and_restore_removes_item() -> None:

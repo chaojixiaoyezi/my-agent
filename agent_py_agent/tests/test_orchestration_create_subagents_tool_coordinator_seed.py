@@ -921,6 +921,7 @@ class TestResourceScopePolicyNormalizationPerSeq269:
             runtime_snapshot=snapshot,
             path_access_mode="normal",
             path_dangerous_roots=(),
+            owner_scope_root="",
             owner_type="main_agent",
             cancellation_token=SimpleNamespace(cancelled=False),
         )

@@ -18,7 +18,7 @@ class _BackgroundCliBackend:
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **_kwargs: object) -> ModelResponse:
         self.prompts.append(prompt)
         return ModelResponse(text="后台主代理 CLI 汇报。", backend=self.name)
 

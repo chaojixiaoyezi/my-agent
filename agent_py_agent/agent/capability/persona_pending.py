@@ -1,6 +1,6 @@
-# LLM: 待确认的 SOUL/AGENTS 长期人设写入——文件型存储,放 <my_agent_home>/pending_persona/<token>.json,
+# LLM: 待确认的 SOUL 长期人设写入——文件型存储,放 <my_agent_home>/pending_persona/<token>.json,
 #   网关侧(update_persona 工具存)与适配器侧(飞书卡片回调取)同一 my_agent_home 根、都能读到。一条记录=
-#   {token, owner_*, target(soul/agents), content, created_at}。pop 用原子领取(os.replace)保证并发/重复
+#   {token, owner_*, target=soul, content, created_at}。pop 用原子领取(os.replace)保证并发/重复
 #   回调只有一个调用能拿到记录 → 只写一次(幂等基石)。TTL 过期(默认 24h)自动作废。改动时同步测试。
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class PendingPersona:
     owner_provider: str
     owner_kind: str
     owner_id: str
-    target: str  # soul / agents
+    target: str  # 只允许 soul；USER/AGENTS 由 owner Agent 自主维护。
     content: str
     created_at: float
     action: str = "add"
@@ -49,6 +49,8 @@ def add(
 ) -> str:
     """登记一条待确认写入,返回 token(uuid4)。owner=(provider, owner_kind, owner_id)。
     顺手清过期(自愈,防堆积)。"""
+    if str(target or "").strip().lower() != "soul":
+        raise ValueError("only SOUL changes use pending persona confirmation")
     provider, owner_kind, owner_id = owner
     token = uuid.uuid4().hex
     record = PendingPersona(
@@ -162,7 +164,7 @@ def _record_from_dict(data: object) -> PendingPersona | None:
     if not isinstance(data, dict):
         return None
     try:
-        return PendingPersona(
+        record = PendingPersona(
             token=str(data["token"]),
             owner_provider=str(data["owner_provider"]),
             owner_kind=str(data["owner_kind"]),
@@ -179,6 +181,7 @@ def _record_from_dict(data: object) -> PendingPersona | None:
                 else None
             ),
         )
+        return record if record.target == "soul" else None
     except (KeyError, TypeError, ValueError):
         return None
 

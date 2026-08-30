@@ -56,12 +56,12 @@ def test_context_bundle_exposes_owner_workspace_separately_from_task_root(
     context = manager.runner_context.write_execution_context(task.id)
     refs = context.context_bundle["workspace_refs"]
 
-    assert refs["owner_workspace_dir"] == str(owner_home / "workspace")
+    assert refs["owner_workspace_dir"] == str(owner_home)
     assert refs["task_root"] == task.task_workspace_dir
     assert context.write_boundary["owner_workspace_dir"] == str(
-        owner_home / "workspace"
+        owner_home
     )
-    assert str(owner_home / "workspace") in Path(
+    assert str(owner_home) in Path(
         context.execution_context_file
     ).read_text(encoding="utf-8")
 

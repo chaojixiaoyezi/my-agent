@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -55,6 +57,48 @@ def test_create_run_writes_full_authority_chain(manager, repo):
     assert {item["event_type"] for item in events} == {"task.created", "agent_run.created"}
     # Task 由框架铸造（B.1 task_id 前缀）。
     assert repo.get_task(task_run["task_id"])["task_id"].startswith("task-")
+
+
+def test_new_runtime_schema_omits_retired_task_and_acceptance_state(repo):
+    """Task 只保存长期身份；新库不再创建已退休的机器验收状态面。"""
+    with repo._runtime_connection() as conn:
+        tables = {
+            str(row["name"])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        task_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(tasks)")
+        }
+        task_run_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(task_runs)")
+        }
+
+    assert "status" not in task_columns
+    assert "current_contract_id" not in task_run_columns
+    assert "acceptance_contracts" not in tables
+    assert "validator_operations" not in tables
+    assert not hasattr(repo, "closeout_task_run")
+
+
+def test_agent_thread_can_be_cold_imported_before_composition_root():
+    """叶子模块先导入时，agent_core 包初始化不得提前装载整套运行时。"""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from agent_py_agent.agent.conversation.agent_thread "
+                "import ensure_subagent_thread; "
+                "from agent_py_agent.agent.core import SimpleAgent; "
+                "assert ensure_subagent_thread and SimpleAgent"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_first_runner_start_activates_pending_attempt_without_new_generation(manager, repo):

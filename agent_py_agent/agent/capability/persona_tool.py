@@ -1,7 +1,9 @@
 # LLM: update_persona 工具——把用户的【长期人设/画像/工作约定】写进对应人格文件(SOUL/USER/AGENTS.md),
 #   这三件每轮整文件注入系统上下文、真正塑造每次交互。区别于 remember(记"需要时才想起"的具体事实/事件到
 #   长期记忆,按相关性召回)。用户表达"以后叫我X/我是做Y的/你说话别太正式"这类长期设定时用本工具,不用 remember。
-#   写入前 scan_memory_content 注入扫描(人格文件每轮注入=注入长效面)。改动时同步 tests/test_persona_tool.py。
+#   写入前 scan_memory_content 注入扫描(人格文件每轮注入=注入长效面)；首次写入保留 version 0 修改前基线。
+#   改动时同步 tests/test_persona_tool.py。
+# 模块用途: 向模型暴露按 owner 隔离的人格增删改查、历史和回滚工具，并统一审批与错误返回。
 from __future__ import annotations
 
 import copy
@@ -48,16 +50,17 @@ _PERSONA_DESCRIPTION = (
     "**target=user(用户画像/称呼/长期偏好)可直接写**;"
     "同一条用户消息里有多个 USER 事实时，必须把全部变更放进一次 operations 批量调用；"
     "整批全部校验后只写一次，任一项失败则全部不写。"
-    "**target=soul(你自己的性格语气)/ agents(长期工作约定)是长期人设，任何变更都必须通过"
-    "统一危险动作审批门。禁止改用 write/edit/patch/shell 绕过。**"
+    "**target=agents(长期工作约定)由当前 owner 的 Agent 自主维护；"
+    "target=soul(你自己的性格语气)的任何变更必须通过统一危险动作审批门。"
+    "禁止改用 write/edit/patch/shell 绕过。**"
 )
 _PERSONA_USE_CASES = (
     "用户说怎么称呼他 / 自我介绍身份角色 / 表达长期偏好 → target=user(直接写)",
     "用户明确要求长期调整性格/语气/风格 → target=soul，由统一审批门裁决",
-    "用户明确要求长期工作约定/产物习惯 → target=agents，由统一审批门裁决",
+    "长期工作约定/产物习惯或反复验证的方法 → target=agents，可自主结构化更新",
 )
 _PERSONA_AVOID_WHEN = (
-    "用基础文件或 shell 工具改 soul/agents → 必须改用 update_persona 的确认链",
+    "用基础文件或 shell 工具改人格文件 → 必须改用 update_persona；只有 soul 需要用户确认",
     "一次性临时语气(如'这次说话活泼点')→ 当场照做即可,别写进 soul",
     "只是'需要时才想起'的具体事实/事件(如'下周三交报告''项目叫X')→ 用 remember 记 memory",
 )
@@ -76,14 +79,14 @@ _PERSONA_KEYWORDS = (
 )
 _PERSONA_PARAMETERS = {
     "action": "可选。add(默认)/list/replace/remove/batch/history/rollback/status。replace/remove 必须先 list 取得 entry_id。",
-    "target": "必填。user(用户画像/称呼,可直接写)/ soul(你的性格语气)/ agents(长期工作约定)。",
+    "target": "必填。user(用户画像/称呼,自主写)/ soul(性格语气,需用户确认)/ agents(长期工作约定,自主写)。",
     "content": "单项 add/replace 必填。要写进的一句话纯描述；不得换行。list/remove 不需要。",
     "entry_id": "replace/remove 必填。只能使用 list 返回的精确 entry_id，不能按自然语言猜删除目标。",
     "source_quote": (
         "可选审计说明。可记录促成本次 USER 画像变更的用户原话；只进入版本记录，不参与授权或文本匹配。"
     ),
     "expected_sha256": "可选。list 返回的文件哈希；并发修改后不匹配则拒绝覆盖。",
-    "rollback_version": "rollback 必填。history 返回的精确版本号。",
+    "rollback_version": "rollback 必填。history 返回的精确版本号；0 表示首次修改前基线。",
     "operations": (
         "可选，仅 target=user。同一条消息要写多个画像事实时使用；"
         "每项为 action/content/entry_id，可选 source_quote 仅作审计记录；按顺序原子执行。"
@@ -96,7 +99,7 @@ _PERSONA_PARAMETER_SCHEMA = {
     "entry_id": {"type": "string"},
     "source_quote": {"type": "string"},
     "expected_sha256": {"type": "string"},
-    "rollback_version": {"type": "integer", "minimum": 1},
+    "rollback_version": {"type": "integer", "minimum": 0},
     "operations": {
         "type": "array",
         "minItems": 1,
@@ -118,6 +121,7 @@ _PERSONA_EXAMPLES = (
     '{"tool":"update_persona","action":"batch","target":"user","operations":[{"action":"add","content":"称呼:松果"},{"action":"add","content":"回答偏好:简洁"}]}',
     '{"tool":"update_persona","action":"list","target":"user"}',
     '{"tool":"update_persona","action":"remove","target":"user","entry_id":"persona-..."}',
+    '{"tool":"update_persona","action":"rollback","target":"user","rollback_version":0}',
     '{"tool":"update_persona","target":"soul","content":"语气偏活泼"}',
 )
 
@@ -175,20 +179,22 @@ class UpdatePersonaTool(BaseTool):
     model_spec = build_update_persona_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy(
-            "dangerous",
+            "mutating",
             by_parameter=((
                 "action",
                 (
                     ("list", "read_only"),
                     ("history", "read_only"),
                     ("status", "read_only"),
-                    ("add", "dangerous"),
-                    ("replace", "dangerous"),
-                    ("remove", "dangerous"),
-                    ("batch", "dangerous"),
-                    ("rollback", "dangerous"),
                 ),
             ),),
+            by_parameter_combinations=tuple(
+                (
+                    (("target", "soul"), ("action", action)),
+                    "dangerous",
+                )
+                for action in ("", "add", "replace", "remove", "batch", "rollback")
+            ),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(parameter_names=("target", "entry_id"),
@@ -367,6 +373,8 @@ def _parse_persona_operations(
     return tuple(operations)
 
 
+# LLM: Rollback accepts the persisted baseline version zero and rejects all negative/non-integer values.
+# 函数用途: 校验 history 返回的精确版本号；0 专门表示首次修改前状态。
 def _parse_rollback_version(
     action: str,
     value: object,
@@ -378,9 +386,9 @@ def _parse_rollback_version(
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        return _err("rollback_version 必须是正整数", "TOOL_INVALID_ARGUMENTS")
-    if parsed < 1:
-        return _err("rollback_version 必须是正整数", "TOOL_INVALID_ARGUMENTS")
+        return _err("rollback_version 必须是非负整数", "TOOL_INVALID_ARGUMENTS")
+    if parsed < 0:
+        return _err("rollback_version 必须是非负整数", "TOOL_INVALID_ARGUMENTS")
     return parsed
 
 

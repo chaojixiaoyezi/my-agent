@@ -10,10 +10,11 @@ import time
 from dataclasses import dataclass
 from typing import ClassVar
 
-from ...common.log_redaction import redact_sensitive_value
-from ...conversation.authority import conversation_transcript_is_authoritative
-from ...tooling.output_projection import project_tool_output_body
-from ..runtime.context_compactor import runtime_compact_policy
+from ..agent_core.runtime.context_compactor import runtime_compact_policy
+from ..common.log_redaction import redact_sensitive_value
+from ..memory_archive.tool_output_externalizer import model_visible_tool_parameters
+from ..tooling.output_projection import project_tool_output_body
+from .authority import conversation_transcript_is_authoritative
 
 _DEFAULT_MAX_CHARS = 48_000
 _DEFAULT_ACTIVE_TURN_HANDOFF_MAX_CHARS = 12_000
@@ -563,15 +564,14 @@ def _bounded_carried_tool_index(records: list[dict], max_chars: int) -> list[str
     return _bounded_carried_tool_index_head_tail(all_lines, max_chars)
 
 
-# LLM: One chronology line exposes only bounded typed keys or already-redacted nested structure;
-# scalar parameter values and unbounded refs never enter the carried index.
+# LLM: One chronology line uses provider-authored model_parameters, never host-completed execution
+# bindings; it exposes only bounded typed keys or already-redacted nested structure.
 # 函数用途: 将一条归档工具记录转换成紧凑索引行，供后续统一做头尾截断。
 def _carried_tool_index_line(index: int, record: dict) -> str:
     tool = str(record.get("tool") or "unknown").strip() or "unknown"
     status = "ok" if record.get("ok") is True else "error"
     ref = _archive_ref(record)
-    raw_params = record.get("parameters")
-    raw_params = raw_params if isinstance(raw_params, dict) else {}
+    raw_params = model_visible_tool_parameters(record)
     redacted = redact_sensitive_value(raw_params)
     params = redacted if isinstance(redacted, dict) else {}
     nested = any(isinstance(value, (dict, list, tuple)) for value in params.values())

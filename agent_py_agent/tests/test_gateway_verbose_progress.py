@@ -789,14 +789,31 @@ def test_gateway_round_end_settles_pending_guidance(tmp_path, monkeypatch) -> No
     assert len(settled) == 1
 
 
-def test_gateway_session_approval_cache_reuses_approved_call(tmp_path, monkeypatch) -> None:
+def test_gateway_session_approval_cache_survives_request_writer_turns(
+    tmp_path,
+    monkeypatch,
+) -> None:
     from agent_py_agent.agent.contracts.tool_approval import ToolApprovalDecision
-    from agent_py_agent.agent.gateway_parts.request_execution import (
-        wait_for_gateway_permission_decision,
+    from agent_py_agent.agent.gateway_parts.approval_session import (
+        ToolApprovalSessionCache,
+        tool_approval_session_scope,
     )
-
-    path = tmp_path / "session.chunks.jsonl"
-    writer = BufferedChunkStreamWriter(path, rich_transcript=True, interactive_approvals=True)
+    cache = ToolApprovalSessionCache()
+    scope = tool_approval_session_scope(
+        owner_id="local/main",
+        thread_id="thread-one",
+        conversation_id="sess-one",
+        cwd=tmp_path / "workspace-one",
+        access_mode="workspace-write",
+        path_access_mode="normal",
+    )
+    first_path = tmp_path / "first.chunks.jsonl"
+    first_writer = BufferedChunkStreamWriter(
+        first_path,
+        rich_transcript=True,
+        interactive_approvals=True,
+    )
+    first_writer.configure_approval_session(cache, lambda: scope)
     request = {
         "permission_id": "approval:abc",
         "request_id": "req-1",
@@ -826,10 +843,10 @@ def test_gateway_session_approval_cache_reuses_approved_call(tmp_path, monkeypat
             req.permission_id, "approved_session"
         ),
     )
-    first = writer.request_permission(request)
+    first = first_writer.request_permission(request)
     assert first["decision"] == "approved_session"
 
-    # 第二次：同 binding 直接放行（不弹框，不再等待）
+    # 第二个 Gateway request 会创建新 writer；同会话同目录同参数仍应直接放行。
     calls: list[str] = []
 
     def fail_wait(chunk_path, req, cancellation_token=None):
@@ -839,9 +856,68 @@ def test_gateway_session_approval_cache_reuses_approved_call(tmp_path, monkeypat
     monkeypatch.setattr(request_execution, "wait_for_gateway_permission_decision", fail_wait)
     request2 = dict(request)
     request2["permission_id"] = "approval:abc2"
-    second = writer.request_permission(request2)
+    second_path = tmp_path / "second.chunks.jsonl"
+    second_writer = BufferedChunkStreamWriter(
+        second_path,
+        rich_transcript=True,
+        interactive_approvals=True,
+    )
+    second_writer.configure_approval_session(cache, lambda: scope)
+    second = second_writer.request_permission(request2)
     assert second["decision"] == "approved"
     assert calls == []
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows = [
+        json.loads(line)
+        for line in second_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert not any(row["kind"] == "permission_requested" for row in rows)
     assert rows[-1]["kind"] == "permission_resolved"
     assert rows[-1]["decision"] == "approved"
+    assert rows[-1]["session_cached"] is True
+
+
+def test_gateway_session_approval_cache_is_exact_scope_and_bounded(tmp_path) -> None:
+    from agent_py_agent.agent.gateway_parts.approval_session import (
+        ToolApprovalSessionCache,
+        tool_approval_session_scope,
+    )
+
+    first_scope = tool_approval_session_scope(
+        owner_id="local/main",
+        thread_id="thread-one",
+        conversation_id="sess-one",
+        cwd=tmp_path / "one",
+        access_mode="workspace-write",
+        path_access_mode="normal",
+    )
+    changed_cwd_scope = tool_approval_session_scope(
+        owner_id="local/main",
+        thread_id="thread-one",
+        conversation_id="sess-one",
+        cwd=tmp_path / "two",
+        access_mode="workspace-write",
+        path_access_mode="normal",
+    )
+    changed_access_scope = tool_approval_session_scope(
+        owner_id="local/main",
+        thread_id="thread-one",
+        conversation_id="sess-one",
+        cwd=tmp_path / "one",
+        access_mode="full-access",
+        path_access_mode="full",
+    )
+    assert first_scope
+    assert len({first_scope, changed_cwd_scope, changed_access_scope}) == 3
+
+    cache = ToolApprovalSessionCache(max_scopes=2, max_keys_per_scope=2)
+    cache.approve(first_scope, "run_command:h1")
+    cache.approve(first_scope, "run_command:h2")
+    cache.approve(first_scope, "run_command:h3")
+    assert cache.is_approved(first_scope, "run_command:h1") is False
+    assert cache.is_approved(first_scope, "run_command:h2") is True
+    assert cache.is_approved(first_scope, "run_command:h3") is True
+    assert cache.is_approved(changed_cwd_scope, "run_command:h3") is False
+
+    cache.approve(changed_cwd_scope, "run_command:h3")
+    cache.approve(changed_access_scope, "run_command:h3")
+    assert cache.is_approved(first_scope, "run_command:h3") is False

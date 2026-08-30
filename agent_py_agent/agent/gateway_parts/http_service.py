@@ -12,6 +12,7 @@ GET /result/<id>、GET /progress/<id>、GET /status、POST /stop。
 # 路由导入按对外 HTTP 分组顺序排列，保持和下方分派表一致。
 # ruff: noqa: I001
 
+import errno
 import itertools
 import json
 import os
@@ -70,9 +71,27 @@ class GatewayHTTPServerParams:
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"}
 
 
+_CLIENT_DISCONNECT_ERRNOS = {
+    errno.EPIPE,
+    errno.ECONNABORTED,
+    errno.ECONNRESET,
+}
+
+
 def _is_loopback_host(host: str) -> bool:
     h = (host or "").strip().lower().strip("[]")
     return h in _LOOPBACK_HOSTS or h.startswith("127.")
+
+
+# LLM: Only socket-close errno values qualify as routine client departure.
+# Do not broaden this to all OSError: disk, encoding and business I/O failures
+# must still reach the bounded server error path with their traceback.
+# 函数用途: 判断一次 HTTP 写回失败是否只是客户端已提前关闭连接。
+def _is_client_disconnect_error(exc: OSError) -> bool:
+    return isinstance(
+        exc,
+        (BrokenPipeError, ConnectionAbortedError, ConnectionResetError),
+    ) or exc.errno in _CLIENT_DISCONNECT_ERRNOS
 
 
 # 进程内单调计数器:ThreadingHTTPServer 下并发请求跑在同进程多线程,同毫秒同 pid 会撞出相同
@@ -98,20 +117,31 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if server is not None and server.auth_middleware is not None:
             self._auth_middleware = server.auth_middleware
 
-    # LLM: Every response closes its HTTP/1.1 connection because one pooled
-    # worker owns the connection until BaseHTTPRequestHandler finishes it.
-    # Keeping an idle socket alive would let a client monopolize the fixed pool.
-    # 函数用途: 发送 JSON 后关闭短轮询连接，避免一个客户端长期占住 Gateway HTTP 工位。
-    def _send_json(self, status: int, body: dict[str, Any]) -> None:
-        body_str = json.dumps(body, ensure_ascii=False)
+    # LLM: The socket write boundary treats only explicit disconnect errno as a
+    # completed transport handoff. Header/body writes share this one boundary so
+    # a departing poll client never becomes a product failure or traceback storm.
+    # 函数用途: 发送短连接响应；客户端已离开时安静收口，其他 I/O 错误继续抛出。
+    def _send_payload(self, status: int, content_type: str, body: bytes) -> None:
         self.close_connection = True
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body_str.encode("utf-8"))))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body_str.encode("utf-8"))
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except OSError as exc:
+            if _is_client_disconnect_error(exc):
+                return
+            raise
+
+    # LLM: JSON encoding remains outside the disconnect catcher so serialization
+    # bugs cannot be mislabeled as a client departure.
+    # 函数用途: 编码并发送 JSON，统一复用短连接写回和断连收口语义。
+    def _send_json(self, status: int, body: dict[str, Any]) -> None:
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self._send_payload(status, "application/json; charset=utf-8", payload)
 
     def _read_json(self) -> dict[str, Any]:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -206,14 +236,7 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json(500, {"error": runtime_error_report(exc, context="gateway.metrics.render")})
             return
-        self.close_connection = True
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        self._send_payload(200, "text/plain; version=0.0.4; charset=utf-8", body)
 
     def _handle_result(self) -> None:
         handle_result(self, _server_instance)

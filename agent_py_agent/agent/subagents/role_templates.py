@@ -38,7 +38,7 @@ RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
 # LLM: Role snapshots expose the same recursive edge-local control at every
 # depth. Host lifecycle owns activity reporting; do not add polling, manual
 # dispatch, model self-report events, or ancestor-wide controls here.
-# 配置用途: worker 保留通用执行能力；coordinator 额外获得创建、直属插话、取消和权限裁决，进展由宿主回传。
+# 配置用途: worker 保留通用执行能力；coordinator 额外获得创建、只读状态、直属插话、取消和权限裁决，进展由宿主回传。
 ROLE_BASE_TOOLS = [
     *READ_ONLY_TOOLS,
     *REPORT_WRITE_TOOLS,
@@ -48,9 +48,10 @@ ROLE_BASE_TOOLS = [
 ]
 # LLM: This is the complete edge-local management surface. Leaf role snapshots
 # remove every item; only a typed can_spawn_children coordinator may inherit it.
-# 配置用途: 定义协调角色管理直属下级所需的创建、插话、取消和权限答复入口。
+# 配置用途: 定义协调角色管理直属下级所需的创建、只读状态、插话、取消和权限答复入口。
 DIRECT_CHILD_CONTROL_TOOLS = [
     "create_subagents",
+    "list_agents",
     "send_guidance",
     "cancel_subagents",
     "resolve_capability_requests",

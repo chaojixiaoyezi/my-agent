@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 
 from ...agent.conversation.control_commands import (
     parse_conversation_control,
@@ -14,10 +15,10 @@ from ...agent.conversation.control_commands import (
 from .slash_command_types import CHAT_SLASH_COMMANDS, SlashCommandContext
 
 
-# LLM: help renderer 只投影结构化目录项，保持既有 30 列用法栏；不能把帮助文本反向作为命令解析器。
-# 函数用途: 生成 plain/TUI 共用的命令帮助正文。
+# LLM: help renderer 只投影结构化目录项，保持既有 30 列用法栏和中文用户文案；不能把帮助文本反向作为命令解析器。
+# 函数用途: 生成 plain/TUI 共用的中文命令帮助正文。
 def _render_chat_help_text() -> str:
-    lines = ["Available commands:"]
+    lines = ["可用命令："]
     lines.extend(f"{spec.usage:<30} {spec.summary}" for spec in CHAT_SLASH_COMMANDS)
     return "\n".join(lines) + "\n"
 
@@ -36,6 +37,7 @@ def handle_common_slash_command(
 ) -> bool:
     handlers: tuple[SlashHandler, ...] = (
         _handle_help_command,
+        _handle_sessions_command,
         _handle_control_command,
         _handle_remember_command,
         _handle_memory_command,
@@ -80,8 +82,50 @@ def _handle_help_command(
 ) -> bool | None:
     if user != "/help":
         return None
-    suffix = "Ctrl+C                        Exit\nOther input                   Send a normal message\n"
+    suffix = "Ctrl+C                        退出\n其他输入                      发送普通消息\n"
     ctx.print_line(CHAT_HELP_TEXT + (suffix if include_plain_help else ""))
+    return True
+
+
+# LLM: `/sessions` only projects SessionManager's current-owner records and exact CLI resume
+# commands. It must not scan another owner, infer a title from conversation text, switch the
+# live TUI in place, or mutate session/task state.
+# 函数用途: 在当前界面列出本用户最近会话，并明确告诉用户怎样退出后恢复指定会话。
+def _handle_sessions_command(
+    user: str,
+    ctx: SlashCommandContext,
+    include_plain_help: bool,
+) -> bool | None:
+    del include_plain_help
+    if user != "/sessions":
+        return None
+    from ...agent.session.manager import SessionManager
+
+    manager = SessionManager(ctx.agent.config)
+    sessions, load_errors = manager.list_sessions_report()
+    recent = sessions[:10]
+    if not recent:
+        ctx.print_line("当前用户还没有可恢复的历史会话。")
+        return True
+    lines = ["最近会话（仅当前用户，按更新时间倒序）："]
+    for session in recent:
+        marker = "（当前）" if session.session_id == ctx.conversation_id else ""
+        updated = datetime.fromtimestamp(session.updated_at).astimezone().strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        channel = str(session.last_active_channel or "chat")
+        lines.append(f"- {updated}  {session.session_id}{marker}  [{channel}]")
+    if len(sessions) > len(recent):
+        lines.append(f"… 另有 {len(sessions) - len(recent)} 条较早会话未显示。")
+    if load_errors:
+        lines.append(f"另有 {len(load_errors)} 条损坏会话记录未展示。")
+    lines.extend(
+        (
+            "恢复旧会话：先输入 /exit 退出当前界面，再运行：",
+            "my-agent resume <session_id>",
+        )
+    )
+    ctx.print_line("\n".join(lines))
     return True
 
 
@@ -100,7 +144,12 @@ def _handle_remember_command(
         )
         records = result.get("records") if isinstance(result, dict) else []
         if result.get("ok") and isinstance(records, list) and records:
-            ctx.print_line(f"Remembered: {str(records[0].get('content') or '')}")
+            ctx.print_line(f"已记住：{str(records[0].get('content') or '')}")
+        elif result.get("outcome") == "unknown":
+            ctx.print_line(
+                "记忆保存结果暂时无法确认；Gateway 可能已经写入，系统没有自动重复保存。"
+                "可用 /memory <关键词> 查询。"
+            )
         else:
             ctx.print_line(
                 "记忆保存失败："
@@ -108,7 +157,7 @@ def _handle_remember_command(
             )
         return True
     rec = ctx.agent.remember(user[len("/remember "):], kind="fact")
-    ctx.print_line(f"Remembered: {rec.content}")
+    ctx.print_line(f"已记住：{rec.content}")
     return True
 
 
@@ -146,7 +195,7 @@ def _recent_memory(ctx: SlashCommandContext):
 
 def _print_memory_records(ctx: SlashCommandContext, records) -> None:
     if not records:
-        ctx.print_line("No memory records found.")
+        ctx.print_line("没有找到记忆记录。")
         return
     for rec in records:
         if isinstance(rec, dict):
@@ -167,7 +216,7 @@ def _handle_prompt_file_command(
     if not user.startswith("/prompt-file "):
         return None
     ctx.prompt_files.append(user[len("/prompt-file "):].strip())
-    ctx.print_line(f"Added prompt file; count={len(ctx.prompt_files)}.")
+    ctx.print_line(f"已添加提示文件；当前共 {len(ctx.prompt_files)} 个。")
     return True
 
 
@@ -201,11 +250,14 @@ def is_exit_command(user: str) -> bool:
     return user.lower() in {"/exit", "/logout", "/quit", "exit", "logout", "退出"}
 
 
+# LLM: `/expand` 的帮助目录、plain TUI 与 rich TUI 必须共享这一解析器；显式 last
+# 和省略参数语义相同，未知文本必须返回 None 而不能猜编号。
+# 函数用途: 解析要展开最后一条还是指定编号的助手回复。
 def parse_expand_target(raw: str) -> str | None:
     if raw == "/expand":
         return "last"
     target = raw[len("/expand "):].strip()
-    if not target:
+    if not target or target == "last":
         return "last"
     if target.isdigit():
         return target

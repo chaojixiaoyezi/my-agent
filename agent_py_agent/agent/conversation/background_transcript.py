@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..subagents.tool_approval_bridge import SubagentToolApprovalSinkMixin
+from .agent_tool_approval import SubagentToolApprovalSinkMixin
 from .channels import project_user_reply, redact_host_absolute_paths
 from .tool_input_progress import ToolInputProgressSinkMixin
 

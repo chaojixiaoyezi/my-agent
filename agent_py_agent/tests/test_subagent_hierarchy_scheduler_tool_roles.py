@@ -263,6 +263,7 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
         goal="root",
         thought="split",
         plan=["plan"],
+        role="coordinator",
         allowed_tools=[
             "create_subagents",
             "inspect_agent_tree",

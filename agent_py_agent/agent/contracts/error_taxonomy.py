@@ -19,6 +19,13 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "GATEWAY_WORKSPACE_INVALID": ErrorContract(
+        code="GATEWAY_WORKSPACE_INVALID",
+        category="path",
+        retryable=False,
+        recommended_action=RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value,
+        recovery_hint="客户端工作目录不存在、格式错误或越过 owner 边界；改用当前 owner 工作区后重试。",
+    ),
     "PATH_INVALID": ErrorContract(
         code="PATH_INVALID",
         category="path",
@@ -138,7 +145,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint=(
             "人格三件套只能通过 update_persona 修改：target=user 可由当前结构化 owner 的 Agent 自主写；"
-            "target=soul/agents 会进入用户确认链。"
+            "target=soul 会进入用户确认链；target=user/agents 由当前 owner 的 Agent 自主维护。"
         ),
     ),
     "PERSONA_ENTRY_NOT_FOUND": ErrorContract(
@@ -367,6 +374,26 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recovery_hint=(
             "接管边未全部写入，新的 replacement 已在启动前取消；先恢复子代理状态存储，"
             "再按原结构化接管关系重试。"
+        ),
+    ),
+    "SUBAGENT_GUIDANCE_TARGET_TERMINAL": ErrorContract(
+        code="SUBAGENT_GUIDANCE_TARGET_TERMINAL",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.DISPATCH.value,
+        recovery_hint=(
+            "目标子代理已经结束，不会再消费普通 guidance；如仍需补做，创建职责明确的"
+            "后续或替代子代理，不要把同一消息反复排进终态邮箱。"
+        ),
+    ),
+    "SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING": ErrorContract(
+        code="SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.WAIT.value,
+        recovery_hint=(
+            "目标当前没有可消费消息的执行轮；先等待权威状态进入运行/待运行/可纠偏阻塞态，"
+            "或通过既有恢复链路恢复后再发送。"
         ),
     ),
     "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED": ErrorContract(
@@ -638,6 +665,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="工具参数不合法；按工具 schema 修参数后可重试。",
+    ),
+    "TOOL_INVOCATION_VALIDATOR_FAILED": ErrorContract(
+        code="TOOL_INVOCATION_VALIDATOR_FAILED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="工具执行前校验器自身发生故障；本次调用未执行，保留参数和错误码并上报底座修复。",
+    ),
+    "TOOL_INVOCATION_VALIDATOR_CONTRACT_BROKEN": ErrorContract(
+        code="TOOL_INVOCATION_VALIDATOR_CONTRACT_BROKEN",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="工具执行前校验器返回了非法合同结果；本次调用未执行，需修复校验器合同。",
     ),
     "TOOL_INTERNAL_PARAMETER_FORBIDDEN": ErrorContract(
         code="TOOL_INTERNAL_PARAMETER_FORBIDDEN",
@@ -1231,6 +1272,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.READ_ARTIFACT_REF.value,
         recovery_hint="产物引用缺失；先按 refs 查找，找不到再重建产物。",
     ),
+    "TOOL_OUTPUT_REQUIRES_READ_ARTIFACT": ErrorContract(
+        code="TOOL_OUTPUT_REQUIRES_READ_ARTIFACT",
+        category="artifact",
+        retryable=False,
+        recommended_action=RecoveryAction.READ_ARTIFACT_REF.value,
+        recovery_hint="这是已外置工具输出；停止重试 read_file，照抄 suggested_tool_call 改用 read_artifact。",
+    ),
     # —— read_artifact / reader / read_modes 语义错误码：底层产出小写码（artifact_not_registered 等），
     #    经 error_contract 的大小写归一化命中下列注册；缺注册会回落 UNKNOWN_ERROR 误导模型放弃。——
     "MISSING_ARTIFACT_REF": ErrorContract(
@@ -1422,6 +1470,48 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RECOVER_FROM_CHECKPOINT.value,
         recovery_hint="compact 引用缺失；读取 checkpoint、summary、raw archive 做恢复，不要继续自动执行。",
     ),
+    "COMPACT_TURN_ACTIVE": ErrorContract(
+        code="COMPACT_TURN_ACTIVE",
+        category="compact",
+        retryable=True,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="当前会话轮仍在运行；等该轮结束或显式停止后再发起 compact。",
+    ),
+    "COMPACT_LANE_BUSY": ErrorContract(
+        code="COMPACT_LANE_BUSY",
+        category="compact",
+        retryable=True,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="同一会话的执行通道正被占用；保留原历史和游标，等已有操作结束后重试。",
+    ),
+    "COMPACT_INTERRUPTED": ErrorContract(
+        code="COMPACT_INTERRUPTED",
+        category="compact",
+        retryable=True,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint="用户已中断本次 compact；原历史、游标和代次保持不变，需要时可由用户重新发起。",
+    ),
+    "COMPACT_FAILED": ErrorContract(
+        code="COMPACT_FAILED",
+        category="compact",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="compact 未能提交；原历史、游标和代次保持不变，短暂退避后重试。",
+    ),
+    "COMPACT_STOP_TARGET_INVALID": ErrorContract(
+        code="COMPACT_STOP_TARGET_INVALID",
+        category="compact",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="停止请求没有携带有效的 Compact 控制消息身份；不得改停其他任务。",
+    ),
+    "COMPACT_STOP_TARGET_INACTIVE": ErrorContract(
+        code="COMPACT_STOP_TARGET_INACTIVE",
+        category="compact",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint="目标 Compact 已结束或已换代；不要扩大停止范围，当前请求直接结束。",
+    ),
     "CONTEXT_COMPACT_DEFERRED": ErrorContract(
         code="CONTEXT_COMPACT_DEFERRED",
         category="compact",
@@ -1435,13 +1525,6 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
         recovery_hint="前一个工具改变了耐久运行上下文；从新快照重新生成并发起这个尚未执行的调用。",
-    ),
-    "TOOL_CALL_LIMIT_DEFERRED": ErrorContract(
-        code="TOOL_CALL_LIMIT_DEFERRED",
-        category="runtime",
-        retryable=True,
-        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
-        recovery_hint="本轮调用超过宿主上限；下一模型轮按最新结构化事实重新发起尚未执行的调用。",
     ),
     "ORCHESTRATION_CALL_DEFERRED": ErrorContract(
         code="ORCHESTRATION_CALL_DEFERRED",

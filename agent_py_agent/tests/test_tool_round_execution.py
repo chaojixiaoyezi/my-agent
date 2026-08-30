@@ -11,10 +11,13 @@ import time
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolProgressEvent,
     ToolRoundExecutionRequest,
     _emit_tool_progress,
+    _payload_progress_detail,
     _structured_tool_progress,
     execute_tool_round,
 )
@@ -25,6 +28,7 @@ from agent_py_agent.agent.tooling.executor import ToolExecution
 from agent_py_agent.agent.tooling.runtime_contracts import (
     ProviderToolCapability,
     ToolCall,
+    ToolContentBlock,
     ToolFailureFacts,
     ToolProtocolSnapshot,
     ToolResult,
@@ -189,6 +193,45 @@ def test_structured_tool_progress_projects_bounded_public_display() -> None:
     assert display["path"] == "~/.my-agent/owner/task/src/ui.py"
     assert display["lines_added"] == 1
     assert "private_extra" not in display["lines"][0]
+
+
+def test_structured_tool_progress_hides_externalized_blob_path() -> None:
+    call = _canonical_calls([{"tool": "web_fetch", "url": "https://example.com/report"}])[0]
+    request = _round_request(
+        agent=SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir="/private/owner")),
+        params=SimpleNamespace(tool_context=[]),
+        tool_rounds=1,
+        response=ModelResponse(text="", backend="test"),
+        calls=[{"tool": "web_fetch", "url": "https://example.com/report"}],
+        execute_one=lambda _request: None,
+        record_one=lambda _record: None,
+    )
+    result = ToolResult.succeeded(
+        call,
+        facts=ToolSuccessFacts(
+            content_blocks=(
+                ToolContentBlock("text", text="bounded preview"),
+                ToolContentBlock("ref", ref="/private/owner/blobs/tool-output.json"),
+            ),
+            metadata={
+                "archive_output_record": {
+                    "output_externalized": True,
+                    "scoped_call_id": "run-web:call-web",
+                    "output_path": "/private/owner/blobs/tool-output.json",
+                }
+            },
+        ),
+    )
+
+    payload = _structured_tool_progress(
+        ToolProgressEvent(request, 1, call, "finished", "完成", result=result),
+        "web_fetch",
+        _payload_progress_detail(call),
+    )
+
+    assert payload["detail"] == "https://example.com/report"
+    assert payload["output"] == "run-web:call-web"
+    assert "/private/owner" not in json.dumps(payload, ensure_ascii=False)
 
 
 def test_non_callable_typed_sink_receives_child_tool_and_process_events() -> None:
@@ -786,7 +829,7 @@ def test_same_round_guidance_after_create_has_specific_retryable_error_code():
     assert records[1].error_code == "ORCHESTRATION_CALL_DEFERRED"
 
 
-def test_tool_round_can_defer_excess_model_tool_calls_to_next_round():
+def test_tool_round_chunks_excess_calls_without_fake_failures():
     calls = [{"tool": "read_file", "path": f"/tmp/source-{idx}.md"} for idx in range(5)]
     executed: list[str] = []
     records: list[tuple[str, str]] = []
@@ -816,22 +859,21 @@ def test_tool_round_can_defer_excess_model_tool_calls_to_next_round():
     )
 
     assert completed is False
-    assert executed == ["/tmp/source-0.md", "/tmp/source-1.md"]
+    assert executed == [
+        "/tmp/source-0.md",
+        "/tmp/source-1.md",
+        "/tmp/source-2.md",
+        "/tmp/source-3.md",
+        "/tmp/source-4.md",
+    ]
     assert records == [
         ("/tmp/source-0.md", ""),
         ("/tmp/source-1.md", ""),
-        ("/tmp/source-2.md", "TOOL_CALL_LIMIT_DEFERRED"),
-        ("/tmp/source-3.md", "TOOL_CALL_LIMIT_DEFERRED"),
-        ("/tmp/source-4.md", "TOOL_CALL_LIMIT_DEFERRED"),
+        ("/tmp/source-2.md", ""),
+        ("/tmp/source-3.md", ""),
+        ("/tmp/source-4.md", ""),
     ]
-    assert any(
-        "[tool-system]" in str(item) and "本轮模型请求了 5 个工具调用" in str(item)
-        for item in params.tool_context
-    )
-    assert any(
-        "只处理到前 2 个" in str(item) and "剩余 3 个没有执行" in str(item)
-        for item in params.tool_context
-    )
+    assert not any("没有执行" in str(item) for item in params.tool_context)
 
 
 def test_tool_round_does_not_limit_model_tool_calls_by_default():
@@ -930,9 +972,12 @@ def test_parallel_safe_readers_overlap_but_records_keep_provider_order():
     assert records == [0, 1], "durable ToolResult order follows provider call order"
 
 
-def test_parallel_limit_caps_parallel_safe_segment():
-    """EXEC-01: max_parallel_tool_calls 配置生效——超过上限的并行调用转串行,
-    全部仍执行, 不丢调用。"""
+@pytest.mark.parametrize(
+    "limit_key",
+    ["max_parallel_tool_calls", "max_tool_calls_per_round"],
+)
+def test_parallel_batch_limits_cap_segments_without_dropping_calls(limit_key):
+    """两个批大小配置都只削峰；全部调用仍执行且按 provider 顺序记录。"""
     spec = make_test_model_spec(
         "read_probe",
         input_schema={
@@ -972,7 +1017,7 @@ def test_parallel_limit_caps_parallel_safe_segment():
         _round_request(
             agent=SimpleNamespace(),
             params=SimpleNamespace(
-                task_attributes={"max_parallel_tool_calls": 2},
+                task_attributes={limit_key: 2},
                 tool_context=[],
                 tool_runtime_snapshot=snapshot,
                 cancellation_token=CancellationToken(),
@@ -1222,6 +1267,155 @@ def test_tool_round_rebases_placeholder_paths_after_conversation_task_selection(
             "output_files": [f"{selected_root}/output/app.py"],
         }
     ]
+
+
+def test_tool_round_rebases_from_exact_request_when_agent_thread_local_is_missing():
+    owner_root = "/owner"
+    selected_root = "/owner/tasks/2026-08-29/task-a"
+    attrs = {
+        "conversation_rebase_from_task_root": owner_root,
+        "run_workspace": {"task_root": selected_root},
+    }
+    agent = SimpleNamespace(
+        config=SimpleNamespace(memory_compact_auto_trigger_percent=90),
+    )
+    params = SimpleNamespace(task_attributes=attrs, tool_context=[])
+    executed: list[dict[str, object]] = []
+
+    def execute_one(request):
+        executed.append(_payload(request.call))
+        return _success(request, "{}")
+
+    execute_tool_round(
+        _round_request(
+            agent=agent,
+            params=params,
+            tool_rounds=1,
+            response=ModelResponse(text="tool round", backend="test"),
+            calls=[
+                {
+                    "tool": "run_command",
+                    "command": "mkdir -p workspace-check",
+                    "working_dir": owner_root,
+                }
+            ],
+            execute_one=execute_one,
+            record_one=lambda _record: None,
+        )
+    )
+
+    assert executed == [
+        {
+            "tool": "run_command",
+            "command": "mkdir -p workspace-check",
+            "working_dir": selected_root,
+        }
+    ]
+
+
+def test_tool_round_workspace_rebase_is_idempotent_when_target_is_below_source():
+    owner_root = "/owner"
+    selected_root = "/owner/tasks/2026-08-29/task-a"
+    attrs = {
+        "conversation_rebase_from_task_root": owner_root,
+        "run_workspace": {"task_root": selected_root},
+    }
+    agent = SimpleNamespace(
+        _current_run_params=SimpleNamespace(task_attributes=attrs),
+        config=SimpleNamespace(memory_compact_auto_trigger_percent=90),
+    )
+    params = SimpleNamespace(task_attributes=attrs, tool_context=[])
+    executed: list[dict[str, object]] = []
+
+    def execute_one(request):
+        executed.append(_payload(request.call))
+        return _success(request, "{}")
+
+    already_rebased = f"{selected_root}/research/pi.md"
+    execute_tool_round(
+        _round_request(
+            agent=agent,
+            params=params,
+            tool_rounds=2,
+            response=ModelResponse(text="tool round", backend="test"),
+            calls=[
+                {
+                    "tool": "create_subagents",
+                    "goal": (
+                        f"新产物写到 {owner_root}/research/new.md；"
+                        f"已转换产物保持 {already_rebased}。"
+                    ),
+                    "output_files": [already_rebased],
+                }
+            ],
+            execute_one=execute_one,
+            record_one=lambda _record: None,
+        )
+    )
+
+    assert executed == [
+        {
+            "tool": "create_subagents",
+            "goal": (
+                f"新产物写到 {selected_root}/research/new.md；"
+                f"已转换产物保持 {already_rebased}。"
+            ),
+            "output_files": [already_rebased],
+        }
+    ]
+
+
+def test_tool_round_separates_provider_arguments_from_host_completed_execution() -> None:
+    public_arguments = {
+        "artifact_ref": "run-web:fetch-1",
+        "mode": "tail",
+        "max_chars": 800,
+    }
+    host_arguments = {
+        **public_arguments,
+        "run_id": "run-web",
+        "task_id": "task-web",
+        "request_id": "request-web",
+    }
+    recorded = []
+
+    def execute_one(request):
+        assert request.model_call is not None
+        assert request.model_call.arguments == public_arguments
+        completed_call = replace(request.call, arguments=host_arguments)
+        result = ToolResult.succeeded(
+            completed_call,
+            '{"ok": true, "content": "Copyright"}',
+            facts=ToolSuccessFacts(effect_outcome="confirmed"),
+        )
+        return ToolExecution(
+            completed_call,
+            ActionDecision("allow"),
+            result,
+            ("received", "normalized", "running", "succeeded", "projected"),
+        )
+
+    execute_tool_round(
+        _round_request(
+            agent=SimpleNamespace(
+                config=SimpleNamespace(memory_compact_auto_trigger_percent=0)
+            ),
+            params=SimpleNamespace(task_attributes={}, tool_context=[]),
+            tool_rounds=1,
+            response=ModelResponse(text="tool round", backend="test"),
+            calls=[{"tool": "read_artifact", **public_arguments}],
+            execute_one=execute_one,
+            record_one=recorded.append,
+        )
+    )
+
+    assert recorded[0].call.arguments == host_arguments
+    assert recorded[0].model_visible_call.arguments == public_arguments
+    assert recorded[0].model_payload == {
+        "tool": "read_artifact",
+        "call_id": "round-test-call-1",
+        **public_arguments,
+    }
 
 
 def test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget():

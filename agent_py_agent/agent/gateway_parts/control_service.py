@@ -13,8 +13,13 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from ..concurrency.interrupt import interrupt_by_name
+from ..concurrency.interrupt import (
+    interrupt_by_name,
+    is_interrupted,
+    register_interruptible,
+)
 from ..conversation.compact import (
+    ConversationCompactOptions,
     inspect_conversation_context,
     prepare_conversation_context,
     render_conversation_context_usage,
@@ -24,6 +29,7 @@ from ..conversation.control_commands import (
     ConversationControlResult,
     ConversationTaskStatus,
     NamedConversationWorkStatus,
+    conversation_compact_interrupt_name,
     conversation_request_interrupt_name,
     render_conversation_task_status,
     render_verbose_control,
@@ -337,6 +343,9 @@ def execute_gateway_conversation_control(
         ):
             return _control_result_from_steer_receipt(steer_receipt)
     if command.kind == "stop":
+        compact_stop = _stop_targeted_manual_compact(scope)
+        if compact_stop is not None:
+            return compact_stop
         live_requests = _live_window_requests(paths, scope)
         expected_turn_id = _steer_expected_turn_id(scope)
         if expected_turn_id:
@@ -692,11 +701,39 @@ def _execute_context_control(
         )
 
 
-# LLM: Manual compact may mutate only the exact idle owner/thread and must hold the same durable
-# execution lane as foreground/background turns before calling the canonical checkpoint/CAS path.
-# A committed result returns its typed thread generation so adapters never parse display prose.
-# 函数用途: 强制压缩当前已完成的会话历史；活跃任务或并发执行时会明确拒绝，成功时返回权威 Compact 代数。
+# LLM: Manual Compact is a first-class cancellable turn like 会话运行时's Compact task.  Register the
+# authenticated conversation plus original control message before any admission check so a TUI Esc
+# can target only this operation and provider transport can close its exact socket.
+# 函数用途: 为手动 Compact 建立精确中断身份，再进入唯一压缩实现。
 def _execute_compact_control(
+    base_agent: object,
+    paths: GatewayPaths,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    client_message_id = str(scope.metadata.get("message_id") or "").strip()
+    if not client_message_id:
+        client_message_id = new_id("manual-compact-local")
+    interrupt_name = conversation_compact_interrupt_name(
+        scope.user_id,
+        scope.channel,
+        scope.conversation_id,
+        client_message_id,
+    )
+    with register_interruptible(interrupt_name):
+        return _execute_registered_compact_control(
+            base_agent,
+            paths,
+            command,
+            scope,
+        )
+
+
+# LLM: The registered manual Compact may mutate only the exact idle owner/thread and must hold the
+# same durable execution lane as foreground/background turns.  User interruption is distinct from
+# lane contention and can never advance the checkpoint cursor or Compact generation.
+# 函数用途: 执行已经登记中断身份的手动压缩，并区分用户停止、占用冲突和真实失败。
+def _execute_registered_compact_control(
     base_agent: object,
     paths: GatewayPaths,
     command: ConversationControlCommand,
@@ -707,6 +744,7 @@ def _execute_compact_control(
             "compact",
             False,
             "当前任务仍在运行；请等本轮完成或先使用 /stop，再执行 /compact。",
+            error_code="COMPACT_TURN_ACTIVE",
         )
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
@@ -715,14 +753,14 @@ def _execute_compact_control(
         if thread is None:
             return ConversationControlResult(
                 "compact",
-                False,
+                True,
                 "当前会话还没有可压缩的历史。",
             )
         before = inspect_conversation_context(owner_agent, store, thread)
         if before.pending_messages <= 0:
             return ConversationControlResult(
                 "compact",
-                False,
+                True,
                 "当前会话没有新的已完成历史需要压缩。",
             )
         with _manual_compact_lane(owner_agent, store, thread.thread_id):
@@ -734,14 +772,16 @@ def _execute_compact_control(
                 owner_agent,
                 store,
                 refreshed,
-                current_prompt="",
-                force=True,
-                custom_instructions=command.value,
+                options=ConversationCompactOptions(
+                    force=True,
+                    custom_instructions=command.value,
+                    interrupt_check=is_interrupted,
+                ),
             )
         if not compacted.compacted:
             return ConversationControlResult(
                 "compact",
-                False,
+                True,
                 "当前会话没有新的已完成历史需要压缩。",
             )
         return ConversationControlResult(
@@ -759,22 +799,31 @@ def _execute_compact_control(
             ),
         )
     except InterruptedError:
+        if is_interrupted():
+            return ConversationControlResult(
+                "compact",
+                False,
+                "上下文压缩已中断；原历史、游标和 compact 次数均保持不变。",
+                error_code="COMPACT_INTERRUPTED",
+            )
         return ConversationControlResult(
             "compact",
             False,
             "当前会话正被另一个执行轮占用，本次未压缩；请稍后重试。",
+            error_code="COMPACT_LANE_BUSY",
         )
     except Exception:
         return ConversationControlResult(
             "compact",
             False,
             "手动 compact 未完成，会话游标保持原状；请稍后重试。",
+            error_code="COMPACT_FAILED",
         )
 
 
-# LLM: The lane has a short admission deadline because a slash control must never queue behind a
-# long model turn; once acquired, its heartbeat covers the complete summary-model call and commit.
-# 函数用途: 为手动 compact 快速申请与正常任务共用的单会话执行权。
+# LLM: The lane has a short admission deadline and also observes the registered user-interrupt
+# token; once acquired, its heartbeat covers the complete summary-model call and guarded commit.
+# 函数用途: 为手动 Compact 快速申请单会话执行权，并在排队期间响应精确 Esc 停止。
 def _manual_compact_lane(owner_agent: object, store: object, thread_id: str):
     config = getattr(owner_agent, "config", None)
     ttl_seconds = max(
@@ -797,9 +846,52 @@ def _manual_compact_lane(owner_agent: object, store: object, thread_id: str):
                     0,
                 ),
             ),
-            interrupt_check=lambda: time.monotonic() >= deadline,
+            interrupt_check=lambda: is_interrupted() or time.monotonic() >= deadline,
             runtime_facts={"execution_source": "conversation_control"},
         )
+    )
+
+
+# LLM: A stop carrying target_control_message_id may interrupt only the manual Compact registered
+# under the same authenticated user/channel/conversation.  It never falls through to a foreground
+# task, child tree, or another owner's operation when that exact target is absent.
+# 函数用途: 处理 TUI 在手动 Compact 动画期间发来的精确 Esc 停止请求。
+def _stop_targeted_manual_compact(
+    scope: GatewayControlScope,
+) -> ConversationControlResult | None:
+    target = str(scope.metadata.get("target_control_message_id") or "").strip()
+    if not target:
+        return None
+    if len(target) > 256:
+        return ConversationControlResult(
+            "stop",
+            False,
+            "目标 Compact 身份无效，未停止其他内容。",
+            request_id=target[:256],
+            delivery_status="rejected",
+            error_code="COMPACT_STOP_TARGET_INVALID",
+        )
+    interrupt_name = conversation_compact_interrupt_name(
+        scope.user_id,
+        scope.channel,
+        scope.conversation_id,
+        target,
+    )
+    if interrupt_by_name(interrupt_name):
+        return ConversationControlResult(
+            "stop",
+            True,
+            "已请求停止当前上下文压缩；正在保留原历史。",
+            request_id=target,
+            delivery_status="accepted",
+        )
+    return ConversationControlResult(
+        "stop",
+        False,
+        "目标上下文压缩已经结束或切换，未停止其他内容。",
+        request_id=target,
+        delivery_status="rejected",
+        error_code="COMPACT_STOP_TARGET_INACTIVE",
     )
 
 
@@ -1999,25 +2091,25 @@ def _interrupt_task_registry_record(owner_agent: object, task_id: str) -> None:
         return
 
 
-# LLM: Child cancellation is best-effort and off the HTTP callback thread; the main stop ack stays immediate.
-# 函数用途：后台取消当前请求派生的活跃子代理和进程。
+# LLM: Child cancellation stays off the HTTP callback thread so the stop ACK remains immediate.
+# It must wait for the same owner-local creation transaction and resolve lineage inside that guard;
+# otherwise a create_subagents call already in flight can publish children after an empty snapshot.
+# 函数用途：等待在途派工落盘后重新读取真实谱系，再后台取消当前请求派生的全部活跃子代理和进程。
 def _cancel_request_subagents_async(
     owner_agent: object,
     request_id: str,
     *,
     run_ids: list[str] | None = None,
 ) -> None:
-    try:
-        selected_run_ids = (
-            list(run_ids)
-            if run_ids is not None
-            else owner_agent.subagent_run_ids_for_request(request_id)
-        )
-    except Exception:
-        return
-
     def cancel() -> None:
         try:
+            supplied = [str(item).strip() for item in list(run_ids or []) if str(item).strip()]
+            discovered = [
+                str(item).strip()
+                for item in owner_agent.subagent_run_ids_for_request(request_id)
+                if str(item).strip()
+            ]
+            selected_run_ids = list(dict.fromkeys([*supplied, *discovered]))
             owner_agent.cancel_request_subagents(
                 request_id,
                 reason="conversation_user_stop",
@@ -2026,7 +2118,22 @@ def _cancel_request_subagents_async(
         except Exception:
             return
 
-    threading.Thread(target=cancel, name=f"cancel-{request_id}", daemon=True).start()
+    def reconcile_after_creation() -> None:
+        guard = getattr(getattr(owner_agent, "subagents", None), "creation_guard", None)
+        if not callable(guard):
+            cancel()
+            return
+        try:
+            with guard():
+                cancel()
+        except Exception:
+            return
+
+    threading.Thread(
+        target=reconcile_after_creation,
+        name=f"cancel-{request_id}",
+        daemon=True,
+    ).start()
 
 
 # LLM: Status projects only public runtime facts; tool names, commands, paths and steer history stay private.
@@ -2418,6 +2525,25 @@ def _scope_request_payload(scope: GatewayControlScope) -> dict[str, object]:
 # 函数用途: 为记忆、历史等薄客户端服务解析与普通请求完全相同的 owner-scoped Agent。
 def resolve_gateway_scope_agent(base_agent: object, scope: GatewayControlScope):
     return _request_agent_for_scope(base_agent, scope)
+
+
+# LLM: TUI/Web passive status reads follow 会话运行时 residency: loaded owners
+# are queried in memory and cold owners stay cold. This function never records
+# activity or constructs an Agent; callers must not use it for writes/controls.
+# 函数用途: 只为状态轮询查找已经加载的用户 Agent，避免空闲客户端把 Gateway 拖进反复初始化。
+def resolve_loaded_gateway_scope_agent(
+    base_agent: object,
+    scope: GatewayControlScope,
+):
+    from .request_worker import (
+        _resolve_loaded_request_agent_for_owner,
+        _resolve_request_owner_identity,
+    )
+
+    owner = scope.resolved_owner
+    if owner is None:
+        owner = _resolve_request_owner_identity(base_agent, _scope_request_payload(scope))
+    return _resolve_loaded_request_agent_for_owner(base_agent, owner)
 
 
 # LLM: Request ids are taken only from the claimed record or its filename.

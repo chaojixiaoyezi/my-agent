@@ -366,7 +366,7 @@ def test_context_bundle_latest_cli_reports_observability_payload(tmp_path: Path,
         f'workspace_root: "{workspace}"\n'
         f'my_agent_home: "{home}"\n'
         'model_backend: "echo"\n'
-        
+        'access_mode: "full-access"\n'
         'memory_path: "data/memory.jsonl"\n'
         'local_store_path: "data/local_store/local.db"\n'
         'local_store_files_dir: "data/local_store/files"\n'

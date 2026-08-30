@@ -119,15 +119,21 @@ class TestResolveWorkspaceRoot:
         assert resolve_workspace_root(config, str(config_path)) == roots[0]
 
     def test_resolve_workspace_roots_list_empty_keeps_current_workspace(self, tmp_path: Path):
-        """An empty list item means keep the current CLI workspace."""
+        """An empty list item selects the canonical owner home, never process cwd."""
+        from agent_py_agent.agent.settings import AgentConfig
         from agent_py_agent.cli.common import resolve_workspace_roots
 
-        config = MagicMock()
-        config.workspace_root = ["", "extra"]
+        config = AgentConfig(
+            my_agent_home=str(tmp_path / "home"),
+            workspace_root=["", "extra"],
+        )
         config_path = tmp_path / "config.yaml"
 
         roots = resolve_workspace_roots(config, str(config_path))
-        assert roots == [Path.cwd().resolve(), (tmp_path / "extra").resolve()]
+        assert roots == [
+            (tmp_path / "home" / "owners" / "local" / "main").resolve(),
+            (tmp_path / "extra").resolve(),
+        ]
 
     def test_resolve_workspace_root_expanduser(self, tmp_path: Path):
         """测试 ~ 展开。"""
@@ -146,6 +152,7 @@ class TestMakeAgent:
 
     def test_make_agent_creates_simple_agent(self, tmp_path: Path):
         """验证 make_agent 创建 SimpleAgent 实例。"""
+        from agent_py_agent.agent.settings import AgentConfig
         from agent_py_agent.cli.common import make_agent
 
         args = MagicMock()
@@ -155,8 +162,10 @@ class TestMakeAgent:
         config_file.write_text("workspace_root: .\n", encoding="utf-8")
 
         with patch("agent_py_agent.cli.common.load_config") as mock_load:
-            mock_config = MagicMock()
-            mock_config.workspace_root = str(tmp_path)
+            mock_config = AgentConfig(
+                my_agent_home=str(tmp_path / "home"),
+                workspace_root="",
+            )
             mock_load.return_value = mock_config
 
             with patch("agent_py_agent.cli.common.SimpleAgent") as mock_agent_cls:
@@ -170,6 +179,7 @@ class TestMakeAgent:
 
     def test_make_agent_uses_explicit_workspace_root_override(self, tmp_path: Path):
         """内部后台命令传 workspace root 时，不能再被当前 cwd 污染。"""
+        from agent_py_agent.agent.settings import AgentConfig
         from agent_py_agent.cli.common import make_agent
 
         explicit_root = tmp_path / "real-workspace"
@@ -181,8 +191,11 @@ class TestMakeAgent:
         args.workspace_root = str(explicit_root)
 
         with patch("agent_py_agent.cli.common.load_config") as mock_load:
-            mock_config = MagicMock()
-            mock_config.workspace_root = ""
+            mock_config = AgentConfig(
+                my_agent_home=str(tmp_path / "home"),
+                workspace_root="",
+                access_mode="full-access",
+            )
             mock_load.return_value = mock_config
 
             with patch("agent_py_agent.cli.common.SimpleAgent") as mock_agent_cls:

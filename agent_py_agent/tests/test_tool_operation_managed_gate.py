@@ -1,84 +1,8 @@
-"""B 切片：唯一 ToolOperationCoordinator 门红测（对方 seq 219 矩阵 a-l + 221/228/231 修正）。
+"""ToolOperationCoordinator 的当前权威合同测试。
 
-修订记录（对方 seq 231 + seq 235 复核后的契约修订）：
-- 显式 ExecutionMode：权威字段挂 agent.subagents（对齐生产 SubAgentManager：
-  subagents.runtime_db + subagents.execution_mode，manager.py:61/363-371，
-  authority_fence.py:55 读取路径），值用 ExecutionMode 枚举成员；subagents
-  恒存在（repo 可为 None），不再出现「repo=None 时无 subagents」形态。
-- store 选择 seam（seq 235 问题 2）：_operation_store_for(agent) 表达目标 seam
-  （生产落地点 runtime_db/execution_mode.select_operation_store）——MANAGED →
-  runtime.db adapter，LOCAL_UNMANAGED → LocalStore，同一执行只选一次。
-  生产 seam 未实现 → 测试态 MANAGED 暂落 local（保持双写等红点），
-  test_b2 显式钉住「MANAGED 必须解析到 runtime.db adapter」红点；
-  实现后自动切生产 seam（try-import），测试不自己决定 store 的权威来源。
-- direct_register_chain：a3/c/d/e2/f/k/l 用 record_run_creation 直接建链，不再调
-  authority_context 预建；a2 故意不建链。测试内零引用
-  authority_context/open_authority_operation/close_authority_operation。
-- c/d/f/f2/h 走真实主链（_traced_call → registry → ToolExecutor）+ MANAGED。
-- c/h/l 的 ToolCall.attempt_id 一律用 _direct_register_chain 真实返回值（seq 235
-  问题 3：严格 fence 实现后，测试伪造 attempt 会因不匹配而掩盖目标断言）。
-- f 保留 runtime.db 原语版（settle current-pointer 原子校验，G4 补已实现，绿防
-  回归；「兄弟」= 同 AgentRun 新 attempt，注释已修正）；f2 新增真实 ToolExecutor
-  屏障集成（seq 235 问题 6）：旧 handler 运行中 takeover → 旧 settle 被拒 →
-  旧执行不得向模型报 success；真正 sibling AgentRun 同时正常完成。
-- d 拆分两个正交状态（seq 235 问题 4）：tool_operations.status == "UNKNOWN"
-  （终态）；resource_mutations 对 canonical scope 的 state == "DIRTY" +
-  dirty_reason 非空（DIRTY 属于 mutation 表，不是 operation 终态）；
-  同 effect_key 重放不重跑 handler（handler_calls 计数）。
-- e 保留 LocalStore 绿版 + 新增 e2 MANAGED replay（runtime.db 账本 effect_key 幂等行数）。
-- h 锁冲突策略统一为 fail-fast（对齐 acquire_locks：UNIQUE(canonical_scope) 冲突
-  → 事务回滚 → RuntimeConflictError，不等待串行）；同根三类路径：原始串 /
-  ../ 别名归一化 / symlink 指向同根（seq 235 问题 5）；不同物理根可并行。
-- k 更名 ask→approved-binding 两次调用（非真实异步 suspend，seq 235 问题 6）；
-  补「ask 悬挂期间另一合法 mutating 操作能完成」断言（不占 EXECUTING 不占锁）。
-- l 缺 authority handler=0 / 有 authority op=0（attempt_id 用真实返回值）。
-- seq 238 第三轮复核修订：a1/a2/a3/d 全部改真实 ToolExecutor 主链（ToolRegistry +
-  _PathWriteTool + runtime_snapshot + _traced_call），删除 _GateTools 桩（绕过唯一
-  coordinator/真实 ToolSpec.effect/resource_parameters/store selector/result 封装）；
-  全文件只传 ExecutionMode 枚举，_manager_mode 遇非枚举抛错（fail-closed，不静默默认
-  MANAGED）；新增 test_b3 生产装配口 caller 测试（agent/core.py:_build_tool_registry
-  唯一装配口必须经 selector 选 store，core.py:846 现写死 agent.local_store → 红）；
-  seam 签名统一为 select_operation_store(agent)，建议落专门模块
-  runtime_db/operation_store_selector.py（不再挤 execution_mode.py）；
-  h3 改双线程 + 双 started 事件证明不同物理根真并行（双方 handler 都进入后才 release）；
-  f2 补紧断言：takeover 后旧 operation=UNKNOWN、旧 mutation=DIRTY（不得 publish）；
-  d 补紧断言：重放后 runtime.db 仍唯一 + LocalStore=0（防「返回失败但账本双写/新建行」）。
-- seq 241 最终裁决修订：try-import 统一到专用模块 runtime_db/operation_store_selector.py
-  （模式解析与 store 构造/缓存分开）；_operation_store_for 顺序改为「先严格校验
-  ExecutionMode → 生产 selector 存在则无论 MANAGED/LOCAL 都经它 → 仅红测阶段才
-  回落 local」（不先短路 LOCAL，否则生产 selector 的 LOCAL 写错会假绿）；
-  b2 补非法模式值用例断言 fail-closed 抛错（覆盖生产 selector 自身校验）。
-
-现状（红测前，每一条都会失败/会失败部分）：
-- 双份 operation：ToolExecutor 内部 execute_tool_operation 落 local_storage 幂等账本
-  （operation_store=agent.local_store，registry.py:760），外层 authority_fence
-  open/close 又在 runtime.db 记一份（无幂等/无锁）→ c 断言 local 0 条必失败。
-- authority_context 缺 run 链时懒建（record_run_creation）→ a2 期望
-  TOOL_AUTHORITY_CONTEXT_MISSING + 不建链，现在 handler=1 + 建链。
-- authority_context 无库 → None 放行 → a1/l 期望 handler=0 现在 handler=1。
-- open_authority_operation 空 agent_run_id/attempt_id → ("", "") 放行 → a3 必失败。
-- close_authority_operation 吞 settle 异常（settle_operation 无 fence 参数）→
-  d 期望非 ok + UNKNOWN 语义现在仍 ok。
-- runtime.db 无 effect_key 幂等（create_tool_operation 每次 INSERT 新行）→
-  e2 期望同 effect_key 只落一行现在两行。
-- coordinator 未接资源锁（acquire_locks 生产零调用）→ h 期望第二操作被锁拒现在两次都执行。
-- 外层 gate 不分 read-only：read-only 工具 MANAGED 下也被 open → l 期望 operation 行=0 现在 1 行。
-- 审批悬挂（ask）在 decide 层直接拒绝、gate 在其后 → k 现状已绿（防回归）。
-- f 原语层（settle current-pointer 校验）G4 补已实现 → f 现状绿（防回归）。
-
-矩阵映射：
-a = test_a1/test_a2/test_a3（MANAGED 缺每种权威字段 → 统一 TOOL_AUTHORITY_CONTEXT_MISSING）
-b = test_b_explicit_local_keeps_local_only
-c = test_c_managed_mutating_writes_only_runtime_db
-d = test_d_settle_crash_marks_unknown
-e = test_e_same_effect_key_replays_persisted_result（LocalStore 绿）+ test_e2_managed_effect_key_single_row（红）
-f = test_f_takeover_prevents_stale_settle
-g = test_g_approval_deny_blocks_handler
-h = test_h_same_write_root_locked_across_tools
-i = 解析器层正文命令/未闭合工具块由 F10/G5 既有测试覆盖；"合法 native 只执行一次" = e/e2
-j = 普通中文真实 LLM（真机验证，非单测）
-k = test_k_approval_pending_holds_no_lease_or_lock
-l = test_l_managed_readonly_requires_authority
+覆盖 MANAGED/LOCAL store 选择、显式运行身份、幂等重放、takeover 后旧 attempt
+不得结算、审批拒绝、UNKNOWN/dirty 事实和并发执行。普通 ``workspace:*`` scope
+只表达本次工具的文件边界，不创建跨回合持久资源锁；仅显式逻辑资源参与持久锁定。
 """
 
 from __future__ import annotations
@@ -754,11 +678,10 @@ def test_d_settle_crash_marks_unknown(tmp_path, monkeypatch):
     # 两个正交状态：operation 终态 UNKNOWN（不可能是 DIRTY）；DIRTY 只属于
     # mutation 表。EXECUTING 滞留 = 崩溃未被标记（现状红）。
     assert ops[0]["status"] == "UNKNOWN"
-    # 可写资源 mutation 如实标 DIRTY + 非空原因（现状生产零写 mutation → 红）。
+    # 普通 workspace 路径已按 会话运行时 语义退出跨 run 持久锁；settle 失败仍由
+    # operation UNKNOWN 如实记录，但不能为普通文件路径重新制造 mutation 账。
     mutations = _mutation_rows(repo)
-    assert len(mutations) == 1
-    assert mutations[0]["state"] == "DIRTY"
-    assert mutations[0]["dirty_reason"]
+    assert mutations == []
 
     # 重放：同 effect_key 不得重跑 handler（先 reconcile UNKNOWN，不重放副作用）。
     second = _traced_call(agent, params, call)
@@ -941,15 +864,13 @@ def test_f2_takeover_mid_execution_blocks_stale_success(tmp_path):
     stale = outcome["execution"]
     assert not stale.result.ok  # 红：takeover 后旧 settle 被拒，不得向模型报 success
     # 紧断言（seq 238）：旧 attempt 的账本状态如实——operation 终态 UNKNOWN
-    # （现状 close 吞 RuntimeConflictError → 滞留 EXECUTING，红）、mutation 标
-    # DIRTY（现状零行，红）、不得 publish（防旧执行向模型报 success 后仍发布）。
+    # （现状 close 吞 RuntimeConflictError → 滞留 EXECUTING，红）、不得 publish
+    # （防旧执行向模型报 success 后仍发布）。普通 workspace 不写持久 mutation。
     ops = repo.operations_for_attempt(attempt_id)
     assert len(ops) == 1
     assert ops[0]["status"] == "UNKNOWN"
     mutations = _mutation_rows(repo)
-    assert len(mutations) == 1
-    assert mutations[0]["state"] == "DIRTY"
-    assert mutations[0]["dirty_reason"]
+    assert mutations == []
     assert repo.publishes_for_attempt(attempt_id) == []  # 旧 attempt 不得 publish
 
     # sibling AgentRun 不受影响：run-f2b 正常完成。
@@ -1001,7 +922,7 @@ def test_g_approval_deny_blocks_handler(tmp_path):
 # 现状：coordinator 无锁接线 → 两次都执行（红）。
 
 
-def test_h_same_write_root_locked_across_tools(tmp_path):
+def test_h_same_write_root_is_not_a_cross_run_durable_lock(tmp_path):
     """同物理写根 fail-fast：原始串 out/x vs 别名 out/../out/x，不同工具名、
     不同 run/attempt → 第二操作被资源锁拒绝 handler=0；第一操作正常完成。"""
     root = tmp_path / "h1"
@@ -1046,7 +967,8 @@ def test_h_same_write_root_locked_across_tools(tmp_path):
         assert started.wait(timeout=10)  # A handler 已启动、未 settle（锁应被持有）
 
         for alias in ("out/x", "out/../out/x"):
-            # 同一物理写根（原始串 / ../ 别名归一化）→ fail-fast 拒绝。
+            # 会话运行时 式工作区并发不把普通文件路径变成跨 run 持久锁；并发安全由
+            # turn 调度、写边界、sandbox 与操作幂等守住，而不是目录租约。
             call_b = _gate_call(
                 run_id="run-h2",
                 tool_name="write_b",
@@ -1056,9 +978,8 @@ def test_h_same_write_root_locked_across_tools(tmp_path):
                 attempt_id=attempt_b,
             )
             b = _traced_call(agent, params_b, call_b)
-            assert b.result.ok is False  # 同物理根并发必须被拒（现状无锁 → ok=True，红）
-            assert write_b.calls == 0
-            assert not b.result.handler_executed
+            assert b.result.ok is True
+            assert b.result.handler_executed
     finally:
         release.set()  # 屏障：无论 B 结果如何都放行 A，防线程悬挂污染后续测试
         thread_a.join(timeout=10)
@@ -1067,8 +988,8 @@ def test_h_same_write_root_locked_across_tools(tmp_path):
     assert write_a.calls == 1  # A 正常完成
 
 
-def test_h2_symlink_same_physical_root_locked(tmp_path):
-    """symlink 指向同一物理根仍冲突（canonical physical root 归一化）。"""
+def test_h2_symlink_same_physical_root_is_not_durably_locked(tmp_path):
+    """普通 workspace 的 symlink 别名同样不恢复跨 run 持久目录锁。"""
     root = tmp_path / "h2"
     root.mkdir(parents=True, exist_ok=True)
     (root / "out").mkdir(parents=True, exist_ok=True)
@@ -1115,7 +1036,7 @@ def test_h2_symlink_same_physical_root_locked(tmp_path):
         thread_a.start()
         assert started.wait(timeout=10)
 
-        # B 经 symlink（alias/linked/x 指向 out/x）→ 同一物理根 → fail-fast 拒绝。
+        # B 经 symlink 指向同一物理根仍由当轮文件语义处理，不进入持久租约。
         call_b = _gate_call(
             run_id="run-h2-2",
             tool_name="write_b",
@@ -1125,8 +1046,8 @@ def test_h2_symlink_same_physical_root_locked(tmp_path):
             attempt_id=attempt_b,
         )
         b = _traced_call(agent, params_b, call_b)
-        assert b.result.ok is False  # symlink 归一化后同根必须被拒（现状无锁 → 红）
-        assert write_b.calls == 0
+        assert b.result.ok is True
+        assert write_b.calls == 1
     finally:
         release.set()
         thread_a.join(timeout=10)

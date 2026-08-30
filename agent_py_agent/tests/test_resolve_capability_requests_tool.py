@@ -65,6 +65,7 @@ def test_grant_resolves_request_and_extends_write_boundary():
         boundary = agent.subagents.runner_context._build_write_boundary(reloaded)
         granted_dir = str(Path(task.task_workspace_dir) / "output" / "goattack-python")
         assert granted_dir in boundary["allowed_write_roots"]
+        assert boundary["capability_write_roots"] == [granted_dir]
         # 唤醒账本落盘
         assert reloaded.attributes["capability_resolution_wake"]["decision"] == "grant"
 
@@ -128,6 +129,45 @@ def test_grant_rejects_out_of_workspace_roots_structurally():
         # 越界授权不落 grant、请求保持未决
         assert reloaded.capability_requests[0].status == "OPEN"
         assert not reloaded.capability_grants
+
+
+def test_grant_cannot_use_broad_agent_workspace_to_cross_owner_wall():
+    """直属父级的显式 grant 也不能把 scoped owner 扩到宿主 workspace。"""
+    with tempfile.TemporaryDirectory() as td:
+        host_root = Path(td)
+        owner_root = host_root / "owners" / "alice"
+        owner_root.mkdir(parents=True)
+        agent = SimpleAgent(
+            AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"),
+            owner_root,
+        )
+        agent.workspace_root = host_root
+        agent.subagents.owner_scope_root = str(owner_root)
+        task = agent.subagents.create_run(
+            goal="读取宿主全局目录",
+            thought="申请扩大目录范围",
+            plan=["申请权限"],
+        )
+        request = agent.subagents.lifecycle.record_capability_request(
+            task.id,
+            RecordCapabilityRequestParams(
+                problem="需要读取 owner 外的宿主目录",
+                needed_capability="host_workspace_access",
+                capability_type="filesystem",
+                path_scope=[str(host_root)],
+            ),
+        )
+
+        result = _tool(agent).execute(
+            {"run_id": task.id, "decision": "grant", "reason": "模拟错误的父级批准"}
+        )
+        payload = json.loads(result.output)
+        reloaded = agent.subagents.load(task.id)
+
+        assert result.ok is False and payload["ok"] is False
+        assert payload["errors"][0]["rejected_write_roots"] == [str(host_root)]
+        assert next(item for item in reloaded.capability_requests if item.id == request.id).status == "OPEN"
+        assert reloaded.capability_grants == []
 
 
 def test_missing_params_and_no_pending_requests_error_clearly():

@@ -475,6 +475,7 @@ _SUBAGENT_ACTIVITY_FIELDS = frozenset(
         "name",
         "role",
         "status",
+        "lifecycle_phase",
         "description",
         "attempts",
         "context_tokens",
@@ -694,6 +695,24 @@ def _normalize_subagent_activity_rows(
 # TuiRuntime's sequencer/store and must not acquire independent lifecycle state.
 # 类用途: 为 TuiRuntime 提供已提交 Compact 边界的唯一公开发布入口。
 class _TuiConversationBoundaryRuntimeMixin:
+    # LLM: Esc may target only a currently active manual Compact block created from this TUI's
+    # durable outbox identity.  Automatic/background Compact operation ids are intentionally
+    # excluded because their cancellation belongs to the active request token.
+    # 函数用途: 返回当前 TUI 手动 Compact 的原始控制消息 ID，供 Esc 精确停止。
+    def active_manual_compact_control_message_id(self) -> str:
+        snapshot = self.store.snapshot()
+        for block in reversed(snapshot.active_blocks):
+            if block.role != "compact" or block.phase in {
+                "completed",
+                "failed",
+                "interrupted",
+            }:
+                continue
+            operation_id = str(block.metadata.get("operation_id") or "").strip()
+            if operation_id.startswith("manual:"):
+                return operation_id.removeprefix("manual:")
+        return ""
+
     # LLM: Manual `/compact` cannot stream server-internal percentages over its control POST, but
     # its persisted client operation is a real lifecycle fact. Keep one honest indeterminate block
     # active from outbox enqueue/restore until the canonical receipt resolves.
@@ -710,36 +729,42 @@ class _TuiConversationBoundaryRuntimeMixin:
                 "operation_id": f"manual:{selected}",
                 "phase": "started",
                 "stage": "preparing",
-                "percent": 5,
+                "percent": 0,
+                "indeterminate": True,
             },
         )
 
     # LLM: Only the durable control receipt may close a manual Compact block. Success removes the
-    # spinner before publish_compact_boundary advances generation; rejection/unknown freezes an
-    # explicit failure without pretending that the transcript changed.
-    # 函数用途: 根据手动压缩的真实控制回执结束动画，成功与失败分别收口。
+    # spinner before publish_compact_boundary advances generation; a typed user interruption is
+    # distinct from provider failure and never pretends that the transcript changed.
+    # 函数用途: 根据手动压缩的真实控制回执，以成功、用户中断或失败三态结束动画。
     def publish_manual_compact_terminal(
         self,
         operation_id: str,
         *,
         succeeded: bool,
+        interrupted: bool = False,
     ) -> None:
         selected = str(operation_id or "").strip()[:128]
         if not selected:
             raise ValueError("manual compact operation id is required")
+        if succeeded and interrupted:
+            raise ValueError("successful manual compact cannot be interrupted")
+        kind = (
+            "conversation_compaction_completed"
+            if succeeded
+            else "conversation_compaction_failed"
+        )
+        phase = "completed" if succeeded else ("interrupted" if interrupted else "failed")
         self._publish(
-            (
-                "conversation_compaction_completed"
-                if succeeded
-                else "conversation_compaction_failed"
-            ),
-            "completed" if succeeded else "failed",
+            kind,
+            phase,
             f"manual-compact:{self.session_id}:{selected}",
             {
                 "operation_id": f"manual:{selected}",
-                "phase": "completed" if succeeded else "failed",
-                "stage": "completed" if succeeded else "failed",
-                "percent": 100,
+                "phase": phase,
+                "stage": "completed" if succeeded else phase,
+                "percent": 100 if succeeded else 0,
             },
         )
 
@@ -1254,19 +1279,28 @@ class TuiRuntime(
                 self._notice_until = 0.0
             return self._notice_text
 
-    # LLM: Periodic refresh stays alive only for time-varying typed state. A
-    # retained terminal-agent roster is interactive but static and must not
-    # redraw forever merely because its background block remains mounted.
-    # 函数用途: 告诉动画线程当前是否还有连接、思考、Compact、运行中代理或短提示需要定时重绘。
+    # LLM: Periodic refresh stays alive only for time-varying typed state. An expired notice
+    # clears itself here and requests exactly one terminal frame so stale footer text cannot
+    # remain painted after the timer stops. A retained terminal-agent roster is interactive but
+    # static and must not redraw forever merely because its background block remains mounted.
+    # 函数用途: 告诉动画线程是否要重绘；短提示到期时补最后一帧，其余空闲状态不持续刷新。
     def needs_periodic_refresh(self) -> bool:
         now = time.monotonic()
         with self._lock:
+            notice_expired = bool(
+                self._notice_text
+                and self._notice_until > 0.0
+                and now >= self._notice_until
+            )
+            if notice_expired:
+                self._notice_text = ""
+                self._notice_until = 0.0
             notice_active = bool(
                 self._notice_text
                 and self._notice_until > 0.0
                 and now < self._notice_until
             )
-        if notice_active:
+        if notice_active or notice_expired:
             return True
         snapshot = self.store.snapshot()
         return any(
@@ -1282,13 +1316,15 @@ class TuiRuntime(
             for block in snapshot.active_blocks
         )
 
-    # LLM: begin_turn 每 request 只创建一次 adapter，重复 worker dequeue 返回同对象但不重放 turn_started。
-    # 函数用途: 从队列切换为运行中回合，并启动 thinking 活动块。
+    # LLM: begin_turn 每 request 只创建一次 adapter，重复 worker dequeue 返回同对象但不重放 turn_started；
+    # show-prompt 诊断轮可显式延迟 assistant 正文，保证终态 prompt 先于 response 落屏。
+    # 函数用途: 从队列切换为运行中回合，启动 thinking，并按请求决定是否暂存回答正文。
     def begin_turn(
         self,
         request_id: str,
         *,
         task_progress_generation_id: str = "",
+        defer_assistant_display: bool = False,
     ) -> TuiTurnEventAdapter:
         normalized = _required_request_id(request_id)
         with self._lock:
@@ -1306,7 +1342,11 @@ class TuiRuntime(
                     request_id=normalized,
                 )
                 self._queued_prompts.pop(queue_id, None)
-            adapter = TuiTurnEventAdapter(self, normalized)
+            adapter = TuiTurnEventAdapter(
+                self,
+                normalized,
+                defer_assistant_display=defer_assistant_display,
+            )
             self._turns[normalized] = adapter
             self.activate_task_progress_generation(
                 task_progress_generation_id or normalized
@@ -1381,9 +1421,16 @@ class TuiRuntime(
 # LLM: TuiTurnEventAdapter 实现 callable/write_model/write_progress/Gateway event 四个入口，共享同一 typed 生命周期和 block identity。
 # 类用途: 把一次本地或 Gateway 回合的流式输出、工具事件和终态写入 TuiRuntime。
 class TuiTurnEventAdapter:
-    # LLM: adapter 状态只记当前显示 block/id/text 和已见工具，不复制 agent/tool runtime 业务状态。
-    # 函数用途: 初始化一个尚未开始的回合 adapter。
-    def __init__(self, runtime: TuiRuntime, request_id: str) -> None:
+    # LLM: adapter 状态只记当前显示 block/id/text 和已见工具，不复制 agent/tool runtime 业务状态；
+    # defer_assistant_display 只改变显式 show-prompt 的展示顺序，不改变终态 response 或会话保存。
+    # 函数用途: 初始化一个尚未开始的回合 adapter，并设置回答是否等最终 prompt 后再显示。
+    def __init__(
+        self,
+        runtime: TuiRuntime,
+        request_id: str,
+        *,
+        defer_assistant_display: bool = False,
+    ) -> None:
         self.runtime = runtime
         self.request_id = request_id
         self.turn_block_id = f"turn:{request_id}"
@@ -1402,6 +1449,7 @@ class TuiTurnEventAdapter:
         self._terminal_response_text = ""
         self._output_chars = 0
         self._output_bytes = 0
+        self._defer_assistant_display = bool(defer_assistant_display)
         self._tool_blocks: set[str] = set()
         self._tool_input_projector = ToolInputProgressEventProjector(
             block_prefix=f"tool-input:{request_id}",
@@ -1518,8 +1566,9 @@ class TuiTurnEventAdapter:
     def __call__(self, chunk: str) -> bool:
         return self.write_model(chunk)
 
-    # LLM: 模型 delta 创建/追加 assistant block；turn activity 持续到终态，renderer 在可见 stream 期间按 typed block 隐藏 spinner。
-    # 函数用途: 发布助手文本增量、刷新输出 token 估计并返回是否有可见内容。
+    # LLM: 普通模型 delta 创建/追加 assistant block；显式 show-prompt 轮只累计输出指标，
+    # 等终态 prompt 已落屏后由 summary 发布一次 final。两种路径都保持 turn activity 到真实终态。
+    # 函数用途: 发布或暂存助手文本增量、刷新输出 token 估计并返回是否收到正文。
     def write_model(self, chunk: str) -> bool:
         text = str(chunk or "")
         if not text:
@@ -1527,6 +1576,9 @@ class TuiTurnEventAdapter:
         with self._lock:
             if self._complete_thinking():
                 self._late_thinking_completion_expected = True
+            if self._defer_assistant_display:
+                self._record_output_metrics(text)
+                return bool(text.strip())
             self._ensure_assistant_started()
             self.runtime._publish(
                 "assistant_delta",
@@ -1546,6 +1598,16 @@ class TuiTurnEventAdapter:
         with self._lock:
             self._late_thinking_completion_expected = False
             self._complete_active_assistant()
+            self.runtime.promote_active_turn_inputs(
+                client_message_ids,
+                request_id=self.request_id,
+            )
+
+    # LLM: Gateway 的 consumed 行在 provider delta 之后才到客户端，只能确认已排队用户消息；
+    # 它不能像本地调用前边界那样切断当前 assistant block，否则终态 summary 会再建一个重复回复。
+    # 函数用途: 确认 Gateway 已消费补充消息，同时保持正在流式输出的助手块连续。
+    def confirm_gateway_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
+        with self._lock:
             self.runtime.promote_active_turn_inputs(
                 client_message_ids,
                 request_id=self.request_id,
@@ -1958,7 +2020,7 @@ class TuiTurnEventAdapter:
                 "interrupt_notice",
                 "completed",
                 f"interrupt:{self.request_id}",
-                {"text": "Interrupted · What should my-agent do instead?"},
+                {"text": "已中断 · 接下来希望 my-agent 怎么做？"},
                 request_id=self.request_id,
             )
         if summary.error:
@@ -2014,8 +2076,9 @@ def _consume_gateway_turn_event(
         final_text = str(payload.get("text") or "")
         adapter.write_model(final_text)
         with adapter._lock:
-            adapter._complete_active_assistant()
-            adapter._terminal_response_text = final_text
+            if not adapter._defer_assistant_display:
+                adapter._complete_active_assistant()
+                adapter._terminal_response_text = final_text
         return True
     if kind == "runtime_progress":
         return adapter._publish_runtime_progress(payload)
@@ -2032,7 +2095,7 @@ def _consume_gateway_turn_event(
                 if str(value or "").strip()
             )
         )
-        adapter.begin_active_turn_input(message_ids)
+        adapter.confirm_gateway_active_turn_input(message_ids)
         return True
     if kind == "context_usage_updated" and isinstance(
         payload.get("context_usage"),

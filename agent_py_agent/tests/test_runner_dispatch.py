@@ -304,9 +304,9 @@ class TestResolveRunnerConcurrency:
         """auto 策略按任务数并发，但受内部安全上限约束。"""
         from agent_py_agent.agent.agent_core.runner.dispatch import _resolve_runner_concurrency
 
-        assert _resolve_runner_concurrency("auto", 5) == 4
-        assert _resolve_runner_concurrency("", 5) == 4
-        assert _resolve_runner_concurrency("auto", 20) == 4
+        assert _resolve_runner_concurrency("auto", 5) == 5
+        assert _resolve_runner_concurrency("", 5) == 5
+        assert _resolve_runner_concurrency("auto", 20) == 8
 
     def test_zero_job_count_returns_0(self):
         """job_count 为 0 时返回 0。"""

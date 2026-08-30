@@ -429,7 +429,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
         self.app_secret = config.get("feishu_app_secret", "")
         self.verification_token = config.get("feishu_verification_token", "")
         self.encrypt_key = config.get("feishu_encrypt_key", "")
-        # my_agent_home 根:卡片按钮回调据此读待确认记录、定位 owner 的 SOUL/AGENTS.md(与网关同一根)。
+        # my_agent_home 根:卡片按钮回调据此读待确认记录、定位 owner 的 SOUL.md(与网关同一根)。
         self.my_agent_home = str(config.get("my_agent_home", "") or "")
         # 默认长连接:免公网且能接密码/人格确认卡片回调；webhook 仍可显式选择。
         self.connection_mode = str(

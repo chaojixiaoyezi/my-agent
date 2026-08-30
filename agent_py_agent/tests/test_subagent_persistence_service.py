@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.subagents.manager import SubAgentManager
@@ -58,6 +59,37 @@ def test_subagent_persistence_service_round_trips_task(tmp_path) -> None:
     assert loaded.checkpoint_ref == loaded.checkpoint_json
     assert loaded.skill_sparks_file.endswith("SKILL_SPARKS.md")
     _assert_runtime_workspace_paths(loaded, tmp_path / "tasks" / task.root_id, task.id)
+
+
+def test_subagent_runtime_index_never_overwrites_root_task_projection(tmp_path) -> None:
+    """Child goals/statuses belong to run/agent indexes, not the shared root task row."""
+    from agent_py_agent.agent.subagents.services.persistence.projections import (
+        register_owner_runtime_indexes,
+    )
+    from agent_py_agent.agent.user_space.home_indexes import (
+        latest_agent_refs,
+        latest_run_refs,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    run_path = tmp_path / "task" / "agents" / "child-1"
+    manager = SimpleNamespace(home_paths=home, owner_id=home.owner_id)
+    child = SimpleNamespace(
+        root_id="root-task",
+        id="child-1",
+        owner=home.owner_id,
+        task_dir=str(run_path),
+        agent_run_workspace_dir=str(run_path),
+        status="RUNNING",
+        goal="这是子代理提示，不是根任务标题",
+    )
+
+    register_owner_runtime_indexes(manager, child)
+
+    assert home.global_index_active_tasks_jsonl.read_text(encoding="utf-8") == ""
+    assert latest_run_refs(home, owner_id=home.owner_id)[0]["run_id"] == "child-1"
+    assert latest_agent_refs(home, owner_id=home.owner_id)[0]["agent_id"] == "child-1"
 
 
 def test_subagent_save_keeps_canonical_state_when_projection_fails(tmp_path) -> None:

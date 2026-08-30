@@ -21,7 +21,7 @@ class _TransientThenOkBackend:
         self.failures = failures
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, **_kwargs) -> ModelResponse:
         self.calls += 1
         if self.calls <= self.failures:
             raise ProviderTransientError("HTTP 429: rate limited")

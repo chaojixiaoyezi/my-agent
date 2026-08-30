@@ -3,11 +3,20 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.capability.persona_repository import PersonaRepository
+from agent_py_agent.agent.capability.persona_repository import (
+    PersonaMutationRequest,
+    PersonaRepository,
+    persona_entry_id,
+)
 from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
+    ExternalizeToolOutputRequest,
+    externalize_tool_output_record,
+)
 from agent_py_agent.agent.memory_store.candidate_models import (
     CandidateObservation,
     MemoryScope,
@@ -17,6 +26,7 @@ from agent_py_agent.agent.memory_store.jsonl import JsonlMemory, MemorySubjectCo
 from agent_py_agent.agent.memory_store.lessons import HotRuleRepository, LessonRepository
 from agent_py_agent.agent.memory_store.promotion import (
     ConversationMessageEvidenceVerifier,
+    LocalStoreToolEvidenceVerifier,
     MemoryPromotionDependencies,
     MemoryPromotionService,
     VerifiedToolEvidence,
@@ -30,6 +40,8 @@ class _ToolVerifier:
         *,
         terminal_status: str = "",
         effect_outcome: str = "",
+        canonical_ref: dict[str, object] | None = None,
+        parameters: dict[str, object] | None = None,
     ) -> None:
         self.successful = successful
         self.terminal_status = terminal_status or (
@@ -38,13 +50,16 @@ class _ToolVerifier:
         self.effect_outcome = effect_outcome or (
             "completed" if successful else "not_started"
         )
+        self.canonical_ref = dict(canonical_ref or {})
+        self.parameters = dict(parameters or {})
 
     def verify(self, ref: dict[str, object]):
         return VerifiedToolEvidence(
             successful=self.successful,
             terminal_status=self.terminal_status,
-            canonical_ref=dict(ref),
+            canonical_ref={**dict(ref), **self.canonical_ref},
             effect_outcome=self.effect_outcome,
+            parameters=self.parameters,
         )
 
 
@@ -110,6 +125,7 @@ def _explicit(
     proposed_action: str = "add",
     target_entry_id: str = "",
     duplicate_generic_evidence: bool = False,
+    source_tool_refs: tuple[dict[str, object], ...] = (),
 ):
     message = conversations.append_message(
         {
@@ -136,6 +152,7 @@ def _explicit(
             origin="user_explicit",
             evidence_refs=(message_ref,) if duplicate_generic_evidence else (),
             source_message_refs=(message_ref,),
+            source_tool_refs=source_tool_refs,
             proposed_action=proposed_action,
             target_entry_id=target_entry_id,
             promotion_target=promotion_target,
@@ -428,10 +445,10 @@ def test_model_inferred_never_auto_promotes(tmp_path: Path):
     assert service.long_term.all() == []
 
 
-def test_automatic_promotion_requires_explicit_auto_eligible_even_before_evidence(
+def test_automatic_promotion_assigns_authority_then_still_verifies_real_evidence(
     tmp_path: Path,
 ) -> None:
-    """空/legacy 权限也必须 fail-closed，且不得先把缺证据候选改成 blocked 状态。"""
+    """宿主自动赋权不等于证据通过；不存在的消息仍会被正式 verifier 阻断。"""
     service, _conversations, _thread = _runtime(tmp_path)
     candidate = service.candidates.observe(
         CandidateObservation(
@@ -447,10 +464,10 @@ def test_automatic_promotion_requires_explicit_auto_eligible_even_before_evidenc
 
     result = service.promote(candidate.candidate_id, automatic=True)
 
-    assert candidate.promotion_mode == "manual_required"
-    assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
-    assert result.status == "pending_review"
-    assert service.candidates.get(candidate.candidate_id).status == "pending_review"
+    assert candidate.promotion_mode == "auto_eligible"
+    assert result.reason_code == "USER_MESSAGE_EVIDENCE_INVALID"
+    assert result.status == "blocked_missing_evidence"
+    assert service.candidates.get(candidate.candidate_id).status == "blocked_missing_evidence"
     assert service.long_term.all() == []
 
 
@@ -515,11 +532,10 @@ def _lesson(
     return candidate
 
 
-def test_model_inferred_lesson_never_auto_promotes_even_with_repeated_evidence(
+def test_model_inferred_lesson_autonomously_promotes_with_repeated_evidence(
     tmp_path: Path,
 ):
-    """定版合同:lesson 自动专线已取消——即使跨任务重复出现+多证据组,automatic 也拒绝,
-    重复次数/多证据组只是人工批准后的晋升门槛,不能替代审核。"""
+    """跨任务重复证据达到门槛后，lesson 由 owner Agent 自主晋升。"""
     service, _conversations, _thread = _runtime(tmp_path)
     candidate = _lesson(
         service,
@@ -531,15 +547,8 @@ def test_model_inferred_lesson_never_auto_promotes_even_with_repeated_evidence(
 
     result = service.promote(candidate.candidate_id, automatic=True)
 
-    assert result.promoted is False
-    assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
-    assert result.status == "pending_review"
-    assert service.lessons.list() == []
-
-    # 人工 approved + automatic=False 仍可晋升(重复次数是多证据晋升门槛)
-    service.review(candidate.candidate_id, approved=True, reviewer="admin")
-    manual = service.promote(candidate.candidate_id, reviewer="admin")
-    assert manual.promoted is True
+    assert result.promoted is True
+    assert result.reason_code == "PROMOTED"
     lessons = service.lessons.list()
     assert len(lessons) == 1
     assert lessons[0].evidence_groups == (
@@ -550,15 +559,15 @@ def test_model_inferred_lesson_never_auto_promotes_even_with_repeated_evidence(
     )
 
 
-def test_model_inferred_single_occurrence_lesson_stays_cleanly_rejected(tmp_path: Path):
-    """lesson 单次出现:权限闸干净拒绝(不崩溃),不落库,候选保持 pending 可再审。"""
+def test_model_inferred_single_occurrence_lesson_waits_for_more_evidence(tmp_path: Path):
+    """lesson 单次出现只是不满足客观门槛，不要求用户审核。"""
     service, _conversations, _thread = _runtime(tmp_path)
     candidate = _lesson(service, content="做 X 任务应先备份再修改。", runs=("run-1",))
 
     result = service.promote(candidate.candidate_id, automatic=True)
 
     assert result.promoted is False
-    assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
+    assert result.reason_code == "PROMOTION_THRESHOLD_NOT_MET"
     assert service.lessons.list() == []
 
 
@@ -592,7 +601,7 @@ def test_lesson_automatic_path_rejects_conflicting_candidate(tmp_path: Path):
     result = service.promote(conflicting.candidate_id, automatic=True)
 
     assert result.promoted is False
-    assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
+    assert result.reason_code == "AUTO_POLICY_CONFLICT_UNRESOLVED"
     assert service.lessons.list() == []
 
 
@@ -797,28 +806,147 @@ def test_user_profile_requires_explicit_message_and_rejects_temporary_scope(
     ).read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize(
-    ("target", "candidate_type", "content"),
-    [
-        ("soul", "soul_change", "AI 人格保持耐心和诚实。"),
-        ("agents", "working_agreement", "长期合作时先核对真实代码。"),
-    ],
-)
-def test_soul_and_agents_require_explicit_confirmation(
+def test_persona_promotion_adopts_exact_prior_update_persona_entry(tmp_path: Path) -> None:
+    direct_content = "故障复盘先写一句大白话结论，再列证据、原因、修复和影响。"
+    target_entry_id = persona_entry_id("user", direct_content)
+    verifier = _ToolVerifier(
+        True,
+        terminal_status="succeeded",
+        effect_outcome="confirmed",
+        canonical_ref={"tool": "update_persona"},
+        parameters={
+            "target": "user",
+            "content": direct_content,
+        },
+    )
+    service, conversations, thread = _runtime(tmp_path, tool_verifier=verifier)
+    service.persona.mutate(
+        PersonaMutationRequest(
+            target="user",
+            action="add",
+            content=direct_content,
+            confirmed=True,
+            source="update_persona:test",
+        )
+    )
+    candidate = _explicit(
+        service,
+        conversations,
+        thread,
+        content="用户希望故障复盘先给大白话结论，再展示证据、原因、修复和影响。",
+        candidate_type="user_preference",
+        subject_key="preference.postmortem.format",
+        promotion_target="user",
+        target_entry_id=target_entry_id,
+        source_tool_refs=(
+            {
+                "owner_id": "owner-1",
+                "run_id": "run-1",
+                "tool_call_id": "call-1",
+                "tool_name": "update_persona",
+            },
+        ),
+    )
+
+    result = service.promote(candidate.candidate_id, automatic=True)
+
+    assert result.promoted is True
+    assert result.promotion_ref == f"USER.md#{target_entry_id}"
+    entries = service.persona.list_entries("user")["entries"]
+    assert isinstance(entries, list)
+    assert entries == [{"entry_id": target_entry_id, "content": direct_content}]
+
+
+def test_local_tool_verifier_recovers_exact_legacy_call_from_owner_index(
     tmp_path: Path,
-    target: str,
-    candidate_type: str,
-    content: str,
 ) -> None:
+    owner = tmp_path / "owner"
+    parameters = {
+        "target": "user",
+        "content": "回答先给结论。",
+    }
+    externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=owner,
+            tool="update_persona",
+            call_id="call-legacy-1",
+            output='{"ok":true}',
+            ok=True,
+            run_id="run-legacy-1",
+            task_id="task-legacy-1",
+            parameters=parameters,
+            result_envelope={
+                "tool_execution": {"handler_executed": True, "duration_ms": 3},
+                "tool_operation": {
+                    "operation_id": "operation-legacy-1",
+                    "status": "succeeded",
+                },
+            },
+        )
+    )
+    verifier = LocalStoreToolEvidenceVerifier(
+        object(),
+        owner_id="owner-1",
+        owner_root=owner,
+    )
+
+    verified = verifier.verify(
+        {
+            "owner_id": "owner-1",
+            "run_id": "run-legacy-1",
+            "tool_call_id": "call-legacy-1",
+            "tool_name": "update_persona",
+        }
+    )
+
+    assert verified is not None
+    assert verified.successful is True
+    assert verified.terminal_status == "succeeded"
+    assert verified.canonical_ref["operation_id"] == "operation-legacy-1"
+    assert verified.canonical_ref["source"] == "tool_output_index"
+    assert verified.parameters == parameters
+
+
+def test_local_tool_verifier_migrates_legacy_done_ledger_status() -> None:
+    record = SimpleNamespace(
+        run_id="run-ledger-1",
+        operation_id="operation-ledger-1",
+        tool="write_file",
+        status="done",
+        parameters={"path": "output/report.md"},
+    )
+    store = SimpleNamespace(
+        get_runtime_gate_ledger=lambda **_kwargs: record,
+    )
+    verifier = LocalStoreToolEvidenceVerifier(store, owner_id="owner-1")
+
+    verified = verifier.verify(
+        {
+            "owner_id": "owner-1",
+            "run_id": "run-ledger-1",
+            "operation_id": "operation-ledger-1",
+            "tool_call_id": "call-ledger-1",
+        }
+    )
+
+    assert verified is not None
+    assert verified.successful is True
+    assert verified.terminal_status == "succeeded"
+    assert verified.canonical_ref["status"] == "succeeded"
+    assert verified.parameters == {"path": "output/report.md"}
+
+
+def test_soul_requires_explicit_confirmation(tmp_path: Path) -> None:
     service, conversations, thread = _runtime(tmp_path)
+    content = "AI 人格保持耐心和诚实。"
     candidate = _explicit(
         service,
         conversations,
         thread,
         content=content,
-        candidate_type=candidate_type,
-        subject_key=f"persona.{target}.rule",
-        promotion_target=target,
+        candidate_type="soul_change",
+        subject_key="persona.soul.rule",
+        promotion_target="soul",
     )
     service.review(candidate.candidate_id, approved=True, reviewer="admin")
 
@@ -827,8 +955,27 @@ def test_soul_and_agents_require_explicit_confirmation(
     result = service.promote(candidate.candidate_id, reviewer="admin", confirmed=True)
 
     assert result.promoted is True
-    target_path = service.persona.path_for(target)
+    target_path = service.persona.path_for("soul")
     assert content in target_path.read_text(encoding="utf-8")
+
+
+def test_agents_working_agreement_is_autonomous(tmp_path: Path) -> None:
+    service, conversations, thread = _runtime(tmp_path)
+    content = "长期合作时先核对真实代码。"
+    candidate = _explicit(
+        service,
+        conversations,
+        thread,
+        content=content,
+        candidate_type="working_agreement",
+        subject_key="persona.agents.rule",
+        promotion_target="agents",
+    )
+
+    result = service.promote(candidate.candidate_id, automatic=True)
+
+    assert result.promoted is True
+    assert content in service.persona.path_for("agents").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("origin", ["subagent_finding", "subagent_lesson"])

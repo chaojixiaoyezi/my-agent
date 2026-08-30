@@ -109,6 +109,7 @@ def test_subagent_tools_are_not_registered_when_subagents_disabled(tmp_path):
         "create_subagents",
         "dispatch_subagents",
         "inspect_agent_tree",
+        "list_agents",
         "schedule_child_subagents",
         "cancel_subagents",
         "wait",
@@ -131,6 +132,7 @@ def test_model_surface_has_no_manual_subagent_dispatch_tools(tmp_path):
     names = set(agent.tools.tools)
     assert {
         "create_subagents",
+        "list_agents",
         "send_guidance",
         "cancel_subagents",
         "resolve_capability_requests",
@@ -138,6 +140,35 @@ def test_model_surface_has_no_manual_subagent_dispatch_tools(tmp_path):
     assert "inspect_agent_tree" not in names
     assert "dispatch_subagents" not in names
     assert "schedule_child_subagents" not in names
+
+
+def test_list_agents_is_read_only_current_tree_projection(tmp_path):
+    """只读状态工具复用 canonical tree，并返回已创建的 owner 内子代理。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import ListAgentsTool
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    child = agent.subagents.create_run(
+        params=CreateRunParams(
+            goal="核对子代理只读状态",
+            thought="",
+            plan=[],
+            role="researcher",
+        )
+    )
+
+    result = ListAgentsTool(agent).execute({})
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["effect"] == "read_only"
+    assert payload["policy"]["does_not_dispatch"] is True
+    assert child.id in {item["run_id"] for item in payload["nodes"]}
 
 
 def test_descendant_create_uses_same_public_tool_and_hierarchy_service():
@@ -297,6 +328,22 @@ def test_task_identity_keeps_main_resume_and_child_ledgers_separate():
     assert progress_ledger_id(agent, resumed) == "task-original"
     assert durable_task_id(child) == "child-task"
     assert progress_ledger_id(agent, child, scoped_id="child-scoped") == "child-scoped"
+
+
+def test_orchestration_controls_keep_durable_parent_across_gateway_followups():
+    from agent_py_agent.agent.agent_core.orchestration.create_policy import (
+        current_orchestration_requester_run_id,
+    )
+
+    agent = SimpleNamespace(
+        _current_run_params=SimpleNamespace(
+            run_id="gateway-request-new",
+            task_id="gateway-request-new",
+            task_attributes={"conversation_task_id": "gateway-request-original"},
+        )
+    )
+
+    assert current_orchestration_requester_run_id(agent) == "gateway-request-original"
 
 
 class TestTaskProgressRegistryTool:

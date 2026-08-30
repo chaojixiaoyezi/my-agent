@@ -80,7 +80,7 @@ def test_persona_versions_cas_and_rollback(tmp_path: Path) -> None:
     assert rolled_back["version"] == 3
     assert "小叶子" in (tmp_path / "owner" / "USER.md").read_text(encoding="utf-8")
     history = repository.history("user")
-    assert [row["action"] for row in history] == ["add", "replace", "rollback"]
+    assert [row["action"] for row in history] == ["baseline", "add", "replace", "rollback"]
     assert all((tmp_path / "owner" / str(row["backup_ref"])).is_file() for row in history)
 
 
@@ -123,8 +123,8 @@ def test_persona_concurrent_adds_keep_all_entries_and_versions(tmp_path: Path) -
     repository = _repository(owner)
     listed = repository.list_entries("user")
     assert len(listed["entries"]) == 32
-    assert len(repository.history("user")) == 32
-    assert len({row["version"] for row in repository.history("user")}) == 32
+    assert len(repository.history("user")) == 33
+    assert len({row["version"] for row in repository.history("user")}) == 33
 
 
 def test_persona_load_blocks_poisoned_line_without_hiding_clean_lines(tmp_path: Path) -> None:
@@ -325,9 +325,51 @@ def test_persona_batch_applies_all_operations_as_one_version(tmp_path: Path) -> 
         "# USER\n\n## 画像\n- 称呼:青禾\n\n## 习惯\n- 回答偏好:尽量简洁\n"
     )
     history = repository.history("user")
-    assert len(history) == 1
-    assert history[0]["action"] == "batch"
-    assert len(history[0]["operations"]) == 2
+    assert [row["action"] for row in history] == ["baseline", "batch"]
+    assert len(history[1]["operations"]) == 2
+
+
+def test_first_persona_mutation_can_rollback_to_prechange_baseline(tmp_path: Path) -> None:
+    repository = _repository(tmp_path / "owner")
+    user_path = tmp_path / "owner" / "USER.md"
+    original = user_path.read_text(encoding="utf-8")
+
+    first = _mutate(repository, "user", "add", content="回答偏好:先给结论", confirmed=True)
+    restored = _mutate(
+        repository,
+        "user",
+        "rollback",
+        rollback_version=0,
+        expected_sha256=str(first["sha256"]),
+        confirmed=True,
+    )
+
+    assert first["version"] == 1
+    assert restored["version"] == 2
+    assert user_path.read_text(encoding="utf-8") == original
+    assert [row["version"] for row in repository.history("user")] == [0, 1, 2]
+
+
+def test_first_persona_commit_failure_restores_document_and_removes_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_py_agent.agent.capability import persona_repository as repository_module
+
+    repository = _repository(tmp_path / "owner")
+    user_path = tmp_path / "owner" / "USER.md"
+    original = user_path.read_text(encoding="utf-8")
+
+    def fail_append(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated version-ledger failure")
+
+    monkeypatch.setattr(repository_module, "append_jsonl_records", fail_append)
+    with pytest.raises(OSError, match="simulated version-ledger failure"):
+        _mutate(repository, "user", "add", content="回答偏好:先给结论", confirmed=True)
+
+    assert user_path.read_text(encoding="utf-8") == original
+    assert not repository.versions_path.exists()
+    assert not list(repository.backups_dir.rglob("*.md"))
 
 
 def test_persona_batch_is_all_or_nothing_when_later_operation_is_invalid(

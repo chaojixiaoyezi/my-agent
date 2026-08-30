@@ -55,6 +55,7 @@ from .models import (
 from .process_registry import (
     BackgroundProcess,
     ProcessAccessScope,
+    ProcessRegistration,
     process_access_scope,
     process_registry,
     terminate_process_tree,
@@ -399,6 +400,10 @@ _MAX_BG_LOG_BYTES = (
 )
 _BG_WATCHDOG_INTERVAL = 2.0
 _PROCESS_PIPE_DRAIN_SECONDS = 2.0
+# 会话运行时 unified exec 会先 yield 一小段时间：短命令在同一工具结果里返回 exit code，
+# 只有仍存活的进程才返回 session。显式后台模式取 0.5 秒，既抓住端口占用/导入失败，
+# 又不把持久服务启动拖成阻塞调用。
+_BACKGROUND_START_SETTLE_SECONDS = 0.5
 
 
 class _LogSizeWatchdog(threading.Thread):
@@ -807,16 +812,18 @@ def _register_hosted_background_process(
     )
     try:
         record = process_registry.register(
-            command=command,
-            pid=hosted.process.pid,
-            output_file=str(log_path),
-            process=hosted.process,
-            cwd=str(target),
-            access_scope=access_scope,
-            child_pid=hosted.child_pid,
-            pid_birth_token=hosted.pid_birth_token,
-            host_state_file=str(hosted.state_file),
-            store_root=store_root,
+            ProcessRegistration(
+                command=command,
+                pid=hosted.process.pid,
+                output_file=str(log_path),
+                process=hosted.process,
+                cwd=str(target),
+                access_scope=access_scope,
+                child_pid=hosted.child_pid,
+                pid_birth_token=hosted.pid_birth_token,
+                host_state_file=str(hosted.state_file),
+                store_root=store_root,
+            )
         )
     except (OSError, TypeError, ValueError):
         _kill_process_group(hosted.process)
@@ -842,7 +849,9 @@ def _build_shell_tool_model_spec(
         description=(
             "Execute one shell command in the workspace. For a server or other persistent "
             "process, pass run_in_background=true and keep the command itself in foreground "
-            "form; shell '&' backgrounding is rejected because it cannot return a managed session."
+            "form; shell '&' backgrounding is rejected because it cannot return a managed session. "
+            "The tool already returns the final exit code; do not append '; echo $?' or another "
+            "always-successful command because that masks an earlier failure."
         ),
         input_schema={
             "type": "object",
@@ -864,7 +873,11 @@ def _build_shell_tool_model_spec(
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "When true, start the command in the background and immediately return its session_id, pid, and output_file.",
+                    "description": (
+                        "When true, start a managed background command and briefly observe startup. "
+                        "If it remains alive, return status=started plus session_id/output_file; "
+                        "if it exits immediately, return status=exited plus exit_code/output_tail."
+                    ),
                 },
             },
             "required": ["command"],
@@ -882,6 +895,7 @@ def _build_shell_tool_model_spec(
                 "Use read_file / write_file when only file IO is needed.",
                 "Avoid for interactive terminal workflows.",
                 "Never append shell '&' or use 'nohup ... &' for a service; remove those wrappers, set run_in_background=true, then use process_session to wait, inspect, or stop it.",
+                "Do not append '; echo $?' or another successful command to inspect status; run_command already reports the final return_code, and such suffixes hide earlier failures.",
                 "Prefer write_file for file changes instead of shell redirection.",
                 "Do not use rm/rmdir/unlink. Delete one text file with apply_patch; route directory or bulk deletion through task_trash.",
                 "Files written under /tmp inside the owner-scoped sandbox are kept in the task workspace .sandbox-tmp directory and survive across tool calls and requests; still keep final deliverables in the selected workspace, not in /tmp.",
@@ -900,7 +914,9 @@ def _build_shell_tool_model_spec(
 
 
 # LLM: shell 的 effect、sandbox、幂等、资源和补参必须由这一个 policy 工厂同步声明。
-# 函数用途: 构造 run_command 的唯一运行时策略，包括后台进程的 dangerous 风险下限。
+# 前台和 managed background 都由同一 owner-scoped sandbox argv 启动；后台只改变
+# 生命周期/返回 session 的方式，不能再声明为 uncontained 而制造虚假授权。
+# 函数用途: 构造 run_command 的唯一运行时策略；后台命令也保留完整沙箱和危险命令拦截。
 def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
     return ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy(
@@ -909,10 +925,7 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
             command_parameter="command",
             by_parameter=(("run_in_background", (("true", "dangerous"),)),),
         ),
-        sandbox_policy=SandboxPolicy(
-            "required",
-            uncontained_by_parameter=(("run_in_background", ("true",)),),
-        ),
+        sandbox_policy=SandboxPolicy("required"),
         idempotency_policy=IdempotencyPolicy("operation"),
         timeout_policy=TimeoutPolicy(default_timeout),
         resource_scopes=ResourceScopePolicy(parameter_names=("working_dir",)),
@@ -1092,22 +1105,16 @@ class ShellTool(BaseTool):
         params: dict[str, Any],
         command: str,
     ) -> Path | ToolHandlerOutcome:
-        effective_access_mode = _effective_access_mode(
-            self.access_mode, params.get("__access_mode")
-        )
-        target = _working_dir_from_params(
-            params,
-            self.workspace_root,
-            workspace_roots=self.workspace_roots,
-            path_access_policy=self.path_access_policy,
-            access_mode=effective_access_mode,
-        )
-        if isinstance(target, ToolHandlerOutcome):
-            return target
-        return target
+        # LLM: Keep PTY and shell on the same structured cwd resolution helper.
+        # 函数用途: 按本轮工作区和访问模式解析命令实际执行目录。
+        _ = command
+        return _shell_execution_target(self, params)
 
-    # LLM: shell 结果 envelope 同时保存内部 process 事实和独立 public display；display 只用于富客户端，不得参与副作用裁决。
-    # 函数用途: 执行前后保护已登记产物，并把命令输出整理成模型结果和终端展示数据。
+    # LLM: shell 结果 envelope 同时保存内部 process 事实、owner 沙箱可见范围和独立
+    # public display；WorkspaceOnly 的文本回执也必须始终说明绝对路径属于隔离视图，
+    # 避免模型把沙箱内 uid=0 或临时根写入扩大解释成宿主副作用。该说明不解析 command，
+    # 不参与授权或副作用裁决。
+    # 函数用途: 执行前后保护已登记产物，并把命令输出、沙箱范围和终端展示数据整理成一次结果。
     def _execute_with_artifact_protection(
         self,
         command: str,
@@ -1147,9 +1154,25 @@ class ShellTool(BaseTool):
         protection_note = shell_artifact_protection_note(artifact_summary)
         if protection_note:
             output = f"{output}\n{protection_note}"
+        owner_scoped = self.path_access_policy.owner_scope_root is not None
+        if owner_scoped:
+            output = (
+                f"{output}\n[sandbox_scope] file_scope=owner_workspace_only "
+                "external_host_paths_hidden=true host_path_absence_proven=false\n"
+                "当前命令只在本 owner 的隔离视图内运行；其中的 uid=0、/root 或其它绝对"
+                "路径都不代表宿主权限，只有结构化授权写根内的结果会持久化到宿主。未挂载"
+                "路径的不存在、拒绝或沙箱内成功都不能证明宿主路径状态。"
+            )
         result_envelope: dict[str, object] = {
             "artifact_protection": artifact_summary,
             "process": process_facts,
+            "sandbox": {
+                "file_scope": (
+                    "owner_workspace_only" if owner_scoped else "full_access"
+                ),
+                "external_host_paths_hidden": owner_scoped,
+                "host_path_absence_proven": False,
+            },
         }
         if isinstance(display, dict):
             result_envelope["display"] = display
@@ -1172,63 +1195,15 @@ class ShellTool(BaseTool):
         output: str = "",
         process_facts: dict[str, object] | None = None,
     ) -> str:
-        """失败时声明副作用状态(长期助手 三态,判定层只认结构化信号):
-
-        - 命令完整退出且是只读命令(analyze_command resolved_effect=read_only,如 grep/
-          ls/diff)→ not_started:失败是明确的,重做安全,不再说成「结果不确定」。
-        - command not found(exit 127, shell 从未 exec 任何目标)→ not_started:
-          2026-08-14 ④类复刻真机实证——tar 未安装时 0.15s 立即失败(exit 127),
-          被归「副作用结果不确定」,模型拿不到真实原因只能请求人工核验,任务死。
-          exit 127 是 shell 的结构化事实:目标命令不存在,进程从未启动,零副作用
-          可证明。判定只用结构化信号: return_code==127 且 stderr 非空(bash 找
-          不到命令必写 stderr; 显式 `exit 127` 无 stderr)——**不匹配错误文本**
-          (2026-08-14 真机: testbox 中文 locale 报「未找到命令」, 英文文本匹配
-          在 Mac 测试过但在中文环境失效, 违反「禁 NL 匹配」铁律)。
-        - 超时 → unknown:进程可能部分生效,防重做(保持)。
-        - 进程完整退出(process_facts.status=exited, return_code 已捕获)→ failed:
-          命令跑完并自己报告了退出码,结果是确定的——不是「副作用不确定」。
-          2026-08-15 长代码场景真机实证: `python3 -m unittest` 校验命令失败
-          (退出码 1, 输出完整)被旧逻辑归 unknown → 上层 TOOL_OPERATION_OUTCOME_UNKNOWN
-          → 模型禁止继续, 任务死。退出码+输出是进程边界的结构化事实, 与 harness/
-          轻量运行时/长期助手 一致: 模型读取输出修正后继续。副作用可能部分发生是模型可
-          观测的事实(读文件), 不是「结果未知」。
-        - 其他写命令失败且无退出码证据 → 不声明:沿通用错误合同保守判 unknown
-          (防重复副作用)。
-        """
-        if ok or not error_code:
-            return ""
-        if error_code == "TOOL_TIMEOUT":
-            return "unknown"
-        if error_code != "COMMAND_FAILED":
-            return ""
-        # exit 127 + stderr 来自 shell 解释器错误前缀 → command not found,
-        # 进程从未启动(bash 找不到命令报错固定以 "bash: " 等前缀开头, 不随
-        # locale 变; 显式 `exit 127` 的命令自身 stderr 无此前缀——命令确实
-        # 执行过, 副作用可能已发生, 不得误判 not_started)。缺 process_facts
-        # (旧调用点)时保守不声明, 沿通用合同。
-        if isinstance(process_facts, dict) and int(
-            process_facts.get("return_code") or 0
-        ) == 127:
-            stderr_head = str(process_facts.get("stderr_head") or "")
-            if stderr_head.startswith(_SHELL_ERROR_PREFIXES):
-                return "not_started"
-        try:
-            analysis = analyze_command(command)
-        except Exception:  # noqa: BLE001 - 判定失败时保守不声明,沿通用合同
-            return ""
-        if analysis.resolved_effect == "read_only":
-            return "not_started"
-        # 进程完整退出且退出码已捕获 → 确定性失败(failed)。只读命令的
-        # not_started 声明优先(重做安全语义更强); 走到这里说明命令可能有写
-        # 副作用, 但进程跑完自报退出码+完整输出, 结果是确定的——模型可读
-        # 输出修正, 不应归「副作用不确定」禁止继续(2026-08-15 长代码真机)。
-        if (
-            isinstance(process_facts, dict)
-            and str(process_facts.get("status") or "") == "exited"
-            and process_facts.get("return_code") is not None
-        ):
-            return "failed"
-        return ""
+        # LLM: Keep this stable seam for callers/tests while the classifier remains one helper.
+        # 函数用途: 按结构化退出事实判断失败是否可安全重试或副作用是否未知。
+        return _shell_failure_effect_outcome(
+            command,
+            ok,
+            error_code,
+            output,
+            process_facts,
+        )
 
     # LLM: 正常退出必须同时返回结构化 process facts 和 `_display` 暂存；异常分支保持原错误合同，不能伪造 stdout/stderr。
     # 函数用途: 运行前台命令并将退出事实、模型文本和终端预览一次性整理出来。
@@ -1241,68 +1216,20 @@ class ShellTool(BaseTool):
         sandbox_read_roots: tuple[Path, ...] | None,
         sandbox_protected_paths: tuple[Path, ...] | None,
     ) -> tuple[str, bool, str, dict[str, object]]:
-        try:
-            result = self._run_command(
-                command,
-                target,
-                timeout,
-                sandbox_write_roots,
-                sandbox_read_roots,
-                sandbox_protected_paths,
-            )
-            output = _format_process_result(result, self.max_output_chars)
-            ok = result.returncode == 0
-            if not ok:
-                output += f"\n[note] 退出码 {result.returncode} 非零(测试失败/grep无匹配/diff有差异等常见,非命令本身故障);看上方 stdout/stderr 定位修正,勿当工具不可用。"
-            return (
-                output,
-                ok,
-                "" if ok else "COMMAND_FAILED",
-                {
-                    "status": "exited",
-                    "return_code": int(result.returncode),
-                    "command_succeeded": ok,
-                    # 结构化 stderr 信号(command not found 判定用, locale 无关):
-                    # stderr_chars=stderr 字节数; stderr_head=stderr 前 80 字符——
-                    # 只用于 shell 解释器错误前缀白名单匹配(bash/sh/zsh 的
-                    # "bash: ..." 固定前缀, 不随 locale 变), 不匹配错误内容。
-                    "stderr_chars": len(str(getattr(result, "stderr", "") or "")),
-                    "stderr_head": str(getattr(result, "stderr", "") or "")[:80],
-                    "_display": _command_display(result, self.max_output_chars),
-                },
-            )
-        except subprocess.TimeoutExpired:
-            return (
-                f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...",
-                False,
-                "TOOL_TIMEOUT",
-                {"status": "timed_out", "timeout_seconds": timeout},
-            )
-        except CommandInterruptedError:
-            return (
-                "CANCELLED: 当前任务已停止，前台命令及其子进程已终止。",
-                False,
-                "CANCELLED",
-                {"status": "cancelled"},
-            )
-        except SandboxUnavailable as exc:
-            return (
-                f"SANDBOX_UNAVAILABLE: {exc}",
-                False,
-                "SANDBOX_UNAVAILABLE",
-                {"status": "not_started", "reason": "sandbox_unavailable"},
-            )
-        except OSError as exc:
-            return (
-                f"COMMAND_FAILED: 命令执行失败: {exc}",
-                False,
-                "COMMAND_FAILED",
-                {"status": "not_started", "reason": type(exc).__name__},
-            )
+        return _run_shell_process_text(
+            self,
+            command,
+            target,
+            timeout,
+            sandbox_write_roots,
+            sandbox_read_roots,
+            sandbox_protected_paths,
+        )
 
     # LLM: Background execution is owned by a detached managed host, not the
-    # one-shot agent runner. It returns pid + process_pid + output_file + session_id;
-    # the exact owner/conversation scope is persisted before success is reported.
+    # one-shot agent runner. Model output exposes only the stable session handle;
+    # host and command-entry PIDs remain private lifecycle facts because later
+    # descendants may own the actual resource. Exact scope is persisted first.
     # stdin remains unsupported here because interactive processes belong to PTY.
     # 函数用途: 把命令放到当前用户会话的后台，马上返回，不堵住模型工具循环。
     def _start_background_command(
@@ -1374,22 +1301,10 @@ class ShellTool(BaseTool):
             log_path,
             cancellation_token=current_cancellation_token(),
         ).start()  # 日志超上限或所属 turn 取消时终止完整进程组
-        payload = {
-            "status": "started",
-            "session_id": record.session_id,
-            "pid": hosted.process.pid,
-            "process_pid": hosted.child_pid,
-            "output_file": str(log_path),
-            "hint": (
-                "命令已在后台运行。用 process_session 的 status/wait/list/stop 动作管理；"
-                "需要结果时用 wait 有界等待，不要运行 sleep 轮询。"
-                "也可以用 read_file 读取 output_file 的完整日志。"
-                "如果这是网络服务，用 process_session network_status 核对监听和防火墙；"
-                "本机成功不能证明局域网可达。"
-            ),
-        }
-        return ToolHandlerOutcome(
-            self.model_spec.name, True, json.dumps(payload, ensure_ascii=False)
+        return _background_start_outcome(
+            tool_name=self.model_spec.name,
+            record=record,
+            log_path=log_path,
         )
 
     def _parse_command(self, params: dict[str, Any]) -> str | ToolHandlerOutcome:
@@ -1413,6 +1328,216 @@ class ShellTool(BaseTool):
             sandbox_read_roots,
             sandbox_protected_paths,
         )
+
+
+# LLM: Shell and PTY must resolve the same trusted cwd and access override; command text never
+# grants a directory or participates in containment decisions.
+# 函数用途: 根据结构化工作目录参数和当前访问策略返回命令的规范执行目录。
+def _shell_execution_target(
+    tool: ShellTool,
+    params: dict[str, Any],
+) -> Path | ToolHandlerOutcome:
+    effective_access_mode = _effective_access_mode(
+        tool.access_mode,
+        params.get("__access_mode"),
+    )
+    return _working_dir_from_params(
+        params,
+        tool.workspace_root,
+        workspace_roots=tool.workspace_roots,
+        path_access_policy=tool.path_access_policy,
+        access_mode=effective_access_mode,
+    )
+
+
+# LLM: This classifier uses only typed process status, return code, stderr prefix, and the command
+# policy parser. Natural-language error text must never decide retry safety or side effects.
+# 函数用途: 将 shell 失败归为未启动、确定失败或结果未知，供上层选择是否安全重试。
+def _shell_failure_effect_outcome(
+    command: str,
+    ok: bool,
+    error_code: str,
+    output: str = "",
+    process_facts: dict[str, object] | None = None,
+) -> str:
+    _ = output
+    if ok or not error_code:
+        return ""
+    if error_code == "TOOL_TIMEOUT":
+        return "unknown"
+    if error_code != "COMMAND_FAILED":
+        return ""
+    # exit 127 plus a shell-owned stderr prefix proves the target command never started.
+    if isinstance(process_facts, dict) and int(
+        process_facts.get("return_code") or 0
+    ) == 127:
+        stderr_head = str(process_facts.get("stderr_head") or "")
+        if stderr_head.startswith(_SHELL_ERROR_PREFIXES):
+            return "not_started"
+    try:
+        analysis = analyze_command(command)
+    except Exception:  # noqa: BLE001 - 判定失败时保守沿用通用 unknown 合同
+        return ""
+    if analysis.resolved_effect == "read_only":
+        return "not_started"
+    if (
+        isinstance(process_facts, dict)
+        and str(process_facts.get("status") or "") == "exited"
+        and process_facts.get("return_code") is not None
+    ):
+        return "failed"
+    return ""
+
+
+# LLM: Foreground execution returns one typed process envelope for every exit path. Timeout and
+# cancellation preserve distinct codes so callers never infer them from rendered output.
+# 函数用途: 运行前台命令并统一整理正常退出、超时、中断、沙箱缺失和启动失败结果。
+def _run_shell_process_text(
+    tool: ShellTool,
+    command: str,
+    target: Path,
+    timeout: int,
+    sandbox_write_roots: tuple[Path, ...] | None,
+    sandbox_read_roots: tuple[Path, ...] | None,
+    sandbox_protected_paths: tuple[Path, ...] | None,
+) -> tuple[str, bool, str, dict[str, object]]:
+    try:
+        result = tool._run_command(
+            command,
+            target,
+            timeout,
+            sandbox_write_roots,
+            sandbox_read_roots,
+            sandbox_protected_paths,
+        )
+        output = _format_process_result(result, tool.max_output_chars)
+        ok = result.returncode == 0
+        if not ok:
+            output += (
+                f"\n[note] 退出码 {result.returncode} 非零"
+                "(测试失败/grep无匹配/diff有差异等常见,非命令本身故障);"
+                "看上方 stdout/stderr 定位修正,勿当工具不可用。"
+            )
+        stderr = str(getattr(result, "stderr", "") or "")
+        return (
+            output,
+            ok,
+            "" if ok else "COMMAND_FAILED",
+            {
+                "status": "exited",
+                "return_code": int(result.returncode),
+                "command_succeeded": ok,
+                "stderr_chars": len(stderr),
+                "stderr_head": stderr[:80],
+                "_display": _command_display(result, tool.max_output_chars),
+            },
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...",
+            False,
+            "TOOL_TIMEOUT",
+            {"status": "timed_out", "timeout_seconds": timeout},
+        )
+    except CommandInterruptedError:
+        return (
+            "CANCELLED: 当前任务已停止，前台命令及其子进程已终止。",
+            False,
+            "CANCELLED",
+            {"status": "cancelled"},
+        )
+    except SandboxUnavailable as exc:
+        return (
+            f"SANDBOX_UNAVAILABLE: {exc}",
+            False,
+            "SANDBOX_UNAVAILABLE",
+            {"status": "not_started", "reason": "sandbox_unavailable"},
+        )
+    except OSError as exc:
+        return (
+            f"COMMAND_FAILED: 命令执行失败: {exc}",
+            False,
+            "COMMAND_FAILED",
+            {"status": "not_started", "reason": type(exc).__name__},
+        )
+
+
+# LLM: The initial result distinguishes a managed process that is still alive from a command
+# that already exited. This preserves the initial yield contract and prevents a session
+# handle from being interpreted as service readiness; external reachability remains separate.
+# 函数用途: 短暂等待后台命令的首个稳定状态；立即失败就原回合返回退出码和日志，仍运行才报告已启动。
+def _background_start_outcome(
+    *,
+    tool_name: str,
+    record: BackgroundProcess,
+    log_path: Path,
+) -> ToolHandlerOutcome:
+    settled = process_registry.wait(
+        record.session_id,
+        _BACKGROUND_START_SETTLE_SECONDS,
+        record.access_scope,
+        record.store_root or None,
+    )
+    state = dict(settled or {})
+    status = str(state.get("status") or "running").strip().lower()
+    if status == "running":
+        payload = {
+            "status": "started",
+            "session_id": record.session_id,
+            "output_file": str(log_path),
+            "startup_observation_seconds": _BACKGROUND_START_SETTLE_SECONDS,
+            "hint": _background_session_hint(running=True),
+        }
+        return ToolHandlerOutcome(tool_name, True, json.dumps(payload, ensure_ascii=False))
+
+    exit_code = _background_exit_code(state)
+    payload = {
+        "status": "exited",
+        "session_id": record.session_id,
+        "exit_code": exit_code,
+        "output_tail": str(state.get("output_tail") or ""),
+        "output_file": str(log_path),
+        "startup_observation_seconds": _BACKGROUND_START_SETTLE_SECONDS,
+        "hint": _background_session_hint(running=False),
+    }
+    if exit_code == 0:
+        return ToolHandlerOutcome(tool_name, True, json.dumps(payload, ensure_ascii=False))
+    return ToolHandlerOutcome(
+        tool_name,
+        False,
+        json.dumps(payload, ensure_ascii=False),
+        error_code="COMMAND_FAILED",
+        effect_outcome="failed",
+    )
+
+
+# LLM: Exit code is a typed host lifecycle fact. Missing or malformed terminal state must not be
+# converted to success, so the fallback remains a generic non-zero failure.
+# 函数用途: 从后台终态安全读取退出码，缺失时按失败处理而不是说启动成功。
+def _background_exit_code(state: dict[str, object]) -> int:
+    try:
+        return int(state.get("exit_code"))
+    except (TypeError, ValueError):
+        return -1
+
+
+# LLM: Guidance explains the stable session handle without claiming port or network readiness.
+# It is model context only and never participates in lifecycle or completion decisions.
+# 函数用途: 给模型说明后台命令仍运行或已经退出时应该怎样汇报和继续核对。
+def _background_session_hint(*, running: bool) -> str:
+    if not running:
+        return (
+            "命令在启动观察期内已经退出；请按 exit_code 和 output_tail 如实汇报，"
+            "不要说服务已启动。session_id 只用于追溯这次受管执行。"
+        )
+    return (
+        "命令在启动观察期后仍在后台运行。session_id 是唯一稳定的管理标识；"
+        "用 process_session 的 status/wait/list/stop 动作管理，不要猜测或操作系统 PID；"
+        "需要结果时用 wait 有界等待，不要运行 sleep 轮询。"
+        "也可以用 read_file 读取 output_file 的完整日志。"
+        "如果这是网络服务，用 process_session network_status 核对真实监听 PID 和防火墙；"
+        "进程仍运行不等于端口已监听，本机监听也不能证明局域网可达。"
+    )
 
 
 def _run_shell_command(

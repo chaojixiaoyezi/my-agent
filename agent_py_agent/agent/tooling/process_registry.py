@@ -73,6 +73,25 @@ class ProcessAccessScope:
         return bool(self.owner_id and self.conversation_id)
 
 
+# LLM: Process registration is one immutable launch fact. Bundle it before the
+# registry lock so call sites cannot shift positional fields or grow another
+# parallel registration signature; access scope and store root remain typed.
+# 类用途: 汇总刚启动后台 host 的登记参数，交给唯一 ProcessRegistry 入口原子落盘。
+@dataclass(frozen=True)
+class ProcessRegistration:
+    command: str
+    pid: int
+    output_file: str
+    process: subprocess.Popen | None = None
+    cwd: str = ""
+    session_id: str | None = None
+    access_scope: ProcessAccessScope | None = None
+    child_pid: int = 0
+    pid_birth_token: str = ""
+    host_state_file: str = ""
+    store_root: str | Path | None = None
+
+
 # LLM: Scope 只能从 executor 注入的 run_scope 和 registry 的 owner home 构造；
 # 选择 session -> root task -> root run -> run 的稳定降级顺序，以便主子代理在同一
 # 对话树内协作，同时隔离其他用户、其他 TUI 会话和无法证明归属的裸调用。
@@ -132,21 +151,19 @@ class BackgroundProcess:
     def is_terminal(self) -> bool:
         return self.status in {"exited", "killed"}
 
-    # LLM: Summary intentionally omits access scope and PID birth tokens. Those
-    # are authorization internals, while child_pid is safe operational context.
+    # LLM: Summary intentionally exposes only the stable session handle. Host,
+    # command-entry and birth-token PIDs are lifecycle internals: descendants may
+    # fork again, so none of them identifies the process that owns a resource.
     # 函数用途: 生成 process_session 返回给模型的简短状态和可选日志尾部。
     def to_summary(self, *, include_output: bool = False, output_tail_chars: int = _OUTPUT_TAIL_CHARS) -> dict[str, Any]:
         summary: dict[str, Any] = {
             "session_id": self.session_id,
-            "pid": self.pid,
             "command": self.command[:200],
             "status": self.status,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(self.started_at)),
             "uptime_seconds": int((self.finished_at or time.time()) - self.started_at),
             "output_file": self.output_file,
         }
-        if self.child_pid > 0:
-            summary["process_pid"] = self.child_pid
         if self.exit_code is not None:
             summary["exit_code"] = self.exit_code
         if include_output:
@@ -261,40 +278,32 @@ class ProcessRegistry:
     # LLM: access_scope is frozen into the record at launch and cannot be replaced later by a
     # caller-supplied session id; callers without trusted scope remain internal-only records.
     # 函数用途: 登记一条刚启动的后台命令，并返回后续管理所需的 session id。
-    def register(
-        self,
-        *,
-        command: str,
-        pid: int,
-        output_file: str,
-        process: subprocess.Popen | None = None,
-        cwd: str = "",
-        session_id: str | None = None,
-        access_scope: ProcessAccessScope | None = None,
-        child_pid: int = 0,
-        pid_birth_token: str = "",
-        host_state_file: str = "",
-        store_root: str | Path | None = None,
-    ) -> BackgroundProcess:
+    def register(self, request: ProcessRegistration) -> BackgroundProcess:
         """登记一个刚启动的后台 host，并在可用时同步写入跨进程权威记录。"""
         with self._lock:
-            sid = session_id or self._next_session_id()
-            birth_token = str(pid_birth_token or "") or capture_process_birth_token(pid)
-            if store_root and not birth_token:
+            sid = request.session_id or self._next_session_id()
+            birth_token = str(request.pid_birth_token or "") or capture_process_birth_token(
+                request.pid
+            )
+            if request.store_root and not birth_token:
                 raise OSError("cannot establish managed process birth identity")
             record = BackgroundProcess(
                 session_id=sid,
-                command=command,
-                pid=pid,
+                command=request.command,
+                pid=request.pid,
                 started_at=time.time(),
-                access_scope=access_scope or ProcessAccessScope(),
-                cwd=cwd,
-                output_file=output_file,
-                process=process,
-                child_pid=max(0, int(child_pid or 0)),
+                access_scope=request.access_scope or ProcessAccessScope(),
+                cwd=request.cwd,
+                output_file=request.output_file,
+                process=request.process,
+                child_pid=max(0, int(request.child_pid or 0)),
                 pid_birth_token=birth_token,
-                host_state_file=str(host_state_file or ""),
-                store_root=str(Path(store_root).resolve(strict=False)) if store_root else "",
+                host_state_file=str(request.host_state_file or ""),
+                store_root=(
+                    str(Path(request.store_root).resolve(strict=False))
+                    if request.store_root
+                    else ""
+                ),
             )
             self._persist_locked(record)
             self._processes[sid] = record
@@ -832,6 +841,7 @@ process_registry = ProcessRegistry()
 __all__ = [
     "BackgroundProcess",
     "ProcessAccessScope",
+    "ProcessRegistration",
     "ProcessRegistry",
     "capture_process_birth_token",
     "process_access_scope",

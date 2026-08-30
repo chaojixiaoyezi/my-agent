@@ -16,28 +16,30 @@ from agent_py_agent.agent.agent_core._tool_loop_service import (
     build_tool_loop_prompt,
     execute_tool_loop,
 )
-from agent_py_agent.agent.agent_core.runner.context import ThreadLocalAgentAttribute
+from agent_py_agent.agent.agent_core.runner.context import (
+    ThreadLocalAgentAttribute,
+    restore_current_subagent_context,
+    set_current_subagent_context,
+)
 from agent_py_agent.agent.agent_core.runtime.guidance import (
     acknowledge_injected_turn_input,
     has_pending_request_guidance,
     has_pending_turn_input,
     inject_pending_guidance,
     inject_pending_turn_input,
-    render_subagent_guidance_section,
+    refresh_runtime_direct_children_snapshot,
 )
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
-    queue_followup_after_post_failure_workspace_mutation,
     queue_interim_reply_for_active_named_work,
     queue_interim_reply_for_open_subagents,
-    queue_reconciliation_for_prior_unresolved_operations,
     queue_reply_for_audit_prepare,
-    queue_reply_for_incomplete_final_mutation,
 )
 from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
+    finish_natural_user_reply,
     natural_user_reply_model_params,
     natural_user_reply_rejection_reason,
     pending_natural_user_reply,
@@ -65,6 +67,8 @@ from agent_py_agent.agent.conversation.authority import (
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.subagents.models import TaskStatus
+from agent_py_agent.agent.turn_end import infer_turn_end_reason
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
     canonical_history_result,
@@ -117,6 +121,169 @@ def _tool_loop_params(**overrides) -> ToolLoopExecuteParams:
             ),
         )
     return params
+
+
+class _MutableSubagentReport:
+    def __init__(self, runs: list[object], load_errors: list[object] | None = None) -> None:
+        self.runs = runs
+        self.load_errors = list(load_errors or [])
+
+
+class _MutableSubagentManager:
+    def __init__(self, runs: list[object]) -> None:
+        self.runs = runs
+        self.load_errors: list[object] = []
+
+    def list_runs_report(self) -> _MutableSubagentReport:
+        return _MutableSubagentReport(self.runs, self.load_errors)
+
+
+def _direct_child(run_id: str, parent_id: str, status: str) -> SimpleNamespace:
+    return SimpleNamespace(id=run_id, parent_id=parent_id, status=status)
+
+
+def test_tool_loop_refreshes_direct_children_after_status_change_and_context_rebuild(
+    tmp_path,
+) -> None:
+    root_id = "task-root"
+    runs = [
+        *[
+            _direct_child(f"child-{index}", root_id, "DONE")
+            for index in range(1, 8)
+        ],
+        _direct_child("child-8", root_id, "RUNNING"),
+        _direct_child("unrelated", "other-root", "RUNNING"),
+    ]
+    manager = _MutableSubagentManager(runs)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    agent.subagents = manager
+    params = _tool_loop_params(
+        request_id=root_id,
+        run_id=root_id,
+        task_id=root_id,
+        runtime_injections=["[BASE_RUNTIME_FACT]"],
+    )
+
+    first_prompt = build_tool_loop_prompt(agent, params)
+    first_snapshot = next(
+        item
+        for item in params.runtime_injections
+        if item.startswith("[RUNTIME_DIRECT_CHILDREN]")
+    )
+
+    assert "[RUNTIME_DIRECT_CHILDREN]" in first_prompt
+    assert '"RUNNING":1' in first_snapshot
+    assert '"DONE":7' in first_snapshot
+    assert "unrelated" not in first_snapshot
+    assert '"all_terminal":false' in first_snapshot
+
+    runs[7].status = "DONE"
+    second_prompt = build_tool_loop_prompt(agent, params)
+    second_snapshot = next(
+        item
+        for item in params.runtime_injections
+        if item.startswith("[RUNTIME_DIRECT_CHILDREN]")
+    )
+
+    assert '"DONE":8' in second_snapshot
+    assert "RUNNING" not in second_snapshot
+    assert '"all_terminal":true' in second_snapshot
+    assert first_snapshot not in second_prompt
+    assert sum(
+        item.startswith("[RUNTIME_DIRECT_CHILDREN]")
+        for item in params.runtime_injections
+    ) == 1
+
+    # Compact/rebuild may reconstruct the volatile injection list. The next model safe point
+    # must rehydrate the current canonical snapshot without changing its bytes when state is stable.
+    params.runtime_injections[:] = ["[BASE_RUNTIME_FACT]"]
+    rebuilt_prompt = build_tool_loop_prompt(agent, params)
+    rebuilt_snapshot = next(
+        item
+        for item in params.runtime_injections
+        if item.startswith("[RUNTIME_DIRECT_CHILDREN]")
+    )
+    assert rebuilt_snapshot == second_snapshot
+    assert rebuilt_snapshot in rebuilt_prompt
+    stable_before = list(params.runtime_injections)
+    build_tool_loop_prompt(agent, params)
+    assert params.runtime_injections == stable_before
+
+
+def test_runtime_direct_children_snapshot_uses_exact_current_child_parent() -> None:
+    runs = [
+        _direct_child("child-1", "task-root", "RUNNING"),
+        _direct_child("child-2", "task-root", "DONE"),
+        _direct_child("grandchild-1", "child-1", "RUNNING"),
+        _direct_child("grandchild-2", "child-2", "DONE"),
+        _direct_child("other", "other-root", "DONE"),
+    ]
+    agent = SimpleNamespace(subagents=_MutableSubagentManager(runs))
+    params = _tool_loop_params(task_id="task-root", runtime_injections=[])
+    previous = set_current_subagent_context(agent, run_id="child-1")
+    try:
+        assert refresh_runtime_direct_children_snapshot(agent, params)
+    finally:
+        restore_current_subagent_context(agent, previous)
+
+    snapshot = params.runtime_injections[0]
+    payload = json.loads(snapshot.rsplit("\n", 1)[-1])
+    assert payload["parent_run_id"] == "child-1"
+    assert payload["children"] == [
+        {"run_id": "grandchild-1", "status": "RUNNING"}
+    ]
+    assert payload["nonterminal_run_ids"] == ["grandchild-1"]
+    assert "child-2" not in snapshot
+    assert "grandchild-2" not in snapshot
+    assert "other" not in snapshot
+
+
+def test_runtime_direct_children_snapshot_never_claims_terminal_when_load_is_partial() -> None:
+    manager = _MutableSubagentManager(
+        [_direct_child("child-1", "task-root", "DONE")]
+    )
+    manager.load_errors = [{"run_id": "child-corrupt"}]
+    agent = SimpleNamespace(subagents=manager)
+    params = _tool_loop_params(task_id="task-root", runtime_injections=[])
+
+    assert refresh_runtime_direct_children_snapshot(agent, params)
+
+    payload = json.loads(params.runtime_injections[0].rsplit("\n", 1)[-1])
+    assert payload["load_error_count"] == 1
+    assert payload["projection_complete"] is False
+    assert payload["all_terminal"] is False
+
+
+def test_subagents_active_receipt_keeps_root_turn_interrupted() -> None:
+    params = _tool_loop_params()
+    queue_natural_user_reply(
+        params,
+        kind="subagents_active",
+        facts={
+            "reply_is_interim": True,
+            "task_continues_without_more_user_input": True,
+        },
+    )
+
+    response = finish_natural_user_reply(
+        params,
+        ModelResponse(text="子代理仍在工作，我会继续等待结果。", backend="test"),
+        accepted=True,
+    )
+
+    assert response.runtime_status == "unfinished"
+    assert response.runtime_reason == "SUBAGENTS_ACTIVE"
+    assert response.runtime_source == "subagent_lifecycle"
+    assert (
+        infer_turn_end_reason(
+            runtime_status=response.runtime_status,
+            runtime_reason=response.runtime_reason,
+        )
+        == "interrupted"
+    )
 
 
 def test_shared_owner_agent_keeps_transient_run_context_per_worker_thread(tmp_path) -> None:
@@ -487,6 +654,12 @@ def test_send_guidance_tool_writes_run_guidance(tmp_path) -> None:
 
     assert result.ok is True
     assert payload["target"] == child.id
+    assert payload["delivery"] == "queued"
+    assert payload["status"] == "pending"
+    assert payload["provider_acknowledged"] is False
+    assert payload["consumed"] is False
+    assert payload["delivery_timing"] == "current_tool_boundary_or_next_turn"
+    assert "不代表目标模型已经接收或执行" in payload["message"]
     pending = agent.conversation_store.pending_guidance("agent_run", child.id)
     assert pending[0].message == "换一个数据来源核对，不要重复查同一个页面。"
     assert pending[0].priority == "normal"
@@ -514,6 +687,40 @@ def test_send_guidance_tool_targets_only_one_named_child(tmp_path) -> None:
     assert agent.conversation_store.pending_guidance("agent_run", child_a.id)
     assert agent.conversation_store.pending_guidance("agent_run", child_b.id) == []
     assert agent.conversation_store.pending_guidance("agent_run", root.id) == []
+
+
+def test_send_guidance_rejects_done_child_without_fake_pending_row(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    child = agent.subagents.create_run(goal="核对数据", thought="", plan=["核对"])
+    child.status = TaskStatus.DONE.value
+    agent.subagents.save(child)
+
+    result = SendGuidanceTool(agent).execute(
+        {"target": child.id, "message": "继续补充一项检查。"}
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert result.error_code == "SUBAGENT_GUIDANCE_TARGET_TERMINAL"
+    assert result.effect_outcome == "not_started"
+    assert payload["details"]["status"] == TaskStatus.DONE.value
+    assert payload["details"]["recommended_action"] == "create_replacement_subagent"
+    assert agent.conversation_store.pending_guidance("agent_run", child.id) == []
+
+
+def test_send_guidance_keeps_blocked_child_eligible_for_correction(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    child = agent.subagents.create_run(goal="核对数据", thought="", plan=["核对"])
+    child.status = TaskStatus.BLOCKED.value
+    agent.subagents.save(child)
+
+    result = SendGuidanceTool(agent).execute(
+        {"target": child.id, "message": "改读当前 workspace 内的 sources 目录。"}
+    )
+
+    assert result.ok is True
+    pending = agent.conversation_store.pending_guidance("agent_run", child.id)
+    assert [item.message for item in pending] == ["改读当前 workspace 内的 sources 目录。"]
 
 
 def test_send_guidance_missing_target_does_not_fall_back_to_parent(tmp_path) -> None:
@@ -557,7 +764,29 @@ def test_send_guidance_keeps_recursive_parent_child_boundary(tmp_path) -> None:
 
     assert result.ok is False
     assert result.error_code == "TOOL_PERMISSION_DENIED"
+    assert result.effect_outcome == "not_started"
     assert agent.conversation_store.pending_guidance("agent_run", grandchild.id) == []
+
+
+def test_send_guidance_followup_keeps_original_conversation_parent(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="", plan=["root"])
+    child = agent.subagents.create_run(
+        goal="child", thought="", plan=["child"], parent_id=root.id, root_id=root.id, depth=1
+    )
+    agent._current_run_params = SimpleNamespace(
+        run_id="gateway-followup-request",
+        task_id="gateway-followup-request",
+        task_attributes={"conversation_task_id": root.id},
+    )
+
+    result = SendGuidanceTool(agent).execute(
+        {"target": child.id, "message": "这是同一主任务的后续要求。"}
+    )
+
+    assert result.ok is True
+    pending = agent.conversation_store.pending_guidance("agent_run", child.id)
+    assert [item.message for item in pending] == ["这是同一主任务的后续要求。"]
 
 
 def test_cli_guidance_send_writes_same_guidance_inbox(tmp_path, capsys) -> None:
@@ -1482,256 +1711,6 @@ def test_open_subagents_queue_interim_reply_without_reading_model_prose() -> Non
     }
 
 
-def test_post_failure_workspace_mutation_followup_is_soft_and_only_queued_once(
-    tmp_path,
-) -> None:
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    params = _tool_loop_params(
-        context_scope="conversation",
-        archive_tool_calls=[
-            {
-                "tool": "run_command",
-                "call_id": "call-build-failed",
-                "ok": False,
-                "handler_executed": True,
-                "error_code": "COMMAND_FAILED",
-                "parameters": {"command": "go test ./..."},
-            },
-            {
-                "tool": "write_file",
-                "call_id": "call-fix",
-                "operation_id": "operation-fix",
-                "ok": True,
-                "handler_executed": True,
-                "tool_operation_status": "succeeded",
-                "parameters": {"path": "cmd.go", "content": "package main\n"},
-            },
-        ],
-    )
-
-    assert queue_followup_after_post_failure_workspace_mutation(agent, params) is True
-    assert "post_failure_workspace_mutation_followup.v1" in params.tool_context[-1]
-    assert "不是完成硬门" in params.tool_context[-1]
-    assert queue_followup_after_post_failure_workspace_mutation(agent, params) is False
-
-
-def test_unknown_completion_conflict_keeps_fail_closed_no_tools_reply(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    params = _tool_loop_params(
-        context_scope="conversation",
-        live_archive_state={},
-        archive_tool_calls=[
-            {
-                "tool": "run_command",
-                "call_id": "call-command-unknown",
-                "operation_id": "operation-command-unknown",
-                "ok": False,
-                "handler_executed": True,
-                "tool_operation_status": "unknown",
-                "effect_outcome": "unknown",
-                "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
-                "parameters": {"command": "deploy"},
-            }
-        ],
-    )
-
-    assert queue_reply_for_incomplete_final_mutation(
-        agent,
-        params,
-        response=ModelResponse(text="已经部署完成。", backend="fake"),
-        tool_rounds=1,
-    ) is True
-    assert not any("completion_conflict.v1" in item for item in params.tool_context)
-    phase = pending_natural_user_reply(params)
-    assert phase is not None
-    assert phase["kind"] == "operation_incomplete"
-    assert phase["facts"]["latest_mutating_operation"]["status"] == "unknown"
-
-
-def test_prior_unknown_operation_gets_one_codex_style_model_reconciliation(
-    tmp_path,
-) -> None:
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    records = [
-        {
-            "tool": "run_command",
-            "call_id": "call-test-timeout",
-            "operation_id": "operation-test-timeout",
-            "ok": False,
-            "handler_executed": True,
-            "tool_operation_status": "unknown",
-            "effect_outcome": "unknown",
-            "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
-            "parameters": {"command": "npm test"},
-        },
-        {
-            "tool": "run_command",
-            "call_id": "call-build-success",
-            "operation_id": "operation-build-success",
-            "ok": True,
-            "handler_executed": True,
-            "tool_operation_status": "succeeded",
-            "effect_outcome": "succeeded",
-            "parameters": {"command": "npm run build"},
-        },
-    ]
-    params = _tool_loop_params(
-        context_scope="conversation",
-        live_archive_state={},
-        archive_tool_calls=records,
-    )
-    response = ModelResponse(text="所有测试和构建均已通过。", backend="fake")
-
-    assert queue_reconciliation_for_prior_unresolved_operations(
-        agent,
-        params,
-        response=response,
-    ) is True
-    assert "prior_unresolved_reconciliation.v1" in params.tool_context[-1]
-    assert "所有测试和构建均已通过" in params.tool_context[-1]
-    assert "不是机器验收结论" in params.tool_context[-1]
-    assert queue_reconciliation_for_prior_unresolved_operations(
-        agent,
-        params,
-        response=response,
-    ) is False
-
-
-def test_new_failed_call_id_does_not_reset_completion_repair_budget(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    records: list[dict[str, object]] = []
-    params = _tool_loop_params(
-        context_scope="conversation",
-        live_archive_state={},
-        archive_tool_calls=records,
-    )
-
-    for index in range(1, 4):
-        records.append(
-            {
-                "tool": "run_command",
-                "call_id": f"call-command-failed-{index}",
-                "operation_id": f"operation-command-failed-{index}",
-                "ok": False,
-                "handler_executed": True,
-                "tool_operation_status": "failed",
-                "effect_outcome": "failed",
-                "error_code": "COMMAND_FAILED",
-                "failure_stage": "execution",
-                "parameters": {"command": f"check-{index}"},
-            }
-        )
-        assert queue_reply_for_incomplete_final_mutation(
-            agent,
-            params,
-            response=ModelResponse(text=f"第 {index} 次声称完成。", backend="fake"),
-            tool_rounds=index,
-        ) is True
-
-    repairs = [item for item in params.tool_context if "completion_conflict.v1" in item]
-    assert len(repairs) == 2
-    assert '"repair_attempt":1' in repairs[0]
-    assert '"repair_attempt":2' in repairs[1]
-    phase = pending_natural_user_reply(params)
-    assert phase is not None
-    assert phase["kind"] == "operation_incomplete"
-
-
-def test_stale_verification_followup_rearms_only_after_a_new_verification_cycle(
-    tmp_path,
-) -> None:
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
-    root = str((tmp_path / "project").resolve())
-    records = [
-        {
-            "tool": "run_command",
-            "call_id": "call-check-1",
-            "ok": False,
-            "handler_executed": True,
-            "error_code": "COMMAND_FAILED",
-            "parameters": {"command": "go test ."},
-            "tool_result_envelope": {
-                "verification_evidence": {
-                    "id": 11,
-                    "root": root,
-                    "status": "failed",
-                }
-            },
-        },
-        {
-            "tool": "write_file",
-            "call_id": "call-fix-1",
-            "ok": True,
-            "handler_executed": True,
-            "tool_operation_status": "succeeded",
-            "parameters": {"path": f"{root}/main.go"},
-            "tool_result_envelope": {
-                "verification_state": [
-                    {
-                        "root": root,
-                        "status": "stale",
-                        "last_verification_id": 11,
-                        "last_verification_status": "failed",
-                        "changed_paths": [f"{root}/main.go"],
-                    }
-                ]
-            },
-        },
-        {
-            "tool": "search_text",
-            "call_id": "call-read",
-            "ok": True,
-            "handler_executed": True,
-            "parameters": {"query": "func"},
-        },
-    ]
-    params = _tool_loop_params(context_scope="conversation", archive_tool_calls=records)
-
-    assert queue_followup_after_post_failure_workspace_mutation(agent, params) is True
-    assert "post_failure_workspace_mutation_followup.v2" in params.tool_context[-1]
-    assert queue_followup_after_post_failure_workspace_mutation(agent, params) is False
-
-    records.extend(
-        [
-            {
-                "tool": "run_command",
-                "call_id": "call-check-2",
-                "ok": True,
-                "handler_executed": True,
-                "parameters": {"command": "go test ."},
-                "tool_result_envelope": {
-                    "verification_evidence": {
-                        "id": 12,
-                        "root": root,
-                        "status": "passed",
-                    }
-                },
-            },
-            {
-                "tool": "write_file",
-                "call_id": "call-fix-2",
-                "ok": True,
-                "handler_executed": True,
-                "tool_operation_status": "succeeded",
-                "parameters": {"path": f"{root}/example.go"},
-                "tool_result_envelope": {
-                    "verification_state": [
-                        {
-                            "root": root,
-                            "status": "stale",
-                            "last_verification_id": 12,
-                            "last_verification_status": "passed",
-                            "changed_paths": [f"{root}/example.go"],
-                        }
-                    ]
-                },
-            },
-        ]
-    )
-
-    assert queue_followup_after_post_failure_workspace_mutation(agent, params) is True
-
-
 def test_active_named_audit_replaces_premature_final_with_model_interim(
     tmp_path,
 ) -> None:
@@ -2594,9 +2573,12 @@ def test_natural_reply_still_rejects_structured_tool_calls() -> None:
     assert natural_user_reply_rejection_reason(response) == "structured_tool_call"
 
 
-def test_natural_reply_discards_unauthorized_tool_call_after_bounded_retry(tmp_path) -> None:
+def test_natural_reply_returns_unauthorized_tool_call_as_failed_result_before_retry(
+    tmp_path,
+) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     prompts: list[str] = []
+    wires: list[list[dict]] = []
 
     class ToolCallingReceiptBackend:
         name = "anthropic_compatible"
@@ -2604,17 +2586,20 @@ def test_natural_reply_discards_unauthorized_tool_call_after_bounded_retry(tmp_p
         def generate(self, prompt: str, on_chunk=None, **kwargs):
             del on_chunk
             prompts.append(prompt)
-            return ModelResponse(
-                text=f"继续原任务收尾（第 {len(prompts)} 次表达）。",
-                backend=self.name,
-                tool_use_blocks=[
-                    {
-                        "id": f"call-{len(prompts)}",
-                        "name": "read_file",
-                        "input": {"path": "README.md"},
-                    }
-                ],
-            )
+            wires.append(list(kwargs.get("messages") or []))
+            if len(prompts) == 1:
+                return ModelResponse(
+                    text="我先读取文件再回答。",
+                    backend=self.name,
+                    tool_use_blocks=[
+                        {
+                            "id": "call-1",
+                            "name": "read_file",
+                            "input": {"path": "README.md"},
+                        }
+                    ],
+                )
+            return ModelResponse(text="任务仍按原要求继续。", backend=self.name)
 
     agent.backend = ToolCallingReceiptBackend()
     params = _tool_loop_params(task_id="task-1")
@@ -2628,11 +2613,58 @@ def test_natural_reply_discards_unauthorized_tool_call_after_bounded_retry(tmp_p
 
     assert len(prompts) == 2
     assert all("[natural-user-reply]" in prompt for prompt in prompts)
-    assert response.text == "继续原任务收尾（第 2 次表达）。"
+    second_wire = json.dumps(wires[1], ensure_ascii=False, sort_keys=True)
+    assert '"type": "tool_use"' in second_wire
+    assert '"tool_use_id": "call-1"' in second_wire
+    assert "TOOL_CHOICE_VIOLATION" in second_wire
+    assert "handler_executed=false" in second_wire
+    assert "这个工具调用没有执行" in second_wire
+    assert response.text == "任务仍按原要求继续。"
     assert response.tool_use_blocks == []
     assert response.runtime_status == "ok"
     assert response.runtime_reason == "background_dispatch"
-    assert response.runtime_source == "model_user_reply_unauthorized_tools_discarded"
+    assert response.runtime_source == "model_user_reply"
+
+
+def test_natural_reply_never_promotes_tool_preamble_after_bounded_retry(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    prompts: list[str] = []
+
+    class RepeatedToolCallingReceiptBackend:
+        name = "anthropic_compatible"
+
+        def generate(self, prompt: str, on_chunk=None, **kwargs):
+            del on_chunk, kwargs
+            prompts.append(prompt)
+            return ModelResponse(
+                text=f"我换个思路再查一下（第 {len(prompts)} 次）。",
+                backend=self.name,
+                tool_use_blocks=[
+                    {
+                        "id": f"call-{len(prompts)}",
+                        "name": "read_file",
+                        "input": {"path": "README.md"},
+                    }
+                ],
+            )
+
+    agent.backend = RepeatedToolCallingReceiptBackend()
+    params = _tool_loop_params(task_id="task-1")
+    queue_natural_user_reply(
+        params,
+        kind="background_dispatch",
+        facts={"reply_is_interim": True},
+    )
+
+    _, response, _ = execute_tool_loop(agent, params)
+
+    assert len(prompts) == 2
+    assert "我换个思路" not in response.text
+    assert response.text == "这次回复没有完整生成，其中附带的操作没有执行。请重试查看结果。"
+    assert response.tool_use_blocks == []
+    assert response.runtime_status == "user_reply_unavailable"
+    assert response.runtime_reason == "NATURAL_REPLY_TOOL_CALL_REJECTED"
+    assert response.runtime_source == "model_user_reply_unauthorized_tools_rejected"
 
 
 def test_natural_reply_does_not_salvage_internal_protocol_from_rejected_tool_call(
@@ -2663,9 +2695,10 @@ def test_natural_reply_does_not_salvage_internal_protocol_from_rejected_tool_cal
 
     _, response, _ = execute_tool_loop(agent, params)
 
-    assert response.text == ""
+    assert response.text == "这次回复没有完整生成，其中附带的操作没有执行。请重试查看结果。"
     assert response.tool_use_blocks == []
     assert response.runtime_status == "user_reply_unavailable"
+    assert response.runtime_reason == "NATURAL_REPLY_TOOL_CALL_REJECTED"
 
 
 def test_unacknowledged_guidance_replays_after_run_recovery(tmp_path) -> None:
@@ -2707,24 +2740,9 @@ def test_tool_loop_reports_thread_guidance_lookup_error(tmp_path, monkeypatch) -
     assert any("runtime_guidance.thread_for_task" in str(item) for item in params.tool_context)
 
 
-def test_subagent_runner_prompt_can_render_pending_guidance(tmp_path) -> None:
-    store = ConversationStore(tmp_path / "conversations")
-    store.append_guidance(
-        {
-            "target_type": "agent_run",
-            "target_id": "child-1",
-            "message": "上级补充：把命中和未命中都写清楚。",
-            "now": 20.0,
-        }
-    )
-
-    section = render_subagent_guidance_section(store, "child-1", now=21.0)
-
-    assert "上级补充：把命中和未命中都写清楚。" in section
-    assert store.pending_guidance("agent_run", "child-1") == []
-
-
-def test_real_subagent_runner_prompt_includes_guidance(tmp_path) -> None:
+def test_subagent_runner_prompt_does_not_claim_guidance_before_provider_safe_point(
+    tmp_path,
+) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
     agent.conversation_store.append_guidance(
@@ -2737,8 +2755,233 @@ def test_real_subagent_runner_prompt_includes_guidance(tmp_path) -> None:
 
     _, prompt = agent._build_subagent_prompt(child.id, 0, "")
 
-    assert "GUIDANCE_DELIVERED" in prompt
-    assert "先写阶段文件，再继续扩展。" in prompt
-    assert "只作为普通补充消息进入上下文" in prompt
-    assert "不会把这些文字解释成新的硬门" in prompt
+    assert "GUIDANCE_DELIVERED" not in prompt
+    assert "先写阶段文件，再继续扩展。" not in prompt
+    assert len(agent.conversation_store.pending_guidance("agent_run", child.id)) == 1
+
+    params = _tool_loop_params(
+        request_id="attempt-child-1",
+        attempt_id="attempt-child-1",
+        run_id=child.id,
+        task_id=child.root_id or child.id,
+    )
+    assert inject_pending_guidance(agent, params, now=21.0) is True
+    assert any("先写阶段文件，再继续扩展。" in str(item) for item in params.tool_context)
+    assert acknowledge_injected_turn_input(agent, params, now=22.0) == 1
     assert agent.conversation_store.pending_guidance("agent_run", child.id) == []
+
+
+def test_pending_agent_guidance_rebinds_to_recovered_attempt_once(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    request = {
+        "target_type": "agent_run",
+        "target_id": "child-1",
+        "message": "恢复后继续这条用户插话。",
+        "sender": "user:alice",
+        "metadata": {"expected_turn_id": "attempt-old"},
+    }
+    first = store.append_guidance_once(request, dedupe_key="child-1/message-1")
+
+    summary = store.rebind_unsubmitted_guidance_for_recovered_turn(
+        "agent_run",
+        "child-1",
+        dead_turn_ids={"attempt-old"},
+        recovered_turn_id="attempt-new",
+    )
+
+    assert summary["rebound"] == 1
+    pending = store.pending_guidance("agent_run", "child-1")
+    assert [entry.guidance_id for entry in pending] == [first.guidance_id]
+    assert pending[0].metadata["expected_turn_id"] == "attempt-new"
+    replay = store.append_guidance_once(
+        {
+            **request,
+            "metadata": {"expected_turn_id": "attempt-new"},
+        },
+        dedupe_key="child-1/message-1",
+    )
+    assert replay.guidance_id == first.guidance_id
+    assert store.claim_guidance_once_for_turn(
+        pending[0],
+        expected_turn_id="attempt-new",
+        attempt_id="attempt-new",
+    ) is True
+    assert store.mark_guidance_entries_submitted(
+        "attempt-new",
+        pending,
+        attempt_id="attempt-new",
+        provider_call_id="call-new",
+    ) == (first.guidance_id,)
+    assert store.consume_submitted_guidance_for_turn(
+        "attempt-new",
+        pending,
+        provider_call_id="call-new",
+        now=30.0,
+    ) == (first.guidance_id,)
+    assert store.pending_guidance("agent_run", "child-1") == []
+
+
+def test_rebound_guidance_repairs_half_written_lookup_projections(tmp_path) -> None:
+    import agent_py_agent.agent.conversation.store as store_module
+
+    store = ConversationStore(tmp_path / "conversations")
+    dedupe_key = "child-1/message-half-written"
+    entry = store.append_guidance_once(
+        {
+            "target_type": "agent_run",
+            "target_id": "child-1",
+            "message": "恢复半写入投影后继续。",
+            "metadata": {
+                "expected_turn_id": "attempt-old",
+                "gateway_input_request_id": "gateway-input-half-written",
+            },
+        },
+        dedupe_key=dedupe_key,
+    )
+    receipt_path = store._guidance_dedupe_path(dedupe_key)
+    original = store.guidance_once_receipt(dedupe_key)
+    assert original is not None
+    rebound = store_module._rebound_guidance_receipt(
+        original,
+        old_turn_id="attempt-old",
+        recovered_turn_id="attempt-new",
+    )
+    store_module.write_json_file_atomic(receipt_path, rebound.to_dict())
+
+    repaired, turn_id = store.guidance_receipt_for_gateway_input(
+        "gateway-input-half-written"
+    )
+
+    assert repaired is not None
+    assert repaired.entry.guidance_id == entry.guidance_id
+    assert turn_id == "attempt-new"
+    input_index = json.loads(
+        store._guidance_input_index_path("gateway-input-half-written").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert input_index["expected_turn_id"] == "attempt-new"
+    assert not store._guidance_turn_index_path("attempt-old", dedupe_key).exists()
+    assert store._guidance_turn_index_path("attempt-new", dedupe_key).exists()
+
+
+def test_reserved_agent_guidance_rebinds_only_before_provider_submission(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    entry = store.append_guidance_once(
+        {
+            "target_type": "agent_run",
+            "target_id": "child-1",
+            "message": "旧 attempt 尚未发给模型。",
+            "metadata": {"expected_turn_id": "attempt-old"},
+        },
+        dedupe_key="child-1/message-reserved",
+    )
+    assert store.claim_guidance_once_for_turn(
+        entry,
+        expected_turn_id="attempt-old",
+        attempt_id="attempt-old",
+    ) is True
+
+    summary = store.rebind_unsubmitted_guidance_for_recovered_turn(
+        "agent_run",
+        "child-1",
+        dead_turn_ids={"attempt-old"},
+        recovered_turn_id="attempt-new",
+    )
+
+    assert summary["rebound"] == 1
+    receipt = store.guidance_once_receipt("child-1/message-reserved")
+    assert receipt is not None
+    assert receipt.status == "pending"
+    assert receipt.attempt_id == ""
+    assert receipt.entry.metadata["expected_turn_id"] == "attempt-new"
+
+
+def test_submitted_agent_guidance_is_never_rebound_after_recovery(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    entry = store.append_guidance_once(
+        {
+            "target_type": "agent_run",
+            "target_id": "child-1",
+            "message": "已经开始提交模型。",
+            "metadata": {"expected_turn_id": "attempt-old"},
+        },
+        dedupe_key="child-1/message-submitted",
+    )
+    assert store.claim_guidance_once_for_turn(
+        entry,
+        expected_turn_id="attempt-old",
+        attempt_id="attempt-old",
+    ) is True
+    assert store.mark_guidance_entries_submitted(
+        "attempt-old",
+        [entry],
+        attempt_id="attempt-old",
+        provider_call_id="call-old",
+    ) == (entry.guidance_id,)
+
+    summary = store.rebind_unsubmitted_guidance_for_recovered_turn(
+        "agent_run",
+        "child-1",
+        dead_turn_ids={"attempt-old"},
+        recovered_turn_id="attempt-new",
+    )
+
+    assert summary["submitted_unknown"] == 1
+    receipt = store.guidance_once_receipt("child-1/message-submitted")
+    assert receipt is not None
+    assert receipt.status == "submitted"
+    assert receipt.entry.metadata["expected_turn_id"] == "attempt-old"
+
+
+def test_legacy_prompt_time_delivery_migrates_to_unknown_without_replay(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    entry = store.append_guidance_once(
+        {
+            "target_type": "agent_run",
+            "target_id": "child-1",
+            "message": "旧旁路可能已经进入模型请求。",
+            "metadata": {"expected_turn_id": "attempt-old"},
+        },
+        dedupe_key="child-1/message-legacy",
+    )
+    store.mark_guidance_delivered([entry.guidance_id], now=25.0)
+
+    summary = store.rebind_unsubmitted_guidance_for_recovered_turn(
+        "agent_run",
+        "child-1",
+        dead_turn_ids={"attempt-old"},
+        recovered_turn_id="attempt-new",
+    )
+
+    assert summary["legacy_submission_unknown"] == 1
+    receipt = store.guidance_once_receipt("child-1/message-legacy")
+    assert receipt is not None
+    assert receipt.status == "submitted"
+    assert receipt.submission_id.startswith("legacy-runner-prompt-unknown:")
+    assert store.pending_guidance("agent_run", "child-1") == []
+
+
+def test_legacy_prompt_delivery_is_retired_on_plain_receipt_lookup(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    dedupe_key = "child-1/message-legacy-terminal"
+    entry = store.append_guidance_once(
+        {
+            "target_type": "agent_run",
+            "target_id": "child-1",
+            "message": "旧子代理已结束，不得永久显示等待或重复投递。",
+            "metadata": {"expected_turn_id": "attempt-terminal"},
+        },
+        dedupe_key=dedupe_key,
+    )
+    store.mark_guidance_delivered([entry.guidance_id], now=26.0)
+
+    receipt = store.guidance_once_receipt(dedupe_key)
+
+    assert receipt is not None
+    assert receipt.status == "submitted"
+    assert receipt.submission_id.startswith("legacy-runner-prompt-unknown:")
+    assert receipt.migration["legacy_runner_prompt_delivery"]["turn_id"] == (
+        "attempt-terminal"
+    )
+    assert store.pending_guidance("agent_run", "child-1") == []

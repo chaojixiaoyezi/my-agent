@@ -307,6 +307,62 @@ def test_request_graceful_shutdown_success(mock_read, mock_alive, tmp_pid_path, 
     result = dc.request_graceful_shutdown(tmp_pid_path, stop_path)
     assert result is True
     assert stop_path.exists()
+    payload = json.loads(stop_path.read_text(encoding="utf-8"))
+    assert payload["target_process"]["pid"] == 12345
+    assert payload["source"] == "daemon_control"
+
+
+def test_stop_request_rejects_old_process_generation():
+    """同 PID 但 start_time 不同也不能跨代停止。"""
+    current = {"host_id": "host-a", "pid": 123, "start_time": 20}
+    stale = {
+        "requested_at": 200.0,
+        "target_process": {"host_id": "host-a", "pid": 123, "start_time": 10},
+    }
+
+    assert dc.stop_request_targets_process(stale, current, process_started_at=100.0) is False
+
+
+def test_stop_request_legacy_timestamp_is_lifecycle_scoped():
+    """旧版无目标停止文件只在本次启动之后写入时兼容生效。"""
+    identity = {"host_id": "host-a", "pid": 123, "start_time": 20}
+
+    assert dc.stop_request_targets_process(
+        {"requested_at": 99.0},
+        identity,
+        process_started_at=100.0,
+    ) is False
+    assert dc.stop_request_targets_process(
+        {"requested_at": 101.0},
+        identity,
+        process_started_at=100.0,
+    ) is True
+
+
+def test_old_cleanup_does_not_remove_successor_stop_request(tmp_path):
+    """旧 Gateway 清理不能删除刚写给新 Gateway 的停止请求。"""
+    stop_path = tmp_path / "gateway.stop"
+    old_identity = {"host_id": "host-a", "pid": 111, "start_time": 10}
+    new_identity = {"host_id": "host-a", "pid": 222, "start_time": 20}
+    stop_path.write_text(
+        json.dumps(
+            {
+                "requested_at": 300.0,
+                "reason": "new stop",
+                "target_process": new_identity,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    removed = dc.remove_gateway_stop_request_if_owned(
+        stop_path,
+        old_identity,
+        process_started_at=100.0,
+    )
+
+    assert removed is False
+    assert stop_path.exists()
 
 
 # ── 移除owned PID文件测试 ─────────────────────────────────────────────────

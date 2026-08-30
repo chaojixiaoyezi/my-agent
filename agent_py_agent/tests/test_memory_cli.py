@@ -9,7 +9,8 @@ from agent_py_agent.cli.parser import build_parser
 def _write_config(tmp_path: Path, extra: str = "") -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
-        'workspace_root: "workspace"\n'
+        'workspace_root: ""\n'
+        f'my_agent_home: "{(tmp_path / "home").as_posix()}"\n'
         'model_backend: "echo"\n'
         f"{extra}",
         encoding="utf-8",
@@ -18,7 +19,7 @@ def _write_config(tmp_path: Path, extra: str = "") -> Path:
 
 
 def _workspace(config_path: Path) -> Path:
-    return config_path.parent / "workspace"
+    return config_path.parent / "home" / "owners" / "local" / "main"
 
 
 def _write_route_index(root: Path) -> Path:

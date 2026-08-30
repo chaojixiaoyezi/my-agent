@@ -10,17 +10,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..agent_core.tool_context.window import (
-    TERMINAL_TOOL_FOLD_METADATA_KEY,
-    build_conversation_terminal_tool_fold,
-    conversation_message_with_terminal_tool_fold,
-)
 from ..tooling.operation_verification import public_operation_verification
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
     canonical_native_messages_envelope,
     provider_history_messages_from_rows,
+)
+from .tool_context_window import (
+    TERMINAL_TOOL_FOLD_METADATA_KEY,
+    build_conversation_terminal_tool_fold,
+    conversation_message_with_terminal_tool_fold,
 )
 
 if TYPE_CHECKING:
@@ -123,7 +123,7 @@ def prepare_subagent_thread_turn(
     force: bool = False,
     progress_callback: Callable[[dict[str, object]], object] | None = None,
 ) -> AgentThreadTurnContext:
-    from .compact import prepare_conversation_context
+    from .compact import ConversationCompactOptions, prepare_conversation_context
 
     selected_attempt = str(attempt_id or "").strip()
     if not selected_attempt:
@@ -152,10 +152,12 @@ def prepare_subagent_thread_turn(
         agent,
         store,
         thread,
-        current_prompt=str(prompt or ""),
-        exclude_request_id=selected_attempt,
-        force=bool(force),
-        progress_callback=progress_callback,
+        options=ConversationCompactOptions(
+            current_prompt=str(prompt or ""),
+            exclude_request_id=selected_attempt,
+            force=bool(force),
+            progress_callback=progress_callback,
+        ),
     )
     return AgentThreadTurnContext(
         thread_id=compact.thread.thread_id,

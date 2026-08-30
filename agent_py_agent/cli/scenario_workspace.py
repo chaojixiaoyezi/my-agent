@@ -54,6 +54,9 @@ def write_scenario_fixture(fixture_root: Path) -> None:
     (fixture_root / "scenario_outputs").mkdir(parents=True, exist_ok=True)
 
 
+# LLM: Scenario fixtures are explicit local-admin external projects; declare Full Access in the
+# isolated override instead of weakening the production WorkspaceOnly validator.
+# 函数用途: 生成隔离场景配置；测试项目位于 owner home 外时显式声明本机管理员访问权限。
 def write_scenario_config(request: ScenarioConfigRequest) -> None:
     base = request.source_config.read_text(encoding="utf-8")
     fixture = str(request.fixture_root).replace("\\", "/")
@@ -62,6 +65,7 @@ def write_scenario_config(request: ScenarioConfigRequest) -> None:
 # scenario-test isolation overrides
 workspace_root: "{fixture}"
 my_agent_home: "{fixture}/.my_agent/home"
+access_mode: "full-access"
 prompt_files:
 memory_path: ".my_agent/memory.jsonl"
 subagent_workspace: ".my_agent/subagents"

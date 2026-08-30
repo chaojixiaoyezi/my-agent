@@ -1,3 +1,6 @@
+# LLM: Owner-scoped Persona authority; keep document bytes, baseline/version snapshots,
+# quota admission, and rollback under the same typed repository contract.
+# 模块用途: 安全加载并按用户隔离地修改 SOUL/USER/AGENTS，同时保存首次修改前基线和后续版本。
 """Owner-scoped Persona repository with guarded loading and versioned writes."""
 
 from __future__ import annotations
@@ -111,6 +114,16 @@ class PersonaBatchMutationRequest:
 
 
 @dataclass(frozen=True)
+class _PreparedPersonaBaseline:
+    """Immutable version zero captured immediately before the first real mutation."""
+
+    content: str
+    sha256: str
+    backup_path: Path
+    record: dict[str, object]
+
+
+@dataclass(frozen=True)
 class _PreparedPersonaMutation:
     """Complete multi-file mutation projected before any authority write."""
 
@@ -124,6 +137,7 @@ class _PreparedPersonaMutation:
     backup_path: Path
     record: dict[str, object]
     operation_results: tuple[dict[str, object], ...] = ()
+    baseline: _PreparedPersonaBaseline | None = None
 
 
 class PersonaRepository:
@@ -244,8 +258,8 @@ class PersonaRepository:
             "state": "available",
             "health": "degraded" if degraded else "healthy",
             "targets": targets,
-            "confirmation_required": ["soul", "agents"],
-            "user_autonomous": True,
+            "confirmation_required": ["soul"],
+            "autonomous_targets": ["user", "agents"],
             "versioned": True,
         }
 
@@ -443,6 +457,8 @@ def _mutate_persona_batch_document(
     return _persona_batch_mutation_result(request, prepared)
 
 
+# LLM: First batch writes keep version one for the changed document while attaching version zero.
+# 函数用途: 先在内存应用整批画像变更，并准备首次修改前基线、版本快照和审计记录。
 def _prepare_persona_batch_mutation(
     repository: PersonaRepository,
     request: PersonaBatchMutationRequest,
@@ -516,6 +532,7 @@ def _prepare_persona_batch_mutation(
         "operations": audit_operations,
         "source": request.source,
     }
+    baseline = _prepare_persona_baseline(repository, request.target, previous)
     return _PreparedPersonaMutation(
         previous=previous,
         previous_sha=previous_sha,
@@ -527,6 +544,7 @@ def _prepare_persona_batch_mutation(
         backup_path=backup_path,
         record=record,
         operation_results=tuple(operation_results),
+        baseline=baseline,
     )
 
 
@@ -562,6 +580,7 @@ def _prepare_persona_mutation(
     record = _persona_version_record(
         repository, request, previous_sha, next_sha, version, backup_path, next_entry_id
     )
+    baseline = _prepare_persona_baseline(repository, request.target, previous)
     return _PreparedPersonaMutation(
         previous=previous,
         previous_sha=previous_sha,
@@ -572,6 +591,38 @@ def _prepare_persona_mutation(
         version=version,
         backup_path=backup_path,
         record=record,
+        baseline=baseline,
+    )
+
+
+# LLM: Version zero is materialized only alongside the first successful mutation for one target.
+# 函数用途: 为首次 Persona 修改准备“修改前”快照，让新用户也能回滚，而不改变首个修改版仍为 1 的兼容语义。
+def _prepare_persona_baseline(
+    repository: PersonaRepository,
+    target: str,
+    previous: str,
+) -> _PreparedPersonaBaseline | None:
+    if repository.history(target):
+        return None
+    sha256 = _sha256_text(previous)
+    backup_path = repository._version_snapshot_path(target, 0, sha256)
+    return _PreparedPersonaBaseline(
+        content=previous,
+        sha256=sha256,
+        backup_path=backup_path,
+        record={
+            "target": target,
+            "version": 0,
+            "sha256": sha256,
+            "previous_sha256": sha256,
+            "source_quote": "",
+            "confirmed": True,
+            "created_at": time.time(),
+            "backup_ref": str(backup_path.relative_to(repository.owner_home)),
+            "action": "baseline",
+            "entry_id": "",
+            "source": "system_baseline",
+        },
     )
 
 
@@ -630,43 +681,80 @@ def _persona_version_record(
     }
 
 
+# LLM: Quota admission must account for every file written by one Persona transaction.
+# 函数用途: 在落盘前一次性核算正文、新版本、可选初始基线及版本账本的全部增量。
 def _admit_persona_mutation(
     repository: PersonaRepository,
     admission: OwnerQuotaAdmission,
     path: Path,
     prepared: _PreparedPersonaMutation,
 ) -> None:
-    version_blob = json.dumps(prepared.record, ensure_ascii=False, sort_keys=True) + "\n"
-    admission.check(
-        [
-            OwnerQuotaChange(path, len(prepared.next_text.encode("utf-8"))),
-            OwnerQuotaChange(prepared.backup_path, len(prepared.next_text.encode("utf-8"))),
+    version_records = [prepared.record]
+    changes = [
+        OwnerQuotaChange(path, len(prepared.next_text.encode("utf-8"))),
+        OwnerQuotaChange(prepared.backup_path, len(prepared.next_text.encode("utf-8"))),
+    ]
+    if prepared.baseline is not None:
+        version_records.insert(0, prepared.baseline.record)
+        changes.append(
             OwnerQuotaChange(
-                repository.versions_path,
-                len(version_blob.encode("utf-8")),
-                append=True,
-            ),
-        ]
+                prepared.baseline.backup_path,
+                len(prepared.baseline.content.encode("utf-8")),
+            )
+        )
+    version_blob = "".join(
+        json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+        for record in version_records
     )
+    changes.append(
+        OwnerQuotaChange(
+            repository.versions_path,
+            len(version_blob.encode("utf-8")),
+            append=True,
+        )
+    )
+    admission.check(changes)
 
 
+# LLM: Commit baseline before version one and append both ledger rows as one locked batch.
+# 函数用途: 原子替换 Persona 正文，并在失败时恢复正文、清理本轮创建的基线和版本快照。
 def _commit_persona_mutation(
     repository: PersonaRepository,
     path: Path,
     prepared: _PreparedPersonaMutation,
 ) -> None:
-    backup_path = repository._write_version_snapshot(
-        str(prepared.record["target"]),
-        prepared.version,
-        prepared.next_sha,
-        prepared.next_text,
-    )
-    write_text_file_atomic_unlocked(path, prepared.next_text)
+    baseline_path = prepared.baseline.backup_path if prepared.baseline is not None else None
+    baseline_existed = bool(baseline_path is not None and baseline_path.exists())
+    backup_existed = prepared.backup_path.exists()
+    document_existed = path.exists()
+    records: list[dict[str, object]] = []
     try:
-        append_jsonl_records(repository.versions_path, [prepared.record])
+        if prepared.baseline is not None:
+            baseline_path = repository._write_version_snapshot(
+                str(prepared.record["target"]),
+                0,
+                prepared.baseline.sha256,
+                prepared.baseline.content,
+            )
+            records.append(prepared.baseline.record)
+        backup_path = repository._write_version_snapshot(
+            str(prepared.record["target"]),
+            prepared.version,
+            prepared.next_sha,
+            prepared.next_text,
+        )
+        records.append(prepared.record)
+        write_text_file_atomic_unlocked(path, prepared.next_text)
+        append_jsonl_records(repository.versions_path, records)
     except Exception:
-        write_text_file_atomic_unlocked(path, prepared.previous)
-        backup_path.unlink(missing_ok=True)
+        if document_existed:
+            write_text_file_atomic_unlocked(path, prepared.previous)
+        else:
+            path.unlink(missing_ok=True)
+        if not backup_existed:
+            prepared.backup_path.unlink(missing_ok=True)
+        if baseline_path is not None and not baseline_existed:
+            baseline_path.unlink(missing_ok=True)
         raise
 
 

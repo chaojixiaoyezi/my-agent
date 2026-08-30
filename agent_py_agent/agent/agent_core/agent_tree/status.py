@@ -1,4 +1,11 @@
 
+"""Bounded canonical agent-tree projection shared by host and model readers."""
+
+# LLM: This module owns the single read-only projection consumed by /status,
+# TUI, recovery diagnostics, and the model-visible list_agents adapter. It must
+# never dispatch, wake, retry, cancel, or become lifecycle authority.
+# 模块用途: 为宿主界面和按需 list_agents 提供同一份有界代理树只读快照。
+
 from __future__ import annotations
 
 from ...model_visible_refs import current_model_ref

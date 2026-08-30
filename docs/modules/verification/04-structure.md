@@ -54,19 +54,14 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
    允许同值 `request_id` 兼容。缺少
    `operation.status` 的 mutating 历史保持 unverified，`ok`、output preview 和模型正文都不能补猜成功。
 
-主代理 completion 只消费上述 typed verification state：stale root + 最近 durable event ID/status 组成
-一次性 followup signature，同一 verify→write 周期最多软核对一次，新 verify 才重新武装。它不执行命令、
-不扫描项目、不解析模型正文，也不把普通任务升级为完成硬门。`project_facts.py` 从 manifest 发现 Python、
-Node、Go、Rust 等规范命令；开放格式仍允许合同/配置扩展，不能按项目名或 prompt 写专项分支。
+主代理每一轮都能看到上述 typed verification state 和原始工具结果，并由模型决定继续修复还是给出 final。
+宿主只把 operation ledger 写入 response/transcript 元数据供审计，不再用 stale、failed、Todo open 等事实
+覆盖 plain final、注入隐藏返工或创建额外 model call。`project_facts.py` 仍从 manifest 发现规范验证命令；
+它提供模型上下文，不拥有普通任务完成权。
 
-operation 的完整审计投影与 completion 的当前效果权威保持分层。末尾 `not_started` 表示 handler 前已有
-结构化证据证明无效果，它继续计入 partial ledger，但不会覆盖此前最近一项 succeeded effect；只有
-not_started 而无任何先前成功仍形成收口冲突。`failed/not_started` 冲突先走 会话运行时 Stop-hook 风格的同一
-active-turn continuation：`completion_conflict.v1` 携带 typed 终态和被拒绝草稿，原工具 schema 不撤销，
-全 turn 最多两次供模型修复/复验；新的 succeeded effect 允许自然 final，两次耗尽才进入无工具的
-`OPERATION_INCOMPLETE` 安全回复。`unknown/cancelled/incomplete/unverified` 不重新授予通用工具执行，避免
-重放未知副作用或越过取消边界。显式 required action 仍由独立结构化 gate 裁决；所有分流只读 typed record，
-不解析最终正文措辞。
+UNKNOWN 副作用、取消、越权和危险路径仍在工具执行期 fail-closed，不能因删除机器完成判官而自动重放；
+显式 required action 继续由自身结构化协议裁决。区别在于：已知失败（包括用户故意要求的非零退出码）已经
+完整返回模型，模型随后给出 plain final 时当前 turn 就按 会话运行时 语义自然结束。
 
 工具失败诊断沿同一公共出口保留四个正交事实：
 
@@ -118,6 +113,11 @@ active-turn continuation：`completion_conflict.v1` 携带 typed 终态和被拒
    自然语言猜调用依赖，不实现跨外部系统 Saga。archive 与 control-plane event
    投影每项 operation/effect；compact 的语义摘要必须另保留中段非成功副作用事实，最终模型据真实
    部分结果说明完成、失败或未知。
+8. 普通会话的首个 `promotes_task` 工具在进入上述 policy/operation 链前，先从结构化 conversation link
+   惰性创建或复用 canonical task workspace，并原子刷新该调用的 cwd、runtime roots、write boundary 与
+   旧路径 rebase。工具预算、duplicate/stale guard 和 ManagedOperationStore authority 仍只在规范化后的
+   canonical call 上运行一次；纯聊天和已取消调用不因这条准备链创建 task。这样首个 handler 与同轮后续
+   工具使用同一目录，而不是依赖第二次模型调用自行找回产物。
 
 工具正文进入模型前还经过一条与执行权分开的投影链：
 

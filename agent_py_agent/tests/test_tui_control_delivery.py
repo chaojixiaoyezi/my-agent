@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
 import pytest
 
@@ -11,6 +12,7 @@ from agent_py_agent.cli.chat_parts.tui_control_delivery import (
     TuiControlOperationReconciler,
     tui_control_operation_outbox_path,
 )
+from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 
 
 def _reconciler(tmp_path, *, submit, status, callbacks=None):
@@ -64,6 +66,196 @@ def test_control_outbox_persists_before_transport_and_rejects_identity_drift(tmp
                 expected_turn_id="turn-a",
             )
         )
+
+
+def test_control_outbox_publishes_start_after_persist_and_before_dispatch(tmp_path) -> None:
+    reconciler = _reconciler(
+        tmp_path,
+        submit=lambda _entry: pytest.fail("stopped worker must not submit"),
+        status=lambda _operation_id: pytest.fail("stopped worker must not poll"),
+    )
+    entry = TuiControlOperationEntry(
+        message_id="control-compact-order",
+        command_text="/compact",
+        command_kind="compact",
+    )
+    order: list[str] = []
+
+    def on_persisted(persisted: TuiControlOperationEntry) -> None:
+        payload = json.loads(
+            (tmp_path / "control-outbox.json").read_text(encoding="utf-8")
+        )
+        assert persisted.message_id in payload["entries"]
+        order.append("start")
+
+    def ensure_worker_started() -> None:
+        assert order == ["start"]
+        order.append("dispatch")
+
+    reconciler._ensure_worker_started = ensure_worker_started  # type: ignore[method-assign]
+    reconciler.enqueue(entry, on_persisted_before_dispatch=on_persisted)
+
+    assert order == ["start", "dispatch"]
+
+
+def test_control_outbox_fast_compact_receipt_closes_started_block(tmp_path) -> None:
+    runtime = TuiRuntime("control-compact-fast-worker")
+    completed = threading.Event()
+    stop_event = threading.Event()
+    errors: list[BaseException] = []
+
+    def on_complete(
+        entry: TuiControlOperationEntry,
+        _result: ConversationControlResult,
+    ) -> None:
+        runtime.publish_manual_compact_terminal(entry.message_id, succeeded=True)
+        completed.set()
+
+    reconciler = TuiControlOperationReconciler(
+        path=tmp_path / "control-outbox.json",
+        submit=lambda _entry: ConversationControlResult(
+            "compact",
+            True,
+            "done",
+            operation_id="gwctl-fast",
+            control_state="completed",
+        ),
+        status=lambda _operation_id: pytest.fail("completed submit must not poll"),
+        on_restore=lambda _entry: None,
+        on_complete=on_complete,
+        on_terminal_unknown=lambda _entry, _result: None,
+        on_conflict=lambda _entry: None,
+        on_error=errors.append,
+        stop_event=stop_event,
+        initial_delay=0.01,
+        maximum_delay=0.02,
+    )
+    entry = TuiControlOperationEntry(
+        message_id="control-compact-fast",
+        command_text="/compact",
+        command_kind="compact",
+    )
+    reconciler.enqueue(
+        entry,
+        on_persisted_before_dispatch=lambda persisted: (
+            runtime.publish_manual_compact_started(persisted.message_id)
+        ),
+    )
+
+    assert completed.wait(1.0)
+    stop_event.set()
+    reconciler._wake.set()
+    snapshot = runtime.store.snapshot()
+    assert snapshot.active_blocks == ()
+    assert all(
+        item.get("code") != "COMPACT_TERMINAL_WITHOUT_START"
+        for item in snapshot.diagnostics
+    )
+    assert reconciler._read_entries() == {}
+    assert errors == []
+
+
+def test_terminal_receipt_removes_outbox_when_display_callback_fails(tmp_path) -> None:
+    errors: list[BaseException] = []
+    reconciler = _reconciler(
+        tmp_path,
+        submit=lambda _entry: ConversationControlResult(
+            "compact",
+            True,
+            "done",
+            operation_id="gwctl-display-failure",
+            control_state="completed",
+        ),
+        status=lambda _operation_id: pytest.fail("completed submit must not poll"),
+        callbacks=errors,
+    )
+    reconciler.on_complete = lambda _entry, _result: (_ for _ in ()).throw(
+        RuntimeError("redraw failed")
+    )
+    reconciler.on_error = errors.append
+    entry = TuiControlOperationEntry(
+        message_id="control-display-failure",
+        command_text="/compact",
+        command_kind="compact",
+    )
+    reconciler.enqueue(entry)
+
+    reconciler._reconcile_one(entry)
+
+    assert reconciler._read_entries() == {}
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+
+
+def test_exact_compact_stop_dispatches_while_compact_post_is_blocked(tmp_path) -> None:
+    compact_entered = threading.Event()
+    compact_release = threading.Event()
+    stop_sent = threading.Event()
+    completed: list[str] = []
+    stop_event = threading.Event()
+
+    def submit(entry: TuiControlOperationEntry) -> ConversationControlResult:
+        if entry.command_kind == "compact":
+            compact_entered.set()
+            assert compact_release.wait(timeout=2)
+            return ConversationControlResult(
+                "compact",
+                False,
+                "interrupted",
+                operation_id="gwctl-compact-blocked",
+                control_state="completed",
+                error_code="COMPACT_INTERRUPTED",
+            )
+        stop_sent.set()
+        return ConversationControlResult(
+            "stop",
+            True,
+            "stopping",
+            operation_id="gwctl-stop-urgent",
+            control_state="completed",
+        )
+
+    reconciler = TuiControlOperationReconciler(
+        path=tmp_path / "control-outbox.json",
+        submit=submit,
+        status=lambda _operation_id: pytest.fail("submit completes in one response"),
+        on_restore=lambda _entry: None,
+        on_complete=lambda entry, _result: completed.append(entry.command_kind),
+        on_terminal_unknown=lambda _entry, _result: None,
+        on_conflict=lambda _entry: None,
+        on_error=lambda error: pytest.fail(str(error)),
+        stop_event=stop_event,
+        initial_delay=0.01,
+        maximum_delay=0.02,
+    )
+    reconciler.enqueue(
+        TuiControlOperationEntry(
+            message_id="control-compact-blocked",
+            command_text="/compact",
+            command_kind="compact",
+        )
+    )
+    assert compact_entered.wait(timeout=1)
+
+    reconciler.enqueue(
+        TuiControlOperationEntry(
+            message_id="control-stop-urgent",
+            command_text="/stop",
+            command_kind="stop",
+            target_control_message_id="control-compact-blocked",
+        )
+    )
+
+    assert stop_sent.wait(timeout=0.5)
+    assert completed == ["stop"]
+    compact_release.set()
+    deadline = time.monotonic() + 1
+    while "compact" not in completed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    stop_event.set()
+    reconciler._wake.set()
+    assert sorted(completed) == ["compact", "stop"]
+    assert reconciler._read_entries() == {}
 
 
 def test_control_outbox_switches_to_get_only_after_operation_id(tmp_path) -> None:

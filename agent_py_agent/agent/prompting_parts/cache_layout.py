@@ -26,10 +26,12 @@ class PromptCacheLayout:
     # 函数用途: 按完整诊断/归档口径还原 prompt；原生适配器会去掉 messages 中已有的当前用户副本。
     def render(self) -> str:
         return _join_prompt_parts(
-            self.stable_prefix,
-            self.stable_user_prefix,
-            self.canonical_user_turn,
-            self.volatile_suffix,
+            (
+                self.stable_prefix,
+                self.stable_user_prefix,
+                self.canonical_user_turn,
+                self.volatile_suffix,
+            )
         )
 
 
@@ -62,7 +64,7 @@ class CacheStructuredPrompt(str):
 # LLM: Joining rules are shared by the string value and tests; never inject a sentinel that could
 # leak into provider input or archives.
 # 函数用途: 用两个换行连接所有非空 typed 段落，并正确处理空段。
-def _join_prompt_parts(*parts: str) -> str:
+def _join_prompt_parts(parts: tuple[str, ...]) -> str:
     return "\n\n".join(str(part) for part in parts if str(part))
 
 

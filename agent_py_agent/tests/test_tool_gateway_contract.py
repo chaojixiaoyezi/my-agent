@@ -445,6 +445,7 @@ def test_tool_gateway_overwrites_execution_output_json_when_mode_is_omitted(tmp_
         "task_output_dir": str(task_output),
         "task_work_dir": str(task_work),
         "output_json": str(output_json),
+        "allowed_write_roots": [str(task_work)],
     }
 
     result = _execute(
@@ -534,6 +535,64 @@ def test_tool_gateway_maps_task_output_alias_from_write_boundary(tmp_path: Path)
     assert "hello" in readback.output
 
 
+def test_tool_gateway_maps_current_owner_relative_task_alias_once(tmp_path: Path):
+    owner_home = tmp_path / "owners" / "user-a"
+    task_root = owner_home / "tasks" / "2026-08-28" / "task-a"
+    task_root.mkdir(parents=True)
+    registry = _registry(task_root)
+    owner_relative = "tasks/2026-08-28/task-a/result.txt"
+    boundary = {
+        "task_root": str(task_root),
+        "execution_cwd": str(task_root),
+        "allowed_write_roots": [str(owner_home)],
+    }
+
+    result = _execute(
+        registry,
+        "write_file",
+        {"path": owner_relative, "content": "one canonical file\n"},
+        write_boundary=boundary,
+    )
+
+    assert result.ok is True
+    assert (task_root / "result.txt").read_text(encoding="utf-8") == "one canonical file\n"
+    assert not (task_root / owner_relative).exists()
+
+
+def test_tool_gateway_maps_current_owner_relative_task_alias_inside_patch(tmp_path: Path):
+    owner_home = tmp_path / "owners" / "user-a"
+    task_root = owner_home / "tasks" / "2026-08-28" / "task-a"
+    task_root.mkdir(parents=True)
+    target = task_root / "result.txt"
+    target.write_text("before\n", encoding="utf-8")
+    registry = _registry(task_root)
+    boundary = {
+        "task_root": str(task_root),
+        "execution_cwd": str(task_root),
+        "allowed_write_roots": [str(owner_home)],
+    }
+
+    result = _execute(
+        registry,
+        "apply_patch",
+        {
+            "patch": (
+                "*** Begin Patch\n"
+                "*** Update File: tasks/2026-08-28/task-a/result.txt\n"
+                "@@\n"
+                "-before\n"
+                "+after\n"
+                "*** End Patch"
+            )
+        },
+        write_boundary=boundary,
+    )
+
+    assert result.ok is True
+    assert target.read_text(encoding="utf-8") == "after\n"
+    assert not (task_root / "tasks").exists()
+
+
 def test_tool_gateway_maps_owner_workspace_alias_without_granting_write(
     tmp_path: Path,
 ):
@@ -574,3 +633,68 @@ def test_tool_gateway_maps_owner_workspace_alias_without_granting_write(
     assert write.ok is False
     assert write.error_code == "WRITE_FORBIDDEN"
     assert not (source.parent / "changed.txt").exists()
+
+
+def test_tool_gateway_round_trips_public_owner_home_alias_through_policy(
+    tmp_path: Path,
+):
+    owner_home = tmp_path / "owners" / "user-a"
+    task_root = owner_home / "tasks" / "2026-08-28" / "task-a"
+    source = task_root / "input" / "brief.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("owner alias input\n", encoding="utf-8")
+    registry = _registry(task_root)
+    boundary = {
+        "task_root": str(task_root),
+        "execution_cwd": str(task_root),
+        "effective_owner_scope_root": str(owner_home),
+        "allowed_read_roots": [str(task_root)],
+        "allowed_write_roots": [str(task_root / "output")],
+    }
+
+    readback = _execute(
+        registry,
+        "read_file",
+        {"path": "~/.my-agent/owner/tasks/2026-08-28/task-a/input/brief.md"},
+        write_boundary=boundary,
+    )
+    forbidden_write = _execute(
+        registry,
+        "write_file",
+        {
+            "path": "~/.my-agent/owner/tasks/2026-08-28/task-a/input/changed.md",
+            "content": "must not write",
+        },
+        write_boundary=boundary,
+    )
+
+    assert readback.ok is True
+    assert "owner alias input" in readback.output
+    assert forbidden_write.ok is False
+    assert forbidden_write.error_code == "WRITE_FORBIDDEN"
+    assert not (source.parent / "changed.md").exists()
+
+
+def test_tool_gateway_public_owner_home_alias_cannot_traverse_owner_wall(
+    tmp_path: Path,
+):
+    owner_home = tmp_path / "owners" / "user-a"
+    task_root = owner_home / "tasks" / "task-a"
+    task_root.mkdir(parents=True)
+    registry = _registry(task_root)
+    boundary = {
+        "task_root": str(task_root),
+        "execution_cwd": str(task_root),
+        "effective_owner_scope_root": str(owner_home),
+        "allowed_read_roots": [str(owner_home)],
+        "allowed_write_roots": [str(task_root)],
+    }
+
+    result = _execute(
+        registry,
+        "read_file",
+        {"path": "~/.my-agent/owner/../other-user/private.txt"},
+        write_boundary=boundary,
+    )
+
+    assert result.ok is False

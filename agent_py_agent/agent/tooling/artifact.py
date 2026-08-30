@@ -80,6 +80,10 @@ class ArtifactReadBudget:
         return events
 
 
+# LLM: This is the sole model-facing reader for archived tool output. Host paths and run identity
+# stay inside the reader/audit layer; the model receives only a logical ref, content window, and
+# an exact continuation call when more suffix content exists.
+# 类用途: 让模型按稳定引用分段读取大工具输出，不暴露内部文件路径或运行身份。
 class ReadArtifactTool(BaseTool):
     model_spec = ToolModelSpec(
         name="read_artifact",
@@ -89,12 +93,12 @@ class ReadArtifactTool(BaseTool):
             "properties": {
                 "artifact_ref": {
                     "type": "string",
-                    "description": "artifact path、sha256、scoped_call_id 或 call_id；必须在当前 task work 的 tool_outputs/index.jsonl 中命中。",
+                    "description": "工具结果给出的逻辑 artifact_ref（优先 scoped_call_id）；不要填写或猜内部文件路径。",
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "从正文第几个字符开始读取，默认 0。",
+                    "description": "mode=slice 时从正文第几个字符开始读取，默认 0；head/tail/search 会忽略它。",
                 },
                 "max_chars": {
                     "type": "integer",
@@ -104,7 +108,7 @@ class ReadArtifactTool(BaseTool):
                 "mode": {
                     "type": "string",
                     "enum": ["slice", "head", "tail", "search"],
-                    "description": "读取模式，默认 slice。",
+                    "description": "读取模式，默认 slice；tail 直接返回真实末尾且不再需要向后续读。",
                 },
                 "query": {"type": "string", "description": "mode=search 时要搜索的关键词。"},
             },
@@ -124,6 +128,7 @@ class ReadArtifactTool(BaseTool):
             keywords=("artifact", "tool_output", "externalized", "read_artifact", "checkpoint"),
             examples=(
                 '{"tool": "read_artifact", "artifact_ref": "run-123:2-1", "offset": 0, "max_chars": 4000}',
+                '{"tool": "read_artifact", "artifact_ref": "run-123:2-1", "mode": "tail", "max_chars": 1000}',
             ),
         ),
     )
@@ -195,6 +200,9 @@ class ReadArtifactTool(BaseTool):
             ),
         )
 
+    # LLM: Execute against the host-only reader, then remove filesystem/scope fields before the
+    # output enters ToolResult. Keep the full payload available only to direct CLI/audit callers.
+    # 函数用途: 读取一段归档正文并只返回模型需要的逻辑引用、窗口、续读提示和内容。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         request = _read_request_from_params(
             self.root, params, default_read_chars=self.default_read_chars
@@ -213,14 +221,69 @@ class ReadArtifactTool(BaseTool):
         ok = payload.get("ok") is True
         if ok:
             self.read_budget.commit(request.run_id, int(payload.get("content_chars") or 0))
+        model_payload = _model_visible_read_payload(payload)
         return ToolHandlerOutcome(
             self.model_spec.name,
             ok,
-            json.dumps(payload, ensure_ascii=False),
+            json.dumps(model_payload, ensure_ascii=False),
             error_code=(
                 "" if ok else str(payload.get("error_code") or "TOOL_EXECUTION_FAILED").upper()
             ),
         )
+
+
+# LLM: Never copy artifact_path/request_id/run_id/task_id from the host reader into model output.
+# Continuation must reuse the canonical logical ref and only the public slice parameters.
+# 函数用途: 把完整读取事实裁成模型可安全照抄的分页结果。
+def _model_visible_read_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = (
+        "ok",
+        "kind",
+        "tool",
+        "call_id",
+        "sha256",
+        "size_bytes",
+        "content_hash_verified",
+        "reads_artifact_body",
+        "read_mode",
+        "content_offset",
+        "content_max_chars",
+        "content_chars",
+        "total_chars",
+        "window_start",
+        "window_end",
+        "has_more_before",
+        "has_more_after",
+        "next_offset",
+        "truncated",
+        "search_query",
+        "match_count",
+        "search_truncated",
+        "content",
+        "error_code",
+        "message",
+    )
+    projected = {key: payload[key] for key in allowed if key in payload}
+    logical_ref = str(
+        payload.get("canonical_artifact_ref")
+        or payload.get("artifact_ref")
+        or ""
+    ).strip()
+    if logical_ref:
+        projected["artifact_ref"] = logical_ref
+    if payload.get("ok") is not True:
+        return projected
+    has_more_after = payload.get("has_more_after") is True
+    if has_more_after and logical_ref:
+        projected["next_read"] = {
+            "artifact_ref": logical_ref,
+            "mode": "slice",
+            "offset": int(payload.get("next_offset") or 0),
+            "max_chars": int(payload.get("content_max_chars") or 0),
+        }
+    else:
+        projected["at_end"] = payload.get("read_mode") != "search"
+    return projected
 
 
 def _read_request_from_params(

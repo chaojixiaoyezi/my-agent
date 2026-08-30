@@ -179,6 +179,20 @@ def _record_large_write_calls(agent, params, *, start: int, stop: int, chars: in
         )
 
 
+def _valid_live_handoff(label: str = "") -> str:
+    """Return the complete six-field live Compact schema used by production."""
+
+    return (
+        "[compact-live-handoff.v1]\n"
+        f"current_progress: 摘要-{label or '当前'}；继续原项目；已恢复缺失用例。\n"
+        "user_constraints: 使用真实 rg=/opt/reference/rg，不重新寻找路径，保留现有实现。\n"
+        "completed: 已读取 checkpoint、核对结构化工具结果并确认已有写入。\n"
+        "failures: 旧摘要夹具不完整，已改用当前六字段交接合同。\n"
+        "unresolved: 仍需扩展剩余用例并运行定向测试。\n"
+        "next_step: 从现有 checkpoint 继续，不重复已完成读取和路径发现。"
+    )
+
+
 class _SummaryBackend:
     name = "anthropic_compatible"
 
@@ -189,12 +203,7 @@ class _SummaryBackend:
     def generate(self, prompt, on_chunk=None, tools=None, messages=None):
         del on_chunk, tools
         self.calls.append((prompt, list(messages or [])))
-        return SimpleNamespace(
-            text=(
-                f"摘要-{len(self.calls)}：继续原项目；真实 rg=/opt/reference/rg；"
-                "最新要求是恢复缺失用例后再扩展，下一步从现有 checkpoint 继续。"
-            )
-        )
+        return SimpleNamespace(text=_valid_live_handoff(str(len(self.calls))))
 
 
 class _EmptySummaryBackend:
@@ -584,7 +593,7 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
 
     def thin_summary(*_args, **_kwargs):
         summary_calls.append(True)
-        return SimpleNamespace(text="S" * 200)
+        return SimpleNamespace(text=_valid_live_handoff("thin"))
 
     agent.backend.generate = thin_summary
     agent.config.model_context_window_tokens = 10_000

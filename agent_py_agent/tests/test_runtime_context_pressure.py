@@ -16,17 +16,17 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
     preflight_context_pressure_response,
     safe_inline_tool_result_tokens,
 )
-from agent_py_agent.agent.agent_core.tool_context.window import (
+from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
+)
+from agent_py_agent.agent.conversation.channels import project_user_reply
+from agent_py_agent.agent.conversation.tool_context_window import (
     _bounded_carried_tool_index,
     build_conversation_terminal_tool_fold,
     conversation_message_with_terminal_tool_fold,
     conversation_terminal_tool_fold_projection,
     window_tool_context_params,
 )
-from agent_py_agent.agent.conversation.authority import (
-    CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
-)
-from agent_py_agent.agent.conversation.channels import project_user_reply
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 

@@ -127,7 +127,10 @@ def _build_runner_result(ctx: RunnerResultContext) -> SubAgentRunnerResult:
         structured_repair_error=ctx.structured_repair_error,
         structured_summary=ctx.parsed.summary,
         evidence_count=ctx.structured_evidence_count,
-        capability_request_count=ctx.structured_request_count,
+        capability_request_count=_runner_capability_request_count(
+            task,
+            ctx.structured_request_count,
+        ),
         artifact_count=ctx.artifact_count,
         test_count=ctx.test_count,
         patch_count=ctx.patch_count,
@@ -135,6 +138,15 @@ def _build_runner_result(ctx: RunnerResultContext) -> SubAgentRunnerResult:
         blocked_reason=ctx.parsed.blocked_reason,
         created_at=ctx.now,
     )
+
+
+# LLM: Capability requests created by the real tool are host-owned lifecycle facts. Model
+# structured output may mirror them but may not erase them by being absent or malformed.
+# 函数用途: 用任务账本里的真实申请数补正 runner 结果，避免普通自然回复把已执行的能力申请显示成 0。
+def _runner_capability_request_count(task: object, structured_count: int) -> int:
+    requests = getattr(task, "capability_requests", None)
+    host_count = len(requests) if isinstance(requests, list) else 0
+    return max(host_count, max(0, int(structured_count or 0)))
 
 
 def _write_runner_result_files(

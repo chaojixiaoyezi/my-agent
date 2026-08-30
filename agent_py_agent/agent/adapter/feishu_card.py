@@ -1,4 +1,4 @@
-# LLM: 飞书交互卡片——改 SOUL/AGENTS 长期人设时,不直接写,发一张按钮确认卡片,用户点『确认』才写
+# LLM: 飞书交互卡片——只在改 SOUL 长期人设时发确认卡；USER/AGENTS 由 owner Agent 自主维护
 #   (全程不阻塞主代理)。build_ 造卡片 JSON;send_ 发卡片(自取 tenant token,fail-open);
 #   extract_card_action / extract_webhook_card_action 把长连接对象或 webhook JSON 归一成同一结构;
 #   apply_card_action 是核心回调
@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 _API_BASE = "https://open.feishu.cn/open-apis"
 _TIMEOUT_S = 10.0
-_TARGET_LABEL = {"soul": "长期人设(SOUL)", "agents": "工作约定(AGENTS)"}
-_TARGET_FIELD = {"soul": "soul_md", "agents": "agents_md"}
+_TARGET_LABEL = {"soul": "长期人设(SOUL)"}
+_TARGET_FIELD = {"soul": "soul_md"}
 
 
 def build_persona_confirm_card(
@@ -158,7 +158,7 @@ def apply_card_action(
     operator_open_id: str = "",
 ) -> dict[str, Any]:
     """核心回调逻辑(纯函数、可单测):按 {token, choice} 落写或取消。
-      - choice=confirm 且 token 有效 → 原子 pop 待确认记录 → append 进 owner 的 SOUL/AGENTS.md;
+      - choice=confirm 且 token 有效 → 原子 pop 待确认记录 → 写入 owner 的 SOUL.md;
       - choice=decline / token 找不到(过期/已处理/重复回调) → 丢弃、不写。
     返回 {"wrote": bool, "owner_id": str|None, "reply_text": str}。幂等靠 pop 的原子领取(重复回调
     第二次 pop 拿不到记录→不重复写)。全程 fail-open,不抛。"""

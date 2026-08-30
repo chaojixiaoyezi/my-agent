@@ -19,10 +19,11 @@ def tool_manifest_payload(snapshot: object) -> dict[str, object]:
 
     if not isinstance(snapshot, ToolRuntimeSnapshot):
         raise TypeError("tool manifest requires ToolRuntimeSnapshot")
+    # snapshot.runtimes 已经是本 run 的 owner、allowlist 与 availability 交集。
+    # manifest 只能投影这份事实；再次拿 user/group 去匹配 agent role 会让远程
+    # TUI 的真实工具清单错误变成空集，而 provider 仍收到同一快照中的 Schema。
     visible_runtimes = tuple(
-        runtime
-        for runtime in snapshot.runtimes
-        if runtime.exposure.model_visible and snapshot.owner_type in runtime.exposure.owner_types
+        runtime for runtime in snapshot.runtimes if runtime.exposure.model_visible
     )
     visible = [runtime.model_spec.name for runtime in visible_runtimes]
     executable = [
@@ -91,7 +92,6 @@ def _runtime_item(
         },
         "exposure": {
             "model_visible": runtime.exposure.model_visible,
-            "owner_types": list(runtime.exposure.owner_types),
         },
         "visible_in_context": True,
         "executable_in_context": executable,
@@ -133,6 +133,16 @@ def _runtime_policy_item(policy: object) -> dict[str, object]:
                     "values": [{"value": value, "effect": effect} for value, effect in variants],
                 }
                 for field_name, variants in resolver.by_parameter
+            ],
+            "combination_overrides": [
+                {
+                    "conditions": [
+                        {"field": field_name, "value": value}
+                        for field_name, value in conditions
+                    ],
+                    "effect": effect,
+                }
+                for conditions, effect in resolver.by_parameter_combinations
             ],
         },
         "approval_policy": {"mode": policy.approval_policy.mode},

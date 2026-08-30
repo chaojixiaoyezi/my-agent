@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _mock_create_items_agent(task_count: int = 3):
     mock_agent = MagicMock()
@@ -85,8 +87,89 @@ def test_default_root_session_exposes_eight_slots_without_second_batch_cap():
     assert details["per_call_cap"] == 0
 
 
+def test_cancelled_batch_stops_before_materializing_and_publishing_remaining_children(
+    tmp_path,
+    monkeypatch,
+):
+    """在途批量派工收到统一工具取消令牌后，不再落盘或启动剩余 child。"""
+    from agent_py_agent.agent.agent_core import orchestration_tools
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.tooling.cancellation import (
+        CancellationToken,
+        ToolCancelled,
+        bind_cancellation_token,
+    )
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    token = CancellationToken()
+    real_resolve = orchestration_tools.resolve_create_run
+    resolved = 0
+
+    def resolve_then_cancel(manager, params):
+        nonlocal resolved
+        result = real_resolve(manager, params)
+        resolved += 1
+        if resolved == 1:
+            token.cancel("interrupted")
+        return result
+
+    publish = MagicMock()
+    monkeypatch.setattr(orchestration_tools, "resolve_create_run", resolve_then_cancel)
+    monkeypatch.setattr(orchestration_tools, "publish_created_subagents", publish)
+
+    with bind_cancellation_token(token), pytest.raises(ToolCancelled):
+        orchestration_tools.execute_create_subagents_service(
+            agent,
+            {
+                "items": [
+                    {"goal": "调研单体架构", "agent_name": "mono-researcher"},
+                    {"goal": "调研微服务架构", "agent_name": "micro-researcher"},
+                    {"goal": "调研 Actor 架构", "agent_name": "actor-researcher"},
+                ]
+            },
+        )
+
+    assert resolved == 1
+    assert len(agent.subagents.list_runs()) == 1
+    publish.assert_not_called()
+
+
 class TestCreateSubagentsToolExecute:
     """测试 CreateSubagentsTool.execute() 方法。"""
+
+    def test_user_cancel_is_reported_as_known_interrupted_create(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """派工安全点取消不能被 operation coordinator 降成未知副作用。"""
+        from agent_py_agent.agent.agent_core import orchestration_tools
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+        from agent_py_agent.agent.tooling.cancellation import ToolCancelled
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+
+        def cancelled_create(_agent, _params):
+            raise ToolCancelled("interrupted")
+
+        monkeypatch.setattr(
+            orchestration_tools,
+            "execute_create_subagents_service",
+            cancelled_create,
+        )
+
+        result = orchestration_tools.CreateSubagentsTool(agent).execute(
+            {"goal": "创建子代理"}
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok is False
+        assert result.error_code == "CANCELLED"
+        assert result.effect_outcome == "failed"
+        assert payload["status"] == "cancelled"
+        assert "结构化谱系收口" in payload["message"]
 
     def test_disabled_by_config(self):
         """配置禁用时返回错误。"""
@@ -690,6 +773,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
         assert "read_file" in call_kwargs["params"].allowed_tools
         assert "search_text" in call_kwargs["params"].allowed_tools
+        assert "capability_request" in call_kwargs["params"].allowed_tools
         assert "write_file" not in call_kwargs["params"].allowed_tools
         assert "apply_patch" not in call_kwargs["params"].allowed_tools
         assert "run_command" not in call_kwargs["params"].allowed_tools

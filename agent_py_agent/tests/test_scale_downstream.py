@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.backends import EchoBackend
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.observability.tracing import TraceContext
 from agent_py_agent.agent.scale_downstream import (
@@ -14,6 +15,17 @@ from agent_py_agent.agent.scale_downstream import (
     _extract_message,
 )
 from agent_py_agent.agent.settings import AgentConfig
+
+
+class _RecordingEchoBackend(EchoBackend):
+    """记录每次原生 messages，验证历史走 provider 结构而不是动态 prompt。"""
+
+    def __init__(self) -> None:
+        self.message_calls: list[list[dict[str, object]]] = []
+
+    def generate(self, prompt: str, **kwargs):
+        self.message_calls.append(list(kwargs.get("messages") or []))
+        return super().generate(prompt, **kwargs)
 
 
 def test_extracts_private_feishu_message_and_owner() -> None:
@@ -122,6 +134,8 @@ def test_scale_turn_reuses_gateway_transcript_and_isolates_other_conversation(tm
         ),
         workspace,
     )
+    backend = _RecordingEchoBackend()
+    agent.backend = backend
     pool = object.__new__(ScaleAgentPool)
     paths = _ExecutionPaths(home_root, workspace, home_root / "owners" / "unused")
     first = ScaleMessage(
@@ -164,17 +178,21 @@ def test_scale_turn_reuses_gateway_transcript_and_isolates_other_conversation(tm
         TraceContext("3" * 32, "4" * 16),
         paths,
     )
+    second_messages = backend.message_calls[-1]
     other_result = pool._run_conversation_turn(
         agent,
         other,
         TraceContext("5" * 32, "6" * 16),
         paths,
     )
+    other_messages = backend.message_calls[-1]
 
     assert first_result.response
-    assert "请记住本会话代号是青黛" in second_result.prompt
-    assert "这是 echo 后端的本地响应" in second_result.prompt
-    assert "请记住本会话代号是青黛" not in other_result.prompt
+    assert "请记住本会话代号是青黛" in str(second_messages)
+    assert "这是 echo 后端的本地响应" in str(second_messages)
+    assert "请记住本会话代号是青黛" not in str(other_messages)
+    assert "# Conversation Transcript" not in second_result.prompt
+    assert "# Conversation Transcript" not in other_result.prompt
 
 
 def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp_path) -> None:
@@ -188,6 +206,8 @@ def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp
         ),
         workspace,
     )
+    backend = _RecordingEchoBackend()
+    agent.backend = backend
     pool = object.__new__(ScaleAgentPool)
     paths = _ExecutionPaths(home_root, workspace, home_root / "owners" / "unused")
     first = ScaleMessage(
@@ -200,5 +220,6 @@ def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp
     pool._run_conversation_turn(agent, first, TraceContext("7" * 32, "8" * 16), paths)
     result = pool._run_conversation_turn(agent, second, TraceContext("9" * 32, "a" * 16), paths)
 
-    assert "群里约定代号是远山" in result.prompt
+    assert "群里约定代号是远山" in str(backend.message_calls[-1])
+    assert "# Conversation Transcript" not in result.prompt
     assert len(list(agent.conversation_store.threads_dir.glob("*.json"))) == 1

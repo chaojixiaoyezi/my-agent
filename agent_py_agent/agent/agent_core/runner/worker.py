@@ -50,7 +50,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
             interval_seconds=_runner_session_heartbeat_interval(worker),
         )
     ):
-        if params.dry_run or params.timeout_seconds <= 0:
+        if params.dry_run:
             result = worker.run_subagent(
                 params=SubagentRunParams(
                     run_id=params.run_id,
@@ -61,6 +61,8 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
                     retry_reason=params.retry_reason,
                 )
             )
+        elif params.timeout_seconds <= 0:
+            result = _run_subagent_worker_interruptibly(worker, params)
         else:
             result = _run_subagent_worker_with_timeout(worker, params)
     result = _reconcile_timed_out_runner(
@@ -205,6 +207,36 @@ def _attach_worker_local_store(worker, local_store: object | None) -> None:
     worker.local_store = local_store
     worker.subagents.local_store = local_store
     worker.memory.local_store = local_store
+
+
+# LLM: Every real child attempt owns a named cancellation token, not only timeout-enabled
+# attempts. The exact run/attempt identity is prepared before registration and passed unchanged
+# into the lifecycle so an Esc/model cancel can close only this child inside a shared Gateway.
+# 函数用途: 在没有超时计时器的普通子代理执行轮外包一层精确可中断边界。
+def _run_subagent_worker_interruptibly(
+    worker,
+    params: RunSubagentWorkerParams,
+):
+    from ...concurrency.interrupt import register_interruptible
+
+    prepared = worker.subagents.lifecycle.prepare_runner_attempt(
+        params.run_id,
+        retry_reason=params.retry_reason,
+    )
+    attempt_id = prepared.runner_active_attempt_id
+    interrupt_name = f"subagent-runner-attempt:{params.run_id}:{attempt_id}"
+    with register_interruptible(interrupt_name):
+        return worker.run_subagent(
+            params=SubagentRunParams(
+                run_id=params.run_id,
+                instruction=params.instruction,
+                dry_run=False,
+                max_cards=params.max_cards,
+                probe=params.probe,
+                retry_reason=params.retry_reason,
+                attempt_id=attempt_id,
+            )
+        )
 
 
 def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):

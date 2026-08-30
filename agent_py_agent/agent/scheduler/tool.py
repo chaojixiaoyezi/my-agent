@@ -173,26 +173,48 @@ class ScheduleTool(BaseTool):
         except OwnerQuotaUnavailable:
             return _error("owner 配额策略当前不可用，已拒绝写入", "OWNER_QUOTA_UNAVAILABLE")
         except (OSError, SchedulerRepositoryError, ValueError) as exc:
-            return _error(str(exc), "SCHEDULER_UNAVAILABLE")
+            # 存储异常可能发生在落盘期间，工具无法证明副作用是否已发生。
+            return _error(str(exc), "SCHEDULER_UNAVAILABLE", effect_outcome="unknown")
 
+    # LLM: Read projections combine job authority with the repository's exact active-run
+    # snapshot; keep writes delegated to repository CAS methods and never infer running state.
+    # 函数用途: 执行具体定时动作，并让 list/get 能直接告诉模型任务是否已经在途运行。
     def _execute(self, repository, action: str, params: dict[str, object]) -> ToolHandlerOutcome:
         if action == "status":
             return _success(action, {"scheduler": repository.runtime_snapshot()})
         if action == "list":
             jobs, errors = repository.list_jobs()
+            active_runs, run_errors = repository.active_runs_by_job()
             return _success(
                 action,
                 {
-                    "jobs": [_job_projection(job, include_prompt=False) for job in jobs],
-                    "load_error_codes": errors,
+                    "jobs": [
+                        _job_projection(
+                            job,
+                            include_prompt=False,
+                            active_run=active_runs.get(str(job["job_id"])),
+                        )
+                        for job in jobs
+                    ],
+                    "load_error_codes": [*errors, *run_errors],
                 },
             )
         job_id = str(params.get("job_id") or "").strip()
         if action not in {"create"} and not job_id:
             return _error("job_id 必填", "TOOL_INVALID_ARGUMENTS")
         if action == "get":
+            active_runs, run_errors = repository.active_runs_by_job()
+            job = repository.get_job(job_id)
             return _success(
-                action, {"job": _job_projection(repository.get_job(job_id), include_prompt=True)}
+                action,
+                {
+                    "job": _job_projection(
+                        job,
+                        include_prompt=True,
+                        active_run=active_runs.get(str(job["job_id"])),
+                    ),
+                    "load_error_codes": run_errors,
+                },
             )
         if action == "history":
             rows, errors = repository.history(job_id=job_id, limit=_limit(params))
@@ -426,7 +448,15 @@ def _source_request_id(agent: object, params: dict[str, object]) -> str:
     return ":".join(item for item in (request_id, call_id) if item)
 
 
-def _job_projection(job: dict[str, object], *, include_prompt: bool) -> dict[str, object]:
+# LLM: This projection is model-visible and owner-safe; current_run must come from the
+# repository's structured active ledger and must never be reconstructed from job prose.
+# 函数用途: 把定时任务和当前在途执行合并成模型可读状态，避免把长时间运行误判成漏触发。
+def _job_projection(
+    job: dict[str, object],
+    *,
+    include_prompt: bool,
+    active_run: dict[str, object] | None = None,
+) -> dict[str, object]:
     payload: dict[str, object] = {
         "job_id": job["job_id"],
         "name": job["name"],
@@ -439,6 +469,7 @@ def _job_projection(job: dict[str, object], *, include_prompt: bool) -> dict[str
         "last_run_at": iso_from_timestamp(job.get("last_run_at")),
         "last_run_status": job.get("last_run_status") or "",
         "last_error_code": job.get("last_error_code") or "",
+        "current_run": _run_projection(active_run) if active_run is not None else None,
     }
     prompt = str(job.get("prompt") or "")
     payload["prompt" if include_prompt else "prompt_preview"] = (
@@ -447,6 +478,9 @@ def _job_projection(job: dict[str, object], *, include_prompt: bool) -> dict[str
     return payload
 
 
+# LLM: Keep this bounded projection free of claim ids, process ids, prompts, and owner paths;
+# timestamps and typed status are sufficient for a caller to observe a live run.
+# 函数用途: 输出一次定时执行的安全状态摘要，既用于历史，也用于当前运行展示。
 def _run_projection(run: dict[str, object]) -> dict[str, object]:
     return {
         "run_id": run["run_id"],
@@ -454,7 +488,10 @@ def _run_projection(run: dict[str, object]) -> dict[str, object]:
         "trigger": run.get("trigger") or "",
         "status": run["status"],
         "scheduled_for": iso_from_timestamp(run.get("scheduled_for")),
+        "claimed_at": iso_from_timestamp(run.get("claimed_at")),
         "started_at": iso_from_timestamp(run.get("started_at")),
+        "waiting_since": iso_from_timestamp(run.get("waiting_since")),
+        "updated_at": iso_from_timestamp(run.get("updated_at")),
         "ended_at": iso_from_timestamp(run.get("ended_at")),
         "delivery_status": run.get("delivery_status") or "",
         "delivery_reason": run.get("delivery_reason") or "",
@@ -472,12 +509,21 @@ def _success(action: str, payload: dict[str, object]) -> ToolHandlerOutcome:
     )
 
 
-def _error(message: str, code: str) -> ToolHandlerOutcome:
+# LLM: Scheduler 的已知校验/CAS/不存在/配额拒绝都发生在 repository 写入前；必须显式
+#   投影 not_started，避免 ToolOperationCoordinator 把可修正冲突升级成 unknown。
+# 函数用途: 生成定时工具的结构化失败；只有存储执行期异常由调用方显式传 unknown。
+def _error(
+    message: str,
+    code: str,
+    *,
+    effect_outcome: str = "not_started",
+) -> ToolHandlerOutcome:
     return ToolHandlerOutcome(
         "schedule",
         False,
         json.dumps({"ok": False, "error": message}, ensure_ascii=False),
         error_code=code,
+        effect_outcome=effect_outcome,
     )
 
 

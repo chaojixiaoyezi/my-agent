@@ -128,6 +128,37 @@ def test_bracketed_paste_followed_immediately_by_enter_submits_once(tmp_path) ->
     asyncio.run(scenario())
 
 
+def test_submitted_input_is_immediately_available_to_same_session_history(tmp_path) -> None:
+    async def scenario() -> None:
+        runtime = TuiRuntime("same-session-history")
+        runtime.publish_session(version="test", model="fixture", workspace=str(tmp_path))
+        with create_pipe_input() as pipe_input:
+            with create_app_session(input=pipe_input, output=DummyOutput()):
+                params = _app_params(tmp_path, runtime)
+                app = make_tui_app(params)
+                run_task = asyncio.create_task(app.run_async())
+                await asyncio.sleep(0.05)
+
+                pipe_input.send_text("本轮刚提交的三行\n第二行\n第三行")
+                pipe_input.send_bytes(b"\r")
+                await asyncio.sleep(0.12)
+                assert params.jobs.get_nowait().user == "本轮刚提交的三行\n第二行\n第三行"
+                assert app.current_buffer.text == ""
+
+                pipe_input.send_bytes(b"\x1b[A")
+                await asyncio.sleep(0.08)
+                assert app.current_buffer.text == "本轮刚提交的三行\n第二行\n第三行"
+
+                pipe_input.send_bytes(b"\x1b[B")
+                await asyncio.sleep(0.08)
+                assert app.current_buffer.text == ""
+
+                app.exit(result=0)
+                assert await run_task == 0
+
+    asyncio.run(scenario())
+
+
 def test_tui_declares_block_cursor_instead_of_inheriting_terminal_shape(tmp_path) -> None:
     runtime = TuiRuntime("cursor-session")
     runtime.publish_session(version="test", model="fixture", workspace=str(tmp_path))

@@ -11,10 +11,7 @@ from .home_indexes import (
     AgentIndexRef,
     RunIndexRef,
     TaskIndexRef,
-    register_agent_ref,
-    register_owner_ref,
-    register_run_ref,
-    register_task_ref,
+    replace_home_index_snapshots,
 )
 from .home_layout import MyAgentHomePaths
 from .owner_resolver import OwnerHomeResult, OwnerIdentity, resolve_owner_home
@@ -52,6 +49,9 @@ class HomeIndexRebuildResult:
         }
 
 
+# LLM: Dry-run only scans canonical owner homes. Apply atomically replaces the
+# disposable global projections instead of appending another copy of every ref.
+# 函数用途: 从真实用户目录重建全局索引；应用时会把膨胀旧索引压成当前状态快照。
 def rebuild_home_indexes(home: MyAgentHomePaths, *, apply: bool = False) -> HomeIndexRebuildResult:
     owners = tuple(_owner_records(home))
     task_refs: list[TaskIndexRef] = []
@@ -75,14 +75,13 @@ def rebuild_home_indexes(home: MyAgentHomePaths, *, apply: bool = False) -> Home
         load_errors=tuple(load_errors),
     )
     if apply:
-        for owner in owners:
-            register_owner_ref(home, owner)
-        for ref in task_refs:
-            register_task_ref(home, ref)
-        for ref in run_refs:
-            register_run_ref(home, ref)
-        for ref in agent_refs:
-            register_agent_ref(home, ref)
+        replace_home_index_snapshots(
+            home,
+            owners=owners,
+            task_refs=tuple(task_refs),
+            run_refs=tuple(run_refs),
+            agent_refs=tuple(agent_refs),
+        )
     return result
 
 

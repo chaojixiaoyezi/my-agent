@@ -4,7 +4,7 @@ from __future__ import annotations
 
 背景:每轮 prompt 原本把全部工具的完整 spec 平铺进主目录(`render_catalog_section`),
 一句问候也背着一堆垂直工具 → token 膨胀。本特性把 deferred category 从初始 schema 和主目录
-正文移出，只留折叠名单；模型用 tool_search 加载命中工具，list_tools 仍可查看完整注册表。
+正文移出，只留折叠名单；模型用单步 tool_search 搜索并展开命中工具，list_tools 仍可查看完整注册表。
 普通对话大幅瘦身，垂直任务功能不丢，deferred=[] 完全恢复老行为。
 """
 
@@ -50,6 +50,7 @@ def test_native_visible_surface_keeps_recursive_agent_control_direct(tmp_path) -
     assert "tool_search" in names
     assert "remember" in names
     assert "create_subagents" in names
+    assert "list_agents" in names
     assert "send_guidance" in names
     assert "cancel_subagents" in names
     assert "resolve_capability_requests" in names
@@ -58,7 +59,7 @@ def test_native_visible_surface_keeps_recursive_agent_control_direct(tmp_path) -
     assert "create_goal" not in names
 
 
-def test_tool_search_returns_compact_candidates_without_loading(tmp_path) -> None:
+def test_tool_search_searches_and_loads_full_specs_in_one_call(tmp_path) -> None:
     agent = _agent(tmp_path)
     result = agent.tools.tools["tool_search"].execute(
         {"query": "get_goal 查看持续目标", "limit": 4}
@@ -66,24 +67,15 @@ def test_tool_search_returns_compact_candidates_without_loading(tmp_path) -> Non
 
     assert result.ok
     loaded = result.result_envelope["tool_search"]["loaded_tool_names"]
-    assert loaded == []
+    assert "get_goal" in loaded
     payload = json.loads(result.output)
-    assert "get_goal" in {item["name"] for item in payload["tools"]}
-    assert all("parameters" not in item for item in payload["tools"])
-
-
-def test_tool_search_loads_only_explicit_deferred_names_for_next_turn(tmp_path) -> None:
-    agent = _agent(tmp_path)
-    result = agent.tools.tools["tool_search"].execute(
-        {
-            "query": "get_goal 查看持续目标",
-            "load_names": ["get_goal"],
-        }
-    )
-
-    assert result.ok
-    loaded = result.result_envelope["tool_search"]["loaded_tool_names"]
-    assert loaded == ["get_goal"]
+    by_name = {item["name"]: item for item in payload["tools"]}
+    assert "get_goal" in by_name
+    assert "properties" in by_name["get_goal"]["input_schema"]
+    assert by_name["get_goal"]["schema_hash"].startswith("sha256:")
+    assert payload["mode"] == "search_and_load"
+    assert payload["loaded_for_next_model_call"] == loaded
+    assert "next_step" not in payload
     names = {
         spec.name
         for spec in agent.tools.model_visible_specs(loaded_tool_names=set(loaded))
@@ -92,27 +84,13 @@ def test_tool_search_loads_only_explicit_deferred_names_for_next_turn(tmp_path) 
     assert "create_subagents" in names
 
 
-def test_tool_search_exact_load_is_bounded_and_does_not_reveal_unavailable_names(tmp_path) -> None:
+def test_tool_search_schema_has_only_query_and_limit(tmp_path) -> None:
     agent = _agent(tmp_path)
-    result = agent.tools.tools["tool_search"].execute(
-        {
-            "query": "goal",
-            "load_names": ["create_goal", "not_a_real_tool"],
-        }
-    )
+    schema = agent.tools.tools["tool_search"].model_spec.input_schema
 
-    assert result.ok
-    payload = json.loads(result.output)
-    assert payload["loaded_for_next_model_call"] == ["create_goal"]
-    assert payload["not_loaded"] == ["not_a_real_tool"]
-    assert result.result_envelope["tool_search"]["loaded_tool_names"] == [
-        "create_goal"
-    ]
-    loaded_tool = payload["tools"][0]
-    assert loaded_tool["input_schema"]["properties"]
-    assert loaded_tool["schema_hash"].startswith("sha256:")
-    assert "parameters" not in loaded_tool
-    assert "required_parameters" not in loaded_tool
+    assert set(schema["properties"]) == {"query", "limit"}
+    assert schema["required"] == ["query"]
+    assert schema["additionalProperties"] is False
 
 
 def test_loaded_tool_schema_is_consumed_after_one_successful_model_call() -> None:

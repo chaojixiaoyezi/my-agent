@@ -193,8 +193,8 @@ def test_subagent_board_scales_and_flags():
         assert len(board.recent) == 10
         assert any("open_capability_request" in item.risk_flags for item in board.hot_list)
         assert any("blocked" in item.risk_flags for item in board.hot_list)
-        assert (root / "subs" / "subagent_board.json").exists()
-        assert (root / "subs" / "SUBAGENT_BOARD.md").exists()
+        assert (agent.subagents.workspace / "subagent_board.json").exists()
+        assert (agent.subagents.workspace / "SUBAGENT_BOARD.md").exists()
 
 
 def test_subagent_board_keeps_current_subagent_paths():
@@ -265,8 +265,8 @@ def test_subagent_due_check_report():
         assert "heartbeat_stale" in kinds
         assert "run_timeout" in kinds
         assert report.summary["P0"] >= 1
-        assert (root / "subs" / "subagent_due_check.json").exists()
-        assert (root / "subs" / "SUBAGENT_DUE_CHECK.md").exists()
+        assert (agent.subagents.workspace / "subagent_due_check.json").exists()
+        assert (agent.subagents.workspace / "SUBAGENT_DUE_CHECK.md").exists()
 
 
 def test_subagent_channel_probe_records_status():
