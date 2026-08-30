@@ -1086,6 +1086,41 @@ def test_conversation_compaction_renders_real_stage_progress_and_hides_thinking_
     assert store.snapshot().active_blocks[-1].metadata["percent"] == 78
 
 
+def test_failed_conversation_compaction_renders_typed_reason_and_preserved_context() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("compact-failed", clock=lambda: 12.0)
+    store.publish(
+        seq.emit(
+            "conversation_compaction_started",
+            "started",
+            "compact:req:failed",
+            {"generation": 1, "percent": 5, "stage": "preparing"},
+        )
+    )
+    store.publish(
+        seq.emit(
+            "conversation_compaction_failed",
+            "failed",
+            "compact:req:failed",
+            {
+                "generation": 1,
+                "percent": 5,
+                "stage": "failed",
+                "error_code": "COMPACT_MODEL_EMPTY_RESPONSE",
+            },
+        )
+    )
+
+    rendered = "\n".join(
+        _frame_lines(
+            render_tui_snapshot(store.snapshot(), TuiRenderContext(width=100))
+        )
+    )
+
+    assert "上下文压缩失败，原上下文已保留" in rendered
+    assert "COMPACT_MODEL_EMPTY_RESPONSE" in rendered
+
+
 def test_manual_compaction_renders_moving_indeterminate_bar_without_fake_percent() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("manual-compact-progress", clock=lambda: 12.0)

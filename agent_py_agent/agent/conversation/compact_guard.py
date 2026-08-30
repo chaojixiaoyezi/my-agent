@@ -135,15 +135,22 @@ def record_compact_failure(
         return
 
 
-# LLM: Failure classification is based on typed exception identity, never message text.
-# 函数用途: 把真实异常类型转成小型稳定错误码，供熔断状态和诊断展示。
+# LLM: Failure classification prefers a typed provider/runtime error_code, then falls back to
+# exception identity. It never parses message text and only emits bounded alphanumeric codes.
+# 函数用途: 把真实异常的结构化错误码转成稳定 Compact 错误码，供熔断状态和界面诊断展示。
 def compact_exception_code(exc: BaseException) -> str:
-    if isinstance(exc, ConversationCompactError):
-        return exc.code
+    typed_code = str(getattr(exc, "error_code", "") or "").strip()
+    source = (
+        str(exc.code)
+        if isinstance(exc, ConversationCompactError)
+        else (typed_code or exc.__class__.__name__)
+    )
     name = "".join(
         character if character.isalnum() else "_"
-        for character in exc.__class__.__name__.upper()
-    )
+        for character in source.upper()
+    )[:96].strip("_")
+    if name.startswith("COMPACT_"):
+        return name
     return f"COMPACT_{name or 'FAILED'}"
 
 

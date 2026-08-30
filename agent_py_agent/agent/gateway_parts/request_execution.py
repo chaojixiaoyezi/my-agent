@@ -767,8 +767,9 @@ def _public_context_compaction_payload(value: object) -> dict[str, object]:
     }
 
 
-# LLM: Compact 进度投影仅接受已知 phase/stage 和非负计数，未知字段不得进入跨进程 TUI 事件。
-# 函数用途: 清洗持久会话 Compact 进度，防止摘要或 prompt 混入展示。
+# LLM: Compact progress projection accepts only known phase/stage, nonnegative counters, and a
+# bounded structured error code. Unknown fields, summaries, and prompts never cross to the TUI.
+# 函数用途: 清洗持久会话 Compact 进度与失败码，防止摘要或 prompt 混入展示。
 def _public_conversation_compact_progress_payload(value: object) -> dict[str, object]:
     if (
         not isinstance(value, dict)
@@ -784,7 +785,11 @@ def _public_conversation_compact_progress_payload(value: object) -> dict[str, ob
         return {}
     generation = _safe_nonnegative_int(value.get("generation"))
     operation_id = str(value.get("operation_id") or "").strip()[:128]
-    return {
+    error_code = "".join(
+        character if character.isalnum() else "_"
+        for character in str(value.get("error_code") or "").upper()
+    )[:96].strip("_")
+    payload = {
         "schema": _CONVERSATION_COMPACT_PROGRESS_SCHEMA,
         "phase": phase,
         "stage": stage,
@@ -796,6 +801,9 @@ def _public_conversation_compact_progress_payload(value: object) -> dict[str, ob
         "trigger_tokens": _safe_nonnegative_int(value.get("trigger_tokens")),
         "source_messages": _safe_nonnegative_int(value.get("source_messages")),
     }
+    if error_code:
+        payload["error_code"] = error_code
+    return payload
 
 
 @dataclass(frozen=True)

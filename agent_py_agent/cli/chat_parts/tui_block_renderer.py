@@ -1329,6 +1329,9 @@ def _render_compact_progress(
             if block.phase == "interrupted"
             else "上下文压缩失败，原上下文已保留"
         )
+        error_code = str(block.metadata.get("error_code") or "").strip()
+        if block.phase == "failed" and error_code:
+            label = f"{label} · {error_code}"
         return wrap_fragments(
             (("class:tui-error", label),),
             width=context.width,

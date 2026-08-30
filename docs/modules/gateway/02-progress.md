@@ -1,5 +1,19 @@
 # Gateway Progress
 
+## 2026-08-30 R113 Todo 每轮纪律与 Compact typed 失败展示
+
+- R112 fresh 长任务已经证明八个 child covers 项会持久追平到 8/9，但 MiniMax 在自然 final 前没有显式关闭
+  root 自己负责的最后一项。R113 参考 会话运行时/终端交互，把“完成即按 exact id 更新、回复前核对、未完或阻塞
+  如实保留”压成 Workspace Context 的一条短纪律；它替换旧说明并受现有开关控制，不新增自动打勾、隐藏
+  模型轮、续跑或 final gate。
+- 同一 R112 root live Compact 在 20% 摘要阶段收到 provider 失败，canonical generation 保持 0、原上下文
+  继续完成任务，但旧投影只留下 `COMPACT_PROVIDERRESPONSEERROR`。R113 让 transcript/live-tool Compact
+  优先保留 provider typed `error_code`，经 Gateway 白名单和 TUI 二次校验后在红色终态块显示，例如
+  `COMPACT_MODEL_EMPTY_RESPONSE`；错误正文、摘要、prompt 和凭据仍不进入 rich 事件。
+- 本地 9 文件组合 264 项 focused 通过；历史 12k Compact fixture 在 R112 HEAD 也处于单 token 恢复边界，
+  只把测试窗口调到 13k 留出演进余量，生产触发点、恢复目标、CAS 和失败回滚均未修改。发布后继续用单
+  Gateway、多 owner 的真实长 TUI 复验 Todo 收尾、主/子 Compact、连续消息与失败可见性。
+
 ## 2026-08-30 R105 十 owner 功能矩阵与 R106 本地候选
 
 - `.10` 唯一 Gateway 同时承载 u246--u255；新增 10 路 TUI 后仍有约 9.7GiB available。Gateway RSS 约

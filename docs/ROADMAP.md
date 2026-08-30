@@ -993,7 +993,8 @@ Gateway/Feishu，并完成本地 8899、MiniMax-M2.7 和两个既有真实飞书
 
 已有：`live_agent_lab.py`、隔离配置、命令执行、transcript 和 summary、`open_live_lab.sh`。
 
-待做：memory 长任务、tools 边界任务、问题任务和多轮恢复任务场景。
+待做：R113 发布后用单 Gateway、多隔离 owner 继续跑 memory 长任务、tools 边界任务、问题任务、多子代理
+整合和多轮恢复场景；每一路保留 tmux、request/thread/task、Compact 代次与 owner 隔离证据，缺环境项单列。
 
 ### 并行开发 Workstream 工作台
 

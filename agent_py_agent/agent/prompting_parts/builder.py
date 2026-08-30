@@ -22,6 +22,10 @@ from typing import TYPE_CHECKING, Any
 from ..capability.persona_repository import PersonaRepository, PersonaRepositoryError
 from ..common import agent_time
 from ..settings import AgentConfig
+from ..task_progress_guidance import (
+    task_progress_closeout_guidance_enabled,
+    task_progress_model_discipline,
+)
 from .cache_layout import CacheStructuredPrompt
 from .memory_context import memory_context_text
 
@@ -464,7 +468,15 @@ def _workspace_context_text(
     ]
     if facts_only:
         return "\n".join(facts)
-    return "\n".join([
+    progress_guidance = (
+        task_progress_model_discipline()
+        if task_progress_closeout_guidance_enabled(builder)
+        else (
+            "task_progress 是模型可选的当前运行清单；它不选择会话、不切换工作区，"
+            "也不会让普通任务自动续跑或阻止下一条用户消息。"
+        )
+    )
+    guidance = [
         *facts,
         "- 写报告日期时优先使用 current_local_date，不要从历史文件、历史记忆或训练知识里猜日期。",
         "- 任务里出现“今天、最近、近一周、本周、今年”等相对时间时，先按 current_local_date 换成明确日期范围；"
@@ -475,8 +487,7 @@ def _workspace_context_text(
         "搜索片段只能当线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。",
         "- 有明确交付文件的长任务，直接按实际进展逐步更新目标文件；只有跨 compact 后确实需要恢复下一步时，"
         "才按需使用 task_progress 或草稿。不要为了形式单独建立检查点，也不要把内部记录动作反复当作用户进度回复。",
-        "- task_progress 是模型可选的当前运行清单；它不选择会话、不切换工作区，"
-        "也不会让普通任务自动续跑或阻止下一条用户消息。",
+        f"- {progress_guidance}",
         "- 分析、调查、排查、取证、研究、对比这类有实质发现的任务，得出结论后通常要把发现、依据和结论写成报告文件交付再收尾，"
         "不能只在对话里口头汇报就算完成；但用户明确要求只读、不要修改、不要落盘或只在对话中回答时，必须服从本轮要求，"
         "不能创建报告文件，也不能把写报告文件列入 task_progress。只有纯问答、闲聊、一次性查值这类本就没有交付物的任务，才不必写文件。",
@@ -485,7 +496,8 @@ def _workspace_context_text(
         "- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；"
         "把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。",
         "- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。",
-    ])
+    ]
+    return "\n".join(guidance)
 
 
 def _transcript_tool_context(tools: ToolSections) -> list[str]:

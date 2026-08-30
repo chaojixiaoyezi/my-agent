@@ -2881,7 +2881,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   保留为 pending，另有四个未绑定返工 child run-id 为 done。R111 的 closeout 软合同没有形成可验的最后更新，
   因此不能记为通过。
 
-## 2026-08-30 后台唤醒与 task_progress 共用 covers 对账【状态：R112 本地定向通过，fresh TUI 待验】
+## 2026-08-30 后台唤醒与 task_progress 共用 covers 对账【状态：`2dded08` 已部署，R112 fresh covers 通过、root 收尾仍失败】
 
 - R111 暴露的第一事实断点不是标题判断，而是两个读取入口不一致：`task_progress` 工具读取前会调用
   `reconcile_completed_child_covers`，后台 `task_runtime_state` 却只对账未绑定 child run-id。TUI 依据 child
@@ -2891,5 +2891,24 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   对账独立 child 行并重读账本。该路径只读取 canonical child `DONE`、lineage 和调用方原样 `covers`；不读取
   goal、completion_message、最终正文或产物内容，也不判定 root 自己的整合项完成。
 - 定向回归构造“child DONE covers=research + root integrate pending”：后台上下文生成后，canonical research
-  已持久化 done，closeout 只列 integrate。下一轮 fresh TUI 仍须证明模型自己在最终回复前用 exact id 关闭
-  integrate；若继续忽略，不能用宿主自动打勾掩盖失败。
+  已持久化 done，closeout 只列 integrate。`.10` fresh `ma-r112-110-u275-todo-reconcile` 的 8 名 child 全部
+  DONE 后，持久账本从初始 0/9 真实追平到 8/9，八个原 covers id 均有 `subagent-done:<run_id>` evidence，
+  证明后台和工具读取已经同源。root 写出 16,274-byte 横向报告并 final，但整轮没有第二次
+  `task_progress`，自己负责的 compare 仍 pending；这不是 covers 对账失败，也不能由宿主自动打勾掩盖。
+- 同一 fresh 任务的 root live Compact 在 20% 摘要阶段后失败，thread 结构事实为
+  `compact_generation=0`、`compact_consecutive_failures=1`、`COMPACT_PROVIDERRESPONSEERROR`；两名 child
+  各自 Compact 1 后正常完成。root 继续工作并 final，说明失败不丢上下文，但旧错误码丢掉了 provider 的
+  具体 `error_code`，TUI 只能显示泛化失败。
+
+## 2026-08-30 每轮 Todo 纪律与 Compact typed 失败原因【状态：R113 本地实现，待严格 gate/发布/fresh TUI】
+
+- 对照 会话运行时 `protocol/src/prompts/base_instructions/default.md` 与 `gpt_5_2_prompt.md`：计划完成时由模型调用
+  `update_plan` 明确关闭；对照 终端交互 `TodoWriteTool/prompt.ts`：完成一项立即更新、未完成或有错误不得
+  假标完成。R113 只把这条通用软纪律放进每轮 Workspace Context，并受现有
+  `task_progress_closeout_guidance_enabled` 控制；没有新增状态机、final gate、隐藏模型轮或自动写账。
+- 为避免稳定 prompt 膨胀，该短句替换原有 task_progress 可选性说明；默认 system prompt 不再重复一份。
+  一个旧 Compact 测试原本已经在 R112 HEAD 的 12k 上下文单 token 边界失败，fixture 调到 13k 只恢复其
+  “成功 Compact 并索引 raw transcript”的原始测试意图，不放宽 recovery target 或生产阈值。
+- `compact_exception_code` 现在优先保留 typed `error_code`，经过限定字符和长度后统一加 `COMPACT_`；
+  transcript/live-tool 失败进度、Gateway rich chunk、TUI reducer 与红色终态块沿同一字段透传。摘要正文、
+  prompt、异常 message 仍不能进入公开事件，失败仍不推进 canonical generation，原上下文仍完整保留。

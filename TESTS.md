@@ -2813,3 +2813,24 @@ ruff check \
 - 本地 focused：`test_dispatch_progress_seed.py + test_background_context_runtime_errors.py +
   test_task_progress_advisory.py` 共 47 项通过。fresh 仍用唯一 Gateway、MiniMax-M2.7、原样 Prompt 3；不得由
   测试者插话或手工改账，最终必须同时核对 TUI、工具记录和 canonical progress.json。
+
+### R112 fresh 真实结果：covers 通过，root-owned 收尾失败
+
+- `.10` 唯一 Gateway、MiniMax-M2.7，tmux `ma-r112-110-u275-todo-reconcile` 只输入一次原样 Prompt 3。
+  八名 child 全部 DONE，canonical 原计划 8 个 covers 项真实成为 done 并带 typed evidence；最终持久账本
+  `done=8,pending=1,total=9`，唯一 pending 是 root 自己的横向整合项。
+- root 写出 `output/coding_agent横向对比报告.md`（16,274 bytes）并自然 final，但整轮只有初始一次
+  `task_progress`。因此 R112 的 covers 同源修复通过，R111/R112 尚未让 MiniMax 主动关闭 root-owned 最后一项。
+- root Compact 动画到 20% 后失败，ConversationThread 记录 generation 0、连续失败 1 和泛化的
+  `COMPACT_PROVIDERRESPONSEERROR`；任务没有中止，两名 child 分别 Compact 1 后完成。R113 的 focused 验收要
+  锁住 typed provider code、失败块可见和原上下文保留。
+
+## 2026-08-30 R113 每轮 Todo 纪律与 Compact 失败码
+
+- 定向测试覆盖：默认/关闭开关下 Workspace Context 的短纪律；provider
+  `MODEL_EMPTY_RESPONSE -> COMPACT_MODEL_EMPTY_RESPONSE`；transcript/live-tool 失败事件经 Gateway/TUI
+  仍只携带有界错误码；渲染明确显示“原上下文已保留”和 typed code。
+- prompt 常驻预算回归继续运行完整 `test_gateway_conversation_compact.py`。其历史 12k fixture 在 R112 HEAD
+  也会因恢复目标边界失败，调整为 13k 留出演进余量；生产触发点、恢复目标和候选判定均未修改。
+- 发布后继续用一个 Gateway、多 owner 的真实 TUI 跑中长任务：至少覆盖多子代理整合、连续追加消息、主/子
+  Compact、插话/等待/终态、历史与 owner 隔离；每一路先公开 tmux 名称，环境缺失项单列而不冒充完成。

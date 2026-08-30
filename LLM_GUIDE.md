@@ -116,6 +116,9 @@
   不因 `pending/in_progress/unknown` 项拒绝正文、追加隐藏模型调用或自动续跑；开启
   `task_progress_closeout_guidance_enabled` 时，现有正常模型请求会在工具回执和后台 Task Runtime State 中收到
   当前展示代次的 exact open ids，提醒模型在最终回复前自主用 `task_progress` 关闭已有证据完成的原 id。
+  同一开关还会用一条 会话运行时/终端交互 式短纪律替换每轮 Workspace Context 里旧的 task_progress 说明：完成项
+  及时按 exact id 更新，回复前再核对，未完成/阻塞保持真实。它不叠加大段常驻 prompt，避免侵占 Compact
+  恢复余量。
   后台 Task Runtime State 在生成该提醒前，必须与 `task_progress` 读取入口共用 canonical child DONE + 显式
   `covers` 对账，避免 TUI 已显示 child 完成而持久账本仍把原项列为 pending。该提醒不按标题、final 文案或
   产物名猜完成，root 自己负责的项仍由模型显式调用关闭。清单继续进入同 thread 的
@@ -172,6 +175,8 @@
   `conversation/live_tool_compact.py` 适配到同一账本，provider overflow 也不得账外删工具对。TUI/Web/SQLite
   只读 generation；presentation/no-save 临时窗口事件不计数，旧 durable apply/attribute 不回读。live 摘要
   请求必须保持“原任务 user 在前、native history 居中、synthetic Compact user 最后”的 会话运行时 顺序。
+  摘要 provider 失败时不推进 generation，原上下文完整保留；熔断账和 TUI 失败块优先携带异常的 typed
+  `error_code`（如 `COMPACT_MODEL_EMPTY_RESPONSE`），没有结构码时才退到异常类名，绝不解析错误正文。
 - 普通回合工具终态折叠只追加一次确定性、脱敏投影，未发生真正 Compact 时旧模型历史必须保持稳定前缀；
   缓存命中只读取 provider usage 账，不以 Context 估算冒充。手动 `/compact` 成功后，Gateway 控制结果通过
   `task_status.compact_generation` 返回 canonical 代数，TUI 立即发布同一 typed boundary 并撤下压缩前的

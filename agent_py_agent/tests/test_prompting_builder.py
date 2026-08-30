@@ -379,6 +379,29 @@ class TestBuildBasic:
         assert "你的私人空间" in result
         assert "当前群的共享空间" in result
 
+    def test_workspace_context_keeps_todo_closeout_discipline_visible(self, tmp_path):
+        builder = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path)
+
+        rendered = builder.build("继续长任务", [])
+
+        assert "task_progress 是软清单" in rendered
+        assert "回复前核对" in rendered
+        assert "宿主不自动打勾或续跑" in rendered
+
+    def test_workspace_context_can_disable_extra_todo_closeout_discipline(self, tmp_path):
+        builder = PromptBuilder(
+            AgentConfig(
+                prompt_files=[],
+                task_progress_closeout_guidance_enabled=False,
+            ),
+            tmp_path,
+        )
+
+        rendered = builder.build("继续长任务", [])
+
+        assert "task_progress 是软清单" not in rendered
+        assert "task_progress 是模型可选的当前运行清单" in rendered
+
     def test_build_includes_current_local_date(self, tmp_path):
         """主代理每轮都能看到当前日期，报告日期不要从旧文件里猜。"""
         config = AgentConfig()
@@ -436,7 +459,7 @@ class TestBuildBasic:
         assert "直接按实际进展逐步更新目标文件" in result
         assert "不要为了形式单独建立检查点" in result
         assert "不要把内部记录动作反复当作用户进度回复" in result
-        assert "task_progress 是模型可选的当前运行清单" in result
+        assert "task_progress 是软清单" in result
         # 分析/取证/研究类通常落报告，但本轮用户的明确只读/不落盘要求优先。
         assert "得出结论后通常要把发现、依据和结论写成报告文件交付再收尾" in result
         assert "用户明确要求只读、不要修改、不要落盘或只在对话中回答时" in result

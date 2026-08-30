@@ -2260,8 +2260,9 @@ def _tui_context_compaction_payload(value: object) -> dict[str, object]:
     return payload if payload["generation"] > 0 else {}
 
 
-# LLM: TUI 在 Gateway 清洗后仍重新验证 Compact phase/stage/计数，直连和 replay 不能绕过展示边界。
-# 函数用途: 将合法会话 Compact 进度转成 reducer 可用的有界数字快照。
+# LLM: TUI revalidates Compact phase/stage/counters and the bounded typed error code after the
+# Gateway projection, so direct/replayed chunks cannot inject arbitrary failure text.
+# 函数用途: 将合法会话 Compact 进度和结构化失败码转成 reducer 可用的有界快照。
 def _tui_conversation_compact_progress_payload(
     value: object,
 ) -> dict[str, object]:
@@ -2288,7 +2289,11 @@ def _tui_conversation_compact_progress_payload(
     if generation <= 0:
         return {}
     operation_id = str(value.get("operation_id") or "").strip()[:128]
-    return {
+    error_code = "".join(
+        character if character.isalnum() else "_"
+        for character in str(value.get("error_code") or "").upper()
+    )[:96].strip("_")
+    payload = {
         "schema": "conversation_compaction_progress.v1",
         "phase": phase,
         "stage": stage,
@@ -2300,6 +2305,9 @@ def _tui_conversation_compact_progress_payload(
         "trigger_tokens": _nonnegative_int(value.get("trigger_tokens")),
         "source_messages": _nonnegative_int(value.get("source_messages")),
     }
+    if error_code:
+        payload["error_code"] = error_code
+    return payload
 
 
 # LLM: 本地审批等待只读 cancellation_token 的结构化状态；取消原因文案不参与控制判断。

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.backends.errors import ProviderResponseError
 from agent_py_agent.agent.conversation.compact import (
     ConversationCompactOptions,
     _merge_compact_operation_evidence,
@@ -19,6 +20,7 @@ from agent_py_agent.agent.conversation.compact import (
 from agent_py_agent.agent.conversation.compact_guard import (
     ConversationCompactCircuitOpenError,
     ConversationCompactError,
+    compact_exception_code,
     split_recent_complete_turns,
 )
 from agent_py_agent.agent.conversation.models import MessageLogEntry
@@ -85,6 +87,18 @@ class _EmptySummaryBackend:
         del prompt
         self.calls += 1
         return ModelResponse(text="", backend=self.name)
+
+
+def test_compact_failure_preserves_typed_provider_error_code() -> None:
+    assert compact_exception_code(
+        ProviderResponseError(
+            "provider payload was empty",
+            error_code="MODEL_EMPTY_RESPONSE",
+        )
+    ) == "COMPACT_MODEL_EMPTY_RESPONSE"
+    assert compact_exception_code(
+        ProviderResponseError("provider payload was malformed")
+    ) == "COMPACT_PROVIDERRESPONSEERROR"
 
 
 def test_conversation_pressure_does_not_reserve_unspent_future_output() -> None:
@@ -629,7 +643,9 @@ def test_same_thread_accumulates_beyond_recent_turn_setting_until_compact(tmp_pa
 
 
 def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_path) -> None:
-    agent = _agent(tmp_path, context_tokens=12_000, max_turns=3)
+    # 给稳定 system/workspace prompt 留出小幅演进余量；本测试验证的是 transcript
+    # 成功压缩与 owner 索引，不应卡在候选刚好高于 recovery target 的单 token 边界。
+    agent = _agent(tmp_path, context_tokens=13_000, max_turns=3)
     backend = _SummaryBackend()
     agent.backend = backend
     request = _request()

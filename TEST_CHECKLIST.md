@@ -272,8 +272,13 @@
   State 中给模型 current-generation exact open ids；模型在最终回复前自主更新已有证据完成的原 id，宿主不
   按标题/final/产物名猜完成。新项要求稳定 `id/title/status`，模型旧 pending 不能覆盖 canonical child DONE；
   `covers` 仍只绑定 exact id。R111 fresh 虽自然交付 22,938 字节报告，但最终五个原项仍全 pending，失败。
-  R112 已让后台 Task Runtime State 与工具读取共用 canonical DONE + exact covers 对账，本地 47 项通过；待
-  唯一 Gateway 的原样长任务证明 child 项真实持久关闭，且 root-owned 最后一项在 final 前由模型显式关闭。
+  R112 已让后台 Task Runtime State 与工具读取共用 canonical DONE + exact covers 对账，本地 47 项通过；
+  `.10` fresh 原样长任务已经证明八个 child covers 项真实持久关闭到 8/9，但 root-owned 最后一项仍未在
+  final 前由模型显式关闭。R113 把同一纪律压成每轮可见短句，仍待 fresh TUI 证明模型主动更新，不能把
+  8/9 或最终报告存在冒充整项通过。
+- [ ] Conversation Compact 失败不推进 generation、不丢原上下文，并以 typed `error_code` 留在 thread、
+  Gateway rich chunk 和 TUI 红色终态块。R112 root 已留下 provider 摘要失败样本；R113 本地要把泛化
+  `COMPACT_PROVIDERRESPONSEERROR` 精确到例如 `COMPACT_MODEL_EMPTY_RESPONSE`，发布后由真实长 TUI 复验。
 - [x] lifecycle/Compact 续跑的 durable tool index 保留有界递归且凭据脱敏的 JSON 参数；native 不伪造旧
   ToolCall/ToolResult，而是安装唯一有界 CompactionSummary handoff。真实 UserTurn 保持在 handoff 之后；
   Task Runtime State 暴露 canonical Todo exact ids 与 `create_subagents.items[].covers` 字段，宿主不按标题猜。

@@ -266,6 +266,7 @@ def test_conversation_compact_progress_is_rich_only_and_content_free(tmp_path):
         "after_tokens": 0,
         "trigger_tokens": 115_200,
         "source_messages": 80,
+        "error_code": "COMPACT_MODEL_EMPTY_RESPONSE",
         "summary": "must not escape",
         "prompt": "must not escape",
     }
@@ -293,6 +294,7 @@ def test_conversation_compact_progress_is_rich_only_and_content_free(tmp_path):
             "after_tokens",
             "trigger_tokens",
             "source_messages",
+            "error_code",
         )
     }
     assert "summary" not in row["compact_progress"]

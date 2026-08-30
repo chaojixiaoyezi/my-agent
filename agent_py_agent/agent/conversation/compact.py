@@ -295,8 +295,14 @@ def _execute_compact_request(request: _CompactRunRequest) -> ConversationCompact
             percent=0,
         )
         raise
-    except Exception:
-        _emit_compact_progress(request, phase="failed", stage="failed", percent=0)
+    except Exception as exc:
+        _emit_compact_progress(
+            request,
+            phase="failed",
+            stage="failed",
+            percent=0,
+            error_code=compact_exception_code(exc),
+        )
         raise
     _emit_compact_progress(
         request,
@@ -636,8 +642,9 @@ def _raise_if_compact_interrupted(request: _CompactRunRequest) -> None:
         raise InterruptedError("conversation compact interrupted by user")
 
 
-# LLM: progress callback 是只读展示投影，其失败不得阻断或改写 compact 权威状态。
-# 函数用途: 将真实 Compact 流水线阶段以有界结构发给 TUI。
+# LLM: progress callback is a read-only projection. A failed terminal may carry only the typed,
+# bounded error code; callback failures must not alter compact state or replace the real error.
+# 函数用途: 将真实 Compact 阶段和失败时的结构化错误码以有界数据发给 TUI。
 def _emit_compact_progress(
     request: _CompactRunRequest,
     *,
@@ -645,6 +652,7 @@ def _emit_compact_progress(
     stage: str,
     percent: int,
     after_tokens: int = 0,
+    error_code: str = "",
 ) -> None:
     callback = request.progress_callback
     if callback is None:
@@ -660,6 +668,7 @@ def _emit_compact_progress(
         "after_tokens": max(0, int(after_tokens or 0)),
         "trigger_tokens": max(0, int(request.policy.trigger_tokens or 0)),
         "source_messages": len(request.pending),
+        "error_code": str(error_code or "").strip(),
     }
     try:
         callback(payload)

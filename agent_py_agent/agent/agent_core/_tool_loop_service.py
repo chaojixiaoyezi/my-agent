@@ -550,7 +550,14 @@ def _live_compact_binding_and_summary(
         code="COMPACT_EMPTY_SUMMARY",
     )
     record_live_tool_compact_failure(binding, error)
-    _emit_native_compact_progress(params, phase="failed", stage="failed", percent=0, **progress)
+    _emit_native_compact_progress(
+        params,
+        phase="failed",
+        stage="failed",
+        percent=0,
+        error_code=error.code,
+        **progress,
+    )
     raise error
 
 
@@ -563,6 +570,7 @@ def _summarize_live_compact(
     binding: object | None,
     progress: dict[str, object],
 ) -> str:
+    from ..conversation.compact_guard import compact_exception_code
     from ..conversation.live_tool_compact import record_live_tool_compact_failure
 
     try:
@@ -578,6 +586,7 @@ def _summarize_live_compact(
             phase="failed",
             stage="failed",
             percent=0,
+            error_code=compact_exception_code(exc),
             **progress,
         )
         raise
@@ -592,6 +601,7 @@ def _apply_native_compact_plan(
     estimator: Callable[[], int],
     plan: _NativeCompactPlan,
 ) -> int:
+    from ..conversation.compact_guard import compact_exception_code
     from ..conversation.live_tool_compact import record_live_tool_compact_failure
 
     original_ir = list(params.tool_ir_history)
@@ -633,7 +643,11 @@ def _apply_native_compact_plan(
     except Exception as exc:
         _restore_native_compact_candidate(params, original_ir, original_tool_context)
         record_live_tool_compact_failure(plan.binding, exc)
-        _emit_native_compact_failed(params, plan)
+        _emit_native_compact_failed(
+            params,
+            plan,
+            error_code=compact_exception_code(exc),
+        )
         raise
 
 
@@ -864,20 +878,22 @@ def _native_compact_progress_values(
     }
 
 
-# LLM: A failed candidate terminates its existing progress block with the same identity. This is
-# display-only and must be called only after the caller has preserved or restored the original IR.
-# 函数用途: 统一结束失败的运行中 Compact 进度条，避免异常路径留下永久动画。
+# LLM: A failed candidate terminates its existing progress block with the same identity and typed
+# error code. This is display-only and must run after the original IR has been restored.
+# 函数用途: 统一结束失败的运行中 Compact 进度条，并显示结构化原因而不留下永久动画。
 def _emit_native_compact_failed(
     params: ToolLoopExecuteParams,
     plan: _NativeCompactPlan,
     *,
     after_tokens: int = 0,
+    error_code: str = "",
 ) -> bool:
     return _emit_native_compact_progress(
         params,
         phase="failed",
         stage="failed",
         percent=0,
+        error_code=error_code,
         **_native_compact_progress_values(plan, after_tokens=after_tokens),
     )
 
@@ -901,10 +917,9 @@ def _emit_native_compact_superseded(
     )
 
 
-# LLM: Live-tool and transcript Compact share one content-free progress schema. Milestones come
-# only from real pipeline boundaries; callback failures are display failures and cannot alter IR,
-# checkpoint, CAS, task status, or retry behavior.
-# 函数用途: 把运行中工具历史 Compact 的真实阶段送进主代理或子代理 TUI 进度条。
+# LLM: Live-tool and transcript Compact share one content-free progress schema. Milestones and a
+# typed failure code come only from real pipeline facts; projection cannot alter compact state.
+# 函数用途: 把运行中工具历史 Compact 的真实阶段及失败码送进主代理或子代理 TUI 进度条。
 def _emit_native_compact_progress(
     params: ToolLoopExecuteParams,
     *,
@@ -917,6 +932,7 @@ def _emit_native_compact_progress(
     trigger_tokens: int,
     source_messages: int,
     after_tokens: int = 0,
+    error_code: str = "",
 ) -> bool:
     sink = params.effective_on_chunk
     writer = getattr(sink, "write_conversation_compact_progress", None)
@@ -933,6 +949,7 @@ def _emit_native_compact_progress(
         "after_tokens": max(0, int(after_tokens or 0)),
         "trigger_tokens": max(0, int(trigger_tokens or 0)),
         "source_messages": max(0, int(source_messages or 0)),
+        "error_code": str(error_code or "").strip(),
     }
     try:
         return writer(payload) is not False

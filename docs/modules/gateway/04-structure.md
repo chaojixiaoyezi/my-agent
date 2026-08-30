@@ -32,9 +32,10 @@
   `Agent.run` 的旧式回复/记忆保存，不能关闭该 ConversationThread 的 live-tool Compact；presentation-only
   或没有 exact thread 的 no-save 调用仍无 Compact 写权。
 - transcript 与 live-tool Compact 都只向客户端发送 `conversation_compaction_progress.v1` 的阶段、百分比、
-  generation 和 token 计数。live-tool 在慢摘要前创建块，在真实 checkpoint 后才进入 committing；TUI 不读
-  日志文案猜进度。完成块收起后保留原有 content-free Compact 结果行；未提交但已恢复 IR 的候选发送
-  `superseded/candidate_discarded` 并静默收起，只有真实异常发送红色 `failed`。
+  generation、token 计数和失败时可选的 typed `error_code`。live-tool 在慢摘要前创建块，在真实 checkpoint
+  后才进入 committing；TUI 不读日志文案猜进度。完成块收起后保留原有 content-free Compact 结果行；未提交
+  但已恢复 IR 的候选发送 `superseded/candidate_discarded` 并静默收起，只有真实异常发送红色 `failed`。
+  Gateway 和 TUI 都只允许有界字母数字错误码，异常 message、摘要和 prompt 不能穿过该边界。
 - 同 thread 前台与后台模型工作片共用 durable run claim，一次只执行一个真实 slice。用户普通输入命中 live
   foreground 时作为 typed steer 在最近 provider 安全点进入；父代理已经让出等待 child 时，新 foreground
   slice 不等待所有 child，最多等待正在执行的单个后台片释放 lane。
@@ -250,9 +251,10 @@ audit Agent 为空而回退 daemon cwd。
 - `gateway_parts/request_execution.py::_update_response_from_result` 只把运行时已经确定的
   `turn_end_reason` 写入最终 response；Gateway 不拥有第二套完成判定器。
 - `BufferedChunkStreamWriter.write_conversation_compact_progress` 是 rich 客户端唯一的持久会话 Compact
-  进度出口。`_public_conversation_compact_progress_payload` 对 schema、phase、stage 和数值字段做白名单投影，
-  再写入 `conversation_compaction_progress` chunk；其中 `superseded/candidate_discarded` 是未提交候选的中性
-  终态，客户端只撤下活动块，不生成失败历史或 Compact 代次。
+  进度出口。`_public_conversation_compact_progress_payload` 对 schema、phase、stage、数值字段和可选 typed
+  `error_code` 做白名单投影，再写入 `conversation_compaction_progress` chunk；其中
+  `superseded/candidate_discarded` 是未提交候选的中性终态，客户端只撤下活动块，不生成失败历史或 Compact
+  代次。真正 `failed` 会冻结“原上下文已保留 + error_code”，但不推进 generation。
 - `_gateway_compact_progress_callback` 只在当前 chunk writer 明确实现上述 typed 方法时向
   `conversation/compact.py` 传回调；普通 callable、CLI 和 IM 客户端不会收到展示事件。
 - ConversationStore 的 summary/checkpoint/generation 仍是权威事实，百分比只是同一操作的展示投影，

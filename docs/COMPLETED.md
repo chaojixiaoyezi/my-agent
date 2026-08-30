@@ -1,5 +1,12 @@
 # COMPLETED
 
+- 2026-08-30 完成 R113 本地底座候选：会话运行时/终端交互 式 Todo 实时更新与回复前核对被压成每轮
+  Workspace Context 的短纪律，替换旧说明且继续受现有开关控制；宿主仍不自动打勾、不追加隐藏模型轮、
+  不以 open Todo 拦截 final。Conversation Compact 现在优先保留 provider typed error code，并沿
+  transcript/live-tool、Gateway rich chunk、TUI reducer 到红色终态块显示；失败不推进 generation，原上下文
+  保留。相关 9 文件组合 264 项 focused 通过；R112 fresh 已证明八个 child covers 项持久追平到 8/9，
+  同时保留 root 最后一项未主动关闭和一次 provider Compact 失败作为发布后复验基线。
+
 - 2026-08-30 完成 R109 子代理 typed lifecycle 与详情首次视口闭环。R108 累计基线先提交为 `3379c21`；
   R109 修复提交为 `a166c7d`。对照 会话运行时 typed agent status/feed 与 终端交互 loading spinner 后，child 只按
   exact phase 显示排队、启动、等待首事件、运行、等待下级和终态；首次详情从 canonical goal 顶部打开，

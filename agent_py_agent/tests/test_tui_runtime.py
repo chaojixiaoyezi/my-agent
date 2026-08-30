@@ -427,19 +427,25 @@ def test_failed_live_compact_does_not_hide_transcript_fallback_progress() -> Non
         "source_messages": 60,
     }
 
-    for phase, stage, percent in (
-        ("started", "preparing", 5),
-        ("failed", "failed", 0),
-    ):
-        assert turn.write_conversation_compact_progress(
-            {
-                **base,
-                "operation_id": "live-tool:attempt-a",
-                "phase": phase,
-                "stage": stage,
-                "percent": percent,
-            }
-        )
+    assert turn.write_conversation_compact_progress(
+        {
+            **base,
+            "operation_id": "live-tool:attempt-a",
+            "phase": "started",
+            "stage": "preparing",
+            "percent": 5,
+        }
+    )
+    assert turn.write_conversation_compact_progress(
+        {
+            **base,
+            "operation_id": "live-tool:attempt-a",
+            "phase": "failed",
+            "stage": "failed",
+            "percent": 0,
+            "error_code": "COMPACT_MODEL_EMPTY_RESPONSE",
+        }
+    )
     assert turn.write_conversation_compact_progress(
         {
             **base,
@@ -453,6 +459,8 @@ def test_failed_live_compact_does_not_hide_transcript_fallback_progress() -> Non
     snapshot = runtime.store.snapshot()
     assert any(block.role == "compact" for block in snapshot.active_blocks)
     assert any(block.phase == "failed" for block in snapshot.stable_blocks)
+    failed = next(block for block in snapshot.stable_blocks if block.phase == "failed")
+    assert failed.metadata["error_code"] == "COMPACT_MODEL_EMPTY_RESPONSE"
 
 
 def test_superseded_live_compact_retires_silently_before_transcript_fallback() -> None:
