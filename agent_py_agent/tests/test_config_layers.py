@@ -34,6 +34,18 @@ def test_shipped_system_prompt_matches_schema_default() -> None:
     assert "Rust" not in shipped
 
 
+def test_task_progress_closeout_guidance_config_defaults_and_override(tmp_path) -> None:
+    shipped_path = Path(__file__).resolve().parents[1] / "config" / "agent_config.yaml"
+    assert load_config(shipped_path).task_progress_closeout_guidance_enabled is True
+
+    disabled_path = tmp_path / "agent_config.yaml"
+    disabled_path.write_text(
+        "model_backend: echo\ntask_progress_closeout_guidance_enabled: false\n",
+        encoding="utf-8",
+    )
+    assert load_config(disabled_path).task_progress_closeout_guidance_enabled is False
+
+
 def test_merge_config_layers_tracks_winning_source() -> None:
     effective = merge_config_layers(
         [

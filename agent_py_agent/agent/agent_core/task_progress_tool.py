@@ -20,6 +20,10 @@ from ..task_progress import (
     with_task_progress_display_plan,
     write_task_progress,
 )
+from ..task_progress_guidance import (
+    task_progress_closeout_contract,
+    task_progress_closeout_guidance_enabled,
+)
 from ..tooling.models import (
     BaseTool,
     ConcurrencyPolicy,
@@ -117,7 +121,7 @@ class TaskProgressTool(BaseTool):
             _reconcile_completed_child_covers_before_read(self.agent, root, run_id)
             reconcile_completed_child_items(self.agent, root, run_id)
             payload = read_task_progress(root, run_id)
-        payload = _with_execution_guidance(payload)
+        payload = _with_execution_guidance(self.agent, payload)
         display_items = task_progress_display_items(payload)
         generation_id, plan_revision = task_progress_display_identity(payload)
         model_payload = dict(payload)
@@ -160,11 +164,14 @@ def _updated_item_ids(params: dict[str, object]) -> list[str]:
     )
 
 
-# LLM: Open progress remains advisory, but the model needs the same 会话运行时
-# persistence reminder after a read that exposed unfinished work. This response
-# field cannot schedule turns, accept work, or infer task quality.
-# 函数用途: 在进度工具结果里附一条软续做提示和可供 covers 使用的 exact id，不改清单或任务终态。
-def _with_execution_guidance(payload: dict[str, object]) -> dict[str, object]:
+# LLM: Open progress remains advisory, but the model needs one shared exact-id
+# persistence/closeout contract after a read. The configurable response field
+# cannot schedule turns, accept work, auto-close items, or infer task quality.
+# 函数用途: 在进度工具结果里附软续做、covers 和最终回复前核对提示，不改清单或任务终态。
+def _with_execution_guidance(
+    agent: object,
+    payload: dict[str, object],
+) -> dict[str, object]:
     open_ids: list[str] = []
     for item in payload.get("items", []) if isinstance(payload.get("items"), list) else []:
         if not isinstance(item, dict) or task_progress_status_is_closed(item.get("status")):
@@ -199,6 +206,8 @@ def _with_execution_guidance(payload: dict[str, object]) -> dict[str, object]:
             "correction=true。只要当前仍能推进，不要用列出未完成项代替继续工作，也不要重复创建同义清单。"
         ),
     }
+    if task_progress_closeout_guidance_enabled(agent):
+        guidance["closeout_contract"] = task_progress_closeout_contract(open_ids)
     return {**payload, "execution_guidance": guidance}
 
 

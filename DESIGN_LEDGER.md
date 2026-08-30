@@ -2839,7 +2839,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   显示“启动中”，RUNNING 且尚无首事件仍显示“等待模型”。错误文案、`runner_last_error` 和伪造 reason 都
   不取得展示权威；该投影也不改变 runner 状态、恢复、父子完成或调度。
 
-## 2026-08-30 Todo 与子代理 exact-id 绑定软纪律增强【状态：R110 本地回归通过，fresh TUI 待验收】
+## 2026-08-30 Todo 与子代理 exact-id 绑定软纪律增强【状态：`fbb562c` 已发布部署，R110 fresh TUI 通过】
 
 - 真实 R109 样本中，主代理先建立 9 条 canonical Todo，随后一次创建 8 个 child，但模型生成的所有
   `create_subagents.items[]` 都省略 `covers`。8 名 child 实际 DONE 后，canonical 账本因此如实保留为
@@ -2856,3 +2856,22 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `bound/unbound_child_run_ids`，避免模型把自动展示行当成下一批 Todo。
 - 该改动不改变 child 创建、启动、完成、权限、任务终态或 Todo 的软性质；它提高模型按 会话运行时 式显式更新
   计划的遵循率，并保留 r17 已证明必要的“返工时可不绑定、不能拿下一个无关 open id 顶替”边界。
+- `.10` 唯一 Gateway 的 fresh TUI `ma-fbb562c-110-u273-todo-binding` 只提交一次原样 Prompt 3：root 先建
+  `proj-1..proj-8 + integrate` 九项计划，首次 8-child 调用逐项携带对应 exact `covers`；child 自然完成后
+  TUI 的原计划从 `0/9` 单调推进到 `2/9、3/9、4/9、5/9、6/9、8/9`，不是另加 child run-id 行冒充完成。
+  多名 child 在 `compact 1` 后继续推进且仍关闭原 exact id。随后 root 因首名 轻量运行时 child 缺交付文件而补派
+  researcher-9；该返工调用省略 `covers`，TUI 正确显示“`8/9 + 另有 1 个子代理运行中`”，没有错误占用
+  唯一剩余的 `integrate`。这同时覆盖同工作 exact 绑定与不确定返工不乱绑两条边界。
+
+## 2026-08-30 主代理最终回复前的 Todo exact-id 软核对【状态：R111 本地定向通过，fresh TUI 待验】
+
+- R110 最终结构账本证明 8 个子代理计划项都已按 covers 自动关闭，补派 child 也按真实 run id 单列 done；
+  但 root 已写完并汇报 `final_comparison_report.md` 后，自己负责的 `integrate` 仍为 pending。终态 UI 收起
+  Todo 只是展示折叠，不能把它当成 canonical 9/9。
+- 会话运行时 `update_plan` 和 终端交互 `TaskUpdate` 都要求模型显式维护计划，宿主不从最终正文或产物名自动判定
+  完成；终端交互 还会把未完成任务作为模型提醒。R111 适配为 `task-progress-closeout-guidance.v1`：
+  `task_progress` 回执与后台 Task Runtime State 共用 current-generation exact open ids，提醒模型在最终回复前
+  更新已有证据完成的原 id，未完成/阻塞/过时项保持原状。
+- `task_progress_closeout_guidance_enabled` 默认开启并可关闭额外模型上下文。该能力不增加隐藏模型调用、不
+  拒绝 plain final、不自动打勾、不续跑普通任务，也不按标题、goal、final 文案或文件名推断完成；因此 Todo
+  仍是模型自查而不是机器验收。fresh 验收必须看到模型自己调用 `task_progress` 关闭 root-owned 最后一项。

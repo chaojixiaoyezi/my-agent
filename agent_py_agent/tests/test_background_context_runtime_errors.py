@@ -204,6 +204,9 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
     assert '"same_work_rule": "copy_exact_id"' in prompt
     assert '"independent_or_uncertain_rule": "omit_covers"' in prompt
     assert '"unbound_completion_followup"' in prompt
+    assert '"schema_version": "task-progress-closeout-guidance.v1"' in prompt
+    assert '"open_item_ids": [\n      "tests"' in prompt
+    assert '"host_behavior": "never_auto_close_never_completion_gate"' in prompt
     assert "这是旧请求编号下的错误账本" not in prompt
     assert "不应出现在后台上下文" not in prompt
     assert "task_rollup.json" not in prompt

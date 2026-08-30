@@ -15,16 +15,22 @@ from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
 from ..runtime_errors import runtime_error_report
 from ..task_progress import (
     read_task_progress_report,
+    task_progress_display_items,
     task_progress_status_is_closed,
     task_progress_summary,
+)
+from ..task_progress_guidance import (
+    task_progress_closeout_contract,
+    task_progress_closeout_guidance_enabled,
 )
 
 _PLAN_CONTINUATION_ID_LIMIT = 64
 
 
 # LLM: Background turns must read the same task-path progress ledger that main
-# tool calls write. The durable task id remains lineage identity only.
-# 函数用途: 汇总当前任务的目录、状态和真实进度清单，供后台主代理续跑时读取。
+# tool calls write. The durable task id remains lineage identity only; optional
+# closeout guidance carries exact display ids without changing their state.
+# 函数用途: 汇总当前任务目录、状态、真实进度和可配置收尾软提示，供后台主代理续跑时读取。
 def task_runtime_state(
     *,
     agent: object,
@@ -72,6 +78,16 @@ def task_runtime_state(
     }
     if continuation := _plan_continuation_contract(progress, progress_projection):
         state["plan_continuation"] = continuation
+    if task_progress_closeout_guidance_enabled(agent):
+        display_items = task_progress_display_items(progress)
+        open_display_ids = [
+            str(item.get("id") or "").strip()
+            for item in display_items
+            if str(item.get("id") or "").strip()
+            and not task_progress_status_is_closed(item.get("status"))
+        ]
+        if closeout := task_progress_closeout_contract(open_display_ids):
+            state["task_progress_closeout"] = closeout
     if work_kind.strip().lower() == "audit":
         from ..ingestion.audit_state import (
             audit_task_source_facts,

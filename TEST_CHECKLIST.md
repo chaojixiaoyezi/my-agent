@@ -267,17 +267,16 @@
 - [ ] task-local 父级创建下一层后以 `interrupted/SUBAGENTS_ACTIVE` 让出；exact direct-child wait 在孩子
   活跃时阻止孤儿误复活。同批成功只恢复一次，失败/缺状态/capability 阻塞立即恢复；嵌套 child 只叫醒
   直属父级，恢复上下文包含有界 `direct_children` refs，Gateway 重启后也能从耐久标记补偿。
-- [ ] `task_progress` 仅为软账本而非质量验收：open 项不触发跨轮自动续跑；但普通 root/child 准备自然
-  final 时，`pending/in_progress/unknown` exact 项会经 native runtime-guidance 在同一 active turn 有界核对
-  一次。关清后自然完成，耗尽仍 open 或只剩显式 blocked 时 typed blocked，不把 durable task 写成 DONE，
-  也不创建 `ordinary_task_resume`。新项要求稳定 `id/title/status`，模型旧 pending 不能覆盖 canonical child
-  DONE；`covers` 仍只绑定 exact id。native provider-message 与主链 focused 已通过并随 `e94f8ec` 发布；
-  r19 在 final 前自行关闭 8/8，未直接命中 open 分支；r9 随后在 13/16 时直接暴露 `save=False` 绕过。
-  本地回归已覆盖 Gateway save/no-save 与后台 no-save，仍待修复部署后的原样 TUI 通过后勾选。
+- [ ] `task_progress` 仅为软账本而非质量验收：open 项不触发跨轮自动续跑，不拒绝 plain final，也不追加
+  隐藏模型调用。R111 通过可配置的 `task-progress-closeout-guidance.v1`，在现有工具回执和后台 Task Runtime
+  State 中给模型 current-generation exact open ids；模型在最终回复前自主更新已有证据完成的原 id，宿主不
+  按标题/final/产物名猜完成。新项要求稳定 `id/title/status`，模型旧 pending 不能覆盖 canonical child DONE；
+  `covers` 仍只绑定 exact id。本地配置、工具回执和后台上下文定向回归已通过；待唯一 Gateway 的原样长任务
+  证明 root-owned 最后一项在 final 前由模型显式关闭后勾选。
 - [x] lifecycle/Compact 续跑的 durable tool index 保留有界递归且凭据脱敏的 JSON 参数；native 不伪造旧
   ToolCall/ToolResult，而是安装唯一有界 CompactionSummary handoff。真实 UserTurn 保持在 handoff 之后；
   Task Runtime State 暴露 canonical Todo exact ids 与 `create_subagents.items[].covers` 字段，宿主不按标题猜。
-- [ ] 已有 canonical Todo 时，root/child 的单项和批量 `create_subagents` 在落任何 run 前执行同一原子
+- [x] 已有 canonical Todo 时，root/child 的单项和批量 `create_subagents` 在落任何 run 前执行同一原子
   planned-delegation 预检：`covers/output_files` 都是可选结构化提示，不是权限或完整写集；省略时不猜，
   但主动提供后必须通过 exact covers、workspace 上界和同批 output 无相同/祖先关系的结构检查。
   未绑定 child 正常创建并用真实 run id 记进度，不关闭现有 Todo；未知/关闭/重复的显式 covers，以及显式
@@ -291,7 +290,9 @@
   只以直接父级 goal 为边界，并支持可选 exact covers；fresh r18 再验证不扩做兄弟项、不拿无关 id 顶替。
   R109 新样本又证明模型可能在初始 8-child 派工中全漏 covers；R110 已把 exact-id 复制纪律同步到默认 prompt、
   task_progress 回执、Schema 字段顺序和 lifecycle wake，并让派工回执排除 child seed 行。本地 105 项 focused
-  通过，仍待 fresh 原样 Prompt 3 验证 Todo 会随 child 完成逐项打勾；在此之前本项保持未完成。
+  通过；`.10` fresh 原样 Prompt 3 的首次 8-child 全部携带 exact covers，原 Todo 随完成事件从 0/9 单调
+  推进到 8/9。缺产物后的补派没有 covers，界面保留 integrate 未完成并单列额外运行 child，证明返工不会
+  拿下一个无关 id 顶替。
 - [x] 根默认 `system_prompt` 在持续执行纪律前包含 会话运行时 assumptions-first 软边界：安全可逆的次要选择采用
   合理默认并继续；只有任何假设都会实质偏离、越权或产生不可逆风险时才问一个短问题。YAML 与 dataclass
   逐字一致，文本不含项目名/语言专项，也不解析问句或写机器状态。

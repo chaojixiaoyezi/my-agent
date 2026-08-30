@@ -45,12 +45,13 @@ class _CaptureBackend:
         return ModelResponse(text="这一回合的最终回复。", backend=self.name)
 
 
-def _agent(tmp_path) -> SimpleAgent:
+def _agent(tmp_path, **config_overrides) -> SimpleAgent:
     return SimpleAgent(
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             tool_protocol="native",
+            **config_overrides,
         ),
         tmp_path,
     )
@@ -156,10 +157,30 @@ def test_open_progress_result_gives_soft_continue_and_covers_guidance(tmp_path) 
     assert delegation["same_work_rule"] == "copy_exact_id"
     assert delegation["independent_or_uncertain_rule"] == "omit_covers"
     assert delegation["unbound_completion_followup"]["matching"] == "exact_id_only"
+    closeout = payload["execution_guidance"]["closeout_contract"]
+    assert closeout["schema_version"] == "task-progress-closeout-guidance.v1"
+    assert closeout["blocking"] is False
+    assert closeout["open_item_ids"] == ["req-core", "req-test"]
+    assert closeout["before_final"]["matching"] == "exact_id_only"
+    assert closeout["host_behavior"] == "never_auto_close_never_completion_gate"
     assert "不要用列出未完成项代替继续工作" in payload["execution_guidance"]["message"]
     assert "covers" in payload["execution_guidance"]["message"]
     assert "correction=true" in payload["execution_guidance"]["message"]
     assert "不能拿无关 open id 顶替" in payload["execution_guidance"]["message"]
+
+
+def test_open_progress_closeout_guidance_can_be_disabled(tmp_path) -> None:
+    agent = _agent(tmp_path, task_progress_closeout_guidance_enabled=False)
+    agent._main_agent_run_id = "run-main"
+    result = TaskProgressTool(agent).execute(
+        {
+            "action": "update",
+            "items": [{"id": "req-core", "title": "实现核心", "status": "pending"}],
+        }
+    )
+
+    payload = json.loads(result.output)
+    assert "closeout_contract" not in payload["execution_guidance"]
 
 
 def test_closed_progress_item_requires_explicit_correction_to_reopen(tmp_path) -> None:

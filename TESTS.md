@@ -2767,6 +2767,26 @@ ruff check \
 - 回归同时锁定：`covers` 在 native item Schema 中紧跟 `goal`；open-plan guidance 提供 exact-id 复制与漏绑
   收尾结构；派工回执排除 child run-id seed 行；有界 result envelope 保留 bound/unbound ids；旧的可选 covers、
   已关闭项 correction、未知/关闭/重复 covers 原子拒绝与嵌套 child 预检继续通过。
-- fresh TUI 验收仍必须只输入一次用户原样 Prompt 3，使用唯一 Gateway + MiniMax-M2.7；观察初次派工参数是否
-  带 8 组 exact covers、child DONE 后原 Todo 是否逐项打勾、最终整合项是否由主代理更新，以及是否不再出现
-  “8 个 child done + 原 9 项全部 pending”。测试者不得追加技术提示或手工修改被测产物。
+- fresh TUI：`.10` 唯一 Gateway + MiniMax-M2.7，tmux
+  `ma-fbb562c-110-u273-todo-binding` 只输入一次用户原样 Prompt 3。初次派工的 8 个 item 分别携带
+  `covers=["proj-1"]..["proj-8"]`，结构化 `coverage_binding` 为 `optional_exact`，8 个 run 全部进入 `bound`，
+  `open_target_ids` 只含九个原计划 id。child DONE 后原 Todo 从 `0/9` 单调推进到
+  `2/9、3/9、4/9、5/9、6/9、8/9`；五名 child 发生 `compact 1` 后仍继续并关闭原 exact id。
+- root 在 `8/9` 自动唤醒并开始整合，发现首名 轻量运行时 child 缺少约定产物后自主补派 researcher-9。其 canonical
+  state 没有 `covers/progress_item_ids`，TUI 显示“`8/9 + 另有 1 个子代理运行中`”，未把返工错绑到唯一剩余
+  的 `integrate`。测试者没有追加技术提示、手工改产物或替被测对象执行任务；长任务最终整合仍由被测 TUI
+  自行继续，不影响本切片对 exact-id 自动回流与返工不乱绑的验收结论。
+
+## 2026-08-30 R111 主代理最终 Todo 软核对
+
+- 失败样本：R110 原样 Prompt 3 的 8 个 covers 项全部变成 done，补派 child 独立 done，root 也交付并最终
+  回复；但 canonical `task-path:ad2d3ff10457ee50` 仍是 `done=9,pending=1,total=10`，pending 项为
+  `integrate`。终屏收起 Todo 不能替代结构账本核对。
+- 对照：会话运行时 `会话运行时-rs/core/src/tools/handlers/plan.rs` 只投递模型的 `PlanUpdate`；终端交互
+  `TaskUpdateTool/prompt.ts` 要求完成后显式更新稳定 task id，并由 task reminder 把当前未完成项重新放进模型
+  上下文。两者都不从最终回复正文自动关闭计划。
+- 本地定向覆盖：默认/关闭配置解析；`task_progress` 开放项回执携带 exact-id closeout contract；后台 Task
+  Runtime State 只投影当前 display plan 的 open ids；关闭开关后不注入额外 contract。提醒明确
+  `blocking=false` 与 `never_auto_close_never_completion_gate`，不会新增模型轮或改变任务终态。
+- fresh TUI 必须使用唯一 Gateway + MiniMax-M2.7 和用户原样长任务；验收 root 在最终回复前自主调用
+  `task_progress` 更新自己完成的最后一项，canonical 计划达到 9/9，且不能由宿主或测试者代写状态。

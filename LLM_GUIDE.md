@@ -113,7 +113,10 @@
   调用模型前关闭并由 child runner 接管，主代理不能携带 child 身份或权限运行。一次 runner 结果重新
   落为 `PENDING` 时只释放该 run 的启动占位；共享批次宿主 PID 仍活着不能阻止这个 child 立即续派。
 - `task_progress` 是当前模型的软计划/记事账本，不是业务质量验收器。普通模型给出 plain final 时，宿主
-  不因 `pending/in_progress/unknown` 项拒绝正文、追加隐藏模型调用或自动续跑；清单继续进入同 thread 的
+  不因 `pending/in_progress/unknown` 项拒绝正文、追加隐藏模型调用或自动续跑；开启
+  `task_progress_closeout_guidance_enabled` 时，现有正常模型请求会在工具回执和后台 Task Runtime State 中收到
+  当前展示代次的 exact open ids，提醒模型在最终回复前自主用 `task_progress` 关闭已有证据完成的原 id。
+  该提醒不按标题、final 文案或产物名猜完成，关闭与否仍由模型显式调用决定。清单继续进入同 thread 的
   下一回合、Compact 和 TUI，供模型或用户以后继续。只有显式 `/goal` 的 open plan、直属 child 等待、
   UNKNOWN 副作用、权限和取消各自保留 typed 生命周期。新账本项必须有稳定
   `id + title + status`，避免空白行。

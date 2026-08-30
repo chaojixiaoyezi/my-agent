@@ -194,6 +194,9 @@ class _ToolConfigFields:
     # 显式 /goal 与普通任务软收口后的续跑间隔；它不轮询或推动子代理。
     # 子代理只通过真实生命周期事件唤醒直接父级。0 时仍使用内置 180 秒兜底。
     continuation_reminder_seconds: int = 180
+    # Todo 仍开放时，把 exact-id 收尾软提醒放进模型上下文；只提示模型在最终回复前
+    # 自主核对，不自动打勾、不阻断最终回复，也不增加隐藏模型调用。
+    task_progress_closeout_guidance_enabled: bool = True
     # 检索完备性软引导(R5b/R6c 实锤:单一渠道失败即下"不存在"绝对结论):同一工具
     # 系统失败累计达此阈值时注入"枚举未试渠道再下结论"软提示(每工具一次);0=关闭。
     tool_failure_channel_hint_threshold: int = 2
