@@ -80,6 +80,11 @@
   又可能是计划 id 的文本不能取得绑定权威，缺少显式 `covers` 时保持未绑定并走真实 child 进度行。
   已关闭项需要返工时，先用 `task_progress` 对原 id 传 `status=in_progress, correction=true`，再选择绑定；
   也可省略 covers，但不能拿无关的下一个 open id 顶替。
+  模型侧纪律比运行时语法更严格：凡 child 原样承接一个现有 open 项，都应把该 exact id 复制到对应
+  `covers`；只有额外工作或关系不能确定时才省略。未绑定 child 完成后，直接父级必须依据自己的派工事实
+  与当前证据，用 `task_progress` 更新已经证实完成的原计划 exact id；宿主仍不按标题或 goal 自动猜映射。
+  `task_progress` 回执、后台 Task Runtime State 与 child completion wake 都投影同一条软合同；派工回执的
+  `open_target_ids` 必须排除 child run_id 自动种出的展示行，只列真正的原计划项。
 - 普通主代理和子代理共用 `turn_end.reason`：`completed` / `blocked` /
   `max-tokens` / `aborted` / `error` / `interrupted`。它只表示一轮为什么结束，
   不从模型正文、验收清单、产物数量或测试描述反推完成。

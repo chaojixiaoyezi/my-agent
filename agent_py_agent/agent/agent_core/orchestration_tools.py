@@ -684,12 +684,45 @@ def _create_subagents_success(payload: dict[str, object]) -> ToolHandlerOutcome:
                 if isinstance(item, dict)
             ],
         }
+    coverage_binding = payload.get("coverage_binding")
+    if isinstance(coverage_binding, dict):
+        envelope["coverage_binding"] = _bounded_coverage_binding(coverage_binding)
     return ToolHandlerOutcome(
         "create_subagents",
         True,
         json.dumps(payload, ensure_ascii=False, indent=2),
         result_envelope=envelope,
     )
+
+
+# LLM: Only bounded ids and explicit exact bindings survive output reduction;
+# human notes and arbitrary provider payload fields must not enter the envelope.
+# 函数用途: 压缩派工绑定回执，供当前模型轮和 TUI 读取稳定的小字段。
+def _bounded_coverage_binding(binding: dict[str, object]) -> dict[str, object]:
+    raw_bound = binding.get("bound")
+    bound = dict(raw_bound) if isinstance(raw_bound, dict) else {}
+    return {
+        "schema_version": str(binding.get("schema_version") or ""),
+        "binding_mode": str(binding.get("binding_mode") or ""),
+        "ledger_run_id": str(binding.get("ledger_run_id") or ""),
+        "open_target_ids": _bounded_text_list(binding.get("open_target_ids")),
+        "open_count": _positive_limit(binding.get("open_count")),
+        "bound": {
+            str(run_id): _bounded_text_list(covers)
+            for run_id, covers in bound.items()
+            if str(run_id or "").strip()
+        },
+        "unbound_child_run_ids": _bounded_text_list(
+            binding.get("unbound_child_run_ids")
+        ),
+    }
+
+
+# LLM: Envelope arrays are capped and normalized without accepting scalar prose.
+# 函数用途: 把绑定回执中的字符串数组限制为最多 24 个非空值。
+def _bounded_text_list(value: object) -> list[str]:
+    values = value if isinstance(value, list | tuple) else ()
+    return [str(item) for item in list(values)[:24] if str(item or "").strip()]
 
 
 def _items_with_parent_context(agent: SimpleAgent, items: list[CreateSubagentItem]) -> list[CreateSubagentItem]:

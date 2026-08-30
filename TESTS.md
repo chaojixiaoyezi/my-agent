@@ -2738,3 +2738,35 @@ ruff check \
 - `.7` 当前 ICMP 丢包且 22 端口拒绝连接，本轮不宣称拿到 8GiB 机器新样本。过往 `.7` 的约 1GiB
   下降来自关闭 17 个已结束但仍驻留的 TUI；本轮 `.10` 再次量化到 69 个 TUI 合计约 4.63GiB，证明
   8GiB 机器必须限制同时常驻窗口数，但这不等于按用户启动多 Gateway。
+
+## 2026-08-30 R110 Todo/child exact-id 绑定遵循回归
+
+- 失败样本：`.10` R109 原样多子代理调研任务创建 9 条 Todo 和 8 名 child；真实
+  `create_subagents` 参数中 8 项均无 `covers`，最终 canonical progress 为 8 done + 9 pending。该证据用于
+  验证模型合同，不把 TUI 文案或标题当成状态事实。
+- 本地定向命令：
+
+  ```bash
+  python3 -m pytest \
+    agent_py_agent/tests/test_config_layers.py \
+    agent_py_agent/tests/test_orchestration_tools.py \
+    agent_py_agent/tests/test_orchestration_tool_specs.py \
+    agent_py_agent/tests/test_task_progress_advisory.py \
+    agent_py_agent/tests/test_background_context_runtime_errors.py \
+    agent_py_agent/tests/test_dispatch_progress_seed.py \
+    agent_py_agent/tests/test_orchestration_create_subagents_items.py \
+    -q --tb=short
+  python3 -m py_compile <本切片 9 个产品模块>
+  python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+  python3 scripts/check_doc_sync.py
+  git diff --check
+  ```
+
+  结果：105 项 focused 全通过；PyCompile、strict code-size（hard=0）、doc sync 与 diff check 通过。没有运行
+  全仓 pytest，本切片远低于约 10,000 行门槛。
+- 回归同时锁定：`covers` 在 native item Schema 中紧跟 `goal`；open-plan guidance 提供 exact-id 复制与漏绑
+  收尾结构；派工回执排除 child run-id seed 行；有界 result envelope 保留 bound/unbound ids；旧的可选 covers、
+  已关闭项 correction、未知/关闭/重复 covers 原子拒绝与嵌套 child 预检继续通过。
+- fresh TUI 验收仍必须只输入一次用户原样 Prompt 3，使用唯一 Gateway + MiniMax-M2.7；观察初次派工参数是否
+  带 8 组 exact covers、child DONE 后原 Todo 是否逐项打勾、最终整合项是否由主代理更新，以及是否不再出现
+  “8 个 child done + 原 9 项全部 pending”。测试者不得追加技术提示或手工修改被测产物。

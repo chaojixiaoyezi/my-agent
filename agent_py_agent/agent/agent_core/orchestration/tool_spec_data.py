@@ -28,13 +28,13 @@ _CREATE_PARAMETERS = {
         "一次派多个可同时立即运行、彼此不等结果的任务时使用；每项必须自带独立 goal，顶层 goal 可省略。"
         "编码项还必须在 goal 中说明互不重叠的文件或模块写入职责；可共享同一父级 task root。只派一个时直接传 goal"
     ),
+    "covers": '可选的 task_progress exact-id 映射（普通 items 或 coverage.targets，例如 ["req-03"]）；凡 child 原样承接一个已存在 open 项，都应复制该项 id，DONE 后系统按 id 打勾。只有额外工作或关系不能确定时才省略；省略后 child 用自己的 run_id 记进度，不关闭原 Todo',
     "description": "可选的 3-12 字职责短标题，只说明这个子代理大概负责什么，供 TUI/Web 单行展示",
     "role": "子代理角色模板 id，默认 worker",
     "agent_name": "可选展示名；只影响状态树和报告里的名字，不改变权限",
     "tool_preset": "工具预设；通常省略。有效值：coding/read_only/none",
     "allowed_tools": "工具偏好提示；通常省略，基础读写工具会自动补齐",
     "allowed_skills": "可选；只把当前 owner Skill 快照中点名的技能授权给子代理",
-    "covers": '可选的 task_progress exact-id 映射（普通 items 或 coverage.targets，例如 ["req-03"]）；只有 child 与仍 open 项确实是同一工作时才填，DONE 后系统按 id 打勾。省略时 child 用自己的 run_id 记进度，不关闭现有项',
     "plan": "子代理初始步骤",
     "input_refs": "交给子代理读取的文件、URL 或 artifact refs",
     "output_files": "可选目标产物，用于交付归属和协调提示；不是权限、完整写集或机器锁，提供时必须位于当前 workspace，同批可共享父级 task root",
@@ -81,7 +81,8 @@ _CREATE_PARAMETER_DETAILS = {
         "和文档引用由运行时从该绑定补入，禁止猜 watch_id。"
     ),
     "covers": (
-        "可选；只绑定 child 确实负责且仍 open 的清单项（id 来自 task_progress items 或 coverage.targets）。"
+        "语法可选；凡 child 原样承接一个已存在 open 清单项，就应复制该 exact id（来自 task_progress "
+        "items 或 coverage.targets），不要因为字段可选而漏掉。只有额外工作或关系不能确定时才省略。"
         "未知、已关闭或跨 item 重复的 id 会使整批原子拒绝；省略时 child 按真实 run_id 单独登记，不会给现有 Todo 打勾。"
         "返工已关闭项先用 task_progress 对原 id 传 status=in_progress, correction=true，再绑定原 id；绝不能拿无关 open id 顶替。"
     ),
@@ -95,7 +96,7 @@ _CREATE_ITEM_PARAMETER_DETAILS = {
     "description": "每个 item 可选；职责短标题只用 3-12 字概括这一个子代理负责什么，不要复制顶层整批 description。",
 }
 _CREATE_EXAMPLES = [
+    '{"tool":"create_subagents","goal":"完成现有 Todo","items":[{"goal":"实现 req-03 用户模块","covers":["req-03"],"description":"实现用户模块","output_files":["src/auth/"]},{"goal":"补齐 req-04 测试","covers":["req-04"],"description":"补齐模块测试","role":"tester"}]}',
     '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行","description":"实现用户认证","output_files":["platform/auth/"]}',
-    '{"tool":"create_subagents","items":[{"goal":"实现注册登录模块","description":"实现注册登录","output_files":["platform/auth/"]},{"goal":"读资料B并写证据摘要","description":"核对资料B","input_refs":["data/b.md"],"output_files":["reports/b.md"]}]}',
-    '{"tool":"create_subagents","goal":"完成现有 Todo","items":[{"goal":"实现 req-03 用户模块","description":"实现用户模块","covers":["req-03"],"output_files":["src/auth/"]},{"goal":"补齐 req-04 测试","description":"补齐模块测试","role":"tester","covers":["req-04"]}]}',
+    '{"tool":"create_subagents","items":[{"goal":"完成清单外的独立资料A","description":"核对资料A","input_refs":["data/a.md"]},{"goal":"完成清单外的独立资料B","description":"核对资料B","input_refs":["data/b.md"]}]}',
 ]

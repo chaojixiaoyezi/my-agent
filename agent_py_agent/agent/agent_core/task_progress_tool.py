@@ -184,18 +184,41 @@ def _with_execution_guidance(payload: dict[str, object]) -> dict[str, object]:
     if not open_ids:
         return payload
     guidance = {
+        "schema_version": "task-progress-execution-guidance.v2",
         "severity": "soft",
         "blocking": False,
         "open_count": len(open_ids),
         "open_item_ids": open_ids[:24],
+        "delegation_contract": _progress_delegation_contract(),
         "message": (
             "这些 exact id 仍是未完成计划，不是宿主完成判定。已有子代理负责时等待其 typed 生命周期事件；"
-            "否则继续使用工具；若下级确实原样承接某项，可用 create_subagents.items[].covers 映射对应 id。"
-            "covers 可省略，不能拿无关 open id 顶替；返工已关闭项时先对原 id 传 status=in_progress 和 "
+            "否则继续使用工具；若下级确实原样承接某项，应把对应 exact id 复制到 "
+            "create_subagents.items[].covers。只有额外工作或关系不能确定时才省略；未绑定 child 完成后，"
+            "父级仍要按已有 exact id 更新被证实完成的计划项。不能拿无关 open id 顶替；"
+            "返工已关闭项时先对原 id 传 status=in_progress 和 "
             "correction=true。只要当前仍能推进，不要用列出未完成项代替继续工作，也不要重复创建同义清单。"
         ),
     }
     return {**payload, "execution_guidance": guidance}
+
+
+# LLM: The delegation hint is a typed soft contract shared by every open-plan
+# result; it suggests exact ids but never schedules, binds, or accepts work.
+# 函数用途: 生成 Todo 与子代理之间的精确绑定及漏绑后收尾说明。
+def _progress_delegation_contract() -> dict[str, object]:
+    return {
+        "tool": "create_subagents",
+        "same_work_field": "items[].covers",
+        "same_work_value_source": "open_item_ids",
+        "same_work_rule": "copy_exact_id",
+        "independent_or_uncertain_rule": "omit_covers",
+        "unbound_completion_followup": {
+            "tool": "task_progress",
+            "action": "update",
+            "identity_field": "items[].id",
+            "matching": "exact_id_only",
+        },
+    }
 
 
 # LLM: Canonical rereads intentionally discard ephemeral incoming-write hints.

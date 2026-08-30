@@ -102,7 +102,11 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "readable report ref is present. Avoid duplicate work and polling. "
     "If known objective gaps remain and the available tools or child capacity can still address "
     "them, continue coordinating instead of returning a partial final report. Report completion "
-    "only when the current objective and runtime facts support it. Describe unresolved limitations "
+    "only when the current objective and runtime facts support it. Reconcile the canonical "
+    "task_progress plan on every child completion: explicit covers are already credited by the "
+    "host; for an unbound child, update only the exact existing item ids that your own delegation "
+    "and current evidence prove complete, and do not rely on title similarity alone. Do not create a "
+    "duplicate plan or leave proved-complete original items stale before final. Describe unresolved limitations "
     "only when they are genuine current blockers or the user has paused or redirected the task."
 )
 

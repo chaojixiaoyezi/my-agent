@@ -101,8 +101,9 @@ def build_create_subagents_model_spec() -> ToolModelSpec:
             "只是可选批次说明。goal 与 items 都没有时会返回可恢复参数错误。"
             + _CREATE_DEPENDENCY_ORDER_RULE
             + _CREATE_DISJOINT_WRITE_SCOPE_RULE
-            + "不支持 operations、count 或 max_concurrency 参数。covers 是可选的 "
-            "task_progress exact-id 映射：只有 child 与仍 open 项确实是同一工作时才填，提供的未知、已关闭或跨 "
+            + "不支持 operations、count 或 max_concurrency 参数。covers 是语法可选的 "
+            "task_progress exact-id 映射：凡 child 原样承接一个已存在 open 项都应复制该 exact id；只有额外工作或关系"
+            "不能确定时才省略。提供的未知、已关闭或跨 "
             "item 重复 id 会整批拒绝；省略时 child 按真实 run_id 单独显示，不会给现有 Todo 打勾。返工已关闭项先用 "
             "task_progress 对原 id 传 status=in_progress, correction=true，再绑定原 id；绝不能拿无关 open id 顶替。"
             "output_files 也是可选交付/协调提示，不是权限、完整写集或机器锁；可以省略，同批 child "
@@ -168,7 +169,7 @@ def build_task_progress_model_spec() -> ToolModelSpec:
     }
     return ToolModelSpec(
         name="task_progress",
-        description="记录或读取当前运行的进度笔记。它只是可选的软账本，不选择会话、不切换工作区、不决定当前轮或后续轮是否继续。【复杂/长任务先建 plan】开工先把任务拆成 items 建一份稳定清单；后续沿用原 id 更新，不能在每次唤醒时另建一套同义清单。每完成一项立即 update 把该项 status 标为 done（界面会逐项打钩显示，模型跨轮也能靠它续接）。把某个仍 open 项原样交给下级时，可用 create_subagents.items[].covers 映射 exact id；不确定或属于额外返工时省略 covers。已关闭项要返工时，先对原 id 传 status=in_progress, correction=true 明确重开，不能拿无关 open id 顶替。清单仍有 open 项且当前还能推进时继续调用工具；只有目标完成或存在真实阻塞时才 final。",
+        description="记录或读取当前运行的进度笔记。它只是可选的软账本，不选择会话、不切换工作区、不决定当前轮或后续轮是否继续。【复杂/长任务先建 plan】开工先把任务拆成 items 建一份稳定清单；后续沿用原 id 更新，不能在每次唤醒时另建一套同义清单。每完成一项立即 update 把该项 status 标为 done（界面会逐项打钩显示，模型跨轮也能靠它续接）。把某个仍 open 项原样交给下级时，应在 create_subagents 对应 item 的 covers 中复制 exact id；只有额外工作或关系不能确定时才省略 covers。未绑定 child 完成后，父级仍要按已有 exact id 更新被证实完成的计划项。已关闭项要返工时，先对原 id 传 status=in_progress, correction=true 明确重开，不能拿无关 open id 顶替。清单仍有 open 项且当前还能推进时继续调用工具；只有目标完成或存在真实阻塞时才 final。",
         input_schema=_input_schema(parameters, property_schemas, details=details),
         hints=_task_progress_model_hints(),
     )

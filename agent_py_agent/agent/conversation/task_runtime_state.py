@@ -127,6 +127,14 @@ def _plan_continuation_contract(
             "field": "items[].covers",
             "value_source": "open_item_ids",
             "matching": "exact_id_only",
+            "same_work_rule": "copy_exact_id",
+            "independent_or_uncertain_rule": "omit_covers",
+            "unbound_completion_followup": {
+                "tool": "task_progress",
+                "action": "update",
+                "identity_field": "items[].id",
+                "matching": "exact_id_only",
+            },
         },
     }
 

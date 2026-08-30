@@ -49,8 +49,10 @@ DISPATCH_SEED_NOTE = (
 )
 
 COVERS_BINDING_NOTE = (
-    "covers 是可选的精确进度映射。只有 child 与一个仍 open 的清单项确实是同一工作时，才在对应 item "
-    '带 covers=[该项 id](如 covers:["req-03"]);DONE 后系统会按 exact id 打勾。返工已关闭项时，先用 '
+    "covers 是可选的精确进度映射。凡 child 原样承接一个仍 open 的清单项，都应在对应 item "
+    '带 covers=[该项 id](如 covers:["req-03"]);DONE 后系统会按 exact id 打勾。只有额外工作或关系不能'
+    "确定时才省略；未绑定 child 完成后，父级仍要用 task_progress 按原 exact id 更新已经由证据证实完成"
+    "的计划项。返工已关闭项时，先用 "
     "task_progress 将原 id 以 correction=true 重开为 in_progress，再绑定原 id；也可以省略 covers，让该 "
     "child 按真实 run_id 成为独立进度项。绝不能拿无关的下一个 open id 顶替。"
 )
@@ -616,25 +618,20 @@ def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
     ledger_run_id, targets = _binding_ledger_targets(agent, root, run_id)
     if not targets:
         return None
-    known_ids = {str(target.get("id") or "").strip() for target in targets}
+    plan_targets = _plan_targets_without_child_rows(agent, targets)
+    known_ids = {str(target.get("id") or "").strip() for target in plan_targets}
     open_ids = [
         str(target.get("id") or "").strip()
-        for target in targets
+        for target in plan_targets
         if not task_progress_status_is_closed(target.get("status"))
         and not _target_has_open_checks(target)
     ]
-    bound: dict[str, list[str]] = {}
-    unknown: list[str] = []
-    for task in tasks:
-        task_id = str(getattr(task, "id", "") or "").strip()
-        covers = _task_covers(task)
-        if not task_id or not covers:
-            continue
-        bound[task_id] = covers
-        unknown.extend(target_id for target_id in covers if target_id not in known_ids)
+    bound, unbound_child_run_ids, unknown = _dispatch_task_bindings(tasks, known_ids)
     if not bound and not open_ids:
         return None
     payload: dict[str, Any] = {
+        "schema_version": "dispatch-coverage-binding.v2",
+        "binding_mode": "optional_exact",
         "open_target_ids": open_ids[:_MAX_BINDING_OPEN_TARGETS],
         "open_count": len(open_ids),
     }
@@ -642,12 +639,52 @@ def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
         payload["ledger_run_id"] = ledger_run_id
     if bound:
         payload["bound"] = bound
+    if unbound_child_run_ids:
+        payload["unbound_child_run_ids"] = unbound_child_run_ids[:_MAX_BINDING_OPEN_TARGETS]
     if unknown:
         payload["unknown_covers_ids"] = list(dict.fromkeys(unknown))[:12]
         payload["note"] = COVERS_PARENT_LEDGER_UNKNOWN_NOTE if ledger_run_id != run_id else COVERS_UNKNOWN_NOTE
-    elif not bound:
+    elif not bound and open_ids:
         payload["note"] = COVERS_BINDING_NOTE
     return payload
+
+
+# LLM: Child-seeded progress rows are recognized only by exact canonical run ids;
+# the model-facing open-id list must contain the original plan, not its TUI roster.
+# 函数用途: 从绑定回执中剔除已由真实 child run_id 占用的派工展示行。
+def _plan_targets_without_child_rows(
+    agent: object,
+    targets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    child_run_ids = _known_child_run_ids(agent)
+    return [
+        target
+        for target in targets
+        if str(target.get("id") or "").strip() not in child_run_ids
+    ]
+
+
+# LLM: This helper classifies only explicit child ids and covers parameters; it
+# never maps goal or description prose onto plan ids.
+# 函数用途: 汇总本批已绑定、未绑定和未知的子代理进度关系。
+def _dispatch_task_bindings(
+    tasks: list,
+    known_ids: set[str],
+) -> tuple[dict[str, list[str]], list[str], list[str]]:
+    bound: dict[str, list[str]] = {}
+    unbound: list[str] = []
+    unknown: list[str] = []
+    for task in tasks:
+        task_id = str(getattr(task, "id", "") or "").strip()
+        covers = _task_covers(task)
+        if not task_id:
+            continue
+        if not covers:
+            unbound.append(task_id)
+            continue
+        bound[task_id] = covers
+        unknown.extend(target_id for target_id in covers if target_id not in known_ids)
+    return bound, unbound, unknown
 
 
 # LLM: Resolve exactly one authoritative ledger for covers; nested runs may read

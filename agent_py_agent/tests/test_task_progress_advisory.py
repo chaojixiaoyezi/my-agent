@@ -149,7 +149,13 @@ def test_open_progress_result_gives_soft_continue_and_covers_guidance(tmp_path) 
     payload = json.loads(result.output)
 
     assert payload["execution_guidance"]["blocking"] is False
+    assert payload["execution_guidance"]["schema_version"] == "task-progress-execution-guidance.v2"
     assert payload["execution_guidance"]["open_item_ids"] == ["req-core", "req-test"]
+    delegation = payload["execution_guidance"]["delegation_contract"]
+    assert delegation["same_work_field"] == "items[].covers"
+    assert delegation["same_work_rule"] == "copy_exact_id"
+    assert delegation["independent_or_uncertain_rule"] == "omit_covers"
+    assert delegation["unbound_completion_followup"]["matching"] == "exact_id_only"
     assert "不要用列出未完成项代替继续工作" in payload["execution_guidance"]["message"]
     assert "covers" in payload["execution_guidance"]["message"]
     assert "correction=true" in payload["execution_guidance"]["message"]

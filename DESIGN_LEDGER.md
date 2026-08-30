@@ -2838,3 +2838,21 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `state=waiting`、携带 exact run ids 的 durable `direct_child_wait` 才显示动态“等待下级”。初次 PENDING 仍
   显示“启动中”，RUNNING 且尚无首事件仍显示“等待模型”。错误文案、`runner_last_error` 和伪造 reason 都
   不取得展示权威；该投影也不改变 runner 状态、恢复、父子完成或调度。
+
+## 2026-08-30 Todo 与子代理 exact-id 绑定软纪律增强【状态：R110 本地回归通过，fresh TUI 待验收】
+
+- 真实 R109 样本中，主代理先建立 9 条 canonical Todo，随后一次创建 8 个 child，但模型生成的所有
+  `create_subagents.items[]` 都省略 `covers`。8 名 child 实际 DONE 后，canonical 账本因此如实保留为
+  “原计划 9 条 pending + 8 条独立 child done”，TUI 的 `0/9` 不是渲染漏画。
+- 对照 会话运行时 `protocol/src/prompts/base_instructions/default.md` 的模型维护计划语义，以及 终端交互
+  `TaskCreateTool` / `TaskUpdateTool` 的 stable task id + explicit owner/status 更新：两者都不靠标题相似度
+  自动把执行者绑定到计划项。my-agent 继续只认调用方显式 `covers`，不恢复 goal/title 自动匹配，也不把
+  open Todo 变成机器质量验收或跨轮硬门。
+- R110 把同一软合同同时放进默认 system prompt、`task_progress` 结构化 execution guidance、
+  `create_subagents` 模型 Schema（`covers` 紧跟 `goal`）和 child lifecycle wake：凡下级原样承接已有 open
+  项，应复制 exact id；额外工作或关系不能确定时仍可省略，返工仍可先按原 id `correction=true` 重开。
+- 对漏绑的 child，完成唤醒要求直接父级只按自己的派工事实和当前证据更新既有 exact id，不允许宿主按中文
+  标题猜测。派工回执同时排除 seed 出来的 child run-id 行，`open_target_ids` 只保留原计划，并回送有界
+  `bound/unbound_child_run_ids`，避免模型把自动展示行当成下一批 Todo。
+- 该改动不改变 child 创建、启动、完成、权限、任务终态或 Todo 的软性质；它提高模型按 会话运行时 式显式更新
+  计划的遵循率，并保留 r17 已证明必要的“返工时可不绑定、不能拿下一个无关 open id 顶替”边界。

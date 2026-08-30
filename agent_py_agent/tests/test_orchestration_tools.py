@@ -52,6 +52,9 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "职责短标题" in spec.parameter_descriptions["description"]
     item_schema = spec.input_schema["properties"]["items"]["items"]
     assert item_schema["required"] == ["goal"]
+    assert list(item_schema["properties"])[:2] == ["goal", "covers"]
+    assert "凡 child 原样承接一个已存在 open 项" in spec.description
+    assert "不要因为字段可选而漏掉" in item_schema["properties"]["covers"]["description"]
     assert item_schema["properties"]["description"]["maxLength"] == 240
     assert item_schema["properties"]["output_files"]["type"] == "array"
     assert "交付身份与协调线索" in spec.parameter_descriptions["output_files"]

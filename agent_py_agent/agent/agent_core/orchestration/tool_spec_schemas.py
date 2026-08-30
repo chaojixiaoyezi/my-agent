@@ -12,13 +12,14 @@ from typing import Any
 
 _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "goal": {"type": "string"},
+    # 计划绑定紧跟 goal 展示给模型；它仍是可选字段，但承接已有 Todo 时应优先被看到并填写。
+    "covers": {"type": "array", "items": {"type": "string"}},
     "description": {"type": "string", "maxLength": 240},
     "role": {"type": "string"},
     "agent_name": {"type": "string"},
     "tool_preset": {"type": "string", "enum": ["coding", "read_only", "none"]},
     "allowed_tools": {"type": "array", "items": {"type": "string"}},
     "allowed_skills": {"type": "array", "items": {"type": "string"}},
-    "covers": {"type": "array", "items": {"type": "string"}},
     "plan": {"type": "array", "items": {"type": "string"}},
     "input_refs": {"type": "array", "items": {"type": "string"}},
     "output_files": {"type": "array", "items": {"type": "string"}},

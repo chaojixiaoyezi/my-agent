@@ -289,6 +289,9 @@
   fresh r15 因 root 先反问目标语言而未进入派工；fresh r16 已证明自主默认和 lifecycle wake，但抓到 child
   越过直接 goal；fresh r17 又抓到 mandatory covers 使 Git 返工 child 错绑 GUI Todo。当前回归要求 child
   只以直接父级 goal 为边界，并支持可选 exact covers；fresh r18 再验证不扩做兄弟项、不拿无关 id 顶替。
+  R109 新样本又证明模型可能在初始 8-child 派工中全漏 covers；R110 已把 exact-id 复制纪律同步到默认 prompt、
+  task_progress 回执、Schema 字段顺序和 lifecycle wake，并让派工回执排除 child seed 行。本地 105 项 focused
+  通过，仍待 fresh 原样 Prompt 3 验证 Todo 会随 child 完成逐项打勾；在此之前本项保持未完成。
 - [x] 根默认 `system_prompt` 在持续执行纪律前包含 会话运行时 assumptions-first 软边界：安全可逆的次要选择采用
   合理默认并继续；只有任何假设都会实质偏离、越权或产生不可逆风险时才问一个短问题。YAML 与 dataclass
   逐字一致，文本不含项目名/语言专项，也不解析问句或写机器状态。

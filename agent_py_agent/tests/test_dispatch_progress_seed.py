@@ -143,6 +143,38 @@ def test_create_subagents_result_envelope_preserves_bounded_todo_snapshot() -> N
     }
 
 
+def test_create_subagents_result_envelope_preserves_bounded_coverage_binding() -> None:
+    from agent.agent_core.orchestration_tools import _create_subagents_success
+
+    outcome = _create_subagents_success(
+        {
+            "created": 2,
+            "coverage_binding": {
+                "schema_version": "dispatch-coverage-binding.v2",
+                "binding_mode": "optional_exact",
+                "ledger_run_id": "run-main",
+                "open_target_ids": ["req-core", "req-test"],
+                "open_count": 2,
+                "bound": {"child-1": ["req-core"]},
+                "unbound_child_run_ids": ["child-2"],
+                "note": "private prose stays out of the bounded envelope",
+            },
+        }
+    )
+
+    assert outcome.result_envelope == {
+        "coverage_binding": {
+            "schema_version": "dispatch-coverage-binding.v2",
+            "binding_mode": "optional_exact",
+            "ledger_run_id": "run-main",
+            "open_target_ids": ["req-core", "req-test"],
+            "open_count": 2,
+            "bound": {"child-1": ["req-core"]},
+            "unbound_child_run_ids": ["child-2"],
+        }
+    }
+
+
 def test_seed_idempotent_on_same_ids(tmp_path):
     agent = _agent(tmp_path)
     assert seed_dispatch_task_progress(agent, [_task("subagent-aa11", "建后端")])["seeded"] == 1
@@ -404,8 +436,35 @@ def test_binding_reminds_usage_when_open_targets_unbound(tmp_path):
     _seed_coverage(tmp_path)
     binding = dispatch_coverage_binding(_agent(tmp_path), [_task("sub-1", "实现注册登录")])
     assert binding["note"] == COVERS_BINDING_NOTE
+    assert binding["schema_version"] == "dispatch-coverage-binding.v2"
+    assert binding["binding_mode"] == "optional_exact"
     assert binding["open_target_ids"] == ["req-01", "req-02"]
+    assert binding["unbound_child_run_ids"] == ["sub-1"]
     assert "bound" not in binding
+
+
+def test_binding_excludes_dispatch_seeded_child_rows_from_open_plan(tmp_path):
+    from agent.agent_core.orchestration.dispatch_progress_seed import (
+        dispatch_coverage_binding,
+        seed_dispatch_task_progress,
+    )
+    from agent.task_progress import write_task_progress
+
+    agent = _agent(tmp_path)
+    write_task_progress(
+        tmp_path,
+        "run-seed-1",
+        {"items": [{"id": "req-core", "title": "实现核心", "status": "pending"}]},
+    )
+    child = _task("sub-1", "实现核心")
+    agent.subagents = SimpleNamespace(list_runs=lambda: [child])
+    seed_dispatch_task_progress(agent, [child])
+
+    binding = dispatch_coverage_binding(agent, [child])
+
+    assert binding["open_target_ids"] == ["req-core"]
+    assert "sub-1" not in binding["open_target_ids"]
+    assert binding["unbound_child_run_ids"] == ["sub-1"]
 
 
 def test_binding_accepts_plain_todo_item_ids(tmp_path):
