@@ -10,10 +10,16 @@
   锚点。命令为 `python3 -m pytest agent_py_agent/tests/test_tui_view.py
   agent_py_agent/tests/test_tui_agent_navigation.py agent_py_agent/tests/test_tui_prompt_toolkit_pipe.py
   agent_py_agent/tests/test_tui_renderer.py -q --tb=short`，结果 87 passed。
-- 真 TUI 使用 `.10` 唯一 Gateway、MiniMax-M2.7 与原样八项目调研提示；客户端
+- 真 TUI 使用 `.10` 唯一 Gateway、MiniMax-M2.7 与原样八项目调研提示；旧客户端
   `ma-r109-110-u272-subagent-phases` 已取得 8 个排队到运行、3 个终态、5 个继续运行的阶段证据。首次详情
   失败样本证明后端 goal/69 条事件均完整，问题仅在首次物理视口贴尾。修复发布后必须换 fresh TUI，直接
   Enter child 即看到完整提示词开头；不能用 `Ctrl+Home` 人工补救冒充修复通过。
+- 修复后关闭旧客户端但保留 canonical session/后台任务，只同步两个 TUI 客户端文件，不重启 Gateway；
+  fresh resume 客户端 `ma-a166c7d-110-u272-child-first-view` 首次 Enter 即显示完整 轻量运行时 goal 与开头 thinking。
+  两次 PageDown 后 `Ctrl+G` 返回再 Enter，视口保持原位置；child 在观察期间终态后 footer 改为“已结束，只读”。
+  最后 8/8 child 终态，轻量运行时/deepseek-harness 各 `compact 1`，main 从等待自动恢复、写出 8 份分报告和 1 份
+  `横向对比报告.md`（16,651 bytes），自然 final 直接显示，终态无 Working。测试机始终只有 PID `3699956`
+  一个 Gateway 和一个 8420 listener。
 
 ## 2026-08-30 R108 收尾回归与真 TUI Compact
 

@@ -1,15 +1,19 @@
 # STATUS
 
-## 2026-08-30 R109 子代理阶段与详情首屏（候选待真 TUI 复验）
+## 2026-08-30 R109 子代理阶段与详情首屏（完成）
 
 - R108 检查点已提交为 `3379c21`，未推送。`.10` 已顺序更新到 R109 基线且仍只有一个
   `ma-gateway-r109-110` Gateway；原样八路调研 TUI 中 8 名 child 先显示“排队中”，随后按真实事件转为
-  运行，当前 3 名已完成、5 名仍运行，主代理显示“等待 5 个子代理”，没有把 accepted 冒充 running。
+  运行；首个观察点为 3 名完成、5 名运行，主代理显示“等待 5 个子代理”，没有把 accepted 冒充 running。
 - 首次进入运行 child 后，Gateway 的 `/client/agent-view` 已返回完整 goal 和 69 条 exact attempt 事件，
-  `Ctrl+Home` 也能看到提示词，但旧视口默认贴尾，普通首屏会落到后部甚至像白屏。R109 候选只改进程内
+  `Ctrl+Home` 也能看到提示词，但旧视口默认贴尾，普通首屏会落到后部甚至像白屏。R109 只改进程内
   展示状态：从导航首次进入从 child goal 顶部打开；返回、重进仍恢复各自位置，回到底部后继续自动跟随。
-- TUI/view/navigation/renderer 定向组合 87 项通过，Ruff、strict code-size 与 diff check 通过；真实修复
-  尚需 fresh TUI 验证后才记完成，本轮不重复全仓 pytest。
+- 修复提交 `a166c7d` 的两个纯客户端文件已同步到 `.10`，没有重启唯一 Gateway。fresh resume TUI
+  `ma-a166c7d-110-u272-child-first-view` 首次 Enter 直接显示完整 轻量运行时 goal 和开头思考，无需 `Ctrl+Home`；翻页、
+  返回、重进保持同一位置。8 名 child 全部终态，轻量运行时/deepseek-harness 各显示 `compact 1`；主代理自动恢复、
+  最终回复直接可见且 Working 撤下。8 份分报告和 1 份横向总报告落盘；Gateway 仍为 PID `3699956`。
+- TUI/view/navigation/renderer 定向组合 87 项通过，Ruff、strict code-size、doc sync 与 diff check 通过；
+  本轮不重复全仓 pytest，也未推送远端。
 
 ## 2026-08-30 R108 Compact 错误合同收尾（完成）
 

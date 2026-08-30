@@ -1,5 +1,14 @@
 # COMPLETED
 
+- 2026-08-30 完成 R109 子代理 typed lifecycle 与详情首次视口闭环。R108 累计基线先提交为 `3379c21`；
+  R109 修复提交为 `a166c7d`。对照 会话运行时 typed agent status/feed 与 终端交互 loading spinner 后，child 只按
+  exact phase 显示排队、启动、等待首事件、运行、等待下级和终态；首次详情从 canonical goal 顶部打开，
+  返回/重进恢复独立视口。87 项 TUI focused 与静态门通过。`.10` 原样八项目调研真 TUI 中，8 名 child 从
+  排队转运行并全部终态，轻量运行时/deepseek-harness 各自然 Compact 1 次；fresh resume
+  `ma-a166c7d-110-u272-child-first-view` 无需 `Ctrl+Home` 即显示完整 prompt，回切保持位置，main 自动恢复并
+  直接显示 final，终态无 Working。产物为 8 份分报告和 1 份 16,651-byte 横向总报告；部署仅替换两个纯
+  TUI 客户端文件，没有重启或复制 Gateway，PID `3699956`/8420 始终唯一。本轮未推送远端。
+
 - 2026-08-30 完成 R108 Compact 错误合同和严格门收尾：六个已在控制面使用的 typed
   Compact code 已全部进入恢复分类表；相邻 176 项回归、Ruff、doc sync、strict code-size、
   import-boundary、diff 与 clean-package 全过。`AUDIT-02` 按用户要求保留 strict xfail，未改

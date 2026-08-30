@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-08-30 子代理详情首次从 goal 开始、重访恢复独立视口【状态：本地合同通过】
+## 2026-08-30 子代理详情首次从 goal 开始、重访恢复独立视口【状态：R109 真 TUI 通过】
 
 - child 详情正文的权威仍是 Gateway 返回的 exact `run_id + goal + attempt transcript events`；视口位置只是
   当前 TUI 进程内展示状态，不能写回会话、任务或代理状态。
@@ -8,7 +8,8 @@
   让用户误以为提示词或历史丢失。离开页面时分别保存普通/modal 的 follow、cursor 和未读基线；重访恢复
   原位置，不再次强拉顶部。用户主动回到底部后仍恢复 sticky follow。
 - `.10` 失败样本已证明后端数据完整而旧首次视口在尾部；本地 prompt_toolkit 回归覆盖“首次顶部、回切保持、
-  modal 同步”。只有 fresh 真 TUI 无需 `Ctrl+Home` 即显示 child goal 后，才升级为完成。
+  modal 同步”。fresh resume TUI `ma-a166c7d-110-u272-child-first-view` 无需 `Ctrl+Home` 即显示完整 child goal；
+  翻页、返回、重进保持同一位置，终态页仍可只读查看，合同已取得真机正证。
 
 ## 2026-08-30 孙代理必须继承父任务的 canonical run workspace【状态：R107 真 TUI 通过】
 
