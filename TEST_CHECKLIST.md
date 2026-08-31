@@ -286,8 +286,10 @@
   canonical task，managed 主链不得扫描/deepcopy 全部历史。`c12ea57` 的退出/resume/接口延迟已在 `.7`
   通过；`e2aba94` 部署后 12 次 stack 无全量 deepcopy，8 秒 CPU 约 12% 单核，16 会话并发快照最大
   0.294 秒；fresh `ma-e2aba94-session-r14` exact resume 前后 session 数稳定为 324、Gateway 始终唯一。
-- [ ] durable child wake 已 ready 但 process-local thread lane 不推进时，Gateway 必须自行检测并有界恢复；
-  不能依赖用户发“继续”或人工重启。本轮已保留可复现事实，但自愈尚未实现。
+- [ ] durable child wake 已 ready 时，Gateway 的 background-main 准备阶段不得同步重复执行 orphan 全量扫描；
+  crash recovery 由独立 `_GatewayOrphanReconciler` 有界推进，ready thread lane 即使遇到慢扫描也必须提交。
+  `.10` 已用 `py-spy` 保留“reconciler 存在、bg-owner 空闲、supervisor 卡 RuntimeDB”的反例；focused 与 fresh
+  TUI 自愈验收通过后再勾选，不能依赖用户发“继续”、人工重启或短超时杀慢模型。
 - [x] 本地/admin 主会话晋升为持久任务后，项目 `execution_cwd` 仍在真实 `allowed_write_roots` 中；
   不会出现前台能写、后台整合同路径被拒的权限分叉。远程 owner task wall、task-local child 和
   transient Audit 的既有窄授权回归保持通过。

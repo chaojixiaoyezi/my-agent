@@ -371,9 +371,11 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
     base_started = threading.Event()
     release_base = threading.Event()
     owner_ran = threading.Event()
+    preparation_modes: list[bool] = []
 
     class BlockingBaseScheduler:
-        def prepare_tick(self, *, now=None):
+        def prepare_tick(self, *, now=None, include_orphan_supervision=True):
+            preparation_modes.append(include_orphan_supervision)
             return None
 
         def ready_thread_ids(self, *, now=None, limit=0):
@@ -385,7 +387,8 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
             return []
 
     class OwnerScheduler:
-        def prepare_tick(self, *, now=None):
+        def prepare_tick(self, *, now=None, include_orphan_supervision=True):
+            preparation_modes.append(include_orphan_supervision)
             return None
 
         def ready_thread_ids(self, *, now=None, limit=0):
@@ -421,6 +424,7 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
         assert owner_ran.wait(1)
         assert ("base", "thread-base") in supervisor._inflight
         assert (1, "thread-owner") in supervisor._inflight
+        assert preparation_modes == [False, False]
     finally:
         release_base.set()
         supervisor.shutdown()
@@ -435,7 +439,8 @@ def test_blocked_thread_does_not_starve_sibling_thread_for_same_owner() -> None:
     sibling_ran = threading.Event()
 
     class TwoThreadScheduler:
-        def prepare_tick(self, *, now=None):
+        def prepare_tick(self, *, now=None, include_orphan_supervision=True):
+            assert include_orphan_supervision is False
             return None
 
         def ready_thread_ids(self, *, now=None, limit=0):
@@ -508,6 +513,30 @@ def test_scheduler_plans_each_pending_conversation_as_an_independent_lane() -> N
     )
 
     assert scheduler.ready_thread_ids(now=20.0) == ("thread-a", "thread-b")
+
+
+def test_prepare_tick_can_skip_inline_orphan_supervision(monkeypatch) -> None:
+    """Gateway planning never waits for the independent reconciler's scan."""
+    from agent_py_agent.agent.conversation import runtime
+
+    scheduler = object.__new__(BackgroundMainAgentScheduler)
+    scheduler._maybe_gc_ledger = lambda *, now: None
+    scheduler._process_collaboration_cases = lambda *, now: None
+    scheduler._enqueue_scheduler_runs = lambda *, now: None
+    scheduler._reclaim_orphaned_attempts = lambda *, now: None
+    scheduler._enqueue_unfinished_task_resume_wakes = lambda *, now: None
+    calls: list[float] = []
+    monkeypatch.setattr(
+        runtime,
+        "_maybe_supervise_orphans",
+        lambda _scheduler, now: calls.append(now),
+    )
+
+    scheduler.prepare_tick(now=20.0, include_orphan_supervision=False)
+    assert calls == []
+
+    scheduler.prepare_tick(now=21.0)
+    assert calls == [21.0]
 
 
 def test_scheduler_does_not_plan_removed_polling_policy_as_a_thread_lane() -> None:

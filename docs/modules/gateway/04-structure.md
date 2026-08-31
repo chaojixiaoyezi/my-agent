@@ -209,7 +209,10 @@
 
 ## 后台会话车道与公平调度
 
-- `conversation.runtime.BackgroundMainAgentScheduler.prepare_tick()` 只做无模型的维护、到期入队和恢复；
+- `conversation.runtime.BackgroundMainAgentScheduler.prepare_tick()` 只做无模型的维护与到期入队；直接调用者
+  默认附带 inline orphan supervision 作为无 Gateway 时的恢复兜底。单 Gateway 已由独立
+  `_GatewayOrphanReconciler` 按 owner 有界恢复，supervisor 因而必须传
+  `include_orphan_supervision=False`；否则同步重复扫描会在历史账或磁盘变慢时先堵住所有 ready lane。
   `ready_thread_ids()` 只投影持久 wake/observation/policy 中的 thread identity，不领取或消费来源。
 - `tick_thread(thread_id)` 只能消费一个 durable thread 的来源。同 thread 的前台、后台唤醒、
   progress policy 和 scheduled continuation 继续由 `conversation/run_claim.py` 的唯一执行 lane 串行。

@@ -83,16 +83,16 @@ def _resolve_param_error(run_id: str, decision: str, reason: str) -> ToolHandler
 
 
 # LLM: This model tool is recursive but edge-local: only the direct parent may
-# resolve a child request. Resolution persists audit facts and queues the same
-# run for continuation; it never grades output or acts as a generic push tool.
-# 类用途: 当前代理处理直属子代理能力申请的唯一显式入口；grant/deny 都让同一 run 自动续跑。
+# resolve a child request within the parent's existing authority ceiling. The
+# handler owns the owner/workspace/tool hard gates, so this control mutation must
+# not add a second end-user approval gate; exact dangerous child actions remain
+# subject to their own runtime approval. Resolution persists audit facts and
+# queues the same run for continuation; it never grades output or acts as a push tool.
+# 类用途: 当前代理在自身既有权限内裁决直属子代理的能力申请；grant/deny 都让同一 run 自动续跑。
 class ResolveCapabilityRequestsTool(BaseTool):
     model_spec = build_resolve_capability_requests_model_spec()
     runtime_policy = ToolRuntimePolicy(
-        effect_resolver=EffectResolverPolicy(
-            "mutating",
-            by_parameter=(("decision", (("grant", "dangerous"), ("deny", "mutating"))),),
-        ),
+        effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
         # seq 253 闭合：run_id/request_id 是逻辑 ID；write_roots 是真实授权
         # 目录（path，锁不能跳过）。

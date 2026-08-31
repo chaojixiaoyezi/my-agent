@@ -433,7 +433,9 @@ def _memory_curator_workers(agent: object) -> int:
 class _BackgroundThreadLaneSupervisorMixin:
     # LLM: Planning is single-threaded and model-free; submission is round-robin
     # across owners, bounded globally and per owner, and keyed by durable thread id.
-    # 函数用途: 公平提交就绪会话，避免一个长回合堵住同用户其它窗口。
+    # Gateway's independent orphan reconciler owns recovery scans, so preparation
+    # must skip the duplicate inline sweep before ready lanes are submitted.
+    # 函数用途: 公平提交就绪会话，且不让重复孤儿扫描堵住同用户或其它窗口。
     def _submit_ready_thread_ticks(self) -> None:
         global_limit = _background_owner_workers(self._base_agent)
         available = max(0, global_limit - len(self._inflight))
@@ -452,7 +454,10 @@ class _BackgroundThreadLaneSupervisorMixin:
             if owner_slots <= 0:
                 continue
             try:
-                scheduler.prepare_tick(now=planned_at)
+                scheduler.prepare_tick(
+                    now=planned_at,
+                    include_orphan_supervision=False,
+                )
                 ready = scheduler.ready_thread_ids(
                     now=planned_at,
                     limit=per_owner_limit + len(active_threads),

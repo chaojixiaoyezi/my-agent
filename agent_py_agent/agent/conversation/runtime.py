@@ -4766,14 +4766,22 @@ class _BackgroundSchedulerThreadLaneMixin:
         self.prepare_tick(now=current)
         return self._consume_ready_sources(now=current)
 
-    # LLM: Preparation is model-free and is called only by the supervisor thread;
-    # it may enqueue durable work but cannot hold a conversation execution lane.
-    # 函数用途: 在分会话并发前完成低频维护、到期入队和孤儿恢复。
-    def prepare_tick(self, *, now: float | None = None) -> None:
+    # LLM: Preparation is model-free and is called only by the supervisor thread.
+    # Gateway must disable inline orphan supervision because its independent
+    # reconciler owns that potentially slow scan; direct schedulers retain it as
+    # a crash-recovery fallback. All other durable enqueue work remains unchanged.
+    # 函数用途: 在分会话并发前完成低频维护和到期入队；按宿主形态选择是否同步扫描孤儿。
+    def prepare_tick(
+        self,
+        *,
+        now: float | None = None,
+        include_orphan_supervision: bool = True,
+    ) -> None:
         current = now if now is not None else __import__("time").time()
         self._maybe_gc_ledger(now=current)
         self._process_collaboration_cases(now=current)
-        _maybe_supervise_orphans(self, current)
+        if include_orphan_supervision:
+            _maybe_supervise_orphans(self, current)
         self._enqueue_scheduler_runs(now=current)
         self._reclaim_orphaned_attempts(now=current)
         self._enqueue_unfinished_task_resume_wakes(now=current)

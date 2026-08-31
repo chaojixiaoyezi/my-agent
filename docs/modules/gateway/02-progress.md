@@ -1,5 +1,17 @@
 # Gateway Progress
 
+## 2026-08-31 Gateway 会话车道与孤儿恢复解耦
+
+- `.10` 单 Gateway 出现 durable wake 已 ready、日志持续 seed owner，但 `bg-owner` worker 长时间空闲。
+  `py-spy` 精确定位 background-main supervisor 卡在
+  `prepare_tick -> supervise_stalled_orphans -> RuntimeDB`；同一 Gateway 的独立
+  `_GatewayOrphanReconciler` 此时已经在并行负责死亡 runner 和孤儿恢复。
+- Gateway 规划会话时现在显式使用 `prepare_tick(include_orphan_supervision=False)`，先提交 ready thread
+  lane；独立 reconciler 继续有界恢复。直接/嵌入式同步 scheduler 保留默认 inline sweep 作为无 Gateway
+  时的 crash-recovery 兜底，不因本修复失去恢复能力。
+- focused 已覆盖 Gateway 对 base/owner 都传 false、同 owner 多车道、跳过与保留两种 prepare 语义；待新
+  wheel 的 fresh MiniMax-M2.7 真 TUI 证明无需用户发“继续”也能从 child wake 自行续跑后标记完成。
+
 ## 2026-08-31 R116/R117 上下文校准与后台 final 连续性
 
 - provider 成功响应现在把数值 context observation 写入 exact thread；读取时要求稳定请求指纹和 Compact

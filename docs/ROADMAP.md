@@ -1099,16 +1099,30 @@ Gateway 启动恢复；subagent supervision 使用内核 advisory lock，空/坏
 
 ### 后台主代理的 capability 审批进入统一 TUI 面板
 
-状态：OPEN P1；安全门工作正常，用户交互链未闭环
+状态：本地候选；改为直属父级在既有权限上限内自主裁决
 
 解决问题：一级 child 申请创建孙代理等管理员级能力时，直属主代理会调用
-`resolve_capability_requests(decision=grant)`；该 dangerous mutation 正确要求用户批准，但 background-main
-工作片目前只拿到 `APPROVAL_REQUIRED`，没有把 exact pending request 显示在当前 owner/thread 的 TUI
-审批面板。模型会反复尝试，用户却不知道需要自己决定。
+`resolve_capability_requests(decision=grant)`；旧 runtime policy 又把该父子控制动作标成 dangerous，导致
+background-main 只拿到 `APPROVAL_REQUIRED`。普通用户既不了解内部 run/path/tool，也不应替直属父级做
+本来就在父级权限上限内的编排决定，模型因而反复尝试而无法继续。
 
-待做：参考 会话运行时 与 终端交互 的 durable permission request，把 background-main 的 exact tool call、child、
-能力范围、原因和 owner/thread 身份投影到现有统一面板；批准或拒绝后唤醒原调用。断线、无消费者、跨 owner
-和过期 attempt 必须 fail closed。不得因为测试需要自动批准孙代理、降低 full-access 门或解析模型文字授权。
+当前候选：`resolve_capability_requests` 的 grant/deny 都按 mutating 父子控制执行；handler 内既有 direct-parent、
+owner wall、父级 workspace/write roots、Skill/Tool availability 仍是唯一硬上限，越界 grant 继续结构化拒绝。
+这不是取消具体危险工具的 exact approval，也不允许主代理给自己提权。focused 通过后需用 fresh TUI 复验
+“child 请求创建下一层 → 直属父级自主 grant → child 续跑”，同时验证跨 owner/越界请求仍失败。
+
+### durable wake 被重复孤儿扫描堵住
+
+状态：本地候选；真实线程栈已定位
+
+解决问题：`.10` 的 durable child wake 持续 ready，Gateway 日志反复发现 hard owner，但主代理没有提交
+thread lane。`py-spy` 证明 `bg-owner` worker 空闲，background-main supervisor 卡在
+`prepare_tick -> supervise_stalled_orphans -> RuntimeDB`。Gateway 已有独立 orphan reconciler，旧代码却在
+每个 owner scheduler 的准备阶段同步重复扫描；历史账多、磁盘 100% 时会长期饿死真正会话工作。
+
+当前候选：Gateway 调度调用 `prepare_tick` 时显式关闭 inline orphan supervision，只保留独立 reconciler；
+直接/嵌入式同步 scheduler 仍默认保留原恢复兜底。验收必须证明慢/阻塞 orphan 扫描不影响 ready lane，且
+独立 reconciler 仍能回收真实死亡 runner；不得用短超时误杀慢模型。
 
 ### 8G 测试机当前资源复测
 

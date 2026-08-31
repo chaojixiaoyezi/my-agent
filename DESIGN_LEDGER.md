@@ -1,5 +1,22 @@
 # DESIGN LEDGER
 
+## 2026-08-31 直属父级在继承权限上限内自主裁决，Gateway 恢复扫描不得堵住会话车道【状态：本地候选】
+
+- `resolve_capability_requests` 处理的是直属父级给 child 的结构化能力 grant/deny，不是父级给自己提权。
+  grant 已经同时经过 direct-parent、owner wall、父级 workspace/write roots 和可用 Skill/Tool 快照校验；只要
+  申请没有越过这些上限，父级模型应直接裁决并留下审计，不再把低层目录、工具或孙代理细节推给普通用户。
+  跨 owner、父级 workspace 外、父级自己没有的能力和真正危险的系统副作用继续由现有硬门拒绝或上抛，
+  不能因父级说“批准”而获得权限。该边界对应 会话运行时 child 继承父 turn permission profile/policy、但不能
+  扩大父级 authority 的做法。
+- 单 Gateway 已有独立 `_GatewayOrphanReconciler`，负责按 owner 有界扫描死亡 runner 和孤儿恢复。
+  background-main 的 `prepare_tick` 不得在提交 ready thread lane 前再次同步执行同一全量扫描；历史 owner/run
+  较多或磁盘变慢时，重复扫描会让 durable wake 明明 ready、`bg-owner` worker 却始终空闲。Gateway 路径只做
+  model-free 会话准备并提交 lane，独立恢复线程继续持有 crash recovery；非 Gateway 的同步 scheduler 仍保留
+  inline orphan supervision 兜底。不能用短墙钟杀 lane，因为健康慢模型可能长时间没有新输出。
+- 活着的 TUI 进程（包括仍留在 tmux 的 TUI）属于显式在线客户端，不按空闲时长自动回收；`/exit` 或进程终止
+  才释放本地 poller/HTTP/展示资源。IM connector 更不能按“多久没聊天”回收，后续只参考 通道运行时/长期助手 的
+  health、lease、reconnect 和明确 shutdown 做长驻验收；无消息不是失活事实。
+
 ## 2026-08-31 TUI 后台回复必须先成为 canonical history【状态：R117b/R117c 真 TUI 通过】
 
 - 对照 会话运行时 `会话运行时-rs/core/src/stream_events_utils.rs` 与 `session/inject.rs`：完成的 assistant response item

@@ -47,6 +47,16 @@ def _tool(agent: SimpleAgent):
     return ResolveCapabilityRequestsTool(agent)
 
 
+def test_parent_resolution_is_mutating_within_existing_authority() -> None:
+    """Parent grant/deny cannot trigger a duplicate end-user dangerous approval."""
+    from agent_py_agent.agent.core import ResolveCapabilityRequestsTool
+    from agent_py_agent.agent.tooling.models import tool_effect_for_runtime_policy
+
+    policy = ResolveCapabilityRequestsTool.runtime_policy
+    assert tool_effect_for_runtime_policy(policy, {"decision": "grant"}) == "mutating"
+    assert tool_effect_for_runtime_policy(policy, {"decision": "deny"}) == "mutating"
+
+
 def test_grant_resolves_request_and_extends_write_boundary():
     with tempfile.TemporaryDirectory() as td:
         agent, task, request = _agent_and_blocked_task(td)
