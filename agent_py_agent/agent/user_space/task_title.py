@@ -61,6 +61,8 @@ def looks_like_machine_id(value: str) -> bool:
         "run_",
         "gw-",
         "gw_",
+        "gwreq-",
+        "gwreq_",
         "req-",
         "req_",
         "task-",

@@ -45,8 +45,8 @@ def start_tui_gateway_preflight(config: TuiGatewayPreflight) -> threading.Thread
     return thread
 
 
-# LLM: wait 结果是 readiness 唯一事实；异常只转成类别，成功回调在 stop_event 未置位时执行一次。
-# 函数用途: 等待 Gateway 就绪，并把终态送回 TUI/worker 生命周期。
+# LLM: wait 结果是 readiness 唯一事实；后台线程只产生结果，状态切换必须投递回 Application loop 以免首帧丢失刷新。
+# 函数用途: 等待 Gateway 就绪，并把终态排队送回 TUI 事件循环。
 def _run_gateway_preflight(config: TuiGatewayPreflight) -> None:
     error_code = ""
     try:
@@ -57,19 +57,42 @@ def _run_gateway_preflight(config: TuiGatewayPreflight) -> None:
     except Exception as exc:  # noqa: BLE001 探活异常必须成为 typed 启动失败而不能杀后台线程
         alive = False
         error_code = type(exc).__name__
-    config.runtime.resolve_connection_check(
-        ok=bool(alive),
-        error_code=error_code or ("" if alive else "GATEWAY_NOT_READY"),
+    final_error_code = error_code or ("" if alive else "GATEWAY_NOT_READY")
+    loop = getattr(config.application, "loop", None)
+    if loop is not None and not bool(getattr(loop, "is_closed", lambda: False)()):
+        loop.call_soon_threadsafe(
+            lambda: _finish_gateway_preflight(
+                config,
+                alive=bool(alive),
+                error_code=final_error_code,
+            )
+        )
+        return
+    _finish_gateway_preflight(
+        config,
+        alive=bool(alive),
+        error_code=final_error_code,
     )
-    config.application.invalidate()
+
+
+# LLM: 这是 Gateway preflight 的唯一状态落点；必须在 Application loop 内先更新 runtime/启动 worker，再 invalidate 触发可见首帧。
+# 函数用途: 在 TUI 事件循环里落实连接成功或失败结果。
+def _finish_gateway_preflight(
+    config: TuiGatewayPreflight,
+    *,
+    alive: bool,
+    error_code: str,
+) -> None:
+    config.runtime.resolve_connection_check(ok=alive, error_code=error_code)
     if alive:
-        if not config.stop_event.is_set():
+        future = getattr(config.application, "future", None)
+        if not config.stop_event.is_set() and (future is None or not future.done()):
             config.on_ready()
+        config.application.invalidate()
         return
     config.stop_event.set()
-    loop = getattr(config.application, "loop", None)
-    if loop is not None:
-        loop.call_soon_threadsafe(lambda: _exit_failed_application(config.application))
+    config.application.invalidate()
+    _exit_failed_application(config.application)
 
 
 # LLM: 迟到失败不能覆盖用户已经退出的 Application future；只有当前 run 尚活跃时设置错误返回码。

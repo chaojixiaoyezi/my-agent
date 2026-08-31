@@ -110,6 +110,13 @@ def send_agent_guidance(
             "子代理正在切换执行回合，消息未发送；请稍后重试。",
         )
     dedupe_key = f"user-agent-guidance:{stable_id}"
+    child_thread_id = str(getattr(task, "agent_thread_id", "") or "").strip()
+    if not child_thread_id:
+        raise AgentControlError(
+            503,
+            "AGENT_THREAD_UNAVAILABLE",
+            "暂时无法确认子代理会话，消息未发送。",
+        )
     try:
         entry = store.append_guidance_once(
             {
@@ -120,8 +127,16 @@ def send_agent_guidance(
                 "priority": "normal",
                 "delivery": "next_turn",
                 "metadata": {
+                    "kind": "active_turn_user_input",
+                    "record_in_transcript": True,
+                    "thread_id": child_thread_id,
+                    "channel": str(getattr(scope, "channel", "") or "chat"),
+                    "conversation_id": str(
+                        getattr(scope, "conversation_id", "") or ""
+                    ),
                     "channel_message_id": stable_id,
                     "conversation_thread_id": str(getattr(thread, "thread_id", "") or ""),
+                    "agent_run_id": str(getattr(task, "id", "") or ""),
                     "expected_turn_id": expected_turn_id,
                     "source": "user_agent_control",
                 },

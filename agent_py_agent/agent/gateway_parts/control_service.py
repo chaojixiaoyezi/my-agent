@@ -2527,6 +2527,21 @@ def resolve_gateway_scope_agent(base_agent: object, scope: GatewayControlScope):
     return _request_agent_for_scope(base_agent, scope)
 
 
+# LLM: Passive disk projections need the same authenticated owner decision as active requests but
+# must not construct an Agent. The returned identity is the only authority callers may use to
+# locate an owner home; channel text and filesystem discovery cannot select another owner.
+# 函数用途: 只解析当前控制请求对应的精确 owner，不加载模型和运行时。
+def resolve_gateway_scope_owner(
+    base_agent: object,
+    scope: GatewayControlScope,
+):
+    from .request_worker import _resolve_request_owner_identity
+
+    if scope.resolved_owner is not None:
+        return scope.resolved_owner
+    return _resolve_request_owner_identity(base_agent, _scope_request_payload(scope))
+
+
 # LLM: TUI/Web passive status reads follow 会话运行时 residency: loaded owners
 # are queried in memory and cold owners stay cold. This function never records
 # activity or constructs an Agent; callers must not use it for writes/controls.
@@ -2535,14 +2550,9 @@ def resolve_loaded_gateway_scope_agent(
     base_agent: object,
     scope: GatewayControlScope,
 ):
-    from .request_worker import (
-        _resolve_loaded_request_agent_for_owner,
-        _resolve_request_owner_identity,
-    )
+    from .request_worker import _resolve_loaded_request_agent_for_owner
 
-    owner = scope.resolved_owner
-    if owner is None:
-        owner = _resolve_request_owner_identity(base_agent, _scope_request_payload(scope))
+    owner = resolve_gateway_scope_owner(base_agent, scope)
     return _resolve_loaded_request_agent_for_owner(base_agent, owner)
 
 
@@ -2587,6 +2597,8 @@ __all__ = [
     "execute_gateway_conversation_control",
     "reconcile_gateway_steer_delivery",
     "request_gateway_memory_curator_lifecycle",
+    "resolve_gateway_scope_owner",
     "resolve_gateway_scope_agent",
+    "resolve_loaded_gateway_scope_agent",
     "steer_active_conversation_if_running",
 ]

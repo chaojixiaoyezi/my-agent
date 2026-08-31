@@ -622,6 +622,9 @@ def _interim_reply_facts(
     return facts
 
 
+# LLM: 阶段回执里的子代理事实必须来自持久化 run 的 parent/root/depth/status；
+#   用户原始要求和模型先前文字都不能补造“协调代理/孙代理已经创建”等拓扑。
+# 函数用途: 汇总当前任务的子代理状态与真实父子关系，供无工具自然回执如实描述。
 def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[str, object]:
     task_id = _delegated_work_task_id(params)
     if not task_id:
@@ -648,7 +651,68 @@ def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[
         except ValueError:
             status = "UNKNOWN"
         status_counts[status] = status_counts.get(status, 0) + 1
-    return {"total": len(runs), "status_counts": dict(sorted(status_counts.items()))}
+    return {
+        "schema": "delegated_work.v2",
+        "authority": "subagent_store",
+        "total": len(runs),
+        "status_counts": dict(sorted(status_counts.items())),
+        "topology": _delegated_work_topology(task_id, runs),
+    }
+
+
+# LLM: topology 是 会话运行时 parent_thread_id/depth 同类的结构化投影；节点截断只影响
+#   展示细节，计数必须覆盖完整 run 集，且未知父级不能静默算作直属或后代。
+# 函数用途: 计算直属子代理、后代代理和未知父级数量，并提供有限节点样本给回复模型核对。
+def _delegated_work_topology(task_id: str, runs: list[object]) -> dict[str, object]:
+    run_ids = {
+        str(getattr(run, "id", "") or "").strip()
+        for run in runs
+        if str(getattr(run, "id", "") or "").strip()
+    }
+    direct_count = 0
+    descendant_count = 0
+    unknown_parent_count = 0
+    max_depth = 0
+    rows: list[dict[str, object]] = []
+    for run in runs:
+        run_id = str(getattr(run, "id", "") or "").strip()
+        parent_id = str(getattr(run, "parent_id", "") or "").strip()
+        try:
+            depth = max(0, int(getattr(run, "depth", 0) or 0))
+        except (TypeError, ValueError):
+            depth = 0
+        max_depth = max(max_depth, depth)
+        if parent_id == task_id:
+            parent_scope = "root"
+            direct_count += 1
+        elif parent_id in run_ids:
+            parent_scope = "delegated_agent"
+            descendant_count += 1
+        else:
+            parent_scope = "unknown"
+            unknown_parent_count += 1
+        if len(rows) < 32:
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "parent_run_id": parent_id,
+                    "parent_scope": parent_scope,
+                    "depth": depth,
+                    "agent_name": str(getattr(run, "agent_name", "") or "").strip(),
+                    "role": str(getattr(run, "role", "") or "").strip(),
+                    "status": str(getattr(run, "status", "") or "").strip(),
+                }
+            )
+    return {
+        "root_run_id": task_id,
+        "direct_child_count": direct_count,
+        "descendant_count": descendant_count,
+        "unknown_parent_count": unknown_parent_count,
+        "max_depth": max_depth,
+        "nested_delegation_observed": descendant_count > 0,
+        "nodes": rows,
+        "nodes_truncated": len(rows) < len(runs),
+    }
 
 
 def _delegated_work_task_id(params: ToolLoopExecuteParams) -> str:

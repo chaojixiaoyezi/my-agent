@@ -35,6 +35,9 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
     model_visible_context_tokens,
     preflight_context_pressure_response,
 )
+from agent_py_agent.agent.agent_core.runtime.conversation_state import (
+    conversation_runtime_state_section,
+)
 from agent_py_agent.agent.agent_core.tool_ir_compact import (
     compact_native_ir_to_token_budget,
     reclaim_oldest_native_ir_pairs,
@@ -55,6 +58,11 @@ from agent_py_agent.agent.backends.tool_ir import (
     CompactionSummary,
     ToolResult,
     UserTurn,
+)
+from agent_py_agent.agent.conversation.active_turn_compact import (
+    ActiveTurnArchiveCompactRequest,
+    compact_carried_active_turn_archive,
+    model_visible_active_turn_tool_calls,
 )
 from agent_py_agent.agent.conversation.authority import (
     AGENT_THREAD_ID_ATTR,
@@ -140,7 +148,9 @@ def _rec(agent, params, *, rnd, idx, cid, body):
 def _message_block_ids(messages):
     """(tool_use ids, tool_result ids) actually present in provider messages."""
     tool_use = {b["id"] for m in messages for b in m["content"] if b["type"] == "tool_use"}
-    tool_result = {b["tool_use_id"] for m in messages for b in m["content"] if b["type"] == "tool_result"}
+    tool_result = {
+        b["tool_use_id"] for m in messages for b in m["content"] if b["type"] == "tool_result"
+    }
     return tool_use, tool_result
 
 
@@ -165,7 +175,7 @@ def _record_large_write_calls(agent, params, *, start: int, stop: int, chars: in
             source_protocol=params.tool_protocol_snapshot.source_protocol,
             run_id=params.run_id,
             turn_id=f"{params.run_id}:round-{index}",
-            attempt_id=params.request_id,
+            attempt_id=params.attempt_id or params.request_id,
         )
         _record_tool_call(
             agent,
@@ -231,6 +241,124 @@ class _ContextCompactionSink:
     def write_conversation_compact_progress(self, value: dict[str, object]) -> bool:
         self.progress_rows.append(dict(value))
         return True
+
+
+def _carried_record(index: int, *, tool: str = "read_file") -> dict[str, object]:
+    call_id = f"carried-{index}"
+    parameters = {"tool": tool, "path": f"artifact-{index}.txt"}
+    return {
+        "call_id": call_id,
+        "scoped_call_id": f"run:{call_id}",
+        "tool": tool,
+        "ok": True,
+        "parameters": dict(parameters),
+        "model_parameters": dict(parameters),
+        "output_preview": f"result-{index}",
+        "tool_round": index,
+    }
+
+
+def test_active_turn_archive_compact_hides_only_committed_source_calls(tmp_path):
+    """完整工具账保持不变，模型只隐藏 thread 指针确认过的旧调用；孤儿候选无权隐藏。"""
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "active-turn-recovery",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(128_000)
+    agent.config.model_context_window_tokens = 128_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    records = [_carried_record(index) for index in range(1, 6)]
+    original_records = json.loads(json.dumps(records))
+    attrs = {
+        CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+        "conversation_thread_id": thread.thread_id,
+    }
+    progress: list[dict[str, object]] = []
+
+    result = compact_carried_active_turn_archive(
+        agent,
+        store,
+        thread,
+        records,
+        ActiveTurnArchiveCompactRequest(
+            task_attributes=attrs,
+            request_id="request-active-turn",
+            attempt_id="attempt-active-turn",
+            task_prompt="继续完成长任务并保留全部约束",
+            progress_callback=lambda value: progress.append(dict(value)),
+        ),
+    )
+
+    assert result.compacted is True
+    assert result.thread.compact_generation == 1
+    assert result.source_call_ids == ("carried-1",)
+    assert records == original_records
+    visible = model_visible_active_turn_tool_calls(agent, attrs, records)
+    assert [item["call_id"] for item in visible] == [
+        "carried-2",
+        "carried-3",
+        "carried-4",
+        "carried-5",
+    ]
+    assert [row["percent"] for row in progress] == [5, 20, 65, 82, 92, 100]
+    assert progress[-1]["generation"] == 1
+
+    checkpoint_path = tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
+    with checkpoint_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "schema": "conversation_compact_checkpoint.v2",
+                    "checkpoint_id": "orphan-generation-2",
+                    "previous_checkpoint_id": result.thread.compact_checkpoint_id,
+                    "thread_id": thread.thread_id,
+                    "generation": 2,
+                    "source_kind": "live_tool_ir",
+                    "source_tool_call_ids": ["carried-2"],
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    visible_after_orphan = model_visible_active_turn_tool_calls(agent, attrs, records)
+    assert [item["call_id"] for item in visible_after_orphan] == [
+        "carried-2",
+        "carried-3",
+        "carried-4",
+        "carried-5",
+    ]
+
+
+def test_reconstructed_runtime_uses_full_archive_but_compacted_model_projection():
+    """Compact 不能重置工具轮数或成功工具事实，也不能把已替代的旧正文再次喂给模型。"""
+
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
+        _reconstructed_runtime_state,
+    )
+
+    records = [_carried_record(index) for index in range(1, 5)]
+    state = _reconstructed_runtime_state(
+        records,
+        model_visible_records=records[-2:],
+    )
+
+    assert state.tool_rounds == 4
+    assert state.executed_tools == ["read_file"] * 4
+    assert state.loaded_tool_names == set()
+    rendered = "\n".join(state.tool_context)
+    assert "artifact-1.txt" not in rendered
+    assert "artifact-2.txt" not in rendered
+    assert "artifact-3.txt" in rendered
+    assert "artifact-4.txt" in rendered
 
 
 # === Step 3: window reclaim → IR integer-pair drop, no orphans ================
@@ -362,9 +490,7 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     build_tool_loop_prompt(agent, params)
 
     assert len(params.tool_ir_history) < before
-    remaining_results = [
-        item for item in params.tool_ir_history if isinstance(item, ToolResult)
-    ]
+    remaining_results = [item for item in params.tool_ir_history if isinstance(item, ToolResult)]
     assert remaining_results == []
     assert "tool_context_window_overflow" not in params.live_archive_state
     assert (
@@ -384,9 +510,7 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     tool_use, _ = _message_block_ids(messages)
     assert "toolu_1" not in tool_use
     assert "toolu_8" not in tool_use
-    summaries = [
-        item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
-    ]
+    summaries = [item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]
     assert len(summaries) == 1
     assert len(agent.backend.calls) == 1
     assert "真实 rg=/opt/reference/rg" in summaries[0].text
@@ -409,23 +533,33 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
     )
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
 
-    assert model_visible_context_tokens(agent, params, "base-prompt") >= 9_000
+    raw_before = model_visible_context_tokens(agent, params, "base-prompt")
+    assert raw_before >= 9_000
+    params.live_archive_state["_provider_context_observation"] = {
+        "schema": "provider_context_observation.v1",
+        "raw_estimated_tokens": raw_before,
+        "provider_input_tokens": raw_before,
+    }
 
     build_tool_loop_prompt(agent, params)
 
     after = model_visible_context_tokens(agent, params, "base-prompt")
     assert after < 9_000
+    assert "_provider_context_observation" not in params.live_archive_state
     messages = _native_provider_messages(agent, params)
     assert messages is not None
     # window marker 会在本轮作为 runtime guidance 进入真实 native messages；它必须已被
     # 最终预算计入，而不是 compact 后偷偷把请求重新顶过 90% 线。
-    assert estimate_tokens(
-        {
-            "initial_user_prompt": "base-prompt",
-            "messages": messages,
-            "tools": [],
-        }
-    ) < 9_000
+    assert (
+        estimate_tokens(
+            {
+                "initial_user_prompt": "base-prompt",
+                "messages": messages,
+                "tools": [],
+            }
+        )
+        < 9_000
+    )
     _assert_no_orphans(messages)
     tool_use, _ = _message_block_ids(messages)
     assert "write_1" not in tool_use
@@ -598,6 +732,8 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
     agent.backend.generate = thin_summary
     agent.config.model_context_window_tokens = 10_000
     agent.config.memory_compact_auto_trigger_percent = 90
+    # 该用例专门验证 live-tool 候选；提高恢复目标，避免基线历史先转交 transcript Compact。
+    agent.config.memory_compact_recovery_target_percent = 80
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -627,9 +763,73 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
     assert updated is not None and updated.compact_generation == 1
     assert sink.progress_rows[-1]["phase"] == "completed"
     assert sink.progress_rows[-1]["after_tokens"] <= 8_100
-    assert preflight_context_pressure_response(
-        SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=10)
-    ) is None
+    assert (
+        preflight_context_pressure_response(
+            SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=10)
+        )
+        is None
+    )
+    _assert_no_orphans(_native_provider_messages(agent, params))
+
+
+def test_native_window_summary_removes_covered_assistant_tool_turn_text(tmp_path):
+    """工具对的长思考正文已由完整摘要覆盖时必须同轮回收，不能留下空壳顶爆窗口。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "covered-assistant-tool-turns",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(
+        _params(),
+        save=True,
+        effective_on_chunk=(sink := _ContextCompactionSink()),
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+    )
+    for index in range(1, 7):
+        _rec(
+            agent,
+            params,
+            rnd=index,
+            idx=1,
+            cid=f"thought_{index}",
+            body="done",
+        )
+    for item in params.tool_ir_history:
+        if isinstance(item, AssistantTurn) and item.tool_calls:
+            object.__setattr__(
+                item, "text", f"covered-round-{item.tool_calls[0].call_id}-" + "思" * 8_000
+            )
+
+    prompt = build_tool_loop_prompt(agent, params)
+
+    updated = store.load_thread(thread.thread_id)
+    assert updated is not None and updated.compact_generation == 1
+    assert sink.progress_rows[-1]["phase"] == "completed"
+    assert sink.progress_rows[-1]["after_tokens"] <= 8_100
+    assert not any(
+        isinstance(item, AssistantTurn) and str(item.text or "").startswith("covered-round-")
+        for item in params.tool_ir_history
+    )
+    assert (
+        preflight_context_pressure_response(
+            SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=6)
+        )
+        is None
+    )
     _assert_no_orphans(_native_provider_messages(agent, params))
 
 
@@ -649,6 +849,8 @@ def test_native_window_rolls_back_summary_that_still_exceeds_trigger(tmp_path):
     agent.backend.generate = lambda *_args, **_kwargs: SimpleNamespace(text="S" * 12_000)
     agent.config.model_context_window_tokens = 10_000
     agent.config.memory_compact_auto_trigger_percent = 90
+    # 该用例专门验证候选回滚；提高恢复目标，确保先进入 live-tool 候选分支。
+    agent.config.memory_compact_recovery_target_percent = 80
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -729,13 +931,12 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
     assert first is not None
     assert len(sink.rows) == 1
     assert sink.rows[0]["generation"] == first.compact_generation == 1
+    assert '"compact_generation":1' in conversation_runtime_state_section(params)
     assert first.compact_source_messages == 0
     assert first.compact_source_tool_pairs > 0
     assert first.compact_checkpoint_id
     assert "真实 rg=/opt/reference/rg" in first.summary
-    checkpoint_path = (
-        tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
-    )
+    checkpoint_path = tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
     checkpoints = [
         json.loads(line)
         for line in checkpoint_path.read_text(encoding="utf-8").splitlines()
@@ -756,12 +957,72 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
     assert second is not None
     assert len(sink.rows) == 2
     assert sink.rows[-1]["generation"] == second.compact_generation == 2
+    assert '"compact_generation":2' in conversation_runtime_state_section(params)
     assert second.compact_source_tool_pairs > first.compact_source_tool_pairs
     assert agent.backend.calls[-1][0] == "x"
     final_blocks = agent.backend.calls[-1][1][-1]["content"]
     final_text = "".join(str(block.get("text") or "") for block in final_blocks)
     assert first.summary in final_text
     assert "摘要-1" not in str(agent.backend.calls[-1][1][:-1])
+
+
+def test_background_main_run_params_commit_live_compact_despite_save_false(tmp_path):
+    """生产后台主代理参数虽由外层保存回复，仍须提交同一会话 Compact。"""
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _run_params,
+    )
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "background-live-compact",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    run_params = _run_params(
+        thread.thread_id,
+        BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            task_id="task-background",
+            reason="scheduled_progress_report",
+        ),
+    )
+    sink = _ContextCompactionSink()
+    params = replace(
+        _params(),
+        save=run_params.save,
+        source=run_params.source,
+        request_id=run_params.request_id,
+        run_id=run_params.run_id,
+        task_id=run_params.task_id,
+        attempt_id="background-attempt",
+        context_scope=run_params.context_scope,
+        task_attributes=run_params.task_attributes,
+        effective_on_chunk=sink,
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+
+    build_tool_loop_prompt(agent, params)
+
+    updated = store.load_thread(thread.thread_id)
+    assert run_params.save is False
+    assert run_params.task_attributes is not None
+    assert run_params.task_attributes[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] is True
+    assert updated is not None
+    assert updated.compact_generation == 1
+    assert updated.compact_checkpoint_id
+    assert sink.rows[-1]["generation"] == 1
+    assert sink.progress_rows[-1]["phase"] == "completed"
 
 
 def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_path):
@@ -796,9 +1057,7 @@ def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_p
     build_tool_loop_prompt(agent, params)
 
     updated = store.load_thread(thread.thread_id)
-    summaries = [
-        item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
-    ]
+    summaries = [item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]
     assert updated is not None
     assert updated.compact_generation == 1
     assert updated.compact_consecutive_failures == 0
@@ -902,12 +1161,8 @@ def test_persistent_native_window_restores_ir_when_compact_cas_fails(
     assert updated.compact_generation == 0
     assert updated.compact_checkpoint_id == ""
     assert updated.compact_consecutive_failures == 1
-    checkpoint_path = (
-        tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
-    )
-    orphan_candidate = json.loads(
-        checkpoint_path.read_text(encoding="utf-8").splitlines()[-1]
-    )
+    checkpoint_path = tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
+    orphan_candidate = json.loads(checkpoint_path.read_text(encoding="utf-8").splitlines()[-1])
     assert orphan_candidate["status"] == "validated_candidate"
     assert orphan_candidate["checkpoint_id"] != updated.compact_checkpoint_id
     assert sink.progress_rows[-1]["stage"] == "failed"
@@ -967,9 +1222,7 @@ def test_shared_native_window_reuses_semantic_summary_across_repeated_pressure(t
 
     build_tool_loop_prompt(agent, params)
 
-    summaries = [
-        item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
-    ]
+    summaries = [item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]
     assert len(summaries) == 1
     assert "真实 rg=/opt/reference/rg" in summaries[0].text
     assert len(agent.backend.calls) == 1
@@ -982,18 +1235,14 @@ def test_shared_native_window_reuses_semantic_summary_across_repeated_pressure(t
     build_tool_loop_prompt(agent, params)
 
     assert len(agent.backend.calls) == 1
-    assert str(_native_provider_messages(agent, params)).count(
-        "真实 rg=/opt/reference/rg"
-    ) == 1
+    assert str(_native_provider_messages(agent, params)).count("真实 rg=/opt/reference/rg") == 1
 
     _record_large_write_calls(agent, params, start=11, stop=20, chars=10_000)
     build_tool_loop_prompt(agent, params)
 
     assert len(agent.backend.calls) == 2
     assert "摘要-1" in str(agent.backend.calls[1][1])
-    summaries = [
-        item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
-    ]
+    summaries = [item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]
     assert len(summaries) == 1
     assert "摘要-2" in summaries[0].text
     assert "摘要-1" not in summaries[0].text
@@ -1021,9 +1270,7 @@ def test_second_compact_replaces_thread_summary_but_preserves_carried_handoff():
     assert replace_compaction_summary_ir(params, "summary-generation-1") is True
     assert replace_compaction_summary_ir(params, "summary-generation-2") is True
 
-    summaries = [
-        item for item in params.tool_ir_history if isinstance(item, CompactionSummary)
-    ]
+    summaries = [item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]
     assert len(summaries) == 2
     assert summaries[0].text.startswith("[active-turn-tool-handoff]")
     assert summaries[1].text == "summary-generation-2"
@@ -1113,12 +1360,8 @@ def test_authoritative_no_save_provider_overflow_commits_same_conversation_compa
     updated = store.load_thread(thread.thread_id)
     assert updated is not None
     assert updated.compact_generation == 1
-    checkpoint_path = (
-        tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
-    )
-    checkpoint = json.loads(
-        checkpoint_path.read_text(encoding="utf-8").splitlines()[-1]
-    )
+    checkpoint_path = tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8").splitlines()[-1])
     assert checkpoint["source_kind"] == "live_tool_ir"
     assert checkpoint["forced"] is True
     assert checkpoint["checkpoint_id"] == updated.compact_checkpoint_id
@@ -1161,9 +1404,15 @@ def test_tool_use_id_mapping_ignores_unparseable_entries(tmp_path):
     params = _params()
     _rec(agent, params, rnd=1, idx=1, cid="cid_X", body="X")
     # entries with no [tool-record round= index=] marker map to nothing.
-    assert tool_use_ids_for_tool_records(params.tool_ir_history, ["garbage", "[tool-system]\nfoo"]) == set()
+    assert (
+        tool_use_ids_for_tool_records(params.tool_ir_history, ["garbage", "[tool-system]\nfoo"])
+        == set()
+    )
     # out-of-range index is skipped, not mis-mapped.
-    assert tool_use_ids_for_tool_records(params.tool_ir_history, ["[tool-record round=1 index=9]"]) == set()
+    assert (
+        tool_use_ids_for_tool_records(params.tool_ir_history, ["[tool-record round=1 index=9]"])
+        == set()
+    )
 
 
 # === Step 4: orphan sweep — stub for orphan tool_use =========================
@@ -1175,7 +1424,12 @@ def test_sweep_stubs_orphan_tool_use_without_dropping_assistant_text():
             "role": "assistant",
             "content": [
                 {"type": "text", "text": "推理过程"},
-                {"type": "tool_use", "id": "tu_orphan", "name": "read_file", "input": {"path": "a"}},
+                {
+                    "type": "tool_use",
+                    "id": "tu_orphan",
+                    "name": "read_file",
+                    "input": {"path": "a"},
+                },
             ],
         }
     ]
@@ -1203,7 +1457,10 @@ def test_sweep_stubs_only_missing_of_multiple_tool_use():
                 {"type": "tool_use", "id": "no_result", "name": "r", "input": {}},
             ],
         },
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "has_result", "content": "ok"}]},
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "has_result", "content": "ok"}],
+        },
     ]
     out = strip_orphaned_tool_blocks(messages)
     _assert_no_orphans(out)
@@ -1218,13 +1475,21 @@ def test_sweep_stubs_only_missing_of_multiple_tool_use():
 
 
 def test_sweep_strips_orphan_tool_result_and_removes_empty_user():
-    messages = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "ghost", "content": "x"}]}]
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "ghost", "content": "x"}],
+        }
+    ]
     assert strip_orphaned_tool_blocks(messages) == []
 
 
 def test_sweep_strips_only_orphan_result_keeps_sibling():
     messages = [
-        {"role": "assistant", "content": [{"type": "tool_use", "id": "real", "name": "r", "input": {}}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "real", "name": "r", "input": {}}],
+        },
         {
             "role": "user",
             "content": [
@@ -1241,7 +1506,10 @@ def test_sweep_strips_only_orphan_result_keeps_sibling():
 
 def test_sweep_leaves_well_paired_messages_unchanged():
     messages = [
-        {"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "r", "input": {}}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "a", "name": "r", "input": {}}],
+        },
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a", "content": "ok"}]},
     ]
     assert strip_orphaned_tool_blocks(messages) == messages
@@ -1308,7 +1576,9 @@ def test_outbound_boundary_strips_orphan_tool_result(tmp_path):
     messages = _native_provider_messages(agent, params)
 
     _assert_no_orphans(messages)
-    result_ids = {b["tool_use_id"] for m in messages for b in m["content"] if b["type"] == "tool_result"}
+    result_ids = {
+        b["tool_use_id"] for m in messages for b in m["content"] if b["type"] == "tool_result"
+    }
     assert "ghost" not in result_ids and "kept" in result_ids
 
 
@@ -1329,5 +1599,10 @@ def test_to_provider_messages_stays_pure_translation():
     messages = AnthropicMessageAdapter().to_provider_messages(history)
     # no synthesized stub here: pure translation leaves the lone tool_use as-is.
     assert messages == [
-        {"role": "assistant", "content": [{"type": "tool_use", "id": "solo", "name": "read_file", "input": {"path": "x"}}]}
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "solo", "name": "read_file", "input": {"path": "x"}}
+            ],
+        }
     ]

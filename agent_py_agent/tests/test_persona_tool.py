@@ -367,6 +367,55 @@ def test_update_persona_batch_does_not_require_natural_language_quotes(tmp_path)
     assert "回答偏好:尽量简洁" in content
 
 
+def test_update_persona_rate_limit_is_isolated_per_owner(tmp_path):
+    (tmp_path / "owner-a").mkdir()
+    (tmp_path / "owner-b").mkdir()
+    owner_a, _soul_a, user_a, _agents_a = _agent_with_paths(tmp_path / "owner-a")
+    owner_b, _soul_b, user_b, _agents_b = _agent_with_paths(tmp_path / "owner-b")
+    tool_a = UpdatePersonaTool(owner_a)
+    tool_b = UpdatePersonaTool(owner_b)
+
+    for index in range(3):
+        result = tool_a.execute(
+            {"target": "user", "content": f"A用户偏好{index}:值{index}"}
+        )
+        assert result.ok is True
+
+    other_owner = tool_b.execute(
+        {"target": "user", "content": "B用户偏好:不受A用户限频影响"}
+    )
+    limited = tool_a.execute({"target": "user", "content": "A用户偏好4:应被限频"})
+
+    assert other_owner.ok is True
+    assert "B用户偏好:不受A用户限频影响" in user_b.read_text(encoding="utf-8")
+    assert limited.ok is False
+    assert limited.error_code == "PERSONA_UPDATE_RATE_LIMITED"
+    assert limited.effect_outcome == "not_started"
+    assert "A用户偏好4:应被限频" not in user_a.read_text(encoding="utf-8")
+
+
+def test_update_persona_rate_limit_is_terminal_not_unknown(tmp_path):
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    tool = UpdatePersonaTool(agent)
+    for index in range(3):
+        assert tool.execute(
+            {"target": "user", "content": f"沟通偏好{index}:值{index}"}
+        ).ok
+
+    execution = execute_canonical_test_call(
+        tmp_path,
+        tools={"update_persona": tool},
+        tool_name="update_persona",
+        arguments={"target": "user", "content": "沟通偏好4:应被限频"},
+    )
+
+    assert execution.result.ok is False
+    assert execution.result.error_code == "PERSONA_UPDATE_RATE_LIMITED"
+    assert execution.result.effect_outcome == "not_started"
+    assert execution.result.status == "failed"
+    assert "沟通偏好4:应被限频" not in user.read_text(encoding="utf-8")
+
+
 def test_append_persona_line_no_trailing_newline(tmp_path):
     p = tmp_path / "x.md"
     p.write_text("# USER", encoding="utf-8")  # 无末尾换行

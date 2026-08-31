@@ -1,5 +1,237 @@
 # TESTS
 
+## 2026-08-31 R116/R117 provider 校准与后台 final canonical history
+
+- 本地新增/更新 provider observation 回归，覆盖稳定指纹、动态消息不致失效、Compact generation CAS、缺失
+  usage 清理、主/child exact thread 写入、保守 ratio floor 与 mismatch 回退。background final 回归使用真实
+  `DeliveryService` 且没有 TUI adapter，要求 channel=`tui` 返回 `not_applicable` 仍只提交一条 final；相同 wake
+  重试不重复，下一 `_gateway_conversation_history` 能读回正文。
+- R116 真 TUI：
+  - `tmux attach -t ma-r116-110-u323-background-context-calibration`：8 名 child 全 DONE、主 compact 0；立即
+    追问 usage 为 input 8,061 / cache-read 32,418。
+  - `tmux attach -t ma-r116-110-u324-four-wake-regression`：4 名 child 全 DONE，主上下文自然越 90%，只发生
+    一次真实 Compact generation 0→1 并继续最终回复。
+- R117 首次 `ma-r117-110-u325-background-final-continuity` 不计通过：Gateway cwd 在旧
+  `/root/my-agent-src`，运行模块 schema v7，遮蔽已安装 wheel；raw messages 仍缺 final。这一负样本要求部署
+  验收除进程/端口外必须核对 cwd、module source 与 schema。
+- R117b 真通过：`tmux attach -t ma-r117b-110-u326-final-history-proof`。两个 child 分别交付 marker
+  `DNS-B731`/`SSE-C942` 的 421/629 行报告，main 写出 357 行 `final_history_proof.md` 并真实 Compact 一次。
+  在发送追问前读取 raw thread，确认 schema v8、message_count=11、6 条 background commentary、恰好 1 条
+  background final、notice 1 条；追问随后准确复述文件、marker 与行数。
+- R117 wheel SHA-256 为
+  `92698066f1c3d82c9fdae6c250d977f4d3b371326767307903fc619f17881b15`；唯一 Gateway
+  `ma-gateway-r117b-110-wheel-runtime` 从 `/root` 运行、MiniMax-M2.7、127.0.0.1:8420。
+
+## 2026-08-30 R114u/R114v Compact 公平让出与中性 service cwd
+
+- 真实旧失败：`.10` `r114r-u305` 在一个后台 active turn 连续推进 13 代 Compact；旧代码在单 scheduler slice
+  完成第 8 代后抛普通 RuntimeError，claim 被假记 failed，下一轮又从未消费 wake 继续。上下文最终没有丢，
+  但日志、Working、policy failure 和恢复判断被污染。
+- 新回归 `test_background_compact_slice_yields_after_eight_progressful_generations` 精确要求前 8 次每次 generation
+  单调前进，第 8 次后只发 `_BackgroundCompactSliceYield`；
+  `test_background_scheduler_treats_compact_slice_yield_as_clean_continuation` 要求 claim=`finished`、源 wake 保持
+  未处理、无 policy failure。普通异常/无 generation 进展仍按原合同失败，不能借控制信号吞 bug。
+- `test_gateway_commands.py` 同时锁定 systemd `WorkingDirectory` 与 launchd cwd 都使用
+  `<MY_AGENT_HOME>/service-cwd`，而非测试/安装时 checkout；启动参数和 config 路径不变。
+- 本轮全部变更测试文件已统一定向 pytest 通过。wheel
+  `41f752dae9894e57ef5a38fe331a399598f99ff1cdc1616dad56ffffd11138a4` 部署后，唯一 Gateway
+  `ma-gateway-r114u-110-wheel` 从 `/root`/site-packages 启动。重启前 GORM 任务有 7 名 live child；日志显示
+  `running_reclaimed=7, orphans_revived=7`，原 roster 无重复并继续收敛。fresh 自然跨 8 代样本仍在长任务矩阵
+  观察，不能只用单测或旧失败冒充真机通过。
+
+## 2026-08-30 R114t pending cwd 与首批派工路径
+
+- 真实失败基线：`.10` `ma-r114r-110-u305-sequential-long` 首轮 prompt 明示 owner home，首批 7 个 child
+  goal 全部复制 `/root/.my-agent/owners/.../r114r-u305/bbb`；晋升后的 main `working_dir` 已是 canonical
+  `tasks/.../gwreq-...`，child 因此得到 `WRITE_FORBIDDEN` 并反复申请能力。该样本证明安全门通过、放置语义失败。
+- 本地回归覆盖 pending Workspace Context 不再含 owner 绝对根、只说明相对路径与首个工作工具固定 cwd；
+  pending Main Context Bundle 的模型短投影不泄露 `primary_workspace_root/my_agent_home/context_bundle_json`
+  的绝对宿主路径，但 canonical bundle payload 仍保留原值供内部恢复；`gwreq-*` 被识别为机器 ID。
+- 命令：
+  `python3 -m pytest agent_py_agent/tests/test_prompting_builder.py agent_py_agent/tests/test_main_context_bundle_contract.py agent_py_agent/tests/test_home_layout.py -q --tb=short`
+  ，结果 94 passed；相关 Ruff 与 PyCompile 通过。
+- 真 TUI gate：fresh owner 只输入一次多 child 长任务，首个模型 prompt 不得出现 owner 绝对根；首次
+  `create_subagents` 的 goal 使用相对路径或 canonical task root，所有 child 的 cwd/写根/产物同根，路径拒绝
+  与无意义 capability request 为 0；任务目录名不得直接等于 `gwreq-*`。
+- 真 TUI 结果：`.10` `ma-r114t-110-u313-cwd-subagents-wheel` 的 6 名 child 首批 goal 使用相对路径，main 与
+  child 均落同一可读 task root；owner-root 泄漏、`WRITE_FORBIDDEN` 和路径型 capability request 为 0。
+  `bbb/` 真实生成 engine/enemies/levels/mario/ui/index.html，后续同 thread 再派 child 补 README；手动 Compact
+  generation 1 后仍准确召回原路径和关卡事实。
+
+## 2026-08-30 R114s Persona 写入限频 owner 隔离
+
+- 真实失败样本：`.10` u306/u307 共用唯一 Gateway 并行运行。u306 模型先后发出三个合法
+  `update_persona`，前两个写入成功，第三个“界面颜色偏好：深绿色”被拒；runtime operation 的
+  `unknown_reason=effect_outcome_unknown:PERSONA_UPDATE_RATE_LIMITED`。u307 的写入发生在同一 30 秒窗口，
+  证明旧进程级计数把不同 owner 串到同一个配额，并非模型没调用或文件路径越界。
+- focused 新增两层覆盖：owner-a 连续三次写满额度后 owner-b 第一次仍成功；owner-a 第四次被拒且
+  `effect_outcome=not_started`。同一结果再经过 canonical tool runtime，必须保留专用 code、failed 状态和
+  明确未执行，不得升级为 UNKNOWN/DIRTY。错误 taxonomy 另断言可退避重试。
+- 本地执行：
+
+  ```bash
+  python3 -m pytest agent_py_agent/tests/test_persona_tool.py \
+    agent_py_agent/tests/test_agent_contracts.py::test_error_taxonomy_uses_explicit_codes_only \
+    agent_py_agent/tests/test_recovery_code_policy.py \
+    agent_py_agent/tests/test_tool_operation_idempotency.py::test_failed_result_is_replayed_exactly \
+    -q --tb=short
+  ```
+
+  结果 38 项通过，相关 Ruff 通过。`.10` 唯一 Gateway 的
+  `ma-r114s-110-u310-persona-a` / `u311-persona-b` 各完成三次真实写入，runtime.db 六条
+  `update_persona` operation 全部 `SUCCEEDED`；两份 `USER.md` 各有且只有自己的三条事实。新的
+  `u310-persona-recall` / `u311-persona-recall` 不调用读取工具，分别准确召回三项且无交叉，真 TUI gate 通过。
+
+## 2026-08-30 R114r 跨工作片 active-turn Compact
+
+- 真实失败样本：`.10` `ma-r114o-110-u299-pdf-skill` 在同一 request 累计 73 个主代理工具调用，archive index
+  约 220k 字符、external outputs 约 420k bytes；`/context` 曾为约 104.3k/128k 且 `compact 0`，后续工作片
+  又无 generation 地回落到约 66.9k。该样本用来区分“终态 fold”与“当前 turn 被暗中缩短”。
+- 新增合同覆盖：真实 checkpoint/CAS 后只隐藏已提交的 exact source call，保留近期调用；手工追加但未被
+  thread 指针引用的下一代孤儿候选不能隐藏任何记录；完整 archive 仍恢复全部 tool rounds 与 executed tools，
+  model projection 不再包含旧正文。
+- 前台 Gateway 与后台 main 各覆盖一次“provider overflow、transcript 暂无可压消息、active-turn archive
+  推进 generation、同一 request 原地重试”的路径；第二次 `RunParams.carried_archive_tool_calls` 仍是完整列表，
+  防止 Compact 重置一次性工具、预算或副作用事实。
+- 当前 5 条新增定向用例与 PyCompile/Ruff 已通过。真 TUI gate：部署 `.10` 唯一 Gateway 后，用 fresh
+  MiniMax-M2.7 长多子代理任务自然跨越多个工作片；必须看到 Compact 动画与 `compact 0 -> 1`，上下文降到
+  恢复目标附近，Todo/child/插话/工具事实不重放，后续模型账继续有 cache-read，最终回复和产物完整。
+- 真 TUI 结果：`ma-r114t-110-u314-architecture-research-long` 的 8 名 child 全部 DONE，main 跨 5 个后台工作
+  片完成 367 行总报告并直接 final。Compact ledger 三代分别是 transcript `25,430→10,157`、live-tool
+  `98,767→890`、live-tool `17,509→12,932`，屏幕精确显示 `compact 3`。八份分报告、直属终态、Todo、final
+  都保留；其中 终端交互 只有 85 行且明确标记未找到代码，是被测任务内容缺口，不由测试者补写。
+- provider usage 账合计 107 次物理调用：普通 input 487,739、cache-write 802,831、cache-read 3,172,988、
+  output 76,826。只按用户给的输入价格计算，普通/缓存价 5/0.1 与 5/1 时分别比全按普通输入省约 69.66% 和
+  56.87%；这些数字来自 `conversations/model_usage/*.jsonl`，不是 TUI Context 估算。
+
+## 2026-08-30 R114q 后台记忆工具连续性
+
+- 真实失败样本：`.10` `ma-r114o-110-u300-memory-a` 的首轮已在当前 owner 的 `USER.md` 写入“青玉7309”、
+  “先结论后证据”和“偏好深绿色”；后台整合轮却因快照没有 `remember/update_persona`，尝试用 shell 读取受保护
+  人格文件后错误汇报未保存。
+- 定向合同：`test_subagent_lifecycle_continuation_keeps_owner_memory_tools` 断言 child 生命周期唤醒仍保留两项
+  owner 记忆工具；整链用例再实例化真实 `SimpleAgent`，断言 policy、registry 冻结快照和 provider-visible
+  schema 都包含 `skill_search/remember/update_persona`。后续用 fresh TUI 在等待 child 时插入一条新偏好，
+  再由同一 owner 的新会话回读验证；若仍发生协议越界，runtime event 必须给出 exact 工具快照证据。
+- 真 TUI 结果：`ma-r114t-110-u316-managed-service-skill-memory` 自然调用 Skill、创建 4 名 child，受管 Python
+  服务实际监听 `0.0.0.0:18086`，根路径 HTTP 200；独立 tester 两分钟后写出复查报告。main 后台整合轮将三项
+  长期偏好写入当前 owner `USER.md`，其它 owner 和 SOUL 未改；最终回复直接显示、Working 撤下。
+
+## 2026-08-30 R114o TUI 首帧 readiness 竞态
+
+- focused：`python3 -m pytest agent_py_agent/tests/test_tui_preflight.py agent_py_agent/tests/test_tui_runtime.py agent_py_agent/tests/test_tui_threading.py -q --tb=short`，45 条通过。
+- 新增 deferred-loop 用例：模拟 Gateway 瞬时就绪但 UI loop 尚未消费回调，断言后台线程
+  不直接启动 worker/刷新；loop drain 后再同一帧清除 connection block、启动 worker 并
+  invalidate 一次。
+- 真 TUI gate：唯一 Gateway 已经运行时新开多个 scoped owner TUI，不输入任何键，
+  3–4 秒内必须自动显示 welcome/输入框，不得停在“正在启动交互界面”。
+- 真 TUI 结果：`ma-r114o-110-u296-*` 至 `u303-*` 共 8 个 owner 同时 fresh 启动，完全
+  不按键等待 5 秒后 8/8 自动显示 welcome 和输入框，真实验收通过。
+
+## 2026-08-30 R114n Compact 恢复余量
+
+- 真实失败样本来自 `ma-r114l-110-u295-compact-research-long`：八名 child 全部 DONE，主代理自然整合并 final，
+  但约 119.4k→100.1k 后很快又到 115.4k，再压到 94.7k，最终共 `compact 3`。终态正确，成本和等待体验不佳。
+- 本地新增/更新覆盖：默认恢复目标 60%；128k/90%/11.52k 尾部得到 76.8k；较低触发线仍以
+  trigger-minus-tail 为上界；配置缺省、合法、非法和 25--80 边界；已完成前缀吃掉恢复余量时跳过 live summary，
+  仍由 transcript Compact 处理；显式 80% fixture 继续覆盖 live 候选成功和过大摘要回滚。
+- 定向命令：
+
+  ```bash
+  python3 -m pytest agent_py_agent/tests/test_memory_config.py \
+    agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py \
+    agent_py_agent/tests/test_gateway_conversation_compact.py \
+    agent_py_agent/tests/test_background_main_agent_runtime.py -q --tb=short
+  ```
+
+  结果全部通过（既有 2 项 xfail 保留）。下一 wheel 必须用 MiniMax-M2.7 fresh 长 TUI 证明：首次 Compact 后
+  provider-visible 输入不高于约 60%，同一普通大报告不会立刻生成下一代，任务/子代理/最终回复仍完整。
+- R114t u314 真 TUI 的三代 checkpoint 分别替换 transcript 与两段不同 active-turn source；每代 source
+  projection 都低于 recovery target，后续增长来自新的报告读取和整合输出，而非同一 90% 贴线候选反复提交。
+  该样本通过恢复余量合同，但仍保留“最终新正文把只读 Context 推回 113k”的观察，不能把最终显示值当作
+  Compact 后 wire input。
+
+## 2026-08-30 R114m search_text 默认正则
+
+- 对照 会话运行时 的 `rg`、终端交互 `GrepTool` 与 任务运行时 `grep`，`search_text` 在省略 `literal` 时改为
+  ripgrep 正则；`literal=true` 仍提供精确普通文本搜索。focused 同时验证默认 alternation 命中、显式 literal
+  空结果、rg/Python 两种 no-match envelope 和 schema 默认值。
+- 本地执行：
+
+  ```bash
+  python3 -m pytest agent_py_agent/tests/test_tools/test_filesystem_tools.py \
+    agent_py_agent/tests/test_core_tools_precise_schema.py -q --tb=short
+  ruff check agent_py_agent/agent/tooling/_filesystem_search.py \
+    agent_py_agent/agent/tooling/_filesystem_search_models.py \
+    agent_py_agent/tests/test_tools/test_filesystem_tools.py \
+    agent_py_agent/tests/test_core_tools_precise_schema.py
+  ```
+
+  58 项全部通过；下一 wheel 用真实 MiniMax-M2.7 TUI 复现原 `A|B` 场景。
+
+## 2026-08-30 R114l 后台主代理 Compact 原地续跑
+
+- 新增长 assistant tool-turn 回归：六轮工具调用各带 8,000 字符思考正文，完整 live handoff 生成后必须删除
+  被覆盖的 assistant/tool/result 整轮，落同一 ConversationThread generation，并使完整 provider preflight
+  回到 recovery target 以下；默认无摘要的 pair window 行为和 UserTurn 保留测试继续通过。
+- 新增后台 main overflow 回归：首轮返回 `context_overflow` 且已经完成一个工具；外层必须强制 transcript
+  Compact、把 context generation 从 0 刷到 1、携带该工具 archive 与相同 continuation injection，在同一
+  scheduler slice 第二次调用成功。没有 generation 或结构化进展时仍有界失败，不能靠下一次 policy 空转。
+- 本地执行：
+
+  ```bash
+  python3 -m pytest agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py -q --tb=short
+  python3 -m pytest agent_py_agent/tests/test_background_main_agent_runtime.py -q --tb=short
+  ruff check agent_py_agent/agent/conversation/runtime.py \
+    agent_py_agent/agent/agent_core/tool_ir_history.py \
+    agent_py_agent/agent/agent_core/tool_ir_compact.py \
+    agent_py_agent/agent/agent_core/_tool_loop_service.py \
+    agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py \
+    agent_py_agent/tests/test_background_main_agent_runtime.py
+  ```
+
+  两个 focused 文件全部通过，相关 PyCompile、Ruff 与 `git diff --check` 通过。
+- `.10` wheel SHA256 为 `e6f8402c9d094185061f48c89c8670054a058d9faa010b7713b05c9573876556`；单一
+  Gateway `ma-gateway-r114l-110-wheel` 已验证只有一个 8420 listener、一个 Gateway 进程且模型配置仍为
+  MiniMax-M2.7。fresh 长任务 TUI `ma-r114l-110-u295-compact-research-long` 已真实创建 8 名 child；其中
+  任务运行时 child 已将约 124,049 token 压至约 53,711 token、generation 0→1，并保留 23 对工具调用的
+  handoff 摘要和报告产物；终端交互 child 也自然 `compact 1`。最终八名 child 全部完成，主代理写出八份分报告
+  和 21,876-byte 横向报告，final 直接显示且 Working 撤下。主链验收通过；主代理短时间 `compact 3` 已转入
+  R114n 恢复余量修复，不把“终态正确”冒充“压缩成本合理”。
+
+## 2026-08-30 R114 Gateway 重启、冷通知与 child 插话持久回放
+
+- 本地 focused 同时覆盖：多页 owner 发现连续翻页、已死 in-process runner 精确回收、
+  旧 active attempt 终态对账、child guidance 只在 provider 真正接收后写入 child thread，以及
+  重连 TUI 没有本地 pending map 时仍能按 exact message id 回放普通用户行。
+- `.10` 始终只有 `ma-gateway-r114g-110-wheel` 一个 8420 listener，MiniMax-M2.7。顺序重启后
+  u285/u286/u287 仍保留原 run 名册；u287 的 7 个失联 runner 在后台精确 reclaim/revive，
+  不到 25 秒八行全部恢复为正在等待模型/运行，没有重复创建 child。
+- 已完成 u283 在 Gateway 重启后是 cold owner，旧轮询返回 0 notice，屏幕停在最后一个
+  Thought/Tool；新读路只解析该 authenticated owner 已存在的会话库，不初始化 Agent。
+  部署后原 TUI `ma-r114e-110-u283-mario-long` 不用 resume 即补出完整最终汇报。
+- fresh `ma-r114g-110-u287-child-steer-replay` 一次原样八项目调研 prompt 创建 8 名 child。
+  进入 researcher-7 后仅输入普通中文补充要求，界面先显示排队，provider 下一安全点
+  消费后变成正常 user block。完全 `/exit` 再精确 resume 同一 session，以及后续再重启
+  Gateway，进入同一 child 都能在原时间位置看到该消息，模型也真实改为至少读两个核心源文件。
+- 部署验收另外抓到一个操作问题：在 `/root/my-agent-src` 里启动 `python -m` 会让旧源码
+  压过已安装 wheel。真正验收必须从 `/root/.my-agent/service-cwd` 启动，并核对
+  `module.__file__` 位于 venv `site-packages`；仅有 `pip install` 成功不能当作部署成功。
+- u288 重启同时取得了“runtime 已 done、task 仍 RUNNING”的真实竞态样本，旧恢复把首批 6 名 child
+  重开为 generation 2/3。新增参数化回归把完成、失败、取消三种 natural terminal event 与旧 task
+  RUNNING/session-running 组合起来，断言监督只补 task/result/session/父级通知，不 abandon、不创建下一代、
+  不调用 auto-start；既有 dead-running 测试继续证明 recovery-generated cancelled 会 requeue。
+- R114j 真 TUI 复验要求：fresh 多 child 长任务运行中只重启唯一 Gateway，记录重启前后每个 run 的
+  `current_attempt_generation/runner_attempts/status`；已自然终态 child 必须原值不动，真正运行中 child 才允许
+  按原 run 恢复。该项完成前不把本轮升级为发布通过。
+- R114j 已取得上述正证：u288 九名终态 child 在再次重启后 generation 不变；u289/u290 的 live child 发生
+  原 run 恢复。新 R114k focused 构造同 owner 的两条真实工具索引和一条 foreign request，断言 recovery 首次
+  provider 参数只携带 exact request 的 `task_progress/create_subagents`，顺序、Todo id 与 covers 保留；伪造
+  marker request id 不匹配时恢复为空。startup requeue 另断言 typed marker 携带 dead attempt id。
+- R114k 发布后的真 TUI 必须在主代理已经建立 Todo 并派出多 child 后重启唯一 Gateway；恢复后 canonical Todo
+  总数和 id 集合不得变化，不得出现第二次同义 `task_progress create` 或取消/重派已有 child。运行中的 child
+  可以按原 run 换代，终态 child 仍不得复活；模型应直接继续等待、整合或执行剩余工作。
+
 ## 2026-08-30 R109 child typed lifecycle 与首次详情视口
 
 - 对照 会话运行时 `core/src/agent/status.rs`、`tui/src/app/agent_status_feed.rs`、`tui/src/multi_agents.rs`，状态只由
@@ -2834,3 +3066,18 @@ ruff check \
   也会因恢复目标边界失败，调整为 13k 留出演进余量；生产触发点、恢复目标和候选判定均未修改。
 - 发布后继续用一个 Gateway、多 owner 的真实 TUI 跑中长任务：至少覆盖多子代理整合、连续追加消息、主/子
   Compact、插话/等待/终态、历史与 owner 隔离；每一路先公开 tmux 名称，环境缺失项单列而不冒充完成。
+
+## 2026-08-30 R114p 首工具 cwd 与后台 Skill 续接
+
+- 真实失败基线：`.10` 单 Gateway 的 `ma-r114o-110-u303-security-skill` 首轮同时读取 3 个 Skill 并调用
+  `run_command` 克隆 Requests。canonical task root 已建立，但执行归档和文件系统都证明 clone 落在 owner
+  home；下一轮相对 `list_files` 从 task root 查找因此返回 `PATH_NOT_FOUND`。
+- 新回归刻意让外层 `RunParams.task_attributes` 与 `ToolLoopExecuteParams.task_attributes` 成为两个 dict。
+  禁用同步函数时用例在 exact 工具投影缺少 `run_workspace` 处失败；启用后首次 shell 的 working_dir、真实目录
+  和 write boundary 都指向 canonical task root，owner home 不再产生同名目录。
+- `.10` `ma-r114o-110-u299-pdf-skill` 的 child 完成唤醒轮在默认后台快照中两次调用 `skill_search`，Gateway
+  记录 typed `TOOL_UNAVAILABLE`，该轮为修复协议额外形成 9 次 provider call。默认 lifecycle profile 加回
+  `skill_search` 后，定向策略测试锁定同任务后续轮仍可读取 Skill 正文；显式 owner/task 减权限仍优先。
+- 本地 focused（未跑全仓）：Gateway 会话、文件系统工具和核心工具 Schema 共 159 项通过；新增 cwd 生产形态
+  4 项通过；后台策略 3 项通过；相关文件 Ruff 与 `git diff --check` 通过。fresh wheel/TUI 复验仍待当前 8 路
+  长任务自然结束后执行，避免人为中断测试样本。

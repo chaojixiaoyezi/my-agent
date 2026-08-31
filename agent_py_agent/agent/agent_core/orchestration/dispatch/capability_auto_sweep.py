@@ -273,11 +273,13 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
 # 函数用途: 在锁内修复失联 runner、释放已满足的父级等待，再复活真正的孤儿。
 def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
     summary: dict[str, object] = {
+        "superseded_attempts_reconciled": 0,
         "parent_closed_cancelled": 0,
         "parent_recovery_held": 0,
         "source_workers_completed": 0,
         "source_workers_completion_pending": 0,
         "running_reclaimed": 0,
+        "running_terminal_projected": 0,
         "running_source_stalls_reclaimed": 0,
         "running_source_ended_reclaimed": 0,
         "stalled_source_hosts_cleanup_attempted": 0,
@@ -286,6 +288,14 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         "orphan_authority_recovery_blocked": 0,
     }
     try:
+        manager = getattr(agent, "subagents", None)
+        repo = getattr(manager, "runtime_db", None)
+        reconcile = getattr(repo, "reconcile_superseded_attempts", None)
+        if callable(reconcile):
+            summary["superseded_attempts_reconciled"] = len(reconcile() or [])
+    except Exception:
+        _LOGGER.debug("supervision stale attempt reconcile failed", exc_info=True)
+    try:
         parent_summary = _reconcile_conversation_parent_lifecycle(agent)
         summary.update(parent_summary)
     except Exception:
@@ -293,6 +303,11 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
     try:
         reclaimed = _reclaim_dead_running_runs(agent)
         summary["running_reclaimed"] = len(reclaimed)
+        summary["running_terminal_projected"] = sum(
+            1
+            for item in reclaimed
+            if item.get("recovery_action") == "terminal_projected"
+        )
         summary["running_source_stalls_reclaimed"] = sum(
             1 for item in reclaimed if item.get("reason") == "runner_session_stalled"
         )
@@ -428,6 +443,20 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
         reason = str(facts["reason"])
         try:
             if _requeue_dead_running(manager, task, run_id, reason=reason):
+                repaired = manager.load(run_id)
+                repaired_attrs = getattr(repaired, "attributes", {}) or {}
+                projection_repair = (
+                    repaired_attrs.get("runtime_terminal_projection_repair")
+                    if isinstance(repaired_attrs, dict)
+                    else None
+                )
+                facts["recovery_action"] = (
+                    "terminal_projected"
+                    if isinstance(projection_repair, dict)
+                    and str(projection_repair.get("attempt_id") or "")
+                    == str(getattr(task, "runner_active_attempt_id", "") or "")
+                    else "requeued"
+                )
                 reclaimed.append(facts)
         except Exception:
             _LOGGER.warning("supervision reclaim failed (run_id=%s)", run_id, exc_info=True)
@@ -444,7 +473,6 @@ def _dead_running_reclaim_facts(
         structured_audit_source_worker_attributes,
         structured_audit_supervised_worker_attributes,
     )
-    from ....subagents.process_control import PROCESS_EPOCH, is_pid_alive
     from ....subagents.runner_session_liveness import (
         has_fresh_runner_session,
         runner_session_of,
@@ -457,7 +485,15 @@ def _dead_running_reclaim_facts(
     if not _reclaim_decision_allows(decision, supervised):
         return None
     session = runner_session_of(task)
-    if not session or has_fresh_runner_session(task):
+    if not session:
+        return None
+    worker_pid, worker_alive, cross_gen, proven_dead_despite_fresh_heartbeat = (
+        _runner_process_reclaim_facts(session)
+    )
+    # 持久心跳用于容忍慢模型、GC 和磁盘抖动，但已经退出的 OS 进程是更强的客观事实。
+    # Gateway 重启后旧 in-process runner 的最后一次心跳可能仍在 45 秒新鲜窗内；若
+    # exact PID 已死，就立即回收。PID 仍活（含复用）时继续等心跳过期，避免双执行。
+    if has_fresh_runner_session(task) and not proven_dead_despite_fresh_heartbeat:
         return None
     ended = _ended_source_worker_with_work(
         task,
@@ -475,11 +511,6 @@ def _dead_running_reclaim_facts(
         "not_alive",
     }:
         return None
-    worker_alive = worker_pid > 0 and is_pid_alive(worker_pid)
-    session_epoch = str(session.get("process_epoch") or "")
-    cross_gen = (
-        bool(session.get("in_process")) and bool(session_epoch) and session_epoch != PROCESS_EPOCH
-    )
     if not cross_gen and not supervised and (worker_pid <= 0 or worker_alive):
         return None
     stalled = supervised and (fully_stalled or worker_pid <= 0 or worker_alive)
@@ -496,6 +527,25 @@ def _dead_running_reclaim_facts(
             host_cleanup_escalated=bool(cleanup.get("escalated")),
         )
     return facts
+
+
+# LLM: OS process death may override only an explicitly shaped runner session; legacy rows with
+# no process kind stay on heartbeat freshness to avoid an unsafe eager reclaim.
+# 函数用途: 提取 runner PID、存活、跨进程代次与“新鲜心跳也可安全回收”四个客观事实。
+def _runner_process_reclaim_facts(
+    session: dict[str, object],
+) -> tuple[int, bool, bool, bool]:
+    from ....subagents.process_control import PROCESS_EPOCH, is_pid_alive
+
+    worker_pid = _session_worker_pid(session)
+    worker_alive = worker_pid > 0 and is_pid_alive(worker_pid)
+    session_epoch = str(session.get("process_epoch") or "")
+    in_process = session.get("in_process")
+    cross_gen = in_process is True and bool(session_epoch) and session_epoch != PROCESS_EPOCH
+    proven_dead = worker_pid > 0 and not worker_alive and (
+        in_process is False or (in_process is True and cross_gen)
+    )
+    return worker_pid, worker_alive, cross_gen, proven_dead
 
 
 def _reclaim_decision_allows(decision: Any, supervised: bool) -> bool:
@@ -593,9 +643,9 @@ def _terminate_fully_stalled_source_hosts(
 
 
 # LLM: Task-file and runtime.db attempts are two projections of one execution.
-# Never clear the task projection before runtime authority says the exact old
-# attempt is safely terminal; create_attempt must keep rejecting live duplicates.
-# 函数用途: 回收已确认假死的 runner；旧权威 attempt 安全封存后才改成待派状态。
+# A natural runtime terminal event must run the ordinary structured finalizer
+# instead of reopening work; only a fenced crash attempt becomes PENDING.
+# 函数用途: 回收已确认失联的 runner；自然终态补齐任务结果，真正崩溃才改成待派状态。
 def _requeue_dead_running(
     manager: Any,
     task: Any,
@@ -610,6 +660,15 @@ def _requeue_dead_running(
             attempt_id,
             reason=f"supervision_{reason}_reclaim",
         )
+        terminal_projection = authority.get("terminal_projection")
+        if isinstance(terminal_projection, dict):
+            return _project_runtime_terminal_result(
+                manager,
+                run_id,
+                attempt_id,
+                terminal_projection,
+                reason=reason,
+            )
         if not bool(authority.get("ready")):
             _LOGGER.info(
                 "supervision requeue deferred (run_id=%s attempt_id=%s reason=%s)",
@@ -627,6 +686,7 @@ def _requeue_dead_running(
     from ....ingestion.source_worker import record_source_worker_recovery
 
     record_source_worker_recovery(refreshed, reason=reason)
+    _close_reclaimed_runner_session(refreshed, reason=reason)
     refreshed.status = "PENDING"
     refreshed.failure_type = ""
     from ....subagents.process_control import reclaim_background_start
@@ -638,6 +698,147 @@ def _requeue_dead_running(
         f"supervision: requeued RUNNING->PENDING reason={reason}",
     )
     return True
+
+
+# LLM: This crash repair deliberately reuses the canonical runner-result service,
+# including capability/source-worker overrides and parent wake delivery. Runtime
+# event fields own lifecycle; no model prose, artifact, or test claim is parsed.
+# 函数用途: Gateway 在“运行账本已收口、任务文件还没来得及收口”时补写同一轮结果，避免把已完成子代理再跑一遍。
+def _project_runtime_terminal_result(
+    manager: Any,
+    run_id: str,
+    attempt_id: str,
+    terminal_projection: dict[str, object],
+    *,
+    reason: str,
+) -> bool:
+    from ....subagents.manager_runner_result_payload import RecordRunnerResultParams
+    from ....turn_end import infer_turn_end_reason, subagent_outcome_for_turn_end
+
+    runtime_status = str(terminal_projection.get("runtime_status") or "").strip()
+    runtime_reason = str(terminal_projection.get("runtime_reason") or "").strip()
+    turn_end_reason = infer_turn_end_reason(
+        explicit=terminal_projection.get("turn_end_reason"),
+        runtime_status=runtime_status,
+        runtime_reason=runtime_reason,
+    )
+    status, failure_type, ok = subagent_outcome_for_turn_end(turn_end_reason)
+    result = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            dry_run=False,
+            ok=ok,
+            message=(
+                "Gateway 恢复时发现本轮运行账本已收口；"
+                "已按结构化终态补齐子代理任务投影。"
+            ),
+            status=status,
+            turn_end_reason=turn_end_reason,
+            failure_type=failure_type,
+            tool_rounds=max(
+                0,
+                int(terminal_projection.get("tool_rounds") or 0),
+            ),
+        )
+    )
+    repaired = manager.load(run_id)
+    if (
+        str(getattr(repaired, "status", "") or "").strip().upper() == "RUNNING"
+        and str(getattr(repaired, "runner_active_attempt_id", "") or "").strip()
+        == attempt_id
+    ):
+        _LOGGER.warning(
+            "runtime terminal projection did not settle task (run_id=%s attempt_id=%s)",
+            run_id,
+            attempt_id,
+        )
+        return False
+    _close_runtime_terminal_runner_session(
+        repaired,
+        status=str(getattr(result, "status", "") or repaired.status),
+        reason=reason,
+    )
+    attributes = dict(getattr(repaired, "attributes", {}) or {})
+    attributes["runtime_terminal_projection_repair"] = {
+        "schema_version": "runtime-terminal-projection-repair.v1",
+        "attempt_id": attempt_id,
+        "event_id": str(terminal_projection.get("event_id") or ""),
+        "run_status": str(terminal_projection.get("run_status") or ""),
+        "task_status": str(getattr(repaired, "status", "") or ""),
+        "turn_end_reason": turn_end_reason,
+        "observed_at": time.time(),
+    }
+    repaired.attributes = attributes
+    manager.save(repaired)
+    manager.actions._append_task_work_log(
+        repaired,
+        "supervision: projected runtime terminal attempt without rerun "
+        f"attempt_id={attempt_id} status={repaired.status}",
+    )
+    return True
+
+
+# LLM: The dead process cannot emit its runner-session epilogue after restart;
+# close only the exact current receipt after the canonical result projection has
+# succeeded. This is display/liveness evidence, never task-completion authority.
+# 函数用途: 给已由运行账本和结果服务确认收口的旧 runner 会话补上结束时间。
+def _close_runtime_terminal_runner_session(
+    task: Any,
+    *,
+    status: str,
+    reason: str,
+) -> None:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    session = attrs.get("runner_session")
+    if not isinstance(session, dict):
+        return
+    if str(session.get("status") or "").strip().lower() not in {
+        "starting",
+        "running",
+    }:
+        return
+    now = time.time()
+    task_status = str(status or "").strip().upper()
+    session_status = (
+        "completed"
+        if task_status == "DONE"
+        else "cancelled"
+        if task_status in {"CANCELLED", "ABANDONED", "TAKEN_OVER"}
+        else "failed"
+    )
+    closed = dict(session)
+    closed.update(
+        status=session_status,
+        heartbeat_at=now,
+        ended_at=now,
+        reconcile_reason=str(reason or "runtime_terminal_projection"),
+    )
+    attrs["runner_session"] = closed
+    task.attributes = attrs
+
+
+# LLM: Once runtime.db has fenced the exact dead attempt, its durable liveness receipt must
+# become terminal in the same canonical save as RUNNING->PENDING. Otherwise the immediate
+# orphan-start pass sees the old fresh heartbeat and delays a proven-safe restart for 45 seconds.
+# 函数用途: 把已确认死亡且已封存的 runner 会话标成失败终态，让同轮监督可以立即续派。
+def _close_reclaimed_runner_session(task: Any, *, reason: str) -> None:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    session = attrs.get("runner_session")
+    if not isinstance(session, dict):
+        return
+    if str(session.get("status") or "").strip().lower() not in {"starting", "running"}:
+        return
+    now = time.time()
+    closed = dict(session)
+    closed.update(
+        status="failed",
+        heartbeat_at=now,
+        ended_at=now,
+        reclaim_reason=str(reason or "runner_reclaimed"),
+    )
+    attrs["runner_session"] = closed
+    task.attributes = attrs
 
 
 def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:

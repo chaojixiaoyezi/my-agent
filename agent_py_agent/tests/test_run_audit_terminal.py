@@ -2,7 +2,7 @@
 
 覆盖：
 - Repository.settle_agent_run：单事务 CAS、幂等、先到先得、多 attempt 收口、
-  事件绑定 attempt（A.8）、查无 run noop。
+  事件绑定 current attempt（A.8）、旧 attempt 换代收口、查无 run noop。
 - runtime_mixin._settle_main_agent_run / _settle_main_agent_run_exception：
   ok→done、非终态（unfinished 等）不落账（R1-03）、cancelled 族别名、
   InterruptedError→cancelled、LOCAL_UNMANAGED noop、repo 异常 fail-silent。
@@ -148,7 +148,7 @@ def test_settle_unknown_run_noop(repo):
     }
 
 
-def test_settle_closes_all_open_attempts_only(repo):
+def test_settle_preserves_superseded_attempt_and_closes_current(repo):
     rec = _record(repo)
     second = repo.create_attempt(rec["agent_run_id"])
     repo.settle_agent_run(
@@ -158,9 +158,10 @@ def test_settle_closes_all_open_attempts_only(repo):
     )
     attempts = _attempts(repo, rec["agent_run_id"])
     assert len(attempts) == 2
-    for attempt in attempts:
-        assert attempt["status"] == "done"
-        assert attempt["ended_at"] > 0
+    assert attempts[0]["status"] == "cancelled"
+    assert attempts[0]["ended_at"] > 0
+    assert attempts[1]["status"] == "done"
+    assert attempts[1]["ended_at"] > 0
     # 事件绑定 current attempt（第二个）
     events = _completed_events(repo, rec["agent_run_id"])
     assert events[0]["attempt_id"] == second["attempt_id"]
@@ -692,6 +693,9 @@ def test_protocol_violation_persists_runtime_event(repo):
     assert '"stage": "tool_protocol_adapter"' in payload
     assert '"protocol_repairs": 0' in payload
     assert '"will_break": false' in payload
+    assert '"tool_runtime_snapshot_hash":' in payload
+    assert '"allowed_tools":' in payload
+    assert '"available_tools":' in payload
 
 
 def test_protocol_violation_break_records_repair_count(repo):

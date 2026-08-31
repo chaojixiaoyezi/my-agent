@@ -172,6 +172,9 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
     entry = entries[0]
     expected_turn_id = str(entry.metadata["expected_turn_id"])
     assert expected_turn_id.startswith("attempt-")
+    assert entry.metadata["record_in_transcript"] is True
+    assert entry.metadata["thread_id"] == child.agent_thread_id
+    assert entry.metadata["agent_run_id"] == child.id
     assert agent.conversation_store.claim_guidance_once_for_turn(
         entry,
         expected_turn_id=expected_turn_id,
@@ -182,6 +185,17 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
         [entry],
         attempt_id=expected_turn_id,
     ) == (entry.guidance_id,)
+    assert agent.conversation_store.consume_submitted_guidance_for_turn(
+        expected_turn_id,
+        [entry],
+    ) == (entry.guidance_id,)
+    child_messages = agent.conversation_store.recent_messages(
+        child.agent_thread_id,
+        limit=10,
+    )
+    assert child_messages[-1].role == "user"
+    assert child_messages[-1].content == "请先运行完整测试"
+    assert child_messages[-1].metadata["agent_run_id"] == child.id
 
     stopped = stop_agent(
         agent,

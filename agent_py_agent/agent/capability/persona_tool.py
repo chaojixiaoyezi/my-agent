@@ -226,11 +226,12 @@ class UpdatePersonaTool(BaseTool):
         if read_result is not None:
             return read_result
         # 只读分支（list/history/status）不计数；只限写更新。
-        if request.target == "user" and _persona_update_rate_limited():
+        if request.target == "user" and _persona_update_rate_limited(repository):
             return _err(
                 "人格更新过于频繁（30 秒内最多 3 次）。普通任务不需要反复更新人设，"
                 "只在用户明确表达长期设定时更新。",
                 "PERSONA_UPDATE_RATE_LIMITED",
+                effect_outcome="not_started",
             )
         if request.target == "user":
             operations = request.operations or (
@@ -392,29 +393,54 @@ def _parse_rollback_version(
     return parsed
 
 
-# LLM: 时间窗限频只防模型重复写人格（K-CTX 真机实证：普通任务反复 update_persona）；
-# 只读操作不限。全局进程级计数，30 秒窗口内最多 2 次写更新。
-# 函数用途: 判定当前人格写更新是否超过频率上限。
+# LLM: Rate limits are keyed by the canonical owner home. A single Gateway serves many owners;
+# process-global timestamps would let one user's valid writes consume another user's allowance.
+# Stale buckets are swept at most once per window so the soft guard cannot leak owner identities.
+# 函数用途: 按当前用户独立计算 30 秒内最多 3 次 USER 画像更新，用户之间绝不互相占额度。
 _persona_update_lock = threading.Lock()
-_persona_update_timestamps: list[float] = []
+_PERSONA_UPDATE_WINDOW_SECONDS = 30.0
+_PERSONA_UPDATE_MAX_WRITES = 3
+_persona_update_timestamps: dict[str, list[float]] = {}
+_persona_update_last_cleanup = 0.0
 
 
-def _persona_update_rate_limited() -> bool:
+def _persona_update_rate_limited(repository: PersonaRepository) -> bool:
+    global _persona_update_last_cleanup
     now = time.monotonic()
+    owner_key = str(repository.owner_home.resolve(strict=False))
     with _persona_update_lock:
-        _persona_update_timestamps[:] = [
-            item for item in _persona_update_timestamps if now - item < 30.0
+        if now - _persona_update_last_cleanup >= _PERSONA_UPDATE_WINDOW_SECONDS:
+            for key, timestamps in tuple(_persona_update_timestamps.items()):
+                live = [
+                    item
+                    for item in timestamps
+                    if now - item < _PERSONA_UPDATE_WINDOW_SECONDS
+                ]
+                if live:
+                    _persona_update_timestamps[key] = live
+                else:
+                    _persona_update_timestamps.pop(key, None)
+            _persona_update_last_cleanup = now
+        timestamps = _persona_update_timestamps.setdefault(owner_key, [])
+        timestamps[:] = [
+            item
+            for item in timestamps
+            if now - item < _PERSONA_UPDATE_WINDOW_SECONDS
         ]
-        if len(_persona_update_timestamps) >= 3:
+        if len(timestamps) >= _PERSONA_UPDATE_MAX_WRITES:
             return True
-        _persona_update_timestamps.append(now)
+        timestamps.append(now)
         return False
 
 
+# LLM: This test-only hook clears every owner bucket and the sweep clock; production callers must
+# never use it to bypass admission.
+# 函数用途: 测试之间清空画像限频状态，避免前一个用例占用后一个用例的额度。
 def _reset_persona_update_rate_limit() -> None:
-    """测试钩子：清空限频时间窗，避免测试间状态污染。"""
+    global _persona_update_last_cleanup
     with _persona_update_lock:
         _persona_update_timestamps.clear()
+        _persona_update_last_cleanup = 0.0
 
 
 # LLM: Read-only Persona actions bypass consent and mutation while sharing repository diagnostics.
@@ -534,12 +560,22 @@ def _persona_source(agent: object) -> str:
     return f"agent_tool:{request_id}" if request_id else "agent_tool"
 
 
-def _err(msg: str, code: str, hint: str = "") -> ToolHandlerOutcome:
+def _err(
+    msg: str,
+    code: str,
+    hint: str = "",
+    *,
+    effect_outcome: str = "",
+) -> ToolHandlerOutcome:
     body = {"error": msg}
     if hint:
         body["hint"] = hint
     return ToolHandlerOutcome(
-        "update_persona", False, json.dumps(body, ensure_ascii=False), error_code=code
+        "update_persona",
+        False,
+        json.dumps(body, ensure_ascii=False),
+        error_code=code,
+        effect_outcome=effect_outcome,
     )
 
 

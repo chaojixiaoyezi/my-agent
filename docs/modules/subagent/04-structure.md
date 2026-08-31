@@ -16,6 +16,11 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - persistence 默认 `allow_terminal_reactivation=False`；保存 runner snapshot 前如发现 canonical store 已有
   更新终态，就恢复该终态而不是覆盖。普通 heartbeat 同样在 terminal 时退出。只有显式结构化 user-stop
   recovery 才可传 true，不能从自然语言“继续”或旧状态标签猜复活。
+- `lifecycle_runner_attempts.reconcile_dead_runner_attempt` 是 runtime.db 与 task 文件投影之间唯一的重启恢复桥。
+  exact `agent_run.completed` 带 `runtime_status` 表示普通模型轮已经自然收口：它必须复用
+  `runner_result_service` 补写 task/result、capability/source-worker 覆盖与 parent wake，不能 abandon 或重派。
+  `reclaim_orphaned_attempt` 生成、没有 `runtime_status` 的终态只证明死 attempt 已安全封存，才允许
+  `RUNNING -> PENDING`。因此终态来源而非状态字符串本身决定恢复动作。
 
 ## 2026-08-25 main/child 跨回合工具终态折叠
 

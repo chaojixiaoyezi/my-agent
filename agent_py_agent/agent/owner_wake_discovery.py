@@ -746,6 +746,20 @@ def _store_roots(owner_home: Path):
         yield from owner_home.glob(pattern)
 
 
+# LLM: Passive clients and wake discovery must share the same finite set of existing conversation
+# layouts. This helper never creates paths, follows no recursive glob, and receives an already
+# authenticated exact owner home from its caller.
+# 函数用途: 列出某个 owner 家目录中已存在的会话库，供重启恢复和冷通知重放共用。
+def existing_conversation_store_roots(owner_home: str | Path) -> tuple[Path, ...]:
+    resolved_home = Path(owner_home)
+    unique: dict[str, Path] = {}
+    for store_root in _store_roots(resolved_home):
+        if not store_root.is_dir():
+            continue
+        unique.setdefault(str(store_root.resolve(strict=False)), store_root)
+    return tuple(unique[key] for key in sorted(unique))
+
+
 def _has_pending_wake_signal(store_root: Path) -> bool:
     # wake_queue/{urgent,normal} 里的文件即待处理(处理过的会被挪进 handled/)。
     for kind in ("urgent", "normal"):
@@ -800,6 +814,7 @@ __all__ = [
     "discover_owner_home_page",
     "discover_wake_pending_owner_page",
     "discover_wake_pending_owners",
+    "existing_conversation_store_roots",
     "seed_registry_from_disk",
     "seed_registry_page_from_disk",
 ]

@@ -1,4 +1,7 @@
 
+# LLM: This module owns the model-visible local text-search contract and its
+# bounded rg/Python execution paths; keep matching semantics aligned across both.
+# 模块用途: 提供工作区内文本搜索，统一参数说明、ripgrep 快速路径和 Python 后备扫描。
 from __future__ import annotations
 
 import fnmatch
@@ -74,25 +77,26 @@ _SEARCH_TEXT_PARAMETERS = {
     "offset": "跳过前多少条匹配，用于分页，默认 0",
     "file_glob": "只搜索匹配 glob 的文件，例如 *.py",
     "context": "每条命中前后额外展示多少行上下文，默认 0",
-    "literal": "是否按普通文本匹配，默认 true；false 时按正则匹配",
+    "literal": "是否按普通文本匹配，默认 false；默认使用 ripgrep 正则语义",
     "ignore_case": "是否忽略大小写，默认 false",
     "output_mode": "输出模式：content、files_with_matches、count 或 line_numbers，默认 content",
     "include_ignored": "是否搜索 .git/node_modules 等常见噪声目录，默认 false",
 }
 _SEARCH_TEXT_PARAMETER_DETAILS = {
-    "query": "必填；literal=true 时整段 query 必须作为连续原文出现，不做分词、语义检索或联网搜索；需要正则时传 literal=false。",
+    "query": "必填；默认使用 ripgrep 正则语义，不做分词、语义检索或联网搜索；要把整段 query 当普通文字时传 literal=true。",
     "path": "可选，只能是当前工作区内已经存在的文件或目录；源码尚未下载时先获取正确 checkout。",
     "limit": "分页大小；命中很多时先看小批量，再用 next_offset 继续。",
     "offset": "上一页返回 next_offset 后，下一次传入这里继续看。",
     "file_glob": "按文件名或工作区相对路径过滤，例如 *.py、docs/*.md。",
     "context": "需要看命中附近内容时传 1 或 2；越大越占 prompt。",
-    "literal": "默认 true，避免把用户普通文字误当正则；传 false 才启用正则。",
+    "literal": "默认 false，使用 ripgrep 正则语义；搜索包含正则符号的普通原文时传 true。",
     "ignore_case": "大小写不确定时传 true。",
     "output_mode": "content 返回行内容；line_numbers 只返回文件:行号；files_with_matches 只返回文件；count 返回每个文件命中数。",
     "include_ignored": "默认跳过 .git、node_modules 和常见缓存目录；确实要查时传 true。",
 }
 _SEARCH_TEXT_EXAMPLES = [
     '{"tool": "search_text", "query": "PromptBuilder"}',
+    '{"tool": "search_text", "query": "LEVELS|level1|level2", "file_glob": "*.js"}',
     '{"tool": "search_text", "query": "max_tool_rounds", "path": "agent_py_agent", "limit": 20, "offset": 0}',
     '{"tool": "search_text", "query": "class .*Tool", "literal": false, "file_glob": "*.py"}',
     '{"tool": "search_text", "query": "===== 章节", "path": "data/long_field_journal.txt", "limit": 100}',
@@ -160,7 +164,11 @@ def build_search_text_model_spec() -> ToolModelSpec:
             "limit": {"type": "integer", "minimum": 1, "description": _SEARCH_TEXT_PARAMETER_DETAILS["limit"]},
             "offset": {"type": "integer", "minimum": 0, "description": _SEARCH_TEXT_PARAMETER_DETAILS["offset"]},
             "context": {"type": "integer", "minimum": 0, "description": _SEARCH_TEXT_PARAMETER_DETAILS["context"]},
-            "literal": {"type": "boolean", "description": _SEARCH_TEXT_PARAMETER_DETAILS["literal"]},
+            "literal": {
+                "type": "boolean",
+                "default": False,
+                "description": _SEARCH_TEXT_PARAMETER_DETAILS["literal"],
+            },
             "ignore_case": {"type": "boolean", "description": _SEARCH_TEXT_PARAMETER_DETAILS["ignore_case"]},
             "include_ignored": {"type": "boolean", "description": _SEARCH_TEXT_PARAMETER_DETAILS["include_ignored"]},
             "output_mode": {
@@ -174,7 +182,7 @@ def build_search_text_model_spec() -> ToolModelSpec:
         name="search_text",
         description=(
             "只在当前本地工作区文件中做字面或正则匹配，适合找函数名、配置项、章节标记和日志锚点；"
-            "不联网、不分词、不做语义搜索，默认 query 必须作为连续原文出现。"
+            "不联网、不分词、不做语义搜索，默认使用 ripgrep 正则语义；精确原文请传 literal=true。"
         ),
         input_schema={
             "type": "object",

@@ -20,6 +20,34 @@ def input_token_usage(response: object) -> int | None:
     )
 
 
+# LLM: Provider-visible context and billing input are not always the same field shape. Anthropic
+# reports uncached input, cache reads, and cache writes as three disjoint top-level counters, while
+# OpenAI-style prompt/input totals already include the nested cached-token detail. Never add nested
+# detail to an inclusive total or use this helper for cost subtraction.
+# 函数用途: 把不同厂商的用量字段还原成“本次模型实际看到的输入 token 总数”。
+def provider_visible_input_token_usage(response: object) -> int | None:
+    usage = response_usage(response)
+    prompt_total = _first_positive_int((usage.get("prompt_tokens"),))
+    if prompt_total is not None:
+        return prompt_total
+
+    input_total = _first_positive_int((usage.get("input_tokens"),))
+    separate_cache_read = _first_positive_int(
+        (usage.get("cache_read_input_tokens"),)
+    )
+    separate_cache_write = _first_positive_int(
+        (
+            usage.get("cache_creation_input_tokens"),
+            usage.get("cache_write_input_tokens"),
+        )
+    )
+    if input_total is not None:
+        return input_total + (separate_cache_read or 0) + (separate_cache_write or 0)
+    if separate_cache_read is None and separate_cache_write is None:
+        return None
+    return (separate_cache_read or 0) + (separate_cache_write or 0)
+
+
 def output_token_usage(response: object) -> int | None:
     usage = response_usage(response)
     return _first_positive_int((usage.get("output_tokens"), usage.get("completion_tokens")))
@@ -115,6 +143,7 @@ __all__ = [
     "goal_token_usage",
     "input_token_usage",
     "output_token_usage",
+    "provider_visible_input_token_usage",
     "reported_cache_read_token_usage",
     "response_cost_usd",
     "response_usage",

@@ -380,12 +380,19 @@ def test_rich_stream_confirms_exact_active_turn_input_ids(tmp_path) -> None:
     writer = BufferedChunkStreamWriter(path, rich_transcript=True)
 
     writer.begin_active_turn_input(("steer-1", "steer-2"))
-    writer.complete_active_turn_input(("steer-1", "steer-2"))
+    writer.complete_active_turn_input(
+        ("steer-1", "steer-2"),
+        client_messages=(("steer-1", "补读源码"), ("steer-2", "继续测试")),
+    )
     writer.close()
 
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["kind"] == "active_turn_input_consumed"
     assert rows[0]["client_message_ids"] == ["steer-1", "steer-2"]
+    assert rows[0]["messages"] == [
+        {"message_id": "steer-1", "text": "补读源码"},
+        {"message_id": "steer-2", "text": "继续测试"},
+    ]
 
     ordinary_path = tmp_path / "ordinary.chunks.jsonl"
     ordinary = BufferedChunkStreamWriter(ordinary_path, rich_transcript=False)

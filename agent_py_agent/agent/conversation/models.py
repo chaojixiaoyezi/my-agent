@@ -5,7 +5,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "conversation_thread.v7"
+SCHEMA_VERSION = "conversation_thread.v8"
 
 THREAD_TASK_LINK_ACTIVE_STATUS = "active"
 THREAD_TASK_LINK_INACTIVE_STATUSES = frozenset(
@@ -307,8 +307,9 @@ class ConversationCompactCommit:
 
 
 # LLM: ConversationThread is the sole durable authority for transcript, compact cursor/checkpoint,
-# compact failure circuit, and the sticky root workspace; task lifecycle remains in ThreadTaskLink.
-# 类用途: 保存一个用户会话的长期状态，其中 compact 提交点、连续失败和工作目录都随同一 thread 跨轮继承。
+# provider context calibration, compact failure circuit, and the sticky root workspace; task
+# lifecycle remains in ThreadTaskLink.
+# 类用途: 保存一个用户会话的长期状态，其中压缩点、供应商真实上下文基线、连续失败和工作目录都随同一 thread 跨轮继承。
 @dataclass(frozen=True)
 class ConversationThread:
     thread_id: str
@@ -328,6 +329,11 @@ class ConversationThread:
     compact_consecutive_failures: int = 0
     compact_failure_updated_at: float = 0.0
     compact_failure_code: str = ""
+    # LLM: This numeric-only observation calibrates the next reconstructed provider slice. It is
+    # valid only for the recorded compact generation and stable request-surface fingerprint;
+    # every committed history rewrite clears it atomically with the compact cursor.
+    # 字段用途: 保存上次模型真实看到的输入量，避免后台唤醒后丢失校准而反复提前压缩。
+    provider_context_observation: dict[str, Any] = field(default_factory=dict)
     # LLM: LLM summary prose cannot be the authority for whether a compacted
     # assistant turn actually executed a side effect.  This bounded public
     # ledger is advanced atomically with the compact cursor and injected beside
@@ -347,8 +353,9 @@ class ConversationThread:
     runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: Persist v7 transcript/tool compact sources, guards, sticky workspace and client cwd together.
-    # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典，并保存两类压缩来源与客户端工作目录。
+    # LLM: Persist v8 transcript/tool compact sources, provider calibration, guards, sticky
+    # workspace and client cwd together.
+    # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典，并保存压缩来源、模型校准与客户端工作目录。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -357,8 +364,9 @@ class ConversationThread:
         payload["active_task_ids"] = list(self.active_task_ids)
         return payload
 
-    # LLM: Older records load with zero live-tool compact sources and no guessed execution state.
-    # 函数用途: 兼容读取旧会话记录；缺少工具压缩数、checkpoint、失败状态或客户端目录时使用安全空值。
+    # LLM: Older records load with no provider calibration and zero live-tool compact sources;
+    # missing runtime facts are never inferred from summary prose.
+    # 函数用途: 兼容读取旧会话记录；缺少模型校准、工具压缩数、checkpoint、失败状态或客户端目录时使用安全空值。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
         bindings = data.get("channel_bindings")
@@ -396,6 +404,11 @@ class ConversationThread:
                 data.get("compact_failure_updated_at") or 0.0
             ),
             compact_failure_code=str(data.get("compact_failure_code") or ""),
+            provider_context_observation=(
+                data.get("provider_context_observation")
+                if isinstance(data.get("provider_context_observation"), dict)
+                else {}
+            ),
             compact_operation_evidence=(
                 data.get("compact_operation_evidence")
                 if isinstance(data.get("compact_operation_evidence"), dict)

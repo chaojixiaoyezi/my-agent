@@ -36,7 +36,15 @@ from .usage import (
 # 模块用途: 连接一次真实模型调用与账本、动态超时、流式活动观测和最终统计。
 
 
-def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, object]:
+# LLM: The caller may pass the exact precomputed context snapshot so timeout, ledger, TUI and
+# provider-observation calibration all share one measurement; fallback construction preserves old
+# auxiliary/test callers without creating a second accounting path.
+# 函数用途: 建立一次模型调用账本，并复用同一份上下文快照计算慢模型超时。
+def start_model_call_record(
+    request: object,
+    *,
+    context_snapshot: object | None = None,
+) -> tuple[ModelCallLedger, str, object]:
     agent = getattr(request, "agent", None)
     ledger = model_call_ledger(agent)
     prompt = getattr(request, "prompt", "") or ""
@@ -44,7 +52,8 @@ def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, obje
     # 记账口径与统一可见口径对齐（门槛1）：text 协议恒等，native 协议计入
     # IR messages/pending guidance/tools —— 首 token 预算按出站可见量估计，
     # 避免多轮工具后 prefill 时间低估（真机 600s ProviderTimeout 根因之一）。
-    context_snapshot = model_visible_context_snapshot(agent, params, prompt)
+    if context_snapshot is None:
+        context_snapshot = model_visible_context_snapshot(agent, params, prompt)
     input_tokens = context_snapshot.current_tokens
     estimate = estimate_first_token_timeout(
         FirstTokenTimeoutParams(

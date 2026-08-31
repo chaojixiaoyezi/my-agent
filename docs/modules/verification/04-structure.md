@@ -28,6 +28,9 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
    在进入工具 registry 前，同一入口先处理 conversation task promotion 和精确 mutation workspace：
    主代理从 thread sticky cwd 自动绑定当前 execution，child rebase 只能改变当前 runner 的
    `run_workspace` 并留下 host marker；随后的动态 write boundary 只信该结构化 marker，不信模型正文。
+   promotion 成功会先把 mutable 外层 `RunParams.task_attributes` 同步到当前冻结的
+   `ToolLoopExecuteParams.task_attributes` 投影，因此本轮第一条工作工具就能读取新建 task root；同步方向
+   永远是外层权威到工具快照，不能由模型参数或 handler 结果反向覆盖。
    精确写目标既可使用绝对路径，也可使用当前 thread 的 durable `owner_home` 下唯一规范的
    `tasks/...` 地址；普通相对路径、包含 `..` 的路径、跨多个 task 的路径都不会触发绑定。历史
    task/progress 菜单、`task_progress select/start` 和自然语言任务判断都不在执行链中。

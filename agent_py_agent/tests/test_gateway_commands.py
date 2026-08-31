@@ -766,3 +766,32 @@ class TestCmdGatewayUninstall:
         with patch("agent_py_agent.cli.gateway_process.uninstall_service", return_value=True):
             result = cmd_gateway_uninstall(args)
             assert result == 0
+
+
+class TestGatewayServiceWorkingDirectory:
+    """测试常驻服务不会从源码目录启动并遮蔽已安装 wheel。"""
+
+    def test_service_working_directory_uses_my_agent_home(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from agent_py_agent.cli import gateway_service
+
+        home = tmp_path / "agent-home"
+        monkeypatch.setenv("MY_AGENT_HOME", str(home))
+        monkeypatch.setattr(gateway_service, "_get_config_path", lambda: str(tmp_path / "missing.yaml"))
+
+        assert gateway_service._service_working_directory() == home / "service-cwd"
+
+    def test_service_files_use_neutral_working_directory(self, tmp_path: Path):
+        from agent_py_agent.cli import gateway_service
+
+        service_cwd = tmp_path / "agent-home" / "service-cwd"
+        with patch.object(gateway_service, "_service_working_directory", return_value=service_cwd):
+            systemd = gateway_service.generate_systemd_unit_text()
+            launchd = gateway_service.generate_launchd_plist_text()
+
+        assert f"WorkingDirectory={service_cwd}" in systemd
+        assert f"<string>{service_cwd}</string>" in launchd
+        assert f"WorkingDirectory={gateway_service.PROJECT_ROOT}" not in systemd

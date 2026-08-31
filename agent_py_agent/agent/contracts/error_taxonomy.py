@@ -162,6 +162,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="一次单项 update_persona 只能处理一个单行事实；多个事实使用一次 operations 批量调用。",
     ),
+    "PERSONA_UPDATE_RATE_LIMITED": ErrorContract(
+        code="PERSONA_UPDATE_RATE_LIMITED",
+        category="resource",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint=(
+            "当前 owner 的 USER 画像在 30 秒内已更新 3 次；同一条用户消息的多个事实应合并为一次 "
+            "operations 批量调用，或者等待窗口结束后以新的调用重试。"
+        ),
+    ),
     "MEMORY_TRANSIENT_DATA_BLOCKED": ErrorContract(
         code="MEMORY_TRANSIENT_DATA_BLOCKED",
         category="permission",

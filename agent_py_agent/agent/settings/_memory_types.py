@@ -26,6 +26,7 @@ class MemorySettings:
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
     memory_compact_auto_trigger_percent: int = 90
+    memory_compact_recovery_target_percent: int = 60
     memory_curator_enabled: bool = True
     memory_curator_provider: str = "auto"
     memory_curator_model: str = ""

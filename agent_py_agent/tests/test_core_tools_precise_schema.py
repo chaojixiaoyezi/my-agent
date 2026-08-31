@@ -15,12 +15,13 @@ def test_search_text_numeric_and_bool_params_precise():
     assert p["offset"]["type"] == "integer"
     assert p["context"]["type"] == "integer"
     assert p["literal"]["type"] == "boolean"
+    assert p["literal"]["default"] is False
     assert p["ignore_case"]["type"] == "boolean"
     assert p["include_ignored"]["type"] == "boolean"
     assert "只在当前本地工作区" in spec.description
     assert "不联网" in spec.description
     assert "不做语义搜索" in spec.description
-    assert "连续原文" in p["query"]["description"]
+    assert "ripgrep 正则语义" in p["query"]["description"]
 
 
 def test_run_command_timeout_and_background_precise():

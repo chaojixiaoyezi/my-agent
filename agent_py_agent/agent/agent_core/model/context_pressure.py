@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from dataclasses import dataclass
 
 from ...backends import ModelResponse, is_provider_context_window_error
@@ -8,9 +11,16 @@ from ...model_guidance import provider_system_instruction
 from ...prompting_parts.cache_layout import prompt_cache_layout
 from ..native_tool_protocol import native_tool_use_active, resolve_native_tools
 from ..runtime.context_compactor import runtime_compact_policy
+from .usage import provider_visible_input_token_usage
 
 # LLM: 本模块是模型调用前的 context-pressure 判定入口；阈值必须只来自 runtime_compact_policy，不能再加隐藏百分比或未来输出预留。
 # 模块用途: 在当前输入达到配置的 compact 阈值或工具上下文溢出时，返回结构化压缩信号并阻止继续堆入大输出。
+
+_PROVIDER_CONTEXT_OBSERVATION_KEY = "_provider_context_observation"
+_PROVIDER_CONTEXT_HYDRATION_KEY = "_provider_context_observation_hydrated_surfaces"
+_PROVIDER_CONTEXT_OBSERVATION_SCHEMA = "provider_context_observation.v2"
+_DURABLE_CALIBRATION_SCOPE = "durable_thread"
+_CURRENT_RUN_CALIBRATION_SCOPE = "current_run"
 
 
 @dataclass(frozen=True)
@@ -36,6 +46,10 @@ class ModelVisibleContextSnapshot:
     runtime_guidance_tokens: int
     tool_schema_tokens: int
     protocol: str
+    # 未校准的本地保守估算只在调用边界内传递，不进入 TUI 事件。
+    raw_estimated_tokens: int
+    # 稳定 system/prompt/tool surface 只保存摘要指纹，不进入公开 TUI 事件。
+    context_surface_fingerprint: str
 
     # LLM: Public serialization exposes only bounded numeric facts and the frozen schema id;
     # prompts, messages, tool definitions, and guidance content must never enter the UI event.
@@ -65,11 +79,18 @@ def model_visible_context_snapshot(
     params: object | None,
     prompt: object,
 ) -> ModelVisibleContextSnapshot:
-    protocol, current, components = _model_visible_context_components(
+    protocol, raw_current, components, surface_fingerprint = _model_visible_context_components(
         agent,
         params,
         prompt,
     )
+    current = _provider_calibrated_context_tokens(
+        agent,
+        params,
+        raw_current,
+        context_surface_fingerprint=surface_fingerprint,
+    )
+    components = _rescale_context_components(current, components)
     policy = runtime_compact_policy(
         agent,
         save=_params_save_enabled(agent, params),
@@ -89,6 +110,8 @@ def model_visible_context_snapshot(
         runtime_guidance_tokens=components["runtime_guidance_tokens"],
         tool_schema_tokens=components["tool_schema_tokens"],
         protocol=protocol,
+        raw_estimated_tokens=raw_current,
+        context_surface_fingerprint=surface_fingerprint,
     )
 
 
@@ -189,7 +212,220 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
 # fixed schema disappear from the compact decision.
 # 函数用途: 统一统计文字 prompt、原生工具 schema、原生工具消息和待转发运行时引导。
 def model_visible_context_tokens(agent: object, params: object, prompt: object) -> int:
-    return _model_visible_context_components(agent, params, prompt)[1]
+    _protocol, raw, _components, surface_fingerprint = _model_visible_context_components(
+        agent,
+        params,
+        prompt,
+    )
+    return _provider_calibrated_context_tokens(
+        agent,
+        params,
+        raw,
+        context_surface_fingerprint=surface_fingerprint,
+    )
+
+
+# LLM: A successful provider call is the only authority allowed to calibrate the estimator. The
+# numeric observation is copied to the exact ConversationThread with a compact-generation CAS so
+# a background wake can reuse it; provider errors and synthetic responses never create a baseline.
+# 函数用途: 记住并持久化上一次真实模型调用的“本地估算/厂商实际”对照，供本轮和后续后台唤醒减少误压缩。
+def record_provider_context_observation(
+    agent: object,
+    params: object,
+    *,
+    raw_estimated_tokens: int,
+    context_surface_fingerprint: str,
+    response: object,
+) -> bool:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    if str(getattr(response, "runtime_status", "") or "").strip().lower() == (
+        "context_overflow"
+    ):
+        return False
+    observed = provider_visible_input_token_usage(response)
+    raw = max(0, int(raw_estimated_tokens or 0))
+    if observed is None or observed <= 0 or raw <= 0:
+        state.pop(_PROVIDER_CONTEXT_OBSERVATION_KEY, None)
+        _persist_provider_context_observation(agent, params, {})
+        return False
+    fingerprint = str(context_surface_fingerprint or "").strip()
+    if not fingerprint:
+        state.pop(_PROVIDER_CONTEXT_OBSERVATION_KEY, None)
+        return False
+    observation = {
+        "schema": _PROVIDER_CONTEXT_OBSERVATION_SCHEMA,
+        "raw_estimated_tokens": raw,
+        "provider_input_tokens": max(1, int(observed)),
+        "context_surface_fingerprint": fingerprint,
+        "observed_at": time.time(),
+    }
+    state[_PROVIDER_CONTEXT_OBSERVATION_KEY] = {
+        **observation,
+        "_calibration_scope": _CURRENT_RUN_CALIBRATION_SCOPE,
+    }
+    _persist_provider_context_observation(agent, params, observation)
+    return True
+
+
+# LLM: Any history rewrite breaks the current-run append-only delta. The canonical Compact CAS
+# clears the durable thread field; this helper removes the in-memory copy only after commit.
+# 函数用途: 在真正改写模型历史后清除本轮旧校准点，下一次真实调用重新建立基线。
+def invalidate_provider_context_observation(params: object) -> bool:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    return state.pop(_PROVIDER_CONTEXT_OBSERVATION_KEY, None) is not None
+
+
+# LLM: Current-run observations use 会话运行时 provider baseline plus append-only local growth.
+# A reconstructed background slice may have replaced raw pairs with the same-generation handoff;
+# for that durable observation use a conservative ratio (never below 50%) and charge all positive
+# raw growth at full price. Fingerprint/generation mismatches always fall back to the raw estimate.
+# 函数用途: 用服务端实际 token 校准本轮追加内容，并让后台唤醒在相同请求表面下安全复用会话级基线。
+def _provider_calibrated_context_tokens(
+    agent: object,
+    params: object,
+    raw_tokens: int,
+    *,
+    context_surface_fingerprint: str,
+) -> int:
+    raw = max(0, int(raw_tokens or 0))
+    observation = _provider_context_observation(
+        agent,
+        params,
+        context_surface_fingerprint=context_surface_fingerprint,
+    )
+    if not observation:
+        return raw
+    try:
+        observed_raw = int(observation.get("raw_estimated_tokens") or 0)
+        provider_input = int(observation.get("provider_input_tokens") or 0)
+    except (TypeError, ValueError):
+        return raw
+    if observed_raw <= 0 or provider_input <= 0:
+        return raw
+    if str(observation.get("_calibration_scope") or "") != _DURABLE_CALIBRATION_SCOPE:
+        if raw < observed_raw:
+            return raw
+        return provider_input + (raw - observed_raw)
+    conservative_ratio_input = max(provider_input, (observed_raw + 1) // 2)
+    scaled = (raw * conservative_ratio_input + observed_raw - 1) // observed_raw
+    if raw < observed_raw:
+        return scaled
+    return max(scaled, provider_input + (raw - observed_raw))
+
+
+# LLM: Hydration reads only the exact structured agent/conversation thread id and validates the
+# compact generation plus stable request-surface fingerprint. Summary prose, cwd and prompt text
+# never select another observation, and a corrupt/missing record simply restores raw estimation.
+# 函数用途: 从当前会话线程按需加载上一次模型真实输入量；每个请求表面每轮最多查一次磁盘。
+def _provider_context_observation(
+    agent: object,
+    params: object,
+    *,
+    context_surface_fingerprint: str,
+) -> dict[str, object]:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return {}
+    fingerprint = str(context_surface_fingerprint or "").strip()
+    current = state.get(_PROVIDER_CONTEXT_OBSERVATION_KEY)
+    if _provider_observation_matches(current, fingerprint):
+        return current
+    hydrated = state.get(_PROVIDER_CONTEXT_HYDRATION_KEY)
+    if not isinstance(hydrated, set):
+        hydrated = set()
+        state[_PROVIDER_CONTEXT_HYDRATION_KEY] = hydrated
+    if fingerprint in hydrated:
+        return {}
+    hydrated.add(fingerprint)
+    _store, _thread_id, thread = _provider_observation_thread(agent, params)
+    if thread is None:
+        return {}
+    observation = getattr(thread, "provider_context_observation", None)
+    if not _provider_observation_matches(observation, fingerprint):
+        return {}
+    try:
+        recorded_generation = int(observation.get("compact_generation") or 0)
+        current_generation = int(getattr(thread, "compact_generation", 0) or 0)
+    except (TypeError, ValueError):
+        return {}
+    if recorded_generation != current_generation:
+        return {}
+    durable = {**dict(observation), "_calibration_scope": _DURABLE_CALIBRATION_SCOPE}
+    state[_PROVIDER_CONTEXT_OBSERVATION_KEY] = durable
+    return durable
+
+
+# LLM: Durable observation writes are fenced by the thread compact generation and are best-effort
+# telemetry after a successful provider response; failure must not turn a good model call into a
+# failed user turn. The store owns atomicity and deliberately does not advance thread recency.
+# 函数用途: 把校准值写入当前主/子代理的精确会话线程；没有会话或发生并发压缩时静默放弃。
+def _persist_provider_context_observation(
+    agent: object,
+    params: object,
+    observation: dict[str, object],
+) -> bool:
+    store, thread_id, thread = _provider_observation_thread(agent, params)
+    updater = getattr(store, "update_provider_context_observation", None)
+    if thread is None or not thread_id or not callable(updater):
+        return False
+    generation = max(0, int(getattr(thread, "compact_generation", 0) or 0))
+    payload = dict(observation)
+    if payload:
+        payload["compact_generation"] = generation
+    try:
+        updated = updater(
+            thread_id,
+            payload,
+            expected_compact_generation=generation,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return (
+        max(0, int(getattr(updated, "compact_generation", 0) or 0)) == generation
+        and dict(getattr(updated, "provider_context_observation", {}) or {}) == payload
+    )
+
+
+# LLM: Agent thread id wins for delegated runs; otherwise the durable foreground conversation id
+# is used. Both are host-authored task attributes, never values parsed from user/model language.
+# 函数用途: 定位当前模型调用所属的唯一会话记录，供校准读取和保存。
+def _provider_observation_thread(
+    agent: object,
+    params: object,
+) -> tuple[object | None, str, object | None]:
+    attributes = getattr(params, "task_attributes", None)
+    attributes = attributes if isinstance(attributes, dict) else {}
+    thread_id = str(
+        attributes.get("agent_thread_id")
+        or attributes.get("conversation_thread_id")
+        or ""
+    ).strip()
+    store = getattr(agent, "conversation_store", None)
+    loader = getattr(store, "load_thread_report", None)
+    if not thread_id or not callable(loader):
+        return store, thread_id, None
+    try:
+        thread, error = loader(thread_id)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return store, thread_id, None
+    return store, thread_id, thread if error is None else None
+
+
+# LLM: Validation is intentionally closed: only this schema and an exact stable-surface digest may
+# affect a compact decision. Private calibration scope is added after load and ignored here.
+# 函数用途: 校验一条供应商上下文观测是否适用于当前模型请求表面。
+def _provider_observation_matches(observation: object, fingerprint: str) -> bool:
+    if not isinstance(observation, dict):
+        return False
+    return (
+        observation.get("schema") == _PROVIDER_CONTEXT_OBSERVATION_SCHEMA
+        and bool(fingerprint)
+        and str(observation.get("context_surface_fingerprint") or "") == fingerprint
+    )
 
 
 # LLM: Component estimates are derived only from the four actual provider-visible values. They
@@ -199,7 +435,7 @@ def _model_visible_context_components(
     agent: object,
     params: object | None,
     prompt: object,
-) -> tuple[str, int, dict[str, int]]:
+) -> tuple[str, int, dict[str, int], str]:
     system_instruction = provider_system_instruction(getattr(agent, "backend", None))
     if not native_tool_use_active(params):
         prompt_surface = {
@@ -216,6 +452,13 @@ def _model_visible_context_components(
                 "runtime_guidance_tokens": 0,
                 "tool_schema_tokens": 0,
             },
+            _stable_context_surface_fingerprint(
+                agent,
+                protocol="text",
+                system_instruction=system_instruction,
+                prompt_surface=str(prompt or ""),
+                tools=None,
+            ),
         )
 
     from ...backends.message_adapter import AnthropicMessageAdapter
@@ -270,7 +513,52 @@ def _model_visible_context_components(
             ("tool_schema_tokens", tools),
         ),
     )
-    return "native", current, components
+    return (
+        "native",
+        current,
+        components,
+        _stable_context_surface_fingerprint(
+            agent,
+            protocol="native",
+            system_instruction=system_instruction,
+            prompt_surface=provider_prompt,
+            tools=tools,
+        ),
+    )
+
+
+# LLM: This digest names only byte-stable provider request surfaces. Conversation messages,
+# current-turn tool results and runtime guidance remain append-only variable input and are excluded;
+# changing the backend, model, system prefix, stable prompt adjunct or tool schema invalidates reuse.
+# 函数用途: 为跨后台轮次的模型校准生成稳定指纹，只保存哈希而不把提示词或工具定义写进线程状态。
+def _stable_context_surface_fingerprint(
+    agent: object,
+    *,
+    protocol: str,
+    system_instruction: str,
+    prompt_surface: str,
+    tools: object,
+) -> str:
+    backend = getattr(agent, "backend", None)
+    payload = {
+        "backend": str(getattr(backend, "name", "") or ""),
+        "model": str(
+            getattr(backend, "model_name", "")
+            or getattr(getattr(agent, "config", None), "model_name", "")
+            or ""
+        ),
+        "protocol": str(protocol or ""),
+        "system_instruction": str(system_instruction or ""),
+        "prompt_surface": str(prompt_surface or ""),
+        "tools": tools if isinstance(tools, list) else [],
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 # LLM: CacheStructuredPrompt keeps the canonical current user turn in its diagnostic string, but
@@ -322,6 +610,36 @@ def _normalize_context_component_tokens(
         key: allocated[index]
         for index, (key, _) in enumerate(values)
     }
+
+
+# LLM: Provider calibration changes only the total, not the private category payloads. Rescale the
+# already-normalized numeric shares with deterministic largest-remainder allocation so the public
+# component sum remains exactly equal to current_tokens without exposing any source content.
+# 函数用途: 将 prompt/messages/tools 等原始占比缩放到校准后的总 token，保证状态条加总一致。
+def _rescale_context_components(
+    total_tokens: int,
+    components: dict[str, int],
+) -> dict[str, int]:
+    keys = (
+        "prompt_tokens",
+        "messages_tokens",
+        "runtime_guidance_tokens",
+        "tool_schema_tokens",
+    )
+    total = max(0, int(total_tokens or 0))
+    weights = [max(0, int(components.get(key, 0) or 0)) for key in keys]
+    weight_total = sum(weights)
+    if weight_total <= 0:
+        return {key: total if index == 0 else 0 for index, key in enumerate(keys)}
+    allocated = [weight * total // weight_total for weight in weights]
+    remainder = total - sum(allocated)
+    order = sorted(
+        range(len(keys)),
+        key=lambda index: (-(weights[index] * total % weight_total), index),
+    )
+    for index in order[:remainder]:
+        allocated[index] += 1
+    return {key: allocated[index] for index, key in enumerate(keys)}
 
 
 # LLM: save 的请求级显式值优先于 Agent 默认值，保持与 runtime_compact_policy 的保存语义一致。
@@ -448,7 +766,9 @@ __all__ = [
     "model_visible_context_budget",
     "model_visible_context_snapshot",
     "model_visible_context_tokens",
+    "invalidate_provider_context_observation",
     "preflight_context_pressure_response",
+    "record_provider_context_observation",
     "safe_inline_tool_result_tokens",
     "should_compact_before_more_tool_output",
 ]

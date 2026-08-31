@@ -1,5 +1,43 @@
 # COMPLETED
 
+## 2026-08-31 R116/R117 provider 上下文观察与 TUI 后台 final 持久化
+
+- provider context estimator 不再只靠本地 token 近似：成功调用把数值观察以稳定请求指纹和 Compact
+  generation CAS 写入 exact ConversationThread。动态消息不会破坏指纹；不匹配、缺 usage 与过期观察均
+  保守回退。R116 u323 的立即追问命中 `32,418` cache-read / `8,061` input，主代理保持 compact 0；u324
+  自然越线后只 Compact 一次并继续，关闭旧版本同类任务频繁重压的成本缺口。
+- 本地 TUI 的 delivery channel 明确属于 transcript-capable channel。后台 main 的 commentary/final 与前台
+  assistant 一样先幂等提交 ConversationStore，`background_notice` 只投影“有新消息”，不能代替模型历史。
+  重试按 exact wake id/part id 去重，未知外部 route 保持 fail closed。
+- R117b u326 在发追问前直接核对 raw thread：schema v8、11 条 messages、6 条后台 commentary、1 条后台
+  final；追问随后准确召回两个 child 报告、marker 与 357 行总报告。此前 u325 因 Gateway cwd 位于旧源码
+  checkout 而导入 schema v7，保留为部署负样本；当前 wheel runtime 从 `/root` 启动并核对模块来源。
+- 相关 background runtime、delivery、notice、conversation history 与 provider observation focused 已通过；
+  本轮生产/测试代码增减低于 10,000 行，按约定不重复全仓 pytest。
+
+## 2026-08-30 R114t/R114r/R114q/R114n/R114v 长会话底座收口
+
+- pending conversation 不再把 owner 根冒充工作 cwd；首个工作工具固定 canonical task root 后 main/child/
+  grandchild 共用该根。`.10` fresh u313 六 child 同根，owner-path 拒绝为 0，后续续作与手动 Compact 仍能召回。
+- 跨后台工作片的 active-turn archive 只能经 ConversationThread checkpoint/CAS 被摘要替换；u314 八 child
+  完成、三代真实 Compact、367 行总报告与 3.17M provider cache-read 均有账，普通恢复不再暗中缩短上下文。
+- 60% recovery target 已同时作用于 transcript/live-tool；u314 每代 source replacement 均低于目标，后续
+  增长来自新工作，不是同一候选贴线重压。完整 raw archive、Todo、child、产物和 final 保留。
+- 后台 main 保留 owner-scoped Skill/Memory/Persona 工具；u316 自然完成 Skill、四 child、受管服务、两分钟
+  复查和三项 USER 偏好写入，SOUL 与其它 owner 未改。
+- systemd/launchd Gateway 服务 cwd 改为 `<MY_AGENT_HOME>/service-cwd`，不再绑定安装时源码 checkout。
+  wheel `41f752d...` 已从 `/root`/site-packages 启动 `.10` 唯一 8420 Gateway；相关 focused 与本轮全部变更
+  测试文件通过。连续 8 代后的公平 yield 仍列 R114u 真机观察，不在本完成项提前勾选。
+
+## 2026-08-30 R114s Persona 写入限频 owner 隔离
+
+- 解决同一 Gateway 的进程级 Persona 写入时间窗让不同 owner 互相消耗额度的问题；限频现在按 canonical
+  owner home 分桶，过期 bucket 有界清理，同 owner 仍保留 30 秒 3 次保护。
+- `PERSONA_UPDATE_RATE_LIMITED` 已进入统一错误 taxonomy，拒绝明确为 `effect_outcome=not_started` 并支持
+  退避，不再被工具运行层升级为 UNKNOWN/DIRTY。
+- 38 项 focused 与 Ruff 通过；`.10` 单 Gateway 的两个 fresh owner 各三次真实写入全部成功，磁盘无串写，
+  两个同 owner 新 TUI 均在零读取工具情况下准确召回各自三项。
+
 - 2026-08-30 完成 R113 本地底座候选：会话运行时/终端交互 式 Todo 实时更新与回复前核对被压成每轮
   Workspace Context 的短纪律，替换旧说明且继续受现有开关控制；宿主仍不自动打勾、不追加隐藏模型轮、
   不以 open Todo 拦截 final。Conversation Compact 现在优先保留 provider typed error code，并沿

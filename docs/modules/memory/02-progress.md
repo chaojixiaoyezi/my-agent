@@ -127,3 +127,13 @@
   resume context；未发现记忆模块新增缺陷。
 - resume 链（run --resume）在多次 429 配额中断下跨进程恢复，memory archive 的
   recovery snapshot 与任务事实源保持一致性，无记忆污染。
+## 2026-08-30 Persona 写入限频 owner 隔离
+
+- `.10` 双 owner 同时维护 `USER.md` 时，旧进程级 30 秒写入计数发生串扰：一个 owner 的合法写入消耗了
+  另一个 owner 的额度。被拒调用虽有 `PERSONA_UPDATE_RATE_LIMITED`，但没有明确副作用终态且 taxonomy
+  漏登记，运行层将它升级成 `TOOL_OPERATION_OUTCOME_UNKNOWN`。
+- 当前按 canonical owner home 保存独立时间窗，旧 owner bucket 每个窗口有界清理；同一 owner 仍保留 30 秒
+  最多 3 次写保护，跨 owner 永不共享额度。限频结果明确为 `not_started`，错误 taxonomy 支持退避，推荐同一
+  用户消息内的多个事实使用一次 operations 合批。
+- 38 项 Persona/错误/恢复/幂等 focused 与相关 Ruff 已通过；唯一 Gateway 下 u310/u311 并发各写三项的六条
+  operation 全部成功，各自 `USER.md` 无交叉；同 owner 新 TUI 无工具读取准确召回三项，真实验收通过。

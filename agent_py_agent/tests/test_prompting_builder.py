@@ -124,9 +124,10 @@ class TestPromptBuilderInit:
         )
 
         assert "尚未建立任务写入目录" in projected
-        assert "output/..." in projected
-        assert "work/..." in projected
-        assert "不要把上面的宿主工作目录拼成绝对写路径" in projected
+        assert "新产物继续使用相对路径" in projected
+        assert "首个工作工具调用时由宿主固定到本轮任务目录" in projected
+        assert str(tmp_path.resolve()) not in projected
+        assert "不要把 owner 私人空间或宿主目录拼成绝对写路径" in projected
 
     def test_group_owner_scope_is_shared_without_exposing_owner_id(self, tmp_path):
         builder = PromptBuilder(

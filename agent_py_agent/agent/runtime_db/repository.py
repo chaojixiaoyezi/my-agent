@@ -4,7 +4,8 @@
 - 主链（A.4）：Task → TaskRun → AgentRun 树 → AgentAttempt 的创建与读取。
 - 不可变委托（A.7）：child 必须先建自己的 AgentAttempt 才能被 delegate。
 - current attempt pointer（F.2/F.3）：create_attempt 以 CAS 递增 generation
-  并替换 agent_runs.current_attempt_id；旧 attempt 行是不可变历史（F.7）。
+  并替换 agent_runs.current_attempt_id；旧 attempt 的身份与执行事实不可改写，
+  但其生命周期必须在换代事务内收口，不能留下非 current 的幽灵 RUNNING。
 - WorkspaceBinding / root claims（D 节）：绑定承载可读写根集合与 epoch，
   同一物理写根在库内唯一声明（D.5）。
 - runtime_events（A.3）：append-only 权威事件流，每事件追到 attempt（A.8）。
@@ -521,6 +522,40 @@ class RuntimeRepository(
             conn.commit()
         return recovered
 
+    # LLM: This upgrade repair trusts only the current_attempt pointer, never PID age or model
+    # prose. A non-current pending/running row has no execution authority and must use the same
+    # UNKNOWN/DIRTY cleanup as live takeover. Owner supervision calls this as an idempotent no-op.
+    # 函数用途: 清理旧版本遗留的非 current 幽灵运行轮，返回实际收口的 attempt ID。
+    def reconcile_superseded_attempts(self, *, now: float | None = None) -> list[str]:
+        current = time.time() if now is None else now
+        reconciled: list[str] = []
+        with self.transaction() as conn:
+            runs = conn.execute(
+                "SELECT DISTINCT ar.agent_run_id, ar.current_attempt_id, "
+                "ar.current_attempt_generation, ar.task_run_id "
+                "FROM agent_runs ar JOIN agent_attempts aa "
+                "ON aa.agent_run_id = ar.agent_run_id "
+                "WHERE ar.current_attempt_id != '' "
+                "AND aa.attempt_id != ar.current_attempt_id "
+                "AND aa.status IN (?, 'running') AND aa.ended_at = 0",
+                (ATTEMPT_STATUS_PENDING,),
+            ).fetchall()
+            for run in runs:
+                reconciled.extend(
+                    self._supersede_noncurrent_attempts_conn(
+                        conn,
+                        agent_run_id=str(run["agent_run_id"] or ""),
+                        current_attempt_id=str(run["current_attempt_id"] or ""),
+                        current_generation=int(
+                            run["current_attempt_generation"] or 0
+                        ),
+                        task_run_id=str(run["task_run_id"] or ""),
+                        now=current,
+                        reason="stale_noncurrent_reconcile",
+                    )
+                )
+        return reconciled
+
     def task_id_for_run_id(self, run_id: str) -> str:
         """授权门同款 JOIN：run_id → 权威链 task_id（runner 身份回填用）。"""
         with self._runtime_connection() as conn:
@@ -723,9 +758,108 @@ class RuntimeRepository(
         assert row is not None
         return row
 
+    # LLM: current pointer is the sole execution-generation authority. This transaction helper
+    # closes every older active attempt and preserves uncertain effects as UNKNOWN/DIRTY; both
+    # live takeover and upgrade reconciliation must use this one implementation.
+    # 函数用途: 在事务内收口被当前执行轮替代的旧 attempt，并清理其锁和未知副作用账本。
+    def _supersede_noncurrent_attempts_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        agent_run_id: str,
+        current_attempt_id: str,
+        current_generation: int,
+        task_run_id: str,
+        now: float,
+        reason: str,
+        extra_cleanup_attempt_ids: tuple[str, ...] = (),
+    ) -> list[str]:
+        stale_attempts = conn.execute(
+            "SELECT attempt_id, attempt_generation, status FROM agent_attempts "
+            "WHERE agent_run_id = ? AND attempt_id != ? "
+            "AND status IN (?, 'running') AND ended_at = 0 "
+            "ORDER BY attempt_generation ASC",
+            (agent_run_id, current_attempt_id, ATTEMPT_STATUS_PENDING),
+        ).fetchall()
+        superseded_ids: list[str] = []
+        for stale_attempt in stale_attempts:
+            stale_attempt_id = str(stale_attempt["attempt_id"] or "")
+            updated_stale = conn.execute(
+                "UPDATE agent_attempts SET status = 'cancelled', ended_at = ? "
+                "WHERE attempt_id = ? AND status IN (?, 'running') AND ended_at = 0",
+                (now, stale_attempt_id, ATTEMPT_STATUS_PENDING),
+            ).rowcount
+            if updated_stale != 1:
+                raise RuntimeConflictError(
+                    f"旧 attempt 收口 CAS 失败: {stale_attempt_id}"
+                )
+            superseded_ids.append(stale_attempt_id)
+            self._append_event_conn(
+                conn,
+                event_type="agent_attempt.superseded",
+                attempt_id=stale_attempt_id,
+                agent_run_id=agent_run_id,
+                task_run_id=task_run_id,
+                payload={
+                    "previous_status": str(stale_attempt["status"] or ""),
+                    "status": "cancelled",
+                    "reason": reason,
+                    "superseded_by_attempt_id": current_attempt_id,
+                    "superseded_by_generation": current_generation,
+                },
+            )
+
+        cleanup_ids = list(superseded_ids)
+        for extra_attempt_id in extra_cleanup_attempt_ids:
+            normalized = str(extra_attempt_id or "").strip()
+            if normalized and normalized not in cleanup_ids:
+                cleanup_ids.append(normalized)
+        for cleanup_attempt_id in cleanup_ids:
+            # outcome_json 保留 holder/lease/resource_scopes 等 claim 元数据；
+            # 只追加结构化未知原因，不能整段覆盖后丢掉副作用追踪锚点。
+            stale_rows = conn.execute(
+                "SELECT operation_id, outcome_json FROM tool_operations "
+                "WHERE attempt_id = ? AND status IN ('CLAIMED', 'EXECUTING')",
+                (cleanup_attempt_id,),
+            ).fetchall()
+            for stale in stale_rows:
+                payload = {}
+                try:
+                    loaded = json.loads(stale["outcome_json"])
+                except (TypeError, json.JSONDecodeError):
+                    loaded = {}
+                if isinstance(loaded, dict):
+                    payload = dict(loaded)
+                payload["reason"] = reason
+                payload["unknown_reason"] = reason
+                conn.execute(
+                    "UPDATE tool_operations SET status = 'UNKNOWN', outcome_json = ?, "
+                    "updated_at = ? WHERE operation_id = ? "
+                    "AND status IN ('CLAIMED', 'EXECUTING')",
+                    (
+                        json.dumps(payload, ensure_ascii=False),
+                        now,
+                        stale["operation_id"],
+                    ),
+                )
+            # 非 current attempt 已永久失去执行权；UNKNOWN 是结果不可知终态，
+            # 旧锁必须释放，进行中 mutation 则保守标 DIRTY 等后续核对。
+            conn.execute(
+                "DELETE FROM resource_locks WHERE attempt_id = ?",
+                (cleanup_attempt_id,),
+            )
+            conn.execute(
+                "UPDATE resource_mutations SET state = 'DIRTY', dirty_reason = ?, "
+                "updated_at = ? WHERE attempt_id = ? AND state != 'DIRTY'",
+                (reason, now, cleanup_attempt_id),
+            )
+        return superseded_ids
+
     # LLM: 创建 attempt 的事务闸与后台只读 recovery 投影必须共用
     # _main_agent_recovery_reason；只读 preflight 不能替代这里的最终 CAS。
-    # 函数用途: 为现有 AgentRun 创建唯一新执行轮并原子取得执行权锁。
+    # 换代必须同时关闭所有非 current 的 active attempt，但不能把旧工具副作用
+    # 猜成成功：工具仍转 UNKNOWN、mutation 仍转 DIRTY。
+    # 函数用途: 为现有 AgentRun 创建唯一新执行轮，原子取得执行权并收掉旧运行态。
     def create_attempt(
         self,
         agent_run_id: str,
@@ -758,9 +892,11 @@ class RuntimeRepository(
         settle 终态即释放；takeover/接管同事务删旧锁。
 
         CAS 换代（F.2/F.3）：0 行命中 = 并发冲突，fail-closed；旧 attempt
-        行不可变（F.7）。G4 takeover（G4-4）原子收尾：旧 attempt 非终态
-        operation 统一转 UNKNOWN、mutation 标 DIRTY（旧 worker 即使还活着
-        也只能看到 UNKNOWN/DIRTY，无法盲重放）。
+        的 ID/generation/执行证据不改写，但生命周期原子转 cancelled，追加
+        agent_attempt.superseded 事件。历史版本遗留的其他非 current active
+        attempt 也在同一事务收口，避免幽灵 RUNNING 累积。G4 takeover
+        （G4-4）继续把旧 attempt 非终态 operation 统一转 UNKNOWN、mutation
+        标 DIRTY（旧 worker 即使还活着也只能看到 UNKNOWN/DIRTY，无法盲重放）。
 
         ``reuse_pending`` 只给真实 runner 启动路径使用：如果 current attempt
         仍是 pending，就原子激活 generation 1；``reject_running`` 同时阻止
@@ -935,52 +1071,18 @@ class RuntimeRepository(
                     "attempt_generation": generation,
                 },
             )
-            if old_attempt_id:
-                # outcome_json 保留 claim 元数据（holder/lease/resource_scopes/
-                # 幂等身份），takeover 原因并入 unknown_reason 键——整段覆盖会
-                # 抹掉 resource_scopes，旧 settle 被拒后的锁释放/标 DIRTY 拿
-                # 不到 scope（f2 sibling 撞锁）。
-                stale_rows = conn.execute(
-                    "SELECT operation_id, outcome_json FROM tool_operations "
-                    "WHERE attempt_id = ? AND status IN ('CLAIMED', 'EXECUTING')",
-                    (old_attempt_id,),
-                ).fetchall()
-                for stale in stale_rows:
-                    payload = {}
-                    try:
-                        loaded = json.loads(stale["outcome_json"])
-                    except (TypeError, json.JSONDecodeError):
-                        loaded = {}
-                    if isinstance(loaded, dict):
-                        payload = dict(loaded)
-                    payload["reason"] = "takeover_recovery"
-                    payload["unknown_reason"] = "takeover_recovery"
-                    conn.execute(
-                        """
-                        UPDATE tool_operations
-                        SET status = 'UNKNOWN', outcome_json = ?, updated_at = ?
-                        WHERE operation_id = ? AND status IN ('CLAIMED', 'EXECUTING')
-                        """,
-                        (json.dumps(payload, ensure_ascii=False), now, stale["operation_id"]),
-                    )
-                # seq 253 补：takeover 把旧 attempt 的非终态操作统一转 UNKNOWN
-                # 后，其持有锁必须同事务释放——UNKNOWN 是终态（结果不可知、
-                # worker 已不可信、不会再有人来 settle/删锁），锁残留会让同
-                # scope 的任何后续 claim 撞 UNIQUE(canonical_scope) 死锁（f2
-                # sibling），与 settle 终态删锁/_mark_unknown_single_transaction
-                # 的「终态即释放」语义一致。
-                conn.execute(
-                    "DELETE FROM resource_locks WHERE attempt_id = ?",
-                    (old_attempt_id,),
-                )
-                conn.execute(
-                    """
-                    UPDATE resource_mutations
-                    SET state = 'DIRTY', dirty_reason = 'takeover_recovery', updated_at = ?
-                    WHERE attempt_id = ? AND state != 'DIRTY'
-                    """,
-                    (now, old_attempt_id),
-                )
+            # current pointer 已成功换代：统一收掉旧 active attempt。正常只有
+            # old_attempt_id；全量查询同时修复升级前遗留的幽灵 RUNNING/PENDING。
+            self._supersede_noncurrent_attempts_conn(
+                conn,
+                agent_run_id=agent_run_id,
+                current_attempt_id=attempt_id,
+                current_generation=generation,
+                task_run_id=str(run["task_run_id"] or ""),
+                now=now,
+                reason="takeover_recovery",
+                extra_cleanup_attempt_ids=(old_attempt_id,),
+            )
             conn.commit()
         row = self.get_attempt(attempt_id)
         assert row is not None

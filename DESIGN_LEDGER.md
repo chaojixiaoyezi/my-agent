@@ -1,5 +1,231 @@
 # DESIGN LEDGER
 
+## 2026-08-31 TUI 后台回复必须先成为 canonical history【状态：R117b 真 TUI 通过】
+
+- 对照 会话运行时 `会话运行时-rs/core/src/stream_events_utils.rs` 与 `session/inject.rs`：完成的 assistant response item
+  先进入会话历史，TUI event/feed 只是同一事实的展示。my-agent 因而把本地 `channel=tui` 明确定义为
+  transcript-capable delivery；后台 main 的 model-authored commentary/final 必须与前台一样先按 exact
+  thread/request/wake/part 幂等提交 ConversationStore，notice 只能提示附着客户端读取新消息。
+- 该规则不把全部 channel 默认当成本地会话。未知外部 route、没有可靠回送/会话身份的 adapter 继续
+  fail closed；delivery status 可以是 `not_applicable`，但只要 authenticated TUI thread 是正文权威，模型
+  历史提交就不能因没有 TUI adapter 而省略。重试不能重复 final，也不能让 notice 反向成为历史事实源。
+- `.10` R117b u326 在任何追问前直接核对 raw thread，确认 6 条 background commentary 和 1 条 final 已在
+  schema v8 messages 中；随后追问准确召回。R117 u325 因旧源码 checkout 遮蔽 wheel 而失败，不能算代码
+  回归失败或真机通过；部署验收必须同时核对 Gateway cwd、`module.__file__`、schema 与行为。
+
+## 2026-08-31 provider 上下文观察只是一代内的数值校准【状态：R116 真 TUI 通过】
+
+- provider usage 中的 context observation 只校准 exact backend/model/protocol/system/stable-prompt/tools
+  指纹与当前 Compact generation。动态 messages/guidance 不进指纹，避免每轮都失效；但观察不能跨模型、
+  system/tools 变化或 Compact 代次复用。CAS 失败、usage 缺失或代次漂移都回退原始估算。
+- 该观察不是累计 token、计费或任务完成事实；累计成本仍只读 ModelCallLedger，Compact 次数仍只读
+  ConversationThread generation。u323/u324 分别证明低估时不乱压、真实越线时只提交一次再继续。
+
+## 2026-08-31 wheel 运行时不得由旧源码 cwd 取得 import 优先级【状态：R117b 已纠正】
+
+- `pip install` 成功不等于运行进程使用新代码。若 Gateway cwd 是另一份 Python package checkout，空字符串
+  `sys.path` 会让该目录先于 site-packages；本轮直接表现为 R117 wheel 已安装但 schema 仍为 v7、TUI channel
+  仍不支持 transcript。
+- wheel 验收从中性 cwd（当前测试机为 `/root`，托管服务为 `<MY_AGENT_HOME>/service-cwd`）启动，并同时核对
+  唯一 listener、模型配置、`module.__file__`/schema 与真实 TUI 行为。源码运行模式则必须明确要求 checkout
+  与待验 revision 完全一致，不能混用两种部署身份。
+
+## 2026-08-30 后台连续 Compact 达到公平切片上限时必须干净让出【状态：R114u 已部署，fresh 长任务观察中】
+
+- `.10` 旧长会话 `r114r-u305` 在同一后台 active turn 连续推进 13 代 Compact；旧循环每个 scheduler slice
+  最多允许 8 次以避免一个 owner 长时间独占 Gateway，但第 8 次后抛普通 `RuntimeError`。外层因此把健康的
+  有进展切片记成 failed claim、输出假错误，再由未消费 wake 偶然续跑完成。上下文没丢，状态和恢复语义却
+  错了，慢模型或超长任务尤其容易撞到。
+- 公平上限继续保留为 8，不改成无界循环，也不靠增大超时掩盖。第 8 次后改发内部 typed yield；activity 正常
+  收口、run claim 以 finished 结束，原 wake/observation/policy 保持未消费，下一 scheduler slice 从 canonical
+  checkpoint/generation 续跑。它不增加 policy failure_count、不打印程序崩溃，也不从模型正文判断进展。
+- focused 覆盖连续 8 代后抛 typed yield、claim 干净关闭、wake 仍可再取以及普通异常仍失败；本地所有本轮
+  变更测试文件通过。wheel `41f752dae9894e57ef5a38fe331a399598f99ff1cdc1616dad56ffffd11138a4`
+  已部署到 `.10` 唯一 `ma-gateway-r114u-110-wheel`。部署时 GORM 长任务的 7 个 live child 均按原 run
+  reclaim/revive，没有重复创建或假终态；真正自然跨 8 代的 fresh 样本继续观察，不用旧失败倒推新实现通过。
+
+## 2026-08-30 托管 Gateway 的 service cwd 不得绑定安装时源码目录【状态：R114v 已部署】
+
+- 旧 systemd/launchd 生成器把安装命令执行时的 `cwd` 写进服务定义；如果恰好在源码 checkout 安装，后续即使
+  wheel 已升级，Python 仍可能优先加载旧 checkout，造成“pip 显示新版本、运行行为仍是旧代码”。这也是本轮
+  首个 fresh TUI 误连旧源码 Gateway 的根因，不是模型或配置漂移。
+- 生成服务现在统一使用 `<MY_AGENT_HOME>/service-cwd` 中性目录；目录由安装流程建立，只承载进程 cwd，不是
+  workspace、owner home 或第二份运行时事实。模型、密钥与用户任务仍从现有 config/owner/task 权威路径解析。
+- systemd 与 launchd 定向测试锁定中性目录和参数；`.10` 手动验收也从 `/root` 启动安装 wheel，模块路径为
+  venv `site-packages`，8420 始终只有一个 listener。以后重新生成服务后不会再被某个 checkout 阴影覆盖。
+
+## 2026-08-30 任务晋升前不得把 owner 根目录冒充 turn cwd【状态：R114t `.10` fresh 真 TUI 通过】
+
+- `.10` `ma-r114r-110-u305-sequential-long` 的首轮模型提示把 owner home 显示成“当前工具工作目录”。模型据此
+  把该绝对路径复制进 7 个 `create_subagents.items[].goal`；工具执行前任务晋升又正确建立了 canonical
+  task root。所有 child 因而在正确 cwd 中尝试访问错误的 owner-root 目标，被 `WRITE_FORBIDDEN` 拦截并
+  产生 capability 重试。安全墙没有失效，问题是首轮模型视图与随后工具视图不一致。
+- 对照 会话运行时 `会话运行时-rs/core/src/session/turn_context.rs`：每轮只有一个 `TurnContext.cwd`，模型相对路径、执行、
+  sandbox 与审批都从同一值解析。本项目仍保留“普通聊天不预建任务目录”的既有语义，但 pending turn 不再
+  暴露 owner 绝对根为产物 cwd；模型视图只说明读取已有资料使用相对路径，首个结构化工作工具会固定任务
+  cwd，之后继续使用相对路径。持久 context bundle 仍保留完整 owner refs，只有短模型投影隐藏这些宿主路径。
+- 该修复不扫描用户 prompt 或 child goal，不重写模型自然语言，不放宽 owner 权限，也不为每条闲聊创建空
+  task。`run_workspace` 一旦建立，原有 canonical task root 继续成为模型、工具、审批、child/grandchild 的
+  唯一 cwd。另将 `gwreq-` / `gwreq_` 纳入机器 ID 识别，任务目录名回退到可读用户标题，不再直接使用请求号。
+- 本地 prompting/context-bundle/task-title focused 94 项、Ruff 与 PyCompile 通过。下一步使用 fresh
+  MiniMax-M2.7 TUI 重跑多 child 创建任务，核对首批 goal、main/child cwd、产物位置、拒绝数与可读目录名。
+- `.10` fresh `ma-r114t-110-u313-cwd-subagents-wheel` 只输入一次原样超级玛丽多子代理任务：首轮模型不再
+  看到 owner 绝对根，6 名 child 的 goal 均使用相对目标，main/child 全部固定到同一个可读 canonical task
+  root；`WRITE_FORBIDDEN` 与 owner-root 泄漏均为 0。后续同 thread 继续补 README 并准确记住原目录，手动
+  Compact generation 1 后仍可召回关卡和路径。
+
+## 2026-08-30 跨工作片 active turn 必须提交真实 Compact【状态：R114r `.10` fresh 真 TUI 通过】
+
+- `.10` `ma-r114o-110-u299-pdf-skill` 的 `/context` 一度显示约 `104.3k/128k`、`compact 0`；同一任务随后
+  在没有 Compact generation 的情况下回落到约 66.9k。权威账本里当前 request 已有 73 次主代理工具调用，
+  assistant metadata 又携带约 99k 字符 `canonical_native_messages`。因此并非 TUI 计数坏了，而是新的
+  `Agent.run` 工作片用有界 handoff 暗中缩短模型视图，却没有把替换边界提交到 ConversationThread。
+- 对照 会话运行时 `会话运行时-rs/core/src/compact.rs`：mid-turn Compact 直接用摘要和有界近期 user items 替换当前
+  history，再继续同一 turn；对照 终端交互 `src/services/compact/compact.ts` 与 `src/query.ts`：调用方把
+  `messagesForQuery/allMessages` 原位替换成 boundary + summary + retained messages。两者都不把“本轮做过新工具”
+  当成可以无账重启的理由。
+- 当前把跨工作片工具历史拆成两种投影，但仍只有一份事实源：完整 owner archive 永久负责 tool-round 预算、
+  一次性派工去重、已执行工具、未知副作用、审计与精确回取；模型可见投影只排除当前 thread 已提交
+  `live_tool_ir` checkpoint 链中列出的 exact call ids。未被 thread `compact_checkpoint_id` 指向的孤儿候选、
+  其它 thread、自然语言摘要和 transcript checkpoint 都无权隐藏调用。
+- Gateway 与后台 main 收到真实 provider `context_overflow` 后，先尝试普通 transcript Compact；若 generation
+  没前进且本轮已有工具 archive，则用同一 `LiveToolCompactCheckpointRequest -> checkpoint -> generation CAS`
+  生成完整替代摘要、保留有界近期整条记录并继续原请求。摘要复用 live Compact 的六字段校验，并把上一代
+  summary 合并成新的完整替代摘要；不追加无界摘要链，也不额外调用一次中段摘要模型。
+- “有新工具/有新插话”不再允许直接重试。只有 canonical generation 真正前进才继续；没有可压记录、账本损坏、
+  checkpoint 链断裂或摘要失败均 fail closed，并复用同一 Compact 失败熔断与 typed 进度终态。TUI 的
+  `compact N` 因此重新等于真实 replacement 次数，普通恢复不再偷偷改变缓存前缀。
+- `.10` fresh `ma-r114t-110-u314-architecture-research-long` 的 8 名 child 全部 DONE，main 跨多个后台工作片
+  自然写出 367 行横向报告并直接 final。canonical ledger 依次提交 transcript `25.4k→10.2k`、live-tool
+  `98.8k→0.9k`、live-tool `17.5k→12.9k` 三代，TUI 同步显示 `compact 3`；完整 archive、八份分报告、Todo、
+  child 终态和最终整合均保留。107 次 provider 调用真实记录 317.3 万 cache-read token，证明不是用 Context
+  数字冒充缓存。
+
+## 2026-08-30 后台主代理保留 owner 记忆写入口【状态：R114q `.10` fresh 真 TUI 通过】
+
+- 真机 `ma-r114o-110-u300-memory-a` 已证明首轮 `update_persona` 成功写入当前 owner 的
+  `USER.md`，但 child 完成后的后台整合轮因工具快照缺少 `remember/update_persona`，随后错误声称
+  “长期偏好未保存”。这不是记忆文件或 owner 隔离失败，而是同一 active turn 在前台/后台切片间丢了能力。
+- 对照 长期助手 `agent/background_review.py`：后台记忆复盘在 profile 允许时显式保留 memory 工具，且只让
+  记忆工具写持久存储；本项目不另造 curator 旁路，而是在现有 owner/task policy 继续收口的前提下，把
+  `remember` 与 `update_persona` 加回后台主代理公共工作快照。
+- 权限语义不变：普通 memory、`USER.md` 与 `AGENTS.md` 可由当前 owner Agent 自主维护；`SOUL.md` 仍由
+  `update_persona` 内部确认链硬守，后台快照不会绕过确认、owner 墙或 tool policy。
+- 后台能力不能只测常量名单。R114q 增加从 `_run_params -> ToolRegistry.runtime_snapshot ->
+  model_visible_specs` 的整链合同，确保 `skill_search/remember/update_persona` 同时进入策略、冻结执行快照和
+  provider schema；协议违规账本也记录该轮 snapshot hash 与 allowed/available 名称，后续可直接区分模型越界
+  和装配漂移，不再靠日志猜测。
+- `.10` fresh `ma-r114t-110-u316-managed-service-skill-memory` 自然调用 `skill_search`、派 4 名 child、启动
+  `0.0.0.0:18086` 受管服务并在两分钟后复查 HTTP 200；后台整合轮把“中文报告、先只读、过程文件不散落根
+  目录”三项写入该 owner 的 `USER.md`。其它 owner 无相同内容，SOUL 未改，证明后台工具连续性和隔离同时成立。
+
+## 2026-08-30 TUI Gateway 快速就绪不得丢首帧刷新【状态：R114o fresh 真 TUI 通过】
+
+- 唯一 Gateway 已就绪时，后台 preflight 可能比 prompt_toolkit 首帧更快返回。旧链路在
+  worker 线程直接更新 runtime 并 `invalidate()`，事件若落在首次 render 边界会丢失，界面持续显示
+  “正在启动交互界面”，直到用户按键才触发下一帧。
+- 对照 终端交互 `src/services/analytics/growthbook.ts` 对“快速结果早于 REPL effect 注册”的
+  catch-up，R114o 让后台线程只产生 readiness 结果，再经 Application loop 一次性落实
+  runtime 终态、worker 启动和 invalidate。这不新建第二份连接事实，也不以定时刷新掩盖竞态。
+- `.10` 重新部署后，8 个独立 owner TUI 在已运行 Gateway 下同时 fresh 启动；不输入任何键，
+  5 秒后 8/8 都已自动显示 welcome/输入框，未再停在启动动画。
+
+## 2026-08-30 Compact 恢复目标必须留出完整长回合空间【状态：R114n `.10` fresh 长 TUI 通过】
+
+- `ma-r114l-110-u295-compact-research-long` 的八子代理调研最终自然完成，但主代理在约 27 分钟内连续提交
+  3 代 Compact。第二、三代分别只从约 119.4k 降到 100.1k、从约 115.4k 降到 94.7k；旧恢复目标只是
+  “90% 触发线减 10% 近期尾部”，128k 窗口实际约为 103.7k，一份 1--2 万 token 的整合报告足以马上再次触发。
+- 对照 会话运行时 `core/src/compact.rs::build_compacted_history_with_limit`：压缩后以摘要替换旧历史，真实用户消息
+  最多保留约 20k token；对照 终端交互 `compactConversation/buildPostCompactMessages`：压缩后只重建边界、
+  摘要和有界附件，并显式记录 `truePostCompactTokenCount/willRetriggerNextTurn`。两者都不把“刚低于触发线”
+  当作健康恢复。
+- 新增唯一配置 `memory_compact_recovery_target_percent`，默认 60、范围 25--80。主代理、子代理、live-tool 与
+  transcript Compact 共用 `RuntimeCompactPolicy`；最终目标取“模型窗口恢复占比”和“触发线减完整近期尾部”
+  的较小值。128k/90% 默认因此压到不高于 76.8k，为下一段长工具链或报告保留约 38.4k 空间。
+- 若已完成会话前缀本身高于恢复目标，live-tool 不再先烧一轮注定贴线的摘要，而直接把旧 transcript 交给
+  canonical Conversation Compact；摘要、checkpoint、generation、active-turn 插话与工具事实仍走原权威路径。
+  该变化不按任务类型或模型正文判断，也不缩短 raw transcript、Memory 或 artifact 保留。
+- R114t u314 的三代各自替换不同 source boundary，提交后的 source projection 都远低于 60% recovery target；
+  后续再次增长来自新的八报告读取与 367 行整合，不是同一候选只贴着 90% 触发线反复压缩。最终上下文可回到
+  113k 是 final 后完整新正文的只读展示事实，不会倒改已提交 generation 或 cache ledger。
+
+## 2026-08-30 本地文本搜索默认语义对齐 ripgrep【状态：R114m 本地合同通过，待真 TUI】
+
+- R114k 的真实超级玛丽恢复任务中，模型先用 `search_text(query="LEVELS")` 成功，随后按常见 grep 习惯传入
+  `LEVELS|level1|...`，但未显式传 `literal=false`，底座把整串当连续普通文字并返回假空结果。工具结构化回执
+  本身正确，错在默认合同与模型熟悉的工具语义相反。
+- 会话运行时 的本地代码搜索走 `rg`，终端交互 `GrepTool` 和 任务运行时 `grep` 均把 pattern 默认解释为
+  ripgrep 正则。当前 `search_text` 因此改为同一默认；需要精确原文时显式传 `literal=true`。rg 与 Python
+  fallback 继续消费同一 `SearchRequest`，非法正则、分页、忽略目录、owner 路径墙和联网边界均不改变。
+- schema 显式声明 `literal.default=false`，并补充 alternation 示例；focused 覆盖默认 `A|B` 同时命中、显式
+  literal 保持普通文字及两条 no-match 结构化合同。该变化待随下一 wheel 进入真实 TUI 复验。
+
+## 2026-08-30 后台主代理 Compact 必须回收完整工具轮并原地续跑【状态：R114l 真 TUI 主链通过，连续压缩转 R114n】
+
+- R114k 的真实恢复任务连续四次出现 live Compact `started -> summarizing -> measuring -> superseded`，每次
+  `compact_generation` 仍为 0。账本、checkpoint 与进度投影都没有丢：候选摘要安装后仍高于统一 recovery
+  target，因此按合同恢复原 IR。真实问题是旧实现只成对删除 ToolCall/ToolResult，却保留这些调用所属的长
+  assistant 思考正文；摘要已覆盖的旧轮因此仍占 provider 窗口，导致“看起来压了、实际上没腾出空间”。
+- 对齐 会话运行时 mid-turn Compact 的 replacement history：只有完整替代摘要已经成功生成时，native IR 才允许把
+  被摘要覆盖、且最后一个保留 ToolCall 也已移除的 assistant 工具轮整条回收。普通窗口/PTL 没有完整摘要时
+  继续保留正文，UserTurn 永远不进入删除集合，工具对仍保持 orphan-safe；候选/CAS 失败仍原样恢复 IR。
+- 后台 main 旧实现又缺少前台 Gateway 与 child runner 已有的 transcript Compact 外层：`Agent.run` 返回
+  `context_overflow` 后，scheduler 只能等下一次 wake 再开一个工作片，重复生成相同摘要和 Working。现在后台
+  同一工作片最多有界重试 8 次；每次只携带结构化 tool archive 与 active-turn user inputs，释放未提交插话，
+  强制唯一 ConversationThread 做 checkpoint/CAS，再用新 generation 继续原 user objective。没有 generation
+  或工具/插话进展时立即停止，不能空转，也不从模型正文重建状态。
+- 这不是第二套压缩：live-tool 与 transcript 仍共用 `RuntimeCompactPolicy`、ConversationThread generation、
+  checkpoint、失败熔断和同一 TUI 进度协议。`save=False` 只表示后台回复由外层提交，不撤销 exact
+  transcript-authoritative turn 的 Compact 权限。
+- focused 已覆盖“长 assistant 工具轮被完整摘要回收并落 generation”及“后台 overflow 在同一 slice 压缩、
+  携带已完成工具、刷新 context generation 后成功返回”。`.10` 已安装 wheel
+  `e6f8402c9d094185061f48c89c8670054a058d9faa010b7713b05c9573876556`，唯一 Gateway 为
+  `ma-gateway-r114l-110-wheel`；fresh `ma-r114l-110-u295-compact-research-long` 以 MiniMax-M2.7 完成八子代理
+  长调研。任务运行时 child 把 23 个完整工具对从约 124,049 token 压到约 53,711 token，终端交互 child
+  也提交 generation 1；八份分报告与 21,876-byte 横向报告均存在。主代理 final 直接显示、Working 撤下、
+  `compact 3` 可见。该链路通过，同时暴露“压后余量太小导致连续三代”的 R114n 问题。
+
+## 2026-08-30 Gateway 重启恢复与冷会话回放【状态：R114j 终态竞态已复验，R114k active-turn 续接待真 TUI】
+
+- `.10` 单 Gateway 顺序重启时，长任务的 durable run/thread/task 都仍在，但测试 owner 位于磁盘发现第三页；
+  旧控制器每发现一页就等待完整 `orphan_supervision_interval_seconds=60`，导致 TUI 约两分钟看不到 child
+  恢复。恢复动作本身随后成功，根因是分页调度节奏，不是模型、持久队列或 child 状态损坏。
+- 对齐 会话运行时 的显式 thread/agent resume 生命周期，并用 长期助手 Gateway 在生命周期入口立即回收 orphan lease
+  补足多用户守护进程语义：磁盘发现仍然每个 controller tick 只读一页，保持启动和大用户量有界；但只要
+  `next_cursor` 存在，下一 tick 立即继续下一页，只有完整一轮结束后才进入 60/120 秒稳态重扫间隔。
+- runner 心跳继续容忍慢模型、GC 与磁盘抖动。唯一例外是 session 明确记录了 `in_process` 形态，且 exact
+  worker PID 已被 OS 证明死亡：这个客观事实可以越过仍新鲜的最后一拍立即回收；PID 仍活、字段缺失或无法
+  证明时继续等待原新鲜窗，防止双执行与旧账误判。
+- 该变化不缩短全局巡检间隔、不在启动线程一次性全量扫描、不新增第二 Gateway，也不从自然语言判断活性。
+  `.10` 唯一 Gateway 携四路旧长任务和 fresh 八-child 调研任务顺序重启；u287 的 7 个失联
+  runner 在不到 25 秒内原 run revive，名册仍为 8 行、无重复派生。
+- 已提交的 assistant final 不能因 owner 被池逐出或 Gateway 重启而从 TUI 消失。被动通知路径
+  先查已驻留 Agent；若 owner 仍 cold，只用 authenticated owner identity 在其 home 下查固定深度的
+  已存在 conversation stores，选 exact channel binding 的最新 thread 重放 notice。这条读路不创建目录、
+  不加载 backend/tool/subagent runtime，也不从全局搜另一 owner。u283 原 TUI 已直接补出之前丢失的 final。
+- 用户给运行 child 的普通插话继续按 会话运行时 active-turn user input 语义：只有 provider 真正接受后
+  才把正文幂等写入 exact child ConversationThread，并在 durable agent transcript 中写 exact id +
+  有界公开文本。TUI 当地 pending 仅用于当场提升；新进程或重启 Gateway 后按事件重建相同 user block。
+  fresh u287 已证明 `/exit -> resume -> Gateway restart` 两层重建后消息仍在原时序，且模型已执行其要求。
+- u288 真实植物大战僵尸长任务在 Gateway 顺序重启时暴露了更窄的收尾竞态：`AgentRun/Attempt` 已由宿主
+  写入 `done`，但子进程尚未来得及把同一轮结果投影到 `SubAgentTask`；旧监督器把所有安全 attempt 终态都
+  当成可重派，导致 6 名已完成 child 被重新拉起，generation/尝试数增加并重复消耗 token。
+- 对齐 会话运行时 `AgentStatus::Completed/Errored` 的单向终态与“child completion 可直接来自 AgentStatus、即使没有
+  final assistant message”的语义：监督器现在读取 exact attempt 的 append-only `agent_run.completed` 事件。
+  事件含宿主 `runtime_status` 时，复用普通 runner-result finalizer 补写 task、capability/source-worker 结构化
+  覆盖、父级 wake 和 session 终态，绝不 abandon/requeue；由 orphan reclaim 生成、没有 `runtime_status` 的
+  cancelled 事件仍按原崩溃恢复路径续跑。完成、失败、取消三种自然终态均有 generation 不增加的回归。
+- R114j 部署后再次重启唯一 Gateway，u288 的 9 名终态 child generation 全部保持不变；u289/u290 的真实
+  运行中 attempt 则按原 run 换代恢复，证明“自然终态补投影”和“真崩溃续跑”已经分开。随后暴露的另一问题
+  位于主 Gateway active turn：处理中请求重排后，旧实现只重放原始 user prompt，而本轮已完成的
+  `task_progress/create_subagents` 尚未进入终态 transcript，模型因此另建同义 Todo，u290 从 10 项膨胀到 16 项。
+- 对齐 会话运行时 rollout 在中断/恢复时保留已发生 turn items 的边界，R114k 不把模型正文做摘要猜测，也不新建
+  影子 recovery prompt。reconciler 写入 exact request 的 typed `gateway_active_turn_recovery.v1` 标记；重排执行
+  从当前 owner 的 canonical `blobs/tool_outputs/index.jsonl` 与有界 task work 索引中，只按
+  `conversation_request_id` 恢复已落盘调用、模型原始参数、操作终态和 artifact refs，再接入现有
+  `carried_archive_tool_calls`。其它 request、child workspace 和自然语言错误均不能混入；索引不可可靠读取时
+  fail closed，宁可停止自动重放，也不冒险重复派工或写入。
+
 ## 2026-08-30 子代理详情首次从 goal 开始、重访恢复独立视口【状态：R109 真 TUI 通过】
 
 - child 详情正文的权威仍是 Gateway 返回的 exact `run_id + goal + attempt transcript events`；视口位置只是
@@ -2912,3 +3138,36 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - `compact_exception_code` 现在优先保留 typed `error_code`，经过限定字符和长度后统一加 `COMPACT_`；
   transcript/live-tool 失败进度、Gateway rich chunk、TUI reducer 与红色终态块沿同一字段透传。摘要正文、
   prompt、异常 message 仍不能进入公开事件，失败仍不推进 canonical generation，原上下文仍完整保留。
+
+## 2026-08-30 首个工作工具使用同一晋升后 cwd，后台续轮保留 Skill 正文入口【状态：R114p 本地通过，fresh TUI 待复验】
+
+- 对照 会话运行时 `会话运行时-rs/core/src/session/turn_context.rs`：一次 Turn 的 cwd 是显式结构事实，工具参数、权限和
+  进程执行都从同一个 TurnContext 取值，不能在同一调用中同时存在“旧 cwd 的工具快照”和“新 cwd 的任务状态”。
+- my-agent 的会话晋升由可变外层 `RunParams` 落账，工具循环则使用独立的 `ToolLoopExecuteParams` 投影。真实
+  R114o 安全审计中，首个 `run_command` 已建立 canonical task root，但工具投影仍保留 owner home，导致仓库
+  克隆到 owner 根；后续 `list_files` 切到 task root 后自然找不到刚克隆的目录。旧单测让两层参数共用同一
+  dict，因而没有覆盖生产形态。
+- R114p 在唯一工具执行缝隙完成晋升后，只从外层权威 task attributes 单向刷新本次工具投影，再生成 cwd、
+  write boundary、审批和沙箱；不读取模型路径来决定任务身份，也不反向覆盖外层状态。回归用两个独立 dict
+  证明旧实现失败、新实现让首次 shell 写入 canonical task root。
+- 子代理生命周期唤醒仍是同一任务的后续模型轮。默认后台工具表此前漏掉 `skill_search`，真实 PDF/Skill
+  长任务在 child 完成唤醒后连续产生 `TOOL_UNAVAILABLE` 修复轮并额外调用模型。默认续轮现保留 Skill 正文
+  读取入口；owner/task policy 仍可结构化减权，未扩大 owner 文件系统硬墙。
+
+## 2026-08-30 Persona 写入限频按 owner 隔离【状态：R114s `.10` 双用户 fresh TUI 通过】
+
+- `.10` 同一 Gateway 的双用户长任务暴露了跨 owner 串扰：u306 与 u307 同时写各自 `USER.md` 时，旧
+  `update_persona` 把最近写入时间保存在进程级单一列表。u307 的合法写入因此占掉 u306 的第三个额度；工具
+  返回 `PERSONA_UPDATE_RATE_LIMITED`，运行层因该码未登记且没有副作用终态，又把确定的未执行拒绝升级成
+  `TOOL_OPERATION_OUTCOME_UNKNOWN`。这不是模型遗忘，也不是 owner 路径泄漏，而是共享 Gateway 的软限频
+  错误地共享了配额。
+- 对照 会话运行时 `会话运行时-rs/core/src/tools/registry.rs` 的 handler 并发属性和 终端交互
+  `StreamingToolExecutor.ts` 的可并行/独占执行边界后，确认本项目的可变 Persona 工具本来就按工具链串行；
+  本次不能用全局互斥或降低并发掩盖问题。唯一修复点是把时间窗以 canonical owner home 为 key 隔离，旧桶
+  每个窗口有界清理，保持一个 Gateway 服务多个 owner 时互不占额度。
+- 同一 owner 仍保留 30 秒最多 3 次写入的软保护；同一消息的多个长期事实应由模型用一次 `operations` 合批。
+  超限现在使用已登记的 `PERSONA_UPDATE_RATE_LIMITED`，结构化标记 `effect_outcome=not_started`，可在退避后
+  重试，绝不能再进入副作用未知或 DIRTY。限频不参与 owner 记忆内容、权限、确认和 Compact 判定。
+- 唯一 Gateway 部署后，fresh owner u310/u311 并发各完成 3 次真实写入，六条 operation 均为 `SUCCEEDED`；
+  各自 `USER.md` 只含自己的识别码、回答风格和界面主色。随后同 owner 新 TUI 在不调用读取工具的前提下
+  准确召回各自三项且未混入对方事实，真实门通过。

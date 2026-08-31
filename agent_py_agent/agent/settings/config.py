@@ -334,6 +334,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
     memory_compact_auto_trigger_percent: int = 90
+    # 到达触发线后把下一轮完整输入收敛到该窗口占比；默认 60%，为大工具回执和长报告留出空间。
+    memory_compact_recovery_target_percent: int = 60
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。
     memory_curator_enabled: bool = True
     memory_curator_provider: str = "auto"

@@ -67,6 +67,7 @@ _FIELDS = (
     _FieldSpec("memory_resume_auto_context_mode", "choice", choices={"off", "trigger", "always"}),
     _FieldSpec("memory_resume_auto_context_limit", "int", 1, 50),
     _FieldSpec("memory_compact_auto_trigger_percent", "compact_trigger_percent"),
+    _FieldSpec("memory_compact_recovery_target_percent", "compact_recovery_percent"),
     _FieldSpec("memory_curator_enabled", "bool"),
     _FieldSpec(
         "memory_curator_provider",
@@ -130,6 +131,13 @@ def _coerce_field(
         )
     if spec.kind == "compact_trigger_percent":
         return _coerce_compact_trigger_percent(spec.field_name, raw_value, default=default, warnings=warnings)
+    if spec.kind == "compact_recovery_percent":
+        return _coerce_compact_recovery_percent(
+            spec.field_name,
+            raw_value,
+            default=default,
+            warnings=warnings,
+        )
     return _coerce_int(
         _IntCoercion(
             field_name=spec.field_name,
@@ -188,6 +196,32 @@ def _coerce_compact_trigger_percent(
     if number > 100:
         _warn(warnings, _WarningDraft(field_name, raw_value, 100, "expected value <= 100"))
         return 100
+    return number
+
+
+# LLM: This config parser mirrors runtime compact bounds so YAML cannot produce a different target
+# from direct AgentConfig construction; clamped values remain explicit structured warnings.
+# 函数用途: 校验压缩恢复目标百分比，越界时限制到 25%--80% 并留下配置警告。
+def _coerce_compact_recovery_percent(
+    field_name: str,
+    raw_value: Any,
+    *,
+    default: int,
+    warnings: list[MemoryConfigWarning],
+) -> int:
+    if raw_value is _MISSING:
+        return default
+    number = _memory_int_number(raw_value)
+    if number is None:
+        reason = "expected an integer, not a boolean" if isinstance(raw_value, bool) else "expected an integer"
+        _warn(warnings, _WarningDraft(field_name, raw_value, default, reason))
+        return default
+    if number < 25:
+        _warn(warnings, _WarningDraft(field_name, raw_value, 25, "expected value between 25 and 80"))
+        return 25
+    if number > 80:
+        _warn(warnings, _WarningDraft(field_name, raw_value, 80, "expected value between 25 and 80"))
+        return 80
     return number
 
 

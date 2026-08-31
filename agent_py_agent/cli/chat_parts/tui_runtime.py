@@ -955,9 +955,16 @@ class _TuiBackgroundActivityRuntimeMixin:
                     )
                 )
                 if message_ids:
-                    self.promote_active_turn_inputs(
+                    promoted_ids = _promote_active_turn_input_ids(
+                        self,
                         message_ids,
                         request_id=request_id,
+                    )
+                    _replay_consumed_active_turn_inputs(
+                        self,
+                        payload.get("messages"),
+                        request_id=request_id,
+                        skip_message_ids=set(promoted_ids),
                     )
                 continue
             self._publish(
@@ -1175,8 +1182,9 @@ class TuiRuntime(
             )
         return True
 
-    # LLM: Promotion intersects runtime-confirmed ids with this TUI's local receipt map. Unknown
-    # external ids are consumed as protocol events but can never create or remove local messages.
+    # LLM: Promotion intersects runtime-confirmed ids with this TUI's local receipt map. The
+    # public bool wrapper remains the keybinding/test contract; the exact-id helper lets replay
+    # render only committed rows that were not already promoted from local pending state.
     # 函数用途: 按精确消息 ID 将真正注入模型的补充消息移入当前回合历史。
     def promote_active_turn_inputs(
         self,
@@ -1184,29 +1192,13 @@ class TuiRuntime(
         *,
         request_id: str,
     ) -> bool:
-        normalized_request_id = _required_request_id(request_id)
-        normalized_ids = tuple(
-            dict.fromkeys(
-                _required_message_id(message_id)
-                for message_id in tuple(message_ids or ())
-                if str(message_id or "").strip()
+        return bool(
+            _promote_active_turn_input_ids(
+                self,
+                message_ids,
+                request_id=request_id,
             )
         )
-        promoted = False
-        with self._lock:
-            for message_id in normalized_ids:
-                text = self._pending_steers.pop(message_id, None)
-                if text is None:
-                    continue
-                self._publish(
-                    "steer_promoted",
-                    "completed",
-                    f"user:{normalized_request_id}:steer:{message_id}",
-                    {"message_id": message_id, "text": text},
-                    request_id=normalized_request_id,
-                )
-                promoted = True
-        return promoted
 
     # LLM: queued identity 只查 runtime 在 queue_added 时登记的 request 映射，input controller 不能按 pending 数量或文案猜测。
     # 函数用途: 判断一个尚在真实任务队列中的 request 是否属于可回取输入。
@@ -2149,6 +2141,72 @@ def _required_message_id(value: str) -> str:
     if not normalized:
         raise ValueError("TUI active-turn message_id is required")
     return normalized
+
+
+# LLM: The exact promoted-id set prevents duplicate user rows when one consumed batch mixes
+# inputs from this TUI and another client. It mutates only the supplied runtime's pending display
+# projection and does not acknowledge provider or conversation state.
+# 函数用途: 提升当前 TUI 确实持有的等待消息，并返回实际提升成功的消息 ID。
+def _promote_active_turn_input_ids(
+    runtime: TuiRuntime,
+    message_ids: tuple[str, ...],
+    *,
+    request_id: str,
+) -> tuple[str, ...]:
+    normalized_request_id = _required_request_id(request_id)
+    normalized_ids = tuple(
+        dict.fromkeys(
+            _required_message_id(message_id)
+            for message_id in tuple(message_ids or ())
+            if str(message_id or "").strip()
+        )
+    )
+    promoted_ids: list[str] = []
+    with runtime._lock:
+        for message_id in normalized_ids:
+            text = runtime._pending_steers.pop(message_id, None)
+            if text is None:
+                continue
+            runtime._publish(
+                "steer_promoted",
+                "completed",
+                f"user:{normalized_request_id}:steer:{message_id}",
+                {"message_id": message_id, "text": text},
+                request_id=normalized_request_id,
+            )
+            promoted_ids.append(message_id)
+    return tuple(promoted_ids)
+
+
+# LLM: A reattached client has no session-local pending text, so the durable consumed event
+# supplies a bounded public copy. Message ids, not text, dedupe rows within the event batch; this
+# helper creates display blocks only and never writes guidance or child state.
+# 函数用途: 重连或重新进入子代理时，补回已经提交给模型的用户消息历史。
+def _replay_consumed_active_turn_inputs(
+    runtime: TuiRuntime,
+    value: object,
+    *,
+    request_id: str,
+    skip_message_ids: set[str],
+) -> None:
+    if not isinstance(value, list | tuple):
+        return
+    seen: set[str] = set(skip_message_ids)
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        message_id = str(item.get("message_id") or "").strip()
+        text = str(item.get("text") or "")
+        if not message_id or not text or message_id in seen:
+            continue
+        seen.add(message_id)
+        runtime._publish(
+            "user_message",
+            "completed",
+            f"user:{request_id}:steer:{message_id}",
+            {"message_id": message_id, "text": text},
+            request_id=request_id,
+        )
 
 
 # LLM: 工具 block identity 只取 typed round/call_index，不使用 detail/output 文本。

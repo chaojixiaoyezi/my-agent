@@ -466,6 +466,54 @@ def test_compact_generation_cas_is_atomic_across_store_instances(tmp_path) -> No
     assert stored.compact_checkpoint_id in {"checkpoint-a", "checkpoint-b"}
 
 
+def test_provider_context_observation_is_generation_fenced_and_compact_clears_it(
+    tmp_path,
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {"canonical_user_id": "provider-context-user", "now": 10.0}
+    )
+    observation = {
+        "schema": "provider_context_observation.v2",
+        "raw_estimated_tokens": 100_000,
+        "provider_input_tokens": 40_000,
+        "context_surface_fingerprint": "a" * 64,
+        "compact_generation": 0,
+    }
+
+    updated = store.update_provider_context_observation(
+        thread.thread_id,
+        observation,
+        expected_compact_generation=0,
+    )
+    assert updated.provider_context_observation == observation
+    assert updated.updated_at == thread.updated_at
+
+    compacted = store.update_compact_state(
+        thread.thread_id,
+        commit=ConversationCompactCommit(
+            summary="summary",
+            operation_evidence={},
+            checkpoint_id="checkpoint-1",
+            compacted_through_message_id="message-1",
+            compacted_through_byte_offset=100,
+            source_messages=2,
+            source_tool_pairs=3,
+        ),
+        expected_generation=0,
+    )
+    assert compacted.compact_generation == 1
+    assert compacted.provider_context_observation == {}
+
+    stale = store.update_provider_context_observation(
+        thread.thread_id,
+        observation,
+        expected_compact_generation=0,
+    )
+    assert stale.compact_generation == 1
+    assert stale.provider_context_observation == {}
+
+
 def test_delayed_message_does_not_move_thread_activity_backwards(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(
@@ -653,7 +701,7 @@ def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> No
     assert reopened.workspace_task_id == "task-1"
     assert reopened.active_task_ids == ()
     payload = json.loads(reopened_store._thread_path(thread.thread_id).read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "conversation_thread.v7"
+    assert payload["schema_version"] == "conversation_thread.v8"
 
 
 def test_thread_persists_client_cwd_across_requests_without_override(tmp_path) -> None:

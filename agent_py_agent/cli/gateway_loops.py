@@ -699,9 +699,9 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         now = time.monotonic()
         if now < self._next_wake_rescan_at:
             return
-        self._next_wake_rescan_at = now + self._wake_rescan_interval
         owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
         if not owners_dir:
+            self._next_wake_rescan_at = now + self._wake_rescan_interval
             return
         limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=64)
         page = seed_registry_page_from_disk(
@@ -711,6 +711,12 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             after_cursor=self._wake_discovery_cursor,
         )
         self._wake_discovery_cursor = page.next_cursor
+        # 一轮发现仍然逐页有界，但只在完整扫完后才进入长间隔。否则第 N 页的活跃
+        # owner 在 Gateway 重启后会平白等待 N × rescan_interval，真实长任务看起来
+        # 像永久卡住。下一页留给下一个 supervisor tick，避免启动线程内全量阻塞。
+        self._next_wake_rescan_at = _next_owner_discovery_at(
+            now, self._wake_rescan_interval, page.next_cursor
+        )
         if page.seeded:
             print(f"[gateway-background-main] wake-pending owners seeded from disk: {page.seeded}", flush=True)
 
@@ -1259,12 +1265,16 @@ class _GatewayOrphanReconciler:
         )
         self._base_executor: DurableDaemonThreadPoolExecutor | None = None
         self._owner_executor: DurableDaemonThreadPoolExecutor | None = None
+        self._owner_worker_limit = _background_owner_workers(self._base_agent)
         self._base_inflight: object | None = None
         self._owner_inflight: dict[tuple[str, str, str], object] = {}
         self._base_next_at = 0.0
         self._owner_next_at: dict[tuple[str, str, str], float] = {}
         self._next_discovery_at = 0.0
 
+    # LLM: The orphan controller uses a bounded runnable set; never pre-fill the executor's
+    # private unbounded queue with every cold owner discovered at startup.
+    # 函数用途: 启动 base 与 owner 两条孤儿恢复车道，并在停止时非阻塞回收线程池。
     def run(self, stop_event: threading.Event) -> None:
         # Base/local and every scoped owner are independent controller lanes.
         # Building or scanning one owner may be slow; it must never postpone
@@ -1276,7 +1286,7 @@ class _GatewayOrphanReconciler:
             thread_name_prefix="orphan-base",
         )
         self._owner_executor = DurableDaemonThreadPoolExecutor(
-            max_workers=_background_owner_workers(self._base_agent),
+            max_workers=self._owner_worker_limit,
             thread_name_prefix="orphan-owner",
         )
         poll_interval = min(1.0, max(0.1, self.interval / 10.0))
@@ -1332,10 +1342,15 @@ class _GatewayOrphanReconciler:
         self._base_next_at = now + self.interval
         self._base_inflight = executor.submit(self._sweep, self._base_agent, "base")
 
+    # LLM: Submit at most the actual worker capacity and pick the newest LRU owners first.
+    # Queued cold owners must not hide a just-reconnected long task behind dozens of agent builds.
+    # 函数用途: 在有界恢复工位内优先扫描最近活跃的用户，未提交者保留到后续 tick。
     def _submit_owner_sweeps(self, now: float) -> None:
         if now >= self._next_discovery_at:
             self._seed_owner_registry()
-            self._next_discovery_at = now + self.interval
+            self._next_discovery_at = _next_owner_discovery_at(
+                now, self.interval, self._discovery_cursor
+            )
         # Orphan supervision is a recovery controller, so it only consumes
         # owners carrying hard runtime facts (unfinished run/task/watch/job or
         # an interactive request). Memory-curator-only owners stay on their
@@ -1349,7 +1364,11 @@ class _GatewayOrphanReconciler:
         executor = self._owner_executor
         if executor is None:
             return
-        for owner in owners:
+        available_slots = max(0, self._owner_worker_limit - len(self._owner_inflight))
+        if available_slots <= 0:
+            return
+        # ActiveOwnerRegistry 的 LRU 顺序是旧→新；恢复优先新近交互/刚发现的 owner。
+        for owner in reversed(owners):
             key = self._owner_key(owner)
             if key in self._owner_inflight:
                 continue
@@ -1361,6 +1380,9 @@ class _GatewayOrphanReconciler:
                 owner,
                 "/".join(key),
             )
+            available_slots -= 1
+            if available_slots <= 0:
+                break
 
     def _sweep_owner(
         self,
@@ -1412,6 +1434,7 @@ class _GatewayOrphanReconciler:
     def _seed_owner_registry(self) -> None:
         owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
         if not owners_dir:
+            self._discovery_cursor = None
             return
         limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=64)
         page = seed_registry_page_from_disk(
@@ -1471,6 +1494,17 @@ def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -
 def _wake_rescan_interval_seconds(agent: SimpleAgent) -> float:
     value = _float_config(agent, "background_owner_wake_rescan_seconds", default=120.0)
     return max(0.0, value)
+
+
+# LLM: Pagination remains bounded per controller tick, while an unfinished discovery cycle must
+# not inherit the long steady-state rescan delay between adjacent pages.
+# 函数用途: 决定 owner 磁盘发现下一次运行时间；有后页就下个 tick 继续，整轮扫完才按配置休眠。
+def _next_owner_discovery_at(
+    now: float,
+    interval: float,
+    next_cursor: OwnerWakeCursor | None,
+) -> float:
+    return float(now) if next_cursor is not None else float(now) + max(0.0, float(interval))
 
 
 def _positive_int_config(agent: SimpleAgent, key: str, *, default: int) -> int:

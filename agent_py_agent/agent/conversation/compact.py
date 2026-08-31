@@ -705,20 +705,25 @@ def _uncompacted_conversation_rows(
     return _messages_after_cursor(rows, thread.compacted_through_message_id)
 
 
-# LLM: Every surface writes the canonical conversation_request_id. The Gateway key remains an
-# explicit schema-migration read for already persisted rows, never a prose or execution fallback.
-# 函数用途: 按结构化请求身份排除已落盘但仍由 current_prompt 单独携带的当前输入。
+# LLM: Every surface writes the canonical conversation_request_id. Exclude only trailing user
+# inputs that have not yet produced a durable assistant checkpoint. Once the same request has an
+# assistant row, 会话运行时 mid-turn Compact must summarize that completed prefix instead of
+# hiding the whole request and repeatedly returning context_overflow.
+# 函数用途: 按结构化请求身份排除末尾尚未产生回复的当前用户输入；同一请求已落盘的阶段回复可进入运行中 Compact。
 def _without_current_request_suffix(
     rows: list[MessageLogEntry],
     request_id: str,
 ) -> list[MessageLogEntry]:
-    """Exclude only the current request's uncommitted tail from compact input."""
+    """Exclude only uncommitted trailing user inputs from compact input."""
     expected = str(request_id or "").strip()
     if not expected:
         return rows
     end = len(rows)
     while end > 0:
-        metadata = rows[end - 1].metadata
+        row = rows[end - 1]
+        if str(row.role or "").strip().lower() != "user":
+            break
+        metadata = row.metadata
         current = (
             str(
                 metadata.get("conversation_request_id")

@@ -400,6 +400,9 @@ from typing import Any
 # Background wake turns are normal continuations of the same Agent.  This is
 # the common capability surface before owner/task policy applies reductions.
 _BACKGROUND_WORK_TOOLS = (
+    "skill_search",
+    "remember",
+    "update_persona",
     "read_file",
     "list_files",
     "search_text",
@@ -444,6 +447,9 @@ GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 
 CONTROL_ACTION_DESCRIPTIONS = {
+    "skill_search": "检索或读取当前轮已经授权的 Skill 正文。",
+    "remember": "把当前 owner 的长期事实写入其隔离记忆。",
+    "update_persona": "维护当前 owner 的 USER/AGENTS 人格约定；SOUL 仍需用户确认。",
     "send_guidance": "给正在运行的代理追加软提示。",
     "create_subagents": "创建并启动新的下级代理。",
     "read_file": "读取子代理产出的文件/产物,用于整合与验收。",
@@ -461,6 +467,7 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "get_goal": "读取当前 /goal 持续目标及其权威状态。",
     "update_goal": "仅在持续目标真正完成或确实阻塞时写入 complete/blocked 终态。",
 }
+
 
 @dataclass(frozen=True)
 class BackgroundToolPolicyRequest:
@@ -676,6 +683,14 @@ class BackgroundRunRequest:
     wake_signal: dict[str, Any] | None = None
 
 
+# LLM: This private control signal means a healthy background turn exhausted its bounded Compact
+# slice after every attempt advanced canonical generation. It must be caught before generic runtime
+# failures so the durable wake stays pending and the next scheduler slice resumes from checkpoints.
+# 类用途: 表示一次超长后台任务已完成本片压缩配额，需要公平让出线程后继续；它不是任务失败。
+class _BackgroundCompactSliceYield(RuntimeError):
+    pass
+
+
 # LLM: This snapshot binds one exact task objective and child phase to one background sample;
 # callers must not replace the objective with the synthetic wake instruction.
 # 类用途: 固定一次后台模型调用所见的目标、任务目录和子代理阶段，避免采样中途漂移。
@@ -789,14 +804,10 @@ def _background_task_continuation_fields(
         return "", "", ""
     if (
         str(getattr(link, "task_id", "") or "").strip() != str(task_id or "").strip()
-        or str(getattr(link, "thread_id", "") or "").strip()
-        != str(thread_id or "").strip()
+        or str(getattr(link, "thread_id", "") or "").strip() != str(thread_id or "").strip()
     ):
         return "", "", "task_link_scope_mismatch"
-    if (
-        str(getattr(link, "status", "") or "").strip().lower()
-        != THREAD_TASK_LINK_ACTIVE_STATUS
-    ):
+    if str(getattr(link, "status", "") or "").strip().lower() != THREAD_TASK_LINK_ACTIVE_STATUS:
         return "", "", ""
     return (
         str(getattr(link, "goal", "") or "").strip(),
@@ -1185,33 +1196,177 @@ def _invoke_background_main_agent(
         task_id=request.task_id,
     )
     try:
-        result = runtime.agent.run(
-            user_prompt,
-            params=_run_params(
-                thread.thread_id,
-                request,
-                runtime.agent,
-                goal_context=goal_context,
-                proactive_delivery_available=proactive_delivery_available,
-                thread=thread,
-            ),
-            inject=[
-                context_markdown(
-                    agent=runtime.agent,
-                    store=runtime.store,
-                    thread=thread,
-                    request=request,
-                    proactive_delivery_available=proactive_delivery_available,
-                ),
-                *continuation_injection,
-            ],
-            on_chunk=activity_sink,
+        result = _run_background_main_turn_with_compact(
+            runtime,
+            thread,
+            request,
+            goal_context,
+            user_prompt=user_prompt,
+            continuation_injection=continuation_injection,
+            proactive_delivery_available=proactive_delivery_available,
+            activity_sink=activity_sink,
         )
+    except _BackgroundCompactSliceYield:
+        activity_sink.finish()
+        raise
     except Exception:
         activity_sink.fail()
         raise
     activity_sink.finish()
     return result
+
+
+# LLM: Background lifecycle wakes continue the same authoritative active turn. Like foreground
+# Gateway and child runners, context overflow must compact the durable transcript and retry while
+# carrying typed tool and steering state; a new scheduler slice must not be the retry mechanism.
+# 函数用途: 后台主代理上下文超限时在同一工作片内压缩并续跑，避免重复工具、重复摘要和永久 Working。
+def _run_background_main_turn_with_compact(
+    runtime: BackgroundMainAgentRuntime,
+    thread: ConversationThread,
+    request: BackgroundRunRequest,
+    goal_context: GoalRuntimeContext,
+    *,
+    user_prompt: str,
+    continuation_injection: list[str],
+    proactive_delivery_available: bool | None,
+    activity_sink: BackgroundMainActivitySink,
+) -> object:
+    current = thread
+    carried_archive_tool_calls: list[dict[str, object]] | None = None
+    carried_active_turn_user_inputs: list[dict[str, object]] = []
+    for _attempt in range(8):
+        run_params = _run_params(
+            current.thread_id,
+            request,
+            runtime.agent,
+            goal_context=goal_context,
+            proactive_delivery_available=proactive_delivery_available,
+            thread=current,
+        )
+        if carried_archive_tool_calls is None:
+            carried_archive_tool_calls = list(run_params.carried_archive_tool_calls or [])
+        else:
+            run_params.carried_archive_tool_calls = list(carried_archive_tool_calls)
+        run_params.carried_active_turn_user_inputs = list(carried_active_turn_user_inputs)
+        run_params.inject = [
+            context_markdown(
+                agent=runtime.agent,
+                store=runtime.store,
+                thread=current,
+                request=request,
+                proactive_delivery_available=proactive_delivery_available,
+            ),
+            *continuation_injection,
+        ]
+        run_params.on_chunk = activity_sink
+        result = runtime.agent.run(user_prompt, params=run_params)
+        if str(getattr(result, "runtime_status", "") or "").strip().lower() != ("context_overflow"):
+            return result
+        (
+            carried_archive_tool_calls,
+            carried_active_turn_user_inputs,
+        ) = _next_background_overflow_carry(
+            runtime.agent,
+            run_params,
+            result,
+            carried_archive_tool_calls,
+            carried_active_turn_user_inputs,
+        )
+        refreshed = _compact_background_main_thread(
+            runtime,
+            current,
+            current_prompt=user_prompt,
+            activity_sink=activity_sink,
+        )
+        if refreshed.compact_generation <= current.compact_generation:
+            from .active_turn_compact import (
+                ActiveTurnArchiveCompactRequest,
+                compact_carried_active_turn_archive,
+            )
+
+            active_turn_compact = compact_carried_active_turn_archive(
+                runtime.agent,
+                runtime.store,
+                refreshed,
+                carried_archive_tool_calls,
+                ActiveTurnArchiveCompactRequest(
+                    task_attributes=run_params.task_attributes,
+                    request_id=str(run_params.request_id or request.task_id or ""),
+                    attempt_id=str(run_params.attempt_id or run_params.request_id or ""),
+                    task_prompt=user_prompt,
+                    progress_callback=activity_sink.write_conversation_compact_progress,
+                ),
+            )
+            if not active_turn_compact.compacted:
+                raise RuntimeError(
+                    "background main thread cannot compact the overflowing active turn"
+                )
+            refreshed = active_turn_compact.thread
+        current = refreshed
+    raise _BackgroundCompactSliceYield(
+        "background main compact slice advanced eight generations and will resume"
+    )
+
+
+# LLM: Compact retry carry contains only structured runtime records. It never reconstructs work
+# from assistant prose, and released pre-provider steering ids return to their canonical mailbox.
+# 函数用途: 合并后台超限轮已经完成的工具与插话，供压缩后的同一轮安全续做。
+def _next_background_overflow_carry(
+    agent: object,
+    run_params: RunParams,
+    result: object,
+    carried_archive_tool_calls: list[dict[str, object]],
+    carried_active_turn_user_inputs: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    from ..agent_core.runtime_mixin import release_active_turn_inputs_for_compact
+    from .active_turn_input import (
+        exclude_active_turn_user_input_ids,
+        merge_active_turn_user_inputs,
+    )
+
+    released_input_ids = release_active_turn_inputs_for_compact(agent, run_params)
+    result_archive = [
+        dict(item)
+        for item in list(getattr(result, "archive_tool_calls", None) or [])
+        if isinstance(item, dict)
+    ]
+    next_archive = result_archive or carried_archive_tool_calls
+    next_inputs = exclude_active_turn_user_input_ids(
+        merge_active_turn_user_inputs(
+            carried_active_turn_user_inputs,
+            getattr(result, "active_turn_user_inputs", None),
+        ),
+        released_input_ids,
+    )
+    return next_archive, next_inputs
+
+
+# LLM: The latest ConversationThread and its canonical Compact CAS are the only retry authority;
+# the volatile activity sink may display progress but cannot manufacture a generation.
+# 函数用途: 强制压缩后台主代理已经完成的会话前缀，并返回最新线程供同一轮继续。
+def _compact_background_main_thread(
+    runtime: BackgroundMainAgentRuntime,
+    current: ConversationThread,
+    *,
+    current_prompt: str,
+    activity_sink: BackgroundMainActivitySink,
+) -> ConversationThread:
+    from .compact import ConversationCompactOptions, prepare_conversation_context
+
+    latest, load_error = runtime.store.load_thread_report(current.thread_id)
+    if load_error is not None or latest is None:
+        raise RuntimeError("background main conversation thread could not be reloaded")
+    compact = prepare_conversation_context(
+        runtime.agent,
+        runtime.store,
+        latest,
+        options=ConversationCompactOptions(
+            current_prompt=str(current_prompt or ""),
+            force=True,
+            progress_callback=activity_sink.write_conversation_compact_progress,
+        ),
+    )
+    return compact.thread
 
 
 # LLM: 会话运行时 keeps child completion inside the originating active turn. When an exact task
@@ -2342,8 +2497,7 @@ def _background_active_turn_request_ids(
         if isinstance(event_metadata, dict):
             envelopes.append(event_metadata)
     values = [
-        str(envelope.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
-        for envelope in envelopes
+        str(envelope.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip() for envelope in envelopes
     ]
     return tuple(dict.fromkeys(value for value in values if value))
 
@@ -2554,9 +2708,7 @@ def _apply_background_thread_workspace_attributes(
     if thread is None or not str(attributes.get("conversation_thread_id") or "").strip():
         return
     run_workspace = attributes.get("run_workspace")
-    if isinstance(run_workspace, dict) and str(
-        run_workspace.get("task_root") or ""
-    ).strip():
+    if isinstance(run_workspace, dict) and str(run_workspace.get("task_root") or "").strip():
         return
     cwd = str(getattr(thread, "cwd", "") or "").strip()
     if not cwd:
@@ -2956,9 +3108,7 @@ def _bounded_context(
         )
     )
     subagent_completions = (
-        {}
-        if narrow_audit_event
-        else _background_subagent_completion_context(state)
+        {} if narrow_audit_event else _background_subagent_completion_context(state)
     )
     return bounded_background_context_payload(
         BackgroundContextPayloadRequest(
@@ -3715,9 +3865,10 @@ def _skip_pending_wake_signal(
         return True
     if signal.wake_signal_id in handled or signal.wake_signal_id in attempted:
         return True
-    if _background_authority_recovery_block(
-        scheduler, str(signal.root_task_id or "").strip()
-    ) is not None:
+    if (
+        _background_authority_recovery_block(scheduler, str(signal.root_task_id or "").strip())
+        is not None
+    ):
         return True
     if signal.thread_id in reported and not _is_scheduler_wake_signal(signal):
         # One model turn already owns this thread for the current tick.
@@ -3819,9 +3970,7 @@ def _background_notice_id(
             "task_id": str(getattr(report, "task_id", "") or ""),
             "reason": str(getattr(report, "reason", "") or ""),
             "content": str(content or ""),
-            "source_created_at": float(
-                getattr(report, "created_at", 0.0) or 0.0
-            ),
+            "source_created_at": float(getattr(report, "created_at", 0.0) or 0.0),
             "delivery_status": str(delivery_status or ""),
         },
         ensure_ascii=False,
@@ -4292,8 +4441,7 @@ def _successful_completion_tree_still_active(
     from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 
     return any(
-        not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
-        for task in related
+        not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related
     )
 
 
@@ -4572,10 +4720,13 @@ def _ready_background_thread_ids(
             return
         if not scheduler._supply_backoff.should_attempt(normalized, current):
             return
-        if _background_authority_recovery_block(
-            scheduler,
-            str(task_id or "").strip(),
-        ) is not None:
+        if (
+            _background_authority_recovery_block(
+                scheduler,
+                str(task_id or "").strip(),
+            )
+            is not None
+        ):
             return
         seen.add(normalized)
         ready.append(normalized)
@@ -4753,7 +4904,8 @@ class _BackgroundSchedulerTickMixin:
                     if result.get("reclaimed"):
                         _HEARTBEAT_LOGGER.info(
                             "orphan attempt reclaimed: %s -> %s",
-                            attempt["attempt_id"], result.get("status"),
+                            attempt["attempt_id"],
+                            result.get("status"),
                         )
                 except RuntimeConflictError as exc:
                     # 竞态：刚被接管/已 settle——下一趟自然跳过，不重试不刷屏
@@ -4845,7 +4997,8 @@ class _BackgroundSchedulerTickMixin:
                     # WK-INT: 失败不丢 wake——回 pending 5 秒后重试
                     if callable(getattr(repo, "release_wake", None)):
                         repo.release_wake(
-                            wake_id, retry_after=float(now) + 5.0,
+                            wake_id,
+                            retry_after=float(now) + 5.0,
                             last_error="consume_failed",
                         )
         except Exception:
@@ -4857,9 +5010,7 @@ class _BackgroundSchedulerTickMixin:
             agent = getattr(getattr(self, "runtime", None), "agent", None)
             owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
             repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
-            if not owner_home or repo is None or not callable(
-                getattr(repo, "upsert_wake", None)
-            ):
+            if not owner_home or repo is None or not callable(getattr(repo, "upsert_wake", None)):
                 return
             from ..owner_wake_discovery import unfinished_task_ids
 
@@ -4899,9 +5050,10 @@ class _BackgroundSchedulerTickMixin:
             if thread is None:
                 return False
             goal = self.store.load_goal(thread.thread_id, task_id=task_id)
-            return goal is not None and str(
-                getattr(goal, "status", "") or ""
-            ).strip().lower() == "active"
+            return (
+                goal is not None
+                and str(getattr(goal, "status", "") or "").strip().lower() == "active"
+            )
         except Exception:  # noqa: BLE001 读不到=fail-closed 不自动补字条
             return False
 
@@ -5821,6 +5973,11 @@ class _BackgroundSchedulerExecutionMixin:
             # run that recovery code may try to take over.
             status = "cancelled"
             return None
+        except _BackgroundCompactSliceYield:
+            # The exact wake/observation/policy remains unhandled. Closing only this bounded
+            # execution claim lets the next scheduler slice resume from canonical checkpoints
+            # without logging a fake crash or incrementing policy failure counters.
+            return None
         except BaseException as exc:
             status = "failed"
             error = exc
@@ -6067,9 +6224,7 @@ def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
         "registered_by_tool": str(metadata.get("tool") or ""),
         "watch_run_id": str(metadata.get("watch_run_id") or ""),
     }
-    conversation_request_id = str(
-        metadata.get(CONVERSATION_REQUEST_ID_ATTR) or ""
-    ).strip()
+    conversation_request_id = str(metadata.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
     if conversation_request_id:
         # task_id 是持久调度身份，conversation_request_id 是同一普通用户回合的
         # Todo/工具轨迹展示代次。二者必须并存，不能拿 task-path 或 task_id 冒充后者。
@@ -6617,9 +6772,7 @@ def _background_authority_recovery_block(
     fingerprint = json.dumps(block, ensure_ascii=False, sort_keys=True)
     if cache.get(normalized_task_id) != fingerprint:
         cache[normalized_task_id] = fingerprint
-        _HEARTBEAT_LOGGER.warning(
-            "BACKGROUND_AUTHORITY_RECOVERY_BLOCK %s", fingerprint
-        )
+        _HEARTBEAT_LOGGER.warning("BACKGROUND_AUTHORITY_RECOVERY_BLOCK %s", fingerprint)
     return block
 
 
@@ -6790,9 +6943,7 @@ def _agent_config_int(config: object | None, key: str) -> int:
 CLI_RESUME_LEASE_SECONDS = 300
 
 
-def resume_prompt_for(
-    *, continuation_reason: str, continuation_seq: int, user_task: str
-) -> str:
+def resume_prompt_for(*, continuation_reason: str, continuation_seq: int, user_task: str) -> str:
     """续跑提示：只引用结构化 continuation_reason + 原任务，不含验收语义。
 
     2026-08-14 设计 v2(审查意见4)：提示词不得出现「代码规模/测试达标」

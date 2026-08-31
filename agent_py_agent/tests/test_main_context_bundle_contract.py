@@ -110,6 +110,30 @@ def test_main_context_bundle_keeps_conversation_task_id_out_of_model_prompt(
     assert result.bundle["task"]["attributes"]["conversation_task_id"] == "durable-work-task"
 
 
+def test_pending_conversation_bundle_hides_owner_absolute_paths_from_model_prompt(
+    tmp_path: Path,
+) -> None:
+    owner_home = tmp_path / "home" / "owners" / "providers" / "tui" / "users" / "u1"
+    owner_home.mkdir(parents=True)
+    result = build_main_context_bundle(
+        MainContextBundleRequest(
+            root=owner_home,
+            home_paths=ensure_my_agent_home(tmp_path / "home"),
+            user_prompt="在任务目录里创建 bbb",
+            request_id="gwreq-pending",
+            task_attributes={"conversation_thread_id": "thread-pending"},
+            save=False,
+        )
+    )
+
+    assert str(owner_home.resolve()) not in result.prompt_section
+    assert str((tmp_path / "home").resolve()) not in result.prompt_section
+    assert "首个工作工具会固定任务目录" in result.prompt_section
+    assert result.bundle["workspace_refs"]["primary_workspace_root"] == str(
+        owner_home.resolve()
+    )
+
+
 def test_runtime_context_bundle_surfaces_tool_spec_load_error(tmp_path: Path) -> None:
     class BrokenTools:
         owner_type = "main_agent"

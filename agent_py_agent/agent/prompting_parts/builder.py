@@ -316,13 +316,35 @@ def project_runtime_workspace_context(
         return "\n".join(projected)
 
     if task_workspace_pending:
-        pending = (
-            "- 当前会话尚未建立任务写入目录；首次工作工具调用会由程序建立。"
-            "写入参数使用相对的 output/...（交付）或 work/...（过程），"
-            "不要把上面的宿主工作目录拼成绝对写路径。"
+        # 任务晋升前的 owner home 只是资料读取边界，不是本轮产物 cwd。把它作为
+        # “当前工具工作目录”展示给模型，会诱导模型把该绝对路径复制进 shell 或
+        # child goal；晋升后工具已经切到 canonical task root，二者随即冲突。
+        pending_root = (
+            "- 当前工作目录: 首个工作工具调用时由宿主固定到本轮任务目录；"
+            "开始前不要自行拼接宿主绝对路径。"
         )
-        if pending not in lines:
-            lines.append(pending)
+        projected = []
+        inserted = False
+        for line in lines:
+            if line.startswith(root_prefix):
+                if not inserted:
+                    projected.append(pending_root)
+                    inserted = True
+                continue
+            if line in {relative_line, generic_write_line}:
+                continue
+            projected.append(line)
+        if not inserted:
+            projected.insert(0, pending_root)
+        pending = (
+            "- 当前会话尚未建立任务写入目录；读取已有资料可使用相对路径。"
+            "首次写入、执行或派工时程序会建立并固定任务目录；"
+            "新产物继续使用相对路径（用户要求的普通目录名也保持相对），"
+            "不要把 owner 私人空间或宿主目录拼成绝对写路径。"
+        )
+        if pending not in projected:
+            projected.append(pending)
+        lines = projected
     return "\n".join(lines)
 
 

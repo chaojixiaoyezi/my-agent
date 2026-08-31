@@ -239,6 +239,43 @@ def test_reconciler_stuck_owner_does_not_delay_base_or_other_owner(
     assert not thread.is_alive()
 
 
+def test_reconciler_bounds_queue_and_prioritizes_recent_owners(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_agent, _owner, _scoped = _scoped_restart_fixture(tmp_path)
+    registry = shared_active_owner_registry(base_agent)
+    for index in range(6):
+        registry.record(OwnerIdentity.provider_user("feishu", f"u-{index}"))
+    monkeypatch.setattr(
+        gateway_loops,
+        "_gateway_agent_from_context",
+        lambda _context: base_agent,
+    )
+    reconciler = gateway_loops._GatewayOrphanReconciler(
+        _context(base_agent, tmp_path)
+    )
+    reconciler._owner_worker_limit = 2
+    reconciler._next_discovery_at = float("inf")
+    submitted: list[str] = []
+
+    class _PendingFuture:
+        def done(self) -> bool:
+            return False
+
+    class _Executor:
+        def submit(self, _callable, _owner, label):
+            submitted.append(label)
+            return _PendingFuture()
+
+    reconciler._owner_executor = _Executor()
+
+    reconciler._submit_owner_sweeps(10.0)
+
+    assert submitted == ["feishu/user/u-5", "feishu/user/u-4"]
+    assert len(reconciler._owner_inflight) == 2
+
+
 def test_reconciler_does_not_sweep_memory_curator_only_owner(
     tmp_path: Path,
     monkeypatch,

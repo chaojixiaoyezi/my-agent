@@ -493,6 +493,7 @@ def test_conversation_guidance_idempotency_reuses_one_entry_and_terminal_receipt
     assert replay.guidance_id == first.guidance_id
     assert replay.created_at == 10.0
     assert receipt is not None and receipt.status == "consumed"
+    assert receipt.entry.delivered_at > 0
     rows = store.recent_guidance("request", "request-1", limit=0)
     assert [item.guidance_id for item in rows] == [first.guidance_id]
 
@@ -1706,9 +1707,86 @@ def test_open_subagents_queue_interim_reply_without_reading_model_prose() -> Non
     assert phase["kind"] == "subagents_active"
     assert phase["facts"]["reply_is_interim"] is True
     assert phase["facts"]["delegated_work"] == {
+        "schema": "delegated_work.v2",
+        "authority": "subagent_store",
         "total": 3,
         "status_counts": {"DONE": 2, "RUNNING": 1},
+        "topology": {
+            "root_run_id": "task-1",
+            "direct_child_count": 0,
+            "descendant_count": 0,
+            "unknown_parent_count": 3,
+            "max_depth": 0,
+            "nested_delegation_observed": False,
+            "nodes": [
+                {
+                    "run_id": "run-1",
+                    "parent_run_id": "",
+                    "parent_scope": "unknown",
+                    "depth": 0,
+                    "agent_name": "",
+                    "role": "",
+                    "status": "DONE",
+                },
+                {
+                    "run_id": "run-2",
+                    "parent_run_id": "",
+                    "parent_scope": "unknown",
+                    "depth": 0,
+                    "agent_name": "",
+                    "role": "",
+                    "status": "DONE",
+                },
+                {
+                    "run_id": "run-3",
+                    "parent_run_id": "",
+                    "parent_scope": "unknown",
+                    "depth": 0,
+                    "agent_name": "",
+                    "role": "",
+                    "status": "RUNNING",
+                },
+            ],
+            "nodes_truncated": False,
+        },
     }
+
+
+def test_open_subagents_receipt_exposes_flattened_topology_instead_of_inventing_grandchildren() -> None:
+    params = _tool_loop_params(
+        root_user_prompt="先派总协调子代理，再由它派四个孙代理",
+        executed_tools=["create_subagents"],
+    )
+    runs = [
+        SimpleNamespace(
+            id=f"worker-{index}",
+            parent_id="task-1",
+            root_id="task-1",
+            depth=1,
+            agent_name=f"worker-{index}",
+            role="worker",
+            status="RUNNING",
+        )
+        for index in range(1, 5)
+    ]
+    agent = SimpleNamespace(
+        subagent_run_ids_for_request=lambda task_id: (
+            [run.id for run in runs] if task_id == "task-1" else []
+        ),
+        subagents=SimpleNamespace(list_runs=lambda: runs),
+    )
+
+    assert queue_interim_reply_for_open_subagents(agent, params, tool_rounds=2) is True
+
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    topology = phase["facts"]["delegated_work"]["topology"]
+    assert topology["direct_child_count"] == 4
+    assert topology["descendant_count"] == 0
+    assert topology["nested_delegation_observed"] is False
+    assert {row["parent_scope"] for row in topology["nodes"]} == {"root"}
+    reply_params = natural_user_reply_model_params(params)
+    assert "不得把直属 worker 改称孙代理" in reply_params.user_prompt
 
 
 def test_active_named_audit_replaces_premature_final_with_model_interim(

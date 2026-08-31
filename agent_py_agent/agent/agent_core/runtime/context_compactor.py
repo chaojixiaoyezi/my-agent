@@ -10,6 +10,7 @@ from ..model.context_window import resolve_model_context_window_tokens
 # agents. The configured percentage has one authoritative location.
 # 模块用途: 统一计算模型窗口、精确触发点、近期尾部预算和连续失败冷却参数。
 DEFAULT_COMPACT_TRIGGER_PERCENT = 90
+DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT = 60
 DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS = 4
 DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP = 20_000
 DEFAULT_COMPACT_RECENT_TAIL_PERCENT = 10
@@ -24,6 +25,7 @@ class RuntimeCompactPolicy:
     context_window_tokens: int
     trigger_percent: int
     trigger_tokens: int
+    recovery_target_percent: int
     recovery_target_tokens: int
     allow_persistent_apply: bool
     recent_tail_max_turns: int
@@ -45,6 +47,13 @@ def runtime_compact_policy(
 ) -> RuntimeCompactPolicy:
     window = resolve_model_context_window_tokens(agent)
     percent = compact_trigger_percent(getattr(getattr(agent, "config", None), "memory_compact_auto_trigger_percent", None))
+    recovery_percent = compact_recovery_target_percent(
+        getattr(
+            getattr(agent, "config", None),
+            "memory_compact_recovery_target_percent",
+            None,
+        )
+    )
     trigger_tokens = compact_trigger_tokens(window, percent)
     recent_tail_tokens = min(
         DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP,
@@ -57,9 +66,12 @@ def runtime_compact_policy(
         context_window_tokens=window,
         trigger_percent=percent,
         trigger_tokens=trigger_tokens,
+        recovery_target_percent=recovery_percent,
         recovery_target_tokens=compact_recovery_target_tokens(
+            window,
             trigger_tokens,
             recent_tail_tokens,
+            recovery_percent,
         ),
         allow_persistent_apply=(
             bool(save) or conversation_transcript_is_authoritative(task_attributes)
@@ -91,26 +103,58 @@ def compact_trigger_tokens(context_window_tokens: int, trigger_percent: int) -> 
     return max(1, int(context_window_tokens * (compact_trigger_percent(trigger_percent) / 100.0)))
 
 
-# LLM: Every live-tool and transcript Compact must settle below this same target so the next
-# complete recent-tail budget does not immediately trigger another generation.
-# 函数用途: 从触发线中预留一整段近期对话空间，计算压缩后必须达到的恢复目标。
+# LLM: Recovery is intentionally lower than the trigger. 会话运行时 and 终端交互 rebuild a compact
+# replacement context instead of stopping just below the trigger; this parser keeps the configurable
+# provider-neutral target bounded while the final calculator still reserves one complete recent tail.
+# 函数用途: 规范化压缩后的目标百分比；非法值回到 60%，过小或过大值限制在 25%--80%。
+def compact_recovery_target_percent(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT
+    if parsed < 25:
+        return 25
+    if parsed > 80:
+        return 80
+    return parsed
+
+
+# LLM: Every live-tool and transcript Compact must settle below both the configured recovery share
+# and trigger-minus-tail ceiling. This prevents one ordinary large turn from immediately creating
+# another generation while preserving the same canonical summary and bounded recent complete turns.
+# 函数用途: 同时按模型窗口恢复比例和触发线尾部余量计算压缩后的统一健康目标。
 def compact_recovery_target_tokens(
+    context_window_tokens: int,
     trigger_tokens: int,
     recent_tail_tokens: int,
+    recovery_target_percent: int,
 ) -> int:
-    if trigger_tokens <= 0:
+    if context_window_tokens <= 0 or trigger_tokens <= 0:
         return 0
-    return max(1, int(trigger_tokens) - max(1, int(recent_tail_tokens or 0)))
+    percentage_target = max(
+        1,
+        int(
+            int(context_window_tokens)
+            * (compact_recovery_target_percent(recovery_target_percent) / 100.0)
+        ),
+    )
+    tail_ceiling = max(
+        1,
+        int(trigger_tokens) - max(1, int(recent_tail_tokens or 0)),
+    )
+    return min(percentage_target, tail_ceiling)
 
 
 __all__ = [
     "DEFAULT_COMPACT_TRIGGER_PERCENT",
+    "DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT",
     "DEFAULT_COMPACT_FAILURE_COOLDOWN_SECONDS",
     "DEFAULT_COMPACT_FAILURE_THRESHOLD",
     "DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS",
     "DEFAULT_COMPACT_RECENT_TAIL_PERCENT",
     "DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP",
     "RuntimeCompactPolicy",
+    "compact_recovery_target_percent",
     "compact_recovery_target_tokens",
     "compact_trigger_percent",
     "compact_trigger_tokens",

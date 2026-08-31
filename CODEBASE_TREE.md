@@ -48,6 +48,7 @@ agent_py_agent/
 |   |-- agent_core/                     # 无副作用包入口；主代理运行时、工具循环、编排与自然回合收口实现
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
 |   |   |-- runtime/                    # 单 child guidance、active-turn compact carrier、sleep 闹钟与 loop support
+|   |   |   |-- conversation_state.py  # 主/子代理当前 Compact 代次的结构化模型事实投影
 |   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
 |   |   |-- model/                      # 主工具循环的统一模型调用账、动态超时、上下文压力与成本统计
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
@@ -137,6 +138,7 @@ agent_py_agent/
 |   |   |-- compact.py                  # 唯一 thread compact：候选验证、一次 CAS 提交与近期 raw tail
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
 |   |   |-- compact_checkpoint.py       # owner-scoped 完整 compact 恢复点与代际引用
+|   |   |-- active_turn_compact.py      # 跨工作片工具 archive 到同一 checkpoint/CAS 的恢复压缩与模型投影
 |   |   |-- live_tool_compact.py        # 运行中原生工具历史到同一 thread checkpoint/CAS 的适配层
 |   |   |-- native_history.py           # 完成回合的 provider 原生消息信封、校验与按请求替换式恢复
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实

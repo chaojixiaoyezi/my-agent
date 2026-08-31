@@ -23,6 +23,9 @@
   阈值、CAS、quota 和注入扫描后自主提交；只有 SOUL 进入 owner 用户确认链。
 - 所有 active/candidate/daily/lesson/HOT/persona 路径都从当前 owner 的 `HomePaths` 解析。共享 Gateway
   只调度多个 owner，绝不共享这些仓库；投影、索引和恢复包不得把其它 owner 的正文带入当前模型。
+- `update_persona` 的写入频率保护也必须以 canonical owner home 分桶；同一 Gateway 的其它 owner 不能消耗
+  当前 owner 的额度。限频只是一层软资源保护，拒绝必须结构化标记 `effect_outcome=not_started` 并保留可
+  退避错误码，不能污染记忆正文、确认链或副作用未知账。
 - `memory_path` 等路径由 home 解析统一给出（显式配置 > MY_AGENT_HOME 环境变量 >
   ~/.my-agent 兜底），记忆模块不自行猜测 owner home。
 

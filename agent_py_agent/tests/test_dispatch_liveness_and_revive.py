@@ -130,6 +130,42 @@ def _capture_auto_start(monkeypatch) -> list[list[str]]:
     return calls
 
 
+def test_supervision_reconciles_superseded_runtime_attempts(tmp_path, monkeypatch) -> None:
+    reconciled: list[str] = []
+    runtime_db = SimpleNamespace(
+        reconcile_superseded_attempts=lambda: reconciled.extend(["attempt-old"]) or [
+            "attempt-old"
+        ]
+    )
+    manager = SimpleNamespace(
+        workspace=tmp_path,
+        runtime_db=runtime_db,
+        list_runs=lambda: [],
+    )
+    monkeypatch.setattr(
+        capability_auto_sweep,
+        "_reconcile_conversation_parent_lifecycle",
+        lambda _agent: {},
+    )
+    monkeypatch.setattr(
+        capability_auto_sweep,
+        "_reconcile_direct_parent_waits",
+        lambda _agent: {},
+    )
+    monkeypatch.setattr(
+        capability_auto_sweep,
+        "auto_start_stalled_orphans",
+        lambda _agent: {"started": 0},
+    )
+
+    summary = capability_auto_sweep._supervise_stalled_orphans_unlocked(
+        _agent(tmp_path, manager)
+    )
+
+    assert reconciled == ["attempt-old"]
+    assert summary["superseded_attempts_reconciled"] == 1
+
+
 def test_runner_session_freshness() -> None:
     assert has_fresh_runner_session(_task_with_session(_session())) is True
     assert has_fresh_runner_session(_task_with_session(_session(age_seconds=60.0))) is False
@@ -481,9 +517,11 @@ def test_managed_supervision_settles_dead_attempt_before_requeue(
     prepared.attributes = {
         **dict(prepared.attributes or {}),
         "runner_session": {
-            **_session(age_seconds=120.0),
+            **_session(age_seconds=0.0),
             "run_id": task.id,
             "worker_pid": 999999999,
+            "process_epoch": "old-gateway-generation",
+            "in_process": True,
         },
     }
     manager.save(prepared)
@@ -503,6 +541,8 @@ def test_managed_supervision_settles_dead_attempt_before_requeue(
     recovered = manager.load(task.id)
     assert recovered.status == "PENDING"
     assert old_attempt_id in recovered.runner_abandoned_attempt_ids
+    assert recovered.attributes["runner_session"]["status"] == "failed"
+    assert recovered.attributes["runner_session"]["reclaim_reason"] == "runner_process_died"
     assert manager.runtime_db.get_attempt(old_attempt_id)["status"] == "cancelled"
     assert calls and calls[0] == [task.id]
     resumed = manager.lifecycle.prepare_runner_attempt(task.id)
@@ -511,6 +551,85 @@ def test_managed_supervision_settles_dead_attempt_before_requeue(
     assert authority is not None
     assert int(authority["current_attempt_generation"]) == 2
     assert manager.runtime_db.get_attempt(resumed.runner_active_attempt_id)["status"] == "running"
+
+
+@pytest.mark.parametrize(
+    ("run_status", "runtime_status", "runtime_reason", "task_status", "session_status"),
+    [
+        ("done", "ok", "", "DONE", "completed"),
+        ("failed", "error", "provider_failed", "FAILED", "failed"),
+        ("cancelled", "cancelled", "user_stop", "CANCELLED", "cancelled"),
+    ],
+)
+def test_managed_supervision_projects_natural_runtime_terminal_without_rerun(
+    tmp_path: Path,
+    monkeypatch,
+    run_status: str,
+    runtime_status: str,
+    runtime_reason: str,
+    task_status: str,
+    session_status: str,
+) -> None:
+    owner_home = tmp_path / "owner"
+    manager = SubAgentManager(
+        tmp_path / "subagents",
+        owner_id="tui-test/terminal-projection",
+        owner_home_dir=str(owner_home),
+    )
+    task = manager.create_run(
+        goal="project a runtime terminal fact",
+        thought="recovery",
+        plan=["finish once"],
+        depth=1,
+    )
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    attempt_id = prepared.runner_active_attempt_id
+    prepared.attributes = {
+        **dict(prepared.attributes or {}),
+        "runner_session": {
+            **_session(age_seconds=0.0),
+            "run_id": task.id,
+            "worker_pid": 999999999,
+            "process_epoch": "old-gateway-generation",
+            "in_process": True,
+        },
+    }
+    manager.save(prepared)
+    authority = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert authority is not None
+    settled = manager.runtime_db.settle_agent_run(
+        agent_run_id=str(authority["agent_run_id"]),
+        status=run_status,
+        attempt_id=attempt_id,
+        payload={
+            "status": run_status,
+            "runtime_status": runtime_status,
+            "runtime_reason": runtime_reason,
+            "runtime_source": "model_turn",
+            "tool_rounds": 2,
+        },
+    )
+    assert settled["settled"] is True
+    calls = _capture_auto_start(monkeypatch)
+
+    summary = capability_auto_sweep.supervise_stalled_orphans(
+        _agent(tmp_path, manager)
+    )
+
+    repaired = manager.load(task.id)
+    assert summary["running_reclaimed"] == 1
+    assert summary["running_terminal_projected"] == 1
+    assert repaired.status == task_status
+    assert repaired.runner_active_attempt_id == ""
+    assert repaired.runner_attempts == 1
+    assert repaired.runner_abandoned_attempt_ids == []
+    assert repaired.attributes["runner_session"]["status"] == session_status
+    repair = repaired.attributes["runtime_terminal_projection_repair"]
+    assert repair["attempt_id"] == attempt_id
+    assert repair["run_status"] == run_status
+    assert manager.runtime_db.agent_run_for_run_id(task.id)["status"] == run_status
+    assert int(manager.runtime_db.agent_run_for_run_id(task.id)["current_attempt_generation"]) == 1
+    assert calls == []
 
 
 def test_cross_generation_inprocess_session_ignores_reused_pid(tmp_path: Path, monkeypatch) -> None:
@@ -531,6 +650,33 @@ def test_cross_generation_inprocess_session_ignores_reused_pid(tmp_path: Path, m
 
     assert summary["running_reclaimed"] == 1
     assert manager.load(frozen.id).status == "PENDING"
+
+
+def test_cross_generation_dead_process_reclaims_even_with_fresh_heartbeat(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    frozen = _make_child(
+        manager,
+        status="RUNNING",
+        session={
+            **_session(age_seconds=0.0),
+            "worker_pid": 999999999,
+            "process_epoch": "old-generation",
+            "in_process": True,
+        },
+    )
+    calls = _capture_auto_start(monkeypatch)
+
+    summary = capability_auto_sweep.supervise_stalled_orphans(_agent(tmp_path, manager))
+
+    assert summary["running_reclaimed"] == 1
+    recovered = manager.load(frozen.id)
+    assert recovered.status == "PENDING"
+    assert recovered.attributes["runner_session"]["status"] == "failed"
+    assert recovered.attributes["runner_session"]["reclaim_reason"] == "runner_process_died"
+    assert calls == [[frozen.id]]
 
 
 def test_cross_generation_subprocess_keeps_live_pid_guard(tmp_path: Path, monkeypatch) -> None:

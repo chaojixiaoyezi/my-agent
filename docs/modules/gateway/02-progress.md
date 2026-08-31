@@ -1,5 +1,118 @@
 # Gateway Progress
 
+## 2026-08-31 R116/R117 上下文校准与后台 final 连续性
+
+- provider 成功响应现在把数值 context observation 写入 exact thread；读取时要求稳定请求指纹和 Compact
+  generation 都匹配。u323 八 child 完成后主 compact 0，立即追问命中 32,418 cache-read；u324 自然越过
+  90% 后只提交 generation 0→1 一次并继续，旧频繁 Compact 未复现。
+- u323 暴露本地 TUI 后台 final 只进 notice、不进 messages。R117 将 `tui` 加入 transcript delivery channel，
+  复用现有 background transcript 幂等键提交 commentary/final；notice 仍独立投影，不取得历史权威。
+- 首次 u325 因 Gateway 从 `/root/my-agent-src` 启动而导入旧 checkout，保留为部署负样本。改从 `/root`
+  启动已安装 wheel 后，u326 在追问前核对到 schema v8、6 条 commentary、1 条 final，随后召回正确。
+  当前唯一 Gateway 为 `ma-gateway-r117b-110-wheel-runtime`，MiniMax-M2.7，8420 单 listener。
+
+## 2026-08-30 R114u/R114v 公平 Compact 让出与中性服务 cwd
+
+- 旧 u305 在一个后台工作片连续推进 8 代后被普通 RuntimeError 误记失败，随后才靠下一次扫描继续；当前保留
+  8 代公平上限，但用 typed yield 干净释放 claim，原 wake 不消费、policy 不记失败，下一片从 canonical
+  generation 续跑。两条 failure-first focused 已转绿，普通异常和无代次进展仍 fail closed。
+- systemd/launchd unit 不再把安装时 checkout 写成运行 cwd，统一建立并使用
+  `<MY_AGENT_HOME>/service-cwd`。它不承载 owner/task/workspace，也不改变配置或密钥来源，只消除源码阴影。
+- wheel `41f752d...` 已部署 `.10` 唯一 Gateway；从 `/root` 启动且模块来自 site-packages。重启时 u315 七个
+  live child 精确 reclaim/revive、名册无重复。fresh 自然跨 8 代仍观察中，不用旧样本冒充新真机证据。
+
+## 2026-08-30 R114t pending turn cwd 投影
+
+- fresh 长任务证明：首轮模型看到 owner home 后会把它复制进同批 child goal；首个工作工具随后建立的
+  canonical task root 与这些自然语言绝对路径冲突，安全墙拒绝但任务空转。
+- 当前 pending 模型投影隐藏 owner/宿主绝对路径，只保留“相对读取、工作工具固定任务 cwd、相对新产物”三项
+  事实；canonical context bundle 文件仍完整保留内部 refs。该变化不预建闲聊任务、不解析 prompt、不重写
+  child goal，也不放宽 owner wall。任务晋升后的现有 cwd 主链不变。
+- `gwreq-*` 同时进入机器 ID 识别，防止目录标题退化成请求号。本地 94 项 focused 与 `.10` u313 fresh
+  真 TUI 通过：6 名 child 同一 canonical task root，owner-root 泄漏和路径拒绝均为 0。
+
+## 2026-08-30 R114r 跨工作片 active-turn Compact
+
+- `.10` 长任务证明当前 request 的完整工具 archive 会跨多个 `Agent.run` 恢复，但旧链只把它临时变成有界
+  handoff；屏幕 Context 会下降，ConversationThread generation 却仍是 0，既让用户误判 Compact，也会让
+  后续恢复再次把旧调用喂给模型。
+- 当前完整 archive 与模型投影正式分离：预算、去重、已执行工具和副作用仍读全账；只有 thread 指针确认的
+  `live_tool_ir` checkpoint exact source ids 从 provider 视图移除。孤儿 checkpoint 和自然语言没有隐藏权。
+- Gateway/background main 的 overflow 后备不再读取“有进展”布尔值放行重试。transcript 无法推进时必须用
+  同一 live checkpoint/CAS 提交 active-turn replacement，复用六字段摘要、失败熔断和 5/20/65/82/92/100
+  进度；提交失败就停止，避免重复烧相同输入。focused 与 `.10` u314 fresh 长任务通过：8/8 child、三代
+  canonical Compact、367 行最终报告和 provider cache-read 账均连续。
+
+## 2026-08-30 R114o TUI 快速就绪首帧
+
+- `.10` 唯一 Gateway 下批量新开 scoped TUI 暴露首帧竞态：进程和 worker 均已就绪，但屏幕长时停在
+  “正在启动交互界面”，输入任意键后立即正常显示。这证明是 preflight 结果早于可见帧
+  被消费，不是 Gateway 慢或模型慢。
+- R114o 把 readiness 结果投递回 prompt_toolkit Application loop，同一回调内完成 runtime 状态、
+  worker 启动与 invalidate。本地 deferred-loop 合同已通过；`.10` 在同一 Gateway 下同时新开
+  8 个 owner TUI，不按键 5 秒后 8/8 自动进入正常首屏。
+
+## 2026-08-30 R114n Compact 恢复目标留出长回合空间
+
+- R114l 八子代理任务最终自然完成，但 main 的 90% 触发、约 81% 恢复使一份长整合报告立刻触发下一代，
+  真实出现约 119.4k→100.1k、115.4k→94.7k 和总计 `compact 3`。
+- 会话运行时 用摘要 + 最多约 20k 用户消息替换旧历史；终端交互 用 boundary + summary + 有界附件重建并监控
+  `willRetriggerNextTurn`。当前新增 `memory_compact_recovery_target_percent=60`，与 90% 触发分离并由统一
+  `RuntimeCompactPolicy` 同时供 main/child、live-tool/transcript 使用。
+- 目标取窗口 60% 与 trigger-minus-tail 的较小值；128k 默认不高于 76.8k。旧会话基线已经高于该目标时
+  跳过注定贴线的 live summary，直接进入 canonical transcript Compact，不改变 checkpoint、generation、
+  active-turn、owner 隔离或 raw transcript 保留。focused 与 u314 fresh 长 TUI 通过；三代替换的是不同
+  transcript/live-tool source，提交后的 source projection 均低于恢复目标。
+
+## 2026-08-30 R114m 本地搜索默认正则
+
+- 真 TUI 恢复任务暴露：模型按 会话运行时/终端交互/任务运行时 的 ripgrep 习惯传 `A|B`，旧
+  `search_text` 却默认 literal，因而返回结构化但错误的本地空结果。
+- 当前 schema 与两条执行后端统一改为默认 ripgrep 正则，精确原文显式 `literal=true`。网络边界、owner
+  路径墙、非法正则错误码、分页和输出模式不变；58 项 focused 已通过，待下一 wheel 真 TUI。
+
+## 2026-08-30 R114l 后台 Compact 原地续跑
+
+- 真实 R114k 长任务的四次 live Compact 都在 measuring 后 superseded：候选未推进 generation 是正确回滚，
+  根因是被删除工具对所属的长 assistant 思考正文仍留在 native IR，摘要后完整请求仍高于 recovery target。
+- 现在只有完整 replacement summary 已生成时，pair reducer 才把已无保留调用的旧 assistant 工具轮一并删除；
+  普通 PTL/window 没有摘要时不动正文，current UserTurn 与 orphan-safe 工具配对合同不变。
+- background main 新增与 foreground/child 同语义的外层：`context_overflow` 后携带 typed archive/插话，强制
+  ConversationStore Compact，并在同一工作片继续；无 generation 或结构化进展立即失败，不等下一次 scheduler
+  policy 重复烧摘要。显示继续复用同一个 Compact 进度块和 canonical generation。
+- focused 已通过，wheel 已部署 `.10` 单 Gateway；`ma-r114l-110-u295-compact-research-long` 已完成八子代理长
+  调研。任务运行时 child 约 124,049→53,711 token、终端交互 child 同为 generation 1；八名 child
+  全部 DONE，八份分报告和横向报告存在，main final 直接显示且 Working 收起。主链通过，连续三代问题转 R114n。
+
+## 2026-08-30 R114 多页 owner 重启恢复与冷通知重放
+
+- `.10` R113 顺序重启唯一 Gateway 后，长任务的 task/thread/run 持久事实完整，最终也能自动恢复；但 u276--u279
+  约两分钟才重新出现 Working。日志与 discovery cursor 证明：这些 owner 位于第三页，旧 orphan/background
+  controller 在相邻页之间错误等待完整 60/120 秒稳态重扫间隔。
+- R114 保留每 tick 一页的有界扫描；页上有 continuation cursor 时下个 tick 立即继续，整轮结束后才等待配置
+  间隔。明确 `in_process`/subprocess 形态且 exact PID 已死时，OS 事实可越过仍新鲜的最后心跳；PID 仍活或
+  旧账缺字段时继续按原 fresh window 保守处理。
+- 对照 会话运行时 resume 生命周期和 长期助手 Gateway orphan lease 回收后，没有新增恢复状态机、第二 Gateway 或
+  全量阻塞扫描。`.10` 唯一 MiniMax-M2.7 Gateway 在 u283--u287 长任务运行时顺序重启；
+  u287 的 7 个 runner 在 25 秒内原 run revive，八行名册无重复，u285/u286 也继续推进。
+- passive notices 仍优先只读驻留 owner；cold owner 只用结构化身份扫自己固定深度的已存在会话库，
+  重放 exact binding 的已提交 notice，不创建目录也不初始化 Agent。u283 原 TUI 在 Gateway 重启后已补出
+  之前屏幕缺失的完整 final。
+- child 用户插话在 provider consume 后同时写 exact child thread 和 durable agent transcript；重连客户端
+  没有本地 pending map 时依 exact message id 重建 user block。u287 已通过 TUI 进程退出/resume 和
+  Gateway 重启两层复验，补充要求仍在 researcher-7 原时序位置。
+- u288 真实长任务进一步暴露 runtime/task 双投影收尾竞态：宿主 terminal event 已提交而 task 仍 RUNNING 时，
+  旧 supervision 会把 `done/failed/cancelled` 一律当作“安全重排队”，已完成 child 因而重复执行。当前恢复
+  先区分 natural model-turn closeout 与 recovery-generated closeout：前者复用 canonical runner-result service
+  补写 task、runner session、父级 wake 和结构化覆盖，不再 abandon/requeue；后者继续按原崩溃路径恢复。
+  参数化 focused 已覆盖完成、失败、取消和原 dead-runner requeue，真 TUI 重启复验列入 R114j gate。
+- R114j 的 fresh/restart 复验已确认 u288 九名终态 child 不增加 generation，u289/u290 的 live attempt 才按
+  原 run 恢复。压力样本同时发现主请求的未完成回合没有从 transcript 恢复工具历史：u290 原先已建 10 项
+  Todo 和 6 名 child，Gateway 重启后模型只看原 prompt，又追加 6 项同义 Todo。
+- R114k 复用现有跨进程工具输出索引和 Compact carried contract。requeue 落 typed active-turn marker，执行端
+  按 exact owner + `conversation_request_id` 读取主回合工具调用并在第一次 provider call 前重建工具去重、轮次、
+  参数和 operation refs；不读取 child 索引、不解析 assistant/错误正文。索引读取失败直接停止自动重放。
+
 ## 2026-08-30 R113 Todo 每轮纪律与 Compact typed 失败展示
 
 - R112 fresh 长任务已经证明八个 child covers 项会持久追平到 8/9，但 MiniMax 在自然 final 前没有显式关闭
@@ -2508,3 +2621,11 @@
   也不会把工具前过渡句当终稿。
 - `.7` `ma-cleanup-audit-r12/r13` 已真实复验：不再猜端口、不再输出半句，精确身份与日志计数均通过；单
   Gateway 拓扑保持不变。
+
+## 2026-08-30 首次工具晋升投影与后台 Skill 续接
+
+- 首个 `promotes_task` 工具成功建立 task root 后，工具循环自己的 task-attributes 投影会在权限/cwd 冻结前
+  从外层活动回合权威状态刷新；这解决多工具并发轮里首个 shell 仍在 owner home 执行的问题。
+- 后台 child-lifecycle 续轮默认保留 `skill_search`，使同一任务前台已经选择的 Skill 能在后续整合轮继续读取；
+  显式 owner/task policy 仍可移除该工具。
+- 本地 focused 已通过，真实 MiniMax-M2.7 TUI 的 fresh 目录和后台唤醒复验待 R114p 部署后完成。

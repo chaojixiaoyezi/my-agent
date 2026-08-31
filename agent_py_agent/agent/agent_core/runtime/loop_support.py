@@ -210,7 +210,9 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
             if st == "project" and sk:
                 project_pairs.append(("project", sk))
         if project_pairs:
-            recall_scope = MemoryRecallScope(tuple(dict.fromkeys([*recall_scope.keys, *project_pairs])))
+            recall_scope = MemoryRecallScope(
+                tuple(dict.fromkeys([*recall_scope.keys, *project_pairs]))
+            )
     except Exception:
         pass
 
@@ -466,11 +468,10 @@ _FORMAL_MEMORY_BUDGET_CHARS = 10000
 
 def _budgeted_formal_memories(records: list) -> list:
     hot = [record for record in records if str(getattr(record, "kind", "") or "") == "hot"]
-    lessons = [
-        record for record in records if str(getattr(record, "kind", "") or "") == "lesson"
-    ]
+    lessons = [record for record in records if str(getattr(record, "kind", "") or "") == "lesson"]
     rest = [
-        record for record in records
+        record
+        for record in records
         if str(getattr(record, "kind", "") or "") not in {"hot", "lesson"}
     ]
     kept = list(hot)
@@ -852,9 +853,7 @@ def _completed_turn_native_messages(
     final_text = str(getattr(final_response, "text", "") or "")
     if not has_tool_use and (final_text or blocks):
         history.append(AssistantTurn(text=final_text, content_blocks=blocks))
-    return strip_orphaned_tool_blocks(
-        AnthropicMessageAdapter().to_provider_messages(history)
-    )
+    return strip_orphaned_tool_blocks(AnthropicMessageAdapter().to_provider_messages(history))
 
 
 # LLM: Historical and current ordinary user turns use one deterministic provider representation;
@@ -864,9 +863,20 @@ def _native_user_task_text(value: object) -> str:
     return f"# User Task\n{str(value or '')}"
 
 
+# LLM: Resume reconstruction has two projections: the complete owner archive restores budgets,
+# dedupe and effect state, while only calls not covered by committed Compact checkpoints reach the
+# provider. Never use the bounded model projection as runtime authority.
+# 函数用途: 从当前请求与完整续跑账本组装工具循环参数，并只把未压缩的近期轨迹展示给模型。
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = seed.params
     archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
+    from ...conversation.active_turn_compact import model_visible_active_turn_tool_calls
+
+    model_visible_archive_tool_calls = model_visible_active_turn_tool_calls(
+        agent,
+        params.task_attributes,
+        archive_tool_calls,
+    )
     # H1：compact 自动续跑会重建一个全新的 ToolLoopExecuteParams。除了已重建的 pending_deferred，
     # 还必须从 carried 的 archive 记录里重建这四项运行时状态，否则续跑相当于「失忆重来」：
     #   - one_shot_tool_calls：一次性编排工具（create_subagents）的去重集合
@@ -877,6 +887,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     # 这是已有 pending_deferred 重建（_live_archive_state_from_carried_archive_tool_calls）的同源补全。
     reconstructed = _reconstructed_runtime_state(
         archive_tool_calls,
+        model_visible_records=model_visible_archive_tool_calls,
         agent=agent,
         request_id=params.request_id,
         run_id=params.run_id,
@@ -892,7 +903,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
 
         handoff = native_carried_tool_handoff(
             tool_context,
-            archive_tool_calls,
+            model_visible_archive_tool_calls,
             max_chars=semantic_summary_config(agent).max_input_chars,
         )
         tool_ir_history = _native_initial_tool_ir_history(
@@ -952,7 +963,9 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         context_scope=params.context_scope,
         loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names},
         workspace_context_snapshot=_workspace_context_snapshot(agent, params),
-        max_protocol_repairs=max(1, int(getattr(getattr(agent, "config", None), "max_protocol_repairs", 2) or 2)),
+        max_protocol_repairs=max(
+            1, int(getattr(getattr(agent, "config", None), "max_protocol_repairs", 2) or 2)
+        ),
     )
 
 
@@ -962,6 +975,7 @@ def _required_action_contract_snapshot(
     tool_runtime_snapshot: object,
 ):
     from ...contracts.effective_contract_snapshot import build_effective_contract_snapshot
+
     # LLM: 会话运行时 式工具循环不在 turn 前后生成或追踪“必做动作”；
     # 安全仍由工具 schema/权限/未知副作用闸保护，这个空快照只保持现有调用接口。
     # 函数用途: 为工具运行时创建不携带机器完成义务的请求快照。
@@ -987,6 +1001,8 @@ def _workspace_context_snapshot(agent, params: RuntimeLoopParams) -> str:
     return str(snapshot() or "")
 
 
+# LLM: This container deliberately keeps effect-control fields separate from model-facing context.
+# 类用途: 保存跨工作片重建出的工具预算、去重事实、已执行工具和可见摘要。
 @dataclass(frozen=True)
 class _ReconstructedRuntimeState:
     tool_context: list[str]
@@ -996,9 +1012,13 @@ class _ReconstructedRuntimeState:
     loaded_tool_names: set[str]
 
 
+# LLM: Full records restore tool rounds, one-shot keys, executed names and loaded tools. The optional
+# model-visible subset may affect only tool_context, so Compact cannot reset budgets or replay effects.
+# 函数用途: 从完整工具账恢复运行控制状态，同时可用已压缩后的子集生成模型可见历史。
 def _reconstructed_runtime_state(
     records: list[dict[str, object]],
     *,
+    model_visible_records: list[dict[str, object]] | None = None,
     agent: object = None,
     request_id: str = "",
     run_id: str = "",
@@ -1029,10 +1049,15 @@ def _reconstructed_runtime_state(
     都回退到逐条机械列表（行为与改动前一致）。
     """
     valid_records = [record for record in records if isinstance(record, dict)]
-    mechanical_entries = [_reconstructed_tool_context_entry(record) for record in valid_records]
+    visible_records = (
+        valid_records
+        if model_visible_records is None
+        else [record for record in model_visible_records if isinstance(record, dict)]
+    )
+    mechanical_entries = [_reconstructed_tool_context_entry(record) for record in visible_records]
     return _ReconstructedRuntimeState(
         tool_context=_tool_context_with_optional_semantic_summary(
-            valid_records,
+            visible_records,
             mechanical_entries,
             agent,
             request_id=request_id,
@@ -1048,6 +1073,27 @@ def _reconstructed_runtime_state(
         ],
         loaded_tool_names=_pending_carried_loaded_tool_names(valid_records),
     )
+
+
+# LLM: Recovery Compact needs the exact same bounded model projection as the next ToolLoop seed,
+# while runtime dedupe/tool-round state remains private to _reconstructed_runtime_state.
+# 函数用途: 为跨工作片 Compact 生成与下一轮一致的工具文本投影，不改变完整工具账或运行预算。
+def reconstructed_model_tool_context(
+    records: list[dict[str, object]],
+    *,
+    agent: object = None,
+    request_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
+) -> list[str]:
+    return _reconstructed_runtime_state(
+        records,
+        model_visible_records=records,
+        agent=agent,
+        request_id=request_id,
+        run_id=run_id,
+        task_id=task_id,
+    ).tool_context
 
 
 def _pending_carried_loaded_tool_names(records: list[dict[str, object]]) -> set[str]:

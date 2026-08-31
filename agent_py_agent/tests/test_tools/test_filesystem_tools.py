@@ -946,6 +946,23 @@ def test_search_text_supports_regex_and_ignore_case(tmp_path: Path):
     assert "没有找到匹配项" in literal.output
 
 
+def test_search_text_defaults_to_ripgrep_regex_semantics(tmp_path: Path):
+    """Default search follows 会话运行时/终端交互 rg alternation; literal stays opt-in."""
+    (tmp_path / "levels.js").write_text("const LEVELS = [];\nconst level2 = {};\n", encoding="utf-8")
+    tool = SearchTextTool(tmp_path, max_matches=20)
+
+    regex = tool.execute({"query": r"LEVELS|level1|level2", "file_glob": "*.js"})
+    literal = tool.execute(
+        {"query": r"LEVELS|level1|level2", "file_glob": "*.js", "literal": True}
+    )
+
+    assert regex.ok
+    assert "levels.js:1" in regex.output
+    assert "levels.js:2" in regex.output
+    assert literal.ok
+    assert "没有找到匹配项" in literal.output
+
+
 def test_search_text_skips_common_noise_dirs_by_default(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1131,7 +1148,9 @@ def test_search_text_no_match_exposes_local_literal_contract(
     tool = SearchTextTool(workspace, max_matches=10)
     monkeypatch.setattr(search_mod.shutil, "which", lambda _name: None)
 
-    result = tool.execute({"query": "find the semantic meaning of ExactIdentifier"})
+    result = tool.execute(
+        {"query": "find the semantic meaning of ExactIdentifier", "literal": True}
+    )
 
     assert result.ok
     facts = result.result_envelope["search_result"]
@@ -1268,7 +1287,7 @@ def test_search_text_treats_rg_no_matches_as_empty_result(tmp_path: Path, monkey
         raising=False,
     )
 
-    result = tool.execute({"query": "Missing"})
+    result = tool.execute({"query": "Missing", "literal": True})
 
     assert result.ok
     assert "没有找到匹配项" in result.output

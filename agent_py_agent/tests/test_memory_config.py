@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.model.context_window import resolve_model_context_window_tokens
 from agent_py_agent.agent.agent_core.runtime.context_compactor import (
+    compact_recovery_target_percent,
+    compact_recovery_target_tokens,
     compact_trigger_percent,
     compact_trigger_tokens,
     runtime_compact_policy,
@@ -40,6 +42,7 @@ def test_memory_settings_accepts_boundary_values():
             "memory_resume_auto_context_mode": "ALWAYS",
             "memory_resume_auto_context_limit": "1",
             "memory_compact_auto_trigger_percent": "70",
+            "memory_compact_recovery_target_percent": "55",
         }
     )
 
@@ -56,6 +59,7 @@ def test_memory_settings_accepts_boundary_values():
     assert settings.memory_resume_auto_context_mode == "always"
     assert settings.memory_resume_auto_context_limit == 1
     assert settings.memory_compact_auto_trigger_percent == 70
+    assert settings.memory_compact_recovery_target_percent == 55
 
 
 def test_memory_settings_invalid_values_fall_back_with_warnings():
@@ -73,6 +77,7 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
             "memory_resume_auto_context_mode": "always; rm -rf /",
             "memory_resume_auto_context_limit": 999,
             "memory_compact_auto_trigger_percent": "abc",
+            "memory_compact_recovery_target_percent": "abc",
         }
     )
 
@@ -90,6 +95,7 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
         "memory_resume_auto_context_mode",
         "memory_resume_auto_context_limit",
         "memory_compact_auto_trigger_percent",
+        "memory_compact_recovery_target_percent",
     }
     assert all(warning.default_value is not None for warning in warnings)
 
@@ -112,6 +118,7 @@ def test_load_config_normalizes_memory_values_and_keeps_warning_receipts(tmp_pat
     assert config.memory_resume_auto_context_mode == "trigger"
     assert config.memory_resume_auto_context_limit == 5
     assert config.memory_compact_auto_trigger_percent == 50
+    assert config.memory_compact_recovery_target_percent == 80
     assert [item["field_name"] for item in config.memory_config_warnings] == [
         "memory_archive_level",
         "memory_hook_enabled",
@@ -119,6 +126,7 @@ def test_load_config_normalizes_memory_values_and_keeps_warning_receipts(tmp_pat
         "memory_rule_auto_read_limit",
         "memory_resume_auto_context_limit",
         "memory_compact_auto_trigger_percent",
+        "memory_compact_recovery_target_percent",
     ]
 
 
@@ -136,6 +144,7 @@ def _memory_config_yaml_lines() -> list[str]:
         "memory_resume_auto_context_mode: trigger",
         "memory_resume_auto_context_limit: 0",
         "memory_compact_auto_trigger_percent: 40",
+        "memory_compact_recovery_target_percent: 99",
     ]
 
 
@@ -153,6 +162,7 @@ def test_memory_compact_trigger_percent_default_is_90():
     settings, warnings = normalize_memory_settings({})
 
     assert settings.memory_compact_auto_trigger_percent == 90
+    assert settings.memory_compact_recovery_target_percent == 60
     assert warnings == []
 
 
@@ -163,11 +173,19 @@ def test_runtime_compact_policy_percent_parser_matches_config_semantics():
     assert compact_trigger_percent(40) == 50
     assert compact_trigger_percent(120) == 100
     assert compact_trigger_tokens(200_000, 70) == 140_000
+    assert compact_recovery_target_percent(None) == 60
+    assert compact_recovery_target_percent(10) == 25
+    assert compact_recovery_target_percent(90) == 80
+    assert compact_recovery_target_tokens(128_000, 115_200, 11_520, 60) == 76_800
+    assert compact_recovery_target_tokens(128_000, 64_000, 11_520, 60) == 52_480
 
 
 def test_runtime_compact_policy_allows_authoritative_no_save_turn() -> None:
     agent = SimpleNamespace(
-        config=SimpleNamespace(memory_compact_auto_trigger_percent=90),
+        config=SimpleNamespace(
+            memory_compact_auto_trigger_percent=90,
+            memory_compact_recovery_target_percent=60,
+        ),
         backend=SimpleNamespace(context_window_tokens=128_000),
     )
 
@@ -180,6 +198,8 @@ def test_runtime_compact_policy_allows_authoritative_no_save_turn() -> None:
 
     assert auxiliary.allow_persistent_apply is False
     assert authoritative.allow_persistent_apply is True
+    assert authoritative.recovery_target_percent == 60
+    assert authoritative.recovery_target_tokens == 76_800
 
 
 def test_model_context_window_config_reaches_http_backend(tmp_path):

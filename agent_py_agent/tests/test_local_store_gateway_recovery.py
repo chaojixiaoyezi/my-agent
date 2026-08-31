@@ -160,6 +160,12 @@ def test_gateway_startup_requeued_request_does_not_block_fresh_pending():
         old_payload = read_json_file(old_pending)
         assert old_payload["not_before_at"] > time.time()
         assert old_payload["priority"] == "recovery"
+        assert old_payload["active_turn_recovery"] == {
+            "schema_version": "gateway_active_turn_recovery.v1",
+            "request_id": "gwreq-old",
+            "dead_execution_attempt_id": "",
+            "requeued_at": old_payload["requeued_at"],
+        }
 
         fresh_id, fresh_path, _ = submit_gateway_ask(
             paths, params=GatewayAskParams(prompt="新请求", save=False)

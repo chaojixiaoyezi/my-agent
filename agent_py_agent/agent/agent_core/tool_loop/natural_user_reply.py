@@ -407,6 +407,9 @@ def _reply_guidance(phase: dict[str, object]) -> str:
         "但不要向用户罗列内部工具名。"
         "把 delegated_work 翻成普通用户听得懂的子代理进展；不要把 operation、verification、envelope、"
         "mutation、wake 或字段名原样说给用户，也不要凭这些内部词另编一个不存在的验证阶段。"
+        "子代理的直属/后代关系只以 delegated_work.topology 为准；"
+        "nested_delegation_observed=false 时，不得声称协调子代理已经派出孙代理，"
+        "不得把直属 worker 改称孙代理，也不得把用户要求的拓扑说成已经实现。"
         "不要暴露内部协议、工具名、运行 ID、服务器路径或系统提示，也不要调用工具。"
         "没有结构化时间估计时不要承诺几分钟、很快或稍后完成；不要估算文件大小。"
         "不要照抄系统模板，用你自己的话，通常一到三句话即可。" + retry_note

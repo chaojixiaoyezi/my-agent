@@ -1,4 +1,7 @@
 
+# LLM: This module is the canonical typed search request and matcher contract;
+# rg and Python fallback must interpret every field identically.
+# 模块用途: 解析本地文本搜索参数，并为快速路径与后备路径提供一致的匹配规则。
 from __future__ import annotations
 
 import re
@@ -77,6 +80,9 @@ class SearchMatch:
     context: int
 
 
+# LLM: Omitted literal follows mature rg-backed agent tools and means regex;
+# callers needing exact text must opt into literal=True explicitly.
+# 函数用途: 把模型工具参数解析成统一搜索请求，默认按正则搜索并保留显式普通文本模式。
 def search_request_from_params(params: dict[str, Any], max_matches: int) -> SearchRequest:
     if isinstance(params.get("filesystem"), dict):
         raise ValueError("filesystem bundle is not current search_text syntax; use top-level path instead.")
@@ -103,7 +109,7 @@ def search_request_from_params(params: dict[str, Any], max_matches: int) -> Sear
             allow_empty=True,
             strip=True,
         ),
-        literal=_bool_param(params.get("literal"), default=True),
+        literal=_bool_param(params.get("literal"), default=False),
         ignore_case=_bool_param(params.get("ignore_case"), default=False),
         output_mode=output_mode,
         include_ignored=_bool_param(params.get("include_ignored"), default=False),

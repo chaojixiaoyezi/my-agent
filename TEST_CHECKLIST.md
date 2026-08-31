@@ -1,5 +1,67 @@
 # TEST CHECKLIST
 
+- [x] provider context observation 只能在 exact backend/model/protocol/system/stable-prompt/tools 指纹与 Compact
+  generation 匹配时校准压力；动态 messages 不使它每轮失效，缺失/漂移回退原估算，成本仍只认 provider
+  ledger。R116 u323 主 compact 0 且立即追问 cache-read 32,418；u324 自然越线只 Compact 一次。
+- [x] 本地 `channel=tui` 的后台 commentary/final 必须先进入 canonical ConversationStore，再投影 notice；没有
+  TUI adapter 时 delivery 可 `not_applicable`，但下一轮历史不能缺。相同 wake 重试只保留一个 final。
+  R117b u326 在追问前 raw 验证 schema v8、6 commentary、1 final，追问准确召回。
+- [x] wheel 部署不能只看 `pip install`、PID 或端口；Gateway 必须从中性 cwd 启动并核对实际 module/schema。
+  R117 u325 旧 checkout 遮蔽为失败样本，R117b 当前从 `/root` 启动且只有一个 MiniMax-M2.7 Gateway。
+
+- [x] R114t fresh MiniMax-M2.7 TUI：pending 首轮不暴露 owner 根为 cwd；首批多 child 直接在 canonical
+  task root 工作，零 stale-owner-path 拒绝/申请；任务目录使用可读标题。94 项 focused 与 `.10`
+  `ma-r114t-110-u313-cwd-subagents-wheel` 通过，6 名 child 同根、owner-root 泄漏/路径拒绝均为 0。
+
+- [x] 同一 Gateway 上每个 owner 的 `update_persona` 写入限频必须独立；owner A 的三次写入不能占用 owner B
+  的额度。第四次同 owner 写入应返回 `PERSONA_UPDATE_RATE_LIMITED`、`effect_outcome=not_started` 和可退避
+  建议，不能进入 UNKNOWN/DIRTY。38 项 focused 通过；`.10` 两个 fresh owner 并发各写 3 个事实全部
+  `SUCCEEDED`，同 owner 新 TUI 无工具读取准确回读，彼此不可见。
+
+- [x] provider 已明确返回 `context_overflow`、但 completed transcript 暂无可压消息时，Gateway/background main
+  必须把当前 request 的旧工具 archive 提交到同一 ConversationThread `live_tool_ir` checkpoint/CAS 后再试。
+  完整 archive 继续恢复 tool-round/one-shot/effect 权威；模型只隐藏已提交 checkpoint chain 的 exact source
+  call ids，孤儿候选无权隐藏。focused 与 `.10` u314 fresh 长 TUI 通过：8/8 child、三代 canonical Compact、
+  367 行 final 报告、3.17M provider cache-read，Todo/产物/终态均连续。
+
+- [x] `memory_compact_auto_trigger_percent=90` 与 `memory_compact_recovery_target_percent=60` 必须由 main/child、
+  live-tool/transcript 共用；128k 窗口压缩后完整 provider 输入应不高于 76.8k，至少留出约 38.4k 再到触发线。
+  已完成会话基线超过恢复目标时不得先烧一轮必重压的 live summary；fresh MiniMax-M2.7 长 TUI 仍需证明任务、
+  插话、工具事实和 final 不丢。u314 三代分别覆盖不同 transcript/live-tool source，提交后的 source projection
+  均低于目标；后续增长来自新增报告读取与 final，不是同候选贴线重压。
+
+- [ ] 后台 main 在一个 scheduler slice 连续推进 8 代 Compact 后必须以 typed yield 干净让出：claim 结束为
+  finished、原 wake 未消费、无 policy failure/假 RuntimeError，下一 slice 从 canonical generation 续跑。
+  focused 已通过，旧 u305 假失败样本保留；仍待 fresh 长任务自然跨过 8 代后勾选真机部分。
+
+- [x] `search_text` 省略 `literal` 时按 ripgrep 正则解释，`A|B` 可命中任一分支；schema 明示
+  `literal.default=false`。`literal=true` 仍按完整普通文本匹配，rg/Python no-match typed envelope 与 owner
+  路径边界不变。58 项 focused 已通过，下一 wheel 待用真实 MiniMax-M2.7 TUI 复现原多分支搜索。
+
+- [x] R114o 唯一 Gateway 快速就绪时，fresh TUI 不按键也要自动清除启动动画并显示
+  welcome/输入框；deferred-loop focused 已通过，`.10` 同时新开 8 个 scoped TUI，5 秒后
+  不按键全部自动进入正常首屏。
+- [x] R114l 八子代理长调研中，任务运行时 child 从约 124,049 token 压到约 53,711 token，
+  generation 0→1；终端交互 child 也 `compact 1`。八名 child 全部完成，八份分报告和 21,876-byte 横向报告
+  存在，main final 直接显示、Working 撤下。主代理连续 `compact 3` 的余量问题单列 R114n，不掩盖主链正证。
+
+- [x] 后台 main 的 native live Compact 在完整摘要覆盖旧工具轮后，必须同时回收该轮 assistant 正文、
+  ToolCall 和 ToolResult；无摘要的普通 window/PTL 仍保留 assistant 正文，UserTurn 不得删除。若完整请求仍
+  overflow，后台必须在同一 scheduler slice 强制 canonical transcript Compact，携带已完成工具与插话后续跑；
+  无 generation/结构化进展要有界停止。focused 与 R114l `.10` fresh 八-child 主链均已通过；连续代次成本
+  由 R114n 另行验收。
+
+- [ ] Gateway active turn 在已执行 `task_progress/create_subagents/write`、尚未提交 assistant 终态时重启，
+  reconciler 必须写 exact `gateway_active_turn_recovery.v1`，下一 provider call 从同 owner 工具索引按
+  `conversation_request_id` 续上已完成调用；Todo id/数量与 child 名册不变，不能只重放原 prompt 后另建计划。
+  foreign request/child 索引不得混入，索引不可读必须 fail closed。focused 已通过，待 R114k fresh 真 TUI。
+
+- [x] 唯一 Gateway 重启落在 child 的 `AgentRun` 已终态、`SubAgentTask` 尚未收尾的窗口时，监督器必须按 exact
+  `agent_run.completed` 宿主事件补齐普通 runner-result 投影；不得 abandon、不得增加 generation、不得重跑
+  已完成/失败/取消 child。恢复器自己生成且没有 `runtime_status` 的 cancelled 终态仍须 requeue 真崩溃轮。
+  三种自然终态与既有崩溃恢复 focused、R114j u288 终态窗口与本轮 u315 七个 live child 顺序重启均通过；
+  终态 generation 未增加，live run 才 reclaim/revive，roster 无重复。
+
 - [ ] Native prompt 必须用 typed `CacheStructuredPrompt` 表达稳定 system、仅供诊断的 current-user 副本与
   动态尾部，不得按标题、用户正文或模型语言猜边界。真实 wire 必须保持「committed summary/已结束消息 →
   当前 user → append-only 当前轮 IR → 当前事实」，当前 user 只发送一次；Anthropic 只有一个最新历史断点，
@@ -116,6 +178,9 @@
 
 - [x] 运行 child 的用户消息 receipt 带 exact `expected_turn_id`，reserve、provider submission 与 consume
   使用同一 attempt；不得再出现 `guidance submission reservation mismatch`。
+- [x] child guidance 只在 provider 接收边界以普通 user message 写入 exact child thread；消费事件
+  同时携带有界展示副本和 exact message id。完全退出/恢复 TUI 以及重启唯一 Gateway 后，
+  researcher-7 详情仍在原位显示用户补充要求；不能仅依赖当前 TUI 的 pending 文本。
 - [x] child 没有 pending/running attempt 时，入口明确拒绝、用户输入保留且 guidance message box 零新增。
 - [x] 默认 root 一次可原子创建 8 名 child，`per_call_cap=0`、session cap=8；第 9 名整批拒绝，终态释放后
   可继续创建，历史累计允许超过 8。
@@ -123,6 +188,9 @@
   常驻 footer 显示应用内“拖选/右键复制”和 `F6 原生模式`，切换后改为 `F6 恢复滚轮`。
 - [x] 历史累计 child 超过八项时，`↑/↓` 选择窗口必须滚入 exact 选中项并显示 `›`；`Enter` 进入的 run id
   与屏幕高亮一致，renderer 的八行裁剪不得把选中项藏在省略提示后。
+- [x] 已终态 thread 所在 owner 在 Gateway 重启后保持 cold，但 TUI 仍必须重放 exact channel
+  binding 下已提交的 assistant notice。读路只扫该 owner 固定深度的已存在 conversation
+  roots，不建目录、不加载模型/工具 Agent、不读另一 owner。u283 原 TUI 已在重启后补出完整 final。
 - [ ] main/child 页面主动上翻时，被动新输出继续保留阅读位置；一旦提交一条通过输入校验的真实消息或命令，
   当前 viewport 必须立即回到底部并恢复 follow，让用户看见自己的消息和下一轮输出。空输入、超限输入和
   终态 child 拒绝不得改变滚动位置。
@@ -376,6 +444,10 @@
   handler pre-gate 才切换。模型不得因为相对路径失败而搜索、复制旧产物到新空目录。r55 已证明 identity
   与 task_path 续接；`1e4c64d` 部署后同一 r55 复验首个 `ls -la bbb`、审批、bwrap 和服务进程 cwd 均为
   原 task root，三个独立终态 request 的 `task_path` 精确相同，localhost 正文也不再是空目录列表。
+- [ ] fresh TUI 的首个 `run_command/write_file` 在建立 canonical task root 的同一次调用里就使用该 cwd；
+  外层活动回合和工具循环即使持有不同 task-attributes 投影，也不得把文件先写到 owner home、下一轮再从
+  task root 查找。后台 child-lifecycle 续轮必须继续暴露任务所需 `skill_search`，不得产生
+  `TOOL_UNAVAILABLE` 修复烧量。
 - [ ] `/goal` 每 thread 只允许一个未结束目标，pause/resume/edit/clear 保留正确任务身份；active goal 的 `/stop` 只暂停，complete/blocked 仅由精确 scoped 工具写入。
 - [ ] `/audit` 只在显式前缀激活，guarantee/window 沿子代理结构化继承；普通 prompt、goal、summary 中的 `/audit` 文字不激活 watch 保证。
 - [ ] 同一 Agent 的前台聊天和后台续跑并发时，prompt、request id、task workspace 和 tool-loop params 不串；已销毁 Agent 不留下可被 object-id 复用的旧状态。

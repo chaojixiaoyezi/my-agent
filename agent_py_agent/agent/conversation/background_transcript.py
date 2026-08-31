@@ -204,11 +204,21 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         del client_message_ids
 
     # LLM: Provider acceptance is the only edge that may publish consumption.
-    # The durable child transcript carries opaque client ids so the exact TUI
-    # pending rows can move into history without matching message prose.
-    # 函数用途: 模型真正收到子代理插话后发布结构化消费回执，供当前详情页收起排队提示。
-    def complete_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
-        _emit_active_input_consumed(self, client_message_ids)
+    # The durable child transcript carries opaque ids plus bounded display text:
+    # the sending TUI promotes its pending row by id, while a later client can
+    # reconstruct the same committed user row without reading private mailboxes.
+    # 函数用途: 模型真正收到子代理插话后发布可重放的消费回执，供当前或重连详情页显示。
+    def complete_active_turn_input(
+        self,
+        client_message_ids: tuple[str, ...],
+        *,
+        client_messages: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        _emit_active_input_consumed(
+            self,
+            client_message_ids,
+            client_messages=client_messages,
+        )
 
     # LLM: Candidate answer deltas stay private until a subsequent tool start proves that
     # segment was commentary. Provider output bounds already cap this text, so no second 12K
@@ -492,21 +502,38 @@ def _normalized_active_input_ids(value: tuple[str, ...]) -> tuple[str, ...]:
 
 
 # LLM: This small display-only helper keeps BackgroundTranscriptSink below the
-# class-size guard. It advances only the sink-local block counter and event stream.
-# 函数用途: 为一批已被模型消费的子代理消息写唯一展示回执。
+# class-size guard. Text is bounded before entering the public ring; full content
+# remains canonical in ConversationStore and provider history.
+# 函数用途: 为一批已被模型消费的子代理消息写可重放且有界的唯一展示回执。
 def _emit_active_input_consumed(
     sink: BackgroundTranscriptSink,
     client_message_ids: tuple[str, ...],
+    *,
+    client_messages: tuple[tuple[str, str], ...] = (),
 ) -> None:
     message_ids = _normalized_active_input_ids(client_message_ids)
     if not message_ids:
         return
+    accepted = set(message_ids)
+    messages = [
+        {
+            "message_id": message_id,
+            "text": text[:BACKGROUND_TRANSCRIPT_TEXT_LIMIT],
+            "truncated": len(text) > BACKGROUND_TRANSCRIPT_TEXT_LIMIT,
+        }
+        for raw_id, raw_text in tuple(client_messages or ())
+        if (message_id := str(raw_id or "").strip()) in accepted
+        and (text := str(raw_text or ""))
+    ]
     sink._active_input_index += 1
     sink._event(
         "active_turn_input_consumed",
         "completed",
         f"{sink.request_id}:active-input:{sink._active_input_index}",
-        {"client_message_ids": list(message_ids)},
+        {
+            "client_message_ids": list(message_ids),
+            **({"messages": messages} if messages else {}),
+        },
     )
 
 

@@ -345,7 +345,12 @@ def _jsonl_error(
 
 
 class ConversationBaseStore:
-    def __init__(self, root: str | Path):
+    # LLM: Passive Gateway replay may open an already-existing owner store without creating any
+    # directories. Runtime writers keep the default initialize=True; read-only callers must never
+    # pass initialize=False for a path that has not already been resolved inside an authenticated
+    # owner home.
+    # 函数用途: 初始化会话存储路径；被动重放可选择只读打开现有目录。
+    def __init__(self, root: str | Path, *, initialize: bool = True):
         self.root = Path(root)
         self.threads_dir = self.root / "threads"
         self.messages_dir = self.root / "messages"
@@ -373,7 +378,8 @@ class ConversationBaseStore:
         # fresh baseline instead of charging service downtime to the user.
         self._goal_clock_lock = threading.Lock()
         self._goal_clock: dict[str, tuple[str, float]] = {}
-        self._ensure_dirs()
+        if initialize:
+            self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
         for path in self._managed_dirs():
@@ -713,8 +719,29 @@ class ConversationThreadStore(ConversationBaseStore):
                 compact_consecutive_failures=0,
                 compact_failure_updated_at=0.0,
                 compact_failure_code="",
+                provider_context_observation={},
                 updated_at=current,
             )
+
+        return self._update_thread_atomic(thread_id, apply)
+
+    # LLM: Provider usage calibration is small numeric thread telemetry. The compact generation
+    # is a CAS fence, and this update must not advance updated_at because model activity is not a
+    # user-visible recency edge. Compact commits clear the field in their own atomic transition.
+    # 函数用途: 保存一次供应商真实输入量校准；若期间已经压缩会话则放弃旧观测，不改变会话最近活跃时间。
+    def update_provider_context_observation(
+        self,
+        thread_id: str,
+        observation: dict[str, Any],
+        *,
+        expected_compact_generation: int,
+    ) -> ConversationThread:
+        payload = dict(observation) if isinstance(observation, dict) else {}
+
+        def apply(thread: ConversationThread) -> ConversationThread:
+            if thread.compact_generation != max(0, int(expected_compact_generation)):
+                return thread
+            return replace(thread, provider_context_observation=payload)
 
         return self._update_thread_atomic(thread_id, apply)
 
@@ -3986,6 +4013,8 @@ class ConversationGuidanceStore(ConversationObservationStore):
             attribution["task_id"] = entry.target_id
         elif entry.target_type == "request" and entry.target_id:
             attribution["gateway_request_id"] = entry.target_id
+        elif entry.target_type == "agent_run" and entry.target_id:
+            attribution["agent_run_id"] = entry.target_id
         try:
             self.append_message_once(
                 {

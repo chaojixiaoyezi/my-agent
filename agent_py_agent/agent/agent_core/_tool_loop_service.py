@@ -33,6 +33,10 @@ from .runner.context import current_task_attributes
 from .runner.stage_trace import (
     trace_runner_tool_call_started,
 )
+from .runtime.conversation_state import (
+    conversation_runtime_state_section,
+    record_conversation_compact_generation,
+)
 from .runtime.goal_accounting import account_goal_model_response, begin_goal_model_turn
 from .runtime.guidance import (
     acknowledge_injected_turn_input,
@@ -611,6 +615,7 @@ def _apply_native_compact_plan(
             params,
             max_tokens=max(1, plan.target_tokens),
             token_estimator=estimator,
+            drop_completed_tool_turns=bool(plan.semantic_summary),
         )
         if not dropped:
             _emit_native_compact_superseded(params, plan)
@@ -711,6 +716,10 @@ def _commit_and_publish_native_compact(
         plan,
         after_tokens=after_tokens,
     )
+    # 历史已按完整工具对改写，上一次 provider 实际用量不再能作为追加基线。
+    from .model.context_pressure import invalidate_provider_context_observation
+
+    invalidate_provider_context_observation(params)
     completed_generation = canonical_generation or plan.progress_generation
     _emit_native_compact_progress(
         params,
@@ -784,6 +793,7 @@ def _reduce_native_ir_to_target(
             max_tokens=max(1, target),
             token_estimator=estimator,
             preserve_newest_pair=not summary_covers_window,
+            drop_completed_tool_turns=summary_covers_window,
         )
         if additional <= 0:
             break
@@ -979,6 +989,11 @@ def _publish_native_ir_compaction(
         state["_native_ir_compact_generation"] = generation
     elif generation <= 0:
         generation = 1
+    record_conversation_compact_generation(
+        params,
+        generation,
+        canonical=canonical_generation > 0,
+    )
     payload = {
         "schema": "model_visible_context_compaction.v1",
         "generation": generation,
@@ -1067,6 +1082,9 @@ def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) ->
         )
         if conversation:
             injections.append(conversation)
+        runtime_state = conversation_runtime_state_section(params)
+        if runtime_state:
+            injections.append(runtime_state)
     if isinstance(params.delivery_contract, dict):
         injections.append(render_delivery_contract_section(params.delivery_contract))
     return injections

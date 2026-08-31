@@ -52,6 +52,340 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     }
 
 
+def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch) -> None:
+    """后台主代理必须像前台/子代理一样在同一工作片 Compact 后续跑并携带已完成工具。"""
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core import runtime_mixin
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.conversation import compact as compact_module
+    from agent_py_agent.agent.conversation import runtime as runtime_module
+    from agent_py_agent.agent.conversation.compact import ConversationCompactResult
+    from agent_py_agent.agent.conversation.models import ConversationThread
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        GoalRuntimeContext,
+        _run_background_main_turn_with_compact,
+    )
+
+    original = ConversationThread(thread_id="thread-bg", canonical_user_id="owner-bg")
+    compacted = replace(original, compact_generation=1, summary="已压缩旧历史")
+    observed_params: list[RunParams] = []
+
+    class Agent:
+        def run(self, _prompt, *, params):
+            observed_params.append(params)
+            if len(observed_params) == 1:
+                return SimpleNamespace(
+                    runtime_status="context_overflow",
+                    archive_tool_calls=[{"tool": "read_file", "ok": True}],
+                    active_turn_user_inputs=[],
+                )
+            return SimpleNamespace(runtime_status="ok", response="继续完成")
+
+    class Store:
+        def load_thread_report(self, thread_id):
+            assert thread_id == original.thread_id
+            return original, None
+
+    class Sink:
+        def __init__(self):
+            self.compact_rows = []
+
+        def write_conversation_compact_progress(self, value):
+            self.compact_rows.append(dict(value))
+            return True
+
+    def fake_run_params(*_args, **_kwargs):
+        return RunParams(
+            carried_archive_tool_calls=[{"tool": "prior", "ok": True}],
+            task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+        )
+
+    compact_calls = []
+
+    def fake_prepare(_agent, _store, _thread, *, options):
+        compact_calls.append(options)
+        return ConversationCompactResult(
+            thread=compacted,
+            messages=(),
+            projected_tokens=1_000,
+            trigger_tokens=9_000,
+            compacted=True,
+        )
+
+    monkeypatch.setattr(runtime_module, "_run_params", fake_run_params)
+    monkeypatch.setattr(
+        runtime_module,
+        "context_markdown",
+        lambda **values: f"ctx-generation-{values['thread'].compact_generation}",
+    )
+    monkeypatch.setattr(compact_module, "prepare_conversation_context", fake_prepare)
+    monkeypatch.setattr(
+        runtime_mixin,
+        "release_active_turn_inputs_for_compact",
+        lambda *_args, **_kwargs: (),
+    )
+    sink = Sink()
+    result = _run_background_main_turn_with_compact(
+        SimpleNamespace(agent=Agent(), store=Store()),
+        original,
+        BackgroundRunRequest(
+            thread_id=original.thread_id,
+            task_id="task-bg",
+            reason="subagent_runner_finished",
+        ),
+        GoalRuntimeContext(task_objective="继续原任务"),
+        user_prompt="继续原任务",
+        continuation_injection=["child completed"],
+        proactive_delivery_available=False,
+        activity_sink=sink,
+    )
+
+    assert result.runtime_status == "ok"
+    assert len(observed_params) == 2
+    assert compact_calls and compact_calls[0].force is True
+    assert observed_params[0].inject == ["ctx-generation-0", "child completed"]
+    assert observed_params[1].inject == ["ctx-generation-1", "child completed"]
+    assert observed_params[1].carried_archive_tool_calls == [{"tool": "read_file", "ok": True}]
+    assert observed_params[0].on_chunk is sink
+    assert observed_params[1].on_chunk is sink
+
+
+def test_background_compact_slice_yields_after_eight_progressful_generations(monkeypatch) -> None:
+    """连续压缩达到公平性上限时应让出调度片，而不是伪造程序崩溃。"""
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core import runtime_mixin
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.conversation import runtime as runtime_module
+    from agent_py_agent.agent.conversation.models import ConversationThread
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        GoalRuntimeContext,
+        _BackgroundCompactSliceYield,
+        _run_background_main_turn_with_compact,
+    )
+
+    original = ConversationThread(thread_id="thread-yield", canonical_user_id="owner-yield")
+    generations: list[int] = []
+
+    class Agent:
+        def run(self, _prompt, *, params):
+            del params
+            return SimpleNamespace(
+                runtime_status="context_overflow",
+                archive_tool_calls=[{"call_id": "call-live", "tool": "read_file", "ok": True}],
+                active_turn_user_inputs=[],
+            )
+
+    class Store:
+        pass
+
+    class Sink:
+        def write_conversation_compact_progress(self, _value):
+            return True
+
+    def fake_run_params(*_args, **_kwargs):
+        return RunParams(task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True})
+
+    def advancing_compact(_runtime, current, **_kwargs):
+        generation = current.compact_generation + 1
+        generations.append(generation)
+        return replace(current, compact_generation=generation)
+
+    monkeypatch.setattr(runtime_module, "_run_params", fake_run_params)
+    monkeypatch.setattr(runtime_module, "context_markdown", lambda **_values: "context")
+    monkeypatch.setattr(runtime_module, "_compact_background_main_thread", advancing_compact)
+    monkeypatch.setattr(
+        runtime_mixin,
+        "release_active_turn_inputs_for_compact",
+        lambda *_args, **_kwargs: (),
+    )
+
+    with pytest.raises(_BackgroundCompactSliceYield):
+        _run_background_main_turn_with_compact(
+            SimpleNamespace(agent=Agent(), store=Store()),
+            original,
+            BackgroundRunRequest(
+                thread_id=original.thread_id,
+                task_id="task-yield",
+                reason="subagent_runner_finished",
+            ),
+            GoalRuntimeContext(task_objective="继续原任务"),
+            user_prompt="继续原任务",
+            continuation_injection=["child completed"],
+            proactive_delivery_available=False,
+            activity_sink=Sink(),
+        )
+
+    assert generations == list(range(1, 9))
+
+
+def test_background_scheduler_treats_compact_slice_yield_as_clean_continuation(
+    monkeypatch,
+) -> None:
+    """让出只结束当前 claim；原来源保持待处理且不写失败账。"""
+    from agent_py_agent.agent.conversation.runtime import _BackgroundCompactSliceYield
+
+    finished: list[dict[str, object]] = []
+
+    class Runtime:
+        agent = SimpleNamespace()
+
+        def run_once(self, _kwargs):
+            raise _BackgroundCompactSliceYield("continue")
+
+    class Store:
+        def finish_background_run(self, request):
+            finished.append(dict(request))
+
+    class Heartbeat:
+        def stop(self):
+            return None
+
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": Runtime(),
+            "store": Store(),
+            "claim_ttl_seconds": 30,
+        }
+    )
+    monkeypatch.setattr(scheduler, "_start_heartbeat", lambda *_args, **_kwargs: Heartbeat())
+    monkeypatch.setattr(scheduler, "_runtime_facts", lambda: {"current_tool": ""})
+
+    result = scheduler._run_with_heartbeat(
+        "claim-yield",
+        {
+            "thread_id": "thread-yield",
+            "task_id": "task-yield",
+            "reason": "subagent_runner_finished",
+            "now": 10.0,
+        },
+        claim_scope_id="thread-yield",
+    )
+
+    assert result is None
+    assert finished[0]["status"] == "finished"
+    assert finished[0]["error"] is None
+
+
+def test_background_overflow_compacts_carried_active_turn_when_transcript_is_empty(
+    monkeypatch,
+) -> None:
+    """真实溢出不能因 transcript 暂无可压消息而账外重启，必须推进本轮工具 Compact。"""
+
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core import runtime_mixin
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.conversation import active_turn_compact as active_module
+    from agent_py_agent.agent.conversation import compact as compact_module
+    from agent_py_agent.agent.conversation import runtime as runtime_module
+    from agent_py_agent.agent.conversation.active_turn_compact import (
+        ActiveTurnArchiveCompactResult,
+    )
+    from agent_py_agent.agent.conversation.compact import ConversationCompactResult
+    from agent_py_agent.agent.conversation.models import ConversationThread
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        GoalRuntimeContext,
+        _run_background_main_turn_with_compact,
+    )
+
+    original = ConversationThread(thread_id="thread-active", canonical_user_id="owner-bg")
+    compacted = replace(
+        original,
+        compact_generation=1,
+        summary="本轮工具历史已正式压缩",
+        compact_checkpoint_id="checkpoint-active-1",
+    )
+    observed_params: list[RunParams] = []
+
+    class Agent:
+        def run(self, _prompt, *, params):
+            observed_params.append(params)
+            if len(observed_params) == 1:
+                return SimpleNamespace(
+                    runtime_status="context_overflow",
+                    archive_tool_calls=[{"call_id": "call-old", "tool": "read_file", "ok": True}],
+                    active_turn_user_inputs=[],
+                )
+            return SimpleNamespace(runtime_status="ok", response="继续完成")
+
+    class Store:
+        def load_thread_report(self, thread_id):
+            assert thread_id == original.thread_id
+            return original, None
+
+    class Sink:
+        def write_conversation_compact_progress(self, _value):
+            return True
+
+    def fake_run_params(*_args, **_kwargs):
+        return RunParams(
+            task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+        )
+
+    def no_transcript_compact(_agent, _store, _thread, *, options):
+        assert options.force is True
+        return ConversationCompactResult(
+            thread=original,
+            messages=(),
+            projected_tokens=100_000,
+            trigger_tokens=90_000,
+            compacted=False,
+        )
+
+    active_calls: list[object] = []
+
+    def active_compact(*args, **_kwargs):
+        active_calls.append(args[-1])
+        return ActiveTurnArchiveCompactResult(
+            thread=compacted,
+            compacted=True,
+            source_call_ids=("call-old",),
+        )
+
+    monkeypatch.setattr(runtime_module, "_run_params", fake_run_params)
+    monkeypatch.setattr(
+        runtime_module,
+        "context_markdown",
+        lambda **values: f"ctx-generation-{values['thread'].compact_generation}",
+    )
+    monkeypatch.setattr(compact_module, "prepare_conversation_context", no_transcript_compact)
+    monkeypatch.setattr(active_module, "compact_carried_active_turn_archive", active_compact)
+    monkeypatch.setattr(
+        runtime_mixin,
+        "release_active_turn_inputs_for_compact",
+        lambda *_args, **_kwargs: (),
+    )
+
+    result = _run_background_main_turn_with_compact(
+        SimpleNamespace(agent=Agent(), store=Store()),
+        original,
+        BackgroundRunRequest(
+            thread_id=original.thread_id,
+            task_id="task-bg",
+            reason="subagent_runner_finished",
+        ),
+        GoalRuntimeContext(task_objective="继续原任务"),
+        user_prompt="继续原任务",
+        continuation_injection=["child completed"],
+        proactive_delivery_available=False,
+        activity_sink=Sink(),
+    )
+
+    assert result.runtime_status == "ok"
+    assert len(observed_params) == 2
+    assert len(active_calls) == 1
+    assert getattr(active_calls[0], "task_prompt", "") == "继续原任务"
+    assert observed_params[1].inject == ["ctx-generation-1", "child completed"]
+    assert observed_params[1].carried_archive_tool_calls == [
+        {"call_id": "call-old", "tool": "read_file", "ok": True}
+    ]
+
+
 def test_ordinary_resume_wake_preserves_foreground_request_generation() -> None:
     """普通任务 policy 的持久 task id 与前台 Todo 展示代次必须同时保留。"""
 
@@ -270,9 +604,7 @@ def test_subagent_wake_restores_original_task_and_root_tool_history(tmp_path) ->
         "call-plan",
         "call-child",
     ]
-    assert params.carried_archive_tool_calls[1]["artifact_ref"].endswith(
-        "create-subagent.json"
-    )
+    assert params.carried_archive_tool_calls[1]["artifact_ref"].endswith("create-subagent.json")
     assert params.task_attributes["max_tool_rounds"] == (
         baseline.task_attributes["max_tool_rounds"] + 2
     )
@@ -297,9 +629,7 @@ def test_subagent_wake_keeps_objective_in_user_task_slot() -> None:
     )
 
     assert prompt == "原始用户任务"
-    assert injections == [
-        "[active-turn-continuation]\n读取本次子代理完成事件后继续"
-    ]
+    assert injections == ["[active-turn-continuation]\n读取本次子代理完成事件后继续"]
 
 
 def test_subagent_wake_provider_prompt_keeps_original_task_after_runtime_injection(
@@ -712,6 +1042,78 @@ def test_background_response_persists_commentary_before_final(tmp_path) -> None:
         "commentary:2",
         "final",
     ]
+
+
+def test_tui_background_final_is_canonical_history_and_retry_is_idempotent(tmp_path) -> None:
+    """TUI notice 只是展示投影；后台 final 必须先进入下一轮模型会读取的同一历史。"""
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+    from agent_py_agent.agent.delivery import DeliveryService, build_default_channel_registry
+    from agent_py_agent.agent.gateway_parts.request_execution import (
+        _gateway_conversation_history,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-tui-final",
+            "channel": "tui",
+            "channel_conversation_id": "session-tui-final",
+            "channel_user_id": "owner-tui-final",
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=DeliveryService(build_default_channel_registry(agent.config)),
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id="task-tui-final",
+        reason="subagent_runner_finished",
+        wake_signal={"wake_signal_id": "wake-tui-final"},
+    )
+    context = DeliveryContext(
+        channel="tui",
+        target="session-tui-final",
+        thread_id=thread.thread_id,
+        task_id=request.task_id,
+    )
+
+    first = runtime._record_response(
+        request,
+        context,
+        "八个子代理已完成，最终报告是 architecture_comparison_report.md。",
+        deliver=True,
+        delivery_reason="root_subagents_terminal",
+    )
+    second = runtime._record_response(
+        request,
+        context,
+        "八个子代理已完成，最终报告是 architecture_comparison_report.md。",
+        deliver=True,
+        delivery_reason="root_subagents_terminal",
+    )
+
+    assert first == (second[0], "not_applicable")
+    assert second[1] == "not_applicable"
+    rows = store.recent_messages(thread.thread_id, limit=0)
+    assert [row.content for row in rows] == [first[0]]
+    assert rows[0].channel == "tui"
+    assert rows[0].metadata["assistant_part_id"] == "final"
+    load_errors: list[dict] = []
+    history = _gateway_conversation_history(
+        agent,
+        thread.thread_id,
+        "next-foreground-request",
+        load_errors,
+    )
+    assert load_errors == []
+    assert history == (("assistant", first[0]),)
 
 
 def test_internal_audit_report_commits_source_refs_after_transcript_append(
@@ -1329,8 +1731,11 @@ def _native_probe(self):
     from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
     return ProviderToolCapability(
-        provider=str(self.name or "bg-test"), endpoint="local://bg-test",
-        model="", stream=False, native_supported=True,
+        provider=str(self.name or "bg-test"),
+        endpoint="local://bg-test",
+        model="",
+        stream=False,
+        native_supported=True,
         evidence="test_backend_declares_native_tools",
         observed_at=_utc_now_iso(),
     )
@@ -1515,11 +1920,13 @@ class _GoalToolProgressBackend:
             return ModelResponse(
                 text="",
                 backend=self.name,
-                tool_use_blocks=[{
-                    "id": "call-goal-list-1",
-                    "name": "list_files",
-                    "input": {"path": "."},
-                }],
+                tool_use_blocks=[
+                    {
+                        "id": "call-goal-list-1",
+                        "name": "list_files",
+                        "input": {"path": "."},
+                    }
+                ],
             )
         return ModelResponse(text="本轮已经根据目录事实继续推进。", backend=self.name)
 
@@ -2658,7 +3065,9 @@ def test_child_settling_during_background_sampling_requires_fresh_terminal_turn(
         ),
         agent,
     )
-    assert params.task_attributes[CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR] == "subagents_terminal"
+    assert (
+        params.task_attributes[CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR] == "subagents_terminal"
+    )
 
     agent.backend = _NaturalCompletionBackend()
     final = _run_child_done_wake(runtime, thread.thread_id, second.id, now=30.0)
@@ -2966,6 +3375,77 @@ def test_audit_finding_tool_profile_uses_typed_message_delivery() -> None:
     assert "send_message" in decision.allowed_tools
     assert "watch_stream" in decision.allowed_tools
     assert "record_finding" not in decision.allowed_tools
+
+
+def test_subagent_lifecycle_continuation_keeps_skill_body_access() -> None:
+    """同一任务被 child 事件唤醒后仍能继续读取该任务已选 Skill 的正文。"""
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundToolPolicyRequest,
+        background_tool_policy_decision,
+    )
+
+    decision = background_tool_policy_decision(
+        request=BackgroundToolPolicyRequest(reason="subagent_runner_finished")
+    )
+
+    assert decision.profile == "subagent_integration"
+    assert "skill_search" in decision.allowed_tools
+
+
+def test_subagent_lifecycle_continuation_keeps_owner_memory_tools() -> None:
+    """等待 child 时收到的新偏好与长期事实仍由同一 owner Agent 自主落账。"""
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundToolPolicyRequest,
+        background_tool_policy_decision,
+    )
+
+    decision = background_tool_policy_decision(
+        request=BackgroundToolPolicyRequest(reason="subagent_runner_finished")
+    )
+
+    assert decision.profile == "subagent_integration"
+    assert "remember" in decision.allowed_tools
+    assert "update_persona" in decision.allowed_tools
+
+
+def test_subagent_lifecycle_runtime_snapshot_contains_continuation_tools(tmp_path) -> None:
+    """策略名单、主代理 registry 与冻结快照必须给同一后台续轮完全相同的能力。"""
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            execution_mode="local_unmanaged",
+        ),
+        tmp_path / "service-root",
+    )
+    params = _run_params(
+        "thread-1",
+        BackgroundRunRequest(
+            thread_id="thread-1",
+            task_id="task-1",
+            reason="subagent_runner_finished",
+        ),
+        agent,
+    )
+    snapshot = agent.tools.runtime_snapshot(
+        allowed_tools=params.allowed_tools,
+        run_id=params.run_id,
+    )
+
+    expected = {"skill_search", "remember", "update_persona"}
+    assert expected.issubset(set(params.allowed_tools or []))
+    assert expected.issubset(snapshot.available_tool_names)
+    assert expected.issubset(
+        {
+            spec.name
+            for spec in agent.tools.model_visible_specs(
+                allowed_tools=params.allowed_tools,
+                runtime_snapshot=snapshot,
+            )
+        }
+    )
 
 
 def test_audit_finding_internal_route_hides_proactive_delivery_tool() -> None:
@@ -3656,12 +4136,8 @@ def test_unknown_old_task_preserves_event_without_blocking_new_task_on_same_thre
     )
     old_task_id = "task-old-unknown"
     new_task_id = "task-new-runnable"
-    store.bind_task(
-        {"thread_id": thread.thread_id, "task_id": old_task_id, "goal": "旧任务"}
-    )
-    store.bind_task(
-        {"thread_id": thread.thread_id, "task_id": new_task_id, "goal": "新任务"}
-    )
+    store.bind_task({"thread_id": thread.thread_id, "task_id": old_task_id, "goal": "旧任务"})
+    store.bind_task({"thread_id": thread.thread_id, "task_id": new_task_id, "goal": "新任务"})
     repo, old_run = _record_unknown_main_run(
         agent,
         task_id=old_task_id,
@@ -4268,8 +4744,8 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
     for index in range(1, 5):
         assert f"第{index}个子代理的最终结论" in backend.provider_texts[0]
         assert f"/tmp/child-{index}/final_report.md" in backend.provider_texts[0]
-    assert '\"event_count\": 4' in backend.provider_texts[0]
-    assert '\"events\": [' in backend.provider_texts[0]
+    assert '"event_count": 4' in backend.provider_texts[0]
+    assert '"events": [' in backend.provider_texts[0]
     assert store.pending_wake_signals() == []
     assert reports[0].delivery_status == "sent"
 
@@ -4395,8 +4871,11 @@ def _seed_seven_completion_wakes(agent, store, thread_id: str) -> None:
     """写入七个终态 child 和七份带长正文/精确报告引用的完成信封。"""
     for index in range(1, 8):
         child = agent.subagents.create_run(
-            goal=f"第{index}部分", thought="", plan=["执行"],
-            parent_id="task-root", root_id="task-root",
+            goal=f"第{index}部分",
+            thought="",
+            plan=["执行"],
+            parent_id="task-root",
+            root_id="task-root",
         )
         agent.subagents.lifecycle.set_status(child.id, "DONE")
     for index in range(1, 8):
@@ -4422,9 +4901,12 @@ def _seven_completion_mailbox_fixture(tmp_path):
     """建立七份长 completion 和一个 4k/5 条有界后台消费者。"""
     agent = SimpleAgent(
         AgentConfig(
-            enable_tools=False, memory_path="memory.jsonl",
-            orphan_supervision_interval_seconds=0, background_completion_coalesce_seconds=0,
-            background_pending_wake_prompt_limit=5, background_context_max_total_tokens=4096,
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+            background_completion_coalesce_seconds=0,
+            background_pending_wake_prompt_limit=5,
+            background_context_max_total_tokens=4096,
         ),
         tmp_path,
     )
@@ -4433,13 +4915,13 @@ def _seven_completion_mailbox_fixture(tmp_path):
     store = agent.conversation_store
     thread = store.get_or_create_thread(
         {
-            "canonical_user_id": "user-1", "channel": "internal",
-            "channel_conversation_id": "thread-seven-results", "channel_user_id": "user-1",
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-seven-results",
+            "channel_user_id": "user-1",
         }
     )
-    store.bind_task(
-        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "七路并行"}
-    )
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-root", "goal": "七路并行"})
     _seed_seven_completion_wakes(agent, store, thread.thread_id)
     channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(
@@ -5408,9 +5890,9 @@ def test_aggregate_capacity_wake_runs_one_owner_model_turn(tmp_path) -> None:
     assert len(reports) == 1
     assert len(backend.prompts) == 1
     assert "typed Audit capacity event" in backend.provider_texts[0]
-    assert '\"capacity_state\": \"alert\"' in backend.provider_texts[0]
-    assert '\"pending\": 8642' in backend.provider_texts[0]
-    assert '\"records_per_second\": 41.0' in backend.provider_texts[0]
+    assert '"capacity_state": "alert"' in backend.provider_texts[0]
+    assert '"pending": 8642' in backend.provider_texts[0]
+    assert '"records_per_second": 41.0' in backend.provider_texts[0]
     assert "OLD_FALSE_NO_BACKLOG" not in backend.provider_texts[0]
     assert "## Recent Messages" not in backend.provider_texts[0]
     assert "## Agent Tree Snapshot" not in backend.provider_texts[0]
@@ -6002,9 +6484,7 @@ def test_scheduler_retires_terminal_task_progress_policy_without_model_call(
             "now": 11.0,
         }
     )
-    store.update_task_status(
-        {"task_id": "task-1", "status": terminal_status, "now": 70.0}
-    )
+    store.update_task_status({"task_id": "task-1", "status": terminal_status, "now": 70.0})
     # 模拟升级前残留账本或终态提交后的极窄竞态：调度器仍须结构化兜底退休。
     policy = store.set_progress_policy(
         {
@@ -7365,9 +7845,7 @@ def test_failed_policy_run_records_backoff_and_retires_after_three(tmp_path) -> 
     assert retired.enabled is False
     assert retired.metadata["failure_count"] == 3
     assert retired.metadata["retired_at"] == 50.0
-    assert retired.policy_id not in {
-        p.policy_id for p in store.due_progress_policies(now=60.0)
-    }
+    assert retired.policy_id not in {p.policy_id for p in store.due_progress_policies(now=60.0)}
 
 
 def test_successful_policy_run_resets_failure_accounting(tmp_path) -> None:

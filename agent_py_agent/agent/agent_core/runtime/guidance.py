@@ -190,7 +190,7 @@ def acknowledge_injected_turn_input(
                 _persist_guidance_transcript(store, entry)
             _complete_active_turn_user_reply_segment(
                 params,
-                _guidance_client_message_ids(consumed_entries),
+                consumed_entries,
             )
         if delivered_ids:
             guidance_pending.difference_update(delivered_ids)
@@ -498,18 +498,34 @@ def _begin_active_turn_user_reply_segment(
 
 
 # LLM: The consumed UI event belongs to the provider-accepted prompt boundary, not the earlier
-# prompt assembly/claim edge. Only the sink may publish that exact client correlation event.
-# 函数用途: 模型确认收到补充输入后，通知输出流发布真正的已消费事件。
+# prompt assembly/claim edge. It carries bounded text beside opaque correlation ids so a newly
+# attached child view can replay the committed user row from the durable transcript event.
+# 函数用途: 模型确认收到补充输入后，通知输出流发布可重放的已消费用户消息事件。
 def _complete_active_turn_user_reply_segment(
     params: object,
-    client_message_ids: tuple[str, ...],
+    entries: list[Any],
 ) -> None:
     sink = getattr(params, "effective_on_chunk", None)
     if sink is None:
         sink = getattr(params, "on_chunk", None)
     complete = getattr(sink, "complete_active_turn_input", None)
     if callable(complete):
-        complete(client_message_ids)
+        client_message_ids = _guidance_client_message_ids(entries)
+        client_messages = tuple(
+            (
+                str(
+                    (getattr(entry, "metadata", {}) or {}).get("channel_message_id")
+                    or ""
+                ).strip(),
+                str(getattr(entry, "message", "") or ""),
+            )
+            for entry in entries
+            if str(
+                (getattr(entry, "metadata", {}) or {}).get("channel_message_id")
+                or ""
+            ).strip()
+        )
+        complete(client_message_ids, client_messages=client_messages)
 
 
 # LLM: Client correlation reads only the structured channel_message_id written by ingress;

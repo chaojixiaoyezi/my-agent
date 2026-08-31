@@ -218,6 +218,9 @@ def test_b_same_instance_rotation_allowed(repo):
     lock = repo.lock_for_scope(_exec_scope(run["agent_run_id"]))
     assert lock["attempt_id"] == second["attempt_id"]
     assert lock["holder_instance"] == repo.instance_id
+    old = repo.get_attempt(first["attempt_id"])
+    assert old["status"] == "cancelled"
+    assert float(old["ended_at"]) > 0
 
 
 def test_b_create_attempt_rejects_expired_lock_while_holder_alive(repo, tmp_path):
@@ -284,6 +287,7 @@ def test_b_create_attempt_immediately_takes_over_unexpired_dead_holder(repo, tmp
     assert attempt["attempt_generation"] == 2
     lock = repo.lock_for_scope(_exec_scope(run["agent_run_id"]))
     assert lock["holder_instance"] == other.instance_id
+    assert repo.get_attempt(first["attempt_id"])["status"] == "cancelled"
 
 
 # =================================================================== C. 旧 worker 越 fence

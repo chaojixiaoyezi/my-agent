@@ -37,7 +37,9 @@ from .model.call_runtime import (
 from .model.context_pressure import (
     context_pressure_response,
     is_context_window_error,
+    model_visible_context_snapshot,
     preflight_context_pressure_response,
+    record_provider_context_observation,
 )
 from .native_tool_protocol import native_tool_use_active, resolve_native_tools
 from .runner.stage_trace import (
@@ -50,6 +52,7 @@ from .runner.stage_trace import (
     trace_runner_model_stream_active,
     trace_runner_provider_retry_scheduled,
 )
+from .runtime.conversation_state import conversation_runtime_state_section
 from .tool_ir_guidance import unforwarded_runtime_guidance
 from .tool_ir_history import native_tool_ir_history, record_runtime_facts_turn_ir
 from .tool_stream import (
@@ -113,6 +116,10 @@ class _ModelGenerationState:
     started_at: float = 0.0
     # provider block-stop observer 已发布的 typed 展示边界；只用于抑制同一物理调用的 response fallback 重放。
     stream_observer_events: set[str] = field(default_factory=set)
+    # 本次真实出站请求的未校准估算；响应返回后与 provider usage 成对，不对外展示。
+    raw_context_estimate_tokens: int = 0
+    # 稳定 provider 请求表面的摘要指纹；只用于拒绝跨模型/工具表面的错误校准复用。
+    context_surface_fingerprint: str = ""
 
 
 # LLM: 这是工具模型轮的统一生成入口；preflight compact、成本和完成追踪必须保持同一路径，变更要同步生成测试。
@@ -141,6 +148,10 @@ def _materialize_native_prompt_facts(request: ModelGenerateParams) -> ModelGener
     if layout is None:
         return request
     record_runtime_facts_turn_ir(request.params, layout.volatile_suffix)
+    record_runtime_facts_turn_ir(
+        request.params,
+        conversation_runtime_state_section(request.params),
+    )
     provider_prompt = CacheStructuredPrompt(
         layout.stable_prefix,
         "",
@@ -341,7 +352,15 @@ def _trace_model_start(request: ModelGenerateParams) -> None:
 def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationState:
     _begin_model_turn_identity(request.params, request.tool_rounds)
     chunk_filter = _build_tool_boundary_chunk_filter(request)
-    ledger, call_id, first_token_estimate = start_model_call_record(request)
+    context_snapshot = model_visible_context_snapshot(
+        request.agent,
+        request.params,
+        request.prompt,
+    )
+    ledger, call_id, first_token_estimate = start_model_call_record(
+        request,
+        context_snapshot=context_snapshot,
+    )
     on_chunk = observed_chunk_filter(
         ledger=ledger,
         call_id=call_id,
@@ -371,6 +390,8 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         messages=_native_provider_messages(request.agent, request.params),
         system_instruction=provider_system_instruction(request.agent.backend),
         started_at=time.monotonic(),
+        raw_context_estimate_tokens=context_snapshot.raw_estimated_tokens,
+        context_surface_fingerprint=context_snapshot.context_surface_fingerprint,
     )
 
 
@@ -560,6 +581,13 @@ def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerati
     _publish_provider_thinking(request, state, response)
     state.chunk_filter.finish()
     record_model_call_finished(state.ledger, state.call_id, response)
+    record_provider_context_observation(
+        request.agent,
+        request.params,
+        raw_estimated_tokens=state.raw_context_estimate_tokens,
+        context_surface_fingerprint=state.context_surface_fingerprint,
+        response=response,
+    )
     trace_runner_model_response_received(
         RunnerModelStageTraceRequest(
             agent=request.agent,

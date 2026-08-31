@@ -19,11 +19,11 @@ LOCAL_CHAT_SOURCE = "cli_chat"
 LOCAL_AGENT_USER_ID = "local-agent"
 
 # LLM: 本地会话路由的交付提交是权威 transcript append，不能按“未注册 IM”
-# 处理。未知外部通道不在此集合中，因此仍 fail-closed，不会因为没有
-# provider adapter 就被错认为本地对话。
-# 常量用途: 声明由 Gateway/CLI 的权威会话库直接承诺的路由能力。
+# 处理。真实富 TUI 使用独立的 ``tui`` channel 身份，它和 CLI/chat 一样由
+# ConversationStore 交付；未知外部通道仍不在此集合中并保持 fail-closed。
+# 常量用途: 声明由 Gateway/CLI/TUI 的权威会话库直接承诺的路由能力。
 TRANSCRIPT_DELIVERY_CHANNELS = frozenset(
-    {"", "internal", "local", "cli", "terminal", "chat", "gateway-cli", "http"}
+    {"", "internal", "local", "cli", "terminal", "chat", "tui", "gateway-cli", "http"}
 )
 
 

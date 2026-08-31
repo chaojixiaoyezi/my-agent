@@ -309,6 +309,8 @@ def _protocol_violation_decision(
     )
 
 
+# LLM: 协议失败审计必须同时携带不可变工具快照身份与有界工具名集合；只做附加落账，任何异常都不得反噬主链。
+# 函数用途: 保存模型原始违规、修复次数和本轮真实工具表，便于区分模型越界与底座能力装配错误。
 def _persist_protocol_violation_event(
     request: ToolLoopResponseDecisionRequest,
     violations: list[dict[str, str]],
@@ -322,7 +324,8 @@ def _persist_protocol_violation_event(
     - provider 原始响应头(前 500 字, 含模型实际输出的工具协议风格, 如 XML
       <tool_calls> vs [TOOL_CALL], 不截断关键证据);
     - 结构化 violations(code/detail/source_protocol/evidence_preview);
-    - 解析阶段(text/native adapter)、模型、协议、repair 计数、是否将 break。
+    - 解析阶段(text/native adapter)、模型、协议、repair 计数、是否将 break；
+    - 本轮冻结工具快照的 hash、allowed/available 名称，区分模型越界与能力装配漂移。
     """
     try:
         params = request.params
@@ -350,6 +353,7 @@ def _persist_protocol_violation_event(
             getattr(protocol_snapshot, "source_protocol", "") or ""
         )
         capability = getattr(protocol_snapshot, "capability", None)
+        tool_runtime_snapshot = getattr(params, "tool_runtime_snapshot", None)
         repo.append_event(
             event_type="protocol_violation",
             attempt_id=attempt_id,
@@ -366,6 +370,23 @@ def _persist_protocol_violation_event(
                 "provider": str(getattr(capability, "provider", "") or "")
                 if capability is not None
                 else "",
+                "tool_runtime_snapshot_hash": str(
+                    getattr(tool_runtime_snapshot, "snapshot_hash", "") or ""
+                ),
+                "allowed_tools": sorted(
+                    str(item)
+                    for item in tuple(
+                        getattr(tool_runtime_snapshot, "allowed_tools", ()) or ()
+                    )
+                    if str(item).strip()
+                ),
+                "available_tools": sorted(
+                    str(item)
+                    for item in tuple(
+                        getattr(tool_runtime_snapshot, "available_tool_names", ()) or ()
+                    )
+                    if str(item).strip()
+                ),
                 "protocol_repairs": request.counters.protocol_repairs,
                 "will_break": will_break,
                 "stage": "tool_protocol_adapter",
@@ -664,4 +685,3 @@ def _unresolved_runtime_issue_request(
     return UnresolvedRuntimeIssueDecisionRequest(
         request.agent, request.params, request.response, request.counters
     )
-

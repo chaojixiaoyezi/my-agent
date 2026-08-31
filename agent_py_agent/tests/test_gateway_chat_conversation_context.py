@@ -75,6 +75,7 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _gateway_conversation_history_seed,
     _gateway_injections,
     _gateway_message_work_scope,
+    _gateway_recovered_active_turn_tool_calls,
     _gateway_run_params,
     _gateway_run_task_attributes,
     _gateway_task_attributes,
@@ -87,9 +88,14 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _GatewayWorkspaceSelection,
     _register_named_system_task,
     _run_gateway_ask,
+    _run_gateway_turn_with_conversation_compact,
     _update_response_from_result,
 )
 from agent_py_agent.agent.gateway_parts.request_worker import GatewayAskParams, submit_gateway_ask
+from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
+    ExternalizeToolOutputRequest,
+    externalize_tool_output_record,
+)
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.user_space.home_indexes import latest_task_refs
 from agent_py_agent.tests._tool_runtime_harness import canonical_test_call
@@ -201,9 +207,7 @@ def test_gateway_thread_uses_validated_client_cwd_and_keeps_it_on_next_turn(tmp_
     assert second.cwd == str(project_root.resolve())
     assert second.runtime_workspace_roots == (str(project_root.resolve()),)
     assert attrs[CONVERSATION_EXECUTION_CWD_ATTR] == str(project_root.resolve())
-    assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [
-        str(project_root.resolve())
-    ]
+    assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [str(project_root.resolve())]
     assert attrs["session_id"] == second.thread_id
 
 
@@ -754,9 +758,7 @@ def test_gateway_child_completion_inputs_are_bounded_with_explicit_omission(tmp_
             now=float(index),
         )
     bounded = _conversation_context(agent, request, "gw-bounded", "继续汇总")
-    bounded_items = {
-        item["task_id"]: item for item in bounded.subagent_completions["items"]
-    }
+    bounded_items = {item["task_id"]: item for item in bounded.subagent_completions["items"]}
     assert bounded.subagent_completions["total"] == 15
     assert bounded.subagent_completions["visible_count"] == 12
     assert bounded.subagent_completions["omitted_count"] == 3
@@ -1242,7 +1244,9 @@ def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcr
     assert len(calls) == 3
     assert calls[1].carried_archive_tool_calls == [first_tool]
     assert calls[2].carried_archive_tool_calls == [first_tool, second_tool]
-    assert thread is not None and thread.compact_generation == 1
+    # 第一次回收已结束 transcript，第二次回收新增的 active-turn 工具历史；
+    # 两次都必须形成 canonical generation，不能再以“有进展”无账重试。
+    assert thread is not None and thread.compact_generation == 2
     assert result.response == "连续两次压缩后仍沿原任务完成"
 
 
@@ -1309,7 +1313,11 @@ def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_pa
             )
         )
 
-    assert calls == 2
+    # 第一次 overflow 压 transcript，第二次才把尚未覆盖的 active-turn tool
+    # archive 提交为另一代；第三次完全相同且无新 source id 时 fail closed。
+    assert calls == 3
+    thread = agent.conversation_store.load_thread(existing.thread_id)
+    assert thread is not None and thread.compact_generation == 2
 
 
 def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(tmp_path, monkeypatch):
@@ -3557,9 +3565,7 @@ def test_stopped_gateway_turn_cannot_create_a_continuation_during_tool_promotion
 
     assert outcome is not None and outcome.error_code == "CANCELLED"
     links = agent.conversation_store.task_links(thread.thread_id)
-    assert [(link.task_id, link.status) for link in links] == [
-        ("task-before-stop", "interrupted")
-    ]
+    assert [(link.task_id, link.status) for link in links] == [("task-before-stop", "interrupted")]
     payload = json.loads(request_path.read_text(encoding="utf-8"))
     assert "conversation_runtime" not in payload
 
@@ -3614,9 +3620,7 @@ def test_first_gateway_mutation_executes_in_promoted_task_workspace(tmp_path, pa
         tool_runtime_snapshot=snapshot,
     )
     requested_path = (
-        "first-tool.txt"
-        if path_mode == "relative"
-        else str(initial_cwd / "first-tool.txt")
+        "first-tool.txt" if path_mode == "relative" else str(initial_cwd / "first-tool.txt")
     )
     call = canonical_test_call(
         snapshot,
@@ -3643,14 +3647,106 @@ def test_first_gateway_mutation_executes_in_promoted_task_workspace(tmp_path, pa
     assert execution.result.ok is True
     task_root = Path(attrs["run_workspace"]["task_root"])
     assert task_root != initial_cwd
-    assert (task_root / "first-tool.txt").read_text(encoding="utf-8") == (
-        "canonical task cwd\n"
-    )
+    assert (task_root / "first-tool.txt").read_text(encoding="utf-8") == ("canonical task cwd\n")
     assert not (initial_cwd / "first-tool.txt").exists()
     assert attrs[CONVERSATION_EXECUTION_CWD_ATTR] == str(task_root)
     assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [str(task_root)]
     if path_mode == "initial_absolute":
         assert execution.call.arguments["path"] == str(task_root / "first-tool.txt")
+
+
+def test_first_gateway_shell_call_rebases_explicit_initial_working_dir(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    owner_home = Path(agent.home_paths.owner_home_dir)
+    conversation = _conversation_context(
+        agent,
+        {
+            "conversation": {
+                "channel": "gateway-cli",
+                "channel_conversation_id": "first-shell-cwd",
+                "channel_user_id": "local-agent",
+                "canonical_user_id": "local-agent",
+            },
+            "workspace": {"cwd": str(owner_home), "roots": [str(owner_home)]},
+        },
+        "gw-first-shell",
+        "克隆项目到自己的任务目录",
+    )
+    attrs = _gateway_task_attributes(conversation)
+    assert attrs is not None and "run_workspace" not in attrs
+    initial_cwd = Path(str(attrs[CONVERSATION_EXECUTION_CWD_ATTR]))
+    snapshot = agent.tools.runtime_snapshot(run_id="gw-first-shell")
+    # 生产链由可变外层 RunParams 持有任务晋升，工具循环使用自己的不可变参数束；
+    # 两者可能携带不同的 task_attributes dict 投影，正是本回归要覆盖的真机形态。
+    outer_params = RunParams(
+        request_id="gw-first-shell",
+        run_id="gw-first-shell",
+        task_id="gw-first-shell",
+        root_user_prompt="克隆项目到自己的任务目录",
+        source="gateway",
+        context_scope="conversation",
+        task_attributes=attrs,
+    )
+    params = ToolLoopExecuteParams(
+        user_prompt="克隆项目到自己的任务目录",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        write_boundary=None,
+        task_attributes=dict(attrs),
+        request_id="gw-first-shell",
+        run_id="gw-first-shell",
+        task_id="gw-first-shell",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+        root_user_prompt="克隆项目到自己的任务目录",
+        source="gateway",
+        context_scope="conversation",
+        tool_runtime_snapshot=snapshot,
+    )
+    call = canonical_test_call(
+        snapshot,
+        "run_command",
+        {
+            "command": "mkdir shell-created",
+            "working_dir": str(initial_cwd),
+        },
+        call_id="first-shell-call",
+        attempt_id="first-shell-attempt",
+    )
+    runtime_request = ToolCallRuntimeRequest(
+        agent,
+        ToolCallExecuteParams(params, 1, 1, call),
+        call,
+    )
+    agent.tools.operation_store = None
+    agent.tools.operation_store_required = False
+    agent._current_run_params = outer_params
+    agent._current_run_task_workspace = str(initial_cwd)
+    try:
+        execution = execute_traced_tool_call(runtime_request)
+    finally:
+        delattr(agent, "_current_run_params")
+
+    task_root = Path(attrs["run_workspace"]["task_root"])
+    assert execution.result.ok is True
+    assert params.task_attributes["run_workspace"] == attrs["run_workspace"]
+    assert (
+        params.task_attributes[CONVERSATION_EXECUTION_CWD_ATTR]
+        == attrs[CONVERSATION_EXECUTION_CWD_ATTR]
+    )
+    assert execution.call.arguments["working_dir"] == str(task_root)
+    assert (task_root / "shell-created").is_dir()
+    assert not (initial_cwd / "shell-created").exists()
 
 
 def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_path):
@@ -3751,9 +3847,7 @@ def test_sticky_workspace_superseded_falls_back_to_reusable_task(tmp_path):
     agent.conversation_store.select_workspace_task(
         {"thread_id": first.thread_id, "task_id": "task-old"}
     )
-    agent.conversation_store.update_task_status(
-        {"task_id": "task-old", "status": "superseded"}
-    )
+    agent.conversation_store.update_task_status({"task_id": "task-old", "status": "superseded"})
 
     followup = _conversation_context(agent, request, "gw-new", "继续写解析器")
     attrs = _gateway_task_attributes(followup)
@@ -4462,7 +4556,10 @@ def test_gateway_subagent_inherits_promoted_task_workspace_without_output_files(
     try:
         create_params = create_run_params(
             agent,
-            {"goal": "读取现有项目并在项目内实现功能", "allowed_tools": ["read_file", "write_file"]},
+            {
+                "goal": "读取现有项目并在项目内实现功能",
+                "allowed_tools": ["read_file", "write_file"],
+            },
             "读取现有项目并在项目内实现功能",
             ["read_file", "write_file"],
         )
@@ -4497,6 +4594,228 @@ def test_gateway_subagent_records_originating_conversation_request(tmp_path):
         delattr(agent, "_current_run_params")
 
     assert create_params.attributes[CONVERSATION_REQUEST_ID_ATTR] == "gw-current"
+
+
+def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(tmp_path) -> None:
+    """同一 Gateway 请求重排后必须续上已落盘工具事实，不能从原需求重新规划。"""
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request_id = "gw-recover-active-turn"
+    root = Path(agent.home_paths.owner_home_dir)
+    for tool, call_id, model_parameters in (
+        (
+            "task_progress",
+            "call-plan",
+            {
+                "action": "create",
+                "items": [{"id": "build", "title": "构建项目", "status": "in_progress"}],
+            },
+        ),
+        (
+            "create_subagents",
+            "call-child",
+            {
+                "goal": "实现项目",
+                "description": "实现核心模块",
+                "covers": ["build"],
+            },
+        ),
+    ):
+        externalize_tool_output_record(
+            ExternalizeToolOutputRequest(
+                root=root,
+                tool=tool,
+                call_id=call_id,
+                output=json.dumps({"ok": True, "tool": tool}, ensure_ascii=False),
+                ok=True,
+                request_id=request_id,
+                conversation_request_id=request_id,
+                run_id=request_id,
+                task_id=request_id,
+                min_chars=0,
+                parameters=dict(model_parameters),
+                model_parameters=dict(model_parameters),
+            )
+        )
+    externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=root,
+            tool="task_progress",
+            call_id="call-other-turn",
+            output="other",
+            ok=True,
+            request_id="gw-other-turn",
+            conversation_request_id="gw-other-turn",
+            run_id="gw-other-turn",
+            task_id="gw-other-turn",
+            min_chars=0,
+            parameters={"action": "create"},
+            model_parameters={"action": "create"},
+        )
+    )
+    request = {
+        "id": request_id,
+        "prompt": "继续原来的长任务",
+        "priority": "recovery",
+        "requeued_at": 10.0,
+        "active_turn_recovery": {
+            "schema_version": "gateway_active_turn_recovery.v1",
+            "request_id": request_id,
+            "dead_execution_attempt_id": "gateway-attempt-old",
+            "requeued_at": 10.0,
+        },
+    }
+    context = _GatewayAskRunContext(
+        agent=agent,
+        request=request,
+        request_id=request_id,
+        request_path=tmp_path / "request.json",
+        response_path=tmp_path / "response.json",
+        on_chunk=lambda _chunk: None,
+    )
+    recovered = _gateway_recovered_active_turn_tool_calls(context)
+
+    assert [item["tool"] for item in recovered] == [
+        "task_progress",
+        "create_subagents",
+    ]
+    assert recovered[0]["model_parameters"]["items"][0]["id"] == "build"
+    assert recovered[1]["model_parameters"]["covers"] == ["build"]
+    captured: list[RunParams] = []
+
+    def run(_prompt, *, params):
+        captured.append(params)
+        return SimpleNamespace(runtime_status="ok")
+
+    agent.run = run
+    result, _conversation = _run_gateway_turn_with_conversation_compact(
+        context,
+        request["prompt"],
+        _GatewayConversationContext(),
+    )
+
+    assert result.runtime_status == "ok"
+    assert [item["call_id"] for item in captured[0].carried_archive_tool_calls] == [
+        "call-plan",
+        "call-child",
+    ]
+
+
+def test_gateway_overflow_without_transcript_commits_active_turn_compact(tmp_path) -> None:
+    """当前请求工具历史已经撑爆窗口时，Gateway 必须记一代 Compact 后再试，不能无账重放。"""
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request_id = "gw-active-turn-overflow"
+    prompt = "继续这项包含许多工具调用的长任务"
+    request = {
+        "id": request_id,
+        "prompt": prompt,
+        "conversation": {
+            "channel": "chat",
+            "channel_conversation_id": "active-turn-overflow",
+            "channel_user_id": "local-agent",
+            "canonical_user_id": "local-agent",
+        },
+    }
+    conversation = _conversation_context(agent, request, request_id, prompt)
+    context = _GatewayAskRunContext(
+        agent=agent,
+        request=request,
+        request_id=request_id,
+        request_path=tmp_path / "request.json",
+        response_path=tmp_path / "response.json",
+        on_chunk=lambda _chunk: None,
+    )
+    records = [
+        {
+            "call_id": f"overflow-{index}",
+            "tool": "read_file",
+            "ok": True,
+            "parameters": {"tool": "read_file", "path": f"part-{index}.txt"},
+            "model_parameters": {"tool": "read_file", "path": f"part-{index}.txt"},
+            "output_preview": f"part-{index}-done",
+            "tool_round": index,
+        }
+        for index in range(1, 5)
+    ]
+    captured: list[RunParams] = []
+
+    def run(_prompt, *, params):
+        captured.append(params)
+        if len(captured) == 1:
+            return SimpleNamespace(
+                runtime_status="context_overflow",
+                archive_tool_calls=records,
+                active_turn_user_inputs=[],
+            )
+        return SimpleNamespace(runtime_status="ok", response="已继续")
+
+    agent.run = run
+    result, refreshed = _run_gateway_turn_with_conversation_compact(
+        context,
+        prompt,
+        conversation,
+    )
+
+    assert result.runtime_status == "ok"
+    assert refreshed.compact_generation == 1
+    assert len(captured) == 2
+    assert [item["call_id"] for item in captured[1].carried_archive_tool_calls] == [
+        "overflow-1",
+        "overflow-2",
+        "overflow-3",
+        "overflow-4",
+    ]
+    stored = agent.conversation_store.load_thread(conversation.thread_id)
+    assert stored is not None and stored.compact_generation == 1
+    assert stored.compact_source_tool_pairs == 1
+    from agent_py_agent.agent.conversation.active_turn_compact import (
+        model_visible_active_turn_tool_calls,
+    )
+
+    visible = model_visible_active_turn_tool_calls(
+        agent,
+        captured[1].task_attributes,
+        records,
+    )
+    assert [item["call_id"] for item in visible] == [
+        "overflow-2",
+        "overflow-3",
+        "overflow-4",
+    ]
+
+
+def test_gateway_recovery_marker_cannot_replay_another_request_history(tmp_path) -> None:
+    """恢复标记 request_id 不匹配时不得读取任何旧回合工具记录。"""
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    context = _GatewayAskRunContext(
+        agent=agent,
+        request={
+            "id": "gw-current",
+            "priority": "recovery",
+            "requeued_at": 10.0,
+            "active_turn_recovery": {
+                "schema_version": "gateway_active_turn_recovery.v1",
+                "request_id": "gw-foreign",
+            },
+        },
+        request_id="gw-current",
+        request_path=tmp_path / "request.json",
+        response_path=tmp_path / "response.json",
+        on_chunk=lambda _chunk: None,
+    )
+
+    assert _gateway_recovered_active_turn_tool_calls(context) == []
 
 
 def _conversation_context(agent: SimpleAgent, request: dict, request_id: str, prompt: str):

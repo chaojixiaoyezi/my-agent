@@ -1,5 +1,18 @@
 # Subagent Progress
 
+## 2026-08-30 Gateway 重启时 natural terminal 不再重跑
+
+- u288 多 child 长任务取得真实竞态：模型轮已经在 runtime.db 写入 AgentRun/Attempt `done`，旧 Gateway
+  进程却在 runner-result task 投影前退出；原 supervision 把这个安全终态与 orphan reclaim 终态等同处理，
+  将 6 名已完成 child 重排为 PENDING 并创建 generation 2/3。
+- 当前 `reconcile_dead_runner_attempt` 读取 exact attempt 的 append-only `agent_run.completed`。只有带宿主
+  `runtime_status` 的 natural closeout 才交回普通 `runner_result_service`，由同一套 turn-end、capability、
+  source-worker、父级 wake 与文件投影规则补写；恢复器自己生成且没有 `runtime_status` 的 terminal event
+  仍只表示旧 attempt 已封存，继续原 requeue 路径。
+- 完成、失败、取消三种自然终态均已参数化验证：task/session/result 被补齐，active id 清空，generation 不增、
+  attempt 不进 abandoned、auto-start 不被调用；原 dead process reclaim/requeue 回归仍通过。待 R114j fresh
+  MiniMax-M2.7 真 TUI 在唯一 Gateway 重启中取得正证。
+
 ## 2026-08-29 精确停止单调性通过，启动阶段仍需可解释
 
 - r53 三名 child 同时运行时，从详情页 Esc 只让 长期助手 child 进入 CANCELLED；后续主代理自然语言调用

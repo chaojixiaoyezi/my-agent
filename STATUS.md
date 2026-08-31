@@ -1,5 +1,64 @@
 # STATUS
 
+## 2026-08-31 R116/R117 provider 上下文校准与后台最终回复历史闭环（完成）
+
+- R116 把 provider 成功响应中的数值上下文观察写回 exact owner/thread，并用
+  `backend/model/protocol/system/stable-prompt/tools` 稳定指纹和 Compact generation CAS 限定适用范围；动态
+  messages、guidance 与本轮 runtime facts 不参与指纹。缺失、代次漂移或指纹不符都回退原始估算，不拿
+  TUI Context、成本或自然语言猜 provider 窗口。
+- `.10` fresh MiniMax-M2.7 真 TUI `ma-r116-110-u323-background-context-calibration` 完成 8 名 child，主
+  `compact 0`；立即追问的 provider usage 为 input `8,061`、cache-read `32,418`，约 80% 可见输入命中缓存。
+  `ma-r116-110-u324-four-wake-regression` 的 4 名 child 全部完成，主上下文自然越过 90% 后只提交一次
+  Compact（generation 0→1）并继续最终回复。它与旧 u320 的 `compact 7` 形成修复前后对照。
+- u323 同时暴露 P0：后台 final 只进入 `background_notice`，没有进入 canonical messages；下一前台轮会把
+  “屏幕看见过”误当“模型历史已有”。根因是本地 TUI channel=`tui` 未列入 transcript-capable channels。
+  R117 将 `tui` 纳入唯一会话交付边界；后台 commentary/final 先按 wake id 与 `assistant_part_id` 幂等提交
+  ConversationStore，notice 只做 UI 新消息投影。未知外部 channel 继续 fail closed。
+- 首次 R117 TUI `ma-r117-110-u325-background-final-continuity` 是部署负样本：Gateway 从
+  `/root/my-agent-src` 启动，Python 导入旧 checkout 的 schema v7，遮蔽了已安装 R117 wheel，raw messages
+  仍缺 final。顺序改为从中性 `/root` 启动 wheel 后，`ma-r117b-110-u326-final-history-proof` 在用户追问前已
+  证明 thread schema v8、11 条 canonical messages、6 条 background commentary、恰好 1 条 background final；
+  随后模型准确回忆两个报告、两个 marker 与 357 行整合报告，不依赖 notice 或事后猜测。
+- 当前 `.10` 仍只有一个 Gateway：`ma-gateway-r117b-110-wheel-runtime`，PID `4092080`，cwd `/root`，
+  127.0.0.1:8420，MiniMax-M2.7；R117 wheel SHA-256 为
+  `92698066f1c3d82c9fdae6c250d977f4d3b371326767307903fc619f17881b15`。
+
+## 2026-08-30 R114t--R114v 单 Gateway 发布与长任务验收（进行中）
+
+- R114t pending cwd、R114r 跨工作片 canonical Compact、R114q 后台记忆工具、R114n 60% 恢复目标已经由
+  `.10` fresh MiniMax-M2.7 真 TUI 取证；R114u 将连续 8 代 Compact 的公平上限从假 RuntimeError 改为干净
+  yield/resume，R114v 让托管 Gateway 使用 `<MY_AGENT_HOME>/service-cwd`，不再被安装时源码目录阴影覆盖。
+- 当前 wheel SHA-256 为 `41f752dae9894e57ef5a38fe331a399598f99ff1cdc1616dad56ffffd11138a4`，
+  `.10` 唯一 Gateway 是 `ma-gateway-r114u-110-wheel` / PID `3912635` / 127.0.0.1:8420，模块从 venv
+  `site-packages` 加载。重启时 GORM 复刻的 7 个 live child 全部按原 run reclaim/revive，无重复、无假终态。
+- `u313` 完成相对 cwd 多 child + 手动 Compact + 同 thread 续作；`u314` 8/8 child、367 行总报告、主 Compact 3
+  和 provider cache-read 成本账通过；`u316` Skill、4 child、受管服务、两分钟复查及 owner Persona 写入通过。
+  新版本 fresh `u317` 递归 main→child→grandchild、`u318` capability/只读系统巡检以及 `u315` GORM 第二阶段
+  仍在真实 TUI 运行，最终产物与终态尚未验完，不提前写成完成。
+- 本地所有本轮变更测试文件定向 pytest 已通过；未跑全仓 pytest，因为当前增量约 4.2k 行，低于 10k 门槛。
+  严格 Ruff/doc-sync/code-size/diff/clean-package 与最终 wheel/推送在长任务收口后执行。
+
+## 2026-08-30 R114t pending cwd 与首批子代理路径（`.10` 真 TUI 通过）
+
+- u305 实锤首轮模型把提示中的 owner 绝对根复制进 7 个 child goal，而宿主随后正确晋升到 task root；
+  owner 墙因而拒绝错误目标，表现为子代理失败、能力申请和重试，不是权限泄露。
+- 本地候选让 pending turn 的模型短投影只暴露相对路径纪律，不再把 owner/home/context bundle 宿主路径当
+  当前 cwd；持久事实、懒任务晋升、现有资料读取和权限墙不变。`gwreq-*` 同时按机器 ID 处理，目录标题回退
+  用户任务摘要。
+- 94 项 focused、Ruff、PyCompile 通过。`.10` fresh `ma-r114t-110-u313-cwd-subagents-wheel` 的 6 名 child
+  全部使用同一 canonical task root，owner-root 泄漏与 `WRITE_FORBIDDEN` 均为 0；后续同 thread 补 README、
+  手动 Compact generation 1 和路径/关卡召回也通过。
+
+## 2026-08-30 R114s Persona 写入限频 owner 隔离（`.10` 真 TUI 通过）
+
+- u306/u307 的并发样本证明旧进程级限频会跨 owner 串额度，并把明确拒绝降为副作用 UNKNOWN。当前按
+  canonical owner home 独立计数，限频码登记为可退避且 `effect_outcome=not_started`。
+- focused 38 项与相关 Ruff 通过。wheel SHA-256 为
+  `812df6675b57bdd3c1bed01c4befc0530ee9f6174f21d33948fd499ef75e3442`，已顺序替换 `.10` 唯一 Gateway；
+  停旧实例 20 秒、启动新实例 4 秒，始终只有一个 8420 listener，模型保持 MiniMax-M2.7。
+- u310/u311 各三次 Persona operation 全部 `SUCCEEDED`，各自 `USER.md` 无交叉；两路同 owner fresh TUI
+  无工具读取准确召回识别码、回答风格与界面主色。
+
 ## 2026-08-30 R109 子代理阶段与详情首屏（完成）
 
 - R108 检查点已提交为 `3379c21`，未推送。`.10` 已顺序更新到 R109 基线且仍只有一个

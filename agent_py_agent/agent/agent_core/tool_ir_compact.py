@@ -64,15 +64,16 @@ def reclaim_oldest_native_ir_pairs(params: object, *, fraction: float) -> int:
 
 
 # LLM: The caller supplies the single full-request token estimator. Ordinary windowing preserves
-# the newest pair; a caller that already installed a complete replacement summary may explicitly
-# release it too. UserTurn items are never candidates and every removal remains pairwise.
-# 函数用途: 原生工具上下文超预算时逐对删除最旧往返；已有完整替代摘要时可连最后一对一并回收。
+# assistant turns and the newest pair; a caller holding a complete replacement summary may release
+# both the final pair and fully covered tool-bearing assistant turns. UserTurn items are never candidates.
+# 函数用途: 原生工具上下文超预算时逐对删除最旧往返；完整摘要已覆盖时也回收对应旧思考正文。
 def compact_native_ir_to_token_budget(
     params: object,
     *,
     max_tokens: int,
     token_estimator: Callable[[], int],
     preserve_newest_pair: bool = True,
+    drop_completed_tool_turns: bool = False,
 ) -> int:
     """按完整 provider 可见 token 预算从最旧开始整对回收 native 工具历史。
 
@@ -82,7 +83,9 @@ def compact_native_ir_to_token_budget(
     ``ToolCall`` 与 ``ToolResult`` 永远同进同退；当前 turn 的 ``UserTurn`` 不在删除集合。
 
     默认至少保留最新一对工具往返。只有上层已经把完整旧历史写入替代摘要时，才可显式传
-    ``preserve_newest_pair=False``，让单条巨型最新回执也能被摘要替换。返回实际删除的配对数。
+    ``preserve_newest_pair=False``，让单条巨型最新回执也能被摘要替换；并显式传
+    ``drop_completed_tool_turns=True``，才能删除这些工具所属、已被摘要覆盖的旧 assistant
+    正文。返回实际删除的配对数。
     估算器即使因取整暂时没有下降，循环也只遍历有限的调用，不会卡死。
     """
     if max_tokens <= 0:
@@ -95,7 +98,11 @@ def compact_native_ir_to_token_budget(
     for call_id in candidates:
         if _nonnegative_estimate(token_estimator) <= max_tokens:
             break
-        removed += drop_tool_call_pairs(params, {call_id})
+        removed += drop_tool_call_pairs(
+            params,
+            {call_id},
+            drop_completed_tool_turns=drop_completed_tool_turns,
+        )
     return removed
 
 

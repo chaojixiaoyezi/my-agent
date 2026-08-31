@@ -1320,6 +1320,50 @@ def test_forced_compact_keeps_current_gateway_turn_out_of_summary(tmp_path) -> N
     assert '"forced": true' in event_path.read_text(encoding="utf-8")
 
 
+def test_forced_compact_includes_completed_checkpoint_from_same_gateway_request(
+    tmp_path,
+) -> None:
+    agent = _agent(tmp_path, context_tokens=1_000_000, max_turns=3)
+    backend = _SummaryBackend()
+    agent.backend = backend
+    request = _request()
+    first = _context(agent, request, "gw-create", "开始")
+    request_id = "gw-long-running"
+    user_marker = "同一长任务的原始需求"
+    assistant_marker = "子代理已完成，主代理即将整合"
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        first,
+        request_id=request_id,
+        role="user",
+        content=user_marker,
+    )
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        first,
+        request_id=request_id,
+        role="assistant",
+        content=assistant_marker,
+    )
+
+    refreshed = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(agent, request, request_id, user_marker),
+        force_compact=True,
+    )
+    stored = agent.conversation_store.load_thread(first.thread_id)
+    tail, errors = agent.conversation_store.messages_after_compact_report(stored)
+
+    assert errors == []
+    assert refreshed.compact_generation == 1
+    assert backend.calls == 1
+    assert user_marker in backend.prompts[0]
+    assert assistant_marker in backend.prompts[0]
+    assert stored is not None and stored.compact_source_messages == 2
+    assert tail == []
+
+
 def test_gateway_thread_marks_runtime_context_as_conversation_scoped(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     request = _request()

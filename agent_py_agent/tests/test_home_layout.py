@@ -88,6 +88,7 @@ def test_machine_ids_with_underscore_are_recognized() -> None:
 
     assert looks_like_machine_id("req_1783992152809_3659711_3") is True
     assert looks_like_machine_id("run_abc123") is True
+    assert looks_like_machine_id("gwreq-1788132973-8ce54bd2f455446eb38b0b01c1ce5f21") is True
 
 
 def test_run_workspace_same_slug_different_prompt_gets_unique_dir(tmp_path: Path):

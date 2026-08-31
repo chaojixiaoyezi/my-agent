@@ -10,16 +10,22 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.model.context_pressure import (
+    invalidate_provider_context_observation,
     model_visible_context_budget,
     model_visible_context_snapshot,
     model_visible_context_tokens,
     preflight_context_pressure_response,
+    record_provider_context_observation,
     safe_inline_tool_result_tokens,
+)
+from agent_py_agent.agent.agent_core.model.usage import (
+    provider_visible_input_token_usage,
 )
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from agent_py_agent.agent.conversation.channels import project_user_reply
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.conversation.tool_context_window import (
     _bounded_carried_tool_index,
     build_conversation_terminal_tool_fold,
@@ -485,3 +491,191 @@ def test_inline_tool_result_budget_reuses_current_compact_headroom(monkeypatch) 
         lambda _payload: 89_000,
     )
     assert safe_inline_tool_result_tokens(agent) == 1_000
+
+
+def test_provider_visible_usage_distinguishes_anthropic_and_openai_cache_shapes() -> None:
+    anthropic = SimpleNamespace(
+        usage={
+            "input_tokens": 10_000,
+            "cache_read_input_tokens": 20_000,
+            "cache_creation_input_tokens": 10_000,
+        }
+    )
+    openai = SimpleNamespace(
+        usage={
+            "prompt_tokens": 40_000,
+            "prompt_tokens_details": {"cached_tokens": 20_000},
+        }
+    )
+
+    assert provider_visible_input_token_usage(anthropic) == 40_000
+    assert provider_visible_input_token_usage(openai) == 40_000
+
+
+def test_provider_observation_uses_actual_baseline_plus_conservative_growth(
+    monkeypatch,
+) -> None:
+    agent = SimpleNamespace(
+        config=AgentConfig(
+            auto_save_memory=True,
+            memory_compact_auto_trigger_percent=90,
+            model_context_window_tokens=100_000,
+        ),
+        backend=SimpleNamespace(context_window_tokens=100_000, name="fake"),
+    )
+    params = SimpleNamespace(
+        context_scope="conversation",
+        save=True,
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+        live_archive_state={},
+    )
+    raw = {"tokens": 100_000}
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _payload: raw["tokens"],
+    )
+    response = SimpleNamespace(
+        usage={
+            "input_tokens": 10_000,
+            "cache_read_input_tokens": 20_000,
+            "cache_creation_input_tokens": 10_000,
+        }
+    )
+
+    initial = model_visible_context_snapshot(agent, params, "prompt")
+    assert record_provider_context_observation(
+        agent,
+        params,
+        raw_estimated_tokens=100_000,
+        context_surface_fingerprint=initial.context_surface_fingerprint,
+        response=response,
+    )
+    raw["tokens"] = 105_000
+    snapshot = model_visible_context_snapshot(agent, params, "prompt")
+    assert snapshot.raw_estimated_tokens == 105_000
+    assert snapshot.current_tokens == 45_000
+    assert sum(
+        (
+            snapshot.prompt_tokens,
+            snapshot.messages_tokens,
+            snapshot.runtime_guidance_tokens,
+            snapshot.tool_schema_tokens,
+        )
+    ) == 45_000
+    assert (
+        preflight_context_pressure_response(
+            SimpleNamespace(agent=agent, params=params, prompt="prompt")
+        )
+        is None
+    )
+
+    raw["tokens"] = 165_000
+    assert model_visible_context_tokens(agent, params, "prompt") == 105_000
+    assert preflight_context_pressure_response(
+        SimpleNamespace(agent=agent, params=params, prompt="prompt")
+    ) is not None
+
+
+def test_provider_observation_falls_back_after_rewrite_or_missing_usage(monkeypatch) -> None:
+    agent = SimpleNamespace(
+        config=AgentConfig(
+            auto_save_memory=True,
+            memory_compact_auto_trigger_percent=90,
+            model_context_window_tokens=100_000,
+        ),
+        backend=SimpleNamespace(context_window_tokens=100_000, name="fake"),
+    )
+    params = SimpleNamespace(
+        context_scope="conversation",
+        save=True,
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+        live_archive_state={},
+    )
+    raw = {"tokens": 100_000}
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _payload: raw["tokens"],
+    )
+    initial = model_visible_context_snapshot(agent, params, "prompt")
+    assert record_provider_context_observation(
+        agent,
+        params,
+        raw_estimated_tokens=100_000,
+        context_surface_fingerprint=initial.context_surface_fingerprint,
+        response=SimpleNamespace(usage={"prompt_tokens": 40_000}),
+    )
+
+    raw["tokens"] = 80_000
+    assert model_visible_context_tokens(agent, params, "prompt") == 80_000
+    assert record_provider_context_observation(
+        agent,
+        params,
+        raw_estimated_tokens=80_000,
+        context_surface_fingerprint=initial.context_surface_fingerprint,
+        response=SimpleNamespace(usage={}),
+    ) is False
+    raw["tokens"] = 105_000
+    assert model_visible_context_tokens(agent, params, "prompt") == 105_000
+
+    assert invalidate_provider_context_observation(params) is False
+
+
+def test_provider_observation_survives_reconstructed_background_slice(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({"canonical_user_id": "provider-calibration"})
+    agent = SimpleNamespace(
+        config=AgentConfig(
+            auto_save_memory=True,
+            memory_compact_auto_trigger_percent=90,
+            model_context_window_tokens=100_000,
+        ),
+        backend=SimpleNamespace(
+            context_window_tokens=100_000,
+            name="fake",
+            model_name="fake-model",
+        ),
+        conversation_store=store,
+    )
+    raw = {"tokens": 100_000}
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _payload: raw["tokens"],
+    )
+    first_params = SimpleNamespace(
+        context_scope="conversation",
+        save=True,
+        task_attributes={"conversation_thread_id": thread.thread_id},
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+        live_archive_state={},
+    )
+    first_snapshot = model_visible_context_snapshot(agent, first_params, "prompt")
+
+    assert record_provider_context_observation(
+        agent,
+        first_params,
+        raw_estimated_tokens=first_snapshot.raw_estimated_tokens,
+        context_surface_fingerprint=first_snapshot.context_surface_fingerprint,
+        response=SimpleNamespace(usage={"prompt_tokens": 40_000}),
+    )
+    persisted = store.load_thread(thread.thread_id)
+    assert persisted is not None
+    assert persisted.provider_context_observation["compact_generation"] == 0
+
+    fresh_params = SimpleNamespace(
+        context_scope="conversation",
+        save=True,
+        task_attributes={"conversation_thread_id": thread.thread_id},
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+        live_archive_state={},
+    )
+    raw["tokens"] = 90_000
+    # Reconstructed slices use a conservative ratio floor, so a 40/100 provider
+    # observation becomes 45K rather than falling back to the raw 90K estimate.
+    assert model_visible_context_tokens(agent, fresh_params, "prompt") == 45_000
+    raw["tokens"] = 110_000
+    assert model_visible_context_tokens(agent, fresh_params, "prompt") == 55_000
+    # A different stable prompt surface cannot borrow the earlier calibration.
+    assert model_visible_context_tokens(agent, fresh_params, "changed prompt") == 110_000

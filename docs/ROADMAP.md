@@ -17,6 +17,28 @@
 
 ## 下一版优先级
 
+### 三项只读审计发现的底层一致性缺口
+
+状态：待验证，尚未修改产品代码
+
+解决问题：本轮 provider/后台 final P0 已闭环，但只读审计还发现三处不能用本次真 TUI 证据顺带宣称完成的
+边界：低层 owner-scoped process 若显式给出 read roots/cwd 却遗漏 `allowed_write_roots`，仍需确认是否可能把
+`None` 误作可写默认；ordinary resume 丢失 `conversation_request_id` 时，Todo display generation 可能与后台
+任务路径代次漂移；capability route 与 runner result 对同一 child state 的整对象保存可能存在后写覆盖。
+
+下一步先各写一个 failure-first 合同测试，再对照 会话运行时 的 sandbox policy、turn identity 与 agent state event
+合并入口做最底层修复。三项可以只读并行审计，但实现阶段必须按文件/函数划分唯一 owner；不得把自然语言、
+界面刷新或重试次数当修复，也不得借机改 `/audit`。
+
+### 后台连续 Compact 的自然跨切片真机样本
+
+状态：R114u focused 与 `.10` 部署完成，fresh 长 TUI 观察中
+
+解决问题：公平调度把一个后台工作片限制为最多连续 8 代 Compact，但旧实现达到上限后抛普通异常，把健康
+续跑误记成失败。当前已改为 typed yield：claim 干净结束、原 wake 保持未消费、下一 slice 从 canonical
+generation 继续；普通异常仍失败。单测与运行中 Gateway 重启恢复已经通过，尚缺一个新 wheel 下自然跨过
+第 8 代的真实任务样本。继续观察 u315/u317 长任务；若未自然达到，不人为灌无意义 token 或修改产物来造通过。
+
 ### TUI 常驻进程回收与两台测试机资源同负载对照
 
 状态：R105 `.10` 已分组采样，`.7` SSH 阻塞待恢复

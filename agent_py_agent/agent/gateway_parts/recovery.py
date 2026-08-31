@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 
 _TERMINAL_PROJECTION_MARKER_SCHEMA = "gateway_terminal_projection_complete.v1"
+_ACTIVE_TURN_RECOVERY_SCHEMA = "gateway_active_turn_recovery.v1"
 
 
 @dataclass(frozen=True)
@@ -743,6 +744,12 @@ def _requeue_stale_processing(
                     "priority": "recovery",
                     "source": str(fresh.get("source") or "gateway_recovery"),
                     "requeued_at": context.now,
+                    "active_turn_recovery": {
+                        "schema_version": _ACTIVE_TURN_RECOVERY_SCHEMA,
+                        "request_id": request_id,
+                        "dead_execution_attempt_id": dead_attempt_id,
+                        "requeued_at": context.now,
+                    },
                     "last_error": (
                         "gateway restarted before request completed"
                         if context.startup

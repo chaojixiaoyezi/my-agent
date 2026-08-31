@@ -177,6 +177,14 @@
   请求必须保持“原任务 user 在前、native history 居中、synthetic Compact user 最后”的 会话运行时 顺序。
   摘要 provider 失败时不推进 generation，原上下文完整保留；熔断账和 TUI 失败块优先携带异常的 typed
   `error_code`（如 `COMPACT_MODEL_EMPTY_RESPONSE`），没有结构码时才退到异常类名，绝不解析错误正文。
+- provider context observation 只是一代内的压力校准：必须同时匹配 exact thread、Compact generation 与
+  backend/model/protocol/system/stable-prompt/tools 稳定指纹；动态 messages/guidance 不进指纹。缺失、漂移或
+  usage 不可信时回退原始估算。它不充当成本、累计 token 或完成事实，ModelCallLedger 仍是计费唯一权威。
+- 本地 `channel=tui` 是 ConversationStore 承载的 transcript channel。后台 model-authored commentary/final
+  必须先按 exact wake/request/part 幂等进入 canonical history，再投影 notice；没有 TUI adapter 可以不发送，
+  但不能省略历史。未知外部 channel 继续 fail closed，notice/footer 不能反向成为模型历史事实源。
+- wheel 部署必须从中性 cwd 启动并核对实际 `module.__file__`/schema；若 cwd 是旧 package checkout，Python
+  会优先导入旧源码并遮蔽已安装 wheel。源码运行模式只允许 checkout 与待验 revision 完全一致。
 - 普通回合工具终态折叠只追加一次确定性、脱敏投影，未发生真正 Compact 时旧模型历史必须保持稳定前缀；
   缓存命中只读取 provider usage 账，不以 Context 估算冒充。手动 `/compact` 成功后，Gateway 控制结果通过
   `task_status.compact_generation` 返回 canonical 代数，TUI 立即发布同一 typed boundary 并撤下压缩前的

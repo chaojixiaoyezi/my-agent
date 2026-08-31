@@ -15,6 +15,25 @@ class _ImmediateLoop:
     def call_soon_threadsafe(self, callback) -> None:
         callback()
 
+    def is_closed(self) -> bool:
+        return False
+
+
+class _DeferredLoop:
+    def __init__(self) -> None:
+        self.callbacks: list[object] = []
+
+    def call_soon_threadsafe(self, callback) -> None:
+        self.callbacks.append(callback)
+
+    def is_closed(self) -> bool:
+        return False
+
+    def drain(self) -> None:
+        callbacks, self.callbacks = self.callbacks, []
+        for callback in callbacks:
+            callback()
+
 
 class _FakeFuture:
     def __init__(self) -> None:
@@ -101,3 +120,39 @@ def test_gateway_preflight_failure_exits_with_typed_error(monkeypatch) -> None:
     assert application.result == 2
     assert snapshot.active_blocks == ()
     assert snapshot.stable_blocks[0].metadata["error_code"] == "GATEWAY_NOT_READY"
+
+
+def test_gateway_preflight_commits_fast_result_on_application_loop(monkeypatch) -> None:
+    application = _application()
+    deferred_loop = _DeferredLoop()
+    application.loop = deferred_loop
+    runtime = TuiRuntime("preflight-fast-result")
+    starts: list[str] = []
+    monkeypatch.setattr(
+        tui_preflight,
+        "wait_for_gateway_running",
+        lambda _paths, timeout: ({"status": "running"}, timeout == 0.1),
+    )
+
+    thread = start_tui_gateway_preflight(
+        TuiGatewayPreflight(
+            application=application,
+            runtime=runtime,
+            paths=object(),
+            timeout_seconds=0.1,
+            stop_event=threading.Event(),
+            on_ready=lambda: starts.append("worker"),
+        )
+    )
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert starts == []
+    assert application.invalidations == 0
+    assert runtime.store.snapshot().active_blocks[0].kind == "connection_started"
+
+    deferred_loop.drain()
+
+    assert starts == ["worker"]
+    assert application.invalidations == 1
+    assert runtime.store.snapshot().active_blocks == ()

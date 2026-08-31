@@ -208,6 +208,23 @@ class _StreamingTokenBackend:
         return ModelResponse(text="hello world", backend=self.name)
 
 
+class _ProviderUsageBackend:
+    name = "provider-usage-test-backend"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        del prompt, on_chunk
+        return ModelResponse(
+            text="ok",
+            backend=self.name,
+            usage={
+                "input_tokens": 10_000,
+                "cache_read_input_tokens": 20_000,
+                "cache_creation_input_tokens": 10_000,
+                "output_tokens": 10,
+            },
+        )
+
+
 class _PlainRuntimeContextTextBackend:
     name = "plain-runtime-context-text-test-backend"
 
@@ -556,10 +573,11 @@ def test_model_generate_compacts_from_typed_provider_context_window_error():
         _current_subagent_run_id="",
     )
 
+    params = _tool_loop_params()
     response = generate_model_response(
         ModelGenerateParams(
             agent=agent,
-            params=_tool_loop_params(),
+            params=params,
             prompt="hello",
             tool_rounds=0,
         )
@@ -567,6 +585,33 @@ def test_model_generate_compacts_from_typed_provider_context_window_error():
 
     assert response.runtime_status == "context_overflow"
     assert response.runtime_source == "provider_error"
+    assert "_provider_context_observation" not in params.live_archive_state
+
+
+def test_successful_model_generate_records_provider_context_observation() -> None:
+    backend = _ProviderUsageBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=10),
+        _current_subagent_run_id="",
+    )
+    params = _tool_loop_params()
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt="hello",
+            tool_rounds=0,
+        )
+    )
+
+    observation = params.live_archive_state["_provider_context_observation"]
+    assert response.text == "ok"
+    assert observation["schema"] == "provider_context_observation.v2"
+    assert observation["raw_estimated_tokens"] > 0
+    assert observation["provider_input_tokens"] == 40_000
+    assert len(observation["context_surface_fingerprint"]) == 64
 
 
 def test_model_generate_rejects_unclosed_long_write_after_full_response():

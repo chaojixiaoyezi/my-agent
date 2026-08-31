@@ -12,13 +12,17 @@ from __future__ import annotations
 6. 子代理收口结果在 native 下落进 IR 历史。
 """
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core._tool_loop_service import _record_tool_call
+from agent_py_agent.agent.agent_core._tool_loop_service import (
+    _record_tool_call,
+    _runtime_injections_with_delivery_contract,
+)
 from agent_py_agent.agent.agent_core.runtime.loop_support import (
     _native_initial_tool_ir_history,
     _native_provider_history_messages,
@@ -31,7 +35,7 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
 )
 from agent_py_agent.agent.backends.base import AnthropicCompatibleBackend, BackendOptions
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
-from agent_py_agent.agent.backends.tool_ir import ToolResult, UserTurn
+from agent_py_agent.agent.backends.tool_ir import RuntimeFactsTurn, ToolResult, UserTurn
 from agent_py_agent.agent.conversation.models import ConversationHistorySeed, MessageLogEntry
 from agent_py_agent.agent.conversation.native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
@@ -544,6 +548,51 @@ def test_native_dynamic_facts_make_later_tool_request_append_only(tmp_path) -> N
     assert second_messages[: len(first_messages)] == first_messages
     assert "runtime-facts-2" in str(second_messages[-1])
     assert sum("runtime-facts-1" in str(message) for message in second_messages) == 1
+
+
+def test_native_current_compact_generation_is_a_latest_typed_runtime_fact(tmp_path) -> None:
+    agent = _native_agent(tmp_path)
+    params = replace(
+        _params(),
+        conversation_history_seed=ConversationHistorySeed(compact_generation=3),
+    )
+    params.tool_ir_history.extend(
+        [
+            UserTurn("# User Task\n告诉我 Compact 次数"),
+            RuntimeFactsTurn(
+                '# Conversation Runtime State\n'
+                '{"schema":"conversation_runtime_state.v1","compact_generation":2}'
+            ),
+        ]
+    )
+
+    _materialize_native_prompt_facts(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=CacheStructuredPrompt("stable", "other-current-facts"),
+            tool_rounds=0,
+        )
+    )
+    messages = _native_provider_messages(agent, params)
+
+    assert messages is not None
+    latest = messages[-1]["content"][0]["text"]
+    assert '"schema":"conversation_runtime_state.v1"' in latest
+    assert '"compact_generation":3' in latest
+    assert '"authority":"conversation_history_seed.compact_generation"' in latest
+
+
+def test_text_protocol_receives_the_same_exact_compact_generation() -> None:
+    params = replace(
+        _params(protocol="text"),
+        conversation_history_seed=ConversationHistorySeed(compact_generation=4),
+    )
+
+    injections = _runtime_injections_with_delivery_contract(params)
+
+    assert any('"schema":"conversation_runtime_state.v1"' in row for row in injections)
+    assert any('"compact_generation":4' in row for row in injections)
 
 
 def test_completed_native_tool_turn_round_trips_through_conversation_metadata(tmp_path) -> None:

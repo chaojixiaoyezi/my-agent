@@ -263,10 +263,93 @@ def write_live_tool_compact_checkpoint(
     return checkpoint_id
 
 
+# LLM: Only the chain ending at ConversationThread.compact_checkpoint_id is committed. Readers
+# must follow previous_checkpoint_id backwards and reject a missing/corrupt link instead of treating
+# an orphan candidate as authority or replaying already-compacted active-turn effects.
+# 函数用途: 读取当前 thread 真正提交过的 Compact 快照链，供恢复时识别已被摘要替代的工具调用。
+def committed_compact_checkpoint_chain(
+    agent: SimpleAgent,
+    thread: ConversationThread,
+) -> tuple[dict[str, object], ...]:
+    checkpoint_id = str(thread.compact_checkpoint_id or "").strip()
+    generation = max(0, int(thread.compact_generation or 0))
+    if not checkpoint_id and generation == 0:
+        return ()
+    if not checkpoint_id or generation <= 0:
+        raise OSError("conversation compact pointer is incomplete")
+    home = getattr(agent, "home_paths", None)
+    raw_root = str(getattr(home, "owner_compact_dir", "") or "").strip()
+    if not raw_root:
+        raise OSError("owner compact directory is unavailable")
+    from ..common.json_io import read_jsonl_objects_report
+
+    path = Path(raw_root) / "conversations" / f"{thread.thread_id}.jsonl"
+    report = read_jsonl_objects_report(
+        path,
+        context="conversation.compact_checkpoint_chain",
+    )
+    if report.load_errors:
+        raise OSError("conversation compact checkpoint ledger is unreadable")
+    by_id = {
+        str(row.get("checkpoint_id") or "").strip(): row
+        for row in report.records
+        if isinstance(row, dict) and str(row.get("checkpoint_id") or "").strip()
+    }
+    chain: list[dict[str, object]] = []
+    visited: set[str] = set()
+    current_id = checkpoint_id
+    expected_generation = generation
+    while current_id:
+        if current_id in visited:
+            raise OSError("conversation compact checkpoint chain contains a cycle")
+        visited.add(current_id)
+        row = by_id.get(current_id)
+        if row is None:
+            raise OSError("conversation compact checkpoint chain is incomplete")
+        if str(row.get("thread_id") or "").strip() != thread.thread_id:
+            raise OSError("conversation compact checkpoint thread identity mismatches")
+        try:
+            row_generation = int(row.get("generation") or 0)
+        except (TypeError, ValueError) as exc:
+            raise OSError("conversation compact checkpoint generation is invalid") from exc
+        if row_generation != expected_generation:
+            raise OSError("conversation compact checkpoint generation chain mismatches")
+        chain.append(dict(row))
+        current_id = str(row.get("previous_checkpoint_id") or "").strip()
+        expected_generation -= 1
+    if expected_generation != 0:
+        raise OSError("conversation compact checkpoint chain ended early")
+    chain.reverse()
+    return tuple(chain)
+
+
+# LLM: Active-turn replay suppression is derived only from committed live_tool_ir checkpoints.
+# Transcript checkpoints and unreferenced candidates never hide archive records.
+# 函数用途: 汇总已提交运行中 Compact 精确替代掉的工具 call id，恢复时仍保留完整账本但不再重复喂模型。
+def committed_live_tool_compact_source_ids(
+    agent: SimpleAgent,
+    thread: ConversationThread,
+) -> frozenset[str]:
+    values = {
+        str(call_id or "").strip()
+        for row in committed_compact_checkpoint_chain(agent, thread)
+        if str(row.get("source_kind") or "").strip() == "live_tool_ir"
+        for call_id in (
+            row.get("source_tool_call_ids")
+            if isinstance(row.get("source_tool_call_ids"), list)
+            else ()
+        )
+        if str(call_id or "").strip()
+    }
+    return frozenset(values)
+
+
 __all__ = [
     "CompactCheckpointRequest",
     "LiveToolCompactCheckpointRequest",
     "compact_checkpoint_id",
+    "committed_compact_checkpoint_chain",
+    "committed_live_tool_compact_source_ids",
     "live_tool_compact_checkpoint_id",
     "write_live_tool_compact_checkpoint",
     "write_compact_checkpoint",

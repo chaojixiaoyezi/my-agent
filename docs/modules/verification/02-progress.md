@@ -1,5 +1,16 @@
 # Verification：开发推进
 
+## 2026-08-30 首个工作工具立即使用 canonical task root
+
+- 真 TUI 首个 `run_command` 曾在 conversation task promotion 已成功后仍沿用外层启动 cwd；第二次工具调用
+  才进入 `<owner_home>/tasks/<task_path>`。根因是 mutable 外层 `RunParams` 已更新，当前工具循环冻结出的
+  `ToolLoopExecuteParams.task_attributes` 仍是晋升前投影，不是权限或任务创建失败。
+- 当前只在结构化 promotion 成功后，把外层权威 attributes 原位同步到本次工具快照，再由既有 cwd、roots、
+  write-boundary 和 operation 链解析。模型参数、自然语言路径和 handler 结果都不能反向改写外层权威；
+  取消、未创建 thread 与 promotion 失败时不做同步。
+- focused 覆盖第一条命令、第一条写入和同轮后续工具落在同一 canonical task root；这不增加机器验收门，
+  只修复已有工作区事实的消费时机。
+
 ## 2026-08-26 主/子代理共用验证证据与动作授权边界（第四候选）
 
 - r38 真实任务证明 canonical 工具事实没有丢：测试机本机服务监听 `0.0.0.0:8765` 且 localhost 200，开发机

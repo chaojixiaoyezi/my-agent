@@ -177,12 +177,22 @@ def record_tool_call_ir(
     history.append(result)
 
 
-def drop_tool_call_pairs(params: object, call_ids: set[str]) -> int:
+# LLM: Pair removal is protocol-safe by default; only a caller holding one complete replacement
+# summary may also discard an assistant turn whose last tool call was removed.
+# 函数用途: 成对删除原生工具调用和结果；已有完整摘要时一并回收对应旧思考轮，避免空壳继续占上下文。
+def drop_tool_call_pairs(
+    params: object,
+    call_ids: set[str],
+    *,
+    drop_completed_tool_turns: bool = False,
+) -> int:
     """按 tool_use id 集合「整对」摘除 ToolCall 与配对的 ToolResult。
 
     Step 3/4 的 compact 在丢弃最老工具往返时调用这里，保证 assistant 消息里不留下
     没有对应 tool_result 的孤儿 tool_use（Anthropic 会拒绝），也不留下指向已删
-    tool_use 的孤儿 tool_result。返回实际摘除的「对」数（以 ToolResult 计）。
+    tool_use 的孤儿 tool_result。只有 ``drop_completed_tool_turns=True`` 且调用方已经持有
+    完整替代摘要时，才连同已无保留调用的旧 assistant 正文一起删除。返回实际摘除的
+    「对」数（以 ToolResult 计）。
     """
     if not call_ids:
         return 0
@@ -190,7 +200,14 @@ def drop_tool_call_pairs(params: object, call_ids: set[str]) -> int:
     removed = sum(
         1 for item in history if isinstance(item, ToolResult) and item.call_id in call_ids
     )
-    rebuilt = [_rewritten_history_item(item, call_ids) for item in history]
+    rebuilt = [
+        _rewritten_history_item(
+            item,
+            call_ids,
+            drop_completed_tool_turns=drop_completed_tool_turns,
+        )
+        for item in history
+    ]
     history[:] = [
         item
         for item in rebuilt
@@ -199,12 +216,23 @@ def drop_tool_call_pairs(params: object, call_ids: set[str]) -> int:
     return removed
 
 
-def _rewritten_history_item(item: Any, call_ids: set[str]) -> Any:
-    """摘除命中的 ToolResult（返回 None）；AssistantTurn 删掉命中的 ToolCall；其余原样。"""
+# LLM: This is a structural IR rewrite; prose never decides whether a turn is covered or removable.
+# 函数用途: 重写一条原生历史记录，并按调用方的摘要覆盖事实决定是否整轮删除旧 assistant 内容。
+def _rewritten_history_item(
+    item: Any,
+    call_ids: set[str],
+    *,
+    drop_completed_tool_turns: bool = False,
+) -> Any:
+    """摘除命中的工具对；完整替代摘要存在时也可删除其所属旧 assistant 轮。"""
     if isinstance(item, ToolResult):
         return None if item.call_id in call_ids else item
     if isinstance(item, AssistantTurn):
-        return _assistant_turn_without(item, call_ids)
+        matched = any(call.call_id in call_ids for call in item.tool_calls)
+        rewritten = _assistant_turn_without(item, call_ids)
+        if drop_completed_tool_turns and matched and not rewritten.tool_calls:
+            return None
+        return rewritten
     return item
 
 

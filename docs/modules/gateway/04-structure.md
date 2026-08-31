@@ -1,5 +1,33 @@
 # Gateway Structure
 
+## TUI transcript channel 与后台回复提交
+
+- `conversation/channels.py` 的 transcript-capable 集合表示“该 channel 的 authenticated thread 由
+  ConversationStore 承载模型历史”，不是“存在外部发送 adapter”。本地 `tui` 属于前者；未知外部 channel
+  仍不自动取得该语义。
+- background main 经统一 transcript sink 生成 commentary/final 后，先用 exact wake id 与
+  `assistant_part_id` 幂等写入 thread，再独立发布 notice/delivery projection。即使 TUI 没有 adapter、发送
+  结果为 `not_applicable`，canonical history 也必须存在；重试只得到同一行，不能重复 final。
+- 下一前台轮只从 ConversationStore/Compact checkpoint 恢复这些正文，不从 notice、footer 或屏幕回放猜
+  模型看过什么。该边界对齐 会话运行时 的 response item 先记录、UI event 后投影顺序。
+
+## provider context observation
+
+- `conversation_thread.v8` 在 exact thread 保存一份 provider 数值观察。观察附带稳定 backend/model/protocol/
+  system/prompt/tools 指纹与 Compact generation；写入使用同 generation CAS，且不推进 thread `updated_at`。
+- context pressure 只在指纹、代次与数值都可信时用它校准 reconstructed durable slice；动态 messages、guidance
+  不进稳定指纹。缺失或不匹配时回退原始估算，成本继续由 ModelCallLedger 负责，不能混成第二份 token 总账。
+
+## pending conversation 的模型 cwd 投影
+
+- 普通 conversation 在没有 `run_workspace` 时仍不创建 task；owner home 是既有资料与权限边界，不是新产物
+  默认落点。模型短提示不得把该绝对目录标成“当前工具工作目录”，也不得通过 context bundle 摘要再次泄露成
+  placement hint。
+- 首个 `ToolRuntimePolicy.promotes_task=true` 的调用继续在唯一执行缝隙建立 task link 和 run workspace；
+  完成后 `conversation_execution_cwd/run_workspace/write_boundary` 同步到本轮工具快照，后续 main、child、
+  approval 与 sandbox 复用同一 canonical root。pending 阶段只告诉模型使用相对路径，不能扫描或改写 goal
+  来补救路径。
+
 ## 工具目录与停止入口的单一事实
 
 - `ToolRuntimeSnapshot` 在 request/run 边界完成 owner、显式 allowlist、availability 和 exposure 收敛。
@@ -11,6 +39,10 @@
   typed 状态，客户端不能把 transport timeout 当业务拒绝，也不能把 accepted 当 terminal。
 - exact child runner 的 session、snapshot 保存和 heartbeat 在每次写入前读取 canonical state；发现更新的
   终态立即退出。显式 recovery 的 reopen 标志只在结构化 user-stop 恢复路径传入，普通保存默认 false。
+- runtime.db 的 `AgentRun/Attempt` 与 `SubAgentTask` 是同一执行的权威生命周期和文件投影，不是两套可互相
+  猜测的状态。Gateway 重启发现 task 仍 RUNNING 时，exact `agent_run.completed` 若带宿主 `runtime_status`，
+  必须复用普通 runner-result finalizer 补投影和父级通知，不得 abandon/requeue；orphan reclaim 产生且没有
+  `runtime_status` 的 terminal event 只表示旧执行轮已封存，仍可把同一逻辑 run 放回 PENDING。
 
 ## 完成回合 canonical native envelope
 
@@ -31,6 +63,14 @@
 - exact background task slice 会设置 `conversation_transcript_authoritative=true`。它的 `save=False` 只关闭
   `Agent.run` 的旧式回复/记忆保存，不能关闭该 ConversationThread 的 live-tool Compact；presentation-only
   或没有 exact thread 的 no-save 调用仍无 Compact 写权。
+- background main 与 foreground Gateway、child runner 共用“当前 run 返回 context_overflow，外层 Compact
+  唯一 ConversationThread，再携带 typed archive/active-turn input 原地续跑”的控制语义。scheduler wake
+  只负责真正的新事件，不充当 Compact 重试器；一个公平 slice 最多推进 8 代。达到 8 代且每代都有进展时
+  发内部 typed yield：当前 claim 正常结束、来源保持未消费，下一 slice 从 canonical checkpoint 续跑；没有
+  generation 变化或普通异常仍失败，不能被 yield 吞掉。
+- native live Compact 的完整 replacement summary 覆盖的是旧 assistant/tool/result 工具轮；只有该摘要存在
+  时才可连同被删工具对所属的 assistant 正文整轮回收。无摘要窗口不能删除 thinking-only/assistant 正文，
+  UserTurn 与 carried handoff 继续独立保留。
 - transcript 与 live-tool Compact 都只向客户端发送 `conversation_compaction_progress.v1` 的阶段、百分比、
   generation、token 计数和失败时可选的 typed `error_code`。live-tool 在慢摘要前创建块，在真实 checkpoint
   后才进入 committing；TUI 不读日志文案猜进度。完成块收起后保留原有 content-free Compact 结果行；未提交
@@ -101,6 +141,16 @@
 
 - 每个 Gateway 请求先冻结结构化 owner 身份和 owner home。WorkspaceOnly 的文件、Shell、PTY 与 LSP 都以
   owner home 为硬墙，进程启动 cwd 不是权限来源；这道文件墙不关闭外网，网络仍由工具自己的网络合同裁决。
+- owner 磁盘发现每个 controller tick 只处理一页，避免大用户量启动时阻塞；只要该页返回 continuation
+  cursor，下一 tick 立即继续相邻页，完整一轮结束后才进入配置的稳态重扫间隔。否则后页 owner 的恢复延迟
+  会错误放大成 `页数 × 60/120 秒`。runner 心跳仍是默认判活事实；仅当 session 明确记录进程形态且 OS 已
+  证明 exact PID 死亡时，最后一拍新鲜心跳不阻止重启回收。
+- 通知轮询不得为 cold owner 构造完整 Agent，也不得因此丢掉已提交 final。被动读先用 exact
+  owner identity 定位 owner home，只查固定深度的已存在 conversation roots 与 exact channel binding；
+  只读 store 禁止 `mkdir`，volatile activity/approval 保持空，直到 owner 因真实任务或控制请求被加载。
+- 运行 child 的用户插话使用 exact attempt/message id；provider 真正接受后才同时提交 child
+  ConversationThread 与 durable display event。当前 TUI 从 pending map 提升，新 TUI/Gateway 从持久事件
+  重建相同 user block；普通文本不得越过 provider boundary 提前写成已消费。
 - `full-access` 只有 `local/main` 管理员配置可以生效。远程 owner 即使复制配置或在正文里声称管理员也会降为
   WorkspaceOnly；Full 主代理创建 child/grandchild 时重新加 owner 墙，并只保留结构化 task/product 写根。
 - Full 模式下的外部路径意图属于 prompt 软约束：用户明确指定外部目录或系统排障时才离开 owner home；涉及
@@ -277,7 +327,9 @@ audit Agent 为空而回退 daemon cwd。
   存活期间展示，不再写 child run。child 常驻次数只来自 ConversationThread；两种 rich 事件均不获得
   ConversationStore compact 权威。
 - Gateway transcript、message repair 与 delegated agent attempt 都写 canonical `conversation_request_id`；
-  Compact 用它排除当前未完成输入。`gateway_request_id` 只保留为旧 Gateway 行的显式迁移读取与请求账本
+  Compact 只排除尾部尚无 assistant checkpoint 的当前 user 输入；一旦同 request 已经产生并持久化 assistant
+  checkpoint，该完成前缀就是合法 Compact 来源，不能因 request id 相同而把整段历史隐藏。
+  `gateway_request_id` 只保留为旧 Gateway 行的显式迁移读取与请求账本
   join，不是第二种 Compact identity。
 - usage 的 `compact_trigger_tokens` 是会话统一策略，不是单次请求的权限投影；no-save 仅让
   preflight 使用完整 context window 作当轮硬限，不把 TUI 的 90% 压缩点改成 100%。
@@ -406,6 +458,15 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - Gateway 的 `conversation/compact.py` 当前只管理 owner/thread 持久 transcript 的
   summary + raw tail + checkpoint。每轮工具历史窗口仍是同一模型请求的内部阶段；迁移期间 exact child
   attributes 只保存其纯数字展示计数，不形成第二份摘要、transcript 或恢复状态。
+- Gateway 请求在 provider/tool 回合中途崩溃时，`gateway_active_turn_recovery.v1` 只证明“同一 request 被
+  reconciler 重排”。恢复器从当前 owner 的 canonical 工具索引按 exact `conversation_request_id` 重建
+  `carried_archive_tool_calls`，再复用上面的同一 IR/Compact 续接链；不把未提交 assistant 正文当历史，也不
+  扫描 child 工作区。工具索引缺失表示尚无已归档调用；索引存在但不可读则 fail closed，不能退回原 prompt
+  自动重做副作用。
+- 跨工作片恢复时，`carried_archive_tool_calls` 始终是预算、去重、已执行工具、未知副作用和审计的完整权威；
+  `conversation.active_turn_compact` 只从模型可见重建中排除当前 thread 已提交 checkpoint 链里的 exact
+  `source_tool_call_ids`。provider overflow 且 transcript Compact 无来源时，它复用 live-tool checkpoint/CAS
+  提交一代完整替代摘要与有界近期记录；未提交候选、损坏链和其它 thread 不能改变模型视图。
 - provider overflow 的既有最终保险仍可成对回收最旧 native IR；任何路径都不得留下孤立
   tool-use 或 tool-result。
 
@@ -501,8 +562,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   累计消息历史；复用 runtime compact policy/token estimator/backend 在 owner+thread 内自动 compact，
   raw transcript 保留，thread summary/message+byte cursor/generation/checkpoint pointer 是唯一 live compact
   状态；首次 compact
-  后从 byte cursor 读取新增尾部，不重复扫描旧前缀。当前 user message 在持久写入后仍作为 active turn
-  单独传入，不进入本次历史摘要；provider 明确返回 `context_overflow` 时，Gateway 会强制推进同一 thread
+  后从 byte cursor 读取新增尾部，不重复扫描旧前缀。尾部尚无 assistant checkpoint 的当前 user message
+  在持久写入后仍作为 active turn 单独传入，不进入本次历史摘要；同 request 已完成的 user/assistant checkpoint
+  可进入后续 Compact。provider 明确返回 `context_overflow` 时，Gateway 会强制推进同一 thread
   的 compact generation 后重试同一 user turn，generation 没有前进或八次后仍溢出则 fail closed。
   Compact 先尝试保留最多四个近期完整回合，近期尾部受统一 token 上限约束；若完整下一轮候选仍会越过
   精确阈值，则退回压缩全部旧段。候选先验证、写完整 checkpoint，再用一次 CAS 提交；失败不推进
@@ -699,7 +761,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `cli/chat_parts/control_runtime.py`：终端 Gateway 模式调用同一 `/control`；本地直跑模式使用同一 typed
   command/状态渲染，并读取 plain/TUI worker 写入的锁保护 request id 控制本进程当前窗口；不得跨线程
   读取 thread-local `RunParams`。
-- `cli/gateway_service.py`：systemd/launchd service unit 生成和安装/卸载入口；不再拆成私有 facade helper。
+- `cli/gateway_service.py`：systemd/launchd service unit 生成和安装/卸载入口；服务 cwd 固定为
+  `<MY_AGENT_HOME>/service-cwd` 中性目录，不能继承安装命令所在源码 checkout，也不把该目录当 owner workspace；
+  不再拆成私有 facade helper。
 - `agent/gateway_parts/process_control.py`：进程存活、终止和等待退出的唯一进程控制模块。
   `daemon_control.py` 只处理 PID record、后台化、锁和 shutdown request，不再作为进程控制转口。
 - `agent/tooling/process_registry.py`、`agent/tooling/process_sessions.py`、`agent/tooling/shell.py`：模型命令

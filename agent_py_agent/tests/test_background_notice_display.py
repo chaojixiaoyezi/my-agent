@@ -702,14 +702,32 @@ def test_child_transcript_publishes_consumed_input_only_after_provider_acceptanc
 
     sink.begin_active_turn_input(("agent-steer-1", "agent-steer-2"))
     assert rows == []
-    sink.complete_active_turn_input(("agent-steer-1", "agent-steer-2"))
+    sink.complete_active_turn_input(
+        ("agent-steer-1", "agent-steer-2"),
+        client_messages=(
+            ("agent-steer-1", "先读两个核心文件"),
+            ("agent-steer-2", "再写报告"),
+        ),
+    )
 
     assert len(rows) == 1
     assert rows[0]["kind"] == "active_turn_input_consumed"
     assert rows[0]["phase"] == "completed"
     assert rows[0]["block_id"] == f"{request_id}:active-input:1"
     assert rows[0]["payload"] == {
-        "client_message_ids": ["agent-steer-1", "agent-steer-2"]
+        "client_message_ids": ["agent-steer-1", "agent-steer-2"],
+        "messages": [
+            {
+                "message_id": "agent-steer-1",
+                "text": "先读两个核心文件",
+                "truncated": False,
+            },
+            {
+                "message_id": "agent-steer-2",
+                "text": "再写报告",
+                "truncated": False,
+            },
+        ],
     }
 
 
@@ -1272,6 +1290,82 @@ def test_gateway_notice_cold_owner_does_not_materialize_agent(monkeypatch) -> No
     assert snapshot["ok"] is True
     assert snapshot["owner_state"] == "cold"
     assert snapshot["active_task_count"] == 0
+
+
+def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts import http_handlers
+    from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        OwnerIdentity,
+        resolve_owner_home,
+    )
+
+    owner = OwnerIdentity.provider_user("tui-test", "cold-user")
+    owner_home = resolve_owner_home(tmp_path, owner).home_dir
+    store_root = (
+        owner_home
+        / "workspace"
+        / "runtime"
+        / "workspaces"
+        / "workspace-a"
+        / "conversations"
+    )
+    store = ConversationStore(store_root)
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "cold-user",
+            "channel": "tui-test",
+            "channel_conversation_id": "cold-session",
+            "channel_user_id": "cold-user",
+            "now": 10.0,
+        }
+    )
+    notices_dir = store_root / "notices"
+    notices_dir.mkdir(parents=True)
+    (notices_dir / f"{thread.thread_id}.notices.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "background_notice.v2",
+                "notice_id": "notice-cold-final",
+                "thread_id": thread.thread_id,
+                "created_at": 20.0,
+                "display_kind": "assistant_response",
+                "content": "冷 owner 的最终回复仍然可见。",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    store.goals_dir.rmdir()
+
+    monkeypatch.setattr(
+        http_handlers,
+        "resolve_loaded_gateway_scope_agent",
+        lambda _base_agent, _scope: None,
+    )
+    snapshot = http_handlers.read_gateway_client_notices(
+        SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path)),
+        scope=GatewayControlScope(
+            "cold-user",
+            "tui-test",
+            "cold-session",
+            resolved_owner=owner,
+        ),
+        after=0.0,
+    )
+
+    assert snapshot["ok"] is True
+    assert snapshot["owner_state"] == "cold"
+    assert [row["content"] for row in snapshot["notices"]] == [
+        "冷 owner 的最终回复仍然可见。"
+    ]
+    assert snapshot["cursor"] == 20.0
+    assert not store.goals_dir.exists()
 
 
 def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:

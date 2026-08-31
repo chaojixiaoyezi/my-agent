@@ -52,6 +52,7 @@ from .control_service import (
     active_turn_guidance_dedupe_key,
     request_gateway_memory_curator_lifecycle,
     resolve_gateway_scope_agent,
+    resolve_gateway_scope_owner,
     resolve_loaded_gateway_scope_agent,
     steer_active_conversation_if_running,
 )
@@ -1232,14 +1233,12 @@ def read_gateway_client_notices(
             error="owner scope unavailable",
         )
     if owner_agent is None:
-        payload = _empty_gateway_notice_response(
-            after,
-            event_after,
-            ok=True,
-            agent_activity=ConversationAgentActivity().to_dict(),
+        return _read_cold_owner_notice_projection(
+            agent,
+            scope=scope,
+            after=after,
+            event_after=event_after,
         )
-        payload["owner_state"] = "cold"
-        return payload
     store = getattr(owner_agent, "conversation_store", None)
     if not isinstance(store, ConversationStore):
         return _empty_gateway_notice_response(
@@ -1306,6 +1305,77 @@ def read_gateway_client_notices(
         "agent_activity": activity_payload,
         "agent_permission_requests": permission_requests,
     }
+
+
+# LLM: A cold owner must remain cold, but committed assistant notices cannot disappear after a
+# Gateway restart. Resolve one authenticated owner home, inspect only the finite canonical store
+# layouts, and replay the newest exact channel binding without constructing Agent/backend/tool
+# state. Volatile activity and approval state intentionally remain empty until the owner is loaded.
+# 函数用途: Gateway 重启后从冷用户已有会话库重放最终回复，避免空闲轮询拉起整套 Agent。
+def _read_cold_owner_notice_projection(
+    base_agent: object,
+    *,
+    scope: GatewayControlScope,
+    after: float,
+    event_after: int,
+) -> dict[str, object]:
+    from ..conversation.store import ConversationStore
+    from ..owner_wake_discovery import existing_conversation_store_roots
+    from ..user_space.owner_resolver import resolve_owner_home
+
+    idle_activity = ConversationAgentActivity().to_dict()
+    payload = _empty_gateway_notice_response(
+        after,
+        event_after,
+        ok=True,
+        agent_activity=idle_activity,
+    )
+    payload["owner_state"] = "cold"
+    home_paths = getattr(base_agent, "home_paths", None)
+    home_root = getattr(home_paths, "root", None)
+    if home_root is None:
+        return payload
+    try:
+        owner = resolve_gateway_scope_owner(base_agent, scope)
+        owner_home = resolve_owner_home(home_root, owner).home_dir
+    except Exception:
+        return payload
+
+    candidates: list[tuple[float, str, object, object]] = []
+    for store_root in existing_conversation_store_roots(owner_home):
+        try:
+            store = ConversationStore(store_root, initialize=False)
+            thread, load_error = store.resolve_thread_report(
+                channel=str(scope.channel or "").strip(),
+                channel_conversation_id=str(scope.conversation_id or "").strip(),
+                channel_user_id=str(scope.user_id or "").strip(),
+            )
+        except Exception:
+            continue
+        if thread is None or load_error is not None:
+            continue
+        candidates.append(
+            (
+                float(getattr(thread, "updated_at", 0.0) or 0.0),
+                str(store_root),
+                store,
+                thread,
+            )
+        )
+    if not candidates:
+        return payload
+
+    _updated_at, _root_key, store, thread = max(candidates, key=lambda item: item[:2])
+    thread_id = str(getattr(thread, "thread_id", "") or "").strip()
+    notices_path = Path(store.root) / "notices" / f"{thread_id}.notices.jsonl"
+    notices, cursor, notices_ok = _read_background_notice_rows(notices_path, after)
+    if not notices_ok:
+        payload["ok"] = False
+        payload["error"] = "notices read failed"
+        return payload
+    payload["notices"] = notices
+    payload["cursor"] = cursor
+    return payload
 
 
 # LLM: Empty/error snapshots share one stable transport shape so clients never

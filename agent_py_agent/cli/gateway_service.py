@@ -128,6 +128,22 @@ def _get_config_path() -> str:
     return str(default_config_path())
 
 
+# LLM: The service cwd is neutral runtime state, never the source checkout or installed package
+# directory. Resolve it through the same configured MY_AGENT_HOME authority used by real agents;
+# falling back must remain side-effect free so unit/plist rendering is deterministic in tests.
+# 函数用途: 选择常驻 Gateway 的中性工作目录，避免旧源码目录遮住刚安装的 wheel。
+def _service_working_directory() -> Path:
+    try:
+        from ..agent.settings import load_config
+        from ..agent.user_space.home_root import configured_home_root
+
+        configured = configured_home_root(load_config(_get_config_path()))
+    except (OSError, TypeError, ValueError):
+        configured = None
+    root = Path(configured or os.environ.get("MY_AGENT_HOME") or "~/.my-agent")
+    return root.expanduser().resolve(strict=False) / "service-cwd"
+
+
 def _format_systemd_unit_section(exec_start: str, working_dir: str, sane_path: str) -> str:
     return f"""[Service]
 Type=simple
@@ -143,10 +159,14 @@ TimeoutStopSec=60
 """
 
 
+# LLM: Generated services must import the interpreter's installed package. Using PROJECT_ROOT as
+# WorkingDirectory can put a stale checkout at sys.path[0] and silently defeat a successful wheel
+# upgrade; keep the executable path and neutral cwd independent.
+# 函数用途: 生成 systemd 单元文本，并固定到 my-agent 数据根下的中性服务目录。
 def generate_systemd_unit_text(system: bool = False) -> str:
     del system
     python_path = get_python_path()
-    working_dir = str(PROJECT_ROOT)
+    working_dir = str(_service_working_directory())
     venv = _detect_venv_dir()
     venv_bin = str(venv / "bin") if venv else str(PROJECT_ROOT / "venv" / "bin")
     config_path = _get_config_path()
@@ -163,6 +183,9 @@ StartLimitBurst=5
 """
 
 
+# LLM: launchd follows the same neutral-cwd import contract as systemd; do not point it at a
+# development checkout merely because the install command happened to run there.
+# 函数用途: 生成 launchd 配置，并让 macOS 常驻进程从中性目录加载已安装包。
 def generate_launchd_plist_text() -> str:
     python_path = get_python_path()
     config_path = _get_config_path()
@@ -194,7 +217,7 @@ def generate_launchd_plist_text() -> str:
     <key>RunAtLoad</key>
     <true/>
     <key>WorkingDirectory</key>
-    <string>{PROJECT_ROOT}</string>
+    <string>{_service_working_directory()}</string>
     <key>StandardOutPath</key>
     <string>/tmp/{label}.stdout.log</string>
     <key>StandardErrorPath</key>
@@ -235,6 +258,9 @@ def _service_scope_label(system: bool) -> str:
     return "system" if system else "user"
 
 
+# LLM: systemd refuses a missing WorkingDirectory before Python starts. Create exactly the
+# canonical neutral directory before writing/enabling the unit; never create a source alias.
+# 函数用途: 安装 systemd 服务，并预先建立不会遮蔽 wheel 的服务工作目录。
 def install_systemd(system: bool = False, force: bool = False) -> bool:
     unit_path = get_systemd_unit_path(system=system)
 
@@ -245,6 +271,7 @@ def install_systemd(system: bool = False, force: bool = False) -> bool:
 
     scope = _service_scope_label(system)
     print(f"Installing {scope} systemd service to: {unit_path}")
+    _service_working_directory().mkdir(parents=True, exist_ok=True)
     unit_path.parent.mkdir(parents=True, exist_ok=True)
     unit_path.write_text(generate_systemd_unit_text(system=system), encoding="utf-8")
 
@@ -301,6 +328,9 @@ def _launchd_domain() -> str:
     return f"gui/{os.getuid()}"
 
 
+# LLM: launchd also requires the declared WorkingDirectory to exist. Keep directory creation at
+# install time so pure plist generation stays read-only.
+# 函数用途: 安装 launchd 服务，并建立统一的中性服务工作目录。
 def install_launchd(force: bool = False) -> bool:
     plist_path = get_launchd_plist_path()
     label = _get_launchd_label()
@@ -311,6 +341,7 @@ def install_launchd(force: bool = False) -> bool:
         return True
 
     print(f"Installing launchd service to: {plist_path}")
+    _service_working_directory().mkdir(parents=True, exist_ok=True)
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     plist_path.write_text(generate_launchd_plist_text(), encoding="utf-8")
 

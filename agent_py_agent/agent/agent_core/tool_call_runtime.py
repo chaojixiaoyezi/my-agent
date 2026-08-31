@@ -346,7 +346,13 @@ def _promote_conversation_task_for_work_tool(
             error_code="CANCELLED",
             effect_outcome="not_started",
         )
-    if promoted is not None or not conversation_thread_id:
+    if promoted is not None:
+        _synchronize_tool_task_attributes_after_promotion(
+            runtime_request.agent,
+            runtime_request.request.params,
+        )
+        return None
+    if not conversation_thread_id:
         return None
     return ToolHandlerOutcome(
         tool_name or "conversation_task_binding",
@@ -354,6 +360,28 @@ def _promote_conversation_task_for_work_tool(
         "CONVERSATION_TASK_BINDING_FAILED: 当前执行请求无法可靠绑定到持久任务，已阻止本次工作步骤。",
         error_code="CONVERSATION_TASK_BINDING_FAILED",
     )
+
+
+# LLM: The mutable outer RunParams owns conversation promotion, while ToolLoopExecuteParams is an
+# immutable run snapshot that may carry a distinct task_attributes projection.  After promotion,
+# replace only that projection's contents from the outer authority before cwd/boundary resolution;
+# never infer a task path from model arguments or copy in the opposite direction.
+# 函数用途: 把刚晋升的正式任务目录同步进本次工具调用快照，保证首个 shell/写工具也在任务目录执行。
+def _synchronize_tool_task_attributes_after_promotion(
+    agent: object,
+    tool_params: object,
+) -> None:
+    current = getattr(agent, "_current_run_params", None)
+    authoritative = getattr(current, "task_attributes", None)
+    projection = getattr(tool_params, "task_attributes", None)
+    if (
+        not isinstance(authoritative, dict)
+        or not isinstance(projection, dict)
+        or projection is authoritative
+    ):
+        return
+    projection.clear()
+    projection.update(authoritative)
 
 
 # LLM: Workspace binding accepts only an exact absolute target or canonical owner-relative

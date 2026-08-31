@@ -157,9 +157,11 @@ def abandon_runner_attempt(
 
 
 # LLM: Dead-runner supervision must reconcile the exact runtime.db attempt before
-# it clears the task-file attempt and exposes the run to auto-start. Keep the
-# duplicate-start rejection in create_attempt intact; UNKNOWN remains a hard stop.
-# 函数用途: 核对子代理旧执行轮是否已经安全封存，只有安全终态或未启动态才允许重新排队。
+# it clears the task-file attempt and exposes the run to auto-start. A natural
+# AgentRun terminal event is a monotonic closeout fact that must be projected,
+# never treated as permission to rerun; recovery-generated terminal events stay
+# requeueable. Keep create_attempt's duplicate/UNKNOWN fences intact.
+# 函数用途: 核对子代理旧执行轮是否已安全封存；自然完成的轮次交给任务投影补写，真正崩溃的轮次才允许重新排队。
 def reconcile_dead_runner_attempt(
     manager: object,
     run_id: str,
@@ -192,6 +194,19 @@ def reconcile_dead_runner_attempt(
         }
     attempt = repo.get_attempt(normalized_attempt_id)
     status = str(attempt["status"] or "").strip() if attempt is not None else ""
+    terminal_projection = _runtime_terminal_projection_fact(
+        repo,
+        normalized_attempt_id,
+        run_status=str(run["status"] or "").strip(),
+        attempt_status=status,
+    )
+    if terminal_projection is not None:
+        return {
+            "ready": False,
+            "reason": "runtime_terminal_projection_required",
+            "status": status,
+            "terminal_projection": terminal_projection,
+        }
     safe_statuses = {"pending", "done", "failed", "cancelled", "recovered"}
     if status in safe_statuses:
         return {"ready": True, "reason": "runtime_attempt_safe", "status": status}
@@ -242,6 +257,52 @@ def reconcile_dead_runner_attempt(
         "status": status,
         "reclaim": result,
     }
+
+
+# LLM: RuntimeDB terminal rows alone are not enough to close a logical child:
+# explicit follow-up and source-worker slices may legitimately reopen a terminal
+# AgentRun. Only the natural model-turn closeout event carries runtime_status and
+# therefore proves that this stale RUNNING task projection missed its finalizer.
+# 函数用途: 从当前 attempt 的追加式事件里提取“模型轮已自然结束、任务文件尚未补写”的精确恢复事实。
+def _runtime_terminal_projection_fact(
+    repo: object,
+    attempt_id: str,
+    *,
+    run_status: str,
+    attempt_status: str,
+) -> dict[str, object] | None:
+    normalized_run_status = str(run_status or "").strip().lower()
+    normalized_attempt_status = str(attempt_status or "").strip().lower()
+    if normalized_run_status not in {"done", "failed", "cancelled"}:
+        return None
+    if normalized_attempt_status != normalized_run_status:
+        return None
+    events_for_attempt = getattr(repo, "events_for_attempt", None)
+    if not callable(events_for_attempt):
+        return None
+    events = list(events_for_attempt(attempt_id, limit=500) or [])
+    for event in reversed(events):
+        if str(event.get("event_type") or "") != "agent_run.completed":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        runtime_status = str(payload.get("runtime_status") or "").strip()
+        if not runtime_status:
+            # reclaim_orphaned_attempt also settles AgentRun, but that event is
+            # a recovery fence rather than proof that the model turn finished.
+            return None
+        return {
+            "event_id": str(event.get("event_id") or ""),
+            "run_status": normalized_run_status,
+            "attempt_status": normalized_attempt_status,
+            "runtime_status": runtime_status,
+            "runtime_reason": str(payload.get("runtime_reason") or ""),
+            "runtime_source": str(payload.get("runtime_source") or ""),
+            "turn_end_reason": str(payload.get("turn_end_reason") or ""),
+            "tool_rounds": max(0, int(payload.get("tool_rounds") or 0)),
+        }
+    return None
 
 
 def _runtime_attempt_identity(manager: object, task: SubAgentTask) -> tuple[str, str]:

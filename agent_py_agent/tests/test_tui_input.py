@@ -972,6 +972,41 @@ def test_child_input_stays_queued_until_exact_provider_consumption(monkeypatch) 
     assert invalidations
 
 
+def test_reattached_child_replays_consumed_user_message_without_local_pending() -> None:
+    runtime = TuiRuntime("child-input-replay")
+    request_id = "bg-agent:child-a:attempt-a"
+
+    assert runtime.publish_background_transcript_events(
+        [
+            {
+                "schema": "background_transcript_event.v1",
+                "seq": 1,
+                "task_id": "child-a",
+                "request_id": request_id,
+                "kind": "active_turn_input_consumed",
+                "phase": "completed",
+                "block_id": f"{request_id}:active-input:1",
+                "payload": {
+                    "client_message_ids": ["agent-steer-replay"],
+                    "messages": [
+                        {
+                            "message_id": "agent-steer-replay",
+                            "text": "至少读取两个核心源码文件。",
+                            "truncated": False,
+                        }
+                    ],
+                },
+            }
+        ]
+    ) == 1
+
+    snapshot = runtime.store.snapshot()
+    assert snapshot.pending_steers == ()
+    assert [block.text for block in snapshot.stable_blocks if block.role == "user"] == [
+        "至少读取两个核心源码文件。"
+    ]
+
+
 def test_active_input_outbox_v1_migration_records_tui_execution_defaults() -> None:
     from agent_py_agent.cli.chat_parts.tui_input_delivery import (
         TuiActiveInputOutboxEntry,

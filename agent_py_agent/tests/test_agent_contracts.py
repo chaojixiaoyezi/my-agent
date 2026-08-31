@@ -77,6 +77,10 @@ def test_error_taxonomy_uses_explicit_codes_only() -> None:
     assert classify_error("TOOL_UNAVAILABLE: magic_search").code == "TOOL_UNAVAILABLE"
     assert classify_error("TOOL_TIMEOUT: retry later").code == "TOOL_TIMEOUT"
     assert classify_error("RATE_LIMITED: HTTP 429").code == "RATE_LIMITED"
+    persona_rate = classify_error("PERSONA_UPDATE_RATE_LIMITED: retry later")
+    assert persona_rate.code == "PERSONA_UPDATE_RATE_LIMITED"
+    assert persona_rate.retryable is True
+    assert persona_rate.recommended_action == "retry_after_backoff"
     assert classify_error("QUOTA_EXCEEDED: provider quota").code == "QUOTA_EXCEEDED"
     provider_quota = classify_error("PROVIDER_QUOTA_EXHAUSTED: token plan exhausted")
     assert provider_quota.code == "PROVIDER_QUOTA_EXHAUSTED"

@@ -439,7 +439,8 @@ def test_g4_mark_atomic_gate_passes_on_current_attempt(ctx):
 def test_g4_create_attempt_takeover_cleanup(ctx):
     """G4 补 4：takeover 以系统权威统一收尾旧 attempt——非终态操作
     CLAIMED/EXECUTING → UNKNOWN(reason=takeover_recovery)，进行中
-    mutation（MUTATING）→ DIRTY(reason=takeover_recovery)。
+    mutation（MUTATING）→ DIRTY(reason=takeover_recovery)，旧 attempt
+    生命周期 → cancelled，并留下 superseded 事件。
     同一事务（INSERT attempt + CAS current pointer + 收尾 + commit），
     接管瞬间旧 attempt 的「结果不可知」即落账，不留给事后 recovery。
     """
@@ -466,6 +467,21 @@ def test_g4_create_attempt_takeover_cleanup(ctx):
     mutation = repo.mutation_for_scope("scope:a")
     assert mutation["state"] == "DIRTY"
     assert mutation["dirty_reason"] == "takeover_recovery"
+    old_attempt = repo.get_attempt(chain["attempt_id"])
+    assert old_attempt["status"] == "cancelled"
+    assert float(old_attempt["ended_at"]) > 0
+    superseded = [
+        event
+        for event in repo.events_for_attempt(chain["attempt_id"])
+        if event["event_type"] == "agent_attempt.superseded"
+    ]
+    assert superseded[-1]["payload"] == {
+        "previous_status": "running",
+        "status": "cancelled",
+        "reason": "takeover_recovery",
+        "superseded_by_attempt_id": new_attempt["attempt_id"],
+        "superseded_by_generation": int(new_attempt["attempt_generation"]),
+    }
     # 新 attempt 不受接管收尾污染：fence 可过、可正常建操作。
     fresh = repo.create_tool_operation(
         agent_run_id=chain["agent_run_id"],
@@ -473,6 +489,53 @@ def test_g4_create_attempt_takeover_cleanup(ctx):
         operation_type="write",
     )
     assert fresh["status"] == "CLAIMED"
+
+
+def test_g4_create_attempt_repairs_legacy_noncurrent_active_attempts(ctx):
+    """换代时一并收口升级前遗留的非 current RUNNING，账本只留一个 active。"""
+    chain, repo = ctx
+    second = repo.create_attempt(chain["agent_run_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status = 'running', ended_at = 0 "
+            "WHERE attempt_id = ?",
+            (chain["attempt_id"],),
+        )
+
+    third = repo.create_attempt(chain["agent_run_id"])
+
+    with repo._runtime_connection() as conn:
+        active = conn.execute(
+            "SELECT attempt_id FROM agent_attempts WHERE agent_run_id = ? "
+            "AND status IN ('pending', 'running') AND ended_at = 0",
+            (chain["agent_run_id"],),
+        ).fetchall()
+    assert [str(row["attempt_id"]) for row in active] == [third["attempt_id"]]
+    assert repo.get_attempt(chain["attempt_id"])["status"] == "cancelled"
+    assert repo.get_attempt(second["attempt_id"])["status"] == "cancelled"
+
+
+def test_g4_periodic_reconcile_repairs_legacy_noncurrent_active_attempt(ctx):
+    """owner 周期巡检无需再挂新一轮，也能迁移升级前的幽灵 RUNNING。"""
+    chain, repo = ctx
+    current = repo.create_attempt(chain["agent_run_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status = 'running', ended_at = 0 "
+            "WHERE attempt_id = ?",
+            (chain["attempt_id"],),
+        )
+
+    reconciled = repo.reconcile_superseded_attempts(now=12345.0)
+
+    assert reconciled == [chain["attempt_id"]]
+    stale = repo.get_attempt(chain["attempt_id"])
+    assert stale["status"] == "cancelled"
+    assert float(stale["ended_at"]) == 12345.0
+    assert repo.get_attempt(current["attempt_id"])["status"] == "running"
+    events = repo.events_for_attempt(chain["attempt_id"])
+    assert events[-1]["event_type"] == "agent_attempt.superseded"
+    assert events[-1]["payload"]["reason"] == "stale_noncurrent_reconcile"
 
 
 # ------------------------------------------------------------------- 资源锁

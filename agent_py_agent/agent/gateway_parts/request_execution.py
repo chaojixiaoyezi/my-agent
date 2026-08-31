@@ -114,7 +114,7 @@ from .permission_bridge import (
     unavailable_gateway_permission_decision,
     wait_for_gateway_permission_decision,
 )
-from .recovery import _gateway_request_attempts
+from .recovery import _ACTIVE_TURN_RECOVERY_SCHEMA, _gateway_request_attempts
 from .request_errors import (
     ConversationPersistenceError,
     SystemCommandRoutingError,
@@ -319,21 +319,33 @@ class BufferedChunkStreamWriter:
         del client_message_ids
 
     # LLM: This event is emitted only after ConversationStore committed consumed at the
-    # provider-accepted prompt boundary; prompt assembly alone must not clear a TUI receipt.
-    # 函数用途: 在模型确认收到补充消息后，向富客户端发布精确消息 ID 的已消费事件。
-    def complete_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
+    # provider-accepted prompt boundary. Text lets reconnecting clients replay the committed
+    # user row, while ids remain the sole pending-receipt correlation authority.
+    # 函数用途: 在模型确认收到补充消息后，向富客户端发布可重放的已消费用户消息事件。
+    def complete_active_turn_input(
+        self,
+        client_message_ids: tuple[str, ...],
+        *,
+        client_messages: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         message_ids = tuple(
-            item
-            for item in (str(value or "").strip() for value in client_message_ids)
-            if item
+            item for item in (str(value or "").strip() for value in client_message_ids) if item
         )
         if self.rich_transcript and message_ids:
+            accepted = set(message_ids)
+            messages = [
+                {"message_id": message_id, "text": text}
+                for raw_id, raw_text in tuple(client_messages or ())
+                if (message_id := str(raw_id or "").strip()) in accepted
+                and (text := str(raw_text or ""))
+            ]
             self.flush()
             write_chunk_event(
                 self.chunk_path,
                 {
                     "kind": "active_turn_input_consumed",
                     "client_message_ids": list(message_ids),
+                    **({"messages": messages} if messages else {}),
                 },
             )
 
@@ -608,10 +620,7 @@ class BufferedChunkStreamWriter:
             request,
             cancellation_token=cancellation_token,
         )
-        if (
-            session_key
-            and str(decision.decision or "").strip().lower() == "approved_session"
-        ):
+        if session_key and str(decision.decision or "").strip().lower() == "approved_session":
             if approval_cache is not None:
                 approval_cache.approve(approval_scope, session_key)
         write_chunk_event(
@@ -744,10 +753,7 @@ def _public_context_usage_payload(value: object) -> dict[str, object]:
     return {
         "schema": _CONTEXT_USAGE_SCHEMA,
         "estimated": value.get("estimated") is True,
-        **{
-            key: _safe_nonnegative_int(value.get(key))
-            for key in _CONTEXT_USAGE_TOKEN_FIELDS
-        },
+        **{key: _safe_nonnegative_int(value.get(key)) for key in _CONTEXT_USAGE_TOKEN_FIELDS},
         "protocol": protocol if protocol in {"native", "text"} else "unknown",
     }
 
@@ -760,10 +766,7 @@ def _public_context_compaction_payload(value: object) -> dict[str, object]:
         return {}
     return {
         "schema": _CONTEXT_COMPACTION_SCHEMA,
-        **{
-            key: _safe_nonnegative_int(value.get(key))
-            for key in _CONTEXT_COMPACTION_FIELDS
-        },
+        **{key: _safe_nonnegative_int(value.get(key)) for key in _CONTEXT_COMPACTION_FIELDS},
     }
 
 
@@ -771,10 +774,7 @@ def _public_context_compaction_payload(value: object) -> dict[str, object]:
 # bounded structured error code. Unknown fields, summaries, and prompts never cross to the TUI.
 # 函数用途: 清洗持久会话 Compact 进度与失败码，防止摘要或 prompt 混入展示。
 def _public_conversation_compact_progress_payload(value: object) -> dict[str, object]:
-    if (
-        not isinstance(value, dict)
-        or value.get("schema") != _CONVERSATION_COMPACT_PROGRESS_SCHEMA
-    ):
+    if not isinstance(value, dict) or value.get("schema") != _CONVERSATION_COMPACT_PROGRESS_SCHEMA:
         return {}
     phase = str(value.get("phase") or "")
     stage = str(value.get("stage") or "")
@@ -985,8 +985,7 @@ class _GatewayActiveTurnTransition:
                 or str(payload.get("status") or "") != "processing"
                 or turn_phase not in ({"open", "closing"} if allow_closing else {"open"})
                 or (payload.get("cancel_requested") is True and not allow_closing)
-                or str(payload.get("execution_attempt_id") or "")
-                != self.execution_attempt_id
+                or str(payload.get("execution_attempt_id") or "") != self.execution_attempt_id
                 or (paths.terminal / f"{self.request_id}.json").exists()
             ):
                 raise InterruptedError("Gateway active turn closed before provider admission")
@@ -1072,15 +1071,9 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "model_accounted_input_tokens": int(
                 getattr(result, "model_accounted_input_tokens", 0) or 0
             ),
-            "model_output_tokens": int(
-                getattr(result, "model_output_tokens", 0) or 0
-            ),
-            "model_total_tokens": int(
-                getattr(result, "model_total_tokens", 0) or 0
-            ),
-            "model_cached_input_tokens": int(
-                getattr(result, "model_cached_input_tokens", 0) or 0
-            ),
+            "model_output_tokens": int(getattr(result, "model_output_tokens", 0) or 0),
+            "model_total_tokens": int(getattr(result, "model_total_tokens", 0) or 0),
+            "model_cached_input_tokens": int(getattr(result, "model_cached_input_tokens", 0) or 0),
             "model_cache_creation_input_tokens": int(
                 getattr(result, "model_cache_creation_input_tokens", 0) or 0
             ),
@@ -1091,9 +1084,7 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
                 getattr(result, "model_estimated_usage_call_count", 0) or 0
             ),
             # LLM: 这是累计模型账本的冻结分栏投影；不从 Context 行或响应正文重新估算。
-            "model_usage_breakdown": dict(
-                getattr(result, "model_usage_breakdown", None) or {}
-            ),
+            "model_usage_breakdown": dict(getattr(result, "model_usage_breakdown", None) or {}),
             "memory_resume_context_injected": result.memory_resume_context_injected,
             "memory_resume_context_query": result.memory_resume_context_query,
             "memory_resume_context_matches": result.memory_resume_context_matches,
@@ -1146,9 +1137,7 @@ def _start_gateway_request_lease(
     if not should_refresh:
         return None, None
     lease_worker = context.worker_id or str(context.request.get("lease_owner") or "")
-    execution_attempt_id = str(
-        context.request.get("execution_attempt_id") or ""
-    ).strip()
+    execution_attempt_id = str(context.request.get("execution_attempt_id") or "").strip()
     try:
         lease_epoch = max(0, int(context.request.get("lease_epoch") or 0))
     except (TypeError, ValueError):
@@ -1250,9 +1239,7 @@ def _configure_gateway_approval_session(
         return
     scope = conversation.scope
     owner_id = str(getattr(scope, "owner_id", "") or "").strip()
-    conversation_id = str(
-        getattr(scope, "channel_conversation_id", "") or ""
-    ).strip()
+    conversation_id = str(getattr(scope, "channel_conversation_id", "") or "").strip()
     execution_cwd = (
         str(conversation.workspace_task.task_path or "").strip()
         if conversation.workspace_task is not None
@@ -1285,9 +1272,7 @@ def _configure_gateway_approval_session(
 # immutable run attributes are a secondary source; the resolved conversation cwd is fallback only.
 # 函数用途: 取得当前工具调用真正使用的任务目录，解决首轮建任务后审批作用域前后不一致。
 def _gateway_approval_runtime_cwd(agent: object, fallback: str) -> str:
-    current_workspace = str(
-        getattr(agent, "_current_run_task_workspace", "") or ""
-    ).strip()
+    current_workspace = str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
     if current_workspace:
         return current_workspace
     params = getattr(agent, "_current_run_params", None)
@@ -1337,6 +1322,9 @@ def _register_named_system_task(
     )
 
 
+# LLM: One Gateway request may cross several provider slices, but every overflow must advance the
+# same canonical Compact generation before retry. Full carried archives remain effect authority.
+# 函数用途: 在同一用户回合内处理上下文超限，正式压缩旧会话或本轮工具历史后继续执行。
 def _run_gateway_turn_with_conversation_compact(
     context: _GatewayAskRunContext,
     prompt: str,
@@ -1345,7 +1333,7 @@ def _run_gateway_turn_with_conversation_compact(
     """Compact the authoritative thread inline and retry the same user turn."""
     request = context.request
     current = conversation
-    carried_archive_tool_calls: list[dict[str, object]] = []
+    carried_archive_tool_calls = _gateway_recovered_active_turn_tool_calls(context)
     carried_active_turn_user_inputs: list[dict[str, object]] = []
     for _attempt in range(8):
         run_params = _gateway_run_params(
@@ -1366,62 +1354,157 @@ def _run_gateway_turn_with_conversation_compact(
         _record_gateway_stage(context.stages, "run_ms", _run_started)
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != "context_overflow":
             return result, current
-        released_input_ids = release_active_turn_inputs_for_compact(
+        carried_archive_tool_calls, carried_active_turn_user_inputs = _gateway_overflow_carry(
             context.agent,
             run_params,
-        )
-        # The same durable turn continues after transcript compaction.  Carry
-        # its typed tool archive and injected user steering into the fresh
-        # provider request so completed reads/writes, one-shot orchestration,
-        # tool-round budgets and /btw inputs are not reset or replayed.
-        result_archive = [
-            dict(item)
-            for item in list(getattr(result, "archive_tool_calls", None) or [])
-            if isinstance(item, dict)
-        ]
-        from ..agent_core.runtime_mixin import _result_added_tool_progress
-
-        made_tool_progress = _result_added_tool_progress(
-            run_params,
             result,
-            result_archive,
+            carried_archive_tool_calls,
+            carried_active_turn_user_inputs,
         )
-        if result_archive:
-            carried_archive_tool_calls = result_archive
-        prior_active_turn_user_inputs = list(carried_active_turn_user_inputs)
-        carried_active_turn_user_inputs = exclude_active_turn_user_input_ids(
-            merge_active_turn_user_inputs(
-                carried_active_turn_user_inputs,
-                getattr(result, "active_turn_user_inputs", None),
-            ),
-            released_input_ids,
+        current = _gateway_compact_overflowing_turn(
+            context,
+            prompt,
+            current,
+            run_params,
+            carried_archive_tool_calls,
         )
-        made_guidance_progress = carried_active_turn_user_inputs != prior_active_turn_user_inputs
-        refreshed = _gateway_conversation_context(
-            _GatewayConversationLoadRequest(
-                context.agent,
-                request,
-                context.request_id,
-                prompt,
-                context.on_chunk,
-            ),
-            force_compact=True,
-        )
-        _require_gateway_conversation_ready(request, refreshed)
-        if refreshed.compact_generation <= current.compact_generation:
-            # A single user turn can cross the pressure boundary repeatedly while
-            # its completed transcript prefix stays unchanged.  Continue only
-            # when typed tool/guidance state advanced; otherwise the bounded loop
-            # would merely replay the same overflowing request.
-            if not (made_tool_progress or made_guidance_progress):
-                raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
-        elif refreshed.compact_generation > current.compact_generation:
-            _publish_gateway_compact_boundary(
-                context.on_chunk,
-                refreshed.compact_generation,
-            )
-        current = refreshed
     raise ConversationPersistenceError("当前会话压缩后仍超过模型上下文上限")
+
+
+# LLM: Overflow carry is typed and complete: the latest full archive replaces the prior snapshot,
+# while steering released before provider submission returns to its owner mailbox.
+# 函数用途: 合并本次溢出前已执行工具与插话，供同一 Gateway 请求压缩后继续。
+def _gateway_overflow_carry(
+    agent: object,
+    run_params: RunParams,
+    result: object,
+    carried_archive_tool_calls: list[dict[str, object]],
+    carried_active_turn_user_inputs: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    released_input_ids = release_active_turn_inputs_for_compact(agent, run_params)
+    result_archive = [
+        dict(item)
+        for item in list(getattr(result, "archive_tool_calls", None) or [])
+        if isinstance(item, dict)
+    ]
+    next_inputs = exclude_active_turn_user_input_ids(
+        merge_active_turn_user_inputs(
+            carried_active_turn_user_inputs,
+            getattr(result, "active_turn_user_inputs", None),
+        ),
+        released_input_ids,
+    )
+    return result_archive or carried_archive_tool_calls, next_inputs
+
+
+# LLM: Transcript Compact has first claim on completed history. If it cannot advance, only the same
+# thread's active-turn checkpoint/CAS may authorize a retry; volatile progress never does.
+# 函数用途: 为一次 Gateway 溢出推进 transcript 或 active-turn Compact，并返回刷新的会话上下文。
+def _gateway_compact_overflowing_turn(
+    context: _GatewayAskRunContext,
+    prompt: str,
+    current: _GatewayConversationContext,
+    run_params: RunParams,
+    carried_archive_tool_calls: list[dict[str, object]],
+) -> _GatewayConversationContext:
+    request = context.request
+    refreshed = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(
+            context.agent,
+            request,
+            context.request_id,
+            prompt,
+            context.on_chunk,
+        ),
+        force_compact=True,
+    )
+    _require_gateway_conversation_ready(request, refreshed)
+    if refreshed.compact_generation > current.compact_generation:
+        _publish_gateway_compact_boundary(context.on_chunk, refreshed.compact_generation)
+        return refreshed
+    from ..conversation.active_turn_compact import (
+        ActiveTurnArchiveCompactRequest,
+        compact_carried_active_turn_archive,
+    )
+
+    store = getattr(context.agent, "conversation_store", None)
+    latest, load_error = (
+        store.load_thread_report(refreshed.thread_id)
+        if store is not None and refreshed.thread_id
+        else (None, {"code": "CONVERSATION_STORE_UNAVAILABLE"})
+    )
+    if load_error is not None or latest is None:
+        raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
+    compacted = compact_carried_active_turn_archive(
+        context.agent,
+        store,
+        latest,
+        carried_archive_tool_calls,
+        ActiveTurnArchiveCompactRequest(
+            task_attributes=run_params.task_attributes,
+            request_id=context.request_id,
+            attempt_id=str(request.get("execution_attempt_id") or context.request_id),
+            task_prompt=prompt,
+            progress_callback=_gateway_compact_progress_callback(context.on_chunk),
+        ),
+    )
+    if not compacted.compacted:
+        raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
+    refreshed = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(
+            context.agent,
+            request,
+            context.request_id,
+            prompt,
+            context.on_chunk,
+        ),
+        force_compact=False,
+    )
+    _require_gateway_conversation_ready(request, refreshed)
+    _publish_gateway_compact_boundary(context.on_chunk, compacted.thread.compact_generation)
+    return refreshed
+
+
+# LLM: A reclaimed Gateway request is the same active turn, not a new turn. Restore only exact
+# owner-local rows carrying its structured conversation_request_id; never rebuild progress from
+# assistant prose, scan child workspaces, or let a missing/corrupt index silently replay effects.
+# 函数用途: Gateway 崩溃重排后恢复本轮已执行工具，避免模型重建 Todo、重复派工或重做写操作。
+def _gateway_recovered_active_turn_tool_calls(
+    context: _GatewayAskRunContext,
+) -> list[dict[str, object]]:
+    if not _gateway_request_is_active_turn_recovery(context.request, context.request_id):
+        return []
+    from ..agent_core.runtime.owner_roots import runtime_owner_root
+    from ..memory_archive.compact_tool_output_refs import carried_tool_call_records
+
+    try:
+        return carried_tool_call_records(
+            runtime_owner_root(context.agent),
+            {"conversation_request_id": context.request_id},
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ConversationPersistenceError(
+            "当前回合的工具历史无法可靠恢复，已停止自动重放，请稍后重试"
+        ) from exc
+
+
+# LLM: Recovery authority is typed metadata written by the reconciler. The narrow legacy branch
+# accepts the prior structured priority+timestamp pair so an in-flight request survives upgrade;
+# arbitrary last_error text or user prompt content can never enable active-turn replay.
+# 函数用途: 判断请求是否确为 Gateway 重排的同一回合，并兼容上一版已经排队的恢复请求。
+def _gateway_request_is_active_turn_recovery(request: object, request_id: str) -> bool:
+    row = request if isinstance(request, dict) else {}
+    marker = row.get("active_turn_recovery")
+    if isinstance(marker, dict):
+        return bool(
+            str(marker.get("schema_version") or "").strip() == _ACTIVE_TURN_RECOVERY_SCHEMA
+            and str(marker.get("request_id") or "").strip() == str(request_id or "").strip()
+        )
+    try:
+        requeued_at = float(row.get("requeued_at") or 0)
+    except (TypeError, ValueError):
+        requeued_at = 0
+    return str(row.get("priority") or "").strip().lower() == "recovery" and requeued_at > 0
 
 
 def _persist_gateway_assistant_result(
@@ -1754,8 +1837,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
         save=bool(request.get("save", True)),
         request_id=context.request_id,
-        attempt_id=str(request.get("execution_attempt_id") or "").strip()
-        or context.request_id,
+        attempt_id=str(request.get("execution_attempt_id") or "").strip() or context.request_id,
         source="gateway",
         resume_context=_gateway_resume_context(request, conversation),
         recovery_next_actions=[
@@ -1858,16 +1940,13 @@ def _gateway_conversation_history_seed(
         return None
     return ConversationHistorySeed(
         compact_summary=(
-            ""
-            if _is_scoped_audit_prepare(work_scope)
-            else str(conversation.compact_summary or "")
+            "" if _is_scoped_audit_prepare(work_scope) else str(conversation.compact_summary or "")
         ),
         compact_generation=max(0, int(conversation.compact_generation or 0)),
         messages=tuple(
             (str(role or ""), str(content or ""))
             for role, content in conversation.history
-            if str(role or "").strip().lower() in {"user", "assistant"}
-            and str(content or "")
+            if str(role or "").strip().lower() in {"user", "assistant"} and str(content or "")
         ),
         canonical_messages=tuple(
             dict(message)
@@ -2300,9 +2379,11 @@ def _gateway_request_workspace_scope(
     raw = request.get("workspace")
     if not isinstance(raw, dict):
         raise GatewayWorkspaceScopeError("workspace 必须是对象")
-    provider = str(
-        getattr(getattr(agent, "config", None), "my_agent_owner_provider", "local") or "local"
-    ).strip().lower()
+    provider = (
+        str(getattr(getattr(agent, "config", None), "my_agent_owner_provider", "local") or "local")
+        .strip()
+        .lower()
+    )
     if provider not in {"", "local"}:
         raise GatewayWorkspaceScopeError("远程 owner 不能覆盖主机工作目录")
     cwd = _existing_absolute_workspace_dir(raw.get("cwd"), field_name="cwd")
@@ -2345,9 +2426,7 @@ def _existing_absolute_workspace_dir(value: object, *, field_name: str) -> Path:
     try:
         resolved = candidate.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
-        raise GatewayWorkspaceScopeError(
-            f"workspace.{field_name} 目录不存在或不可访问"
-        ) from exc
+        raise GatewayWorkspaceScopeError(f"workspace.{field_name} 目录不存在或不可访问") from exc
     if not resolved.is_dir():
         raise GatewayWorkspaceScopeError(f"workspace.{field_name} 不是目录")
     return resolved
@@ -2523,9 +2602,7 @@ def _gateway_subagent_completion_context(
             include_handled=True,
         )
     except Exception as exc:
-        load_errors.append(
-            _conversation_error(exc, "gateway.conversation.subagent_completions")
-        )
+        load_errors.append(_conversation_error(exc, "gateway.conversation.subagent_completions"))
         return {}
     load_errors.extend(error for error in errors if isinstance(error, dict))
     context, issues = subagent_completion_context_from_observations(
@@ -2555,9 +2632,7 @@ def _gateway_workspace_lineage_task_ids(
     load_errors: list[dict],
 ) -> set[str]:
     current_task_id = str(getattr(workspace_task, "task_id", "") or "").strip()
-    task_path = _existing_gateway_workspace_path(
-        getattr(workspace_task, "task_path", "")
-    )
+    task_path = _existing_gateway_workspace_path(getattr(workspace_task, "task_path", ""))
     if not current_task_id or not task_path:
         return set()
     try:
@@ -2572,8 +2647,7 @@ def _gateway_workspace_lineage_task_ids(
         str(getattr(link, "task_id", "") or "").strip()
         for link in links
         if str(getattr(link, "task_id", "") or "").strip()
-        if str(getattr(link, "cancellation_scope", "") or "").strip().lower()
-        != "detached"
+        if str(getattr(link, "cancellation_scope", "") or "").strip().lower() != "detached"
         if _existing_gateway_workspace_path(getattr(link, "task_path", "")) == task_path
     }
     selected.add(current_task_id)
@@ -3008,9 +3082,7 @@ def _append_current_workspace_prompt(
             "但不得为同一任务另起一个并发写入者。"
         )
     else:
-        lifecycle_guidance = (
-            "- 当前任务没有执行者；若本轮需要工作，直接按当前 User Task 调用工具。"
-        )
+        lifecycle_guidance = "- 当前任务没有执行者；若本轮需要工作，直接按当前 User Task 调用工具。"
     lines.extend(
         [
             "## Current Task Runtime",
@@ -3294,9 +3366,7 @@ def _append_gateway_conversation_message(
         if errors:
             raise OSError("conversation message ledger could not be read reliably")
         normalized_part_id = (
-            str(assistant_part_id or "final").strip() or "final"
-            if role == "assistant"
-            else ""
+            str(assistant_part_id or "final").strip() or "final" if role == "assistant" else ""
         )
         if any(
             _gateway_message_matches_part(
@@ -3326,9 +3396,7 @@ def _append_gateway_conversation_message(
             if fold:
                 entry_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
         if role == "assistant":
-            native_envelope = canonical_native_messages_envelope(
-                canonical_native_messages
-            )
+            native_envelope = canonical_native_messages_envelope(canonical_native_messages)
             if native_envelope:
                 entry_metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = native_envelope
         entry = store.append_message(
@@ -3406,9 +3474,7 @@ def _queue_gateway_conversation_repair(
         if fold:
             repair_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
     if role == "assistant":
-        native_envelope = canonical_native_messages_envelope(
-            canonical_native_messages
-        )
+        native_envelope = canonical_native_messages_envelope(canonical_native_messages)
         if native_envelope:
             repair_metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = native_envelope
     payload = {

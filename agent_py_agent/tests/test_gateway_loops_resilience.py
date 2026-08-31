@@ -16,6 +16,15 @@ from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
 from agent_py_agent.agent.gateway_parts.queue_service import GatewayClaim
 
 
+def test_owner_discovery_pages_continue_next_tick_before_steady_rescan_delay() -> None:
+    from agent_py_agent.cli.gateway_loops import _next_owner_discovery_at
+
+    cursor = ("tui-matrix", "user", "u064")
+
+    assert _next_owner_discovery_at(10.0, 60.0, cursor) == 10.0
+    assert _next_owner_discovery_at(10.0, 60.0, None) == 70.0
+
+
 def test_background_main_loop_survives_tick_exceptions_and_reports_supply_error(monkeypatch, capsys) -> None:
     from agent_py_agent.cli import gateway_loops
 
