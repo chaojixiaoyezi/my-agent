@@ -65,6 +65,11 @@ grant/deny 是直属父级在自己既有 authority 内的编排裁决，运行�
 workspace/write roots 和当前 Skill/Tool 快照；任何越界、跨 owner 或父级本身没有的能力都必须结构化拒绝或
 上抛，模型正文里的“批准”没有提权效力。它与下面一次具体危险 ToolCall 的 exact approval 仍是两份账。
 
+`coordinator` 的 `create_subagents` 不是 capability_request：builtin 结构化角色模板声明
+`can_spawn_children=true` 后，直接在父级继承的 depth/capacity/owner/workspace 上限内暴露 edge-local 管理工具，
+由创建 handler 再守上限。标准 wheel 必须携带 builtin role JSON；缺少模板时应由 distribution gate 阻断发布，
+不能在运行时静默降成 leaf 后再期待模型自行申请同一份固有角色能力。
+
 主代理很少出现同类“挂掉”，是因为它通常已经拥有当前工作区，而且没有跨 child runner 的能力申请/
 裁决边界。child 过去看似挂掉主要有两条状态断链：一是“申请已落账—本轮被误关—裁决没有重新排队”；
 二是“创建孙代理后父级 PENDING—孤儿器立即误复活—只能反复轮询，孙代理结果又越级发给根会话”。

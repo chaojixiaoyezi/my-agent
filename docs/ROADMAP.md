@@ -1111,6 +1111,11 @@ owner wall、父级 workspace/write roots、Skill/Tool availability 仍是唯一
 这不是取消具体危险工具的 exact approval，也不允许主代理给自己提权。focused 通过后需用 fresh TUI 复验
 “child 请求创建下一层 → 直属父级自主 grant → child 续跑”，同时验证跨 owner/越界请求仍失败。
 
+fresh wheel 复验另发现 builtin coordinator JSON 没有进入生产包，导致 role 文案仍是 coordinator、结构化
+`can_spawn_children` 快照却为空，`create_subagents` 被 leaf policy 删除。当前同步把 builtin role catalog 加入
+package-data 和 distribution boundary；递归创建本身按 会话运行时 式 depth/capacity 硬门直接继承，不再靠模型先
+发现并申请本来就在角色合同里的工具。其它新增目录、MCP、Skill 或外部权限仍走上面的直属父级裁决。
+
 ### durable wake 被重复孤儿扫描堵住
 
 状态：本地候选；真实线程栈已定位

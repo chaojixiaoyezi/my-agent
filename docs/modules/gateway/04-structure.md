@@ -221,6 +221,10 @@
   `background_threads_per_owner` 限制单 owner 并发；超出者保留在持久队列等后续 tick。
 - scheduler 的 policy 诊断是 worker thread-local，不同会话不会互相污染运行事实。
 
+Gateway 的 active-turn 工具恢复从 `user_space.runtime_paths.runtime_owner_root` 读取唯一 owner 根；该 helper
+位于 Gateway 与 agent-core 都能依赖的下层。旧 `agent_core.runtime.owner_roots` 只兼容 re-export，同一目录
+选择不能在 Gateway 内复制，也不能形成 gateway-parts 反向 import agent-core 的分层环。
+
 ## TUI 后台活动投影
 
 2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v5`：Gateway 后台主代理把最近一次

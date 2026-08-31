@@ -16,6 +16,10 @@
 - 活着的 TUI 进程（包括仍留在 tmux 的 TUI）属于显式在线客户端，不按空闲时长自动回收；`/exit` 或进程终止
   才释放本地 poller/HTTP/展示资源。IM connector 更不能按“多久没聊天”回收，后续只参考 通道运行时/长期助手 的
   health、lease、reconnect 和明确 shutdown 做长驻验收；无消息不是失活事实。
+- coordinator 的递归控制不是临时 capability grant。结构化角色模板若声明 `can_spawn_children=true`，它在父级
+  既有 depth/capacity/owner/workspace 上限内直接获得 edge-local `create_subagents` 等工具；这对齐 会话运行时 在
+  `agent_max_depth` 内给每层 session 注册 spawn 工具、由 handler 再守深度和容量的方式。builtin 角色 JSON
+  属于生产运行合同，标准 wheel 必须携带；缺资源不能静默把 coordinator 降成普通 worker。
 
 ## 2026-08-31 TUI 后台回复必须先成为 canonical history【状态：R117b/R117c 真 TUI 通过】
 

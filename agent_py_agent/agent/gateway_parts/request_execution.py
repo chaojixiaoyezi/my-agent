@@ -1466,16 +1466,17 @@ def _gateway_compact_overflowing_turn(
 
 
 # LLM: A reclaimed Gateway request is the same active turn, not a new turn. Restore only exact
-# owner-local rows carrying its structured conversation_request_id; never rebuild progress from
-# assistant prose, scan child workspaces, or let a missing/corrupt index silently replay effects.
+# owner-local rows carrying its structured conversation_request_id, and resolve that owner root
+# through the shared low-layer user_space helper rather than importing agent-core. Never rebuild
+# progress from assistant prose, scan child workspaces, or silently replay a corrupt index.
 # 函数用途: Gateway 崩溃重排后恢复本轮已执行工具，避免模型重建 Todo、重复派工或重做写操作。
 def _gateway_recovered_active_turn_tool_calls(
     context: _GatewayAskRunContext,
 ) -> list[dict[str, object]]:
     if not _gateway_request_is_active_turn_recovery(context.request, context.request_id):
         return []
-    from ..agent_core.runtime.owner_roots import runtime_owner_root
     from ..memory_archive.compact_tool_output_refs import carried_tool_call_records
+    from ..user_space.runtime_paths import runtime_owner_root
 
     try:
         return carried_tool_call_records(

@@ -30,6 +30,18 @@ class _OwnerRuntimePathInputs:
     runtime_root: Path
 
 
+# LLM: This is the single low-layer owner persistence-root resolver shared by
+# Gateway and agent-core. Keep the home_paths preference and legacy agent.root
+# fallback stable; callers must not duplicate this selection in higher layers.
+# 函数用途: 返回当前代理唯一的 owner 持久化根目录，供会话恢复、归档和运行账本共同使用。
+def runtime_owner_root(agent: object) -> Path:
+    home_paths = getattr(agent, "home_paths", None)
+    owner_home = getattr(home_paths, "owner_home_dir", None)
+    if isinstance(owner_home, str | Path) and str(owner_home).strip():
+        return Path(owner_home)
+    return Path(agent.root)
+
+
 def resolve_runtime_paths_for_agent(config: Any, root: Path, home: Any | None) -> RuntimePathResolution:
     if not getattr(home, "owner_home_dir", None):
         raise ValueError("owner home is required for runtime paths")
@@ -190,5 +202,6 @@ __all__ = [
     "RuntimePathResolution",
     "apply_runtime_paths_to_config",
     "resolve_runtime_paths_for_agent",
+    "runtime_owner_root",
     "runtime_paths_for_agent",
 ]

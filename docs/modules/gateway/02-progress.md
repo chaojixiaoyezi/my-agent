@@ -11,6 +11,10 @@
   时的 crash-recovery 兜底，不因本修复失去恢复能力。
 - focused 已覆盖 Gateway 对 base/owner 都传 false、同 owner 多车道、跳过与保留两种 prepare 语义；待新
   wheel 的 fresh MiniMax-M2.7 真 TUI 证明无需用户发“继续”也能从 child wake 自行续跑后标记完成。
+- 首个新 wheel 真测进一步暴露 builtin role JSON 未进包：coordinator 的结构化模板快照为空，递归工具被按
+  leaf 删除。package-data 与 distribution boundary 现把 builtin role catalog 列为强制资源；同时把 Gateway
+  active-turn 恢复依赖的 owner-root helper 下沉到 `user_space.runtime_paths`，清掉 gateway-parts 反向依赖
+  agent-core 的已有分层违规。下一 wheel 必须证明 coordinator 直接获得递归工具且实际创建孙代理。
 
 ## 2026-08-31 R116/R117 上下文校准与后台 final 连续性
 

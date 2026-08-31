@@ -19,6 +19,7 @@ from package_boundary_policy import forbidden_distribution_member
 _RUNTIME_RESOURCE_ROOTS = (
     "agent_py_agent/config",
     "agent_py_agent/prompts",
+    "agent_py_agent/agent/subagents/role_template_catalog/builtin",
     "agent_py_agent/skills/builtin",
     "agent_py_agent/vendor/bin",
 )
