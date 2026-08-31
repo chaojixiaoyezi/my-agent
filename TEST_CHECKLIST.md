@@ -378,6 +378,12 @@
   骨架；主/子/wake 共用 会话运行时 式持续完成软纪律，且没有重新引入 final 解析、Todo 自动续轮或机器质量验收。
 - [x] 同一 exact parent 下，系统生成的单个补派、批量补派和递归 child 名称沿历史 sibling 连续编号；
   显式自定义名称不改，机器身份仍只认 run_id。
+- [x] 标准 wheel 必须携带全部 builtin role JSON；distribution boundary 缺任一角色资源即失败。fresh TUI
+  中 coordinator 必须直接获得角色固有的递归控制工具并实际创建 depth-2 child，不能静默降级为 leaf 后再
+  依赖模型申请同一能力。R118 u331 已取得两名孙代理的 exact parent/root 与三条 DONE 状态。
+- [x] Gateway 提交 ready thread lane 前不得再次同步执行全量 orphan supervision；独立 reconciler 继续持有
+  crash recovery，直接/嵌入式 scheduler 保留 inline 兜底。R118 u328 已通过 child→main 自动唤醒，u331 已
+  通过 grandchild→coordinator→main 两级自动唤醒，均未补发“继续”。
 - [ ] OPEN capability request 不能被普通 completed 收尾覆盖为 DONE；直属父级 grant/deny 后必须续跑
   同一 run，取消/接管终态不得复活。根、子、孙只能 guidance/cancel/resolve 自己的直属 child；
   模型 cancel 回执不得夹带整树状态，schema 不暴露 dry_run/kill_process 运维参数。

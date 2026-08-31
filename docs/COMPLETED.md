@@ -1,5 +1,18 @@
 # COMPLETED
 
+## 2026-08-31 R118 父级能力裁决、durable wake 与生产递归角色
+
+- `resolve_capability_requests` 的 grant/deny 现在都是直属父级在自身 authority 上限内的 mutating 控制；
+  direct-parent、owner、workspace/write roots 与可用工具继续硬拦越界，具体危险调用的用户审批仍单独保留。
+- Gateway scheduler 不再于提交 ready thread 前同步重复 orphan 全量扫描；唯一 reconciler 继续恢复死亡 runner，
+  非 Gateway scheduler 保留 inline 兜底。u328 证明直属 child 完成后 main 自动恢复，u331 证明两名 depth-2
+  researcher 收齐后 coordinator 与 main 逐层自动恢复并 final，全程没有测试者催办。
+- 标准 wheel 现在强制携带 builtin role catalog，distribution boundary 会在缺失时失败；同时把 owner-root helper
+  下沉到 user-space 低层，消除 Gateway 对 agent-core 的反向依赖。最终 wheel SHA-256 为
+  `0f8f97e8b439bcf718ca4acbc1bb207aa7199b53fe055bfe9ed4ef35d28cd40b`。
+- 当前 `.10` 仍只有一个 `ma-gateway-0f6ac38-110` / MiniMax-M2.7 / 8420 listener。focused、Ruff、doc sync、
+  strict code-size、diff、source/wheel clean-package 均通过；本轮远低于 10,000 行，按约定未重复跑全仓 pytest。
+
 ## 2026-08-31 R116/R117 provider 上下文观察与 TUI 后台 final 持久化
 
 - provider context estimator 不再只靠本地 token 近似：成功调用把数值观察以稳定请求指纹和 Compact

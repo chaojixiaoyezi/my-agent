@@ -1,5 +1,31 @@
 # STATUS
 
+## 2026-08-31 R118 父级自主裁决、Gateway durable wake 与生产 wheel 递归角色（完成）
+
+- `d9b70f2` 将 `resolve_capability_requests` 的 grant/deny 收成直属父级在既有 authority 内的 mutating
+  控制；direct-parent、owner wall、父级 workspace/write roots、可用 Tool/Skill 快照继续硬拦越界。具体危险
+  ToolCall 的 exact approval 没有取消，主代理也不能借该入口给自己提权。
+- 同一提交把 Gateway 的 ready-thread 提交与 inline orphan 全量扫描解耦：唯一
+  `_GatewayOrphanReconciler` 继续恢复死亡 runner，Gateway scheduler 不再于每个 owner 的
+  `prepare_tick` 同步重复扫描；直接/嵌入式 scheduler 仍保留恢复兜底，也没有给慢模型增加短墙钟。
+- 首轮 wheel 的 fresh TUI `ma-d9b70f2-110-u328-capability-wake` 已证明 child 完成后 main 无需用户发
+  “继续”便自动恢复并 final，同时暴露 builtin role JSON 未打进发行包。`0f6ac38` 将六个角色模板列为
+  package-data 与 distribution boundary 强制资源，并把 owner-root helper 下沉到正确低层，消除 Gateway
+  反向依赖 agent-core。
+- 当前 `.10` 只有 `ma-gateway-0f6ac38-110` / PID `4111559` 监听 8420，模型为 MiniMax-M2.7，默认
+  `my-agent` 与 Gateway 都来自独立 `/root/.my-agent/runtime-venv-0f6ac38`。最终 wheel SHA-256 为
+  `0f8f97e8b439bcf718ca4acbc1bb207aa7199b53fe055bfe9ed4ef35d28cd40b`。
+- fresh TUI `ma-0f6ac38-110-u331-one-coordinator` 形成真实 root→coordinator→两名 researcher：协调 run
+  `subagent-1788179030-b3175b9a` 和两名 depth-2 run 均为 `DONE`，两名 researcher 的 canonical
+  `parent_id` 都精确指向 coordinator，三者 `root_id` 一致。两个孙代理收齐后 coordinator 自动醒，随后
+  main 自动醒并直接 final，终屏 `Working` 撤下；全程没有测试者补发推进消息。
+- u329/u330 两次 MiniMax-M2.7 自行把 coordinator 任务拆成直属 researcher，保留为 provider 拓扑遵循
+  负样本，不拿它否定已经由 u331 证明的结构化角色能力。capability grant/deny 的 focused 合同已通过；
+  非角色型额外 capability 的 fresh 父级裁决 TUI 仍单列待测，不用递归角色样本冒充。
+- `.10` 根卷从 100%/0 available 清除可重建的 sandbox、npm、pip、Go cache 后约有 1.3GiB 可用、使用率
+  98%。owner 任务/Memory/复刻项目、会话运行时、终端交互、当前与回滚运行环境均未删除；六组旧备份/测试语料
+  因永久删除审批未获准而保留，不能绕过审批清理。
+
 ## 2026-08-31 R116/R117 provider 上下文校准与后台最终回复历史闭环（完成）
 
 - R116 把 provider 成功响应中的数值上下文观察写回 exact owner/thread，并用

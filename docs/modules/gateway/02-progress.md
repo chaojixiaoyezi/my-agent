@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-08-31 Gateway 会话车道与孤儿恢复解耦
+## 2026-08-31 Gateway 会话车道与孤儿恢复解耦（R118 真 TUI 通过）
 
 - `.10` 单 Gateway 出现 durable wake 已 ready、日志持续 seed owner，但 `bg-owner` worker 长时间空闲。
   `py-spy` 精确定位 background-main supervisor 卡在
@@ -9,12 +9,14 @@
 - Gateway 规划会话时现在显式使用 `prepare_tick(include_orphan_supervision=False)`，先提交 ready thread
   lane；独立 reconciler 继续有界恢复。直接/嵌入式同步 scheduler 保留默认 inline sweep 作为无 Gateway
   时的 crash-recovery 兜底，不因本修复失去恢复能力。
-- focused 已覆盖 Gateway 对 base/owner 都传 false、同 owner 多车道、跳过与保留两种 prepare 语义；待新
-  wheel 的 fresh MiniMax-M2.7 真 TUI 证明无需用户发“继续”也能从 child wake 自行续跑后标记完成。
+- focused 已覆盖 Gateway 对 base/owner 都传 false、同 owner 多车道、跳过与保留两种 prepare 语义；fresh
+  MiniMax-M2.7 u328 已证明直属 child 完成后 main 自行续跑，u331 又证明孙代理→coordinator→main 两级 durable
+  wake 都无需用户发“继续”，最终回复直接显示且 `Working` 撤下。
 - 首个新 wheel 真测进一步暴露 builtin role JSON 未进包：coordinator 的结构化模板快照为空，递归工具被按
   leaf 删除。package-data 与 distribution boundary 现把 builtin role catalog 列为强制资源；同时把 Gateway
   active-turn 恢复依赖的 owner-root helper 下沉到 `user_space.runtime_paths`，清掉 gateway-parts 反向依赖
-  agent-core 的已有分层违规。下一 wheel 必须证明 coordinator 直接获得递归工具且实际创建孙代理。
+  agent-core 的已有分层违规。最终 wheel `0f8f97e8...` 已包含六个 builtin JSON；u331 中 coordinator 直接获得
+  递归工具并创建两名 depth-2 researcher，三条 canonical state 全部 DONE、parent/root 血缘一致。
 
 ## 2026-08-31 R116/R117 上下文校准与后台 final 连续性
 

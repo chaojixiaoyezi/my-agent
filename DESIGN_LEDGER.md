@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-08-31 直属父级在继承权限上限内自主裁决，Gateway 恢复扫描不得堵住会话车道【状态：本地候选】
+## 2026-08-31 直属父级在继承权限上限内自主裁决，Gateway 恢复扫描不得堵住会话车道【状态：R118 wake/递归真 TUI 通过；capability focused 通过】
 
 - `resolve_capability_requests` 处理的是直属父级给 child 的结构化能力 grant/deny，不是父级给自己提权。
   grant 已经同时经过 direct-parent、owner wall、父级 workspace/write roots 和可用 Skill/Tool 快照校验；只要
@@ -20,6 +20,14 @@
   既有 depth/capacity/owner/workspace 上限内直接获得 edge-local `create_subagents` 等工具；这对齐 会话运行时 在
   `agent_max_depth` 内给每层 session 注册 spawn 工具、由 handler 再守深度和容量的方式。builtin 角色 JSON
   属于生产运行合同，标准 wheel 必须携带；缺资源不能静默把 coordinator 降成普通 worker。
+- `.10` 的 `ma-d9b70f2-110-u328-capability-wake` 已证明直属 child 完成后 main durable wake 不依赖用户催办；
+  `ma-0f6ac38-110-u331-one-coordinator` 又证明生产 wheel 中 coordinator 首轮直接持有递归工具、实际创建两名
+  depth-2 researcher，孙代理收齐后 coordinator 与 main 逐层自动恢复并自然 final。三条 child canonical state
+  均为 `DONE`，两名孙代理的 `parent_id` 精确指向 coordinator，不能只凭屏幕文案得出结论。
+- 递归角色没有经过 capability request，因此 u331 不能冒充“父级处理额外 capability”真机样本。后者已经有
+  grant/deny 同为 mutating、越界仍拒绝的 focused 合同；后续 fresh TUI 应选一个不属于角色固有工具面的窄
+  能力请求单独验证。供应商两次未按 prompt 建 coordinator 的 u329/u330 也保留为模型遵循负样本，不写专项
+  prompt 判官或机器拓扑验收。
 
 ## 2026-08-31 TUI 后台回复必须先成为 canonical history【状态：R117b/R117c 真 TUI 通过】
 
