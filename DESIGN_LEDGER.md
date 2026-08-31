@@ -31,7 +31,9 @@
   `__editable__.my_agent-0.3.0.pth`；因此 cwd 已为 `/root` 时仍会导入旧 checkout。
 - wheel 验收必须使用独立 non-editable runtime venv，并同时核对唯一 listener、模型配置、进程 executable、
   pip Location/Editable metadata、`module.__file__`、schema 与真实 TUI 行为。源码运行模式则必须明确要求
-  checkout 与待验 revision 完全一致，不能混用两种部署身份。托管 service cwd 仍保持中性，但它只是其中一门。
+  checkout 与待验 revision 完全一致，不能混用两种部署身份。默认 `my-agent` launcher 也必须指向同一
+  runtime venv，并在替换前保存可回滚 symlink；不能只更新 Gateway 后让用户新开的 TUI 继续走旧客户端。
+  托管 service cwd 仍保持中性，但它只是其中一门。
 
 ## 2026-08-30 后台连续 Compact 达到公平切片上限时必须干净让出【状态：R114u 已部署，fresh 长任务观察中】
 

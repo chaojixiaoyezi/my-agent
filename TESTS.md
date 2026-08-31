@@ -24,6 +24,9 @@
   `/root/.my-agent/runtime-venv-efa90d1`；离线核对 module 位于该 venv、schema v8、`tui=True`。顺序停止旧
   PID 4092080 并确认端口释放后，唯一 Gateway
   `ma-gateway-efa90d1-110-runtime-venv` / PID 4099186 在 8420 运行，MiniMax-M2.7。
+- 默认 `command -v my-agent` 为 `/usr/local/bin/my-agent`；部署前它仍链接旧
+  `/root/my-agent-src/.venv/bin/my-agent`。备份原 symlink 后已原子切到新 runtime venv，`readlink -f` 与
+  `my-agent --help` 均验证成功；Gateway 和 CLI/TUI 不再使用两套 Python 环境。
 - 部署后 TUI `ma-efa90d1-110-u327-deploy-final-smoke` 约 3 秒出首屏并自动派 2 名 child；报告实测
   245/198 行、marker 分别 12/14 次，main 整合 290 行。追问前 canonical messages 已有 4 条 background
   commentary + 1 条 `root_subagents_terminal` final、notice=1；随后禁止工具的追问准确召回全部事实。

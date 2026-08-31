@@ -24,6 +24,9 @@
   `ma-gateway-efa90d1-110-runtime-venv` / PID `4099186` / 127.0.0.1:8420 / MiniMax-M2.7，实际模块来自该
   venv site-packages、schema v8、`tui=True`。wheel SHA-256 为
   `ce6b35facef781ac8f3c7f67cb38d7cddd5d9aac878ba7826ad06b135f5cff8e`。
+- 默认 `/usr/local/bin/my-agent` 也已从旧源码 venv 原子切换到
+  `/root/.my-agent/runtime-venv-efa90d1/bin/my-agent`；旧 symlink 原样保存在
+  `/root/deploy-efa90d1/my-agent-entrypoint.before`，可独立回滚。普通 `my-agent --help` 已用新入口通过。
 - fresh `ma-efa90d1-110-u327-deploy-final-smoke` 中 2 名 child 自然完成，分别交付 245/198 行报告，main 写出
   290 行整合报告并直接显示 final。追问前 raw messages 已有 4 条 background commentary + 恰好 1 条
   `root_subagents_terminal` final、notice 1 条；零工具追问准确召回三个文件、行数、marker 及出现次数。

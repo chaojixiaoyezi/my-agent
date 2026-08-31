@@ -185,7 +185,8 @@
   但不能省略历史。未知外部 channel 继续 fail closed，notice/footer 不能反向成为模型历史事实源。
 - wheel 部署必须使用独立 non-editable runtime venv，并核对进程 executable、pip Location/Editable metadata、
   `module.__file__` 与 schema；中性 cwd 只是其中一门，旧 venv 的 editable `.pth` 即使在 `/root` 也会导入
-  旧 checkout。源码运行模式只允许 checkout 与待验 revision 完全一致。
+  旧 checkout。默认 `my-agent` launcher 必须可回滚地指向同一 runtime venv，避免 Gateway 新而 TUI 旧。
+  源码运行模式只允许 checkout 与待验 revision 完全一致。
 - 普通回合工具终态折叠只追加一次确定性、脱敏投影，未发生真正 Compact 时旧模型历史必须保持稳定前缀；
   缓存命中只读取 provider usage 账，不以 Context 估算冒充。手动 `/compact` 成功后，Gateway 控制结果通过
   `task_status.compact_generation` 返回 canonical 代数，TUI 立即发布同一 typed boundary 并撤下压缩前的

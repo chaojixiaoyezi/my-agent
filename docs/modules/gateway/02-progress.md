@@ -12,7 +12,8 @@
 - 最终发现仅改 cwd 仍不足：旧 executable 与 editable `.pth` 都指向 `/root/my-agent-src`。当前使用独立
   `runtime-venv-efa90d1` 普通 wheel；唯一 Gateway 为 `ma-gateway-efa90d1-110-runtime-venv`，
   MiniMax-M2.7，8420 单 listener。u327 的 2 child、245/198/290 行产物、追问前 4 commentary + 1 final 和
-  零工具准确召回全部通过。
+  零工具准确召回全部通过。默认 `/usr/local/bin/my-agent` 也已备份旧 symlink 后指向同一新 venv，
+  防止后续用户 TUI 继续加载旧客户端。
 
 ## 2026-08-30 R114u/R114v 公平 Compact 让出与中性服务 cwd
 
