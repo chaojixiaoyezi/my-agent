@@ -10,8 +10,11 @@
   assistant 一样先幂等提交 ConversationStore，`background_notice` 只投影“有新消息”，不能代替模型历史。
   重试按 exact wake id/part id 去重，未知外部 route 保持 fail closed。
 - R117b u326 在发追问前直接核对 raw thread：schema v8、11 条 messages、6 条后台 commentary、1 条后台
-  final；追问随后准确召回两个 child 报告、marker 与 357 行总报告。此前 u325 因 Gateway cwd 位于旧源码
-  checkout 而导入 schema v7，保留为部署负样本；当前 wheel runtime 从 `/root` 启动并核对模块来源。
+  final；追问随后准确召回两个 child 报告、marker 与 357 行总报告。此前 u325 因旧 editable venv 导入
+  schema v7，保留为部署负样本。
+- 最终部署改用独立普通-wheel runtime venv；u327 的两名 child 交付 245/198 行报告，main 交付 290 行整合
+  报告。追问前 raw messages 已有 4 commentary + 1 background final，零工具追问准确召回所有行数和 marker。
+  当前 8420 只有 `ma-gateway-efa90d1-110-runtime-venv`，实际 import 位于该 venv site-packages。
 - 相关 background runtime、delivery、notice、conversation history 与 provider observation focused 已通过；
   本轮生产/测试代码增减低于 10,000 行，按约定不重复全仓 pytest。
 

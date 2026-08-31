@@ -5,9 +5,11 @@
   ledger。R116 u323 主 compact 0 且立即追问 cache-read 32,418；u324 自然越线只 Compact 一次。
 - [x] 本地 `channel=tui` 的后台 commentary/final 必须先进入 canonical ConversationStore，再投影 notice；没有
   TUI adapter 时 delivery 可 `not_applicable`，但下一轮历史不能缺。相同 wake 重试只保留一个 final。
-  R117b u326 在追问前 raw 验证 schema v8、6 commentary、1 final，追问准确召回。
-- [x] wheel 部署不能只看 `pip install`、PID 或端口；Gateway 必须从中性 cwd 启动并核对实际 module/schema。
-  R117 u325 旧 checkout 遮蔽为失败样本，R117b 当前从 `/root` 启动且只有一个 MiniMax-M2.7 Gateway。
+  R117b u326 在追问前 raw 验证 schema v8、6 commentary、1 final；独立 runtime 的 u327 又验证
+  4 commentary + 1 final，两个样本的零工具追问均准确召回。
+- [x] wheel 部署不能只看 `pip install`、PID、端口或 cwd；必须核对进程 executable、editable metadata、
+  module/schema。R117 u325 旧 editable venv 为失败样本；当前独立 `runtime-venv-efa90d1` 只运行一个
+  MiniMax-M2.7 Gateway，u327 fresh TUI 通过。
 
 - [x] R114t fresh MiniMax-M2.7 TUI：pending 首轮不暴露 owner 根为 cwd；首批多 child 直接在 canonical
   task root 工作，零 stale-owner-path 拒绝/申请；任务目录使用可读标题。94 项 focused 与 `.10`

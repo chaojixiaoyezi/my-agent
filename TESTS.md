@@ -11,16 +11,22 @@
     追问 usage 为 input 8,061 / cache-read 32,418。
   - `tmux attach -t ma-r116-110-u324-four-wake-regression`：4 名 child 全 DONE，主上下文自然越 90%，只发生
     一次真实 Compact generation 0→1 并继续最终回复。
-- R117 首次 `ma-r117-110-u325-background-final-continuity` 不计通过：Gateway cwd 在旧
-  `/root/my-agent-src`，运行模块 schema v7，遮蔽已安装 wheel；raw messages 仍缺 final。这一负样本要求部署
-  验收除进程/端口外必须核对 cwd、module source 与 schema。
+- R117 首次 `ma-r117-110-u325-background-final-continuity` 不计通过：Gateway 使用
+  `/root/my-agent-src/.venv/bin/python`，其 editable finder 导入 schema v7，遮蔽已安装 wheel；raw messages
+  仍缺 final。这一负样本要求部署除进程/端口/cwd 外还核对 Python executable、editable metadata、module source
+  与 schema。
 - R117b 真通过：`tmux attach -t ma-r117b-110-u326-final-history-proof`。两个 child 分别交付 marker
   `DNS-B731`/`SSE-C942` 的 421/629 行报告，main 写出 357 行 `final_history_proof.md` 并真实 Compact 一次。
   在发送追问前读取 raw thread，确认 schema v8、message_count=11、6 条 background commentary、恰好 1 条
   background final、notice 1 条；追问随后准确复述文件、marker 与行数。
-- R117 wheel SHA-256 为
-  `92698066f1c3d82c9fdae6c250d977f4d3b371326767307903fc619f17881b15`；唯一 Gateway
-  `ma-gateway-r117b-110-wheel-runtime` 从 `/root` 运行、MiniMax-M2.7、127.0.0.1:8420。
+- 最终提交 `efa90d1` wheel SHA-256 为
+  `ce6b35facef781ac8f3c7f67cb38d7cddd5d9aac878ba7826ad06b135f5cff8e`，安装到独立
+  `/root/.my-agent/runtime-venv-efa90d1`；离线核对 module 位于该 venv、schema v8、`tui=True`。顺序停止旧
+  PID 4092080 并确认端口释放后，唯一 Gateway
+  `ma-gateway-efa90d1-110-runtime-venv` / PID 4099186 在 8420 运行，MiniMax-M2.7。
+- 部署后 TUI `ma-efa90d1-110-u327-deploy-final-smoke` 约 3 秒出首屏并自动派 2 名 child；报告实测
+  245/198 行、marker 分别 12/14 次，main 整合 290 行。追问前 canonical messages 已有 4 条 background
+  commentary + 1 条 `root_subagents_terminal` final、notice=1；随后禁止工具的追问准确召回全部事实。
 
 ## 2026-08-30 R114u/R114v Compact 公平让出与中性 service cwd
 

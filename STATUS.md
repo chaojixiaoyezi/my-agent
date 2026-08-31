@@ -14,14 +14,21 @@
   “屏幕看见过”误当“模型历史已有”。根因是本地 TUI channel=`tui` 未列入 transcript-capable channels。
   R117 将 `tui` 纳入唯一会话交付边界；后台 commentary/final 先按 wake id 与 `assistant_part_id` 幂等提交
   ConversationStore，notice 只做 UI 新消息投影。未知外部 channel 继续 fail closed。
-- 首次 R117 TUI `ma-r117-110-u325-background-final-continuity` 是部署负样本：Gateway 从
-  `/root/my-agent-src` 启动，Python 导入旧 checkout 的 schema v7，遮蔽了已安装 R117 wheel，raw messages
-  仍缺 final。顺序改为从中性 `/root` 启动 wheel 后，`ma-r117b-110-u326-final-history-proof` 在用户追问前已
+- 首次 R117 TUI `ma-r117-110-u325-background-final-continuity` 是部署负样本：Gateway 使用旧 checkout 的
+  editable venv，Python 导入 schema v7，遮蔽了已安装 R117 wheel，raw messages 仍缺 final。u326 随后在用户追问前
   证明 thread schema v8、11 条 canonical messages、6 条 background commentary、恰好 1 条 background final；
   随后模型准确回忆两个报告、两个 marker 与 357 行整合报告，不依赖 notice 或事后猜测。
-- 当前 `.10` 仍只有一个 Gateway：`ma-gateway-r117b-110-wheel-runtime`，PID `4092080`，cwd `/root`，
-  127.0.0.1:8420，MiniMax-M2.7；R117 wheel SHA-256 为
-  `92698066f1c3d82c9fdae6c250d977f4d3b371326767307903fc619f17881b15`。
+- 最终部署验收又发现“cwd=/root”仍不足：旧进程的可执行文件本身是
+  `/root/my-agent-src/.venv/bin/python`，全局还有 `__editable__.my_agent-0.3.0.pth`。当前已用普通 wheel 建立
+  独立 `/root/.my-agent/runtime-venv-efa90d1`；唯一 Gateway 为
+  `ma-gateway-efa90d1-110-runtime-venv` / PID `4099186` / 127.0.0.1:8420 / MiniMax-M2.7，实际模块来自该
+  venv site-packages、schema v8、`tui=True`。wheel SHA-256 为
+  `ce6b35facef781ac8f3c7f67cb38d7cddd5d9aac878ba7826ad06b135f5cff8e`。
+- fresh `ma-efa90d1-110-u327-deploy-final-smoke` 中 2 名 child 自然完成，分别交付 245/198 行报告，main 写出
+  290 行整合报告并直接显示 final。追问前 raw messages 已有 4 条 background commentary + 恰好 1 条
+  `root_subagents_terminal` final、notice 1 条；零工具追问准确召回三个文件、行数、marker 及出现次数。
+- 测试机根卷仍显示 47G/100%、Available=0；本次只清理了可重建的 pip 与 Go build cache，旧部署备份、用户
+  task、会话和 Memory 均未删除。新 venv 已成功安装并运行，但下一次发布前需要单独做有保留策略的磁盘治理。
 
 ## 2026-08-30 R114t--R114v 单 Gateway 发布与长任务验收（进行中）
 

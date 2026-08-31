@@ -7,9 +7,12 @@
   90% 后只提交 generation 0→1 一次并继续，旧频繁 Compact 未复现。
 - u323 暴露本地 TUI 后台 final 只进 notice、不进 messages。R117 将 `tui` 加入 transcript delivery channel，
   复用现有 background transcript 幂等键提交 commentary/final；notice 仍独立投影，不取得历史权威。
-- 首次 u325 因 Gateway 从 `/root/my-agent-src` 启动而导入旧 checkout，保留为部署负样本。改从 `/root`
-  启动已安装 wheel 后，u326 在追问前核对到 schema v8、6 条 commentary、1 条 final，随后召回正确。
-  当前唯一 Gateway 为 `ma-gateway-r117b-110-wheel-runtime`，MiniMax-M2.7，8420 单 listener。
+- 首次 u325 因 Gateway 使用旧 checkout editable venv 而导入 schema v7，保留为部署负样本。u326 在追问前
+  核对到 schema v8、6 条 commentary、1 条 final，随后召回正确。
+- 最终发现仅改 cwd 仍不足：旧 executable 与 editable `.pth` 都指向 `/root/my-agent-src`。当前使用独立
+  `runtime-venv-efa90d1` 普通 wheel；唯一 Gateway 为 `ma-gateway-efa90d1-110-runtime-venv`，
+  MiniMax-M2.7，8420 单 listener。u327 的 2 child、245/198/290 行产物、追问前 4 commentary + 1 final 和
+  零工具准确召回全部通过。
 
 ## 2026-08-30 R114u/R114v 公平 Compact 让出与中性服务 cwd
 

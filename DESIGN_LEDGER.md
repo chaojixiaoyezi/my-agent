@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-08-31 TUI 后台回复必须先成为 canonical history【状态：R117b 真 TUI 通过】
+## 2026-08-31 TUI 后台回复必须先成为 canonical history【状态：R117b/R117c 真 TUI 通过】
 
 - 对照 会话运行时 `会话运行时-rs/core/src/stream_events_utils.rs` 与 `session/inject.rs`：完成的 assistant response item
   先进入会话历史，TUI event/feed 只是同一事实的展示。my-agent 因而把本地 `channel=tui` 明确定义为
@@ -12,6 +12,9 @@
 - `.10` R117b u326 在任何追问前直接核对 raw thread，确认 6 条 background commentary 和 1 条 final 已在
   schema v8 messages 中；随后追问准确召回。R117 u325 因旧源码 checkout 遮蔽 wheel 而失败，不能算代码
   回归失败或真机通过；部署验收必须同时核对 Gateway cwd、`module.__file__`、schema 与行为。
+- 最终独立 runtime venv 上的 u327 再次在追问前核对到 4 条 background commentary 与 1 条
+  `root_subagents_terminal` final；零工具追问准确召回 245/198/290 行与 marker 次数，证明真实部署不是只靠
+  u326 历史样本。
 
 ## 2026-08-31 provider 上下文观察只是一代内的数值校准【状态：R116 真 TUI 通过】
 
@@ -21,14 +24,14 @@
 - 该观察不是累计 token、计费或任务完成事实；累计成本仍只读 ModelCallLedger，Compact 次数仍只读
   ConversationThread generation。u323/u324 分别证明低估时不乱压、真实越线时只提交一次再继续。
 
-## 2026-08-31 wheel 运行时不得由旧源码 cwd 取得 import 优先级【状态：R117b 已纠正】
+## 2026-08-31 wheel 运行时不得继承旧 editable Python 环境【状态：R117c 已纠正】
 
-- `pip install` 成功不等于运行进程使用新代码。若 Gateway cwd 是另一份 Python package checkout，空字符串
-  `sys.path` 会让该目录先于 site-packages；本轮直接表现为 R117 wheel 已安装但 schema 仍为 v7、TUI channel
-  仍不支持 transcript。
-- wheel 验收从中性 cwd（当前测试机为 `/root`，托管服务为 `<MY_AGENT_HOME>/service-cwd`）启动，并同时核对
-  唯一 listener、模型配置、`module.__file__`/schema 与真实 TUI 行为。源码运行模式则必须明确要求 checkout
-  与待验 revision 完全一致，不能混用两种部署身份。
+- `pip install` 成功和中性 cwd 都不等于运行进程使用新代码。旧 Gateway 的 executable 仍是
+  `/root/my-agent-src/.venv/bin/python`，系统 site-packages 还有
+  `__editable__.my_agent-0.3.0.pth`；因此 cwd 已为 `/root` 时仍会导入旧 checkout。
+- wheel 验收必须使用独立 non-editable runtime venv，并同时核对唯一 listener、模型配置、进程 executable、
+  pip Location/Editable metadata、`module.__file__`、schema 与真实 TUI 行为。源码运行模式则必须明确要求
+  checkout 与待验 revision 完全一致，不能混用两种部署身份。托管 service cwd 仍保持中性，但它只是其中一门。
 
 ## 2026-08-30 后台连续 Compact 达到公平切片上限时必须干净让出【状态：R114u 已部署，fresh 长任务观察中】
 
