@@ -1,11 +1,14 @@
 
-# LLM: Capability routing may narrow a child request but never widen the manager's owner wall.
-# Keep path normalization and owner-bound partitioning here so explicit, semantic, and lifecycle
-# grant paths consume one structured rule instead of reimplementing permission prose.
-# 模块用途: 汇总能力申请范围，并保证任何子代理授权都不能越过当前用户自己的目录边界。
+# LLM: Capability routing may narrow a child request but never widen the manager's owner wall
+# or the direct parent's effective tool snapshot. Keep path/tool authority decisions here so
+# explicit, semantic, and lifecycle grant paths consume one structured rule instead of prose.
+# 模块用途: 汇总能力申请范围，并保证任何子代理授权都不能越过当前用户目录或直属父级工具上限。
 from __future__ import annotations
 
 import shlex
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,6 +21,11 @@ if TYPE_CHECKING:
     from .services.lifecycle import RecordCapabilityGrantParams
 
 _DELETE_COMMAND_REQUESTS = frozenset({"rm", "rmdir", "unlink"})
+DIRECT_PARENT_TOOL_AUTHORITY_ATTR = "direct_parent_tool_authority"
+_CREATION_TOOL_AUTHORITY: ContextVar[dict[str, object] | None] = ContextVar(
+    "subagent_creation_tool_authority",
+    default=None,
+)
 
 
 # LLM: This immutable decision is the only transport shape for owner-bound path checks; callers
@@ -30,6 +38,40 @@ class CapabilityPathScopeDecision:
     allowed_paths: tuple[str, ...]
     rejected_paths: tuple[str, ...]
     owner_scope_root: str = ""
+
+
+# LLM: This immutable snapshot is the only authority fact a parent-resolution model and the
+# hard grant gate may share. It is derived from the exact parent run or root ToolRuntimeSnapshot,
+# never from goal/problem/evidence prose or the child's claimed allowed_tools list.
+# 类用途: 保存一条工具申请在直属父级当前权限内可授予和不可授予的精确工具集合。
+@dataclass(frozen=True)
+class CapabilityToolAuthorityDecision:
+    """Structured direct-parent tool authority for one capability request."""
+
+    parent_run_id: str
+    authority_source: str
+    requested_tools: tuple[str, ...]
+    grantable_tools: tuple[str, ...]
+    unavailable_tools: tuple[str, ...]
+    snapshot_error_code: str = ""
+
+    # LLM: Keep the model-visible shape versioned and machine-authored; callers must not add
+    # inferred approval or completion claims around this payload.
+    # 函数用途: 输出 capability wake、工具结果和审计共用的结构化父级权限快照。
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": "capability_parent_tool_authority.v1",
+            "parent_run_id": self.parent_run_id,
+            "authority_source": self.authority_source,
+            "requested_tools": list(self.requested_tools),
+            "grantable_tools": list(self.grantable_tools),
+            "unavailable_tools": list(self.unavailable_tools),
+            "has_tool_request": bool(self.requested_tools),
+            "all_requested_tools_grantable": bool(self.requested_tools) and not self.unavailable_tools,
+            "snapshot_error_code": self.snapshot_error_code,
+            "capability_resolution_requires_user_approval": False,
+            "dangerous_tool_call_approval_is_separate": True,
+        }
 
 
 # LLM: This exception is the defense-in-depth boundary at canonical grant persistence. Routers
@@ -51,6 +93,217 @@ class CapabilityOwnerScopeViolation(ValueError):
 def effective_request_path_scope(request: CapabilityRequest) -> list[str]:
     values = request.path_scope or request.cwd_scope
     return list(dict.fromkeys(str(item or "").strip() for item in values if str(item or "").strip()))
+
+
+# LLM: requested_tools and requested_mcp_tools are exact model-facing registry names. Do not
+# fuzzy-match prefixes, capability prose, server labels, or tool descriptions into authority.
+# 函数用途: 合并普通工具和 MCP 工具申请，得到父级授权硬门使用的唯一精确名称列表。
+def requested_capability_tool_names(request: CapabilityRequest) -> list[str]:
+    return _merge_list(
+        list(getattr(request, "requested_tools", []) or []),
+        list(getattr(request, "requested_mcp_tools", []) or []),
+    )
+
+
+# LLM: MCP aliases in either request field resolve only by an exact, unique leaf-name match inside
+# the direct parent's authoritative snapshot. Move proven MCP names into the MCP audit field;
+# ambiguous or absent names remain in their original field and therefore fail closed later.
+# 函数用途: 规范普通/MCP 申请字段，把唯一命中的 MCP 短名归到完整 MCP 名，重名或未知时不猜。
+def canonical_capability_tool_request_fields(
+    agent_or_manager: Any,
+    task: SubAgentTask,
+    requested_tools: list[str] | tuple[str, ...],
+    requested_mcp_tools: list[str] | tuple[str, ...],
+) -> tuple[list[str], list[str]]:
+    available, _source, _error_code = _direct_parent_available_tools(
+        agent_or_manager,
+        task,
+    )
+    ordinary: list[str] = []
+    mcp: list[str] = []
+
+    # LLM: A short MCP alias is safe only when one exact leaf exists inside this parent's
+    # authoritative snapshot. Full but unavailable MCP names stay unresolved for the hard gate.
+    # 函数用途: 在父级工具快照中解析唯一 MCP 短名；完整、重名或未知名称不做模糊猜测。
+    def _unique_mcp_name(name: str) -> str:
+        if name in available and name.startswith("mcp__"):
+            return name
+        if name.startswith("mcp__"):
+            return ""
+        candidates = sorted(
+            item
+            for item in available
+            if item.startswith("mcp__") and item.rsplit("__", 1)[-1] == name
+        )
+        return candidates[0] if len(candidates) == 1 else ""
+
+    for raw_name in requested_tools:
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        resolved_mcp = _unique_mcp_name(name) if name not in available else ""
+        if name.startswith("mcp__"):
+            resolved_mcp = name
+        target = mcp if resolved_mcp else ordinary
+        resolved = resolved_mcp or name
+        if resolved not in target:
+            target.append(resolved)
+    for raw_name in requested_mcp_tools:
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        resolved = _unique_mcp_name(name) or name
+        if resolved not in mcp:
+            mcp.append(resolved)
+    ordinary = [item for item in ordinary if item not in mcp]
+    return ordinary, mcp
+
+
+# LLM: Creation-time tool authority is copied from the exact immutable ToolRuntimeSnapshot
+# carried by the Tool Gateway invocation. The child cannot supply or widen this host-owned field.
+# 函数用途: 把父代理创建 child 当轮的真实工具上限压成可持久化快照，供跨进程能力裁决复用。
+def creation_tool_authority_snapshot(runtime_snapshot: Any) -> dict[str, object]:
+    return {
+        "schema_version": "direct_parent_tool_authority.v1",
+        "parent_run_id": str(getattr(runtime_snapshot, "run_id", "") or ""),
+        "available_tool_names": sorted(
+            str(item or "").strip()
+            for item in (getattr(runtime_snapshot, "available_tool_names", ()) or ())
+            if str(item or "").strip()
+        ),
+        "snapshot_hash": str(getattr(runtime_snapshot, "snapshot_hash", "") or ""),
+        "owner_type": str(getattr(runtime_snapshot, "owner_type", "") or ""),
+    }
+
+
+# LLM: The scoped Tool Gateway handler binds creation authority through a ContextVar so concurrent
+# tool calls cannot leak snapshots and internal host facts never pollute public/idempotency params.
+# 函数用途: 在一次 create_subagents handler 内临时绑定父回合工具快照，退出时可靠恢复旧上下文。
+@contextmanager
+def bind_creation_tool_authority(runtime_snapshot: Any) -> Iterator[None]:
+    token = _CREATION_TOOL_AUTHORITY.set(
+        creation_tool_authority_snapshot(runtime_snapshot)
+    )
+    try:
+        yield
+    finally:
+        _CREATION_TOOL_AUTHORITY.reset(token)
+
+
+# LLM: Creation policy reads a defensive copy of the current host binding. No caller may mutate
+# the ContextVar value after one child has persisted it.
+# 函数用途: 读取当前派工工具调用绑定的父级权限快照；普通内部创建没有绑定时返回空对象。
+def current_creation_tool_authority() -> dict[str, object]:
+    return dict(_CREATION_TOOL_AUTHORITY.get() or {})
+
+
+# LLM: Only a versioned creation snapshot whose parent id matches the canonical child edge is
+# authoritative. Invalid or model-authored lookalikes fail closed and never become grant input.
+# 函数用途: 从 child 状态读取创建它的父回合工具快照，并核对父子编号没有漂移。
+def task_creation_tool_authority(task: SubAgentTask) -> dict[str, object]:
+    attrs = getattr(task, "attributes", {})
+    raw = attrs.get(DIRECT_PARENT_TOOL_AUTHORITY_ATTR) if isinstance(attrs, dict) else None
+    snapshot = dict(raw) if isinstance(raw, dict) else {}
+    if snapshot.get("schema_version") != "direct_parent_tool_authority.v1":
+        return {}
+    parent_run_id = str(snapshot.get("parent_run_id") or "").strip()
+    expected_parent = str(getattr(task, "parent_id", "") or "").strip()
+    if not parent_run_id or parent_run_id != expected_parent:
+        return {}
+    names = snapshot.get("available_tool_names")
+    if not isinstance(names, list):
+        return {}
+    snapshot["available_tool_names"] = list(
+        dict.fromkeys(str(item or "").strip() for item in names if str(item or "").strip())
+    )
+    return snapshot
+
+
+# LLM: A nested parent can grant only its rebuilt effective execution-context tools, including
+# prior ordinary/MCP grants and disabled-tool policy; a root parent uses its immutable runtime
+# snapshot. Snapshot failure is fail-closed.
+# 函数用途: 判断直属父级当前是否真的持有申请中的工具，供模型裁决事实和落账硬门共同使用。
+def direct_parent_tool_authority(
+    agent_or_manager: Any,
+    task: SubAgentTask,
+    requested_tools: list[str] | tuple[str, ...],
+) -> CapabilityToolAuthorityDecision:
+    requested = tuple(
+        dict.fromkeys(
+            str(item or "").strip()
+            for item in requested_tools
+            if str(item or "").strip()
+        )
+    )
+    parent_run_id = str(getattr(task, "parent_id", "") or "").strip()
+    available, source, error_code = _direct_parent_available_tools(
+        agent_or_manager,
+        task,
+    )
+    grantable = tuple(item for item in requested if item in available)
+    unavailable = tuple(item for item in requested if item not in available)
+    return CapabilityToolAuthorityDecision(
+        parent_run_id=parent_run_id,
+        authority_source=source,
+        requested_tools=requested,
+        grantable_tools=grantable,
+        unavailable_tools=unavailable,
+        snapshot_error_code=error_code,
+    )
+
+
+# LLM: Root and nested authority lookup is shared by hard grant checks, semantic-router bypass,
+# and exact MCP alias canonicalization. Accept either the owning agent or its manager so the
+# lower-level routing service does not grow a reverse dependency on agent-core.
+# 函数用途: 读取直属父级当前真实工具集合，并返回来源与失败码供上层结构化记录。
+def _direct_parent_available_tools(
+    agent_or_manager: Any,
+    task: SubAgentTask,
+) -> tuple[set[str], str, str]:
+    manager = getattr(agent_or_manager, "subagents", None)
+    if manager is None and callable(getattr(agent_or_manager, "load", None)):
+        manager = agent_or_manager
+    parent_run_id = str(getattr(task, "parent_id", "") or "").strip()
+    parent_task = None
+    if parent_run_id and manager is not None and callable(getattr(manager, "load", None)):
+        try:
+            parent_task = manager.load(parent_run_id)
+        except (FileNotFoundError, TypeError, ValueError):
+            parent_task = None
+    if parent_task is not None:
+        try:
+            parent_context = manager.runner_context.build_execution_context(parent_run_id)
+            available = {
+                str(item or "").strip()
+                for item in (parent_context.allowed_tools or [])
+                if str(item or "").strip()
+            }
+            source = "parent_run_execution_context"
+            error_code = ""
+        except Exception:
+            available = set()
+            source = "parent_run_execution_context"
+            error_code = "PARENT_TOOL_SNAPSHOT_UNAVAILABLE"
+    else:
+        creation_snapshot = task_creation_tool_authority(task)
+        if creation_snapshot:
+            available = set(creation_snapshot["available_tool_names"])
+            source = "parent_creation_runtime_snapshot"
+            error_code = ""
+        else:
+            # 旧任务没有创建时快照；同 owner、同部署 registry 仅作显式兼容来源，新的
+            # create_subagents 主链不会再走这里。失败时仍 fail closed。
+            try:
+                registry = agent_or_manager.tools
+                snapshot = registry.runtime_snapshot(run_id=parent_run_id)
+                available = set(snapshot.available_tool_names)
+                source = "legacy_process_runtime_snapshot"
+                error_code = "PARENT_CREATION_SNAPSHOT_MISSING"
+            except Exception:
+                available = set()
+                source = "legacy_process_runtime_snapshot"
+                error_code = "PARENT_TOOL_SNAPSHOT_UNAVAILABLE"
+    return available, source, error_code
 
 
 # LLM: owner_scope_root is a hard multi-tenant upper bound. Relative capability paths resolve from

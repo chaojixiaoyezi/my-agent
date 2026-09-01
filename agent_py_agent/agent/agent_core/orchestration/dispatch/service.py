@@ -23,6 +23,7 @@ _CAPABILITY_ROUTE_ACTIONS = {
     "GRANTED": "granted",
     "WOULD_GAP": "would_gap",
     "GAP": "gap",
+    "PARENT_RESOLUTION_REQUIRED": "parent_resolution_required",
 }
 _PATCH_REVIEW_ACTIONS = {
     "APPROVE": "approve",
@@ -162,7 +163,8 @@ def make_capability_route_records(agent: Any, ctx: Any, *, mutate_state: bool | 
                     run_id=item.run_id,
                     dry_run=item.dry_run,
                     applied=not item.dry_run,
-                    ok=item.status in {"WOULD_GRANT", "GRANTED"},
+                    ok=item.status
+                    in {"WOULD_GRANT", "GRANTED", "PARENT_RESOLUTION_REQUIRED"},
                     message=item.message,
                     evidence_paths=[
                         str(agent.subagents.workspace / "subagent_capability_route_report.json")

@@ -20,6 +20,10 @@ from ...conversation.authority import (
 )
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
+from ...subagents.capability_scope import (
+    DIRECT_PARENT_TOOL_AUTHORITY_ATTR,
+    current_creation_tool_authority,
+)
 from ...subagents.role_templates import (
     COORDINATOR_TOOLS,
     DIRECT_CHILD_CONTROL_TOOLS,
@@ -469,15 +473,18 @@ def _config_bool(agent, key: str, default: bool) -> bool:
     return bool_value(value, default=default)
 
 
-# LLM: Direct and nested create paths share this structured attribute builder so recursion
-# carries identical refs, lineage hints, long-running flags, and conversation authority.
-# 函数用途: 把创建参数归一成子代理任务属性，供顶层和孙代理创建共用。
+# LLM: Direct and nested create paths share this attribute builder. The host-bound parent tool
+# snapshot overwrites any input lookalike without entering model/idempotency parameters.
+# 函数用途: 归一子代理属性，并把当前父回合真实工具上限安全写入顶层或孙代理任务。
 def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
     attrs = (
         dict(raw_params.get("attributes") or {})
         if isinstance(raw_params.get("attributes"), dict)
         else {}
     )
+    attrs.pop(DIRECT_PARENT_TOOL_AUTHORITY_ATTR, None)
+    if parent_authority := current_creation_tool_authority():
+        attrs[DIRECT_PARENT_TOOL_AUTHORITY_ATTR] = parent_authority
     for key in _LIST_ATTRIBUTE_FIELDS:
         values = _list_attribute_values(key, raw_params)
         if values and key not in attrs:

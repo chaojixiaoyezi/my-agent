@@ -161,10 +161,9 @@ class SubAgentLifecycleService:
         self.manager.mutate(run_id, _request_reducer)
         return committed_request[0]
 
-    # LLM: A grant and its exact request resolution are one lifecycle mutation. Keep the request
-    # terminal before the canonical save so persistence can advance a settled blocked attempt to
-    # PENDING; callers may still repeat the same resolution without creating duplicate grants.
-    # 函数用途: 给子代理授权时同步结清对应申请，并让已经结束的阻塞轮次重新进入待执行队列。
+    # LLM: A grant and its exact request resolution are one lifecycle mutation. Ordinary and MCP
+    # tool names must both enter persisted effective permissions while retaining typed audit fields.
+    # 函数用途: 给子代理授权时同步结清申请、合并普通/MCP 工具，并让阻塞轮次重进待执行队列。
     def record_capability_grant(
         self,
         run_id: str,
@@ -203,7 +202,12 @@ class SubAgentLifecycleService:
                         )
                     request.status = "GRANTED"
             task.allowed_skills = _merge_list(task.allowed_skills, grant.skills)
-            task.allowed_tools = _merge_list(task.allowed_tools, grant.tools)
+            # MCP 名称和普通工具名称最终都进入模型的同一工具快照；保留 grant.mcp_tools
+            # 独立账本字段的同时，也必须把它并入 task 的持久有效权限，供孙代理继承上限。
+            task.allowed_tools = _merge_list(
+                task.allowed_tools,
+                [*grant.tools, *grant.mcp_tools],
+            )
             task.updated_at = time.time()
             committed_grant.append(grant)
 
@@ -211,10 +215,9 @@ class SubAgentLifecycleService:
         _reopen_capability_blocked_conversation_link(self.manager, task)
         return committed_grant[0]
 
-    # LLM: An existing grant may resolve another request only after a route has proven structural
-    # coverage. Bind that exact grant id into the request audit fields under the canonical guard;
-    # never create a duplicate grant or perform a detached status-only save.
-    # 函数用途: 用已经存在且已核实覆盖范围的授权原子结清另一条申请，并保留授权来源关联。
+    # LLM: An existing grant may resolve another request only after structural coverage. Reapply
+    # both ordinary/MCP effective tools under the canonical guard without duplicating the grant.
+    # 函数用途: 用已有授权原子结清另一条申请，并恢复其普通/MCP 权限和来源关联。
     def resolve_request_with_existing_grant(
         self,
         run_id: str,
@@ -252,7 +255,10 @@ class SubAgentLifecycleService:
             constraints["covered_by_grant_id"] = grant.id
             request.constraints = constraints
             task.allowed_skills = _merge_list(task.allowed_skills, grant.skills)
-            task.allowed_tools = _merge_list(task.allowed_tools, grant.tools)
+            task.allowed_tools = _merge_list(
+                task.allowed_tools,
+                [*grant.tools, *grant.mcp_tools],
+            )
             task.updated_at = time.time()
             committed_grant.append(grant)
 

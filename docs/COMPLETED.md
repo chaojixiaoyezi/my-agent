@@ -1,5 +1,25 @@
 # COMPLETED
 
+## 2026-09-01 R124--R128 直属父级 capability 授权与危险 ToolCall 分账
+
+- 解决 child 申请父级已经拥有的工具时，main 因当前模型可见清单不完整而误拒绝、语义 Router 又抢先把
+  OPEN 申请结成 GAP、grant 后 MCP 工具只落账却不进入下一 runner 的问题。创建时由 Tool Gateway 冻结直属
+  父级 immutable `ToolRuntimeSnapshot`；嵌套父级读取 exact execution context，模型文字不能伪造或扩大。
+- 普通/MCP 申请字段共用结构化规范器：完整普通名优先；MCP 短名只有在父快照中唯一末段精确命中时才规范为
+  `mcp__server__tool`，未知或重名保持原值并在 hard grant gate fail closed。父级可授予全部 exact 工具时，
+  CapabilityRouter 保持 OPEN，交给直属父级 grant/deny，不再抢先关 GAP。
+- capability grant 把普通/MCP 名同时并入同一 child 的 durable `allowed_tools` 和下一不可变 provider 快照，
+  但具体危险 ToolCall 继续走原有用户审批。grant/deny 是父级控制裁决，不再让普通用户理解内部 run/tool；
+  实际桌面操作仍必须按 exact call 单独确认。
+- R128 `.10` 单 Gateway、MiniMax-M2.7 真 TUI `ma-r128-110-main-capability-approval` 通过：直属 main 自主
+  grant `capreq-1788293189-ab042cc0`，原 child `subagent-1788293169-474f3c3b` 生成第二 runner session 后继续；
+  `take_screenshot_with_ocr` 另经 `approval:053e0842c70dd2439b6ed55d` 一次性批准，真实返回窗口、屏幕尺寸和
+  OCR 文本。最终 wheel SHA-256 为 `54c992e9d949ae957e05eb4afba5a06a2672b66c34a271f59e5c94d7f3db22cf`。
+- 部署前 capability/create/route 组合 194 项通过；提交前扩大到 capability/direct-parent/approval/Gateway/
+  background runtime 共 401 个 selected case，395 passed、6 个既有 expected xfail、0 failed。R128 同时核对
+  canonical request、grant、两片 runner session、runtime gate、operation/audit 与结果 ref。本轮远低于
+  10,000 行，按约定未跑全仓 pytest。
+
 ## 2026-09-01 R123 Computer Use 开源执行器与真 TUI 闭环
 
 - 解决 my-agent 没有系统桌面控制能力、又不应自造截图/OCR/鼠标键盘引擎的问题：官方 extra 固定复用

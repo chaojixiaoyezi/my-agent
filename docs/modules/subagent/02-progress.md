@@ -1,5 +1,25 @@
 # Subagent Progress
 
+## 2026-09-01 直属父级工具 authority 成为 capability grant 硬事实（R128 真 TUI 通过）
+
+- R124 真 TUI 暴露：child 的 exact Computer Use request 已落账，但 main wake 没有直属父级真实工具快照，
+  模型据自身当前展示工具错误 deny，并把安全拒绝误说成链路通过。该样本不算 capability 正例。
+- 创建入口现从 scoped Tool Gateway immutable snapshot 生成宿主私有
+  `direct_parent_tool_authority.v1`，不接受模型 attributes 覆盖，也不污染 tool payload/idempotency；孙代理
+  则读取直属父 run 的重建 execution context。裁决、wake 与审计共用 exact grantable/unavailable 名称。
+- `requested_mcp_tools` 不再只落审计账：grant 后会与 ordinary tools 一并进入同 run 的下一工具快照和
+  durable allowed tools。具体危险工具调用仍走用户 ToolCall approval；能力 grant 不能替代逐次批准。
+- R125 进一步证明 creation snapshot 已正确进入 canonical state，但 child 只填 MCP 短名，旧语义 Router
+  又在父 wake 前把 no-hit OPEN 抢先结为 GAP。候选只做父快照内唯一末段 exact 规范化；直属父级能授予全部
+  请求工具时，Router 投影 `PARENT_RESOLUTION_REQUIRED` 而不改 request。未知/重名继续 fail closed。
+- R126 又抓到模型把 MCP 短名填进普通 `requested_tools`；候选让两个字段共用父快照唯一 exact 归类，只有
+  唯一 MCP 命中才移入完整 MCP 字段，普通 exact 名优先，未知/重名不猜。
+- 创建、根/嵌套授权、越界拒绝、MCP 同 run 续跑及路由竞态共 194 项 focused 通过。R128 单 Gateway 真 TUI
+  已取得四份独立证据：直属 main grant `capreq-1788293189-ab042cc0`；原 child
+  `subagent-1788293169-474f3c3b` 产生第二 runner session；完整 MCP 名进入 durable grant 并真实返回
+  窗口/屏幕/OCR 结果；`take_screenshot_with_ocr` 另经 `approval:053e0842c70dd2439b6ed55d` 一次性审批。
+  capability grant 不再错误询问用户，也没有吞掉后续危险 ToolCall 的逐项确认。
+
 ## 2026-09-01 等待中的子代理可由用户插话精确唤醒（本地候选）
 
 - 旧控制面只允许插话进入 pending/running attempt；直属父代理因等待 child 已结束本轮时，用户从详情页发

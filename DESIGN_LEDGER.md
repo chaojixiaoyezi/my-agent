@@ -1,5 +1,38 @@
 # DESIGN LEDGER
 
+## 2026-09-01 能力授权读取直属父级精确工具快照【状态：R128 单 Gateway 真 TUI 通过】
+
+- `capability_request` 是 child 请求直属父级已有能力的控制协议，不是具体危险工具调用的用户审批。
+  grant/deny 必须读取结构化 `capability_request` 与宿主生成的 `parent_tool_authority`；只要 exact 工具名位于
+  直属父级权威快照内，父级可以自主 grant，同一 AgentRun 续跑。child 随后真正调用危险工具时仍进入既有
+  ToolCall approval，不能把 capability grant 冒充用户批准。
+- 根 main 创建 child 时，`create_subagents` 的 scoped Tool Gateway handler 从当轮不可变
+  `ToolRuntimeSnapshot` 生成 `direct_parent_tool_authority.v1`，通过 ContextVar 只写入 child canonical
+  attributes。该事实不能由模型参数伪造，也不进入公开 tool payload、operation contract 或幂等摘要。嵌套
+  parent 则从其 exact runner execution context 重建当前有效工具，包含历史普通/MCP grant 与禁用策略。
+- 普通工具和 MCP 工具在 grant 审计中保留各自字段，但下一 runner 的 provider 工具快照与 durable
+  `task.allowed_tools` 必须同时合并二者，使同一 run 能调用获批 MCP，也使孙代理只能沿父级当前 authority
+  继续减法。父快照缺失、parent id 漂移或请求工具不在快照内一律结构化 fail closed；旧任务才保留带
+  `PARENT_CREATION_SNAPSHOT_MISSING` 警告的进程级兼容来源。
+- 该边界对齐 会话运行时 `multi_agents.rs` / `agent/control/spawn.rs` 的“child 继承父 turn effective config、
+  approval policy、sandbox 与 cwd”，并参考 终端交互 `runAgent.ts` 的 worker 工具池与
+  `swarmWorkerHandler.ts` 的具体 ToolUse permission 上送；没有新增自然语言审批判官或第二套工具注册表。
+- R124 真 TUI `ma-r124-110-main-capability-approval` 保留为首个失败基线：child 请求两个 Computer Use 工具，
+  父级没有创建时 authority 而错误拒绝。R125 已证明快照成功落盘，同时暴露两项后续主链缺口：模型在
+  `requested_mcp_tools` 填写唯一工具短名，而 provider 注册名带 `mcp__server__tool`；旧语义 Router 又在父级
+  wake 前把无 card 命中误关成 GAP。当前只对 MCP 字段做“父快照内唯一、末段完全相等”的结构化规范化，
+  重名/未知不猜；直属父级能授予全部 exact 工具时，Router 只记录 `PARENT_RESOLUTION_REQUIRED` 并保持
+  OPEN。R126 又证明 MiniMax 可能把 MCP 短名放进普通 `requested_tools`；当前实现对两个申请字段统一执行相同
+  唯一精确归类，只有父快照内唯一 MCP 末段命中才移入完整 `requested_mcp_tools`。
+- R128 真 TUI `ma-r128-110-main-capability-approval` 已完成闭环：child
+  `subagent-1788293169-474f3c3b` 的 `capreq-1788293189-ab042cc0` 被直属 main 自主 grant 为
+  `capgrant-1788293213-1dc31102`；request 中四个 Computer Use 短名均规范为完整 MCP 名，父快照显示全部
+  grantable。原 run 从 `runsess-...-1788293174856-155690` 续到第二片
+  `runsess-...-1788293223305-155866`，没有换 child。随后 `take_screenshot_with_ocr` 仍产生独立
+  `approval:053e0842c70dd2439b6ed55d`，用户只允许一次后才执行；runtime gate ledger 为 APPROVED，真实
+  `list_windows/get_screen_size/take_screenshot_with_ocr` trace 全部成功并返回 OCR。由此证明 capability grant
+  与危险 ToolCall approval 已分账，模型终屏不作为验收依据。
+
 ## 2026-09-01 普通 turn、显式 Goal 与 TUI 展示必须分层【状态：R121 最终 wheel 真 TUI 通过】
 
 - 普通 turn 与显式 ThreadGoal 是两种不同产品语义。普通 turn 由模型自然回复后结束，open Todo、工具轮上限、

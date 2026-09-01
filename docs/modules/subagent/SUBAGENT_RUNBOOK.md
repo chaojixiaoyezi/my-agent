@@ -133,6 +133,13 @@ allow 与 forbidden 同时命中时按最具体路径条目决定，同层由 fo
   用户输入，不能落一条没有 `expected_turn_id` 的消息，也不能因校验失败杀掉 child。
 - 停止：`cancel_subagents(run_id|run_ids, reason)`，只停止点名的直属 child。
 - 权限：`resolve_capability_requests(run_id, decision, reason, ...)`，只裁决直属 child。
+- 权限裁决只读宿主提供的 exact `capability_request` 与 `parent_tool_authority`。根 child 的上限来自创建当轮
+  不可变 Tool Gateway 快照，孙代理来自直属父 run 当前 execution context；模型不能用“我好像没有这个工具”
+  或 child 自报字段替代。申请位于上限内时父级自主 grant，同一 run 续跑；超出时结构化 deny/fail closed。
+- capability grant 不是具体危险动作的批准。获批工具真正执行时仍按 ToolCall effect/policy 向用户逐次审批；
+  排障必须分别找 capability request/grant、runner session、tool approval 和 tool result 四份账。
+- MCP 短名只在直属父快照中存在唯一 exact 末段命中时由宿主规范成完整 `mcp__server__tool`；重名或未知
+  不猜。若父级有全部 exact 工具而 request 已变 GAP，说明旧语义路由抢跑，不能让父级重复 deny 或新建替身。
 - child 的 child 由 child 自己管理；根代理不能越过中间层直接控制孙代理。
 - 已结束且目标仍有缺口时，可以创建职责明确的新 child，并用
   `replacement_for_run_ids` 记录接管关系；不能把“再派一个”当状态查询。

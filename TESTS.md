@@ -3135,3 +3135,71 @@ ruff check \
 - 本地 focused（未跑全仓）：Gateway 会话、文件系统工具和核心工具 Schema 共 159 项通过；新增 cwd 生产形态
   4 项通过；后台策略 3 项通过；相关文件 Ruff 与 `git diff --check` 通过。fresh wheel/TUI 复验仍待当前 8 路
   长任务自然结束后执行，避免人为中断测试样本。
+
+## 2026-09-01 R124 capability 父级工具 authority 失败基线与本地候选
+
+- `.10` 单 Gateway、MiniMax-M2.7，tmux `ma-r124-110-main-capability-approval`。测试只要求一名无 Computer
+  Use 预置的 child 申请 `mcp__computer_use__list_windows` 与
+  `mcp__computer_use__take_screenshot_with_ocr`，父级在自身权限内裁决，并把 capability 与具体危险调用
+  审批分开。真实结果为 main deny、request CLOSED、child DONE 且无第二 runner session；终屏却称 PASS。
+  该轮保留为失败证据，不能当安全拒绝正例。
+- 本地候选覆盖：创建时 host snapshot 覆盖模型同名 attributes 且退出 ContextVar 后不泄漏；根父级使用
+  creation snapshot 而非漂移的进程 registry；嵌套父级读取 exact execution context；越权工具不结清 OPEN
+  request；普通/MCP grant 同时进入后续工具快照与 durable allowed tools；wake 明确危险 ToolCall approval
+  独立。
+- 定向命令：
+
+  ```bash
+  python3 -m pytest \
+    agent_py_agent/tests/test_orchestration_create_subagents_tool.py \
+    agent_py_agent/tests/test_orchestration_create_subagents_items.py \
+    agent_py_agent/tests/test_resolve_capability_requests_tool.py \
+    agent_py_agent/tests/test_direct_parent_lifecycle.py \
+    agent_py_agent/tests/test_capability_auto_grant.py \
+    -q --tb=short
+  ```
+
+  结果：104 项通过；相关 PyCompile、Ruff 与 `git diff --check` 通过。fresh wheel 尚未部署，下一轮必须同时
+  核对 TUI、canonical child/request/grant/session、approval ledger 与真实 Computer Use 结果。
+
+### R125 fresh：父快照通过，MCP 短名与语义路由竞态失败
+
+- wheel `8694e876...` 部署到 `.10` 唯一 `ma-gateway-r124-capability-110`，MiniMax-M2.7；tmux
+  `ma-r125-110-main-capability-approval` 只输入一段普通中文，要求一名子助手自然申请桌面能力。
+- canonical child `subagent-1788290283-ec8f4f06` 的 `direct_parent_tool_authority` 已精确包含完整
+  `mcp__computer_use__list_windows` 与 `mcp__computer_use__take_screenshot_with_ocr`，证明 R124 第一层修复
+  生效。失败点是 child 在 `requested_mcp_tools` 填短名，且 CapabilityRouter no-hit 在 main wake 前把 OPEN
+  变 GAP；main 随后看见 unavailable 并 deny，resolve 又得到 no pending。该轮仍为失败，不算真机完成。
+- 新候选只在父快照内唯一末段完全匹配时把 MCP 短名规范成完整名；重名/未知不猜。父级拥有全部 exact 工具
+  时，语义路由返回观察型 `PARENT_RESOLUTION_REQUIRED` 并保持 OPEN。扩展后的 capability、route、dispatch、
+  create、approval 组合 193 项 focused 通过；待下一 wheel fresh TUI。
+
+### R126 fresh：模型把 MCP 短名放入普通工具字段
+
+- `.10` 唯一 Gateway、MiniMax-M2.7，tmux `ma-r126-110-main-capability-approval`。child
+  `subagent-1788291990-346e17f6` 的父 authority 再次包含三项完整 Computer Use 工具，但模型提交
+  `capability_type=tool + requested_tools=[list_windows,take_screenshot,take_screenshot_with_ocr]`。第一版只规范
+  `requested_mcp_tools`，因此 Router 仍抢先结 GAP，父级 resolve 得到 no pending；本轮仍失败。
+- 候选让普通/MCP 两个申请字段共用父快照唯一 exact 规范器：普通完整工具名优先，只有唯一 MCP 末段命中才
+  归入完整 MCP 字段，未知/重名保持原字段并 fail closed。新增真实参数形态回归后相关组合 194 项通过。
+
+### R128 fresh：直属父级 grant、同 run 续片与危险 ToolCall 独立审批通过
+
+- `.10` 唯一 Gateway `ma-gateway-r127-capability-110`、MiniMax-M2.7，真 TUI
+  `ma-r128-110-main-capability-approval`。只输入一段普通中文，要求 child 自然发现 Computer Use 缺口、直属
+  main 在自身 authority 内自主批准、原 child 续跑，且具体桌面操作仍由用户逐项确认。
+- child `subagent-1788293169-474f3c3b` 提交 `capreq-1788293189-ab042cc0`；普通/MCP 两个输入字段最终规范为
+  四个完整 `mcp__computer_use__*` 名称，request status 为 GRANTED，grant 为
+  `capgrant-1788293213-1dc31102`。`parent_tool_authority` 来源为
+  `parent_creation_runtime_snapshot`，`all_requested_tools_grantable=true`、`unavailable_tools=[]`，并明确
+  `capability_resolution_requires_user_approval=false`、`dangerous_tool_call_approval_is_separate=true`。
+- 原 child 第一片 runner session 为 `runsess-subagent-...-1788293174856-155690`，获批后第二片为
+  `runsess-subagent-...-1788293223305-155866`，最终仍是同一 run 且状态 DONE。真实 trace 依次包含
+  capability_request、list_windows、get_screen_size、take_screenshot_with_ocr，后三项均成功。
+- OCR 调用产生独立审批 `approval:053e0842c70dd2439b6ed55d`；用户在 TUI 选择“允许一次”后，canonical
+  `runtime_gate_ledger` 才记录 `tool_approval=APPROVED/allowed=true`，并关联 exact operation 与结果 ref。
+  OCR 结果真实读到窗口标题 `root@myagent-test:~` 和屏幕文本 `COMPUTERUSEPASSR122`。因此本轮通过来自
+  request/grant/session/approval/tool ledger 与实际结果，不来自模型终屏自报。
+- 提交前严格 focused gate 扩展到 capability、direct-parent、approval、Gateway control、runtime guidance 与
+  background main 共 401 个 selected case：395 passed、6 个仓库既有 expected xfail、0 failed；Ruff、
+  PyCompile、doc sync、strict code-size（hard=0）、`git diff --check` 和 clean-package 全部通过。

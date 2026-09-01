@@ -374,6 +374,24 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 ## 2026-07-28 工具能力继承边界
 
+- 根 main 的 child 不能用 `agent.tools` 当前进程注册表或模型正文反推父级授权上限。创建 child 的
+  `create_subagents.execute_scoped` 从当轮 Tool Gateway `ToolRuntimeSnapshot` 冻结
+  `direct_parent_tool_authority.v1`，经 ContextVar 只进入 canonical task attributes；输入中同名字段会被
+  删除并由宿主事实覆盖。嵌套 parent 从 exact runner execution context 读取有效工具，因而自然包含已获批
+  ordinary/MCP grant 与 disabled policy。
+- `capability_scope.direct_parent_tool_authority` 是父级 wake 与 grant 硬门的共同来源。请求工具不在快照、
+  parent id 不匹配或快照不可用时 fail closed；不对名称做前缀、描述或 capability 文本模糊匹配。
+  grant 只表示 child 可在下一执行片看见该工具；真正危险 ToolCall 仍走独立 approval ledger。
+- `requested_mcp_tools` 允许模型填写 tool 的公开短名，但宿主只在直属父快照内存在唯一
+  `mcp__server__<完全相同末段>` 时规范成完整 registry 名；两个 server 重名或没有命中时保留原值并由权限
+  硬门拒绝。语义 CapabilityRouter 遇到父级可完整授予的 exact 请求只投影
+  `PARENT_RESOLUTION_REQUIRED`，不得在父 wake 前把 OPEN 抢先关闭为 GAP。
+- 同一规则也处理模型误放在 `requested_tools` 的 MCP 短名：父级普通 exact 工具名优先；只有不存在普通 exact
+  且恰好命中一个 MCP 末段时才移入 `requested_mcp_tools`。字段归类来自 registry 事实，不解析 capability
+  文案或任务正文。
+- `CapabilityGrant.tools` 与 `mcp_tools` 为审计保留类型差异，但 runner immutable snapshot 和 task durable
+  `allowed_tools` 合并二者。这样同一 AgentRun 授权后能继续，且孙代理只能在直属父当前有效集合内再申请。
+
 - `services/hierarchy/scheduler.py` 把已经解析的 child role 与父 task 的当前 `allowed_tools` 一并交给
   `services/hierarchy/tool_policy.py`。
 - `tool_policy.scheduled_child_tools` 先整理显式请求与角色候选，再统一与父工具集合求交集。

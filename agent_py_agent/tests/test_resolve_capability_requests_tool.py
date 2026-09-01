@@ -14,7 +14,10 @@ from pathlib import Path
 
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
-from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityRequestParams
+from agent_py_agent.agent.subagents.services.lifecycle import (
+    RecordCapabilityGrantParams,
+    RecordCapabilityRequestParams,
+)
 from agent_py_agent.tests._tool_runtime_harness import execute_approved_registry_test_call
 
 
@@ -78,6 +81,258 @@ def test_grant_resolves_request_and_extends_write_boundary():
         assert boundary["capability_write_roots"] == [granted_dir]
         # 唤醒账本落盘
         assert reloaded.attributes["capability_resolution_wake"]["decision"] == "grant"
+
+
+def test_grant_uses_root_runtime_snapshot_as_tool_authority():
+    """A root parent may grant an exact registered tool and the same run receives it."""
+    with tempfile.TemporaryDirectory() as td:
+        agent = SimpleAgent(
+            AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"),
+            Path(td),
+        )
+        task = agent.subagents.create_run(
+            goal="读取文件",
+            thought="需要父级工具授权",
+            plan=["申请", "读取"],
+            allowed_tools=["capability_request"],
+        )
+        request = agent.subagents.lifecycle.record_capability_request(
+            task.id,
+            RecordCapabilityRequestParams(
+                problem="当前快照没有 read_file",
+                needed_capability="read_file",
+                capability_type="tool",
+                requested_tools=["read_file"],
+            ),
+        )
+
+        result = _tool(agent).execute(
+            {
+                "run_id": task.id,
+                "request_id": request.id,
+                "decision": "grant",
+                "reason": "read_file 在父级当前运行时快照内",
+            }
+        )
+        payload = json.loads(result.output)
+        reloaded = agent.subagents.load(task.id)
+
+        assert result.ok and payload["ok"]
+        assert payload["resolved"][0]["parent_tool_authority"][
+            "all_requested_tools_grantable"
+        ] is True
+        assert reloaded.capability_requests[0].status == "GRANTED"
+        assert reloaded.capability_grants[0].tools == ["read_file"]
+        assert reloaded.status == "PENDING"
+
+
+def test_grant_prefers_exact_parent_creation_snapshot_over_child_process_registry():
+    """A root child grant reads the creating turn snapshot, not its worker process tool pool."""
+    with tempfile.TemporaryDirectory() as td:
+        agent = SimpleAgent(
+            AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"),
+            Path(td),
+        )
+        task = agent.subagents.create_run(
+            goal="读取文件",
+            thought="请求父级已有能力",
+            plan=["申请", "继续"],
+            parent_id="root-turn-exact",
+            root_id="root-turn-exact",
+            allowed_tools=["capability_request"],
+            attributes={
+                "direct_parent_tool_authority": {
+                    "schema_version": "direct_parent_tool_authority.v1",
+                    "parent_run_id": "root-turn-exact",
+                    "available_tool_names": ["read_file"],
+                    "snapshot_hash": "sha256:exact",
+                    "owner_type": "main_agent",
+                }
+            },
+        )
+        request = agent.subagents.lifecycle.record_capability_request(
+            task.id,
+            RecordCapabilityRequestParams(
+                problem="当前 child 没有 read_file",
+                needed_capability="read_file",
+                capability_type="tool",
+                requested_tools=["read_file"],
+            ),
+        )
+
+        result = _tool(agent).execute(
+            {
+                "run_id": task.id,
+                "request_id": request.id,
+                "decision": "grant",
+                "reason": "创建该 child 的父回合快照含 read_file",
+            }
+        )
+        payload = json.loads(result.output)
+
+        assert result.ok
+        authority = payload["resolved"][0]["parent_tool_authority"]
+        assert authority["authority_source"] == "parent_creation_runtime_snapshot"
+        assert authority["snapshot_error_code"] == ""
+
+
+def test_grant_rejects_tool_outside_parent_runtime_snapshot():
+    """Model prose cannot grant a tool absent from the direct parent's runtime snapshot."""
+    with tempfile.TemporaryDirectory() as td:
+        agent = SimpleAgent(
+            AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"),
+            Path(td),
+        )
+        task = agent.subagents.create_run(
+            goal="调用不存在工具",
+            thought="测试父级上限",
+            plan=["申请"],
+            allowed_tools=["capability_request"],
+        )
+        request = agent.subagents.lifecycle.record_capability_request(
+            task.id,
+            RecordCapabilityRequestParams(
+                problem="需要一个未注册工具",
+                needed_capability="not_registered_tool",
+                capability_type="tool",
+                requested_tools=["not_registered_tool"],
+            ),
+        )
+
+        result = _tool(agent).execute(
+            {
+                "run_id": task.id,
+                "request_id": request.id,
+                "decision": "grant",
+                "reason": "模拟模型错误批准",
+            }
+        )
+        payload = json.loads(result.output)
+        reloaded = agent.subagents.load(task.id)
+
+        assert result.ok is False and payload["ok"] is False
+        assert payload["errors"][0]["unavailable_tools"] == ["not_registered_tool"]
+        assert reloaded.capability_requests[0].status == "OPEN"
+        assert reloaded.capability_grants == []
+
+
+def test_mcp_grant_enters_next_runner_tool_snapshot():
+    """requested_mcp_tools must affect the next immutable runner snapshot, not only audit JSON."""
+    with tempfile.TemporaryDirectory() as td:
+        agent = SimpleAgent(
+            AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"),
+            Path(td),
+        )
+        task = agent.subagents.create_run(
+            goal="调用 MCP 工具",
+            thought="测试 MCP grant 生效",
+            plan=["申请", "继续"],
+            allowed_tools=["capability_request"],
+        )
+        request = agent.subagents.lifecycle.record_capability_request(
+            task.id,
+            RecordCapabilityRequestParams(
+                problem="当前角色快照没有精确工具",
+                needed_capability="read_file",
+                capability_type="mcp",
+                requested_mcp_tools=["read_file"],
+            ),
+        )
+
+        result = _tool(agent).execute(
+            {
+                "run_id": task.id,
+                "request_id": request.id,
+                "decision": "grant",
+                "reason": "精确工具在父级快照内",
+            }
+        )
+        reloaded = agent.subagents.load(task.id)
+        _skills, tools, grants = agent.subagents.runner_context._extract_granted_caps(reloaded)
+
+        assert result.ok
+        assert reloaded.capability_grants[0].mcp_tools == ["read_file"]
+        assert "read_file" in tools
+        assert grants[0]["mcp_tools"] == ["read_file"]
+
+
+def test_nested_parent_can_regrant_only_its_effective_mcp_tool():
+    """A prior MCP grant is durable parent authority for the exact grandchild tool."""
+    from agent_py_agent.agent.agent_core.runner.context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        agent = SimpleAgent(
+            AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"),
+            Path(td),
+        )
+        parent = agent.subagents.create_run(
+            goal="父代理",
+            thought="先获得精确工具再派孙代理",
+            plan=["申请", "分派"],
+            allowed_tools=["capability_request", "resolve_capability_requests"],
+        )
+        parent_request = agent.subagents.lifecycle.record_capability_request(
+            parent.id,
+            RecordCapabilityRequestParams(
+                problem="父代理需要 read_file",
+                needed_capability="read_file",
+                capability_type="mcp",
+                requested_mcp_tools=["read_file"],
+            ),
+        )
+        agent.subagents.lifecycle.record_capability_grant(
+            parent.id,
+            RecordCapabilityGrantParams(
+                request_id=parent_request.id,
+                grant_type="mcp",
+                mcp_tools=["read_file"],
+                reason="根代理授予精确工具",
+            ),
+        )
+        child = agent.subagents.create_run(
+            goal="孙代理读取文件",
+            thought="需要直属父级授权",
+            plan=["申请", "读取"],
+            parent_id=parent.id,
+            root_id=parent.root_id,
+            allowed_tools=["capability_request"],
+        )
+        child_request = agent.subagents.lifecycle.record_capability_request(
+            child.id,
+            RecordCapabilityRequestParams(
+                problem="孙代理需要 read_file",
+                needed_capability="read_file",
+                capability_type="mcp",
+                requested_mcp_tools=["read_file"],
+            ),
+        )
+
+        previous = set_current_subagent_context(agent, run_id=parent.id)
+        try:
+            result = _tool(agent).execute(
+                {
+                    "run_id": child.id,
+                    "request_id": child_request.id,
+                    "decision": "grant",
+                    "reason": "工具属于直属父级有效权限",
+                }
+            )
+        finally:
+            restore_current_subagent_context(agent, previous)
+
+        payload = json.loads(result.output)
+        reloaded_parent = agent.subagents.load(parent.id)
+        reloaded_child = agent.subagents.load(child.id)
+        assert result.ok and payload["ok"]
+        assert "read_file" in reloaded_parent.allowed_tools
+        assert payload["resolved"][0]["parent_tool_authority"]["authority_source"] == (
+            "parent_run_execution_context"
+        )
+        assert reloaded_child.capability_grants[0].mcp_tools == ["read_file"]
+        assert "read_file" in reloaded_child.allowed_tools
 
 
 def test_deny_closes_request_with_auditable_reason_and_wakes():
@@ -332,3 +587,61 @@ def test_capability_request_submission_notifies_parent_thread():
         thread_now = store.thread_for_task(task.id)
         if thread_now is not None:
             assert notify_error is None, f"有 thread 时通知不应失败: {notify_error}"
+
+
+def test_capability_request_wake_carries_parent_tool_authority_and_separate_approval_fact():
+    """The parent wake exposes exact grantability without turning grant into user approval."""
+    from agent_py_agent.agent.agent_core.capability_request_tool import CapabilityRequestTool
+    from agent_py_agent.agent.agent_core.runner import context as runner_context
+
+    with tempfile.TemporaryDirectory() as td:
+        agent = SimpleAgent(
+            AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"),
+            Path(td),
+        )
+        task = agent.subagents.create_run(
+            goal="测试 MCP 权限申请通知",
+            thought="提交非自动授权请求",
+            plan=["申请"],
+            allowed_tools=["capability_request"],
+        )
+        store = agent.conversation_store
+        thread = store.get_or_create_thread(
+            {
+                "canonical_user_id": "owner-capability-test",
+                "channel": "internal",
+                "channel_conversation_id": "capability-test-thread",
+                "channel_user_id": "owner-capability-test",
+            }
+        )
+        store.bind_task(
+            {
+                "thread_id": thread.thread_id,
+                "task_id": task.id,
+                "goal": task.goal,
+            }
+        )
+        previous = runner_context.set_current_subagent_context(agent, run_id=task.id)
+        try:
+            result = CapabilityRequestTool(agent).execute(
+                {
+                    "problem": "角色快照没有 read_file",
+                    "needed_capability": "read_file",
+                    "capability_type": "mcp",
+                    "requested_mcp_tools": ["read_file"],
+                }
+            )
+        finally:
+            runner_context.restore_current_subagent_context(agent, previous)
+
+        assert result.ok
+        events = store.unhandled_observations_requiring_main(limit=20)
+        event = next(item for item in events if item.event_type == "subagent_capability_request_open")
+        authority = event.metadata["parent_tool_authority"]
+        request_scope = event.metadata["capability_request"]
+
+        assert request_scope["requested_mcp_tools"] == ["read_file"]
+        assert authority["grantable_tools"] == ["read_file"]
+        assert authority["all_requested_tools_grantable"] is True
+        assert authority["capability_resolution_requires_user_approval"] is False
+        assert authority["dangerous_tool_call_approval_is_separate"] is True

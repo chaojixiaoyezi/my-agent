@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ..subagents.capability_scope import (
+    canonical_capability_tool_request_fields,
+    direct_parent_tool_authority,
+    requested_capability_tool_names,
+)
 from ..subagents.role_templates import is_self_authorized_root_task
 from ..subagents.services.lifecycle import RecordCapabilityRequestParams
 from ..tooling.models import (
@@ -60,9 +65,9 @@ class CapabilityRequestTool(BaseTool):
         self.agent = agent
         self.model_spec = build_capability_request_model_spec()
 
-    # LLM: 自动授权成功后必须返回 context_refresh runtime transition；不能依赖模型
-    # 按提示主动结束，也不能原地修改当前 ToolRuntimeSnapshot。OPEN 请求继续走父级路由。
-    # 函数用途: 记录当前子代理的能力缺口，能安全自动批时落账并切到下一工作片。
+    # LLM: 自动授权成功后必须返回 context_refresh runtime transition；OPEN 请求的 wake
+    # 必须携带直属父级真实 ToolRuntimeSnapshot 权限事实，不能让模型从 child prose 猜可授予性。
+    # 函数用途: 记录当前子代理的能力缺口；安全自动批则切片续跑，外部能力则带父级权限快照上报。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         request = _capability_request_input(self.agent, params)
         if isinstance(request, ToolHandlerOutcome):
@@ -100,10 +105,16 @@ class CapabilityRequestTool(BaseTool):
             # R4 子项②：提交即推送父级（observation + wake），主代理不再对未决请求失明。
             from ..subagents.runner_completion_wake import notify_parent_on_capability_request
 
+            authority = direct_parent_tool_authority(
+                self.agent,
+                self.agent.subagents.load(request.run_id),
+                requested_capability_tool_names(record),
+            )
             notify_parent_on_capability_request(
                 self.agent.subagents,
                 self.agent.subagents.load(request.run_id),
                 record,
+                parent_tool_authority=authority.to_dict(),
             )
         payload = self._request_payload(request.run_id, record, auto_grant)
         payload.update(scope_resolution_payload(request.scope_resolution))
@@ -182,11 +193,27 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
             "缺少 run_id；runner 内会自动使用当前 run id。",
             error_code="TOOL_PARAMETER_REQUIRED",
         )
-    if _is_root_run(agent, run_id):
+    manager = getattr(agent, "subagents", None)
+    try:
+        task = manager.load(run_id)
+    except (AttributeError, FileNotFoundError):
+        return _capability_error(
+            f"run_id 不存在: {run_id}",
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+    if is_self_authorized_root_task(task):
         return _capability_error(
             "root run 不走 capability_request；root 当前不应缺能力，请使用现有工具、调度下级或说明暂不支持。",
             error_code="TOOL_NOT_ALLOWED",
         )
+    requested_tools, requested_mcp_tools = canonical_capability_tool_request_fields(
+        agent,
+        task,
+        string_list(normalized.get("requested_tools"), TOOL_TEXT_LIST_OPTIONS),
+        string_list(normalized.get("requested_mcp_tools"), TOOL_TEXT_LIST_OPTIONS),
+    )
+    normalized["requested_tools"] = requested_tools
+    normalized["requested_mcp_tools"] = requested_mcp_tools
     problem = str(normalized.get("problem") or "").strip()
     if not problem:
         return _capability_error(
@@ -198,17 +225,6 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
         params=_record_params(normalized, problem),
         scope_resolution=resolution,
     )
-
-
-def _is_root_run(agent: object, run_id: str) -> bool:
-    manager = getattr(agent, "subagents", None)
-    if manager is None or not hasattr(manager, "load"):
-        return False
-    try:
-        task = manager.load(run_id)
-    except FileNotFoundError:
-        return False
-    return is_self_authorized_root_task(task)
 
 
 def _record_params(params: dict[str, object], problem: str) -> RecordCapabilityRequestParams:
@@ -282,9 +298,21 @@ def _capability_request_input_schema() -> dict[str, object]:
             "enum": ["shell", "tool", "skill", "mcp", "network", "generic"],
             "description": "能力分类，用于父级路由。",
         },
-        "requested_tools": {**string_list_schema, "description": "真正需要父级授权的工具名。"},
+        "requested_tools": {
+            **string_list_schema,
+            "description": (
+                "真正需要父级授权的工具名。若填写的是父级快照中唯一命中的 MCP 短名，"
+                "宿主会把它规范到 requested_mcp_tools；重名或未知时不会猜。"
+            ),
+        },
         "requested_skills": {**string_list_schema, "description": "任务确实需要的 skill 名。"},
-        "requested_mcp_tools": {**string_list_schema, "description": "需要父级接入的 MCP 工具名。"},
+        "requested_mcp_tools": {
+            **string_list_schema,
+            "description": (
+                "需要父级接入的 MCP 工具名。可填写完整 mcp__server__tool 名；若只知道 tool 短名，"
+                "宿主仅在直属父级快照中存在唯一精确同名项时规范化，重名或未知时不会猜。"
+            ),
+        },
         "requested_commands": {**string_list_schema, "description": "需要授权的命令或命令前缀。"},
         "cwd_scope": {**string_list_schema, "description": "命令工作目录范围。"},
         "path_scope": {**string_list_schema, "description": "需要读写的路径范围。"},

@@ -52,6 +52,9 @@ class SubAgentRunnerContextService:
     def __init__(self, manager):
         self.manager = manager
 
+    # LLM: Ordinary and MCP grant names share the immutable model tool snapshot, while the
+    # original typed grant fields remain separate in audit payloads. Never drop mcp_tools here.
+    # 函数用途: 汇总子代理已获批的 Skill、普通工具和 MCP 工具，供下一工作片重建可执行快照。
     def _extract_granted_caps(self, task: SubAgentTask) -> tuple[list[str], list[str], list[dict[str, object]]]:
         """Extract skills, tools, and grants from capability grants."""
         granted_skills: list[str] = []
@@ -59,7 +62,13 @@ class SubAgentRunnerContextService:
         grants: list[dict[str, object]] = []
         for grant in task.capability_grants:
             granted_skills = _merge_list(granted_skills, grant.skills)
-            granted_tools = _merge_list(granted_tools, grant.tools)
+            # MCP grant 里的名称已经是 provider 可调用的精确 mcp__server__tool 名；
+            # 它与普通 tool grant 进入同一个 immutable runtime snapshot，但仍保留
+            # 独立 mcp_tools 账本字段供审计，不能只落账不生效。
+            granted_tools = _merge_list(
+                granted_tools,
+                [*grant.tools, *grant.mcp_tools],
+            )
             grants.append(
                 {
                     "id": grant.id,

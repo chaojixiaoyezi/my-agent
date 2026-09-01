@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from ..capability.skill_snapshot import SkillSnapshotError
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..settings.defaults import default_config_int
+from ..subagents.capability_scope import bind_creation_tool_authority
 from ..subagents.services.base import CreateRunParams
 from ..subagents.services.hierarchy.scheduled_role import (
     agent_name_has_trailing_identifier,
@@ -29,6 +30,7 @@ from ..tooling.models import (
     ResourceScopePolicy,
     ToolHandlerOutcome,
     ToolInputPolicy,
+    ToolInvocationContext,
     ToolRuntimePolicy,
 )
 from .hierarchy_tools import execute_child_creation
@@ -246,6 +248,17 @@ class CreateSubagentsTool(BaseTool):
             return execute_create_subagents_service(self.agent, params)
         except ToolCancelled as exc:
             return _cancelled_create_subagents_result(exc)
+
+    # LLM: The Tool Gateway's immutable snapshot is the only source for a root or nested parent's
+    # creation-time tool ceiling. Inject it after model input validation and before persistence.
+    # 函数用途: 创建 child 前把父代理本轮真实工具快照写进宿主属性，供跨进程权限申请精确裁决。
+    def execute_scoped(
+        self,
+        params: dict[str, object],
+        context: ToolInvocationContext,
+    ) -> ToolHandlerOutcome:
+        with bind_creation_tool_authority(context.runtime_snapshot):
+            return self.execute(params)
 
 
 # LLM: A propagated user/turn cancellation is a known interrupted create, not a generic handler

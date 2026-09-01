@@ -8,6 +8,7 @@ from ..contracts.subagent_completion import SUBAGENT_COMPLETION_SCHEMA_VERSION
 from ..memory_archive.tokens import estimate_tokens
 from ..model_visible_refs import current_model_ref, current_model_ref_list
 from ..runtime_errors import runtime_error_report
+from .capability_scope import request_scope_snapshot
 from .context_bundle_contracts import declared_output_refs
 from .models import (
     SUBAGENT_WAKE_STATUSES,
@@ -344,7 +345,13 @@ def _service_window_remaining(task: Any) -> float:
 # for the child's BLOCKED result to resume that exact parent; notification
 # failure is recorded and must not erase the durable request.
 # 函数用途: 直接根孩子申请权限时唤醒根会话；孙代理申请交给直属父级处理。
-def notify_parent_on_capability_request(manager: Any, task: Any, request: Any) -> None:
+def notify_parent_on_capability_request(
+    manager: Any,
+    task: Any,
+    request: Any,
+    *,
+    parent_tool_authority: dict[str, object] | None = None,
+) -> None:
     store = getattr(manager, "conversation_store", None)
     if store is None:
         return
@@ -358,8 +365,23 @@ def notify_parent_on_capability_request(manager: Any, task: Any, request: Any) -
         thread = store.thread_for_task(run_id)
         if thread is None:
             return
-        observation = store.append_observation(_capability_open_observation(thread, task, request))
-        store.raise_wake_signal(_capability_open_signal(thread, task, request_id, observation))
+        observation = store.append_observation(
+            _capability_open_observation(
+                thread,
+                task,
+                request,
+                parent_tool_authority=parent_tool_authority,
+            )
+        )
+        store.raise_wake_signal(
+            _capability_open_signal(
+                thread,
+                task,
+                request,
+                observation,
+                parent_tool_authority=parent_tool_authority,
+            )
+        )
     except Exception as exc:
         attrs = dict(getattr(task, "attributes", {}) or {})
         attrs["capability_request_notify_error"] = runtime_error_report(
@@ -386,10 +408,20 @@ def _has_persisted_subagent_parent(manager: Any, task: Any) -> bool:
     return str(getattr(parent, "id", "") or "").strip() == parent_id
 
 
-# 函数用途: 构造"能力申请待处理"的 observation payload（requires_main_agent=True）。
-def _capability_open_observation(thread: Any, task: Any, request: Any) -> dict[str, object]:
+# LLM: This observation carries exact request and parent-authority facts to the root wake. Keep
+# capability resolution distinct from later per-ToolCall user approval and never infer either.
+# 函数用途: 构造“能力申请待处理”的 observation，带上申请和直属父级权限事实供 main 裁决。
+def _capability_open_observation(
+    thread: Any,
+    task: Any,
+    request: Any,
+    *,
+    parent_tool_authority: dict[str, object] | None = None,
+) -> dict[str, object]:
     run_id = str(getattr(task, "id", "") or "")
     request_id = str(getattr(request, "id", "") or "")
+    authority = dict(parent_tool_authority or {})
+    authority_summary = _capability_authority_summary(authority)
     return {
         "thread_id": thread.thread_id,
         "event_type": "subagent_capability_request_open",
@@ -397,6 +429,7 @@ def _capability_open_observation(thread: Any, task: Any, request: Any) -> dict[s
             f"子代理 {run_id} 提交了能力申请 {request_id}"
             f"（{str(getattr(request, 'needed_capability', '') or '')[:80]}），等待父级 grant/deny；"
             "父代理用 resolve_capability_requests 处理，不要放着不管。"
+            f"{authority_summary}能力授权不是用户对具体危险 ToolCall 的批准。"
         ),
         "urgency": "high",
         "source_agent_id": run_id,
@@ -408,18 +441,25 @@ def _capability_open_observation(thread: Any, task: Any, request: Any) -> dict[s
             "request_id": request_id,
             "capability_type": str(getattr(request, "capability_type", "") or ""),
             "path_scope": list(getattr(request, "path_scope", []) or []),
+            "capability_request": request_scope_snapshot(request),
+            "parent_tool_authority": authority,
         },
     }
 
 
-# 函数用途: 构造"能力申请待处理"的 wake signal payload（高优先级 + 去重键）。
+# LLM: The wake signal mirrors the durable observation and dedupes by exact run/request id. Its
+# metadata is advisory model context; canonical request/grant state remains the machine authority.
+# 函数用途: 构造高优先级且可去重的能力申请 wake，唤醒直属 main 处理同一条申请。
 def _capability_open_signal(
     thread: Any,
     task: Any,
-    request_id: str,
+    request: Any,
     observation: Any,
+    *,
+    parent_tool_authority: dict[str, object] | None = None,
 ) -> dict[str, object]:
     run_id = str(getattr(task, "id", "") or "")
+    request_id = str(getattr(request, "id", "") or "")
     return {
         "thread_id": thread.thread_id,
         "observation": observation,
@@ -429,8 +469,28 @@ def _capability_open_signal(
         "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
         "root_task_id": str(getattr(task, "root_id", "") or run_id),
         "dedupe_key": f"capability-open:{run_id}:{request_id}",
-        "metadata": {"run_id": run_id, "request_id": request_id},
+        "metadata": {
+            "run_id": run_id,
+            "request_id": request_id,
+            "capability_request": request_scope_snapshot(request),
+            "parent_tool_authority": dict(parent_tool_authority or {}),
+        },
     }
+
+
+# LLM: This sentence projects only typed host authority. It must not choose grant/deny or infer
+# user approval from availability; the parent model still owns the scoped capability decision.
+# 函数用途: 把父级工具可授予快照压成一条短提示，减少模型把 capability 当用户审批的概率。
+def _capability_authority_summary(authority: dict[str, object]) -> str:
+    if authority.get("has_tool_request") is not True:
+        return ""
+    grantable = [str(item) for item in authority.get("grantable_tools", []) if str(item)]
+    unavailable = [str(item) for item in authority.get("unavailable_tools", []) if str(item)]
+    if unavailable:
+        return "宿主父级权限快照显示不可授予工具=" + ",".join(unavailable) + "；"
+    if grantable:
+        return "宿主父级权限快照显示申请工具均可授予；"
+    return "宿主父级权限快照不可用，grant 必须失败关闭；"
 
 
 def _record_wake_error(manager: Any, task: Any, result: Any, exc: BaseException) -> None:

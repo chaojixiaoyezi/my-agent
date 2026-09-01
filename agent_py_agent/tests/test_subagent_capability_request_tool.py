@@ -11,6 +11,9 @@ from types import SimpleNamespace
 from agent_py_agent.agent.agent_core.capability_request_tool import CapabilityRequestTool
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.subagents.capability_scope import (
+    DIRECT_PARENT_TOOL_AUTHORITY_ATTR,
+)
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.role_templates import ROLE_BASE_TOOLS
 from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
@@ -60,6 +63,127 @@ def test_capability_request_tool_records_open_request(tmp_path):
     assert request.requested_tools == ["controlled_exec"]
     assert request.requested_commands == ["pwd", "python3"]
     assert request.output_budget["stdout_bytes"] == 1024
+
+
+def test_capability_request_tool_canonicalizes_unique_parent_mcp_leaf_name(tmp_path):
+    """A user-natural short MCP name becomes the one exact parent registry name, never fuzzy."""
+    manager = SubAgentManager(tmp_path / "subs")
+    parent_id = "gateway-request-1"
+    task = manager.create_run(
+        goal="need desktop tools",
+        thought="ask root parent",
+        plan=["request"],
+        parent_id=parent_id,
+        root_id=parent_id,
+    )
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=task.id)
+    task.attributes[DIRECT_PARENT_TOOL_AUTHORITY_ATTR] = {
+        "schema_version": "direct_parent_tool_authority.v1",
+        "parent_run_id": task.parent_id,
+        "available_tool_names": [
+            "mcp__computer_use__list_windows",
+            "mcp__computer_use__take_screenshot_with_ocr",
+        ],
+        "snapshot_hash": "sha256:test",
+        "owner_type": "main_agent",
+    }
+    manager.save(task)
+
+    result = CapabilityRequestTool(agent).execute(
+        {
+            "problem": "需要列出窗口并截图识字。",
+            "capability_type": "mcp",
+            "requested_mcp_tools": ["list_windows", "take_screenshot_with_ocr"],
+        }
+    )
+
+    request = manager.load(task.id).capability_requests[0]
+    assert result.ok is True
+    assert request.status == "OPEN"
+    assert request.requested_mcp_tools == [
+        "mcp__computer_use__list_windows",
+        "mcp__computer_use__take_screenshot_with_ocr",
+    ]
+
+
+def test_capability_request_tool_does_not_guess_ambiguous_mcp_leaf_name(tmp_path):
+    """Two parent servers with the same leaf keep the short name unresolved and fail closed later."""
+    manager = SubAgentManager(tmp_path / "subs")
+    parent_id = "gateway-request-2"
+    task = manager.create_run(
+        goal="need desktop tools",
+        thought="ask root parent",
+        plan=["request"],
+        parent_id=parent_id,
+        root_id=parent_id,
+    )
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=task.id)
+    task.attributes[DIRECT_PARENT_TOOL_AUTHORITY_ATTR] = {
+        "schema_version": "direct_parent_tool_authority.v1",
+        "parent_run_id": task.parent_id,
+        "available_tool_names": [
+            "mcp__desktop_a__list_windows",
+            "mcp__desktop_b__list_windows",
+        ],
+        "snapshot_hash": "sha256:test",
+        "owner_type": "main_agent",
+    }
+    manager.save(task)
+
+    result = CapabilityRequestTool(agent).execute(
+        {
+            "problem": "需要列出窗口。",
+            "capability_type": "mcp",
+            "requested_mcp_tools": ["list_windows"],
+        }
+    )
+
+    assert result.ok is True
+    assert manager.load(task.id).capability_requests[0].requested_mcp_tools == [
+        "list_windows"
+    ]
+
+
+def test_capability_request_tool_moves_unique_mcp_leaf_out_of_generic_tools(tmp_path):
+    """MiniMax may use requested_tools for a desktop short name; host canonicalization stays exact."""
+    manager = SubAgentManager(tmp_path / "subs")
+    parent_id = "gateway-request-3"
+    task = manager.create_run(
+        goal="need desktop tools",
+        thought="ask root parent",
+        plan=["request"],
+        parent_id=parent_id,
+        root_id=parent_id,
+        attributes={
+            DIRECT_PARENT_TOOL_AUTHORITY_ATTR: {
+                "schema_version": "direct_parent_tool_authority.v1",
+                "parent_run_id": parent_id,
+                "available_tool_names": [
+                    "mcp__computer_use__list_windows",
+                    "mcp__computer_use__take_screenshot",
+                ],
+                "snapshot_hash": "sha256:test",
+                "owner_type": "main_agent",
+            }
+        },
+    )
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=task.id)
+
+    result = CapabilityRequestTool(agent).execute(
+        {
+            "problem": "需要列出窗口并截图。",
+            "capability_type": "tool",
+            "requested_tools": ["list_windows", "take_screenshot"],
+        }
+    )
+
+    request = manager.load(task.id).capability_requests[0]
+    assert result.ok is True
+    assert request.requested_tools == []
+    assert request.requested_mcp_tools == [
+        "mcp__computer_use__list_windows",
+        "mcp__computer_use__take_screenshot",
+    ]
 
 
 def test_capability_request_tool_scopes_cross_run_writes_to_current_runner(tmp_path):

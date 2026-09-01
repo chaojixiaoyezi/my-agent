@@ -1,5 +1,31 @@
 # STATUS
 
+## 2026-09-01 R124--R128 capability 父级工具上限与独立 ToolCall 审批（完成）
+
+- fresh 失败样本 `ma-r124-110-main-capability-approval` 中，child
+  `subagent-1788282215-a4110226` 正确提交 `capreq-1788282235-577be3fa`，请求
+  `mcp__computer_use__list_windows` 与 `mcp__computer_use__take_screenshot_with_ocr`；main 因没有收到
+  创建时父级工具快照而错误 deny，随后把拒绝误报为 PASS。request 为 CLOSED/denied，child 没有第二片，
+  因此该轮明确失败。
+- 本地候选让 `create_subagents.execute_scoped` 从 immutable `ToolRuntimeSnapshot` 绑定宿主私有父权限事实，
+  `create_task_attributes` 覆盖任何输入同名字段后才落入 child canonical state；公共 tool 参数、operation
+  contract 与幂等键不包含该内部事实。嵌套父级按 exact execution context 计算可授予集合。
+- R125 `ma-r125-110-main-capability-approval` 已证明父快照包含两项完整 Computer Use 名称；但 child 提交
+  唯一短名，旧语义 Router 又先把 OPEN 结成 GAP，main 因此仍 deny 且 resolve 返回 no pending。候选现以
+  父快照内唯一末段完全匹配规范 MCP 短名，重名/未知不猜；父级有全部 exact 工具时自动 Router 保留 OPEN。
+- grant 同时把 `tools` 与 `mcp_tools` 并入同一 run 后续工具快照和 durable allowed tools；wake 与工具回执
+  明确 capability 裁决无需用户批准，而具体危险 ToolCall approval 保持独立。R126 又证明模型会把 MCP 短名
+  写入普通工具字段，现已对两个字段统一做父快照内唯一 exact 归类。
+- R128 `.10` 唯一 Gateway `ma-gateway-r127-capability-110`、MiniMax-M2.7，真 TUI
+  `ma-r128-110-main-capability-approval` 通过。`subagent-1788293169-474f3c3b` 的
+  `capreq-1788293189-ab042cc0` 由直属 main 自主 grant 为 `capgrant-1788293213-1dc31102`；同一 run 生成第二
+  runner session 后实际调用 `list_windows/get_screen_size/take_screenshot_with_ocr`。OCR 调用另有
+  `approval:053e0842c70dd2439b6ed55d`，用户选择“允许一次”后 runtime gate ledger 才记 APPROVED 并执行，
+  证明两层权限没有互相冒充。最终 wheel SHA-256
+  `54c992e9d949ae957e05eb4afba5a06a2672b66c34a271f59e5c94d7f3db22cf`，部署目录
+  `/root/.my-agent/runtime-venv-r127`；部署前 194 项相关 focused 通过，提交前扩展 gate 为 401 个 selected
+  case（395 passed、6 个既有 expected xfail、0 failed）。
+
 ## 2026-09-01 R123 Computer Use 开源执行器接入（完成）
 
 - `my-agent[computer-use]` 固定复用 `computer-control-mcp==0.3.13`，没有复制截图/OCR/窗口/鼠标键盘实现；

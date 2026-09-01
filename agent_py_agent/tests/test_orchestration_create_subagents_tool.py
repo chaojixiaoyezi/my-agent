@@ -32,6 +32,76 @@ def _mock_created_task(index: int):
     return task
 
 
+def test_parent_runtime_snapshot_is_host_bound_for_every_create_attribute_build():
+    """The scoped host snapshot overrides input lookalikes without changing public params."""
+    from agent_py_agent.agent.agent_core.orchestration.create_policy import (
+        create_task_attributes,
+    )
+    from agent_py_agent.agent.subagents.capability_scope import (
+        bind_creation_tool_authority,
+    )
+
+    snapshot = SimpleNamespace(
+        run_id="root-turn-1",
+        available_tool_names=frozenset({"read_file", "mcp__computer_use__list_windows"}),
+        snapshot_hash="sha256:test-parent-snapshot",
+        owner_type="main_agent",
+    )
+    expected = {
+        "schema_version": "direct_parent_tool_authority.v1",
+        "parent_run_id": "root-turn-1",
+        "available_tool_names": ["mcp__computer_use__list_windows", "read_file"],
+        "snapshot_hash": "sha256:test-parent-snapshot",
+        "owner_type": "main_agent",
+    }
+    raw = {
+        "attributes": {
+            "direct_parent_tool_authority": {"available_tool_names": ["spoofed_tool"]},
+            "marker": "a",
+        }
+    }
+    with bind_creation_tool_authority(snapshot):
+        first = create_task_attributes(raw)
+        second = create_task_attributes({})
+
+    assert first["direct_parent_tool_authority"] == expected
+    assert first["marker"] == "a"
+    assert second["direct_parent_tool_authority"] == expected
+    assert "direct_parent_tool_authority" not in create_task_attributes(raw)
+
+
+def test_create_subagents_scoped_handler_binds_and_resets_parent_authority(monkeypatch):
+    """Tool Gateway scope is visible only while the create handler is executing."""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.subagents.capability_scope import (
+        current_creation_tool_authority,
+    )
+    from agent_py_agent.agent.tooling.models import (
+        ToolHandlerOutcome,
+        ToolInvocationContext,
+    )
+
+    snapshot = SimpleNamespace(
+        run_id="root-turn-scoped",
+        available_tool_names=frozenset({"read_file"}),
+        snapshot_hash="sha256:scoped",
+        owner_type="main_agent",
+    )
+    tool = CreateSubagentsTool(SimpleNamespace())
+    observed: dict[str, object] = {}
+
+    def fake_execute(_params):
+        observed.update(current_creation_tool_authority())
+        return ToolHandlerOutcome("create_subagents", True, "ok")
+
+    monkeypatch.setattr(tool, "execute", fake_execute)
+    result = tool.execute_scoped({}, ToolInvocationContext(runtime_snapshot=snapshot))
+
+    assert result.ok
+    assert observed["parent_run_id"] == "root-turn-scoped"
+    assert current_creation_tool_authority() == {}
+
+
 def test_unrelated_open_runs_do_not_consume_current_root_session_slots():
     """其它 TUI 的可恢复旧任务不能永久堵住当前根任务的 会话运行时 式会话槽。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import (

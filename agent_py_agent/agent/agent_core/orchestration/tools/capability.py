@@ -22,6 +22,7 @@ from ....subagents.authorization_gate import (
     authorize_direct_child_operation,
 )
 from ....subagents.capability_scope import (
+    direct_parent_tool_authority,
     partition_capability_paths_by_owner,
     resolve_capability_scope_path,
 )
@@ -212,18 +213,24 @@ class ResolveCapabilityRequestsTool(BaseTool):
                     request_id=request.id,
                     grant_type=str(getattr(request, "capability_type", "") or "generic"),
                     tools=list(record.get("tools") or []),
+                    mcp_tools=list(record.get("mcp_tools") or []),
                     skills=list(record.get("skills") or []),
                     capability_cards=list(record.get("capability_cards") or []),
                     reason=ctx.reason,
                     path_scope=list(record.get("path_scope") or []),
-                    request_scope={"resolved_by": "resolve_capability_requests"},
+                    request_scope={
+                        "resolved_by": "resolve_capability_requests",
+                        "parent_tool_authority": dict(
+                            record.get("parent_tool_authority") or {}
+                        ),
+                    },
                 ),
             )
             record["grant_id"] = grant.id
 
-    # LLM: Grant judgment is side-effect free. write_roots remains an objective hard boundary;
-    # request status and grant are committed together later by record_capability_grant.
-    # 函数用途: 校验一条授权并生成结构化裁决记录，真正结清申请由后续原子落账完成。
+    # LLM: Grant judgment is side-effect free. write_roots and direct-parent ToolRuntimeSnapshot
+    # are objective hard boundaries; request status and grant commit together later.
+    # 函数用途: 校验目录、工具和 Skill 上限并生成裁决记录，真正结清申请由后续原子落账完成。
     def _mark_grant(self, ctx: _ResolveContext, request: Any) -> dict[str, object]:
         requested_roots = _string_list(ctx.params.get("write_roots")) or _string_list(getattr(request, "path_scope", []))
         allowed_roots, rejected_roots = self._partition_safe_roots(ctx.task, requested_roots)
@@ -234,7 +241,24 @@ class ResolveCapabilityRequestsTool(BaseTool):
                 "error": "write_roots 全部越界（必须在任务工作区或主代理 workspace 内），未授权。",
                 "rejected_write_roots": rejected_roots,
             }
-        tools = _string_list(ctx.params.get("tools")) or _string_list(getattr(request, "requested_tools", []))
+        tools = _string_list(ctx.params.get("tools")) or _string_list(
+            getattr(request, "requested_tools", [])
+        )
+        mcp_tools = _string_list(getattr(request, "requested_mcp_tools", []))
+        requested_tool_names = list(dict.fromkeys([*tools, *mcp_tools]))
+        authority = direct_parent_tool_authority(
+            self.agent,
+            ctx.task,
+            requested_tool_names,
+        )
+        if authority.unavailable_tools:
+            return {
+                "ok": False,
+                "request_id": request.id,
+                "error": "申请工具超出直属父级当前可用工具快照，未授权。",
+                "unavailable_tools": list(authority.unavailable_tools),
+                "parent_tool_authority": authority.to_dict(),
+            }
         skills, capability_cards, skill_error = _resolved_skill_grant(
             self.agent,
             _string_list(getattr(request, "requested_skills", [])),
@@ -253,8 +277,10 @@ class ResolveCapabilityRequestsTool(BaseTool):
             "status": "GRANTED",
             "path_scope": allowed_roots,
             "tools": tools,
+            "mcp_tools": mcp_tools,
             "skills": skills,
             "capability_cards": capability_cards,
+            "parent_tool_authority": authority.to_dict(),
         }
         if rejected_roots:
             record["rejected_write_roots"] = rejected_roots

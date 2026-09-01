@@ -24,9 +24,12 @@ from ..capability_route_service import (
     write_capability_route_report_files,
 )
 from ..capability_scope import (
+    direct_parent_tool_authority,
     effective_request_path_scope,
     existing_delete_trash_grant,
     partition_capability_paths_by_owner,
+    request_scope_snapshot,
+    requested_capability_tool_names,
 )
 from ..model_capabilities import capability_request_counts_as_open
 from ..models import CapabilityRequest, SubAgentCapabilityRouteOptions, SubAgentTask
@@ -129,6 +132,17 @@ class SubAgentCapabilityService:
                     apply=apply,
                 ),
             )
+        requested_tool_names = requested_capability_tool_names(request)
+        if requested_tool_names:
+            parent_authority = direct_parent_tool_authority(
+                self.manager,
+                task,
+                requested_tool_names,
+            )
+            if not parent_authority.unavailable_tools:
+                # 直属父级已经持有全部 exact 工具时，OPEN request 必须留给父级模型裁决；
+                # 语义 CapabilityRouter 没有匹配 card 不能抢先把它关闭成 GAP。
+                return _parent_resolution_record(task, request, query, hits, parent_authority)
         selected_hits = _hits_matching_requested_scope(request, selected_hits)
         selected_cards, granted_skills, granted_tools, reasons = extract_selected_hits_data(selected_hits)
         if existing_grant := existing_delete_trash_grant(task, request):
@@ -161,6 +175,32 @@ class SubAgentCapabilityService:
                 reasons=reasons,
             )
         )
+
+
+# LLM: This record is observational even in an applying sweep. It preserves the OPEN request for
+# the direct parent and prevents semantic no-hit routing from racing the parent's structured wake.
+# 函数用途: 记录“直属父级可裁决”但不改申请状态，避免自动路由先把 OPEN 误关成 GAP。
+def _parent_resolution_record(
+    task: SubAgentTask,
+    request: CapabilityRequest,
+    query: str,
+    hits: list[CapabilitySearchHit],
+    authority: object,
+) -> CapabilityRouteRecord:
+    return CapabilityRouteRecord(
+        id=f"parent-resolution:{request.id}",
+        run_id=task.id,
+        request_id=request.id,
+        status="PARENT_RESOLUTION_REQUIRED",
+        dry_run=True,
+        query=query,
+        candidate_count=len(hits),
+        request_scope={
+            "capability_request": request_scope_snapshot(request),
+            "parent_tool_authority": authority.to_dict(),
+        },
+        message="申请工具均在直属父级当前权限内；保留 OPEN，等待直属父级结构化 grant/deny。",
+    )
 
 
 def _hits_matching_requested_scope(

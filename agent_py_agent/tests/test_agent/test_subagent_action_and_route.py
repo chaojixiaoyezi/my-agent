@@ -448,6 +448,58 @@ def test_subagent_capability_route_creates_gap_when_no_match():
         assert report.records[0].request_scope["capability_type"] == "mcp"
 
 
+def test_capability_router_keeps_parent_grantable_tool_request_open():
+    """An automatic semantic no-hit must not race the direct parent's typed grant/deny wake."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        agent = SimpleAgent(AgentConfig(subagent_workspace="subs"), root)
+        parent_id = "gateway-request-1"
+        task = agent.subagents.create_run(
+            goal="读取桌面",
+            thought="等待直属父级授权",
+            plan=["申请能力"],
+            parent_id=parent_id,
+            root_id=parent_id,
+            attributes={
+                "direct_parent_tool_authority": {
+                    "schema_version": "direct_parent_tool_authority.v1",
+                    "parent_run_id": parent_id,
+                    "available_tool_names": [
+                        "mcp__computer_use__list_windows",
+                    ],
+                    "snapshot_hash": "sha256:test",
+                    "owner_type": "main_agent",
+                }
+            },
+        )
+        request = agent.subagents.lifecycle.record_capability_request(
+            task.id,
+            RecordCapabilityRequestParams(
+                problem="需要读取桌面窗口",
+                needed_capability="desktop_windows",
+                capability_type="mcp",
+                requested_mcp_tools=["mcp__computer_use__list_windows"],
+            ),
+        )
+        router = CapabilityRouter(
+            config=CapabilityConfig(capability_candidate_limit=3),
+            tool_specs=[],
+        )
+
+        report = agent.subagents.capability.write_capability_route_report(
+            router,
+            apply=True,
+            run_ids=[task.id],
+        )
+        routed = agent.subagents.load(task.id)
+
+        assert report.records[0].status == "PARENT_RESOLUTION_REQUIRED"
+        assert report.records[0].dry_run is True
+        assert routed.capability_requests[0].id == request.id
+        assert routed.capability_requests[0].status == "OPEN"
+        assert routed.capability_gaps == []
+
+
 def test_subagent_capability_route_turns_owner_scope_violation_into_gap_without_wake():
     """语义路由命中工具也不能批准 owner 外路径，更不能唤醒同一 child 重跑。"""
     with tempfile.TemporaryDirectory() as td:

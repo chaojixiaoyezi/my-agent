@@ -337,14 +337,19 @@ def build_resolve_capability_requests_model_spec() -> ToolModelSpec:
         "reason": "必填。裁决原因，写入审计。",
         "request_id": "可选。grant/deny 时指定单个请求 id；缺省处理该 run 全部未决请求。",
         "write_roots": "可选。grant 文件系统请求时授权的目录列表；缺省用请求自带 path_scope。目录必须落在当前任务工作区或主代理 workspace 内；若请求的是兄弟/越界目录，不要重试 grant，改用 deny 唤醒 child 回现有写区。",
-        "tools": "可选。grant 时附加授权的工具名列表；缺省用请求自带 requested_tools。",
+        "tools": (
+            "可选。grant 时附加授权的精确模型工具名；缺省用请求自带 requested_tools。"
+            "只能授予宿主 parent_tool_authority 标为 grantable 的工具；能力 grant 不等于用户批准"
+            "随后某一次危险 ToolCall。"
+        ),
     }
     return ToolModelSpec(
         name="resolve_capability_requests",
         description=(
             "主代理对子代理能力申请的裁决入口：grant 授权（可附目录写权限），deny 显式拒绝。"
             "两种处理都会唤醒子代理继续任务，并保留结构化审计记录。grant 不能扩出父级 workspace；"
-            "越界请求应 deny，让 child 使用现有目录，不能反复 grant。"
+            "也不能超出直属父级当前 ToolRuntimeSnapshot。越界请求应 deny，让 child 使用现有目录，"
+            "不能反复 grant。这里不走用户审批；获批工具的具体危险调用仍单独进入用户审批。"
         ),
         input_schema=_input_schema(parameters, _RESOLVE_CAPABILITY_PARAMETER_SCHEMA, required=("run_id", "decision")),
         hints=_hints(
