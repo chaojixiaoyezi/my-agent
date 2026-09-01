@@ -1,5 +1,19 @@
 # COMPLETED
 
+## 2026-09-01 R123 Computer Use 开源执行器与真 TUI 闭环
+
+- 解决 my-agent 没有系统桌面控制能力、又不应自造截图/OCR/鼠标键盘引擎的问题：官方 extra 固定复用
+  MIT/PyPI `computer-control-mcp==0.3.13`，底座只做结构化装配，并复用既有 MCP、Tool Gateway、审批、取消、
+  operation 和 owner 墙。上游缺失的滚轮只调用同一 PyAutoGUI `scroll()`，没有复制执行器。
+- 默认关闭；只有 `local/main + full-access` 注入。普通 owner 的真实 TUI 完全看不到能力；浏览器页面仍优先
+  Browser。普通 MCP 默认延迟披露，Computer Use 通过 deployment-owned `catalog_category=computer_use`
+  首轮直接可见，修复 MiniMax-M2.7 因无法消费原生 Tool Search 引用而误选终端的问题。
+- `.10` `ma-r123-110-u376-computer-use` 已真实完成窗口激活、截图/OCR、滚动找验证码、点击、ASCII 输入、
+  Enter 和 OCR 后置验证；`ma-r123-110-u377-computer-stop` 证明 MCP 运行调用可由 `/stop` 中断；
+  `ma-r123-110-u378-computer-isolation` 证明普通 owner 隔离。全程只有 1 Gateway + 1 MCP 子进程。
+- commit `8eab29c` wheel SHA-256 为 `c6b1fa3d3d4c302984d2c4a5cd333bd0768f22c8becc64995b787ebacf20822e`；
+  107 项相关合同、Ruff、doc sync、strict code-size、diff 与 clean-package 通过。本轮远低于 10,000 行，未跑全仓 pytest。
+
 ## 2026-09-01 R121 Goal 固定状态、思考折叠与后续轮连续性
 
 - `/goal ...` 在 durable outbox 成功后原样留在 TUI 历史；固定面板 Goal 排在 child 前，方向键可选，Enter

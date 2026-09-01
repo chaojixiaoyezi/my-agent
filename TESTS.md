@@ -12,6 +12,13 @@
   provider Schema 中直接可见；目录分类不能降低 dangerous effect 或绕过 exact approval。
 - 另做一次慢 OCR `/stop`，确认 typed cancellation 和 MCP/Gateway 存活；没有环境时明确记为环境缺口。
 
+2026-09-01 R123 已在 `.10` 完成：`ma-r123-110-u376-computer-use` 真实调用窗口激活、截图、OCR、滚轮、
+点击、ASCII 输入、按键、等待和后置 OCR；从屏幕读到 `SCROLL-R122-927`，目标窗口回显
+`COMPUTER_USE_PASS R122`。`ma-r123-110-u377-computer-stop` 用确定性的 120 秒 `wait_milliseconds`
+覆盖与慢 OCR 相同的 MCP client cancellation 通道，Running 时 `/stop` 立即变为“已中断”，随后 Gateway/MCP
+均仍为单进程且 pending/processing 为 0。普通 owner `ma-r123-110-u378-computer-isolation` 没有任何
+Computer Use 工具。热 OCR 太快，未用碰运气式时序冒充“慢 OCR 正好被撞中”。
+
 ## 2026-09-01 R121 Goal/思考与底层恢复边界（本地与真 TUI 通过）
 
 - TUI focused 覆盖：Goal 无 active task 时仍投影；Goal 排在 child 前；`↓/Enter` 展开 exact objective 且不

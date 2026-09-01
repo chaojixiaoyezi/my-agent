@@ -28,7 +28,7 @@
 
 ### Computer Use 复用开源执行器
 
-状态：本地底座适配、首轮工具可见性修复与相邻合同通过，待 `.10` MiniMax-M2.7 真 TUI 复验
+状态：已落地，`.10` MiniMax-M2.7 真 TUI 完整闭环通过
 
 解决问题：my-agent 后续需要截图、点击、输入、滚动和等待界面状态，但不应在底座里自造一套桌面自动化引擎。
 当前选定 MIT/PyPI 的 `computer-control-mcp==0.3.13`，通过 `my-agent[computer-use]` 随底座发布；my-agent
@@ -43,7 +43,12 @@ DISPLAY/WAYLAND/XAUTHORITY/DBUS 字段，不泄漏 API Key。上游未注册滚�
 `mcp` 延迟类别；MiniMax-M2.7 不支持 会话运行时/终端交互 的原生 tool-search 引用协议，首轮实际看不到桌面工具，
 转而误选 `terminal_session`。当前增加 deployment-owned `catalog_category`：普通 MCP 仍默认延迟，官方
 Computer Use 使用稳定 `computer_use` 分类直接进入首轮 Schema。这个字段只控制目录披露，不能改变 owner、
-Full Access、effect 或审批。待 fresh TUI 完成真实桌面动作后再把本项移入完成清单。
+Full Access、effect 或审批。fresh TUI `ma-r123-110-u376-computer-use` 已完成 activate、截图、OCR、滚轮、
+点击、ASCII 输入、回车与后置 OCR；模型从滚动后的屏幕读取 `SCROLL-R122-927`，目标应用回显
+`COMPUTER_USE_PASS R122`。同一 Gateway 的 `ma-r123-110-u377-computer-stop` 用 120 秒 MCP wait 覆盖与慢
+OCR 相同的 client cancellation 通道，`/stop` 后工具立即显示“已中断”；普通 owner TUI
+`ma-r123-110-u378-computer-isolation` 则完全看不到桌面能力。验收后仍只有 1 个 Gateway 和 1 个 Computer
+Use 子进程。
 
 ### 测试机部署空间的显式保留策略
 

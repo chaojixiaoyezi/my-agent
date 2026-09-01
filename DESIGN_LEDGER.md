@@ -30,7 +30,7 @@
   不互堵；stable message 重放只返回原 receipt，终态 child 只读。模型消费后形成 typed reply obligation，
   避免“思考里答了但用户看不到回复”。
 
-## 2026-09-01 Computer Use 只复用成熟执行器【状态：底座适配完成，待真 TUI 验收】
+## 2026-09-01 Computer Use 只复用成熟执行器【状态：底座与真 TUI 已完成】
 
 - Computer Use 的截图、坐标、点击、键入、等待和窗口发现不在本项目重复实现。对 Agent-S、UI-TARS
   Desktop、OpenACI、open-computer-use、computer-use-mcp 与 computer-control-mcp 做源码、许可证、发布形态和
@@ -49,6 +49,10 @@
   `services/api/模型助手.ts` 的 model-aware `isToolSearchEnabled` 后，本项目允许部署者为单个 MCP server 声明
   `catalog_category`。默认仍是 `mcp`；官方 Computer Use 固定为 `computer_use`，首轮直接可见。该配置只影响
   provider 工具目录和检索提示，不能改变 owner、workspace、effect、approval 或 Tool Gateway 权限快照。
+- `.10` 最终以 MiniMax-M2.7、单 Gateway 和 Xvfb/xterm 验收：模型首轮直接选择 Computer Use，逐笔审批后
+  自主完成滚动找码、点击、键入、回车和 OCR 后置验证；120 秒 MCP wait 经 `/stop` 进入同一取消链；普通
+  owner 的真实 TUI 不注册该能力。执行器仍保留上游边界：截图 image 未直接进入文本 provider、Unicode
+  键入未承诺、上游个别失败仍可能以 `isError=false` 的自然语言返回，所以最终状态必须二次读取验证。
 
 ## 2026-08-31 直属父级在继承权限上限内自主裁决，Gateway 恢复扫描不得堵住会话车道【状态：R118 wake/递归真 TUI 通过；capability focused 通过】
 

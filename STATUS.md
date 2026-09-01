@@ -1,5 +1,21 @@
 # STATUS
 
+## 2026-09-01 R123 Computer Use 开源执行器接入（完成）
+
+- `my-agent[computer-use]` 固定复用 `computer-control-mcp==0.3.13`，没有复制截图/OCR/窗口/鼠标键盘实现；
+  my-agent 只提供开关、local/main + Full Access 身份门、MCP profile 和一个基于上游 PyAutoGUI 的滚轮注册。
+- 首轮 TUI 发现全部 MCP 被无条件延迟后，已按 会话运行时 `search_tool_enabled ? Deferred : Direct` 和 终端交互
+  model-aware Tool Search 做底层修复：普通 MCP 保持 `mcp` 延迟分类，官方 Computer Use 使用结构化
+  `computer_use` 分类直接进入首轮 Schema。目录披露不能降低 effect、审批、owner 或 workspace 权限。
+- `.10` MiniMax-M2.7 的 `ma-r123-110-u376-computer-use` 完成真实滚动找码、点击、键入、回车和 OCR 后置
+  验证；`ma-r123-110-u377-computer-stop` 中断 120 秒 MCP 调用；`ma-r123-110-u378-computer-isolation`
+  证明普通 owner 无此能力。当前唯一 Gateway 为 `ma-gateway-8eab29c-cu-110` / PID `133160`，唯一 Computer
+  Use 子进程 PID `133203`，pending/processing 均为 0，MiniMax-M2.7，启动到 `/status` 为 3203ms。
+- 最终 wheel SHA-256 `c6b1fa3d3d4c302984d2c4a5cd333bd0768f22c8becc64995b787ebacf20822e`；默认
+  `/usr/local/bin/my-agent` 已切到 `/root/.my-agent/runtime-venv-8eab29c-cu/bin/my-agent`，旧入口保存在
+  `/root/deploy-8eab29c-cu/my-agent-entrypoint.before` 可回滚。原始 image 未进入文本模型、Unicode 输入和上游
+  错误标记不准仍作为明确限制保留。
+
 ## 2026-09-01 R121 Goal/思考展示与普通模式续跑边界（完成）
 
 - 普通任务不再因工具轮上限、open Todo 或旧 `ordinary_task_resume` policy 在用户不知情时继续调用模型；历史

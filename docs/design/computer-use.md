@@ -109,3 +109,19 @@ ASCII、按 Enter，再读取结果文字。通过条件同时包括：
 4. `/stop` 能中断慢 OCR，Gateway 和 MCP 子进程不遗留失控调用；
 5. 同时连接多个 TUI 时仍只有一个 Gateway、local/main 只保留一个 Computer Use MCP 子进程；
 6. 一个普通 owner 在相同全局配置下看不到 Computer Use 工具。
+
+## 2026-09-01 最终验收记录
+
+| 项目 | 结果 |
+|---|---|
+| 发布物 | commit `8eab29c`；wheel SHA-256 `c6b1fa3d3d4c302984d2c4a5cd333bd0768f22c8becc64995b787ebacf20822e`；Python 3.11；`computer-control-mcp 0.3.13` |
+| 单实例 | Gateway `ma-gateway-8eab29c-cu-110` / PID `133160`；Computer Use PID `133203`；验收后均为 1 个 |
+| 完整闭环 | `ma-r123-110-u376-computer-use`：activate → screenshot/OCR → scroll → OCR 读出 `SCROLL-R122-927` → click → type → Enter → OCR 读出 `COMPUTER_USE_PASS R122` |
+| 工具审批 | screenshot、OCR、click、type、press 均出现 exact TUI approval；activate/scroll 按配置为 mutating，继续进入统一 operation 账 |
+| 取消 | `ma-r123-110-u377-computer-stop` 的 120 秒 `wait_milliseconds` 在 Running 时收到 `/stop`，工具立即显示“已中断”；这是与慢 OCR 共用的 MCP client cancellation 通道 |
+| owner 隔离 | `ma-r123-110-u378-computer-isolation` 使用普通 owner，模型明确没有桌面操作能力，未出现任何 `mcp__computer_use__*` |
+| 启动 | fresh runtime 的唯一 Gateway 从启动到 `/status` 为 `3203ms`；当前已低于 3--4 秒目标，首次冷加载仍受 RapidOCR/ONNX 缓存影响 |
+
+上游 `take_screenshot_with_ocr` 首次按窗口读取曾返回失败文本但没有设置 MCP `isError=true`；MiniMax 随后改用
+全屏 OCR 并通过后置读取完成。这个样本再次确认：上游成功文案和 `isError` 只作外部数据，不能代替目标应用
+状态验证。原始 screenshot 的 image block 在文本 MiniMax 请求里也没有被冒充成视觉理解。

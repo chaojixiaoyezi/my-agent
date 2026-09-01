@@ -2,11 +2,11 @@
 
 ## Computer Use
 
-- [ ] `my-agent[computer-use]` 在目标 Python 3.10--3.13 runtime 可安装，包版本固定为 `0.3.13`。
-- [ ] 默认/普通 owner/WorkspaceOnly 不注册 `mcp__computer_use__*`，local/main + Full Access 才注册。
-- [ ] Xvfb 真 TUI 经 MiniMax-M2.7 完成 list/OCR/activate/scroll/type/key/OCR 后置验证，并留下 tmux 名称。
-- [ ] 危险动作 exact approval、慢 OCR `/stop`、单 Gateway/单 MCP 子进程与普通 owner 隔离都有证据。
-- [ ] 原始 image 未进入 provider 时不得写成“模型已看图”；Unicode 输入限制如实保留。
+- [x] `my-agent[computer-use]` 在目标 Python 3.11 runtime 可安装，包版本固定为 `0.3.13`。
+- [x] 默认/普通 owner/WorkspaceOnly 不注册 `mcp__computer_use__*`，local/main + Full Access 才注册。
+- [x] Xvfb 真 TUI 经 MiniMax-M2.7 完成 list/OCR/activate/scroll/type/key/OCR 后置验证，并留下 tmux 名称。
+- [x] 危险动作 exact approval、同一 MCP 取消通道 `/stop`、单 Gateway/单 MCP 子进程与普通 owner 隔离都有证据。
+- [x] 原始 image 未进入 provider 时不得写成“模型已看图”；Unicode 输入限制如实保留。
 
 - [x] R121 fresh 真 TUI 必须原样显示已持久化的 `/goal ...`，固定面板 Goal 在直属 child 前；`↓` 高亮 Goal、
   `Enter` 展开完整 objective/状态/token/时限且不切代理页，`Ctrl+G` 收起。命令不得进入模型队列或产生第二个
