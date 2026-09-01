@@ -7,8 +7,6 @@
 # gap when the underlying mature library already owns the OS implementation.
 # 模块用途: 直接启动打包进底座的开源桌面执行器，并用其既有 PyAutoGUI 依赖补齐滚轮工具。
 
-from __future__ import annotations
-
 from typing import Optional
 
 import pyautogui
