@@ -866,6 +866,15 @@ tool_protocol: "native"
 #   mcp_servers: {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}, "timeout": 120}}
 mcp_servers: {}
 
+# Computer Use：直接复用 MIT 开源的 computer-control-mcp 执行鼠标、键盘、窗口、截图和 OCR，
+# my-agent 只通过现有 MCP/Tool Gateway 做薄适配，不重复实现桌面自动化引擎。
+# - 安装：pip install 'my-agent[computer-use]'；当前执行器的 OCR 依赖支持 Python 3.10-3.13。
+# - 默认 false：headless Gateway 不启动图形子进程，也不承担 OCR/ONNX 依赖。
+# - 只有结构化 local/main 管理员 + access_mode=full-access 才会注册；远程/普通 owner 即使改配置也不可见。
+# - 截图/OCR 和所有输入动作按 dangerous 审批；窗口枚举/屏幕尺寸/等待只读，移动鼠标/激活窗口按 mutating。
+# - Linux 复用 Gateway 当前 DISPLAY/WAYLAND/XAUTHORITY 会话；没有可用桌面会明确表现为工具不可用。
+computer_use_enabled: false
+
 # Language Server Protocol：管理员安装 server 后在这里显式配置，运行时按需惰性启动。
 # JSON-RPC 走 stdio；owner-scoped 用户的 server 同样必须进入 bwrap，缺 sandbox 时 fail-closed。
 # 不扫描 PATH 猜 server，也不允许普通用户在请求里改 command。精简 YAML 要使用单行 inline dict。

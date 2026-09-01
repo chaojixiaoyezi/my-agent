@@ -28,13 +28,16 @@
 
 ### Computer Use 复用开源执行器
 
-状态：设计登记，尚未选型或接入
+状态：本地底座适配与相邻合同通过，待 `.10` MiniMax-M2.7 真 TUI
 
 解决问题：my-agent 后续需要截图、点击、输入、滚动和等待界面状态，但不应在底座里自造一套桌面自动化引擎。
-选型必须先核对候选项目的当前许可证、跨平台/无头能力、可取消性、截图与坐标语义、进程隔离和维护活跃度；
-通过后直接打包成熟执行器，my-agent 只增加薄 Tool/Capability adapter。owner、Workspace/Full Access、危险操作
-审批、取消、超时、操作日志和截图归档仍由本项目结构化控制面统一治理；浏览器内任务优先现有 Browser 工具，
-不得同时维护第二套浏览器控制协议。该项不能与 R121 真 TUI 封板混为已完成。
+当前选定 MIT/PyPI 的 `computer-control-mcp==0.3.13`，通过 `my-agent[computer-use]` 随底座发布；my-agent
+只按结构化 local/main + Full Access 注入一份保留名 MCP profile，复用现有 typed Tool Gateway、审批、取消、
+超时、operation 和外部数据不可信投影。普通 owner/WorkspaceOnly 看不到该能力，GUI session 只透传明确的
+DISPLAY/WAYLAND/XAUTHORITY/DBUS 字段，不泄漏 API Key。上游未注册滚轮时只在启动入口复用其既有 PyAutoGUI
+公开动作补一个 `scroll_screen`，不复制执行引擎。下一步在 `.10` 单 Gateway 的 Xvfb 里用 MiniMax-M2.7
+完成窗口枚举、OCR、激活、滚动、ASCII 输入、按键与 OCR 后置验证；同时记录当前上游 Python 3.14/Unicode 输入和
+原始 image provider 投影限制。浏览器内任务继续优先 Browser，不能另造第二套浏览器控制协议。
 
 ### 测试机部署空间的显式保留策略
 

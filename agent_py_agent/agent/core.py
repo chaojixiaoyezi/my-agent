@@ -94,6 +94,7 @@ from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService,
 from .settings import AgentConfig
 from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
+from .tooling.computer_use_profile import computer_use_mcp_servers
 from .tooling.gateway_status import GatewayStatusTool
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .user_space.home_indexes import register_owner_ref
@@ -773,6 +774,12 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
     effective_path_access_mode = (
         "full" if access_mode == "full-access" and not owner_scope_root else config.path_access_mode
     )
+    mcp_servers = computer_use_mcp_servers(
+        getattr(config, "mcp_servers", {}),
+        enabled=bool(getattr(config, "computer_use_enabled", False)),
+        is_local_admin=_is_local_admin_owner(agent.home_paths),
+        access_mode=access_mode,
+    )
     return ToolRegistry(
         ToolRegistryParams(
             workspace_root=workspace_root,
@@ -818,8 +825,8 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             disabled_tools=list(getattr(agent.owner_policy, "disabled_tools", ())),
             artifact_root=runtime_owner_root(agent),
             runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
-            mcp_servers=dict(getattr(config, "mcp_servers", {}) or {}),
-                        tool_embedder=_build_tool_embedder(config),
+            mcp_servers=mcp_servers,
+            tool_embedder=_build_tool_embedder(config),
             operation_store=select_operation_store(agent),
             operation_store_required=True,
             operation_owner_id=str(

@@ -1,5 +1,15 @@
 # TESTS
 
+## Computer Use 真 TUI 最小闭环
+
+- 默认配置、普通 owner、WorkspaceOnly 与远程 owner 先走合同测试，必须证明不会启动 Computer Use MCP。
+- 真机只在 local/main + Full Access + `my-agent[computer-use]` 环境启用；同一轮记录唯一 Gateway PID、MCP
+  子进程数、MiniMax-M2.7 生效配置和准确 tmux 名称。
+- 测试窗口使用隔离 Xvfb/xterm。普通中文 prompt 触发窗口枚举、OCR、激活、滚动、ASCII 输入、按键与后置 OCR，
+  不允许测试者替被测 Agent 调工具或补目标应用状态。
+- 截图/OCR、滚动、输入、点击必须走真实审批；完成只认后置 OCR/应用状态，不认上游“Successfully”文案。
+- 另做一次慢 OCR `/stop`，确认 typed cancellation 和 MCP/Gateway 存活；没有环境时明确记为环境缺口。
+
 ## 2026-09-01 R121 Goal/思考与底层恢复边界（本地与真 TUI 通过）
 
 - TUI focused 覆盖：Goal 无 active task 时仍投影；Goal 排在 child 前；`↓/Enter` 展开 exact objective 且不

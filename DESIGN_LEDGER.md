@@ -30,15 +30,19 @@
   不互堵；stable message 重放只返回原 receipt，终态 child 只读。模型消费后形成 typed reply obligation，
   避免“思考里答了但用户看不到回复”。
 
-## 2026-09-01 Computer Use 只复用成熟执行器【状态：设计中，未实现】
+## 2026-09-01 Computer Use 只复用成熟执行器【状态：底座适配完成，待真 TUI 验收】
 
-- Computer Use 的截图、坐标、点击、键入、滚动、等待和窗口发现不在本项目重复实现。先对候选开源项目做
-  源码与许可证审计，选定一个维护活跃、可嵌入、可取消且能在目标 Linux/macOS 环境工作的执行器后，作为
-  可选运行依赖随底座打包；my-agent 只实现薄适配，不复制其核心。
+- Computer Use 的截图、坐标、点击、键入、等待和窗口发现不在本项目重复实现。对 Agent-S、UI-TARS
+  Desktop、OpenACI、open-computer-use、computer-use-mcp 与 computer-control-mcp 做源码、许可证、发布形态和
+  依赖审计后，选择 MIT/PyPI 的 `computer-control-mcp==0.3.13` 作为官方 `computer-use` 可选运行依赖；
+  my-agent 只生成 MCP profile，不复制其 PyAutoGUI/RapidOCR/ONNX 核心。上游未注册滚轮，启动入口只复用
+  同一 PyAutoGUI 的公开 `scroll()` 补一个 typed tool，不另造执行引擎。详细边界见
+  `docs/design/computer-use.md`。
 - 适配层必须把每个动作投影为 typed ToolCall/ToolResult，带 owner/thread/run/operation id，并复用现有
-  capability、危险操作审批、取消、超时、副作用幂等、截图归档和审计。Full Access 仍只有管理员显式拥有；
+  capability、危险操作审批、取消、超时、副作用幂等和审计。Full Access 仍只有管理员显式拥有；
   GUI 能力不能绕过文件 owner 墙或替用户自动批准。浏览器页面优先 Browser 工具，Computer Use 只补浏览器
-  工具无法覆盖的系统 UI。选型未完成前不写临时 pyautogui 旁路，也不把设计登记冒充可用功能。
+  工具无法覆盖的系统 UI。当前 MiniMax-M2.7 只消费文本，真实动作采用 OCR 坐标闭环；原始 MCP image 尚未
+  进入 provider 多模态消息，不能冒充“模型已经看图”。
 
 ## 2026-08-31 直属父级在继承权限上限内自主裁决，Gateway 恢复扫描不得堵住会话车道【状态：R118 wake/递归真 TUI 通过；capability focused 通过】
 

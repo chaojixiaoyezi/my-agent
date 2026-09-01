@@ -29,6 +29,11 @@ dev = [
   "pyte>=0.8.2,<0.9",  # 仅开发验收：成熟 VTXXX 屏幕模拟器用于 PTY ANSI checkpoint 重放，产品运行时不依赖
   "ruff>=0.8",
 ]
+# Computer Use 直接复用 MIT 开源执行器；它包含 OCR/ONNX 等较重桌面依赖，
+# 因此作为官方可选运行能力随底座发布，headless Gateway 默认不被强制安装。
+computer-use = [
+  "computer-control-mcp==0.3.13",
+]
 # 飞书/企业微信加密事件回调需要的密码学原语（stdlib 无 AES、密码学不能自建）。
 # `secrets` extra 名为已发布安装接口，暂保兼容；已退休的 SecretStore 不再消费它。
 secrets = [

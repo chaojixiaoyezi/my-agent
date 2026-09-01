@@ -370,6 +370,7 @@ def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> lis
             "tool_catalog_include_examples",
             "tool_catalog_show_truncated_notice",
             "tool_vector_search_enabled",
+            "computer_use_enabled",
         ),
     )
 

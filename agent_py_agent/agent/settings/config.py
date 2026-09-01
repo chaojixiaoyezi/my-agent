@@ -254,6 +254,9 @@ class _ToolConfigFields:
     # 未声明 effect 的 MCP 工具默认 dangerous；只有部署配置可逐工具降低风险，server 自报不授权。
     # 默认空 = 不连任何 server、不起任何子进程(零开销)。仅 stdio 传输(JSON-RPC over stdio)。
     mcp_servers: dict[str, Any] = field(default_factory=dict)
+    # Computer Use 复用 computer-control-mcp，不在本项目实现鼠标/键盘/OCR。只有 local/main
+    # 管理员同时显式 full-access 时才注入；普通 owner 和 WorkspaceOnly 一律不可见。
+    computer_use_enabled: bool = False
     lsp_servers: dict[str, Any] = field(default_factory=dict)
     # 视觉理解(短板6)：辅助视觉模型配置,让 analyze_image 工具能看图(分析图片内容)。
     # my-agent 主模型不一定支持视觉,所以走独立的 anthropic_compatible 视觉端点:把图片转成
