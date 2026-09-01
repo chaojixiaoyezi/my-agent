@@ -6,6 +6,20 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## AgentRun guidance successor
+
+- 用户从 TUI/Web/IM 对一个可见 child 插话时，控制面先做 exact owner/conversation/root/run 授权，再以
+  `(owner_id, run_id)` 的短 admission 锁保护“读 current attempt → 预留 successor → 写 durable guidance →
+  接纳启动”。锁不覆盖 provider 调用或 runner 生命周期，不同 owner/run 互不阻塞。
+- RuntimeDB 的 `queue_pending_attempt` 只排队不执行：一个尚未启动的 current pending attempt 可幂等复用；
+  running、unknown、非终态异常、遗留 execution lock 均 fail closed；合法 terminal predecessor 才能在同一
+  `BEGIN IMMEDIATE` 事务内递增 generation、CAS current pointer 并写 queued events。`create_attempt` 仍是
+  唯一取得执行锁和激活 pending 的入口。
+- guidance receipt 记录 exact `expected_turn_id`。启动前失败允许同 stable id 重放；只有同 AgentRun 的旧
+  attempt 已终态，才能把尚未 provider-submitted 的 receipt 重绑到新 pending attempt。submitted/consumed/
+  rejected receipt 不再启动下一轮。模型消费后由 typed reply obligation 约束当前 agent 回应用户，不从消息
+  文案猜“是否需要回复”。
+
 ## Exact stop admission 与 terminal fencing
 
 - `enqueue_agent_stop` 在调用线程内完成 exact owner/conversation/parent/run 鉴权和终态短路，然后按稳定键

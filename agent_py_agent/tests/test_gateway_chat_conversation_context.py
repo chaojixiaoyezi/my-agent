@@ -3019,6 +3019,87 @@ def test_active_thread_goal_is_not_closed_by_one_delivery_complete_turn(tmp_path
     assert link.task_id == goal.task_id and link.status == "active"
 
 
+def test_active_goal_without_materialized_workspace_allows_followup_turn(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "chat",
+            "channel_conversation_id": "session-goal-no-workspace",
+            "channel_user_id": "local-cli",
+            "canonical_user_id": "local-agent",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-goal-first", "持续等待后续消息")
+    goal = agent.conversation_store.create_goal(
+        {"thread_id": first.thread_id, "objective": "持续等待后续消息"}
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": goal.task_id,
+            "goal": goal.objective,
+            "status": "active",
+        }
+    )
+
+    followup = _conversation_context(agent, request, "gw-goal-followup", "现在回复我")
+
+    assert followup.load_errors == ()
+    assert followup.workspace_task is None
+    assert followup.thread_goal is not None
+    assert followup.thread_goal["task_id"] == goal.task_id
+    result = _run_gateway_ask(
+        _GatewayAskRunContext(
+            agent,
+            {"prompt": "现在回复我", **request},
+            tmp_path / "req-goal-followup.json",
+            tmp_path / "resp-goal-followup.json",
+            "gw-goal-followup",
+            lambda _chunk: None,
+        )
+    )
+    assert result.response
+
+
+def test_sticky_workspace_with_missing_configured_path_still_fails_closed(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
+    request = {
+        "conversation": {
+            "channel": "chat",
+            "channel_conversation_id": "session-missing-workspace",
+            "channel_user_id": "local-cli",
+            "canonical_user_id": "local-agent",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-missing-first", "建立任务")
+    missing = Path(agent.home_paths.owner_tasks_dir) / "2026-09-01" / "removed-workspace" / "work"
+    missing.mkdir(parents=True)
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-missing-workspace",
+            "goal": "建立任务",
+            "task_path": str(missing),
+            "status": "active",
+        }
+    )
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": first.thread_id, "task_id": "task-missing-workspace"}
+    )
+    missing.rmdir()
+
+    followup = _conversation_context(agent, request, "gw-missing-followup", "继续")
+
+    assert followup.workspace_task is None
+    assert len(followup.load_errors) == 1
+    assert followup.load_errors[0]["context"] == "gateway.conversation.workspace_task"
+
+
 def test_multiple_named_goals_expose_only_management_facts_to_an_ordinary_turn(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),

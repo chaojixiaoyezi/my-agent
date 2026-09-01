@@ -17,6 +17,7 @@ from .task_identity import durable_task_id
 
 _TASK_EVENT_LIMIT = 20
 _DIRECT_CHILDREN_MARKER = "[RUNTIME_DIRECT_CHILDREN]"
+_ACTIVE_TURN_REPLY_REQUIRED_IDS = "_active_turn_reply_required_guidance_ids"
 
 
 # LLM: This volatile suffix is rebuilt from canonical direct-child rows at every provider safe
@@ -196,6 +197,7 @@ def acknowledge_injected_turn_input(
             guidance_pending.difference_update(delivered_ids)
             _forget_guidance_ack_entries(state, delivered_ids)
             state.pop("_guidance_submission_id", None)
+            _require_active_turn_user_reply(state, delivered_ids)
             acknowledged += len(delivered_ids)
 
     event_pending = state.get("_task_event_ack_ids")
@@ -210,6 +212,47 @@ def acknowledge_injected_turn_input(
         event_pending.difference_update(event_ids)
     acknowledged += len(event_ids)
     return acknowledged
+
+
+# LLM: A consumed user steer creates a typed, attempt-local reply obligation.
+# The ids are canonical guidance ids; model prose and thinking text never create
+# or clear this state. Tool-loop boundaries clear it only after visible model
+# text exists, which prevents a waiting parent from swallowing the reply.
+# 函数用途: 判断本工作片是否已经接收用户插话、但还没有生成可展示的助手正文。
+def active_turn_user_reply_required(params: object) -> bool:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    pending = state.get(_ACTIVE_TURN_REPLY_REQUIRED_IDS)
+    return isinstance(pending, set) and bool(pending)
+
+
+# LLM: Only a real visible assistant text boundary may settle the consumed-user
+# obligation. Clearing the typed set is deliberately independent of task status:
+# the same reply may be followed by a direct-child wait or by more tool work.
+# 函数用途: 模型已经给出可展示正文后，收掉本批插话的回复欠账。
+def satisfy_active_turn_user_reply(params: object) -> bool:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    pending = state.pop(_ACTIVE_TURN_REPLY_REQUIRED_IDS, None)
+    return isinstance(pending, set) and bool(pending)
+
+
+# LLM: Provider acceptance is the sole edge that creates this obligation. The
+# set permits one model-authored response to acknowledge a FIFO batch while
+# preserving exact ids for diagnostics and avoiding natural-language matching.
+# 函数用途: 模型真正收到一批插话后，登记必须补一段可见正文。
+def _require_active_turn_user_reply(state: dict[str, Any], guidance_ids: list[str]) -> None:
+    pending = state.get(_ACTIVE_TURN_REPLY_REQUIRED_IDS)
+    if not isinstance(pending, set):
+        pending = set()
+        state[_ACTIVE_TURN_REPLY_REQUIRED_IDS] = pending
+    pending.update(
+        str(guidance_id or "").strip()
+        for guidance_id in guidance_ids
+        if str(guidance_id or "").strip()
+    )
 
 
 # LLM: Prompt assembly only reserves guidance. This explicit edge advances the exact batch to

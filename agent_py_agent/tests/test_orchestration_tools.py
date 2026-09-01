@@ -259,6 +259,116 @@ def test_descendant_create_enforces_same_per_call_limit(tmp_path):
     assert agent.subagents.load(parent.id).child_ids == []
 
 
+def test_descendant_create_normalizes_relative_outputs_to_canonical_task_root(tmp_path):
+    """递归派工和顶层派工共用同一相对产物路径解析，不复制到 owner/output 旁路。"""
+    from agent_py_agent.agent.agent_core.hierarchy_tools import _hierarchy_child_spec
+    from agent_py_agent.agent.agent_core.runner.context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.context_bundle import build_context_bundle
+    from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
+        HierarchyScheduleRequest,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            subagent_workspace="subs",
+        ),
+        tmp_path,
+    )
+    task_root = (
+        tmp_path
+        / "home"
+        / "owners"
+        / "providers"
+        / "tui"
+        / "users"
+        / "nested-user"
+        / "tasks"
+        / "2026-08-31"
+        / "nested-task"
+    )
+    owner_root = (
+        tmp_path
+        / "home"
+        / "owners"
+        / "providers"
+        / "tui"
+        / "users"
+        / "nested-user"
+    )
+    agent.subagents.workspace_root = owner_root
+    agent.subagents.workspace_roots = [owner_root]
+    parent = agent.subagents.create_run(
+        goal="协调孙代理写调研资料",
+        thought="只负责派工与汇总",
+        plan=["派工", "等待", "汇总"],
+        role="coordinator",
+        allowed_tools=["create_subagents", "read_file", "write_file"],
+        extra_write_roots=[str(task_root)],
+    )
+    parent.task_workspace_dir = str(task_root)
+    agent.subagents.save(parent)
+    previous = set_current_subagent_context(
+        agent,
+        run_id=parent.id,
+        task_attributes={
+            "run_workspace": {
+                "task_root": str(task_root),
+                "work_dir": str(task_root / "work"),
+                "output_dir": str(task_root / "output"),
+            }
+        },
+    )
+    try:
+        spec = _hierarchy_child_spec(
+            agent,
+            {
+                "goal": "写三份调研资料",
+                "role": "researcher",
+                "output_files": [
+                    "restart-grandchild/GRANDCHILD_RESEARCH.md",
+                    "restart-grandchild/SOURCES.md",
+                    "restart-grandchild/PORTING_CHECKLIST.md",
+                ],
+            },
+            tool_name="create_subagents",
+        )
+    finally:
+        restore_current_subagent_context(agent, previous)
+
+    expected = [
+        str((task_root / "restart-grandchild" / name).resolve(strict=False))
+        for name in ("GRANDCHILD_RESEARCH.md", "SOURCES.md", "PORTING_CHECKLIST.md")
+    ]
+    assert spec.attributes["output_refs"] == expected
+    assert spec.extra_write_roots == [
+        str((task_root / "restart-grandchild").resolve(strict=False)),
+        str(task_root.resolve(strict=False)),
+    ]
+    assert str(owner_root.resolve(strict=False)) not in spec.extra_write_roots
+    assert not any("/output/restart-grandchild/" in ref for ref in expected)
+
+    scheduled = agent.subagents.hierarchy.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[spec],
+            apply=True,
+        )
+    )
+    child = agent.subagents.load(scheduled.created_run_ids[0])
+    bundle = build_context_bundle(child)
+
+    assert child.task_workspace_dir == str(task_root)
+    assert bundle.output_contract["required_file_refs"] == expected
+    assert bundle.task_packet["file_contract"]["required_file_refs"] == expected
+
+
 class TestTaskProgressTool:
     """测试通用任务进度账本。"""
 

@@ -122,6 +122,18 @@ def is_provider_timeout_error(exc: BaseException) -> bool:
     return isinstance(exc, ProviderTimeoutError)
 
 
+# LLM: Only transport-owned streaming stages may replay one sampling request through the
+# 会话运行时 reconnect loop; total wall-clock and legacy/provider-declared timeouts retain
+# their separate bounded retry contract.
+# 函数用途: 判断一次超时是不是流式连接中断，可安全重发同一模型采样请求。
+def is_provider_stream_timeout_error(exc: BaseException) -> bool:
+    """Return True for first-event or between-event streaming timeouts."""
+    return isinstance(exc, ProviderTimeoutError) and exc.stage in {
+        "first_event",
+        "stream_idle",
+    }
+
+
 def is_provider_transient_error(exc: BaseException) -> bool:
     """Return True when the model-provider failure is temporary or rate-limited."""
     return isinstance(exc, ProviderTransientError)

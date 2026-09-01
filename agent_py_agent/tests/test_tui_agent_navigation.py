@@ -41,6 +41,80 @@ def _row(
     }
 
 
+def _goal(
+    goal_id: str = "goal-one",
+    *,
+    status: str = "active",
+) -> dict[str, object]:
+    return {
+        "goal_id": goal_id,
+        "name": "底座持续验证",
+        "objective": "逐项验证 Goal、思考折叠和多子代理交互，发现问题后修复。",
+        "status": status,
+        "tokens_used": 12_300,
+        "token_budget": 80_000,
+        "time_used_seconds": 502,
+        "duration_seconds": 86_400,
+        "created_at": 10.0,
+        "updated_at": 20.0,
+    }
+
+
+def test_goal_precedes_children_and_enter_expands_without_opening_agent() -> None:
+    root = TuiRuntime("nav-goal")
+    navigation = TuiAgentNavigationState(root)
+    changed_to: list[TuiRuntime] = []
+    navigation.set_view_change_callback(changed_to.append)
+    goal = _goal()
+    child = _row("child-a")
+    navigation.update_goal_rows([goal])
+    navigation.update_rows("", [child])
+    root.update_background_activity(
+        1,
+        {"goals": [goal], "subagents": [child]},
+    )
+
+    assert navigation.move_selection(1) is True
+    assert navigation.snapshot().selected_run_id == "goal:goal-one"
+    assert navigation.enter_selected() is True
+    snapshot = navigation.snapshot()
+    assert snapshot.active_run_id == ""
+    assert snapshot.expanded_goal_id == "goal:goal-one"
+    assert changed_to == []
+
+    frame = render_tui_snapshot(
+        root.store.snapshot(),
+        TuiRenderContext(
+            width=120,
+            selected_agent_run_id=snapshot.selected_run_id,
+            expanded_goal_id=snapshot.expanded_goal_id,
+        ),
+    )
+    rendered = "\n".join(fragments_text(line) for line in frame.agent_lines)
+    assert "Goal 底座持续验证 · 进行中" in rendered
+    assert "逐项验证 Goal、思考折叠和多子代理交互" in rendered
+    assert "12.3k/80.0k tokens" in rendered
+    assert "Ctrl+G 收起 Goal" in fragments_text(frame.footer)
+
+    assert navigation.move_selection(1) is True
+    assert navigation.snapshot().selected_run_id == "child-a"
+    assert navigation.snapshot().expanded_goal_id == ""
+    assert navigation.enter_selected() is True
+    assert navigation.snapshot().active_run_id == "child-a"
+
+
+def test_goal_navigation_drops_malformed_rows_and_back_collapses_detail() -> None:
+    root = TuiRuntime("nav-goal-malformed")
+    navigation = TuiAgentNavigationState(root)
+    assert navigation.update_goal_rows([{}, _goal(status="paused")]) is True
+    assert navigation.move_selection(1) is True
+    assert navigation.enter_selected() is True
+    assert navigation.snapshot().expanded_goal_id == "goal:goal-one"
+    assert navigation.back() is True
+    assert navigation.snapshot().expanded_goal_id == ""
+    assert navigation.snapshot().active_run_id == ""
+
+
 def test_down_selects_children_enter_opens_and_back_never_stops() -> None:
     root = TuiRuntime("nav-root")
     navigation = TuiAgentNavigationState(root)
@@ -242,14 +316,23 @@ def test_child_view_applies_live_events_todo_context_children_and_final() -> Non
         "event_cursor": 7,
         "final_response": "子代理已完成并提交结果。",
     }
+    navigation.active_runtime().set_notice(
+        "这个子代理已经结束，当前页面只读；Ctrl+G 返回父代理",
+        duration_seconds=60.0,
+    )
     assert navigation.apply_agent_view("child-a", terminal) is True
     assert navigation.snapshot().terminal is True
+    assert (
+        navigation.active_runtime().notice()
+        == "这个子代理已经结束，当前页面只读；Ctrl+G 返回父代理"
+    )
     snapshot = navigation.active_runtime().store.snapshot()
     assert any(
         block.role == "assistant" and "提交结果" in block.text
         for block in snapshot.stable_blocks
     )
     assert not any(block.role == "tool" for block in snapshot.active_blocks)
+    assert navigation.active_runtime().clear_notice() is True
     assert navigation.active_runtime().needs_periodic_refresh() is False
     frame = render_tui_snapshot(
         snapshot,

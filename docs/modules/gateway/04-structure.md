@@ -1,5 +1,13 @@
 # Gateway Structure
 
+## ThreadGoal 与 workspace 物化边界
+
+- `ThreadGoal` 是 thread 上的持久控制 overlay；创建 Goal 不等于已经进行文件工作，也不要求立即创建 task
+  workspace。其 exact task link 可以保留空 `task_path`，下一 foreground turn 继续从 thread 的可信 cwd 运行。
+- `_gateway_workspace_task` 必须区分“从未配置工作区”和“配置过非空工作区但目录已消失”。前者返回
+  `workspace_task=None` 且保留 Goal；后者写入 `gateway.conversation.workspace_task` load error，让请求按
+  `CONVERSATION_PERSISTENCE_UNAVAILABLE` fail closed。该分流只读结构化路径字段，不从 Goal 正文推断。
+
 ## TUI transcript channel 与后台回复提交
 
 - `conversation/channels.py` 的 transcript-capable 集合表示“该 channel 的 authenticated thread 由

@@ -61,8 +61,8 @@ def test_routine_shell_write_request_auto_grants():
         assert grant is not None
         assert "run_command" in grant.tools
         assert "write_file" in grant.tools
-        assert "edit_file" in grant.tools
-        assert "apply_patch" in grant.tools
+        assert "edit_file" not in grant.tools
+        assert "apply_patch" not in grant.tools
         context = agent.subagents.runner_context.build_execution_context(task.id)
         assert "process_session" in context.allowed_tools
         assert grant.command_allowlist == ["npm"]
@@ -80,6 +80,31 @@ def test_empty_path_scope_defaults_to_task_workspace():
         grant = auto_grant_routine_request(agent.subagents, task.id, request.id)
         assert grant is not None
         assert grant.path_scope == [str(task.task_workspace_dir)]
+        assert grant.tools == ["run_command"]
+
+
+def test_shell_path_scope_does_not_expand_into_file_mutation_tools():
+    """命令目标路径只是范围，不得把只读 child 暗中升级成文件编辑器。"""
+    with tempfile.TemporaryDirectory() as td:
+        agent, task = _agent_and_task(td)
+        target = Path(task.task_workspace_dir) / "output" / "disposable.txt"
+        request = _record_request(
+            agent,
+            task,
+            capability_type="tool",
+            needed_capability="run_command",
+            requested_tools=["run_command"],
+            requested_commands=[],
+            path_scope=[str(target)],
+        )
+
+        grant = auto_grant_routine_request(agent.subagents, task.id, request.id)
+
+        assert grant is not None
+        assert grant.tools == ["run_command"]
+        context = agent.subagents.runner_context.build_execution_context(task.id)
+        assert "run_command" in context.allowed_tools
+        assert not {"write_file", "edit_file", "apply_patch"} & set(context.allowed_tools)
 
 
 def test_out_of_sandbox_path_is_not_auto_granted():

@@ -150,6 +150,9 @@ def _make_render_context_factory(
             selected_agent_run_id=str(
                 getattr(navigation_snapshot, "selected_run_id", "") or ""
             ),
+            expanded_goal_id=str(
+                getattr(navigation_snapshot, "expanded_goal_id", "") or ""
+            ),
             agent_view_depth=max(
                 0,
                 int(getattr(navigation_snapshot, "depth", 0) or 0),
@@ -250,9 +253,9 @@ def _make_todo_window(view: TuiTranscriptView) -> Any:
 
 
 # LLM: The coordinator panel is a separate fixed region below the prompt footer
-# for child rows only. Main activity follows 终端交互's SpinnerWithVerb at the
-# transcript tail and must not be duplicated here.
-# 函数用途: 创建输入框下方的直属子代理状态区域，任务结束后原位收起。
+# for exact Goal and child rows. Main activity follows 终端交互's
+# SpinnerWithVerb at the transcript tail and must not be duplicated here.
+# 函数用途: 创建输入框下方的 Goal/直属子代理状态区域；两者都不存在时原位收起。
 def _make_agent_window(view: TuiTranscriptView) -> Any:
     from prompt_toolkit.layout import Window
 

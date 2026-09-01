@@ -22,7 +22,7 @@ from ...subagents.services.contract_identity import (
     idempotency_contract_identity_from_context_packs,
     repair_contract_identity_from_context_packs,
 )
-from ..runner.context import current_subagent_run_id
+from ..runner.context import current_subagent_run_id, current_task_root
 from ..runner.ref_fields import params_output_refs
 from .create_context import (
     agent_workspace_roots,
@@ -137,7 +137,7 @@ def _current_conversation_product_write_roots(agent: object) -> list[str]:
         else ""
     )
     if not task_root:
-        task_root = _current_task_root(agent)
+        task_root = current_task_root(agent)
     task_path = _resolved_path(task_root)
     if task_path is not None:
         return [str(task_path)]
@@ -227,7 +227,7 @@ def _default_workspace_product_root(agent: object, params: dict[str, object], go
     # 已晋升任务的父级写上界是 canonical task root。不能因为某个 output ref
     # 恰好位于 owner home，便把整个用户家目录再次加入 child 写根；用户明确的
     # 任务外输出仍由结构化 output/user_requested_output_dir 单独授权。
-    if _current_task_root(agent):
+    if current_task_root(agent):
         return ""
     raw = getattr(getattr(agent, "subagents", None), "workspace_root", None)
     if not isinstance(raw, str | Path):
@@ -251,7 +251,7 @@ def _has_output_ref_inside_workspace(params: dict[str, object], root: Path, root
 
 
 def _current_task_output_write_roots(agent: object, params: dict[str, object]) -> list[str]:
-    task_root = _current_task_root(agent)
+    task_root = current_task_root(agent)
     if not task_root:
         return []
     task_output = (Path(task_root).expanduser() / "output").resolve(strict=False)
@@ -268,13 +268,6 @@ def _task_output_root_for_ref(ref: str, task_output: Path) -> str:
     if path is None or not is_relative_to(path, task_output):
         return ""
     return str(path.parent)
-
-
-def _current_task_root(agent: object) -> str:
-    raw = getattr(agent, "_current_run_task_workspace", "")
-    if not isinstance(raw, str | Path):
-        return ""
-    return str(raw).strip()
 
 
 def _output_ref_path(ref: str, root: Path) -> Path | None:

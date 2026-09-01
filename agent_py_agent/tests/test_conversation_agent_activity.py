@@ -223,6 +223,92 @@ def test_conversation_agent_activity_marks_active_roots_unknown_on_link_failure(
     assert activity.warnings == ("conversation_task_links_unavailable",)
 
 
+def test_conversation_agent_activity_projects_goal_without_active_task() -> None:
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+    from agent_py_agent.agent.conversation.models import ThreadGoal
+
+    active_goal = ThreadGoal(
+        goal_id="goal-one",
+        thread_id="thread-goal",
+        objective="持续验证 Goal 与多子代理交互",
+        task_id="goal-task-one",
+        name="底座验证",
+        status="active",
+        token_budget=80_000,
+        duration_seconds=86_400,
+        tokens_used=12_300,
+        time_used_seconds=500,
+        created_at=10.0,
+        updated_at=20.0,
+    )
+    completed_goal = ThreadGoal(
+        goal_id="goal-done",
+        thread_id="thread-goal",
+        objective="已经完成",
+        task_id="goal-task-done",
+        status="complete",
+    )
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: ([], []),
+        load_thread_report=lambda _thread_id: (
+            SimpleNamespace(compact_generation=2, workspace_task_id=""),
+            None,
+        ),
+        load_goals_report=lambda _thread_id: ([active_goal, completed_goal], None),
+        current_goal_time_seconds=lambda _goal: 502,
+    )
+
+    activity = conversation_agent_activity(
+        SimpleNamespace(subagents=None),
+        store,
+        "thread-goal",
+    )
+
+    assert activity.active_task_count == 0
+    assert activity.goal_projection_ok is True
+    assert activity.goals == (
+        {
+            "goal_id": "goal-one",
+            "name": "底座验证",
+            "objective": "持续验证 Goal 与多子代理交互",
+            "status": "active",
+            "tokens_used": 12_300,
+            "time_used_seconds": 502,
+            "created_at": 10.0,
+            "updated_at": 20.0,
+            "token_budget": 80_000,
+            "duration_seconds": 86_400,
+        },
+    )
+    assert activity.to_dict()["goals"] == [dict(activity.goals[0])]
+
+
+def test_conversation_agent_activity_goal_read_failure_is_explicit() -> None:
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: ([], []),
+        load_goals_report=lambda _thread_id: (
+            [],
+            {"error_code": "GOAL_STORE_CORRUPT"},
+        ),
+    )
+
+    activity = conversation_agent_activity(
+        SimpleNamespace(subagents=None),
+        store,
+        "thread-goal",
+    )
+
+    assert activity.goals == ()
+    assert activity.goal_projection_ok is False
+    assert activity.warnings == ("conversation_goal_projection_load_error",)
+
+
 def test_conversation_agent_activity_retains_completed_child_roster() -> None:
     from agent_py_agent.agent.conversation.agent_activity import (
         conversation_agent_activity,

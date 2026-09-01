@@ -27,6 +27,7 @@ from ...subagents.role_templates import (
 )
 from ...subagents.services.base import CreateRunParams
 from ..parameters import _bool_param, _positive_int
+from ..runner.context import current_task_root
 from ..runner.prompts import SUBAGENT_DEFAULT_PLAN, SUBAGENT_DEFAULT_THOUGHT
 from ..runner.ref_fields import params_input_refs, params_output_refs
 from ..spawn_role_seed import is_explicit_root_role
@@ -59,7 +60,7 @@ def create_run_params(
 ):
     if not str(raw_params.get("goal") or "").strip() and str(goal or "").strip():
         raw_params = {**raw_params, "goal": goal}
-    raw_params = _params_with_task_output_defaults(raw_params, agent)
+    raw_params = normalize_create_output_params(raw_params, agent)
     goal = str(raw_params.get("goal") or goal).strip()
     role_policy = _role_policy(agent, raw_params, goal, allowed_tools)
     return _create_run_params_from_build(
@@ -624,11 +625,10 @@ def _clamp_service_window_to_audit_deadline(attrs: dict[str, object]) -> None:
     attrs["service_window_seconds"] = min(declared, remaining) if declared > 0 else remaining
 
 
-# LLM: Output refs have one resolution order: explicit task paths, current cwd
-# relative paths, then legacy workspace-output rebasing. Every rewrite must stay
-# inside a canonical root and remain visible in structured attributes.
-# 函数用途: 统一解析子代理交付路径，让普通相对路径继承当前目录并保留任务内部 output/work 语义。
-def _params_with_task_output_defaults(
+# LLM: Root and recursive create paths must call this one output-ref normalizer before
+# deriving attributes or write roots. Rewrites stay inside the canonical task root.
+# 函数用途: 统一解析所有层级子代理的交付路径，让相对路径只落到当前任务目录。
+def normalize_create_output_params(
     raw_params: dict[str, object], agent=None
 ) -> dict[str, object]:
     task_root = _current_task_root_path(agent)
@@ -1210,7 +1210,7 @@ def _current_task_output_dir(agent) -> Path | None:
 
 
 def _current_task_root_path(agent) -> Path | None:
-    task_root = _current_task_root(agent)
+    task_root = current_task_root(agent)
     if not task_root:
         return None
     try:
@@ -1292,7 +1292,7 @@ def _same_or_inside(path: Path, root: Path) -> bool:
 def _add_current_task_workspace(attrs: dict[str, object], agent=None) -> None:
     if "run_workspace" in attrs:
         return
-    task_root = _current_task_root(agent)
+    task_root = current_task_root(agent)
     if not task_root:
         return
     attrs["run_workspace"] = {
@@ -1300,13 +1300,6 @@ def _add_current_task_workspace(attrs: dict[str, object], agent=None) -> None:
         "work_dir": f"{task_root}/work",
         "output_dir": f"{task_root}/output",
     }
-
-
-def _current_task_root(agent) -> str:
-    raw = getattr(agent, "_current_run_task_workspace", "") if agent is not None else ""
-    if not isinstance(raw, (str, Path)):
-        return ""
-    return str(raw).strip()
 
 
 def _add_derived_output_refs(attrs: dict[str, object], raw_params: dict[str, object]) -> None:

@@ -396,15 +396,23 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         )
         return True
 
-    # LLM: Finish freezes an incomplete explicit thinking block, clears transient
-    # provider-parameter rows, and deliberately drops the remaining candidate
-    # model segment; the durable background notice is the sole owner-facing final response.
-    # 函数用途: 收口后台展示流，避免最终回复与持久通知重复显示。
-    def finish(self) -> None:
+    # LLM: Finish freezes an incomplete explicit thinking block and clears
+    # transient provider rows. Main background turns keep their durable notice
+    # as the sole final projection; task-local child turns explicitly publish
+    # their canonical interim/final text because no root notice owns that view.
+    # 函数用途: 收口后台展示流；子代理详情页可选择发布本轮正式正文，主代理仍避免重复。
+    def finish(
+        self,
+        *,
+        final_text: str = "",
+        publish_final: bool = False,
+    ) -> None:
         self._clear_tool_input_progress()
         if self._thinking_active:
             self.write_thinking(self._thinking_text)
         self._model_text = ""
+        if publish_final:
+            self._publish_final_response(final_text)
 
     # LLM: This immutable projection contains only segments promoted at real tool boundaries;
     # callers persist it before the terminal response using typed assistant part ids.
@@ -450,6 +458,22 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
             "completed",
             f"{self.request_id}:assistant:{self._assistant_index}",
             {"text": content, "process": True},
+        )
+
+    # LLM: The canonical AgentRunResult text is the only terminal source. A
+    # tool preamble already promoted as commentary must not be emitted twice;
+    # exact normalized equality is display dedupe only and never affects state.
+    # 函数用途: 将子代理本轮正式回复追加到详情页；若同文已在工具前展示则跳过重复卡片。
+    def _publish_final_response(self, text: str) -> None:
+        content = public_background_transcript_text(text, limit=0)
+        if not content or content in self._committed_commentary:
+            return
+        self._assistant_index += 1
+        self._event(
+            "assistant_completed",
+            "completed",
+            f"{self.request_id}:assistant:{self._assistant_index}",
+            {"text": content, "process": False},
         )
 
     # LLM: Tool identity comes only from typed round/call_index within this

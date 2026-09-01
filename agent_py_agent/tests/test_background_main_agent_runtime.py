@@ -2145,6 +2145,15 @@ def test_thread_goal_turn_with_no_tool_calls_stops_auto_continuation(tmp_path) -
     pending = store.pending_wake_signals()
     assert pending == []
     assert first_wake.status == "pending"
+    assert reports[0].delivery_status == "sent"
+    assert reports[0].delivery_reason == "thread_goal_progress"
+    assert [item.content for item in runtime.channels.adapter("internal").sent_messages] == [
+        "后台主代理已检查任务树，并给出阶段汇报。"
+    ]
+    rows = store.recent_messages(thread.thread_id)
+    assert [(item.role, item.content) for item in rows] == [
+        ("assistant", "后台主代理已检查任务树，并给出阶段汇报。")
+    ]
 
 
 def test_thread_goal_with_tool_progress_schedules_exactly_one_next_turn(tmp_path) -> None:
@@ -2284,7 +2293,11 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
     guided_reports = scheduler.tick()
 
     assert len(guided_reports) == 1
-    assert guided_reports[0].delivery_status == "suppressed"
+    assert guided_reports[0].delivery_status == "sent"
+    assert guided_reports[0].delivery_reason == "thread_goal_progress"
+    assert [item.content for item in channels.adapter("internal").sent_messages] == [
+        "本轮已经根据目录事实继续推进。"
+    ]
     assert "Their lifecycle events will wake this same goal again" in backend.prompts[0]
     assert store.pending_wake_signals() == []
 
@@ -2891,8 +2904,8 @@ def test_subagent_owned_resume_policy_is_retired_without_root_model_turn(tmp_pat
     )
 
     assert runnable == []
-    assert suppressed == [(policy, "subagent_runner_owned_policy")]
-    assert rows[0]["reason"] == "subagent_runner_owned_policy"
+    assert suppressed == [(policy, "removed_ordinary_task_resume_policy")]
+    assert rows[0]["reason"] == "removed_ordinary_task_resume_policy"
     retired = store.get_progress_policy(policy.policy_id)
     assert retired is not None and retired.enabled is False
 
@@ -6311,7 +6324,7 @@ def test_scheduler_retires_ordinary_resume_when_exact_task_link_is_missing(tmp_p
             "policy_id": policy.policy_id,
             "thread_id": thread.thread_id,
             "task_id": "gwreq-finished-and-removed",
-            "reason": "ordinary_resume_task_link_missing_or_inactive",
+            "reason": "removed_ordinary_task_resume_policy",
         }
     ]
     retired = store.get_progress_policy(policy.policy_id)

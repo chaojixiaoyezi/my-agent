@@ -32,6 +32,10 @@ from agent_py_agent.agent.gateway_parts.http_handlers import (
     read_gateway_client_notices,
 )
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.subagents.direct_parent_lifecycle import (
+    mark_parent_waiting_for_direct_children,
+    parent_wait_blocks_dispatch,
+)
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
 
@@ -80,6 +84,34 @@ def _bound_agent_tree(tmp_path):
     child = agent.subagents.lifecycle.prepare_runner_attempt(child.id)
     scope = GatewayControlScope("local-agent", "chat", "session-a")
     return agent, scope, child
+
+
+def _park_child_waiting_for_grandchild(agent, child):
+    grandchild = agent.subagents.create_run(
+        goal="继续处理分片",
+        root_id="task-root",
+        parent_id=child.id,
+    )
+    agent.subagents.add_child(child.id, grandchild.id)
+    repo = agent.subagents.runtime_db
+    agent_run = repo.agent_run_for_run_id(child.id)
+    assert agent_run is not None
+    current = repo.current_attempt(str(agent_run["agent_run_id"]))
+    assert current is not None
+    assert repo.settle_agent_attempt(
+        agent_run_id=str(agent_run["agent_run_id"]),
+        attempt_id=str(current["attempt_id"]),
+    )["settled"] is True
+    waiting = agent.subagents.load(child.id)
+    waiting.status = "PENDING"
+    waiting.runner_active_attempt_id = ""
+    agent.subagents.save(waiting)
+    assert mark_parent_waiting_for_direct_children(
+        agent.subagents,
+        child.id,
+        [grandchild.id],
+    ) == (grandchild.id,)
+    return grandchild, agent_run
 
 
 def test_agent_control_http_context_uses_exact_scoped_owner(tmp_path) -> None:
@@ -214,6 +246,15 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
         operation_id="agent-stop-1",
     )
     assert replayed_stop["status"] == "already_terminal"
+    delivered_replay = send_agent_guidance(
+        agent,
+        scope=scope,
+        run_id=child.id,
+        message="请先运行完整测试",
+        message_id="agent-steer-1",
+    )
+    assert delivered_replay["status"] == "consumed"
+    assert delivered_replay["replayed"] is True
     with pytest.raises(AgentControlError) as exc_info:
         send_agent_guidance(
             agent,
@@ -329,6 +370,233 @@ def test_agent_guidance_rejects_nonterminal_task_without_active_attempt(tmp_path
 
     assert exc_info.value.error_code == "AGENT_NOT_RUNNING"
     assert agent.conversation_store.recent_guidance("agent_run", child.id) == []
+
+
+def test_consumed_guidance_http_replay_does_not_queue_another_attempt(tmp_path) -> None:
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    accepted = send_agent_guidance(
+        agent,
+        scope=scope,
+        run_id=child.id,
+        message="确认收到后继续等待。",
+        message_id="agent-steer-consumed-replay",
+    )
+    entry = agent.conversation_store.recent_guidance("agent_run", child.id)[0]
+    turn_id = str(entry.metadata["expected_turn_id"])
+    assert agent.conversation_store.claim_guidance_once_for_turn(
+        entry,
+        expected_turn_id=turn_id,
+        attempt_id=turn_id,
+    ) is True
+    assert agent.conversation_store.mark_guidance_entries_submitted(
+        turn_id,
+        [entry],
+        attempt_id=turn_id,
+    ) == (entry.guidance_id,)
+    assert agent.conversation_store.consume_submitted_guidance_for_turn(
+        turn_id,
+        [entry],
+    ) == (entry.guidance_id,)
+    repo = agent.subagents.runtime_db
+    agent_run = repo.agent_run_for_run_id(child.id)
+    assert agent_run is not None
+    assert repo.settle_agent_attempt(
+        agent_run_id=str(agent_run["agent_run_id"]),
+        attempt_id=turn_id,
+    )["settled"] is True
+    idle = agent.subagents.load(child.id)
+    idle.status = "PENDING"
+    idle.runner_active_attempt_id = ""
+    agent.subagents.save(idle)
+
+    replay = send_agent_guidance(
+        agent,
+        scope=scope,
+        run_id=child.id,
+        message="确认收到后继续等待。",
+        message_id="agent-steer-consumed-replay",
+    )
+
+    assert replay["ok"] is True
+    assert replay["replayed"] is True
+    assert replay["status"] == "consumed"
+    assert replay["guidance_id"] == accepted["guidance_id"]
+    assert replay["expected_turn_id"] == turn_id
+    assert replay["resume"]["status"] == "replay_consumed"
+    assert len(repo.attempts_for_run(str(agent_run["agent_run_id"]))) == 1
+
+
+def test_agent_guidance_wakes_waiting_parent_on_same_run_once(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    grandchild, agent_run = _park_child_waiting_for_grandchild(agent, child)
+    repo = agent.subagents.runtime_db
+    starts: list[str] = []
+
+    def fake_auto_start(_agent, tasks, _request_params):
+        target = tasks[0]
+        starts.append(target.id)
+        refreshed = agent.subagents.load(target.id)
+        attrs = dict(refreshed.attributes or {})
+        attrs["background_start"] = {
+            "launch_id": "launch-user-guidance",
+            "status": "launching",
+            "updated_at": time.time(),
+        }
+        refreshed.attributes = attrs
+        agent.subagents.save(refreshed)
+        return {
+            "status": "started",
+            "run_ids": [target.id],
+            "launch_id": "launch-user-guidance",
+        }
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration.background.dispatch.auto_start_tasks",
+        fake_auto_start,
+    )
+
+    accepted = send_agent_guidance(
+        agent,
+        scope=scope,
+        run_id=child.id,
+        message="先回复我这条插话，再继续等待孩子。",
+        message_id="agent-steer-waiting-parent",
+    )
+    replay = send_agent_guidance(
+        agent,
+        scope=scope,
+        run_id=child.id,
+        message="先回复我这条插话，再继续等待孩子。",
+        message_id="agent-steer-waiting-parent",
+    )
+
+    successor = repo.current_attempt(str(agent_run["agent_run_id"]))
+    assert successor is not None
+    assert successor["attempt_generation"] == 2
+    assert successor["status"] == "pending"
+    assert accepted["expected_turn_id"] == successor["attempt_id"]
+    assert accepted["guidance_id"] == replay["guidance_id"]
+    assert accepted["resume"]["status"] == "started"
+    assert replay["resume"]["status"] == "already_starting"
+    assert starts == [child.id]
+    assert parent_wait_blocks_dispatch(agent.subagents.load(child.id)) is False
+    assert agent.subagents.load(grandchild.id).status == "PLANNING"
+    entries = agent.conversation_store.recent_guidance("agent_run", child.id)
+    assert len(entries) == 1
+    assert entries[0].metadata["expected_turn_id"] == successor["attempt_id"]
+
+
+def test_concurrent_waiting_parent_guidance_starts_one_runner(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    _park_child_waiting_for_grandchild(agent, child)
+    starts: list[str] = []
+
+    def fake_auto_start(_agent, tasks, _request_params):
+        target = tasks[0]
+        starts.append(target.id)
+        time.sleep(0.05)
+        refreshed = agent.subagents.load(target.id)
+        attrs = dict(refreshed.attributes or {})
+        attrs["background_start"] = {
+            "launch_id": "launch-concurrent-guidance",
+            "status": "launching",
+            "updated_at": time.time(),
+        }
+        refreshed.attributes = attrs
+        agent.subagents.save(refreshed)
+        return {
+            "status": "started",
+            "run_ids": [target.id],
+            "launch_id": "launch-concurrent-guidance",
+        }
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration.background.dispatch.auto_start_tasks",
+        fake_auto_start,
+    )
+    barrier = threading.Barrier(3)
+    responses: list[dict[str, object]] = []
+    failures: list[BaseException] = []
+
+    def send(index: int) -> None:
+        try:
+            barrier.wait(timeout=2.0)
+            responses.append(
+                send_agent_guidance(
+                    agent,
+                    scope=scope,
+                    run_id=child.id,
+                    message=f"并发补充 {index}",
+                    message_id=f"agent-steer-concurrent-{index}",
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    workers = [threading.Thread(target=send, args=(index,)) for index in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait(timeout=2.0)
+    for worker in workers:
+        worker.join(timeout=2.0)
+
+    assert failures == []
+    assert len(responses) == 2
+    assert starts == [child.id]
+    assert len(agent.conversation_store.recent_guidance("agent_run", child.id)) == 2
+
+
+def test_waiting_parent_guidance_retries_launch_without_duplicate_message(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    _park_child_waiting_for_grandchild(agent, child)
+    starts = 0
+
+    def flaky_auto_start(_agent, tasks, _request_params):
+        nonlocal starts
+        starts += 1
+        if starts == 1:
+            return {"status": "failed", "run_ids": [tasks[0].id]}
+        return {
+            "status": "started",
+            "run_ids": [tasks[0].id],
+            "launch_id": "launch-retried-guidance",
+        }
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration.background.dispatch.auto_start_tasks",
+        flaky_auto_start,
+    )
+    with pytest.raises(AgentControlError) as first_error:
+        send_agent_guidance(
+            agent,
+            scope=scope,
+            run_id=child.id,
+            message="这条消息必须保留并重试启动。",
+            message_id="agent-steer-retry-launch",
+        )
+    assert first_error.value.error_code == "AGENT_RESUME_UNAVAILABLE"
+    assert len(agent.conversation_store.recent_guidance("agent_run", child.id)) == 1
+
+    accepted = send_agent_guidance(
+        agent,
+        scope=scope,
+        run_id=child.id,
+        message="这条消息必须保留并重试启动。",
+        message_id="agent-steer-retry-launch",
+    )
+
+    assert accepted["resume"]["status"] == "started"
+    assert starts == 2
+    assert len(agent.conversation_store.recent_guidance("agent_run", child.id)) == 1
 
 
 def test_agent_guidance_rejects_runtime_attempt_before_task_projection_commits(tmp_path) -> None:

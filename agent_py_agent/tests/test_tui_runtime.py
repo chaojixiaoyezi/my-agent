@@ -312,6 +312,41 @@ def test_idle_activity_snapshot_hydrates_compact_count_and_cannot_regress() -> N
     assert runtime.store.snapshot().status.compact_count == 3
 
 
+def test_idle_goal_keeps_fixed_projection_until_authoritative_empty_snapshot() -> None:
+    runtime = TuiRuntime("idle-goal-runtime")
+    goal = {
+        "goal_id": "goal-one",
+        "name": "持续验证",
+        "objective": "继续验证底座",
+        "status": "paused",
+        "tokens_used": 1200,
+        "time_used_seconds": 45,
+    }
+
+    assert runtime.update_background_activity(0, {"goals": [goal]}) is True
+    active = runtime.store.snapshot().active_blocks
+    background = next(block for block in active if block.role == "background")
+    assert background.metadata["goals"] == [goal]
+    assert runtime.has_active_background_task() is False
+
+    # 投影读取失败不能把上一份已知 Goal 擦掉。
+    assert runtime.update_background_activity(
+        0,
+        {"goals": [], "goal_projection_ok": False},
+    ) is False
+    assert any(
+        block.role == "background" for block in runtime.store.snapshot().active_blocks
+    )
+
+    assert runtime.update_background_activity(
+        0,
+        {"goals": [], "goal_projection_ok": True},
+    ) is True
+    assert not any(
+        block.role == "background" for block in runtime.store.snapshot().active_blocks
+    )
+
+
 def test_gateway_context_compaction_creates_one_content_free_history_event() -> None:
     runtime = TuiRuntime("context-compaction-runtime")
     runtime.enqueue_prompt("context-request", "go", queued=False)
@@ -504,9 +539,35 @@ def test_superseded_live_compact_retires_silently_before_transcript_fallback() -
             "percent": 5,
         }
     )
-    assert any(
-        block.role == "compact" for block in runtime.store.snapshot().active_blocks
+    active = next(
+        block for block in runtime.store.snapshot().active_blocks if block.role == "compact"
     )
+    assert active.metadata["percent"] == 65, "同代 fallback 接管不能让用户看到进度倒退"
+
+    assert turn.write_conversation_compact_progress(
+        {
+            **base,
+            "operation_id": "transcript:attempt-b",
+            "phase": "completed",
+            "stage": "completed",
+            "percent": 100,
+            "after_tokens": 31_200,
+        }
+    )
+    assert turn.write_conversation_compact_progress(
+        {
+            **base,
+            "generation": 3,
+            "operation_id": "transcript:attempt-c",
+            "phase": "started",
+            "stage": "preparing",
+            "percent": 5,
+        }
+    )
+    next_generation = next(
+        block for block in runtime.store.snapshot().active_blocks if block.role == "compact"
+    )
+    assert next_generation.metadata["percent"] == 5, "新一代 Compact 应从自己的真实阶段开始"
 
 
 def test_turn_activity_survives_stream_and_tools_until_structured_terminal() -> None:

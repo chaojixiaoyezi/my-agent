@@ -385,6 +385,7 @@ class _TuiBackgroundActivityState:
     started_at: float = 0.0
     compact_count: int = 0
     main_activity: dict[str, object] = field(default_factory=dict)
+    goals: tuple[dict[str, object], ...] = ()
     subagents: tuple[dict[str, object], ...] = ()
     task_progress: _TuiTaskProgressProjection = field(
         default_factory=_TuiTaskProgressProjection
@@ -394,7 +395,7 @@ class _TuiBackgroundActivityState:
     # LLM: Visibility is a pure display derivation; it cannot close or revive a task.
     # 函数用途: 判断底部 Working 区当前是否应挂在界面上。
     def visible(self) -> bool:
-        return bool(self.count > 0 or self.main_activity or self.subagents)
+        return bool(self.count > 0 or self.main_activity or self.goals or self.subagents)
 
 
 # LLM: This controller is runtime-owned and only factors the removable
@@ -453,6 +454,7 @@ class _TuiBackgroundActivityController:
 
 
 _SUBAGENT_ACTIVITY_ROW_LIMIT = 64
+_GOAL_ACTIVITY_ROW_LIMIT = 16
 _MAIN_ACTIVITY_FIELDS = frozenset(
     {"task_id", "phase", "activity", "started_at", "updated_at", "ended_at"}
 )
@@ -487,6 +489,20 @@ _SUBAGENT_ACTIVITY_FIELDS = frozenset(
         "ended_at",
     }
 )
+_GOAL_ACTIVITY_FIELDS = frozenset(
+    {
+        "goal_id",
+        "name",
+        "objective",
+        "status",
+        "tokens_used",
+        "token_budget",
+        "time_used_seconds",
+        "duration_seconds",
+        "created_at",
+        "updated_at",
+    }
+)
 
 
 # LLM: Poll snapshots are normalized as one frame. Missing fields retain active
@@ -513,6 +529,12 @@ def _next_background_activity_state(
         if main_value is not None
         else current.main_activity if count > 0 else {}
     )
+    if snapshot.get("goal_projection_ok", True) is not False and snapshot.get(
+        "goals"
+    ) is not None:
+        goals = _normalize_goal_activity_rows(snapshot.get("goals"))
+    else:
+        goals = current.goals
     if snapshot.get("projection_ok", True) is not False and snapshot.get(
         "subagents"
     ) is not None:
@@ -533,6 +555,7 @@ def _next_background_activity_state(
         started_at=current.started_at,
         compact_count=compact_count,
         main_activity=main_activity,
+        goals=goals,
         subagents=subagents,
         task_progress=task_progress,
         hidden_subagent_count=hidden_count,
@@ -569,6 +592,7 @@ def _background_activity_payload(
         "compact_count": state.compact_count,
         "started_at": state.started_at,
         "main_activity": dict(state.main_activity),
+        "goals": [dict(row) for row in state.goals],
         "subagents": [dict(row) for row in state.subagents],
         **_task_progress_payload(state.task_progress),
         "hidden_subagent_count": state.hidden_subagent_count,
@@ -578,6 +602,38 @@ def _background_activity_payload(
             else {}
         ),
     }
+
+
+# LLM: Goal rows accept only bounded public scalars from the authenticated
+# conversation projection. Internal task ids, wake records, and paths never
+# enter TUI metadata.
+# 函数用途: 清洗固定 Goal 状态行和详情页需要的公开字段。
+def _normalize_goal_activity_rows(value: object) -> tuple[dict[str, object], ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    rows: list[dict[str, object]] = []
+    for item in value[:_GOAL_ACTIVITY_ROW_LIMIT]:
+        if not isinstance(item, Mapping):
+            continue
+        goal_id = str(item.get("goal_id") or "").strip()[:240]
+        if not goal_id:
+            continue
+        row = {
+            str(key): item[key]
+            for key in _GOAL_ACTIVITY_FIELDS
+            if key in item and not isinstance(item[key], dict | list | tuple | set)
+        }
+        row["goal_id"] = goal_id
+        row["name"] = str(row.get("name") or "").strip()[:240]
+        row["objective"] = str(row.get("objective") or "").strip()[:4_000]
+        row["status"] = str(row.get("status") or "").strip().lower()[:40]
+        for key in ("tokens_used", "time_used_seconds"):
+            row[key] = _nonnegative_int(row.get(key))
+        for key in ("token_budget", "duration_seconds"):
+            if row.get(key) is not None:
+                row[key] = max(1, _nonnegative_int(row.get(key)))
+        rows.append(row)
+    return tuple(rows)
 
 
 # LLM: Main activity is an authenticated scalar-only Gateway projection. Nested
@@ -691,10 +747,62 @@ def _normalize_subagent_activity_rows(
     return tuple(rows)
 
 
-# LLM: This narrow mixin owns only the typed conversation boundary publisher. It delegates to
-# TuiRuntime's sequencer/store and must not acquire independent lifecycle state.
-# 类用途: 为 TuiRuntime 提供已提交 Compact 边界的唯一公开发布入口。
+# LLM: This narrow mixin owns typed persisted-control display and conversation
+# boundaries. It delegates to TuiRuntime's sequencer/store and must not acquire
+# a second lifecycle or execution source.
+# 类用途: 为 TuiRuntime 提供可靠控制命令展示与已提交 Compact 边界的公开入口。
 class _TuiConversationBoundaryRuntimeMixin:
+    # LLM: Recovery projects only caller-loaded canonical turns. This mixin does
+    # not read storage, persist text, or submit replayed history to a model.
+    # 函数用途: 在欢迎卡后恢复用户/助手可见历史，并给每轮分配稳定的本地展示 ID。
+    def publish_recovered_history(
+        self,
+        turns: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+    ) -> None:
+        for index, pair in enumerate(tuple(turns or ()), start=1):
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                continue
+            user_text, assistant_text = str(pair[0] or ""), str(pair[1] or "")
+            history_request_id = f"history:{self.session_id}:{index}"
+            if user_text:
+                self._publish(
+                    "user_message",
+                    "completed",
+                    f"{history_request_id}:user",
+                    {"text": user_text},
+                    request_id=history_request_id,
+                )
+            if assistant_text:
+                self._publish(
+                    "assistant_completed",
+                    "completed",
+                    f"{history_request_id}:assistant",
+                    {"text": assistant_text},
+                    request_id=history_request_id,
+                )
+
+    # LLM: A persisted slash control is shown as a local user-shaped block but
+    # never enters the model queue or canonical conversation messages. The
+    # durable control outbox/Gateway receipt remains its sole execution source.
+    # 函数用途: 将已成功保存的 `/goal` 等控制命令留在当前 TUI 历史里，方便用户回看自己输入了什么。
+    def publish_control_command_input(self, message_id: str, text: str) -> bool:
+        normalized = _required_message_id(message_id)
+        command_text = str(text or "").strip()
+        if not command_text:
+            return False
+        with self._lock:
+            if normalized in self._published_control_commands:
+                return False
+            self._published_control_commands.add(normalized)
+            self._publish(
+                "user_message",
+                "completed",
+                f"control-command:{normalized}",
+                {"text": command_text},
+                request_id=normalized,
+            )
+        return True
+
     # LLM: Esc may target only a currently active manual Compact block created from this TUI's
     # durable outbox identity.  Automatic/background Compact operation ids are intentionally
     # excluded because their cancellation belongs to the active request token.
@@ -1050,9 +1158,11 @@ class TuiRuntime(
         self._turns: dict[str, TuiTurnEventAdapter] = {}
         self._pending_steers: dict[str, str] = {}
         self._queued_prompts: dict[str, str] = {}
+        self._published_control_commands: set[str] = set()
         self._console_index = 0
         self._background_notice_index = 0
         self._notice_text = ""
+        self._notice_kind = ""
         self._notice_until = 0.0
         self._lock = threading.RLock()
         self._permission_coordinator = TuiPermissionCoordinator(self)
@@ -1096,34 +1206,6 @@ class TuiRuntime(
                 "text": "" if ok else "Gateway is unavailable.",
             },
         )
-
-    # LLM: 恢复只投影调用方已从 canonical session 加载的轮次；TUI 不读磁盘、不另存正文，也不把历史重新提交给模型。
-    # 函数用途: 在欢迎卡后恢复当前会话的用户/助手可见 transcript，并为每轮生成稳定 session-local block id。
-    def publish_recovered_history(
-        self,
-        turns: list[tuple[str, str]] | tuple[tuple[str, str], ...],
-    ) -> None:
-        for index, pair in enumerate(tuple(turns or ()), start=1):
-            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-                continue
-            user_text, assistant_text = str(pair[0] or ""), str(pair[1] or "")
-            history_request_id = f"history:{self.session_id}:{index}"
-            if user_text:
-                self._publish(
-                    "user_message",
-                    "completed",
-                    f"{history_request_id}:user",
-                    {"text": user_text},
-                    request_id=history_request_id,
-                )
-            if assistant_text:
-                self._publish(
-                    "assistant_completed",
-                    "completed",
-                    f"{history_request_id}:assistant",
-                    {"text": assistant_text},
-                    request_id=history_request_id,
-                )
 
     # LLM: enqueue_prompt 使用 request_id 作为用户块/队列身份；排队项只发 queue_added，开始执行时再原子提升为稳定用户块。
     # 函数用途: 立即显示空闲提交，或把运行中提交登记成可回取的用户队列预览。
@@ -1248,18 +1330,45 @@ class TuiRuntime(
                 {"text": normalized},
             )
 
-    # LLM: notice 是有界的输入交互提示，不写事件 journal/会话历史，也不能用其文案触发退出、中断或业务状态。
-    # 函数用途: 在 footer 短暂显示双击退出、清空等按键提示。
-    def set_notice(self, text: str, *, duration_seconds: float = 0.8) -> None:
+    # LLM: notice 是有界的输入交互提示，不写事件 journal/会话历史；kind 只供同类提示做结构化替换/清理，禁止解析文案做机器判断。
+    # 函数用途: 在 footer 短暂显示双击退出、只读拒绝等按键提示，并标记提示来源以免后台刷新误清用户反馈。
+    def set_notice(
+        self,
+        text: str,
+        *,
+        duration_seconds: float = 0.8,
+        notice_kind: str = "interaction",
+    ) -> None:
         normalized = str(text or "")
         with self._lock:
             self._notice_text = normalized
+            self._notice_kind = (
+                str(notice_kind or "interaction").strip() or "interaction"
+                if normalized
+                else ""
+            )
             self._notice_until = (
                 time.monotonic() + max(0.0, float(duration_seconds or 0.0))
                 if normalized
                 else 0.0
             )
         self.store.invalidate()
+
+    # LLM: Conditional clearing compares typed notice kind, never rendered prose. A stale
+    # agent-startup refresh therefore cannot erase copy, delivery, rejection, or stop feedback.
+    # 函数用途: 仅在提示属于指定来源时清除它；不传来源时显式清除当前任意短提示。
+    def clear_notice(self, *, expected_kind: str = "") -> bool:
+        expected = str(expected_kind or "").strip()
+        with self._lock:
+            if expected and self._notice_kind != expected:
+                return False
+            if not self._notice_text:
+                return False
+            self._notice_text = ""
+            self._notice_kind = ""
+            self._notice_until = 0.0
+        self.store.invalidate()
+        return True
 
     # LLM: notice expiry 只读 monotonic deadline 并清 UI 临时字段；不得发布 system_message 或修改 reducer status。
     # 函数用途: 返回当前尚未过期的输入提示。
@@ -1268,6 +1377,7 @@ class TuiRuntime(
         with self._lock:
             if self._notice_text and now >= self._notice_until:
                 self._notice_text = ""
+                self._notice_kind = ""
                 self._notice_until = 0.0
             return self._notice_text
 
@@ -1286,6 +1396,7 @@ class TuiRuntime(
             )
             if notice_expired:
                 self._notice_text = ""
+                self._notice_kind = ""
                 self._notice_until = 0.0
             notice_active = bool(
                 self._notice_text
@@ -1435,6 +1546,11 @@ class TuiTurnEventAdapter:
         self._compact_active = False
         self._compact_block_id = ""
         self._compact_payload: dict[str, object] = {}
+        # 同一尚未提交的 generation 可能先做 live 候选、再由 transcript
+        # fallback 接管。operation_id 会变，但用户看到的是同一次 Compact；
+        # 保留代内高水位，避免进度条从 20% 倒回 15%。
+        self._compact_progress_generation = 0
+        self._compact_progress_percent = 0
         self._assistant_index = 0
         self._assistant_block_id = ""
         self._assistant_text = ""
@@ -1713,6 +1829,19 @@ class TuiTurnEventAdapter:
         payload = _tui_conversation_compact_progress_payload(value)
         if not payload:
             return False
+        generation = int(payload["generation"])
+        incoming_percent = int(payload["percent"])
+        if generation < self._compact_progress_generation:
+            return False
+        if generation > self._compact_progress_generation:
+            self._compact_progress_generation = generation
+            self._compact_progress_percent = incoming_percent
+        else:
+            self._compact_progress_percent = max(
+                self._compact_progress_percent,
+                incoming_percent,
+            )
+        payload = {**payload, "percent": self._compact_progress_percent}
         phase = str(payload["phase"])
         operation_id = str(payload["operation_id"])
         block_id = f"conversation-compact:{self.request_id}:{operation_id}"

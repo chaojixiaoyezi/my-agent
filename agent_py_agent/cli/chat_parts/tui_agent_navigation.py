@@ -3,7 +3,7 @@
 # LLM: This module owns only TUI selection, view stack, per-view display runtimes,
 # and event cursors. Canonical run status, messages, guidance, cancellation, and
 # authorization remain on Gateway/domain services and are never inferred here.
-# 模块用途: 支持空输入时方向键选择子代理、Enter 进入、Ctrl+G 返回，并缓存每个代理的独立展示页面。
+# 模块用途: 支持空输入时方向键选择 Goal/子代理、Enter 查看、Ctrl+G 返回，并缓存每个代理的独立展示页面。
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ _TERMINAL_AGENT_STATUSES = frozenset(
         "TAKEN_OVER",
     }
 )
+_AGENT_STARTUP_NOTICE_KIND = "agent_startup"
 _ROW_SCALAR_FIELDS = frozenset(
     {
         "run_id",
@@ -47,6 +48,20 @@ _ROW_SCALAR_FIELDS = frozenset(
         "ended_at",
     }
 )
+_GOAL_ROW_SCALAR_FIELDS = frozenset(
+    {
+        "goal_id",
+        "name",
+        "objective",
+        "status",
+        "tokens_used",
+        "token_budget",
+        "time_used_seconds",
+        "duration_seconds",
+        "created_at",
+        "updated_at",
+    }
+)
 
 
 # LLM: The snapshot is the renderer/keybinding boundary. It contains only exact
@@ -58,6 +73,7 @@ class TuiAgentNavigationSnapshot:
     active_name: str = "main"
     active_status: str = ""
     selected_run_id: str = ""
+    expanded_goal_id: str = ""
     depth: int = 0
     terminal: bool = False
 
@@ -76,7 +92,9 @@ class TuiAgentNavigationState:
         self._runtimes: dict[str, TuiRuntime] = {}
         self._rows_by_parent: dict[str, tuple[dict[str, object], ...]] = {"": ()}
         self._rows_by_run: dict[str, dict[str, object]] = {}
+        self._goal_rows: dict[str, dict[str, object]] = {}
         self._selected_by_parent: dict[str, str] = {}
+        self._expanded_goal_id = ""
         self._path: list[str] = []
         self._event_cursors: dict[str, int] = {}
         self._goal_published: set[str] = set()
@@ -108,59 +126,89 @@ class TuiAgentNavigationState:
             for row in rows:
                 self._rows_by_run[str(row["run_id"])] = row
             selected = self._selected_by_parent.get(parent, "")
-            if selected and all(str(row["run_id"]) != selected for row in rows):
+            if selected and selected not in self._selection_ids_locked(parent):
                 self._selected_by_parent.pop(parent, None)
             runtime = self._runtimes.get(parent) if parent else self.root_runtime
         if runtime is not None:
             runtime.store.invalidate()
         return True
 
+    # LLM: Goal rows are exact read-only ThreadGoal projections. They join only
+    # the root visual selector and cannot be used as an agent run id or control
+    # operation.
+    # 函数用途: 刷新主界面底部 Goal 行，并保持方向键选择和展开项跟随准确 Goal。
+    def update_goal_rows(self, value: object) -> bool:
+        rows = _goal_navigation_rows(value)
+        next_rows = {
+            _goal_navigation_id(str(row["goal_id"])): row for row in rows
+        }
+        with self._lock:
+            if self._goal_rows == next_rows:
+                return False
+            self._goal_rows = next_rows
+            selected = self._selected_by_parent.get("", "")
+            if selected and selected not in self._selection_ids_locked(""):
+                self._selected_by_parent.pop("", None)
+            if self._expanded_goal_id and self._expanded_goal_id not in next_rows:
+                self._expanded_goal_id = ""
+            runtime = self.root_runtime
+        runtime.store.invalidate()
+        return True
+
     # LLM: Direction movement is active only when the input controller explicitly
     # calls it. It never consumes history or changes the current view itself.
-    # 函数用途: 在当前层的子代理行之间移动选择；首次向下选第一行，首次向上选最后一行。
+    # 函数用途: 在当前层的 Goal/子代理行之间移动选择；首次向下选第一行，首次向上选最后一行。
     def move_selection(self, delta: int) -> bool:
         step = int(delta or 0)
         if not step:
             return False
         with self._lock:
             parent = self._active_run_id_locked()
-            rows = self._rows_by_parent.get(parent, ())
-            if not rows:
+            ids = self._selection_ids_locked(parent)
+            if not ids:
                 return False
-            ids = [str(row["run_id"]) for row in rows]
             selected = self._selected_by_parent.get(parent, "")
             if selected not in ids:
                 index = 0 if step > 0 else len(ids) - 1
             else:
                 index = max(0, min(len(ids) - 1, ids.index(selected) + step))
             self._selected_by_parent[parent] = ids[index]
+            if not parent and self._expanded_goal_id != ids[index]:
+                self._expanded_goal_id = ""
             runtime = self._active_runtime_locked()
         runtime.store.invalidate()
         return True
 
-    # LLM: Enter follows the selected exact run id from the current parent's
-    # authenticated row set. A transient loading notice is display-only; it
-    # cannot enter a typed id supplied from input text or imply run liveness.
-    # 函数用途: 进入当前选中的子代理详情页，详细快照到达前显示载入提示。
+    # LLM: Enter follows an exact typed selection from the authenticated Goal
+    # or child row set. Goal toggles read-only detail in root; a child opens its
+    # display runtime. Neither action trusts an id supplied from input text.
+    # 函数用途: 展开当前 Goal 或进入选中的子代理详情页；子代理快照到达前显示载入提示。
     def enter_selected(self) -> bool:
         with self._lock:
             parent = self._active_run_id_locked()
             selected = self._selected_by_parent.get(parent, "")
-            if not selected or selected not in {
-                str(row["run_id"]) for row in self._rows_by_parent.get(parent, ())
-            }:
+            if not selected or selected not in self._selection_ids_locked(parent):
                 return False
-            self._path.append(selected)
-            runtime = self._runtime_for_locked(selected)
-            callback = self._view_change
-            has_snapshot = selected in self._goal_published
-            lifecycle_phase = str(
-                self._rows_by_run.get(selected, {}).get("lifecycle_phase") or ""
-            )
+            if not parent and selected in self._goal_rows:
+                self._expanded_goal_id = "" if self._expanded_goal_id == selected else selected
+                runtime = self.root_runtime
+                callback = None
+                has_snapshot = True
+                lifecycle_phase = ""
+            else:
+                self._expanded_goal_id = ""
+                self._path.append(selected)
+                runtime = self._runtime_for_locked(selected)
+                callback = self._view_change
+                has_snapshot = selected in self._goal_published
+                lifecycle_phase = str(
+                    self._rows_by_run.get(selected, {}).get("lifecycle_phase") or ""
+                )
         if not has_snapshot:
             runtime.set_notice(
                 _agent_startup_notice(lifecycle_phase),
                 duration_seconds=2.5,
+                notice_kind=_AGENT_STARTUP_NOTICE_KIND,
             )
         if callback is not None:
             callback(runtime)
@@ -172,11 +220,16 @@ class TuiAgentNavigationState:
     # 函数用途: 用 Ctrl+G、Alt+左箭头或 `/back` 返回上一层代理视图。
     def back(self) -> bool:
         with self._lock:
-            if not self._path:
+            if not self._path and self._expanded_goal_id:
+                self._expanded_goal_id = ""
+                runtime = self.root_runtime
+                callback = None
+            elif not self._path:
                 return False
-            self._path.pop()
-            runtime = self._active_runtime_locked()
-            callback = self._view_change
+            else:
+                self._path.pop()
+                runtime = self._active_runtime_locked()
+                callback = self._view_change
         if callback is not None:
             callback(runtime)
         runtime.store.invalidate()
@@ -191,6 +244,8 @@ class TuiAgentNavigationState:
             if parent not in self._selected_by_parent:
                 return False
             self._selected_by_parent.pop(parent, None)
+            if not parent:
+                self._expanded_goal_id = ""
             runtime = self._active_runtime_locked()
         runtime.store.invalidate()
         return True
@@ -208,6 +263,7 @@ class TuiAgentNavigationState:
                 active_name=str(row.get("name") or row.get("role") or active or "main"),
                 active_status=status,
                 selected_run_id=self._selected_by_parent.get(active, ""),
+                expanded_goal_id=self._expanded_goal_id if not active else "",
                 depth=len(self._path),
                 terminal=bool(active and status in _TERMINAL_AGENT_STATUSES),
             )
@@ -269,13 +325,14 @@ class TuiAgentNavigationState:
         if isinstance(events, list | tuple):
             runtime.publish_background_transcript_events(events)
         if terminal or goal_published or bool(events) or final_response:
-            runtime.set_notice("")
+            runtime.clear_notice(expected_kind=_AGENT_STARTUP_NOTICE_KIND)
         else:
             # 轮询会续上这个短 notice；一旦 goal/首事件到达立即清除。这样既不新增
             # 持久状态，也不会因为首个不完整快照把详情页变成无解释白屏。
             runtime.set_notice(
                 _agent_startup_notice(lifecycle_phase),
                 duration_seconds=2.5,
+                notice_kind=_AGENT_STARTUP_NOTICE_KIND,
             )
         if terminal:
             runtime.settle_agent_transcript(selected, status=status)
@@ -331,6 +388,20 @@ class TuiAgentNavigationState:
     # 函数用途: 在持锁状态下返回当前代理 run id，空串表示主代理。
     def _active_run_id_locked(self) -> str:
         return self._path[-1] if self._path else ""
+
+    # LLM: Root selection is Goal rows followed by direct children; nested
+    # pages contain children only. This is a visual ordering contract and never
+    # changes either lifecycle.
+    # 函数用途: 返回当前页面方向键可以选择的准确行 ID。
+    def _selection_ids_locked(self, parent_run_id: str) -> list[str]:
+        parent = str(parent_run_id or "").strip()
+        ids = list(self._goal_rows) if not parent else []
+        ids.extend(
+            str(row["run_id"])
+            for row in self._rows_by_parent.get(parent, ())
+            if str(row.get("run_id") or "").strip()
+        )
+        return ids
 
     # LLM: Runtime allocation uses one session-local display namespace per run;
     # no Agent, worker, queue, or model backend is constructed.
@@ -397,6 +468,36 @@ def _navigation_rows(
         actual_parent = str(row.get("parent_run_id") or "").strip()
         if parent_run_id and actual_parent != parent_run_id:
             continue
+        rows.append(row)
+    return tuple(rows)
+
+
+# LLM: Goal navigation ids are an explicit namespace distinct from run ids, so
+# an Enter action can never accidentally call the child-agent endpoint.
+# 函数用途: 为底部 Goal 行生成稳定且不会与子代理冲突的选择 ID。
+def _goal_navigation_id(goal_id: str) -> str:
+    return f"goal:{str(goal_id or '').strip()}"
+
+
+# LLM: Goal row normalization accepts only bounded public scalars supplied by
+# the authenticated conversation activity projection.
+# 函数用途: 清洗可供方向键选择和详情展示的 Goal 列表。
+def _goal_navigation_rows(value: object) -> tuple[dict[str, object], ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    rows: list[dict[str, object]] = []
+    for item in value[:16]:
+        if not isinstance(item, Mapping):
+            continue
+        goal_id = str(item.get("goal_id") or "").strip()
+        if not goal_id:
+            continue
+        row = {
+            str(key): item[key]
+            for key in _GOAL_ROW_SCALAR_FIELDS
+            if key in item and not isinstance(item[key], dict | list | tuple | set)
+        }
+        row["goal_id"] = goal_id
         rows.append(row)
     return tuple(rows)
 

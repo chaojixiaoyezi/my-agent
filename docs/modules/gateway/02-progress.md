@@ -1,5 +1,17 @@
 # Gateway Progress
 
+## 2026-09-01 R121 空 Goal 工作区与真实丢失目录分流（最终 wheel 真 TUI 通过）
+
+- `.10` 同一 fresh Goal TUI 的后续消息返回 `CONVERSATION_PERSISTENCE_UNAVAILABLE`。结构化诊断定位到
+  `gateway.conversation.workspace_task`：纯聊天 Goal 没有调用工作工具，task link 的 `task_path` 合法为空；
+  旧加载器却把空路径与一个曾存在但后来消失的非空 sticky workspace 合并成同一种损坏。
+- `request_execution._gateway_workspace_task` 现在先保留原始 `configured_task_path`：exact selection 的空路径
+  不产生 load error，继续使用 thread cwd；只有非空配置路径无法解析为现存目录时仍 fail closed。该改动不
+  创建空任务目录、不猜用户意图，也不放宽 owner 或 workspace 权限。
+- 新增正反回归：空路径 Goal 的下一轮实际 `_run_gateway_ask` 成功；移除一个已绑定的非空目录后仍产生精确
+  workspace load error。整个 Gateway 会话上下文测试文件已通过；最终 wheel 在原 active Goal thread 中的
+  后续消息、直接 final 与 canonical user/final 已真 TUI 复验。
+
 ## 2026-08-31 Gateway 会话车道与孤儿恢复解耦（R118 真 TUI 通过）
 
 - `.10` 单 Gateway 出现 durable wake 已 ready、日志持续 seed owner，但 `bg-owner` worker 长时间空闲。

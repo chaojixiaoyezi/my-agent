@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,79 @@ def test_duplicate_runner_start_rejects_current_running_attempt(manager, repo):
     assert [attempt["attempt_id"] for attempt in attempts] == [
         first.runner_active_attempt_id
     ]
+
+
+def test_explicit_input_queues_one_pending_successor_before_runner_activation(
+    manager,
+    repo,
+):
+    task = manager.create_run(goal="等待用户补充", root_id="run-main", parent_id="run-main")
+    first = manager.lifecycle.prepare_runner_attempt(task.id)
+    agent_run = repo.agent_run_for_run_id(task.id)
+    assert agent_run is not None
+    assert repo.settle_agent_attempt(
+        agent_run_id=str(agent_run["agent_run_id"]),
+        attempt_id=first.runner_active_attempt_id,
+    )["settled"] is True
+    projected = manager.load(task.id)
+    projected.status = "PENDING"
+    projected.runner_active_attempt_id = ""
+    manager.save(projected)
+
+    queued = repo.queue_pending_attempt(
+        str(agent_run["agent_run_id"]),
+        source="user_agent_guidance",
+    )
+    replay = repo.queue_pending_attempt(
+        str(agent_run["agent_run_id"]),
+        source="user_agent_guidance",
+    )
+
+    assert queued["attempt_id"] == replay["attempt_id"]
+    assert queued["attempt_generation"] == 2
+    assert queued["status"] == "pending"
+    assert repo.has_active_exec_lock(str(agent_run["agent_run_id"])) is False
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    assert prepared.runner_active_attempt_id == queued["attempt_id"]
+    assert repo.current_attempt(str(agent_run["agent_run_id"]))["status"] == "running"
+    assert len(repo.attempts_for_run(str(agent_run["agent_run_id"]))) == 2
+
+
+def test_concurrent_explicit_inputs_reuse_one_pending_successor(manager, repo):
+    task = manager.create_run(goal="并发插话", root_id="run-main", parent_id="run-main")
+    first = manager.lifecycle.prepare_runner_attempt(task.id)
+    agent_run = repo.agent_run_for_run_id(task.id)
+    assert agent_run is not None
+    assert repo.settle_agent_attempt(
+        agent_run_id=str(agent_run["agent_run_id"]),
+        attempt_id=first.runner_active_attempt_id,
+    )["settled"] is True
+    barrier = threading.Barrier(3)
+    queued_ids: list[str] = []
+    failures: list[BaseException] = []
+
+    def queue() -> None:
+        try:
+            barrier.wait(timeout=2.0)
+            queued = repo.queue_pending_attempt(
+                str(agent_run["agent_run_id"]),
+                source="user_agent_guidance",
+            )
+            queued_ids.append(str(queued["attempt_id"]))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    workers = [threading.Thread(target=queue) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait(timeout=2.0)
+    for worker in workers:
+        worker.join(timeout=2.0)
+
+    assert failures == []
+    assert len(queued_ids) == 2
+    assert len(set(queued_ids)) == 1
+    assert len(repo.attempts_for_run(str(agent_run["agent_run_id"]))) == 2
 
 
 def test_conversation_task_id_reuses_task_row(manager, repo):

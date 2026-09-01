@@ -237,7 +237,10 @@ def _run_subagent_model_turn(
                     result=result,
                 )
                 if transcript_sink is not None:
-                    transcript_sink.finish()
+                    transcript_sink.finish(
+                        final_text=str(getattr(result, "response", "") or ""),
+                        publish_final=True,
+                    )
                 return result
             (
                 carried_archive_tool_calls,

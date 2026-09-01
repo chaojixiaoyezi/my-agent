@@ -111,19 +111,9 @@ def test_requeued_result_releases_its_task_launch_while_batch_host_lives() -> No
     assert _is_dispatch_runner_candidate(task) is True
 
 
-def test_task_local_unfinished_turn_never_rents_root_background_scheduler(
-    monkeypatch,
-) -> None:
+def test_task_local_unfinished_turn_never_rents_root_background_scheduler() -> None:
     from agent_py_agent.agent.agent_core._finalization_service import (
         _schedule_typed_unfinished_continuation,
-    )
-    from agent_py_agent.agent.conversation import runtime as conversation_runtime
-
-    scheduled: list[str] = []
-    monkeypatch.setattr(
-        conversation_runtime,
-        "ensure_ordinary_task_resume",
-        lambda *_args, **kwargs: scheduled.append(str(kwargs.get("task_id") or "")),
     )
     ctx = SimpleNamespace(
         do_save=True,
@@ -141,8 +131,6 @@ def test_task_local_unfinished_turn_never_rents_root_background_scheduler(
     )
 
     _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
-
-    assert scheduled == []
 
 
 def test_incomplete_result_with_open_capability_request_remains_blocked() -> None:

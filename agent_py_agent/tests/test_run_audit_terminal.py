@@ -437,18 +437,12 @@ def _patch_resume(monkeypatch):
     def fake_goal(agent, **kwargs):
         goal.calls.append(kwargs)
 
-    ordinary = SimpleNamespace(calls=[])
-
-    def fake_ordinary(agent, **kwargs):
-        ordinary.calls.append(kwargs)
-
     monkeypatch.setattr(conv_runtime, "ensure_goal_progress_continuation", fake_goal)
-    monkeypatch.setattr(conv_runtime, "ensure_ordinary_task_resume", fake_ordinary)
-    return goal, ordinary
+    return goal
 
 
 def test_removed_required_action_gate_does_not_schedule_continuation(monkeypatch):
-    goal, ordinary = _patch_resume(monkeypatch)
+    goal = _patch_resume(monkeypatch)
     ctx = _ctx(
         task_attributes={"thread_goal_id": "goal-1", "conversation_thread_id": "thread-1"},
         final_response=SimpleNamespace(
@@ -461,11 +455,10 @@ def test_removed_required_action_gate_does_not_schedule_continuation(monkeypatch
     )
     _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
     assert goal.calls == []
-    assert ordinary.calls == []
 
 
 def test_gate_blocked_does_not_schedule(monkeypatch):
-    goal, ordinary = _patch_resume(monkeypatch)
+    goal = _patch_resume(monkeypatch)
     ctx = _ctx(
         task_attributes={"thread_goal_id": "goal-1"},
         final_response=SimpleNamespace(
@@ -478,11 +471,10 @@ def test_gate_blocked_does_not_schedule(monkeypatch):
     )
     _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
     assert goal.calls == []
-    assert ordinary.calls == []
 
 
 def test_non_gate_unknown_reason_does_not_schedule(monkeypatch):
-    goal, ordinary = _patch_resume(monkeypatch)
+    goal = _patch_resume(monkeypatch)
     ctx = _ctx(
         task_attributes={"thread_goal_id": "goal-1"},
         final_response=SimpleNamespace(
@@ -495,11 +487,10 @@ def test_non_gate_unknown_reason_does_not_schedule(monkeypatch):
     )
     _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
     assert goal.calls == []
-    assert ordinary.calls == []
 
 
 def test_removed_required_action_gate_does_not_resume_ordinary_task(monkeypatch):
-    goal, ordinary = _patch_resume(monkeypatch)
+    goal = _patch_resume(monkeypatch)
     ctx = _ctx(
         task_attributes={},
         final_response=SimpleNamespace(
@@ -512,7 +503,6 @@ def test_removed_required_action_gate_does_not_resume_ordinary_task(monkeypatch)
     )
     _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
     assert goal.calls == []
-    assert ordinary.calls == []
 
 
 @pytest.mark.parametrize(
@@ -528,7 +518,7 @@ def test_background_unfinished_slice_does_not_poll_without_terminal_children(
         CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
     )
 
-    goal, ordinary = _patch_resume(monkeypatch)
+    goal = _patch_resume(monkeypatch)
     ctx = _ctx(
         source="background_main_agent",
         do_save=False,
@@ -549,16 +539,15 @@ def test_background_unfinished_slice_does_not_poll_without_terminal_children(
     _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
 
     assert goal.calls == []
-    assert ordinary.calls == []
 
 
-def test_background_terminal_child_integration_resumes_exact_active_task(monkeypatch):
-    """全部 child 终态后的整合片段越过工具轮边界时必须立即续接原任务。"""
+def test_background_terminal_child_integration_does_not_create_ordinary_poll(monkeypatch):
+    """全部 child 终态后的普通整合片段越过轮限也不创建第二条模型调度链。"""
     from agent_py_agent.agent.conversation.authority import (
         CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
     )
 
-    goal, ordinary = _patch_resume(monkeypatch)
+    goal = _patch_resume(monkeypatch)
     ctx = _ctx(
         source="background_main_agent",
         do_save=False,
@@ -580,13 +569,31 @@ def test_background_terminal_child_integration_resumes_exact_active_task(monkeyp
     _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
 
     assert goal.calls == []
-    assert ordinary.calls == [
-        {
-            "task_id": "task-root",
-            "thread_id": "thread-1",
-            "due_now": True,
-            "conversation_request_id": "",
-        }
+
+
+def test_explicit_goal_unfinished_turn_schedules_goal_driver(monkeypatch):
+    """显式 Goal 的可继续收口仍使用独立 Goal policy，并保留 exact task/thread。"""
+    goal = _patch_resume(monkeypatch)
+    ctx = _ctx(
+        source="gateway",
+        task_attributes={
+            "thread_goal_id": "goal-1",
+            "conversation_thread_id": "thread-1",
+            "conversation_task_id": "task-root",
+        },
+        final_response=SimpleNamespace(
+            text="本轮达到工具边界",
+            backend="test",
+            runtime_status="unfinished",
+            runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+            runtime_source="tool_loop",
+        ),
+    )
+
+    _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
+
+    assert goal.calls == [
+        {"task_id": "task-root", "thread_id": "thread-1", "due_now": True}
     ]
 
 

@@ -3,7 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
-from agent_py_agent.cli.chat_parts.tui_threading import _refresh_loop
+from agent_py_agent.cli.chat_parts.tui_threading import (
+    _publish_background_activity,
+    _refresh_loop,
+)
 
 
 class _FiniteStop:
@@ -57,3 +60,38 @@ def test_refresh_loop_invalidates_only_active_ticks() -> None:
         _RefreshDecisions([False, True, False]),
     )
     assert app.invalidate_calls == 1
+
+
+def test_background_activity_updates_goal_and_child_navigation_together() -> None:
+    runtime = TuiRuntime("threading-goal-projection")
+    calls: list[tuple[str, object]] = []
+    navigation = SimpleNamespace(
+        update_goal_rows=lambda value: calls.append(("goals", value)) or True,
+        update_rows=lambda parent, value: calls.append((parent, value)) or True,
+    )
+    goal = {
+        "goal_id": "goal-one",
+        "name": "持续验证",
+        "objective": "验证底座",
+        "status": "active",
+    }
+    child = {
+        "run_id": "child-one",
+        "parent_run_id": "",
+        "status": "RUNNING",
+    }
+
+    assert _publish_background_activity(
+        runtime,
+        {
+            "active_task_count": 1,
+            "active_task_projection_ok": True,
+            "goal_projection_ok": True,
+            "subagent_projection_ok": True,
+            "goals": [goal],
+            "subagents": [child],
+        },
+        agent_navigation=navigation,
+    ) is True
+
+    assert calls == [("goals", [goal]), ("", [child])]

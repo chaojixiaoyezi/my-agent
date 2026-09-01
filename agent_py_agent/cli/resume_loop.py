@@ -1,14 +1,10 @@
-"""CLI 自动续跑循环（2026-08-14 根因3 设计 v2，审查通过后实施）。
+"""CLI Goal 续跑与用户显式 resume 执行器。
 
-cmd_run 首轮收口后，若收口是可续跑族（共享 gate should_continue_task），
-进程内循环续跑——同一 task/run/thread 链路（CliContinuationContext 贯穿），
-直到：任务完成 / 预算耗尽 / 不可续跑族（blocked/协议违规/UNKNOWN）/ 用户
-停止。续跑轮不走 cli_one_shot failed 兜底（切片3），任务级非终态由本循环
-决定。
+普通 ``run`` 只执行一轮；只有 exact active Goal 才能在进程内进入下一轮。
+用户 ``run --resume`` 则是显式控制命令，沿同一 task/run/thread 恢复。
 
-防失控双保险：resume_limit（policy 预算，默认 3，ensure_ordinary_task_resume
-单一权威递增）+ max_rounds（进程内护栏，默认 8）。预算耗尽写
-continuation_budget_exhausted 事件，绝不输出 DONE。
+Goal 续跑由同因收敛和 max_rounds 护栏限制；不再创建普通任务 progress
+policy，也没有 CLI/Gateway 为普通任务抢同一 policy 的旁路。
 """
 
 from __future__ import annotations
@@ -43,7 +39,7 @@ class CliResumeOutcome:
 
 
 def should_resume(result: object) -> tuple[bool, str]:
-    """收口后是否续跑（共享 gate，gateway 与 CLI 同一判断）。"""
+    """收口是否允许由显式 Goal 或用户 resume 继续。"""
     from ..agent.conversation.runtime import should_continue_task
 
     return should_continue_task(result)
@@ -258,10 +254,8 @@ def run_with_resume(
 ) -> CliResumeOutcome:
     """首轮 + 续跑轮循环（进程内，同一 task/run/thread 链路）。
 
-    2026-08-15 3×3 真机(cell2 bs4): max_rounds 硬编码 8 对复刻类长任务
-    太紧——续跑链 8 轮×resume_limit 3 次≈24 轮就预算耗尽死停等用户「继续」,
-    无人值守 CLI 场景任务必死。改为读配置 cli_resume_max_rounds(默认 8
-    保持现状, 普通交互任务防失控语义不变), 长任务部署可调大。
+    ``max_rounds`` 只限制显式 Goal 的进程内连续轮数；普通 CLI 请求没有
+    active Goal，因此首轮结束即返回。
 
     EXEC-41(四改之 2 步骤 2): 收口判定换用 decide_closeout 单一权威——
     停止原因采集(should_resume 白名单 gate)与 goal 授权(_auto_resume_
@@ -304,50 +298,9 @@ def run_with_resume(
         )
     authorized = _auto_resume_authorized(agent, runner)
 
-    # 缺口A(双席复核 seq1834): 进入续跑循环前 claim 一次(整个循环持有,
-    # lease 300s 覆盖进程内多轮)——CLI 与 gateway 同读同写同一 policy claim,
-    # 已被其他 consumer 持有则整个续跑放弃(等 gateway/下次), 不双跑。
-    # 缺口A真机补充(2026-08-14 testbox): try_claim 依赖
-    # kind=ordinary_task_resume 的 policy, 但该 policy 由收口 finalization
-    # (_schedule_typed_unfinished_continuation)创建——那是 gateway 调度器
-    # 路径, CLI one-shot run 从不经过 → 找不到 policy 永远 False, 永不续跑
-    # (测试里 fake agent 显式建 policy 掩盖了此洞)。修: claim 前先
-    # ensure_ordinary_task_resume 建/递增同一 policy(预算单一权威),
-    # 预算耗尽(返回 False) → budget_exhausted, 与 gateway 互斥语义不变。
-    from ..agent.conversation.runtime import ensure_ordinary_task_resume
-    from .resume_contract import try_claim_cli_resume
-
-    store = getattr(agent, "conversation_store", None)
-    budget_left = 1  # 通过 ensure+claim 即有至少一次预算; 无 store 不设预算
-    if should and authorized and store is not None:
-        ensured = ensure_ordinary_task_resume(
-            agent,
-            task_id=runner.ctx.root_task_id,
-            thread_id=runner.ctx.root_thread_id,
-            store=store,
-            due_now=True,
-        )
-        if not ensured:
-            # 预算耗尽 = 停: 清该任务闹钟字条, 不靠到期重醒白烧预算。
-            _cancel_task_wake_notes(agent, runner.ctx.root_task_id)
-            record_budget_exhausted(
-                agent=agent,
-                run_id=runner.ctx.root_run_id,
-                attempt_id=runner.ctx.parent_attempt_id,
-                task_run_id=runner._task_run_id(),
-                budget_before=0,
-                budget_after=0,
-                reason="resume_limit_reached",
-            )
-            return CliResumeOutcome(
-                status="budget_exhausted", rounds=rounds, final_result=result,
-                reason="resume_limit_reached",
-            )
-        if not try_claim_cli_resume(store, runner.ctx.root_task_id):
-            return CliResumeOutcome(
-                status="unresumable", rounds=rounds, final_result=result,
-                reason="claim_held_by_other_consumer",
-            )
+    # GoalManager/ConversationStore 的 exact active goal 是唯一自动续跑授权；
+    # -1 表示没有独立普通任务 policy 预算，仍受同因和 max_rounds 护栏约束。
+    budget_left = -1
     while True:
         outcome = decide_closeout(
             CloseoutFacts(

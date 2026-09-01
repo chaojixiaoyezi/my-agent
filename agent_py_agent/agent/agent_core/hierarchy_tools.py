@@ -17,7 +17,10 @@ from ..tooling.cancellation import raise_if_cancelled
 from ..tooling.models import ToolHandlerOutcome
 from .orchestration.create_constraints import resolved_extra_write_roots
 from .orchestration.create_context import create_context_manifest, create_context_packs
-from .orchestration.create_policy import create_task_attributes
+from .orchestration.create_policy import (
+    create_task_attributes,
+    normalize_create_output_params,
+)
 from .orchestration.dispatch.state_contract import dispatch_state_contract_payload
 from .orchestration.lifecycle import (
     CreatedSubagentLifecycleRequest,
@@ -377,6 +380,9 @@ def _bulk_schedule_error(agent: object, child_specs: list[HierarchyChildSpec]) -
     )
 
 
+# LLM: Recursive child specs pass through the same output-ref normalization as root
+# creation before permissions and attributes are derived; do not add a second path policy.
+# 函数用途: 把一项递归派工参数转换成孙代理规格，并统一绑定当前任务目录。
 def _hierarchy_child_spec(
     agent: object,
     raw: object,
@@ -385,6 +391,7 @@ def _hierarchy_child_spec(
 ) -> HierarchyChildSpec | ToolHandlerOutcome:
     if not isinstance(raw, dict):
         return _schedule_error("children 每一项必须是对象。", tool_name=tool_name)
+    raw = normalize_create_output_params(raw, agent)
     goal = str(raw.get("goal") or "").strip()
     if not goal:
         return _schedule_error("children 每一项必须包含 goal。", tool_name=tool_name)

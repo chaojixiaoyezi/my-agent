@@ -1,5 +1,38 @@
 # STATUS
 
+## 2026-09-01 R121 Goal/思考展示与普通模式续跑边界（完成）
+
+- 普通任务不再因工具轮上限、open Todo 或旧 `ordinary_task_resume` policy 在用户不知情时继续调用模型；历史
+  policy 启动时结构化退役。只有当前 thread 的显式 `/goal` 能跨普通回合持续续跑，Goal 身份、预算、暂停和
+  恢复继续只读 ThreadGoal 事实，不从模型正文或 Todo 猜测。
+- 子代理插话现在绑定 exact AgentRun：活跃轮原地收取；等待中的非终态代理原子预留一个 pending successor、
+  写入一次 durable guidance 后立即唤醒。同一 stable message 重放只返回原回执，并发提交只启动一个 runner；
+  已消费消息还要求该代理在让出前产生结构化 reply obligation，不能只在 thinking 中“看见”却不回复。
+- TUI 固定面板先显示 Goal、再显示直属 child。`↓` 可选中 `goal:<id>`，`Enter` 只展开完整 objective、状态、
+  token 与时限，不切换代理页面；`Ctrl+G` 收起。持久 outbox 保存成功后，原样 `/goal ...` 以用户消息样式留在
+  当前 TUI 历史，但不会进入模型消息或生成第二次控制请求。
+- 流式 thinking 保持实时展开；每个完成/失败/中断的 thinking 默认只保留灰色摘要，`Ctrl+O` 才展开全部历史，
+  再按一次恢复折叠。typed thinking block、canonical history 和模型上下文均未删除。
+- `.10` fresh 真 TUI `ma-r121-110-u374-goal-thinking` 已验证 `/goal` 原文、Goal 固定行、`↓/Enter/Ctrl+G`
+  和 thinking 自动折叠/`Ctrl+O` 展开。该轮同时抓到一个真实底层缺陷：MiniMax-M2.7 已正常返回 73 output
+  tokens，但旧 delivery gate 因 Goal 仍 active 而抑制整个 assistant final，用户只看到收口后的思考。当前修复
+  对齐 会话运行时：`thread_goal_continue` 是一轮真实 active turn，本轮 final 始终进入 canonical owner transcript；
+  Goal 是否仍 active 只决定后续 continuation，不再吞掉本轮正式回复。自动 child lifecycle/control chatter 仍由
+  各自 typed reason 抑制，不能借此放宽成所有后台事件都可见。
+- 第一版正文裁决 wheel 顺序部署后，同一 TUI 的普通追问又暴露第二个真机缺陷：纯聊天 `/goal` 没有执行
+  文件工具，因此 exact task link 的 `task_path` 合法为空；Gateway 却把它与“曾有非空工作区但目录已丢失”
+  合并成 `CONVERSATION_PERSISTENCE_UNAVAILABLE`。当前候选只在配置过的非空路径确实消失时 fail closed；
+  空路径 Goal 继续使用 thread cwd。新增正反回归，并将整个 Gateway 会话上下文测试文件跑通。
+- 最终 wheel 在同一 `ma-r121-110-u374-goal-thinking` 中原样追问，5 秒 live thinking 后自动折叠，正文
+  “新版本正式回复可见”直接出现，Goal 保持进行中。磁盘 canonical messages 精确为本轮 user + assistant
+  两行；`Ctrl+O` 进入/退出详细历史，`↓/Enter/Ctrl+G` 选择、展开、收起 Goal 均再次物理按键通过。
+- provider 流 idle timeout 由 typed stage 进入统一有界退避，外层重连接管，不能被内层固定尝试数提前吞掉；
+  工具审批投影只接受 exact applied approval 结构事实，handler 自报 metadata 无权伪造“已批准”。
+- 三组所有受影响 focused pytest、相关 PyCompile、focused Ruff 与 `git diff --check` 已通过；当前生产/测试
+  代码累计增删 4,769 行，低于用户约定的 10k，全仓 pytest 不运行。最终 wheel SHA-256 为
+  `9bb53f3226013534ef3e64a9cd5e192fd941dc682647baff11b1d929785d8d34`，已部署到 `.10` 唯一
+  `ma-gateway-r121-final2-110-r3` / PID `118531` / 8420，配置与欢迎页均核对为 MiniMax-M2.7。
+
 ## 2026-08-31 R118 父级自主裁决、Gateway durable wake 与生产 wheel 递归角色（完成）
 
 - `d9b70f2` 将 `resolve_capability_requests` 的 grant/deny 收成直属父级在既有 authority 内的 mutating

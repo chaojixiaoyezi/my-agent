@@ -11,6 +11,7 @@ must clean it when a scope or agent ends.
 
 import threading
 import weakref
+from pathlib import Path
 
 _LOCAL = threading.local()
 
@@ -169,6 +170,19 @@ def current_task_attributes(agent) -> dict | None:
         return value if isinstance(value, dict) else None
     value = getattr(agent, "_current_task_attributes", None)
     return value if isinstance(value, dict) else None
+
+
+# LLM: This is the single in-process seam for the active canonical task root.
+# A typed subagent runner context outranks the legacy transient main-turn field.
+# 函数用途: 返回当前主代理或任意层级子代理真正绑定的任务目录。
+def current_task_root(agent) -> str:
+    attrs = current_task_attributes(agent)
+    workspace = attrs.get("run_workspace") if isinstance(attrs, dict) else None
+    runner_root = workspace.get("task_root") if isinstance(workspace, dict) else ""
+    if isinstance(runner_root, str | Path) and str(runner_root).strip():
+        return str(runner_root).strip()
+    raw = getattr(agent, "_current_run_task_workspace", "")
+    return str(raw).strip() if isinstance(raw, str | Path) else ""
 
 
 # LLM: Runtime IDs accept only explicit strings so arbitrary objects cannot become authority keys.

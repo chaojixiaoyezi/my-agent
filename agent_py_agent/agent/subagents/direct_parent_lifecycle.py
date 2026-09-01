@@ -99,6 +99,43 @@ def parent_wait_blocks_dispatch(task: object) -> bool:
     return marker.get("state") == "waiting" and bool(_unique_ids(marker.get("run_ids")))
 
 
+# LLM: A real user message is an explicit control event that may wake this exact
+# logical parent before its children finish. Clear only the typed wait marker in
+# one canonical mutation; child identities and their durable work keep running,
+# and the next parent slice may mark the remaining active children again.
+# 函数用途: 用户从代理详情页插话时解除“等待直属孩子”，让同一个父代理立即处理消息。
+def release_parent_wait_for_user_guidance(
+    manager: Any,
+    parent_run_id: str,
+) -> tuple[str, ...]:
+    parent_id = str(parent_run_id or "").strip()
+    if manager is None or not parent_id:
+        return ()
+    released_run_ids: list[str] = []
+
+    # LLM: The reducer runs under the manager's canonical state guard. It may
+    # mutate only the wait marker and must never stop, complete, or rewrite a
+    # child from this parent-side control edge.
+    # 函数用途: 在锁内复读最新父任务并精确删掉等待标记。
+    def release(parent: object) -> None:
+        if task_has_ended_status(parent):
+            return
+        marker = _wait_record(parent)
+        run_ids = _unique_ids(marker.get("run_ids"))
+        if marker.get("state") != "waiting" or not run_ids:
+            return
+        attrs = dict(getattr(parent, "attributes", {}) or {})
+        attrs.pop(DIRECT_CHILD_WAIT_ATTR, None)
+        parent.attributes = attrs
+        released_run_ids.extend(run_ids)
+
+    try:
+        manager.mutate(parent_id, release)
+    except (FileNotFoundError, TypeError, ValueError):
+        return ()
+    return tuple(released_run_ids)
+
+
 # LLM: One child terminal event may resume only its exact direct parent. A
 # normal DONE child is batched until all marked siblings end; failures and
 # missing canonical rows demand immediate parent attention.
@@ -336,6 +373,7 @@ __all__ = [
     "direct_children_context_payload",
     "mark_parent_waiting_for_direct_children",
     "parent_wait_blocks_dispatch",
+    "release_parent_wait_for_user_guidance",
     "reconcile_all_parent_waits",
     "reconcile_parent_wait_for_child",
 ]

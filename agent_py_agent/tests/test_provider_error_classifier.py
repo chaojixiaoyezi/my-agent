@@ -89,10 +89,8 @@ def test_retry_delays_get_jitter_but_stay_config_driven() -> None:
     assert apply_retry_jitter(0.0) == 0.0
 
 
-def test_typed_timeout_error_fast_fails_not_retried() -> None:
-    """CI 回归钉子:typed ProviderTimeoutError 必须快速上抛,不被文本分类器
-    误判 TIMEOUT/retryable 进入重试循环(my-agent 的 request_timeout 是回合
-    超时,重试每次同样超时,只拖垮续航)。文本分类器只兜非 typed 裸异常。"""
+def test_typed_timeout_retry_uses_structured_stage() -> None:
+    """流式超时按 会话运行时 语义重连；墙钟和旧超时不得被文本误判为无限重试。"""
     import pytest
 
     from agent_py_agent.agent.agent_core.provider_transient_auto_resume import (
@@ -100,7 +98,16 @@ def test_typed_timeout_error_fast_fails_not_retried() -> None:
     )
     from agent_py_agent.agent.backends.errors import ProviderTimeoutError
 
-    with pytest.raises(ProviderTimeoutError):
-        _raise_unless_provider_transient(ProviderTimeoutError("模型接口请求超时: request_timeout=17s"))
+    _raise_unless_provider_transient(
+        ProviderTimeoutError("等待首事件超时", stage="first_event")
+    )
+    _raise_unless_provider_transient(
+        ProviderTimeoutError("流式响应空闲超时", stage="stream_idle")
+    )
+    for stage in ("wall_clock", "provider_declared", "provider_wall"):
+        with pytest.raises(ProviderTimeoutError):
+            _raise_unless_provider_transient(
+                ProviderTimeoutError("模型接口请求超时", stage=stage)
+            )
     # 裸异常(无 typed 形态)仍走文本分类器:rate_limit 放行重试
     _raise_unless_provider_transient(RuntimeError("429 rate limit"))

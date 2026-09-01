@@ -7,6 +7,7 @@ from agent_py_agent.agent.backends import (
     ModelResponse,
     ProviderQuotaExhaustedError,
     ProviderResponseError,
+    ProviderTimeoutError,
     ProviderTransientError,
 )
 from agent_py_agent.agent.core import SimpleAgent
@@ -108,6 +109,50 @@ def test_provider_transient_prefers_typed_retry_sink(monkeypatch) -> None:
             "error_type": "ProviderTransientError",
         }
     ]
+
+
+# LLM: This regression test locks 会话运行时 stream reconnect semantics without broadening
+# wall-clock timeout retries or relying on error-message text.
+# 函数用途: 验证流式空闲超时会显示重连并继续同一模型轮，最终只返回成功结果。
+def test_stream_idle_timeout_reconnects_with_configured_schedule(monkeypatch) -> None:
+    calls = 0
+    waits: list[float] = []
+    typed: list[dict[str, object]] = []
+
+    class RetrySink:
+        def __call__(self, _text: str) -> None:
+            raise AssertionError("typed retry sink should avoid legacy text")
+
+        def write_provider_retry(self, **payload: object) -> bool:
+            typed.append(dict(payload))
+            return True
+
+    def operation() -> str:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise ProviderTimeoutError("idle", stage="stream_idle")
+        return "ok"
+
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", waits.append)
+    monkeypatch.setattr(provider_transient_auto_resume, "apply_retry_jitter", lambda value: value)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (2.0, 5.0, 9.0),
+    )
+
+    assert (
+        provider_transient_auto_resume.run_with_provider_transient_auto_resume(
+            operation,
+            on_chunk=RetrySink(),
+        )
+        == "ok"
+    )
+    assert calls == 3
+    assert waits == [2.0, 5.0]
+    assert [item["attempt"] for item in typed] == [1, 2]
+    assert all(item["error_type"] == "ProviderTimeoutError" for item in typed)
 
 
 def test_provider_transient_model_turn_raises_after_schedule_exhausted(

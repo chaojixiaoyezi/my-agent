@@ -5353,11 +5353,9 @@ class ConversationProgressStore(ConversationWakeStore):
     ) -> tuple[ProgressPolicy | None, bool, bool]:
         """锁内 CAS 更新一个进度策略（flock 跨进程互斥，读-改-写原子）。
 
-        2026-08-14 双席复核硬门1（严格 CAS）：try_claim_cli_resume 此前是
-        先读 policy、再 write_json_file_atomic——两个 CLI/gateway 消费者
-        并发时读-改-写窗口内互相覆盖，无 expected-version 比对。此方法用
-        gateway_parts.io 的 update_json_file_atomic（fcntl.flock 锁内
-        读-改-写）保证同文件系统内任意消费者的原子互斥。
+        使用 gateway_parts.io 的 update_json_file_atomic（fcntl.flock 锁内
+        读-改-写）保证同文件系统内任意策略维护者的原子互斥；调用方只提供
+        纯结构化 updater，不能从文案猜状态。
         返回值 (policy, changed, aborted)：
         - aborted=True = updater 返回 None（条件不满足，明确放弃，不落盘）
         - changed=True = 锁内比对后内容真正写盘

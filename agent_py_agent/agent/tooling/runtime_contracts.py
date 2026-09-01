@@ -298,6 +298,34 @@ class ToolOperation:
         }
 
 
+# LLM: This host-owned result is attached only after an exact ToolCall approval binding resumes.
+# Handlers and provider prose must not synthesize it through generic metadata or output text.
+# 类用途: 表示用户批准已经精确应用到同一次工具调用，供模型续轮和耐久审计读取。
+@dataclass(frozen=True)
+class AppliedToolApproval:
+    permission_id: str
+    decision: str
+
+    def __post_init__(self) -> None:
+        permission_id = str(self.permission_id or "").strip()
+        decision = str(self.decision or "").strip().lower()
+        if not permission_id:
+            raise ValueError("applied tool approval requires permission_id")
+        if decision not in {"approved", "approved_session"}:
+            raise ValueError(f"invalid applied tool approval decision: {decision}")
+        object.__setattr__(self, "permission_id", permission_id)
+        object.__setattr__(self, "decision", decision)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": "tool_approval_result.v1",
+            "permission_id": self.permission_id,
+            "status": "approved",
+            "decision": self.decision,
+            "applied": True,
+        }
+
+
 @dataclass(frozen=True)
 class ToolSuccessFacts:
     """Optional host-owned facts attached to one successful canonical result."""
@@ -347,6 +375,7 @@ class ToolResult:
     failure_stage: str = ""
     duration_ms: int = 0
     operation: ToolOperation | None = None
+    applied_approval: AppliedToolApproval | None = None
     effect_outcome: str = ""
     effect_source_ref: str = ""
     refs: tuple[ToolResultRef, ...] = ()
@@ -387,6 +416,11 @@ class ToolResult:
             raise ValueError(f"invalid tool output trust: {trust}")
         if redaction not in {"default", "source_code"}:
             raise ValueError(f"invalid tool output redaction: {redaction}")
+        if self.applied_approval is not None and not isinstance(
+            self.applied_approval,
+            AppliedToolApproval,
+        ):
+            raise ValueError("tool result applied_approval must be typed")
         object.__setattr__(self, "call_id", str(self.call_id).strip())
         object.__setattr__(self, "tool_name", str(self.tool_name).strip())
         object.__setattr__(self, "status", status)
@@ -517,6 +551,9 @@ class ToolResult:
             "failure_stage": self.failure_stage,
             "duration_ms": self.duration_ms,
             "operation": self.operation.to_dict() if self.operation else None,
+            "applied_approval": (
+                self.applied_approval.to_dict() if self.applied_approval else None
+            ),
             "effect_outcome": self.effect_outcome,
             "effect_source_ref": self.effect_source_ref,
             "refs": [ref.to_dict() for ref in self.refs],
@@ -544,6 +581,15 @@ class ToolResult:
         if self.effect_outcome:
             fields.append(f"effect_outcome={self.effect_outcome}")
         parts = [f"[tool-result; {'; '.join(fields)}]", self.output]
+        if self.applied_approval is not None:
+            parts.append(
+                "[tool-approval; status=approved; "
+                f"decision={self.applied_approval.decision}; already_applied=true]"
+            )
+            parts.append(
+                "The user already approved this exact tool call and the host already applied "
+                "that approval before execution. Do not wait for or request another approval."
+            )
         if self.recovery_hint:
             parts.append(
                 "[tool-recovery; "

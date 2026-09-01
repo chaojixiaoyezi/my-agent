@@ -461,8 +461,7 @@ def test_visible_assistant_keeps_prior_thinking_text_in_order() -> None:
 
 
 def test_completed_thinking_collapses_and_detailed_mode_expands() -> None:
-    """终端交互 对齐：completed 思考默认展开内容（灰色常显），
-    超长（>50 行）才折叠提示；detailed 模式全量展开。"""
+    """终端交互 对齐：completed 思考默认只留摘要，detailed 模式恢复灰色正文。"""
     store = TuiStateStore()
     seq = TuiEventSequencer("renderer", clock=lambda: 30.0)
     store.publish(seq.emit("thinking_started", "started", "thinking"))
@@ -479,10 +478,9 @@ def test_completed_thinking_collapses_and_detailed_mode_expands() -> None:
         store.snapshot(),
         TuiRenderContext(width=80, detailed_transcript=True),
     )
-    # 默认展开：标题 + 内容都可见（灰色）
-    assert _frame_lines(collapsed)[0] == "∴ Thought for 10s"
-    assert "（private reasoning）" in _frame_lines(collapsed)
-    assert _frame_lines(detailed)[0] == "∴ Thought for 10s"
+    assert _frame_lines(collapsed) == ["∴ Thought for 10s（Ctrl+O 展开）"]
+    assert "（private reasoning）" not in _frame_lines(collapsed)
+    assert _frame_lines(detailed)[0] == "∴ Thought for 10s（Ctrl+O 展开）"
     assert "（private reasoning）" in _frame_lines(detailed)
     assert fragments_text(detailed.footer).startswith("  Showing detailed transcript")
 
@@ -507,7 +505,7 @@ def test_completed_thinking_fullwidth_parentheses_fit_narrow_terminal() -> None:
 
 
 def test_completed_thinking_long_content_folds_with_hint() -> None:
-    """completed 思考超长（>50 行）折叠为提示行（灰色），Ctrl+O 看全部。"""
+    """completed 长思考也只留一行摘要，Ctrl+O 才恢复完整内容。"""
     store = TuiStateStore()
     seq = TuiEventSequencer("renderer", clock=lambda: 30.0)
     store.publish(seq.emit("thinking_started", "started", "thinking"))
@@ -522,16 +520,14 @@ def test_completed_thinking_long_content_folds_with_hint() -> None:
     )
     frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
     texts = _frame_lines(frame)
-    assert any("思考内容共" in text and "Ctrl+O" in text for text in texts)
-    # 折叠提示行灰色
-    hint_lines = [
-        line
-        for line in frame.transcript_lines
-        if any("思考内容共" in text for _style, text in line)
-    ]
-    assert hint_lines
-    styles = {style for line in hint_lines for style, _text in line}
-    assert "class:tui-thinking" in styles
+    assert texts == ["∴ Thought for 10s（Ctrl+O 展开）"]
+    detailed = render_tui_snapshot(
+        store.snapshot(),
+        TuiRenderContext(width=80, detailed_transcript=True),
+    )
+    detailed_text = "\n".join(_frame_lines(detailed))
+    assert "思考第 1 行内容" in detailed_text
+    assert "思考第 79 行内容" in detailed_text
 
 
 def test_block_cache_reuses_stable_history_when_active_stream_changes() -> None:

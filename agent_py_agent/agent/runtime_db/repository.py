@@ -855,6 +855,214 @@ class RuntimeRepository(
             )
         return superseded_ids
 
+    # LLM: An explicit external input may reserve the next turn for one existing
+    # nonterminal logical agent while no runner owns execution. This method only
+    # creates/reuses a pending attempt; create_attempt(reuse_pending=True) remains
+    # the sole activation edge that acquires the execution lock. Callers must
+    # still enforce task lifecycle, owner authorization, and terminal read-only
+    # rules before using this repository primitive.
+    # 函数用途: 给暂时空闲或等待孩子的同一个代理预留下一执行轮；这里只排队，不启动模型或工具。
+    def queue_pending_attempt(
+        self,
+        agent_run_id: str,
+        *,
+        source: str = "external_input",
+    ) -> sqlite3.Row:
+        """Create or reuse one unstarted current attempt for an explicit wake."""
+
+        now = time.time()
+        normalized_source = str(source or "external_input").strip() or "external_input"
+        scope = exec_lock_scope(agent_run_id)
+        with self.transaction() as conn:
+            # Reserve the writer before reading current_generation. Two TUI/Web
+            # submissions may target the same idle child concurrently; the
+            # second caller must observe and reuse the first pending row rather
+            # than race the UNIQUE(agent_run_id, generation) constraint.
+            conn.execute("BEGIN IMMEDIATE")
+            run, current = self._load_pending_attempt_source_conn(
+                conn,
+                agent_run_id,
+            )
+            reusable = self._validate_pending_attempt_transition_conn(
+                conn,
+                run=run,
+                current=current,
+                agent_run_id=agent_run_id,
+                scope=scope,
+                source=normalized_source,
+            )
+            if reusable is not None:
+                return reusable
+            return self._insert_pending_attempt_conn(
+                conn,
+                run=run,
+                current=current,
+                agent_run_id=agent_run_id,
+                source=normalized_source,
+                now=now,
+            )
+
+    # LLM: The writer transaction must read the run pointer and pointed attempt
+    # together. Missing pointers are corruption/conflict, never an empty agent.
+    # 函数用途: 在排队事务中读取同一 AgentRun 的 current pointer 和执行轮。
+    def _load_pending_attempt_source_conn(
+        self,
+        conn: sqlite3.Connection,
+        agent_run_id: str,
+    ) -> tuple[sqlite3.Row, sqlite3.Row]:
+        run = conn.execute(
+            "SELECT current_attempt_generation, current_attempt_id, "
+            "status, task_run_id, workspace_epoch FROM agent_runs "
+            "WHERE agent_run_id = ?",
+            (agent_run_id,),
+        ).fetchone()
+        if run is None:
+            raise KeyError(f"agent_run 不存在: {agent_run_id}")
+        current_attempt_id = str(run["current_attempt_id"] or "")
+        current = conn.execute(
+            "SELECT attempt_id, agent_run_id, attempt_generation, status, ended_at "
+            "FROM agent_attempts WHERE attempt_id = ? AND agent_run_id = ?",
+            (current_attempt_id, agent_run_id),
+        ).fetchone()
+        if current is None:
+            raise RuntimeConflictError(
+                f"current attempt 缺失，拒绝排队新轮次: {agent_run_id}"
+            )
+        return run, current
+
+    # LLM: Reuse is allowed only for one unstarted current pending row. Running,
+    # unknown, nonterminal or still-locked predecessors fail closed before any
+    # generation is inserted.
+    # 函数用途: 校验旧执行轮是否允许续接；已有 pending 直接复用，其它冲突明确拒绝。
+    def _validate_pending_attempt_transition_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run: sqlite3.Row,
+        current: sqlite3.Row,
+        agent_run_id: str,
+        scope: str,
+        source: str,
+    ) -> sqlite3.Row | None:
+        current_status = str(current["status"] or "").strip().lower()
+        current_ended_at = float(current["ended_at"] or 0.0)
+        if current_status == ATTEMPT_STATUS_PENDING and current_ended_at == 0:
+            return current
+        if current_status == "running" and current_ended_at == 0:
+            raise RuntimeExecutionBusyError(
+                f"current attempt 仍在运行，拒绝另排轮次: {agent_run_id}"
+            )
+        recovery_reason = _main_agent_recovery_reason(
+            str(run["status"] or ""),
+            current_status,
+        )
+        if recovery_reason:
+            self._append_event_conn(
+                conn,
+                event_type="agent_attempt.queue_blocked",
+                attempt_id=str(current["attempt_id"] or ""),
+                agent_run_id=agent_run_id,
+                task_run_id=str(run["task_run_id"] or ""),
+                payload={"reason": recovery_reason, "source": source},
+            )
+            raise RuntimeConflictError(
+                f"attempt 不可安全续接({recovery_reason})，拒绝排队: {agent_run_id}"
+            )
+        if current_status not in _ATTEMPT_TERMINAL_STATUSES:
+            raise RuntimeConflictError(
+                f"attempt 状态不可续接({current_status!r})，拒绝排队: {agent_run_id}"
+            )
+        lock = conn.execute(
+            "SELECT attempt_id FROM resource_locks WHERE canonical_scope = ?",
+            (scope,),
+        ).fetchone()
+        if lock is not None:
+            raise RuntimeExecutionBusyError(
+                f"执行权锁仍存在，拒绝排队新轮次: {scope}"
+            )
+        return None
+
+    # LLM: Insertion and current-pointer CAS share the same immediate writer
+    # transaction. Events describe the committed generation and never trigger it.
+    # 函数用途: 原子插入下一 pending attempt、切换 current pointer 并记录排队事件。
+    def _insert_pending_attempt_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run: sqlite3.Row,
+        current: sqlite3.Row,
+        agent_run_id: str,
+        source: str,
+        now: float,
+    ) -> sqlite3.Row:
+        current_attempt_id = str(current["attempt_id"] or "")
+        current_status = str(current["status"] or "").strip().lower()
+        previous_generation = int(run["current_attempt_generation"] or 0)
+        generation = previous_generation + 1
+        attempt_id = new_id("attempt_id")
+        conn.execute(
+            """
+            INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation,
+                                       status, started_at, metadata_json)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (
+                attempt_id,
+                agent_run_id,
+                generation,
+                ATTEMPT_STATUS_PENDING,
+                now,
+                json.dumps(
+                    {"lifecycle": ATTEMPT_STATUS_PENDING, "source": source},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        updated = conn.execute(
+            """
+            UPDATE agent_runs
+            SET current_attempt_id = ?, current_attempt_generation = ?,
+                status = 'created', updated_at = ?
+            WHERE agent_run_id = ? AND current_attempt_id = ?
+              AND current_attempt_generation = ? AND status = ?
+            """,
+            (
+                attempt_id,
+                generation,
+                now,
+                agent_run_id,
+                current_attempt_id,
+                previous_generation,
+                str(run["status"] or ""),
+            ),
+        ).rowcount
+        if updated != 1:
+            raise RuntimeConflictError(
+                f"pending attempt 排队 CAS 失败: {agent_run_id} "
+                f"generation {previous_generation}->{generation}"
+            )
+        for event_type in ("agent_attempt.queued", "agent_run.queued"):
+            self._append_event_conn(
+                conn,
+                event_type=event_type,
+                attempt_id=attempt_id,
+                agent_run_id=agent_run_id,
+                task_run_id=str(run["task_run_id"] or ""),
+                payload={
+                    "previous_attempt_id": current_attempt_id,
+                    "previous_status": current_status,
+                    "status": ATTEMPT_STATUS_PENDING,
+                    "attempt_generation": generation,
+                    "source": source,
+                },
+            )
+        row = conn.execute(
+            "SELECT * FROM agent_attempts WHERE attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()
+        assert row is not None
+        return row
+
     # LLM: 创建 attempt 的事务闸与后台只读 recovery 投影必须共用
     # _main_agent_recovery_reason；只读 preflight 不能替代这里的最终 CAS。
     # 换代必须同时关闭所有非 current 的 active attempt，但不能把旧工具副作用

@@ -1760,15 +1760,28 @@ def _tool_round_limit_reached(agent, params: ToolLoopExecuteParams, tool_rounds:
     return limit > 0 and tool_rounds >= limit
 
 
-# LLM: 工具轮数耗尽时由模型基于真实工具记录给出诚实总结；不再交给独立验收器重写正文。
-# 函数用途: 轮数到顶时让模型只做总结不再用工具；续跑文案按预算如实切换——
-# 还有自动续跑预算说「系统会自动继续」，预算耗尽说「请回复『继续』」（真机铁证
-# 2026-08-07 celery 复刻:提示词承诺自动续跑但普通任务不续，模型如实转述了没兑现的承诺）。
 # LLM: 工具轮数耗尽后只允许模型基于真实已执行结果收口；若本轮创建了 child，
-# 提示它结束当前轮等待事件，不能重新引入 shell sleep 或状态轮询。
-# 函数用途: 在工具调用达到本轮上限时生成最后一次不带新工具执行的模型回复。
+# wait for the exact lifecycle wake. Only an explicit active Goal promises a
+# future host-driven turn; ordinary chat must honestly stop for user input.
+# 函数用途: 工具轮数到顶后生成诚实阶段回复，并区分等待子代理、Goal 续跑和普通暂停。
 def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_rounds: int):
-    if _ordinary_task_resume_available(agent, params) is False:
+    waiting_for_children = _executed_subagent_orchestration(params)
+    if waiting_for_children:
+        params.tool_context.append(
+            "[tool-system]\n"
+            "本轮已达到最大工具轮数限制；请根据真实工具记录简短说明当前阶段，"
+            "然后结束本回合等待子代理生命周期事件。不要用 shell sleep 或查询工具轮询；"
+            "子代理终态会精确唤醒同一任务，系统不替主代理生成最终结论。"
+        )
+    elif _active_goal_continuation_available(agent, params):
+        params.tool_context.append(
+            "[tool-system]\n"
+            "本轮已达到最大工具轮数限制，停止继续调用工具。这是一次未完成的阶段交接，不是任务完成。"
+            "请只根据真实工具记录说明已经完成的工作、仍未完成的工作和当前限制；"
+            "不要把尚未执行的动作写成正在执行或已经完成。"
+            "当前显式 Goal 会保留同一任务并按其持久预算继续。"
+        )
+    else:
         params.tool_context.append(
             "[tool-system]\n"
             "本轮已达到最大工具轮数限制，停止继续调用工具。这是一次未完成的阶段交接，不是任务完成。"
@@ -1776,18 +1789,6 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
             "不要把尚未执行的动作写成正在执行或已经完成。"
             "本次交接后暂停自动推进；"
             "请如实告诉用户：回复『继续』可让我接着做。"
-        )
-    else:
-        params.tool_context.append(
-            "[tool-system]\n"
-            "本轮已达到最大工具轮数限制，停止继续调用工具。这是一次未完成的阶段交接，不是任务完成。"
-            "请只根据真实工具记录说明已经完成的工作、仍未完成的工作和当前限制；"
-            "不要把尚未执行的动作写成正在执行或已经完成。运行时会保留同一任务并按持久进度继续。"
-        )
-    if _executed_subagent_orchestration(params):
-        params.tool_context.append(
-            "[tool-system]\n结束本回合等子代理生命周期事件；"
-            "不要用 shell sleep 或查询工具轮询。系统不替主代理生成最终结论。"
         )
     final_prompt = build_tool_loop_prompt(agent, params)
     final_response = generate_model_response(
@@ -1809,83 +1810,33 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
 
 
 def _repeated_failure_halt_threshold(params: ToolLoopExecuteParams) -> int:
-    # L2 阶梯:同工具同类失败连续达阈值即收口并自动续跑(不再跟随 guardrail
+    # L2 阶梯:同工具同类失败连续达阈值即诚实收口(不再跟随 guardrail
     # 3N DENY;默认 8,可经 task_attributes/runtime_guard_policy 覆盖)。
     return configured_repeated_failure_halt_threshold(params)
 
 
-def _ordinary_task_resume_available(agent, params: ToolLoopExecuteParams) -> bool | None:
-    """轮限收口提示词按"会不会真的自动续跑"切换:会=「会自动继续」,不会=
-    「请回复『继续』」。
-
-    三值语义:True=本次收口后还有自动续跑预算且被授权;False=本次收口后
-    不会自动续跑;None=查不到(沿用乐观文案, 与 /goal 无限续跑语义一致)。
-    判定完全用结构化信号(EXEC-39 goal 授权 + policy metadata 的
-    resume_used/resume_limit),不做自然语言判断。EXEC-41(四改之 2 步骤 4):
-    承诺文案与收口机器 decide_closeout 同源——CLI 只有 active goal 才可能
-    自动续, 这里必须同判, 不许文案先行于机器行为(2026-08-07 真机教训)。
-    """
+# LLM: Tool-limit wording may promise another host-driven turn only when the
+# exact thread/task owns an active Goal. Never infer this from ordinary progress
+# policies or model prose; those legacy policies are retired by the scheduler.
+# 函数用途: 判断当前轮是否属于显式活跃 Goal，供轮限回复选择真实承诺文案。
+def _active_goal_continuation_available(agent, params: ToolLoopExecuteParams) -> bool:
     try:
         attrs = getattr(params, "task_attributes", None)
         attrs = attrs if isinstance(attrs, dict) else {}
         if str(attrs.get("thread_goal_id") or "").strip():
-            # /goal 任务无预算概念:用户显式目标即无限续跑授权。
             return True
         store = getattr(agent, "conversation_store", None)
-        source = str(getattr(params, "source", "") or "").strip()
-        from .runtime.task_identity import durable_task_id
-
-        if source == "cli_run":
-            # EXEC-39: CLI 正常不自动续跑——只有 active goal 才可能自动续
-            # (decide_closeout 同源)。无 store/无 thread/无 active goal
-            # 一律 False(fail-closed), 与 _auto_resume_authorized 同判。
-            # task 身份用 bind 发放的 params.task_id(与 runner.ctx.root_
-            # task_id 同源), 不用 ledger path key(goal.task_id 按它匹配)。
-            task_id = str(getattr(params, "task_id", "") or "").strip()
-            if store is None or not task_id:
-                return False
-            thread_id = str(attrs.get("conversation_thread_id") or "").strip()
-            if not thread_id:
-                return False
-            try:
-                goal = store.load_goal(thread_id, task_id=task_id)
-            except Exception:  # noqa: BLE001 goal 读不到=fail-closed 不承诺续跑
-                return False
-            if goal is None or str(
-                getattr(goal, "status", "") or ""
-            ).strip().lower() != "active":
-                return False
-        else:
-            # 自动续跑恢复的是一个真实执行任务，不是 Todo 的存储位置。
-            # 同一 workspace 可以跨多个用户 turn 复用 task-path 账本，但
-            # scheduler 只能拿 conversation_task_id 恢复本轮执行上下文。
-            task_id = str(durable_task_id(params) or "").strip()
-        if store is None or not callable(getattr(store, "list_progress_policies", None)):
-            return None
-        if not task_id:
-            return None
-        matching = [
-            policy
-            for policy in store.list_progress_policies(enabled_only=True)
-            if policy.task_id == task_id
-            and str((policy.metadata or {}).get("kind") or "") == "ordinary_task_resume"
-        ]
-        if not matching:
-            # 还没有 policy = 本次收口将创建第一次续跑 = 有预算。
-            return True
-        try:
-            used = int((matching[0].metadata or {}).get("resume_used") or 0)
-        except (TypeError, ValueError):
-            used = 0
-        try:
-            resume_limit = int((matching[0].metadata or {}).get("resume_limit") or 0)
-        except (TypeError, ValueError):
-            resume_limit = 0
-        if resume_limit <= 0:
-            return True
-        return used < resume_limit
+        task_id = str(getattr(params, "task_id", "") or "").strip()
+        thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+        if store is None or not task_id or not thread_id:
+            return False
+        goal = store.load_goal(thread_id, task_id=task_id)
+        return bool(
+            goal is not None
+            and str(getattr(goal, "status", "") or "").strip().lower() == "active"
+        )
     except Exception:
-        return None
+        return False
 
 
 # LLM: 同类失败计数默认只生成模型返工提示；只有显式 hard gate 可写 halt，且

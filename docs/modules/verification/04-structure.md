@@ -42,6 +42,9 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
    旁路。成功验证后若发生 workspace mutation，state 记录最近 verification event ID/status 并置 stale；
    read/search 不改变 stale，只有新的真实规范验证命令产生新周期。
 6. `tool_call_archive_record.py` 对其他结构化副作用证据使用显式字段白名单；当前接受
+   宿主 approval gate 写入并绑定 exact permission/call/operation 的 `applied_tool_approval`；handler 私有
+   metadata、模型正文和 UI 文案无权生成批准事实。该投影只供同一轮 current-turn、archive 与 Compact/恢复
+   重建“本调用为何被允许”，不能反向批准另一调用。
    `message_tool_delivery.v1` 的成功状态、当前 owner 标记、receipt、用户投影、附件引用和有界
    `evidence_refs`，以及
    `tool_search` 的已加载工具名列表。参数审计只接受 `input_sources`、`input_coercions` 和不可逆

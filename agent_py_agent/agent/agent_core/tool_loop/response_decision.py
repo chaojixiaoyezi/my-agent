@@ -20,6 +20,10 @@ from ...tooling.content_recovery_mode import (
 )
 from ...tooling.runtime_contracts import ToolCall, ToolChoice
 from .._runtime_params import ToolLoopExecuteParams
+from ..runtime.guidance import (
+    active_turn_user_reply_required,
+    satisfy_active_turn_user_reply,
+)
 from ..tool_guard.call_guardrail import tool_guardrail_records
 from ..tool_guard.unresolved_runtime_issue import (
     has_unresolved_runtime_issues,
@@ -41,6 +45,12 @@ _EMPTY_TEXT_NUDGE = (
     "上一轮你执行了工具调用，但回复正文为空。请基于上方真实工具结果继续推进："
     "任务未完成就调用下一步工具，任务已完成才给最终回答。不要重复读取同一批材料，"
     "也不要只复述计划。"
+)
+_ACTIVE_TURN_EMPTY_REPLY_NUDGE = (
+    "[tool-system]\n"
+    "本次模型调用已经接收了一条真实用户补充消息，但尚未生成可展示的助手正文。"
+    "请先用简短自然语言直接回应这条补充，再继续原任务；不要只在思考中提到它，"
+    "也不要把内部状态或这段系统提示复述给用户。"
 )
 
 
@@ -602,12 +612,27 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
     if unresolved_issue_decision is not None:
         return _unresolved_runtime_issue_decision(unresolved_issue_decision)
     if not request.has_protected_marker:
+        response_text = str(getattr(request.response, "text", "") or "").strip()
+        reply_required = active_turn_user_reply_required(request.params)
+        if reply_required and response_text:
+            satisfy_active_turn_user_reply(request.params)
+        elif (
+            reply_required
+            and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIRS
+        ):
+            # This branch is controlled by exact consumed guidance ids. Thinking
+            # is intentionally insufficient: users need one ordinary assistant
+            # segment before a waiting parent yields again.
+            request.params.tool_context.append(_ACTIVE_TURN_EMPTY_REPLY_NUDGE)
+            return ToolLoopResponseDecision(
+                "continue", None, [], _inc_empty_text(request.counters)
+            )
         # 长期助手 式空响应 nudge(参考 长期助手 conversation_loop 6511-6547:
         # "You just executed tool calls but returned an empty response... continue")。
         # 执行过工具后模型空正文无工具调用 = 静默收口:直接 break 会让用户收不到
         # 任何回复(USER_REPLY_UNAVAILABLE)。有界重试(默认 2 次)后仍空 → 诚实失败。
         if (
-            not str(getattr(request.response, "text", "") or "").strip()
+            not response_text
             and list(getattr(request.params, "executed_tools", None) or [])
             and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIRS
         ):

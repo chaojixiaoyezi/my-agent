@@ -206,6 +206,28 @@ def test_retry_timeout_no_third_attempt() -> None:
     assert _AlwaysTimeoutBackend.calls == 2  # attempt-1 超时 + 重试超时, 无第三次
 
 
+def test_stream_timeout_is_left_for_outer_reconnect_loop() -> None:
+    """流式超时不在生成层静默重试，外层负责可见的 会话运行时 reconnect。"""
+    from agent_py_agent.agent.agent_core.tool_model_generation import (
+        _retry_once_after_timeout,
+    )
+
+    params = _params()
+    request = ModelGenerateParams(
+        agent=_agent(),
+        params=params,
+        prompt="hello",
+        tool_rounds=1,
+    )
+    assert (
+        _retry_once_after_timeout(
+            request,
+            ProviderTimeoutError("idle", stage="stream_idle"),
+        )
+        is None
+    )
+
+
 # ---------------------------------------------------------------- 5. 判定函数单元测
 
 def test_ir_last_tool_use_confirmed_matrix() -> None:

@@ -484,6 +484,18 @@ def test_tool_round_approval_resumes_same_call_without_model_retry() -> None:
     assert executed[0].call_id == executed[1].call_id
     assert executed[0].arguments == executed[1].arguments
     assert [result.output for result in recorded] == ["fixture-ok"]
+    assert recorded[0].applied_approval is not None
+    assert recorded[0].applied_approval.to_dict() == {
+        "schema_version": "tool_approval_result.v1",
+        "permission_id": params.runtime_approved_actions[0]["approval_id"],
+        "status": "approved",
+        "decision": "approved",
+        "applied": True,
+    }
+    assert (
+        "[tool-approval; status=approved; decision=approved; already_applied=true]"
+        in recorded[0].render_for_prompt()
+    )
     assert "only inspect the target" in params.tool_context[-1]
 
 

@@ -519,6 +519,9 @@ def _publish_background_activity(
     subagents = value.get("subagents")
     if not isinstance(subagents, list | tuple):
         subagents = None
+    goals = value.get("goals")
+    if not isinstance(goals, list | tuple):
+        goals = None
     progress_items = value.get("task_progress_items")
     task_progress = (
         {
@@ -535,10 +538,12 @@ def _publish_background_activity(
             {
                 "compact_count": compact_count,
                 "main_activity": value.get("main_activity"),
+                "goals": goals,
                 "subagents": subagents,
                 "task_progress": task_progress,
                 "hidden_subagent_count": hidden_count,
                 "projection_ok": value.get("subagent_projection_ok") is not False,
+                "goal_projection_ok": value.get("goal_projection_ok") is not False,
                 "task_progress_projection_ok": (
                     value.get("task_progress_projection_ok") is not False
                 ),
@@ -546,6 +551,9 @@ def _publish_background_activity(
         )
     )
     row_updater = getattr(agent_navigation, "update_rows", None)
+    goal_updater = getattr(agent_navigation, "update_goal_rows", None)
+    if goals is not None and callable(goal_updater):
+        changed = bool(goal_updater(goals)) or changed
     if subagents is not None and callable(row_updater):
         changed = bool(row_updater("", subagents)) or changed
     return changed

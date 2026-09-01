@@ -23,11 +23,13 @@ from agent_py_agent.agent.agent_core.runner.context import (
 )
 from agent_py_agent.agent.agent_core.runtime.guidance import (
     acknowledge_injected_turn_input,
+    active_turn_user_reply_required,
     has_pending_request_guidance,
     has_pending_turn_input,
     inject_pending_guidance,
     inject_pending_turn_input,
     refresh_runtime_direct_children_snapshot,
+    satisfy_active_turn_user_reply,
 )
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
@@ -878,6 +880,103 @@ def test_active_turn_user_input_reopens_the_model_reply_sink_once(tmp_path) -> N
     assert inject_pending_guidance(agent, params, now=11.0) is True
     assert sink.started == 1
     assert sink.client_message_ids == ("steer-client-1",)
+
+
+def test_task_local_waiting_parent_replies_to_consumed_guidance_before_yield(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    parent = agent.subagents.create_run(
+        goal="协调研究员",
+        thought="等待研究员",
+        plan=["派发", "汇总"],
+        role="coordinator",
+    )
+    child = agent.subagents.create_run(
+        goal="完成调研",
+        thought="执行调研",
+        plan=["写报告"],
+        role="researcher",
+        parent_id=parent.id,
+        root_id=parent.id,
+    )
+    parent.child_ids = [child.id]
+    parent.status = TaskStatus.PENDING.value
+    child.status = TaskStatus.RUNNING.value
+    agent.subagents.save(parent)
+    agent.subagents.save(child)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "agent_run",
+            "target_id": parent.id,
+            "message": "先回复已经收到，再继续等待研究员。",
+            "now": 10.0,
+            "metadata": {"channel_message_id": "steer-client-1"},
+        }
+    )
+    prompts: list[str] = []
+
+    class ThinkingOnlyThenReplyBackend:
+        name = "thinking_then_reply"
+
+        def generate(self, prompt: str, on_chunk=None, **kwargs):
+            del on_chunk
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                return ModelResponse(
+                    text="",
+                    backend=self.name,
+                    assistant_content_blocks=[
+                        {"type": "thinking", "thinking": "我已理解用户插话。"}
+                    ],
+                )
+            wire = prompt + json.dumps(kwargs.get("messages") or [], ensure_ascii=False)
+            assert "已经接收了一条真实用户补充消息" in wire
+            return ModelResponse(
+                text="已经收到你的补充；研究员保持运行，我继续等待它完成。",
+                backend=self.name,
+            )
+
+    agent.backend = ThinkingOnlyThenReplyBackend()
+    params = _tool_loop_params(
+        context_scope="task_local",
+        request_id="attempt-parent-2",
+        run_id=parent.id,
+        task_id=parent.id,
+        root_user_prompt="协调研究员并汇总",
+        allowed_tools=[],
+    )
+
+    _, response, _ = execute_tool_loop(agent, params)
+
+    assert len(prompts) == 2
+    assert response.text == "已经收到你的补充；研究员保持运行，我继续等待它完成。"
+    assert response.runtime_status == "unfinished"
+    assert response.runtime_reason == "SUBAGENTS_ACTIVE"
+    assert agent.conversation_store.pending_guidance("agent_run", parent.id) == []
+    assert active_turn_user_reply_required(params) is False
+    assert child.status == agent.subagents.load(child.id).status
+    assert agent.subagents.load(child.id).status == TaskStatus.RUNNING.value
+
+
+def test_consumed_guidance_reply_obligation_uses_structured_ids(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    agent.conversation_store.append_guidance(
+        {
+            "target_type": "agent_run",
+            "target_id": "main-run-1",
+            "message": "先回复我，再继续。",
+            "now": 10.0,
+        }
+    )
+    params = _tool_loop_params(run_id="main-run-1")
+
+    assert inject_pending_guidance(agent, params, now=11.0) is True
+    assert active_turn_user_reply_required(params) is False
+    assert acknowledge_injected_turn_input(agent, params, now=12.0) == 1
+    assert active_turn_user_reply_required(params) is True
+    assert satisfy_active_turn_user_reply(params) is True
+    assert satisfy_active_turn_user_reply(params) is False
 
 
 def test_guidance_consumption_receipt_keeps_provider_injection_fifo() -> None:

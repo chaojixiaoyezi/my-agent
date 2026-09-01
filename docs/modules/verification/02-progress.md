@@ -1,5 +1,16 @@
 # Verification：开发推进
 
+## 2026-09-01 工具批准只认 exact applied approval（本地候选）
+
+- 旧 archive 投影可能把 handler 私有 metadata 中类似 approval 的字段当成“用户已批准”，让后续
+  current-turn/Compact/恢复看到未经权威控制面确认的批准事实。当前只有 Registry/approval gate 生成、带
+  exact permission/call/operation 绑定的 `AppliedToolApproval` 能进入 canonical ToolResult 与 archive；
+  handler 自报字段、模型正文和展示标签一律忽略。
+- current-turn、工具归档和 tool-loop 回归覆盖合法 applied approval 保留、伪造 metadata 丢弃、批准后原
+  ToolCall 原地续跑以及未知/拒绝不升级。provider stream idle timeout 同时改用 typed stage 交给外层有界
+  退避，不把连接抖动包装成工具批准或任务失败。相关 focused 已通过，待 R121 真 TUI 的真实 transient 与
+  approval 场景继续取证。
+
 ## 2026-08-30 首个工作工具立即使用 canonical task root
 
 - 真 TUI 首个 `run_command` 曾在 conversation task promotion 已成功后仍沿用外层启动 cwd；第二次工具调用

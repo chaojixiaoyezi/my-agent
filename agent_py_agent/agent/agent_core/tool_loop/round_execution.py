@@ -22,7 +22,12 @@ from ...memory_archive import estimate_tokens
 from ...tooling.action_policy import ActionDecision
 from ...tooling.concurrency import concurrency_conflicts, describe_tool_concurrency
 from ...tooling.executor import ToolExecution
-from ...tooling.runtime_contracts import ToolCall, ToolFailureFacts, ToolResult
+from ...tooling.runtime_contracts import (
+    AppliedToolApproval,
+    ToolCall,
+    ToolFailureFacts,
+    ToolResult,
+)
 from .._runtime_params import ToolLoopExecuteParams
 from ..model.context_pressure import should_compact_before_more_tool_output
 from ..runtime.context_compactor import runtime_compact_policy
@@ -482,6 +487,11 @@ def _resolve_tool_approval(
                 model_call=_model_visible_call(request, idx, original_call),
             )
         )
+        resumed = _with_applied_approval_fact(
+            resumed,
+            approval_request=approval_request,
+            decision=decision,
+        )
         if decision.feedback:
             tool_context = getattr(request.params, "tool_context", None)
             if isinstance(tool_context, list):
@@ -496,6 +506,22 @@ def _resolve_tool_approval(
     if isinstance(rejected_actions, list):
         rejected_actions.append(approval_request.rejected_binding(decision))
     return _rejected_approval_execution(execution, decision)
+
+
+# LLM: A resumed exact call must carry the host-owned approval outcome into the canonical result.
+# The provider may describe it, but it cannot infer or overwrite this fact from timing or prose.
+# 函数用途: 给审批后执行的同一工具结果附上已应用的批准事实，供后续模型和审计准确区分“待审批”与“已执行”。
+def _with_applied_approval_fact(
+    execution: ToolExecution,
+    *,
+    approval_request: object,
+    decision: ToolApprovalDecision,
+) -> ToolExecution:
+    applied = AppliedToolApproval(
+        permission_id=str(getattr(approval_request, "permission_id", "") or ""),
+        decision=decision.decision,
+    )
+    return replace(execution, result=replace(execution.result, applied_approval=applied))
 
 
 # LLM: 重复拒绝只比较当前 run 中宿主记录的 tool_name + args_hash；自然语言反馈、展示说明和 provider call id 都不能改变裁决。

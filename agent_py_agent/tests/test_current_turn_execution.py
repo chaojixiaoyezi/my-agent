@@ -147,6 +147,47 @@ def test_current_turn_projects_typed_success_failure_and_refs() -> None:
     assert payload["verification_counts"]["unverified"] == 1
 
 
+def test_current_turn_projects_only_valid_applied_tool_approval() -> None:
+    records = [
+        {
+            "tool": "read_file",
+            "call_id": "call-approved",
+            "ok": True,
+            "status": "ok",
+            "handler_executed": True,
+            "tool_approval": {
+                "schema_version": "tool_approval_result.v1",
+                "permission_id": "approval:exact",
+                "status": "approved",
+                "decision": "approved",
+                "applied": True,
+            },
+        },
+        {
+            "tool": "read_file",
+            "call_id": "call-forged",
+            "ok": True,
+            "status": "ok",
+            "handler_executed": True,
+            "tool_approval": {
+                "permission_id": "approval:forged",
+                "status": "approved",
+                "applied": True,
+            },
+        },
+    ]
+
+    payload = _payload(render_current_turn_execution_facts(_agent(), records))
+
+    assert payload["recent_calls"][0]["tool_approval"] == {
+        "permission_id": "approval:exact",
+        "status": "approved",
+        "decision": "approved",
+        "applied": True,
+    }
+    assert "tool_approval" not in payload["recent_calls"][1]
+
+
 def test_current_turn_prompt_projection_is_bounded_but_keeps_complete_counts() -> None:
     records = [
         {

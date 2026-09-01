@@ -1,5 +1,30 @@
 # TESTS
 
+## 2026-09-01 R121 Goal/思考与底层恢复边界（本地与真 TUI 通过）
+
+- TUI focused 覆盖：Goal 无 active task 时仍投影；Goal 排在 child 前；`↓/Enter` 展开 exact objective 且不
+  切换代理；`Ctrl+G` 收起；选中项始终滚入八行视窗；malformed Goal 丢弃；authoritative empty 才清除旧行。
+- 控制入口覆盖：`/goal` 先写 durable outbox、再显示恰好一个用户样式命令；该显示不进入 prompt queue、
+  active-turn steering 或第二次 dispatch。空输入时 Enter 只展开选中的 Goal。
+- thinking 覆盖：live 块持续展开；completed/failed/interrupted 默认只显示 `Ctrl+O 展开` 摘要；detailed
+  transcript 显示完整灰色正文，切换不改变 canonical block。
+- 子代理插话覆盖：活跃轮原地收取；等待代理只预留一个 successor 并只启动一个 runner；并发/HTTP 重放不
+  重复消息或 attempt；已消费 guidance 形成 exact reply obligation；终态 child 仍拒绝。
+- provider/工具覆盖：typed stream idle timeout 进入配置化外层退避；工具归档只接受 exact applied approval，
+  handler metadata 不能伪造批准；普通 task 不再注册/消费旧自动续跑，显式 active Goal continuation 保留。
+- Goal 正文裁决新增回归：active Goal 的无工具正式回复会以 `thread_goal_progress` 进入 owner channel 与 canonical
+  messages，但不额外登记下一轮；child 活跃时没有 guidance 的 wake 仍不轮询，用户显式 guidance 触发的真实
+  Goal turn 则保留正式回复。会话运行时 对照路径为 `会话运行时-rs/ext/goal/src/runtime.rs::continue_if_idle`。
+- Goal 工作区新增正反回归：exact active Goal 的 `task_path` 为空时，下一前台 turn 不产生 load error、继续
+  投影同一 ThreadGoal 并能实际完成 `_run_gateway_ask`；sticky task 已配置非空路径而路径后来消失时，仍产生
+  `gateway.conversation.workspace_task` load error。整个 `test_gateway_chat_conversation_context.py` 已通过。
+- 本地三组所有受影响 focused pytest、整个 Gateway 会话上下文测试文件、触及产品文件 PyCompile、Ruff、
+  doc sync、strict code-size、diff 与 clean-package 均通过。累计变更 4,769 行，低于 10k，未跑全仓 pytest。
+- 最终 wheel 真机仍使用 `tmux attach -t ma-r121-110-u374-goal-thinking`：同一 active Goal 的后续消息成功，
+  5 秒 thinking 自动折叠，assistant final 直接显示；raw canonical history 精确保存本轮 user/final。随后
+  `Ctrl+O` 往返详细模式、`↓/Enter/Ctrl+G` 往返 Goal detail 均通过。唯一 Gateway、PID、模型和 wheel hash
+  见 `STATUS.md`。
+
 ## 2026-08-31 R116/R117 provider 校准与后台 final canonical history
 
 - 本地新增/更新 provider observation 回归，覆盖稳定指纹、动态消息不致失效、Compact generation CAS、缺失

@@ -1146,6 +1146,9 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "received_chars",
     }
     metadata = {key: payload[key] for key in allowed if key in payload}
+    raw_goals = payload.get("goals")
+    if isinstance(raw_goals, list | tuple):
+        metadata["goals"] = _public_goal_rows(raw_goals)
     raw_subagents = payload.get("subagents")
     if isinstance(raw_subagents, list | tuple):
         metadata["subagents"] = _public_subagent_rows(raw_subagents)
@@ -1158,6 +1161,40 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
 _PUBLIC_MAIN_ACTIVITY_FIELDS = frozenset(
     {"task_id", "phase", "activity", "started_at", "updated_at", "ended_at"}
 )
+
+_PUBLIC_GOAL_FIELDS = frozenset(
+    {
+        "goal_id",
+        "name",
+        "objective",
+        "status",
+        "tokens_used",
+        "token_budget",
+        "time_used_seconds",
+        "duration_seconds",
+        "created_at",
+        "updated_at",
+    }
+)
+
+
+# LLM: Goal display metadata repeats the runtime scalar whitelist. It is a
+# read-only projection and intentionally excludes task ids, paths, wake state,
+# and control authority.
+# 函数用途: 保留底部 Goal 状态行和展开详情需要的公开字段。
+def _public_goal_rows(value: list[object] | tuple[object, ...]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in value[:16]:
+        if not isinstance(item, Mapping):
+            continue
+        row = {
+            str(key): item[key]
+            for key in _PUBLIC_GOAL_FIELDS
+            if key in item and not isinstance(item[key], dict | list | tuple | set)
+        }
+        if str(row.get("goal_id") or "").strip():
+            rows.append(row)
+    return rows
 
 
 # LLM: Replay/test-injected main activity receives the same scalar whitelist as

@@ -46,8 +46,10 @@ from .tool_input_progress import public_tool_input_progress
 _SCHEMA_VERSION = "conversation_agent_activity.v6"
 _MAX_PROJECTED_SUBAGENTS = 64
 _MAX_PROJECTED_PROGRESS_ITEMS = 128
+_MAX_PROJECTED_GOALS = 16
 _ACTIVITY_TEXT_LIMIT = 240
 _AGENT_PROMPT_TEXT_LIMIT = 10_000
+_GOAL_OBJECTIVE_TEXT_LIMIT = 4_000
 _CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
 _CONTEXT_USAGE_TOKEN_FIELDS = (
     "context_window_tokens",
@@ -324,12 +326,14 @@ class ConversationAgentActivity:
     active_task_count: int = 0
     compact_count: int = 0
     main_activity: dict[str, object] | None = None
+    goals: tuple[dict[str, object], ...] = ()
     subagents: tuple[dict[str, object], ...] = ()
     task_progress_items: tuple[dict[str, object], ...] = ()
     task_progress_generation_id: str = ""
     task_progress_plan_revision: int = 0
     hidden_subagent_count: int = 0
     active_task_projection_ok: bool = True
+    goal_projection_ok: bool = True
     subagent_projection_ok: bool = True
     task_progress_projection_ok: bool = True
     warnings: tuple[str, ...] = ()
@@ -343,6 +347,7 @@ class ConversationAgentActivity:
             "active_task_count": max(0, int(self.active_task_count or 0)),
             "compact_count": max(0, int(self.compact_count or 0)),
             "main_activity": dict(self.main_activity or {}),
+            "goals": [dict(row) for row in self.goals],
             "subagents": [dict(row) for row in self.subagents],
             "task_progress_items": [dict(row) for row in self.task_progress_items],
             "task_progress_generation_id": str(self.task_progress_generation_id or ""),
@@ -352,6 +357,7 @@ class ConversationAgentActivity:
             ),
             "hidden_subagent_count": max(0, int(self.hidden_subagent_count or 0)),
             "active_task_projection_ok": bool(self.active_task_projection_ok),
+            "goal_projection_ok": bool(self.goal_projection_ok),
             "subagent_projection_ok": bool(self.subagent_projection_ok),
             "task_progress_projection_ok": bool(self.task_progress_projection_ok),
             "subagent_projection_warnings": list(self.warnings),
@@ -368,6 +374,7 @@ def conversation_agent_activity(
     thread_id: str,
 ) -> ConversationAgentActivity:
     compact_count, compact_warnings = _conversation_compact_count(store, thread_id)
+    goals, goal_warnings = _conversation_goal_rows(store, thread_id)
     active_links, link_warnings = _active_task_links(store, thread_id)
     workspace_task_id = _conversation_workspace_task_id(store, thread_id)
     active_task_ids = [
@@ -386,8 +393,12 @@ def conversation_agent_activity(
         return ConversationAgentActivity(
             active_task_count=0,
             compact_count=compact_count,
+            goals=tuple(goals),
             active_task_projection_ok=not link_warnings,
-            warnings=tuple(dict.fromkeys((*link_warnings, *compact_warnings))),
+            goal_projection_ok=not goal_warnings,
+            warnings=tuple(
+                dict.fromkeys((*link_warnings, *goal_warnings, *compact_warnings))
+            ),
         )
 
     rows, run_warnings = _direct_subagent_rows(
@@ -430,18 +441,21 @@ def conversation_agent_activity(
         active_task_count=len(live_task_ids),
         compact_count=compact_count,
         main_activity=main_activity,
+        goals=tuple(goals),
         subagents=tuple(visible),
         task_progress_items=progress_items,
         task_progress_generation_id=progress_generation_id,
         task_progress_plan_revision=progress_plan_revision,
         hidden_subagent_count=max(0, len(rows) - len(visible)),
         active_task_projection_ok=not link_warnings,
+        goal_projection_ok=not goal_warnings,
         subagent_projection_ok=not run_warnings,
         task_progress_projection_ok=not progress_warnings,
         warnings=tuple(
             dict.fromkeys(
                 (
                     *link_warnings,
+                    *goal_warnings,
                     *run_warnings,
                     *execution_warnings,
                     *progress_warnings,
@@ -450,6 +464,65 @@ def conversation_agent_activity(
             )
         ),
     )
+
+
+# LLM: Goal rows are a bounded owner-facing projection of exact ThreadGoal
+# records. They are display data only: the TUI must never use these rows to
+# schedule, pause, resume, or complete a goal.
+# 函数用途: 读取当前会话尚未完成的 Goal，供底部状态行和只读详情展示。
+def _conversation_goal_rows(
+    store: object,
+    thread_id: str,
+) -> tuple[list[dict[str, object]], list[str]]:
+    loader = getattr(store, "load_goals_report", None)
+    if not callable(loader):
+        # Embedded/legacy read adapters may intentionally omit Goal support;
+        # absence means no projection, while an available loader that fails is
+        # a real authoritative-read warning and must retain the prior TUI row.
+        return [], []
+    try:
+        raw_goals, load_error = loader(str(thread_id or ""))
+    except Exception:
+        return [], ["conversation_goal_projection_unavailable"]
+    if load_error:
+        return [], ["conversation_goal_projection_load_error"]
+    elapsed_reader = getattr(store, "current_goal_time_seconds", None)
+    rows: list[dict[str, object]] = []
+    for goal in list(raw_goals or []):
+        status = str(getattr(goal, "status", "") or "").strip().lower()
+        goal_id = str(getattr(goal, "goal_id", "") or "").strip()
+        if not goal_id or status == "complete":
+            continue
+        try:
+            elapsed = (
+                float(elapsed_reader(goal))
+                if callable(elapsed_reader)
+                else float(getattr(goal, "time_used_seconds", 0.0) or 0.0)
+            )
+        except Exception:
+            elapsed = float(getattr(goal, "time_used_seconds", 0.0) or 0.0)
+        token_budget = getattr(goal, "token_budget", None)
+        duration_seconds = getattr(goal, "duration_seconds", None)
+        row: dict[str, object] = {
+            "goal_id": goal_id,
+            "name": _bounded_text(getattr(goal, "name", ""), limit=240),
+            "objective": _bounded_text(
+                getattr(goal, "objective", ""),
+                limit=_GOAL_OBJECTIVE_TEXT_LIMIT,
+            ),
+            "status": status,
+            "tokens_used": max(0, int(getattr(goal, "tokens_used", 0) or 0)),
+            "time_used_seconds": max(0, int(elapsed)),
+            "created_at": max(0.0, _safe_float(getattr(goal, "created_at", 0.0))),
+            "updated_at": max(0.0, _safe_float(getattr(goal, "updated_at", 0.0))),
+        }
+        if token_budget is not None:
+            row["token_budget"] = max(1, int(token_budget))
+        if duration_seconds is not None:
+            row["duration_seconds"] = max(1, int(duration_seconds))
+        rows.append(row)
+    rows.sort(key=lambda item: (float(item.get("created_at") or 0.0), str(item["goal_id"])))
+    return rows[:_MAX_PROJECTED_GOALS], []
 
 
 # LLM: TUI liveness follows the active-turn boundary, not the resumable

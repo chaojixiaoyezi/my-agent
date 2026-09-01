@@ -1,5 +1,18 @@
 # Subagent Progress
 
+## 2026-09-01 等待中的子代理可由用户插话精确唤醒（本地候选）
+
+- 旧控制面只允许插话进入 pending/running attempt；直属父代理因等待 child 已结束本轮时，用户从详情页发
+  消息会直接得到 `AGENT_NOT_RUNNING`，即使逻辑 AgentRun 仍非终态。当前以 exact owner/run 短 admission
+  串行同一目标：活跃轮原地收取，等待中的非终态代理原子复用或预留唯一 pending successor，再幂等写入
+  guidance 并非阻塞启动同一 run。
+- stable message receipt 是网络重放权威：并发提交、首次启动失败重试和已消费 HTTP 重放均不得复制消息、
+  attempt 或 runner。旧 attempt 只有具备同 run ancestry 且已经结构化终态时，尚未提交的 pending receipt
+  才能 rebind；终态 child 继续只读。
+- task-local 父代理消费 guidance 后会先形成 typed reply obligation，再决定继续等待 child，避免只在 thinking
+  中理解用户却没有可见回复。Gateway control、RuntimeDB pending successor、direct-parent wake 与回复义务
+  focused 已全部通过，待 R121 fresh 真 TUI 插话/回复/等待并行复验。
+
 ## 2026-08-30 Gateway 重启时 natural terminal 不再重跑
 
 - u288 多 child 长任务取得真实竞态：模型轮已经在 runtime.db 写入 AgentRun/Attempt `done`，旧 Gateway

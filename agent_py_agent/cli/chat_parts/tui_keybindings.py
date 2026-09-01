@@ -1081,14 +1081,25 @@ def _tui_submit_control_operation(
         expected_turn_id=expected_turn_id,
         target_control_message_id=target_control_message_id,
     )
+
+    # LLM: The control command becomes visible only after the exact outbox row
+    # is durable. This callback is presentation-only; it cannot submit a model
+    # prompt or become a second command dispatcher.
+    # 函数用途: 保存成功后立即在 TUI 历史显示 `/goal`，并在 `/compact` 时同时启动压缩动画。
+    def on_control_persisted(persisted) -> None:
+        runtime.publish_control_command_input(
+            persisted.message_id,
+            persisted.command_text,
+        )
+        if command.kind == "compact":
+            runtime.publish_manual_compact_started(persisted.message_id)
+
     try:
         reconciler = _ensure_control_operation_reconciler(params)
-        if command.kind == "compact":
+        if command.kind in {"compact", "goal"}:
             reconciler.enqueue(
                 entry,
-                on_persisted_before_dispatch=lambda persisted: (
-                    runtime.publish_manual_compact_started(persisted.message_id)
-                ),
+                on_persisted_before_dispatch=on_control_persisted,
             )
         else:
             reconciler.enqueue(entry)
@@ -1186,10 +1197,21 @@ def _ensure_control_operation_reconciler(
 
     runtime = _required_tui_runtime(params)
 
-    # LLM: Restart restoration is a notice only; command/result text stays in the server receipt.
-    # 函数用途: TUI 重启时提示仍有控制操作正在对账。
+    # LLM: Restart restoration may replay the exact persisted Goal/Compact
+    # command as a display block; execution and result authority stay in the
+    # same outbox/server receipt and are never inferred from that text.
+    # 函数用途: TUI 重启时恢复尚未对账的命令显示，并提示控制操作仍在确认。
     def on_restore(entry) -> None:
+        if entry.command_kind == "goal":
+            runtime.publish_control_command_input(
+                entry.message_id,
+                entry.command_text,
+            )
         if entry.command_kind == "compact":
+            runtime.publish_control_command_input(
+                entry.message_id,
+                entry.command_text,
+            )
             runtime.publish_manual_compact_started(entry.message_id)
         elif entry.command_kind == "steer":
             command = parse_conversation_control(

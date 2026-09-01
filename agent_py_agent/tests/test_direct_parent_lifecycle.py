@@ -28,6 +28,7 @@ from agent_py_agent.agent.subagents.direct_parent_lifecycle import (
     parent_wait_blocks_dispatch,
     reconcile_all_parent_waits,
     reconcile_parent_wait_for_child,
+    release_parent_wait_for_user_guidance,
 )
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
@@ -116,6 +117,7 @@ def test_task_local_create_yields_and_wait_marker_blocks_orphan_restart(tmp_path
     assert response.runtime_status == "unfinished"
     assert response.runtime_reason == "SUBAGENTS_ACTIVE"
     assert response.turn_end_reason == "interrupted"
+    assert response.text == "created"
     assert parent_wait_blocks_dispatch(refreshed) is True
     assert _is_dispatch_runner_candidate(refreshed) is False
     assert children[0].id in refreshed.attributes["direct_child_wait"]["run_ids"]
@@ -144,6 +146,27 @@ def test_successful_siblings_resume_parent_only_after_last_child(tmp_path) -> No
     assert final_decision.should_resume is True
     assert final_decision.reason == "all_direct_children_terminal"
     assert parent_wait_blocks_dispatch(manager.load(parent.id)) is False
+
+
+def test_user_guidance_releases_parent_wait_without_stopping_children(tmp_path) -> None:
+    manager, parent, children = _parent_and_children(
+        tmp_path,
+        statuses=("RUNNING", "RUNNING"),
+    )
+    mark_parent_waiting_for_direct_children(
+        manager,
+        parent.id,
+        [child.id for child in children],
+    )
+
+    released = release_parent_wait_for_user_guidance(manager, parent.id)
+
+    assert released == tuple(child.id for child in children)
+    assert parent_wait_blocks_dispatch(manager.load(parent.id)) is False
+    assert [manager.load(child.id).status for child in children] == [
+        "RUNNING",
+        "RUNNING",
+    ]
 
 
 def test_child_failure_releases_parent_without_waiting_for_successful_sibling(tmp_path) -> None:

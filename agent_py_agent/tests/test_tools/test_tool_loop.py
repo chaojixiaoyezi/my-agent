@@ -1492,15 +1492,8 @@ def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
         assert agent.backend.calls == 4
 
 
-def test_tool_round_limit_schedules_ordinary_task_resume(tmp_path):
-    """LLM: 普通任务(无 /goal)轮限收口后创建带预算的自动续跑 policy。
-
-    2026-08-08 真机查证:gateway worker 的 run source 是硬编码 "gateway"(request_execution
-    _gateway_run_params),原白名单本就匹配——收口后 policy 确实创建。真 bug 在调度器
-    (policy 创建后无人消费),此处测试只固定创建侧语义:前台普通任务(gateway/chat/
-    cli_run/cli_*/http:*/空)创建 kind=ordinary_task_resume 的 policy,预算
-    resume_used < resume_limit 才续;后台唤醒轮不占预算。
-    """
+def test_tool_round_limit_does_not_schedule_ordinary_task_resume(tmp_path):
+    """普通任务轮限只诚实交接，不创建宿主定时模型轮询。"""
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     agent = SimpleAgent(
         _text_agent_config(
@@ -1548,29 +1541,15 @@ def test_tool_round_limit_schedules_ordinary_task_resume(tmp_path):
         if item.task_id == "task-limit"
     )
     assert link.status == "active"
-    policies = agent.conversation_store.list_progress_policies(enabled_only=True)
-    assert len(policies) == 1
-    # 执行续跑身份必须是 durable conversation task；task-path 只属于 Todo
-    # 账本，不能交给 scheduler，否则后台轮无法恢复 task link。
-    assert policies[0].task_id == "task-limit"
-    assert policies[0].metadata["kind"] == "ordinary_task_resume"
-    assert policies[0].metadata["tool"] == "task_round_resume"
-    assert policies[0].metadata["resume_used"] == 1
-    assert policies[0].metadata["resume_limit"] == 3
-    assert policies[0].metadata["conversation_request_id"] == "gwreq-limit"
-    # due_now expedite: next_due_at 提前到当前,调度器下一 tick 即拉起续跑。
-    assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]
+    assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
 
 
-def test_ordinary_task_resume_available_signal(tmp_path):
-    """LLM: 轮限收口提示词按续跑预算切换——还有预算说「会自动继续」,耗尽说「请回复『继续』」。
-
-    全部用结构化信号(policy metadata 的 resume_used/resume_limit)判定,禁自然语言。
-    """
+def test_active_goal_continuation_ignores_legacy_ordinary_policy(tmp_path):
+    """轮限承诺只认 exact Goal；遗留普通 policy 不再取得续跑权。"""
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core._tool_loop_service import (
-        _ordinary_task_resume_available,
+        _active_goal_continuation_available,
     )
 
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
@@ -1609,11 +1588,10 @@ def test_ordinary_task_resume_available_signal(tmp_path):
         base.update(overrides)
         return SimpleNamespace(**base)
 
-    # 无 policy(本次收口将创建第一次)= 有预算。
-    assert _ordinary_task_resume_available(agent, params()) is True
-    # /goal 任务无预算概念,永远乐观(用户显式目标即无限续跑授权)。
+    assert _active_goal_continuation_available(agent, params()) is False
+    # typed Goal id 是当前轮已经绑定活跃 Goal 的结构化事实。
     assert (
-        _ordinary_task_resume_available(
+        _active_goal_continuation_available(
             agent, params(task_attributes={**params().task_attributes, "thread_goal_id": "goal-1"})
         )
         is True
@@ -1637,27 +1615,28 @@ def test_ordinary_task_resume_available_signal(tmp_path):
             },
         }
     )
-    assert _ordinary_task_resume_available(agent, params()) is True
+    assert _active_goal_continuation_available(agent, params()) is False
     agent.conversation_store.mark_progress_reported(
         policy.policy_id, metadata_updates={"resume_used": 2}
     )
-    assert _ordinary_task_resume_available(agent, params()) is True
+    assert _active_goal_continuation_available(agent, params()) is False
     agent.conversation_store.mark_progress_reported(
         policy.policy_id, metadata_updates={"resume_used": 3}
     )
-    assert _ordinary_task_resume_available(agent, params()) is False
-    # 无 conversation_store 的宿主侧调用 → None(沿用乐观文案)。
-    assert _ordinary_task_resume_available(object(), params()) is None
+    assert _active_goal_continuation_available(agent, params()) is False
+    agent.conversation_store.disable_progress_policy(policy.policy_id)
+    assert (
+        _active_goal_continuation_available(agent, params()) is False
+    )
+    assert _active_goal_continuation_available(object(), params()) is False
 
 
-def test_ordinary_task_resume_available_cli_run_requires_active_goal(tmp_path):
-    """EXEC-41(四改之 2 步骤 4): CLI 轮限收口承诺与 decide_closeout 同源——
-    无 active goal 的 cli_run 一律 False(承诺文案=「已暂停」), 有 active goal
-    才继续看 policy 预算; gateway 不受影响(仍按 policy 信号)。"""
+def test_cli_tool_limit_promise_requires_exact_active_goal(tmp_path):
+    """CLI 轮限收口也只认 exact active Goal，不认普通任务或已结束 Goal。"""
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core._tool_loop_service import (
-        _ordinary_task_resume_available,
+        _active_goal_continuation_available,
     )
 
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
@@ -1688,8 +1667,8 @@ def test_ordinary_task_resume_available_cli_run_requires_active_goal(tmp_path):
         return SimpleNamespace(**base)
 
     # 无 goal: EXEC-39 停即停, 承诺文案必须是「已暂停」。
-    assert _ordinary_task_resume_available(agent, params()) is False
-    # 有 active goal: 授权成立, 无 policy = 首次续跑有预算 → 会自动继续。
+    assert _active_goal_continuation_available(agent, params()) is False
+    # exact active Goal 授权成立。
     agent.conversation_store.create_goal(
         {
             "thread_id": thread.thread_id,
@@ -1697,7 +1676,7 @@ def test_ordinary_task_resume_available_cli_run_requires_active_goal(tmp_path):
             "task_id": "task-cli-signal",
         }
     )
-    assert _ordinary_task_resume_available(agent, params()) is True
+    assert _active_goal_continuation_available(agent, params()) is True
     # goal 变非 active(complete) → 不承诺续跑。
     goal = agent.conversation_store.load_goal(thread.thread_id, task_id="task-cli-signal")
     agent.conversation_store.update_goal(
@@ -1707,15 +1686,11 @@ def test_ordinary_task_resume_available_cli_run_requires_active_goal(tmp_path):
             "status": "complete",
         }
     )
-    assert _ordinary_task_resume_available(agent, params()) is False
+    assert _active_goal_continuation_available(agent, params()) is False
 
 
-def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
-    """LLM: 普通任务续跑预算耗尽后 policy 退休,调度器不再拉起,等用户显式「继续」。
-
-    resume_used >= resume_limit 时 _schedule_typed_unfinished_continuation 必须
-    disable policy(否则 scheduler 每 interval 照拉,预算失去意义)。
-    """
+def test_legacy_ordinary_task_resume_policy_is_retired_without_running(tmp_path):
+    """升级前遗留的普通续跑 policy 到期时直接退休，不能执行模型。"""
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     agent = SimpleAgent(
         _text_agent_config(
@@ -1746,7 +1721,7 @@ def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
             "task_path": task_path,
         }
     )
-    agent.conversation_store.set_progress_policy(
+    policy = agent.conversation_store.set_progress_policy(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-limit",
@@ -1762,18 +1737,25 @@ def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
         }
     )
 
-    result = agent.run(
-        "读取 notes 并完成验证",
-        save=True,
-        task_id="task-limit",
-        task_attributes={
-            "conversation_thread_id": thread.thread_id,
-            "conversation_task_id": "task-limit",
-        },
-        source="gateway",
+    from agent_py_agent.agent.conversation.runtime import (
+        _runnable_due_policies,
+        _snooze_suppressed_policies,
     )
 
-    assert result.runtime_status == "unfinished"
+    runnable, suppressed = _runnable_due_policies(
+        agent.conversation_store,
+        [policy],
+        now=policy.next_due_at + 1,
+        agent=agent,
+    )
+    assert runnable == []
+    assert suppressed == [(policy, "removed_ordinary_task_resume_policy")]
+    _snooze_suppressed_policies(
+        agent.conversation_store,
+        suppressed,
+        now=policy.next_due_at + 1,
+        agent=agent,
+    )
     policies = agent.conversation_store.list_progress_policies(enabled_only=False)
     assert len(policies) == 1
     assert not policies[0].enabled

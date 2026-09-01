@@ -1,5 +1,19 @@
 # TEST CHECKLIST
 
+- [x] R121 fresh 真 TUI 必须原样显示已持久化的 `/goal ...`，固定面板 Goal 在直属 child 前；`↓` 高亮 Goal、
+  `Enter` 展开完整 objective/状态/token/时限且不切代理页，`Ctrl+G` 收起。命令不得进入模型队列或产生第二个
+  control dispatch。`.10` 唯一 MiniMax-M2.7 Gateway 的 `ma-r121-110-u374-goal-thinking` 已物理按键复验。
+- [x] fresh 真 TUI 中 live thinking 必须持续展开；每个结束 thinking 自动折叠为灰色摘要，`Ctrl+O` 展开全部
+  历史、再按恢复折叠，assistant final 仍直接显示。首轮已验证 thinking 折叠/展开，但暴露 active Goal final
+  被 delivery gate 抑制；中间 wheel 的同 thread 追问又暴露空 `task_path` 被误判为持久化损坏。两项 focused
+  均已修，且非空丢失路径仍 fail closed；最终 wheel 同 thread 已验证 thinking 折叠、直接 final、canonical
+  user/final、`Ctrl+O` 往返和 Goal detail 往返。PgUp/child 的既有独立视口合同继续由专项回归覆盖。
+- [ ] 普通任务达到工具轮上限或保留 open Todo 后不得注册/消费 ordinary auto-resume；旧 policy 启动时 typed
+  退役。显式 `/goal`、直属 child lifecycle wake、用户插话和 provider transient retry 仍应分别恢复，不得把
+  “普通模式不自动续跑”误做成所有恢复都失效。focused 已通过，待长任务、重启和插话真 TUI。
+- [x] 等待中的非终态 child guidance 使用同一 AgentRun 的唯一 pending successor；并发提交、首次启动失败重放
+  和已消费 HTTP 重放都不重复消息/attempt/runner，终态 child 只读。所有受影响 focused 三组已通过。
+
 - [x] provider context observation 只能在 exact backend/model/protocol/system/stable-prompt/tools 指纹与 Compact
   generation 匹配时校准压力；动态 messages 不使它每轮失效，缺失/漂移回退原估算，成本仍只认 provider
   ledger。R116 u323 主 compact 0 且立即追问 cache-read 32,418；u324 自然越线只 Compact 一次。

@@ -2753,9 +2753,14 @@ def _gateway_workspace_task(
                 selected = candidates[-1]
     if selected is None:
         return None
-    task_path = _existing_gateway_workspace_path(getattr(selected, "task_path", ""))
+    configured_task_path = str(getattr(selected, "task_path", "") or "").strip()
+    task_path = _existing_gateway_workspace_path(configured_task_path)
     if not task_path:
-        if strict_selection:
+        # 会话运行时 keeps a Goal as a thread overlay and does not require it to materialize a
+        # workspace before the first real file/tool action. An exact sticky Goal link with an
+        # empty path is therefore valid and the next foreground turn stays in the thread cwd.
+        # A non-empty path that disappeared is still an objective persistence failure.
+        if strict_selection and configured_task_path:
             load_errors.append(
                 _conversation_error(
                     ValueError(

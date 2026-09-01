@@ -238,11 +238,39 @@ def _execution_call(agent: object, record: dict[str, object]) -> dict[str, objec
             item[key] = value
     if record.get("tool_operation_replayed") is True:
         item["replayed"] = True
+    approval = _applied_approval_from_record(record)
+    if approval:
+        item["tool_approval"] = approval
     item["verification_status"] = _verification_status(item)
     refs = _record_refs(record)
     if refs:
         item["refs"] = refs
     return item
+
+
+# LLM: The prompt-tail projection accepts only the canonical archive's bounded approval result.
+# Handler prose and arbitrary metadata cannot manufacture an approval in current-turn facts.
+# 函数用途: 将已经应用的用户批准以最小结构化字段带入后续模型轮次，避免模型再次等待同一审批。
+def _applied_approval_from_record(record: dict[str, object]) -> dict[str, object]:
+    value = record.get("tool_approval")
+    if not isinstance(value, dict):
+        return {}
+    if (
+        value.get("schema_version") != "tool_approval_result.v1"
+        or value.get("status") != "approved"
+        or value.get("applied") is not True
+    ):
+        return {}
+    permission_id = str(value.get("permission_id") or "").strip()
+    decision = str(value.get("decision") or "").strip().lower()
+    if not permission_id or decision not in {"approved", "approved_session"}:
+        return {}
+    return {
+        "permission_id": permission_id,
+        "status": "approved",
+        "decision": decision,
+        "applied": True,
+    }
 
 
 def _tool_effect(

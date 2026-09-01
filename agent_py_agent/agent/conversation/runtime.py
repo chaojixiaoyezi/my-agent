@@ -1760,9 +1760,10 @@ def _channel_attachments(
     return tuple(attachments)
 
 
-# LLM: 子代理公开回复只服从本轮开始时冻结的树阶段与当前终态事实；能力申请/授权是
-#   内部控制事件，不能冒充助手回复。采样后才结束的 child 必须由下一条 wake 开新轮。
-# 函数用途: 决定后台模型回复是否进入用户会话，隐藏内部能力流转和过期进度，只放行新鲜终态汇总。
+# LLM: Goal continuation is a real 会话运行时 turn, so its terminal assistant message must enter
+# the canonical owner transcript even while the Goal remains active. Child lifecycle/capability
+# wakes are still internal control events and may be suppressed by their typed reason below.
+# 函数用途: 决定后台模型回复是否进入用户会话；保留每轮 Goal 正式回复，同时隐藏内部能力流转和过期子代理进度。
 def _background_delivery_decision(
     agent: object,
     request: BackgroundRunRequest,
@@ -1795,7 +1796,11 @@ def _background_delivery_decision(
     if reason == "thread_goal_continue":
         if task_completed:
             return True, "thread_goal_completion"
-        return False, "thread_goal_continuation_internal"
+        # 会话运行时 starts an ordinary turn when an active Goal continues while the thread is idle.
+        # The turn may keep the Goal active, but its final assistant item still belongs to the
+        # rollout and remains visible. Suppressing it here made the provider spend/output tokens
+        # while the owner saw only a finished thinking block and an apparently vanished main row.
+        return True, "thread_goal_progress"
     if goal_status == "active" and reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return False, "thread_goal_lifecycle_internal"
     if reason in {"subagent_capability_request_open", "subagent_capability_granted"}:
@@ -4618,25 +4623,6 @@ def _consume_due_policies(
         if recovery_block is not None:
             _record_recovery_blocked_policy(scheduler, policy, recovery_block)
             continue
-        # 双席复核硬门1(seq1845): suppression 是读检查, gateway「读到未
-        # claim」后、CLI 写入 claim 前选中 policy 的窗口内仍需同一把 CAS
-        # 阻止 gateway 执行。执行前再走一次锁内 CAS 领取(gateway 与 CLI
-        # 同写 consumer/gateway_claim_at, 双向互斥), 领取失败=CLI 已持有
-        # 或已被并发 gateway 领取 → 跳过本轮。
-        if not _gateway_consume_policy_cas(scheduler.store, policy, now=current):
-            # BUGFIX(2026-08-20 真机): 这里曾 append ProgressPolicy 对象元组,
-            # _runtime_facts 序列化时 TypeError(ProgressPolicy not JSON serializable)
-            # 崩整个 background-main tick。与 _snooze_suppressed_policies 一致
-            # 只落标量 dict。
-            scheduler.last_progress_policy_suppressed.append(
-                {
-                    "policy_id": policy.policy_id,
-                    "thread_id": policy.thread_id,
-                    "task_id": policy.task_id,
-                    "reason": "cli_claim_held_before_execute",
-                }
-            )
-            continue
         report = _consume_with_supply_guard(
             scheduler._supply_backoff,
             policy.thread_id,
@@ -4645,59 +4631,6 @@ def _consume_due_policies(
         )
         if report:
             _append_background_report(scheduler, reports, report)
-
-
-def _gateway_consume_policy_cas(store: object, policy: ProgressPolicy, *, now: float) -> bool:
-    """gateway 执行前的锁内 CAS 领取(与 CLI claim 双向互斥)。
-
-    2026-08-14 双席复核硬门1(seq1845 memory steward): 旧实现只有
-    _progress_policy_suppression_reason 的读检查——gateway 在读到"未
-    claim"后、CLI 写入 claim 前已选中 policy 的竞态窗口内, 无同一把
-    policy CAS 阻止 gateway 继续执行。此函数用 update_progress_policy_
-    atomic(flock 锁内读-改-写)在真正执行前做最终确认:
-    - CLI 的 cli_claim_at 在 lease 内 → updater 返回 None → aborted →
-      放弃执行(cli_claim_held_before_execute)
-    - 无 CLI claim / 已过期 → 写 consumer=gateway_scheduler +
-      gateway_claim_at(与 CLI 同文件锁, 双向互斥) → 放行
-    非 ordinary_task_resume 的 policy 不走续跑互斥(原样放行)。
-    """
-    from dataclasses import replace as _replace
-
-    if str((policy.metadata or {}).get("kind") or "") != "ordinary_task_resume":
-        return True
-    updater = getattr(store, "update_progress_policy_atomic", None)
-    if not callable(updater):
-        return True  # 无 CAS 能力的 store(fake/旧版) 保守放行
-
-    def _cas_consume(current_policy: ProgressPolicy):
-        metadata = dict(current_policy.metadata or {})
-        claimed_at = metadata.get("cli_claim_at")
-        try:
-            claimed_at = float(claimed_at) if claimed_at else 0.0
-        except (TypeError, ValueError):
-            claimed_at = 0.0
-        if claimed_at > 0 and now - claimed_at < CLI_RESUME_LEASE_SECONDS:
-            return None  # CLI 持有: 放弃(gateway 不并发消费)
-        # 双席复核硬门2(seq1897 维护记录): 拒绝仍在 lease 内的既有
-        # gateway_claim_at——多 gateway 实例(或重启残留)并发时, 后到者
-        # 不能覆盖存活领取, 同一把锁内 CAS 保证 gateway-wide 互斥
-        # (不依赖「gateway 单例」假设)。
-        gateway_claimed = metadata.get("gateway_claim_at")
-        try:
-            gateway_claimed = float(gateway_claimed) if gateway_claimed else 0.0
-        except (TypeError, ValueError):
-            gateway_claimed = 0.0
-        if gateway_claimed > 0 and now - gateway_claimed < CLI_RESUME_LEASE_SECONDS:
-            return None  # 其他 gateway 实例持有: 放弃
-        metadata["consumer"] = "gateway_scheduler"
-        metadata["gateway_claim_at"] = now
-        return _replace(current_policy, metadata=metadata)
-
-    try:
-        _updated, _changed, aborted = updater(policy.policy_id, _cas_consume)
-    except Exception:  # noqa: BLE001 领取失败保守放弃(不双跑)
-        return False
-    return not aborted
 
 
 # LLM: Ready-thread discovery may inspect durable sources but must not claim, consume, or run them;
@@ -6388,132 +6321,6 @@ def ensure_goal_progress_continuation(
     return True
 
 
-# LLM: A plain task (no /goal) can also leave open work at a tool-round limit or a
-# soft repeated-failure closeout.  The closeout prompt promises "the runtime keeps
-# the same task and continues on persistent progress"; this function makes that
-# promise real for ordinary tasks by renting the same progress-policy lane, bounded
-# by a resume budget so a stuck task cannot auto-burn forever.  Goal tasks stay on
-# their own unbounded lane (an explicit /goal is the user's standing authorization).
-# 函数用途: 普通任务(无 /goal)轮限/失败软收口后调度自动续跑,预算耗尽后退休 policy
-# 并如实停等用户回复「继续」。
-def ensure_ordinary_task_resume(
-    agent: object | None,
-    *,
-    task_id: str,
-    thread_id: str = "",
-    store: ConversationStore | None = None,
-    now: float | None = None,
-    due_now: bool = False,
-    limit: int | None = None,
-    conversation_request_id: str = "",
-) -> bool:
-    """Schedule bounded automatic resumption for an ordinary unfinished task.
-
-    Unlike :func:`ensure_goal_progress_continuation` this lane does not require
-    a goal record nor a non-empty progress ledger: the conversation history is
-    enough to resume.  The budget (``resume_used`` vs ``resume_limit``) caps
-    automatic resumptions; once exhausted the policy is disabled and the
-    closeout prompt tells the user to say 继续 explicitly.
-    """
-    task_id = str(task_id or "").strip()
-    if agent is None or not task_id:
-        return False
-    selected_store = store or getattr(agent, "conversation_store", None)
-    if selected_store is None:
-        return False
-    thread_id = str(thread_id or "").strip() or _thread_id_for_task(selected_store, task_id)
-    if not thread_id:
-        return False
-    current = now if now is not None else time.time()
-    conversation_request_id = str(conversation_request_id or "").strip()
-    resume_limit = _ordinary_task_resume_limit(agent, limit)
-    matching = [
-        policy
-        for policy in selected_store.list_progress_policies(enabled_only=True)
-        if policy.task_id == task_id
-        and str((policy.metadata or {}).get("kind") or "") == "ordinary_task_resume"
-    ]
-    used = 0
-    if matching:
-        try:
-            used = int((matching[0].metadata or {}).get("resume_used") or 0)
-        except (TypeError, ValueError):
-            used = 0
-        if used >= resume_limit:
-            # 预算耗尽:退休 policy,调度器不再每间隔拉起;由用户显式「继续」驱动。
-            selected_store.disable_progress_policy(matching[0].policy_id, now=current)
-            return False
-    if matching:
-        # 先顺延再 expedite 到 now:mark_progress_reported 记账 resume_used+1,
-        # expedite 单调提前,最终 due=now 立即拉起。
-        metadata_updates: dict[str, object] = {"resume_used": used + 1}
-        if conversation_request_id:
-            metadata_updates[CONVERSATION_REQUEST_ID_ATTR] = conversation_request_id
-        selected_store.mark_progress_reported(
-            matching[0].policy_id,
-            now=current,
-            metadata_updates=metadata_updates,
-        )
-        selected_store.expedite_progress_policy(
-            matching[0].policy_id,
-            due_at=current,
-            reason="ordinary_task_round_resume",
-            now=current,
-        )
-        return True
-    interval = int(
-        getattr(
-            getattr(agent, "config", None),
-            "continuation_reminder_seconds",
-            0,
-        )
-        or 0
-    )
-    policy_metadata: dict[str, object] = {
-        "kind": "ordinary_task_resume",
-        "tool": "task_round_resume",
-        "resume_used": 1,
-        "resume_limit": resume_limit,
-        "reason": "普通任务轮限/失败软收口自动续跑",
-    }
-    if conversation_request_id:
-        policy_metadata[CONVERSATION_REQUEST_ID_ATTR] = conversation_request_id
-    policy = selected_store.set_progress_policy(
-        {
-            "thread_id": thread_id,
-            "task_id": task_id,
-            "interval_seconds": max(60, interval) if interval > 0 else 180,
-            "route_channel": "internal",
-            "route_target": "",
-            "now": current,
-            "metadata": policy_metadata,
-        }
-    )
-    if due_now:
-        selected_store.expedite_progress_policy(
-            policy.policy_id,
-            due_at=current,
-            reason="ordinary_task_round_resume",
-            now=current,
-        )
-    return True
-
-
-def _ordinary_task_resume_limit(agent: object | None, explicit: int | None = None) -> int:
-    if explicit is not None:
-        try:
-            return max(1, int(explicit))
-        except (TypeError, ValueError):
-            pass
-    try:
-        configured = int(
-            getattr(getattr(agent, "config", None), "ordinary_task_resume_limit", 0) or 0
-        )
-    except (TypeError, ValueError):
-        configured = 0
-    return configured if configured > 0 else 3
-
-
 def _thread_id_for_task(store: ConversationStore, task_id: str) -> str:
     try:
         thread = store.thread_for_task(task_id)
@@ -6577,6 +6384,8 @@ def _runnable_due_policies(
 def _progress_policy_suppression_reason(
     store, policy: ProgressPolicy, *, now: float, agent: object | None = None
 ) -> str:
+    if _is_removed_ordinary_task_resume_policy(policy):
+        return "removed_ordinary_task_resume_policy"
     if _is_removed_dispatch_supervision_policy(policy):
         return "removed_dispatch_supervision_policy"
     if _is_legacy_child_watch_backstop_policy(policy):
@@ -6589,34 +6398,9 @@ def _progress_policy_suppression_reason(
         return "subagent_runner_owned_policy"
     if _policy_task_link_is_terminal(store, policy):
         return "terminal_task_link"
-    if _ordinary_resume_task_link_is_missing_or_inactive(store, policy):
-        return "ordinary_resume_task_link_missing_or_inactive"
-    if _cli_claim_holds_policy(policy, now=now):
-        return "cli_claim_held"  # 双席复核硬门2: gateway 与 CLI 同读同一 claim
     if _progress_policy_is_stale(policy, now=now):
         return "stale_missed_interval"
     return ""
-
-
-def _cli_claim_holds_policy(policy: ProgressPolicy, *, now: float) -> bool:
-    """CLI resume_loop 的 cli_claim_at lease 内持有 → gateway 不并发消费。
-
-    2026-08-14 双席复核硬门2: resume_used=1 对应整条进程内续跑链的预算
-    语义成立的前提是 gateway 不会在 CLI claim 链内拉起同一 task。CLI 与
-    gateway 同读同一 policy metadata(cli_claim_at/cli_claim_owner)——
-    lease(300s) 内 gateway 调度器 suppress 该 policy, 链内无并发消费者;
-    lease 过期(CLI 崩溃/退出未释放)后 gateway 自然接管, 不双跑。
-    """
-    if str((policy.metadata or {}).get("kind") or "") != "ordinary_task_resume":
-        return False
-    claimed_at = (policy.metadata or {}).get("cli_claim_at")
-    try:
-        claimed_at = float(claimed_at) if claimed_at else 0.0
-    except (TypeError, ValueError):
-        claimed_at = 0.0
-    if claimed_at <= 0:
-        return False
-    return now - claimed_at < CLI_RESUME_LEASE_SECONDS
 
 
 def _is_legacy_child_watch_backstop_policy(policy: ProgressPolicy) -> bool:
@@ -6634,6 +6418,15 @@ def _is_legacy_child_watch_backstop_policy(policy: ProgressPolicy) -> bool:
 def _is_removed_dispatch_supervision_policy(policy: ProgressPolicy) -> bool:
     metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
     return str(metadata.get("tool") or "") == "dispatch_supervision_auto"
+
+
+# LLM: Ordinary task auto-resume was removed in favor of 会话运行时 explicit
+# events and a separate Goal driver. Match only the old typed marker and retire
+# it; never infer migration state from prose, task titles, or timestamps.
+# 函数用途: 识别升级前遗留的普通任务自动续跑策略，让调度器一次性退休而不执行模型。
+def _is_removed_ordinary_task_resume_policy(policy: ProgressPolicy) -> bool:
+    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+    return str(metadata.get("kind") or "") == "ordinary_task_resume"
 
 
 def _is_legacy_audit_root_poll_policy(policy: ProgressPolicy) -> bool:
@@ -6687,37 +6480,6 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
         ):
             return True
     return False
-
-
-# LLM: ordinary-task auto-resume authority is the exact active ThreadTaskLink;
-# a durable policy is only a timer/index and must never resurrect a missing,
-# cross-thread, or inactive task.  Stores without an exact-link API are test or
-# legacy adapters, so preserve their previous behavior instead of guessing.
-# 函数用途: 检查普通任务续跑提醒是否已经失去对应的活任务；丢失或失活时让调度器退休提醒，
-# 避免旧对话被反复唤醒并产生过期进度和无效模型费用。
-def _ordinary_resume_task_link_is_missing_or_inactive(
-    store: object,
-    policy: ProgressPolicy,
-) -> bool:
-    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
-    if str(metadata.get("kind") or "") != "ordinary_task_resume":
-        return False
-    loader = getattr(store, "load_task_link", None)
-    if not callable(loader):
-        return False
-    try:
-        link = loader(str(policy.task_id or "").strip())
-    except Exception:
-        # 读取损坏会由 store 的结构化诊断通道报告；这里不猜测任务已结束，
-        # 以免一次暂时性 I/O 错误永久退休仍在工作的任务。
-        return False
-    if link is None:
-        return True
-    return bool(
-        str(getattr(link, "thread_id", "") or "").strip() != policy.thread_id
-        or str(getattr(link, "task_id", "") or "").strip() != policy.task_id
-        or str(getattr(link, "status", "") or "").strip().lower() != "active"
-    )
 
 
 def _claimed_background_task_is_terminal(
@@ -6862,8 +6624,8 @@ _RETIRE_SUPPRESSION_REASONS = frozenset(
         "audit_root_poll_policy",
         "durable_audit_root_policy",
         "removed_dispatch_supervision_policy",
+        "removed_ordinary_task_resume_policy",
         "subagent_runner_owned_policy",
-        "ordinary_resume_task_link_missing_or_inactive",
     }
 )
 
@@ -6938,17 +6700,12 @@ def _agent_config_int(config: object | None, key: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 共享续跑 gate(2026-08-14 根因3 设计 v2, 审查意见2): gateway 调度器与 CLI
-# resume_loop 用同一判断, 杜绝两份逻辑漂移。纯结构化, 禁 NL 匹配。
+# Goal/手动续跑共享 gate：只判断一轮的结构化收口原因是否允许继续，
+# 不授予普通任务自动调度权；是否真正续跑仍由显式 Goal 或用户命令决定。
 
 
-# 可续跑收口 reason 白名单(与 _schedule_typed_unfinished_continuation 同一
-# gate 分支): 任务未完成、预算内可自动续跑。EXHAUSTED 变体(收益递减/硬门)
-# 不在此列, 等用户介入。
-# CLI 自动续跑 claim 的互斥 lease 秒数(2026-08-14 双席复核硬门2):
-# gateway 调度器与 CLI resume_loop 同读同一 policy metadata——
-# cli.resume_contract 从此处 import(cli→conversation 方向合法, 反之违规)。
-CLI_RESUME_LEASE_SECONDS = 300
+# 可继续收口 reason 白名单。普通模式只据此给出诚实阶段状态；显式 Goal
+# 可以据此排下一轮，用户显式 resume 也可沿同一任务继续。
 
 
 def resume_prompt_for(*, continuation_reason: str, continuation_seq: int, user_task: str) -> str:
@@ -6989,14 +6746,12 @@ CONTINUABLE_REASONS = frozenset(
 
 
 def should_continue_task(final_response: object) -> tuple[bool, str]:
-    """判断一次收口后任务是否应自动续跑(结构化)。
+    """判断一次收口是否允许由 Goal 或显式 resume 继续(结构化)。
 
-    返回 (should, reason): should=True 表示收口是可续跑族(unfinished 返工门
-    或 CONTINUABLE_REASONS), CLI resume_loop 据此续跑; blocked/协议违规/
-    UNKNOWN effect 等一律 False(恢复矩阵 truth table, 审查意见6)。
+    返回 (should, reason): should=True 只表示技术上可继续，不代表普通任务会
+    自动调度。blocked/协议违规/UNKNOWN effect 等一律 False。
 
-    与 _finalization_service._schedule_typed_unfinished_continuation 的 gate
-    分支同一条精确条件: 返工门 unfinished 族 + 三个可续跑 reason。
+    显式 Goal 的 finalization 与 CLI 手动/Goal 驱动共用这条精确条件。
     """
     reason = str(getattr(final_response, "runtime_reason", "") or "").strip().upper()
     source = str(getattr(final_response, "runtime_source", "") or "").strip()

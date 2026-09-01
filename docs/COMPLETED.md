@@ -1,5 +1,18 @@
 # COMPLETED
 
+## 2026-09-01 R121 Goal 固定状态、思考折叠与后续轮连续性
+
+- `/goal ...` 在 durable outbox 成功后原样留在 TUI 历史；固定面板 Goal 排在 child 前，方向键可选，Enter
+  展开 exact objective/状态/token，Ctrl+G 收起。显示块不进入模型队列，也不生成第二个控制请求。
+- live thinking 实时展示；结束后默认折成灰色摘要，Ctrl+O 进入详细历史、再按返回。正文不会随 thinking
+  隐藏。普通 turn 不再由旧 `ordinary_task_resume` 暗中续跑，只有显式 Goal 持有持续生命周期。
+- 真 TUI 先发现 active Goal 吞 final，再发现空 `task_path` 被误判为工作区损坏；分别按 会话运行时 normal turn 与
+  thread overlay 语义修复。非空但真实丢失的 sticky workspace 仍 fail closed。
+- `.10` `ma-r121-110-u374-goal-thinking` 最终复验通过，canonical history 精确保存 user/final；唯一 Gateway
+  为 `ma-gateway-r121-final2-110-r3`，MiniMax-M2.7，wheel SHA-256 `9bb53f3226013534ef3e64a9cd5e192fd941dc682647baff11b1d929785d8d34`。
+- 相关 focused、Gateway 会话上下文整文件、PyCompile、Ruff、doc sync、strict code-size、diff 和
+  clean-package 全绿；累计 4,769 行，按约定未跑全仓 pytest。
+
 ## 2026-08-31 R118 父级能力裁决、durable wake 与生产递归角色
 
 - `resolve_capability_requests` 的 grant/deny 现在都是直属父级在自身 authority 上限内的 mutating 控制；

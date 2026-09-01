@@ -21,7 +21,6 @@ from agent_py_agent.cli.resume_contract import (
     continuation_from_params,
     record_budget_exhausted,
     resume_prompt_for,
-    try_claim_cli_resume,
 )
 
 
@@ -191,51 +190,6 @@ def test_should_continue_task_truth_table():
         assert should_continue_task(resp)[0] is False, (reason, source, status)
 
 
-def test_try_claim_cli_resume_mutual_exclusion(tmp_path):
-    """CLI claim 互斥：已 claim 且 lease 未过期 → 跳过；过期后可重 claim。"""
-    import time
-
-    from agent_py_agent.agent.conversation.store import ConversationStore
-
-    store = ConversationStore(tmp_path / "conv")
-    thread = store.get_or_create_thread(
-        {
-            "canonical_user_id": "u",
-            "channel": "cli_run",
-            "channel_conversation_id": "req-1",
-            "channel_user_id": "u",
-            "owner_id": "local/main",
-            "owner_home": str(tmp_path),
-            "title": "t",
-        }
-    )
-    policy = store.set_progress_policy(
-        {
-            "thread_id": thread.thread_id,
-            "task_id": "task-1",
-            "interval_seconds": 180,
-            "now": time.time(),
-            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
-        }
-    )
-    # 首次 claim 成功
-    assert try_claim_cli_resume(store, "task-1", now=1000.0) is True
-    # lease 未过期（now 未推进 300s）→ 拒绝（防双 consumer）
-    assert try_claim_cli_resume(store, "task-1", now=1100.0) is False
-    # lease 过期 → 可重 claim
-    assert try_claim_cli_resume(store, "task-1", now=1400.0) is True
-
-
-def test_try_claim_cli_resume_no_policy(tmp_path):
-    """无续跑 policy 的 task → 不可续跑。"""
-    import time
-
-    from agent_py_agent.agent.conversation.store import ConversationStore
-
-    store = ConversationStore(tmp_path / "conv")
-    assert try_claim_cli_resume(store, "no-such-task", now=time.time()) is False
-
-
 # ------------------------------------------------- 切片3: 轮/任务终态分层
 
 
@@ -385,8 +339,6 @@ class _FakeRunAgent:
     """
 
     def __init__(self, tmp_path, *, task_id="task-1", channel_id="req-1"):
-        import time
-
         from agent_py_agent.agent.agent_core.cli_run_conversation import (
             _CLI_RUN_CHANNEL,
             _CLI_RUN_USER_ID,
@@ -395,8 +347,7 @@ class _FakeRunAgent:
 
         self.conversation_store = ConversationStore(tmp_path / "conv")
         self.calls = []
-        # 建续跑 policy（kind=ordinary_task_resume），claim 互斥检查需要;
-        # thread 按 bind_cli_run_conversation 的真实 channel 身份预建,
+        # thread 按 bind_cli_run_conversation 的真实 channel 身份预建，
         # base.request_id=channel_id 时 bind 复用同一线程。
         self._thread = self.conversation_store.get_or_create_thread(
             {
@@ -405,14 +356,7 @@ class _FakeRunAgent:
                 "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
             }
         )
-        self.conversation_store.set_progress_policy(
-            {
-                "thread_id": self._thread.thread_id, "task_id": task_id,
-                "interval_seconds": 180, "now": time.time(),
-                "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
-            }
-        )
-        # EXEC-39: 自动续跑授权 gate 的 active goal, 与 bind 后
+        # 自动续跑授权只来自 active goal，与 bind 后
         # root_thread_id/root_task_id 对齐。
         self.conversation_store.create_goal(
             {
@@ -518,73 +462,6 @@ def test_run_with_resume_unresumable_stops(tmp_path):
     assert len(fake.calls) == 1  # 只首轮
 
 
-# ------------------------------------------------- 切片5: 崩溃/双消费者回归
-
-
-def test_claim_mutual_exclusion_second_consumer_skips(tmp_path):
-    """双 consumer：第一个 claim 后第二个在 lease 内跳过（防双跑）。
-
-    审查硬条件2: claim/lease CAS 可审计; 双 consumer 有可复现测试。
-    """
-    import time
-
-    from agent_py_agent.agent.conversation.store import ConversationStore
-
-    store = ConversationStore(tmp_path / "conv")
-    thread = store.get_or_create_thread(
-        {
-            "canonical_user_id": "u", "channel": "cli_run",
-            "channel_conversation_id": "req-1", "channel_user_id": "u",
-            "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
-        }
-    )
-    store.set_progress_policy(
-        {
-            "thread_id": thread.thread_id, "task_id": "task-1",
-            "interval_seconds": 180, "now": time.time(),
-            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
-        }
-    )
-    # consumer A claim
-    assert try_claim_cli_resume(store, "task-1", now=1000.0) is True
-    # consumer B 在 lease 内 → 跳过
-    assert try_claim_cli_resume(store, "task-1", now=1100.0) is False
-    # lease 过期 → B 可接管
-    assert try_claim_cli_resume(store, "task-1", now=1400.0) is True
-
-
-def test_reclaim_after_process_crash(tmp_path):
-    """进程崩溃后 claim 残留：lease 过期即可重 claim（恢复矩阵）。
-
-    审查硬条件4: 进程崩溃、claim 后未建 attempt 有可复现测试。
-    """
-    import time
-
-    from agent_py_agent.agent.conversation.store import ConversationStore
-
-    store = ConversationStore(tmp_path / "conv")
-    thread = store.get_or_create_thread(
-        {
-            "canonical_user_id": "u", "channel": "cli_run",
-            "channel_conversation_id": "req-1", "channel_user_id": "u",
-            "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
-        }
-    )
-    store.set_progress_policy(
-        {
-            "thread_id": thread.thread_id, "task_id": "task-1",
-            "interval_seconds": 180, "now": time.time(),
-            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
-        }
-    )
-    # 进程 A claim 后崩溃(lease 残留)
-    assert try_claim_cli_resume(store, "task-1", now=2000.0) is True
-    # 进程 B 在 lease 内发现残留 → 跳过
-    assert try_claim_cli_resume(store, "task-1", now=2100.0) is False
-    # lease(300s)过期 → 进程 B 可重 claim 继续
-    assert try_claim_cli_resume(store, "task-1", now=2400.0) is True
-
-
 def test_resume_round_attempt_chain(tmp_path):
     """续跑轮 attempt 链：每轮 attempt_id 递增且 parent 指向上一轮。"""
     from agent_py_agent.agent.agent_core.runtime.run_params import (
@@ -657,12 +534,8 @@ def test_resume_round_blocked_is_unresumable(tmp_path):
     assert len(fake.calls) == 2  # 首轮 + 1 续跑轮后停
 
 
-def test_resume_without_precreated_policy_ensures_and_continues(tmp_path):
-    """真机洞回归(2026-08-14 testbox): 真实 CLI run 从不预建 ordinary_task_
-    resume policy(它是收口 finalization 的 gateway 调度器路径产物), 旧实现
-    try_claim_cli_resume 找不到 policy 永远 False → 永不续跑(测试用 fake
-    agent 显式建 policy 掩盖)。修后 run_with_resume 先 ensure_ordinary_task_
-    resume 建同一 policy 再 claim——无 policy 场景也应正常续跑完成。"""
+def test_active_goal_continues_without_ordinary_resume_policy(tmp_path):
+    """显式 Goal 在进程内按自身护栏续跑，不创建普通任务 policy。"""
     from agent_py_agent.agent.agent_core.runtime.run_params import (
         run_params_with_request_id,
     )
@@ -678,7 +551,7 @@ def test_resume_without_precreated_policy_ensures_and_continues(tmp_path):
             )
             from agent_py_agent.agent.conversation.store import ConversationStore
 
-            # 与 _FakeRunAgent 唯一区别: 不预建 policy(真实 CLI 场景)
+            # 与 _FakeRunAgent 唯一区别只是独立 thread/task 身份。
             self.conversation_store = ConversationStore(tmp_path / "conv")
             self.calls = []
             self._thread = self.conversation_store.get_or_create_thread(
@@ -688,8 +561,7 @@ def test_resume_without_precreated_policy_ensures_and_continues(tmp_path):
                     "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
                 }
             )
-            # 不发 set_progress_policy
-            # EXEC-39: 自动续跑需 active goal——按新语义建一个
+            # 自动续跑只建 active Goal，不发普通 progress policy。
             self.conversation_store.create_goal(
                 {
                     "thread_id": self._thread.thread_id,
@@ -703,83 +575,15 @@ def test_resume_without_precreated_policy_ensures_and_continues(tmp_path):
         RunParams(source="cli_run", request_id="req-nopol", task_id="task-nopol", task_attributes={})
     )
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
-    # 不再 unresumable: 修后 ensure 自动建 policy 并续跑 3 轮完成
     assert outcome.status == "completed"
     assert len(fake.calls) == 3  # 首轮 + 2 续跑轮
-    # policy 已创建(预算单一权威落点)
-    policies = fake.conversation_store.list_progress_policies(enabled_only=True)
-    assert any(
-        p.task_id == "task-nopol"
-        and str((p.metadata or {}).get("kind") or "") == "ordinary_task_resume"
-        for p in policies
-    )
+    assert fake.conversation_store.list_progress_policies(enabled_only=True) == []
 
 
-def test_claim_strict_cas_concurrent_consumers_only_one_wins(tmp_path):
-    """双席复核硬门1(严格 CAS): 两个消费者(CLI/gateway 并发)claim 同一
-    policy, flock 锁内读-改-写保证只有一个成功——不再读-写窗口互相覆盖。
-
-    两个独立 ConversationStore 实例(模拟两个进程, 同文件系统)并发
-    try_claim_cli_resume: 恰一个返回 True, 另一个返回 False(lease 未过期)。
-    """
-    import threading
+def test_gateway_retires_removed_ordinary_resume_policy(tmp_path):
+    """旧普通续跑 policy 无论历史 claim 字段如何都必须直接退休。"""
     import time as _time
 
-    from agent_py_agent.agent.conversation.store import ConversationStore
-    from agent_py_agent.cli.resume_contract import try_claim_cli_resume
-
-    store = ConversationStore(tmp_path / "conv")
-    thread = store.get_or_create_thread(
-        {
-            "canonical_user_id": "u", "channel": "cli_run",
-            "channel_conversation_id": "req-cas", "channel_user_id": "u",
-            "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
-        }
-    )
-    store.set_progress_policy(
-        {
-            "thread_id": thread.thread_id, "task_id": "task-cas",
-            "interval_seconds": 180, "now": _time.time(),
-            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
-        }
-    )
-    # 第二个 store 实例=独立消费者(模拟另一进程, 同一 policy 文件)
-    store2 = ConversationStore(tmp_path / "conv")
-    results: list[bool] = []
-    barrier = threading.Barrier(2)
-
-    def _claimer(s):
-        barrier.wait()  # 同时出发, 放大读-改-写竞态窗口
-        results.append(try_claim_cli_resume(s, "task-cas"))
-
-    t1 = threading.Thread(target=_claimer, args=(store,))
-    t2 = threading.Thread(target=_claimer, args=(store2,))
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-
-    assert sorted(results) == [False, True]  # 恰一个成功
-    claimed = store.get_progress_policy(
-        store.list_progress_policies(enabled_only=True)[0].policy_id
-    )
-    assert (claimed.metadata or {}).get("cli_claim_owner") == "cli_resume_loop"
-    # lease 内再次 claim 仍失败(幂等互斥)
-    assert try_claim_cli_resume(store, "task-cas") is False
-    # lease 过期后可重 claim(崩溃后接管)
-    expired = _time.time() + 400
-    assert try_claim_cli_resume(store, "task-cas", now=expired) is True
-
-
-def test_gateway_suppresses_cli_claimed_policy(tmp_path):
-    """双席复核硬门2(gateway 同读 claim): CLI cli_claim_at lease 内,
-    gateway 调度器的 _progress_policy_suppression_reason 返回
-    "cli_claim_held" → 不在 CLI 续跑链内并发消费(预算语义成立);
-    lease 过期后 gateway 自然接管。"""
-    import time as _time
-    from dataclasses import replace as _replace
-
-    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
     from agent_py_agent.agent.conversation.runtime import (
         _progress_policy_suppression_reason,
     )
@@ -811,26 +615,11 @@ def test_gateway_suppresses_cli_claimed_policy(tmp_path):
     )
     policy = store.list_progress_policies(enabled_only=True)[0]
     now = _time.time()
-    # 未 claim → 不 suppress
-    assert _progress_policy_suppression_reason(store, policy, now=now) == ""
-    # CLI claim 后 → gateway suppress(cli_claim_held)
-    store.update_progress_policy_atomic(
-        policy.policy_id,
-        lambda p: _replace(
-            p,
-            metadata={
-                **p.metadata,
-                "cli_claim_at": now,
-                "cli_claim_owner": "cli_resume_loop",
-            },
-        ),
+    assert (
+        _progress_policy_suppression_reason(store, policy, now=now)
+        == "removed_ordinary_task_resume_policy"
     )
-    claimed = store.get_progress_policy(policy.policy_id)
-    assert _progress_policy_suppression_reason(store, claimed, now=now) == "cli_claim_held"
-    # lease 过期后 gateway 接管(不再 suppress)
-    later = now + 400
-    assert _progress_policy_suppression_reason(store, claimed, now=later) == ""
-    # 非 ordinary_task_resume 的 policy 不受 cli_claim 影响
+    # 其它持久策略保持原本的独立语义。
     store.set_progress_policy(
         {
             "thread_id": thread.thread_id, "task_id": "task-other",
@@ -840,116 +629,6 @@ def test_gateway_suppresses_cli_claimed_policy(tmp_path):
     )
     other = [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-other"][0]
     assert _progress_policy_suppression_reason(store, other, now=now) == ""
-
-
-def test_gateway_execute_cas_aborted_when_cli_claims_in_window(tmp_path):
-    """双席复核硬门1(seq1845): gateway 读到"未 claim"后、执行前 CLI 写入
-    claim 的竞态窗口——gateway 执行前 CAS 领取被 aborted(不执行),
-    双向互斥闭合。CLI lease 过期后 gateway 可领取执行。"""
-    import time as _time
-
-    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
-    from agent_py_agent.agent.conversation.runtime import _gateway_consume_policy_cas
-    from agent_py_agent.agent.conversation.store import ConversationStore
-    from agent_py_agent.cli.resume_contract import try_claim_cli_resume
-
-    store = ConversationStore(tmp_path / "conv")
-    thread = store.get_or_create_thread(
-        {
-            "canonical_user_id": "u", "channel": "cli_run",
-            "channel_conversation_id": "req-race", "channel_user_id": "u",
-            "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
-        }
-    )
-    store.set_progress_policy(
-        {
-            "thread_id": thread.thread_id, "task_id": "task-race",
-            "interval_seconds": 180, "now": _time.time(),
-            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
-        }
-    )
-    policy = store.list_progress_policies(enabled_only=True)[0]
-    now = _time.time()
-    # 竞态窗口: gateway 读检查通过(未 claim) → CLI 先写入 claim
-    assert _gateway_consume_policy_cas(store, policy, now=now) is True  # gateway 领取
-    assert try_claim_cli_resume(store, "task-race", now=now) is False  # CLI 被 gateway 挡
-    # 反过来: CLI 先 claim → gateway 执行前 CAS 被 aborted
-    store2 = ConversationStore(tmp_path / "conv")
-    store2.set_progress_policy(
-        {
-            "thread_id": thread.thread_id, "task_id": "task-race2",
-            "interval_seconds": 180, "now": now,
-            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
-        }
-    )
-    p2 = [p for p in store2.list_progress_policies(enabled_only=True) if p.task_id == "task-race2"][0]
-    assert try_claim_cli_resume(store2, "task-race2", now=now) is True  # CLI 先 claim
-    assert (
-        _gateway_consume_policy_cas(store2, p2, now=now) is False
-    )  # gateway 执行前被 aborted, 不双跑
-    # lease 过期后 gateway 可领取(CLI 崩溃/退出接管)
-    later = now + 400
-    assert _gateway_consume_policy_cas(store2, p2, now=later) is True
-    # 非 ordinary 类型不受互斥影响
-    store2.set_progress_policy(
-        {
-            "thread_id": thread.thread_id, "task_id": "task-other-race",
-            "interval_seconds": 180, "now": now,
-            "metadata": {"kind": "other_kind"},
-        }
-    )
-    po = [p for p in store2.list_progress_policies(enabled_only=True) if p.task_id == "task-other-race"][0]
-    assert _gateway_consume_policy_cas(store2, po, now=now) is True
-
-
-
-
-
-
-def test_gateway_consume_rejects_live_gateway_claim(tmp_path):
-    """双席复核硬门2(seq1897): gateway 锁内 CAS 拒绝仍在 lease 内的既有
-    gateway_claim_at——多 gateway 实例互斥不依赖单例假设; lease 过期后
-    可接管(重启残留让位)。"""
-    import time as _time
-
-    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
-    from agent_py_agent.agent.conversation.runtime import _gateway_consume_policy_cas
-    from agent_py_agent.agent.conversation.store import ConversationStore
-
-    store = ConversationStore(tmp_path / "conv")
-    thread = store.get_or_create_thread(
-        {
-            "canonical_user_id": "u", "channel": "cli_run",
-            "channel_conversation_id": "req-gw2", "channel_user_id": "u",
-            "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
-        }
-    )
-    store.set_progress_policy(
-        {
-            "thread_id": thread.thread_id, "task_id": "task-gw2",
-            "interval_seconds": 180, "now": _time.time(),
-            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
-        }
-    )
-    policy = store.list_progress_policies(enabled_only=True)[0]
-    now = _time.time()
-    # gateway A 领取成功
-    assert _gateway_consume_policy_cas(store, policy, now=now) is True
-    # gateway B(另一实例)在 lease 内 → 被拒(不覆盖存活领取)
-    assert _gateway_consume_policy_cas(store, policy, now=now + 10) is False
-    # lease 过期后 B 可接管(A 崩溃/退出让位)
-    assert _gateway_consume_policy_cas(store, policy, now=now + 400) is True
-    # 非 ordinary 类型不受互斥影响
-    store.set_progress_policy(
-        {
-            "thread_id": thread.thread_id, "task_id": "task-other2",
-            "interval_seconds": 180, "now": now,
-            "metadata": {"kind": "other_kind"},
-        }
-    )
-    po = [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-other2"][0]
-    assert _gateway_consume_policy_cas(store, po, now=now) is True
-
 
 
 def test_orphan_reclaim_nonterminal_ops_writes_visible_event(tmp_path):

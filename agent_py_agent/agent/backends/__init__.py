@@ -30,6 +30,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "is_provider_configuration_error": ("errors", "is_provider_configuration_error"),
     "is_provider_quota_exhausted_error": ("errors", "is_provider_quota_exhausted_error"),
     "is_provider_recoverable_error": ("errors", "is_provider_recoverable_error"),
+    "is_provider_stream_timeout_error": ("errors", "is_provider_stream_timeout_error"),
     "is_provider_timeout_error": ("errors", "is_provider_timeout_error"),
     "is_provider_transient_error": ("errors", "is_provider_transient_error"),
     "is_provider_usage_limit_error": ("errors", "is_provider_usage_limit_error"),

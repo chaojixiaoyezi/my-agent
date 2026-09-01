@@ -264,6 +264,10 @@ def _conversation_request_id(params: object) -> str:
 
 def _attach_gate_and_refs(output_record: dict[str, object], result: object) -> None:
     output_record.update(_tool_execution_facts_from_result(result))
+    approval = _applied_tool_approval_from_result(result)
+    if approval:
+        output_record["tool_approval"] = approval
+        output_record["approval_id"] = approval["permission_id"]
     runtime_gate = _runtime_gate_from_result(result)
     if runtime_gate:
         output_record["runtime_gate"] = runtime_gate
@@ -279,6 +283,17 @@ def _attach_gate_and_refs(output_record: dict[str, object], result: object) -> N
     result_envelope = _compact_result_envelope(result)
     if result_envelope:
         output_record["tool_result_envelope"] = result_envelope
+
+
+# LLM: Durable approval evidence may only come from the typed host-owned ToolResult field.
+# Generic handler metadata and output prose are deliberately ignored to prevent forged approval facts.
+# 函数用途: 把已经应用到同一次调用的用户批准写入工具账本，并给运行时门账本提供批准编号。
+def _applied_tool_approval_from_result(result: object) -> dict[str, object]:
+    approval = getattr(result, "applied_approval", None)
+    if approval is None or not hasattr(approval, "to_dict"):
+        return {}
+    value = approval.to_dict()
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _register_tool_result_artifacts(
@@ -393,7 +408,18 @@ def _scope_from_result(result: object) -> dict[str, object]:
 
 def _runtime_gate_from_result(result: object) -> dict[str, object]:
     gate = _result_details(result).get("runtime_gate")
-    return dict(gate) if isinstance(gate, dict) else {}
+    if isinstance(gate, dict):
+        return dict(gate)
+    approval = _applied_tool_approval_from_result(result)
+    if not approval:
+        return {}
+    return {
+        "gate": "tool_approval",
+        "status": "APPROVED",
+        "allowed": True,
+        "source": str(approval.get("schema_version") or "tool_approval_result.v1"),
+        "evidence": {"approval_id": str(approval.get("permission_id") or "")},
+    }
 
 
 def _error_facts_from_result(result: object) -> dict[str, object]:

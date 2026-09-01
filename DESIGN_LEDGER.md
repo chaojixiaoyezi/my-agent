@@ -1,5 +1,45 @@
 # DESIGN LEDGER
 
+## 2026-09-01 普通 turn、显式 Goal 与 TUI 展示必须分层【状态：R121 最终 wheel 真 TUI 通过】
+
+- 普通 turn 与显式 ThreadGoal 是两种不同产品语义。普通 turn 由模型自然回复后结束，open Todo、工具轮上限、
+  completion 文案或历史 `ordinary_task_resume` policy 都无权在后台再调用模型；旧 policy 只做 typed retirement。
+  只有用户显式 `/goal` 建立的 exact thread goal 才可跨轮持续执行、暂停、恢复或清除。直属 child 等待、明确
+  user guidance、Gateway crash recovery 与 provider transient retry 各自继续读取结构化 wake/attempt/error，
+  不能因为删除普通自动续跑而被文本兜底替代或一起删除。
+- Goal 是固定 TUI 的只读投影，不是 conversation task、Todo 或 child。selection id 固定为 `goal:<goal_id>`，
+  与真实 AgentRun id 分离；方向键可以选中，`Enter` 只展开 exact objective/状态/预算，绝不切换 active run 或
+  执行控制。`/goal ...` 原文只在 durable control outbox 保存成功后显示为本地 user-shaped block；显示文本不进
+  模型消息、不参与路由，也不能替代 outbox/Gateway receipt。完全重启后的命令回看只能由 canonical command
+  history 另行设计，当前不能把进程内显示冒充跨重启持久化。
+- live thinking 为当前工作反馈，必须实时展开；closed thinking 属于历史细节，默认只显示灰色摘要，`Ctrl+O`
+  才临时展开全部。折叠只影响 presentation，typed block、事件顺序、canonical transcript、Compact 和 provider
+  prompt 均保持原样。assistant final/commentary 仍直接显示，不能跟 thinking 一起藏起来。
+- Goal 的 active 状态只授权 idle continuation，不是消息可见性门。对齐 会话运行时
+  `会话运行时-rs/ext/goal/src/runtime.rs::continue_if_idle`：自动 continuation 仍是一轮正常 turn，模型产生的 terminal
+  assistant item 必须进入同一 rollout/transcript；一轮结束后 Goal 可继续 active。my-agent 因此只用 typed
+  lifecycle/capability reason 隐藏内部控制流，不再用 `goal.status=active` 抑制 `thread_goal_continue` 的整轮 final。
+  这条规则不从正文判断“是不是阶段汇报”，也不让 notice/ring 成为第二份历史。
+- ThreadGoal 不要求在创建时物化 task workspace。对齐 会话运行时 的 thread overlay 语义：exact active Goal link
+  的 `task_path` 为空时，后续前台 turn 继续使用 thread 当前 cwd，并保留 Goal 管理事实；只有一个曾经配置为
+  非空的 sticky workspace 路径后来消失，才属于 `CONVERSATION_PERSISTENCE_UNAVAILABLE`。空路径与丢失
+  路径必须由结构化字段区分，不能用“目录不存在”这一条宽泛判断把纯聊天 Goal 锁死，也不能因此放宽真正
+  工作区损坏的 fail-closed 门。
+- 等待中的非终态 child 接受插话时，在同一 owner/run 的短 admission 锁内读取 canonical attempt、原子复用或
+  预留一个 pending successor、幂等写 guidance，再非阻塞启动。锁不能包住 provider 调用，不同 owner/run
+  不互堵；stable message 重放只返回原 receipt，终态 child 只读。模型消费后形成 typed reply obligation，
+  避免“思考里答了但用户看不到回复”。
+
+## 2026-09-01 Computer Use 只复用成熟执行器【状态：设计中，未实现】
+
+- Computer Use 的截图、坐标、点击、键入、滚动、等待和窗口发现不在本项目重复实现。先对候选开源项目做
+  源码与许可证审计，选定一个维护活跃、可嵌入、可取消且能在目标 Linux/macOS 环境工作的执行器后，作为
+  可选运行依赖随底座打包；my-agent 只实现薄适配，不复制其核心。
+- 适配层必须把每个动作投影为 typed ToolCall/ToolResult，带 owner/thread/run/operation id，并复用现有
+  capability、危险操作审批、取消、超时、副作用幂等、截图归档和审计。Full Access 仍只有管理员显式拥有；
+  GUI 能力不能绕过文件 owner 墙或替用户自动批准。浏览器页面优先 Browser 工具，Computer Use 只补浏览器
+  工具无法覆盖的系统 UI。选型未完成前不写临时 pyautogui 旁路，也不把设计登记冒充可用功能。
+
 ## 2026-08-31 直属父级在继承权限上限内自主裁决，Gateway 恢复扫描不得堵住会话车道【状态：R118 wake/递归真 TUI 通过；capability focused 通过】
 
 - `resolve_capability_requests` 处理的是直属父级给 child 的结构化能力 grant/deny，不是父级给自己提权。

@@ -210,7 +210,7 @@ def _generate_or_recover_context_pressure(
         _record_provider_timeout(_provider_timeout_record(request, state, exc))
         # 门槛5: 超时后按结构化 tool ledger 判定至多重试一次(只重发模型调用,
         # 不重放工具); 资格不足或重试再超时则原样上抛(无第三次)。
-        retried = _retry_once_after_timeout(request)
+        retried = _retry_once_after_timeout(request, exc)
         if retried is not None:
             retried_response, retried_state = retried
             return retried_response, retried_state
@@ -231,7 +231,10 @@ def _generate_or_recover_context_pressure(
         raise
 
 
-def _retry_once_after_timeout(request: ModelGenerateParams):
+def _retry_once_after_timeout(
+    request: ModelGenerateParams,
+    exc: ProviderTimeoutError,
+):
     """门槛5: 超时后至多重试一次, 只重发模型调用不重放工具。
 
     资格(fail-closed): IR 最后一条 tool_use 已确认(有配对 ToolResult)或
@@ -244,6 +247,11 @@ def _retry_once_after_timeout(request: ModelGenerateParams):
     由外层统一 finish(seq1545 补证——attempt-2 的 call_id 必须落 finished,
     不能停留在 started/first_token)。
     """
+    # first_event/stream_idle 属于 response-stream reconnect：交给外层统一的
+    # 会话运行时 退避链，确保有 1/5...5/5 可见进度，也避免这里先静默多打一枪
+    # 造成总尝试数多于配置。外层仍会用同一 typed guidance guard 拒绝歧义重放。
+    if exc.stage in {"first_event", "stream_idle"}:
+        return None
     if _has_ambiguous_active_turn_input(request):
         return None
     if not _ir_last_tool_use_confirmed(request):

@@ -563,6 +563,72 @@ def test_background_transcript_sink_reuses_free_code_diff_renderer() -> None:
     assert any("class:tui-diff-add" in fragment[0] for fragment in new_line)
 
 
+def test_child_transcript_finish_publishes_canonical_reply_without_duplicate_commentary() -> None:
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BACKGROUND_TRANSCRIPT_SCHEMA,
+        BackgroundTranscriptSink,
+    )
+
+    rows: list[dict[str, object]] = []
+
+    def append_event(_agent, **kwargs) -> None:
+        rows.append(
+            {
+                "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
+                "seq": len(rows) + 1,
+                **kwargs,
+            }
+        )
+
+    request_id = "bg-agent:child-reply:attempt-2"
+    sink = BackgroundTranscriptSink(
+        SimpleNamespace(),
+        thread_id="thread-child-reply",
+        task_id="child-reply",
+        request_id=request_id,
+        event_writer=append_event,
+    )
+    sink.write_model("已经收到插话，我会继续等待研究员。")
+    sink.finish(
+        final_text="已经收到插话，我会继续等待研究员。",
+        publish_final=True,
+    )
+
+    assert [row["kind"] for row in rows] == ["assistant_completed"]
+    assert rows[0]["payload"] == {
+        "text": "已经收到插话，我会继续等待研究员。",
+        "process": False,
+    }
+
+    duplicate_rows: list[dict[str, object]] = []
+
+    def append_duplicate(_agent, **kwargs) -> None:
+        duplicate_rows.append(dict(kwargs))
+
+    duplicate = BackgroundTranscriptSink(
+        SimpleNamespace(),
+        thread_id="thread-child-reply",
+        task_id="child-reply",
+        request_id="bg-agent:child-reply:attempt-3",
+        event_writer=append_duplicate,
+    )
+    duplicate.write_model("先创建研究员。")
+    duplicate.write_progress(
+        {
+            "round": 1,
+            "call_index": 0,
+            "tool": "create_subagents",
+            "phase": "started",
+        }
+    )
+    duplicate.finish(final_text="先创建研究员。", publish_final=True)
+
+    assert [row["kind"] for row in duplicate_rows] == [
+        "assistant_completed",
+        "tool_started",
+    ]
+
+
 def test_background_tool_input_progress_is_transient_and_redacted() -> None:
     from agent_py_agent.agent.conversation.background_transcript import (
         BackgroundTranscriptSink,

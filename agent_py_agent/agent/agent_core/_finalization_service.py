@@ -5,7 +5,6 @@ import time as time_module
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from ..conversation.task_state import conversation_task_completed
 from ..memory_archive import (
     archive_run_turn,
@@ -669,12 +668,12 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
     }
 
 
-# LLM: Root conversation turns may rent the owner scheduler, while task-local
-# child turns must remain on their own runner/thread lane. Never turn a child
-# checkpoint into a background-main turn with root tools.
-# 函数用途: 为未完成的主会话安排续跑；子代理只保存断点并交回自己的 runner 续派。
+# LLM: Only an explicit persistent Goal may schedule another model turn after a
+# turn boundary. Ordinary chat stops at the boundary and is resumed solely by a
+# real user/control/lifecycle event; child turns stay on their own runner lane.
+# 函数用途: 只为显式 Goal 安排持久续跑；普通任务和子代理不创建定时模型轮询。
 def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext) -> None:
-    """Resume explicit persistent root work after a structured turn boundary."""
+    """Resume an explicit persistent Goal after a structured turn boundary."""
     source = str(ctx.source or "").strip().lower()
     # Background lifecycle slices deliberately use ``save=False`` because the
     # conversation transcript is already the authority.  That presentation/
@@ -684,28 +683,27 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
     if str(ctx.context_scope or "").strip().lower() == "task_local":
         return
     attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
-    # A named Audit owns durable, lease-backed source workers.  Host-level
-    # reconciliation keeps those workers alive and structured finding/lifecycle
-    # events wake the coordinator only when its judgment is needed.  Scheduling
-    # an ordinary model turn here would poll the coordinator while sources are
-    # healthy and duplicate that runtime.
+    # A named Audit owns durable, lease-backed source workers. Host-level
+    # reconciliation keeps those workers alive and structured lifecycle events
+    # wake the coordinator only when its judgment is needed.
     if str(attrs.get("conversation_work_kind") or "").strip().lower() == "audit":
         return
-    reason = str(getattr(ctx.final_response, "runtime_reason", "") or "").strip().upper()
-    # 2026-08-14 根因3 设计 v2(审查意见2): gate 判断提取为共享函数
-    # should_continue_task(conversation/runtime.py)——gateway 调度器与 CLI
-    # resume_loop 用同一判断, 杜绝两份逻辑漂移。逻辑与旧内联 gate 完全等价:
-    # 返工门 unfinished 族 + {TASK_PROGRESS_OPEN, TOOL_ROUND_LIMIT_REACHED,
-    # REPEATED_TOOL_FAILURE}; blocked/协议违规/UNKNOWN 不续跑。
+    goal_id = str(attrs.get("thread_goal_id") or "").strip()
+    if not goal_id:
+        # 会话运行时 ordinary turns have no host-created polling loop. A tool
+        # limit or soft failure is an honest handoff; a later user message may
+        # continue the same thread/task. Child completion and approval results
+        # already have exact typed wake paths and must not be duplicated here.
+        return
+
+    # Goal mode uses the shared typed continuation gate. Blocked, cancelled,
+    # protocol-violating and unknown-effect turns never acquire a future tick.
     from ..conversation.runtime import should_continue_task
 
     should, _reason = should_continue_task(ctx.final_response)
     if not should:
         return
-    from ..conversation.runtime import (
-        ensure_goal_progress_continuation,
-        ensure_ordinary_task_resume,
-    )
+    from ..conversation.runtime import ensure_goal_progress_continuation
     from .runtime.task_identity import durable_task_id
 
     thread_id = str(attrs.get("conversation_thread_id") or "")
@@ -719,48 +717,11 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
         or source in {"gateway", "chat", "cli_run"}
         or not source
     )
-    if str(attrs.get("thread_goal_id") or "").strip():
-        ensure_goal_progress_continuation(
-            agent,
-            task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
-            thread_id=thread_id,
-            due_now=foreground,
-        )
-        return
-    # 普通任务(无 /goal):只有轮限/失败等宿主结构化 unfinished
-    # 状态才进入持久恢复链；task_progress 账本不参与。多数后台轮只是
-    # 「读状态、给回执」，不能派生同类空转唤醒；但 child lifecycle 工作片
-    # 开始时已确认全部直属 child 终态后，主代理正在执行的是原 active turn
-    # 的整合阶段。此时工具轮边界不能把整项任务遗留在 active+无 executor。
-    if source == "background_main_agent":
-        from ..conversation.authority import (
-            CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
-        )
-
-        sampled_phase = str(
-            attrs.get(CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR) or ""
-        ).strip()
-        if sampled_phase != "subagents_terminal":
-            return
-        ensure_ordinary_task_resume(
-            agent,
-            task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
-            thread_id=thread_id,
-            due_now=True,
-            conversation_request_id=str(
-                attrs.get(CONVERSATION_REQUEST_ID_ATTR) or ""
-            ),
-        )
-        return
-    # 自动续跑必须保留真实 conversation task 身份。Todo 的 task-path 账本只
-    # 负责跨 turn 保存清单；把它交给 scheduler 会产生一个没有 task link 的
-    # 影子执行身份，后台醒来后所有工具都会绑定失败。
-    ensure_ordinary_task_resume(
+    ensure_goal_progress_continuation(
         agent,
         task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
         thread_id=thread_id,
         due_now=foreground,
-        conversation_request_id=str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or ""),
     )
 
 

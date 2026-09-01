@@ -4,7 +4,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
-from ..backends import is_provider_recoverable_error, is_provider_transient_error
+from ..backends import (
+    is_provider_recoverable_error,
+    is_provider_stream_timeout_error,
+    is_provider_transient_error,
+)
 from ..concurrency.interrupt import is_interrupted, wait_interruptibly
 from ..concurrency.retry import apply_retry_jitter
 from ..settings.runtime_guard_config import RuntimeGuardPolicy, runtime_guard_data
@@ -87,12 +91,15 @@ def _raise_if_interrupted() -> None:
 #   接手压缩,unknown 保守快速浮出)。模型全程无感。
 # 函数用途: 这个错值不值得原地重试?值得就放行去等待,不值得立刻抛给上层。
 def _raise_unless_provider_transient(exc: Exception) -> None:
-    if is_provider_transient_error(exc):
+    # 会话运行时 对 dropped/idle response stream 重发同一 sampling request，并在 UI
+    # 展示 reconnect 进度。这里仅放行结构化 first_event/stream_idle；工具尚未
+    # 执行，重放的是模型采样而不是副作用。wall_clock/provider_declared/legacy
+    # 仍由生成层的一次有界重试收口，避免慢模型永久空转。
+    if is_provider_transient_error(exc) or is_provider_stream_timeout_error(exc):
         return
-    # typed provider 错误语义明确,只信 is_provider_transient_error,不再用文本
+    # typed provider 错误语义明确,只信上面的结构化判定,不再用文本
     # 分类器二次放大重试面(CI 回归实锤:ProviderTimeoutError 的 str 含 "timeout",
-    # 会被分类器误判 TIMEOUT/retryable 进入重试循环——但 my-agent 的 request_timeout
-    # 是整个模型回合的超时,重试每次都会同样超时,只会拖垮续航;原设计就是快速失败)。
+    # 会把 wall_clock/provider_declared 误判 TIMEOUT/retryable 进入重试循环)。
     # 文本分类器只兜"没有 typed 形态的裸异常"(如裸 RuntimeError("429"))。
     if is_provider_recoverable_error(exc):
         raise exc

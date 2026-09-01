@@ -134,6 +134,48 @@ def test_escape_stops_focused_child_and_ctrl_g_back_only_navigates(monkeypatch) 
     assert stopped == ["child-a"]
 
 
+def test_empty_enter_expands_selected_goal_without_submitting_prompt(monkeypatch) -> None:
+    root = TuiRuntime("goal-enter-input")
+    navigation = TuiAgentNavigationState(root)
+    navigation.update_goal_rows(
+        [
+            {
+                "goal_id": "goal-one",
+                "name": "持续验证",
+                "objective": "验证 TUI",
+                "status": "active",
+            }
+        ]
+    )
+    assert navigation.move_selection(1) is True
+    submitted: list[bool] = []
+    monkeypatch.setattr(
+        tui_keybindings,
+        "_submit_input_area",
+        lambda _event, _params: submitted.append(True),
+    )
+    invalidated: list[bool] = []
+    params = SimpleNamespace(
+        input_area=TextArea(multiline=True),
+        agent_navigation=navigation,
+        exit_armed_at_ref=[0.0],
+        eof_armed_at_ref=[0.0],
+        escape_armed_at_ref=[0.0],
+        escape_armed_text_ref=[""],
+    )
+    event = SimpleNamespace(
+        app=SimpleNamespace(invalidate=lambda: invalidated.append(True)),
+    )
+
+    tui_keybindings._handle_enter_keybinding(event, params)
+
+    assert submitted == []
+    assert invalidated == [True]
+    snapshot = navigation.snapshot()
+    assert snapshot.active_run_id == ""
+    assert snapshot.expanded_goal_id == "goal:goal-one"
+
+
 def test_escape_targets_active_manual_compact_control_message() -> None:
     runtime = TuiRuntime("manual-compact-escape")
     runtime.publish_manual_compact_started("compact-control-1")
@@ -556,6 +598,39 @@ def test_gateway_btw_enters_durable_control_outbox_with_exact_turn() -> None:
     assert [(item.message_id, item.text) for item in pending] == [
         (entry.message_id, "先检查现有结果")
     ]
+
+
+def test_gateway_goal_command_is_visible_only_after_durable_enqueue() -> None:
+    runtime = TuiRuntime("control-goal-visible")
+    captured: list[object] = []
+
+    class Reconciler:
+        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+            captured.append(entry)
+            assert on_persisted_before_dispatch is not None
+            on_persisted_before_dispatch(entry)
+
+    params = SimpleNamespace(
+        use_gateway=True,
+        state_lock=threading.Lock(),
+        is_running_ref=[False],
+        running_request_id_ref=[""],
+        tui_runtime=runtime,
+        control_operation_reconciler=Reconciler(),
+    )
+
+    command = "/goal 1d 底座验证 验证所有 TUI 交互"
+    assert tui_keybindings._tui_submit_control_operation(params, command)
+    assert captured[0].command_kind == "goal"
+    snapshot = runtime.store.snapshot()
+    assert [
+        block.text for block in snapshot.stable_blocks if block.role == "user"
+    ] == [command]
+    assert snapshot.queued_inputs == ()
+    assert snapshot.pending_steers == ()
+
+    # 同一持久消息的回调重放只保留一条显示块，不能重复执行或刷屏。
+    assert runtime.publish_control_command_input(captured[0].message_id, command) is False
 
 
 def test_expand_parser_accepts_documented_explicit_last() -> None:

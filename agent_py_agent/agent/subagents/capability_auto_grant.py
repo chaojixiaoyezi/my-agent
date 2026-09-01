@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..tooling.write_boundary import WRITE_TOOL_NAMES, WRITE_TOOL_ORDER
+from ..tooling.write_boundary import WRITE_TOOL_NAMES
 from .capability_scope import (
     _delete_only_request,
     grant_command_allowlist,
@@ -31,10 +31,6 @@ from .services.lifecycle import RecordCapabilityGrantParams
 ROUTINE_GRANT_TOOLS = frozenset(
     {"run_command", *WRITE_TOOL_NAMES, "read_file", "list_files", "search_text", "search"}
 )
-# LLM: Routine write grants must reuse the canonical ordered mutation tools so
-# child snapshots never receive a different editor set from the write boundary.
-# 常量用途: 规定自动授权时文件写工具的稳定顺序，并和执行围栏保持同一成员集合。
-_WRITE_TOOLS = WRITE_TOOL_ORDER
 _SHELL_HINTS = frozenset({"shell", "controlled_exec"})
 _NON_ROUTINE_CAPABILITY_TYPES = frozenset({"mcp", "network", "skill"})
 
@@ -69,11 +65,11 @@ def assess_routine_capability_request(
     tools = list(requested_tools)
     if commands or _shell_capability_requested(request):
         tools = _merge_unique(tools, ["run_command"])
-    if requested_paths or any(tool in _WRITE_TOOLS for tool in tools):
-        # 与 resolve_capability_requests._mark_grant 同款语义:给了路径围栏就是要在里面
-        # 读写,写工具必须并入,否则 path_scope 在运行时不生效(runner_context_service
-        # ._granted_filesystem_write_roots 只认带写工具的 grant)。
-        tools = _merge_unique(tools, list(_WRITE_TOOLS))
+    # path_scope 同时可用于 shell cwd、命令目标或只读范围，不能反向推导出文件写
+    # 能力。grant 只保留申请中明确列出的工具；runner_context_service 会在 grant
+    # 真正包含任一 WRITE_TOOL_NAMES 成员时才把 path_scope 投影成写根。这样申请
+    # run_command 不会旁生 write_file/edit_file/apply_patch，具体工具审批也无法被
+    # 未申请的编辑器绕过。
     return RoutineGrantAssessment(
         eligible=True,
         tools=tools,

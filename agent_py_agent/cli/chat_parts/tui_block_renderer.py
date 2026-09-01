@@ -207,6 +207,7 @@ class TuiRenderContext:
     focused_agent_name: str = "main"
     focused_agent_status: str = ""
     selected_agent_run_id: str = ""
+    expanded_goal_id: str = ""
     agent_view_depth: int = 0
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
@@ -264,6 +265,11 @@ class TuiRenderContext:
             self,
             "selected_agent_run_id",
             str(self.selected_agent_run_id or "").strip(),
+        )
+        object.__setattr__(
+            self,
+            "expanded_goal_id",
+            str(self.expanded_goal_id or "").strip(),
         )
         object.__setattr__(
             self,
@@ -351,6 +357,7 @@ def tui_render_context_key(
         context.focused_agent_name,
         context.focused_agent_status,
         context.selected_agent_run_id,
+        context.expanded_goal_id,
         context.agent_view_depth,
         connection_animation,
         thinking_animation,
@@ -700,30 +707,47 @@ def _render_background_activity(
     return (_truncate_formatted_line(tuple(fragments), context.width),)
 
 
-# LLM: Child rows share the same canonical background projection as main but
-# render in 终端交互's coordinator region below the composer. The bounded
-# viewport must always include the exact run selected by navigation so the
-# highlight and Enter target cannot diverge.
-# 函数用途: 在输入框下方绘制直属子代理列表，并让方向键选中的行始终留在八行可见窗口内。
+# LLM: Exact Goal projections precede direct-child rows in 终端交互's
+# coordinator region below the composer. The bounded viewport must always
+# include the exact navigation id selected by the input layer so highlight and
+# Enter target cannot diverge; neither row kind gains lifecycle authority here.
+# 函数用途: 在输入框下方绘制 Goal 和直属子代理，并让方向键选中的项目始终留在八行可见窗口内。
 def _render_subagent_panel(
     block: TuiBlock,
     context: TuiRenderContext,
 ) -> tuple[FormattedLine, ...]:
+    goals = _goal_activity_rows(block.metadata.get("goals"))
     rows = _subagent_activity_rows(block.metadata.get("subagents"))
     hidden = max(0, int(block.metadata.get("hidden_subagent_count") or 0))
     lines: list[FormattedLine] = []
-    visible_rows = _visible_subagent_activity_rows(
-        rows,
-        selected_run_id=context.selected_agent_run_id,
+    entries = [
+        {**goal, "_panel_kind": "goal", "_selection_id": _goal_selection_id(goal)}
+        for goal in goals
+    ]
+    entries.extend(
+        {**row, "_panel_kind": "subagent", "_selection_id": str(row.get("run_id") or "")}
+        for row in rows
+    )
+    visible_entries = _visible_agent_activity_entries(
+        entries,
+        selected_id=context.selected_agent_run_id,
         limit=8,
     )
-    for row in visible_rows:
-        lines.extend(_render_subagent_activity_row(row, context))
-    hidden += max(0, len(rows) - len(visible_rows))
+    for entry in visible_entries:
+        if entry.get("_panel_kind") == "goal":
+            lines.extend(_render_goal_activity_row(entry, context))
+        else:
+            lines.extend(_render_subagent_activity_row(entry, context))
+    hidden += max(0, len(entries) - len(visible_entries))
     if hidden:
+        hidden_label = (
+            f"还有 {hidden} 项未展开"
+            if goals
+            else f"还有 {hidden} 个子代理未展开"
+        )
         lines.extend(
             wrap_fragments(
-                (("class:tui-muted", f"还有 {hidden} 个子代理未展开"),),
+                (("class:tui-muted", hidden_label),),
                 width=context.width,
                 first_prefix=(("class:tui-muted", "    … "),),
                 continuation_prefix=(("class:tui-muted", "      "),),
@@ -732,34 +756,185 @@ def _render_subagent_panel(
     return tuple(lines)
 
 
-# LLM: This is a pure presentation window over the canonical ordered roster.
+# LLM: This is a pure presentation window over the canonical Goal-then-child
+# roster. Goal and run ids already occupy disjoint namespaces upstream.
 # It never changes selection or run order; when selection falls past the first
-# page, only the minimum leading rows are displaced to reveal that exact run.
-# 函数用途: 裁出固定行数的子代理窗口，避免游标已经移到隐藏项而屏幕仍停在前几项。
-def _visible_subagent_activity_rows(
-    rows: list[dict[str, object]],
+# page, only the minimum leading rows are displaced to reveal that exact item.
+# 函数用途: 裁出固定行数的 Goal/子代理窗口，避免游标已经移到隐藏项而屏幕仍停在前几项。
+def _visible_agent_activity_entries(
+    entries: list[dict[str, object]],
     *,
-    selected_run_id: str,
+    selected_id: str,
     limit: int,
 ) -> list[dict[str, object]]:
     visible_limit = max(1, int(limit or 1))
-    if len(rows) <= visible_limit:
-        return rows
-    selected = str(selected_run_id or "").strip()
+    if len(entries) <= visible_limit:
+        return entries
+    selected = str(selected_id or "").strip()
     selected_index = next(
         (
             index
-            for index, row in enumerate(rows)
-            if str(row.get("run_id") or "").strip() == selected
+            for index, entry in enumerate(entries)
+            if str(entry.get("_selection_id") or "").strip() == selected
         ),
         -1,
     )
     start = (
-        max(0, min(selected_index - visible_limit + 1, len(rows) - visible_limit))
+        max(0, min(selected_index - visible_limit + 1, len(entries) - visible_limit))
         if selected_index >= visible_limit
         else 0
     )
-    return rows[start : start + visible_limit]
+    return entries[start : start + visible_limit]
+
+
+# LLM: Goal metadata already passed two scalar whitelists; this final bounded
+# shape check keeps malformed replay input out of the fixed panel.
+# 函数用途: 从 Working block 中安全取出可选择的 Goal 展示行。
+def _goal_activity_rows(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [
+        dict(item)
+        for item in value[:16]
+        if isinstance(item, dict) and str(item.get("goal_id") or "").strip()
+    ]
+
+
+# LLM: The display namespace must match TuiAgentNavigationState exactly; it is
+# not accepted by any Gateway command or child endpoint.
+# 函数用途: 为 Goal 行生成只供界面选择使用的稳定 ID。
+def _goal_selection_id(row: dict[str, object]) -> str:
+    return f"goal:{str(row.get('goal_id') or '').strip()}"
+
+
+# LLM: Goal status, usage and objective are projections of exact ThreadGoal
+# fields. Rendering never parses the objective or changes Goal lifecycle.
+# 函数用途: 绘制固定 Goal 状态行；选中并回车后在原位展开完整目标与用量。
+def _render_goal_activity_row(
+    row: dict[str, object],
+    context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    status = str(row.get("status") or "").strip().lower()
+    icon, label, style = _goal_status_display(status, context)
+    selection_id = _goal_selection_id(row)
+    selected = selection_id == context.selected_agent_run_id
+    expanded = selection_id == context.expanded_goal_id
+    name = sanitize_terminal_text(str(row.get("name") or "").strip()) or "持续目标"
+    objective = sanitize_terminal_text(" ".join(str(row.get("objective") or "").split()))
+    elapsed = max(0, _safe_render_int(row.get("time_used_seconds")))
+    tokens_used = max(0, _safe_render_int(row.get("tokens_used")))
+    token_budget = max(0, _safe_render_int(row.get("token_budget")))
+    suffix: list[Fragment] = [
+        ("class:tui-muted", f" · {_format_activity_duration(elapsed)}"),
+    ]
+    if token_budget > 0:
+        suffix.append(
+            (
+                "class:tui-muted",
+                " · "
+                f"{_format_compact_number(tokens_used)}/{_format_compact_number(token_budget)} tokens",
+            )
+        )
+    row_prefix = "› " if selected else "  "
+    fixed: tuple[Fragment, ...] = (
+        ("class:tui-agent-selected" if selected else "class:tui-muted", row_prefix),
+        (style, f"{icon} Goal "),
+        ("class:tui-agent-selected" if selected else "class:tui-strong", name),
+        (style, f" · {label}"),
+        *suffix,
+    )
+    objective_width = max(0, context.width - display_width_fragments(fixed) - 3)
+    fragments: list[Fragment] = [
+        ("class:tui-agent-selected" if selected else "class:tui-muted", row_prefix),
+        (style, f"{icon} Goal "),
+        ("class:tui-agent-selected" if selected else "class:tui-strong", name),
+        (style, f" · {label}"),
+    ]
+    if objective and objective_width > 0:
+        fragments.append(("class:tui-muted", f" · {_truncate_text(objective, objective_width)}"))
+    fragments.extend(suffix)
+    lines: list[FormattedLine] = [
+        _truncate_formatted_line(tuple(fragments), context.width)
+    ]
+    if expanded:
+        lines.extend(_render_goal_activity_detail(row, context))
+    return tuple(lines)
+
+
+# LLM: Expanded Goal detail remains a read-only rendering of the selected exact
+# row and never exposes internal task ids, paths, policies, or wake records.
+# 函数用途: 在 Goal 行下展开完整目标、状态、用量和可用控制命令提示。
+def _render_goal_activity_detail(
+    row: dict[str, object],
+    context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    objective = sanitize_terminal_text(str(row.get("objective") or "").strip())
+    status = str(row.get("status") or "").strip().lower()
+    _icon, label, _style = _goal_status_display(status, context)
+    elapsed = max(0, _safe_render_int(row.get("time_used_seconds")))
+    tokens_used = max(0, _safe_render_int(row.get("tokens_used")))
+    token_budget = max(0, _safe_render_int(row.get("token_budget")))
+    duration_seconds = max(0, _safe_render_int(row.get("duration_seconds")))
+    usage = f"状态：{label} · 已运行 {_format_activity_duration(elapsed)}"
+    if tokens_used or token_budget:
+        usage += f" · token {_format_compact_number(tokens_used)}"
+        if token_budget:
+            usage += f"/{_format_compact_number(token_budget)}"
+    if duration_seconds:
+        usage += f" · 时限 {_format_activity_duration(duration_seconds)}"
+    lines: list[FormattedLine] = []
+    lines.extend(
+        wrap_fragments(
+            (("class:tui-muted", objective or "（目标内容为空）"),),
+            width=context.width,
+            first_prefix=(("class:tui-muted", "    目标："),),
+            continuation_prefix=(("class:tui-muted", "          "),),
+        )
+    )
+    lines.extend(
+        wrap_fragments(
+            (("class:tui-muted", usage),),
+            width=context.width,
+            first_prefix=(("class:tui-muted", "    "),),
+            continuation_prefix=(("class:tui-muted", "    "),),
+        )
+    )
+    lines.extend(
+        wrap_fragments(
+            (("class:tui-muted", "/goal pause · /goal resume · /goal clear"),),
+            width=context.width,
+            first_prefix=(("class:tui-muted", "    控制："),),
+            continuation_prefix=(("class:tui-muted", "          "),),
+        )
+    )
+    return tuple(lines)
+
+
+# LLM: Goal status styles are a pure mapping of the closed ThreadGoal enum.
+# Unknown values stay visibly unknown and never acquire active semantics.
+# 函数用途: 把 Goal 结构化状态映射为图标、中文标签和颜色。
+def _goal_status_display(
+    status: str,
+    context: TuiRenderContext,
+) -> tuple[str, str, str]:
+    normalized = str(status or "").strip().lower()
+    if normalized == "active":
+        return (
+            SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)],
+            "进行中",
+            "class:tui-subagent-running",
+        )
+    if normalized == "paused":
+        return "Ⅱ", "已暂停", "class:tui-subagent-pending"
+    if normalized == "blocked":
+        return "!", "受阻", "class:tui-subagent-blocked"
+    if normalized == "usage_limited":
+        return "!", "额度受限", "class:tui-subagent-blocked"
+    if normalized == "budget_limited":
+        return "!", "预算已到", "class:tui-subagent-blocked"
+    if normalized == "complete":
+        return "✓", "已完成", "class:tui-subagent-done"
+    return "?", "状态未知", "class:tui-muted"
 
 
 # LLM: Rows are already whitelisted by runtime/reducer; this final shape check
@@ -1290,28 +1465,20 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
     if not detail:
         return ()
     title = _thinking_title(block)
-    # 终端交互 对齐：completed 思考内容默认展开（灰色常显），超长折叠提示。
+    # 对齐 终端交互 的 hidePastThinking：流式思考结束后只保留灰色摘要行；
+    # Ctrl+O 进入 detailed transcript 时才恢复完整正文。折叠不删除 typed block。
     lines: list[FormattedLine] = list(
         wrap_fragments(
-            (("class:tui-thinking", title),),
+            (("class:tui-thinking", f"{title}（Ctrl+O 展开）"),),
             width=context.width,
             first_prefix=(("class:tui-thinking", "∴ "),),
             continuation_prefix=(("class:tui-thinking", "  "),),
         )
     )
+    if not context.detailed_transcript:
+        return tuple(lines)
     content_lines = _thinking_content_lines(detail, context, closed=True)
-    if len(content_lines) > _THINKING_LIVE_MAX_LINES and not context.detailed_transcript:
-        lines.extend(content_lines[:_THINKING_LIVE_MAX_LINES])
-        lines.append(
-            (
-                (
-                    "class:tui-thinking",
-                    f"  … 思考内容共 {len(content_lines)} 行，Ctrl+O 查看全部",
-                ),
-            )
-        )
-    else:
-        lines.extend(content_lines)
+    lines.extend(content_lines)
     return tuple(lines)
 
 
@@ -2311,9 +2478,10 @@ def _unrepresented_active_child_count(
     return count
 
 
-# LLM: The coordinator panel consumes only child rows from the removable
-# background activity block and stays outside transcript/history like 终端交互.
-# 函数用途: 生成输入框下方的直属子代理固定面板；没有子代理时不占高度。
+# LLM: The coordinator panel consumes exact Goal and child rows from the
+# removable background activity block and stays outside transcript/history like
+# 终端交互. An active or paused Goal keeps the panel visible without a task.
+# 函数用途: 生成输入框下方的 Goal/直属子代理固定面板；两者都没有时不占高度。
 def _render_fixed_agent_panel(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -2622,7 +2790,13 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
             text = f"  Ctrl+G 返回 · Esc 停止 · {history_hint}"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if context.selected_agent_run_id:
-        text = f"  ↑↓ 选择 · Enter 查看 · {history_hint}"
+        if context.selected_agent_run_id.startswith("goal:"):
+            action = "Enter 收起 Goal" if context.expanded_goal_id else "Enter 查看 Goal"
+            text = f"  ↑↓ 选择 · {action} · {history_hint}"
+            if context.expanded_goal_id:
+                text = f"  Ctrl+G 收起 Goal · ↑↓ 选择 · {history_hint}"
+        else:
+            text = f"  ↑↓ 选择 · Enter 查看 · {history_hint}"
         if snapshot.status.phase in {"running", "interrupting"}:
             text += " · Esc 停止主代理"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)

@@ -21,6 +21,10 @@ from ...tooling.operation_verification import (
     public_operation_verification,
 )
 from .._runtime_params import ToolLoopExecuteParams
+from ..runtime.guidance import (
+    active_turn_user_reply_required,
+    satisfy_active_turn_user_reply,
+)
 from ..runtime.task_identity import durable_task_id
 from .natural_user_reply import queue_natural_user_reply
 
@@ -51,8 +55,19 @@ def completion_response_after_tool_round(
 ) -> ModelResponse | None:
     if transition_response := _context_refresh_transition_response(request):
         return transition_response
+    visible_text = bool(str(getattr(request.response, "text", "") or "").strip())
+    if visible_text:
+        # Tool start is a real public commentary boundary in both Gateway and
+        # child transcript sinks, so this model-authored segment satisfies the
+        # consumed steer even though the task continues to execute tools.
+        satisfy_active_turn_user_reply(request.params)
     successful_tools = list(request.params.executed_tools or [])[request.before_executed_count :]
     if "create_subagents" in successful_tools:
+        if active_turn_user_reply_required(request.params):
+            # A user steer that immediately caused another child spawn still
+            # needs one ordinary reply. Continue the same bounded model loop;
+            # do not settle the parent wait with an empty assistant message.
+            return None
         if wait_response := task_local_wait_response_for_open_subagents(
             request.agent,
             request.params,
@@ -75,9 +90,10 @@ def completion_response_after_tool_round(
 
 
 # LLM: A task-local parent with active direct children cannot close as DONE.
-# The host stores an exact-id wait marker and returns an interrupted slice; the
-# next model turn is opened only by a child event or explicit user guidance.
-# 函数用途: 子代理还有直属孩子运行时，让它安全结束当前工作片并等事件。
+# The host stores an exact-id wait marker and returns an interrupted slice; any
+# model-authored text from this slice must survive as the visible interim reply.
+# The next model turn is opened only by a child event or explicit user guidance.
+# 函数用途: 子代理还有直属孩子运行时，保留本轮回复后安全结束工作片并等事件。
 def task_local_wait_response_for_open_subagents(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -104,7 +120,7 @@ def task_local_wait_response_for_open_subagents(
         or "tool_loop"
     )
     return ModelResponse(
-        text="",
+        text=str(getattr(response, "text", "") or ""),
         backend=backend,
         runtime_status="unfinished",
         runtime_reason="SUBAGENTS_ACTIVE",
