@@ -2663,3 +2663,25 @@
 - 后台 child-lifecycle 续轮默认保留 `skill_search`，使同一任务前台已经选择的 Skill 能在后续整合轮继续读取；
   显式 owner/task policy 仍可移除该工具。
 - 本地 focused 已通过，真实 MiniMax-M2.7 TUI 的 fresh 目录和后台唤醒复验待 R114p 部署后完成。
+
+## 2026-09-01 active turn 重排与 RuntimeDB unknown 冲突修复
+
+- R129 在 `.10` 唯一 Gateway 的真实 TUI 中证明：processing 请求、conversation runtime、任务目录与 15 条
+  工具归档都能跨进程重排，但启动调和会先把死亡进程持有的主 run/attempt 标为 unknown；第二次 worker
+  随后被 generic authority hard gate 拒绝，不能只凭 `requeued_requests=1` 宣称恢复成功。
+- Gateway 现在先按 `gateway_active_turn_recovery.v1` 恢复 exact request 的 carried tool records，再调用
+  RuntimeDB 的结构化窄口。RuntimeDB 另行要求 exact task id + run/request id、current unknown attempt、全部
+  已启动操作为 SUCCEEDED/FAILED 且有同 operation id/tool/status 的耐久记录、CANCELLED 从未进入 handler，
+  并且该 attempt 没有 MUTATING/DIRTY resource。
+- 全部成立时旧 attempt 记为 recovered、unknown run 回到 created、执行锁释放；普通 agent authority 随后
+  创建新 generation 并把 carried records 交还模型。CLAIMED 且 handler_started_at=0 的占位在同一事务取消。
+  缺身份但也没有 run/工具记录表示崩溃发生在 runtime 建链前，可按原请求首次进入；已有工具记录却查无
+  exact run、记录缺失/冲突、执行中/unknown 工具或脏资源则继续 fail closed。
+- 通用 `recover_attempt_unknown` 的人工出口没有改成自动；后台 wake、child 与普通 CLI unknown 也不会借用
+  该窄口。
+- R130 已在 `.10` 唯一 MiniMax-M2.7 Gateway 的 `ma-r130-110-main-active-restart` 完成第一安全点。请求
+  `gwreq-1788301131-52a459b2470f43b99c5e73c7e26b79c0` 的 generation 1 在 21 个工具操作全部终态后被
+  SIGTERM 打断；新 Gateway 写入 `attempt_recovered/recovery_mode=recorded_active_turn`，同一主 run 创建
+  generation 2，只新增 5 个后续工具操作并自然 done。18 个 unittest、三组样例和两种报告都在原 owner task
+  root，TUI 直接显示 final，零新任务和零已结算写入重放。等待直属 child 与 coordinator 等待孙代理仍须分别
+  真 TUI 复验。

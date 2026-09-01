@@ -1028,3 +1028,20 @@ scoped Agent 的 effective owner home 是 tasks、Memory、Persona、sessions、
 Gateway 内使用已绑定 owner 的 daemon dispatcher；原因是旧 subprocess 协议没有序列化请求级 owner，直接
 复用会静默退回 `local/main`。daemon 只持有运行执行体，canonical task/attempt/lease/recovery 继续落该 owner
 磁盘，Gateway 重启由统一恢复链接管。该规则按结构化 provider/kind/id 判定，不按 provider 名称粗分。
+
+## Active-turn restart recovery boundary
+
+`gateway_parts/recovery.py` 只负责证明旧 processing lease 的执行者已失效，并把同一 request id 写回 pending；
+`request_execution.py` 只在该请求携带匹配的 `gateway_active_turn_recovery.v1` 时读取 owner-local tool index。
+这两个事实都不能单独释放 RuntimeDB unknown。
+
+最终恢复权威在 `RuntimeRepository.recover_recorded_active_turn_attempt`：调用方必须给出 request 文件中持久化的
+exact task id、同值 run/request id，以及 carried archive 中的 operation id/status/tool 投影。仓储在一个 SQLite
+事务里重新读取 root main/current attempt、tool operations 和 resource mutations；只有所有已启动工具均有
+确定终态及匹配记录、资源稳定时，才执行 unknown→recovered、run unknown→created、exact exec lock release。
+generic `create_attempt` 和 `recover_attempt_unknown` 不感知 transport marker，继续保持普通 unknown 人工恢复。
+
+模型输出、异常字符串、PID 年龄、目录内容和“看起来已完成”都不是恢复证据。恢复后新 generation 仍走普通
+`_bind_main_agent_authority`；旧操作不会被 RuntimeDB 重开，模型只从 carried records 获得已做事实。任何
+EXECUTING/UNKNOWN、已启动但未 settle、缺 archive、operation 字段冲突或 DIRTY/MUTATING 资源都返回结构化
+blocked，由 Gateway 停止该 request，避免重复副作用。

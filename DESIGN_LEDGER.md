@@ -3292,3 +3292,28 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 唯一 Gateway 部署后，fresh owner u310/u311 并发各完成 3 次真实写入，六条 operation 均为 `SUCCEEDED`；
   各自 `USER.md` 只含自己的识别码、回答风格和界面主色。随后同 owner 新 TUI 在不调用读取工具的前提下
   准确召回各自三项且未混入对方事实，真实门通过。
+
+## 2026-09-01 Gateway 同一 active turn 重启恢复的 unknown 窄口【状态：R130 主代理活跃点真 TUI 通过】
+
+- 对照 会话运行时 `会话运行时-rs/core/src/agent/control/spawn.rs` 与
+  `app-server/src/request_processors/thread_lifecycle.rs`：恢复保留原 thread/history/active turn 身份，运行中的
+  turn 与持久历史在恢复响应中按同一 turn id 合并；新的执行片不能把旧执行者不确定的副作用当成没发生。
+- `.10` 唯一 Gateway 的 R129 真 TUI 在主代理已完成 15 个工具动作、第二次 live-tool Compact 刚开始时收到
+  SIGTERM。请求文件按 exact request id 成功重排，工具归档、任务目录、thread/task 绑定均保留；但启动调和先
+  把旧 RuntimeDB run/attempt 标成 `unknown`，第二次执行在 `_bind_main_agent_authority` 直接创建新 attempt，
+  被通用 unknown 硬门正确拒绝。两条单独正确的规则因此互相冲突，请求以 `RuntimeConflictError` 失败。
+- 通用 unknown 合同不放宽：普通 CLI、child、缺失身份、执行中/UNKNOWN 工具、缺耐久结果、DIRTY/MUTATING
+  资源仍必须人工 `recover_attempt_unknown`。唯一自动窄口只接受 Gateway 已写入的
+  `gateway_active_turn_recovery.v1`，并在 RuntimeDB 单事务中同时核对 exact task id + run/request id、current
+  unknown attempt、每个已启动工具的 terminal row 与同 operation id/tool/status 的耐久归档；从未进入 handler
+  的 CLAIMED 可证明无副作用，事务内改为 CANCELLED。
+- 全部核对通过后，旧 attempt 以 `recorded_active_turn` 审计事实转 recovered、unknown run 回到 created、只
+  释放该 attempt 的执行锁；随后普通 authority binding 创建下一 generation。任一不确定项继续 fail closed，
+  不解析异常文案、模型正文、路径或时间猜测，也不重放已结算工具。
+- 本地 focused 已覆盖 exact 成功、缺归档、EXECUTING、task/run 错配、未启动 CLAIMED、DIRTY resource、人工
+  unknown 恢复不回归，以及 Gateway 真实 carried archive 接缝。
+- R130 主代理活跃点在 `.10` 唯一 MiniMax-M2.7 Gateway 上通过：同一 request/thread/task/run 的旧
+  generation 1 已有 21 个 terminal operation，顺序重启后全部按 matching archive 记为 recorded，旧 attempt
+  转 recovered；generation 2 仅完成剩余 5 个操作并自然 done。TUI 直接 final，原 owner task root 内 18 个
+  unittest 和全部报告存在。该结果只证明主代理活跃点；等待直属 child 与 coordinator 等待孙代理仍要逐项
+  重启，不能由本轮外推。

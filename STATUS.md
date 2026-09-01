@@ -1,5 +1,26 @@
 # STATUS
 
+## 2026-09-01 R130 主代理活跃回合跨 Gateway 重启（第一安全点完成）
+
+- 新 wheel SHA-256 `bb42ce82392bc63d6a9ddf1df2415eceb34007f5116972a2317101118769578c` 已原位部署到
+  `/root/.my-agent/runtime-venv-r127`；旧 R127 wheel 以 SHA-256
+  `54c992e9d949ae957e05eb4afba5a06a2672b66c34a271f59e5c94d7f3db22cf` 保存在
+  `/root/deploy-r130-active-recovery/` 作为回滚证据。升级和重启期间始终只允许一个 8420 监听者；当前唯一
+  Gateway 为 `ma-gateway-r130-active-recovery-resume-110` / PID `166634`，模型欢迎页为 MiniMax-M2.7。
+- fresh 真 TUI `ma-r130-110-main-active-restart` 只输入一次普通中文中型任务。请求
+  `gwreq-1788301131-52a459b2470f43b99c5e73c7e26b79c0` 在主代理持续写文件、旧 generation 已结算
+  21 个工具操作时顺序重启唯一 Gateway；任务、thread、run 与 owner task root 均未变化。
+- 旧 `attempt-1788301132-0753fc22` 由启动调和写成 unknown 后，经 exact active-turn marker、21 条 terminal
+  RuntimeDB row 和 matching durable archive、稳定资源事实核对，写入
+  `attempt_recovered/recovery_mode=recorded_active_turn` 并转为 recovered。新
+  `attempt-1788301405-db3814d2` 为 generation 2，只执行 5 个后续工具操作后自然 done；主 run 同一
+  `agentrun-1788301132-e4c40522`，没有另建任务或重放已完成写入。
+- TUI 最终直接显示完整报告；18 个 unittest 全通过，三组 JSONL 样例、JSON/Markdown 报告和源代码均位于
+  `/root/.my-agent/owners/local/main/tasks/2026-09-02/root-报告/r130-main-restart`，未写到 `/root` 或仓库。
+  第一安全点通过不代替等待直属 child 与 coordinator 等待孙代理的后续重启门。
+- 同轮另发现独立底座问题：pytest capture 打开 `/dev/null` 时收到 `PermissionError`，模型改用 unittest 才
+  完成验证。该问题不影响本轮重启续接结论，但已进入 ROADMAP；不得把模型绕行当成 sandbox 已修复。
+
 ## 2026-09-01 R124--R128 capability 父级工具上限与独立 ToolCall 审批（完成）
 
 - fresh 失败样本 `ma-r124-110-main-capability-approval` 中，child
@@ -3036,3 +3057,16 @@ my-agent scenario-test
 - 首轮监督事件为 4 条复活、21 条父会话关闭取消、5 条失联 runner 回收；3 条 RUNNING 随后自然 DONE，
   非终态总数从旧提示的 25 收敛到 11。连续两次 `status --json` 都返回 9 条近期未收口记录，未触发调度。
 - 本轮未跑全仓 pytest：生产与测试改动远低于 10,000 行，按项目约定只跑直接相关 focused tests。
+
+## 2026-09-01 R129 主代理活跃时重启失败基线与本地修复
+
+- `.10` 保持一个 Gateway、MiniMax-M2.7；TUI `ma-r129-110-main-active-restart` 的普通中型日志工具任务已
+  写入 README、实现、三组样例和 10 个测试。重启发生在第 15 个工具动作已结算、第二次 Compact 开始处。
+- 新 Gateway 成功重排 exact request，`attempts=2`、原 thread/task/path/15 条 carried tool records 全部保留；
+  但旧主 run/attempt 被进程死亡调和为 unknown，第二次 authority binding 因通用 fail-closed 门拒绝，R129
+  以 `RuntimeConflictError` 终止。这一轮是明确失败样本，不算重启恢复通过。
+- 本地候选增加结构化 active-turn 窄口：只在 exact request marker、task/run 双身份、current unknown、全部
+  工具终态与耐久 operation 记录一致、无脏资源时恢复旧 attempt；普通 unknown 仍只允许人工处理。
+- 当前相关五文件 focused 运行到 100% 通过；PyCompile、Ruff、strict code-size（hard=0）已通过。尚未部署，
+  下一步构建 wheel 后用 fresh R130 TUI 再做相同安全点重启，并核对文件摘要、operation 数、attempt generation、
+  Compact、最终回复与单 Gateway 身份。

@@ -53,6 +53,7 @@ from .operations import (
     OP_CLAIMED,
     OP_EXECUTING,
     OP_FAILED,
+    OP_SUCCEEDED,
     OP_UNKNOWN,
     RUN_STATUS_LEGACY_CREATED,
     RuntimeConflictError,
@@ -144,6 +145,190 @@ def _cancel_unstarted_tool_operations(
             "WHERE operation_id = ? AND status = ? AND handler_started_at = 0",
             (OP_CANCELLED, now, result_json, str(row["operation_id"]), OP_CLAIMED),
         )
+
+
+# LLM: Manual and typed active-turn recovery must share this one unknown->recovered CAS.  The
+# caller owns effect verification; this helper only performs the exact current-attempt transition,
+# run repair, lock release and append-only event in the caller's transaction.
+# 函数用途: 在副作用已经由上层结构化核对后，原子恢复当前 unknown 执行轮并释放执行锁。
+def _recover_unknown_attempt_conn(
+    repository: Any,
+    conn: sqlite3.Connection,
+    *,
+    attempt_id: str,
+    operator: str,
+    effect_disposition: str,
+    reason: str,
+    event_facts: dict[str, object] | None = None,
+) -> dict[str, Any]:
+    now = time.time()
+    row = conn.execute(
+        "SELECT aa.agent_run_id, ar.current_attempt_id, ar.status AS run_status "
+        "FROM agent_attempts aa "
+        "JOIN agent_runs ar ON ar.agent_run_id = aa.agent_run_id "
+        "WHERE aa.attempt_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    if row is None:
+        return {"recovered": False, "reason": "no_such_attempt"}
+    if str(row["current_attempt_id"] or "") != str(attempt_id):
+        return {"recovered": False, "reason": "not_current_attempt"}
+    cur = conn.execute(
+        "UPDATE agent_attempts SET status = ?, ended_at = ? "
+        "WHERE attempt_id = ? AND status = ? "
+        "AND EXISTS (SELECT 1 FROM agent_runs ar "
+        "WHERE ar.agent_run_id = agent_attempts.agent_run_id "
+        "AND ar.current_attempt_id = agent_attempts.attempt_id)",
+        (ATTEMPT_STATUS_RECOVERED, now, attempt_id, ATTEMPT_STATUS_UNKNOWN),
+    )
+    if cur.rowcount != 1:
+        return {"recovered": False, "reason": "not_unknown"}
+    agent_run_id = str(row["agent_run_id"] or "")
+    run_status_before = str(row["run_status"] or "")
+    run_status_after = run_status_before
+    if run_status_before == ATTEMPT_STATUS_UNKNOWN:
+        conn.execute(
+            "UPDATE agent_runs SET status = 'created', updated_at = ? "
+            "WHERE agent_run_id = ? AND status = 'unknown'",
+            (now, agent_run_id),
+        )
+        run_status_after = "created"
+    conn.execute(
+        "DELETE FROM resource_locks WHERE canonical_scope = ? AND attempt_id = ?",
+        (exec_lock_scope(agent_run_id), attempt_id),
+    )
+    payload: dict[str, object] = {
+        "status": ATTEMPT_STATUS_RECOVERED,
+        "operator": str(operator or ""),
+        "effect_disposition": effect_disposition,
+        "reason": str(reason or ""),
+        "run_status_before": run_status_before,
+        "run_status_after": run_status_after,
+    }
+    payload.update(dict(event_facts or {}))
+    repository._append_event_conn(
+        conn,
+        event_type="attempt_recovered",
+        attempt_id=attempt_id,
+        agent_run_id=agent_run_id,
+        payload=payload,
+    )
+    return {
+        "recovered": True,
+        "attempt_id": attempt_id,
+        "agent_run_id": agent_run_id,
+        "run_status": run_status_after,
+    }
+
+
+# LLM: Active-turn archive facts are untrusted projections until matched to RuntimeDB rows; keep
+# normalization limited to the two fields used by that comparison and discard empty identities.
+# 函数用途: 规范化同一回合工具归档里的操作 ID、终态和工具名，供事务核对使用。
+def _normalize_recorded_operation_facts(
+    facts_by_id: dict[str, dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    return {
+        str(operation_id or "").strip(): {
+            "status": str((facts or {}).get("status") or "").strip().upper(),
+            "operation_type": str((facts or {}).get("operation_type") or "").strip(),
+        }
+        for operation_id, facts in dict(facts_by_id or {}).items()
+        if str(operation_id or "").strip()
+    }
+
+
+# LLM: Exact task+run equality is the anti-confusion boundary for automatic active-turn recovery;
+# never fall back to the newest task run, thread id, prompt text, or an unrelated main row.
+# 函数用途: 在事务内读取与请求任务和运行 ID 同时匹配的根主代理执行轮。
+def _exact_active_turn_run(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: str,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT ar.agent_run_id, ar.status AS run_status, "
+        "ar.current_attempt_id, aa.status AS attempt_status "
+        "FROM agent_runs ar "
+        "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
+        "JOIN tasks t ON t.task_id = tr.task_id "
+        "LEFT JOIN agent_attempts aa ON aa.attempt_id = ar.current_attempt_id "
+        "WHERE t.task_id = ? AND ar.run_id = ? AND ar.role = 'main' "
+        "AND ar.parent_agent_run_id = '' "
+        "ORDER BY ar.created_at DESC LIMIT 1",
+        (task_id, run_id),
+    ).fetchone()
+
+
+# LLM: A settled database outcome is not enough for model continuation: every started success or
+# failure must also have its exact durable carried record. CLAIMED+never-started is the sole safe
+# omission and is cancelled only after the whole preflight passes.
+# 函数用途: 核对旧执行轮所有工具终态和耐久归档，返回可恢复性与安全取消数量。
+def _active_turn_operation_recovery_report(
+    conn: sqlite3.Connection,
+    attempt_id: str,
+    recorded: dict[str, dict[str, str]],
+) -> dict[str, object]:
+    operations = conn.execute(
+        "SELECT operation_id, operation_type, status, handler_started_at, settled_at "
+        "FROM tool_operations WHERE attempt_id = ? ORDER BY tool_operation_generation",
+        (attempt_id,),
+    ).fetchall()
+    blockers: list[str] = []
+    required: dict[str, tuple[str, str]] = {}
+    unstarted_count = 0
+    for operation in operations:
+        operation_id = str(operation["operation_id"] or "")
+        operation_type = str(operation["operation_type"] or "")
+        status = str(operation["status"] or "").upper()
+        handler_started_at = float(operation["handler_started_at"] or 0)
+        settled_at = float(operation["settled_at"] or 0)
+        if status == OP_CLAIMED and handler_started_at == 0:
+            unstarted_count += 1
+        elif status in {OP_SUCCEEDED, OP_FAILED} and settled_at > 0:
+            required[operation_id] = (status, operation_type)
+        elif not (status == OP_CANCELLED and handler_started_at == 0 and settled_at > 0):
+            blockers.append(operation_id)
+    if blockers:
+        return {
+            "ok": False,
+            "reason": "operation_outcome_uncertain",
+            "blocking_operation_ids": blockers,
+        }
+    missing: list[str] = []
+    mismatched: list[str] = []
+    for operation_id, (status, operation_type) in required.items():
+        fact = recorded.get(operation_id)
+        if fact is None:
+            missing.append(operation_id)
+        elif fact["status"] != status or fact["operation_type"] != operation_type:
+            mismatched.append(operation_id)
+    if missing or mismatched:
+        return {
+            "ok": False,
+            "reason": "operation_record_incomplete",
+            "missing_operation_ids": missing,
+            "mismatched_operation_ids": mismatched,
+        }
+    return {
+        "ok": True,
+        "recorded_operation_count": len(required),
+        "cancelled_unstarted_operation_count": unstarted_count,
+    }
+
+
+# LLM: Mutation state is independent of tool terminality; a DIRTY or MUTATING scope keeps the
+# generic unknown hard stop even when every handler row and archive record otherwise matches.
+# 函数用途: 列出指定旧执行轮仍不稳定的资源修改，空列表才允许自动恢复。
+def _uncertain_attempt_mutation_ids(
+    conn: sqlite3.Connection,
+    attempt_id: str,
+) -> list[str]:
+    rows = conn.execute(
+        "SELECT mutation_id FROM resource_mutations "
+        "WHERE attempt_id = ? AND state != 'STABLE' ORDER BY mutation_id",
+        (attempt_id,),
+    ).fetchall()
+    return [str(item["mutation_id"] or "") for item in rows]
 
 
 # LLM: RuntimeRepository 是 owner runtime.db 的唯一写入口；新增状态前必须区分
@@ -521,6 +706,107 @@ class RuntimeRepository(
                 recovered.append(str(row["agent_run_id"] or ""))
             conn.commit()
         return recovered
+
+    # LLM: This is the only automatic exception to the generic UNKNOWN hard stop.  It accepts
+    # two exact durable identities plus a complete operation-record projection, then proves in
+    # one transaction that no handler outcome or mutation is uncertain.  Never broaden it to a
+    # task-only match, model text, error strings, PID age, or a best-effort archive scan.
+    # 函数用途: 为同一持久 active turn 的崩溃重排核对工具账，全部确定时自动换到新执行轮。
+    def recover_recorded_active_turn_attempt(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        recorded_operation_facts: dict[str, dict[str, str]],
+        operator: str,
+    ) -> dict[str, Any]:
+        """Recover one exact root turn only when every started effect is durable.
+
+        Generic ``unknown`` attempts still require ``recover_attempt_unknown``.
+        This narrower path is authorized only by an already validated active-turn
+        recovery marker at the transport layer. RuntimeDB independently requires
+        the exact task+run pair, the current unknown attempt, terminal tool rows,
+        matching durable operation records, and no MUTATING/DIRTY resource.
+        """
+
+        selected_task_id = str(task_id or "").strip()
+        selected_run_id = str(run_id or "").strip()
+        if not selected_run_id:
+            return {"recovered": False, "status": "blocked", "reason": "identity_missing"}
+        recorded = _normalize_recorded_operation_facts(recorded_operation_facts)
+        with self.transaction() as conn:
+            if not selected_task_id:
+                exists = conn.execute(
+                    "SELECT 1 FROM agent_runs WHERE run_id = ? LIMIT 1",
+                    (selected_run_id,),
+                ).fetchone()
+                return {
+                    "recovered": False,
+                    "status": "blocked" if exists is not None else "absent",
+                    "reason": "identity_missing" if exists is not None else "no_exact_run",
+                }
+            row = _exact_active_turn_run(conn, selected_task_id, selected_run_id)
+            if row is None:
+                return {"recovered": False, "status": "absent", "reason": "no_exact_run"}
+            attempt_id = str(row["current_attempt_id"] or "")
+            attempt_status = str(row["attempt_status"] or "")
+            recovery_reason = _main_agent_recovery_reason(
+                str(row["run_status"] or ""),
+                attempt_status,
+            )
+            if attempt_status != ATTEMPT_STATUS_UNKNOWN:
+                not_required = not recovery_reason and attempt_status in _ATTEMPT_TERMINAL_STATUSES
+                return {
+                    "recovered": False,
+                    "status": "not_required" if not_required else "blocked",
+                    "reason": "attempt_already_terminal" if not_required else (
+                        recovery_reason or "attempt_not_unknown"
+                    ),
+                    "attempt_id": attempt_id,
+                }
+            operation_report = _active_turn_operation_recovery_report(
+                conn,
+                attempt_id,
+                recorded,
+            )
+            if operation_report.get("ok") is not True:
+                return {
+                    "recovered": False,
+                    "status": "blocked",
+                    "attempt_id": attempt_id,
+                    **operation_report,
+                }
+            mutation_ids = _uncertain_attempt_mutation_ids(conn, attempt_id)
+            if mutation_ids:
+                return {
+                    "recovered": False,
+                    "status": "blocked",
+                    "reason": "resource_state_uncertain",
+                    "attempt_id": attempt_id,
+                    "blocking_mutation_ids": mutation_ids,
+                }
+            _cancel_unstarted_tool_operations(
+                conn,
+                agent_run_id=str(row["agent_run_id"] or ""),
+                attempt_id=attempt_id,
+                now=time.time(),
+            )
+            recorded_count = int(operation_report["recorded_operation_count"] or 0)
+            result = _recover_unknown_attempt_conn(
+                self,
+                conn,
+                attempt_id=attempt_id,
+                operator=operator,
+                effect_disposition="recorded" if recorded_count else "confirmed_noop",
+                reason="同一 active turn 崩溃重排；已核对全部工具终态与耐久记录",
+                event_facts={
+                    "recovery_mode": "recorded_active_turn",
+                    "task_id": selected_task_id,
+                    "run_id": selected_run_id,
+                    **operation_report,
+                },
+            )
+            return {**result, "status": "recovered" if result.get("recovered") else "blocked"}
 
     # LLM: This upgrade repair trusts only the current_attempt pointer, never PID age or model
     # prose. A non-current pending/running row has no execution authority and must use the same
@@ -2254,63 +2540,15 @@ class RuntimeRepository(
         """
         if str(effect_disposition or "") not in {"confirmed_noop", "recorded", "abandoned"}:
             return {"recovered": False, "reason": "invalid_effect_disposition"}
-        now = time.time()
         with self.transaction() as conn:
-            row = conn.execute(
-                "SELECT aa.agent_run_id, ar.current_attempt_id, ar.status AS run_status "
-                "FROM agent_attempts aa "
-                "JOIN agent_runs ar ON ar.agent_run_id = aa.agent_run_id "
-                "WHERE aa.attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-            if row is None:
-                return {"recovered": False, "reason": "no_such_attempt"}
-            if str(row["current_attempt_id"] or "") != str(attempt_id):
-                return {"recovered": False, "reason": "not_current_attempt"}
-            cur = conn.execute(
-                "UPDATE agent_attempts SET status = ?, ended_at = ? "
-                "WHERE attempt_id = ? AND status = ? "
-                "AND EXISTS (SELECT 1 FROM agent_runs ar "
-                "WHERE ar.agent_run_id = agent_attempts.agent_run_id "
-                "AND ar.current_attempt_id = agent_attempts.attempt_id)",
-                (ATTEMPT_STATUS_RECOVERED, now, attempt_id, ATTEMPT_STATUS_UNKNOWN),
-            )
-            if cur.rowcount != 1:
-                return {"recovered": False, "reason": "not_unknown"}
-            agent_run_id = str(row["agent_run_id"] or "")
-            run_status_before = str(row["run_status"] or "")
-            run_status_after = run_status_before
-            if run_status_before == ATTEMPT_STATUS_UNKNOWN:
-                conn.execute(
-                    "UPDATE agent_runs SET status = 'created', updated_at = ? "
-                    "WHERE agent_run_id = ? AND status = 'unknown'",
-                    (now, agent_run_id),
-                )
-                run_status_after = "created"
-            conn.execute(
-                "DELETE FROM resource_locks WHERE canonical_scope = ? AND attempt_id = ?",
-                (exec_lock_scope(agent_run_id), attempt_id),
-            )
-            self._append_event_conn(
+            return _recover_unknown_attempt_conn(
+                self,
                 conn,
-                event_type="attempt_recovered",
                 attempt_id=attempt_id,
-                agent_run_id=agent_run_id,
-                payload={
-                    "status": ATTEMPT_STATUS_RECOVERED,
-                    "operator": str(operator or ""),
-                    "effect_disposition": effect_disposition,
-                    "reason": str(reason or ""),
-                    "run_status_before": run_status_before,
-                    "run_status_after": run_status_after,
-                },
+                operator=operator,
+                effect_disposition=effect_disposition,
+                reason=reason,
             )
-        return {
-            "recovered": True,
-            "attempt_id": attempt_id,
-            "agent_run_id": agent_run_id,
-            "run_status": run_status_after,
-        }
 
     # -------------------------------------------------------- wake_queue
     # LLM: 调度唤醒字条(2026-08-17 扫描治理 owner 拍板)——"任务自己留的闹钟"。

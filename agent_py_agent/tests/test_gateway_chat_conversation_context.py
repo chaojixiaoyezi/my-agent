@@ -4686,6 +4686,13 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(tmp_path) ->
     )
     request_id = "gw-recover-active-turn"
     root = Path(agent.home_paths.owner_home_dir)
+    authority = agent.subagents.runtime_db.record_run_creation(
+        owner_id="local/main",
+        goal="继续原来的长任务",
+        conversation_task_id=request_id,
+        run_id=request_id,
+        role="main",
+    )
     for tool, call_id, model_parameters in (
         (
             "task_progress",
@@ -4705,6 +4712,17 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(tmp_path) ->
             },
         ),
     ):
+        operation = agent.subagents.runtime_db.create_tool_operation(
+            agent_run_id=authority["agent_run_id"],
+            attempt_id=authority["attempt_id"],
+            operation_type=tool,
+        )
+        agent.subagents.runtime_db.mark_operation_executing(operation["operation_id"])
+        agent.subagents.runtime_db.settle_operation(
+            operation["operation_id"],
+            "SUCCEEDED",
+            {"ok": True},
+        )
         externalize_tool_output_record(
             ExternalizeToolOutputRequest(
                 root=root,
@@ -4719,6 +4737,14 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(tmp_path) ->
                 min_chars=0,
                 parameters=dict(model_parameters),
                 model_parameters=dict(model_parameters),
+                result_envelope={
+                    "tool_operation": {
+                        "operation_id": str(operation["operation_id"]),
+                        "status": "succeeded",
+                        "action": "executed",
+                        "idempotency_scope": "operation",
+                    }
+                },
             )
         )
     externalize_tool_output_record(
@@ -4737,6 +4763,15 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(tmp_path) ->
             model_parameters={"action": "create"},
         )
     )
+    with agent.subagents.runtime_db.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status='unknown', ended_at=? WHERE attempt_id=?",
+            (time.time(), authority["attempt_id"]),
+        )
+        conn.execute(
+            "UPDATE agent_runs SET status='unknown', updated_at=? WHERE agent_run_id=?",
+            (time.time(), authority["agent_run_id"]),
+        )
     request = {
         "id": request_id,
         "prompt": "继续原来的长任务",
@@ -4747,6 +4782,11 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(tmp_path) ->
             "request_id": request_id,
             "dead_execution_attempt_id": "gateway-attempt-old",
             "requeued_at": 10.0,
+        },
+        "conversation_runtime": {
+            "request_id": request_id,
+            "task_id": request_id,
+            "thread_id": "thread-recover-active-turn",
         },
     }
     context = _GatewayAskRunContext(
@@ -4783,6 +4823,12 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(tmp_path) ->
         "call-plan",
         "call-child",
     ]
+    with agent.subagents.runtime_db._runtime_connection() as conn:
+        attempt = conn.execute(
+            "SELECT status FROM agent_attempts WHERE attempt_id=?",
+            (authority["attempt_id"],),
+        ).fetchone()
+    assert attempt["status"] == "recovered"
 
 
 def test_gateway_overflow_without_transcript_commits_active_turn_compact(tmp_path) -> None:

@@ -3203,3 +3203,43 @@ ruff check \
 - 提交前严格 focused gate 扩展到 capability、direct-parent、approval、Gateway control、runtime guidance 与
   background main 共 401 个 selected case：395 passed、6 个仓库既有 expected xfail、0 failed；Ruff、
   PyCompile、doc sync、strict code-size（hard=0）、`git diff --check` 和 clean-package 全部通过。
+
+### R129：主代理活跃回合重启恢复失败基线与候选回归
+
+- 真 TUI：`ma-r129-110-main-active-restart`，唯一 Gateway 从旧 PID 155435 切换到
+  `ma-gateway-r129-restart-110` / PID 160108，模型 MiniMax-M2.7。重启前 15 个 RuntimeDB tool operation 与
+  owner tool index 的 15 条 exact request 归档逐项一致，任务目录已有 6 个文件；重启后请求成功 requeue，
+  但 generic stale-attempt 调和与 main authority binding 冲突，第二次尝试在模型调用前失败。
+- 候选 focused 覆盖：exact task/run + terminal operation + matching archive 自动 recovered；成功/失败工具缺
+  归档、EXECUTING/UNKNOWN、DIRTY mutation、身份错配继续 blocked；CLAIMED 且 handler 从未开始时安全取消；
+  既有人工 `recover_attempt_unknown` 与 generic create-attempt unknown 门保持不变；Gateway carried history 在
+  agent.run 前完成同源核对。
+- 定向命令：
+
+  ```bash
+  python3 -m pytest \
+    agent_py_agent/tests/test_runtime_db_recover_stale.py \
+    agent_py_agent/tests/test_cli_resume_contract.py \
+    agent_py_agent/tests/test_gateway_chat_conversation_context.py \
+    agent_py_agent/tests/test_local_store_gateway_recovery.py \
+    agent_py_agent/tests/test_startup_commands.py \
+    -q --tb=short
+  ```
+
+  结果：全部运行到 100% 通过。真实产品结论仍待新 wheel 的 R130 TUI 重启复验；合同测试不能替代该门。
+
+### R130：主代理活跃点跨 Gateway 原地续接通过
+
+- wheel `bb42ce82392bc63d6a9ddf1df2415eceb34007f5116972a2317101118769578c` 原位部署后，`.10` 始终只有一个
+  8420 监听者；真 TUI 为 `ma-r130-110-main-active-restart`，Gateway 从 PID 165459 顺序切换到 PID 166634，
+  欢迎页明确显示 MiniMax-M2.7。
+- 只输入一次普通中文，要求主代理在自己的 task root 完成中型 JSONL 分析 CLI、三组样例、两种报告和至少
+  12 个 unittest。重启发生在同一 request 正在生成下一次 Write 参数时；重启前已有 21 个 terminal tool
+  operation，重启后 request/thread/task/run 全部保持原 identity。
+- RuntimeDB 事件精确记录 `recovery_mode=recorded_active_turn`、`recorded_operation_count=21`；旧 attempt
+  generation 1 为 recovered，新 attempt generation 2 为 done，并只新增 5 个后续操作。最终 18 个 unittest
+  通过，三组样例和六份报告存在，TUI 自然 final、Gateway pending/processing 均归零。
+- 反证同时保留：同轮 pytest 因受管环境 `/dev/null` 无权限而在 capture 初始化失败；模型切换 unittest 的
+  18/18 只能证明业务产物，不证明 pytest/sandbox 正常。该问题另列底座修复，不污染重启门的正负结论。
+- 当前只勾选“主代理活跃点”；等待直属 child 与 coordinator 等待孙代理仍必须分别使用 fresh 真 TUI 顺序
+  重启唯一 Gateway，不得用本轮主代理样本外推。

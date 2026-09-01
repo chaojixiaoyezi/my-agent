@@ -1334,6 +1334,7 @@ def _run_gateway_turn_with_conversation_compact(
     request = context.request
     current = conversation
     carried_archive_tool_calls = _gateway_recovered_active_turn_tool_calls(context)
+    _recover_gateway_active_turn_authority(context, carried_archive_tool_calls)
     carried_active_turn_user_inputs: list[dict[str, object]] = []
     for _attempt in range(8):
         run_params = _gateway_run_params(
@@ -1487,6 +1488,52 @@ def _gateway_recovered_active_turn_tool_calls(
         raise ConversationPersistenceError(
             "当前回合的工具历史无法可靠恢复，已停止自动重放，请稍后重试"
         ) from exc
+
+
+# LLM: The transport marker only identifies the reclaimed request. RuntimeDB independently proves
+# exact task+run ownership and complete terminal operation records before releasing UNKNOWN. Keep
+# this bridge before agent.run so generic authority binding remains fail-closed for every other case.
+# 函数用途: 在崩溃重排的同一回合重新进入模型前，核对已执行工具并安全释放旧执行轮。
+def _recover_gateway_active_turn_authority(
+    context: _GatewayAskRunContext,
+    carried_archive_tool_calls: list[dict[str, object]],
+) -> None:
+    if not _gateway_request_is_active_turn_recovery(context.request, context.request_id):
+        return
+    repo = getattr(getattr(context.agent, "subagents", None), "runtime_db", None)
+    recover = getattr(repo, "recover_recorded_active_turn_attempt", None)
+    if not callable(recover):
+        return
+    runtime = context.request.get("conversation_runtime")
+    runtime = runtime if isinstance(runtime, dict) else {}
+    task_id = str(runtime.get("task_id") or "").strip()
+    operation_facts: dict[str, dict[str, str]] = {}
+    for record in carried_archive_tool_calls:
+        operation_id = str(record.get("operation_id") or "").strip()
+        if not operation_id:
+            continue
+        facts = {
+            "status": str(record.get("tool_operation_status") or "").strip(),
+            "operation_type": str(record.get("tool") or "").strip(),
+        }
+        previous = operation_facts.get(operation_id)
+        if previous is not None and previous != facts:
+            raise ConversationPersistenceError("当前回合工具记录互相冲突，已停止自动续跑")
+        operation_facts[operation_id] = facts
+    result = recover(
+        task_id=task_id,
+        run_id=context.request_id,
+        recorded_operation_facts=operation_facts,
+        operator="gateway-active-turn-recovery",
+    )
+    recovery_status = str(result.get("status") or "")
+    if recovery_status in {"recovered", "not_required"}:
+        return
+    if recovery_status == "absent" and not carried_archive_tool_calls:
+        return
+    raise ConversationPersistenceError(
+        "当前回合仍有无法确认的工具副作用，已停止自动续跑；请核对运行诊断"
+    )
 
 
 # LLM: Recovery authority is typed metadata written by the reconciler. The narrow legacy branch

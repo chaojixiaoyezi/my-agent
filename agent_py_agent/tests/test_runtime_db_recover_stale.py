@@ -250,3 +250,227 @@ def test_publish_sandbox_tmp_empty_noop(tmp_path):
     (root / "work").mkdir(parents=True)
     assert _publish_sandbox_tmp_outputs(root, run_id="run-test") == []
     assert not (root / "work" / "timeline.jsonl").exists()
+
+
+def _seed_unknown_active_turn(
+    repo: RuntimeRepository,
+    request_id: str,
+    *,
+    operation_status: str = "SUCCEEDED",
+) -> tuple[dict[str, str], str]:
+    """创建一个与 Gateway 请求同身份的 unknown 根执行轮和工具操作。"""
+
+    record = repo.record_run_creation(
+        owner_id="local/main",
+        goal="恢复同一回合",
+        conversation_task_id=request_id,
+        run_id=request_id,
+        role="main",
+    )
+    operation = repo.create_tool_operation(
+        agent_run_id=record["agent_run_id"],
+        attempt_id=record["attempt_id"],
+        operation_type="write_file",
+    )
+    repo.mark_operation_executing(operation["operation_id"])
+    if operation_status in {"SUCCEEDED", "FAILED"}:
+        repo.settle_operation(operation["operation_id"], operation_status, {"ok": True})
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status='unknown', ended_at=? WHERE attempt_id=?",
+            (time.time(), record["attempt_id"]),
+        )
+        conn.execute(
+            "UPDATE agent_runs SET status='unknown', updated_at=? WHERE agent_run_id=?",
+            (time.time(), record["agent_run_id"]),
+        )
+    return record, str(operation["operation_id"])
+
+
+def test_recorded_active_turn_recovery_allows_exact_terminal_operation(tmp_path):
+    repo = _make_repo(tmp_path)
+    request_id = "gw-safe-active-turn"
+    record, operation_id = _seed_unknown_active_turn(repo, request_id)
+
+    result = repo.recover_recorded_active_turn_attempt(
+        task_id=request_id,
+        run_id=request_id,
+        recorded_operation_facts={
+            operation_id: {"status": "succeeded", "operation_type": "write_file"}
+        },
+        operator="test-gateway-recovery",
+    )
+
+    assert result["status"] == "recovered"
+    with repo._runtime_connection() as conn:
+        attempt = conn.execute(
+            "SELECT status FROM agent_attempts WHERE attempt_id=?",
+            (record["attempt_id"],),
+        ).fetchone()
+        run = conn.execute(
+            "SELECT status FROM agent_runs WHERE agent_run_id=?",
+            (record["agent_run_id"],),
+        ).fetchone()
+        event = conn.execute(
+            "SELECT payload_json FROM runtime_events "
+            "WHERE event_type='attempt_recovered' AND attempt_id=?",
+            (record["attempt_id"],),
+        ).fetchone()
+    assert attempt["status"] == "recovered"
+    assert run["status"] == "created"
+    assert json.loads(event["payload_json"])["recovery_mode"] == "recorded_active_turn"
+    assert repo.create_attempt(record["agent_run_id"])["attempt_id"] != record["attempt_id"]
+
+
+def test_recorded_active_turn_recovery_blocks_missing_durable_record(tmp_path):
+    repo = _make_repo(tmp_path)
+    request_id = "gw-missing-record"
+    record, operation_id = _seed_unknown_active_turn(repo, request_id)
+
+    result = repo.recover_recorded_active_turn_attempt(
+        task_id=request_id,
+        run_id=request_id,
+        recorded_operation_facts={},
+        operator="test-gateway-recovery",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "operation_record_incomplete"
+    assert result["missing_operation_ids"] == [operation_id]
+    with repo._runtime_connection() as conn:
+        attempt = conn.execute(
+            "SELECT status FROM agent_attempts WHERE attempt_id=?",
+            (record["attempt_id"],),
+        ).fetchone()
+    assert attempt["status"] == "unknown"
+
+
+def test_recorded_active_turn_recovery_blocks_executing_operation(tmp_path):
+    repo = _make_repo(tmp_path)
+    request_id = "gw-executing-operation"
+    record, operation_id = _seed_unknown_active_turn(
+        repo,
+        request_id,
+        operation_status="EXECUTING",
+    )
+
+    result = repo.recover_recorded_active_turn_attempt(
+        task_id=request_id,
+        run_id=request_id,
+        recorded_operation_facts={},
+        operator="test-gateway-recovery",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "operation_outcome_uncertain"
+    assert result["blocking_operation_ids"] == [operation_id]
+    with repo._runtime_connection() as conn:
+        run = conn.execute(
+            "SELECT status FROM agent_runs WHERE agent_run_id=?",
+            (record["agent_run_id"],),
+        ).fetchone()
+    assert run["status"] == "unknown"
+
+
+def test_recorded_active_turn_recovery_requires_exact_task_and_run(tmp_path):
+    repo = _make_repo(tmp_path)
+    request_id = "gw-exact-identity"
+    record, operation_id = _seed_unknown_active_turn(repo, request_id)
+    facts = {operation_id: {"status": "succeeded", "operation_type": "write_file"}}
+
+    wrong_task = repo.recover_recorded_active_turn_attempt(
+        task_id="another-task",
+        run_id=request_id,
+        recorded_operation_facts=facts,
+        operator="test-gateway-recovery",
+    )
+    wrong_run = repo.recover_recorded_active_turn_attempt(
+        task_id=request_id,
+        run_id="another-run",
+        recorded_operation_facts=facts,
+        operator="test-gateway-recovery",
+    )
+
+    assert wrong_task["status"] == "absent"
+    assert wrong_run["status"] == "absent"
+    with repo._runtime_connection() as conn:
+        attempt = conn.execute(
+            "SELECT status FROM agent_attempts WHERE attempt_id=?",
+            (record["attempt_id"],),
+        ).fetchone()
+    assert attempt["status"] == "unknown"
+
+
+def test_recorded_active_turn_recovery_cancels_provably_unstarted_claim(tmp_path):
+    repo = _make_repo(tmp_path)
+    request_id = "gw-unstarted-claim"
+    record = repo.record_run_creation(
+        owner_id="local/main",
+        goal="恢复未启动工具",
+        conversation_task_id=request_id,
+        run_id=request_id,
+        role="main",
+    )
+    operation = repo.create_tool_operation(
+        agent_run_id=record["agent_run_id"],
+        attempt_id=record["attempt_id"],
+        operation_type="run_command",
+    )
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status='unknown', ended_at=? WHERE attempt_id=?",
+            (time.time(), record["attempt_id"]),
+        )
+        conn.execute(
+            "UPDATE agent_runs SET status='unknown', updated_at=? WHERE agent_run_id=?",
+            (time.time(), record["agent_run_id"]),
+        )
+
+    result = repo.recover_recorded_active_turn_attempt(
+        task_id=request_id,
+        run_id=request_id,
+        recorded_operation_facts={},
+        operator="test-gateway-recovery",
+    )
+
+    assert result["status"] == "recovered"
+    with repo._runtime_connection() as conn:
+        operation_row = conn.execute(
+            "SELECT status, handler_started_at FROM tool_operations WHERE operation_id=?",
+            (operation["operation_id"],),
+        ).fetchone()
+    assert operation_row["status"] == "CANCELLED"
+    assert float(operation_row["handler_started_at"] or 0) == 0
+
+
+def test_recorded_active_turn_recovery_blocks_dirty_resource(tmp_path):
+    repo = _make_repo(tmp_path)
+    request_id = "gw-dirty-resource"
+    record, operation_id = _seed_unknown_active_turn(repo, request_id)
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO resource_mutations(mutation_id, canonical_scope, version, state, "
+            "dirty_reason, attempt_id, updated_at) VALUES(?,?,?,?,?,?,?)",
+            (
+                "mutation-dirty",
+                "path:/tmp/dirty",
+                1,
+                "DIRTY",
+                "unknown writer",
+                record["attempt_id"],
+                time.time(),
+            ),
+        )
+
+    result = repo.recover_recorded_active_turn_attempt(
+        task_id=request_id,
+        run_id=request_id,
+        recorded_operation_facts={
+            operation_id: {"status": "succeeded", "operation_type": "write_file"}
+        },
+        operator="test-gateway-recovery",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "resource_state_uncertain"
+    assert result["blocking_mutation_ids"] == ["mutation-dirty"]
