@@ -43,6 +43,12 @@
   GUI 能力不能绕过文件 owner 墙或替用户自动批准。浏览器页面优先 Browser 工具，Computer Use 只补浏览器
   工具无法覆盖的系统 UI。当前 MiniMax-M2.7 只消费文本，真实动作采用 OCR 坐标闭环；原始 MCP image 尚未
   进入 provider 多模态消息，不能冒充“模型已经看图”。
+- 第一轮真 TUI 证明“工具已注册”不等于“模型首轮可见”：旧默认把全部 MCP 放进 `mcp` 延迟分类，
+  MiniMax-M2.7 没有 会话运行时/终端交互 原生 Tool Search 引用能力时不会可靠加载。对照 会话运行时
+  `core/src/mcp_tool_exposure.rs` 的 `search_tool_enabled ? Deferred : Direct`，以及 终端交互
+  `services/api/模型助手.ts` 的 model-aware `isToolSearchEnabled` 后，本项目允许部署者为单个 MCP server 声明
+  `catalog_category`。默认仍是 `mcp`；官方 Computer Use 固定为 `computer_use`，首轮直接可见。该配置只影响
+  provider 工具目录和检索提示，不能改变 owner、workspace、effect、approval 或 Tool Gateway 权限快照。
 
 ## 2026-08-31 直属父级在继承权限上限内自主裁决，Gateway 恢复扫描不得堵住会话车道【状态：R118 wake/递归真 TUI 通过；capability focused 通过】
 

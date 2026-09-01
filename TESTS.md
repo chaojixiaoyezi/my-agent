@@ -8,6 +8,8 @@
 - 测试窗口使用隔离 Xvfb/xterm。普通中文 prompt 触发窗口枚举、OCR、激活、滚动、ASCII 输入、按键与后置 OCR，
   不允许测试者替被测 Agent 调工具或补目标应用状态。
 - 截图/OCR、滚动、输入、点击必须走真实审批；完成只认后置 OCR/应用状态，不认上游“Successfully”文案。
+- 合同测试同时证明：普通 `catalog_category=mcp` 仍被默认渐进披露，而官方 `computer_use` 分类在初始
+  provider Schema 中直接可见；目录分类不能降低 dangerous effect 或绕过 exact approval。
 - 另做一次慢 OCR `/stop`，确认 typed cancellation 和 MCP/Gateway 存活；没有环境时明确记为环境缺口。
 
 ## 2026-09-01 R121 Goal/思考与底层恢复边界（本地与真 TUI 通过）

@@ -119,6 +119,9 @@ class MCPToolInfo:
     input_schema: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: This config is the canonical per-server MCP declaration. Catalog placement only affects
+# model exposure; it must never change effect, approval, owner, workspace, or runtime authority.
+# 类用途: 保存一个 MCP 服务的启动、超时、展示分类和逐工具风险配置，供注册与断线重连复用。
 @dataclass
 class MCPServerConfig:
     """单个 stdio MCP server 的连接声明。
@@ -136,11 +139,17 @@ class MCPServerConfig:
     cwd: str = ""
     max_content_chars: int = _DEFAULT_MAX_CONTENT_CHARS  # 工具结果喂模型的文本上限,超截断
     max_line_chars: int = _DEFAULT_MAX_LINE_CHARS        # 读 stdout 单行字符上限,超丢弃(防 OOM)
+    # 默认 MCP 工具继续进入渐进披露；部署者可为必须首轮可见的受控服务声明独立目录分类。
+    # 该字段只影响模型工具目录，不授予权限，也不改变 effect/approval。
+    catalog_category: str = "mcp"
     # MCP server 是外部执行边界，工具真实 effect 未知时按最严 dangerous 处理。
     # 只有部署者显式配置的逐工具声明才可降低风险；server 自报 metadata 不具授权效力。
     default_effect: str = "dangerous"
     tool_effects: dict[str, str] = field(default_factory=dict)
 
+    # LLM: Parse deployment-owned structure only. Reject malformed catalog categories instead of
+    # silently changing whether a server's tools are direct or deferred.
+    # 函数用途: 从配置映射构造 MCP 服务声明，并校验超时、展示分类和风险等级。
     @classmethod
     def from_mapping(cls, name: str, raw: object) -> MCPServerConfig:
         """从 config 的一条 ``mcp_servers.<name>`` 映射构造，做最小健壮性归一化。"""
@@ -177,6 +186,10 @@ class MCPServerConfig:
             cwd=str(raw.get("cwd") or "").strip(),
             max_content_chars=_coerce_positive_int(raw.get("max_content_chars"), _DEFAULT_MAX_CONTENT_CHARS),
             max_line_chars=_coerce_positive_int(raw.get("max_line_chars"), _DEFAULT_MAX_LINE_CHARS),
+            catalog_category=_configured_catalog_category(
+                raw.get("catalog_category", "mcp"),
+                server_name=name,
+            ),
             default_effect=default_effect,
             tool_effects=tool_effects,
         )
@@ -188,6 +201,20 @@ class MCPServerConfig:
 
 
 _VALID_MCP_EFFECTS = frozenset({"read_only", "mutating", "dangerous"})
+_VALID_CATALOG_CATEGORY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+# LLM: Catalog category is a presentation/retrieval identifier, not an authorization label.
+# 函数用途: 校验 MCP 工具目录分类，避免拼写错误静默改变首轮工具可见性。
+def _configured_catalog_category(value: object, *, server_name: str) -> str:
+    category = str(value or "").strip().lower()
+    if not _VALID_CATALOG_CATEGORY.fullmatch(category):
+        raise MCPError(
+            f"MCP server '{server_name}' 的 catalog_category 必须是 "
+            "1-64 位小写字母开头的字母、数字或下划线",
+            code="MCP_CONFIG_INVALID",
+        )
+    return category
 
 
 def _configured_effect(value: object, *, server_name: str, field_name: str) -> str:

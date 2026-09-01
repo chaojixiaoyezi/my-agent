@@ -20,6 +20,9 @@ effect 边界：MCP 工具属于外部执行边界，未声明 effect 时一律�
 Tool Gateway。部署者只能通过 ``mcp_servers.<server>.tool_effects`` 逐工具显式声明
 ``read_only``/``mutating``/``dangerous``；MCP server 自报 metadata 不具授权效力。这样未知
 工具不会再伪装成只读绕过幂等与审批绑定。
+
+目录披露边界：普通 MCP 默认使用 ``catalog_category=mcp``，继续经 ``tool_search`` 渐进披露；
+部署者可为需要首轮直接可见的受控服务声明独立分类。分类只影响模型目录，不改变 owner、effect、审批或执行权限。
 """
 
 import json
@@ -186,6 +189,7 @@ def build_proxy_tool(
     info: MCPToolInfo,
     *,
     effect: str = "dangerous",
+    catalog_category: str = "mcp",
 ) -> MCPProxyTool:
     """LLM: MCP 完整 Schema 必须先通过 canonical 编译；失败时调用方跳过该工具而非降级透传。
 
@@ -203,7 +207,7 @@ def build_proxy_tool(
         description=sanitize_credentials(description),
         input_schema=canonical_schema,
         hints=ToolModelHints(
-            category="mcp",
+            category=catalog_category,
             use_cases=tuple(_mcp_use_cases(server_name, info.name, effect)),
             avoid_when=("该外部能力与当前任务无关时不要调用",),
             keywords=tuple(_mcp_keywords(server_name, info.name, effect)),
@@ -321,6 +325,7 @@ def refresh_registered_mcp_client(
                 client.config.name,
                 info,
                 effect=client.config.effect_for_tool(info.name),
+                catalog_category=client.config.catalog_category,
             )
         except (TypeError, ValueError) as exc:
             logger.warning(
@@ -360,6 +365,7 @@ def _register_discovered_tools(
                 config.name,
                 info,
                 effect=config.effect_for_tool(info.name),
+                catalog_category=config.catalog_category,
             )
         except (TypeError, ValueError) as exc:
             logger.warning(

@@ -71,6 +71,9 @@ def computer_use_mcp_servers(
         # OCR 坐标可能较长；原始截图是单行 base64，放宽传输硬限但模型侧仍走有界投影。
         "max_content_chars": 256 * 1024,
         "max_line_chars": 32 * 1024 * 1024,
+        # 当前 MiniMax-M2.7 不支持 会话运行时/终端交互 的原生 tool-search 引用协议；官方
+        # Computer Use 必须首轮可见，普通第三方 MCP 仍保留默认渐进披露。
+        "catalog_category": "computer_use",
         "default_effect": "dangerous",
         "tool_effects": dict(_COMPUTER_USE_TOOL_EFFECTS),
     }

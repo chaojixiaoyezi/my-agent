@@ -309,6 +309,22 @@ def test_config_invalid_timeout_falls_back_to_default():
     assert config.connect_timeout == 30.0  # _DEFAULT_CONNECT_TIMEOUT
 
 
+def test_config_catalog_category_defaults_and_validates():
+    assert MCPServerConfig.from_mapping("default", {"command": "x"}).catalog_category == "mcp"
+    direct = MCPServerConfig.from_mapping(
+        "desktop",
+        {"command": "x", "catalog_category": "computer_use"},
+    )
+    assert direct.catalog_category == "computer_use"
+
+    with pytest.raises(MCPError) as exc_info:
+        MCPServerConfig.from_mapping(
+            "bad",
+            {"command": "x", "catalog_category": "Computer Use!"},
+        )
+    assert exc_info.value.code == "MCP_CONFIG_INVALID"
+
+
 def test_parse_mcp_servers_skips_invalid_entries():
     configs = parse_mcp_servers(
         {

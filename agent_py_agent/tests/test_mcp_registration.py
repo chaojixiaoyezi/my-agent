@@ -121,6 +121,20 @@ def test_build_proxy_tool_contract_matches_native_tool_use_contract():
     assert sorted(input_schema["required"]) == ["a", "b"]
 
 
+def test_build_proxy_tool_uses_deployment_catalog_category_without_changing_effect():
+    proxy = build_proxy_tool(
+        client=None,  # type: ignore[arg-type]
+        server_name="desktop",
+        info=MCPToolInfo(name="click", description="Click the desktop", input_schema={}),
+        effect="dangerous",
+        catalog_category="computer_use",
+    )
+
+    assert proxy.model_spec.category == "computer_use"
+    assert proxy.runtime_policy.effect_resolver.default_effect == "dangerous"
+    assert proxy.runtime_policy.approval_policy.mode == "dangerous"
+
+
 def test_mcp_full_schema_is_preserved_for_provider_and_runtime():
     schema = {
         "type": "object",
@@ -506,6 +520,40 @@ def test_mcp_tool_effect_can_only_be_lowered_by_explicit_server_config():
     finally:
         for client in clients:
             client.stop()
+
+
+def test_direct_catalog_category_survives_default_mcp_progressive_disclosure(tmp_path):
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+
+    config = _echo_servers_config()
+    config["demo"]["catalog_category"] = "computer_use"
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=6000,
+            max_entries=100,
+            max_matches=30,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            catalog_deferred_categories=["mcp"],
+            mcp_servers=config,
+        )
+    )
+    try:
+        visible = {
+            spec.name
+            for spec in registry.model_visible_specs(
+                runtime_snapshot=registry.runtime_snapshot()
+            )
+        }
+        assert "mcp__demo__echo" in visible
+        assert "mcp__demo__add" in visible
+        assert registry.tools["mcp__demo__echo"].model_spec.category == "computer_use"
+    finally:
+        registry.close_mcp_clients()
 
 
 def test_unknown_mcp_tool_is_blocked_by_runtime_effect_gate_before_call(tmp_path):

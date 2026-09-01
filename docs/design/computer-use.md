@@ -52,6 +52,10 @@ computer-control-mcp (PyAutoGUI / RapidOCR / ONNX)
   `full-access`，最终权限仍会被 owner wall 降级，Computer Use 不注册。
 - 当前 Gateway 的 local/main Agent 只创建一份执行器；多个 TUI 会话复用同一个 ToolRegistry，不各起一套
   OCR 进程。其他 owner 的 scoped Agent 因身份门不启动它。
+- 普通第三方 MCP 默认归入 `catalog_category=mcp` 并由 `tool_search` 渐进披露；官方 Computer Use 明确归入
+  `computer_use`，其 16 个稳定工具 Schema 在第一轮直接可见。原因不是权限特例，而是当前 MiniMax-M2.7
+  不支持 会话运行时/终端交互 的原生 Tool Search 引用协议。分类只改变 provider 工具目录，不能改变 owner、
+  Full Access、effect、审批或执行快照；同一会话中这组稳定 Schema 保持顺序不变，便于前缀缓存复用。
 - 子进程使用当前 Python 的 `-m agent_py_agent.agent.tooling.computer_use_server`；入口继续运行同一份上游
   FastMCP server，只多注册 `scroll_screen`，不会依赖 PATH 中另一个不确定 Python。
 - Linux 只显式透传当前 `DISPLAY`、`WAYLAND_DISPLAY`、`XAUTHORITY`、`DBUS_SESSION_BUS_ADDRESS`；MCP 安全环境
@@ -83,6 +87,15 @@ computer-control-mcp (PyAutoGUI / RapidOCR / ONNX)
 - Linux 头less 验收需要 Xvfb 之外再运行窗口管理器；没有窗口管理器时窗口枚举、激活和按窗口 OCR 不能作为
   可用证据。RPM 系测试环境还需 `xorg-x11-server-Xvfb`、`xterm`、`xorg-x11-xauth`、
   `xorg-x11-server-utils`、`openbox` 和 `python3-tkinter`。
+
+## 工具披露对照
+
+- 会话运行时 `会话运行时-rs/core/src/mcp_tool_exposure.rs` 只在真实 search tool 可用时把 MCP 标成 Deferred，否则是
+  Direct；当前 `ToolSearch` feature 也已标为 Removed/default false。
+- 终端交互 `src/services/api/模型助手.ts` 先按具体 model/provider 判定 `isToolSearchEnabled`；不支持时删除
+  ToolSearch 自身，并把普通工具直接放入请求，不会把能力藏在模型无法消费的引用协议后面。
+- my-agent 当前尚无 provider-native Tool Search 能力协商，不能仅因本地存在一个文本 `tool_search` 就假定
+  所有模型都会先调用它。因此采用逐 server 的结构化目录分类，不按用户 prompt 或工具名称做机器判断。
 
 ## 真 TUI 验收
 

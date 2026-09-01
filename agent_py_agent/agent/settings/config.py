@@ -250,7 +250,9 @@ class _ToolConfigFields:
     # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)
     # 动态注册成 mcp__<server>__<tool> 前缀的工具。结构：
     #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int,
-    #                  default_effect: dangerous, tool_effects: {tool_name: read_only|mutating|dangerous}}}
+    #                  catalog_category: mcp, default_effect: dangerous,
+    #                  tool_effects: {tool_name: read_only|mutating|dangerous}}}
+    # catalog_category 默认 mcp（渐进披露）；独立分类只改变模型目录，不改变授权或 effect。
     # 未声明 effect 的 MCP 工具默认 dangerous；只有部署配置可逐工具降低风险，server 自报不授权。
     # 默认空 = 不连任何 server、不起任何子进程(零开销)。仅 stdio 传输(JSON-RPC over stdio)。
     mcp_servers: dict[str, Any] = field(default_factory=dict)

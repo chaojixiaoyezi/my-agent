@@ -28,7 +28,7 @@
 
 ### Computer Use 复用开源执行器
 
-状态：本地底座适配与相邻合同通过，待 `.10` MiniMax-M2.7 真 TUI
+状态：本地底座适配、首轮工具可见性修复与相邻合同通过，待 `.10` MiniMax-M2.7 真 TUI 复验
 
 解决问题：my-agent 后续需要截图、点击、输入、滚动和等待界面状态，但不应在底座里自造一套桌面自动化引擎。
 当前选定 MIT/PyPI 的 `computer-control-mcp==0.3.13`，通过 `my-agent[computer-use]` 随底座发布；my-agent
@@ -38,6 +38,12 @@ DISPLAY/WAYLAND/XAUTHORITY/DBUS 字段，不泄漏 API Key。上游未注册滚�
 公开动作补一个 `scroll_screen`，不复制执行引擎。下一步在 `.10` 单 Gateway 的 Xvfb 里用 MiniMax-M2.7
 完成窗口枚举、OCR、激活、滚动、ASCII 输入、按键与 OCR 后置验证；同时记录当前上游 Python 3.14/Unicode 输入和
 原始 image provider 投影限制。浏览器内任务继续优先 Browser，不能另造第二套浏览器控制协议。
+
+首轮真 TUI 已暴露并定位一项底层缺口：16 个执行器工具均已注册，但旧逻辑把全部 MCP 无条件放入
+`mcp` 延迟类别；MiniMax-M2.7 不支持 会话运行时/终端交互 的原生 tool-search 引用协议，首轮实际看不到桌面工具，
+转而误选 `terminal_session`。当前增加 deployment-owned `catalog_category`：普通 MCP 仍默认延迟，官方
+Computer Use 使用稳定 `computer_use` 分类直接进入首轮 Schema。这个字段只控制目录披露，不能改变 owner、
+Full Access、effect 或审批。待 fresh TUI 完成真实桌面动作后再把本项移入完成清单。
 
 ### 测试机部署空间的显式保留策略
 

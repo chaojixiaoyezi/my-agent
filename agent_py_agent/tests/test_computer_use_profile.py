@@ -70,6 +70,7 @@ def test_authorized_profile_uses_current_python_gui_session_and_safe_effects() -
         "ENV": "development",
     }
     assert profile["default_effect"] == "dangerous"
+    assert profile["catalog_category"] == "computer_use"
     assert profile["tool_effects"] == {
         "get_screen_size": "read_only",
         "list_windows": "read_only",
