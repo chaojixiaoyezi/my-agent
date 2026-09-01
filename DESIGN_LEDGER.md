@@ -3293,7 +3293,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   各自 `USER.md` 只含自己的识别码、回答风格和界面主色。随后同 owner 新 TUI 在不调用读取工具的前提下
   准确召回各自三项且未混入对方事实，真实门通过。
 
-## 2026-09-01 Gateway 同一 active turn 重启恢复的 unknown 窄口【状态：R130 主代理活跃点真 TUI 通过】
+## 2026-09-01 Gateway 同一 active turn 重启恢复的 unknown 窄口【状态：R130/R131/R133 三安全点真 TUI 通过】
 
 - 对照 会话运行时 `会话运行时-rs/core/src/agent/control/spawn.rs` 与
   `app-server/src/request_processors/thread_lifecycle.rs`：恢复保留原 thread/history/active turn 身份，运行中的
@@ -3315,5 +3315,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - R130 主代理活跃点在 `.10` 唯一 MiniMax-M2.7 Gateway 上通过：同一 request/thread/task/run 的旧
   generation 1 已有 21 个 terminal operation，顺序重启后全部按 matching archive 记为 recorded，旧 attempt
   转 recovered；generation 2 仅完成剩余 5 个操作并自然 done。TUI 直接 final，原 owner task root 内 18 个
-  unittest 和全部报告存在。该结果只证明主代理活跃点；等待直属 child 与 coordinator 等待孙代理仍要逐项
-  重启，不能由本轮外推。
+  unittest 和全部报告存在。
+- R131 在 main 等唯一直属 child 时顺序重启，原 child run/generation/runner 不变；child 完成后原 main 新
+  generation 自动 final。R133 在唯一 coordinator 已以 `SUBAGENTS_ACTIVE` 等待两名直属 worker 时顺序重启，
+  两名 worker 不复制，原 coordinator 与原 main 依次生成下一 attempt 并自然完成。三种安全点均由独立 fresh
+  MiniMax-M2.7 TUI 证明，不互相外推。

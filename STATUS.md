@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-09-01 R130 主代理活跃回合跨 Gateway 重启（第一安全点完成）
+## 2026-09-01 R130/R131/R133 活跃回合与两级等待跨 Gateway 重启（完成）
 
 - 新 wheel SHA-256 `bb42ce82392bc63d6a9ddf1df2415eceb34007f5116972a2317101118769578c` 已原位部署到
   `/root/.my-agent/runtime-venv-r127`；旧 R127 wheel 以 SHA-256
@@ -17,7 +17,19 @@
   `agentrun-1788301132-e4c40522`，没有另建任务或重放已完成写入。
 - TUI 最终直接显示完整报告；18 个 unittest 全通过，三组 JSONL 样例、JSON/Markdown 报告和源代码均位于
   `/root/.my-agent/owners/local/main/tasks/2026-09-02/root-报告/r130-main-restart`，未写到 `/root` 或仓库。
-  第一安全点通过不代替等待直属 child 与 coordinator 等待孙代理的后续重启门。
+  这是第一安全点。
+- R131 fresh 真 TUI `ma-r131-110-direct-child-wait-restart` 在 main generation 1 已以
+  `runtime_reason=SUBAGENTS_ACTIVE` 等待唯一直属 child 时，从 Gateway PID 166634 顺序切到 168278。原 child
+  `subagent-1788302139-230579bf` 保持 generation 1 / runner PID 167884，未复制、未重派；完成后同一 main
+  generation 2 被新 Gateway 自动唤醒，34 个 unittest、四组样例和最终回复自然完成。这是第二安全点。
+- R132 用于捕捉第三安全点时，MiniMax-M2.7 多创建一层 coordinator；五个 run 虽逐层自然完成、46 个
+  unittest 通过，但该轮没有在目标等待窗口重启，且最终文字把间接层级说成直接层级，因此只保留为模型
+  拓扑/汇报偏差负样本，不计恢复通过。
+- R133 fresh 真 TUI `ma-r133-110-coordinator-wait-restart` 形成精确 root→1 coordinator→2 workers。
+  coordinator generation 1 的 `agent_attempt.completed` 明确为 `SUBAGENTS_ACTIVE`，两名直属 worker 均为
+  generation 1 / runner PID 171475 时，唯一 Gateway 从 PID 168278 顺序切到 171987。两名 worker 原地完成，
+  原 coordinator generation 2 自动集成，原 main generation 2 自动汇报；canonical tree 始终只有 4 个 run，
+  91 个 unittest 全通过。这是第三安全点，P0-2 重启恢复门完成。
 - 同轮另发现独立底座问题：pytest capture 打开 `/dev/null` 时收到 `PermissionError`，模型改用 unittest 才
   完成验证。该问题不影响本轮重启续接结论，但已进入 ROADMAP；不得把模型绕行当成 sandbox 已修复。
 

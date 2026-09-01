@@ -1,5 +1,28 @@
 # COMPLETED
 
+## 2026-09-01 R129--R133 Gateway 活跃回合与子代理等待跨重启
+
+- 解决 processing request 已按 exact id 重排、工具结果也完整落账时，启动 stale-attempt 调和仍先把旧
+  main run/attempt 标成 unknown，第二 worker 又被 generic fail-closed 门挡住的问题。普通 unknown 合同不
+  放宽；只有同一 `gateway_active_turn_recovery.v1` 同时通过 task+run 双身份、current unknown、全部已启动
+  工具终态与 matching durable archive、无 DIRTY/MUTATING resource 核对，旧 attempt 才转 recovered 并释放
+  exact execution lock。CLAIMED 且 handler 未启动可在同事务取消，其它不确定继续人工处理。
+- R129 `.10` 真 TUI 保留失败基线：请求、任务目录和 15 条工具归档都成功重排，但 generic unknown 门在模型
+  前拒绝第二 attempt。R130 `ma-r130-110-main-active-restart` 部署 wheel
+  `bb42ce82392bc63d6a9ddf1df2415eceb34007f5116972a2317101118769578c` 后，旧 generation 的 21 个 terminal
+  operation 被逐项核对并记为 recorded；同 request/thread/task/run 的 generation 2 只执行 5 个后续操作，
+  18 个 unittest 通过并自然 final，零已结算写入重放。
+- R131 `ma-r131-110-direct-child-wait-restart` 在 main 已以 `SUBAGENTS_ACTIVE` 等待唯一直属 child 时重启；
+  原 child `subagent-1788302139-230579bf`、generation 1、runner PID 167884 均未复制，child 完成后新 Gateway
+  自动唤醒原 main generation 2，34 个 unittest 与最终回复自然完成。
+- R133 `ma-r133-110-coordinator-wait-restart` 形成精确 root→1 coordinator→2 workers；coordinator generation
+  1 以 `SUBAGENTS_ACTIVE` 让出后重启唯一 Gateway。两名 worker 保持原 run/generation 完成，原 coordinator
+  generation 2 集成，原 main generation 2 汇报，91 个 unittest 全通过。R132 额外 coordinator 的模型偏差
+  保留为负样本，没有用它冒充等待重启门。
+- 提交 `e4bb658` 前直接相关 180 项 focused、PyCompile、Ruff、doc sync、strict code-size、diff 与
+  clean-package 全绿；变更远低于 10,000 行，按约定未跑全仓 pytest。部署和三次顺序重启全程都只有一个
+  8420 listener，配置与欢迎页为 MiniMax-M2.7。
+
 ## 2026-09-01 R124--R128 直属父级 capability 授权与危险 ToolCall 分账
 
 - 解决 child 申请父级已经拥有的工具时，main 因当前模型可见清单不完整而误拒绝、语义 Router 又抢先把

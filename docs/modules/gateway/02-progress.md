@@ -2683,5 +2683,10 @@
   `gwreq-1788301131-52a459b2470f43b99c5e73c7e26b79c0` 的 generation 1 在 21 个工具操作全部终态后被
   SIGTERM 打断；新 Gateway 写入 `attempt_recovered/recovery_mode=recorded_active_turn`，同一主 run 创建
   generation 2，只新增 5 个后续工具操作并自然 done。18 个 unittest、三组样例和两种报告都在原 owner task
-  root，TUI 直接显示 final，零新任务和零已结算写入重放。等待直属 child 与 coordinator 等待孙代理仍须分别
-  真 TUI 复验。
+  root，TUI 直接显示 final，零新任务和零已结算写入重放。
+- R131 在 main 已以 `SUBAGENTS_ACTIVE` 等待唯一直属 child 时顺序重启。原 child generation 1 / runner PID
+  167884 保持不变，完成后新 Gateway 自动启动原 main generation 2 并 final；canonical tree 始终只有 2 个 run。
+- R133 形成精确 root→1 coordinator→2 workers。coordinator generation 1 以 `SUBAGENTS_ACTIVE` 让出、两名
+  worker generation 1 正在运行时顺序重启；worker 无重复，原 coordinator generation 2 集成后原 main
+  generation 2 汇报，91 个 unittest 全通过。R132 因模型多派一层 coordinator 且错过等待窗口只保留负样本。
+  至此主代理活跃、main 等直属 child、coordinator 等孙代理三个真 TUI 重启安全点全部通过。

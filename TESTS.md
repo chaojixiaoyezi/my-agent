@@ -3243,3 +3243,34 @@ ruff check \
   18/18 只能证明业务产物，不证明 pytest/sandbox 正常。该问题另列底座修复，不污染重启门的正负结论。
 - 当前只勾选“主代理活跃点”；等待直属 child 与 coordinator 等待孙代理仍必须分别使用 fresh 真 TUI 顺序
   重启唯一 Gateway，不得用本轮主代理样本外推。
+
+### R131：main 等待唯一直属 child 时跨 Gateway 重启通过
+
+- fresh TUI `ma-r131-110-direct-child-wait-restart` 只输入一次普通中文，根只派一名直属 child。main
+  generation 1 以 `SUBAGENTS_ACTIVE` 让出、TUI 显示“等待 1 个子代理”后，唯一 Gateway 从 PID 166634
+  顺序切换到 168278。
+- child `subagent-1788302139-230579bf` 全程只有 generation 1 和 runner PID 167884；Gateway 退出后进程由
+  init 接管继续，没有新增 child、attempt 或 runner。child 完成后新 Gateway 自动创建原 main generation 2，
+  检查并直接 final。
+- canonical tree 精确 2 个 run；产物在原 owner task root，34 个 unittest、四组样例和 JSON/Markdown 报告
+  完成。测试者没有发送“继续”或修改产物。
+
+### R132：额外 coordinator 与最终层级误报负样本
+
+- fresh TUI `ma-r132-110-coordinator-grandchildren-restart` 的第一 coordinator 收到的 prompt 已明确要求亲自
+  创建两名实现者，但 MiniMax-M2.7 又派一名 coordinator，形成 root→coordinator→coordinator→2 workers。
+  五个 run 后续全部自然完成，46 个 unittest 通过；但目标等待窗口在观察期间结束，本轮未执行 Gateway 重启，
+  不能计入恢复门。
+- 根 final 又把第一 coordinator 间接完成的两名 worker 表述成直接创建。canonical `parent_agent_run_id` 与
+  最终文字不一致，保留为模型拓扑遵循/事实汇报问题；不能用终屏自报覆盖结构化树。
+
+### R133：coordinator 等待两名直属 worker 时跨 Gateway 重启通过
+
+- fresh TUI `ma-r133-110-coordinator-wait-restart` 形成精确 4-run 树：root、1 coordinator、2 workers。
+  coordinator generation 1 的宿主事件为 `runtime_reason=SUBAGENTS_ACTIVE`；两名直属 worker 均是 running /
+  generation 1 / runner PID 171475 时，唯一 Gateway 从 PID 168278 顺序切换到 171987。
+- 重启前后 worker 的 run、attempt、generation 和 runner PID 全部不变。两名 worker 自然 done 后，原
+  coordinator 才创建 generation 2 集成；随后原 main generation 2 自动检查并 final。全程没有额外 coordinator、
+  worker 或人工推动消息。
+- 最终 91 个 unittest 全通过；canonical tree 为 coordinator=1、worker=2，TUI 直接显示完整最终汇报，
+  Gateway pending/processing 归零。至此主代理活跃、main 等 child、coordinator 等孙代理三个顺序重启门均通过。

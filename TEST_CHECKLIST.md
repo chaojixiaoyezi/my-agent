@@ -75,10 +75,12 @@
   无 generation/结构化进展要有界停止。focused 与 R114l `.10` fresh 八-child 主链均已通过；连续代次成本
   由 R114n 另行验收。
 
-- [ ] Gateway active turn 在已执行 `task_progress/create_subagents/write`、尚未提交 assistant 终态时重启，
+- [x] Gateway active turn 在已执行 `task_progress/create_subagents/write`、尚未提交 assistant 终态时重启，
   reconciler 必须写 exact `gateway_active_turn_recovery.v1`，下一 provider call 从同 owner 工具索引按
   `conversation_request_id` 续上已完成调用；Todo id/数量与 child 名册不变，不能只重放原 prompt 后另建计划。
-  foreign request/child 索引不得混入，索引不可读必须 fail closed。focused 已通过，待 R114k fresh 真 TUI。
+  foreign request/child 索引不得混入，索引不可读必须 fail closed。focused 与 R130 主代理活跃点已通过；
+  R131/R133 又分别证明 create_subagents 后 main 等直属 child、coordinator 等两名直属 worker 时顺序重启不
+  重复派工，并能逐层自动 wake 到自然 final。
 
 - [x] 唯一 Gateway 重启落在 child 的 `AgentRun` 已终态、`SubAgentTask` 尚未收尾的窗口时，监督器必须按 exact
   `agent_run.completed` 宿主事件补齐普通 runner-result 投影；不得 abandon、不得增加 generation、不得重跑
@@ -434,13 +436,14 @@
 - [ ] 单 Gateway 内后台车道按 `owner + durable thread_id` 隔离；同 thread 继续由 run claim
   单飞，同 owner 的另一条长 TUI/policy 回合不得阻塞 child 完成 wake。全局和单 owner
   并发上限必须可配置，超出保留持久队列而不丢失。
-- [ ] 主 run/current attempt 为 `unknown` 时 wake、observation、policy 原样保留且零模型调用、零通用自动重挂；
+- [x] 主 run/current attempt 为 `unknown` 时 wake、observation、policy 原样保留且零模型调用、零通用自动重挂；
   同线程新任务不被旧阻塞项占满 limit。人工核对恢复后原事件继续，Gateway 不再刷 loop error。唯一窄例外是
   exact `gateway_active_turn_recovery.v1` 的同一回合：必须同时匹配 task+run/request，且全部已启动工具都有
   terminal RuntimeDB row 与同 operation id/tool/status 的耐久归档、无 DIRTY/MUTATING 资源，才可把旧 attempt
   转 recovered 并开新 generation；任何不确定仍 hard block。R129 已保留“请求重排成功但 generic unknown 门
   冲突失败”的真机基线；R130 主代理活跃点已用同 request/run、旧 21 条 operation、新 generation 5 条后续
-  operation 与自然 final 证明零重复续跑。等待直属 child 与 coordinator 等待孙代理两个安全点仍待真 TUI。
+  operation 与自然 final 证明零重复续跑。R131/R133 又完成直属 child 与孙代理等待点，普通 unknown 正反边界
+  继续由 focused 覆盖，三个真 TUI 安全点均通过。
 - [ ] Web 服务等长期命令只用 `run_command(run_in_background=true)` 启动并返回受管 session；shell `&` /
   `nohup ... &` 在执行前明确拒绝且可修正重试，最终必须从另一条命令核验 0.0.0.0 监听与局域网访问。
 - [ ] 主代理、子代理、Gateway 与 TUI 对六类 `turn_end` 映射一致；普通完成不读取 acceptance/verification，

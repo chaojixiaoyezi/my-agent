@@ -26,18 +26,6 @@
 用户显式创建的 ThreadGoal 持有跨轮持续执行语义。旧 policy 只做 typed retirement，不再被执行；子代理等待、
 生命周期 durable wake、显式插话和 provider transient retry 仍按各自结构化事件恢复，不能被误删成“都不续跑”。
 
-### Gateway 活跃回合重启与 unknown 窄口
-
-状态：R130 主代理活跃点真 TUI 通过，待直属 child / 孙代理等待点
-
-解决问题：processing request 已按 exact id 重排、工具结果也完整落账时，启动期 stale-attempt 调和仍会把旧
-主代理 run/attempt 标成 unknown；新 Gateway 随后被 generic fail-closed 门挡住，表现为“队列说已恢复，实际
-三秒失败”。当前候选只为同一 active-turn recovery marker 增加事务窄口：task+run 双身份、current unknown、
-全部已启动工具终态与耐久 operation 记录、资源稳定性必须全部一致，才恢复旧 attempt 并让普通 binding 建
-下一 generation。普通 unknown、缺归档、执行中工具或脏资源仍人工处理。R130 已在主代理活跃点重启唯一
-Gateway：旧 generation 的 21 个工具事实核对后原地续接，新 generation 自然完成且没有重写原副作用。
-下一步只剩等待直属 child、coordinator 等待孙代理两个安全点，逐项证明零重复派工、逐层 wake 和自然终态。
-
 ### 受管命令的基础设备文件
 
 状态：R130 真 TUI 发现失败样本，待对照 会话运行时 后修复
