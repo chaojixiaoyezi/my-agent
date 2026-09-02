@@ -8,6 +8,11 @@
   transcript fallback 从自身 started 进度开始，旧 operation 迟到事件不能污染当前块。同 operation 保持单调。
   85 项 focused 通过；`ma-r150-local-compact-resume` 手动动画、generation 3→4、计数只在提交后增加及压缩后
   记忆追问均通过。自然触发的 fallback 失败链仍列为后续真 TUI 覆盖。
+- [ ] Compact 中途收到 typed stop/cancellation 时，transcript、active-turn archive 与 native IR 都必须在
+  摘要、候选改写、checkpoint 和 generation CAS 的安全点停止；CAS 前只发布
+  `superseded/candidate_discarded`，不得推进 generation/cursor 或失败熔断，IR/tool-context 必须恢复。
+  R154 主代理 MiniMax-M2.7 真 TUI 已在摘要 20% 时 Esc 通过，focused 已覆盖五个竞态边界；child/grandchild
+  的自然真机停止仍待补证，因此本项暂不整体勾选。
 - [x] `/exit` 后新 TUI 的 `/sessions` 必须只列当前 owner，会话由 exact session id 恢复；历史 final、child
   roster、Compact 代次继续存在。R149→R150 真 TUI 已通过；当前 `/sessions` 是只读列表加恢复命令，不冒充
   终端交互 式列表内直接选择。

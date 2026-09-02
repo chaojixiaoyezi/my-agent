@@ -150,8 +150,8 @@ revision 迟到，容易把慢模型当成死锁，也可能在看不见 prompt 
 
 ### live Compact 摘要污染与只读任务写报告冲突
 
-状态：只读优先级已在 `.7` 真 TUI 通过；手动 Compact Esc 本地合同已修，待 fresh `.7` 真 TUI；live handoff
-结构校验待下一次自然触发
+状态：只读优先级已在 `.7` 真 TUI 通过；R154 主代理自动 Compact Esc 已由本机 MiniMax-M2.7 真 TUI 通过；
+child/grandchild 自然中断与 live handoff 结构校验仍待后续真机样本
 
 解决问题：真实植物大战僵尸只读验收在 generation 5/6 连续 Compact 时，MiniMax-M2.7 先返回一段原始
 `<minimax:tool_call>` 伪写文件协议，后又只返回“写入验收报告”的半句。旧代码只检查非空，导致坏摘要进入
@@ -163,7 +163,9 @@ IR 机械投影；通用研究纪律明确服从本轮只读/不落盘要求。�
 文件；期间触发的是 transcript Compact generation 7，并非 live-tool，因此不能把 fixed handoff validator
 冒充真机已触发。随后手动 Compact 真机复现了 Esc 无目标、仍提交 generation 的独立缺口；当前候选已把
 Compact 登记为 exact cancellable operation，精确 stop 走 durable urgent lane，供应商断流并在 checkpoint/CAS
-前复核中断。下一次 fresh `.7` TUI 必须证明 Esc 后 generation 不变、原历史可继续回答，未完成前不宣称通过。
+前复核中断。R154 本机 fresh TUI 已在 `active_turn_tool_archive` 摘要 20% 时 Esc：operation 中性
+`superseded/candidate_discarded`，request/task 为 interrupted，generation 保持 4、失败计数保持 0；随后同一
+TUI 可继续原任务。主代理这条已完成，child/grandchild 仍须用自然长任务分别补证，不能拿合同测试冒充真机。
 
 ### 代码瘦身第二轮：区分产品合同与离线评测脚手架
 

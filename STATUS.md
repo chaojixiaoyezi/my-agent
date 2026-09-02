@@ -1,5 +1,16 @@
 # STATUS
 
+## 2026-09-02 R154 Compact 停止信号贯穿摘要、候选与提交（主代理真 TUI 通过）
+
+- transcript、active-turn archive 与 native IR 共用 `CompactInterruptCheck`；慢摘要前后、候选改写前后、
+  checkpoint 前后与 generation CAS 前都复核。用户停止只丢弃未提交候选，不计 provider/摘要失败；原生 IR
+  与 tool-context 恢复原值，generation/cursor/失败熔断均不动。CAS 已成功后不回滚，避免持久历史与界面分叉。
+- 本机 MiniMax-M2.7 真 TUI `ma-r154-local-compact-cancel` 在 `active_turn_tool_archive` 摘要 20% 时按 Esc：
+  typed operation 以 `superseded/candidate_discarded` 收口，request/task 为 interrupted，thread 仍为
+  generation 4、失败计数 0；随后同一 TUI 接受自然语言“继续”并恢复工作。
+- 当前 focused 覆盖停止发生在摘要前、摘要后、内存改写后、checkpoint 后以及已有取消令牌五个边界；
+  child/grandchild 的自然真机中断仍留在封板矩阵，不用主代理样本代替。
+
 ## 2026-09-02 R151 详细 transcript 中一次返回父代理（真 TUI 通过）
 
 - child 详情处于 Ctrl+O 展开态时，普通 chat 的 Ctrl+G filter 不生效，导致按键被吞；现把 Ctrl+G 与 Alt+Left

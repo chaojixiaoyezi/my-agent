@@ -1,5 +1,16 @@
 # TESTS
 
+## Compact 中断的不可见候选边界
+
+- transcript、active-turn archive 与 native IR 都必须在慢摘要前后、候选改写前后、checkpoint 前后和
+  generation CAS 前读取同一个 typed stop/cancellation callback；不能只取消外层 HTTP 流。
+- 在 CAS 前停止时，断言 generation/cursor/失败计数不变，IR/tool-context 恢复原值，并只发布
+  `superseded/candidate_discarded`；checkpoint 已写可以留下不可达候选，但 thread 不得引用它。
+- 在 CAS 已成功后不回滚已提交代次。摘要、checkpoint 或 CAS 的真实异常仍记失败，不能把用户停止混入熔断。
+- R154 本机 MiniMax-M2.7 真 TUI `ma-r154-local-compact-cancel` 在 active-turn 摘要 20% 时 Esc，观察到
+  request/task interrupted、generation 4、failure 0，并在同一会话继续原工作。child/grandchild 仍需自然
+  真机样本；focused 只覆盖竞态边界，不替代这两条最终验收。
+
 ## Computer Use 真 TUI 最小闭环
 
 - 默认配置、普通 owner、WorkspaceOnly 与远程 owner 先走合同测试，必须证明不会启动 Computer Use MCP。

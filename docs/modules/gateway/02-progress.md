@@ -1,5 +1,13 @@
 # Gateway Progress
 
+## 2026-09-02 R154 Compact 中断贯穿所有提交安全点（主代理真 TUI 通过）
+
+- transcript、active-turn archive 与 native IR 统一读取 `CompactInterruptCheck`。摘要前后、候选改写前后、
+  checkpoint 前后和 CAS 前都能中断；用户停止只发布中性 superseded，不再计入 provider 失败熔断。
+- 本机 MiniMax-M2.7 真 TUI `ma-r154-local-compact-cancel` 在 active-turn 摘要 20% 时 Esc：request/task
+  interrupted，operation `candidate_discarded`，thread 保持 generation 4/failure 0；同一会话随后正常续作。
+- focused 覆盖五个竞态位置；主代理路径已验收，child/grandchild 自然真机停止仍待后续封板矩阵。
+
 ## 2026-09-02 Compact 来源与提交权统一投影（Focused 通过，真 TUI 待验）
 
 - `conversation_compaction_progress.v1` 现在显式携带 `source_kind/commit_authority`；完整 transcript、可持久

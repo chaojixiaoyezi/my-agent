@@ -24,6 +24,10 @@
   `active_turn_tool_archive/conversation_thread` 或 `turn_local_tool_ir/turn_local`。三类生产者、Gateway、
   后台 transcript 与 TUI 只调用 `conversation/compact_progress.py` 这一份白名单；不得从 operation id 前缀、
   阶段或中文文案猜。双字段都缺失的历史事件只投影成 `legacy/legacy`，不能据此推进 generation。
+- transcript、active-turn archive 与 native IR 共享同一个 typed interruption callback。慢摘要、内存候选、
+  checkpoint 和 generation CAS 各自在副作用前后复核；CAS 前的停止只把 operation 标成
+  `superseded/candidate_discarded`，恢复未提交 IR/tool-context，不推进 generation/cursor/failure circuit。
+  checkpoint 已写而 CAS 未赢的候选没有 live authority；CAS 赢后不回滚，避免持久 thread 与 TUI 分叉。
 
 ## ThreadGoal 与 workspace 物化边界
 

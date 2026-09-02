@@ -1,5 +1,13 @@
 # COMPLETED
 
+## 2026-09-02 R154 主代理 Compact 中断原子边界
+
+- 三条 Compact 路径使用同一个只读中断合同；CAS 前的用户停止恢复未提交内存状态、丢弃候选且不增加失败，
+  CAS 成功后则保留已提交代次。该语义对齐 会话运行时 可取消 compact task，并适配 my-agent 的 checkpoint/CAS。
+- focused 覆盖摘要前后、原生 IR 改写后、checkpoint 后和预取消；本机真 TUI
+  `ma-r154-local-compact-cancel` 在 active-turn 摘要 20% 时 Esc 后保持 compact 4/failure 0，并能继续原任务。
+- 本项完成的是主代理路径；child/grandchild 自然真机停止仍保留在 TEST_CHECKLIST，不以单测冒充完成。
+
 ## 2026-09-02 R151 child 详细历史中的层级返回
 
 - transcript modal 现在也注册 Ctrl+G/Alt+Left，并复用唯一 `navigation.back()`；不再要求用户先 Ctrl+O 收起

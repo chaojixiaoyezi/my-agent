@@ -1,5 +1,19 @@
 # DESIGN LEDGER
 
+## 2026-09-02 Compact 停止信号贯穿摘要、候选与提交【状态：R154 主代理真 TUI/Focused 通过】
+
+- transcript、active-turn archive 与 native IR 三条 Compact 路径共用一个只读
+  `CompactInterruptCheck`。慢摘要前后、内存候选改写前后、checkpoint 前后和 generation CAS 前都检查；
+  回调读取失败按停止处理。CAS 已成功后不回滚已提交代次，避免屏幕和持久历史分叉。
+- 用户停止是 `superseded/candidate_discarded`，不是 provider/摘要失败：原生 IR 与 tool-context 恢复原值，
+  generation/cursor/失败熔断不动；checkpoint 已写时允许留下不可达候选，thread 未引用就没有 live authority。
+- 对照 会话运行时 `会话运行时-rs/core/src/tasks/compact.rs` 与 `core/src/compact.rs`：Compact 属于当前可取消 task，模型流
+  中断直接返回 `TurnAborted/Interrupted`，成功生成后才替换 history。my-agent 适配自己的 checkpoint/CAS，
+  不增加第二份取消状态或回滚已赢 CAS。
+- 本机 MiniMax-M2.7 真 TUI `ma-r154-local-compact-cancel` 在
+  `active_turn_tool_archive` 摘要 20% 时 Esc：operation 中性收口，request/task 为 interrupted，thread 保持
+  generation 4、failure 0；随后同一 TUI 可继续原工作。child/grandchild 的自然真机停止仍留在封板矩阵。
+
 ## 2026-09-02 Compact 来源与提交权进入统一进度协议【状态：Focused 通过，真 TUI 待验】
 
 - `conversation_compaction_progress.v1` 新增 `source_kind` 与 `commit_authority`：完整会话历史为

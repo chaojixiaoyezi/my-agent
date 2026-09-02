@@ -2957,6 +2957,7 @@ def test_manual_compact_stop_interrupts_provider_and_preserves_generation(tmp_pa
     assert unchanged is not None
     assert unchanged.compact_generation == 0
     assert unchanged.compact_checkpoint_id == ""
+    assert unchanged.compact_consecutive_failures == 0
     assert len(agent.conversation_store.recent_messages(thread.thread_id, limit=10)) == 2
 
 

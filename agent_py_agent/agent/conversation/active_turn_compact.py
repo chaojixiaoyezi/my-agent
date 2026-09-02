@@ -15,6 +15,7 @@ from .authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from .compact_checkpoint import committed_live_tool_compact_source_ids
+from .compact_guard import CompactInterruptCheck, raise_if_compact_interrupted
 from .compact_progress import (
     COMPACT_AUTHORITY_CONVERSATION,
     COMPACT_SOURCE_ACTIVE_TURN,
@@ -39,9 +40,9 @@ class ActiveTurnArchiveCompactResult:
     projected_tokens_after: int = 0
 
 
-# LLM: The caller supplies one immutable overflow identity and UI projection; the request contains
-# no task status or completion authority and cannot change the owner/thread binding.
-# 类用途: 打包一次跨工作片压缩所需的请求、尝试、原任务和可选进度回调。
+# LLM: The caller supplies one immutable overflow identity, UI projection and typed interrupt
+# check; the request contains no task status or completion authority and cannot change binding.
+# 类用途: 打包跨工作片压缩所需的请求、尝试、原任务、进度回调和当前停止检查。
 @dataclass(frozen=True)
 class ActiveTurnArchiveCompactRequest:
     task_attributes: object
@@ -49,6 +50,7 @@ class ActiveTurnArchiveCompactRequest:
     attempt_id: str
     task_prompt: str = ""
     progress_callback: Callable[[dict[str, object]], object] | None = None
+    interrupt_check: CompactInterruptCheck | None = None
 
 
 # LLM: This candidate freezes one exact checkpoint boundary before the summary model call. The
@@ -171,9 +173,9 @@ def _build_active_turn_compact_plan(
     )
 
 
-# LLM: Summary, checkpoint and CAS are one transactional candidate. A failure records the shared
-# Compact circuit and closes the volatile progress block without changing the full archive.
-# 函数用途: 生成完整替代摘要、提交 checkpoint/CAS，并返回唯一代次和前后 token 数。
+# LLM: Summary, checkpoint and CAS are one interruptible candidate. User stop discards it without
+# failure accounting; only a real error records the shared circuit while the full archive stays.
+# 函数用途: 可中断地生成并提交跨工作片摘要；停止时保留原工具账并收起进度块。
 def _execute_active_turn_compact(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
@@ -184,10 +186,12 @@ def _execute_active_turn_compact(
 
     callback = request.progress_callback
     progress = plan.progress
+    raise_if_compact_interrupted(request.interrupt_check)
     _emit_progress(callback, progress, phase="started", stage="preparing", percent=5)
     _emit_progress(callback, progress, phase="progress", stage="summarizing", percent=20)
     try:
         replacement = _active_turn_replacement_summary(agent, plan, request)
+        raise_if_compact_interrupted(request.interrupt_check)
         after_tokens = estimate_tokens(
             {
                 "compact_summary": replacement,
@@ -211,7 +215,29 @@ def _execute_active_turn_compact(
             after_tokens=after_tokens,
         )
         updated = _commit_active_turn_compact(agent, plan, request, replacement, after_tokens)
+    except InterruptedError:
+        _emit_progress(
+            callback,
+            progress,
+            phase="superseded",
+            stage="candidate_discarded",
+            percent=0,
+        )
+        raise
     except Exception as exc:
+        # A transport may surface its own exception after the stop callback closes it. Recheck
+        # typed interruption before classifying that close as a Compact/provider failure.
+        try:
+            raise_if_compact_interrupted(request.interrupt_check)
+        except InterruptedError:
+            _emit_progress(
+                callback,
+                progress,
+                phase="superseded",
+                stage="candidate_discarded",
+                percent=0,
+            )
+            raise
         record_live_tool_compact_failure(plan.binding, exc)
         _emit_progress(
             callback,
@@ -291,9 +317,9 @@ def _active_turn_replacement_summary(
     return replacement
 
 
-# LLM: This helper is the sole checkpoint/CAS writer for the recovery candidate. Progress at 92%
-# happens after checkpoint append and before CAS, matching the ordinary live-tool path.
-# 函数用途: 用冻结的边界提交一次 active-turn Compact，并在 checkpoint 后更新进度。
+# LLM: This helper is the sole checkpoint/CAS writer for the recovery candidate and forwards the
+# same interrupt check. Progress at 92% remains between checkpoint append and CAS.
+# 函数用途: 用冻结边界可中断地提交 active-turn Compact，并在恢复点后更新进度。
 def _commit_active_turn_compact(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
@@ -314,6 +340,7 @@ def _commit_active_turn_compact(
             request_id=str(request.request_id or ""),
             attempt_id=str(request.attempt_id or request.request_id or ""),
             forced=True,
+            interrupt_check=request.interrupt_check,
             after_checkpoint=lambda: _emit_progress(
                 request.progress_callback,
                 plan.progress,

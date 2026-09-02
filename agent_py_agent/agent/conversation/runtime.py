@@ -15,7 +15,7 @@ from ..backends.errors import (
     is_provider_transient_error,
     is_provider_usage_limit_error,
 )
-from ..concurrency.interrupt import register_interruptible
+from ..concurrency.interrupt import is_interrupted, register_interruptible
 from ..contracts.subagent_completion import (
     DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
     subagent_completion_context_from_observations,
@@ -1304,6 +1304,7 @@ def _run_background_main_turn_with_compact(
                     attempt_id=str(run_params.attempt_id or run_params.request_id or ""),
                     task_prompt=user_prompt,
                     progress_callback=activity_sink.write_conversation_compact_progress,
+                    interrupt_check=is_interrupted,
                 ),
             )
             if not active_turn_compact.compacted:
@@ -1351,8 +1352,8 @@ def _next_background_overflow_carry(
 
 
 # LLM: The latest ConversationThread and its canonical Compact CAS are the only retry authority;
-# the volatile activity sink may display progress but cannot manufacture a generation.
-# 函数用途: 强制压缩后台主代理已经完成的会话前缀，并返回最新线程供同一轮继续。
+# the registered background interrupt crosses summary and commit, while activity is display-only.
+# 函数用途: 可中断地压缩后台主代理已完成前缀，并返回最新线程供同一轮继续。
 def _compact_background_main_thread(
     runtime: BackgroundMainAgentRuntime,
     current: ConversationThread,
@@ -1373,6 +1374,7 @@ def _compact_background_main_thread(
             current_prompt=str(current_prompt or ""),
             force=True,
             progress_callback=activity_sink.write_conversation_compact_progress,
+            interrupt_check=is_interrupted,
         ),
     )
     return compact.thread

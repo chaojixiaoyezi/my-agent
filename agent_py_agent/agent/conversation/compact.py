@@ -15,11 +15,13 @@ from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
 from .compact_checkpoint import CompactCheckpointRequest, write_compact_checkpoint
 from .compact_guard import (
+    CompactInterruptCheck,
     ConversationCompactCircuitOpenError,
     ConversationCompactError,
     compact_circuit_is_open,
     compact_exception_code,
     compact_partitions,
+    raise_if_compact_interrupted,
     record_compact_failure,
 )
 from .compact_progress import (
@@ -116,7 +118,7 @@ class ConversationCompactOptions:
     force: bool = False
     custom_instructions: str = ""
     progress_callback: Callable[[dict[str, object]], object] | None = None
-    interrupt_check: Callable[[], bool] | None = None
+    interrupt_check: CompactInterruptCheck | None = None
 
 
 # LLM: This immutable request keeps one compact invocation's authority, token baseline, progress,
@@ -139,7 +141,7 @@ class _CompactRunRequest:
     task_id: str = ""
     custom_instructions: str = ""
     progress_callback: Callable[[dict[str, object]], object] | None = None
-    interrupt_check: Callable[[], bool] | None = None
+    interrupt_check: CompactInterruptCheck | None = None
 
 
 # LLM: A candidate is still non-authoritative until its checkpoint id is written and referenced.
@@ -460,7 +462,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     )
     partition_count = max(1, len(partitions))
     for partition_index, (compact_rows, retained_tail) in enumerate(partitions):
-        _raise_if_compact_interrupted(request)
+        raise_if_compact_interrupted(request.interrupt_check)
         summarize_percent = 15 + int(partition_index * 50 / partition_count)
         measure_percent = 15 + int((partition_index + 0.75) * 50 / partition_count)
         _emit_compact_progress(
@@ -527,7 +529,7 @@ def _build_compact_candidate(
     compact_rows: list[MessageLogEntry],
     retained_tail: list[MessageLogEntry],
 ) -> _CompactCandidate:
-    _raise_if_compact_interrupted(request)
+    raise_if_compact_interrupted(request.interrupt_check)
     evidence = _merge_compact_operation_evidence(
         request.thread.compact_operation_evidence,
         compact_rows,
@@ -542,7 +544,7 @@ def _build_compact_candidate(
         run_id=request.run_id,
         task_id=request.task_id,
     )
-    _raise_if_compact_interrupted(request)
+    raise_if_compact_interrupted(request.interrupt_check)
     projected_after = _projected_context_tokens(
         request.agent,
         summary,
@@ -567,7 +569,7 @@ def _commit_compact_candidate(
     request: _CompactRunRequest,
     candidate: _CompactCandidate,
 ) -> ConversationCompactResult:
-    _raise_if_compact_interrupted(request)
+    raise_if_compact_interrupted(request.interrupt_check)
     last_row = candidate.compact_rows[-1]
     byte_offset = request.store.message_byte_offset_after(
         request.thread.thread_id,
@@ -595,7 +597,7 @@ def _commit_compact_candidate(
             forced=request.forced,
         ),
     )
-    _raise_if_compact_interrupted(request)
+    raise_if_compact_interrupted(request.interrupt_check)
     _emit_compact_progress(
         request,
         phase="progress",
@@ -629,22 +631,6 @@ def _commit_compact_candidate(
             list(candidate.retained_tail)
         ),
     )
-
-
-# LLM: Compact interruption is checked around every expensive or mutating boundary.  A cancelled
-# candidate may leave an unreferenced checkpoint file, but it must never advance the canonical
-# generation/cursor; checkpoint retention can safely sweep that unreachable file later.
-# 函数用途: 在模型调用、恢复点和最终 CAS 前确认本次压缩仍被允许继续。
-def _raise_if_compact_interrupted(request: _CompactRunRequest) -> None:
-    check = request.interrupt_check
-    if check is None:
-        return
-    try:
-        interrupted = bool(check())
-    except Exception:
-        interrupted = True
-    if interrupted:
-        raise InterruptedError("conversation compact interrupted by user")
 
 
 # LLM: progress callback is a read-only projection. A failed terminal may carry only the typed,

@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, TypeAlias
 
 from ..memory_archive import estimate_tokens
 from ..runtime_errors import RecoverableRuntimeError
@@ -12,6 +13,13 @@ from .models import ConversationThread, MessageLogEntry
 
 if TYPE_CHECKING:
     from .store import ConversationStore
+
+
+# LLM: Every Compact producer uses this read-only callback contract at expensive and mutating
+# boundaries. Callback errors fail closed because losing the stop signal is more dangerous than
+# discarding an uncommitted candidate.
+# 类型用途: 表示一次压缩是否已被当前回合要求停止；只读状态，不允许回调自己修改压缩账本。
+CompactInterruptCheck: TypeAlias = Callable[[], bool]
 
 
 # LLM: Compact failures are typed runtime facts; callers must not infer a retry class from text.
@@ -28,6 +36,20 @@ class ConversationCompactError(RecoverableRuntimeError):
 # 类用途: 表示同一会话连续压缩失败已经熔断，冷却结束后才允许下一次真实尝试。
 class ConversationCompactCircuitOpenError(ConversationCompactError):
     category = "conversation_compact_circuit"
+
+
+# LLM: Transcript, active-turn archive and native-IR Compact must share this exact interruption
+# interpretation. It raises before checkpoint/CAS; a successful CAS is never rolled back later.
+# 函数用途: 在压缩的模型调用、内存候选、恢复点和最终提交前统一检查用户停止信号。
+def raise_if_compact_interrupted(check: CompactInterruptCheck | None) -> None:
+    if check is None:
+        return
+    try:
+        interrupted = bool(check())
+    except Exception:
+        interrupted = True
+    if interrupted:
+        raise InterruptedError("conversation compact interrupted by user")
 
 
 # LLM: Prefer one bounded suffix of complete user/assistant turns, then retry once with no tail.
@@ -155,11 +177,13 @@ def compact_exception_code(exc: BaseException) -> str:
 
 
 __all__ = [
+    "CompactInterruptCheck",
     "ConversationCompactCircuitOpenError",
     "ConversationCompactError",
     "compact_circuit_is_open",
     "compact_exception_code",
     "compact_partitions",
+    "raise_if_compact_interrupted",
     "record_compact_failure",
     "split_recent_complete_turns",
 ]

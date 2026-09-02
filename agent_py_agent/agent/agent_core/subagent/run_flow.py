@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from ...concurrency.interrupt import is_interrupted
 from ...conversation.active_turn_input import (
     exclude_active_turn_user_input_ids,
     merge_active_turn_user_inputs,
@@ -180,10 +181,10 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
     )
 
 
-# LLM: The delegated runner keeps task_local permission/memory isolation while the structured
-# authoritative-thread flag delegates all durable Compact to ConversationStore. Overflow retries
-# carry typed tool/input progress so completed work is not replayed.
-# 函数用途: 使用子代理自己的历史执行一轮模型任务；超限时压缩旧轮次并在同一尝试内继续。
+# LLM: The delegated runner keeps task_local isolation while all durable Compact uses the child's
+# ConversationThread. Its registered interrupt follows both preflight and overflow retries, while
+# typed tool/input progress prevents completed work replay.
+# 函数用途: 使用子代理自己的历史执行模型任务；超限压缩可随时停止，成功后仍在同一尝试继续。
 def _run_subagent_model_turn(
     lifecycle,
     prompt: str,
@@ -212,6 +213,7 @@ def _run_subagent_model_turn(
             prompt=prompt,
             attempt_id=attempt_id,
             progress_callback=compact_progress,
+            interrupt_check=is_interrupted,
         )
         for _attempt in range(8):
             run_params = _subagent_model_run_params(
@@ -260,6 +262,7 @@ def _run_subagent_model_turn(
                 attempt_id=attempt_id,
                 force=True,
                 progress_callback=compact_progress,
+                interrupt_check=is_interrupted,
             )
             if (
                 refreshed.compact_generation <= current.compact_generation

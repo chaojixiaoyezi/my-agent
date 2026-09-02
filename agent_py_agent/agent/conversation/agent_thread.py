@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..tooling.operation_verification import public_operation_verification
+from .compact_guard import CompactInterruptCheck
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
@@ -111,9 +112,9 @@ def ensure_subagent_thread(manager: object, task: object) -> ConversationThread 
     )
 
 
-# LLM: The current child prompt is appended once before preflight and excluded by its typed
-# request id from the compact prefix. This mirrors foreground turn ordering without a Gateway.
-# 函数用途: 在子代理调用模型前可靠记录当前输入、执行自动 Compact，并生成有界历史注入。
+# LLM: The current child prompt is appended once before preflight and excluded by its typed request
+# id. The runner interrupt check crosses summary/checkpoint/CAS exactly like the foreground path.
+# 函数用途: 子代理调用模型前记录输入并可中断地自动 Compact，再生成有界历史注入。
 def prepare_subagent_thread_turn(
     agent: object,
     task: object,
@@ -122,6 +123,7 @@ def prepare_subagent_thread_turn(
     attempt_id: str,
     force: bool = False,
     progress_callback: Callable[[dict[str, object]], object] | None = None,
+    interrupt_check: CompactInterruptCheck | None = None,
 ) -> AgentThreadTurnContext:
     from .compact import ConversationCompactOptions, prepare_conversation_context
 
@@ -157,6 +159,7 @@ def prepare_subagent_thread_turn(
             exclude_request_id=selected_attempt,
             force=bool(force),
             progress_callback=progress_callback,
+            interrupt_check=interrupt_check,
         ),
     )
     return AgentThreadTurnContext(

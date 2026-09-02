@@ -61,6 +61,10 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
    副作用仍以 archive、operation ledger、artifact 和真实文件为准。transcript Compact 对正常完成的空正文
    使用相同原则，从旧摘要、raw row 投影和结构化 operation evidence 生成有界续接包。presentation/no-save
    辅助回合可做临时窗口整理，但不得推进 generation 或冒充 `compact N`。
+   用户 stop/cancellation 不是摘要失败：三条 Compact 路径在慢摘要前后、候选改写前后、checkpoint 前后和
+   generation CAS 前读取同一个中断回调；CAS 前恢复未提交的 IR/tool-context 并发布中性
+   `superseded/candidate_discarded`，不增加失败或推进代次。checkpoint 已落盘但 CAS 未赢时，它只是不可达候选；
+   CAS 已成功后不得回滚已提交代次，避免持久历史与客户端分叉。
 9. `/status`、TUI 和 Web 只显示 thread 的一个 compact generation；消息段压缩与可持久 live-tool 压缩都
    推进它。每次真实尝试另有唯一 operation id，进度还必须携带成对的 `source_kind/commit_authority`：
    transcript 和可持久 live-tool 的提交权都属于 conversation thread，presentation/no-save 的临时整理只属于

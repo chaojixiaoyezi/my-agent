@@ -7,6 +7,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 
 from ..backends import ModelResponse
@@ -18,6 +19,7 @@ from ..contracts.gates.tool_guardrail import (
     consecutive_same_failure_count,
     failure_class_of_result,
 )
+from ..conversation.compact_guard import raise_if_compact_interrupted
 from ..conversation.compact_progress import (
     COMPACT_AUTHORITY_CONVERSATION,
     COMPACT_AUTHORITY_TURN_LOCAL,
@@ -444,8 +446,9 @@ def _native_compact_policy(agent: object, params: ToolLoopExecuteParams) -> obje
     )
 
 
-# LLM: Planning may call the summary backend but cannot mutate native IR or advance generation.
-# 函数用途: 在删减历史前算清触发线、健康尾部、线程绑定和完整替代摘要。
+# LLM: Planning checks the run interrupt before it may call the summary backend; it still cannot
+# mutate native IR or advance generation.
+# 函数用途: 停止检查通过后算清触发线、健康尾部、线程绑定和完整替代摘要。
 def _prepare_native_compact_plan(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -456,6 +459,7 @@ def _prepare_native_compact_plan(
 ) -> _NativeCompactPlan | None:
     from .model.context_pressure import model_visible_context_tokens
 
+    raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
     policy = _native_compact_policy(agent, params)
     limit = int(
         policy.trigger_tokens
@@ -512,9 +516,9 @@ def _prepare_native_compact_plan(
     )
 
 
-# LLM: An authoritative turn binds its exact thread before summary generation; empty summaries
-# fail through the same circuit instead of allowing an untracked destructive reduction.
-# 函数用途: 找到本代理自己的会话线程并生成完整替代摘要，失败时记录统一熔断事实。
+# LLM: An authoritative turn binds its exact thread before summary generation and rechecks stop
+# before classifying an empty result; only real empty summaries consume the shared circuit.
+# 函数用途: 找到本代理线程并可中断地生成完整摘要，真实失败时才记录统一熔断事实。
 def _live_compact_binding_and_summary(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -566,6 +570,7 @@ def _live_compact_binding_and_summary(
         **progress,
     )
     summary = _summarize_live_compact(agent, params, binding, progress)
+    raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
     if binding is None or summary:
         return (
             binding,
@@ -593,9 +598,9 @@ def _live_compact_binding_and_summary(
     raise error
 
 
-# LLM: Summary failure shares the live Compact circuit and closes the already-visible progress
-# block before propagating. Mechanical fallback remains valid only when the caller has no binding.
-# 函数用途: 调用运行中 Compact 摘要模型，并在失败时恢复为明确的进度终态。
+# LLM: The slow summary call checks both cancellation sources before and after provider I/O.
+# Interruption closes the block neutrally; only real failure enters the live Compact circuit.
+# 函数用途: 可中断地调用 Compact 摘要模型，并把停止和真实失败投影成不同终态。
 def _summarize_live_compact(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -605,13 +610,37 @@ def _summarize_live_compact(
     from ..conversation.compact_guard import compact_exception_code
     from ..conversation.live_tool_compact import record_live_tool_compact_failure
 
+    interrupt_check = partial(_native_compact_interrupted, params)
     try:
-        return _native_tool_history_summary(
+        raise_if_compact_interrupted(interrupt_check)
+        summary = _native_tool_history_summary(
             agent,
             params,
             previous_summary=(binding.thread.summary if binding is not None else ""),
         )
+        raise_if_compact_interrupted(interrupt_check)
+        return summary
+    except InterruptedError:
+        _emit_native_compact_progress(
+            params,
+            phase="superseded",
+            stage="candidate_discarded",
+            percent=0,
+            **progress,
+        )
+        raise
     except Exception as exc:
+        try:
+            raise_if_compact_interrupted(interrupt_check)
+        except InterruptedError:
+            _emit_native_compact_progress(
+                params,
+                phase="superseded",
+                stage="candidate_discarded",
+                percent=0,
+                **progress,
+            )
+            raise
         record_live_tool_compact_failure(binding, exc)
         _emit_native_compact_progress(
             params,
@@ -624,9 +653,9 @@ def _summarize_live_compact(
         raise
 
 
-# LLM: Mutation is transactional in memory: any summary/checkpoint/CAS failure restores both IR
-# and its human-readable window marker before sharing the failure circuit.
-# 函数用途: 按计划成对删减工具历史；提交失败时把模型上下文完整恢复到操作前。
+# LLM: Mutation is transactional in memory: interruption or failure restores IR and its readable
+# marker. Only real summary/checkpoint/CAS errors share the failure circuit.
+# 函数用途: 按计划成对删减工具历史；停止或提交失败都把模型上下文完整恢复到操作前。
 def _apply_native_compact_plan(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -639,6 +668,7 @@ def _apply_native_compact_plan(
     original_ir = list(params.tool_ir_history)
     original_tool_context = list(params.tool_context)
     try:
+        raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
         dropped = compact_native_ir_to_token_budget(
             params,
             max_tokens=max(1, plan.target_tokens),
@@ -657,6 +687,7 @@ def _apply_native_compact_plan(
             dropped=dropped,
             summary_covers_window=bool(plan.semantic_summary),
         )
+        raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
         _emit_native_compact_progress(
             params,
             phase="progress",
@@ -673,7 +704,17 @@ def _apply_native_compact_plan(
         return _commit_and_publish_native_compact(
             agent, params, plan, dropped=dropped, after_tokens=after_tokens
         )
+    except InterruptedError:
+        _restore_native_compact_candidate(params, original_ir, original_tool_context)
+        _emit_native_compact_superseded(params, plan)
+        raise
     except Exception as exc:
+        try:
+            raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+        except InterruptedError:
+            _restore_native_compact_candidate(params, original_ir, original_tool_context)
+            _emit_native_compact_superseded(params, plan)
+            raise
         _restore_native_compact_candidate(params, original_ir, original_tool_context)
         record_live_tool_compact_failure(plan.binding, exc)
         _emit_native_compact_failed(
@@ -717,10 +758,9 @@ def _settle_native_ir_window(
     return dropped, estimator()
 
 
-# LLM: A live-tool generation becomes durable and visible only after the complete candidate has
-# reached its recovery target with one recent-tail budget below the trigger. Checkpoint/CAS
-# remains before the UI projection.
-# 函数用途: 只提交已经腾出完整近期工作空间的运行中 Compact，并把同一代次和 token 数投给 TUI。
+# LLM: A live-tool generation becomes durable only after the settled candidate passes another
+# interrupt check and its checkpoint/CAS wins; UI completion is emitted afterwards.
+# 函数用途: 停止检查通过后提交健康的运行中 Compact，再把已确认代次和 token 数投给 TUI。
 def _commit_and_publish_native_compact(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -729,6 +769,7 @@ def _commit_and_publish_native_compact(
     dropped: int,
     after_tokens: int,
 ) -> int:
+    raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
     preserved_pairs = _native_tool_result_count(params)
     if plan.binding is not None:
         _emit_native_compact_progress(
@@ -834,8 +875,9 @@ def _reduce_native_ir_to_target(
     return dropped
 
 
-# LLM: This is the only bridge from a settled native window to the canonical thread commit.
-# 函数用途: 计算精确移除/保留的调用编号，并把已稳定的窗口提交为下一代 Compact。
+# LLM: This is the only bridge from a settled native window to the canonical thread commit and it
+# forwards the run-owned interrupt check across checkpoint/CAS.
+# 函数用途: 计算精确调用边界并可中断地把稳定窗口提交为下一代 Compact。
 def _commit_native_ir_generation(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -870,6 +912,7 @@ def _commit_native_ir_generation(
             request_id=params.request_id,
             attempt_id=params.attempt_id,
             forced=plan.forced,
+            interrupt_check=lambda: _native_compact_interrupted(params),
             after_checkpoint=lambda: _emit_native_compact_progress(
                 params,
                 phase="progress",
@@ -880,6 +923,15 @@ def _commit_native_ir_generation(
         ),
     )
     return max(0, int(updated_thread.compact_generation or 0))
+
+
+# LLM: Native Compact observes both the runner thread interrupt and the run-owned cancellation
+# token. The callback is intentionally side-effect free and is interpreted fail-closed by the
+# shared Compact guard.
+# 函数用途: 汇总当前工具循环的两种结构化停止信号，供摘要、内存候选和 checkpoint/CAS 共用。
+def _native_compact_interrupted(params: ToolLoopExecuteParams) -> bool:
+    token = getattr(params, "cancellation_token", None)
+    return is_interrupted() or bool(token is not None and token.cancelled)
 
 
 # LLM: The display generation must be chosen before a potentially slow summary call and must

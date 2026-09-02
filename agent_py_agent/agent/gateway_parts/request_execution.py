@@ -1353,8 +1353,8 @@ def _gateway_overflow_carry(
 
 
 # LLM: Transcript Compact has first claim on completed history. If it cannot advance, only the same
-# thread's active-turn checkpoint/CAS may authorize a retry; volatile progress never does.
-# 函数用途: 为一次 Gateway 溢出推进 transcript 或 active-turn Compact，并返回刷新的会话上下文。
+# thread's interruptible active-turn checkpoint/CAS may authorize a retry; progress never does.
+# 函数用途: 可中断地为 Gateway 溢出推进 transcript 或 active-turn Compact，并刷新会话上下文。
 def _gateway_compact_overflowing_turn(
     context: _GatewayAskRunContext,
     prompt: str,
@@ -1401,6 +1401,7 @@ def _gateway_compact_overflowing_turn(
             attempt_id=str(request.get("execution_attempt_id") or context.request_id),
             task_prompt=prompt,
             progress_callback=_gateway_compact_progress_callback(context.on_chunk),
+            interrupt_check=is_interrupted,
         ),
     )
     if not compacted.compacted:
@@ -2444,6 +2445,9 @@ def _path_is_within(path: Path, root: Path) -> bool:
         return False
 
 
+# LLM: Gateway preflight shares the registered request interrupt with Compact. User stop propagates
+# unchanged; only real compact errors become bounded load diagnostics with the original thread.
+# 函数用途: 加载并按需压缩 Gateway 会话；停止立即退出，真实失败才保留旧线程并登记诊断。
 def _load_gateway_compact_context(
     inputs: _GatewayConversationLoadRequest,
     store: object,
@@ -2463,8 +2467,11 @@ def _load_gateway_compact_context(
                 exclude_request_id=inputs.request_id,
                 force=force,
                 progress_callback=_gateway_compact_progress_callback(inputs.on_chunk),
+                interrupt_check=is_interrupted,
             ),
         )
+    except InterruptedError:
+        raise
     except Exception as exc:
         load_errors.append(_conversation_error(exc, "gateway.conversation.compact"))
         return thread, (), 0, {}

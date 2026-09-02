@@ -71,6 +71,7 @@ from agent_py_agent.agent.conversation.authority import (
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.memory_archive import estimate_tokens
+from agent_py_agent.agent.tooling.cancellation import CancellationToken
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
     canonical_history_result,
@@ -340,6 +341,66 @@ def test_active_turn_archive_compact_hides_only_committed_source_calls(tmp_path)
         "carried-4",
         "carried-5",
     ]
+
+
+def test_active_turn_archive_interrupt_after_summary_does_not_commit_or_fail(tmp_path):
+    """慢摘要刚返回时收到停止，只撤候选，不写 checkpoint、代次或失败熔断。"""
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "active-turn-interrupt",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    backend = _SummaryBackend(128_000)
+    token = CancellationToken()
+    original_generate = backend.generate
+
+    def generate_then_interrupt(*args, **kwargs):
+        response = original_generate(*args, **kwargs)
+        token.cancel("stop-after-summary")
+        return response
+
+    backend.generate = generate_then_interrupt
+    agent.backend = backend
+    agent.config.model_context_window_tokens = 128_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    attrs = {
+        CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+        "conversation_thread_id": thread.thread_id,
+    }
+    progress: list[dict[str, object]] = []
+
+    with pytest.raises(InterruptedError, match="interrupted by user"):
+        compact_carried_active_turn_archive(
+            agent,
+            store,
+            thread,
+            [_carried_record(index) for index in range(1, 6)],
+            ActiveTurnArchiveCompactRequest(
+                task_attributes=attrs,
+                request_id="request-active-turn-interrupt",
+                attempt_id="attempt-active-turn-interrupt",
+                task_prompt="继续长任务",
+                progress_callback=lambda value: progress.append(dict(value)),
+                interrupt_check=lambda: token.cancelled,
+            ),
+        )
+
+    unchanged = store.load_thread(thread.thread_id)
+    assert unchanged is not None
+    assert unchanged.compact_generation == 0
+    assert unchanged.compact_checkpoint_id == ""
+    assert unchanged.compact_consecutive_failures == 0
+    assert progress[-1]["phase"] == "superseded"
+    assert progress[-1]["stage"] == "candidate_discarded"
+    assert not (tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl").exists()
 
 
 def test_reconstructed_runtime_uses_full_archive_but_compacted_model_projection():
@@ -1120,6 +1181,216 @@ def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
         "failed",
     ]
     assert not any(row["phase"] == "completed" for row in sink.progress_rows)
+
+
+def test_persistent_native_interrupt_after_summary_restores_ir_without_failure(tmp_path):
+    """摘要请求已计费但停止先于内存改写时，原生历史保持逐项相同且不触发熔断。"""
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "native-summary-interrupt",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    backend = _SummaryBackend(10_000)
+    token = CancellationToken()
+    original_generate = backend.generate
+
+    def generate_then_interrupt(*args, **kwargs):
+        response = original_generate(*args, **kwargs)
+        token.cancel("stop-after-summary")
+        return response
+
+    backend.generate = generate_then_interrupt
+    agent.backend = backend
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(
+        _params(),
+        save=True,
+        cancellation_token=token,
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+        effective_on_chunk=(sink := _ContextCompactionSink()),
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    before_ir = list(params.tool_ir_history)
+    before_context = list(params.tool_context)
+
+    with pytest.raises(InterruptedError, match="interrupted by user"):
+        build_tool_loop_prompt(agent, params)
+
+    unchanged = store.load_thread(thread.thread_id)
+    assert unchanged is not None
+    assert params.tool_ir_history == before_ir
+    assert params.tool_context == before_context
+    assert unchanged.compact_generation == 0
+    assert unchanged.compact_checkpoint_id == ""
+    assert unchanged.compact_consecutive_failures == 0
+    assert sink.progress_rows[-1]["phase"] == "superseded"
+    assert not any(row["phase"] == "failed" for row in sink.progress_rows)
+
+
+def test_persistent_native_already_cancelled_never_starts_summary_or_mutation(tmp_path):
+    """进入预算检查前已经取消时，不再调用摘要模型，也不碰现有原生历史。"""
+
+    agent = _native_agent(tmp_path)
+    backend = _SummaryBackend(10_000)
+    agent.backend = backend
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    token = CancellationToken()
+    token.cancel("already-stopped")
+    params = replace(
+        _params(),
+        save=True,
+        cancellation_token=token,
+        effective_on_chunk=(sink := _ContextCompactionSink()),
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    before_ir = list(params.tool_ir_history)
+    before_context = list(params.tool_context)
+
+    with pytest.raises(InterruptedError, match="interrupted by user"):
+        build_tool_loop_prompt(agent, params)
+
+    assert backend.calls == []
+    assert params.tool_ir_history == before_ir
+    assert params.tool_context == before_context
+    assert sink.progress_rows == []
+
+
+def test_persistent_native_interrupt_after_ir_mutation_rolls_back_without_failure(
+    tmp_path,
+    monkeypatch,
+):
+    """内存候选已经成对裁剪后收到停止，必须恢复 IR/tool-context 再退出。"""
+
+    import agent_py_agent.agent.agent_core._tool_loop_service as tool_loop_service
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "native-mutation-interrupt",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    token = CancellationToken()
+    params = replace(
+        _params(),
+        save=True,
+        cancellation_token=token,
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+        effective_on_chunk=(sink := _ContextCompactionSink()),
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    before_ir = list(params.tool_ir_history)
+    before_context = list(params.tool_context)
+    original_settle = tool_loop_service._settle_native_ir_window
+
+    def settle_then_interrupt(**kwargs):
+        result = original_settle(**kwargs)
+        token.cancel("stop-after-ir-mutation")
+        return result
+
+    monkeypatch.setattr(tool_loop_service, "_settle_native_ir_window", settle_then_interrupt)
+    with pytest.raises(InterruptedError, match="interrupted by user"):
+        build_tool_loop_prompt(agent, params)
+
+    unchanged = store.load_thread(thread.thread_id)
+    assert unchanged is not None
+    assert params.tool_ir_history == before_ir
+    assert params.tool_context == before_context
+    assert unchanged.compact_generation == 0
+    assert unchanged.compact_checkpoint_id == ""
+    assert unchanged.compact_consecutive_failures == 0
+    assert sink.progress_rows[-1]["phase"] == "superseded"
+
+
+def test_persistent_native_interrupt_after_checkpoint_leaves_orphan_without_cas(tmp_path):
+    """checkpoint 已写而 CAS 尚未执行时停止，只留下不可达候选，不推进代次或失败账。"""
+
+    token = CancellationToken()
+
+    class InterruptAtCommitSink(_ContextCompactionSink):
+        def write_conversation_compact_progress(self, value: dict[str, object]) -> bool:
+            super().write_conversation_compact_progress(value)
+            if value.get("stage") == "committing":
+                token.cancel("stop-after-checkpoint")
+            return True
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "native-checkpoint-interrupt",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    sink = InterruptAtCommitSink()
+    params = replace(
+        _params(),
+        save=True,
+        cancellation_token=token,
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+        effective_on_chunk=sink,
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    before_ir = list(params.tool_ir_history)
+    before_context = list(params.tool_context)
+
+    with pytest.raises(InterruptedError, match="interrupted by user"):
+        build_tool_loop_prompt(agent, params)
+
+    unchanged = store.load_thread(thread.thread_id)
+    assert unchanged is not None
+    assert params.tool_ir_history == before_ir
+    assert params.tool_context == before_context
+    assert unchanged.compact_generation == 0
+    assert unchanged.compact_checkpoint_id == ""
+    assert unchanged.compact_consecutive_failures == 0
+    checkpoint_path = tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
+    orphan = json.loads(checkpoint_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert orphan["status"] == "validated_candidate"
+    assert orphan["checkpoint_id"] != unchanged.compact_checkpoint_id
+    assert [row["stage"] for row in sink.progress_rows][-2:] == [
+        "committing",
+        "candidate_discarded",
+    ]
+    assert not any(row["phase"] == "failed" for row in sink.progress_rows)
 
 
 def test_persistent_native_window_restores_ir_when_compact_cas_fails(

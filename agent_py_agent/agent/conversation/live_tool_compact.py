@@ -19,10 +19,12 @@ from .compact_checkpoint import (
     write_live_tool_compact_checkpoint,
 )
 from .compact_guard import (
+    CompactInterruptCheck,
     ConversationCompactCircuitOpenError,
     ConversationCompactError,
     compact_circuit_is_open,
     compact_exception_code,
+    raise_if_compact_interrupted,
     record_compact_failure,
 )
 from .models import ConversationCompactCommit, ConversationThread
@@ -41,8 +43,9 @@ class LiveToolCompactBinding:
     thread: ConversationThread
 
 
-# LLM: This immutable request keeps one live-tool candidate's summary, boundaries and usage aligned.
-# 类用途: 打包一次运行中压缩提交的摘要、调用编号、token 数和请求身份，避免参数错位。
+# LLM: This immutable request keeps one live-tool candidate's summary, boundaries, usage and
+# interruption check aligned through checkpoint/CAS; the UI callback remains observation-only.
+# 类用途: 打包一次运行中压缩的摘要、调用编号、token、请求身份和停止检查，避免提交阶段参数错位。
 @dataclass(frozen=True)
 class LiveToolCompactCommitRequest:
     summary: str
@@ -55,6 +58,7 @@ class LiveToolCompactCommitRequest:
     attempt_id: str
     forced: bool = False
     after_checkpoint: Callable[[], None] | None = None
+    interrupt_check: CompactInterruptCheck | None = None
 
 
 # LLM: Only a policy-approved transcript-authoritative turn may persist a live-tool Compact.
@@ -102,15 +106,16 @@ def resolve_live_tool_compact_binding(
     return LiveToolCompactBinding(store=store, thread=thread)
 
 
-# LLM: The checkpoint is written before one generation CAS. Transcript cursor/evidence remain
-# unchanged because the source is current-turn native IR, while source pair totals advance.
-# 函数用途: 提交一次工具历史压缩；记录精确调用编号、token 前后值和完整替代摘要。
+# LLM: The checkpoint is written before one generation CAS, with the shared interrupt check on
+# both sides of that write. Once CAS wins it is authoritative and must not be rolled back.
+# 函数用途: 可中断地提交工具历史压缩；停止时最多留下孤立恢复点，不推进代次或游标。
 def commit_live_tool_compact(
     agent: SimpleAgent,
     binding: LiveToolCompactBinding,
     request: LiveToolCompactCommitRequest,
 ) -> ConversationThread:
     source_ids, retained_ids, replacement = _validated_live_tool_request(request)
+    raise_if_compact_interrupted(request.interrupt_check)
     checkpoint_id = write_live_tool_compact_checkpoint(
         agent,
         LiveToolCompactCheckpointRequest(
@@ -132,6 +137,9 @@ def commit_live_tool_compact(
         except Exception:
             # 进度投影不是 Compact 权威；即使 TUI 已断开也必须继续完成同一 CAS。
             pass
+    # Check after the durable candidate exists but before it receives live authority. An orphan
+    # checkpoint is recoverable evidence; advancing generation after /stop is not.
+    raise_if_compact_interrupted(request.interrupt_check)
     return binding.store.update_compact_state(
         binding.thread.thread_id,
         commit=ConversationCompactCommit(
@@ -181,13 +189,14 @@ def _validated_live_tool_request(
     return source_ids, retained_ids, replacement
 
 
-# LLM: Failure accounting shares the transcript Compact circuit and never masks the original error.
-# 函数用途: 运行中压缩失败时只累加同一 thread 的熔断事实，不推进摘要、游标或代次。
+# LLM: Failure accounting shares the transcript Compact circuit, but typed user interruption is a
+# neutral discarded candidate and must never consume the failure budget.
+# 函数用途: 真实压缩失败才累加同一 thread 的熔断事实；用户停止不算失败也不推进代次。
 def record_live_tool_compact_failure(
     binding: LiveToolCompactBinding | None,
     exc: BaseException,
 ) -> None:
-    if binding is None:
+    if binding is None or isinstance(exc, InterruptedError):
         return
     record_compact_failure(
         binding.store,
