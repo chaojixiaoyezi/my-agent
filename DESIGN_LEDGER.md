@@ -1,5 +1,20 @@
 # DESIGN LEDGER
 
+## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：R156 Focused 通过，真 TUI 待验】
+
+- Full Access 继续经过统一 attempt sandbox，但 Linux 根目录 `--bind / /` 后必须用
+  `--dev-bind /dev /dev` 重新开放真实设备树。RHEL/SELinux enforcing 测试机证明：普通根 bind
+  会继承 nodev 语义，导致 `/dev/null`、`/dev/zero` 等即使是 0666 也返回 EACCES；这不是 pytest
+  或模型问题。对照 会话运行时 `linux-sandbox/src/bwrap.rs` 的“根挂载后再挂 `/dev`”层次，my-agent
+  选择 bwrap 专用 `--dev-bind`，只作用于已经取得管理员 Full Access 的分支，不扩大 WorkspaceOnly。
+- 普通终态任务仍不自动吸附下一回合。为使“回到上次那个项目”能由模型聪明地找到精确目录，Gateway
+  completion 索引保留宿主生成的 `conversation_runtime`；`session_search` 只给
+  `gateway_request` 投影 typed `task_ref(request/thread/task/path/status)`。模型可按需检索并把绝对
+  `task_path` 交给既有写工具精确回绑，机器仍不解析用户措辞、不从标题或回答猜 cwd。
+- 两项均保持一个权威来源：设备权限仍由 SandboxSpec/bwrap argv 裁决；任务身份仍由 Gateway request
+  与 ConversationStore 裁决，LocalStore/task_ref 只是 owner 内只读搜索投影。旧记录可由既有 Gateway
+  index rebuild 从 done request 补齐，不新增常驻任务目录列表或每轮 token 注入。
+
 ## 2026-09-02 普通终态任务不再隐式吸附新回合【状态：R155 本机真 TUI/Focused 通过】
 
 - `ConversationThread.workspace_task_id` 收窄为状态/导航投影，不再让 `completed/interrupted`

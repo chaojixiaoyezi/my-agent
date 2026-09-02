@@ -42,6 +42,9 @@ def audit_request_processing(
     )
 
 
+# LLM: Completion replaces the same LocalStore source row written at queued/processing time, so
+# host-authored conversation_runtime must be carried forward or historical task paths disappear.
+# 函数用途: 将 Gateway 最终响应、原始请求和精确会话任务引用一起写入历史索引。
 def audit_request_completed(
     agent: SimpleAgent,
     *,
@@ -53,7 +56,11 @@ def audit_request_completed(
     )
     log_gateway_payload(
         agent,
-        {**response, "prompt": params.request.get("prompt", "")},
+        {
+            **response,
+            "prompt": params.request.get("prompt", ""),
+            "conversation_runtime": params.request.get("conversation_runtime", {}),
+        },
         event_type=event_type,
         request_path=params.request_path,
         response_path=params.response_path,

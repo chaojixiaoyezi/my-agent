@@ -1,5 +1,17 @@
 # Gateway Structure
 
+## Gateway 历史任务引用投影
+
+- `requests/{state}/<request_id>.json` 内的 `conversation_runtime` 是 request/thread/task/path 的宿主权威；
+  response 和 LocalStore 都不能独立发明或修改它。completion 写同一 `gateway_request` 索引行时必须从原
+  request 携带该字段，不能因最终 response 本身没有路径就覆盖丢失。
+- LocalStore metadata 只保存上述字段的 owner-local 搜索投影。`session_search` 仅在记录来源确为
+  `gateway_request`、task_id 非空且 task_path 为绝对路径时返回 `task_ref`；普通聊天、Memory、标题、摘要和
+  模型回复都不能生成该引用。discover/scroll/browse 使用同一投影函数，避免切换检索模式丢路径。
+- `task_ref` 只帮助模型定位历史工作，不是写授权。真正续作仍由当前 turn 的工具参数进入统一 write boundary，
+  再按同 thread canonical task path 执行 R155 的精确 rebind；owner 墙、冲突 active executor 和多路径歧义
+  继续 fail closed。
+
 ## ConversationTaskLink 与 TaskRun 收口
 
 - `ConversationTaskLink` 表示用户会话任务是否仍有执行意图；`TaskRun/AgentRun` 表示这一轮真实执行树是否已经

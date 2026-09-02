@@ -38,12 +38,14 @@
 
 ### 受管命令的基础设备文件
 
-状态：R130 真 TUI 发现失败样本，待对照 会话运行时 后修复
+状态：R156 已定位并完成底层修复，Focused 通过，待 `.10` 真 TUI
 
 解决问题：R130 主代理尝试运行 pytest 时，受管命令环境访问 `/dev/null` 得到
 `PermissionError`，pytest 的 capture 初始化因此失败；同一回合改用 unittest 后 18 项全通过，说明不是业务
-代码错误。本项不能靠提示模型规避 pytest，后续须先对照 会话运行时 的 sandbox `/dev` 挂载与 终端交互 命令执行
-边界，再修通所有受管命令最基本的空设备访问，同时保留 owner workspace 与系统设备写权限的安全墙。
+代码错误。R156 精确 A/B 已定位为 Full Access 的 `--bind / /` 继承 nodev；宿主设备与 WorkspaceOnly
+最小设备树都正常，并没有 SELinux AVC。对照 会话运行时 的根挂载后 `/dev` 覆盖层，当前追加
+`--dev-bind /dev /dev`，只恢复已授权管理员的真实设备语义，不扩大普通 owner。下一步由同 wheel 真 TUI
+直接跑常规 pytest 后移入 COMPLETED。
 
 ### Computer Use 复用开源执行器
 

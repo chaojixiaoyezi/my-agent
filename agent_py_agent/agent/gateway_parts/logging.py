@@ -106,9 +106,12 @@ def _gateway_payload_content(context: _GatewayPayloadRenderContext) -> str:
     )
 
 
+# LLM: Gateway metadata is a searchable projection, not a second task authority. Preserve only
+# the host-authored request/thread/task/path tuple so session_search can point back to canonical files.
+# 函数用途: 生成 Gateway 历史索引元数据，并保留后续续作所需的精确任务目录引用。
 def _gateway_payload_metadata(context: _GatewayPayloadRenderContext) -> dict:
     payload = context.payload
-    return {
+    metadata = {
         "request_id": context.request_id,
         "kind": context.kind,
         "status": context.status,
@@ -122,6 +125,34 @@ def _gateway_payload_metadata(context: _GatewayPayloadRenderContext) -> dict:
         "request_path": str(context.request_path or payload.get("request_file", "")),
         "response_path": str(context.response_path or ""),
     }
+    conversation_runtime = _gateway_conversation_runtime(
+        payload,
+        request_id=context.request_id,
+    )
+    if conversation_runtime:
+        metadata["conversation_runtime"] = conversation_runtime
+    return metadata
+
+
+# LLM: Do not infer task identity from prompt/response text or legacy filenames. The Gateway
+# request is the only source allowed to populate this index projection.
+# 函数用途: 从 Gateway 请求载荷中筛出可供历史检索返回的结构化会话任务字段。
+def _gateway_conversation_runtime(
+    payload: dict,
+    *,
+    request_id: str,
+) -> dict[str, str]:
+    runtime = payload.get("conversation_runtime")
+    if not isinstance(runtime, dict):
+        return {}
+    result = {
+        key: str(runtime.get(key) or "").strip()
+        for key in ("thread_id", "task_id", "task_path")
+        if str(runtime.get(key) or "").strip()
+    }
+    if request_id:
+        result["request_id"] = request_id
+    return result
 
 
 def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> None:

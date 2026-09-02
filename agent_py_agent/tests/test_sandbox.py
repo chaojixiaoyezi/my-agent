@@ -113,6 +113,29 @@ def test_full_access_shell_still_ro_binds_persona_files(tmp_path) -> None:
     assert all((str(home / name), str(home / name)) in ro_pairs for name in ("SOUL.md", "USER.md", "AGENTS.md"))
 
 
+def test_full_access_rebinds_device_tree_after_root_mount(tmp_path) -> None:
+    """Full Access 的根挂载不能把 /dev/null 等基础设备变成 nodev。"""
+    home = tmp_path / "owner"
+    workspace = tmp_path / "workspace"
+    home.mkdir()
+    workspace.mkdir()
+
+    argv = build_bwrap_argv(
+        SandboxSpec(
+            owner_home=home,
+            workspace=workspace,
+            bwrap_path="/fake/bwrap",
+            full_access=True,
+        )
+    )
+
+    root_bind = argv.index("--bind")
+    device_bind = argv.index("--dev-bind")
+    assert argv[root_bind + 1 : root_bind + 3] == ["/", "/"]
+    assert argv[device_bind + 1 : device_bind + 3] == ["/dev", "/dev"]
+    assert root_bind < device_bind
+
+
 def test_system_dirs_readonly(tmp_path) -> None:
     """系统库/工具只读(命令能跑但改不动系统);rm -rf / 删不掉这些。"""
     spec, _ = _spec(tmp_path)

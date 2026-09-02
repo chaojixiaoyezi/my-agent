@@ -1,5 +1,14 @@
 # TEST CHECKLIST
 
+## R156 Full Access 设备与历史续作定位
+
+- [x] Full Access 根挂载之后必须出现 `--dev-bind /dev /dev`，且 WorkspaceOnly 的最小设备树和 owner 墙不变。
+- [x] completion 索引保留 host-authored `conversation_runtime`；Gateway 历史结果投影 exact `task_ref`。
+- [x] Memory/普通来源不能靠同名 metadata 冒充任务路径；discover 与 browse 均保留合法 task_ref。
+- [ ] `.10` 单 Gateway + MiniMax-M2.7 真 TUI 直接运行常规 pytest，证明 `/dev/null` 实际可读写。
+- [ ] 同一 TUI 完成两个无关任务后，以自然措辞续作第一个；模型从 session_search 取得 exact task_path，
+  写工具回绑旧项目且不在第三个目录重建。
+
 ## 新任务/旧项目续作工作区裁决
 
 - [x] `completed/interrupted` 普通 link 不凭 sticky pointer 吸附新回合，新工作落在新目录。

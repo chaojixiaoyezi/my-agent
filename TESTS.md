@@ -1,5 +1,19 @@
 # TESTS
 
+## Full Access 基础设备与历史任务引用
+
+- Full Access 的 bwrap argv 必须先 bind `/`，再用 `--dev-bind /dev /dev` 覆盖设备树；不能用普通
+  `--bind /dev` 冒充，因为 RHEL/SELinux enforcing 真机仍会保持 nodev。WorkspaceOnly 继续使用最小
+  `--dev /dev`，两种档位均需真实打开 `/dev/null` 并运行常规 pytest。
+- Gateway completion 覆盖 processing 索引时必须保留 request-level `conversation_runtime`；
+  `session_search` 的 discover/browse/scroll 都只对 `source_type=gateway_request` 返回绝对路径
+  `task_ref`，Memory/普通消息即便携带同名 metadata 也不能取得该投影。
+- focused 命令：
+  `python3 -m pytest agent_py_agent/tests/test_sandbox.py agent_py_agent/tests/test_gateway_logging.py agent_py_agent/tests/test_session_search_tool.py -q --tb=short`。
+- 真 TUI 待验：同一 MiniMax-M2.7 会话先完成项目 A、再完成无关项目 B，随后自然表达“回到刚才那个 A”并
+  修改；同时在 Full Access 下创建普通 pytest 用例并直接运行。验收读取真实 bwrap argv、task_ref、request
+  runtime、successor link 和文件路径，不拿模型口头结论代替。
+
 ## 普通新任务与结构化旧项目续作
 
 - terminal ordinary task 之后的普通新回合不得从 `thread.workspace_task_id` 继承 cwd；

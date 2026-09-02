@@ -9,8 +9,9 @@
 #   与 长期助手 的差异:my-agent 的事实单元是 record(非逐条 message),没有
 #   session 血缘/连续 message-id,故 scroll 用 updated_at 时间序当滚动轴、不做
 #   血缘去重/rebind;模式名(discover/scroll/browse)与返回字段(snippet/window/
-#   messages_before/after/count)对齐 长期助手 语义。契约:只读零副作用;空库/无命中
-#   返回结构化提示不报错；给精确 input_schema（对齐原生 tool_use 改造规范）。
+#   messages_before/after/count)对齐 长期助手 语义。Gateway 记录额外投影 host-authored
+#   task_ref，供“回到上次项目”拿到精确路径，不从自然语言猜 cwd。契约:只读零副作用;
+#   空库/无命中返回结构化提示不报错；给精确 input_schema（对齐原生 tool_use 改造规范）。
 # 模块用途: 让模型能检索/翻看本地历史记录(普通聊天、记忆、任务产物、归档),回答"我们之前
 #   对 X 怎么处理的/在哪聊过 Y",而不用把全部历史塞进 prompt。
 from __future__ import annotations
@@ -42,6 +43,8 @@ _MAX_LIMIT = 20
 _MAX_WINDOW = 20
 
 
+# LLM: Tool instructions may explain how to consume typed task_ref, but must never infer a path
+# from natural-language history or turn a search hit into write authorization.
 # 函数用途: session_search 的工具说明书(进工具目录,引导模型先查历史再上网/翻盘)。
 def build_session_search_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
@@ -51,6 +54,7 @@ def build_session_search_model_spec() -> ToolModelSpec:
             "三种形态由参数推断:"
             "①传 query=全文检索(FTS5,支持中文子串);②传 around_id=以某条记录为锚翻看前后上下文;"
             "③都不传=按时间倒序列出最近记录。回答'我们之前对X怎么处理/在哪记过Y'优先用它,先于上网/翻文件。"
+            "Gateway 任务命中可能带 task_ref；其中 task_path 是该历史任务的精确目录，用户要求续作时优先使用。"
         ),
         input_schema={
             "type": "object",
@@ -190,9 +194,11 @@ def _browse(store: LocalStore, limit: int, source_type: str | None) -> dict[str,
     }
 
 
-# 函数用途: 把一条 FTS 命中整形成发现结果(含围绕 query 的 snippet 与定位 id)。
+# LLM: Search hits may expose a typed task_ref only for host-indexed gateway_request rows; never
+# derive it from snippets, titles, or arbitrary memory metadata.
+# 函数用途: 把一条 FTS 命中整形成发现结果，并附上可用的精确历史任务引用。
 def _shape_hit(hit: LocalSearchResult, *, snippet_for: str) -> dict[str, Any]:
-    return {
+    entry = {
         "around_id": hit.id,
         "title": hit.title,
         "source_type": hit.source_type,
@@ -202,9 +208,15 @@ def _shape_hit(hit: LocalSearchResult, *, snippet_for: str) -> dict[str, Any]:
         "score": round(hit.score, 3),
         "scope": _history_scope(hit.metadata),
     }
+    task_ref = _history_task_ref(hit.metadata, source_type=hit.source_type)
+    if task_ref:
+        entry["task_ref"] = task_ref
+    return entry
 
 
-# 函数用途: 把一条记录整形成 scroll/browse 的条目(可选标锚、可选预览)。
+# LLM: Scroll/browse must use the same gateway task-ref projection as discovery so navigation
+# mode cannot silently discard an exact continuation path.
+# 函数用途: 把一条记录整形成 scroll/browse 条目，并保留可用的历史任务引用。
 def _shape_record(rec: LocalSearchResult, *, anchor_id: str | None = None, preview: bool = False) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "id": rec.id,
@@ -215,6 +227,9 @@ def _shape_record(rec: LocalSearchResult, *, anchor_id: str | None = None, previ
     }
     body = rec.content or ""
     entry["preview" if preview else "content"] = body[:_PREVIEW_CHARS] if preview else body
+    task_ref = _history_task_ref(rec.metadata, source_type=rec.source_type)
+    if task_ref:
+        entry["task_ref"] = task_ref
     if anchor_id is not None and rec.id == anchor_id:
         entry["anchor"] = True
     return entry
@@ -239,6 +254,38 @@ def _history_scope(metadata: object) -> dict[str, str]:
             value = str(attributes.get(key) or "").strip()
             if value:
                 result[key] = value
+    return result
+
+
+# LLM: conversation_runtime is a Gateway index projection of canonical host state. Requiring the
+# gateway_request source and an absolute task_path prevents arbitrary chat/memory rows from posing
+# as executable cwd authority; the write tool still performs its own exact-path rebind checks.
+# 函数用途: 从 Gateway 历史元数据提取精确任务目录，供模型按用户要求继续旧项目。
+def _history_task_ref(
+    metadata: object,
+    *,
+    source_type: str,
+) -> dict[str, str]:
+    if source_type != "gateway_request" or not isinstance(metadata, dict):
+        return {}
+    runtime = metadata.get("conversation_runtime")
+    if not isinstance(runtime, dict):
+        return {}
+    task_id = str(runtime.get("task_id") or "").strip()
+    task_path = str(runtime.get("task_path") or "").strip()
+    if not task_id or not task_path.startswith("/"):
+        return {}
+    result = {
+        "task_id": task_id,
+        "task_path": task_path,
+    }
+    for key in ("request_id", "thread_id"):
+        value = str(runtime.get(key) or "").strip()
+        if value:
+            result[key] = value
+    status = str(metadata.get("status") or "").strip()
+    if status:
+        result["status"] = status
     return result
 
 

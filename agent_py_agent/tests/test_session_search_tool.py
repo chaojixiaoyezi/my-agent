@@ -112,6 +112,55 @@ class TestDiscoveryMode:
             "scope_key": "session:thread-example",
         }
 
+    def test_gateway_hit_exposes_exact_task_ref_for_continuation(self, tmp_path):
+        store = _store(tmp_path)
+        store.upsert_record(
+            source_type="gateway_request",
+            source_id="gw-log-tool",
+            title="Gateway ask done gw-log-tool",
+            content="用户之前完成了日志分析工具",
+            metadata={
+                "status": "done",
+                "conversation_runtime": {
+                    "request_id": "gw-log-tool",
+                    "thread_id": "thread-one",
+                    "task_id": "task-log-tool",
+                    "task_path": "/owner/tasks/log-tool",
+                },
+            },
+        )
+
+        p = _payload(_tool(store).execute({"query": "日志分析工具"}))
+
+        hit = next(item for item in p["results"] if item["source_id"] == "gw-log-tool")
+        assert hit["task_ref"] == {
+            "task_id": "task-log-tool",
+            "task_path": "/owner/tasks/log-tool",
+            "request_id": "gw-log-tool",
+            "thread_id": "thread-one",
+            "status": "done",
+        }
+
+    def test_non_gateway_metadata_cannot_pose_as_task_ref(self, tmp_path):
+        store = _store(tmp_path)
+        store.upsert_record(
+            source_type="memory",
+            source_id="memory-fake-task",
+            title="伪造任务引用",
+            content="伪造任务引用校验词",
+            metadata={
+                "conversation_runtime": {
+                    "task_id": "fake",
+                    "task_path": "/another-owner/task",
+                }
+            },
+        )
+
+        p = _payload(_tool(store).execute({"query": "伪造任务引用校验词"}))
+
+        assert p["count"] == 1
+        assert "task_ref" not in p["results"][0]
+
 
 class TestScrollMode:
     def test_scroll_returns_window_around_anchor(self, tmp_path):
@@ -151,6 +200,28 @@ class TestScrollMode:
         # 窗口被夹到 [1,20];库里 4 条,total <= 4。
         assert p["count"] <= 4
 
+    def test_scroll_keeps_gateway_task_ref(self, tmp_path):
+        store = _store(tmp_path)
+        store.upsert_record(
+            source_type="gateway_request",
+            source_id="gw-scroll",
+            title="历史任务滚动锚点",
+            content="历史任务滚动正文",
+            metadata={
+                "status": "done",
+                "conversation_runtime": {
+                    "task_id": "task-scroll",
+                    "task_path": "/owner/tasks/scroll",
+                },
+            },
+        )
+        anchor = store.search("历史任务滚动正文", limit=1)[0]
+
+        p = _payload(_tool(store).execute({"around_id": anchor.id, "window": 1}))
+
+        anchored = next(item for item in p["messages"] if item.get("anchor"))
+        assert anchored["task_ref"]["task_path"] == "/owner/tasks/scroll"
+
 
 class TestBrowseMode:
     def test_browse_lists_recent(self, tmp_path):
@@ -175,6 +246,26 @@ class TestBrowseMode:
         tool = _tool(store)
         p = _payload(tool.execute({"source_type": "archive"}))
         assert all(r["source_type"] == "archive" for r in p["results"])
+
+    def test_browse_keeps_gateway_task_ref(self, tmp_path):
+        store = _store(tmp_path)
+        store.upsert_record(
+            source_type="gateway_request",
+            source_id="gw-recent",
+            title="最近任务",
+            content="最近任务正文",
+            metadata={
+                "status": "done",
+                "conversation_runtime": {
+                    "task_id": "task-recent",
+                    "task_path": "/owner/tasks/recent",
+                },
+            },
+        )
+
+        p = _payload(_tool(store).execute({"source_type": "gateway_request"}))
+
+        assert p["results"][0]["task_ref"]["task_path"] == "/owner/tasks/recent"
 
 
 class TestUnavailableStore:

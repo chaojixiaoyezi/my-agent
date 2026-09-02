@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-09-03 R156 历史检索携带精确任务目录
+
+- Gateway completion 过去只索引 response + prompt，会覆盖 queued/processing 阶段已有的
+  `conversation_runtime`。同一 thread 后续说“回到上次项目”时，模型虽然会调用 `session_search`，
+  但只能看到回答中的相对路径，因而可能在新任务目录重建项目。
+- completion 现在沿用 done request 的 host-authored request/thread/task/path；LocalStore 仍只是搜索索引，
+  `session_search` 只为 `gateway_request` 返回 typed `task_ref`。写入旧项目仍由统一 write boundary 的
+  exact path rebind 二次裁决，搜索命中本身不授予写权限。
+- 该方案不恢复 terminal sticky task，也不把全部历史任务注入每轮 prompt。模型只在用户提及历史工作时按需
+  搜索，因此兼顾长会话续作、owner 隔离与缓存前缀稳定。
+
 ## 2026-09-02 R155 终态工作区不隐式吸附，精确写路径可回绑
 
 - `_gateway_workspace_task` 现只选 exact request `conversation_runtime`、thread Goal 或 active task。

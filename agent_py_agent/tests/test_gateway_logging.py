@@ -7,6 +7,7 @@ from __future__ import annotations
 import sys
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -69,6 +70,41 @@ class TestLogGatewayPayload:
         call_kwargs = mock_agent.local_store.log_record.call_args[1]
         assert call_kwargs["source_type"] == "gateway_request"
         assert call_kwargs["source_id"] == "req_123"
+
+    def test_completed_audit_keeps_exact_conversation_task_reference(self, tmp_path: Path):
+        """最终索引覆盖 processing 行时仍保留宿主生成的旧任务绝对路径。"""
+        from agent_py_agent.agent.gateway_parts.audit_service import (
+            AuditRequestCompletedParams,
+            audit_request_completed,
+        )
+
+        mock_store = MagicMock()
+        agent = SimpleNamespace(local_store=mock_store)
+        request_path = tmp_path / "done" / "gw-task.json"
+        response_path = tmp_path / "responses" / "gw-task.json"
+        runtime = {
+            "request_id": "gw-task",
+            "thread_id": "thread-task",
+            "task_id": "task-log-tool",
+            "task_path": "/owner/tasks/log-tool",
+        }
+
+        audit_request_completed(
+            agent,
+            params=AuditRequestCompletedParams(
+                response={"id": "gw-task", "status": "done", "ok": True},
+                request={
+                    "prompt": "继续日志工具",
+                    "conversation_runtime": runtime,
+                },
+                request_path=request_path,
+                response_path=response_path,
+            ),
+        )
+
+        kwargs = mock_store.log_record.call_args.kwargs
+        assert kwargs["metadata"]["conversation_runtime"] == runtime
+        assert '"task_path": "/owner/tasks/log-tool"' in kwargs["content"]
 
 
 class TestLogGatewayEvent:

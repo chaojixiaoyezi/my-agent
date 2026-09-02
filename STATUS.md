@@ -1,5 +1,17 @@
 # STATUS
 
+## 2026-09-03 R156 Full Access 基础设备与自然续作历史定位（Focused 通过，真 TUI 待验）
+
+- `.10` 真 TUI 复现了普通 pytest 与 `2>/dev/null` 都报 PermissionError。宿主 `/dev/null` 正常，
+  WorkspaceOnly 的 `--dev /dev` 也正常；精确进程参数证明失败只在 Full Access 的 `--bind / /`
+  分支。手工 A/B 中普通根 bind 失败，追加 `--dev-bind /dev /dev` 立即成功，排除了模型声称的
+  “SELinux policy 本身拒绝”结论。
+- Full Access argv 现于根 bind 后重挂真实设备树；WorkspaceOnly、owner 隔离、网络和 persona/control
+  只读覆盖不变。构造回归已钉住顺序，部署后还需用 MiniMax-M2.7 真 TUI 跑常规 pytest。
+- Gateway completion 不再覆盖掉 request 的 `conversation_runtime`。owner-local `session_search`
+  对 Gateway 命中返回 exact `task_ref`，让模型在自然“回到上次项目”时取得旧目录，再复用 R155 已有的
+  exact mutation-path rebind；普通聊天/Memory 不能伪造该字段。三组 focused 共 55 项通过。
+
 ## 2026-09-02 R155 新任务与旧项目续作的工作区分流（本机真 TUI 通过）
 
 - 普通 `completed/interrupted` 任务不再因 thread 保留 `workspace_task_id` 就隐式吸附

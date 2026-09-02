@@ -156,6 +156,13 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
             "--bind",
             "/",
             "/",
+            # hardened Linux 上，根目录 bind 会继承 bwrap 的 nodev 语义；必须在其后
+            # 显式重新挂真实设备树，否则 Full Access 连 /dev/null 都打不开，pytest
+            # 和 subprocess capture 会报 EACCES。会话运行时 也在根挂载后重挂 /dev；本项
+            # 使用 --dev-bind，才能在 SELinux enforcing 的 RHEL 系测试镜像保留设备能力。
+            "--dev-bind",
+            "/dev",
+            "/dev",
         ]
         _append_readonly_mounts(argv, spec.read_only_paths)
         _append_persona_readonly_mounts(argv, spec.protected_persona_root or spec.owner_home)
