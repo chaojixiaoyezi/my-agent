@@ -1,5 +1,14 @@
 # TEST CHECKLIST
 
+## 新任务/旧项目续作工作区裁决
+
+- [x] `completed/interrupted` 普通 link 不凭 sticky pointer 吸附新回合，新工作落在新目录。
+- [x] exact request 恢复、active task 和未结束 Goal 仍在首次模型调用前获得原 cwd。
+- [x] 同一 task root 存在多代 terminal link 时，精确写入路径选最新一代建 successor。
+- [x] 本轮占位任务在回绑旧项目时转 `superseded`，request/thread/link/path 四处一致。
+- [x] 跨两个 canonical root 或同根多个 active executor 时 fail closed，不用新旧、产物数量或用户措辞猜。
+- [x] 真 MiniMax-M2.7 TUI `ma-r155-local-workspace-routing` 先验无关新项目，再验原项目续作。
+
 - [x] Compact 进度必须携带成对的 `source_kind/commit_authority`，Gateway、后台事件和 TUI 使用同一校验器；
   transcript、持久 live-tool、turn-local 三条链分别显示不同含义，不能靠 operation id 或中文猜。历史 v1
   双字段都缺失时仅作为 `legacy/legacy` 展示，部分缺失与矛盾组合拒绝。当前 223 项 Compact/Gateway/TUI
@@ -517,13 +526,13 @@
 - [ ] `/verbose on/full/off` 只改变当前 thread，不进入 transcript/guidance/模型；进度发送不触发任务重做，最终回复仍能送达。
 - [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop`、`/goal ...`、`/verbose ...` 都由统一系统命令入口处理；任何未知 `/XXXX` fail-closed，不进入普通队列、transcript 或模型。
 - [ ] 已有 linked live turn 时 `/btw` 只注入该 turn、不发第二个 wake，也不泄漏到下一任务；`/stop` 不判断聊天/任务，直接按当前窗口的精确 request id 打断模型读取、清掉未消费 steer、停止子树，不停止 Gateway，也不影响其他用户会话。
-- [ ] `/stop` 后 transcript、compact、memory 和 task workspace 保留；用户后续自然说“继续”时，模型用精确 task id 重开原现场，不创建第二个任务目录。
-- [x] 同一 TUI/IM thread 的普通任务自然 `completed` 后，下一条消息在首个
-  `promotes_task` 工具处建立新 successor id，但必须继承同一 canonical task root；
-  旧 link 保持终态；sticky root 必须在首个模型采样前成为模型、工具、审批和沙箱共同的 cwd，不能等到
-  handler pre-gate 才切换。模型不得因为相对路径失败而搜索、复制旧产物到新空目录。r55 已证明 identity
-  与 task_path 续接；`1e4c64d` 部署后同一 r55 复验首个 `ls -la bbb`、审批、bwrap 和服务进程 cwd 均为
-  原 task root，三个独立终态 request 的 `task_path` 精确相同，localhost 正文也不再是空目录列表。
+- [ ] `/stop` 后 transcript、compact、memory 和 task workspace 保留；用户自然续作时，模型从历史找到原项目，
+  首个精确旧项目写路径在 effect 前结构化回绑；不能只因“继续”两个字自动复活旧 task。
+- [x] 同一 TUI/IM thread 的普通任务自然 `completed/interrupted` 后，下一条无关工作不得继承 terminal
+  `workspace_task_id`，首个 `promotes_task` 工具建立新 task root。若写工具精确命中同 thread 唯一 canonical
+  旧根，则同根多代 terminal execution 归并后选最新一代建立 successor，旧 link 保持终态；跨多根或同根
+  多个 active executor 不得猜。R155 本机真 TUI 已证明 CSV 新任务落新目录、旧文本项目 Markdown 续作回绑
+  原根，processing request、thread、successor 与真实路径一致，影子占位转 `superseded`。
 - [ ] fresh TUI 的首个 `run_command/write_file` 在建立 canonical task root 的同一次调用里就使用该 cwd；
   外层活动回合和工具循环即使持有不同 task-attributes 投影，也不得把文件先写到 owner home、下一轮再从
   task root 查找。后台 child-lifecycle 续轮必须继续暴露任务所需 `skill_search`，不得产生

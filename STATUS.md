@@ -1,5 +1,20 @@
 # STATUS
 
+## 2026-09-02 R155 新任务与旧项目续作的工作区分流（本机真 TUI 通过）
+
+- 普通 `completed/interrupted` 任务不再因 thread 保留 `workspace_task_id` 就隐式吸附
+  下一条消息。exact request 恢复、未结束 Goal 和 active task 仍续用原目录；其他回合第
+  一个工作工具才在 owner `tasks/` 下懒建新目录。
+- 结构化写入路径可以精确续作旧项目；同一 canonical `task_path` 下有多个历史
+  run 时，当前按目录合并后选最新 terminal generation，而不再把多个 execution id 误报
+  为多项目歧义。多个不同目录或多个 active executor 仍拒绝猜测。
+- `ma-r155-local-workspace-routing` 恢复同一 MiniMax-M2.7 会话：无关 CSV 工具独立
+  落目录并通过 20 项测试；后续 Markdown 报告真实写入旧文本项目后，初始影子
+  request 被 `superseded`，当前 successor、processing request 与 thread 均指向旧目录。
+- 本轮还证明单 Gateway 正确结构是 `local/main` 服务进程 + 请求携带 owner；把
+  Gateway 本身启动成普通 owner 会让 thin TUI 正确探活失败。这是测试配置修正，
+  没有放宽 owner 墙。
+
 ## 2026-09-02 R154 Compact 停止信号贯穿摘要、候选与提交（主代理真 TUI 通过）
 
 - transcript、active-turn archive 与 native IR 共用 `CompactInterruptCheck`；慢摘要前后、候选改写前后、

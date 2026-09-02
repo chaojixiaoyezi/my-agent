@@ -1,5 +1,19 @@
 # TESTS
 
+## 普通新任务与结构化旧项目续作
+
+- terminal ordinary task 之后的普通新回合不得从 `thread.workspace_task_id` 继承 cwd；
+  exact request-level `conversation_runtime`、未结束 Goal 与 active task 仍必须稳定继承。
+- 写工具的显式绝对路径或 canonical owner-relative `tasks/...` 路径若只命中同 thread
+  一个 canonical task root，必须在 handler/write boundary 之前回绑。同根的多个 terminal
+  execution link 选最新一代，已懒建的本轮占位 link 转 `superseded`；两个不同根或
+  同根多个 active link 不得猜。
+- focused 命令：
+  `python3 -m pytest agent_py_agent/tests/test_gateway_chat_conversation_context.py agent_py_agent/tests/test_gateway_conversation_control.py agent_py_agent/tests/test_tool_runtime_unification.py agent_py_agent/tests/test_conversation_store.py -q --tb=short`。
+- 真 TUI：`ma-r155-local-workspace-routing` 在同一会话完成无关 CSV 项目后，又显式续作旧文本
+  项目。验收同时读 processing request `conversation_runtime`、thread `workspace_task_id`、task links
+  与真实文件路径；不用模型最终文字代替路由事实。
+
 ## Compact 中断的不可见候选边界
 
 - transcript、active-turn archive 与 native IR 都必须在慢摘要前后、候选改写前后、checkpoint 前后和
@@ -2047,14 +2061,15 @@ RC=0、ConversationStore user/assistant=2、Candidate/formal=1/1、唯一 user m
 主代理完成表达回归必须覆盖：普通 `task_progress` 即使仍有 open item，也只是一份可恢复的进度笔记，
 不能拦截模型本轮回复、追加隐藏提醒、自动唤醒后台执行或要求下一轮先选择/关闭旧任务。只有显式持久
 `/goal` 的 open plan 才保持 `unfinished` 并由既有 continuation 续跑。该行为不得解析“完成”等自然语言、
-扫描任务目录、执行验证命令或给普通 task 增加完成硬门。终态普通 task 续作必须保留旧终态和 cwd、
-创建新执行 task id；只有精确持久 `/goal` 可以原 id 恢复。子代理普通工具必须是父 run 快照的严格子集；
+扫描任务目录、执行验证命令或给普通 task 增加完成硬门。终态普通 task 必须保留旧终态；新回合只有 exact
+request、未结束 Goal、active task 或精确旧项目写路径才可复用旧 cwd，并以新执行 task id 续作；其他工作
+建立新目录。只有精确持久 `/goal` 可以原 id 恢复。子代理普通工具必须是父 run 快照的严格子集；
 coordinator 可通过统一 `create_subagents` 继续递归创建，所有 leaf 都不得获得
 create/guidance/cancel/resolve 四个直属下级控制工具，但仍可用 `capability_request` 为自己申请权限。
 直接创建和层级调度都要覆盖这条规则。模型调用账本必须区分 logical turn、
 物理 model attempt 和 provider HTTP attempt，并覆盖并发首次请求、重试、失败、超时和迟到 finish。
 task-local child 即使携带父 conversation id，也必须证明可在自己的 runner lane 正常写入授权产物。
-sticky workspace 回归还必须覆盖：新 execution 复用旧 task path 时，四份当前执行投影同步换成新
+workspace 回归还必须覆盖：精确回绑使新 execution 复用旧 task path 时，四份当前执行投影同步换成新
 request/run/task，旧 output 与 artifact 列表保留，timeline 只追加一次；相同 task 恢复时保留既有
 progress/evidence 并回到 RUNNING。损坏投影不得在激活时被静默洗掉，旧 task link 也不得覆盖新投影。
 
@@ -2140,8 +2155,9 @@ terminal_unknown/conflict 不换 ID 重做、重启恢复原行，以及未绑�
 
 停止后续接回归必须覆盖：新 gateway request 的 `task_id` 与原持久 task 不同时，`/btw` 仍从
 `task_attributes.conversation_task_id` 消费一次；`/stop` 只中断当前真实 live turn，没有运行内容时
-不得修改旧 task/goal；停止后的下一条普通消息无需 select/start/close 命令即可聊天或在 sticky cwd
-继续工作。若命中一个已终态工作目录，首个 `promotes_task` 工具自动创建本轮执行身份，旧终态保持不变。
+不得修改旧 task/goal；停止后的下一条普通消息无需 select/start/close 命令即可聊天或开始新工作。只有
+exact binding、未结束 Goal、active task 或写工具精确命中旧 canonical root 时才续用旧目录；回绑建立
+本轮执行身份，旧终态保持不变。
 
 容器节点真验收不能只看单测：最终镜像必须运行
 `python -m agent_py_agent.agent.tooling.sandbox --quiet` 并退出 0。工作树检查使用
@@ -2408,6 +2424,10 @@ python3 -m pytest agent_py_agent/tests/test_tui_agent_navigation.py agent_py_age
 必须与该高亮行一致，再用 `Ctrl+G` 返回。测试者不得给模型补消息或修改被测任务产物。
 
 ## 2026-08-26 思考/完整正文、缓存稳定前缀、canonical task root 与网络事实
+
+> 本节的 terminal sticky cwd 要求是当时发布记录。2026-09-02 R155 已将当前合同收窄为：terminal
+> pointer 只作状态/导航；普通新工作建立新目录，exact request、Goal、active task 或精确旧项目写路径
+> 才可复用旧 canonical root。当前验收以本文顶部“普通新任务与结构化旧项目续作”为准。
 
 本轮 focused 必须覆盖：多次 provider thinking 块按时间顺序保留、空首块 typed discard、assistant 正文前
 封口 thinking；工具边界 commentary 与 final 用同一 request 的不同 `assistant_part_id` 完整落账，配对预览

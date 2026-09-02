@@ -456,17 +456,16 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   request/run/task identity，在 `state.json` 锁内幂等写终态，再追加 `run_workspace_finished`
   timeline。自然语言回复、目录内容和旧索引都没有状态变更权。
 
-## 2026-07-28 工作目录、task lifecycle 与 model attempt
+## 2026-07-28 工作目录、task lifecycle 与 model attempt（2026-09-02 R155 更新）
 
-- `request_execution._gateway_task_attributes` 把 sticky workspace 与 live `conversation_task_id`
-  分栏。exact non-detached sticky `task_path` 在模型首采样前投影为唯一 `conversation_execution_cwd` 与
-  runtime root；终态 link 只投影 cwd/status、不预填 live id/run workspace，active/interrupted 才携带当前
-  执行身份。这样 shell 参数、审批路径、write boundary 和实际进程 cwd 不会晚于模型一步切换。
-- `conversation.task_promotion` 在终态 workspace 上用当前 request id 建立幂等 successor，旧 link 不改；
-  successor 的 goal 来自本轮精确 user prompt，终态 link 只贡献 sticky cwd，不能把旧 goal 带进新的
-  background continuation；本轮输入缺失时不创建 successor。`/goal` 的精确持久记录是唯一允许原 id resume 的例外。`run_task_workspace_writer` 只在本轮工作工具已
-  设置 active 标志后归档 task workspace，普通 chat 不因有 sticky cwd 被误记成任务。task-local child
-  携带父 conversation id 只作 lineage，不进入这条主会话防双执行判断。
+- `request_execution._gateway_task_attributes` 把 thread 最近工作区投影与本轮 live
+  `conversation_task_id` 分栏。只有 exact request binding、未结束 Goal 或 active task 才能在模型首采样前
+  投影 `conversation_execution_cwd/runtime_workspace_roots`；普通 terminal link 不再取得新回合 cwd 权威。
+- `conversation.task_promotion` 为没有精确绑定的新工作懒建本轮目录。若写工具携带同 thread 旧项目内的
+  显式结构化目标，统一 tool runtime 在 effect 前按 canonical `task_path` 回绑并建立 successor：同根多代
+  terminal execution 只算一个项目，多个不同根或同根多个 active executor 时不猜。`/goal` 的精确持久记录
+  仍是唯一允许原 id resume 的例外。`run_task_workspace_writer` 只在本轮工作工具已设置 active 标志后归档
+  task workspace；task-local child 携带父 conversation id 只作 lineage。
 - 新会话没有 sticky workspace 时仍保持惰性晋升，但首个 `promotes_task` 工具必须在冻结该调用的
   write boundary、审批 cwd、沙箱根和 handler cwd 之前完成晋升。materialize 后由 conversation seam 原子同步
   `run_workspace`、`conversation_execution_cwd`、runtime roots 和旧 cwd rebase source，再重建当前 call；
@@ -613,10 +612,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   Compact 先尝试保留最多四个近期完整回合，近期尾部受统一 token 上限约束；若完整下一轮候选仍会越过
   精确阈值，则退回压缩全部旧段。候选先验证、写完整 checkpoint，再用一次 CAS 提交；失败不推进
   summary/cursor/generation。当前消息始终是独立 root
-  prompt。thread 持久保存唯一 `workspace_task_id`，后续 turn 像 会话运行时 一样继承同一 cwd；普通聊天只继承
-  目录，不会因此重开或归档旧任务。上一 link 已终态时，第一个文件、执行、派工或 wait 等
-  `promotes_task` 工具会在同一 cwd 建立本轮新 task id，旧 link 始终保持终态；只有精确持久 `/goal`
-  可以原 id 恢复。普通模型上下文只暴露当前 sticky workspace，不再注入活跃/已完成任务菜单；
+  prompt。thread 持久保存 `workspace_task_id` 作为最近状态/导航投影；后续 turn 只有 exact request、未结束
+  Goal 或 active task 才继承原 cwd。普通 terminal task 后的新工作从 owner home 起步，第一个文件、执行、
+  派工或 wait 等 `promotes_task` 工具建立本轮 task id/目录；旧 link 始终保持终态。只有精确持久 `/goal`
+  可以原 id 恢复。普通模型上下文不注入活跃/已完成任务菜单；
   `task_progress` 只保留 `read/update`，不承担会话、目录或任务生命周期控制。若写工具携带同 thread
   既有目录中的精确结构化路径，统一执行入口可无歧义绑定该目录；正文不参与身份判断。根 task workspace 不再保存 recovery compact
   指针、continue packet 或第二份任务对话恢复包；主 thread 的 summary + raw tail 是唯一主会话 compact，
@@ -635,9 +634,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   本轮第一个工作工具激活 sticky task，或模型结构化 `select`/新建 task 时，会把 `thread_id/task_id/task_path` 原子写入
   当前 processing record；多用户 Gateway 无法保存该绑定时阻断工作工具，不能继续产生一个控制不到的任务。
 - `agent/conversation/task_promotion.py`、`agent/conversation/store.py`：`ConversationThread.workspace_task_id`
-  是唯一耐久 cwd 选择，store 在写入前核验同一 thread 的精确 task link。普通聊天只有 sticky cwd，没有本轮
-  task-active 标志，因而不会重开生命周期或获得任务归档；第一个工作工具才在既有 active task 上继续，
-  或在终态 workspace 上创建新执行身份。模型用 `select` 切换其他旧 workspace/task 候选时只切换结构化
+  是耐久状态/导航投影，store 在写入前核验同一 thread 的精确 task link。普通聊天没有本轮 task-active
+  标志，因而不会重开生命周期或获得任务归档；第一个工作工具才在 exact/Goal/active task 上继续，或为
+  普通新工作创建新目录。写工具精确命中旧 canonical root 时才回绑并建立 successor。模型用 `select`
+  切换其他旧 workspace/task 候选时只切换结构化
   lineage；本轮用户消息早已属于同一权威 thread transcript，
   不复制到 task guidance ledger，正文不参与任务身份判断。
   conversation task link 是生命周期权威，`work/state.json`
@@ -901,10 +901,11 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   message metadata。后续“发我”使用 `Recent Artifact Refs.path` 调 `send_message`，不得重做旧任务。
 - transcript 持久化对 user 消息 fail-closed；assistant 消息失败走持久 repair。conversation-backed
   run 禁止再自动写 owner-global dialogue memory，稳定偏好继续由 USER/preference authority 提供。
-- 入站请求从 thread 的 `workspace_task_id` 继承唯一 cwd，但不把它标成当前轮 active task。旧 v1/v2 thread
-  只在持续目标的精确 task id 或仅有一个合法根任务时无歧义迁移；多候选时不猜。普通聊天不会改变 task
-  lifecycle；首个工作工具按 sticky id 自动绑定当前 run。结构化终态只从 active 热索引移除，不清空
-  sticky cwd。`subagent-*` 和 `bg-main-*` 内部链接不能替代根工作目录。所有 `promotes_task` 工具共享
+- 入站请求只从 exact request binding、未结束 Goal 或 active task 继承 cwd；thread 的
+  `workspace_task_id` 本身只保留最近状态/导航投影。旧 v1/v2 thread 只在持续目标的精确 task id 或仅有一个
+  合法 active 根任务时无歧义迁移；多候选时不猜。普通聊天不会改变 task lifecycle；新工作由首个工作工具
+  懒建目录，精确旧项目写路径才允许回绑。`subagent-*` 和 `bg-main-*` 内部链接不能替代根工作目录。所有
+  `promotes_task` 工具共享
   同一个执行冲突门；只有另一个真实 live executor 会阻止第二执行器，历史 task/open checklist 不会阻止
   当前消息开始工作。精确路径绑定会同步 run workspace；该决策不解析用户自然语言。
 - 同一 `canonical_user_id + channel + channel_conversation_id` 同时最多执行一条前台 request；此外同一

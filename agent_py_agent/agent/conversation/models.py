@@ -307,9 +307,9 @@ class ConversationCompactCommit:
 
 
 # LLM: ConversationThread is the sole durable authority for transcript, compact cursor/checkpoint,
-# provider context calibration, compact failure circuit, and the sticky root workspace; task
+# provider context calibration, compact failure circuit, and the latest workspace projection; task
 # lifecycle remains in ThreadTaskLink.
-# 类用途: 保存一个用户会话的长期状态，其中压缩点、供应商真实上下文基线、连续失败和工作目录都随同一 thread 跨轮继承。
+# 类用途: 保存一个用户会话的长期状态，其中压缩点、供应商真实上下文基线、连续失败和最近工作区投影随 thread 保留。
 @dataclass(frozen=True)
 class ConversationThread:
     thread_id: str
@@ -347,14 +347,14 @@ class ConversationThread:
     task_ids: tuple[str, ...] = ()
     active_task_ids: tuple[str, ...] = ()
     workspace_task_id: str = ""
-    # 会话运行时 project cwd is thread state, while workspace_task_id points to the hidden
-    # durable task workspace. Keeping them separate lets one Gateway serve many TUI directories.
+    # The trusted client cwd is thread state. workspace_task_id is the latest task projection for
+    # status/navigation; only an exact bound request, Goal, or active link may turn it into cwd.
     cwd: str = ""
     runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: Persist v8 transcript/tool compact sources, provider calibration, guards, sticky
-    # workspace and client cwd together.
+    # LLM: Persist v8 transcript/tool compact sources, provider calibration, guards, latest
+    # workspace projection and client cwd together.
     # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典，并保存压缩来源、模型校准与客户端工作目录。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

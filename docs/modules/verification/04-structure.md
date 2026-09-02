@@ -26,7 +26,8 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
 
 1. `tool_call_runtime.execute_traced_tool_call` 得到真实 canonical `ToolResult`；handler 的 `ToolHandlerOutcome` 只在 Executor 内转换。
    在进入工具 registry 前，同一入口先处理 conversation task promotion 和精确 mutation workspace：
-   主代理从 thread sticky cwd 自动绑定当前 execution，child rebase 只能改变当前 runner 的
+   主代理只从 exact request、未结束 Goal、active task 或精确旧项目写路径绑定当前 execution，child
+   rebase 只能改变当前 runner 的
    `run_workspace` 并留下 host marker；随后的动态 write boundary 只信该结构化 marker，不信模型正文。
    promotion 成功会先把 mutable 外层 `RunParams.task_attributes` 同步到当前冻结的
    `ToolLoopExecuteParams.task_attributes` 投影，因此本轮第一条工作工具就能读取新建 task root；同步方向

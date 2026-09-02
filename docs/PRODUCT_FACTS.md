@@ -881,13 +881,12 @@ proof 的事实见下方 2026-07-12 收口快照。
   `OWNER_SCOPE_UNAVAILABLE` 终态拒绝，不会回退共享 main owner 串户。
 - 普通对话只有在真实调用文件、执行、`task_progress`、`create_subagents`、`wait` 等带
   `promotes_task` 的工作工具时，才在内部建立或激活 task/workspace 运行记录；用户无需知道内部 task id。
-  thread 以 `workspace_task_id` 记住最近使用的根工作目录，后续 turn 像 会话运行时 一样继承 cwd。纯聊天
-  虽能看到这个目录事实，但不会重开任务、写任务归档或改变生命周期；上一 task 已终态时，第一次工作工具
-  会在同一目录建立当前 request 的新 task id，旧 task 保持终态，并记录 `continued_from_task_id`。只有
-  持久 `/goal` 的精确暂停任务才按原 task id 恢复。普通用户和模型都不需要 select/start/close 任务；
-  当前消息直接决定本轮做什么。若写工具携带同 thread 某个既有任务目录下的精确结构化路径，统一工具入口
-  可以无歧义绑定该目录，但这不是自然语言任务判断，也不改变同一会话历史。最终运行事件关闭本轮执行记录，
-  但不清空 sticky workspace，也不切换或重建会话历史。
+  thread 以 `workspace_task_id` 记住最近状态/导航投影，但它不独自取得下一 turn 的 cwd 权威。exact request、
+  未结束 Goal 或 active task 才直接继承原目录；普通 terminal task 后的新工作由首个工作工具建立新目录。
+  若写工具携带同 thread 某个既有任务目录下的精确结构化路径，统一工具入口按 canonical root 归并历史代次，
+  在无歧义时回绑并建立 successor；跨多根或同根多个 active executor 时拒绝猜测。普通用户和模型都不需要
+  select/start/close 任务，这不是自然语言任务判断，也不改变同一会话历史。最终运行事件关闭本轮执行记录，
+  thread 的最近投影和完整历史仍保留。
 - 会话任务使用两份非竞争索引：`task_ids` 是完整历史事实，供后台策略和审计精确读取；
   `active_task_ids` 只保存普通聊天可见的活跃候选。终态任务从热索引移除但不删除历史链接。子代理
   虽继承父任务的会话引用用于归档产物和进度，但它自己的收口无权关闭父会话任务；关闭入口按
@@ -895,9 +894,9 @@ proof 的事实见下方 2026-07-12 收口快照。
   会话链接，则允许它关闭自己的 DONE 链接；子任务和 `bg-main-*` 内部链接即使处于 active/completed，
   也不会成为普通会话的工作目录。后台自动续跑只服务显式 `/goal`，并携带精确 thread/task link；只有结构化
   任务终态确认后才把该任务从活跃候选移除，
-  避免“已经交付却仍被定时器重复做”。模型上下文只注入当前 sticky workspace，不再注入可恢复任务菜单
-  或最近完成任务菜单。普通聊天继承 cwd 但不激活旧执行；文件、命令、浏览器、PTY、LSP、派工和 wait 的
-  第一个工作入口会复用该目录并建立当前执行身份。内部绑定和权限失败均 fail-closed；代码不解析“继续、
+  避免“已经交付却仍被定时器重复做”。模型上下文不注入可恢复任务菜单或最近完成任务菜单。普通新回合
+  只在 exact request、Goal 或 active task 下预绑定 cwd；其他文件、命令、浏览器、PTY、LSP、派工和 wait
+  的第一个工作入口懒建本轮目录，精确旧项目写路径才允许回绑。内部绑定和权限失败均 fail-closed；代码不解析“继续、
   第二步”等自然语言决定目录或运行身份，也不要求用户输入触发词。
   历史 `ddfd942a` 的 1.10 第三步真测中，B 的回执与后台
   Navi 执行均正确且独立复验 62 项测试通过；A 虽已选择原 Zoxide 工作区并在后台继续，辅助表达轮却因一次
@@ -1398,10 +1397,10 @@ proof 的事实见下方 2026-07-12 收口快照。
   interruptible turn 或未过期 background claim。仅有旧 active link、open checklist 或未来 reminder
   不算正在运行，因此不会被 `/stop` 改状态。停止后历史、compact、记忆、人格、cwd 和文件均保留，
   下一条普通消息无需补发旧 prompt 或任何任务管理命令。
-- sticky workspace 的内部结构化绑定仍保留，但旧 `select_current_conversation_task` 名称和公共导出已
-  删除。终态目录被下一轮工作复用时，系统创建新的执行 identity 并刷新 canonical workspace 投影；
-  旧 task 保持终态。精确结构化写路径可以在统一 Tool Gateway 绑定同 thread 的既有目录，历史菜单和
-  自然语言没有执行权。
+- workspace 的内部结构化绑定仍保留，但旧 `select_current_conversation_task` 名称和公共导出已删除。
+  terminal pointer 只作状态/导航；只有 exact request、Goal、active task 或精确结构化写路径能让下一轮
+  复用旧目录。回绑时创建新的执行 identity 并刷新 canonical workspace 投影，旧 task 保持终态；历史菜单
+  和自然语言没有执行权。
 - 本轮实现直接核对 会话运行时 `session/session.rs`、`session/mod.rs`、`tasks/mod.rs`、
   `tools/handlers/plan.rs` 与 长期助手 `cli.py`、`tools/todo_tool.py`；只适配现有 owner/thread/goal
   数据结构，删除了候选加载/渲染、普通清单提醒、普通 continuation、select/start handler 和废弃错误码，
@@ -1461,9 +1460,9 @@ proof 的事实见下方 2026-07-12 收口快照。
   只有显式持久 `/goal` 的 open plan 保持
   `unfinished` 并沿既有 continuation 续跑。代码不判断正文是否含“全部完成”，也不从模型文字反向
   改变任务状态。
-- sticky workspace 与 live execution 已分开：普通终态 task 不会被下一轮工具复活。纯聊天只继承 cwd；
-  真正开始工作时在同一 cwd 上创建当前 request 的新 task id，并保存 `continued_from_task_id`。只有精确
-  持久 `/goal` 允许原 task id 恢复。后台 claim 后还会重读精确 task link，若 `/stop` 或前台完成已先到达，
+- workspace 最近投影与 live execution 已分开：普通终态 task 不会被下一轮工具隐式复活，也不把 cwd
+  自动交给无关新工作；精确旧项目写路径可建立当前 request 的 successor。只有精确持久 `/goal` 允许原
+  task id 恢复。后台 claim 后还会重读精确 task link，若 `/stop` 或前台完成已先到达，
   就取消本次 claim 并退休对应 wake/policy，不再启动模型或工具。
 - 子代理 `allowed_tools` 改为父 run 工具快照的严格子集：worker 固定去掉继续派工能力，coordinator
   也只有父代理已有该能力时才保留。child 携带父 conversation id 只用于 lineage、wake 和归档；

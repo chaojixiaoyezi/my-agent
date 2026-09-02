@@ -793,9 +793,9 @@ def _record_gateway_stage(
     stages[key] = round((time.monotonic() - started_mono) * 1000, 1)
 
 
-# LLM: This value is the resolved 会话运行时 thread workspace, not proof that the current turn
+# LLM: This is an eligible exact/Goal/active workspace selection, not proof that the current turn
 # has started task execution; lifecycle activation still happens at the first promoting tool.
-# 类用途: 保存本轮从会话状态继承的确切任务目录，普通聊天只进入目录而不会重开任务。
+# 类用途: 保存本轮具有结构化执行权的确切任务目录，普通历史投影不会自动进入这里。
 @dataclass(frozen=True)
 class _GatewayWorkspaceSelection:
     task_id: str
@@ -807,9 +807,9 @@ class _GatewayWorkspaceSelection:
     execution_sources: tuple[str, ...] = ()
 
 
-# LLM: Gateway projects one owner/thread history plus one sticky workspace; internal run records
-# never become model-visible task choices.
-# 类用途: 保存一个持续 thread 的历史和跨轮继承工作目录。
+# LLM: Gateway projects one owner/thread history plus an optional authorized execution workspace;
+# internal run records never become model-visible task choices.
+# 类用途: 保存一个持续 thread 的历史，以及本轮可继承的精确工作目录。
 @dataclass(frozen=True)
 class _GatewayConversationContext:
     thread_id: str = ""
@@ -1181,7 +1181,7 @@ def _execute_gateway_conversation_turn(
     return _persist_gateway_assistant_result(context, conversation, result)
 
 
-# LLM: Approval scope must match the same canonical sticky cwd passed to model/tool execution.
+# LLM: Approval scope must match the same canonical execution cwd passed to model/tool execution.
 # Missing owner, thread, or cwd disables reuse and therefore fails safe by prompting again.
 # 函数用途: 在模型开始前按用户、会话、任务目录和权限模式绑定“本会话允许”的真实生命周期。
 def _configure_gateway_approval_session(
@@ -2097,10 +2097,9 @@ def _audit_runtime_prompt_section(request: dict) -> str:
     )
 
 
-# LLM: Stamp the exact sticky workspace as the turn cwd before the first model sample while
-# keeping terminal lifecycle identity separate. Promotion may create a fresh execution later,
-# but every model/tool/approval path must already resolve relative paths from this one cwd.
-# 函数用途: 生成本轮结构化会话参数；先进入同一任务目录，再按首个工作工具建立本轮执行身份。
+# LLM: Stamp only an exact request/Goal/active workspace before the first model sample. A terminal
+# link may appear here only through exact authority; a historical thread projection alone cannot.
+# 函数用途: 生成本轮结构化会话参数；有精确执行权时先进入原目录，否则由首个工作工具懒建新目录。
 def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict | None:
     attrs: dict[str, object] = {}
     if conversation.thread_id:
@@ -2116,9 +2115,9 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
         )
     if conversation.workspace_task is not None:
         task = conversation.workspace_task
-        # 会话运行时 在模型采样前就把 session/turn cwd 固定下来，shell、审批与模型看到
-        # 的目录完全一致。本项目的 owner 隔离要求 sticky task root 在持久工作开始后
-        # 取得同样权威；client cwd 只属于任务晋升前，不能在 completed 后续轮重新冒头。
+        # 会话运行时 在模型采样前就把显式 session/turn cwd 固定下来，shell、审批与模型看到
+        # 的目录完全一致。本项目只让 exact request、Goal 或 active task 取得同样权威；
+        # 普通 terminal 历史不会仅凭 thread pointer 进入这个分支。
         attrs[CONVERSATION_EXECUTION_CWD_ATTR] = task.task_path
         attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = [task.task_path]
         attrs[CONVERSATION_WORKSPACE_TASK_ID_ATTR] = task.task_id
@@ -2127,9 +2126,8 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
         attrs[CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR] = (
             task.execution_state_available
         )
-        # 终态任务(completed 等)不预填旧的 live task 身份或 run_workspace：纯聊天
-        # 不得复活/归档旧任务。但上面的 execution_cwd 已在首采样前指向 sticky root；
-        # 本轮首个 promotes_task 工具再以新 request/task 身份在同一路径建立 successor。
+        # 终态任务只可能来自 exact request/Goal 选择；它不预填旧 live identity。
+        # 首个 promotes_task 工具再按结构化选择决定恢复或建立 successor。
         if str(task.status or "").strip().lower() in {"active", "interrupted"}:
             attrs["conversation_task_id"] = task.task_id
             attrs["run_workspace"] = {
@@ -2189,7 +2187,7 @@ def _gateway_run_task_attributes(
 
 
 # LLM: Inline Compact/provider retries may rebuild RunParams, but only the exact request that
-# durably published this thread/task binding may regain active-turn authority. A sticky task id
+# durably published this thread/task binding may regain active-turn authority. A historical task id
 # alone is insufficient because a later user turn or background wake can observe the same cwd.
 # 函数用途: 判断当前请求是否仍是该会话任务的原执行回合，避免续跑丢权或新请求冒充旧回合。
 def _gateway_request_owns_active_task_turn(
@@ -2301,6 +2299,8 @@ def _gateway_conversation_context(
         thread,
         thread_goal,
         load_errors,
+        request=inputs.request,
+        request_id=inputs.request_id,
     )
     subagent_completions = _gateway_subagent_completion_context(
         store,
@@ -2663,14 +2663,17 @@ def _gateway_workspace_lineage_task_ids(
     return selected
 
 
-# LLM: Resolve the sticky workspace from ConversationThread.workspace_task_id. For pre-v3 records,
-# migrate only an exact goal task or one unambiguous root task; never inspect the user prompt.
-# 函数用途: 找出该会话下一轮默认进入的原任务目录，并对旧数据做无歧义兼容。
+# LLM: Workspace execution follows an exact bound request, unfinished Goal, or currently active
+# task. A terminal sticky pointer is display/navigation state and must not select a new turn.
+# 函数用途: 为本轮选择仍有执行权的精确任务目录；普通终态任务不会自动吸附下一项工作。
 def _gateway_workspace_task(
     store: object,
     thread: object,
     thread_goal: dict[str, object] | None,
     load_errors: list[dict],
+    *,
+    request: object = None,
+    request_id: str = "",
 ) -> _GatewayWorkspaceSelection | None:
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
     try:
@@ -2681,10 +2684,7 @@ def _gateway_workspace_task(
     if errors:
         load_errors.extend(error for error in errors if isinstance(error, dict))
         return None
-    from ..conversation.task_promotion import (
-        is_live_conversation_workspace,
-        is_reusable_conversation_workspace,
-    )
+    from ..conversation.task_promotion import is_reusable_conversation_workspace
 
     # A detached named task owns its own execution lane and workspace.  It may
     # remain active while the parent conversation starts unrelated work, so it
@@ -2696,83 +2696,28 @@ def _gateway_workspace_task(
         if is_reusable_conversation_workspace(link)
         and str(getattr(link, "cancellation_scope", "") or "").strip().lower() != "detached"
     ]
-    selected_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
-    selected = None
-    strict_selection = bool(selected_id)
-    if selected_id:
-        selected = next(
-            (link for link in links if str(getattr(link, "task_id", "") or "") == selected_id),
-            None,
-        )
-        if selected is None:
-            load_errors.append(
-                _conversation_error(
-                    ValueError(f"sticky conversation workspace task is missing: {selected_id}"),
-                    "gateway.conversation.workspace_task",
-                )
-            )
-        elif selected not in selectable:
-            # sticky 指向的任务已不可复用(如 superseded/取消)时回退常规选择,
-            # 不能因此让本轮开新任务目录——真机(2026-08-08):用户连续消息被
-            # 截断成新任务名,模型在新目录找不到旧产物,复刻任务停摆。
-            selected = None
-            strict_selection = False
-    goal_task_id = str((thread_goal or {}).get("task_id") or "").strip()
-    if goal_task_id:
-        selected = next(
-            (
-                link
-                for link in selectable
-                if str(getattr(link, "task_id", "") or "") == goal_task_id
-            ),
-            None,
-        )
-        strict_selection = strict_selection or selected is not None
-    if selected is None:
-        # 同路径的多条历史链接算一个工作区;去重后唯一才可隐式继承,
-        # 否则同一目录反复续跑会被 len>1 误判为"多个候选"而开新任务。
-        # 仅 live(active/interrupted)任务可隐式继承:completed 等终态任务
-        # 是新消息应另开新目录的对象(问题1),不作为「最近工作区」回退选中。
-        unique_paths = {
-            path: link
-            for link in selectable
-            if is_live_conversation_workspace(link)
-            and (path := _existing_gateway_workspace_path(getattr(link, "task_path", "")))
-        }
-        if len(unique_paths) == 1:
-            selected = next(iter(unique_paths.values()))
-        elif len(unique_paths) > 1:
-            # 多个候选工作区时同会话普通消息默认延续有真实产物的任务:
-            # 仅 output 目录非空才是工作证据,空壳目录是用户消息被截断成
-            # 任务名的产物(真机 2026-08-08 scrapy 复刻停摆三连)。全部
-            # 有产物/全部为空时回退最近绑定的候选。开新任务目录会让模型
-            # 在新目录找不到旧产物,因此绝不因多候选而开新任务。
-            candidates = list(unique_paths.values())
-            populated = [
-                link
-                for link in candidates
-                if _gateway_workspace_has_artifacts(
-                    _existing_gateway_workspace_path(getattr(link, "task_path", ""))
-                )
-            ]
-            if len(populated) == 1:
-                selected = populated[0]
-            else:
-                selected = candidates[-1]
+    selected, strict_selection = _select_gateway_workspace_link(
+        selectable=selectable,
+        thread=thread,
+        thread_goal=thread_goal,
+        request=request,
+        request_id=request_id,
+        load_errors=load_errors,
+    )
     if selected is None:
         return None
     configured_task_path = str(getattr(selected, "task_path", "") or "").strip()
     task_path = _existing_gateway_workspace_path(configured_task_path)
     if not task_path:
         # 会话运行时 keeps a Goal as a thread overlay and does not require it to materialize a
-        # workspace before the first real file/tool action. An exact sticky Goal link with an
+        # workspace before the first real file/tool action. An exact Goal link with an
         # empty path is therefore valid and the next foreground turn stays in the thread cwd.
         # A non-empty path that disappeared is still an objective persistence failure.
         if strict_selection and configured_task_path:
             load_errors.append(
                 _conversation_error(
                     ValueError(
-                        "sticky conversation workspace path is missing or not a directory: "
+                        "selected conversation workspace path is missing or not a directory: "
                         f"{getattr(selected, 'task_id', '')}"
                     ),
                     "gateway.conversation.workspace_task",
@@ -2797,6 +2742,104 @@ def _gateway_workspace_task(
     )
 
 
+# LLM: Selection priority is entirely structured. Exact request lineage and Goal identity may
+# select a terminal workspace; otherwise only a currently active task is eligible and ambiguity
+# yields no selection rather than a recency/artifact guess.
+# 函数用途: 按请求绑定、持续目标、当前活跃任务的顺序选择工作区链接，不读取用户措辞或产物多少。
+def _select_gateway_workspace_link(
+    *,
+    selectable: list[object],
+    thread: object,
+    thread_goal: dict[str, object] | None,
+    request: object,
+    request_id: str,
+    load_errors: list[dict],
+) -> tuple[object | None, bool]:
+    allowed = {
+        str(getattr(link, "task_id", "") or "").strip(): link for link in selectable
+    }
+    exact_request_task_id = _gateway_bound_request_task_id(
+        request,
+        request_id=request_id,
+        thread_id=str(getattr(thread, "thread_id", "") or ""),
+    )
+    if exact_request_task_id:
+        return _required_gateway_workspace_link(
+            allowed,
+            exact_request_task_id,
+            load_errors,
+            source="bound request",
+        ), True
+    goal_task_id = str((thread_goal or {}).get("task_id") or "").strip()
+    if goal_task_id:
+        return _required_gateway_workspace_link(
+            allowed,
+            goal_task_id,
+            load_errors,
+            source="thread goal",
+        ), True
+    sticky_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
+    sticky = allowed.get(sticky_id)
+    if sticky is not None and _gateway_workspace_link_active(sticky):
+        return sticky, True
+    active = [link for link in selectable if _gateway_workspace_link_active(link)]
+    return (active[0], True) if len(active) == 1 else (None, False)
+
+
+# LLM: A request-level task binding is written by the Gateway after promotion and survives retry
+# or restart. Client prose and the thread's historical sticky pointer cannot manufacture it.
+# 函数用途: 校验请求自身已经持久绑定的精确 thread/task 身份，供同一执行轮恢复目录。
+def _gateway_bound_request_task_id(
+    request: object,
+    *,
+    request_id: str,
+    thread_id: str,
+) -> str:
+    row = request if isinstance(request, dict) else {}
+    runtime = row.get("conversation_runtime")
+    if not isinstance(runtime, dict):
+        return ""
+    expected_request_id = str(request_id or "").strip()
+    payload_request_id = str(row.get("id") or row.get("request_id") or "").strip()
+    bound_request_id = str(runtime.get("request_id") or "").strip()
+    if payload_request_id and expected_request_id and payload_request_id != expected_request_id:
+        return ""
+    if bound_request_id and expected_request_id and bound_request_id != expected_request_id:
+        return ""
+    if str(runtime.get("thread_id") or "").strip() != str(thread_id or "").strip():
+        return ""
+    return str(runtime.get("task_id") or "").strip()
+
+
+# LLM: Exact request/Goal identities fail closed when their task link is missing or retired;
+# silently falling back to another workspace could redirect writes across unrelated tasks.
+# 函数用途: 读取必须存在且可复用的精确任务链接；损坏时登记会话加载错误。
+def _required_gateway_workspace_link(
+    allowed: dict[str, object],
+    task_id: str,
+    load_errors: list[dict],
+    *,
+    source: str,
+) -> object | None:
+    selected = allowed.get(str(task_id or "").strip())
+    if selected is not None:
+        return selected
+    load_errors.append(
+        _conversation_error(
+            ValueError(f"{source} workspace task is missing or not reusable: {task_id}"),
+            "gateway.conversation.workspace_task",
+        )
+    )
+    return None
+
+
+# LLM: Only active means an ordinary new turn still belongs to a live execution. Interrupted and
+# completed are terminal here; they require exact request/Goal binding or an exact mutation path.
+# 函数用途: 判断任务链接是否仍在执行中，避免完成或中断任务自动吸附普通新消息。
+def _gateway_workspace_link_active(link: object) -> bool:
+    return str(getattr(link, "status", "") or "").strip().lower() == "active"
+
+
 # LLM: Workspace inheritance accepts only an existing directory from the exact owner-local task
 # link. It resolves symlinks once so all downstream boundaries receive one canonical path.
 # 函数用途: 校验并规范化会话任务目录；路径不存在或不是目录时返回空。
@@ -2809,24 +2852,6 @@ def _existing_gateway_workspace_path(value: object) -> str:
     except OSError:
         return ""
     return str(path) if path.is_dir() else ""
-
-
-# LLM: An output subdirectory with at least one file is the only structured evidence that a
-# task actually produced artifacts; empty shells are created when a user message truncates
-# into a task name (2026-08-08 scrapy replica stall x3).
-# 函数用途: 判断任务工作区是否有真实产物,供多候选工作区选择时区分实工作区与空壳。
-def _gateway_workspace_has_artifacts(path: str) -> bool:
-    if not path:
-        return False
-    output_dir = os.path.join(path, "output")
-    if not os.path.isdir(output_dir):
-        return False
-    try:
-        return any(
-            os.path.isfile(os.path.join(output_dir, name)) for name in os.listdir(output_dir)
-        )
-    except OSError:
-        return False
 
 
 # LLM: Visible prose, canonical provider replay and artifact refs come from one bounded thread

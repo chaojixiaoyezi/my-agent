@@ -1,5 +1,13 @@
 # COMPLETED
 
+- 2026-09-02 完成普通新任务与旧项目续作的工作区分流：终态普通 task 只保留为
+  状态/导航历史，不再隐式选中下一回合 cwd；exact request、active task 和未结束 Goal
+  仍保持原路径。显式写入旧项目时，统一工具入口按 canonical `task_path` 合并同项目的
+  多代执行，选最新 terminal link 建 successor 并清理影子占位。focused 与本机
+  MiniMax-M2.7 真 TUI `ma-r155-local-workspace-routing` 均通过：无关 CSV 项目新建目录，
+  Markdown 报告续作则回到旧文本项目，request/thread/successor/path 精确一致。这解决
+  长期助手把所有事粘在一个目录，或明确续作却留下空影子任务的双向问题。
+
 ## 2026-09-02 R154 主代理 Compact 中断原子边界
 
 - 三条 Compact 路径使用同一个只读中断合同；CAS 前的用户停止恢复未提交内存状态、丢弃候选且不增加失败，

@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.runtime.guidance import (
@@ -3702,6 +3703,7 @@ def test_promote_resumes_exact_active_sticky_task_without_shadow_link(tmp_path) 
     attrs = {
         "conversation_thread_id": thread.thread_id,
         "conversation_task_id": "req-second",
+        "conversation_workspace_task_id": "req-first",
     }
     agent._current_run_params = RunParams(
         request_id="req-second",
@@ -3729,12 +3731,8 @@ def test_promote_resumes_exact_active_sticky_task_without_shadow_link(tmp_path) 
     assert str(links[0].status).strip().lower() == "active"
 
 
-def test_promote_completed_sticky_task_starts_new_execution_in_same_workspace(tmp_path) -> None:
-    """终态 sticky 只换新执行身份，不丢同一 thread 的持久工作目录。
-
-    这与 会话运行时 thread cwd 一致：上一任务保持 completed，新消息取得新 task id，
-    但用户继续在同一 TUI/IM 工作时仍能直接看到旧产物，不去空目录重新搜索。
-    """
+def test_promote_completed_sticky_task_starts_new_execution_in_new_workspace(tmp_path) -> None:
+    """终态 sticky 仅供展示；没有精确选择的新消息建立自己的任务目录。"""
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
@@ -3771,7 +3769,8 @@ def test_promote_completed_sticky_task_starts_new_execution_in_same_workspace(tm
 
     assert promoted is not None
     assert promoted.task_id == "req-second"  # 新执行代数
-    assert promoted.task_path == str(task_dir)  # 新执行身份，thread cwd 不变
+    assert Path(promoted.task_path) != task_dir.resolve()
+    assert "conversation_continued_from_task_id" not in attrs
     links = agent.conversation_store.task_links(thread.thread_id)
     by_id = {item.task_id: item for item in links}
     assert str(by_id["req-first"].status).strip().lower() == "completed"  # 原任务保持终态
@@ -3843,6 +3842,7 @@ def test_promote_blocked_by_running_policy_does_not_create_shadow_link(tmp_path)
     attrs = {
         "conversation_thread_id": thread.thread_id,
         "conversation_task_id": "req-second",
+        "conversation_workspace_task_id": "req-first",
     }
     agent._current_run_params = RunParams(
         request_id="req-second",

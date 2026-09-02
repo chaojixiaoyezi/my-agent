@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-09-02 R155 终态工作区不隐式吸附，精确写路径可回绑
+
+- `_gateway_workspace_task` 现只选 exact request `conversation_runtime`、thread Goal 或 active task。
+  terminal ordinary sticky 只用于 UI/导航，新请求在 owner home 起步并懒建自己的任务目录。
+- 写工具的显式目标路径仍在统一 tool runtime 入口裁决。同一 canonical task root 下多个
+  completed/interrupted generation 按 `created_at + task_id` 选最新一代；当前占位 link 转
+  `superseded`，再把 handler cwd、write roots、request runtime 与 thread pointer 一次同步到旧项目。
+- 本机真 TUI `ma-r155-local-workspace-routing` 以无关 CSV 任务证明新目录，以旧文本
+  检查工具的 Markdown 报告证明多代同根回绑。测试期间始终只有一个
+  `local/main` Gateway，owner 只由 thin TUI 请求携带。
+
 ## 2026-09-02 R154 Compact 中断贯穿所有提交安全点（主代理真 TUI 通过）
 
 - transcript、active-turn archive 与 native IR 统一读取 `CompactInterruptCheck`。摘要前后、候选改写前后、
@@ -953,6 +964,9 @@
 
 ## 2026-07-29 普通会话恢复为 会话运行时 式 active turn
 
+> 2026-09-02 R155 已收窄本节的 sticky cwd 语义：terminal pointer 只作状态/导航，普通新工作不再继承；
+> exact request、Goal、active task 或精确旧项目写路径才可复用旧目录。以下保留当时发布记录。
+
 - 普通用户会话现在只有一个持续 transcript、一个 compact 链和一个 sticky cwd。每条新消息直接开始
   当前 active turn；旧 task/progress 只保留在历史、记忆和文件事实中，不再形成“未完成任务清单”菜单，
   也不要求用户或模型执行 select/start/finish/close 仪式。
@@ -982,6 +996,8 @@
   active-turn 语义，暂未顺手扩张修改范围。
 
 ## 2026-07-28 sticky workspace 与当前执行身份分离
+
+> 2026-09-02 R155 已替换“terminal task 自动贡献 cwd”行为；以下保留当时的历史发布证据。
 
 - Gateway 现在分别投影上一 task 的 workspace id/status 与当前 live execution id。普通终态 task 只提供
   cwd，纯聊天不会重开它；本轮第一个工作工具在同一 cwd 建立当前 request 的新 task id，并记录
@@ -1403,6 +1419,9 @@
   配置刷新点且供应商探活成功时才安全切回；4000 仅在自身探活成功时作为后备。
 
 ## 2026-07-21 会话运行时 式 thread 工作目录跨轮继承
+
+> 2026-09-02 R155 已将跨轮继承收窄到 exact request、Goal 和 active task；普通 terminal pointer
+> 只作状态/导航，旧项目续作由精确写路径回绑。以下保留初版设计与验收记录。
 
 - 真实双长任务在停止后能够通过显式 `task_progress select` 找回项目，但这仍与 会话运行时 单个 task 的体验有
   差距：会话运行时 在 `会话运行时-rs/core/src/session/session.rs` 的 `SessionConfiguration.environments` 中持久保存

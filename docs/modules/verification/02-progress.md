@@ -123,12 +123,13 @@
 ## 2026-07-29 普通 active turn 不再受历史进度账控制
 
 - `tool_call_runtime` 仍是文件、命令、浏览器、PTY、LSP、派工和其他工作工具的唯一 task promotion /
-  workspace binding 入口，但模型不再通过 `task_progress select/start` 控制它。当前 thread 的 sticky cwd
-  自动进入本轮；精确结构化写路径可无歧义绑定同 thread 的既有目录，模糊路径、跨 task、跨 owner 或
+  workspace binding 入口，但模型不再通过 `task_progress select/start` 控制它。exact request、未结束 Goal
+  或 active task 自动进入本轮；精确结构化写路径可无歧义绑定同 thread 的既有 canonical 目录，同根多代
+  terminal execution 按最新一代续作。模糊路径、跨 task、跨 owner 或
   已有 live executor 时继续在 handler 前拒绝。
 - 普通 `task_progress` 只保留 `read/update`，open item 不触发 completion nudge、后台 continuation 或
   verification hard gate。只有 exact `/goal` 的 active goal/task 同时成立时，open plan 才有耐久续跑权。
-- 回归覆盖终态 cwd 上建立新 execution 并刷新 canonical workspace identity、普通 open progress 直接结束
+- 回归覆盖精确回绑旧 cwd 后建立新 execution 并刷新 canonical workspace identity、普通 open progress 直接结束
   本轮、显式 `/goal` 继续、无 live executor 的 `/stop` 不改历史状态、live request 的 `/stop` 立即中断，
   以及内部 conversation task id 只留在 JSON 事实、不再进入模型提示。
 - 全量 pytest 跑到 100% 后仅发现两条仍断言已删除旧语义的测试；修正期望后，本次相关 308 项回归全部

@@ -177,19 +177,21 @@ guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩�
 
 - 每条用户消息直接成为新的 active turn；无需选择、关闭或新建普通任务。
 - 普通 `task_progress` 只允许 `read/update`，是模型可选的恢复笔记，不是会话或任务控制器。
-- sticky workspace 自动延续 canonical task root；上一执行已终态时，首个工作工具在同一 task-path lineage
-  创建本轮执行身份。
+- exact request-level binding、未结束 Goal 或 active task 自动延续 canonical task root；普通
+  completed/interrupted task 只保留历史/导航投影，不隐式吸附下一个新回合。
 - 不解析“继续、重来、第二步”等自然语言来猜 task id 或控制生命周期。
-- 若文件变更工具已经携带显式绝对目标，且所有变更目标只落在同一 thread 的一个旧 task 内，统一工具
-  runtime 可以把这一结构化路径事实用于精确 workspace binding；读操作、相对路径、跨多个 task 或有
-  live executor 的目录都不得猜测或自动绑定。
+- 若文件变更工具已携带显式绝对目标或 canonical owner-relative `tasks/...` 目标，
+  且所有变更只落在同一 thread 的一个 canonical task root，统一工具 runtime 可精确回绑。
+  同根的多个 terminal execution link 只是同项目的历史代次，选最新一代建 successor；读操作、
+  普通相对路径、跨多根或同根多个 live executor 都不得猜测或自动绑定。
 - workspace binding 只改变本轮结构化 cwd/lineage；模型历史仍是同一 thread。
 - 完成、停止、取消和 supersede 只改变 task record，不切换聊天 lane。
 
 任务晋升前的普通对话默认使用结构化 owner home；进程启动 cwd 或未获 Full Access 的外部 client cwd
 不会成为权限。首个 `promotes_task` 动作创建或复用
 `<owner_home>/tasks/<task_path>/` 后，该目录成为 main、child、grandchild 的唯一默认 execution cwd 与产品
-写根；后续轮由 `ConversationThread.workspace_task_id` 复用它。`run_command` 与新建 PTY 没有显式
+写根；同一 active execution、exact request 恢复或 Goal 续转由结构化 task id 复用它，thread
+`workspace_task_id` 只供状态/导航。`run_command` 与新建 PTY 没有显式
 `working_dir` 时从该 task root 启动；调用者显式指定目录时仍必须落在结构化允许根并经过 sandbox 验证。
 不得从 Gateway daemon 的 `/root`、模型文字、`child_outputs` 猜工作区，也不得让 child 另选家目录。这个
 默认值不检查命令文字或用户措辞，适配 会话运行时 turn cwd 的单一事实源，同时落实本项目 owner 多租户边界。
@@ -199,8 +201,9 @@ guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩�
 ## `/stop`, `/goal`, and `/audit`
 
 `/stop` 等价于停止当前 会话运行时 turn：终止当前模型/工具执行和子代理树，把 task 标记为 interrupted，并抑制
-迟到回复。thread transcript、compact、workspace、artifacts、USER/SOUL 和 memory 都保留。用户之后说
-“继续”时，模型可精确 select 原 task 后接着工作，无需重发整段 prompt。
+迟到回复。thread transcript、compact、workspace、artifacts、USER/SOUL 和 memory 都保留。后续模型仍能从
+历史和 owner-local 任务索引找到原项目；当写工具精确指向该 canonical 目录时才结构化回绑，
+不因“继续”两个字自动复活旧任务。
 
 `/goal` 是同一 thread 上的持久目标 overlay，不创建第二个会话或模型历史。它绑定一个 durable root task，
 用 typed command 和 `get_goal/update_goal` 管理生命周期；普通任务无需 `/goal`。

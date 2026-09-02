@@ -20,12 +20,13 @@ from .authority import (
     CONVERSATION_WORK_DURATION_ATTR,
     CONVERSATION_WORK_KIND_ATTR,
     CONVERSATION_WORK_NAME_ATTR,
+    CONVERSATION_WORKSPACE_TASK_ID_ATTR,
 )
 
 
-# LLM: A sticky cwd is not a live-task capability.  The first work tool in each turn binds the
-# current request automatically; terminal run records never require user-visible selection.
-# 函数用途: 本轮真正工作时自动建立运行身份并保留目录连续性，不让旧清单控制新一轮。
+# LLM: A thread's latest workspace projection is not a live-task capability. The first work tool
+# binds a fresh request unless exact request/Goal/active authority already selected a workspace.
+# 函数用途: 本轮真正工作时自动建立运行身份；只有结构化授权才复用旧目录，不让旧清单控制新一轮。
 def promote_current_conversation_task(
     agent: object,
     *,
@@ -81,18 +82,17 @@ def promote_current_conversation_task(
         selected = _materialize_promoted_workspace(agent, current, existing, task_goal=goal) or existing
         return _activate_current_conversation_task(store, current, attrs, selected)
     if not child_run_id:
-        # 每轮 /ask 都有新请求 id，但同一 thread 的 workspace_task_id 是类似
-        # 会话运行时 thread cwd 的持久工作区指针。旧执行已 completed 时也只换一个
-        # 新 active-turn/task 身份，不换目录；否则用户在同一 TUI/IM 说「继续」会
-        # 在新空目录里找不到上轮产物，甚至让模型自行搜索和复制旧目录。
-        candidate = _sticky_workspace_task_id(store, thread_id) or explicit_task_id
+        # Gateway 在首个模型采样前只把 exact bound request、Goal 或 active task
+        # 写入该字段。thread.workspace_task_id 同时保留给 UI/定位，但 completed/
+        # interrupted sticky 不能在这里偷偷取得新任务的执行选择权。
+        candidate = str(attrs.get(CONVERSATION_WORKSPACE_TASK_ID_ATTR) or explicit_task_id).strip()
         if candidate:
             reusable = _reusable_conversation_workspace_link(store, thread_id, candidate)
             if reusable is not None and not _detached_named_work_link(reusable):
                 bound = bind_current_conversation_workspace(agent, candidate)
                 if bound is not None:
                     return bound
-                # 精确 sticky 续接失败时不另建影子目录。active 任务由
+                # 精确 task 续接失败时不另建影子目录。active 任务由
                 # execution blocker 收口；terminal 任务则由新执行代 successor 原子换代。
                 return None
             if not str(
@@ -102,7 +102,7 @@ def promote_current_conversation_task(
                 or ""
             ).strip():
                 return None
-        # detached 任务(后台巡检等)只提供 sticky 目录,不续接:新请求是独立的
+        # detached 任务(后台巡检等)只保留历史目录投影,不续接:新请求是独立的
         # 前台任务,按原路径新建 link(不占用 detached 任务的工作区)。
     task_goal = str(
         goal
@@ -234,13 +234,18 @@ def _active_conversation_link(store: object, thread_id: str, task_id: str):
     )
 
 
+# LLM: Detached named work keeps its own lifecycle and cannot become foreground cwd authority.
+# 函数用途: 判断 Audit/后台巡检等独立任务，避免把其目录自动交给普通前台消息。
 def _detached_named_work_link(link: object) -> bool:
-    """detached 命名工作(audit/后台巡检)只贡献 sticky 目录,不参与前台续接。"""
+    """detached 命名工作(audit/后台巡检)只保留导航投影，不参与前台续接。"""
     return str(getattr(link, "cancellation_scope", "") or "").strip().lower() == "detached"
 
 
+# LLM: This reads the latest task projection for bookkeeping only; callers must not treat it as
+# execution authority without an exact request/Goal/active decision.
+# 函数用途: 读取线程最近任务投影，供回绑时淘汰本轮占位记录，不直接决定工作目录。
 def _sticky_workspace_task_id(store: object, thread_id: str) -> str:
-    """读取线程持久化的 sticky cwd(上一轮晋升时 select_workspace_task 写入)。"""
+    """读取线程最近任务投影；仅用于替换占位 link，不直接授予下一轮 cwd。"""
     loader = getattr(store, "load_thread", None)
     if not callable(loader):
         return ""
@@ -253,9 +258,9 @@ def _sticky_workspace_task_id(store: object, thread_id: str) -> str:
     return str(getattr(thread, "workspace_task_id", "") or "").strip()
 
 
-# LLM: Binding uses an exact structured task id and never matches prose.  A terminal ordinary
-# task yields a fresh execution successor over the same cwd; only a paused structured /goal resumes
-# in place because the goal record itself owns that durable task id.
+# LLM: Binding uses an exact structured task id and never matches prose. A terminal task selected
+# by exact authority yields a fresh execution successor over the same cwd; only a paused structured
+# /goal resumes in place because the goal record itself owns that durable task id.
 # 函数用途: 内部绑定既有工作目录；普通终态任务保持终态，新一轮另建运行身份。
 def bind_current_conversation_workspace(agent: object, task_id: str):
     """由结构化会话身份或精确写入路径绑定既有目录，不作为模型工具暴露。"""
@@ -271,7 +276,7 @@ def bind_current_conversation_workspace(agent: object, task_id: str):
         return None
     if conversation_task_execution_blocker(agent, selected_id) is not None:
         return None
-    # 先前的 current 是线程持久化的 sticky cwd,不是本轮 gateway 派生的占位 id:
+    # 先前的 current 是线程最近任务投影,不是本轮 gateway 派生的占位 id:
     # 占位 id 从未 activate 过,把它当 prior 会在 supersede 时误杀同 id 的
     # 新执行代数(问题5 影子任务:successor 刚建就被标 superseded)。
     prior_current_id = _sticky_workspace_task_id(store, thread_id) or str(
@@ -486,8 +491,8 @@ def _continue_terminal_link_as_new_execution(agent: object, store: object, link:
     )
     if not successor_id:
         return None
-    # A terminal link contributes only the sticky cwd.  The successor is a new
-    # 会话运行时 active turn, so its objective must come from this turn's exact
+    # A terminal link selected by exact authority contributes its canonical cwd. The successor
+    # is a new 会话运行时 active turn, so its objective must come from this turn's exact
     # user input rather than the historical execution that previously occupied
     # the directory.  Copying the old goal here makes foreground execution look
     # correct while a later background wake resumes unrelated historical work.
@@ -633,18 +638,6 @@ def is_reusable_conversation_workspace(link: object) -> bool:
     return status in {"active", "completed", "interrupted"} and not task_id.startswith(
         ("subagent-", "bg-main-")
     )
-
-
-def is_live_conversation_workspace(link: object) -> bool:
-    """会话任务仍可被新用户消息继承身份/目录：仅 active 或 interrupted(暂停待恢复)。
-
-    completed 等终态任务不再吸附新消息(问题1 真机 2026-08-09:celery 完成后
-    click/jinja2/requests 等新任务消息全被吸进 celery 旧目录——新 req id 配旧
-    task_path);终态任务只保留状态提示,新一轮工作走独立目录。interrupted 是
-    「暂停可恢复」:用户手动继续时仍续接原目录(3081 测试锁定),故归入 live。
-    """
-    status = str(getattr(link, "status", "") or "").strip().lower()
-    return status in {"active", "interrupted"} and is_reusable_conversation_workspace(link)
 
 
 def conversation_task_execution_blocker(agent: object, task_id: str) -> dict[str, object] | None:

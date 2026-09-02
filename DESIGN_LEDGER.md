@@ -1,5 +1,23 @@
 # DESIGN LEDGER
 
+## 2026-09-02 普通终态任务不再隐式吸附新回合【状态：R155 本机真 TUI/Focused 通过】
+
+- `ConversationThread.workspace_task_id` 收窄为状态/导航投影，不再让 `completed/interrupted`
+  普通任务自动取得下一条用户消息的 cwd 权威。新回合只从 exact request-level
+  `conversation_runtime`、未结束 `/goal` 或仍 active 的任务继承工作区；否则从 owner home
+  起步，首个 `promotes_task` 动作建立新任务目录。
+- 明确写入同 thread 旧项目的结构化路径仍可精确续作。裁决先按 canonical
+  `task_path` 分组，而不是按历史 execution id 计数：同一项目有多代 terminal link 时选
+  最新一代建 successor，本轮早先懒建的影子任务标为 `superseded`；跨多个不同目录或
+  同目录有多个 active executor 仍 fail closed。用户说“继续”本身没有机器权威。
+- 对照 会话运行时 `会话运行时-rs/core/src/session/turn_context.rs`、`session/handlers.rs` 与
+  `session/session.rs`：每个 turn 只从显式 session/turn 环境建 cwd，不从完成正文或历史
+  任务猜目录。my-agent 额外保留 owner 隔离下的结构化写路径回绑，不增加文本分类器或
+  人工任务选择步骤。
+- 本机 MiniMax-M2.7 真 TUI `ma-r155-local-workspace-routing` 在同一会话先把无关 CSV
+  工具落到新目录，再把 Markdown 报告续作精确回绑旧文本检查项目；处理请求、thread
+  与 successor 三处的 task id/path 一致，临时影子 link 为 `superseded`。
+
 ## 2026-09-02 Compact 停止信号贯穿摘要、候选与提交【状态：R154 主代理真 TUI/Focused 通过】
 
 - transcript、active-turn archive 与 native IR 三条 Compact 路径共用一个只读
@@ -739,7 +757,7 @@
 - 子代理的 `allowed_write_roots` 必须覆盖所有能启动进程的正式工具：文件写入、`run_command`、PTY 和 LSP 共用同一结构化写边界。bwrap 中 owner home 作为只读基座，仅把本轮精确授权根叠加为可写；不得解析 shell 文本、重定向或自然语言猜测写路径。PTY session 与 LSP server 还必须绑定创建时的 owner/task 写域，禁止按可猜 session/server id 跨域复用。
 - 默认安装进入透明容器 CLI：用户仍调用 `my-agent`，包装器只挂当前工作区和 `~/.my-agent`；宿主 venv 仅为显式 `--host` 开发模式。企业 worker 在启动和 K8s readiness 重跑同一 sandbox 自检。
 - 发布干净度分两层：工作树门检查 tracked 脏文件和未忽略 untracked 文件；制品门直接检查 wheel/zip/tar 内容、运行状态目录和大小预算。`.gitignore` 不是发布安全事实。
-- 普通通道对话以 `owner + channel + chat/topic` 的持久 transcript 为唯一多轮事实源；旧 dialogue memory 不得重复注入或挤占稳定偏好。thread 另外持久保存一个精确 `workspace_task_id`，作用等同 会话运行时 `SessionConfiguration` 中跨 turn 继承的 cwd；它只选择当前工作目录，不等于当前轮正在执行任务，也不从自然语言推断。
+- 普通通道对话以 `owner + channel + chat/topic` 的持久 transcript 为唯一多轮事实源；旧 dialogue memory 不得重复注入或挤占稳定偏好。thread 另外持久保存一个精确 `workspace_task_id`，但它只表示最近状态/导航投影，不独自取得新 turn 的 cwd 权威。exact request、未结束 Goal 或 active task 才能继承目录；旧项目续作依靠工具携带的精确结构化路径回绑，不能从自然语言推断。
 - 公开 `my-agent run` 虽然不可追问，也必须把精确 user turn 在模型/工具执行前写入同一个 owner
   `ConversationStore`，最终公开 assistant 投影再按同一 request 幂等追加；audit 仍只是经历档案，不能
   成为 Memory 的第二消息权威。该 one-shot thread 只提供 transcript 与可核验 message ref，不预填
@@ -750,7 +768,7 @@
 - `cli_run` 的“无伪任务关联”不是无条件要求 `task_links=[]`：adapter 不得预填或主动 bind；若本轮没有
   task-promoting tool，links 必须为空。若模型真实执行会晋升任务的工具，既有生命周期可以建立 link，
   但 one-shot 收口后只能留下 `completed` 历史 link，`active_task_ids/active_task_links` 必须为空。
-- 普通会话只有一个持久 transcript 和一个 sticky `workspace_task_id`；每条用户消息都是新的 active turn，当前消息决定本轮聊天或工作。`/stop` 只中断眼前真实运行的 turn，历史、compact、memory、persona 和 cwd 都保留；没有 live turn 时不得借旧 task/goal 改状态。普通 `task_progress` 只提供 `read/update` 的可选恢复笔记，open item 不拦最终回复、不自动续跑、不要求用户选择、关闭或重开任务。若 sticky workspace 上一执行已终态，首个 `promotes_task` 工具会在同一 cwd 建立当前 request 的新执行 id 并记录 `continued_from_task_id`，旧终态不变；旧 link 只贡献 cwd，successor 的结构化 goal 必须取本轮精确用户输入，禁止复制旧执行目标；本轮输入缺失时 fail-closed，不创建 successor。后台续轮继续读取完整 thread summary/raw tail，但 task link、observation 与 progress 等运行投影只允许当前 task 及其持久 child lineage，不能把同会话旧项目重新暴露成任务菜单。结构化绝对写入路径可在统一工具入口无歧义绑定同 thread 的既有目录。只有用户显式创建的 `/goal` 才拥有可暂停、恢复和后台续跑的长期生命周期。该边界直接对照 会话运行时 的持久 thread/cwd + 单个 active turn，并采用 长期助手 的 session-local todo 仅作模型工作笔记；IM 只传结构化 owner/conversation/message 身份，不产生第二套语义。
+- 普通会话只有一个持久 transcript；`workspace_task_id` 只保留最近状态/导航投影。每条用户消息都是新的 active turn，当前消息决定本轮聊天或工作。`/stop` 只中断眼前真实运行的 turn，历史、compact、memory、persona 和产物都保留；没有 live turn 时不得借旧 task/goal 改状态。普通 `task_progress` 只提供 `read/update` 的可选恢复笔记，open item 不拦最终回复、不自动续跑、不要求用户选择、关闭或重开任务。exact request、未结束 Goal 或 active task 可以结构化继承 cwd；普通 terminal task 后的新工作由首个 `promotes_task` 工具建立新目录。写工具若精确命中同 thread 一个 canonical 旧项目根，则统一入口按目录归并多代 terminal execution、选最新一代建立 successor，并把本轮占位任务 supersede；跨多根或同根多个 active executor 时 fail closed。后台续轮继续读取完整 thread summary/raw tail，但 task link、observation 与 progress 等运行投影只允许当前 task 及其持久 child lineage，不能把同会话旧项目重新暴露成任务菜单。只有用户显式创建的 `/goal` 才拥有可暂停、恢复和后台续跑的长期生命周期。该边界直接对照 会话运行时 的显式 session/turn cwd + 单个 active turn，并采用 长期助手 的 session-local todo 仅作模型工作笔记；IM 只传结构化 owner/conversation/message 身份，不产生第二套语义。
 - 原生子代理创建入口必须有机器可校验的目标，但不重复表达同一事实：单派使用非空
   `create_subagents.goal`；批量使用非空 `items`，且每项自己的非空 `goal` 是对应 child 的完整工作边界，
   顶层 `goal` 只作可选批次说明。两种形态都没有、空批次或任一 item 缺目标时，必须在落任何 run 前返回

@@ -605,7 +605,7 @@ def _completion_followup_fixture(tmp_path: Path) -> tuple[SimpleAgent, dict, str
             "thread_id": first.thread_id,
             "task_id": "root-task",
             "goal": "多子代理调研",
-            "status": "interrupted",
+            "status": "active",
             "task_path": str(workspace),
         }
     )
@@ -711,9 +711,12 @@ def test_gateway_followup_receives_exact_root_child_completion_inputs(tmp_path):
             "thread_id": thread_id,
             "task_id": "followup-task",
             "goal": "继续汇总",
-            "status": "interrupted",
+            "status": "active",
             "task_path": str(tmp_path / "root-workspace"),
         }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "root-task", "status": "completed"}
     )
     agent.conversation_store.select_workspace_task(
         {"thread_id": thread_id, "task_id": "followup-task"}
@@ -3256,7 +3259,7 @@ def test_internal_child_links_never_appear_in_model_conversation_context(tmp_pat
 
 
 @pytest.mark.parametrize("prior_status", ["completed", "interrupted"])
-def test_next_turn_reuses_terminal_workspace_with_fresh_execution_automatically(
+def test_next_turn_starts_fresh_workspace_after_terminal_ordinary_task(
     tmp_path,
     prior_status,
 ):
@@ -3293,6 +3296,7 @@ def test_next_turn_reuses_terminal_workspace_with_fresh_execution_automatically(
     followup = _conversation_context(agent, request, "gw-followup", "继续做第二步")
     attrs = _gateway_task_attributes(followup)
     assert attrs is not None
+    assert followup.workspace_task is None
     params = RunParams(
         request_id="gw-followup",
         run_id="gw-followup",
@@ -3301,27 +3305,23 @@ def test_next_turn_reuses_terminal_workspace_with_fresh_execution_automatically(
         task_attributes=attrs,
     )
     agent._current_run_params = params
-    agent._current_run_task_workspace = str(workspace)
     try:
         selected = promote_current_conversation_task(agent)
     finally:
         delattr(agent, "_current_run_params")
 
     assert selected is not None
-    successor_id = params.task_attributes["conversation_task_id"]
-    assert successor_id != "task-completed"
-    # interrupted 恢复和 completed 后续轮都使用新执行身份，但同一
-    # thread 的 会话运行时 cwd 不变；这样新目标不会篡改旧终态，
-    # 「继续启动上一个项目」也不需要模型搜索、复制旧目录。
-    assert params.task_attributes["conversation_continued_from_task_id"] == "task-completed"
-    assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
-    assert agent._current_run_task_workspace == str(workspace)
+    assert selected.task_id == "gw-followup"
+    assert "conversation_continued_from_task_id" not in params.task_attributes
+    new_workspace = Path(params.task_attributes["run_workspace"]["task_root"])
+    assert new_workspace != workspace.resolve()
+    assert agent._current_run_task_workspace == str(new_workspace)
     links = {
         link.task_id: (link.status, link.goal)
         for link in agent.conversation_store.task_links(conversation.thread_id)
     }
     assert links["task-completed"] == (prior_status, "校园交易网站第一步")
-    assert links[successor_id] == ("active", "继续做第二步")
+    assert links["gw-followup"] == ("active", "继续做第二步")
 
 
 def test_terminal_workspace_successor_fails_closed_without_current_prompt(tmp_path):
@@ -3355,9 +3355,21 @@ def test_terminal_workspace_successor_fails_closed_without_current_prompt(tmp_pa
     agent.conversation_store.select_workspace_task(
         {"thread_id": conversation.thread_id, "task_id": "task-completed"}
     )
+    request.update(
+        {
+            "id": "gw-followup",
+            "conversation_runtime": {
+                "request_id": "gw-followup",
+                "thread_id": conversation.thread_id,
+                "task_id": "task-completed",
+                "task_path": str(workspace),
+            },
+        }
+    )
     followup = _conversation_context(agent, request, "gw-followup", "")
     attrs = _gateway_task_attributes(followup)
     assert attrs is not None
+    assert followup.workspace_task is not None
     params = RunParams(
         request_id="gw-followup",
         run_id="gw-followup",
@@ -3457,7 +3469,7 @@ def test_first_progress_update_automatically_binds_current_turn(tmp_path):
     "work_tool",
     ["read_file", "list_files", "search_text", "find_files", "write_file"],
 )
-def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first_work_tool(
+def test_gateway_terminal_workspace_starts_new_directory_at_first_work_tool(
     tmp_path,
     prior_status,
     work_tool,
@@ -3499,20 +3511,12 @@ def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first
     before = agent.conversation_store.task_links(first.thread_id)[0]
 
     assert attrs is not None
-    assert attrs[CONVERSATION_WORKSPACE_TASK_ID_ATTR] == "task-original"
-    assert attrs[CONVERSATION_WORKSPACE_TASK_STATUS_ATTR] == prior_status
-    if prior_status == "interrupted":
-        # interrupted=暂停待恢复:预填 live 身份供 promote 回落。
-        assert attrs["conversation_task_id"] == "task-original"
-        assert attrs["run_workspace"]["task_root"] == str(workspace.resolve())
-    else:
-        # completed 只暴露 sticky cwd 事实，不预填旧 live 身份或运行台账；首个
-        # promotes_task 工具再建新 execution successor。cwd 必须在模型首采样前
-        # 已经是 sticky root，否则第一条 shell 会把绝对路径写成旧客户端启动目录。
-        assert "conversation_task_id" not in attrs
-        assert "run_workspace" not in attrs
-    assert attrs[CONVERSATION_EXECUTION_CWD_ATTR] == str(workspace.resolve())
-    assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [str(workspace.resolve())]
+    assert CONVERSATION_WORKSPACE_TASK_ID_ATTR not in attrs
+    assert CONVERSATION_WORKSPACE_TASK_STATUS_ATTR not in attrs
+    assert "conversation_task_id" not in attrs
+    assert "run_workspace" not in attrs
+    assert CONVERSATION_EXECUTION_CWD_ATTR not in attrs
+    assert CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR not in attrs
     assert CONVERSATION_TASK_TURN_ACTIVE_ATTR not in attrs
     assert before.status == prior_status
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
@@ -3553,9 +3557,9 @@ def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first
     thread = agent.conversation_store.load_thread(first.thread_id)
     assert links["task-original"].status == prior_status
     assert links["gw-followup"].status == "active"
-    # 新 execution 身份和旧任务终态分开，thread cwd 则对
-    # completed/interrupted 一致继承。
-    new_workspace = workspace
+    # 普通终态 task 只留作历史；本轮直到第一个工作工具才建立自己的目录。
+    new_workspace = Path(attrs["run_workspace"]["task_root"])
+    assert new_workspace != workspace.resolve()
     assert links["gw-followup"].task_path == str(new_workspace.resolve())
     assert thread is not None and thread.workspace_task_id == "gw-followup"
     state = json.loads((new_workspace / "work" / "state.json").read_text(encoding="utf-8"))
@@ -3830,7 +3834,7 @@ def test_first_gateway_shell_call_rebases_explicit_initial_working_dir(tmp_path)
     assert not (initial_cwd / "shell-created").exists()
 
 
-def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_path):
+def test_new_ordinary_turn_does_not_reuse_completed_sticky_workspace(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
@@ -3870,7 +3874,6 @@ def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_pa
         task_attributes=attrs,
     )
     agent._current_run_params = params
-    agent._current_run_task_workspace = str(old_workspace)
     try:
         started = TaskProgressTool(agent).execute(
             {"action": "update", "summary": "按当前用户消息开始本轮工作"}
@@ -3886,10 +3889,8 @@ def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_pa
     assert thread is not None and thread.workspace_task_id == "gw-new"
     assert attrs["conversation_task_id"] == "gw-new"
     assert attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] is True
-    # 旧 task 仍保持 completed，新消息换成新 active-turn/task 身份；
-    # 工作目录则属于 thread，连续 TUI/IM 轮次必须继续看到原产物。
-    assert attrs["conversation_continued_from_task_id"] == "task-old"
-    assert attrs["run_workspace"]["task_root"] == str(old_workspace)
+    assert "conversation_continued_from_task_id" not in attrs
+    assert Path(attrs["run_workspace"]["task_root"]) != old_workspace.resolve()
     assert links["task-old"] == "completed"
     assert links["gw-new"] == "active"
 
@@ -3941,10 +3942,8 @@ def test_sticky_workspace_superseded_falls_back_to_reusable_task(tmp_path):
     assert "run_workspace" not in attrs
 
 
-def test_multi_candidate_workspace_prefers_populated_output_over_latest_empty(tmp_path):
-    # 多候选工作区(同会话多个可复用任务目录)时,普通消息延续有真实产物的任务,
-    # 不选最近创建的 output 空壳目录(空壳=用户消息被截断成任务名,真机
-    # 2026-08-08 scrapy 复刻停摆三连)。
+def test_multi_active_workspace_candidates_do_not_guess_from_artifact_count(tmp_path):
+    # 多个 active task 都是结构化执行候选时，产物多少和创建先后不能替用户选目录。
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
@@ -3981,11 +3980,12 @@ def test_multi_candidate_workspace_prefers_populated_output_over_latest_empty(tm
     attrs = _gateway_task_attributes(followup)
 
     assert attrs is not None
-    assert attrs["conversation_task_id"] == "task-populated"
-    assert attrs["run_workspace"]["task_root"] == str(populated)
+    assert "conversation_task_id" not in attrs
+    assert "run_workspace" not in attrs
+    assert CONVERSATION_WORKSPACE_TASK_ID_ATTR not in attrs
 
 
-def test_interrupted_workspace_is_reused_at_first_work_tool_without_selection(tmp_path):
+def test_interrupted_workspace_requires_exact_selection_before_reuse(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
     )
@@ -4019,9 +4019,8 @@ def test_interrupted_workspace_is_reused_at_first_work_tool_without_selection(tm
     followup = _conversation_context(agent, request, "gw-followup", "继续")
     section = _gateway_injections({"inject": []}, followup)[0]
     assert "task-interrupted" not in section
-    assert "## Current Task Runtime" in section
+    assert "## Current Task Runtime" not in section
     assert str(workspace) not in section
-    assert "不要要求用户选择、开始、完成或关闭历史任务" in section
     attrs = _gateway_task_attributes(followup)
     assert attrs is not None
     params = RunParams(
@@ -4039,6 +4038,65 @@ def test_interrupted_workspace_is_reused_at_first_work_tool_without_selection(tm
 
     assert allowed is None
     assert params.task_attributes["conversation_task_id"] == "gw-followup"
+    assert "conversation_continued_from_task_id" not in params.task_attributes
+    assert Path(params.task_attributes["run_workspace"]["task_root"]) != workspace.resolve()
+
+
+def test_bound_request_resumes_interrupted_workspace_by_exact_identity(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_exact_resume_gate",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "完成原项目")
+    workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "original-task"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-interrupted",
+            "goal": "完成原项目",
+            "status": "active",
+            "task_path": str(workspace),
+        }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-interrupted", "status": "interrupted"}
+    )
+    request.update(
+        {
+            "id": "gw-followup",
+            "conversation_runtime": {
+                "request_id": "gw-followup",
+                "thread_id": conversation.thread_id,
+                "task_id": "task-interrupted",
+                "task_path": str(workspace),
+            },
+        }
+    )
+    followup = _conversation_context(agent, request, "gw-followup", "继续原执行轮")
+    attrs = _gateway_task_attributes(followup)
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        root_user_prompt="继续原执行轮",
+        task_attributes=attrs,
+    )
+    agent._current_run_params = params
+    try:
+        allowed = _promote_work_tool(agent, params, {"tool": "write_file"})
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert allowed is None
     assert params.task_attributes["conversation_continued_from_task_id"] == "task-interrupted"
     assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
 
@@ -4064,14 +4122,28 @@ def test_exact_mutation_path_reselects_completed_conversation_workspace(tmp_path
     agent.conversation_store.bind_task(
         {
             "thread_id": conversation.thread_id,
+            "task_id": "task-completed-older",
+            "goal": "更早一次执行",
+            "status": "active",
+            "task_path": str(original),
+            "now": 1.0,
+        }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-completed-older", "status": "completed", "now": 2.0}
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
             "task_id": "task-completed",
             "goal": "完成原项目",
             "status": "active",
             "task_path": str(original),
+            "now": 3.0,
         }
     )
     agent.conversation_store.update_task_status(
-        {"task_id": "task-completed", "status": "completed"}
+        {"task_id": "task-completed", "status": "completed", "now": 4.0}
     )
     placeholder = tmp_path / "placeholder"
     (placeholder / "output").mkdir(parents=True)
@@ -4127,6 +4199,7 @@ def test_exact_mutation_path_reselects_completed_conversation_workspace(tmp_path
         for link in agent.conversation_store.task_links(conversation.thread_id)
     }
     assert links == {
+        "task-completed-older": "completed",
         "task-completed": "completed",
         "gw-followup": "superseded",
         successor_id: "active",

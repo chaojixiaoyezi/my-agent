@@ -233,7 +233,7 @@ non-loopback、未显式放行和未知分别返回。任何结果都保留
 
 ### 长期会话完整正文、思考时序与 canonical task root
 
-状态：sticky cwd 与 final 后重复 thinking 均已在 `.7` 唯一 Gateway 真机通过
+状态：final 后重复 thinking 已在 `.7` 真机通过；sticky cwd 的旧语义已由 2026-09-02 R155 收窄
 
 解决问题：主/子代理工具前过程和最终长报告曾被活动块折叠，用户要按 `Ctrl+O` 才能看到；多次模型调用的
 thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消息还有固定 12K 裁剪，既可能丢长期 TUI/IM
@@ -247,7 +247,9 @@ thinking 会覆盖、闪烁或留下空 spinner；滚轮一步过大。普通消
 490K/400K。首个 `promotes_task` 动作后，main/child/grandchild 的 cwd 与写根统一切到
 `<owner_home>/tasks/<task_path>/`。r55 第一段 5 名 child 全部自然完成、final 直接展示；第二段 successor
 身份与 `task_path` 已正确续接，但模型首采样仍看到旧 TUI 启动 cwd，第一条后台命令因此服务了空 `bbb`。
-`1e4c64d` 让 non-detached sticky root 在模型首采样前成为唯一 `execution_cwd`，terminal link 仍不复活。
+`1e4c64d` 曾让 non-detached sticky root 在模型首采样前成为唯一 `execution_cwd`；R155 后 terminal
+pointer 只作状态/导航，只有 exact request、Goal 或 active task 会在首采样前取得 cwd，精确旧项目写路径
+则在 effect 前回绑。
 原 r55 的同提示复验中，首个列表、审批、bwrap 和服务进程全部使用原 task root，localhost 返回真实游戏；
 三个独立 completed run 的 `task_path` 精确相同。该切片完成，剩余独立问题是 LAN 外部失败、Gateway 冷启动
 约 30 秒，以及 main 在“只协调”任务里仍亲自改功能文件。用户随后在同一 r55 指出最后稳定块仍是思考；

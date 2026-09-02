@@ -2013,9 +2013,9 @@ class ConversationTaskStore(ConversationModelUsageStore):
             _sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
             return link
 
-    # LLM: This is the only durable writer for a thread's 会话运行时 sticky root workspace.
-    # It validates the exact thread/task identity and does not alter task lifecycle status.
-    # 函数用途: 记住该会话后续轮次默认进入哪个已有任务目录；不会启动、恢复或结束任务。
+    # LLM: This is the only durable writer for the thread's latest task projection. It validates
+    # exact identity but grants no execution/cwd authority to a later ordinary turn.
+    # 函数用途: 记住会话最近一次任务，供状态和导航显示；不会让后续普通消息自动进入旧目录。
     def select_workspace_task(self, request: dict) -> ConversationThread:
         thread_id = str(request.get("thread_id") or "").strip()
         task_id = str(request.get("task_id") or "").strip()

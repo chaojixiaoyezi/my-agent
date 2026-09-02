@@ -385,7 +385,8 @@ def _synchronize_tool_task_attributes_after_promotion(
 
 
 # LLM: Workspace binding accepts only an exact absolute target or canonical owner-relative
-# tasks/... target; both must resolve to one reusable workspace before any write gate is changed.
+# tasks/... target; both must resolve to one canonical workspace before any write gate is changed.
+# Several terminal execution generations may legitimately share that same task root.
 # 函数用途: 根据结构化写入路径恢复同一会话的原任务目录；普通相对路径和歧义路径仍保持拒绝。
 def _bind_declared_mutation_workspace(
     runtime_request: ToolCallRuntimeRequest,
@@ -443,7 +444,48 @@ def _unique_exact_mutation_workspace(links: list[object], targets: list[Path]):
         if is_reusable_conversation_workspace(link)
         and _all_targets_inside_task(targets, getattr(link, "task_path", ""))
     ]
-    return candidates[0] if len(candidates) == 1 else None
+    by_root: dict[Path, list[object]] = {}
+    for link in candidates:
+        root = _canonical_link_task_root(link)
+        if root is not None:
+            by_root.setdefault(root, []).append(link)
+    if len(by_root) != 1:
+        return None
+    generations = next(iter(by_root.values()))
+    active = [
+        link
+        for link in generations
+        if str(getattr(link, "status", "") or "").strip().lower() == "active"
+    ]
+    if len(active) > 1:
+        return None
+    if active:
+        return active[0]
+    return max(generations, key=_mutation_workspace_generation_order, default=None)
+
+
+# LLM: Task identity is an execution generation, while task_path is the canonical project root.
+# Resolve paths once before grouping so symlink spellings cannot manufacture or hide ambiguity.
+# 函数用途: 把历史任务链接的目录规范化，供同一项目的多次执行记录合并判定。
+def _canonical_link_task_root(link: object) -> Path | None:
+    text = str(getattr(link, "task_path", "") or "").strip()
+    if not text:
+        return None
+    try:
+        return Path(text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+# LLM: When one canonical root has only terminal generations, the newest durable link is the
+# continuation parent. The task id is a deterministic tie-breaker, never a semantic guess.
+# 函数用途: 同一目录有多次已结束执行时，选最新一代作为本轮续作的结构化父记录。
+def _mutation_workspace_generation_order(link: object) -> tuple[float, str]:
+    try:
+        created_at = float(getattr(link, "created_at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    return created_at, str(getattr(link, "task_id", "") or "")
 
 
 def _bind_exact_mutation_workspace(
