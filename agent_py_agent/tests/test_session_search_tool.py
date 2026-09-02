@@ -17,7 +17,10 @@ from agent_py_agent.agent.capability.session_search_tool import (
     SessionSearchTool,
     build_session_search_model_spec,
 )
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.local_storage.store import LocalStore
+from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.tooling.models import KeywordToolSearchProvider
 
 
 def _store(tmp_path: Path) -> LocalStore:
@@ -53,6 +56,34 @@ class TestSpec:
         assert properties["limit"]["type"] == "integer"
         assert properties["around_id"]["type"] == "string"
         assert spec.input_schema.get("required", []) == []
+
+    def test_recent_named_project_wording_recommends_history_search(self):
+        """真实中文续作措辞必须命中历史工具，而不是让模型先遍历整个 owner 目录。"""
+        spec = build_session_search_model_spec()
+
+        hits = KeywordToolSearchProvider().search(
+            "回到刚才那个星河日志分析器，在原项目里增加 CSV 输出",
+            [spec],
+            1,
+        )
+
+        assert [hit.name for hit in hits] == ["session_search"]
+        assert any("刚才" in reason or "回到" in reason for reason in hits[0].reasons)
+        assert "source_type\":\"gateway_request" in spec.examples[1]
+
+    def test_recent_named_project_ranks_session_search_first_in_real_registry(self, tmp_path):
+        """完整默认工具集里，真实续作措辞也必须把 session_search 排到首位。"""
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+            tmp_path,
+        )
+
+        section = agent.tools.render_recommended_tools_section(
+            "回到刚才那个星河日志分析器，在原项目里增加 CSV 输出"
+        )
+        recommendations = [line for line in section.splitlines() if line.startswith("- ")]
+
+        assert recommendations[0].startswith("- session_search：")
 
 
 class TestDiscoveryMode:

@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：R156 Focused 通过，真 TUI 待验】
+## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：设备真 TUI 通过；R157 历史续作 Focused 通过，待真 TUI 复验】
 
 - Full Access 继续经过统一 attempt sandbox，但 Linux 根目录 `--bind / /` 后必须用
   `--dev-bind /dev /dev` 重新开放真实设备树。RHEL/SELinux enforcing 测试机证明：普通根 bind
@@ -14,6 +14,11 @@
 - 两项均保持一个权威来源：设备权限仍由 SandboxSpec/bwrap argv 裁决；任务身份仍由 Gateway request
   与 ConversationStore 裁决，LocalStore/task_ref 只是 owner 内只读搜索投影。旧记录可由既有 Gateway
   index rebuild 从 done request 补齐，不新增常驻任务目录列表或每轮 token 注入。
+- R156 真 TUI 证明 typed `task_ref` 本身正确，但真实“回到刚才那个……”措辞下，动态工具推荐把
+  `session_search` 排在普通文件工具之后，MiniMax-M2.7 没有调用历史工具而是遍历 owner 目录，多个同类项目
+  时选错。R157 只补齐 `ToolModelHints` 的“刚才/先前/回到/原项目”检索语义和带
+  `source_type=gateway_request` 的示例，使历史工具在该类自然措辞下排首位；仍由模型选择命中项，宿主不解析
+  用户正文、不自动恢复 terminal sticky，也不把任务菜单常驻注入每轮 prompt。
 
 ## 2026-09-02 普通终态任务不再隐式吸附新回合【状态：R155 本机真 TUI/Focused 通过】
 

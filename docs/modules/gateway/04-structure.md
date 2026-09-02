@@ -11,6 +11,9 @@
 - `task_ref` 只帮助模型定位历史工作，不是写授权。真正续作仍由当前 turn 的工具参数进入统一 write boundary，
   再按同 thread canonical task path 执行 R155 的精确 rebind；owner 墙、冲突 active executor 和多路径歧义
   继续 fail closed。
+- 历史任务定位仍走按需工具发现，不把任务列表固定塞入每轮上下文。`session_search` 的
+  `ToolModelHints` 覆盖“刚才/先前/回到/原项目”等自然续作说法，并提供限定 `gateway_request` 的查询示例；
+  hints 只影响模型侧软推荐排序，不参与路径、owner、thread 或终态裁决。
 
 ## ConversationTaskLink 与 TaskRun 收口
 

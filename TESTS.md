@@ -10,9 +10,10 @@
   `task_ref`，Memory/普通消息即便携带同名 metadata 也不能取得该投影。
 - focused 命令：
   `python3 -m pytest agent_py_agent/tests/test_sandbox.py agent_py_agent/tests/test_gateway_logging.py agent_py_agent/tests/test_session_search_tool.py -q --tb=short`。
-- 真 TUI 待验：同一 MiniMax-M2.7 会话先完成项目 A、再完成无关项目 B，随后自然表达“回到刚才那个 A”并
-  修改；同时在 Full Access 下创建普通 pytest 用例并直接运行。验收读取真实 bwrap argv、task_ref、request
-  runtime、successor link 和文件路径，不拿模型口头结论代替。
+- 真 TUI 第一阶段：同一 MiniMax-M2.7 会话的项目 A、无关项目 B 已分别跑通 31/21 项常规 pytest，证明
+  Full Access 设备链通过。自然表达“回到刚才那个 A”时必须先在完整默认工具集中把 `session_search` 推荐到
+  首位，并用 `source_type=gateway_request` 取得 exact task_ref；首轮暴露的全盘遍历误选问题已形成回归，待
+  R157 wheel 复验 request runtime、successor link 和真实文件路径，不能拿模型口头结论代替。
 
 ## 普通新任务与结构化旧项目续作
 

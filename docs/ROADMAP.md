@@ -38,14 +38,17 @@
 
 ### 受管命令的基础设备文件
 
-状态：R156 已定位并完成底层修复，Focused 通过，待 `.10` 真 TUI
+状态：设备链 `.10` 真 TUI 已通过；R157 历史续作推荐 Focused 通过，待真 TUI 复验
 
 解决问题：R130 主代理尝试运行 pytest 时，受管命令环境访问 `/dev/null` 得到
 `PermissionError`，pytest 的 capture 初始化因此失败；同一回合改用 unittest 后 18 项全通过，说明不是业务
 代码错误。R156 精确 A/B 已定位为 Full Access 的 `--bind / /` 继承 nodev；宿主设备与 WorkspaceOnly
 最小设备树都正常，并没有 SELinux AVC。对照 会话运行时 的根挂载后 `/dev` 覆盖层，当前追加
 `--dev-bind /dev /dev`，只恢复已授权管理员的真实设备语义，不扩大普通 owner。下一步由同 wheel 真 TUI
-直接跑常规 pytest 后移入 COMPLETED。
+直接跑常规 pytest 已完成：项目 A 首轮 31 项、项目 B 21 项均通过，未再出现 `/dev/null` 错误。随后自然
+要求回到项目 A 时，首轮虽已有正确 `task_ref`，但 MiniMax-M2.7 未调用 `session_search`，转而全盘查目录并
+选错同类旧项目。R157 已让“刚才/先前/回到/原项目”等自然措辞把 `session_search` 推荐到首位，仍待同一
+TUI 模式复验精确回绑后整体移入 COMPLETED。
 
 ### Computer Use 复用开源执行器
 

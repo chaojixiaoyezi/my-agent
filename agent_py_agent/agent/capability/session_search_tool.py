@@ -41,6 +41,22 @@ _DEFAULT_BROWSE_LIMIT = 10
 _DEFAULT_WINDOW = 5
 _MAX_LIMIT = 20
 _MAX_WINDOW = 20
+_SESSION_SEARCH_USE_CASES = (
+    "用户问之前怎么解决或上次聊到哪时先检索历史",
+    "用户要求回到刚才、先前或某个具名旧项目时，先按项目名检索 gateway_request 并读取 task_ref",
+    "拿到一条命中后用 around_id 翻看前后上下文",
+    "用户问最近在做什么时浏览最近记录",
+)
+_SESSION_SEARCH_KEYWORDS = (
+    "历史", "检索", "回顾", "之前", "上次", "刚才", "先前", "回到", "原项目", "旧项目",
+    "记录", "session", "history", "search", "recall", "翻看", "找一下", "查一下",
+)
+_SESSION_SEARCH_EXAMPLES = (
+    '{"tool":"session_search","query":"记忆推送模式怎么落地的"}',
+    '{"tool":"session_search","query":"星河日志分析器","source_type":"gateway_request"}',
+    '{"tool":"session_search","around_id":"rec-abc123","window":8}',
+    '{"tool":"session_search"}',
+)
 
 
 # LLM: Tool instructions may explain how to consume typed task_ref, but must never infer a path
@@ -69,18 +85,10 @@ def build_session_search_model_spec() -> ToolModelSpec:
         },
         hints=ToolModelHints(
             category="capability",
-            use_cases=(
-                "用户问之前怎么解决或上次聊到哪时先检索历史",
-                "拿到一条命中后用 around_id 翻看前后上下文",
-                "用户问最近在做什么时浏览最近记录",
-            ),
+            use_cases=_SESSION_SEARCH_USE_CASES,
             avoid_when=("当前世界状态要使用对应实时工具", "已经知道确切答案时无需翻历史"),
-            keywords=("历史", "检索", "回顾", "之前", "上次", "记录", "session", "history", "search", "recall", "翻看", "找一下", "查一下"),
-            examples=(
-                '{"tool":"session_search","query":"记忆推送模式怎么落地的"}',
-                '{"tool":"session_search","around_id":"rec-abc123","window":8}',
-                '{"tool":"session_search"}',
-            ),
+            keywords=_SESSION_SEARCH_KEYWORDS,
+            examples=_SESSION_SEARCH_EXAMPLES,
         ),
     )
 

@@ -1,16 +1,19 @@
 # STATUS
 
-## 2026-09-03 R156 Full Access 基础设备与自然续作历史定位（Focused 通过，真 TUI 待验）
+## 2026-09-03 R156/R157 Full Access 设备已通过，历史续作推荐待真 TUI 复验
 
 - `.10` 真 TUI 复现了普通 pytest 与 `2>/dev/null` 都报 PermissionError。宿主 `/dev/null` 正常，
   WorkspaceOnly 的 `--dev /dev` 也正常；精确进程参数证明失败只在 Full Access 的 `--bind / /`
   分支。手工 A/B 中普通根 bind 失败，追加 `--dev-bind /dev /dev` 立即成功，排除了模型声称的
   “SELinux policy 本身拒绝”结论。
 - Full Access argv 现于根 bind 后重挂真实设备树；WorkspaceOnly、owner 隔离、网络和 persona/control
-  只读覆盖不变。构造回归已钉住顺序，部署后还需用 MiniMax-M2.7 真 TUI 跑常规 pytest。
+  只读覆盖不变。`.10` 单 Gateway + MiniMax-M2.7 真 TUI 已直接跑常规 pytest：项目 A 最终 31 项、项目 B
+  21 项通过，`/dev/null` 实际可用。
 - Gateway completion 不再覆盖掉 request 的 `conversation_runtime`。owner-local `session_search`
   对 Gateway 命中返回 exact `task_ref`，让模型在自然“回到上次项目”时取得旧目录，再复用 R155 已有的
-  exact mutation-path rebind；普通聊天/Memory 不能伪造该字段。三组 focused 共 55 项通过。
+  exact mutation-path rebind；普通聊天/Memory 不能伪造该字段。首轮真 TUI 暴露的剩余问题不是引用缺失，
+  而是该自然措辞下历史工具推荐排序过低，模型改用全盘 `find` 并选错同类旧项目。R157 已补齐自然续作
+  hints 与 `gateway_request` 查询示例，完整默认工具集里 `session_search` 现稳定排首位；相关 focused 72 项通过。
 
 ## 2026-09-02 R155 新任务与旧项目续作的工作区分流（本机真 TUI 通过）
 
