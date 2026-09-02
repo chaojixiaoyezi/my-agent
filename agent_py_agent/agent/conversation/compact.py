@@ -22,6 +22,11 @@ from .compact_guard import (
     compact_partitions,
     record_compact_failure,
 )
+from .compact_progress import (
+    COMPACT_AUTHORITY_CONVERSATION,
+    COMPACT_SOURCE_TRANSCRIPT,
+    CONVERSATION_COMPACT_PROGRESS_SCHEMA,
+)
 from .models import (
     ConversationCompactCommit,
     ConversationThread,
@@ -658,7 +663,7 @@ def _emit_compact_progress(
     if callback is None:
         return
     payload: dict[str, object] = {
-        "schema": "conversation_compaction_progress.v1",
+        "schema": CONVERSATION_COMPACT_PROGRESS_SCHEMA,
         "phase": str(phase),
         "stage": str(stage),
         "percent": min(100, max(0, int(percent or 0))),
@@ -668,6 +673,8 @@ def _emit_compact_progress(
         "after_tokens": max(0, int(after_tokens or 0)),
         "trigger_tokens": max(0, int(request.policy.trigger_tokens or 0)),
         "source_messages": len(request.pending),
+        "source_kind": COMPACT_SOURCE_TRANSCRIPT,
+        "commit_authority": COMPACT_AUTHORITY_CONVERSATION,
         "error_code": str(error_code or "").strip(),
     }
     try:

@@ -14,6 +14,7 @@ from ...agent.contracts.tool_approval import (
     ToolApprovalDecision,
     ToolApprovalRequest,
 )
+from ...agent.conversation.compact_progress import normalize_conversation_compact_progress
 from ...agent.conversation.tool_input_progress import ToolInputProgressEventProjector
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventSequencer
 from .tui_permission_queue import TuiPermissionCoordinator, TuiPermissionRuntimeMixin
@@ -2466,48 +2467,7 @@ def _tui_context_compaction_payload(value: object) -> dict[str, object]:
 def _tui_conversation_compact_progress_payload(
     value: object,
 ) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        return {}
-    if value.get("schema") != "conversation_compaction_progress.v1":
-        return {}
-    phase = str(value.get("phase") or "")
-    stage = str(value.get("stage") or "")
-    if phase not in {"started", "progress", "completed", "superseded", "failed"}:
-        return {}
-    if stage not in {
-        "preparing",
-        "summarizing",
-        "measuring",
-        "checkpointing",
-        "committing",
-        "completed",
-        "candidate_discarded",
-        "failed",
-    }:
-        return {}
-    generation = _nonnegative_int(value.get("generation"))
-    if generation <= 0:
-        return {}
-    operation_id = str(value.get("operation_id") or "").strip()[:128]
-    error_code = "".join(
-        character if character.isalnum() else "_"
-        for character in str(value.get("error_code") or "").upper()
-    )[:96].strip("_")
-    payload = {
-        "schema": "conversation_compaction_progress.v1",
-        "phase": phase,
-        "stage": stage,
-        "percent": min(100, _nonnegative_int(value.get("percent"))),
-        "generation": generation,
-        "operation_id": operation_id or f"legacy:{generation}",
-        "before_tokens": _nonnegative_int(value.get("before_tokens")),
-        "after_tokens": _nonnegative_int(value.get("after_tokens")),
-        "trigger_tokens": _nonnegative_int(value.get("trigger_tokens")),
-        "source_messages": _nonnegative_int(value.get("source_messages")),
-    }
-    if error_code:
-        payload["error_code"] = error_code
-    return payload
+    return normalize_conversation_compact_progress(value)
 
 
 # LLM: 本地审批等待只读 cancellation_token 的结构化状态；取消原因文案不参与控制判断。

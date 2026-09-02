@@ -1,5 +1,16 @@
 # DESIGN LEDGER
 
+## 2026-09-02 Compact 来源与提交权进入统一进度协议【状态：Focused 通过，真 TUI 待验】
+
+- `conversation_compaction_progress.v1` 新增 `source_kind` 与 `commit_authority`：完整会话历史为
+  `conversation_transcript/conversation_thread`，可持久的当前工具归档为
+  `active_turn_tool_archive/conversation_thread`，仅本轮临时整理为 `turn_local_tool_ir/turn_local`。
+  来源和提交权必须成对校验，不能从 operation id、中文文案或是否出现 checkpoint 阶段反推。
+- Gateway、后台 transcript 和 TUI 共同调用唯一 normalizer；缺少两个字段的历史 v1 事件只投影成显式
+  `legacy/legacy`，缺一个字段、未知值或矛盾组合全部 fail closed。该兼容只用于展示，不取得持久写权。
+- TUI 根据结构化来源分别显示“压缩会话上下文”“整理工具上下文”“整理当前工具历史”。动画仍是只读投影，
+  `compact N` 只认 ConversationThread checkpoint/CAS 后的 generation；turn-local 完成不得冒充一次 Compact。
+
 ## 2026-09-02 Compact 提交代次与展示操作身份分离【状态：R150 真 TUI/Focused 通过】
 
 - `compact_generation` 只代表 ConversationThread 已成功安装的持久历史代次；`operation_id` 代表一次候选和它的

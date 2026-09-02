@@ -311,6 +311,10 @@ def test_active_turn_archive_compact_hides_only_committed_source_calls(tmp_path)
     ]
     assert [row["percent"] for row in progress] == [5, 20, 65, 82, 92, 100]
     assert progress[-1]["generation"] == 1
+    assert {row["source_kind"] for row in progress} == {"active_turn_tool_archive"}
+    assert {row["commit_authority"] for row in progress} == {
+        "conversation_thread"
+    }
 
     checkpoint_path = tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
     with checkpoint_path.open("a", encoding="utf-8") as handle:
@@ -592,6 +596,8 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
     ]
     assert [row["percent"] for row in sink.progress_rows] == [5, 20, 65, 100]
     assert {row["generation"] for row in sink.progress_rows} == {1}
+    assert {row["source_kind"] for row in sink.progress_rows} == {"turn_local_tool_ir"}
+    assert {row["commit_authority"] for row in sink.progress_rows} == {"turn_local"}
     build_tool_loop_prompt(agent, params)
 
     assert len(_message_block_ids(_native_provider_messages(agent, params))[0]) == remaining
@@ -1375,6 +1381,12 @@ def test_authoritative_no_save_provider_overflow_commits_same_conversation_compa
     ]
     assert [row["percent"] for row in sink.progress_rows] == [5, 20, 65, 82, 92, 100]
     assert {row["generation"] for row in sink.progress_rows} == {1}
+    assert {row["source_kind"] for row in sink.progress_rows} == {
+        "active_turn_tool_archive"
+    }
+    assert {row["commit_authority"] for row in sink.progress_rows} == {
+        "conversation_thread"
+    }
 
 
 # === Step 3: text-entry → tool_use id mapping (round/index join) ==============

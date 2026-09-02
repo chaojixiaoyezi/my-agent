@@ -20,6 +20,11 @@ my-agent chat
 同 thread 的前台和后台继续共用一条 run claim，不同 thread 在全局/单 owner 两层上限内并发。
 这与 会话运行时 每个 Thread/Session 自有 active turn 的边界一致，但仍保留本项目的跨进程持久队列和恢复。
 
+Compact 进度是无正文的公开事件，不是提交权本身。Gateway 只转发统一校验后的
+`conversation_compaction_progress.v1`：`source_kind` 说明处理的是完整 transcript、可持久 active-turn 工具
+归档还是仅本轮工具 IR，`commit_authority` 说明它能否推进 ConversationThread。两字段必须是协议允许的成对
+组合；界面和后台消费者不得从 operation id 前缀或显示文案推断。
+
 Gateway 的“服务地址”和 TUI 的“项目目录”是两种不同事实。前者固定在当前 owner 的
 `workspace/runtime/services/gateway`，决定 pid、heartbeat、请求队列和 HTTP 端口；后者由客户端在
 结构化 `workspace.cwd/workspace.roots` 中提交，经 Gateway 校验后保存为 `ConversationThread.cwd` 与

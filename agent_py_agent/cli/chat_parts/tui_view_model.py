@@ -1130,6 +1130,8 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "compact_generation",
         "generation",
         "operation_id",
+        "source_kind",
+        "commit_authority",
         "before_tokens",
         "after_tokens",
         "trigger_tokens",

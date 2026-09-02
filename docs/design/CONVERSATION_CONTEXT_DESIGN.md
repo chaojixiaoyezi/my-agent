@@ -61,8 +61,11 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
    副作用仍以 archive、operation ledger、artifact 和真实文件为准。transcript Compact 对正常完成的空正文
    使用相同原则，从旧摘要、raw row 投影和结构化 operation evidence 生成有界续接包。presentation/no-save
    辅助回合可做临时窗口整理，但不得推进 generation 或冒充 `compact N`。
-9. `/status`、TUI 和 Web 只显示 thread 的一个 compact generation；消息段压缩与 live-tool 压缩都推进它。
-   每次真实尝试另有唯一 operation id，live 失败后的 transcript 后备不会复用失败 block；main/child 自动
+9. `/status`、TUI 和 Web 只显示 thread 的一个 compact generation；消息段压缩与可持久 live-tool 压缩都
+   推进它。每次真实尝试另有唯一 operation id，进度还必须携带成对的 `source_kind/commit_authority`：
+   transcript 和可持久 live-tool 的提交权都属于 conversation thread，presentation/no-save 的临时整理只属于
+   turn-local。Gateway 和界面调用同一个公开 normalizer，不能根据 operation id 前缀或中文标签猜来源；
+   turn-local 动画不得增加 `compact N`。live 失败后的 transcript 后备不会复用失败 block；main/child 自动
    Compact 都发送 typed 进度。手动 `/compact` 在持久 outbox 入队后保留转圈块，真实回执才结束。
 
 任务工作区不保存第二套 compact。`work/state.json`、任务进度和子代理 canonical state 只是结构化运行

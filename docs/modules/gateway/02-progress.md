@@ -1,5 +1,14 @@
 # Gateway Progress
 
+## 2026-09-02 Compact 来源与提交权统一投影（Focused 通过，真 TUI 待验）
+
+- `conversation_compaction_progress.v1` 现在显式携带 `source_kind/commit_authority`；完整 transcript、可持久
+  active-turn 工具归档与 turn-local 工具整理各有唯一合法组合，Gateway 不再复制一份独立 schema。
+- Gateway rich chunk、后台 transcript 与 TUI 共同使用 `conversation/compact_progress.py` 校验。旧 v1 两字段
+  同时缺失只投影为 `legacy/legacy`；部分缺失、未知或矛盾组合直接拒绝，展示兼容不能取得持久提交权。
+- TUI 根据 typed 来源显示不同中文动作，`compact N` 仍只来自 canonical checkpoint/CAS。相关 223 项
+  Compact/Gateway/TUI focused 测试通过；同 wheel 的 MiniMax-M2.7 真 TUI 仍需补标签和自动触发证据。
+
 ## 2026-09-02 R148 会话任务与 TaskRun 持久终态对齐（本机真 TUI 通过）
 
 - 普通会话和 Goal 原本会先把持久 `ConversationTaskLink` 标为终态，再结束主代理；旧 RuntimeDB 收口仅依赖

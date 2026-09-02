@@ -19,6 +19,11 @@
 - TUI 只用 generation 拒绝旧代事件；同一 operation 内百分比取单调高水位。旧 operation 已 failed 或
   superseded 后，新 operation 从自身 started 百分比开始，随后到达的旧事件不再更新当前块。只有 canonical
   checkpoint/CAS 后的 completion/boundary 推进界面 Compact 次数。
+- 每个进度事件还必须携带成对的来源和提交权：
+  `conversation_transcript/conversation_thread`、
+  `active_turn_tool_archive/conversation_thread` 或 `turn_local_tool_ir/turn_local`。三类生产者、Gateway、
+  后台 transcript 与 TUI 只调用 `conversation/compact_progress.py` 这一份白名单；不得从 operation id 前缀、
+  阶段或中文文案猜。双字段都缺失的历史事件只投影成 `legacy/legacy`，不能据此推进 generation。
 
 ## ThreadGoal 与 workspace 物化边界
 

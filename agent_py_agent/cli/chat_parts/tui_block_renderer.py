@@ -12,6 +12,11 @@ from typing import Any
 
 from wcwidth import wcswidth
 
+from ...agent.conversation.compact_progress import (
+    COMPACT_SOURCE_ACTIVE_TURN,
+    COMPACT_SOURCE_TRANSCRIPT,
+    COMPACT_SOURCE_TURN_LOCAL,
+)
 from .tui_markdown import (
     FormattedLine,
     Fragment,
@@ -1535,11 +1540,17 @@ def _render_compact_progress(
         filled = min(bar_width, max(0, int(round(percent * bar_width / 100))))
         meter = "━" * filled + "─" * (bar_width - filled)
         progress_text = f"{percent}% · {stage}"
+    source_kind = str(block.metadata.get("source_kind") or "")
+    source_label = {
+        COMPACT_SOURCE_TRANSCRIPT: "正在压缩会话上下文 ",
+        COMPACT_SOURCE_ACTIVE_TURN: "正在整理工具上下文 ",
+        COMPACT_SOURCE_TURN_LOCAL: "正在整理当前工具历史 ",
+    }.get(source_kind, "正在压缩上下文 ")
     glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
     return wrap_fragments(
         (
             ("class:tui-spinner-highlight", glyph + " "),
-            ("class:tui-thinking", "正在压缩上下文 "),
+            ("class:tui-thinking", source_label),
             ("class:tui-thinking", f"[{meter}] {progress_text}"),
         ),
         width=context.width,

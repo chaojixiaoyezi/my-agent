@@ -3274,3 +3274,17 @@ ruff check \
   worker 或人工推动消息。
 - 最终 91 个 unittest 全通过；canonical tree 为 coordinator=1、worker=2，TUI 直接显示完整最终汇报，
   Gateway pending/processing 归零。至此主代理活跃、main 等 child、coordinator 等孙代理三个顺序重启门均通过。
+# 2026-09-02 Compact 来源与提交权协议
+
+- 新增唯一 `compact_progress.py` normalizer；三种合法组合分别覆盖 transcript、持久 active-turn 工具归档和
+  turn-local 工具整理，历史 v1 双字段缺失显式降为 `legacy/legacy`，部分缺失或矛盾组合 fail closed。
+- Gateway rich chunk、后台 transcript、TUI adapter 和 renderer 不再各自复制 schema；TUI 分别显示“正在压缩
+  会话上下文”“正在整理工具上下文”“正在整理当前工具历史”，但只有 conversation-thread CAS 可以增加
+  `compact N`。
+- 定向命令：
+
+  ```bash
+  python3 -m pytest agent_py_agent/tests/test_compact_progress.py agent_py_agent/tests/test_gateway_conversation_compact.py agent_py_agent/tests/test_gateway_streaming.py agent_py_agent/tests/test_tui_runtime.py agent_py_agent/tests/test_background_notice_display.py agent_py_agent/tests/test_tui_renderer.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py agent_py_agent/tests/test_subagent_runtime_compact.py -q --tb=short
+  ```
+
+  结果 223 passed。真 TUI 标签将在同 wheel 的 MiniMax-M2.7 长会话继续验收。

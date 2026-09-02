@@ -18,6 +18,13 @@ from ..contracts.gates.tool_guardrail import (
     consecutive_same_failure_count,
     failure_class_of_result,
 )
+from ..conversation.compact_progress import (
+    COMPACT_AUTHORITY_CONVERSATION,
+    COMPACT_AUTHORITY_TURN_LOCAL,
+    COMPACT_SOURCE_ACTIVE_TURN,
+    COMPACT_SOURCE_TURN_LOCAL,
+    CONVERSATION_COMPACT_PROGRESS_SCHEMA,
+)
 from ..conversation.tool_context_window import record_native_ir_window, window_tool_context_params
 from ..prompting_parts.builder import ToolSections, project_runtime_workspace_context
 from ..runtime_db.operations import exec_lock_scope
@@ -156,6 +163,8 @@ class _NativeCompactPlan:
     semantic_summary: str
     progress_generation: int
     progress_operation_id: str
+    progress_source_kind: str
+    progress_commit_authority: str
     forced: bool
 
 
@@ -476,6 +485,8 @@ def _prepare_native_compact_plan(
         summary,
         progress_generation,
         progress_operation_id,
+        progress_source_kind,
+        progress_commit_authority,
     ) = _live_compact_binding_and_summary(
         agent,
         params,
@@ -495,6 +506,8 @@ def _prepare_native_compact_plan(
         semantic_summary=summary,
         progress_generation=progress_generation,
         progress_operation_id=progress_operation_id,
+        progress_source_kind=progress_source_kind,
+        progress_commit_authority=progress_commit_authority,
         forced=force,
     )
 
@@ -510,7 +523,7 @@ def _live_compact_binding_and_summary(
     before_tokens: int,
     trigger_tokens: int,
     source_messages: int,
-) -> tuple[object | None, str, int, str]:
+) -> tuple[object | None, str, int, str, str, str]:
     from ..conversation.live_tool_compact import (
         record_live_tool_compact_failure,
         resolve_live_tool_compact_binding,
@@ -523,9 +536,17 @@ def _live_compact_binding_and_summary(
     )
     progress_generation = _native_compact_progress_generation(params, binding)
     progress_operation_id = f"live-tool:{uuid.uuid4().hex}"
+    if binding is None:
+        progress_source_kind = COMPACT_SOURCE_TURN_LOCAL
+        progress_commit_authority = COMPACT_AUTHORITY_TURN_LOCAL
+    else:
+        progress_source_kind = COMPACT_SOURCE_ACTIVE_TURN
+        progress_commit_authority = COMPACT_AUTHORITY_CONVERSATION
     progress = {
         "generation": progress_generation,
         "operation_id": progress_operation_id,
+        "source_kind": progress_source_kind,
+        "commit_authority": progress_commit_authority,
         "before_tokens": before_tokens,
         "trigger_tokens": trigger_tokens,
         "source_messages": source_messages,
@@ -546,7 +567,14 @@ def _live_compact_binding_and_summary(
     )
     summary = _summarize_live_compact(agent, params, binding, progress)
     if binding is None or summary:
-        return binding, summary, progress_generation, progress_operation_id
+        return (
+            binding,
+            summary,
+            progress_generation,
+            progress_operation_id,
+            progress_source_kind,
+            progress_commit_authority,
+        )
     from ..conversation.compact_guard import ConversationCompactError
 
     error = ConversationCompactError(
@@ -881,6 +909,8 @@ def _native_compact_progress_values(
     return {
         "generation": plan.progress_generation,
         "operation_id": plan.progress_operation_id,
+        "source_kind": plan.progress_source_kind,
+        "commit_authority": plan.progress_commit_authority,
         "before_tokens": plan.before_tokens,
         "after_tokens": max(0, int(after_tokens or 0)),
         "trigger_tokens": plan.trigger_tokens,
@@ -938,6 +968,8 @@ def _emit_native_compact_progress(
     percent: int,
     generation: int,
     operation_id: str,
+    source_kind: str,
+    commit_authority: str,
     before_tokens: int,
     trigger_tokens: int,
     source_messages: int,
@@ -949,12 +981,14 @@ def _emit_native_compact_progress(
     if not callable(writer):
         return False
     payload = {
-        "schema": "conversation_compaction_progress.v1",
+        "schema": CONVERSATION_COMPACT_PROGRESS_SCHEMA,
         "phase": str(phase),
         "stage": str(stage),
         "percent": min(100, max(0, int(percent or 0))),
         "generation": max(1, int(generation or 1)),
         "operation_id": str(operation_id or "").strip(),
+        "source_kind": str(source_kind or "").strip(),
+        "commit_authority": str(commit_authority or "").strip(),
         "before_tokens": max(0, int(before_tokens or 0)),
         "after_tokens": max(0, int(after_tokens or 0)),
         "trigger_tokens": max(0, int(trigger_tokens or 0)),

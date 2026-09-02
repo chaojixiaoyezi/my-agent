@@ -1,5 +1,9 @@
 # TEST CHECKLIST
 
+- [x] Compact 进度必须携带成对的 `source_kind/commit_authority`，Gateway、后台事件和 TUI 使用同一校验器；
+  transcript、持久 live-tool、turn-local 三条链分别显示不同含义，不能靠 operation id 或中文猜。历史 v1
+  双字段都缺失时仅作为 `legacy/legacy` 展示，部分缺失与矛盾组合拒绝。当前 223 项 Compact/Gateway/TUI
+  focused 通过；同 wheel 真 TUI 标签与自动 live-tool 触发仍待验。
 - [x] 同一 Compact generation 内不同 operation 不得共享百分比高水位；live 候选 superseded/failed 后，
   transcript fallback 从自身 started 进度开始，旧 operation 迟到事件不能污染当前块。同 operation 保持单调。
   85 项 focused 通过；`ma-r150-local-compact-resume` 手动动画、generation 3→4、计数只在提交后增加及压缩后

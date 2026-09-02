@@ -1068,6 +1068,8 @@ def test_conversation_compaction_renders_real_stage_progress_and_hides_thinking_
             "compact:req:2",
             {
                 "generation": 2,
+                "source_kind": "conversation_transcript",
+                "commit_authority": "conversation_thread",
                 "percent": 5,
                 "stage": "preparing",
                 "before_tokens": 118_400,
@@ -1081,6 +1083,8 @@ def test_conversation_compaction_renders_real_stage_progress_and_hides_thinking_
             "compact:req:2",
             {
                 "generation": 2,
+                "source_kind": "conversation_transcript",
+                "commit_authority": "conversation_thread",
                 "percent": 78,
                 "stage": "checkpointing",
                 "after_tokens": 31_200,
@@ -1094,7 +1098,7 @@ def test_conversation_compaction_renders_real_stage_progress_and_hides_thinking_
     )
     rendered = "\n".join(_frame_lines(frame))
 
-    assert "正在压缩上下文" in rendered
+    assert "正在压缩会话上下文" in rendered
     assert "78% · 正在写恢复点" in rendered
     assert not any("Working" in line or "Thinking" in line for line in _frame_lines(frame))
     assert store.snapshot().active_blocks[-1].metadata["percent"] == 78

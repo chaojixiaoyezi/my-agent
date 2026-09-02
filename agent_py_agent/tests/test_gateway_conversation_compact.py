@@ -529,6 +529,10 @@ def test_compact_progress_callback_reports_real_pipeline_stages(tmp_path) -> Non
     assert events[0]["before_tokens"] > 0
     assert events[-1]["after_tokens"] == result.projected_tokens
     assert all(event["generation"] == 1 for event in events)
+    assert {event["source_kind"] for event in events} == {"conversation_transcript"}
+    assert {event["commit_authority"] for event in events} == {
+        "conversation_thread"
+    }
     assert all("summary" not in event for event in events)
 
 

@@ -61,6 +61,7 @@ from ..conversation.compact import (
     conversation_scope,
     prepare_conversation_context,
 )
+from ..conversation.compact_progress import normalize_conversation_compact_progress
 from ..conversation.control_commands import (
     conversation_task_attributes,
     system_slash_command_name,
@@ -149,24 +150,6 @@ _CONTEXT_COMPACTION_FIELDS = (
     "trigger_tokens",
     "dropped_pairs",
     "preserved_pairs",
-)
-# LLM: `superseded/candidate_discarded` closes an uncommitted live candidate without claiming
-# success or failure; clients must retire its spinner while canonical generation remains unchanged.
-_CONVERSATION_COMPACT_PROGRESS_SCHEMA = "conversation_compaction_progress.v1"
-_CONVERSATION_COMPACT_PROGRESS_PHASES = frozenset(
-    {"started", "progress", "completed", "superseded", "failed"}
-)
-_CONVERSATION_COMPACT_PROGRESS_STAGES = frozenset(
-    {
-        "preparing",
-        "summarizing",
-        "measuring",
-        "checkpointing",
-        "committing",
-        "completed",
-        "candidate_discarded",
-        "failed",
-    }
 )
 logger = logging.getLogger(__name__)
 
@@ -774,36 +757,7 @@ def _public_context_compaction_payload(value: object) -> dict[str, object]:
 # bounded structured error code. Unknown fields, summaries, and prompts never cross to the TUI.
 # 函数用途: 清洗持久会话 Compact 进度与失败码，防止摘要或 prompt 混入展示。
 def _public_conversation_compact_progress_payload(value: object) -> dict[str, object]:
-    if not isinstance(value, dict) or value.get("schema") != _CONVERSATION_COMPACT_PROGRESS_SCHEMA:
-        return {}
-    phase = str(value.get("phase") or "")
-    stage = str(value.get("stage") or "")
-    if (
-        phase not in _CONVERSATION_COMPACT_PROGRESS_PHASES
-        or stage not in _CONVERSATION_COMPACT_PROGRESS_STAGES
-    ):
-        return {}
-    generation = _safe_nonnegative_int(value.get("generation"))
-    operation_id = str(value.get("operation_id") or "").strip()[:128]
-    error_code = "".join(
-        character if character.isalnum() else "_"
-        for character in str(value.get("error_code") or "").upper()
-    )[:96].strip("_")
-    payload = {
-        "schema": _CONVERSATION_COMPACT_PROGRESS_SCHEMA,
-        "phase": phase,
-        "stage": stage,
-        "percent": min(100, _safe_nonnegative_int(value.get("percent"))),
-        "generation": generation,
-        "operation_id": operation_id or f"legacy:{generation}",
-        "before_tokens": _safe_nonnegative_int(value.get("before_tokens")),
-        "after_tokens": _safe_nonnegative_int(value.get("after_tokens")),
-        "trigger_tokens": _safe_nonnegative_int(value.get("trigger_tokens")),
-        "source_messages": _safe_nonnegative_int(value.get("source_messages")),
-    }
-    if error_code:
-        payload["error_code"] = error_code
-    return payload
+    return normalize_conversation_compact_progress(value)
 
 
 @dataclass(frozen=True)

@@ -390,6 +390,8 @@ def test_gateway_conversation_compact_progress_updates_one_active_block_then_bou
         "schema": "conversation_compaction_progress.v1",
         "generation": 3,
         "operation_id": "transcript:compact-3",
+        "source_kind": "conversation_transcript",
+        "commit_authority": "conversation_thread",
         "before_tokens": 118_400,
         "after_tokens": 0,
         "trigger_tokens": 115_200,
@@ -424,6 +426,7 @@ def test_gateway_conversation_compact_progress_updates_one_active_block_then_bou
     assert len(active) == 1
     assert active[0].metadata["percent"] == 35
     assert active[0].metadata["stage"] == "summarizing"
+    assert active[0].metadata["source_kind"] == "conversation_transcript"
     assert "summary" not in active[0].metadata
 
     assert turn.on_gateway_event(

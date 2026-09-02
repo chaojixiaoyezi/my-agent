@@ -17,6 +17,7 @@ from typing import Any
 
 from .agent_tool_approval import SubagentToolApprovalSinkMixin
 from .channels import project_user_reply, redact_host_absolute_paths
+from .compact_progress import normalize_conversation_compact_progress
 from .tool_input_progress import ToolInputProgressSinkMixin
 
 BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
@@ -90,20 +91,6 @@ _CONTEXT_COMPACTION_FIELDS = frozenset(
         "preserved_pairs",
     }
 )
-_CONVERSATION_COMPACT_STAGES = frozenset(
-    {
-        "preparing",
-        "summarizing",
-        "measuring",
-        "checkpointing",
-        "committing",
-        "completed",
-        "candidate_discarded",
-        "failed",
-    }
-)
-
-
 # LLM: One thread state owns only a monotonic display cursor and a bounded ring.
 # Clearing retained rows for a new task must not reset either sequence counter.
 # 类用途: 保存一个会话当前任务的易失展示事件和连续游标。
@@ -358,29 +345,11 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     # phase select one block, so an ineffective live candidate cannot hide a transcript fallback.
     # 函数用途: 原位发布后台会话 Compact 的开始、进度、完成、候选放弃或失败阶段。
     def write_conversation_compact_progress(self, value: Mapping[str, object]) -> bool:
-        if value.get("schema") != "conversation_compaction_progress.v1":
+        public = normalize_conversation_compact_progress(value)
+        if not public:
             return False
-        phase = str(value.get("phase") or "").strip().lower()
-        stage = str(value.get("stage") or "").strip().lower()
-        generation = _nonnegative_int(value.get("generation"))
-        operation_id = str(value.get("operation_id") or "").strip()[:128]
-        if (
-            generation <= 0
-            or phase not in {"started", "progress", "completed", "superseded", "failed"}
-            or stage not in _CONVERSATION_COMPACT_STAGES
-        ):
-            return False
-        payload = {
-            "generation": generation,
-            "operation_id": operation_id or f"legacy:{generation}",
-            "phase": phase,
-            "stage": stage,
-            "percent": min(100, _nonnegative_int(value.get("percent"))),
-            "before_tokens": _nonnegative_int(value.get("before_tokens")),
-            "after_tokens": _nonnegative_int(value.get("after_tokens")),
-            "trigger_tokens": _nonnegative_int(value.get("trigger_tokens")),
-            "source_messages": _nonnegative_int(value.get("source_messages")),
-        }
+        payload = {key: item for key, item in public.items() if key != "schema"}
+        phase = str(payload["phase"])
         kind, event_phase = {
             "started": ("conversation_compaction_started", "started"),
             "progress": ("conversation_compaction_progress", "updated"),

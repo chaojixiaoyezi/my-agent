@@ -15,6 +15,11 @@ from .authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from .compact_checkpoint import committed_live_tool_compact_source_ids
+from .compact_progress import (
+    COMPACT_AUTHORITY_CONVERSATION,
+    COMPACT_SOURCE_ACTIVE_TURN,
+    CONVERSATION_COMPACT_PROGRESS_SCHEMA,
+)
 from .live_tool_compact import (
     LiveToolCompactCommitRequest,
     commit_live_tool_compact,
@@ -157,6 +162,8 @@ def _build_active_turn_compact_plan(
         progress={
             "generation": generation,
             "operation_id": f"active-turn-archive:{uuid.uuid4().hex}",
+            "source_kind": COMPACT_SOURCE_ACTIVE_TURN,
+            "commit_authority": COMPACT_AUTHORITY_CONVERSATION,
             "before_tokens": before_tokens,
             "trigger_tokens": max(0, int(policy.trigger_tokens or 0)),
             "source_messages": len(source_ids) * 2,
@@ -375,7 +382,7 @@ def _emit_progress(
     if callback is None:
         return
     payload = {
-        "schema": "conversation_compaction_progress.v1",
+        "schema": CONVERSATION_COMPACT_PROGRESS_SCHEMA,
         **base,
         "phase": str(phase),
         "stage": str(stage),
