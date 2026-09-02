@@ -1,5 +1,11 @@
 # TEST CHECKLIST
 
+- [x] 子代理详情 payload 必须先校验 exact run 并形成单一展示投影，再原子更新名册/终稿去重和活动区；拆分
+  不得改变 goal、事件游标、历史或终态。78 项 navigation/input/PTY 与 strict code-size 通过；
+  `ma-r149-local-child-navigation` 真键盘验证进入、Ctrl+O 保持 child、返回 main。
+- [ ] child 处于 Ctrl+O 详细 transcript 时，Ctrl+G 也应一次返回父代理；当前需先 Ctrl+O 退出 modal 才生效。
+  修复只能调整 typed key routing，Esc 仍用于停止当前代理，不能复用为返回。
+
 - [x] 活动/终态、收起/展开的 thinking 与 Ctrl+O 提示必须统一使用 terminal dim；用户消息在独立深色底上
   使用 bold，assistant 正文不得继承。52 项 renderer focused 与本机 `ma-r147-local-tui-style` ANSI capture
   通过；同一 wheel 的测试机终端观感仍待部署后复验。

@@ -79,6 +79,26 @@ class TuiAgentNavigationSnapshot:
     terminal: bool = False
 
 
+# LLM: This immutable projection is the only normalized input accepted by the child
+# view updater. It contains display facts, not control authority or executable objects.
+# 类用途: 保存一次子代理详情响应中已经校验过的行、事件和终态展示字段。
+@dataclass(frozen=True)
+class _AgentViewProjection:
+    run_id: str
+    payload: Mapping[str, object]
+    raw_agent: Mapping[str, object]
+    row: dict[str, object]
+    children: tuple[dict[str, object], ...]
+    events: object
+    typed_final_request_ids: frozenset[str]
+    final_response: str
+    final_response_request_id: str
+    final_response_key: str
+    terminal: bool
+    status: str
+    lifecycle_phase: str
+
+
 # LLM: One navigation instance belongs to one TUI application and one root
 # runtime. Child runtimes are display stores only and cannot execute model work.
 # 类用途: 管理当前代理视图栈、每层子代理名册、方向键选中项和独立正文页面。
@@ -289,120 +309,81 @@ class TuiAgentNavigationState:
     # a transient incomplete payload must not permanently suppress that prompt.
     # 函数用途: 把 Gateway 子代理完整消息快照应用到对应页面并增量刷新正文。
     def apply_agent_view(self, run_id: str, payload: object) -> bool:
-        selected = str(run_id or "").strip()
-        if not selected or not isinstance(payload, Mapping) or payload.get("ok") is not True:
+        view = _normalize_agent_view_projection(run_id, payload)
+        if view is None:
             return False
-        raw_agent = payload.get("agent")
-        if not isinstance(raw_agent, Mapping):
-            return False
-        row = _navigation_row(raw_agent, expected_run_id=selected)
-        if row is None:
-            return False
-        children = _navigation_rows(payload.get("children"), parent_run_id=selected)
-        events = payload.get("transcript_events")
-        typed_final_request_ids = _typed_final_response_request_ids(events, selected)
-        final_response = str(payload.get("final_response") or "").strip()
-        final_response_request_id = _final_response_request_id(
-            payload.get("final_response_request_id"),
-            selected,
+        runtime, first_goal, prior_final_key, typed_final_already_visible = (
+            self._register_agent_view(view)
         )
-        final_response_key = final_response_request_id or (
-            f"legacy:{final_response}" if final_response else ""
-        )
-        with self._lock:
-            self._rows_by_run[selected] = row
-            self._rows_by_parent[selected] = children
-            for child in children:
-                self._rows_by_run[str(child["run_id"])] = child
-            child_ids = {str(child["run_id"]) for child in children}
-            if self._selected_by_parent.get(selected, "") not in child_ids:
-                self._selected_by_parent.pop(selected, None)
-            runtime = self._runtime_for_locked(selected)
-            first_goal = selected not in self._goal_published
-            prior_final_key = self._final_response_keys.get(selected, "")
-            self._typed_final_response_request_ids.update(typed_final_request_ids)
-            typed_final_already_visible = bool(
-                final_response_request_id
-                and final_response_request_id
-                in self._typed_final_response_request_ids
-            )
-            if final_response_key:
-                self._final_response_keys[selected] = final_response_key
-        goal = str(row.get("goal") or "").strip()
+        goal = str(view.row.get("goal") or "").strip()
         if first_goal and goal:
-            runtime.enqueue_prompt(f"agent-goal:{selected}", goal, queued=False)
+            runtime.enqueue_prompt(f"agent-goal:{view.run_id}", goal, queued=False)
             with self._lock:
-                self._goal_published.add(selected)
+                self._goal_published.add(view.run_id)
         with self._lock:
-            goal_published = selected in self._goal_published
-        terminal = bool(payload.get("terminal"))
-        status = str(row.get("status") or "").strip().upper()
-        lifecycle_phase = str(row.get("lifecycle_phase") or "").strip().lower()
-        if isinstance(events, list | tuple):
-            runtime.publish_background_transcript_events(events)
-        if terminal or goal_published or bool(events) or final_response:
+            goal_published = view.run_id in self._goal_published
+        if isinstance(view.events, list | tuple):
+            runtime.publish_background_transcript_events(view.events)
+        if view.terminal or goal_published or bool(view.events) or view.final_response:
             runtime.clear_notice(expected_kind=_AGENT_STARTUP_NOTICE_KIND)
         else:
             # 轮询会续上这个短 notice；一旦 goal/首事件到达立即清除。这样既不新增
             # 持久状态，也不会因为首个不完整快照把详情页变成无解释白屏。
             runtime.set_notice(
-                _agent_startup_notice(lifecycle_phase),
+                _agent_startup_notice(view.lifecycle_phase),
                 duration_seconds=2.5,
                 notice_kind=_AGENT_STARTUP_NOTICE_KIND,
             )
-        if terminal:
-            runtime.settle_agent_transcript(selected, status=status)
+        if view.terminal:
+            runtime.settle_agent_transcript(view.run_id, status=view.status)
         if (
-            final_response
-            and final_response_key != prior_final_key
+            view.final_response
+            and view.final_response_key != prior_final_key
             and not typed_final_already_visible
         ):
-            runtime.publish_background_response(final_response, thread_id=selected)
-        main_activity = {
-            "task_id": selected,
-            "phase": _agent_activity_phase(
-                status,
-                terminal,
-                lifecycle_phase=lifecycle_phase,
-            ),
-            "activity": str(row.get("activity") or "").strip(),
-            "started_at": row.get("created_at", 0.0),
-            "updated_at": row.get("updated_at", 0.0),
-            "ended_at": row.get("ended_at", 0.0),
-            **(
-                {"context_usage": dict(raw_agent["context_usage"])}
-                if isinstance(raw_agent.get("context_usage"), Mapping)
-                else {}
-            ),
-        }
+            runtime.publish_background_response(
+                view.final_response,
+                thread_id=view.run_id,
+            )
         runtime.update_background_activity(
-            0 if terminal else 1,
-            {
-                "compact_count": max(0, _safe_int(row.get("compact_count"))),
-                "main_activity": main_activity,
-                "subagents": children,
-                "task_progress": {
-                    "items": payload.get("task_progress_items"),
-                    "generation_id": payload.get("task_progress_generation_id"),
-                    "plan_revision": payload.get("task_progress_plan_revision"),
-                },
-                "hidden_subagent_count": max(
-                    0,
-                    _safe_int(payload.get("hidden_child_count")),
-                ),
-                "projection_ok": True,
-                "task_progress_projection_ok": isinstance(
-                    payload.get("task_progress_items"), list | tuple
-                ),
-            },
+            0 if view.terminal else 1,
+            _agent_view_background_activity(view),
         )
         with self._lock:
-            self._event_cursors[selected] = max(
-                self._event_cursors.get(selected, 0),
-                _safe_int(payload.get("event_cursor")),
+            self._event_cursors[view.run_id] = max(
+                self._event_cursors.get(view.run_id, 0),
+                _safe_int(view.payload.get("event_cursor")),
             )
         runtime.store.invalidate()
         return True
+
+    # LLM: Registry mutation is kept under one lock so child rows, selection,
+    # final dedupe, and display runtime become visible as one UI projection.
+    # 函数用途: 原子登记一次已校验的子代理详情，并返回渲染阶段所需的去重状态。
+    def _register_agent_view(
+        self,
+        view: _AgentViewProjection,
+    ) -> tuple[TuiRuntime, bool, str, bool]:
+        with self._lock:
+            self._rows_by_run[view.run_id] = view.row
+            self._rows_by_parent[view.run_id] = view.children
+            for child in view.children:
+                self._rows_by_run[str(child["run_id"])] = child
+            child_ids = {str(child["run_id"]) for child in view.children}
+            if self._selected_by_parent.get(view.run_id, "") not in child_ids:
+                self._selected_by_parent.pop(view.run_id, None)
+            runtime = self._runtime_for_locked(view.run_id)
+            first_goal = view.run_id not in self._goal_published
+            prior_final_key = self._final_response_keys.get(view.run_id, "")
+            self._typed_final_response_request_ids.update(view.typed_final_request_ids)
+            typed_final_already_visible = bool(
+                view.final_response_request_id
+                and view.final_response_request_id
+                in self._typed_final_response_request_ids
+            )
+            if view.final_response_key:
+                self._final_response_keys[view.run_id] = view.final_response_key
+        return runtime, first_goal, prior_final_key, typed_final_already_visible
 
     # LLM: Internal active identity comes only from the view stack.
     # 函数用途: 在持锁状态下返回当前代理 run id，空串表示主代理。
@@ -439,6 +420,94 @@ class TuiAgentNavigationState:
     def _active_runtime_locked(self) -> TuiRuntime:
         active = self._active_run_id_locked()
         return self._runtime_for_locked(active) if active else self.root_runtime
+
+
+# LLM: Gateway detail payloads cross an untrusted presentation boundary. Normalize
+# exact run identity and bounded row/event facts once before mutating navigation state.
+# 函数用途: 校验并整理一份子代理详情响应，非法或串代理的数据直接拒绝。
+def _normalize_agent_view_projection(
+    run_id: str,
+    payload: object,
+) -> _AgentViewProjection | None:
+    selected = str(run_id or "").strip()
+    if not selected or not isinstance(payload, Mapping) or payload.get("ok") is not True:
+        return None
+    raw_agent = payload.get("agent")
+    if not isinstance(raw_agent, Mapping):
+        return None
+    row = _navigation_row(raw_agent, expected_run_id=selected)
+    if row is None:
+        return None
+    children = _navigation_rows(payload.get("children"), parent_run_id=selected)
+    events = payload.get("transcript_events")
+    final_response = str(payload.get("final_response") or "").strip()
+    final_response_request_id = _final_response_request_id(
+        payload.get("final_response_request_id"),
+        selected,
+    )
+    final_response_key = final_response_request_id or (
+        f"legacy:{final_response}" if final_response else ""
+    )
+    return _AgentViewProjection(
+        run_id=selected,
+        payload=payload,
+        raw_agent=raw_agent,
+        row=row,
+        children=children,
+        events=events,
+        typed_final_request_ids=frozenset(
+            _typed_final_response_request_ids(events, selected)
+        ),
+        final_response=final_response,
+        final_response_request_id=final_response_request_id,
+        final_response_key=final_response_key,
+        terminal=bool(payload.get("terminal")),
+        status=str(row.get("status") or "").strip().upper(),
+        lifecycle_phase=str(row.get("lifecycle_phase") or "").strip().lower(),
+    )
+
+
+# LLM: Activity rendering derives only from the normalized child projection. Keep
+# this payload compatible with TuiRuntime and never infer lifecycle from prose.
+# 函数用途: 生成子代理详情页底部 Working、上下文、Todo 和下级代理的展示数据。
+def _agent_view_background_activity(view: _AgentViewProjection) -> dict[str, object]:
+    row = view.row
+    payload = view.payload
+    main_activity = {
+        "task_id": view.run_id,
+        "phase": _agent_activity_phase(
+            view.status,
+            view.terminal,
+            lifecycle_phase=view.lifecycle_phase,
+        ),
+        "activity": str(row.get("activity") or "").strip(),
+        "started_at": row.get("created_at", 0.0),
+        "updated_at": row.get("updated_at", 0.0),
+        "ended_at": row.get("ended_at", 0.0),
+        **(
+            {"context_usage": dict(view.raw_agent["context_usage"])}
+            if isinstance(view.raw_agent.get("context_usage"), Mapping)
+            else {}
+        ),
+    }
+    return {
+        "compact_count": max(0, _safe_int(row.get("compact_count"))),
+        "main_activity": main_activity,
+        "subagents": view.children,
+        "task_progress": {
+            "items": payload.get("task_progress_items"),
+            "generation_id": payload.get("task_progress_generation_id"),
+            "plan_revision": payload.get("task_progress_plan_revision"),
+        },
+        "hidden_subagent_count": max(
+            0,
+            _safe_int(payload.get("hidden_child_count")),
+        ),
+        "projection_ok": True,
+        "task_progress_projection_ok": isinstance(
+            payload.get("task_progress_items"), list | tuple
+        ),
+    }
 
 
 # LLM: Row normalization allows only bounded scalar display fields plus exact

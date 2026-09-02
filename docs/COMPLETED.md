@@ -1,5 +1,13 @@
 # COMPLETED
 
+## 2026-09-02 R149 子代理详情投影尺寸硬门
+
+- 把超长 `apply_agent_view` 拆为校验后的 immutable projection、锁内名册/终稿登记和活动区数据生成；展示
+  Runtime 仍无执行权限，Gateway typed payload 仍是唯一身份与终态来源。
+- 78 项 navigation/input/PTY 回归、Ruff 与 strict code-size 通过，生产 hard finding 从 1 降为 0。
+- `ma-r149-local-child-navigation` 真 TUI 已验证运行中 child 的完整 prompt、思考、工具、独立历史和返回。
+  详细 transcript 中 Ctrl+G 需先退出 modal 的组合键缺口单列 ROADMAP/BUG-102，不属于本项完成范围。
+
 ## 2026-09-02 R147/R148 TUI 消息层级与 TaskRun 收口
 
 - TUI 思考标签、正文和 Ctrl+O 提示统一使用 terminal dim；用户消息保留深色独立底并加 bold。终端交互

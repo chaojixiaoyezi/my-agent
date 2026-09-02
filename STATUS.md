@@ -1,5 +1,14 @@
 # STATUS
 
+## 2026-09-02 R149 子代理详情投影瘦身（严格尺寸门通过）
+
+- `apply_agent_view` 原来同时校验 HTTP payload、改导航名册、做终稿去重、发布历史并拼底部状态，超过 100 行
+  硬门。现拆成 immutable 详情投影、锁内注册和活动区投影三个职责；没有新增状态源或兼容旁路。
+- navigation/input/PTY 相关 78 项、Ruff、diff 与 strict code-size 通过，生产 hard finding 为 0。
+- 本机 `ma-r149-local-child-navigation` 自然派出 2 个 child；`↓/Enter`、完整 goal/thinking/tool、独立历史、
+  Ctrl+O 不跳 root、退出详情后 Ctrl+G 返回均通过。新发现详细 transcript 中 Ctrl+G 首次被 modal 吞掉，作为
+  P2 BUG-102 单列，当前没有掩盖为通过。
+
 ## 2026-09-02 R147 TUI 思考弱化与用户消息强调（本机真 TUI 通过）
 
 - 对照 终端交互 `AssistantThinkingMessage.tsx`/`CtrlOToExpand.tsx` 的 `dimColor`，统一把活动思考、终态
