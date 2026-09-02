@@ -1,5 +1,14 @@
 # COMPLETED
 
+## 2026-09-02 R147/R148 TUI 消息层级与 TaskRun 收口
+
+- TUI 思考标签、正文和 Ctrl+O 提示统一使用 terminal dim；用户消息保留深色独立底并加 bold。终端交互
+  提供的是 `dimColor` 语义而非固定灰色值，本机真实 TUI 的 ANSI 输出已证明用户为 SGR 1、思考为 SGR 2。
+- 会话 TaskRun 不再依赖一轮内临时完成属性。持久 task link 终态与 exact AgentRun 整树终态共同授权唯一 CAS，
+  root/child 竞态和 Gateway 启动崩溃窗口都能幂等补齐，UNKNOWN 工具操作不受影响。
+- R147 52 项 renderer focused 通过；R148 相关 117 项 focused 通过。`ma-r148-local-goal-taskrun` 真 `/goal`
+  完成后，Goal 工具、root AgentRun、TaskRun/唯一 close event 三方一致。测试机同 wheel 部署仍是后续硬门。
+
 ## 2026-09-02 R143 模型前置失败不再留下幽灵运行
 
 - 解决已绑定 RuntimeDB attempt 后、正式模型循环前的 capability probe/上下文准备异常没有进入既有 closeout，

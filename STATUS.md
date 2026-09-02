@@ -1,5 +1,15 @@
 # STATUS
 
+## 2026-09-02 R147 TUI 思考弱化与用户消息强调（本机真 TUI 通过）
+
+- 对照 终端交互 `AssistantThinkingMessage.tsx`/`CtrlOToExpand.tsx` 的 `dimColor`，统一把活动思考、终态
+  Thought 摘要、展开正文和 Ctrl+O 提示映射为 terminal dim；不再只靠固定 `#949494`，减少不同终端调色板
+  导致本机与测试机观感漂移。
+- 用户消息保留独立深色背景并增加 bold，助手正文不继承该属性。改动只在主题层，不改 transcript、模型请求、
+  Compact、缓存或鼠标复制文本。
+- 本机 fresh MiniMax-M2.7 TUI `ma-r147-local-tui-style` 的 ANSI capture 已分别观察到用户 SGR 1 与思考
+  SGR 2；52 项 renderer focused 通过。测试机当前未部署此 commit，部署后仍需用同一 wheel 复验。
+
 ## 2026-09-02 R148 Goal/普通会话 TaskRun 收口（本机真 TUI 通过）
 
 - 修复了持久 task link 已终态、AgentRun 已终态，但 TaskRun 仍因旧临时属性门保持开放的问题。当前只在 exact

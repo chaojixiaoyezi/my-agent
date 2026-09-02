@@ -18,6 +18,7 @@ from agent_py_agent.cli.chat_parts.tui_markdown import (
     fragments_text,
     sanitize_terminal_text,
 )
+from agent_py_agent.cli.chat_parts.tui_ui_setup import _make_tui_style
 from agent_py_agent.cli.chat_parts.tui_view_model import (
     TuiBlock,
     TuiContextUsage,
@@ -197,6 +198,23 @@ def test_full_frame_matches_reference_message_geometry_at_120_columns() -> None:
         "class:tui-muted",
         "  ? 快捷键 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式",
     ),)
+
+
+def test_tui_theme_dims_thinking_and_emphasizes_user_text() -> None:
+    """主/子代理共用的主题必须弱化思考，并让用户输入明显区别于代理正文。"""
+    style = _make_tui_style()
+
+    thinking = style.get_attrs_for_style_str("class:tui-thinking")
+    thinking_detail = style.get_attrs_for_style_str("class:tui-thinking-detail")
+    user_text = style.get_attrs_for_style_str("class:tui-user-text")
+
+    assert thinking.dim is True
+    assert thinking_detail.dim is True
+    assert thinking.color == "ffffff"
+    assert thinking_detail.color == "ffffff"
+    assert user_text.bold is True
+    assert user_text.color == "ffffff"
+    assert user_text.bgcolor == "3a3a3a"
 
 
 def test_footer_explains_native_copy_escape_hatch_without_hiding_history() -> None:

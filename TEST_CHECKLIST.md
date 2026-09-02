@@ -1,5 +1,9 @@
 # TEST CHECKLIST
 
+- [x] 活动/终态、收起/展开的 thinking 与 Ctrl+O 提示必须统一使用 terminal dim；用户消息在独立深色底上
+  使用 bold，assistant 正文不得继承。52 项 renderer focused 与本机 `ma-r147-local-tui-style` ANSI capture
+  通过；同一 wheel 的测试机终端观感仍待部署后复验。
+
 - [x] 普通会话或 `/goal` 的 TaskRun 只能在持久 ConversationTaskLink 已进入不可复活终态，且 exact TaskRun
   下唯一 root 与所有 child 都终态时关闭；任一事实仍活跃、缺失或冲突必须保持开放。root/最后 child 的竞态和
   Gateway 启动重放都使用同一 CAS，UNKNOWN ToolOperation 不得被顺带裁决。117 项 focused 与本机
