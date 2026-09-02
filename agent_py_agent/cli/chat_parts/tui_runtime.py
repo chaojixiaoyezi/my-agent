@@ -1546,10 +1546,11 @@ class TuiTurnEventAdapter:
         self._compact_active = False
         self._compact_block_id = ""
         self._compact_payload: dict[str, object] = {}
-        # 同一尚未提交的 generation 可能先做 live 候选、再由 transcript
-        # fallback 接管。operation_id 会变，但用户看到的是同一次 Compact；
-        # 保留代内高水位，避免进度条从 20% 倒回 15%。
+        # generation 只负责拒绝旧代事件；每个 operation 都有独立动画。
+        # live 候选结束后 transcript fallback 会从自己的真实阶段重新开始，
+        # 不能继承上一候选的百分比而让用户误以为它已经推进。
         self._compact_progress_generation = 0
+        self._compact_progress_operation_id = ""
         self._compact_progress_percent = 0
         self._assistant_index = 0
         self._assistant_block_id = ""
@@ -1831,21 +1832,33 @@ class TuiTurnEventAdapter:
             return False
         generation = int(payload["generation"])
         incoming_percent = int(payload["percent"])
-        if generation < self._compact_progress_generation:
-            return False
-        if generation > self._compact_progress_generation:
-            self._compact_progress_generation = generation
-            self._compact_progress_percent = incoming_percent
-        else:
-            self._compact_progress_percent = max(
-                self._compact_progress_percent,
-                incoming_percent,
-            )
-        payload = {**payload, "percent": self._compact_progress_percent}
         phase = str(payload["phase"])
         operation_id = str(payload["operation_id"])
         block_id = f"conversation-compact:{self.request_id}:{operation_id}"
         with self._lock:
+            if generation < self._compact_progress_generation:
+                return False
+            same_operation = (
+                generation == self._compact_progress_generation
+                and operation_id == self._compact_progress_operation_id
+            )
+            if generation > self._compact_progress_generation:
+                if self._compact_active:
+                    return False
+                self._compact_progress_generation = generation
+                self._compact_progress_operation_id = operation_id
+                self._compact_progress_percent = incoming_percent
+            elif same_operation:
+                self._compact_progress_percent = max(
+                    self._compact_progress_percent,
+                    incoming_percent,
+                )
+            elif phase == "started" and not self._compact_active:
+                self._compact_progress_operation_id = operation_id
+                self._compact_progress_percent = incoming_percent
+            else:
+                return False
+            payload = {**payload, "percent": self._compact_progress_percent}
             if phase == "started":
                 if self._compact_active:
                     return False

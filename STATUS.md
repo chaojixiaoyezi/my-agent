@@ -1,5 +1,15 @@
 # STATUS
 
+## 2026-09-02 R150 Compact operation 动画隔离与 resume 真 TUI
+
+- 修复同一未提交 generation 内，live-tool 候选的 65% 被 transcript fallback 继承的问题。generation 现在只
+  负责拒绝旧代；百分比按 exact operation_id 维护，新 fallback 从自己的 5% 开始，旧 operation 迟到进度被拒绝。
+- Compact/Gateway/background 相关 85 项 focused 与 Ruff 通过。`ma-r150-local-compact-resume` 从
+  `/sessions` 列出的 exact id 恢复 R149：历史 final、3 个 child 与 compact 3 都在；手动 `/compact` 持续显示
+  动画，canonical 提交后只变为 generation/compact 4。
+- Compact 后普通记忆追问准确回答查询类型、mtime+content_hash 增量机制和三名 child 分工，Context 为
+  36.0k/128k；证明本轮展示修复没有改模型上下文、摘要或缓存前缀。
+
 ## 2026-09-02 R149 子代理详情投影瘦身（严格尺寸门通过）
 
 - `apply_agent_view` 原来同时校验 HTTP payload、改导航名册、做终稿去重、发布历史并拼底部状态，超过 100 行

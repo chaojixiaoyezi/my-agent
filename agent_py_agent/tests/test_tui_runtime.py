@@ -499,7 +499,7 @@ def test_failed_live_compact_does_not_hide_transcript_fallback_progress() -> Non
 
 
 def test_superseded_live_compact_retires_silently_before_transcript_fallback() -> None:
-    """未采用的 live 候选不留红字，并立即允许同代 transcript Compact 接管。"""
+    """未采用的 live 候选不留红字，同代 fallback 从自己的真实进度开始。"""
     runtime = TuiRuntime("conversation-compact-superseded")
     runtime.enqueue_prompt("compact-superseded", "go", queued=False)
     turn = runtime.begin_turn("compact-superseded")
@@ -542,7 +542,21 @@ def test_superseded_live_compact_retires_silently_before_transcript_fallback() -
     active = next(
         block for block in runtime.store.snapshot().active_blocks if block.role == "compact"
     )
-    assert active.metadata["percent"] == 65, "同代 fallback 接管不能让用户看到进度倒退"
+    assert active.metadata["percent"] == 5, "同代 fallback 不得继承上一 operation 的进度"
+
+    assert not turn.write_conversation_compact_progress(
+        {
+            **base,
+            "operation_id": "live-tool:attempt-a",
+            "phase": "progress",
+            "stage": "checkpointing",
+            "percent": 92,
+        }
+    )
+    still_fallback = next(
+        block for block in runtime.store.snapshot().active_blocks if block.role == "compact"
+    )
+    assert still_fallback.metadata["percent"] == 5
 
     assert turn.write_conversation_compact_progress(
         {

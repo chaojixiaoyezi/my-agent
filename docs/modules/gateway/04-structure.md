@@ -11,6 +11,15 @@
 - TaskRun 的最终 status 来自唯一 root AgentRun；一次成功关闭只追加一条 `task_run.closed` 事件。该投影不修改
   ToolOperation，UNKNOWN 工具副作用仍由原有恢复/人工审计协议处理。
 
+## Compact generation 与动画 operation
+
+- `compact_generation` 是 ConversationThread 成功提交历史替换的持久代次；`operation_id` 是一次摘要候选/动画
+  的身份。同一待提交 generation 可以先出现 live-tool 候选，再由 transcript fallback 接管，二者不能共享
+  百分比、block id 或终态。
+- TUI 只用 generation 拒绝旧代事件；同一 operation 内百分比取单调高水位。旧 operation 已 failed 或
+  superseded 后，新 operation 从自身 started 百分比开始，随后到达的旧事件不再更新当前块。只有 canonical
+  checkpoint/CAS 后的 completion/boundary 推进界面 Compact 次数。
+
 ## ThreadGoal 与 workspace 物化边界
 
 - `ThreadGoal` 是 thread 上的持久控制 overlay；创建 Goal 不等于已经进行文件工作，也不要求立即创建 task

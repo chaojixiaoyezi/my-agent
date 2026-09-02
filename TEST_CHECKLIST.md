@@ -1,5 +1,13 @@
 # TEST CHECKLIST
 
+- [x] 同一 Compact generation 内不同 operation 不得共享百分比高水位；live 候选 superseded/failed 后，
+  transcript fallback 从自身 started 进度开始，旧 operation 迟到事件不能污染当前块。同 operation 保持单调。
+  85 项 focused 通过；`ma-r150-local-compact-resume` 手动动画、generation 3→4、计数只在提交后增加及压缩后
+  记忆追问均通过。自然触发的 fallback 失败链仍列为后续真 TUI 覆盖。
+- [x] `/exit` 后新 TUI 的 `/sessions` 必须只列当前 owner，会话由 exact session id 恢复；历史 final、child
+  roster、Compact 代次继续存在。R149→R150 真 TUI 已通过；当前 `/sessions` 是只读列表加恢复命令，不冒充
+  终端交互 式列表内直接选择。
+
 - [x] 子代理详情 payload 必须先校验 exact run 并形成单一展示投影，再原子更新名册/终稿去重和活动区；拆分
   不得改变 goal、事件游标、历史或终态。78 项 navigation/input/PTY 与 strict code-size 通过；
   `ma-r149-local-child-navigation` 真键盘验证进入、Ctrl+O 保持 child、返回 main。

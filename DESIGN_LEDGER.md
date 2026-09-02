@@ -1,5 +1,16 @@
 # DESIGN LEDGER
 
+## 2026-09-02 Compact 提交代次与展示操作身份分离【状态：R150 真 TUI/Focused 通过】
+
+- `compact_generation` 只代表 ConversationThread 已成功安装的持久历史代次；`operation_id` 代表一次候选和它的
+  进度动画。同一未提交 generation 允许 live-tool 候选放弃后由 transcript fallback 接管，但两个 operation
+  不得共享进度高水位或终态。
+- TUI 用 generation 拒绝旧代，用 `(generation, operation_id)` 维护本次动画；同 operation 百分比单调，新
+  operation 从自身 started 阶段开始，迟到旧事件 fail closed。动画完成、失败或 superseded 都不直接改代次，
+  Compact 次数仍只认 canonical checkpoint/CAS 后的 boundary。
+- R150 手动 `/compact` 验证动画持续可见、提交后计数 3→4、压缩后记忆连续；live 65%→fallback 5% 与旧事件
+  拒绝由 typed focused 覆盖。自然 fallback 仍待真环境触发，不把合成事件冒充真实供应商链。
+
 ## 2026-09-02 会话任务终态与执行树终态共同关闭 TaskRun【状态：R148 本机真 TUI 通过】
 
 - `ConversationTaskLink` 的终态只证明用户这项会话工作已经结构化结束，`AgentRun` 树的终态只证明真实执行

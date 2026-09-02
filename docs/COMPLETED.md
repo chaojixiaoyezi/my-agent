@@ -1,5 +1,14 @@
 # COMPLETED
 
+## 2026-09-02 R150 Compact 动画 operation 隔离
+
+- TUI 不再把持久 generation 当成动画身份：同 operation 内进度单调，不同 operation 即便复用同一待提交
+  generation 也各自从真实 started 阶段开始；旧候选迟到事件不能覆盖当前 fallback。
+- 85 项 Compact/Gateway/background focused 与 Ruff 通过。R150 真 TUI 从 exact session id 恢复 R149 全历史，
+  手动 `/compact` 显示动画并在提交后把 generation/计数从 3 精确推进到 4；随后的记忆追问准确。
+- 本项只改展示 reducer，不改变摘要、checkpoint/CAS、缓存或计费。自然发生的 live→transcript fallback 仍保留
+  为后续压力真测，不用合成事件冒充 provider 已真实走过该分支。
+
 ## 2026-09-02 R149 子代理详情投影尺寸硬门
 
 - 把超长 `apply_agent_view` 拆为校验后的 immutable projection、锁内名册/终稿登记和活动区数据生成；展示
