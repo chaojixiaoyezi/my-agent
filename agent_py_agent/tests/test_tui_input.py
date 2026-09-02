@@ -707,6 +707,41 @@ def test_gateway_manual_compact_starts_visible_progress_after_durable_enqueue() 
     assert active[0].metadata["indeterminate"] is True
 
 
+def test_gateway_manual_compact_rejects_active_task_before_animation() -> None:
+    for foreground_active, background_active in ((True, False), (False, True)):
+        runtime = TuiRuntime(
+            f"control-compact-active-{foreground_active}-{background_active}"
+        )
+        if background_active:
+            runtime.update_background_activity(
+                1,
+                {"main_activity": {"phase": "waiting"}},
+            )
+
+        class Reconciler:
+            def enqueue(self, _entry, *, on_persisted_before_dispatch=None) -> None:
+                del on_persisted_before_dispatch
+                raise AssertionError("active task must not persist manual compact")
+
+        params = SimpleNamespace(
+            use_gateway=True,
+            state_lock=threading.Lock(),
+            is_running_ref=[foreground_active],
+            running_request_id_ref=["gwreq-active" if foreground_active else ""],
+            tui_runtime=runtime,
+            control_operation_reconciler=Reconciler(),
+        )
+
+        assert tui_keybindings._tui_submit_control_operation(params, "/compact")
+        snapshot = runtime.store.snapshot()
+        assert all(block.role != "compact" for block in snapshot.active_blocks)
+        assert all(block.role != "compact" for block in snapshot.stable_blocks)
+        assert any(
+            block.role == "system" and "当前任务仍在运行" in block.text
+            for block in snapshot.stable_blocks
+        )
+
+
 def test_gateway_manual_compact_fast_terminal_cannot_overtake_start() -> None:
     runtime = TuiRuntime("control-compact-fast-terminal")
 

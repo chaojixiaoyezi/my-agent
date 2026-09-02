@@ -1030,8 +1030,10 @@ def _tui_attach_gateway_job(
 
 # LLM: Mutating Gateway slash controls enter a durable operation outbox before HTTP. `/btw` binds
 # an exact live turn; Esc during manual Compact binds that typed control message instead of falling
-# through to a foreground/background task. Ambiguous task sets still fail closed server-side.
-# 函数用途: 展示同源上下文，或持久提交带精确回合/Compact 目标的 TUI 控制命令。
+# through to a foreground/background task. 会话运行时 does not expose manual Compact during an active
+# task, so the client must reject that state before persisting an outbox row or starting animation;
+# automatic in-turn Compact is a separate runtime path. Ambiguous task sets still fail closed.
+# 函数用途: 展示同源上下文，或持久提交带精确回合/Compact 目标的 TUI 控制命令；任务运行中不显示假的手动压缩动画。
 def _tui_submit_control_operation(
     params: TuiCreateKeybindingsParams,
     text: str,
@@ -1056,6 +1058,18 @@ def _tui_submit_control_operation(
         )
         return True
     runtime = _required_tui_runtime(params)
+    if command.kind == "compact":
+        with params.state_lock:
+            foreground_active = bool(params.is_running_ref[0])
+        background_active_reader = getattr(runtime, "has_active_background_task", None)
+        background_active = bool(
+            callable(background_active_reader) and background_active_reader()
+        )
+        if foreground_active or background_active:
+            runtime.write_console(
+                "当前任务仍在运行；请等本轮完成或先使用 /stop，再执行 /compact。"
+            )
+            return True
     target_control_message_id = ""
     if command.kind == "stop":
         target_control_message_id = runtime.active_manual_compact_control_message_id()
