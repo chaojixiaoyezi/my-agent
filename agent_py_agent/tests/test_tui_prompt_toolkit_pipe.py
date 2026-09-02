@@ -195,6 +195,48 @@ def test_real_prompt_toolkit_pipe_defaults_tui_mouse_and_f6_toggles(tmp_path) ->
     asyncio.run(scenario())
 
 
+def test_ctrl_g_returns_from_child_while_detailed_transcript_is_open(tmp_path) -> None:
+    """Ctrl+G 在普通/详细历史两态都必须返回父代理，Esc 仍留给停止。"""
+
+    async def scenario() -> None:
+        runtime = TuiRuntime("child-detailed-back-session")
+        runtime.publish_session(version="test", model="fixture", workspace=str(tmp_path))
+        navigation = TuiAgentNavigationState(runtime)
+        navigation.update_rows(
+            "",
+            [
+                {
+                    "run_id": "child-detailed",
+                    "parent_run_id": "",
+                    "name": "child-detailed",
+                    "status": "RUNNING",
+                }
+            ],
+        )
+        with create_pipe_input() as pipe_input:
+            with create_app_session(input=pipe_input, output=DummyOutput()):
+                app = make_tui_app(
+                    _app_params(tmp_path, runtime, agent_navigation=navigation)
+                )
+                run_task = asyncio.create_task(app.run_async())
+                await asyncio.sleep(0.05)
+
+                pipe_input.send_bytes(b"\x1b[B\r")
+                await asyncio.sleep(0.08)
+                assert navigation.snapshot().active_run_id == "child-detailed"
+
+                pipe_input.send_bytes(b"\x0f")
+                await asyncio.sleep(0.08)
+                pipe_input.send_bytes(b"\x07")
+                await asyncio.sleep(0.08)
+                assert navigation.snapshot().active_run_id == ""
+
+                app.exit(result=0)
+                assert await run_task == 0
+
+    asyncio.run(scenario())
+
+
 def test_real_vt100_output_enables_default_mouse_and_f6_emits_both_transitions(
     tmp_path,
 ) -> None:

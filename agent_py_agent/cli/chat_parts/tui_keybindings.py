@@ -249,6 +249,12 @@ def _register_transcript_bindings(
     kb.add("q", filter=navigation)(lambda e: _exit_transcript_mode(e, params))
     kb.add("escape", filter=navigation, eager=True)(lambda e: _exit_transcript_mode(e, params))
     kb.add("c-c", filter=navigation)(lambda e: _handle_transcript_ctrl_c(e, params))
+    kb.add("c-g", filter=navigation)(
+        lambda e: _handle_agent_back_keybinding(e, params)
+    )
+    kb.add("escape", "left", filter=navigation)(
+        lambda e: _handle_agent_back_keybinding(e, params)
+    )
     kb.add("/", filter=navigation)(lambda e: _open_transcript_search(e, params))
     kb.add("n", filter=navigation)(
         lambda e: _navigate_transcript_search(e, params, reverse=False)

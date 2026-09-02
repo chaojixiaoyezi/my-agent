@@ -1,5 +1,14 @@
 # STATUS
 
+## 2026-09-02 R151 详细 transcript 中一次返回父代理（真 TUI 通过）
+
+- child 详情处于 Ctrl+O 展开态时，普通 chat 的 Ctrl+G filter 不生效，导致按键被吞；现把 Ctrl+G 与 Alt+Left
+  显式注册到 transcript-navigation mode，仍调用同一个 typed `navigation.back()`，没有复制身份判断。
+- 返回只切代理层级，不顺带关闭详细模式；Ctrl+O 继续独立控制展开，Esc 继续精确停止当前代理。79 项
+  navigation/input/prompt_toolkit pipe 回归通过。
+- `ma-r151-local-child-detail-back` 恢复原 session，进入已完成 worker-1、Ctrl+O 展开后只按一次 Ctrl+G 即回
+  root；随后 Ctrl+O 收起时 root final、3 个 child 名册和 compact 4 均在。
+
 ## 2026-09-02 R150 Compact operation 动画隔离与 resume 真 TUI
 
 - 修复同一未提交 generation 内，live-tool 候选的 65% 被 transcript fallback 继承的问题。generation 现在只

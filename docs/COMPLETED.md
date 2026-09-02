@@ -1,5 +1,12 @@
 # COMPLETED
 
+## 2026-09-02 R151 child 详细历史中的层级返回
+
+- transcript modal 现在也注册 Ctrl+G/Alt+Left，并复用唯一 `navigation.back()`；不再要求用户先 Ctrl+O 收起
+  详情。代理层级和 transcript 展开态保持正交，Esc 的精确停止语义不变。
+- 79 项 focused 通过；`ma-r151-local-child-detail-back` 真实恢复、进入 child、展开、一次返回 root、再收起
+  详情均通过，root 的历史、child roster 与 Compact 代次未丢。
+
 ## 2026-09-02 R150 Compact 动画 operation 隔离
 
 - TUI 不再把持久 generation 当成动画身份：同 operation 内进度单调，不同 operation 即便复用同一待提交

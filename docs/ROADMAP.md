@@ -688,10 +688,10 @@ child sink 先按 typed `write_progress` 接工具事件，`Ctrl+O` 改为冻结
 实按 `↓/Enter/Ctrl+O/Home/Ctrl+G` 后显示 child 完整 prompt、灰色思考/过程、工具卡和代码内容，展开未跳 root；
 三名 child 的 JSONL 均已有 tool started/completed。界面切片已完成，超级玛丽产物仍由被测任务自行继续。
 
-R149 本机 fresh TUI 重新验证上述主链，并把 `apply_agent_view` 的严格尺寸 hard finding 清零；同时发现一个更窄
-键态：child 已进入 Ctrl+O 详细 transcript 时，Ctrl+G 首次由 modal 吞掉，必须先收起详情才返回。后续按
-终端交互 teammate view 的 global/modal key ownership 调整，让 Ctrl+G 两态都走同一 typed back；Esc 继续只
-停止当前代理，不能改成返回。
+R149 本机 fresh TUI 重新验证上述主链，并把 `apply_agent_view` 的严格尺寸 hard finding 清零；同时发现 child
+进入 Ctrl+O 详细 transcript 后 Ctrl+G 没有 modal binding。R151 已按 mode/global key ownership 补齐
+Ctrl+G/Alt+Left，两态都走同一 typed back；真实按键一次返回 root，同时保留详细模式。Esc 继续只停止当前
+代理，没有改成返回。本项转入 COMPLETED。
 
 同一 tmux 后续暴露“进入 child 再返回后，鼠标上翻像没有历史”。现场 `Ctrl+Home` 能立即显示 root 首条原始
 Prompt，证明 canonical history 未丢；根因一是普通/modal control 复用全局 cursor 并在每次切换时强制 End，
