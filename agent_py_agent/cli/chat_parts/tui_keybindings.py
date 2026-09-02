@@ -373,7 +373,8 @@ def _handle_enter_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
 
 
 # LLM: 提交入口统一恢复 transcript follow-tail、保存历史、执行 typed command 或进入 canonical queue；补全 Enter 也必须复用它。
-# 函数用途: 提交当前输入框内容，先回到最新对话，再在命令未消费时创建一个聊天任务。
+# 终态 child 的拒发必须清空未投递草稿，避免同一个输入控件返回父页面后把 child 消息误发给父代理。
+# 函数用途: 提交当前输入框内容，先回到最新对话，再在命令未消费时创建一个聊天任务；终态子代理只提示拒发并清空本次草稿。
 def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
     if _replace_trailing_backslash_with_newline(params.input_area):
         return
@@ -409,6 +410,8 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         getattr(navigation_snapshot, "active_run_id", "") or ""
     ).strip()
     if active_agent_id and bool(getattr(navigation_snapshot, "terminal", False)):
+        _reset_input_after_submit(params)
+        _reset_exit_arms(params)
         _active_tui_runtime(params).set_notice(
             "这个子代理已经结束，当前页面只读；Ctrl+G 返回父代理",
             duration_seconds=2.5,

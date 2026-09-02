@@ -176,6 +176,43 @@ def test_empty_enter_expands_selected_goal_without_submitting_prompt(monkeypatch
     assert snapshot.expanded_goal_id == "goal:goal-one"
 
 
+def test_terminal_child_reject_clears_unsent_draft_before_parent_navigation() -> None:
+    root_runtime = TuiRuntime("terminal-child-input")
+    child_runtime = TuiRuntime("terminal-child-input:child-a")
+    input_area = TextArea(multiline=True)
+    input_area.text = "请继续补充终态子代理结果"
+    invalidations: list[bool] = []
+    navigation = SimpleNamespace(
+        snapshot=lambda: SimpleNamespace(
+            active_run_id="child-a",
+            terminal=True,
+        ),
+        active_runtime=lambda: child_runtime,
+    )
+    params = SimpleNamespace(
+        input_area=input_area,
+        interaction_state=TuiInteractionState(),
+        agent_navigation=navigation,
+        tui_runtime=root_runtime,
+        exit_armed_at_ref=[0.0],
+        eof_armed_at_ref=[0.0],
+        escape_armed_at_ref=[0.0],
+        escape_armed_text_ref=[""],
+    )
+    event = SimpleNamespace(
+        app=SimpleNamespace(invalidate=lambda: invalidations.append(True)),
+    )
+
+    tui_keybindings._submit_input_area(event, params)
+
+    assert input_area.text == ""
+    assert child_runtime.notice() == (
+        "这个子代理已经结束，当前页面只读；Ctrl+G 返回父代理"
+    )
+    assert root_runtime.store.snapshot().queued_inputs == ()
+    assert invalidations == [True]
+
+
 def test_escape_targets_active_manual_compact_control_message() -> None:
     runtime = TuiRuntime("manual-compact-escape")
     runtime.publish_manual_compact_started("compact-control-1")
