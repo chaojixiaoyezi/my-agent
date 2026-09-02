@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-09-02 R148 会话任务与 TaskRun 持久终态对齐（本机真 TUI 通过）
+
+- 普通会话和 Goal 原本会先把持久 `ConversationTaskLink` 标为终态，再结束主代理；旧 RuntimeDB 收口仅依赖
+  一轮内的临时属性，导致 `AgentRun` 已结束但 `TaskRun.closed_at` 仍为零，启动扫描会把已完成工作误报为在途。
+- 当前收口只信两类结构化事实：同一 canonical task 的持久 link 已处于不可复活终态，且 exact TaskRun 下
+  包含唯一 root 的整棵 AgentRun 树全部终态。最后一个 root/child 收口边都执行同一 CAS；Gateway 启动发现层
+  还会重放一次，覆盖两类事实之间断电或崩溃的窗口。模型措辞、质量判断和 UNKNOWN 工具操作均不参与裁决。
+- 本机 `ma-r148-local-goal-taskrun` 通过真实 `/goal` 完成 CSV 数据质量工具、15 项测试与示例；模型先成功调用
+  `update_goal(complete)`，随后 root AgentRun 结束。最终 TaskRun 为 `done`、`closed_at` 非零且仅有一条
+  `task_run.closed`。相关 117 项 focused 测试通过。
+
 ## 2026-09-02 R143 模型前置失败统一收口（本机真 TUI 通过）
 
 - Gateway 请求终态原本能正确返回 failed，但主代理 RuntimeDB attempt 在 provider capability probe/上下文准备

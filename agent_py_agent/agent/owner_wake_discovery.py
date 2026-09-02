@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
+from .conversation.task_state import conversation_task_link_is_terminal
 from .gateway_parts.io import update_json_file_atomic
 from .memory_store.candidate_models import host_promotion_mode
 from .runtime_db.repository import (
@@ -499,6 +500,7 @@ def unfinished_task_ids(owner_home: Path) -> list[str]:
     links_root = owner_home / "workspace" / "runtime" / "workspaces"
     active_ids: list[str] = []
     links_by_task: dict[str, Path] = {}
+    link_statuses: dict[str, set[str]] = {}
     if links_root.is_dir():
         try:
             link_files = sorted(links_root.glob("*/conversations/tasks/*.json"), reverse=True)
@@ -511,12 +513,16 @@ def unfinished_task_ids(owner_home: Path) -> list[str]:
                 continue
             if not isinstance(payload, dict):
                 continue
-            if str(payload.get("status") or "").strip().lower() != THREAD_TASK_LINK_ACTIVE_STATUS:
-                continue
             task_id = str(payload.get("task_id") or "").strip()
-            if task_id and task_id not in active_ids:
+            status = str(payload.get("status") or "").strip().lower()
+            if task_id:
+                link_statuses.setdefault(task_id, set()).add(status)
+            if task_id and status == THREAD_TASK_LINK_ACTIVE_STATUS and task_id not in active_ids:
                 active_ids.append(task_id)
                 links_by_task[task_id] = path
+    repo = _runtime_repo_for_owner(owner_home)
+    if repo is not None:
+        _reconcile_terminal_conversation_task_runs(repo, link_statuses)
     if not active_ids:
         return []
     tasks_root = owner_home / "tasks"
@@ -538,6 +544,37 @@ def unfinished_task_ids(owner_home: Path) -> list[str]:
                 ledger_ids.add(task_id)
     candidates = [task_id for task_id in active_ids if task_id in ledger_ids]
     return _filter_by_runtime_authority(owner_home, candidates, links_by_task)
+
+
+# LLM: Discovery replays the same TaskRun closeout CAS after process crashes. It may
+# trust only one unambiguous canonical link status per task and a fully terminal RuntimeDB
+# tree; active, conflicting, unreadable, or unknown link states remain open.
+# 函数用途: 网关启动或周期发现时补齐“会话链接已结束、代理树也已结束但执行总账未关”的崩溃窗口。
+def _reconcile_terminal_conversation_task_runs(
+    repo: RuntimeRepository,
+    link_statuses: dict[str, set[str]],
+) -> None:
+    try:
+        open_runs = repo.open_task_runs()
+    except Exception:  # noqa: BLE001 恢复投影失败不能阻断 owner 发现
+        return
+    for task_run in open_runs:
+        task_id = str(task_run["task_id"] or "").strip()
+        statuses = link_statuses.get(task_id, set())
+        if len(statuses) != 1:
+            continue
+        link_status = next(iter(statuses))
+        if not conversation_task_link_is_terminal(link_status):
+            continue
+        try:
+            repo.settle_task_run_if_agent_tree_terminal(
+                task_run_id=str(task_run["task_run_id"] or ""),
+                task_id=task_id,
+                operator="wake-discovery-task-run-reconcile",
+                reason=f"conversation_task_{link_status}",
+            )
+        except Exception:  # noqa: BLE001 单条坏账不影响其它 owner 任务发现
+            continue
 
 
 def _filter_by_runtime_authority(

@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 from ..conversation.authority import conversation_transcript_is_authoritative
+from ..conversation.task_state import conversation_task_link_is_terminal
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
 from ._compression_service import CompressionService
 from ._finalization_service import FinalizationService
@@ -534,6 +535,44 @@ def _settle_main_agent_run(agent, params: RunParams, result) -> None:
         cli_one_shot=_is_cli_run(params),
         continuation_seq=int(getattr(params, "continuation_seq", 0) or 0),
     )
+    _settle_terminal_conversation_task_run(agent, params)
+
+
+# LLM: A TaskRun spans every foreground/background slice and descendant of one
+# conversation task. The durable link—not a turn-local flag or model prose—authorizes
+# closeout, while RuntimeDB proves the exact agent tree terminal. This function runs on
+# root and child terminal edges so either side of their race can complete the same CAS.
+# 函数用途: 在任一代理执行收口后核对持久会话任务状态，并幂等关闭整棵任务执行总账。
+def _settle_terminal_conversation_task_run(agent: object, params: object) -> None:
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    store = getattr(agent, "conversation_store", None)
+    if repo is None or store is None:
+        return
+    run_id = str(getattr(params, "run_id", "") or "").strip()
+    task_id = str(getattr(params, "task_id", "") or "").strip()
+    try:
+        row = repo.agent_run_for_run_id(run_id) if run_id else None
+        if row is None and task_id:
+            row = repo.main_agent_run_for_task(task_id)
+        if row is None or str(row["status"] or "") not in AGENT_RUN_TERMINAL_STATUSES:
+            return
+        task_run_id = str(row["task_run_id"] or "").strip()
+        task_run = repo.get_task_run(task_run_id)
+        if task_run is None:
+            return
+        canonical_task_id = str(task_run["task_id"] or "").strip()
+        link = store.load_task_link(canonical_task_id)
+        link_status = str(getattr(link, "status", "") or "").strip().lower()
+        if link is None or not conversation_task_link_is_terminal(link_status):
+            return
+        repo.settle_task_run_if_agent_tree_terminal(
+            task_run_id=task_run_id,
+            task_id=canonical_task_id,
+            operator="conversation-runtime",
+            reason=f"conversation_task_{link_status}",
+        )
+    except Exception:  # noqa: BLE001 审计投影失败不反噬已完成的用户任务
+        return
 
 
 def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseException) -> None:
@@ -546,6 +585,7 @@ def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseExceptio
         runtime_status=status,
         runtime_reason=type(exc).__name__,
     )
+    _settle_terminal_conversation_task_run(agent, params)
 
 
 # LLM: Authority binding replaces the transport attempt id with the RuntimeDB attempt id;

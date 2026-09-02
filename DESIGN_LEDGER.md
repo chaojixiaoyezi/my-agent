@@ -1,5 +1,17 @@
 # DESIGN LEDGER
 
+## 2026-09-02 会话任务终态与执行树终态共同关闭 TaskRun【状态：R148 本机真 TUI 通过】
+
+- `ConversationTaskLink` 的终态只证明用户这项会话工作已经结构化结束，`AgentRun` 树的终态只证明真实执行
+  已经停止；两者缺一都不能关闭 TaskRun。模型说“完成”、一轮内的临时属性、Todo 文案和质量验收都没有
+  机器终态权限。
+- root、child 的普通/异常收口边共同调用 exact TaskRun 的幂等 CAS，只有唯一 root 且整树终态才写
+  `closed_at`，最终 status 取 root AgentRun。Gateway 启动发现层以唯一无冲突的持久 task-link 状态重放同一
+  CAS，覆盖 link 与 agent tree 先后落盘之间的崩溃窗口；UNKNOWN ToolOperation 不被顺带改写。
+- 该边界对齐 会话运行时 的 task 生命周期：执行完成事件负责收起执行状态，而不是外置机器质量判官决定模型任务
+  是否“合格”。R148 真 `/goal` 中 `update_goal(complete)` 先成功、root 后结束，最终只产生一条
+  `task_run.closed`；持久 Goal 状态、AgentRun 与 TaskRun 三层一致。
+
 ## 2026-09-02 已绑定 attempt 后只有一个异常收口边界【状态：R143 本机真 TUI 通过】
 
 - 权威 RuntimeDB attempt 一旦绑定，后续 skill snapshot、工具运行快照、上下文准备、provider 能力探针、模型

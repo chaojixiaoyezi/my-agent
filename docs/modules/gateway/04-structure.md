@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## ConversationTaskLink 与 TaskRun 收口
+
+- `ConversationTaskLink` 表示用户会话任务是否仍有执行意图；`TaskRun/AgentRun` 表示这一轮真实执行树是否已经
+  结束。TaskRun 只有在 link 进入结构化不可复活终态、并且 exact TaskRun 下所有 AgentRun 都终态且只有一个
+  root 时才可关闭。模型回复里的“完成/失败”、一轮内临时属性和任务质量都没有终态权限。
+- root、child 的普通与异常收口边都调用同一幂等 CAS，因此“link 先终态”和“最后一个 child 后终态”两种顺序
+  都能闭环。`owner_wake_discovery` 在 Gateway 启动/周期发现时只扫描仍开放 TaskRun，并以唯一、无冲突的
+  canonical link 状态重放该 CAS；缺失、活跃、未知或互相冲突的 link 状态一律保持开放。
+- TaskRun 的最终 status 来自唯一 root AgentRun；一次成功关闭只追加一条 `task_run.closed` 事件。该投影不修改
+  ToolOperation，UNKNOWN 工具副作用仍由原有恢复/人工审计协议处理。
+
 ## ThreadGoal 与 workspace 物化边界
 
 - `ThreadGoal` 是 thread 上的持久控制 overlay；创建 Goal 不等于已经进行文件工作，也不要求立即创建 task

@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import json
+import time
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -61,12 +64,45 @@ def _attempts(repo, agent_run_id):
     ).fetchall()
 
 
+def _task_run_row(repo, task_run_id):
+    return repo._runtime_connect().execute(
+        "SELECT * FROM task_runs WHERE task_run_id = ?", (task_run_id,)
+    ).fetchone()
+
+
 def _completed_events(repo, agent_run_id):
     return repo._runtime_connect().execute(
         "SELECT * FROM runtime_events WHERE agent_run_id = ? AND event_type = 'agent_run.completed' "
         "ORDER BY seq",
         (agent_run_id,),
     ).fetchall()
+
+
+def _insert_unknown_tool_operation(repo, rec) -> str:
+    operation_id = uuid.uuid4().hex
+    conn = repo._runtime_connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO tool_operations(operation_id, attempt_id, agent_run_id,
+                                        attempt_generation, tool_operation_generation,
+                                        operation_type, status, handler_started_at,
+                                        outcome_json, created_at, updated_at)
+            VALUES(?, ?, ?, 1, 0, 'test', 'UNKNOWN', 1, ?, ?, ?)
+            """,
+            (
+                operation_id,
+                rec["attempt_id"],
+                rec["agent_run_id"],
+                json.dumps({"side_effect": True}),
+                time.time(),
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return operation_id
 
 
 # ---------------------------------------------------------------- settle CAS
@@ -214,8 +250,17 @@ def test_settle_event_falls_back_to_latest_attempt(repo):
 # ------------------------------------------------- runtime_mixin 终态挂钩
 
 
-def _agent(repo):
-    return SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo))
+def _agent(repo, *, link_status: str = "active"):
+    store = SimpleNamespace(
+        load_task_link=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            status=link_status,
+        )
+    )
+    return SimpleNamespace(
+        subagents=SimpleNamespace(runtime_db=repo),
+        conversation_store=store,
+    )
 
 
 def _params(run_id="run-1", attempt_id="attempt-1"):
@@ -233,6 +278,138 @@ def test_main_settle_ok_maps_to_done(repo):
     payload = _completed_events(repo, rec["agent_run_id"])[0]["payload_json"]
     assert '"runtime_status": "ok"' in payload
     assert '"tool_rounds": 2' in payload
+
+
+def test_persisted_completed_link_closes_task_run_without_transient_flag(repo):
+    rec = _record(repo)
+    result = SimpleNamespace(
+        runtime_status="ok", runtime_reason="", runtime_source="", tool_rounds=1
+    )
+    params = SimpleNamespace(
+        run_id="run-1",
+        task_id=rec["task_id"],
+        attempt_id=rec["attempt_id"],
+        task_attributes={},
+    )
+
+    _settle_main_agent_run(_agent(repo, link_status="completed"), params, result)
+
+    task_run = _task_run_row(repo, rec["task_run_id"])
+    assert task_run["status"] == "done"
+    assert task_run["closed_at"] > 0
+    events = repo._runtime_connect().execute(
+        "SELECT * FROM runtime_events WHERE task_run_id = ? "
+        "AND event_type = 'task_run.closed'",
+        (rec["task_run_id"],),
+    ).fetchall()
+    assert len(events) == 1
+    assert '"reason": "conversation_task_completed"' in events[0]["payload_json"]
+
+
+def test_active_goal_link_keeps_task_run_open_even_with_transient_completion_flag(repo):
+    rec = _record(repo)
+    result = SimpleNamespace(
+        runtime_status="ok", runtime_reason="", runtime_source="", tool_rounds=1
+    )
+    params = SimpleNamespace(
+        run_id="run-1",
+        task_id=rec["task_id"],
+        attempt_id=rec["attempt_id"],
+        task_attributes={"conversation_task_completed": True},
+    )
+
+    _settle_main_agent_run(_agent(repo, link_status="active"), params, result)
+
+    assert _task_run_row(repo, rec["task_run_id"])["closed_at"] == 0
+
+
+def test_last_child_terminal_edge_closes_already_terminal_conversation_task(repo):
+    rec = _record(repo)
+    child = repo.record_run_creation(
+        owner_id="local/main",
+        goal="child",
+        run_id="child-1",
+        role="worker",
+        parent_run_id="run-1",
+    )
+    repo.settle_agent_run(
+        agent_run_id=rec["agent_run_id"],
+        status="done",
+        attempt_id=rec["attempt_id"],
+    )
+    result = SimpleNamespace(
+        runtime_status="ok", runtime_reason="", runtime_source="", tool_rounds=1
+    )
+    params = SimpleNamespace(
+        run_id="child-1",
+        task_id="child-1",
+        attempt_id=child["attempt_id"],
+        task_attributes={},
+    )
+
+    _settle_main_agent_run(_agent(repo, link_status="completed"), params, result)
+
+    task_run = _task_run_row(repo, rec["task_run_id"])
+    assert task_run["status"] == "done"
+    assert task_run["closed_at"] > 0
+
+
+def test_task_run_closeout_preserves_unknown_tool_operation(repo):
+    rec = _record(repo)
+    operation_id = _insert_unknown_tool_operation(repo, rec)
+    repo.settle_agent_run(
+        agent_run_id=rec["agent_run_id"],
+        status="done",
+        attempt_id=rec["attempt_id"],
+    )
+
+    result = repo.settle_task_run_if_agent_tree_terminal(
+        task_run_id=rec["task_run_id"],
+        task_id=rec["task_id"],
+    )
+
+    assert result["settled"] is True
+    operation = repo._runtime_connect().execute(
+        "SELECT status FROM tool_operations WHERE operation_id = ?",
+        (operation_id,),
+    ).fetchone()
+    assert operation is not None
+    assert operation["status"] == "UNKNOWN"
+
+
+def test_nonterminal_child_keeps_completed_conversation_task_run_open(repo):
+    rec = _record(repo)
+    child = repo.record_run_creation(
+        owner_id="local/main",
+        goal="child",
+        run_id="child-1",
+        role="worker",
+        parent_run_id="run-1",
+    )
+    repo.settle_agent_run(
+        agent_run_id=rec["agent_run_id"],
+        status="done",
+        attempt_id=rec["attempt_id"],
+    )
+
+    blocked = repo.settle_task_run_if_agent_tree_terminal(
+        task_run_id=rec["task_run_id"],
+        task_id=rec["task_id"],
+    )
+
+    assert blocked == {"settled": False, "reason": "agent_tree_active"}
+    assert _task_run_row(repo, rec["task_run_id"])["closed_at"] == 0
+    repo.settle_agent_run(
+        agent_run_id=child["agent_run_id"],
+        status="done",
+        attempt_id=child["attempt_id"],
+    )
+    settled = repo.settle_task_run_if_agent_tree_terminal(
+        task_run_id=rec["task_run_id"],
+        task_id=rec["task_id"],
+    )
+    assert settled["settled"] is True
+    assert settled["status"] == "done"
 
 
 def test_main_settle_unfinished_not_terminal(repo):

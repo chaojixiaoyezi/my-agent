@@ -1,5 +1,10 @@
 # TEST CHECKLIST
 
+- [x] 普通会话或 `/goal` 的 TaskRun 只能在持久 ConversationTaskLink 已进入不可复活终态，且 exact TaskRun
+  下唯一 root 与所有 child 都终态时关闭；任一事实仍活跃、缺失或冲突必须保持开放。root/最后 child 的竞态和
+  Gateway 启动重放都使用同一 CAS，UNKNOWN ToolOperation 不得被顺带裁决。117 项 focused 与本机
+  `ma-r148-local-goal-taskrun` 真 TUI 已通过；Goal 更新、root 终态、TaskRun 单事件三方账本一致。
+
 - [x] 权威 run/attempt 绑定后，skill/tool snapshot、上下文准备或 provider capability probe 在首个模型调用前
   抛错，也必须让 exact run/attempt 同步进入 failed 且 ended_at 非零；TUI 回到空闲后不得留下幽灵 RUNNING。
   R143 本机 `ma-r143-local-preflight-closeout` 先以缺密钥真实复现，再恢复同一 Gateway 完成下一轮；失败轮与

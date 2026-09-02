@@ -599,6 +599,20 @@ class RuntimeRepository(
             ).fetchall()
         return list(rows)
 
+    # LLM: Recovery callers may inspect only still-open TaskRuns; returning canonical rows
+    # avoids rescanning historical terminal runs or deriving openness from status aliases.
+    # 函数用途: 列出尚未写入 closed_at 的执行总账，供启动/发现层幂等补齐终态。
+    def open_task_runs(self, *, limit: int = 0) -> list[sqlite3.Row]:
+        normalized_limit = max(0, int(limit or 0))
+        query = "SELECT * FROM task_runs WHERE closed_at = 0 ORDER BY created_at"
+        params: tuple[object, ...] = ()
+        if normalized_limit:
+            query += " LIMIT ?"
+            params = (normalized_limit,)
+        with self._runtime_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return list(rows)
+
     # ------------------------------------------------------------ AgentRun
     def create_agent_run(
         self,
@@ -2247,6 +2261,75 @@ class RuntimeRepository(
                 },
             )
         return {"settled": True, "closed_at": now}
+
+    # LLM: Conversation completion may close a TaskRun only after every AgentRun in its
+    # exact tree is terminal; the root AgentRun status supplies the execution outcome.
+    # This is lifecycle projection only and must never inspect model prose or task quality.
+    # 函数用途: 在普通会话任务已经结构化结束后，确认整棵代理树都结束再原子关闭本次执行。
+    def settle_task_run_if_agent_tree_terminal(
+        self,
+        *,
+        task_run_id: str,
+        task_id: str = "",
+        operator: str = "",
+        reason: str = "",
+        now: float | None = None,
+    ) -> dict[str, object]:
+        selected_run = str(task_run_id or "").strip()
+        if not selected_run:
+            return {"settled": False, "reason": "missing_task_run"}
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            task_run = conn.execute(
+                "SELECT task_id, closed_at FROM task_runs WHERE task_run_id = ?",
+                (selected_run,),
+            ).fetchone()
+            if task_run is None:
+                return {"settled": False, "reason": "no_such_task_run"}
+            recorded_task_id = str(task_run["task_id"] or "")
+            if str(task_id or "").strip() not in {"", recorded_task_id}:
+                return {"settled": False, "reason": "task_mismatch"}
+            if float(task_run["closed_at"] or 0.0) > 0:
+                return {"settled": False, "reason": "already_terminal"}
+            agents = conn.execute(
+                "SELECT agent_run_id, parent_agent_run_id, status "
+                "FROM agent_runs WHERE task_run_id = ? ORDER BY created_at, agent_run_id",
+                (selected_run,),
+            ).fetchall()
+            if not agents:
+                return {"settled": False, "reason": "no_agent_runs"}
+            if any(
+                str(row["status"] or "") not in AGENT_RUN_TERMINAL_STATUSES
+                for row in agents
+            ):
+                return {"settled": False, "reason": "agent_tree_active"}
+            roots = [row for row in agents if not str(row["parent_agent_run_id"] or "")]
+            if len(roots) != 1:
+                return {"settled": False, "reason": "invalid_agent_tree"}
+            root_status = str(roots[0]["status"] or "")
+            cur = conn.execute(
+                "UPDATE task_runs SET status = ?, closed_at = ?, updated_at = ? "
+                "WHERE task_run_id = ? AND closed_at = 0",
+                (root_status, now, now, selected_run),
+            )
+            if cur.rowcount == 0:
+                return {"settled": False, "reason": "already_terminal"}
+            self._append_event_conn(
+                conn,
+                event_type="task_run.closed",
+                attempt_id="",
+                agent_run_id="",
+                task_run_id=selected_run,
+                payload={
+                    "status": root_status,
+                    "task_id": recorded_task_id,
+                    "operator": str(operator or ""),
+                    "reason": str(reason or ""),
+                    "root_agent_run_id": str(roots[0]["agent_run_id"] or ""),
+                    "agent_run_count": len(agents),
+                },
+            )
+        return {"settled": True, "closed_at": now, "status": root_status}
 
     # ------------------------------------------- R1-03 收口矩阵 + 孤儿兜底
     # LLM: 这里只依据 tool operation 的结构化执行事实分类；UNKNOWN/EXECUTING

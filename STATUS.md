@@ -1,5 +1,16 @@
 # STATUS
 
+## 2026-09-02 R148 Goal/普通会话 TaskRun 收口（本机真 TUI 通过）
+
+- 修复了持久 task link 已终态、AgentRun 已终态，但 TaskRun 仍因旧临时属性门保持开放的问题。当前只在 exact
+  task link 不可复活且整棵 AgentRun 树终态时关闭；root/child 任一最后落盘边都能触发，Gateway 启动发现还会
+  幂等补齐崩溃窗口。活跃 Goal、冲突 link、非终态 child 和 UNKNOWN 工具操作都保持原状态。
+- focused 覆盖普通完成、Goal `update_goal(complete)` 先于 root final、最后 child 结束、启动重放、冲突
+  fail-closed、异常收口与 UNKNOWN 保留，共 117 项通过。
+- 本机真实 MiniMax-M2.7 TUI `ma-r148-local-goal-taskrun` 从零完成 CSV 数据质量工具、15 项测试和中文示例。
+  持久账本显示 Goal 更新工具成功、root AgentRun 为 done、TaskRun 为 done/closed，且只有一条
+  `task_run.closed`，没有幽灵 Working。
+
 ## 2026-09-02 R143 模型前置失败统一收口（本机真 TUI 通过）
 
 - 本机故意移除唯一 Gateway 的模型密钥后，fresh TUI `ma-r143-local-preflight-closeout` 在 provider capability

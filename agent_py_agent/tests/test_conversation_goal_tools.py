@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.agent_core.runtime.goal_accounting import account_goal_model_response
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.agent_core.runtime_mixin import _settle_main_agent_run
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
@@ -426,6 +428,49 @@ def test_update_goal_complete_closes_task_link(tmp_path) -> None:
     assert agent.conversation_store.load_goal(thread.thread_id).status == "complete"
     links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
     assert links[goal.task_id].status == "completed"
+
+
+def test_update_goal_complete_also_closes_terminal_runtime_tree(tmp_path) -> None:
+    """Goal 工具先关持久链接时，最终收口不能依赖随后缺失的临时 completion 标记。"""
+    agent, thread, goal = _goal_agent(tmp_path)
+    repo = agent.subagents.runtime_db
+    rec = repo.record_run_creation(
+        owner_id="local/main",
+        goal=goal.objective,
+        conversation_task_id=goal.task_id,
+        run_id="goal-run",
+        role="main",
+    )
+    params = RunParams(
+        run_id="goal-run",
+        task_id=goal.task_id,
+        attempt_id=rec["attempt_id"],
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": goal.task_id,
+        },
+    )
+    agent._current_run_params = params
+
+    result = agent.tools.tools["update_goal"].execute({"status": "complete"})
+    assert result.ok is True
+    assert "conversation_task_completed" not in params.task_attributes
+
+    _settle_main_agent_run(
+        agent,
+        params,
+        SimpleNamespace(
+            runtime_status="ok",
+            runtime_reason="",
+            runtime_source="",
+            tool_rounds=1,
+        ),
+    )
+
+    task_run = repo.get_task_run(rec["task_run_id"])
+    assert task_run is not None
+    assert task_run["status"] == "done"
+    assert task_run["closed_at"] > 0
 
 
 def test_update_goal_blocked_preserves_resumable_task(tmp_path) -> None:

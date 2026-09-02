@@ -340,3 +340,104 @@ def test_cancelled_projection_failure_bounded_across_ticks(stale_owner):
         unfinished_task_ids(home)
 
     assert len(_stale_conflict_events(repo)) == 1  # 有界：只有首次 tick 写
+
+
+def test_terminal_link_replays_open_task_run_closeout_after_restart(tmp_path):
+    """link 与代理树已终态但进程在 TaskRun CAS 前退出时，owner 发现层补账一次。"""
+    home = tmp_path / "home"
+    repo = RuntimeRepository(home / "runtime.db")
+    task_id = "goal-terminal-before-task-run-close"
+    rec = repo.record_run_creation(
+        owner_id="local/main",
+        goal="持续目标已完成",
+        conversation_task_id=task_id,
+        run_id=task_id,
+        role="main",
+    )
+    repo.settle_agent_run(
+        agent_run_id=rec["agent_run_id"],
+        status="done",
+        attempt_id=rec["attempt_id"],
+    )
+    link_dir = (
+        home
+        / "workspace"
+        / "runtime"
+        / "workspaces"
+        / "goal"
+        / "conversations"
+        / "tasks"
+    )
+    link_dir.mkdir(parents=True)
+    (link_dir / f"{task_id}.json").write_text(
+        __import__("json").dumps(
+            {
+                "task_id": task_id,
+                "status": "completed",
+                "thread_id": "thread-goal",
+                "goal": "持续目标已完成",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert unfinished_task_ids(home) == []
+    assert unfinished_task_ids(home) == []
+
+    task_run = repo.get_task_run(rec["task_run_id"])
+    assert task_run is not None
+    assert task_run["status"] == "done"
+    assert task_run["closed_at"] > 0
+    events = repo._runtime_connect().execute(
+        "SELECT * FROM runtime_events WHERE task_run_id = ? "
+        "AND event_type = 'task_run.closed'",
+        (rec["task_run_id"],),
+    ).fetchall()
+    assert len(events) == 1
+
+
+def test_conflicting_duplicate_link_statuses_do_not_close_task_run(tmp_path):
+    """同 task 出现 active/completed 冲突投影时保持打开，不能猜哪份链接有权威。"""
+    home = tmp_path / "home"
+    repo = RuntimeRepository(home / "runtime.db")
+    task_id = "conflicting-link-task"
+    rec = repo.record_run_creation(
+        owner_id="local/main",
+        goal="冲突链接",
+        conversation_task_id=task_id,
+        run_id=task_id,
+        role="main",
+    )
+    repo.settle_agent_run(
+        agent_run_id=rec["agent_run_id"],
+        status="done",
+        attempt_id=rec["attempt_id"],
+    )
+    for workspace, status in (("one", "active"), ("two", "completed")):
+        link_dir = (
+            home
+            / "workspace"
+            / "runtime"
+            / "workspaces"
+            / workspace
+            / "conversations"
+            / "tasks"
+        )
+        link_dir.mkdir(parents=True)
+        (link_dir / f"{task_id}.json").write_text(
+            __import__("json").dumps(
+                {
+                    "task_id": task_id,
+                    "status": status,
+                    "thread_id": "thread-conflict",
+                    "goal": "冲突链接",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    unfinished_task_ids(home)
+
+    task_run = repo.get_task_run(rec["task_run_id"])
+    assert task_run is not None
+    assert task_run["closed_at"] == 0
