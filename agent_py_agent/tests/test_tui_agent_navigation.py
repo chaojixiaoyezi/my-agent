@@ -367,6 +367,53 @@ def test_completed_root_roster_stays_selectable_but_does_not_animate() -> None:
     )
 
 
+def test_child_final_response_fallback_does_not_duplicate_typed_final_event() -> None:
+    root = TuiRuntime("nav-final-dedupe")
+    navigation = TuiAgentNavigationState(root)
+    row = _row("child-final", status="DONE", lifecycle_phase="terminal")
+    navigation.update_rows("", [row])
+    navigation.move_selection(1)
+    navigation.enter_selected()
+    final_text = "子代理已完成并提交唯一最终回复。"
+    request_id = "bg-agent:child-final:attempt-child-final"
+    payload = {
+        "ok": True,
+        "agent": {**row, "goal": "完成唯一回复测试", "ended_at": 22.0},
+        "terminal": True,
+        "children": [],
+        "task_progress_items": [],
+        "transcript_events": [
+            {
+                "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
+                "seq": 1,
+                "task_id": "child-final",
+                "request_id": request_id,
+                "kind": "assistant_completed",
+                "phase": "completed",
+                "block_id": f"{request_id}:assistant:1",
+                "payload": {"text": final_text, "process": False},
+            }
+        ],
+        "event_cursor": 1,
+        "final_response": "",
+    }
+
+    assert navigation.apply_agent_view("child-final", payload) is True
+    followup = {
+        **payload,
+        "transcript_events": [],
+        "final_response": final_text,
+        "final_response_request_id": request_id,
+    }
+    assert navigation.apply_agent_view("child-final", followup) is True
+    matches = [
+        block
+        for block in navigation.active_runtime().store.snapshot().stable_blocks
+        if block.role == "assistant" and block.text == final_text
+    ]
+    assert len(matches) == 1
+
+
 def test_hidden_ninth_child_scrolls_into_panel_and_enter_opens_same_run() -> None:
     root = TuiRuntime("nav-roster-window")
     navigation = TuiAgentNavigationState(root)

@@ -11,6 +11,7 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from ...agent.conversation.background_transcript import BACKGROUND_TRANSCRIPT_SCHEMA
 from .tui_runtime import TuiRuntime
 
 _TERMINAL_AGENT_STATUSES = frozenset(
@@ -98,7 +99,8 @@ class TuiAgentNavigationState:
         self._path: list[str] = []
         self._event_cursors: dict[str, int] = {}
         self._goal_published: set[str] = set()
-        self._final_responses: dict[str, str] = {}
+        self._final_response_keys: dict[str, str] = {}
+        self._typed_final_response_request_ids: set[str] = set()
         self._view_change: Callable[[TuiRuntime], None] | None = None
         self._lock = threading.RLock()
 
@@ -297,6 +299,16 @@ class TuiAgentNavigationState:
         if row is None:
             return False
         children = _navigation_rows(payload.get("children"), parent_run_id=selected)
+        events = payload.get("transcript_events")
+        typed_final_request_ids = _typed_final_response_request_ids(events, selected)
+        final_response = str(payload.get("final_response") or "").strip()
+        final_response_request_id = _final_response_request_id(
+            payload.get("final_response_request_id"),
+            selected,
+        )
+        final_response_key = final_response_request_id or (
+            f"legacy:{final_response}" if final_response else ""
+        )
         with self._lock:
             self._rows_by_run[selected] = row
             self._rows_by_parent[selected] = children
@@ -307,10 +319,15 @@ class TuiAgentNavigationState:
                 self._selected_by_parent.pop(selected, None)
             runtime = self._runtime_for_locked(selected)
             first_goal = selected not in self._goal_published
-            prior_final = self._final_responses.get(selected, "")
-            final_response = str(payload.get("final_response") or "").strip()
-            if final_response:
-                self._final_responses[selected] = final_response
+            prior_final_key = self._final_response_keys.get(selected, "")
+            self._typed_final_response_request_ids.update(typed_final_request_ids)
+            typed_final_already_visible = bool(
+                final_response_request_id
+                and final_response_request_id
+                in self._typed_final_response_request_ids
+            )
+            if final_response_key:
+                self._final_response_keys[selected] = final_response_key
         goal = str(row.get("goal") or "").strip()
         if first_goal and goal:
             runtime.enqueue_prompt(f"agent-goal:{selected}", goal, queued=False)
@@ -321,7 +338,6 @@ class TuiAgentNavigationState:
         terminal = bool(payload.get("terminal"))
         status = str(row.get("status") or "").strip().upper()
         lifecycle_phase = str(row.get("lifecycle_phase") or "").strip().lower()
-        events = payload.get("transcript_events")
         if isinstance(events, list | tuple):
             runtime.publish_background_transcript_events(events)
         if terminal or goal_published or bool(events) or final_response:
@@ -336,7 +352,11 @@ class TuiAgentNavigationState:
             )
         if terminal:
             runtime.settle_agent_transcript(selected, status=status)
-        if final_response and final_response != prior_final:
+        if (
+            final_response
+            and final_response_key != prior_final_key
+            and not typed_final_already_visible
+        ):
             runtime.publish_background_response(final_response, thread_id=selected)
         main_activity = {
             "task_id": selected,
@@ -500,6 +520,48 @@ def _goal_navigation_rows(value: object) -> tuple[dict[str, object], ...]:
         row["goal_id"] = goal_id
         rows.append(row)
     return tuple(rows)
+
+
+# LLM: A typed non-process assistant completion is the canonical visible final
+# for one request. Record only exact bg-agent identities from the frozen public
+# transcript schema so a later history fallback cannot append the same reply.
+# 函数用途: 从本次子代理事件里提取已经显示过的正式最终回复回合标识。
+def _typed_final_response_request_ids(value: object, run_id: str) -> set[str]:
+    if not isinstance(value, list | tuple):
+        return set()
+    prefix = f"bg-agent:{str(run_id or '').strip()}:"
+    request_ids: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        request_id = str(item.get("request_id") or "").strip()
+        block_id = str(item.get("block_id") or "").strip()
+        payload = item.get("payload")
+        if (
+            item.get("schema") != BACKGROUND_TRANSCRIPT_SCHEMA
+            or item.get("kind") != "assistant_completed"
+            or item.get("phase") != "completed"
+            or not request_id.startswith(prefix)
+            or not block_id.startswith(f"{request_id}:")
+            or not isinstance(payload, Mapping)
+            or payload.get("process") is True
+            or not str(payload.get("text") or "").strip()
+        ):
+            continue
+        request_ids.add(request_id)
+    return request_ids
+
+
+# LLM: The final-response fallback may join only an exact request identity in
+# the current child namespace. Invalid or legacy values remain empty and use
+# the existing text key solely to make repeated polling idempotent.
+# 函数用途: 校验 Gateway 返回的最终回复回合标识确实属于当前子代理。
+def _final_response_request_id(value: object, run_id: str) -> str:
+    request_id = str(value or "").strip()
+    prefix = f"bg-agent:{str(run_id or '').strip()}:"
+    if not request_id.startswith(prefix) or len(request_id) > 512:
+        return ""
+    return request_id
 
 
 # LLM: Activity phase is a display mapping from canonical status/terminal facts;

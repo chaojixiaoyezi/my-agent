@@ -659,7 +659,13 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
             None,
         ),
         recent_messages_report=lambda _thread_id, *, limit: (
-            [SimpleNamespace(role="assistant", content="已提交关卡设计。")],
+            [
+                SimpleNamespace(
+                    role="assistant",
+                    content="已提交关卡设计。",
+                    metadata={"conversation_request_id": "attempt-child-done"},
+                )
+            ],
             [],
         ),
     )
@@ -685,11 +691,16 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
     assert view["agent"]["activity"] == "已完成"
     assert [row["run_id"] for row in view["children"]] == ["grandchild"]
     assert view["final_response"] == "已提交关卡设计。"
+    assert (
+        view["final_response_request_id"]
+        == "bg-agent:child-done:attempt-child-done"
+    )
 
     child.status = "RUNNING"
     running_view = conversation_agent_view(agent, store, child.id)
     assert running_view["terminal"] is False
     assert running_view["final_response"] == ""
+    assert running_view["final_response_request_id"] == ""
 
 
 def test_conversation_agent_activity_reads_child_thread_generation_only(
