@@ -1,5 +1,19 @@
 # DESIGN LEDGER
 
+## 2026-09-02 已绑定 attempt 后只有一个异常收口边界【状态：R143 本机真 TUI 通过】
+
+- 权威 RuntimeDB attempt 一旦绑定，后续 skill snapshot、工具运行快照、上下文准备、provider 能力探针、模型
+  循环和 finalization 都属于同一物理执行片。任一阶段异常都必须关闭 exact current attempt；不能因异常发生在
+  “首个模型 token 之前”而让 TUI/请求终态与 run 账本分裂。
+- 失败分类继续只读异常类型与结构化控制：`InterruptedError` 对应 cancelled，其余未处理异常对应 failed。
+  provider transient retry 仍在后端自己的 typed 有界退避内处理；只有该执行片最终向外抛错时才收口失败。
+  不解析错误正文，不增加启动调和补扫，也不重开已失败 run。
+- 对齐 会话运行时 `会话运行时-rs/core/src/tasks/mod.rs::start_task/on_task_finished`：task runner 无论正常或错误都从同一 spawn
+  边界完成生命周期。my-agent 复用现有 `_settle_main_agent_run_exception` 与 RuntimeDB CAS，把 try 边界外扩到
+  已绑定 attempt 的完整执行体，而不是另造 Gateway 错误状态机。
+- R143 真 TUI 的缺密钥失败轮已证明 run/attempt 同步 failed、ended_at 非零；恢复配置后的同会话下一轮自然
+  done，说明异常收口会释放执行权，但不会破坏 Conversation history 或后续请求。
+
 ## 2026-09-01 能力授权读取直属父级精确工具快照【状态：R128 单 Gateway 真 TUI 通过】
 
 - `capability_request` 是 child 请求直属父级已有能力的控制协议，不是具体危险工具调用的用户审批。

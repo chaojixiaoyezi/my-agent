@@ -1,5 +1,10 @@
 # TEST CHECKLIST
 
+- [x] 权威 run/attempt 绑定后，skill/tool snapshot、上下文准备或 provider capability probe 在首个模型调用前
+  抛错，也必须让 exact run/attempt 同步进入 failed 且 ended_at 非零；TUI 回到空闲后不得留下幽灵 RUNNING。
+  R143 本机 `ma-r143-local-preflight-closeout` 先以缺密钥真实复现，再恢复同一 Gateway 完成下一轮；失败轮与
+  成功轮分别为 failed/done，相关 focused 34 项与扩展 39 项通过。
+
 ## Computer Use
 
 - [x] `my-agent[computer-use]` 在目标 Python 3.11 runtime 可安装，包版本固定为 `0.3.13`。

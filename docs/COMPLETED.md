@@ -1,5 +1,18 @@
 # COMPLETED
 
+## 2026-09-02 R143 模型前置失败不再留下幽灵运行
+
+- 解决已绑定 RuntimeDB attempt 后、正式模型循环前的 capability probe/上下文准备异常没有进入既有 closeout，
+  从而让 TUI 已空闲而 run/attempt 永久显示运行中的问题。
+- `_run_once_with_params` 现在以一个统一异常边界覆盖 prompt/skill scope、工具准备、上下文装配、provider
+  probe、模型循环与 finalization；复用既有 `_settle_main_agent_run_exception`，普通异常落 `failed`、用户中断
+  落 `cancelled`，不新增兼容旁路或自然语言判定。
+- 对照 会话运行时 `会话运行时-rs/core/src/tasks/mod.rs`：任务从统一 spawn 点调用 `on_task_finished`，意外错误同样先摘除
+  active task 再结束 turn。my-agent 保留自己的 RuntimeDB CAS，只适配同一个生命周期边界。
+- 本机 wheel `4648d4c8a1d35bffd4c53e4f859c5e1ec1ba582d9c894249a459c7e01bf35c24` 真 TUI
+  `ma-r143-local-preflight-closeout` 通过：缺密钥轮的 run/attempt 均 failed 且 ended_at 非零；恢复配置后的
+  下一轮自然 done 并完成实现、测试和端到端验证。相关 focused 34 项与扩展 39 项全绿。
+
 ## 2026-09-01 R129--R133 Gateway 活跃回合与子代理等待跨重启
 
 - 解决 processing request 已按 exact id 重排、工具结果也完整落账时，启动 stale-attempt 调和仍先把旧

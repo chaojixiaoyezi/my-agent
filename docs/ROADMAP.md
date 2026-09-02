@@ -17,6 +17,16 @@
 
 ## 下一版优先级
 
+### 模型前置失败后的 run/attempt 终态
+
+状态：已落地，本机 MiniMax-M2.7 真 TUI 复验通过
+
+解决问题：Gateway 已登记权威 run/attempt 后，skill 快照、工具准备、上下文装配或 provider capability probe
+可能在正式模型循环前失败。旧异常边界只包住模型循环和 finalization，导致界面已经报错并空闲，RuntimeDB
+却永久保留 `created/running`。当前把“已绑定 attempt 后的整个执行体”统一置于既有异常收口边界：普通异常
+写 failed，显式中断写 cancelled；不新增启动补扫，也不把 provider 错误当成可恢复任务。R143 本机真 TUI
+先以缺密钥复现失败，再恢复同一 Gateway 完成下一轮完整单位换算工具，失败/成功两轮账本均与界面一致。
+
 ### 普通模式与 Goal 模式分离
 
 状态：本地 focused 通过，待顺序重启/长任务真 TUI

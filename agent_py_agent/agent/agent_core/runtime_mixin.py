@@ -645,28 +645,28 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     # with the exact RuntimeDB attempt.  Keep this function execution-only so the
     # caller retains the same params object for final settlement.
     root_user_prompt = params.root_user_prompt or user_prompt
-    with current_prompt_scope(agent, user_prompt, params):
-        if agent.config.enable_tools:
-            agent.tools.prepare_for_run()
-        prepared = _prepare_runtime_context(
-            agent,
-            RuntimeContextRequest(
-                user_prompt,
-                params.inject,
-                params.resume_context,
-                params.context_scope,
-                allowed_tools=params.allowed_tools,
-                write_boundary=params.write_boundary,
-                request_id=params.request_id,
-                run_id=params.run_id,
-                task_id=params.task_id,
-                source=params.source,
-                save=params.save,
-                task_attributes=params.task_attributes,
-            ),
-        )
-        _log_run_stage("context_ready", params, started_mono=_run_stage_started)
-        try:
+    try:
+        with current_prompt_scope(agent, user_prompt, params):
+            if agent.config.enable_tools:
+                agent.tools.prepare_for_run()
+            prepared = _prepare_runtime_context(
+                agent,
+                RuntimeContextRequest(
+                    user_prompt,
+                    params.inject,
+                    params.resume_context,
+                    params.context_scope,
+                    allowed_tools=params.allowed_tools,
+                    write_boundary=params.write_boundary,
+                    request_id=params.request_id,
+                    run_id=params.run_id,
+                    task_id=params.task_id,
+                    source=params.source,
+                    save=params.save,
+                    task_attributes=params.task_attributes,
+                ),
+            )
+            _log_run_stage("context_ready", params, started_mono=_run_stage_started)
             loop_result = _execute_runtime_loop(
                 agent,
                 _runtime_loop_params(user_prompt, prepared, params),
@@ -678,13 +678,14 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
             result = agent._get_services().finalization.finalize(ctx)
             _log_run_stage("finalize_done", params, started_mono=_run_stage_started)
             return result
-        except BaseException as exc:
-            # 会话运行时 and 长期助手 both close every run through one terminal
-            # lifecycle path.  Keep the durable runtime fact aligned with the
-            # background claim even when the model/provider raises.
-            update_runtime_fact_terminal_if_enabled(agent, params, exc)
-            _settle_main_agent_run_exception(agent, params, exc)
-            raise
+    except BaseException as exc:
+        # 会话运行时 在 task spawn 边界统一调用 on_task_finished；这里等价地覆盖
+        # 已绑定 attempt 后的所有入口，包括 skill/tool snapshot、provider
+        # capability probe、上下文准备、模型循环和 finalization。任何一步抛错
+        # 都不能让 TUI 已空闲而权威账本仍保留 running。
+        update_runtime_fact_terminal_if_enabled(agent, params, exc)
+        _settle_main_agent_run_exception(agent, params, exc)
+        raise
 
 
 def _compact_auto_continue_params(

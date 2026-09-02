@@ -1,5 +1,19 @@
 # STATUS
 
+## 2026-09-02 R143 模型前置失败统一收口（本机真 TUI 通过）
+
+- 本机故意移除唯一 Gateway 的模型密钥后，fresh TUI `ma-r143-local-preflight-closeout` 在 provider capability
+  probe 阶段如实失败并立即回到输入框。旧实现已先登记 RuntimeDB run/attempt，却在进入异常收口区之前
+  抛错，会留下永久 `created/running` 幽灵任务。
+- `_run_once_with_params` 现把已绑定 attempt 后的 skill/tool snapshot、上下文准备、provider probe、模型循环和
+  finalization 放进同一异常边界；任何异常都沿既有结构化收口写 `failed`，`InterruptedError` 仍写
+  `cancelled`。该边界对齐 会话运行时 `tasks/mod.rs::start_task` 从 spawn 点统一调用 `on_task_finished` 的生命周期，
+  没有新增补扫、文本判断或第二份状态机。
+- 失败样本 run `gwreq-1788332570-8eb83c85278c4dadbaee17974d45c6cb` 与 attempt
+  `attempt-1788332570-ab73337a` 均为 `failed` 且 `ended_at` 非零。恢复配置后同一 TUI 的下一轮
+  `gwreq-1788333007-ecd2a9922e794af2afd89c6784c60968` 自然 `done`，完整生成并验证单位换算 CLI，证明失败
+  不占住会话车道也不妨碍后续任务。相关 focused 34 项与扩展 39 项全部通过。
+
 ## 2026-09-01 R130/R131/R133 活跃回合与两级等待跨 Gateway 重启（完成）
 
 - 新 wheel SHA-256 `bb42ce82392bc63d6a9ddf1df2415eceb34007f5116972a2317101118769578c` 已原位部署到

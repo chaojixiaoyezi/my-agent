@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-09-02 R143 模型前置失败统一收口（本机真 TUI 通过）
+
+- Gateway 请求终态原本能正确返回 failed，但主代理 RuntimeDB attempt 在 provider capability probe/上下文准备
+  抛错时仍可能保持 running；根因是权威 attempt 已绑定，而 `runtime_mixin` 的异常边界从正式模型循环之后才
+  开始。该缺口会让启动扫描误报崩溃卡死任务，也会给恢复器留下错误执行权事实。
+- 当前复用唯一 `_settle_main_agent_run_exception`，把异常边界扩到已绑定 attempt 后的整个执行体。Gateway
+  请求归档、provider typed retry、取消和 RuntimeDB CAS 均未另造分支。
+- 本机独立 wheel 的 `ma-r143-local-preflight-closeout` 先缺密钥失败：run/attempt 都是 failed 且 ended_at 非零；
+  再恢复同一 Gateway 和 TUI，下一轮完整单位换算 CLI 自然 done。focused 34 项及 Gateway/runtime 扩展 39 项
+  通过。
+
 ## 2026-09-01 R121 空 Goal 工作区与真实丢失目录分流（最终 wheel 真 TUI 通过）
 
 - `.10` 同一 fresh Goal TUI 的后续消息返回 `CONVERSATION_PERSISTENCE_UNAVAILABLE`。结构化诊断定位到

@@ -22,7 +22,9 @@ from agent_py_agent.agent.agent_core._finalization_service import (
     _schedule_typed_unfinished_continuation,
 )
 from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.runtime_mixin import (
+    _run_once_with_params,
     _settle_main_agent_run,
     _settle_main_agent_run_exception,
 )
@@ -362,6 +364,41 @@ def test_main_settle_exception_other_maps_failed(repo):
         _agent(repo), _params(run_id="run-1", attempt_id=rec["attempt_id"]), ValueError("boom")
     )
     assert _run_row(repo, rec["agent_run_id"])["status"] == "failed"
+
+
+def test_run_once_context_prepare_failure_settles_bound_attempt(repo, monkeypatch):
+    """能力探针/上下文准备在模型循环前失败，也必须关闭已绑定的权威 attempt。"""
+    from agent_py_agent.agent.agent_core import runtime_mixin
+
+    rec = _record(repo)
+    agent = SimpleNamespace(
+        config=SimpleNamespace(enable_tools=False, auto_save_memory=False),
+        subagents=SimpleNamespace(runtime_db=repo),
+    )
+    params = RunParams(
+        request_id="req-pre-context-failure",
+        run_id="run-1",
+        task_id="task-1",
+        attempt_id=rec["attempt_id"],
+        save=False,
+    )
+
+    def fail_before_model(*_args, **_kwargs):
+        raise ValueError("provider capability probe failed")
+
+    monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", fail_before_model)
+
+    with pytest.raises(ValueError, match="capability probe failed"):
+        _run_once_with_params(agent, "请完成任务", params)
+
+    row = _run_row(repo, rec["agent_run_id"])
+    attempt = _attempts(repo, rec["agent_run_id"])[0]
+    assert row["status"] == "failed"
+    assert attempt["status"] == "failed"
+    assert attempt["ended_at"] > 0
+    assert len(_completed_events(repo, rec["agent_run_id"])) == 1
+    assert not hasattr(agent, "_current_user_prompt")
+    assert not hasattr(agent, "_current_run_params")
 
 
 def test_main_settle_no_repo_noop():
