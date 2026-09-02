@@ -364,6 +364,44 @@ def test_cancel_subagents_tool_allows_cancellation_after_same_run_retry_exhauste
     assert agent.subagents.load(task.id).status == "CANCELLED"
 
 
+def test_conversation_user_stop_settles_authority_then_explicitly_reopens_same_run(
+    tmp_path,
+):
+    from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
+        CancelSubagentTaskRequest,
+        cancel_subagent_task,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    task = agent.subagents.create_run(goal="长任务", thought="用户停止", plan=["执行"])
+    running = agent.subagents.lifecycle.prepare_runner_attempt(task.id)
+    first_attempt_id = running.runner_active_attempt_id
+
+    cancelled = cancel_subagent_task(
+        agent,
+        CancelSubagentTaskRequest(
+            task=running,
+            reason="conversation_user_stop",
+            source="conversation_control",
+        ),
+    )
+
+    authority = agent.subagents.runtime_db.agent_run_for_run_id(task.id)
+    assert cancelled["runtime_authority"]["status"] == "cancelled"
+    assert authority is not None and authority["status"] == "cancelled"
+    resumed = agent.subagents.lifecycle.prepare_runner_attempt(task.id)
+    reopened = agent.subagents.runtime_db.agent_run_for_run_id(task.id)
+    assert resumed.status == "RUNNING"
+    assert resumed.runner_active_attempt_id != first_attempt_id
+    assert reopened is not None and reopened["status"] == "created"
+    assert int(reopened["current_attempt_generation"]) == 2
+
+
 def test_cancel_subagents_tool_cannot_cancel_system_managed_audit_source_worker(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
         CancelSubagentTaskRequest,

@@ -237,6 +237,14 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
     )
     assert stopped["status"] == "cancelled"
     assert agent.subagents.load(grandchild.id).status == "CANCELLED"
+    child_authority = agent.subagents.runtime_db.agent_run_for_run_id(child.id)
+    grandchild_authority = agent.subagents.runtime_db.agent_run_for_run_id(
+        grandchild.id
+    )
+    assert child_authority is not None
+    assert grandchild_authority is not None
+    assert child_authority["status"] == "cancelled"
+    assert grandchild_authority["status"] == "cancelled"
     terminal_view = read_agent_view(agent, scope=scope, run_id=child.id)
     assert terminal_view["terminal"] is True
     replayed_stop = stop_agent(

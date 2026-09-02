@@ -730,6 +730,7 @@ def _persist_cancelled_task(
     task.ended_at = context.now
     task.updated_at = context.now
     task.runner_active_attempt_id = ""
+    runtime_authority = _settle_cancelled_runtime_authority(agent, task, context)
     agent.subagents.save(task)
     agent.subagents.actions._append_task_work_log(
         task,
@@ -743,9 +744,86 @@ def _persist_cancelled_task(
         "abandoned_attempt_id": context.attempt_id,
         "pid_report": context.pid_report,
         "conversation_link": conversation_link,
+        "runtime_authority": runtime_authority,
         "findings_ledger": context.findings_ledger,
         "findings_recorded": context.findings_recorded,
     }
+
+
+# LLM: RuntimeDB is the managed run authority. A cancellation may arrive after a coordinator has
+# already yielded its current attempt while waiting for descendants, so the runner exception path
+# is not guaranteed to settle the run. Fence the exact current attempt here before writing the task
+# projection; terminal conflicts must surface instead of leaving RuntimeDB at ``created``.
+# 函数用途: 在统一取消入口把受管子代理的权威 AgentRun 收口为 cancelled；无权威库的本地兼容模式保持原样。
+def _settle_cancelled_runtime_authority(
+    agent: SimpleAgent,
+    task: SubAgentTask,
+    context: _CancellationContext,
+) -> dict[str, object]:
+    manager = getattr(agent, "subagents", None)
+    repo = getattr(manager, "runtime_db", None)
+    run_id = str(getattr(task, "id", "") or "").strip()
+    if repo is None:
+        return {"status": "not_managed", "run_id": run_id}
+    row = repo.agent_run_for_run_id(run_id)
+    if row is None:
+        return {"status": "not_registered", "run_id": run_id}
+    agent_run_id = str(row["agent_run_id"] or "").strip()
+    recorded_attempt_id = str(row["current_attempt_id"] or "").strip()
+    requested_attempt_id = str(context.attempt_id or "").strip()
+    authority_attempt_id = requested_attempt_id or recorded_attempt_id
+    if requested_attempt_id and requested_attempt_id != recorded_attempt_id:
+        current_attempt = repo.get_attempt(recorded_attempt_id)
+        current_status = (
+            str(current_attempt["status"] or "").strip().lower()
+            if current_attempt is not None
+            else ""
+        )
+        current_ended_at = (
+            float(current_attempt["ended_at"] or 0.0)
+            if current_attempt is not None
+            else 0.0
+        )
+        # 创建时登记的 pending attempt 尚未交给 runner，没有模型、工具或副作用可被
+        # 旧投影遗漏；可以直接取消该唯一未启动轮。若 current 已运行或已换成其它终态，
+        # 必须保留 stale-attempt 闸，不能拿旧 task 快照停止一个未被信号触达的新执行者。
+        if current_status == "pending" and current_ended_at == 0:
+            authority_attempt_id = recorded_attempt_id
+    result = repo.settle_agent_run(
+        agent_run_id=agent_run_id,
+        status="cancelled",
+        attempt_id=authority_attempt_id,
+        now=context.now,
+        payload={
+            "status": "cancelled",
+            "runtime_status": "cancelled",
+            "runtime_reason": context.reason,
+            "runtime_source": context.source,
+            "run_id": run_id,
+        },
+    )
+    if bool(result.get("settled")):
+        return {
+            "status": "cancelled",
+            "run_id": run_id,
+            "agent_run_id": agent_run_id,
+            "attempt_id": authority_attempt_id,
+        }
+    refreshed = repo.agent_run_for_run_id(run_id)
+    refreshed_status = str(refreshed["status"] or "") if refreshed is not None else ""
+    if result.get("reason") == "already_terminal" and refreshed_status == "cancelled":
+        return {
+            "status": "cancelled",
+            "run_id": run_id,
+            "agent_run_id": agent_run_id,
+            "attempt_id": authority_attempt_id,
+            "replayed": True,
+        }
+    raise RuntimeError(
+        "子代理取消未能收口权威 AgentRun："
+        f"run_id={run_id} reason={result.get('reason') or 'unknown'} "
+        f"current_status={refreshed_status or 'missing'}"
+    )
 
 
 def _sync_cancelled_conversation_link(agent: SimpleAgent, task_id: str) -> dict[str, object]:
