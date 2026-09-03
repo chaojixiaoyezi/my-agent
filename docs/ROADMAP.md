@@ -38,14 +38,15 @@
 
 ### 续作回绑后的占位壳与软计划终态一致性
 
-状态：真 TUI 已取到失败样本，待 会话运行时 对照与通用合同修复
+状态：Todo 身份迁移 Focused 已通过、待真 TUI；占位壳仍待设计
 
 解决问题：R161 已证明历史绝对地址和 exact successor 回绑正确，但回绑前物化的请求目录仍以
 `ABANDONED` 空壳留在 `tasks/`。它没有业务文件，也没有造成写错项目，但长期使用会污染用户看到的任务目录；
-修复必须保留 request/task link 的审计事实，不能粗暴删除历史。相同真跑还发现模型给
-`task_progress` 发送缺少稳定 id/status 的旧式条目时，合同正确拒绝，模型却直接 final，导致底部清单继续显示
-“0/5、进行中 1”。后续先对照 会话运行时 rollout/turn 与计划展示，再收口“审计记录保留、用户目录不堆壳”和
-“计划拒绝可修复、自然 final 不伪装后台 Working”两条通用语义；不得解析 final 或 pytest 文本替模型验收。
+修复必须保留 request/task link 的审计事实，不能粗暴删除历史。相同真跑还发现模型最后已按原 `q1..q5`
+发送 `done`，但 Todo 先建在占位 task-path，exact rebind 后更新改为寻址历史 task-path，底座把原 id 误判成
+新项并要求 title，导致底部清单继续显示“0/5、进行中 1”。当前先修结构化 workspace rebind 同步迁移本代
+display plan；随后再对照 会话运行时 rollout/turn 收口“审计记录保留、用户目录不堆壳”。不得解析 final 或 pytest
+文本替模型验收。
 
 ### Computer Use 复用开源执行器
 

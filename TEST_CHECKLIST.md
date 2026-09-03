@@ -21,8 +21,10 @@
   为 `DONE`，未出现嵌套 `tasks/`。同轮自然 Compact 提交 generation 1。
 - [ ] 精确回绑成功后，只有 `work/` 元数据的 `ABANDONED` 占位 task 是否应从普通历史/任务目录投影移除，
   需要先对照 会话运行时 的 turn cwd 与 rollout 历史保留语义；不能直接删除有审计价值的 request/task link。
-- [ ] `task_progress` 的非法旧式更新被拒绝时，模型应在 final 前按回执修正稳定 id/title/status；若仍自然结束，
-  TUI 不得把陈旧“进行中”伪装成后台还会继续，也不得由宿主根据 final/pytest 文本自动打勾。
+- [ ] 当前请求先在占位 task-path 建立 Todo、再 exact rebind 到历史 task-path 时，本代 display plan 与原 exact ids
+  必须原子迁到目标 canonical 账本；后续 `{id,status}` 更新直接成功，源账本不留第二份。不得根据 final/pytest
+  文本自动打勾，也不得把任务路径切换误报成模型参数错误。失败先行生产缝隙与相关 focused 已通过；待 `.10`
+  单 Gateway + MiniMax-M2.7 真 TUI 重跑“先建 Todo → 回绑旧项目 → 原 id 收尾”。
 
 ## 新任务/旧项目续作工作区裁决
 

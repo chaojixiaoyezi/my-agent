@@ -13,6 +13,8 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.task_progress import (
     merge_task_progress,
+    progress_path,
+    rebind_task_progress_display_plan,
     task_progress_display_identity,
     task_progress_display_items,
     with_task_progress_display_plan,
@@ -276,6 +278,31 @@ def test_display_plan_switch_hides_unrelated_open_history_without_deleting_it() 
         "new-b",
     ]
     assert task_progress_display_identity(reconciled) == ("turn-new", 3)
+
+
+def test_progress_rebind_refuses_a_different_display_generation(tmp_path) -> None:
+    source_id = "task-path:source"
+    target_id = "task-path:target"
+    write_task_progress(
+        tmp_path,
+        source_id,
+        with_task_progress_display_plan(
+            {"items": [{"id": "old", "title": "旧回合", "status": "pending"}]},
+            generation_id="turn-old",
+            item_ids=["old"],
+        ),
+    )
+
+    result = rebind_task_progress_display_plan(
+        tmp_path,
+        source_id,
+        target_id,
+        generation_id="turn-current",
+    )
+
+    assert result["status"] == "generation_mismatch"
+    assert progress_path(tmp_path, source_id).exists()
+    assert not progress_path(tmp_path, target_id).exists()
 
 
 def test_task_progress_tool_emits_only_current_turn_display_projection(tmp_path) -> None:

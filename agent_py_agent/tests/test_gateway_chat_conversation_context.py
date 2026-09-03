@@ -27,6 +27,9 @@ from agent_py_agent.agent.agent_core.runner.context import (
 )
 from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
 from agent_py_agent.agent.agent_core.runtime.loop_support import RunParams, _prepare_runtime_context
+from agent_py_agent.agent.agent_core.runtime.task_identity import (
+    task_path_progress_ledger_id,
+)
 from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
     ToolCallRuntimeRequest,
@@ -97,6 +100,11 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     externalize_tool_output_record,
 )
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.task_progress import (
+    progress_path,
+    read_task_progress,
+    write_task_progress,
+)
 from agent_py_agent.agent.user_space.home_indexes import latest_task_refs
 from agent_py_agent.tests._tool_runtime_harness import canonical_test_call
 
@@ -4274,6 +4282,125 @@ def test_exact_mutation_path_reselects_completed_conversation_workspace(tmp_path
         "gw-followup": "superseded",
         successor_id: "active",
     }
+
+
+def test_exact_mutation_rebind_moves_current_progress_plan_to_historical_workspace(tmp_path):
+    """占位任务先建的 Todo 必须随 exact workspace successor 迁到原项目。"""
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_progress_rebind",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "完成原项目")
+    original = Path(agent.home_paths.owner_home_dir) / "tasks" / "original-task"
+    (original / "output").mkdir(parents=True)
+    (original / "work").mkdir()
+    target = original / "app.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-completed",
+            "goal": "完成原项目",
+            "status": "active",
+            "task_path": str(original),
+        }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-completed", "status": "completed"}
+    )
+    placeholder = Path(agent.home_paths.owner_home_dir) / "tasks" / "placeholder"
+    (placeholder / "output").mkdir(parents=True)
+    (placeholder / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "gw-followup",
+            "goal": "回到原项目追加功能",
+            "status": "active",
+            "task_path": str(placeholder),
+        }
+    )
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": conversation.thread_id, "task_id": "gw-followup"}
+    )
+    attrs = {
+        "conversation_thread_id": conversation.thread_id,
+        "conversation_task_id": "gw-followup",
+        "run_workspace": {
+            "task_root": str(placeholder),
+            "output_dir": str(placeholder / "output"),
+            "work_dir": str(placeholder / "work"),
+        },
+    }
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        root_user_prompt="回到原项目追加功能",
+        context_scope="conversation",
+        task_attributes=attrs,
+    )
+    owner_root = Path(agent.home_paths.owner_home_dir)
+    source_ledger_id = task_path_progress_ledger_id(placeholder)
+    target_ledger_id = task_path_progress_ledger_id(original)
+    write_task_progress(
+        owner_root,
+        target_ledger_id,
+        {"items": [{"id": "old", "title": "旧项目基线", "status": "done"}]},
+    )
+    agent._current_run_params = params
+    agent._current_run_task_workspace = str(placeholder)
+    try:
+        created = TaskProgressTool(agent).execute(
+            {
+                "action": "create",
+                "items": [
+                    {"id": "q1", "title": "追加 JSON 输出", "status": "in_progress"},
+                    {"id": "q2", "title": "补齐测试", "status": "pending"},
+                ],
+            }
+        )
+        rebound = _promote_work_tool(
+            agent,
+            params,
+            {
+                "tool": "edit_file",
+                "path": str(target),
+                "old_string": "value = 1",
+                "new_string": "value = 2",
+            },
+        )
+        closed = TaskProgressTool(agent).execute(
+            {
+                "action": "update",
+                "items": [
+                    {"id": "q1", "status": "done"},
+                    {"id": "q2", "status": "done"},
+                ],
+            }
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert created.ok is True
+    assert rebound is None
+    assert closed.ok is True
+    target_progress = read_task_progress(owner_root, target_ledger_id)
+    assert [(item["id"], item["status"]) for item in target_progress["items"]] == [
+        ("old", "done"),
+        ("q1", "done"),
+        ("q2", "done"),
+    ]
+    assert target_progress["display_plan"]["generation_id"] == "gw-followup"
+    assert target_progress["display_plan"]["item_ids"] == ["q1", "q2"]
+    assert not progress_path(owner_root, source_ledger_id).exists()
 
 
 def test_owner_relative_task_mutation_reselects_exact_conversation_workspace(tmp_path):

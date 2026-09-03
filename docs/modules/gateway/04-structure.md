@@ -29,6 +29,10 @@
 - 真 TUI 中，历史地址命中后仍按既有两阶段生命周期工作：本轮占位 task 转 `ABANDONED`，原历史目录内创建
   同 request id 的 continuation successor。业务文件只写 successor 的 canonical task root；占位壳是否继续
   出现在用户任务目录属于后续 projection/retention 设计，不能通过删除 request/task 审计事实解决。
+- 如果本轮已在占位 task-path 建立 `task_progress`，上述 successor 切换还必须迁移同一 request 的
+  `display_plan.generation_id`。迁移只使用 task-path 指纹、request generation 和 exact item ids：先合并并验证
+  目标 canonical `progress.json`，再移除源文件。不同 generation、缺失源或同路径不迁移；final、pytest 文本和
+  Todo 标题都不参与。
 
 ## ConversationTaskLink 与 TaskRun 收口
 

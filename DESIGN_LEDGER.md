@@ -1,5 +1,19 @@
 # DESIGN LEDGER
 
+## 2026-09-03 Exact workspace rebind 携带当前 Todo 账本【状态：Focused 通过，待真 TUI】
+
+- R161 真 TUI 证明模型最终 `task_progress` 已携带原 `q1..q5` 与 `done`，失败并非模型漏字段。当前请求先在
+  占位 task-path 建账，显式历史写路径随后把 conversation task 绑定到原项目；`progress_ledger_id` 立即按新
+  task-path 寻址，导致同一回合原 id 在目标账本里看起来不存在。
+- 修复只发生在 exact structured workspace rebind：把源 task-path 当前 display generation 的软计划合并到
+  目标 task-path canonical 账本，复用既有 exact-id merge 与 display generation 规则；目标持久成功后移除源
+  `progress.json`，原始工具调用仍留在 tool-output/conversation archive。它不解析 final、测试输出或标题，
+  不替模型打勾，也不让 Todo 取得任务完成权。若源账本不是本 request 的 display generation，则不迁移。
+- 迁移发生在目标 successor 已有 canonical task-path、thread workspace pointer 尚未切换的边界；目标写入和本代
+  item/display generation 复核成功后才清理源文件。I/O 失败作为
+  `conversation_task_progress_rebind` 结构化诊断留在当前 attrs，但软清单失败不取得阻断业务写入的权限。
+  会话运行时 本身无需这层适配，因为 `update_plan` 直接归当前 turn；该扩展只服务 my-agent 已有的跨回合计划账本。
+
 ## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：Focused 与 `.10` 真 TUI 均通过】
 
 - Full Access 继续经过统一 attempt sandbox，但 Linux 根目录 `--bind / /` 后必须用

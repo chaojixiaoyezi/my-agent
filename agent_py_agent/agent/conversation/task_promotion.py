@@ -276,6 +276,11 @@ def bind_current_conversation_workspace(agent: object, task_id: str):
         return None
     if conversation_task_execution_blocker(agent, selected_id) is not None:
         return None
+    source_workspace = (
+        _workspace_task_root(attrs.get("run_workspace"))
+        or str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
+        or str(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR) or "").strip()
+    )
     # 先前的 current 是线程最近任务投影,不是本轮 gateway 派生的占位 id:
     # 占位 id 从未 activate 过,把它当 prior 会在 supersede 时误杀同 id 的
     # 新执行代数(问题5 影子任务:successor 刚建就被标 superseded)。
@@ -300,11 +305,55 @@ def bind_current_conversation_workspace(agent: object, task_id: str):
         ) or link
         workspace = _selected_task_workspace(link.task_path)
     if workspace is not None:
+        _rebind_current_task_progress(
+            agent,
+            current,
+            attrs,
+            source_workspace=source_workspace,
+            target_workspace=str(workspace),
+        )
         _set_current_task_workspace(agent, attrs, workspace)
     if not _remember_conversation_workspace(store, link):
         return None
     attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] = True
     return link if _publish_current_request_task_binding(current, link) else None
+
+
+# LLM: A main-turn exact workspace successor changes the canonical task-path progress key.
+# Transfer only the same request's display generation; a missing or stale source is a no-op,
+# while failures remain structured diagnostics and never grant workspace authority.
+# 函数用途: 续作回绑时同步搬迁本轮 Todo，让后续按原 ID 更新仍命中同一本清单。
+def _rebind_current_task_progress(
+    agent: object,
+    current: object,
+    attrs: dict[str, object],
+    *,
+    source_workspace: str,
+    target_workspace: str,
+) -> None:
+    source = str(source_workspace or "").strip()
+    target = str(target_workspace or "").strip()
+    if not source or not target or source == target:
+        return
+    from ..agent_core.runtime.owner_roots import runtime_owner_root
+    from ..agent_core.runtime.task_identity import (
+        progress_display_generation_id,
+        task_path_progress_ledger_id,
+    )
+    from ..task_progress import rebind_task_progress_display_plan
+
+    result = rebind_task_progress_display_plan(
+        runtime_owner_root(agent),
+        task_path_progress_ledger_id(source),
+        task_path_progress_ledger_id(target),
+        generation_id=progress_display_generation_id(agent, current),
+    )
+    if str(result.get("status") or "") not in {
+        "same_ledger",
+        "source_missing",
+        "generation_mismatch",
+    }:
+        attrs["conversation_task_progress_rebind"] = result
 
 
 def rebase_subagent_conversation_workspace(agent: object, link: object) -> bool:

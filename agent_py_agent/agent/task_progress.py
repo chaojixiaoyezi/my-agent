@@ -76,6 +76,103 @@ def write_task_progress(root: str | Path, run_id: str, update: dict[str, Any]) -
     return merged
 
 
+# LLM: Exact conversation workspace rebinding may change the task-path ledger key mid-turn.
+# Move only the current display generation after the target write verifies; tool archives retain
+# the original calls, so the source progress file must not remain a second live authority.
+# 函数用途: 把本轮在占位任务里建立的 Todo 搬到续作项目账本，避免回绑后原 ID 被当成新项。
+def rebind_task_progress_display_plan(
+    root: str | Path,
+    source_run_id: str,
+    target_run_id: str,
+    *,
+    generation_id: str,
+) -> dict[str, Any]:
+    source_id = str(source_run_id or "").strip()
+    target_id = str(target_run_id or "").strip()
+    generation = str(generation_id or "").strip()
+    result: dict[str, Any] = {
+        "schema_version": "task-progress-rebind.v1",
+        "source_run_id": source_id,
+        "target_run_id": target_id,
+        "generation_id": generation,
+    }
+    if not source_id or not target_id or not generation:
+        return {**result, "status": "invalid_identity"}
+    if source_id == target_id:
+        return {**result, "status": "same_ledger"}
+    source_path = progress_path(root, source_id)
+    if not source_path.exists():
+        return {**result, "status": "source_missing"}
+    source, load_error = read_task_progress_report(root, source_id)
+    if load_error:
+        return {**result, "status": "source_unreadable", "load_error": load_error}
+    source_generation, _source_revision = task_progress_display_identity(source)
+    if source_generation != generation:
+        return {
+            **result,
+            "status": "generation_mismatch",
+            "source_generation_id": source_generation,
+        }
+    items = task_progress_display_items(source)
+    item_ids = [
+        str(item.get("id") or "").strip()
+        for item in items
+        if str(item.get("id") or "").strip()
+    ]
+    update: dict[str, Any] = {
+        "items": items,
+        "summary": str(source.get("summary") or "").strip(),
+        "next_action": str(source.get("next_action") or "").strip(),
+    }
+    coverage = source.get("coverage")
+    if isinstance(coverage, dict):
+        update["coverage"] = coverage
+    try:
+        written = write_task_progress(
+            root,
+            target_id,
+            with_task_progress_display_plan(
+                update,
+                generation_id=generation,
+                item_ids=item_ids,
+            ),
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        return {
+            **result,
+            "status": "target_write_failed",
+            "error": runtime_error_report(exc, context="task_progress.rebind.write"),
+        }
+    target_generation, _target_revision = task_progress_display_identity(written)
+    target_items = {
+        str(item.get("id") or "") for item in task_progress_display_items(written)
+    }
+    if target_generation != generation or any(
+        item_id not in target_items for item_id in item_ids
+    ):
+        return {
+            **result,
+            "status": "target_verification_failed",
+            "item_ids": item_ids,
+        }
+    try:
+        source_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return {
+            **result,
+            "status": "moved_source_retained",
+            "item_ids": item_ids,
+            "error": runtime_error_report(exc, context="task_progress.rebind.cleanup"),
+        }
+    try:
+        source_path.parent.rmdir()
+    except OSError:
+        pass
+    return {**result, "status": "moved", "item_ids": item_ids}
+
+
 def invalid_item_statuses(update: dict[str, Any]) -> list[dict[str, str]]:
     invalid: list[dict[str, str]] = []
     for index, item in enumerate(_list(update.get("items"))):
@@ -861,6 +958,7 @@ __all__ = [
     "progress_path",
     "read_task_progress",
     "read_task_progress_report",
+    "rebind_task_progress_display_plan",
     "task_progress_summary",
     "task_progress_display_identity",
     "task_progress_display_items",

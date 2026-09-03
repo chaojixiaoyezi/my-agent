@@ -1,5 +1,18 @@
 # STATUS
 
+## 2026-09-03 R162 Todo 随 exact workspace successor 迁移（Focused 通过，待真 TUI）
+
+- R161 真 TUI 的最后一次 `task_progress` 实际携带原 `q1..q5 + done`；失败是因为清单先按占位 task-path
+  建账，写历史项目触发 exact successor 后 resolver 改按原项目 task-path 寻址，原 id 在另一本账里被误判为
+  新项。模型参数、测试结果和结构化回执已经把问题定位到 task identity seam。
+- 对照 会话运行时 `update_plan`：计划是当前 turn 的结构化展示，模型负责更新，宿主不从 final 推断完成；my-agent
+  额外持久化跨回合 task-path 计划，因此在 exact workspace rebind 时搬迁“本 request 的 display generation”。
+  目标账本沿既有 exact-id merge 落盘并复核后，源 `progress.json` 才移除；其它 generation 不迁，原始工具调用
+  仍在 conversation/tool-output archive。
+- 失败先行生产缝隙用例已从 `TOOL_INVALID_ARGUMENTS` 转为原 `{id,status}` 更新成功；目标历史账本保留旧项并
+  合入本代 q1/q2，源账本消失。task progress、task identity、会话活动、Gateway conversation/control、
+  tool loop 与后台投影相关 focused 全绿；真实 MiniMax-M2.7 TUI 仍待同样顺序复验。
+
 ## 2026-09-03 R156–R161 Full Access 设备与历史续作真 TUI 均通过
 
 - `.10` 真 TUI 复现了普通 pytest 与 `2>/dev/null` 都报 PermissionError。宿主 `/dev/null` 正常，
@@ -39,9 +52,10 @@
   为 `DONE`，两者共享 exact request id；未出现嵌套 `tasks/`，也没有在占位目录重建业务文件。期间真实
   Compact 动画自然触发并提交 generation 1。
 - 本轮另发现两项未混入 R161 通过结论的独立缺口：回绑成功后 `tasks/` 仍保留只有 `work/` 元数据的
-  `ABANDONED` 占位壳；模型最终一次 `task_progress` 使用缺少稳定 id/status 的旧式条目被合同正确拒绝后，
-  TUI 底部仍显示“完成 0/5、进行中 1”，与最终正文和真实 30 项测试不一致。前者是整洁性/历史投影问题，
-  后者是软计划收口与展示一致性问题，均继续保留为待修底座项，不恢复机器质量验收。
+  `ABANDONED` 占位壳；模型最终一次 `task_progress` 已正确携带原 `q1..q5 + done`，但 exact workspace rebind
+  将账本寻址从占位 task-path 切到历史 task-path，原 id 因此在目标账本里被误判为新项并要求重复 title。
+  TUI 随后仍显示“完成 0/5、进行中 1”，与最终正文和真实 30 项测试不一致。前者是整洁性/历史投影问题，
+  后者是 task-path 身份迁移问题，均继续保留为待修底座项，不恢复机器质量验收。
 
 ## 2026-09-02 R155 新任务与旧项目续作的工作区分流（本机真 TUI 通过）
 

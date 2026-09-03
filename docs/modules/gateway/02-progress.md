@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-09-03 R162 exact workspace rebind 携带本代 Todo
+
+- 真 TUI 最终 `task_progress` 已正确提交原 q1..q5；失败来自 rebind 前后的 task-path ledger key 改变，不是模型
+  漏字段。目标历史项目被正确修改、测试也通过，但 TUI 只能读到占位账本的旧状态。
+- `bind_current_conversation_workspace` 现在记录切换前后的结构化 workspace，只把 exact request display
+  generation 从源 task-path 账本合并到目标账本；目标落盘并复核 item ids/generation 后才移除源文件。旧代、
+  无源账本和同路径均不动，原始 tool archive 保留。
+- 失败先行回归已证明修前原 `{id,status}` 被拒、修后直接收尾；相关 task progress、Gateway、tool loop 与 TUI
+  投影 focused 全绿。仍需 `.10` 同类真实 MiniMax-M2.7 TUI 验收。
+
 ## 2026-09-03 R156 历史检索携带精确任务目录
 
 - Gateway completion 过去只索引 response + prompt，会覆盖 queued/processing 阶段已有的
