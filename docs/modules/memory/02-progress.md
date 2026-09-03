@@ -24,9 +24,10 @@
 - live-tool Compact 现在从语义摘要前到 CAS 后发布真实阶段进度，与 transcript Compact 共用同一公开 schema；
   summary 很慢时 spinner 继续刷新但百分比停在当前 milestone，不以墙钟伪造推进。callback 只读、fail-open，
   不改变失败回滚、checkpoint 或 generation。
-- live-tool 候选计量后仍达不到 recovery target 时，原 IR 回滚并发布中性的
-  `superseded/candidate_discarded`：TUI 静默收起进度条，failure count/generation 都不变，同代 transcript
-  operation 可以继续。只有摘要 transport、checkpoint 或 CAS 的真实异常保留红色 `failed`。
+- live-tool 候选计量后优先达到 recovery target；达不到目标但已低于真实 trigger 时仍正式提交，避免摘要
+  已付费却 generation 永远为 0。只有 `after >= trigger` 才回滚原 IR 并发布中性的
+  `superseded/candidate_discarded`；failure count/generation 不变，同代 transcript operation 可以继续。
+  摘要 transport、checkpoint 或 CAS 的真实异常仍保留红色 `failed`。
 - 工具归档现在显式分开 provider 原始 `model_parameters` 与宿主执行 `parameters`。run/task/request/cwd 等
   host binding 仍可用于审计、幂等和恢复，但 carried 摘要、native replay 与后续模型可见投影只读取前者；
   旧索引只在 value-free `input_sources` 能证明字段来自模型/调用方时才回退提取，不能把宿主默认值带回模型。

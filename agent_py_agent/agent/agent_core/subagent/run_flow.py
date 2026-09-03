@@ -50,6 +50,19 @@ class SubagentModelIteration:
     transcript_sink: object
 
 
+# LLM: This immutable request keeps one child overflow's thread generation, active archive and
+# display callback together; it carries no completion or permission authority of its own.
+# 类用途: 收拢子代理一次溢出压缩所需的固定身份、当前代次和工具轨迹，避免参数错位。
+@dataclass(frozen=True)
+class SubagentOverflowCompactRequest:
+    prompt: str
+    attempt_id: str
+    task_attributes: dict[str, object]
+    current: object
+    carried_archive_tool_calls: list[dict[str, object]]
+    progress_callback: object
+
+
 def run_subagent_flow(lifecycle, options: SubagentRunParams):
     """Run one subagent task from prompt construction through result persistence."""
     active_attempt_id = _prepare_subagent_attempt(lifecycle, options)
@@ -247,7 +260,6 @@ def _run_subagent_model_turn(
             (
                 carried_archive_tool_calls,
                 carried_active_turn_user_inputs,
-                made_progress,
             ) = _next_subagent_overflow_carry(
                 agent,
                 run_params,
@@ -255,20 +267,18 @@ def _run_subagent_model_turn(
                 carried_archive_tool_calls,
                 carried_active_turn_user_inputs,
             )
-            refreshed = prepare_subagent_thread_turn(
+            refreshed = _compact_subagent_overflowing_turn(
                 agent,
                 task,
-                prompt=prompt,
-                attempt_id=attempt_id,
-                force=True,
-                progress_callback=compact_progress,
-                interrupt_check=is_interrupted,
+                SubagentOverflowCompactRequest(
+                    prompt=prompt,
+                    attempt_id=attempt_id,
+                    task_attributes=task_attributes,
+                    current=current,
+                    carried_archive_tool_calls=carried_archive_tool_calls,
+                    progress_callback=compact_progress,
+                ),
             )
-            if (
-                refreshed.compact_generation <= current.compact_generation
-                and not made_progress
-            ):
-                raise RuntimeError("subagent thread cannot compact the overflowing context")
             current = refreshed
         raise RuntimeError("subagent thread still exceeds the model context after Compact")
     except Exception:
@@ -279,29 +289,22 @@ def _run_subagent_model_turn(
         _trim_subagent_transcript(agent, task, enabled=transcript_sink is not None)
 
 
-# LLM: Overflow retries may carry only typed tool progress and active-turn input records. Keep
-# release filtering here so a Compact retry cannot replay completed tools or consumed guidance.
-# 函数用途: 合并一次子代理超限轮次的结构化进度，并报告下一轮是否还有可继续的新增事实。
+# LLM: Overflow retries may carry only typed tool progress and active-turn input records. These
+# values prevent replay but never authorize a retry without a committed Compact generation.
+# 函数用途: 合并子代理超限轮次的工具与插话事实，过滤已消费输入后交给正式 Compact 续接。
 def _next_subagent_overflow_carry(
     agent,
     run_params: RunParams,
     result: object,
     carried_archive_tool_calls: list[dict[str, object]],
     carried_active_turn_user_inputs: list[dict[str, object]],
-) -> tuple[list[dict[str, object]], list[dict[str, object]], bool]:
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     released_input_ids = release_active_turn_inputs_for_compact(agent, run_params)
     result_archive = [
         dict(item)
         for item in list(getattr(result, "archive_tool_calls", None) or [])
         if isinstance(item, dict)
     ]
-    from ..runtime_mixin import _result_added_tool_progress
-
-    made_tool_progress = _result_added_tool_progress(
-        run_params,
-        result,
-        result_archive,
-    )
     next_archive = result_archive or carried_archive_tool_calls
     next_inputs = exclude_active_turn_user_input_ids(
         merge_active_turn_user_inputs(
@@ -310,8 +313,96 @@ def _next_subagent_overflow_carry(
         ),
         released_input_ids,
     )
-    made_guidance_progress = next_inputs != carried_active_turn_user_inputs
-    return next_archive, next_inputs, made_tool_progress or made_guidance_progress
+    return next_archive, next_inputs
+
+
+# LLM: A child provider-overflow retry must advance the same ConversationThread generation before
+# rebuilding RunParams. Transcript Compact gets first claim; if the unfinished turn is the pressure
+# source, the canonical active-turn archive checkpoint/CAS is the only valid fallback. Never treat a
+# freshly rendered handoff or newly archived tool record as an uncounted Compact.
+# 函数用途: 子代理上下文溢出时先压已结束历史，再正式压当前工具轨迹；成功推进代次后才继续原尝试。
+def _compact_subagent_overflowing_turn(
+    agent: object,
+    task: object,
+    request: SubagentOverflowCompactRequest,
+) -> object:
+    refreshed = prepare_subagent_thread_turn(
+        agent,
+        task,
+        prompt=request.prompt,
+        attempt_id=request.attempt_id,
+        force=True,
+        progress_callback=request.progress_callback,
+        interrupt_check=is_interrupted,
+    )
+    if refreshed.compact_generation > request.current.compact_generation:
+        return refreshed
+    return _compact_subagent_active_turn_archive(
+        agent,
+        task,
+        request,
+        refreshed,
+    )
+
+
+# LLM: This fallback owns only the unfinished active-turn archive boundary. It requires the exact
+# child thread/store binding and a committed generation before returning to the model retry loop.
+# 函数用途: 已结束历史无法压缩时，把当前 child 工具轨迹正式落入同一会话代次并复核提交结果。
+def _compact_subagent_active_turn_archive(
+    agent: object,
+    task: object,
+    request: SubagentOverflowCompactRequest,
+    refreshed: object,
+) -> object:
+    store, latest = _load_subagent_compact_thread(agent, refreshed)
+
+    from ...conversation.active_turn_compact import (
+        ActiveTurnArchiveCompactRequest,
+        compact_carried_active_turn_archive,
+    )
+
+    compacted = compact_carried_active_turn_archive(
+        agent,
+        store,
+        latest,
+        request.carried_archive_tool_calls,
+        ActiveTurnArchiveCompactRequest(
+            task_attributes=request.task_attributes,
+            request_id=str(request.attempt_id or ""),
+            attempt_id=str(request.attempt_id or ""),
+            task_prompt=request.prompt,
+            progress_callback=request.progress_callback,
+            interrupt_check=is_interrupted,
+        ),
+    )
+    if not compacted.compacted:
+        raise RuntimeError("subagent thread cannot compact the overflowing active turn")
+    refreshed = prepare_subagent_thread_turn(
+        agent,
+        task,
+        prompt=request.prompt,
+        attempt_id=request.attempt_id,
+        progress_callback=request.progress_callback,
+        interrupt_check=is_interrupted,
+    )
+    if refreshed.compact_generation <= request.current.compact_generation:
+        raise RuntimeError("subagent Compact generation did not advance")
+    return refreshed
+
+
+# LLM: Store/thread loading is fail-closed because a child may never compact against its parent or
+# a guessed fallback thread. The returned pair has already passed exact readable authority checks.
+# 函数用途: 读取子代理当前唯一会话线程；存储缺失或记录损坏时直接停止本次恢复。
+def _load_subagent_compact_thread(agent: object, refreshed: object) -> tuple[object, object]:
+    store = getattr(agent, "conversation_store", None)
+    latest, load_error = (
+        store.load_thread_report(refreshed.thread_id)
+        if store is not None and refreshed.thread_id
+        else (None, {"code": "CONVERSATION_STORE_UNAVAILABLE"})
+    )
+    if load_error is not None or latest is None:
+        raise RuntimeError("subagent conversation thread is unavailable during Compact")
+    return store, latest
 
 
 # LLM: Public display setup is explicitly best effort and must remain separate from

@@ -443,9 +443,10 @@ def render_conversation_context_usage(
     return "\n".join(lines)
 
 
-# LLM: Candidate partitions are tried without state mutation; only a candidate at or below the
-# shared recovery target reaches commit, leaving one complete recent-tail budget before trigger.
-# 函数用途: 依次尝试近期尾部分区，只提交能真正腾出下一段工作空间的候选。
+# LLM: Candidate partitions are tried without state mutation. The recovery target is preferred,
+# while a candidate below the actual trigger remains a valid fallback just like 会话运行时/终端交互:
+# rejecting it would burn another summary call without advancing the canonical generation.
+# 函数用途: 依次尝试近期尾部分区，优先提交健康目标；否则保留低于触发线的最佳有效候选。
 def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # LLM: A provider-pressure retry must replace the whole completed prefix once. Repeatedly
     # protecting and then re-compacting the same tail creates checkpoint churn without helping
@@ -461,6 +462,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
         )
     )
     partition_count = max(1, len(partitions))
+    trigger_fallback: _CompactCandidate | None = None
     for partition_index, (compact_rows, retained_tail) in enumerate(partitions):
         raise_if_compact_interrupted(request.interrupt_check)
         summarize_percent = 15 + int(partition_index * 50 / partition_count)
@@ -480,6 +482,11 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
         except InterruptedError:
             raise
         except Exception as exc:
+            if trigger_fallback is not None:
+                return _commit_compact_candidate_or_record_failure(
+                    request,
+                    trigger_fallback,
+                )
             record_compact_failure(
                 request.store,
                 request.thread,
@@ -494,23 +501,22 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             percent=measure_percent,
             after_tokens=candidate.projected_tokens_after,
         )
-        if candidate.projected_tokens_after > request.policy.recovery_target_tokens:
+        if candidate.projected_tokens_after <= request.policy.recovery_target_tokens:
+            return _commit_compact_candidate_or_record_failure(request, candidate)
+        if candidate.projected_tokens_after >= request.policy.trigger_tokens:
             continue
-        try:
-            return _commit_compact_candidate(request, candidate)
-        except InterruptedError:
-            raise
-        except Exception as exc:
-            record_compact_failure(
-                request.store,
-                request.thread,
-                code=compact_exception_code(exc),
-                now=request.attempted_at,
-            )
-            raise
+        if (
+            trigger_fallback is None
+            or candidate.projected_tokens_after
+            < trigger_fallback.projected_tokens_after
+        ):
+            trigger_fallback = candidate
+
+    if trigger_fallback is not None:
+        return _commit_compact_candidate_or_record_failure(request, trigger_fallback)
 
     error = ConversationCompactError(
-        "conversation compact candidate did not reach the configured recovery target",
+        "conversation compact candidate did not fall below the configured trigger",
         code="COMPACT_CANDIDATE_TOO_LARGE",
     )
     record_compact_failure(
@@ -520,6 +526,27 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
         now=request.attempted_at,
     )
     raise error
+
+
+# LLM: Every accepted transcript candidate reaches the same checkpoint/CAS failure bookkeeping;
+# choosing a trigger fallback must not create an unrecorded mutation-error path.
+# 函数用途: 提交一个已验证的摘要候选，并把真实 checkpoint/CAS 异常记入同一会话熔断账。
+def _commit_compact_candidate_or_record_failure(
+    request: _CompactRunRequest,
+    candidate: _CompactCandidate,
+) -> ConversationCompactResult:
+    try:
+        return _commit_compact_candidate(request, candidate)
+    except InterruptedError:
+        raise
+    except Exception as exc:
+        record_compact_failure(
+            request.store,
+            request.thread,
+            code=compact_exception_code(exc),
+            now=request.attempted_at,
+        )
+        raise
 
 
 # LLM: This helper may call the model but cannot write any state.

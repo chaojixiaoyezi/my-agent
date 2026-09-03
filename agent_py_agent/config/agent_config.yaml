@@ -163,7 +163,8 @@ memory_embedding_api_key_env: ""  # embedding key 的环境变量名（生产用
 # - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：
 #   不写默认 90；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
 # - memory_compact_recovery_target_percent 控制 compact 后的健康目标：默认 60，范围 25-80；
-#   运行时还会同时满足“触发线 - 一段完整近期尾部预算”，避免刚压完一份长报告就再次压缩。
+#   运行时会优先收敛到“触发线 - 一段完整近期尾部预算”以内；若固定提示/工具上下文使该目标不可达，
+#   但候选已经低于真实触发线，仍提交这一代，避免慢模型反复生成并丢弃同一份有效摘要。
 # - 主代理、子代理和手动 /compact 都显示真实生命周期动画；阶段间只转圈，不按等待时间虚构百分比。
 # - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。
 # - 自动 compact 续接有绝对深度硬顶（见下方 memory_compact_auto_continue_max_depth，防无限续跑 H2）；未达硬顶时只要 compact 包可恢复就继续同一任务，不会因普通任务缺少验收/测试备注而停车。

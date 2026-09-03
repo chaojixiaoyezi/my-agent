@@ -9,6 +9,7 @@ import pytest
 from agent_py_agent.agent.agent_core.model.context_pressure import (
     preflight_context_pressure_response,
 )
+from agent_py_agent.agent.agent_core.models import AgentRunResult
 from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_scope_root
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation.agent_thread import prepare_subagent_thread_turn
@@ -158,6 +159,29 @@ class _OverflowThenListThenCompleteChildBackend(_OverflowThenCompleteChildBacken
         return ModelResponse(text="压缩后工具调用成功，子任务完成。", backend=self.name)
 
 
+class _ActiveTurnSummaryChildBackend:
+    """只承担测试里的 active-turn Compact 摘要调用。"""
+
+    name = "active-turn-summary-child"
+    context_window_tokens = 128_000
+
+    def generate(self, _prompt: str, on_chunk=None, **_kwargs):
+        del on_chunk
+        return ModelResponse(
+            text=(
+                "[compact-live-handoff.v1]\n"
+                "current_progress: 已完成多项工具核对，正在继续同一个子任务。\n"
+                "user_constraints: 保持原任务范围与当前工作目录，不重复已经成功的副作用。\n"
+                "completed: 已读取并核对五个输入文件，精确调用记录保存在 owner archive。\n"
+                "failures: none。\n"
+                "unresolved: 仍需形成最终结论并回复直接父代理。\n"
+                "next_step: 基于当前文件和保留的近期记录完成汇总。"
+            ),
+            backend=self.name,
+            usage={"input_tokens": 2_000, "output_tokens": 180},
+        )
+
+
 def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     tmp_path: Path,
 ) -> None:
@@ -226,6 +250,93 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     assert _file_bytes(agent.memory.path) == owner_memory_before
     assert not (run_home / "compactions").exists()
     assert not (run_home / "recovery").exists()
+
+
+def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """当前 child 工具轨迹导致溢出时，必须正式推进其 thread generation 后原尝试续跑。"""
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            enable_tools=True,
+            my_agent_home=str(tmp_path / "home"),
+            tool_context_ptl_retry_max=0,
+            model_context_window_tokens=128_000,
+            memory_compact_auto_trigger_percent=90,
+        ),
+        tmp_path,
+    )
+    task = agent.subagents.create_run(
+        goal="在长工具链发生上下文压力后继续完成子任务",
+        thought="使用当前子代理自己的 Compact 账本续接。",
+        plan=["读取输入", "形成结论"],
+        role="worker",
+    )
+    records = [
+        {
+            "call_id": f"call-active-{index}",
+            "scoped_call_id": f"run:call-active-{index}",
+            "tool": "read_file",
+            "ok": True,
+            "model_parameters": {
+                "tool": "read_file",
+                "path": f"input-{index}.txt",
+            },
+            "output_preview": f"result-{index}",
+            "effect_outcome": "succeeded",
+        }
+        for index in range(1, 6)
+    ]
+    agent.backend = _ActiveTurnSummaryChildBackend()
+    run_params_seen = []
+
+    def fake_run(prompt: str, *, params):
+        run_params_seen.append(params)
+        if len(run_params_seen) == 1:
+            return AgentRunResult(
+                prompt=prompt,
+                response="provider reported context pressure",
+                backend=agent.backend.name,
+                used_memories=0,
+                archive_tool_calls=records,
+                runtime_status="context_overflow",
+                runtime_reason="context_overflow",
+                runtime_source="preflight",
+                turn_end_reason="max-tokens",
+            )
+        return AgentRunResult(
+            prompt=prompt,
+            response="子代理已基于压缩后的上下文完成结论。",
+            backend=agent.backend.name,
+            used_memories=0,
+            archive_tool_calls=records,
+            runtime_status="ok",
+            turn_end_reason="completed",
+        )
+
+    monkeypatch.setattr(agent, "run", fake_run)
+
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    thread = agent.conversation_store.load_thread(task.agent_thread_id)
+    assert result.ok
+    assert len(run_params_seen) == 2
+    assert thread is not None and thread.compact_generation == 1
+    assert thread.compact_checkpoint_id
+    assert runtime_compact_count(task, agent.conversation_store) == 1
+    assert run_params_seen[1].conversation_history_seed.compact_generation == 1
+    assert run_params_seen[1].carried_archive_tool_calls == records
+    events = read_agent_transcript_events(agent, run_id=task.id, after=0)["events"]
+    completed = [
+        row
+        for row in events
+        if row.get("kind") == "conversation_compaction_completed"
+    ]
+    assert completed
+    assert completed[-1]["payload"]["source_kind"] == "active_turn_tool_archive"
 
 
 def test_subagent_compact_retry_keeps_exact_attempt_authorized_for_later_tools(

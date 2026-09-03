@@ -17,6 +17,16 @@
 
 ## 下一版优先级
 
+### 子代理上下文溢出的正式 Compact 代次
+
+状态：本地 focused 通过，待 `.10` MiniMax-M2.7 长 TUI
+
+解决问题：R162 长 child 连续生成 23 次有效摘要，但因为都未压到 60% 理想目标而被回滚；随后又允许新
+`Agent.run` 用有界 handoff 续跑，造成实际上下文下降、费用已发生、TUI 却始终 `compact 0`。当前统一为
+会话运行时/终端交互 的提交边界：60% 是优选目标，低于 90% 真实 trigger 就是可提交候选；child 外层必须看到
+自己的 ConversationThread generation 真正推进后才能续跑。待部署后用真实长工具链验证动画、计数、
+checkpoint、同 attempt 续接、用户插话与最终终态，不能只凭 mock 通过。
+
 ### 模型前置失败后的 run/attempt 终态
 
 状态：已落地，本机 MiniMax-M2.7 真 TUI 复验通过

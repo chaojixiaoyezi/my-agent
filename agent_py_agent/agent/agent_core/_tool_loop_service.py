@@ -695,9 +695,10 @@ def _apply_native_compact_plan(
             percent=65,
             **_native_compact_progress_values(plan, after_tokens=after_tokens),
         )
-        if after_tokens > plan.recovery_target_tokens:
-            # 摘要或必须保留的最新往返未腾出一整段近期工作空间：恢复原 IR，交给
-            # transcript Compact。只低于触发线但仍贴线的薄结果不能推进 generation。
+        if after_tokens >= plan.trigger_tokens:
+            # 摘要或必须保留的最新往返连真实触发线都未降到：恢复原 IR，交给
+            # transcript Compact。恢复目标只是优选目标，低于触发线的有效候选必须提交，
+            # 否则慢模型会重复烧摘要却永远不推进 canonical generation。
             _restore_native_compact_candidate(params, original_ir, original_tool_context)
             _emit_native_compact_superseded(params, plan, after_tokens=after_tokens)
             return 0

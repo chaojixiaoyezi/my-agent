@@ -839,6 +839,66 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
     _assert_no_orphans(_native_provider_messages(agent, params))
 
 
+def test_native_window_commits_below_trigger_when_recovery_target_is_unreachable(
+    tmp_path,
+    monkeypatch,
+):
+    """有效 native 候选即使未到 60% 目标，也必须推进代次而不是反复烧摘要。"""
+
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "native-trigger-fallback",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_recovery_target_percent = 80
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(
+        _params(),
+        save=True,
+        effective_on_chunk=(sink := _ContextCompactionSink()),
+        provider_history_messages=[
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "H" * 20_000}],
+            }
+        ],
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+    )
+    _record_large_write_calls(agent, params, start=1, stop=10, chars=3_000)
+    original_settle = service._settle_native_ir_window
+
+    def settle_below_trigger(**kwargs):
+        dropped, _actual_tokens = original_settle(**kwargs)
+        return dropped, 8_500
+
+    monkeypatch.setattr(service, "_settle_native_ir_window", settle_below_trigger)
+
+    build_tool_loop_prompt(agent, params)
+
+    updated = store.load_thread(thread.thread_id)
+    assert updated is not None and updated.compact_generation == 1
+    assert sink.progress_rows[-1]["phase"] == "completed"
+    assert sink.progress_rows[-1]["after_tokens"] == 8_500
+    assert sink.progress_rows[-1]["trigger_tokens"] == 9_000
+    assert sink.progress_rows[-1]["after_tokens"] > 8_100
+    _assert_no_orphans(_native_provider_messages(agent, params))
+
+
 def test_native_window_summary_removes_covered_assistant_tool_turn_text(tmp_path):
     """工具对的长思考正文已由完整摘要覆盖时必须同轮回收，不能留下空壳顶爆窗口。"""
     store = ConversationStore(tmp_path / "conversations")

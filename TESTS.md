@@ -1,5 +1,19 @@
 # TESTS
 
+## 子代理溢出与 Compact 有效候选
+
+- `memory_compact_recovery_target_percent` 是优选裁剪目标，不是第二个提交硬门。构造
+  `recovery_target < after_tokens < trigger_tokens` 时，transcript 与 native live Compact 都必须写
+  checkpoint/CAS、generation 加一并发布 completed；`after_tokens >= trigger_tokens` 才能恢复原 IR/游标。
+- child provider 返回 `context_overflow` 且当前 assistant 尚未进入 transcript 时，必须先尝试 transcript，
+  再用 exact active-turn archive 提交 child 自己的 ConversationThread；没有 generation 前进不得仅凭新增工具
+  或有界 handoff 启动下一次 `Agent.run`。TUI compact 次数必须与该 generation 完全相同。
+- focused 命令：
+  `python3 -m pytest agent_py_agent/tests/test_subagent_runtime_compact.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py agent_py_agent/tests/test_gateway_conversation_compact.py -q --tb=short`。
+- 真 TUI 必须使用单 Gateway + MiniMax-M2.7 的长工具任务，保留 exact child thread/events 证据；验收要求
+  completed operation、checkpoint、`compact 1+`、原 attempt 续跑、最终回复可见且 Working 消失。上下文数值
+  自己下降但 generation 不变属于失败。
+
 ## Full Access 基础设备与历史任务引用
 
 - Full Access 的 bwrap argv 必须先 bind `/`，再用 `--dev-bind /dev /dev` 覆盖设备树；不能用普通
@@ -531,15 +545,16 @@ strict code-size、diff 与 clean-package。最终仍必须在 `.7` 的唯一 Ga
 控制面只读、Full 父级 child 恢复 owner wall、子代理保留明确项目根、request-local Shell/PTY/网络 handler，
 以及 WorkspaceOnly 外部 cwd 拒绝。文件墙与网络开关分离。
 
-Compact 回归必须覆盖：live/transcript 都低于同一 recovery target；每次尝试有独立 operation id；live 失败后
+Compact 回归必须覆盖：live/transcript 都优先收敛到同一 recovery target；每次尝试有独立 operation id；live 失败后
 后备进度仍显示；child transcript 收到 start/progress/completed；手动 `/compact` 入 outbox 后保持活动块，
 真实回执才收口。普通无摘要窗口必须保留最新工具对；完整替代摘要已覆盖本轮工具历史时，必须允许回收
 最后一对巨型回执，并证明 checkpoint/generation 成功、provider IR 无孤儿且不再立即触发 overflow。摘要
 transport 异常必须恢复原 IR 并累加失败熔断；供应商正常完成但 text 为空时，live/transcript 都必须只消费
 这一次模型调用，用 typed IR/raw transcript + operation evidence 生成有界机械续接摘要并推进有效 generation。
-候选完成计量后仍高于 recovery target 时，必须恢复原 IR、保持 failure count 不变并发布
-`superseded/candidate_discarded`；TUI 要静默撤下该块，不得冻结红色失败，随后同代 transcript operation 必须
-仍能启动。真正的摘要 transport、checkpoint 与 CAS 异常继续发布 `failed`。live 摘要还必须通过
+候选完成计量后若仍 `>= trigger`，必须恢复原 IR、保持 failure count 不变并发布
+`superseded/candidate_discarded`；位于 `recovery target` 与 `trigger` 之间的有效候选必须提交，不得重复烧摘要。
+TUI 要静默撤下被拒候选，不得冻结红色失败，随后同代 transcript operation 必须仍能启动。真正的摘要
+transport、checkpoint 与 CAS 异常继续发布 `failed`。live 摘要还必须通过
 `compact-live-handoff.v1` 固定结构校验：缺字段、只有“下一步”短句，或包含供应商私有工具协议/XML 调用时，
 只能退回 typed IR 的 `compact-mechanical-fallback.v1`；伪工具正文不得执行、不得进入下一轮续接。明确只读、
 不要修改或不要落盘的研究任务必须在对话中交付，不能被通用“研究要写报告”软提示反向诱导创建文件。

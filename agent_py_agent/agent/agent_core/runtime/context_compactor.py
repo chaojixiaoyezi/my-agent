@@ -103,9 +103,9 @@ def compact_trigger_tokens(context_window_tokens: int, trigger_percent: int) -> 
     return max(1, int(context_window_tokens * (compact_trigger_percent(trigger_percent) / 100.0)))
 
 
-# LLM: Recovery is intentionally lower than the trigger. 会话运行时 and 终端交互 rebuild a compact
-# replacement context instead of stopping just below the trigger; this parser keeps the configurable
-# provider-neutral target bounded while the final calculator still reserves one complete recent tail.
+# LLM: Recovery is intentionally lower than the trigger and remains the compactor's preferred
+# target. It is not a second validity threshold: 会话运行时 and 终端交互 keep a successful replacement
+# once it is below the real trigger instead of discarding and reissuing the same summary request.
 # 函数用途: 规范化压缩后的目标百分比；非法值回到 60%，过小或过大值限制在 25%--80%。
 def compact_recovery_target_percent(value: object) -> int:
     try:
@@ -119,10 +119,10 @@ def compact_recovery_target_percent(value: object) -> int:
     return parsed
 
 
-# LLM: Every live-tool and transcript Compact must settle below both the configured recovery share
-# and trigger-minus-tail ceiling. This prevents one ordinary large turn from immediately creating
-# another generation while preserving the same canonical summary and bounded recent complete turns.
-# 函数用途: 同时按模型窗口恢复比例和触发线尾部余量计算压缩后的统一健康目标。
+# LLM: Every live-tool and transcript Compact aims below both the configured recovery share and
+# trigger-minus-tail ceiling. Callers may still commit a valid candidate below the trigger when
+# fixed prompt/tool context makes this ideal target unreachable.
+# 函数用途: 同时按模型窗口恢复比例和触发线尾部余量计算压缩后的统一优选健康目标。
 def compact_recovery_target_tokens(
     context_window_tokens: int,
     trigger_tokens: int,

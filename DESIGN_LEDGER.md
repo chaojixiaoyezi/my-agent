@@ -1,5 +1,25 @@
 # DESIGN LEDGER
 
+## 2026-09-03 子代理溢出正式记代与 Compact 有效候选边界【状态：Focused 通过，待 `.10` 真 TUI】
+
+- R162 `.10` 长子代理实际运行 1:34:33、上下文约 106k，界面仍显示 `compact 0`。读取 exact child thread 与
+  transcript events 后确认不是 TUI 漏记：该线程 `compact_generation=0`、checkpoint 为空，23 次 operation
+  全部为 `started -> summarizing -> measuring -> superseded`，没有一次 completed。典型候选从 120,995 降到
+  104,473、从 128,212 降到 110,070，已经低于 115,200 触发线，却因高于 76,800 的 60% recovery target
+  被整体回滚；新 `Agent.run` 又靠有界 handoff 视觉降量，形成“上下文变小但没正式 Compact”的账外续跑。
+- 对照 会话运行时 `会话运行时-rs/core/src/compact.rs`：摘要成功后直接替换历史、持久化 compacted item 并在同一 active
+  turn 继续；对照 终端交互 `sessionMemoryCompact.ts`、`compact.ts` 与 `query.ts`：只有压后仍达到/超过自动
+  trigger 才拒绝，`willRetriggerNextTurn` 只是遥测，不撤销有效摘要。由此统一合同为：60% 继续作为裁剪优选
+  目标；`after < trigger` 即可 checkpoint/CAS；`after >= trigger` 才回滚。transcript 会先尝试各 tail partition
+  达到健康目标，均做不到时提交其中最小的 `< trigger` 候选。
+- child provider overflow 不再把“新工具记录/新 handoff”冒充 Compact 进展。它先尝试自己的 transcript
+  Compact；若当前未结束回合尚未写入 transcript，则把 exact carried active-turn archive 写入同一 child
+  ConversationThread checkpoint/CAS，确认 generation 递增后才以原 attempt 续跑。完整 archive、工具幂等、
+  user steering 与最终完成权不变；TUI 继续只读 canonical generation，不新增显示账本。
+- focused 覆盖三条边界：`recovery < after < trigger` 的 transcript/native 均提交 generation；`after >= trigger`
+  保持回滚；child completed transcript 为空时由 active-turn archive 正式推进 generation 后续跑。真实验收仍需
+  fresh MiniMax-M2.7 长 TUI 证明进度动画、child `compact 0 -> 1`、同一任务继续和最终 Working 收口。
+
 ## 2026-09-03 Exact workspace rebind 携带当前 Todo 账本【状态：Focused 通过，待真 TUI】
 
 - R161 真 TUI 证明模型最终 `task_progress` 已携带原 `q1..q5` 与 `done`，失败并非模型漏字段。当前请求先在

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -648,7 +649,7 @@ def test_same_thread_accumulates_beyond_recent_turn_setting_until_compact(tmp_pa
 
 def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_path) -> None:
     # 给稳定 system/workspace prompt 留出小幅演进余量；本测试验证的是 transcript
-    # 成功压缩与 owner 索引，不应卡在候选刚好高于 recovery target 的单 token 边界。
+    # 成功压缩与 owner 索引，不应卡在候选刚好高于优选 recovery target 的单 token 边界。
     agent = _agent(tmp_path, context_tokens=13_000, max_turns=3)
     backend = _SummaryBackend()
     agent.backend = backend
@@ -833,7 +834,7 @@ def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_p
         assert thread is not None
         with pytest.raises(
             ConversationCompactError,
-            match="did not reach the configured recovery target",
+            match="did not fall below the configured trigger",
         ):
             prepare_conversation_context(
                 agent,
@@ -877,6 +878,61 @@ def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_p
         / f"{context.thread_id}.jsonl"
     )
     assert not checkpoint_path.exists()
+
+
+def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_unreachable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """60% 是优选目标；候选已低于 90% 触发线时不能反复丢弃并重烧摘要。"""
+
+    from agent_py_agent.agent.conversation import compact as compact_module
+
+    agent = _agent(tmp_path, context_tokens=10_000)
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_recovery_target_percent = 60
+    backend = _SummaryBackend()
+    agent.backend = backend
+    request = _request("ou-trigger-fallback")
+    context = _context(agent, request, "gw-create", "开始")
+    for index in range(4):
+        for role in ("user", "assistant"):
+            assert _append_gateway_conversation_message(
+                agent,
+                {"metadata": {"channel": "feishu"}},
+                context,
+                request_id=f"gw-trigger-fallback-{index}-{role}",
+                role=role,
+                content=f"第 {index} 轮 {role} " + ("历史内容" * 80),
+            )
+    original_build = compact_module._build_compact_candidate
+
+    def build_candidate_below_trigger(*args, **kwargs):
+        candidate = original_build(*args, **kwargs)
+        return replace(candidate, projected_tokens_after=8_500)
+
+    monkeypatch.setattr(
+        compact_module,
+        "_build_compact_candidate",
+        build_candidate_below_trigger,
+    )
+    thread = agent.conversation_store.load_thread(context.thread_id)
+    assert thread is not None
+
+    compacted = prepare_conversation_context(
+        agent,
+        agent.conversation_store,
+        thread,
+        options=ConversationCompactOptions(current_prompt="继续", force=True),
+    )
+    stored = agent.conversation_store.load_thread(context.thread_id)
+
+    assert compacted.compacted is True
+    assert compacted.projected_tokens == 8_500
+    assert compacted.trigger_tokens == 9_000
+    assert stored is not None and stored.compact_generation == 1
+    assert stored.compact_consecutive_failures == 0
+    assert backend.calls == 1
 
 
 def test_compact_circuit_half_opens_after_cooldown_and_success_resets_it(tmp_path) -> None:

@@ -122,10 +122,13 @@
   367 行 final 报告、3.17M provider cache-read，Todo/产物/终态均连续。
 
 - [x] `memory_compact_auto_trigger_percent=90` 与 `memory_compact_recovery_target_percent=60` 必须由 main/child、
-  live-tool/transcript 共用；128k 窗口压缩后完整 provider 输入应不高于 76.8k，至少留出约 38.4k 再到触发线。
-  已完成会话基线超过恢复目标时不得先烧一轮必重压的 live summary；fresh MiniMax-M2.7 长 TUI 仍需证明任务、
-  插话、工具事实和 final 不丢。u314 三代分别覆盖不同 transcript/live-tool source，提交后的 source projection
-  均低于目标；后续增长来自新增报告读取与 final，不是同候选贴线重压。
+  live-tool/transcript 共用；128k 窗口应优先压到 76.8k，为下一段工作留空间。R162 进一步证明 60% 不能作为
+  第二提交硬门：固定上下文使目标不可达时，最佳候选只要 `<115.2k` 就必须提交，`>=115.2k` 才回滚。
+  u314 三代均达到优选目标；新的低于 trigger fallback 已有 focused 覆盖。
+
+- [ ] R162 fresh MiniMax-M2.7 长 child 必须自然跨过一次 active-turn context pressure：同一 operation 最终
+  completed、exact child checkpoint 存在、generation/TUI `compact` 同步从 0 到 1+，原 attempt 继续且最终
+  Working 收口；不能再出现多次摘要用量已发生但全部 candidate_discarded、靠 fresh handoff 账外降量。
 
 - [ ] 后台 main 在一个 scheduler slice 连续推进 8 代 Compact 后必须以 typed yield 干净让出：claim 结束为
   finished、原 wake 未消费、无 policy failure/假 RuntimeError，下一 slice 从 canonical generation 续跑。
