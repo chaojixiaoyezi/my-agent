@@ -17,15 +17,16 @@
 
 ## 下一版优先级
 
-### 子代理上下文溢出的正式 Compact 代次
+### Compact 浅压缩与缓存重建成本
 
-状态：本地 focused 通过，待 `.10` MiniMax-M2.7 长 TUI
+状态：R163 只读证据完成，待实现与新长 TUI
 
-解决问题：R162 长 child 连续生成 23 次有效摘要，但因为都未压到 60% 理想目标而被回滚；随后又允许新
-`Agent.run` 用有界 handoff 续跑，造成实际上下文下降、费用已发生、TUI 却始终 `compact 0`。当前统一为
-会话运行时/终端交互 的提交边界：60% 是优选目标，低于 90% 真实 trigger 就是可提交候选；child 外层必须看到
-自己的 ConversationThread generation 真正推进后才能续跑。待部署后用真实长工具链验证动画、计数、
-checkpoint、同 attempt 续接、用户插话与最终终态，不能只凭 mock 通过。
+解决问题：R163 已证明 child 溢出正式记代和五代 main Compact 都是真实新历史，不再账外续跑；但 main
+gen1/4/5 只释放约 12%–18%，压后离 90% 触发线仅 2k 左右。当前计划先让最低水位估算使用与真实删除同构的
+只读 IR，而不是用空 `tool_ir_history` 假设不可删的 User/RuntimeFacts 也会消失；再把机械 fallback 的输入预算
+与输出预算拆开，并评估结构化替换旧 RuntimeFacts。低于 trigger 的有效候选继续提交，不能恢复“没到 60%
+就作废”。后续再按 终端交互 的 compact fork 评估复用主请求 system/tools/model/thinking 稳定前缀，必须以
+provider usage 证明缓存收益，不能只加 cache 标记或牺牲长期会话记忆。
 
 ### 模型前置失败后的 run/attempt 终态
 
@@ -45,18 +46,6 @@ checkpoint、同 attempt 续接、用户插话与最终终态，不能只凭 moc
 以为任务结束却仍在 Working，也可能重复副作用。当前与 会话运行时 普通 turn 对齐：普通模式在本轮自然结束；只有
 用户显式创建的 ThreadGoal 持有跨轮持续执行语义。旧 policy 只做 typed retirement，不再被执行；子代理等待、
 生命周期 durable wake、显式插话和 provider transient retry 仍按各自结构化事件恢复，不能被误删成“都不续跑”。
-
-### 续作回绑后的占位壳与软计划终态一致性
-
-状态：Todo 身份迁移 Focused 已通过、待真 TUI；占位壳仍待设计
-
-解决问题：R161 已证明历史绝对地址和 exact successor 回绑正确，但回绑前物化的请求目录仍以
-`ABANDONED` 空壳留在 `tasks/`。它没有业务文件，也没有造成写错项目，但长期使用会污染用户看到的任务目录；
-修复必须保留 request/task link 的审计事实，不能粗暴删除历史。相同真跑还发现模型最后已按原 `q1..q5`
-发送 `done`，但 Todo 先建在占位 task-path，exact rebind 后更新改为寻址历史 task-path，底座把原 id 误判成
-新项并要求 title，导致底部清单继续显示“0/5、进行中 1”。当前先修结构化 workspace rebind 同步迁移本代
-display plan；随后再对照 会话运行时 rollout/turn 收口“审计记录保留、用户目录不堆壳”。不得解析 final 或 pytest
-文本替模型验收。
 
 ### Computer Use 复用开源执行器
 

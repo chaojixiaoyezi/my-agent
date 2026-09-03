@@ -132,6 +132,7 @@ _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS = 0.08
 _CHUNK_STREAM_FLUSH_CHARS = 128
 _GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
 _MAX_PROMPT_OPERATION_EVIDENCE_EVENTS = 4
+_MAX_RECENT_TASK_WORKSPACES = 4
 _CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
 _CONTEXT_USAGE_TOKEN_FIELDS = (
     "context_window_tokens",
@@ -829,6 +830,10 @@ class _GatewayConversationContext:
     canonical_history_messages: tuple[dict[str, object], ...] = ()
     recent_artifacts: tuple[dict[str, object], ...] = ()
     workspace_task: _GatewayWorkspaceSelection | None = None
+    # LLM: These exact owner/thread completed-task refs are model-visible candidates only;
+    # they never select cwd, grant write authority, or bypass exact-path runtime rebinding.
+    # 字段用途: 保存同一会话最近完成任务的精确目录候选，让模型能识别“回到上个项目”而不靠猜路径。
+    recent_task_workspaces: tuple[dict[str, str], ...] = ()
     # LLM: These are bounded, exact-root terminal child deliveries from the observation ledger;
     # prompt rendering must keep them separate from chat prose and omit runner-private payloads.
     # 字段用途: 保存当前根任务直属子代理的完成回复和精确产物引用，供普通后续轮直接整合。
@@ -2302,6 +2307,13 @@ def _gateway_conversation_context(
         request=inputs.request,
         request_id=inputs.request_id,
     )
+    recent_task_workspaces = _gateway_recent_task_workspaces(
+        store,
+        thread,
+        workspace_task,
+        load_errors,
+        request_id=inputs.request_id,
+    )
     subagent_completions = _gateway_subagent_completion_context(
         store,
         thread.thread_id,
@@ -2330,6 +2342,7 @@ def _gateway_conversation_context(
         canonical_history_messages=canonical_history_messages,
         recent_artifacts=recent_artifacts,
         workspace_task=workspace_task,
+        recent_task_workspaces=recent_task_workspaces,
         subagent_completions=subagent_completions,
         thread_goal=thread_goal,
         named_work=named_work,
@@ -2854,6 +2867,73 @@ def _existing_gateway_workspace_path(value: object) -> str:
     return str(path) if path.is_dir() else ""
 
 
+# LLM: This bounded projection exposes only canonical completed-task directories from the same
+# owner/thread. It is discovery context, never workspace selection or execution authority; exact
+# tool paths still pass the normal owner scope and runtime rebind gates.
+# 函数用途: 列出同一会话最近完成的任务目录候选，供模型理解用户对旧工作的指代并先查原目录。
+def _gateway_recent_task_workspaces(
+    store: object,
+    thread: object,
+    workspace_task: _GatewayWorkspaceSelection | None,
+    load_errors: list[dict],
+    *,
+    request_id: str,
+) -> tuple[dict[str, str], ...]:
+    thread_id = str(getattr(thread, "thread_id", "") or "").strip()
+    owner_home_text = str(getattr(thread, "owner_home", "") or "").strip()
+    try:
+        owner_home = Path(owner_home_text).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return ()
+    if not thread_id or not owner_home.is_dir():
+        return ()
+    try:
+        links, errors = store.task_links_report(thread_id)
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.recent_task_workspaces"))
+        return ()
+    load_errors.extend(error for error in errors if isinstance(error, dict))
+    current_task_id = str(getattr(workspace_task, "task_id", "") or "").strip()
+    current_path = _existing_gateway_workspace_path(
+        getattr(workspace_task, "task_path", "")
+    )
+    rows: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    ordered = sorted(
+        links,
+        key=lambda link: (
+            float(getattr(link, "created_at", 0.0) or 0.0),
+            str(getattr(link, "task_id", "") or ""),
+        ),
+        reverse=True,
+    )
+    for link in ordered:
+        task_id = str(getattr(link, "task_id", "") or "").strip()
+        status = str(getattr(link, "status", "") or "").strip().lower()
+        if status != "completed" or task_id in {request_id, current_task_id}:
+            continue
+        if str(getattr(link, "cancellation_scope", "") or "").strip().lower() == "detached":
+            continue
+        task_path = _existing_gateway_workspace_path(getattr(link, "task_path", ""))
+        if not task_path or task_path == current_path or task_path in seen_paths:
+            continue
+        if not _path_is_within(Path(task_path), owner_home):
+            continue
+        goal = " ".join(str(getattr(link, "goal", "") or "").split())[:160]
+        rows.append(
+            {
+                "task_id": task_id,
+                "task_path": task_path,
+                "status": status,
+                "goal": goal,
+            }
+        )
+        seen_paths.add(task_path)
+        if len(rows) >= _MAX_RECENT_TASK_WORKSPACES:
+            break
+    return tuple(rows)
+
+
 # LLM: Visible prose, canonical provider replay and artifact refs come from one bounded thread
 # row selection but remain three typed outputs; paths and native envelopes never enter prose.
 # 函数用途: 一次读取本轮共用的有界正文、原生消息前缀和近期产物引用。
@@ -2965,6 +3045,7 @@ def _conversation_prompt_section(
     if not scoped_audit_prepare:
         _append_subagent_completions_prompt(lines, conversation.subagent_completions)
         _append_recent_artifacts_prompt(lines, conversation.recent_artifacts)
+        _append_recent_task_workspaces_prompt(lines, conversation.recent_task_workspaces)
         _append_current_workspace_prompt(lines, conversation.workspace_task)
     if conversation.named_work:
         lines.extend(
@@ -3132,6 +3213,31 @@ def _append_current_workspace_prompt(
             (
                 f"- execution_running={json.dumps(workspace.execution_running)} "
                 f"execution_state_available={json.dumps(workspace.execution_state_available)}"
+            ),
+        ]
+    )
+
+
+# LLM: Historical candidates are exact structured refs, not an implicit sticky cwd. The model
+# decides relevance from the current user turn; runtime path scope and rebind remain authoritative.
+# 函数用途: 把最近完成任务的精确目录候选告诉模型，避免续作时在新占位目录重复重建。
+def _append_recent_task_workspaces_prompt(
+    lines: list[str],
+    workspaces: tuple[dict[str, str], ...],
+) -> None:
+    if not workspaces:
+        return
+    lines.extend(
+        [
+            "## Recent Completed Task Workspace Candidates",
+            "- 下面 JSON 来自同一 owner、同一 thread 的结构化任务链接，只是历史候选，不是当前 cwd 或写入授权。",
+            "- 若当前 User Task 指向其中一项旧工作，先读取对应精确 task_path 核对，不要在新目录重建；后续工具仍会按真实路径和权限裁决。",
+            "- 若当前任务无关则忽略；候选不足时再用 session_search 检索当前用户自己的历史任务。",
+            json.dumps(
+                list(workspaces),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
             ),
         ]
     )

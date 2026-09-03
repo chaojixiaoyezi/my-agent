@@ -1,5 +1,17 @@
 # COMPLETED
 
+## 2026-09-04 R163/R165 Compact 正式记代与历史任务续作收口
+
+- R163 `.10` 单 Gateway + MiniMax-M2.7 长 TUI 证明 child provider overflow 会先提交自己的
+  ConversationThread：DeepSeek child generation 1 为 `118,383→71,087`，8 名 child 全部 DONE。main 五次
+  Compact 的 47 个 live-tool source id 全不重叠，generation 严格 0→5，最终报告和 Working 自然收口。
+  会话运行时/终端交互 对照确认 60% 是优选目标、低于真实 trigger 即可提交；浅压缩成本作为新 ROADMAP 项保留。
+- R165 让普通新回合看到同 owner/thread 最近四个 completed task-path 候选，但不自动选择 cwd 或授予写权；
+  exact successor 成功后只删除身份精确匹配、完全未修改的系统占位脚手架，task link 审计记录仍保留。
+- 同一真 TUI 依次完成星河日志分析器、无关云尺目录体检器、再自然续作星河，定向测试分别 23/17/26 项
+  通过。第三轮业务文件只落原星河目录，continuation completed、占位 link superseded，物理 task 目录保持
+  两个；主 Compact 1→2→4，三轮最终回复都直接显示。相关本地 focused 通过，`.10` 仍只有一个 Gateway。
+
 ## 2026-09-03 R156–R161 Full Access 设备与历史任务绝对地址
 
 - Full Access 的根 bind 后重新 `--dev-bind /dev /dev`，恢复管理员已授权环境里的真实设备语义；WorkspaceOnly

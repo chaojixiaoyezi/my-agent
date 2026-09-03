@@ -326,6 +326,43 @@ def test_finish_run_workspace_rejects_a_different_run_identity(tmp_path):
     assert "finished_at" not in state
 
 
+def test_remove_unmodified_run_workspace_preserves_any_user_material(tmp_path):
+    from agent_py_agent.agent.user_space.run_workspace import (
+        EnsureRunWorkspaceRequest,
+        ensure_run_workspace,
+        remove_unmodified_run_workspace,
+    )
+
+    request = EnsureRunWorkspaceRequest(
+        home=tmp_path,
+        template="tasks/{date}/{task_name}",
+        task_name="临时空壳",
+        user_prompt="建立任务目录",
+        request_id="request-placeholder",
+        run_id="request-placeholder",
+        task_id="request-placeholder",
+    )
+    untouched = ensure_run_workspace(request)
+
+    assert remove_unmodified_run_workspace(
+        untouched.root,
+        owner_home=tmp_path,
+        task_id="request-placeholder",
+    ) is True
+    assert not untouched.root.exists()
+
+    preserved = ensure_run_workspace(request)
+    user_file = preserved.root / "notes.txt"
+    user_file.write_text("用户内容", encoding="utf-8")
+
+    assert remove_unmodified_run_workspace(
+        preserved.root,
+        owner_home=tmp_path,
+        task_id="request-placeholder",
+    ) is False
+    assert user_file.read_text(encoding="utf-8") == "用户内容"
+
+
 def test_finish_run_workspace_is_idempotent_and_appends_one_terminal_event(tmp_path):
     import json
 

@@ -1,6 +1,6 @@
 # TEST CHECKLIST
 
-## R156–R161 Full Access 设备与历史续作定位
+## R156–R165 Full Access 设备与历史续作定位
 
 - [x] Full Access 根挂载之后必须出现 `--dev-bind /dev /dev`，且 WorkspaceOnly 的最小设备树和 owner 墙不变。
 - [x] completion 索引保留 host-authored `conversation_runtime`；Gateway 历史结果投影 exact `task_ref`。
@@ -19,12 +19,13 @@
   写工具回绑旧项目且不在第三个目录重建。`.10` 的 `ma-r161-110-history-address` 中青岚/霜灯分别
   23/25 项 pytest 通过，续作青岚后原目录达到 30 项；第三轮占位 task 为 `ABANDONED`，原目录 successor
   为 `DONE`，未出现嵌套 `tasks/`。同轮自然 Compact 提交 generation 1。
-- [ ] 精确回绑成功后，只有 `work/` 元数据的 `ABANDONED` 占位 task 是否应从普通历史/任务目录投影移除，
-  需要先对照 会话运行时 的 turn cwd 与 rollout 历史保留语义；不能直接删除有审计价值的 request/task link。
-- [ ] 当前请求先在占位 task-path 建立 Todo、再 exact rebind 到历史 task-path 时，本代 display plan 与原 exact ids
+- [x] 精确回绑成功后，只有系统脚手架的 superseded 占位目录会被移除；ConversationTaskLink 审计事实保留。
+  删除前复核 owner/tasks 路径、workspace identity、完整允许文件/目录集合和 symlink；任意用户内容均不动。
+  R165 真 TUI 的第三轮占位 link 仍可审计，但物理 tasks 只剩 A/B 两个业务目录。
+- [x] 当前请求先在占位 task-path 建立 Todo、再 exact rebind 到历史 task-path 时，本代 display plan 与原 exact ids
   必须原子迁到目标 canonical 账本；后续 `{id,status}` 更新直接成功，源账本不留第二份。不得根据 final/pytest
-  文本自动打勾，也不得把任务路径切换误报成模型参数错误。失败先行生产缝隙与相关 focused 已通过；待 `.10`
-  单 Gateway + MiniMax-M2.7 真 TUI 重跑“先建 Todo → 回绑旧项目 → 原 id 收尾”。
+  文本自动打勾，也不得把任务路径切换误报成模型参数错误。失败先行生产缝隙、focused 与 R165 `.10` 单
+  Gateway + MiniMax-M2.7 真 TUI 均已通过。
 
 ## 新任务/旧项目续作工作区裁决
 
@@ -126,7 +127,7 @@
   第二提交硬门：固定上下文使目标不可达时，最佳候选只要 `<115.2k` 就必须提交，`>=115.2k` 才回滚。
   u314 三代均达到优选目标；新的低于 trigger fallback 已有 focused 覆盖。
 
-- [ ] R162 fresh MiniMax-M2.7 长 child 必须自然跨过一次 active-turn context pressure：同一 operation 最终
+- [x] R163 fresh MiniMax-M2.7 长 child 必须自然跨过一次 active-turn context pressure：同一 operation 最终
   completed、exact child checkpoint 存在、generation/TUI `compact` 同步从 0 到 1+，原 attempt 继续且最终
   Working 收口；不能再出现多次摘要用量已发生但全部 candidate_discarded、靠 fresh handoff 账外降量。
 

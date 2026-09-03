@@ -12,7 +12,11 @@
 - `task_ref` 只帮助模型定位历史工作，不是写授权。真正续作仍由当前 turn 的工具参数进入统一 write boundary，
   再按同 thread canonical task path 执行 R155 的精确 rebind；owner 墙、冲突 active executor 和多路径歧义
   继续 fail closed。
-- 历史任务定位仍走按需工具发现，不把任务列表固定塞入每轮上下文。`session_search` 的
+- 历史任务定位有两层有界入口：Gateway 会把同 owner/thread 最近四个 completed canonical task-path 作为
+  动态尾部候选，帮助模型直接识别最近 A/B；更旧或候选不足时仍走按需工具发现。候选按 path 去重，排除
+  当前 request/task、detached、缺失目录和 owner 外路径，只携带 exact id/path/status 与短目标预览；它既不
+  设置 workspace selection，也不取得读写授权。
+- `session_search` 的
   `ToolModelHints` 覆盖“刚才/先前/回到/原项目”等自然续作说法，并提供限定 `gateway_request` 的查询示例；
   hints 只影响模型侧软推荐排序，不参与路径、owner、thread 或终态裁决。
 - discovery 对宽检索在本地最多超采样 20 条，将带合法 typed `task_ref` 的结果稳定提到普通文本前，
@@ -26,9 +30,10 @@
 - 首轮任务晋升可以把启动 cwd 的普通绝对路径重定向到正式 task root，但不得改写已经位于 canonical
   `<owner>/tasks/...` 下的显式历史地址。该保护仅在 target 的结构化形状证明 source 是 owner home 时启用；
   后续 task-to-task 重定向不套用这条例外。路径是否可读、可写或可续接仍由后续统一工具门裁决。
-- 真 TUI 中，历史地址命中后仍按既有两阶段生命周期工作：本轮占位 task 转 `ABANDONED`，原历史目录内创建
-  同 request id 的 continuation successor。业务文件只写 successor 的 canonical task root；占位壳是否继续
-  出现在用户任务目录属于后续 projection/retention 设计，不能通过删除 request/task 审计事实解决。
+- 真 TUI 中，历史地址命中后仍按既有两阶段生命周期工作：本轮占位 task 转 `superseded`，原历史目录内创建
+  同 request id 的 continuation successor。业务文件只写 successor 的 canonical task root；successor、sticky
+  selection、request binding 和 Todo 迁移均成功后，底座只删除 identity 精确匹配且整棵树仍为原始脚手架的
+  占位物理目录。任意用户文件、陌生目录、symlink 或身份冲突均不删除；superseded link 继续保留完整审计事实。
 - 如果本轮已在占位 task-path 建立 `task_progress`，上述 successor 切换还必须迁移同一 request 的
   `display_plan.generation_id`。迁移只使用 task-path 指纹、request generation 和 exact item ids：先合并并验证
   目标 canonical `progress.json`，再移除源文件。不同 generation、缺失源或同路径不迁移；final、pytest 文本和

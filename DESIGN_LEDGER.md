@@ -1,6 +1,22 @@
 # DESIGN LEDGER
 
-## 2026-09-03 子代理溢出正式记代与 Compact 有效候选边界【状态：Focused 通过，待 `.10` 真 TUI】
+## 2026-09-04 历史任务候选与续作占位工作区收口【状态：Focused 与 `.10` 真 TUI 通过】
+
+- 普通终态任务仍不自动成为下一回合 cwd。Gateway 只把同 owner、同 thread 最近四个已完成且真实存在的
+  canonical task-path 作为有界结构化候选放进动态尾部；模型判断当前请求是否相关，宿主不解析“前面/上次”
+  等措辞、不自动选择目录。真正读写仍经过 owner wall、workspace roots 与 exact mutation rebind。
+- 历史候选按 canonical path 去重，排除当前 request/task、detached、非完成、已删除与 owner 外路径；只携带
+  exact task id/path/status 和 160 字目标预览。候选不足仍可调用 `session_search`，因此这不是第二份任务索引。
+- exact successor 已完成 link supersede、thread sticky、request binding 与 Todo 迁移后，才尝试删除本轮懒建的
+  占位目录。删除器只接受 `<owner_home>/tasks` 内、`work/run_workspace.json.task_id` 精确匹配且整棵目录仍为
+  `activate_run_workspace` 原始脚手架的路径；任意用户文件、陌生目录、软链接或身份冲突都保持原样。审计用
+  task link 继续以 `superseded` 保留，目录整洁不靠抹掉历史记录实现。
+- R165 `.10` 单 Gateway + MiniMax-M2.7 真 TUI 在同一 session 完成星河日志分析器、无关云尺目录体检器，再以
+  自然表达续作星河。三轮分别通过 23、17、26 项定向测试；第三轮命中原目录，最终 task successor 为
+  completed、占位 link 为 superseded，而物理 `tasks/` 只有两个业务目录。主 Conversation Compact 在三轮中
+  从 1→2→4，最终回复均直接显示。
+
+## 2026-09-03 子代理溢出正式记代与 Compact 有效候选边界【状态：Focused 与 `.10` 真 TUI 通过；浅压缩成本待优化】
 
 - R162 `.10` 长子代理实际运行 1:34:33、上下文约 106k，界面仍显示 `compact 0`。读取 exact child thread 与
   transcript events 后确认不是 TUI 漏记：该线程 `compact_generation=0`、checkpoint 为空，23 次 operation
@@ -19,8 +35,13 @@
 - focused 覆盖三条边界：`recovery < after < trigger` 的 transcript/native 均提交 generation；`after >= trigger`
   保持回滚；child completed transcript 为空时由 active-turn archive 正式推进 generation 后续跑。真实验收仍需
   fresh MiniMax-M2.7 长 TUI 证明进度动画、child `compact 0 -> 1`、同一任务继续和最终 Working 收口。
+- R163 `.10` 真 TUI 已闭环：8 名 child 全部 DONE，DeepSeek child 的 generation 1 为
+  `118,383→71,087`；main 五代严格按 `0→1→2→3→4→5` 提交，47 个 live-tool source id 互不重叠，最终报告
+  与 Working 都自然收口。gen1/4/5 虽是真实新代次，但分别只降到 113,207/105,396/112,440，说明提交语义
+  已正确而最低水位估算、机械 fallback 长度和 Compact 摘要缓存复用仍有真实成本优化空间；该项另留
+  ROADMAP，不把有效代次回退成“达不到 60% 就丢弃”。
 
-## 2026-09-03 Exact workspace rebind 携带当前 Todo 账本【状态：Focused 通过，待真 TUI】
+## 2026-09-03 Exact workspace rebind 携带当前 Todo 账本【状态：Focused 与 `.10` 真 TUI 通过】
 
 - R161 真 TUI 证明模型最终 `task_progress` 已携带原 `q1..q5` 与 `done`，失败并非模型漏字段。当前请求先在
   占位 task-path 建账，显式历史写路径随后把 conversation task 绑定到原项目；`progress_ledger_id` 立即按新
@@ -33,6 +54,8 @@
   item/display generation 复核成功后才清理源文件。I/O 失败作为
   `conversation_task_progress_rebind` 结构化诊断留在当前 attrs，但软清单失败不取得阻断业务写入的权限。
   会话运行时 本身无需这层适配，因为 `update_plan` 直接归当前 turn；该扩展只服务 my-agent 已有的跨回合计划账本。
+- R165 同一 TUI 的第三轮先在占位目录建本代计划，再回绑原星河目录并自然收尾；最终回复直接显示，源占位
+  目录删除而 successor completed，证明计划身份没有因 task-path 改变而卡在旧账本。
 
 ## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：Focused 与 `.10` 真 TUI 均通过】
 
@@ -47,7 +70,8 @@
   `task_path` 交给既有写工具精确回绑，机器仍不解析用户措辞、不从标题或回答猜 cwd。
 - 两项均保持一个权威来源：设备权限仍由 SandboxSpec/bwrap argv 裁决；任务身份仍由 Gateway request
   与 ConversationStore 裁决，LocalStore/task_ref 只是 owner 内只读搜索投影。旧记录可由既有 Gateway
-  index rebuild 从 done request 补齐，不新增常驻任务目录列表或每轮 token 注入。
+  index rebuild 从 done request 补齐；R165 后续增加的最近四项动态候选也只读取相同 task link，不建立第二份
+  任务目录状态。
 - R156 真 TUI 证明 typed `task_ref` 本身正确，但真实“回到刚才那个……”措辞下，动态工具推荐把
   `session_search` 排在普通文件工具之后，MiniMax-M2.7 没有调用历史工具而是遍历 owner 目录，多个同类项目
   时选错。R157 只补齐 `ToolModelHints` 的“刚才/先前/回到/原项目”检索语义和带

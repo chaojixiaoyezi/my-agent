@@ -13,6 +13,9 @@
 - 真 TUI 必须使用单 Gateway + MiniMax-M2.7 的长工具任务，保留 exact child thread/events 证据；验收要求
   completed operation、checkpoint、`compact 1+`、原 attempt 续跑、最终回复可见且 Working 消失。上下文数值
   自己下降但 generation 不变属于失败。
+- R163 `.10` 真 TUI `ma-r163-110-child-compact` 已通过：8 名 child 全部 DONE，DeepSeek child 的
+  generation 1 为 `118,383→71,087`；main 五代严格递增且 47 个 live-tool source id 不重叠。gen1/4/5
+  分别只压到 113,207/105,396/112,440，属于有效但偏浅的 Compact，后续成本优化不能倒退为 60% 第二硬门。
 
 ## Full Access 基础设备与历史任务引用
 
@@ -47,11 +50,18 @@
   一个 canonical task root，必须在 handler/write boundary 之前回绑。同根的多个 terminal
   execution link 选最新一代，已懒建的本轮占位 link 转 `superseded`；两个不同根或
   同根多个 active link 不得猜。
+- 普通新回合可从动态尾部看到最多四个同 owner/thread 的 completed canonical task-path 候选；排除当前、
+  detached、已删除、非终态、owner 外路径并按 path 去重。该列表不得设置 workspace selection 或扩大权限。
+- exact successor 完成后，源占位目录只有在 identity task id 精确匹配且整棵树仍为系统脚手架时才能删除；
+  加入任意用户文件、陌生目录或 symlink 后必须保持原样。superseded task link 继续保留审计事实。
 - focused 命令：
   `python3 -m pytest agent_py_agent/tests/test_gateway_chat_conversation_context.py agent_py_agent/tests/test_gateway_conversation_control.py agent_py_agent/tests/test_tool_runtime_unification.py agent_py_agent/tests/test_conversation_store.py -q --tb=short`。
 - 真 TUI：`ma-r155-local-workspace-routing` 在同一会话完成无关 CSV 项目后，又显式续作旧文本
   项目。验收同时读 processing request `conversation_runtime`、thread `workspace_task_id`、task links
   与真实文件路径；不用模型最终文字代替路由事实。
+- R165 `.10` 真 TUI `ma-r165-110-workspace-continuity` 依次完成 A、无关 B、自然续作 A；定向测试
+  23/17/26 项通过，第三轮 successor completed、占位 link superseded 且占位物理目录不存在，tasks 下只有
+  A/B 两个业务目录。三轮主 Compact 计数 1→2→4，最终回复均直接显示。
 
 ## Compact 中断的不可见候选边界
 

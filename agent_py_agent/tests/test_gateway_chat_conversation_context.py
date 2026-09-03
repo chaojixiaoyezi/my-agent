@@ -3973,6 +3973,96 @@ def test_new_ordinary_turn_does_not_reuse_completed_sticky_workspace(tmp_path):
     assert links["gw-new"] == "active"
 
 
+def test_new_turn_projects_completed_workspace_candidates_without_selecting_them(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_historical_workspace_candidates",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-first", "完成星河日志分析器")
+    owner_home = Path(agent.home_paths.owner_home_dir)
+    original = owner_home / "tasks" / "2026-09-03" / "星河日志分析器"
+    second = owner_home / "tasks" / "2026-09-03" / "云尺目录体检器"
+    detached = owner_home / "tasks" / "2026-09-03" / "后台巡检"
+    for path in (original, second, detached):
+        (path / "work").mkdir(parents=True)
+        (path / "output").mkdir()
+    rows = (
+        ("task-star-old", "星河日志分析器旧执行", original, 1.0, "foreground"),
+        ("task-ruler", "云尺目录体检器", second, 2.0, "foreground"),
+        ("task-star-new", "星河日志分析器", original, 3.0, "foreground"),
+        ("task-detached", "后台巡检", detached, 4.0, "detached"),
+    )
+    for task_id, goal, path, now, cancellation_scope in rows:
+        agent.conversation_store.bind_task(
+            {
+                "thread_id": first.thread_id,
+                "task_id": task_id,
+                "goal": goal,
+                "status": "active",
+                "task_path": str(path),
+                "cancellation_scope": cancellation_scope,
+                "now": now,
+            }
+        )
+        agent.conversation_store.update_task_status(
+            {"task_id": task_id, "status": "completed", "now": now + 0.1}
+        )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-missing",
+            "goal": "已经被删除的任务",
+            "status": "active",
+            "task_path": str(owner_home / "tasks" / "missing"),
+            "now": 5.0,
+        }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-missing", "status": "completed", "now": 5.1}
+    )
+
+    followup = _conversation_context(
+        agent,
+        request,
+        "gw-return",
+        "回到星河日志分析器，增加 CSV 导出",
+    )
+    injection = _gateway_injections({"inject": []}, followup)[0]
+    attrs = _gateway_task_attributes(followup)
+
+    assert followup.workspace_task is None
+    assert followup.recent_task_workspaces == (
+        {
+            "task_id": "task-star-new",
+            "task_path": str(original),
+            "status": "completed",
+            "goal": "星河日志分析器",
+        },
+        {
+            "task_id": "task-ruler",
+            "task_path": str(second),
+            "status": "completed",
+            "goal": "云尺目录体检器",
+        },
+    )
+    assert "Recent Completed Task Workspace Candidates" in injection
+    assert str(original) in injection
+    assert "task-star-old" not in injection
+    assert "task-detached" not in injection
+    assert "task-missing" not in injection
+    assert attrs is not None
+    assert CONVERSATION_WORKSPACE_TASK_ID_ATTR not in attrs
+    assert "run_workspace" not in attrs
+
+
 def test_sticky_workspace_superseded_falls_back_to_reusable_task(tmp_path):
     # sticky 指向 superseded 任务时,普通轮次回退复用最近的可复用任务目录,
     # 不因 sticky 失效而开新任务目录(真机 2026-08-08:用户连续消息被截断成
@@ -4401,6 +4491,82 @@ def test_exact_mutation_rebind_moves_current_progress_plan_to_historical_workspa
     assert target_progress["display_plan"]["generation_id"] == "gw-followup"
     assert target_progress["display_plan"]["item_ids"] == ["q1", "q2"]
     assert not progress_path(owner_root, source_ledger_id).exists()
+
+
+def test_exact_rebind_removes_only_the_auto_materialized_placeholder(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_placeholder_cleanup",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    conversation = _conversation_context(agent, request, "gw-first", "完成原项目")
+    original = Path(agent.home_paths.owner_home_dir) / "tasks" / "original-task"
+    (original / "output").mkdir(parents=True)
+    (original / "work").mkdir()
+    target = original / "app.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": conversation.thread_id,
+            "task_id": "task-completed",
+            "goal": "完成原项目",
+            "status": "active",
+            "task_path": str(original),
+        }
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-completed", "status": "completed"}
+    )
+    followup = _conversation_context(agent, request, "gw-followup", "回到原项目追加功能")
+    attrs = _gateway_task_attributes(followup)
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        root_user_prompt="回到原项目追加功能",
+        context_scope="conversation",
+        task_attributes=attrs,
+    )
+    agent._current_run_params = params
+    try:
+        created = TaskProgressTool(agent).execute(
+            {
+                "action": "update",
+                "items": [{"id": "q1", "title": "追加功能", "status": "in_progress"}],
+            }
+        )
+        placeholder = Path(params.task_attributes["run_workspace"]["task_root"])
+        assert placeholder.is_dir()
+        rebound = _promote_work_tool(
+            agent,
+            params,
+            {
+                "tool": "edit_file",
+                "path": str(target),
+                "old_string": "value = 1",
+                "new_string": "value = 2",
+            },
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert created.ok is True
+    assert rebound is None
+    assert params.task_attributes["run_workspace"]["task_root"] == str(original)
+    assert params.task_attributes["conversation_placeholder_workspace_cleanup"] == {
+        "status": "removed",
+        "task_id": "gw-followup",
+    }
+    assert not placeholder.exists()
+    placeholder_link = agent.conversation_store.load_task_link("gw-followup")
+    assert placeholder_link is not None and placeholder_link.status == "superseded"
 
 
 def test_owner_relative_task_mutation_reselects_exact_conversation_workspace(tmp_path):

@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-09-04 R163/R165 Compact 真机与历史续作占位收口
+
+- R163 `.10` 长 TUI 已证明 child overflow 会先推进 exact child ConversationThread；DeepSeek child
+  `118,383→71,087`、generation 1 后继续，8 名 child 全部 DONE。main 五代 checkpoint 严格递增，47 个
+  live-tool source id 不重复；gen1/4/5 偏浅是后续成本问题，不再把有效 generation 说成漏记。
+- Gateway 普通回合动态尾部新增最多四个同 owner/thread completed task-path 候选。模型自行判断是否与当前
+  请求有关；候选不设置 cwd、不授予写权，真正续作继续走 exact mutation rebind。
+- rebind 的 successor、thread/request binding 与本代 Todo 迁移全部成功后，只清除身份精确且未被修改的
+  占位脚手架。R165 `.10` 同一 TUI 的 A→无关 B→自然续作 A 分别通过 23/17/26 项定向测试，第三轮最终
+  Todo/回复收口，物理 tasks 只有 A/B 两个业务目录，superseded link 保持可审计。
+
 ## 2026-09-03 R162 exact workspace rebind 携带本代 Todo
 
 - 真 TUI 最终 `task_progress` 已正确提交原 q1..q5；失败来自 rebind 前后的 task-path ledger key 改变，不是模型
@@ -8,7 +19,7 @@
   generation 从源 task-path 账本合并到目标账本；目标落盘并复核 item ids/generation 后才移除源文件。旧代、
   无源账本和同路径均不动，原始 tool archive 保留。
 - 失败先行回归已证明修前原 `{id,status}` 被拒、修后直接收尾；相关 task progress、Gateway、tool loop 与 TUI
-  投影 focused 全绿。仍需 `.10` 同类真实 MiniMax-M2.7 TUI 验收。
+  投影 focused 全绿，R165 `.10` 同类真实 MiniMax-M2.7 TUI 已验收。
 
 ## 2026-09-03 R156 历史检索携带精确任务目录
 
@@ -18,8 +29,8 @@
 - completion 现在沿用 done request 的 host-authored request/thread/task/path；LocalStore 仍只是搜索索引，
   `session_search` 只为 `gateway_request` 返回 typed `task_ref`。写入旧项目仍由统一 write boundary 的
   exact path rebind 二次裁决，搜索命中本身不授予写权限。
-- 该方案不恢复 terminal sticky task，也不把全部历史任务注入每轮 prompt。模型只在用户提及历史工作时按需
-  搜索，因此兼顾长会话续作、owner 隔离与缓存前缀稳定。
+- 该阶段不恢复 terminal sticky task；R165 后续只增加最近四个同 thread completed path 的有界动态候选，
+  更旧历史仍按需搜索，因此兼顾长会话续作、owner 隔离与缓存稳定前缀。
 - `.10` 真 TUI 首轮发现：引用和检索返回都正确，但“回到刚才那个……”没有把历史工具排到推荐首位，模型
   先用文件工具遍历 owner，遇到多个日志分析项目后猜错。R157 补全 `session_search` 的自然续作 hints 和
   `gateway_request` 查询示例；完整默认工具快照下该工具现排首位。这个修复只改变软推荐，不改变 Schema、

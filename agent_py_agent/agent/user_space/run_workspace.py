@@ -96,6 +96,82 @@ def ensure_run_workspace(request: EnsureRunWorkspaceRequest) -> RunWorkspacePath
     return activate_run_workspace(run_workspace_paths(request).root, request)
 
 
+# LLM: This cleanup is deliberately narrower than retention: it removes only an exact
+# owner/tasks descendant whose persisted identity matches the superseded task and whose complete
+# tree is still the untouched scaffold produced by activate_run_workspace. Any unknown file,
+# directory, symlink, identity mismatch, or concurrent filesystem change makes it a no-op.
+# 函数用途: 续作回绑成功后安全清掉未承载用户内容的临时任务空壳；发现任何真实内容就原样保留。
+def remove_unmodified_run_workspace(
+    root: str | Path,
+    *,
+    owner_home: str | Path,
+    task_id: str,
+) -> bool:
+    expected_task_id = str(task_id or "").strip()
+    try:
+        workspace_root = Path(root).expanduser().resolve(strict=True)
+        tasks_root = (Path(owner_home).expanduser().resolve(strict=True) / "tasks").resolve(
+            strict=False
+        )
+        relative_root = workspace_root.relative_to(tasks_root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if not expected_task_id or not relative_root.parts or not workspace_root.is_dir():
+        return False
+    paths = _run_workspace_paths_for_root(workspace_root)
+    identity = _workspace_identity(workspace_root)
+    if str(identity.get("task_id") or "").strip() != expected_task_id:
+        return False
+    scaffold_files = {
+        paths.collab_blackboard_md,
+        paths.collab_messages_jsonl,
+        paths.collab_findings_jsonl,
+        paths.artifact_manifest_json,
+        paths.task_yaml,
+        paths.workspace_json,
+        paths.state_json,
+        paths.timeline_jsonl,
+    }
+    allowed_files = scaffold_files | {
+        path.with_name(path.name + ".lock") for path in scaffold_files
+    }
+    allowed_dirs = {
+        paths.work_dir,
+        paths.output_dir,
+        paths.runtime_dir,
+        paths.agents_dir,
+        paths.logs_dir,
+        paths.collab_dir,
+        paths.collab_evidence_packets_dir,
+        paths.artifacts_dir,
+        paths.summaries_dir,
+        paths.artifacts_dir.parent,
+    }
+    try:
+        entries = list(workspace_root.rglob("*"))
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.is_symlink():
+            return False
+        if entry.is_file() and entry not in allowed_files:
+            return False
+        if entry.is_dir() and entry not in allowed_dirs:
+            return False
+        if not entry.is_file() and not entry.is_dir():
+            return False
+    try:
+        for entry in sorted(entries, key=lambda path: len(path.parts), reverse=True):
+            if entry.is_file():
+                entry.unlink()
+            else:
+                entry.rmdir()
+        workspace_root.rmdir()
+    except OSError:
+        return False
+    return not workspace_root.exists()
+
+
 # LLM: 这是 standalone 主运行工作区的唯一终态写入口；只接受结构化运行结果和精确
 # request/run/task 身份，不解析模型正文，也不扫描 output/ 猜“是否完成”。
 # 函数用途: 在一次顶层运行真正返回时原子结束 state.json，并给 timeline 留一条可审计终态。
@@ -569,5 +645,6 @@ __all__ = [
     "activate_run_workspace",
     "ensure_run_workspace",
     "finish_run_workspace",
+    "remove_unmodified_run_workspace",
     "run_workspace_paths",
 ]

@@ -316,7 +316,21 @@ def bind_current_conversation_workspace(agent: object, task_id: str):
     if not _remember_conversation_workspace(store, link):
         return None
     attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] = True
-    return link if _publish_current_request_task_binding(current, link) else None
+    if not _publish_current_request_task_binding(current, link):
+        return None
+    if _remove_rebound_placeholder_workspace(
+        agent,
+        store,
+        thread_id=thread_id,
+        task_id=prior_current_id,
+        source_workspace=source_workspace,
+        target_workspace=str(workspace or ""),
+    ):
+        attrs["conversation_placeholder_workspace_cleanup"] = {
+            "status": "removed",
+            "task_id": prior_current_id,
+        }
+    return link
 
 
 # LLM: A main-turn exact workspace successor changes the canonical task-path progress key.
@@ -354,6 +368,46 @@ def _rebind_current_task_progress(
         "generation_mismatch",
     }:
         attrs["conversation_task_progress_rebind"] = result
+
+
+# LLM: Cleanup follows—not precedes—the exact successor bind, sticky selection, request-binding
+# publish, and prior-link supersede. It delegates deletion to the untouched-scaffold verifier;
+# user files, unknown workspace layouts, active links, and cross-owner paths always survive.
+# 函数用途: 精确回到旧任务后移除本轮自动生成但尚未承载用户内容的占位目录，避免任务列表积累空壳。
+def _remove_rebound_placeholder_workspace(
+    agent: object,
+    store: object,
+    *,
+    thread_id: str,
+    task_id: str,
+    source_workspace: str,
+    target_workspace: str,
+) -> bool:
+    source = _selected_task_workspace(source_workspace)
+    target = _selected_task_workspace(target_workspace)
+    candidate_id = str(task_id or "").strip()
+    if source is None or target is None or source == target or not candidate_id:
+        return False
+    try:
+        link = store.load_task_link(candidate_id)
+        thread = store.load_thread(thread_id)
+    except Exception:
+        return False
+    if (
+        link is None
+        or thread is None
+        or str(getattr(link, "thread_id", "") or "").strip() != thread_id
+        or str(getattr(link, "status", "") or "").strip().lower() != "superseded"
+        or _selected_task_workspace(getattr(link, "task_path", "")) != source
+    ):
+        return False
+    from ..user_space.run_workspace import remove_unmodified_run_workspace
+
+    return remove_unmodified_run_workspace(
+        source,
+        owner_home=str(getattr(thread, "owner_home", "") or ""),
+        task_id=candidate_id,
+    )
 
 
 def rebase_subagent_conversation_workspace(agent: object, link: object) -> bool:
