@@ -38,7 +38,7 @@
 
 ### 受管命令的基础设备文件
 
-状态：设备链 `.10` 真 TUI 已通过；R158 历史续作结构化排序 Focused 通过，待真 TUI 复验
+状态：设备链 `.10` 真 TUI 已通过；R159 历史续作地址规范化 Focused 通过，待真 TUI 复验
 
 解决问题：R130 主代理尝试运行 pytest 时，受管命令环境访问 `/dev/null` 得到
 `PermissionError`，pytest 的 capture 初始化因此失败；同一回合改用 unittest 后 18 项全通过，说明不是业务
@@ -49,7 +49,9 @@
 要求回到项目 A 时，首轮虽已有正确 `task_ref`，但 MiniMax-M2.7 未调用 `session_search`，转而全盘查目录并
 选错同类旧项目。R157 已让“刚才/先前/回到/原项目”等自然措辞把 `session_search` 推荐到首位，但真跑中前 5 条
 仍被普通会话与当前 processing 请求挤满。R158 改为本地超采样后按终态 typed task_ref 稳定提前，
-当前占位项不再冒充历史任务。仍待同一 TUI 模式复验精确回绑后整体移入 COMPLETED。
+当前占位项不再冒充历史任务。R158 真跑中引用已排首位，但模型复用的 `tasks/...` 被旧参数入口再拼到当前
+cwd。R159 改由 host-authored owner wall 还原任务地址，写授权仍由原边界裁决。仍待同一 TUI 模式复验
+精确回绑后整体移入 COMPLETED。
 
 ### Computer Use 复用开源执行器
 

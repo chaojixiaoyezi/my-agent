@@ -1,6 +1,6 @@
 # TEST CHECKLIST
 
-## R156–R158 Full Access 设备与历史续作定位
+## R156–R159 Full Access 设备与历史续作定位
 
 - [x] Full Access 根挂载之后必须出现 `--dev-bind /dev /dev`，且 WorkspaceOnly 的最小设备树和 owner 墙不变。
 - [x] completion 索引保留 host-authored `conversation_runtime`；Gateway 历史结果投影 exact `task_ref`。
@@ -10,6 +10,8 @@
   `source_type=gateway_request`；不常驻注入历史任务菜单。
 - [x] 默认前 5 条被聊天文本占满时，owner-local 超采样仍必须把第 6 条终态 task_ref 稳定提前；
   `queued/processing/running` 当前占位请求不得取得历史 task_ref。
+- [x] 历史 task_ref 被模型复用成 owner-relative `tasks/...` 时，必须从结构化 owner wall 还原，不嵌套 cwd；
+  读通、非授权写仍拒绝、穿越 owner 仍拒绝。
 - [ ] 同一 TUI 完成两个无关任务后，以自然措辞续作第一个；模型从 session_search 取得 exact task_path，
   写工具回绑旧项目且不在第三个目录重建。
 

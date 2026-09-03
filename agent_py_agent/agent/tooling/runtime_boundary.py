@@ -9,7 +9,7 @@ from typing import Any
 # LLM: This module normalizes only host-declared workspace aliases before policy and execution.
 # It must never infer paths from prose or widen the boundary; absolute canonical paths remain
 # idempotent and every rewritten path is still checked by the normal read/write policy.
-# 模块用途: 把 output/work/workspace 和当前 tasks/... 地址转成唯一物理路径，避免重复拼接任务目录。
+# 模块用途: 把 output/work/workspace 和 owner 内 tasks/... 地址转成唯一物理路径，避免重复拼接任务目录。
 
 _TASK_WORKSPACE_RELATIVE_PATH_TOOL_NAMES = {
     "apply_patch",
@@ -134,6 +134,9 @@ def _task_workspace_relative_path(
         return owner_alias_path
     if _is_absolute_or_home_path(normalized):
         return ""
+    owner_task_path = _owner_tasks_alias_path(normalized, boundary)
+    if owner_task_path:
+        return owner_task_path
     current_task_path = _current_task_alias_path(normalized, boundary)
     if current_task_path:
         return current_task_path
@@ -177,6 +180,31 @@ def _model_owner_home_alias_path(
     except (OSError, RuntimeError, ValueError):
         return ""
     if not _is_relative_to(candidate, owner_root):
+        return ""
+    return str(candidate)
+
+
+# LLM: An owner-relative tasks/... value is a canonical address, not cwd-relative prose. Resolve
+# it only from the host-authored owner wall; later read/write policy and exact mutation rebind still
+# decide access. This lets a model reuse a session_search task_ref without nesting it under cwd.
+# 函数用途: 把当前用户自己的 tasks/... 地址还原到 owner 根，但不因此授予读写权。
+def _owner_tasks_alias_path(
+    normalized: str,
+    boundary: dict[str, object],
+) -> str:
+    parts = tuple(part for part in normalized.split("/") if part)
+    if not parts or parts[0] != "tasks" or any(part in {".", ".."} for part in parts):
+        return ""
+    root_text = str(boundary.get("effective_owner_scope_root") or "").strip()
+    if not root_text:
+        return ""
+    try:
+        owner_root = Path(root_text).expanduser().resolve(strict=False)
+        tasks_root = (owner_root / "tasks").resolve(strict=False)
+        candidate = owner_root.joinpath(*parts).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    if not _is_relative_to(candidate, tasks_root):
         return ""
     return str(candidate)
 

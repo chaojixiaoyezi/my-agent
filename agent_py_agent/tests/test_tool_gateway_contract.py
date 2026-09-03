@@ -593,6 +593,46 @@ def test_tool_gateway_maps_current_owner_relative_task_alias_inside_patch(tmp_pa
     assert not (task_root / "tasks").exists()
 
 
+def test_tool_gateway_maps_historical_owner_task_alias_without_cwd_nesting(tmp_path: Path):
+    """session_search 返回的 tasks/... 可读旧任务，但不会绕过写边界。"""
+    owner_home = tmp_path / "owners" / "user-a"
+    current = owner_home / "tasks" / "2026-08-29" / "current-task"
+    historical = owner_home / "tasks" / "2026-08-28" / "historical-task"
+    current.mkdir(parents=True)
+    historical.mkdir(parents=True)
+    source = historical / "report.txt"
+    source.write_text("historical result\n", encoding="utf-8")
+    registry = _registry(current)
+    owner_relative = "tasks/2026-08-28/historical-task/report.txt"
+    boundary = {
+        "task_root": str(current),
+        "execution_cwd": str(current),
+        "effective_owner_scope_root": str(owner_home),
+        "allowed_read_roots": [str(owner_home)],
+        "allowed_write_roots": [str(current)],
+    }
+
+    readback = _execute(
+        registry,
+        "read_file",
+        {"path": owner_relative},
+        write_boundary=boundary,
+    )
+    forbidden_write = _execute(
+        registry,
+        "write_file",
+        {"path": owner_relative, "content": "must not overwrite\n"},
+        write_boundary=boundary,
+    )
+
+    assert readback.ok is True
+    assert "historical result" in readback.output
+    assert forbidden_write.ok is False
+    assert forbidden_write.error_code == "WRITE_FORBIDDEN"
+    assert source.read_text(encoding="utf-8") == "historical result\n"
+    assert not (current / "tasks").exists()
+
+
 def test_tool_gateway_maps_owner_workspace_alias_without_granting_write(
     tmp_path: Path,
 ):

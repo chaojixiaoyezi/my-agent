@@ -17,6 +17,9 @@
 - R157 二次真 TUI 又暴露：工具已被调用，但默认 5 条命中被普通消息和本轮 processing 请求占满，
   排在后面的已完成项目 task_ref 仍不可见。R158 对宽检索在本地最多取 20 条，再用 host-authored
   终态 task_ref 稳定分组；不读 prompt 正文做分类，不变更组内 FTS 顺序，不赋予写权。
+- R158 第三次真 TUI 中 typed task_ref 已稳定排第一，但模型把它缩为 `tasks/...` 后，文件工具又按
+  当前占位 cwd 解释，形成 `current/tasks/...`。R159 在共享参数规范化器中以结构化 owner wall 为唯一基准
+  还原 owner-relative 任务地址；所有读写边界与 exact mutation rebind 继续在后续逐层检查。
 
 ## 2026-09-02 R155 终态工作区不隐式吸附，精确写路径可回绑
 

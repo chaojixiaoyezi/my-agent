@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-09-03 R156–R158 Full Access 设备已通过，历史续作结构化排序待真 TUI 复验
+## 2026-09-03 R156–R159 Full Access 设备已通过，历史续作地址规范化待真 TUI 复验
 
 - `.10` 真 TUI 复现了普通 pytest 与 `2>/dev/null` 都报 PermissionError。宿主 `/dev/null` 正常，
   WorkspaceOnly 的 `--dev /dev` 也正常；精确进程参数证明失败只在 Full Access 的 `--bind / /`
@@ -18,6 +18,10 @@
   模型已调用 `session_search`，但默认 5 条结果被会话文本和当前 processing 请求挤满，又在第三个
   目录里重建，已用 Esc 中断避免扩大。R158 改为宽检索本地超采样后优先返回已结束的 typed
   `task_ref`，当前占位请求不得冒充历史项目；26 项 `session_search` focused 已通过。
+- R158 真 TUI `ma-r158-110-taskref-priority` 已证明 task_ref 排第一，但模型把绝对目录复用为
+  `tasks/...`，旧规范化器又相对当前占位 cwd 拼接，导致读路径成为 `current/tasks/...`。R159 现从结构化
+  owner wall 解析 owner-relative 任务地址，同时保留写边界：定向回归证明可读旧任务，对旧任务的写入仍
+  `WRITE_FORBIDDEN`，且不产生 cwd 下嵌套 `tasks/`。
 
 ## 2026-09-02 R155 新任务与旧项目续作的工作区分流（本机真 TUI 通过）
 

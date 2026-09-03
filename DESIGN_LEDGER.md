@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：设备真 TUI 通过；R158 结构化排序 Focused 通过，待真 TUI 复验】
+## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：设备真 TUI 通过；R159 历史地址规范化 Focused 通过，待真 TUI 复验】
 
 - Full Access 继续经过统一 attempt sandbox，但 Linux 根目录 `--bind / /` 后必须用
   `--dev-bind /dev /dev` 重新开放真实设备树。RHEL/SELinux enforcing 测试机证明：普通根 bind
@@ -24,6 +24,12 @@
   20 条候选，只依据 host-authored 的“终态 Gateway + 合法 task_ref”稳定提前；每组内仍保持 FTS
   相关度顺序。`queued/processing/running` 占位请求不再投影成历史任务。这不是用户文本分类，
   也不改变写入授权与 exact-path rebind 的二次裁决。
+- R158 真 TUI 已让 typed task_ref 稳定排第一，但 MiniMax-M2.7 将其复用成 owner-relative
+  `tasks/日期/任务名`；旧规范化器只在该地址恰好等于“当前占位任务”时还原，否则把它再拼到当前
+  cwd 下形成 `current/tasks/...`。R159 让唯一参数规范化入口从 host-authored
+  `effective_owner_scope_root` 还原任意合法 owner-local `tasks/...` 地址；还原只解决地址，后续 owner 墙、
+  allowed-read/write roots 与 exact mutation rebind 仍独立裁决，因此不会把历史路径变成写授权。对照 会话运行时
+  `TurnContext/TurnEnvironment` 的绝对 cwd 机器字段，界面脱敏值不作为路由权威。
 
 ## 2026-09-02 普通终态任务不再隐式吸附新回合【状态：R155 本机真 TUI/Focused 通过】
 

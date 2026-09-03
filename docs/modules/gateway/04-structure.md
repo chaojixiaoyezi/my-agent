@@ -18,6 +18,9 @@
 - discovery 对宽检索在本地最多超采样 20 条，将带合法 typed `task_ref` 的结果稳定提到普通文本前，
   然后再按用户 limit 截断。这只是搜索结果展示优先级；两个分组内保留 FTS 原顺序，不产生第二次模型
   请求，也不把历史任务常驻注入 prompt。
+- 模型可把已返回的绝对 task_path 复用为 owner-relative `tasks/...`。该形式只在工具参数入口从
+  `effective_owner_scope_root` 还原，不从进程 cwd 或模型文本猜 owner。地址还原后仍顺序经过 owner 墙、工作区读写根、
+  同 thread 历史 link 与 exact mutation rebind；任一层不匹配就拒绝，所以规范化本身没有权限语义。
 
 ## ConversationTaskLink 与 TaskRun 收口
 
