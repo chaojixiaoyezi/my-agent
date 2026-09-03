@@ -15,8 +15,14 @@
 - [x] 首轮从 owner home 晋升当前任务后，模型明确给出的任一 `<owner>/tasks/...` 历史绝对地址必须保持原样；
   归档的 `model_parameters` 与执行参数一致，普通 owner-home 占位路径仍重定向。生产缝隙失败先行回归及
   task rebase/runtime/tool gateway 共 206 项 focused 通过。
-- [ ] 同一 TUI 完成两个无关任务后，以自然措辞续作第一个；模型从 session_search 取得 exact task_path，
-  写工具回绑旧项目且不在第三个目录重建。
+- [x] 同一 TUI 完成两个无关任务后，以自然措辞续作第一个；模型从 session_search 取得 exact task_path，
+  写工具回绑旧项目且不在第三个目录重建。`.10` 的 `ma-r161-110-history-address` 中青岚/霜灯分别
+  23/25 项 pytest 通过，续作青岚后原目录达到 30 项；第三轮占位 task 为 `ABANDONED`，原目录 successor
+  为 `DONE`，未出现嵌套 `tasks/`。同轮自然 Compact 提交 generation 1。
+- [ ] 精确回绑成功后，只有 `work/` 元数据的 `ABANDONED` 占位 task 是否应从普通历史/任务目录投影移除，
+  需要先对照 会话运行时 的 turn cwd 与 rollout 历史保留语义；不能直接删除有审计价值的 request/task link。
+- [ ] `task_progress` 的非法旧式更新被拒绝时，模型应在 final 前按回执修正稳定 id/title/status；若仍自然结束，
+  TUI 不得把陈旧“进行中”伪装成后台还会继续，也不得由宿主根据 final/pytest 文本自动打勾。
 
 ## 新任务/旧项目续作工作区裁决
 

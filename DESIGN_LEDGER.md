@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：设备真 TUI 通过；R161 绝对历史地址 Focused 通过，待真 TUI 复验】
+## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：Focused 与 `.10` 真 TUI 均通过】
 
 - Full Access 继续经过统一 attempt sandbox，但 Linux 根目录 `--bind / /` 后必须用
   `--dev-bind /dev /dev` 重新开放真实设备树。RHEL/SELinux enforcing 测试机证明：普通根 bind
@@ -41,6 +41,10 @@
   后代”：当 target 本身位于 `<source>/tasks/...`、从而结构化证明 source 是 owner home 时，任何已经位于
   `<source>/tasks/...` 的绝对地址保持不动；其他 owner 普通路径和真正旧 task root→新 task root 仍按原规则
   重定向。该地址保护不产生权限，后续 ActionPolicy、owner wall 与 exact task link 继续独立裁决。
+- R161 `.10` 真 TUI 已完成“新建 A → 新建 B → 自然续作 A”的同会话闭环。续作 request 先物化的占位 task
+  进入 `ABANDONED`，原 A 目录生成同 request id 的 `-continue-*` successor 并进入 `DONE`；业务修改和
+  30 项 pytest 都只发生在原 A，未产生嵌套 `tasks/`。这证明地址保护与 exact mutation rebind 已闭环，
+  但不等于占位壳的目录保留策略已经验收；后者单独进入清理/投影设计，不通过删除审计事实来美化目录。
 
 ## 2026-09-02 普通终态任务不再隐式吸附新回合【状态：R155 本机真 TUI/Focused 通过】
 

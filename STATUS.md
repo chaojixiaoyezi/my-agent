@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-09-03 R156–R161 Full Access 设备已通过，历史续作绝对地址修复待真 TUI 复验
+## 2026-09-03 R156–R161 Full Access 设备与历史续作真 TUI 均通过
 
 - `.10` 真 TUI 复现了普通 pytest 与 `2>/dev/null` 都报 PermissionError。宿主 `/dev/null` 正常，
   WorkspaceOnly 的 `--dev /dev` 也正常；精确进程参数证明失败只在 Full Access 的 `--bind / /`
@@ -31,7 +31,17 @@
   `current-task/<old-task>`。归档同时保留了正确 `model_parameters` 与错误执行 `parameters`，排除模型和
   handler。R161 仅在 target 已证明 source 是 canonical owner home 时保护 `<owner>/tasks/...` 绝对地址；
   普通 `<owner>/foo` 仍重定向当前任务，后续 task-to-task rebase、读写权限和 exact mutation binding 不变。
-  相关 206 项 focused 通过，待新 wheel 同样自然提示真 TUI 复验。
+  相关 206 项 focused 通过。R161 wheel 已在 `.10` 单 Gateway 的
+  `ma-r161-110-history-address` 复验：同一 MiniMax-M2.7 会话先后从零完成“青岚温度换算器”和
+  “霜灯文本计数器”，分别 23/25 项 pytest 通过；第三轮自然要求回到青岚后，模型用历史绝对地址直接修改
+  原目录，补齐 JSON 功能并达到 30 项通过。第三轮 request
+  `gwreq-1788411695-c093588434714d2ca636c91f38ae2b2d` 的占位 task 为 `ABANDONED`，原青岚目录内 successor
+  为 `DONE`，两者共享 exact request id；未出现嵌套 `tasks/`，也没有在占位目录重建业务文件。期间真实
+  Compact 动画自然触发并提交 generation 1。
+- 本轮另发现两项未混入 R161 通过结论的独立缺口：回绑成功后 `tasks/` 仍保留只有 `work/` 元数据的
+  `ABANDONED` 占位壳；模型最终一次 `task_progress` 使用缺少稳定 id/status 的旧式条目被合同正确拒绝后，
+  TUI 底部仍显示“完成 0/5、进行中 1”，与最终正文和真实 30 项测试不一致。前者是整洁性/历史投影问题，
+  后者是软计划收口与展示一致性问题，均继续保留为待修底座项，不恢复机器质量验收。
 
 ## 2026-09-02 R155 新任务与旧项目续作的工作区分流（本机真 TUI 通过）
 

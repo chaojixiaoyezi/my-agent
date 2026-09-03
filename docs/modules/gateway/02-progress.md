@@ -26,7 +26,9 @@
 - R160 真 TUI 的 tool-output index 同时记录正确旧任务 `model_parameters` 与被套入当前任务的执行
   `parameters`，定位到首轮 owner-home→task-root rebase。R161 在这条纯路径转换里保护 canonical
   `<owner>/tasks/...` 绝对地址；不保护普通 owner 子路径，也不改变任何 read/write grant。206 项相关 focused
-  通过，待新 wheel 真 TUI 复验。
+  通过。R161 `.10` 真 TUI `ma-r161-110-history-address` 已完成 A/B 两个独立项目，再自然续作 A：写入只落原 A，
+  pytest 从 23 增至 30 项，未产生嵌套 `tasks/`；同轮 Compact 自然提交 generation 1。回绑前占位 task 留下
+  `ABANDONED` 元数据壳，已作为独立历史投影/目录整洁问题进入 ROADMAP。
 
 ## 2026-09-02 R155 终态工作区不隐式吸附，精确写路径可回绑
 

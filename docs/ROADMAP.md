@@ -36,25 +36,16 @@
 用户显式创建的 ThreadGoal 持有跨轮持续执行语义。旧 policy 只做 typed retirement，不再被执行；子代理等待、
 生命周期 durable wake、显式插话和 provider transient retry 仍按各自结构化事件恢复，不能被误删成“都不续跑”。
 
-### 受管命令的基础设备文件
+### 续作回绑后的占位壳与软计划终态一致性
 
-状态：设备链 `.10` 真 TUI 已通过；R161 历史绝对地址保护 Focused 通过，待真 TUI 复验
+状态：真 TUI 已取到失败样本，待 会话运行时 对照与通用合同修复
 
-解决问题：R130 主代理尝试运行 pytest 时，受管命令环境访问 `/dev/null` 得到
-`PermissionError`，pytest 的 capture 初始化因此失败；同一回合改用 unittest 后 18 项全通过，说明不是业务
-代码错误。R156 精确 A/B 已定位为 Full Access 的 `--bind / /` 继承 nodev；宿主设备与 WorkspaceOnly
-最小设备树都正常，并没有 SELinux AVC。对照 会话运行时 的根挂载后 `/dev` 覆盖层，当前追加
-`--dev-bind /dev /dev`，只恢复已授权管理员的真实设备语义，不扩大普通 owner。下一步由同 wheel 真 TUI
-直接跑常规 pytest 已完成：项目 A 首轮 31 项、项目 B 21 项均通过，未再出现 `/dev/null` 错误。随后自然
-要求回到项目 A 时，首轮虽已有正确 `task_ref`，但 MiniMax-M2.7 未调用 `session_search`，转而全盘查目录并
-选错同类旧项目。R157 已让“刚才/先前/回到/原项目”等自然措辞把 `session_search` 推荐到首位，但真跑中前 5 条
-仍被普通会话与当前 processing 请求挤满。R158 改为本地超采样后按终态 typed task_ref 稳定提前，
-当前占位项不再冒充历史任务。R158 真跑中引用已排首位，但模型复用的 `tasks/...` 被旧参数入口再拼到当前
-cwd。R159 改由 host-authored owner wall 还原后，真 TUI 又暴露 Full Access 管理员本来就没有该安全墙字段。
-R160 独立携带 canonical owner home 地址，不改变 Full Access 或 WorkspaceOnly 权限。R160 真跑又证明模型
-给出的其实是正确绝对 task_path，但 owner-home→current-task 的首轮重定向把任一 `<owner>/tasks/...` 都误当
-占位 cwd 后代。R161 保护已是 canonical 历史任务的绝对地址，普通 owner 路径仍重定向；仍待同一 TUI 模式
-复验精确回绑后整体移入 COMPLETED。
+解决问题：R161 已证明历史绝对地址和 exact successor 回绑正确，但回绑前物化的请求目录仍以
+`ABANDONED` 空壳留在 `tasks/`。它没有业务文件，也没有造成写错项目，但长期使用会污染用户看到的任务目录；
+修复必须保留 request/task link 的审计事实，不能粗暴删除历史。相同真跑还发现模型给
+`task_progress` 发送缺少稳定 id/status 的旧式条目时，合同正确拒绝，模型却直接 final，导致底部清单继续显示
+“0/5、进行中 1”。后续先对照 会话运行时 rollout/turn 与计划展示，再收口“审计记录保留、用户目录不堆壳”和
+“计划拒绝可修复、自然 final 不伪装后台 Working”两条通用语义；不得解析 final 或 pytest 文本替模型验收。
 
 ### Computer Use 复用开源执行器
 

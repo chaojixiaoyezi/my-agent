@@ -26,6 +26,9 @@
 - 首轮任务晋升可以把启动 cwd 的普通绝对路径重定向到正式 task root，但不得改写已经位于 canonical
   `<owner>/tasks/...` 下的显式历史地址。该保护仅在 target 的结构化形状证明 source 是 owner home 时启用；
   后续 task-to-task 重定向不套用这条例外。路径是否可读、可写或可续接仍由后续统一工具门裁决。
+- 真 TUI 中，历史地址命中后仍按既有两阶段生命周期工作：本轮占位 task 转 `ABANDONED`，原历史目录内创建
+  同 request id 的 continuation successor。业务文件只写 successor 的 canonical task root；占位壳是否继续
+  出现在用户任务目录属于后续 projection/retention 设计，不能通过删除 request/task 审计事实解决。
 
 ## ConversationTaskLink 与 TaskRun 收口
 

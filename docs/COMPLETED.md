@@ -1,5 +1,17 @@
 # COMPLETED
 
+## 2026-09-03 R156–R161 Full Access 设备与历史任务绝对地址
+
+- Full Access 的根 bind 后重新 `--dev-bind /dev /dev`，恢复管理员已授权环境里的真实设备语义；WorkspaceOnly
+  设备最小集、owner 墙和网络边界不变。`.10` 单 Gateway + MiniMax-M2.7 真 TUI 已用常规 pytest 验证。
+- Gateway completion 保留 exact conversation runtime，`session_search` 只从终态 typed Gateway 记录投影
+  task_ref；宽检索优先合法历史引用，模型复用的 owner-relative/absolute 地址由独立 canonical owner home
+  还原，权限仍由后置统一门裁决。
+- R161 将 owner-home 晋升 rebase 收窄为占位 cwd 重定向，不再吞掉 canonical `<owner>/tasks/...` 历史绝对地址。
+  206 项 focused 通过；`.10` 真 TUI `ma-r161-110-history-address` 完成 A/B 后自然续作 A，原目录测试从 23 增至
+  30 项，无嵌套 `tasks/` 或第三份业务项目，并自然提交 Compact generation 1。占位壳保留和 Todo 拒绝后的
+  展示一致性是另两项 P1，不影响本项地址/设备合同完成结论。
+
 - 2026-09-02 完成普通新任务与旧项目续作的工作区分流：终态普通 task 只保留为
   状态/导航历史，不再隐式选中下一回合 cwd；exact request、active task 和未结束 Goal
   仍保持原路径。显式写入旧项目时，统一工具入口按 canonical `task_path` 合并同项目的
