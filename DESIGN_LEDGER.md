@@ -1,5 +1,28 @@
 # DESIGN LEDGER
 
+## 2026-09-04 Compact 真实最低水位与主请求缓存面复用【状态：Focused 与 `.10` 真 TUI 通过】
+
+- R163 的浅代次不是假 Compact，而是规划器用空 `tool_ir_history` 估算“最低水位”，把实际不可删除的
+  `UserTurn`、`RuntimeFactsTurn` 与 carried summary 也当成会消失。规划现改为在副本上调用真实
+  `compact_native_ir_to_token_budget`，仅删除可由摘要覆盖的完整 ToolCall/ToolResult 与对应 assistant turn；
+  副本不写窗口、不推进 generation、不改变 active turn。真实 floor 已吃满 recovery target 时直接交给
+  transcript Compact，不先付一次必然只释放少量空间的 live summary。
+- 会话运行时 `会话运行时-rs/core/src/compact.rs` 先克隆完整 history，再把 synthetic compact prompt 追加到同一回合；
+  终端交互 `src/services/compact/compact.ts` 与 `src/utils/forkedAgent.ts` 进一步证明 compact fork 必须保持
+  parent 的 system、tools、model、messages prefix 与 thinking 配置，不能另设输出 token 破坏缓存。my-agent
+  适配为：沿用本轮 `CacheStructuredPrompt`、完整 provider history/current IR、同一 system 指令和工具 schema，
+  只把摘要要求追加到 volatile 尾部；不覆盖 backend 输出预算或 thinking 配置。
+- cache-safe Compact 是一次性辅助模型调用，没有工具执行循环或 handler 权限。工具 schema 只为保持缓存 key；
+  provider 若仍返回 native tool block，结果直接弃用并从 typed IR 生成机械交接，绝不执行。辅助调用账本的输入
+  估算也纳入 system/tools，避免 Compact 成本继续少记。
+- provider 空/非法摘要的机械替代正文不再借用 12K 摘要输入预算，独立封顶 4K，保留任务、旧摘要线索、失败、
+  未决项和最新调用的 head/tail。低于 90% trigger 的有效候选仍照常提交；本轮没有恢复“必须压到 60%”第二硬门。
+- 77 项语义摘要/native IR 全集与 196 项 Compact/cache/provider 相邻 focused 通过。R166 `.10` 单 Gateway、
+  MiniMax-M2.7 真 TUI `ma-r166-110-compact-cache` 进一步完成 8-child 长调研：main 提交 2 代、轻量运行时 child 提交
+  1 代；child live-tool 为 `118,696→73,217`，main live-tool 为 `85,161→726`，三代均有 started/progress/
+  completed 动画后继续原任务并最终收口。请求级 provider 账本持续出现 cache-read（轻量运行时 child 18 次物理调用
+  累计 733,008；main 各后台片分别累计 222,475/231,647/249,956/319,539），没有 Compact 工具执行或失败。
+
 ## 2026-09-04 历史任务候选与续作占位工作区收口【状态：Focused 与 `.10` 真 TUI 通过】
 
 - 普通终态任务仍不自动成为下一回合 cwd。Gateway 只把同 owner、同 thread 最近四个已完成且真实存在的

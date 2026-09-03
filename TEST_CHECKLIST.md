@@ -1,5 +1,17 @@
 # TEST CHECKLIST
 
+## R166 Compact 成本与缓存复验
+
+- [x] live Compact 的最低可达 token 在副本上使用真实 IR 删除器；UserTurn、RuntimeFacts、carried summary
+  不得被空历史估算误算成可删除，探测不能改变 IR/window/generation。
+- [x] cache-safe 摘要请求保持 parent 的 structured prompt、完整 provider/current messages、system、tools、
+  model 与 thinking 配置；只在最后追加摘要指令，不另设输出 token。payload 对照测试已通过。
+- [x] Compact 辅助调用没有工具 handler/循环；provider 返回 native tool block 时不执行并退 typed fallback。
+- [x] live mechanical fallback 与 12K input budget 解耦，输出最多 4K，同时保留任务 head 和最新调用 tail。
+- [x] `.10` 单 Gateway + MiniMax-M2.7 的 fresh 长 TUI `ma-r166-110-compact-cache` 已触发 main 2 代与 child
+  1 代。child live-tool `118,696→73,217`，main live-tool `85,161→726`；事件流包含真实进度动画，随后继续
+  原任务，8 个 child 与 main 全部正常收口。provider 请求账本持续记录 cache-read，Compact 无工具执行/失败。
+
 ## R156–R165 Full Access 设备与历史续作定位
 
 - [x] Full Access 根挂载之后必须出现 `--dev-bind /dev /dev`，且 WorkspaceOnly 的最小设备树和 owner 墙不变。

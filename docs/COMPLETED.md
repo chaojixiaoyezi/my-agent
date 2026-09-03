@@ -1,5 +1,15 @@
 # COMPLETED
 
+## 2026-09-04 R166 Compact 缓存面与真实可达水位
+
+- live Compact 的资格预估和最终提交改用同一个 native IR 删除语义，恢复目标不再被误当第二道硬门；
+  provider 有效摘要即使没有达到优选 60%，只要低于真实 90% trigger 也能正式记代并继续原 attempt。
+- 摘要辅助调用保持 会话运行时 的完整历史顺序和 终端交互 的稳定缓存前缀，只在末尾追加 Compact 指令；调用
+  不安装工具 handler、不进入工具循环，异常工具块走有界 typed fallback，独立用量完整进入 provider 账本。
+- `.10` 真 TUI `ma-r166-110-compact-cache` 中 main 提交两代、child 提交一代后均继续原任务，8 名 child
+  和 main 全部收口；main/child 状态行显示 canonical generation，最终报告存在且直接显示。196 项相关
+  focused、Ruff、doc sync、strict code-size、diff 与 clean-package 通过。
+
 ## 2026-09-04 R163/R165 Compact 正式记代与历史任务续作收口
 
 - R163 `.10` 单 Gateway + MiniMax-M2.7 长 TUI 证明 child provider overflow 会先提交自己的

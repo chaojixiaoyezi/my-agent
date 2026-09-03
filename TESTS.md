@@ -1,5 +1,23 @@
 # TESTS
 
+## Compact 真实最低水位与缓存安全 fork
+
+- 构造不可删除 UserTurn/RuntimeFacts 已占满 60% recovery target、外加多组工具对越过 90% trigger 的窗口；
+  preflight 必须不调用摘要模型、不改 IR、不推进 generation，并交给 transcript/context overflow 路径。
+- parent 与 Compact 的 Anthropic payload 必须保持 model、system、tools、tool_choice、thinking 和 cache marker
+  之前的 messages prefix 一致；Compact 只在最后 volatile text 追加摘要要求，不重复当前任务或上一代 summary，
+  也不能设置独立 max output token。返回 native tool block 时不得执行，必须使用 typed fallback。
+- 空/非法摘要在配置 12K input budget 时仍最多输出 4K，并同时保留当前任务 head 与最新工具调用 tail。
+- focused 命令：
+  `python3 -m pytest agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py agent_py_agent/tests/test_context_pressure_native_trigger.py agent_py_agent/tests/test_compact_progress.py agent_py_agent/tests/test_compact_circuit_breaker.py agent_py_agent/tests/test_gateway_conversation_compact.py agent_py_agent/tests/test_subagent_runtime_compact.py agent_py_agent/tests/test_backends_native_tool_use.py agent_py_agent/tests/test_backends_openai_native_tool_use.py agent_py_agent/tests/test_native_tool_use_ir_messages_flow.py -q --tb=short`。
+- 真实验收必须用单 Gateway + MiniMax-M2.7 长 TUI；至少比较一次 Compact 前一轮、摘要调用、Compact 后一轮的
+  provider cache-read/cache-creation/input，核对 generation、before→after、进度动画、后续动作和最终终态。
+- R166 `.10` 真 TUI `ma-r166-110-compact-cache` 已通过：一个主代理派 8 个 child 完成长调研，main generation
+  `0→1→2`、轻量运行时 child `0→1`；child live-tool 为 `118,696→73,217`，main live-tool 为 `85,161→726`。child
+  Compact 后继续思考并完成，main 两次 Compact 后继续读取报告、写成品并直接显示最终回复，终态 Working
+  消失。provider 请求级账本全程有 cache-read；轻量运行时 child 18 次物理调用累计 cache-read 733,008，main 后台片
+  分别累计 222,475/231,647/249,956/319,539，所有记录 `failed=0`。
+
 ## 子代理溢出与 Compact 有效候选
 
 - `memory_compact_recovery_target_percent` 是优选裁剪目标，不是第二个提交硬门。构造

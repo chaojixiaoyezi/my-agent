@@ -16,6 +16,7 @@ from ..agent_core.model.call_runtime import (
     record_model_call_finished,
     record_model_provider_attempt,
 )
+from ..backends import ProviderRequestOptions
 from ..backends.gateway_helpers import provider_attempt_observer
 from ..contracts.model_call_ledger import (
     ModelCallActivityParams,
@@ -23,20 +24,25 @@ from ..contracts.model_call_ledger import (
     ModelCallStartedParams,
 )
 from ..memory_archive import estimate_tokens
+from ..tooling.runtime_contracts import ToolChoice
 
 # LLM: This module is the one accounting/admission boundary for real model calls made outside the
 # main tool loop. It must never own Compact state or infer request identity from prompt prose.
 # 模块用途: 让 Compact 等辅助模型请求也进入统一调用账、供应商重试账、并发闸和成本统计。
 
 
-# LLM: The host supplies exact request/run/task identity and a typed purpose; prompt/messages stay
-# request-local and are never copied into ledger metadata or user-visible status.
-# 类用途: 描述一次不带工具执行权的辅助模型调用，并绑定到真实任务用量作用域。
+# LLM: The host supplies exact request/run/task identity and a typed purpose; optional tools and
+# system guidance preserve a parent request's provider cache surface but this one-shot wrapper never
+# executes returned tool calls. Prompt/messages stay request-local and never enter ledger metadata.
+# 类用途: 描述一次没有工具执行权的辅助模型调用；Compact 可复用主请求的缓存前缀，并绑定到真实任务用量作用域。
 @dataclass(frozen=True)
 class AuxiliaryModelCallRequest:
     agent: object
     prompt: str
     messages: list[dict[str, Any]] | None = None
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: ToolChoice | None = None
+    system_instruction: str = ""
     request_id: str = ""
     run_id: str = ""
     task_id: str = ""
@@ -53,88 +59,17 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
     if not callable(generate):
         raise RuntimeError("auxiliary model backend is unavailable")
 
-    ledger = model_call_ledger(agent)
-    identity = uuid.uuid4().hex
-    logical_call_id = f"auxiliary:{_purpose(request.purpose)}:{identity[:24]}"
-    call_id = f"{logical_call_id}:attempt-1:{identity[24:32]}"
-    input_tokens = estimate_tokens(
-        {
-            "prompt": str(request.prompt or ""),
-            "messages": list(request.messages or []),
-        }
-    )
-    ledger.started(
-        ModelCallStartedParams(
-            call_id=call_id,
-            backend=str(getattr(backend, "name", "") or ""),
-            model=model_name(agent),
-            input_tokens=input_tokens,
-            output_tokens_estimate=max_output_tokens(agent),
-            request_id=str(request.request_id or ""),
-            run_id=str(request.run_id or ""),
-            metadata={
-                "logical_call_id": logical_call_id,
-                "physical_attempt": 1,
-                "task_id": str(request.task_id or ""),
-                "purpose": _purpose(request.purpose),
-                "auxiliary": True,
-            },
-        )
-    )
-    observed_output_tokens = 0
-    saw_first_event = False
-
-    # LLM: Delta accounting stores only token counts. It cannot expose summary text or influence
-    # provider liveness; a backend without an on_chunk keyword simply returns one terminal result.
-    # 函数用途: 将辅助调用的流式活动写入同一模型账，避免慢响应看起来像零输出调用。
-    def _on_chunk(chunk: str) -> None:
-        nonlocal observed_output_tokens, saw_first_event
-        tokens = estimate_tokens(str(chunk or ""))
-        if tokens <= 0:
-            return
-        observed_output_tokens += tokens
-        if not saw_first_event:
-            saw_first_event = True
-            ledger.first_token(
-                ModelCallFirstTokenParams(
-                    call_id=call_id,
-                    output_tokens_seen=tokens,
-                )
-            )
-            return
-        ledger.activity(
-            ModelCallActivityParams(
-                call_id=call_id,
-                output_tokens_seen=tokens,
-            )
-        )
-
-    # LLM: The transport observer copies typed attempt facts only. Error bodies, prompts and
-    # credentials remain inside their existing provider boundary.
-    # 函数用途: 把辅助调用的 HTTP 尝试和退避次数写入统一模型账。
-    def _observe_provider_attempt(event: dict[str, object]) -> None:
-        record_model_provider_attempt(ledger, call_id, event)
-
+    ledger, call_id = _start_auxiliary_call(request, backend)
     started_at = time.monotonic()
     label = type(backend).__name__
     response: object | None = None
     try:
-        from ..agent_core.model.llm_metrics import record_llm_call
-        from ..llm_scale.hot_path import global_llm_admission_slot
-        from ..observability.concurrency_metrics import llm_inflight
-
-        with provider_attempt_observer(_observe_provider_attempt):
-            with global_llm_admission_slot():
-                llm_inflight(1)
-                try:
-                    response = _call_backend(
-                        generate,
-                        str(request.prompt or ""),
-                        request.messages,
-                        _on_chunk,
-                    )
-                finally:
-                    llm_inflight(-1)
+        response = _invoke_auxiliary_generate(
+            request,
+            generate,
+            ledger,
+            call_id,
+        )
         record_model_call_finished(ledger, call_id, response)
     except Exception as exc:
         record_model_call_failed(ledger, call_id, exc)
@@ -153,14 +88,124 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
     return response
 
 
+# LLM: Ledger identity and estimated request size are fixed before any provider I/O. Cache-safe
+# fields count toward input cost but their bodies never enter metadata.
+# 函数用途: 为辅助请求建立唯一调用编号，并按真实 prompt/messages/tools/system 请求面登记预计输入。
+def _start_auxiliary_call(
+    request: AuxiliaryModelCallRequest,
+    backend: object,
+) -> tuple[object, str]:
+    ledger = model_call_ledger(request.agent)
+    identity = uuid.uuid4().hex
+    logical_call_id = f"auxiliary:{_purpose(request.purpose)}:{identity[:24]}"
+    call_id = f"{logical_call_id}:attempt-1:{identity[24:32]}"
+    input_tokens = estimate_tokens(
+        {
+            "prompt": str(request.prompt or ""),
+            "messages": list(request.messages or []),
+            "tools": list(request.tools or []),
+            "system_instruction": str(request.system_instruction or ""),
+        }
+    )
+    ledger.started(
+        ModelCallStartedParams(
+            call_id=call_id,
+            backend=str(getattr(backend, "name", "") or ""),
+            model=model_name(request.agent),
+            input_tokens=input_tokens,
+            output_tokens_estimate=max_output_tokens(request.agent),
+            request_id=str(request.request_id or ""),
+            run_id=str(request.run_id or ""),
+            metadata={
+                "logical_call_id": logical_call_id,
+                "physical_attempt": 1,
+                "task_id": str(request.task_id or ""),
+                "purpose": _purpose(request.purpose),
+                "auxiliary": True,
+            },
+        )
+    )
+    return ledger, call_id
+
+
+# LLM: The one-shot provider call shares global admission and typed transport observations with the
+# main loop. Callbacks account only token counts/attempt facts and cannot expose summary bodies.
+# 函数用途: 在全局并发槽内执行一次辅助请求，并把流式活动和 HTTP 重试写入同一本模型账。
+def _invoke_auxiliary_generate(
+    request: AuxiliaryModelCallRequest,
+    generate: object,
+    ledger: object,
+    call_id: str,
+) -> object:
+    from ..llm_scale.hot_path import global_llm_admission_slot
+    from ..observability.concurrency_metrics import llm_inflight
+
+    on_chunk = _auxiliary_chunk_observer(ledger, call_id)
+
+    def _observe_provider_attempt(event: dict[str, object]) -> None:
+        record_model_provider_attempt(ledger, call_id, event)
+
+    prompt = request.prompt if isinstance(request.prompt, str) else str(request.prompt or "")
+    with provider_attempt_observer(_observe_provider_attempt):
+        with global_llm_admission_slot():
+            llm_inflight(1)
+            try:
+                return _call_backend(
+                    generate,
+                    prompt,
+                    request.messages,
+                    on_chunk,
+                    tools=request.tools,
+                    tool_choice=request.tool_choice,
+                    system_instruction=request.system_instruction,
+                )
+            finally:
+                llm_inflight(-1)
+
+
+# LLM: Delta accounting stores only token counts. It cannot influence provider liveness; a backend
+# without an on_chunk keyword simply returns one terminal result.
+# 函数用途: 创建辅助调用的流式计数回调，首段和后续活动分别写入统一模型账。
+def _auxiliary_chunk_observer(ledger: object, call_id: str) -> object:
+    saw_first_event = False
+
+    def _on_chunk(chunk: str) -> None:
+        nonlocal saw_first_event
+        tokens = estimate_tokens(str(chunk or ""))
+        if tokens <= 0:
+            return
+        if not saw_first_event:
+            saw_first_event = True
+            ledger.first_token(
+                ModelCallFirstTokenParams(
+                    call_id=call_id,
+                    output_tokens_seen=tokens,
+                )
+            )
+            return
+        ledger.activity(
+            ModelCallActivityParams(
+                call_id=call_id,
+                output_tokens_seen=tokens,
+            )
+        )
+
+    return _on_chunk
+
+
 # LLM: Signature inspection avoids retrying a TypeError after provider I/O may already have begun.
-# Messages are mandatory when supplied; silently dropping them would corrupt Compact semantics.
-# 函数用途: 只传后端明确支持的流回调，并在 live Compact 时强制保留原生历史消息。
+# Cache-critical messages/tools/system are all-or-error when supplied; the wrapper deliberately has
+# no tool execution loop, so an auxiliary response can never gain the parent turn's tool authority.
+# 函数用途: 只传后端明确支持的参数；Compact 需要复用缓存面时强制保留原生历史、工具定义与 system 指令。
 def _call_backend(
     generate: object,
     prompt: str,
     messages: list[dict[str, Any]] | None,
     on_chunk: object,
+    *,
+    tools: list[dict[str, Any]] | None,
+    tool_choice: ToolChoice | None,
+    system_instruction: str,
 ) -> object:
     kwargs: dict[str, object] = {}
     if _accepts_keyword(generate, "on_chunk"):
@@ -169,6 +214,21 @@ def _call_backend(
         if not _accepts_keyword(generate, "messages"):
             raise TypeError("auxiliary model backend does not accept native messages")
         kwargs["messages"] = list(messages)
+    if tools is not None:
+        if not _accepts_keyword(generate, "tools"):
+            raise TypeError("auxiliary model backend does not accept native tools")
+        if not _accepts_keyword(generate, "tool_choice"):
+            raise TypeError("auxiliary model backend does not accept tool_choice")
+        kwargs["tools"] = list(tools)
+        kwargs["tool_choice"] = tool_choice or ToolChoice.auto(
+            "auxiliary_cache_surface"
+        )
+    if system_instruction:
+        if not _accepts_keyword(generate, "request_options"):
+            raise TypeError("auxiliary model backend does not accept request_options")
+        kwargs["request_options"] = ProviderRequestOptions(
+            system_instruction=str(system_instruction)
+        )
     return generate(prompt, **kwargs)
 
 

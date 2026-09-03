@@ -19,14 +19,16 @@
 
 ### Compact 浅压缩与缓存重建成本
 
-状态：R163 只读证据完成，待实现与新长 TUI
+状态：已落地，focused 与 `.10` MiniMax-M2.7 真 TUI 通过
 
 解决问题：R163 已证明 child 溢出正式记代和五代 main Compact 都是真实新历史，不再账外续跑；但 main
-gen1/4/5 只释放约 12%–18%，压后离 90% 触发线仅 2k 左右。当前计划先让最低水位估算使用与真实删除同构的
-只读 IR，而不是用空 `tool_ir_history` 假设不可删的 User/RuntimeFacts 也会消失；再把机械 fallback 的输入预算
-与输出预算拆开，并评估结构化替换旧 RuntimeFacts。低于 trigger 的有效候选继续提交，不能恢复“没到 60%
-就作废”。后续再按 终端交互 的 compact fork 评估复用主请求 system/tools/model/thinking 稳定前缀，必须以
-provider usage 证明缓存收益，不能只加 cache 标记或牺牲长期会话记忆。
+gen1/4/5 只释放约 12%–18%，压后离 90% 触发线仅 2k 左右。当前已让最低水位估算在副本上执行真实 IR 删除器，
+不再假设不可删的 User/RuntimeFacts 会消失；机械 fallback 输出独立封顶 4K。live 摘要同时按 会话运行时 的完整
+history 追加请求顺序和 终端交互 cache-safe fork 复用主请求 system/tools/model/messages/thinking 前缀，工具
+schema 只参与缓存且没有执行入口。低于 trigger 的有效候选继续提交，不能恢复“没到 60% 就作废”。R166
+`ma-r166-110-compact-cache` 已在一个 8-child 长任务中验证 main 2 代、child 1 代、进度动画、持续 cache-read、
+Compact 后继续工作与最终收口；child 从 118,696 压到 73,217，main live-tool 从 85,161 压到 726。结构化
+RuntimeFacts 的进一步替换只在后续真实账本仍显示不可接受的 shallow/cost 时再设计，不预先扩大改动。
 
 ### 模型前置失败后的 run/attempt 终态
 

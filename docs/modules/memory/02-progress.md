@@ -1,5 +1,18 @@
 # Memory Progress
 
+## 2026-09-04 Compact 最低水位与缓存安全辅助调用
+
+- native live Compact 的资格预估改为在 IR 副本上执行与提交阶段相同的完整工具对回收，不再用空历史假设
+  UserTurn、RuntimeFacts 和 carried summary 可删除。真实不可删前缀已达到 recovery target 时跳过 live 摘要，
+  由 transcript Compact 处理旧会话；低于 trigger 的有效候选仍可提交。
+- live 摘要按 会话运行时 的“完整 history 后追加 compact 指令”顺序，并采用 终端交互 的 cache-safe fork 原则：
+  保持主请求结构化 prompt、provider history、当前 IR、system、tools、model 和 thinking 配置，只增加末尾
+  volatile 指令。辅助 wrapper 没有工具执行循环；返回 native tool block 时改用 typed 机械摘要。
+- provider 空/非法正文的机械摘要独立封顶 4K，不再复用 12K 输入预算。辅助账本输入估算同步计入 system/tools。
+  77 项直接测试及 196 项 Compact/cache/provider 相邻 focused 通过。R166 `.10` 单 Gateway + MiniMax-M2.7
+  真 TUI 通过：main 2 代、child 1 代均带进度动画并继续原任务，provider 请求账本持续有 cache-read，最终
+  8 个 child 与 main 全部收口；child live-tool `118,696→73,217`，main live-tool `85,161→726`。
+
 ## 2026-08-29 自主维护与 owner 隔离收口
 
 - `promotion_mode` 改为宿主按 typed target/type/origin/action 重算，旧 batch、replace/remove 或历史

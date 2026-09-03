@@ -6,6 +6,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
@@ -470,8 +471,7 @@ def _prepare_native_compact_plan(
     before_call_ids = _native_tool_call_ids(params)
     if limit <= 0 or (before_tokens < limit and not force) or len(before_call_ids) <= 1:
         return None
-    base_params = replace(params, tool_ir_history=[])
-    base_tokens = model_visible_context_tokens(agent, base_params, prompt)
+    base_tokens = _native_compact_floor_tokens(agent, params, prompt)
     recent_tail_tokens = max(1, int(policy.recent_tail_tokens or 0))
     recovery_target = (
         max(1, int(policy.recovery_target_tokens or 0))
@@ -495,6 +495,7 @@ def _prepare_native_compact_plan(
         agent,
         params,
         policy,
+        provider_prompt=prompt,
         before_tokens=before_tokens,
         trigger_tokens=limit,
         source_messages=len(before_call_ids) * 2,
@@ -516,6 +517,37 @@ def _prepare_native_compact_plan(
     )
 
 
+# LLM: Eligibility must estimate the same structural deletion later applied to the real IR. An
+# empty history would incorrectly pretend that UserTurn, RuntimeFactsTurn and carried summaries are
+# removable, causing expensive live summaries that leave almost no headroom. The probe owns copied
+# containers and never records a window, mutates the active turn, or advances Compact generation.
+# 函数用途: 在副本上删尽真正可被摘要覆盖的工具轮，算出运行中 Compact 实际能达到的最低上下文水位。
+def _native_compact_floor_tokens(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    prompt: object,
+) -> int:
+    from .model.context_pressure import model_visible_context_tokens
+
+    probe_params = replace(
+        params,
+        tool_ir_history=list(params.tool_ir_history),
+        tool_context=list(params.tool_context),
+    )
+
+    def estimator() -> int:
+        return model_visible_context_tokens(agent, probe_params, prompt)
+
+    compact_native_ir_to_token_budget(
+        probe_params,
+        max_tokens=1,
+        token_estimator=estimator,
+        preserve_newest_pair=False,
+        drop_completed_tool_turns=True,
+    )
+    return estimator()
+
+
 # LLM: An authoritative turn binds its exact thread before summary generation and rechecks stop
 # before classifying an empty result; only real empty summaries consume the shared circuit.
 # 函数用途: 找到本代理线程并可中断地生成完整摘要，真实失败时才记录统一熔断事实。
@@ -524,6 +556,7 @@ def _live_compact_binding_and_summary(
     params: ToolLoopExecuteParams,
     policy: object,
     *,
+    provider_prompt: str,
     before_tokens: int,
     trigger_tokens: int,
     source_messages: int,
@@ -569,7 +602,13 @@ def _live_compact_binding_and_summary(
         percent=20,
         **progress,
     )
-    summary = _summarize_live_compact(agent, params, binding, progress)
+    summary = _summarize_live_compact(
+        agent,
+        params,
+        binding,
+        progress,
+        provider_prompt=provider_prompt,
+    )
     raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
     if binding is None or summary:
         return (
@@ -606,6 +645,8 @@ def _summarize_live_compact(
     params: ToolLoopExecuteParams,
     binding: object | None,
     progress: dict[str, object],
+    *,
+    provider_prompt: str,
 ) -> str:
     from ..conversation.compact_guard import compact_exception_code
     from ..conversation.live_tool_compact import record_live_tool_compact_failure
@@ -617,6 +658,7 @@ def _summarize_live_compact(
             agent,
             params,
             previous_summary=(binding.thread.summary if binding is not None else ""),
+            provider_prompt=provider_prompt,
         )
         raise_if_compact_interrupted(interrupt_check)
         return summary
@@ -1133,6 +1175,7 @@ def _native_tool_history_summary(
     params: ToolLoopExecuteParams,
     *,
     previous_summary: str = "",
+    provider_prompt: str = "",
 ) -> str:
     from ..memory_archive.compact_semantic_summary import (
         LiveToolHistorySummaryRequest,
@@ -1146,6 +1189,10 @@ def _native_tool_history_summary(
     config = semantic_summary_config(agent)
     if not config.enabled:
         return ""
+    from ..model_guidance import provider_system_instruction
+    from .native_tool_protocol import resolve_native_tools
+
+    tools = resolve_native_tools(agent, params)
     return summarize_live_tool_history(
         LiveToolHistorySummaryRequest(
             history=history,
@@ -1157,6 +1204,16 @@ def _native_tool_history_summary(
             task_prompt=str(getattr(params, "user_prompt", "") or ""),
             previous_summary=str(previous_summary or ""),
             max_output_chars=config.max_input_chars,
+            provider_prompt=provider_prompt,
+            provider_history_messages=tuple(
+                deepcopy(item)
+                for item in list(getattr(params, "provider_history_messages", None) or [])
+                if isinstance(item, dict)
+            ),
+            tools=tuple(deepcopy(tools or [])),
+            system_instruction=provider_system_instruction(
+                getattr(agent, "backend", None)
+            ),
         )
     )
 

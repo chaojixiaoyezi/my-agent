@@ -56,6 +56,7 @@ from agent_py_agent.agent.backends.message_adapter import (
 from agent_py_agent.agent.backends.tool_ir import (
     AssistantTurn,
     CompactionSummary,
+    RuntimeFactsTurn,
     ToolResult,
     UserTurn,
 )
@@ -837,6 +838,56 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
         is None
     )
     _assert_no_orphans(_native_provider_messages(agent, params))
+
+
+def test_native_window_floor_keeps_ir_facts_that_live_compact_cannot_delete(tmp_path):
+    """运行事实已经吃满恢复目标时直接交给 thread Compact，不先烧一份必然很薄的 live 摘要。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "native-real-compact-floor",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_recovery_target_percent = 60
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(
+        _params(),
+        save=True,
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+    )
+    params.tool_ir_history.extend(
+        [
+            UserTurn("U" * 8_000),
+            RuntimeFactsTurn("R" * 14_000),
+        ]
+    )
+    fixed_tokens = model_visible_context_tokens(agent, params, "base-prompt")
+    assert 6_000 <= fixed_tokens < 9_000
+    _record_large_write_calls(agent, params, start=1, stop=8, chars=4_000)
+    before_ir = list(params.tool_ir_history)
+
+    prompt = build_tool_loop_prompt(agent, params)
+
+    assert params.tool_ir_history == before_ir
+    assert agent.backend.calls == []
+    assert store.load_thread(thread.thread_id).compact_generation == 0
+    pressure = preflight_context_pressure_response(
+        SimpleNamespace(agent=agent, params=params, prompt=prompt, tool_rounds=8)
+    )
+    assert pressure is not None
+    assert pressure.runtime_status == "context_overflow"
 
 
 def test_native_window_commits_below_trigger_when_recovery_target_is_unreachable(

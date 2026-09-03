@@ -35,11 +35,16 @@
   native IR 摘要共用的语义摘要入口，但不拥有 Compact 状态、工具执行或完成判定。
 - 摘要后端调用统一经 `agent/conversation/auxiliary_model_call.py` 包装，复用当前 agent 的
   `ModelCallLedger`、provider attempt observer、全局 admission 和指标；Compact 不再拥有第二套线程超时
-  或隐形调用计数。调用持续时间由 backend/provider 已配置的网络超时负责收口。
+  或隐形调用计数。调用持续时间由 backend/provider 已配置的网络超时负责收口；账本输入估算包含实际发送的
+  system 与 tools，不再只数 prompt/messages。
 - 运行中真实 turn 的摘要输入由“上一代 ConversationThread 完整摘要 + 本次 native 工具
   历史 + 当前任务”组成，输出是可独立替代上一代的完整摘要，不是只描述本次增量的片段。
-- provider 消息顺序固定为“真实任务 user → native history → synthetic Compact user 指令”。这是 会话运行时
-  compaction turn 的适配；普通 backend 的 `prompt + messages` 会把 prompt 放最前，不能直接复用该顺序。
+- 真实 native 路径复制主请求的 `CacheStructuredPrompt`、完整 provider history/current IR、system 和 tools；
+  Compact 指令只追加到 volatile 尾部。这样既保持 会话运行时 的“完整 history 后追加 synthetic request”顺序，
+  又对齐 终端交互 cache-safe fork 的 system/tools/model/messages/thinking 前缀。旧 fake/普通字符串调用保留
+  “真实任务 user → native history → synthetic Compact user”的兼容顺序，不从 prose 猜缓存边界。
+- 工具 schema 在 Compact 请求里只用于保持 provider cache surface；辅助 wrapper 是单次生成，没有 handler 或
+  工具循环。返回任何 native tool block 都视为不可用摘要并转 typed 机械交接，绝不执行或回放。
 - `agent/conversation/live_tool_compact.py` 才负责把这份摘要连同精确移除/保留的 tool-call
   ID 写入 checkpoint，并通过 ConversationStore 的同一 CAS 推进 generation；TUI 只投影
   已提交的代次和 token 前后值。
@@ -50,6 +55,9 @@
   候选已低于真实 trigger，则仍写 checkpoint/CAS 并推进 generation。只有 `after >= trigger` 才用
   `superseded/candidate_discarded` 撤销展示且恢复原 IR；`failed` 只代表摘要 transport、checkpoint、CAS 等
   真实故障。该边界与 transcript、会话运行时、终端交互 一致，避免重复烧同一摘要却不记代。
+- 规划资格使用真实 IR 删除器的副本探测：只移除完整工具对及已被摘要覆盖的 assistant turn，不把 UserTurn、
+  RuntimeFacts 或 carried summary 假装成可删内容。探测不写 window/generation；不可删 floor 已高于 recovery
+  target 时不启动 live 摘要，避免下一轮立刻重压的浅代次。
 - `save` 与 transcript authority 是两个结构化事实：前者决定 `Agent.run` 是否写旧式回复/记忆，后者决定
   当前 exact thread 是否拥有 Compact CAS。后台 main 由 ConversationStore 另行提交回复，因此可以
   `save=False + authoritative=true`；辅助、不保存且非权威的展示回合仍只能临时摘要。任何正文权威的
@@ -57,7 +65,8 @@
 - completed-empty 与调用失败是两个合同：前者表示 provider 请求和用量账都已正常结束，只从 typed IR 生成
   `compact-mechanical-fallback.v1` 的有界非权威续接投影并继续 checkpoint/CAS；后者仍抛错、恢复 IR 并累计
   熔断。transcript Compact 对 completed-empty 使用 raw row + structured operation evidence 的同类有界投影。
-  两种机械投影都不判断完成、不授权路径、不替代 archive、operation ledger、artifact 或真实文件。
+  live 机械投影独立封顶 4K，不沿用 12K 摘要输入预算；两种机械投影都不判断完成、不授权路径、不替代
+  archive、operation ledger、artifact 或真实文件。
 - 非空 provider 正文也不能自动成为 live handoff：只接受以 `compact-live-handoff.v1` 开头、六个固定语义栏
   完整且不含供应商工具协议的纯文本。非法正文与 completed-empty 一样使用 typed IR 机械投影，但 reason
   区分 `provider_empty_summary` 与 `provider_invalid_summary_shape`，便于审计而不把模型文本升级为机器状态。

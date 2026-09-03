@@ -26,7 +26,9 @@ from agent_py_agent.agent.backends.base import (
     BackendOptions,
     ModelResponse,
     OpenAICompatibleBackend,
+    ProviderRequestOptions,
 )
+from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.backends.tool_ir import (
     AssistantTurn,
     CompactionSummary,
@@ -40,6 +42,7 @@ from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
     summarize_carried_tool_context,
     summarize_live_tool_history,
 )
+from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
     canonical_history_result,
@@ -140,6 +143,20 @@ class _LiveSummaryBackend:
             else "Now let me create the theme and constants modules"
         )
         return ModelResponse(text=text, backend=self.name)
+
+
+class _ToolCallingSummaryBackend:
+    name = "tool-calling-summary"
+
+    def generate(self, prompt, on_chunk=None, messages=None):
+        del prompt, on_chunk, messages
+        return ModelResponse(
+            text=_VALID_LIVE_SUMMARY,
+            backend=self.name,
+            tool_use_blocks=[
+                {"id": "toolu_compact_forbidden", "name": "read_file", "input": {}}
+            ],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +419,97 @@ def test_live_compact_openai_payload_has_task_once_and_instruction_last() -> Non
     assert "完整替代摘要" in str(messages[-1]["content"])
 
 
+def test_live_compact_cache_safe_fork_reuses_parent_request_prefix() -> None:
+    captured: list[dict[str, object]] = []
+    backend = AnthropicCompatibleBackend(_capture_options("claude-cache-test"))
+
+    def request_json(_path, payload, _headers):
+        captured.append(payload)
+        return {"content": [{"type": "text", "text": _VALID_LIVE_SUMMARY}], "usage": {}}
+
+    backend.request_json = request_json
+    prompt = CacheStructuredPrompt(
+        "STABLE-PARENT-RULES",
+        "DYNAMIC-RUNTIME-FACTS",
+        canonical_user_turn="# User Task\nCACHE-TASK",
+    )
+    tool = {
+        "name": "read_file",
+        "description": "read one file",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    }
+    system_instruction = "HOST-SYSTEM-GUIDANCE"
+    previous_summary = "PREVIOUS-CACHE-SUMMARY"
+    prior = (
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"# Earlier Conversation Summary\n{previous_summary}",
+                }
+            ],
+        },
+        {"role": "assistant", "content": [{"type": "text", "text": "EARLIER-ANSWER"}]},
+    )
+    call = canonical_history_call(
+        "read_file",
+        {"path": "/srv/project/cache.json"},
+        call_id="toolu_cache_prefix",
+    )
+    history = [
+        UserTurn("# User Task\nCACHE-TASK"),
+        AssistantTurn(text="核对缓存文件", tool_calls=[call]),
+        canonical_history_result(call, '{"status":"running"}'),
+    ]
+    parent_messages = [
+        *prior,
+        *AnthropicMessageAdapter().to_provider_messages(history),
+    ]
+    backend.generate(
+        prompt,
+        tools=[tool],
+        messages=parent_messages,
+        request_options=ProviderRequestOptions(system_instruction=system_instruction),
+    )
+
+    agent = SimpleNamespace(backend=backend, config=SimpleNamespace())
+    summary = summarize_live_tool_history(
+        LiveToolHistorySummaryRequest(
+            history=history,
+            backend=backend,
+            agent=agent,
+            task_prompt="CACHE-TASK",
+            previous_summary=previous_summary,
+            provider_prompt=prompt,
+            provider_history_messages=prior,
+            tools=(tool,),
+            system_instruction=system_instruction,
+        )
+    )
+
+    assert summary.startswith(_SUMMARY_MARK)
+    assert len(captured) == 2
+    parent_payload, compact_payload = captured
+    assert compact_payload["model"] == parent_payload["model"]
+    assert compact_payload["system"] == parent_payload["system"]
+    assert compact_payload["tools"] == parent_payload["tools"]
+    assert compact_payload["tool_choice"] == parent_payload["tool_choice"] == {"type": "auto"}
+    assert "thinking" not in compact_payload
+    parent_tail = parent_payload["messages"][-1]["content"]
+    compact_tail = compact_payload["messages"][-1]["content"]
+    assert parent_tail[:-1] == compact_tail[:-1]
+    assert parent_tail[-1]["text"] == "DYNAMIC-RUNTIME-FACTS"
+    assert compact_tail[-1]["text"].startswith("DYNAMIC-RUNTIME-FACTS")
+    assert "完整替代摘要" in compact_tail[-1]["text"]
+    assert str(compact_payload["messages"]).count("CACHE-TASK") == 1
+    assert str(compact_payload["messages"]).count(previous_summary) == 1
+
+
 def test_live_tool_history_empty_response_uses_bounded_typed_fallback() -> None:
     backend = _LiveSummaryBackend(text="")
     call = canonical_history_call(
@@ -430,6 +538,36 @@ def test_live_tool_history_empty_response_uses_bounded_typed_fallback() -> None:
     assert "status=succeeded" in summary
     assert "保留最新测试结果" in summary
     assert len(summary) <= 1_400
+
+
+def test_live_tool_history_mechanical_fallback_has_independent_output_cap() -> None:
+    history = [UserTurn("用户要求：" + "保留" * 2_000)]
+    for index in range(10):
+        call = canonical_history_call(
+            "write_file",
+            {"path": f"/srv/project/{index}.txt", "content": "x" * 3_000},
+            call_id=f"toolu_fallback_{index}",
+        )
+        history.extend(
+            [
+                AssistantTurn(text=f"处理阶段 {index}", tool_calls=[call]),
+                canonical_history_result(call, f"result-{index}-" + "y" * 3_000),
+            ]
+        )
+
+    summary = summarize_live_tool_history(
+        LiveToolHistorySummaryRequest(
+            history=history,
+            backend=_LiveSummaryBackend(text=""),
+            task_prompt="TASK-FALLBACK-HEAD：继续原任务",
+            max_output_chars=12_000,
+        )
+    )
+
+    assert summary.startswith("[compact-mechanical-fallback]")
+    assert "TASK-FALLBACK-HEAD" in summary
+    assert "toolu_fallback_9" in summary
+    assert len(summary) <= 4_000
 
 
 def test_live_tool_history_rejects_provider_tool_protocol_and_uses_typed_fallback() -> None:
@@ -477,6 +615,20 @@ def test_live_tool_history_rejects_action_only_provider_summary() -> None:
     assert summary.startswith("[compact-mechanical-fallback]")
     assert "provider_invalid_summary_shape" in summary
     assert "只读调研，不得落盘" in summary
+
+
+def test_live_tool_history_never_accepts_or_executes_returned_tool_call() -> None:
+    summary = summarize_live_tool_history(
+        LiveToolHistorySummaryRequest(
+            history=[UserTurn("核对当前状态并继续")],
+            backend=_ToolCallingSummaryBackend(),
+            task_prompt="继续当前长任务",
+        )
+    )
+
+    assert summary.startswith("[compact-mechanical-fallback]")
+    assert "toolu_compact_forbidden" not in summary
+    assert "继续当前长任务" in summary
 
 
 def test_live_tool_history_summary_transport_failure_propagates() -> None:

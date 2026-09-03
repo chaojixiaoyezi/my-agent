@@ -1,5 +1,18 @@
 # STATUS
 
+## 2026-09-04 R166 Compact 最低水位与缓存安全辅助调用（真 TUI 通过）
+
+- native live Compact 现在在 IR 副本上运行与提交阶段相同的真实删除器来估算最低水位；不再用空工具历史
+  制造“理论上能压得更低”的假门槛。恢复目标仍是优选目标，真实候选低于 trigger 即可提交，避免有效
+  child Compact 被错误回滚并再次撞 provider overflow。
+- 辅助摘要调用对齐 会话运行时 的完整历史顺序，并采用 终端交互 的 cache-safe fork：model、system、tools、
+  thinking、完整 provider history 与当前 IR 均保持，只有末尾追加 volatile Compact 指令。它是一次性无工具
+  调用；模型若返回工具块则不执行，改用 4K 上限的 typed fallback。
+- `.10` 单 Gateway + MiniMax-M2.7 真 TUI `ma-r166-110-compact-cache` 已通过：8 名 child 全部完成，main
+  Compact 0→1→2，DeepSeek child Compact 0→1 后继续思考并完成；最终报告存在、final 直接显示、Working
+  自然撤下。provider 账本持续出现 cache-read，Compact 没有执行工具或产生失败。196 项相邻 focused 与本地
+  严格 gate 全绿，未跑无必要的全仓 pytest。
+
 ## 2026-09-03 R162 Todo 随 exact workspace successor 迁移（Focused 通过，待真 TUI）
 
 - R161 真 TUI 的最后一次 `task_progress` 实际携带原 `q1..q5 + done`；失败是因为清单先按占位 task-path

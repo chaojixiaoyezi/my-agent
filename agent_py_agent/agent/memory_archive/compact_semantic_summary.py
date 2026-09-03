@@ -55,6 +55,9 @@ _DEFAULT_PROTECT_HEAD = 2
 _DEFAULT_PROTECT_TAIL = 6
 _DEFAULT_MIN_MIDDLE = 4
 _DEFAULT_MAX_INPUT_CHARS = 12_000
+# 机械 fallback 是下轮永久前缀，不应复用摘要输入预算；4K 足以保留任务、约束、
+# 未决项和最新工具引用，同时避免一次无效 provider 摘要把固定前缀重新撑到 12K。
+_LIVE_FALLBACK_MAX_OUTPUT_CHARS = 4_000
 # 单条中段记录进摘要 prompt 时的正文上限(保留头尾的截断,避免一条巨型输出
 # 撑爆摘要输入)。
 _PER_RECORD_VALUE_CHARS = 1_200
@@ -165,6 +168,10 @@ class LiveToolHistorySummaryRequest:
     task_prompt: str = ""
     previous_summary: str = ""
     max_output_chars: int = _DEFAULT_MAX_INPUT_CHARS
+    provider_prompt: str = ""
+    provider_history_messages: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    tools: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    system_instruction: str = ""
 
 
 def semantic_summary_config(agent: object) -> SemanticSummaryConfig:
@@ -199,10 +206,12 @@ def summarize_carried_tool_context(
         return None
 
 
-# LLM: live compact reuses the bounded backend request and emits one current task at the first user
-# turn plus one final synthetic compact instruction. A completed empty provider response uses a
-# typed bounded projection; transport/backend exceptions still propagate and abort the mutation.
-# 函数用途: 对即将回收的完整原生工具历史生成一条可持续回放的非权威续接摘要，并在模型空回复时保住任务与工具事实。
+# LLM: Live Compact preserves the parent model/system/tools/message prefix when a typed provider
+# prompt is supplied, then appends one synthetic instruction as the only volatile suffix. This is a
+# one-shot non-executing fork: returned tool calls are rejected, never run. Legacy/test callers keep
+# the older task-first wire. Empty/invalid text uses a typed bounded projection; transport failures
+# still abort the mutation.
+# 函数用途: 对即将回收的完整原生工具历史生成续接摘要；真实运行尽量复用主请求缓存，空回复仍保住任务与工具事实。
 def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     if not request.history:
         return ""
@@ -212,22 +221,30 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     )
 
     task_prompt = str(request.task_prompt or "继续当前任务。")
-    compact_history = _live_compact_history(
-        request.history,
-        task_prompt=task_prompt,
-        previous_summary=request.previous_summary,
+    summary_instruction = _live_summary_prompt(
+        "" if request.provider_history_messages else request.previous_summary
     )
-    messages = strip_orphaned_tool_blocks(
-        AnthropicMessageAdapter().to_provider_messages(compact_history)
+    cache_safe = _compact_cache_safe_prompt(
+        request.provider_prompt,
+        summary_instruction,
     )
+    if cache_safe is None:
+        compact_history = _live_compact_history(
+            request.history,
+            task_prompt=task_prompt,
+            previous_summary=request.previous_summary,
+        )
+        messages = AnthropicMessageAdapter().to_provider_messages(compact_history)
+    else:
+        messages = [
+            *[dict(item) for item in request.provider_history_messages],
+            *AnthropicMessageAdapter().to_provider_messages(request.history),
+        ]
+    messages = strip_orphaned_tool_blocks(messages)
     generate = _resolve_generate_with_messages(
-        request.backend,
+        request,
         messages,
-        initial_user_prompt=task_prompt,
-        agent=request.agent,
-        request_id=request.request_id,
-        run_id=request.run_id,
-        task_id=request.task_id,
+        cache_safe_prompt=cache_safe,
     )
     if generate is None or not messages:
         return ""
@@ -235,15 +252,16 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     # backend request itself (which already has a bounded request_timeout).
     # A second daemon-thread deadline cannot cancel blocking HTTP and would
     # leave an orphan summary call consuming quota beside the resumed turn.
-    summary = generate(_live_summary_prompt(request.previous_summary)).strip()
+    summary = generate(summary_instruction).strip()
     limit = max(1_000, int(request.max_output_chars or _DEFAULT_MAX_INPUT_CHARS))
+    fallback_limit = min(limit, _LIVE_FALLBACK_MAX_OUTPUT_CHARS)
     if not summary:
         # HTTP/模型调用已经正常结束但正文为空，不值得再烧一次相同请求，也不能把主代理轮
         # 粗暴打断。这里仅用 typed IR 生成有界投影；真正异常仍由上面的直接调用抛给 Compact
         # 熔断器，checkpoint/CAS 也仍保持原来的失败语义。
         return _mechanical_live_tool_history_summary(
             request,
-            limit=limit,
+            limit=fallback_limit,
             reason="provider_empty_summary",
         )
     if not _valid_live_summary(summary):
@@ -251,7 +269,7 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
         # 这类正文不是可续接交接；沿用 typed IR 机械摘要，不能让伪动作污染下一轮。
         return _mechanical_live_tool_history_summary(
             request,
-            limit=limit,
+            limit=fallback_limit,
             reason="provider_invalid_summary_shape",
         )
     return (
@@ -450,6 +468,36 @@ def _is_previous_thread_summary(
     return (
         text.startswith("# Earlier Conversation Summary (generation ")
         and text.endswith(f"\n{previous_summary}")
+    )
+
+
+# LLM: A typed parent prompt is copied without flattening its metadata; only its volatile suffix is
+# extended. That keeps provider cache keys for system/tools/message history identical to the main
+# request while guaranteeing that the Compact instruction is chronologically last. Plain strings
+# return None and retain the compatibility path instead of inferring cache boundaries from prose.
+# 函数用途: 基于主请求的结构化缓存布局构造 Compact 请求，只在末尾追加摘要要求。
+def _compact_cache_safe_prompt(
+    provider_prompt: object,
+    compact_instruction: str,
+) -> str | None:
+    from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
+
+    layout = prompt_cache_layout(provider_prompt)
+    if layout is None:
+        return None
+    volatile_suffix = "\n\n".join(
+        text
+        for text in (
+            str(layout.volatile_suffix or "").strip(),
+            str(compact_instruction or "").strip(),
+        )
+        if text
+    )
+    return CacheStructuredPrompt(
+        layout.stable_prefix,
+        volatile_suffix,
+        stable_user_prefix=layout.stable_user_prefix,
+        canonical_user_turn=layout.canonical_user_turn,
     )
 
 
@@ -720,37 +768,37 @@ def _resolve_generate(
 # append exactly one non-tool user instruction last, matching 会话运行时 compaction request order.
 # 函数用途: 把摘要要求放到工具历史末尾再调用模型，防止模型把它当旧消息后继续普通工作。
 def _resolve_generate_with_messages(
-    backend: Any,
+    request: LiveToolHistorySummaryRequest,
     messages: list[dict[str, Any]],
     *,
-    initial_user_prompt: str,
-    agent: Any = None,
-    request_id: str = "",
-    run_id: str = "",
-    task_id: str = "",
+    cache_safe_prompt: str | None = None,
 ) -> Callable[[str], str] | None:
     """把历史放在前面，并把 Compact 要求作为最后一条 synthetic user 消息。
 
     会话运行时 的 compaction turn 会先克隆完整 history，再 ``record_items`` 追加摘要 prompt。
-    Anthropic/OpenAI-compatible backend 的普通 ``prompt + messages`` 入口则会把 prompt 放在
-    最前面；这里显式反转为 compaction 顺序，避免模型忽略旧指令并续写最后一个工具动作。
+    typed cache-safe 路径把摘要要求放进结构化 prompt 的 volatile 尾部，从而同时保持
+    system/tools/messages/thinking 前缀；兼容路径仍显式追加 user message。
     """
-    generate = getattr(backend, "generate", None)
+    generate = getattr(request.backend, "generate", None)
     if not callable(generate):
         return None
 
     def _call(prompt: str) -> str:
-        compact_messages = [
-            *messages,
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}],
-            },
-        ]
-        # tool_ir_history 从首个 assistant/tool call 开始，不含本 turn 的原始 user prompt。
-        # 继续用 backend 的 prompt 参数把真实任务放在最前，既满足 provider 角色顺序，也让
-        # Compact 指令仍然稳定位于整段历史最后。
-        if agent is not None:
+        compact_messages = list(messages)
+        outgoing_prompt: str = cache_safe_prompt or str(
+            request.task_prompt or "继续当前任务。"
+        )
+        if cache_safe_prompt is None:
+            compact_messages.append(
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                }
+            )
+        # 兼容路径继续用 prompt 承载真实任务并在 messages 尾部放 Compact 指令；结构化
+        # 缓存路径的任务已经在完整原生历史里，outgoing_prompt 只携带稳定前缀与动态尾部。
+        tools = list(request.tools) or None
+        if request.agent is not None:
             from ..conversation.auxiliary_model_call import (
                 AuxiliaryModelCallRequest,
                 generate_auxiliary_model_response,
@@ -758,17 +806,35 @@ def _resolve_generate_with_messages(
 
             response = generate_auxiliary_model_response(
                 AuxiliaryModelCallRequest(
-                    agent=agent,
-                    prompt=initial_user_prompt,
+                    agent=request.agent,
+                    prompt=outgoing_prompt,
                     messages=compact_messages,
-                    request_id=request_id,
-                    run_id=run_id,
-                    task_id=task_id,
+                    tools=tools,
+                    system_instruction=request.system_instruction,
+                    request_id=request.request_id,
+                    run_id=request.run_id,
+                    task_id=request.task_id,
                     purpose="compact_live_tool_summary",
                 )
             )
         else:
-            response = generate(initial_user_prompt, messages=compact_messages)
+            kwargs: dict[str, object] = {"messages": compact_messages}
+            if tools is not None:
+                from ..tooling.runtime_contracts import ToolChoice
+
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = ToolChoice.auto("compact_cache_surface")
+            if request.system_instruction:
+                from ..backends import ProviderRequestOptions
+
+                kwargs["request_options"] = ProviderRequestOptions(
+                    system_instruction=request.system_instruction
+                )
+            response = generate(outgoing_prompt, **kwargs)
+        if list(getattr(response, "tool_use_blocks", None) or []) or list(
+            getattr(response, "tool_calls", None) or []
+        ):
+            return ""
         return str(getattr(response, "text", response) or "")
 
     return _call
@@ -802,8 +868,10 @@ def _summary_prompt(content: str) -> str:
 
 
 # LLM: The prompt requests one replacement summary, not a delta. The current task already occupies
-# the wire's first user turn, so this final instruction must never copy it into a second location.
-# 函数用途: 把上一代 thread summary 放入末尾 Compact 指令，要求模型生成可独立续接的新摘要。
+# the wire's canonical user turn, so this final instruction never copies it. Cache-safe callers pass
+# an empty previous_summary because the exact parent history already contains it; compatibility
+# callers embed the prior summary here once.
+# 函数用途: 要求模型生成可独立续接的新摘要；旧兼容路径才把上一代 thread summary 补进末尾指令。
 def _live_summary_prompt(previous_summary: str = "") -> str:
     previous = _clip(str(previous_summary or "").strip(), 12_000)
     previous_block = (
