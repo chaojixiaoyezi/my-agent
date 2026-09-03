@@ -23,6 +23,10 @@
 - R159 干净真 TUI 证明 Full Access 管理员没有 owner wall 时上述分支仍无法运行。R160 把
   `canonical_owner_home_root` 作为独立地址事实写入每轮工具边界，`effective_owner_scope_root` 仍只表达
   实际安全上界；地址与授权不再复用同一个“有/无”信号。
+- R160 真 TUI 的 tool-output index 同时记录正确旧任务 `model_parameters` 与被套入当前任务的执行
+  `parameters`，定位到首轮 owner-home→task-root rebase。R161 在这条纯路径转换里保护 canonical
+  `<owner>/tasks/...` 绝对地址；不保护普通 owner 子路径，也不改变任何 read/write grant。206 项相关 focused
+  通过，待新 wheel 真 TUI 复验。
 
 ## 2026-09-02 R155 终态工作区不隐式吸附，精确写路径可回绑
 

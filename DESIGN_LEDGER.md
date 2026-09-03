@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：设备真 TUI 通过；R160 地址/权限分离 Focused 通过，待真 TUI 复验】
+## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：设备真 TUI 通过；R161 绝对历史地址 Focused 通过，待真 TUI 复验】
 
 - Full Access 继续经过统一 attempt sandbox，但 Linux 根目录 `--bind / /` 后必须用
   `--dev-bind /dev /dev` 重新开放真实设备树。RHEL/SELinux enforcing 测试机证明：普通根 bind
@@ -36,6 +36,11 @@
   `canonical_owner_home_root` 写进每轮工具边界：前者只还原地址，后者继续表示实际 owner 安全墙。
   Full Access 不会因此被收窄，WorkspaceOnly 也不会被放宽；对照 会话运行时 将 typed turn cwd 与 sandbox
   policy 分层保存，而不是用“是否有安全墙”推断 cwd。
+- R160 真 TUI 的双参数归档进一步证明：模型给的是合法历史绝对路径，错误发生在工具轮开始前的
+  `conversation_rebase_from_task_root`。R161 将 rebase 明确定义为“占位 cwd 重定向”而非“重写所有 source
+  后代”：当 target 本身位于 `<source>/tasks/...`、从而结构化证明 source 是 owner home 时，任何已经位于
+  `<source>/tasks/...` 的绝对地址保持不动；其他 owner 普通路径和真正旧 task root→新 task root 仍按原规则
+  重定向。该地址保护不产生权限，后续 ActionPolicy、owner wall 与 exact task link 继续独立裁决。
 
 ## 2026-09-02 普通终态任务不再隐式吸附新回合【状态：R155 本机真 TUI/Focused 通过】
 

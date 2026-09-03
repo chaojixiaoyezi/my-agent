@@ -1173,10 +1173,10 @@ def _rebase_workspace_value(value: object, source: str, target: str) -> object:
     return _rebase_workspace_text(rebased, source, target, separator="\\")
 
 
-# LLM: Rebase may run more than once for the same admitted call; exact target path spans are
-# protected before replacing source prefixes so the transform is idempotent even when target is
-# nested below source. Arbitrary prose can contain multiple independent path spans.
-# 函数用途: 在一段工具参数文字中安全替换路径，已转换的正式目录再处理也不会变。
+# LLM: Rebase may run more than once for the same admitted call; exact target path spans and
+# canonical owner tasks/... addresses are protected before replacing source prefixes.  The latter
+# protection applies only when the selected target itself proves that source is the owner home.
+# 函数用途: 在工具参数中改写启动目录，但保留已经明确指向任一历史任务的绝对地址。
 def _rebase_workspace_text(value: str, source: str, target: str, *, separator: str) -> str:
     source_prefix = f"{source}{separator}"
     if source_prefix not in value:
@@ -1194,9 +1194,40 @@ def _rebase_workspace_text(value: str, source: str, target: str, *, separator: s
             pieces.append(target)
             cursor = index + len(target)
             continue
+        if _workspace_text_starts_with_owner_task(
+            value,
+            index,
+            source,
+            target,
+            separator=separator,
+        ):
+            pieces.append(source_prefix)
+            cursor = index + len(source_prefix)
+            continue
         pieces.append(target_prefix)
         cursor = index + len(source_prefix)
     return "".join(pieces)
+
+
+# LLM: An absolute <owner>/tasks[/...] path is an explicit cross-task address, not a placeholder
+# cwd.  Infer the owner namespace only from target=<owner>/tasks/...; never protect an arbitrary
+# source/tasks child during later task-to-task rebases.
+# 函数用途: 识别已经指向用户历史任务目录的绝对路径，避免把它套进当前任务目录。
+def _workspace_text_starts_with_owner_task(
+    value: str,
+    index: int,
+    source: str,
+    target: str,
+    *,
+    separator: str,
+) -> bool:
+    owner_tasks_root = f"{source}{separator}tasks"
+    return target.startswith(f"{owner_tasks_root}{separator}") and _workspace_text_starts_with_target(
+        value,
+        index,
+        owner_tasks_root,
+        separator=separator,
+    )
 
 
 # LLM: Boundary checking distinguishes the selected target itself/descendants from a merely

@@ -23,6 +23,9 @@
   `effective_owner_scope_root`。两个字段分别表示“地址基准”和“实际安全墙”，Full Access 下前者存在而
   后者可以为空。地址还原后仍顺序经过 owner 墙、工作区读写根、
   同 thread 历史 link 与 exact mutation rebind；任一层不匹配就拒绝，所以规范化本身没有权限语义。
+- 首轮任务晋升可以把启动 cwd 的普通绝对路径重定向到正式 task root，但不得改写已经位于 canonical
+  `<owner>/tasks/...` 下的显式历史地址。该保护仅在 target 的结构化形状证明 source 是 owner home 时启用；
+  后续 task-to-task 重定向不套用这条例外。路径是否可读、可写或可续接仍由后续统一工具门裁决。
 
 ## ConversationTaskLink 与 TaskRun 收口
 

@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-09-03 R156–R160 Full Access 设备已通过，历史续作地址/权限分离待真 TUI 复验
+## 2026-09-03 R156–R161 Full Access 设备已通过，历史续作绝对地址修复待真 TUI 复验
 
 - `.10` 真 TUI 复现了普通 pytest 与 `2>/dev/null` 都报 PermissionError。宿主 `/dev/null` 正常，
   WorkspaceOnly 的 `--dev /dev` 也正常；精确进程参数证明失败只在 Full Access 的 `--bind / /`
@@ -25,7 +25,13 @@
 - R159 干净真 TUI `ma-r159-110-history-address` 再次证明检索与 task_ref 正确，但 Full Access 管理员没有
   `effective_owner_scope_root`，所以 R159 的 owner-relative 地址分支仍未执行。R160 新增独立
   `canonical_owner_home_root`：地址定位不再借用权限墙，普通 owner 隔离、Full Access 与写入裁决仍走原字段。
-  当前 runtime/tool gateway focused 通过，待同样自然提示真 TUI 复验。
+  当前 runtime/tool gateway focused 通过。
+- R160 真 TUI `ma-r160-110-history-address` 证明 MiniMax 已把 `session_search` 返回的旧任务绝对
+  `task_path` 原样交给 `list_files`，但首轮晋升遗留的 owner-home→current-task rebase 又把它改成
+  `current-task/<old-task>`。归档同时保留了正确 `model_parameters` 与错误执行 `parameters`，排除模型和
+  handler。R161 仅在 target 已证明 source 是 canonical owner home 时保护 `<owner>/tasks/...` 绝对地址；
+  普通 `<owner>/foo` 仍重定向当前任务，后续 task-to-task rebase、读写权限和 exact mutation binding 不变。
+  相关 206 项 focused 通过，待新 wheel 同样自然提示真 TUI 复验。
 
 ## 2026-09-02 R155 新任务与旧项目续作的工作区分流（本机真 TUI 通过）
 

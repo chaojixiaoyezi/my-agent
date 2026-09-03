@@ -3740,6 +3740,76 @@ def test_first_gateway_mutation_executes_in_promoted_task_workspace(tmp_path, pa
         assert execution.call.arguments["path"] == str(task_root / "first-tool.txt")
 
 
+def test_gateway_read_keeps_explicit_historical_task_path_after_current_task_promotion(tmp_path):
+    """当前任务的 cwd 重定向不能吞掉模型明确给出的旧任务绝对地址。"""
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    owner_home = Path(agent.home_paths.owner_home_dir)
+    current = owner_home / "tasks" / "2026-09-03" / "current-task"
+    historical = owner_home / "tasks" / "2026-09-02" / "historical-task"
+    current.mkdir(parents=True)
+    (historical / "project").mkdir(parents=True)
+    (historical / "project" / "README.md").write_text("historical\n", encoding="utf-8")
+    attrs = {
+        "conversation_rebase_from_task_root": str(owner_home),
+        "run_workspace": {
+            "task_root": str(current),
+            "output_dir": str(current / "output"),
+            "work_dir": str(current / "work"),
+        },
+        CONVERSATION_EXECUTION_CWD_ATTR: str(current),
+        CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR: [str(current)],
+    }
+    snapshot = agent.tools.runtime_snapshot(run_id="gw-historical-read")
+    params = ToolLoopExecuteParams(
+        user_prompt="继续以前完成的项目",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        write_boundary=None,
+        task_attributes=attrs,
+        request_id="gw-historical-read",
+        run_id="gw-historical-read",
+        task_id="gw-historical-read",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+        root_user_prompt="继续以前完成的项目",
+        source="gateway",
+        context_scope="conversation",
+        tool_runtime_snapshot=snapshot,
+    )
+    call = canonical_test_call(
+        snapshot,
+        "list_files",
+        {"path": str(historical), "recursive": True},
+        call_id="historical-list-files",
+        attempt_id="historical-list-files-attempt",
+    )
+    agent.tools.operation_store = None
+    agent.tools.operation_store_required = False
+
+    execution = execute_traced_tool_call(
+        ToolCallRuntimeRequest(
+            agent,
+            ToolCallExecuteParams(params, 1, 1, call),
+            call,
+        )
+    )
+
+    assert execution.result.ok is True
+    assert execution.call.arguments["path"] == str(historical)
+    assert "README.md" in execution.result.output
+    assert not (current / "tasks").exists()
+
+
 def test_first_gateway_shell_call_rebases_explicit_initial_working_dir(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
