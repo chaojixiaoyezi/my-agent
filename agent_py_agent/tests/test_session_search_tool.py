@@ -18,6 +18,7 @@ from agent_py_agent.agent.capability.session_search_tool import (
     build_session_search_model_spec,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.local_storage.models import LocalSearchResult
 from agent_py_agent.agent.local_storage.store import LocalStore
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.tooling.models import KeywordToolSearchProvider
@@ -43,6 +44,29 @@ def _tool(store) -> SessionSearchTool:
 def _payload(result) -> dict:
     assert result.ok, result.output
     return json.loads(result.output)
+
+
+def _search_result(
+    *,
+    source_type: str,
+    source_id: str,
+    title: str,
+    content: str,
+    score: float = 0.0,
+    metadata: dict | None = None,
+) -> LocalSearchResult:
+    return LocalSearchResult(
+        id=f"record-{source_id}",
+        source_type=source_type,
+        source_id=source_id,
+        title=title,
+        content=content,
+        metadata=metadata or {},
+        visibility="private",
+        created_at=1.0,
+        updated_at=2.0,
+        score=score,
+    )
 
 
 class TestSpec:
@@ -191,6 +215,98 @@ class TestDiscoveryMode:
 
         assert p["count"] == 1
         assert "task_ref" not in p["results"][0]
+
+    def test_completed_task_ref_survives_prose_top_five(self):
+        """宽检索须从本地候选中提起已结束任务引用，不能被五条聊天文本挤掉。"""
+        rows = [
+            _search_result(
+                source_type="conversation_message",
+                source_id=f"chat-{index}",
+                title=f"聊天 {index}",
+                content="北辰账目汇总器的普通对话",
+                score=float(index),
+            )
+            for index in range(5)
+        ]
+        rows.append(
+            _search_result(
+                source_type="gateway_request",
+                source_id="gw-north-star",
+                title="Gateway ask done gw-north-star",
+                content="北辰账目汇总器已经完成",
+                score=99.0,
+                metadata={
+                    "status": "done",
+                    "conversation_runtime": {
+                        "task_id": "task-north-star",
+                        "task_path": "/owner/tasks/north-star",
+                    },
+                },
+            )
+        )
+        search_limits: list[int] = []
+        store = SimpleNamespace(
+            search=lambda _query, *, limit, source_type: search_limits.append(limit) or rows[:limit],
+            list_recent=lambda **_kwargs: [],
+            records_around=lambda *_args, **_kwargs: ([], 0, 0),
+        )
+
+        p = _payload(_tool(store).execute({"query": "北辰账目汇总器", "limit": 5}))
+
+        assert search_limits == [20]
+        assert p["count"] == 5
+        assert p["results"][0]["source_id"] == "gw-north-star"
+        assert p["results"][0]["task_ref"]["task_path"] == "/owner/tasks/north-star"
+        assert [item["source_id"] for item in p["results"][1:]] == [
+            "chat-0",
+            "chat-1",
+            "chat-2",
+            "chat-3",
+        ]
+
+    @pytest.mark.parametrize("status", ["queued", "processing", "running", ""])
+    def test_live_gateway_placeholder_cannot_pose_as_historical_task(self, status):
+        """当前请求的占位目录即使命中更高，也不能取得历史续作 task_ref。"""
+        metadata = {
+            "status": status,
+            "conversation_runtime": {
+                "task_id": "task-current-placeholder",
+                "task_path": "/owner/tasks/current-placeholder",
+            },
+        }
+        rows = [
+            _search_result(
+                source_type="gateway_request",
+                source_id="gw-current",
+                title="当前请求",
+                content="北辰账目汇总器续作",
+                metadata=metadata,
+            ),
+            _search_result(
+                source_type="gateway_request",
+                source_id="gw-history",
+                title="历史请求",
+                content="北辰账目汇总器完成",
+                metadata={
+                    "status": "done",
+                    "conversation_runtime": {
+                        "task_id": "task-history",
+                        "task_path": "/owner/tasks/history",
+                    },
+                },
+            ),
+        ]
+        store = SimpleNamespace(
+            search=lambda *_args, **_kwargs: rows,
+            list_recent=lambda **_kwargs: [],
+            records_around=lambda *_args, **_kwargs: ([], 0, 0),
+        )
+
+        p = _payload(_tool(store).execute({"query": "北辰账目汇总器"}))
+
+        assert p["results"][0]["source_id"] == "gw-history"
+        current = next(item for item in p["results"] if item["source_id"] == "gw-current")
+        assert "task_ref" not in current
 
 
 class TestScrollMode:

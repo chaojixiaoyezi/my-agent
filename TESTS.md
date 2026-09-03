@@ -7,13 +7,16 @@
   `--dev /dev`，两种档位均需真实打开 `/dev/null` 并运行常规 pytest。
 - Gateway completion 覆盖 processing 索引时必须保留 request-level `conversation_runtime`；
   `session_search` 的 discover/browse/scroll 都只对 `source_type=gateway_request` 返回绝对路径
-  `task_ref`，Memory/普通消息即便携带同名 metadata 也不能取得该投影。
+  `task_ref`，Memory/普通消息即便携带同名 metadata 也不能取得该投影。只有
+  `done/failed/interrupted` 终态请求可作为历史任务；当前 `queued/processing/running` 占位项必须排除。
+- 默认 discovery 需在 owner-local 索引最多超采样 20 条，再把 typed `task_ref` 稳定提到聊天文本前；
+  每个分组内的 FTS 排序不得变。这是本地结果整形，不增加模型请求或常驻上下文。
 - focused 命令：
   `python3 -m pytest agent_py_agent/tests/test_sandbox.py agent_py_agent/tests/test_gateway_logging.py agent_py_agent/tests/test_session_search_tool.py -q --tb=short`。
-- 真 TUI 第一阶段：同一 MiniMax-M2.7 会话的项目 A、无关项目 B 已分别跑通 31/21 项常规 pytest，证明
+- 真 TUI 第一阶段：同一 MiniMax-M2.7 会话的项目 A、无关项目 B 已分别跑通 19/15 项常规 pytest，证明
   Full Access 设备链通过。自然表达“回到刚才那个 A”时必须先在完整默认工具集中把 `session_search` 推荐到
-  首位，并用 `source_type=gateway_request` 取得 exact task_ref；首轮暴露的全盘遍历误选问题已形成回归，待
-  R157 wheel 复验 request runtime、successor link 和真实文件路径，不能拿模型口头结论代替。
+  首位。R157 真跑又暴露默认前 5 条被普通消息挤满；R158 的真 TUI 复验必须证明模型收到 exact
+  task_ref，且 processing request runtime、successor link 和真实文件路径都回绑 A，不能拿模型口头结论代替。
 
 ## 普通新任务与结构化旧项目续作
 

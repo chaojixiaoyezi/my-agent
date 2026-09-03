@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：设备真 TUI 通过；R157 历史续作 Focused 通过，待真 TUI 复验】
+## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：设备真 TUI 通过；R158 结构化排序 Focused 通过，待真 TUI 复验】
 
 - Full Access 继续经过统一 attempt sandbox，但 Linux 根目录 `--bind / /` 后必须用
   `--dev-bind /dev /dev` 重新开放真实设备树。RHEL/SELinux enforcing 测试机证明：普通根 bind
@@ -19,6 +19,11 @@
   时选错。R157 只补齐 `ToolModelHints` 的“刚才/先前/回到/原项目”检索语义和带
   `source_type=gateway_request` 的示例，使历史工具在该类自然措辞下排首位；仍由模型选择命中项，宿主不解析
   用户正文、不自动恢复 terminal sticky，也不把任务菜单常驻注入每轮 prompt。
+- R157 真 TUI 进一步证明模型已会调 `session_search`，但默认前 5 条被普通聊天和当前
+  `processing` 请求占满，排在第 6 的已完成任务 `task_ref` 仍未进入模型视野。R158 在本地最多取
+  20 条候选，只依据 host-authored 的“终态 Gateway + 合法 task_ref”稳定提前；每组内仍保持 FTS
+  相关度顺序。`queued/processing/running` 占位请求不再投影成历史任务。这不是用户文本分类，
+  也不改变写入授权与 exact-path rebind 的二次裁决。
 
 ## 2026-09-02 普通终态任务不再隐式吸附新回合【状态：R155 本机真 TUI/Focused 通过】
 

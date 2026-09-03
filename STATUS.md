@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-09-03 R156/R157 Full Access 设备已通过，历史续作推荐待真 TUI 复验
+## 2026-09-03 R156–R158 Full Access 设备已通过，历史续作结构化排序待真 TUI 复验
 
 - `.10` 真 TUI 复现了普通 pytest 与 `2>/dev/null` 都报 PermissionError。宿主 `/dev/null` 正常，
   WorkspaceOnly 的 `--dev /dev` 也正常；精确进程参数证明失败只在 Full Access 的 `--bind / /`
@@ -14,6 +14,10 @@
   exact mutation-path rebind；普通聊天/Memory 不能伪造该字段。首轮真 TUI 暴露的剩余问题不是引用缺失，
   而是该自然措辞下历史工具推荐排序过低，模型改用全盘 `find` 并选错同类旧项目。R157 已补齐自然续作
   hints 与 `gateway_request` 查询示例，完整默认工具集里 `session_search` 现稳定排首位；相关 focused 72 项通过。
+- R157 同一真 TUI 已完成项目 A、无关项目 B，两者 pytest 分别 19/15 项通过；自然续作 A 时
+  模型已调用 `session_search`，但默认 5 条结果被会话文本和当前 processing 请求挤满，又在第三个
+  目录里重建，已用 Esc 中断避免扩大。R158 改为宽检索本地超采样后优先返回已结束的 typed
+  `task_ref`，当前占位请求不得冒充历史项目；26 项 `session_search` focused 已通过。
 
 ## 2026-09-02 R155 新任务与旧项目续作的工作区分流（本机真 TUI 通过）
 

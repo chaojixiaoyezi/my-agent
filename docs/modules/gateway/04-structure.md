@@ -6,7 +6,8 @@
   response 和 LocalStore 都不能独立发明或修改它。completion 写同一 `gateway_request` 索引行时必须从原
   request 携带该字段，不能因最终 response 本身没有路径就覆盖丢失。
 - LocalStore metadata 只保存上述字段的 owner-local 搜索投影。`session_search` 仅在记录来源确为
-  `gateway_request`、task_id 非空且 task_path 为绝对路径时返回 `task_ref`；普通聊天、Memory、标题、摘要和
+  `gateway_request`、状态是 `done/failed/interrupted`、task_id 非空且 task_path 为绝对路径时返回
+  `task_ref`；普通聊天、Memory、当前占位请求、标题、摘要和
   模型回复都不能生成该引用。discover/scroll/browse 使用同一投影函数，避免切换检索模式丢路径。
 - `task_ref` 只帮助模型定位历史工作，不是写授权。真正续作仍由当前 turn 的工具参数进入统一 write boundary，
   再按同 thread canonical task path 执行 R155 的精确 rebind；owner 墙、冲突 active executor 和多路径歧义
@@ -14,6 +15,9 @@
 - 历史任务定位仍走按需工具发现，不把任务列表固定塞入每轮上下文。`session_search` 的
   `ToolModelHints` 覆盖“刚才/先前/回到/原项目”等自然续作说法，并提供限定 `gateway_request` 的查询示例；
   hints 只影响模型侧软推荐排序，不参与路径、owner、thread 或终态裁决。
+- discovery 对宽检索在本地最多超采样 20 条，将带合法 typed `task_ref` 的结果稳定提到普通文本前，
+  然后再按用户 limit 截断。这只是搜索结果展示优先级；两个分组内保留 FTS 原顺序，不产生第二次模型
+  请求，也不把历史任务常驻注入 prompt。
 
 ## ConversationTaskLink 与 TaskRun 收口
 

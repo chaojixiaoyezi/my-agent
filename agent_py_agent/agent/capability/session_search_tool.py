@@ -41,6 +41,7 @@ _DEFAULT_BROWSE_LIMIT = 10
 _DEFAULT_WINDOW = 5
 _MAX_LIMIT = 20
 _MAX_WINDOW = 20
+_HISTORICAL_TASK_REF_STATUSES = frozenset({"done", "failed", "interrupted"})
 _SESSION_SEARCH_USE_CASES = (
     "用户问之前怎么解决或上次聊到哪时先检索历史",
     "用户要求回到刚才、先前或某个具名旧项目时，先按项目名检索 gateway_request 并读取 task_ref",
@@ -70,7 +71,8 @@ def build_session_search_model_spec() -> ToolModelSpec:
             "三种形态由参数推断:"
             "①传 query=全文检索(FTS5,支持中文子串);②传 around_id=以某条记录为锚翻看前后上下文;"
             "③都不传=按时间倒序列出最近记录。回答'我们之前对X怎么处理/在哪记过Y'优先用它,先于上网/翻文件。"
-            "Gateway 任务命中可能带 task_ref；其中 task_path 是该历史任务的精确目录，用户要求续作时优先使用。"
+            "已结束的 Gateway 任务命中可能带 task_ref，并在默认检索结果里优先展示；"
+            "其中 task_path 是该历史任务的精确目录，用户要求续作时优先使用。"
         ),
         input_schema={
             "type": "object",
@@ -143,21 +145,40 @@ def _error(message: str, hint: str, code: str) -> ToolHandlerOutcome:
     )
 
 
-# 函数用途: discovery 形态——FTS5 全文检索,每条命中带 snippet 与定位 id(可继续 scroll)。
+# LLM: Broad discovery overfetches locally so a lower-ranked host-authored historical task_ref
+# cannot be hidden by several prose rows. Stable partitioning keeps FTS order inside each group.
+# 函数用途: discovery 形态检索历史，并让可续作的精确任务引用优先出现。
 def _discover(store: LocalStore, query: str, limit: int, source_type: str | None) -> dict[str, Any]:
-    hits = store.search(query, limit=limit, source_type=source_type)
-    results = [_shape_hit(hit, snippet_for=query) for hit in hits]
+    fetch_limit = _MAX_LIMIT if source_type in {None, "gateway_request"} else limit
+    hits = store.search(query, limit=fetch_limit, source_type=source_type)
+    shaped = [_shape_hit(hit, snippet_for=query) for hit in hits]
+    results = _prioritize_historical_task_refs(shaped)[:limit]
+    task_ref_count = sum(1 for item in results if item.get("task_ref"))
     return {
         "mode": "discover",
         "query": query,
         "results": results,
         "count": len(results),
         "hint": (
-            "用某条结果的 around_id 翻看它前后的上下文,或换关键词。"
+            (
+                f"已优先返回 {task_ref_count} 条可续作的精确 task_ref；"
+                "续作时使用其 task_path，或用 around_id 翻看前后上下文。"
+            )
+            if task_ref_count
+            else "用某条结果的 around_id 翻看它前后的上下文,或换关键词。"
             if results
             else "没有命中的历史记录;可换关键词,或不传参浏览最近记录。"
         ),
     }
+
+
+# LLM: task_ref presence is a typed host fact, not an inference from title/content. Do not add
+# natural-language continuation classifiers here or reorder entries inside either partition.
+# 函数用途: 把携带精确历史任务引用的命中稳定提到普通聊天文本前面。
+def _prioritize_historical_task_refs(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    task_results = [item for item in results if item.get("task_ref")]
+    prose_results = [item for item in results if not item.get("task_ref")]
+    return [*task_results, *prose_results]
 
 
 # 函数用途: scroll 形态——以 around_id 为锚,按时间序返回前后窗口(无 FTS,纯翻看)。
@@ -265,16 +286,19 @@ def _history_scope(metadata: object) -> dict[str, str]:
     return result
 
 
-# LLM: conversation_runtime is a Gateway index projection of canonical host state. Requiring the
-# gateway_request source and an absolute task_path prevents arbitrary chat/memory rows from posing
-# as executable cwd authority; the write tool still performs its own exact-path rebind checks.
-# 函数用途: 从 Gateway 历史元数据提取精确任务目录，供模型按用户要求继续旧项目。
+# LLM: conversation_runtime is a Gateway index projection of canonical host state. Requiring a
+# terminal gateway_request plus an absolute task_path prevents live placeholders or arbitrary
+# chat/memory rows from posing as historical cwd authority; writes still recheck exact-path scope.
+# 函数用途: 只从已结束 Gateway 历史中提取精确任务目录，供模型继续旧项目。
 def _history_task_ref(
     metadata: object,
     *,
     source_type: str,
 ) -> dict[str, str]:
     if source_type != "gateway_request" or not isinstance(metadata, dict):
+        return {}
+    status = str(metadata.get("status") or "").strip().lower()
+    if status not in _HISTORICAL_TASK_REF_STATUSES:
         return {}
     runtime = metadata.get("conversation_runtime")
     if not isinstance(runtime, dict):
@@ -286,14 +310,12 @@ def _history_task_ref(
     result = {
         "task_id": task_id,
         "task_path": task_path,
+        "status": status,
     }
     for key in ("request_id", "thread_id"):
         value = str(runtime.get(key) or "").strip()
         if value:
             result[key] = value
-    status = str(metadata.get("status") or "").strip()
-    if status:
-        result["status"] = status
     return result
 
 
