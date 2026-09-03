@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：设备真 TUI 通过；R159 历史地址规范化 Focused 通过，待真 TUI 复验】
+## 2026-09-03 Full Access 设备挂载与历史任务引用补全【状态：设备真 TUI 通过；R160 地址/权限分离 Focused 通过，待真 TUI 复验】
 
 - Full Access 继续经过统一 attempt sandbox，但 Linux 根目录 `--bind / /` 后必须用
   `--dev-bind /dev /dev` 重新开放真实设备树。RHEL/SELinux enforcing 测试机证明：普通根 bind
@@ -30,6 +30,12 @@
   `effective_owner_scope_root` 还原任意合法 owner-local `tasks/...` 地址；还原只解决地址，后续 owner 墙、
   allowed-read/write roots 与 exact mutation rebind 仍独立裁决，因此不会把历史路径变成写授权。对照 会话运行时
   `TurnContext/TurnEnvironment` 的绝对 cwd 机器字段，界面脱敏值不作为路由权威。
+- R159 真 TUI 暴露 local/main 管理员开 Full Access 时，安全层会正确省略
+  `effective_owner_scope_root`，但地址规范化错误地也依赖这个安全墙字段，因而管理员仍把 `tasks/...`
+  嵌套到当前 cwd。R160 将宿主 `HomePaths.owner_home_dir` 作为独立
+  `canonical_owner_home_root` 写进每轮工具边界：前者只还原地址，后者继续表示实际 owner 安全墙。
+  Full Access 不会因此被收窄，WorkspaceOnly 也不会被放宽；对照 会话运行时 将 typed turn cwd 与 sandbox
+  policy 分层保存，而不是用“是否有安全墙”推断 cwd。
 
 ## 2026-09-02 普通终态任务不再隐式吸附新回合【状态：R155 本机真 TUI/Focused 通过】
 

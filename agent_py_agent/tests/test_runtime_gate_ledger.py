@@ -634,6 +634,7 @@ def test_local_full_access_main_has_no_workspace_write_allowlist(tmp_path):
 
     boundary = write_boundary_with_runtime_ledger(agent, params)
 
+    assert boundary["canonical_owner_home_root"] == str(owner_home.resolve())
     assert "effective_owner_scope_root" not in boundary
     assert "allowed_write_roots" not in boundary
 

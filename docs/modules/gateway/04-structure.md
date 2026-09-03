@@ -19,7 +19,9 @@
   然后再按用户 limit 截断。这只是搜索结果展示优先级；两个分组内保留 FTS 原顺序，不产生第二次模型
   请求，也不把历史任务常驻注入 prompt。
 - 模型可把已返回的绝对 task_path 复用为 owner-relative `tasks/...`。该形式只在工具参数入口从
-  `effective_owner_scope_root` 还原，不从进程 cwd 或模型文本猜 owner。地址还原后仍顺序经过 owner 墙、工作区读写根、
+  宿主 `canonical_owner_home_root` 还原，不从进程 cwd 或模型文本猜 owner；旧内部入口只为兼容回退
+  `effective_owner_scope_root`。两个字段分别表示“地址基准”和“实际安全墙”，Full Access 下前者存在而
+  后者可以为空。地址还原后仍顺序经过 owner 墙、工作区读写根、
   同 thread 历史 link 与 exact mutation rebind；任一层不匹配就拒绝，所以规范化本身没有权限语义。
 
 ## ConversationTaskLink 与 TaskRun 收口

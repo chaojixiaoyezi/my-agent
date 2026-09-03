@@ -633,6 +633,34 @@ def test_tool_gateway_maps_historical_owner_task_alias_without_cwd_nesting(tmp_p
     assert not (current / "tasks").exists()
 
 
+def test_tool_gateway_maps_historical_task_alias_for_full_access_admin(tmp_path: Path):
+    """管理员无 owner 安全墙时仍用独立 owner 地址事实定位自己的旧任务。"""
+    owner_home = tmp_path / "owners" / "local" / "main"
+    current = owner_home / "tasks" / "2026-09-03" / "current-task"
+    historical = owner_home / "tasks" / "2026-09-02" / "historical-task"
+    current.mkdir(parents=True)
+    historical.mkdir(parents=True)
+    source = historical / "report.txt"
+    source.write_text("full access historical result\n", encoding="utf-8")
+    registry = _registry(current, access_mode="full")
+    boundary = {
+        "task_root": str(current),
+        "execution_cwd": str(current),
+        "canonical_owner_home_root": str(owner_home),
+    }
+
+    readback = _execute(
+        registry,
+        "read_file",
+        {"path": "tasks/2026-09-02/historical-task/report.txt"},
+        write_boundary=boundary,
+    )
+
+    assert readback.ok is True
+    assert "full access historical result" in readback.output
+    assert not (current / "tasks").exists()
+
+
 def test_tool_gateway_maps_owner_workspace_alias_without_granting_write(
     tmp_path: Path,
 ):

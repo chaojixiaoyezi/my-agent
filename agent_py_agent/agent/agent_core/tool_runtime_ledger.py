@@ -96,6 +96,7 @@ def _nonnegative_int(value: object) -> int:
 def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[str, object] | None:
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
+    _attach_canonical_owner_home_root(merged, agent)
     _attach_effective_owner_scope(merged, agent, params)
     _attach_runtime_approved_actions(merged, params)
     _attach_task_workspace_roots(merged, params)
@@ -128,6 +129,21 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
             merged.get("tool_rate_limit_records"), rate_rows
         )
     return merged or boundary
+
+
+# LLM: The canonical owner home is an address fact, not a permission grant. Always derive it
+# from HomePaths and keep it separate from effective_owner_scope_root, which is intentionally
+# absent for a local administrator using Full Access.
+# 函数用途: 把当前用户家的真实路径写入工具边界，供 tasks/... 等公开地址稳定还原。
+def _attach_canonical_owner_home_root(
+    boundary: dict[str, object],
+    agent: object,
+) -> None:
+    owner_home = _resolved_path(
+        getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+    )
+    if owner_home is not None:
+        boundary["canonical_owner_home_root"] = str(owner_home)
 
 
 # LLM: Main runs and subagents need a stable read root matching the first archive write.

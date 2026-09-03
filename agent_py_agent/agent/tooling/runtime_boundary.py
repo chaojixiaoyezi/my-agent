@@ -171,11 +171,10 @@ def _model_owner_home_alias_path(
         return ""
     if any(not part or part in {".", ".."} for part in suffix_parts):
         return ""
-    root_text = str(boundary.get("effective_owner_scope_root") or "").strip()
-    if not root_text:
+    owner_root = _canonical_owner_address_root(boundary)
+    if owner_root is None:
         return ""
     try:
-        owner_root = Path(root_text).expanduser().resolve(strict=False)
         candidate = owner_root.joinpath(*suffix_parts).resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return ""
@@ -195,11 +194,10 @@ def _owner_tasks_alias_path(
     parts = tuple(part for part in normalized.split("/") if part)
     if not parts or parts[0] != "tasks" or any(part in {".", ".."} for part in parts):
         return ""
-    root_text = str(boundary.get("effective_owner_scope_root") or "").strip()
-    if not root_text:
+    owner_root = _canonical_owner_address_root(boundary)
+    if owner_root is None:
         return ""
     try:
-        owner_root = Path(root_text).expanduser().resolve(strict=False)
         tasks_root = (owner_root / "tasks").resolve(strict=False)
         candidate = owner_root.joinpath(*parts).resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
@@ -207,6 +205,26 @@ def _owner_tasks_alias_path(
     if not _is_relative_to(candidate, tasks_root):
         return ""
     return str(candidate)
+
+
+# LLM: Address resolution prefers the explicit canonical owner home and only falls back to the
+# security wall for older host callers. This helper never grants access; normal read/write policy
+# still evaluates the canonical result after rewriting.
+# 函数用途: 取得 owner 路径别名的宿主地址基准，并兼容尚未补新字段的内部调用。
+def _canonical_owner_address_root(
+    boundary: dict[str, object],
+) -> Path | None:
+    root_text = str(
+        boundary.get("canonical_owner_home_root")
+        or boundary.get("effective_owner_scope_root")
+        or ""
+    ).strip()
+    if not root_text:
+        return None
+    try:
+        return Path(root_text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 # LLM: Model-visible owner-relative task addresses are aliases only when their exact tasks/...

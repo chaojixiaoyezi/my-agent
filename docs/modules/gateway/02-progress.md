@@ -20,6 +20,9 @@
 - R158 第三次真 TUI 中 typed task_ref 已稳定排第一，但模型把它缩为 `tasks/...` 后，文件工具又按
   当前占位 cwd 解释，形成 `current/tasks/...`。R159 在共享参数规范化器中以结构化 owner wall 为唯一基准
   还原 owner-relative 任务地址；所有读写边界与 exact mutation rebind 继续在后续逐层检查。
+- R159 干净真 TUI 证明 Full Access 管理员没有 owner wall 时上述分支仍无法运行。R160 把
+  `canonical_owner_home_root` 作为独立地址事实写入每轮工具边界，`effective_owner_scope_root` 仍只表达
+  实际安全上界；地址与授权不再复用同一个“有/无”信号。
 
 ## 2026-09-02 R155 终态工作区不隐式吸附，精确写路径可回绑
 

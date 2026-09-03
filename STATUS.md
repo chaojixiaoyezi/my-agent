@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-09-03 R156–R159 Full Access 设备已通过，历史续作地址规范化待真 TUI 复验
+## 2026-09-03 R156–R160 Full Access 设备已通过，历史续作地址/权限分离待真 TUI 复验
 
 - `.10` 真 TUI 复现了普通 pytest 与 `2>/dev/null` 都报 PermissionError。宿主 `/dev/null` 正常，
   WorkspaceOnly 的 `--dev /dev` 也正常；精确进程参数证明失败只在 Full Access 的 `--bind / /`
@@ -22,6 +22,10 @@
   `tasks/...`，旧规范化器又相对当前占位 cwd 拼接，导致读路径成为 `current/tasks/...`。R159 现从结构化
   owner wall 解析 owner-relative 任务地址，同时保留写边界：定向回归证明可读旧任务，对旧任务的写入仍
   `WRITE_FORBIDDEN`，且不产生 cwd 下嵌套 `tasks/`。
+- R159 干净真 TUI `ma-r159-110-history-address` 再次证明检索与 task_ref 正确，但 Full Access 管理员没有
+  `effective_owner_scope_root`，所以 R159 的 owner-relative 地址分支仍未执行。R160 新增独立
+  `canonical_owner_home_root`：地址定位不再借用权限墙，普通 owner 隔离、Full Access 与写入裁决仍走原字段。
+  当前 runtime/tool gateway focused 通过，待同样自然提示真 TUI 复验。
 
 ## 2026-09-02 R155 新任务与旧项目续作的工作区分流（本机真 TUI 通过）
 
