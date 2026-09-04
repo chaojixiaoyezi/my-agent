@@ -37,6 +37,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - 用户从 TUI/Web 触发的 stop 在整棵目标分支收口后必须额外交接一次 typed `CANCELLED`：直属 root child
   复用 canonical conversation completion wake，nested child 只释放并恢复 exact direct parent。模型本轮
   调用 `cancel_subagents` 已同步取得工具结果，root `/stop` 也有自己的整树停止边界，二者不重复发布该 wake。
+- direct-parent reconcile 不把所有 CANCELLED 当失败。它读取目标 canonical
+  `attributes.cancel_subagents.source`：`user_agent_control` 是父轮外发生的新事实，即使同批 sibling 仍运行也
+  立即恢复 parent；`cancel_subagents` 是父模型本轮已处理的动作，仍按普通终态合批。周期恢复复用这份耐久
+  来源，不能依赖 TUI 进程内参数或取消 reason 文本。
 - `cancel_subagents` 优先解析 exact child，再使用 durable conversation task identity；短生命周期 request id
   不能覆盖父级身份。signal 只针对该 attempt，siblings 不进入停止集合。
 - persistence 默认 `allow_terminal_reactivation=False`；保存 runner snapshot 前如发现 canonical store 已有

@@ -13,9 +13,11 @@
   的一份终态交接。模型 `cancel_subagents` 与 root `/stop` 不增加重复 wake。
 - [x] root child 取消向当前 root conversation 发布 `status=CANCELLED` typed wake；grandchild 取消只释放
   exact direct-parent wait 并幂等恢复该 parent，不能越级唤醒 root。
-- [x] 同步 stop、异步 stop、孙代理等待、递归取消相邻 54 项 focused 通过。
-- [ ] `.10` 单 Gateway + MiniMax-M2.7 真 TUI：分别证明 child/grandchild 在 Compact 提交前 Esc 后
-  generation 不增加、父级自动恢复且收到真实取消事实；Compact 已提交后的停止应保留已赢 CAS 的代次。
+- [x] user-controlled CANCELLED 即使仍有运行中 sibling 也进入 direct-parent attention；父轮内
+  `cancel_subagents` 的 CANCELLED 继续合批。即时链与周期恢复都读 canonical cancel source。
+- [x] `.10` root child 真 TUI：Esc 后 main 自动恢复、保留兄弟并补派替代任务。
+- [ ] `.10` 三层新 wheel 真 TUI：停止一个 grandchild 后 coordinator 应立即恢复且 sibling 继续；旧 wheel 已
+  复现约 23 分钟延迟。另需完成 child/grandchild Compact 候选中途取消与 CAS 后取消两条边界。
 
 ## R170 递归创建共享容量
 

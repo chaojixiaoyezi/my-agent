@@ -19,12 +19,15 @@
 - root child 的用户停止应异步先回 `accepted`，随后仅发布一份
   `subagent_runner_finished/status=CANCELLED`；grandchild 停止不得越级发 root wake，而应清掉 exact
   direct-parent wait marker，并通过幂等 dispatcher 只恢复该父级。
+- 三层测试必须保留至少一名运行中 sibling：`source=user_agent_control` 的 CANCELLED grandchild 应立即进入
+  `attention_run_ids` 并恢复 coordinator；`source=cancel_subagents` 的父轮内取消应继续等待 sibling，避免重复轮。
 - 模型侧 `cancel_subagents` 已在当前模型轮拿到工具结果，不走这条额外后台通知；root `/stop` 也不产生 child
   completion wake。目标分支的后代仍须先全部 durable 取消，才交接顶层目标节点。
 - focused 命令：
   `python3 -m pytest agent_py_agent/tests/test_gateway_agent_control_service.py agent_py_agent/tests/test_direct_parent_lifecycle.py agent_py_agent/tests/test_orchestration_cancel_subagents_tool.py -q --tb=short`。
-- 部署后真 TUI 分别验证 root→child 与 root→coordinator→grandchild；验收需要 Esc 后 Compact 候选不提交、
-  exact target 终态、父级自动恢复、无重复 wake/派工及其它 owner 不受影响。
+- `.10` 的 root→child 已在 `ma-r171-110-user-stop-parent-wake` 通过；旧三层样本
+  `ma-r171-110-grandchild-user-stop-wake-r2` 精确复现“取消一个、四个 sibling 仍运行时父级不醒”。新 wheel
+  仍需按同构任务复验：Esc 后 target 终态、coordinator 立即恢复、siblings 不停、无越级 root wake。
 
 ## 2026-09-04 R170 递归创建共享 session/owner 容量
 

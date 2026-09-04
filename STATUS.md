@@ -23,8 +23,15 @@
   用户从 TUI/Web 精确停止代理时，等整棵目标分支 durable 取消后发布一份 typed 终态交接。直属 root child
   走原会话 wake；grandchild 只释放并恢复 exact direct parent，不能越级唤醒 root。模型自己调用
   `cancel_subagents` 和 root `/stop` 保持原本同轮语义，不重复通知。
-- 同步与真实异步 stop、孙代理等待释放、整树取消和相邻 lifecycle 共 54 项 focused 通过；`.10` 部署后仍需
-  用新 TUI 证明 root/协调父级在人工 Esc 后立即看到 CANCELLED 并继续，才把本项改为完成。
+- `dd1747d` 部署后的 `.10` 真 TUI `ma-r171-110-user-stop-parent-wake` 已证明 root child 被 Esc 后，main
+  自动收到真实 `CANCELLED`、保留两个运行中兄弟并自行补派替代 child。进一步的三层 TUI
+  `ma-r171-110-grandchild-user-stop-wake-r2` 暴露第二个缺口：coordinator 等五名 grandchild 时，用户停止
+  其中一名，旧 reconcile 只把 `CANCELLED` 当普通终态；因为另四名仍活跃，coordinator 继续睡了约 23 分钟，
+  直到周期巡检在兄弟结束后才恢复。
+- 当前候选不把所有 `CANCELLED` 粗暴加入失败集合，而是读取 child canonical
+  `attributes.cancel_subagents.source`：只有 `user_agent_control` 这种父轮外控制事件立即进入 attention；父代理
+  自己用 `cancel_subagents` 的取消仍在本轮工具结果中处理并继续合批。结构化来源也让进程若在交接中崩溃，
+  周期恢复仍能得出同一结论。含“仍有运行中兄弟”的新回归已通过；待新 wheel 三层真 TUI 复验后关闭本项。
 
 ## 2026-09-04 R170 递归代理容量统一（Focused 与真 TUI 通过）
 

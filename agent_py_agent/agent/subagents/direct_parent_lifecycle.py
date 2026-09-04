@@ -137,9 +137,11 @@ def release_parent_wait_for_user_guidance(
 
 
 # LLM: One child terminal event may resume only its exact direct parent. A
-# normal DONE child is batched until all marked siblings end; failures and
-# missing canonical rows demand immediate parent attention.
-# 函数用途: 收到孩子结果后核对等待清单，决定是继续等同批兄弟还是叫醒父级。
+# normal DONE child is batched until all marked siblings end; failures, an
+# externally controlled cancellation, and missing canonical rows demand
+# immediate parent attention. Cancellation authority comes from the durable
+# structured cancel record, never from its prose reason.
+# 函数用途: 收到孩子结果后核对等待清单；普通完成可等同批兄弟，用户从详情页停止则马上叫醒直属父级。
 def reconcile_parent_wait_for_child(
     manager: Any,
     child_run_id: str,
@@ -254,7 +256,7 @@ def _reconcile_parent_wait(
             attention.append(child_id)
             continue
         status = str(getattr(child, "status", "") or "").strip()
-        if task_status_in(status, SUBAGENT_FAILURE_STATUSES):
+        if _child_requires_immediate_parent_attention(child, status):
             terminal.append(child_id)
             attention.append(child_id)
         elif task_status_in(status, SUBAGENT_ENDED_STATUSES):
@@ -287,6 +289,25 @@ def _reconcile_parent_wait(
         attention_run_ids=tuple(attention),
         missing_run_ids=tuple(missing),
     )
+
+
+# LLM: CANCELLED is normally a parent-owned handled terminal state and must not
+# create a duplicate wake. The exact `user_agent_control` source is different:
+# an outside user changed the sleeping parent's child set, so the parent must
+# observe that event immediately even while siblings remain active. Keeping the
+# source in canonical attributes also lets periodic recovery repair a crash
+# between cancellation and delivery.
+# 函数用途: 区分父代理自己取消和用户从 TUI 停止；只有后者与真实失败一样要求父级立即处理。
+def _child_requires_immediate_parent_attention(child: object, status: str) -> bool:
+    if task_status_in(status, SUBAGENT_FAILURE_STATUSES):
+        return True
+    if not task_status_in(status, {TaskStatus.CANCELLED.value}):
+        return False
+    attrs = getattr(child, "attributes", {}) or {}
+    cancel_record = attrs.get("cancel_subagents") if isinstance(attrs, dict) else None
+    if not isinstance(cancel_record, dict):
+        return False
+    return str(cancel_record.get("source") or "").strip() == "user_agent_control"
 
 
 # LLM: Context rows expose bounded durable fields and refs, never raw prompts or

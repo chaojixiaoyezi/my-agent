@@ -328,6 +328,53 @@ def test_owner_stop_grandchild_immediately_resumes_waiting_direct_parent(
     assert agent.conversation_store.pending_wake_signals(limit=0) == []
 
 
+def test_owner_stop_grandchild_resumes_parent_while_sibling_keeps_running(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """用户停止一个孙代理时，协调代理不能等其余兄弟全结束才醒。"""
+    agent, scope, parent = _bound_agent_tree(tmp_path)
+    grandchild, _agent_run = _park_child_waiting_for_grandchild(agent, parent)
+    sibling = agent.subagents.create_run(
+        goal="继续处理另一个分片",
+        root_id="task-root",
+        parent_id=parent.id,
+    )
+    sibling = agent.subagents.lifecycle.prepare_runner_attempt(sibling.id)
+    agent.subagents.add_child(parent.id, sibling.id)
+    assert mark_parent_waiting_for_direct_children(
+        agent.subagents,
+        parent.id,
+        [grandchild.id, sibling.id],
+    ) == (grandchild.id, sibling.id)
+    started: list[str] = []
+
+    def record_start(_agent, run_id: str):
+        started.append(run_id)
+        return {"status": "started", "run_ids": [run_id]}
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration.dispatch.capability_auto_sweep.auto_start_orphan_run",
+        record_start,
+    )
+
+    stopped = stop_agent(
+        agent,
+        scope=scope,
+        run_id=grandchild.id,
+        operation_id="agent-stop-grandchild-with-sibling",
+    )
+
+    assert stopped["status"] == "cancelled"
+    assert agent.subagents.load(grandchild.id).status == "CANCELLED"
+    assert agent.subagents.load(sibling.id).status == "RUNNING"
+    assert parent_wait_blocks_dispatch(agent.subagents.load(parent.id)) is False
+    assert started == [parent.id]
+    delivery = stopped["result"]["parent_delivery"]
+    assert delivery["reason"] == "child_attention_required"
+    assert delivery["resume_requested"] is True
+
+
 def test_interactive_stop_acknowledges_before_slow_canonical_closeout(
     tmp_path, monkeypatch
 ) -> None:

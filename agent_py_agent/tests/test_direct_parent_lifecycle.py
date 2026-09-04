@@ -187,6 +187,54 @@ def test_child_failure_releases_parent_without_waiting_for_successful_sibling(tm
     assert children[1].id in decision.active_run_ids
 
 
+def test_user_controlled_cancel_releases_parent_without_waiting_for_sibling(tmp_path) -> None:
+    manager, parent, children = _parent_and_children(tmp_path, statuses=("RUNNING", "RUNNING"))
+    mark_parent_waiting_for_direct_children(
+        manager, parent.id, [child.id for child in children]
+    )
+    cancelled = manager.load(children[0].id)
+    cancelled.status = "CANCELLED"
+    cancelled.attributes = {
+        **dict(cancelled.attributes or {}),
+        "cancel_subagents": {
+            "cancel_status": "CANCELLED",
+            "source": "user_agent_control",
+        },
+    }
+    manager.save(cancelled)
+
+    decision = reconcile_parent_wait_for_child(manager, cancelled.id)
+
+    assert decision.should_resume is True
+    assert decision.reason == "child_attention_required"
+    assert decision.attention_run_ids == (cancelled.id,)
+    assert children[1].id in decision.active_run_ids
+
+
+def test_parent_owned_cancel_stays_batched_while_sibling_runs(tmp_path) -> None:
+    manager, parent, children = _parent_and_children(tmp_path, statuses=("RUNNING", "RUNNING"))
+    mark_parent_waiting_for_direct_children(
+        manager, parent.id, [child.id for child in children]
+    )
+    cancelled = manager.load(children[0].id)
+    cancelled.status = "CANCELLED"
+    cancelled.attributes = {
+        **dict(cancelled.attributes or {}),
+        "cancel_subagents": {
+            "cancel_status": "CANCELLED",
+            "source": "cancel_subagents",
+        },
+    }
+    manager.save(cancelled)
+
+    decision = reconcile_parent_wait_for_child(manager, cancelled.id)
+
+    assert decision.should_resume is False
+    assert decision.reason == "siblings_still_active"
+    assert decision.attention_run_ids == ()
+    assert parent_wait_blocks_dispatch(manager.load(parent.id)) is True
+
+
 def test_resumed_parent_context_contains_direct_child_results_and_requests(tmp_path) -> None:
     manager, parent, children = _parent_and_children(tmp_path, statuses=("BLOCKED",))
     child = manager.load(children[0].id)

@@ -23,6 +23,10 @@
 - 交接只接受结构化 `CANCELLED`、authenticated thread、`parent_id/root_id` 和 canonical task state；不解析
   页面文字、目标或 final。整树取消先完成，交接失败不回滚已生效的停止，现有恢复巡检继续作为故障兜底。
   模型内取消和 root `/stop` 维持原语义，避免同一事实重复唤醒。
+- `CANCELLED` 本身不足以判断是否要抢在兄弟完成前唤醒：父代理自己调用 `cancel_subagents` 已在同一轮看到
+  工具结果，应继续按普通已处理终态合批；`attributes.cancel_subagents.source=user_agent_control` 表示外部用户
+  改变了一个正在睡眠的父级之 child 集，必须立即标为 direct-parent attention。该来源随 canonical state
+  持久化，因此即时交接与崩溃后的周期 reconcile 使用同一裁决，不依赖易失函数参数或中文 reason。
 
 ## 2026-09-04 根/子/孙代理共享同一创建容量事实【状态：R170 focused 与真 TUI 通过】
 

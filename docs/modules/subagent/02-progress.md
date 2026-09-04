@@ -13,7 +13,10 @@
 - 已补齐 TUI/Web 外部停止与父级运行链之间的缺口：整棵目标分支取消完成后，root child 通过现有会话 wake
   回报 `CANCELLED`，nested child 则只释放并恢复 exact direct parent。
 - 模型本轮调用 `cancel_subagents` 已有同步工具结果，root `/stop` 已拥有整棵主任务的停止边界，两者不走
-  额外 completion wake。当前 focused 已通过，`.10` child/grandchild Compact 中 Esc 的真 TUI 复验待完成。
+  额外 completion wake。`.10` root-child 已真机通过；三层样本又发现 external CANCELLED 在仍有 sibling 时
+  被当普通终态合批，coordinator 延迟约 23 分钟才恢复。
+- 当前从 canonical `cancel_subagents.source` 区分父轮内取消与 `user_agent_control`：后者立即进入直属父级
+  attention，前者继续不重复 wake。含运行中 sibling 的 focused 已通过，新 wheel 三层真 TUI 待完成。
 
 ## 2026-09-04 R170 递归派工容量收敛（focused 与真 TUI 通过）
 
