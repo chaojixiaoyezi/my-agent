@@ -1,6 +1,6 @@
 # Subagent Progress
 
-## 2026-09-04 R170 递归派工容量收敛（本地 focused 通过）
+## 2026-09-04 R170 递归派工容量收敛（focused 与真 TUI 通过）
 
 - R169 grandchild 真任务首次证明 coordinator 的结构化配额快照正确但创建结果越界：owner 只允许两名
   subagent、main 加活跃代理最多三名，递归 handler 仍一次创建四名下级。根因是根路径独占容量预检，
@@ -8,8 +8,11 @@
 - 对照 会话运行时 同 session 所有代理共享 `AgentRegistry::reserve_spawn_slot`，将 my-agent 已有 durable
   session/owner/task/per-call 计算迁到 `agent_core/orchestration/capacity.py`；root/child/grandchild 在同一
   creation guard 内共用，超限整批 `not_started`，显式 per-call 参数错误保持原反馈。
-- 新回归覆盖 parent 已占一个槽、请求四项、仅余一槽时零子记录；相邻 120 项 focused 通过。下一步发布到
-  `.10` 唯一 Gateway，用真实 MiniMax-M2.7 TUI 重放同一递归请求，并继续补 grandchild Compact 正证。
+- 新回归覆盖 parent 已占一个槽、请求四项、仅余一槽时零子记录；相邻 120 项 focused 通过。
+  `.10` 唯一 Gateway 的 `ma-r170-110-nested-capacity-r2` 已复现
+  `requested=4/available=1/not_started` 且原批次零创建。`ma-r170-110-grandchild-compact-r2` 则在充足配额下
+  形成三层树：depth-2 孙代理自然 Compact `120,065→69,952` 后继续调用工具并 DONE，五名孙代理收齐后
+  coordinator 和 main 均自动恢复并 final；活跃孙代理 TUI 插话也在下一工具边界精确送入。
 
 ## 2026-09-01 直属父级工具 authority 成为 capability grant 硬事实（R128 真 TUI 通过）
 

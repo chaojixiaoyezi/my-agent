@@ -8,9 +8,16 @@
 - failure-first 回归在一个真实 `SimpleAgent` 中保留一个非终态 parent，再由该 parent 批量请求四名下级；
   统一容量只剩一槽，必须返回 `SUBAGENT_CAPACITY_EXCEEDED/not_started`、`requested=4/available=1`，并保证
   parent `child_ids=[]`、manager 只有原 parent。显式 per-call cap=2 的旧精确错误继续通过。
-- 当前创建、items、owner quota、hierarchy scheduler/limit 与 dispatch state 共 120 项 focused 通过。真机
-  复验必须使用 `.10` 唯一 Gateway、MiniMax-M2.7 和 fresh owner；先证明超限零创建，再使用允许的容量让
-  grandchild 独立线程自然 Compact 并继续完成，不能靠 main/child Compact 代替。
+- 当前创建、items、owner quota、hierarchy scheduler/limit 与 dispatch state 共 120 项 focused 通过。
+  `.10` 唯一 Gateway + MiniMax-M2.7 真 TUI `ma-r170-110-nested-capacity-r2` 中，coordinator 原批次请求四项时
+  返回 `requested=4/available=1/owner_cap=2/not_started`，没有部分 child；容量释放后模型改用逐项请求属于
+  新调用，不改变原批次原子性。
+- 独立三层真 TUI `ma-r170-110-grandchild-compact-r2` 中，coordinator 创建五名 grandchild；用户从 TUI
+  进入 `subagent-1788527190-94bc6171` 并在活跃轮插话，消息于下一工具边界送入。该孙代理自然 Compact
+  `120,065→69,952`，checkpoint `compact-1-cf29cdc3a1f1272f2f43`、generation 1、33 对工具留 7 对；动画、
+  压后工具续跑、最终报告均可见。五名孙代理随后全 DONE，coordinator 自动唤醒汇总，main 再自动 final；
+  exact `parent_id/root_id` 全部正确。孙代理用量为 21 次 MiniMax-M2.7 物理调用、cache-read 965,158、
+  cache-write 94,143、普通 input 97,333、output 11,577、失败 0。
 
 ## Shell 产物保护的 owner 私有存储
 

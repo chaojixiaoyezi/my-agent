@@ -1,5 +1,23 @@
 # COMPLETED
 
+## 2026-09-04 R170 递归派工容量与孙代理 Compact 真机闭环
+
+- 根与任意递归层级现共用唯一 session/owner/task/per-call 容量计算和 owner-local 创建事务；超限批次原子
+  `not_started`，不静默截断或部分落盘。120 项 focused 与 `.10` 真 TUI
+  `ma-r170-110-nested-capacity-r2` 均证明 `requested=4/available=1` 时原批次零创建。
+- 独立 TUI `ma-r170-110-grandchild-compact-r2` 形成 main→coordinator→5 名孙代理的真实三层树；depth-2
+  `subagent-1788527190-94bc6171` 自然 Compact `120,065→69,952`、generation 1，压后继续工作并 DONE。
+  五名孙代理完成后 coordinator、main 逐层自动唤醒和 final，TUI 插话、动画、checkpoint、lineage 与
+  MiniMax-M2.7 用量账均有结构化证据。Compact 中途取消仍按 main/child/grandchild 分层留在测试清单。
+
+## 2026-09-04 R169 Transcript Compact 缓存面统一
+
+- Gateway 前后台、手动 `/compact` 与每层 agent thread 复用普通模型轮的 stable prompt、system、工具 Schema
+  和 canonical provider messages，只在末尾追加摘要要求；auxiliary 摘要不执行模型返回的工具调用。
+- `.10` 单 Gateway 已分别取得 main 自然/手动、直属 child 和 depth-2 grandchild 的 MiniMax-M2.7 真 TUI
+  证据；三层都提交自己的 generation、显示动画、保留 provider cache-read 并在压缩后继续工作。故障中途取消
+  仍按层级单列测试，不能由自然成功推断。
+
 ## 2026-09-04 R167/R168 Shell 前像存储与工具归档分型
 
 - shell 前像已从用户项目树迁到 owner `data/artifact_backups`，使用 opaque hash blob、原子写入和严格

@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-09-04 R170 递归代理容量统一（本地 Focused 通过，待真 TUI）
+## 2026-09-04 R170 递归代理容量统一（Focused 与真 TUI 通过）
 
 - R169 grandchild 真任务已经证明配额文件、coordinator task 和 execution context 都是
   `max_subagents=2/max_active_agents=3`，但递归 handler 仍创建四名下级；根路径的容量预检没有进入
@@ -10,10 +10,15 @@
   核对 canonical 非终态 run；容量不足整批 `not_started`，零部分落盘。原显式 per-call 上限仍返回更精确
   的“单次最多 N 个”错误。
 - 新增递归四项请求、仅余一槽的 failure-first 回归，核对 `requested=4/available=1`、owner/active limit 和
-  parent `child_ids=[]`；扩展 120 项创建/owner quota/hierarchy/dispatch focused 全绿。下一步发布 R170，
-  在 `.10` 单 Gateway 复现同一请求，再补 grandchild 独立 ConversationThread 的自然 Compact。
+  parent `child_ids=[]`；扩展 120 项创建/owner quota/hierarchy/dispatch focused 全绿。`.10` 唯一 Gateway 的
+  真 TUI `ma-r170-110-nested-capacity-r2` 已取得同样的结构化整批拒绝，原四项没有部分创建；终态释放容量后，
+  模型自行改为逐项创建不影响这次原子拒绝结论。
+- 独立真 TUI `ma-r170-110-grandchild-compact-r2` 已形成 main→coordinator→5 名 grandchild 的三层树；孙代理
+  `subagent-1788527190-94bc6171` 自然 Compact `120,065→69,952`、`compact 0→1`，动画完整显示并继续调用工具，
+  随后五名孙代理、coordinator 和 main 依次自然 DONE/final。该孙代理 21 次物理调用为 MiniMax-M2.7，
+  cache-read 965,158、cache-write 94,143、普通 input 97,333，零失败；主代理通过不再被当作孙代理证明。
 
-## 2026-09-04 R169 Transcript Compact 缓存面统一（Focused、main/child 真 TUI 通过）
+## 2026-09-04 R169 Transcript Compact 缓存面统一（Focused、main/child/grandchild 真 TUI 通过）
 
 - 已确认 R166 修正的是运行中工具历史的 live Compact；会话旧历史的 transcript Compact 仍把摘要、操作
   证据和全部历史重新拼成一条巨型 prompt。功能上能提交 generation，但第一次大压缩会形成新的冷前缀，
@@ -25,8 +30,9 @@
 - 摘要调用仍为一次无工具执行的 auxiliary call；provider 返回 ToolCall 时丢弃其正文并使用机械摘要，
   不执行 handler。相关 Gateway/background/child/TUI/control 共 287 项 focused 通过。`.10` 两路 main-only
   已分别自然压缩和手动 `/compact`，动画、generation 2、压后续作及 provider cache-read 均正常；独立 child
-  `118,772→74,012`、`compact 0→1` 后继续完成。grandchild 证据因 R170 真实配额缺口需在修复后重跑，不能用
-  main/child 的通过代替。
+  `118,772→74,012`、`compact 0→1` 后继续完成。R170 又补齐 exact depth-2 grandchild
+  `120,065→69,952`、`compact 0→1`、压后工具续跑、终态与逐级父级唤醒，三层自然成功路径现均有独立证据。
+  child/grandchild Compact 中途取消仍按独立故障边界留在测试清单。
 
 ## 2026-09-04 R167/R168 Shell 产物保护迁出项目树与前像范围（真 TUI 通过）
 

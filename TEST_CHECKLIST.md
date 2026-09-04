@@ -7,8 +7,10 @@
 - [x] owner 仅余一槽时，递归四项批次返回 `SUBAGENT_CAPACITY_EXCEEDED/not_started`，四项零落盘；容量状态
   不可读继续 fail closed。显式单次上限仍保留原精确错误。
 - [x] 创建、批量、owner quota、hierarchy 与 dispatch 相邻 120 项 focused 通过。
-- [ ] `.10` 单 Gateway + MiniMax-M2.7 真 TUI：coordinator 请求四项时结构化显示 `requested=4/available=1`，
-  父级 child_ids 保持空；容量允许的下一路 grandchild 自然 Compact 后继续工作并终态。
+- [x] `.10` 单 Gateway + MiniMax-M2.7 真 TUI：`ma-r170-110-nested-capacity-r2` 的 coordinator 请求四项时
+  结构化显示 `requested=4/available=1/not_started` 且原批次零创建；另一路
+  `ma-r170-110-grandchild-compact-r2` 的 depth-2 grandchild 自然 Compact `120,065→69,952` 后继续工作并
+  终态，五名 grandchild→coordinator→main 逐级自动唤醒并 final。
 
 ## R169 Transcript Compact 普通请求缓存面
 
@@ -20,8 +22,9 @@
   临时工具不跨轮复活。Gateway/background/child/TUI/control 相关 287 项 focused 通过。
 - [x] `.10` 唯一 Gateway + MiniMax-M2.7 真 TUI：两路 main-only 分别触发自然 Compact 与手动/续作，
   独立 child 自然 `118,772→74,012`、`compact 0→1` 后完成；动画、generation、cache-read 和上下文连续正常。
-- [ ] grandchild 独立线程自然 Compact 与 Compact 中途取消仍待真机；R170 配额回归先修，不能用 main/child
-  或 root 在 grandchild 任务里发生 Compact 冒充。
+- [x] grandchild 独立线程自然 Compact 已在 R170 真 TUI 通过；checkpoint、generation、动画、压后续跑和
+  父级唤醒均由 exact depth-2 run 证明，未用 main/child 冒充。
+- [ ] child/grandchild 的 Compact 中途取消仍待分别真机；不能由自然 Compact 成功或主代理中途取消替代。
 
 ## R168 Shell 前像范围与结算回收
 

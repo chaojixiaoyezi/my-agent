@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-09-04 根/子/孙代理共享同一创建容量事实【状态：R170 本地 focused 通过，真 TUI 待验】
+## 2026-09-04 根/子/孙代理共享同一创建容量事实【状态：R170 focused 与真 TUI 通过】
 
 - R169 grandchild Compact 真任务的 owner 配额明确为 `max_subagents=2/max_active_agents=3`，coordinator 的
   canonical task、runner prompt 和 execution context 也都携带该值，但递归 `create_subagents` 仍一次落盘并
@@ -16,8 +16,14 @@
   storage/lineage 不可读继续 fail closed。显式 `subagent_hierarchy_max_children_per_tool_call` 的精确参数错误先于
   总容量回执，避免模型失去原有修正线索。容量只读结构化配置、task lineage 和 canonical status，不解析
   goal、role、展示名或模型回复，也不改变 Compact、父子唤醒和 runner 并发语义。
+- `.10` 唯一 Gateway 真 TUI `ma-r170-110-nested-capacity-r2` 已证明递归四项请求在仅余一槽时整批
+  `not_started`；模型随后等待终态释放并发起新的单项请求，是正常的新事务，不是原批次被静默截断。
+  `ma-r170-110-grandchild-compact-r2` 另以充足结构化配额创建五名 depth-2 grandchild；其中一个独立 thread
+  自然 Compact `120,065→69,952`、generation 1 后继续工具调用并 DONE，五名孙代理收齐后 coordinator 与 main
+  逐层自动恢复和 final。由此容量、孙代理 Compact、TUI 插话和 durable wake 分别有真实结构证据；
+  child/grandchild Compact 中途取消仍是独立边界，不能由本条自然成功推断。
 
-## 2026-09-04 Transcript Compact 与普通模型轮共用缓存面【状态：Focused 通过，真 TUI 待验】
+## 2026-09-04 Transcript Compact 与普通模型轮共用缓存面【状态：Focused 与三层真 TUI 通过】
 
 - R166 只收口了运行中工具 IR 的 live Compact。对 R167 长会话逐个物理请求核账后发现 transcript generation 1
   虽正确从约 103.9k 压到 10.5k，但摘要请求自身约 108k 输入没有 cache-read；根因是 `_summarize` 把旧摘要、
@@ -32,8 +38,9 @@
   allowed-tools/prompt-files/system/context scope。若 provider overflow 发生在 `tool_search` 后，临时 Schema 只由
   carried tool archive 的 typed envelope 恢复；普通成功轮已消费的 Schema 不跨轮复活。
 - 工具 Schema 只用于缓存 key，auxiliary summary 没有 handler/工具循环；任何 ToolCall 都丢弃模型正文并用
-  bounded mechanical fallback。下一步真实 TUI 要分别证明 main、child、grandchild；主代理成功只覆盖共用
-  算法，不能证明独立 agent thread、runner cancel/recovery 和嵌套 durable wake。
+  bounded mechanical fallback。R169 已分别证明 main 自然/手动与直属 child，R170 再以 exact depth-2
+  grandchild 证明 generation、cache-read、动画、压后续跑和嵌套 durable wake。主代理成功仍不被当作其它
+  层级证明；child/grandchild Compact 中途取消继续单列。
 
 ## 2026-09-04 Shell 前像只保护交付物并在权威结算后回收【状态：Focused 通过，真 TUI 待验】
 
