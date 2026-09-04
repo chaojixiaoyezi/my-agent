@@ -187,8 +187,7 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
         normalized,
         explicit_keys=("run_id", "from_run_id", "agent_id"),
     )
-    current_run_id = current_subagent_run_id(agent)
-    run_id = str(resolution.effective.get("agent_id") or current_run_id).strip()
+    run_id = str(resolution.effective.get("agent_id") or current_subagent_run_id(agent)).strip()
     if not run_id:
         return _capability_error(
             "缺少 run_id；runner 内会自动使用当前 run id。",
@@ -221,19 +220,25 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
             "缺少 problem；必须说明当前被什么能力缺口阻塞。",
             error_code="TOOL_PARAMETER_REQUIRED",
         )
-    record_params = _record_params(normalized, problem)
-    if not capability_request_declares_target(record_params):
-        return _capability_error(
-            "能力申请没有结构化授权目标；请在 requested_tools、requested_mcp_tools、"
-            "requested_skills、requested_commands、path_scope、cwd_scope 或 network_scope "
-            "中至少填写一项。工具名必须使用当前目录中的精确名称，不能只在 problem 或 "
-            "needed_capability 里描述。",
-            error_code="TOOL_PARAMETER_REQUIRED",
-        )
+    if not capability_request_declares_target(record_params := _record_params(normalized, problem)):
+        return _missing_capability_target_error()
     return CapabilityRequestToolInput(
         run_id=run_id,
         params=record_params,
         scope_resolution=resolution,
+    )
+
+
+# LLM: Keep the corrective schema hint at the input boundary; callers and
+# auto-grant must not duplicate or parse this user-facing prose.
+# 函数用途: 返回空授权目标的统一参数错误，并告诉模型应填写哪些结构化字段。
+def _missing_capability_target_error() -> ToolHandlerOutcome:
+    return _capability_error(
+        "能力申请没有结构化授权目标；请在 requested_tools、requested_mcp_tools、"
+        "requested_skills、requested_commands、path_scope、cwd_scope 或 network_scope "
+        "中至少填写一项。工具名必须使用当前目录中的精确名称，不能只在 problem 或 "
+        "needed_capability 里描述。",
+        error_code="TOOL_PARAMETER_REQUIRED",
     )
 
 
