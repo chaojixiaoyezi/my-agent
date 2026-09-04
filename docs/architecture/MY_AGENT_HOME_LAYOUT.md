@@ -121,7 +121,10 @@ workspace/runtime/workspaces/<workspace-scope>/
 - global index 和 owner projection 可重建，不替代正文事实。
 - raw audit 和 tool output 只给审计、恢复和检索，不直接进入 prompt 大正文。
 - shell 产物恢复副本只落 `data/artifact_backups/v1/`，registry 保存 owner-local opaque ref；不得放进 task
-  项目树或保留可被测试/打包工具识别的原文件名。无变化命令的预备份必须在当次复核后删除。
+  项目树或保留可被测试/打包工具识别的原文件名。`tool_output` 归档虽可登记供按 ref 读取，但带结构化
+  `shell_preimage_policy=exclude`，不参与后续 shell 前像；无变化命令的预备份必须在当次复核后删除，临时
+  operation manifest 在通用 ToolOperation succeeded/failed 权威结算后删除，changed/invalid 的实际恢复 blob
+  继续按 opaque ref 保留。
 - `output/` 放最终交付；`work/` 放过程、日志、结构化任务状态、子代理和验收记录。
 - dangerous roots 继续由安全策略拦截；普通用户指定输出目录不靠 broad allowed-write-roots
   白名单兜住。子代理 runner 或内部工具调用一旦显式传入 `allowed_write_roots`，该字段就是

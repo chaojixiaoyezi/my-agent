@@ -549,8 +549,148 @@ def test_shell_unchanged_artifact_discards_prebackup(tmp_path: Path) -> None:
     assert result.ok is True
     assert not list(backup_root.rglob("*.blob"))
     schema_root = backup_root / "v1"
-    assert list(schema_root.rglob("operation.json"))
+    assert not list(schema_root.rglob("operation.json"))
     assert not (workspace / "data" / "artifacts" / "shell_backups").exists()
+
+
+def test_shell_preimage_skips_tool_archives_but_keeps_open_world_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Tool archives are not deliverables; unknown kinds stay protected by default."""
+    from agent_py_agent.agent.artifacts.registry import (
+        ARTIFACT_ROLE_METADATA_KEY,
+        ARTIFACT_ROLE_TOOL_OUTPUT_ARCHIVE,
+        SHELL_PREIMAGE_POLICY_EXCLUDE,
+        SHELL_PREIMAGE_POLICY_INCLUDE,
+        SHELL_PREIMAGE_POLICY_METADATA_KEY,
+        ArtifactRegistration,
+        register_artifact,
+    )
+    from agent_py_agent.agent.artifacts.shell_protection import snapshot_ready_artifacts
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cases = (
+        ("legacy-output", "tool_output", {}, False),
+        (
+            "typed-output",
+            "tool_output",
+            {
+                ARTIFACT_ROLE_METADATA_KEY: ARTIFACT_ROLE_TOOL_OUTPUT_ARCHIVE,
+                SHELL_PREIMAGE_POLICY_METADATA_KEY: SHELL_PREIMAGE_POLICY_EXCLUDE,
+            },
+            False,
+        ),
+        (
+            "explicit-output",
+            "tool_output",
+            {SHELL_PREIMAGE_POLICY_METADATA_KEY: SHELL_PREIMAGE_POLICY_INCLUDE},
+            True,
+        ),
+        ("future-format", "future_custom_format", {}, True),
+    )
+    expected: set[str] = set()
+    for artifact_id, kind, metadata, protected in cases:
+        path = workspace / f"{artifact_id}.data"
+        path.write_text(artifact_id, encoding="utf-8")
+        register_artifact(
+            ArtifactRegistration(
+                workspace_root=workspace,
+                path=path,
+                artifact_id=artifact_id,
+                run_id="run-policy",
+                task_id="task-policy",
+                agent_id="agent-policy",
+                kind=kind,
+                status="ready",
+                source="test",
+                metadata=metadata,
+            )
+        )
+        if protected:
+            expected.add(artifact_id)
+
+    snapshots = snapshot_ready_artifacts(
+        workspace,
+        tmp_path / "owner" / "artifact_backups",
+        run_scope={"owner_id": "owner", "run_id": "run-policy", "task_id": "task-policy"},
+        operation_id="operation-policy",
+    )
+
+    assert {item.artifact_id for item in snapshots} == expected
+
+
+def test_shell_settlement_removes_manifest_but_keeps_changed_preimage(
+    tmp_path: Path,
+) -> None:
+    """Managed settlement closes the manifest window without deleting recovery bytes."""
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        latest_artifact_records,
+        register_artifact,
+    )
+    from agent_py_agent.agent.artifacts.shell_protection import resolve_shell_artifact_backup
+    from agent_py_agent.agent.tooling.models import ToolOperationSettlementContext
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "report.md"
+    artifact.write_text("before", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=artifact,
+            artifact_id="report",
+            run_id="run-settle",
+            task_id="task-settle",
+            agent_id="agent-settle",
+            status="ready",
+        )
+    )
+    backup_root = tmp_path / "owner" / "artifact_backups"
+    tool = ShellTool(
+        workspace,
+        options=ShellToolOptions(artifact_backup_root=backup_root),
+    )
+    run_scope = {
+        "owner_id": "owner-settle",
+        "run_id": "run-settle",
+        "task_id": "task-settle",
+    }
+
+    result = tool.execute(
+        {
+            "command": "printf after > report.md",
+            "__run_scope": run_scope,
+            "__tool_call_id": "call-settle",
+            "__operation_id": "operation-settle",
+            "__operation_managed": True,
+        }
+    )
+
+    record = latest_artifact_records(workspace)["report"]
+    backup_ref = str(record.metadata["backup_ref"])
+    assert result.ok is True
+    assert list(backup_root.rglob("operation.json"))
+    assert resolve_shell_artifact_backup(backup_root, backup_ref).read_text() == "before"
+
+    tool.on_operation_settled(
+        {},
+        ToolOperationSettlementContext(
+            owner_id="owner-settle",
+            run_id="run-settle",
+            task_id="task-settle",
+            operation_id="operation-settle",
+            tool_name="run_command",
+            args_hash="hash",
+            idempotency_key="key",
+            idempotency_scope="operation",
+            status="succeeded",
+        ),
+    )
+
+    assert not list(backup_root.rglob("operation.json"))
+    assert resolve_shell_artifact_backup(backup_root, backup_ref).read_text() == "before"
 
 
 def test_shell_pytest_does_not_collect_internal_artifact_backup(tmp_path: Path) -> None:

@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..artifacts.registry import ArtifactRegistration, register_artifact
+from ..artifacts.registry import (
+    ARTIFACT_ROLE_METADATA_KEY,
+    ARTIFACT_ROLE_TOOL_OUTPUT_ARCHIVE,
+    SHELL_PREIMAGE_POLICY_EXCLUDE,
+    SHELL_PREIMAGE_POLICY_METADATA_KEY,
+    ArtifactRegistration,
+    register_artifact,
+)
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..settings.defaults import default_config_int
 from ..tooling.executor import ToolOutputProjection
@@ -296,6 +303,9 @@ def _applied_tool_approval_from_result(result: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+# LLM: Tool result refs remain discoverable in the artifact registry, but raw tool-output archives
+# are typed as non-deliverables so foreground shell protection never copies its own growing ledger.
+# 函数用途: 登记工具返回的文件引用，并给完整工具回执标明“可读取但不属于用户交付物”的结构化角色。
 def _register_tool_result_artifacts(
     agent: object,
     output_record: dict[str, object],
@@ -313,6 +323,15 @@ def _register_tool_result_artifacts(
         path = _existing_file_ref(ref.get("ref") or ref.get("path"))
         if path is None:
             continue
+        kind = str(ref.get("kind") or "")
+        metadata = {"call_id": str(output_record.get("call_id") or "")}
+        if kind == "tool_output":
+            metadata.update(
+                {
+                    ARTIFACT_ROLE_METADATA_KEY: ARTIFACT_ROLE_TOOL_OUTPUT_ARCHIVE,
+                    SHELL_PREIMAGE_POLICY_METADATA_KEY: SHELL_PREIMAGE_POLICY_EXCLUDE,
+                }
+            )
         registered = register_artifact(
             ArtifactRegistration(
                 workspace_root=workspace_root,
@@ -320,10 +339,10 @@ def _register_tool_result_artifacts(
                 run_id=str(scope.get("run_id") or record.params.run_id or ""),
                 task_id=str(scope.get("task_id") or record.params.task_id or ""),
                 agent_id=str(scope.get("owner_id") or scope.get("run_id") or record.params.run_id or ""),
-                kind=str(ref.get("kind") or ""),
+                kind=kind,
                 source="tool_result",
                 created_by_tool=record.result.tool_name,
-                metadata={"call_id": str(output_record.get("call_id") or "")},
+                metadata=metadata,
             )
         )
         ref["artifact_id"] = registered.artifact_id

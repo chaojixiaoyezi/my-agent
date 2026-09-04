@@ -811,6 +811,24 @@ class ToolOperationReconciliation:
     reason: str = ""
 
 
+# LLM: This context is emitted only after the authoritative operation store has accepted a
+# terminal status. Handlers may release private recovery state, but must not alter the result.
+# 类用途: 把已经耐久结算的副作用操作身份交给工具做恢复材料回收；回收失败不推翻执行终态。
+@dataclass(frozen=True)
+class ToolOperationSettlementContext:
+    owner_id: str
+    run_id: str
+    task_id: str
+    operation_id: str
+    tool_name: str
+    args_hash: str
+    idempotency_key: str
+    idempotency_scope: str
+    status: str
+    source_ref: str = ""
+    replayed: bool = False
+
+
 # LLM: 可用性只描述当前进程的结构化就绪状态，绝不能承担 owner/任务授权，也不能运行有业务副作用的探针。
 # 类用途: 统一表示工具能否在当前运行环境工作，并给最终执行复检提供稳定错误原因。
 @dataclass(frozen=True)
@@ -1288,6 +1306,16 @@ class BaseTool:
     ) -> ToolOperationReconciliation:
         _ = (params, context)
         return ToolOperationReconciliation()
+
+    # LLM: This best-effort hook runs only after an authoritative terminal settlement or replay.
+    # It may discard private recovery material but cannot revise operation/result authority.
+    # 函数用途: 让少数工具在操作账本已落终态后回收临时恢复状态；默认无需处理。
+    def on_operation_settled(
+        self,
+        params: dict[str, Any],
+        context: ToolOperationSettlementContext,
+    ) -> None:
+        _ = (params, context)
 
     # LLM: 只有执行写根不在 resource_scopes 参数里的工具覆盖本方法；默认无额外写根。
     # 函数用途: 结构化声明执行写根（已解析的绝对路径字符串元组），operation lock

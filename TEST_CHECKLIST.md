@@ -1,5 +1,18 @@
 # TEST CHECKLIST
 
+## R168 Shell 前像范围与结算回收
+
+- [x] `tool_output` 新登记行携带结构化 archive role 与 shell exclusion；旧行默认排除，显式 include 优先，
+  未知/未来产物 kind 仍默认保护。
+- [x] 普通直调与 ActionPolicy read-only 路径无需等待 ToolOperation 通知；无变化前像和 operation manifest 均
+  回收，不改变工具结果。
+- [x] mutating 路径只有在权威 ToolOperation succeeded/failed 写入成功后触发 `on_operation_settled`；持久化
+  失败/UNKNOWN 不清理，幂等 replay 会再次通知，hook 失败不篡改已结算终态。
+- [x] changed/invalid 前像 blob 在 manifest 删除后仍能通过 opaque registry ref 恢复；跨 owner 和 no-follow
+  边界沿用 R167 合同。
+- [ ] `.10` 单 Gateway + fresh MiniMax-M2.7 TUI 连续产生工具输出和 shell，确认 snapshots 不再累计复制
+  `tool_output`、正常结算零 manifest，并记录前后 I/O/目录数量。
+
 ## R167 Shell 产物保护迁出项目树
 
 - [x] 正式 Agent 的备份根只来自 `HomePaths.owner_artifact_backups_dir`，经 registry 显式注入；Full Access
@@ -10,7 +23,7 @@
   not_started。两个 owner 的同名结构化身份仍物理隔离。
 - [x] focused 中真实 `pytest --collect-only` 仅收集原 `test_generated.py` 一次，项目没有
   `data/artifacts/shell_backups`；HomePaths、ToolRegistry、runtime、sandbox 相邻回归通过。
-- [ ] `.10` 单 Gateway + MiniMax-M2.7 fresh TUI 从普通中文请求完成“创建测试→登记产物→项目级 pytest”，
+- [x] `.10` 单 Gateway + MiniMax-M2.7 fresh TUI 从普通中文请求完成“创建报告→登记产物→shell 修改→读取”，
   并由 task tree、owner backup tree、工具账本三方确认零重复收集、零 no-op blob、opaque ref 不泄露宿主路径。
 - [ ] 受管后台 shell 在 process session 真实退出后的产物复核另立合同；当前不得把前台通过冒充后台已覆盖。
 

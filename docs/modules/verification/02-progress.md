@@ -467,3 +467,13 @@
   与 authority guard 仍在 canonical executor 规范化后只运行一次。取消在准备前命中时不产生晋升副作用。
 - 相对路径与晋升前 owner-root 绝对路径两条 focused 回归均已通过；真实 MiniMax-M2.7 TUI 复验仍是
   把 BUG-010 标为完成的必要条件。
+
+## 2026-09-04 Shell 工具输出前像膨胀收口
+
+- R167 单 Gateway 真 TUI 的 8 子代理长调研暴露：普通 `run_command` 会把累计 `tool_output` registry 行全部
+  当作 ready 交付物复制，一条命令已出现 11 个无意义前像，owner 私有区很快累积约 29 份 manifest。
+- 工具输出登记现带结构化 archive role 与 shell exclusion；旧 `kind=tool_output` 同样迁移兼容，未知产物 kind
+  仍默认保护。通用 operation coordinator 在 succeeded/failed 权威落库后通知 handler 回收 crash-window
+  manifest，UNKNOWN 不清；幂等 replay 再通知一次。
+- shell、artifact registry、tool archive、LocalStore 幂等主链 focused 已通过。下一步部署到 `.10` 唯一
+  Gateway，用 fresh MiniMax-M2.7 TUI 连续产生归档和命令，核对 snapshot/manifest 数量不再随调用数增长。

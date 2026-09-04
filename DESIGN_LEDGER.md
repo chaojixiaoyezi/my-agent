@@ -1,6 +1,29 @@
 # DESIGN LEDGER
 
-## 2026-09-04 Shell 产物备份迁出任务树【状态：Focused 通过，真 TUI 待验】
+## 2026-09-04 Shell 前像只保护交付物并在权威结算后回收【状态：Focused 通过，真 TUI 待验】
+
+- R167 真 TUI 长调研在同一 owner 内跑 8 个子代理时，`data/artifact_backups/v1` 很快出现约 29 份
+  `operation.json`；抽样一条普通 `run_command` 就包含 11 个前像，内容全部是先前的 `tool_search`、
+  `create_subagents`、`task_progress` 等 `tool_output` 归档。后续每条命令继续复制累计归档，I/O、磁盘和清单
+  大小近似平方增长。这不是 MiniMax 慢，而是 artifact registry 把“可读取的完整工具回执”误投影成了“用户
+  交付物”。
+- `tool_output` 仍留在 canonical registry，供 `read_artifact`、Compact 和恢复按 ref 定位；登记时新增结构化
+  `artifact_role=tool_output_archive`、`shell_preimage_policy=exclude`。shell 前像选择先尊重显式 include/exclude，
+  再兼容旧 `kind=tool_output` 行；未知的新 kind 默认继续保护，符合开放世界合同，绝不靠路径或中文文案猜。
+- 会话运行时 `会话运行时-rs/core/src/tools/registry.rs` 在 handler 结束、生命周期终态发出之后才进入完成记录，并明确
+  “PostToolUse 只能拒绝结果，不能倒改已经完成的执行”；终端交互 `src/utils/fileHistory.ts` 也把版本前像放在
+  专门的 session file-history 状态，而不是把工具回执混进用户文件历史。my-agent 适配为通用
+  `on_operation_settled`：只有权威 ToolOperation 成功写入 succeeded/failed，工具才能回收私有 crash-window
+  清单；回收失败只记维护债务，不推翻已经落库的结果，幂等 replay 会再次触发回收。
+- `run_command` 的 changed/invalid 前像 blob 仍由 artifact registry 的 opaque `backup_ref` 长期引用；结算只删
+  `operation.json` 和无变化临时 blob。ActionPolicy 判为 read-only 的调用不进入 ToolOperation，handler 会在返回前
+  直接清理；mutating 调用等待账本结算通知，UNKNOWN 保留清单供重启核对。由宿主内部布尔字段
+  `__operation_managed` 传递这项事实，模型参数不能伪造。
+- focused 覆盖：新旧工具输出不进入前像、显式 include 可覆盖、未知格式默认受保护、普通直调零残留、变更
+  blob 在结算后仍可恢复、成功与幂等 replay 均通知一次、归档登记元数据可追溯。真机下一步用同一 Gateway 的
+  fresh MiniMax-M2.7 TUI 连续产生工具回执和 shell，核对每条命令前像数量不再随工具调用数增长。
+
+## 2026-09-04 Shell 产物备份迁出任务树【状态：Focused 与 R167 真 TUI 普通链通过】
 
 - 旧 `snapshot_ready_artifacts(workspace_root)` 在每条前台 shell 启动前，把全部 ready 产物按原文件名复制到
   `<workspace>/data/artifacts/shell_backups`。因此已登记的 `test_*.py` 会在同一条 pytest 开始前出现于项目树，
@@ -16,7 +39,8 @@
 - 每次前台调用用宿主注入的 run scope、tool call id 与随机 nonce 派生 operation key；产物以 artifact/content
   SHA-256 命名 `.blob`。写入过程为私有目录、0600 临时文件、流式 hash、fsync、atomic replace；公开账本只存
   `owner-artifact-backup:v1/...`，统一 resolver 拒绝绝对路径、`..` 和 symlink 越界。shell 后 unchanged blob
-  立即删除并清空 operation 目录，changed/invalid/unknown 才保留恢复前像。
+  立即删除；权威 ToolOperation 结算后清掉临时 operation 清单，changed/invalid 的恢复前像仍按 registry ref 保留，
+  unknown 则保留清单继续核对。
 - 当前范围只覆盖既有前台 shell 合同。受管后台 shell 在启动返回后仍持续运行，不能在启动回执时假装已完成
   post-check；其 artifact lifecycle 需与 process session 的真实退出事件另做一片。focused 已覆盖真实 pytest
   collect-only 只收一个 node、no-op 零残留、损坏/修改保留原内容、owner 隔离、Full Access 外部 cwd、ref

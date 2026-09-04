@@ -134,7 +134,9 @@ UNKNOWN 副作用、取消、越权和危险路径仍在工具执行期 fail-clo
    再放入不可信数据边界；status、error code、verification facts、hash、大小与 artifact ref 保持
    结构化，不能被正文里的伪标签覆盖。
 3. externalizer、compact、runtime event、机械恢复、shared context 和 handoff 只传递相同 typed
-   trust/redaction 元数据，不维护第二份工具名单。完整原文仅保存在 owner/task artifact。
+   trust/redaction 元数据，不维护第二份工具名单。完整原文仅保存在 owner/task artifact。完整工具回执为了
+   ref 解析仍进入 artifact registry，但必须标记 `artifact_role=tool_output_archive` 和
+   `shell_preimage_policy=exclude`；它不是用户交付物，不能被每条后续 shell 再复制成恢复前像。
 4. `read_artifact` 固定继承外部数据边界；`read_file/search_text` 只有实际读取或命中 canonical
    `work/blobs/tool_outputs/` 时才收紧。JSON wrapper 与纯文本 archive 统一按结构来源处理，不按后缀、
    文件正文或用户自然语言猜信任。
@@ -177,6 +179,8 @@ Conversation thread 的 sticky workspace、task 索引、Compact 状态、通道
   否则在注册/启动边界 fail-closed，不能只让 provider 看见而执行端忽略。
 - 新增副作用工具必须声明 `idempotency_scope` 并经过上述 operation coordinator；不得读取 audit ledger
   判断“是否执行过”，也不得因参数相同自行推断为同一业务动作。
+- 工具拥有 owner 私有 crash-window 状态时，只能通过通用 `on_operation_settled` 在权威 ToolOperation
+  succeeded/failed 落库后回收；UNKNOWN 必须保留。回收失败不得改写已结算结果，幂等 replay 可重试回收。
 - 声明 `idempotency_scope=business` 的工具必须覆盖 `business_idempotency_key`；键只能来自 typed
   owner/request/目标和规范参数，不能含模型 call id，也不能由用户自然语言推断。能查询外部操作状态时
   才覆盖 `reconcile_operation`；没有证据就保留 unknown。

@@ -39,6 +39,7 @@ from .models import (
     ToolFailureStage,
     ToolHandlerOutcome,
     ToolOperationReconciliation,
+    ToolOperationSettlementContext,
     apply_tool_execution_facts,
 )
 
@@ -55,6 +56,9 @@ _BUSY_RETRY_ATTEMPTS = 3
 _BUSY_RETRY_DELAYS = (0.5, 1.0, 2.0)
 
 
+# LLM: Callers provide one immutable execution request; on_settled is notification-only and may
+# run solely after the durable store has accepted a terminal operation fact.
+# 类用途: 汇总一次副作用工具占位、执行、核对和终态回收所需的全部结构化输入。
 @dataclass(frozen=True)
 class ToolOperationExecutionRequest:
     store: object | None
@@ -71,6 +75,7 @@ class ToolOperationExecutionRequest:
     timeout_seconds: int
     invoke: Callable[[], ToolHandlerOutcome]
     reconcile: Callable[[ToolOperationRecord], ToolOperationReconciliation] | None = None
+    on_settled: Callable[[ToolOperationSettlementContext], None] | None = None
     resource_scopes: tuple[str, ...] = ()
     # seq 245 P2：调用者 attempt 身份透传（来源 = ToolCall.attempt_id）。
     attempt_id: str = ""
@@ -257,6 +262,12 @@ def _resolve_claim(
                 result,
                 failure_stage=ToolFailureStage.EFFECT_RECONCILIATION,
             )
+        _notify_operation_settled(
+            request,
+            status=claim.record.status,
+            source_ref=result.effect_source_ref,
+            replayed=True,
+        )
         return result
     if claim.action == "execute":
         return claim
@@ -405,6 +416,12 @@ def _settle_reconciled_operation(
             diagnostic=f"reconciliation_persistence_failed:{type(exc).__name__}",
             source_ref=source_ref,
         )
+    _notify_operation_settled(
+        request,
+        status=terminal_status,
+        source_ref=source_ref,
+        replayed=True,
+    )
     return reconciled_result
 
 
@@ -692,7 +709,46 @@ def _execute_claimed_operation(
             diagnostic=type(exc).__name__,
         )
         return result
+    if operation_status in {TOOL_OPERATION_SUCCEEDED, TOOL_OPERATION_FAILED}:
+        _notify_operation_settled(
+            request,
+            status=operation_status,
+            source_ref=result.effect_source_ref,
+            replayed=False,
+        )
     return result
+
+
+# LLM: Recovery cleanup is strictly downstream of authoritative terminal persistence. Hook
+# failures are private maintenance debt and must never rewrite a result that is already durable.
+# 函数用途: 尽力通知工具“操作账本已经结算”，用于清掉 shell 等工具的临时恢复清单。
+def _notify_operation_settled(
+    request: ToolOperationExecutionRequest,
+    *,
+    status: str,
+    source_ref: str,
+    replayed: bool,
+) -> None:
+    if request.on_settled is None:
+        return
+    try:
+        request.on_settled(
+            ToolOperationSettlementContext(
+                owner_id=request.owner_id,
+                run_id=request.run_id,
+                task_id=request.task_id,
+                operation_id=request.operation_id,
+                tool_name=request.tool_name,
+                args_hash=request.args_hash,
+                idempotency_key=request.idempotency_key,
+                idempotency_scope=request.idempotency_scope,
+                status=status,
+                source_ref=source_ref,
+                replayed=replayed,
+            )
+        )
+    except Exception:  # noqa: BLE001 - terminal operation authority is already persisted
+        logger.warning("tool operation settlement cleanup failed", exc_info=True)
 
 
 # LLM: 权威终态写入失败后绝不能继续返回 ok=true；原工具报告只作为旁证，不能恢复执行权。

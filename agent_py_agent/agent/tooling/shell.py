@@ -21,6 +21,7 @@ from agent_py_agent.agent.artifacts.shell_protection import (
     reconcile_shell_artifact_operation,
     reconcile_shell_artifact_operation_items,
     release_shell_artifact_operation,
+    settle_shell_artifact_operation,
     shell_artifact_protection_note,
     snapshot_ready_artifacts,
 )
@@ -57,6 +58,7 @@ from .models import (
     ToolModelSpec,
     ToolOperationReconciliation,
     ToolOperationReconciliationContext,
+    ToolOperationSettlementContext,
     ToolRuntimePolicy,
     TrustedParameterBinding,
 )
@@ -121,6 +123,9 @@ class ShellToolOptions:
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
 
 
+# LLM: This immutable request carries the exact ActionPolicy operation decision into shell recovery;
+# it prevents read-only/direct calls from waiting for a settlement notification that will not exist.
+# 类用途: 汇总一次前台命令的执行边界、恢复身份及是否由通用副作用账本接管终态。
 @dataclass(frozen=True)
 class _ShellArtifactExecutionRequest:
     """Host-only inputs for one foreground shell operation."""
@@ -134,8 +139,12 @@ class _ShellArtifactExecutionRequest:
     run_scope: object
     tool_call_id: str
     operation_id: str
+    operation_managed: bool
 
 
+# LLM: Prepared state binds snapshots to one stable private operation key and must not be rebuilt
+# from the post-command filesystem.
+# 类用途: 保存命令启动前已经落盘的产物前像及恢复清单引用，供退出后复核与结算。
 @dataclass(frozen=True)
 class _ShellArtifactExecutionState:
     """Prepared owner-private artifact state surrounding one shell process."""
@@ -979,6 +988,7 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
                 "__run_scope",
                 "__tool_call_id",
                 "__operation_id",
+                "__operation_managed",
             ),
             safe_parameter_defaults=(
                 ("timeout", default_timeout),
@@ -1156,6 +1166,7 @@ class ShellTool(BaseTool):
                 run_scope=params.get("__run_scope"),
                 tool_call_id=str(params.get("__tool_call_id") or ""),
                 operation_id=str(params.get("__operation_id") or ""),
+                operation_managed=params.get("__operation_managed") is True,
             )
         )
 
@@ -1229,6 +1240,27 @@ class ShellTool(BaseTool):
                 outcome="unknown",
                 reason="artifact_operation_reconciliation_failed",
             )
+
+    # LLM: Generic ToolOperation settlement is the authority that closes this manifest's crash
+    # window. Preserve changed preimage blobs; remove only the now-redundant operation journal.
+    # 函数用途: 在 run_command 的权威成功/失败终态落库后回收 owner 私有 shell 恢复清单。
+    def on_operation_settled(
+        self,
+        params: dict[str, Any],
+        context: ToolOperationSettlementContext,
+    ) -> None:
+        _ = params
+        if self.artifact_backup_root is None:
+            return
+        settle_shell_artifact_operation(
+            self.artifact_backup_root,
+            run_scope={
+                "owner_id": context.owner_id,
+                "run_id": context.run_id,
+                "task_id": context.task_id,
+            },
+            operation_id=context.operation_id,
+        )
 
     # LLM: 正常退出必须同时返回结构化 process facts 和 `_display` 暂存；异常分支保持原错误合同，不能伪造 stdout/stderr。
     # 函数用途: 运行前台命令并将退出事实、模型文本和终端预览一次性整理出来。
@@ -1631,6 +1663,16 @@ def _commit_protected_shell_outcome(
             effect_outcome="unknown",
             effect_source_ref=prepared.operation_ref,
         )
+    if not request.operation_managed:
+        try:
+            settle_shell_artifact_operation(
+                request.tool.artifact_backup_root,
+                run_scope=request.run_scope,
+                operation_id="",
+                operation_key=prepared.operation_key,
+            )
+        except (OSError, TypeError, ValueError):
+            logger.warning("unmanaged shell artifact cleanup deferred", exc_info=True)
     return outcome
 
 

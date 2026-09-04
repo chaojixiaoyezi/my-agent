@@ -267,6 +267,65 @@ def test_tool_archive_registers_write_file_artifact(tmp_path: Path):
     assert next(iter(records.values())).path == str((tmp_path / "outputs" / "report.md").resolve())
 
 
+def test_tool_output_archive_registers_shell_preimage_exclusion(tmp_path: Path):
+    from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_call_record
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
+    from agent_py_agent.agent.artifacts.registry import (
+        ARTIFACT_ROLE_METADATA_KEY,
+        ARTIFACT_ROLE_TOOL_OUTPUT_ARCHIVE,
+        SHELL_PREIMAGE_POLICY_EXCLUDE,
+        SHELL_PREIMAGE_POLICY_METADATA_KEY,
+        latest_artifact_records,
+    )
+    from agent_py_agent.agent.tooling.runtime_contracts import (
+        ToolResult,
+        ToolResultRef,
+        ToolSuccessFacts,
+    )
+    from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
+
+    archived = tmp_path / "work" / "blobs" / "tool_outputs" / "read-file.json"
+    archived.parent.mkdir(parents=True)
+    archived.write_text('{"output":"complete"}\n', encoding="utf-8")
+    call = canonical_history_call(
+        "read_file",
+        {"path": "report.md"},
+        call_id="read-report",
+        run_id="run-output",
+    )
+    result = ToolResult.succeeded(
+        call,
+        "preview",
+        facts=ToolSuccessFacts(
+            refs=(
+                ToolResultRef(
+                    kind="tool_output",
+                    ref=str(archived),
+                    sha256="abc",
+                    size_bytes=archived.stat().st_size,
+                    summary="complete raw tool output",
+                ),
+            )
+        ),
+    )
+    output_record = archive_tool_call_record(
+        SimpleNamespace(root=tmp_path, config=SimpleNamespace()),
+        ToolCallRecordParams(
+            params=_empty_tool_loop_params(),
+            tool_rounds=1,
+            idx=1,
+            call=call,
+            result=result,
+        ),
+    )
+
+    registry_ref = output_record["artifact_registry_refs"][0]
+    record = latest_artifact_records(tmp_path)[registry_ref["artifact_id"]]
+    assert record.kind == "tool_output"
+    assert record.metadata[ARTIFACT_ROLE_METADATA_KEY] == ARTIFACT_ROLE_TOOL_OUTPUT_ARCHIVE
+    assert record.metadata[SHELL_PREIMAGE_POLICY_METADATA_KEY] == SHELL_PREIMAGE_POLICY_EXCLUDE
+
+
 def _empty_tool_loop_params():
     from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 

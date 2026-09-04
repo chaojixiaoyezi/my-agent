@@ -21,6 +21,11 @@ from .registry_reader import latest_records_from_lines, lookup_record_with_error
 
 SCHEMA_VERSION = "artifact_registry.v1"
 REGISTRY_RELATIVE_PATH = Path("data") / "artifacts" / "registry.jsonl"
+ARTIFACT_ROLE_METADATA_KEY = "artifact_role"
+ARTIFACT_ROLE_TOOL_OUTPUT_ARCHIVE = "tool_output_archive"
+SHELL_PREIMAGE_POLICY_METADATA_KEY = "shell_preimage_policy"
+SHELL_PREIMAGE_POLICY_EXCLUDE = "exclude"
+SHELL_PREIMAGE_POLICY_INCLUDE = "include"
 
 
 @dataclass(frozen=True)

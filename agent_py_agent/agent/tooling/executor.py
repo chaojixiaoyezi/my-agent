@@ -27,6 +27,7 @@ from .models import (
     ToolInvocationContext,
     ToolOperationReconciliation,
     ToolOperationReconciliationContext,
+    ToolOperationSettlementContext,
     ToolRuntime,
     ToolRuntimeSnapshot,
     apply_tool_execution_facts,
@@ -427,7 +428,13 @@ def _invoke_with_operation_policy(
                 failure_stage=ToolFailureStage.RUNTIME_GATE.value,
                 handler_executed=False,
             )
-        return invoke_registry_tool(_invoke_request(request, call))
+        return invoke_registry_tool(
+            _invoke_request(
+                request,
+                call,
+                operation_managed=decision.resolved_effect != "read_only",
+            )
+        )
 
     blocked = _require_operation_authority(request, call)
     if blocked is not None:
@@ -479,6 +486,7 @@ def _invoke_with_operation_policy(
             timeout_seconds=runtime.runtime_policy.timeout_policy.seconds,
             invoke=invoke,
             reconcile=_operation_reconciler(runtime, call),
+            on_settled=_operation_settlement_notifier(runtime, call),
             resource_scopes=resource_scopes,
             attempt_id=call.attempt_id,
         )
@@ -609,17 +617,25 @@ def _durable_operation_scopes(scopes: tuple[str, ...]) -> tuple[str, ...]:
 
 
 # LLM: Handler invocation must receive the exact owner wall already authorized by ActionPolicy;
-# it cannot fall back to mutable registry state when concurrent TUI requests use different owners.
-# 函数用途: 把已通过权限门的调用转成不可变 registry 执行请求。
+# it cannot fall back to mutable registry state. operation_managed is the host decision that tells
+# recovery-aware handlers whether the generic operation store will send a later settlement notice.
+# 函数用途: 把已通过权限门的调用和是否进入副作用账本的事实转成不可变 registry 执行请求。
 def _invoke_request(
     request: ToolExecutorRequest,
     call: ToolCall,
+    *,
+    operation_managed: bool,
 ) -> RegistryToolInvokeRequest:
     tools = {
         runtime.model_spec.name: runtime.handler for runtime in request.runtime_snapshot.runtimes
     }
     runtime = request.runtime_snapshot.runtime(call.tool_name)
-    payload = _handler_arguments(request, call, runtime)
+    payload = _handler_arguments(
+        request,
+        call,
+        runtime,
+        operation_managed=operation_managed,
+    )
     return RegistryToolInvokeRequest(
         tool_name=call.tool_name,
         arguments=payload,
@@ -638,10 +654,15 @@ def _invoke_request(
     )
 
 
+# LLM: Model arguments stay immutable; only declared internal parameters may receive host facts.
+# The operation-managed flag must come from ActionPolicy, never model text or a handler guess.
+# 函数用途: 给工具实现补入 owner、调用身份、取消令牌和副作用账本接管状态等宿主字段。
 def _handler_arguments(
     request: ToolExecutorRequest,
     call: ToolCall,
     runtime: ToolRuntime | None,
+    *,
+    operation_managed: bool | None = None,
 ) -> dict[str, object]:
     """Add host-only inputs without changing the canonical model arguments."""
 
@@ -655,6 +676,8 @@ def _handler_arguments(
         payload["__tool_call_id"] = call.call_id
     if "__operation_id" in internal_parameters:
         payload["__operation_id"] = call.operation_id
+    if "__operation_managed" in internal_parameters and operation_managed is not None:
+        payload["__operation_managed"] = operation_managed
     if "__cancellation_token" in internal_parameters:
         payload["__cancellation_token"] = request.cancellation_token
     return payload
@@ -705,6 +728,21 @@ def _operation_reconciler(
         )
 
     return reconcile
+
+
+# LLM: The coordinator owns when settlement is authoritative; this adapter only routes the typed
+# notification back to the same immutable handler that executed/reconciled the operation.
+# 函数用途: 把通用操作账本的终态通知转给具体工具，用于回收工具私有的临时恢复材料。
+def _operation_settlement_notifier(
+    runtime: ToolRuntime,
+    call: ToolCall,
+) -> Callable[[ToolOperationSettlementContext], None]:
+    def notify(context: ToolOperationSettlementContext) -> None:
+        hook = getattr(runtime.handler, "on_operation_settled", None)
+        if callable(hook):
+            hook(call.arguments, context)
+
+    return notify
 
 
 def _project_output(

@@ -329,6 +329,7 @@ class _PathWriteTool(BaseTool):
         policy: ToolRuntimePolicy | None = None,
     ):
         self.calls = 0
+        self.settlements = []
         self.started = started
         self.release = release
         self.model_spec = make_test_model_spec(
@@ -360,6 +361,13 @@ class _PathWriteTool(BaseTool):
             True,
             f"completed:{params['value']}",
         )
+
+    # LLM: The test tool records typed settlement notifications to prove coordinator-to-handler
+    # routing without changing the side effect result.
+    # 函数用途: 收集权威操作账本落终态后的通知，供成功与幂等重放测试断言。
+    def on_operation_settled(self, params, context):
+        _ = params
+        self.settlements.append(context)
 
 
 class _ReadOnlyTool(BaseTool):
@@ -671,6 +679,7 @@ def test_d_settle_crash_marks_unknown(tmp_path, monkeypatch):
     execution = _traced_call(agent, params, call)
 
     assert tool.calls == 1  # handler 已执行
+    assert tool.settlements == []  # 权威终态未落库，不能提前清理恢复材料
     assert execution.result.handler_executed
     assert not execution.result.ok  # settle 失败必须如实反映，不能吞成成功
     assert "UNKNOWN" in (execution.result.error_code or "")
@@ -740,6 +749,8 @@ def test_e_same_effect_key_replays_persisted_result(tmp_path):
     assert first.result.ok and second.result.ok
     assert second.result.output == first.result.output
     assert tool.calls == 1  # 重放不重跑 handler
+    assert [item.replayed for item in tool.settlements] == [False, True]
+    assert all(item.status == "succeeded" for item in tool.settlements)
 
 
 def test_e2_managed_effect_key_single_row(tmp_path):

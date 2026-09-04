@@ -9,10 +9,17 @@
 - 两个 owner 即使 task/run/artifact/call 名完全相同，物理备份根也必须隔离；本地管理员 Full Access 在外部
   project cwd 仍使用自己的 `home_paths.owner_artifact_backups_dir`。resolver 拒绝 `..` 和 symlink 越界；
   atomic replace 失败时返回 `ARTIFACT_BACKUP_FAILED`，命令副作用不得启动。
+- 工具完整回执虽然仍以 `tool_output` 登记供恢复和按 ref 读取，但必须带
+  `artifact_role=tool_output_archive` 与 `shell_preimage_policy=exclude`，不能被后续每条 shell 重复备份；旧
+  `kind=tool_output` 行同样排除，未知 kind 默认保护，显式 include 可覆盖。
+- read-only/直调命令返回前清除临时 manifest；mutating 命令必须等 ToolOperation succeeded/failed 落库后再由
+  `on_operation_settled` 清除。幂等 replay 会重试回收；UNKNOWN 不清。changed/invalid 的 blob 即使清单删除也
+  必须继续能由 registry `backup_ref` 解析。
 - focused 命令：
-  `python3 -m pytest agent_py_agent/tests/test_tools/test_shell_tool.py agent_py_agent/tests/test_owner_resolver.py agent_py_agent/tests/test_remote_owner_workspace_scope.py agent_py_agent/tests/test_tool_runtime_unification.py agent_py_agent/tests/test_tool_input_completion_provenance.py agent_py_agent/tests/test_registry_resilience_contract.py agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_gateway_per_user_scoping.py agent_py_agent/tests/test_sandbox.py -q --tb=short`。
-- 真机必须从 fresh owner TUI 让 MiniMax-M2.7 自己创建并登记一个 pytest 文件，再自然执行项目级 pytest；
-  同时核对 TUI 工具输出、task 文件树、owner private store 和唯一 Gateway。后台 shell 不在本项通过范围。
+  `python3 -m pytest agent_py_agent/tests/test_tools/test_shell_tool.py agent_py_agent/tests/test_artifact_registry.py agent_py_agent/tests/test_tool_operation_managed_gate.py agent_py_agent/tests/test_owner_resolver.py agent_py_agent/tests/test_remote_owner_workspace_scope.py agent_py_agent/tests/test_tool_runtime_unification.py agent_py_agent/tests/test_tool_input_completion_provenance.py agent_py_agent/tests/test_registry_resilience_contract.py agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_gateway_per_user_scoping.py agent_py_agent/tests/test_sandbox.py -q --tb=short`。
+- 真机必须从 fresh owner TUI 让 MiniMax-M2.7 自己创建并登记交付物，再自然连续执行多条命令；同时核对 TUI
+  工具输出、task 文件树、owner private store 和唯一 Gateway。工具输出数量增长时，shell snapshots 不得增长；
+  权威终态后不得残留 operation manifest。后台 shell 不在本项通过范围。
 
 ## Compact 真实最低水位与缓存安全 fork
 

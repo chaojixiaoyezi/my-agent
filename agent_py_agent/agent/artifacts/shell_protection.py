@@ -23,6 +23,11 @@ from agent_py_agent.agent.contracts.artifact_acceptance import (
 )
 
 from .registry import (
+    ARTIFACT_ROLE_METADATA_KEY,
+    ARTIFACT_ROLE_TOOL_OUTPUT_ARCHIVE,
+    SHELL_PREIMAGE_POLICY_EXCLUDE,
+    SHELL_PREIMAGE_POLICY_INCLUDE,
+    SHELL_PREIMAGE_POLICY_METADATA_KEY,
     ArtifactRegistration,
     artifact_metadata_record_exists,
     artifact_operation_record_exists,
@@ -32,6 +37,7 @@ from .registry import (
 from .shell_operation_journal import (
     operation_manifest_ref,
     read_operation_manifest,
+    remove_operation_manifest,
     write_operation_manifest,
 )
 
@@ -144,6 +150,7 @@ def snapshot_ready_artifacts(
         for record in records.values()
         if str(record.status or "") == "ready"
         and not _is_artifact_group(record)
+        and _requires_shell_preimage(record)
     ]
     if not ready:
         return []
@@ -215,6 +222,23 @@ def snapshot_ready_artifacts(
         _prune_empty_backup_dirs(operation_dir, store_root / _BACKUP_SCHEMA)
         raise
     return snapshots
+
+
+# LLM: Explicit host metadata is authoritative. The reserved tool_output role/kind is a migration
+# default for old rows; every unknown/new artifact kind remains protected unless explicitly excluded.
+# 函数用途: 判断 ready 记录是否属于用户交付物，需要在前台 shell 启动前保留恢复前像。
+def _requires_shell_preimage(record: object) -> bool:
+    metadata = getattr(record, "metadata", None)
+    facts = metadata if isinstance(metadata, dict) else {}
+    policy = str(facts.get(SHELL_PREIMAGE_POLICY_METADATA_KEY) or "").strip().lower()
+    if policy == SHELL_PREIMAGE_POLICY_INCLUDE:
+        return True
+    if policy == SHELL_PREIMAGE_POLICY_EXCLUDE:
+        return False
+    role = str(facts.get(ARTIFACT_ROLE_METADATA_KEY) or "").strip().lower()
+    if role == ARTIFACT_ROLE_TOOL_OUTPUT_ARCHIVE:
+        return False
+    return str(getattr(record, "kind", "") or "").strip().lower() != "tool_output"
 
 
 # LLM: File groups use a directory projection plus typed member rows and require a separate
@@ -541,6 +565,51 @@ def complete_shell_artifact_operation(
     write_operation_manifest(backup_store_root, operation_key, manifest)
     release_shell_artifact_operation(operation_key)
     return operation_manifest_ref(operation_key)
+
+
+# LLM: Managed callers invoke this only after the matching ToolOperation terminal fact persists;
+# direct/read-only calls without an operation store invoke it before returning. It drops the
+# crash-window manifest while preserving changed/invalid blobs still referenced by the registry.
+# 函数用途: 在权威账本结算后或无账本调用返回前清理 shell 临时清单；有效旧版本继续保留。
+def settle_shell_artifact_operation(
+    backup_store_root: str | Path,
+    *,
+    run_scope: dict[str, object],
+    operation_id: str,
+    operation_key: str = "",
+) -> bool:
+    scope = run_scope if isinstance(run_scope, dict) else {}
+    operation_key = str(operation_key or "").strip() or _operation_key(
+        scope, operation_id=operation_id, tool_call_id=""
+    )
+    manifest = read_operation_manifest(backup_store_root, operation_key)
+    if manifest is None:
+        return False
+    root = _lexical_absolute_path(str(manifest.get("workspace_root") or ""))
+    _validate_operation_manifest_context(manifest, root, scope, operation_id)
+    with _ACTIVE_OPERATION_LOCK:
+        if operation_key in _ACTIVE_OPERATION_KEYS:
+            raise OSError("active shell artifact operation cannot be settled")
+    if str(manifest.get("state") or "") != "completed":
+        raise OSError("shell artifact operation is not completed")
+    snapshots = _snapshots_from_manifest(manifest, operation_key)
+    _retry_manifest_cleanup(backup_store_root, operation_key, manifest, snapshots)
+    items = manifest.get("items")
+    if not isinstance(items, list):
+        raise OSError("shell artifact operation items are invalid")
+    if any(
+        isinstance(item, dict)
+        and str(item.get("state") or "") in {"cleanup_pending", "unchanged_observed"}
+        for item in items
+    ):
+        return False
+    remove_operation_manifest(backup_store_root, operation_key)
+    store_root = _lexical_absolute_path(backup_store_root)
+    _prune_empty_backup_dirs(
+        store_root / _BACKUP_SCHEMA / operation_key,
+        store_root / _BACKUP_SCHEMA,
+    )
+    return True
 
 
 # LLM: An uncertain handler path deliberately leaves its manifest at `executing`; only the
@@ -1693,6 +1762,7 @@ __all__ = [
     "reconcile_shell_artifacts",
     "release_shell_artifact_operation",
     "resolve_shell_artifact_backup",
+    "settle_shell_artifact_operation",
     "shell_artifact_protection_note",
     "snapshot_ready_artifacts",
 ]
