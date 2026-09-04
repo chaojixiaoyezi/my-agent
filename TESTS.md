@@ -1,5 +1,19 @@
 # TESTS
 
+## 2026-09-04 R171 详情页 Esc 的父级终态交接
+
+- 失败样本必须同时核对 child canonical state、ConversationStore wake 和父级 TUI：child 已
+  `CANCELLED` 而 wake 为空时，不能把页面最终刷新成终态当作父级已经恢复。
+- root child 的用户停止应异步先回 `accepted`，随后仅发布一份
+  `subagent_runner_finished/status=CANCELLED`；grandchild 停止不得越级发 root wake，而应清掉 exact
+  direct-parent wait marker，并通过幂等 dispatcher 只恢复该父级。
+- 模型侧 `cancel_subagents` 已在当前模型轮拿到工具结果，不走这条额外后台通知；root `/stop` 也不产生 child
+  completion wake。目标分支的后代仍须先全部 durable 取消，才交接顶层目标节点。
+- focused 命令：
+  `python3 -m pytest agent_py_agent/tests/test_gateway_agent_control_service.py agent_py_agent/tests/test_direct_parent_lifecycle.py agent_py_agent/tests/test_orchestration_cancel_subagents_tool.py -q --tb=short`。
+- 部署后真 TUI 分别验证 root→child 与 root→coordinator→grandchild；验收需要 Esc 后 Compact 候选不提交、
+  exact target 终态、父级自动恢复、无重复 wake/派工及其它 owner 不受影响。
+
 ## 2026-09-04 R170 递归创建共享 session/owner 容量
 
 - 真实失败样本：`.10` owner 配额 `max_subagents=2/max_active_agents=3`，root 已有一个运行中 coordinator；

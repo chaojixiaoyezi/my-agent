@@ -12,6 +12,7 @@ from .capability_scope import request_scope_snapshot
 from .context_bundle_contracts import declared_output_refs
 from .models import (
     SUBAGENT_WAKE_STATUSES,
+    TaskStatus,
     task_status_in,
 )
 
@@ -24,14 +25,17 @@ _COMPLETION_MESSAGE_MAX_TOKENS = 1_000
 _COMPLETION_EVIDENCE_REF_LIMIT = 20
 
 
-# LLM: Root children publish a conversation wake; nested children never skip a
-# level and are resumed by the direct-parent runner lifecycle after lease exit.
-# 函数用途: 子代理结果落盘后更新会话投影，仅直接属于根会话的孩子发根唤醒。
+# LLM: Normal runner results notify only statuses that need parent model attention. User-controlled
+# cancellation uses the sibling entry below so model-owned cancel_subagents remains an in-turn fact
+# and cannot create a duplicate background wake.
+# 函数用途: 子代理自然结束后按既有唤醒状态集合通知直属父级。
 def notify_parent_on_runner_result(
     manager: Any,
     task: Any,
     result: Any,
     output_payload: dict[str, object],
+    *,
+    parent_thread: Any | None = None,
 ) -> None:
     store = getattr(manager, "conversation_store", None)
     if store is None or bool(getattr(result, "dry_run", False)):
@@ -39,11 +43,60 @@ def notify_parent_on_runner_result(
     status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip()
     if not task_status_in(status, SUBAGENT_WAKE_STATUSES):
         return
+    _notify_parent_terminal(
+        manager,
+        task,
+        result,
+        output_payload,
+        status=status,
+        parent_thread=parent_thread,
+    )
+
+
+# LLM: An external TUI/Web stop is not a model-owned handled cancellation: after the whole branch
+# is closed, it must surface the exact CANCELLED fact to the root conversation. The authorized
+# thread is carried across link retirement; nested children still stop at their direct parent.
+# 函数用途: 用户从代理详情页停止任务后，复用标准交接信封通知正确父级。
+def notify_parent_on_controlled_cancel(
+    manager: Any,
+    task: Any,
+    *,
+    parent_thread: Any,
+) -> None:
+    status = str(getattr(task, "status", "") or "").strip()
+    if not task_status_in(status, {TaskStatus.CANCELLED.value}):
+        return
+    _notify_parent_terminal(
+        manager,
+        task,
+        None,
+        {},
+        status=status,
+        parent_thread=parent_thread,
+    )
+
+
+# LLM: Natural completion and authorized external cancellation converge here after their distinct
+# admission rules. One exact task/thread pair updates the projection and publishes at most one
+# deduplicated root wake; nested children never skip their persisted direct parent.
+# 函数用途: 用同一结构化终态信封更新会话，并在目标直属根会话时发布一次唤醒。
+def _notify_parent_terminal(
+    manager: Any,
+    task: Any,
+    result: Any,
+    output_payload: dict[str, object],
+    *,
+    status: str,
+    parent_thread: Any | None,
+) -> None:
+    store = getattr(manager, "conversation_store", None)
+    if store is None:
+        return
     task_id = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "").strip()
     if not task_id:
         return
     try:
-        thread = store.thread_for_task(task_id)
+        thread = parent_thread or store.thread_for_task(task_id)
         if thread is None:
             return
         store.update_task_status({"task_id": task_id, "status": status})
@@ -513,5 +566,6 @@ def _record_wake_error(manager: Any, task: Any, result: Any, exc: BaseException)
 __all__ = [
     "completion_handoff_payload",
     "notify_parent_on_capability_request",
+    "notify_parent_on_controlled_cancel",
     "notify_parent_on_runner_result",
 ]

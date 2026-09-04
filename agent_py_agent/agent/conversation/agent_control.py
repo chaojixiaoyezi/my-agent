@@ -17,7 +17,7 @@ from ..agent_core.orchestration.tools.cancel import (
     cancel_subagent_tree,
 )
 from ..runtime_db.operations import RuntimeConflictError, RuntimeExecutionBusyError
-from ..runtime_errors import DataCorruptionError
+from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..subagents.authorization_gate import OperationRequest, authorize_operation
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from .agent_activity import conversation_agent_view
@@ -674,15 +674,7 @@ def stop_agent(
             "status": "already_terminal",
         }
     try:
-        result = cancel_subagent_tree(
-            agent,
-            CancelSubagentTaskRequest(
-                task=task,
-                reason="用户从代理详情页按 Esc 停止",
-                kill_process=True,
-                source="user_agent_control",
-            ),
-        )
+        result = _cancel_user_controlled_agent_tree(agent, task, parent_thread=_thread)
     except OSError as exc:
         raise AgentControlError(
             503,
@@ -744,15 +736,7 @@ def enqueue_agent_stop(
         # 函数用途: 后台执行一次真实取消，并在结束后释放同一 run 的并发停止占位。
         def cancel() -> None:
             try:
-                cancel_subagent_tree(
-                    agent,
-                    CancelSubagentTaskRequest(
-                        task=task,
-                        reason="用户从代理详情页按 Esc 停止",
-                        kill_process=True,
-                        source="user_agent_control",
-                    ),
-                )
+                _cancel_user_controlled_agent_tree(agent, task, parent_thread=_thread)
             finally:
                 with _AGENT_STOP_LOCK:
                     _AGENT_STOP_ACTIVE.discard(active_key)
@@ -770,6 +754,86 @@ def enqueue_agent_stop(
         "status": "accepted",
         "already_active": already_active,
     }
+
+
+# LLM: TUI/Web stop closes the entire authorized branch before publishing one terminal handoff.
+# This is the control-plane equivalent of the runner's normal completion callback; model-owned
+# cancel_subagents and root /stop keep their existing in-turn semantics and do not gain a duplicate
+# wake. Parent delivery failure never rolls back an already durable cancellation.
+# 函数用途: 完整停止用户点名的子代理分支，再用同一终态链通知或恢复它的直属父代理。
+def _cancel_user_controlled_agent_tree(
+    agent: object,
+    task: object,
+    *,
+    parent_thread: object,
+) -> dict[str, object]:
+    result = cancel_subagent_tree(
+        agent,
+        CancelSubagentTaskRequest(
+            task=task,
+            reason="用户从代理详情页按 Esc 停止",
+            kill_process=True,
+            source="user_agent_control",
+        ),
+    )
+    run_id = str(getattr(task, "id", "") or "").strip()
+    return {
+        **result,
+        "parent_delivery": _deliver_stopped_agent_to_parent(
+            agent,
+            run_id,
+            parent_thread=parent_thread,
+        ),
+    }
+
+
+# LLM: A root child uses the canonical conversation completion wake, while a nested child releases
+# only its exact direct parent's wait marker and starts that durable parent through the ordinary
+# idempotent dispatcher. The periodic reconciler remains the crash fallback for delivery errors.
+# 函数用途: 把已取消节点交给正确的直属父级，让主代理或协调代理马上知道它已经停止。
+def _deliver_stopped_agent_to_parent(
+    agent: object,
+    run_id: str,
+    *,
+    parent_thread: object,
+) -> dict[str, object]:
+    manager = getattr(agent, "subagents", None)
+    try:
+        task = manager.load(run_id)
+        from ..agent_core.orchestration.dispatch.capability_auto_sweep import (
+            auto_start_orphan_run,
+        )
+        from ..subagents.direct_parent_lifecycle import (
+            reconcile_parent_wait_for_child,
+        )
+        from ..subagents.runner_completion_wake import notify_parent_on_controlled_cancel
+
+        notify_parent_on_controlled_cancel(
+            manager,
+            task,
+            parent_thread=parent_thread,
+        )
+        decision = reconcile_parent_wait_for_child(manager, run_id)
+        start_result: dict[str, object] = {}
+        if decision.should_resume:
+            started = auto_start_orphan_run(agent, decision.parent_run_id)
+            if isinstance(started, dict):
+                start_result = dict(started)
+        return {
+            "status": "delivered",
+            "parent_run_id": decision.parent_run_id,
+            "reason": decision.reason,
+            "resume_requested": decision.should_resume,
+            "resume_result": start_result,
+        }
+    except Exception as exc:
+        return {
+            "status": "deferred",
+            **runtime_error_report(
+                exc,
+                context="agent_control.deliver_stopped_agent_to_parent",
+            ),
+        }
 
 
 # LLM: A child approval decision reuses the exact conversation subtree gate and

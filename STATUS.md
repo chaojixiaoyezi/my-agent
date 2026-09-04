@@ -1,5 +1,18 @@
 # STATUS
 
+## 2026-09-04 R171 用户停止子代理后的直属父级恢复（本地 Focused 通过，真 TUI 待复验）
+
+- 真 TUI `ma-r171-110-child-compact-precommit` 在直属 child 的 Compact 摘要 20% 阶段按 Esc，child 已正确
+  `CANCELLED`，候选以 `candidate_discarded` 收口、generation 保持 0；但 root main 没有收到新 wake，页面旧
+  final 仍说 child 在运行。结构化账本确认不是 TUI 漏画：取消先清除了 active attempt/link，runner 的迟到
+  结果被 stale fence 丢弃，而普通完成通知又有意不把模型本轮已处理的 `CANCELLED` 当后台 wake。
+- 对照 会话运行时 `close_agent.rs` 的共享状态订阅与 终端交互 `inProcessRunner.ts` 的 abort 后 idle callback，当前只在
+  用户从 TUI/Web 精确停止代理时，等整棵目标分支 durable 取消后发布一份 typed 终态交接。直属 root child
+  走原会话 wake；grandchild 只释放并恢复 exact direct parent，不能越级唤醒 root。模型自己调用
+  `cancel_subagents` 和 root `/stop` 保持原本同轮语义，不重复通知。
+- 同步与真实异步 stop、孙代理等待释放、整树取消和相邻 lifecycle 共 54 项 focused 通过；`.10` 部署后仍需
+  用新 TUI 证明 root/协调父级在人工 Esc 后立即看到 CANCELLED 并继续，才把本项改为完成。
+
 ## 2026-09-04 R170 递归代理容量统一（Focused 与真 TUI 通过）
 
 - R169 grandchild 真任务已经证明配额文件、coordinator task 和 execution context 都是

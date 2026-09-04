@@ -1,5 +1,15 @@
 # TEST CHECKLIST
 
+## R171 用户控制取消后的父级恢复
+
+- [x] TUI/Web 的 exact-agent Esc 复用唯一树取消入口；目标及运行中后代全部 durable 终态后，才发布目标节点
+  的一份终态交接。模型 `cancel_subagents` 与 root `/stop` 不增加重复 wake。
+- [x] root child 取消向当前 root conversation 发布 `status=CANCELLED` typed wake；grandchild 取消只释放
+  exact direct-parent wait 并幂等恢复该 parent，不能越级唤醒 root。
+- [x] 同步 stop、异步 stop、孙代理等待、递归取消相邻 54 项 focused 通过。
+- [ ] `.10` 单 Gateway + MiniMax-M2.7 真 TUI：分别证明 child/grandchild 在 Compact 提交前 Esc 后
+  generation 不增加、父级自动恢复且收到真实取消事实；Compact 已提交后的停止应保留已赢 CAS 的代次。
+
 ## R170 递归创建共享容量
 
 - [x] 根与递归 `create_subagents` 在同一 owner-local 创建事务内调用唯一 session/owner/task/per-call 容量计算；

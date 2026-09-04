@@ -229,6 +229,18 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
     assert child_messages[-1].content == "请先运行完整测试"
     assert child_messages[-1].metadata["agent_run_id"] == child.id
 
+    root_thread = agent.conversation_store.thread_for_task("task-root")
+    assert root_thread is not None
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": root_thread.thread_id,
+            "task_id": child.id,
+            "goal": child.goal,
+            "status": "active",
+            "now": time.time(),
+        }
+    )
+
     stopped = stop_agent(
         agent,
         scope=scope,
@@ -245,6 +257,12 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
     assert grandchild_authority is not None
     assert child_authority["status"] == "cancelled"
     assert grandchild_authority["status"] == "cancelled"
+    assert stopped["result"]["parent_delivery"]["status"] == "delivered"
+    signals = agent.conversation_store.pending_wake_signals(limit=0)
+    assert len(signals) == 1
+    assert signals[0].reason == "subagent_runner_finished"
+    assert signals[0].source_agent_id == child.id
+    assert signals[0].metadata["status"] == "CANCELLED"
     terminal_view = read_agent_view(agent, scope=scope, run_id=child.id)
     assert terminal_view["terminal"] is True
     replayed_stop = stop_agent(
@@ -273,6 +291,41 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
         )
     assert exc_info.value.status == 409
     assert exc_info.value.error_code == "AGENT_ALREADY_TERMINAL"
+
+
+def test_owner_stop_grandchild_immediately_resumes_waiting_direct_parent(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent, scope, parent = _bound_agent_tree(tmp_path)
+    grandchild, _agent_run = _park_child_waiting_for_grandchild(agent, parent)
+    started: list[str] = []
+
+    def record_start(_agent, run_id: str):
+        started.append(run_id)
+        return {"status": "started", "run_ids": [run_id]}
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration.dispatch.capability_auto_sweep.auto_start_orphan_run",
+        record_start,
+    )
+
+    stopped = stop_agent(
+        agent,
+        scope=scope,
+        run_id=grandchild.id,
+        operation_id="agent-stop-grandchild-1",
+    )
+
+    assert stopped["status"] == "cancelled"
+    assert agent.subagents.load(grandchild.id).status == "CANCELLED"
+    assert parent_wait_blocks_dispatch(agent.subagents.load(parent.id)) is False
+    assert started == [parent.id]
+    delivery = stopped["result"]["parent_delivery"]
+    assert delivery["status"] == "delivered"
+    assert delivery["parent_run_id"] == parent.id
+    assert delivery["resume_requested"] is True
+    assert agent.conversation_store.pending_wake_signals(limit=0) == []
 
 
 def test_interactive_stop_acknowledges_before_slow_canonical_closeout(
@@ -316,6 +369,42 @@ def test_interactive_stop_acknowledges_before_slow_canonical_closeout(
     assert duplicate["already_active"] is True
     assert calls == [child.id]
     release.set()
+
+
+def test_interactive_stop_eventually_wakes_root_parent(tmp_path) -> None:
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    root_thread = agent.conversation_store.thread_for_task("task-root")
+    assert root_thread is not None
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": root_thread.thread_id,
+            "task_id": child.id,
+            "goal": child.goal,
+            "status": "active",
+            "now": time.time(),
+        }
+    )
+
+    accepted = enqueue_agent_stop(
+        agent,
+        scope=scope,
+        run_id=child.id,
+        operation_id="agent-stop-root-wake",
+    )
+
+    deadline = time.monotonic() + 2.0
+    signals = []
+    while time.monotonic() < deadline:
+        signals = agent.conversation_store.pending_wake_signals(limit=0)
+        if agent.subagents.load(child.id).status == "CANCELLED" and signals:
+            break
+        time.sleep(0.01)
+
+    assert accepted["status"] == "accepted"
+    assert agent.subagents.load(child.id).status == "CANCELLED"
+    assert len(signals) == 1
+    assert signals[0].source_agent_id == child.id
+    assert signals[0].metadata["status"] == "CANCELLED"
 
 
 def test_interactive_stop_reconciles_grandchild_created_inside_inflight_guard(

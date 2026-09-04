@@ -1,5 +1,12 @@
 # Subagent Progress
 
+## 2026-09-04 R171 用户从详情页停止后的直属父级恢复
+
+- 已补齐 TUI/Web 外部停止与父级运行链之间的缺口：整棵目标分支取消完成后，root child 通过现有会话 wake
+  回报 `CANCELLED`，nested child 则只释放并恢复 exact direct parent。
+- 模型本轮调用 `cancel_subagents` 已有同步工具结果，root `/stop` 已拥有整棵主任务的停止边界，两者不走
+  额外 completion wake。当前 focused 已通过，`.10` child/grandchild Compact 中 Esc 的真 TUI 复验待完成。
+
 ## 2026-09-04 R170 递归派工容量收敛（focused 与真 TUI 通过）
 
 - R169 grandchild 真任务首次证明 coordinator 的结构化配额快照正确但创建结果越界：owner 只允许两名

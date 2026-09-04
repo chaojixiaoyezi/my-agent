@@ -1,5 +1,17 @@
 # DESIGN LEDGER
 
+## 2026-09-04 用户从代理详情页停止后必须显式交接直属父级【状态：Focused 通过，真 TUI 待复验】
+
+- 用户控制取消与模型调用 `cancel_subagents` 不是同一个通知时机：后者在当前父模型轮已拿到工具结果；前者在
+  另一个 TUI/Web 控制请求中发生，若只写 child `CANCELLED`，正在等待的父级不会凭空得知。
+- 对照 会话运行时 `会话运行时-rs/core/src/tools/handlers/multi_agents/close_agent.rs` 的共享状态订阅，以及 终端交互
+  `src/utils/swarm/inProcessRunner.ts` 在 abort 后显式通知 idle waiter，当前新增的不是第二套取消，而是唯一树
+  取消完成后的控制面终态交接：root child 复用 canonical conversation wake，nested child 只解除 exact
+  direct-parent wait 并启动该父级，绝不越级。
+- 交接只接受结构化 `CANCELLED`、authenticated thread、`parent_id/root_id` 和 canonical task state；不解析
+  页面文字、目标或 final。整树取消先完成，交接失败不回滚已生效的停止，现有恢复巡检继续作为故障兜底。
+  模型内取消和 root `/stop` 维持原语义，避免同一事实重复唤醒。
+
 ## 2026-09-04 根/子/孙代理共享同一创建容量事实【状态：R170 focused 与真 TUI 通过】
 
 - R169 grandchild Compact 真任务的 owner 配额明确为 `max_subagents=2/max_active_agents=3`，coordinator 的
