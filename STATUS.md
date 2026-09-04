@@ -1,5 +1,18 @@
 # STATUS
 
+## 2026-09-04 R172 空目标能力申请拒绝（本地 Focused 通过，真 TUI 待复验）
+
+- R171 真 TUI 中，一个没有 `create_subagents` 的 child 两次只在
+  `needed_capability` 写 `subagent_orchestration`，而所有 `requested_*` 与 scope 字段都为空。旧机制仍记录
+  OPEN、自动生成 `tools=[]` 的 GRANTED，再让 child 刷新完全相同的工具快照；模型正确发现能力没有变化，
+  但白耗两轮模型调用并留下假授权账。
+- 对照 会话运行时 `request_permissions.rs` 的“permissions 为空直接报错”，当前 `capability_request` 在写账前要求
+  至少一个结构化授权目标：精确工具/MCP/Skill/命令，或 path/cwd/network scope。`problem`、
+  `expected_output` 与自造的能力别名仍只是说明文字，不能产生机器授权。
+- 自动授权层保留第二道防线：旧记录或内部旁路即使带 path scope，也不能生成没有有效工具或命令的空 grant；
+  path-only/Skill/MCP/网络申请保持 OPEN 交给直属父级裁决。49 项 capability focused 已通过；待部署后用
+  MiniMax-M2.7 真 TUI 证明模型收到参数错误并改填 `requested_tools=["create_subagents"]`，而非重复空刷新。
+
 ## 2026-09-04 R171 用户停止子代理后的直属父级恢复（本地 Focused 通过，真 TUI 待复验）
 
 - 真 TUI `ma-r171-110-child-compact-precommit` 在直属 child 的 Compact 摘要 20% 阶段按 Esc，child 已正确

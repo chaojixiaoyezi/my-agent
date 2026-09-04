@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .services.lifecycle import RecordCapabilityGrantParams
 
 _DELETE_COMMAND_REQUESTS = frozenset({"rm", "rmdir", "unlink"})
+_SHELL_CAPABILITY_HINTS = frozenset({"shell", "controlled_exec"})
 DIRECT_PARENT_TOOL_AUTHORITY_ATTR = "direct_parent_tool_authority"
 _CREATION_TOOL_AUTHORITY: ContextVar[dict[str, object] | None] = ContextVar(
     "subagent_creation_tool_authority",
@@ -93,6 +94,31 @@ class CapabilityOwnerScopeViolation(ValueError):
 def effective_request_path_scope(request: CapabilityRequest) -> list[str]:
     values = request.path_scope or request.cwd_scope
     return list(dict.fromkeys(str(item or "").strip() for item in values if str(item or "").strip()))
+
+
+# LLM: problem/expected_output/needed_capability prose never identifies grant authority. A
+# request is actionable only when an exact structured target exists, except the existing typed
+# shell aliases whose runtime meaning is exactly run_command. Keep this shared by the tool input
+# gate and auto-grant defense so malformed legacy/imported records cannot produce empty grants.
+# 函数用途: 判断能力申请是否明确写出了要授权的工具、命令、目录、网络或 Skill；空申请直接拒绝。
+def capability_request_declares_target(request: Any) -> bool:
+    list_fields = (
+        "requested_tools",
+        "requested_mcp_tools",
+        "requested_skills",
+        "requested_commands",
+        "path_scope",
+        "cwd_scope",
+        "network_scope",
+    )
+    if any(
+        any(str(item or "").strip() for item in (getattr(request, field, None) or []))
+        for field in list_fields
+    ):
+        return True
+    capability_type = str(getattr(request, "capability_type", "") or "").strip().lower()
+    needed = str(getattr(request, "needed_capability", "") or "").strip().lower()
+    return capability_type in _SHELL_CAPABILITY_HINTS or needed in _SHELL_CAPABILITY_HINTS
 
 
 # LLM: requested_tools and requested_mcp_tools are exact model-facing registry names. Do not

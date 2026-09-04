@@ -1,5 +1,17 @@
 # DESIGN LEDGER
 
+## 2026-09-04 能力申请必须声明结构化授权目标【状态：R172 Focused 通过，真 TUI 待复验】
+
+- 能力申请的 `problem`、`expected_output`、`needed_capability` 只给模型和父级解释缺口，不能作为授权对象。
+  对照 会话运行时 `会话运行时-rs/core/src/tools/handlers/request_permissions.rs`，空 permissions 在进入审批前即失败；
+  my-agent 同样要求精确 `requested_tools/requested_mcp_tools/requested_skills/requested_commands`，或明确的
+  `path_scope/cwd_scope/network_scope` 至少一项，且在 canonical request 落账前校验。
+- path scope 只回答“范围在哪”，不回答“授予什么能力”。因此仅路径、Skill、MCP 或网络申请可以作为 OPEN
+  请求交给直属父级，但 routine auto-grant 只有真实工具、命令或 typed shell 请求时才可结算；禁止再写
+  `tools=[]` 的 GRANTED，也禁止因此触发无效 context refresh。
+- 输入门与自动授权防线复用同一结构化 target 判定，既阻止新空请求，也覆盖旧账/内部旁路。逻辑只读取
+  schema 字段，不从自然语言中的 `create_subagents`、`shell` 等词猜权限，不改变逐次危险 ToolCall 审批。
+
 ## 2026-09-04 用户从代理详情页停止后必须显式交接直属父级【状态：Focused 通过，真 TUI 待复验】
 
 - 用户控制取消与模型调用 `cancel_subagents` 不是同一个通知时机：后者在当前父模型轮已拿到工具结果；前者在

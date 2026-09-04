@@ -1,5 +1,13 @@
 # Subagent Progress
 
+## 2026-09-04 R172 空目标 capability request 不再生成假授权
+
+- 真 TUI 发现 child 能只写 `needed_capability=subagent_orchestration`，旧自动批随后生成 `tools=[]` grant 并
+  context refresh，实际工具快照没有任何变化。当前按 会话运行时 空 permissions 拒绝语义，在 request 落账前要求
+  精确结构化目标，并在 auto-grant 保留旧数据防线。
+- path/scope 不会反向推导工具；没有工具、命令或 typed shell 的请求不会自动 GRANTED。49 项 focused 通过，
+  等 `.10` 新 wheel 用 MiniMax-M2.7 真 TUI 验证模型修正参数。
+
 ## 2026-09-04 R171 用户从详情页停止后的直属父级恢复
 
 - 已补齐 TUI/Web 外部停止与父级运行链之间的缺口：整棵目标分支取消完成后，root child 通过现有会话 wake

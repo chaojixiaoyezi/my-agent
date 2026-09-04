@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..subagents.capability_scope import (
     canonical_capability_tool_request_fields,
+    capability_request_declares_target,
     direct_parent_tool_authority,
     requested_capability_tool_names,
 )
@@ -220,9 +221,18 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
             "缺少 problem；必须说明当前被什么能力缺口阻塞。",
             error_code="TOOL_PARAMETER_REQUIRED",
         )
+    record_params = _record_params(normalized, problem)
+    if not capability_request_declares_target(record_params):
+        return _capability_error(
+            "能力申请没有结构化授权目标；请在 requested_tools、requested_mcp_tools、"
+            "requested_skills、requested_commands、path_scope、cwd_scope 或 network_scope "
+            "中至少填写一项。工具名必须使用当前目录中的精确名称，不能只在 problem 或 "
+            "needed_capability 里描述。",
+            error_code="TOOL_PARAMETER_REQUIRED",
+        )
     return CapabilityRequestToolInput(
         run_id=run_id,
-        params=_record_params(normalized, problem),
+        params=record_params,
         scope_resolution=resolution,
     )
 

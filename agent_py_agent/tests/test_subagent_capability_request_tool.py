@@ -207,7 +207,7 @@ def test_capability_request_tool_scopes_cross_run_writes_to_current_runner(tmp_p
     assert manager.load(other.id).capability_requests == []
 
 
-def test_capability_request_tool_ignores_capability_alias(tmp_path):
+def test_capability_request_tool_rejects_ignored_alias_without_structured_target(tmp_path):
     agent, manager, task = _agent_with_current_run(tmp_path)
 
     result = CapabilityRequestTool(agent).execute(
@@ -217,9 +217,29 @@ def test_capability_request_tool_ignores_capability_alias(tmp_path):
         }
     )
 
-    assert result.ok is True
-    request = manager.load(task.id).capability_requests[0]
-    assert request.needed_capability == "capability"
+    assert result.ok is False
+    assert result.error_code == "TOOL_PARAMETER_REQUIRED"
+    assert "结构化授权目标" in result.output
+    assert manager.load(task.id).capability_requests == []
+
+
+def test_capability_request_tool_rejects_prose_only_tool_request(tmp_path):
+    """模型在 prose 里说出工具名不构成权限目标，也不得写账或唤醒父级。"""
+    agent, manager, task = _agent_with_current_run(tmp_path)
+
+    result = CapabilityRequestTool(agent).execute(
+        {
+            "problem": "需要 create_subagents，但当前工具快照里没有它。",
+            "needed_capability": "subagent_orchestration",
+            "capability_type": "tool",
+            "expected_output": "能够创建下级代理",
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_PARAMETER_REQUIRED"
+    assert "requested_tools" in result.output
+    assert manager.load(task.id).capability_requests == []
 
 
 def test_capability_request_tool_does_not_parse_stringified_object_fields(tmp_path):

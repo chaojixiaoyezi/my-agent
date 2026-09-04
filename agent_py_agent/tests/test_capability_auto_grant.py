@@ -83,6 +83,32 @@ def test_empty_path_scope_defaults_to_task_workspace():
         assert grant.tools == ["run_command"]
 
 
+def test_request_without_structured_target_never_creates_empty_grant():
+    """旧记录或旁路绕过工具输入门时，也不能得到 tools=[] 的假授权。"""
+    with tempfile.TemporaryDirectory() as td:
+        agent, task = _agent_and_task(td)
+        request = _record_request(
+            agent,
+            task,
+            capability_type="tool",
+            needed_capability="subagent_orchestration",
+            requested_tools=[],
+            requested_commands=[],
+            path_scope=[],
+        )
+
+        assessment = assess_routine_capability_request(agent.subagents.load(task.id), request)
+        grant = auto_grant_routine_request(agent.subagents, task.id, request.id)
+
+        assert assessment.eligible is False
+        assert "no_structured_capability_target" in assessment.blockers
+        assert "no_effective_routine_grant" in assessment.blockers
+        assert grant is None
+        reloaded = agent.subagents.load(task.id)
+        assert reloaded.capability_requests[0].status == "OPEN"
+        assert reloaded.capability_grants == []
+
+
 def test_shell_path_scope_does_not_expand_into_file_mutation_tools():
     """命令目标路径只是范围，不得把只读 child 暗中升级成文件编辑器。"""
     with tempfile.TemporaryDirectory() as td:

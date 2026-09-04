@@ -6,6 +6,15 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## Capability request 的授权目标
+
+- `problem`、`expected_output` 与 `needed_capability` 是人/模型可读说明，不是授权对象。request 必须在
+  `requested_tools/requested_mcp_tools/requested_skills/requested_commands` 或
+  `path_scope/cwd_scope/network_scope` 中声明至少一项结构化目标，才能进入 canonical request 账本。
+- scope 只限定边界，不能凭空变成工具。routine auto-grant 仅对精确工具、命令或 typed shell 生成有效 grant；
+  path-only、Skill、MCP、network 和非 routine 工具由直属父级按其真实 authority 裁决。旧空 request 也不能
+  被补成 `tools=[]` 的 GRANTED。
+
 ## AgentRun guidance successor
 
 - 用户从 TUI/Web/IM 对一个可见 child 插话时，控制面先做 exact owner/conversation/root/run 授权，再以

@@ -20,6 +20,7 @@ from typing import Any
 from ..tooling.write_boundary import WRITE_TOOL_NAMES
 from .capability_scope import (
     _delete_only_request,
+    capability_request_declares_target,
     grant_command_allowlist,
     request_scope_snapshot,
     scoped_constraints,
@@ -82,6 +83,8 @@ def assess_routine_capability_request(
 # 函数用途: 收集一条申请不能自动批的全部客观原因(空列表=常规且在沙箱内)。
 def _routine_request_blockers(task: Any, request: Any, extra_safe_roots: tuple[str, ...]) -> list[str]:
     blockers: list[str] = []
+    if not capability_request_declares_target(request):
+        blockers.append("no_structured_capability_target")
     if list(getattr(request, "requested_mcp_tools", []) or []):
         blockers.append("mcp_tools_requested")
     if list(getattr(request, "network_scope", []) or []):
@@ -99,6 +102,14 @@ def _routine_request_blockers(task: Any, request: Any, extra_safe_roots: tuple[s
     if _delete_only_request(request):
         # 纯删除申请走既有 task_trash/父级裁决通道,自动批出一张空 allowlist 毫无意义。
         blockers.append("delete_only_request")
+    if (
+        not _clean_list(getattr(request, "requested_tools", []))
+        and not grant_command_allowlist(request)
+        and not _shell_capability_requested(request)
+    ):
+        # path_scope 只是授权范围，不代表具体能力；自动批一张 tools=[] 的 grant
+        # 不会改变运行时，却会触发无意义 context_refresh 并误导模型。
+        blockers.append("no_effective_routine_grant")
     if not _task_root_text(task):
         blockers.append("no_task_workspace")
     safe_roots = _task_safe_roots(task, extra_safe_roots)

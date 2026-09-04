@@ -1,5 +1,17 @@
 # TESTS
 
+## 2026-09-04 R172 空能力授权防线
+
+- `capability_request` 只有 problem/needed-capability prose、所有结构化目标为空时，必须在写 request、wake
+  父级或自动授权前返回 `TOOL_PARAMETER_REQUIRED`；模型文字里出现工具名不能代替 `requested_tools`。
+- 防御性地直接写入一条旧式空 request 后，routine assessment 必须同时给出
+  `no_structured_capability_target/no_effective_routine_grant`，request 保持 OPEN、grant 列表为空。
+- path-only、Skill、MCP、network scope 仍是合法的父级裁决请求；只有精确工具/命令/typed shell 才能形成
+  routine grant。focused 命令：
+  `python3 -m pytest agent_py_agent/tests/test_capability_auto_grant.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_resolve_capability_requests_tool.py -q --tb=short`。
+- 真 TUI 复验需让缺 `create_subagents` 的 child 先提交 prose-only 请求，观察确定性参数错误，再由模型自行改为
+  exact `requested_tools`；不得由测试者补参数或手工改账。
+
 ## 2026-09-04 R171 详情页 Esc 的父级终态交接
 
 - 失败样本必须同时核对 child canonical state、ConversationStore wake 和父级 TUI：child 已

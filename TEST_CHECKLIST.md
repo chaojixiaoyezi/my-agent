@@ -1,5 +1,12 @@
 # TEST CHECKLIST
 
+## R172 空能力授权防线
+
+- [x] 空 `requested_*`/scope 且只有 prose 的能力申请在落账前失败，不发 wake、不产生 grant/context refresh。
+- [x] 旧记录/内部旁路的空请求由 auto-grant 第二道防线拒绝；path-only request 不被误批为 `tools=[]`。
+- [x] capability input/auto-grant/parent resolution 相邻 49 项 focused 通过。
+- [ ] `.10` 单 Gateway + MiniMax-M2.7 真 TUI：模型收到空目标错误后能自行改填 exact tool；不存在重复空授权。
+
 ## R171 用户控制取消后的父级恢复
 
 - [x] TUI/Web 的 exact-agent Esc 复用唯一树取消入口；目标及运行中后代全部 durable 终态后，才发布目标节点
