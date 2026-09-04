@@ -79,6 +79,7 @@ class OwnerHomeResult:
     artifacts_dir: Path
     audit_dir: Path
     data_dir: Path
+    artifact_backups_dir: Path
     scheduler_dir: Path
     scheduler_store_json: Path
     scheduler_history_jsonl: Path
@@ -161,6 +162,7 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_artifacts_dir=owner.artifacts_dir,
         owner_audit_dir=owner.audit_dir,
         owner_data_dir=owner.data_dir,
+        owner_artifact_backups_dir=owner.artifact_backups_dir,
         owner_scheduler_dir=owner.scheduler_dir,
         owner_scheduler_store_json=owner.scheduler_store_json,
         owner_scheduler_history_jsonl=owner.scheduler_history_jsonl,
@@ -220,6 +222,7 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         artifacts_dir=home_dir / "artifacts",
         audit_dir=home_dir / "audit",
         data_dir=data,
+        artifact_backups_dir=data / "artifact_backups",
         scheduler_dir=scheduler,
         scheduler_store_json=scheduler / "store.json",
         scheduler_history_jsonl=scheduler / "history.jsonl",
@@ -249,6 +252,7 @@ def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
         result.artifacts_dir,
         result.audit_dir,
         result.data_dir,
+        result.artifact_backups_dir,
         result.scheduler_dir,
         result.logs_dir,
         result.cache_dir,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -13,8 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_py_agent.agent.artifacts.shell_operation_journal import operation_manifest_ref
 from agent_py_agent.agent.artifacts.shell_protection import (
-    reconcile_shell_artifacts,
+    complete_shell_artifact_operation,
+    mark_shell_artifact_operation_executing,
+    reconcile_shell_artifact_operation,
+    reconcile_shell_artifact_operation_items,
+    release_shell_artifact_operation,
     shell_artifact_protection_note,
     snapshot_ready_artifacts,
 )
@@ -49,6 +55,8 @@ from .models import (
     ToolInputPolicy,
     ToolModelHints,
     ToolModelSpec,
+    ToolOperationReconciliation,
+    ToolOperationReconciliationContext,
     ToolRuntimePolicy,
     TrustedParameterBinding,
 )
@@ -66,6 +74,11 @@ from .sandbox import SandboxUnavailable
 _MAX_COMMAND_CHARS = 2000
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
 _DEFAULT_ACCESS_MODE = "workspace-write"
+_ShellSandboxRoots = tuple[
+    tuple[Path, ...] | None,
+    tuple[Path, ...] | None,
+    tuple[Path, ...] | None,
+]
 _ACCESS_MODES = frozenset({"restricted", "workspace-write", "full-access"})
 _ACCESS_MODE_RANK = {"restricted": 0, "workspace-write": 1, "full-access": 2}
 _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
@@ -102,9 +115,36 @@ class ShellToolOptions:
     path_dangerous_roots: list[str] | None = None
     owner_scope_root: str = ""  # 多用户隔离:per-user owner home;空=不隔离
     protected_persona_root: str = ""
+    artifact_backup_root: Path | None = None
     access_mode: str = _DEFAULT_ACCESS_MODE
     default_timeout: int = 30
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
+
+
+@dataclass(frozen=True)
+class _ShellArtifactExecutionRequest:
+    """Host-only inputs for one foreground shell operation."""
+
+    tool: ShellTool
+    command: str
+    target: Path
+    timeout: int
+    sandbox_roots: _ShellSandboxRoots
+    effective_access_mode: str
+    run_scope: object
+    tool_call_id: str
+    operation_id: str
+
+
+@dataclass(frozen=True)
+class _ShellArtifactExecutionState:
+    """Prepared owner-private artifact state surrounding one shell process."""
+
+    snapshots: list[object]
+    source_roots: tuple[Path, ...] | None
+    summary: dict[str, Any]
+    operation_key: str
+    operation_ref: str
 
 
 def _is_dangerous_command(command: str) -> bool:
@@ -937,6 +977,8 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
                 "__sandbox_protected_write_paths",
                 "__access_mode",
                 "__run_scope",
+                "__tool_call_id",
+                "__operation_id",
             ),
             safe_parameter_defaults=(
                 ("timeout", default_timeout),
@@ -977,6 +1019,11 @@ class ShellTool(BaseTool):
         )
         self.access_mode = _normalize_access_mode(options.access_mode)
         self.protected_persona_root = str(options.protected_persona_root or "")
+        self.artifact_backup_root = (
+            Path(options.artifact_backup_root).expanduser().resolve(strict=False)
+            if options.artifact_backup_root is not None
+            else None
+        )
         self.default_timeout = options.default_timeout
         self.max_output_chars = max(0, int(options.max_output_chars))
         self.model_spec = _build_shell_tool_model_spec(
@@ -1091,13 +1138,25 @@ class ShellTool(BaseTool):
                     self.path_access_policy.owner_scope_root,
                 ),
             )
-        return self._execute_with_artifact_protection(
-            command,
-            target,
-            timeout,
-            sandbox_write_roots,
-            sandbox_read_roots,
-            sandbox_protected_paths,
+        return _execute_with_artifact_protection(
+            _ShellArtifactExecutionRequest(
+                tool=self,
+                command=command,
+                target=target,
+                timeout=timeout,
+                sandbox_roots=(
+                    sandbox_write_roots,
+                    sandbox_read_roots,
+                    sandbox_protected_paths,
+                ),
+                effective_access_mode=_effective_access_mode(
+                    self.access_mode,
+                    params.get("__access_mode"),
+                ),
+                run_scope=params.get("__run_scope"),
+                tool_call_id=str(params.get("__tool_call_id") or ""),
+                operation_id=str(params.get("__operation_id") or ""),
+            )
         )
 
     def _execution_target(
@@ -1109,83 +1168,6 @@ class ShellTool(BaseTool):
         # 函数用途: 按本轮工作区和访问模式解析命令实际执行目录。
         _ = command
         return _shell_execution_target(self, params)
-
-    # LLM: shell 结果 envelope 同时保存内部 process 事实、owner 沙箱可见范围和独立
-    # public display；WorkspaceOnly 的文本回执也必须始终说明绝对路径属于隔离视图，
-    # 避免模型把沙箱内 uid=0 或临时根写入扩大解释成宿主副作用。该说明不解析 command，
-    # 不参与授权或副作用裁决。
-    # 函数用途: 执行前后保护已登记产物，并把命令输出、沙箱范围和终端展示数据整理成一次结果。
-    def _execute_with_artifact_protection(
-        self,
-        command: str,
-        target: Path,
-        timeout: int,
-        sandbox_write_roots: tuple[Path, ...] | None,
-        sandbox_read_roots: tuple[Path, ...] | None,
-        sandbox_protected_paths: tuple[Path, ...] | None,
-    ) -> ToolHandlerOutcome:
-        try:
-            artifact_snapshots = snapshot_ready_artifacts(self.workspace_root)
-        except OSError as exc:
-            return ToolHandlerOutcome(
-                self.model_spec.name,
-                False,
-                f"ARTIFACT_BACKUP_FAILED: shell 执行前无法备份已登记产物: {exc}",
-                error_code="ARTIFACT_BACKUP_FAILED",
-            )
-        artifact_summary: dict[str, Any] = {
-            "snapshots": len(artifact_snapshots),
-            "changed": [],
-            "invalid": [],
-        }
-        output, ok, error_code, process_facts = self._run_process_text(
-            command,
-            target,
-            timeout,
-            sandbox_write_roots,
-            sandbox_read_roots,
-            sandbox_protected_paths,
-        )
-        display = process_facts.pop("_display", None)
-        try:
-            artifact_summary = reconcile_shell_artifacts(self.workspace_root, artifact_snapshots)
-        except OSError as exc:
-            output = f"{output}\nARTIFACT_POSTCHECK_FAILED: shell 执行后无法复核已登记产物: {exc}"
-        protection_note = shell_artifact_protection_note(artifact_summary)
-        if protection_note:
-            output = f"{output}\n{protection_note}"
-        owner_scoped = self.path_access_policy.owner_scope_root is not None
-        if owner_scoped:
-            output = (
-                f"{output}\n[sandbox_scope] file_scope=owner_workspace_only "
-                "external_host_paths_hidden=true host_path_absence_proven=false\n"
-                "当前命令只在本 owner 的隔离视图内运行；其中的 uid=0、/root 或其它绝对"
-                "路径都不代表宿主权限，只有结构化授权写根内的结果会持久化到宿主。未挂载"
-                "路径的不存在、拒绝或沙箱内成功都不能证明宿主路径状态。"
-            )
-        result_envelope: dict[str, object] = {
-            "artifact_protection": artifact_summary,
-            "process": process_facts,
-            "sandbox": {
-                "file_scope": (
-                    "owner_workspace_only" if owner_scoped else "full_access"
-                ),
-                "external_host_paths_hidden": owner_scoped,
-                "host_path_absence_proven": False,
-            },
-        }
-        if isinstance(display, dict):
-            result_envelope["display"] = display
-        return ToolHandlerOutcome(
-            self.model_spec.name,
-            ok,
-            output,
-            result_envelope=result_envelope,
-            error_code="" if ok else error_code,
-            effect_outcome=self._failure_effect_outcome(
-                command, ok, error_code, output, process_facts
-            ),
-        )
 
     @staticmethod
     def _failure_effect_outcome(
@@ -1204,6 +1186,49 @@ class ShellTool(BaseTool):
             output,
             process_facts,
         )
+
+    # LLM: Generic ToolOperation recovery delegates to the owner-private artifact manifest keyed by
+    # the canonical operation_id. It never re-executes command text when the manifest says executing.
+    # 函数用途: Gateway 重启或 shell 结果未知后核对同一操作的产物前像和已持久结果。
+    def reconcile_operation(
+        self,
+        params: dict[str, Any],
+        context: ToolOperationReconciliationContext,
+    ) -> ToolOperationReconciliation:
+        _ = params
+        if self.artifact_backup_root is None:
+            return ToolOperationReconciliation(
+                outcome="unknown",
+                reason="artifact_backup_store_unavailable",
+            )
+        try:
+            facts = reconcile_shell_artifact_operation(
+                self.artifact_backup_root,
+                run_scope={
+                    "owner_id": context.owner_id,
+                    "run_id": context.run_id,
+                    "task_id": context.task_id,
+                },
+                operation_id=context.operation_id,
+            )
+            payload = facts.get("result")
+            result = (
+                _shell_outcome_from_manifest(payload)
+                if isinstance(payload, dict)
+                else None
+            )
+            return ToolOperationReconciliation(
+                outcome=str(facts.get("outcome") or "unknown"),
+                source_ref=str(facts.get("source_ref") or ""),
+                result=result,
+                reason=str(facts.get("reason") or ""),
+            )
+        except (OSError, TypeError, ValueError):
+            logger.exception("shell artifact operation reconciliation failed")
+            return ToolOperationReconciliation(
+                outcome="unknown",
+                reason="artifact_operation_reconciliation_failed",
+            )
 
     # LLM: 正常退出必须同时返回结构化 process facts 和 `_display` 暂存；异常分支保持原错误合同，不能伪造 stdout/stderr。
     # 函数用途: 运行前台命令并将退出事实、模型文本和终端预览一次性整理出来。
@@ -1328,6 +1353,317 @@ class ShellTool(BaseTool):
             sandbox_read_roots,
             sandbox_protected_paths,
         )
+
+
+# LLM: Artifact manifests store the exact handler-level outcome needed by generic ToolOperation
+# reconciliation. Only explicit ToolHandlerOutcome fields are serialized; runtime store facts remain external.
+# 函数用途: 把 shell handler 结果转换为 owner 私有恢复清单中的纯数据。
+def _shell_outcome_payload(outcome: ToolHandlerOutcome) -> dict[str, object]:
+    return {
+        "tool": outcome.tool,
+        "ok": outcome.ok,
+        "output": outcome.output,
+        "call_id": outcome.call_id,
+        "result_envelope": dict(outcome.result_envelope or {}),
+        "error_code": outcome.error_code,
+        "reported_error_code": outcome.reported_error_code,
+        "effect_outcome": outcome.effect_outcome,
+        "effect_source_ref": outcome.effect_source_ref,
+        "handler_executed": outcome.handler_executed,
+        "failure_stage": outcome.failure_stage,
+        "duration_ms": outcome.duration_ms,
+    }
+
+
+# LLM: Rehydration is strict data construction; manifest prose cannot select a class, callback, or path.
+# 函数用途: 从已校验的私有恢复清单重建一次 shell handler 结果。
+def _shell_outcome_from_manifest(payload: dict[str, object]) -> ToolHandlerOutcome:
+    if str(payload.get("tool") or "") != "run_command" or not isinstance(
+        payload.get("result_envelope"),
+        dict,
+    ):
+        raise ValueError("shell operation result manifest is invalid")
+    return ToolHandlerOutcome(
+        tool="run_command",
+        ok=payload.get("ok") is True,
+        output=str(payload.get("output") or ""),
+        call_id=str(payload.get("call_id") or ""),
+        result_envelope=dict(payload.get("result_envelope") or {}),
+        error_code=str(payload.get("error_code") or ""),
+        reported_error_code=str(payload.get("reported_error_code") or ""),
+        effect_outcome=str(payload.get("effect_outcome") or ""),
+        effect_source_ref=str(payload.get("effect_source_ref") or ""),
+        handler_executed=payload.get("handler_executed") is True,
+        failure_stage=str(payload.get("failure_stage") or ""),
+        duration_ms=int(payload.get("duration_ms") or 0),
+    )
+
+
+# LLM: This foreground wrapper is outside ShellTool to keep the tool class below its size gate.
+# It must preserve process facts and the exact owner-store artifact lifecycle in one outcome.
+# 函数用途: 执行前后保护已登记产物，并把命令输出、沙箱范围和终端展示数据整理成一次结果。
+def _execute_with_artifact_protection(
+    request: _ShellArtifactExecutionRequest,
+) -> ToolHandlerOutcome:
+    prepared = _prepare_shell_artifact_execution(request)
+    if isinstance(prepared, ToolHandlerOutcome):
+        return prepared
+    write_roots, read_roots, protected_paths = request.sandbox_roots
+    try:
+        output, ok, error_code, process_facts = request.tool._run_process_text(
+            request.command,
+            request.target,
+            request.timeout,
+            write_roots,
+            read_roots,
+            protected_paths,
+        )
+    except BaseException:
+        release_shell_artifact_operation(prepared.operation_key)
+        raise
+    display = process_facts.pop("_display", None)
+    output, artifact_summary, postcheck_failed = _postcheck_shell_artifacts(
+        request,
+        prepared,
+        output,
+    )
+    outcome = _build_protected_shell_outcome(
+        request,
+        prepared,
+        output=output,
+        ok=ok,
+        error_code=error_code,
+        process_facts=process_facts,
+        display=display,
+        artifact_summary=artifact_summary,
+        postcheck_failed=postcheck_failed,
+    )
+    return _commit_protected_shell_outcome(request, prepared, outcome)
+
+
+# LLM: Every preimage and its durable prepared phase must exist before the process starts. Failure
+# returns not_started and exposes only the opaque operation ref, never the owner-store path.
+# 函数用途: 为一次前台 shell 准备已登记产物前像并推进私有恢复清单。
+def _prepare_shell_artifact_execution(
+    request: _ShellArtifactExecutionRequest,
+) -> _ShellArtifactExecutionState | ToolHandlerOutcome:
+    tool = request.tool
+    write_roots, read_roots, _protected_paths = request.sandbox_roots
+    source_roots = _artifact_source_roots(
+        tool,
+        write_roots,
+        read_roots,
+        effective_access_mode=request.effective_access_mode,
+    )
+    try:
+        artifact_snapshots = snapshot_ready_artifacts(
+            tool.workspace_root,
+            tool.artifact_backup_root,
+            source_roots=source_roots,
+            run_scope=request.run_scope,
+            tool_call_id=request.tool_call_id,
+            operation_id=request.operation_id,
+        )
+    except (OSError, ValueError):
+        logger.exception("artifact pre-backup failed before shell start")
+        return ToolHandlerOutcome(
+            tool.model_spec.name,
+            False,
+            "ARTIFACT_BACKUP_FAILED: shell 执行前无法安全备份已登记产物；命令未启动。",
+            error_code="ARTIFACT_BACKUP_FAILED",
+            effect_outcome="not_started",
+        )
+    summary: dict[str, Any] = {
+        "snapshots": len(artifact_snapshots),
+        "changed": [],
+        "invalid": [],
+        "cleanup_deferred": [],
+    }
+    if not artifact_snapshots:
+        return _ShellArtifactExecutionState([], source_roots, summary, "", "")
+    operation_key = artifact_snapshots[0].operation_key
+    operation_ref = operation_manifest_ref(operation_key)
+    try:
+        if tool.artifact_backup_root is None:
+            raise OSError("canonical owner artifact backup root is unavailable")
+        mark_shell_artifact_operation_executing(
+            tool.artifact_backup_root,
+            artifact_snapshots,
+        )
+    except (OSError, ValueError):
+        logger.exception("artifact operation could not enter executing state")
+        return ToolHandlerOutcome(
+            tool.model_spec.name,
+            False,
+            "ARTIFACT_BACKUP_FAILED: 产物恢复清单无法安全落盘；命令未启动。",
+            error_code="ARTIFACT_BACKUP_FAILED",
+            effect_outcome="not_started",
+            effect_source_ref=operation_ref,
+        )
+    return _ShellArtifactExecutionState(
+        artifact_snapshots,
+        source_roots,
+        summary,
+        operation_key,
+        operation_ref,
+    )
+
+
+# LLM: Postcheck is the sole bridge from process completion to artifact registry projection. Any
+# structural read/write failure keeps the command effect unknown and retains all recovery bytes.
+# 函数用途: 命令退出后复核所有受保护产物，并生成不泄露宿主路径的简短结果。
+def _postcheck_shell_artifacts(
+    request: _ShellArtifactExecutionRequest,
+    prepared: _ShellArtifactExecutionState,
+    output: str,
+) -> tuple[str, dict[str, Any], bool]:
+    summary = prepared.summary
+    if prepared.snapshots:
+        try:
+            if request.tool.artifact_backup_root is None:
+                raise OSError("canonical owner artifact backup root is unavailable")
+            summary = reconcile_shell_artifact_operation_items(
+                request.tool.workspace_root,
+                prepared.snapshots,
+                backup_store_root=request.tool.artifact_backup_root,
+                source_roots=prepared.source_roots,
+            )
+        except (OSError, ValueError):
+            logger.exception("artifact postcheck failed after shell exit")
+            output = (
+                f"{output}\nARTIFACT_POSTCHECK_FAILED: "
+                "shell 已执行，但无法安全复核已登记产物；结果状态未知，需要人工检查。"
+            )
+            return output, summary, True
+    protection_note = shell_artifact_protection_note(summary)
+    if protection_note:
+        output = f"{output}\n{protection_note}"
+    return output, summary, False
+
+
+# LLM: The result envelope exposes process and sandbox facts but never owner-private backup paths.
+# Artifact postcheck failure overrides provider success and stays UNKNOWN for durable reconciliation.
+# 函数用途: 把 shell 进程、沙箱和产物复核事实组装成统一工具结果。
+def _build_protected_shell_outcome(
+    request: _ShellArtifactExecutionRequest,
+    prepared: _ShellArtifactExecutionState,
+    *,
+    output: str,
+    ok: bool,
+    error_code: str,
+    process_facts: dict[str, Any],
+    display: object,
+    artifact_summary: dict[str, Any],
+    postcheck_failed: bool,
+) -> ToolHandlerOutcome:
+    tool = request.tool
+    owner_scoped = tool.path_access_policy.owner_scope_root is not None
+    if owner_scoped:
+        output = (
+            f"{output}\n[sandbox_scope] file_scope=owner_workspace_only "
+            "external_host_paths_hidden=true host_path_absence_proven=false\n"
+            "当前命令只在本 owner 的隔离视图内运行；其中的 uid=0、/root 或其它绝对"
+            "路径都不代表宿主权限，只有结构化授权写根内的结果会持久化到宿主。未挂载"
+            "路径的不存在、拒绝或沙箱内成功都不能证明宿主路径状态。"
+        )
+    result_envelope: dict[str, object] = {
+        "artifact_protection": artifact_summary,
+        "process": process_facts,
+        "sandbox": {
+            "file_scope": "owner_workspace_only" if owner_scoped else "full_access",
+            "external_host_paths_hidden": owner_scoped,
+            "host_path_absence_proven": False,
+        },
+    }
+    if isinstance(display, dict):
+        result_envelope["display"] = display
+    outcome = ToolHandlerOutcome(
+        tool.model_spec.name,
+        ok and not postcheck_failed,
+        output,
+        result_envelope=result_envelope,
+        error_code=(
+            "ARTIFACT_POSTCHECK_FAILED"
+            if postcheck_failed
+            else ("" if ok else error_code)
+        ),
+        effect_outcome=(
+            "unknown"
+            if postcheck_failed
+            else tool._failure_effect_outcome(
+                request.command, ok, error_code, output, process_facts
+            )
+        ),
+        effect_source_ref=prepared.operation_ref,
+    )
+    return outcome
+
+
+# LLM: The completed manifest closes the crash window before generic ToolOperation settlement.
+# Unknown postcheck leaves the executing manifest intact and only releases the live-process marker.
+# 函数用途: 持久化确定的 shell 结果，失败时保守返回未知并保留恢复材料。
+def _commit_protected_shell_outcome(
+    request: _ShellArtifactExecutionRequest,
+    prepared: _ShellArtifactExecutionState,
+    outcome: ToolHandlerOutcome,
+) -> ToolHandlerOutcome:
+    if not prepared.snapshots or request.tool.artifact_backup_root is None:
+        return outcome
+    if outcome.effect_outcome == "unknown":
+        release_shell_artifact_operation(prepared.operation_key)
+        return outcome
+    try:
+        complete_shell_artifact_operation(
+            request.tool.artifact_backup_root,
+            prepared.snapshots,
+            _shell_outcome_payload(outcome),
+        )
+    except (OSError, TypeError, ValueError):
+        logger.exception("artifact operation result could not be committed")
+        release_shell_artifact_operation(prepared.operation_key)
+        return ToolHandlerOutcome(
+            request.tool.model_spec.name,
+            False,
+            f"{outcome.output}\nARTIFACT_POSTCHECK_FAILED: shell 已执行并完成产物复核，"
+            "但恢复终态无法安全落盘；结果状态未知，需要人工检查。",
+            result_envelope=outcome.result_envelope,
+            error_code="ARTIFACT_POSTCHECK_FAILED",
+            effect_outcome="unknown",
+            effect_source_ref=prepared.operation_ref,
+        )
+    return outcome
+
+
+# LLM: Source roots come only from the immutable runtime boundary. Owner-scoped runs use the
+# explicit sandbox read/write view; explicit local-admin Full Access is the sole unrestricted
+# sentinel. A bare workspace-write tool stays bounded to its configured workspace roots.
+# 函数用途: 计算 shell 前后允许宿主读取并保护的产物范围，阻止注册表伪造路径越权。
+def _artifact_source_roots(
+    tool: ShellTool,
+    sandbox_write_roots: tuple[Path, ...] | None,
+    sandbox_read_roots: tuple[Path, ...] | None,
+    *,
+    effective_access_mode: str,
+) -> tuple[Path, ...] | None:
+    owner_root = getattr(tool.path_access_policy, "owner_scope_root", None)
+    boundary_supplied = sandbox_write_roots is not None or sandbox_read_roots is not None
+    if not owner_root and effective_access_mode == "full-access" and not boundary_supplied:
+        return None
+    roots: list[Path] = []
+    for value in (
+        *(sandbox_write_roots or ()),
+        *(sandbox_read_roots or ()),
+    ):
+        resolved = Path(value).expanduser().resolve(strict=False)
+        if resolved not in roots:
+            roots.append(resolved)
+    if boundary_supplied:
+        return tuple(roots)
+    if owner_root:
+        roots.append(Path(owner_root).expanduser().resolve(strict=False))
+    if not roots:
+        roots.extend(tool.workspace_roots or [tool.workspace_root])
+    return tuple(roots)
 
 
 # LLM: Shell and PTY must resolve the same trusted cwd and access override; command text never

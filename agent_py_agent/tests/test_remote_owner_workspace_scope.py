@@ -33,6 +33,7 @@ def test_feishu_scoped_agent_workspace_locked_to_owner_home(tmp_path, monkeypatc
     owner_home = Path(str(agent.home_paths.owner_home_dir)).resolve()
     shell = agent.tools.tools["run_command"]
     assert shell.workspace_root == owner_home
+    assert shell.artifact_backup_root == agent.home_paths.owner_artifact_backups_dir
     # 源码树(项目根)绝不能再是远程用户的合法工作区。
     assert project.resolve() not in [Path(root).resolve() for root in shell.workspace_roots]
     # 子代理管理器同规(子代理工具与主代理同一工作区边界)。
@@ -44,6 +45,7 @@ def test_local_main_workspace_only_uses_owner_home(tmp_path, monkeypatch):
     shell = agent.tools.tools["run_command"]
 
     assert shell.workspace_root == Path(agent.home_paths.owner_home_dir).resolve()
+    assert shell.artifact_backup_root == agent.home_paths.owner_artifact_backups_dir
     assert project.resolve() not in shell.workspace_roots
 
 
@@ -53,3 +55,5 @@ def test_local_main_full_access_keeps_explicit_project(tmp_path, monkeypatch):
 
     assert shell.workspace_root == project.resolve()
     assert shell.path_access_policy.owner_scope_root is None
+    assert shell.artifact_backup_root == agent.home_paths.owner_artifact_backups_dir
+    assert not shell.artifact_backup_root.is_relative_to(project.resolve())

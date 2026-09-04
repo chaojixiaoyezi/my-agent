@@ -303,6 +303,7 @@ def _tool_registry_agent_stub(
             owner_provider="local",
             owner_kind="main",
             owner_home_dir=str(root),
+            owner_artifact_backups_dir=root / "data" / "artifact_backups",
         ),
         channel_registry=SimpleNamespace(),
         current_skill_snapshot=lambda: None,

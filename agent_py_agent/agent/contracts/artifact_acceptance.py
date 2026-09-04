@@ -63,7 +63,12 @@ def validate_html_artifact(request: ArtifactAcceptanceRequest) -> ArtifactAccept
     refs = scan_html_refs(text)
     findings = _finding_records(
         [
-            *image_ref_findings(refs, path=path, workspace_root=request.workspace_root),
+            *image_ref_findings(
+                refs,
+                path=path,
+                workspace_root=request.workspace_root,
+                reference_roots=request.reference_roots,
+            ),
             *html_contract_findings(text, refs.resources, request.validation_contract),
         ]
     )

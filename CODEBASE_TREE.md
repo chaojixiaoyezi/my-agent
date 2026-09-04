@@ -303,6 +303,7 @@ docs/
 |   `-- work/                           # 状态、日志、子代理原始结果与过程产物
 |       `-- blobs/tool_outputs/         # 大工具输出完整正文；Memory 只保存 preview/hash/size/ref
 |-- agents/<run_id>/                    # 子代理 refs-only projection
+|-- data/artifact_backups/v1/           # 前台 shell 改动 ready 产物时保留的 owner 私有哈希恢复 blob
 |-- workspace/runtime/workspaces/<scope>/# LocalStore、gateway、conversation 等 workspace 账本
 `-- global_index/                       # 可重建轻量索引
 

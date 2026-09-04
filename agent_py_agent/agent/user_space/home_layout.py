@@ -99,6 +99,7 @@ class MyAgentHomePaths:
     owner_artifacts_dir: Path
     owner_audit_dir: Path
     owner_data_dir: Path
+    owner_artifact_backups_dir: Path
     owner_scheduler_dir: Path
     owner_scheduler_store_json: Path
     owner_scheduler_history_jsonl: Path

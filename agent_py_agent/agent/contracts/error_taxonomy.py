@@ -2356,6 +2356,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="写入前备份原文件失败；可重试，持续失败时检查磁盘空间或目标路径权限。",
     ),
+    "ARTIFACT_POSTCHECK_FAILED": ErrorContract(
+        code="ARTIFACT_POSTCHECK_FAILED",
+        category="artifact",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="命令已经执行，但产物复核或恢复副本校验失败；不要自动重试写操作，先人工核对产物和备份账本。",
+    ),
     # —— 命令策略（不可原样重试：换安全命令或专用工具）——
     "COMMAND_POLICY_BLOCKED": ErrorContract(
         code="COMMAND_POLICY_BLOCKED",

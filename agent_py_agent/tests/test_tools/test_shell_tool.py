@@ -6,6 +6,7 @@ from __future__ import annotations
 测试 run_command 工具：正常执行、超时处理、危险命令拒绝、参数校验。
 """
 
+import hashlib
 import json
 import os
 import shlex
@@ -406,6 +407,9 @@ def test_shell_corrupting_ready_artifact_records_invalid_with_backup(tmp_path: P
         latest_artifact_records,
         register_artifact,
     )
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        resolve_shell_artifact_backup,
+    )
 
     workspace = tmp_path / "workspace"
     output_dir = workspace / "outputs"
@@ -429,7 +433,14 @@ def test_shell_corrupting_ready_artifact_records_invalid_with_backup(tmp_path: P
         )
     )
 
-    tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    tool = ShellTool(
+        workspace,
+        options=ShellToolOptions(
+            artifact_backup_root=backup_root,
+            default_timeout=30,
+        ),
+    )
     python = shlex.quote(sys.executable)
     script = "from pathlib import Path; Path('outputs/weekly.xlsx').write_text('broken')"
     result = tool.execute({"command": f"{python} -c {shlex.quote(script)}"})
@@ -440,7 +451,12 @@ def test_shell_corrupting_ready_artifact_records_invalid_with_backup(tmp_path: P
     assert latest.status == "invalid"
     assert latest.metadata["change_status"] == "invalid_after_shell"
     assert isinstance(backup_ref, str) and backup_ref
-    assert Path(backup_ref).is_file()
+    backup = resolve_shell_artifact_backup(backup_root, backup_ref)
+    assert backup.is_file()
+    assert backup.read_bytes() != b"broken"
+    assert backup.suffix == ".blob"
+    assert not backup.is_relative_to(workspace)
+    assert str(tmp_path) not in backup_ref
     assert "artifact_protection_invalid=1" in result.output
 
 
@@ -450,6 +466,9 @@ def test_shell_changing_generic_ready_artifact_keeps_ready_with_backup(tmp_path:
         ArtifactRegistration,
         latest_artifact_records,
         register_artifact,
+    )
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        resolve_shell_artifact_backup,
     )
 
     workspace = tmp_path / "workspace"
@@ -471,16 +490,792 @@ def test_shell_changing_generic_ready_artifact_keeps_ready_with_backup(tmp_path:
         )
     )
 
-    tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    tool = ShellTool(
+        workspace,
+        options=ShellToolOptions(
+            artifact_backup_root=backup_root,
+            default_timeout=30,
+        ),
+    )
     result = tool.execute({"command": "printf 'new content' > outputs/notes.custom"})
 
     latest = latest_artifact_records(workspace)["notes"]
     assert result.ok is True
     assert latest.status == "ready"
     assert latest.metadata["change_status"] == "changed_ready"
-    assert Path(str(latest.metadata["backup_ref"])).is_file()
+    backup_ref = str(latest.metadata["backup_ref"])
+    backup = resolve_shell_artifact_backup(backup_root, backup_ref)
+    assert backup.read_text(encoding="utf-8") == "old content"
+    assert not backup.is_relative_to(workspace)
+    assert str(tmp_path) not in backup_ref
     assert "artifact_protection_changed=1" in result.output
     assert "artifact_protection_invalid=0" in result.output
+
+
+def test_shell_unchanged_artifact_discards_prebackup(tmp_path: Path) -> None:
+    """A read-only shell must not accumulate artifact backup blobs or operation dirs."""
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    workspace = tmp_path / "workspace"
+    output_dir = workspace / "outputs"
+    output_dir.mkdir(parents=True)
+    artifact = output_dir / "test_generated.py"
+    artifact.write_text("def test_generated():\n    assert True\n", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=artifact,
+            artifact_id="generated-test",
+            run_id="run-1",
+            task_id="task-1",
+            agent_id="agent-1",
+            kind="python",
+            status="ready",
+            source="test",
+        )
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    tool = ShellTool(
+        workspace,
+        options=ShellToolOptions(
+            artifact_backup_root=backup_root,
+            default_timeout=30,
+        ),
+    )
+
+    result = tool.execute({"command": "true"})
+
+    assert result.ok is True
+    assert not list(backup_root.rglob("*.blob"))
+    schema_root = backup_root / "v1"
+    assert list(schema_root.rglob("operation.json"))
+    assert not (workspace / "data" / "artifacts" / "shell_backups").exists()
+
+
+def test_shell_pytest_does_not_collect_internal_artifact_backup(tmp_path: Path) -> None:
+    """The pre-shell copy of a test artifact must stay outside project discovery."""
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    test_file = workspace / "test_generated.py"
+    test_file.write_text("def test_generated():\n    assert True\n", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=test_file,
+            artifact_id="generated-test",
+            run_id="run-1",
+            task_id="task-1",
+            agent_id="agent-1",
+            kind="python",
+            status="ready",
+            source="test",
+        )
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    tool = ShellTool(
+        workspace,
+        options=ShellToolOptions(
+            artifact_backup_root=backup_root,
+            default_timeout=30,
+        ),
+    )
+
+    result = tool.execute(
+        {"command": f"{shlex.quote(sys.executable)} -m pytest --collect-only -q"}
+    )
+
+    assert result.ok is True
+    assert result.output.count("test_generated.py::test_generated") == 1
+    assert "shell_backups" not in result.output
+    assert not list(backup_root.rglob("*.blob"))
+
+
+def test_shell_artifact_backup_refs_are_owner_isolated(tmp_path: Path) -> None:
+    """Identical artifact/run names in two owners must resolve under different stores."""
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        resolve_shell_artifact_backup,
+        snapshot_ready_artifacts,
+    )
+
+    resolved: list[Path] = []
+    refs: list[str] = []
+    for owner_name in ("alice", "bob"):
+        workspace = tmp_path / owner_name / "tasks" / "same-task"
+        workspace.mkdir(parents=True)
+        artifact = workspace / "same.py"
+        artifact.write_text("print('same')\n", encoding="utf-8")
+        register_artifact(
+            ArtifactRegistration(
+                workspace_root=workspace,
+                path=artifact,
+                artifact_id="same-artifact",
+                run_id="same-run",
+                task_id="same-task",
+                agent_id="same-agent",
+                kind="python",
+                status="ready",
+                source="test",
+            )
+        )
+        backup_root = tmp_path / owner_name / "data" / "artifact_backups"
+        snapshots = snapshot_ready_artifacts(
+            workspace,
+            backup_root,
+            run_scope={
+                "owner_id": owner_name,
+                "task_id": "same-task",
+                "run_id": "same-run",
+                "attempt_id": "attempt-1",
+            },
+            tool_call_id="call-1",
+        )
+        refs.append(snapshots[0].backup_ref)
+        resolved.append(
+            resolve_shell_artifact_backup(backup_root, snapshots[0].backup_ref)
+        )
+
+    assert resolved[0] != resolved[1]
+    assert resolved[0].is_relative_to(tmp_path / "alice")
+    assert resolved[1].is_relative_to(tmp_path / "bob")
+    assert all(path.read_text(encoding="utf-8") == "print('same')\n" for path in resolved)
+    assert all(str(tmp_path) not in ref for ref in refs)
+
+
+def test_shell_artifact_backup_ref_rejects_traversal_and_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    """An opaque ref cannot climb or follow a symlink beyond the exact owner store."""
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        resolve_shell_artifact_backup,
+    )
+
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    (backup_root / "v1").mkdir(parents=True)
+    with pytest.raises(ValueError, match="invalid shell artifact backup ref"):
+        resolve_shell_artifact_backup(
+            backup_root,
+            "owner-artifact-backup:v1/../../outside.blob",
+        )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (backup_root / "v1" / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this platform")
+    with pytest.raises(ValueError, match="escapes owner store"):
+        resolve_shell_artifact_backup(
+            backup_root,
+            "owner-artifact-backup:v1/link/outside.blob",
+        )
+
+
+def test_shell_artifact_backup_failure_does_not_start_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Atomic backup failure must fail closed before any shell side effect starts."""
+    from agent_py_agent.agent.artifacts import shell_protection
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "result.txt"
+    artifact.write_text("ready", encoding="utf-8")
+    second_artifact = workspace / "second.txt"
+    second_artifact.write_text("also ready", encoding="utf-8")
+    for artifact_id, path in (("result", artifact), ("second", second_artifact)):
+        register_artifact(
+            ArtifactRegistration(
+                workspace_root=workspace,
+                path=path,
+                artifact_id=artifact_id,
+                run_id="run-1",
+                task_id="task-1",
+                agent_id="agent-1",
+                kind="text",
+                status="ready",
+                source="test",
+            )
+        )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    tool = ShellTool(
+        workspace,
+        options=ShellToolOptions(
+            artifact_backup_root=backup_root,
+            default_timeout=30,
+        ),
+    )
+
+    real_replace = shell_protection.os.replace
+    replace_count = 0
+
+    def reject_second_replace(source: object, target: object) -> None:
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 2:
+            raise OSError("simulated atomic rename failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(shell_protection.os, "replace", reject_second_replace)
+    result = tool.execute({"command": "printf started > command-started.txt"})
+
+    assert result.ok is False
+    assert result.error_code == "ARTIFACT_BACKUP_FAILED"
+    assert result.effect_outcome == "not_started"
+    assert not (workspace / "command-started.txt").exists()
+    assert not list(backup_root.rglob(".tmp-*"))
+    assert not list(backup_root.rglob("*.blob"))
+
+
+def test_shell_ready_artifact_without_canonical_backup_root_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A bare tool may run normally, but cannot protect a ready artifact without an injected store."""
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "result.txt"
+    artifact.write_text("ready", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(workspace_root=workspace, path=artifact, status="ready")
+    )
+
+    result = ShellTool(workspace).execute(
+        {"command": "printf started > command-started.txt"}
+    )
+
+    assert result.ok is False
+    assert result.error_code == "ARTIFACT_BACKUP_FAILED"
+    assert result.effect_outcome == "not_started"
+    assert not (workspace / "command-started.txt").exists()
+    assert not (workspace.parent / ".my-agent-artifact-backups").exists()
+
+
+def test_shell_rejects_forged_ready_artifact_outside_owner_scope(
+    tmp_path: Path,
+) -> None:
+    """Writable registry data cannot make the host pre-backup read outside the owner wall."""
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        register_observed_artifact,
+    )
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    register_observed_artifact(
+        ArtifactRegistration(
+            workspace_root=owner,
+            path=outside,
+            artifact_id="forged",
+            status="ready",
+            source="forged-test",
+        ),
+        observed_sha256="forged",
+        observed_size_bytes=6,
+    )
+    backup_root = owner / "private" / "artifact_backups"
+    tool = ShellTool(
+        owner,
+        options=ShellToolOptions(
+            owner_scope_root=str(owner),
+            artifact_backup_root=backup_root,
+        ),
+    )
+
+    result = tool.execute({"command": "printf started > command-started.txt"})
+
+    assert result.ok is False
+    assert result.error_code == "ARTIFACT_BACKUP_FAILED"
+    assert result.effect_outcome == "not_started"
+    assert "outside-secret" not in result.output
+    assert not (owner / "command-started.txt").exists()
+    assert not list(backup_root.rglob("*.blob"))
+
+
+def test_shell_rejects_symlink_ready_artifact_before_backup(tmp_path: Path) -> None:
+    """A registry leaf symlink is rejected before its target bytes can enter the owner store."""
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        register_observed_artifact,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    artifact = workspace / "result.txt"
+    try:
+        artifact.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this platform")
+    register_observed_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=artifact,
+            artifact_id="symlink",
+            status="ready",
+        ),
+        observed_sha256="forged",
+        observed_size_bytes=6,
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+
+    result = ShellTool(
+        workspace,
+        options=ShellToolOptions(artifact_backup_root=backup_root),
+    ).execute({"command": "printf started > command-started.txt"})
+
+    assert result.ok is False
+    assert result.error_code == "ARTIFACT_BACKUP_FAILED"
+    assert result.effect_outcome == "not_started"
+    assert not (workspace / "command-started.txt").exists()
+    assert not list(backup_root.rglob("*.blob"))
+
+
+def test_shell_postcheck_marks_replaced_symlink_invalid_without_following(
+    tmp_path: Path,
+) -> None:
+    """A command-created symlink is an invalid postimage and never rewrites the registry to its target."""
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        latest_artifact_records,
+        register_artifact,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "result.txt"
+    artifact.write_text("ready", encoding="utf-8")
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=artifact,
+            artifact_id="result",
+            status="ready",
+        )
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    python = shlex.quote(sys.executable)
+    script = (
+        "from pathlib import Path; import os; "
+        "p=Path('result.txt'); p.unlink(); "
+        f"os.symlink({str(outside)!r}, p)"
+    )
+
+    result = ShellTool(
+        workspace,
+        options=ShellToolOptions(artifact_backup_root=backup_root),
+    ).execute({"command": f"{python} -c {shlex.quote(script)}"})
+
+    latest = latest_artifact_records(workspace)["result"]
+    assert result.ok is True
+    assert latest.status == "invalid"
+    assert latest.path == str(artifact)
+    assert latest.sha256 == ""
+    assert latest.size_bytes == 0
+    assert latest.metadata["findings"][0]["code"] == "ARTIFACT_SOURCE_SYMLINK_BLOCKED"
+    assert outside.read_text(encoding="utf-8") == "secret"
+
+
+def test_shell_postcheck_failure_is_typed_unknown_after_command_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reconciliation failure cannot be reported as a successful or safe-to-retry command."""
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+    from agent_py_agent.agent.tooling import shell as shell_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "result.txt"
+    artifact.write_text("ready", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(workspace_root=workspace, path=artifact, status="ready")
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+
+    def fail_postcheck(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise OSError("simulated postcheck failure")
+
+    monkeypatch.setattr(
+        shell_module,
+        "reconcile_shell_artifact_operation_items",
+        fail_postcheck,
+    )
+    result = ShellTool(
+        workspace,
+        options=ShellToolOptions(artifact_backup_root=backup_root),
+    ).execute({"command": "printf changed > result.txt"})
+
+    assert artifact.read_text(encoding="utf-8") == "changed"
+    assert result.ok is False
+    assert result.error_code == "ARTIFACT_POSTCHECK_FAILED"
+    assert result.effect_outcome == "unknown"
+    assert result.result_envelope["process"]["return_code"] == 0
+
+
+def test_shell_unchanged_cleanup_failure_does_not_reclassify_command_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure to delete a proven-unneeded copy is cleanup debt, not unknown command effect."""
+    from agent_py_agent.agent.artifacts import shell_protection
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "result.txt"
+    artifact.write_text("ready", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(workspace_root=workspace, path=artifact, status="ready")
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    monkeypatch.setattr(
+        shell_protection,
+        "_discard_backup",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("busy")),
+    )
+
+    result = ShellTool(
+        workspace,
+        options=ShellToolOptions(artifact_backup_root=backup_root),
+    ).execute({"command": "true"})
+
+    assert result.ok is True
+    assert result.error_code == ""
+    assert result.effect_outcome == ""
+    assert result.result_envelope["artifact_protection"]["cleanup_deferred"]
+
+
+def test_shell_rejects_tampered_recovery_blob_before_registry_append(
+    tmp_path: Path,
+) -> None:
+    """Changed output cannot advertise a missing or modified recovery preimage."""
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        reconcile_shell_artifacts,
+        resolve_shell_artifact_backup,
+        snapshot_ready_artifacts,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "result.txt"
+    artifact.write_text("ready", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(workspace_root=workspace, path=artifact, status="ready")
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    snapshots = snapshot_ready_artifacts(
+        workspace,
+        backup_root,
+        source_roots=(workspace,),
+    )
+    artifact.write_text("changed", encoding="utf-8")
+    resolve_shell_artifact_backup(backup_root, snapshots[0].backup_ref).write_text(
+        "tampered", encoding="utf-8"
+    )
+
+    with pytest.raises(OSError, match="does not match"):
+        reconcile_shell_artifacts(
+            workspace,
+            snapshots,
+            backup_store_root=backup_root,
+            source_roots=(workspace,),
+        )
+
+
+def test_shell_legacy_referenced_backup_migrates_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    """A latest legacy recovery ref is preserved under the owner store before project cleanup."""
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        latest_artifact_records,
+        register_observed_artifact,
+        registry_path,
+    )
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        resolve_shell_artifact_backup,
+        snapshot_ready_artifacts,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "result.txt"
+    artifact.write_text("broken", encoding="utf-8")
+    legacy = workspace / "data" / "artifacts" / "shell_backups" / "1" / "result"
+    legacy.mkdir(parents=True)
+    old_backup = legacy / "result.txt"
+    old_backup.write_text("ready", encoding="utf-8")
+    register_observed_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=artifact,
+            artifact_id="result",
+            status="invalid",
+            source="shell_postcheck",
+            metadata={
+                "change_status": "invalid_after_shell",
+                "backup_ref": str(old_backup),
+                "previous_sha256": hashlib.sha256(b"ready").hexdigest(),
+                "previous_size_bytes": 5,
+            },
+        ),
+        observed_sha256="broken-digest",
+        observed_size_bytes=6,
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+
+    assert snapshot_ready_artifacts(workspace, backup_root) == []
+    latest = latest_artifact_records(workspace)["result"]
+    migrated_ref = str(latest.metadata["backup_ref"])
+    assert migrated_ref.startswith("owner-artifact-backup:v1/")
+    assert resolve_shell_artifact_backup(backup_root, migrated_ref).read_text() == "ready"
+    assert not (workspace / "data" / "artifacts" / "shell_backups").exists()
+    line_count = len(registry_path(workspace).read_text(encoding="utf-8").splitlines())
+
+    assert snapshot_ready_artifacts(workspace, backup_root) == []
+    assert len(registry_path(workspace).read_text(encoding="utf-8").splitlines()) == line_count
+    assert latest_artifact_records(workspace)["result"].metadata["backup_ref"] == migrated_ref
+
+
+def test_shell_legacy_unreferenced_backups_are_removed(tmp_path: Path) -> None:
+    """Old no-op copies with no authoritative registry ref are safe migration garbage."""
+    from agent_py_agent.agent.artifacts.shell_protection import snapshot_ready_artifacts
+
+    workspace = tmp_path / "workspace"
+    legacy = workspace / "data" / "artifacts" / "shell_backups" / "1"
+    legacy.mkdir(parents=True)
+    (legacy / "test_duplicate.py").write_text("def test_x(): pass\n", encoding="utf-8")
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+
+    assert snapshot_ready_artifacts(workspace, backup_root) == []
+    assert not (workspace / "data" / "artifacts" / "shell_backups").exists()
+    assert not list(backup_root.rglob("*.blob"))
+
+
+def test_shell_legacy_backup_ref_cannot_escape_exact_task_root(tmp_path: Path) -> None:
+    """A forged legacy ref blocks migration without reading or deleting the outside file."""
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        register_observed_artifact,
+    )
+    from agent_py_agent.agent.artifacts.shell_protection import snapshot_ready_artifacts
+
+    workspace = tmp_path / "workspace"
+    legacy = workspace / "data" / "artifacts" / "shell_backups"
+    legacy.mkdir(parents=True)
+    (legacy / "unreferenced.txt").write_text("old", encoding="utf-8")
+    artifact = workspace / "result.txt"
+    artifact.write_text("broken", encoding="utf-8")
+    outside = tmp_path / "outside-backup.txt"
+    outside.write_text("secret", encoding="utf-8")
+    register_observed_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=artifact,
+            artifact_id="result",
+            status="invalid",
+            source="shell_postcheck",
+            metadata={
+                "change_status": "invalid_after_shell",
+                "backup_ref": str(outside),
+            },
+        ),
+        observed_sha256="broken",
+        observed_size_bytes=6,
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+
+    with pytest.raises(OSError, match="escapes task backup root"):
+        snapshot_ready_artifacts(workspace, backup_root)
+    assert outside.read_text(encoding="utf-8") == "secret"
+    assert legacy.exists()
+    assert not list(backup_root.rglob("*.blob"))
+
+
+def test_shell_published_blob_is_removed_if_finalization_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure after atomic rename cannot strand an unreferenced final blob."""
+    from agent_py_agent.agent.artifacts import shell_protection
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "result.txt"
+    artifact.write_text("ready", encoding="utf-8")
+    register_artifact(
+        ArtifactRegistration(workspace_root=workspace, path=artifact, status="ready")
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    real_chmod = shell_protection._chmod_private
+
+    def reject_blob(path: Path, *, directory: bool) -> None:
+        if not directory:
+            raise OSError("simulated chmod failure")
+        real_chmod(path, directory=directory)
+
+    monkeypatch.setattr(shell_protection, "_chmod_private", reject_blob)
+    result = ShellTool(
+        workspace,
+        options=ShellToolOptions(artifact_backup_root=backup_root),
+    ).execute({"command": "printf started > command-started.txt"})
+
+    assert result.ok is False
+    assert result.error_code == "ARTIFACT_BACKUP_FAILED"
+    assert result.effect_outcome == "not_started"
+    assert not (workspace / "command-started.txt").exists()
+    assert not list(backup_root.rglob("*.blob"))
+
+
+def test_shell_full_access_handler_honors_per_call_workspace_downgrade(
+    tmp_path: Path,
+) -> None:
+    """A registry built for Full Access cannot bypass an explicit narrow invocation boundary."""
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        register_observed_artifact,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    register_observed_artifact(
+        ArtifactRegistration(
+            workspace_root=workspace,
+            path=outside,
+            artifact_id="forged",
+            status="ready",
+        ),
+        observed_sha256="forged",
+        observed_size_bytes=6,
+    )
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+    tool = ShellTool(
+        workspace,
+        options=ShellToolOptions(
+            access_mode="full-access",
+            artifact_backup_root=backup_root,
+        ),
+    )
+
+    result = tool.execute(
+        {
+            "command": "printf started > command-started.txt",
+            "__access_mode": "workspace-write",
+            "__sandbox_write_roots": [str(workspace)],
+            "__sandbox_read_roots": [],
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_code == "ARTIFACT_BACKUP_FAILED"
+    assert result.effect_outcome == "not_started"
+    assert not (workspace / "command-started.txt").exists()
+    assert not list(backup_root.rglob("*.blob"))
+
+
+@pytest.mark.parametrize("symlink_component", ["data", "artifacts"])
+def test_shell_legacy_cleanup_rejects_parent_symlink_escape(
+    tmp_path: Path,
+    symlink_component: str,
+) -> None:
+    """Legacy cleanup never follows a data/artifacts parent link outside the task."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if symlink_component == "data":
+        external_legacy = outside / "artifacts" / "shell_backups"
+        external_legacy.mkdir(parents=True)
+        try:
+            (workspace / "data").symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlink creation is unavailable on this platform")
+    else:
+        (workspace / "data").mkdir()
+        external_legacy = outside / "shell_backups"
+        external_legacy.mkdir(parents=True)
+        try:
+            (workspace / "data" / "artifacts").symlink_to(
+                outside, target_is_directory=True
+            )
+        except OSError:
+            pytest.skip("symlink creation is unavailable on this platform")
+    sentinel = external_legacy / "test_must_survive.py"
+    sentinel.write_text("secret", encoding="utf-8")
+    backup_root = tmp_path / "owner" / "data" / "artifact_backups"
+
+    result = ShellTool(
+        workspace,
+        options=ShellToolOptions(artifact_backup_root=backup_root),
+    ).execute({"command": "printf started > command-started.txt"})
+
+    assert result.ok is False
+    assert result.error_code == "ARTIFACT_BACKUP_FAILED"
+    assert result.effect_outcome == "not_started"
+    assert sentinel.read_text(encoding="utf-8") == "secret"
+    assert not (workspace / "command-started.txt").exists()
+
+
+def test_shell_legacy_store_overlap_fails_before_copy_or_delete(tmp_path: Path) -> None:
+    """A misconfigured canonical store nested in the legacy tree cannot be deleted by migration."""
+    workspace = tmp_path / "workspace"
+    legacy = workspace / "data" / "artifacts" / "shell_backups"
+    legacy.mkdir(parents=True)
+    sentinel = legacy / "test_must_survive.py"
+    sentinel.write_text("secret", encoding="utf-8")
+
+    result = ShellTool(
+        workspace,
+        options=ShellToolOptions(artifact_backup_root=legacy / "canonical"),
+    ).execute({"command": "printf started > command-started.txt"})
+
+    assert result.ok is False
+    assert result.error_code == "ARTIFACT_BACKUP_FAILED"
+    assert result.effect_outcome == "not_started"
+    assert sentinel.read_text(encoding="utf-8") == "secret"
+    assert not (workspace / "command-started.txt").exists()
+
+
+def test_shell_ready_file_group_does_not_block_foreground_commands(tmp_path: Path) -> None:
+    """The legacy single-file protector preserves prior skip semantics for typed file groups."""
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactGroupRegistration,
+        register_artifact_group,
+    )
+
+    workspace = tmp_path / "workspace"
+    output = workspace / "output"
+    output.mkdir(parents=True)
+    member = output / "one.txt"
+    member.write_text("one", encoding="utf-8")
+    register_artifact_group(
+        ArtifactGroupRegistration(
+            workspace_root=workspace,
+            paths=[member],
+            artifact_id="group-one",
+            status="ready",
+        )
+    )
+
+    result = ShellTool(workspace).execute({"command": "true"})
+
+    assert result.ok is True
+    assert result.error_code == ""
 
 
 def test_shell_tool_model_spec_has_run_command(shell_tool: ShellTool) -> None:

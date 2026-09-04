@@ -127,6 +127,19 @@ class ToolOperationReopenRequest:
     now: float | None = None
 
 
+@dataclass(frozen=True)
+class ToolOperationReconciliationClaimRequest:
+    """Atomic ownership request for inspecting one unknown side effect."""
+
+    owner_id: str
+    run_id: str
+    operation_id: str
+    expected_generation: int
+    holder: ToolOperationHolder
+    lease_expires_at: float
+    now: float | None = None
+
+
 class ToolOperationStateError(RuntimeError):
     """The authoritative operation store is missing or inconsistent."""
 
@@ -219,6 +232,25 @@ class LocalStoreToolOperationMixin:
             conn.commit()
             return record
 
+    # LLM: UNKNOWN reconciliation may itself append receipts or clean recovery data. Exactly one
+    # holder must own that phase; normal claim/replay is deliberately not reused because UNKNOWN
+    # must remain the externally visible effect state until reconciliation proves a terminal fact.
+    # 函数用途: 原子领取一次未知副作用的核对权，避免多个 TUI 同时重复对账。
+    def claim_tool_operation_reconciliation(
+        self,
+        request: ToolOperationReconciliationClaimRequest,
+    ) -> ToolOperationClaim:
+        return _claim_local_tool_operation_reconciliation(self, request)
+
+    # LLM: A non-terminal reconciliation result releases only the exact holder/generation. The
+    # operation remains UNKNOWN, so a later caller may safely re-inspect after partial recovery.
+    # 函数用途: 核对未能得到终态时释放本次核对权，保留原操作为未知状态。
+    def release_tool_operation_reconciliation(
+        self,
+        request: ToolOperationReconciliationClaimRequest,
+    ) -> ToolOperationRecord:
+        return _release_local_tool_operation_reconciliation(self, request)
+
     # LLM: 只有目标系统证明 not_started，或 provider 声明同一幂等键可安全重放，才可原子重开 unknown。
     # 函数用途: 在同一业务键和同一参数身份上换新 holder/generation，供当前调用安全重试一次。
     def reopen_tool_operation_after_reconciliation(
@@ -235,6 +267,21 @@ class LocalStoreToolOperationMixin:
         encoded_reconciliation = _json_dumps(request.reconciliation_result)
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            current_record = _select_operation(
+                conn,
+                request.owner_id,
+                request.run_id,
+                request.operation_id,
+            )
+            if current_record is None:
+                raise ToolOperationOwnershipError(
+                    "tool operation reconciliation target is missing"
+                )
+            marker = _reconciliation_marker(current_record.result)
+            if marker and current_record.holder_id != request.holder.holder_id:
+                raise ToolOperationOwnershipError(
+                    "tool operation reconciliation reopen lost holder ownership"
+                )
             cursor = conn.execute(
                 """
                 UPDATE tool_operations
@@ -318,6 +365,136 @@ class LocalStoreToolOperationMixin:
                 [*values, int(limit)],
             ).fetchall()
         return [_record_from_row(row) for row in rows]
+
+
+# LLM: This implementation sits outside the mixin size boundary but remains the only local-store
+# atomic UNKNOWN reconciliation claim. It must run entirely under one BEGIN IMMEDIATE transaction.
+# 函数用途: 在 owner 本地账本中原子领取一次未知副作用的核对权。
+def _claim_local_tool_operation_reconciliation(
+    store: Any,
+    request: ToolOperationReconciliationClaimRequest,
+) -> ToolOperationClaim:
+    current = float(request.now if request.now is not None else time.time())
+    if float(request.lease_expires_at or 0) <= current:
+        raise ValueError("tool operation reconciliation lease must expire in the future")
+    with store._connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        record = _select_operation(
+            conn, request.owner_id, request.run_id, request.operation_id
+        )
+        if record is None:
+            raise ToolOperationOwnershipError(
+                "tool operation reconciliation target is missing"
+            )
+        conflict = _local_reconciliation_claim_conflict(record, request, current)
+        if conflict is not None:
+            conn.commit()
+            return conflict
+        payload = dict(record.result)
+        payload["_reconciliation_claim"] = {
+            "holder": _holder_payload(request.holder),
+            "lease_expires_at": float(request.lease_expires_at),
+            "generation": record.generation,
+        }
+        conn.execute(
+            """
+            UPDATE tool_operations
+            SET holder_id = ?, holder_host = ?, holder_pid = ?,
+                holder_process_start_token = ?, lease_expires_at = ?,
+                result_json = ?, updated_at = ?
+            WHERE owner_id = ? AND run_id = ? AND operation_id = ?
+              AND status = 'unknown' AND generation = ?
+            """,
+            (
+                request.holder.holder_id,
+                request.holder.host,
+                request.holder.pid,
+                request.holder.process_start_token,
+                float(request.lease_expires_at),
+                _json_dumps(payload),
+                current,
+                request.owner_id,
+                request.run_id,
+                request.operation_id,
+                int(request.expected_generation),
+            ),
+        )
+        claimed = _select_operation(
+            conn, request.owner_id, request.run_id, request.operation_id
+        )
+        if claimed is None or claimed.holder_id != request.holder.holder_id:
+            raise ToolOperationOwnershipError(
+                "tool operation reconciliation claim was not persisted"
+            )
+        conn.commit()
+        return ToolOperationClaim("reconcile", claimed)
+
+
+# LLM: Conflict decisions are derived only from persisted state, generation, and live lease facts.
+# 函数用途: 判断本地 UNKNOWN 行当前能否被新的核对者领取。
+def _local_reconciliation_claim_conflict(
+    record: ToolOperationRecord,
+    request: ToolOperationReconciliationClaimRequest,
+    current: float,
+) -> ToolOperationClaim | None:
+    if record.status != TOOL_OPERATION_UNKNOWN:
+        return ToolOperationClaim("conflict", record, "operation_is_not_unknown")
+    if record.generation != int(request.expected_generation):
+        return ToolOperationClaim("conflict", record, "unknown_generation_changed")
+    marker = _reconciliation_marker(record.result)
+    if marker and _reconciliation_marker_is_live(marker, current):
+        return ToolOperationClaim("in_flight", record, "reconciliation_in_flight")
+    return None
+
+
+# LLM: Release uses the exact holder and generation and only removes the host-reserved marker.
+# Provider result data and UNKNOWN reason remain unchanged for the next reconciliation attempt.
+# 函数用途: 原子释放本地未知操作的核对租约。
+def _release_local_tool_operation_reconciliation(
+    store: Any,
+    request: ToolOperationReconciliationClaimRequest,
+) -> ToolOperationRecord:
+    current = float(request.now if request.now is not None else time.time())
+    with store._connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        record = _select_operation(
+            conn, request.owner_id, request.run_id, request.operation_id
+        )
+        if (
+            record is None
+            or record.status != TOOL_OPERATION_UNKNOWN
+            or record.generation != int(request.expected_generation)
+            or record.holder_id != request.holder.holder_id
+        ):
+            raise ToolOperationOwnershipError(
+                "tool operation reconciliation release lost ownership"
+            )
+        payload = dict(record.result)
+        payload.pop("_reconciliation_claim", None)
+        conn.execute(
+            """
+            UPDATE tool_operations
+            SET lease_expires_at = 0, result_json = ?, updated_at = ?
+            WHERE owner_id = ? AND run_id = ? AND operation_id = ?
+              AND status = 'unknown' AND generation = ? AND holder_id = ?
+            """,
+            (
+                _json_dumps(payload),
+                current,
+                request.owner_id,
+                request.run_id,
+                request.operation_id,
+                int(request.expected_generation),
+                request.holder.holder_id,
+            ),
+        )
+        released = _select_operation(
+            conn, request.owner_id, request.run_id, request.operation_id
+        )
+        if released is None:
+            raise ToolOperationStateError("tool operation disappeared during release")
+        conn.commit()
+        return released
 
 
 def new_tool_operation_holder() -> ToolOperationHolder:
@@ -588,6 +765,45 @@ def _operation_holder_is_live(record: ToolOperationRecord, now: float) -> bool:
     return expected == actual
 
 
+# LLM: Reconciliation ownership lives inside the existing result JSON to avoid a second authority
+# table. Only this host-written reserved key is interpreted; provider/model payload fields are not.
+# 函数用途: 从未知操作结果中读取宿主写入的核对租约标记。
+def _reconciliation_marker(result: dict[str, Any]) -> dict[str, Any]:
+    marker = result.get("_reconciliation_claim")
+    return dict(marker) if isinstance(marker, dict) else {}
+
+
+# LLM: A remote-host holder is considered live until lease expiry; a local dead pid may be taken
+# over immediately. This mirrors normal operation-claim liveness without changing UNKNOWN status.
+# 函数用途: 判断已有未知操作核对租约是否仍由活跃进程持有。
+def _reconciliation_marker_is_live(marker: dict[str, Any], now: float) -> bool:
+    if float(marker.get("lease_expires_at") or 0) <= now:
+        return False
+    holder = marker.get("holder")
+    if not isinstance(holder, dict):
+        return False
+    host = str(holder.get("host") or "")
+    if not host or host != socket.gethostname():
+        return True
+    pid = int(holder.get("pid") or 0)
+    if pid <= 0 or not _pid_exists(pid):
+        return False
+    expected = str(holder.get("process_start_token") or "")
+    actual = _read_process_start_token(pid)
+    return True if not expected or actual is None else expected == actual
+
+
+# LLM: Holder serialization is structural and must stay aligned with ToolOperationHolder fields.
+# 函数用途: 把核对持有者身份写入本地 operation JSON 标记。
+def _holder_payload(holder: ToolOperationHolder) -> dict[str, object]:
+    return {
+        "holder_id": holder.holder_id,
+        "host": holder.host,
+        "pid": holder.pid,
+        "process_start_token": holder.process_start_token,
+    }
+
+
 def _pid_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -728,6 +944,7 @@ __all__ = [
     "ToolOperationClaim",
     "ToolOperationClaimRequest",
     "ToolOperationCompletionRequest",
+    "ToolOperationReconciliationClaimRequest",
     "ToolOperationReopenRequest",
     "ToolOperationHolder",
     "ToolOperationOwnershipError",

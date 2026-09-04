@@ -1,4 +1,7 @@
-"""Diagnostic readers for artifact registry JSONL files."""
+"""LLM: Parse artifact-registry JSONL supplied by a trusted storage seam.
+
+模块用途: 把账本文本解析成最新产物记录并保留坏行诊断；文件如何安全读取由上层 registry 决定。
+"""
 
 from __future__ import annotations
 
@@ -37,6 +40,29 @@ def latest_records_with_errors(
     except (OSError, UnicodeError) as exc:
         context.errors.append(_error_report(exc, context="artifact_registry.read", path=path))
         return context.latest, context.errors
+    return latest_records_from_lines(
+        path,
+        lines,
+        record_from_payload,
+        initial_errors=context.errors,
+    )
+
+
+# LLM: Host-owned callers may obtain bytes through descriptor-anchored IO. Keep parsing separate so
+# those callers never have to reopen the mutable workspace path with Path APIs.
+# 函数用途: 解析调用方已经安全读取的 JSONL 行，并返回每个 artifact_id 的最新记录和坏行诊断。
+def latest_records_from_lines(
+    path: Path,
+    lines: list[str],
+    record_from_payload: Callable[[object], Any],
+    *,
+    initial_errors: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    context = RegistryReadContext(
+        path=path,
+        record_from_payload=record_from_payload,
+        errors=list(initial_errors or []),
+    )
     for line_no, line in enumerate(lines, start=1):
         _read_registry_line(context, line, line_no=line_no)
     return context.latest, context.errors

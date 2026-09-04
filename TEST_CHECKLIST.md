@@ -1,5 +1,19 @@
 # TEST CHECKLIST
 
+## R167 Shell 产物保护迁出项目树
+
+- [x] 正式 Agent 的备份根只来自 `HomePaths.owner_artifact_backups_dir`，经 registry 显式注入；Full Access
+  管理员外部 cwd 与 WorkspaceOnly owner 均不得从当前项目推导内部存储。
+- [x] backup ref 是 owner-local opaque v1 ref，blob 不保留原扩展；临时写、hash、fsync、atomic replace 和
+  0700/0600 权限完成后才发布。resolver 拒绝绝对/穿越/symlink 越界。
+- [x] unchanged 产物立即清掉本调用 blob/operation；changed/invalid 保留 shell 前内容；备份失败时命令
+  not_started。两个 owner 的同名结构化身份仍物理隔离。
+- [x] focused 中真实 `pytest --collect-only` 仅收集原 `test_generated.py` 一次，项目没有
+  `data/artifacts/shell_backups`；HomePaths、ToolRegistry、runtime、sandbox 相邻回归通过。
+- [ ] `.10` 单 Gateway + MiniMax-M2.7 fresh TUI 从普通中文请求完成“创建测试→登记产物→项目级 pytest”，
+  并由 task tree、owner backup tree、工具账本三方确认零重复收集、零 no-op blob、opaque ref 不泄露宿主路径。
+- [ ] 受管后台 shell 在 process session 真实退出后的产物复核另立合同；当前不得把前台通过冒充后台已覆盖。
+
 ## R166 Compact 成本与缓存复验
 
 - [x] live Compact 的最低可达 token 在副本上使用真实 IR 删除器；UserTurn、RuntimeFacts、carried summary

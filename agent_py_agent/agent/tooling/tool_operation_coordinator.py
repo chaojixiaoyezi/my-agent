@@ -26,6 +26,7 @@ from ..local_storage import (
     ToolOperationClaimRequest,
     ToolOperationCompletionRequest,
     ToolOperationHolder,
+    ToolOperationReconciliationClaimRequest,
     ToolOperationRecord,
     ToolOperationReopenRequest,
     new_tool_operation_holder,
@@ -284,9 +285,15 @@ def _reconcile_unknown_operation(
     claim = attempt.claim
     if request.reconcile is None:
         return _unknown_claim_result(request, claim, diagnostic=claim.reason or "no_reconciler")
+    claimed = _claim_unknown_reconciliation(request, attempt)
+    if isinstance(claimed, ToolHandlerOutcome):
+        return claimed
+    attempt = claimed
+    claim = attempt.claim
     try:
         reconciliation = request.reconcile(claim.record)
     except Exception as exc:  # noqa: BLE001 - reconciliation is read-only and must fail closed
+        _release_unknown_reconciliation(request, attempt)
         return _unknown_claim_result(
             request,
             claim,
@@ -301,18 +308,22 @@ def _reconcile_unknown_operation(
         "safe_to_retry",
         "unknown",
     }:
+        _release_unknown_reconciliation(request, attempt)
         return _unknown_claim_result(
             request,
             claim,
             diagnostic=f"invalid_reconciliation_outcome:{outcome or 'empty'}",
         )
     if outcome == "unknown":
+        _release_unknown_reconciliation(request, attempt)
         return _unknown_claim_result(
             request,
             claim,
             diagnostic=str(reconciliation.reason or claim.reason or "still_unknown"),
+            source_ref=source_ref,
         )
     if not source_ref:
+        _release_unknown_reconciliation(request, attempt)
         return _unknown_claim_result(
             request,
             claim,
@@ -325,8 +336,29 @@ def _reconcile_unknown_operation(
             source_ref=source_ref,
             reconciliation_outcome=outcome,
         )
+    return _settle_reconciled_operation(
+        request,
+        attempt,
+        reconciliation,
+        source_ref=source_ref,
+    )
+
+
+# LLM: A terminal reconciliation result becomes authoritative only after the same exact
+# reconciliation holder/generation settles the operation store. Persistence failure stays UNKNOWN.
+# 函数用途: 校验核对结果并把已证明的成功或失败终态写回权威操作账本。
+def _settle_reconciled_operation(
+    request: ToolOperationExecutionRequest,
+    attempt: _ToolOperationClaimAttempt,
+    reconciliation: ToolOperationReconciliation,
+    *,
+    source_ref: str,
+) -> ToolHandlerOutcome:
+    claim = attempt.claim
+    outcome = str(reconciliation.outcome or "").strip().lower()
     reconciled_result = reconciliation.result
     if reconciled_result is None or reconciled_result.ok != (outcome == "succeeded"):
+        _release_unknown_reconciliation(request, attempt)
         return _unknown_claim_result(
             request,
             claim,
@@ -366,6 +398,7 @@ def _reconcile_unknown_operation(
             )
         )
     except Exception as exc:  # noqa: BLE001 - unknown remains authoritative on any store race
+        _release_unknown_reconciliation(request, attempt)
         return _unknown_claim_result(
             request,
             claim,
@@ -373,6 +406,79 @@ def _reconcile_unknown_operation(
             source_ref=source_ref,
         )
     return reconciled_result
+
+
+# LLM: Reconciliation handlers may persist receipts, so UNKNOWN inspection is itself an exclusive
+# operation. A store without this atomic contract must fail closed instead of falling back to an
+# in-process mutex that cannot protect two Gateways/TUIs.
+# 函数用途: 通过权威 operation store 原子领取未知副作用的核对权。
+def _claim_unknown_reconciliation(
+    request: ToolOperationExecutionRequest,
+    attempt: _ToolOperationClaimAttempt,
+) -> _ToolOperationClaimAttempt | ToolHandlerOutcome:
+    claim_reconciliation = getattr(
+        request.store,
+        "claim_tool_operation_reconciliation",
+        None,
+    )
+    if not callable(claim_reconciliation):
+        return _unknown_claim_result(
+            request,
+            attempt.claim,
+            diagnostic="operation_store_reconciliation_claim_missing",
+        )
+    claim_request = _reconciliation_claim_request(attempt)
+    try:
+        claimed = claim_reconciliation(claim_request)
+    except Exception as exc:  # noqa: BLE001 - claim authority failure leaves UNKNOWN unchanged
+        return _unknown_claim_result(
+            request,
+            attempt.claim,
+            diagnostic=f"reconciliation_claim_failed:{type(exc).__name__}",
+        )
+    if claimed.action != "reconcile":
+        return _unknown_claim_result(
+            request,
+            claimed,
+            diagnostic=claimed.reason or f"reconciliation_claim_{claimed.action}",
+        )
+    return _ToolOperationClaimAttempt(
+        claim=ToolOperationClaim("unknown", claimed.record, attempt.claim.reason),
+        holder=attempt.holder,
+        lease_expires_at=attempt.lease_expires_at,
+    )
+
+
+# LLM: Only the exact reconciliation holder/generation may release. A release race is diagnostic;
+# it never grants execution and never replaces a terminal fact written by another process.
+# 函数用途: 核对仍无终态或异常时尽力释放权威核对租约。
+def _release_unknown_reconciliation(
+    request: ToolOperationExecutionRequest,
+    attempt: _ToolOperationClaimAttempt,
+) -> None:
+    release = getattr(request.store, "release_tool_operation_reconciliation", None)
+    if not callable(release):
+        return
+    try:
+        release(_reconciliation_claim_request(attempt))
+    except Exception:  # noqa: BLE001 - UNKNOWN and lease expiry remain the safe fallback
+        logger.warning("tool operation reconciliation release failed", exc_info=True)
+
+
+# LLM: Claim and release must use the identical structured holder, generation, and lease values.
+# 函数用途: 从当前 UNKNOWN claim 构造核对租约请求。
+def _reconciliation_claim_request(
+    attempt: _ToolOperationClaimAttempt,
+) -> ToolOperationReconciliationClaimRequest:
+    record = attempt.claim.record
+    return ToolOperationReconciliationClaimRequest(
+        owner_id=record.owner_id,
+        run_id=record.run_id,
+        operation_id=record.operation_id,
+        expected_generation=record.generation,
+        holder=attempt.holder,
+        lease_expires_at=attempt.lease_expires_at,
+    )
 
 
 def _reopen_unknown_operation(

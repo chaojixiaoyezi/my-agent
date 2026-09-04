@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-09-04 R167 Shell 产物保护迁出任务树
+
+- R165 的项目级 pytest 重复收集不是 pytest 配置问题：foreground `run_command` 启动前把 ready
+  `test_*.py` 原名备份到当前 task，pytest 在同一次命令里看见框架副本；unchanged 分支又从不删除。
+- 备份根现由 owner HomePaths 显式注入 `data/artifact_backups`，不随 task cwd、Full Access 或 owner wall
+  有无漂移。内容以无原扩展 hash blob 原子落盘，公共 registry 仅保留 opaque owner-local ref；无变化副本
+  当次删除。终端交互 提供项目外哈希文件历史对照，会话运行时 提供 temp/rename 与漏件生命周期对照。
+- focused 已覆盖 pytest 单 node、no-op 清理、修改/损坏保留、两 owner 隔离、Full Access 外部 cwd、路径逃逸
+  与原子失败 fail-closed。`.10` 单 Gateway MiniMax-M2.7 真 TUI 待部署；后台 process session 的退出后复核
+  仍是明确未覆盖边界。
+
 ## 2026-09-04 R163/R165 Compact 真机与历史续作占位收口
 
 - R163 `.10` 长 TUI 已证明 child overflow 会先推进 exact child ConversationThread；DeepSeek child

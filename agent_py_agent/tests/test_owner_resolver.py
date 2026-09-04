@@ -14,6 +14,7 @@ def test_resolve_local_main_owner_uses_v2_owner_home(tmp_path: Path):
     assert result.daily_memory_dir == result.home_dir / "memory" / "daily"
     assert result.tasks_dir == result.home_dir / "tasks"
     assert result.scheduler_dir == result.home_dir / "data" / "scheduler"
+    assert result.artifact_backups_dir == result.home_dir / "data" / "artifact_backups"
 
 
 def test_resolve_provider_user_owner_uses_v2_provider_home(tmp_path: Path):
@@ -39,6 +40,7 @@ def test_ensure_owner_home_creates_owner_seed_files(tmp_path: Path):
     assert result.skill_policy_json.exists()
     assert result.tool_policy_json.exists()
     assert result.scheduler_dir.is_dir()
+    assert result.artifact_backups_dir.is_dir()
     assert permissions["filesystem"]["access_mode"] == "workspace-write"
 
 

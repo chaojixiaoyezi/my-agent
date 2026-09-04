@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sqlite3
 import stat
 import time
@@ -47,6 +48,7 @@ from ..local_storage.tool_operations import (
     ToolOperationClaimRequest,
     ToolOperationCompletionRequest,
     ToolOperationOwnershipError,
+    ToolOperationReconciliationClaimRequest,
     ToolOperationRecord,
     ToolOperationReopenRequest,
     ToolOperationStateError,
@@ -293,6 +295,79 @@ class ManagedOperationStore:
         )
         return record
 
+    # LLM: UNKNOWN reconciliation can mutate provider receipts or owner-private journals, so it
+    # needs the same cross-process authority as execution. The row stays UNKNOWN until facts prove
+    # a terminal result; holder/lease and workspace locks fence all competing reconcilers.
+    # 函数用途: 在 runtime.db 内原子领取未知副作用的核对权，并重新取得原资源范围的锁。
+    def claim_tool_operation_reconciliation(
+        self,
+        request: ToolOperationReconciliationClaimRequest,
+    ) -> ToolOperationClaim:
+        return _claim_managed_tool_operation_reconciliation(self._repo, request)
+
+    # LLM: A still-unknown reconciliation must relinquish its exact lease and workspace locks.
+    # The mutation remains DIRTY, preserving the fail-closed fact for a later reconciler.
+    # 函数用途: 未核对出终态时原子释放核对权，让后续调用可继续恢复而不重复并发执行。
+    def release_tool_operation_reconciliation(
+        self,
+        request: ToolOperationReconciliationClaimRequest,
+    ) -> ToolOperationRecord:
+        if self._repo is None:
+            raise AuthorityContextMissing("MANAGED run 无权威库（repo 缺失）")
+        current = float(request.now if request.now is not None else time.time())
+        with self._repo._runtime_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM tool_operations WHERE operation_id = ?",
+                (request.operation_id,),
+            ).fetchone()
+            if row is None:
+                raise ToolOperationOwnershipError(
+                    "tool operation reconciliation release target is missing"
+                )
+            payload = _outcome_payload(row)
+            holder = payload.get("holder") if isinstance(payload.get("holder"), dict) else {}
+            if (
+                str(row["status"] or "") != OP_UNKNOWN
+                or int(row["tool_operation_generation"]) != int(request.expected_generation)
+                or str(holder.get("holder_id") or "") != request.holder.holder_id
+            ):
+                raise ToolOperationOwnershipError(
+                    "tool operation reconciliation release lost ownership"
+                )
+            payload.pop("reconciliation_claim", None)
+            payload["lease_expires_at"] = 0.0
+            scopes = _scopes_from_payload(payload)
+            conn.execute(
+                "UPDATE tool_operations SET outcome_json = ?, updated_at = ? "
+                "WHERE operation_id = ? AND status = ? AND "
+                "tool_operation_generation = ?",
+                (
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    current,
+                    request.operation_id,
+                    OP_UNKNOWN,
+                    int(request.expected_generation),
+                ),
+            )
+            _delete_locks_in_tx(conn, scopes, holder_id=request.holder.holder_id)
+            for scope in scopes:
+                _mark_mutation_dirty_in_tx(
+                    conn,
+                    scope,
+                    reason="reconciliation_incomplete",
+                    attempt_id=str(row["attempt_id"] or ""),
+                    now=current,
+                )
+            conn.commit()
+        return _operation_record(
+            self._repo,
+            request.operation_id,
+            owner_id=request.owner_id,
+            run_id=request.run_id,
+            task_id="",
+        )
+
     # ------------------------------------------------------------- reopen
     def reopen_tool_operation_after_reconciliation(
         self,
@@ -333,6 +408,15 @@ class ManagedOperationStore:
                     f"reconcile 重开必须拒绝）"
                 )
             payload = _outcome_payload(row)
+            holder = payload.get("holder") if isinstance(payload.get("holder"), dict) else {}
+            marker = payload.get("reconciliation_claim")
+            if (
+                isinstance(marker, dict)
+                and str(holder.get("holder_id") or "") != request.holder.holder_id
+            ):
+                raise ToolOperationOwnershipError(
+                    "tool operation reconciliation reopen lost holder ownership"
+                )
             # seq 253 #3：reopen 必须对当前 workspace_epoch 做 fence——claim
             # 捕获 epoch 与当前 epoch 不一致（工作区已翻新）→ 拒绝，否则形成
             # 「可执行、不可收口」状态（后续 settle 必因 epoch 不符失败）。
@@ -383,6 +467,11 @@ class ManagedOperationStore:
             # 重取资源锁（fail-fast）+ mutation 重声明 MUTATING，与 claim 同事务形状。
             scopes = _scopes_from_payload(payload)
             new_generation = int(row["tool_operation_generation"]) + 1
+            _delete_locks_in_tx(
+                conn,
+                scopes,
+                holder_id=request.holder.holder_id,
+            )
             try:
                 for scope in scopes:
                     _insert_lock_in_tx(
@@ -591,6 +680,140 @@ class ManagedOperationStore:
             if record is not None:
                 records.append(record)
         return records
+
+
+# LLM: Managed UNKNOWN reconciliation is one runtime.db transaction: current-attempt fence,
+# exclusive lease, workspace locks, mutation ownership, and payload claim advance together.
+# 函数用途: 在 runtime.db 中原子领取未知副作用核对权，并返回新的权威 holder 记录。
+def _claim_managed_tool_operation_reconciliation(
+    repo: Any,
+    request: ToolOperationReconciliationClaimRequest,
+) -> ToolOperationClaim:
+    current = float(request.now if request.now is not None else time.time())
+    if float(request.lease_expires_at or 0) <= current:
+        raise ValueError("tool operation reconciliation lease must expire in the future")
+    if repo is None:
+        raise AuthorityContextMissing("MANAGED run 无权威库（repo 缺失）")
+    with repo._runtime_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT op.*, ar.workspace_epoch AS _workspace_epoch
+            FROM tool_operations op
+            JOIN agent_runs ar ON ar.agent_run_id = op.agent_run_id
+            WHERE op.operation_id = ?
+              AND op.attempt_id = ar.current_attempt_id
+              AND op.attempt_generation = ar.current_attempt_generation
+            """,
+            (request.operation_id,),
+        ).fetchone()
+        if row is None:
+            raise ToolOperationOwnershipError(
+                f"tool operation reconciliation target is missing or fenced: "
+                f"{request.operation_id}"
+            )
+        blocked = _managed_reconciliation_claim_decision(row, request, current)
+        if blocked is not None:
+            conn.commit()
+            return blocked
+        payload = _outcome_payload(row)
+        scopes = _scopes_from_payload(payload)
+        if not _acquire_managed_reconciliation_scopes(
+            conn,
+            row,
+            request,
+            scopes,
+            current,
+        ):
+            conn.rollback()
+            return ToolOperationClaim(
+                "in_flight",
+                _record_from_row(row, owner_id=request.owner_id),
+                "reconciliation_scope_busy",
+            )
+        payload["holder"] = _holder_dict(request.holder)
+        payload["lease_expires_at"] = float(request.lease_expires_at)
+        payload["reconciliation_claim"] = {
+            "holder": _holder_dict(request.holder),
+            "lease_expires_at": float(request.lease_expires_at),
+            "generation": int(row["tool_operation_generation"]),
+        }
+        updated = conn.execute(
+            "UPDATE tool_operations SET outcome_json = ?, updated_at = ? "
+            "WHERE operation_id = ? AND status = ? AND "
+            "tool_operation_generation = ? AND settled_at = 0",
+            (
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                current,
+                request.operation_id,
+                OP_UNKNOWN,
+                int(request.expected_generation),
+            ),
+        ).rowcount
+        if updated != 1:
+            raise ToolOperationOwnershipError(
+                "tool operation reconciliation claim lost unknown generation"
+            )
+        for scope in scopes:
+            _upsert_mutation_mutating_in_tx(
+                conn, scope, attempt_id=str(row["attempt_id"]), now=current
+            )
+        conn.commit()
+    claimed = _operation_record(
+        repo,
+        request.operation_id,
+        owner_id=request.owner_id,
+        run_id=request.run_id,
+        task_id="",
+    )
+    return ToolOperationClaim("reconcile", claimed)
+
+
+# LLM: This decision reads only the row locked by BEGIN IMMEDIATE; no prose or caller hint can
+# bypass status, generation, or a live reconciliation lease.
+# 函数用途: 判断一条 managed UNKNOWN 行是否暂时不能被当前核对者领取。
+def _managed_reconciliation_claim_decision(
+    row: sqlite3.Row,
+    request: ToolOperationReconciliationClaimRequest,
+    current: float,
+) -> ToolOperationClaim | None:
+    record = _record_from_row(row, owner_id=request.owner_id)
+    if str(row["status"] or "") != OP_UNKNOWN:
+        return ToolOperationClaim("conflict", record, "operation_is_not_unknown")
+    if int(row["tool_operation_generation"]) != int(request.expected_generation):
+        return ToolOperationClaim("conflict", record, "unknown_generation_changed")
+    marker = _outcome_payload(row).get("reconciliation_claim")
+    if isinstance(marker, dict) and _managed_reconciliation_claim_is_live(marker, current):
+        return ToolOperationClaim("in_flight", record, "reconciliation_in_flight")
+    return None
+
+
+# LLM: Resource locks are reacquired before the reconciliation marker is committed. Any overlap
+# rolls back the transaction and leaves the UNKNOWN row untouched.
+# 函数用途: 为 managed 未知操作核对重新取得其原始结构化资源锁。
+def _acquire_managed_reconciliation_scopes(
+    conn: Any,
+    row: sqlite3.Row,
+    request: ToolOperationReconciliationClaimRequest,
+    scopes: list[str],
+    current: float,
+) -> bool:
+    try:
+        for scope in scopes:
+            _insert_lock_in_tx(
+                conn,
+                scope,
+                request.holder,
+                attempt_id=str(row["attempt_id"]),
+                attempt_generation=int(row["attempt_generation"]),
+                workspace_epoch=int(row["_workspace_epoch"]),
+                tool_operation_generation=int(row["tool_operation_generation"]),
+                lease_expires_at=float(request.lease_expires_at),
+                now=current,
+            )
+    except (RuntimeConflictError, sqlite3.IntegrityError):
+        return False
+    return True
 
 
 # ------------------------------------------------------------------ claim 内部
@@ -1085,6 +1308,24 @@ def _holder_pid_alive(holder: dict[str, Any]) -> bool:
         return True
     except OSError:
         return False
+
+
+# LLM: Reconciliation claims use the same host process evidence and a hard lease. A dead local
+# holder may be replaced before expiry; cross-host ambiguity remains live until the lease expires.
+# 函数用途: 判断 runtime.db 中的未知操作核对租约是否仍有效。
+def _managed_reconciliation_claim_is_live(
+    marker: dict[str, Any],
+    now: float,
+) -> bool:
+    if float(marker.get("lease_expires_at") or 0) <= now:
+        return False
+    holder = marker.get("holder")
+    if not isinstance(holder, dict):
+        return False
+    host = str(holder.get("host") or "")
+    if host and host != socket.gethostname():
+        return True
+    return _holder_pid_alive(holder)
 
 
 # ------------------------------------------------------------------ finish 内部

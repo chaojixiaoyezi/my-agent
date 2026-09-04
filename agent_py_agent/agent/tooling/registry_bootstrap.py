@@ -105,6 +105,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             path_dangerous_roots=params.path_dangerous_roots,
             owner_scope_root=params.owner_scope_root,
             protected_persona_root=params.protected_persona_root,
+            artifact_backup_root=params.artifact_backup_root,
             access_mode=params.access_mode,
             default_timeout=params.shell_tool_timeout,
             max_output_chars=params.shell_tool_output_max_chars,

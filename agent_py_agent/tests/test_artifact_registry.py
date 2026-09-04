@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_artifact_registry_updates_same_artifact_id_path(tmp_path: Path):
     from agent_py_agent.agent.artifacts.registry import (
@@ -67,6 +69,77 @@ def test_artifact_registry_reports_bad_rows_without_losing_good_records(tmp_path
     assert report.records["report"].path == str(artifact.resolve())
     assert report.errors[0]["context"] == "artifact_registry.read_line"
     assert report.errors[0]["category"] == "data_parse"
+
+
+def test_artifact_registry_rejects_replaced_workspace_root_symlink(tmp_path: Path):
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        latest_artifact_records_report,
+        register_observed_artifact,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    original = tmp_path / "workspace-original"
+    workspace.rename(original)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    try:
+        workspace.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this platform")
+
+    report = latest_artifact_records_report(workspace)
+
+    assert report.records == {}
+    assert report.errors
+    with pytest.raises(OSError):
+        register_observed_artifact(
+            ArtifactRegistration(
+                workspace_root=workspace,
+                path=workspace / "result.txt",
+                artifact_id="result",
+                status="ready",
+            ),
+            observed_sha256="digest",
+            observed_size_bytes=1,
+        )
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert not (outside / "data" / "artifacts" / "registry.jsonl").exists()
+
+
+def test_artifact_registry_rejects_hardlinked_ledger(tmp_path: Path):
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        register_observed_artifact,
+        registry_path,
+    )
+
+    workspace = tmp_path / "workspace"
+    ledger = registry_path(workspace)
+    ledger.parent.mkdir(parents=True)
+    outside = tmp_path / "outside-ledger.jsonl"
+    outside.write_text("sentinel\n", encoding="utf-8")
+    try:
+        ledger.hardlink_to(outside)
+    except OSError:
+        pytest.skip("hardlink creation is unavailable on this platform")
+
+    with pytest.raises(OSError):
+        register_observed_artifact(
+            ArtifactRegistration(
+                workspace_root=workspace,
+                path=workspace / "result.txt",
+                artifact_id="result",
+                status="ready",
+            ),
+            observed_sha256="digest",
+            observed_size_bytes=1,
+        )
+
+    assert outside.read_text(encoding="utf-8") == "sentinel\n"
 
 
 def test_artifact_registry_records_logical_file_group(tmp_path: Path):

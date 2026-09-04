@@ -1,5 +1,15 @@
 # STATUS
 
+## 2026-09-04 R167 Shell 产物保护迁出项目树（Focused 通过，待真 TUI）
+
+- 已确认 R165 项目级 pytest 的重复节点来自 `run_command` 启动前把 ready `test_*.py` 原名复制进当前 task；
+  unchanged 分支没有清理，又形成长期磁盘污染。不是 pytest 自身、模型或用户项目配置错误。
+- 当前把唯一备份根移到 owner `data/artifact_backups`，由 HomePaths 显式注入；Full Access 外部 cwd 也不漂移。
+  hash blob 经 temp/fsync/atomic replace 后才发布 opaque ref，无变化立即删除，路径穿越与 symlink 越界拒绝。
+- 194 项 shell/HomePaths/ToolRegistry/runtime/sandbox focused 分组全绿，strict code-size hard=0。下一步部署
+  `.10` 唯一 Gateway，用 MiniMax-M2.7 fresh TUI 复验真实项目 pytest、任务目录和 owner store；后台 shell
+  退出后的产物复核仍单列，当前不冒充完成。
+
 ## 2026-09-04 R166 Compact 最低水位与缓存安全辅助调用（真 TUI 通过）
 
 - native live Compact 现在在 IR 副本上运行与提交阶段相同的真实删除器来估算最低水位；不再用空工具历史

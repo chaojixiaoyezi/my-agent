@@ -1,5 +1,27 @@
 # DESIGN LEDGER
 
+## 2026-09-04 Shell 产物备份迁出任务树【状态：Focused 通过，真 TUI 待验】
+
+- 旧 `snapshot_ready_artifacts(workspace_root)` 在每条前台 shell 启动前，把全部 ready 产物按原文件名复制到
+  `<workspace>/data/artifacts/shell_backups`。因此已登记的 `test_*.py` 会在同一条 pytest 开始前出现于项目树，
+  被第二次收集；reconcile 对 unchanged 直接跳过，又让每条无修改命令永久留一批副本。
+- 终端交互 `src/utils/fileHistory.ts` 把备份放在用户配置根 `file-history/<session>`，文件名为路径哈希 + 版本，
+  不保留原扩展；会话运行时 `会话运行时-rs/core/src/shell_snapshot.rs` 虽保护的是 shell 环境而非项目文件，也把快照放在
+  会话运行时 home，并采用同目录临时文件、验证后 rename、Drop 删除和三天漏件清理。my-agent 保留自身的 ready
+  产物保护能力，只适配两者共同的“项目外内部存储 + opaque 名称 + 明确生命周期”，不靠 pytest 排除规则。
+- 唯一物理根为 `HomePaths.owner_artifact_backups_dir = owner_data_dir/artifact_backups`。它从 core 经
+  `ToolRegistryParams`、bootstrap、`ShellToolOptions` 显式注入，不能从 cwd 或 `owner_scope_root` 猜；因此本地
+  管理员 Full Access 即使在 owner home 外工作，备份仍回自己的 owner store。裸 ShellTool 仅使用项目兄弟的
+  测试/嵌入 fallback，正式 Agent 始终提供 canonical path。
+- 每次前台调用用宿主注入的 run scope、tool call id 与随机 nonce 派生 operation key；产物以 artifact/content
+  SHA-256 命名 `.blob`。写入过程为私有目录、0600 临时文件、流式 hash、fsync、atomic replace；公开账本只存
+  `owner-artifact-backup:v1/...`，统一 resolver 拒绝绝对路径、`..` 和 symlink 越界。shell 后 unchanged blob
+  立即删除并清空 operation 目录，changed/invalid/unknown 才保留恢复前像。
+- 当前范围只覆盖既有前台 shell 合同。受管后台 shell 在启动返回后仍持续运行，不能在启动回执时假装已完成
+  post-check；其 artifact lifecycle 需与 process session 的真实退出事件另做一片。focused 已覆盖真实 pytest
+  collect-only 只收一个 node、no-op 零残留、损坏/修改保留原内容、owner 隔离、Full Access 外部 cwd、ref
+  traversal/symlink、atomic rename 失败前命令未启动及 ToolRegistry/HomePaths 相邻回归。
+
 ## 2026-09-04 Compact 真实最低水位与主请求缓存面复用【状态：Focused 与 `.10` 真 TUI 通过】
 
 - R163 的浅代次不是假 Compact，而是规划器用空 `tool_ir_history` 估算“最低水位”，把实际不可删除的

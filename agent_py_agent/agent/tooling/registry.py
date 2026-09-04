@@ -117,6 +117,7 @@ class ToolRegistryParams:
     )
     disabled_tools: list[str] = field(default_factory=list)
     artifact_root: Path | None = None
+    artifact_backup_root: Path | None = None
     runtime_fact_roots: list[Path] | None = None
     runtime_guard_policy: object | None = None
     # MCP 客户端(短板6)：要连接的外部 MCP server 声明。默认空 = 不连、不起子进程(零开销)。

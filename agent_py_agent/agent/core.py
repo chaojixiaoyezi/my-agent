@@ -824,6 +824,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_default_read_chars=config.memory_artifact_default_read_chars,
             disabled_tools=list(getattr(agent.owner_policy, "disabled_tools", ())),
             artifact_root=runtime_owner_root(agent),
+            artifact_backup_root=agent.home_paths.owner_artifact_backups_dir,
             runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
             mcp_servers=mcp_servers,
             tool_embedder=_build_tool_embedder(config),

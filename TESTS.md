@@ -1,5 +1,19 @@
 # TESTS
 
+## Shell 产物保护的 owner 私有存储
+
+- 注册名为 `test_generated.py` 的 ready 产物后，从项目根通过真实 `run_command` 执行
+  `python -m pytest --collect-only -q`；只能收集原文件一次，项目树不得出现 `shell_backups`。
+- no-op shell 后，`owner_data/artifact_backups/v1` 不得残留 blob 或 operation 目录；修改/损坏产物时必须保留
+  shell 前内容，registry 只记录 opaque ref，模型回执不得出现 owner store 绝对路径。
+- 两个 owner 即使 task/run/artifact/call 名完全相同，物理备份根也必须隔离；本地管理员 Full Access 在外部
+  project cwd 仍使用自己的 `home_paths.owner_artifact_backups_dir`。resolver 拒绝 `..` 和 symlink 越界；
+  atomic replace 失败时返回 `ARTIFACT_BACKUP_FAILED`，命令副作用不得启动。
+- focused 命令：
+  `python3 -m pytest agent_py_agent/tests/test_tools/test_shell_tool.py agent_py_agent/tests/test_owner_resolver.py agent_py_agent/tests/test_remote_owner_workspace_scope.py agent_py_agent/tests/test_tool_runtime_unification.py agent_py_agent/tests/test_tool_input_completion_provenance.py agent_py_agent/tests/test_registry_resilience_contract.py agent_py_agent/tests/test_home_runtime_bootstrap.py agent_py_agent/tests/test_gateway_per_user_scoping.py agent_py_agent/tests/test_sandbox.py -q --tb=short`。
+- 真机必须从 fresh owner TUI 让 MiniMax-M2.7 自己创建并登记一个 pytest 文件，再自然执行项目级 pytest；
+  同时核对 TUI 工具输出、task 文件树、owner private store 和唯一 Gateway。后台 shell 不在本项通过范围。
+
 ## Compact 真实最低水位与缓存安全 fork
 
 - 构造不可删除 UserTurn/RuntimeFacts 已占满 60% recovery target、外加多组工具对越过 90% trigger 的窗口；

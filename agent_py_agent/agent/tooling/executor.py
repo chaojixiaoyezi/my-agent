@@ -653,6 +653,8 @@ def _handler_arguments(
         payload["__run_scope"] = _handler_run_scope(request, call)
     if "__tool_call_id" in internal_parameters:
         payload["__tool_call_id"] = call.call_id
+    if "__operation_id" in internal_parameters:
+        payload["__operation_id"] = call.operation_id
     if "__cancellation_token" in internal_parameters:
         payload["__cancellation_token"] = request.cancellation_token
     return payload
@@ -670,6 +672,7 @@ def _handler_run_scope(
     )
     supplied.update(
         {
+            "owner_id": request.operation_owner_id,
             "run_id": call.run_id,
             "task_id": _task_id(request),
             "attempt_id": call.attempt_id,

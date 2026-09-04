@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 def test_xlsx_acceptance_rejects_package_missing_content_types(tmp_path):
     from zipfile import ZIP_DEFLATED, ZipFile
@@ -292,6 +294,66 @@ def test_html_acceptance_defers_dynamic_template_images_but_keeps_static_missing
 
     missing = [item.value for item in report.findings if item.code == "HTML_LOCAL_IMAGE_MISSING"]
     assert missing == ["missing.png"]
+
+
+def test_html_acceptance_rejects_absolute_image_outside_reference_roots(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_html_artifact,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"not-public")
+    path = workspace / "index.html"
+    path.write_text(
+        f'<!doctype html><html><head></head><body><img src="{outside}"></body></html>',
+        encoding="utf-8",
+    )
+
+    report = validate_html_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            workspace_root=workspace,
+            reference_roots=(workspace,),
+        )
+    )
+
+    assert any(item.code == "HTML_LOCAL_IMAGE_MISSING" for item in report.findings)
+
+
+def test_html_acceptance_rejects_image_symlink_outside_reference_root(tmp_path):
+    from agent_py_agent.agent.contracts.artifact_acceptance import (
+        ArtifactAcceptanceRequest,
+        validate_html_artifact,
+    )
+
+    workspace = tmp_path / "workspace"
+    assets = workspace / "assets"
+    assets.mkdir(parents=True)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"not-public")
+    linked = assets / "hero.png"
+    try:
+        linked.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this platform")
+    path = workspace / "index.html"
+    path.write_text(
+        '<!doctype html><html><head></head><body><img src="assets/hero.png"></body></html>',
+        encoding="utf-8",
+    )
+
+    report = validate_html_artifact(
+        ArtifactAcceptanceRequest(
+            path=path,
+            workspace_root=workspace,
+            reference_roots=(workspace,),
+        )
+    )
+
+    assert any(item.code == "HTML_LOCAL_IMAGE_MISSING" for item in report.findings)
 
 
 def test_html_acceptance_contract_rejects_external_resources_for_single_file(tmp_path):

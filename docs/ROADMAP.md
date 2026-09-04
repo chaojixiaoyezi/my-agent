@@ -17,6 +17,18 @@
 
 ## 下一版优先级
 
+### Shell 产物保护不污染用户项目
+
+状态：实现与 focused 通过，待 `.10` MiniMax-M2.7 真 TUI
+
+解决问题：R165 真任务在项目根执行 pytest 时，`run_command` 会先把已登记的 `test_*.py` 原名复制到
+`<task>/data/artifacts/shell_backups/`，同一条 pytest 随即把框架副本再次收集；无变化命令还会永久留下副本。
+当前新增唯一 `owner_data/artifact_backups` 权威根，从 HomePaths 经 ToolRegistry 显式注入，管理员 Full Access
+在外部 cwd 也不随项目漂移。副本使用无原扩展的哈希 blob、owner-local opaque ref、临时文件 + fsync +
+原子 replace；shell 后内容未变立即删除本次 blob。终端交互 的 owner 配置目录/哈希文件历史用于存放与命名
+对照，会话运行时 shell snapshot 的临时提交、Drop/过期清理用于原子性和生命周期对照。后台 shell 当前仍不冒充
+已覆盖，真实 TUI 先验收前台 pytest 不再重复收集、任务树无 `shell_backups`、owner 私有根无 no-op 垃圾。
+
 ### Compact 浅压缩与缓存重建成本
 
 状态：已落地，focused 与 `.10` MiniMax-M2.7 真 TUI 通过
