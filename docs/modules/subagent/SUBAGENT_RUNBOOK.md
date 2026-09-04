@@ -25,6 +25,9 @@ orphan reconciler、observation/wake 和代理树 projection
 `create_subagents` 默认不再另设“单次最多 4 个”，整批只按当前 root 可用槽位原子接受或拒绝。
 `subagent_hierarchy_max_children_per_tool_call` 仍可由部署方显式设置更小批次，`0` 表示不额外收紧；
 默认 `runner_auto_concurrency=8`，所以八个已创建 child 可以真正并行启动。
+这份容量不是根代理专属：child/coordinator 创建 grandchild 时也在同一 owner-local 创建事务里复用同一个
+session/owner/task/per-call 计算，任意一层超限都整批 `not_started`，不会截断成部分创建。runner 并发上限与
+创建容量仍是两件事，和 会话运行时 的 session registry / execution limiter 分工相同。
 
 `items` 里的所有 child 都会立即并发启动，因此只允许放彼此独立、无需等待兄弟未来结果的工作。把 goal
 写成“先修复、再测试”不会形成串行顺序；若测试必须读取本轮修复后的代码，应先只创建修复 child，等其

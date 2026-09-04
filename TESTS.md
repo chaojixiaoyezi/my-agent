@@ -1,5 +1,17 @@
 # TESTS
 
+## 2026-09-04 R170 递归创建共享 session/owner 容量
+
+- 真实失败样本：`.10` owner 配额 `max_subagents=2/max_active_agents=3`，root 已有一个运行中 coordinator；
+  coordinator 的 task、runner prompt 与 execution context 均保留正确配额，却一次成功创建四名 grandchild。
+  `create_subagents` 权威 blob 记录 `planned_count=4` 和四个 created run ids，证明是递归 handler 绕过根容量门。
+- failure-first 回归在一个真实 `SimpleAgent` 中保留一个非终态 parent，再由该 parent 批量请求四名下级；
+  统一容量只剩一槽，必须返回 `SUBAGENT_CAPACITY_EXCEEDED/not_started`、`requested=4/available=1`，并保证
+  parent `child_ids=[]`、manager 只有原 parent。显式 per-call cap=2 的旧精确错误继续通过。
+- 当前创建、items、owner quota、hierarchy scheduler/limit 与 dispatch state 共 120 项 focused 通过。真机
+  复验必须使用 `.10` 唯一 Gateway、MiniMax-M2.7 和 fresh owner；先证明超限零创建，再使用允许的容量让
+  grandchild 独立线程自然 Compact 并继续完成，不能靠 main/child Compact 代替。
+
 ## Shell 产物保护的 owner 私有存储
 
 - 注册名为 `test_generated.py` 的 ready 产物后，从项目根通过真实 `run_command` 执行

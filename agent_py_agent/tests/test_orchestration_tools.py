@@ -259,6 +259,49 @@ def test_descendant_create_enforces_same_per_call_limit(tmp_path):
     assert agent.subagents.load(parent.id).child_ids == []
 
 
+def test_descendant_batch_respects_shared_owner_capacity_atomically(tmp_path):
+    """孙代理派工与根代理共用 owner/会话槽位，超限时不能落盘部分批次。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            max_subagents=8,
+            subagent_hierarchy_max_children_per_tool_call=0,
+        ),
+        tmp_path,
+    )
+    agent.owner_policy = SimpleNamespace(max_subagents=2, max_active_agents=3)
+    parent = agent.subagents.create_run(goal="父任务", thought="拆分", plan=["执行"])
+    agent._current_subagent_run_id = parent.id
+
+    result = CreateSubagentsTool(agent).execute(
+        {
+            "items": [
+                {"goal": "目标一"},
+                {"goal": "目标二"},
+                {"goal": "目标三"},
+                {"goal": "目标四"},
+            ]
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert result.error_code == "SUBAGENT_CAPACITY_EXCEEDED"
+    assert result.effect_outcome == "not_started"
+    assert payload["requested"] == 4
+    assert payload["available"] == 1
+    assert payload["limits"]["owner_active"] == 1
+    assert payload["limits"]["owner_cap"] == 2
+    assert payload["limits"]["active_agent_cap"] == 3
+    assert agent.subagents.load(parent.id).child_ids == []
+    assert [task.id for task in agent.subagents.list_runs()] == [parent.id]
+
+
 def test_descendant_create_normalizes_relative_outputs_to_canonical_task_root(tmp_path):
     """递归派工和顶层派工共用同一相对产物路径解析，不复制到 owner/output 旁路。"""
     from agent_py_agent.agent.agent_core.hierarchy_tools import _hierarchy_child_spec

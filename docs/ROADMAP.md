@@ -17,6 +17,20 @@
 
 ## 下一版优先级
 
+### 递归派工共享同一容量事实
+
+状态：R170 本地 focused 通过，待 `.10` MiniMax-M2.7 真 TUI
+
+解决问题：R169 的 grandchild Compact 真任务给 owner 明确配置 `max_subagents=2`、
+`max_active_agents=3`，coordinator 仍一次创建 4 名下级。任务与执行上下文里的配额快照都正确，实际绕过点是
+根代理走 `orchestration_tools` 的容量预检，递归代理却直接进入 hierarchy scheduler，只检查模型可选的
+`max_children`。当前对照 会话运行时 `会话运行时-rs/core/src/agent/registry.rs`：同一 session 的所有层级共享一份
+`AgentRegistry::reserve_spawn_slot`。my-agent 将已有 session/owner/task/per-call 计算迁到唯一
+`orchestration/capacity.py`，根、child、grandchild 在同一 owner 创建事务内先读 canonical 非终态 run，超限
+整批 `not_started`，不截断、不部分落盘；显式单次上限仍保留更精确的参数提示。下一步部署后用同样的
+coordinator 批量请求证明 `requested=4/available=1`、父级 `child_ids=[]`，再用容量允许的独立任务完成孙代理
+自然 Compact。
+
 ### Shell 产物保护不污染用户项目
 
 状态：R167/R168 已落地，focused 与 `.10` MiniMax-M2.7 真 TUI 通过；后台 shell 另待验证
@@ -46,7 +60,7 @@ RuntimeFacts 的进一步替换只在后续真实账本仍显示不可接受的 
 
 ### Transcript Compact 复用普通请求缓存前缀
 
-状态：R169 focused 通过，待 `.10` MiniMax-M2.7 真 TUI
+状态：R169 focused、`.10` main/child MiniMax-M2.7 真 TUI 通过；grandchild 待 R170 配额修复后复验
 
 解决问题：R166 已让 live Compact 保持当前模型轮的完整缓存面，但旧 transcript Compact 仍把 earlier summary、
 operation evidence 和全部消息拼成一条新 prompt；它虽然正确提交 ConversationThread generation，却让首个大
@@ -54,8 +68,10 @@ operation evidence 和全部消息拼成一条新 prompt；它虽然正确提交
 compact input”和 终端交互 `src/services/compact/compact.ts`、`src/utils/forkedAgent.ts` 的 cache-safe fork
 适配：Gateway 前台/后台、手动命令和每层 agent thread 都从普通运行时同一 tool snapshot/PromptBuilder 生成
 stable prefix，同一 system/tools/canonical native messages 在前，摘要要求在最后。摘要没有工具执行循环；
-provider overflow 时仅从 typed archive 恢复尚未消费的 deferred tool Schema。下一步用主代理-only 的自然与
-手动两路 TUI 快速验证，再各跑一条 child/grandchild 自然 Compact；主代理通过不能替代后两条独立线程证据。
+provider overflow 时仅从 typed archive 恢复尚未消费的 deferred tool Schema。`.10` 两路 main-only 已分别
+完成自然 Compact 与手动 `/compact`，手动动画和压缩后原报告续作正常；独立 child 从
+`118,772→74,012`、`compact 0→1` 后继续完成。grandchild 真任务先暴露递归配额绕过，修复后再补独立线程
+证据；main/child 通过不能替代这一条。
 
 ### 模型前置失败后的 run/attempt 终态
 

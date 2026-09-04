@@ -15,6 +15,10 @@ from ..subagents.services.hierarchy.scheduler import (
 )
 from ..tooling.cancellation import raise_if_cancelled
 from ..tooling.models import ToolHandlerOutcome
+from .orchestration.capacity import (
+    checked_creation_capacity,
+    subagent_quota_result,
+)
 from .orchestration.create_constraints import resolved_extra_write_roots
 from .orchestration.create_context import create_context_manifest, create_context_packs
 from .orchestration.create_policy import (
@@ -68,6 +72,12 @@ def execute_child_creation(
     bulk_error = _bulk_schedule_error(agent, child_specs)
     if bulk_error:
         return _schedule_error(bulk_error, tool_name=tool_name)
+    capacity = checked_creation_capacity(agent)
+    if isinstance(capacity, ToolHandlerOutcome):
+        return capacity
+    slots, limits = capacity
+    if len(child_specs) > slots:
+        return subagent_quota_result(len(child_specs), slots, limits)
     target_error = _hierarchy_target_error(agent, child_specs)
     if target_error:
         return _schedule_error(target_error, tool_name=tool_name)

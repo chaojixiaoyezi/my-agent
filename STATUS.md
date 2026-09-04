@@ -1,6 +1,19 @@
 # STATUS
 
-## 2026-09-04 R169 Transcript Compact 缓存面统一（Focused 通过，待真 TUI）
+## 2026-09-04 R170 递归代理容量统一（本地 Focused 通过，待真 TUI）
+
+- R169 grandchild 真任务已经证明配额文件、coordinator task 和 execution context 都是
+  `max_subagents=2/max_active_agents=3`，但递归 handler 仍创建四名下级；根路径的容量预检没有进入
+  hierarchy 路径，这是底座分叉，不是模型行为。
+- 对照 会话运行时 session 共享 `AgentRegistry` 后，已有 session/owner/task/per-call 容量计算迁到唯一
+  `agent_core/orchestration/capacity.py`。根与递归 `create_subagents` 现在都在同一 owner-local 创建事务内先
+  核对 canonical 非终态 run；容量不足整批 `not_started`，零部分落盘。原显式 per-call 上限仍返回更精确
+  的“单次最多 N 个”错误。
+- 新增递归四项请求、仅余一槽的 failure-first 回归，核对 `requested=4/available=1`、owner/active limit 和
+  parent `child_ids=[]`；扩展 120 项创建/owner quota/hierarchy/dispatch focused 全绿。下一步发布 R170，
+  在 `.10` 单 Gateway 复现同一请求，再补 grandchild 独立 ConversationThread 的自然 Compact。
+
+## 2026-09-04 R169 Transcript Compact 缓存面统一（Focused、main/child 真 TUI 通过）
 
 - 已确认 R166 修正的是运行中工具历史的 live Compact；会话旧历史的 transcript Compact 仍把摘要、操作
   证据和全部历史重新拼成一条巨型 prompt。功能上能提交 generation，但第一次大压缩会形成新的冷前缀，
@@ -10,9 +23,10 @@
   grandchild 均走同一 helper；provider overflow 后尚未消费的 `tool_search` 临时 Schema 从结构化工具归档
   恢复，不能靠自然语言或重新搜索猜。
 - 摘要调用仍为一次无工具执行的 auxiliary call；provider 返回 ToolCall 时丢弃其正文并使用机械摘要，
-  不执行 handler。相关 Gateway/background/child/TUI/control 共 287 项 focused 通过，Ruff 与 py_compile
-  通过。下一步部署 `.10` 唯一 Gateway，用 MiniMax-M2.7 真 TUI 分别验 main-only、child 和 grandchild 的
-  自然 Compact、动画、generation、缓存与后续任务连续性。
+  不执行 handler。相关 Gateway/background/child/TUI/control 共 287 项 focused 通过。`.10` 两路 main-only
+  已分别自然压缩和手动 `/compact`，动画、generation 2、压后续作及 provider cache-read 均正常；独立 child
+  `118,772→74,012`、`compact 0→1` 后继续完成。grandchild 证据因 R170 真实配额缺口需在修复后重跑，不能用
+  main/child 的通过代替。
 
 ## 2026-09-04 R167/R168 Shell 产物保护迁出项目树与前像范围（真 TUI 通过）
 

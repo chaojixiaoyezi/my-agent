@@ -1,5 +1,22 @@
 # DESIGN LEDGER
 
+## 2026-09-04 根/子/孙代理共享同一创建容量事实【状态：R170 本地 focused 通过，真 TUI 待验】
+
+- R169 grandchild Compact 真任务的 owner 配额明确为 `max_subagents=2/max_active_agents=3`，coordinator 的
+  canonical task、runner prompt 和 execution context 也都携带该值，但递归 `create_subagents` 仍一次落盘并
+  启动四个下级。根因是根创建在 `orchestration_tools` 内读取 session/owner/task/per-call 容量，递归创建却
+  直接进入 hierarchy scheduler，只检查调用参数里的 per-parent `max_children`；不是模型没读懂提示，也不是
+  task 快照丢失。
+- 对照 会话运行时 `会话运行时-rs/core/src/agent/registry.rs`：同一用户 session 的 `AgentControl` 克隆共享唯一
+  `AgentRegistry`，任意深度 spawn 都先 `reserve_spawn_slot`，容量失败不会创建 thread；
+  `agent/control/execution.rs` 再单独限制并发执行。my-agent 保留 durable owner/run 事实源和 owner-local 文件
+  事务，但把已有容量计算迁到唯一 `agent_core/orchestration/capacity.py`，根与递归工具均在 materialize 前
+  调用。它仍按当前 conversation task 统计 session tree，管理员 owner policy 统计全 owner，终态释放槽位。
+- 超限批次原子返回 `SUBAGENT_CAPACITY_EXCEEDED + effect_outcome=not_started`，不静默截断、不部分创建；
+  storage/lineage 不可读继续 fail closed。显式 `subagent_hierarchy_max_children_per_tool_call` 的精确参数错误先于
+  总容量回执，避免模型失去原有修正线索。容量只读结构化配置、task lineage 和 canonical status，不解析
+  goal、role、展示名或模型回复，也不改变 Compact、父子唤醒和 runner 并发语义。
+
 ## 2026-09-04 Transcript Compact 与普通模型轮共用缓存面【状态：Focused 通过，真 TUI 待验】
 
 - R166 只收口了运行中工具 IR 的 live Compact。对 R167 长会话逐个物理请求核账后发现 transcript generation 1

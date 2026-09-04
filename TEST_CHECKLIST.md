@@ -1,5 +1,15 @@
 # TEST CHECKLIST
 
+## R170 递归创建共享容量
+
+- [x] 根与递归 `create_subagents` 在同一 owner-local 创建事务内调用唯一 session/owner/task/per-call 容量计算；
+  不从 goal、role、标题或模型文字推断配额。
+- [x] owner 仅余一槽时，递归四项批次返回 `SUBAGENT_CAPACITY_EXCEEDED/not_started`，四项零落盘；容量状态
+  不可读继续 fail closed。显式单次上限仍保留原精确错误。
+- [x] 创建、批量、owner quota、hierarchy 与 dispatch 相邻 120 项 focused 通过。
+- [ ] `.10` 单 Gateway + MiniMax-M2.7 真 TUI：coordinator 请求四项时结构化显示 `requested=4/available=1`，
+  父级 child_ids 保持空；容量允许的下一路 grandchild 自然 Compact 后继续工作并终态。
+
 ## R169 Transcript Compact 普通请求缓存面
 
 - [x] Gateway 前台/后台、手动 `/compact`、child/grandchild transcript Compact 均通过同一 typed surface
@@ -8,8 +18,10 @@
   仍只由既有验证与 CAS 推进。
 - [x] provider overflow 后尚未消费的 `tool_search` Schema 只从 typed carried archive 恢复；成功模型轮后的
   临时工具不跨轮复活。Gateway/background/child/TUI/control 相关 287 项 focused 通过。
-- [ ] `.10` 唯一 Gateway + MiniMax-M2.7 真 TUI：两路 main-only 分别触发自然 Compact 与手动/取消/续作，
-  再各触发 child、grandchild 自然 Compact；逐条核对动画、generation、cache-read、上下文事实和副作用不重做。
+- [x] `.10` 唯一 Gateway + MiniMax-M2.7 真 TUI：两路 main-only 分别触发自然 Compact 与手动/续作，
+  独立 child 自然 `118,772→74,012`、`compact 0→1` 后完成；动画、generation、cache-read 和上下文连续正常。
+- [ ] grandchild 独立线程自然 Compact 与 Compact 中途取消仍待真机；R170 配额回归先修，不能用 main/child
+  或 root 在 grandchild 任务里发生 Compact 冒充。
 
 ## R168 Shell 前像范围与结算回收
 

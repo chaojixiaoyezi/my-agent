@@ -535,6 +535,9 @@ SimpleAgent orchestration tool
 - `agent/agent_core/orchestration/`：模型可见的统一 `create_subagents`、`send_guidance`、
   `cancel_subagents` 与直属 capability 处理入口。创建即由宿主自动启动；
   `dispatch/scheduler` 只保留为内部执行引擎，不再注册成模型工具。
+- `agent/agent_core/orchestration/capacity.py`：根与任意递归层级共用的创建容量入口；在 owner-local 创建事务
+  内按当前 conversation tree、全 owner 非终态 run、task/per-call 配置计算槽位，读取失败或整批超限均在
+  materialize 前 fail closed。它不控制 runner 并发，也不读取模型文字。
 - `agent/agent_core/agent_tree/status.py`：`/status`、TUI、恢复和诊断共用的内部树投影；旧
   `orchestration/tools/status.py` 与 `InspectAgentTreeTool` 已删除，不能从内部 projection 反向恢复模型工具。
 - `agent/conversation/agent_activity.py`：从 active conversation task link 与 canonical child run 生成
