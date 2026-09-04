@@ -62,6 +62,7 @@ from ..conversation.compact import (
     prepare_conversation_context,
 )
 from ..conversation.compact_progress import normalize_conversation_compact_progress
+from ..conversation.compact_provider_surface import ConversationCompactModelSurface
 from ..conversation.control_commands import (
     conversation_task_attributes,
     system_slash_command_name,
@@ -854,6 +855,9 @@ class _GatewayHistoryRow:
     metadata: dict[str, object] = field(default_factory=dict)
 
 
+# LLM: The gateway preflight carries only host-resolved request inputs plus any one-call deferred
+# tool surface retained after a provider overflow; it cannot infer authorization from chat prose.
+# 类用途: 保存 Gateway 加载会话与 Compact 所需的请求快照，确保溢出恢复沿用同一工具缓存面。
 @dataclass(frozen=True)
 class _GatewayConversationLoadRequest:
     agent: SimpleAgent
@@ -861,6 +865,7 @@ class _GatewayConversationLoadRequest:
     request_id: str
     prompt: str
     on_chunk: object | None = None
+    loaded_tool_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1357,9 +1362,9 @@ def _gateway_overflow_carry(
     return result_archive or carried_archive_tool_calls, next_inputs
 
 
-# LLM: Transcript Compact has first claim on completed history. If it cannot advance, only the same
-# thread's interruptible active-turn checkpoint/CAS may authorize a retry; progress never does.
-# 函数用途: 可中断地为 Gateway 溢出推进 transcript 或 active-turn Compact，并刷新会话上下文。
+# LLM: Transcript Compact has first claim on completed history and reuses pending one-call tools
+# from the carried archive. Otherwise only the same thread's active-turn checkpoint/CAS may retry.
+# 函数用途: 携带溢出工具缓存面，为 Gateway 推进 transcript 或 active-turn Compact，并刷新会话上下文。
 def _gateway_compact_overflowing_turn(
     context: _GatewayAskRunContext,
     prompt: str,
@@ -1367,6 +1372,8 @@ def _gateway_compact_overflowing_turn(
     run_params: RunParams,
     carried_archive_tool_calls: list[dict[str, object]],
 ) -> _GatewayConversationContext:
+    from ..agent_core.runtime.loop_support import pending_carried_loaded_tool_names
+
     request = context.request
     refreshed = _gateway_conversation_context(
         _GatewayConversationLoadRequest(
@@ -1375,6 +1382,11 @@ def _gateway_compact_overflowing_turn(
             context.request_id,
             prompt,
             context.on_chunk,
+            tuple(
+                sorted(
+                    pending_carried_loaded_tool_names(carried_archive_tool_calls)
+                )
+            ),
         ),
         force_compact=True,
     )
@@ -2481,6 +2493,15 @@ def _load_gateway_compact_context(
                 force=force,
                 progress_callback=_gateway_compact_progress_callback(inputs.on_chunk),
                 interrupt_check=is_interrupted,
+                model_surface=ConversationCompactModelSurface(
+                    prompt_files=tuple(
+                        str(item)
+                        for item in inputs.request.get("prompt_files", [])
+                        if str(item or "").strip()
+                    ),
+                    context_scope="conversation",
+                    loaded_tool_names=tuple(inputs.loaded_tool_names),
+                ),
             ),
         )
     except InterruptedError:

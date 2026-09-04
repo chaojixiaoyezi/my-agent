@@ -21,6 +21,7 @@ from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.services.control_plane_projection import (
     runtime_compact_count,
@@ -46,17 +47,21 @@ class _OverflowThenCompleteChildBackend:
         self.overflow_once = overflow_once
         self.model_prompts: list[str] = []
         self.model_messages: list[list[dict]] = []
+        self.model_kwargs: list[dict[str, object]] = []
         self.summary_prompts: list[str] = []
+        self.summary_kwargs: list[dict[str, object]] = []
 
     def generate(self, prompt: str, on_chunk=None, **kwargs):
-        if prompt.startswith("You maintain a conversation summary"):
+        if "You maintain a conversation summary" in prompt:
             self.summary_prompts.append(prompt)
+            self.summary_kwargs.append(dict(kwargs))
             return ModelResponse(
                 text="旧轮次已完成现状核对；继续执行当前子任务。",
                 backend=self.name,
             )
         self.model_prompts.append(prompt)
         self.model_messages.append(list(kwargs.get("messages") or []))
+        self.model_kwargs.append(dict(kwargs))
         if self.overflow_once and len(self.model_prompts) == 1:
             return ModelResponse(
                 text="provider reported context pressure",
@@ -103,6 +108,7 @@ class _WriteThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
     def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.model_prompts.append(prompt)
         self.model_messages.append(list(kwargs.get("messages") or []))
+        self.model_kwargs.append(dict(kwargs))
         if len(self.model_prompts) == 1:
             if on_chunk is not None:
                 on_chunk("我先写入子代理负责的文件。")
@@ -127,14 +133,16 @@ class _OverflowThenListThenCompleteChildBackend(_OverflowThenCompleteChildBacken
     name = "overflow-list-then-complete-child"
 
     def generate(self, prompt: str, on_chunk=None, **kwargs):
-        if prompt.startswith("You maintain a conversation summary"):
+        if "You maintain a conversation summary" in prompt:
             self.summary_prompts.append(prompt)
+            self.summary_kwargs.append(dict(kwargs))
             return ModelResponse(
                 text="旧轮次已压缩；继续使用同一子代理执行权。",
                 backend=self.name,
             )
         self.model_prompts.append(prompt)
         self.model_messages.append(list(kwargs.get("messages") or []))
+        self.model_kwargs.append(dict(kwargs))
         if len(self.model_prompts) == 1:
             return ModelResponse(
                 text="provider reported context pressure",
@@ -235,6 +243,12 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     assert result.ok
     assert len(backend.model_prompts) == 2
     assert len(backend.summary_prompts) == 1
+    summary_layout = prompt_cache_layout(backend.summary_prompts[0])
+    resumed_layout = prompt_cache_layout(backend.model_prompts[-1])
+    assert summary_layout is not None and resumed_layout is not None
+    assert summary_layout.stable_prefix == resumed_layout.stable_prefix
+    assert backend.summary_kwargs[0]["tools"] == backend.model_kwargs[-1]["tools"]
+    assert backend.summary_kwargs[0]["messages"]
     assert "# Agent Thread Context" not in backend.model_prompts[-1]
     assert "旧轮次已完成现状核对" in json.dumps(
         backend.model_messages[-1],

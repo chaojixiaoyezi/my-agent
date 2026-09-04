@@ -1071,7 +1071,7 @@ def _reconstructed_runtime_state(
         executed_tools=[
             name for record in valid_records if (name := _carried_executed_tool_name(record))
         ],
-        loaded_tool_names=_pending_carried_loaded_tool_names(valid_records),
+        loaded_tool_names=pending_carried_loaded_tool_names(valid_records),
     )
 
 
@@ -1096,7 +1096,10 @@ def reconstructed_model_tool_context(
     ).tool_context
 
 
-def _pending_carried_loaded_tool_names(records: list[dict[str, object]]) -> set[str]:
+# LLM: Only typed tool_search result envelopes can restore an ephemeral schema after overflow;
+# callers in foreground/background/child Compact must reuse this same reducer to preserve cache shape.
+# 函数用途: 从携带的工具归档中恢复尚未被下一次成功模型调用消费的临时工具名称。
+def pending_carried_loaded_tool_names(records: list[dict[str, object]]) -> set[str]:
     """Restore only a tool_search selection not yet consumed by a later model round."""
 
     rounded = [

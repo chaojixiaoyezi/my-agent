@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-09-04 R168/R169 Shell 真机收口与 transcript Compact 缓存面
+
+- R168 `.10` 单 Gateway 真 TUI `ma-r168-110-u381-artifact-linear` 已生成 5,000 行工具输出并执行后续 shell；
+  canonical archive 保持可读，shell 不再递归备份工具回执，结算后 operation manifest 与无变化 blob 都为 0。
+- R169 对账发现 R166 cache-safe fork 只覆盖 live-tool Compact；旧 transcript Compact 会把全部历史重拼为冷
+  prompt。当前 Gateway 前台/后台、手动 `/compact` 和每层 agent thread 共用
+  `conversation/compact_provider_surface.py`，保持普通轮的 stable prompt、system、tools、canonical native
+  messages，只在末尾添加摘要请求。工具 Schema 不获执行入口；overflow 后未消费的 deferred tools 只从 typed
+  archive 恢复。287 项相邻 focused 通过，`.10` main/child/grandchild 真 TUI 仍待完成。
+
 ## 2026-09-04 R167 Shell 产物保护迁出任务树
 
 - R165 的项目级 pytest 重复收集不是 pytest 配置问题：foreground `run_command` 启动前把 ready

@@ -50,9 +50,10 @@ class SubagentModelIteration:
     transcript_sink: object
 
 
-# LLM: This immutable request keeps one child overflow's thread generation, active archive and
-# display callback together; it carries no completion or permission authority of its own.
-# 类用途: 收拢子代理一次溢出压缩所需的固定身份、当前代次和工具轨迹，避免参数错位。
+# LLM: This immutable request keeps one child overflow's thread generation, active archive,
+# display callback, and already-resolved model surface together; it carries no completion or
+# permission authority of its own.
+# 类用途: 收拢子代理一次溢出压缩所需的固定身份、当前代次、工具轨迹和缓存面，避免参数错位。
 @dataclass(frozen=True)
 class SubagentOverflowCompactRequest:
     prompt: str
@@ -61,6 +62,7 @@ class SubagentOverflowCompactRequest:
     current: object
     carried_archive_tool_calls: list[dict[str, object]]
     progress_callback: object
+    model_surface: object
 
 
 def run_subagent_flow(lifecycle, options: SubagentRunParams):
@@ -219,6 +221,7 @@ def _run_subagent_model_turn(
         if transcript_sink is not None
         else None
     )
+    model_surface = _subagent_compact_model_surface(context)
     try:
         current = prepare_subagent_thread_turn(
             agent,
@@ -227,6 +230,7 @@ def _run_subagent_model_turn(
             attempt_id=attempt_id,
             progress_callback=compact_progress,
             interrupt_check=is_interrupted,
+            model_surface=model_surface,
         )
         for _attempt in range(8):
             run_params = _subagent_model_run_params(
@@ -277,6 +281,10 @@ def _run_subagent_model_turn(
                     current=current,
                     carried_archive_tool_calls=carried_archive_tool_calls,
                     progress_callback=compact_progress,
+                    model_surface=_pending_subagent_compact_model_surface(
+                        context,
+                        carried_archive_tool_calls,
+                    ),
                 ),
             )
             current = refreshed
@@ -334,6 +342,7 @@ def _compact_subagent_overflowing_turn(
         force=True,
         progress_callback=request.progress_callback,
         interrupt_check=is_interrupted,
+        model_surface=request.model_surface,
     )
     if refreshed.compact_generation > request.current.compact_generation:
         return refreshed
@@ -384,6 +393,7 @@ def _compact_subagent_active_turn_archive(
         attempt_id=request.attempt_id,
         progress_callback=request.progress_callback,
         interrupt_check=is_interrupted,
+        model_surface=request.model_surface,
     )
     if refreshed.compact_generation <= request.current.compact_generation:
         raise RuntimeError("subagent Compact generation did not advance")
@@ -464,6 +474,49 @@ def _subagent_model_run_params(
         carried_active_turn_user_inputs=list(iteration.carried_active_turn_user_inputs),
         conversation_history_seed=iteration.current.history_seed,
         on_chunk=iteration.transcript_sink,
+    )
+
+
+# LLM: Transcript Compact and the following child model turn must share the exact structured tool
+# ceiling, pending one-call discoveries, and system prompt. This copies only host-owned facts.
+# 函数用途: 从子代理上下文和溢出归档生成缓存面，确保 child/grandchild 压缩不另起一套 prompt。
+def _subagent_compact_model_surface(
+    context: object,
+    *,
+    loaded_tool_names: object = (),
+) -> object:
+    from ...conversation.compact_provider_surface import ConversationCompactModelSurface
+    from ..runner.prompts import subagent_runner_system_prompt
+
+    allowed = getattr(context, "allowed_tools", None)
+    return ConversationCompactModelSurface(
+        allowed_tools=tuple(allowed) if allowed is not None else None,
+        system_prompt_override=subagent_runner_system_prompt(context),
+        context_scope="task_local",
+        loaded_tool_names=tuple(
+            sorted(
+                {
+                    str(item).strip()
+                    for item in (loaded_tool_names or ())
+                    if str(item).strip()
+                }
+            )
+        ),
+    )
+
+
+# LLM: Overflow restoration must use the shared typed archive reducer; do not inspect model text,
+# tool names, or the transient inner loop object after Agent.run has returned.
+# 函数用途: 从子代理本轮权威工具归档恢复一次性工具 Schema，并生成下一次 transcript Compact 缓存面。
+def _pending_subagent_compact_model_surface(
+    context: object,
+    records: list[dict[str, object]],
+) -> object:
+    from ..runtime.loop_support import pending_carried_loaded_tool_names
+
+    return _subagent_compact_model_surface(
+        context,
+        loaded_tool_names=pending_carried_loaded_tool_names(records),
     )
 
 

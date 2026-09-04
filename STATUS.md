@@ -1,14 +1,30 @@
 # STATUS
 
-## 2026-09-04 R167 Shell 产物保护迁出项目树（Focused 通过，待真 TUI）
+## 2026-09-04 R169 Transcript Compact 缓存面统一（Focused 通过，待真 TUI）
+
+- 已确认 R166 修正的是运行中工具历史的 live Compact；会话旧历史的 transcript Compact 仍把摘要、操作
+  证据和全部历史重新拼成一条巨型 prompt。功能上能提交 generation，但第一次大压缩会形成新的冷前缀，
+  因而出现约 108k uncached input。这是旧路径遗漏，不是 R166 算法回退或历史丢失。
+- 当前 transcript Compact 复用普通模型轮的结构化 stable prompt、system、原生工具 Schema 和 canonical
+  provider messages；只在最后追加 synthetic 摘要要求。Gateway 前台/后台、手动 `/compact`、child 与
+  grandchild 均走同一 helper；provider overflow 后尚未消费的 `tool_search` 临时 Schema 从结构化工具归档
+  恢复，不能靠自然语言或重新搜索猜。
+- 摘要调用仍为一次无工具执行的 auxiliary call；provider 返回 ToolCall 时丢弃其正文并使用机械摘要，
+  不执行 handler。相关 Gateway/background/child/TUI/control 共 287 项 focused 通过，Ruff 与 py_compile
+  通过。下一步部署 `.10` 唯一 Gateway，用 MiniMax-M2.7 真 TUI 分别验 main-only、child 和 grandchild 的
+  自然 Compact、动画、generation、缓存与后续任务连续性。
+
+## 2026-09-04 R167/R168 Shell 产物保护迁出项目树与前像范围（真 TUI 通过）
 
 - 已确认 R165 项目级 pytest 的重复节点来自 `run_command` 启动前把 ready `test_*.py` 原名复制进当前 task；
   unchanged 分支没有清理，又形成长期磁盘污染。不是 pytest 自身、模型或用户项目配置错误。
 - 当前把唯一备份根移到 owner `data/artifact_backups`，由 HomePaths 显式注入；Full Access 外部 cwd 也不漂移。
   hash blob 经 temp/fsync/atomic replace 后才发布 opaque ref，无变化立即删除，路径穿越与 symlink 越界拒绝。
-- 194 项 shell/HomePaths/ToolRegistry/runtime/sandbox focused 分组全绿，strict code-size hard=0。下一步部署
-  `.10` 唯一 Gateway，用 MiniMax-M2.7 fresh TUI 复验真实项目 pytest、任务目录和 owner store；后台 shell
-  退出后的产物复核仍单列，当前不冒充完成。
+- R168 进一步把 canonical `tool_output` archive 与用户交付物分型；shell 前像不再递归备份工具回执，
+  权威 ToolOperation 结算后清理 crash-window manifest，无变化 blob 也立即回收。`.10` 唯一 Gateway 的
+  fresh TUI `ma-r168-110-u381-artifact-linear` 已生成 5,000 行工具输出、修改真实交付物并核对 registry：
+  tool archive 仍可读，`operation_manifests=0`、`backup_blobs=0`，前像数量不再随工具历史平方增长。
+- 相关 focused 与 strict code-size hard=0；后台 shell 退出后的产物复核仍单列，不能用前台通过替代。
 
 ## 2026-09-04 R166 Compact 最低水位与缓存安全辅助调用（真 TUI 通过）
 

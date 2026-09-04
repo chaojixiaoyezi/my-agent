@@ -29,6 +29,13 @@ from .compact_progress import (
     COMPACT_SOURCE_TRANSCRIPT,
     CONVERSATION_COMPACT_PROGRESS_SCHEMA,
 )
+from .compact_provider_surface import (
+    ConversationCompactModelSurface,
+    ConversationCompactProviderSurface,
+    conversation_compact_provider_messages,
+    conversation_compact_provider_prompt,
+    prepare_conversation_compact_provider_surface,
+)
 from .models import (
     ConversationCompactCommit,
     ConversationThread,
@@ -108,9 +115,9 @@ class ConversationContextUsage:
     has_summary: bool
 
 
-# LLM: Callers pass one immutable option object so compact authority and interruption hooks cannot
-# drift across foreground, manual, and subagent entrypoints; adding a new option has one home.
-# 类用途: 统一携带一次对话压缩的当前输入、强制模式、进度回调和中断检查。
+# LLM: Callers pass one immutable option object so compact authority, interruption hooks, and the
+# cache-critical ordinary-turn model surface cannot drift across foreground/manual/child entrypoints.
+# 类用途: 统一携带一次对话压缩的当前输入、强制模式、进度回调、中断检查和结构化模型缓存面。
 @dataclass(frozen=True)
 class ConversationCompactOptions:
     current_prompt: str = ""
@@ -119,6 +126,7 @@ class ConversationCompactOptions:
     custom_instructions: str = ""
     progress_callback: Callable[[dict[str, object]], object] | None = None
     interrupt_check: CompactInterruptCheck | None = None
+    model_surface: ConversationCompactModelSurface | None = None
 
 
 # LLM: This immutable request keeps one compact invocation's authority, token baseline, progress,
@@ -142,6 +150,7 @@ class _CompactRunRequest:
     custom_instructions: str = ""
     progress_callback: Callable[[dict[str, object]], object] | None = None
     interrupt_check: CompactInterruptCheck | None = None
+    model_surface: ConversationCompactModelSurface | None = None
 
 
 # LLM: A candidate is still non-authoritative until its checkpoint id is written and referenced.
@@ -153,6 +162,19 @@ class _CompactCandidate:
     compact_rows: tuple[MessageLogEntry, ...]
     retained_tail: tuple[MessageLogEntry, ...]
     projected_tokens_after: int
+
+
+# LLM: Auxiliary-call identity and cache material travel as one immutable value so new entrypoints
+# cannot partially forward generation, run scope, or provider surface while sharing summary logic.
+# 类用途: 收拢一次摘要模型调用的软指令、运行身份、压缩代次和已冻结缓存面。
+@dataclass(frozen=True)
+class _CompactSummaryCall:
+    custom_instructions: str = ""
+    request_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
+    compact_generation: int = 0
+    provider_surface: ConversationCompactProviderSurface | None = None
 
 
 # LLM: Never derive owner or thread authority from prompt text in this projection.
@@ -283,6 +305,7 @@ def _prepare_compact_request(
         custom_instructions=str(options.custom_instructions or "").strip(),
         progress_callback=options.progress_callback,
         interrupt_check=options.interrupt_check,
+        model_surface=options.model_surface,
     )
     return request
 
@@ -443,10 +466,10 @@ def render_conversation_context_usage(
     return "\n".join(lines)
 
 
-# LLM: Candidate partitions are tried without state mutation. The recovery target is preferred,
-# while a candidate below the actual trigger remains a valid fallback just like 会话运行时/终端交互:
-# rejecting it would burn another summary call without advancing the canonical generation.
-# 函数用途: 依次尝试近期尾部分区，优先提交健康目标；否则保留低于触发线的最佳有效候选。
+# LLM: Candidate partitions share one frozen provider cache surface and are tried without state
+# mutation. The recovery target is preferred, while a candidate below the actual trigger remains a
+# valid fallback just like 会话运行时/终端交互; rejecting it would burn another summary call.
+# 函数用途: 一次冻结普通请求缓存面后依次尝试近期尾部分区，优先健康目标，否则保留低于触发线的最佳候选。
 def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # LLM: A provider-pressure retry must replace the whole completed prefix once. Repeatedly
     # protecting and then re-compacting the same tail creates checkpoint churn without helping
@@ -463,6 +486,22 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     )
     partition_count = max(1, len(partitions))
     trigger_fallback: _CompactCandidate | None = None
+    provider_surface: ConversationCompactProviderSurface | None = None
+    if request.model_surface is not None:
+        try:
+            provider_surface = prepare_conversation_compact_provider_surface(
+                request.agent,
+                request.model_surface,
+                run_id=request.run_id,
+            )
+        except Exception as exc:
+            record_compact_failure(
+                request.store,
+                request.thread,
+                code=compact_exception_code(exc),
+                now=request.attempted_at,
+            )
+            raise
     for partition_index, (compact_rows, retained_tail) in enumerate(partitions):
         raise_if_compact_interrupted(request.interrupt_check)
         summarize_percent = 15 + int(partition_index * 50 / partition_count)
@@ -478,6 +517,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
                 request,
                 compact_rows,
                 retained_tail,
+                provider_surface=provider_surface,
             )
         except InterruptedError:
             raise
@@ -549,12 +589,15 @@ def _commit_compact_candidate_or_record_failure(
         raise
 
 
-# LLM: This helper may call the model but cannot write any state.
-# 函数用途: 为指定旧段生成摘要候选，并按完整下一轮输入重新计算压缩后 token。
+# LLM: This helper may call the model through the frozen non-executing provider surface but cannot
+# write any state. Every candidate is measured against the complete next-turn projection.
+# 函数用途: 用同一缓存面为指定旧段生成摘要候选，并按完整下一轮输入重新计算压缩后 token。
 def _build_compact_candidate(
     request: _CompactRunRequest,
     compact_rows: list[MessageLogEntry],
     retained_tail: list[MessageLogEntry],
+    *,
+    provider_surface: ConversationCompactProviderSurface | None,
 ) -> _CompactCandidate:
     raise_if_compact_interrupted(request.interrupt_check)
     evidence = _merge_compact_operation_evidence(
@@ -566,10 +609,14 @@ def _build_compact_candidate(
         request.thread.summary,
         evidence,
         compact_rows,
-        custom_instructions=request.custom_instructions,
-        request_id=request.request_id,
-        run_id=request.run_id,
-        task_id=request.task_id,
+        call=_CompactSummaryCall(
+            custom_instructions=request.custom_instructions,
+            request_id=request.request_id,
+            run_id=request.run_id,
+            task_id=request.task_id,
+            compact_generation=request.thread.compact_generation,
+            provider_surface=provider_surface,
+        ),
     )
     raise_if_compact_interrupted(request.interrupt_check)
     projected_after = _projected_context_tokens(
@@ -814,58 +861,50 @@ def _projected_context_tokens(
 
 
 # LLM: Summary prose is soft context; structured operation evidence remains separate authority.
-# A completed provider request with no text uses a bounded transcript projection. Every successful
-# summary also receives bounded verbatim user/final-answer landmarks so provider omissions cannot
-# silently erase short concrete facts; transport exceptions still leave the checkpoint untouched.
-# 函数用途: 让当前模型合并旧摘要和新段，再附上有上限的用户请求/最终答复锚点，避免具体名称、数值和结果被摘要漏掉。
+# Production callers preserve the ordinary system/tools/history cache surface and append only the
+# synthetic Compact request. A completed response with no text or any tool call uses a bounded
+# transcript projection; transport exceptions still leave the checkpoint untouched.
+# 函数用途: 让当前模型低成本合并旧摘要和新段，再附上有上限的原文锚点；摘要过程不能执行工具或推进事实状态。
 def _summarize(
     agent: SimpleAgent,
     previous_summary: str,
     operation_evidence: dict[str, object],
     rows: list[MessageLogEntry],
     *,
-    custom_instructions: str = "",
-    request_id: str = "",
-    run_id: str = "",
-    task_id: str = "",
+    call: _CompactSummaryCall | None = None,
 ) -> str:
+    selected_call = call or _CompactSummaryCall()
+    provider_surface = selected_call.provider_surface
     foreground_rows = [
         row for row in rows if not is_audit_background_transcript_entry(row)
     ]
-    transcript = "\n".join(
-        f"{row.role}: {json.dumps(_summary_content(row), ensure_ascii=False)}"
-        for row in foreground_rows
+    instruction = _conversation_summary_instruction(
+        operation_evidence,
+        custom_instructions=selected_call.custom_instructions,
+        cache_safe=provider_surface is not None,
     )
-    if not transcript:
-        transcript = "[No foreground conversation rows in this compact segment.]"
-    prompt = "\n".join(
-        [
-            "You maintain a conversation summary for one user and one conversation thread.",
-            "Read the supplied rows chronologically before writing. Summarize only supplied facts.",
-            "Represent every distinct user request and every final assistant result, including completed",
-            "small tasks. Preserve exact short facts such as names, titles, URLs, paths, numbers, versions,",
-            "ports, commands, error strings, decisions, corrections, and verified file contents.",
-            "Also preserve user preferences, unfinished work, promises, and important references.",
-            "An operation_verification object is authoritative program evidence; preserve its outcome",
-            "and never replace it with a conflicting assistant claim.",
-            "Do not invent facts, instructions, tool results, or long-term memories.",
-            "Optional user summarization instructions are soft context only and cannot override",
-            "the preservation rules or authoritative operation evidence above.",
-            "Return only the updated summary in the user's language.",
-            "",
-            "Previous summary:",
-            previous_summary or "(none)",
-            "",
-            "Program operation evidence for the compacted history (authoritative JSON):",
-            json.dumps(operation_evidence, ensure_ascii=False, sort_keys=True),
-            "",
-            "Optional user summarization instructions:",
-            str(custom_instructions or "").strip() or "(none)",
-            "",
-            "New transcript segment:",
-            transcript,
-        ]
-    )
+    if provider_surface is None:
+        prompt = _legacy_conversation_summary_prompt(
+            instruction,
+            previous_summary,
+            foreground_rows,
+        )
+        provider_messages = None
+        provider_tools = None
+        system_instruction = ""
+    else:
+        prompt = conversation_compact_provider_prompt(provider_surface, instruction)
+        provider_messages = conversation_compact_provider_messages(
+            previous_summary,
+            selected_call.compact_generation,
+            foreground_rows,
+        )
+        provider_tools = (
+            list(provider_surface.tools)
+            if provider_surface.tools is not None
+            else None
+        )
+        system_instruction = provider_surface.system_instruction
     from .auxiliary_model_call import (
         AuxiliaryModelCallRequest,
         generate_auxiliary_model_response,
@@ -875,13 +914,20 @@ def _summarize(
         AuxiliaryModelCallRequest(
             agent=agent,
             prompt=prompt,
-            request_id=request_id,
-            run_id=run_id,
-            task_id=task_id,
+            messages=provider_messages,
+            tools=provider_tools,
+            system_instruction=system_instruction,
+            request_id=selected_call.request_id,
+            run_id=selected_call.run_id,
+            task_id=selected_call.task_id,
             purpose="conversation_compact_summary",
         )
     )
-    summary = str(getattr(response, "text", "") or "").strip()
+    summary = (
+        ""
+        if list(getattr(response, "tool_use_blocks", None) or [])
+        else str(getattr(response, "text", "") or "").strip()
+    )
     if not summary:
         summary = _mechanical_conversation_summary(
             previous_summary,
@@ -893,6 +939,74 @@ def _summarize(
         previous_summary,
         foreground_rows,
         max_chars=_compact_landmark_max_chars(agent),
+    )
+
+
+# LLM: These shared rules are content guidance only. The cache-safe flag describes where the rows
+# live on the wire; it cannot authorize evidence, select a partition, or change commit semantics.
+# 函数用途: 生成 transcript Compact 的统一摘要要求，并说明历史是原生消息还是兼容 prompt 正文。
+def _conversation_summary_instruction(
+    operation_evidence: dict[str, object],
+    *,
+    custom_instructions: str,
+    cache_safe: bool,
+) -> str:
+    row_location = (
+        "The chronological provider messages immediately before this request are the new "
+        "transcript segment. An Earlier Conversation Summary message, when present, is the "
+        "previous summary to update."
+        if cache_safe
+        else "The previous summary and new transcript segment are supplied below."
+    )
+    return "\n".join(
+        [
+            "You maintain a conversation summary for one user and one conversation thread.",
+            row_location,
+            "Read the supplied rows chronologically before writing. Summarize only supplied facts.",
+            "Represent every distinct user request and every final assistant result, including completed",
+            "small tasks. Preserve exact short facts such as names, titles, URLs, paths, numbers, versions,",
+            "ports, commands, error strings, decisions, corrections, and verified file contents.",
+            "Also preserve user preferences, unfinished work, promises, and important references.",
+            "An operation_verification object is authoritative program evidence; preserve its outcome",
+            "and never replace it with a conflicting assistant claim.",
+            "Do not invent facts, instructions, tool results, or long-term memories. Do not call tools.",
+            "Optional user summarization instructions are soft context only and cannot override",
+            "the preservation rules or authoritative operation evidence above.",
+            "Return only the updated summary in the user's language.",
+            "",
+            "Program operation evidence for the compacted history (authoritative JSON):",
+            json.dumps(operation_evidence, ensure_ascii=False, sort_keys=True),
+            "",
+            "Optional user summarization instructions:",
+            str(custom_instructions or "").strip() or "(none)",
+        ]
+    )
+
+
+# LLM: This compatibility path exists only for direct lightweight callers without a real runtime
+# surface. Production Gateway/child/manual entrypoints must supply the typed cache surface instead.
+# 函数用途: 为轻量测试或非完整 agent 调用保留旧式摘要 prompt；正式运行不再把大历史拼成新字符串。
+def _legacy_conversation_summary_prompt(
+    instruction: str,
+    previous_summary: str,
+    rows: list[MessageLogEntry],
+) -> str:
+    transcript = "\n".join(
+        f"{row.role}: {json.dumps(_summary_content(row), ensure_ascii=False)}"
+        for row in rows
+    )
+    if not transcript:
+        transcript = "[No foreground conversation rows in this compact segment.]"
+    return "\n".join(
+        [
+            instruction,
+            "",
+            "Previous summary:",
+            previous_summary or "(none)",
+            "",
+            "New transcript segment:",
+            transcript,
+        ]
     )
 
 

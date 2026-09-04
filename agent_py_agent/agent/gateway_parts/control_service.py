@@ -24,6 +24,7 @@ from ..conversation.compact import (
     prepare_conversation_context,
     render_conversation_context_usage,
 )
+from ..conversation.compact_provider_surface import ConversationCompactModelSurface
 from ..conversation.control_commands import (
     ConversationControlCommand,
     ConversationControlResult,
@@ -729,10 +730,9 @@ def _execute_compact_control(
         )
 
 
-# LLM: The registered manual Compact may mutate only the exact idle owner/thread and must hold the
-# same durable execution lane as foreground/background turns.  User interruption is distinct from
-# lane contention and can never advance the checkpoint cursor or Compact generation.
-# 函数用途: 执行已经登记中断身份的手动压缩，并区分用户停止、占用冲突和真实失败。
+# LLM: The registered manual Compact may mutate only the exact idle owner/thread, holds the shared
+# lane, and uses the ordinary native model surface. Interruption never advances cursor/generation.
+# 函数用途: 以普通模型缓存面执行已登记的手动压缩，并区分用户停止、占用冲突和真实失败。
 def _execute_registered_compact_control(
     base_agent: object,
     paths: GatewayPaths,
@@ -776,6 +776,9 @@ def _execute_registered_compact_control(
                     force=True,
                     custom_instructions=command.value,
                     interrupt_check=is_interrupted,
+                    model_surface=ConversationCompactModelSurface(
+                        context_scope="conversation",
+                    ),
                 ),
             )
         if not compacted.compacted:

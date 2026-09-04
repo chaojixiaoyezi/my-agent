@@ -1,5 +1,23 @@
 # DESIGN LEDGER
 
+## 2026-09-04 Transcript Compact 与普通模型轮共用缓存面【状态：Focused 通过，真 TUI 待验】
+
+- R166 只收口了运行中工具 IR 的 live Compact。对 R167 长会话逐个物理请求核账后发现 transcript generation 1
+  虽正确从约 103.9k 压到 10.5k，但摘要请求自身约 108k 输入没有 cache-read；根因是 `_summarize` 把旧摘要、
+  操作证据和完整 transcript 重新串成一个巨型 prompt，未携带普通轮的 system/tools/native messages。
+- 会话运行时 `会话运行时-rs/core/src/compact.rs` 克隆完整历史并在末尾追加 synthetic compact user input；终端交互
+  `src/services/compact/compact.ts` 与 `src/utils/forkedAgent.ts` 明确复制 parent system、user/system context、
+  tools、model、完整 messages 与 thinking，避免约 98% 缓存丢失。my-agent 不复制其 session 实现，而是在
+  `conversation/compact_provider_surface.py` 复用正常运行的 tool snapshot、PromptBuilder、native tool resolver
+  和 provider system instruction，冻结一次 immutable cache surface 后供所有 transcript 候选使用。
+- previous summary 使用普通下一轮相同的 `CompactionSummary` envelope，后接待压缩 canonical native messages；
+  synthetic 摘要指令是唯一 volatile suffix。Gateway、后台 main、child/grandchild 与手动命令都传结构化
+  allowed-tools/prompt-files/system/context scope。若 provider overflow 发生在 `tool_search` 后，临时 Schema 只由
+  carried tool archive 的 typed envelope 恢复；普通成功轮已消费的 Schema 不跨轮复活。
+- 工具 Schema 只用于缓存 key，auxiliary summary 没有 handler/工具循环；任何 ToolCall 都丢弃模型正文并用
+  bounded mechanical fallback。下一步真实 TUI 要分别证明 main、child、grandchild；主代理成功只覆盖共用
+  算法，不能证明独立 agent thread、runner cancel/recovery 和嵌套 durable wake。
+
 ## 2026-09-04 Shell 前像只保护交付物并在权威结算后回收【状态：Focused 通过，真 TUI 待验】
 
 - R167 真 TUI 长调研在同一 owner 内跑 8 个子代理时，`data/artifact_backups/v1` 很快出现约 29 份

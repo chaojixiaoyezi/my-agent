@@ -71,6 +71,7 @@ from agent_py_agent.agent.ingestion.watch_state import (
 )
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.models import TaskStatus
+from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 
@@ -108,6 +109,17 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _native_test_capability(provider: str, endpoint: str) -> ProviderToolCapability:
+    return ProviderToolCapability(
+        provider=provider,
+        endpoint=endpoint,
+        model="test-model",
+        stream=False,
+        native_supported=True,
+        evidence="test_backend_declares_native_tools",
+    )
 
 
 def _bind_durable_task(
@@ -2764,6 +2776,11 @@ def test_manual_compact_uses_canonical_checkpoint_lane_and_custom_instructions(t
     class SummaryBackend:
         name = "summary-test"
 
+        def probe_tool_capability(self):
+            return _native_test_capability(
+                self.name, "local://manual-compact-test"
+            )
+
         def generate(self, prompt: str, **_kwargs) -> ModelResponse:
             prompts.append(prompt)
             return ModelResponse(text="已保留的会话摘要", backend=self.name)
@@ -2877,6 +2894,11 @@ def test_manual_compact_stop_interrupts_provider_and_preserves_generation(tmp_pa
 
     class BlockingSummaryBackend:
         name = "blocking-summary-test"
+
+        def probe_tool_capability(self):
+            return _native_test_capability(
+                self.name, "local://manual-compact-stop-test"
+            )
 
         def generate(self, _prompt: str, **_kwargs) -> ModelResponse:
             entered.set()

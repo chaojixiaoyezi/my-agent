@@ -1,5 +1,16 @@
 # TEST CHECKLIST
 
+## R169 Transcript Compact 普通请求缓存面
+
+- [x] Gateway 前台/后台、手动 `/compact`、child/grandchild transcript Compact 均通过同一 typed surface
+  复用普通模型轮的 stable prompt、system、原生工具 Schema 与 canonical provider messages；摘要指令只在末尾。
+- [x] 摘要 auxiliary call 不执行工具；provider 返回 ToolCall 时弃用正文并落机械摘要，generation/checkpoint
+  仍只由既有验证与 CAS 推进。
+- [x] provider overflow 后尚未消费的 `tool_search` Schema 只从 typed carried archive 恢复；成功模型轮后的
+  临时工具不跨轮复活。Gateway/background/child/TUI/control 相关 287 项 focused 通过。
+- [ ] `.10` 唯一 Gateway + MiniMax-M2.7 真 TUI：两路 main-only 分别触发自然 Compact 与手动/取消/续作，
+  再各触发 child、grandchild 自然 Compact；逐条核对动画、generation、cache-read、上下文事实和副作用不重做。
+
 ## R168 Shell 前像范围与结算回收
 
 - [x] `tool_output` 新登记行携带结构化 archive role 与 shell exclusion；旧行默认排除，显式 include 优先，
@@ -10,8 +21,8 @@
   失败/UNKNOWN 不清理，幂等 replay 会再次通知，hook 失败不篡改已结算终态。
 - [x] changed/invalid 前像 blob 在 manifest 删除后仍能通过 opaque registry ref 恢复；跨 owner 和 no-follow
   边界沿用 R167 合同。
-- [ ] `.10` 单 Gateway + fresh MiniMax-M2.7 TUI 连续产生工具输出和 shell，确认 snapshots 不再累计复制
-  `tool_output`、正常结算零 manifest，并记录前后 I/O/目录数量。
+- [x] `.10` 单 Gateway + fresh MiniMax-M2.7 TUI `ma-r168-110-u381-artifact-linear` 连续产生 5,000 行工具
+  输出和 shell；tool archive 仍可读，snapshots 不再复制它，正常结算后 manifest/blob 均为 0。
 
 ## R167 Shell 产物保护迁出项目树
 

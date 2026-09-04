@@ -19,15 +19,17 @@
 
 ### Shell 产物保护不污染用户项目
 
-状态：实现与 focused 通过，待 `.10` MiniMax-M2.7 真 TUI
+状态：R167/R168 已落地，focused 与 `.10` MiniMax-M2.7 真 TUI 通过；后台 shell 另待验证
 
 解决问题：R165 真任务在项目根执行 pytest 时，`run_command` 会先把已登记的 `test_*.py` 原名复制到
 `<task>/data/artifacts/shell_backups/`，同一条 pytest 随即把框架副本再次收集；无变化命令还会永久留下副本。
 当前新增唯一 `owner_data/artifact_backups` 权威根，从 HomePaths 经 ToolRegistry 显式注入，管理员 Full Access
 在外部 cwd 也不随项目漂移。副本使用无原扩展的哈希 blob、owner-local opaque ref、临时文件 + fsync +
 原子 replace；shell 后内容未变立即删除本次 blob。终端交互 的 owner 配置目录/哈希文件历史用于存放与命名
-对照，会话运行时 shell snapshot 的临时提交、Drop/过期清理用于原子性和生命周期对照。后台 shell 当前仍不冒充
-已覆盖，真实 TUI 先验收前台 pytest 不再重复收集、任务树无 `shell_backups`、owner 私有根无 no-op 垃圾。
+对照，会话运行时 shell snapshot 的临时提交、Drop/过期清理用于原子性和生命周期对照。R168
+`ma-r168-110-u381-artifact-linear` 已用 5,000 行真实工具输出验证 archive 仍可恢复，项目树没有内部备份，
+结算后 manifest/blob 均为 0，工具历史不会被下一条 shell 递归复制。后台受管 shell 要等真实进程退出事件
+接入产物复核，继续作为独立边界，不由本次前台证据冒充完成。
 
 ### Compact 浅压缩与缓存重建成本
 
@@ -41,6 +43,19 @@ schema 只参与缓存且没有执行入口。低于 trigger 的有效候选继�
 `ma-r166-110-compact-cache` 已在一个 8-child 长任务中验证 main 2 代、child 1 代、进度动画、持续 cache-read、
 Compact 后继续工作与最终收口；child 从 118,696 压到 73,217，main live-tool 从 85,161 压到 726。结构化
 RuntimeFacts 的进一步替换只在后续真实账本仍显示不可接受的 shallow/cost 时再设计，不预先扩大改动。
+
+### Transcript Compact 复用普通请求缓存前缀
+
+状态：R169 focused 通过，待 `.10` MiniMax-M2.7 真 TUI
+
+解决问题：R166 已让 live Compact 保持当前模型轮的完整缓存面，但旧 transcript Compact 仍把 earlier summary、
+operation evidence 和全部消息拼成一条新 prompt；它虽然正确提交 ConversationThread generation，却让首个大
+摘要请求约 108k 输入落到冷前缀。当前按 会话运行时 `会话运行时-rs/core/src/compact.rs` 的“完整 history 后追加 synthetic
+compact input”和 终端交互 `src/services/compact/compact.ts`、`src/utils/forkedAgent.ts` 的 cache-safe fork
+适配：Gateway 前台/后台、手动命令和每层 agent thread 都从普通运行时同一 tool snapshot/PromptBuilder 生成
+stable prefix，同一 system/tools/canonical native messages 在前，摘要要求在最后。摘要没有工具执行循环；
+provider overflow 时仅从 typed archive 恢复尚未消费的 deferred tool Schema。下一步用主代理-only 的自然与
+手动两路 TUI 快速验证，再各跑一条 child/grandchild 自然 Compact；主代理通过不能替代后两条独立线程证据。
 
 ### 模型前置失败后的 run/attempt 终态
 

@@ -6,6 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.backends.anthropic_prompt_cache import (
+    anthropic_messages_with_optional_cache,
+    anthropic_prompt_cache_projection,
+)
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderResponseError
 from agent_py_agent.agent.conversation.compact import (
@@ -38,26 +42,46 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _prompt_operation_evidence,
 )
 from agent_py_agent.agent.memory_store import MemoryRecord
+from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 
 
-class _SummaryBackend:
+# Test helper: production transcript Compact now uses the same native provider surface as a normal
+# turn, so summary fakes must explicitly declare native-tool capability instead of taking a text path.
+class _NativeSummaryBackend:
+    name = "native-summary-test"
+
+    def probe_tool_capability(self) -> ProviderToolCapability:
+        return ProviderToolCapability(
+            provider=self.name,
+            endpoint="local://conversation-compact-test",
+            model="test-model",
+            stream=False,
+            native_supported=True,
+            evidence="test_backend_declares_native_tools",
+        )
+
+
+class _SummaryBackend(_NativeSummaryBackend):
     name = "summary-test"
 
     def __init__(self) -> None:
         self.calls = 0
         self.prompts: list[str] = []
+        self.kwargs: list[dict[str, object]] = []
 
-    def generate(self, prompt: str, **_kwargs) -> ModelResponse:
+    def generate(self, prompt: str, **kwargs) -> ModelResponse:
         self.calls += 1
         self.prompts.append(prompt)
+        self.kwargs.append(dict(kwargs))
         return ModelResponse(
             text="用户的暗号是紫藤；较早工作已经讨论，仍需继续后续步骤。",
             backend=self.name,
         )
 
 
-class _ConflictingSummaryBackend:
+class _ConflictingSummaryBackend(_NativeSummaryBackend):
     name = "conflicting-summary-test"
 
     def generate(self, prompt: str, **_kwargs) -> ModelResponse:
@@ -67,7 +91,7 @@ class _ConflictingSummaryBackend:
         )
 
 
-class _OversizedSummaryBackend:
+class _OversizedSummaryBackend(_NativeSummaryBackend):
     name = "oversized-summary-test"
 
     def __init__(self) -> None:
@@ -78,7 +102,7 @@ class _OversizedSummaryBackend:
         return ModelResponse(text="过大的摘要" * 20_000, backend=self.name)
 
 
-class _EmptySummaryBackend:
+class _EmptySummaryBackend(_NativeSummaryBackend):
     name = "empty-summary-test"
 
     def __init__(self) -> None:
@@ -88,6 +112,29 @@ class _EmptySummaryBackend:
         del prompt
         self.calls += 1
         return ModelResponse(text="", backend=self.name)
+
+
+class _ToolCallingSummaryBackend(_SummaryBackend):
+    name = "tool-calling-summary-test"
+
+    def generate(self, prompt: str, **kwargs) -> ModelResponse:
+        self.calls += 1
+        self.prompts.append(prompt)
+        self.kwargs.append(dict(kwargs))
+        return ModelResponse(
+            text="我将调用工具后再总结。",
+            backend=self.name,
+            tool_use_blocks=[
+                {
+                    "id": "compact-tool-call-must-not-run",
+                    "name": "write_file",
+                    "input": {
+                        "path": "compact-tool-must-not-run.txt",
+                        "content": "unsafe",
+                    },
+                }
+            ],
+        )
 
 
 def test_compact_failure_preserves_typed_provider_error_code() -> None:
@@ -402,6 +449,37 @@ def test_completed_empty_compact_response_commits_mechanical_fallback(tmp_path) 
     )
     assert "紫藤项目" in result.thread.summary
     assert "8080" in result.thread.summary
+
+
+def test_transcript_compact_tool_call_is_never_executed(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    backend = _ToolCallingSummaryBackend()
+    agent.backend = backend
+    request = _request("ou_compact_no_tools")
+    context = _context(agent, request, "gw-create", "开始")
+    for role, content in (
+        ("user", "请保留本轮真实事实。"),
+        ("assistant", "本轮已经正常完成。"),
+    ):
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            context,
+            request_id=f"gw-no-tools-{role}",
+            role=role,
+            content=content,
+        )
+
+    compacted = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(agent, request, "gw-force", "继续"),
+        force_compact=True,
+    )
+
+    assert compacted.compact_generation == 1
+    assert compacted.compact_summary.startswith(
+        "[conversation-compact-mechanical-fallback]"
+    )
+    assert not (tmp_path / "compact-tool-must-not-run.txt").exists()
 
 
 def test_compact_keeps_exact_user_and_final_answer_landmarks_when_model_omits_them() -> None:
@@ -1371,6 +1449,10 @@ def test_forced_compact_keeps_current_gateway_turn_out_of_summary(tmp_path) -> N
     assert refreshed.compact_generation == 1
     assert backend.calls == 1
     assert current_marker not in backend.prompts[0]
+    assert current_marker not in json.dumps(
+        backend.kwargs[0].get("messages") or [],
+        ensure_ascii=False,
+    )
     assert any(
         row.metadata.get("gateway_request_id") == "gw-current" and row.content == current_marker
         for row in tail
@@ -1418,10 +1500,92 @@ def test_forced_compact_includes_completed_checkpoint_from_same_gateway_request(
     assert errors == []
     assert refreshed.compact_generation == 1
     assert backend.calls == 1
-    assert user_marker in backend.prompts[0]
-    assert assistant_marker in backend.prompts[0]
+    provider_history = json.dumps(
+        backend.kwargs[0].get("messages") or [],
+        ensure_ascii=False,
+    )
+    assert user_marker in provider_history
+    assert assistant_marker in provider_history
+    assert user_marker not in backend.prompts[0]
+    assert assistant_marker not in backend.prompts[0]
+    layout = prompt_cache_layout(backend.prompts[0])
+    assert layout is not None
+    assert "# System" in layout.stable_prefix
+    assert "# Tools" in layout.stable_prefix
+    assert "You maintain a conversation summary" in layout.volatile_suffix
+    tools = backend.kwargs[0].get("tools")
+    assert isinstance(tools, list) and tools
+    assert getattr(backend.kwargs[0].get("tool_choice"), "mode", "") == "auto"
+    projection = anthropic_prompt_cache_projection(
+        system_instruction="",
+        prompt=backend.prompts[0],
+        cache_enabled=True,
+        native_messages=True,
+    )
+    wire_messages, wire_tools = anthropic_messages_with_optional_cache(
+        prompt=projection.prompt,
+        messages=list(backend.kwargs[0].get("messages") or []),
+        tools=tools,
+        cache_enabled=True,
+        stable_user_prefix=projection.stable_user_prefix,
+        stable_system_cache_active=projection.stable_system_cache_active,
+        structured_native_layout_active=projection.structured_native_layout_active,
+    )
+    assert "You maintain a conversation summary" in json.dumps(
+        wire_messages[-1],
+        ensure_ascii=False,
+    )
+    assert "cache_control" not in wire_messages[-1]["content"][-1]
+    assert any(
+        isinstance(block, dict) and block.get("cache_control") == {"type": "ephemeral"}
+        for message in wire_messages[:-1]
+        for block in (
+            message.get("content", [])
+            if isinstance(message.get("content"), list)
+            else []
+        )
+    )
+    assert wire_tools[-1]["cache_control"] == {"type": "ephemeral"}
     assert stored is not None and stored.compact_source_messages == 2
     assert tail == []
+
+
+def test_transcript_compact_preserves_pending_deferred_tool_surface_after_overflow(
+    tmp_path,
+) -> None:
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    backend = _SummaryBackend()
+    agent.backend = backend
+    request = _request("ou_deferred_tool_compact")
+    first = _context(agent, request, "gw-create", "开始")
+    for role in ("user", "assistant"):
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            first,
+            request_id=f"gw-deferred-{role}",
+            role=role,
+            content=f"待压缩 {role}",
+        )
+
+    refreshed = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(
+            agent,
+            request,
+            "gw-force-deferred",
+            "继续",
+            loaded_tool_names=("get_goal",),
+        ),
+        force_compact=True,
+    )
+    tool_names = {
+        str(item.get("name") or "")
+        for item in (backend.kwargs[0].get("tools") or [])
+        if isinstance(item, dict)
+    }
+
+    assert refreshed.compact_generation == 1
+    assert "get_goal" in tool_names
 
 
 def test_gateway_thread_marks_runtime_context_as_conversation_scoped(tmp_path) -> None:

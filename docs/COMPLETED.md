@@ -1,5 +1,15 @@
 # COMPLETED
 
+## 2026-09-04 R167/R168 Shell 前像存储与工具归档分型
+
+- shell 前像已从用户项目树迁到 owner `data/artifact_backups`，使用 opaque hash blob、原子写入和严格
+  owner/symlink 边界；无变化内容立即清理，真实改动的旧内容继续由 registry ref 恢复。
+- canonical `tool_output` archive 现在带结构化角色和 shell exclusion，不再被每条后续命令当用户产物递归
+  复制。ToolOperation 成功/失败结算后统一通知回收 crash-window manifest；UNKNOWN 继续保留供恢复核对。
+- `.10` 单 Gateway、MiniMax-M2.7 真 TUI `ma-r168-110-u381-artifact-linear` 已输出 5,000 行、修改并复核
+  真实交付物；完整工具回执仍可读取，项目内无内部备份，`operation_manifests=0`、`backup_blobs=0`。
+  受管后台 shell 的退出后复核仍是后续独立工作，不包含在本项完成范围。
+
 ## 2026-09-04 R166 Compact 缓存面与真实可达水位
 
 - live Compact 的资格预估和最终提交改用同一个 native IR 删除语义，恢复目标不再被误当第二道硬门；

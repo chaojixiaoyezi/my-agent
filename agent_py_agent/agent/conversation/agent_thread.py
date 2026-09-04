@@ -26,6 +26,7 @@ from .tool_context_window import (
 
 if TYPE_CHECKING:
     from .compact import ConversationCompactResult
+    from .compact_provider_surface import ConversationCompactModelSurface
 
 _AGENT_THREAD_CHANNEL = "agent-runtime"
 
@@ -113,8 +114,9 @@ def ensure_subagent_thread(manager: object, task: object) -> ConversationThread 
 
 
 # LLM: The current child prompt is appended once before preflight and excluded by its typed request
-# id. The runner interrupt check crosses summary/checkpoint/CAS exactly like the foreground path.
-# 函数用途: 子代理调用模型前记录输入并可中断地自动 Compact，再生成有界历史注入。
+# id. The runner supplies the same model surface used by its following ordinary turn; interruption
+# crosses summary/checkpoint/CAS exactly like the foreground path.
+# 函数用途: 子代理调用模型前记录输入，以相同工具与 system 缓存面执行可中断 Compact，再生成有界历史注入。
 def prepare_subagent_thread_turn(
     agent: object,
     task: object,
@@ -124,6 +126,7 @@ def prepare_subagent_thread_turn(
     force: bool = False,
     progress_callback: Callable[[dict[str, object]], object] | None = None,
     interrupt_check: CompactInterruptCheck | None = None,
+    model_surface: ConversationCompactModelSurface | None = None,
 ) -> AgentThreadTurnContext:
     from .compact import ConversationCompactOptions, prepare_conversation_context
 
@@ -160,6 +163,7 @@ def prepare_subagent_thread_turn(
             force=bool(force),
             progress_callback=progress_callback,
             interrupt_check=interrupt_check,
+            model_surface=model_surface,
         ),
     )
     return AgentThreadTurnContext(

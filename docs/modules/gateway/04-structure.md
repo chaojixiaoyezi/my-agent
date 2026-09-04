@@ -168,6 +168,10 @@
 - 记忆召回、推荐工具、工作区、wake/runtime injection 和执行事实属于本次请求的动态尾部，不得移动到旧
   messages 之前。普通回合只追加消息，真正 Compact 才能以 committed summary 一次替换旧前缀并推进
   generation；TUI Context、模型正文或字符数不能充当 cache-read 证据。
+- transcript Compact 也必须使用普通轮同一 tool snapshot、stable PromptBuilder 前缀、provider system 和
+  canonical native messages，摘要指令是最后一条 synthetic user 输入。候选分区共用一次冻结的缓存面；
+  摘要调用没有工具循环，返回 ToolCall 时改用机械摘要。provider overflow 后尚未消费的 `tool_search` Schema
+  只由 carried archive 的 typed envelope 恢复，成功轮已经消费的临时工具不得跨轮复活。
 - child/grandchild 通过各自 ConversationThread 生成相同 seed，保持 thread、Compact、workspace 与权限独立。
   presentation-only 辅助调用默认不携带长期历史，避免一次任务上下文被复制到第二个模型表达轮。
 

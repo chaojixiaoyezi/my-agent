@@ -1286,6 +1286,8 @@ def _run_background_main_turn_with_compact(
             current,
             current_prompt=user_prompt,
             activity_sink=activity_sink,
+            run_params=run_params,
+            carried_archive_tool_calls=carried_archive_tool_calls,
         )
         if refreshed.compact_generation <= current.compact_generation:
             from .active_turn_compact import (
@@ -1351,17 +1353,21 @@ def _next_background_overflow_carry(
     return next_archive, next_inputs
 
 
-# LLM: The latest ConversationThread and its canonical Compact CAS are the only retry authority;
-# the registered background interrupt crosses summary and commit, while activity is display-only.
-# 函数用途: 可中断地压缩后台主代理已完成前缀，并返回最新线程供同一轮继续。
+# LLM: The latest ConversationThread and canonical Compact CAS are the only retry authority. The
+# carried archive supplies pending one-call tools; interrupt crosses summary/commit, display does not.
+# 函数用途: 以后台主代理已完成历史和当前工具归档可中断地压缩，并返回同一轮继续用的最新线程。
 def _compact_background_main_thread(
     runtime: BackgroundMainAgentRuntime,
     current: ConversationThread,
     *,
     current_prompt: str,
     activity_sink: BackgroundMainActivitySink,
+    run_params: RunParams,
+    carried_archive_tool_calls: list[dict[str, object]],
 ) -> ConversationThread:
+    from ..agent_core.runtime.loop_support import pending_carried_loaded_tool_names
     from .compact import ConversationCompactOptions, prepare_conversation_context
+    from .compact_provider_surface import ConversationCompactModelSurface
 
     latest, load_error = runtime.store.load_thread_report(current.thread_id)
     if load_error is not None or latest is None:
@@ -1375,6 +1381,21 @@ def _compact_background_main_thread(
             force=True,
             progress_callback=activity_sink.write_conversation_compact_progress,
             interrupt_check=is_interrupted,
+            model_surface=ConversationCompactModelSurface(
+                allowed_tools=(
+                    tuple(run_params.allowed_tools)
+                    if run_params.allowed_tools is not None
+                    else None
+                ),
+                prompt_files=tuple(run_params.prompt_files or ()),
+                system_prompt_override=run_params.system_prompt_override,
+                context_scope=str(run_params.context_scope or "conversation"),
+                loaded_tool_names=tuple(
+                    sorted(
+                        pending_carried_loaded_tool_names(carried_archive_tool_calls)
+                    )
+                ),
+            ),
         ),
     )
     return compact.thread

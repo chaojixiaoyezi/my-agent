@@ -137,6 +137,7 @@ agent_py_agent/
 |   |   |-- agent_thread_store.py      # agent thread 精确 ID 物化、身份冲突与运行目录校验
 |   |   |-- closeout.py                # 收口状态机 decide_closeout(四改之 2): 终态 done/cancelled/wait_human/wait_handoff/resume_round
 |   |   |-- compact.py                  # 唯一 thread compact：候选验证、一次 CAS 提交与近期 raw tail
+|   |   |-- compact_provider_surface.py # transcript Compact 复用普通轮 stable prompt/system/tools/messages 的缓存面
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
 |   |   |-- compact_checkpoint.py       # owner-scoped 完整 compact 恢复点与代际引用
 |   |   |-- active_turn_compact.py      # 跨工作片工具 archive 到同一 checkpoint/CAS 的恢复压缩与模型投影
