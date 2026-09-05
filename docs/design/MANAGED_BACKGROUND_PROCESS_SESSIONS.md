@@ -79,6 +79,10 @@ run_command(run_in_background=true)
   因此沙箱内 `ps/lsof` 无结果不能推翻这条事实。
 - firewalld 可用时只执行固定的只读 `--state` / `--query-port`，报告“显式放行”“未显式放行”或“未知”；
   service rule、nftables、云安全组、路由、NAT 和上游网络未被观察时不得推断。
+- R179 保留 firewall-cmd 原生退出码：只有 `NOT_RUNNING=252` 证明未运行；超时、权限错误、zone 查询失败
+  保持 `unknown`。逐 zone/port 的 `port_observations` 与 `explicit_rules` 一起返回；混合放行为
+  `partially_allowed`，任一查询未知则总览未知但保留已知行。字段是只读证据，不自动改规则或任务终态。
+  退出码依据 [firewall-cmd 官方手册](https://firewalld.org/documentation/man-pages/firewall-cmd.html#exit_codes)。
 - non-loopback listener 只证明服务接受非回环地址，不证明另一台机器能连接。结果固定要求独立外部探针，
   工具不自动开放端口、不重启服务、不发网络请求。
 

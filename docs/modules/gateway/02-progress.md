@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-09-05 R180 canonical 历史显示恢复
+
+- 修复 exact resume 仅加载问答预览导致已保存思考、工具和 commentary 不显示的问题。`client_service`
+  先解析 authenticated owner/thread，再从相同 canonical rows 返回独立的 `display_events`；模型预览不变。
+- `conversation/history_display.py` 只映射公开类型块；native user 内部注入、签名和参数不透传，工具按 exact id
+  配对，状态只读 `is_error`，无结果显示缺口。TUI 复用同一 reducer，不回灌模型、不执行、不重新排队。
+- 已有真实失败样本为 R179 process-resume，第一轮 canonical 54 native 消息仍在。定向验证覆盖顺序、幂等、
+  空/残缺回合、Audit 排除、原数据不变与客户端边界；R180 两个旧会话真 TUI 已恢复并继续交互，只回看不增加
+  模型调用。完整 Compact 前过程、child 有界环之外的历史与分页仍属 P1，不能提前封板。
+
 ## 2026-09-04 R168/R169 Shell 真机收口与 transcript Compact 缓存面
 
 - R168 `.10` 单 Gateway 真 TUI `ma-r168-110-u381-artifact-linear` 已生成 5,000 行工具输出并执行后续 shell；

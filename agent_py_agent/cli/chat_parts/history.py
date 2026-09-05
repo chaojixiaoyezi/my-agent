@@ -1,6 +1,6 @@
 
 # LLM: 本模块维护 CLI 进程内有界历史，并为显式 Gateway session 恢复提供 ConversationStore 的只读可见投影。
-# 模块用途: 构造最近对话上下文、裁剪本地历史，并恢复已有聊天会话的完整问答。
+# 模块用途: 构造最近对话预览；恢复时另传 canonical 显示事件，避免把问答预览误当完整正文。
 
 from __future__ import annotations
 
@@ -17,17 +17,18 @@ class ConversationTurn:
     assistant_message: str
 
 
-# LLM: GatewayChatHistorySnapshot 只投影 ConversationStore 中同一 chat session 的完整 user/assistant 对；错误必须保留给显式 resume fail-closed。
-# 类用途: 保存从权威会话账本恢复出的可显示历史、线程身份和读取错误。
+# LLM: Snapshot 分开保存问答预览和 display-only 原生事件；只有 turns 可供既有本地预览上下文使用，错误保留给 resume。
+# 类用途: 保存同一会话的预览、完整显示、线程身份与读取错误。
 @dataclass(frozen=True)
 class GatewayChatHistorySnapshot:
     turns: tuple[tuple[str, str], ...] = ()
     thread_id: str = ""
     load_errors: tuple[dict[str, object], ...] = ()
+    display_events: tuple[dict[str, object], ...] | None = None
 
 
 # LLM: 恢复只读 resolve_thread/recent_messages_report，不能创建线程、写第二 transcript 或按正文猜配对；request id 和 role 是唯一配对事实。
-# 函数用途: 从当前 Agent 的 ConversationStore 恢复指定 CLI chat session 最近若干完整回合。
+# 函数用途: 从当前 Agent 的 ConversationStore 恢复指定会话的问答预览和类型正文，不改模型历史。
 def load_gateway_chat_history(
     agent: object,
     session_id: str,
@@ -37,6 +38,7 @@ def load_gateway_chat_history(
     if getattr(agent, "gateway_client_only", False) is True:
         return _load_thin_gateway_chat_history(agent, session_id, max_turns=max_turns)
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
+    from ...agent.conversation.history_display import conversation_history_display_events
 
     selected_session_id = str(session_id or "").strip()
     store = getattr(agent, "conversation_store", None)
@@ -70,11 +72,12 @@ def load_gateway_chat_history(
         turns=turns,
         thread_id=thread_id,
         load_errors=tuple(dict(item) for item in row_errors if isinstance(item, dict)),
+        display_events=conversation_history_display_events(rows, max_turns=max_turns),
     )
 
 
 # LLM: 轻量客户端只能消费 Gateway 的 typed history contract；端点不可用或行格式错误必须显式 fail-closed，不能构造本地 Agent。
-# 函数用途: 从已运行 Gateway 恢复一个 TUI 会话的完整问答历史。
+# 函数用途: 从已运行 Gateway 恢复会话预览与显示事件，不在薄客户端解析内部 native envelope。
 def _load_thin_gateway_chat_history(
     agent: object,
     session_id: str,
@@ -105,6 +108,10 @@ def _load_thin_gateway_chat_history(
         turns=tuple(turns[-max(1, int(max_turns or 1)):]),
         thread_id=str(payload.get("thread_id") or ""),
         load_errors=errors,
+        display_events=(
+            tuple(dict(item) for item in payload["display_events"] if isinstance(item, dict))
+            if isinstance(payload.get("display_events"), list) else None
+        ),
     )
 
 

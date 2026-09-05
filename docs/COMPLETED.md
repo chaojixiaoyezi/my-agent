@@ -1,5 +1,48 @@
 # COMPLETED
 
+## 2026-09-05 R180 已持久化历史的类型恢复
+
+- Gateway 与本地恢复分别传递问答预览和 canonical display-only 事件；原先丢失的思考、commentary、工具与
+  final 复用正常 reducer 显示。无内部 user 注入/签名/参数透传，不回灌模型，不重新排队或调用工具。
+- `.10` `ma-r179-110-process-resume` 首轮历史 Ctrl+Home/思考 Ctrl+O 真实可见，恢复前后均 36 次模型调用；
+  后续普通追问自然完成。`ma-r180-110-long-resume` 恢复五阶段原 session，main/child 代次 2/5，进入和返回
+  原已完成 child 正确，没有新增回看模型调用。
+- 186 项 focused、Ruff、doc sync、strict size、diff、源码/候选 wheel clean-package 均通过，未跑全仓 pytest。
+  本切片不代表 Compact 前完整过程、无限分页和 child 有界环之外的历史已经恢复；这些 P1 边界仍开放。
+
+## 2026-09-05 R179 后台网络证据与停止清理
+
+- 原 firewalld helper 保留原生退出码，查询失败不再说成关闭；逐 zone/port 返回明确放行、未明确放行或未知，
+  部分放行不再冒充全部放行。不新增网络请求、规则写入、模型调用或任务质量判定。
+- `.10` 的 R179 wheel 已通过真实 MiniMax TUI：恢复原交班服务 session 后，实际 network_status 查询
+  public/18778 得到 rc=1、not_explicitly_allowed，明确区分本机监听与外部 LAN 未验证。
+- `gwreq-1788585936-8e660f0e75484386bc731523185c2b30` 经 TUI 停止原进程；受管记录 killed/-15、listener
+  PID 2221390 消失、18778 不再监听，唯一 Gateway 继续运行。此前重复启动的失败进程也均已退出。
+- focused 覆盖超时、授权错误、252 未运行、zone 缺失、全部/部分/未放行；异常分支尚未做 TUI 故障注入。
+  模型此前两次漏查 firewalld 的诊断质量问题保留为 BUG-109，不冒充由此自动消失。
+
+## 2026-09-05 R177 TUI 终态补帧与返回父层即时校准
+
+- final 或 Working 归零后，既有即时 invalidate 之外只登记一枚 one-shot terminal frame；刷新线程消费后立即
+  静止。`.10` `ma-r177-110-tui-final-nav` 第一轮自主派 5 名 child，收齐后用户无按键即看到完整最终回复，
+  Working 同帧撤下。
+- 同一会话第二轮形成 main→coordinator→researcher。孙代理详情自然终态后，Ctrl+G 返回父页约 0.2 秒首帧
+  已显示“已完成”；Enter 回看仍命中同一 run 与历史，再返回 root 时 coordinator 和两名直属 researcher
+  状态、最终回复均正确。
+- 父页即时校准只使用详情页已接收且 `updated_at` 不旧的 typed row，下一 Gateway 全量轮询仍是权威；不改
+  active count、Todo、Goal、selection、history、Compact、缓存、取消或 wake。相关 focused 与静态门通过。
+
+## 2026-09-05 R176 child/grandchild Compact 中断与父级恢复
+
+- `.10` 单 Gateway + MiniMax-M2.7 两路真实 TUI 分别在直属 child 和 depth-2 grandchild 的 Compact
+  summarizing 阶段按 Esc；两份候选均以 `candidate_discarded` 结束，没有推进 generation/checkpoint，也没有
+  执行半份摘要。
+- 直属 child 取消后 main 约 8.4 秒恢复，五名兄弟继续并最终收口；孙代理取消后 exact coordinator 约 3.4 秒
+  开始下一 attempt，随后 coordinator/main 自然 DONE。另一次 Compact 已提交后的停止保留已提交 generation，
+  作为 post-commit 对照，不与 pre-commit 回滚混写。
+- 这关闭了 R154/R169/R170 留下的分层故障门：主代理、child、grandchild 现在各有自然 Compact 成功、压后续跑
+  与中断原子边界证据；算法共享不再被错误当成层级运行链已经自动通过。
+
 ## 2026-09-04 R170 递归派工容量与孙代理 Compact 真机闭环
 
 - 根与任意递归层级现共用唯一 session/owner/task/per-call 容量计算和 owner-local 创建事务；超限批次原子

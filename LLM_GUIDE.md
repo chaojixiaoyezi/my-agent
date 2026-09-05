@@ -185,6 +185,10 @@
 - 本地 `channel=tui` 是 ConversationStore 承载的 transcript channel。后台 model-authored commentary/final
   必须先按 exact wake/request/part 幂等进入 canonical history，再投影 notice；没有 TUI adapter 可以不发送，
   但不能省略历史。未知外部 channel 继续 fail closed，notice/footer 不能反向成为模型历史事实源。
+- 显式 resume 的问答预览不能充当 TUI 正文。Gateway 从同 owner/thread 的 canonical 消息另投影
+  display-only 用户输入、思考、过程回复、工具和 final；TUI 复用正常 reducer，显示事件不能进模型上下文或
+  任务队列。native user 内部注入、签名与工具参数不透传，工具状态只读 typed `is_error`。已不存在于原生
+  快照中的 Compact 前过程仍须按归档恢复，不能用缺失尾部声称全历史已通过。
 - wheel 部署必须使用独立 non-editable runtime venv，并核对进程 executable、pip Location/Editable metadata、
   `module.__file__` 与 schema；中性 cwd 只是其中一门，旧 venv 的 editable `.pth` 即使在 `/root` 也会导入
   旧 checkout。默认 `my-agent` launcher 必须可回滚地指向同一 runtime venv，避免 Gateway 新而 TUI 旧。

@@ -62,6 +62,25 @@ def test_refresh_loop_invalidates_only_active_ticks() -> None:
     assert app.invalidate_calls == 1
 
 
+def test_background_terminal_transition_requests_exactly_one_followup_frame() -> None:
+    runtime = TuiRuntime("background-terminal-frame")
+
+    assert runtime.update_background_activity(1) is True
+    assert runtime.needs_periodic_refresh() is True
+    assert runtime.update_background_activity(0) is True
+    assert runtime.needs_periodic_refresh() is True
+    assert runtime.needs_periodic_refresh() is False
+
+
+def test_background_final_response_requests_exactly_one_followup_frame() -> None:
+    runtime = TuiRuntime("background-final-frame")
+
+    runtime.publish_background_response("最终回复", thread_id="thread-final")
+
+    assert runtime.needs_periodic_refresh() is True
+    assert runtime.needs_periodic_refresh() is False
+
+
 def test_background_activity_updates_goal_and_child_navigation_together() -> None:
     runtime = TuiRuntime("threading-goal-projection")
     calls: list[tuple[str, object]] = []

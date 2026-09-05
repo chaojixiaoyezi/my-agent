@@ -1,5 +1,43 @@
 # DESIGN LEDGER
 
+## 2026-09-05 会话恢复不能使用问答预览代替正文【状态：R180 已部署，持久化尾部恢复真 TUI 通过】
+
+- R179 真实 `/exit → /sessions → resume` 找回了同一 session，但工具和思考消失；原 canonical final metadata
+  中仍有 54 条 native messages、22 次工具调用。根因是客户端只加载 final 配对预览，再据此重建界面。
+- 对照 会话运行时 `tui/src/app/thread_routing.rs::replay_thread_snapshot` 的 typed turn/event replay，以及 终端交互
+  `src/utils/sessionRestore.ts` 返回完整 `result.messages`，恢复显示与模型请求装配必须分开：读取同 owner/thread
+  的 canonical 消息及原生内容块，映射成现有 reducer 的公开事件；问答预览仍只服务原来的本地上下文入口。
+- 原生 user 文本中的运行时注入、system、thinking signature 和工具参数不向前端透传；真实用户输入只认
+  canonical user row。工具配对只认 tool-use id，失败只认 `is_error`，不解析结果正文。显示恢复不执行工具、
+  不回灌模型、不改 Compact generation、缓存前缀、权限或任务状态。
+- 本切片先修已持久化内容的恢复。较老的原生块若已被 active-turn Compact 移除，不能编造回来；长会话分页、
+  Compact 前完整过程与 child 有界展示环之外的原文恢复继续作为 P1 硬门，不用一次普通 resume 代替。
+
+## 2026-09-05 后台网络观测保留未知与部分证据【状态：R179 已部署，正常分支真 TUI 通过】
+
+- R178 LAN 任务两次把 iptables 的 ACCEPT 当成服务器防火墙已排除；实际 firewalld 使用 nftables，18778
+  没有匹配放行规则。模型没有使用既有 `process_session(network_status)`，该失败不能靠重写 final 或增加
+  机器质量验收掩盖。运行存活、端口冲突、主机规则与跨机器连接分别记录。
+- 对照 会话运行时 `core/src/unified_exec/process.rs` 的独立进程状态和 `linux-sandbox/src/bwrap.rs` 的明确
+  network mode；会话运行时 没有这套 firewalld 专用诊断，退出码语义直接依据官方 firewall-cmd 手册。
+  现有观测入口只把明确的 `NOT_RUNNING=252` 判为停止；超时、授权失败和缺少 zone 证据都保留 unknown。
+  每个 zone/port 都保留查询结果，任一成功不得覆盖其余失败或未放行。只读调用数量、权限和外部探针要求不变。
+- R179 `ma-r179-110-process-resume` 实际调用 network_status，正确报告 public/18778 的 rc=1 与外部可达性未验；
+  随后原受管服务停止、端口释放、Gateway 不受影响。查询超时/部分规则分支由 focused 覆盖，未做真 TUI 故障注入。
+
+
+## 2026-09-05 TUI 终态补帧与返回父层名册即时校准【状态：R177 Focused 与 `.10` 真 TUI 通过】
+
+- 后台 final 和 `Working → idle` 已经进入同一 typed reducer，但终态 invalidate 若恰好撞上上一帧渲染收尾，
+  终端可能一直保留旧 Working，直到用户 Ctrl+L。对照 会话运行时
+  `会话运行时-rs/tui/src/tui/frame_requester.rs` 的合帧调度，当前仍以即时 invalidate 为主链，只额外登记一枚
+  one-shot 终帧请求；刷新线程消费一次后立即静止，不恢复空闲常驻重绘。
+- 进入孙代理后只轮询当前精确 run，父页名册会保留进入前快照；返回时不能从文字或 elapsed time 猜状态，
+  但可以把当前页面已经收到的、`updated_at` 不旧于父缓存的 typed run row 合回父页展示。下一次正常 Gateway
+  快照仍全量覆盖，任务状态、重试、取消和 wake 权威完全不在 TUI。
+- 该校准只替换父页面 `subagents` 显示行，不改 active count、Todo、Goal、selection、canonical history 或
+  后端 run；因此已结束 child 仍可按 Enter 查看，Esc 仍只停止当前代理，Ctrl+G 仍只返回层级。
+
 ## 2026-09-04 能力申请必须声明结构化授权目标【状态：R172 Focused 通过，真 TUI 待复验】
 
 - 能力申请的 `problem`、`expected_output`、`needed_capability` 只给模型和父级解释缺口，不能作为授权对象。
@@ -12,7 +50,7 @@
 - 输入门与自动授权防线复用同一结构化 target 判定，既阻止新空请求，也覆盖旧账/内部旁路。逻辑只读取
   schema 字段，不从自然语言中的 `create_subagents`、`shell` 等词猜权限，不改变逐次危险 ToolCall 审批。
 
-## 2026-09-04 用户从代理详情页停止后必须显式交接直属父级【状态：Focused 通过，真 TUI 待复验】
+## 2026-09-04 用户从代理详情页停止后必须显式交接直属父级【状态：R176 Focused 与真 TUI 通过】
 
 - 用户控制取消与模型调用 `cancel_subagents` 不是同一个通知时机：后者在当前父模型轮已拿到工具结果；前者在
   另一个 TUI/Web 控制请求中发生，若只写 child `CANCELLED`，正在等待的父级不会凭空得知。
@@ -27,6 +65,9 @@
   工具结果，应继续按普通已处理终态合批；`attributes.cancel_subagents.source=user_agent_control` 表示外部用户
   改变了一个正在睡眠的父级之 child 集，必须立即标为 direct-parent attention。该来源随 canonical state
   持久化，因此即时交接与崩溃后的周期 reconcile 使用同一裁决，不依赖易失函数参数或中文 reason。
+- `.10` R176 已分别在直属 child 与 depth-2 grandchild 的真实 Compact summarizing 阶段按 Esc：候选均写
+  `conversation_compaction_superseded/stage=candidate_discarded`，旧 generation/checkpoint 原样保留；直属父级
+  分别约 8.4 秒和 3.4 秒恢复，运行中兄弟不受影响，随后 coordinator/main 自然完成。
 
 ## 2026-09-04 根/子/孙代理共享同一创建容量事实【状态：R170 focused 与真 TUI 通过】
 

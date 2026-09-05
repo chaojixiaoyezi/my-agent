@@ -1,5 +1,43 @@
 # TESTS
 
+## R180 会话显示恢复定向验证
+
+- `test_conversation_history_display.py` 验证 canonical 用户输入、思考、commentary、工具、final 的顺序与幂等，
+  未结束输入保留，原始 metadata 不变，内部注入/签名/参数不外发，未知工具结果不伪装成功；控制事件不能重放。
+- Gateway client、CLI history、chat 启动、TUI runtime、threading、navigation、prompt_toolkit pipe 一起做 focused。
+  真 TUI 使用已结束的 R178 process session，实际退出/列会话/恢复，再检查 Ctrl+Home、Ctrl+O 和最后正文；
+  原 session、模型调用数量、后台进程与 Gateway 身份必须独立核对。
+- 这不是 Compact 前完整过程和无限历史分页验收；原生快照之外的历史仍须独立补齐，不能靠补造内容通过。
+
+## 2026-09-05 R178/R179 长会话和后台进程网络
+
+- `ma-r178-110-long-sequence`：同一 exact session 依次做八项目多代理调研、保存选型建议、纯聊天追问、
+  coordinator 组织下级用 Go 复刻 Ripgrep；每轮分别核对 task link、message、Compact generation 与 usage。
+  源码作为 pristine inputs 提供，测试者不写复刻实现。报告质量与框架生命周期结果独立评分。
+- `ma-r178-110-process-lan`：自然请求创建交班报告服务并持续监听 18778，外部 Mac 独立探测，随后在 TUI
+  追加排查和端口冲突请求；最后仍须由该 TUI 停止并核对原进程树。禁止测试者旁路开防火墙或替换产物。
+- firewall focused 覆盖查询超时、拒绝、启动失败、NOT_RUNNING、zone 查询失败、空 zones、全部/部分/无
+  显式放行；`query-port` 返回 0/1 是有效真假结果，其余错误码不是未放行或防火墙关闭。命令：
+  `.venv/bin/python -m pytest agent_py_agent/tests/test_process_sessions.py -q --tb=short`。
+- 原 stop 用例改为与启动相同的 host-bound executor；此前直接注入 owner-a 与执行器 canonical owner 不同，
+  只触发越权拒绝。修测试接线，不修改生产身份裁决。
+
+## 2026-09-05 R176/R177 Compact 中断与 TUI 终态帧
+
+- 直属 child 与 depth-2 grandchild 必须各自在真实 `conversation_compaction_progress/stage=summarizing`
+  后由详情页 Esc 中断；只接受同 operation 的 `candidate_discarded`、generation/checkpoint 未推进、目标 run
+  `CANCELLED`、直属父级新 attempt 自动开始和 sibling 不受影响的组合证据。Compact 已完成后再停止只能证明
+  post-commit 取消，不能冒充候选回滚。
+- 后台 final 与活动计数归零各登记一枚 one-shot terminal frame；连续两次
+  `needs_periodic_refresh()` 必须为 True/False，空闲 runtime 不得持续刷新。
+- 孙代理详情收到比父名册更新的 canonical terminal row 后，Ctrl+G 返回应立即在父页显示该终态；若父名册
+  的 structured `updated_at` 更新，则不得用详情旧行覆盖。该行为只更新展示 runtime，不写 agent/task 账。
+- focused：`.venv/bin/python -m pytest agent_py_agent/tests/test_tui_agent_navigation.py
+  agent_py_agent/tests/test_tui_threading.py agent_py_agent/tests/test_tui_prompt_toolkit_pipe.py -q --tb=short`。
+- 真 TUI：`ma-r176-110-child-compact-cancel`、`ma-r176-110-grandchild-compact-cancel` 完成 CAS/父级 wake；
+  候选版 `ma-r177-110-tui-final-nav` 第一轮在无 Ctrl+L/滚动/输入的情况下自动显示 final 并撤下 Working，
+  同会话第二轮形成三层树；孙代理终态后返回父页的 0.2 秒首帧已显示完成，Enter 回看命中同一 run/history。
+
 ## 2026-09-04 R172 空能力授权防线
 
 - `capability_request` 只有 problem/needed-capability prose、所有结构化目标为空时，必须在写 request、wake

@@ -434,6 +434,10 @@ class _TuiBackgroundActivityController:
             next_state = _next_background_activity_state(current, count, snapshot)
             if next_state == current:
                 return False
+            # 从动画态切入静止终态时，再排一帧给刷新线程。即时 store
+            # invalidate 仍是主链；这一帧只防止终态事件恰好撞上渲染收尾而留屏。
+            if current.count > 0 and next_state.count == 0:
+                owner._terminal_refresh_pending = True
             if not current.visible() and next_state.visible():
                 next_state = replace(next_state, started_at=time.time())
                 kind, phase = "background_activity_started", "started"
@@ -451,6 +455,30 @@ class _TuiBackgroundActivityController:
             )
             if not next_state.visible():
                 self._state = replace(next_state, started_at=0.0)
+        return True
+
+    # LLM: Returning from a descendant may expose a parent runtime whose last
+    # child roster predates the descendant's own canonical detail snapshot.
+    # Replace only those display rows; task count, Todo, Goal, and lifecycle
+    # authority remain untouched and the next normal poll still replaces the
+    # complete projection.
+    # 函数用途: 从下级页面返回时，立即用已知的最新子代理状态修正父页面名册，避免短暂显示旧的“运行中”。
+    def reconcile_subagents(self, value: object) -> bool:
+        rows = _normalize_subagent_activity_rows(value)
+        owner = self._owner
+        with owner._lock:
+            current = self._state
+            if rows == current.subagents:
+                return False
+            next_state = replace(current, subagents=rows)
+            self._state = next_state
+            owner._publish(
+                "background_activity_updated",
+                "updated",
+                f"background-activity:{owner.session_id}",
+                _background_activity_payload(next_state),
+                request_id=f"background:{owner.session_id}",
+            )
         return True
 
 
@@ -753,13 +781,18 @@ def _normalize_subagent_activity_rows(
 # a second lifecycle or execution source.
 # 类用途: 为 TuiRuntime 提供可靠控制命令展示与已提交 Compact 边界的公开入口。
 class _TuiConversationBoundaryRuntimeMixin:
-    # LLM: Recovery projects only caller-loaded canonical turns. This mixin does
-    # not read storage, persist text, or submit replayed history to a model.
-    # 函数用途: 在欢迎卡后恢复用户/助手可见历史，并给每轮分配稳定的本地展示 ID。
+    # LLM: Recovery prefers host-projected canonical display events; plain callers may provide
+    # only their visible pairs. Neither path reads storage, writes history, queues or calls a model.
+    # 函数用途: 在欢迎卡后用同一 reducer 恢复正文、工具和思考；不让恢复触发执行或 Working。
     def publish_recovered_history(
         self,
         turns: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+        *,
+        display_events: tuple[dict[str, object], ...] | None = None,
     ) -> None:
+        if display_events is not None:
+            self._publish_recovered_display_events(display_events)
+            return
         for index, pair in enumerate(tuple(turns or ()), start=1):
             if not isinstance(pair, (list, tuple)) or len(pair) != 2:
                 continue
@@ -781,6 +814,28 @@ class _TuiConversationBoundaryRuntimeMixin:
                     {"text": assistant_text},
                     request_id=history_request_id,
                 )
+
+    # LLM: Accept only terminal display kinds under a stable history namespace. This path cannot
+    # replay permission/control/lifecycle events or restore activity; duplicate blocks stay idempotent.
+    # 函数用途: 校验公开历史事件并提交现有显示账，不创建第二种界面块或执行旁路。
+    def _publish_recovered_display_events(self, events: tuple[dict[str, object], ...]) -> None:
+        for item in events:
+            request_id = str(item.get("request_id") or "")
+            block_id = str(item.get("block_id") or "")
+            kind = str(item.get("kind") or "")
+            phase = str(item.get("phase") or "")
+            payload = item.get("payload")
+            if (
+                item.get("schema") != "conversation_history_display.v1"
+                or not request_id.startswith("history:")
+                or not block_id.startswith(f"{request_id}:")
+                or kind not in {"user_message", "assistant_completed", "thinking_completed",
+                               "tool_completed", "tool_failed", "system_message"}
+                or phase not in {"completed", "failed"}
+                or not isinstance(payload, Mapping)
+            ):
+                continue
+            self._publish(kind, phase, block_id, dict(payload), request_id=request_id)
 
     # LLM: A persisted slash control is shown as a local user-shaped block but
     # never enters the model queue or canonical conversation messages. The
@@ -920,6 +975,12 @@ class _TuiBackgroundActivityRuntimeMixin:
     ) -> bool:
         return self._background_activity.update(active_task_count, snapshot)
 
+    # LLM: This is a display-only reconciliation hook for navigation return.
+    # It cannot alter active counts, task state, or any backend run record.
+    # 函数用途: 返回父代理页面时，先把已经掌握的直属子代理新状态画出来，随后仍由正常轮询全量校准。
+    def reconcile_background_subagents(self, value: object) -> bool:
+        return self._background_activity.reconcile_subagents(value)
+
     # LLM: A final background notice may arrive after the active-task block was
     # removed. A typed empty sequence is an authoritative clear, while a value
     # of the wrong type is absent/invalid and must not disturb the last snapshot.
@@ -1012,6 +1073,9 @@ class _TuiBackgroundActivityRuntimeMixin:
             return
         request_id = f"bg-response:{thread_id or self.session_id}"
         with self._lock:
+            # 最终回复进入 reducer 时仍会立即 invalidate；额外的一次刷新由
+            # needs_periodic_refresh 消费，语义等同 会话运行时 FrameRequester 的终帧请求。
+            self._terminal_refresh_pending = True
             self._background_notice_index += 1
             block_id = f"{request_id}:{self._background_notice_index}"
             self._publish(
@@ -1165,6 +1229,7 @@ class TuiRuntime(
         self._notice_text = ""
         self._notice_kind = ""
         self._notice_until = 0.0
+        self._terminal_refresh_pending = False
         self._lock = threading.RLock()
         self._permission_coordinator = TuiPermissionCoordinator(self)
         self._background_activity = _TuiBackgroundActivityController(self)
@@ -1382,11 +1447,12 @@ class TuiRuntime(
                 self._notice_until = 0.0
             return self._notice_text
 
-    # LLM: Periodic refresh stays alive only for time-varying typed state. An expired notice
-    # clears itself here and requests exactly one terminal frame so stale footer text cannot
-    # remain painted after the timer stops. A retained terminal-agent roster is interactive but
-    # static and must not redraw forever merely because its background block remains mounted.
-    # 函数用途: 告诉动画线程是否要重绘；短提示到期时补最后一帧，其余空闲状态不持续刷新。
+    # LLM: Periodic refresh stays alive only for time-varying typed state. Expired notices and
+    # committed background terminals each request exactly one follow-up frame so an invalidate
+    # racing the prior render cannot leave stale Working/final text painted. A retained terminal-
+    # agent roster is interactive but static and must not redraw forever merely because its block
+    # remains mounted.
+    # 函数用途: 告诉动画线程是否要重绘；提示到期或后台终态时各补一帧，其余空闲状态不持续刷新。
     def needs_periodic_refresh(self) -> bool:
         now = time.monotonic()
         with self._lock:
@@ -1404,7 +1470,9 @@ class TuiRuntime(
                 and self._notice_until > 0.0
                 and now < self._notice_until
             )
-        if notice_active or notice_expired:
+            terminal_refresh_pending = self._terminal_refresh_pending
+            self._terminal_refresh_pending = False
+        if notice_active or notice_expired or terminal_refresh_pending:
             return True
         snapshot = self.store.snapshot()
         return any(

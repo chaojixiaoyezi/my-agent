@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## 会话恢复的显示与模型预览
+
+- `client_service.read_gateway_client_history` 在 authenticated scope 内解析唯一 owner/thread；同一批 canonical
+  rows 分别产生 `turns` 问答预览与 `display_events` 公开类型正文。客户端不能选择内部文件或其它 owner。
+- `conversation/history_display.py` 消费已保存 native envelope 与可见消息，不改变 provider replay 或 Compact；
+  内部 user 注入和 thinking signature 不外发。恢复事件只接受终态显示 kind，不支持权限、控制或活动恢复。
+- CLI history snapshot 将两者分别传给 `TuiRunParams`；TUI 事件进入现有 reducer，预览才进入原本的本地上下文
+  helper。该显示修复不会产生额外模型调用、工具执行或历史写入。raw 之外已裁掉的 native 原文不得伪造。
+
 ## Gateway 历史任务引用投影
 
 - `requests/{state}/<request_id>.json` 内的 `conversation_runtime` 是 request/thread/task/path 的宿主权威；

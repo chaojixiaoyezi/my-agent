@@ -287,7 +287,7 @@ def cmd_resume(args) -> int:
 
 
 # LLM: Local and Gateway chat share conversation/archive semantics；显式 session 恢复只读 canonical ConversationStore，读取错误 fail-closed，正常退出只提交一次 Curator close reason。
-# 函数用途: 启动或恢复交互聊天、加载最近完整问答用于界面显示，并在正常关闭后登记统一后台会话提炼请求。
+# 函数用途: 启动或恢复聊天，将问答预览与显示事件分开传递，正常关闭后登记统一后台会话提炼请求。
 def cmd_chat(args) -> int:
     use_gateway = bool(args.gateway)
     use_tui = _has_prompt_toolkit() and not bool(getattr(args, "plain", False))
@@ -311,6 +311,7 @@ def cmd_chat(args) -> int:
         # 报错, 不进入交互循环。
         return 3
     state, build_history_context = _init_chat_state(agent)
+    recovered_display_events = None
     if str(getattr(args, "session_id", "") or "").strip():
         restored = load_gateway_chat_history(
             agent,
@@ -321,6 +322,7 @@ def cmd_chat(args) -> int:
             print("会话历史读取失败，未进入聊天。", file=sys.stderr)
             return 3
         state["conversation_history"].extend(restored.turns)
+        recovered_display_events = restored.display_events
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
 
@@ -343,6 +345,7 @@ def cmd_chat(args) -> int:
             build_history_context=build_history_context,
             session_manager=session_manager,
             current_session_id=current_session_id,
+            recovered_display_events=recovered_display_events,
         ))
     else:
         from .chat_parts.plain_state import RunPlainConfig

@@ -240,18 +240,20 @@ def test_process_session_stop_terminates_owned_process_tree(tmp_path: Path) -> N
             scope,
         )
     )
-    tool = ProcessSessionTool(str(tmp_path))
-
-    stopped = tool.execute(
+    # 启动与停止都经过同一 host-bound executor；不能用测试传入的 owner-a
+    # 直接冒充执行器已校准的身份，否则验证的是越权拒绝而不是进程回收。
+    stopped = _call(
+        registry,
+        "process_session",
         {
             "action": "stop",
             "session_id": started["session_id"],
-            "__run_scope": scope,
-        }
+        },
+        scope,
     )
 
     assert stopped.ok is True
-    payload = json.loads(stopped.output)
+    payload = _payload(stopped)
     assert payload["status"] == "killed"
     assert process_registry.status(started["session_id"])["status"] == "killed"
 
@@ -349,6 +351,65 @@ def test_managed_network_status_reports_loopback_only(monkeypatch) -> None:
     assert payload["lan_reachability"] == "loopback_only"
     assert payload["external_probe_required"] is False
     assert payload["host_firewall"] == {"status": "not_applicable", "ports": []}
+
+
+@pytest.mark.parametrize("return_code", [None, 29, 251, 252, 253])
+def test_firewall_query_failure_is_not_reported_as_stopped(monkeypatch, return_code) -> None:
+    from agent_py_agent.agent.tooling import process_network_status as network
+
+    monkeypatch.setattr(network.shutil, "which", lambda _name: "/usr/bin/firewall-cmd")
+    result = None if return_code is None else subprocess.CompletedProcess([], return_code, "", "")
+    monkeypatch.setattr(network, "_firewall_command", lambda *_args: result)
+    observed = network._host_firewall_observation([{"port": 18778}])
+    assert observed["status"] == ("not_running" if return_code == 252 else "unknown")
+
+
+@pytest.mark.parametrize("zone_result", [None, (29, ""), (0, "")])
+def test_firewall_missing_zone_evidence_stays_unknown(monkeypatch, zone_result) -> None:
+    from agent_py_agent.agent.tooling import process_network_status as network
+
+    monkeypatch.setattr(network.shutil, "which", lambda _name: "/usr/bin/firewall-cmd")
+    replies = iter([
+        subprocess.CompletedProcess([], 0, "running", ""),
+        None if zone_result is None else subprocess.CompletedProcess([], *zone_result, ""),
+    ])
+    monkeypatch.setattr(network, "_firewall_command", lambda *_args: next(replies))
+    assert network._host_firewall_observation([{"port": 18778}])["status"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("codes", "expected"),
+    [((0, 0), "explicitly_allowed"), ((0, 1), "partially_allowed"),
+     ((1, 1), "not_explicitly_allowed"), ((0, 29), "unknown"), ((0, None), "unknown")],
+)
+def test_firewall_port_summary_requires_every_zone_port_observation(monkeypatch, codes, expected) -> None:
+    from agent_py_agent.agent.tooling import process_network_status as network
+
+    monkeypatch.setattr(network.shutil, "which", lambda _name: "/usr/bin/firewall-cmd")
+    replies = iter([
+        subprocess.CompletedProcess([], 0, "running", ""),
+        subprocess.CompletedProcess([], 0, "public\n  interfaces: eth0\n", ""),
+        *(None if code is None else subprocess.CompletedProcess([], code, "", "") for code in codes),
+    ])
+    monkeypatch.setattr(network, "_firewall_command", lambda *_args: next(replies))
+    observed = network._host_firewall_observation([{"port": 18081}, {"port": 18778}])
+    assert observed["status"] == expected
+    assert len(observed["port_observations"]) == 2
+    assert len(observed["explicit_rules"]) == codes.count(0)
+    assert "nftables" in observed["evidence_boundary"]
+
+
+def test_firewall_command_preserves_exit_code_and_marks_timeout(monkeypatch) -> None:
+    from agent_py_agent.agent.tooling import process_network_status as network
+
+    denied = subprocess.CompletedProcess([], 253, "", "denied")
+    monkeypatch.setattr(network.subprocess, "run", lambda *_args, **_kwargs: denied)
+    assert network._firewall_command("firewall-cmd", ("--state",)) is denied
+    monkeypatch.setattr(
+        network.subprocess, "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("firewall-cmd", 1.5)),
+    )
+    assert network._firewall_command("firewall-cmd", ("--state",)) is None
 
 
 def test_proc_listener_reports_actual_socket_owner_pids(tmp_path: Path) -> None:

@@ -143,6 +143,77 @@ def test_down_selects_children_enter_opens_and_back_never_stops() -> None:
     assert root.store.snapshot().status.phase == "idle"
 
 
+def test_back_reconciles_descendant_terminal_status_before_parent_poll() -> None:
+    root = TuiRuntime("nav-parent-roster-reconcile")
+    navigation = TuiAgentNavigationState(root)
+    coordinator = _row("coordinator")
+    grandchild_running = _row(
+        "grandchild",
+        parent="coordinator",
+        status="RUNNING",
+    )
+    navigation.update_rows("", [coordinator])
+    navigation.move_selection(1)
+    navigation.enter_selected()
+    navigation.apply_agent_view(
+        "coordinator",
+        {
+            "ok": True,
+            "agent": {**coordinator, "goal": "协调审计"},
+            "terminal": False,
+            "children": [grandchild_running],
+            "hidden_child_count": 0,
+            "task_progress_items": [],
+            "transcript_events": [],
+            "event_cursor": 0,
+            "final_response": "",
+        },
+    )
+    navigation.move_selection(1)
+    navigation.enter_selected()
+    navigation.apply_agent_view(
+        "grandchild",
+        {
+            "ok": True,
+            "agent": {
+                **grandchild_running,
+                "status": "CANCELLED",
+                "lifecycle_phase": "terminal",
+                "activity": "已停止",
+                "updated_at": 30.0,
+                "ended_at": 30.0,
+                "goal": "执行代码审计",
+            },
+            "terminal": True,
+            "children": [],
+            "hidden_child_count": 0,
+            "task_progress_items": [],
+            "transcript_events": [],
+            "event_cursor": 0,
+            "final_response": "已停止。",
+        },
+    )
+
+    assert navigation.back() is True
+    snapshot = navigation.snapshot()
+    assert snapshot.active_run_id == "coordinator"
+    assert snapshot.selected_run_id == "grandchild"
+    frame = render_tui_snapshot(
+        navigation.active_runtime().store.snapshot(),
+        TuiRenderContext(
+            width=100,
+            selected_agent_run_id=snapshot.selected_run_id,
+            focused_agent_run_id="coordinator",
+            focused_agent_name="coordinator",
+            focused_agent_status="RUNNING",
+        ),
+    )
+    rendered = "\n".join(fragments_text(line) for line in frame.agent_lines)
+    assert "grandchild" in rendered
+    assert "已停止" in rendered
+    assert "grandchild · 运行中" not in rendered
+
+
 def test_child_view_applies_live_events_todo_context_children_and_final() -> None:
     root = TuiRuntime("nav-detail")
     navigation = TuiAgentNavigationState(root)
@@ -333,6 +404,7 @@ def test_child_view_applies_live_events_todo_context_children_and_final() -> Non
     )
     assert not any(block.role == "tool" for block in snapshot.active_blocks)
     assert navigation.active_runtime().clear_notice() is True
+    assert navigation.active_runtime().needs_periodic_refresh() is True
     assert navigation.active_runtime().needs_periodic_refresh() is False
     frame = render_tui_snapshot(
         snapshot,

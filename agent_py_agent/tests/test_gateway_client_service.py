@@ -117,6 +117,7 @@ def test_gateway_client_history_returns_only_complete_foreground_turns(monkeypat
             content="background",
             metadata={
                 "gateway_request_id": "req-3",
+                "task_id": "task-audit",
                 "reason": "audit_finding",
                 "background_delivery_reason": "scheduled",
             },
@@ -155,6 +156,9 @@ def test_gateway_client_history_returns_only_complete_foreground_turns(monkeypat
             "assistant_message": "answer",
         },
     )
+    assert [event["kind"] for event in result.display_events] == [
+        "user_message", "assistant_completed", "user_message",
+    ]
 
 
 def test_gateway_http_routes_client_memory_and_history(monkeypatch, tmp_path) -> None:

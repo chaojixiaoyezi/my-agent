@@ -1,5 +1,59 @@
 # STATUS
 
+## 2026-09-05 R180 已部署，历史恢复切片真 TUI 通过
+
+- 当前唯一 Gateway 已顺序升级为 R180，PID 2236118，8420，MiniMax-M2.7；wheel SHA-256
+  `7bb89e06512c90423993065e51c1068cfcd4beee5384a6292162b8e43d83541f`，默认 launcher 同属 R180 独立 venv。
+  R179 环境保留回滚，旧 PID 已确认退出才启动新进程。
+- `ma-r179-110-process-resume` 真 TUI Ctrl+Home 找回首轮用户输入/思考/过程回复/工具，Ctrl+O 可展开，最终
+  停止汇报直接显示；恢复前后均 36 次模型调用。恢复后的普通追问 `gwreq-1788588359-5f549f9cdc404c7ca2fead50bba53548`
+  自然结束，调用总数到 39，Compact 2。其服务器排障归因仍错误，BUG-109 未关闭。
+- `ma-r180-110-long-resume` 恢复原五阶段 session，main/child Compact 2/5 不倒退；Enter 进入原已完成 child、
+  Ctrl+G 返回正确 root，回看没有新增模型调用（main 61 / 该 child 104）。child 的有界环仍缺少较早工具过程，
+  因此 P1 完整历史硬门继续开放，不用本切片冒充封板。186 项 focused 和本地严格门通过，未跑全仓 pytest。
+
+- `.10` 唯一 Gateway 为 R179，MiniMax-M2.7，PID 2215803；默认 launcher 已指向独立 R179 wheel venv。
+  `ma-r179-110-process-resume` 经真实 `/exit → /sessions → resume` 回到原 session。重新启动后台服务后实际
+  调用 `process_session(network_status)`，public/18778 的 query rc=1、not_explicitly_allowed 和外部探针边界
+  均正确展示。随后 `gwreq-1788585936-8e660f0e75484386bc731523185c2b30` 停止服务，listener PID 2221390
+  消失，18778 无监听，Gateway 不受影响。未知/部分放行异常分支仅 focused 验证，不冒充真 TUI 注入。
+- R178 同一长 TUI 已完成调研、两次小追问、递归 Go 复刻和追加边界修改。递归阶段 coordinator+6 worker
+  全终态，main Compact 2；追加 child 也 DONE，五代 Compact、98 对工具源入账。实际产物仍有 4 项跳过与
+  gitignore 占位实现，不能算完整复刻合格；最后一轮未形成孙代理，拓扑遵循按模型结果单独记录。
+- 新发现 BUG-111：恢复只用问答预览导致工具/思考不显示，尽管原生 metadata 仍保存这些数据。R180 增加
+  canonical display-only 事件投影并复用 reducer，缓存/模型请求不变。当前定向测试和上述新 wheel 真 TUI 通过；
+  Compact 前完整过程归档、长历史分页与全部 P1 封板仍未完成，不能进入 IM/Audit 封板结论。
+
+## 2026-09-05 R178 长会话与后台网络验收（仍在执行）
+
+- `.10` 仍为一个 Gateway、MiniMax-M2.7。`ma-r178-110-long-sequence` 的同一 session 先完成八项目
+  多代理调研，再完成一份非技术建议和一次纯聊天追问；随后在新 task 中用 coordinator→worker 递归复刻
+  Ripgrep。第一轮 8 child 均 DONE，main Compact 1，后两轮普通消息和原 task 续作都保留在同一 canonical
+  history；第二个大任务仍在运行，不能提前声称整条长会话已通过。
+- 调研产物质量与底座运行分账：模型未找到 终端交互，部分项目仅查文档，不能将“8 child DONE”当成
+  八个项目均完成代码级调研。Ripgrep 完整性也必须读实际差异与产物，不按 final 文案判定。
+- `ma-r178-110-process-lan` 在 final 后持续监听 `0.0.0.0:18778`，重复启动明确返回端口冲突，原服务
+  没有被替换；Mac 外部探针连接失败。宿主 firewalld/nftables 的 public zone 没有放行 18778，模型却两次
+  只检查 iptables 并排除服务器防火墙。工具没有返回虚假的放行状态；这是模型诊断失败，不能伪装为已修。
+- 同时发现已有 `network_status` 的独立观测缺口：查询异常被归为 not_running、任一端口放行被汇总为全部
+  放行。R179 按官方 firewalld 退出码保留 unknown 和每 zone/port 结果；不新增质量判官、强制工具路由或
+  防火墙修改。候选 focused / 真 TUI 复验状态见问题账本。
+
+## 2026-09-05 R176/R177 Compact 取消与 TUI 终态刷新
+
+- R176 直属 child `subagent-1788564867-7e44c59d` 在 generation 1 摘要阶段停止，事件以
+  `candidate_discarded` 结束且 thread 保持 generation 0；五名兄弟继续，其中三名自然 Compact 1，main
+  约 8.4 秒后恢复并最终 DONE。depth-2 `subagent-1788568405-f2836ce5` 的 generation 2 在 15% 摘要阶段停止，
+  seq 513–515 明确 started/progress/superseded，thread 保留既有 generation 1 与 checkpoint；coordinator
+  3.4 秒后开始 generation 3 并完成。主、子、孙三层 Compact 的成功与中断边界至此都有独立真 TUI 证据。
+- R175/R176 同时复现两项纯展示问题：后台已经 DONE/final 时终端偶发停在旧 Working；从孙代理返回时父页
+  最多在下一轮询前仍把已取消行画成运行中。R177 对照 会话运行时 FrameRequester 增加一次性终态补帧，并在返回
+  父页时只用已观察到的较新 typed row 校准名册；不改变轮询、状态机或取消权威。
+- 28 项 navigation/threading/prompt-toolkit focused、103 项 runtime/renderer 相邻测试、Ruff、PyCompile 和
+  strict code-size 均通过。候选 wheel `dd0680c4…c363c` 已切入 `.10` 唯一 Gateway；
+  `ma-r177-110-tui-final-nav` 首轮 5-child 审计在无人按键时直接显示 final、收起 Working；同会话第二轮形成
+  main→coordinator→researcher，孙代理终态后 Ctrl+G 约 0.2 秒首帧即显示“已完成”，Enter 精确回到同一历史。
+
 ## 2026-09-04 R172 空目标能力申请拒绝（本地 Focused 通过，真 TUI 待复验）
 
 - R171 真 TUI 中，一个没有 `create_subagents` 的 child 两次只在

@@ -1,5 +1,33 @@
 # TEST CHECKLIST
 
+## R179/R180 当前收尾
+
+- [x] R179 真实 network_status 返回宿主监听、逐端口 rc=1 与 not_explicitly_allowed；没有把本机监听冒充 LAN 成功。
+- [x] R179 原 session 恢复后停止受管服务；原 listener PID 消失、18778 释放、单 Gateway 存活。
+- [x] R178 同一长 TUI 完成五阶段用户任务，主/直属代理均自然终态；模型产物 4 项 skip 单独记不通过。
+- [x] R180 失败先行：resume 缺显示事件；新增显示投影与定向顺序/幂等/隔离/不回灌验证。
+- [x] R180 新 wheel 真 TUI 恢复已保存思考/工具/正文，继续原会话；只回看时模型调用数不变，无重派。
+- [ ] Compact 前全部过程、长历史分页、child 展示环之外的恢复；P1 全部硬门不能提前打勾。
+
+## R178/R179 长会话、受管进程与网络证据
+
+- [x] 同一 TUI 第一轮八项目调研的 8 child 自然终态、main Compact 1；两个普通追问均进入同一 history。
+- [x] 第一次追问写入原任务目录；纯聊天追问不创建新业务项目；第二个大任务创建独立目录和递归代理树。
+- [ ] 第二个大任务收口后追加修改，再 `/exit`、`/sessions`、exact resume 核对完整历史与客户端回收。
+- [x] 服务 final 后持续存活；相同端口再次启动返回失败，原服务 PID 与监听不变。
+- [x] Mac 独立 LAN 探针失败，与宿主 firewalld/nftables 未放行事实一致，不把本机 curl 200 当外部成功。
+- [ ] 模型正确使用宿主规则证据完成诊断；R178 连续两次只看 iptables，当前为真实失败。
+- [ ] R179 防火墙查询 unknown/partial 修复通过 focused 和真实 TUI，停止受管服务后进程树、端口均回收。
+
+## R177 TUI 终态补帧与父层名册校准
+
+- [x] final 与 `Working → idle` 各自只请求一次补帧；即时 invalidate 仍是主链，空闲不常驻重绘。
+- [x] 返回父层只合入 `updated_at` 不旧于父缓存的 typed child row，不解析文案、不改变 run/selection/history。
+- [x] navigation/threading/prompt-toolkit/runtime/renderer focused、Ruff、PyCompile、strict code-size 通过。
+- [x] `.10` 候选首轮真 TUI：5 child 收齐后，无人工刷新键直接出现 final，Working 同帧撤下。
+- [x] `.10` 候选递归真 TUI：进入孙代理，待其终态后 Ctrl+G，父页约 0.2 秒首帧即显示真实终态；Enter
+  精确回到同一 run/history，连续 Ctrl+G 返回 root 后三名直属代理和最终回复均正确。
+
 ## R172 空能力授权防线
 
 - [x] 空 `requested_*`/scope 且只有 prose 的能力申请在落账前失败，不发 wake、不产生 grant/context refresh。
@@ -16,8 +44,9 @@
 - [x] user-controlled CANCELLED 即使仍有运行中 sibling 也进入 direct-parent attention；父轮内
   `cancel_subagents` 的 CANCELLED 继续合批。即时链与周期恢复都读 canonical cancel source。
 - [x] `.10` root child 真 TUI：Esc 后 main 自动恢复、保留兄弟并补派替代任务。
-- [ ] `.10` 三层新 wheel 真 TUI：停止一个 grandchild 后 coordinator 应立即恢复且 sibling 继续；旧 wheel 已
-  复现约 23 分钟延迟。另需完成 child/grandchild Compact 候选中途取消与 CAS 后取消两条边界。
+- [x] `.10` 三层新 wheel 真 TUI：R176 停止一个 grandchild 后 coordinator 约 3.4 秒恢复且 sibling 继续；
+  直属 child 父级约 8.4 秒恢复。child/grandchild 均覆盖 summarizing 阶段候选回滚，另有一次 post-commit
+  停止反证两种边界没有混写。
 
 ## R170 递归创建共享容量
 
@@ -43,7 +72,8 @@
   独立 child 自然 `118,772→74,012`、`compact 0→1` 后完成；动画、generation、cache-read 和上下文连续正常。
 - [x] grandchild 独立线程自然 Compact 已在 R170 真 TUI 通过；checkpoint、generation、动画、压后续跑和
   父级唤醒均由 exact depth-2 run 证明，未用 main/child 冒充。
-- [ ] child/grandchild 的 Compact 中途取消仍待分别真机；不能由自然 Compact 成功或主代理中途取消替代。
+- [x] child/grandchild 的 Compact 中途取消已由 R176 两路独立真机完成：同 operation superseded、候选丢弃、
+  generation/checkpoint 不推进、目标取消、直属父级 durable wake 和 sibling 连续性全部一致。
 
 ## R168 Shell 前像范围与结算回收
 
@@ -128,11 +158,12 @@
   transcript fallback 从自身 started 进度开始，旧 operation 迟到事件不能污染当前块。同 operation 保持单调。
   85 项 focused 通过；`ma-r150-local-compact-resume` 手动动画、generation 3→4、计数只在提交后增加及压缩后
   记忆追问均通过。自然触发的 fallback 失败链仍列为后续真 TUI 覆盖。
-- [ ] Compact 中途收到 typed stop/cancellation 时，transcript、active-turn archive 与 native IR 都必须在
+- [x] Compact 中途收到 typed stop/cancellation 时，transcript、active-turn archive 与 native IR 都必须在
   摘要、候选改写、checkpoint 和 generation CAS 的安全点停止；CAS 前只发布
   `superseded/candidate_discarded`，不得推进 generation/cursor 或失败熔断，IR/tool-context 必须恢复。
-  R154 主代理 MiniMax-M2.7 真 TUI 已在摘要 20% 时 Esc 通过，focused 已覆盖五个竞态边界；child/grandchild
-  的自然真机停止仍待补证，因此本项暂不整体勾选。
+  R154 主代理 MiniMax-M2.7 真 TUI 已在摘要 20% 时 Esc 通过，focused 覆盖五个竞态边界；R176 又分别在
+  直属 child 与 depth-2 grandchild 的 summarizing 阶段完成候选丢弃、generation/checkpoint 不推进、精确
+  取消和直属父级恢复，三层真机边界现已闭环。
 - [x] `/exit` 后新 TUI 的 `/sessions` 必须只列当前 owner，会话由 exact session id 恢复；历史 final、child
   roster、Compact 代次继续存在。R149→R150 真 TUI 已通过；当前 `/sessions` 是只读列表加恢复命令，不冒充
   终端交互 式列表内直接选择。

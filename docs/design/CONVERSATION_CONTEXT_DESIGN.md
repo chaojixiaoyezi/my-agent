@@ -18,6 +18,12 @@ task 或 turn 语义；它们进入同一个 Gateway/runtime。
 
 ## Transcript and compact
 
+TUI 显式 resume 不再使用完整问答预览重建正文。Gateway 在同一 owner/thread 的 canonical rows 上另生成
+`conversation_history_display.v1`：真实用户输入、公开 assistant 正文/思考、按 tool-use id 配对的结果。native
+user 注入、签名和参数留在服务端；显示事件不回灌模型。canonical final 优先于 provider 原始末段正文。
+原问答预览仍保留原调用方，缓存、Compact 和原生请求拼装不因 UI 恢复改变。当前恢复范围受已有历史读取窗口
+约束；Compact 前完整过程与长会话分页仍待 P1 验收，不能凭已有 native 尾部声明完整归档已恢复。
+
 owner-scoped `ConversationStore` 中的 raw JSONL transcript 是唯一对话事实源。thread JSON 只保存同一历史的
 compact summary、精确消息/字节 cursor、generation、live checkpoint pointer、累计来源消息/工具往返、
 连续失败状态和 `/verbose` 设置。compact 不删除或改写 raw 消息：旧段被摘要后，新的 user/assistant 消息

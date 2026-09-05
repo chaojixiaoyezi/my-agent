@@ -3,8 +3,9 @@ from __future__ import annotations
 """Structured listener and host-firewall observations for managed processes."""
 
 # LLM: This module observes only host-owned process/socket/firewall facts for one already
-# authorized managed session. It never changes firewall rules and never declares remote reachability.
-# 模块用途: 查询受管后台服务监听在哪些地址、主机防火墙是否显式放行，并明确区分本机与局域网证据。
+# authorized managed session. Failed observations remain unknown, never approval or stopped state.
+# It never changes firewall rules or declares remote reachability; keep process_session tests in sync.
+# 模块用途: 查询受管后台服务监听与防火墙事实；查询失败保留未知，不能据此宣布局域网可达。
 
 import ipaddress
 import os
@@ -17,6 +18,7 @@ from typing import Any
 NETWORK_STATUS_SCHEMA = "managed_process_network_status.v1"
 _LISTEN_STATE = "0A"
 _FIREWALL_TIMEOUT_SECONDS = 1.5
+_FIREWALL_NOT_RUNNING = 252  # firewall-cmd 的公开退出码，不从错误文案猜运行状态。
 
 
 # LLM: Remote reachability always needs an independent observer. Local listener and firewall
@@ -195,9 +197,10 @@ def _proc_address(value: str, family: socket.AddressFamily) -> str:
     return socket.inet_ntop(family, reordered)
 
 
-# LLM: firewalld inspection is read-only and intentionally conservative. No explicit port rule
-# does not prove blocking because services/nftables/upstream devices may still decide traffic.
-# 函数用途: 查询非回环监听端口是否被活动 firewalld zone 显式放行。
+# LLM: Fixed read-only firewalld calls preserve exit-code evidence per zone/port. Only NOT_RUNNING
+# proves daemon absence; partial/failed observations cannot imply all ports allowed. No explicit
+# rule proves neither blocking nor external reachability. Sync process_session contracts and tests.
+# 函数用途: 逐区域、端口查询显式放行；超时或拒绝显示未知，不能把一个端口的结果推广到全部端口。
 def _host_firewall_observation(
     bindings: list[dict[str, object]],
 ) -> dict[str, object]:
@@ -207,33 +210,62 @@ def _host_firewall_observation(
         return {"status": "not_applicable", "ports": []}
     if not binary:
         return {"status": "not_detected", "ports": ports}
-    if _firewall_command(binary, ("--state",)) != "running":
+    state = _firewall_command(binary, ("--state",))
+    if state is not None and state.returncode == _FIREWALL_NOT_RUNNING:
         return {"status": "not_running", "ports": ports}
+    if state is None or state.returncode != 0:
+        return {"status": "unknown", "ports": ports, "reason": "state_query_failed"}
     active = _firewall_command(binary, ("--get-active-zones",))
-    zones = [line.strip() for line in active.splitlines() if line and not line[:1].isspace()]
+    if active is None or active.returncode != 0:
+        return {"status": "unknown", "ports": ports, "reason": "zone_query_failed"}
+    zones = [line.strip() for line in active.stdout.splitlines() if line and not line[:1].isspace()]
+    if not zones:
+        return {"status": "unknown", "ports": ports, "reason": "no_active_zones"}
     allowed: list[dict[str, object]] = []
+    observations: list[dict[str, object]] = []
     for zone in zones:
         for port in ports:
             answer = _firewall_command(
                 binary,
                 (f"--zone={zone}", f"--query-port={port}/tcp"),
             )
-            if answer == "yes":
-                allowed.append({"zone": zone, "port": port, "protocol": "tcp"})
+            rule = {"zone": zone, "port": port, "protocol": "tcp"}
+            code = answer.returncode if answer is not None else None
+            status = "unknown"
+            if code == 0:
+                status = "explicitly_allowed"
+                allowed.append(rule)
+            elif code == 1:
+                status = "not_explicitly_allowed"
+            observations.append({**rule, "status": status, "query_return_code": code})
+    if any(row["status"] == "unknown" for row in observations):
+        status = "unknown"
+    elif len(allowed) == len(observations):
+        status = "explicitly_allowed"
+    else:
+        status = "partially_allowed" if allowed else "not_explicitly_allowed"
     return {
-        "status": "explicitly_allowed" if allowed else "not_explicitly_allowed",
+        "status": status,
         "ports": ports,
         "active_zones": zones,
         "explicit_rules": allowed,
+        "port_observations": observations,
+        "evidence_boundary": (
+            "只查询活动 firewalld 区域的显式端口规则；未覆盖 service/rich rules、其他 nftables 规则或上游设备。"
+            "未显式放行不等于已阻断，部分放行不等于全部放行，查询失败不等于防火墙已关闭。"
+        ),
     }
 
 
 # LLM: This helper runs only fixed read-only firewalld arguments assembled from integer ports
-# and discovered zone names. Timeout or command failure returns no observation, never approval.
-# 函数用途: 有界执行一条只读 firewall-cmd 查询并返回标准输出。
-def _firewall_command(binary: str, arguments: tuple[str, ...]) -> str:
+# and discovered zone names. Preserve native exit codes (query false=1, NOT_RUNNING=252);
+# timeout/OS failure is None, not an empty successful observation. Never mutate rules.
+# 函数用途: 有界执行只读 firewall-cmd 查询，保留退出码；无法执行时返回未知而不是伪造停用状态。
+def _firewall_command(
+    binary: str, arguments: tuple[str, ...],
+) -> subprocess.CompletedProcess[str] | None:
     try:
-        result = subprocess.run(
+        return subprocess.run(
             [binary, *arguments],
             capture_output=True,
             text=True,
@@ -241,8 +273,7 @@ def _firewall_command(binary: str, arguments: tuple[str, ...]) -> str:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return ""
-    return result.stdout.strip()
+        return None
 
 
 __all__ = ["NETWORK_STATUS_SCHEMA", "managed_process_network_status"]

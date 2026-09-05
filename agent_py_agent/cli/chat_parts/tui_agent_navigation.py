@@ -239,8 +239,11 @@ class TuiAgentNavigationState:
 
     # LLM: Back pops exactly one visual parent. It does not cancel, pause, resume,
     # or mutate either agent, which is why Esc is deliberately not routed here.
-    # 函数用途: 用 Ctrl+G、Alt+左箭头或 `/back` 返回上一层代理视图。
+    # Before showing the parent, its cached roster is reconciled only with newer
+    # typed rows already observed on the descendant page.
+    # 函数用途: 用 Ctrl+G、Alt+左箭头或 `/back` 返回上一层，并先修正已知的过期子代理展示状态。
     def back(self) -> bool:
+        reconcile_rows: tuple[dict[str, object], ...] | None = None
         with self._lock:
             if not self._path and self._expanded_goal_id:
                 self._expanded_goal_id = ""
@@ -250,8 +253,18 @@ class TuiAgentNavigationState:
                 return False
             else:
                 self._path.pop()
+                parent = self._active_run_id_locked()
+                reconcile_rows = _reconcile_parent_rows(
+                    self._rows_by_parent.get(parent, ()),
+                    self._rows_by_run,
+                )
+                self._rows_by_parent[parent] = reconcile_rows
                 runtime = self._active_runtime_locked()
                 callback = self._view_change
+        if reconcile_rows is not None:
+            reconciler = getattr(runtime, "reconcile_background_subagents", None)
+            if callable(reconciler):
+                reconciler(reconcile_rows)
         if callback is not None:
             callback(runtime)
         runtime.store.invalidate()
@@ -420,6 +433,25 @@ class TuiAgentNavigationState:
     def _active_runtime_locked(self) -> TuiRuntime:
         active = self._active_run_id_locked()
         return self._runtime_for_locked(active) if active else self.root_runtime
+
+
+# LLM: Descendant detail polling may hold a newer typed row than the parent's
+# cached roster. Merge only rows whose structured updated_at is at least as new;
+# no status is inferred or made monotonic.
+# 函数用途: 返回上一层时把刚查看代理的最新状态合回父列表，避免旧缓存短暂把已停止代理画成运行中。
+def _reconcile_parent_rows(
+    cached: tuple[dict[str, object], ...],
+    rows_by_run: Mapping[str, dict[str, object]],
+) -> tuple[dict[str, object], ...]:
+    reconciled: list[dict[str, object]] = []
+    for row in cached:
+        run_id = str(row.get("run_id") or "").strip()
+        latest = rows_by_run.get(run_id)
+        if latest is None or _row_updated_at(latest) < _row_updated_at(row):
+            reconciled.append(row)
+        else:
+            reconciled.append(dict(latest))
+    return tuple(reconciled)
 
 
 # LLM: Gateway detail payloads cross an untrusted presentation boundary. Normalize
@@ -671,6 +703,16 @@ def _safe_int(value: object) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+# LLM: Row recency arbitration is display-only and uses the canonical scalar
+# already supplied by the backend; invalid timestamps are simply oldest.
+# 函数用途: 读取子代理展示行的更新时间，用来避免返回父页面时拿旧快照覆盖新状态。
+def _row_updated_at(value: Mapping[str, object]) -> float:
+    try:
+        return max(0.0, float(value.get("updated_at") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 __all__ = ["TuiAgentNavigationSnapshot", "TuiAgentNavigationState"]

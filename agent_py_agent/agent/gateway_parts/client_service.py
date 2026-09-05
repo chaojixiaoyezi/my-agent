@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..conversation.history_display import conversation_history_display_events
 from ..conversation.models import is_audit_background_transcript_entry
 from .control_service import GatewayControlScope, resolve_gateway_scope_agent
 
@@ -30,23 +31,25 @@ class GatewayClientMemoryResult:
         }
 
 
-# LLM: History result 只包含完整 user/assistant 对和小型读取错误；chunk、内部注入、后台消息不能冒充恢复历史。
-# 类用途: 表示一个 owner/channel/conversation 的可恢复聊天回合。
+# LLM: History result 将问答预览与完整显示事件分开；内部注入不得透传，显示事件不能回灌模型。
+# 类用途: 表示同 owner/channel/conversation 的预览、正文恢复和读取错误。
 @dataclass(frozen=True)
 class GatewayClientHistoryResult:
     ok: bool
     thread_id: str = ""
     turns: tuple[dict[str, str], ...] = ()
     load_errors: tuple[dict[str, object], ...] = ()
+    display_events: tuple[dict[str, object], ...] = ()
 
-    # LLM: HTTP 投影保留 typed turns 和错误码，不输出服务端路径或异常原文。
-    # 函数用途: 转换成可发送的 JSON 字典。
+    # LLM: HTTP 投影区分预览和 display-only 事件，不输出内部 envelope、服务端路径或异常原文。
+    # 函数用途: 转换成各前端共用的公开历史合同。
     def to_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
             "thread_id": self.thread_id,
             "turns": [dict(item) for item in self.turns],
             "load_errors": [dict(item) for item in self.load_errors],
+            "display_events": [dict(item) for item in self.display_events],
         }
 
 
@@ -90,8 +93,8 @@ def execute_gateway_client_memory(
     return GatewayClientMemoryResult(normalized, True, records=records)
 
 
-# LLM: 历史读取只使用 authenticated scope 解析 owner/thread，并按稳定 request id 配对；不按正文或相邻行猜问答关系。
-# 函数用途: 读取当前会话最近若干个完整问答回合供薄客户端恢复显示。
+# LLM: 历史读取先解析 authenticated owner/thread；问答预览与 native 显示共用同一批 canonical rows，不执行或写入。
+# 函数用途: 返回当前会话的预览和完整类型正文，让恢复不再丢掉已保存的思考、工具和过程回复。
 def read_gateway_client_history(
     base_agent: object,
     *,
@@ -134,6 +137,7 @@ def read_gateway_client_history(
         thread_id=thread_id,
         turns=_paired_history_turns(rows, max_turns=limit),
         load_errors=safe_errors,
+        display_events=conversation_history_display_events(rows, max_turns=limit),
     )
 
 

@@ -144,6 +144,7 @@ agent_py_agent/
 |   |   |-- active_turn_compact.py      # 跨工作片工具 archive 到同一 checkpoint/CAS 的恢复压缩与模型投影
 |   |   |-- live_tool_compact.py        # 运行中原生工具历史到同一 thread checkpoint/CAS 的适配层
 |   |   |-- native_history.py           # 完成回合的 provider 原生消息信封、校验与按请求替换式恢复
+|   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
 |   |   |-- runtime.py                  # 后台主代理调度热循环：wake_queue 到期消费、三源对账(5min)、事件提前醒取消闹钟
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
@@ -282,6 +283,11 @@ docs/
 ```
 
 ## Current Storage Roots
+
+### 关键文件说明
+
+- `agent/conversation/history_display.py`：同一 canonical message/native envelope 的只读公开显示转换入口，
+  Gateway 与本地恢复共用；不拥有模型上下文、Compact、工具执行或第二份会话账本。
 
 ```text
 ~/.my-agent/owners/<provider>/<kind-or-id>/

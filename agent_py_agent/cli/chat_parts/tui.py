@@ -244,8 +244,8 @@ def _make_start_worker_params(
     )
 
 
-# LLM: run_tui 在任何 app/worker 创建前发布唯一 session_started，并只投影 canonical session 已加载的历史；欢迎卡/恢复正文不经 stdout 建第二事实源。
-# 函数用途: 启动一次可恢复历史的完整 prompt_toolkit TUI 会话并等待其退出。
+# LLM: run_tui 在 app/worker 前发布 session 和 canonical 显示历史；模型预览独立传给 worker，恢复事件不能进任务队列。
+# 函数用途: 启动可恢复正文、工具和思考的 prompt_toolkit 会话，随后等待用户交互或退出。
 def run_tui(*, params: TuiRunParams) -> int:
     from agent_py_agent import __version__
 
@@ -263,7 +263,9 @@ def run_tui(*, params: TuiRunParams) -> int:
         model=str(getattr(params.agent.config, "model_name", "") or ""),
         workspace=str(getattr(params.agent, "root", "") or ""),
     )
-    tui_runtime.publish_recovered_history(params.conversation_history)
+    tui_runtime.publish_recovered_history(
+        params.conversation_history, display_events=params.recovered_display_events,
+    )
 
     app = _make_tui_app(
         params=_make_tui_app_params(

@@ -106,6 +106,8 @@ class MakeTuiAppParams:
     agent_navigation: object | None = None
 
 
+# LLM: TUI 启动参数分离模型用问答预览和只读恢复事件；显示历史不能送入 jobs 或模型请求。
+# 类用途: 把启动、会话恢复和界面依赖显式交给 TUI 主入口。
 @dataclasses.dataclass(frozen=True)
 class TuiRunParams:
     agent: object
@@ -128,3 +130,4 @@ class TuiRunParams:
     build_history_context: object
     session_manager: object
     current_session_id: str
+    recovered_display_events: tuple[dict[str, object], ...] | None = None
