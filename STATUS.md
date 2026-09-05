@@ -8,6 +8,8 @@
   `7d4b25f20f9486ac17aba3c9d2327fe2c8cfb1d0d886d0321ca68f5381f99ad0`；复用停止后升级的独立 runtime-venv-r180，
   direct_url 安装元数据与 wheel hash 一致，R179 环境和旧 wheel 保留回滚。`ma-r180-110-long-resume` 真 TUI
   Ctrl+Home 已看到第一轮八项目调研的 user/思考/工具；只回看调用保持 61，Compact 保持 2，未新派任务。
+- 恢复后的交接追问 `gwreq-1788590861-752503a84f7f4177b438dac35097d078` 自然完成，生成 6407 bytes 的
+  `HANDOVER.md`；新增 4 次 MiniMax 调用、cache-read 174,142、retry 0，Compact 仍 2，没有新增 child。
 - 同时启动 Gateway 与 resume 暴露另一个时序问题：CLI 在 TUI readiness 前读取历史，服务尚未就绪时退出。
   确认 Gateway running 后同 session 正常恢复；后续应把恢复并入现有 preflight，不增加无限重试，见 BUG-112。
 - Compact 前完整过程、child 有界环之外的历史和读取层分页仍待补齐；线上 Actions 当前 disabled，不作为验收来源。
