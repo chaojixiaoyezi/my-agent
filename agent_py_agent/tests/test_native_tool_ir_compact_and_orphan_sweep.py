@@ -165,8 +165,14 @@ def _provider_message_tokens(agent, params) -> int:
     return estimate_tokens(_native_provider_messages(agent, params) or [])
 
 
-def _record_large_write_calls(agent, params, *, start: int, stop: int, chars: int) -> None:
+# LLM: 夹具只向临时原生 IR/工具记录写入 typed 数据，不执行实际文件工具；可附加状态快照验证 Compact 回滚。
+# 函数用途: 构造大参数工具轮，复现完整请求压力及旧状态回收后的事务边界。
+def _record_large_write_calls(
+    agent, params, *, start: int, stop: int, chars: int, with_runtime_facts: bool = False,
+) -> None:
     for index in range(start, stop + 1):
+        if with_runtime_facts:
+            params.tool_ir_history.append(RuntimeFactsTurn(f"runtime-state-{index}"))
         call = canonical_history_call(
             "write_file",
             {
@@ -840,6 +846,115 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
     _assert_no_orphans(_native_provider_messages(agent, params))
 
 
+@pytest.mark.parametrize(
+    ("drop_ids", "with_summary", "kept_facts"),
+    [
+        ({"c1"}, True, [1, 2, 3]),
+        ({"c1", "c2"}, True, [2, 3]),
+        ({"c1", "c2", "c3"}, True, [3]),
+        ({"c2"}, True, [0, 1, 2, 3]),
+        ({"missing"}, True, [0, 1, 2, 3]),
+        ({"c1", "c2", "c3"}, False, [0, 1, 2, 3]),
+    ],
+)
+def test_summary_retires_runtime_facts_only_with_contiguous_tool_prefix(
+    tmp_path, drop_ids, with_summary, kept_facts,
+):
+    agent, params = _native_agent(tmp_path), _params()
+    user = UserTurn("保留原件，继续上一个项目。")
+    steering = UserTurn("最新补充：中文路径也要支持。")
+    handoff = CompactionSummary("[active-turn-tool-handoff]\n原工作片交接")
+    params.tool_ir_history.extend([user, handoff])
+    for index in range(3):
+        params.tool_ir_history.append(RuntimeFactsTurn(f"snapshot-{index}"))
+        _rec(agent, params, rnd=index + 1, idx=1, cid=f"c{index + 1}", body="ok")
+        if index == 0:
+            params.tool_ir_history.append(steering)
+    params.tool_ir_history.append(RuntimeFactsTurn("snapshot-3"))
+    archive_before = list(params.archive_tool_calls)
+
+    drop_tool_call_pairs(params, drop_ids, drop_completed_tool_turns=with_summary)
+
+    assert [item.text for item in params.tool_ir_history if isinstance(item, RuntimeFactsTurn)] == [
+        f"snapshot-{index}" for index in kept_facts
+    ]
+    assert [item for item in params.tool_ir_history if isinstance(item, UserTurn)] == [user, steering]
+    assert handoff in params.tool_ir_history
+    assert params.archive_tool_calls == archive_before
+    _assert_no_orphans(_native_provider_messages(agent, params))
+
+
+def test_summary_keeps_facts_until_entire_parallel_tool_turn_is_retired(tmp_path):
+    agent, params = _native_agent(tmp_path), _params()
+    old, latest = RuntimeFactsTurn("old"), RuntimeFactsTurn("latest")
+    params.tool_ir_history.append(old)
+    _rec(agent, params, rnd=1, idx=1, cid="c1", body="ok")
+    _rec(agent, params, rnd=1, idx=2, cid="c2", body="ok")
+    params.tool_ir_history.append(latest)
+
+    drop_tool_call_pairs(params, {"c1"}, drop_completed_tool_turns=True)
+    assert old in params.tool_ir_history
+    drop_tool_call_pairs(params, {"c2"}, drop_completed_tool_turns=True)
+    assert old not in params.tool_ir_history
+    assert latest in params.tool_ir_history
+    _assert_no_orphans(_native_provider_messages(agent, params))
+
+
+def test_native_window_reclaims_old_runtime_facts_across_two_generations(tmp_path):
+    """旧运行快照不再永久占据 floor；整段交给摘要后继续原回合，插话与最新状态保留。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({
+        "canonical_user_id": "local/main", "channel": "test",
+        "channel_conversation_id": "runtime-facts-long-turn", "channel_user_id": "local/main",
+    })
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_recovery_target_percent = 60
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(_params(), save=True, task_attributes={
+        CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+        "conversation_thread_id": thread.thread_id,
+    })
+    user = UserTurn("保留现有项目和原件。")
+    steering = UserTurn("后续也检查中文和空格路径。")
+    params.tool_ir_history.append(user)
+    for generation in (1, 2):
+        old_facts = []
+        for index in range(18):
+            fact = RuntimeFactsTurn(f"generation-{generation}-state-{index}:" + "R" * 2_200)
+            old_facts.append(fact)
+            params.tool_ir_history.append(fact)
+            _rec(agent, params, rnd=generation * 100 + index, idx=1,
+                 cid=f"g{generation}-c{index}", body="ok")
+        if generation == 1:
+            params.tool_ir_history.append(steering)
+        latest = RuntimeFactsTurn(f"current-state-{generation}")
+        params.tool_ir_history.append(latest)
+        archive_before = list(params.archive_tool_calls)
+        assert model_visible_context_tokens(agent, params, "base-prompt") > 9_000
+
+        prompt = build_tool_loop_prompt(agent, params)
+
+        assert store.load_thread(thread.thread_id).compact_generation == generation
+        assert len(agent.backend.calls) == generation
+        sent_history = json.dumps(agent.backend.calls[-1][1], ensure_ascii=False)
+        assert old_facts[0].text in sent_history
+        assert old_facts[-1].text in sent_history
+        assert latest in params.tool_ir_history
+        assert user in params.tool_ir_history and steering in params.tool_ir_history
+        assert params.archive_tool_calls == archive_before
+        assert model_visible_context_tokens(agent, params, prompt) < 6_000
+        _assert_no_orphans(_native_provider_messages(agent, params))
+        ir_before = list(params.tool_ir_history)
+        build_tool_loop_prompt(agent, params)
+        assert params.tool_ir_history == ir_before
+        assert len(agent.backend.calls) == generation
+
+
 def test_native_window_floor_keeps_ir_facts_that_live_compact_cannot_delete(tmp_path):
     """运行事实已经吃满恢复目标时直接交给 thread Compact，不先烧一份必然很薄的 live 摘要。"""
     store = ConversationStore(tmp_path / "conversations")
@@ -1416,13 +1531,15 @@ def test_persistent_native_interrupt_after_ir_mutation_rolls_back_without_failur
         },
         effective_on_chunk=(sink := _ContextCompactionSink()),
     )
-    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000, with_runtime_facts=True)
     before_ir = list(params.tool_ir_history)
     before_context = list(params.tool_context)
     original_settle = tool_loop_service._settle_native_ir_window
 
     def settle_then_interrupt(**kwargs):
         result = original_settle(**kwargs)
+        assert RuntimeFactsTurn("runtime-state-1") not in params.tool_ir_history
+        assert RuntimeFactsTurn("runtime-state-6") in params.tool_ir_history
         token.cancel("stop-after-ir-mutation")
         return result
 
@@ -1533,10 +1650,12 @@ def test_persistent_native_window_restores_ir_when_compact_cas_fails(
         },
         effective_on_chunk=(sink := _ContextCompactionSink()),
     )
-    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000, with_runtime_facts=True)
     before_ir = list(params.tool_ir_history)
 
     def fail_compact_cas(*_args, **_kwargs):
+        assert RuntimeFactsTurn("runtime-state-1") not in params.tool_ir_history
+        assert RuntimeFactsTurn("runtime-state-6") in params.tool_ir_history
         raise RuntimeError("synthetic compact CAS conflict")
 
     monkeypatch.setattr(store, "update_compact_state", fail_compact_cas)

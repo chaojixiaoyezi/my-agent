@@ -1,5 +1,11 @@
 # Gateway Progress
 
+## R190 native Compact 的旧状态最低水位
+
+对照 会话运行时 `compact.rs` 的历史替换与当前上下文重建，删除摘要覆盖的连续旧工具区内过期运行快照。
+最新 RuntimeFactsTurn、真实用户插话和保留工具尾部仍参与最低水位；探针与提交调用同一个 IR 回收入口。
+141 focused 已过，取消/提交冲突还原原上下文。原长 TUI 的频繁压缩和实际价格收益仍待部署复验。
+
 ## R189 重启后的过程流续接
 
 对照 会话运行时 `thread_routing::apply_refreshed_snapshot_thread` 的会话/缓冲交接，为现有易失环增加 stream ID。

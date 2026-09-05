@@ -1,5 +1,7 @@
 
 
+# LLM: 工具循环用同一 native IR 和 owner/thread Compact 权威；预算探针须与实际摘要回收及回滚规则一致。
+# 模块用途: 组装每轮工具请求并协调压缩与提交；不以裁剪改写用户输入、工具账本或任务状态。
 from __future__ import annotations
 
 import json
@@ -511,8 +513,9 @@ def _prepare_native_compact_plan(
 
 
 # LLM: Eligibility must estimate the same structural deletion later applied to the real IR. An
-# empty history would incorrectly pretend that UserTurn, RuntimeFactsTurn and carried summaries are
-# removable, causing expensive live summaries that leave almost no headroom. The probe owns copied
+# empty history would incorrectly discard UserTurn, the newest RuntimeFactsTurn and carried summaries.
+# Stale runtime facts in the summarized tool prefix are removable under the shared structural rule,
+# unlike those protected items. The probe owns copied
 # containers and never records a window, mutates the active turn, or advances Compact generation.
 # 函数用途: 在副本上删尽真正可被摘要覆盖的工具轮，算出运行中 Compact 实际能达到的最低上下文水位。
 def _native_compact_floor_tokens(

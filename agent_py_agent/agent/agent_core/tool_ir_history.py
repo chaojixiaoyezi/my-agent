@@ -1,4 +1,6 @@
 
+# LLM: 本模块维护模型可见的 typed IR；普通请求只追加，摘要覆盖后的回收保留用户输入和当前运行事实。
+# 模块用途: 保存并整理原生工具往返；改动须同时核对配对、缓存前缀、Compact 探针和取消回滚。
 from __future__ import annotations
 
 """原生 tool_use 协议下的 IR 历史维护（Step 2 接线层）。
@@ -28,6 +30,8 @@ text 协议路径一字不动。
   turn 里删 ToolCall、历史里删配对的 ToolResult），保持配对不变量。
 - ``UserTurn`` 不属于工具结果窗口，工具 compact 不得删除；需要缩短时由上层 active-turn/thread
   compact 处理。
+- ``RuntimeFactsTurn`` 是宿主状态快照，不是真实用户输入；完整摘要覆盖的旧工具前缀回收时，可一并
+  删除其中旧快照，但最新一份和保留工具尾部的快照不动。普通无摘要整理不能删除快照。
 - ``CompactionSummary`` 不属于第二条 compact 路线；thread/live summary 是同一 IR 历史里旧工具
   往返的 replacement item，每次压缩原位替换；带稳定 schema marker 的 carried handoff 是另一条
   当前 turn 交接事实，不能被 replacement 连带删除。
@@ -72,7 +76,8 @@ def record_user_turn_ir(params: object, text: str) -> None:
 
 # LLM: A dynamic prompt suffix becomes an append-only typed history item before provider
 # submission. Exact duplicate facts are emitted once per run; changed facts append at their real
-# chronology point and are never moved behind later tool calls on a subsequent request.
+# chronology point and are never moved behind later tool calls on a subsequent request. Only a
+# successful Compact may replace covered old facts, through the shared pair-removal contract.
 # 函数用途: 把本次调用新增的运行事实写入原生历史，并对同一 run 的完全相同事实去重。
 def record_runtime_facts_turn_ir(params: object, text: str) -> bool:
     content = str(text or "")
@@ -177,9 +182,9 @@ def record_tool_call_ir(
     history.append(result)
 
 
-# LLM: Pair removal is protocol-safe by default; only a caller holding one complete replacement
-# summary may also discard an assistant turn whose last tool call was removed.
-# 函数用途: 成对删除原生工具调用和结果；已有完整摘要时一并回收对应旧思考轮，避免空壳继续占上下文。
+# LLM: 成对回收不改变原始账本；完整摘要存在时才能删除已无工具的 assistant 轮及连续退休前缀内的旧
+# RuntimeFactsTurn。最新快照、真实 UserTurn 和保留工具尾部必须保持；探针与事务回滚复用此规则。
+# 函数用途: 摘除已覆盖的工具往返、旧思考与过期状态快照，避免长任务压缩后仍被旧状态塞满。
 def drop_tool_call_pairs(
     params: object,
     call_ids: set[str],
@@ -191,8 +196,8 @@ def drop_tool_call_pairs(
     Step 3/4 的 compact 在丢弃最老工具往返时调用这里，保证 assistant 消息里不留下
     没有对应 tool_result 的孤儿 tool_use（Anthropic 会拒绝），也不留下指向已删
     tool_use 的孤儿 tool_result。只有 ``drop_completed_tool_turns=True`` 且调用方已经持有
-    完整替代摘要时，才连同已无保留调用的旧 assistant 正文一起删除。返回实际摘除的
-    「对」数（以 ToolResult 计）。
+    完整替代摘要时，才连同已无保留调用的旧 assistant 正文、连续退休工具前缀中的旧状态一起删除。
+    最新运行快照、真实用户输入和未退休工具尾部始终保留。返回实际摘除的「对」数（以 ToolResult 计）。
     """
     if not call_ids:
         return 0
@@ -200,13 +205,19 @@ def drop_tool_call_pairs(
     removed = sum(
         1 for item in history if isinstance(item, ToolResult) and item.call_id in call_ids
     )
+    retired_facts = (
+        _summarized_runtime_fact_indexes(history, call_ids)
+        if drop_completed_tool_turns
+        else set()
+    )
     rebuilt = [
         _rewritten_history_item(
             item,
             call_ids,
             drop_completed_tool_turns=drop_completed_tool_turns,
         )
-        for item in history
+        for index, item in enumerate(history)
+        if index not in retired_facts
     ]
     history[:] = [
         item
@@ -214,6 +225,25 @@ def drop_tool_call_pairs(
         if item is not None and not _is_empty_assistant_turn(item)
     ]
     return removed
+
+
+# LLM: 仅从 typed 调用/结果的顺序计算连续退休前缀；跳过较新的任意调用不授权删除其之前仍在用的状态。
+# 函数用途: 找出摘要可替代的旧运行快照下标；并行轮尚有保留调用时不越过该轮，最新快照永远保留。
+def _summarized_runtime_fact_indexes(history: list[Any], call_ids: set[str]) -> set[int]:
+    retired_through = -1
+    for index, item in enumerate(history):
+        if isinstance(item, AssistantTurn) and any(
+            call.call_id not in call_ids for call in item.tool_calls
+        ):
+            break
+        if isinstance(item, ToolResult):
+            if item.call_id not in call_ids:
+                break
+            retired_through = index
+    fact_indexes = [
+        index for index, item in enumerate(history) if isinstance(item, RuntimeFactsTurn)
+    ]
+    return {index for index in fact_indexes[:-1] if index <= retired_through}
 
 
 # LLM: This is a structural IR rewrite; prose never decides whether a turn is covered or removable.

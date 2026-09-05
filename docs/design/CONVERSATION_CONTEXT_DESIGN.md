@@ -63,6 +63,8 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
    transcript cursor，只累计 `compact_source_tool_pairs`，并在同一 turn 内用一个 `CompactionSummary` 继续。
    日常无摘要窗口化至少保留最新工具对；完整替代摘要已安装后，若最新单对本身超过恢复余量，则可把该对
    也成对回收。其事实已进入摘要，精确原文仍在 owner archive/ref，不能因机械保留一条巨型回执制造假失败。
+   同一完整摘要也覆盖连续退休工具前缀中的旧 `RuntimeFactsTurn`；该旧快照随前缀回收，最新快照、所有真实
+   `UserTurn` 和保留工具尾部不动。无摘要或非连续删除不能取得回收快照权限，floor 探针与真实提交共用规则。
    摘要模型请求按 会话运行时 compaction turn 排序：历史全部在前，合成的 Compact 指令作为最后一条 synthetic
    user 消息；不能把指令放在首条 prompt 后再追加历史，否则兼容模型可能忽略旧指令并普通续写末尾动作。
 8. live-tool 摘要的 transport/调用异常、checkpoint 或 CAS 失败时，原生 IR 与 tool-context 恢复到压缩前，

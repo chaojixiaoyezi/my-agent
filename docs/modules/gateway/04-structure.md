@@ -1,5 +1,12 @@
 # Gateway Structure
 
+## R190 摘要覆盖范围与状态快照
+
+`tool_ir_history.drop_tool_call_pairs` 的完整摘要参数同时授权回收旧 assistant 轮和连续退休前缀内的旧运行
+快照。`_summarized_runtime_fact_indexes` 从 typed 调用/结果顺序找边界，不读正文；遇到任何保留调用即停止，
+并始终保留最新快照。`_native_compact_floor_tokens` 与实际压缩共用此规则，取消/CAS 失败恢复原列表。
+原始 transcript/工具账不参与删除，普通窗口化与孤儿清理不传摘要授权。
+
 ## R189 易失过程与持久消息的两种游标
 
 - `background_transcript.read_background_transcript_events` 在 owner Agent 锁内分配进程实例 stream ID，

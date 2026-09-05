@@ -21,6 +21,10 @@
 
 ## 2026-08-23 当前运行基线
 
+- native Compact 只在完整替代摘要已经覆盖时，随连续退休的工具前缀回收旧 RuntimeFactsTurn；最新快照、
+  真实 UserTurn、保留工具尾部和 carried handoff 始终保留。最低水位探针与实际提交共用该结构规则，取消或
+  CAS 失败还原全部 IR。普通轮继续 append-only，不把回收逻辑挪到每次请求或孤儿清理，也不删正式工具账本。
+
 - 后台易失过程游标必须与 owner Agent 的 stream ID 成对传输；只有换流才能重基序号，发布成功才确认。
   canonical 消息字节位置不跟随进程重置，已有输入/审批/历史不清空。冷 owner 不因轮询构建 Agent。
   子代理最终回复必须携带原 thread/message ID，不能用回复正文作为 legacy 去重键。

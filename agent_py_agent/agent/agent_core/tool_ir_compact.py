@@ -1,4 +1,6 @@
 
+# LLM: 原生工具回收复用唯一 typed IR 重写入口；摘要覆盖事实同时控制旧 assistant 与运行快照回收。
+# 模块用途: 按完整请求预算整对整理工具历史，保留配对、用户输入与当前状态，不写另一份 Compact 账。
 from __future__ import annotations
 
 """native 模式下 compact 对结构化 IR 历史的「整对」回收（Step 3）。
@@ -65,8 +67,9 @@ def reclaim_oldest_native_ir_pairs(params: object, *, fraction: float) -> int:
 
 # LLM: The caller supplies the single full-request token estimator. Ordinary windowing preserves
 # assistant turns and the newest pair; a caller holding a complete replacement summary may release
-# both the final pair and fully covered tool-bearing assistant turns. UserTurn items are never candidates.
-# 函数用途: 原生工具上下文超预算时逐对删除最旧往返；完整摘要已覆盖时也回收对应旧思考正文。
+# both the final pair and fully covered tool-bearing assistant turns and stale runtime facts in the
+# retired prefix. The newest facts and all UserTurn items are never candidates.
+# 函数用途: 逐对回收最旧工具往返；完整摘要覆盖时一起回收旧思考和状态，保留用户原话与当前状态。
 def compact_native_ir_to_token_budget(
     params: object,
     *,
@@ -85,7 +88,7 @@ def compact_native_ir_to_token_budget(
     默认至少保留最新一对工具往返。只有上层已经把完整旧历史写入替代摘要时，才可显式传
     ``preserve_newest_pair=False``，让单条巨型最新回执也能被摘要替换；并显式传
     ``drop_completed_tool_turns=True``，才能删除这些工具所属、已被摘要覆盖的旧 assistant
-    正文。返回实际删除的配对数。
+    正文及连续退休前缀中的旧运行状态，最新状态始终保留。返回实际删除的配对数。
     估算器即使因取整暂时没有下降，循环也只遍历有限的调用，不会卡死。
     """
     if max_tokens <= 0:

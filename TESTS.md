@@ -1,5 +1,14 @@
 # TESTS
 
+## R190 运行快照与工具前缀一起压缩
+
+`test_native_tool_ir_compact_and_orphan_sweep.py` 先在旧实现复现 5 个失败：工具已退休但旧状态仍在、并行轮
+全部退休仍不回收、状态快照抬高 floor 导致完全不尝试 native Compact。修复后要求摘要请求先见完整旧快照，
+两代压缩均提交并保留全部用户插话/最新状态；无摘要、不连续删除或并行轮部分保留时不能误删状态。
+现有取消后内存恢复和 CAS 失败用例加入真正被删除的 RuntimeFactsTurn，校验原候选完整回滚。
+连同语义摘要、原生消息/引导和压力校准共 141 项通过；产品验收仍复用原 MiniMax-M2.7 长 TUI，
+比较真实 Compact 账本的完整请求数字、代次间工具数量与 provider 缓存账，不能用 fake 摘要证明实际省钱。
+
 ## R189 重连与消息身份
 
 `test_background_notice_display.py` 用两次真实 Agent 展示源实例、同一 canonical store 和 TUI reducer 验证
