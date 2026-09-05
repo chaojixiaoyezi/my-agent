@@ -13,10 +13,10 @@ from .native_history import canonical_native_messages_from_metadata
 HISTORY_DISPLAY_SCHEMA = "conversation_history_display.v1"
 
 
-# LLM: 调用方先解析 owner/thread；分组只读宿主 request identity，Audit 和内部角色不进入普通显示。
-# 函数用途: 将已有消息按回合生成只读事件；未完成回合的真实用户输入也必须保留。
+# LLM: 调用方已解析 owner/thread 并限制读取窗口；本投影不得再用模型预览的回合数截断后台消息组。
+# 函数用途: 显示所读取窗口的全部公开消息；后台 commentary 不是独立用户回合，未完成输入也保留。
 def conversation_history_display_events(
-    rows: Sequence[object], *, max_turns: int,
+    rows: Sequence[object],
 ) -> tuple[dict[str, object], ...]:
     groups: dict[str, list[object]] = {}
     for index, row in enumerate(rows):
@@ -35,7 +35,7 @@ def conversation_history_display_events(
         )
         groups.setdefault(identity, []).append(row)
     events: list[dict[str, object]] = []
-    for identity in list(groups)[-max(1, int(max_turns)):]:
+    for identity in groups:
         events.extend(_turn_events(identity, groups[identity]))
     return tuple(events)
 

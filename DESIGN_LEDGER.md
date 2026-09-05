@@ -1,5 +1,15 @@
 # DESIGN LEDGER
 
+## 2026-09-05 显示窗口不能重复按模型预览回合截断【状态：R181 已部署，原长会话真 TUI 通过】
+
+- R180 的长会话 Ctrl+Home 复验发现：raw transcript 有 53 行、5 个真实 user；读取窗口 80 行已全部返回，
+  但后台 commentary 无独立 conversation request id，各自以 message id 分组后共 34 组，又被显示投影裁到 20 组。
+  根因是把模型预览的 `max_turns` 重复用于显示分组，不能归为模型遗忘或数据删除。
+- R181 删除这层重复截取及多余参数，完整投影调用方已读取的 bounded rows。仍沿用 会话运行时/终端交互 完整消息
+  replay 原则；读取层分页仍是独立待办，不能靠无限增大内存窗口替代。无额外模型调用或历史写入。
+- 同轮发现 resume 的历史读取早于 TUI readiness，冷启动并行时会提前退出；后续应把历史准备放进既有
+  preflight 成功链，再启动 worker。保留同一 owner/session 和有限等待，不用后台轮询或空历史假成功兜底。
+
 ## 2026-09-05 会话恢复不能使用问答预览代替正文【状态：R180 已部署，持久化尾部恢复真 TUI 通过】
 
 - R179 真实 `/exit → /sessions → resume` 找回了同一 session，但工具和思考消失；原 canonical final metadata

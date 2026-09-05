@@ -1,5 +1,13 @@
 # Gateway Progress
 
+## R181 显示层不再二次裁剪回合
+
+- R180 长会话首屏复验反证：读取层已返回全部 53 行/5 user，却因 34 个后台显示组被裁成 20 组而丢头。
+  删除 `history_display` 的预览回合上限，投影调用方已经读取的完整窗口；匿名后台消息不能算作用户回合。
+- 新回归覆盖 32 条无 request id commentary 不挤掉第一条用户输入；分页与 Compact 前归档仍独立待验。
+- R181 原长会话真 TUI 已回到首条八项目调研输入/思考/工具，回看调用保持 61、Compact 2。冷启动并行
+  resume 另暴露历史读取早于 preflight 的时序问题，需后续通用修复，不能当成历史损坏。
+
 ## 2026-09-05 R180 canonical 历史显示恢复
 
 - 修复 exact resume 仅加载问答预览导致已保存思考、工具和 commentary 不显示的问题。`client_service`

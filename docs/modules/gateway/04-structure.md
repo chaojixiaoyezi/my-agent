@@ -2,6 +2,8 @@
 
 ## 会话恢复的显示与模型预览
 
+- 显示转换只投影调用方已经限定的 raw rows，不再按 `max_turns` 对 request/message 分组二次裁剪；后台
+  commentary 可能没有独立 request id，不能被误算为一个用户回合。真正分页属于存储/读取层，不属于渲染器。
 - `client_service.read_gateway_client_history` 在 authenticated scope 内解析唯一 owner/thread；同一批 canonical
   rows 分别产生 `turns` 问答预览与 `display_events` 公开类型正文。客户端不能选择内部文件或其它 owner。
 - `conversation/history_display.py` 消费已保存 native envelope 与可见消息，不改变 provider replay 或 Compact；

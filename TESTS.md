@@ -2,6 +2,8 @@
 
 ## R180 会话显示恢复定向验证
 
+- R181 增加真实长会话回归：5 个 user 的 53 条 raw rows 形成 34 个显示组时，不能再按 20 个预览回合丢掉开头。
+  单测以 32 条无 request id 后台 commentary 验证窗口不被重复裁剪，真 TUI 用原五阶段 session 回看首条输入。
 - `test_conversation_history_display.py` 验证 canonical 用户输入、思考、commentary、工具、final 的顺序与幂等，
   未结束输入保留，原始 metadata 不变，内部注入/签名/参数不外发，未知工具结果不伪装成功；控制事件不能重放。
 - Gateway client、CLI history、chat 启动、TUI runtime、threading、navigation、prompt_toolkit pipe 一起做 focused。

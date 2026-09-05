@@ -93,8 +93,8 @@ def execute_gateway_client_memory(
     return GatewayClientMemoryResult(normalized, True, records=records)
 
 
-# LLM: 历史读取先解析 authenticated owner/thread；问答预览与 native 显示共用同一批 canonical rows，不执行或写入。
-# 函数用途: 返回当前会话的预览和完整类型正文，让恢复不再丢掉已保存的思考、工具和过程回复。
+# LLM: 历史读取先解析 authenticated owner/thread；max_turns 只限制读取/问答预览，显示层完整消费所读 rows，不再次裁组。
+# 函数用途: 返回当前会话预览和类型正文，避免后台过程回复挤掉仍在读取窗口里的用户输入。
 def read_gateway_client_history(
     base_agent: object,
     *,
@@ -137,7 +137,7 @@ def read_gateway_client_history(
         thread_id=thread_id,
         turns=_paired_history_turns(rows, max_turns=limit),
         load_errors=safe_errors,
-        display_events=conversation_history_display_events(rows, max_turns=limit),
+        display_events=conversation_history_display_events(rows),
     )
 
 

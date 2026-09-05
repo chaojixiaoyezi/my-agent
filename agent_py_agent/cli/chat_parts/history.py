@@ -28,7 +28,7 @@ class GatewayChatHistorySnapshot:
 
 
 # LLM: 恢复只读 resolve_thread/recent_messages_report，不能创建线程、写第二 transcript 或按正文猜配对；request id 和 role 是唯一配对事实。
-# 函数用途: 从当前 Agent 的 ConversationStore 恢复指定会话的问答预览和类型正文，不改模型历史。
+# 函数用途: 恢复问答预览，并将所读完整窗口交给类型显示；显示不再重复按预览回合数截取。
 def load_gateway_chat_history(
     agent: object,
     session_id: str,
@@ -72,7 +72,7 @@ def load_gateway_chat_history(
         turns=turns,
         thread_id=thread_id,
         load_errors=tuple(dict(item) for item in row_errors if isinstance(item, dict)),
-        display_events=conversation_history_display_events(rows, max_turns=max_turns),
+        display_events=conversation_history_display_events(rows),
     )
 
 

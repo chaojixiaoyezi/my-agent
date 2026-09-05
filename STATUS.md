@@ -1,8 +1,20 @@
 # STATUS
 
+## R181 已部署，长会话开头恢复真 TUI 通过
+
+- R180 长会话首屏仍缺调研开头，不是 raw 消息不存在：实际 53 行/5 user 全部在读取的 80 行窗口内；后台
+  无 request id 的 commentary 形成 34 个显示组，再按模型预览 20 回合截断而丢头。R181 已删除重复截断。
+- `.10` 当前唯一 Gateway PID 2240088，MiniMax-M2.7，R181 wheel
+  `7d4b25f20f9486ac17aba3c9d2327fe2c8cfb1d0d886d0321ca68f5381f99ad0`；复用停止后升级的独立 runtime-venv-r180，
+  direct_url 安装元数据与 wheel hash 一致，R179 环境和旧 wheel 保留回滚。`ma-r180-110-long-resume` 真 TUI
+  Ctrl+Home 已看到第一轮八项目调研的 user/思考/工具；只回看调用保持 61，Compact 保持 2，未新派任务。
+- 同时启动 Gateway 与 resume 暴露另一个时序问题：CLI 在 TUI readiness 前读取历史，服务尚未就绪时退出。
+  确认 Gateway running 后同 session 正常恢复；后续应把恢复并入现有 preflight，不增加无限重试，见 BUG-112。
+- Compact 前完整过程、child 有界环之外的历史和读取层分页仍待补齐；线上 Actions 当前 disabled，不作为验收来源。
+
 ## 2026-09-05 R180 已部署，历史恢复切片真 TUI 通过
 
-- 当前唯一 Gateway 已顺序升级为 R180，PID 2236118，8420，MiniMax-M2.7；wheel SHA-256
+- R180 验收时唯一 Gateway 为 PID 2236118，8420，MiniMax-M2.7；wheel SHA-256
   `7bb89e06512c90423993065e51c1068cfcd4beee5384a6292162b8e43d83541f`，默认 launcher 同属 R180 独立 venv。
   R179 环境保留回滚，旧 PID 已确认退出才启动新进程。
 - `ma-r179-110-process-resume` 真 TUI Ctrl+Home 找回首轮用户输入/思考/过程回复/工具，Ctrl+O 可展开，最终
@@ -12,7 +24,7 @@
   Ctrl+G 返回正确 root，回看没有新增模型调用（main 61 / 该 child 104）。child 的有界环仍缺少较早工具过程，
   因此 P1 完整历史硬门继续开放，不用本切片冒充封板。186 项 focused 和本地严格门通过，未跑全仓 pytest。
 
-- `.10` 唯一 Gateway 为 R179，MiniMax-M2.7，PID 2215803；默认 launcher 已指向独立 R179 wheel venv。
+- R179 验收时 `.10` 唯一 Gateway 为 MiniMax-M2.7 / PID 2215803，默认 launcher 指向独立 R179 wheel venv。
   `ma-r179-110-process-resume` 经真实 `/exit → /sessions → resume` 回到原 session。重新启动后台服务后实际
   调用 `process_session(network_status)`，public/18778 的 query rc=1、not_explicitly_allowed 和外部探针边界
   均正确展示。随后 `gwreq-1788585936-8e660f0e75484386bc731523185c2b30` 停止服务，listener PID 2221390
