@@ -21,6 +21,10 @@
 
 ## 2026-08-23 当前运行基线
 
+- Gateway TUI 的显式 resume 复用同一可见 preflight：readiness 后才读取授权 owner/session 的 canonical
+  历史，恢复成功后才启动 worker。历史读取不在界面线程做 HTTP；失败明确退出，已退出客户端的迟到结果
+  不得重启 worker。本地/普通终端模式保留既有恢复路径，不引入空历史或重复 Gateway 兜底。
+
 - 普通工具的 `workspace:*` 只是当前 turn 调度/审计事实，不进入跨 run 持久
   `resource_locks`；父子代理共享同一 canonical task root 和交付路径。operation 幂等/replay、精确
   `logical:*` 互斥、active turn、owner 墙、write boundary 和沙箱仍保留。任务晋升前，本地可信 CLI/TUI

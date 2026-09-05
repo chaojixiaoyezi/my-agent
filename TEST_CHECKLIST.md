@@ -3,7 +3,9 @@
 ## R179/R180 当前收尾
 
 - [x] R181 修复显示窗口二次截断后，原长会话 Ctrl+Home 实际看见八项目调研的第一条用户输入及思考/工具。
-- [ ] Gateway 与 resume 同时启动时，历史准备必须等待既有 readiness；冷启动提前退出的 BUG-112 待修。
+- [x] R182 两个原 session 的 TUI 先启动、随后启动唯一 Gateway；历史准备等待既有 readiness，不再提前退出。
+- [ ] BUG-113：恢复历史与后台 notice 必须按 canonical 消息身份去重，不能把旧 final 追加到最新追问后。
+- [ ] BUG-114：同 owner 的一次连续工作需要修改两个历史任务时，不能因第二次 exact rebind 失败转写到错误目录。
 - [x] R179 真实 network_status 返回宿主监听、逐端口 rc=1 与 not_explicitly_allowed；没有把本机监听冒充 LAN 成功。
 - [x] R179 原 session 恢复后停止受管服务；原 listener PID 消失、18778 释放、单 Gateway 存活。
 - [x] R178 同一长 TUI 完成五阶段用户任务，主/直属代理均自然终态；模型产物 4 项 skip 单独记不通过。

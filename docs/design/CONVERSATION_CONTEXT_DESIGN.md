@@ -18,6 +18,10 @@ task 或 turn 语义；它们进入同一个 Gateway/runtime。
 
 ## Transcript and compact
 
+薄 Gateway TUI 显式恢复必须在同一可见 preflight 内先等待 readiness，再后台读取授权的 owner/session
+history，最后启动 worker；恢复失败不接受任务，客户端退出后迟到结果不重新启动。原会话的数据错误不得
+被包装成空历史成功，连接期间也不创建新 session、Gateway 或额外重试器。
+
 TUI 显式 resume 不再使用完整问答预览重建正文。Gateway 在同一 owner/thread 的 canonical rows 上另生成
 `conversation_history_display.v1`：真实用户输入、公开 assistant 正文/思考、按 tool-use id 配对的结果。native
 user 注入、签名和参数留在服务端；显示事件不回灌模型。canonical final 优先于 provider 原始末段正文。

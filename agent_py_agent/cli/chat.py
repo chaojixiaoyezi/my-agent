@@ -286,8 +286,8 @@ def cmd_resume(args) -> int:
     return cmd_chat(args)
 
 
-# LLM: Local and Gateway chat share conversation/archive semantics；显式 session 恢复只读 canonical ConversationStore，读取错误 fail-closed，正常退出只提交一次 Curator close reason。
-# 函数用途: 启动或恢复聊天，将问答预览与显示事件分开传递，正常关闭后登记统一后台会话提炼请求。
+# LLM: 显式恢复只读 canonical history；Gateway TUI 将读取交给既有 preflight，不能在 readiness 前 HTTP 请求或以空历史启动 worker。
+# 函数用途: 启动或恢复聊天，本地直接读历史，薄客户端先显示连接界面；正常关闭后登记统一会话提炼请求。
 def cmd_chat(args) -> int:
     use_gateway = bool(args.gateway)
     use_tui = _has_prompt_toolkit() and not bool(getattr(args, "plain", False))
@@ -312,7 +312,9 @@ def cmd_chat(args) -> int:
         return 3
     state, build_history_context = _init_chat_state(agent)
     recovered_display_events = None
-    if str(getattr(args, "session_id", "") or "").strip():
+    resume_session = bool(str(getattr(args, "session_id", "") or "").strip())
+    deferred_history = bool(resume_session and use_gateway and use_tui)
+    if resume_session and not deferred_history:
         restored = load_gateway_chat_history(
             agent,
             current_session_id,
@@ -346,6 +348,7 @@ def cmd_chat(args) -> int:
             session_manager=session_manager,
             current_session_id=current_session_id,
             recovered_display_events=recovered_display_events,
+            restore_session_history=deferred_history,
         ))
     else:
         from .chat_parts.plain_state import RunPlainConfig

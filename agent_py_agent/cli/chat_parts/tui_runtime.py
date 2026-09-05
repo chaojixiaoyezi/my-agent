@@ -1254,8 +1254,8 @@ class TuiRuntime(
             {"text": "Connecting to Gateway"},
         )
 
-    # LLM: readiness 终态只接收布尔探测结果和错误类别；异常正文、endpoint 与 secret 不进入事件。
-    # 函数用途: 结束 Gateway 连接动画，并在失败时显示可恢复错误。
+    # LLM: preflight 终态仅接收就绪/准备结果和结构化错误码；不能从异常正文猜历史损坏或泄漏端点密钥。
+    # 函数用途: 结束启动动画，区分服务不可用与会话历史尚未恢复成功。
     def resolve_connection_check(
         self,
         *,
@@ -1269,7 +1269,11 @@ class TuiRuntime(
             {
                 "ok": bool(ok),
                 "error_code": str(error_code or ""),
-                "text": "" if ok else "Gateway is unavailable.",
+                "text": "" if ok else (
+                    "会话历史恢复失败，未开始处理任务。"
+                    if error_code == "GATEWAY_HISTORY_UNAVAILABLE"
+                    else "Gateway is unavailable."
+                ),
             },
         )
 

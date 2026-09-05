@@ -1,5 +1,5 @@
 # LLM: 本模块把真实 Gateway readiness 映射为 TUI 启动事件；探测仍复用 canonical Gateway state，不另建健康事实源。
-# 模块用途: 在 TUI 已可见后后台等待 Gateway，成功才启动聊天 worker，失败则安全退出并返回错误码。
+# 模块用途: 在 TUI 已可见后后台等待 Gateway 并准备恢复历史，全部成功才启动 worker，失败则安全退出。
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from typing import Any
 from .tui_runtime import TuiRuntime
 
 
-# LLM: 配置束只携带同一 Application/TuiRuntime、Gateway paths 和一次 worker starter；不保存 endpoint 或 secret。
-# 类用途: 描述一次 TUI Gateway 启动探活所需依赖。
+# LLM: 同一 Application 的 prepare_session 只能在 readiness 后读恢复数据，返回空错误码表示成功；不能执行任务或另起 Gateway。
+# 类用途: 描述一次连接、可选会话恢复及 worker 启动所需依赖，不保存端点或密钥。
 @dataclass(frozen=True)
 class TuiGatewayPreflight:
     application: Any
@@ -21,6 +21,7 @@ class TuiGatewayPreflight:
     timeout_seconds: float
     stop_event: threading.Event
     on_ready: Callable[[], None]
+    prepare_session: Callable[[], str] | None = None
 
 
 # LLM: compatibility wrapper preserves the test/adapter patch point while delaying the heavy daemon status stack until the preflight thread runs.
@@ -45,8 +46,8 @@ def start_tui_gateway_preflight(config: TuiGatewayPreflight) -> threading.Thread
     return thread
 
 
-# LLM: wait 结果是 readiness 唯一事实；后台线程只产生结果，状态切换必须投递回 Application loop 以免首帧丢失刷新。
-# 函数用途: 等待 Gateway 就绪，并把终态排队送回 TUI 事件循环。
+# LLM: readiness 后才允许有界历史读取，准备失败不得启动 worker；结果经 loop 提交，退出后迟到回调不得复活客户端。
+# 函数用途: 后台顺序连接服务、准备会话，把完整启动结果排队送回界面线程。
 def _run_gateway_preflight(config: TuiGatewayPreflight) -> None:
     error_code = ""
     try:
@@ -54,6 +55,11 @@ def _run_gateway_preflight(config: TuiGatewayPreflight) -> None:
             config.paths,
             timeout=max(0.0, float(config.timeout_seconds or 0.0)),
         )
+        if config.stop_event.is_set():
+            return
+        if alive and config.prepare_session is not None:
+            error_code = config.prepare_session()
+            alive = not bool(error_code)
     except Exception as exc:  # noqa: BLE001 探活异常必须成为 typed 启动失败而不能杀后台线程
         alive = False
         error_code = type(exc).__name__
@@ -75,19 +81,20 @@ def _run_gateway_preflight(config: TuiGatewayPreflight) -> None:
     )
 
 
-# LLM: 这是 Gateway preflight 的唯一状态落点；必须在 Application loop 内先更新 runtime/启动 worker，再 invalidate 触发可见首帧。
-# 函数用途: 在 TUI 事件循环里落实连接成功或失败结果。
+# LLM: 这是 preflight 唯一状态落点；已退出时不发布事件，否则在 loop 更新 runtime/启动 worker 后 invalidate。
+# 函数用途: 落实连接与历史恢复结果，忽略用户退出后才返回的旧结果。
 def _finish_gateway_preflight(
     config: TuiGatewayPreflight,
     *,
     alive: bool,
     error_code: str,
 ) -> None:
+    future = getattr(config.application, "future", None)
+    if config.stop_event.is_set() or (future is not None and future.done()):
+        return
     config.runtime.resolve_connection_check(ok=alive, error_code=error_code)
     if alive:
-        future = getattr(config.application, "future", None)
-        if not config.stop_event.is_set() and (future is None or not future.done()):
-            config.on_ready()
+        config.on_ready()
         config.application.invalidate()
         return
     config.stop_event.set()

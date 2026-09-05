@@ -3,7 +3,10 @@ from __future__ import annotations
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.cli.chat_parts import tui_preflight
+from agent_py_agent.cli.chat_parts.tui import _prepare_gateway_session
 from agent_py_agent.cli.chat_parts.tui_preflight import (
     TuiGatewayPreflight,
     start_tui_gateway_preflight,
@@ -156,3 +159,106 @@ def test_gateway_preflight_commits_fast_result_on_application_loop(monkeypatch) 
     assert starts == ["worker"]
     assert application.invalidations == 1
     assert runtime.store.snapshot().active_blocks == ()
+
+
+def test_gateway_preflight_prepares_session_after_ready_before_worker(monkeypatch) -> None:
+    application = _application()
+    application.loop = _DeferredLoop()
+    runtime = TuiRuntime("preflight-resume")
+    order: list[str] = []
+
+    def ready(_paths, *, timeout):
+        order.append("ready")
+        return {}, True
+
+    def prepare():
+        assert threading.current_thread() is not threading.main_thread()
+        order.append("history")
+        return ""
+
+    monkeypatch.setattr(tui_preflight, "wait_for_gateway_running", ready)
+    thread = start_tui_gateway_preflight(TuiGatewayPreflight(
+        application=application, runtime=runtime, paths=object(), timeout_seconds=3,
+        stop_event=threading.Event(), on_ready=lambda: order.append("worker"),
+        prepare_session=prepare,
+    ))
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert order == ["ready", "history"]
+    application.loop.drain()
+    assert order == ["ready", "history", "worker"]
+
+
+@pytest.mark.parametrize("alive,error", [(False, "GATEWAY_NOT_READY"), (True, "GATEWAY_HISTORY_UNAVAILABLE")])
+def test_gateway_preflight_history_failure_never_starts_worker(monkeypatch, alive, error) -> None:
+    application = _application()
+    runtime = TuiRuntime("preflight-history-error")
+    starts: list[str] = []
+    monkeypatch.setattr(tui_preflight, "wait_for_gateway_running", lambda *_args, **_kwargs: ({}, alive))
+    thread = start_tui_gateway_preflight(TuiGatewayPreflight(
+        application=application, runtime=runtime, paths=object(), timeout_seconds=3,
+        stop_event=threading.Event(), on_ready=lambda: starts.append("worker"),
+        prepare_session=lambda: starts.append("history") or "GATEWAY_HISTORY_UNAVAILABLE",
+    ))
+    thread.join(timeout=2)
+    assert starts == (["history"] if alive else [])
+    assert application.result == 2
+    assert runtime.store.snapshot().stable_blocks[0].metadata["error_code"] == error
+
+
+def test_gateway_preflight_late_result_cannot_restart_closed_tui(monkeypatch) -> None:
+    application = _application()
+    application.loop = _DeferredLoop()
+    runtime = TuiRuntime("preflight-closed")
+    stop = threading.Event()
+    starts: list[str] = []
+    monkeypatch.setattr(tui_preflight, "wait_for_gateway_running", lambda *_args, **_kwargs: ({}, True))
+    thread = start_tui_gateway_preflight(TuiGatewayPreflight(
+        application=application, runtime=runtime, paths=object(), timeout_seconds=3,
+        stop_event=stop, on_ready=lambda: starts.append("worker"),
+        prepare_session=lambda: "",
+    ))
+    thread.join(timeout=2)
+    snapshot = runtime.store.snapshot()
+    stop.set()
+    application.exit(result=0)
+    application.loop.drain()
+    assert starts == []
+    assert application.result == 0
+    assert application.invalidations == 0
+    assert runtime.store.snapshot() == snapshot
+
+
+@pytest.mark.parametrize("outcome", ["ready", "failed", "closed", "raised"])
+def test_resume_preparation_publishes_only_successful_live_session(outcome) -> None:
+    stop = threading.Event()
+    runtime = TuiRuntime("exact-session")
+    reads: list[tuple[str, int]] = []
+
+    def request_history(session_id, *, max_turns):
+        reads.append((session_id, max_turns))
+        if outcome == "closed":
+            stop.set()
+        if outcome == "raised":
+            raise OSError("private path must not escape")
+        return {
+            "ok": outcome != "failed", "thread_id": "exact-thread",
+            "turns": [{"user_message": "之前的问题", "assistant_message": "之前的答复"}],
+        }
+
+    params = SimpleNamespace(
+        agent=SimpleNamespace(
+            gateway_client_only=True,
+            config=SimpleNamespace(chat_history_max_turns=20),
+            request_chat_history=request_history,
+        ),
+        current_session_id="exact-session", history_lock=threading.Lock(),
+        conversation_history=[],
+    )
+    error = _prepare_gateway_session(params, runtime, stop)
+    assert reads == [("exact-session", 20)]
+    assert error == ("GATEWAY_HISTORY_UNAVAILABLE" if outcome in {"failed", "raised"} else "")
+    assert params.conversation_history == ([("之前的问题", "之前的答复")] if outcome == "ready" else [])
+    snapshot = runtime.store.snapshot()
+    assert len(snapshot.stable_blocks) == (2 if outcome == "ready" else 0)
+    assert snapshot.active_blocks == ()

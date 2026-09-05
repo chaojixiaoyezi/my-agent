@@ -1,5 +1,13 @@
 # TESTS
 
+## R182 恢复启动顺序
+
+- 失败先行覆盖 Gateway TUI 不能在界面 preflight 前请求历史。preflight focused 覆盖 readiness→历史→worker
+  顺序、HTTP 准备位于后台、连接失败不读历史、读取错误/异常不启动 worker、退出后迟到结果不重开。
+- `.10` 真 TUI 复用 R178 两个已经结束的原 session，在唯一 Gateway 重启就绪过程中并行 resume；核对首条
+  历史、无误退出、无新增模型调用或任务、精确 session/thread、正常中文追问与退出。此处记录方法，结果另记
+  TUI 审计账本；完整过程归档与分页仍需独立验收。
+
 ## R180 会话显示恢复定向验证
 
 - R181 增加真实长会话回归：5 个 user 的 53 条 raw rows 形成 34 个显示组时，不能再按 20 个预览回合丢掉开头。

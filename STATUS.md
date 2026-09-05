@@ -1,5 +1,19 @@
 # STATUS
 
+## R182 启动顺序修复已部署，两路原会话真 TUI 通过
+
+- BUG-112 已改为同一 preflight 顺序执行 readiness、原 session 历史恢复、worker 启动；失败或已退出时
+  不假装空历史成功。141 项 focused、Ruff、doc sync、strict size、diff、源码/wheel clean-package 通过。
+- `.10` R182 wheel `c2a8610a5b57115cc69aabd410e76bc2b6d044cc0c65c6f0c3f344904a0f4d23`，唯一 Gateway
+  PID 2243914 / 8420 / MiniMax-M2.7。两个原 session 的 TUI 先启动、Gateway 随后启动，均恢复成功；
+  只回看调用保持 65/39、Compact 2/2，Ctrl+Home 均看见第一条输入/思考/工具。
+- 两路普通追问均自然 final：长会话 18 calls、retry 0、cache-read 1,094,674、Compact 2→3；服务会话
+  2 calls、retry 0、cache-read 29,044、Compact 仍 2。不能因 lifecycle 通过就声称产物修改完成。
+- 新 BUG-113：恢复后后台通知从 0 再取，旧 final 被追加到末尾，须统一消息身份去重。新 BUG-114：
+  续作旧 Go 任务后再改同 owner 另一历史任务的 HANDOVER，edit_file/apply_patch 均返回
+  `CONVERSATION_TASK_BINDING_FAILED`；模型转写了旁边的勘误文件，原修改要求未完成，待定位通用 rebind。
+- 远端 main 已确认包含 R181 与交接证据 `263882e`；GitHub Actions 当前 `enabled=false`，线上不作验收来源。
+
 ## R181 已部署，长会话开头恢复真 TUI 通过
 
 - R180 长会话首屏仍缺调研开头，不是 raw 消息不存在：实际 53 行/5 user 全部在读取的 80 行窗口内；后台

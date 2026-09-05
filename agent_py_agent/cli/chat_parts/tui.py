@@ -1,5 +1,5 @@
 # LLM: 本模块编排 chat TUI 生命周期；TuiRuntime 是显示唯一事实源，worker/按键只通过 typed event 更新它。
-# 模块用途: 创建交互界面、后台 worker 和会话级状态，并负责退出收尾。
+# 模块用途: 创建界面，经同一 preflight 连接和恢复会话后启动 worker，并负责退出收尾。
 
 from __future__ import annotations
 
@@ -244,8 +244,30 @@ def _make_start_worker_params(
     )
 
 
-# LLM: run_tui 在 app/worker 前发布 session 和 canonical 显示历史；模型预览独立传给 worker，恢复事件不能进任务队列。
-# 函数用途: 启动可恢复正文、工具和思考的 prompt_toolkit 会话，随后等待用户交互或退出。
+# LLM: 后台准备只读 exact session，将预览和显示分开更新；HTTP 不阻塞界面，失败或退出后不能用空历史启动 worker。
+# 函数用途: 服务就绪后恢复原会话；不执行任务、不回灌模型、不更改 Compact 或权限。
+def _prepare_gateway_session(params: TuiRunParams, runtime, stop_event: threading.Event) -> str:
+    from .history import chat_history_max_turns, load_gateway_chat_history
+
+    try:
+        restored = load_gateway_chat_history(
+            params.agent, params.current_session_id,
+            max_turns=chat_history_max_turns(params.agent.config),
+        )
+    except Exception:  # noqa: BLE001 启动准备失败必须显式终止，不能让后台异常丢失或透传私有路径
+        return "GATEWAY_HISTORY_UNAVAILABLE"
+    if restored.load_errors:
+        return "GATEWAY_HISTORY_UNAVAILABLE"
+    if stop_event.is_set():
+        return ""
+    with params.history_lock:
+        params.conversation_history[:] = restored.turns
+    runtime.publish_recovered_history(restored.turns, display_events=restored.display_events)
+    return ""
+
+
+# LLM: Gateway 显式恢复在 preflight readiness 后、worker 前进行；本地已加载显示可立即发布，恢复事件不进任务队列。
+# 函数用途: 先显示可交互界面，再完成连接与历史准备，成功后接收任务或退出。
 def run_tui(*, params: TuiRunParams) -> int:
     from agent_py_agent import __version__
 
@@ -298,8 +320,8 @@ def run_tui(*, params: TuiRunParams) -> int:
     if params.use_gateway:
         from .tui_preflight import TuiGatewayPreflight, start_tui_gateway_preflight
 
-        # LLM: pre-run 在 prompt_toolkit loop 已建立后才启动探活，避免后台失败先于 Application.future。
-        # 函数用途: 为 Gateway TUI 启动一次可见的 readiness 检查。
+        # LLM: pre-run 在 loop 建立后才探活；显式 resume 的历史读取复用同一后台阶段，成功之前不得启动 worker。
+        # 函数用途: 显示连接过程，并按顺序完成 readiness 与可选历史恢复。
         def pre_run() -> None:
             start_tui_gateway_preflight(TuiGatewayPreflight(
                 application=app,
@@ -310,6 +332,9 @@ def run_tui(*, params: TuiRunParams) -> int:
                 ),
                 stop_event=stop_event,
                 on_ready=start_workers,
+                prepare_session=(
+                    lambda: _prepare_gateway_session(params, tui_runtime, stop_event)
+                ) if params.restore_session_history else None,
             ))
     else:
         pre_run = start_workers

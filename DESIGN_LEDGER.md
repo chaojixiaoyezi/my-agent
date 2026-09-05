@@ -1,5 +1,15 @@
 # DESIGN LEDGER
 
+## 2026-09-05 恢复会话复用唯一启动 preflight【状态：R182 已部署，两路原 session 真 TUI 通过】
+
+- BUG-112 的历史 HTTP 请求早于可见 TUI 和 Gateway readiness。对照 会话运行时 `tui/src/app.rs` 先
+  `bootstrap` 再 `resume_thread`、终端交互 `sessionRestore.ts` 在首次 query 前恢复状态，薄客户端改为
+  在同一 preflight 后台线程等服务就绪、读取 exact owner/session 历史；准备成功才启动 worker。
+- 不增加重试器、Gateway 或空历史旁路；等待仍使用既有有界 readiness。历史读取失败显式退出，不接受任务；
+  用户已退出时迟到结果不得启动 worker 或覆盖退出状态。显示恢复与模型预览、缓存、Compact 继续分离。
+- 两路 TUI 先启动、随后启动唯一 Gateway，均保留原 session 并显示首轮历史；回看模型调用不变，后续普通
+  追问均自然结束。旧后台 notice 与恢复历史仍有重复展示，必须按 canonical 消息身份另行闭环，不能按正文去重。
+
 ## 2026-09-05 显示窗口不能重复按模型预览回合截断【状态：R181 已部署，原长会话真 TUI 通过】
 
 - R180 的长会话 Ctrl+Home 复验发现：raw transcript 有 53 行、5 个真实 user；读取窗口 80 行已全部返回，

@@ -1,5 +1,14 @@
 # Gateway Progress
 
+## R182 resume 接入既有 preflight（两路真 TUI 已通过）
+
+- 修复 Gateway 未就绪时 exact resume 提前读历史并退出。薄客户端只向 TUI 传恢复意图，后台 readiness
+  后才请求原 owner/session 历史，成功后启动 worker。错误码、退出晚到结果均在原 preflight 收口。
+- 不新增 endpoint、队列、任务、配置或重试；普通终端/本地模式和模型上下文拼装不变。对照 会话运行时
+  `tui/src/app.rs` 的 bootstrap→resume_thread、终端交互 `sessionRestore.ts` 首次 query 前恢复。
+- `.10` 唯一 Gateway PID 2243914；两个旧 session 的 TUI 先启动、Gateway 随后启动，均正常恢复，回看调用
+  保持 65/39。后续真实 MiniMax 追问均结束；旧 notice 重复与跨旧任务 rebind 失败作为独立问题继续处理。
+
 ## R181 显示层不再二次裁剪回合
 
 - R180 长会话首屏复验反证：读取层已返回全部 53 行/5 user，却因 34 个后台显示组被裁成 20 组而丢头。

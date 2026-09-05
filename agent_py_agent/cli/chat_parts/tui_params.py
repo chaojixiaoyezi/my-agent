@@ -1,4 +1,7 @@
 
+# LLM: 本模块显式传递同一 TUI 的参数；恢复标志只控制 readiness 后读历史，不创建另一套 session 或上下文。
+# 模块用途: 集中保存聊天界面依赖与启动参数，避免跨模块共享隐式全局状态。
+
 from __future__ import annotations
 
 """dataclass parameter bundles for chat TUI modules.
@@ -106,8 +109,8 @@ class MakeTuiAppParams:
     agent_navigation: object | None = None
 
 
-# LLM: TUI 启动参数分离模型用问答预览和只读恢复事件；显示历史不能送入 jobs 或模型请求。
-# 类用途: 把启动、会话恢复和界面依赖显式交给 TUI 主入口。
+# LLM: 恢复标志要求 Gateway preflight 后读取 exact session；模型预览和只读事件分离，显示历史不能送入 jobs 或模型请求。
+# 类用途: 把界面依赖与是否等待服务后恢复历史的启动要求显式交给 TUI。
 @dataclasses.dataclass(frozen=True)
 class TuiRunParams:
     agent: object
@@ -131,3 +134,4 @@ class TuiRunParams:
     session_manager: object
     current_session_id: str
     recovered_display_events: tuple[dict[str, object], ...] | None = None
+    restore_session_history: bool = False
