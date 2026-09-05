@@ -1,6 +1,20 @@
 # STATUS
 
-## R187 长子代理累计 Compact 上限修复（本地已验证，未部署复验）
+## R188 后台唤醒 cwd 残留修复（已部署，原 TUI 路径复验通过）
+
+- 真 TUI 错误已显示精确路径：B 把相对 `tasks/2026-09-05/file-inventory` 接在内部 `runs/日期/hash` 后面。
+  根因是后台 task-link 恢复仍覆盖执行 cwd；现仅恢复归档引用，cwd 独立使用可信 thread 或 owner home。
+- 184 focused / 2 原有 xfailed、Ruff、doc sync、strict size、diff、源码和 wheel clean-package 通过。
+  新候选 `e0ff30333281bc3598a15695622c3507ca5ead04f8bb930453bd703811a789a6` 同时含 R187。
+- `.10` 唯一 Gateway PID 2415915 / 8420；升级后 B 同一 root 后台新增真实 MiniMax-M2.7 调用，
+  一个已结束工作批次 7 calls、cache-read 327,418、retry 0。工具索引已有 29 次 `tasks/...` 相对文件操作
+  成功，原 HANDOVER 被直接修改；app.py 基准 hash、空 findings.jsonl 和 18778 停止状态均保持。
+- 升级前 A child4 同样在 Compact 8 后被旧循环终止，main 已自然补派 child5；保留失败原记录。
+  B 已超过一小时、main Compact 29+，因此优先部署底座修复，原定后台自然 final 后的恢复验收未完成。
+- 原 A/B session 已精确恢复，child 列表保持 5/3；新 BUG-118：旧 TUI 留存的易失事件整数游标在 Gateway
+  重启后不会回退，状态和 Compact 可更新但过程流缺帧。重进原 session 可恢复显示，不算底座修好。
+
+## R187 长子代理累计 Compact 上限修复（随 R188 已部署，长 TUI 超限验收未完成）
 
 - 删除 child 单轮累计 8 次 Compact 后失败的上限；成功提交代次后继续原 run/attempt，仍保留真实失败、
   无可压缩记录、停止和原有预算。父级自动清理跳过已结束 child，不再把现有失败覆盖成停止。

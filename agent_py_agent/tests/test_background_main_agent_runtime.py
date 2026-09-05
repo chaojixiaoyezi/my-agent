@@ -434,7 +434,8 @@ def test_ordinary_resume_wake_preserves_foreground_request_generation() -> None:
     assert attrs[CONVERSATION_REQUEST_ID_ATTR] == "gwreq-2"
 
 
-def test_background_auto_continuation_uses_canonical_task_root(tmp_path) -> None:
+@pytest.mark.parametrize("explicit_cwd", [False, True])
+def test_background_continuation_separates_owner_cwd_from_run_archive(tmp_path, explicit_cwd) -> None:
     from agent_py_agent.agent.agent_core.orchestration.create_policy import (
         _primary_workspace_root,
     )
@@ -444,12 +445,14 @@ def test_background_auto_continuation_uses_canonical_task_root(tmp_path) -> None
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
 
     service_root = tmp_path / "gateway-service"
-    project_root = tmp_path / "tui-project"
-    project_root.mkdir()
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         service_root,
     )
+    owner_home = Path(agent.home_paths.owner_home_dir)
+    project_root = owner_home / "projects" / "tui-project"
+    project_root.mkdir(parents=True)
+    expected_cwd = project_root if explicit_cwd else owner_home
     task_root = Path(agent.home_paths.owner_home_dir) / "tasks" / "task-1"
     (task_root / "output").mkdir(parents=True)
     (task_root / "work").mkdir()
@@ -460,8 +463,8 @@ def test_background_auto_continuation_uses_canonical_task_root(tmp_path) -> None
             "channel": "gateway-cli",
             "channel_conversation_id": "cwd-background-session",
             "channel_user_id": "local-agent",
-            "cwd": str(project_root.resolve()),
-            "runtime_workspace_roots": [str(project_root.resolve())],
+            "cwd": str(project_root.resolve()) if explicit_cwd else "",
+            "runtime_workspace_roots": [str(project_root.resolve())] if explicit_cwd else [],
         }
     )
     store.bind_task(
@@ -487,15 +490,16 @@ def test_background_auto_continuation_uses_canonical_task_root(tmp_path) -> None
         thread=persisted_thread,
     )
 
-    assert params.task_attributes[CONVERSATION_EXECUTION_CWD_ATTR] == str(task_root.resolve())
+    assert params.task_attributes[CONVERSATION_EXECUTION_CWD_ATTR] == str(expected_cwd.resolve())
     assert params.task_attributes[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [
-        str(task_root.resolve())
+        str(expected_cwd.resolve())
     ]
+    assert params.task_attributes["run_workspace"]["task_root"] == str(task_root.resolve())
     boundary = write_boundary_with_runtime_ledger(agent, params)
-    assert boundary["execution_cwd"] == str(task_root.resolve())
+    assert boundary["execution_cwd"] == str(expected_cwd.resolve())
     agent._current_run_params = params
     try:
-        assert _primary_workspace_root(agent) == task_root.resolve()
+        assert _primary_workspace_root(agent) == expected_cwd.resolve()
     finally:
         delattr(agent, "_current_run_params")
 

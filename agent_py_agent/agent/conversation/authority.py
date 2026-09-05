@@ -87,9 +87,8 @@ def current_conversation_task_attributes(agent: object) -> dict[str, object]:
     return delegated if isinstance(delegated, dict) else {}
 
 
-# LLM: This is the one Gateway-hosted cwd for relative-path semantics. It is either the validated
-# pre-task client cwd or the selected canonical task root; callers never derive it from prose.
-# 函数用途: 从当前会话属性读取本轮模型、工具和审批共同使用的唯一工作目录。
+# LLM: Gateway 的相对路径起点来自可信会话 cwd 或 canonical owner home，不从 task 归档或正文推导。
+# 函数用途: 读取本轮模型、工具和审批共同使用的工作目录；运行记录位置不能覆盖它。
 def conversation_execution_cwd(attributes: object) -> str:
     if not isinstance(attributes, Mapping):
         return ""

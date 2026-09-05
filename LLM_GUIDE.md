@@ -21,6 +21,10 @@
 
 ## 2026-08-23 当前运行基线
 
+- 后台唤醒也必须把执行 cwd 与内部 run_workspace 分离：task link 只恢复归档、标题和运行属性，
+  相对文件路径从可信 thread cwd 或 canonical owner home 解析。不能因为任务进入后台就重新用 runs
+  记录目录覆盖工作位置；显式外部 cwd 继续由既有 owner/Full Access 边界检查，不新增授权旁路。
+
 - 子代理成功 Compact 后继续同一 run/thread/attempt，不以累计次数结束长回合；真实压缩失败、停止和
   原有预算照常生效。模型执行批次只区分工具显示 ID，不改变副作用身份。父级自动清理不覆盖已结束 child
   的结果/失败原因；显式用户控制与独立 Audit 结算不走这条被动清理判断。

@@ -1,5 +1,22 @@
 # DESIGN LEDGER
 
+## 2026-09-05 后台唤醒不从运行记录选工作目录【状态：R188 已部署，原 TUI 路径复验通过】
+
+- R186 真实 B 整合发现相对 `tasks/日期/项目` 查找失败；exact task link 指向 owner 的内部 runs 归档，
+  `_apply_background_task_link_attributes` 仍将该地址塞回执行 cwd，覆盖已经统一的 home 默认值。
+- 对照 会话运行时 `tools/runtimes/apply_patch.rs` 分离 cwd、workspace_roots 与文件权限；后台同样只从可信 thread
+  cwd 或 canonical owner home 取得执行位置。run_workspace 只保留归档、状态、恢复引用，不再决定用户文件落点。
+- 显式客户端目录继续经过既有 owner/Full Access 工具门，不新增权限；Audit 专属引用与业务文件均不迁移。
+- 新候选单 Gateway PID 2415915 下，原 B root 已连续成功读取/编辑 29 个 `tasks/...` 相对文件调用，
+  原服务 hash 和停止状态保持。完整任务仍在整合，不能把路径修复等同于产物质量和 Compact 效率通过。
+
+## 2026-09-05 易失过程游标的重启边界【状态：BUG-118 待设计】
+
+- R188 顺序重启时，未退出 TUI 的活动/Compact 标量在更新，过程仍停在旧块；精确重进 session 后才恢复。
+  读到两端都使用 `max(旧游标, 当前游标)`，而后台进程的 next_seq 在新进程从零开始，旧大游标会挡住新事件。
+- 必须用结构化流身份/重建快照处理进程代际，不按正文或时间猜测跳过。先继续对照 会话运行时 完整 thread
+  snapshot 与缓冲重基的具体链路，再确定统一协议；本轮未实现，不以重进界面的操作替代产品修复。
+
 ## 2026-09-05 子代理长回合 Compact 与失败终态【状态：R187 已实现，待真 TUI 复验】
 
 - BUG-116 属于执行循环和生命周期投影：长 child 累计 8 次成功 Compact 后被固定循环上限判失败，

@@ -2749,24 +2749,26 @@ def _background_task_attributes(
         skill_refs = metadata.get("scheduler_skill_refs")
         if isinstance(skill_refs, list) and skill_refs:
             attributes["skill_snapshot_refs"] = skill_refs
-    _apply_background_thread_workspace_attributes(attributes, thread=thread)
+    _apply_background_thread_workspace_attributes(attributes, thread=thread, agent=agent)
     return attributes or None
 
 
-# LLM: Thread cwd seeds only taskless/pre-promotion turns. An exact task link has already
-# installed the canonical task root and must never be overwritten by the older client snapshot.
-# 函数用途: 无任务后台轮继承可信启动目录；已有任务的自动续跑保留唯一 owner/task 目录。
+# LLM: 后台与前台共享可信 thread cwd，未指定时使用 canonical owner home；run_workspace 只是归档身份。
+# 显式外部 cwd 仍由既有 Tool Gateway owner/Full Access 门裁决，本入口不从 task path 扩展权限。
+# 函数用途: 后台唤醒后保持用户实际工作位置，不再把内部运行记录目录当成相对路径起点。
 def _apply_background_thread_workspace_attributes(
     attributes: dict[str, object],
     *,
     thread: ConversationThread | None,
+    agent: object | None,
 ) -> None:
-    if thread is None or not str(attributes.get("conversation_thread_id") or "").strip():
-        return
-    run_workspace = attributes.get("run_workspace")
-    if isinstance(run_workspace, dict) and str(run_workspace.get("task_root") or "").strip():
+    if not str(attributes.get("conversation_thread_id") or "").strip():
         return
     cwd = str(getattr(thread, "cwd", "") or "").strip()
+    if not cwd and agent is not None and getattr(agent, "root", None) is not None:
+        from ..user_space.runtime_paths import runtime_owner_root
+
+        cwd = str(runtime_owner_root(agent).expanduser().resolve(strict=False))
     if not cwd:
         return
     roots: list[str] = []
@@ -2792,9 +2794,8 @@ def _sampled_or_current_subagent_phase(
     return phase
 
 
-# LLM: An exact durable task link reconstructs the same canonical cwd used by foreground
-# promotion. Thread/client cwd is pre-task context only and cannot outrank the selected task.
-# 函数用途: 把后台唤醒绑定到原任务目录、标题和运行属性，供工具、子代理和恢复共用。
+# LLM: exact task link 只恢复运行归档、标题和结构化工作属性，不能授予权限或选择用户文件的执行 cwd。
+# 函数用途: 让后台唤醒继续使用原任务记录，用户工作位置由独立的 thread/home 入口处理。
 def _apply_background_task_link_attributes(
     attributes: dict[str, object],
     *,
@@ -2815,15 +2816,12 @@ def _apply_background_task_link_attributes(
     if task_path:
         root = Path(task_path).expanduser().resolve(strict=False)
         if root.exists():
-            # 持久后台轮从 exact task link 重建与前台晋升相同的唯一 cwd；
-            # 旧 thread client cwd 只用于任务开始前，不能在 wake 时重新取得优先级。
+            # 这些路径只供内部归档和运行恢复使用，不作为用户工具的 cwd 或权限根。
             attributes["run_workspace"] = {
                 "task_root": str(root),
                 "output_dir": str(root / "output"),
                 "work_dir": str(root / "work"),
             }
-            attributes[CONVERSATION_EXECUTION_CWD_ATTR] = str(root)
-            attributes[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = [str(root)]
     for field, attr_name in (
         ("work_kind", "conversation_work_kind"),
         ("work_name", "conversation_work_name"),
