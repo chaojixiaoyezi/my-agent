@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 
+from .background_history import background_display_turn_from_row
 from .background_transcript import public_background_transcript_text
 from .models import is_audit_background_transcript_entry
 from .native_history import canonical_native_messages_from_metadata
@@ -13,7 +14,7 @@ from .native_history import canonical_native_messages_from_metadata
 HISTORY_DISPLAY_SCHEMA = "conversation_history_display.v1"
 
 
-# LLM: 调用方已解析 owner/thread 并限制读取窗口；本投影不得再用模型预览的回合数截断后台消息组。
+# LLM: 调用方已解析 owner/thread 并限制窗口；后台消息按显式工作片 ID 组合，不从 task 或文本猜测过程归属。
 # 函数用途: 显示所读取窗口的全部公开消息；后台 commentary 不是独立用户回合，未完成输入也保留。
 def conversation_history_display_events(
     rows: Sequence[object],
@@ -27,7 +28,8 @@ def conversation_history_display_events(
         metadata = getattr(row, "metadata", None)
         metadata = metadata if isinstance(metadata, dict) else {}
         identity = str(
-            metadata.get("conversation_request_id")
+            metadata.get("background_transcript_request_id")
+            or metadata.get("conversation_request_id")
             or metadata.get("gateway_request_id")
             or metadata.get("agent_attempt_id")
             or getattr(row, "message_id", "")
@@ -40,7 +42,7 @@ def conversation_history_display_events(
     return tuple(events)
 
 
-# LLM: 真实 user/final 身份来自 canonical row；native 仅补过程块，native user 内部注入不能公开。
+# LLM: user/final 身份来自 canonical row；已提交后台快照完整时优先使用同块 ID，不能把 native 内部输入公开。
 # 函数用途: 恢复一轮的输入和已保存 native 内容，无 native 时保留全部正式 commentary/final。
 def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
     request_id = f"history:{identity}"
@@ -50,6 +52,13 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
         if row.role == "user" and getattr(row, "content", "")
     ]
     assistants = [row for row in rows if row.role == "assistant"]
+    for row in reversed(assistants):
+        if snapshot := background_display_turn_from_row(row):
+            events.extend({**item, "schema": HISTORY_DISPLAY_SCHEMA} for item in snapshot["events"])
+            final_event = public_assistant_message_event(row)
+            final_event["covered_background_request_id"] = snapshot["request_id"]
+            events.append(final_event)
+            return events
     native = next((
         messages for row in reversed(assistants)
         if (messages := canonical_native_messages_from_metadata(getattr(row, "metadata", None)))

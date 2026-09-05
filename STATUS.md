@@ -1,5 +1,16 @@
 # STATUS
 
+## R186 后台完整快照切片（focused 已通过，正在真 TUI 验收）
+
+- canonical final 保存同工作片完整公开块快照；恢复和实时补帧共享原 block ID，旧缓冲只在完整快照提交/恢复
+  成功后按 exact request ID 重基。模型 history 不读取展示 metadata，没有额外模型调用或缓存前缀改动。
+- 330 focused / 2 原有 xfailed、严格检查及 wheel clean-package 通过；候选 wheel 为
+  `eb5a8e04a7129b1ccb0725a95575a19d98bc131ee908b107263d7da4cd05ab3f`。单 Gateway 已顺序升级到 PID 2344284；
+  A 原 child4 以同一 run/thread 恢复，只更换 attempt。B 原 session 追加新任务，三个 child 已完成；
+  主代理整合中，真实调用确认 MiniMax-M2.7，后台 final 后 exact resume 仍待完成。
+- 新 BUG-116：长 child 在 8 次 Compact 后失败并被生命周期清理成 CANCELLED；main 后续反复强制压缩，
+  已见第 27 代。保存失败证据并继续对照，不算长任务通过，也不宣布 P0/P1 封板。
+
 ## R185 后台最终回复身份统一（已部署，实时通过，恢复顺序仍失败）
 
 BUG-113 已确认是 canonical final 与 notices 第二份正文各有 ID，恢复后从零轮询导致重复。现删除第二份

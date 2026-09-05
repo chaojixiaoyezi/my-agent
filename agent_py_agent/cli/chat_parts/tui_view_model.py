@@ -317,7 +317,30 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "turn_failed": self._handle_turn_status,
             "turn_interrupted": self._handle_turn_status,
             "status_updated": self._handle_status_updated,
+            "history_blocks_reordered": self._handle_history_blocks_reordered,
         }
+
+    # LLM: 只按 canonical 快照给出的稳定块 ID 重排显示槽位，不修改内容、活动、权限或其他工作片的相对位置。
+    # 函数用途: 实时客户端漏收较早过程后，补全快照时将同一工作片重新放回原顺序，而不是追加在 final 后。
+    def _handle_history_blocks_reordered(self, event: TuiEvent) -> None:
+        ids = event.payload.get("block_ids")
+        final_id = event.payload.get("final_block_id")
+        if (
+            not event.request_id.startswith("bg-main:") or not isinstance(ids, list)
+            or not isinstance(final_id, str) or not final_id.startswith("history:")
+            or not ids or ids[-1] != final_id
+            or not all(isinstance(key, str) and (key == final_id or key.startswith(f"{event.request_id}:")) for key in ids)
+            or len(set(ids)) != len(ids)
+        ):
+            return
+        id_set = set(ids)
+        selected = {block.block_id: block for block in self.stable_blocks if block.block_id in id_set}
+        if len(selected) != len(ids):
+            return
+        ordered = iter(selected[key] for key in ids)
+        self.stable_blocks = [
+            next(ordered) if block.block_id in selected else block for block in self.stable_blocks
+        ]
 
     # LLM: apply 只接受 journal 已裁决事件；异常 handler 转为诊断并保留上一合法快照。
     # 函数用途: 将一条 typed event 应用到 view model。

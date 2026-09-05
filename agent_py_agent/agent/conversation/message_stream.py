@@ -3,11 +3,11 @@
 
 from __future__ import annotations
 
-from .history_display import public_assistant_message_event
+from .history_display import conversation_history_display_events, public_assistant_message_event
 from .models import is_audit_background_transcript_entry
 
 
-# LLM: after 是完整 JSONL 行后的偏移，不是墙钟时间；所有读过的消息都推进游标，只有已提交后台 final 投影正文。
+# LLM: after 是完整行偏移；仅已提交后台 final 投影正文和完整显示快照，不从实时环拼补或回灌模型。
 # 函数用途: 从同一会话增量取得后台回复；保持相同文本不同消息可区分，错误时保留原游标供重试。
 def read_background_response_page(store: object, thread_id: str, *, after: int = 0) -> tuple[list[dict], int, bool]:
     entries, cursor, errors = store.message_page_after_offset_report(thread_id, after=after)
@@ -24,6 +24,7 @@ def read_background_response_page(store: object, thread_id: str, *, after: int =
         ):
             continue
         event = public_assistant_message_event(entry)
+        display_events = conversation_history_display_events([entry])
         notices.append({
             "schema_version": "background_message.v1",
             "notice_id": entry.message_id,
@@ -32,5 +33,7 @@ def read_background_response_page(store: object, thread_id: str, *, after: int =
             "display_kind": "assistant_response",
             "content": event["payload"]["text"],
             "created_at": entry.created_at,
+            **({"display_events": list(display_events)}
+               if display_events and display_events[-1].get("covered_background_request_id") else {}),
         })
     return notices, cursor, True

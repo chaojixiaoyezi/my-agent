@@ -585,7 +585,7 @@ def _consume_selected_agent_view(
     return True, bool(applier(run_id, payload))
 
 
-# LLM: 只消费 canonical message 投影；发布成功才记入幂等集合，协议或发布失败不得确认游标。
+# LLM: 只消费 canonical message 投影及同一行的完整过程快照；发布成功才确认游标，不能回读临时环补造历史。
 # 函数用途: 发布一条后台已提交回复，重放仍指向同一个历史显示块；不同 ID 的相同正文各保留一次。
 def _publish_background_notice_row(
     tui_runtime: object,
@@ -608,7 +608,10 @@ def _publish_background_notice_row(
     if not callable(publisher):
         return False
     if content:
-        publisher(content, thread_id=thread_id, message_id=message_id)
+        display_events = row.get("display_events")
+        publisher(content, thread_id=thread_id, message_id=message_id, **(
+            {"display_events": tuple(display_events)} if isinstance(display_events, list) else {}
+        ))
     seen.add(key)
     return True
 

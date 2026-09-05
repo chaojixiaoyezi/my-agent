@@ -131,6 +131,7 @@ agent_py_agent/
 |   |   |-- agent_control.py           # owner 树内代理详情、运行中 guidance 与精确停止的通道中立控制面
 |   |   |-- agent_tool_approval.py     # child exact ToolApprovalRequest 的 owner 耐久记录、consumer 租约与决定等待
 |   |   |-- background_transcript.py  # 后台 main/child 的有界 typed 过程事件环与 child 工具审批 sink
+|   |   |-- background_history.py     # 后台完整展示块快照，随 canonical final 保存并用于恢复重基
 |   |   |-- auxiliary_model_call.py   # Compact 等会话辅助模型调用的统一记账、退避、并发闸和成本统计
 |   |   |-- tool_context_window.py    # text/native 共用的有界工具历史窗口与稳定前缀投影
 |   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
@@ -289,7 +290,11 @@ docs/
 ### 关键文件说明
 
 - `agent_py_agent/tests/test_conversation_message_stream.py`：canonical 消息分页、恢复竞态、损坏游标和实时/历史幂等验证。
+- `agent_py_agent/tests/test_background_history_snapshot.py`：完整后台块快照、慢客户端补帧、损坏快照拒绝重基、
+  Compact 重调工具身份和 provider 历史不变验证。
 - `agent/conversation/message_stream.py`：后台 final 的唯一公开增量投影，复用 ConversationStore，不另存 notices 正文。
+- `agent/conversation/background_history.py`：按稳定块 ID 保存后台完整终态展示，逐 token 增量不重复存储；
+  canonical final 提交前不授权 TUI 丢弃旧事件，不进入 provider history 或 Compact 输入。
 
 - `agent_py_agent/tests/test_owner_home_workspace.py`：家目录主/子代理读写、跨 owner/符号链接拒绝、控制文件保护、普通目录名与缓存稳定整理指南。
 

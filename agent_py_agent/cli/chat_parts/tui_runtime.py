@@ -818,10 +818,10 @@ class _TuiConversationBoundaryRuntimeMixin:
                     request_id=history_request_id,
                 )
 
-    # LLM: Accept only terminal display kinds under a stable history namespace. This path cannot
-    # replay permission/control/lifecycle events or restore activity; duplicate blocks stay idempotent.
-    # 函数用途: 校验公开历史事件并提交现有显示账，不创建第二种界面块或执行旁路。
+    # LLM: 只接受静态公开终态；后台快照沿原 block ID，完整 final 发布成功才重基该工作片，不执行控制或恢复活动。
+    # 函数用途: 按原顺序恢复显示，并记住已完整恢复的后台工作片，避免旧工具跑到 final 后面。
     def _publish_recovered_display_events(self, events: tuple[dict[str, object], ...]) -> None:
+        background_blocks: dict[str, list[str]] = {}
         for item in events:
             request_id = str(item.get("request_id") or "")
             block_id = str(item.get("block_id") or "")
@@ -830,7 +830,7 @@ class _TuiConversationBoundaryRuntimeMixin:
             payload = item.get("payload")
             if (
                 item.get("schema") != "conversation_history_display.v1"
-                or not request_id.startswith("history:")
+                or not request_id.startswith(("history:", "bg-main:"))
                 or not block_id.startswith(f"{request_id}:")
                 or kind not in {"user_message", "assistant_completed", "thinking_completed",
                                "tool_completed", "tool_failed", "system_message"}
@@ -839,6 +839,16 @@ class _TuiConversationBoundaryRuntimeMixin:
             ):
                 continue
             self._publish(kind, phase, block_id, dict(payload), request_id=request_id)
+            if request_id.startswith("bg-main:"):
+                background_blocks.setdefault(request_id, []).append(block_id)
+            covered = str(item.get("covered_background_request_id") or "")
+            if kind == "assistant_completed" and request_id.startswith("history:") and covered.startswith("bg-main:"):
+                self._publish(
+                    "history_blocks_reordered", "completed", f"{covered}:history-order",
+                    {"block_ids": [*background_blocks.get(covered, []), block_id], "final_block_id": block_id},
+                    request_id=covered,
+                )
+                self._recovered_background_turns.add(covered)
 
     # LLM: A persisted slash control is shown as a local user-shaped block but
     # never enters the model queue or canonical conversation messages. The
@@ -1049,9 +1059,12 @@ class _TuiBackgroundActivityRuntimeMixin:
         return True
 
 
-    # LLM: 后台已提交正文复用 canonical message_id，与历史恢复命中同一块；不生成到达次序身份。
-    # 函数用途: 显示后台最终回复并请求终帧；重复消息只更新原块，不重跑或重投递。
-    def publish_background_response(self, content: str, *, thread_id: str, message_id: str) -> None:
+    # LLM: 后台 final 与恢复共享 message_id；完整过程快照先补齐原块，不能按到达次序生成第二份工具或正文。
+    # 函数用途: 显示后台最终回复并补回错过的过程，请求终帧但不重跑或重投递。
+    def publish_background_response(
+        self, content: str, *, thread_id: str, message_id: str,
+        display_events: tuple[dict[str, object], ...] = (),
+    ) -> None:
         text = str(content or "").strip()
         if not text or not thread_id or not message_id:
             return
@@ -1060,6 +1073,9 @@ class _TuiBackgroundActivityRuntimeMixin:
             # 最终回复进入 reducer 时仍会立即 invalidate；额外的一次刷新由
             # needs_periodic_refresh 消费，语义等同 会话运行时 FrameRequester 的终帧请求。
             self._terminal_refresh_pending = True
+            if display_events:
+                self._publish_recovered_display_events(display_events)
+                return
             block_id = f"{request_id}:assistant"
             self._publish(
                 "assistant_completed",
@@ -1072,7 +1088,7 @@ class _TuiBackgroundActivityRuntimeMixin:
     # LLM: Background transcript rows are a display-only Gateway projection.
     # This entry accepts only the frozen schema and the explicit bg-main or
     # bg-agent namespace, then reuses one sequencer/reducer for the current page.
-    # 函数用途: 将后台主代理或当前子代理的灰色思考、工具和 diff 事件发布到当前正文流。
+    # 函数用途: 接收实时过程；只跳过完整快照已覆盖的旧显示，未完成工作片和插话消费回执继续接收。
     def publish_background_transcript_events(self, value: object) -> int:
         if not isinstance(value, list | tuple):
             return 0
@@ -1098,6 +1114,8 @@ class _TuiBackgroundActivityRuntimeMixin:
                 or not block_id.startswith(f"{request_id}:")
                 or not isinstance(payload, Mapping)
             ):
+                continue
+            if request_id in self._recovered_background_turns and kind != "active_turn_input_consumed":
                 continue
             if kind == "active_turn_input_consumed":
                 raw_ids = payload.get("client_message_ids")
@@ -1194,7 +1212,7 @@ class TuiRuntime(
     TuiPermissionRuntimeMixin,
 ):
     # LLM: session_id 固定一个 UI 生命周期；store 可注入用于 replay/tests，但不能在运行中替换。
-    # 函数用途: 创建 TUI runtime 和全局单调 sequencer。
+    # 函数用途: 创建 TUI runtime、单调 sequencer 和本页面已完整恢复的工作片集合。
     def __init__(self, session_id: str, *, store: TuiStateStore | None = None) -> None:
         normalized = str(session_id or "default").strip() or "default"
         self.session_id = normalized
@@ -1209,6 +1227,7 @@ class TuiRuntime(
         self._published_control_commands: set[str] = set()
         self._console_index = 0
         self.background_message_cursor = 0
+        self._recovered_background_turns: set[str] = set()
         self._notice_text = ""
         self._notice_kind = ""
         self._notice_until = 0.0

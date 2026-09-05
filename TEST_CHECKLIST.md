@@ -714,3 +714,10 @@
 - [ ] 最终 Linux 容器运行 sandbox probe 退出 0；没有用 `privileged` 或宿主级 `SYS_ADMIN` 绕过。
 - [x] `check_clean_package.py --mode worktree .` 已如实阻断 2171 项保留的未跟踪协作/运行文件；新建 wheel 和 sdist 均通过 artifact 模式。
 - [ ] 默认容器安装的透明 `my-agent` 只挂当前 workspace 和持久 home；`--host` 没被误当生产路径。
+# R186 后台完整工作片恢复
+
+- [x] 完整终态快照不依赖临时环容量；模型上下文不读取该 metadata，未提交快照不能重基旧事件。
+- [x] 同号工具在 Compact 重调后使用不同 attempt 显示 ID；旧 final 缺快照不猜测补造。
+- [x] 无实时事件、完整实时事件、错过较早过程三种客户端恢复同序，无重复正文或工具。
+- [ ] MiniMax-M2.7 真 TUI：后台 final 后 exact resume，底部仍为 final、工具/思考可回看、调用数不增加。
+- [ ] Gateway 退出前尚未 final 的全过程持久化和完整长历史分页；本切片不能代替该验收。

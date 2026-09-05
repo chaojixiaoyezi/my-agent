@@ -161,3 +161,35 @@ def test_background_commentary_does_not_count_as_twenty_extra_user_turns():
     assert events[0]["kind"] == "user_message"
     assert events[0]["payload"]["text"] == "帮我检查项目"
     assert len([event for event in events if event["kind"] == "assistant_completed"]) == 34
+
+
+def test_background_snapshot_rebases_old_buffer_but_keeps_active_turn():
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BackgroundTranscriptSink,
+        read_background_transcript_events,
+    )
+
+    agent = SimpleNamespace()
+    sink = BackgroundTranscriptSink(agent, thread_id="thread-1", task_id="task-1")
+    sink.write_thinking("先检查已有结果", duration_seconds=4)
+    sink.write_model("开始检查")
+    sink._flush_model_commentary()
+    sink._event("tool_completed", "completed", f"{sink.request_id}:tool:1:1", {"tool": "read_file", "output": "文件内容", "ok": True})
+    sink.finish()
+    metadata = {"task_id": "task-1", "background_delivery_reason": "root_subagents_terminal", "background_transcript_request_id": sink.request_id}
+    rows = [
+        SimpleNamespace(role="assistant", content="开始检查", thread_id="thread-1", message_id="msg-commentary", metadata={**metadata, "assistant_part_id": "commentary:1"}),
+        SimpleNamespace(role="assistant", content="已完成检查", thread_id="thread-1", message_id="msg-final", metadata={**metadata, "assistant_part_id": "final", "background_display_turn": sink.display_history_snapshot()}),
+    ]
+    runtime = TuiRuntime("resume")
+    runtime.publish_recovered_history([], display_events=conversation_history_display_events(rows))
+    snapshot = runtime.store.snapshot()
+    assert [(block.role, block.text) for block in snapshot.stable_blocks] == [
+        ("thinking", "先检查已有结果"), ("assistant", "开始检查"), ("tool", ""), ("assistant", "已完成检查"),
+    ]
+    runtime.publish_background_transcript_events(read_background_transcript_events(agent, thread_id="thread-1", after=0)["events"])
+    assert runtime.store.snapshot().stable_blocks == snapshot.stable_blocks
+    active = BackgroundTranscriptSink(agent, thread_id="thread-1", task_id="task-1")
+    active.write_thinking_delta("新工作片仍然可见")
+    runtime.publish_background_transcript_events(read_background_transcript_events(agent, thread_id="thread-1", after=0)["events"])
+    assert any(block.text == "新工作片仍然可见" for block in runtime.store.snapshot().active_blocks)

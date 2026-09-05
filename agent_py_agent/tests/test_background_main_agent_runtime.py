@@ -89,6 +89,9 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
             return original, None
 
     class Sink:
+        def begin_model_attempt(self, _attempt):
+            pass
+
         def __init__(self):
             self.compact_rows = []
 
@@ -183,6 +186,9 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
         pass
 
     class Sink:
+        def begin_model_attempt(self, _attempt):
+            pass
+
         def write_conversation_compact_progress(self, _value):
             return True
 
@@ -319,6 +325,9 @@ def test_background_overflow_compacts_carried_active_turn_when_transcript_is_emp
             return original, None
 
     class Sink:
+        def begin_model_attempt(self, _attempt):
+            pass
+
         def write_conversation_compact_progress(self, _value):
             return True
 
@@ -1281,6 +1290,7 @@ def test_internal_audit_finding_run_uses_transcript_fallback_and_handles_wake(
             (),
             {},
             (),
+            {},
         ),
     )
     recorded: list[tuple[tuple[str, ...], str, str]] = []
@@ -1386,6 +1396,7 @@ def test_chat_audit_finding_commits_to_transcript_and_handles_wake(
             (),
             {},
             (),
+            {},
         ),
     )
     recorded: list[tuple[tuple[str, ...], str, str]] = []
@@ -1475,6 +1486,7 @@ def test_chat_transcript_persists_delivery_service_redaction(
             (),
             {},
             (),
+            {},
         ),
     )
     monkeypatch.setattr(
@@ -1615,7 +1627,7 @@ def test_internal_audit_finding_empty_reply_remains_retryable(
     monkeypatch.setattr(
         runtime,
         "_run_agent",
-        lambda *_args, **_kwargs: ("", 0, 0, 0, (), (), {}, ()),
+        lambda *_args, **_kwargs: ("", 0, 0, 0, (), (), {}, (), {}),
     )
 
     report = runtime.run_once(
@@ -3577,6 +3589,7 @@ def test_audit_finding_message_tool_delivery_is_mirrored_once_with_evidence(
             ),
             {},
             (),
+            {},
         ),
     )
     sent = runtime.run_once(request)
@@ -3642,6 +3655,7 @@ def test_audit_finding_without_message_tool_delivery_stays_internal_and_retryabl
             (),
             {},
             (),
+            {},
         ),
     )
 

@@ -996,7 +996,12 @@ def test_concurrent_turn_permissions_are_fifo_and_never_replace_overlay() -> Non
     assert overlay.permission_id == first.permission_id
     second_thread.start()
     assert runtime.resolve_permission(first.permission_id, "approved")
-    assert runtime.store.snapshot().permission.permission_id == second.permission_id
+    # Thread.start 不保证第二线程已经入队；等待公开 overlay 出现，不能把调度延迟误判成 FIFO 丢失。
+    deadline = time.monotonic() + 1.0
+    while runtime.store.snapshot().permission is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    overlay = runtime.store.snapshot().permission
+    assert overlay is not None and overlay.permission_id == second.permission_id
     assert runtime.resolve_permission(second.permission_id, "denied")
     first_thread.join(timeout=1.0)
     second_thread.join(timeout=1.0)

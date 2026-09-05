@@ -842,7 +842,7 @@ class BackgroundMainAgentRuntime:
             agent.conversation_store = store
         self.channels = channels or FakeDeliveryService()
 
-    # LLM: 后台轮在调用模型前冻结目标/子树阶段，随后把同一快照传给运行参数和投递裁决。
+    # LLM: 后台轮先冻结目标/子树阶段；完整展示快照随 canonical final 提交，不参与投递或生命周期裁决。
     # 函数用途: 执行一次结构化后台唤醒，并按会话渠道记录或发送模型回复。
     def run_once(self, params: dict) -> BackgroundMainAgentReport:
         request = _run_request(params)
@@ -871,6 +871,7 @@ class BackgroundMainAgentRuntime:
             message_tool_deliveries,
             operation_verification,
             assistant_commentaries,
+            display_snapshot,
         ) = self._run_agent(
             thread,
             request,
@@ -916,6 +917,7 @@ class BackgroundMainAgentRuntime:
                 delivery_artifacts=delivery_artifacts,
                 operation_verification=operation_verification,
                 assistant_commentaries=assistant_commentaries,
+                display_snapshot=display_snapshot,
                 deliver=deliver,
                 delivery_reason=delivery_reason,
                 route_supports_transcript=route_supports_transcript,
@@ -1009,7 +1011,7 @@ class BackgroundMainAgentRuntime:
             task_status=_background_task_link_status(self.agent, request, store=self.store),
         )
 
-    # LLM: 调用方传入的 GoalRuntimeContext 是本轮唯一采样；禁止在模型调用前再次刷新 child phase。
+    # LLM: GoalRuntimeContext 是唯一采样；返回的显示快照只供 final 持久化，不能注入模型或改变 child phase。
     # 函数用途: 用冻结的后台上下文调用主代理，并整理工具、产物与投递结果。
     def _run_agent(
         self,
@@ -1028,13 +1030,14 @@ class BackgroundMainAgentRuntime:
         tuple[dict[str, object], ...],
         dict[str, object],
         tuple[str, ...],
+        dict[str, object],
     ]:
         resolved_goal_context = goal_context or _goal_runtime_context(
             self.agent,
             self.store,
             request,
         )
-        result = _invoke_background_main_agent(
+        result, display_snapshot = _invoke_background_main_agent(
             self,
             thread,
             request,
@@ -1073,8 +1076,11 @@ class BackgroundMainAgentRuntime:
             deliveries,
             operation_verification,
             assistant_commentaries,
+            display_snapshot,
         )
 
+    # LLM: 只有已投递或权威本地提交才保存 final 及完整显示快照；旧消息没有快照时不猜测补造过程。
+    # 函数用途: 处理渠道投递并将真实正文和本工作片显示交给唯一会话提交层。
     def _record_response(
         self,
         request: BackgroundRunRequest,
@@ -1084,6 +1090,7 @@ class BackgroundMainAgentRuntime:
         delivery_artifacts: tuple[dict[str, object], ...] = (),
         operation_verification: dict[str, object] | None = None,
         assistant_commentaries: tuple[str, ...] = (),
+        display_snapshot: dict[str, object] | None = None,
         deliver: bool,
         delivery_reason: str,
         route_supports_transcript: bool | None = None,
@@ -1171,20 +1178,20 @@ class BackgroundMainAgentRuntime:
             evidence_refs=evidence_refs,
             message_metadata=message_metadata,
             assistant_commentaries=assistant_commentaries,
+            display_snapshot=display_snapshot,
         )
         return committed_content, delivery_status
 
 
-# LLM: This helper owns the one background model invocation and its volatile
-# activity sink. It must not commit transcript, delivery, or lifecycle state.
-# 函数用途: 调用一次后台主代理，并同步更新 TUI/Web 所见的 main 活动阶段。
+# LLM: 本入口运行一次后台工作片，冻结 sink 的展示副本后返回；不能提交 transcript、投递或生命周期状态。
+# 函数用途: 调用后台主代理，同步 main 活动，并把本轮完整过程交给消息提交方。
 def _invoke_background_main_agent(
     runtime: BackgroundMainAgentRuntime,
     thread: ConversationThread,
     request: BackgroundRunRequest,
     goal_context: GoalRuntimeContext,
     delivery_availability: tuple[bool | None, bool | None],
-) -> object:
+) -> tuple[object, dict[str, object]]:
     proactive_delivery_available, transcript_delivery_available = delivery_availability
     wake_prompt = background_prompt(
         request.reason,
@@ -1222,13 +1229,13 @@ def _invoke_background_main_agent(
         activity_sink.fail()
         raise
     activity_sink.finish()
-    return result
+    return result, activity_sink.display_history_snapshot()
 
 
 # LLM: Background lifecycle wakes continue the same authoritative active turn. Like foreground
 # Gateway and child runners, context overflow must compact the durable transcript and retry while
 # carrying typed tool and steering state; a new scheduler slice must not be the retry mechanism.
-# 函数用途: 后台主代理上下文超限时在同一工作片内压缩并续跑，避免重复工具、重复摘要和永久 Working。
+# 函数用途: 后台主代理在同一工作片压缩并续跑；每次模型执行同时换工具显示批次，避免同号覆盖旧工具。
 def _run_background_main_turn_with_compact(
     runtime: BackgroundMainAgentRuntime,
     thread: ConversationThread,
@@ -1268,6 +1275,7 @@ def _run_background_main_turn_with_compact(
             *continuation_injection,
         ]
         run_params.on_chunk = activity_sink
+        activity_sink.begin_model_attempt(_attempt + 1)
         result = runtime.agent.run(user_prompt, params=run_params)
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != ("context_overflow"):
             return result
@@ -1431,6 +1439,8 @@ def _is_active_turn_lifecycle_continuation(
     )
 
 
+# LLM: canonical final 是正文及完整工作片展示的唯一持久位置；commentary 仅携带关联 ID，不复制整个快照。
+# 函数用途: 幂等保存后台过程正文和最终回复，提交成功后客户端才可按工作片 ID 排除旧缓冲。
 def _commit_background_response(
     runtime: BackgroundMainAgentRuntime,
     request: BackgroundRunRequest,
@@ -1443,11 +1453,17 @@ def _commit_background_response(
     evidence_refs: tuple[str, ...],
     message_metadata: dict[str, object],
     assistant_commentaries: tuple[str, ...] = (),
+    display_snapshot: dict[str, object] | None = None,
 ) -> None:
     """Persist only a provider-committed or authoritative local delivery."""
 
     if delivery_status != "sent" and not transcript_record:
         return
+    if display_snapshot:
+        message_metadata = {
+            **message_metadata,
+            "background_transcript_request_id": display_snapshot.get("request_id", ""),
+        }
     delivery_key = _background_delivery_idempotency_key(request)
     for index, commentary in enumerate(assistant_commentaries, start=1):
         text = str(commentary or "").strip()
@@ -1476,7 +1492,10 @@ def _commit_background_response(
         "role": "assistant",
         "content": committed_content,
         "channel": delivery_context.channel,
-        "metadata": {**message_metadata, "assistant_part_id": "final"},
+        "metadata": {
+            **message_metadata, "assistant_part_id": "final",
+            **({"background_display_turn": display_snapshot} if display_snapshot else {}),
+        },
     }
     if delivery_key:
         message_entry = runtime.store.append_message_once(

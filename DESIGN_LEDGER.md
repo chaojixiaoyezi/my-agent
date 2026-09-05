@@ -1,5 +1,28 @@
 # DESIGN LEDGER
 
+## 2026-09-05 子代理长回合 Compact 与失败终态【状态：R187 开发中】
+
+- BUG-116 属于执行循环和生命周期投影：长 child 累计 8 次成功 Compact 后被固定循环上限判失败，
+  父级清理又将该 FAILED 覆盖为 CANCELLED。不能把有进展的上下文续接当成失败重试次数。
+- 已读 会话运行时 `core/src/session/turn.rs` 的 mid-turn Compact 成功后继续循环，以及 `agent/status.rs`
+  将 Error、TurnComplete、Shutdown 分开的事件状态。适配本项目同一 child thread/run/attempt：成功提交
+  Compact generation 后继续，实际压缩失败、无可压缩内容、取消和既有预算仍可终止；不新增自动重派。
+- 每次 Compact 后的模型执行批次进入工具显示 ID，避免内层轮号重新从 1 开始覆盖旧工具。
+  父级自动生命周期清理只取消尚未结束的 child，保留既有失败原因；显式用户取消和 Audit 结算入口不改。
+- 先做定向合同验证，再由真实 TUI 长 child 复验；不把单测通过或补派成功当成原故障已闭环。
+
+## 2026-09-05 后台完整工作片快照与缓冲重基【状态：R186 开发中】
+
+- 解决 R185 真 TUI 的 `FAIL_REPLAY_ORDER`：恢复 canonical final 后，旧过程环再次从零推送，将工具和
+  思考排到 final 之后。按 会话运行时 `tui/src/app/thread_events.rs` 的完整 turn 快照/缓冲重基处理。
+- 每个后台工作片使用跨进程不复用的显示 ID；sink 按块保留公开终态，不从 1024 条临时环反推完整历史。
+  最终消息提交时把这份展示快照写入同一 canonical 消息 metadata，commentary 用精确工作片 ID 关联；
+  不新增第二份消息文件，不改变模型历史或 Compact 输入，不按正文相似度拼接。
+- TUI 恢复完整快照及 final 后才记住其 exact request ID；只跳过该已恢复工作片的旧显示事件，未完成工作片
+  和用户插话消费回执继续接收。实时 final 同样补齐已错过的过程块，块 ID 与实时事件一致，不能重复追加。
+- 本切片只闭环已提交后台 final 的展示恢复。Gateway 在 final 提交前退出的完整过程持久化、前台 Compact
+  前归档与长历史分页继续作为独立 P1，不以本切片冒充通过；旧 final 没有结构化快照时不得猜测补造。
+
 ## 2026-09-05 后台回复恢复使用 canonical 消息游标【状态：R185 部分部署，过程恢复顺序未闭环】
 
 - BUG-113 的旧 notices 保存了第二份最终正文，并让 TUI 另生 bg-response 编号；恢复历史后又从零读取，

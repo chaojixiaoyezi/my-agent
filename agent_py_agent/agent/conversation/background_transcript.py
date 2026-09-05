@@ -2,7 +2,7 @@
 
 # LLM: This module owns the shared public event mapper and the main-agent volatile
 # ring. Child callers may replace the event writer with their durable bounded JSONL;
-# neither route owns conversation text, lifecycle, permissions, or completion.
+# main 同时按块保留完整工作片快照，最终由 canonical 消息提交；两条投影都不拥有生命周期或权限。
 # 模块用途: 将后台主代理或子代理的思考、工具和 diff 转成同一展示事件，供 TUI/Web 增量读取。
 
 from __future__ import annotations
@@ -14,8 +14,10 @@ from collections import OrderedDict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 from .agent_tool_approval import SubagentToolApprovalSinkMixin
+from .background_history import BackgroundTurnHistory
 from .channels import project_user_reply, redact_host_absolute_paths
 from .compact_progress import normalize_conversation_compact_progress
 from .tool_input_progress import ToolInputProgressSinkMixin
@@ -32,7 +34,6 @@ BACKGROUND_TRANSCRIPT_DELTA_FLUSH_CHARS = 256
 _TRANSCRIPT_STATE_ATTR = "_conversation_background_transcript_projection"
 _TRANSCRIPT_LOCK_ATTR = "_conversation_background_transcript_projection_lock"
 _TRANSCRIPT_SEQ_ATTR = "_conversation_background_transcript_next_seq"
-_TRANSCRIPT_TURN_ATTR = "_conversation_background_transcript_next_turn"
 _TRANSCRIPT_SETUP_LOCK = threading.Lock()
 BACKGROUND_TRANSCRIPT_EVENT_KINDS = frozenset(
     {
@@ -149,7 +150,7 @@ class _ThinkingDeltaBatcher:
 class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressSinkMixin):
     # LLM: Construction allocates one display-only turn identity; canonical task
     # and thread ids are inputs, while the generated request id is not authority.
-    # 函数用途: 为一次后台续轮创建事件块编号和内部缓冲区。
+    # 函数用途: 为一次后台续轮创建事件块编号和完整块快照；child 的耐久 writer 继续自行保存。
     def __init__(
         self,
         agent: object,
@@ -170,6 +171,10 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
             thread_id=self.thread_id,
             task_id=self.task_id,
         )
+        self._display_history = (
+            BackgroundTurnHistory(self.thread_id, self.task_id, self.request_id)
+            if event_writer is None else None
+        )
         self._assistant_index = 0
         self._thinking_index = 0
         self._thinking_block_id = ""
@@ -179,6 +184,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         self._model_text = ""
         self._committed_commentary: list[str] = []
         self._tool_blocks: set[str] = set()
+        self._tool_attempt = 0
         self._retry_index = 0
         self._active_input_index = 0
 
@@ -382,6 +388,18 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         self._model_text = ""
         if publish_final:
             self._publish_final_response(final_text)
+        if self._display_history is not None:
+            self._display_history.finish()
+
+    # LLM: 只返回显示副本；runtime 必须随同 canonical final 提交，不能用于模型上下文或机器状态。
+    # 函数用途: 取得不受临时环裁剪影响的完整工作片展示。
+    def display_history_snapshot(self) -> dict:
+        return self._display_history.snapshot() if self._display_history is not None else {}
+
+    # LLM: 同一工作片 Compact 重调 agent.run 时轮号会重置，宿主 attempt 序号必须进入工具块身份。
+    # 函数用途: 切换本工作片的模型执行批次，防止压缩后的同号工具覆盖压缩前的工具显示。
+    def begin_model_attempt(self, attempt: int) -> None:
+        self._tool_attempt = max(0, int(attempt))
 
     # LLM: This immutable projection contains only segments promoted at real tool boundaries;
     # callers persist it before the terminal response using typed assistant part ids.
@@ -445,18 +463,19 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
             {"text": content, "process": False},
         )
 
-    # LLM: Tool identity comes only from typed round/call_index within this
-    # display turn; details and output text cannot merge unrelated tool cards.
-    # 函数用途: 生成后台工具卡片的稳定块编号。
+    # LLM: 工具身份来自本工作片的 attempt/round/call_index；不同执行批次同号工具不能合并。
+    # 函数用途: 生成后台工具卡片稳定编号，正文或输出不能参与判重。
     def _tool_block_id(self, progress: Mapping[str, object]) -> str:
         return (
-            f"{self.request_id}:tool:{_nonnegative_int(progress.get('round'))}:"
+            f"{self.request_id}:"
+            + (f"attempt:{self._tool_attempt}:" if self._tool_attempt else "")
+            + f"tool:{_nonnegative_int(progress.get('round'))}:"
             f"{_nonnegative_int(progress.get('call_index'))}"
         )
 
     # LLM: Every event append keeps the writer's exact canonical thread/task and
     # generated display request identity; callers cannot substitute another run.
-    # 函数用途: 向本轮所属会话追加一条展示事件。
+    # 函数用途: 先保留完整展示块，再发布临时增量；传输失败不能抹掉最终可恢复的过程。
     def _event(
         self,
         kind: str,
@@ -464,6 +483,8 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         block_id: str,
         payload: Mapping[str, object],
     ) -> None:
+        if self._display_history is not None:
+            self._display_history.record(kind, phase, block_id, payload)
         try:
             self._event_writer(
                 self.agent,
@@ -581,10 +602,10 @@ def _background_thread_state(
     return state
 
 
-# LLM: A new display turn receives a unique request id inside its thread. When
+# LLM: 每个显示工作片使用跨进程不可复用 ID，供 canonical 快照精确重基旧事件。When
 # task identity changes, stale retained bodies are removed but cursor monotonicity
 # is preserved so an already-connected client can continue incrementally.
-# 函数用途: 为一次后台主代理续轮建立展示身份，并在新任务开始时清除旧任务过程。
+# 函数用途: 为一次后台主代理续轮建立唯一展示身份，并在新任务开始时清除旧临时过程。
 def begin_background_transcript_turn(
     agent: object,
     *,
@@ -604,9 +625,7 @@ def begin_background_transcript_turn(
             state.truncated_through_seq = 0
         if task_key:
             state.task_id = task_key
-        next_turn = max(0, _safe_int(getattr(agent, _TRANSCRIPT_TURN_ATTR, 0))) + 1
-        setattr(agent, _TRANSCRIPT_TURN_ATTR, next_turn)
-        return f"bg-main:{thread_key}:{next_turn}"
+        return f"bg-main:{thread_key}:{uuid4().hex}"
 
 
 # LLM: Append accepts only the frozen public event vocabulary and scalar

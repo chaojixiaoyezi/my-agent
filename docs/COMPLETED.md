@@ -1,5 +1,15 @@
 # COMPLETED
 
+## 2026-09-05 R186 已提交后台工作片快照（代码已部署，长 TUI 验收仍进行中）
+
+- 解决问题：旧后台过程在恢复 final 后重放到末尾。终态公开块快照与 canonical final 一起保存，
+  完整恢复后按精确工作片身份重基易失环；实时补帧、历史恢复使用原 block ID，不改变模型历史或缓存。
+- 330 focused / 2 原有 xfailed 与严格检查通过；`.10` wheel `eb5a8e04...ab3f`、唯一 Gateway PID 2344284，
+  B 原 session 新任务已确认 5 次真实 MiniMax-M2.7 调用、cache-read 92,256。三个 child 自然完成，
+  主代理正在整合。最终回复后的 exact resume 尚未完成，不能把本实现记录当作 P1 全量通过。
+- A 原 root/child4 在顺序升级后以同一 run/thread 恢复，只换执行 attempt，没有新增替代 run。
+  Gateway 提交前过程持久化、Compact 工作片让出和长历史分页仍开放。
+
 ## 2026-09-05 R185 canonical 后台正文切片（不代表完整历史验收完成）
 
 - 解决问题：后台最终回复被另存到 notices，恢复时用不同 ID 再显示。删除第二份写入/读取链，改为同一

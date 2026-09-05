@@ -237,6 +237,16 @@ class BackgroundMainActivitySink:
     def assistant_commentary_messages(self) -> tuple[str, ...]:
         return self._transcript.assistant_commentary_messages()
 
+    # LLM: 工作片快照来自唯一 transcript sink，与活动标量无关，调用方只可随最终消息保存。
+    # 函数用途: 将完整过程展示交给后台消息提交层，避免恢复时只能读到已裁剪的临时环。
+    def display_history_snapshot(self) -> dict:
+        return self._transcript.display_history_snapshot()
+
+    # LLM: attempt 只给同一后台工作片的显示块命名，不能授予重试或恢复权限。
+    # 函数用途: 将宿主模型执行批次传给过程 sink，保证 Compact 后工具编号不碰撞。
+    def begin_model_attempt(self, attempt: int) -> None:
+        self._transcript.begin_model_attempt(attempt)
+
     # LLM: Fail is a liveness hint only. The real exception/retry/task state is
     # still owned by the background runtime and structured lifecycle stores.
     # 函数用途: 后台主代理轮异常退出时让 main 行显示真实失败阶段。
