@@ -1,11 +1,12 @@
 # COMPLETED
 
-## 2026-09-05 R189 过程流换代与最终消息接线（本地实现）
+## 2026-09-05 R189 过程流换代与最终消息接线（已部署，原 TUI 切片通过）
 
 - 解决 Gateway 换进程后旧 TUI 大游标吞新输出：过程流携带独立身份，只有不同流才能重基序号；
   canonical 消息仍用持久字节位置，冷 owner 不暖启动、失败不确认、不清空用户输入和既有历史。
 - 子代理 final 从原消息库带 thread/message ID，修正遗漏参数的旧调用，移除正文拼接的 legacy 去重键。
-- 228 focused / 1 原有 skipped；真实在线客户端跨唯一 Gateway 重启与 child 页面仍待验证，不提前关闭 P1。
+- 228 focused / 1 原有 skipped；客户端 PID 不变跨唯一 Gateway 重启，新流思考/工具/Compact 实时接续。
+  B 已结束 child 页面可见原 final，Ctrl+O 展开与 Ctrl+G 返回正确；不提前关闭未提交过程持久化等剩余 P1。
 
 ## 2026-09-05 R186 已结束后台回合的恢复验收补充
 

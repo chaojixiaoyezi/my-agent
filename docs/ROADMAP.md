@@ -9,7 +9,7 @@
 ## BUG-118 Gateway 重启后的实时过程游标
 
 - 解决问题：旧 TUI 保持大于新进程序号的整数游标，标量状态更新但新过程缺帧。
-  状态：R189 已按结构化 stream ID 实现双端续接，228 focused / 1 原有 skipped；待原 TUI 保持在线重启复验。
+  状态：R189 已部署，228 focused / 1 原有 skipped；原 TUI PID 不变跨单 Gateway 重启，旧流 55→新流 0 后新过程继续显示。
   不能要求用户每次手动重进 TUI，不能丢弃未完成过程或把新模型调用当成旧事件。
 
 ## R187 子代理长期 Compact 不按累计次数误终止
@@ -28,7 +28,7 @@
 ## BUG-119 子代理最终回复调用遗漏
 
 - 解决问题：R185 正文入口要求 message_id，但子代理详情旧调用没同步，进入特定终态页会抛 TypeError。
-  R189 从 canonical 消息携带 thread/message ID，删除文本 legacy 身份，发布后才确认；focused 通过，真 TUI 待验。
+  R189 从 canonical 消息携带 thread/message ID，删除文本 legacy 身份，发布后才确认；focused 与 B 终态 child 页面真 TUI 均通过。
 
 ## R185 后台回复身份统一（部分已部署，完整恢复排序失败）
 

@@ -24,6 +24,7 @@
 - 后台易失过程游标必须与 owner Agent 的 stream ID 成对传输；只有换流才能重基序号，发布成功才确认。
   canonical 消息字节位置不跟随进程重置，已有输入/审批/历史不清空。冷 owner 不因轮询构建 Agent。
   子代理最终回复必须携带原 thread/message ID，不能用回复正文作为 legacy 去重键。
+  R189 原 TUI 已通过在线单 Gateway 重启与终态 child 查看/展开/返回；未提交过程持久化仍未封板，见 FT-172～174。
 
 - 后台唤醒也必须把执行 cwd 与内部 run_workspace 分离：task link 只恢复归档、标题和运行属性，
   相对文件路径从可信 thread cwd 或 canonical owner home 解析。不能因为任务进入后台就重新用 runs

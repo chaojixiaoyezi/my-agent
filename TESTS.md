@@ -9,6 +9,10 @@
 真 TUI 部署时 Gateway/TUI 协议一并升级；之后保持客户端 PID 不变重启单 Gateway，核对 exact run、
 新流公开块、Compact、原任务副作用与独立 owner。只进入/回看页面不得增加模型调用。
 
+R189 原 TUI 复验已执行：两个客户端 PID 不变，唯一 Gateway 顺序重启后，B 旧流 cursor 55 变为新流 0，
+随后真实后台思考/工具与 Compact 继续显示；原运行身份保持。终态 child 页面可展开并返回原 main。
+详细 session/run/stream、部署包、回滚和保留文件证据见 TUI 审计 FT-172～174；未提交过程归档仍待测。
+
 ## R185 canonical 后台正文读取
 
 - `test_conversation_message_stream.py` 使用真实临时 ConversationStore 和 TUI reducer，覆盖消息 ID 幂等、

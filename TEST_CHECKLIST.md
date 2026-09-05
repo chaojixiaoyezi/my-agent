@@ -736,12 +736,13 @@
 - [x] 有 task link 时，默认后台工具 cwd 仍为 owner home，归档 task_root 原值不动。
 - [x] 显式同 owner 项目 cwd 可保留，工具和派工读取一致；原权限门不变。
 - [x] 原 B TUI 自然后台续作已有 29 次相对 tasks 文件操作成功，已知原服务文件 hash 与停止状态保持。
-- [ ] Gateway 重启后不退出 TUI，实时过程能立即跟随新的流身份；当前 BUG-118 未修。
+- [x] R189 原 TUI 保持在线跨唯一 Gateway 重启后，实时过程跟随新流；结果见 FT-174。
 
 ## R189 过程流换代与子代理 final 身份
 
 - [x] 同流不倒退、换流可从小序号接续；新进程序号已超过旧进程时也不漏前缀。
 - [x] 冷 owner 不暖启动；畸形页/发布失败不确认，重试同页不额外调用模型或改 canonical 消息。
 - [x] 子代理 final 携带 canonical message ID，已消费的 typed final 不再重复；相邻共 228 passed / 1 skipped。
-- [ ] 原 TUI 进程不退出，顺序重启唯一 Gateway 后新思考/工具继续显示；原任务身份、其他 owner 独立核对。
-- [ ] 已结束 child 页面进入、Ctrl+O 与 Ctrl+G 返回真 TUI 复验，不以单测冒充。
+- [x] 原 TUI PID 2492068/2492070 不退出，唯一 Gateway 2492065→2499672 后新思考/工具继续显示；A/B 原 root/thread/child 集合不变。
+- [x] B 已结束 child4 原页面进入、Ctrl+O 展开与 Ctrl+G 返回真 TUI 通过，使用 canonical final `msg-6cf16d42f2a242a1`。
+- [ ] 提交前崩溃过程的完整持久化、长历史分页和所有恢复时机仍独立待验，不由上述通过项替代。

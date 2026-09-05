@@ -1,13 +1,22 @@
 # STATUS
 
-## R189 重连流身份与子代理最终消息接线（focused 通过，待部署真 TUI）
+## R189 重连流身份与子代理最终消息接线（已部署，原 TUI 跨重启复验通过）
 
 - BUG-118：过程页增加 owner Agent 实例级 stream ID；同流递增、换流从新事件接续，发布成功才确认。
   冷 owner 回显旧游标而不初始化 Agent；canonical 消息位置、已有块与输入/审批状态不清空。
 - 相邻回归发现 BUG-119：子代理 final 的旧调用未传 R185 后必须提供的 message_id；现从原消息库携带
   thread/message ID，去掉正文生成 legacy 去重键，并在发布后确认。228 passed / 1 原有 skipped。
+- `.10` 安装 R189 独立环境，wheel SHA `04e57ca27a63e2bcf9c789618a4f926775eb7efe98969ea6d7afa83c93bcc19a`。
+  两路先精确恢复原 session 加载新客户端，再保持 TUI PID 2492068/2492070 不变，顺序重启唯一 Gateway
+  2492065→2499672。B 旧流 cursor 55→新流 0 后继续显示新思考、工具和 Compact，不需手动重进。
+- 原 A/B root、thread 与 child 集合保持不变；三个活跃 child 用原 ID 换 attempt 恢复，两个已完成 child
+  不重跑。B 后续四个 child 全部 DONE，主代理继续整合；新主工作片已入账 6 次 MiniMax-M2.7 调用、
+  cache-read 290,938、retry 0。这不是最终整合质量通过，也不是所有崩溃时机已测完。
+- B 已完成 child4 原页面可见委派要求、工具和最终回复，Ctrl+O 展开仍在 child，Ctrl+G 返回原 main。
+  原服务 app.py hash、空 findings.jsonl 和 18778 停止状态保持；R188 环境与 wheel 保留回滚。
 - R187 原长 child `subagent-1788624047-5ea76744` 已实际到 Compact 10，仍 RUNNING，执行 attempt
   `attempt-1788625011-80cf1021` 不变；已跨过旧次数故障点，最终完成仍待验。
+  R189 后同一 child 已到 Compact 16，重启后仍继续；B 主 Compact 42→45 的频率与成本另查，不算已优化。
 - R186 B 已自然 final 并在原 TUI /exit→精确 resume：191 个公开过程块可回看，底部保持最终回复，Working
   收起。只回看前后 210 消息行、51 用量行及文件 hash 均不变，Compact 保持 39；未完成过程归档仍开放。
 

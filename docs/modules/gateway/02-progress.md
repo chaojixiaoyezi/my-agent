@@ -5,7 +5,9 @@
 对照 会话运行时 `thread_routing::apply_refreshed_snapshot_thread` 的会话/缓冲交接，为现有易失环增加 stream ID。
 客户端确认发布后才更新“流身份+序号”，旧 canonical 消息游标独立；冷 owner 回显旧流、不创建 Agent。
 子代理 final 的旧调用遗漏同步修复：原消息库提供 thread/message ID，删除正文推导身份。
-228 focused / 1 原有 skipped 通过，唯一 Gateway 与原 TUI 重启复验待做；不替代未提交过程持久化。
+228 focused / 1 原有 skipped 通过。`.10` 原 TUI PID 不变跨唯一 Gateway 2492065→2499672，B 旧流游标 55
+换新流 0 后实际继续显示主代理思考、工具和 Compact；三个活跃 child 原 ID 恢复，终态 child 不重跑。
+B 终态 child 页面展开/返回也通过；不替代未提交过程持久化、完整长历史和任务质量验收。
 
 ## R185 后台消息单一来源（已部署，实时通过、恢复排序待修）
 
