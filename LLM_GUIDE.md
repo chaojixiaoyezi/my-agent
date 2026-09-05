@@ -21,6 +21,10 @@
 
 ## 2026-08-23 当前运行基线
 
+- 恢复和后台 final 使用 canonical thread/message ID，不再从 notices 第二份正文创建新显示块。历史快照交接
+  实际末行字节位置，实时页只能在发布成功后推进；不能按正文相似度去重或用当前时间跳过未知消息。
+  这只影响展示，不更改模型历史、缓存或 Compact。升级同步更换 Gateway/TUI，旧 notices 文件不删除。
+
 - 普通主代理与子代理的文件权限墙是 canonical owner home；业务 tasks、output、work、workspace 目录名
   不参与权限、执行选择或参数重写。工具的显式路径和正文保持原样，普通相对路径以真实 cwd 解析。
   新宿主运行记录落在 owner_runs_dir/日期/身份哈希，与用户项目分开；旧 tasks 运行引用仍可恢复，不搬迁用户文件。

@@ -25,6 +25,7 @@ class GatewayChatHistorySnapshot:
     thread_id: str = ""
     load_errors: tuple[dict[str, object], ...] = ()
     display_events: tuple[dict[str, object], ...] | None = None
+    message_cursor: int = 0
 
 
 # LLM: 恢复只读 resolve_thread/recent_messages_report，不能创建线程、写第二 transcript 或按正文猜配对；request id 和 role 是唯一配对事实。
@@ -62,6 +63,7 @@ def load_gateway_chat_history(
             thread_id,
             limit=max(16, max(1, int(max_turns or 1)) * 4),
         )
+        message_cursor = store.message_byte_offset_after(thread_id, rows[-1].message_id) if rows else 0
     except Exception as exc:  # noqa: BLE001 同上，不能静默恢复成空历史
         return GatewayChatHistorySnapshot(
             thread_id=thread_id,
@@ -73,6 +75,7 @@ def load_gateway_chat_history(
         thread_id=thread_id,
         load_errors=tuple(dict(item) for item in row_errors if isinstance(item, dict)),
         display_events=conversation_history_display_events(rows),
+        message_cursor=message_cursor,
     )
 
 
@@ -107,6 +110,7 @@ def _load_thin_gateway_chat_history(
     return GatewayChatHistorySnapshot(
         turns=tuple(turns[-max(1, int(max_turns or 1)):]),
         thread_id=str(payload.get("thread_id") or ""),
+        message_cursor=max(0, int(payload.get("message_cursor") or 0)),
         load_errors=errors,
         display_events=(
             tuple(dict(item) for item in payload["display_events"] if isinstance(item, dict))

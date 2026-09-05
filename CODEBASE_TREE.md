@@ -145,6 +145,7 @@ agent_py_agent/
 |   |   |-- live_tool_compact.py        # 运行中原生工具历史到同一 thread checkpoint/CAS 的适配层
 |   |   |-- native_history.py           # 完成回合的 provider 原生消息信封、校验与按请求替换式恢复
 |   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
+|   |   |-- message_stream.py           # 从同一消息账本分页投影后台 final，恢复与实时共用 ID/游标
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
 |   |   |-- runtime.py                  # 后台主代理调度热循环：wake_queue 到期消费、三源对账(5min)、事件提前醒取消闹钟
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
@@ -286,6 +287,9 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `agent_py_agent/tests/test_conversation_message_stream.py`：canonical 消息分页、恢复竞态、损坏游标和实时/历史幂等验证。
+- `agent/conversation/message_stream.py`：后台 final 的唯一公开增量投影，复用 ConversationStore，不另存 notices 正文。
 
 - `agent_py_agent/tests/test_owner_home_workspace.py`：家目录主/子代理读写、跨 owner/符号链接拒绝、控制文件保护、普通目录名与缓存稳定整理指南。
 

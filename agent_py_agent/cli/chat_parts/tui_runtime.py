@@ -782,14 +782,17 @@ def _normalize_subagent_activity_rows(
 # 类用途: 为 TuiRuntime 提供可靠控制命令展示与已提交 Compact 边界的公开入口。
 class _TuiConversationBoundaryRuntimeMixin:
     # LLM: Recovery prefers host-projected canonical display events; plain callers may provide
-    # only their visible pairs. Neither path reads storage, writes history, queues or calls a model.
+    # only their visible pairs. The exact last-read canonical byte cursor starts live message polling;
+    # neither path reads storage, writes history, queues or calls a model.
     # 函数用途: 在欢迎卡后用同一 reducer 恢复正文、工具和思考；不让恢复触发执行或 Working。
     def publish_recovered_history(
         self,
         turns: list[tuple[str, str]] | tuple[tuple[str, str], ...],
         *,
         display_events: tuple[dict[str, object], ...] | None = None,
+        message_cursor: int = 0,
     ) -> None:
+        self.background_message_cursor = max(self.background_message_cursor, int(message_cursor))
         if display_events is not None:
             self._publish_recovered_display_events(display_events)
             return
@@ -1045,39 +1048,19 @@ class _TuiBackgroundActivityRuntimeMixin:
             )
         return True
 
-    # LLM: Every legacy background notice receives a fresh block id so repeated
-    # updates cannot collapse in the reducer. The method is display-only.
-    # 函数用途: 把后台进度或旧版通知显示为独立的灰色系统消息。
-    def publish_background_notice(self, summary: str, *, thread_id: str = "") -> None:
-        text = str(summary or "").strip()
-        if not text:
-            return
-        request_id = f"bg-notice:{thread_id or self.session_id}"
-        with self._lock:
-            self._background_notice_index += 1
-            block_id = f"{request_id}:{self._background_notice_index}"
-            self._publish(
-                "system_message",
-                "completed",
-                block_id,
-                {"text": text, "severity": "info"},
-                request_id=request_id,
-            )
 
-    # LLM: A committed background owner reply must enter transcript as the same
-    # assistant role as a foreground final; this method does not deliver or rerun it.
-    # 函数用途: 把 Gateway 已提交的后台主代理最终回复显示为普通助手消息，而不是灰色系统告警。
-    def publish_background_response(self, content: str, *, thread_id: str = "") -> None:
+    # LLM: 后台已提交正文复用 canonical message_id，与历史恢复命中同一块；不生成到达次序身份。
+    # 函数用途: 显示后台最终回复并请求终帧；重复消息只更新原块，不重跑或重投递。
+    def publish_background_response(self, content: str, *, thread_id: str, message_id: str) -> None:
         text = str(content or "").strip()
-        if not text:
+        if not text or not thread_id or not message_id:
             return
-        request_id = f"bg-response:{thread_id or self.session_id}"
+        request_id = f"history:{thread_id}:{message_id}"
         with self._lock:
             # 最终回复进入 reducer 时仍会立即 invalidate；额外的一次刷新由
             # needs_periodic_refresh 消费，语义等同 会话运行时 FrameRequester 的终帧请求。
             self._terminal_refresh_pending = True
-            self._background_notice_index += 1
-            block_id = f"{request_id}:{self._background_notice_index}"
+            block_id = f"{request_id}:assistant"
             self._publish(
                 "assistant_completed",
                 "completed",
@@ -1225,7 +1208,7 @@ class TuiRuntime(
         self._queued_prompts: dict[str, str] = {}
         self._published_control_commands: set[str] = set()
         self._console_index = 0
-        self._background_notice_index = 0
+        self.background_message_cursor = 0
         self._notice_text = ""
         self._notice_kind = ""
         self._notice_until = 0.0

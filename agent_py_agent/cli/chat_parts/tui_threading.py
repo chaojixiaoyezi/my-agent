@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -86,8 +84,7 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
         ),
         daemon=True,
     ).start()
-    # S-BG1: 后台完成监视线程——子代理完成后的后台自动汇总（gateway 写的
-    # notices）即使没有用户操作也要显示到屏幕。
+    # 后台完成仍读同一 canonical 消息流，无需用户操作，也不另存回复正文。
     threading.Thread(
         target=lambda: _background_notice_loop(
             params.stop_event,
@@ -115,7 +112,7 @@ def _background_notice_loop(
     agent_navigation: object | None = None,
     foreground_running_ref: list[bool] | None = None,
 ) -> None:
-    seen: set[tuple[float, str]] = set()
+    seen: set[tuple[str, str]] = set()
     event_cursor = [0]
     failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
     while not stop_event.is_set():
@@ -167,7 +164,7 @@ def _consume_background_notices(
     session_id: str,
     tui_runtime: object,
     app_ref: list,
-    seen: set[tuple[float, str]],
+    seen: set[tuple[str, str]],
     event_cursor_ref: list[int] | None = None,
     agent_navigation: object | None = None,
 ) -> bool:
@@ -197,8 +194,8 @@ def _consume_background_notices(
     )
 
 
-# LLM: Thin clients consume the one authenticated /client/notices snapshot. Notification and
-# transcript cursors remain independent; only the typed active count may update healthy poll cadence.
+# LLM: Thin clients consume the authenticated canonical message page plus an independent
+# process-event cursor; neither cursor can rewind, and only typed activity controls poll cadence.
 # Invalid responses enter the existing exponential backoff without clearing display state.
 # 函数用途: 从单 Gateway 拉取活动、过程事件和最终回复，并记录下一轮是否需要秒级刷新。
 def _consume_gateway_background_snapshot(
@@ -206,17 +203,18 @@ def _consume_gateway_background_snapshot(
     session_id: str,
     tui_runtime: object,
     app_ref: list,
-    seen: set[tuple[float, str]],
+    seen: set[tuple[str, str]],
     event_cursor: list[int],
     agent_navigation: object | None = None,
 ) -> bool:
     fetcher = getattr(agent, "request_background_notices", None)
     if not callable(fetcher):
         return True
+    message_after = max(0, int(getattr(tui_runtime, "background_message_cursor", 0)))
     try:
         payload = fetcher(
             session_id,
-            after=max(key[0] for key in seen) if seen else 0.0,
+            after=message_after,
             event_after=max(0, int(event_cursor[0] or 0)),
         )
     except Exception:
@@ -250,11 +248,16 @@ def _consume_gateway_background_snapshot(
     if not transcript_ok:
         return False
     raw = payload.get("notices")
-    if not isinstance(raw, list):
+    cursor = payload.get("cursor")
+    if not isinstance(raw, list) or type(cursor) is not int or cursor < message_after:
         return False
-    fresh = [dict(row) for row in raw if isinstance(row, dict)]
+    if any(not isinstance(row, dict) for row in raw):
+        return False
+    fresh = [dict(row) for row in raw]
     for row in fresh:
-        _publish_background_notice_row(tui_runtime, row, seen)
+        if not _publish_background_notice_row(tui_runtime, row, seen):
+            return False
+    tui_runtime.background_message_cursor = cursor
     agent_view_ok, agent_view_changed = _consume_selected_agent_view(
         agent,
         None,
@@ -275,7 +278,7 @@ def _consume_gateway_background_snapshot(
 
 
 # LLM: Embedded/local mode reads the same agent-owned projection and event ring without HTTP.
-# ConversationStore and notice files remain authoritative; the typed active count affects only the
+# ConversationStore is the only message source; the typed active count affects only the
 # next display delay, while the event ring stays display-only.
 # 函数用途: 在本地完整 Agent 模式消费后台活动、过程事件和最终通知，并更新空闲刷新节奏。
 def _consume_local_background_snapshot(
@@ -284,7 +287,7 @@ def _consume_local_background_snapshot(
     session_id: str,
     tui_runtime: object,
     app_ref: list,
-    seen: set[tuple[float, str]],
+    seen: set[tuple[str, str]],
     event_cursor: list[int],
     agent_navigation: object | None = None,
 ) -> bool:
@@ -333,7 +336,13 @@ def _consume_local_background_snapshot(
     )
     if not transcript_ok:
         return False
-    notices_path = Path(root) / "notices" / f"{thread_id}.notices.jsonl"
+    from ...agent.conversation.message_stream import read_background_response_page
+
+    fresh, cursor, messages_ok = read_background_response_page(
+        store, thread_id, after=max(0, int(getattr(tui_runtime, "background_message_cursor", 0))),
+    )
+    if not messages_ok:
+        return False
     agent_view_ok, agent_view_changed = _consume_selected_agent_view(
         agent,
         store,
@@ -342,17 +351,8 @@ def _consume_local_background_snapshot(
     )
     if not agent_view_ok:
         return False
-    if not notices_path.exists():
-        if (
-            activity_changed
-            or transcript_changed
-            or agent_view_changed
-            or permission_changed
-        ) and app_ref[0] is not None:
-            app_ref[0].invalidate()
-        return True
-    fresh = _read_local_notice_rows(notices_path, seen)
     if not fresh:
+        tui_runtime.background_message_cursor = cursor
         if (
             activity_changed
             or transcript_changed
@@ -362,34 +362,14 @@ def _consume_local_background_snapshot(
             app_ref[0].invalidate()
         return True
     for row in fresh:
-        _publish_background_notice_row(tui_runtime, row, seen)
+        if not _publish_background_notice_row(tui_runtime, row, seen):
+            return False
+    tui_runtime.background_message_cursor = cursor
     if app_ref[0] is not None:
         app_ref[0].invalidate()
     return True
 
 
-# LLM: Local notice parsing is a display-only bounded adapter. Invalid JSON and
-# duplicate notice identities are skipped without changing task/activity state;
-# equal timestamps remain legal because multiple background reports can share a tick.
-# 函数用途: 读取嵌入式 TUI 尚未显示的后台通知行。
-def _read_local_notice_rows(
-    notices_path: Path,
-    seen: set[tuple[float, str]],
-) -> list[dict[str, object]]:
-    fresh: list[dict[str, object]] = []
-    for line in notices_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        key = _background_notice_key(row)
-        if key not in seen:
-            fresh.append(row)
-    return fresh
 
 
 # LLM: Gateway rows are already owner-scoped; this adapter supplies one exact
@@ -605,61 +585,32 @@ def _consume_selected_agent_view(
     return True, bool(applier(run_id, payload))
 
 
-# LLM: A v2 committed owner delivery becomes an assistant block; legacy v1
-# notices remain system hints. Schema fields, not prose, select the display role.
-# 函数用途: 去重并发布一条后台回复或旧版后台提示到当前 TUI。
+# LLM: 只消费 canonical message 投影；发布成功才记入幂等集合，协议或发布失败不得确认游标。
+# 函数用途: 发布一条后台已提交回复，重放仍指向同一个历史显示块；不同 ID 的相同正文各保留一次。
 def _publish_background_notice_row(
     tui_runtime: object,
     row: dict[str, object],
-    seen: set[tuple[float, str]],
-) -> None:
-    summary = str(row.get("summary") or "").strip()
-    content = str(row.get("content") or summary).strip()
+    seen: set[tuple[str, str]],
+) -> bool:
+    content = str(row.get("content") or "").strip()
     thread_id = str(row.get("thread_id") or "")
-    if not content:
-        return
-    key = _background_notice_key(row)
+    message_id = str(row.get("message_id") or "")
+    if (
+        row.get("schema_version") != "background_message.v1"
+        or row.get("display_kind") != "assistant_response"
+        or not message_id or not thread_id
+    ):
+        return False
+    key = (thread_id, message_id)
     if key in seen:
-        return
+        return True
+    publisher = getattr(tui_runtime, "publish_background_response", None)
+    if not callable(publisher):
+        return False
+    if content:
+        publisher(content, thread_id=thread_id, message_id=message_id)
     seen.add(key)
-    progress_items = row.get("task_progress_items")
-    progress_publisher = getattr(tui_runtime, "publish_task_progress_snapshot", None)
-    if isinstance(progress_items, list | tuple) and callable(progress_publisher):
-        progress_publisher(
-            progress_items,
-            generation_id=row.get("task_progress_generation_id"),
-            plan_revision=row.get("task_progress_plan_revision"),
-        )
-    if str(row.get("display_kind") or "") == "assistant_response":
-        publisher = getattr(tui_runtime, "publish_background_response", None)
-        if callable(publisher):
-            publisher(content, thread_id=thread_id)
-        return
-    notice_text = f"⚙ 后台更新：{summary}"
-    tui_runtime.publish_background_notice(notice_text, thread_id=thread_id)
-
-
-# LLM: Explicit v2 notice ids are authoritative. Legacy rows fall back to a
-# content fingerprint paired with their timestamp so two distinct replies from
-# the same scheduler tick are both visible while exact replay stays idempotent.
-# 函数用途: 生成 TUI 后台通知去重键，兼容没有 notice_id 的历史文件。
-def _background_notice_key(row: Mapping[str, object]) -> tuple[float, str]:
-    try:
-        created_at = float(row.get("created_at") or 0.0)
-    except (TypeError, ValueError):
-        created_at = 0.0
-    notice_id = str(row.get("notice_id") or "").strip()
-    if notice_id:
-        return created_at, notice_id
-    raw = json.dumps(
-        dict(row),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
-    return created_at, f"legacy-{digest}"
+    return True
 
 
 # LLM: refresh loop 只在 runtime 报告存在可见动画/短提示时 invalidate；typed event 自带 redraw，空闲时必须零周期整屏重绘。

@@ -124,7 +124,15 @@ def test_gateway_client_history_returns_only_complete_foreground_turns(monkeypat
         ),
     ]
 
+    for index, row in enumerate(rows):
+        row.message_id = f"msg-{index}"
+        row.thread_id = "thread-1"
+
     class Store:
+        def message_byte_offset_after(self, thread_id, message_id):
+            assert (thread_id, message_id) == ("thread-1", "msg-3")
+            return 4096
+
         def resolve_thread_report(self, **kwargs):
             assert kwargs["channel_conversation_id"] == "sess-test"
             return SimpleNamespace(thread_id="thread-1"), None
@@ -149,6 +157,7 @@ def test_gateway_client_history_returns_only_complete_foreground_turns(monkeypat
 
     assert result.ok is True
     assert result.thread_id == "thread-1"
+    assert result.message_cursor == 4096
     assert result.turns == (
         {
             "request_id": "req-1",

@@ -3923,117 +3923,8 @@ def _skip_pending_wake_signal(
         scheduler._mark_signal(signal, current, handled)
         return True
     return False
-
-
-# LLM: This projection records only user-deliverable background owner replies.
-# Each committed reply receives a content-addressed id and a commit timestamp;
-# the scheduler's sampled `now` remains source metadata because several reports
-# can share it. The projection never becomes delivery or completion authority.
-# 函数用途: 把后台主代理已提交给用户边界的回复写成 TUI 可消费的普通助手消息事件。
-def _record_background_notice(
-    store: object,
-    report: BackgroundMainAgentReport,
-    *,
-    agent: object | None = None,
-) -> None:
-    """后台主代理轮完成 → 写一条 notices 记录（TUI 后台完成监视用）。"""
-    import json as _json
-
-    root = getattr(store, "root", None)
-    delivery_status = str(report.delivery_status or "").strip().lower()
-    content = str(report.response or "").strip()
-    if not root or delivery_status not in {"sent", "not_applicable"} or not content:
-        return
-    try:
-        if agent is not None:
-            (
-                progress_items,
-                progress_generation_id,
-                progress_plan_revision,
-            ) = task_progress_projection_for_task(
-                agent,
-                store,
-                str(getattr(report, "task_id", "") or ""),
-            )
-        else:
-            progress_items, progress_generation_id, progress_plan_revision = (), "", 0
-        notices_dir = Path(root) / "notices"
-        notices_dir.mkdir(parents=True, exist_ok=True)
-        source_created_at = float(getattr(report, "created_at", 0.0) or 0.0)
-        notice_id = _background_notice_id(
-            report,
-            content=content,
-            delivery_status=delivery_status,
-        )
-        line = _json.dumps(
-            {
-                "schema_version": "background_notice.v2",
-                "notice_id": notice_id,
-                "display_kind": "assistant_response",
-                "thread_id": report.thread_id,
-                "reason": str(report.reason or ""),
-                "content": content,
-                "summary": content[:500],
-                "created_at": time.time(),
-                "source_created_at": source_created_at,
-                "delivery_status": delivery_status,
-                "task_progress_items": [dict(item) for item in progress_items],
-                "task_progress_generation_id": progress_generation_id,
-                "task_progress_plan_revision": progress_plan_revision,
-            },
-            ensure_ascii=False,
-        )
-        with open(notices_dir / f"{report.thread_id}.notices.jsonl", "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "background notice write failed (thread=%s)", report.thread_id, exc_info=True
-        )
-
-
-# LLM: A notice id identifies one committed owner reply independently of wall
-# clock collisions. It uses only already-public routing/content fields and is
-# stable across projection retries of the same report.
-# 函数用途: 为后台最终回复生成稳定去重编号，避免同一秒多条消息互相覆盖。
-def _background_notice_id(
-    report: BackgroundMainAgentReport,
-    *,
-    content: str,
-    delivery_status: str,
-) -> str:
-    raw = json.dumps(
-        {
-            "thread_id": str(getattr(report, "thread_id", "") or ""),
-            "task_id": str(getattr(report, "task_id", "") or ""),
-            "reason": str(getattr(report, "reason", "") or ""),
-            "content": str(content or ""),
-            "source_created_at": float(getattr(report, "created_at", 0.0) or 0.0),
-            "delivery_status": str(delivery_status or ""),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return f"notice-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]}"
-
-
-# LLM: Every background execution lane must publish through this one report boundary. Appending
-# only to the scheduler return list is insufficient because an attached TUI consumes the durable
-# notice projection, while the ConversationStore remains the transcript authority.
-# 函数用途: 统一登记后台轮结果并通知正在观察的 TUI；通知失败不影响已提交的会话回复。
-def _append_background_report(
-    scheduler: BackgroundMainAgentScheduler,
-    reports: list[BackgroundMainAgentReport],
-    report: BackgroundMainAgentReport,
-) -> None:
-    reports.append(report)
-    _record_background_notice(
-        scheduler.store,
-        report,
-        agent=scheduler.runtime.agent,
-    )
-
-
+# LLM: 批次执行与确认仍走 scheduler 的耐久 wake 合同；runtime 已提交 canonical 回复，这里不能另存正文。
+# 函数用途: 运行一批同源唤醒、登记调度结果并处理确认或退避，不创建第二条通知主链。
 def _consume_wake_signal_batch(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -4056,8 +3947,8 @@ def _consume_wake_signal_batch(
     if report is None:
         _defer_failed_wake_batch(scheduler, wake_batch, execution_signal, current)
         return
-    # S-BG1：所有后台车道都经统一出口写 notices；不能只让 child wake 可见。
-    _append_background_report(scheduler, reports, report)
+    # 正文由 runtime 统一提交；所有后台车道只把调度报告放进返回列表。
+    reports.append(report)
     if _is_scheduler_wake_signal(signal):
         return
     reported.add(report.thread_id)
@@ -4551,8 +4442,8 @@ def _wake_signal_root_is_inactive(store: object, signal: WakeSignal) -> bool:
 
 
 # LLM: observation 必须先按 task 隔离再计算 runnable limit；unknown task 的
-# 事件原样保留，不能形成队头阻塞或被其它 task 的报告顺带确认。
-# 函数用途: 批量消费没有可用 wake 的主代理观察事件。
+# 事件原样保留；已提交回复由 canonical 消息流显示，调度器不重复写正文或确认其它 task。
+# 函数用途: 批量消费没有可用 wake 的观察事件并登记调度结果，不另建回复账本。
 def _consume_observation_batches(
     scheduler: BackgroundMainAgentScheduler,
     reports: list[BackgroundMainAgentReport],
@@ -4591,7 +4482,7 @@ def _consume_observation_batches(
             partial(scheduler._run_observation_batch, thread_id, selected, now=current),
         )
         if report is not None:
-            _append_background_report(scheduler, reports, report)
+            reports.append(report)
             reported.add(report.thread_id)
 
 
@@ -4622,8 +4513,8 @@ def _observation_waits_for_linked_wake(
 
 
 # LLM: policy 的 unknown 权威阻塞只暂停调度，不退休、不顺延；显式恢复后
-# 原排期自然重新获得准入。
-# 函数用途: 消费本轮到期且拥有执行权的进度策略。
+# 原排期自然重新获得准入。回复提交留在 runtime，策略调度不复制最终正文。
+# 函数用途: 消费本轮到期且拥有执行权的进度策略，收集结果供上层观察。
 def _consume_due_policies(
     scheduler: BackgroundMainAgentScheduler,
     reports: list[BackgroundMainAgentReport],
@@ -4662,7 +4553,7 @@ def _consume_due_policies(
             partial(scheduler._run_due_policy, policy, now=current),
         )
         if report:
-            _append_background_report(scheduler, reports, report)
+            reports.append(report)
 
 
 # LLM: Ready-thread discovery may inspect durable sources but must not claim, consume, or run them;

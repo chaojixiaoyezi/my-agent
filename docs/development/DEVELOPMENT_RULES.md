@@ -49,15 +49,12 @@ before changing code.
   “还能跑”的旁路。
 - 一个概念只允许一个权威位置。task workspace、memory、artifact、subagent state、
   compact ledger、config 都必须有唯一 canonical path / canonical schema。
-- `--no-save` 只表示不写长期记忆、raw archive 等可持久对话记录；不能关闭 task
-  workspace。一次真实任务仍要有 `tasks/<date>/<task-slug>/{output,work}` 工作现场。
-- 输入工作区和任务产物目录必须分开。用户给的相对源码/资料/输入路径默认相对真实
-  workspace/cwd；task workspace 的 `task_root`、`output_dir`、`work_dir` 只负责本轮
-  交付物、草稿、审计和子代理过程文件，不能变成普通输入路径的默认根。
-- 当前 run 没有用户显式指定输出目录时，`output_files` / `output_refs` /
-  `artifact_refs` 的相对路径默认归一到当前 task `output/`。要写项目文件，必须使用
-  明确项目路径、修复合同、目标 refs 或 `extra_write_roots` 等结构化授权；不能靠
-  裸相对交付文件名把报告写到项目根目录。
+- `--no-save` 不赋予工具绕开当前 owner 权限的能力。运行身份与用户业务目录分离，
+  宿主记录使用 canonical runs 根；不因一次运行强制创建 tasks/output/work 业务目录。
+- 主代理和普通子代理的文件权限范围是自己的 owner home；所有普通相对路径以真实 cwd 解析，
+  output/work/tasks 名称不作魔法映射。文件整理与目录命名由稳定内置提示说明，用户可覆盖整理习惯。
+- `output_files` / `output_refs` / `artifact_refs` 是明确的文件引用，不推导额外写权限，
+  也不触发 task 回绑或参数改写。跨 owner、控制面、SOUL 确认与 exact Audit 继续服从结构化授权。
 - 不同时保留新旧两套路由。旧字段、旧目录、旧 facade、旧 fallback 确认不用就删；
   迁移必须短期、显式、有删除条件。
 - 配置必须单一来源。用户配置、默认 YAML、dataclass 默认值和测试覆盖不能互相打架；

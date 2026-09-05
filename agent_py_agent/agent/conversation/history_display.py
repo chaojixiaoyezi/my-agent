@@ -40,7 +40,7 @@ def conversation_history_display_events(
     return tuple(events)
 
 
-# LLM: 真实 user 只来自 canonical row；native user 的文本通常是内部 runtime 注入，不能公开或当成用户输入。
+# LLM: 真实 user/final 身份来自 canonical row；native 仅补过程块，native user 内部注入不能公开。
 # 函数用途: 恢复一轮的输入和已保存 native 内容，无 native 时保留全部正式 commentary/final。
 def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
     request_id = f"history:{identity}"
@@ -56,8 +56,8 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
     ), ())
     if not native:
         events.extend(
-            _event(request_id, f"assistant:{index}", "assistant_completed", {"text": _public(row.content)})
-            for index, row in enumerate(assistants)
+            public_assistant_message_event(row)
+            for row in assistants
             if getattr(row, "content", "")
         )
         return events
@@ -82,10 +82,19 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
     events.extend(_native_events(
         request_id, native, final_text=_public(final.content) if final is not None else None,
     ))
+    if final is not None and final.content:
+        events.append(public_assistant_message_event(final))
     return events
 
 
-# LLM: 原生类型是唯一映射依据；tool_result 按精确 id 配对；末次正文用 canonical final，签名/注入/参数不透传。
+# LLM: canonical message_id 与 thread_id 是历史恢复和实时后台 final 共用的显示身份，不从正文或时间生成编号。
+# 函数用途: 将一条已提交助手消息转换成稳定显示块，同一消息重放不再插入第二条。
+def public_assistant_message_event(row: object) -> dict[str, object]:
+    request_id = f"history:{row.thread_id}:{row.message_id}"
+    return _event(request_id, "assistant", "assistant_completed", {"text": _public(row.content)})
+
+
+# LLM: 原生类型是唯一映射依据；tool_result 按精确 id 配对；跳过由调用方追加的 canonical final，签名/注入/参数不透传。
 # 函数用途: 按原顺序重放灰色思考、正文与工具结果；缺失结果明确显示未知，绝不伪造成功。
 def _native_events(
     request_id: str, messages: tuple[dict, ...], *, final_text: str | None,
@@ -125,8 +134,6 @@ def _native_events(
                 continue
             seen_calls.add(call_id)
             events.append(_tool_event(request_id, key, block, results.get(call_id)))
-    if final_text:
-        events.append(_event(request_id, "final", "assistant_completed", {"text": final_text}))
     return events
 
 

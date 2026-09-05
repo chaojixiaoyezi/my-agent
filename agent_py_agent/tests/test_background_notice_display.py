@@ -1,10 +1,4 @@
-"""S-BG1 回归：任一后台主代理车道完成 → notices 文件 → TUI 显示。
-
-真机实锤（s2-fast）：子代理完成后父代理在后台自动续跑汇总，但 TUI 无事件
-驱动不刷新——用户看不到"后台已自动汇总"。修复：
-1. gateway 在 child wake、observation、due policy 任一后台轮 report 产生后写 notices
-2. TUI 监视线程周期读取并以普通 assistant 消息显示已提交的后台最终回复
-"""
+"""后台完成从 canonical transcript 投影到 TUI；实时正文与恢复历史共用消息身份。"""
 
 from __future__ import annotations
 
@@ -15,209 +9,94 @@ from types import SimpleNamespace
 from wcwidth import wcswidth
 
 
-def test_gateway_records_background_notice(tmp_path: Path) -> None:
-    """后台轮 report 产生 → notices 文件按 thread_id 落一行 JSON。"""
-    from agent_py_agent.agent.conversation.runtime import _record_background_notice
-
-    store_root = tmp_path / "conversations"
-    store = SimpleNamespace(root=store_root)
-    report = SimpleNamespace(
-        thread_id="thread-bg-1",
-        reason="subagent_runner_finished",
-        response="子代理 A/B/C 已完成：t1=1-5 t2=1-5 t3=1-5",
-        created_at=1787200000.0,
-        delivery_status="sent",
-    )
-    _record_background_notice(store, report)
-
-    notices_path = store_root / "notices" / "thread-bg-1.notices.jsonl"
-    assert notices_path.exists()
-    rows = [json.loads(line) for line in notices_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(rows) == 1
-    assert rows[0]["thread_id"] == "thread-bg-1"
-    assert rows[0]["reason"] == "subagent_runner_finished"
-    assert "子代理" in rows[0]["summary"]
-    assert rows[0]["schema_version"] == "background_notice.v2"
-    assert rows[0]["notice_id"].startswith("notice-")
-    assert rows[0]["display_kind"] == "assistant_response"
-    assert rows[0]["content"] == report.response
-    assert rows[0]["source_created_at"] == report.created_at
-
-
-def test_gateway_background_notice_carries_final_task_progress(tmp_path: Path) -> None:
-    import hashlib
-
-    from agent_py_agent.agent.conversation.runtime import _record_background_notice
+# LLM: 夹具使用与 Gateway 一致的 owner-scoped 会话库；只写临时 canonical 消息，不启动模型。
+# 函数用途: 创建可用于本地轮询和冷 owner 恢复的真实消息源。
+def _message_store(tmp_path):
     from agent_py_agent.agent.conversation.store import ConversationStore
-    from agent_py_agent.agent.task_progress import (
-        with_task_progress_display_plan,
-        write_task_progress,
-    )
 
-    owner_root = tmp_path / "owner"
     store = ConversationStore(tmp_path / "conversations")
-    task_path = str(tmp_path / "project" / "bbb")
-    thread = store.get_or_create_thread(
-        {
-            "canonical_user_id": "local-agent",
-            "channel": "chat",
-            "channel_conversation_id": "session-progress",
-            "channel_user_id": "local-agent",
-            "now": 1.0,
-        }
-    )
-    store.bind_task(
-        {
-            "thread_id": thread.thread_id,
-            "task_id": "task-progress",
-            "task_path": task_path,
-            "goal": "完成游戏",
-            "now": 2.0,
-        }
-    )
-    ledger_id = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
-    write_task_progress(
-        owner_root,
-        ledger_id,
-        with_task_progress_display_plan(
-            {"items": [{"id": "qa", "title": "整合测试", "status": "done"}]},
-            generation_id="turn-final",
-            item_ids=["qa"],
-        ),
-    )
-    report = SimpleNamespace(
-        thread_id=thread.thread_id,
-        task_id="task-progress",
-        reason="subagent_runner_finished",
-        response="游戏已完成。",
-        created_at=100.0,
-        delivery_status="sent",
-    )
-
-    _record_background_notice(
-        store,
-        report,
-        agent=SimpleNamespace(
-            home_paths=SimpleNamespace(owner_home_dir=owner_root)
-        ),
-    )
-
-    notice_path = store.root / "notices" / f"{thread.thread_id}.notices.jsonl"
-    row = json.loads(notice_path.read_text(encoding="utf-8").splitlines()[0])
-    assert row["task_progress_items"] == [
-        {"id": "qa", "title": "整合测试", "status": "done"}
-    ]
-    assert row["task_progress_generation_id"] == "turn-final"
-    assert row["task_progress_plan_revision"] == 1
+    thread = store.get_or_create_thread({
+        "canonical_user_id": "local-agent", "channel": "chat",
+        "channel_conversation_id": "session-1", "channel_user_id": "local-agent", "now": 1.0,
+    })
+    return store, thread
 
 
-def test_gateway_skips_internal_or_empty_background_notice(tmp_path: Path) -> None:
-    """被 delivery contract 抑制或没有正文的后台轮不进入用户 transcript。"""
-    from agent_py_agent.agent.conversation.runtime import _record_background_notice
-
-    store_root = tmp_path / "conversations"
-    store = SimpleNamespace(root=store_root)
-    for delivery_status, response in (("suppressed", "内部整合"), ("sent", "")):
-        _record_background_notice(
-            store,
-            SimpleNamespace(
-                thread_id="thread-bg-hidden",
-                reason="subagent_runner_finished",
-                response=response,
-                created_at=1787200000.0,
-                delivery_status=delivery_status,
-            ),
-        )
-
-    assert not (store_root / "notices").exists()
+# LLM: 后台正文只通过 append_message 写入；metadata 决定是否公开，文本本身没有控制意义。
+# 函数用途: 生成一条有稳定消息 ID 的后台最终回复。
+def _append_background_message(store, thread, content="后台最终回复", **metadata):
+    return store.append_message({
+        "thread_id": thread.thread_id, "role": "assistant", "content": content, "now": 20.0,
+        "metadata": {"background_delivery_reason": "root_subagents_terminal",
+                     "assistant_part_id": "final", **metadata},
+    })
 
 
-def test_gateway_notice_write_failure_is_silent(tmp_path: Path) -> None:
-    """notices 写入失败不抛（显示增强不能影响后台轮主流程）。"""
-    from agent_py_agent.agent.conversation.runtime import _record_background_notice
+def test_background_page_projects_canonical_message(tmp_path):
+    from agent_py_agent.agent.conversation.message_stream import read_background_response_page
 
-    store = SimpleNamespace(root=tmp_path / "conversations")
-    report = SimpleNamespace(
-        thread_id="t", reason="r", response="x", created_at=1.0, delivery_status="sent"
-    )
-    # 覆盖 notices 目录为文件（mkdir 失败路径）
-    bad_root = tmp_path / "bad"
-    bad_root.mkdir()
-    (bad_root / "notices").write_text("not-a-dir", encoding="utf-8")
-    _record_background_notice(SimpleNamespace(root=bad_root), report)  # 不抛即通过
+    store, thread = _message_store(tmp_path)
+    message = _append_background_message(store, thread)
+    rows, cursor, ok = read_background_response_page(store, thread.thread_id)
+    assert ok and len(rows) == 1
+    assert rows[0]["message_id"] == message.message_id
+    assert rows[0]["notice_id"] == message.message_id
+    assert rows[0]["schema_version"] == "background_message.v1"
+    assert rows[0]["content"] == message.content
+    assert cursor == store.message_byte_offset_after(thread.thread_id, message.message_id)
+    assert not (store.root / "notices").exists()
+    assert read_background_response_page(store, thread.thread_id, after=cursor) == ([], cursor, True)
 
 
-def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
-    """TUI 监视：v2 notices 新行 → 普通助手回复 + 去重。"""
+def test_background_page_filters_roles_and_internal_audit(tmp_path):
+    from agent_py_agent.agent.conversation.message_stream import read_background_response_page
+
+    store, thread = _message_store(tmp_path)
+    store.append_message({"thread_id": thread.thread_id, "role": "user", "content": "用户输入"})
+    store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": "前台回复"})
+    _append_background_message(store, thread, "过程回复", assistant_part_id="commentary:1")
+    _append_background_message(store, thread, "内部审计", reason="audit_finding", task_id="task-audit")
+    final = _append_background_message(store, thread, "公开汇报")
+    rows, cursor, ok = read_background_response_page(store, thread.thread_id)
+    assert ok and [row["message_id"] for row in rows] == [final.message_id]
+    assert cursor == store.message_byte_offset_after(thread.thread_id, final.message_id)
+
+
+def test_background_page_preserves_cursor_on_corruption(tmp_path):
+    from agent_py_agent.agent.conversation.message_stream import read_background_response_page
+
+    store, thread = _message_store(tmp_path)
+    final = _append_background_message(store, thread)
+    offset = store.message_byte_offset_after(thread.thread_id, final.message_id)
+    with store._message_path(thread.thread_id).open("ab") as handle:
+        handle.write(b"not-json\n")
+    assert read_background_response_page(store, thread.thread_id, after=offset) == ([], offset, False)
+
+
+def test_background_page_has_no_notice_file_dependency(tmp_path):
+    from agent_py_agent.agent.conversation.message_stream import read_background_response_page
+
+    store, thread = _message_store(tmp_path)
+    _append_background_message(store, thread)
+    (store.root / "notices").write_text("旧旁路不可写也不影响 canonical 读取")
+    assert read_background_response_page(store, thread.thread_id)[2] is True
+
+
+def test_tui_consumes_background_notices_and_publishes(tmp_path):
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
     from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
 
-    store_root = tmp_path / "conversations"
-    thread_id = "thread-tui-1"
-    notices_dir = store_root / "notices"
-    notices_dir.mkdir(parents=True)
-    (notices_dir / f"{thread_id}.notices.jsonl").write_text(
-        json.dumps(
-            {
-                "schema_version": "background_notice.v2",
-                "display_kind": "assistant_response",
-                "thread_id": thread_id,
-                "reason": "subagent_runner_finished",
-                "content": "子代理已完成，后台自动汇总完成。",
-                "summary": "子代理已完成，后台自动汇总完成。",
-                "created_at": 100.0,
-                "task_progress_items": [
-                    {"id": "qa", "title": "整合测试", "status": "done"}
-                ],
-                "task_progress_generation_id": "generation-final",
-                "task_progress_plan_revision": 4,
-            },
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    published: list[str] = []
-    progress_snapshots: list[tuple[list[dict[str, object]], str, int]] = []
-
-    class _Store:
-        root = store_root
-
-        def resolve_thread_report(self, **kwargs):
-            return SimpleNamespace(thread_id=thread_id), None
-
-    class _Runtime:
-        def publish_task_progress_snapshot(
-            self,
-            items,
-            *,
-            generation_id="",
-            plan_revision=0,
-        ):
-            progress_snapshots.append(
-                (list(items), str(generation_id), int(plan_revision))
-            )
-
-        def publish_background_response(self, text, *, thread_id=""):
-            published.append(text)
-
-    class _Agent:
-        conversation_store = _Store()
-
-    seen: set[tuple[float, str]] = set()
-    _consume_background_notices(_Agent(), "session-1", _Runtime(), [None], seen)
-    assert len(published) == 1
-    assert published[0] == "子代理已完成，后台自动汇总完成。"
-    assert progress_snapshots == [
-        (
-            [{"id": "qa", "title": "整合测试", "status": "done"}],
-            "generation-final",
-            4,
-        )
-    ]
-    # 第二次消费同文件：已 seen，不重复发布
-    _consume_background_notices(_Agent(), "session-1", _Runtime(), [None], seen)
-    assert len(published) == 1
+    store, thread = _message_store(tmp_path)
+    message = _append_background_message(store, thread)
+    agent = SimpleNamespace(conversation_store=store)
+    runtime = TuiRuntime("session-1")
+    seen = set()
+    assert _consume_background_notices(agent, "session-1", runtime, [None], seen)
+    assert _consume_background_notices(agent, "session-1", runtime, [None], seen)
+    blocks = runtime.store.snapshot().stable_blocks
+    assert [(block.role, block.text) for block in blocks] == [("assistant", message.content)]
+    assert blocks[0].block_id == f"history:{thread.thread_id}:{message.message_id}:assistant"
+    assert runtime.background_message_cursor == store.message_byte_offset_after(thread.thread_id, message.message_id)
 
 
 def test_tui_skips_when_no_thread_or_no_session(tmp_path: Path) -> None:
@@ -231,7 +110,7 @@ def test_tui_skips_when_no_thread_or_no_session(tmp_path: Path) -> None:
             return None, None
 
     class _Runtime:
-        def publish_background_notice(self, text, *, thread_id=""):
+        def publish_background_response(self, text, *, thread_id="", message_id=""):
             raise AssertionError("不应发布")
 
     class _Agent:
@@ -259,7 +138,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
             )
             return {
                 "ok": True,
-                "cursor": 200.0,
+                "cursor": 200,
                 "transcript_events": [],
                 "event_cursor": event_after,
                 "active_task_count": 2,
@@ -288,9 +167,10 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
                 },
                 "notices": [
                     {
-                        "schema_version": "background_notice.v2",
+                        "schema_version": "background_message.v1",
                         "display_kind": "assistant_response",
                         "thread_id": "thread-http-1",
+                        "message_id": "message-http-1",
                         "reason": "subagent_runner_finished",
                         "content": "HTTP 后台完成通知测试。",
                         "summary": "HTTP 后台完成通知测试。",
@@ -318,12 +198,13 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
         def publish_task_progress_snapshot(self, _items, **_kwargs):
             return True
 
-        def publish_background_response(self, text, *, thread_id=""):
+        def publish_background_response(self, text, *, thread_id="", message_id=""):
             published.append(text)
 
-    seen: set[tuple[float, str]] = set()
+    seen: set[tuple[str, str]] = set()
+    runtime = _Runtime()
     assert _consume_background_notices(
-        _Agent(), "session-http", _Runtime(), [None], seen
+        _Agent(), "session-http", runtime, [None], seen
     )
     assert len(fetched) == 1
     assert fetched[0]["after"] == 0.0
@@ -335,9 +216,9 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
     assert published[1] == "HTTP 后台完成通知测试。"
     # 游标推进后不重复
     assert _consume_background_notices(
-        _Agent(), "session-http", _Runtime(), [None], seen
+        _Agent(), "session-http", runtime, [None], seen
     )
-    assert fetched[1]["after"] == 150.0
+    assert fetched[1]["after"] == 200
 
 
 def test_tui_keeps_distinct_background_replies_with_same_timestamp() -> None:
@@ -350,31 +231,34 @@ def test_tui_keeps_distinct_background_replies_with_same_timestamp() -> None:
     calls = [
         [
             {
-                "schema_version": "background_notice.v2",
+                "schema_version": "background_message.v1",
                 "display_kind": "assistant_response",
                 "thread_id": "thread-same-time",
+                "message_id": "message-retry",
                 "content": "工具绑定暂时失败。",
                 "created_at": 150.0,
             }
         ],
         [
             {
-                "schema_version": "background_notice.v2",
+                "schema_version": "background_message.v1",
                 "display_kind": "assistant_response",
                 "thread_id": "thread-same-time",
+                "message_id": "message-retry",
                 "content": "工具绑定暂时失败。",
                 "created_at": 150.0,
             },
             {
-                "schema_version": "background_notice.v2",
+                "schema_version": "background_message.v1",
                 "display_kind": "assistant_response",
                 "thread_id": "thread-same-time",
+                "message_id": "message-final",
                 "content": "任务完成，以下是最终交付。",
                 "created_at": 150.0,
             },
         ],
     ]
-    fetched_after: list[float] = []
+    fetched_after: list[int] = []
 
     class _Agent:
         def request_background_notices(self, _session_id, *, after, event_after):
@@ -382,7 +266,7 @@ def test_tui_keeps_distinct_background_replies_with_same_timestamp() -> None:
             rows = calls.pop(0) if calls else []
             return {
                 "ok": True,
-                "cursor": 150.0,
+                "cursor": 200 + len(fetched_after),
                 "transcript_events": [],
                 "event_cursor": event_after,
                 "active_task_count": 0,
@@ -404,19 +288,20 @@ def test_tui_keeps_distinct_background_replies_with_same_timestamp() -> None:
         def publish_task_progress_snapshot(self, *_args, **_kwargs):
             return False
 
-        def publish_background_response(self, text, *, thread_id=""):
+        def publish_background_response(self, text, *, thread_id="", message_id=""):
             del thread_id
             published.append(text)
 
-    seen: set[tuple[float, str]] = set()
+    seen: set[tuple[str, str]] = set()
+    runtime = _Runtime()
     assert _consume_background_notices(
-        _Agent(), "session-same-time", _Runtime(), [None], seen
+        _Agent(), "session-same-time", runtime, [None], seen
     )
     assert _consume_background_notices(
-        _Agent(), "session-same-time", _Runtime(), [None], seen
+        _Agent(), "session-same-time", runtime, [None], seen
     )
 
-    assert fetched_after == [0.0, 150.0]
+    assert fetched_after == [0, 201]
     assert published == [
         "工具绑定暂时失败。",
         "任务完成，以下是最终交付。",
@@ -921,7 +806,7 @@ def test_tui_notice_loop_consumes_background_transcript_once() -> None:
             )
             return {
                 "ok": True,
-                "cursor": 0.0,
+                "cursor": 0,
                 "notices": [],
                 "transcript_events": page["events"],
                 "event_cursor": page["cursor"],
@@ -1394,23 +1279,7 @@ def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
             "now": 10.0,
         }
     )
-    notices_dir = store_root / "notices"
-    notices_dir.mkdir(parents=True)
-    (notices_dir / f"{thread.thread_id}.notices.jsonl").write_text(
-        json.dumps(
-            {
-                "schema_version": "background_notice.v2",
-                "notice_id": "notice-cold-final",
-                "thread_id": thread.thread_id,
-                "created_at": 20.0,
-                "display_kind": "assistant_response",
-                "content": "冷 owner 的最终回复仍然可见。",
-            },
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    message = _append_background_message(store, thread, "冷 owner 的最终回复仍然可见。")
     store.goals_dir.rmdir()
 
     monkeypatch.setattr(
@@ -1434,7 +1303,7 @@ def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
     assert [row["content"] for row in snapshot["notices"]] == [
         "冷 owner 的最终回复仍然可见。"
     ]
-    assert snapshot["cursor"] == 20.0
+    assert snapshot["cursor"] == store.message_byte_offset_after(thread.thread_id, message.message_id)
     assert not store.goals_dir.exists()
 
 
@@ -1443,8 +1312,8 @@ def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:
     from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 
     runtime = TuiRuntime("session-notices")
-    runtime.publish_background_response("第一条", thread_id="thread-1")
-    runtime.publish_background_response("第二条", thread_id="thread-1")
+    runtime.publish_background_response("第一条", thread_id="thread-1", message_id="msg-1")
+    runtime.publish_background_response("第二条", thread_id="thread-1", message_id="msg-2")
 
     snapshot = runtime.store.snapshot()
     notices = [block for block in snapshot.stable_blocks if block.role == "assistant"]
@@ -1598,6 +1467,7 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
         "done",
         "done",
     ]
+    assert runtime.needs_periodic_refresh() is True
     assert runtime.needs_periodic_refresh() is False
     assert runtime.publish_task_progress_snapshot(None) is False
     assert runtime.publish_task_progress_snapshot([]) is True

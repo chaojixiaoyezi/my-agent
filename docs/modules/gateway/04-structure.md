@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## R185 后台正文与恢复快照交接
+
+- `ConversationStore.message_page_after_offset_report` 从完整 JSONL 行后的字节位置顺序读一页，不回扫旧前缀；
+  `message_stream.read_background_response_page` 只投影同 thread 已提交且公开的后台 final，不写新存储。
+- `/client/history.message_cursor` 是实际读到的最后一条消息之后的位置，不能取稍后的文件大小或当前时间。
+  `/client/notices.after/cursor` 使用该整数位置；过程事件仍有独立 `event_after/event_cursor`，不能混用。
+- TUI 在历史恢复后接续读取，前后台 final 共用 `history:thread_id:message_id:assistant`，不靠正文或时间去重。
+  未发布成功不确认游标；游标倒退/非完整行/损坏显式失败并沿用既有读取退避，不生成空历史假成功。
+- 旧 notices 只保留为历史现场，不再接入新的消息主链；匹配版本 Gateway/TUI 一起升级。页面之外的历史读取和
+  原生过程完整归档仍为独立 P1，不能宣称这些旧数据已经恢复。
+
 ## R184 执行身份与用户目录分离
 
 Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆盖为工具 cwd。任务晋升仅登记运行身份，
@@ -27,9 +38,8 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
   `gateway_request`、状态是 `done/failed/interrupted`、task_id 非空且 task_path 为绝对路径时返回
   `task_ref`；普通聊天、Memory、当前占位请求、标题、摘要和
   模型回复都不能生成该引用。discover/scroll/browse 使用同一投影函数，避免切换检索模式丢路径。
-- `task_ref` 只帮助模型定位历史工作，不是写授权。真正续作仍由当前 turn 的工具参数进入统一 write boundary，
-  再按同 thread canonical task path 执行 R155 的精确 rebind；owner 墙、冲突 active executor 和多路径歧义
-  继续 fail closed。
+- `task_ref` 只帮助模型定位历史工作，不是写授权。R184 已删除按业务目录重新绑定任务；工具实际参数保留，
+  文件读写只认 canonical owner 边界和结构化安全策略，不因属于另一个 task 拦截。
 - 历史任务定位有两层有界入口：Gateway 会把同 owner/thread 最近四个 completed canonical task-path 作为
   动态尾部候选，帮助模型直接识别最近 A/B；更旧或候选不足时仍走按需工具发现。候选按 path 去重，排除
   当前 request/task、detached、缺失目录和 owner 外路径，只携带 exact id/path/status 与短目标预览；它既不

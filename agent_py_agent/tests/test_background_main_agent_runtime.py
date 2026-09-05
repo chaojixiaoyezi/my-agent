@@ -2091,10 +2091,12 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     sent = channels.adapter("internal").sent_messages
     assert sent[0].target == "thread-1"
     assert "后台主代理已检查任务树" in sent[0].content
-    notice_path = store.root / "notices" / f"{thread.thread_id}.notices.jsonl"
-    notice = json.loads(notice_path.read_text(encoding="utf-8").splitlines()[-1])
-    assert notice["reason"] == "scheduled_progress_report"
-    assert notice["content"] == reports[0].response
+    from agent_py_agent.agent.conversation.message_stream import read_background_response_page
+
+    rows, cursor, ok = read_background_response_page(store, thread.thread_id)
+    assert ok and cursor > 0
+    assert rows[-1]["content"] == reports[0].response
+    assert not (store.root / "notices").exists()
 
 
 def test_thread_goal_turn_with_no_tool_calls_stops_auto_continuation(tmp_path) -> None:

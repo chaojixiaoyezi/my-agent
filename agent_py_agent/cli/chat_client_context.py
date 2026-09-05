@@ -235,22 +235,21 @@ class GatewayChatClientAgent:
             "load_errors": [{"error_code": "GATEWAY_UNAVAILABLE"}],
         }
 
-    # LLM: S-BG1 notices and the typed active-task count share one lightweight
-    # HTTP snapshot; transport failure returns no activity claim so the caller
-    # preserves its last projection instead of guessing from prose.
-    # 函数用途: 拉取当前会话后台任务数量，以及 after 游标之后的后台完成通知。
+    # LLM: Canonical message byte offsets and the independent process-event cursor share one
+    # authenticated HTTP snapshot; transport failure leaves both display projections unchanged.
+    # 函数用途: 拉取当前会话活动与实际已读消息位置之后的后台回复，不把时间戳当消息游标。
     def request_background_notices(
         self,
         session_id: str,
         *,
-        after: float,
+        after: int,
         event_after: int = 0,
     ) -> dict[str, object]:
         # 后台状态只是易失展示；2 秒仍无响应就交给 TUI 退避，不能让每个窗口长期占住连接。
         _status, body = self.post_gateway_json(
             "/client/notices",
             {
-                "after": max(0.0, float(after or 0.0)),
+                "after": max(0, int(after or 0)),
                 "event_after": max(0, int(event_after or 0)),
                 "client_capabilities": {"tool_approval": True},
                 "user_id": "local-agent",

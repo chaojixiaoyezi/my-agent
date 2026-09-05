@@ -31,7 +31,7 @@ class GatewayClientMemoryResult:
         }
 
 
-# LLM: History result 将问答预览与完整显示事件分开；内部注入不得透传，显示事件不能回灌模型。
+# LLM: History result 分开保存预览、显示与最后完整消息字节游标；游标只交接实时读取，不回灌模型。
 # 类用途: 表示同 owner/channel/conversation 的预览、正文恢复和读取错误。
 @dataclass(frozen=True)
 class GatewayClientHistoryResult:
@@ -40,6 +40,7 @@ class GatewayClientHistoryResult:
     turns: tuple[dict[str, str], ...] = ()
     load_errors: tuple[dict[str, object], ...] = ()
     display_events: tuple[dict[str, object], ...] = ()
+    message_cursor: int = 0
 
     # LLM: HTTP 投影区分预览和 display-only 事件，不输出内部 envelope、服务端路径或异常原文。
     # 函数用途: 转换成各前端共用的公开历史合同。
@@ -50,6 +51,7 @@ class GatewayClientHistoryResult:
             "turns": [dict(item) for item in self.turns],
             "load_errors": [dict(item) for item in self.load_errors],
             "display_events": [dict(item) for item in self.display_events],
+            "message_cursor": self.message_cursor,
         }
 
 
@@ -93,8 +95,8 @@ def execute_gateway_client_memory(
     return GatewayClientMemoryResult(normalized, True, records=records)
 
 
-# LLM: 历史读取先解析 authenticated owner/thread；max_turns 只限制读取/问答预览，显示层完整消费所读 rows，不再次裁组。
-# 函数用途: 返回当前会话预览和类型正文，避免后台过程回复挤掉仍在读取窗口里的用户输入。
+# LLM: 先解析 authenticated owner/thread；max_turns 限制读取/预览，实时游标止于实际读到的末行，不以稍后的文件大小跳过消息。
+# 函数用途: 返回当前会话预览、完整可读窗口及后台流接续位置，不让恢复期间的新回复丢失。
 def read_gateway_client_history(
     base_agent: object,
     *,
@@ -125,6 +127,7 @@ def read_gateway_client_history(
             thread_id,
             limit=max(16, limit * 4),
         )
+        message_cursor = store.message_byte_offset_after(thread_id, rows[-1].message_id) if rows else 0
     except Exception as exc:  # noqa: BLE001 同上
         return GatewayClientHistoryResult(
             False,
@@ -138,6 +141,7 @@ def read_gateway_client_history(
         turns=_paired_history_turns(rows, max_turns=limit),
         load_errors=safe_errors,
         display_events=conversation_history_display_events(rows),
+        message_cursor=message_cursor,
     )
 
 

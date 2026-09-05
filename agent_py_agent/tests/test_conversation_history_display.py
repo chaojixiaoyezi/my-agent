@@ -30,7 +30,7 @@ def _rows(*, failed: bool = False) -> list[SimpleNamespace]:
             {"type": "text", "text": "这是完整汇报。"},
         ]},
     ]
-    return [
+    rows = [
         SimpleNamespace(role="user", content="帮我检查项目", metadata={"gateway_request_id": "req-1"}),
         SimpleNamespace(role="assistant", content="我先检查。", metadata={"gateway_request_id": "req-1", "assistant_part_id": "commentary:1"}),
         SimpleNamespace(role="assistant", content="这是完整汇报。", metadata={
@@ -38,6 +38,10 @@ def _rows(*, failed: bool = False) -> list[SimpleNamespace]:
             "canonical_native_messages": canonical_native_messages_envelope(native),
         }),
     ]
+    for index, row in enumerate(rows):
+        row.thread_id = "thread-1"
+        row.message_id = f"msg-source-{index}"
+    return rows
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -150,7 +154,7 @@ def test_canonical_final_is_authoritative_when_provider_text_was_projected():
 def test_background_commentary_does_not_count_as_twenty_extra_user_turns():
     rows = _rows()
     rows.extend(SimpleNamespace(
-        role="assistant", content=f"后台过程 {index}", message_id=f"msg-{index}",
+        role="assistant", content=f"后台过程 {index}", message_id=f"msg-{index}", thread_id="thread-1",
         metadata={"assistant_part_id": f"commentary:{index}"},
     ) for index in range(32))
     events = conversation_history_display_events(rows)

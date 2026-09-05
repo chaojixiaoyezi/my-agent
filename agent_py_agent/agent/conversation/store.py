@@ -1057,6 +1057,40 @@ class ConversationMessageStore(ConversationThreadStore):
         selected = entries if limit <= 0 else entries[-limit:]
         return selected, [*report.load_errors, *parse_errors]
 
+    # LLM: 显示流只接受同 thread JSONL 完整行后的字节游标；不回扫前缀，不改模型历史，损坏/截断不能假装空页。
+    # 函数用途: 为恢复后的实时显示顺序读取一页 canonical 消息，并返回下一条应读取的位置。
+    def message_page_after_offset_report(
+        self, thread_id: str, *, after: int = 0, limit: int = 100,
+    ) -> tuple[list[MessageLogEntry], int, list[dict[str, Any]]]:
+        path = self._message_path(thread_id)
+        cursor = max(0, int(after))
+        if not path.exists() and cursor == 0:
+            return [], cursor, []
+        try:
+            entries: list[MessageLogEntry] = []
+            with path.open("rb") as handle:
+                size = handle.seek(0, 2)
+                if cursor > size:
+                    raise DataCorruptionError("message cursor exceeds canonical transcript")
+                if cursor:
+                    handle.seek(cursor - 1)
+                    if handle.read(1) != b"\n":
+                        raise DataCorruptionError("message cursor is not a complete row boundary")
+                handle.seek(cursor)
+                while len(entries) < max(1, min(1000, int(limit))):
+                    line = handle.readline()
+                    if not line or not line.endswith(b"\n"):
+                        break
+                    raw = json.loads(line.decode("utf-8"))
+                    parsed, errors = _message_entries([raw])
+                    if errors or len(parsed) != 1 or parsed[0].thread_id != thread_id:
+                        raise DataCorruptionError("invalid canonical message row")
+                    entries.extend(parsed)
+                    cursor = handle.tell()
+            return entries, cursor, []
+        except Exception as exc:
+            return [], max(0, int(after)), [_jsonl_error(exc, "conversation.messages.page", path=path)]
+
     # LLM: Memory Curator 只能从精确 message_id 后顺序读取有界批次；不得每次全量重放 transcript。
     # 函数用途: 从 append-only ConversationStore 游标后流式读取至多 limit 条消息和结构化错误。
     def messages_after_report(

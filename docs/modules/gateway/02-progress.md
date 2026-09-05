@@ -1,5 +1,14 @@
 # Gateway Progress
 
+## R185 后台消息单一来源（已部署，实时通过、恢复排序待修）
+
+对照 会话运行时 `tui/src/app/thread_events.rs` 的快照重基与 终端交互 `assistant/sessionHistory.ts` 的消息游标，
+删除后台 report 的 notices 正文副本。原 `/client/notices` 改投影 canonical message 字节页，恢复 history 带
+实际末行位置；冷 owner 不加载 Agent，也能只读相同消息源。所有最终显示都复用原 thread/message ID，
+相同文本不合并，模型上下文和 Compact 不写入。部署必须同步更换 Gateway/TUI；旧 notices 原处保留。
+363 focused / 2 原有 xfailed 与严格检查通过。`.10` B 新后台 final 自动显示且 Working 收起；再恢复后
+过程环从 0 重放到 final 后方，不能算完整通过。继续将过程快照和实时增量共同重基，不能跳过未知过程。
+
 
 ## R184 文件目录与运行记录分离（focused 与原会话真 TUI 通过）
 

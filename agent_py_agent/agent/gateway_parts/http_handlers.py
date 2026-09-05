@@ -37,6 +37,7 @@ from ..conversation.control_commands import (
     parse_conversation_control,
     parse_conversation_task_command,
 )
+from ..conversation.message_stream import read_background_response_page
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .client_service import execute_gateway_client_memory, read_gateway_client_history
 from .control_operation_service import (
@@ -982,13 +983,13 @@ def handle_control_status(handler, server) -> None:
     handler._send_json(200, gateway_control_operation_status_payload(receipt))
 
 
-# LLM: Notice/activity reads reuse trusted source and the resolved owner/thread;
-# clients cannot select another thread id or derive activity from message text.
-# 函数用途: 接收薄客户端的会话后台状态查询并返回安全的计数和通知投影。
+# LLM: Trusted owner/thread scope selects the canonical message page; after is a complete-row byte offset,
+# not a clock timestamp. Activity and the independent process-event cursor cannot authorize work.
+# 函数用途: 接收薄客户端后台查询，把已提交正文、过程事件和活动状态投影到同一界面。
 def handle_client_notices(handler, server) -> None:
     """S-BG1: 返回当前会话的进行中任务数和后台主代理轮完成通知。
 
-    body: {"conversation_id": ..., "after": 通知游标, "event_after": 过程事件游标}
+    body: {"conversation_id": ..., "after": canonical 消息字节位置, "event_after": 过程事件游标}
     响应同时返回 notices/cursor 与 transcript_events/event_cursor 两条独立增量流。
     """
     if require_trusted_source(handler):
@@ -1005,11 +1006,7 @@ def handle_client_notices(handler, server) -> None:
     if not _http_conversation_id(body):
         handler._send_json(400, {"error": "conversation_id is required"})
         return
-    after = 0.0
-    try:
-        after = float(body.get("after") or 0.0)
-    except (TypeError, ValueError):
-        after = 0.0
+    after = _safe_request_int(body.get("after"))
     try:
         event_after = max(0, int(body.get("event_after") or 0))
     except (TypeError, ValueError):
@@ -1210,7 +1207,7 @@ def read_gateway_client_notices(
     agent: object,
     *,
     scope: GatewayControlScope,
-    after: float,
+    after: int,
     event_after: int = 0,
     interactive_approvals: bool = False,
 ) -> dict[str, object]:
@@ -1279,8 +1276,7 @@ def read_gateway_client_notices(
     activity = conversation_agent_activity(owner_agent, store, thread_id)
     activity_payload = activity.to_dict()
     active_task_count = activity.active_task_count
-    notices_path = Path(store.root) / "notices" / f"{thread_id}.notices.jsonl"
-    notices, cursor, notices_ok = _read_background_notice_rows(notices_path, after)
+    notices, cursor, notices_ok = read_background_response_page(store, thread_id, after=after)
     if not notices_ok:
         return {
             "ok": False,
@@ -1316,7 +1312,7 @@ def _read_cold_owner_notice_projection(
     base_agent: object,
     *,
     scope: GatewayControlScope,
-    after: float,
+    after: int,
     event_after: int,
 ) -> dict[str, object]:
     from ..conversation.store import ConversationStore
@@ -1367,8 +1363,7 @@ def _read_cold_owner_notice_projection(
 
     _updated_at, _root_key, store, thread = max(candidates, key=lambda item: item[:2])
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
-    notices_path = Path(store.root) / "notices" / f"{thread_id}.notices.jsonl"
-    notices, cursor, notices_ok = _read_background_notice_rows(notices_path, after)
+    notices, cursor, notices_ok = read_background_response_page(store, thread_id, after=after)
     if not notices_ok:
         payload["ok"] = False
         payload["error"] = "notices read failed"
@@ -1382,7 +1377,7 @@ def _read_cold_owner_notice_projection(
 # infer missing approval/activity fields. This helper creates no task state.
 # 函数用途: 构造无线程或读取失败时的空后台快照。
 def _empty_gateway_notice_response(
-    after: float,
+    after: int,
     event_after: int,
     *,
     ok: bool = False,
@@ -1440,41 +1435,6 @@ def _gateway_agent_permission_requests(
         return []
 
 
-# LLM: Notice files are append-only delivery projections. The inclusive time
-# cursor deliberately replays rows at the boundary because separate committed
-# notices may share one scheduler timestamp; the client deduplicates by typed
-# notice_id (or a legacy content fingerprint). This reader cannot affect activity
-# or transcript event cursors, and malformed rows are skipped without guessing prose.
-# 函数用途: 读取通知文件中 after 之后的合法行，并返回新游标和文件读取状态。
-def _read_background_notice_rows(
-    notices_path: Path,
-    after: float,
-) -> tuple[list[dict[str, object]], float, bool]:
-    if not notices_path.exists():
-        return [], after, True
-    notices: list[dict[str, object]] = []
-    cursor = after
-    try:
-        lines = notices_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return [], after, False
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        try:
-            created = float(row.get("created_at") or 0.0)
-        except (TypeError, ValueError):
-            created = 0.0
-        if created >= after:
-            notices.append(row)
-            cursor = max(cursor, created)
-    return notices, cursor, True
 
 
 def handle_client_memory(handler, server) -> None:

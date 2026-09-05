@@ -75,7 +75,7 @@ def test_background_terminal_transition_requests_exactly_one_followup_frame() ->
 def test_background_final_response_requests_exactly_one_followup_frame() -> None:
     runtime = TuiRuntime("background-final-frame")
 
-    runtime.publish_background_response("最终回复", thread_id="thread-final")
+    runtime.publish_background_response("最终回复", thread_id="thread-final", message_id="msg-final")
 
     assert runtime.needs_periodic_refresh() is True
     assert runtime.needs_periodic_refresh() is False

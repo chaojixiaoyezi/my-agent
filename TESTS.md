@@ -1,5 +1,16 @@
 # TESTS
 
+## R185 canonical 后台正文读取
+
+- `test_conversation_message_stream.py` 使用真实临时 ConversationStore 和 TUI reducer，覆盖消息 ID 幂等、
+  相同正文/相同时间但不同 ID、JSONL 有界分页、恢复读取后并发追加、完整行边界、半行续读、损坏不推进游标、
+  不回扫历史前缀、发布失败重试、native final 与实时 final 共用身份。测试不创建任务、不给模型注入内容。
+- 原 notices 写入测试改验 canonical commit；进度仍从 `agent_activity` 读取，不在回复里复存一份 Todo。
+  相邻 focused 包括 background runtime/wake、Gateway client/history、CLI resume/preflight 和刷新线程。
+- 真 TUI 复用 `.10` 单 Gateway 的两路原长 session，先恢复检查旧 final 不追加，再用自然中文续作和多子代理
+  产生新的后台 final，退出/恢复后仍只显示一次。模型调用、缓存、Compact 与副作用分别记账；历史分页和完整
+  过程归档不是本切片的通过项。升级需同步更换 Gateway 和 TUI，旧时间戳游标不做猜测式兼容。
+
 ## R184 家目录权限与软整理
 
 新增 `test_owner_home_workspace.py` 验证 main/child 在同 home 的两个历史目录之间实际读写（绝对、相对、`..`）、
