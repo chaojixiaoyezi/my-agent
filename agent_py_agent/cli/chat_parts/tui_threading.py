@@ -1,4 +1,5 @@
 # LLM: 本模块只启动 TUI worker 与轻量动画刷新线程；业务事件仍由 worker/runtime 发布，刷新线程不得改 reducer 状态。
+# 过程轮询按流身份与序号一起确认；换进程只重基易失游标，不重置 canonical 消息位置。
 # 模块用途: 组装后台任务参数，并以 终端交互 接近的帧率驱动 spinner/临时提示重绘。
 
 from __future__ import annotations
@@ -195,7 +196,8 @@ def _consume_background_notices(
 
 
 # LLM: Thin clients consume the authenticated canonical message page plus an independent
-# process-event cursor; neither cursor can rewind, and only typed activity controls poll cadence.
+# process-event cursor paired with its stream identity. Only a new stream can reset the event
+# sequence; canonical message offsets never rewind. Typed activity controls poll cadence.
 # Invalid responses enter the existing exponential backoff without clearing display state.
 # 函数用途: 从单 Gateway 拉取活动、过程事件和最终回复，并记录下一轮是否需要秒级刷新。
 def _consume_gateway_background_snapshot(
@@ -216,6 +218,7 @@ def _consume_gateway_background_snapshot(
             session_id,
             after=message_after,
             event_after=max(0, int(event_cursor[0] or 0)),
+            event_stream_id=str(getattr(tui_runtime, "background_event_stream_id", "")),
         )
     except Exception:
         return False
@@ -244,6 +247,7 @@ def _consume_gateway_background_snapshot(
         payload.get("transcript_events"),
         payload.get("event_cursor"),
         event_cursor,
+        stream_id=payload.get("event_stream_id"),
     )
     if not transcript_ok:
         return False
@@ -279,7 +283,7 @@ def _consume_gateway_background_snapshot(
 
 # LLM: Embedded/local mode reads the same agent-owned projection and event ring without HTTP.
 # ConversationStore is the only message source; the typed active count affects only the
-# next display delay, while the event ring stays display-only.
+# next display delay, while the event ring stays display-only and uses the same stream handshake.
 # 函数用途: 在本地完整 Agent 模式消费后台活动、过程事件和最终通知，并更新空闲刷新节奏。
 def _consume_local_background_snapshot(
     agent: object,
@@ -327,12 +331,14 @@ def _consume_local_background_snapshot(
         agent,
         thread_id=thread_id,
         after=max(0, int(event_cursor[0] or 0)),
+        stream_id=str(getattr(tui_runtime, "background_event_stream_id", "")),
     )
     transcript_ok, transcript_changed = _consume_background_transcript_projection(
         tui_runtime,
         transcript.get("events"),
         transcript.get("cursor"),
         event_cursor,
+        stream_id=transcript.get("stream_id"),
     )
     if not transcript_ok:
         return False
@@ -448,21 +454,31 @@ def _sync_local_agent_permissions(
     return bool(syncer(rows, decision_writer=write_decision))
 
 
-# LLM: The TUI cursor advances only through the typed background event page.
-# Invalid transport shape triggers the existing poll backoff; event prose is
-# never parsed, and the runtime remains the only sequencer/reducer owner.
-# 函数用途: 消费一页后台过程事件并推进独立整数游标，返回协议是否有效及画面是否变化。
+# LLM: A stream change rebases only the volatile cursor after successful publication; existing
+# blocks, input receipts, canonical messages and task state remain untouched. Invalid shape or
+# same-stream cursor regression uses the existing backoff, never content/time-based guessing.
+# 函数用途: 消费带身份的后台过程页；同流递增、换流重新接续，发布失败不确认新游标。
 def _consume_background_transcript_projection(
     tui_runtime: object,
     events: object,
     cursor_value: object,
     cursor_ref: list[int],
+    *,
+    stream_id: object,
 ) -> tuple[bool, bool]:
-    if not isinstance(events, list):
+    if (
+        not isinstance(events, list)
+        or not isinstance(stream_id, str)
+        or type(cursor_value) is not int
+        or cursor_value < 0
+        or (events and not stream_id)
+    ):
         return False, False
-    try:
-        response_cursor = max(0, int(cursor_value or 0))
-    except (TypeError, ValueError):
+    response_cursor = cursor_value
+    previous_stream = str(getattr(tui_runtime, "background_event_stream_id", ""))
+    if stream_id == previous_stream and response_cursor < cursor_ref[0]:
+        return False, False
+    if not stream_id and (previous_stream or response_cursor != cursor_ref[0]):
         return False, False
     publisher = getattr(tui_runtime, "publish_background_transcript_events", None)
     if events and not callable(publisher):
@@ -471,7 +487,10 @@ def _consume_background_transcript_projection(
         consumed_cursor = int(publisher(events) or 0) if callable(publisher) else 0
     except (TypeError, ValueError):
         return False, False
-    cursor_ref[0] = max(cursor_ref[0], response_cursor, consumed_cursor)
+    if consumed_cursor > response_cursor:
+        return False, False
+    cursor_ref[0] = response_cursor
+    tui_runtime.background_event_stream_id = stream_id
     return True, bool(events)
 
 

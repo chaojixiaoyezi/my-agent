@@ -1,4 +1,5 @@
 # LLM: 本模块是 chat worker/Gateway structured rows 到 TuiEvent 的唯一 adapter；它不渲染、不执行工具，也不把 legacy 文案当状态。
+# 后台流身份仅管理展示续接，换流不得清空本页面历史、待输入回执或已恢复工作片。
 # 模块用途: 为 session、输入队列、回合、流式助手、思考和工具生命周期分配稳定 block id 并发布有序 typed events。
 
 from __future__ import annotations
@@ -1212,7 +1213,7 @@ class TuiRuntime(
     TuiPermissionRuntimeMixin,
 ):
     # LLM: session_id 固定一个 UI 生命周期；store 可注入用于 replay/tests，但不能在运行中替换。
-    # 函数用途: 创建 TUI runtime、单调 sequencer 和本页面已完整恢复的工作片集合。
+    # 函数用途: 创建 TUI runtime、单调 sequencer、后台流身份和本页面已完整恢复的工作片集合。
     def __init__(self, session_id: str, *, store: TuiStateStore | None = None) -> None:
         normalized = str(session_id or "default").strip() or "default"
         self.session_id = normalized
@@ -1227,6 +1228,7 @@ class TuiRuntime(
         self._published_control_commands: set[str] = set()
         self._console_index = 0
         self.background_message_cursor = 0
+        self.background_event_stream_id = ""
         self._recovered_background_turns: set[str] = set()
         self._notice_text = ""
         self._notice_kind = ""

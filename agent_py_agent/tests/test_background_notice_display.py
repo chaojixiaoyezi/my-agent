@@ -128,7 +128,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
     fetched: list[dict[str, object]] = []
 
     class _Agent:
-        def request_background_notices(self, session_id, *, after, event_after):
+        def request_background_notices(self, session_id, *, after, event_after, event_stream_id):
             fetched.append(
                 {
                     "session_id": session_id,
@@ -141,6 +141,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
                 "cursor": 200,
                 "transcript_events": [],
                 "event_cursor": event_after,
+                "event_stream_id": event_stream_id,
                 "active_task_count": 2,
                 "agent_activity": {
                     "schema_version": "conversation_agent_activity.v5",
@@ -261,7 +262,7 @@ def test_tui_keeps_distinct_background_replies_with_same_timestamp() -> None:
     fetched_after: list[int] = []
 
     class _Agent:
-        def request_background_notices(self, _session_id, *, after, event_after):
+        def request_background_notices(self, _session_id, *, after, event_after, event_stream_id):
             fetched_after.append(after)
             rows = calls.pop(0) if calls else []
             return {
@@ -269,6 +270,7 @@ def test_tui_keeps_distinct_background_replies_with_same_timestamp() -> None:
                 "cursor": 200 + len(fetched_after),
                 "transcript_events": [],
                 "event_cursor": event_after,
+                "event_stream_id": event_stream_id,
                 "active_task_count": 0,
                 "agent_activity": {
                     "active_task_count": 0,
@@ -313,13 +315,14 @@ def test_tui_notice_transport_failure_preserves_projection_and_reports_failure()
     from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
 
     class _Agent:
-        def request_background_notices(self, session_id, *, after, event_after):
+        def request_background_notices(self, session_id, *, after, event_after, event_stream_id):
             return {
                 "ok": False,
                 "notices": [],
                 "cursor": after,
                 "transcript_events": [],
                 "event_cursor": event_after,
+                "event_stream_id": event_stream_id,
                 "active_task_count": 0,
             }
 
@@ -682,6 +685,106 @@ def test_child_transcript_publishes_consumed_input_only_after_provider_acceptanc
     }
 
 
+def test_background_reconnect_rebases_only_process_cursor(tmp_path: Path) -> None:
+    """真实消息库与 reducer 跨 Agent 重建后接新流，旧正文和消息字节游标都保留。"""
+    from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
+    from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
+    from agent_py_agent.agent.gateway_parts.http_handlers import read_gateway_client_notices
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    store, thread = _message_store(tmp_path)
+    final = _append_background_message(store, thread, "已保存的最终汇报")
+    source = [SimpleNamespace(conversation_store=store)]
+    sink = BackgroundTranscriptSink(source[0], thread_id=thread.thread_id, task_id="task-a")
+    for index in range(5):
+        sink.write_thinking(f"旧进程公开块 {index}")
+
+    class Client:
+        def request_background_notices(self, _session, *, after, event_after, event_stream_id):
+            return read_gateway_client_notices(
+                source[0], scope=GatewayControlScope("local-agent", "chat", "session-1"),
+                after=after, event_after=event_after, event_stream_id=event_stream_id,
+            )
+
+    runtime, cursor, seen = TuiRuntime("session-1"), [0], set()
+    assert _consume_background_notices(Client(), "session-1", runtime, [None], seen, cursor)
+    old_stream = runtime.background_event_stream_id
+    old_blocks = tuple(runtime.store.snapshot().stable_blocks)
+    message_after = store.message_byte_offset_after(thread.thread_id, final.message_id)
+    assert cursor == [10] and runtime.background_message_cursor == message_after
+    before = store._message_path(thread.thread_id).read_bytes()
+
+    source[0] = SimpleNamespace(conversation_store=store)
+    # 新 Agent 还没产生事件的第一次读取也要换代，不能沿用上一进程的大游标。
+    assert _consume_background_notices(Client(), "session-1", runtime, [None], seen, cursor)
+    assert cursor == [0] and runtime.background_event_stream_id != old_stream
+    assert tuple(runtime.store.snapshot().stable_blocks) == old_blocks
+    restarted = BackgroundTranscriptSink(source[0], thread_id=thread.thread_id, task_id="task-a")
+    restarted.write_thinking("重连后的公开块")
+    assert _consume_background_notices(Client(), "session-1", runtime, [None], seen, cursor)
+    blocks = tuple(runtime.store.snapshot().stable_blocks)
+    assert blocks[:len(old_blocks)] == old_blocks
+    assert blocks[-1].text == "重连后的公开块" and cursor == [2]
+    assert runtime.background_message_cursor == message_after
+    assert store._message_path(thread.thread_id).read_bytes() == before
+    assert _consume_background_notices(Client(), "session-1", runtime, [None], seen, cursor)
+    assert tuple(runtime.store.snapshot().stable_blocks) == blocks
+
+
+def test_background_new_stream_replays_even_when_sequence_is_already_larger():
+    """换代按身份判定：新进程可能已经产生更多事件，不能靠数值倒退检测重启。"""
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BackgroundTranscriptSink,
+        read_background_transcript_events,
+    )
+
+    old_agent, new_agent = SimpleNamespace(), SimpleNamespace()
+    old = BackgroundTranscriptSink(old_agent, thread_id="thread-a", task_id="task-a")
+    old.write_thinking("旧消息")
+    old_page = read_background_transcript_events(old_agent, thread_id="thread-a", after=0)
+    new = BackgroundTranscriptSink(new_agent, thread_id="thread-a", task_id="task-a")
+    for index in range(4):
+        new.write_thinking(f"新消息 {index}")
+    page = read_background_transcript_events(
+        new_agent, thread_id="thread-a", after=old_page["cursor"], stream_id=old_page["stream_id"],
+    )
+    assert len(page["events"]) == 8
+    assert [row["payload"]["text"] for row in page["events"] if row["kind"] == "thinking_completed"] == [
+        f"新消息 {index}" for index in range(4)
+    ]
+    assert page["stream_id"] != old_page["stream_id"]
+
+
+def test_background_stream_ack_requires_valid_page_and_successful_publish():
+    """协议损坏、同流倒退或发布失败都不确认新身份；重试仍能消费同一页。"""
+    from agent_py_agent.cli.chat_parts.tui_threading import (
+        _consume_background_transcript_projection,
+    )
+
+    runtime = SimpleNamespace(background_event_stream_id="old")
+    cursor = [9]
+    for events, seq, stream in [(None, 1, "new"), ([], -1, "new"), ([], 1, None), ([], 1, "old")]:
+        assert _consume_background_transcript_projection(
+            runtime, events, seq, cursor, stream_id=stream,
+        ) == (False, False)
+        assert runtime.background_event_stream_id == "old" and cursor == [9]
+
+    def reject(_events):
+        raise ValueError("publish failed")
+
+    runtime.publish_background_transcript_events = reject
+    assert _consume_background_transcript_projection(
+        runtime, [{"seq": 1}], 1, cursor, stream_id="new",
+    ) == (False, False)
+    assert runtime.background_event_stream_id == "old" and cursor == [9]
+    runtime.publish_background_transcript_events = lambda _events: 1
+    assert _consume_background_transcript_projection(
+        runtime, [{"seq": 1}], 1, cursor, stream_id="new",
+    ) == (True, True)
+    assert runtime.background_event_stream_id == "new" and cursor == [1]
+
+
 def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) -> None:
     """独立 event_after 游标不会与最终通知 created_at 游标互相覆盖。"""
     from agent_py_agent.agent.conversation.background_transcript import (
@@ -747,6 +850,7 @@ def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) 
         scope=GatewayControlScope("local-agent", "chat", "session-rich-cursor"),
         after=0.0,
         event_after=first["event_cursor"],
+        event_stream_id=first["event_stream_id"],
     )
     assert second["transcript_events"] == []
     assert second["event_cursor"] == 2
@@ -796,6 +900,7 @@ def test_tui_notice_loop_consumes_background_transcript_once() -> None:
             *,
             after,
             event_after,
+            event_stream_id,
         ):
             del session_id, after
             fetched.append(event_after)
@@ -803,6 +908,7 @@ def test_tui_notice_loop_consumes_background_transcript_once() -> None:
                 source,
                 thread_id="thread-http-rich",
                 after=event_after,
+                stream_id=event_stream_id,
             )
             return {
                 "ok": True,
@@ -810,6 +916,7 @@ def test_tui_notice_loop_consumes_background_transcript_once() -> None:
                 "notices": [],
                 "transcript_events": page["events"],
                 "event_cursor": page["cursor"],
+                "event_stream_id": page["stream_id"],
                 "active_task_count": 0,
                 "agent_activity": {
                     "active_task_count": 0,
@@ -884,6 +991,7 @@ def test_background_transcript_lru_eviction_keeps_cursor_forward(monkeypatch) ->
         agent,
         thread_id="thread-1",
         after=old_cursor,
+        stream_id=first_page["stream_id"],
     )
 
     assert len(resumed_page["events"]) == 1
@@ -1239,12 +1347,36 @@ def test_gateway_notice_cold_owner_does_not_materialize_agent(monkeypatch) -> No
         SimpleNamespace(),
         scope=GatewayControlScope("cold-user", "local", "cold-session"),
         after=0.0,
+        event_after=3000,
+        event_stream_id="old-process",
     )
 
     assert len(calls) == 1
     assert snapshot["ok"] is True
     assert snapshot["owner_state"] == "cold"
     assert snapshot["active_task_count"] == 0
+    assert snapshot["event_cursor"] == 3000
+    assert snapshot["event_stream_id"] == "old-process"
+    assert snapshot["transcript_events"] == []
+
+
+def test_thin_client_sends_process_identity_separate_from_message_offset():
+    from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
+
+    requests = []
+
+    def post(path, body, **kwargs):
+        requests.append((path, body, kwargs))
+        return 200, {"ok": True}
+
+    client = SimpleNamespace(post_gateway_json=post)
+    assert GatewayChatClientAgent.request_background_notices(
+        client, "session-a", after=234, event_after=900, event_stream_id="process-a",
+    ) == {"ok": True}
+    path, body, kwargs = requests[0]
+    assert path == "/client/notices" and kwargs == {"timeout": 2.0}
+    assert body["after"] == 234 and body["event_after"] == 900
+    assert body["event_stream_id"] == "process-a" and body["conversation_id"] == "session-a"
 
 
 def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(

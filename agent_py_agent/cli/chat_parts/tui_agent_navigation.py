@@ -3,6 +3,7 @@
 # LLM: This module owns only TUI selection, view stack, per-view display runtimes,
 # and event cursors. Canonical run status, messages, guidance, cancellation, and
 # authorization remain on Gateway/domain services and are never inferred here.
+# 结束页正文必须保留原 thread/message ID，不能以正文哈希或 legacy 文案创建身份。
 # 模块用途: 支持空输入时方向键选择 Goal/子代理、Enter 查看、Ctrl+G 返回，并缓存每个代理的独立展示页面。
 
 from __future__ import annotations
@@ -320,7 +321,7 @@ class TuiAgentNavigationState:
     # LLM: One authenticated detail payload updates only its exact run runtime.
     # The first non-empty delegated goal becomes the child page's user block;
     # a transient incomplete payload must not permanently suppress that prompt.
-    # 函数用途: 把 Gateway 子代理完整消息快照应用到对应页面并增量刷新正文。
+    # 函数用途: 把子代理消息快照应用到对应页面；正式回复用 canonical thread/message ID，发布后才确认。
     def apply_agent_view(self, run_id: str, payload: object) -> bool:
         view = _normalize_agent_view_projection(run_id, payload)
         if view is None:
@@ -356,13 +357,16 @@ class TuiAgentNavigationState:
         ):
             runtime.publish_background_response(
                 view.final_response,
-                thread_id=view.run_id,
+                thread_id=str(view.payload.get("thread_id") or ""),
+                message_id=view.final_response_key,
             )
         runtime.update_background_activity(
             0 if view.terminal else 1,
             _agent_view_background_activity(view),
         )
         with self._lock:
+            if view.final_response_key:
+                self._final_response_keys[view.run_id] = view.final_response_key
             self._event_cursors[view.run_id] = max(
                 self._event_cursors.get(view.run_id, 0),
                 _safe_int(view.payload.get("event_cursor")),
@@ -371,7 +375,8 @@ class TuiAgentNavigationState:
         return True
 
     # LLM: Registry mutation is kept under one lock so child rows, selection,
-    # final dedupe, and display runtime become visible as one UI projection.
+    # typed final identity, and display runtime become visible as one UI projection.
+    # Canonical final acknowledgement happens only after publication, not during registration.
     # 函数用途: 原子登记一次已校验的子代理详情，并返回渲染阶段所需的去重状态。
     def _register_agent_view(
         self,
@@ -394,8 +399,6 @@ class TuiAgentNavigationState:
                 and view.final_response_request_id
                 in self._typed_final_response_request_ids
             )
-            if view.final_response_key:
-                self._final_response_keys[view.run_id] = view.final_response_key
         return runtime, first_goal, prior_final_key, typed_final_already_visible
 
     # LLM: Internal active identity comes only from the view stack.
@@ -456,6 +459,7 @@ def _reconcile_parent_rows(
 
 # LLM: Gateway detail payloads cross an untrusted presentation boundary. Normalize
 # exact run identity and bounded row/event facts once before mutating navigation state.
+# A final without its canonical thread/message id is not guessed from prose or a legacy alias.
 # 函数用途: 校验并整理一份子代理详情响应，非法或串代理的数据直接拒绝。
 def _normalize_agent_view_projection(
     run_id: str,
@@ -477,9 +481,9 @@ def _normalize_agent_view_projection(
         payload.get("final_response_request_id"),
         selected,
     )
-    final_response_key = final_response_request_id or (
-        f"legacy:{final_response}" if final_response else ""
-    )
+    final_response_key = str(payload.get("final_response_message_id") or "").strip()
+    if not final_response_key or not str(payload.get("thread_id") or "").strip():
+        final_response = ""
     return _AgentViewProjection(
         run_id=selected,
         payload=payload,
@@ -654,8 +658,8 @@ def _typed_final_response_request_ids(value: object, run_id: str) -> set[str]:
 
 
 # LLM: The final-response fallback may join only an exact request identity in
-# the current child namespace. Invalid or legacy values remain empty and use
-# the existing text key solely to make repeated polling idempotent.
+# the current child namespace. Invalid values remain empty; the independent canonical
+# message ID still owns history identity, never a key derived from response prose.
 # 函数用途: 校验 Gateway 返回的最终回复回合标识确实属于当前子代理。
 def _final_response_request_id(value: object, run_id: str) -> str:
     request_id = str(value or "").strip()

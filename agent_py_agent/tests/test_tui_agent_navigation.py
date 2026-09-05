@@ -191,6 +191,8 @@ def test_back_reconciles_descendant_terminal_status_before_parent_poll() -> None
             "transcript_events": [],
             "event_cursor": 0,
             "final_response": "已停止。",
+            "thread_id": "thread-grandchild",
+            "final_response_message_id": "msg-grandchild-final",
         },
     )
 
@@ -386,6 +388,8 @@ def test_child_view_applies_live_events_todo_context_children_and_final() -> Non
         ],
         "event_cursor": 7,
         "final_response": "子代理已完成并提交结果。",
+        "thread_id": "thread-child-a",
+        "final_response_message_id": "msg-child-a-final",
     }
     navigation.active_runtime().set_notice(
         "这个子代理已经结束，当前页面只读；Ctrl+G 返回父代理",
@@ -476,6 +480,8 @@ def test_child_final_response_fallback_does_not_duplicate_typed_final_event() ->
         "transcript_events": [],
         "final_response": final_text,
         "final_response_request_id": request_id,
+        "thread_id": "thread-child-final",
+        "final_response_message_id": "msg-child-final",
     }
     assert navigation.apply_agent_view("child-final", followup) is True
     matches = [

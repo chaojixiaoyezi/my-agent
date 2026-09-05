@@ -1,5 +1,17 @@
 # STATUS
 
+## R189 重连流身份与子代理最终消息接线（focused 通过，待部署真 TUI）
+
+- BUG-118：过程页增加 owner Agent 实例级 stream ID；同流递增、换流从新事件接续，发布成功才确认。
+  冷 owner 回显旧游标而不初始化 Agent；canonical 消息位置、已有块与输入/审批状态不清空。
+- 相邻回归发现 BUG-119：子代理 final 的旧调用未传 R185 后必须提供的 message_id；现从原消息库携带
+  thread/message ID，去掉正文生成 legacy 去重键，并在发布后确认。228 passed / 1 原有 skipped。
+- R187 原长 child `subagent-1788624047-5ea76744` 已实际到 Compact 10，仍 RUNNING，执行 attempt
+  `attempt-1788625011-80cf1021` 不变；已跨过旧次数故障点，最终完成仍待验。
+- R186 B 已自然 final 并在原 TUI /exit→精确 resume：191 个公开过程块可回看，底部保持最终回复，Working
+  收起。只回看前后 210 消息行、51 用量行及文件 hash 均不变，Compact 保持 39；未完成过程归档仍开放。
+
+
 ## R188 后台唤醒 cwd 残留修复（已部署，原 TUI 路径复验通过）
 
 - 真 TUI 错误已显示精确路径：B 把相对 `tasks/2026-09-05/file-inventory` 接在内部 `runs/日期/hash` 后面。

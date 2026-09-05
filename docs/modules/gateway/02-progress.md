@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R189 重启后的过程流续接
+
+对照 会话运行时 `thread_routing::apply_refreshed_snapshot_thread` 的会话/缓冲交接，为现有易失环增加 stream ID。
+客户端确认发布后才更新“流身份+序号”，旧 canonical 消息游标独立；冷 owner 回显旧流、不创建 Agent。
+子代理 final 的旧调用遗漏同步修复：原消息库提供 thread/message ID，删除正文推导身份。
+228 focused / 1 原有 skipped 通过，唯一 Gateway 与原 TUI 重启复验待做；不替代未提交过程持久化。
+
 ## R185 后台消息单一来源（已部署，实时通过、恢复排序待修）
 
 对照 会话运行时 `tui/src/app/thread_events.rs` 的快照重基与 终端交互 `assistant/sessionHistory.ts` 的消息游标，

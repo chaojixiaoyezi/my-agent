@@ -663,6 +663,7 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
                 SimpleNamespace(
                     role="assistant",
                     content="已提交关卡设计。",
+                    message_id="msg-child-final",
                     metadata={"conversation_request_id": "attempt-child-done"},
                 )
             ],
@@ -691,6 +692,8 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
     assert view["agent"]["activity"] == "已完成"
     assert [row["run_id"] for row in view["children"]] == ["grandchild"]
     assert view["final_response"] == "已提交关卡设计。"
+    assert view["final_response_message_id"] == "msg-child-final"
+    assert view["thread_id"] == child.agent_thread_id
     assert (
         view["final_response_request_id"]
         == "bg-agent:child-done:attempt-child-done"
@@ -700,6 +703,7 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
     running_view = conversation_agent_view(agent, store, child.id)
     assert running_view["terminal"] is False
     assert running_view["final_response"] == ""
+    assert running_view["final_response_message_id"] == ""
     assert running_view["final_response_request_id"] == ""
 
 

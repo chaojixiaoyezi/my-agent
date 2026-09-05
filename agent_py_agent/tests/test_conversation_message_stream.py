@@ -179,7 +179,7 @@ def test_invalid_or_rewinding_remote_cursor_does_not_acknowledge(cursor):
     runtime = TuiRuntime("session")
     runtime.background_message_cursor = 10
     agent = SimpleNamespace(request_background_notices=lambda *_args, **_kwargs: {
-        "ok": True, "cursor": cursor, "notices": [], "transcript_events": [], "event_cursor": 0,
+        "ok": True, "cursor": cursor, "notices": [], "transcript_events": [], "event_cursor": 0, "event_stream_id": "",
     })
     assert _consume_background_notices(agent, "session", runtime, [None], set()) is False
     assert runtime.background_message_cursor == 10

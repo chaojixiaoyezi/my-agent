@@ -3,6 +3,7 @@
 # LLM: This module owns the shared public event mapper and the main-agent volatile
 # ring. Child callers may replace the event writer with their durable bounded JSONL;
 # main 同时按块保留完整工作片快照，最终由 canonical 消息提交；两条投影都不拥有生命周期或权限。
+# 易失游标必须与当前 Agent 的 stream_id 配对，重建 Agent 后不能用旧进程序号跳过新事件。
 # 模块用途: 将后台主代理或子代理的思考、工具和 diff 转成同一展示事件，供 TUI/Web 增量读取。
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ BACKGROUND_TRANSCRIPT_DELTA_FLUSH_CHARS = 256
 _TRANSCRIPT_STATE_ATTR = "_conversation_background_transcript_projection"
 _TRANSCRIPT_LOCK_ATTR = "_conversation_background_transcript_projection_lock"
 _TRANSCRIPT_SEQ_ATTR = "_conversation_background_transcript_next_seq"
+_TRANSCRIPT_STREAM_ATTR = "_conversation_background_transcript_stream_id"
 _TRANSCRIPT_SETUP_LOCK = threading.Lock()
 BACKGROUND_TRANSCRIPT_EVENT_KINDS = frozenset(
     {
@@ -689,31 +691,40 @@ def append_background_transcript_event(
         return next_seq
 
 
-# LLM: Readback is cursor-only and returns retained public copies. A truncated
+# LLM: Readback pairs a process-owned stream identity with its cursor; an unknown stream
+# starts at retained new events without changing canonical history or runtime state. A truncated
 # flag is diagnostic for slow clients; terminal events carry full content so the
 # TUI reducer can still recover completed blocks after a missed start.
-# 函数用途: 读取指定游标之后的后台展示事件、最新游标和是否发生环形裁剪。
+# 函数用途: 读取同一流游标之后的后台展示事件；Agent 重建后换流，避免旧大序号挡住新输出。
 def read_background_transcript_events(
     agent: object,
     *,
     thread_id: str,
     after: int,
+    stream_id: str = "",
 ) -> dict[str, object]:
     thread_key = str(thread_id or "").strip()
     cursor = max(0, _safe_int(after))
     if not thread_key:
-        return {"events": [], "cursor": cursor, "truncated": False}
+        return {"events": [], "cursor": cursor, "stream_id": stream_id, "truncated": False}
     lock = _background_transcript_lock(agent)
     with lock:
+        current_stream = getattr(agent, _TRANSCRIPT_STREAM_ATTR, "")
+        if not current_stream:
+            current_stream = uuid4().hex
+            setattr(agent, _TRANSCRIPT_STREAM_ATTR, current_stream)
+        if stream_id != current_stream:
+            cursor = 0
         rows = _background_transcript_rows(agent)
         state = rows.get(thread_key)
         if state is None:
-            return {"events": [], "cursor": cursor, "truncated": False}
+            return {"events": [], "cursor": cursor, "stream_id": current_stream, "truncated": False}
         rows.move_to_end(thread_key)
         retained = [copy.deepcopy(row) for row in state.events if int(row["seq"]) > cursor]
         return {
             "events": retained,
             "cursor": max(cursor, state.next_seq),
+            "stream_id": current_stream,
             "truncated": bool(cursor < state.truncated_through_seq),
         }
 

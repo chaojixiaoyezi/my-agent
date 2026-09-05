@@ -1,4 +1,6 @@
-
+# LLM: HTTP handlers preserve authenticated owner/thread boundaries and typed protocol fields;
+# process stream identity affects only display cursors, never model requests or authorization.
+# 模块用途: 接收 Gateway HTTP 请求并转给正式会话、控制与展示入口，统一返回结构化结果。
 from __future__ import annotations
 
 """Endpoint handlers used by the gateway HTTP server.
@@ -984,12 +986,13 @@ def handle_control_status(handler, server) -> None:
 
 
 # LLM: Trusted owner/thread scope selects the canonical message page; after is a complete-row byte offset,
-# not a clock timestamp. Activity and the independent process-event cursor cannot authorize work.
+# not a clock timestamp. Process sequence is paired with event_stream_id; neither stream grants work.
 # 函数用途: 接收薄客户端后台查询，把已提交正文、过程事件和活动状态投影到同一界面。
 def handle_client_notices(handler, server) -> None:
     """S-BG1: 返回当前会话的进行中任务数和后台主代理轮完成通知。
 
-    body: {"conversation_id": ..., "after": canonical 消息字节位置, "event_after": 过程事件游标}
+    body: {"conversation_id": ..., "after": canonical 消息字节位置,
+           "event_after": 过程事件游标, "event_stream_id": 当前过程流身份}
     响应同时返回 notices/cursor 与 transcript_events/event_cursor 两条独立增量流。
     """
     if require_trusted_source(handler):
@@ -1011,6 +1014,10 @@ def handle_client_notices(handler, server) -> None:
         event_after = max(0, int(body.get("event_after") or 0))
     except (TypeError, ValueError):
         event_after = 0
+    event_stream_id = body.get("event_stream_id", "")
+    if not isinstance(event_stream_id, str):
+        handler._send_json(400, {"error": "event_stream_id must be a string"})
+        return
     result = read_gateway_client_notices(
         server.agent,
         scope=_gateway_control_scope(
@@ -1021,6 +1028,7 @@ def handle_client_notices(handler, server) -> None:
         ),
         after=after,
         event_after=event_after,
+        event_stream_id=event_stream_id,
         interactive_approvals=bool(
             isinstance(body.get("client_capabilities"), dict)
             and body["client_capabilities"].get("tool_approval") is True
@@ -1201,7 +1209,8 @@ def _send_agent_control_error(handler, error: AgentControlError) -> None:
 # LLM: The canonical thread owns task candidates while each typed task link
 # owns its lifecycle. The response adds a bounded direct-child display
 # projection from canonical runs; neither notices nor that projection can
-# create task state, authorize work, retry, or decide completion.
+# create task state, authorize work, retry, or decide completion. Process-stream identity is
+# echoed with its event sequence, independently from the durable message byte cursor.
 # 函数用途: 读取一个已鉴权会话真正还在工作的主任务、直属子代理状态和新增后台通知。
 def read_gateway_client_notices(
     agent: object,
@@ -1209,6 +1218,7 @@ def read_gateway_client_notices(
     scope: GatewayControlScope,
     after: int,
     event_after: int = 0,
+    event_stream_id: str = "",
     interactive_approvals: bool = False,
 ) -> dict[str, object]:
     """返回当前 thread 的活动投影、后台过程事件与 after 之后的通知。"""
@@ -1235,6 +1245,7 @@ def read_gateway_client_notices(
             scope=scope,
             after=after,
             event_after=event_after,
+            event_stream_id=event_stream_id,
         )
     store = getattr(owner_agent, "conversation_store", None)
     if not isinstance(store, ConversationStore):
@@ -1260,6 +1271,7 @@ def read_gateway_client_notices(
             after,
             event_after,
             ok=True,
+            event_stream_id=event_stream_id,
             agent_activity=ConversationAgentActivity().to_dict(),
         )
     thread_id = str(getattr(thread, "thread_id", "") or "")
@@ -1272,41 +1284,34 @@ def read_gateway_client_notices(
         owner_agent,
         thread_id=thread_id,
         after=event_after,
+        stream_id=event_stream_id,
     )
     activity = conversation_agent_activity(owner_agent, store, thread_id)
     activity_payload = activity.to_dict()
     active_task_count = activity.active_task_count
     notices, cursor, notices_ok = read_background_response_page(store, thread_id, after=after)
-    if not notices_ok:
-        return {
-            "ok": False,
-            "error": "notices read failed",
-            "notices": [],
-            "cursor": after,
-            "transcript_events": transcript["events"],
-            "event_cursor": transcript["cursor"],
-            "events_truncated": transcript["truncated"],
-            "active_task_count": active_task_count,
-            "agent_activity": activity_payload,
-            "agent_permission_requests": permission_requests,
-        }
-    return {
-        "ok": True,
+    payload = {
+        "ok": notices_ok,
         "notices": notices,
         "cursor": cursor,
         "transcript_events": transcript["events"],
         "event_cursor": transcript["cursor"],
+        "event_stream_id": transcript["stream_id"],
         "events_truncated": transcript["truncated"],
         "active_task_count": active_task_count,
         "agent_activity": activity_payload,
         "agent_permission_requests": permission_requests,
     }
+    if not notices_ok:
+        payload["error"] = "notices read failed"
+    return payload
 
 
 # LLM: A cold owner must remain cold, but committed assistant notices cannot disappear after a
 # Gateway restart. Resolve one authenticated owner home, inspect only the finite canonical store
 # layouts, and replay the newest exact channel binding without constructing Agent/backend/tool
-# state. Volatile activity and approval state intentionally remain empty until the owner is loaded.
+# state. Volatile activity and approval state intentionally remain empty until the owner is loaded;
+# an echoed stream cursor keeps the client unchanged until a new real stream exists.
 # 函数用途: Gateway 重启后从冷用户已有会话库重放最终回复，避免空闲轮询拉起整套 Agent。
 def _read_cold_owner_notice_projection(
     base_agent: object,
@@ -1314,6 +1319,7 @@ def _read_cold_owner_notice_projection(
     scope: GatewayControlScope,
     after: int,
     event_after: int,
+    event_stream_id: str,
 ) -> dict[str, object]:
     from ..conversation.store import ConversationStore
     from ..owner_wake_discovery import existing_conversation_store_roots
@@ -1324,6 +1330,7 @@ def _read_cold_owner_notice_projection(
         after,
         event_after,
         ok=True,
+        event_stream_id=event_stream_id,
         agent_activity=idle_activity,
     )
     payload["owner_state"] = "cold"
@@ -1374,13 +1381,15 @@ def _read_cold_owner_notice_projection(
 
 
 # LLM: Empty/error snapshots share one stable transport shape so clients never
-# infer missing approval/activity fields. This helper creates no task state.
+# infer missing approval/activity fields. Empty projections echo the process cursor without
+# claiming a new stream or creating task state.
 # 函数用途: 构造无线程或读取失败时的空后台快照。
 def _empty_gateway_notice_response(
     after: int,
     event_after: int,
     *,
     ok: bool = False,
+    event_stream_id: str = "",
     error: str = "",
     agent_activity: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
@@ -1390,6 +1399,7 @@ def _empty_gateway_notice_response(
         "cursor": after,
         "transcript_events": [],
         "event_cursor": max(0, int(event_after or 0)),
+        "event_stream_id": event_stream_id,
         "events_truncated": False,
         "active_task_count": 0,
         "agent_permission_requests": [],

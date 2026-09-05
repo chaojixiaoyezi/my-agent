@@ -1,5 +1,14 @@
 # TESTS
 
+## R189 重连与消息身份
+
+`test_background_notice_display.py` 用两次真实 Agent 展示源实例、同一 canonical store 和 TUI reducer 验证
+高游标→新流空页→新事件，以及新进程序号更大的情形；只换事件游标、不动消息文件、旧块或用量账。
+冷 owner、同流回退、畸形页、发布失败和 HTTP 参数分别覆盖。子代理最终回复测试要求真实来源的消息 ID，
+不从正文构造去重键；补充主/子页面、权限、历史与 HTTP focused，不跑全仓 pytest。
+真 TUI 部署时 Gateway/TUI 协议一并升级；之后保持客户端 PID 不变重启单 Gateway，核对 exact run、
+新流公开块、Compact、原任务副作用与独立 owner。只进入/回看页面不得增加模型调用。
+
 ## R185 canonical 后台正文读取
 
 - `test_conversation_message_stream.py` 使用真实临时 ConversationStore 和 TUI reducer，覆盖消息 ID 幂等、

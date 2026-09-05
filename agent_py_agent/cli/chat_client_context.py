@@ -35,6 +35,7 @@ from .workspace_resolution import (
 # LLM: Gateway chat clients need config, owner-scoped paths, and UI metadata—not a model backend,
 # tool registry, scheduler, memory curator, or subagent runtime. Every operation stays on an
 # explicit Gateway HTTP/file contract; this process must never promote itself to SimpleAgent.
+# 后台易失游标必须携带服务端流身份；canonical 消息位置与模型上下文独立于重连。
 # 模块用途: 为 Gateway TUI 构造始终轻量的客户端；聊天、记忆、历史和生命周期都交给已经
 # 运行的 Gateway，不在终端进程重复初始化完整智能体。
 
@@ -236,7 +237,8 @@ class GatewayChatClientAgent:
         }
 
     # LLM: Canonical message byte offsets and the independent process-event cursor share one
-    # authenticated HTTP snapshot; transport failure leaves both display projections unchanged.
+    # authenticated HTTP snapshot; process cursors include stream identity, and transport failure
+    # leaves both display projections unchanged. Changing streams never rewinds canonical messages.
     # 函数用途: 拉取当前会话活动与实际已读消息位置之后的后台回复，不把时间戳当消息游标。
     def request_background_notices(
         self,
@@ -244,6 +246,7 @@ class GatewayChatClientAgent:
         *,
         after: int,
         event_after: int = 0,
+        event_stream_id: str = "",
     ) -> dict[str, object]:
         # 后台状态只是易失展示；2 秒仍无响应就交给 TUI 退避，不能让每个窗口长期占住连接。
         _status, body = self.post_gateway_json(
@@ -251,6 +254,7 @@ class GatewayChatClientAgent:
             {
                 "after": max(0, int(after or 0)),
                 "event_after": max(0, int(event_after or 0)),
+                "event_stream_id": event_stream_id,
                 "client_capabilities": {"tool_approval": True},
                 "user_id": "local-agent",
                 "channel": "chat",
@@ -264,6 +268,7 @@ class GatewayChatClientAgent:
             "cursor": after,
             "transcript_events": [],
             "event_cursor": max(0, int(event_after or 0)),
+            "event_stream_id": event_stream_id,
             "active_task_count": 0,
             "agent_permission_requests": [],
         }

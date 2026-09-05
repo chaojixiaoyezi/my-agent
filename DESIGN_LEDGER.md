@@ -10,12 +10,18 @@
 - 新候选单 Gateway PID 2415915 下，原 B root 已连续成功读取/编辑 29 个 `tasks/...` 相对文件调用，
   原服务 hash 和停止状态保持。完整任务仍在整合，不能把路径修复等同于产物质量和 Compact 效率通过。
 
-## 2026-09-05 易失过程游标的重启边界【状态：BUG-118 待设计】
+## 2026-09-05 易失过程游标的重启边界【状态：R189 实现中】
 
 - R188 顺序重启时，未退出 TUI 的活动/Compact 标量在更新，过程仍停在旧块；精确重进 session 后才恢复。
   读到两端都使用 `max(旧游标, 当前游标)`，而后台进程的 next_seq 在新进程从零开始，旧大游标会挡住新事件。
-- 必须用结构化流身份/重建快照处理进程代际，不按正文或时间猜测跳过。先继续对照 会话运行时 完整 thread
-  snapshot 与缓冲重基的具体链路，再确定统一协议；本轮未实现，不以重进界面的操作替代产品修复。
+- 已读 会话运行时 `tui/src/app/thread_routing.rs::apply_refreshed_snapshot_thread` 和
+  `thread_events.rs::rebase_buffer_after_session_refresh`：刷新后的会话事实与旧缓冲有明确交接，交互请求保留；
+  终端交互 `assistant/sessionHistory.ts` 的 ID 分页也不依赖进程内累计序号。这里适配现有 HTTP 过程环，
+  不是声称 会话运行时 使用相同 wire 字段。
+- 每个已加载 owner Agent 的过程环分配不可复用的 `event_stream_id`，客户端同时携带该身份与 `event_after`；
+  同流序号只前进，换流从现存新事件开始。只有发布成功才一起确认身份和游标，冷 owner 回显旧游标而不拉起 Agent。
+  canonical 消息字节游标独立保留，已有显示块、输入队列、权限请求和未完成过程不清空；不产生模型调用。
+- 本切片修复在线客户端接不上新流，不宣称已经补齐重启前未提交过程的持久化或完整长历史分页。
 
 ## 2026-09-05 子代理长回合 Compact 与失败终态【状态：R187 已实现，待真 TUI 复验】
 
@@ -28,7 +34,13 @@
   父级自动生命周期清理只取消尚未结束的 child，保留既有失败原因；显式用户取消和 Audit 结算入口不改。
 - 先做定向合同验证，再由真实 TUI 长 child 复验；不把单测通过或补派成功当成原故障已闭环。
 
-## 2026-09-05 后台完整工作片快照与缓冲重基【状态：R186 开发中】
+## 2026-09-05 子代理最终回复消息身份【状态：R189 实现，待真 TUI】
+
+- 相邻测试发现 R185 改为 canonical final 后，child 详情仍用缺少 message_id 的旧调用，导致 TypeError。
+  复用原 child ConversationThread 的 message_id/thread_id，request_id 继续只关联 typed transcript。
+  移除由正文创建 legacy 去重键的旧分支；最终回复发布成功才更新已读身份，不改子代理生命周期。
+
+## 2026-09-05 后台完整工作片快照与缓冲重基【状态：R186 已结束回合真 TUI 通过】
 
 - 解决 R185 真 TUI 的 `FAIL_REPLAY_ORDER`：恢复 canonical final 后，旧过程环再次从零推送，将工具和
   思考排到 final 之后。按 会话运行时 `tui/src/app/thread_events.rs` 的完整 turn 快照/缓冲重基处理。
@@ -39,6 +51,7 @@
   和用户插话消费回执继续接收。实时 final 同样补齐已错过的过程块，块 ID 与实时事件一致，不能重复追加。
 - 本切片只闭环已提交后台 final 的展示恢复。Gateway 在 final 提交前退出的完整过程持久化、前台 Compact
   前归档与长历史分页继续作为独立 P1，不以本切片冒充通过；旧 final 没有结构化快照时不得猜测补造。
+- 原 B 191 块工作片自然 final 后 exact resume 顺序和展开均通过，回看不增加模型调用或 Compact，见 FT-170。
 
 ## 2026-09-05 后台回复恢复使用 canonical 消息游标【状态：R185 部分部署，过程恢复顺序未闭环】
 

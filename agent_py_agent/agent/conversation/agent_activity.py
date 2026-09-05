@@ -7,6 +7,7 @@ the display cache into another lifecycle authority.
 """
 
 # LLM: This module is the read-only adapter from canonical conversation task
+# 子代理结束页同步投影 canonical thread/message ID；显示层不得从正文猜最终回复身份。
 # links and subagent runs to bounded public activity rows. It must never become
 # a lifecycle, authorization, retry, or completion authority.
 # 模块用途: 为 TUI 和后续 Web 提供同一份会话主任务与直属子代理状态快照。
@@ -695,6 +696,7 @@ def conversation_agent_view(
     (
         final_response,
         final_response_request_id,
+        final_response_message_id,
         history_warnings,
     ) = _agent_final_response(store, thread_id)
     status = str(getattr(task, "status", "") or "").strip().upper()
@@ -705,6 +707,7 @@ def conversation_agent_view(
     return {
         "schema_version": "conversation_agent_view.v2",
         "ok": True,
+        "thread_id": thread_id,
         "agent": {
             **row,
             "goal": _public_agent_text(
@@ -728,6 +731,7 @@ def conversation_agent_view(
         "events_truncated": bool(transcript.get("truncated")),
         # 运行中的历史 assistant 段可能只是 Compact 前一轮，不能冒充当前任务 final。
         "final_response": final_response if terminal else "",
+        "final_response_message_id": final_response_message_id if terminal else "",
         # typed transcript 和兜底 final 都指向同一个模型 request；TUI 必须按
         # 这个结构化身份归并，不能拿自然语言正文猜是不是重复。
         "final_response_request_id": (
@@ -1361,23 +1365,23 @@ def _task_progress_items_for_run(
 
 
 # LLM: Only the canonical child ConversationThread assistant tail can become a
-# completed detail-page response. Return its structured conversation request id
+# completed detail-page response. Return its canonical message id and conversation request id
 # with the text so typed transcript and history fallback can be joined without
 # natural-language dedupe; internal runner files and result aliases are not fallbacks.
-# 函数用途: 读取子代理最近一次正式模型回复及其回合标识，供已完成详情页无重复地显示。
+# 函数用途: 读取子代理正式回复、消息 ID 和回合标识；不能用正文内容代替去重身份。
 def _agent_final_response(
     store: object,
     thread_id: str,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, str, list[str]]:
     if not thread_id:
-        return "", "", []
+        return "", "", "", []
     reader = getattr(store, "recent_messages_report", None)
     if not callable(reader):
-        return "", "", ["agent_thread_unavailable"]
+        return "", "", "", ["agent_thread_unavailable"]
     try:
         messages, load_errors = reader(thread_id, limit=12)
     except Exception:
-        return "", "", ["agent_thread_unavailable"]
+        return "", "", "", ["agent_thread_unavailable"]
     message = next(
         (
             item
@@ -1387,7 +1391,7 @@ def _agent_final_response(
         None,
     )
     if message is None:
-        return "", "", (["agent_thread_load_error"] if load_errors else [])
+        return "", "", "", (["agent_thread_load_error"] if load_errors else [])
     response = _public_agent_text(getattr(message, "content", ""), limit=24_000)
     metadata = getattr(message, "metadata", None)
     request_id = (
@@ -1398,6 +1402,7 @@ def _agent_final_response(
     return (
         response,
         request_id,
+        str(getattr(message, "message_id", "") or ""),
         (["agent_thread_load_error"] if load_errors else []),
     )
 

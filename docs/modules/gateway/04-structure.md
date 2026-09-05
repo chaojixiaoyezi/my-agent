@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## R189 易失过程与持久消息的两种游标
+
+- `background_transcript.read_background_transcript_events` 在 owner Agent 锁内分配进程实例 stream ID，
+  同流按序读取；流不同则从当前保留事件接续。LRU 清理仍沿用该实例的全局单调序号。
+- `/client/notices` 增加成对的 `event_stream_id` 请求/响应字段；薄客户端与本地模式共享换代消费合同。
+  `cursor` 仍是 canonical 消息字节位置；两者不互相重置。仅在发布成功后确认新事件身份和序号。
+- `conversation_agent_view` 把 canonical child `thread_id/final_response_message_id` 与 request ID 同时投影；
+  request 用于合并 typed final，message ID 用于历史块，正文不充当任何身份。
+
 ## R185 后台正文与恢复快照交接
 
 - `ConversationStore.message_page_after_offset_report` 从完整 JSONL 行后的字节位置顺序读一页，不回扫旧前缀；
