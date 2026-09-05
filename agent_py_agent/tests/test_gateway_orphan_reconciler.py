@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.orchestration.background import dispatch as background_dispatch
 from agent_py_agent.agent.agent_core.orchestration.dispatch.capability_auto_sweep import (
     _reconcile_conversation_parent_lifecycle,
@@ -414,6 +416,36 @@ def test_reconciler_cancels_old_run_when_parent_conversation_completed(
     assert links[parent_task_id].status == "completed"
     assert links[task.id].status == "cancelled"
     assert any(int(report.get("parent_closed_cancelled") or 0) == 1 for report in reports)
+
+
+@pytest.mark.parametrize(
+    "terminal_status", ["FAILED", "BLOCKED", "TIMEOUT", "CHANNEL_ERROR", "DONE"]
+)
+def test_parent_cleanup_preserves_existing_child_terminal_result(
+    tmp_path: Path,
+    terminal_status: str,
+) -> None:
+    _base_agent, _owner, scoped = _scoped_restart_fixture(tmp_path)
+    task = _running_restart_task(scoped, heartbeat_at=time.time())
+    _thread, _parent_task_id = _bind_conversation_task(scoped, task, run_status="failed")
+    ended = scoped.subagents.load(task.id)
+    ended.status = terminal_status
+    ended.failure_type = "runner_error" if terminal_status == "FAILED" else ""
+    ended.runner_last_error = "typed Compact failure" if terminal_status == "FAILED" else ""
+    scoped.subagents.save(ended)
+
+    decision = conversation_lifecycle_decisions(scoped, [ended])[task.id]
+    assert decision.should_cancel
+    assert decision.reason == "run_link_closed"
+
+    summary = _reconcile_conversation_parent_lifecycle(scoped)
+
+    preserved = scoped.subagents.load(task.id)
+    assert preserved.status == terminal_status
+    assert preserved.failure_type == ended.failure_type
+    assert preserved.runner_last_error == ended.runner_last_error
+    assert "cancel_subagents" not in preserved.attributes
+    assert summary["parent_closed_cancelled"] == 0
 
 
 def test_reconciler_cancels_old_run_when_parent_conversation_interrupted(

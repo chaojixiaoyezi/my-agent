@@ -10,6 +10,7 @@ from __future__ import annotations
 #   失败绝不外抛(唤醒轮必须照常进行),结果落 debug 日志与返回摘要。
 #   改动时同步检查 conversation/runtime.py(BackgroundMainAgentScheduler._run_wake_signal
 #   接入点)、tests/test_capability_auto_grant.py。
+# 模块用途: 在唤醒和监督阶段核对能力及运行生命周期；只取消仍活跃的旧孩子，不覆盖已记录的失败终态。
 """Mechanism-level capability sweep before subagent-lifecycle wake turns."""
 
 import logging
@@ -19,7 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from ....subagents.capability_auto_grant import auto_grant_open_requests
-from ....subagents.models import SUBAGENT_RECOVERY_CLOSED_STATUSES, task_status_in
+from ....subagents.models import (
+    SUBAGENT_ENDED_STATUSES,
+    SUBAGENT_RECOVERY_CLOSED_STATUSES,
+    task_status_in,
+)
 from .conversation_lifecycle_gate import conversation_lifecycle_decisions
 from .params import DispatchParams
 from .tool_helpers import _dispatch_capability_config
@@ -882,10 +887,12 @@ def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
     }
 
 
+# LLM: 父级清理不是新取消指令；只有未结束 child 可进入取消工具，不能把 FAILED 等终态改成 CANCELLED。
+# 函数用途: 关闭失去父级执行权的活跃孩子，保留已经结束任务的结果、失败原因和原有用户控制记录。
 def _cancel_closed_parent_task(agent: Any, task: Any, decision: Any) -> bool:
     if not decision.should_cancel or task_status_in(
         getattr(task, "status", ""),
-        SUBAGENT_RECOVERY_CLOSED_STATUSES,
+        SUBAGENT_ENDED_STATUSES,
     ):
         return False
     if decision.reason == "parent_link_closed":

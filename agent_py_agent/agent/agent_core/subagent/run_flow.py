@@ -1,3 +1,5 @@
+# LLM: 本模块串联同一 child 的尝试、模型轮和正式结果；Compact 续接不新建 run/attempt，失败交给生命周期处理。
+# 模块用途: 执行子代理任务并保存结果；长期压缩不是重派次数，修改时同步验证停止、恢复与工具显示身份。
 
 from __future__ import annotations
 
@@ -196,10 +198,9 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
     )
 
 
-# LLM: The delegated runner keeps task_local isolation while all durable Compact uses the child's
-# ConversationThread. Its registered interrupt follows both preflight and overflow retries, while
-# typed tool/input progress prevents completed work replay.
-# 函数用途: 使用子代理自己的历史执行模型任务；超限压缩可随时停止，成功后仍在同一尝试继续。
+# LLM: 子代理始终使用自身 ConversationThread 和同一执行身份；只有已提交 Compact 才能续接，
+# 不以累计压缩次数判失败。停止、真实压缩失败和预算仍生效，工具显示批次不改变权限或副作用幂等身份。
+# 函数用途: 使用子代理自己的历史执行长期任务；每次成功压缩后继续原尝试，并保留各批工具的独立显示。
 def _run_subagent_model_turn(
     lifecycle,
     prompt: str,
@@ -232,7 +233,11 @@ def _run_subagent_model_turn(
             interrupt_check=is_interrupted,
             model_surface=model_surface,
         )
-        for _attempt in range(8):
+        model_iteration = 0
+        while True:
+            model_iteration += 1
+            if transcript_sink is not None:
+                transcript_sink.begin_model_attempt(model_iteration)
             run_params = _subagent_model_run_params(
                 context=context,
                 prompt=prompt,
@@ -288,7 +293,6 @@ def _run_subagent_model_turn(
                 ),
             )
             current = refreshed
-        raise RuntimeError("subagent thread still exceeds the model context after Compact")
     except Exception:
         if transcript_sink is not None:
             transcript_sink.fail()

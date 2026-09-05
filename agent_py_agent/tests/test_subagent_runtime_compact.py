@@ -266,11 +266,13 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     assert not (run_home / "recovery").exists()
 
 
+@pytest.mark.parametrize("overflow_count", [1, 9])
 def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retry(
     tmp_path: Path,
     monkeypatch,
+    overflow_count: int,
 ) -> None:
-    """当前 child 工具轨迹导致溢出时，必须正式推进其 thread generation 后原尝试续跑。"""
+    """有新工具进展的 child 可跨过旧的 8 次上限，始终在原尝试推进正式代次。"""
 
     agent = SimpleAgent(
         AgentConfig(
@@ -302,20 +304,28 @@ def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retr
             "output_preview": f"result-{index}",
             "effect_outcome": "succeeded",
         }
-        for index in range(1, 6)
+        for index in range(1, 5 * overflow_count + 1)
     ]
     agent.backend = _ActiveTurnSummaryChildBackend()
     run_params_seen = []
 
     def fake_run(prompt: str, *, params):
         run_params_seen.append(params)
-        if len(run_params_seen) == 1:
+        if len(run_params_seen) <= overflow_count:
+            params.on_chunk.write_progress({
+                "round": 1,
+                "call_index": 1,
+                "tool": "read_file",
+                "phase": "completed",
+                "ok": True,
+                "output": f"第 {len(run_params_seen)} 批工具结果",
+            })
             return AgentRunResult(
                 prompt=prompt,
                 response="provider reported context pressure",
                 backend=agent.backend.name,
                 used_memories=0,
-                archive_tool_calls=records,
+                archive_tool_calls=records[:5 * len(run_params_seen)],
                 runtime_status="context_overflow",
                 runtime_reason="context_overflow",
                 runtime_source="preflight",
@@ -337,20 +347,61 @@ def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retr
 
     thread = agent.conversation_store.load_thread(task.agent_thread_id)
     assert result.ok
-    assert len(run_params_seen) == 2
-    assert thread is not None and thread.compact_generation == 1
+    assert len(run_params_seen) == overflow_count + 1
+    assert len({params.attempt_id for params in run_params_seen}) == 1
+    assert {params.run_id for params in run_params_seen} == {task.id}
+    assert thread is not None and thread.compact_generation == overflow_count
     assert thread.compact_checkpoint_id
-    assert runtime_compact_count(task, agent.conversation_store) == 1
+    assert runtime_compact_count(task, agent.conversation_store) == overflow_count
     assert run_params_seen[1].conversation_history_seed.compact_generation == 1
-    assert run_params_seen[1].carried_archive_tool_calls == records
+    assert run_params_seen[-1].conversation_history_seed.compact_generation == overflow_count
+    assert run_params_seen[-1].carried_archive_tool_calls == records
     events = read_agent_transcript_events(agent, run_id=task.id, after=0)["events"]
     completed = [
         row
         for row in events
         if row.get("kind") == "conversation_compaction_completed"
     ]
-    assert completed
+    assert len(completed) == overflow_count
     assert completed[-1]["payload"]["source_kind"] == "active_turn_tool_archive"
+    tools = [row for row in events if row.get("kind") == "tool_completed"]
+    assert len(tools) == overflow_count
+    assert len({row["block_id"] for row in tools}) == overflow_count
+
+
+def test_subagent_overflow_without_compactable_progress_still_fails(tmp_path, monkeypatch):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
+    task = agent.subagents.create_run(
+        goal="核对输入", thought="读取真实材料", plan=["核对"], role="worker"
+    )
+    model_calls = []
+
+    def overflow_without_progress(prompt, *, params):
+        model_calls.append(params)
+        return AgentRunResult(
+            prompt=prompt,
+            response="",
+            backend="echo",
+            used_memories=0,
+            runtime_status="context_overflow",
+            runtime_reason="context_overflow",
+            runtime_source="provider_error",
+            turn_end_reason="max-tokens",
+        )
+
+    monkeypatch.setattr(agent, "run", overflow_without_progress)
+
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    assert not result.ok
+    assert len(model_calls) == 1
+    ended = agent.subagents.load(task.id)
+    assert ended.status == "FAILED"
+    assert ended.failure_type == "runner_error"
+    assert "cannot compact the overflowing active turn" in ended.runner_last_error
+    assert agent.conversation_store.load_thread(task.agent_thread_id).compact_generation == 0
 
 
 def test_subagent_compact_retry_keeps_exact_attempt_authorized_for_later_tools(
