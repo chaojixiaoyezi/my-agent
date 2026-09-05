@@ -1,5 +1,29 @@
 # STATUS
 
+## R184 家目录软整理与硬隔离（已部署，边界与原会话续作通过）
+
+- 主/子代理的普通文件边界统一为 owner home；删去按写目标切 task、全部字符串路径重写和业务目录魔法别名。
+- 新运行记录写到 runs/日期/不透明键，旧 tasks 记录原处可恢复；用户业务目录按稳定内置提示词由模型整理。
+- 删除额外 LLM 目录取名旁路和两项废弃配置；home_context_enabled 控制目录指南，workspace_task_path_template
+  改为软整理建议。主/子代理都读指南，不扫描整个 home，也不修改用户既有人格/记忆。
+- 532 项 focused 与本地严格 gate 通过；`.10` 唯一 Gateway PID 2259815，MiniMax-M2.7，最终候选 wheel
+  `f586faa2a0c1fc9e8a79c71899027979e8bc464f89bfe4ba77bd2afe82a54b4e`。两路仍是 R178 原 session。
+- 第一轮真实 TUI 已直接修改两个旧目录的原文件；另一 owner 三个子代理在自己 home 默认工作并自然完成。
+  main Compact 4→5 / 2→3，缓存命中继续入 provider 账。任务质量另记：B 误改样本原件且导出文件含报错，
+  已经原 TUI 提出恢复/重验，不代补产物，见 BUG-115。旧日志/提示中的特殊目录表述也在最终候选清理。
+- 最终候选的原会话续作：A 再次直接修改两份原文，去掉核对中标记，7 calls / retry 0 / cache-read 203,095，
+  Compact 5→6；B 57 calls / retry 0 / cache-read 3,191,326，Compact 3→6，已恢复 app.py 和可读样例，
+  但漏恢复一个空文件并错误声称从未误改，因此内容验收不通过。同一 TUI 再追问后已补回空文件，
+  已知误改均恢复、服务仍停止；原始全量基准已被模型覆盖，完整保留与准确追溯仍记 BUG-115 开放。
+- 本切片不改变模型缓存/Compact 算法，也不关闭旧 notice 重复、完整过程归档与模型事实使用等剩余 P1 项。
+
+
+## R183 同请求往返历史目录修复（已部署但任务失败，设计被 R184 替代）
+
+- BUG-114 已由 task links 证实为 A→B→A 重入：回到交接目录时原 request-local successor 已 superseded，
+  原 ID 分配没有下一代。已补确定性后继编号，并修重复绑定当前 successor 时自我 supersede；相关 focused 通过。
+- 下一步原长会话真 TUI 复验，测试者不补产物；历史 notice 去重与完整归档仍开放，不能据此提前封板。
+
 ## R182 启动顺序修复已部署，两路原会话真 TUI 通过
 
 - BUG-112 已改为同一 preflight 顺序执行 readiness、原 session 历史恢复、worker 启动；失败或已退出时

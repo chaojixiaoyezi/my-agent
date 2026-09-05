@@ -1,5 +1,13 @@
 # Subagent Progress
 
+## R184 家目录协作（focused 与三个 child 真 TUI 通过）
+
+普通 child/grandchild 继承直接父级的 owner home 产品范围；cwd 单独传递，不能继承管理员的外部启动目录。
+删除按文件路径回绑 child task 的入口；Audit exact-source、控制面、能力/工具审批和跨 owner 墙不变。
+FT-158 普通自然语言任务中，程序、测试、说明三个 child 均在自己的 owner home 运行并自然 DONE，主代理
+整合产生实际项目、测试和文档。grandchild、另一 owner 与 exact worker 边界由 focused 覆盖，本轮不冒充真机全覆盖。
+
+
 ## 2026-09-04 R172 空目标 capability request 不再生成假授权
 
 - 真 TUI 发现 child 能只写 `needed_capability=subagent_orchestration`，旧自动批随后生成 `tools=[]` grant 并

@@ -1,5 +1,12 @@
 # Subagent Structure
 
+## 普通代理的家目录范围
+
+R184：main/child/grandchild 的普通文件工作区是同一个 owner home，不再按业务 tasks 目录收窄。
+`run_workspace` 保留 parent/run/恢复记录；`conversation_execution_cwd` 独立表示文件起点，创建 child 时按
+owner 校验。普通目录名不触发路径别名、task 选择或权限变化；exact-source Audit 继续使用明确窄范围。
+
+
 本文只描述当前子代理主链路。
 
 `SubAgentManager` 不再接收 `closeout_for_all_task_nodes`，`runner_result_service.py` 也不生成

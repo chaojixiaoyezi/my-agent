@@ -37,7 +37,6 @@ def test_explicit_coordinator_product_delivery_uses_output_files_without_extra_w
     assert result.ok is True
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
     assert params.extra_write_roots == [
-        str(Path("/tmp/project/build").resolve(strict=False)),
         str(Path("/tmp/project").resolve(strict=False)),
     ]
 

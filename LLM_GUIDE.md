@@ -21,16 +21,20 @@
 
 ## 2026-08-23 当前运行基线
 
+- 普通主代理与子代理的文件权限墙是 canonical owner home；业务 tasks、output、work、workspace 目录名
+  不参与权限、执行选择或参数重写。工具的显式路径和正文保持原样，普通相对路径以真实 cwd 解析。
+  新宿主运行记录落在 owner_runs_dir/日期/身份哈希，与用户项目分开；旧 tasks 运行引用仍可恢复，不搬迁用户文件。
+  稳定目录指南复用 Owner Scope 和 home_context_enabled；workspace_task_path_template 仅是模型整理建议，
+  不新增取名模型调用或家目录全量扫描，主/子代理共用。SOUL 确认、owner 隔离、control-plane 与 exact Audit 保留。
+
 - Gateway TUI 的显式 resume 复用同一可见 preflight：readiness 后才读取授权 owner/session 的 canonical
   历史，恢复成功后才启动 worker。历史读取不在界面线程做 HTTP；失败明确退出，已退出客户端的迟到结果
   不得重启 worker。本地/普通终端模式保留既有恢复路径，不引入空历史或重复 Gateway 兜底。
 
-- 普通工具的 `workspace:*` 只是当前 turn 调度/审计事实，不进入跨 run 持久
-  `resource_locks`；父子代理共享同一 canonical task root 和交付路径。operation 幂等/replay、精确
-  `logical:*` 互斥、active turn、owner 墙、write boundary 和沙箱仍保留。任务晋升前，本地可信 CLI/TUI
-  可以使用经 Gateway 校验的启动 cwd；首个工作动作晋升任务后，main、child、grandchild 的默认 cwd
-  统一切到 `<owner_home>/tasks/<task_path>/`。远程用户始终只在各自 owner home 下，任何代理都不得继承
-  单 Gateway daemon 的 `/root`。
+- 普通工具的 workspace 只是当前 turn 调度/审计事实，不进入跨 run 持久目录锁。
+  父子代理共享当前用户的 home 文件范围，operation 幂等、精确逻辑锁、active turn、owner 墙和沙箱仍保留。
+  任务晋升不改变 cwd；默认从 owner home 工作，用户明确指定的外部位置仍须满足宿主 Full Access。
+  普通子代理不会继承管理员的外部 cwd；任何代理都不得继承单 Gateway daemon 的 /root。
 - 模型成本统计复用唯一 `ModelCallLedger`，按 request/run 累计 provider input/output/
   cache-read/cache-creation，明细裁剪不截断总账。无 provider usage 时按结构化估算
   单独计数。TUI `ctx` 只表示当前上下文压力，不得当成任务累计消耗。
@@ -49,12 +53,9 @@
   合理假设都会造成实质偏离、越权或不可逆风险的关键缺口才问一个简短问题。该纪律不解析用户正文、不生成
   机器状态、不恢复完成验收；发布 YAML 与 dataclass 默认值必须逐字一致，用户仍可通过唯一
   `system_prompt` 配置入口覆盖。
-- 会话的 `workspace_task_id` 是状态/导航投影，不是终态普通任务对新回合的 cwd 权威。
-  Gateway 只在 exact request-level `conversation_runtime`、未结束 `/goal` 或 active task 存在时，
-  才在首次模型采样前投影原 `conversation_execution_cwd/runtime_workspace_roots`；普通
-  `completed/interrupted` 之后的新工作懒建新目录。写工具若显式命中同 thread 某个唯一
-  canonical task root，再以该结构化路径回绑；同根多代选最新 terminal link，多根或多个
-  active executor 时 fail closed。路由不解析“继续/新任务”等文字。
+- 会话的 workspace_task_id 和 run_workspace 是状态/导航/恢复引用，不决定用户文件落点。
+  exact request、Goal 和 child wake 可复用运行身份；普通新轮建立独立记录，但 cwd 和 home 文件范围不变。
+  文件路径不再触发运行回绑、进度账搬迁或旧路径重写。历史 task 状态不会阻止使用同 home 的已有文件。
 - 子代理完成、阻塞或能力申请唤醒不是一条新用户任务，而是原 root active turn 的后续工作片。必须从
   exact thread/task link 恢复原始 objective 和 task path：原始 objective 继续占据 `User Task` /
   `root_user_prompt`，结构化 wake 只作为 runtime continuation 注入。该 root 自己的 canonical tool-output

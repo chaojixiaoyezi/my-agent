@@ -208,7 +208,7 @@ def test_repair_file_task_with_output_ref_defaults_to_workspace_root():
     assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
 
 
-def test_repair_task_uses_required_read_target_as_product_root(tmp_path):
+def test_repair_task_keeps_host_workspace_without_target_derived_authority(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)
@@ -245,7 +245,6 @@ def test_repair_task_uses_required_read_target_as_product_root(tmp_path):
     assert result.ok is True
     assert task.allowed_write_roots == [
         str(task.task_dir),
-        str(target.parent.resolve(strict=False)),
         str(tmp_path.resolve(strict=False)),
     ]
 
@@ -563,8 +562,8 @@ def test_legacy_system_default_output_stays_out_of_child_result_index(tmp_path):
     assert row["read_order"] == []
 
 
-def test_output_prefixed_task_output_file_does_not_duplicate_output_dir(tmp_path):
-    """output/foo.md 已经是任务 output 下路径，不能再拼成 output/output/foo.md。"""
+def test_output_prefixed_file_resolves_against_real_host_workspace(tmp_path):
+    """output/foo.md 是普通 cwd 相对路径，不受运行记录的任务目录影响。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)
@@ -579,11 +578,11 @@ def test_output_prefixed_task_output_file_does_not_duplicate_output_dir(tmp_path
     }).output)
 
     output_ref = payload["tasks"][0]["attributes"]["output_files"][0]
-    assert output_ref == str((task_root / "output" / "report.md").resolve(strict=False))
+    assert output_ref == str((tmp_path / "output" / "report.md").resolve(strict=False))
     assert "/output/output/" not in output_ref
 
 
-def test_model_invented_owner_home_output_is_rebased_into_current_task(tmp_path):
+def test_explicit_owner_home_output_is_preserved_without_rebasing(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     owner_home = tmp_path / "owners" / "user-a"
@@ -604,12 +603,11 @@ def test_model_invented_owner_home_output_is_rebased_into_current_task(tmp_path)
     )
 
     child = agent.subagents.load(payload["created_run_ids"][0])
-    expected = str((task_root / "output" / invented.name).resolve(strict=False))
+    expected = str(invented.resolve(strict=False))
     assert child.attributes["output_files"] == [expected]
-    # goal 是模型原始沟通文本，不再作为路径机器事实被静默重写；执行边界只读取
-    # 上面的结构化 output_files，因此即使模型口头写错 owner 根也不能越界落盘。
+    # 家目录内显式落点有效；整理规则只提示模型，不篡改它的目标和正文。
     assert str(invented) in child.goal
-    assert expected not in child.goal
+    assert str(task_root / "output" / invented.name) not in child.attributes["output_files"]
 
 
 def test_same_output_without_structured_inputs_stays_two_distinct_runs(tmp_path):

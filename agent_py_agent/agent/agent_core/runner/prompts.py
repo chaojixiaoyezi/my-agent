@@ -289,7 +289,7 @@ def _workspace_execution_contract_lines(
         f"- Current working directory (cwd): {execution_cwd}",
         f"- Internal task state root（仅宿主管理的 work/output）: {task_root or 'none'}",
         "- 普通相对目录和文件始终从 cwd 解析；不要把 cwd 拼到内部 task state root 下面。"
-        "只有父级明确给出 `work/...` 或 `output/...` 命名空间时，才使用内部任务区。",
+        "`work/...`、`output/...`、`tasks/...` 也是 cwd 内的普通目录，不表示内部任务区。",
     ]
 
 

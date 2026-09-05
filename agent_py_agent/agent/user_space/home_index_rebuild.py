@@ -216,8 +216,13 @@ def _agent_refs_for_owner(owner: OwnerHomeResult) -> _AgentRefsReport:
     return _AgentRefsReport(refs, load_errors)
 
 
+# LLM: 索引是可重建投影；新 runs 与存量 tasks 的宿主 state.json 都保留，用户项目内容不用于判断状态。
+# 函数用途: 重建运行索引时同时读取当前归档和升级前的记录，不搬动用户文件。
 def _task_state_paths(owner_home: Path) -> list[Path]:
-    return sorted((owner_home / "tasks").glob("*/*/work/state.json"))
+    return sorted(
+        path for root in ("runs", "tasks")
+        for path in (owner_home / root).glob("*/*/work/state.json")
+    )
 
 
 def _read_json_report(path: Path, *, context: str) -> tuple[Path, dict[str, Any], dict[str, object] | None]:

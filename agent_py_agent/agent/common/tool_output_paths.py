@@ -14,15 +14,15 @@ def tool_output_root(root: str | Path) -> Path:
     return Path(root) / "blobs" / "tool_outputs"
 
 
-# LLM: Lookup may read the owner-level index plus canonical task work indexes. Keep traversal
-# bounded to the known two-level task layout and deduplicate resolved paths without reading rows.
-# 函数用途: 枚举当前 owner 范围内可查找的工具输出目录，不读取文件正文。
+# LLM: 查找覆盖新 runs 与原处保留的旧 tasks 索引，保持两层有界遍历；不改变归档写入身份。
+# 函数用途: 枚举 owner 内可查找的工具输出目录，不读正文；切换运行布局不能丢失旧引用。
 def tool_output_roots_for_lookup(root: str | Path) -> tuple[Path, ...]:
     base = Path(root)
     roots = [tool_output_root(base)]
-    tasks_root = base / "tasks"
-    if tasks_root.is_dir():
-        roots.extend(sorted(tasks_root.glob("*/*/work/blobs/tool_outputs")))
+    for namespace in ("runs", "tasks"):
+        archive_root = base / namespace
+        if archive_root.is_dir():
+            roots.extend(sorted(archive_root.glob("*/*/work/blobs/tool_outputs")))
     return _unique_paths(roots)
 
 

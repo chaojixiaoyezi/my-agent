@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-"""LLM: 任务状态只由结构化运行结果、task link 与子代理状态改变，禁止解析自然语言触发。
+"""LLM: 运行状态只由结构化结果、task link 与子代理事件改变；文件路径不再触发任务选择或参数重写。
 
-模块用途: 在普通会话真的开始工作时提升任务、绑定连续工作目录，并在正常 turn 结束后关闭候选。
+模块用途: 普通会话工作时建立可恢复的运行身份；运行归档与用户目录权限相互独立。
 """
 
 import hashlib
@@ -149,10 +149,8 @@ def _activate_current_conversation_task(
     return link if _publish_current_request_task_binding(current, link) else None
 
 
-# LLM: Materialization must publish one atomic workspace fact set. The generic workspace writer
-# fills run_workspace/delivery refs, while this conversation seam also owns execution_cwd,
-# runtime roots and provider-path rebase metadata; never leave those projections split.
-# 函数用途: 为刚晋升的会话任务创建或复用目录，并同步本轮所有工具与子代理使用的唯一工作区。
+# LLM: 运行归档仅由通用 writer 建立；会话层同步 task link，不能更改用户 cwd 或文件访问范围。
+# 函数用途: 创建或恢复本轮宿主记录，保留主代理和子代理用于停止、进度与恢复的唯一身份。
 def _materialize_promoted_workspace(
     agent: object,
     current: object,
@@ -162,13 +160,6 @@ def _materialize_promoted_workspace(
 ):
     """把已晋升会话任务绑定到真实 workspace；失败时保留任务链接但不伪造路径。"""
     attrs = getattr(current, "task_attributes", None)
-    pre_materialize_workspace = (
-        _workspace_task_root(attrs.get("run_workspace"))
-        or str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
-        or str(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR) or "").strip()
-        if isinstance(attrs, dict)
-        else ""
-    )
     inherited = _selected_task_workspace(getattr(link, "task_path", ""))
     if inherited is not None and isinstance(attrs, dict):
         # 链接已持有既有目录(续接/新执行代数继承原目录):先填进本轮工作区,
@@ -189,7 +180,6 @@ def _materialize_promoted_workspace(
             agent,
             attrs,
             Path(workspace).expanduser().resolve(strict=False),
-            rebase_from=pre_materialize_workspace,
         )
     store = getattr(agent, "conversation_store", None)
     if store is None:
@@ -258,12 +248,10 @@ def _sticky_workspace_task_id(store: object, thread_id: str) -> str:
     return str(getattr(thread, "workspace_task_id", "") or "").strip()
 
 
-# LLM: Binding uses an exact structured task id and never matches prose. A terminal task selected
-# by exact authority yields a fresh execution successor over the same cwd; only a paused structured
-# /goal resumes in place because the goal record itself owns that durable task id.
-# 函数用途: 内部绑定既有工作目录；普通终态任务保持终态，新一轮另建运行身份。
+# LLM: 精确绑定以激活后的 link.task_id 判断是否换代；重复绑定当前 successor 不得自我 supersede，旧终态不复活。
+# 函数用途: 按同 owner/thread 的明确运行身份恢复归档引用；不因访问旧文件而调用。
 def bind_current_conversation_workspace(agent: object, task_id: str):
-    """由结构化会话身份或精确写入路径绑定既有目录，不作为模型工具暴露。"""
+    """由结构化会话身份绑定既有运行归档，不读取工具文件路径，也不作为模型工具暴露。"""
     current = getattr(agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None) if current is not None else None
     thread_id = str(attrs.get("conversation_thread_id") or "").strip() if isinstance(attrs, dict) else ""
@@ -288,7 +276,7 @@ def bind_current_conversation_workspace(agent: object, task_id: str):
         attrs.get("conversation_task_id") or ""
     ).strip()
     link = _activate_reusable_workspace_link(agent, store, link)
-    if link is None or not _supersede_prior_current(store, thread_id, prior_current_id, selected_id):
+    if link is None or not _supersede_prior_current(store, thread_id, prior_current_id, link.task_id):
         return None
     attrs["conversation_task_id"] = link.task_id
     workspace = _selected_task_workspace(link.task_path)
@@ -410,35 +398,6 @@ def _remove_rebound_placeholder_workspace(
     )
 
 
-def rebase_subagent_conversation_workspace(agent: object, link: object) -> bool:
-    """Bind a child runner to an exact workspace without changing parent task state.
-
-    A subagent has its own runner identity and working directory, while
-    ``conversation_task_id`` remains the parent-task lineage it reports into.  This
-    mirrors the separate parent-id/cwd fields used by 会话运行时 and the separate
-    parent-session/child-session fields used by 通道运行时.  Rebinding a child cwd must
-    therefore never reopen, supersede, or select a conversation task globally.
-    """
-    from ..agent_core.runner.context import current_subagent_run_id
-
-    if not current_subagent_run_id(agent):
-        return False
-    current = getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None) if current is not None else None
-    if not isinstance(attrs, dict):
-        return False
-    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
-    if not thread_id or thread_id != str(getattr(link, "thread_id", "") or "").strip():
-        return False
-    workspace = _selected_task_workspace(getattr(link, "task_path", ""))
-    if workspace is None:
-        return False
-    _set_current_task_workspace(agent, attrs, workspace)
-    attrs["conversation_subagent_workspace_rebase"] = {
-        "task_id": str(getattr(link, "task_id", "") or "").strip(),
-        "task_root": str(workspace),
-    }
-    return True
 
 
 def _publish_current_request_task_binding(current: object, link: object) -> bool:
@@ -475,32 +434,18 @@ def _remember_conversation_workspace(store: object, link: object) -> bool:
     )
 
 
-# LLM: First promotion rebases provider-generated paths from the trusted client cwd into the
-# canonical owner/task workspace. Later reselection rebases from the previous task root.
-# 函数用途: 切换本轮唯一任务目录，并登记已有工具参数需要从哪个旧根重定向。
+# LLM: run_workspace 只承载宿主运行账本和恢复引用，不是用户文件的 cwd 或权限根。
+# 函数用途: 切换当前运行记录的归档位置；家目录、显式工具路径和会话 cwd 保持原样。
 def _set_current_task_workspace(
     agent: object,
     attrs: dict[str, object],
     workspace: Path,
-    *,
-    rebase_from: str = "",
 ) -> None:
-    previous_workspace = str(rebase_from or "").strip() or (
-        _workspace_task_root(attrs.get("run_workspace"))
-        or str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
-        or str(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR) or "").strip()
-    )
-    if previous_workspace and previous_workspace != str(workspace):
-        attrs["conversation_rebase_from_task_root"] = previous_workspace
     attrs["run_workspace"] = {
         "task_root": str(workspace),
         "output_dir": str(workspace / "output"),
         "work_dir": str(workspace / "work"),
     }
-    attrs[CONVERSATION_EXECUTION_CWD_ATTR] = str(workspace)
-    attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = [str(workspace)]
-    # 一轮内后续工具仍持有同一个 agent；同步唯一当前工作区，确保派工、finding 与
-    # 动态 write boundary 不会继续引用本轮刚创建的占位目录。
     agent._current_run_task_workspace = str(workspace)
 
 
@@ -623,6 +568,8 @@ def _continue_terminal_link_as_new_execution(agent: object, store: object, link:
     return successor
 
 
+# LLM: 同一 request/source/path 的活跃 successor 幂等复用；superseded 槽位只能分配下一代，不复活旧代或覆盖其他路径。
+# 函数用途: 为一次请求往返历史目录选择稳定运行编号；失败和未知状态仍拒绝，所有编号从结构化任务账派生。
 def _terminal_successor_task_id(
     store: object,
     thread_id: str,
@@ -653,14 +600,20 @@ def _terminal_successor_task_id(
         return base_id
     suffix = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:8]
     derived = f"{base_id}-continue-{suffix}"
-    existing = by_id.get(derived)
-    if existing is None:
-        return derived
-    if (
-        str(getattr(existing, "status", "") or "").strip().lower() == "active"
-        and str(getattr(existing, "task_path", "") or "") == task_path
-    ):
-        return derived
+    # 已占用编号数不超过任务数，因此这段有界扫描必能发现空槽或明确的状态/路径冲突。
+    # 同一请求 A→B→A 需要新代；第一次 A 的 superseded 记录仍是历史事实，不能重新激活。
+    for visit in range(len(by_id) + 1):
+        candidate = derived if visit == 0 else f"{derived}-visit-{visit + 1}"
+        existing = by_id.get(candidate)
+        if existing is None:
+            return candidate
+        if str(getattr(existing, "task_path", "") or "") != task_path:
+            return ""
+        status = str(getattr(existing, "status", "") or "").strip()
+        if status == "active":
+            return candidate
+        if status != "superseded":
+            return ""
     return ""
 
 
@@ -805,6 +758,8 @@ def conversation_thread_execution_state(store: object, thread_id: str) -> dict[s
     }
 
 
+# LLM: 运行观测只使用同 thread 的 typed policy/watch_run_id，不把等待者自身当成活跃执行。
+# 函数用途: 汇总持久进度策略所观察的运行身份，供恢复与重复执行检查使用，不判断业务目录访问权。
 def _append_thread_policy_execution_state(
     store: object,
     thread_id: str,
@@ -834,13 +789,9 @@ def _append_thread_policy_execution_state(
         metadata = getattr(item, "metadata", None)
         metadata = metadata if isinstance(metadata, dict) else {}
         if str(metadata.get("kind") or "") == "subagent_progress_watch":
-            # wait 登记的是「等某 run 的进度」:被 watch 的 run 才是执行中的对象,
-            # task_id 只是调度归属(通常=父任务自身),不能作为 running 源——
-            # 否则父任务唤醒轮续接会被自己的 wait policy 判成 running,被
-            # workspace blocker 拦成 CONVERSATION_TASK_BINDING_FAILED 死锁
-            # (真机 2026-08-09 requests 复刻:claim 驱动轮 sticky 回落 bind 被拦,
-            # 父代理全部工具禁足,连 cancel policy 都救不了自己)。
-            # self-watch(watch_run_id 空或=task_id)不证明任何 run 在执行。
+            # wait 的 task_id 是等待者的调度归属，watch_run_id 才是被观察对象。
+            # 将父任务自己的等待策略算作运行证据，会错误阻止其 typed wake 续接。
+            # self-watch（watch_run_id 空或等于 task_id）不证明任何 run 在执行。
             watched = str(metadata.get("watch_run_id") or "").strip()
             task_id_field = str(getattr(item, "task_id", "") or "").strip()
             if not watched or watched == task_id_field:
@@ -910,52 +861,6 @@ def _append_execution_source(
     selected_id = str(task_id or "").strip()
     if selected_id:
         sources_by_task_id.setdefault(selected_id, []).append(source)
-
-
-# LLM: This gate reads only exact execution state.  Historical task candidates never block a new
-# turn; only a genuinely live executor may prevent concurrent mutation of the same workspace.
-# 函数用途: 只阻止同目录双执行，不要求用户或模型选择、开始、关闭旧任务。
-def conversation_workspace_execution_blocker(agent: object) -> dict[str, object] | None:
-    current = getattr(agent, "_current_run_params", None)
-    # A task-local child carries the parent conversation ids only for lineage,
-    # wake routing, and archive projection.  It owns an independent runner
-    # lane, so the main conversation's live executor must not block its tools.
-    if str(getattr(current, "context_scope", "") or "").strip().lower() == "task_local":
-        return None
-    attrs = getattr(current, "task_attributes", None)
-    attrs = attrs if isinstance(attrs, dict) else {}
-    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
-    if not thread_id:
-        return None
-    store = getattr(agent, "conversation_store", None)
-    if store is None:
-        return None
-    current_task_id = str(attrs.get("conversation_task_id") or "").strip()
-    if current_task_id:
-        if attrs.get(CONVERSATION_TASK_TURN_ACTIVE_ATTR) is True:
-            return None
-        state = conversation_task_execution_state(store, thread_id, current_task_id)
-        if state["state_available"] is True and state["running"] is not True:
-            return None
-        return {
-            "ok": False,
-            "error": (
-                "The current conversation workspace already has a live executor."
-                if state["state_available"] is True
-                else "The current conversation workspace execution state could not be read safely."
-            ),
-            "thread_id": thread_id,
-            "task_id": current_task_id,
-            "running": state["running"],
-            "state_available": state["state_available"],
-            "sources": state["sources"],
-            "load_errors": state["load_errors"],
-            "how_to_fix": (
-                "Do not launch a second mutating executor in the same workspace. "
-                "The conversation remains available; steer or stop the current turn, or wait for it to finish."
-            ),
-        }
-    return None
 
 
 # LLM: 仅由正常 runtime turn 终态调用；此函数自身不读取最终回复正文。后台
@@ -1237,151 +1142,12 @@ def _workspace_task_root(value: object) -> str:
     return str(value.get("task_root") or "").strip()
 
 
-# LLM: Exact tool-request params are the authority, mirroring 会话运行时 TurnContext propagation.
-# The Agent thread-local remains a compatibility fallback only for direct legacy callers.
-# 函数用途: 按当前工具请求携带的任务目录重定向旧路径，避免共享 Gateway 并发时读错会话。
-def rebase_bound_conversation_workspace_params(
-    agent: object,
-    value: object,
-    *,
-    params: object | None = None,
-) -> object:
-    """Rebase structured tool arguments from this turn's placeholder into the bound task root."""
-    current = params if params is not None else getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None)
-    if not isinstance(attrs, dict):
-        return value
-    source = str(attrs.get("conversation_rebase_from_task_root") or "").strip().rstrip("/\\")
-    target = _workspace_task_root(attrs.get("run_workspace")).rstrip("/\\")
-    if not source or not target or source == target:
-        return value
-    return _rebase_workspace_value(value, source, target)
-
-
-def _rebase_workspace_value(value: object, source: str, target: str) -> object:
-    if isinstance(value, dict):
-        return {key: _rebase_workspace_value(item, source, target) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_rebase_workspace_value(item, source, target) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_rebase_workspace_value(item, source, target) for item in value)
-    if not isinstance(value, str):
-        return value
-    if value == source:
-        return target
-    # 只替换完整目录前缀；不会把相似任务 id（如 req_1 与 req_10）误改。
-    # 正式 task root 通常就在占位 owner root 之下，因此重试/归档再走一次
-    # 本函数时，必须保护已经以 target 开头的片段，不能叠加第二层目录。
-    rebased = _rebase_workspace_text(value, source, target, separator="/")
-    return _rebase_workspace_text(rebased, source, target, separator="\\")
-
-
-# LLM: Rebase may run more than once for the same admitted call; exact target path spans and
-# canonical owner tasks/... addresses are protected before replacing source prefixes.  The latter
-# protection applies only when the selected target itself proves that source is the owner home.
-# 函数用途: 在工具参数中改写启动目录，但保留已经明确指向任一历史任务的绝对地址。
-def _rebase_workspace_text(value: str, source: str, target: str, *, separator: str) -> str:
-    source_prefix = f"{source}{separator}"
-    if source_prefix not in value:
-        return value
-    target_prefix = f"{target}{separator}"
-    pieces: list[str] = []
-    cursor = 0
-    while True:
-        index = value.find(source_prefix, cursor)
-        if index < 0:
-            pieces.append(value[cursor:])
-            break
-        pieces.append(value[cursor:index])
-        if _workspace_text_starts_with_target(value, index, target, separator=separator):
-            pieces.append(target)
-            cursor = index + len(target)
-            continue
-        if _workspace_text_starts_with_owner_task(
-            value,
-            index,
-            source,
-            target,
-            separator=separator,
-        ):
-            pieces.append(source_prefix)
-            cursor = index + len(source_prefix)
-            continue
-        pieces.append(target_prefix)
-        cursor = index + len(source_prefix)
-    return "".join(pieces)
-
-
-# LLM: An absolute <owner>/tasks[/...] path is an explicit cross-task address, not a placeholder
-# cwd.  Infer the owner namespace only from target=<owner>/tasks/...; never protect an arbitrary
-# source/tasks child during later task-to-task rebases.
-# 函数用途: 识别已经指向用户历史任务目录的绝对路径，避免把它套进当前任务目录。
-def _workspace_text_starts_with_owner_task(
-    value: str,
-    index: int,
-    source: str,
-    target: str,
-    *,
-    separator: str,
-) -> bool:
-    owner_tasks_root = f"{source}{separator}tasks"
-    return target.startswith(f"{owner_tasks_root}{separator}") and _workspace_text_starts_with_target(
-        value,
-        index,
-        owner_tasks_root,
-        separator=separator,
-    )
-
-
-# LLM: Boundary checking distinguishes the selected target itself/descendants from a merely
-# similar path segment such as ``task-1-copy``; punctuation after a path counts as prose boundary.
-# 函数用途: 判断当前位置是否已经是正式任务路径，避免错把相似名称当成已转换。
-def _workspace_text_starts_with_target(
-    value: str,
-    index: int,
-    target: str,
-    *,
-    separator: str,
-) -> bool:
-    if not value.startswith(target, index):
-        return False
-    end = index + len(target)
-    if end >= len(value):
-        return True
-    next_char = value[end]
-    return next_char in {
-        separator,
-        "/",
-        "\\",
-        " ",
-        "\t",
-        "\r",
-        "\n",
-        '"',
-        "'",
-        "`",
-        ")",
-        "]",
-        "}",
-        ">",
-        ",",
-        ".",
-        ";",
-        ":",
-        "，",
-        "。",
-        "；",
-        "：",
-        "、",
-    }
 
 
 __all__ = [
     "complete_current_conversation_task",
     "complete_named_audit_task_if_settled",
-    "conversation_workspace_execution_blocker",
     "conversation_task_execution_state",
     "conversation_thread_execution_state",
     "promote_current_conversation_task",
-    "rebase_bound_conversation_workspace_params",
 ]

@@ -110,7 +110,7 @@ def test_main_context_bundle_keeps_conversation_task_id_out_of_model_prompt(
     assert result.bundle["task"]["attributes"]["conversation_task_id"] == "durable-work-task"
 
 
-def test_pending_conversation_bundle_hides_owner_absolute_paths_from_model_prompt(
+def test_pending_conversation_bundle_exposes_real_home_without_future_cwd_switch(
     tmp_path: Path,
 ) -> None:
     owner_home = tmp_path / "home" / "owners" / "providers" / "tui" / "users" / "u1"
@@ -126,9 +126,9 @@ def test_pending_conversation_bundle_hides_owner_absolute_paths_from_model_promp
         )
     )
 
-    assert str(owner_home.resolve()) not in result.prompt_section
-    assert str((tmp_path / "home").resolve()) not in result.prompt_section
-    assert "首个工作工具会固定任务目录" in result.prompt_section
+    assert str(owner_home.resolve()) in result.prompt_section
+    assert str((tmp_path / "home").resolve()) in result.prompt_section
+    assert "首个工作工具会固定任务目录" not in result.prompt_section
     assert result.bundle["workspace_refs"]["primary_workspace_root"] == str(
         owner_home.resolve()
     )

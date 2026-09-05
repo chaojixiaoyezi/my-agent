@@ -636,9 +636,8 @@ def _manager_workspace_attrs(manager: Any) -> dict[str, object]:
     return attrs
 
 
-# LLM: A promoted run_workspace task root outranks conversation cwd and manager fallback.
-# This preserves one owner/task boundary across main, child, grandchild, and one Gateway.
-# 函数用途: 生成子代理最终任务属性，让每个 TUI 的整棵代理树留在自己的任务目录。
+# LLM: 子代理 cwd 与归档目录相互独立，只从父级宿主属性或 manager 用户范围继承。
+# 函数用途: 保存子代理的真实文件起点，不把内部 run 目录当成产品项目目录。
 def _task_attrs_for_create(manager: Any, params: CreateRunParams) -> dict[str, object]:
     from ...conversation.authority import (
         conversation_execution_cwd,
@@ -647,23 +646,13 @@ def _task_attrs_for_create(manager: Any, params: CreateRunParams) -> dict[str, o
 
     attributes = dict(params.attributes or {})
     workspace_attrs = _manager_workspace_attrs(manager)
-    run_workspace = attributes.get("run_workspace")
-    task_root = (
-        str(run_workspace.get("task_root") or "").strip()
-        if isinstance(run_workspace, dict)
-        else ""
-    )
-    cwd = task_root or conversation_execution_cwd(attributes)
+    cwd = conversation_execution_cwd(attributes)
     if cwd:
         try:
             workspace_attrs["workspace_root"] = str(
                 Path(cwd).expanduser().resolve(strict=False)
             )
-            roots = (
-                (task_root,)
-                if task_root
-                else conversation_runtime_workspace_roots(attributes)
-            )
+            roots = conversation_runtime_workspace_roots(attributes)
             workspace_attrs["workspace_roots"] = [
                 str(Path(item).expanduser().resolve(strict=False))
                 for item in roots

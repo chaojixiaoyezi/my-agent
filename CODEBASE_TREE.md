@@ -211,6 +211,7 @@ agent_py_agent/
 |   |-- test_adapter_ingress.py         # adapter POST 前落盘、幂等/隔离、响应丢失与崩溃恢复回归
 |   |-- test_agent_transcript.py        # 子代理公开过程事件的增量游标、隔离和有界裁剪回归
 |   |-- test_chat_prompt_queue.py       # canonical chat Queue 精确回取、FIFO 与 unfinished-task 对账
+|   |-- test_owner_home_workspace.py    # 主/子代理家目录范围、跨 owner 拒绝、运行记录分离与软整理指南
 |   |-- test_tui_ansi_snapshot.py       # ANSI offset 重放、样式/背景、Unicode、resize 和坏账 fail-closed 回归
 |   |-- test_tui_agent_navigation.py    # 子代理选中/进入/返回、详情过程、只读终态与 footer 回归
 |   |-- test_tui_events.py              # TUI event 信封、sequencer、cursor、重复/冲突/乱序与有界重放
@@ -286,6 +287,9 @@ docs/
 
 ### 关键文件说明
 
+- `agent_py_agent/tests/test_owner_home_workspace.py`：家目录主/子代理读写、跨 owner/符号链接拒绝、控制文件保护、普通目录名与缓存稳定整理指南。
+
+
 - `agent/conversation/history_display.py`：同一 canonical message/native envelope 的只读公开显示转换入口，
   Gateway 与本地恢复共用；不拥有模型上下文、Compact、工具执行或第二份会话账本。
 
@@ -293,7 +297,7 @@ docs/
 ~/.my-agent/owners/<provider>/<kind-or-id>/
 |-- SOUL.md                             # AI 人格；用户明确确认后经 PersonaRepository 更新
 |-- USER.md                             # 当前用户明确表达的稳定画像与偏好
-|-- AGENTS.md                           # 长期合作方式；用户明确确认后更新
+|-- AGENTS.md                           # 长期合作方式；模型经 PersonaRepository 自主维护
 |-- memory-hot.md                      # 每轮必读的少量高频短规则与精确 lesson 引用
 |-- memory.md                          # 短导航，不保存第二份事实或教训正文
 |-- memory/
@@ -306,10 +310,12 @@ docs/
 |   |-- lessons/*.md                   # 可复用正式教训唯一详细正文
 |   `-- routing/INDEX.md               # 由 lesson metadata 确定性重建的路由索引
 |-- audit/YYYY-MM-DD.jsonl              # raw turn/tool/gateway 黑盒索引；非完整对话权威
-|-- tasks/<date>/<task-slug>/           # 当前任务工作区
-|   |-- output/                         # 最终交付物
-|   `-- work/                           # 状态、日志、子代理原始结果与过程产物
-|       `-- blobs/tool_outputs/         # 大工具输出完整正文；Memory 只保存 preview/hash/size/ref
+|-- tasks/<date>/<task-slug>/           # 模型自行整理的用户工作；命名仅为软提示，旧目录不搬迁
+|   |-- inputs/                         # 按需保留来源材料
+|   `-- output/                         # 用户成品；代码按实际项目结构组织
+|-- runs/<date>/<runtime-key>/          # 宿主运行归档，不作为 cwd 或普通文件权限根
+|   |-- output/                         # 宿主兼容交接区，不是新业务默认落点
+|   `-- work/                           # 状态、日志、代理交接与大输出归档
 |-- agents/<run_id>/                    # 子代理 refs-only projection
 |-- data/artifact_backups/v1/           # 前台 shell 改动 ready 产物时保留的 owner 私有哈希恢复 blob
 |-- workspace/runtime/workspaces/<scope>/# LocalStore、gateway、conversation 等 workspace 账本

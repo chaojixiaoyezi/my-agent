@@ -94,9 +94,14 @@ def _task_state_files(paths: MyAgentHomePaths, date_key: str | None) -> list[Pat
     return sorted(dict.fromkeys(files), reverse=True)
 
 
+# LLM: 状态查询只投影宿主运行记录；兼读旧 tasks 归档，不按目录名判业务任务状态。
+# 函数用途: 查找新 runs 与历史 tasks 的真实 state 文件，避免布局分离后 /home 漏掉运行。
 def _task_workspace_roots(paths: MyAgentHomePaths) -> tuple[Path, ...]:
-    owner_tasks = getattr(paths, "owner_tasks_dir", None)
-    return (Path(owner_tasks),) if owner_tasks else ()
+    return tuple(dict.fromkeys(
+        Path(value)
+        for attr in ("owner_runs_dir", "owner_tasks_dir")
+        if (value := getattr(paths, attr, None))
+    ))
 
 
 def _task_state_files_under(root: Path, date_key: str | None) -> list[Path]:

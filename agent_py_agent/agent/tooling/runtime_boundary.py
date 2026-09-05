@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-"""Pure normalization and exact task-boundary checks used before execution."""
+"""LLM: 仅还原宿主展示的 owner-home 别名；普通相对路径始终相对 cwd，绝不按 tasks/output/work 名字重定向。
 
-import re
+模块用途: 在统一执行入口还原脱敏地址并核对精确只读范围，不改变用户业务目录语义。
+"""
+
 from pathlib import Path
 from typing import Any
 
-# LLM: This module normalizes only host-declared workspace aliases before policy and execution.
-# It must never infer paths from prose or widen the boundary; absolute canonical paths remain
-# idempotent and every rewritten path is still checked by the normal read/write policy.
-# 模块用途: 把 output/work/workspace 和 owner 内 tasks/... 地址转成唯一物理路径，避免重复拼接任务目录。
-
-_TASK_WORKSPACE_RELATIVE_PATH_TOOL_NAMES = {
+_OWNER_HOME_ALIAS_TOOL_NAMES = {
     "apply_patch",
     "edit_file",
     "find_files",
@@ -29,19 +26,18 @@ _READ_BOUNDARY_TOOL_NAMES = {
 _MODEL_OWNER_HOME_ALIAS = "~/.my-agent/owner"
 
 
-# LLM: This is the sole argument canonicalizer for task workspace aliases. Keep it pure and
-# ensure callers still run authorization, hashing, sandboxing, and handlers after normalization.
-# 函数用途: 在工具执行前统一路径别名，包括补丁头里的文件路径。
-def canonicalize_task_workspace_arguments(
+# LLM: 只把宿主展示别名还原为同 owner 地址；哈希、权限和 handler 继续共享同一参数，不改普通路径。
+# 函数用途: 还原脱敏家目录，包括补丁文件头；补丁正文、绝对路径和业务目录名保持原样。
+def canonicalize_owner_home_arguments(
     tool_name: str,
     arguments: dict[str, Any],
     write_boundary: dict[str, object] | None,
 ) -> dict[str, Any]:
-    """Resolve host-declared task aliases before policy, hashing, and execution."""
+    """Resolve only the display home alias before policy, hashing, and execution."""
 
     params = dict(arguments)
     if (
-        tool_name not in _TASK_WORKSPACE_RELATIVE_PATH_TOOL_NAMES
+        tool_name not in _OWNER_HOME_ALIAS_TOOL_NAMES
         or not isinstance(write_boundary, dict)
     ):
         return params
@@ -84,6 +80,8 @@ def exact_read_boundary_error(
     return "只能读取当前任务结构化授权的输入或本 run 工作目录。"
 
 
+# LLM: 此入口只恢复补丁头里的 owner 展示别名，不解释业务目录，也不改补丁正文中的路径。
+# 函数用途: 遍历补丁文件头；没有需要还原的地址时返回空值，调用方保留原始补丁。
 def _task_workspace_relative_patch(
     raw_patch: object,
     boundary: dict[str, object],
@@ -100,6 +98,8 @@ def _task_workspace_relative_patch(
     return "\n".join(rewritten_lines) if changed else ""
 
 
+# LLM: 只有结构化补丁头可还原 owner 别名；正文的相同文字不能成为文件路由依据。
+# 函数用途: 识别新增、修改、删除和移动文件头，保留其他每一行的原文。
 def _task_workspace_patch_header(
     line: str,
     boundary: dict[str, object],
@@ -119,6 +119,8 @@ def _task_workspace_patch_header(
     return line
 
 
+# LLM: 普通相对地址、绝对地址及 tasks/output/work 名称不作映射；仅尝试还原宿主 owner 展示别名。
+# 函数用途: 规范化待识别的展示地址，再交给唯一 owner 别名解析器；不会选择任务或授予权限。
 def _task_workspace_relative_path(
     raw: object,
     boundary: dict[str, object],
@@ -132,26 +134,6 @@ def _task_workspace_relative_path(
     owner_alias_path = _model_owner_home_alias_path(normalized, boundary)
     if owner_alias_path:
         return owner_alias_path
-    if _is_absolute_or_home_path(normalized):
-        return ""
-    owner_task_path = _owner_tasks_alias_path(normalized, boundary)
-    if owner_task_path:
-        return owner_task_path
-    current_task_path = _current_task_alias_path(normalized, boundary)
-    if current_task_path:
-        return current_task_path
-    for prefix, root_key in (
-        ("output", "task_output_dir"),
-        ("work", "task_work_dir"),
-        ("workspace", "owner_workspace_dir"),
-    ):
-        rewritten = _task_workspace_prefixed_path(
-            normalized,
-            prefix,
-            boundary.get(root_key),
-        )
-        if rewritten:
-            return rewritten
     return ""
 
 
@@ -183,30 +165,6 @@ def _model_owner_home_alias_path(
     return str(candidate)
 
 
-# LLM: An owner-relative tasks/... value is a canonical address, not cwd-relative prose. Resolve
-# it only from the host-authored owner wall; later read/write policy and exact mutation rebind still
-# decide access. This lets a model reuse a session_search task_ref without nesting it under cwd.
-# 函数用途: 把当前用户自己的 tasks/... 地址还原到 owner 根，但不因此授予读写权。
-def _owner_tasks_alias_path(
-    normalized: str,
-    boundary: dict[str, object],
-) -> str:
-    parts = tuple(part for part in normalized.split("/") if part)
-    if not parts or parts[0] != "tasks" or any(part in {".", ".."} for part in parts):
-        return ""
-    owner_root = _canonical_owner_address_root(boundary)
-    if owner_root is None:
-        return ""
-    try:
-        tasks_root = (owner_root / "tasks").resolve(strict=False)
-        candidate = owner_root.joinpath(*parts).resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        return ""
-    if not _is_relative_to(candidate, tasks_root):
-        return ""
-    return str(candidate)
-
-
 # LLM: Address resolution prefers the explicit canonical owner home and only falls back to the
 # security wall for older host callers. This helper never grants access; normal read/write policy
 # still evaluates the canonical result after rewriting.
@@ -225,63 +183,6 @@ def _canonical_owner_address_root(
         return Path(root_text).expanduser().resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return None
-
-
-# LLM: Model-visible owner-relative task addresses are aliases only when their exact tasks/...
-# prefix matches the host-authored current task root. This prevents cwd/tasks/... duplication
-# without treating arbitrary relative paths as owner-home authority.
-# 函数用途: 将当前任务的 tasks/日期/任务名/... 地址幂等地还原为真实路径。
-def _current_task_alias_path(
-    normalized: str,
-    boundary: dict[str, object],
-) -> str:
-    parts = tuple(part for part in normalized.split("/") if part)
-    if not parts or parts[0] != "tasks" or any(part in {".", ".."} for part in parts):
-        return ""
-    root_text = str(boundary.get("task_root") or "").strip()
-    if not root_text:
-        return ""
-    try:
-        task_root = Path(root_text).expanduser().resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        return ""
-    root_parts = task_root.parts
-    task_indexes = [index for index, part in enumerate(root_parts) if part == "tasks"]
-    if not task_indexes:
-        return ""
-    for index in reversed(task_indexes):
-        alias_parts = root_parts[index:]
-        if tuple(parts[: len(alias_parts)]) != alias_parts:
-            continue
-        suffix = parts[len(alias_parts) :]
-        return str((task_root.joinpath(*suffix)).resolve(strict=False))
-    return ""
-
-
-def _task_workspace_prefixed_path(
-    normalized: str,
-    prefix: str,
-    raw_root: object,
-) -> str:
-    suffix = _task_workspace_path_suffix(normalized, prefix)
-    if suffix is None:
-        return ""
-    root = str(raw_root or "").strip()
-    if not root:
-        return ""
-    try:
-        base = Path(root).expanduser().resolve(strict=False)
-    except OSError:
-        return ""
-    return str((base / suffix).resolve(strict=False)) if suffix else str(base)
-
-
-def _task_workspace_path_suffix(normalized: str, prefix: str) -> str | None:
-    if normalized == prefix:
-        return ""
-    if normalized.startswith(prefix + "/"):
-        return normalized[len(prefix) + 1 :]
-    return None
 
 
 def _resolved_boundary_paths(
@@ -318,14 +219,7 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def _is_absolute_or_home_path(text: str) -> bool:
-    return text.startswith("/") or text.startswith("~") or bool(
-        re.match(r"^[A-Za-z]:[\\/]", text)
-        or re.match(r"^\\\\[^\\/]+[\\/][^\\/]+", text)
-    )
-
-
 __all__ = [
-    "canonicalize_task_workspace_arguments",
+    "canonicalize_owner_home_arguments",
     "exact_read_boundary_error",
 ]

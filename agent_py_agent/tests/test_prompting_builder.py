@@ -93,7 +93,7 @@ class TestPromptBuilderInit:
         assert "current_local_time:" in projected
         assert projected.count("相对路径默认相对当前工具工作目录") == 1
         assert "权限允许写入目录（不代表默认落点）" in projected
-        assert "只以当前工具工作目录为默认落点" in projected
+        assert "文件整理遵循家目录约定" in projected
 
     def test_runtime_workspace_projection_does_not_present_owner_home_as_default(self, tmp_path):
         owner_root = tmp_path / "owners" / "u1"
@@ -113,21 +113,14 @@ class TestPromptBuilderInit:
         assert f"当前工具工作目录（仅供执行定位）: {task_root}" in projected
         assert f"权限允许写入目录（不代表默认落点）: {owner_root}" in projected
         assert "当前允许写入目录" not in projected
-        assert "更宽的用户空间仅表示可以访问已有资料" in projected
+        assert "这只是整理纪律，不是权限限制" in projected
 
-    def test_pending_conversation_workspace_exposes_relative_write_aliases(self, tmp_path):
+    def test_conversation_without_task_keeps_real_cwd_visible(self, tmp_path):
         builder = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path)
-
-        projected = project_runtime_workspace_context(
-            builder.snapshot_workspace_context(),
-            task_workspace_pending=True,
-        )
-
-        assert "尚未建立任务写入目录" in projected
-        assert "新产物继续使用相对路径" in projected
-        assert "首个工作工具调用时由宿主固定到本轮任务目录" in projected
-        assert str(tmp_path.resolve()) not in projected
-        assert "不要把 owner 私人空间或宿主目录拼成绝对写路径" in projected
+        projected = project_runtime_workspace_context(builder.snapshot_workspace_context())
+        assert str(tmp_path.resolve()) in projected
+        assert "首个工作工具调用时由宿主固定" not in projected
+        assert "相对路径默认相对当前工具工作目录" in projected
 
     def test_group_owner_scope_is_shared_without_exposing_owner_id(self, tmp_path):
         builder = PromptBuilder(

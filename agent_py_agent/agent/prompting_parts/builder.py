@@ -159,6 +159,8 @@ class PromptBuilder:
         task_local = _is_task_local_context(request.context_scope)
         memory_text = _memory_text([] if task_local else request.memories)
         owner_scope = _owner_scope_text(self)
+        if home_guide := _home_directory_guide(self):
+            owner_scope += "\n\n" + home_guide
         dynamic = _dynamic_prompt_text(self, request, task_local)
         injected = "\n".join(request.inject or [])
         workspace_context = (
@@ -265,15 +267,8 @@ def project_runtime_workspace_context(
     allowed_write_roots: list[str] | tuple[str, ...] = (),
     task_output_dir: str = "",
     task_work_dir: str = "",
-    task_workspace_pending: bool = False,
 ) -> str:
-    """Project the live Tool Gateway cwd/write roots into a frozen turn snapshot.
-
-    Wall-clock facts remain frozen for prompt-cache stability, while the execution
-    workspace may legitimately change once an ordinary conversation is promoted to
-    a task.  The values here are host-authored runtime facts; no model text or user
-    wording participates in choosing a path.
-    """
+    """投影本轮真实 cwd/权限根；时间保持冻结，运行归档不改变文件路径。"""
 
     lines = str(snapshot or "").splitlines()
     root_prefix = "- 当前工具工作目录（仅供执行定位）:"
@@ -300,8 +295,8 @@ def project_runtime_workspace_context(
                     "- 文件工具和 shell 使用同一个 cwd；用户指定的普通相对路径直接按 cwd 解析。"
                 )
                 projected.append(
-                    "- 普通新任务中，用户没有明确指定位置的文件和目录只以当前工具工作目录为默认落点；"
-                    "更宽的用户空间仅表示可以访问已有资料，不要因此把新产物散落到其根目录。"
+                    "- 文件整理遵循家目录约定；新工作先自选合适目录，旧工作沿用原目录。"
+                    "这只是整理纪律，不是权限限制；目录名不会改变工具参数或任务身份。"
                 )
                 inserted = True
                 continue
@@ -315,36 +310,6 @@ def project_runtime_workspace_context(
             ]
         return "\n".join(projected)
 
-    if task_workspace_pending:
-        # 任务晋升前的 owner home 只是资料读取边界，不是本轮产物 cwd。把它作为
-        # “当前工具工作目录”展示给模型，会诱导模型把该绝对路径复制进 shell 或
-        # child goal；晋升后工具已经切到 canonical task root，二者随即冲突。
-        pending_root = (
-            "- 当前工作目录: 首个工作工具调用时由宿主固定到本轮任务目录；"
-            "开始前不要自行拼接宿主绝对路径。"
-        )
-        projected = []
-        inserted = False
-        for line in lines:
-            if line.startswith(root_prefix):
-                if not inserted:
-                    projected.append(pending_root)
-                    inserted = True
-                continue
-            if line in {relative_line, generic_write_line}:
-                continue
-            projected.append(line)
-        if not inserted:
-            projected.insert(0, pending_root)
-        pending = (
-            "- 当前会话尚未建立任务写入目录；读取已有资料可使用相对路径。"
-            "首次写入、执行或派工时程序会建立并固定任务目录；"
-            "新产物继续使用相对路径（用户要求的普通目录名也保持相对），"
-            "不要把 owner 私人空间或宿主目录拼成绝对写路径。"
-        )
-        if pending not in projected:
-            projected.append(pending)
-        lines = projected
     return "\n".join(lines)
 
 
@@ -431,6 +396,39 @@ def _owner_scope_text(builder: PromptBuilder) -> str:
         "当成任务目录。只有 Full Access 已由宿主开启，并且用户明确指定外部路径或明确要求排查系统问题时，"
         "才离开自己的 owner home。涉及其他用户目录时也必须有用户明确要求；无需额外反问授权，但默认优先"
         "只读，只修改用户明确要求的范围，并尽量少改。WorkspaceOnly 只限制本机文件范围，不限制外部网络。"
+    )
+
+
+# LLM: 目录指南属于稳定 prefix，main/child 共用；只读取现有配置和 canonical home，不扫描文件或调用模型。
+# 函数用途: 告诉个人助手家里各目录的用途；用户可覆盖整理偏好，但不能覆盖结构化权限。
+def _home_directory_guide(builder: PromptBuilder) -> str:
+    if not bool(getattr(builder.config, "home_context_enabled", True)):
+        return ""
+    home = getattr(builder.home_paths, "owner_home_dir", None)
+    if home is None:
+        return ""
+    template = str(getattr(builder.config, "workspace_task_path_template", "tasks/{date}/{task_slug}"))
+    return (
+        f"# 家目录与整理约定\n- 你的家（owner home）: {home}\n"
+        "- 家是主代理和普通子代理共同的文件工作区；tasks 里的不同目录不是权限隔离区。\n"
+        f"- 新的文件工作建议放在 {template}；date 是开始日期，task_slug 是简短可读名称。"
+        "脚本、代码、PPT、报告等小事大事都就近整理，不把文件散落在家根目录。\n"
+        "- 用户说上次那个或继续改时，先查会话/记忆索引和相关文件找到原目录，在原处续做。"
+        "不要因新回合、日期变化或任务完成另建副本，也不用判断长期项目/短期任务状态。"
+        "目标不同时可新建目录；用户明确指定位置或组织方式时优先照办。\n"
+        "- 一个工作目录按需用 inputs/ 放来源材料，src/ 或实际项目结构放代码，output/ 放成品，"
+        "tmp/ 放可重建中间文件；不必为没有内容的分类创建空目录。\n"
+        "- 借用已有项目验证新工具时，先在当前工作的 tmp/ 下准备样本副本；"
+        "不要为了制造增删改案例修改原项目。若用户要求保留原件，交付前用实际文件核对，而不是口头假定未改。\n"
+        "- 上传文件先看工具给出的真实引用，保留原件与来源；有明确归属时在对应工作里整理，"
+        "暂时没有归属的资料可按日期/主题放 inputs/。不要搬动通道的内部存储或随意清理旧成果。\n"
+        "- artifacts/ 可放用户明确希望收藏的成品，skills/ 放可复用技能；需要时建立简短索引，"
+        "不要为了整理重复复制整份项目。workspace/ 是已有工作空间，继续尊重里面现有结构。\n"
+        "- SOUL.md 是人格，修改须用户确认；USER.md 是用户画像，AGENTS.md 是长期约定，"
+        "均通过人格工具维护。memory.md、memory-hot.md 和 memory/ 属于记忆系统，"
+        "通过记忆工具检索/维护，不拿运行日志代替长期记忆，也不把普通任务进度写进人格。\n"
+        "- runs/、agents/、compact/、data/、logs/ 及权限配置是宿主控制记录，不是项目输出目录；"
+        "不要编辑它们绕过运行时。目录用途只是软纪律，实际读写仍服从当前用户权限。"
     )
 
 

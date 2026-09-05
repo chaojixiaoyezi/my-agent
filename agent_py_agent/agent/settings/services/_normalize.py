@@ -211,11 +211,9 @@ _EXTERNAL_KNOWLEDGE_LIST_FIELDS = (
 )
 _HOME_RUNTIME_INT_FIELDS = (
     ("home_lesson_auto_read_limit", 0, 20),
-    ("workspace_task_llm_title_input_chars", 200, 20_000),
 )
 _HOME_RUNTIME_BOOL_FIELDS = (
     "home_context_enabled", "run_task_workspace_enabled",
-    "workspace_task_llm_title_enabled",
 )
 def _normalize_home_strings(out: dict[str, object], defaults: object) -> list[str]:
     warnings: list[str] = []

@@ -1,5 +1,13 @@
 # Verification：开发推进
 
+## R184 删除业务目录执行门（focused 与跨目录真 TUI 通过）
+
+工具主链删除 `conversation_workspace_execution_blocker`、写路径驱动的绑定失败门及参数重写层。
+本轮停止的 active-turn transition、权限、操作幂等、typed handler 结果和被动验证保留；不恢复机器质量验收。
+FT-158/160 两份旧业务文件直接修改，未再出现路径回绑或改写导致的错误目标。FT-161 模型遗漏恢复文件、
+把已恢复说成从未误改，仍按真实内容失败登记 BUG-115；运行终态 DONE 不作为内容正确的证据。
+
+
 ## 2026-09-01 工具批准只认 exact applied approval（本地候选）
 
 - 旧 archive 投影可能把 handler 私有 metadata 中类似 approval 的字段当成“用户已批准”，让后续

@@ -2132,11 +2132,7 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
         )
     if conversation.workspace_task is not None:
         task = conversation.workspace_task
-        # 会话运行时 在模型采样前就把显式 session/turn cwd 固定下来，shell、审批与模型看到
-        # 的目录完全一致。本项目只让 exact request、Goal 或 active task 取得同样权威；
-        # 普通 terminal 历史不会仅凭 thread pointer 进入这个分支。
-        attrs[CONVERSATION_EXECUTION_CWD_ATTR] = task.task_path
-        attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = [task.task_path]
+        # exact task 选择用于运行恢复；用户 cwd 和家目录权限不随内部记录路径改变。
         attrs[CONVERSATION_WORKSPACE_TASK_ID_ATTR] = task.task_id
         attrs[CONVERSATION_WORKSPACE_TASK_STATUS_ATTR] = task.status
         attrs[CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR] = task.execution_running

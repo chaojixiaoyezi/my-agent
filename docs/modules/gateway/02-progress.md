@@ -1,5 +1,22 @@
 # Gateway Progress
 
+
+## R184 文件目录与运行记录分离（focused 与原会话真 TUI 通过）
+
+R183 真机仍失败：正确旧 Go 绝对路径被重写成 HANDOVER 所在目录。按用户新决定删除写目标回绑和全部
+业务目录别名，普通主/子代理使用完整 owner home；新宿主记录留在 runs/，tasks 由模型按稳定提示词整理。
+已通过 532 项相关检查，包含跨自己目录读写、owner/符号链接隔离、停止、旧运行恢复与提示词稳定性。
+`.10` 唯一 Gateway / MiniMax-M2.7，两路原 session 均继续完成实际读写并推进 Compact；新宿主归档写 runs，
+旧业务文件原位修改。任务样本保护与汇报失真另记 BUG-115，不能混作文件权限或 lifecycle 失败。
+
+
+## R183 同请求旧工作区重入（真 TUI 失败，业务目录绑定由 R184 删除）
+
+- R182 实际 task links 是交接目录→Go 目录→交接目录；request-local 交接 successor 已 superseded，重入
+  时唯一候选槽被占用而失败。现只对同路径/同请求的 superseded 槽生成下一代，不覆盖或复活旧终态。
+- 重复选择同一活跃 successor 时按激活后的 task_id 判断是否 supersede，不再对比其历史父 id。
+  Gateway callback、owner/线程边界、Todo 和工作区写入路径沿用原实现；不新增兼容执行或跨用户放权。
+
 ## R182 resume 接入既有 preflight（两路真 TUI 已通过）
 
 - 修复 Gateway 未就绪时 exact resume 提前读历史并退出。薄客户端只向 TUI 传恢复意图，后台 readiness

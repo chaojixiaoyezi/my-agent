@@ -160,9 +160,8 @@ class _HomeProviderConfigFields:
     my_agent_owner_provider: str = "local"
     my_agent_owner_kind: str = "main"
     my_agent_owner_id: str = "main"
+    # 仅向模型说明推荐的业务文件整理格式，不决定运行归档或文件权限。
     workspace_task_path_template: str = "tasks/{date}/{task_slug}"
-    workspace_task_llm_title_enabled: bool = False
-    workspace_task_llm_title_input_chars: int = 2_000
     home_context_enabled: bool = True
     home_lesson_auto_read_limit: int = 3
     home_lesson_stale_caveat_days: int = 7

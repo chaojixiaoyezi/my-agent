@@ -284,10 +284,8 @@ def _attach_task_workspace_roots(boundary: dict[str, object], params: object) ->
             boundary["allowed_write_roots"] = [work_dir, output_dir]
 
 
-# LLM: Before task promotion the host-validated client cwd is effective. After promotion the
-# canonical owner/task root replaces it for cwd and permissions; the daemon launch directory
-# must never remain an ambient write grant for main or children.
-# 函数用途: 主会话默认使用 owner home；真正开始任务后把执行与读写范围收口到唯一任务目录。
+# LLM: 会话 cwd 与运行归档分离；始终使用宿主验证的 cwd，默认用户 home。权限根不随任务晋升收窄。
+# 函数用途: 为主会话提供真实执行位置和完整家目录读范围，防止继承 Gateway 的启动目录。
 def _attach_main_conversation_execution_cwd(
     boundary: dict[str, object],
     agent: object,
@@ -312,11 +310,9 @@ def _attach_main_conversation_execution_cwd(
     ):
         return
     tools = getattr(agent, "tools", None)
-    task_workspace = _run_workspace(params)
-    promoted_task_root = _resolved_path(task_workspace.get("task_root"))
-    project_cwd = promoted_task_root or _resolved_path(
-        attrs.get(CONVERSATION_EXECUTION_CWD_ATTR)
-    )
+    project_cwd = _resolved_path(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR))
+    if project_cwd is None:
+        project_cwd = _resolved_path(boundary.get("canonical_owner_home_root"))
     if project_cwd is None:
         project_cwd = _resolved_path(getattr(tools, "workspace_root", None))
     if project_cwd is None:
@@ -337,11 +333,10 @@ def _attach_main_conversation_execution_cwd(
         )
     cwd_text = str(project_cwd)
     boundary["execution_cwd"] = cwd_text
-    requested_roots = (
-        []
-        if promoted_task_root is not None
-        else _string_list(attrs.get(CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR))
-    )
+    requested_roots = [
+        *_string_list(attrs.get(CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR)),
+        _text(boundary.get("canonical_owner_home_root")),
+    ]
     execution_roots: list[str] = []
     for value in [cwd_text, *requested_roots]:
         root = _resolved_path(value)
@@ -358,16 +353,14 @@ def _attach_main_conversation_execution_cwd(
     boundary["allowed_write_roots"] = list(dict.fromkeys([*roots, *execution_roots]))
 
 
-# LLM: WorkspaceOnly grants a main turn the current owner's whole home, while task-local child
-# turns keep their narrower inherited task roots. Full Access is represented by a missing owner
-# wall and must not be inferred from provider names or prompt text.
-# 函数用途: 给主代理开放自己的完整用户目录，同时保持子代理只写当前任务的结构化范围。
+# LLM: 普通 main/child 的文件墙是同一 owner home；Audit 精确授权和 control_plane 不扩大。
+# 函数用途: 放开自己家里的普通文件操作，继续保护其他用户与宿主权威文件；不看 tasks 命名或模型文字。
 def _attach_owner_task_write_scope(
     boundary: dict[str, object],
     agent: object,
     params: object,
 ) -> None:
-    """Apply the canonical owner-home/main and task-local/child write scopes."""
+    """Apply owner-home scope without turning business folders into permission walls."""
 
     owner_scope = _effective_owner_scope(agent, params)
     if not owner_scope:
@@ -384,10 +377,11 @@ def _attach_owner_task_write_scope(
         return
 
     scope = _text(getattr(params, "context_scope", "default")).lower() or "default"
-    if scope not in {"task_local", "control_plane"}:
+    if scope != "control_plane" and boundary.get("read_scope_mode") != "exact":
         # 用户自己的 owner home 是 WorkspaceOnly 的完整产品工作区。任务目录、旧项目和
         # 用户直接放在 home 下的文件都可写；框架控制面由 forbidden_write_roots 另行保护。
         boundary["allowed_write_roots"] = [str(owner_root)]
+        boundary["execution_workspace_roots"] = [str(owner_root)]
         return
 
     task_root_text = _text(boundary.get("task_root"))
@@ -405,9 +399,6 @@ def _attach_owner_task_write_scope(
         boundary["allowed_write_roots"] = []
         return
 
-    if _is_exact_subagent_workspace_rebase(params, task_root):
-        boundary["allowed_write_roots"] = [str(task_root)]
-        return
 
     existing_roots = _string_list(boundary.get("allowed_write_roots"))
     if not existing_roots:
@@ -517,25 +508,6 @@ def _is_main_conversation_task_run(params: object) -> bool:
         context_scope == "default"
         and _text(attrs.get("conversation_thread_id"))
         and _text(attrs.get("conversation_task_id"))
-    )
-
-
-def _is_exact_subagent_workspace_rebase(params: object, task_root: Path) -> bool:
-    """Trust only the host-authored exact-task rebase marker for a child cwd."""
-    attrs = getattr(params, "task_attributes", None)
-    if not isinstance(attrs, dict):
-        return False
-    marker = attrs.get("conversation_subagent_workspace_rebase")
-    if not isinstance(marker, dict):
-        return False
-    context_scope = _text(getattr(params, "context_scope", "default")).lower()
-    marked_root = _resolved_path(marker.get("task_root"))
-    return bool(
-        context_scope == "task_local"
-        and _text(attrs.get("conversation_thread_id"))
-        and _text(attrs.get("conversation_task_id"))
-        and _text(marker.get("task_id"))
-        and marked_root == task_root
     )
 
 

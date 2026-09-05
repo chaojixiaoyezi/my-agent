@@ -60,7 +60,6 @@ from agent_py_agent.agent.conversation.control_commands import (
 from agent_py_agent.agent.conversation.task_promotion import (
     complete_current_conversation_task,
     complete_named_audit_task_if_settled,
-    conversation_workspace_execution_blocker,
     promote_current_conversation_task,
 )
 from agent_py_agent.agent.core import SimpleAgent
@@ -2365,7 +2364,7 @@ def test_current_turn_automatically_binds_sticky_workspace_without_overwriting_g
     assert reused.task_path == str(workspace)
 
 
-def test_live_background_claim_alone_blocks_second_task_executor(tmp_path):
+def test_live_claim_is_not_an_extra_filesystem_gate(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
     )
@@ -2411,8 +2410,8 @@ def test_live_background_claim_alone_blocks_second_task_executor(tmp_path):
     finally:
         delattr(agent, "_current_run_params")
 
-    assert selected.ok is False
-    assert selected.error_code == "CONVERSATION_TASK_ALREADY_RUNNING"
+    assert selected is None
+    assert agent.conversation_store.task_links(first.thread_id)[0].status == "active"
 
 
 def test_wait_policy_alone_does_not_block_orchestration_tools(tmp_path):
@@ -2521,7 +2520,7 @@ def test_wait_policy_alone_does_not_block_workspace_write(tmp_path):
         delattr(agent, "_current_run_params")
 
 
-def test_unreadable_background_execution_state_fails_closed(tmp_path, monkeypatch):
+def test_file_promotion_does_not_query_unrelated_background_state(tmp_path, monkeypatch):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
     )
@@ -2562,8 +2561,7 @@ def test_unreadable_background_execution_state_fails_closed(tmp_path, monkeypatc
     finally:
         delattr(agent, "_current_run_params")
 
-    assert selected.ok is False
-    assert selected.error_code == "CONVERSATION_TASK_STATE_UNAVAILABLE"
+    assert selected is None
 
 
 def test_background_promotion_reuses_link_workspace_without_synthetic_wake_directory(tmp_path):
@@ -3219,7 +3217,7 @@ def test_detached_named_work_never_occupies_the_foreground_sticky_workspace(
     )
     agent._current_run_params = params
     try:
-        assert conversation_workspace_execution_blocker(agent) is None
+        assert _promote_work_tool(agent, params, {"tool": "write_file"}) is None
         selected = promote_current_conversation_task(agent)
     finally:
         delattr(agent, "_current_run_params")
@@ -3664,7 +3662,7 @@ def test_stopped_gateway_turn_cannot_create_a_continuation_during_tool_promotion
 
 
 @pytest.mark.parametrize("path_mode", ["relative", "initial_absolute"])
-def test_first_gateway_mutation_executes_in_promoted_task_workspace(tmp_path, path_mode):
+def test_first_gateway_mutation_keeps_explicit_owner_home_cwd(tmp_path, path_mode):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
@@ -3740,12 +3738,12 @@ def test_first_gateway_mutation_executes_in_promoted_task_workspace(tmp_path, pa
     assert execution.result.ok is True
     task_root = Path(attrs["run_workspace"]["task_root"])
     assert task_root != initial_cwd
-    assert (task_root / "first-tool.txt").read_text(encoding="utf-8") == ("canonical task cwd\n")
-    assert not (initial_cwd / "first-tool.txt").exists()
-    assert attrs[CONVERSATION_EXECUTION_CWD_ATTR] == str(task_root)
-    assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [str(task_root)]
-    if path_mode == "initial_absolute":
-        assert execution.call.arguments["path"] == str(task_root / "first-tool.txt")
+    assert task_root.is_relative_to(owner_home / "runs")
+    assert (initial_cwd / "first-tool.txt").read_text(encoding="utf-8") == "canonical task cwd\n"
+    assert not (task_root / "first-tool.txt").exists()
+    assert attrs[CONVERSATION_EXECUTION_CWD_ATTR] == str(initial_cwd)
+    assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [str(initial_cwd)]
+    assert execution.call.arguments["path"] == requested_path
 
 
 def test_gateway_read_keeps_explicit_historical_task_path_after_current_task_promotion(tmp_path):
@@ -3818,7 +3816,7 @@ def test_gateway_read_keeps_explicit_historical_task_path_after_current_task_pro
     assert not (current / "tasks").exists()
 
 
-def test_first_gateway_shell_call_rebases_explicit_initial_working_dir(tmp_path):
+def test_first_gateway_shell_keeps_explicit_working_dir(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
@@ -3907,9 +3905,9 @@ def test_first_gateway_shell_call_rebases_explicit_initial_working_dir(tmp_path)
         params.task_attributes[CONVERSATION_EXECUTION_CWD_ATTR]
         == attrs[CONVERSATION_EXECUTION_CWD_ATTR]
     )
-    assert execution.call.arguments["working_dir"] == str(task_root)
-    assert (task_root / "shell-created").is_dir()
-    assert not (initial_cwd / "shell-created").exists()
+    assert execution.call.arguments["working_dir"] == str(initial_cwd)
+    assert (initial_cwd / "shell-created").is_dir()
+    assert not (task_root / "shell-created").exists()
 
 
 def test_new_ordinary_turn_does_not_reuse_completed_sticky_workspace(tmp_path):
@@ -4269,7 +4267,7 @@ def test_bound_request_resumes_interrupted_workspace_by_exact_identity(tmp_path)
     assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
 
 
-def test_exact_mutation_path_reselects_completed_conversation_workspace(tmp_path):
+def test_exact_file_target_does_not_select_or_supersede_task(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
     )
@@ -4357,25 +4355,15 @@ def test_exact_mutation_path_reselects_completed_conversation_workspace(tmp_path
         delattr(agent, "_current_run_params")
 
     assert result is None
-    successor_id = params.task_attributes["conversation_task_id"]
-    assert successor_id not in {"task-completed", "gw-followup"}
-    assert params.task_attributes["conversation_continued_from_task_id"] == "task-completed"
-    assert params.task_attributes["run_workspace"]["task_root"] == str(original)
-    assert params.task_attributes["conversation_rebase_from_task_root"] == str(placeholder)
-    links = {
-        link.task_id: link.status
-        for link in agent.conversation_store.task_links(conversation.thread_id)
-    }
-    assert links == {
-        "task-completed-older": "completed",
-        "task-completed": "completed",
-        "gw-followup": "superseded",
-        successor_id: "active",
-    }
+    assert params.task_attributes["conversation_task_id"] == "gw-followup"
+    assert params.task_attributes["run_workspace"]["task_root"] == str(placeholder)
+    assert "conversation_rebase_from_task_root" not in params.task_attributes
+    links = {link.task_id: link.status for link in agent.conversation_store.task_links(conversation.thread_id)}
+    assert links == {"task-completed-older": "completed", "task-completed": "completed", "gw-followup": "active"}
 
 
-def test_exact_mutation_rebind_moves_current_progress_plan_to_historical_workspace(tmp_path):
-    """占位任务先建的 Todo 必须随 exact workspace successor 迁到原项目。"""
+def test_editing_old_files_keeps_current_progress_and_old_plan_separate(tmp_path):
+    """编辑旧工作文件不移动当前 Todo，不改旧账本。"""
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
     )
@@ -4483,17 +4471,14 @@ def test_exact_mutation_rebind_moves_current_progress_plan_to_historical_workspa
     assert rebound is None
     assert closed.ok is True
     target_progress = read_task_progress(owner_root, target_ledger_id)
-    assert [(item["id"], item["status"]) for item in target_progress["items"]] == [
-        ("old", "done"),
-        ("q1", "done"),
-        ("q2", "done"),
-    ]
-    assert target_progress["display_plan"]["generation_id"] == "gw-followup"
-    assert target_progress["display_plan"]["item_ids"] == ["q1", "q2"]
-    assert not progress_path(owner_root, source_ledger_id).exists()
+    assert [(item["id"], item["status"]) for item in target_progress["items"]] == [("old", "done")]
+    current_progress = read_task_progress(owner_root, source_ledger_id)
+    assert [(item["id"], item["status"]) for item in current_progress["items"]] == [("q1", "done"), ("q2", "done")]
+    assert current_progress["display_plan"]["generation_id"] == "gw-followup"
+    assert progress_path(owner_root, source_ledger_id).exists()
 
 
-def test_exact_rebind_removes_only_the_auto_materialized_placeholder(tmp_path):
+def test_old_file_access_keeps_private_run_and_user_files(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
@@ -4559,17 +4544,15 @@ def test_exact_rebind_removes_only_the_auto_materialized_placeholder(tmp_path):
 
     assert created.ok is True
     assert rebound is None
-    assert params.task_attributes["run_workspace"]["task_root"] == str(original)
-    assert params.task_attributes["conversation_placeholder_workspace_cleanup"] == {
-        "status": "removed",
-        "task_id": "gw-followup",
-    }
-    assert not placeholder.exists()
-    placeholder_link = agent.conversation_store.load_task_link("gw-followup")
-    assert placeholder_link is not None and placeholder_link.status == "superseded"
+    assert params.task_attributes["run_workspace"]["task_root"] == str(placeholder)
+    assert "conversation_placeholder_workspace_cleanup" not in params.task_attributes
+    assert placeholder.is_relative_to(agent.home_paths.owner_runs_dir)
+    assert placeholder.is_dir() and target.read_text(encoding="utf-8") == "value = 1\n"
+    link = agent.conversation_store.load_task_link("gw-followup")
+    assert link is not None and link.status == "active"
 
 
-def test_owner_relative_task_mutation_reselects_exact_conversation_workspace(tmp_path):
+def test_owner_relative_file_target_does_not_rebind_runtime(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
@@ -4645,22 +4628,13 @@ def test_owner_relative_task_mutation_reselects_exact_conversation_workspace(tmp
         delattr(agent, "_current_run_params")
 
     assert result is None
-    successor_id = params.task_attributes["conversation_task_id"]
-    assert successor_id not in {"task-completed", "gw-followup"}
-    assert params.task_attributes["conversation_continued_from_task_id"] == "task-completed"
-    assert params.task_attributes["run_workspace"]["task_root"] == str(original)
-    links = {
-        link.task_id: link.status
-        for link in agent.conversation_store.task_links(conversation.thread_id)
-    }
-    assert links == {
-        "task-completed": "completed",
-        "gw-followup": "superseded",
-        successor_id: "active",
-    }
+    assert params.task_attributes["conversation_task_id"] == "gw-followup"
+    assert "conversation_continued_from_task_id" not in params.task_attributes
+    links = {link.task_id: link.status for link in agent.conversation_store.task_links(conversation.thread_id)}
+    assert links == {"task-completed": "completed", "gw-followup": "active"}
 
 
-def test_exact_mutation_path_rebases_child_without_superseding_parent_task(tmp_path):
+def test_child_file_target_does_not_change_cwd_or_parent_identity(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
     )
@@ -4742,12 +4716,9 @@ def test_exact_mutation_path_rebases_child_without_superseding_parent_task(tmp_p
 
     assert result is None
     assert attrs["conversation_task_id"] == "gw-parent"
-    assert attrs["run_workspace"]["task_root"] == str(original)
-    assert attrs["conversation_rebase_from_task_root"] == str(child_workspace)
-    assert attrs["conversation_subagent_workspace_rebase"] == {
-        "task_id": "task-original",
-        "task_root": str(original),
-    }
+    assert attrs["run_workspace"]["task_root"] == str(child_workspace)
+    assert "conversation_rebase_from_task_root" not in attrs
+    assert "conversation_subagent_workspace_rebase" not in attrs
     links = {
         link.task_id: link.status
         for link in agent.conversation_store.task_links(conversation.thread_id)
@@ -4997,7 +4968,7 @@ def test_gateway_followup_subagent_lineage_uses_active_task_root(tmp_path):
     assert create_params.depth == 1
 
 
-def test_gateway_subagent_relative_outputs_use_promoted_task_root(tmp_path):
+def test_gateway_subagent_relative_outputs_keep_actual_cwd_not_runtime_archive(tmp_path):
     service_root = tmp_path / "service"
     client_root = tmp_path / "client-project"
     task_root = tmp_path / "home" / "task"
@@ -5040,11 +5011,12 @@ def test_gateway_subagent_relative_outputs_use_promoted_task_root(tmp_path):
         delattr(agent, "_current_run_params")
 
     assert create_params.attributes["output_refs"] == [
-        str((task_root / "bbb" / "index.html").resolve())
+        str((client_root / "bbb" / "index.html").resolve())
     ]
+    assert create_params.extra_write_roots == [str(agent.home_paths.owner_home_dir.resolve())]
 
 
-def test_gateway_subagent_inherits_promoted_task_workspace_without_output_files(
+def test_gateway_child_inherits_home_without_declaring_outputs(
     tmp_path,
 ):
     service_root = tmp_path / "service"
@@ -5085,7 +5057,7 @@ def test_gateway_subagent_inherits_promoted_task_workspace_without_output_files(
     finally:
         delattr(agent, "_current_run_params")
 
-    task_root_text = str(task_root.resolve())
+    task_root_text = str(agent.home_paths.owner_home_dir.resolve())
     assert create_params.extra_write_roots == [task_root_text]
     assert task.attributes["workspace_root"] == task_root_text
     assert task.attributes["workspace_roots"] == [task_root_text]

@@ -1,5 +1,12 @@
 # Verification：结构
 
+## 家目录不是 task 目录锁
+
+普通工具的文件安全依据为 owner home、明确禁写路径与精确授权，而非用户业务目录是否属于另一 task。
+晋升只登记可恢复运行记录，不修改路径、patch 正文或 cwd。其他执行者的状态是协作/恢复事实，不是额外文件锁；
+取消与 active-turn 幂等依旧在唯一执行入口校验。Audit 精确读写边界保持不变。
+
+
 ```text
 agent/verification/
 |-- project_facts.py   # 从真实项目文件发现规范验证命令，并按精确 token 分类

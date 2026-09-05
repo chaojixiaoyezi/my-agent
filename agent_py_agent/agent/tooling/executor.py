@@ -36,7 +36,7 @@ from .models import (
 from .output_projection import project_tool_output_body
 from .registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
 from .registry_workspace import effective_registry_cwd
-from .runtime_boundary import canonicalize_task_workspace_arguments
+from .runtime_boundary import canonicalize_owner_home_arguments
 from .runtime_contracts import (
     ToolCall,
     ToolContentBlock,
@@ -338,7 +338,7 @@ def _normalized_call(
         trusted_context=_trusted_context(request),
     )
     completion = complete_tool_arguments(request.call.arguments, runtime, context)
-    normalized_arguments = canonicalize_task_workspace_arguments(
+    normalized_arguments = canonicalize_owner_home_arguments(
         request.call.tool_name,
         completion.value,
         request.write_boundary,

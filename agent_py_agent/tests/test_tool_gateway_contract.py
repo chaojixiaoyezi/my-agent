@@ -403,7 +403,7 @@ def test_tool_gateway_overwrites_existing_task_output_when_mode_is_omitted(tmp_p
 
     assert first.ok is True
     assert second.ok is True
-    assert (task_output / "report.md").read_text(encoding="utf-8") == "## Section\n"
+    assert (workspace / "output" / "report.md").read_text(encoding="utf-8") == "## Section\n"
 
 
 def test_tool_gateway_overwrites_existing_task_work_when_mode_is_omitted(tmp_path: Path):
@@ -429,7 +429,7 @@ def test_tool_gateway_overwrites_existing_task_work_when_mode_is_omitted(tmp_pat
 
     assert first.ok is True
     assert second.ok is True
-    assert (task_work / "facts.md").read_text(encoding="utf-8") == "- detail\n"
+    assert (workspace / "work" / "facts.md").read_text(encoding="utf-8") == "- detail\n"
 
 
 def test_tool_gateway_overwrites_execution_output_json_when_mode_is_omitted(tmp_path: Path):
@@ -487,7 +487,7 @@ def test_tool_gateway_explicit_overwrite_still_replaces_task_output(tmp_path: Pa
     )
 
     assert result.ok is True
-    assert (task_output / "report.md").read_text(encoding="utf-8") == "# Replacement\n"
+    assert (workspace / "output" / "report.md").read_text(encoding="utf-8") == "# Replacement\n"
 
 
 def test_tool_gateway_omitted_mode_still_overwrites_non_task_output_file(tmp_path: Path):
@@ -507,7 +507,7 @@ def test_tool_gateway_omitted_mode_still_overwrites_non_task_output_file(tmp_pat
     assert target.read_text(encoding="utf-8") == "new\n"
 
 
-def test_tool_gateway_maps_task_output_alias_from_write_boundary(tmp_path: Path):
+def test_task_output_metadata_does_not_redirect_relative_user_path(tmp_path: Path):
     workspace = tmp_path / "workspace"
     task_output = tmp_path / "home" / "tasks" / "today" / "task" / "output"
     task_work = task_output.parent / "work"
@@ -523,8 +523,8 @@ def test_tool_gateway_maps_task_output_alias_from_write_boundary(tmp_path: Path)
     )
 
     assert result.ok is True
-    assert (task_output / "report.md").read_text(encoding="utf-8") == "hello"
-    assert not (workspace / "output" / "report.md").exists()
+    assert (workspace / "output" / "report.md").read_text(encoding="utf-8") == "hello"
+    assert not (task_output / "report.md").exists()
     readback = _execute(
         registry,
         "read_file",
@@ -535,7 +535,7 @@ def test_tool_gateway_maps_task_output_alias_from_write_boundary(tmp_path: Path)
     assert "hello" in readback.output
 
 
-def test_tool_gateway_maps_current_owner_relative_task_alias_once(tmp_path: Path):
+def test_tasks_prefix_remains_relative_to_explicit_cwd(tmp_path: Path):
     owner_home = tmp_path / "owners" / "user-a"
     task_root = owner_home / "tasks" / "2026-08-28" / "task-a"
     task_root.mkdir(parents=True)
@@ -555,11 +555,11 @@ def test_tool_gateway_maps_current_owner_relative_task_alias_once(tmp_path: Path
     )
 
     assert result.ok is True
-    assert (task_root / "result.txt").read_text(encoding="utf-8") == "one canonical file\n"
-    assert not (task_root / owner_relative).exists()
+    assert (task_root / owner_relative).read_text(encoding="utf-8") == "one canonical file\n"
+    assert not (task_root / "result.txt").exists()
 
 
-def test_tool_gateway_maps_current_owner_relative_task_alias_inside_patch(tmp_path: Path):
+def test_patch_uses_owner_home_cwd_without_task_aliases(tmp_path: Path):
     owner_home = tmp_path / "owners" / "user-a"
     task_root = owner_home / "tasks" / "2026-08-28" / "task-a"
     task_root.mkdir(parents=True)
@@ -568,7 +568,7 @@ def test_tool_gateway_maps_current_owner_relative_task_alias_inside_patch(tmp_pa
     registry = _registry(task_root)
     boundary = {
         "task_root": str(task_root),
-        "execution_cwd": str(task_root),
+        "execution_cwd": str(owner_home),
         "allowed_write_roots": [str(owner_home)],
     }
 
@@ -593,7 +593,7 @@ def test_tool_gateway_maps_current_owner_relative_task_alias_inside_patch(tmp_pa
     assert not (task_root / "tasks").exists()
 
 
-def test_tool_gateway_maps_historical_owner_task_alias_without_cwd_nesting(tmp_path: Path):
+def test_owner_relative_path_uses_home_cwd_but_keeps_exact_write_gate(tmp_path: Path):
     """session_search 返回的 tasks/... 可读旧任务，但不会绕过写边界。"""
     owner_home = tmp_path / "owners" / "user-a"
     current = owner_home / "tasks" / "2026-08-29" / "current-task"
@@ -606,7 +606,7 @@ def test_tool_gateway_maps_historical_owner_task_alias_without_cwd_nesting(tmp_p
     owner_relative = "tasks/2026-08-28/historical-task/report.txt"
     boundary = {
         "task_root": str(current),
-        "execution_cwd": str(current),
+        "execution_cwd": str(owner_home),
         "effective_owner_scope_root": str(owner_home),
         "allowed_read_roots": [str(owner_home)],
         "allowed_write_roots": [str(current)],
@@ -633,7 +633,7 @@ def test_tool_gateway_maps_historical_owner_task_alias_without_cwd_nesting(tmp_p
     assert not (current / "tasks").exists()
 
 
-def test_tool_gateway_maps_historical_task_alias_for_full_access_admin(tmp_path: Path):
+def test_admin_home_cwd_reads_home_relative_path(tmp_path: Path):
     """管理员无 owner 安全墙时仍用独立 owner 地址事实定位自己的旧任务。"""
     owner_home = tmp_path / "owners" / "local" / "main"
     current = owner_home / "tasks" / "2026-09-03" / "current-task"
@@ -645,7 +645,7 @@ def test_tool_gateway_maps_historical_task_alias_for_full_access_admin(tmp_path:
     registry = _registry(current, access_mode="full")
     boundary = {
         "task_root": str(current),
-        "execution_cwd": str(current),
+        "execution_cwd": str(owner_home),
         "canonical_owner_home_root": str(owner_home),
     }
 
@@ -661,7 +661,7 @@ def test_tool_gateway_maps_historical_task_alias_for_full_access_admin(tmp_path:
     assert not (current / "tasks").exists()
 
 
-def test_tool_gateway_maps_owner_workspace_alias_without_granting_write(
+def test_explicit_home_cwd_does_not_override_narrow_write_boundary(
     tmp_path: Path,
 ):
     task_root = tmp_path / "owners" / "user-a" / "tasks" / "task-a"
@@ -673,6 +673,7 @@ def test_tool_gateway_maps_owner_workspace_alias_without_granting_write(
     registry = _registry(task_root)
     boundary = {
         "owner_workspace_dir": str(owner_workspace),
+        "execution_cwd": str(owner_workspace.parent),
         "task_output_dir": str(task_root / "output"),
         "task_work_dir": str(task_root / "work"),
         "allowed_write_roots": [str(task_root / "output"), str(task_root / "work")],

@@ -1,5 +1,22 @@
 # TESTS
 
+## R184 家目录权限与软整理
+
+新增 `test_owner_home_workspace.py` 验证 main/child 在同 home 的两个历史目录之间实际读写（绝对、相对、`..`）、
+跨 owner/符号链接拒绝、控制文件保护、精确 worker 不扩权、普通目录名无魔法、稳定目录指南及关闭开关。
+旧测试改为文件操作不切换运行身份、不搬移 Todo、不删除归档；额外取名测试改为无需 LLM 的身份归档。
+交付合同路径原样保存，不凭路径发放写根；CLI/child 也不得将 output/work 当魔法目录。
+新增布局下工具输出索引与 home 状态查询必须兼读新 runs 和旧 tasks；532 项 focused 已通过。
+产品验收继续只认单 Gateway、MiniMax-M2.7、真实 TUI 普通中文交互和原生工具/文件证据。
+
+
+## R183 同请求旧目录重入（历史失败样本，文件绑定策略已由 R184 替代）
+
+- 用真实 ConversationStore 与 Gateway request binding callback 构造占位→A→B→A→B→A，核对每次 cwd、
+  request lineage、旧任务终态和当代幂等；取消/未知/其他终态不能像 superseded 一样跳过，大小写别名不接受。
+- 真 TUI 继续原 Ripgrep/交接会话：更新交接总览、对齐项目测试说明、返回交接总览写核对结果。只给普通中文
+  请求，测试者不改产物；观察 typed task links 确认真实往返分支触发，再核对原 HANDOVER 是否确实修改。
+
 ## R182 恢复启动顺序
 
 - 失败先行覆盖 Gateway TUI 不能在界面 preflight 前请求历史。preflight focused 覆盖 readiness→历史→worker

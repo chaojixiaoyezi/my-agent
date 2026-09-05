@@ -25,7 +25,7 @@ from agent_py_agent.agent.agent_core.tool_call_runtime import (
     _promote_conversation_task_for_work_tool,
 )
 from agent_py_agent.agent.conversation.task_promotion import (
-    conversation_workspace_execution_blocker,
+    conversation_task_execution_state,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
@@ -131,8 +131,8 @@ def test_self_watch_policy_does_not_mark_parent_running(tmp_path):
     agent, thread_id, task_id = _agent_with_self_watch(tmp_path)
     params = _params(thread_id, task_id, task_id)
     agent._current_run_params = params
-    blocked = conversation_workspace_execution_blocker(agent)
-    assert blocked is None, f"self-watch 不应判 running，blocked={blocked}"
+    state = conversation_task_execution_state(agent.conversation_store, thread_id, task_id)
+    assert state["running"] is False
 
 
 def test_self_watch_policy_no_longer_blocks_sticky_rebind(tmp_path):
@@ -166,8 +166,7 @@ def test_realistic_watch_of_other_run_still_marks_that_run_running(tmp_path):
     params = _params(thread_id, task_id, task_id)
     agent._current_run_params = params
     # 父任务 blocker 不因 watch 子代理而拦
-    blocked = conversation_workspace_execution_blocker(agent)
-    assert blocked is None
+    assert _promote(agent, params) is None
     # 但子代理被判 running
     from agent_py_agent.agent.conversation.task_promotion import (
         conversation_task_execution_state,
@@ -241,7 +240,7 @@ def test_stale_watch_policy_retired_when_watch_target_terminal(tmp_path):
     _retire_with_child(agent, agent.conversation_store, thread_id, child_id, task_id=task_id)
 
 
-def test_executor_running_blocks_writing_tools_only(tmp_path):
+def test_run_observation_does_not_add_a_workspace_file_lock(tmp_path):
     """问题6契约:执行锁豁免从 ToolRuntimePolicy.mutates_workspace 声明推导,
     不再手写工具名名单。executor running 时:写 workspace 工具被拦,读/编排
     工具(wait/cancel 等)必须始终可用——2026-08-09 真机死锁里连 cancel 都
@@ -285,22 +284,7 @@ def test_executor_running_blocks_writing_tools_only(tmp_path):
                 call=call,
             )
         )
-        if tool_name in writing:
-            assert outcome is not None, (
-                f"{tool_name} 声明写 workspace,executor running 时必须被拦"
-            )
-            assert getattr(outcome, "error_code", "") in {
-                "CONVERSATION_TASK_ALREADY_RUNNING",
-                "CONVERSATION_TASK_BINDING_FAILED",
-            }, (
-                f"{tool_name} 应报绑定门错误,"
-                f"实际={getattr(outcome, 'error_code', outcome)}"
-            )
-        else:
-            assert outcome is None, (
-                f"{tool_name} 不写 workspace,executor running 时必须豁免,"
-                f"实际={getattr(outcome, 'error_code', outcome)}"
-            )
+        assert outcome is None, f"{tool_name} 不应被其他运行的观察状态当成目录锁"
 
 
 def test_stale_self_task_watch_retired_when_target_terminal(tmp_path):

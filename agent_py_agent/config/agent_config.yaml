@@ -59,24 +59,18 @@ my_agent_owner_id: "main"
 # - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。
 # - home_lesson_stale_caveat_days: 召回的 lesson 超过多少天未更新就附加"记忆可能过期"提示；0 表示不加提示。
 #   防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。
-# - run_task_workspace_enabled: 保存 run 在第一轮模型调用前自动创建 tasks/date/task_slug/output 和 work 等目录，并把路径作为软运行状态提示给模型。
+# - run_task_workspace_enabled: 保存宿主运行记录到用户 runs/日期/不透明ID；普通聊天不建运行，记录不改变工具 cwd。
 home_context_enabled: true
 home_lesson_auto_read_limit: 3
 home_lesson_stale_caveat_days: 7
 run_task_workspace_enabled: true
 
-# 任务工作区路径模板：
-# - {date} 是任务创建日期，例如 2026-05-13。
-# - {task_slug} 是从任务名/用户意图生成的短安全目录名，例如 “分析 /Users/.../all-agent 架构” -> “all-agent-架构分析”。
-# - 默认结果形如 ~/.my-agent/owners/local/main/tasks/2026-05-13/all-agent-架构分析/。
-# - 同一 prompt/同一任务会复用同一个任务目录，并用 work/timeline.jsonl 记录多次 run；不同任务只是撞名时才追加 run/request 后缀。
-# - 每个任务目录只保留两块顶层内容：
-#   output/ 是可以复制走的最终交付物；work/ 是日志、状态、compact、草稿、子代理账本等过程材料。
+# 用户业务文件的整理建议（由 home_context_enabled 控制提示加载）：
+# - {date} 表示工作开始日期，{task_slug} 表示模型选择的简短易懂名称。
+# - 模型根据用户需求自行创建目录；旧工作沿用已有位置，用户明确指定的路径优先。
+# - 仅为软提示，不用于权限判断、运行状态或路径重写。主代理与普通子代理都可使用自己完整的家。
+# - 宿主运行记录单独留在 runs/，不自动占用或移动用户 tasks/ 中的文件，也不额外调用模型取目录名。
 workspace_task_path_template: "tasks/{date}/{task_slug}"
-# 通道运行时 风格的可选 LLM 短标题：失败自动回退上面的确定性中文标题。
-# 默认关闭，避免普通 IM 每个新目录都多等一次模型请求；正式任务入口可按需开启。
-workspace_task_llm_title_enabled: false
-workspace_task_llm_title_input_chars: 2000
 
 # 默认模型后端：
 # - echo: 本地离线调试

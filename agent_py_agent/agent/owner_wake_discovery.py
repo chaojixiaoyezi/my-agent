@@ -525,11 +525,13 @@ def unfinished_task_ids(owner_home: Path) -> list[str]:
         _reconcile_terminal_conversation_task_runs(repo, link_statuses)
     if not active_ids:
         return []
-    tasks_root = owner_home / "tasks"
-    if not tasks_root.is_dir():
-        return []
+    # 新记录在 runs，存量在 tasks；仅扫描标准宿主 state 叶子，不从业务文件名推断活跃运行。
     try:
-        task_files = sorted(tasks_root.glob("*/*/work/state.json"), reverse=True)
+        task_files = sorted(
+            (path for root in ("runs", "tasks")
+             for path in (owner_home / root).glob("*/*/work/state.json")),
+            reverse=True,
+        )
     except OSError:
         return []
     ledger_ids: set[str] = set()

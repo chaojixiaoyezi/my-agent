@@ -8,6 +8,8 @@ import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.runtime.guidance import (
     acknowledge_injected_turn_input,
     inject_pending_guidance,
@@ -2159,6 +2161,77 @@ def test_selected_task_is_persisted_on_the_live_gateway_request(tmp_path) -> Non
         "task_path": selected.task_path,
     }
     assert selected.task_path
+
+
+def test_same_request_can_reenter_two_completed_workspaces_without_reviving_old_runs(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.task_promotion import bind_current_conversation_workspace
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path,
+    )
+    thread, placeholder = _bind_durable_task(agent, "req-reentry")
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    request_path = paths.processing / "req-reentry.json"
+    write_json_file(request_path, _request("req-reentry"))
+    roots = {}
+    for label in ("a", "b"):
+        root = Path(agent.home_paths.owner_home_dir) / "tasks" / label
+        (root / "output").mkdir(parents=True)
+        (root / "work").mkdir()
+        roots[label] = root
+        agent.conversation_store.bind_task({
+            "thread_id": thread.thread_id, "task_id": f"old-{label}",
+            "goal": f"历史工作 {label}", "status": "completed", "task_path": str(root),
+        })
+    agent.conversation_store.select_workspace_task({
+        "thread_id": thread.thread_id, "task_id": placeholder.task_id,
+    })
+    params = RunParams(
+        request_id="req-reentry", run_id="req-reentry", task_id="req-reentry",
+        root_user_prompt="核对项目里的测试，再更新之前的交接文档。",
+        task_attributes={"conversation_thread_id": thread.thread_id, "conversation_task_id": "req-reentry"},
+        conversation_task_binding_callback=_GatewayTaskBindingWriter(request_path, "req-reentry"),
+    )
+    agent._current_run_params = params
+    visited = []
+    try:
+        for label in ("a", "b", "a", "b", "a"):
+            selected = bind_current_conversation_workspace(agent, f"old-{label}")
+            assert selected is not None
+            assert selected.task_id not in visited
+            visited.append(selected.task_id)
+            assert selected.task_path == str(roots[label])
+            replay = bind_current_conversation_workspace(agent, f"old-{label}")
+            assert replay is not None and replay.task_id == selected.task_id
+            link = agent.conversation_store.load_task_link(selected.task_id)
+            assert link.status == "active"
+            payload = json.loads(request_path.read_text(encoding="utf-8"))
+            assert payload["conversation_runtime"]["task_id"] == selected.task_id
+            assert params.task_attributes["run_workspace"]["task_root"] == str(roots[label])
+    finally:
+        del agent._current_run_params
+    links = {link.task_id: link for link in agent.conversation_store.task_links(thread.thread_id)}
+    assert links["old-a"].status == links["old-b"].status == "completed"
+    assert all(links[task_id].status == "superseded" for task_id in visited[:-1])
+    assert links[visited[-1]].status == "active"
+
+
+@pytest.mark.parametrize("status", ["completed", "cancelled", "interrupted", "unknown", "SUPERSEDED"])
+def test_workspace_reentry_does_not_skip_other_terminal_or_unknown_successor(status) -> None:
+    import hashlib
+
+    from agent_py_agent.agent.conversation.task_promotion import _terminal_successor_task_id
+
+    derived = "req-reentry-continue-" + hashlib.sha256(b"old-a").hexdigest()[:8]
+    rows = [
+        SimpleNamespace(task_id="req-reentry", task_path="/owner/tasks/b", status="active"),
+        SimpleNamespace(task_id=derived, task_path="/owner/tasks/a", status=status),
+    ]
+    store = SimpleNamespace(task_links_report=lambda _thread: (rows, []))
+    assert _terminal_successor_task_id(
+        store, "thread", base_id="req-reentry", source_id="old-a", task_path="/owner/tasks/a",
+    ) == ""
 
 
 def test_selected_task_reuses_the_single_thread_history_without_guidance_copy(tmp_path) -> None:

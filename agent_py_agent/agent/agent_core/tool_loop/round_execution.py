@@ -146,14 +146,7 @@ class _ToolRoundProgress:
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     before_context_count = len(getattr(request.params, "tool_context", []) or [])
     _append_assistant_tool_round_context(request)
-    calls = [
-        _bound_conversation_workspace_call(
-            request.agent,
-            call,
-            params=request.params,
-        )
-        for call in request.calls
-    ]
+    calls = list(request.calls)
     # no-action 结构化闸(复核 seq 339):评估判 informational(requires_action=False)
     # 时模型仍提出的 ToolCall 一律不进 handler——全部转结构化拦截结果
     # (TOOL_ACTION_NOT_REQUIRED, handler_executed=False),并做有界计数。
@@ -898,30 +891,6 @@ def _runtime_transition_after_tool(
     return {"kind": kind, "reason": reason, "resume": resume}
 
 
-# LLM: Tool execution owns the exact immutable turn parameters.  Always pass that snapshot into
-# workspace rebasing; the shared Agent thread-local is compatibility only for older direct callers.
-# 函数用途: 用本条工具请求自己的任务目录改写旧 cwd，避免并发 Gateway 线程读错临时上下文。
-def _bound_conversation_workspace_call(
-    agent: object,
-    call: ToolCall,
-    *,
-    params: object | None = None,
-) -> ToolCall:
-    """统一改写绑定前 prompt 遗留的占位目录，避免账本续上而产物另起目录。"""
-    from ...conversation.task_promotion import rebase_bound_conversation_workspace_params
-
-    projected = {"tool": call.tool_name, **call.arguments}
-    rebased = rebase_bound_conversation_workspace_params(
-        agent,
-        projected,
-        params=params,
-    )
-    if not isinstance(rebased, dict):
-        return call
-    arguments = {
-        key: value for key, value in rebased.items() if key not in {"tool", "tool_name", "call_id"}
-    }
-    return replace(call, arguments=arguments)
 
 
 def _record_unstarted_calls(

@@ -1,5 +1,18 @@
 # COMPLETED
 
+## 2026-09-05 R184 家目录边界与文件软整理
+
+- 解决问题：同一用户的旧任务目录被当成独立权限区，续作触发 task 回绑失败，正确路径还会被改写。
+  删除这批执行门、参数/patch 正文重写、output/work 魔法映射、由产物路径推导写根以及额外命名 LLM。
+- 普通主/子代理默认在自己的 owner home 工作；任务命名、资料/源码/临时文件/成果分类和旧工作续作由
+  同一稳定内置指南说明。参考 通道运行时 bootstrap 工作区说明、长期助手 SOUL/AGENTS 加载和 会话运行时 cwd/权限根分离。
+  新宿主归档写 runs/日期/身份哈希，旧记录与用户产品原位保留；owner、SOUL、control-plane、exact Audit 不软化。
+- 532 项 focused、本地严格 gate 和 `.10` 单 Gateway / MiniMax-M2.7 原会话 TUI 通过本切片验收：
+  两份旧目录原文件反复直接修改，三个普通 child 的实际 cwd 均为自己 home，Compact 后继续原会话。
+  详见 FT-158/160；未跑全仓 pytest，未声称真实 TUI 覆盖每一个拒绝分支。
+- 多子代理工具任务另暴露模型误改样本、报告失真 BUG-115；后续均由原 TUI 自行恢复已知文件并保持服务停止。
+  这不等于模型质量问题已根治，也不关闭完整过程归档、旧 notice 重复和剩余 P1 验收。
+
 ## 2026-09-05 R182 exact resume 等待统一 readiness
 
 - 薄 Gateway TUI 不再先同步请求历史；在可见 preflight 内顺序连接、恢复同 owner/session、启动 worker。

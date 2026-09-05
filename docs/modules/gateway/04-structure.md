@@ -1,5 +1,12 @@
 # Gateway Structure
 
+## R184 执行身份与用户目录分离
+
+Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆盖为工具 cwd。任务晋升仅登记运行身份，
+不按写目标切换 task、不递归改写工具参数。新运行归档位于 `owner_runs_dir/日期/身份哈希`，旧 tasks 链接保持
+原处可恢复；wake/索引识别两种已知归档，不迁移用户文件。普通文件范围仍由 canonical owner 决定。
+
+
 ## 会话恢复的显示与模型预览
 
 - 显示转换只投影调用方已经限定的 raw rows，不再按 `max_turns` 对 request/message 分组二次裁剪；后台

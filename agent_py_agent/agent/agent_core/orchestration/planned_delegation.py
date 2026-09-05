@@ -68,7 +68,8 @@ def planned_delegation_failure(
 
 
 # LLM: Proposed write paths are resolved only against inherited structured
-# roots. Optional output_files remain delivery/collision hints, never permission
+# roots after creation normalizes relative refs against the real cwd. No folder name bypasses this gate.
+# Optional output_files remain delivery/collision hints, never permission
 # grants or proof of a complete child write set.
 # 函数用途: 模型可选择声明产物；一旦声明，找出其中越出父级工作区、非本地或无法解析的路径。
 def _output_scope_issues(
@@ -80,8 +81,6 @@ def _output_scope_issues(
     primary_root = resolved_roots[0] if resolved_roots else None
     for output in outputs:
         normalized = output.strip().replace("\\", "/")
-        if _is_task_local_output(normalized):
-            continue
         if "://" in normalized:
             issues.append({"output_file": output, "reason": "non_local_output_ref"})
             continue
@@ -120,15 +119,6 @@ def _resolved_roots(roots: tuple[str, ...]) -> list[Path]:
         if path not in resolved:
             resolved.append(path)
     return resolved
-
-
-# LLM: Only exact output/work namespace prefixes select canonical task-local
-# staging. Similar names remain ordinary workspace-relative paths.
-# 函数用途: 判断一条相对输出是否明确指向受管任务的 output 或 work 目录。
-def _is_task_local_output(value: str) -> bool:
-    while value.startswith("./"):
-        value = value[2:]
-    return value in {"output", "work"} or value.startswith(("output/", "work/"))
 
 
 # LLM: Repair guidance is built solely from typed failure fields. It can tell

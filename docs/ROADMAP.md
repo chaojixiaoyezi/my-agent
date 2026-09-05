@@ -28,6 +28,9 @@ exact resume 又发现只恢复问答预览、没有工具/思考的 BUG-111；R
 R180 长会话首屏复验又发现对后台消息组的重复回合截取；R181 删除这层截取，原 TUI 已验证首条用户输入。
 R182 将 exact resume 历史准备并入既有 readiness，两个原 session 真 TUI 已通过；另发现旧 notice 重复追加，
 以及同 owner 连续修改两个历史任务时的 `CONVERSATION_TASK_BINDING_FAILED`，须继续收口而非改用户 prompt。
+R183 真 TUI 又暴露正确绝对路径被重写，跨旧任务修改仍失败。用户确认 R184：家目录为权限墙，删除业务
+目录回绑/参数重写，任务文件整理改为稳定提示词；532 项 focused 和原 session 真 TUI 已通过文件边界验收。
+新发现 BUG-115：样本原件保护和恢复汇报失真；保留真实失败，不给某一任务加机器质量判官。
 Compact 前完整过程与历史分页仍待补齐，未具备的 IM/Audit 环境不得冒充通过。
 
 ### Shell 产物保护不污染用户项目

@@ -25,7 +25,7 @@ from .models import (
 )
 from .registry_workspace import effective_registry_cwd
 from .runtime_boundary import (
-    canonicalize_task_workspace_arguments,
+    canonicalize_owner_home_arguments,
     exact_read_boundary_error,
 )
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
@@ -307,7 +307,7 @@ def _with_task_workspace_relative_path(
     params: dict[str, Any],
     request: RegistryToolInvokeRequest,
 ) -> dict[str, Any]:
-    return canonicalize_task_workspace_arguments(
+    return canonicalize_owner_home_arguments(
         request.tool_name,
         params,
         request.write_boundary,

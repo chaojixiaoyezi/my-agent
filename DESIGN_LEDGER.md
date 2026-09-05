@@ -1,5 +1,34 @@
 # DESIGN LEDGER
 
+## 2026-09-05 家目录权限与文件整理分离【状态：R184 已部署，边界与续作真 TUI 通过】
+
+- 用户明确要求删除“同家不同 task 所以拒绝”的路径选择/授权代码；家目录是普通主代理和子代理的文件权限边界。
+  tasks 命名、目录用途、旧工作续作与上传归档由内置提示说明，不解析文字产生权限或生命周期状态。
+- 删除按写目标重新绑定 task 和永久改写旧绝对路径的执行入口。cwd、用户文件地址和内部 run 记录分开；
+  runtime identity、active turn、取消/恢复、Compact 和 owner 隔离仍使用原结构化事实，旧用户目录不迁移或删除。
+- 对照已读：会话运行时 `core/src/tools/runtimes/apply_patch.rs` 独立 cwd/权限根；通道运行时
+  `src/agents/bootstrap-files.ts`、`system-prompt.ts` 与 `docs/reference/templates/AGENTS.md` 的工作区说明加载；
+  长期助手 `agent/prompt_builder.py` 的 SOUL/AGENTS 加载和 `agent/system_prompt.py` 的稳定/动态分层。
+- 运行注入和 child 提示也删除 output/work 特殊命名空间；旧交付合同只附运行引用，不重写 artifacts 或派生写权限。
+  新 runs 与旧 tasks 的工具输出索引、home 运行查询均保留，避免布局调整使引用失效。
+- 稳定家目录说明复用现有 home/prompt 加载；当前目录、真实结果、时间和记忆仍在动态部分。没有新目录状态分类器，
+  不整家扫描，不改写用户已有 SOUL/AGENTS。532 项 focused 覆盖 owner/符号链接拒绝、exact Audit 和旧运行恢复；
+  `.10` 两个原 session 真 TUI 已覆盖跨两份旧工作修改、三个 child 的 owner home cwd 和 Compact 后续作。
+- 文件边界通过不等于模型交付质量通过：B 曾误改样本原件，恢复追问后又遗漏一个空文件且错误声称完全恢复。
+  保留 BUG-115 及原始工具证据；只经 TUI 追问修复，不以此恢复任务目录墙或机器完成判官。
+- R183 首轮部署实际又暴露路径重写：模型原参数是正确的旧 Go 项目绝对路径，handler 却收到交接目录路径。
+  该轮不算通过；不再以增加 successor 访问代数解决家内文件访问，按本条替换旧设计。
+
+## 2026-09-05 同一请求内往返旧工作目录【状态：R183 局部部署，跨任务授权设计由 R184 替代】
+
+- R182 真 TUI 是交接目录 A→Go 目录 B→A，不是文件权限拒绝。已有 request-local successor A 在离开时
+  被标 `superseded`，回到 A 时 ID 分配仍命中它并返回空；另有直接重复绑定同一 successor 时自我 supersede 的风险。
+- 对照 会话运行时 `tools/runtimes/apply_patch.rs` 将 `workspace_roots`、cwd 与当前执行分开：本项目仍按显式写路径
+  选择同 owner/thread 的唯一 canonical task root，不由任务文字决定权限。已替代记录保留终态，当前请求
+  重入时分配确定性下一代；同一活跃代重复绑定保持幂等，不能把自己标为 superseded。
+- 这是原绑定主链路修复，不开放跨 owner、未知路径、多根歧义或其他活跃执行；Gateway request、Todo、当前
+  workspace 与历史记录继续走现有权威入口。真实 TUI 必须重试原修改任务，不能由测试者修交接文件。
+
 ## 2026-09-05 恢复会话复用唯一启动 preflight【状态：R182 已部署，两路原 session 真 TUI 通过】
 
 - BUG-112 的历史 HTTP 请求早于可见 TUI 和 Gateway readiness。对照 会话运行时 `tui/src/app.rs` 先

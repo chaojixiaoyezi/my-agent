@@ -324,14 +324,7 @@ def _runtime_workspace_context(agent: object, params: ToolLoopExecuteParams) -> 
             effective_cwd=str(cwd),
             allowed_write_roots=_string_sequence(boundary.get("allowed_write_roots")),
         )
-    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
-    return project_runtime_workspace_context(
-        snapshot,
-        task_workspace_pending=bool(
-            str(attrs.get("conversation_thread_id") or "").strip()
-            and not isinstance(attrs.get("run_workspace"), dict)
-        ),
-    ) or None
+    return project_runtime_workspace_context(snapshot) or None
 
 
 # LLM: Prompt projection and ToolRegistry share this exact cwd selector. The process root is only

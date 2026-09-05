@@ -16,7 +16,6 @@ from ..tooling.models import (
     apply_tool_execution_facts,
 )
 from ..tooling.runtime_contracts import ToolCall, ToolResult
-from ..tooling.write_boundary import declared_write_paths
 from .audit_dispatch import audit_privileged_tool_call
 from .parameters import (
     _one_shot_tool_call_is_duplicate,
@@ -32,12 +31,8 @@ from .tool_loop.round_execution import ToolCallExecuteParams
 from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 
 
-# 读/查询类与编排/管理类工具不做 workspace 双写,不触发同目录执行锁:锁只防
-# "两个执行者写同一 workspace"。wait 定时器(progress_policy)被当作 running
-# 信号时,管理类工具若也被拦,父代理连 cancel/wait/create_subagents 都做不了,
-# 任务死锁(真机 2026-08-09:父代理 wait 后 read_file/create_subagents 全被
-# CONVERSATION_TASK_ALREADY_RUNNING 拦,子代理全死,循环唤醒只空转烧钱)。
-# 读类放行同理:读不与写并发冲突,恢复任务必须先能看状态。
+# LLM: 本请求冻结工具参数和宿主运行上下文；文件路径不选择任务身份，也不生成目录执行锁。
+# 类用途: 把一次工具调用的模型原参数、执行参数与审计请求放在一起，供共享工具入口读取。
 @dataclass(frozen=True)
 class ToolCallRuntimeRequest:
     agent: object
@@ -62,8 +57,8 @@ class ToolCallRuntimeRequest:
             **self.call.arguments,
         }
 
-    # LLM: Archive and provider replay use this call only; guards and handlers continue to use
-    # ``call`` so rebased paths and trusted bindings remain execution authority.
+    # LLM: Archive/provider replay retain the original call; execution has its own typed call
+    # snapshot, but task changes must never rebase either snapshot's file arguments.
     # 函数用途: 取得模型最初提交的工具调用，供归档保存安全回放视图。
     @property
     def model_call(self) -> ToolCall:
@@ -131,8 +126,7 @@ def _audit_source_worker_tool_scope_result(
 
 
 # LLM: 最终 Tool Gateway 调用必须携带模型看到的同一 run 快照，不能在执行时重新扩大工具宇宙。
-# 首个工作工具还必须在生成 write boundary/cwd 之前完成会话任务晋升，否则 handler 会继续
-# 使用晋升前的 owner 根目录，而同轮后续工具已经切到 task root，造成一次请求两个工作目录。
+# 首个工作工具在权限快照前登记运行身份，供归档与停止查询使用；晋升前后 cwd 和 owner 文件范围不变。
 # 函数用途: 执行并审计一个已追踪工具调用，同时维护任务晋升、幂等记录和被动验收事实。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     from .tool_call_archive_record import archive_tool_output_projection
@@ -201,11 +195,8 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     return execution
 
 
-# LLM: 会话运行时 resolves one TurnContext cwd before policy, approval, sandbox and handler execution.
-# This adapter preserves my-agent's lazy task activation while rebuilding the current call from the
-# newly bound workspace before any execution boundary is frozen. Runtime guards stay at the normalized
-# handler seam and cancellation remains side-effect free.
-# 函数用途: 在首个工作工具执行前完成任务晋升和路径重定向，避免首个工具落错目录。
+# LLM: 工具参数是原始请求事实；任务晋升只登记运行身份，不重写路径、内容或 cwd。
+# 函数用途: 在首个工作工具前建立可恢复的运行记录；停止、权限与 handler 仍走唯一执行入口。
 def _prepare_traced_tool_runtime_request(
     runtime_request: ToolCallRuntimeRequest,
 ) -> tuple[ToolCallRuntimeRequest, ToolHandlerOutcome | None]:
@@ -216,16 +207,7 @@ def _prepare_traced_tool_runtime_request(
         if cancelled
         else _promote_conversation_task_for_work_tool(runtime_request)
     )
-    if cancelled or promotion_outcome is not None:
-        return runtime_request, promotion_outcome
-    from .tool_loop.round_execution import _bound_conversation_workspace_call
-
-    rebound = _bound_conversation_workspace_call(
-        runtime_request.agent,
-        runtime_request.call,
-        params=runtime_request.request.params,
-    )
-    return replace(runtime_request, call=rebound), None
+    return runtime_request, promotion_outcome
 
 
 def _required_action_for_call(runtime_request: ToolCallRuntimeRequest) -> object | None:
@@ -284,9 +266,6 @@ def _promote_conversation_task_for_work_tool(
             persona_error,
             error_code="PERSONA_WRITE_REQUIRES_TOOL",
         )
-    mutation_binding_error = _bind_declared_mutation_workspace(runtime_request)
-    if mutation_binding_error is not None:
-        return mutation_binding_error
     current = getattr(runtime_request.agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None) if current is not None else None
     conversation_thread_id = (
@@ -294,31 +273,7 @@ def _promote_conversation_task_for_work_tool(
         if isinstance(attrs, dict)
         else ""
     )
-    from ..conversation.task_promotion import (
-        conversation_workspace_execution_blocker,
-        promote_current_conversation_task,
-    )
-
-    # 执行锁只拦声明「写当前 workspace」的工具(问题6:豁免从 ToolRuntimePolicy
-    # 声明推导,不再手写工具名名单)。wait/派工/读工具声明 False,任务恢复与
-    # 取消在任何执行态下都必须可用——这救回了 2026-08-09 真机死锁(父代理被
-    # 自己的 wait policy 锁死时连 cancel 都救不了)。
-    decision = (
-        None
-        if runtime.runtime_policy.mutates_workspace is not True
-        else conversation_workspace_execution_blocker(runtime_request.agent)
-    )
-    if decision is not None:
-        return ToolHandlerOutcome(
-            tool_name or "conversation_task_binding",
-            False,
-            json.dumps(decision, ensure_ascii=False),
-            error_code=(
-                "CONVERSATION_TASK_ALREADY_RUNNING"
-                if decision.get("state_available") is True
-                else "CONVERSATION_TASK_STATE_UNAVAILABLE"
-            ),
-        )
+    from ..conversation.task_promotion import promote_current_conversation_task
 
     # Gateway 的 active-turn T 锁必须覆盖「检查仍在运行 -> 建立/续接 task link ->
     # 把绑定写回热请求」整个晋升事务。否则 /stop 可在早期 cancellation 检查之后
@@ -366,7 +321,7 @@ def _promote_conversation_task_for_work_tool(
 # immutable run snapshot that may carry a distinct task_attributes projection.  After promotion,
 # replace only that projection's contents from the outer authority before cwd/boundary resolution;
 # never infer a task path from model arguments or copy in the opposite direction.
-# 函数用途: 把刚晋升的正式任务目录同步进本次工具调用快照，保证首个 shell/写工具也在任务目录执行。
+# 函数用途: 同步刚登记的运行身份和归档引用，不改变工具请求的文件地址或执行目录。
 def _synchronize_tool_task_attributes_after_promotion(
     agent: object,
     tool_params: object,
@@ -384,263 +339,6 @@ def _synchronize_tool_task_attributes_after_promotion(
     projection.update(authoritative)
 
 
-# LLM: Workspace binding accepts only an exact absolute target or canonical owner-relative
-# tasks/... target; both must resolve to one canonical workspace before any write gate is changed.
-# Several terminal execution generations may legitimately share that same task root.
-# 函数用途: 根据结构化写入路径恢复同一会话的原任务目录；普通相对路径和歧义路径仍保持拒绝。
-def _bind_declared_mutation_workspace(
-    runtime_request: ToolCallRuntimeRequest,
-) -> ToolHandlerOutcome | None:
-    """Rebind an exact old workspace named by a structured filesystem mutation path.
-
-    会话运行时 keeps one working directory across turns.  my-agent additionally isolates
-    owner task directories, so an absolute write target inside one exact task is the
-    machine-readable equivalent of selecting that workspace.  The canonical
-    owner-relative ``tasks/...`` form is equally unambiguous and is resolved only
-    against the current thread's durable owner home.  Other relative paths never
-    guess, reads never select, and paths spanning multiple tasks remain denied by
-    the normal write boundary.
-    """
-
-    agent = runtime_request.agent
-    payload = runtime_request.payload
-    tool_name = str(payload.get("tool") or "").strip()
-    raw_targets = declared_write_paths(tool_name, payload)
-    current = getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None) if current is not None else None
-    thread_id = (
-        str(attrs.get("conversation_thread_id") or "").strip()
-        if isinstance(attrs, dict)
-        else ""
-    )
-    store = getattr(agent, "conversation_store", None)
-    if not thread_id or store is None:
-        return None
-    try:
-        thread = store.load_thread(thread_id)
-        links, load_errors = store.task_links_report(thread_id)
-    except Exception:
-        return None
-    if thread is None or load_errors:
-        return None
-    targets = _canonical_mutation_targets(
-        raw_targets,
-        owner_home=getattr(thread, "owner_home", ""),
-    )
-    if not targets or len(targets) != len(raw_targets):
-        return None
-    selected_link = _unique_exact_mutation_workspace(links, targets)
-    if selected_link is None:
-        return None
-    return _bind_exact_mutation_workspace(agent, tool_name, attrs, selected_link)
-
-
-def _unique_exact_mutation_workspace(links: list[object], targets: list[Path]):
-    from ..conversation.task_promotion import is_reusable_conversation_workspace
-
-    candidates = [
-        link
-        for link in links
-        if is_reusable_conversation_workspace(link)
-        and _all_targets_inside_task(targets, getattr(link, "task_path", ""))
-    ]
-    by_root: dict[Path, list[object]] = {}
-    for link in candidates:
-        root = _canonical_link_task_root(link)
-        if root is not None:
-            by_root.setdefault(root, []).append(link)
-    if len(by_root) != 1:
-        return None
-    generations = next(iter(by_root.values()))
-    active = [
-        link
-        for link in generations
-        if str(getattr(link, "status", "") or "").strip().lower() == "active"
-    ]
-    if len(active) > 1:
-        return None
-    if active:
-        return active[0]
-    return max(generations, key=_mutation_workspace_generation_order, default=None)
-
-
-# LLM: Task identity is an execution generation, while task_path is the canonical project root.
-# Resolve paths once before grouping so symlink spellings cannot manufacture or hide ambiguity.
-# 函数用途: 把历史任务链接的目录规范化，供同一项目的多次执行记录合并判定。
-def _canonical_link_task_root(link: object) -> Path | None:
-    text = str(getattr(link, "task_path", "") or "").strip()
-    if not text:
-        return None
-    try:
-        return Path(text).expanduser().resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-
-# LLM: When one canonical root has only terminal generations, the newest durable link is the
-# continuation parent. The task id is a deterministic tie-breaker, never a semantic guess.
-# 函数用途: 同一目录有多次已结束执行时，选最新一代作为本轮续作的结构化父记录。
-def _mutation_workspace_generation_order(link: object) -> tuple[float, str]:
-    try:
-        created_at = float(getattr(link, "created_at", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        created_at = 0.0
-    return created_at, str(getattr(link, "task_id", "") or "")
-
-
-def _bind_exact_mutation_workspace(
-    agent: object,
-    tool_name: str,
-    attrs: dict[str, object],
-    selected_link: object,
-) -> ToolHandlerOutcome | None:
-    from ..conversation.task_promotion import (
-        bind_current_conversation_workspace,
-        conversation_task_execution_blocker,
-        rebase_subagent_conversation_workspace,
-    )
-    from .runner.context import current_subagent_run_id
-
-    selected_id = str(getattr(selected_link, "task_id", "") or "").strip()
-    current_task_id = str(attrs.get("conversation_task_id") or "").strip()
-    is_subagent = bool(current_subagent_run_id(agent))
-    if not selected_id or (not is_subagent and current_task_id == selected_id):
-        return None
-    # A child targeting its own parent task is one of that task's executors, so the
-    # parent's live claim must not block its local cwd.  A different live task still
-    # blocks the child to prevent two unrelated task trees writing the same workspace.
-    blocker = (
-        None
-        if is_subagent and current_task_id == selected_id
-        else conversation_task_execution_blocker(agent, selected_id)
-    )
-    if blocker is not None:
-        return _mutation_workspace_blocked_result(tool_name, selected_id, blocker)
-    if is_subagent:
-        if rebase_subagent_conversation_workspace(agent, selected_link):
-            return None
-        return _mutation_workspace_binding_failed(
-            tool_name,
-            selected_id,
-            "The child runner could not bind the exact target workspace safely.",
-        )
-    selected = bind_current_conversation_workspace(agent, selected_id)
-    if selected is not None:
-        return None
-    return _mutation_workspace_binding_failed(
-        tool_name,
-        selected_id,
-        "The exact target task workspace could not be bound safely.",
-    )
-
-
-def _mutation_workspace_blocked_result(
-    tool_name: str,
-    selected_id: str,
-    blocker: dict[str, object],
-) -> ToolHandlerOutcome:
-    return ToolHandlerOutcome(
-        tool_name or "conversation_task_binding",
-        False,
-        json.dumps(
-            {
-                "ok": False,
-                "error": "The exact target workspace cannot be bound while its execution state is busy or unavailable.",
-                "task_id": selected_id,
-                **blocker,
-            },
-            ensure_ascii=False,
-        ),
-        error_code=(
-            "CONVERSATION_TASK_ALREADY_RUNNING"
-            if blocker.get("state_available") is True
-            else "CONVERSATION_TASK_STATE_UNAVAILABLE"
-        ),
-    )
-
-
-def _mutation_workspace_binding_failed(
-    tool_name: str,
-    selected_id: str,
-    error: str,
-) -> ToolHandlerOutcome:
-    return ToolHandlerOutcome(
-        tool_name or "conversation_task_binding",
-        False,
-        json.dumps(
-            {"ok": False, "error": error, "task_id": selected_id},
-            ensure_ascii=False,
-        ),
-        error_code="CONVERSATION_TASK_BINDING_FAILED",
-    )
-
-
-# LLM: Owner-relative resolution is a canonical address conversion, not a general cwd fallback.
-# 函数用途: 把绝对路径或用户根目录下的 tasks/... 路径转换成可比对的绝对写目标。
-def _canonical_mutation_targets(
-    raw_targets: list[str],
-    *,
-    owner_home: object,
-) -> list[Path]:
-    targets: list[Path] = []
-    owner_root = _resolved_owner_home(owner_home)
-    for raw in raw_targets:
-        try:
-            text = str(raw or "").strip()
-            candidate = Path(text).expanduser()
-            if not candidate.is_absolute():
-                if owner_root is None or not _is_canonical_owner_task_path(candidate):
-                    continue
-                candidate = owner_root / candidate
-            targets.append(candidate.resolve(strict=False))
-        except (OSError, RuntimeError, ValueError):
-            continue
-    return targets
-
-
-# LLM: Durable thread owner_home is the only base allowed for owner-relative task addresses.
-# 函数用途: 安全解析当前会话的用户根目录；缺失或非绝对路径时不提供回退。
-def _resolved_owner_home(owner_home: object) -> Path | None:
-    text = str(owner_home or "").strip()
-    if not text:
-        return None
-    try:
-        candidate = Path(text).expanduser()
-        return candidate.resolve(strict=False) if candidate.is_absolute() else None
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-
-# LLM: Canonical owner-relative task paths must stay under the literal tasks component.
-# 函数用途: 拒绝普通相对路径和包含上下级跳转的路径，只接受 tasks/... 任务地址。
-def _is_canonical_owner_task_path(candidate: Path) -> bool:
-    parts = candidate.parts
-    return bool(
-        parts
-        and parts[0] == "tasks"
-        and all(part not in {"", ".", ".."} for part in parts)
-    )
-
-
-def _all_targets_inside_task(targets: list[Path], raw_task_root: object) -> bool:
-    text = str(raw_task_root or "").strip()
-    if not text:
-        return False
-    try:
-        task_root = Path(text).expanduser().resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        return False
-    if not task_root.exists():
-        return False
-    return all(_path_is_relative_to(target, task_root) for target in targets)
-
-
-def _path_is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolHandlerOutcome:

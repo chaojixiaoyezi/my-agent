@@ -32,45 +32,39 @@ def test_tool_output_archive_root_stays_fixed_when_turn_is_promoted(tmp_path) ->
     assert attrs[TOOL_OUTPUT_ARCHIVE_ROOT_ATTR] == str(first)
 
 
-def test_optional_llm_task_title_uses_short_json_and_sanitizes() -> None:
+def test_runtime_archive_uses_identity_not_user_directory_template(tmp_path):
     from types import SimpleNamespace
 
-    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _preferred_task_name
-    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _run_workspace_request
+    from agent_py_agent.agent.user_space.run_workspace import ensure_run_workspace
 
-    class Backend:
-        def generate_json(self, prompt, *, max_tokens=None, messages=None):
-            assert len(prompt) < 2500
-            assert max_tokens == 64
-            return ModelResponse(text='{"title":"星桥 发布站"}', backend="fake")
-
+    owner = tmp_path / "owner"
     agent = SimpleNamespace(
-        config=SimpleNamespace(workspace_task_llm_title_enabled=True, workspace_task_llm_title_input_chars=2000),
-        backend=Backend(),
+        home_paths=SimpleNamespace(owner_home_dir=owner, owner_runs_dir=owner / "runs"),
+        config=SimpleNamespace(workspace_task_path_template="tasks/{date}/{task_slug}"),
     )
-    params = SimpleNamespace(task_attributes={})
+    params = SimpleNamespace(task_id="request-one", run_id="request-one", task_attributes={})
+    first = _run_workspace_request(agent, params, "整理季度销售复盘")
+    same = _run_workspace_request(agent, params, "修改上个月的另一个项目")
+    assert first.template == same.template
+    root = ensure_run_workspace(first).root
+    assert root.is_relative_to(owner / "runs")
+    assert not (owner / "tasks").exists()
+    assert (root / "work" / "state.json").is_file()
+    params.task_id = "request-two"
+    assert _run_workspace_request(agent, params, first.user_prompt).template != first.template
 
-    assert _preferred_task_name(agent, params, "请做一个很长的建站任务") == "星桥-发布站"
 
-
-def test_optional_llm_task_title_failure_falls_back_to_deterministic_title() -> None:
+def test_runtime_archive_requires_structured_identity(tmp_path):
     from types import SimpleNamespace
 
-    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _preferred_task_name
-    from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+    import pytest
 
-    class Backend:
-        def generate_json(self, prompt, *, max_tokens=None, messages=None):
-            del prompt, max_tokens, messages
-            raise ProviderTimeoutError("title request timed out")
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _run_workspace_request
 
-    agent = SimpleNamespace(
-        config=SimpleNamespace(workspace_task_llm_title_enabled=True, workspace_task_llm_title_input_chars=2000),
-        backend=Backend(),
-    )
-    params = SimpleNamespace(task_attributes={})
-
-    assert _preferred_task_name(agent, params, "请整理季度销售复盘") == "整理季度销售复盘"
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=tmp_path))
+    with pytest.raises(ValueError, match="explicit runtime identity"):
+        _run_workspace_request(agent, SimpleNamespace(task_attributes={}), "任务名字不能冒充运行身份")
 
 
 def test_task_local_workspace_root_prefers_agent_run_workspace_over_parent_task_root(tmp_path):
@@ -150,7 +144,7 @@ def test_subagent_run_id_workspace_root_prefers_loaded_agent_workspace_even_with
     assert current_run_task_work_dir(agent, params) == agent_root.resolve(strict=False)
 
 
-def test_attach_run_task_workspace_context_defaults_contract_output_root(tmp_path):
+def test_attach_runtime_context_does_not_invent_contract_output_permission(tmp_path):
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
         attach_run_task_workspace_context,
     )
@@ -174,7 +168,7 @@ def test_attach_run_task_workspace_context_defaults_contract_output_root(tmp_pat
 
     workspace = updated.task_attributes["run_workspace"]
     artifact = updated.delivery_contract["artifacts"][0]
-    assert artifact["allowed_output_roots"] == [workspace["output_dir"]]
+    assert artifact == params.delivery_contract["artifacts"][0]
     assert updated.delivery_contract["task_workspace"]["output_dir"] == workspace["output_dir"]
     assert updated.delivery_contract["task_workspace"]["work_dir"] == workspace["work_dir"]
 
@@ -247,9 +241,10 @@ def test_attach_run_task_workspace_context_no_save_still_creates_task_workspace(
     assert Path(workspace["work_dir"]).name == "work"
     injection = "\n".join(updated.inject)
     assert "# Current Task Workspace" in injection
-    assert f"relative_input_root: {tmp_path}" in injection
-    # 稳而不管减负:注入段只留目录事实+一句定位;目录使用教学收编 lessons/workspace.md
-    assert "输入目录不是交付目录" in injection
+    assert f"cwd: {agent.home_paths.owner_home_dir}" in injection
+    # 运行定位不再强制分开输入与交付；修改既有文件也是合法的家目录工作。
+    assert "续作保留原文件位置" in injection
+    assert "输入目录不是交付目录" not in injection
 
 
 def test_gateway_task_workspace_prompt_uses_validated_client_cwd(tmp_path) -> None:
@@ -473,10 +468,10 @@ def test_attach_run_task_workspace_context_preserves_user_requested_output_root(
     artifact = updated.delivery_contract["artifacts"][0]
     assert artifact["allowed_output_roots"] == [str(user_dir)]
     assert updated.delivery_contract["task_workspace"]["output_dir"] != str(user_dir)
-    assert updated.delivery_contract["task_workspace"]["user_requested_output_dir"] == str(user_dir)
+    assert "user_requested_output_dir" not in updated.delivery_contract["task_workspace"]
 
 
-def test_attach_run_task_workspace_context_resolves_relative_user_output_root_to_project(tmp_path):
+def test_attach_runtime_context_preserves_relative_contract_paths(tmp_path):
     from pathlib import Path
 
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
@@ -510,13 +505,11 @@ def test_attach_run_task_workspace_context_resolves_relative_user_output_root_to
 
     workspace = updated.task_attributes["run_workspace"]
     artifact = updated.delivery_contract["artifacts"][0]
-    owner_home = Path(agent.home_paths.owner_home_dir)
-    expected_root = str((owner_home / "lab_outputs" / "compact-stress").resolve(strict=False))
-    expected_report = str((owner_home / "lab_outputs" / "compact-stress" / "report.md").resolve(strict=False))
-    assert artifact["preferred_path"] == expected_report
-    assert artifact["allowed_output_roots"] == [expected_root]
-    assert workspace["output_dir"] != expected_root
-    assert updated.delivery_contract["task_workspace"]["user_requested_output_dir"] == expected_root
+    assert artifact == params.delivery_contract["artifacts"][0]
+    assert artifact["preferred_path"] == "lab_outputs/compact-stress/report.md"
+    assert artifact["allowed_output_roots"] == ["lab_outputs/compact-stress"]
+    assert workspace["output_dir"] not in artifact["allowed_output_roots"]
+    assert "user_requested_output_dir" not in updated.delivery_contract["task_workspace"]
 
 
 def test_attach_run_task_workspace_context_preserves_user_requested_absolute_artifact_path(tmp_path):
@@ -544,8 +537,8 @@ def test_attach_run_task_workspace_context_preserves_user_requested_absolute_art
 
     artifact = updated.delivery_contract["artifacts"][0]
     assert artifact["path"] == str(user_file)
-    assert artifact["allowed_output_roots"] == [str(user_file.parent)]
-    assert updated.delivery_contract["task_workspace"]["user_requested_output_dir"] == str(user_file.parent)
+    assert "allowed_output_roots" not in artifact
+    assert "user_requested_output_dir" not in updated.delivery_contract["task_workspace"]
 
 
 def test_attach_run_task_workspace_context_preserves_windows_absolute_artifact_path(tmp_path):
@@ -573,8 +566,8 @@ def test_attach_run_task_workspace_context_preserves_windows_absolute_artifact_p
 
     artifact = updated.delivery_contract["artifacts"][0]
     assert artifact["path"] == user_file
-    assert artifact["allowed_output_roots"] == [r"C:\Users\alice\agent-output"]
-    assert updated.delivery_contract["task_workspace"]["user_requested_output_dir"] == r"C:\Users\alice\agent-output"
+    assert "allowed_output_roots" not in artifact
+    assert "user_requested_output_dir" not in updated.delivery_contract["task_workspace"]
 
 
 def test_attach_run_task_workspace_context_preserves_home_artifact_path(tmp_path):
@@ -604,12 +597,11 @@ def test_attach_run_task_workspace_context_preserves_home_artifact_path(tmp_path
 
     artifact = updated.delivery_contract["artifacts"][0]
     assert artifact["path"] == user_file
-    user_dir = str((Path.home() / "agent-output").resolve(strict=False))
-    assert artifact["allowed_output_roots"] == [user_dir]
-    assert updated.delivery_contract["task_workspace"]["user_requested_output_dir"] == user_dir
+    assert "allowed_output_roots" not in artifact
+    assert "user_requested_output_dir" not in updated.delivery_contract["task_workspace"]
 
 
-def test_attach_run_task_workspace_context_rewrites_relative_output_contract_to_task_output(tmp_path):
+def test_attach_runtime_context_preserves_literal_output_prefix_contract(tmp_path):
     from pathlib import Path
 
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
@@ -642,8 +634,9 @@ def test_attach_run_task_workspace_context_rewrites_relative_output_contract_to_
 
     workspace = updated.task_attributes["run_workspace"]
     artifact = updated.delivery_contract["artifacts"][0]
-    assert artifact["preferred_path"] == str(Path(workspace["output_dir"]) / "项目分析报告.md")
-    assert artifact["allowed_output_roots"] == [workspace["output_dir"]]
+    assert artifact["preferred_path"] == "./output/项目分析报告.md"
+    assert artifact["allowed_output_roots"] == ["./output"]
+    assert workspace["output_dir"] not in artifact["allowed_output_roots"]
 
 
 def test_single_shot_environment_fact_only_for_cli_run(tmp_path):
@@ -663,7 +656,7 @@ def test_single_shot_environment_fact_only_for_cli_run(tmp_path):
 
     cli = attach_run_task_workspace_context(agent, replace(base, source="cli_run"), "做一个任务")
     cli_section = next(item for item in cli.inject if "# Current Task Workspace" in str(item))
-    assert "单次运行" in cli_section and "不会有任何回复" in cli_section
+    assert "单次运行" in cli_section and "不会收到应答" in cli_section
 
     gateway = attach_run_task_workspace_context(agent, replace(base, source="gateway"), "做一个任务")
     gateway_section = next(item for item in gateway.inject if "# Current Task Workspace" in str(item))
@@ -700,24 +693,17 @@ def test_same_prompt_relay_reuses_task_workspace(tmp_path):
     assert other.root != first.root, "不同 prompt 不得误复用"
 
 
-def test_relay_legacy_outputs_projected_on_reused_workspace(tmp_path):
-    """R11a 接力倒退钉子:接力轮(timeline≥2)注入上轮子代理产出清单;
-    首轮/无遗产不注入。纯事实投影零指令。"""
-    from types import SimpleNamespace
+def test_runtime_cwd_prompt_does_not_scan_old_child_outputs(tmp_path, monkeypatch):
+    from pathlib import Path
 
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import _workspace_prompt_section
 
-    root = tmp_path / "task"
-    work = root / "work"
-    agents = work / "agents" / "subagent-x1"
-    agents.mkdir(parents=True)
-    (work / "timeline.jsonl").write_text('{"run":1}\n{"run":2}\n', encoding="utf-8")
-    (agents / "runner_response.md").write_text("深度分析" * 3000, encoding="utf-8")
-    paths = SimpleNamespace(root=root, output_dir=root / "output", work_dir=work)
+    def reject_scan(*args, **kwargs):
+        raise AssertionError("目录说明不应扫描旧运行资料")
 
-    section = _workspace_prompt_section(paths, primary_workspace_root=tmp_path)
-    assert "- relay_legacy_outputs:" in section and "subagent-x1" in section, "接力轮必须看到遗产清单"
-
-    (work / "timeline.jsonl").write_text('{"run":1}\n', encoding="utf-8")
-    first_round = _workspace_prompt_section(paths, primary_workspace_root=tmp_path)
-    assert "- relay_legacy_outputs:" not in first_round, "首轮不注入"
+    monkeypatch.setattr(Path, "glob", reject_scan)
+    section = _workspace_prompt_section(primary_workspace_root=tmp_path)
+    assert f"cwd: {tmp_path}" in section
+    assert "普通目录" in section
+    assert "relay_legacy_outputs" not in section
+    assert "最终交付物写这里" not in section

@@ -269,8 +269,8 @@ def run_with_resume(
             getattr(getattr(agent, "config", None), "cli_resume_max_rounds", 0) or 8
         )
     # EXEC-35: 上次运行异常中断(429/kill)后, 旧 attempt 可能仍是 running
-    # (僵尸执行者)——conversation_workspace_execution_blocker 会拦工具
-    # (CONVERSATION_TASK_BINDING_FAILED, 真机 2026-08-16 双线 resume 实锤)。
+    # (僵尸执行者)。目录级执行锁已移除；仍须用进程事实纠正 attempt 状态，
+    # 避免停止、恢复和持久运行展示继续引用已退出的执行者。
     # 复用 RUN-01 recover_stale_attempts(进程死亡证明)先调和僵尸 attempt,
     # 再以接管者身份续跑。
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
