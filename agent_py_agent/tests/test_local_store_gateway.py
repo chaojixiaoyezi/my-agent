@@ -211,8 +211,11 @@ def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
     )
     _assert_requeued(paths, recovered, request_path)
 
-    # Second request: fail (attempts=2, lease timed out, exhausted)
+    # Second observed lease failure consumes the budget; dispatch count alone never does.
     second_path = _write_processing_request(paths, "gwreq-fail", attempts=2)
+    payload = read_json_file(second_path)
+    payload["processing_failure_count"] = 1
+    write_json_file(second_path, payload)
     failed = recover_gateway_processing_requests(
         paths, startup=False, max_attempts=2, timeout_seconds=1, agent=agent
     )

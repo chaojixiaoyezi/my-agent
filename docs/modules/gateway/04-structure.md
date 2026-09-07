@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## R193 唯一恢复计数来源
+
+- `recovery.py::_gateway_processing_failure_count` 读取 processing 请求的非负整数；缺字段是未记录过失败，
+  从 0 开始，不把旧 attempts 或 last_error 拆解为历史失败。非法类型不回退。
+- `_recover_one_processing_request` 仅非 startup 的真实租约失效消耗 max_attempts；重排在回合锁内重读
+  exact attempt/epoch/heartbeat 再保存计数，active_turn_recovery.cause 为宿主枚举，不解析模型或错误正文。
+- 总 attempts 保留用于诊断，lease epoch/attempt ID 仍独立承担执行 fence；terminal_response 及其终态投影
+  同步保存 processing_failure_count，重启/停止/未知副作用不会被新的计数入口绕开。
+
 ## R191 状态来源与纯请求投影
 
 - `PromptCacheLayout.volatile_sections` 是宿主提供的唯一分段正文；`volatile_suffix` 仅由其渲染，拒绝同时

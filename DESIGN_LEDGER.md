@@ -1,5 +1,17 @@
 # DESIGN LEDGER
 
+## 2026-09-06 执行代次与卡死失败次数分账【状态：R193 本地实现，待真 TUI】
+
+- 会话运行时 `core/src/session/mod.rs` 的 InitialHistory::Resumed 重建原会话，不把多次恢复当成任务执行失败。
+  长期助手 `gateway/run.py`/`restart_loop_guard.py` 也把服务启动接续与短时间服务重启风暴分层处理。
+- 适配现有恢复主链：processing 请求的 `processing_failure_count` 是唯一已观察租约失败计数；旧总
+  `attempts` 只记录派发次数，不能充当失败事实。旧请求未记录过此事实，初始化 0，不解析 last_error 迁移。
+- `startup=True` 的原进程死亡续接不消费卡死预算；运行期租约真失效才加一，原 max_attempts=2 仍是
+  首次重排、再次失效失败。重启不清除已发生的租约失败。active_turn_recovery 追加结构化 cause 供诊断。
+- 同回合锁内重读 exact attempt/epoch/heartbeat 后重排；终态继续经过同一 CAS 与原消息结算；未知工具副作用
+  仍需底层账本确认。本修复不创建 Gateway 自启动循环，也不新加任务时长门；原 10 秒启动退避仍在。
+- 外部 supervisor 重启风暴与 长期助手 式服务级熔断属于独立问题，本次不借机引入第二套调度器。
+
 ## 2026-09-06 未写入的确定错误交回模型纠正【状态：R192 定向通过，待真 TUI】
 
 - 真实 `update_persona` 的不存在条目与 `update_goal` 的无目标返回没有携带副作用事实，被统一协调器保守地

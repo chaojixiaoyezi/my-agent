@@ -455,6 +455,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_user_inflight_limit: int = 8
     gateway_global_inflight_limit: int = 500
     gateway_processing_timeout_seconds: int = 900
+    # 仅计 processing 租约失效的失败次数；服务重启续接不计，0 不限，副作用未知仍禁止盲目重放。
     gateway_request_max_attempts: int = 2
     # 后台会话全局线程池上限；超出留在持久队列，同 thread 仍由 run claim 单飞。
     background_owner_workers: int = 8

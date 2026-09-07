@@ -1,5 +1,14 @@
 # STATUS
 
+## R193 Gateway 重启不消耗任务卡死预算（本地实现，待真 TUI）
+
+- `attempts` 仍是总执行代次；独立 `processing_failure_count` 只统计运行期确认失效的 processing 租约。
+  服务启动恢复原回合不增加也不清空失败数；未记录过的旧请求从 0 个已知失败开始，不从错误文案猜历史。
+- request/run/owner、lease epoch/CAS、10 秒启动延后和 UNKNOWN 工具保护均保留；没有新增后台自动重启。
+- 195 focused 通过 / 1 原有 skipped：多次重启后原请求保持、真正卡死上限仍有效、已有失败不洗白、坏计数
+  不重置，以及心跳/恢复历史；Ruff/doc sync/strict size/diff/源码 clean-package 通过，无全仓 pytest。
+  下一步部署后保持原 TUI 在线顺序重启验证，不自动复活已失败的旧终态请求。
+
 ## R192 已知未提交错误误进 UNKNOWN（定向通过，待部署）
 
 - 真实 C 修改画像的不存在条目、A 子代理无 goal 的更新均被误判为未知副作用，整轮停止。按 会话运行时 目标工具、

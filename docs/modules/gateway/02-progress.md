@@ -1,5 +1,11 @@
 # Gateway Progress
 
+## R193 重启恢复不误算处理失败
+
+总 attempts 继续标识派发代次；processing_failure_count 只在运行期租约真过期时累计。启动恢复保留原
+回合和既有失败数，不按 lifetime attempts 杀掉长任务。完整终态保存两种数字，诊断不再把服务重启说成超时。
+原租约/CAS、UNKNOWN 和用户停止不变，10 秒启动延后保留；本地定向通过后使用原多路 TUI 在线重启复验。
+
 ## R191 动态事实增量和一致预检查
 
 对照 会话运行时 `ContextManager::update_world_state`，PromptBuilder 用已知字段产生来源分段；原生 IR 只追加

@@ -128,6 +128,9 @@ def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
         assert (paths.inbox / request_path.name).exists()
 
         second_path = _write_processing_request(paths, "gwreq-fail", 2, "会失败归档的请求")
+        payload = read_json_file(second_path)
+        payload["processing_failure_count"] = 1
+        write_json_file(second_path, payload)
         failed = recover_gateway_processing_requests(
             paths,
             startup=False,
@@ -138,6 +141,73 @@ def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
         assert failed["failed"] == 1
         assert (paths.failed / second_path.name).exists()
         assert (paths.responses / "gwreq-fail.json").exists()
+
+
+def test_repeated_gateway_restart_is_not_a_processing_failure(tmp_path):
+    agent = _make_recovery_agent(tmp_path)
+    paths = gateway_paths(agent)
+    _ensure_gateway_dirs(paths)
+    path = _write_processing_request(paths, "gwreq-restarts", 20, "继续原长任务")
+    for attempt in range(20, 24):
+        result = recover_gateway_processing_requests(paths, startup=True, agent=agent)
+        assert result["requeued"] == 1
+        assert result["failed"] == 0
+        pending = paths.inbox / path.name
+        payload = read_json_file(pending)
+        assert payload["attempts"] == attempt
+        assert payload["processing_failure_count"] == 0
+        assert payload["active_turn_recovery"]["cause"] == "gateway_restart"
+        assert payload["id"] == "gwreq-restarts"
+        assert not (paths.terminal / path.name).exists()
+        payload.update(status="processing", attempts=attempt + 1, lease_started_at=time.time() - 20)
+        write_json_file(pending, payload)
+        pending.replace(path)
+
+    first = recover_gateway_processing_requests(paths, startup=False, timeout_seconds=1, agent=agent)
+    assert first["requeued"] == 1
+    pending = paths.inbox / path.name
+    payload = read_json_file(pending)
+    assert payload["processing_failure_count"] == 1
+    assert payload["active_turn_recovery"]["cause"] == "processing_lease_expired"
+    payload.update(status="processing", attempts=25, lease_started_at=time.time() - 20)
+    write_json_file(pending, payload)
+    pending.replace(path)
+    second = recover_gateway_processing_requests(paths, startup=False, timeout_seconds=1, agent=agent)
+    assert second["failed"] == 1
+    response = read_json_file(paths.responses / path.name)
+    assert response["processing_failure_count"] == 2
+    assert response["attempts"] == 25
+
+
+def test_restart_does_not_erase_a_prior_processing_failure(tmp_path):
+    agent = _make_recovery_agent(tmp_path)
+    paths = gateway_paths(agent)
+    _ensure_gateway_dirs(paths)
+    path = _write_processing_request(paths, "gwreq-prior-failure", 2, "继续工作")
+    payload = read_json_file(path)
+    payload["processing_failure_count"] = 1
+    write_json_file(path, payload)
+    result = recover_gateway_processing_requests(paths, startup=True, agent=agent)
+    assert result["requeued"] == 1
+    assert read_json_file(paths.inbox / path.name)["processing_failure_count"] == 1
+
+
+def test_corrupt_processing_failure_counter_is_not_silently_reset(tmp_path):
+    from agent_py_agent.agent.gateway_parts.recovery import (
+        recover_gateway_processing_requests_report,
+    )
+
+    agent = _make_recovery_agent(tmp_path)
+    paths = gateway_paths(agent)
+    _ensure_gateway_dirs(paths)
+    path = _write_processing_request(paths, "gwreq-bad-counter", 2, "继续工作")
+    payload = read_json_file(path)
+    payload["processing_failure_count"] = "unknown"
+    write_json_file(path, payload)
+    report = recover_gateway_processing_requests_report(paths, startup=True, agent=agent)
+    assert report.summary["requeued"] == report.summary["failed"] == 0
+    assert len(report.load_errors) == 1
+    assert read_json_file(path)["processing_failure_count"] == "unknown"
 
 
 def test_gateway_startup_requeued_request_does_not_block_fresh_pending():
@@ -165,6 +235,7 @@ def test_gateway_startup_requeued_request_does_not_block_fresh_pending():
             "request_id": "gwreq-old",
             "dead_execution_attempt_id": "",
             "requeued_at": old_payload["requeued_at"],
+            "cause": "gateway_restart",
         }
 
         fresh_id, fresh_path, _ = submit_gateway_ask(

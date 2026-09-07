@@ -1,5 +1,11 @@
 # TESTS
 
+## R193 Gateway 恢复预算
+
+两个回归先在旧实现复现“attempt 20 或 2 即启动恢复失败”；修复后要求连续服务重启保持同 request 身份，
+processing 真实失效单独累计到上限。非法计数、既有失败保留、健康心跳、恢复工具历史、终态 CAS 与投影一起
+做 focused 检查。产品验收保持原 TUI 进程在线，顺序重启唯一 Gateway，并读取 exact request/run/child 账。
+
 ## R192 提交前拒绝不等于未知副作用
 
 先用真实 ToolExecutor + LocalStore 复现 Persona 不存在条目/版本、批量第二项失败、CAS 冲突，以及

@@ -1,10 +1,13 @@
-
+# LLM: Reconcile exact request leases and canonical terminal receipts; dispatch generations
+# never imply task failure. Startup resume preserves effects/history, expired processing leases
+# consume their own persisted budget. Check heartbeat/terminal/owner tests when changing this boundary.
+# 模块用途: 恢复 Gateway 中断的请求，分清服务重启和真正卡死，并保证同一回合只有一个终态和执行者。
 from __future__ import annotations
 
 """detects, requeues, fails, and archives stale gateway processing requests.
 
 gateway 如果崩在半路，请求会留在 processing 目录。
-这个文件专门处理这种'卡住的请求'：能重试就退回 pending，重试太多就写失败响应并归档。
+服务重启按原身份退回 pending；真实 processing 租约失效才累计失败，上限用尽写失败响应并归档。
 processing liveness 直接读取 lease_service，不再经过 runtime 聚合层。
 """
 
@@ -192,6 +195,10 @@ def _ensure_recovery_dirs(paths: GatewayPaths) -> None:
         folder.mkdir(parents=True, exist_ok=True)
 
 
+# LLM: Dispatch attempts fence executions but are not failure counts. Startup restores the
+# same turn; only expired live-service processing leases consume the recovery failure budget.
+# Keep terminal/CAS/unknown-operation fences unchanged and never derive cause from last_error prose.
+# 函数用途: 区分服务重启续接和真正卡死，避免一个健康长任务因部署多次就被错误终止。
 def _recover_one_processing_request(
     paths: GatewayPaths,
     request_path: Path,
@@ -220,15 +227,16 @@ def _recover_one_processing_request(
         )
     if not _processing_request_stale(payload, request_path, context):
         return ""
-    attempts = _gateway_request_attempts(payload)
-    if context.max_attempts > 0 and attempts >= context.max_attempts:
+    failures = _gateway_processing_failure_count(payload) + (0 if context.startup else 1)
+    if not context.startup and context.max_attempts > 0 and failures >= context.max_attempts:
         return _fail_stale_processing(
             {
                 "paths": paths,
                 "request_path": request_path,
                 "payload": payload,
-                "timeout_seconds": context.timeout_seconds,
-                "attempts": attempts,
+                "timeout_seconds": context.lease_stale_seconds or context.timeout_seconds,
+                "attempts": _gateway_request_attempts(payload),
+                "processing_failure_count": failures,
                 "agent": context.agent,
             }
         )
@@ -669,6 +677,10 @@ def _gateway_lease_heartbeat(payload: dict) -> float:
         return 0.0
 
 
+# LLM: This is only an exhausted processing-lease failure budget, never startup recovery.
+# The terminal response records failures separately from dispatch attempts; exact lease CAS
+# remains the authority before any archive or visible response is written.
+# 函数用途: 真正卡死次数用尽时提交失败及准确诊断，不把进程恢复代次说成任务超时次数。
 def _fail_stale_processing(context: dict) -> str:
     paths = context["paths"]
     request_path = context["request_path"]
@@ -677,11 +689,15 @@ def _fail_stale_processing(context: dict) -> str:
         "payload": context["payload"],
         "status": "failed",
         "error_code": "GATEWAY_PROCESSING_TIMEOUT",
-        "error": f"gateway processing timeout after {context['timeout_seconds']}s; attempts={context['attempts']}",
+        "error": (
+            f"gateway processing lease expired; threshold={context['timeout_seconds']}s; "
+            f"failures={context['processing_failure_count']}; attempts={context['attempts']}"
+        ),
         "event_type": "gateway_request_processing_failed",
         "agent": context["agent"],
     }
     response = _build_gateway_failure_response(failure_context)
+    response["processing_failure_count"] = context["processing_failure_count"]
     request_id = request_path.stem
     conversation_store = _recovery_conversation_store(
         context.get("agent"),
@@ -717,6 +733,10 @@ def _fail_stale_processing(context: dict) -> str:
     return "failed"
 
 
+# LLM: Preserve request/run identity and committed effects while replacing only the dead lease.
+# Record observed processing failures under the existing turn lock; startup resumes do not
+# consume that budget or reset earlier failures. This does not start/restart the Gateway itself.
+# 函数用途: 精确重排原回合；服务重启沿用原任务，卡死单独计数，保留启动退避及旧副作用保护。
 def _requeue_stale_processing(
     paths: GatewayPaths,
     request_path: Path,
@@ -744,11 +764,15 @@ def _requeue_stale_processing(
                     "priority": "recovery",
                     "source": str(fresh.get("source") or "gateway_recovery"),
                     "requeued_at": context.now,
+                    "processing_failure_count": (
+                        _gateway_processing_failure_count(fresh) + (0 if context.startup else 1)
+                    ),
                     "active_turn_recovery": {
                         "schema_version": _ACTIVE_TURN_RECOVERY_SCHEMA,
                         "request_id": request_id,
                         "dead_execution_attempt_id": dead_attempt_id,
                         "requeued_at": context.now,
+                        "cause": "gateway_restart" if context.startup else "processing_lease_expired",
                     },
                     "last_error": (
                         "gateway restarted before request completed"
@@ -780,6 +804,17 @@ def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:
 
 def _gateway_request_attempts(payload: dict) -> int:
     return gateway_request_attempts(payload)
+
+
+# LLM: This new host-owned counter is independent from legacy total dispatch attempts.
+# Missing old records start at zero observed lease failures; history prose cannot reconstruct
+# a cause. Malformed persisted counters must fail closed rather than reset a consumed budget.
+# 函数用途: 读取已记录的真正卡死次数；旧记录无法证明的重启/失败不瞎猜，坏计数交给数据诊断。
+def _gateway_processing_failure_count(payload: dict) -> int:
+    value = payload.get("processing_failure_count", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise DataCorruptionError("invalid gateway processing_failure_count")
+    return value
 
 
 def _gateway_processing_started_at(payload: dict, request_path: Path) -> float:
@@ -1291,6 +1326,7 @@ def repair_gateway_chunk_projection(
 
 # LLM: This helper is the sole schema builder for a terminal request archive. The complete response
 # is embedded as authority; /responses and history are repairable projections after a crash.
+# Observed lease failures and total dispatch attempts stay separate in terminal projections.
 # 函数用途: 把锁内读取到的最新请求状态和完整最终答复合并成可恢复的终态归档。
 def _terminal_gateway_request_payload(
     request_id: str,
@@ -1322,6 +1358,9 @@ def _terminal_gateway_request_payload(
             "status": status,
             "turn_phase": "closed",
             "attempts": terminal_response.get("attempts", payload.get("attempts", 0)),
+            "processing_failure_count": terminal_response.get(
+                "processing_failure_count", _gateway_processing_failure_count(payload)
+            ),
             "lease_owner": terminal_response.get(
                 "lease_owner", payload.get("lease_owner", "")
             ),

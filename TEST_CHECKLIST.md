@@ -1,5 +1,12 @@
 # TEST CHECKLIST
 
+## R193 服务重启与卡死次数
+
+- [x] 原请求从总 attempt 20 连续恢复 4 次不失败；之后两次真实租约过期仍达到原失败上限。
+- [x] 重启不擦除既有 processing_failure_count；非法计数不重置，保持可诊断失败。
+- [x] 195 focused 通过 / 1 原有 heartbeat mock skipped；恢复历史/RuntimeDB 工具防重做、终态投影同时回归。
+- [ ] 部署后原活跃 TUI 连续两次 Gateway 重启，验证原 request/run/child 不重复、历史继续、其他 owner 不受阻。
+
 ## R192 确定未写入的工具错误
 
 - [x] 真实 operation store 下 Persona 不存在条目/版本、批量部分校验失败、CAS 冲突保持 failed/not_started。
