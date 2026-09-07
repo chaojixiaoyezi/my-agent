@@ -1,6 +1,6 @@
 # STATUS
 
-## R194 恢复真实执行绑定（本地实现，正在验收）
+## R194 恢复真实执行绑定（已部署，两路主代理连续重启通过）
 
 - R193 已部署 `.10` 唯一 Gateway；原 A/C TUI 在线重启后 attempts=2、processing_failure_count=0，
   计数修复生效，但两路在恢复身份层失败。队列的 conversation_runtime.task_id 是旧项目展示链接，
@@ -9,9 +9,16 @@
   重入沿用此绑定，展示链接不作执行权威。凭据落盘失败不进入模型，并收口该未开始 attempt。
 - RuntimeDB 按同一 task+run、预期 agent/attempt、PID/start 死亡证据接续；不扫别的 run，活着或不能
   证明死亡的不接管。原工具完整记录、UNKNOWN、资源状态、停止/租约代次硬门均保留。
-- 六个相关文件 195 focused 通过 / 1 原有 skipped，真实重启复验待部署。
+- 相关 8 个文件合计 216 focused 通过 / 1 原有 skipped；严格检查与源码/wheel clean-package 通过。
+  本地提交 `1cc51d3`；独立 R194 环境和 85 项原依赖版本均核对，未推送远端 Git。
+- `.10` 唯一 Gateway 2981752→2983852→2986389；原 A/C TUI 未重开。同 request/agent_run 连续两次恢复，
+  attempts=3、processing_failure_count=0；A 两代旧工具 15/13 条、C 7/8 条均有完整恢复事件。
+  第二次恢复后继续新工具调用。E 原 child 身份保持并最终完成、Compact 1；完整父/子/孙矩阵仍未封板。
 - R192 真 TUI 已把 C 的报告偏好写成问题先行/年/月/日顺序/美元，之后继续执行 14 条工具；未污染 D。
   B/D/E 已分别返回最终汇报；完整批量覆盖与费用公平性仍需核对，不能用模型 final 代替证据。
+- B/D 下一轮普通请求在“接着做”的正文后自然 final：host turn_end_reason=completed、runtime_status=ok，
+  原生消息最后没有 tool_use；没有模型调用超时。原始 provider stop_reason 未落到现有用量账，不能据此
+  断言全部责任在模型或改写普通模式续跑。记录未通过，并通过显式 `/goal` 继续测试目标模式。
 
 ## R193 Gateway 重启不消耗任务卡死预算（本地实现，待真 TUI）
 

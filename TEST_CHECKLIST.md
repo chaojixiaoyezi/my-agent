@@ -5,7 +5,8 @@
 - [x] 实际 task/run/agent_run/attempt 在模型前落盘，旧展示 task 不覆盖；落盘失败收口未开始 attempt。
 - [x] exact owner 死亡证明与启动路径共用，活进程/未知进程/换代拒绝；其他 run 不受接管影响。
 - [x] 原完整工具记录、UNKNOWN 和 dirty resource 回归保持，processing 停止/终态 fence 不绕开。
-- [ ] 原 A/C TUI 自然后续轮完成两次单 Gateway 重启，实际绑定与工具继续，零重复副作用。
+- [x] 原 A/C TUI 自然后续轮完成两次单 Gateway 重启，实际绑定与工具继续；attempts=3、已知失败=0。
+- [ ] 完整主/子/孙恢复矩阵及所有副作用零重复；不能用两路主代理通过替代。
 - [ ] B/D/E 完整批量质量、后续偏好与隔离核对；Memory 双路径重复偏好另列未修复问题。
 
 ## R193 服务重启与卡死次数

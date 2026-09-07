@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-09-06 展示任务与执行恢复身份分离【状态：R194 本地实现，待真实重启复验】
+## 2026-09-06 展示任务与执行恢复身份分离【状态：R194 已部署，两路主代理双重启通过】
 
 - 参考 会话运行时 `core/src/session/session.rs` 从 ResumedHistory/SessionMeta 保留 thread/session ID，以及
   `session/mod.rs::record_initial_history` 重建原 rollout；不把展示标题、cwd 或旧项目链接猜成运行身份。
