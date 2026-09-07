@@ -1,5 +1,20 @@
 # STATUS
 
+## R195 递归重启组合与执行代次显示（进行中）
+
+- `.10` 同一个 R194 Gateway 上运行九路 TUI、八个 owner，新增图书递归协作、开源研究、局域网台账和
+  同 owner 新窗口召回。图书实际形成 main→coordinator→grandchild，测试者未代写产物或执行项目验证。
+- 2986389→3036952 停启约 7.6 秒。两名原孙代理同 run 换 attempt 后继续并完成，随后原 coordinator
+  完成、原 main 自动续作；已完成的前两名孙代理未重新派发。全部副作用和完整终态仍继续核对。
+- 真 TUI 发现 coordinator 正常收取下级后被标成“重试 2 次”：renderer 把 attempts-1 当失败数。
+  参考 终端交互 AgentLine 删除该无证据数字，状态/描述/ctx/Compact 保留。两个 focused 文件通过，
+  新客户端真 TUI 复验尚未完成；目前运行中的客户端仍可能显示旧标签。
+- 同次恢复 A 失败：run_command 在重启之前已因 240 秒超时落 UNKNOWN；恢复门拒绝续跑。
+  这是新的超时结果证据问题，不能算 R194 身份错误复发，也不能直接放宽 UNKNOWN。
+  正在对照 会话运行时 exec 的终止和输出收集；普通“任务处理失败”提示未解释该边界，同样待修。
+- 记忆重复仍未修复：Persona 每次 build 从 repository.snapshot 读取，未发现永久缓存 USER 的旁路；
+  自动 promotion 与后续直接 batch 的同义重复仍需继续核对模型可见内容，不凭推测更换记忆架构。
+
 ## R194 恢复真实执行绑定（已部署，两路主代理连续重启通过）
 
 - R193 已部署 `.10` 唯一 Gateway；原 A/C TUI 在线重启后 attempts=2、processing_failure_count=0，

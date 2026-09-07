@@ -177,7 +177,8 @@
   和恢复逻辑仍读取宿主内部代理树投影。模型的取消合同也不暴露 dry-run、进程参数或整树回执，
   防止把打断工具变成另一个巡检入口。
 - TUI 只读可观察面从 active task link 和 canonical child run 生成有界直属快照，在输入框附近固定显示
-  子代理名称、status、当前活动、耗时和 attempts。它不进 transcript，不暴露 goal/工具输出/路径/权限，也不参与
+  子代理名称、status、职责、耗时、当前上下文和 Compact 次数。attempts 只作执行诊断，不推断成失败重试。
+  它不进 transcript，不暴露 goal/工具输出/路径/权限，也不参与
   完成、重试或验收。未来用户直控必须先落一份 TUI/Web/IM 共用的 owner-scoped typed
   protocol；不允许前端直改子代理账本。
 - `context_scope=isolated` 只用于把结构化事实改写成一句用户可见回执：该物理模型调用继续进入成本与调用

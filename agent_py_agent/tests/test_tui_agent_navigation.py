@@ -666,3 +666,25 @@ def test_selected_child_footer_overrides_root_running_hint() -> None:
     assert fragments_text(frame.footer).strip() == (
         "↑↓ 选择 · Enter 查看 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式 · Esc 停止主代理"
     )
+
+
+def test_child_execution_generations_do_not_claim_failure_retries() -> None:
+    for status, phase, expected in (
+        ("RUNNING", "waiting_descendants", "等待下级"),
+        ("RUNNING", "running", "运行中"),
+        ("DONE", "completed", "已完成"),
+        ("FAILED", "failed", "失败"),
+    ):
+        runtime = TuiRuntime("execution-generations")
+        child = _row("coordinator", status=status, lifecycle_phase=phase)
+        child.update(attempts=8, context_tokens=60_000, compact_count=3)
+        runtime.update_background_activity(1, {"subagents": [child]})
+        frame = render_tui_snapshot(
+            runtime.store.snapshot(), TuiRenderContext(width=120)
+        )
+        rendered = "\n".join(fragments_text(line) for line in frame.agent_lines)
+        assert "coordinator" in rendered
+        assert expected in rendered
+        assert "ctx 60.0k" in rendered
+        assert "compact 3" in rendered
+        assert "重试" not in rendered

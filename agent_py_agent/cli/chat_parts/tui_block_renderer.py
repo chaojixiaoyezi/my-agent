@@ -1,5 +1,5 @@
 # LLM: 本模块是 TuiViewSnapshot 到 prompt_toolkit formatted lines 的唯一 block renderer；不得读取原始模型文本猜工具、权限或生命周期。
-# 模块用途: 生成 终端交互 同构的欢迎卡、用户/助手/思考/工具块、权限面板、队列和底部提示。
+# 模块用途: 生成 终端交互 同构的消息、权限、队列和底部提示；执行代次不能冒充失败重试数。
 
 from __future__ import annotations
 
@@ -982,8 +982,9 @@ def _active_subagent_count(rows: list[dict[str, object]]) -> int:
 
 # LLM: A child row mirrors 终端交互's width budgeting: canonical status and
 # numeric suffixes are reserved first, then one bounded task description is
-# truncated into the remaining columns. Runtime stage prose never enters it.
-# 函数用途: 用单行显示直属子代理的名字、状态、职责短标题、耗时、上下文 token 和 Compact 次数。
+# truncated into the remaining columns. Attempts include normal child wakes and
+# process resumes, so they do not prove failures and must not become retry counts.
+# 函数用途: 单行显示子代理的真实状态、职责、耗时、上下文和压缩次数，不把正常续作标成失败重试。
 def _render_subagent_activity_row(
     row: dict[str, object],
     context: TuiRenderContext,
@@ -1008,7 +1009,6 @@ def _render_subagent_activity_row(
         " ".join(str(row.get("description") or "").split())
     )
     elapsed = _subagent_elapsed_seconds(row, context.now)
-    attempts = max(0, _safe_render_int(row.get("attempts")))
     context_tokens = max(0, _safe_render_int(row.get("context_tokens")))
     compact_count = max(0, _safe_render_int(row.get("compact_count")))
     suffix: list[tuple[str, str]] = [
@@ -1016,8 +1016,6 @@ def _render_subagent_activity_row(
         ("class:tui-muted", f" · ctx {_format_compact_number(context_tokens)}"),
         ("class:tui-muted", f" · compact {compact_count}"),
     ]
-    if attempts > 1:
-        suffix.append(("class:tui-muted", f" · 重试 {attempts - 1} 次"))
     selected = str(row.get("run_id") or "").strip() == context.selected_agent_run_id
     row_prefix = "› " if selected else "  "
     fixed_without_name: tuple[Fragment, ...] = (

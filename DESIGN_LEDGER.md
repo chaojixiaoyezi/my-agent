@@ -1,5 +1,20 @@
 # DESIGN LEDGER
 
+## 2026-09-07 执行代次不等于失败重试【状态：R195 本地通过，待新 TUI】
+
+- 图书递归真任务中，coordinator 正常等待下级并被唤醒三轮，旧展示把 attempts-1 写成“重试 2 次”。
+- 对照 终端交互 `components/CoordinatorAgentStatus.tsx::AgentLine` 的状态、耗时、token、队列和职责投影，
+  删除没有失败事实来源的 footer 重试推断。RuntimeDB attempt、真正的 provider retry、恢复预算不变。
+- 不另加失败计数器、不按错误正文猜重试；真实失败继续显示失败状态并保留诊断。窄屏职责获得原数字占用的空间。
+
+## 2026-09-07 shell 超时后的结果证明【状态：诊断，尚未修改运行语义】
+
+- 真任务 A 的构建加搜索命令在 240 秒超时后落 UNKNOWN，之后 Gateway 恢复被挡。现有 shell 会尝试终止
+  进程树，却丢弃终止证明和部分输出，并把 TOOL_TIMEOUT 全部归为 unknown。
+- 对照 会话运行时 `core/src/exec.rs`：超时触发进程组终止，再收集有界输出和 timed_out/退出状态。
+  后续只允许可信进程终态证据把本次操作记为确定失败；信号失败、进程仍存活、身份不可核实继续 UNKNOWN。
+  不解析 command/错误文案推导安全，不把终止等同于文件回滚，不自动重放同一副作用操作。
+
 ## 2026-09-06 展示任务与执行恢复身份分离【状态：R194 已部署，两路主代理双重启通过】
 
 - 参考 会话运行时 `core/src/session/session.rs` 从 ResumedHistory/SessionMeta 保留 thread/session ID，以及
