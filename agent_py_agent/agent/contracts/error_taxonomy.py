@@ -1,4 +1,5 @@
 # LLM: 本模块是工具/合同错误码到恢复动作的唯一分类表；控制流读取 code，不得解析用户或模型错误文案。
+#   Persona CAS 冲突保留原错误码；分类表不证明是否写入，副作用事实必须由实际 handler 提供。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -154,6 +155,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="人格条目已变化或不存在；先用 update_persona action=list 取得当前 entry_id，再精确替换或删除。",
+    ),
+    "PERSONA_VERSION_CONFLICT": ErrorContract(
+        code="PERSONA_VERSION_CONFLICT",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="人格文件已有新版本；重新 list 读取当前哈希和条目，保留其他会话更新后再提交变更。",
     ),
     "PERSONA_CONTENT_NOT_ATOMIC": ErrorContract(
         code="PERSONA_CONTENT_NOT_ATOMIC",

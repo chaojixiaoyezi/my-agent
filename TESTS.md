@@ -1,5 +1,12 @@
 # TESTS
 
+## R192 提交前拒绝不等于未知副作用
+
+先用真实 ToolExecutor + LocalStore 复现 Persona 不存在条目/版本、批量第二项失败、CAS 冲突，以及
+update_goal 无目标/错任务，共 6 例错误转 UNKNOWN。handler 补明确未提交事实后，Persona/Goal/Repository/
+operation-idempotency 共 99 focused 通过。写后 I/O 故障仍 UNKNOWN，不能自动重放。
+真验继续原 `ma-r190-110-memory-compact`，使用普通中文要求续作，不让用户提供内部条目编号或绕过安全门。
+
 ## R191 来源分段与真实请求投影
 
 先在旧代码复现：五轮未变工作区被重复注入五次，以及预检查/物化后输入估算和稳定指纹不一致。

@@ -3,7 +3,7 @@
 #   长期记忆,按相关性召回)。用户表达"以后叫我X/我是做Y的/你说话别太正式"这类长期设定时用本工具,不用 remember。
 #   写入前 scan_memory_content 注入扫描(人格文件每轮注入=注入长效面)；首次写入保留 version 0 修改前基线。
 #   改动时同步 tests/test_persona_tool.py。
-# 模块用途: 向模型暴露按 owner 隔离的人格增删改查、历史和回滚工具，并统一审批与错误返回。
+# 模块用途: 向模型暴露按 owner 隔离的人格增删改查、历史和回滚；提交前拒绝可纠正，写入中断仍按未知副作用保护。
 from __future__ import annotations
 
 import copy
@@ -474,8 +474,10 @@ def _persona_read_result(
     return ToolHandlerOutcome("update_persona", True, json.dumps(payload, ensure_ascii=False))
 
 
-# LLM: All mutation failures map to the registered tool error taxonomy in one place.
-# 函数用途: 调用 Persona repository 并把并发、注入、配额和文件错误转换成稳定工具结果。
+# LLM: Repository entry/CAS/security exceptions arise before _commit_persona_mutation;
+# mark only those as not_started. I/O or generic repository errors may follow a partial
+# commit and must retain unknown-effect reconciliation. Keep repository and runtime tests aligned.
+# 函数用途: 区分画像尚未写入的校验拒绝与可能部分写入的异常，让模型能改正条目编号而不丢失副作用保护。
 def _execute_persona_mutation(
     agent: object,
     repository: PersonaRepository,
@@ -519,14 +521,16 @@ def _execute_persona_mutation(
             )
     except PersonaEntryNotFoundError:
         return _err(
-            "entry_id 或版本不存在；请重新 list/history 后再操作", "PERSONA_ENTRY_NOT_FOUND"
+            "entry_id 或版本不存在；请重新 list/history 后再操作", "PERSONA_ENTRY_NOT_FOUND",
+            effect_outcome="not_started",
         )
     except PersonaConflictError as exc:
         return _err(
-            str(exc), "PERSONA_VERSION_CONFLICT", hint="人格文件已被其他会话修改，请重新 list。"
+            str(exc), "PERSONA_VERSION_CONFLICT", hint="人格文件已被其他会话修改，请重新 list。",
+            effect_outcome="not_started",
         )
     except PersonaSecurityError as exc:
-        return _err(str(exc), "PERSONA_INJECTION_BLOCKED")
+        return _err(str(exc), "PERSONA_INJECTION_BLOCKED", effect_outcome="not_started")
     except OwnerQuotaExceeded as exc:
         return _err(
             str(exc), "OWNER_DISK_QUOTA_EXCEEDED", hint="清理当前 owner 文件或联系管理员调整配额。"
@@ -560,6 +564,9 @@ def _persona_source(agent: object) -> str:
     return f"agent_tool:{request_id}" if request_id else "agent_tool"
 
 
+# LLM: The owning branch must prove not_started; never infer it from error text or taxonomy.
+# Keep unspecified write failures uncertain for ToolOperationCoordinator, including partial persistence.
+# 函数用途: 返回画像工具错误；调用方明确证明未提交时附上校验阶段，否则保留未知副作用判断。
 def _err(
     msg: str,
     code: str,
@@ -576,6 +583,7 @@ def _err(
         json.dumps(body, ensure_ascii=False),
         error_code=code,
         effect_outcome=effect_outcome,
+        failure_stage="validation" if effect_outcome == "not_started" else "",
     )
 
 

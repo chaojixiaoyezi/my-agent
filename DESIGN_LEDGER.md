@@ -1,6 +1,16 @@
 # DESIGN LEDGER
 
-## 2026-09-06 按来源追加运行状态变化【状态：R191 实施中，未部署】
+## 2026-09-06 未写入的确定错误交回模型纠正【状态：R192 定向通过，待真 TUI】
+
+- 真实 `update_persona` 的不存在条目与 `update_goal` 的无目标返回没有携带副作用事实，被统一协调器保守地
+  包装为 UNKNOWN。读 会话运行时 `ext/goal/src/tool.rs::handle_update`、长期助手
+  `tools/memory_tool.py::MemoryStore.replace`：条件不满足交回模型纠正，不当作执行结果未知。
+- 本项目保留结构化 entry_id、owner、task、CAS 权威；由实际 handler 在已证明提交前拒绝的分支返回
+  `effect_outcome=not_started/failure_stage=validation`。不扩展中央错误码重放白名单、不按正文判断，
+  Persona 文件/版本/审计的部分写入异常继续 UNKNOWN。补登记 PERSONA_VERSION_CONFLICT 分类。
+- 用真实 operation store 复现 6 个原实现误 UNKNOWN，修后定向通过；原 C TUI 需复验，不以单测封板。
+
+## 2026-09-06 按来源追加运行状态变化【状态：R191 已部署，真实样本通过，经济性继续验证】
 
 - R190 真 TUI 已证明旧状态可以随完整摘要回收，main/child 都在压缩后继续；但原 B 的 7 份动态状态包各有
   14,361～18,743 字符，多份相邻包的前 13,679 字符相同，少量执行变化导致整包重复追加。该字符证据只用于
@@ -16,7 +26,8 @@
   不更改用户 Memory、权限、任务终态或工具副作用账，不新增模型调用。属于现有 native 缓存重复注入 bug 修复，
   不增加双轨开关；text 协议和没有结构分段的直接摘要请求沿用原输入语义。
 - 定向验证覆盖重复包、A→B→A、不同来源、空注入复位、多来源压缩与回滚、完整渲染和请求前缀；随后部署到
-  唯一 Gateway，用原长 TUI 的连续任务核对真实 provider usage、Compact 和记忆，产品级结果仍待验。
+  唯一 Gateway。真实新请求未变记忆只出现一次，完整批量追加后 Compact 4 代继续到 final；首轮任务质量
+  不等价，provider 两档账单只记观测数据，不当成等效任务成本结论，见 FT-181～184。
 
 ## 2026-09-05 运行中 Compact 回收已覆盖的旧状态快照【状态：R190 已部署，原 TUI 回收续跑通过】
 

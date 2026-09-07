@@ -216,6 +216,59 @@ def test_update_persona_missing_entry_does_not_claim_success(tmp_path):
     assert result.error_code == "PERSONA_ENTRY_NOT_FOUND"
 
 
+@pytest.mark.parametrize("arguments,code", [
+    ({"action": "replace", "entry_id": "missing", "content": "报告先列问题"}, "PERSONA_ENTRY_NOT_FOUND"),
+    ({"action": "rollback", "rollback_version": 99}, "PERSONA_ENTRY_NOT_FOUND"),
+    ({"action": "add", "content": "报告先列问题", "expected_sha256": "stale"}, "PERSONA_VERSION_CONFLICT"),
+    ({"operations": [{"action": "add", "content": "日期用年月日"},
+                     {"action": "remove", "entry_id": "missing"}]}, "PERSONA_ENTRY_NOT_FOUND"),
+])
+def test_persona_precommit_rejection_stays_failed_through_operation_store(tmp_path, arguments, code):
+    from agent_py_agent.agent.local_storage import LocalStore
+
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    before = user.read_bytes()
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    result = execute_canonical_test_call(
+        tmp_path, tools={"update_persona": UpdatePersonaTool(agent)},
+        tool_name="update_persona", arguments={"target": "user", **arguments},
+        operation_store=store,
+    ).result
+
+    assert result.error_code == code
+    assert result.effect_outcome == "not_started"
+    assert result.failure_stage == "validation"
+    assert result.handler_executed is True
+    assert result.operation.status == "failed"
+    assert user.read_bytes() == before
+    assert PersonaRepository.from_home_paths(agent.home_paths).history("user") == []
+
+
+def test_persona_write_then_error_remains_unknown(tmp_path, monkeypatch):
+    from agent_py_agent.agent.local_storage import LocalStore
+
+    agent, _soul, user, _agents = _agent_with_paths(tmp_path)
+    repository = PersonaRepository.from_home_paths(agent.home_paths)
+    agent.persona_repository = repository
+
+    def interrupted_commit(request):
+        user.write_text("partially committed", encoding="utf-8")
+        raise OSError("audit persistence interrupted")
+
+    monkeypatch.setattr(repository, "mutate", interrupted_commit)
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    result = execute_canonical_test_call(
+        tmp_path, tools={"update_persona": UpdatePersonaTool(agent)},
+        tool_name="update_persona", arguments={"target": "user", "content": "报告先列问题"},
+        operation_store=store,
+    ).result
+
+    assert result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert result.effect_outcome == "unknown"
+    assert result.operation.status == "unknown"
+    assert user.read_text(encoding="utf-8") == "partially committed"
+
+
 def test_update_persona_invalid_target(tmp_path):
     agent, *_ = _agent_with_paths(tmp_path)
     result = UpdatePersonaTool(agent).execute({"target": "memory", "content": "x"})

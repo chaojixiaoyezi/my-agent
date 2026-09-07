@@ -106,6 +106,29 @@ def test_get_goal_without_existing_goal_matches_codex_response(tmp_path) -> None
     assert '"goal": null' in result.output
 
 
+@pytest.mark.parametrize("missing", [True, False])
+def test_update_goal_precondition_failure_is_not_unknown(tmp_path, missing):
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    agent, thread, goal = _goal_agent(tmp_path)
+    if missing:
+        agent.conversation_store.delete_goal(thread.thread_id, expected_goal_id=goal.goal_id)
+    else:
+        agent._current_run_params.task_attributes["conversation_task_id"] = "another-task"
+    result = execute_canonical_test_call(
+        tmp_path, tools={"update_goal": agent.tools.tools["update_goal"]},
+        tool_name="update_goal", arguments={"status": "complete"},
+        operation_store=agent.local_store,
+    ).result
+
+    assert result.error_code == ("GOAL_NOT_FOUND" if missing else "GOAL_STATE_CONFLICT")
+    assert result.effect_outcome == "not_started"
+    assert result.failure_stage == "validation"
+    assert result.operation.status == "failed"
+    if not missing:
+        assert agent.conversation_store.load_goal(thread.thread_id).status == "active"
+
+
 def test_legacy_cleared_goal_is_absent_but_unknown_status_fails_closed(tmp_path) -> None:
     agent, thread, goal = _goal_agent(tmp_path)
     path = agent.conversation_store._goal_path(thread.thread_id)

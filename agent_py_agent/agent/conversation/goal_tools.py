@@ -1,3 +1,6 @@
+# LLM: Goal tools bind to structured current-thread authority. Pre-update rejection is
+# side-effect-free; generic create/persistence failures must not acquire replay authority.
+# 模块用途: 提供会话目标读写工具；不存在或归属冲突交回模型处理，真实写入异常保留保护。
 from __future__ import annotations
 
 """会话运行时 model tools for one persisted thread goal."""
@@ -35,12 +38,19 @@ def _goal_context(agent: SimpleAgent) -> tuple[str, str, str, dict[str, object] 
     )
 
 
-def _error(tool: str, message: str, code: str) -> ToolHandlerOutcome:
+# LLM: Only the call site observing a pre-write guard may supply not_started. This
+# result crosses ToolOperationCoordinator; do not whitelist codes or parse the message.
+# 函数用途: 给目标工具返回结构化失败，明确未写入的错误可供模型纠正，其余保持保守处理。
+def _error(
+    tool: str, message: str, code: str, *, effect_outcome: str = "",
+) -> ToolHandlerOutcome:
     return ToolHandlerOutcome(
         tool,
         False,
         json.dumps({"ok": False, "error": message, "error_code": code}, ensure_ascii=False),
         error_code=code,
+        effect_outcome=effect_outcome,
+        failure_stage="validation" if effect_outcome == "not_started" else "",
     )
 
 
@@ -198,6 +208,9 @@ class CreateGoalTool(BaseTool):
         return ToolHandlerOutcome("create_goal", True, _goal_response(goal))
 
 
+# LLM: Goal mutation requires exact current thread/task identity; only structured
+# preconditions are recoverable failures. Keep post-write persistence protected.
+# 类用途: 由模型标记当前目标完成或阻塞，不创建目标，也不把无目标的普通任务误停成未知副作用。
 class UpdateGoalTool(BaseTool):
     model_spec = ToolModelSpec(
         name="update_goal",
@@ -240,6 +253,10 @@ class UpdateGoalTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
+    # LLM: Validate status, exact task ownership and goal existence before the CAS update;
+    # a missing/CAS-rejected goal has no mutation to reconcile. Post-update writes may
+    # fail partially and continue through the ordinary unknown-effect path.
+    # 函数用途: 修改当前任务目标；没有目标或目标已变更时让模型正常处理，不把未发生的写入当成未知。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         status = str(params.get("status") or "").strip().lower()
         if status not in {"complete", "blocked"}:
@@ -247,10 +264,14 @@ class UpdateGoalTool(BaseTool):
                 "update_goal",
                 "update_goal can only mark the existing goal complete or blocked",
                 "TOOL_INVALID_ARGUMENTS",
+                effect_outcome="not_started",
             )
         thread_id, task_id, goal_id, _ = _goal_context(self.agent)
         if not thread_id:
-            return _error("update_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED")
+            return _error(
+                "update_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED",
+                effect_outcome="not_started",
+            )
         store = self.agent.conversation_store
         with store.goal_transition_guard(thread_id):
             goal = store.load_goal(
@@ -268,9 +289,13 @@ class UpdateGoalTool(BaseTool):
                         else "this thread has no goal"
                     ),
                     "GOAL_STATE_CONFLICT" if goals else "GOAL_NOT_FOUND",
+                    effect_outcome="not_started",
                 )
             if task_id and goal.task_id != task_id:
-                return _error("update_goal", "the active run is bound to another task", "GOAL_STATE_CONFLICT")
+                return _error(
+                    "update_goal", "the active run is bound to another task", "GOAL_STATE_CONFLICT",
+                    effect_outcome="not_started",
+                )
             updated = store.update_goal(
                 {
                     "thread_id": thread_id,
@@ -280,7 +305,10 @@ class UpdateGoalTool(BaseTool):
                 }
             )
             if updated is None:
-                return _error("update_goal", "the goal changed concurrently", "GOAL_STATE_CONFLICT")
+                return _error(
+                    "update_goal", "the goal changed concurrently", "GOAL_STATE_CONFLICT",
+                    effect_outcome="not_started",
+                )
             task_status = "completed" if status == "complete" else "interrupted"
             store.update_task_status({"task_id": goal.task_id, "status": task_status})
             registry_status = "done" if status == "complete" else "blocked"
