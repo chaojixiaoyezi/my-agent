@@ -1,10 +1,21 @@
 # STATUS
 
-## R199 历史分页（本地实现，尚未部署）
+## R200 协调员正常续跑被累计次数误拦（本地修复，待部署）
+
+- F 的协调员 runner_attempts=4、PENDING/interrupted，5 个 child 已结束；旧孤儿入口把正常工作片计入
+  `_ORPHAN_REVIVE_ATTEMPT_CAP=4`。已删除该重复卡口，复用原候选/真实失败预算和身份、UNKNOWN 防线。
+- 3 个红测复现后，88 focused 通过 / 1 Linux 专属 skipped；尚未冒充原 TUI 自动恢复通过。
+
+## R199 历史分页（已部署，原 D 分页切片通过）
 
 - 已接通 canonical 向前分页、异步上翻、同页锚点保持和 Ctrl+O 旧页补入；不改模型上下文/缓存。
-- 原历史重排还会被 renderer 的 created_seq 排序抵消，现同步调整显示槽位；待原 D 会话真实复验。
-- 图书 F 的当前执行代已全部 done，但主界面仍等待协调员；完整父层唤醒链尚在定位，不能算正常长任务。
+- 提交 fb33b63；wheel SHA `152db912b1f2713dff76e6eaf430410800f184bda6e45d0f63f6f0b409f5a1bc`。
+  1788798770.414 停 R198，1788798777.997 启唯一 Gateway 3231726；私有模型配置原字节复用，MiniMax-M2.7。
+- 原 D 会话 sess_1788752617_7811c6b8 / thread-479cf8cfdd2e46fc 升级客户端到 PID 3232424。
+  初始最新页 105 行、before=147844；Ctrl+Home 上翻读到首条输入，Ctrl+O 回看也通过。
+  canonical messages 121 行与 model_usage 8 行 SHA 不变，Compact 5；主/子切换与 OS 复制仍待组合复验。
+- 先清无人使用的临时探针环境，再通过 /exit 关闭五个已空闲 R171 Compact 测试客户端，核对进程零引用后
+  删除 R170 安装环境；项目包备份和依赖版本留在部署证据目录。未删用户代码、会话、当前安装或旧失败证据。
 
 ## R198 前后台恢复归属（已部署，真实主代理恢复切片通过）
 

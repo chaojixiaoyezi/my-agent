@@ -341,17 +341,23 @@ def test_orphan_revive_waits_for_abandoned_attempt_thread_to_exit(
     ) is True
 
 
-def test_supervision_skips_live_capped_and_running(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("attempts", [4, 64])
+def test_supervision_keeps_liveness_and_retry_gates_without_lifetime_slice_cap(
+    tmp_path: Path, monkeypatch, attempts: int,
+) -> None:
     manager = SubAgentManager(tmp_path / "subagents")
     _make_child(manager, status="PENDING", session=_session())
-    _make_child(manager, status="PENDING", attempts=4)
+    waiting = _make_child(manager, status="PENDING", attempts=attempts)
+    waiting.turn_end_reason = "interrupted"
+    manager.save(waiting)
+    _make_child(manager, status="FAILED", attempts=attempts)
     _make_child(manager, status="RUNNING", session=_session())
     calls = _capture_auto_start(monkeypatch)
 
     summary = capability_auto_sweep.supervise_stalled_orphans(_agent(tmp_path, manager))
 
-    assert summary["orphans_revived"] == 0
-    assert calls == []
+    assert summary["orphans_revived"] == 1
+    assert calls == [[waiting.id]]
 
 
 def test_supervision_lock_serializes_competing_trigger_paths(tmp_path: Path, monkeypatch) -> None:

@@ -21,6 +21,10 @@
 
 ## 2026-08-23 当前运行基线
 
+- 普通 child/coordinator 接续不能用累计 runner_attempts 作为生命周期上限；它也包含正常等孩子后的
+  工作片。孤儿恢复复用同一 runner candidate，真实 FAILED/TIMEOUT 仍走既有重试策略；live session、
+  未退出 attempt、owner/conversation、直属等待、能力和 UNKNOWN 门不得旁路。
+
 - 显示历史通过同 owner canonical JSONL 向前分页，读取到的最早行与实时续读末行各持一个游标。
   行数目标不能拆坏一个连续工作片；仅在用户上翻时异步补页，不重写模型历史或缓存前缀。
   视口以 block ID/块内行定位；Ctrl+O 可补旧前缀，不混入冻结之后的回复，子页不消费 root 游标。

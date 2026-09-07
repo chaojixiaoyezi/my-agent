@@ -1,5 +1,11 @@
 # Subagent Progress
 
+## R200 正常工作片不是失败重试（本地通过，原 TUI 待验）
+
+F 协调员四个正常工作片后被旧孤儿累计次数门挡住，最后一个 child DONE 后无法接续。
+移除该门和 Audit 特判，共用原候选及失败预算；父层等待、活跃 session、owner 和 UNKNOWN 仍守门。
+3 个红测后，88 focused / 1 Linux 专属 skipped；待同一个 F run 在新版 Gateway 自然启动下一工作片。
+
 ## R184 家目录协作（focused 与三个 child 真 TUI 通过）
 
 普通 child/grandchild 继承直接父级的 owner home 产品范围；cwd 单独传递，不能继承管理员的外部启动目录。

@@ -148,6 +148,42 @@ def test_successful_siblings_resume_parent_only_after_last_child(tmp_path) -> No
     assert parent_wait_blocks_dispatch(manager.load(parent.id)) is False
 
 
+def test_late_child_completion_resumes_same_parent_after_many_work_slices(
+    tmp_path, monkeypatch,
+) -> None:
+    from agent_py_agent.agent.agent_core.orchestration.background import dispatch
+    from agent_py_agent.agent.agent_core.runner.worker import _resume_direct_parent_after_session
+
+    manager, parent, children = _parent_and_children(
+        tmp_path, statuses=("RUNNING", "RUNNING"),
+    )
+    parent.runner_attempts = 8
+    parent.turn_end_reason = "interrupted"
+    manager.save(parent)
+    mark_parent_waiting_for_direct_children(manager, parent.id, [c.id for c in children])
+    started = []
+
+    def capture_start(agent, tasks, request_params):
+        run_ids = [task.id for task in tasks]
+        started.append(run_ids)
+        return {"status": "started", "run_ids": run_ids}
+
+    monkeypatch.setattr(dispatch, "auto_start_tasks", capture_start)
+    worker = SimpleNamespace(subagents=manager)
+    for index, child in enumerate(children):
+        child.status = "DONE"
+        manager.save(child)
+        _resume_direct_parent_after_session(worker, child.id)
+        if index == 0:
+            assert started == []
+            assert parent_wait_blocks_dispatch(manager.load(parent.id))
+
+    assert started == [[parent.id]]
+    assert not parent_wait_blocks_dispatch(manager.load(parent.id))
+    _resume_direct_parent_after_session(worker, children[-1].id)
+    assert started == [[parent.id]]
+
+
 def test_user_guidance_releases_parent_wait_without_stopping_children(tmp_path) -> None:
     manager, parent, children = _parent_and_children(
         tmp_path,

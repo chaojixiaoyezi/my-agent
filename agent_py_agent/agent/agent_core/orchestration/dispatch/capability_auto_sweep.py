@@ -10,7 +10,8 @@ from __future__ import annotations
 #   失败绝不外抛(唤醒轮必须照常进行),结果落 debug 日志与返回摘要。
 #   改动时同步检查 conversation/runtime.py(BackgroundMainAgentScheduler._run_wake_signal
 #   接入点)、tests/test_capability_auto_grant.py。
-# 模块用途: 在唤醒和监督阶段核对能力及运行生命周期；只取消仍活跃的旧孩子，不覆盖已记录的失败终态。
+#   正常工作片次数不构成存活上限；续跑与故障重试统一复用 runner candidate，UNKNOWN 仍由运行账裁决。
+# 模块用途: 在唤醒和监督阶段核对能力及运行生命周期；允许长期父子协作接续，不把工作片数量当失败次数。
 """Mechanism-level capability sweep before subagent-lifecycle wake turns."""
 
 import logging
@@ -40,11 +41,6 @@ CAPABILITY_SWEEP_REASONS = frozenset(
         "subagent_runner_finished",
     }
 )
-
-# 普通任务的机制层自动复活上限。Audit 来源工作者是长期逻辑岗位，不能拿累计
-# runner_attempts 当生命周期上限；它的卡死次数另记在来源恢复账中并持续可观测。
-_ORPHAN_REVIVE_ATTEMPT_CAP = 4
-
 
 def sweep_applies_to_reason(reason: object) -> bool:
     return str(reason or "").strip() in CAPABILITY_SWEEP_REASONS
@@ -176,25 +172,16 @@ def auto_start_orphan_run(agent: Any, run_id: str) -> dict[str, object]:
     }
 
 
-# 函数用途: 判断一个 run 是不是"该被机制层复活的停滞可派孤儿"(全结构化判据)。
+# LLM: Delegate eligibility and failed-run retry policy to the canonical runner candidate gate.
+# Lifetime runner_attempts counts healthy child-wait/guidance slices too, never a recovery budget.
+# Keep live-session, active-attempt and conversation fences; callers additionally check RuntimeDB UNKNOWN.
+# 函数用途: 判断同一 run 能否安全接续；正常等孩子后的第几轮不封顶，真实失败仍走既有重试规则。
 def _is_stalled_dispatchable_orphan(task: Any, decision: Any = None) -> bool:
     from ....contracts.state_machine import DISPATCHABLE_STATES, normalize_status
     from ....subagents.runner_session_liveness import has_fresh_runner_session
     from ...runner.dispatch import _is_dispatch_runner_candidate
 
     if normalize_status(str(getattr(task, "status", "") or "")) not in DISPATCHABLE_STATES:
-        return False
-    from ....common.audit_activation import (
-        structured_audit_supervised_worker_attributes,
-    )
-
-    is_source_worker = structured_audit_supervised_worker_attributes(
-        getattr(task, "attributes", {}) or {}
-    )
-    if (
-        not is_source_worker
-        and int(getattr(task, "runner_attempts", 0) or 0) >= _ORPHAN_REVIVE_ATTEMPT_CAP
-    ):
         return False
     if has_fresh_runner_session(task):
         return False

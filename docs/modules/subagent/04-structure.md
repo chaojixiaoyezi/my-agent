@@ -1,5 +1,12 @@
 # Subagent Structure
 
+## 正常接续与失败恢复
+
+`runner/worker.py::_resume_direct_parent_after_session` 先按 exact child 释放直属等待，再交给
+`capability_auto_sweep.auto_start_orphan_run`。该入口不再限制累计工作片次数，也不为 Audit 另开豁免，
+而是共用 `runner/dispatch.py::_is_dispatch_runner_candidate` 的等待、能力、终态和失败预算。
+RuntimeDB UNKNOWN 仍在创建 attempt 前被阻断；不会把已失败状态重写成可续跑状态。
+
 ## 普通代理的家目录范围
 
 R184：main/child/grandchild 的普通文件工作区是同一个 owner home，不再按业务 tasks 目录收窄。

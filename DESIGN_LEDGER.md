@@ -1,6 +1,19 @@
 # DESIGN LEDGER
 
-## 2026-09-07 显示历史向前分页【状态：R199 本地实现，待真实 TUI】
+## 2026-09-07 正常子代理工作片不设生命周期次数上限【状态：R200 本地通过，待原 TUI】
+
+- F 真递归任务的协调员在第 4 个工作片后保持 PENDING，最后一个孩子已经 DONE；直属等待标记被清除，
+  `auto_start_orphan_run` 却被 `_ORPHAN_REVIVE_ATTEMPT_CAP=4` 拒绝。正常工作片数被误当故障数。
+- 对照 会话运行时 `core/src/agent/control.rs::send_inter_agent_communication` 与 `control/execution.rs`，
+  下级事件接续同一 thread，限制的是实时执行容量；`session/turn.rs::run_sampling_request` 的失败预算属于
+  单次采样，不是整个代理的生存次数。这里不声称已经逐行对照其全部恢复系统。
+- 删除孤儿入口的累计次数门及其 Audit 豁免分支，普通代理和来源岗位共同复用既有 runner candidate。
+  fresh session、未退出 attempt、直属等待、owner/conversation、能力和 UNKNOWN 门保持；FAILED/TIMEOUT
+  仍由既有 typed failure 重试策略裁决，不把失败改为 PENDING，也不增加无限故障重试旁路。
+- 3 个定位用例先失败；修后与生命周期、候选、会话和能力共 88 passed / 1 Linux 专属 skipped。
+  下一步在原 F TUI 不插话、不造新 run、不改旧账，验证第 5 个工作片能自然接续及最终逐层回复。
+
+## 2026-09-07 显示历史向前分页【状态：R199 已部署，原 D 分页通过，组合验收继续】
 
 - 解决问题：恢复仅取最近 80 条且没有更早游标，正文在磁盘上却无法上翻。终端交互
   `src/assistant/sessionHistory.ts` 使用 latest/before_id/hasMore；本项目复用已有 canonical JSONL 字节边界，
@@ -13,6 +26,8 @@
   但不夹入冻结期间的新回复；控制、主/子工作状态、模型预览不受影响。Home 到当前已加载页顶部，再上翻续读。
 - 顺带修复原历史重排未改变显示排序槽位的问题，否则 renderer 按 created_seq 排序会再次把过程放到 final 后。
   事件 journal 不改写；排序槽位只属于显示投影。旧消息及旧失败账不迁移、不删除。
+- 原 D 精确 resume：最新页 105 行、before=147844，上翻可见首条真实用户需求；Ctrl+O 也可回看。
+  121 条消息和 8 条用量记录的 SHA 均不变，Compact 保持 5；主/子切换和系统剪贴板组合尚未完成。
 
 ## 2026-09-07 同一回合恢复归属【状态：R198 已部署，真实主代理恢复切片通过】
 

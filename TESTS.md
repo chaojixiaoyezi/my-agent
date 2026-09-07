@@ -1,5 +1,12 @@
 # TESTS
 
+## R200 正常工作片接续与故障门区分
+
+`test_dispatch_liveness_and_revive.py` 用 4/64 个历史工作片验证同 run 可继续，同时保留 fresh session、
+running、FAILED、UNKNOWN 和未退出 attempt 的拒绝；`test_direct_parent_lifecycle.py` 从真实等待记录
+走最后一个孩子完成到 targeted auto-start，不只测“等待标记删除”。3 个定位用例先失败，修后与 runner
+candidate、session pool、capability 共 88 passed / 1 Linux 专属 skipped。原 F TUI 自然接续是最终验收。
+
 ## R199 按需历史分页与显示排序
 
 定向文件为 `test_conversation_history_paging.py`、`test_tui_history_paging.py`，并回归
@@ -8,6 +15,8 @@
 以真实临时 JSONL 验证 UTF-8 字节边界/追加竞态，以真实 renderer 验证顺序，不只断言 reducer 列表顺序。
 上述 12 个 focused 文件共 186 passed；没有运行全仓 pytest。
 最终必须在原 D TUI 精确恢复并向前读到首条消息；对比 canonical 消息、模型用量和 Compact，证明只是展示读取。
+该切片已通过：最新页 105 行、before=147844，首条输入和 Ctrl+O 可回看，121 条消息/8 条用量 SHA
+未变，Compact 5；主子视图与实际系统剪贴板组合不据此宣称通过。
 
 ## R198 同一请求的恢复归属
 
