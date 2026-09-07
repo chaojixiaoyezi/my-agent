@@ -1,5 +1,13 @@
 # TESTS
 
+## R194 精确 owner 恢复与未开始执行清理
+
+红测先复现旧展示 task 导致同回合恢复拒绝、core 不发布实际身份。定向覆盖新旧展示链接、原工具历史、
+冷 owner 已死 PID、活 PID、不可核实 PID/start、PID 复用、旧 agent/attempt 拒绝、其他 run 不动；
+processing 关闭/取消/换代/终态后不保存绑定，磁盘或回合门拒绝时关闭尚未运行的 attempt。
+直接调用 ask 的 fixture 补真实 processing/lease，不关闭生产安全门。真实验收继续原 A/C 长会话，
+自然语言另开后续轮后顺序重启同一个 Gateway；不人工修改已失败请求或补被测产物。
+
 ## R193 Gateway 恢复预算
 
 两个回归先在旧实现复现“attempt 20 或 2 即启动恢复失败”；修复后要求连续服务重启保持同 request 身份，

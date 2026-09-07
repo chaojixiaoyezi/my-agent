@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## R194 展示与执行双字段、单权威
+
+- `runtime_mixin::_bind_main_agent_authority` 取得 RuntimeDB 真身份，调用现有 binding callback 的
+  `bind_runtime_authority`；异常沿原 exact-attempt 收口入口处理，尚未进入任何模型或工具。
+- `_GatewayTaskBindingWriter` 在原 active-turn transition 与 JSON 原子更新内保存 `runtime_authority`
+  v1，不覆盖 heartbeat、停止位或 `conversation_runtime` 展示链接。
+- `_gateway_runtime_authority` 核对 request 与 current/dead transport 代次、完整结构字段；恢复与
+  `_gateway_run_params` 共用。坏凭据报错，不回退猜另一个 task/run。
+- `RuntimeRepository.recover_recorded_active_turn_attempt` 核对 exact task+run 和预期 agent/attempt；
+  `_mark_dead_runner_attempt_unknown` 与启动扫描共用 PID/start+CAS，再应用原工具/资源完整性证明。
+
 ## R193 唯一恢复计数来源
 
 - `recovery.py::_gateway_processing_failure_count` 读取 processing 请求的非负整数；缺字段是未记录过失败，

@@ -1,3 +1,6 @@
+# LLM: 主代理真实 task/run/attempt 必须在模型前完成绑定并交给宿主持久保存；
+# 正常结束、异常和 Compact 续接沿用同一权威，不从会话展示编号反推执行身份。
+# 模块用途: 执行主代理的模型工具循环、上下文续接与精确执行轮收尾，不替子代理调度另建身份。
 from __future__ import annotations
 
 """implements the SimpleAgent prompt/model/tool loop plus memory methods.
@@ -330,7 +333,8 @@ class SimpleAgentRuntimeMixin:
 
 # LLM: 主代理每轮必须挂到 params.task_id 对应的权威根 run；run_id 命中旧任务时
 # 必须丢弃该行并按 task 回退，绝不能仅凭线程级旧身份跨任务创建 attempt。
-# 函数用途: 为前台或后台主代理轮次登记或续挂数据库权威链，并回填当前 attempt。
+#   Gateway 需要在模型/工具之前收到本次实际 DB 身份，不能从后续会话展示任务反推恢复身份。
+# 函数用途: 登记主代理数据库权威链并回填 attempt；同步宿主恢复凭据，落盘失败时不进入模型。
 def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     """MANAGED 下主代理 run 登记权威链（seq 255 单一闭合：root/main AgentRun）。
 
@@ -386,11 +390,31 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
             role="main",
         )
         attempt_id = str(record.get("attempt_id") or "").strip()
+        agent_run_id = str(record.get("agent_run_id") or "")
+        authority_run_id = run_id
     else:
         attempt = repo.create_attempt(str(row["agent_run_id"]))
         attempt_id = str(attempt["attempt_id"] or "").strip()
+        agent_run_id = str(row["agent_run_id"] or "")
+        authority_run_id = str(row["run_id"] or "")
     if not attempt_id:
         return params
+    publish = getattr(params.conversation_task_binding_callback, "bind_runtime_authority", None)
+    if callable(publish):
+        try:
+            if publish({
+                "task_id": task_id, "run_id": authority_run_id, "invocation_run_id": run_id,
+                "agent_run_id": agent_run_id, "attempt_id": attempt_id,
+            }) is not True:
+                raise RuntimeError("主代理执行身份无法可靠保存，尚未进入模型或工具")
+        except Exception as exc:
+            # 这时模型尚未进入；沿用精确 attempt 收口，不能把未开始的轮次留成永远 running。
+            _settle_main_agent_run_status(
+                agent, run_id=authority_run_id, attempt_id=attempt_id,
+                runtime_status="cancelled" if isinstance(exc, InterruptedError) else "failed",
+                runtime_reason="runtime_authority_publish_failed",
+            )
+            raise
     return replace(params, attempt_id=attempt_id)
 
 

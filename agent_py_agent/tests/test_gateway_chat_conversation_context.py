@@ -798,7 +798,7 @@ def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
         "metadata": {"channel": "feishu", "message_id": "om_1"},
         "conversation": conversation,
     }
-    _run_gateway_ask(
+    _run_claimed_gateway_ask(
         _GatewayAskRunContext(
             agent,
             first_request,
@@ -1363,7 +1363,7 @@ def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(tmp_pa
         return original_run(prompt, params=params, **kwargs)
 
     monkeypatch.setattr(agent, "run", guarded_run)
-    _run_gateway_ask(
+    _run_claimed_gateway_ask(
         _GatewayAskRunContext(
             agent,
             {"prompt": "继续当前工作", "conversation": conversation},
@@ -1450,7 +1450,7 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
     release.start()
     started = time.monotonic()
     try:
-        result = _run_gateway_ask(
+        result = _run_claimed_gateway_ask(
             _GatewayAskRunContext(
                 agent,
                 {"prompt": "等上一轮结束后继续", "conversation": conversation},
@@ -1511,7 +1511,7 @@ def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path,
 
     def invoke(prompt: str, request_id: str) -> None:
         try:
-            _run_gateway_ask(
+            _run_claimed_gateway_ask(
                 _GatewayAskRunContext(
                     agent,
                     {"prompt": prompt, "conversation": conversation},
@@ -1927,7 +1927,7 @@ def test_gateway_conversation_turns_do_not_leak_into_owner_global_memory(tmp_pat
         "channel_user_id": "ou_user1",
         "canonical_user_id": "ou_user1",
     }
-    _run_gateway_ask(
+    _run_claimed_gateway_ask(
         _GatewayAskRunContext(
             agent,
             {
@@ -2021,7 +2021,7 @@ def test_gateway_ordinary_chat_accepts_legacy_cleared_goal_tombstone(tmp_path) -
     payload["status"] = "cleared"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    result = _run_gateway_ask(
+    result = _run_claimed_gateway_ask(
         _GatewayAskRunContext(
             agent,
             {"prompt": "继续普通聊天", "conversation": conversation},
@@ -3060,7 +3060,7 @@ def test_active_goal_without_materialized_workspace_allows_followup_turn(tmp_pat
     assert followup.workspace_task is None
     assert followup.thread_goal is not None
     assert followup.thread_goal["task_id"] == goal.task_id
-    result = _run_gateway_ask(
+    result = _run_claimed_gateway_ask(
         _GatewayAskRunContext(
             agent,
             {"prompt": "现在回复我", **request},
@@ -5085,7 +5085,10 @@ def test_gateway_subagent_records_originating_conversation_request(tmp_path):
     assert create_params.attributes[CONVERSATION_REQUEST_ID_ATTR] == "gw-current"
 
 
-def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(tmp_path) -> None:
+@pytest.mark.parametrize("display_task_differs", [False, True])
+def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(
+    tmp_path, monkeypatch, display_task_differs,
+) -> None:
     """同一 Gateway 请求重排后必须续上已落盘工具事实，不能从原需求重新规划。"""
 
     agent = SimpleAgent(
@@ -5171,10 +5174,14 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(tmp_path) ->
             model_parameters={"action": "create"},
         )
     )
+    if display_task_differs:
+        monkeypatch.setattr(
+            "agent_py_agent.agent.runtime_db.repository._proc_state", lambda _pid: "dead"
+        )
     with agent.subagents.runtime_db.transaction() as conn:
         conn.execute(
-            "UPDATE agent_attempts SET status='unknown', ended_at=? WHERE attempt_id=?",
-            (time.time(), authority["attempt_id"]),
+            "UPDATE agent_attempts SET status=?, ended_at=? WHERE attempt_id=?",
+            ("running" if display_task_differs else "unknown", time.time(), authority["attempt_id"]),
         )
         conn.execute(
             "UPDATE agent_runs SET status='unknown', updated_at=? WHERE agent_run_id=?",
@@ -5193,10 +5200,20 @@ def test_gateway_recovery_rehydrates_exact_active_turn_tool_history(tmp_path) ->
         },
         "conversation_runtime": {
             "request_id": request_id,
-            "task_id": request_id,
+            "task_id": "older-display-task" if display_task_differs else request_id,
             "thread_id": "thread-recover-active-turn",
         },
     }
+    if display_task_differs:
+        request["runtime_authority"] = {
+            "schema_version": "gateway_runtime_authority.v1",
+            "request_id": request_id,
+            "gateway_execution_attempt_id": "gateway-attempt-old",
+            "task_id": request_id,
+            "run_id": request_id,
+            "agent_run_id": authority["agent_run_id"],
+            "attempt_id": authority["attempt_id"],
+        }
     context = _GatewayAskRunContext(
         agent=agent,
         request=request,
@@ -5351,6 +5368,92 @@ def test_gateway_recovery_marker_cannot_replay_another_request_history(tmp_path)
     )
 
     assert _gateway_recovered_active_turn_tool_calls(context) == []
+
+
+@pytest.mark.parametrize("mode", ["current", "recovered", "request", "transport", "marker_schema", "missing_id", "malformed"])
+def test_gateway_runtime_authority_is_exact_and_structured(mode):
+    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_runtime_authority
+
+    binding = {
+        "schema_version": "gateway_runtime_authority.v1", "request_id": "request",
+        "gateway_execution_attempt_id": "transport-1", "task_id": "actual-task", "run_id": "actual-run",
+        "agent_run_id": "agent-run", "attempt_id": "runtime-attempt",
+    }
+    request = {"runtime_authority": binding, "execution_attempt_id": "transport-1"}
+    if mode in {"recovered", "marker_schema"}:
+        request["execution_attempt_id"] = "transport-2"
+        request["active_turn_recovery"] = {
+            "schema_version": "gateway_active_turn_recovery.v1" if mode == "recovered" else "bad.v1",
+            "request_id": "request", "dead_execution_attempt_id": "transport-1",
+        }
+    if mode == "request":
+        binding["request_id"] = "other-request"
+    elif mode == "transport":
+        binding["gateway_execution_attempt_id"] = "unrelated-transport"
+    elif mode == "missing_id":
+        binding["attempt_id"] = " "
+    elif mode == "malformed":
+        binding["gateway_execution_attempt_id"] = []
+    if mode in {"current", "recovered"}:
+        assert _gateway_runtime_authority(request, "request") == binding
+    else:
+        with pytest.raises(ConversationPersistenceError):
+            _gateway_runtime_authority(request, "request")
+
+
+@pytest.mark.parametrize("fence", ["open", "closing", "cancelled", "new_attempt", "terminal"])
+def test_gateway_runtime_binding_writer_preserves_queue_and_respects_lease(tmp_path, fence):
+    root = tmp_path / "gateway"
+    path = root / "requests/processing/request.json"
+    path.parent.mkdir(parents=True)
+    request = {
+        "id": "request", "status": "processing", "turn_phase": "open",
+        "execution_attempt_id": "transport-1", "lease_heartbeat_at": 1234,
+        "conversation_runtime": {"task_id": "old-display-task"},
+    }
+    if fence == "closing":
+        request["turn_phase"] = "closing"
+    elif fence == "cancelled":
+        request["cancel_requested"] = True
+    elif fence == "new_attempt":
+        request["execution_attempt_id"] = "transport-2"
+    elif fence == "terminal":
+        terminal = root / "requests/terminal/request.json"
+        terminal.parent.mkdir(parents=True)
+        terminal.write_text("{}", encoding="utf-8")
+    path.write_text(json.dumps(request), encoding="utf-8")
+    live = dict(request)
+    writer = _GatewayTaskBindingWriter(path, "request", live, "transport-1")
+    binding = {
+        "invocation_run_id": "request", "task_id": "actual-task", "run_id": "actual-run",
+        "agent_run_id": "agent-run", "attempt_id": "runtime-attempt",
+    }
+    if fence == "open":
+        assert writer.bind_runtime_authority(binding) is True
+    else:
+        with pytest.raises(InterruptedError):
+            writer.bind_runtime_authority(binding)
+    durable = json.loads(path.read_text(encoding="utf-8"))
+    assert durable == live
+    assert durable["lease_heartbeat_at"] == 1234
+    assert durable["conversation_runtime"]["task_id"] == "old-display-task"
+    assert ("runtime_authority" in durable) == (fence == "open")
+
+
+# LLM: Direct ask tests must provide the same durable processing identity as the real worker;
+# do not disable the production pre-model authority callback to accommodate in-memory fixtures.
+# 函数用途: 给直接调用 ask 内部入口的测试补齐真实 processing 文件与租约身份，不跳过执行绑定门。
+def _run_claimed_gateway_ask(context):
+    from dataclasses import replace
+
+    request = {
+        **context.request, "id": context.request_id, "status": "processing", "turn_phase": "open",
+        "execution_attempt_id": f"gateway-test-{context.request_id}",
+    }
+    path = context.request_path.parent / "gateway/requests/processing" / f"{context.request_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(request), encoding="utf-8")
+    return _run_gateway_ask(replace(context, request=request, request_path=path))
 
 
 def _conversation_context(agent: SimpleAgent, request: dict, request_id: str, prompt: str):

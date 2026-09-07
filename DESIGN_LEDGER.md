@@ -1,5 +1,18 @@
 # DESIGN LEDGER
 
+## 2026-09-06 展示任务与执行恢复身份分离【状态：R194 本地实现，待真实重启复验】
+
+- 参考 会话运行时 `core/src/session/session.rs` 从 ResumedHistory/SessionMeta 保留 thread/session ID，以及
+  `session/mod.rs::record_initial_history` 重建原 rollout；不把展示标题、cwd 或旧项目链接猜成运行身份。
+- RuntimeDB 仍是 task/run/attempt 唯一权威。Gateway 的 `runtime_authority` v1 是 core 绑定后写出的
+  投影，携带 request 与 transport attempt 来源；回放时必须再次对账，不产生新权限或独立身份体系。
+- owner 按需加载，因此不能依赖管理员实例初始化替所有用户调和崩溃。启动扫描与 exact owner 恢复共用
+  PID/start 死亡证明和 current-attempt CAS；缺信息、活进程、新代次及不确定工具仍阻断。
+- 保存恢复凭据在模型前完成；拒绝或磁盘错误关闭未开始执行轮，不能留下 running 假忙。旧无凭据请求
+  仅保留已有精确 task+request 对账，不增加“最新任务/相似路径”猜测兜底。与用户家目录整理软提示无关。
+- 另外记录：自动 Memory promotion 先写、后模型直接 batch 写同一偏好会重复。待通过现有来源和条目
+  身份解决，不能按相似自然语言硬合并，也不能因此恢复用户确认记忆的要求。
+
 ## 2026-09-06 执行代次与卡死失败次数分账【状态：R193 本地实现，待真 TUI】
 
 - 会话运行时 `core/src/session/mod.rs` 的 InitialHistory::Resumed 重建原会话，不把多次恢复当成任务执行失败。

@@ -49,6 +49,43 @@ def _main_run_rows(repo, task_id):
     ).fetchall()
 
 
+def test_main_binding_publishes_actual_runtime_ids_before_model(repo):
+    captured = []
+    writer = SimpleNamespace(bind_runtime_authority=lambda binding: captured.append(binding) or True)
+    params = RunParams(
+        request_id="new-request", run_id="new-request", task_id="new-request",
+        task_attributes={"conversation_task_id": "old-display-task"},
+        conversation_task_binding_callback=writer,
+    )
+    bound = _bind_main_agent_authority(_agent(repo), params)
+    row = repo.agent_run_for_run_id("new-request")
+    assert captured == [{
+        "task_id": "new-request", "run_id": "new-request",
+        "invocation_run_id": "new-request", "agent_run_id": row["agent_run_id"],
+        "attempt_id": bound.attempt_id,
+    }]
+
+
+@pytest.mark.parametrize("failure", [False, InterruptedError("closed"), OSError("disk")])
+def test_main_binding_publish_failure_closes_unstarted_attempt(repo, failure):
+    def publish(_binding):
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    params = RunParams(
+        request_id="unstarted", run_id="unstarted", task_id="unstarted",
+        conversation_task_binding_callback=SimpleNamespace(bind_runtime_authority=publish),
+    )
+    with pytest.raises((RuntimeError, InterruptedError, OSError)):
+        _bind_main_agent_authority(_agent(repo), params)
+    row = repo.agent_run_for_run_id("unstarted")
+    attempt = repo.current_attempt(row["agent_run_id"])
+    assert attempt["status"] == ("cancelled" if isinstance(failure, InterruptedError) else "failed")
+    assert attempt["ended_at"] > 0
+    assert repo.classify_attempt_closeout(attempt["attempt_id"]) == "cancelled"  # 账本证实零工具副作用
+
+
 def test_cross_identity_resume_does_not_split_run_tree(repo):
     """请求身份（req_{id}）登记后，主代理后台身份（bg-main-thread-{thread}）
     续跑同一 task——必须续挂原 main run，不得新建第二棵 run 树。"""

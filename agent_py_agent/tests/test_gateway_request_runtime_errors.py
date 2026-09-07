@@ -247,7 +247,10 @@ def test_handle_gateway_request_ignores_orphan_bad_response_projection(tmp_path:
     request_id = "gw-bad-response"
     request_path = paths.processing / f"{request_id}.json"
     request_path.write_text(
-        '{"id": "gw-bad-response", "kind": "ask", "prompt": "should not rerun"}',
+        json.dumps({
+            "id": request_id, "kind": "ask", "prompt": "should not rerun",
+            "status": "processing", "turn_phase": "open", "execution_attempt_id": "claimed-attempt",
+        }),
         encoding="utf-8",
     )
     gateway_response_path(paths, request_id).write_text("{bad json", encoding="utf-8")

@@ -1,5 +1,18 @@
 # STATUS
 
+## R194 恢复真实执行绑定（本地实现，正在验收）
+
+- R193 已部署 `.10` 唯一 Gateway；原 A/C TUI 在线重启后 attempts=2、processing_failure_count=0，
+  计数修复生效，但两路在恢复身份层失败。队列的 conversation_runtime.task_id 是旧项目展示链接，
+  当前 RuntimeDB 的 task 实际是新 request；此外冷 owner 未经过管理员启动时的死亡进程调和。
+- core 在模型/工具之前持久发布实际 task/run/agent_run/attempt 到精确 processing 请求，重启及 Compact
+  重入沿用此绑定，展示链接不作执行权威。凭据落盘失败不进入模型，并收口该未开始 attempt。
+- RuntimeDB 按同一 task+run、预期 agent/attempt、PID/start 死亡证据接续；不扫别的 run，活着或不能
+  证明死亡的不接管。原工具完整记录、UNKNOWN、资源状态、停止/租约代次硬门均保留。
+- 六个相关文件 195 focused 通过 / 1 原有 skipped，真实重启复验待部署。
+- R192 真 TUI 已把 C 的报告偏好写成问题先行/年/月/日顺序/美元，之后继续执行 14 条工具；未污染 D。
+  B/D/E 已分别返回最终汇报；完整批量覆盖与费用公平性仍需核对，不能用模型 final 代替证据。
+
 ## R193 Gateway 重启不消耗任务卡死预算（本地实现，待真 TUI）
 
 - `attempts` 仍是总执行代次；独立 `processing_failure_count` 只统计运行期确认失效的 processing 租约。

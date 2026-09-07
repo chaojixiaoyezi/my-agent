@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R194 冷 owner 和真实执行身份
+
+R193 真重启证明 attempts 与失败预算已分开，但 A/C 的旧展示任务与真实 DB task 不同导致恢复拒绝。
+core 现于模型前回写精确执行绑定，RuntimeDB 按 owner/run 的 current attempt 与 PID/start 证明恢复；
+管理员启动调和不再是所有用户恢复的前提。停止、transport 换代、工具未知和资源 dirty 保持原硬门。
+状态：本地定向验收中，产品级重启通过尚未宣称。
+
 ## R193 重启恢复不误算处理失败
 
 总 attempts 继续标识派发代次；processing_failure_count 只在运行期租约真过期时累计。启动恢复保留原

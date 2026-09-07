@@ -1,3 +1,6 @@
+# LLM: Gateway holds transport and conversation projections; actual execution identity is
+# published by RuntimeDB binding before model entry. Never infer it from a reused display task.
+# 模块用途: 执行已领取的网关请求，持久传递真实运行身份，并恢复同一回合的消息、工具与压缩状态。
 from __future__ import annotations
 
 """execution helpers keep one claimed gateway request inside focused contexts.
@@ -881,7 +884,8 @@ class _GatewayRunParamsRequest:
 # LLM: This writer is the only bridge from a promoted conversation task back to the exact
 # claimed Gateway request. Keep the durable request file and the live request object identical,
 # otherwise an inline Compact retry loses active-turn authority and leaves wake policies alive.
-# 类用途: 把本轮刚建立的任务身份同时写入请求文件和当前内存请求，供同回合续跑与停止使用。
+#   RuntimeDB 身份另由 bind_runtime_authority 原样投影，展示任务不能覆盖执行绑定。
+# 类用途: 保存本轮展示任务与实际执行绑定，分别供会话展示和精确恢复使用，互不反推。
 @dataclass(frozen=True)
 class _GatewayTaskBindingWriter:
     """Publish live request -> durable task lineage for /status, /btw and /stop."""
@@ -889,6 +893,40 @@ class _GatewayTaskBindingWriter:
     request_path: Path
     request_id: str
     request: dict | None = None
+    execution_attempt_id: str = ""
+
+    # LLM: Only core's actual DB binding calls this method, before any model/tool side effect.
+    # Preserve unrelated queue fields under the exact transport-attempt transition; failure must
+    # prevent execution. RuntimeDB revalidates this projection on recovery, it grants no new scope.
+    # 函数用途: 将真实 task/run/attempt 原样落到本轮请求，避免旧项目展示编号误导重启恢复。
+    def bind_runtime_authority(self, binding: dict[str, str]) -> bool:
+        keys = ("task_id", "run_id", "agent_run_id", "attempt_id")
+        if binding.get("invocation_run_id") != self.request_id or not all(
+            isinstance(binding.get(k), str) and binding[k].strip() for k in keys
+        ):
+            return False
+        payload = {
+            "schema_version": "gateway_runtime_authority.v1",
+            "request_id": self.request_id,
+            "gateway_execution_attempt_id": self.execution_attempt_id,
+            **{key: binding[key] for key in keys},
+        }
+
+        # LLM: T is held by the caller; the JSON lock preserves concurrent heartbeat fields.
+        # 函数用途: 在当前回合锁内只更新执行绑定，不覆盖租约、停止标记或展示任务。
+        def persist() -> bool:
+            update_json_file_atomic(
+                self.request_path,
+                lambda current: {**current, "runtime_authority": payload},
+                require_existing=True,
+            )
+            if isinstance(self.request, dict):
+                self.request["runtime_authority"] = dict(payload)
+            return True
+
+        return _GatewayActiveTurnTransition(
+            self.request_path, self.request_id, self.execution_attempt_id,
+        )("bind_runtime_authority", persist)
 
     def __call__(self, link: object) -> bool:
         selected_thread_id = str(getattr(link, "thread_id", "") or "")
@@ -1465,7 +1503,9 @@ def _gateway_recovered_active_turn_tool_calls(
 # LLM: The transport marker only identifies the reclaimed request. RuntimeDB independently proves
 # exact task+run ownership and complete terminal operation records before releasing UNKNOWN. Keep
 # this bridge before agent.run so generic authority binding remains fail-closed for every other case.
-# 函数用途: 在崩溃重排的同一回合重新进入模型前，核对已执行工具并安全释放旧执行轮。
+#   New requests carry actual DB identity, distinct from the conversation display binding;
+# RuntimeDB also reconciles a provably dead current runner for this exact owner/run only.
+# 函数用途: 按真实执行绑定核对原回合工具与进程死亡，不用旧展示任务编号查找或放宽 UNKNOWN。
 def _recover_gateway_active_turn_authority(
     context: _GatewayAskRunContext,
     carried_archive_tool_calls: list[dict[str, object]],
@@ -1476,7 +1516,10 @@ def _recover_gateway_active_turn_authority(
     recover = getattr(repo, "recover_recorded_active_turn_attempt", None)
     if not callable(recover):
         return
-    runtime = context.request.get("conversation_runtime")
+    runtime = _gateway_runtime_authority(context.request, context.request_id)
+    if not runtime:
+        # 旧请求只沿用其原有精确 task+request 证明，不能按最新 run 或展示路径猜另一个执行。
+        runtime = context.request.get("conversation_runtime")
     runtime = runtime if isinstance(runtime, dict) else {}
     task_id = str(runtime.get("task_id") or "").strip()
     operation_facts: dict[str, dict[str, str]] = {}
@@ -1494,9 +1537,11 @@ def _recover_gateway_active_turn_authority(
         operation_facts[operation_id] = facts
     result = recover(
         task_id=task_id,
-        run_id=context.request_id,
+        run_id=str(runtime.get("run_id") or context.request_id),
         recorded_operation_facts=operation_facts,
         operator="gateway-active-turn-recovery",
+        expected_attempt_id=str(runtime.get("attempt_id") or ""),
+        expected_agent_run_id=str(runtime.get("agent_run_id") or ""),
     )
     recovery_status = str(result.get("status") or "")
     if recovery_status in {"recovered", "not_required"}:
@@ -1504,8 +1549,35 @@ def _recover_gateway_active_turn_authority(
     if recovery_status == "absent" and not carried_archive_tool_calls:
         return
     raise ConversationPersistenceError(
-        "当前回合仍有无法确认的工具副作用，已停止自动续跑；请核对运行诊断"
+        "当前回合执行恢复未通过核对：" + json.dumps(result, ensure_ascii=False)
     )
+
+
+# LLM: Transport owns this persisted projection, RuntimeDB owns the identity. Validate request
+# and transport-attempt provenance before passing any field to recovery or a resumed RunParams.
+# 函数用途: 读取已绑定的执行身份，拒绝错请求、错代次或残缺凭据，不解析模型正文。
+def _gateway_runtime_authority(request: dict, request_id: str) -> dict:
+    binding = request.get("runtime_authority")
+    if binding is None:
+        return {}
+    marker = request.get("active_turn_recovery")
+    marker = marker if isinstance(marker, dict) else {}
+    attempts = {str(request.get("execution_attempt_id") or "")}
+    if (marker.get("schema_version") == _ACTIVE_TURN_RECOVERY_SCHEMA
+            and marker.get("request_id") == request_id):
+        attempts.add(str(marker.get("dead_execution_attempt_id") or ""))
+    valid = (
+        isinstance(binding, dict)
+        and binding.get("schema_version") == "gateway_runtime_authority.v1"
+        and binding.get("request_id") == request_id
+        and isinstance(binding.get("gateway_execution_attempt_id"), str)
+        and binding.get("gateway_execution_attempt_id") in attempts - {""}
+        and all(isinstance(binding.get(k), str) and binding[k].strip()
+                for k in ("task_id", "run_id", "agent_run_id", "attempt_id"))
+    )
+    if not valid:
+        raise ConversationPersistenceError("本轮执行绑定的请求或代次不匹配，已停止恢复")
+    return binding
 
 
 # LLM: Recovery authority is typed metadata written by the reconciler. The narrow legacy branch
@@ -1848,6 +1920,9 @@ def _require_gateway_conversation_ready(
         raise ConversationPersistenceError("会话记录当前不可用，请稍后重试")
 
 
+# LLM: Reuse a persisted actual task on same-turn resume/overflow, never a display task's cwd.
+# The callback commits each new DB attempt before model entry and survives normal RunParams use.
+# 函数用途: 为本回合构造运行参数；恢复沿用真实 task，首次绑定由 core 写回，用户工作目录不受影响。
 def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     request = inputs.request
     context = inputs.context
@@ -1857,6 +1932,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
         save=bool(request.get("save", True)),
         request_id=context.request_id,
+        task_id=str(_gateway_runtime_authority(request, context.request_id).get("task_id") or ""),
         attempt_id=str(request.get("execution_attempt_id") or "").strip() or context.request_id,
         source="gateway",
         resume_context=_gateway_resume_context(request, conversation),
@@ -1889,6 +1965,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
             context.request_path,
             context.request_id,
             context.request,
+            str(request.get("execution_attempt_id") or "").strip() or context.request_id,
         ),
     )
 

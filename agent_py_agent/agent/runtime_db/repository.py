@@ -15,6 +15,7 @@
 
 # LLM: runtime.db 只保存 Task 身份与 TaskRun/AgentRun/Attempt 的执行生命周期；
 # 禁止把已退休的机器验收合同或 Task 业务完成状态重新接回这个权威仓储。
+# 冷 owner 的精确恢复与启动扫描共用进程死亡证明，展示投影不得覆盖 current attempt。
 # 模块用途: 管理 owner 级任务身份、每次执行、代理树、工具操作和恢复状态。
 
 from __future__ import annotations
@@ -99,6 +100,42 @@ def _runner_identity_metadata() -> dict[str, object]:
         "runner_pid": os.getpid(),
         "runner_start_time": _proc_start_time(os.getpid()),
     }
+
+
+# LLM: CLI startup and exact owner-turn recovery share the same process-death proof and
+# current-attempt CAS. Missing/unverifiable process identity never authorizes takeover.
+# 函数用途: 证实原进程已死后，将仍是 current 的运行轮记为 unknown；不按时长猜死，也不动新执行者。
+def _mark_dead_runner_attempt_unknown(conn, row, current: float) -> bool:
+    try:
+        meta = json.loads(str(row["metadata_json"] or "{}"))
+        pid = int(meta.get("runner_pid") or 0)
+        if pid <= 0:
+            return False
+        state = _proc_state(pid)
+        if state != "dead":
+            if state != "alive" or meta.get("runner_start_time") is None:
+                return False
+            live_start = _proc_start_time(pid)
+            if live_start is None or live_start == float(meta["runner_start_time"]):
+                return False
+    except (AttributeError, TypeError, ValueError):
+        return False
+    attempt_id = str(row["current_attempt_id"] or "")
+    agent_run_id = str(row["agent_run_id"] or "")
+    changed = conn.execute(
+        "UPDATE agent_attempts SET status='unknown', ended_at=? WHERE attempt_id=? "
+        "AND status IN ('running','created') AND EXISTS "
+        "(SELECT 1 FROM agent_runs WHERE agent_run_id=? AND current_attempt_id=?)",
+        (current, attempt_id, agent_run_id, attempt_id),
+    ).rowcount
+    if changed != 1:
+        return False
+    conn.execute(
+        "UPDATE agent_runs SET status='unknown', updated_at=? "
+        "WHERE agent_run_id=? AND current_attempt_id=?",
+        (current, agent_run_id, attempt_id),
+    )
+    return True
 
 
 # LLM: A successful attempt close may leave the AgentRun resumable, but every
@@ -239,7 +276,8 @@ def _normalize_recorded_operation_facts(
 
 # LLM: Exact task+run equality is the anti-confusion boundary for automatic active-turn recovery;
 # never fall back to the newest task run, thread id, prompt text, or an unrelated main row.
-# 函数用途: 在事务内读取与请求任务和运行 ID 同时匹配的根主代理执行轮。
+# Read PID/start metadata from that same current attempt, never from a sibling or stale generation.
+# 函数用途: 读取精确 task/run 的根执行轮和同一 current attempt 的进程凭据，供原子恢复核对。
 def _exact_active_turn_run(
     conn: sqlite3.Connection,
     task_id: str,
@@ -247,7 +285,7 @@ def _exact_active_turn_run(
 ) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT ar.agent_run_id, ar.status AS run_status, "
-        "ar.current_attempt_id, aa.status AS attempt_status "
+        "ar.current_attempt_id, aa.status AS attempt_status, aa.metadata_json "
         "FROM agent_runs ar "
         "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
         "JOIN tasks t ON t.task_id = tr.task_id "
@@ -657,6 +695,9 @@ class RuntimeRepository(
                 "SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
 
+    # LLM: Reuse the exact current-attempt CAS used by owner-local active-turn recovery;
+    # unavailable PID/start identity must leave the row untouched, not guess from age.
+    # 函数用途: 启动时统一调和已经证实进程死亡的运行轮，与按用户恢复保持同一判断和写入路径。
     def recover_stale_attempts(self, *, now: float | None = None) -> list[str]:
         """RUN-01（2026-08-15 C1 真机实证）：普通 CLI run 崩溃后悬挂 attempt 的调和。
 
@@ -687,37 +728,8 @@ class RuntimeRepository(
                 """,
             ).fetchall()
             for row in rows:
-                try:
-                    meta = json.loads(str(row["metadata_json"] or "{}"))
-                except (TypeError, ValueError):
-                    meta = {}
-                pid = int(meta.get("runner_pid") or 0)
-                if pid <= 0:
-                    continue  # 旧记录无身份，fail-closed 保持原态
-                state = _proc_state(pid)
-                if state == "dead":
-                    pass  # 明确查无此进程 = 死亡证明
-                elif state == "alive":
-                    recorded_start = meta.get("runner_start_time")
-                    if recorded_start is None:
-                        continue  # 无 start_time 可核对，仅 pid 存活即保持
-                    current_start = _proc_start_time(pid)
-                    if current_start is None or current_start == float(recorded_start):
-                        continue  # 同一进程存活（或当前不可读），保持原态
-                    # start_time 可读且不匹配：pid 已被复用，原进程已死
-                else:
-                    continue  # unverifiable，fail-closed
-                conn.execute(
-                    "UPDATE agent_attempts SET status='unknown', ended_at=? "
-                    "WHERE attempt_id=?",
-                    (current, str(row["current_attempt_id"] or "")),
-                )
-                conn.execute(
-                    "UPDATE agent_runs SET status='unknown', updated_at=? "
-                    "WHERE agent_run_id=?",
-                    (current, str(row["agent_run_id"] or "")),
-                )
-                recovered.append(str(row["agent_run_id"] or ""))
+                if _mark_dead_runner_attempt_unknown(conn, row, current):
+                    recovered.append(str(row["agent_run_id"] or ""))
             conn.commit()
         return recovered
 
@@ -725,7 +737,9 @@ class RuntimeRepository(
     # two exact durable identities plus a complete operation-record projection, then proves in
     # one transaction that no handler outcome or mutation is uncertain.  Never broaden it to a
     # task-only match, model text, error strings, PID age, or a best-effort archive scan.
-    # 函数用途: 为同一持久 active turn 的崩溃重排核对工具账，全部确定时自动换到新执行轮。
+    # Owner Agents may be loaded lazily after Gateway startup: reconcile only this exact
+    # current runner using durable PID/start identity, then apply the unchanged effect proof.
+    # 函数用途: 按用户和精确执行绑定调和已死进程，再核对工具账；不要求默认管理员先代办所有用户恢复。
     def recover_recorded_active_turn_attempt(
         self,
         *,
@@ -733,13 +747,15 @@ class RuntimeRepository(
         run_id: str,
         recorded_operation_facts: dict[str, dict[str, str]],
         operator: str,
+        expected_attempt_id: str = "",
+        expected_agent_run_id: str = "",
     ) -> dict[str, Any]:
         """Recover one exact root turn only when every started effect is durable.
 
         Generic ``unknown`` attempts still require ``recover_attempt_unknown``.
         This narrower path is authorized only by an already validated active-turn
         recovery marker at the transport layer. RuntimeDB independently requires
-        the exact task+run pair, the current unknown attempt, terminal tool rows,
+        the exact task+run pair, the current unknown (or provably dead) attempt, terminal tool rows,
         matching durable operation records, and no MUTATING/DIRTY resource.
         """
 
@@ -763,7 +779,14 @@ class RuntimeRepository(
             if row is None:
                 return {"recovered": False, "status": "absent", "reason": "no_exact_run"}
             attempt_id = str(row["current_attempt_id"] or "")
+            if ((expected_attempt_id and attempt_id != expected_attempt_id)
+                    or (expected_agent_run_id and row["agent_run_id"] != expected_agent_run_id)):
+                return {"recovered": False, "status": "blocked", "reason": "execution_binding_changed"}
             attempt_status = str(row["attempt_status"] or "")
+            if attempt_status in {"running", "created"} and _mark_dead_runner_attempt_unknown(
+                conn, row, time.time(),
+            ):
+                attempt_status = ATTEMPT_STATUS_UNKNOWN
             recovery_reason = _main_agent_recovery_reason(
                 str(row["run_status"] or ""),
                 attempt_status,

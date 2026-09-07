@@ -1,5 +1,13 @@
 # TEST CHECKLIST
 
+## R194 展示身份误作恢复权威
+
+- [x] 实际 task/run/agent_run/attempt 在模型前落盘，旧展示 task 不覆盖；落盘失败收口未开始 attempt。
+- [x] exact owner 死亡证明与启动路径共用，活进程/未知进程/换代拒绝；其他 run 不受接管影响。
+- [x] 原完整工具记录、UNKNOWN 和 dirty resource 回归保持，processing 停止/终态 fence 不绕开。
+- [ ] 原 A/C TUI 自然后续轮完成两次单 Gateway 重启，实际绑定与工具继续，零重复副作用。
+- [ ] B/D/E 完整批量质量、后续偏好与隔离核对；Memory 双路径重复偏好另列未修复问题。
+
 ## R193 服务重启与卡死次数
 
 - [x] 原请求从总 attempt 20 连续恢复 4 次不失败；之后两次真实租约过期仍达到原失败上限。

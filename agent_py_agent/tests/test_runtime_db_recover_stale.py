@@ -15,6 +15,8 @@ import sqlite3
 import time
 import uuid
 
+import pytest
+
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
 
@@ -320,6 +322,55 @@ def test_recorded_active_turn_recovery_allows_exact_terminal_operation(tmp_path)
     assert run["status"] == "created"
     assert json.loads(event["payload_json"])["recovery_mode"] == "recorded_active_turn"
     assert repo.create_attempt(record["agent_run_id"])["attempt_id"] != record["attempt_id"]
+
+
+@pytest.mark.parametrize("process_state,start,expected", [
+    ("dead", 123.0, "recovered"),
+    ("alive", 123.0, "blocked"),
+    ("alive", None, "blocked"),
+    ("alive", 124.0, "recovered"),
+    ("unverifiable", 123.0, "blocked"),
+])
+def test_exact_owner_recovery_requires_process_death(tmp_path, monkeypatch, process_state, start, expected):
+    repo = _make_repo(tmp_path)
+    request_id = "gw-cold-owner"
+    record, operation_id = _seed_unknown_active_turn(repo, request_id)
+    other = repo.record_run_creation(
+        owner_id="local/main", goal="另一轮", conversation_task_id="other-task",
+        run_id="other-run", role="main",
+    )
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status='running', ended_at=0, metadata_json=? WHERE attempt_id=?",
+            (json.dumps({"runner_pid": 1234, "runner_start_time": 123.0}), record["attempt_id"]),
+        )
+        conn.execute("UPDATE agent_runs SET status='created' WHERE agent_run_id=?", (record["agent_run_id"],))
+    monkeypatch.setattr("agent_py_agent.agent.runtime_db.repository._proc_state", lambda _pid: process_state)
+    monkeypatch.setattr("agent_py_agent.agent.runtime_db.repository._proc_start_time", lambda _pid: start)
+    result = repo.recover_recorded_active_turn_attempt(
+        task_id=request_id, run_id=request_id, expected_attempt_id=record["attempt_id"],
+        expected_agent_run_id=record["agent_run_id"], operator="test-exact-owner",
+        recorded_operation_facts={operation_id: {"status": "succeeded", "operation_type": "write_file"}},
+    )
+    assert result["status"] == expected
+    assert repo.get_attempt(record["attempt_id"])["status"] == ("recovered" if expected == "recovered" else "running")
+    assert repo.get_attempt(other["attempt_id"])["status"] == "running"
+
+
+@pytest.mark.parametrize("mismatch", ["attempt", "agent_run"])
+def test_exact_owner_recovery_does_not_replace_changed_binding(tmp_path, monkeypatch, mismatch):
+    repo = _make_repo(tmp_path)
+    request_id = "gw-changed-authority"
+    record, _operation_id = _seed_unknown_active_turn(repo, request_id)
+    monkeypatch.setattr("agent_py_agent.agent.runtime_db.repository._proc_state", lambda _pid: pytest.fail("must not probe"))
+    result = repo.recover_recorded_active_turn_attempt(
+        task_id=request_id, run_id=request_id,
+        expected_attempt_id="older-attempt" if mismatch == "attempt" else record["attempt_id"],
+        expected_agent_run_id="different-run" if mismatch == "agent_run" else record["agent_run_id"],
+        operator="test-stale-binding", recorded_operation_facts={},
+    )
+    assert result["reason"] == "execution_binding_changed"
+    assert repo.get_attempt(record["attempt_id"])["status"] == "unknown"
 
 
 def test_recorded_active_turn_recovery_blocks_missing_durable_record(tmp_path):
