@@ -1,6 +1,20 @@
 # STATUS
 
-## R196 shell 超时事实与恢复提示（本地修复，未部署）
+## R196 shell 超时事实与恢复提示（已部署，真实边界复验进行中）
+
+- `.10` 已部署本地提交 `9bae530`，wheel SHA
+  `6b432484eed54d529db1898ed6c0f51c0de63f06452001ab7c1fd938298af8bd`；85 项依赖与 R194 一致，pip check 通过。
+  唯一 Gateway 为 PID 3068424、`ma-gateway-r196-110`；R194 停止 1788777486.162，R196 启动 1788777494.542。
+  此次切换在没有当前活跃工具的窗口完成，不作为“执行中安全恢复”的新增通过证据。
+- 六个原会话客户端升级至 R196 并通过 TUI 追加真实任务；新图书 `/status` 和用量账确认 MiniMax-M2.7。
+  图书协调人等待孙代理时不再误显示失败重试，账单主代理 Compact 从 1 到 2 后继续派工。
+  1788779400 附近，资料整理、账单、图书和研究四路仍在推进；文件合并和设备台账新轮已结束，产物质量待核对。
+- 用户截图的 `./rg_test -h` 返回 `COMMAND_FAILED`/exit 2，已正常记 FAILED，不是停止全轮的直接原因。
+  此前 240 秒命令 UNKNOWN 在后续 Gateway 重启恢复时阻止接续，旧客户端只显示通用错误。
+  未改旧账、未清除 A 输入框里的未发送内容，也未把旧失败记录冒充新版复验结果。
+- 清理前核对旧环境没有进程引用：已删除无人使用的 R191；本次再删除 R190（约 712 MiB）及 pip 缓存
+  （约 391 MiB），可用空间约 1.4→2.4 GiB。保留 R196、R194/R193 回滚、复刻项目、测试证据和 会话运行时/终端交互。
+  删除的环境/下载缓存可重新安装生成；运行中的旧客户端环境没有清理。
 
 - A 的 `gwreq-1788765451-12ae7b10990a4529a911544573f3c501` 在重启前已经有一条 240 秒 shell 超时，
   operation `tool_operation:298687ea176e97dae58c7e37fe8f8854` 留在 UNKNOWN；恢复严格核账后失败。
@@ -10,10 +24,20 @@
   直接进程有退出码且管道排空时记 FAILED；否则仍 UNKNOWN。FAILED 不代表文件回滚，不自动重放。
 - 进程停止共用同一个回执，未确认不假写 killed；启动前 deadline 用尽明确 not_started。
   恢复结果不确定返回 `ACTIVE_TURN_OUTCOME_UNCERTAIN`，客户端说明原因并避免建议重做整个任务。
-- 352 个唯一 focused 用例分组通过，另复验 66 项 R195 TUI 渲染检查；没有跑全仓 pytest。两轮均待新版真实 TUI，
-  `.10` 仍为 R194 单 Gateway；旧 UNKNOWN 账本没有被改为成功。磁盘当前约 1.5 GiB 可用，升级前先核对空间。
+- 352 个唯一 focused 用例分组通过，另复验 66 项 R195 TUI 渲染检查；没有跑全仓 pytest。
+  R195 的无假重试标签已在新版真 TUI 观察到；R196 长项目真实超时→排查→继续→重启完整复验仍未闭环。
 - 图书原三层递归任务已经产生 main final `msg-efc7947e135c4d5b`，Working 收起；完整产物质量不因此自动通过。
   B 界面另报 child `IncompleteRead(0 bytes read)`，网络错误退避仍需核对，不混入本次 shell 超时修复结论。
+
+### 当前尚未完成的底座项
+
+- 长历史：`MAX_HISTORY_TURNS=20` 经 `read_gateway_client_history` 变成最近 80 条消息，客户端没有向前分页
+  游标。磁盘正文保留不等于 TUI 可看完整；已读 终端交互 `sessionHistory.ts` 的 before_id/has_more 路径，尚未实现。
+- 网络断流：B child 的 runner_result 确认 FAILED / `IncompleteRead(0 bytes read)` / runner_attempts=1；
+  原始异常调用栈和应落到哪层退避仍需核查，不能把 runner 汇总的 tool_rounds=0 当成整个子任务没做过工具。
+- Memory：自动 promotion 后的直接 persona batch 会写同义重复；同 owner 去重/来源归并未闭环，未发现此样本跨 owner 泄漏。
+- 综合验收：主/子/孙全部停止、插话、精确恢复与副作用去重；Compact 取消/回滚、长会话记忆和公平费用对照；
+  完整历史/视图切换与复制滚动组合；服务外部 LAN 可达和停止回收。已有分项通过不代替完整矩阵。
 
 ## R195 递归重启组合与执行代次显示（进行中）
 
