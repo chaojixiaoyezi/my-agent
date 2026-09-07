@@ -1,5 +1,10 @@
 # Gateway Structure
 
+## R201 客户端详细正文来源
+
+`TuiFrameProvider.set_state_store` 是导航换显示仓库的唯一入口；详细模式的冻结 snapshot 通过
+`TuiTranscriptModeState.rebind_view_snapshot` 同步重绑。界面来源不改变 Gateway 控制或模型会话。
+
 ## R199 显示历史双向游标
 
 - `ConversationMessageStore.history_page_report` 使用 `history_page.py` 在 canonical JSONL 中向前读取，

@@ -158,6 +158,41 @@ def test_window_scroll_follows_each_agent_store_anchor_after_switch() -> None:
     assert view.window.vertical_scroll == 0
 
 
+def test_agent_switch_rebinds_expanded_transcript_to_selected_store() -> None:
+    from agent_py_agent.cli.chat_parts.tui_transcript import TuiTranscriptModeState
+
+    root, child = TuiStateStore(), TuiStateStore()
+    root_seq = TuiEventSequencer("expanded-root", clock=lambda: 1.0)
+    child_seq = TuiEventSequencer("expanded-child", clock=lambda: 2.0)
+    root.publish(root_seq.emit("user_message", "completed", "root-1", {"text": "主代理需求"}))
+    child.publish(child_seq.emit("user_message", "completed", "child-1", {"text": "子代理职责"}))
+    mode = TuiTranscriptModeState()
+    view = make_tui_transcript_view(root, lambda width: TuiRenderContext(width=width), transcript_state=mode)
+    view.set_state_store(child)
+    mode.enter(child.snapshot())
+    mode.toggle_show_all()
+
+    view.set_state_store(root)
+    rendered = "\n".join(fragments_text(line) for line in view.provider.frame(80).transcript_lines)
+    assert "主代理需求" in rendered
+    assert "子代理职责" not in rendered
+    assert mode.snapshot().active and mode.snapshot().show_all
+    root.publish(root_seq.emit("user_message", "completed", "root-2", {"text": "刚到的新消息"}))
+    view.set_state_store(root)  # 同页面刷新不能解冻或偷纳入后到内容。
+    assert "刚到的新消息" not in "\n".join(
+        fragments_text(line) for line in view.provider.frame(80).transcript_lines
+    )
+    view.set_state_store(child)
+    assert "子代理职责" in "\n".join(
+        fragments_text(line) for line in view.provider.frame(80).transcript_lines
+    )
+    mode.exit()
+    view.set_state_store(root)
+    assert "刚到的新消息" in "\n".join(
+        fragments_text(line) for line in view.provider.frame(80).transcript_lines
+    )
+
+
 def test_agent_store_switch_restores_each_viewport_without_cross_view_selection() -> None:
     root_store = TuiStateStore()
     child_store = TuiStateStore()

@@ -1,10 +1,11 @@
 # Subagent Progress
 
-## R200 正常工作片不是失败重试（本地通过，原 TUI 待验）
+## R200 正常工作片不是失败重试（已部署，两份原现场恢复）
 
 F 协调员四个正常工作片后被旧孤儿累计次数门挡住，最后一个 child DONE 后无法接续。
 移除该门和 Audit 特判，共用原候选及失败预算；父层等待、活跃 session、owner 和 UNKNOWN 仍守门。
-3 个红测后，88 focused / 1 Linux 专属 skipped；待同一个 F run 在新版 Gateway 自然启动下一工作片。
+3 个红测后，88 focused / 1 Linux 专属 skipped，另 37 runner-dispatch 通过。F 与旧 R171 coordinator
+均在同 run 自动开始第 5 个工作片并 DONE；原 root 接着汇总，R171 已最终回复，未插话或另建替代代理。
 
 ## R184 家目录协作（focused 与三个 child 真 TUI 通过）
 

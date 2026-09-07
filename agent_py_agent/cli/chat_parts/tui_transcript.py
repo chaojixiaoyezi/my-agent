@@ -1,4 +1,4 @@
-# LLM: 本模块是 Ctrl-O transcript 模式、冻结快照与全文搜索的唯一 UI 状态源；它不写会话历史，也不拥有业务运行状态。
+# LLM: 本模块是 Ctrl-O transcript 模式、冻结快照与全文搜索的唯一 UI 状态源；切代理必须重绑显示快照，不写会话或运行状态。
 # 模块用途: 提供 终端交互 风格的详细 transcript、less 式搜索/导航、resize 失效和搜索高亮。
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class TuiTranscriptModeSnapshot:
     current_match: int = 0
 
 
-# LLM: TuiTranscriptModeState 在同一锁内维护模式和搜索；冻结 snapshot 仅用于显示，所有 control 动作仍由外层 keybinding 明确调用。
+# LLM: TuiTranscriptModeState 在同一锁内维护模式和搜索；冻结 snapshot 只属于当前显示来源，control 动作仍由外层 keybinding 调用。
 # 类用途: 管理 Ctrl-O 进入/退出、Ctrl-E、`/` 搜索、n/N 导航与 resize 清理。
 class TuiTranscriptModeState:
     # LLM: invalidate callback 只能丢 frame cache 并请求重绘，不能从 worker 线程操作 prompt_toolkit layout。
@@ -119,6 +119,17 @@ class TuiTranscriptModeState:
             if self._frozen_snapshot is None:
                 raise RuntimeError("active TUI transcript is missing frozen snapshot")
             return self._frozen_snapshot
+
+    # LLM: A typed view-source change replaces only the display snapshot. Keep modal/show-all
+    # mode, reset source-specific search coordinates, and never carry another agent's frozen rows.
+    # 函数用途: 详细模式切回父级时换成父级正文并重新冻结，避免操作目标变了而画面还停在子代理。
+    def rebind_view_snapshot(self, snapshot: TuiViewSnapshot) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            self._frozen_snapshot = snapshot
+            self._reset_search_locked()
+        self._notify()
 
     # LLM: 冻结阅读可追加更早的静态块，但不能夹入查看期间的新回复或改变原活动/审批快照。
     # 函数用途: Ctrl+O 模式翻旧页时保留当前阅读现场，同时补齐新读到的历史前缀。

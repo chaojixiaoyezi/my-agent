@@ -1,6 +1,16 @@
 # DESIGN LEDGER
 
-## 2026-09-07 正常子代理工作片不设生命周期次数上限【状态：R200 本地通过，待原 TUI】
+## 2026-09-07 详细正文绑定当前代理【状态：R201 本地通过，待真实 TUI】
+
+- R199 原 TUI 的 child→Ctrl+O→Ctrl+G 组合证明：导航身份已回主代理，frame-provider 却继续使用子代理
+  的冻结 snapshot。不能把导航身份与正文来源拆成两份事实，也不能等用户退出详细模式才纠正。
+- 对照 终端交互 `screens/REPL.tsx` 的 `displayedMessages` 按 viewed task 选择、缺消息不落回主代理的
+  边界，以及 enter/exit transcript 的冻结状态；本项目保留自己的子页 Ctrl+O，不照搬其根 transcript 分支。
+- 同一 frame-provider 换到不同 typed store 时，重绑当前冻结 snapshot、清空跨来源搜索坐标，保留
+  active/show-all。同 store 刷新仍维持原冻结边界，后到 live 消息不偷偷夹入；无模型、持久化或控制副作用。
+- 定位红测后 44 focused 通过；待原 TUI 复验，不冒充中文拖选/系统剪贴板通过。
+
+## 2026-09-07 正常子代理工作片不设生命周期次数上限【状态：R200 已部署，两份原现场恢复】
 
 - F 真递归任务的协调员在第 4 个工作片后保持 PENDING，最后一个孩子已经 DONE；直属等待标记被清除，
   `auto_start_orphan_run` 却被 `_ORPHAN_REVIVE_ATTEMPT_CAP=4` 拒绝。正常工作片数被误当故障数。
@@ -11,7 +21,8 @@
   fresh session、未退出 attempt、直属等待、owner/conversation、能力和 UNKNOWN 门保持；FAILED/TIMEOUT
   仍由既有 typed failure 重试策略裁决，不把失败改为 PENDING，也不增加无限故障重试旁路。
 - 3 个定位用例先失败；修后与生命周期、候选、会话和能力共 88 passed / 1 Linux 专属 skipped。
-  下一步在原 F TUI 不插话、不造新 run、不改旧账，验证第 5 个工作片能自然接续及最终逐层回复。
+  另 37 runner-dispatch 通过。R200 原 F 与旧 R171 coordinator 均自动进入 generation 5 并 DONE；
+  F root 继续验证，R171 root 已 final/Working 收起；没有插话、新 run 或手工改旧状态。
 
 ## 2026-09-07 显示历史向前分页【状态：R199 已部署，原 D 分页通过，组合验收继续】
 

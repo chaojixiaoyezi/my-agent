@@ -1,5 +1,11 @@
 # TESTS
 
+## R201 详细模式与代理导航组合
+
+原 TUI child→Ctrl+O→Ctrl+G 复现“导航已回 root、正文仍是 child”；新增真实 frame 断言先红。
+覆盖重绑正文、show-all 保留、同 store 不解冻、后到消息最终仍可见；与 transcript/agent-navigation/history
+paging 共 44 focused 通过。最后须原 TUI 复验；测试者不向 DUT 注入业务修复或改模型历史。
+
 ## R200 正常工作片接续与故障门区分
 
 `test_dispatch_liveness_and_revive.py` 用 4/64 个历史工作片验证同 run 可继续，同时保留 fresh session、

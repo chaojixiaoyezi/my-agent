@@ -1,10 +1,15 @@
 # TEST CHECKLIST
 
+## R201 展开视图返回父代理
+
+- [x] 原 TUI 复现，frame 红测；正文/详细档位/冻结边界及旧页组合 44 focused 通过。
+- [ ] 原 child Ctrl+O→Ctrl+G 后直接显示 root，首轮历史仍可见，不需要额外收起。
+
 ## R200 正常续跑不按生命周期次数封顶
 
 - [x] 3 个红测复现；4/64 个工作片后同 run 续派、最后一名 child 的完成边接续一次。
 - [x] live session/仍在退出的 attempt、失败预算、owner/conversation、能力与 UNKNOWN 原门保留。
-- [ ] 新版单 Gateway 在原 F 无插话/无新 run 情况下继续，父层结果逐级回到 TUI。
+- [x] 原 F 和旧 R171 coordinator 无插话/无新 run 地 4→5 并 DONE；R171 root final 已显示，F root 继续验证。
 
 ## R199 显示历史向前分页
 

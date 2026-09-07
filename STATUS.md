@@ -1,10 +1,22 @@
 # STATUS
 
-## R200 协调员正常续跑被累计次数误拦（本地修复，待部署）
+## R201 展开后的跨代理显示来源（本地修复，待真实 TUI）
+
+- R199 组合复验抓到：child 中 Ctrl+O 后 Ctrl+G，导航已回 root，冻结正文仍来自 child；退出展开才刷新。
+  当前在唯一 frame-provider 换 store 入口重绑冻结 snapshot，保留详细/全展开模式，清除旧搜索坐标。
+- 定位用例先红；正文/导航/冻结/分页共 44 focused 通过，待只升级客户端的原窗口复验。
+
+## R200 协调员正常续跑被累计次数误拦（已部署，两份真实现场恢复）
 
 - F 的协调员 runner_attempts=4、PENDING/interrupted，5 个 child 已结束；旧孤儿入口把正常工作片计入
   `_ORPHAN_REVIVE_ATTEMPT_CAP=4`。已删除该重复卡口，复用原候选/真实失败预算和身份、UNKNOWN 防线。
-- 3 个红测复现后，88 focused 通过 / 1 Linux 专属 skipped；尚未冒充原 TUI 自动恢复通过。
+- 3 个红测复现后，88 focused 通过 / 1 Linux 专属 skipped，另 37 runner-dispatch 通过。严格 gate 通过，
+  提交 aad7602 / wheel SHA 635ddce2b908f3ce7a8f8556a98c4f6c610e84f0290bd1c9b72b965560d55e71。
+- 1788800954.341 启唯一 R200 Gateway 3235693。F 同 coordinator 的 generation 5 自动启动并于
+  1788801039.735 DONE，root 自行继续交班验证；旧 R171 孙代理停止现场也从 4→5，1788801142.950 DONE，
+  root final msg-c70e9f64897546c8 于 1788801320.558 保存，Working 收起。没有发催办、另造 run 或改失败账。
+- 两名 coordinator 新用量均为 MiniMax-M2.7，实际工具/文本继续；这一恢复边通过，不把产物质量或全部 P0/P1
+  一并宣布通过。B/C/E/K 已从原 TUI 追加后续任务，J/F 长任务继续。
 
 ## R199 历史分页（已部署，原 D 分页切片通过）
 

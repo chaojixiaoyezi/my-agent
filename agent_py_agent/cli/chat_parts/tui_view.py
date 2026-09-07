@@ -1,4 +1,4 @@
-# LLM: 本模块把 typed snapshot renderer 接入 prompt_toolkit UIControl；只管理画面缓存、cursor/follow 和 redraw，不持有业务执行权。
+# LLM: 本模块把 typed snapshot renderer 接入 prompt_toolkit；画面缓存与冻结正文随当前 store 切换，只管显示，不持有业务执行权。
 # 模块用途: 提供可滚动 transcript control、固定 overlay/footer 内容和稳定 block cache，替代字符串 TextArea+行前缀 lexer。
 
 from __future__ import annotations
@@ -111,9 +111,9 @@ class TuiFrameProvider:
             self.transcript_state.set_invalidate_callback(self.invalidate)
 
     # LLM: View navigation may swap only the visible typed store. Every seen
-    # store remains subscribed to this provider, while canonical state and event
-    # sequencing stay inside their original runtimes.
-    # 函数用途: 进入或返回代理详情时切换当前画面使用的状态仓库。
+    # store remains subscribed to this provider. Rebind any expanded frozen snapshot to the
+    # selected store; canonical state and event sequencing stay inside their original runtimes.
+    # 函数用途: 进入或返回代理详情时一起切换正文来源和详细模式快照，不能留下另一代理的旧画面。
     def set_state_store(self, state_store: TuiStateStore) -> None:
         if not isinstance(state_store, TuiStateStore):
             raise TypeError("state_store must be TuiStateStore")
@@ -124,6 +124,8 @@ class TuiFrameProvider:
             self._cached_key = None
             needs_subscription = id(state_store) not in self._subscribed_store_ids
             self._subscribed_store_ids.add(id(state_store))
+        if self.transcript_state is not None:
+            self.transcript_state.rebind_view_snapshot(state_store.snapshot())
         if needs_subscription:
             state_store.subscribe(self.invalidate)
         self.invalidate()

@@ -21,6 +21,9 @@
 
 ## 2026-08-23 当前运行基线
 
+- Ctrl+O 冻结正文也属于当前代理页面。frame-provider 换 typed store 时同步重绑冻结 snapshot、清空旧
+  搜索坐标并保留详细档位；同 store 刷新不解冻，不把后台新消息偷加进当前冻结画面。
+
 - 普通 child/coordinator 接续不能用累计 runner_attempts 作为生命周期上限；它也包含正常等孩子后的
   工作片。孤儿恢复复用同一 runner candidate，真实 FAILED/TIMEOUT 仍走既有重试策略；live session、
   未退出 attempt、owner/conversation、直属等待、能力和 UNKNOWN 门不得旁路。
