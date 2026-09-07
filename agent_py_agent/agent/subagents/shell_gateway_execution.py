@@ -1,4 +1,6 @@
 
+# LLM: 受控 shell 仅执行结构化决策批准的批处理命令，不能继承控制宿主的输入；PTY/MCP 有独立输入通道。
+# 模块用途: 执行受控命令并留存限额输出、超时回执和审计证据，不让多个代理共享终端输入。
 from __future__ import annotations
 
 """Execution helpers for controlled subagent shell gateway."""
@@ -72,6 +74,8 @@ def execute_shell_command(request: ShellGatewayRequest) -> ShellGatewayExecution
     return _execution_result_from_capture(result, capture, output_dir, start)
 
 
+# LLM: 此入口没有交互输入协议，stdin 必须显式关闭；输出预算、取消、进程树终止和产物审计保持原语义。
+# 函数用途: 启动一个非交互受控进程，收集限额输出并在取消或超时时回收，避免读取宿主键盘输入。
 def _run_subprocess_with_budget(
     decision: ShellGatewayDecision,
     stdout_limit: int,
@@ -81,6 +85,7 @@ def _run_subprocess_with_budget(
     process = subprocess.Popen(
         decision.argv,
         cwd=decision.cwd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,

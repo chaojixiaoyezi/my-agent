@@ -1,5 +1,11 @@
 # ROADMAP
 
+## R202 普通命令的输入边界（优先真实 TUI）
+
+- 普通 Popen 继承 Gateway stdin，导致前台宿主的命令无输入时白等，且有抢读共享输入的风险。
+- 同步执行统一 DEVNULL，管道与独立 PTY 不变；80 focused / 9 Linux skipped。下一步单 Gateway 部署，
+  原长任务验证无人交互时及时反馈、显式输入仍可用，保留旧超时证据，不代写被测项目。
+
 ## R201 详细视图切代理仍显示旧正文（原 TUI 组合通过）
 
 - 解决问题：Ctrl+O 的 child 冻结快照在 Ctrl+G 返回后没换成 root，显示与实际控制目标不一致。

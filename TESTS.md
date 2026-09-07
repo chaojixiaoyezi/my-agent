@@ -1,5 +1,12 @@
 # TESTS
 
+## R202 批处理 stdin 不继承宿主
+
+`test_shell_stdin.py` 以独立管道模拟宿主输入，经三个真实子进程入口验证：无显式输入时 EOF、宿主输入不被
+消费、命令内显式管道仍正常。沙箱 argv 在定向测试中替换为受控 shell，不伪称平台权限测试；原 PTY、
+超时进程树、受控命令和 attempt 平台测试一并运行。80 passed / 9 Linux bwrap skipped，另 83 个 shell/受控
+入口测试通过，合计 163 passed；真 TUI 仍是最后验收。
+
 ## R201 详细模式与代理导航组合
 
 原 TUI child→Ctrl+O→Ctrl+G 复现“导航已回 root、正文仍是 child”；新增真实 frame 断言先红。

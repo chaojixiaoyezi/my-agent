@@ -1,4 +1,4 @@
-# LLM: shell 的退出、超时和取消共用进程控制事实；超时只有可信终止回执才能归为确定失败。
+# LLM: 普通 shell 显式关闭宿主 stdin，交互归独立 PTY；退出、超时和取消仍共用可信进程回执。
 # 模块用途: 在用户权限内执行命令并整理输出、进程及产物保护记录，保留超时前输出供模型排查。
 from __future__ import annotations
 
@@ -1970,6 +1970,8 @@ def _background_session_hint(*, running: bool) -> str:
     )
 
 
+# LLM: 普通前台命令必须是独立的非交互执行，不能继承宿主终端输入；POSIX 经 attempt 沙箱，Windows 单租户保持同一 stdin 语义。
+# 函数用途: 选择平台执行路径并等待命令完成；管道和重定向由命令自身提供输入，人工交互使用 PTY 会话。
 def _run_shell_command(
     tool: ShellTool,
     command: str,
@@ -2000,6 +2002,7 @@ def _run_shell_command(
         proc = subprocess.Popen(
             ["powershell.exe", "-NoProfile", "-Command", command],
             cwd=str(target),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -2014,9 +2017,8 @@ def _run_shell_command(
     )
 
 
-# LLM: 前台命令只能吃 attempt 沙箱 argv（G6：owner-scoped 与 POSIX 单租户统一）；
-#   加载失败归一成 SandboxUnavailable（fail-closed，绝不回退宿主 shell）。
-# 函数用途: 在 attempt 沙箱内运行前台命令并等待完成。
+# LLM: 前台命令只能吃 attempt 沙箱 argv；显式关闭继承 stdin，防止 Gateway/TUI 输入被抢读；加载失败不回退宿主 shell。
+# 函数用途: 在 attempt 沙箱内运行非交互命令并等待完成；无显式输入时得到 EOF，而不是白等宿主终端四分钟。
 def _run_attempt_sandboxed_shell_command(
     tool: ShellTool,
     command: str,
@@ -2041,6 +2043,7 @@ def _run_attempt_sandboxed_shell_command(
             exec_arg,
             shell=use_shell,
             cwd=str(target),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

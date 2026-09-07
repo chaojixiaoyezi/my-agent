@@ -1,3 +1,5 @@
+# LLM: attempt 沙箱负责平台执行边界；同步 run 不继承宿主 stdin，PTY 仍由调用方经 build_argv 构造独立终端。
+# 模块用途: 为不同平台构造执行隔离并回收超时进程，普通批处理不会意外等待或消费 Gateway 的输入。
 """AttemptExecutionSandbox（3.txt E.4-E.8）：attempt 级平台执行网关。
 
 - Linux：bwrap/namespace（复用 agent.tooling.sandbox 的挂载构造与自检）。
@@ -258,6 +260,8 @@ class AttemptExecutionSandbox:
         )
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
+    # LLM: 同步批处理无 stdin 注入协议，必须返回 EOF；不改变 build_argv、显式 PTY 通道和超时回收契约。
+    # 函数用途: 在沙箱里执行非交互命令并等待退出，隔开宿主终端输入，超时仍回收完整进程组。
     def run(
         self,
         command_argv: list[str],
@@ -272,6 +276,7 @@ class AttemptExecutionSandbox:
         argv = self.build_argv(command_argv)
         proc = subprocess.Popen(
             argv,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE if capture_output else None,
             stderr=subprocess.PIPE if capture_output else None,
             text=capture_output,

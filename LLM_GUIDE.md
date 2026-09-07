@@ -227,6 +227,8 @@
 - 普通 shell 不允许绕过直属生命周期事件去读 `work/agents/*` 内部状态文件；该门发生在进程启动前，
   必须返回 `WRONG_STATUS_SURFACE + effect_outcome=not_started` 给模型改用正式结果引用，不能误判成
   `TOOL_OPERATION_OUTCOME_UNKNOWN` 后中断整轮。真正已经启动且副作用终态未知的命令仍保持 fail-closed。
+- 普通 run_command、controlled_exec 和 attempt.run 是非交互批处理，spawn 必须显式 stdin=DEVNULL；
+  不继承 Gateway/TUI 的 stdin，不因宿主前台/后台启动而改变行为。命令自身管道/重定向和独立 PTY/MCP 输入保持。
 - shell 超时不按错误码豁免 UNKNOWN，也不按调用次数解除保护。唯一进程终止入口的可信回执证明观察到的
   进程树已终止、直接进程有退出码且管道排空后，才把此次超时记为确定失败并保留部分输出供模型排查。
   确定失败可能留下部分文件，不等于事务回滚，不自动重放同一个 operation；旧 UNKNOWN 记录不自动洗白。

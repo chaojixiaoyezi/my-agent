@@ -1,5 +1,12 @@
 # Subagent Structure
 
+## 同步命令与交互输入
+
+`tooling/shell.py` 的普通 run_command、`shell_gateway_execution._run_subprocess_with_budget` 的
+controlled_exec 和 `attempt/sandbox.py::run` 都是非交互批处理，spawn 显式使用 DEVNULL；不能继承
+Gateway/TUI 的 fd 0。显式命令管道/重定向仍由子 shell 建立；PTY 继续绑定独立 slave fd，MCP 使用协议管道。
+此修复不改变命令授权、输出预算、取消和进程终止证明，也不解析确认文案或自动输入 yes。
+
 ## 正常接续与失败恢复
 
 `runner/worker.py::_resume_direct_parent_after_session` 先按 exact child 释放直属等待，再交给

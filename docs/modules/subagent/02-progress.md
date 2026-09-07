@@ -1,5 +1,10 @@
 # Subagent Progress
 
+## R202 受控命令不共享宿主输入（本地，待 TUI）
+
+controlled_exec 与普通主/子 run_command、attempt.run 的非交互路径统一关闭继承 stdin；独立 PTY 仍保留
+自己的终端输入。避免是否等待 yes 取决于 Gateway 启动方式；80 focused / 9 Linux skipped，待真实长任务复验。
+
 ## R200 正常工作片不是失败重试（已部署，两份原现场恢复）
 
 F 协调员四个正常工作片后被旧孤儿累计次数门挡住，最后一个 child DONE 后无法接续。

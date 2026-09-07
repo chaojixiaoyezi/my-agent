@@ -1,5 +1,16 @@
 # STATUS
 
+## R202 普通命令等待宿主输入（本地修复，待真实 TUI）
+
+- 原 C `restore` 无输入时等待 240 秒；Gateway stdin 为 `/dev/pts/4`，普通 Popen 未传 stdin，错误继承宿主终端。
+- 对照 会话运行时 spawn.rs 的 RedirectForShellTool / Stdio::null 与 pipe.rs 的显式 Piped/Null 区分；
+  普通 shell、受控执行和 attempt 同步入口明确 DEVNULL，独立 PTY/MCP 不变，不自动替用户回答确认。
+- 六个定位红测后，80 通用/平台 focused 与另 83 个 shell/受控入口测试通过（合计 163），9 Linux bwrap
+  用例在本机跳过；本地严格 gate 已通过，暂无真实新版 TUI 结论。
+- 同 C 已提供 R196 的真实超时继续证据：两次 240 秒超时，SIGTERM 回执分别确认 4/5 个进程已终止、
+  无 unresolved PID、管道排空；随后同 attempt 又执行 11 次操作（9 成功）并 done。第二次有显式管道仍超时，
+  不能都归因于 stdin，也不能把本轮普通执行证据替代故障重启矩阵。
+
 ## R201 展开后的跨代理显示来源（已部署，原 TUI 组合通过）
 
 - R199 组合复验抓到：child 中 Ctrl+O 后 Ctrl+G，导航已回 root，冻结正文仍来自 child；退出展开才刷新。

@@ -1,5 +1,14 @@
 # DESIGN LEDGER
 
+## 2026-09-07 批处理与交互输入分离【状态：R202 本地通过，待 TUI】
+
+- 普通命令没有输入协议，不能默默借用 Gateway/TUI 的 fd 0；前台与后台启动 Gateway 必须等价。
+- 对照 会话运行时 `core/src/spawn.rs` 的 RedirectForShellTool→Stdio::null，以及 `utils/pty/src/pipe.rs`
+  中独立的 Piped/Null；当前 run_command、controlled_exec、attempt.run 明确关闭宿主 stdin。
+- 命令内部的显式管道/重定向不受影响；独立 PTY 和 MCP 继续保留各自输入通道。不解析提示词或命令输出去
+  猜确认，不自动输入 yes，不更改权限/文件边界、超时预算或 UNKNOWN 规则；纯 bug fix 无新增配置。
+- 真实长任务的 240 秒输入等待为失败样本；6 个红测后 80 focused / 9 Linux 环境 skipped，待新版原 TUI。
+
 ## 2026-09-07 详细正文绑定当前代理【状态：R201 原 TUI 组合通过】
 
 - R199 原 TUI 的 child→Ctrl+O→Ctrl+G 组合证明：导航身份已回主代理，frame-provider 却继续使用子代理
