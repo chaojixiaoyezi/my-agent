@@ -1,5 +1,12 @@
 # TEST CHECKLIST
 
+## R197 HTTP 正文断流
+
+- [x] JSON/GET/SSE/open 捕获真实 IncompleteRead；同名文案不取得重试权。
+- [x] open/body 各用既有预算，耗尽有界，用户停止优先，watchdog 阶段保持，半截原生工具不执行；146 focused。
+- [ ] 单 Gateway 部署，指定 owner 的真实 MiniMax 流断开后原 TUI 继续；原工具/子代理不重复创建。
+- [ ] 真实网络恢复、最终交付与费用/attempt 账交叉核对；旧 B 失败不能被本地回归自动标成恢复。
+
 ## R196 超时证据与一致恢复
 
 - [x] 正常成功调用不触发 UNKNOWN 计数或提示；重复 UNKNOWN 不解除保护、不重复灌入上下文。

@@ -1,5 +1,17 @@
 # DESIGN LEDGER
 
+## 2026-09-07 HTTP 正文断流进入既有恢复链【状态：R197 本地通过，待真实 TUI】
+
+- B 长子任务记录 `IncompleteRead(0 bytes read)` 后 FAILED；该 stdlib 异常不属于 OSError，原公共 HTTP
+  入口没有捕获，原 transient 分类也不认识其类型。错误正文不是重试依据。
+- 对照 会话运行时 `core/src/session/turn.rs::run_sampling_request` 的 retryable stream 和有界采样重试；
+  `会话运行时-api/src/sse/responses.rs` 将流错误与完整 response.completed 分开。只适配现有 transport/model 重试，
+  不新建 runner、工作队列或任务自动重做路径。
+- `IncompleteRead` 在连接/响应头阶段复用原 2/5/15 秒 HTTP 预算，读取正文阶段交现有模型回合预算；
+  两层不为同一次正文错误叠加重试。用户停止优先，watchdog 关闭导致的异常保留原超时阶段。
+- 只遍历已知异常链读取真实类型；普通同名文案、认证/配置错误不能取得重试权。半截 JSON/tool input 不变成
+  正常 ModelResponse，已执行工具不在本层重做。146 focused 通过，真实 MiniMax 定向断流验收仍待完成。
+
 ## 2026-09-07 执行代次不等于失败重试【状态：R195 本地通过，待新 TUI】
 
 - 图书递归真任务中，coordinator 正常等待下级并被唤醒三轮，旧展示把 attempts-1 写成“重试 2 次”。

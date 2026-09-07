@@ -21,6 +21,10 @@
 
 ## 2026-08-23 当前运行基线
 
+- HTTP `IncompleteRead` 属于 provider 断流，不得作为未知 runner 编程错误一跳终止长任务；同一 transport
+  错误边界覆盖 JSON、metadata GET、SSE list/iterator 和响应头。open 复用原 HTTP 退避，body 交原模型重试。
+  用户中断不重连，watchdog 超时保留真实阶段；半截响应不返回可执行工具，不增加整任务重做旁路。
+
 - native 运行事实按宿主来源分段，普通轮只追加同来源相对最新 IR 有变化的内容；A→B→A 不能因 ever-seen
   去重而丢掉最后 A。预检查与真实发送共用无副作用投影，发送时才提交 IR；动态包不污染稳定校准指纹。
   完整诊断 prompt 从分段无损生成，不能另存独立副本或从标题解析来源；text 协议不变。

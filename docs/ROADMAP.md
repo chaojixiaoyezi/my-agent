@@ -1,9 +1,16 @@
 # ROADMAP
 
+## R197 HTTP 断流恢复（定向完成，真实 TUI 待验）
+
+- 解决问题：长子任务的 IncompleteRead 未被公共 HTTP 入口捕获，也未分类为 transient，绕过现有退避直接 FAILED。
+- 按 会话运行时 采样级 stream retry 适配共享 transport；保留模型回合/HTTP 两层既有预算与中断、原工具幂等。
+- 146 focused 通过，含真实 stdlib chunked 断流、用户停止、超时阶段、预算耗尽、半截原生工具不执行。
+  下一步独立发布、真实 MiniMax TUI 定向断流；未宣称旧 B 子任务已恢复或全网络矩阵通过。
+
 ## R196 当前推进
 
 - 已在本地统一 shell 超时结果与 UNKNOWN 恢复保护，保留部分输出和退出回执，删除计数/错误码放行旁路。
-- 352 个唯一 focused 用例通过。下一步核对磁盘和活动任务安全点、升级同一个 Gateway，再做真实 TUI 长任务复验。
+- 352 个唯一 focused 用例通过；已部署 `.10` 单 Gateway R196，下一步继续真实 TUI 长任务超时/恢复复验。
 - 新旧 UNKNOWN 不能凭本次补丁自动改账。历史首屏缺失、Memory 同义重复、网络读取中断、等质量费用比较仍待完成。
 
 ## R195 当前推进

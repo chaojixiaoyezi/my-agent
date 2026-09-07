@@ -7,9 +7,16 @@ from __future__ import annotations
 """
 
 import errno
+import http.client
+import json
 import socket
 import urllib.error
+from io import BufferedReader, BytesIO
+from types import SimpleNamespace
 
+import pytest
+
+from agent_py_agent.agent.backends import gateway_helpers
 from agent_py_agent.agent.backends.errors import (
     ProviderConnectionError,
     ProviderRecoverableError,
@@ -76,3 +83,180 @@ def test_timeout_stays_timeout():
     from agent_py_agent.agent.backends.errors import ProviderTimeoutError
 
     assert isinstance(err, ProviderTimeoutError)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_incomplete_http_body_is_typed_transient_without_string_matching(wrapped):
+    error = http.client.IncompleteRead(b"uncommitted model bytes", 100)
+    exc = urllib.error.URLError(error) if wrapped else error
+    assert isinstance(_runtime_network_error(exc, _request()), ProviderTransientError)
+    # 普通文案不能借用异常类名获得重试权。
+    assert isinstance(
+        _runtime_network_error(urllib.error.URLError("IncompleteRead(0 bytes read)"), _request()),
+        ProviderConnectionError,
+    )
+
+
+# LLM: 使用真实 stdlib HTTPResponse 的 chunked 解析，不把真实断流只替换成手工异常；响应不会访问网络或落盘。
+# 函数用途: 构造一条完整 SSE data 后下个 chunk 缺失内容的响应，复现长任务中途 IncompleteRead。
+def _truncated_chunked_response(data: bytes = b'data: {"delta":"partial"}\n\n'):
+    wire = (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        + f"{len(data):x}\r\n".encode()
+        + data + b"\r\n10\r\n"
+    )
+    response = http.client.HTTPResponse(
+        SimpleNamespace(makefile=lambda *_args: BufferedReader(BytesIO(wire)))
+    )
+    response.begin()
+    return response
+
+
+@pytest.mark.parametrize("entry", ["post_json", "get_json", "post_stream", "post_stream_iter"])
+def test_truncated_http_response_normalized_at_every_transport_entry(monkeypatch, entry):
+    response = _truncated_chunked_response()
+    monkeypatch.setattr(gateway_helpers, "_gateway_urlopen", lambda *_args: response)
+    with pytest.raises(ProviderTransientError) as raised:
+        result = getattr(gateway_helpers, entry)(_request())
+        if entry == "post_stream_iter":
+            assert next(result) == '{"delta":"partial"}'
+            next(result)
+    assert isinstance(raised.value.__cause__, http.client.IncompleteRead)
+    assert response.closed
+
+
+def test_truncated_body_uses_existing_model_retry_not_a_second_body_retry(monkeypatch):
+    from agent_py_agent.agent.agent_core import provider_transient_auto_resume as retry
+
+    responses = iter([_truncated_chunked_response(), BytesIO(b"data: [DONE]\n\n")])
+    opened = []
+    waits = []
+
+    def open_response(*_args):
+        opened.append(True)
+        return next(responses)
+
+    monkeypatch.setattr(gateway_helpers, "_gateway_urlopen", open_response)
+    monkeypatch.setattr(retry, "provider_transient_retry_delays", lambda _policy: (0.1,))
+    monkeypatch.setattr(retry, "apply_retry_jitter", lambda value: value)
+    monkeypatch.setattr(retry, "wait_interruptibly", waits.append)
+    result = retry.run_with_provider_transient_auto_resume(
+        lambda: gateway_helpers.post_stream(_request())
+    )
+    assert result == ["[DONE]"]
+    assert waits == [0.1]
+    assert len(opened) == 2
+
+
+def test_incomplete_read_during_user_abort_remains_an_interrupt(monkeypatch):
+    stopped = False
+
+    def interrupted_stream(_request):
+        nonlocal stopped
+        yield '{"delta":"partial"}'
+        stopped = True
+        raise http.client.IncompleteRead(b"")
+
+    monkeypatch.setattr(gateway_helpers, "_stream_with_watchdog", interrupted_stream)
+    monkeypatch.setattr(gateway_helpers, "_provider_is_interrupted", lambda: stopped)
+    stream = gateway_helpers.post_stream_iter(_request())
+    next(stream)
+    with pytest.raises(InterruptedError):
+        next(stream)
+
+
+def test_incomplete_read_at_response_open_uses_bounded_http_retry(monkeypatch):
+    attempts = []
+    waits = []
+    events = []
+
+    def failed_open(*_args):
+        attempts.append(True)
+        raise http.client.IncompleteRead(b"")
+
+    monkeypatch.setattr(gateway_helpers, "_gateway_urlopen", failed_open)
+    monkeypatch.setattr(gateway_helpers, "_provider_retry_wait", waits.append)
+    with gateway_helpers.provider_attempt_observer(events.append):
+        with pytest.raises(ProviderTransientError):
+            gateway_helpers.post_json(_request())
+    assert len(attempts) == 4
+    assert waits == [2.0, 5.0, 15.0]
+    assert len([event for event in events if event["status"] == "failed"]) == 4
+
+
+def test_incomplete_body_read_after_watchdog_close_keeps_timeout_phase(monkeypatch):
+    from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+
+    guard = SimpleNamespace(
+        timed_out=True,
+        timeout_stage="stream_idle",
+        start=lambda: None,
+        cancel=lambda: None,
+        touch=lambda: None,
+    )
+    monkeypatch.setattr(gateway_helpers, "_StreamIdleWatchdog", lambda *_args, **_kw: guard)
+    monkeypatch.setattr(gateway_helpers, "_gateway_urlopen", lambda *_args: _truncated_chunked_response())
+    with pytest.raises(ProviderTimeoutError) as raised:
+        gateway_helpers.post_stream(_request())
+    assert raised.value.stage == "stream_idle"
+
+
+@pytest.mark.parametrize("entry", ["post_json", "get_json"])
+def test_incomplete_non_streaming_body_after_user_abort_is_not_retried(monkeypatch, entry):
+    stopped = False
+    closed = []
+
+    def read_body():
+        nonlocal stopped
+        stopped = True
+        raise http.client.IncompleteRead(b"")
+
+    response = SimpleNamespace(read=read_body, close=lambda: closed.append(True))
+    monkeypatch.setattr(gateway_helpers, "_gateway_urlopen", lambda *_args: response)
+    monkeypatch.setattr(gateway_helpers, "_provider_is_interrupted", lambda: stopped)
+    with pytest.raises(InterruptedError):
+        getattr(gateway_helpers, entry)(_request())
+    assert closed == [True]
+
+
+def test_incomplete_body_exhausts_only_existing_model_retry_budget(monkeypatch):
+    from agent_py_agent.agent.agent_core import provider_transient_auto_resume as retry
+
+    attempts = []
+    waits = []
+
+    def open_response(*_args):
+        attempts.append(True)
+        return _truncated_chunked_response()
+
+    monkeypatch.setattr(gateway_helpers, "_gateway_urlopen", open_response)
+    monkeypatch.setattr(retry, "provider_transient_retry_delays", lambda _policy: (0.1, 0.2))
+    monkeypatch.setattr(retry, "apply_retry_jitter", lambda value: value)
+    monkeypatch.setattr(retry, "wait_interruptibly", waits.append)
+    with pytest.raises(ProviderTransientError):
+        retry.run_with_provider_transient_auto_resume(
+            lambda: gateway_helpers.post_stream(_request())
+        )
+    assert attempts == [True, True, True]
+    assert waits == [0.1, 0.2]
+
+
+def test_native_partial_tool_input_never_returns_a_response_on_http_disconnect(monkeypatch):
+    from agent_py_agent.agent.backends.base import AnthropicCompatibleBackend, BackendOptions
+
+    events = [
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "tool_use", "id": "partial-1", "name": "write_file"}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "input_json_delta", "partial_json": '{"content":"not committed'}},
+    ]
+    wire_data = b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
+    response = _truncated_chunked_response(wire_data)
+    monkeypatch.setattr(gateway_helpers, "_gateway_urlopen", lambda *_args: response)
+    backend = AnthropicCompatibleBackend(BackendOptions(
+        api_base="http://127.0.0.1:9", api_key="test", model_name="test",
+        request_timeout=10, max_tokens=64, temperature=0.2, stream_enabled=True,
+    ))
+    with pytest.raises(ProviderTransientError):
+        backend.generate("prompt", tools=[{"name": "write_file"}])
+    assert response.closed

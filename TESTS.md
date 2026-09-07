@@ -1,5 +1,16 @@
 # TESTS
 
+## R197 HTTP 分块断流
+
+使用真实 stdlib HTTPResponse/BufferedReader 构造完整首条 SSE 后缺失下一块数据的响应，复现 IncompleteRead，
+而不是给 fake LLM 一个“成功”结果。分别覆盖 POST JSON、GET、流式 list/iterator、wrapped exception、
+用户停止和 watchdog 关闭；现有模型重试与 HTTP open 各自计数，半截原生 write_file 参数不得变成可执行响应。
+146 项 focused 通过；这些只证明代码边界，不代替真实 TUI 产品验收。
+
+真实验收继续单 Gateway/MiniMax-M2.7。测试代理仅作为传输故障夹具，只匹配明确测试 owner 的流式请求，
+在已有真实工具结果后截断一段真实上游响应；不伪造模型正文，不碰其它 owner，不记录请求正文/密钥。
+需要核对原 TUI 重连提示、同 run/attempt 后续工具、操作账不重复、最终产物及失败请求与成功重试的账本。
+
 ## R196 已知超时与真实 UNKNOWN
 
 先红测复现“8 次成功调用被灌入 5 条 UNKNOWN 放行提示”、普通 TOOL_TIMEOUT 无证明豁免和重复 UNKNOWN

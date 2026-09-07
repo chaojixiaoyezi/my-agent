@@ -1,5 +1,12 @@
 # STATUS
 
+## R197 HTTP 半途断流（本地修复，待部署和真 TUI）
+
+- 共享 HTTP 入口补全 stdlib IncompleteRead 捕获和类型分类；现有 HTTP/model 退避负责原采样恢复，不新开 runner。
+- 146 focused 通过，覆盖实际 chunked 解析、JSON/GET/SSE、用户取消、watchdog 阶段、有界耗尽及半截工具参数。
+- `.10` 仍为 R196 唯一 Gateway。准备只对指定新测试 owner 注入一次真实 MiniMax 响应中断，其余请求正常转发。
+  旧失败账不改；真实复验前不宣称网络问题关闭。历史分页与 Memory 同义重复继续未完成。
+
 ## R196 shell 超时事实与恢复提示（已部署，真实边界复验进行中）
 
 - `.10` 已部署本地提交 `9bae530`，wheel SHA

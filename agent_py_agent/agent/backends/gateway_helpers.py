@@ -1,5 +1,5 @@
-# LLM: Provider HTTP transport normalizes retries, timeouts, response decoding, and typed user interrupts; keep it independent from backend/runtime initialization cycles.
-# 模块用途: 统一发送模型 HTTP 请求，并在超时、网络异常或用户停止时及时收回连接。
+# LLM: Provider HTTP transport owns typed connection/body-read errors, bounded open retries and interrupts; body failures defer to the existing model retry without replaying tools.
+# 模块用途: 统一模型 HTTP 请求和响应断流分类；区分超时、用户停止与可恢复网络错误并收回连接。
 from __future__ import annotations
 
 import errno
@@ -33,6 +33,12 @@ from .errors import (
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 425, 429, 502, 503, 504, 529})
 _RETRYABLE_HTTP_DELAYS_SECONDS = (2.0, 5.0, 15.0)
 _MAX_RETRY_AFTER_SECONDS = 30.0
+_NETWORK_IO_ERRORS = (
+    urllib.error.URLError,
+    TimeoutError,
+    OSError,
+    http.client.IncompleteRead,
+)
 _RETRYABLE_NETWORK_ERROR_MARKERS = frozenset(
     {
         "unexpected_eof",
@@ -135,8 +141,8 @@ def _emit_provider_attempt(event: dict[str, object]) -> None:
         return
 
 
-# LLM: Non-streaming POST reads register the current task's abort hook and must preserve typed provider errors for callers.
-# 函数用途: 发送非流式 JSON 请求；用户停止时主动关闭响应，不等完整请求超时。
+# LLM: Non-streaming POST owns one body read; truncated HTTP bodies become typed transient errors for the existing model retry, never partial JSON success.
+# 函数用途: 发送非流式 JSON 请求；停止时关闭响应，断流时交回现有恢复链，不把半截正文当成功。
 def post_json(
     request: GatewayRequest,
 ) -> dict[str, Any]:
@@ -150,7 +156,7 @@ def post_json(
         raise
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except _NETWORK_IO_ERRORS as exc:
         if _provider_is_interrupted():
             raise InterruptedError("模型接口请求已被用户停止") from exc
         raise _runtime_network_error(exc, request) from exc
@@ -163,8 +169,8 @@ def post_json(
         raise _runtime_decode_error(exc, request) from exc
 
 
-# LLM: Metadata GET follows the same interrupt contract as inference calls without turning discovery failures into model output.
-# 函数用途: 读取模型元数据；若当前任务被停止，立即中断正在等待的响应。
+# LLM: Metadata GET shares the body-read error/interrupt boundary with inference but must not interpret incomplete HTTP bytes as capability evidence.
+# 函数用途: 读取模型元数据；区分用户停止与响应断流，读取不完整时不返回错误的能力结论。
 def get_json(request: GatewayRequest) -> dict[str, Any]:
     """GET provider metadata without turning discovery failure into a model run failure."""
     _require_api_key(request.api_key)
@@ -177,7 +183,7 @@ def get_json(request: GatewayRequest) -> dict[str, Any]:
         raise
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except _NETWORK_IO_ERRORS as exc:
         if _provider_is_interrupted():
             raise InterruptedError("模型接口请求已被用户停止") from exc
         raise _runtime_network_error(exc, request) from exc
@@ -201,8 +207,8 @@ def post_stream_iter(
     yield from _post_stream_lines(request)
 
 
-# LLM: Streaming callers share this typed error boundary; user interrupts must never be retried or mislabeled as provider failures.
-# 函数用途: 统一启动 SSE 流并归一异常，将用户停止保留为独立中断事件。
+# LLM: SSE iterators share the typed body-read boundary; IncompleteRead must reach the existing model retry, while user cancellation remains a non-retryable interrupt.
+# 函数用途: 统一 SSE 异常；把 HTTP 半途断流归到网络恢复，用户停止不进入重连。
 def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
     """Shared streaming implementation used by list and iterator callers."""
     request.payload["stream"] = True
@@ -213,7 +219,7 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
         raise
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+    except (*_NETWORK_IO_ERRORS, ValueError) as exc:
         if _provider_is_interrupted():
             raise InterruptedError("模型接口流式请求已被用户停止") from exc
         if _is_timeout_exception(exc):
@@ -221,8 +227,8 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
         raise _runtime_network_error(exc, request) from exc
 
 
-# LLM: Match 会话运行时's stream idle boundary: valid SSE data resets the deadline, while comments, half-lines, and silence do not.
-# 函数用途: 读取流式模型响应，空闲超时或用户停止时主动关闭 socket 解除阻塞。
+# LLM: Valid SSE data resets rolling idle; teardown IncompleteRead preserves the watchdog's typed phase before outer transport normalization.
+# 函数用途: 读取模型流并及时收回超时连接；因超时关闭产生的断流仍记真实超时阶段。
 def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
     with _gateway_response_scope(_open_gateway_request(request)) as (resp, response_guard):
         with _provider_interrupt_callback(response_guard.abort):
@@ -256,7 +262,7 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
                 )
                 if watchdog.timed_out:
                     raise _stream_timeout_error(request, watchdog.timeout_stage)
-            except (OSError, ValueError) as exc:
+            except (*_NETWORK_IO_ERRORS, ValueError) as exc:
                 if watchdog.timed_out:
                     raise _stream_timeout_error(request, watchdog.timeout_stage) from exc
                 if _is_timeout_exception(exc):
@@ -472,8 +478,8 @@ def _open_gateway_request(request: GatewayRequest):
     raise RuntimeError("unreachable gateway retry state")
 
 
-# LLM: 每次物理 HTTP attempt 都必须向 observer 发布结构化 retry 序号和真实等待值；错误正文不得承担重试裁决。
-# 函数用途: 执行一次模型 HTTP 请求，遇到已分类的瞬时故障时登记本层退避并返回给循环重试。
+# LLM: 每次物理 HTTP open 都发布重试事实；IncompleteRead 在 open 阶段用本层预算，已移交响应的 body 断流由模型层处理。
+# 函数用途: 执行一次连接及响应头请求，按异常类型登记有界退避，不在这里重新读取或拼接半截响应。
 def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt: int):
     req = _urllib_request(request)
     attempt_id = f"provider-http:{time.time_ns()}:{attempt + 1}"
@@ -506,7 +512,7 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
             raise
         _provider_retry_wait(retry_wait_seconds)
         return None
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except _NETWORK_IO_ERRORS as exc:
         retry_scheduled = _should_retry_network_error(exc, attempt, last_attempt)
         retry_wait_seconds = _network_retry_delay_seconds(attempt) if retry_scheduled else 0.0
         _emit_provider_attempt(
@@ -957,11 +963,13 @@ def _is_timeout_exception(exc: BaseException) -> bool:
     return isinstance(reason, (TimeoutError, socket.timeout))
 
 
-# LLM: 瞬时网络判定优先读取 typed DNS/ECONNREFUSED；受控文本 marker 仅兼容没有 errno 的既有断流库异常。
-# 函数用途: 判断网络异常是否值得进入当前请求的有界重试。
+# LLM: 瞬时判定先读 typed IncompleteRead/DNS/ECONNREFUSED，异常名字或 partial 正文不授予重试权；保持既有预算。
+# 函数用途: 将真实 HTTP 响应截断和瞬时连接错误送入现有有界重试，不把配置或普通错误文案当断流。
 def _is_transient_network_error(exc: BaseException) -> bool:
     if _is_timeout_exception(exc):
         return False
+    if any(isinstance(item, http.client.IncompleteRead) for item in _network_exception_chain(exc)):
+        return True
     if _is_dns_resolution_exception(exc):
         return True
     if _is_connection_refused_exception(exc):
