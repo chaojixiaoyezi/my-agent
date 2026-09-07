@@ -4,7 +4,8 @@
 
 原 TUI child→Ctrl+O→Ctrl+G 复现“导航已回 root、正文仍是 child”；新增真实 frame 断言先红。
 覆盖重绑正文、show-all 保留、同 store 不解冻、后到消息最终仍可见；与 transcript/agent-navigation/history
-paging 共 44 focused 通过。最后须原 TUI 复验；测试者不向 DUT 注入业务修复或改模型历史。
+paging 共 44 focused 通过。真实原 R171 窗口 child 展开返回 root、grandchild 全展开逐层返回，以及原 D
+恢复后普通/展开模式上翻首条输入均已通过。两会话消息/用量四份 SHA 不变；测试者未注入业务修复或改模型历史。
 
 ## R200 正常工作片接续与故障门区分
 

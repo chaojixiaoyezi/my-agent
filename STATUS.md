@@ -1,10 +1,23 @@
 # STATUS
 
-## R201 展开后的跨代理显示来源（本地修复，待真实 TUI）
+## R201 展开后的跨代理显示来源（已部署，原 TUI 组合通过）
 
 - R199 组合复验抓到：child 中 Ctrl+O 后 Ctrl+G，导航已回 root，冻结正文仍来自 child；退出展开才刷新。
   当前在唯一 frame-provider 换 store 入口重绑冻结 snapshot，保留详细/全展开模式，清除旧搜索坐标。
-- 定位用例先红；正文/导航/冻结/分页共 44 focused 通过，待只升级客户端的原窗口复验。
+- 定位用例先红；正文/导航/冻结/分页共 44 focused 与本地严格 gate 通过。提交 a447db1；wheel SHA
+  542625bb6e06a6caf7af9c343ae2327716a12595624fd7ee850fa9342696c1dd。只升级客户端，Gateway 3235693 未重启。
+- 原 R171 TUI / PID 3253808：child 展开返回 root、grandchild 全展开逐层返回 coordinator/root 均直接换正文；
+  原 D / PID 3253802 普通与展开模式均可上翻首条输入。两会话消息/用量四份 SHA 不变；不冒充 OS 复制通过。
+- 两个空闲旧客户端经 /exit 后删除零引用的 R199 安装环境，保留包备份/依赖与会话；新入口使用 R201，
+  忙碌的其它旧 TUI 未强停。剩余磁盘约 765 MiB，当前 Gateway RSS 约 517 MiB，仍需控制安装副本数量。
+
+## R201 并行任务的质量观察（不添加机器验收）
+
+- F 交班与 E 跨年度账本均出现 final/Working 收起；F final msg-6d887a5906ab4a84，E final
+  msg-79085455fd294be1。已记录它们列出的未验证范围，不把文字“完成”当产物全过。
+- C 保修流程停在“读代码确认”：attempt-1788801845-b569ba70 是 done；4 次真实模型调用均 finished，
+  原生末条仅 thinking/text、没有 tool_use。不是本轮崩溃/超时，属于提前收尾的质量失败；后续普通消息后
+  已继续修 undo/restore 并 Compact 23→24。K 更正报告也出现阶段性文字收尾，保留待核对。
 
 ## R200 协调员正常续跑被累计次数误拦（已部署，两份真实现场恢复）
 

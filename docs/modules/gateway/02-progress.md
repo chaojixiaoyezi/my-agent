@@ -1,9 +1,10 @@
 # Gateway Progress
 
-## R201 当前代理与冻结正文同源（本地，待 TUI）
+## R201 当前代理与冻结正文同源（已部署，原 TUI 组合通过）
 
 Ctrl+O 冻结 snapshot 在代理导航换 store 时同步重绑，详细档位保持、搜索坐标清理；同来源刷新不解冻。
-这只改客户端 frame-provider，不需重启当前 R200 Gateway。44 focused 通过，待原窗口组合复验。
+这只改客户端 frame-provider，未重启 R200 Gateway。44 focused 与严格 gate 通过；原 child/孙代理
+逐层返回及原 D 上翻首条输入已通过，两会话消息/用量四份 SHA 不变。系统复制仍待验。
 
 ## R199 历史更早页（已部署，原 D 分页切片通过）
 
