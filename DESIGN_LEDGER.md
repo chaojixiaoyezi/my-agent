@@ -1,6 +1,14 @@
 # DESIGN LEDGER
 
-## 2026-09-07 HTTP 正文断流进入既有恢复链【状态：R197 本地通过，待真实 TUI】
+## 2026-09-07 同一回合恢复归属【状态：R198 真机问题已定位，设计与修复进行中】
+
+- G 真任务在唯一 Gateway 重启后，后台 child 完成唤醒先续完原 root；旧前台请求随后又进行 Compact 和
+  原 attempt 恢复核对，因 execution_binding_changed 失败，造成“有最终报告又报任务失败”。
+- 同 thread lane 只保证同时不运行，不能单独保证排队的同一旧请求不会再次执行。恢复必须重读权威完成/
+  交接状态，使用真实 request/thread/task/attempt 和 canonical 消息，不能改成忽略身份冲突或解析完成文案。
+- 参考 会话运行时 的同一 active turn 与既有会话历史恢复路径；具体实现仍在核对，不新增任务质量验收器。
+
+## 2026-09-07 HTTP 正文断流进入既有恢复链【状态：R197 已部署，真实重连切片通过】
 
 - B 长子任务记录 `IncompleteRead(0 bytes read)` 后 FAILED；该 stdlib 异常不属于 OSError，原公共 HTTP
   入口没有捕获，原 transient 分类也不认识其类型。错误正文不是重试依据。
@@ -10,7 +18,8 @@
 - `IncompleteRead` 在连接/响应头阶段复用原 2/5/15 秒 HTTP 预算，读取正文阶段交现有模型回合预算；
   两层不为同一次正文错误叠加重试。用户停止优先，watchdog 关闭导致的异常保留原超时阶段。
 - 只遍历已知异常链读取真实类型；普通同名文案、认证/配置错误不能取得重试权。半截 JSON/tool input 不变成
-  正常 ModelResponse，已执行工具不在本层重做。146 focused 通过，真实 MiniMax 定向断流验收仍待完成。
+  正常 ModelResponse，已执行工具不在本层重做。146 focused 通过；真实 MiniMax 一次断流后，同请求与
+  attempt 继续，三名 child 非重复派工。长任务质量、完整网络/取消矩阵仍单独验收。
 
 ## 2026-09-07 执行代次不等于失败重试【状态：R195 本地通过，待新 TUI】
 

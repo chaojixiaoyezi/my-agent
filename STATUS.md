@@ -1,11 +1,29 @@
 # STATUS
 
-## R197 HTTP 半途断流（本地修复，待部署和真 TUI）
+## R197 HTTP 半途断流（已部署，真实重连切片通过，长任务继续）
 
 - 共享 HTTP 入口补全 stdlib IncompleteRead 捕获和类型分类；现有 HTTP/model 退避负责原采样恢复，不新开 runner。
 - 146 focused 通过，覆盖实际 chunked 解析、JSON/GET/SSE、用户取消、watchdog 阶段、有界耗尽及半截工具参数。
-- `.10` 仍为 R196 唯一 Gateway。准备只对指定新测试 owner 注入一次真实 MiniMax 响应中断，其余请求正常转发。
-  旧失败账不改；真实复验前不宣称网络问题关闭。历史分页与 Memory 同义重复继续未完成。
+- `.10` 唯一 Gateway PID 3102333，`ma-gateway-r197-110`，提交 `b80f1ce`；独立 R197 环境与 R196 的
+  85 项依赖一致。wheel SHA `c2222a363c47274eff9948f98eef459c002bf8256b774e762cf443943d5f6006`。
+- `ma-r197-110-stream-retry` / owner `p1-r197-stream-retry` 的真实 MiniMax-M2.7 家庭资料归档长任务，
+  请求 `gwreq-1788782704-1d3397cd0a6d41e2a1c28257285eb26b`。上游首段真实响应后截断一次 HTTP chunk，
+  TUI 显示“12 秒后自动重连（模型回合 1/5）”，同一 `attempt-1788782707-dc1e2b2f` 随后继续工具和派工。
+  失败请求与 HTTP 200 重试的正文 SHA 相同；只注入一次，其他 owner 零注入。
+- 派工第一次因两项同时绑定 A3 而被原子拒绝，`effect_outcome=not_started`；模型改参数后一次创建三个
+  child，没有把参数修复算断流重派。两名已完成，第三名真实 Compact 1 后继续验证；完整产物质量未通过。
+- 8895 是 loopback provider 故障夹具，不是第二 Gateway；只将私有部署配置的 api_base 指向它，真实上游、
+  模型和密钥未改。一次故障已用尽，当前透传；下次安全切换恢复直连。原配置及旧失败账保留。
+
+## R198 新发现：前后台争抢原回合恢复（定位中）
+
+- G 原研究请求在 R197 重启后，`subagent_runner_finished` 后台先取得同 thread lane，原根 run 换 attempt
+  接续并完成；canonical final `msg-9d853b6f403c4a14` 于 1788783209.898 保存。
+- 排队的旧 Gateway 请求随后取得 lane，先 Compact 到 generation 4，再按重启前 `runtime_authority.attempt_id`
+  核对已换代的 RuntimeDB，返回 `execution_binding_changed`；1788783235.475 请求 FAILED。
+  这是已提交结果与滞后请求恢复的冲突，不是磁盘损坏或 Compact 摘要丢失。不能用捕获异常后假成功来掩盖。
+- 旧现场保持；优先解决同一请求完成/续接的唯一执行归属，历史分页随后继续。C 换独立保修工具，E 修复
+  年度报告入口，H 停止受管服务三路已通过原 TUI 追加普通任务；B、F、J 长任务继续。
 
 ## R196 shell 超时事实与恢复提示（已部署，真实边界复验进行中）
 

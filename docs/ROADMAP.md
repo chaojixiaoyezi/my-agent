@@ -1,11 +1,18 @@
 # ROADMAP
 
-## R197 HTTP 断流恢复（定向完成，真实 TUI 待验）
+## R198 同回合恢复竞争（优先修复）
+
+- 解决问题：后台已继续并完成原任务，旧 Gateway 请求取得 lane 后仍恢复旧 attempt，最终又报失败。
+- 真 G canonical final 与 execution_binding_changed 已核对。先读 会话运行时 active-turn/恢复实现，收敛请求
+  完成与执行归属，保持 identity/UNKNOWN 门；不捕获错误假完成，不手动改旧账。
+
+## R197 HTTP 断流恢复（真实重连切片通过，继续长任务验收）
 
 - 解决问题：长子任务的 IncompleteRead 未被公共 HTTP 入口捕获，也未分类为 transient，绕过现有退避直接 FAILED。
 - 按 会话运行时 采样级 stream retry 适配共享 transport；保留模型回合/HTTP 两层既有预算与中断、原工具幂等。
 - 146 focused 通过，含真实 stdlib chunked 断流、用户停止、超时阶段、预算耗尽、半截原生工具不执行。
-  下一步独立发布、真实 MiniMax TUI 定向断流；未宣称旧 B 子任务已恢复或全网络矩阵通过。
+  已独立发布；真实 MiniMax 新 J 原 TUI 断流后同请求/attempt 继续并自主创建三个 child。
+  下一步核对完整交付与费用、恢复直连；未宣称旧 B 子任务已恢复或全网络矩阵通过。
 
 ## R196 当前推进
 
