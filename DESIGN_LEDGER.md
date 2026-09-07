@@ -1,6 +1,20 @@
 # DESIGN LEDGER
 
-## 2026-09-07 同一回合恢复归属【状态：R198 本地修复通过，待真实 TUI】
+## 2026-09-07 显示历史向前分页【状态：R199 本地实现，待真实 TUI】
+
+- 解决问题：恢复仅取最近 80 条且没有更早游标，正文在磁盘上却无法上翻。终端交互
+  `src/assistant/sessionHistory.ts` 使用 latest/before_id/hasMore；本项目复用已有 canonical JSONL 字节边界，
+  不新建历史库、不修改模型上下文、Compact、Memory 或缓存前缀。
+- `history_page.py` 从末尾或指定边界倒读，行数为目标窗口，最早连续工作片保持完整后再分页。
+  单个很长工作片可能超过目标行数，不能误称固定字节上限；不为了满足页大小拆坏 native 工具/思考组合。
+- HTTP `before_message_cursor` 与实时 `message_cursor` 分开；同 owner/thread 解析仍在 Gateway。
+  UI 单个在途读取，错误保留原文和游标，上翻重试；切子页或退出后的迟到结果不应用到当前页。
+- 更早页只新增静态显示块，渲染器提供 block ID/行锚点保持原阅读位置。Ctrl+O 冻结页可以补更早前缀，
+  但不夹入冻结期间的新回复；控制、主/子工作状态、模型预览不受影响。Home 到当前已加载页顶部，再上翻续读。
+- 顺带修复原历史重排未改变显示排序槽位的问题，否则 renderer 按 created_seq 排序会再次把过程放到 final 后。
+  事件 journal 不改写；排序槽位只属于显示投影。旧消息及旧失败账不迁移、不删除。
+
+## 2026-09-07 同一回合恢复归属【状态：R198 已部署，真实主代理恢复切片通过】
 
 - G 真任务在唯一 Gateway 重启后，后台 child 完成唤醒先续完原 root；旧前台请求随后又进行 Compact 和
   原 attempt 恢复核对，因 execution_binding_changed 失败，造成“有最终报告又报任务失败”。

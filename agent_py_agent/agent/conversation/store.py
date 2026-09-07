@@ -971,7 +971,16 @@ def _message_entry_by_id_in_path(
     return None, []
 
 
+# LLM: 消息存储保持 canonical append-only 身份，显示分页只是只读投影；写入与模型历史调用方仍使用原合同。
+# 类用途: 保存会话消息并提供精确查找、实时顺读和向前翻页，不另建正文副本。
 class ConversationMessageStore(ConversationThreadStore):
+    # LLM: 历史页只从当前 store 的 canonical 路径倒读；不修改消息、Compact、模型上下文或实时消费位置。
+    # 函数用途: 提供独立向前游标，让客户端按需补更早记录，而不是固定截断或全量载入会话。
+    def history_page_report(self, thread_id: str, *, before: int | None = None, limit: int = 80):
+        from .history_page import read_conversation_history_page
+
+        return read_conversation_history_page(self._message_path(thread_id), thread_id, before=before, limit=limit)
+
     # LLM: Transcript append is append-only; its activity projection must merge into the latest
     # thread after the ledger write rather than writing the earlier loaded thread snapshot.
     # 函数用途: 追加一条对话记录，并只刷新会话活动时间，避免迟到消息把新任务目录改回旧目录。

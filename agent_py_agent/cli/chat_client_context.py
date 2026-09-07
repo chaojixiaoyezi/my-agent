@@ -216,10 +216,11 @@ class GatewayChatClientAgent:
             "error_code": "GATEWAY_UNAVAILABLE",
         }
 
-    # LLM: Resume history comes from the same owner ConversationStore used by Gateway turns; the
-    # terminal must not open that store or create a local full Agent.
-    # 函数用途: 读取一个聊天会话最近的完整问答回合。
-    def request_chat_history(self, session_id: str, *, max_turns: int) -> dict[str, object]:
+    # LLM: 历史及向前分页只访问同 owner Gateway，不打开服务端路径；分页不提交模型任务。
+    # 函数用途: 读取最新或给定完整行边界之前的一页会话显示。
+    def request_chat_history(
+        self, session_id: str, *, max_turns: int, before_message_cursor: int | None = None,
+    ) -> dict[str, object]:
         _status, body = self.post_gateway_json(
             "/client/history",
             {
@@ -227,6 +228,7 @@ class GatewayChatClientAgent:
                 "user_id": "local-agent",
                 "channel": "chat",
                 "conversation_id": str(session_id or "default"),
+                **({"before_message_cursor": before_message_cursor} if before_message_cursor is not None else {}),
             },
             timeout=10.0,
         )

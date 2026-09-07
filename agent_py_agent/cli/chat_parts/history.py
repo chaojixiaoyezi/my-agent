@@ -17,7 +17,7 @@ class ConversationTurn:
     assistant_message: str
 
 
-# LLM: Snapshot 分开保存问答预览和 display-only 原生事件；只有 turns 可供既有本地预览上下文使用，错误保留给 resume。
+# LLM: Snapshot 分开保存预览、display-only 事件和双向游标；上翻只更新显示，不把旧页追加到模型预览。
 # 类用途: 保存同一会话的预览、完整显示、线程身份与读取错误。
 @dataclass(frozen=True)
 class GatewayChatHistorySnapshot:
@@ -26,18 +26,22 @@ class GatewayChatHistorySnapshot:
     load_errors: tuple[dict[str, object], ...] = ()
     display_events: tuple[dict[str, object], ...] | None = None
     message_cursor: int = 0
+    before_message_cursor: int = 0
 
 
-# LLM: 恢复只读 resolve_thread/recent_messages_report，不能创建线程、写第二 transcript 或按正文猜配对；request id 和 role 是唯一配对事实。
-# 函数用途: 恢复问答预览，并将所读完整窗口交给类型显示；显示不再重复按预览回合数截取。
+# LLM: 恢复和上翻共用只读 canonical 分页；不创建线程、不写第二 transcript，不从正文猜回合。
+# 函数用途: 恢复最新窗口或更早的一页，同时传递各自的显示和实时读取边界。
 def load_gateway_chat_history(
     agent: object,
     session_id: str,
     *,
     max_turns: int,
+    before_message_cursor: int | None = None,
 ) -> GatewayChatHistorySnapshot:
     if getattr(agent, "gateway_client_only", False) is True:
-        return _load_thin_gateway_chat_history(agent, session_id, max_turns=max_turns)
+        return _load_thin_gateway_chat_history(
+            agent, session_id, max_turns=max_turns, before_message_cursor=before_message_cursor,
+        )
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
     from ...agent.conversation.history_display import conversation_history_display_events
 
@@ -59,35 +63,38 @@ def load_gateway_chat_history(
         return GatewayChatHistorySnapshot()
     thread_id = str(getattr(thread, "thread_id", "") or "")
     try:
-        rows, row_errors = store.recent_messages_report(
+        page = store.history_page_report(
             thread_id,
+            before=before_message_cursor,
             limit=max(16, max(1, int(max_turns or 1)) * 4),
         )
-        message_cursor = store.message_byte_offset_after(thread_id, rows[-1].message_id) if rows else 0
     except Exception as exc:  # noqa: BLE001 同上，不能静默恢复成空历史
         return GatewayChatHistorySnapshot(
             thread_id=thread_id,
             load_errors=(_history_load_error(exc),),
         )
-    turns = _paired_gateway_chat_turns(rows, max_turns=max_turns)
+    turns = _paired_gateway_chat_turns(list(page.rows), max_turns=max_turns)
     return GatewayChatHistorySnapshot(
         turns=turns,
         thread_id=thread_id,
-        load_errors=tuple(dict(item) for item in row_errors if isinstance(item, dict)),
-        display_events=conversation_history_display_events(rows),
-        message_cursor=message_cursor,
+        load_errors=page.errors,
+        display_events=conversation_history_display_events(page.rows),
+        message_cursor=page.after,
+        before_message_cursor=page.before,
     )
 
 
-# LLM: 轻量客户端只能消费 Gateway 的 typed history contract；端点不可用或行格式错误必须显式 fail-closed，不能构造本地 Agent。
-# 函数用途: 从已运行 Gateway 恢复会话预览与显示事件，不在薄客户端解析内部 native envelope。
+# LLM: 轻量客户端只解析公开历史和整数游标；失败不回落本地 Agent，也不重置已有展示窗口。
+# 函数用途: 从 Gateway 取得一页可见事件，错误留给启动或翻页调用方解释。
 def _load_thin_gateway_chat_history(
     agent: object,
     session_id: str,
     *,
     max_turns: int,
+    before_message_cursor: int | None = None,
 ) -> GatewayChatHistorySnapshot:
-    payload = agent.request_chat_history(session_id, max_turns=max_turns)
+    options = {"before_message_cursor": before_message_cursor} if before_message_cursor is not None else {}
+    payload = agent.request_chat_history(session_id, max_turns=max_turns, **options)
     payload = payload if isinstance(payload, dict) else {}
     raw_turns = payload.get("turns")
     turns: list[tuple[str, str]] = []
@@ -111,6 +118,7 @@ def _load_thin_gateway_chat_history(
         turns=tuple(turns[-max(1, int(max_turns or 1)):]),
         thread_id=str(payload.get("thread_id") or ""),
         message_cursor=max(0, int(payload.get("message_cursor") or 0)),
+        before_message_cursor=max(0, int(payload.get("before_message_cursor") or 0)),
         load_errors=errors,
         display_events=(
             tuple(dict(item) for item in payload["display_events"] if isinstance(item, dict))

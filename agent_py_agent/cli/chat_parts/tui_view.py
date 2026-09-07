@@ -231,7 +231,7 @@ def _switch_transcript_control_store(
 # 类用途: 给 prompt_toolkit Window 提供按需 formatted lines、follow-tail 和手动滚动。
 class TuiTranscriptControl(UIControl):
     # LLM: cursor_line 是渲染锚点而非会话位置；新消息仅在 follow=True 时把锚点推进末尾。
-    # 函数用途: 创建一个非 focusable 的滚动 transcript control。
+    # 函数用途: 创建滚动控件、各页面视口和按需旧页回调；没有后台模型或文件读取。
     def __init__(self, provider: TuiFrameProvider) -> None:
         self.provider = provider
         self._state_store = provider.state_store
@@ -247,6 +247,7 @@ class TuiTranscriptControl(UIControl):
         self._selection_copied = False
         self._right_copy_armed = False
         self._copy_on_select: Callable[[str], None] | None = None
+        self._older_history: Callable[[bool], None] | None = None
         self._selection_width = 0
         self._last_lines: tuple[FormattedLine, ...] = ()
         self._lock = threading.Lock()
@@ -357,6 +358,9 @@ class TuiTranscriptControl(UIControl):
                 self._unseen_block_ids = frozenset()
             else:
                 self.follow = False
+            request_older = int(delta) < 0 and target < self._last_render_height
+        if request_older and self._older_history is not None:
+            self._older_history(False)
 
     # LLM: home 显式离开 follow-tail 并把 anchor 设为首行。
     # 函数用途: 跳到 transcript 顶部。
@@ -368,6 +372,44 @@ class TuiTranscriptControl(UIControl):
             self._begin_manual_scroll_locked(visible_block_ids)
             self.follow = False
             self.cursor_line = 0
+        if self._older_history is not None:
+            self._older_history(True)
+
+    # LLM: 翻页回调只发读取意图，实际网络及同 owner 身份校验归外层；root/child 不能共享隐式历史游标。
+    # 函数用途: 绑定滚到顶部时的异步旧页加载入口。
+    def set_older_history_callback(self, callback: Callable[[bool], None]) -> None:
+        self._older_history = callback
+
+    # LLM: 滚动锚点使用渲染器给出的 block ID 和块内行号，不从正文匹配或总行数差推测位置。
+    # 函数用途: 保存分页之前正在看的确切正文位置，流式尾部增长不影响它。
+    def history_anchor(self) -> tuple[str, int] | None:
+        frame = self.provider.frame(self.provider.last_width)
+        with self._lock:
+            if self.follow:
+                return None
+            line = self.cursor_line
+        candidates = [(key, offset) for key, offset in frame.block_line_offsets if offset <= line]
+        if not candidates:
+            return None
+        key, offset = candidates[-1]
+        return key, line - offset
+
+    # LLM: 只恢复同页块位置，旧页加入已读基线而非新消息；不改变 tail-follow，失效选区不能误用于复制。
+    # 函数用途: 插入旧历史后保留阅读位置，旧内容不增加未读提示，并清掉失效坐标选区。
+    def restore_history_anchor(
+        self, anchor: tuple[str, int] | None, *, home: bool = False, block_ids: tuple[str, ...] = (),
+    ) -> None:
+        offsets = dict(self.provider.frame(self.provider.last_width).block_line_offsets)
+        with self._lock:
+            self._selection = None
+            if self._unseen_baseline is not None:
+                self._unseen_baseline = self._unseen_baseline.union(block_ids)
+                self._unseen_block_ids = self._unseen_block_ids.difference(block_ids)
+            if not self.follow:
+                if home:
+                    self.cursor_line = 0
+                elif anchor is not None and anchor[0] in offsets:
+                    self.cursor_line = offsets[anchor[0]] + anchor[1]
 
     # LLM: end 恢复 follow-tail；具体末行在下一 create_content 根据当前 frame 决定。
     # 函数用途: 跳到 transcript 底部并继续跟随新输出。

@@ -31,7 +31,7 @@ class GatewayClientMemoryResult:
         }
 
 
-# LLM: History result 分开保存预览、显示与最后完整消息字节游标；游标只交接实时读取，不回灌模型。
+# LLM: History result 分开保存预览、显示、向前分页和实时游标；游标只用于展示，不回灌模型。
 # 类用途: 表示同 owner/channel/conversation 的预览、正文恢复和读取错误。
 @dataclass(frozen=True)
 class GatewayClientHistoryResult:
@@ -41,6 +41,8 @@ class GatewayClientHistoryResult:
     load_errors: tuple[dict[str, object], ...] = ()
     display_events: tuple[dict[str, object], ...] = ()
     message_cursor: int = 0
+    before_message_cursor: int = 0
+    has_older: bool = False
 
     # LLM: HTTP 投影区分预览和 display-only 事件，不输出内部 envelope、服务端路径或异常原文。
     # 函数用途: 转换成各前端共用的公开历史合同。
@@ -52,6 +54,8 @@ class GatewayClientHistoryResult:
             "load_errors": [dict(item) for item in self.load_errors],
             "display_events": [dict(item) for item in self.display_events],
             "message_cursor": self.message_cursor,
+            "before_message_cursor": self.before_message_cursor,
+            "has_older": self.has_older,
         }
 
 
@@ -95,13 +99,14 @@ def execute_gateway_client_memory(
     return GatewayClientMemoryResult(normalized, True, records=records)
 
 
-# LLM: 先解析 authenticated owner/thread；max_turns 限制读取/预览，实时游标止于实际读到的末行，不以稍后的文件大小跳过消息。
-# 函数用途: 返回当前会话预览、完整可读窗口及后台流接续位置，不让恢复期间的新回复丢失。
+# LLM: 先解析 authenticated owner/thread，再按完整工作片向前翻页；实时游标与更早游标独立，追加竞态不跳过新消息。
+# 函数用途: 返回当前会话的一页显示和预览，让上翻能接着读取更早内容而不加载全部历史。
 def read_gateway_client_history(
     base_agent: object,
     *,
     scope: GatewayControlScope,
     max_turns: int,
+    before_message_cursor: int | None = None,
 ) -> GatewayClientHistoryResult:
     try:
         owner_agent = resolve_gateway_scope_agent(base_agent, scope)
@@ -123,25 +128,27 @@ def read_gateway_client_history(
     thread_id = str(getattr(thread, "thread_id", "") or "")
     limit = _bounded_limit(max_turns, maximum=200)
     try:
-        rows, row_errors = store.recent_messages_report(
+        page = store.history_page_report(
             thread_id,
+            before=before_message_cursor,
             limit=max(16, limit * 4),
         )
-        message_cursor = store.message_byte_offset_after(thread_id, rows[-1].message_id) if rows else 0
     except Exception as exc:  # noqa: BLE001 同上
         return GatewayClientHistoryResult(
             False,
             thread_id=thread_id,
             load_errors=(_safe_load_error(exc),),
         )
-    safe_errors = tuple(_safe_load_error(item) for item in row_errors)
+    safe_errors = tuple(_safe_load_error(item) for item in page.errors)
     return GatewayClientHistoryResult(
         not safe_errors,
         thread_id=thread_id,
-        turns=_paired_history_turns(rows, max_turns=limit),
+        turns=_paired_history_turns(list(page.rows), max_turns=limit),
         load_errors=safe_errors,
-        display_events=conversation_history_display_events(rows),
-        message_cursor=message_cursor,
+        display_events=conversation_history_display_events(page.rows),
+        message_cursor=page.after,
+        before_message_cursor=page.before,
+        has_older=page.before > 0,
     )
 
 

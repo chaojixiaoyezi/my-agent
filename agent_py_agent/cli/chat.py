@@ -313,6 +313,7 @@ def cmd_chat(args) -> int:
     state, build_history_context = _init_chat_state(agent)
     recovered_display_events = None
     recovered_message_cursor = 0
+    recovered_before_message_cursor = 0
     resume_session = bool(str(getattr(args, "session_id", "") or "").strip())
     deferred_history = bool(resume_session and use_gateway and use_tui)
     if resume_session and not deferred_history:
@@ -327,6 +328,7 @@ def cmd_chat(args) -> int:
         state["conversation_history"].extend(restored.turns)
         recovered_display_events = restored.display_events
         recovered_message_cursor = restored.message_cursor
+        recovered_before_message_cursor = restored.before_message_cursor
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
 
@@ -351,6 +353,7 @@ def cmd_chat(args) -> int:
             current_session_id=current_session_id,
             recovered_display_events=recovered_display_events,
             recovered_message_cursor=recovered_message_cursor,
+            recovered_before_message_cursor=recovered_before_message_cursor,
             restore_session_history=deferred_history,
         ))
     else:

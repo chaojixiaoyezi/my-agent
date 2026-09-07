@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 
 from .background_history import background_display_turn_from_row
 from .background_transcript import public_background_transcript_text
+from .history_page import history_group_identity
 from .models import is_audit_background_transcript_entry
 from .native_history import canonical_native_messages_from_metadata
 
@@ -20,21 +21,12 @@ def conversation_history_display_events(
     rows: Sequence[object],
 ) -> tuple[dict[str, object], ...]:
     groups: dict[str, list[object]] = {}
-    for index, row in enumerate(rows):
+    for row in rows:
         if is_audit_background_transcript_entry(row):
             continue
         if getattr(row, "role", "") not in {"user", "assistant"}:
             continue
-        metadata = getattr(row, "metadata", None)
-        metadata = metadata if isinstance(metadata, dict) else {}
-        identity = str(
-            metadata.get("background_transcript_request_id")
-            or metadata.get("conversation_request_id")
-            or metadata.get("gateway_request_id")
-            or metadata.get("agent_attempt_id")
-            or getattr(row, "message_id", "")
-            or f"row-{index}"
-        )
+        identity = history_group_identity(row)
         groups.setdefault(identity, []).append(row)
     events: list[dict[str, object]] = []
     for identity in groups:

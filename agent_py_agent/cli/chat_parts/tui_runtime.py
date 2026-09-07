@@ -784,7 +784,7 @@ def _normalize_subagent_activity_rows(
 class _TuiConversationBoundaryRuntimeMixin:
     # LLM: Recovery prefers host-projected canonical display events; plain callers may provide
     # only their visible pairs. The exact last-read canonical byte cursor starts live message polling;
-    # neither path reads storage, writes history, queues or calls a model.
+    # neither path reads storage, writes history, queues or calls a model. Older-page cursor is separate.
     # 函数用途: 在欢迎卡后用同一 reducer 恢复正文、工具和思考；不让恢复触发执行或 Working。
     def publish_recovered_history(
         self,
@@ -792,8 +792,10 @@ class _TuiConversationBoundaryRuntimeMixin:
         *,
         display_events: tuple[dict[str, object], ...] | None = None,
         message_cursor: int = 0,
+        before_message_cursor: int = 0,
     ) -> None:
         self.background_message_cursor = max(self.background_message_cursor, int(message_cursor))
+        self.history_before_cursor = max(0, int(before_message_cursor))
         if display_events is not None:
             self._publish_recovered_display_events(display_events)
             return
@@ -818,6 +820,21 @@ class _TuiConversationBoundaryRuntimeMixin:
                     {"text": assistant_text},
                     request_id=history_request_id,
                 )
+
+    # LLM: 向前翻页只补未见显示块；不改实时游标、Working 或模型上下文，过期响应不能覆盖新分页边界。
+    # 函数用途: 将一页更早记录放到已有正文前面，返回实际补入的块身份供视口保持原位置。
+    def prepend_history_page(self, events, *, expected_before: int, next_before: int) -> tuple[str, ...]:
+        with self._lock:
+            if self.history_before_cursor != expected_before or not 0 <= next_before < expected_before:
+                return ()
+            previous = {block.block_id for block in self.store.snapshot().stable_blocks}
+            self._publish_recovered_display_events(tuple(events))
+            inserted = tuple(block.block_id for block in self.store.snapshot().stable_blocks if block.block_id not in previous)
+            if inserted:
+                self._publish("history_page_prepended", "completed", f"history-page:{expected_before}",
+                              {"block_ids": list(inserted)})
+            self.history_before_cursor = next_before
+            return inserted
 
     # LLM: 只接受静态公开终态；后台快照沿原 block ID，完整 final 发布成功才重基该工作片，不执行控制或恢复活动。
     # 函数用途: 按原顺序恢复显示，并记住已完整恢复的后台工作片，避免旧工具跑到 final 后面。
@@ -1213,7 +1230,7 @@ class TuiRuntime(
     TuiPermissionRuntimeMixin,
 ):
     # LLM: session_id 固定一个 UI 生命周期；store 可注入用于 replay/tests，但不能在运行中替换。
-    # 函数用途: 创建 TUI runtime、单调 sequencer、后台流身份和本页面已完整恢复的工作片集合。
+    # 函数用途: 创建 TUI runtime、单调 sequencer、独立历史/实时游标和已完整恢复的工作片集合。
     def __init__(self, session_id: str, *, store: TuiStateStore | None = None) -> None:
         normalized = str(session_id or "default").strip() or "default"
         self.session_id = normalized
@@ -1228,6 +1245,7 @@ class TuiRuntime(
         self._published_control_commands: set[str] = set()
         self._console_index = 0
         self.background_message_cursor = 0
+        self.history_before_cursor = 0
         self.background_event_stream_id = ""
         self._recovered_background_turns: set[str] = set()
         self._notice_text = ""

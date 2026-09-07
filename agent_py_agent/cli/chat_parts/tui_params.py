@@ -135,4 +135,5 @@ class TuiRunParams:
     current_session_id: str
     recovered_display_events: tuple[dict[str, object], ...] | None = None
     recovered_message_cursor: int = 0
+    recovered_before_message_cursor: int = 0
     restore_session_history: bool = False

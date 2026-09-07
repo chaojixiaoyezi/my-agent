@@ -31,6 +31,7 @@ agent_py_agent/
 |   |   |-- tui_terminal.py             # OSC 终端标题、活动帧与退出清理
 |   |   |-- tui_transcript.py           # 详细 transcript 冻结视图、全文搜索与命中导航状态
 |   |   |-- tui_view.py                 # prompt_toolkit typed transcript control、frame/block cache、scroll anchor 与 overlay/footer
+|   |   |-- tui_history.py              # 上翻异步读取更早页、同页面响应校验和冻结视口衔接
 |   |   |-- tui_events.py               # TUI 唯一 versioned event 信封、单调 sequencer 与幂等有界 journal
 |   |   |-- tui_view_model.py           # typed event reducer：稳定/活动 block、权限 overlay、输入队列与状态快照
 |   |   |-- tui_ui_setup.py             # alternate-screen prompt_toolkit 布局、控件、style 与 focus 接线
@@ -146,6 +147,7 @@ agent_py_agent/
 |   |   |-- live_tool_compact.py        # 运行中原生工具历史到同一 thread checkpoint/CAS 的适配层
 |   |   |-- native_history.py           # 完成回合的 provider 原生消息信封、校验与按请求替换式恢复
 |   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
+|   |   |-- history_page.py             # canonical 字节边界向前分页和完整工作片分组
 |   |   |-- message_stream.py           # 从同一消息账本分页投影后台 final，恢复与实时共用 ID/游标
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
 |   |   |-- runtime.py                  # 后台主代理调度热循环：wake_queue 到期消费、三源对账(5min)、事件提前醒取消闹钟
@@ -220,6 +222,8 @@ agent_py_agent/
 |   |-- test_tui_markdown.py            # CommonMark 标题/列表/引用/代码/表格、样式角色与 Unicode 宽度换行
 |   |-- test_tui_runtime.py             # 本地/Gateway 流式、工具、queue、终态和全局事件顺序 adapter 回归
 |   |-- test_tui_view.py                # UIContent formatted lines、frame/block cache、follow anchor 和 resize 重排
+|   |-- test_tui_history_paging.py      # 更早页渲染顺序、锚点、冻结页、子页/过期响应和单在途读取
+|   |-- test_conversation_history_paging.py # 中文长行字节边界、完整工作片、坏游标与追加竞态
 |   |-- test_tui_input.py               # slash/path 补全、菜单选择、queue 回取与 bracketed paste 输入回归
 |   |-- test_tui_interaction.py         # stash、Ctrl-R、help 与 paste refs 状态机回归
 |   |-- test_tui_paste.py               # 大小 paste 的折叠/展开和占位符安全回归
@@ -288,6 +292,9 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `agent/conversation/history_page.py`：显示专用倒读页与工作片身份，双游标不回灌模型。
+- `cli/chat_parts/tui_history.py`：每个 TUI 单一的按需旧页读取器，不持有后台任务或历史副本。
 
 - `agent_py_agent/tests/test_conversation_message_stream.py`：canonical 消息分页、恢复竞态、损坏游标和实时/历史幂等验证。
 - `agent_py_agent/tests/test_background_history_snapshot.py`：完整后台块快照、慢客户端补帧、损坏快照拒绝重基、

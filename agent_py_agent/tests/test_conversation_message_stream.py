@@ -108,16 +108,18 @@ def test_history_cursor_stops_at_last_read_row_not_later_append(conversation, mo
     store, thread_id = conversation
     first = _append(store, thread_id)
     exact_offset = store.message_byte_offset_after
+    exact_page = store.history_page_report
     late = []
 
     # LLM: 模拟快照读取和取偏移之间到达新消息；只在临时 canonical 文件追加一次。
     # 函数用途: 构造不能使用稍后文件总长度跳过的真实读写竞态。
-    def append_between_read_and_cursor(tid, mid):
+    def append_between_read_and_cursor(tid, **kwargs):
+        page = exact_page(tid, **kwargs)
         if not late:
             late.append(_append(store, thread_id))
-        return exact_offset(tid, mid)
+        return page
 
-    monkeypatch.setattr(store, "message_byte_offset_after", append_between_read_and_cursor)
+    monkeypatch.setattr(store, "history_page_report", append_between_read_and_cursor)
     agent = SimpleNamespace(conversation_store=store)
     if gateway:
         monkeypatch.setattr(client_service, "resolve_gateway_scope_agent", lambda *_args: agent)

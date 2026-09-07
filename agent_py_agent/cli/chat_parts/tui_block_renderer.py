@@ -373,8 +373,8 @@ def tui_render_context_key(
     )
 
 
-# LLM: TuiRenderFrame 分离滚动 transcript、permission、输入状态、Todo、代理面板和 footer，布局层不得从行文案反推区域。
-# 类用途: 返回一次可直接交给 prompt_toolkit controls 的不可变画面。
+# LLM: TuiRenderFrame 分离各显示区，并以 block ID 给出正文行锚点；布局不能从正文猜位置或执行状态。
+# 类用途: 返回不可变画面及分页后保持阅读位置所需的块起始行。
 @dataclass(frozen=True)
 class TuiRenderFrame:
     transcript_lines: tuple[FormattedLine, ...]
@@ -383,6 +383,7 @@ class TuiRenderFrame:
     todo_lines: tuple[FormattedLine, ...]
     agent_lines: tuple[FormattedLine, ...]
     footer: FormattedLine
+    block_line_offsets: tuple[tuple[str, int], ...] = ()
 
 
 # LLM: TuiRenderCacheStats 是只读诊断，不参与渲染决策或业务状态。
@@ -455,7 +456,7 @@ class TuiBlockRenderCache:
 
 # LLM: render_tui_snapshot 只组合 snapshot 中 typed block/order；active/stable 通过 created_seq 合流但不改写 reducer。
 # 终端交互's SpinnerWithVerb 位于消息区末尾，因此 main 活动从 background block 单独放到 transcript 末尾。
-# 函数用途: 渲染完整对话画面、主代理实时工作行、权限覆盖层和状态提示。
+# 函数用途: 渲染完整画面并输出正文块的起始行，供翻页保持阅读锚点；不读取历史或执行任务。
 def render_tui_snapshot(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -463,6 +464,7 @@ def render_tui_snapshot(
     cache: TuiBlockRenderCache | None = None,
 ) -> TuiRenderFrame:
     lines: list[FormattedLine] = []
+    offsets: list[tuple[str, int]] = []
     active_thinking = tuple(
         block
         for block in snapshot.active_blocks
@@ -505,6 +507,8 @@ def render_tui_snapshot(
     for block in blocks:
         rendered = cache.render(block, context) if cache is not None else _render_block(block, context)
         _append_block(lines, rendered)
+        if rendered:
+            offsets.append((block.block_id, len(lines) - len(rendered)))
     for block in visible_activity:
         rendered = cache.render(block, context) if cache is not None else _render_block(block, context)
         _append_block(lines, rendered)
@@ -533,6 +537,7 @@ def render_tui_snapshot(
             _render_fixed_todo(snapshot, context),
             _render_fixed_agent_panel(snapshot, context),
             _render_footer(snapshot, context),
+            block_line_offsets=tuple(offsets),
         )
     )
 
@@ -552,6 +557,7 @@ def sanitize_tui_render_frame(frame: TuiRenderFrame) -> TuiRenderFrame:
         todo_lines=tuple(_sanitize_formatted_line(line) for line in frame.todo_lines),
         agent_lines=tuple(_sanitize_formatted_line(line) for line in frame.agent_lines),
         footer=_sanitize_formatted_line(frame.footer),
+        block_line_offsets=frame.block_line_offsets,
     )
 
 

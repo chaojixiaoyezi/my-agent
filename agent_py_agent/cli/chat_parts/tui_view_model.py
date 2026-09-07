@@ -318,9 +318,10 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "turn_interrupted": self._handle_turn_status,
             "status_updated": self._handle_status_updated,
             "history_blocks_reordered": self._handle_history_blocks_reordered,
+            "history_page_prepended": self._handle_history_page_prepended,
         }
 
-    # LLM: 只按 canonical 快照给出的稳定块 ID 重排显示槽位，不修改内容、活动、权限或其他工作片的相对位置。
+    # LLM: 按 canonical 块 ID 重排并沿用原 created_seq 显示槽位，防止 renderer 抵消顺序；不改 journal、内容或活动。
     # 函数用途: 实时客户端漏收较早过程后，补全快照时将同一工作片重新放回原顺序，而不是追加在 final 后。
     def _handle_history_blocks_reordered(self, event: TuiEvent) -> None:
         ids = event.payload.get("block_ids")
@@ -339,7 +340,27 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             return
         ordered = iter(selected[key] for key in ids)
         self.stable_blocks = [
-            next(ordered) if block.block_id in selected else block for block in self.stable_blocks
+            replace(next(ordered), created_seq=block.created_seq) if block.block_id in selected else block
+            for block in self.stable_blocks
+        ]
+
+    # LLM: created_seq 在显示层充当排序槽位；仅更早页取得前置槽位，原事件 journal/运行时间/活动块不改。
+    # 函数用途: 把后读到的历史放回正文前部，保留欢迎卡在顶部，不让 renderer 又按到达时间排回底部。
+    def _handle_history_page_prepended(self, event: TuiEvent) -> None:
+        ids = event.payload.get("block_ids")
+        if not isinstance(ids, list) or not ids or not all(
+            isinstance(key, str) and key.startswith(("history:", "bg-main:")) for key in ids
+        ):
+            return
+        selected = {block.block_id: block for block in self.stable_blocks if block.block_id in ids}
+        if len(selected) != len(ids):
+            return
+        remaining = [block for block in self.stable_blocks if block.block_id not in selected]
+        start = min((block.created_seq for block in remaining), default=0) - len(ids) - 1
+        prefix = [replace(selected[key], created_seq=start + index) for index, key in enumerate(ids)]
+        self.stable_blocks = [
+            replace(block, created_seq=start - 1) if block.kind == "session_started" else block
+            for block in [*prefix, *remaining]
         ]
 
     # LLM: apply 只接受 journal 已裁决事件；异常 handler 转为诊断并保留上一合法快照。

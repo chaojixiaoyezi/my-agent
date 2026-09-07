@@ -1,5 +1,13 @@
 # Gateway Progress
 
+## R199 历史更早页（本地实现，真实复验待做）
+
+`/client/history` 增加独立向前字节游标，同 authenticated owner/thread 倒读完整工作片页。
+保留实时读游标和模型上下文；损坏/非法游标显式失败，不回落最新窗口。原 TUI 首轮历史恢复待验。
+
+R198 已部署：L 后续排查原请求真实重启后同 run/agent 继续并 done；3199680 是唯一 Gateway。
+完整去重/父子孙恢复矩阵仍待验证，F 的协调员等待异常单独定位。
+
 ## R198 请求恢复专属执行权（本地通过，待真 TUI）
 
 真 G 的后台完成唤醒与原请求恢复顺序竞争，导致 canonical final 后又报 execution_binding_changed。

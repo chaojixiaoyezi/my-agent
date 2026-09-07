@@ -1479,8 +1479,8 @@ def handle_client_memory(handler, server) -> None:
     handler._send_json(200, result.to_dict())
 
 
-# LLM: 历史 API 只读取 authenticated owner/thread 的完整问答投影；resume 不得迫使客户端构造本地 SimpleAgent。
-# 函数用途: 返回指定聊天会话最近若干个可恢复回合。
+# LLM: 历史 API 只读取 authenticated owner/thread；可选字节游标不能变成路径、身份或无界查询。
+# 函数用途: 返回最近或更早的一页聊天历史，非法游标显式拒绝而不是回到最新页。
 def handle_client_history(handler, server) -> None:
     if require_trusted_source(handler):
         return
@@ -1496,6 +1496,10 @@ def handle_client_history(handler, server) -> None:
     if not _http_conversation_id(body):
         handler._send_json(400, {"error": "conversation_id is required"})
         return
+    before = body.get("before_message_cursor")
+    if before is not None and (isinstance(before, bool) or not isinstance(before, int) or before < 0):
+        handler._send_json(400, {"error": "invalid history cursor"})
+        return
     result = read_gateway_client_history(
         server.agent,
         scope=_gateway_control_scope(
@@ -1505,6 +1509,7 @@ def handle_client_history(handler, server) -> None:
             channel=channel,
         ),
         max_turns=_request_limit(body, default=20),
+        before_message_cursor=before,
     )
     handler._send_json(200, result.to_dict())
 

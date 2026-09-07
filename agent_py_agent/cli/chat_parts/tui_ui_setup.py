@@ -751,6 +751,9 @@ def _assemble_tui_application(
         app.invalidate()
 
     parts.transcript_view.set_copy_on_select(copy_settled_selection)
+    from .tui_history import wire_tui_history_pager
+
+    wire_tui_history_pager(app, params, parts.transcript_view)
     _install_input_copy_on_select(parts.input_area, copy_settled_selection)
     if not parts.interaction.snapshot().mouse_capture_enabled:
         parts.runtime.set_notice(

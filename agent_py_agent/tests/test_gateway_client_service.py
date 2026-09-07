@@ -129,18 +129,15 @@ def test_gateway_client_history_returns_only_complete_foreground_turns(monkeypat
         row.thread_id = "thread-1"
 
     class Store:
-        def message_byte_offset_after(self, thread_id, message_id):
-            assert (thread_id, message_id) == ("thread-1", "msg-3")
-            return 4096
-
         def resolve_thread_report(self, **kwargs):
             assert kwargs["channel_conversation_id"] == "sess-test"
             return SimpleNamespace(thread_id="thread-1"), None
 
-        def recent_messages_report(self, thread_id, *, limit):
+        def history_page_report(self, thread_id, *, before, limit):
             assert thread_id == "thread-1"
             assert limit == 16
-            return rows, []
+            assert before is None
+            return SimpleNamespace(rows=tuple(rows), before=0, after=4096, errors=())
 
     owner_agent = SimpleNamespace(conversation_store=Store())
     monkeypatch.setattr(

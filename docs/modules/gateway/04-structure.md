@@ -1,5 +1,13 @@
 # Gateway Structure
 
+## R199 显示历史双向游标
+
+- `ConversationMessageStore.history_page_report` 使用 `history_page.py` 在 canonical JSONL 中向前读取，
+  与 display 投影共用结构化工作片身份；目标行数边界不拆最早连续工作片。
+- `GatewayClientHistoryResult` 的 `before_message_cursor/has_older` 只供更早显示页，`message_cursor`
+  仍是实际已读末行的实时位置。`handle_client_history` 拒绝非法游标；路径和 owner 不由游标决定。
+- 薄客户端和本地显示恢复共用分页合同；TUI 旧页不写入 conversation_history、任务队列或模型请求。
+
 ## R198 恢复执行归属
 
 - `_GatewayTaskBindingWriter.bind_conversation_claim` 在请求原子锁内保存 request/thread/claim-task，

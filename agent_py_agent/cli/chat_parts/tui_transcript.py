@@ -120,6 +120,23 @@ class TuiTranscriptModeState:
                 raise RuntimeError("active TUI transcript is missing frozen snapshot")
             return self._frozen_snapshot
 
+    # LLM: 冻结阅读可追加更早的静态块，但不能夹入查看期间的新回复或改变原活动/审批快照。
+    # 函数用途: Ctrl+O 模式翻旧页时保留当前阅读现场，同时补齐新读到的历史前缀。
+    def prepend_history(self, live_snapshot: TuiViewSnapshot, block_ids: tuple[str, ...]) -> None:
+        with self._lock:
+            frozen = self._frozen_snapshot
+            if not self._active or frozen is None:
+                return
+            ids = set(block_ids)
+            old_ids = {block.block_id for block in frozen.stable_blocks}
+            prefix = [block for block in live_snapshot.stable_blocks if block.block_id in ids - old_ids]
+            welcome = {block.block_id: block for block in live_snapshot.stable_blocks if block.kind == "session_started"}
+            self._frozen_snapshot = replace(frozen, stable_blocks=(
+                *prefix, *(welcome.get(block.block_id, block) for block in frozen.stable_blocks),
+            ))
+            self._matches, self._matches_query = (), ""
+        self._notify()
+
     # LLM: show-all 仅在 transcript 模式可切换；普通聊天视图没有隐藏的第二份开关状态。
     # 函数用途: 切换详细 transcript 的完整展示档位。
     def toggle_show_all(self) -> bool:

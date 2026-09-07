@@ -1,5 +1,14 @@
 # TESTS
 
+## R199 按需历史分页与显示排序
+
+定向文件为 `test_conversation_history_paging.py`、`test_tui_history_paging.py`，并回归
+`test_conversation_message_stream.py`、`test_gateway_client_service.py`、`test_conversation_history_display.py`、
+`test_tui_view.py`、`test_tui_view_model.py`、`test_background_notice_display.py`、子页导航和 transcript。
+以真实临时 JSONL 验证 UTF-8 字节边界/追加竞态，以真实 renderer 验证顺序，不只断言 reducer 列表顺序。
+上述 12 个 focused 文件共 186 passed；没有运行全仓 pytest。
+最终必须在原 D TUI 精确恢复并向前读到首条消息；对比 canonical 消息、模型用量和 Compact，证明只是展示读取。
+
 ## R198 同一请求的恢复归属
 
 真实 G 暴露后台 child wake 先执行原 root、旧前台随后恢复失败。定向用例先复现死进程/TTL 到期的错误

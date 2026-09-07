@@ -264,6 +264,7 @@ def _prepare_gateway_session(params: TuiRunParams, runtime, stop_event: threadin
         params.conversation_history[:] = restored.turns
     runtime.publish_recovered_history(
         restored.turns, display_events=restored.display_events, message_cursor=restored.message_cursor,
+        before_message_cursor=restored.before_message_cursor,
     )
     return ""
 
@@ -290,6 +291,7 @@ def run_tui(*, params: TuiRunParams) -> int:
     tui_runtime.publish_recovered_history(
         params.conversation_history, display_events=params.recovered_display_events,
         message_cursor=params.recovered_message_cursor,
+        before_message_cursor=params.recovered_before_message_cursor,
     )
 
     app = _make_tui_app(

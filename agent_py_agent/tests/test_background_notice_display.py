@@ -1542,7 +1542,8 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     assert "Working · main · 等待 1 个子代理 · 0:00" in transcript
     assert "main" not in rendered
     assert "game-engine · 运行中 · 实现超级玛丽核心玩法 · 0:50" in rendered
-    assert "ctx 12.3k · compact 1 · 重试 1 次" in rendered
+    assert "ctx 12.3k · compact 1" in rendered
+    assert "重试" not in rendered  # 正常工作片计数不能被展示成失败重试次数。
     assert "level-design · 已完成 · 设计前三个关卡 · 0:45 · ctx 6.8k · compact 0" in rendered
     assert "模型已生成回复" not in rendered
     assert "尝试 1" not in rendered
