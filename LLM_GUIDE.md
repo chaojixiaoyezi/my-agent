@@ -207,6 +207,10 @@
 - 普通 shell 不允许绕过直属生命周期事件去读 `work/agents/*` 内部状态文件；该门发生在进程启动前，
   必须返回 `WRONG_STATUS_SURFACE + effect_outcome=not_started` 给模型改用正式结果引用，不能误判成
   `TOOL_OPERATION_OUTCOME_UNKNOWN` 后中断整轮。真正已经启动且副作用终态未知的命令仍保持 fail-closed。
+- shell 超时不按错误码豁免 UNKNOWN，也不按调用次数解除保护。唯一进程终止入口的可信回执证明观察到的
+  进程树已终止、直接进程有退出码且管道排空后，才把此次超时记为确定失败并保留部分输出供模型排查。
+  确定失败可能留下部分文件，不等于事务回滚，不自动重放同一个 operation；旧 UNKNOWN 记录不自动洗白。
+  Gateway 恢复遇到 `operation_outcome_uncertain` 对外返回专用说明，其他持久化失败仍保持各自原因。
 - Compact 的当前语义是每个 main/child/grandchild 各有独立 ConversationThread，并只认同一 owner/thread
   checkpoint + generation CAS。transcript 旧段由 `conversation/compact.py` 提交；运行中 native IR 由
   `conversation/live_tool_compact.py` 适配到同一账本，provider overflow 也不得账外删工具对。TUI/Web/SQLite

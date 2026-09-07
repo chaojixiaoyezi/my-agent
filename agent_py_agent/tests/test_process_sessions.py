@@ -258,6 +258,19 @@ def test_process_session_stop_terminates_owned_process_tree(tmp_path: Path) -> N
     assert process_registry.status(started["session_id"])["status"] == "killed"
 
 
+def test_process_session_unconfirmed_stop_is_not_success(monkeypatch):
+    monkeypatch.setattr(process_registry, "kill", lambda *args: {
+        "session_id": "bg-test", "status": "running", "termination": {"confirmed": False}
+    })
+    result = ProcessSessionTool().execute({
+        "action": "stop", "session_id": "bg-test",
+        "__run_scope": {"owner_id": "owner-a", "session_id": "thread-a", "run_id": "run-a", "root_task_id": "task-a"},
+    })
+    assert result.ok is False
+    assert result.effect_outcome == "unknown"
+    assert result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+
+
 def test_process_session_requires_host_bound_scope(tmp_path: Path) -> None:
     result = ProcessSessionTool(str(tmp_path)).execute({"action": "list"})
 

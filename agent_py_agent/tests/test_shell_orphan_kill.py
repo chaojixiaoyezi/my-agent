@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -90,3 +91,78 @@ def test_nonzero_exit_preserved(tmp_path) -> None:
     tool = ShellTool(tmp_path, options=ShellToolOptions(default_timeout=30))
     result = tool._run_command("exit 7", tmp_path, timeout=10)
     assert result.returncode == 7  # 退出码原样透传
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell quoting")
+def test_timeout_keeps_partial_output_and_proven_exit(tmp_path):
+    script = "import time,sys; print('中文进度', flush=True); print('stderr-step', file=sys.stderr, flush=True); time.sleep(30)"
+    tool = ShellTool(tmp_path, options=ShellToolOptions(default_timeout=30))
+    result = tool.execute({"command": f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}", "timeout": 1})
+    assert result.ok is False
+    assert result.error_code == "TOOL_TIMEOUT"
+    assert result.effect_outcome == "failed"
+    assert "中文进度" in result.output and "stderr-step" in result.output
+    facts = result.result_envelope["process"]
+    assert facts["termination"]["confirmed"] is True
+    assert facts["termination"]["return_code"] is not None
+    assert facts["pipes_drained"] is True
+
+
+def test_generic_timeout_does_not_claim_termination(tmp_path, monkeypatch):
+    tool = ShellTool(tmp_path, options=ShellToolOptions(default_timeout=30))
+
+    def unknown_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired("command", 1, output=b"partial-progress")
+
+    monkeypatch.setattr(tool, "_run_command", unknown_timeout)
+    result = tool.execute({"command": "echo progress", "timeout": 1})
+    assert result.effect_outcome == "unknown"
+    assert "partial-progress" in result.output
+    assert "termination" not in result.result_envelope["process"]
+
+
+@pytest.mark.parametrize("complete,still_alive", [(False, False), (True, True)])
+def test_termination_cannot_be_confirmed_by_signal_only(monkeypatch, complete, still_alive):
+    from unittest.mock import Mock
+
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    monkeypatch.setattr(module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(module, "_process_tree_snapshot", lambda pid: ({pid: "birth"}, complete))
+    monkeypatch.setattr(module, "_signal_process_snapshot", lambda *args: True)
+    monkeypatch.setattr(module, "_wait_process_snapshot_gone", lambda *args: not still_alive)
+    monkeypatch.setattr(module, "_process_instance_terminated", lambda *args: not still_alive)
+    proc = Mock(pid=12345)
+    proc.poll.return_value = None if still_alive else -15
+    receipt = module.terminate_process_tree(proc.pid, proc, grace_seconds=0)
+    assert receipt.confirmed is False
+
+
+def test_missing_process_identity_does_not_prove_exit(monkeypatch):
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    monkeypatch.setattr(module.os, "kill", lambda *args: None)
+    monkeypatch.setattr(module, "capture_process_birth_token", lambda pid: "")
+    assert module._process_instance_terminated(99999999, "original-birth") is False
+
+
+def test_termination_does_not_resnapshot_reused_root_pid(monkeypatch):
+    from unittest.mock import Mock
+
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    snapshot = Mock(return_value=({12345: "old-root", 12346: "original-child"}, True))
+    signal_tree = Mock(return_value=True)
+    monkeypatch.setattr(module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(module, "_process_tree_snapshot", snapshot)
+    monkeypatch.setattr(module, "_signal_process_snapshot", signal_tree)
+    monkeypatch.setattr(module, "_wait_process_snapshot_gone", lambda *args: False)
+    monkeypatch.setattr(module, "_same_process", lambda *args: False)
+    monkeypatch.setattr(module, "_process_instance_terminated", lambda *args: True)
+    proc = Mock(pid=12345)
+    proc.poll.return_value = -15
+    receipt = module.terminate_process_tree(proc.pid, proc, grace_seconds=0)
+    snapshot.assert_called_once_with(12345)
+    assert receipt.confirmed is True
+    assert len(signal_tree.call_args_list) == 2
+    assert signal_tree.call_args_list[-1].args[0] == {12345: "old-root", 12346: "original-child"}

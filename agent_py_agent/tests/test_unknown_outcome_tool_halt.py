@@ -115,7 +115,7 @@ class TestMarkUnknownOutcomeHalt:
         assert params.tool_context == [], "已有失败收口时 unknown 不参与"
 
     def test_non_unknown_effect_never_halt(self):
-        for effect in ("confirmed", "none", "", None, "rejected"):
+        for effect in ("confirmed", "none", "", None, "rejected", "failed", "not_started"):
             params = _params()
             _mark_unknown_outcome_halt(
                 None,
@@ -123,6 +123,31 @@ class TestMarkUnknownOutcomeHalt:
             )
             assert params.unknown_outcome_halt is None
             assert params.tool_context == []
+
+    def test_successes_do_not_disable_later_unknown_protection(self):
+        params = _params()
+        for _ in range(8):
+            _mark_unknown_outcome_halt(None, _record("run_command", _result("confirmed"), params))
+        assert params.tool_context == []
+        _mark_unknown_outcome_halt(
+            None, _record("run_command", _result("unknown", "TOOL_TIMEOUT", True), params)
+        )
+        assert params.unknown_outcome_halt == ("run_command", "TOOL_TIMEOUT", "unknown", True)
+
+    def test_timeout_requires_known_effect_not_error_code_bypass(self):
+        for tool_name in ("run_command", "write_file", "network_request"):
+            params = _params()
+            _mark_unknown_outcome_halt(
+                None, _record(tool_name, _result("unknown", "TOOL_TIMEOUT", True), params)
+            )
+            assert params.unknown_outcome_halt == (tool_name, "TOOL_TIMEOUT", "unknown", True)
+            assert not any("进程组已清理" in line for line in params.tool_context)
+        confirmed = _params()
+        _mark_unknown_outcome_halt(
+            None, _record("run_command", _result("failed", "TOOL_TIMEOUT", True), confirmed)
+        )
+        assert confirmed.unknown_outcome_halt is None
+        assert confirmed.tool_context == []
 
 
 def _informational_snapshot(**overrides):

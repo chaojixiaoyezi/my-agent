@@ -24,8 +24,9 @@ SIGTERM 宽限后再 SIGKILL;Windows 用 taskkill /T /F 杀进程树。
 """
 
 # LLM: 本模块是后台 shell 的唯一进程事实源；任何模型可见的查询或停止入口都必须
-# 携带 host 注入的 ProcessAccessScope，不能仅凭可猜的 session_id 访问全局记录。
-# 模块用途: 登记后台命令、按用户会话隔离查询，并可靠终止整棵进程树。
+# 携带 host 注入的 ProcessAccessScope，不能仅凭可猜的 session_id 访问全局记录；
+# 终止回执必须区分已发信号与已确认退出，供前台超时和后台停止共用。
+# 模块用途: 登记后台命令、隔离查询并终止进程树，保留实际退出核对结果而不凭信号宣称成功。
 
 import json
 import os
@@ -34,7 +35,7 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,17 @@ _IS_WINDOWS = os.name == "nt"
 # 杀进程时 SIGTERM 到 SIGKILL 的宽限秒数。先礼(SIGTERM 让进程自己清理)后兵
 # (还活着就 SIGKILL 硬杀整组),避免留下孤儿子进程。
 _KILL_GRACE_SECONDS = 3.0
+
+
+# LLM: 该回执只证明本次观察到的进程树是否已终止，不证明命令成功或外部系统已回滚。
+# 类用途: 把终止方式、退出码和无法确认的进程带回 shell 与后台进程控制调用方。
+@dataclass(frozen=True)
+class ProcessTerminationReceipt:
+    method: str
+    confirmed: bool
+    return_code: int | None
+    observed_processes: int
+    unresolved_pids: tuple[int, ...] = ()
 # 滚动输出缓冲:查询时从日志文件尾部最多读这么多字符,够看进度/结论又不撑爆 prompt。
 _OUTPUT_TAIL_CHARS = 4000
 # 最多保留多少条已结束的进程记录,超了按启动时间淘汰最老的(防内存无界增长)。
@@ -396,8 +408,8 @@ class ProcessRegistry:
             return [record.to_summary(include_output=False) for record in records], load_errors
 
     # LLM: kill 在拿到 PID 前先做 scope 精确匹配，实际发信号放在锁外；二次回锁时
-    # 仍核对同一记录，避免并发清理或 session 复用导致误杀/误报。
-    # 函数用途: 停止当前用户会话所属的后台进程及其全部后代。
+    # 仍核对同一记录，只有终止回执确认后才登记 killed，不能把已发信号写成退出事实。
+    # 函数用途: 停止当前用户会话所属的后台进程及后代，持久化已确认的终态并返回核对信息。
     def kill(
         self,
         session_id: str,
@@ -422,22 +434,23 @@ class ProcessRegistry:
             proc = record.process
 
         # 真正杀进程在锁外做(killpg + 宽限 + wait 可能耗时,不长占锁阻塞 list/status)。
-        killed_signal = terminate_process_tree(pid, proc)
+        termination = terminate_process_tree(pid, proc)
 
         with self._lock:
             record = self._visible_record_locked(session_id, access_scope, store_root)
             if record is not None:
-                record.status = "killed"
-                record.finished_at = time.time()
-                if record.process is not None:
-                    code = record.process.poll()
-                    record.exit_code = code if code is not None else -signal.SIGTERM
-                else:
-                    record.exit_code = -signal.SIGTERM
+                if termination.confirmed:
+                    record.status = "killed"
+                    record.finished_at = time.time()
+                    record.exit_code = termination.return_code
                 self._persist_locked(record)
                 summary = record.to_summary(include_output=False)
-                summary["signal"] = killed_signal
-                summary["message"] = "已向进程组发送终止信号。"
+                summary["signal"] = termination.method
+                summary["termination"] = asdict(termination)
+                summary["message"] = (
+                    "已确认观察到的进程树终止。" if termination.confirmed
+                    else "已尝试终止，但仍无法确认所有进程退出；未登记已停止。"
+                )
                 return summary
         return None
 
@@ -609,13 +622,15 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+# LLM: 前台超时、后台停止和 runner 清理共用唯一终止入口；PID 出生标识避免复用误杀。
+# 函数用途: 有界发送 TERM/KILL 并回收直接子进程，返回核对回执；无法读取进程信息时不冒充确认。
 def terminate_process_tree(
     pid: int,
     proc: subprocess.Popen | None,
     *,
     grace_seconds: float | None = None,
-) -> str:
-    """终止完整后代进程树。返回最终用到的终止方式描述。
+) -> ProcessTerminationReceipt:
+    """终止观察到的后代进程树，并返回退出核对结果。
 
     POSIX:先快照 root 的全部后代,对每个进程组和 pid 发 SIGTERM,宽限后再对
       仍为同一进程实例的存活者发 SIGKILL。不能只 killpg(root):bwrap
@@ -624,43 +639,53 @@ def terminate_process_tree(
     Windows:taskkill /T /F 杀整棵进程树(/T 含子进程,/F 强制)。
     """
     if pid <= 0:
-        return "noop"
+        return ProcessTerminationReceipt("noop", False, None, 0)
     if _IS_WINDOWS:
         return _terminate_windows_tree(pid, proc)
-    snapshot = _process_tree_snapshot(pid)
-    if not _signal_process_snapshot(snapshot, signal.SIGTERM):
-        return "already_gone"
+    snapshot, complete = _process_tree_snapshot(pid)
+    method = "already_gone"
+    signalled = _signal_process_snapshot(snapshot, signal.SIGTERM)
     grace = _KILL_GRACE_SECONDS if grace_seconds is None else max(0.0, grace_seconds)
-    if _wait_process_snapshot_gone(snapshot, proc, grace):
-        return "SIGTERM"
-    current = _process_tree_snapshot(pid)
-    _signal_process_snapshot({**snapshot, **current}, getattr(signal, "SIGKILL", signal.SIGTERM))
+    if signalled:
+        method = "SIGTERM"
+        if not _wait_process_snapshot_gone(snapshot, proc, grace):
+            # 根进程已回收时 PID 可能复用；只能对仍是原实例的根补充后代，不能杀到另一棵新树。
+            if snapshot.get(pid) and _same_process(pid, snapshot[pid]):
+                current, current_complete = _process_tree_snapshot(pid)
+                snapshot.update(current)
+                complete = complete and current_complete
+            _signal_process_snapshot(snapshot, getattr(signal, "SIGKILL", signal.SIGTERM))
+            method = "SIGTERM->SIGKILL"
     if proc is not None:
         try:
             proc.wait(timeout=2)
         except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
-    return "SIGTERM->SIGKILL"
+    _wait_process_snapshot_gone(snapshot, proc, 0.5)
+    unresolved = tuple(pid for pid, token in snapshot.items() if not _process_instance_terminated(pid, token))
+    return_code = proc.poll() if proc is not None else None
+    confirmed = complete and not unresolved and (proc is None or return_code is not None)
+    return ProcessTerminationReceipt(method, confirmed, return_code, len(snapshot), unresolved)
 
 
-# 兼容既有内部测试/调用；新的生产调用统一使用上面的公开入口。
-def _terminate_process_tree(pid: int, proc: subprocess.Popen | None) -> str:
-    return terminate_process_tree(pid, proc)
-
-
-def _terminate_windows_tree(pid: int, proc: subprocess.Popen | None) -> str:
-    """Windows:taskkill /T /F 杀整棵进程树(/T 含子进程,/F 强制);失败退到 Popen.kill。"""
+# LLM: Windows 仅在 taskkill /T /F 成功且直接子进程已回收时确认；单独 Popen.kill 不能证明后代退出。
+# 函数用途: 调用系统进程树终止工具并核对返回码，失败时尽力终止直接子进程但保留未确认结果。
+def _terminate_windows_tree(pid: int, proc: subprocess.Popen | None) -> ProcessTerminationReceipt:
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["taskkill", "/PID", str(pid), "/T", "/F"],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        return "taskkill/T/F"
+        if proc is not None:
+            proc.wait(timeout=2)
+        code = proc.poll() if proc is not None else None
+        confirmed = result.returncode == 0 and proc is not None and code is not None
+        return ProcessTerminationReceipt("taskkill/T/F", confirmed, code, 1, () if confirmed else (pid,))
     except (OSError, subprocess.SubprocessError):
         _safe_popen_kill(proc)
-        return "popen.kill"
+        return ProcessTerminationReceipt("popen.kill", False, None, 1, (pid,))
 
 
 def _safe_popen_kill(proc: subprocess.Popen | None) -> None:
@@ -672,12 +697,14 @@ def _safe_popen_kill(proc: subprocess.Popen | None) -> None:
         pass
 
 
-def _process_tree_snapshot(root_pid: int) -> dict[int, str]:
-    """快照 root 及全部后代，并带进程出生标识避免 PID 复用误杀。"""
+# LLM: 快照同时返回完整性；枚举失败不能等同于没有后代，也不能用于确认终止。
+# 函数用途: 只读采集 root 及可观察后代的出生标识，供同一次终止与退出核对使用。
+def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     if root_pid <= 0:
-        return {}
+        return {}, False
     children: dict[int, list[int]] = {}
-    for child, parent in _process_parent_map().items():
+    parents, complete = _process_parent_map()
+    for child, parent in parents.items():
         children.setdefault(parent, []).append(child)
     ordered: list[int] = []
     pending = [root_pid]
@@ -689,17 +716,22 @@ def _process_tree_snapshot(root_pid: int) -> dict[int, str]:
         seen.add(current)
         ordered.append(current)
         pending.extend(children.get(current, ()))
-    return {current: capture_process_birth_token(current) for current in ordered}
+    snapshot = {current: capture_process_birth_token(current) for current in ordered}
+    complete = complete and all(token or _process_instance_terminated(pid, "") for pid, token in snapshot.items())
+    return snapshot, complete
 
 
-def _process_parent_map() -> dict[int, int]:
+# LLM: 进程枚举只使用系统结构化字段；无法访问或解析时返回不完整，禁止用空表证明退出。
+# 函数用途: 读取宿主机父子进程关系；进程恰好消失不算错误，其余读取失败保留核对缺口。
+def _process_parent_map() -> tuple[dict[int, int], bool]:
     proc_root = Path("/proc")
     if proc_root.is_dir():
         result: dict[int, int] = {}
         try:
             entries = tuple(proc_root.iterdir())
         except OSError:
-            entries = ()
+            return {}, False
+        complete = True
         for entry in entries:
             if not entry.name.isdigit():
                 continue
@@ -707,9 +739,11 @@ def _process_parent_map() -> dict[int, int]:
                 status = (entry / "status").read_text(encoding="utf-8", errors="replace")
                 parent_line = next(line for line in status.splitlines() if line.startswith("PPid:"))
                 result[int(entry.name)] = int(parent_line.split(":", 1)[1].strip())
-            except (OSError, StopIteration, TypeError, ValueError):
+            except (FileNotFoundError, ProcessLookupError):
                 continue
-        return result
+            except (OSError, StopIteration, TypeError, ValueError):
+                complete = False
+        return result, complete and bool(result)
     try:
         completed = subprocess.run(
             ["ps", "-axo", "pid=,ppid="],
@@ -719,15 +753,35 @@ def _process_parent_map() -> dict[int, int]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return {}
+        return {}, False
     result = {}
+    complete = completed.returncode == 0
     for line in completed.stdout.splitlines():
         try:
             child_text, parent_text = line.split()
             result[int(child_text)] = int(parent_text)
         except (TypeError, ValueError):
-            continue
-    return result
+            complete = False
+    return result, complete and bool(result)
+
+
+# LLM: 信号发送失败、出生标识读取失败或权限不足都不能证明死亡；僵尸已不能再执行但可能尚未被父进程收割。
+# 函数用途: 只读核对原进程实例已消失、已变成僵尸或 PID 已被明确复用，用于终止回执而非任务验收。
+def _process_instance_terminated(pid: int, birth_token: str) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        if stat.rsplit(")", 1)[1].split()[0] == "Z":
+            return True
+    except (OSError, IndexError):
+        pass
+    current = capture_process_birth_token(pid) if birth_token else ""
+    return bool(birth_token and current and current != birth_token)
 
 
 # LLM: Persisted process control must pair a PID with a stable birth identity.
@@ -819,6 +873,8 @@ def _signal_process_snapshot(snapshot: dict[int, str], signum: int) -> bool:
     return sent
 
 
+# LLM: 此等待仅核对已观察进程，权限或身份读取失败须视为未确认；调用方仍要检查快照完整性。
+# 函数用途: 在有界时间内收割直接子进程并等待观察到的后代退出，不把信号已发送当成终止。
 def _wait_process_snapshot_gone(
     snapshot: dict[int, str],
     proc: subprocess.Popen | None,
@@ -828,10 +884,10 @@ def _wait_process_snapshot_gone(
     while time.monotonic() < deadline:
         if proc is not None:
             proc.poll()
-        if not any(_same_process(pid, token) for pid, token in snapshot.items()):
+        if all(_process_instance_terminated(pid, token) for pid, token in snapshot.items()):
             return True
         time.sleep(0.05)
-    return not any(_same_process(pid, token) for pid, token in snapshot.items())
+    return all(_process_instance_terminated(pid, token) for pid, token in snapshot.items())
 
 
 # 当前进程的共享缓存；跨主/子代理的权威事实由 ProcessSessionStore 提供。
@@ -843,6 +899,7 @@ __all__ = [
     "ProcessAccessScope",
     "ProcessRegistration",
     "ProcessRegistry",
+    "ProcessTerminationReceipt",
     "capture_process_birth_token",
     "process_access_scope",
     "process_registry",

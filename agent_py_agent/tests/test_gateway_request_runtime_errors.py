@@ -42,6 +42,40 @@ def _make_agent(tmp_path: Path) -> tuple[SimpleAgent, object]:
     return agent, paths
 
 
+@pytest.mark.parametrize("reason", ["operation_outcome_uncertain", "identity_mismatch"])
+def test_recovery_uncertainty_has_structured_safe_client_error(monkeypatch, reason):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts.request_errors import (
+        ConversationPersistenceError,
+        gateway_client_error_message,
+    )
+
+    repo = SimpleNamespace(recover_recorded_active_turn_attempt=lambda **kwargs: {
+        "status": "rejected", "reason": reason, "operation_id": "private-operation-id"
+    })
+    context = SimpleNamespace(
+        request={}, request_id="request",
+        agent=SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)),
+    )
+    monkeypatch.setattr(request_execution, "_gateway_request_is_active_turn_recovery", lambda *args: True)
+    monkeypatch.setattr(request_execution, "_gateway_runtime_authority", lambda *args: {
+        "task_id": "task", "run_id": "request"
+    })
+    with pytest.raises(ConversationPersistenceError) as caught:
+        request_execution._recover_gateway_active_turn_authority(context, [])
+    code = caught.value.error_code
+    message = gateway_client_error_message(code)
+    assert "private-operation-id" not in message
+    assert "任务处理失败" not in message
+    if reason == "operation_outcome_uncertain":
+        assert code == "ACTIVE_TURN_OUTCOME_UNCERTAIN"
+        assert "不要直接重做" in message
+    else:
+        assert code == "CONVERSATION_PERSISTENCE_UNAVAILABLE"
+        assert "会话记录" in message
+
+
 def test_terminal_and_provider_admission_share_exact_turn_winner(tmp_path: Path) -> None:
     agent, paths = _make_agent(tmp_path)
     request_id = "gw-terminal-wins-admission"

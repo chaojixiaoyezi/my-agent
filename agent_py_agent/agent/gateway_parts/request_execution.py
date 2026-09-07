@@ -1,6 +1,7 @@
 # LLM: Gateway holds transport and conversation projections; actual execution identity is
 # published by RuntimeDB binding before model entry. Never infer it from a reused display task.
-# 模块用途: 执行已领取的网关请求，持久传递真实运行身份，并恢复同一回合的消息、工具与压缩状态。
+# Unknown operation recovery has a typed public error; exception prose never decides retry or bypass.
+# 模块用途: 执行网关请求，传递真实运行身份并恢复原回合；恢复受阻时区分执行结果未确认与会话读写失败。
 from __future__ import annotations
 
 """execution helpers keep one claimed gateway request inside focused contexts.
@@ -121,6 +122,7 @@ from .permission_bridge import (
 )
 from .recovery import _ACTIVE_TURN_RECOVERY_SCHEMA, _gateway_request_attempts
 from .request_errors import (
+    ActiveTurnOutcomeUncertainError,
     ConversationPersistenceError,
     SystemCommandRoutingError,
     UserReplyUnavailableError,
@@ -1505,7 +1507,7 @@ def _gateway_recovered_active_turn_tool_calls(
 # this bridge before agent.run so generic authority binding remains fail-closed for every other case.
 #   New requests carry actual DB identity, distinct from the conversation display binding;
 # RuntimeDB also reconciles a provably dead current runner for this exact owner/run only.
-# 函数用途: 按真实执行绑定核对原回合工具与进程死亡，不用旧展示任务编号查找或放宽 UNKNOWN。
+# 函数用途: 按真实执行绑定核对原回合工具与进程死亡；结果未确认时返回专用错误，不猜身份或放宽 UNKNOWN。
 def _recover_gateway_active_turn_authority(
     context: _GatewayAskRunContext,
     carried_archive_tool_calls: list[dict[str, object]],
@@ -1548,6 +1550,10 @@ def _recover_gateway_active_turn_authority(
         return
     if recovery_status == "absent" and not carried_archive_tool_calls:
         return
+    if result.get("reason") == "operation_outcome_uncertain":
+        raise ActiveTurnOutcomeUncertainError(
+            "上一轮操作结果未确认：" + json.dumps(result, ensure_ascii=False)
+        )
     raise ConversationPersistenceError(
         "当前回合执行恢复未通过核对：" + json.dumps(result, ensure_ascii=False)
     )

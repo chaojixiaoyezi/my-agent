@@ -243,7 +243,6 @@ from types import SimpleNamespace as _NS
 
 def _timeout_record():
     from agent_py_agent.agent.agent_core._tool_loop_service import (
-        ToolCallRecordParams,
         _mark_unknown_outcome_halt,
     )
 
@@ -267,11 +266,11 @@ def _timeout_record():
     return params
 
 
-def test_timeout_does_not_set_unknown_halt():
-    """EXEC-36: 命令超时不再触发 UNKNOWN 人工闸(模型可继续核验)。"""
+def test_timeout_without_termination_evidence_preserves_unknown_halt():
+    """错误码不是进程已退出的证据；真正 UNKNOWN 与重启恢复保持一致。"""
     params = _timeout_record()
-    assert params.unknown_outcome_halt is None
-    assert any("超时" in line for line in params.tool_context)
+    assert params.unknown_outcome_halt == ("run_command", "TOOL_TIMEOUT", "unknown", True)
+    assert not any("进程组已清理" in line for line in params.tool_context)
 
 
 def test_other_unknown_still_sets_halt():
@@ -317,8 +316,8 @@ def test_manual_resume_repairs_channel_binding(tmp_path):
     assert bound["channel_conversation_id"] == "run-abc123"
 
 
-def test_unknown_releases_after_fourth(tmp_path):
-    """EXEC-38: 单轮内第 4 次未知副作用不再 halt(前 3 次保持人工闸)。"""
+def test_repeated_unknown_does_not_release_protection(tmp_path):
+    """重复收到 UNKNOWN 不能解锁；同一轮只追加一次说明，避免污染缓存前缀。"""
     from agent_py_agent.agent.agent_core._tool_loop_service import (
         _mark_unknown_outcome_halt,
     )
@@ -333,9 +332,9 @@ def test_unknown_releases_after_fourth(tmp_path):
             params=params,
         )
         _mark_unknown_outcome_halt(agent, record)
-    # 前 3 次设 halt, 第 4 次放过(仍 halt 但那是第 3 次的值)
-    assert params._unknown_outcome_count == 4
-    assert any("不再拦截" in line for line in params.tool_context)
+    assert params.unknown_outcome_halt == ("run_command", "EXECUTOR_DIED", "unknown", True)
+    assert len(params.tool_context) == 1
+    assert not any("不再拦截" in line for line in params.tool_context)
 
 
 def test_auto_resume_requires_active_goal(tmp_path):

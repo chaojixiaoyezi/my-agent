@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R196 恢复失败的明确原因（本地完成，未部署）
+
+真实 A 的 shell 超时先产生 UNKNOWN，再被重启恢复挡住；并非 R194 身份丢失复发。原工具循环按次数与
+TOOL_TIMEOUT 豁免的旧分支已删除，shell 以退出回执和部分输出表达已知终止失败，真正 UNKNOWN 保持。
+恢复收到结构化 `operation_outcome_uncertain` 时返回专用错误，不再让用户看到笼统失败后直接重做。
+352 个唯一 focused 分组通过，`.10` 仍为原 R194 单 Gateway；真实 TUI 复验及历史 UNKNOWN 核对未完成。
+
 ## R194 冷 owner 和真实执行身份
 
 R193 真重启证明 attempts 与失败预算已分开，但 A/C 的旧展示任务与真实 DB task 不同导致恢复拒绝。

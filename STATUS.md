@@ -1,5 +1,20 @@
 # STATUS
 
+## R196 shell 超时事实与恢复提示（本地修复，未部署）
+
+- A 的 `gwreq-1788765451-12ae7b10990a4529a911544573f3c501` 在重启前已经有一条 240 秒 shell 超时，
+  operation `tool_operation:298687ea176e97dae58c7e37fe8f8854` 留在 UNKNOWN；恢复严格核账后失败。
+  不是模型服务拒绝，也不是质量机器验收。旧工具循环却按工具调用次数、TOOL_TIMEOUT 错误码放行，
+  还在正常调用后反复添加“副作用未知多次”的提示，造成运行中与恢复时不一致。
+- 已删除这两条旁路；前台超时保留标准输出/错误输出及进程终止回执。已确认观察到的进程树退出、
+  直接进程有退出码且管道排空时记 FAILED；否则仍 UNKNOWN。FAILED 不代表文件回滚，不自动重放。
+- 进程停止共用同一个回执，未确认不假写 killed；启动前 deadline 用尽明确 not_started。
+  恢复结果不确定返回 `ACTIVE_TURN_OUTCOME_UNCERTAIN`，客户端说明原因并避免建议重做整个任务。
+- 352 个唯一 focused 用例分组通过，另复验 66 项 R195 TUI 渲染检查；没有跑全仓 pytest。两轮均待新版真实 TUI，
+  `.10` 仍为 R194 单 Gateway；旧 UNKNOWN 账本没有被改为成功。磁盘当前约 1.5 GiB 可用，升级前先核对空间。
+- 图书原三层递归任务已经产生 main final `msg-efc7947e135c4d5b`，Working 收起；完整产物质量不因此自动通过。
+  B 界面另报 child `IncompleteRead(0 bytes read)`，网络错误退避仍需核对，不混入本次 shell 超时修复结论。
+
 ## R195 递归重启组合与执行代次显示（进行中）
 
 - `.10` 同一个 R194 Gateway 上运行九路 TUI、八个 owner，新增图书递归协作、开源研究、局域网台账和

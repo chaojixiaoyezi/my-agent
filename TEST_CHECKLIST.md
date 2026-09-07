@@ -1,5 +1,14 @@
 # TEST CHECKLIST
 
+## R196 超时证据与一致恢复
+
+- [x] 正常成功调用不触发 UNKNOWN 计数或提示；重复 UNKNOWN 不解除保护、不重复灌入上下文。
+- [x] 前台超时保留中文 stdout/stderr 与终止回执；独立 session 后代也回收。
+- [x] 未确认进程/身份/管道或普通 TimeoutExpired 继续 UNKNOWN；已确认失败不自动重放同一 operation。
+- [x] 启动前 deadline 明确未启动，后台停止不凭已发信号登记 killed；精确恢复返回安全明确文案。
+- [ ] 新版真实 TUI 长项目超时、排查、继续与单 Gateway 恢复闭环；当前仍 R194，旧 UNKNOWN 保留。
+- [ ] 独立核对 B 的 IncompleteRead 与 provider 退避，不把本次 shell 修复当成全部网络错误修复。
+
 ## R195 递归重启和真实状态展示
 
 - [x] 真图书任务产生 main→coordinator→grandchild；单 Gateway 重启后原两名孙代理恢复并完成，原父层依次续作。

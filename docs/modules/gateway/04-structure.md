@@ -1,5 +1,13 @@
 # Gateway Structure
 
+## R196 UNKNOWN 恢复的安全公开错误
+
+- `_recover_gateway_active_turn_authority` 仍核对真实 runtime binding 和工具终态，仅按返回的结构化
+  reason 选择 `ActiveTurnOutcomeUncertainError`；不解析异常正文，不更改旧工具账本或释放 UNKNOWN。
+- `request_errors.gateway_client_error_message` 将该错误投影成“结果未确认，停止自动恢复，避免重做”；
+  通用 `ConversationPersistenceError` 说明会话记录读写不可用，provider 错误继续保持各自含义。
+- shell/ToolOperation 的确定失败依赖共享进程终止回执，Gateway 不另行猜测命令内容或补造退出事实。
+
 ## R194 展示与执行双字段、单权威
 
 - `runtime_mixin::_bind_main_agent_authority` 取得 RuntimeDB 真身份，调用现有 binding callback 的

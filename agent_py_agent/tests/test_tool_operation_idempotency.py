@@ -501,6 +501,25 @@ def test_side_effect_timeout_is_persisted_unknown_and_not_retried(tmp_path):
     assert record.unknown_reason == "effect_outcome_unknown:TOOL_TIMEOUT"
 
 
+def test_confirmed_timeout_failure_is_terminal_without_replaying_side_effect(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _CountingTool(result=ToolHandlerOutcome(
+        "counting_write", False, "partial output; process terminated",
+        error_code="TOOL_TIMEOUT", effect_outcome="failed",
+    ))
+    registry = _registry(tmp_path, store, tool)
+    call = _call("run-1", "call-confirmed-timeout", 1)
+    first = _execute(registry, call)
+    replay = _execute(registry, call)
+    assert first.error_code == "TOOL_TIMEOUT"
+    assert first.effect_outcome == "failed"
+    assert tool.calls == 1
+    assert replay.handler_executed is False
+    record = store.get_tool_operation(owner_id="owner-a", run_id="run-1", operation_id=call.operation_id)
+    assert record.status == "failed"
+    assert not record.unknown_reason
+
+
 def test_started_side_effect_cancellation_is_unknown_and_not_retried(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     cancelled = ToolHandlerOutcome(

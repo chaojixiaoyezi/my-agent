@@ -3,8 +3,8 @@ from __future__ import annotations
 """Model-facing control surface for managed background shell sessions."""
 
 # LLM: 本模块只投影 process_registry 中当前可信用户会话可见的记录；session_id
-# 只是定位键，不是授权凭证，授权范围必须由 executor 通过 __run_scope 注入。
-# 模块用途: 让模型不用 shell sleep/ps/kill，也能查询、等待和停止自己启动的后台命令。
+# 只是定位键，不是授权凭证；停止的未确认回执不能投影成成功，权限由 __run_scope 注入。
+# 模块用途: 查询、等待和停止自己的后台命令，向模型明确报告停止已确认还是执行结果未知。
 
 import json
 from typing import Any
@@ -145,8 +145,8 @@ class ProcessSessionTool(BaseTool):
         self.workspace_root = str(workspace_root or ".")
 
     # LLM: action 只分派到 registry 的 scope-aware 方法；未知、越界与不存在记录均
-    # 返回稳定结构化错误，不泄露其他会话是否存在同名 session。
-    # 函数用途: 执行后台进程的列出、查询、等待或停止动作。
+    # 返回稳定错误，不泄露其他会话是否存在；stop 必须沿用 registry 的终止回执，不能假成功。
+    # 函数用途: 执行后台进程控制；未确认的停止结果明确 UNKNOWN，保留结果供核对。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         scope = process_access_scope(params.get("__run_scope"), self.owner_scope_root)
         if not scope.is_bound():
@@ -194,6 +194,13 @@ class ProcessSessionTool(BaseTool):
             return self._error(
                 "PROCESS_NOT_FOUND",
                 f"当前用户会话中不存在后台进程: {session_id}",
+            )
+        termination = result.get("termination")
+        if action == "stop" and isinstance(termination, dict) and termination.get("confirmed") is not True:
+            return ToolHandlerOutcome(
+                self.model_spec.name, False, json.dumps(result, ensure_ascii=False),
+                result_envelope={"process": result},
+                error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown",
             )
         return self._ok(result)
 

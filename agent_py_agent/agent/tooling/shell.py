@@ -1,3 +1,5 @@
+# LLM: shell 的退出、超时和取消共用进程控制事实；超时只有可信终止回执才能归为确定失败。
+# 模块用途: 在用户权限内执行命令并整理输出、进程及产物保护记录，保留超时前输出供模型排查。
 from __future__ import annotations
 
 import hashlib
@@ -10,7 +12,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +68,7 @@ from .process_registry import (
     BackgroundProcess,
     ProcessAccessScope,
     ProcessRegistration,
+    ProcessTerminationReceipt,
     process_access_scope,
     process_registry,
     terminate_process_tree,
@@ -171,6 +174,20 @@ class CommandTooLongError(ValueError):
 
 class CommandInterruptedError(RuntimeError):
     """Foreground command was cancelled by the owning conversation request."""
+
+
+# LLM: 仅本地进程执行器构造该异常；普通 TimeoutExpired 不含终止证明，不能降级 UNKNOWN。
+# 类用途: 将前台命令超时前输出和真实进程回收记录一并交回工具结果层。
+class CommandTimeoutError(subprocess.TimeoutExpired):
+    # LLM: 构造只携带已发生的执行事实，不执行命令或替模型决定重试。
+    # 函数用途: 保存超时、输出、终止回执和管道是否已关闭，供主代理与恢复使用同一结果。
+    def __init__(
+        self, command: str, timeout: int, stdout: str, stderr: str,
+        termination: ProcessTerminationReceipt, pipes_drained: bool,
+    ) -> None:
+        super().__init__(command, timeout, output=stdout, stderr=stderr)
+        self.termination: ProcessTerminationReceipt = termination
+        self.pipes_drained: bool = pipes_drained
 
 
 def _validate_command(command: str) -> str:
@@ -497,17 +514,20 @@ class _LogSizeWatchdog(threading.Thread):
             return False
 
 
-def _kill_process_group(proc: subprocess.Popen) -> None:
-    """前台、后台命令共用 process_registry 的完整后代树终止入口。"""
-    terminate_process_tree(proc.pid, proc)
+# LLM: 前台和后台必须共享同一个终止实现；返回可信回执，不能凭函数被调用就宣称清理成功。
+# 函数用途: 终止指定命令的可观察进程树，并把退出核对信息交回超时路径。
+def _kill_process_group(proc: subprocess.Popen) -> ProcessTerminationReceipt:
+    return terminate_process_tree(proc.pid, proc)
 
 
-def _drain_terminated_process(proc: subprocess.Popen[str]) -> None:
-    """Reap the direct child without trusting descendants to close inherited pipes."""
+# LLM: 有界读取超时前输出，后代仍持有管道时不无限等待；关闭本地句柄不等于远端进程已退出。
+# 函数用途: 回收命令输出与直接子进程，保留已有文本，并明确管道是否真正排空。
+def _drain_terminated_process(proc: subprocess.Popen[str]) -> tuple[str, str, bool]:
     try:
-        proc.communicate(timeout=_PROCESS_PIPE_DRAIN_SECONDS)
-        return
-    except subprocess.TimeoutExpired:
+        stdout, stderr = proc.communicate(timeout=_PROCESS_PIPE_DRAIN_SECONDS)
+        return _process_output_text(stdout), _process_output_text(stderr), True
+    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = _process_output_text(exc.output), _process_output_text(exc.stderr)
         _kill_process_group(proc)
     for stream in (proc.stdout, proc.stderr):
         try:
@@ -519,11 +539,18 @@ def _drain_terminated_process(proc: subprocess.Popen[str]) -> None:
         proc.wait(timeout=0.5)
     except (subprocess.TimeoutExpired, ChildProcessError):
         pass
+    return stdout, stderr, False
+
+
+# LLM: subprocess 的 TimeoutExpired 在 text 模式也可能携带 bytes；此处仅做展示解码。
+# 函数用途: 将已捕获的输出统一为文本，保留中文并避免 None 或 bytes 破坏结果格式化。
+def _process_output_text(value: str | bytes | None) -> str:
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
 
 
 # LLM: 前台宿主 shell 与 bwrap shell 共用同一超时/进程组回收语义；不要让隔离分支
 #   复制出另一套 communicate 行为，否则超时会重新产生孙进程孤儿。
-# 函数用途: 等待前台命令完成，超时则终止整个进程组并把超时继续交给工具层处理。
+# 函数用途: 等待前台命令完成；超时则终止进程树，并把实际输出及退出回执交给工具层而不丢弃证据。
 def _communicate_process(
     proc: subprocess.Popen[str],
     *,
@@ -539,9 +566,9 @@ def _communicate_process(
                 raise CommandInterruptedError(command)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                _kill_process_group(proc)
-                _drain_terminated_process(proc)
-                raise subprocess.TimeoutExpired(command, timeout)
+                termination = _kill_process_group(proc)
+                out, err, drained = _drain_terminated_process(proc)
+                raise CommandTimeoutError(command, timeout, out, err, termination, drained)
             try:
                 out, err = proc.communicate(timeout=min(0.2, remaining))
                 if cancellation_requested():
@@ -1092,9 +1119,8 @@ class ShellTool(BaseTool):
             error_code="SANDBOX_UNAVAILABLE",
         )
 
-    # LLM: shell 自带 & 不得进入前台或结构化后台执行；否则 shell 很快退出，模型会把
-    #   一次临时探活误当成持久服务成功。拒绝结果必须声明 not_started，允许安全重试。
-    # 函数用途: 校验并执行一条命令，长期进程统一登记为可查询、可终止的后台会话。
+    # LLM: shell 自带 & 不得进入执行；deadline 已过等前置拒绝必须声明 not_started，不能遗留 UNKNOWN。
+    # 函数用途: 校验并执行命令，未启动与执行后失败分账；长期进程统一登记为受管后台会话。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         command_result = self._parse_command(params)
         if isinstance(command_result, ToolHandlerOutcome):
@@ -1129,6 +1155,8 @@ class ShellTool(BaseTool):
                 False,
                 "TOOL_DEADLINE_EXCEEDED: 外层任务剩余时间不足，系统没有启动新的 shell 命令。",
                 error_code="TOOL_TIMEOUT",
+                effect_outcome="not_started",
+                result_envelope={"process": {"status": "not_started", "reason": "deadline_exceeded"}},
             )
         sandbox_write_roots = _sandbox_write_roots(params)
         sandbox_read_roots = _sandbox_read_roots(params)
@@ -1728,9 +1756,8 @@ def _shell_execution_target(
     )
 
 
-# LLM: This classifier uses only typed process status, return code, stderr prefix, and the command
-# policy parser. Natural-language error text must never decide retry safety or side effects.
-# 函数用途: 将 shell 失败归为未启动、确定失败或结果未知，供上层选择是否安全重试。
+# LLM: 只读取本地执行器生成的进程状态、退出码和终止回执；TOOL_TIMEOUT 字符串不是退出证明。
+# 函数用途: 区分未启动、已终止的失败与未知执行；failed 仍可能有部分写入，不等同于可自动重放。
 def _shell_failure_effect_outcome(
     command: str,
     ok: bool,
@@ -1742,6 +1769,16 @@ def _shell_failure_effect_outcome(
     if ok or not error_code:
         return ""
     if error_code == "TOOL_TIMEOUT":
+        facts = process_facts or {}
+        termination = facts.get("termination")
+        if (
+            facts.get("status") == "timed_out"
+            and facts.get("pipes_drained") is True
+            and isinstance(termination, dict)
+            and termination.get("confirmed") is True
+            and termination.get("return_code") is not None
+        ):
+            return "failed"
         return "unknown"
     if error_code != "COMMAND_FAILED":
         return ""
@@ -1768,8 +1805,8 @@ def _shell_failure_effect_outcome(
 
 
 # LLM: Foreground execution returns one typed process envelope for every exit path. Timeout and
-# cancellation preserve distinct codes so callers never infer them from rendered output.
-# 函数用途: 运行前台命令并统一整理正常退出、超时、中断、沙箱缺失和启动失败结果。
+# cancellation preserve distinct codes and trusted termination receipts; generic timeouts remain unknown.
+# 函数用途: 运行前台命令，统一返回输出与退出事实；超时保留已产生的输出，不冒充命令成功或回滚。
 def _run_shell_process_text(
     tool: ShellTool,
     command: str,
@@ -1810,13 +1847,9 @@ def _run_shell_process_text(
                 "_display": _command_display(result, tool.max_output_chars),
             },
         )
-    except subprocess.TimeoutExpired:
-        return (
-            f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s): {command[:100]}...",
-            False,
-            "TOOL_TIMEOUT",
-            {"status": "timed_out", "timeout_seconds": timeout},
-        )
+    except subprocess.TimeoutExpired as exc:
+        output, facts = _shell_timeout_result(exc, command, timeout, tool.max_output_chars)
+        return output, False, "TOOL_TIMEOUT", facts
     except CommandInterruptedError:
         return (
             "CANCELLED: 当前任务已停止，前台命令及其子进程已终止。",
@@ -1838,6 +1871,25 @@ def _run_shell_process_text(
             "COMMAND_FAILED",
             {"status": "not_started", "reason": type(exc).__name__},
         )
+
+
+# LLM: 只有 CommandTimeoutError 的本地回执携带终止事实；普通 TimeoutExpired 保留 unknown。
+# 函数用途: 整理超时前标准输出与错误输出，给模型看排查线索，并给持久工具账本保存退出证据。
+def _shell_timeout_result(exc, command: str, timeout: int, max_output_chars: int) -> tuple[str, dict]:
+    facts: dict[str, object] = {"status": "timed_out", "timeout_seconds": timeout}
+    code = None
+    if isinstance(exc, CommandTimeoutError):
+        facts.update(termination=asdict(exc.termination), pipes_drained=exc.pipes_drained)
+        code = exc.termination.return_code
+    result = subprocess.CompletedProcess(
+        command, code, _process_output_text(exc.output), _process_output_text(exc.stderr)
+    )
+    if code is not None:
+        facts["_display"] = _command_display(result, max_output_chars)
+    output = f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s)\n"
+    output += _format_process_result(result, max_output_chars)
+    output += "\n[note] 超时不是成功；命令可能已经改动部分文件，请根据输出与现有结果排查，不自动重放。"
+    return output, facts
 
 
 # LLM: The initial result distinguishes a managed process that is still alive from a command

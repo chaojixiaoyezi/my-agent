@@ -25,3 +25,5 @@ def test_shell_tool_refuses_expired_runtime_deadline(tmp_path, monkeypatch):
     assert result.ok is False
     assert result.error_code == "TOOL_TIMEOUT"
     assert "TOOL_DEADLINE_EXCEEDED" in result.output
+    assert result.effect_outcome == "not_started"
+    assert result.result_envelope["process"]["status"] == "not_started"

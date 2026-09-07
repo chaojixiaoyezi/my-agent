@@ -1,6 +1,6 @@
 
 
-# LLM: 工具循环用同一 native IR 和 owner/thread Compact 权威；预算探针须与实际摘要回收及回滚规则一致。
+# LLM: 工具循环用同一 native IR 和 owner/thread Compact 权威；副作用按工具账本结构化结果处理，不能由次数或错误码旁路恢复保护。
 # 模块用途: 组装每轮工具请求并协调压缩与提交；不以裁剪改写用户输入、工具账本或任务状态。
 from __future__ import annotations
 
@@ -2046,57 +2046,17 @@ def _clear_active_repeated_failure_halt(params: object, tool_name: str) -> None:
     object.__setattr__(params, "repeated_failure_halt_exhausted", False)
 
 
-# T-USER-001 真机铁证(2026-08-11):TOOL_OPERATION_OUTCOME_UNKNOWN 出现后
-# 模型仍继续发起新调用(写文件命令 reconcile 成 unknown 后又连发 5 次调用)。
-# unknown 语义=「工具已执行但副作用是否完成不确定」(见 tool_operation_coordinator
-# reconcile 说明),继续调用只会制造更多不确定副作用。错误合同(error_taxonomy)
-# 已把 TOOL_OPERATION_OUTCOME_UNKNOWN 定为 retryable=False + MANUAL_REVIEW
-# (禁止自动重复执行)→ 首次出现即收口,不再给模型工具权,与本合同一致
-# (复核 seq 339:连续 2 次才收口与单次即 hard-stop 的合同矛盾,已改)。
-# 与 repeated_failure_halt(同类失败计数)正交:unknown 不依赖失败类相同。
-# 收口轮走 _final_response_after_unknown_outcome_halt,任务保持 unfinished 等用户核对。
+# LLM: 与持久 tool_operations 的 UNKNOWN 恢复规则一致，只读取 effect_outcome；
+# 不能凭调用次数或 TOOL_TIMEOUT 声称副作用已确定。已证实退出的超时由 shell 返回 failed。
+# 函数用途: 首次遇到真实未知执行结果时记录收口状态并追加一次说明，防止运行中放行、重启却失败。
 def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
     if record.params.repeated_failure_halt is not None:
-        return
-    # EXEC-38(owner 拍板): 未知副作用验证单轮内第 4 次放过——前 3 次按
-    # 人工闸收口, 第 4 次不拦(防死循环: 模型连续尝试都被同一未知拦住时,
-    # 硬卡不产出也是问题)。放行时注入如实报告要求, 绝不标 ok。
-    unknown_count = int(getattr(record.params, "_unknown_outcome_count", 0) or 0) + 1
-    object.__setattr__(record.params, "_unknown_outcome_count", unknown_count)
-    if unknown_count >= _UNKNOWN_OUTCOME_RELEASE_AFTER:
-        record.params.tool_context.append(
-            "[tool-system]\n"
-            "副作用未知验证已连续触发多次，本轮不再拦截。请按实际状态"
-            "如实报告或继续推进；绝不能把未验证的结果说成完成。"
-        )
         return
     if getattr(record.params, "unknown_outcome_halt", None) is not None:
         return
     effect = str(getattr(record.result, "effect_outcome", "") or "").strip().lower()
     if effect != "unknown":
         return
-    # EXEC-36: 命令超时(TOOL_TIMEOUT)不是"写副作用未知"——
-    # 进程组已被系统终止(_kill_process_group), 对照在超时时返回 partial
-    # output 让模型继续修。真机 2026-08-16: ma-b r4 模型写的死循环测试
-    # 300s 超时 → UNKNOWN 人工闸收口 RC=2, 任务死等人工;对照同场景模型
-    # 自己看超时输出排查修好。超时不设人工闸, 注入"可继续但勿原样重试"。
-    reported = str(
-        getattr(record.result, "reported_error_code", "")
-        or getattr(record.result, "error_code", "")
-        or ""
-    ).strip().upper()
-    if reported == "TOOL_TIMEOUT":
-        record.params.tool_context.append(
-            "[tool-system]\n"
-            "命令执行超时已被系统终止（进程组已清理）。"
-            "你可以继续调用工具核验结果、排查原因并修复；"
-            "不要原样重试同一条会超时的命令。"
-        )
-        return
-    # 2026-08-15 3×3 cell1 真机: 记录触发 UNKNOWN 的原始报码(如 COMMAND_FAILED)
-    # ——收口时按错误合同区分「结果已知的失败」(taxonomy retryable=True,
-    # 如命令失败读输出修正)与「真未知」(超时/执行者死/无码)——前者收口可
-    # 续跑(模型开新轮读 reported_output_preview 修复), 后者保持单次收口。
     object.__setattr__(
         record.params,
         "unknown_outcome_halt",
@@ -2125,7 +2085,6 @@ def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
 # 时模型仍提出 ToolCall,不能直接进 handler——由执行层拦截(TOOL_ACTION_NOT_REQUIRED,
 # handler 不执行),有界拦截(连续 2 轮)后走收口轮等用户明确指示。
 # 判定只用结构化信号(assessment 状态 + 调用出现与否 + 轮数),不解析模型话术。
-_UNKNOWN_OUTCOME_RELEASE_AFTER = 4  # EXEC-38: 单轮内第 4 次未知副作用放过
 _NO_ACTION_GATE_STREAK_ATTR = "_no_action_gate_streak"
 _NO_ACTION_GATE_HALT_LIMIT = 2
 

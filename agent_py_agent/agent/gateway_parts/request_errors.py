@@ -1,3 +1,5 @@
+# LLM: 客户端只接收结构化错误码对应的安全文案；内部异常与恢复明细不能直接公开。
+# 模块用途: 统一 Gateway 请求失败的响应，并区分模型连接、会话读写与执行结果未确认。
 from __future__ import annotations
 
 """Shared gateway request error response builders."""
@@ -14,6 +16,12 @@ class ConversationPersistenceError(RuntimeError):
     error_code = "CONVERSATION_PERSISTENCE_UNAVAILABLE"
 
 
+# LLM: 仅精确恢复返回 operation_outcome_uncertain 时使用；不能靠异常文本推断或扩大到所有持久化错误。
+# 类用途: 表示上一轮操作结果未核清，恢复被阻止，避免界面误导用户反复重发任务。
+class ActiveTurnOutcomeUncertainError(ConversationPersistenceError):
+    error_code = "ACTIVE_TURN_OUTCOME_UNCERTAIN"
+
+
 class UserReplyUnavailableError(RuntimeError):
     """The model reply phase ended without any text safe for user delivery."""
 
@@ -27,8 +35,8 @@ class SystemCommandRoutingError(RuntimeError):
 
 
 # LLM: Client-visible failure prose is selected only from structured error_code; provider and
-# client-workspace failures both stop before any raw exception text reaches the UI.
-# 函数用途: 把 Gateway 结构化错误码转换成 TUI、飞书和未来 Web 共用的安全中文提示，包括目录无效提示。
+# client-workspace and active-turn recovery failures never expose raw exception text or suggest unsafe replay.
+# 函数用途: 用明确中文区分请求失败原因；结果未确认时说明为何停止恢复，不笼统建议重新执行。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
     messages = {
@@ -48,6 +56,14 @@ def gateway_client_error_message(error_code: object) -> str:
         "PROVIDERCONNECTIONERROR": "无法连接模型服务，请检查网络、代理和接口地址后重试。",
         "GATEWAY_WORKSPACE_INVALID": (
             "当前工作目录不可用，任务没有开始。请确认目录存在且重新从该目录启动客户端。"
+        ),
+        "ACTIVE_TURN_OUTCOME_UNCERTAIN": (
+            "上一轮有操作已发起，但执行结果尚不能确认。为避免重复写入或重复启动，"
+            "已停止自动恢复；请先核对执行结果，不要直接重做整个任务。"
+        ),
+        "CONVERSATION_PERSISTENCE_UNAVAILABLE": (
+            "当前会话记录无法可靠读取或保存，本轮已停止，避免在缺少上下文时继续执行。"
+            "请查看运行诊断后再恢复。"
         ),
     }
     return messages.get(code, "任务处理失败，请稍后重试；如持续失败，请查看运行诊断。")
