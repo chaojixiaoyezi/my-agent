@@ -428,9 +428,9 @@ def _provider_observation_matches(observation: object, fingerprint: str) -> bool
     )
 
 
-# LLM: Component estimates are derived only from the four actual provider-visible values. They
-# are proportionally normalized so their displayed sum is exactly the canonical total estimate.
-# 函数用途: 分别估算 prompt、历史消息、运行指引和工具定义的占比，同时保持总数与原 compact 口径一致。
+# LLM: Estimation shares the real source-keyed prompt/IR projection without committing it; neither
+# repeated facts nor a volatile prompt fingerprint may inflate preflight or defeat calibration.
+# 函数用途: 用实际发给模型的分段投影估算占比，预检查不写 IR，动态状态也不混入稳定指纹。
 def _model_visible_context_components(
     agent: object,
     params: object | None,
@@ -463,8 +463,9 @@ def _model_visible_context_components(
 
     from ...backends.message_adapter import AnthropicMessageAdapter
     from ..tool_ir_guidance import unforwarded_runtime_guidance
+    from ..tool_ir_history import project_native_prompt_history
 
-    history = list(getattr(params, "tool_ir_history", None) or [])
+    projected_prompt, history = project_native_prompt_history(params, prompt)
     current_messages = (
         AnthropicMessageAdapter().to_provider_messages(history)
         if history
@@ -489,7 +490,7 @@ def _model_visible_context_components(
         already_forwarded,
     )
     tools = resolve_native_tools(agent, params) or []
-    provider_prompt = _native_provider_prompt_adjunct(prompt)
+    provider_prompt = _native_provider_prompt_adjunct(projected_prompt)
     payload = {
         "system_instruction": system_instruction,
         "prompt_adjunct": provider_prompt,

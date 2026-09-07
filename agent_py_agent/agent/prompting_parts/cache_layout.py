@@ -1,3 +1,5 @@
+# LLM: 缓存布局由宿主字段构造，来源分段是唯一动态正文来源；归档字符串与 provider 投影必须一致。
+# 模块用途: 描述模型输入的稳定前缀和动态状态分段，不解析标题、不持有会话或权限状态。
 from __future__ import annotations
 
 """Provider-neutral prompt layout for append-only native prompt caching.
@@ -13,13 +15,32 @@ from dataclasses import dataclass
 # LLM: This immutable projection is the only structured description of native prompt ordering.
 # Adapters may relocate typed parts, and may omit canonical_user_turn only when the same turn is
 # already present in native messages; they must never infer boundaries by parsing prose.
-# 类用途: 保存稳定 system、兼容首条用户段、当前用户诊断副本和动态尾部，避免靠标题猜缓存边界。
+# 类用途: 保存稳定前缀与带来源的动态段，整段尾部从这些字段无损生成，避免靠标题猜缓存边界。
 @dataclass(frozen=True)
 class PromptCacheLayout:
     stable_prefix: str
-    volatile_suffix: str
+    volatile_suffix: str = ""
     stable_user_prefix: str = ""
     canonical_user_turn: str = ""
+    volatile_sections: tuple[tuple[str, str], ...] = ()
+
+    # LLM: 分段与整段只能提供一种输入；冻结分段后生成唯一整段投影，不能让两份正文各自漂移。
+    # 函数用途: 检查宿主来源不为空或重复，并无损拼出诊断和摘要模型继续使用的动态正文。
+    def __post_init__(self) -> None:
+        sections = tuple(tuple(section) for section in self.volatile_sections)
+        object.__setattr__(self, "volatile_sections", sections)
+        if not sections:
+            return
+        if self.volatile_suffix:
+            raise ValueError("动态分段与整段正文不能同时提供")
+        sources: set[str] = set()
+        for source, text in sections:
+            if not isinstance(source, str) or not source.strip() or not isinstance(text, str):
+                raise ValueError("动态分段需要非空来源字符串和正文字符串")
+            if source in sources:
+                raise ValueError("动态分段来源不能重复")
+            sources.add(source)
+        object.__setattr__(self, "volatile_suffix", _join_prompt_parts(tuple(text for _, text in sections)))
 
     # LLM: Rendering must be lossless because text backends and archives consume the same full
     # string even when they ignore provider-specific message placement.
@@ -41,20 +62,22 @@ class CacheStructuredPrompt(str):
     cache_layout: PromptCacheLayout
 
     # LLM: Construct the string value and attached immutable layout atomically so neither surface can drift from the other.
-    # 函数用途: 创建带缓存布局的完整 prompt 字符串。
+    # 函数用途: 用单份动态分段或整段正文创建完整 prompt；来源只给原生 IR 去重使用，不发送权限信息。
     def __new__(
         cls,
         stable_prefix: str,
-        volatile_suffix: str,
+        volatile_suffix: str = "",
         *,
         stable_user_prefix: str = "",
         canonical_user_turn: str = "",
+        volatile_sections: tuple[tuple[str, str], ...] = (),
     ) -> CacheStructuredPrompt:
         layout = PromptCacheLayout(
             stable_prefix=str(stable_prefix or ""),
             volatile_suffix=str(volatile_suffix or ""),
             stable_user_prefix=str(stable_user_prefix or ""),
             canonical_user_turn=str(canonical_user_turn or ""),
+            volatile_sections=volatile_sections,
         )
         value = super().__new__(cls, layout.render())
         value.cache_layout = layout

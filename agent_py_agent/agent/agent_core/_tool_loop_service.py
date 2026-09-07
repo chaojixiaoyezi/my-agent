@@ -513,7 +513,7 @@ def _prepare_native_compact_plan(
 
 
 # LLM: Eligibility must estimate the same structural deletion later applied to the real IR. An
-# empty history would incorrectly discard UserTurn, the newest RuntimeFactsTurn and carried summaries.
+# empty history would discard UserTurn, each source's newest RuntimeFactsTurn and carried summaries.
 # Stale runtime facts in the summarized tool prefix are removable under the shared structural rule,
 # unlike those protected items. The probe owns copied
 # containers and never records a window, mutates the active turn, or advances Compact generation.

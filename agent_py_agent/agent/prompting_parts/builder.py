@@ -1,4 +1,5 @@
-
+# LLM: 本模块从宿主字段构造 prompt；原生动态来源和完整诊断正文共用一份布局，不能按标题反解析。
+# 模块用途: 为主/子代理组织模型输入；文本协议保留原格式，原生协议让未变化状态留在已缓存历史里。
 from __future__ import annotations
 
 """主智能体使用的 prompt 拼装器。
@@ -120,8 +121,8 @@ class PromptBuilder:
         return chunks
 
     # LLM: Every root and delegated model turn must receive the same evidence boundary. Native
-    # prompts additionally carry a typed stable/volatile layout; never infer that boundary from prose.
-    # 函数用途: 拼出完整模型输入；原生工具协议下同时标出可复用稳定前缀，但不删减任何正文。
+    # prompts carry source-keyed volatile sections so changes do not duplicate unrelated facts.
+    # 函数用途: 拼出完整模型输入；原生工具协议同时标出各动态字段来源，未变化分段由 IR 留在原位置。
     def build(
         self,
         user_prompt: str = "",
@@ -178,7 +179,7 @@ class PromptBuilder:
                     dynamic=dynamic,
                     tool_catalog=_tools.tool_catalog_section or default_tools,
                 ),
-                _native_cache_volatile_suffix(
+                volatile_sections=_native_cache_volatile_sections(
                     memory_text=memory_text,
                     tool_recommendations=(
                         _tools.tool_recommendations_section or default_recommendations
@@ -235,24 +236,22 @@ def _native_cache_stable_prefix(
     )
 
 
-# LLM: Memory recall, task-specific recommendations, workspace provisioning, wake/resume
-# injections, and execution facts may all change between completed turns. They stay after the
-# append-only native conversation/tool IR so they cannot invalidate an already cached history.
-# 函数用途: 组装本轮辅助上下文，作为规范会话消息和工具历史之后的动态尾部发送。
-def _native_cache_volatile_suffix(
+# LLM: 来源来自宿主已知字段，不解析 Markdown；改变一个分段只追加该段，旧 IR 的字节和顺序保持。
+# 函数用途: 分开记忆、推荐、工作区、运行注入和执行事实，同时保留原完整正文的拼接顺序与格式。
+def _native_cache_volatile_sections(
     *,
     memory_text: str,
     tool_recommendations: str,
     workspace_context: str,
     injected: str,
     execution_facts: str,
-) -> str:
+) -> tuple[tuple[str, str], ...]:
     return (
-        f"# Related Memory\n{memory_text}\n\n"
-        f"{tool_recommendations}\n\n"
-        f"# Workspace Context\n{workspace_context}\n\n"
-        f"# Runtime Injection\n{injected or '（无）'}\n\n"
-        f"{execution_facts}\n"
+        ("prompt.related_memory", f"# Related Memory\n{memory_text}"),
+        ("prompt.tool_recommendations", tool_recommendations),
+        ("prompt.workspace", f"# Workspace Context\n{workspace_context}"),
+        ("prompt.runtime_injection", f"# Runtime Injection\n{injected or '（无）'}"),
+        ("prompt.execution", f"{execution_facts}\n"),
     )
 
 

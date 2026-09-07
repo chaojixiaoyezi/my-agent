@@ -166,10 +166,15 @@ def _provider_message_tokens(agent, params) -> int:
 
 
 # LLM: 夹具只向临时原生 IR/工具记录写入 typed 数据，不执行实际文件工具；可附加状态快照验证 Compact 回滚。
-# 函数用途: 构造大参数工具轮，复现完整请求压力及旧状态回收后的事务边界。
+# 函数用途: 构造大参数工具轮，复现多来源最新状态保留及旧状态回收后的事务回滚边界。
 def _record_large_write_calls(
     agent, params, *, start: int, stop: int, chars: int, with_runtime_facts: bool = False,
 ) -> None:
+    if with_runtime_facts:
+        params.tool_ir_history.extend([
+            RuntimeFactsTurn("same-workspace", source="workspace"),
+            RuntimeFactsTurn("same-memory", source="memory"),
+        ])
     for index in range(start, stop + 1):
         if with_runtime_facts:
             params.tool_ir_history.append(RuntimeFactsTurn(f"runtime-state-{index}"))
@@ -921,7 +926,9 @@ def test_native_window_reclaims_old_runtime_facts_across_two_generations(tmp_pat
     })
     user = UserTurn("保留现有项目和原件。")
     steering = UserTurn("后续也检查中文和空格路径。")
-    params.tool_ir_history.append(user)
+    workspace = RuntimeFactsTurn("当前工作区未变", source="workspace")
+    memory = RuntimeFactsTurn("报告先讲结论", source="memory")
+    params.tool_ir_history.extend([user, workspace, memory])
     for generation in (1, 2):
         old_facts = []
         for index in range(18):
@@ -945,6 +952,7 @@ def test_native_window_reclaims_old_runtime_facts_across_two_generations(tmp_pat
         assert old_facts[0].text in sent_history
         assert old_facts[-1].text in sent_history
         assert latest in params.tool_ir_history
+        assert workspace in params.tool_ir_history and memory in params.tool_ir_history
         assert user in params.tool_ir_history and steering in params.tool_ir_history
         assert params.archive_tool_calls == archive_before
         assert model_visible_context_tokens(agent, params, prompt) < 6_000
@@ -1540,6 +1548,8 @@ def test_persistent_native_interrupt_after_ir_mutation_rolls_back_without_failur
         result = original_settle(**kwargs)
         assert RuntimeFactsTurn("runtime-state-1") not in params.tool_ir_history
         assert RuntimeFactsTurn("runtime-state-6") in params.tool_ir_history
+        assert RuntimeFactsTurn("same-workspace", source="workspace") in params.tool_ir_history
+        assert RuntimeFactsTurn("same-memory", source="memory") in params.tool_ir_history
         token.cancel("stop-after-ir-mutation")
         return result
 
@@ -1656,6 +1666,8 @@ def test_persistent_native_window_restores_ir_when_compact_cas_fails(
     def fail_compact_cas(*_args, **_kwargs):
         assert RuntimeFactsTurn("runtime-state-1") not in params.tool_ir_history
         assert RuntimeFactsTurn("runtime-state-6") in params.tool_ir_history
+        assert RuntimeFactsTurn("same-workspace", source="workspace") in params.tool_ir_history
+        assert RuntimeFactsTurn("same-memory", source="memory") in params.tool_ir_history
         raise RuntimeError("synthetic compact CAS conflict")
 
     monkeypatch.setattr(store, "update_compact_state", fail_compact_cas)

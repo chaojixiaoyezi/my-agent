@@ -31,7 +31,7 @@ text 协议路径一字不动。
 - ``UserTurn`` 不属于工具结果窗口，工具 compact 不得删除；需要缩短时由上层 active-turn/thread
   compact 处理。
 - ``RuntimeFactsTurn`` 是宿主状态快照，不是真实用户输入；完整摘要覆盖的旧工具前缀回收时，可一并
-  删除其中旧快照，但最新一份和保留工具尾部的快照不动。普通无摘要整理不能删除快照。
+  删除其中旧快照，但每个来源最新一份和保留工具尾部的快照不动。普通无摘要整理不能删除快照。
 - ``CompactionSummary`` 不属于第二条 compact 路线；thread/live summary 是同一 IR 历史里旧工具
   往返的 replacement item，每次压缩原位替换；带稳定 schema marker 的 carried handoff 是另一条
   当前 turn 交接事实，不能被 replacement 连带删除。
@@ -43,6 +43,7 @@ text 协议路径一字不动。
 """
 
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any
 
 from ..backends.tool_ir import (
@@ -51,7 +52,9 @@ from ..backends.tool_ir import (
     RuntimeFactsTurn,
     UserTurn,
 )
+from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..tooling.runtime_contracts import ToolCall, ToolResult
+from .runtime.conversation_state import conversation_runtime_state_section
 
 
 def native_tool_ir_history(params: object) -> list[Any]:
@@ -75,30 +78,43 @@ def record_user_turn_ir(params: object, text: str) -> None:
 
 
 # LLM: A dynamic prompt suffix becomes an append-only typed history item before provider
-# submission. Exact duplicate facts are emitted once per run; changed facts append at their real
-# chronology point and are never moved behind later tool calls on a subsequent request. Only a
-# successful Compact may replace covered old facts, through the shared pair-removal contract.
-# 函数用途: 把本次调用新增的运行事实写入原生历史，并对同一 run 的完全相同事实去重。
-def record_runtime_facts_turn_ir(params: object, text: str) -> bool:
+# submission. Compare only the latest surviving item of the same host source: A→B→A must append
+# A again. IR is the sole baseline, so cancellation/Compact rollback cannot leave a stale seen set.
+# 函数用途: 同来源状态有变化才追加，未变化留在原历史位置；不修改或去重真实用户输入。
+def record_runtime_facts_turn_ir(params: object, text: str, *, source: str = "") -> bool:
     content = str(text or "")
     if not content.strip():
         return False
-    state = getattr(params, "live_archive_state", None)
-    if isinstance(state, dict):
-        seen = state.get("_native_runtime_facts_seen")
-        if not isinstance(seen, set):
-            seen = set()
-            state["_native_runtime_facts_seen"] = seen
-        if content in seen:
-            return False
-        seen.add(content)
-    elif any(
-        isinstance(item, RuntimeFactsTurn) and item.text == content
-        for item in native_tool_ir_history(params)
-    ):
-        return False
-    native_tool_ir_history(params).append(RuntimeFactsTurn(content))
+    history = native_tool_ir_history(params)
+    for item in reversed(history):
+        if isinstance(item, RuntimeFactsTurn) and item.source == source:
+            if item.text == content:
+                return False
+            break
+    history.append(RuntimeFactsTurn(content, source=source))
     return True
+
+
+# LLM: 预检查与实际发送共用同一个无副作用投影；来源来自布局字段，IR 副本是唯一去重基线。
+# 函数用途: 在历史浅副本中追加变化状态，返回去掉重复尾部的 prompt；不改原 IR、用量账或会话状态。
+def project_native_prompt_history(params: object, prompt: str) -> tuple[str, list[Any]]:
+    history = list(getattr(params, "tool_ir_history", None) or [])
+    layout = prompt_cache_layout(prompt)
+    if layout is None:
+        return prompt, history
+    projected = SimpleNamespace(tool_ir_history=history)
+    sections = layout.volatile_sections or (("prompt.volatile", layout.volatile_suffix),)
+    for source, text in sections:
+        record_runtime_facts_turn_ir(projected, text, source=source)
+    record_runtime_facts_turn_ir(
+        projected, conversation_runtime_state_section(params), source="conversation.runtime",
+    )
+    provider_prompt = CacheStructuredPrompt(
+        layout.stable_prefix,
+        stable_user_prefix=layout.stable_user_prefix,
+        canonical_user_turn=layout.canonical_user_turn,
+    )
+    return provider_prompt, history
 
 
 # LLM: compact 摘要与真实 UserTurn 类型分开；每次安装只替换 thread/live summary，
@@ -183,7 +199,7 @@ def record_tool_call_ir(
 
 
 # LLM: 成对回收不改变原始账本；完整摘要存在时才能删除已无工具的 assistant 轮及连续退休前缀内的旧
-# RuntimeFactsTurn。最新快照、真实 UserTurn 和保留工具尾部必须保持；探针与事务回滚复用此规则。
+# RuntimeFactsTurn。各来源最新快照、真实 UserTurn 和保留工具尾部必须保持；探针与事务回滚复用此规则。
 # 函数用途: 摘除已覆盖的工具往返、旧思考与过期状态快照，避免长任务压缩后仍被旧状态塞满。
 def drop_tool_call_pairs(
     params: object,
@@ -197,7 +213,7 @@ def drop_tool_call_pairs(
     没有对应 tool_result 的孤儿 tool_use（Anthropic 会拒绝），也不留下指向已删
     tool_use 的孤儿 tool_result。只有 ``drop_completed_tool_turns=True`` 且调用方已经持有
     完整替代摘要时，才连同已无保留调用的旧 assistant 正文、连续退休工具前缀中的旧状态一起删除。
-    最新运行快照、真实用户输入和未退休工具尾部始终保留。返回实际摘除的「对」数（以 ToolResult 计）。
+    各来源最新快照、真实用户输入和未退休工具尾部始终保留。返回实际摘除的「对」数（以 ToolResult 计）。
     """
     if not call_ids:
         return 0
@@ -228,7 +244,7 @@ def drop_tool_call_pairs(
 
 
 # LLM: 仅从 typed 调用/结果的顺序计算连续退休前缀；跳过较新的任意调用不授权删除其之前仍在用的状态。
-# 函数用途: 找出摘要可替代的旧运行快照下标；并行轮尚有保留调用时不越过该轮，最新快照永远保留。
+# 函数用途: 找出摘要可替代的旧状态；不越过尚有保留调用的并行轮，每个来源的最新状态始终保留。
 def _summarized_runtime_fact_indexes(history: list[Any], call_ids: set[str]) -> set[int]:
     retired_through = -1
     for index, item in enumerate(history):
@@ -240,10 +256,15 @@ def _summarized_runtime_fact_indexes(history: list[Any], call_ids: set[str]) -> 
             if item.call_id not in call_ids:
                 break
             retired_through = index
-    fact_indexes = [
-        index for index, item in enumerate(history) if isinstance(item, RuntimeFactsTurn)
-    ]
-    return {index for index in fact_indexes[:-1] if index <= retired_through}
+    latest_by_source = {
+        item.source: index for index, item in enumerate(history) if isinstance(item, RuntimeFactsTurn)
+    }
+    return {
+        index for index, item in enumerate(history)
+        if isinstance(item, RuntimeFactsTurn)
+        and index <= retired_through
+        and index != latest_by_source[item.source]
+    }
 
 
 # LLM: This is a structural IR rewrite; prose never decides whether a turn is covered or removable.
@@ -366,6 +387,7 @@ __all__ = [
     "native_tool_ir_history",
     "open_assistant_turn_ir",
     "record_runtime_facts_turn_ir",
+    "project_native_prompt_history",
     "replace_compaction_summary_ir",
     "record_tool_call_ir",
 ]

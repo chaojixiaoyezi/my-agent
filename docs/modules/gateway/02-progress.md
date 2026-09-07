@@ -1,10 +1,18 @@
 # Gateway Progress
 
+## R191 动态事实增量和一致预检查
+
+对照 会话运行时 `ContextManager::update_world_state`，PromptBuilder 用已知字段产生来源分段；原生 IR 只追加
+相对同来源最新值的变化。去掉第二份 ever-seen 基线，压缩后每类最新状态继续保留。
+预检查与模型发送共用 `project_native_prompt_history`，探针不提交 IR、动态字段不污染稳定校准指纹。
+260 focused 通过，三路原长 TUI 继续测试；真实费用和后续记忆不由单测代替。
+
 ## R190 native Compact 的旧状态最低水位
 
 对照 会话运行时 `compact.rs` 的历史替换与当前上下文重建，删除摘要覆盖的连续旧工具区内过期运行快照。
 最新 RuntimeFactsTurn、真实用户插话和保留工具尾部仍参与最低水位；探针与提交调用同一个 IR 回收入口。
-141 focused 已过，取消/提交冲突还原原上下文。原长 TUI 的频繁压缩和实际价格收益仍待部署复验。
+141 focused 已过，取消/提交冲突还原原上下文。已部署唯一 Gateway R190；原 child 第 96 代后 DONE，main
+真实恢复约半窗口后继续。频繁重复状态包和价格收益留给 R191，不宣称经济性已通过。
 
 ## R189 重启后的过程流续接
 

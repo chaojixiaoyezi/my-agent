@@ -19,7 +19,6 @@ from ..concurrency.interrupt import (
     set_interrupt,
 )
 from ..model_guidance import provider_system_instruction
-from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..tooling.runtime_contracts import ToolChoice
 from ._runtime_params import ToolLoopExecuteParams
 from .model.call_runtime import (
@@ -52,9 +51,12 @@ from .runner.stage_trace import (
     trace_runner_model_stream_active,
     trace_runner_provider_retry_scheduled,
 )
-from .runtime.conversation_state import conversation_runtime_state_section
 from .tool_ir_guidance import unforwarded_runtime_guidance
-from .tool_ir_history import native_tool_ir_history, record_runtime_facts_turn_ir
+from .tool_ir_history import (
+    native_tool_ir_history,
+    project_native_prompt_history,
+    record_runtime_facts_turn_ir,
+)
 from .tool_stream import (
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,
@@ -137,27 +139,14 @@ def generate_model_response(request: ModelGenerateParams):
     return _finish_model_generation(request, final_state, response)
 
 
-# LLM: A typed native prompt's volatile suffix must enter the canonical IR before provider
-# submission. The backend then receives an empty volatile adjunct, so every later tool request
-# literally extends the earlier messages instead of moving changed facts behind newer results.
-# 函数用途: 把本次原生请求的动态事实固化为追加式消息，并返回不再重复携带这些事实的 prompt。
+# LLM: Native dynamic sections enter IR by host source before submission; compare only each
+# source's surviving latest value. Use the same pure projection as preflight before committing IR.
+# 函数用途: 提交预检查所用的同一原生状态投影，去掉 prompt 中重复尾部，保持旧消息前缀。
 def _materialize_native_prompt_facts(request: ModelGenerateParams) -> ModelGenerateParams:
     if not native_tool_use_active(request.params):
         return request
-    layout = prompt_cache_layout(request.prompt)
-    if layout is None:
-        return request
-    record_runtime_facts_turn_ir(request.params, layout.volatile_suffix)
-    record_runtime_facts_turn_ir(
-        request.params,
-        conversation_runtime_state_section(request.params),
-    )
-    provider_prompt = CacheStructuredPrompt(
-        layout.stable_prefix,
-        "",
-        stable_user_prefix=layout.stable_user_prefix,
-        canonical_user_turn=layout.canonical_user_turn,
-    )
+    provider_prompt, history = project_native_prompt_history(request.params, request.prompt)
+    native_tool_ir_history(request.params)[:] = history
     return replace(request, prompt=provider_prompt)
 
 
@@ -482,6 +471,8 @@ def _publish_runner_model_stream_activity(
     )
 
 
+# LLM: 追加未转发的宿主引导后翻译 IR；来源与普通状态分开，不重排 provider 已有前缀或改写用户输入。
+# 函数用途: 组装本轮原生消息并检查工具配对；唯一副作用是将新运行指引加入当前 IR。
 def _native_provider_messages(agent: object, params: object) -> list[dict] | None:
     """native 下把 IR 历史和宿主运行时指引翻成厂商原生 messages。
 
@@ -503,7 +494,7 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
         seen,
     )
     if guidance:
-        record_runtime_facts_turn_ir(params, "\n\n".join(guidance))
+        record_runtime_facts_turn_ir(params, "\n\n".join(guidance), source="runtime.guidance")
         history = getattr(params, "tool_ir_history", None)
     prior = [
         deepcopy(item)

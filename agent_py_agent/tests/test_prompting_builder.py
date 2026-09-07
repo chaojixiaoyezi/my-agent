@@ -775,6 +775,37 @@ class TestBuildPromptFilesParam:
         assert "HOT SECRET" not in result
 
 
+def test_cache_sections_are_immutable_and_render_losslessly():
+    from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
+
+    sections = [["memory", "# Related Memory\n真实内容"], ["execution", "工具事实\n"]]
+    result = CacheStructuredPrompt("stable", volatile_sections=sections)
+    sections[0][1] = "外部修改不能影响布局"
+    assert result.cache_layout.volatile_sections == (
+        ("memory", "# Related Memory\n真实内容"), ("execution", "工具事实\n"),
+    )
+    assert result.cache_layout.volatile_suffix == "# Related Memory\n真实内容\n\n工具事实\n"
+    assert str(result) == "stable\n\n# Related Memory\n真实内容\n\n工具事实\n"
+    assert str(result) == result.cache_layout.render()
+
+
+@pytest.mark.parametrize("sections", [
+    (("same", "a"), ("same", "b")), (("", "a"),), (("   ", "a"),), (("source", None),),
+])
+def test_cache_sections_reject_ambiguous_sources(sections):
+    from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
+
+    with pytest.raises(ValueError):
+        CacheStructuredPrompt("stable", volatile_sections=sections)
+
+
+def test_cache_sections_and_independent_suffix_cannot_diverge():
+    from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
+
+    with pytest.raises(ValueError):
+        CacheStructuredPrompt("stable", "separate", volatile_sections=(("memory", "fact"),))
+
+
 class TestBuildFullPrompt:
     def test_build_full_prompt_order(self, tmp_path):
         config = AgentConfig(system_prompt="system prompt content")

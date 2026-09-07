@@ -91,6 +91,14 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 
 ## Cache economics
 
+动态状态由 PromptBuilder 的字段携带来源键，不能通过 Markdown 标题或公共前缀反推来源。记忆召回、工具
+推荐、工作区、运行注入、执行事实各自形成一个分段；普通工具轮只追加相对同来源最新 IR 状态的变化，
+不变项留在原位置，A→B→A 的最后 A 也必须追加。IR 是唯一比较基线，不另存永远 seen 的集合。
+完整诊断/摘要 prompt 从同一分段无损渲染。预检查与真实发送共用 `project_native_prompt_history`，
+前者只操作浅副本，后者提交原 IR；避免预检查多算整包或将动态字段混入稳定校准指纹。
+完整 Compact 摘要覆盖连续退休工具前缀后，才可回收其中旧分段，并保留每个来源的最新项；取消或 CAS
+失败恢复原列表，也同时恢复比较基线。真正用户输入、Memory 存储、历史账本和权限不参与这一回收。
+
 费用只使用 provider ledger 的 typed `input/cache_creation/cache_read`，不从屏幕 Context 或字符数倒推。
 缓存创建没有独立价格时按普通输入单价 5 保守计。当前样本为：
 

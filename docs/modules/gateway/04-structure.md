@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## R191 状态来源与纯请求投影
+
+- `PromptCacheLayout.volatile_sections` 是宿主提供的唯一分段正文；`volatile_suffix` 仅由其渲染，拒绝同时
+  提供两份正文或重复来源。未分段的直接调用仍作为单段输入，不分析 Markdown。
+- `RuntimeFactsTurn.source` 是开放来源字符串，不获得权限。`record_runtime_facts_turn_ir` 只比较同来源
+  最后一个保留项，不维护 ever-seen 集合；旧消息不重排，变化返回旧值也追加。
+- `project_native_prompt_history` 在浅副本上投影本次变化和会话状态；context pressure 只读该副本，模型
+  生成才提交同一 IR。Compact 仍走原整对回收入口，但保留每个来源最新项；回滚恢复 IR 即恢复基线。
+
 ## R190 摘要覆盖范围与状态快照
 
 `tool_ir_history.drop_tool_call_pairs` 的完整摘要参数同时授权回收旧 assistant 轮和连续退休前缀内的旧运行

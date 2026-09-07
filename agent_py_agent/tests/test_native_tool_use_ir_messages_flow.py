@@ -583,6 +583,101 @@ def test_native_current_compact_generation_is_a_latest_typed_runtime_fact(tmp_pa
     assert '"authority":"conversation_history_seed.compact_generation"' in latest
 
 
+def test_native_builder_materializes_only_changed_fact_sources(tmp_path) -> None:
+    agent = _native_agent(tmp_path)
+    params = _params()
+    params.tool_ir_history.append(UserTurn("继续整理自己的项目"))
+    builder = PromptBuilder(AgentConfig(system_prompt="stable system", prompt_files=[]), tmp_path)
+    previous_messages = []
+    for index, injection in enumerate(("约定甲", "约定甲", "约定乙", "约定甲", "")):
+        prompt = builder.build(
+            "继续整理自己的项目", [],
+            inject=[injection] if injection else [],
+            workspace_context_override="unchanged workspace " * 300,
+            tools=ToolSections(
+                native_tool_use=True,
+                execution_facts_section=f"# Current Turn Execution Facts\nstep={index}",
+            ),
+        )
+        _materialize_native_prompt_facts(
+            ModelGenerateParams(agent=agent, params=params, prompt=prompt, tool_rounds=index)
+        )
+        messages = _native_provider_messages(agent, params)
+        assert messages[:len(previous_messages)] == previous_messages
+        previous_messages = messages
+        if index < 4:
+            _record(agent, params, tool_rounds=index + 1, idx=1, tool_name="read_file",
+                    call_id=f"source-delta-{index}", arguments={"path": "README.md"}, output="ok")
+
+    facts = [item for item in params.tool_ir_history if isinstance(item, RuntimeFactsTurn)]
+    assert sum("unchanged workspace" in item.text for item in facts) == 1
+    assert sum("# Related Memory" in item.text for item in facts) == 1
+    assert [item.text for item in facts if item.source == "prompt.runtime_injection"] == [
+        "# Runtime Injection\n约定甲", "# Runtime Injection\n约定乙",
+        "# Runtime Injection\n约定甲", "# Runtime Injection\n（无）",
+    ]
+    assert len([item for item in facts if item.source == "prompt.execution"]) == 5
+    assert params.tool_ir_history[0] == UserTurn("继续整理自己的项目")
+
+
+def test_native_pressure_projection_matches_materialized_request_without_mutation(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        _model_visible_context_components,
+    )
+
+    agent = _native_agent(tmp_path)
+    params = _params()
+    params.tool_ir_history.append(UserTurn("真实用户输入"))
+    for fact in ("旧状态", "新状态", "新状态"):
+        prompt = CacheStructuredPrompt("stable", volatile_sections=(
+            ("workspace", "不变的工作区" * 500), ("execution", fact),
+        ))
+        original = list(params.tool_ir_history)
+        before = _model_visible_context_components(agent, params, prompt)
+        assert params.tool_ir_history == original
+        materialized = _materialize_native_prompt_facts(ModelGenerateParams(
+            agent=agent, params=params, prompt=prompt, tool_rounds=0,
+        ))
+        after = _model_visible_context_components(agent, params, materialized.prompt)
+        assert before == after
+
+
+def test_runtime_fact_delta_uses_latest_surviving_source_not_ever_seen() -> None:
+    from copy import deepcopy
+
+    from agent_py_agent.agent.agent_core.tool_ir_history import record_runtime_facts_turn_ir
+
+    params = _params()
+    assert record_runtime_facts_turn_ir(params, "A", source="clock")
+    assert record_runtime_facts_turn_ir(params, "A", source="memory")
+    assert not record_runtime_facts_turn_ir(params, "A", source="clock")
+    checkpoint = deepcopy(params.tool_ir_history)
+    assert record_runtime_facts_turn_ir(params, "B", source="clock")
+    assert record_runtime_facts_turn_ir(params, "A", source="clock")
+    assert [item.text for item in params.tool_ir_history if item.source == "clock"] == ["A", "B", "A"]
+    params.tool_ir_history[:] = checkpoint
+    assert record_runtime_facts_turn_ir(params, "B", source="clock")
+    assert "_native_runtime_facts_seen" not in params.live_archive_state
+
+
+def test_summary_retains_latest_fact_for_each_source() -> None:
+    from agent_py_agent.agent.agent_core.tool_ir_history import drop_tool_call_pairs
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn
+
+    params = _params()
+    user = UserTurn("接着做原任务")
+    unchanged = RuntimeFactsTurn("当前工作区", source="workspace")
+    old = RuntimeFactsTurn("old", source="execution")
+    latest = RuntimeFactsTurn("new", source="execution")
+    call = canonical_history_call("read_file", {"path": "README.md"}, call_id="old-pair")
+    result = canonical_history_result(call, "ok")
+    params.tool_ir_history.extend([
+        user, unchanged, old, AssistantTurn(tool_calls=[call]), result, latest,
+    ])
+    assert drop_tool_call_pairs(params, {"old-pair"}, drop_completed_tool_turns=True) == 1
+    assert params.tool_ir_history == [user, unchanged, latest]
+
+
 def test_text_protocol_receives_the_same_exact_compact_generation() -> None:
     params = replace(
         _params(protocol="text"),
