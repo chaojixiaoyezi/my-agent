@@ -1,13 +1,25 @@
 # DESIGN LEDGER
 
-## 2026-09-07 批处理与交互输入分离【状态：R202 本地通过，待 TUI】
+## 2026-09-07 清单状态与执行活动分离【状态：R203 本地通过，待 TUI】
+
+- Todo 的 in_progress 是模型维护的计划事实，不等于当前存在执行。只由快照的前台 phase 或后台 active count
+  决定动画；空闲显示待继续，不自动打勾、不改计划账，不用正文判断完成。删除 Todo 单独维持刷新时钟的旧判断。
+- 对照 会话运行时 history_cell/plans.rs 的静态计划、终端交互 TaskListV2.tsx 的独立状态图标；本项目保留运行期
+  Todo 动画偏好，终态立即静止。144 focused 通过，原 TUI 待验；没有新配置、模型请求或持久化副作用。
+- 新发现的截断并非质量验收问题：K provider 输出被截断，runtime 保留 unfinished，但 TUI 未提示。
+  会话运行时 会话运行时-api/src/sse/responses.rs 将 response.incomplete 作为流错误；终端交互 query.ts 对 max-output
+  有界恢复、耗尽后展示错误。下一步核对本项目同轮恢复与终态展示，不能凭半句文本判断、不能改旧失败账，
+  也不能把这种技术恢复扩成普通任务的后台自动续跑或重新加入机器质量判官。尚未实现这部分。
+
+## 2026-09-07 批处理与交互输入分离【状态：R202 已部署，真实分项复验】
 
 - 普通命令没有输入协议，不能默默借用 Gateway/TUI 的 fd 0；前台与后台启动 Gateway 必须等价。
 - 对照 会话运行时 `core/src/spawn.rs` 的 RedirectForShellTool→Stdio::null，以及 `utils/pty/src/pipe.rs`
   中独立的 Piped/Null；当前 run_command、controlled_exec、attempt.run 明确关闭宿主 stdin。
 - 命令内部的显式管道/重定向不受影响；独立 PTY 和 MCP 继续保留各自输入通道。不解析提示词或命令输出去
   猜确认，不自动输入 yes，不更改权限/文件边界、超时预算或 UNKNOWN 规则；纯 bug fix 无新增配置。
-- 真实长任务的 240 秒输入等待为失败样本；6 个红测后 80 focused / 9 Linux 环境 skipped，待新版原 TUI。
+- 真实长任务的 240 秒输入等待为失败样本；163 focused / 9 Linux 环境 skipped。R202 单 Gateway 已部署，
+  原 C 验证 PTY/管道与显式 EOF，模型修复业务输入错误并继续；默认无重定向 fd 0 的独立真机切片仍不冒充通过。
 
 ## 2026-09-07 详细正文绑定当前代理【状态：R201 原 TUI 组合通过】
 

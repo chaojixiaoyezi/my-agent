@@ -71,6 +71,24 @@ def test_direct_turn_stream_tool_and_final_keep_order_and_no_duplicate() -> None
     assert snapshot.status.tool_rounds == 1
 
 
+def test_unfinished_todo_does_not_keep_idle_runtime_refreshing() -> None:
+    runtime = TuiRuntime("todo-idle-refresh")
+    runtime.begin_turn("request-plan", task_progress_generation_id="plan-gen")
+    items = [{"id": "remaining", "title": "检查交班结果", "status": "in_progress"}]
+    runtime.publish_task_progress_snapshot(items, generation_id="plan-gen")
+    assert runtime.needs_periodic_refresh() is True
+    runtime.complete_turn("request-plan", TuiTurnSummary(response_text="本轮结束"))
+    runtime.needs_periodic_refresh()  # 允许终态的一次性补帧。
+    assert runtime.needs_periodic_refresh() is False
+    todo = next(b for b in runtime.store.snapshot().active_blocks if b.role == "todo")
+    assert todo.metadata["items"] == items
+    runtime.update_background_activity(1, {"subagents": []})
+    assert runtime.needs_periodic_refresh() is True
+    runtime.update_background_activity(0)
+    runtime.needs_periodic_refresh()
+    assert runtime.needs_periodic_refresh() is False
+
+
 def test_multiple_provider_thinking_blocks_keep_chronological_order() -> None:
     """每次 provider 调用的思考都独立留在对应回复之前，不能被后一次覆盖。"""
     runtime = TuiRuntime("session-multi-thinking")

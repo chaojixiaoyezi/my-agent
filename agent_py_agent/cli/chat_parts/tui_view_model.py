@@ -1,5 +1,5 @@
 # LLM: 本模块是 typed TUI event 到可渲染快照的唯一 reducer；不得读取模型正文猜状态，也不得执行工具、权限或会话动作。
-# 模块用途: 管理稳定历史块、活动块、权限覆盖层、输入队列、状态和有界诊断，并向 UI 提供线程安全快照。
+# 模块用途: 管理稳定历史块、活动块、权限覆盖层、输入队列、状态和有界诊断；快照把执行活动与未完成清单分开。
 
 from __future__ import annotations
 
@@ -108,8 +108,8 @@ class TuiDiagnostic:
     block_id: str
 
 
-# LLM: TuiViewSnapshot 是 UI 线程读取的不可变投影，调用方不得直接修改 reducer 内部状态。
-# 类用途: 一次性取得历史、活动块、队列、overlay、status 和 diagnostics。
+# LLM: TuiViewSnapshot 是 UI 线程读取的不可变投影；活动谓词只供显示/刷新，不改 Todo 或运行账，调用方不得修改 reducer。
+# 类用途: 一次性取得历史、活动块、队列、overlay、status 和 diagnostics，统一判断页面是否仍有真实执行。
 @dataclass(frozen=True)
 class TuiViewSnapshot:
     stable_blocks: tuple[TuiBlock, ...]
@@ -119,6 +119,18 @@ class TuiViewSnapshot:
     permission: TuiPermissionOverlay | None
     status: TuiStatus
     diagnostics: tuple[TuiDiagnostic, ...]
+
+    # LLM: Display activity comes from the current turn phase or canonical background count,
+    # never from unfinished Todo items; renderer and refresh cadence must share this predicate.
+    # 函数用途: 判断页面是否仍有前台或后台工作，避免模型漏勾清单导致终态页面永远闪动；不改变业务状态。
+    @property
+    def has_active_work(self) -> bool:
+        return self.status.phase in {"running", "interrupting"} or any(
+            block.role == "background"
+            and block.phase not in TERMINAL_BLOCK_PHASES
+            and _nonnegative_int(block.metadata.get("active_task_count"), 0) > 0
+            for block in self.active_blocks
+        )
 
 
 # LLM: 该 mixin 只实现权限 overlay 的 typed 状态转换，由唯一 TuiViewModelReducer 继承；不得独立实例化或持有第二份状态。

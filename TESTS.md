@@ -1,5 +1,11 @@
 # TESTS
 
+## R203 Todo 活动与终态
+
+两个真实状态复现分别验证 runtime 不再因未勾完项保持周期刷新，以及真实 renderer/frame key 在空闲后稳定。
+前台完成、后台活跃/归零、原计划内容不被篡改均覆盖；独立块缓存仍明确接收显示活动投影。
+与 renderer/runtime/view-model/view/agent-navigation 共 144 focused 通过，原 TUI 是最终验收。
+
 ## R202 批处理 stdin 不继承宿主
 
 `test_shell_stdin.py` 以独立管道模拟宿主输入，经三个真实子进程入口验证：无显式输入时 EOF、宿主输入不被

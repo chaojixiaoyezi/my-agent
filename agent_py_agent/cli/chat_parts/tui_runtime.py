@@ -1,6 +1,6 @@
 # LLM: 本模块是 chat worker/Gateway structured rows 到 TuiEvent 的唯一 adapter；它不渲染、不执行工具，也不把 legacy 文案当状态。
 # 后台流身份仅管理展示续接，换流不得清空本页面历史、待输入回执或已恢复工作片。
-# 模块用途: 为 session、输入队列、回合、流式助手、思考和工具生命周期分配稳定 block id 并发布有序 typed events。
+# 模块用途: 为 session、输入队列、回合、流式助手、思考和工具发布有序事件；执行活动结束后不因残留 Todo 空转刷新。
 
 from __future__ import annotations
 
@@ -731,19 +731,6 @@ def _task_progress_payload(
         "task_progress_generation_id": projection.generation_id,
         "task_progress_plan_revision": projection.plan_revision,
     }
-
-
-# LLM: Periodic animation is enabled only by typed task_progress status; titles and
-# display prose must never keep the render clock alive.
-# 函数用途: 判断 Todo 快照是否含正在执行项，避免纯待办或已完成清单持续空转刷新。
-def _todo_items_need_animation(value: object) -> bool:
-    if not isinstance(value, list | tuple):
-        return False
-    return any(
-        isinstance(item, Mapping)
-        and str(item.get("status") or "").strip().lower() == "in_progress"
-        for item in value
-    )
 
 
 # LLM: This is the client-side metadata whitelist for the authenticated activity
@@ -1478,7 +1465,7 @@ class TuiRuntime(
     # racing the prior render cannot leave stale Working/final text painted. A retained terminal-
     # agent roster is interactive but static and must not redraw forever merely because its block
     # remains mounted.
-    # 函数用途: 告诉动画线程是否要重绘；提示到期或后台终态时各补一帧，其余空闲状态不持续刷新。
+    # 函数用途: 以快照真实活动决定动画；提示到期或终态各补一帧，未勾完的清单不让空闲页面持续刷新。
     def needs_periodic_refresh(self) -> bool:
         now = time.monotonic()
         with self._lock:
@@ -1501,16 +1488,8 @@ class TuiRuntime(
         if notice_active or notice_expired or terminal_refresh_pending:
             return True
         snapshot = self.store.snapshot()
-        return any(
+        return snapshot.has_active_work or any(
             block.role in {"connection", "thinking", "compact"}
-            or (
-                block.role == "background"
-                and _nonnegative_int(block.metadata.get("active_task_count")) > 0
-            )
-            or (
-                block.role == "todo"
-                and _todo_items_need_animation(block.metadata.get("items"))
-            )
             for block in snapshot.active_blocks
         )
 

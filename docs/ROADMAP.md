@@ -1,10 +1,16 @@
 # ROADMAP
 
+## R203 Todo 与技术截断的真实状态
+
+- Todo 空闲仍闪动的修复已通过 144 focused，下一步原 TUI 验证；模型计划不被自动改写。
+- K 阶段性半句回复已查明 MODEL_RESPONSE_TRUNCATED，旧任务因此仍活跃。继续参考 会话运行时 incomplete
+  流错误与 终端交互 有界恢复，解决前端无提示的缺口；不把副作用、任务身份和机器质量验收混在一起。
+
 ## R202 普通命令的输入边界（优先真实 TUI）
 
 - 普通 Popen 继承 Gateway stdin，导致前台宿主的命令无输入时白等，且有抢读共享输入的风险。
-- 同步执行统一 DEVNULL，管道与独立 PTY 不变；80 focused / 9 Linux skipped。下一步单 Gateway 部署，
-  原长任务验证无人交互时及时反馈、显式输入仍可用，保留旧超时证据，不代写被测项目。
+- 同步执行统一 DEVNULL，管道与独立 PTY 不变；163 focused / 9 Linux skipped。已部署单 Gateway；原 C
+  显式 PTY、管道和 EOF 重定向已验证，默认无重定向切片仍待测。L 服务树停止闭环，保留旧超时证据与业务代码。
 
 ## R201 详细视图切代理仍显示旧正文（原 TUI 组合通过）
 

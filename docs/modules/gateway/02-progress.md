@@ -1,5 +1,10 @@
 # Gateway Progress
 
+## R203 计划显示不代表执行（本地，待原 TUI）
+
+前台 phase 与后台 active count 共用快照谓词；空闲 Todo 保留未完成事实但不再闪动或维持周期刷新。
+144 focused 通过，原 F 客户端待验；单 Gateway 当前为 R202，后台协议不变。K 截断后提示缺失单列 BUG-140。
+
 ## R201 当前代理与冻结正文同源（已部署，原 TUI 组合通过）
 
 Ctrl+O 冻结 snapshot 在代理导航换 store 时同步重绑，详细档位保持、搜索坐标清理；同来源刷新不解冻。

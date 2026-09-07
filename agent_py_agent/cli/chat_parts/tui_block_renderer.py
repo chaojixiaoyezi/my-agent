@@ -1,5 +1,5 @@
 # LLM: 本模块是 TuiViewSnapshot 到 prompt_toolkit formatted lines 的唯一 block renderer；不得读取原始模型文本猜工具、权限或生命周期。
-# 模块用途: 生成 终端交互 同构的消息、权限、队列和底部提示；执行代次不能冒充失败重试数。
+# 模块用途: 生成消息、权限、队列和底部提示；执行代次不冒充重试数，未勾完清单不冒充正在执行。
 
 from __future__ import annotations
 
@@ -283,8 +283,8 @@ class TuiRenderContext:
         )
 
 
-# LLM: frame provider 必须复用 renderer 的可见上下文规则；wall clock 仅在活动 connection/thinking/background/compact/tool-input 真正改变画面时进入 key。
-# 函数用途: 生成一次完整 TUI 画面所需的上下文缓存键，避免空闲长会话被动画时钟反复重绘。
+# LLM: frame provider 必须复用 renderer 的可见上下文规则；Todo 的时钟只在 snapshot.has_active_work 时进入 key。
+# 函数用途: 生成完整画面的上下文缓存键，避免空闲长会话或未勾完的清单被动画时钟反复重绘。
 def tui_render_context_key(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -332,7 +332,7 @@ def tui_render_context_key(
     )
     todo_animation = (
         context.spinner_index % len(SPINNER_GLYPHS)
-        if any(
+        if snapshot.has_active_work and any(
             block.role == "todo"
             and _todo_has_in_progress_items(block.metadata.get("items"))
             for block in snapshot.active_blocks
@@ -1147,8 +1147,8 @@ def _render_interrupt_notice(
     )
 
 
-# LLM: cache key 不包含不影响该 block 的状态；活动 thinking/tool-input 才读取各自 spinner/clock，session 才读取品牌元数据。
-# 函数用途: 生成一个精确且可哈希的 block 渲染版本键。
+# LLM: cache key 不包含无关状态；Todo 的显示活动投影可能不改变原 block seq，必须独立入 key，空闲时排除 spinner。
+# 函数用途: 生成可哈希的块渲染版本键，保证执行停止后不会复用旧动画，但保留模型清单事实。
 def _block_cache_key(block: TuiBlock, context: TuiRenderContext) -> tuple[Any, ...]:
     key: tuple[Any, ...] = (
         block.block_id,
@@ -1175,8 +1175,9 @@ def _block_cache_key(block: TuiBlock, context: TuiRenderContext) -> tuple[Any, .
     }:
         key += _tool_input_animation_key(block, context)
     if block.role == "todo":
-        key += (context.todos_expanded,)
-        if _todo_has_in_progress_items(block.metadata.get("items")):
+        active_execution = bool(block.metadata.get("active_execution"))
+        key += (context.todos_expanded, active_execution)
+        if active_execution and _todo_has_in_progress_items(block.metadata.get("items")):
             key += (context.spinner_index % len(SPINNER_GLYPHS),)
     return key
 
@@ -1739,14 +1740,15 @@ def _format_compact_number(value: int) -> str:
 
 
 # LLM: Todo is a read-only projection. The header counts typed completed/running
-# states and separately reports active child rows not represented by a visible Todo;
-# the collapsed view remains only a four-item window and never changes ledger state.
-# 函数用途: 渲染真实完成/运行数、未映射的运行中子代理提示和四行任务窗口；Ctrl-T 只负责展开或收起全部任务。
+# states and separately reports active child rows not represented by a visible Todo.
+# The display-only active_execution projection gates animation, never ledger completion.
+# 函数用途: 渲染四行任务窗口；有真实执行才闪动，空闲时把未勾完项显示为待继续，Ctrl-T 不改任务状态。
 def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     items = block.metadata.get("items")
     if not isinstance(items, list) or not items:
         return ()
     public_items = [item for item in items if isinstance(item, dict)]
+    active_execution = bool(block.metadata.get("active_execution"))
     visible_items, hidden_count = _todo_window_items(
         public_items,
         expanded=context.todos_expanded,
@@ -1763,7 +1765,8 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
     )
     title = f"📋 任务清单 · 完成 {completed_count}/{len(public_items)}"
     if in_progress_count:
-        title += f" · 进行中 {in_progress_count}"
+        label = "进行中" if active_execution else "待继续"
+        title += f" · {label} {in_progress_count}"
     unrepresented_active_child_count = max(
         0,
         _safe_render_int(block.metadata.get("unrepresented_active_child_count")),
@@ -1800,7 +1803,7 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
         style = style_map.get(status, "class:tui-todo-pending")
         icon = (
             SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)] + " "
-            if status == "in_progress"
+            if status == "in_progress" and active_execution
             else icon_map.get(status, "□ ")
         )
         prefix = f"  {icon}"
@@ -2335,8 +2338,9 @@ def _render_input_status(
 # overlay exact direct-child statuses for display. Auto-seeded items whose id is
 # an exact visible child run id are omitted because the coordinator panel owns
 # those rows; active children without an explicit visible Todo link remain a
-# separate header count. The canonical ledger remains unchanged.
-# 函数用途: 生成输入框上方的用户任务清单，隐藏与下方子代理面板重复的自动派工项，原位更新关联状态，并提示仍在运行的额外子代理。
+# separate header count. Snapshot activity gates the local animation projection only;
+# the canonical ledger remains unchanged even if the model finishes with incomplete items.
+# 函数用途: 生成输入框上方清单、投影真实执行活动及关联子代理状态；空闲保留未完成项但停止闪动，不代替模型打勾。
 def _render_fixed_todo(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -2347,6 +2351,7 @@ def _render_fixed_todo(
     )
     if todo is None:
         return ()
+    todo = replace(todo, metadata={**todo.metadata, "active_execution": snapshot.has_active_work})
     background = next(
         (
             block

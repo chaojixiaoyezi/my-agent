@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## R203 Todo 动画活动源
+
+`TuiViewSnapshot.has_active_work` 是显示与刷新共用的只读活动谓词；`_render_fixed_todo` 只增加本地
+`active_execution` 投影。renderer 缓存键纳入它，空闲时不纳入 spinner；runtime 不再由 Todo 状态单独驱动刷新。
+该字段不进入 Gateway、模型、计划账或持久化，不修改任何任务状态。
+
 ## R201 客户端详细正文来源
 
 `TuiFrameProvider.set_state_store` 是导航换显示仓库的唯一入口；详细模式的冻结 snapshot 通过

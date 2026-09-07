@@ -1196,6 +1196,36 @@ def test_question_help_footer_maps_only_real_tui_shortcuts() -> None:
     assert narrow_text.count("\n") > wide_text.count("\n")
 
 
+def test_todo_spinner_stops_when_turn_and_background_work_are_idle() -> None:
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import tui_render_context_key
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnSummary
+
+    runtime = TuiRuntime("todo-render-lifecycle")
+    runtime.begin_turn("request-plan", task_progress_generation_id="plan-gen")
+    items = [{"id": "remaining", "title": "检查交班结果", "status": "in_progress"}]
+    runtime.publish_task_progress_snapshot(items, generation_id="plan-gen")
+    first = TuiRenderContext(width=100, spinner_index=0)
+    second = TuiRenderContext(width=100, spinner_index=1)
+    busy = runtime.store.snapshot()
+    assert render_tui_snapshot(busy, first).todo_lines != render_tui_snapshot(busy, second).todo_lines
+
+    runtime.complete_turn("request-plan", TuiTurnSummary(response_text="本轮结束"))
+    idle = runtime.store.snapshot()
+    frame = render_tui_snapshot(idle, first)
+    assert frame.todo_lines == render_tui_snapshot(idle, second).todo_lines
+    assert "待继续 1" in "\n".join(fragments_text(line) for line in frame.todo_lines)
+    assert tui_render_context_key(idle, first) == tui_render_context_key(idle, second)
+    todo = next(b for b in idle.active_blocks if b.role == "todo")
+    assert todo.metadata["items"] == items
+
+    runtime.update_background_activity(1, {"subagents": []})
+    background = runtime.store.snapshot()
+    assert render_tui_snapshot(background, first).todo_lines != render_tui_snapshot(background, second).todo_lines
+    runtime.update_background_activity(0)
+    stopped = runtime.store.snapshot()
+    assert render_tui_snapshot(stopped, first).todo_lines == render_tui_snapshot(stopped, second).todo_lines
+
+
 def test_todo_panel_renders_items_with_checkmarks_and_shared_spinner() -> None:
     """Todo 运行项共用一帧动画，待办和完成图标保持静态。"""
     from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiBlockRenderCache
@@ -1209,6 +1239,7 @@ def test_todo_panel_renders_items_with_checkmarks_and_shared_spinner() -> None:
         phase="active",
         title="任务清单",
         metadata={
+            "active_execution": True,
             "items": [
                 {"id": "a", "title": "阅读项目A", "status": "done"},
                 {"id": "b", "title": "分析模块", "status": "in_progress"},
@@ -1248,7 +1279,7 @@ def test_todo_panel_collapses_to_status_window_and_ctrl_t_expands() -> None:
         kind="task_progress",
         role="todo",
         phase="active",
-        metadata={"items": items},
+        metadata={"items": items, "active_execution": True},
     )
     cache = TuiBlockRenderCache(max_entries=10)
 

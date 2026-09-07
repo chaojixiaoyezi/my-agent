@@ -1,12 +1,30 @@
 # STATUS
 
-## R202 普通命令等待宿主输入（本地修复，待真实 TUI）
+## R203 未完成清单不代表执行仍活跃（本地通过，待原 TUI）
+
+- F 已 final/输入空闲，Todo 仍闪动；两个定位用例先红。快照统一区分实际前台/后台活动与模型清单状态，
+  空闲时保留未勾完项、显示“待继续”、停止动画和周期刷新；不代替模型完成 Todo，不修改后端账。
+- 对照 会话运行时 history_cell/plans.rs 与 终端交互 TaskListV2.tsx 的静态计划状态；保留用户要求的运行期动画。
+  144 focused 通过，待部署客户端并在原 TUI 验证；不把单测当产品验收。
+- K 旧追问的事件已证实 runtime_status=unfinished / MODEL_RESPONSE_TRUNCATED，而前端只显示半句回复。
+  新复刻沿用其未结束 task，不能仅由旧 parent id 判定派错父级。截断提示/恢复链路为新开口 BUG-140。
+
+## R202 普通命令等待宿主输入（已部署，真实分项复验）
 
 - 原 C `restore` 无输入时等待 240 秒；Gateway stdin 为 `/dev/pts/4`，普通 Popen 未传 stdin，错误继承宿主终端。
 - 对照 会话运行时 spawn.rs 的 RedirectForShellTool / Stdio::null 与 pipe.rs 的显式 Piped/Null 区分；
   普通 shell、受控执行和 attempt 同步入口明确 DEVNULL，独立 PTY/MCP 不变，不自动替用户回答确认。
 - 六个定位红测后，80 通用/平台 focused 与另 83 个 shell/受控入口测试通过（合计 163），9 Linux bwrap
-  用例在本机跳过；本地严格 gate 已通过，暂无真实新版 TUI 结论。
+  用例在本机跳过；本地严格 gate 已通过。唯一 Gateway 已为 R202 / PID 3271274，MiniMax-M2.7，
+  wheel SHA 8fbe3d11b4d5fec7e11251e479506de0e553388a374746db518116dc2112b98d。
+- C 原会话的显式 PTY 与 yes 管道通过；无输入另经真实工具的 /dev/null 重定向验证：先在 0.34/0.62 秒
+  暴露业务脚本 EOFError，再由被测模型自行修复，delete/restore 各约 0.93/0.92 秒取消，保留 37 条设备。
+  这些是显式 EOF 的真实验收，不冒充“去掉重定向后默认 fd 0”的独立真机复现。该回合 13 次 MiniMax 调用、
+  未缓存输入 186454、缓存读取 403014、输出 4084，Compact 26→27；无失败/超时/模型重试。
+- L 经原 TUI 停止游戏服务，process_session 回执确认 4 个进程已终止、无 unresolved PID；旧服务/宿主
+  PID 3181703/3181687 均消失，8099 无监听，本机连接失败，23 个项目文件和 README 保留。
+- 退出空闲客户端后，已删除零引用 R177/R197 环境，保留安装包/依赖/原启动参数，可重建；未删用户项目、
+  会话运行时/终端交互 或历史。R189 仍有受保护客户端引用，未动。证据在 deploy/r202-9887c60。
 - 同 C 已提供 R196 的真实超时继续证据：两次 240 秒超时，SIGTERM 回执分别确认 4/5 个进程已终止、
   无 unresolved PID、管道排空；随后同 attempt 又执行 11 次操作（9 成功）并 done。第二次有显式管道仍超时，
   不能都归因于 stdin，也不能把本轮普通执行证据替代故障重启矩阵。
@@ -27,8 +45,8 @@
 - F 交班与 E 跨年度账本均出现 final/Working 收起；F final msg-6d887a5906ab4a84，E final
   msg-79085455fd294be1。已记录它们列出的未验证范围，不把文字“完成”当产物全过。
 - C 保修流程停在“读代码确认”：attempt-1788801845-b569ba70 是 done；4 次真实模型调用均 finished，
-  原生末条仅 thinking/text、没有 tool_use。不是本轮崩溃/超时，属于提前收尾的质量失败；后续普通消息后
-  已继续修 undo/restore 并 Compact 23→24。K 更正报告也出现阶段性文字收尾，保留待核对。
+  原生末条没有 tool_use。任务未完整，但这些事实还不足以区分模型自愿收尾与输出截断；不能仅由 finished
+  推断完整响应。K 更正报告本轮已确认为 MODEL_RESPONSE_TRUNCATED，详见 BUG-140。
 
 ## R200 协调员正常续跑被累计次数误拦（已部署，两份真实现场恢复）
 
