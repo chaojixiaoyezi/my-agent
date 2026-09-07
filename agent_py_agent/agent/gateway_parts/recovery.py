@@ -1,6 +1,7 @@
 # LLM: Reconcile exact request leases and canonical terminal receipts; dispatch generations
 # never imply task failure. Startup resume preserves effects/history, expired processing leases
-# consume their own persisted budget. Check heartbeat/terminal/owner tests when changing this boundary.
+# consume their own persisted budget. Terminal commit releases exact request-affine claims; failed
+# cleanup stays retryable without re-execution. Check heartbeat/terminal/owner tests on changes.
 # 模块用途: 恢复 Gateway 中断的请求，分清服务重启和真正卡死，并保证同一回合只有一个终态和执行者。
 from __future__ import annotations
 
@@ -284,8 +285,9 @@ def _non_negative_int(value: object, *, default: int) -> int:
 
 
 # LLM: A canonical archive always wins over a leftover hot record. Legacy sealed processing rows
-# are committed without re-running the provider, then every client-visible projection is repaired.
-# 函数用途: 恢复“终态已提交但 processing 尚未清理”或旧版封口中间态。
+# are committed without re-running the provider. Exact request-affine claim cleanup precedes
+# the same canonical commit, so a cleanup I/O failure remains a commit retry, not a model retry.
+# 函数用途: 补交已封口的答复和执行权释放，不重跑模型；随后修复用户可见投影。
 def _recover_committed_terminal_processing(
     paths: GatewayPaths,
     request_path: Path,
@@ -360,6 +362,7 @@ def _recover_committed_terminal_processing(
                 terminal_response,
             )
         target = gateway_terminal_projection_folder(paths, terminal_response)
+        _finish_gateway_conversation_claim(terminal_payload, request_id, conversation_store)
         _commit_gateway_terminal_request(
             paths,
             request_path,
@@ -1081,9 +1084,40 @@ def repair_gateway_terminal_request(
         )
 
 
-# LLM: This is the sole processing-to-terminal transition. Under the exact-turn lock it embeds the
-# complete response, closes steering, settles never-claimed inputs, and only then moves the file.
-# 函数用途: 在同一回合锁内保存完整答复、收口补充消息并移动到完成或失败目录。
+# LLM: Release only the host-bound request's running recovery claim, using the already scoped
+# store and atomic task selector. No model calls, path guessing, or replacement-attempt recovery.
+# 函数用途: 结束原请求遗留的执行权；旧清理不能释放其他请求、线程或普通后台的租约。
+def _finish_gateway_conversation_claim(
+    payload: dict, request_id: str, conversation_store: object | None,
+) -> None:
+    binding = payload.get("conversation_claim")
+    if binding is None:
+        return
+    if (
+        not isinstance(binding, dict)
+        or binding.get("schema_version") != "gateway_conversation_claim.v1"
+        or binding.get("request_id") != request_id
+        or binding.get("task_id") != f"gateway:{request_id}"
+        or not isinstance(binding.get("thread_id"), str)
+        or not binding["thread_id"].strip()
+    ):
+        raise DataCorruptionError("Gateway 执行车道引用与原请求不一致")
+    if conversation_store is None:
+        raise RuntimeError("Gateway 执行车道收尾缺少原用户会话存储")
+    conversation_store.finish_background_run({
+        "thread_id": binding["thread_id"],
+        "expected_task_id": binding["task_id"],
+        "recover_same_task_only": True,
+        "status": {"failed": "failed", "cancelled": "cancelled", "interrupted": "cancelled"}.get(
+            payload.get("status"), "finished",
+        ),
+        "runtime_facts": {"execution_source": "gateway", "request_id": request_id},
+    })
+
+
+# LLM: Sole terminal transition seals the response before exact claim/guidance cleanup. Failed
+# cleanup leaves a sealed hot record for startup commit repair, never another model invocation.
+# 函数用途: 保存完整答复，释放原请求执行权、收口补充消息并移动到终态目录；失败可幂等补交。
 def terminalize_gateway_request_file(
     paths: GatewayPaths,
     path: Path,
@@ -1208,6 +1242,7 @@ def terminalize_gateway_request_file(
                     )
         if terminal_response is not None and path.is_file():
             write_json_file_atomic(path, terminal_payload)
+        _finish_gateway_conversation_claim(terminal_payload, turn_id, conversation_store)
         archived = _commit_gateway_terminal_request(
             paths,
             path if path_exists else canonical,

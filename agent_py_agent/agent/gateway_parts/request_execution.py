@@ -1,6 +1,7 @@
 # LLM: Gateway holds transport and conversation projections; actual execution identity is
 # published by RuntimeDB binding before model entry. Never infer it from a reused display task.
-# Unknown operation recovery has a typed public error; exception prose never decides retry or bypass.
+# Request-affine claims are bound before acquisition and retained until terminal commit; unknown
+# operation recovery has a typed public error. Exception prose never decides retry or bypass.
 # 模块用途: 执行网关请求，传递真实运行身份并恢复原回合；恢复受阻时区分执行结果未确认与会话读写失败。
 from __future__ import annotations
 
@@ -897,6 +898,41 @@ class _GatewayTaskBindingWriter:
     request: dict | None = None
     execution_attempt_id: str = ""
 
+    # LLM: Publish the exact request/thread lane before acquiring its recoverable claim. This
+    # write-ahead binding lets the sole terminalizer release it even after a crash before execution.
+    # 函数用途: 先保存请求的执行车道归属，避免进程中断后留下无法释放的租约。
+    def bind_conversation_claim(self, thread_id: str) -> bool:
+        if not self.request_id or not thread_id:
+            raise ValueError("执行车道必须绑定 request_id 与 thread_id")
+        binding = {
+            "schema_version": "gateway_conversation_claim.v1",
+            "request_id": self.request_id,
+            "thread_id": thread_id,
+            "task_id": f"gateway:{self.request_id}",
+        }
+
+        # LLM: Preserve queue fields under T plus JSON lock; an existing binding cannot change thread.
+        # 函数用途: 持久保存唯一请求归属，恢复不能改绑其他会话，失败就不领取执行权。
+        def persist() -> bool:
+            # LLM: The existing binding is write-ahead authority, not an overwriteable projection.
+            # 函数用途: 在原子更新中校验旧绑定，防止恢复失败时丢掉待清理的原始车道。
+            def update(current: dict) -> dict:
+                previous = current.get("conversation_claim")
+                if previous is not None and previous != binding:
+                    raise ConversationPersistenceError("恢复执行车道与原请求绑定不一致")
+                return {**current, "conversation_claim": binding}
+
+            update_json_file_atomic(
+                self.request_path, update, require_existing=True,
+            )
+            if isinstance(self.request, dict):
+                self.request["conversation_claim"] = dict(binding)
+            return True
+
+        return _GatewayActiveTurnTransition(
+            self.request_path, self.request_id, self.execution_attempt_id,
+        )("bind_conversation_claim", persist)
+
     # LLM: Only core's actual DB binding calls this method, before any model/tool side effect.
     # Preserve unrelated queue fields under the exact transport-attempt transition; failure must
     # prevent execution. RuntimeDB revalidates this projection on recovery, it grants no new scope.
@@ -1163,8 +1199,8 @@ def _start_gateway_request_lease(
     )
 
 
-# LLM: assistant 落账前先拆出用户正文与产物 metadata，内部协议不得进入权威 transcript。
-# 函数用途: 执行一轮 Gateway 对话，并可靠保存用户消息、回复投影和近期产物引用。
+# LLM: Persist exact recovery lane before acquiring, then prepare canonical history under the lane.
+# 函数用途: 执行一轮 Gateway 对话；先固定恢复归属，再读取上下文、运行及保存正式消息。
 def _run_gateway_ask(context: _GatewayAskRunContext):
     request = context.request
     prompt = str(request.get("prompt") or request.get("goal") or "").strip()
@@ -1180,9 +1216,8 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
     preflight = _preflight_gateway_conversation(load_request)
     _require_gateway_conversation_ready(request, preflight)
     with _gateway_conversation_execution_lane(
-        context.agent,
+        context,
         preflight.thread_id,
-        request_id=context.request_id,
     ):
         # Reserve the thread before reading compact/history/task state.  A turn
         # queued behind another turn must see that prior turn's final transcript,
@@ -1848,12 +1883,10 @@ def _set_gateway_identifier_redactions(
         setter(identifiers)
 
 
-def _gateway_conversation_execution_lane(
-    agent: SimpleAgent,
-    thread_id: str,
-    *,
-    request_id: str,
-):
+# LLM: Write-ahead request binding precedes pinned claim acquisition; terminalization owns crash
+# cleanup. Background child wake may take this lane only after the foreground yields or finishes.
+# 函数用途: 将原请求绑定到共用车道，重启后由原请求接续，不让后台先重复执行同一任务。
+def _gateway_conversation_execution_lane(context: _GatewayAskRunContext, thread_id: str):
     """Serialize one thread's foreground and background model turns.
 
     会话运行时 reserves one ``active_turn`` before automatic idle work.  The
@@ -1865,6 +1898,12 @@ def _gateway_conversation_execution_lane(
     thread_id = str(thread_id or "").strip()
     if not thread_id:
         return nullcontext()
+    agent = context.agent
+    request_id = context.request_id
+    _GatewayTaskBindingWriter(
+        context.request_path, request_id, context.request,
+        str(context.request.get("execution_attempt_id") or "").strip() or request_id,
+    ).bind_conversation_claim(thread_id)
     store = agent.conversation_store
     config = getattr(agent, "config", None)
     ttl_seconds = max(1, int(getattr(config, "background_claim_ttl_seconds", 90) or 90))
@@ -1889,6 +1928,11 @@ def _gateway_conversation_execution_lane(
             heartbeat_interval_seconds=interval_seconds,
             interrupt_check=is_interrupted,
             runtime_facts={"execution_source": "gateway", "request_id": request_id},
+            recover_same_task_only=True,
+            acquire_transition=_GatewayActiveTurnTransition(
+                context.request_path, request_id,
+                str(context.request.get("execution_attempt_id") or "").strip() or request_id,
+            ),
         )
     )
 

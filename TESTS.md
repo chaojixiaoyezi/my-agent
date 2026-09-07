@@ -1,5 +1,13 @@
 # TESTS
 
+## R198 同一请求的恢复归属
+
+真实 G 暴露后台 child wake 先执行原 root、旧前台随后恢复失败。定向用例先复现死进程/TTL 到期的错误
+接管，再验证 request-affine claim；真实 ConversationStore、Gateway 请求文件与终态提交链均参与。
+覆盖写入前失败、绑定后停止、返回后未提交、原请求再次接管、终态释放失败再启动补交、迟到清理与错误引用。
+原会话上下文、队列恢复及后台调度共 318 focused 通过 / 2 原有 xfailed；不以此替代真实 TUI 单 Gateway 重启。
+
+
 ## R197 HTTP 分块断流
 
 使用真实 stdlib HTTPResponse/BufferedReader 构造完整首条 SSE 后缺失下一块数据的响应，复现 IncompleteRead，

@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## R198 恢复执行归属
+
+- `_GatewayTaskBindingWriter.bind_conversation_claim` 在请求原子锁内保存 request/thread/claim-task，
+  不允许恢复改绑会话；`ConversationRunLaneRequest.acquire_transition` 将领取与请求终态串行。
+- `ConversationClaimStore` 的 `recover_same_task_only` 只约束未结束的宿主专属 claim，普通 claim 不变。
+  Gateway 车道在模型返回后不提前释放；普通后台继续在 finally 按 claim ID 结束。
+- 正常终态和 `_recover_committed_terminal_processing` 均调用 `_finish_gateway_conversation_claim`，
+  由 owner-scoped store 在一个原子更新内核对 thread/task/恢复标记/运行态；不会删除后来请求的 claim。
+  释放写入失败保留完整 sealed 请求等待补交，执行身份与 UNKNOWN 规则仍独立核对。
+
+
 ## R196 UNKNOWN 恢复的安全公开错误
 
 - `_recover_gateway_active_turn_authority` 仍核对真实 runtime binding 和工具终态，仅按返回的结构化

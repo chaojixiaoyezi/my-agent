@@ -7417,6 +7417,42 @@ def test_background_claim_immediately_takes_over_dead_same_host_owner(tmp_path) 
     assert second["previous_claim"]["expired"] is False
 
 
+@pytest.mark.parametrize("expired", [False, True])
+def test_foreground_claim_recovery_remains_with_exact_request(tmp_path, monkeypatch, expired):
+    from agent_py_agent.agent.conversation import store as store_module
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({
+        "canonical_user_id": "owner", "channel": "chat",
+        "channel_conversation_id": "session", "channel_user_id": "owner",
+    })
+    first = store.claim_background_run({
+        "thread_id": thread.thread_id, "task_id": "gateway:request-1",
+        "reason": "gateway_foreground_turn", "recover_same_task_only": True,
+        "lease_seconds": 10, "now": 10,
+    })
+    monkeypatch.setattr(store_module, "process_identity_is_live", lambda _: False)
+    current = 30 if expired else 11
+    for task_id in ("request-1", "gateway:request-2"):
+        assert store.claim_background_run({
+            "thread_id": thread.thread_id, "task_id": task_id,
+            "reason": "subagent_runner_finished", "now": current,
+        }) is None
+    assert store.load_background_run_claim(thread.thread_id)["claim_id"] == first["claim_id"]
+    recovered = store.claim_background_run({
+        "thread_id": thread.thread_id, "task_id": "gateway:request-1",
+        "reason": "gateway_foreground_turn", "recover_same_task_only": True, "now": current,
+    })
+    assert recovered and recovered["claim_id"] != first["claim_id"]
+    store.finish_background_run({
+        "thread_id": thread.thread_id, "claim_id": recovered["claim_id"], "status": "finished",
+    })
+    assert store.claim_background_run({
+        "thread_id": thread.thread_id, "task_id": "request-1",
+        "reason": "subagent_runner_finished", "now": current + 1,
+    }) is not None
+
+
 def test_background_claim_legacy_owner_waits_for_ttl_instead_of_guessing(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(

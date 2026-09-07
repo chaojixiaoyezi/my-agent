@@ -884,7 +884,7 @@ def test_gateway_public_reply_redacts_structured_ids_but_keeps_internal_transcri
         ),
     )
 
-    result = _run_gateway_ask(
+    result = _run_claimed_gateway_ask(
         _GatewayAskRunContext(
             agent,
             {"prompt": "告诉我归属", "conversation": conversation},
@@ -952,7 +952,7 @@ def test_gateway_persists_same_redacted_runtime_tool_identifier_as_delivery(
         ),
     )
 
-    result = _run_gateway_ask(
+    result = _run_claimed_gateway_ask(
         _GatewayAskRunContext(
             agent,
             {"prompt": "打开来源", "conversation": conversation},
@@ -1056,7 +1056,7 @@ def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path,
         )
 
     monkeypatch.setattr(agent, "run", pressure_then_answer)
-    result = _run_gateway_ask(
+    result = _run_claimed_gateway_ask(
         _GatewayAskRunContext(
             agent,
             {"prompt": "继续聊", "conversation": conversation},
@@ -1239,7 +1239,7 @@ def test_gateway_same_turn_can_cross_pressure_twice_without_recompacting_transcr
         )
 
     monkeypatch.setattr(agent, "run", pressure_twice_then_answer)
-    result = _run_gateway_ask(
+    result = _run_claimed_gateway_ask(
         _GatewayAskRunContext(
             agent,
             {"prompt": "继续长任务", "conversation": conversation},
@@ -1312,7 +1312,7 @@ def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_pa
 
     monkeypatch.setattr(agent, "run", pressure_without_progress)
     with pytest.raises(ConversationPersistenceError, match="无法继续压缩"):
-        _run_gateway_ask(
+        _run_claimed_gateway_ask(
             _GatewayAskRunContext(
                 agent,
                 {"prompt": "继续长任务", "conversation": conversation},
@@ -1979,7 +1979,7 @@ def test_gateway_fails_closed_before_model_when_user_turn_cannot_persist(tmp_pat
     }
 
     with pytest.raises(ConversationPersistenceError):
-        _run_gateway_ask(
+        _run_claimed_gateway_ask(
             _GatewayAskRunContext(
                 agent,
                 request,
@@ -2063,7 +2063,7 @@ def test_gateway_does_not_report_success_for_empty_unavailable_model_reply(tmp_p
     )
 
     with pytest.raises(UserReplyUnavailableError):
-        _run_gateway_ask(
+        _run_claimed_gateway_ask(
             _GatewayAskRunContext(
                 agent,
                 {"prompt": "继续原任务", "conversation": conversation},
@@ -2109,7 +2109,7 @@ def test_gateway_does_not_report_done_for_any_empty_model_reply(tmp_path, monkey
     )
 
     with pytest.raises(UserReplyUnavailableError):
-        _run_gateway_ask(
+        _run_claimed_gateway_ask(
             _GatewayAskRunContext(
                 agent,
                 {"prompt": "完成后告诉我", "conversation": conversation},
@@ -2172,7 +2172,7 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
             operation_verification=operation_verification,
         ),
     )
-    result = _run_gateway_ask(
+    result = _run_claimed_gateway_ask(
         _GatewayAskRunContext(
             agent,
             {"prompt": "请记住海棠", "conversation": conversation},
@@ -5453,7 +5453,22 @@ def _run_claimed_gateway_ask(context):
     path = context.request_path.parent / "gateway/requests/processing" / f"{context.request_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(request), encoding="utf-8")
-    return _run_gateway_ask(replace(context, request=request, request_path=path))
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.gateway_parts.recovery import terminalize_gateway_request_file
+
+    paths = gateway_paths_from_root(path.parent.parent.parent)
+    status = "done"
+    try:
+        return _run_gateway_ask(replace(context, request=request, request_path=path))
+    except BaseException:
+        status = "failed"
+        raise
+    finally:
+        terminalize_gateway_request_file(
+            paths, path, paths.done if status == "done" else paths.failed, context.request_id,
+            conversation_store=context.agent.conversation_store,
+            terminal_response={"id": context.request_id, "status": status, "ok": status == "done"},
+        )
 
 
 def _conversation_context(agent: SimpleAgent, request: dict, request_id: str, prompt: str):

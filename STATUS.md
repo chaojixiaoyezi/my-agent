@@ -1,5 +1,16 @@
 # STATUS
 
+## R198 前后台恢复归属（本地修复通过，待部署与真实重启复验）
+
+- 原 G 的前后台争抢用例先红后绿。Gateway 领取执行权前保存 exact request/thread 绑定，领取与停止/终态
+  共用原 active-turn 锁；只允许同请求接续恢复专属 claim，普通后台租约行为不变。
+- 专属 claim 保留到终态提交；正常完成、失败、取消与启动补交复用原子 exact-task 收尾。释放 I/O 失败
+  保留已封口结果，下次只补交，不重新调用模型；迟到清理不能结束后来的请求。
+- 318 focused 通过、2 项原有 xfailed；没有全仓 pytest。尚未算真实 TUI 恢复通过，旧 A/G 失败记录保留。
+- 并行 C 保修工具、E 年度账单已给出 final；H 停止后 8081 不再监听。J 三名 child DONE，主代理 Compact
+  6 后继续修复样本和验证问题；任务质量与费用未通过，不把重连成功当完整交付。
+
+
 ## R197 HTTP 半途断流（已部署，真实重连切片通过，长任务继续）
 
 - 共享 HTTP 入口补全 stdlib IncompleteRead 捕获和类型分类；现有 HTTP/model 退避负责原采样恢复，不新开 runner。

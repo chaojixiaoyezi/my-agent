@@ -1,5 +1,13 @@
 # Gateway Progress
 
+## R198 请求恢复专属执行权（本地通过，待真 TUI）
+
+真 G 的后台完成唤醒与原请求恢复顺序竞争，导致 canonical final 后又报 execution_binding_changed。
+已按 会话运行时 active-turn 归属适配原 claim：先绑定，再经原请求 transition 领取，同请求恢复、终态释放。
+启动补交与正常收尾共用 exact-task 原子清理，清理失败不重跑模型。318 focused / 2 原有 xfailed；
+旧失败账不改，真实重启与零重复副作用仍待验。
+
+
 ## R196 恢复失败的明确原因（本地完成，未部署）
 
 真实 A 的 shell 超时先产生 UNKNOWN，再被重启恢复挡住；并非 R194 身份丢失复发。原工具循环按次数与

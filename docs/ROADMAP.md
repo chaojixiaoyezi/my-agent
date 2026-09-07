@@ -3,8 +3,9 @@
 ## R198 同回合恢复竞争（优先修复）
 
 - 解决问题：后台已继续并完成原任务，旧 Gateway 请求取得 lane 后仍恢复旧 attempt，最终又报失败。
-- 真 G canonical final 与 execution_binding_changed 已核对。先读 会话运行时 active-turn/恢复实现，收敛请求
-  完成与执行归属，保持 identity/UNKNOWN 门；不捕获错误假完成，不手动改旧账。
+- 真 G canonical final 与 execution_binding_changed 已核对。对照 会话运行时 同一 active-turn/线程恢复，
+  已实现 write-ahead request/thread 归属、同请求恢复 claim、终态 exact-task 释放和补交；318 focused
+  通过 / 2 原有 xfailed。待真实 TUI 顺序重启；identity/UNKNOWN 门保留，不改旧失败账或捕获错误假完成。
 
 ## R197 HTTP 断流恢复（真实重连切片通过，继续长任务验收）
 

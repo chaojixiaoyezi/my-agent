@@ -1,3 +1,5 @@
+# LLM: Share one durable claim lane; host-bound foreground recovery must retain exact task affinity.
+# 模块用途: 前后台共用执行权、心跳与释放流程，不新增队列或模型重试。
 """One durable execution lane shared by foreground and background turns."""
 
 from __future__ import annotations
@@ -8,12 +10,15 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 
 from ..runtime_errors import runtime_error_report
 
 _LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
 
 
+# LLM: Callers publish any recoverable task binding before acquiring; this flag carries no authority.
+# 类用途: 汇集执行车道参数，允许 Gateway 保留原请求的重启恢复归属。
 @dataclass(frozen=True)
 class ConversationRunLaneRequest:
     """Inputs for one foreground or background owner of a conversation lane."""
@@ -27,6 +32,8 @@ class ConversationRunLaneRequest:
     interrupt_check: Callable[[], bool]
     retry_seconds: float = 0.05
     runtime_facts: dict[str, object] = field(default_factory=dict)
+    recover_same_task_only: bool = False
+    acquire_transition: Callable[[str, Callable], dict | None] | None = None
 
 
 def claim_heartbeat_interval_seconds(
@@ -97,23 +104,35 @@ class ConversationRunClaimHeartbeat(threading.Thread):
                 return
 
 
+# LLM: Acquisition retains cancellation/cadence; a host transition serializes each attempt with
+# terminalization, closing the write-ahead-bind/acquire race without holding a lock while waiting.
+# 函数用途: 等待并领取会话执行权，每次领取可与停止原子裁决；等待时不持锁、不调用模型。
 def _acquire_conversation_run_claim(request: ConversationRunLaneRequest) -> dict:
     while True:
         if request.interrupt_check():
             raise InterruptedError("conversation turn interrupted while waiting for execution lane")
-        claim = request.store.claim_background_run(
+        acquire = partial(
+            request.store.claim_background_run,
             {
                 "thread_id": request.thread_id,
                 "task_id": request.claim_task_id,
                 "reason": request.reason,
                 "lease_seconds": request.lease_seconds,
+                "recover_same_task_only": request.recover_same_task_only,
             }
+        )
+        claim = (
+            request.acquire_transition("claim_conversation", acquire)
+            if request.acquire_transition is not None else acquire()
         )
         if claim is not None:
             return claim
         time.sleep(max(0.05, request.retry_seconds))
 
 
+# LLM: Ordinary lanes finish in finally. Gateway's write-ahead recovery binding makes terminal
+# commit responsible for releasing pinned lanes, including the crash gap after returning a result.
+# 函数用途: 保持心跳直到本轮退出；恢复专属车道由请求终态释放，避免返回结果后被抢先续跑。
 @contextmanager
 def conversation_run_lane(request: ConversationRunLaneRequest) -> Iterator[dict]:
     """Hold the durable per-thread execution claim for one complete model turn."""
@@ -139,16 +158,17 @@ def conversation_run_lane(request: ConversationRunLaneRequest) -> Iterator[dict]
         raise
     finally:
         heartbeat.stop()
-        request.store.finish_background_run(
-            {
-                "thread_id": request.thread_id,
-                "claim_id": claim_id,
-                "task_id": request.claim_task_id,
-                "status": status,
-                "error": error,
-                "runtime_facts": dict(request.runtime_facts),
-            }
-        )
+        if not request.recover_same_task_only:
+            request.store.finish_background_run(
+                {
+                    "thread_id": request.thread_id,
+                    "claim_id": claim_id,
+                    "task_id": request.claim_task_id,
+                    "status": status,
+                    "error": error,
+                    "runtime_facts": dict(request.runtime_facts),
+                }
+            )
 
 
 __all__ = [

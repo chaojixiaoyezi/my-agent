@@ -21,6 +21,11 @@
 
 ## 2026-08-23 当前运行基线
 
+- Gateway 前台执行车道先持久绑定 exact request/thread，再在原 active-turn transition 下领取。
+  恢复专属 claim 不因 TTL 或宿主退出被后台/另一请求接管；原请求可恢复，终态提交才释放。
+  完成、失败、停止与启动补交共用 exact-task 原子清理；清理失败只补交结果，不重做模型工作。
+  普通后台 claim 不改变，权限、UNKNOWN、运行身份和模型完成语义不放宽。
+
 - HTTP `IncompleteRead` 属于 provider 断流，不得作为未知 runner 编程错误一跳终止长任务；同一 transport
   错误边界覆盖 JSON、metadata GET、SSE list/iterator 和响应头。open 复用原 HTTP 退避，body 交原模型重试。
   用户中断不重连，watchdog 超时保留真实阶段；半截响应不返回可执行工具，不增加整任务重做旁路。

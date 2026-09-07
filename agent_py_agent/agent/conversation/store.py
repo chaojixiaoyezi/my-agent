@@ -1,3 +1,6 @@
+# LLM: Canonical conversation persistence owns messages and execution claims; recovery ownership
+# is structured and atomic, and never inferred from model text. Check Gateway terminal cleanup.
+# 模块用途: 保存会话、消息及执行归属；前台恢复专属租约须由原请求继续或在终态释放。
 """Conversation store for threads, messages, tasks, observations, guidance,
 wake signals, progress policies, and background claims.
 """
@@ -5489,6 +5492,8 @@ _FINISH_STATUSES = {"finished", "failed", "cancelled"}
 _INVALID_FINISH_STATUS = "invalid_status"
 
 
+# LLM: Host-owned claim inputs; recovery affinity adds no permissions or new lease identity.
+# 类用途: 表达执行租约及原请求恢复归属，由同一 claim 文件持久保存。
 @dataclass(frozen=True)
 class BackgroundClaimPayload:
     thread_id: str
@@ -5498,8 +5503,11 @@ class BackgroundClaimPayload:
     task_id: str = ""
     claim_scope_id: str = ""
     owner_process: dict[str, object] = field(default_factory=dict)
+    recover_same_task_only: bool = False
 
 
+# LLM: Emit one canonical claim; omit disabled recovery affinity for ordinary background callers.
+# 函数用途: 构造待落盘的租约；恢复专属标记只对宿主明确绑定的请求生效。
 def _new_claim(payload: BackgroundClaimPayload) -> dict[str, Any]:
     return {
         "schema_version": "background_run_claim.v1",
@@ -5516,6 +5524,7 @@ def _new_claim(payload: BackgroundClaimPayload) -> dict[str, Any]:
         "owner_process": dict(payload.owner_process),
         "acquisition": {"reason": "new_claim"},
         "takeover": {"allowed": False, "reason": "claim_running"},
+        **({"recover_same_task_only": True} if payload.recover_same_task_only else {}),
     }
 
 
@@ -5610,28 +5619,46 @@ def _claim_load_error(exc: BaseException, path: Path) -> dict[str, Any]:
     return report
 
 
+# LLM: Serialize each claim in the owner store; death/TTL cannot transfer recoverable foreground
+# ownership to another task. Terminal cleanup is exact-task CAS, not a directory or quality lock.
+# 类用途: 管理前后台共用执行租约，确保重启恢复和请求结束都能正确交接。
 class ConversationClaimStore(ConversationProgressStore):
+    # LLM: Atomically acquire a claim; only the original host-bound task can resume a pinned claim.
+    # 函数用途: 领取执行权；普通后台维持租约接管，尚未收尾的前台请求不因超时被另一执行者抢走。
     def claim_background_run(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         claim_scope_id = str(request.get("claim_scope_id") or thread.thread_id).strip()
         current = now(request.get("now"))
         lease = _claim_lease_seconds(request.get("lease_seconds"))
+        task_id = str(request.get("task_id") or "").strip()
+        recover_same_task_only = request.get("recover_same_task_only") is True
+        if recover_same_task_only and not task_id:
+            raise ValueError("恢复专属执行租约必须绑定明确的 task_id")
         claim = _new_claim(
             BackgroundClaimPayload(
                 thread_id=thread.thread_id,
                 reason=str(request.get("reason") or ""),
                 current=current,
                 lease=lease,
-                task_id=str(request.get("task_id") or ""),
+                task_id=task_id,
                 claim_scope_id=claim_scope_id,
                 owner_process=build_process_identity(),
+                recover_same_task_only=recover_same_task_only,
             )
         )
         claimed = False
 
+        # LLM: Called under the claim JSON lock; affinity is checked before TTL/dead-owner takeover.
+        # 函数用途: 原子核对旧租约归属，再按真实租约和宿主状态决定是否替换。
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal claimed
+            if (
+                data.get("status") == "running"
+                and data.get("recover_same_task_only") is True
+                and (not recover_same_task_only or data.get("task_id") != task_id)
+            ):
+                return data
             active = (
                 str(data.get("status") or "") == "running"
                 and float_value(data.get("expires_at")) > current
@@ -5715,10 +5742,17 @@ class ConversationClaimStore(ConversationProgressStore):
         )
         return updated if renewed else None
 
+    # LLM: Finish by exact claim ID, or by host-published exact task at Gateway terminal commit.
+    # Task-only cleanup requires recovery affinity and running state; it cannot close a later task.
+    # 函数用途: 原子释放租约并保留真实终态；重启后的失败收尾不依赖线程仍能读取。
     def finish_background_run(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
         claim_scope_id = str(request.get("claim_scope_id") or thread_id).strip()
         claim_id = str(request.get("claim_id") or "")
+        expected_task_id = str(request.get("expected_task_id") or "").strip()
+        finish_recovery_task = request.get("recover_same_task_only") is True
+        if not claim_id and not (expected_task_id and finish_recovery_task):
+            return None
         # 收尾（释放租约/记失败事实）只作用于 claim 文件，不依赖线程仍可读。这条在 `_run_with_heartbeat`
         # 的 finally 里跑：若线程在长跑中变不可读还硬 `_require_thread`，会二次抛 KeyError 盖掉真正的 run
         # 错误、并再次崩后台清理。改为对已存在的 claim 文件收尾；无 claim 文件则无可收尾直接返回 None。
@@ -5740,10 +5774,19 @@ class ConversationClaimStore(ConversationProgressStore):
         )
         finished = False
 
+        # LLM: Select and finish under one file lock; missing IDs and late task cleanup are no-ops.
+        # 函数用途: 在同一原子更新中核对租约身份，避免迟到的旧请求结束新请求的执行权。
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal finished
-            if str(data.get("claim_id") or "") != str(claim_id or ""):
-                finished = False
+            if claim_id and data.get("claim_id") != claim_id:
+                return data
+            if expected_task_id and (
+                data.get("task_id") != expected_task_id or data.get("thread_id") != thread_id
+            ):
+                return data
+            if finish_recovery_task and (
+                data.get("recover_same_task_only") is not True or data.get("status") != "running"
+            ):
                 return data
             finished = True
             payload = {

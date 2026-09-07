@@ -1,12 +1,22 @@
 # DESIGN LEDGER
 
-## 2026-09-07 同一回合恢复归属【状态：R198 真机问题已定位，设计与修复进行中】
+## 2026-09-07 同一回合恢复归属【状态：R198 本地修复通过，待真实 TUI】
 
 - G 真任务在唯一 Gateway 重启后，后台 child 完成唤醒先续完原 root；旧前台请求随后又进行 Compact 和
   原 attempt 恢复核对，因 execution_binding_changed 失败，造成“有最终报告又报任务失败”。
 - 同 thread lane 只保证同时不运行，不能单独保证排队的同一旧请求不会再次执行。恢复必须重读权威完成/
   交接状态，使用真实 request/thread/task/attempt 和 canonical 消息，不能改成忽略身份冲突或解析完成文案。
-- 参考 会话运行时 的同一 active turn 与既有会话历史恢复路径；具体实现仍在核对，不新增任务质量验收器。
+- 参考 会话运行时 `core/src/session/turn.rs::run_turn` 复用同一 TurnContext，以及
+  `core/src/thread_manager.rs` 返回已运行的同一 resumed thread；不新增任务质量验收器。
+- 实现采用原 Conversation run claim 的恢复归属：Gateway 前台声明 `recover_same_task_only`，未收尾
+  claim 只能由同一精确 request 的执行车道接续；TTL/宿主死亡不把请求变成后台新工作。普通后台 claim 不变。
+- Gateway 在领取 claim 前持久保存 request/thread/claim-task 绑定，发布失败不领取；避免进程在领取后、
+  写引用前退出留下孤儿。终态提交与重启补交在原子更新中只释放这个 exact request 仍在运行的恢复专属
+  claim；普通后台 finally 继续按 claim ID 收尾，Gateway 专属车道保留到终态提交，覆盖模型返回后尚未
+  封存请求的崩溃间隙。新请求或其他 thread 的 claim 不受迟到清理影响。
+- 每次领取在原 Gateway active-turn transition 内核对执行代次，与停止及终态提交串行；等待期间不持锁。
+  claim 清理 I/O 失败保留已封口请求，启动恢复复用同一清理函数补交，不触发模型重跑。
+  这不增加目录锁、质量判定、模型调用或按文字推断身份；旧记录不自动改写为新协议。
 
 ## 2026-09-07 HTTP 正文断流进入既有恢复链【状态：R197 已部署，真实重连切片通过】
 
