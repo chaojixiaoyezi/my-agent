@@ -1,5 +1,5 @@
-# LLM: 本模块是 owner 私有模型配置的唯一文件源；只处理显式菜单操作，密钥不进入公开投影或异常正文。
-# 模块用途: 安全保存模型接口、地址、密钥和上下文窗口，并让用户选择后续工作使用的模型。
+# LLM: 本模块是 owner 私有模型配置的唯一文件源；子代理仅可显式引用已保存配置，密钥不进入公开投影。
+# 模块用途: 保存用户模型配置，解析主/子代理的模型选择；派工不能新增配置或改变主代理选择。
 
 from __future__ import annotations
 
@@ -154,10 +154,30 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
     return config
 
 
-# LLM: 只读取宿主配置来源中的 stable ID；raw params 中的同名属性必须先移除，不能由模型选择凭证。
-# 函数用途: 将子代理的创建时模型引用落入属性，重启后仍可恢复原接口与窗口。
-def inherit_model_profile(attrs: dict, agent: object) -> None:
+# LLM: 显式 model 只按当前 owner 保存的 ID/唯一模型名精确解析；不接受端点、密钥或跨 owner 引用。
+# 函数用途: 找到子代理要使用的已有配置；重名需用编号消歧，未知配置在创建前拒绝。
+def resolve_child_model_profile(agent: object, model: object) -> str:
+    if not isinstance(model, str) or not model.strip():
+        raise ModelProfileError("子代理 model 请填写 /model 中已新增的模型名称或配置编号；省略则继承父级。")
+    profiles = read_model_profiles(model_profiles_path(agent.home_paths))["profiles"]
+    model = model.strip()
+    if model in profiles:
+        return model
+    matches = [key for key, row in profiles.items() if row["model_name"] == model]
+    if len(matches) == 1:
+        return matches[0]
+    available = [{"id": key, "model_name": row["model_name"]} for key, row in profiles.items()]
+    reason = "模型名称有多个配置，请使用编号。" if matches else "当前用户尚未新增这个模型，请通过 /model 配置。"
+    raise ModelProfileError(reason + " 可用配置：" + json.dumps(available, ensure_ascii=False))
+
+
+# LLM: 宿主属性先移除伪造值；显式 model 解析后冻结 ID，否则继承父级当前快照，不改用户选择或运行配置。
+# 函数用途: 在 child 创建前记录选定模型，子孙和恢复都走同一私有配置引用。
+def inherit_model_profile(attrs: dict, agent: object, *, model: object = None) -> None:
     attrs.pop("host_model_profile.v1", None)
+    if model is not None:
+        attrs["host_model_profile.v1"] = {"profile_id": resolve_child_model_profile(agent, model)}
+        return
     sources = getattr(getattr(agent, "config", None), "config_sources", {})
     source = sources.get("model_name", {}) if isinstance(sources, dict) else {}
     if source.get("source") == "owner_model_profile" and source.get("profile_id"):

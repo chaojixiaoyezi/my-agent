@@ -1,4 +1,6 @@
 
+# LLM: 递归创建在全部规格校验成功后才物化；模型引用共用 owner 私有配置解析，不改变父级或现有 child。
+# 模块用途: 创建当前 child 的下一层，显式模型错误整批拒绝而不留下部分孙代理。
 from __future__ import annotations
 
 import json
@@ -7,6 +9,7 @@ from dataclasses import dataclass
 from ..action_protocol import subagent_schedule_envelope_from_payload
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..runtime_errors import runtime_error_report
+from ..settings.model_profiles import ModelProfileError
 from ..subagents.services.hierarchy.qa_scheduler import quality_advice_payload
 from ..subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
@@ -392,7 +395,7 @@ def _bulk_schedule_error(agent: object, child_specs: list[HierarchyChildSpec]) -
 
 # LLM: Recursive child specs pass through the same output-ref normalization as root
 # creation before permissions and attributes are derived; do not add a second path policy.
-# 函数用途: 把一项递归派工参数转换成孙代理规格，并统一绑定当前任务目录。
+# 函数用途: 构造孙代理规格及选定模型引用；无效配置在整个批次落盘前返回可修错误。
 def _hierarchy_child_spec(
     agent: object,
     raw: object,
@@ -405,6 +408,10 @@ def _hierarchy_child_spec(
     goal = str(raw.get("goal") or "").strip()
     if not goal:
         return _schedule_error("children 每一项必须包含 goal。", tool_name=tool_name)
+    try:
+        attrs = create_task_attributes(raw, agent)
+    except ModelProfileError as exc:
+        return ToolHandlerOutcome(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
     return HierarchyChildSpec(
         goal=goal,
         description=str(raw.get("description") or "").strip()[:240],
@@ -418,7 +425,7 @@ def _hierarchy_child_spec(
         extra_write_roots=resolved_extra_write_roots(agent, raw, goal),
         context_manifest=create_context_manifest(raw),
         context_packs=create_context_packs(raw),
-        attributes=create_task_attributes(raw, agent),
+        attributes=attrs,
     )
 
 

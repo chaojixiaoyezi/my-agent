@@ -1,5 +1,12 @@
 # Subagent Progress
 
+## R214 可选独立模型（本地实现，真实 child 待验）
+
+对照 会话运行时 spawn 的父配置继承与创建前显式模型覆盖；model 可填写本 owner /model 新增配置的精确名称或 ID。
+省略继承父级；选择冻结为 host_model_profile.v1，父级选择不变，恢复和孙代理共用。未知/重名/跨 owner 在
+任何 child 物化前返回可修错误，整批不部分创建；不同显式模型参与原去重键，不改变无 model 的旧键。
+本地配置、创建、递归和幂等共 117 focused 通过；本次用户要求 Qwen 不派 child，真实跨模型 TUI 尚未执行，不冒充通过。
+
 ## R205 子代理的长度限制提示（本地，待 TUI）
 
 child 的 canonical final 与实时展示共用主代理 turn-end 归一化；正文为空或半截时均可说明长度限制。

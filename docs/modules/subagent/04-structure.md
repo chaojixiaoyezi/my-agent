@@ -1,5 +1,14 @@
 # Subagent Structure
 
+## 独立模型选择入口
+
+`create_subagents.model` / `items[].model` → `create_policy.create_task_attributes` →
+`settings/model_profiles.inherit_model_profile`：省略继承父级来源，显式值经 `resolve_child_model_profile` 在当前
+owner 私有配置中解析名称/ID，绑定原 host_model_profile.v1。root/批次/递归均先构造完整规格再写任务，
+失败返回 TOOL_INVALID_ARGUMENTS/not_started。runner 继续通过 inherited_model_config 复用原恢复路径。
+模型只传公开引用，不传 key/base；名称重名需 ID。`parameters.subagent_intent_identity` 仅在显式选择时
+包含 model，无 model 的历史键不变；没有另建模型队列或 Gateway。
+
 ## 子代理结束原因同源
 
 `agent_thread.append_subagent_thread_result` 用 `result_turn_end_reason` 保存 canonical final；

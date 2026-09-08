@@ -1,5 +1,15 @@
 # STATUS
 
+## R214 本地 Qwen 基础调用通过；子代理独立模型入口本地已实现
+
+- `ma-r214-110-model-label` 使用独立 c59233d 客户端，唯一 Gateway 仍 3561271；未改默认 launcher 和用户其他窗口。
+- 问候 request `gwreq-1788868943-16b9860e0a144a6cab0979cd05861eda` / thread `thread-9c93c95810c24656` 为 done。
+  provider 用量一笔 Qwen，18286 输入、62 输出、16659 cache-read，重试0，child=0；不把本次当长任务或 Compact 验收。
+- BUG-149 新开即显示已选 Qwen，MiniMax→Qwen 切换后顶部立即同步；菜单期间模型用量账 hash 不变。
+- `create_subagents.model` 已本地支持 /model 新增配置的名称或 ID，默认继承；主 A / 子 B 不改主选择。
+  隔离、重名拒绝、整批零部分创建、孙代理继承和恢复等 117 focused 通过；后端尚未部署，真实跨模型 child 待验。
+- 两片本地 Ruff/doc sync/strict code-size/diff/clean-package gate 均通过；没有全仓 pytest，也未向远端推送。
+
 ## R214 欢迎区模型名修复；本地模型缩为基础测试
 
 - 用户要求不再用本地 Qwen 做大任务；`ma-r213-110-qwen-main` 已通过 Esc 停止，界面确认已中断，未重启 Gateway。

@@ -195,6 +195,100 @@ def test_child_inherits_exact_profile_after_selection_changes(tmp_path):
     assert attrs == {}
 
 
+def test_child_can_select_saved_model_without_switching_parent(tmp_path):
+    host = Host(tmp_path)
+    a, _ = add(host, model_name="model-A")
+    b, _ = add(host, model_name="model-B", model_backend="openai_compatible", model_context_window_tokens=262144)
+    execute_model_profile_operation(host, "select", {"profile_id": a})
+    attrs = {"host_model_profile.v1": {"profile_id": "spoofed"}}
+    with selected_model_scope(host):
+        inherit_model_profile(attrs, host, model="model-B")
+        assert host.config.model_name == "model-A"
+    assert attrs == {"host_model_profile.v1": {"profile_id": b}}
+    assert read_model_profiles(model_profiles_path(host.home_paths))["selected"] == a
+    child = Host(tmp_path)
+    child.config = inherited_model_config(host, SimpleNamespace(attributes=attrs))
+    assert child.config.model_name == "model-B" and child.config.model_context_window_tokens == 262144
+    grandchild_attrs = {}
+    inherit_model_profile(grandchild_attrs, child)
+    assert grandchild_attrs == attrs
+    execute_model_profile_operation(host, "select", {"profile_id": "default"})
+    assert inherited_model_config(host, SimpleNamespace(attributes=grandchild_attrs)).model_name == "model-B"
+
+
+def test_explicit_child_model_is_owner_scoped_and_unambiguous(tmp_path):
+    from agent_py_agent.agent.settings.model_profiles import ModelProfileError
+
+    host = Host(tmp_path, owner="alice")
+    first, _ = add(host, model_name="same-name")
+    add(host, model_name="same-name", model_context_window_tokens=100000)
+    for selection in ("same-name", "missing", "", {"api_key": "not-accepted"}):
+        with pytest.raises(ModelProfileError):
+            inherit_model_profile({}, host, model=selection)
+    attrs = {}
+    inherit_model_profile(attrs, host, model=first)
+    assert attrs == {"host_model_profile.v1": {"profile_id": first}}
+    with pytest.raises(ModelProfileError):
+        inherit_model_profile({}, Host(tmp_path, owner="bob"), model=first)
+
+
+def test_root_batch_model_validation_has_no_partial_creation(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.tests.test_orchestration_create_subagents_items import _agent
+
+    host = Host(tmp_path)
+    profile_id, _ = add(host, model_name="model-B")
+    agent = _agent()
+    agent.home_paths = host.home_paths
+    result = CreateSubagentsTool(agent).execute({"items": [
+        {"goal": "检查输入", "model": profile_id}, {"goal": "检查输出", "model": "missing-model"},
+    ]})
+    assert result.ok is False and result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert result.effect_outcome == "not_started"
+    agent.subagents.create_run.assert_not_called()
+    assert "model-B" in result.output and "only-private-secret" not in result.output
+
+
+def test_root_and_nested_creation_bind_the_same_explicit_model(tmp_path):
+    from agent_py_agent.agent.agent_core.hierarchy_tools import _hierarchy_child_specs
+    from agent_py_agent.agent.agent_core.orchestration.create_payload import (
+        create_items_from_params,
+    )
+    from agent_py_agent.agent.agent_core.orchestration.create_policy import create_task_attributes
+    from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
+        build_create_subagents_model_spec,
+    )
+    from agent_py_agent.tests.test_orchestration_create_subagents_items import _agent
+
+    host = Host(tmp_path)
+    profile_id, _ = add(host, model_name="model-B")
+    agent = _agent()
+    agent.home_paths = host.home_paths
+    raw = {"goal": "检查输入", "model": "model-B"}
+    expected = {"profile_id": profile_id}
+    assert create_task_attributes(raw, agent)["host_model_profile.v1"] == expected
+    specs = _hierarchy_child_specs(agent, {"children": [raw]}, tool_name="create_subagents")
+    assert specs[0].attributes["host_model_profile.v1"] == expected
+    invalid = _hierarchy_child_specs(agent, {"children": [raw, {"goal": "检查输出", "model": "missing"}]}, tool_name="create_subagents")
+    assert invalid.ok is False and invalid.effect_outcome == "not_started"
+    items = create_items_from_params({"model": "model-B", "items": [{"goal": "A"}, {"goal": "B", "model": profile_id}]})
+    assert [item.params["model"] for item in items] == ["model-B", profile_id]
+    props = build_create_subagents_model_spec().input_schema["properties"]
+    assert props["model"]["type"] == props["items"]["items"]["properties"]["model"]["type"] == "string"
+
+
+def test_different_child_models_do_not_share_creation_guard_identity():
+    from agent_py_agent.agent.agent_core.parameters import subagent_intent_identity
+
+    payload = {"goal": "检查同一份材料"}
+    original = subagent_intent_identity({}, payload)
+    assert "model" not in json.loads(original)
+    first = subagent_intent_identity({"model": "model-A"}, payload)
+    second = subagent_intent_identity({"model": "model-B"}, payload)
+    assert original != first != second
+    assert subagent_intent_identity({"model": "model-A"}, {**payload, "model": "model-B"}) == second
+
+
 def test_task_overlay_preserves_model_reference_and_full_selected_profile(tmp_path):
     host = Host(tmp_path)
     key, _ = add(host)

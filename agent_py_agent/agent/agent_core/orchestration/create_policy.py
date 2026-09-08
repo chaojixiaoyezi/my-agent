@@ -1,5 +1,5 @@
 # LLM: 子代理创建策略统一角色、结构化参数和运行身份；产品 cwd 与运行归档分离，交付路径不重写到 task。
-# 模块用途: 为派工组装角色和参数，继承当前用户家目录；修改路径处理时同步核对子代理工具及创建合同测试。
+# 模块用途: 为派工组装角色和参数，继承用户家目录并绑定所选模型；显式模型在创建前解析，不能新增凭证。
 
 from __future__ import annotations
 
@@ -475,8 +475,8 @@ def _config_bool(agent, key: str, default: bool) -> bool:
 
 
 # LLM: Direct and nested create paths share this attribute builder. The host-bound parent tool
-# snapshot and model profile reference overwrite input lookalikes without entering model/idempotency parameters.
-# 函数用途: 归一子代理属性，安全写入父回合工具上限与模型引用，让重启后的子代理仍继承原模型。
+# snapshot and model profile reference overwrite input lookalikes; an explicit model resolves only owner-saved profiles.
+# 函数用途: 归一属性，绑定父工具上限和已验证模型引用；显式模型无效时在任务落盘前报错。
 def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
     attrs = (
         dict(raw_params.get("attributes") or {})
@@ -517,7 +517,7 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
     _clamp_service_window_to_audit_deadline(attrs)
     from ...settings.model_profiles import inherit_model_profile
 
-    inherit_model_profile(attrs, agent)
+    inherit_model_profile(attrs, agent, model=raw_params.get("model"))
     return attrs
 
 

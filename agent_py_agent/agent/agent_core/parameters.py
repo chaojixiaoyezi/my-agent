@@ -1,4 +1,6 @@
 
+# LLM: 派工幂等键来自结构化参数；显式不同模型必须区分，未选模型的历史键保持原样。
+# 模块用途: 规范编排参数与同轮去重身份，不从自然语言猜模型或任务状态。
 from __future__ import annotations
 
 """normalizes orchestration-tool parameters and one-shot tool-call guard keys.
@@ -77,6 +79,8 @@ def _create_subagent_intent_keys(payload: dict[str, object]) -> set[str]:
     return keys
 
 
+# LLM: model 是显式配置选择，不得被 goal 去重吞掉；省略时不追加字段，保持既有请求键稳定。
+# 函数用途: 生成派工去重身份，让同目标的不同模型比较不会被当成同一个子代理。
 def subagent_intent_identity(payload: dict[str, object], item: dict[str, object]) -> str:
     goal = " ".join(str(item.get("goal") or payload.get("goal") or "").split())
     if not goal:
@@ -93,12 +97,15 @@ def subagent_intent_identity(payload: dict[str, object], item: dict[str, object]
         key: _subagent_intent_list(payload, item, key)
         for key in ("input_refs", "artifact_refs", "output_files", "output_refs", "covers")
     }
+    model = item.get("model", payload.get("model"))
+    model_ref = {"model": model.strip()} if isinstance(model, str) and model.strip() else {}
     return json.dumps(
         {
             "goal": goal,
             "role": role,
             "replacement_for_run_ids": sorted(replacement_ids),
             **work_refs,
+            **model_ref,
         },
         ensure_ascii=False,
         sort_keys=True,

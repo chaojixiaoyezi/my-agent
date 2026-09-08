@@ -1,4 +1,6 @@
 
+# LLM: 根级/递归派工保持统一创建边界；模型配置验证错误必须在物化前返回，不得部分创建或扩大凭据权限。
+# 模块用途: 模型可调用的创建、插话与停止工具；显式子模型只绑定当前 owner 已新增配置。
 from __future__ import annotations
 
 """exposes model-callable orchestration tools backed by SimpleAgent subagent workflows.
@@ -15,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from ..capability.skill_snapshot import SkillSnapshotError
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ..settings.model_profiles import ModelProfileError
 from ..subagents.capability_scope import bind_creation_tool_authority
 from ..subagents.services.base import CreateRunParams
 from ..subagents.services.hierarchy.scheduled_role import (
@@ -451,6 +454,8 @@ def _items_result(agent: SimpleAgent, params: dict[str, object]) -> ToolHandlerO
     return None
 
 
+# LLM: 单项参数和模型引用在持久化前构造；配置错误是可修参数错误，不能静默回到父模型。
+# 函数用途: 准备一个 child 的参数，无效配置不创建任务、不执行模型。
 def _prepare_single_mode(
     agent: SimpleAgent,
     params: dict[str, object],
@@ -483,7 +488,10 @@ def _prepare_single_mode(
     validation = _validate_single_goal(ValidateSingleGoalRequest(agent, params, goal, allowed_tools))
     if validation:
         return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
-    return allowed_tools, create_run_params(agent, params, goal, allowed_tools)
+    try:
+        return allowed_tools, create_run_params(agent, params, goal, allowed_tools)
+    except ModelProfileError as exc:
+        return ToolHandlerOutcome("create_subagents", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
 
 
 # LLM: A cancellation after materialization but before publication must leave the record visible
@@ -525,6 +533,8 @@ def _created_tasks_result(
     return _create_subagents_success(payload)
 
 
+# LLM: 全批次规格（含显式模型引用）先构造成功才物化；参数错误不能留下部分 child。
+# 函数用途: 校验批量派工并统一创建，模型配置错误返回可修回执，父级与既有任务不变。
 def _execute_items(
     agent: SimpleAgent,
     items: list[CreateSubagentItem],
@@ -567,7 +577,10 @@ def _execute_items(
     validation = _validate_items(agent, capped, allowed_tool_values)
     if validation:
         return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
-    task_params = _indexed_item_run_params(agent, capped)
+    try:
+        task_params = _indexed_item_run_params(agent, capped)
+    except ModelProfileError as exc:
+        return ToolHandlerOutcome("create_subagents", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
     if invalid := _replacement_preflight_result(agent, task_params):
         return invalid
     resolutions = _resolve_task_params(agent, task_params)

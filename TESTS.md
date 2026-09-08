@@ -1,5 +1,15 @@
 # TESTS
 
+## R214 简单 Qwen 调用与模型显示
+
+按用户最新范围，本地模型只测基本可用，原 R213 长任务通过 Esc 停止，不新增 child。
+新 TUI `ma-r214-110-model-label` 仅发送“你好，跟我打个招呼吧。”，得到完整回复且 Working 正常收起。
+唯一 Gateway 未重启；18286 输入/62 输出/16659 cache-read/1 provider call/0 retry/0 child 来自 canonical usage。
+真实顶部先读取 Qwen，/model 切 MiniMax 后立即刷新，再切回 Qwen；两次菜单操作前后账本 hash 相同。
+证据位于 r214-c59233d 的 evidence-selected-default.json / evidence-selected-qwen.json，保留各自截图与精确请求。
+117 个 TUI focused 已通过；另模型/创建/递归/幂等 117 focused 通过。
+子代理独立 model 的本地定向覆盖不等于真实跨模型 child 通过，该项仍待后续验收。
+
 ## R213 BUG-150 部署后真实传输分项
 
 源码3a5b9fc，wheel SHA256 `155c71600ca6468338017f905bea89e0ffd05151f121496fb931a27fd0ebf524`。

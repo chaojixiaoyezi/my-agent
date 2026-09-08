@@ -1,3 +1,5 @@
+# LLM: schema 与创建参数解析保持一致；model 只允许公开引用，不能通过工具传递端点或凭据。
+# 模块用途: 声明派工和权限工具的结构字段，模型字段可选且不扩大 owner 边界。
 """Native tool_use input-schema fragments for orchestration tools.
 
 这些是 native tool_use 的精确 JSON Schema 片段（消除弱推导导致的 TOOL_INVALID_ARGUMENTS），
@@ -17,6 +19,7 @@ _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "description": {"type": "string", "maxLength": 240},
     "role": {"type": "string"},
     "agent_name": {"type": "string"},
+    "model": {"type": "string", "minLength": 1},
     "tool_preset": {"type": "string", "enum": ["coding", "read_only", "none"]},
     "allowed_tools": {"type": "array", "items": {"type": "string"}},
     "allowed_skills": {"type": "array", "items": {"type": "string"}},
