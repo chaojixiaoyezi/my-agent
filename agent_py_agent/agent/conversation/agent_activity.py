@@ -10,6 +10,7 @@ the display cache into another lifecycle authority.
 # 子代理结束页同步投影 canonical thread/message ID；显示层不得从正文猜最终回复身份。
 # links and subagent runs to bounded public activity rows. It must never become
 # a lifecycle, authorization, retry, or completion authority.
+# 前台与后台 main 共用唯一数值/阶段投影；历史正文和生命周期不得由这份易失显示状态驱动。
 # 模块用途: 为 TUI 和后续 Web 提供同一份会话主任务与直属子代理状态快照。
 
 from __future__ import annotations
@@ -95,7 +96,7 @@ class BackgroundMainActivitySink:
             thread_id=self.thread_id,
             task_id=self.task_id,
         )
-        self._publish("running", "整理任务上下文")
+        self._publish("running", "整理任务上下文", begin=True)
 
     # LLM: Plain callback compatibility records only a generic phase; arbitrary
     # legacy text is never parsed into status or echoed into the public panel.
@@ -140,27 +141,16 @@ class BackgroundMainActivitySink:
         activity = _bounded_text(text, limit=_ACTIVITY_TEXT_LIMIT)
         self._publish("thinking", activity or "思考中")
 
-    # LLM: Context usage is the same frozen numeric provider-preflight snapshot
-    # used by foreground turns. It is display-only and must preserve the current
-    # activity phase instead of creating a second context authority.
-    # 函数用途: 保存后台 main 最近一次模型调用前的实时上下文总量，供 TUI 状态条刷新。
+    # LLM: 数字来自同一 provider-preflight schema，前后台共用发布函数；更新数字不改变活动阶段。
+    # 函数用途: 保存后台 main 最近一次调用前的上下文总量，供所有同会话窗口读取。
     def write_context_usage(self, usage: dict[str, object]) -> bool:
         public = _public_context_usage(usage)
         if not self.thread_id or not public:
             return False
-        lock = _main_activity_lock(self.agent)
-        with lock:
-            rows = _main_activity_rows(self.agent)
-            current = dict(rows.get(self.thread_id, {}))
-            current.update(
-                {
-                    "task_id": self.task_id,
-                    "started_at": current.get("started_at") or self.started_at,
-                    "updated_at": time.time(),
-                    "context_usage": public,
-                }
-            )
-            rows[self.thread_id] = current
+        publish_main_activity(
+            self.agent, MainActivitySource(self.thread_id, self.task_id, self.started_at, self._transcript.request_id),
+            context_usage=public,
+        )
         return True
 
     # LLM: Tool activity reads only typed progress fields. The compact row keeps
@@ -255,26 +245,54 @@ class BackgroundMainActivitySink:
         self._transcript.fail()
         self._publish("failed", "本轮处理失败，等待底层恢复")
 
-    # LLM: Updates are bounded scalar projections under one agent-owned lock;
-    # callers cannot inject nested payloads or overwrite another thread key.
-    # 函数用途: 原子更新当前 thread 的 main 活动快照。
-    def _publish(self, phase: str, activity: str) -> None:
-        if not self.thread_id:
+    # LLM: 前后台只写同一 owner Agent 的线程级快照；不得为后台另设状态源。
+    # 函数用途: 将后台真实阶段交给共用的 main 显示发布入口。
+    def _publish(self, phase: str, activity: str, *, begin: bool = False) -> None:
+        publish_main_activity(
+            self.agent, MainActivitySource(self.thread_id, self.task_id, self.started_at, self._transcript.request_id),
+            phase=phase, activity=activity, begin=begin,
+        )
+
+
+# LLM: 该身份只关联一个显示工作片，task/thread 来自宿主；projection_id 不能作为运行或权限依据。
+# 类用途: 固定一次 main 活动更新的归属，防止旧工作片的迟到事件覆盖新工作片。
+@dataclass(frozen=True)
+class MainActivitySource:
+    thread_id: str
+    task_id: str
+    started_at: float
+    projection_id: str
+
+
+# LLM: 这是前后台 main 标量的唯一写入点，身份由宿主提供；只保存白名单数字/短阶段。
+# 换 task 不继承旧上下文；迟到的旧工作片不能覆盖新工作片。显示身份不授予执行权。
+# 函数用途: 原子更新同一会话的活动与上下文，让不同 TUI 看到同一份最新数字。
+def publish_main_activity(
+    agent: object, source: MainActivitySource, *,
+    phase: str = "", activity: str = "", context_usage: object = None, begin: bool = False,
+) -> None:
+    thread_id, task_id = source.thread_id, source.task_id
+    if not thread_id:
+        return
+    with _main_activity_lock(agent):
+        rows = _main_activity_rows(agent)
+        current = dict(rows.get(thread_id, {}))
+        if not begin and current.get("projection_id") != source.projection_id:
             return
-        lock = _main_activity_lock(self.agent)
-        with lock:
-            rows = _main_activity_rows(self.agent)
-            current = dict(rows.get(self.thread_id, {}))
-            row = {
-                "task_id": self.task_id,
-                "phase": str(phase or "running"),
-                "activity": _bounded_text(activity, limit=_ACTIVITY_TEXT_LIMIT),
-                "started_at": self.started_at,
-                "updated_at": time.time(),
-            }
-            if usage := _public_context_usage(current.get("context_usage")):
-                row["context_usage"] = usage
-            rows[self.thread_id] = row
+        if current.get("task_id") != task_id:
+            current = {}
+        row = {
+            "projection_id": source.projection_id,
+            "task_id": task_id,
+            "phase": phase or current.get("phase") or "running",
+            "activity": _bounded_text(activity or current.get("activity"), limit=_ACTIVITY_TEXT_LIMIT),
+            "started_at": source.started_at,
+            "updated_at": time.time(),
+        }
+        usage = _public_context_usage(context_usage) or _public_context_usage(current.get("context_usage"))
+        if usage:
+            row["context_usage"] = usage
+        rows[thread_id] = row
 
 
 # LLM: The lock is stored on the shared Gateway agent so all scheduler threads

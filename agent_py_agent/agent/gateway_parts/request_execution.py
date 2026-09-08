@@ -3,6 +3,7 @@
 # Request-affine claims are bound before acquisition and retained until terminal commit; unknown
 # operation recovery has a typed public error. Exception prose never decides retry or bypass.
 # Canonical final and its delayed repair preserve the same host-owned turn-end and native data.
+# 前台 chunk 同步更新已有 owner/thread main 标量；显示故障不能中止请求，不影响消息或模型缓存。
 # 模块用途: 执行网关请求并恢复真实回合；保存原正文及结束原因，延迟补交不能把被截断的回复显示成完整成功。
 from __future__ import annotations
 
@@ -206,6 +207,7 @@ def close_chunk_stream(chunk_path: Path) -> None:
 
 
 # LLM: BufferedChunkStreamWriter 是 Gateway run 的公开事件出口；审批与富 transcript 必须分别来自显式客户端能力，普通客户端不得收到思考或大段工具展示数据。
+# 公开事件先沿原 chunk 落盘，再投影 main 数字/阶段；同会话其他窗口不能只看到旧后台状态。
 # 类用途: 缓冲模型/工具事件，并为支持的 TUI 投递逐轮说明、折叠思考、结构化结果和审批等待。
 @dataclass
 class BufferedChunkStreamWriter:
@@ -229,6 +231,7 @@ class BufferedChunkStreamWriter:
     _observed_tool_rounds: int = 0
     interactive_approvals: bool = False
     rich_transcript: bool = False
+    main_activity_sink: object | None = field(default=None, repr=False)
     # Gateway request writer 不是会话本体；这里只绑定 owner Agent 持有的进程内缓存及
     # 本轮已经解析完成的精确作用域，避免每个请求各自维护一份假“会话”状态。
     _approval_session_cache: ToolApprovalSessionCache | None = field(
@@ -242,6 +245,16 @@ class BufferedChunkStreamWriter:
 
     def __call__(self, text: str) -> None:
         self.write(text)
+
+    # LLM: 原 chunk 是公开事件出口；标量投影不改变 payload/顺序，异常只丢展示，不能反噬模型回合。
+    # 函数用途: 发布一个已清洗事件，并将其数值和阶段同步给同会话的 main 状态条。
+    def _write_event(self, event: dict[str, object]) -> None:
+        write_chunk_event(self.chunk_path, event)
+        if callable(self.main_activity_sink):
+            try:
+                self.main_activity_sink(event)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
 
     # LLM: rich transcript 逐模型轮暂存 commentary，普通客户端仍只保留首段；任何暂存段都只能在真实工具边界公开。
     # 函数用途: 接收供应商可见文本增量，等待工具边界确认它是过程说明。
@@ -333,8 +346,7 @@ class BufferedChunkStreamWriter:
                 and (text := str(raw_text or ""))
             ]
             self.flush()
-            write_chunk_event(
-                self.chunk_path,
+            self._write_event(
                 {
                     "kind": "active_turn_input_consumed",
                     "client_message_ids": list(message_ids),
@@ -357,6 +369,8 @@ class BufferedChunkStreamWriter:
         if self._should_flush(text):
             self.flush()
 
+    # LLM: 增量在冻结边界前落到原 chunk；共用 main 投影只观察相同已清洗事件，不改变分段顺序。
+    # 函数用途: 先发尚未送出的模型增量，再发累计的运行过程，避免工具边界前漏字。
     def flush(self) -> None:
         # Live model deltas must reach the chunk file before any boundary event
         # that freezes the segment (commentary/progress/permission/compact).
@@ -367,8 +381,7 @@ class BufferedChunkStreamWriter:
         self._buffer.clear()
         self._buffer_chars = 0
         self._last_flush_at = time.monotonic()
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "runtime_progress",
                 "text": text,
@@ -394,8 +407,7 @@ class BufferedChunkStreamWriter:
             progress.pop("display", None)
         if not self.rich_transcript and self._verbose_level != "full":
             progress.pop("output", None)
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "tool_progress",
                 "text": legacy_text,
@@ -413,8 +425,7 @@ class BufferedChunkStreamWriter:
         content = self._public_model_text(text, max_chars=12_000)
         if not content:
             return
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "assistant_thinking",
                 "text": content,
@@ -435,8 +446,7 @@ class BufferedChunkStreamWriter:
         )
         if not content:
             return
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "thinking_delta",
                 "text": content,
@@ -452,8 +462,7 @@ class BufferedChunkStreamWriter:
         public = public_tool_input_progress(value)
         if not public:
             return False
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "tool_input_progress",
                 "progress": public,
@@ -469,7 +478,7 @@ class BufferedChunkStreamWriter:
         if not self.rich_transcript or not self._tool_input_active:
             return False
         self._tool_input_active = False
-        write_chunk_event(self.chunk_path, {"kind": "tool_input_reset"})
+        self._write_event({"kind": "tool_input_reset"})
         return True
 
     # LLM: provider retry 只向显式 rich 客户端公开有界结构化进度；原始异常和 endpoint 不得进入公开 chunk。
@@ -492,8 +501,7 @@ class BufferedChunkStreamWriter:
         layer = "连接" if retry_scope == "transport" else "模型回合"
         self.flush()
         self._reset_tool_input_progress()
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "runtime_progress",
                 "text": (
@@ -522,8 +530,7 @@ class BufferedChunkStreamWriter:
         if not public:
             return False
         self.flush()
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "context_usage_updated",
                 "context_usage": public,
@@ -541,8 +548,7 @@ class BufferedChunkStreamWriter:
         if not public:
             return False
         self.flush()
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "context_window_compacted",
                 "context_compaction": public,
@@ -559,8 +565,7 @@ class BufferedChunkStreamWriter:
         if not public:
             return False
         self.flush()
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "conversation_compaction_progress",
                 "compact_progress": public,
@@ -590,8 +595,7 @@ class BufferedChunkStreamWriter:
             # 会话级已批准：直接放行，不再发布 permission_requested，避免 TUI 闪一下
             # 审批框；最终工具账本仍会记录这次真实执行。
             decision = ToolApprovalDecision(request.permission_id, "approved")
-            write_chunk_event(
-                self.chunk_path,
+            self._write_event(
                 {
                     "kind": "permission_resolved",
                     **decision.to_dict(),
@@ -601,8 +605,7 @@ class BufferedChunkStreamWriter:
             return decision.to_dict()
         self.flush()
         self._write_model_commentary_at_boundary()
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "permission_requested",
                 "permission": request.to_dict(),
@@ -616,8 +619,7 @@ class BufferedChunkStreamWriter:
         if session_key and str(decision.decision or "").strip().lower() == "approved_session":
             if approval_cache is not None:
                 approval_cache.approve(approval_scope, session_key)
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "permission_resolved",
                 **decision.to_dict(),
@@ -633,8 +635,7 @@ class BufferedChunkStreamWriter:
             return
         self.flush()
         self._write_model_commentary_at_boundary()
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "conversation_compacted",
                 "compact_generation": normalized_generation,
@@ -646,9 +647,17 @@ class BufferedChunkStreamWriter:
         """Return exact structured progress observed during this request."""
         return self._observed_tool_rounds
 
+    # LLM: 先刷新原事件，后关闭本请求显示阶段；任务终态和后台唤醒仍由 canonical runtime 负责。
+    # 函数用途: 收口前台输出及其 main 活动提示，不删除已有上下文数字。
     def close(self) -> None:
         self.flush()
         close_chunk_stream(self.chunk_path)
+        closer = getattr(self.main_activity_sink, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
 
     # LLM: The returned copy contains only tool-boundary-confirmed assistant messages. It is
     # the typed handoff into ConversationStore and never includes an uncommitted final candidate.
@@ -669,8 +678,7 @@ class BufferedChunkStreamWriter:
             return
         self._commentary_emitted = True
         self._committed_commentary.append(content)
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "assistant_commentary",
                 "text": content,
@@ -727,8 +735,7 @@ class BufferedChunkStreamWriter:
         )
         if not content:
             return
-        write_chunk_event(
-            self.chunk_path,
+        self._write_event(
             {
                 "kind": "model_delta",
                 "text": content,
@@ -1219,8 +1226,8 @@ def _start_gateway_request_lease(
     )
 
 
-# LLM: Persist exact recovery lane before acquiring, then prepare canonical history under the lane.
-# 函数用途: 执行一轮 Gateway 对话；先固定恢复归属，再读取上下文、运行及保存正式消息。
+# LLM: 持有精确恢复车道后准备 canonical 会话并绑定 main 显示；显示不能授予执行权或成为状态源。
+# 函数用途: 执行 Gateway 对话，固定归属、读取上下文，并同步同会话窗口的前台活动。
 def _run_gateway_ask(context: _GatewayAskRunContext):
     request = context.request
     prompt = str(request.get("prompt") or request.get("goal") or "").strip()
@@ -1246,12 +1253,27 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         conversation = _gateway_conversation_context(load_request)
         _record_gateway_stage(context.stages, "conversation_prep_ms", _conversation_prep_started)
         _require_gateway_conversation_ready(request, conversation)
+        _configure_gateway_main_activity(context, conversation)
         if conversation.compact_generation > preflight.compact_generation:
             _publish_gateway_compact_boundary(
                 context.on_chunk,
                 conversation.compact_generation,
             )
         return _execute_gateway_conversation_turn(context, prompt, conversation)
+
+
+# LLM: 只在取得会话执行车道后调用，绑定宿主解析的 owner/thread/task，普通客户端不扩展公开范围。
+# 函数用途: 将富 TUI 的前台事件接到已有 main 状态表，后续任务晋升仍读原请求的结构化绑定。
+def _configure_gateway_main_activity(context: _GatewayAskRunContext, conversation: _GatewayConversationContext) -> None:
+    writer = context.on_chunk
+    if not isinstance(writer, BufferedChunkStreamWriter) or not writer.rich_transcript or not conversation.thread_id:
+        return
+    from .main_activity import GatewayMainActivitySink
+
+    writer.main_activity_sink = GatewayMainActivitySink(
+        context.agent, thread_id=conversation.thread_id, request_id=context.request_id, request=context.request,
+        task_id=str(getattr(conversation.workspace_task, "task_id", "") or ""),
+    )
 
 
 def _execute_gateway_conversation_turn(

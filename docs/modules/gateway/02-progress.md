@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R210 前台 main 数字/阶段（本地，真实 TUI 待验）
+
+原 chunk 后发布到同一 owner/thread 标量，不增加读请求/模型调用。前台与后台互换时用显示工作片身份
+拒绝旧 close/context；显示 task 跟随真实晋升绑定，不混用 RuntimeDB task。115 focused 通过。
+一个旧 `/verbose` 测试在未改版也失败：夹具没构造 processing/attempt，先触发真实 active-turn 拒绝；
+补齐已认领夹具，保留系统命令必须被路由拒绝的原断言。完整跨窗口正文另片完成，不关闭 BUG-146。
+
 ## R209 真复验与下一个缺口
 
 展开/上翻时失联警告与恢复通过，8428 读取夹具已停止，原配置直连；Gateway 3336610 与业务 run 没重启。

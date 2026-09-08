@@ -538,6 +538,10 @@ def test_legacy_queued_system_command_fails_closed_beside_claimed_request(
             {
                 "id": request_id,
                 "kind": "ask",
+                # 测试已认领请求的路由，而不是缺少认领身份时的 active-turn 拒绝。
+                "status": "processing",
+                "turn_phase": "open",
+                "execution_attempt_id": request_id,
                 "goal": "/verbose on",
                 "conversation": _conversation(),
             }

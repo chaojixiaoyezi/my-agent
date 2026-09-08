@@ -1,5 +1,13 @@
 # TESTS
 
+## R210 前台 main 显示投影
+
+115 focused（gateway_main_activity、conversation_agent_activity、gateway_verbose_progress、gateway_streaming、
+gateway_request_runtime_errors）通过，无全仓 pytest。新用例覆盖旧后台等待被前台工具/数字更新、准确晋升、
+跨 thread 冲突不发布、普通客户端不扩大公开面、迟到旧 close 不覆盖新工作片、显示失败不影响原 chunk。
+旧 `/verbose` 夹具在 HEAD 同样缺 processing/attempt 而提前被拒绝；只补真实认领字段，原断言保留。
+真实 TUI 需比较同 session 两页的下一次前台调用数字与阶段；正文增量仍未接通，不以本片关闭完整 BUG-146。
+
 ## R209 真 TUI 结果
 
 原 Go 同会话的 child 详情经 Ctrl+O 展开并上翻到首段，notes 读取定向 503 时底栏警告保持，恢复后仍保持

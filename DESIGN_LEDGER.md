@@ -2,6 +2,13 @@
 
 ## 2026-09-08 前台与后台会话展示统一【状态：BUG-146 已定位入口差异，未实现】
 
+R210 第一片已实现 main **标量**同步，真实 TUI 待验；正文流接通仍未实现，BUG-146 不关闭。
+对照 会话运行时 `app-server/src/bespoke_event_handling.rs:handle_token_count_event` 与
+`outgoing_message.rs:ThreadScopedOutgoingMessageSender`：按同 thread 共享实际事件；本项目沿原
+`BufferedChunkStreamWriter` 已清洗 chunk 更新 `publish_main_activity`，前后台使用同一 owner/thread 表。
+精确 display task 跟随 `conversation_runtime`，工作片身份只拒绝迟到显示，不能授予执行权。
+不改工具/模型回调、会话历史、缓存、Compact 计数或 Gateway 数量；旧请求关闭不能覆盖新后台的活动。
+
 - 真实同 session 对照：发送追问的原 TUI 有前台工具与 context，新观察 TUI 只有 user 和旧后台过程。
   前台请求 chunk 与 `BackgroundMainActivitySink` 没有合入同一 owner/thread 显示流；刷新成功不能证明完整。
 - 下一片先对照 会话运行时 同 thread 的 active-turn 事件投递，再把 foreground 的 typed 过程/上下文纳入现有

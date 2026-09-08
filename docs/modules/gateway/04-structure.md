@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## R210 main 标量共用
+
+`BufferedChunkStreamWriter._write_event` 保持原 chunk 落盘，再交 `GatewayMainActivitySink` 消费已清洗
+typed kind。`publish_main_activity` 是前后台唯一标量写入点；`MainActivitySource` 只在显示层隔离工作片，
+新任务不继承旧 task 的上下文，旧工作片迟到事件不盖新状态。正文/权限/生命周期仍走原路径。
+
 ## R209 展开装饰保留实时提示
 
 `TuiFrameProvider.frame` 将实时 context 健康作为 `preserve_footer` 传给 transcript decorator；冻结正文和
