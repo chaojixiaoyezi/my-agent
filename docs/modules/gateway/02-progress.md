@@ -1,5 +1,10 @@
 # Gateway Progress
 
+## R216 真实消息同步分项通过
+
+50cdfaf独立包升级唯一Gateway为3585410；原页/观察页/恢复页同session真实输入与final各一条，无Working残留。
+8次MiniMax/0重试，恢复前后canonical消息和用量未变。默认launcher/旧TUI未切换；实时前台过程仍待下一片。
+
 ## R216 前台已提交消息（本地实现，待真实 TUI）
 
 沿原消息分页增加显式 Gateway 前台 user/final，同一消息继续使用 canonical ID；旧客户端未声明

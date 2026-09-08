@@ -1,5 +1,12 @@
 # COMPLETED
 
+## R216 已提交消息真实三页通过
+
+在唯一 Gateway 上，ma-r216-110-messages / -view / -resume 使用同一会话；执行中观察页收到用户输入，
+最终三页都显示完整回复。220行真实终端截图各有一条用户输入、一条final，无残留Working，随后恢复尺寸。
+126.947秒、8次MiniMax、0重试；恢复前后canonical消息/用量相同，DUT自行运行并产出脚本/中文说明。
+独立50cdfaf包已部署，不改变旧TUI和默认launcher。BUG-146实时过程仍未修完，不是完整验收通过。
+
 ## R216 前台已提交消息（代码已落地，真实 TUI 待验）
 
 有明确 Gateway request 的 user/final 可经同会话消息页显示；原页登记真实 ID，跳过自己的同步副本。

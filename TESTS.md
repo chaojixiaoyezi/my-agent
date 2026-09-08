@@ -1,5 +1,18 @@
 # TESTS
 
+## R216 真实三页验收证据
+
+源码50cdfaf，wheel SHA256 `5a133a5e63cae791388f4d56d2e331eb1490f8f5b046e22cc1a1d89baf340df1`。
+唯一Gateway3585410，owner p1-r216-messages，session sess_1788878722_5fe7131f，thread thread-9826d7ee8d6048af。
+request gwreq-1788878884-f2a7cafa397b4d9ab1bb73bd341997fa：done/completed，126.947秒，7工具轮/8模型调用/0重试。
+provider MiniMax-M2.7，输入51725、cache-read210048、输出4786；child0、Compact0。没有本地Qwen额外任务。
+三路tmux：ma-r216-110-messages / ma-r216-110-messages-view / ma-r216-110-messages-resume。
+运行中观察页先出现user；final后三页同文。ui-verification.json保存临时220行完整截图，各user=1/final=1，
+无Working，原尺寸已恢复；evidence-final/recovered的canonical消息及用量逐字段相同，恢复没有模型调用。
+176行说明SHA256 `e729055c00d3c9693438c8e9371ba52823687ee35b0e56da575cccbc0958ef9e`；
+77行脚本SHA256 `486c0e35377f74304716b185f344102b9d47e613c9b614c7faae7cc1c5474de8`，均在本owner家内。
+所有证据位于部署目录r216-50cdfaf，未替DUT补业务。此片不证明实时工具/思考、长Compact或跨模型child通过。
+
 ## R216 前台消息同步验证
 
 上述相关消息页、历史、worker、HTTP/控制与TUI刷新共131 focused通过；Ruff/doc sync/strict size/diff/package通过。

@@ -1,5 +1,18 @@
 # STATUS
 
+## R216 已部署；前台 user/final 同步三页真实通过
+
+- 独立包 `50cdfaf`，唯一 Gateway 3578746 → 3585410，tmux `ma-gateway-r216-110`；旧包/配置保留。
+- `ma-r216-110-messages` / `-view` / `-resume` 同 session `sess_1788878722_5fe7131f`，owner `p1-r216-messages`。
+  request `gwreq-1788878884-f2a7cafa397b4d9ab1bb73bd341997fa`，thread `thread-9826d7ee8d6048af`。
+- 执行中观察页收到 user；结束后三页 final 一致。临时220行真终端完整截图中，各页 user=1/final=1、无Working；
+  已恢复原尺寸。resume 前后 canonical 消息和用量 hash 不变，没有补模型调用或替 DUT 写业务。
+- 126.947秒，7工具轮，8次 MiniMax-M2.7 / 0重试；input51725、cache-read210048、output4786，Compact0，child0。
+  实际生成176行中文说明和77行脚本，三次 run_command、两次 write_file 和两次 task_progress 均有成功记录。
+- 131 focused + 本地严格 gate 通过；未跑全仓、未推远端。默认 launcher 仍是旧版本，新包只用于上述新窗口和Gateway。
+  BUG-146 仍开放：执行中的思考/工具流未接通；旧版客户端的能力协商仅 focused 通过，未补旧版真实交互。
+  本地 Qwen 保持轻量已验范围，主A/子B显式入口已部署但跨模型 child 真验仍待做。
+
 ## R216 前台已提交消息同步（本地实现，尚未部署）
 
 BUG-146 的 user/final 同步入口已接入既有消息分页；发起页入队前登记 request，通知/历史重放不重复。
