@@ -1,5 +1,21 @@
 # TESTS
 
+## R215 真 TUI 分项证据
+
+部署包dd9610b，wheel SHA256 `368831bbcf690a222314d063c2c88ee1bc6a5e8b1667ce27799a7132c0b5509c`。
+唯一Gateway3578746，测试owner p0-r215-approval，session sess_1788873252_9ad24c92，thread thread-8b18541cb3d04b55。
+主/观察tmux为ma-r215-110-approval / ma-r215-110-approval-view；同一普通Python入门教程请求一次TUI提交。
+request gwreq-1788873474-8f17d99e1af4477f909b1becb371b0de；精确审批approval:bbaac469f95c46bb7b79e06d，
+原页允许一次，只有一条对应resolved。观察页等待为静态且不可代批；结束后两页不再Working。
+总500.629秒含测试者保留审批约402.409秒，不能把该段算模型响应慢。21个MiniMax调用/0重试/2985输出，
+cache-read743908、cache-write119647，Compact0；PTY pty-1-1788873885真实exited/0。
+147行教程SHA256 `17526c7f68806ba5772341eeca2b662b19c17db2c7d32ba4fc73fee33879fc66`，位于本owner家内。
+真实证据evidence-waiting/allowed/progress/final.json在r215-dd9610b；采集器曾把公开审批误当带原arguments，
+KeyError时没有发按键，核对公开binding/args_hash后才在原TUI批准，不是产品异常。
+BUG-146：观察页仍缺前台正文和final，仅数字/阶段正确。审批分项通过不代表完整跨窗口交互通过。
+旧部署候选清理：先验证无进程argv/cwd/exe/fd引用，再备份全部文件/符号链接/目录；9922项完全一致后
+才删除测试机deploy-candidates。247777700字节可从本机私有备份恢复，未删除被测项目代码或当前runtime。
+
 ## R215 审批阶段显示
 
 `test_gateway_main_activity.py` / `test_tui_renderer.py` / `test_conversation_agent_activity.py` 共87 focused通过。

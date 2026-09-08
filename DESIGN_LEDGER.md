@@ -1,12 +1,15 @@
 # DESIGN LEDGER
 
-## 2026-09-08 同会话工具审批等待【状态：BUG-147 本地已修，待真 TUI】
+## 2026-09-08 同会话工具审批等待【状态：BUG-147 真实 TUI 允许一次分支通过】
 
 对照 会话运行时 app-server `bespoke_event_handling.rs` 的 note_permission_requested 与 thread-scoped 通知，
 终端交互 Spinner/TeammateSpinnerLine 的工作/等待分离。本项目沿同一公开 chunk 记录本工作片未决
 permission ID，最后一个对应回执才清等待；无关回执、缓存批准和并发工具结果不能清掉其他审批。
 同 owner/thread 的 main 状态静态展示等待，关闭流释放显示集合；真正审批、任务与模型执行源不变。
 这不关闭 BUG-146 的完整前台正文同步，也不允许观察页通过显示状态代批。
+ma-r215-110-approval与同session观察页已验等待/批准/继续/结束；拒绝、并发及冻结切换真验保留。
+BUG-146已定位foreground chunk单页消费及message_stream后台final过滤两处；下一片按精确request去重，
+不能伪造background_delivery_reason或只删过滤导致原页双份最终回复，模型历史和缓存保持原源。
 
 ## 2026-09-08 模型展示与独立子代理模型【状态：欢迎区真 TUI 通过；子代理显式选择本地已实现】
 

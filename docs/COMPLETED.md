@@ -1,5 +1,12 @@
 # COMPLETED
 
+## R215 真实审批等待/解除（分项通过）
+
+ma-r215-110-approval 主页在具体 terminal_session(python3) 审批处等待，exact同session观察页也静态等待，
+没有第二个授权框。通过主页允许一次后，真实Python交互、错误恢复、退出和教程写入完成，Working收起。
+21次MiniMax-M2.7调用、0重试，PTY exited/0，147行教程存在于本owner家内；没有替DUT写业务代码。
+原Gateway由3561271受控升级为唯一3578746，独立dd9610b包。完整跨窗口正文仍失败并保留BUG-146。
+
 ## R215 审批等待展示（本地已修，未部署）
 
 解决问题：原 TUI 等待具体工具授权时，同会话观察页还在闪 Working。

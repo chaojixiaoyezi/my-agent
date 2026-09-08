@@ -1,5 +1,12 @@
 # ROADMAP
 
+## R215 下一片：前台正文与 canonical final 的完整同会话同步
+
+BUG-147真TUI等待→原页允许一次→工作继续→结束已通过，证据在 r215-dd9610b。
+BUG-146两个入口已定位：foreground chunk只有发起页消费；message_stream.read_background_response_page
+显式只保留后台final，因此观察页连前台final也错过。下一片需要同request事件关联和原页去重，
+不能只去掉过滤后让发起页重复显示，也不能伪造后台消息或改模型历史；以两页同任务及恢复组合验证。
+
 ## R215 当前优先：审批等待真实 TUI 复验
 
 解决问题：原窗口等用户审批，观察窗口却仍显示正在使用工具，容易误判卡死。

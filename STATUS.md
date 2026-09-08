@@ -1,5 +1,18 @@
 # STATUS
 
+## R215 已部署；审批等待真 TUI 分项通过
+
+- 独立非 editable `dd9610b` 包，唯一 Gateway 从3561271受控切为3578746 / ma-gateway-r215-110，
+  部署默认及真实模型调用均 MiniMax-M2.7。旧包/配置/窗口保留，默认 launcher 未替换。
+- ma-r215-110-approval 与 ma-r215-110-approval-view 为同 owner/session；原页等待 Python REPL 授权时，
+  两页均静态等待，观察页没有审批框。原页允许一次后继续，最终两页 Working 消失。
+- exact request gwreq-1788873474-8f17d99e1af4477f909b1becb371b0de 为 done，20工具轮、21模型调用、0重试，
+  10笔terminal_session和1笔write_file副作用成功。REPL真实退出0，147行教程在本owner家内。
+- BUG-146再次复现：观察页实时数字正确，但无前台正文/最终报告；不把BUG-147分项通过当其已修。
+  子代理独立model入口现已随包部署，跨模型真实child仍待验，本地Qwen不追加大任务。
+- 磁盘：旧deploy-candidates没有进程引用，9922项逐文件备份校验后移除测试机副本，回收247777700字节，
+  本机私有testbox-backups/r215-110-candidates备份可恢复；可用约718MB，未删owner/复刻代码/运行环境。
+
 ## R215 审批等待同步（本地修复，待真 TUI）
 
 - BUG-147：共享 main 漏读审批事件，另一个窗口误显示 Working；现按精确 permission ID 维护等待显示，
