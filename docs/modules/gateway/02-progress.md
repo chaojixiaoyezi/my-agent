@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R215 前台审批同步（本地修复，待真实 TUI）
+
+共用 main 标量现在接收 permission_requested/resolved。维护当前工作片精确未决 ID，最后对应回执后解除；
+工具/模型进展不能掩盖等待，context 数值仍更新。TUI观察页静态显示等待，不创建额外审批入口。
+会话运行时参照 app-server `bespoke_event_handling.rs` 与 `outgoing_message.rs`，前端参考 终端交互 Spinner。
+87 focused 通过；完整前台正文 BUG-146 和授权本身不在此片变更。
+
 ## R212 模型配置与真实传输（本地修复，待部署）
 
 真实Qwen任务反证：菜单配置在保护线程丢失，普通模型轮回落部署默认，压缩才请求Qwen。

@@ -255,6 +255,25 @@ def test_failed_background_refresh_is_visible_in_every_agent_view(focused_run, d
     assert _frame_text(frames[0]) == _frame_text(frames[2])
 
 
+@pytest.mark.parametrize("detailed", [False, True])
+def test_shared_main_approval_wait_is_static_and_not_working(detailed):
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("approval-render")
+    runtime.update_background_activity(1, {"main_activity": {
+        "phase": "waiting_permission", "activity": "等待工具审批", "started_at": 10,
+    }})
+    snapshot = runtime.store.snapshot()
+    cache = TuiBlockRenderCache()
+    frames = [render_tui_snapshot(snapshot, TuiRenderContext(
+        width=65, now=20, spinner_index=index, detailed_transcript=detailed,
+    ), cache=cache) for index in (0, 2)]
+    assert _frame_text(frames[0]) == _frame_text(frames[1])
+    assert "等待审批" in _frame_text(frames[0])
+    assert "Working" not in _frame_text(frames[0])
+    assert not frames[0].overlay_lines  # 观察状态不是另一个可批准的权限入口。
+
+
 def test_narrow_frame_never_exceeds_width_and_uses_single_column_card() -> None:
     frame = render_tui_snapshot(
         _fixture_store().snapshot(),

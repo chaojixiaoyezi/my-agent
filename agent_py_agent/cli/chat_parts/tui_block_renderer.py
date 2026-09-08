@@ -645,7 +645,7 @@ def _render_connection(
 # projection and mirrors 终端交互's animated SpinnerWithVerb at transcript tail.
 # Fixed prefix/suffix reserve their columns before the activity is truncated, so
 # arbitrary thinking text can never wrap this removable display state.
-# 函数用途: 在正文与 Context/Todo 之间显示主行；快照读取失败改为静态的上次状态，不推断任务已结束。
+# 函数用途: 在正文与 Context/Todo 之间显示主行；真实审批等待使用静态提示，失联保留上次状态，不推断任务已结束。
 def _render_background_activity(
     block: TuiBlock,
     context: TuiRenderContext,
@@ -695,6 +695,11 @@ def _render_background_activity(
             (terminal_style, f"{terminal_icon} "),
             ("class:tui-strong", context.focused_agent_name),
             (terminal_style, f" · {terminal_label}"),
+        )
+    elif main_phase == "waiting_permission":
+        prefix = (
+            ("class:tui-context-warning", "◌ 等待审批"),
+            ("class:tui-muted", f" · {context.focused_agent_name if context.focused_agent_run_id else 'main'}"),
         )
     else:
         glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]

@@ -89,3 +89,37 @@ def test_projection_error_preserves_original_chunk_and_close(tmp_path):
     writer.write_context_usage({"schema": "model_visible_context_usage.v1", "current_tokens": 62_300})
     writer.close()
     assert "62300" in path.read_text()
+
+
+def test_foreground_approval_wait_tracks_exact_pending_ids_and_keeps_context():
+    from agent_py_agent.agent.gateway_parts.main_activity import GatewayMainActivitySink
+
+    agent = SimpleNamespace()
+    sink = GatewayMainActivitySink(agent, thread_id="thread-a", request_id="req-a", request={}, task_id="task-a")
+    sink({"kind": "permission_requested", "permission": {"permission_id": "approval-a", "arguments": "private"}})
+    sink({"kind": "permission_requested", "permission": {"permission_id": "approval-b"}})
+    sink({"kind": "tool_progress", "progress": {"tool": "read_file", "phase": "finished"}})
+    sink({"kind": "context_usage_updated", "context_usage": {"schema": "model_visible_context_usage.v1", "current_tokens": 62300}})
+    sink({"kind": "permission_resolved", "permission_id": "other", "decision": "approved", "session_cached": True})
+    sink({"kind": "permission_resolved", "permission_id": "approval-a", "decision": "denied"})
+    row = background_main_activity(agent, "thread-a", {"task-a"})
+    assert row["phase"] == "waiting_permission"
+    assert row["activity"] == "等待工具审批"
+    assert row["context_usage"]["current_tokens"] == 62300
+    assert "private" not in str(row) and "approval-a" not in str(row)
+    assert background_main_activity(agent, "thread-b", {"task-a"}) == {}
+    sink({"kind": "permission_resolved", "permission_id": "approval-b", "decision": "cancelled"})
+    assert background_main_activity(agent, "thread-a", {"task-a"})["phase"] == "running"
+    sink.close()
+    sink({"kind": "permission_requested", "permission": {"permission_id": "late"}})
+    assert background_main_activity(agent, "thread-a", {"task-a"})["phase"] == "waiting"
+
+
+def test_malformed_approval_does_not_create_a_wait():
+    from agent_py_agent.agent.gateway_parts.main_activity import GatewayMainActivitySink
+
+    agent = SimpleNamespace()
+    sink = GatewayMainActivitySink(agent, thread_id="thread-a", request_id="req-a", request={}, task_id="task-a")
+    for permission in ({}, {"permission_id": []}, {"permission_id": ""}, None):
+        sink({"kind": "permission_requested", "permission": permission})
+    assert background_main_activity(agent, "thread-a", {"task-a"})["phase"] == "running"

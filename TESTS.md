@@ -1,5 +1,12 @@
 # TESTS
 
+## R215 审批阶段显示
+
+`test_gateway_main_activity.py` / `test_tui_renderer.py` / `test_conversation_agent_activity.py` 共87 focused通过。
+新增先红用例覆盖漏事件、并发/无关审批回执、数值不冻结及普通/展开状态条仍动画；等待现在为静态展示。
+真实验证须使用自建测试 owner 的工具策略触发审批，旁边打开 exact 同 session 的 TUI；保留请求、审批回执
+和两页屏幕，不能去批准已有用户窗口的操作或以单测代替 TUI。
+
 ## R214 简单 Qwen 调用与模型显示
 
 按用户最新范围，本地模型只测基本可用，原 R213 长任务通过 Esc 停止，不新增 child。

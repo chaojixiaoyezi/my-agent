@@ -10,7 +10,7 @@ the display cache into another lifecycle authority.
 # 子代理结束页同步投影 canonical thread/message ID；显示层不得从正文猜最终回复身份。
 # links and subagent runs to bounded public activity rows. It must never become
 # a lifecycle, authorization, retry, or completion authority.
-# 前台与后台 main 共用唯一数值/阶段投影；历史正文和生命周期不得由这份易失显示状态驱动。
+# 前台与后台 main 共用唯一数值/阶段投影，显式审批等待仍属于活动回合；历史正文和生命周期不得由此驱动。
 # 模块用途: 为 TUI 和后续 Web 提供同一份会话主任务与直属子代理状态快照。
 
 from __future__ import annotations
@@ -74,6 +74,7 @@ _MAIN_ACTIVITY_LIVE_PHASES = frozenset(
         "thinking",
         "tool",
         "working",
+        "waiting_permission",
     }
 )
 

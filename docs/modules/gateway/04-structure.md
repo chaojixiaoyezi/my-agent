@@ -6,6 +6,9 @@
 typed kind。`publish_main_activity` 是前后台唯一标量写入点；`MainActivitySource` 只在显示层隔离工作片，
 新任务不继承旧 task 的上下文，旧工作片迟到事件不盖新状态。正文/权限/生命周期仍走原路径。
 
+R215：同一 sink 的未决 permission ID 集合只控制 waiting_permission 展示。最后对应回执解除等待，
+缓存批准/无关回执不清其他等待；关闭流释放集合。TUI main 渲染静态等待，不建新的授权入口。
+
 ## R212 模型配置不经过执行池
 
 `handle_client_models` 沿 `resolve_gateway_scope_owner` 获取可信身份，`resolve_owner_home/home_paths_with_owner`
