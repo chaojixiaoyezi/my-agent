@@ -1,4 +1,4 @@
-# LLM: 子代理创建策略统一角色、结构化参数和运行身份；产品 cwd 与运行归档分离，交付路径不重写到 task。
+# LLM: 子代理创建策略统一角色与显式运行身份；产品 cwd 与归档分离，交付路径不重写到 task 或生成身份。
 # 模块用途: 为派工组装角色和参数，继承用户家目录并绑定所选模型；显式模型在创建前解析，不能新增凭证。
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ from .create_constraints import (
     resolved_extra_write_roots,
 )
 from .create_context import create_context_manifest, create_context_packs
-from .work_scope import add_work_scope_key
 
 
 @dataclass(frozen=True)
@@ -474,9 +473,8 @@ def _config_bool(agent, key: str, default: bool) -> bool:
     return bool_value(value, default=default)
 
 
-# LLM: Direct and nested create paths share this attribute builder. The host-bound parent tool
-# snapshot and model profile reference overwrite input lookalikes; an explicit model resolves only owner-saved profiles.
-# 函数用途: 归一属性，绑定父工具上限和已验证模型引用；显式模型无效时在任务落盘前报错。
+# LLM: 根/递归创建共用属性装配，宿主工具上限与 owner 模型引用覆盖伪造值；IO 只作元数据，不生成 work_scope_key。
+# 函数用途: 保留显式属性并绑定父工具上限和已验证模型引用；不落盘，无效模型在整批创建前报错。
 def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
     attrs = (
         dict(raw_params.get("attributes") or {})
@@ -509,7 +507,6 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
         ):
             attrs[key] = _positive_int(raw_params.get(key), default=0)
     _add_derived_output_refs(attrs, raw_params)
-    add_work_scope_key(attrs)
     add_current_conversation_attrs(attrs, agent)
     _inherit_conversation_request_id(attrs, agent)
     _add_current_task_workspace(attrs, agent)

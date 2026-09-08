@@ -1,5 +1,12 @@
 # COMPLETED
 
+## R220 普通派工引用与身份分离（本地通过，真实 TUI 待验）
+
+移除自动 IO 合同和 work_scope.py 哈希生成，资料/产物引用继续保留；不按 goal、名字或相同文件合并任务。
+五个先红用例钉住5→3吞派工，修后247focused与1项显式Audit并发通过；LOCAL/MANAGED完整工具路径中，
+同operation重放原ID且handler不执行，新operation同参数创建新child。旧任务不迁移、不重派、不自动补任务。
+主/子/孙模型继承、owner权限、显式幂等/Audit身份与未知副作用门不变；尚未据此宣称BUG-152真实闭环。
+
 ## R219 最近上下文耐久显示（真实 TUI 分项通过）
 
 主/子在同一模型 preflight 将数字保存到 exact thread，删除旧 child run 属性的写读旁路。

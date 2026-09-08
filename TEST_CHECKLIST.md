@@ -1,5 +1,13 @@
 # TEST CHECKLIST
 
+## R220 派工身份修复
+
+- [x] 五项普通派工共享IO仍保留五个run/目标；不生成自动幂等合同或work_scope（focused）。
+- [x] 文字完全相同但不同普通创建请求仍独立；LOCAL/MANAGED同operation则返回原ID，handler不再执行。
+- [x] 显式幂等、终态排除派发、replacement、结构化状态、模型配置和Audit显式work_scope并发保留。
+- [ ] 单Gateway/MiniMax真实多子代理任务，核对实际参数→创建回执→canonical目标一一对应，终态按真实证据判。
+- [ ] 正在执行/崩溃窗口的完整派工恢复矩阵，不以正常同operation定向重放代替真实中断验收。
+
 ## R219 当前切片
 
 - [x] 真实TUI原页拒绝具体工具；观察页同步解除等待，handler未执行且零对应operation。

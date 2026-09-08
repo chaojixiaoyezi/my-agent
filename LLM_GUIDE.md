@@ -21,8 +21,9 @@
 
 ## 2026-08-23 当前运行基线
 
-- R219 Context 三页恢复及压缩后child数字已真TUI分项通过；普通派工自动IO引用合同误复用另列BUG-152。
-  修复前先核对精确ToolCall/operation重试身份；不能以相同输入/输出推断两个职责是同一child。
+- 普通派工不按 IO 引用生成 idempotency_contract 或 work_scope_key；已删自动生成模块。
+  精确 ToolCall/operation 仍重放原回执，显式幂等与 Audit 身份不变，UNKNOWN 不盲目重做。
+  R219 的 5→3 吞派工 BUG-152 已定向复现并修复；真实 TUI 待验，旧任务不重写或自动重派。
 
 - 主/子上下文显示统一从各自 ConversationThread.model_context_usage 读取同代 preflight 数字，不依赖活跃
   main_activity，也不回读旧 child 属性。成功 Compact 同一 CAS 清除；空闲恢复不额外调用模型，不显示假 Working。

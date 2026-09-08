@@ -399,8 +399,8 @@ def test_structured_idempotency_does_not_reuse_completed_alias(tmp_path):
     assert second["created_run_ids"] != first["created_run_ids"]
 
 
-def test_generic_worker_reuses_same_structured_io_scope_without_goal_text_key(tmp_path):
-    """同一父级同一 input/output 范围复用已有 child；这不是按 goal 文案合并。"""
+def test_generic_worker_shared_io_remains_metadata_not_identity(tmp_path):
+    """同一 input/output 不能代替派工身份；新请求保留自己的引用和任务。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)
@@ -420,10 +420,10 @@ def test_generic_worker_reuses_same_structured_io_scope_without_goal_text_key(tm
     }).output)
 
     assert first["created_run_ids"]
-    assert second["created_run_ids"] == []
-    assert second["reused_run_ids"] == first["created_run_ids"]
+    assert second["created_run_ids"] != first["created_run_ids"]
+    assert second["reused_run_ids"] == []
     assert second["child_result_index"][0]["expected_outputs"] == [str(tmp_path / "outputs" / "batch4.md")]
-    assert second["tasks"][0]["attributes"]["work_scope_key"]
+    assert "work_scope_key" not in second["tasks"][0]["attributes"]
 
 
 def test_items_without_output_files_keep_business_output_contract_empty(tmp_path):

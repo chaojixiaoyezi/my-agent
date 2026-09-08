@@ -1,5 +1,14 @@
 # STATUS
 
+## R220 派工误合并本地已修，准备真实复验
+
+- 删除普通派工的自动IO合同与work_scope哈希，共去掉两个相同文件猜身份的来源，显式身份不改。
+- 五个用例先红，其中精确重现5items→3run；修后247 focused + 1项Audit显式身份并发通过。
+- LOCAL/MANAGED真实创建handler的同operation重放不重复创建，新operation不复用共享文件child。
+- 模型配置定向包含在内；本地Qwen仍保持基础短对话，未追加大任务或child。
+- 下一步单Gateway MiniMax真实TUI；当前Gateway仍R219/3606014，默认launcher未改，BUG-152待真实关闭。
+- 原P0/P1与未提交过程耐久化继续开放；本轮不跑全仓pytest、不推远端Git。
+
 ## R219 Context 真实恢复通过；下一片修 BUG-152 派工误复用
 
 - 5ad6696 独立包已受控部署，唯一 Gateway 3606014、MiniMax-M2.7；旧包保留，默认 launcher 未改。

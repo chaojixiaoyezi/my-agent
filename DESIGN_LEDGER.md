@@ -1,12 +1,15 @@
 # DESIGN LEDGER
 
-## 2026-09-08 派工引用不能冒充派工身份【状态：BUG-152 已复现，下一片待修】
+## 2026-09-08 派工引用不能冒充派工身份【状态：R220 修复中，真实 TUI 待验】
 
 R219 真实五项派工中，植物/僵尸/UI 有不同 covers 与职责，却共享 index.html 输入输出；宿主自动生成
 system_derived_io_scope 合同，并把后两项都复用为植物 child。真实回执 created=3、reused 同一 run 两次，
 不能归因于模型少传条目。会话运行时 multi_agents/spawn.rs 按显式创建生成新 thread、返回精确身份，不按文件引用合并。
-下一片先核对本项目既有 ToolCall/operation 的精确重试幂等，再移除普通派工的自动 IO 引用复用；
-显式幂等、恢复、owner 与安全门仍保留。不解析 goal 判相似，也不增加文件锁或机器质量判官。
+已核对 会话运行时 agent/control/spawn.rs 的 spawn_new_thread，以及本项目 ToolExecutor→ToolOperationCoordinator→
+ManagedOperationStore：精确 operation 已终态时重放原回执，输入冲突拒绝，未证明副作用的 UNKNOWN 不重做。
+删除 create_context 自动 IO 合同及 work_scope.py 的 IO 哈希生成；显式幂等、Audit work_scope、恢复、owner 与安全门
+仍保留。不解析 goal 判相似，也不增加文件锁或机器质量判官。旧任务不重写或重派；新派工不匹配其旧 IO 身份。
+定向复现真实 5→3、同文字不同调用、LOCAL/MANAGED 精确重放与新调用；同输入/输出绝不能吞掉独立派工项。
 
 ## 2026-09-08 最近上下文快照独立于执行活动【状态：R219 真实 TUI 分项通过】
 

@@ -1,5 +1,5 @@
-# LLM: 子代理上下文装配只描述输入、交付与幂等引用；不从任务目录关系推导额外文件权限。
-# 模块用途: 组装派工资料清单并规范显式路径；模型提示与结构化授权各自独立。
+# LLM: 子代理上下文只描述资料和显式合同；输入输出引用不生成派工身份或文件权限，根/递归共用。
+# 模块用途: 组装派工资料清单并规范显式路径；同一文件可被多个独立子代理使用，不因此合并任务。
 
 from __future__ import annotations
 
@@ -7,12 +7,10 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from ...subagents.services.contract_identity import idempotency_contract_identity_from_context_packs
 from ..runner.ref_fields import (
     _file_refs_from_value,
     _manifest_input_refs,
     _normalize_file_ref,
-    params_input_refs,
     params_output_refs,
 )
 
@@ -27,34 +25,14 @@ def create_context_manifest(raw_params: dict[str, object]) -> dict[str, object]:
     return manifest
 
 
+# LLM: 保留调用方明确提交的上下文和幂等合同；不得从 IO、goal 或名称推导创建身份，无落盘副作用。
+# 函数用途: 合并显式上下文包与引用；真正的调用重放由 ToolOperation 账本负责，不能在这里猜重复派工。
 def create_context_packs(raw_params: dict[str, object]) -> list[dict[str, object]]:
     packs = _dict_list_param(raw_params.get("context_packs"))
     for ref in string_list(raw_params.get("context_pack_refs"), TOOL_TEXT_LIST_OPTIONS):
         if not _pack_has_ref(packs, ref):
             packs.append({"kind": "context_ref", "path": ref})
-    _append_system_idempotency_pack(packs, raw_params)
     return packs
-
-
-def _append_system_idempotency_pack(packs: list[dict[str, object]], raw_params: dict[str, object]) -> None:
-    if idempotency_contract_identity_from_context_packs(packs):
-        return
-    input_refs = params_input_refs(raw_params)
-    output_refs = params_output_refs(raw_params)
-    if not input_refs or not output_refs:
-        return
-    packs.append({
-        "kind": "idempotency_contract",
-        "contract": {
-            "schema": "subagent_idempotency_contract.v1",
-            "kind": "system_derived_io_scope",
-            "idempotency_key": "create_subagents.io_refs",
-            "scope_refs": [
-                *(f"input:{ref}" for ref in input_refs),
-                *(f"output:{ref}" for ref in output_refs),
-            ],
-        },
-    })
 
 
 def _required_read_paths(raw_params: dict[str, object], manifest: dict[str, object]) -> list[str]:

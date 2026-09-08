@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _workspace_agent(tmp_path: Path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
@@ -84,7 +86,7 @@ def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
     assert len(agent.subagents.list_runs()) == 1
 
 
-def test_generic_worker_reuses_system_derived_output_ref_contract(tmp_path):
+def test_generic_workers_sharing_input_and_output_are_independent(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
@@ -104,9 +106,96 @@ def test_generic_worker_reuses_system_derived_output_ref_contract(tmp_path):
         "extra_write_roots": [str(tmp_path / "artifacts")],
     }).output)
 
-    assert second["created_run_ids"] == []
-    assert second["reused_run_ids"] == first["created_run_ids"]
-    assert len(agent.subagents.list_runs()) == 1
+    assert second["created_run_ids"]
+    assert second["reused_run_ids"] == []
+    assert second["created_run_ids"] != first["created_run_ids"]
+    assert len(agent.subagents.list_runs()) == 2
+
+
+def test_five_dispatch_items_keep_their_own_identity_despite_shared_io(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    items = [
+        {"goal": "开发核心", "output_files": ["abc/index.html"]},
+        *[
+            {"goal": goal, "input_refs": ["abc/index.html"], "output_files": ["abc/index.html"]}
+            for goal in ("开发植物", "开发僵尸", "开发界面")
+        ],
+        {"goal": "开发关卡", "input_refs": ["abc/index.html"], "output_files": ["abc/levels.js"]},
+    ]
+    result = CreateSubagentsTool(agent).execute({"goal": "并行开发游戏", "items": items})
+    payload = json.loads(result.output)
+
+    assert result.ok, result.output
+    assert payload["created"] == 5
+    assert len(set(payload["created_run_ids"])) == 5
+    assert payload["reused_run_ids"] == []
+    tasks = [agent.subagents.load(run_id) for run_id in payload["created_run_ids"]]
+    assert [task.goal for task in tasks] == [item["goal"] for item in items]
+    for task in tasks:
+        assert "work_scope_key" not in task.attributes
+        assert not any(pack.get("kind") == "idempotency_contract" for pack in task.context_packs)
+
+
+def test_identical_ordinary_dispatches_are_not_an_explicit_retry(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    params = {"goal": "独立检查实现", "input_refs": ["src/core.py"], "output_files": ["review.md"]}
+    first = json.loads(CreateSubagentsTool(agent).execute(params).output)
+    second = json.loads(CreateSubagentsTool(agent).execute(params).output)
+
+    assert first["created_run_ids"] != second["created_run_ids"]
+    assert second["reused_run_ids"] == []
+    assert len(agent.subagents.list_runs()) == 2
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_dispatch_operation_replay_preserves_ids_but_new_call_creates_children(tmp_path, managed):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.runtime_db.managed_operation_store import ManagedOperationStore
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    agent = _workspace_agent(tmp_path)
+    attempt_id = "test-attempt"
+    if managed:
+        repo = RuntimeRepository(tmp_path / "runtime.db")
+        record = repo.record_run_creation(
+            owner_id="test-owner", goal="派工验证", run_id="test-run",
+            conversation_task_id="test-run", thread_id="test-thread", role="assistant",
+        )
+        attempt_id = record["attempt_id"]
+        store = ManagedOperationStore(repo)
+    else:
+        store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    params = {
+        "goal": "并行检查实现",
+        "items": [
+            {"goal": goal, "input_refs": ["src/core.py"], "output_files": ["review.md"]}
+            for goal in ("检查正常行为", "检查错误行为")
+        ],
+    }
+    results = []
+    for call_id in ("dispatch-1", "dispatch-1", "dispatch-2"):
+        execution = execute_canonical_test_call(
+            tmp_path, tools={"create_subagents": CreateSubagentsTool(agent)},
+            tool_name="create_subagents", arguments=params, call_id=call_id,
+            attempt_id=attempt_id, operation_id=f"dispatch:{call_id}",
+            idempotency_key=f"dispatch:{call_id}", operation_store=store,
+            operation_store_required=True,
+        )
+        assert execution.result.ok, execution.result.output
+        results.append(execution.result)
+    first, replay, following = results
+    first_ids = json.loads(first.output)["created_run_ids"]
+    assert len(first_ids) == 2
+    assert json.loads(replay.output)["created_run_ids"] == first_ids
+    assert replay.operation.replayed and not replay.handler_executed
+    assert not set(json.loads(following.output)["created_run_ids"]) & set(first_ids)
+    assert len(agent.subagents.list_runs()) == 4
 
 
 def test_generic_default_name_does_not_reuse_different_goal(tmp_path):
