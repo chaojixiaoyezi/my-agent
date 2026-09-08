@@ -1,5 +1,11 @@
 # COMPLETED
 
+## R218 原真实会话命令标题恢复通过
+
+ma-r218-110-live-resume使用82da8d1独立客户端，8条Bash调用预览恢复；展开头尾与原页逐字一致，
+user/final各1、18思考、无Working，canonical及用量不变。209focused+严格gate通过，没有额外模型请求。
+唯一Gateway3593187保持运行；只更新验证客户端，默认launcher没变，空闲Context等其他问题保留。
+
 ## R218 工具历史调用预览（本地修复，待真 TUI）
 
 R217 三页验证发现八条 Bash 标题恢复后无命令；已保留的脱敏 detail 在唯一 metadata 层投影为调用标题，

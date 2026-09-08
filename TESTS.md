@@ -1,5 +1,15 @@
 # TESTS
 
+## R218 原记录真实复验
+
+源码82da8d1，wheel SHA256 `de6ab4f7cc18dcff1c89cc144d8c6d4a0c6215ba4c2fb5d530a734a0a0f7dbca`，
+独立runtime-venv-r218仅启动ma-r218-110-live-resume；原Gateway3593187/1108abc不变。
+同sess_1788885531_d7d9966b，真实8条Bash标题全部恢复，user/final各1、思考18、无Working。
+展开头SHA256 `f2c03ece16e8df3737515d2af580f1562c1514071efc9619a3a14fc728526780`，
+展开尾SHA256 `4e2d4025e44915a6b8b9cb505ef3bf38953d67cf633fe2c2fb27973389d30b00`；以实际截图逐字比较。
+`r218-82da8d1/ui-three-pages.json`（本次单页）与`verification.json`保存原尺寸还原、逐字比较和canonical不变结论。
+未修改业务文件、模型历史或用量；空闲Context一行仍缺，单列待查。
+
 ## R217/R218 真实同步、历史与修复定位
 
 R217源码1108abc，wheel SHA256 `7ac875eb2b2ddde64b6a70da9d616edcbac12dbbcb86b5c575ed6d5b61c84ecf`，

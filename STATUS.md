@@ -1,5 +1,16 @@
 # STATUS
 
+## R218 客户端真实历史复验通过
+
+- `82da8d1` 独立非editable客户端，tmux `ma-r218-110-live-resume`；Gateway保持R217/3593187，未重启、未换默认launcher。
+- 原真实会话的8条Bash命令标题全部恢复；Ctrl+O头尾截图与原在线页逐字相同。user/final各1、思考18、无Working，
+  canonical消息/用量前后完全相同。BUG-151为FIXED_TUI_RESTORE；没有重新调用模型或补执行业务工具。
+- 209 focused与本地严格gate通过；本次未推远端、未以线上CI作为验收来源。sink去重转换的后台包将在下一次
+  受控Gateway升级时随包启用，当前客户端已能正确读取原有快照。
+- 连续任务的第二个大任务及后续追问均已返回：统筹子代理+4孙代理全部done，主Compact1；完整游戏/外部访问仍未通过。
+  后续模型只检查iptables/ufw，再次错误排除服务端，未查实际运行的firewalld；不能把任务done当作排障成功。
+- 空闲恢复缺Context、提交前崩溃过程、其他P0/P1和跨模型child真实组合仍开放；本地Qwen不追加任务。
+
 ## R218 历史工具标题补修；R217 完整实时过程真 TUI 分项通过
 
 - R217 独立包 `1108abc` 已部署，唯一 Gateway 3593187；新客户端 `ma-r217-110-live` / `-mirror`
