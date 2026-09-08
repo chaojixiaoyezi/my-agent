@@ -1491,6 +1491,19 @@ def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
     assert snapshot["cursor"] == store.message_byte_offset_after(thread.thread_id, message.message_id)
     assert not store.goals_dir.exists()
 
+    foreground = store.append_message({
+        "thread_id": thread.thread_id, "role": "assistant", "content": "冷用户的前台回复",
+        "metadata": {"gateway_request_id": "gwreq-cold", "assistant_part_id": "final"},
+    })
+    for capable, expected in ((False, []), (True, [foreground.message_id])):
+        page = http_handlers.read_gateway_client_notices(
+            SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path)),
+            scope=GatewayControlScope("cold-user", "tui-test", "cold-session", resolved_owner=owner),
+            after=snapshot["cursor"], include_foreground=capable,
+        )
+        assert page["ok"] and [row["message_id"] for row in page["notices"]] == expected
+        assert page["owner_state"] == "cold" and not store.goals_dir.exists()
+
 
 def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:
     """同一 thread 连续后台回复不能因复用稳定 block id 而丢掉后者。"""

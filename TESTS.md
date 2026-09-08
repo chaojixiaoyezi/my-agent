@@ -1,5 +1,14 @@
 # TESTS
 
+## R216 前台消息同步验证
+
+上述相关消息页、历史、worker、HTTP/控制与TUI刷新共131 focused通过；Ruff/doc sync/strict size/diff/package通过。
+
+定向验证原页/观察页、重复文本不同 message ID、分批 user 页与完整恢复、后台续片沿原请求号不被隐藏、
+入队前关联和回调失败零入队、旧客户端默认不接收前台消息、冷 owner 无 Agent 初始化。
+真实测试须两个新版 TUI 恢复同一自建 session，再由原页一次普通中文需求；保留两页完整屏幕、
+canonical request/user/final、provider usage 和原页零重复。执行中的思考/工具同步不在本片通过范围。
+
 ## R215 真 TUI 分项证据
 
 部署包dd9610b，wheel SHA256 `368831bbcf690a222314d063c2c88ee1bc6a5e8b1667ce27799a7132c0b5509c`。

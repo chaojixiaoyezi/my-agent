@@ -73,11 +73,8 @@ def _submit_gateway_job(ctx: Any):
     return _submit_new_gateway_job(ctx.cfg, ctx.job, ctx.turn_inject)
 
 
-# LLM: TUI dequeues and durably submits a new Gateway job before publishing the
-# running snapshot. The lightweight client's cwd is always carried separately
-# from the optional full-Agent audit hook, so one owner service can execute each
-# TUI in its own project.
-# 函数用途: 提交一条尚无 Gateway ID 的 TUI 任务，同时传入该终端的真实工作目录并固定请求 ID。
+# LLM: 入队前只登记显示去重 ID；运行/停止快照仍在 durable submit 成功后发布，不让未提交编号获得控制权。
+# 函数用途: 提交新 TUI 请求，保持真实工作目录，并防止自己的正文经同会话观察流再显示一次。
 def _submit_new_gateway_job(cfg: Any, job: Any, turn_inject: list[str]):
     from .gateway_client import ChatRequestContent, submit_chat_request
 
@@ -98,6 +95,7 @@ def _submit_new_gateway_job(cfg: Any, job: Any, turn_inject: list[str]):
         agent=cfg.agent,
         workspace_root=getattr(cfg.agent, "root", ""),
         workspace_roots=getattr(cfg.agent, "workspace_roots", None),
+        on_request_allocated=getattr(getattr(cfg, "tui_runtime", None), "register_gateway_request", None),
     )
     job.gateway_request_id = request_id
     return request_id, chunk_path, cfg.paths.terminal / f"{request_id}.json"

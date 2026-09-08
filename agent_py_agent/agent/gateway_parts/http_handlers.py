@@ -985,9 +985,8 @@ def handle_control_status(handler, server) -> None:
     handler._send_json(200, gateway_control_operation_status_payload(receipt))
 
 
-# LLM: Trusted owner/thread scope selects the canonical message page; after is a complete-row byte offset,
-# not a clock timestamp. Process sequence is paired with event_stream_id; neither stream grants work.
-# 函数用途: 接收薄客户端后台查询，把已提交正文、过程事件和活动状态投影到同一界面。
+# LLM: 可信 owner/thread 选择分页；前台 user/final 仅发给显式支持同请求去重的客户端，不授予执行权。
+# 函数用途: 在同一查询中投影已提交消息及活动，旧客户端继续原后台通知语义。
 def handle_client_notices(handler, server) -> None:
     """S-BG1: 返回当前会话的进行中任务数和后台主代理轮完成通知。
 
@@ -1032,6 +1031,10 @@ def handle_client_notices(handler, server) -> None:
         interactive_approvals=bool(
             isinstance(body.get("client_capabilities"), dict)
             and body["client_capabilities"].get("tool_approval") is True
+        ),
+        include_foreground=bool(
+            isinstance(body.get("client_capabilities"), dict)
+            and body["client_capabilities"].get("foreground_messages") is True
         ),
     )
     handler._send_json(200, result)
@@ -1211,7 +1214,7 @@ def _send_agent_control_error(handler, error: AgentControlError) -> None:
 # projection from canonical runs; neither notices nor that projection can
 # create task state, authorize work, retry, or decide completion. Process-stream identity is
 # echoed with its event sequence, independently from the durable message byte cursor.
-# 函数用途: 读取一个已鉴权会话真正还在工作的主任务、直属子代理状态和新增后台通知。
+# 函数用途: 读取已鉴权会话的活动和消息；按客户端显式能力开放前台消息，热/冷 owner 路径一致。
 def read_gateway_client_notices(
     agent: object,
     *,
@@ -1220,6 +1223,7 @@ def read_gateway_client_notices(
     event_after: int = 0,
     event_stream_id: str = "",
     interactive_approvals: bool = False,
+    include_foreground: bool = False,
 ) -> dict[str, object]:
     """返回当前 thread 的活动投影、后台过程事件与 after 之后的通知。"""
     from ..conversation.store import ConversationStore
@@ -1246,6 +1250,7 @@ def read_gateway_client_notices(
             after=after,
             event_after=event_after,
             event_stream_id=event_stream_id,
+            include_foreground=include_foreground,
         )
     store = getattr(owner_agent, "conversation_store", None)
     if not isinstance(store, ConversationStore):
@@ -1289,7 +1294,9 @@ def read_gateway_client_notices(
     activity = conversation_agent_activity(owner_agent, store, thread_id)
     activity_payload = activity.to_dict()
     active_task_count = activity.active_task_count
-    notices, cursor, notices_ok = read_background_response_page(store, thread_id, after=after)
+    notices, cursor, notices_ok = read_background_response_page(
+        store, thread_id, after=after, include_foreground=include_foreground,
+    )
     payload = {
         "ok": notices_ok,
         "notices": notices,
@@ -1312,7 +1319,7 @@ def read_gateway_client_notices(
 # layouts, and replay the newest exact channel binding without constructing Agent/backend/tool
 # state. Volatile activity and approval state intentionally remain empty until the owner is loaded;
 # an echoed stream cursor keeps the client unchanged until a new real stream exists.
-# 函数用途: Gateway 重启后从冷用户已有会话库重放最终回复，避免空闲轮询拉起整套 Agent。
+# 函数用途: 重启后从冷用户已有会话库读取消息，保持前台能力声明，不因轮询拉起整套 Agent。
 def _read_cold_owner_notice_projection(
     base_agent: object,
     *,
@@ -1320,6 +1327,7 @@ def _read_cold_owner_notice_projection(
     after: int,
     event_after: int,
     event_stream_id: str,
+    include_foreground: bool = False,
 ) -> dict[str, object]:
     from ..conversation.store import ConversationStore
     from ..owner_wake_discovery import existing_conversation_store_roots
@@ -1370,7 +1378,9 @@ def _read_cold_owner_notice_projection(
 
     _updated_at, _root_key, store, thread = max(candidates, key=lambda item: item[:2])
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
-    notices, cursor, notices_ok = read_background_response_page(store, thread_id, after=after)
+    notices, cursor, notices_ok = read_background_response_page(
+        store, thread_id, after=after, include_foreground=include_foreground,
+    )
     if not notices_ok:
         payload["ok"] = False
         payload["error"] = "notices read failed"

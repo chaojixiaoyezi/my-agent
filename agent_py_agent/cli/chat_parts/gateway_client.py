@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,10 +76,8 @@ class ChunkFilePollRequest:
     on_event: object | None = None
 
 
-# LLM: submit maps one client context into identity/workspace facts and exposes a full Agent only
-# to the optional audit hook. A thin client must remain present for routing but never masquerade
-# as a local audit Agent or lose its scoped identity.
-# 函数用途: 提交聊天请求并返回 request、chunk 和 response 路径；薄客户端只供身份和目录投影。
+# LLM: submit 保留可信身份/工作区；可选分配回调在原子入队前登记显示关联，不改变权限、请求正文或模型配置。
+# 函数用途: 提交聊天请求并返回真实编号和路径，让发起页提前识别后到的同源消息。
 def submit_chat_request(
     paths,
     content: ChatRequestContent,
@@ -86,6 +85,7 @@ def submit_chat_request(
     *,
     workspace_root: object = "",
     workspace_roots: object = None,
+    on_request_allocated: Callable[[str], None] | None = None,
 ) -> tuple[str, Path, Path]:
     identity = _gateway_submit_identity(agent)
     workspace = _gateway_submit_workspace(
@@ -119,6 +119,7 @@ def submit_chat_request(
             workspace_root=str(workspace.get("cwd") or ""),
             workspace_roots=[str(item) for item in workspace.get("roots", [])],
         ),
+        **({"on_request_allocated": on_request_allocated} if on_request_allocated is not None else {}),
     )
     chunk_path = gateway_chunk_path(paths, request_id)
     return request_id, chunk_path, response_path

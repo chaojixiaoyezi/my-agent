@@ -1,5 +1,11 @@
 # COMPLETED
 
+## R216 前台已提交消息（代码已落地，真实 TUI 待验）
+
+有明确 Gateway request 的 user/final 可经同会话消息页显示；原页登记真实 ID，跳过自己的同步副本。
+后台续片仍按独立消息投递，用户块 ID 在分页/恢复中稳定；旧客户端能力未声明时不接收新种类消息。
+不改模型请求、记忆或 Compact，实时过程尚未接通。本条不能当完整 BUG-146 或原 P0/P1 通过。
+
 ## R215 真实审批等待/解除（分项通过）
 
 ma-r215-110-approval 主页在具体 terminal_session(python3) 审批处等待，exact同session观察页也静态等待，

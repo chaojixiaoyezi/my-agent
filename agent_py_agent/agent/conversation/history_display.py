@@ -16,8 +16,8 @@ from .native_history import canonical_native_messages_from_metadata
 HISTORY_DISPLAY_SCHEMA = "conversation_history_display.v1"
 
 
-# LLM: 调用方已解析 owner/thread 并限制窗口；后台消息按显式工作片 ID 组合，不从 task 或文本猜测过程归属。
-# 函数用途: 显示窗口的公开消息和独立的技术结束提示；后台 commentary 不另起回合，未完成输入也保留。
+# LLM: 已授权同会话记录按工作片组合；前台 ID 仅供发起页去重，后台续片不得借原请求号被过滤。
+# 函数用途: 投影公开消息和结束提示，恢复与实时消息沿相同编号显示，不修改模型历史。
 def conversation_history_display_events(
     rows: Sequence[object],
 ) -> tuple[dict[str, object], ...]:
@@ -31,9 +31,23 @@ def conversation_history_display_events(
         groups.setdefault(identity, []).append(row)
     events: list[dict[str, object]] = []
     for identity in groups:
-        events.extend(_turn_events(identity, groups[identity]))
-        events.extend(_turn_end_events(groups[identity]))
+        group = groups[identity]
+        gateway_id = next((value for row in group if (value := foreground_gateway_request_id(row))), "")
+        if any(isinstance(getattr(row, "metadata", None), Mapping) and row.metadata.get("background_delivery_reason") for row in group):
+            gateway_id = ""
+        projected = [*_turn_events(identity, group), *_turn_end_events(group)]
+        events.extend({**event, **({"gateway_request_id": gateway_id} if gateway_id else {})} for event in projected)
     return tuple(events)
+
+
+# LLM: 只读取宿主 metadata 的精确请求关联；后台续片虽可携带原编号，仍是独立应显示的工作片。
+# 函数用途: 返回可用于前台显示去重的请求号；不猜旧消息、不从正文或 task 名推导。
+def foreground_gateway_request_id(row: object) -> str:
+    metadata = getattr(row, "metadata", None)
+    if not isinstance(metadata, Mapping) or metadata.get("background_delivery_reason"):
+        return ""
+    value = metadata.get("gateway_request_id")
+    return value.strip() if isinstance(value, str) else ""
 
 
 # LLM: 结束提示只由 canonical final 的结构化 reason 产生；ID 与原消息绑定，重放不能新增模型输入或重复提示。
@@ -54,13 +68,13 @@ def _turn_end_events(rows: list[object]) -> list[dict[str, object]]:
     return events
 
 
-# LLM: user/final 身份来自 canonical row；已提交后台快照完整时优先使用同块 ID，不能把 native 内部输入公开。
-# 函数用途: 恢复一轮的输入和已保存 native 内容，无 native 时保留全部正式 commentary/final。
+# LLM: user/final 使用 canonical message ID，分页不能改变用户块编号；后台完整快照优先，不公开 native 内部输入。
+# 函数用途: 恢复一轮输入和 native 内容，让分批到达与完整恢复得到同一用户消息，不按文字去重。
 def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
     request_id = f"history:{identity}"
     events = [
-        _event(request_id, f"user:{index}", "user_message", {"text": _public(row.content)})
-        for index, row in enumerate(rows)
+        _event(request_id, f"user:{row.message_id}", "user_message", {"text": _public(row.content)})
+        for row in rows
         if row.role == "user" and getattr(row, "content", "")
     ]
     assistants = [row for row in rows if row.role == "assistant"]

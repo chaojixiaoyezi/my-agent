@@ -162,11 +162,15 @@ def _build_turn_inject(
     return turn_inject
 
 
-# LLM: A new Gateway job must have its durable server id before ``is_running`` becomes visible.
-# Attached fallback jobs already carry that id and are never submitted again.
-# 函数用途: 在发布 TUI 运行快照前完成一次本地 Gateway 入队，并把真实 ID 写回当前任务。
+# LLM: 新请求先 durable submit；已有 exact Gateway job 不再次入队，但同样登记本页显示去重，不据此取得执行权。
+# 函数用途: 在发布运行快照前准备真实请求编号，避免已接回的请求被通知与本地流重复显示。
 def _tui_prepare_gateway_job(cfg: TuiWorkerConfig, job: Any) -> None:
-    if not cfg.use_gateway or str(getattr(job, "gateway_request_id", "") or "").strip():
+    if not cfg.use_gateway:
+        return
+    if request_id := str(getattr(job, "gateway_request_id", "") or "").strip():
+        register = getattr(getattr(cfg, "tui_runtime", None), "register_gateway_request", None)
+        if callable(register):
+            register(request_id)
         return
     from .tui_worker_paths import _submit_new_gateway_job
 

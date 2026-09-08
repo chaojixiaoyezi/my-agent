@@ -100,8 +100,9 @@ def test_gateway_job_is_durably_submitted_before_running_snapshot(monkeypatch) -
     assert calls[0][1][0] == "runtime rule"
 
 
-def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path) -> None:
+def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path, monkeypatch) -> None:
     """Initial TUI submission must not lose cwd when the audit Agent is intentionally absent."""
+    from agent_py_agent.agent.gateway_parts import request_client
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     from agent_py_agent.cli.chat_parts.tui_worker_paths import _submit_new_gateway_job
 
@@ -117,7 +118,17 @@ def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path) -> None
         agent=client,
         paths=paths,
         current_session_id="session-project",
+        tui_runtime=TuiRuntime("session-project"),
     )
+    write_request = request_client.write_gateway_request
+
+    def inspect_before_admission(target, payload):
+        assert payload["id"] in cfg.tui_runtime._owned_gateway_requests
+        assert job.gateway_request_id == ""
+        assert "on_request_allocated" not in payload
+        return write_request(target, payload)
+
+    monkeypatch.setattr(request_client, "write_gateway_request", inspect_before_admission)
     job = SimpleNamespace(
         user="创建项目",
         prompt_files=[],
@@ -138,6 +149,30 @@ def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path) -> None
         "roots": [str(project.resolve())],
     }
     assert job.gateway_request_id == request_id
+
+
+def test_display_registration_failure_does_not_submit_a_request(tmp_path):
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.gateway_parts.request_client import (
+        GatewayAskParams,
+        submit_gateway_ask,
+    )
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+
+    def fail(_request_id):
+        raise RuntimeError("display registration failed")
+
+    with pytest.raises(RuntimeError, match="display registration failed"):
+        submit_gateway_ask(paths, params=GatewayAskParams(prompt="普通消息"), on_request_allocated=fail)
+    assert list(paths.inbox.glob("*.json")) == []
+
+
+def test_attached_gateway_job_registers_display_without_resubmitting():
+    runtime = TuiRuntime("session")
+    cfg = SimpleNamespace(use_gateway=True, tui_runtime=runtime)
+    _tui_prepare_gateway_job(cfg, SimpleNamespace(gateway_request_id="gwreq-existing"))
+    assert runtime._owned_gateway_requests == {"gwreq-existing"}
 
 
 def test_complete_queued_inject_does_not_append_chat_style_twice() -> None:

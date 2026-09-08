@@ -248,10 +248,8 @@ class GatewayChatClientAgent:
             "load_errors": [{"error_code": "GATEWAY_UNAVAILABLE"}],
         }
 
-    # LLM: Canonical message byte offsets and the independent process-event cursor share one
-    # authenticated HTTP snapshot; process cursors include stream identity, and transport failure
-    # leaves both display projections unchanged. Changing streams never rewinds canonical messages.
-    # 函数用途: 拉取当前会话活动与实际已读消息位置之后的后台回复，不把时间戳当消息游标。
+    # LLM: canonical 游标不随进程流重置；显式声明能按请求去重前台消息，旧客户端不被强发未知用户事件。
+    # 函数用途: 拉取同会话活动与已提交消息，不把时间戳当游标，也不因失败清空已有显示。
     def request_background_notices(
         self,
         session_id: str,
@@ -267,7 +265,7 @@ class GatewayChatClientAgent:
                 "after": max(0, int(after or 0)),
                 "event_after": max(0, int(event_after or 0)),
                 "event_stream_id": event_stream_id,
-                "client_capabilities": {"tool_approval": True},
+                "client_capabilities": {"tool_approval": True, "foreground_messages": True},
                 "user_id": "local-agent",
                 "channel": "chat",
                 "conversation_id": str(session_id or "default"),

@@ -819,7 +819,7 @@ def test_thin_client_agent_requests_keep_local_conversation_identity() -> None:
     assert all(payload["user_id"] == "local-agent" for _path, payload, _ in calls)
     assert all(payload["channel"] == "chat" for _path, payload, _ in calls)
     assert all(payload["conversation_id"] == "session-a" for _path, payload, _ in calls)
-    assert calls[0][1]["client_capabilities"] == {"tool_approval": True}
+    assert calls[0][1]["client_capabilities"] == {"tool_approval": True, "foreground_messages": True}
     assert calls[-1][2] == 10.0
 
 

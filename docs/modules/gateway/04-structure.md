@@ -1,5 +1,13 @@
 # Gateway Structure
 
+## R216 已提交消息的同会话投影
+
+`submit_gateway_ask` 在原子入队前调用可选 on_request_allocated，TUI 仅登记显示去重，运行控制引用
+仍等提交成功才发布。`request_background_notices` 声明 foreground_messages，HTTP 热/冷路径原样传给
+`message_stream`。仅有宿主 Gateway request 绑定的 user/final 扩入原消息页；无来源消息及 Audit 不开放。
+`history_display.foreground_gateway_request_id` 统一排除后台续片；用户块使用 message ID。
+原发送页按 exact ID 跳过已走本地流的副本，观察页使用恢复同款静态卡片；不新增持久正文或模型调用。
+
 ## R210 main 标量共用
 
 `BufferedChunkStreamWriter._write_event` 保持原 chunk 落盘，再交 `GatewayMainActivitySink` 消费已清洗

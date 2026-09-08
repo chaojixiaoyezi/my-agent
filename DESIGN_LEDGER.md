@@ -1,5 +1,15 @@
 # DESIGN LEDGER
 
+## 2026-09-08 同会话前台已提交消息同步【状态：R216 本地实现；真实 TUI 待验】
+
+解决 BUG-146 中观察页连前台用户输入/最终回复都收不到的缺口。沿 会话运行时 按 thread 投递的做法，
+复用 canonical 消息分页和稳定显示块，不另存 notices 正文、不改变模型历史或缓存。
+发起页在请求原子入队前登记宿主分配的 exact Gateway request ID，后到的同 ID 前台消息仅确认游标，
+不重复落屏；后台续片不能因为携带原请求编号而被过滤。提交回调失败则不入队，不能先执行后登记。
+只开放具有明确 Gateway request 绑定的前台 user/final；内部 Audit 继续过滤，原后台 final 路径保留。
+foreground_messages 必须由新版客户端显式声明，旧客户端继续原消息种类；冷 owner 不额外初始化。
+本片不宣称接通执行中的思考/工具流；最终消息、恢复重放和原页零重复分别验证后，再完成实时过程。
+
 ## 2026-09-08 同会话工具审批等待【状态：BUG-147 真实 TUI 允许一次分支通过】
 
 对照 会话运行时 app-server `bespoke_event_handling.rs` 的 note_permission_requested 与 thread-scoped 通知，

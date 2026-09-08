@@ -827,12 +827,14 @@ class _TuiConversationBoundaryRuntimeMixin:
             self.history_before_cursor = next_before
             return inserted
 
-    # LLM: 只接受静态公开终态；历史 payload 的副本撤掉实时 Todo 字段，不能锁代或覆盖当前计划。
-    # 完整 final 发布成功才重基原工作片；不改 canonical 原记录、不执行控制、不恢复活动。
-    # 函数用途: 恢复历史卡片和原工作片顺序，但把底部当前清单留给实时活动快照，向前翻页也不覆盖它。
+    # LLM: 静态事件不接管 Todo；本页前台按 exact 请求去重，后台独立工作片仍显示，不改 canonical 原记录。
+    # 函数用途: 恢复历史卡片及顺序，避免本页已显示的前台回复被分页或通知重复追加。
     def _publish_recovered_display_events(self, events: tuple[dict[str, object], ...]) -> None:
         background_blocks: dict[str, list[str]] = {}
         for item in events:
+            gateway_id = item.get("gateway_request_id")
+            if isinstance(gateway_id, str) and gateway_id in self._owned_gateway_requests:
+                continue
             request_id = str(item.get("request_id") or "")
             block_id = str(item.get("block_id") or "")
             kind = str(item.get("kind") or "")
@@ -1070,17 +1072,20 @@ class _TuiBackgroundActivityRuntimeMixin:
         return True
 
 
-    # LLM: 后台 final 与恢复共享 message_id；完整过程快照先补齐原块，不能按到达次序生成第二份工具或正文。
-    # 函数用途: 显示后台最终回复并补回错过的过程，请求终帧但不重跑或重投递。
+    # LLM: 消息与恢复共享稳定块 ID；仅明确前台请求可命中本页去重，后台不能借原请求号跳过。
+    # 函数用途: 显示同会话已提交消息及快照，原发送页不重复追加自己的用户消息和回复。
     def publish_background_response(
         self, content: str, *, thread_id: str, message_id: str,
         display_events: tuple[dict[str, object], ...] = (),
+        gateway_request_id: str = "",
     ) -> None:
         text = str(content or "").strip()
         if not text or not thread_id or not message_id:
             return
         request_id = f"history:{thread_id}:{message_id}"
         with self._lock:
+            if gateway_request_id in self._owned_gateway_requests:
+                return
             # 最终回复进入 reducer 时仍会立即 invalidate；额外的一次刷新由
             # needs_periodic_refresh 消费，语义等同 会话运行时 FrameRequester 的终帧请求。
             self._terminal_refresh_pending = True
@@ -1216,14 +1221,14 @@ class _TuiBackgroundActivityRuntimeMixin:
 
 
 # LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；两个无状态 mixin 只能借用同一 publish/store。
-# 类用途: 建立 TUI 状态容器、发布启动/输入与 Compact 边界事件，并为每个 request 创建唯一 adapter。
+# 类用途: 建立 TUI 状态容器和回合 adapter；发起页登记真实请求编号，避免同会话消息再次显示。
 class TuiRuntime(
     _TuiConversationBoundaryRuntimeMixin,
     _TuiBackgroundActivityRuntimeMixin,
     TuiPermissionRuntimeMixin,
 ):
     # LLM: session_id 固定一个 UI 生命周期；store 可注入用于 replay/tests，但不能在运行中替换。
-    # 函数用途: 创建 TUI runtime、单调 sequencer、独立历史/实时游标和已完整恢复的工作片集合。
+    # 函数用途: 创建单调事件流、历史游标及本页已提交请求关联；这些显示集合没有执行或审批权。
     def __init__(self, session_id: str, *, store: TuiStateStore | None = None) -> None:
         normalized = str(session_id or "default").strip() or "default"
         self.session_id = normalized
@@ -1233,6 +1238,7 @@ class TuiRuntime(
             session_id=normalized,
         )
         self._turns: dict[str, TuiTurnEventAdapter] = {}
+        self._owned_gateway_requests: set[str] = set()
         self._pending_steers: dict[str, str] = {}
         self._queued_prompts: dict[str, str] = {}
         self._published_control_commands: set[str] = set()
@@ -1515,6 +1521,12 @@ class TuiRuntime(
             block.role in {"connection", "thinking", "compact"}
             for block in snapshot.active_blocks
         )
+
+    # LLM: 只在原子入队前登记宿主分配编号；集合没有执行权，也不改变用于停止/插话的 running ref。
+    # 函数用途: 标记这条请求已有本页显示通路，后到的同源历史只推进游标，不重复落屏。
+    def register_gateway_request(self, request_id: str) -> None:
+        with self._lock:
+            self._owned_gateway_requests.add(_required_request_id(request_id))
 
     # LLM: begin_turn 每 request 只创建一次 adapter，重复 worker dequeue 返回同对象但不重放 turn_started；
     # show-prompt 诊断轮可显式延迟 assistant 正文，保证终态 prompt 先于 response 落屏。

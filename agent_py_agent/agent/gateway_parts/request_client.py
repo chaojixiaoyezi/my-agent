@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -113,12 +114,13 @@ class GatewayAskParams:
 _DEFAULT_GATEWAY_CLI_SESSION_ID = "default"
 
 
-# LLM: 请求文件是 Gateway admission 的权威输入；客户端能力必须显式写入结构化 payload，不能按 source/终端文案猜测。
-# 函数用途: 校验并原子提交一条 Gateway ask 请求。
+# LLM: 入队前回调只登记宿主分配的显示关联，不能改 ID/载荷；回调失败不得入队，执行权仍由 admission 决定。
+# 函数用途: 校验请求，先通知调用页真实编号，再原子入队，防止观察流比本地登记先到。
 def submit_gateway_ask(
     paths: GatewayPaths,
     *,
     params: GatewayAskParams,
+    on_request_allocated: Callable[[str], None] | None = None,
 ) -> tuple[str, Path, Path]:
     prompt, system_task = _normalized_gateway_prompt(params)
     request_id = new_gateway_request_id()
@@ -157,6 +159,8 @@ def submit_gateway_ask(
     # travel in the canonical request body. Owner routing reads these fields, never prompt text.
     payload["user_id"] = str(params.canonical_user_id or params.channel_user_id)
     payload["metadata"] = _gateway_identity_metadata(params, conversation)
+    if on_request_allocated is not None:
+        on_request_allocated(request_id)
     request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)
     if params.agent is not None:

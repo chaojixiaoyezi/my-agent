@@ -107,7 +107,7 @@ def test_rich_restore_preserves_order_and_never_requeues_or_mutates(failed):
 def test_without_native_keep_commentary_final_and_unanswered_user():
     rows = _rows()
     rows[-1].metadata.pop("canonical_native_messages")
-    rows.append(SimpleNamespace(role="user", content="还有一问", metadata={"gateway_request_id": "req-2"}))
+    rows.append(SimpleNamespace(role="user", content="还有一问", message_id="msg-followup", metadata={"gateway_request_id": "req-2"}))
     events = conversation_history_display_events(rows)
     assert [event["payload"]["text"] for event in events] == [
         "帮我检查项目", "我先检查。", "这是完整汇报。", "还有一问",

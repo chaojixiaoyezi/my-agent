@@ -209,6 +209,91 @@ def test_failed_publish_does_not_acknowledge_message(conversation):
     assert _publish_background_notice_row(TuiRuntime("session"), rows[0], seen)
 
 
+def test_foreground_messages_reach_observer_without_repeating_origin(conversation):
+    from agent_py_agent.agent.conversation.history_display import (
+        conversation_history_display_events,
+    )
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiTurnSummary
+
+    store, thread_id = conversation
+    origin, observer = TuiRuntime("origin"), TuiRuntime("observer")
+    origin.register_gateway_request("gwreq-live")
+    origin.enqueue_prompt("chat-local", "检查后汇报", queued=False)
+    origin.begin_turn("chat-local")
+    metadata = {"gateway_request_id": "gwreq-live"}
+    user = store.append_message({
+        "thread_id": thread_id, "role": "user", "content": "检查后汇报", "metadata": metadata,
+    })
+    final = store.append_message({
+        "thread_id": thread_id, "role": "assistant", "content": "检查完成",
+        "metadata": {**metadata, "assistant_part_id": "final"},
+    })
+    before = store._message_path(thread_id).read_bytes()
+    rows, cursor, ok = read_background_response_page(store, thread_id, include_foreground=True)
+    assert ok and [row["message_id"] for row in rows] == [user.message_id, final.message_id]
+    assert read_background_response_page(store, thread_id)[0] == []
+    seen_origin, seen_observer = set(), set()
+    for row in rows:
+        assert _publish_background_notice_row(origin, row, seen_origin)
+        assert _publish_background_notice_row(observer, row, seen_observer)
+    origin.complete_turn("chat-local", TuiTurnSummary(response_text="检查完成", ok=True))
+    history = conversation_history_display_events([user, final])
+    for runtime in (origin, observer):
+        runtime.publish_recovered_history([], display_events=history)
+        texts = [block.text for block in runtime.store.snapshot().stable_blocks]
+        assert texts.count("检查后汇报") == 1
+        assert texts.count("检查完成") == 1
+        assert not runtime.store.snapshot().has_active_work
+    assert cursor == len(before) and store._message_path(thread_id).read_bytes() == before
+
+
+def test_owned_foreground_does_not_hide_background_continuation(conversation):
+    store, thread_id = conversation
+    runtime = TuiRuntime("origin")
+    runtime.register_gateway_request("gwreq-live")
+    final = _append(store, thread_id, "子代理返回后的汇报", metadata={"gateway_request_id": "gwreq-live"})
+    rows, _, ok = read_background_response_page(store, thread_id, include_foreground=True)
+    assert ok and _publish_background_notice_row(runtime, rows[0], set())
+    blocks = runtime.store.snapshot().stable_blocks
+    assert any(block.text == final.content for block in blocks)
+
+
+def test_foreground_user_ids_stay_stable_across_partial_pages(conversation):
+    from agent_py_agent.agent.conversation.history_display import (
+        conversation_history_display_events,
+    )
+
+    store, thread_id = conversation
+    entries = [store.append_message({
+        "thread_id": thread_id, "role": "user", "content": "继续检查",
+        "metadata": {"gateway_request_id": "gwreq-live"},
+    }) for _ in range(2)]
+    runtime = TuiRuntime("observer")
+    rows, _, ok = read_background_response_page(store, thread_id, include_foreground=True)
+    assert ok
+    for row in rows:
+        assert _publish_background_notice_row(runtime, row, set())
+    runtime.publish_recovered_history([], display_events=conversation_history_display_events(entries))
+    assert [block.text for block in runtime.store.snapshot().stable_blocks] == ["继续检查", "继续检查"]
+
+
+def test_foreground_page_excludes_other_thread_and_unknown_message_roles(conversation):
+    store, thread_id = conversation
+    other = store.get_or_create_thread({
+        "canonical_user_id": "another-user", "channel": "chat", "channel_conversation_id": "other",
+        "channel_user_id": "another-user",
+    })
+    store.append_message({
+        "thread_id": other.thread_id, "role": "user", "content": "另一个用户",
+        "metadata": {"gateway_request_id": "gwreq-other"},
+    })
+    store.append_message({
+        "thread_id": thread_id, "role": "assistant", "content": "还没确认的过程",
+        "metadata": {"gateway_request_id": "gwreq-live", "assistant_part_id": "commentary:1"},
+    })
+    assert read_background_response_page(store, thread_id, include_foreground=True)[0] == []
+
+
 @pytest.mark.parametrize("cursor", [True, -1, 0, 100.0, "100"])
 def test_invalid_or_rewinding_remote_cursor_does_not_acknowledge(cursor):
     runtime = TuiRuntime("session")

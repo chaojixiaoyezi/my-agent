@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R216 前台已提交消息（本地实现，待真实 TUI）
+
+沿原消息分页增加显式 Gateway 前台 user/final，同一消息继续使用 canonical ID；旧客户端未声明
+foreground_messages 时保留原后台消息合同。发送页在入队前登记真实 ID，通知/历史不会重复追加。
+用户块 ID 不再依赖分页中的 index；冷 owner 读取不初始化 Agent，后台续片仍显示。
+本片只封已提交消息缺口，执行中的思考/工具同步和原 P0/P1 尚未完成。
+
 ## R215 前台审批同步（本地修复，待真实 TUI）
 
 共用 main 标量现在接收 permission_requested/resolved。维护当前工作片精确未决 ID，最后对应回执后解除；

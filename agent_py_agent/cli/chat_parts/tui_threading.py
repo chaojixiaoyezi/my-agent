@@ -608,8 +608,8 @@ def _consume_selected_agent_view(
     return True, bool(applier(run_id, payload))
 
 
-# LLM: 只消费 canonical message 投影及同一行的完整过程快照；发布成功才确认游标，不能回读临时环补造历史。
-# 函数用途: 发布一条后台已提交回复，重放仍指向同一个历史显示块；不同 ID 的相同正文各保留一次。
+# LLM: user 必须带 canonical 显示事件；前台请求关联仅用于原页去重，发布成功后才确认消息游标。
+# 函数用途: 发布同会话已提交输入/回复；不同消息的相同正文保留，原发送页的同源副本跳过。
 def _publish_background_notice_row(
     tui_runtime: object,
     row: dict[str, object],
@@ -620,7 +620,8 @@ def _publish_background_notice_row(
     message_id = str(row.get("message_id") or "")
     if (
         row.get("schema_version") != "background_message.v1"
-        or row.get("display_kind") != "assistant_response"
+        or row.get("display_kind") not in {"assistant_response", "user_message"}
+        or row.get("display_kind") == "user_message" and not isinstance(row.get("display_events"), list)
         or not message_id or not thread_id
     ):
         return False
@@ -634,7 +635,7 @@ def _publish_background_notice_row(
         display_events = row.get("display_events")
         publisher(content, thread_id=thread_id, message_id=message_id, **(
             {"display_events": tuple(display_events)} if isinstance(display_events, list) else {}
-        ))
+        ), **({"gateway_request_id": row["gateway_request_id"]} if isinstance(row.get("gateway_request_id"), str) else {}))
     seen.add(key)
     return True
 
