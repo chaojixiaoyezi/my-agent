@@ -1,3 +1,5 @@
+# LLM: 运行配置按原来源优先级合并；宿主模型 profile_id 必须随来源保留，让孙代理恢复同一配置。
+# 模块用途: 叠加 owner/task/run 的明确配置，不丢失未被覆盖字段的模型身份，也不公开任意元数据。
 from __future__ import annotations
 
 """Runtime config override layers with source tracing.
@@ -174,10 +176,15 @@ def _runtime_layer_items(layer: ConfigLayer, allowed: set[str]):
             yield key, value
 
 
+# LLM: 来源来自已加载宿主 config，菜单 profile ID 是恢复引用；仅保留声明元数据，不复制未知秘密字段。
+# 函数用途: 规范化配置来源时保留模型身份，避免加工具超时等无关配置后孙代理偷偷换回默认模型。
 def _source_record(value: object) -> dict[str, object]:
     if isinstance(value, dict) and "source" in value:
         priority = _current_priority(value)
-        return {"source": str(value.get("source") or "unknown"), "priority": priority}
+        record = {"source": str(value.get("source") or "unknown"), "priority": priority}
+        if record["source"] == "owner_model_profile" and isinstance(value.get("profile_id"), str):
+            record["profile_id"] = value["profile_id"]
+        return record
     return dict(_LOADED_CONFIG_DEFAULT_SOURCE)
 
 

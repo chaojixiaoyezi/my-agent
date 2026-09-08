@@ -21,6 +21,9 @@ from agent_py_agent.agent.settings.model_profiles import (
     validate_model_profile,
 )
 from agent_py_agent.agent.settings.model_scope import ModelScopedAttribute, selected_model_scope
+from agent_py_agent.agent.settings.services.runtime_config_task import (
+    apply_task_runtime_config_overlay,
+)
 
 
 class Host:
@@ -190,6 +193,26 @@ def test_child_inherits_exact_profile_after_selection_changes(tmp_path):
         assert child.config is recovered
     inherit_model_profile(attrs, host)
     assert attrs == {}
+
+
+def test_task_overlay_preserves_model_reference_and_full_selected_profile(tmp_path):
+    host = Host(tmp_path)
+    key, _ = add(host)
+    execute_model_profile_operation(host, "select", {"profile_id": key})
+    config = selected_model_config(host)
+    overlay = tmp_path / "task-runtime.yaml"
+    overlay.write_text("tool_timeout_seconds: 31\nmodel_context_window_tokens: 128000\napi_base: https://stale.test\n")
+    task = SimpleNamespace(runtime_identity=SimpleNamespace(config_overlay_ref=str(overlay), config_scope="task"))
+    child = Host(tmp_path)
+    child.config = apply_task_runtime_config_overlay(config, task, workspace_root=tmp_path)
+    assert child.config.model_context_window_tokens == 96000
+    assert child.config.api_base == "https://example.test/anthropic"
+    attrs = {}
+    inherit_model_profile(attrs, child)
+    assert attrs == {"host_model_profile.v1": {"profile_id": key}}
+    execute_model_profile_operation(host, "select", {"profile_id": "default"})
+    grandchild = inherited_model_config(host, SimpleNamespace(attributes=attrs))
+    assert grandchild.model_context_window_tokens == 96000
 
 
 def test_explicit_window_does_not_call_metadata():

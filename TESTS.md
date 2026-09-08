@@ -1,5 +1,13 @@
 # TESTS
 
+## R211 模型窗口真实执行与 overlay 组合
+
+ma-r211-110-models 经真实 /model 保存 Anthropic/MiniMax-M2.7/96000，菜单/Auth/非法窗口期间 canonical
+消息和模型账本均未新增，密钥未进入聊天。普通家庭物品工具续作后 8 次 MiniMax 成功、0失败，
+主窗口为 45.3k/96k、compact 1，创建两名 child；完整业务交付和孙代理 overlay 复验仍未关闭。
+先红用例暴露旧任务 overlay 覆盖窗口且丢 profile ID；整组优先级与声明来源保留后，57 focused 通过。
+
+
 ## R211 /model（真实 TUI 待验）
 
 新增 test_model_profiles.py、test_tui_model_menu.py、test_gateway_model_profiles.py：定向验证脱敏、0600、并发新增、同 ID 幂等/冲突、

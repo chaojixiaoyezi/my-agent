@@ -18,11 +18,15 @@
 - 上下文窗口是用户显式配置的总容量（tokens），不是输出长度；用于真实压力/Compact 计算。
   切模型保留 canonical 历史，但不同供应商的缓存不保证复用，较小窗口按原 Compact 流程处理。
 - 打开、保存、选择菜单不向 provider 发探针或 LLM 请求；格式校验不冒充连接成功。
+- 模型名、后端、地址、密钥、窗口与输出上限采用同一显式选择优先级；旧 task/run 配置不能拆开覆盖。
+  无关运行配置叠加必须保留宿主 profile ID，孙代理创建/重启继续引用同一配置，不能默默恢复部署默认。
 
 ## 对照
 
 - 终端交互 src/commands/model/model.tsx：菜单选择与取消独立，配置命令不成为模型聊天请求。
 - 会话运行时 会话运行时-rs/core/src/config/edit.rs：结构化模型配置编辑、明确选择、原子写入。
+- 会话运行时 会话运行时-rs/config/src/config_layer_source.rs 与 core/src/config/config_loader_tests.rs：按真实配置层保留来源和优先级；
+  本项目在既有来源记录保留宿主 profile ID，不另建一份模型身份。
 - 本项目复用 owner scope、现有两种后端、前台/后台工作片和子代理配置继承，不另造模型执行链。
 
 ## 验证要求

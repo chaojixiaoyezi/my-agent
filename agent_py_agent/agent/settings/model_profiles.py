@@ -135,7 +135,7 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
     return public_model_profiles(data, agent.config)
 
 
-# LLM: 只克隆模型字段，不污染共享 config；显式 key 不再被部署环境变量替换，窗口标记让真实压力计算读用户值。
+# LLM: 模型整组字段共享显式选择的来源与优先级；旧 task overlay 不能拆开模型名、地址、密钥和窗口。
 # 函数用途: 在新工作片开始时生成模型配置快照，正在运行的旧快照不受后续菜单操作影响。
 def selected_model_config(agent: object, *, profile_id: str | None = None):
     data = read_model_profiles(model_profiles_path(agent.home_paths))
@@ -147,9 +147,10 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
     row = data["profiles"][selected]
     config = replace(agent.config, **row, api_key_env="", model_context_window_explicit=True)
     config.max_tokens = min(config.max_tokens, int(row["model_context_window_tokens"]) // 4)
-    config.config_sources = {**config.config_sources, "model_name": {
+    fields = {*row, "api_key_env", "model_context_window_explicit", "max_tokens"}
+    config.config_sources = {**config.config_sources, **{key: {
         "source": "owner_model_profile", "priority": 90, "profile_id": selected,
-    }}
+    } for key in fields}}
     return config
 
 

@@ -1,5 +1,15 @@
 # TEST CHECKLIST
 
+## R211 /model 真 TUI 分项
+
+- [x] ma-r211-110-models：Auth 预留与返回、字段掩码、非法窗口阻止保存、保存与选择独立。
+- [x] 菜单操作未进入 canonical 聊天或模型调用；同一旧会话恢复后 8 次 MiniMax-M2.7 成功、0失败。
+- [x] 显式 96k 参与真实计算，主界面 45.3k/96k、compact 1，并继续派两个 child。
+- [x] task overlay 的整组模型优先级及孙代理引用，新增先红组合用例后 57 focused 通过。
+- [ ] overlay 修复部署后真实 child/grandchild/restart 组合；不得用上述单测代替。
+- [ ] OpenAI 实际模型调用、运行中切回默认和菜单重开/取消组合；当前不算全部已验。
+
+
 ## R210 前台数字/阶段
 
 - [x] 前后台共用 main 标量、任务晋升身份、跨 thread 拒绝、迟到事件隔离与显示失败不反噬执行；115 focused。
