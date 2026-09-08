@@ -1,5 +1,11 @@
 # Subagent Progress
 
+## R205 子代理的长度限制提示（本地，待 TUI）
+
+child 的 canonical final 与实时展示共用主代理 turn-end 归一化；正文为空或半截时均可说明长度限制。
+run_flow 先提交原结果再传 typed reason 给原 sink，提示不改变 task/attempt，不驱动重派或额外模型调用。
+有界恢复策略与真实 TUI 验收仍未完成，不能把本片当作子代理全部失败恢复通过。
+
 ## R202 受控命令不共享宿主输入（本地，待 TUI）
 
 controlled_exec 与普通主/子 run_command、attempt.run 的非交互路径统一关闭继承 stdin；独立 PTY 仍保留

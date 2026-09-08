@@ -1,11 +1,12 @@
-# LLM: 本模块只把同 owner/thread 已保存的会话消息投影为公开显示事件；不读路径、不执行工具、不改变模型历史。
-# 模块用途: 给 Gateway 和本地会话恢复共用完整正文、思考与工具的显示转换，问答预览不再代替正文。
+# LLM: 本模块只把同 owner/thread 已保存的会话及 typed turn-end 投影为显示事件；不执行工具、不改变模型历史。
+# 模块用途: 给恢复和子代理页共用正文、思考、工具与长度限制提示，保留原消息身份，不从文字判断完成。
 
 from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
 
+from ..turn_end import turn_end_notice
 from .background_history import background_display_turn_from_row
 from .background_transcript import public_background_transcript_text
 from .history_page import history_group_identity
@@ -16,7 +17,7 @@ HISTORY_DISPLAY_SCHEMA = "conversation_history_display.v1"
 
 
 # LLM: 调用方已解析 owner/thread 并限制窗口；后台消息按显式工作片 ID 组合，不从 task 或文本猜测过程归属。
-# 函数用途: 显示所读取窗口的全部公开消息；后台 commentary 不是独立用户回合，未完成输入也保留。
+# 函数用途: 显示窗口的公开消息和独立的技术结束提示；后台 commentary 不另起回合，未完成输入也保留。
 def conversation_history_display_events(
     rows: Sequence[object],
 ) -> tuple[dict[str, object], ...]:
@@ -31,7 +32,26 @@ def conversation_history_display_events(
     events: list[dict[str, object]] = []
     for identity in groups:
         events.extend(_turn_events(identity, groups[identity]))
+        events.extend(_turn_end_events(groups[identity]))
     return tuple(events)
+
+
+# LLM: 结束提示只由 canonical final 的结构化 reason 产生；ID 与原消息绑定，重放不能新增模型输入或重复提示。
+# 函数用途: 在半截回复后另列技术说明，主代理、子代理和后台历史用同一规则；不改写原正文。
+def _turn_end_events(rows: list[object]) -> list[dict[str, object]]:
+    events = []
+    for row in rows:
+        metadata = getattr(row, "metadata", {})
+        if not isinstance(metadata, Mapping) or row.role != "assistant":
+            continue
+        if str(metadata.get("assistant_part_id") or "final") != "final":
+            continue
+        if notice := turn_end_notice(metadata.get("turn_end_reason")):
+            events.append(_event(
+                f"history:{row.thread_id}:{row.message_id}", "turn-end", "system_message",
+                {"text": notice}, phase="failed",
+            ))
+    return events
 
 
 # LLM: user/final 身份来自 canonical row；已提交后台快照完整时优先使用同块 ID，不能把 native 内部输入公开。

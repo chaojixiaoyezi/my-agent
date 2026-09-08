@@ -1,7 +1,7 @@
 # LLM: This module adapts delegated agent runs to the same durable ConversationThread and
 # Compact engine used by foreground turns. Each run owns one transcript; parent/child lineage
 # is metadata only and never causes prompt history to be shared or inferred from prose.
-# 模块用途: 给子代理和孙代理建立独立会话历史，在每次运行前自动压缩并为后续恢复保留上下文。
+# 模块用途: 给子代理和孙代理建立独立会话历史，保存正文与真实结束原因，自动压缩并保留后续恢复上下文。
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..tooling.operation_verification import public_operation_verification
+from ..turn_end import result_turn_end_reason
 from .compact_guard import CompactInterruptCheck
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .native_history import (
@@ -177,7 +178,7 @@ def prepare_subagent_thread_turn(
 
 # LLM: Tool-boundary-confirmed assistant parts and the terminal result are persisted in exact
 # order with distinct typed dedupe identities. Runtime facts/tool fold stay only on the final.
-# 函数用途: 子代理一轮结束后先保存完整过程回复，再保存最终正文与工具折叠供续接/Compact。
+# 函数用途: 子代理一轮结束后保存过程和最终正文，终态沿用主代理同一 typed 协议供恢复显示，不解析回复判断。
 def append_subagent_thread_result(
     agent: object,
     task: object,
@@ -203,9 +204,7 @@ def append_subagent_thread_result(
             "runtime_status": str(
                 getattr(result, "runtime_status", "ok") or "ok"
             ).strip(),
-            "turn_end_reason": str(
-                getattr(result, "turn_end_reason", "") or ""
-            ).strip(),
+            "turn_end_reason": result_turn_end_reason(result),
             "operation_verification": public_operation_verification(
                 getattr(result, "operation_verification", None)
             ),

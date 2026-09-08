@@ -6,6 +6,8 @@ import sys
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_worker import (
     _build_turn_inject,
@@ -195,6 +197,31 @@ def test_gateway_outcome_user_stop_is_typed_and_silent() -> None:
     assert recorded is False
     assert summary.interrupted is True
     assert summary.response_text == ""
+
+
+@pytest.mark.parametrize("fields", [
+    {"turn_end_reason": "max-tokens"},
+    {"runtime_status": "unfinished", "runtime_reason": "MODEL_RESPONSE_TRUNCATED"},
+])
+def test_gateway_truncated_reply_is_preserved_with_visible_failure(fields):
+    ctx, runtime = _context()
+    text, recorded, summary = _gateway_outcome(ctx, {"ok": True, "response": "接下来准备", **fields})
+    assert text == "接下来准备" and recorded is False
+    assert summary.ok is False and "长度限制" in summary.error
+    adapter = runtime.begin_turn("truncated")
+    adapter.finalize(summary)
+    snapshot = runtime.store.snapshot()
+    assert any(block.text == text for block in snapshot.stable_blocks)
+    assert any("长度限制" in block.text for block in snapshot.stable_blocks)
+    assert not snapshot.has_active_work
+
+
+def test_length_notice_does_not_parse_response_or_override_explicit_completion():
+    from agent_py_agent.cli.chat_parts.tui_worker_paths import _model_length_error
+
+    assert _model_length_error({"response": "MODEL_RESPONSE_TRUNCATED", "runtime_status": "ok"}) == ""
+    assert _model_length_error({"turn_end_reason": "completed", "runtime_reason": "MODEL_RESPONSE_TRUNCATED"}) == ""
+    assert "长度限制" in _model_length_error(SimpleNamespace(runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED"))
 
 
 def test_gateway_outcome_without_typed_code_uses_safe_generic_error() -> None:

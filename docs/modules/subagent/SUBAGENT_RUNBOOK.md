@@ -36,6 +36,10 @@ session/owner/task/per-call 计算，任意一层超限都整批 `not_started`�
 
 ## 状态与通知
 
+provider 达到输出长度限制时，宿主的 `turn_end_reason=max-tokens` 必须随 canonical final 保存。
+child 详情页将已收到的正文与技术提示分开，空正文也能显示原因；提示本身不决定重派、取消或完成。
+它与主代理/后台历史共用同一协议，不能通过回复中是否包含“完成”或“截断”来判断。
+
 创建回执只给本批 run ids、结果读取 refs 和 `await_lifecycle_event`。根主代理会先给用户一条短回执；
 任意 task-local 父代理则立即以 `interrupted/SUBAGENTS_ACTIVE` 结束当前工作片。宿主把正在等待的
 直属 run ids 写入 canonical state，孤儿恢复器不会把这种正常等待误当挂死重启。child 的进展、

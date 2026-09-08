@@ -1,5 +1,5 @@
 # LLM: 本模块是 Gateway TUI 的轻量执行边界；导入时不得加载本地 SimpleAgent、模型后端、工具注册表或 Conversation runtime。
-# 模块用途: 提交并轮询 Gateway 聊天请求，把服务端事件转换成统一 TUI 终态。
+# 模块用途: 提交并轮询 Gateway 聊天请求，区分请求交付成功和模型回复完整；与本地 TUI 共用长度限制提示。
 
 from __future__ import annotations
 
@@ -118,8 +118,8 @@ def _gateway_timeout(cfg: Any) -> float:
     return float(cfg.agent.config.gateway_request_timeout)
 
 
-# LLM: Gateway outcome 只依据 typed ok/status/error/token/round 字段；silent stop 不落助手正文。
-# 函数用途: 把 Gateway response 转成统一 worker 返回合同。
+# LLM: Gateway ok 只表示交付成功；typed max-tokens 仍是未完整响应。保留实际正文并显示原因，silent stop 不落正文。
+# 函数用途: 把 Gateway response 转为统一终态，防止半句话被当作正常答完。
 def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, TuiTurnSummary]:
     from ...agent.gateway_parts.response_renderer import (
         current_context_token_estimate,
@@ -147,14 +147,25 @@ def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, Tui
     context_tokens = current_context_token_estimate(response)
     with ctx.cfg.state_lock:
         ctx.cfg.last_token_estimate_ref[0] = context_tokens
+    error = _model_length_error(response)
     summary = TuiTurnSummary(
         response_text=text,
-        ok=True,
+        ok=not error,
+        error=error,
         context_tokens=context_tokens,
         output_tokens=estimate_tokens(text) if text else 0,
         tool_rounds=_nonnegative_int(response.get("tool_rounds")),
     )
     return text, False, summary
+
+
+# LLM: Only host-owned turn_end/runtime fields select this display notice. No prose parsing,
+# model calls, state writes, or automatic continuation; both TUI execution paths use this helper.
+# 函数用途: 明确告诉用户模型这段回复受到长度限制，而不是无提示地停在半句话；不判断任务质量。
+def _model_length_error(value: object) -> str:
+    from ...agent.turn_end import result_turn_end_reason, turn_end_notice
+
+    return turn_end_notice(result_turn_end_reason(value))
 
 
 # LLM: 非负转换只用于显示统计，不能改变执行、重试或工具完成状态。

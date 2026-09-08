@@ -1,5 +1,15 @@
 # DESIGN LEDGER
 
+## 2026-09-08 截断结果必须有明确提示【状态：BUG-140 首片修复中】
+
+- 先修本地/Gateway TUI 忽略 typed max-tokens 的错误：保留实际收到的半截正文，明确提示长度限制，
+  不再仅因 Gateway ok=True 把回合当完整成功。普通包含“截断”字样的正文不能触发提示。
+- 对照 会话运行时 response.incomplete 的显性错误边界；本片不增加额外模型调用，不更改 provider 输出上限。
+- final metadata 保存同一 typed turn-end；Gateway 正常提交与 repair 传同一原生消息/原因快照，后台工作片
+  从实际结果交接原因，child 使用相同归一化。展示提示不混入模型正文，不改写历史、任务状态或缓存前缀。
+- 恢复提示绑定原 thread/message ID，完整后台快照的覆盖标记不能再假定处于末事件；实时 child 的提示仍
+  属于原 run/attempt 展示流。终端交互 的有界同轮恢复及真实 TUI 截断复验仍需闭环，不把局部通过当全部完成。
+
 ## 2026-09-08 后台续片恢复精确用户回合【状态：BUG-141 修复中】
 
 - K 同一 TUI 在调研追问被截断后继续派发 Go 复刻；child wake 已携带新 conversation_request_id，

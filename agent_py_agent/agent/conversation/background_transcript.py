@@ -4,7 +4,7 @@
 # ring. Child callers may replace the event writer with their durable bounded JSONL;
 # main 同时按块保留完整工作片快照，最终由 canonical 消息提交；两条投影都不拥有生命周期或权限。
 # 易失游标必须与当前 Agent 的 stream_id 配对，重建 Agent 后不能用旧进程序号跳过新事件。
-# 模块用途: 将后台主代理或子代理的思考、工具和 diff 转成同一展示事件，供 TUI/Web 增量读取。
+# 模块用途: 将后台主代理或子代理的思考、工具、diff 和 typed 截断说明转成同一展示事件，供 TUI/Web 增量读取。
 
 from __future__ import annotations
 
@@ -377,12 +377,14 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     # transient provider rows. Main background turns keep their durable notice
     # as the sole final projection; task-local child turns explicitly publish
     # their canonical interim/final text because no root notice owns that view.
-    # 函数用途: 收口后台展示流；子代理详情页可选择发布本轮正式正文，主代理仍避免重复。
+    # typed end_reason 只生成技术提示，不能驱动 retry 或修改 task；正文为空也必须能解释长度限制。
+    # 函数用途: 收口展示流；子代理可发布本轮正文及截断说明，主代理仍由 canonical final 投影避免重复。
     def finish(
         self,
         *,
         final_text: str = "",
         publish_final: bool = False,
+        end_reason: str = "",
     ) -> None:
         self._clear_tool_input_progress()
         if self._thinking_active:
@@ -390,6 +392,12 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         self._model_text = ""
         if publish_final:
             self._publish_final_response(final_text)
+            from ..turn_end import turn_end_notice
+
+            if notice := turn_end_notice(end_reason):
+                self._event(
+                    "system_message", "failed", f"{self.request_id}:turn-end", {"text": notice},
+                )
         if self._display_history is not None:
             self._display_history.finish()
 

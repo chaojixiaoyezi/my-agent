@@ -1,5 +1,11 @@
 # Subagent Structure
 
+## 子代理结束原因同源
+
+`agent_thread.append_subagent_thread_result` 用 `result_turn_end_reason` 保存 canonical final；
+`run_flow._run_subagent_model_turn` 提交后把同一原因传给 `BackgroundTranscriptSink.finish`。
+sink 只发布独立 system_message 技术提示，不修改生命周期；历史投影也复用 `turn_end_notice`。
+
 ## 同步命令与交互输入
 
 `tooling/shell.py` 的普通 run_command、`shell_gateway_execution._run_subprocess_with_budget` 的

@@ -41,6 +41,39 @@ def _append(store, thread_id, text="相同正文", *, metadata=None):
     })
 
 
+def test_background_length_notice_survives_live_and_history_handoff(conversation):
+    from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
+    from agent_py_agent.agent.conversation.history_display import (
+        conversation_history_display_events,
+    )
+
+    store, thread_id = conversation
+    sink = BackgroundTranscriptSink(SimpleNamespace(), thread_id=thread_id, task_id="task-1")
+    sink.write_thinking("继续核对当前任务")
+    sink.finish()
+    row = _append(store, thread_id, "接下来要修改", metadata={
+        "task_id": "task-1",
+        "turn_end_reason": "max-tokens",
+        "background_transcript_request_id": sink.request_id,
+        "background_display_turn": sink.display_history_snapshot(),
+    })
+    before = store._message_path(thread_id).read_bytes()
+    notices, cursor, ok = read_background_response_page(store, thread_id)
+    assert ok and cursor > 0
+    events = notices[0]["display_events"]
+    assert events[-1]["kind"] == "system_message"
+    assert "长度限制" in events[-1]["payload"]["text"]
+    assert any(event.get("covered_background_request_id") == sink.request_id for event in events)
+    runtime = TuiRuntime("truncated-background")
+    runtime.publish_recovered_history([], display_events=events)
+    runtime.publish_recovered_history([], display_events=conversation_history_display_events([row]))
+    snapshot = runtime.store.snapshot()
+    assert sum(block.text == "接下来要修改" for block in snapshot.stable_blocks) == 1
+    assert sum("长度限制" in block.text for block in snapshot.stable_blocks) == 1
+    assert not snapshot.has_active_work
+    assert store._message_path(thread_id).read_bytes() == before
+
+
 def test_forward_pages_keep_distinct_ids_with_same_text_and_time(conversation):
     store, thread_id = conversation
     entries = [_append(store, thread_id) for _ in range(5)]

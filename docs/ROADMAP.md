@@ -1,10 +1,17 @@
 # ROADMAP
 
+## R205 截断提示与后续恢复（进行中）
+
+- 解决问题：模型达到输出限制停在半句，TUI 却当正常结束。
+- 实时提示/正文保留、canonical final/repair、后台和 child 显示已实现，3 个历史红测后 11 文件定向
+  429 passed / 2 原有 xfailed；有界恢复与真实 MiniMax TUI 截断复验未完成，不能以单测关闭 BUG-140。
+
 ## R204 后台目标不能只读旧 task goal
 
 - 解决问题：连续任务共享仍活跃的运行身份时，child 返回却把主代理接回旧目标。
 - 按派工请求读取 canonical 用户原文，运行树/路径不变；179 focused / 2 原有 xfailed，本地通过。
-  下一步真实 TUI 验证同一长期会话的新旧请求与递归 child wake，不修改旧失败账、不替模型写复刻代码。
+- R204 单 Gateway 已部署，原 K/L 新请求真实 MiniMax-M2.7 调用；K worker 仍运行，待 child wake 后核对
+  最终接续目标，不修改旧失败账、不替模型写复刻代码。
 
 ## R203 Todo 与技术截断的真实状态
 

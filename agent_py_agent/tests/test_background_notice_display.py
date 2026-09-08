@@ -451,6 +451,24 @@ def test_background_transcript_sink_reuses_free_code_diff_renderer() -> None:
     assert any("class:tui-diff-add" in fragment[0] for fragment in new_line)
 
 
+def test_child_transcript_length_limit_notice_keeps_partial_body_and_no_control_event() -> None:
+    from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
+
+    for body in ("", "我会继续修改"):
+        rows = []
+        sink = BackgroundTranscriptSink(
+            SimpleNamespace(), thread_id="thread-child-length", task_id="child-length",
+            request_id="bg-agent:child-length:attempt-1",
+            event_writer=lambda _agent, **event: rows.append(event),
+        )
+        sink.finish(final_text=body, publish_final=True, end_reason="max-tokens")
+        assert rows[-1]["kind"] == "system_message"
+        assert rows[-1]["block_id"] == "bg-agent:child-length:attempt-1:turn-end"
+        assert "长度限制" in rows[-1]["payload"]["text"]
+        assert [row["payload"]["text"] for row in rows if row["kind"] == "assistant_completed"] == ([body] if body else [])
+        assert all(row["kind"] in {"system_message", "assistant_completed"} for row in rows)
+
+
 def test_child_transcript_finish_publishes_canonical_reply_without_duplicate_commentary() -> None:
     from agent_py_agent.agent.conversation.background_transcript import (
         BACKGROUND_TRANSCRIPT_SCHEMA,

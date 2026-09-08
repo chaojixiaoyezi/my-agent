@@ -1,10 +1,19 @@
 # TEST CHECKLIST
 
+## R205 截断提示
+
+- [x] 实时 local/Gateway 共用 typed 长度判断；保留非流式半截正文，不把 transport ok 当完整模型答复；56 focused。
+- [x] 本地持久历史与后台快照保留独立 typed 提示；正常提交/repair 同源、重放不重复，child 实时结束也显示。
+- [x] 11 文件定向回归 429 passed / 2 原有 xfailed，Ruff/doc sync/strict code-size 通过；无全仓 pytest。
+- [ ] 新版真实 provider 截断及后续消息续作；不能把显示回归算真实 TUI 通过。
+- [ ] 对照 终端交互 的有界同轮恢复，保持工具副作用、取消和费用账的原边界。
+
 ## R204 后台逐轮输入归属
 
 - [x] 保留 K 真实错误 final/wake/任务/消息/执行代证据，旧 goal 与新 request 不一致的定位测试先红。
 - [x] 同 task 新请求正文和工具记录精确恢复；分页、批量顺序、插话、缺失/损坏/错 thread、legacy 和真实 prompt 回归。
 - [x] 原 canonical 正文、Compact、task link 不被读取过程重写；179 passed / 2 原有 xfailed。
+- [x] R204 单 Gateway 及原 K/L 精确会话恢复，新请求真实 MiniMax-M2.7 调用；F/E/I 并行继续。
 - [ ] 新版真实长 TUI 连续任务/递归返回后接续正确目标，实际工具与最终交付复核。
 
 ## R203 Todo 终态与截断观察

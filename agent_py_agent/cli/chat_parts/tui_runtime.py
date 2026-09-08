@@ -1989,9 +1989,9 @@ class TuiTurnEventAdapter:
     def on_gateway_event(self, payload: dict[str, Any]) -> bool:
         return _consume_gateway_turn_event(self, payload)
 
-    # LLM: finalize 只使用结构化 summary，并先清所有易失参数行，保证 active
-    # block 先 terminal，再 status，最后 turn terminal 且仅一次。
-    # 函数用途: 清理临时展示后完成、失败或中断当前回合。
+    # LLM: finalize 只使用结构化 summary；技术失败仍保留已收到的响应正文，失败提示另列，不能伪装完整成功。
+    # 活动块先 terminal，再 status，最后 turn terminal 且仅一次；不影响模型或持久化。
+    # 函数用途: 结束回合并保留半截回复，明确显示失败/中断原因，避免非流式失败正文被丢掉。
     def finalize(self, summary: TuiTurnSummary) -> None:
         with self._lock:
             if self._finished:
@@ -2002,7 +2002,7 @@ class TuiTurnEventAdapter:
                 phase="interrupted" if summary.interrupted else "failed"
             )
             self._complete_thinking()
-            if summary.ok and summary.response_text:
+            if not summary.interrupted and summary.response_text:
                 self._finalize_assistant_text(summary.response_text)
             else:
                 self._complete_active_assistant(phase="interrupted" if summary.interrupted else "failed")

@@ -3,12 +3,13 @@
 LLM: 本模块只归一化宿主已经掌握的运行事实，不能读取模型正文、产物、测试或
 验收结果。主代理、子代理、Gateway 和 TUI 必须共享这里的六种 reason；新增或
 修改 reason 时同步检查 AgentRunResult、SubAgentRunnerResult、持久化投影和定向
-测试。协议取自 DSH ``turn/end.reason``，继续/停止循环仍由 会话运行时 式工具调用与
-pending input 决定。
+测试。只读技术提示与归一化共用这里的协议，不成为模型正文或恢复命令。
+协议取自 DSH ``turn/end.reason``，继续/停止循环仍由 会话运行时 式工具调用与 pending input 决定。
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
 
 
@@ -73,6 +74,25 @@ def infer_turn_end_reason(
     return TurnEndReason.INTERRUPTED.value
 
 
+# LLM: 只读取宿主结果 DTO 的结构化结束字段；字典和本地结果对象共享优先级，不能解析 response 或 error 正文。
+# 函数用途: 给持久化和前端统一取得本轮真正的结束原因；不修改结果、不启动恢复。
+def result_turn_end_reason(value: object) -> str:
+    field = value.get if isinstance(value, Mapping) else lambda key: getattr(value, key, "")
+    return infer_turn_end_reason(
+        explicit=field("turn_end_reason"),
+        runtime_status=field("runtime_status"),
+        runtime_reason=field("runtime_reason"),
+    )
+
+
+# LLM: 这是只读技术提示，不是模型答复、生命周期状态或自动重试命令；live/history/main/child 复用同一文案。
+# 函数用途: 当宿主明确记录长度限制时向用户说明回复可能不完整，未知状态不猜测。
+def turn_end_notice(reason: object) -> str:
+    if normalize_turn_end_reason(reason) == TurnEndReason.MAX_TOKENS.value:
+        return "本次模型响应达到长度限制，回复可能不完整。"
+    return ""
+
+
 # LLM: 子代理生命周期只能由 turn_end_reason 映射；模型输出的 status/summary
 # 不能覆盖这里的 host-owned 结果。返回值依次为 task status、failure type、ok。
 # 函数用途: 将一轮结束原因投影成现有子代理状态，供持久化和父代理通知使用。
@@ -96,5 +116,7 @@ __all__ = [
     "TurnEndReason",
     "infer_turn_end_reason",
     "normalize_turn_end_reason",
+    "result_turn_end_reason",
     "subagent_outcome_for_turn_end",
+    "turn_end_notice",
 ]

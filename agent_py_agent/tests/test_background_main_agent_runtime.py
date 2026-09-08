@@ -1080,7 +1080,8 @@ def test_background_response_persists_public_operation_verification(tmp_path) ->
     assert "private-operation" not in serialized
 
 
-def test_background_response_persists_commentary_before_final(tmp_path) -> None:
+@pytest.mark.parametrize("end_reason", ["", "max-tokens", "completed"])
+def test_background_response_persists_commentary_before_final(tmp_path, end_reason) -> None:
     """后台主代理的工具边界过程回复与 final 按 typed part 顺序进入同一会话。"""
     from agent_py_agent.agent.conversation.channels import DeliveryContext
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
@@ -1109,6 +1110,7 @@ def test_background_response_persists_commentary_before_final(tmp_path) -> None:
         ),
         "最终报告",
         assistant_commentaries=("先读代码", "再核对测试"),
+        display_snapshot={"turn_end_reason": end_reason},
         deliver=True,
         delivery_reason="scheduled_progress_report",
     )
@@ -1120,6 +1122,29 @@ def test_background_response_persists_commentary_before_final(tmp_path) -> None:
         "commentary:2",
         "final",
     ]
+    assert rows[-1].metadata.get("turn_end_reason", "") == end_reason
+    assert all("turn_end_reason" not in row.metadata for row in rows[:-1])
+
+
+def test_background_model_result_keeps_typed_end_reason_in_frozen_snapshot(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import runtime as module
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=False), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread({
+        "canonical_user_id": "local-agent", "channel": "chat",
+        "channel_conversation_id": "background-length", "channel_user_id": "local-agent",
+    })
+    result = SimpleNamespace(response="继续修改", runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED")
+    monkeypatch.setattr(module, "_run_background_main_turn_with_compact", lambda *args, **kwargs: result)
+    returned, snapshot = module._invoke_background_main_agent(
+        BackgroundMainAgentRuntime(agent=agent, store=store), thread,
+        module.BackgroundRunRequest(thread_id=thread.thread_id, task_id="task-length", reason="subagent_runner_finished"),
+        module.GoalRuntimeContext(task_objective="继续当前项目"), (False, True),
+    )
+    assert returned is result
+    assert snapshot["turn_end_reason"] == "max-tokens"
+    assert snapshot["complete"] is True and snapshot["thread_id"] == thread.thread_id
 
 
 def test_tui_background_final_is_canonical_history_and_retry_is_idempotent(tmp_path) -> None:

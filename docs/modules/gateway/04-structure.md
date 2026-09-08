@@ -1,5 +1,13 @@
 # Gateway Structure
 
+## R205 模型长度与交付状态分离
+
+轻量 worker 的 `_model_length_error` 复用 `turn_end.result_turn_end_reason/turn_end_notice`；summary.ok
+反映未完整响应，adapter.finalize 保留正文。Gateway 的 `_GatewayAssistantTurn` 把原生消息与结束原因
+一起交给正常 append/repair；后台从实际结果的展示快照交接，在 final metadata 保存同一原因。
+`history_display` 按 canonical message ID 另投影提示，message_stream 的快照覆盖标记不依赖末事件。
+这些展示 metadata 不进入模型上下文，不推进 Compact、不增加模型请求。
+
 ## R204 后台原文定位
 
 `_goal_runtime_context` 的生命周期分支使用 `_background_request_objective`，按 wake 的请求编号在

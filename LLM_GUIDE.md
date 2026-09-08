@@ -21,6 +21,11 @@
 
 ## 2026-08-23 当前运行基线
 
+- TUI Gateway ok 只表示请求交付，不保证模型输出完整；typed max-tokens 要明确提示，保留实际回复正文。
+  技术错误提示与模型正文分开，final metadata 保存同一 typed 结束原因，正常提交/补交不能分叉。
+  后台与 child 共用归一化和显示文案，历史按原消息 ID 重放；不按正文猜截断、不因此增加模型调用。
+  有界恢复和真实 TUI 截断复验尚未完成。
+
 - lifecycle wake 恢复任务目标与工具索引共用 exact conversation_request_id；用户正文从同 owner/thread
   canonical transcript 分页找回，不能把复用的 task link.goal 当成后续回合目标。批量按账本顺序读取，
   明确编号缺失或损坏要报错，不猜最近任务、不改旧账；无编号的旧 wake 继续原 task link 路径。
@@ -360,7 +365,7 @@ my-agent/                          ← 项目根目录
 - 读 `TEST_CHECKLIST.md` 了解收口检查项
 
 如果改动涉及 subagent/capability/runner：
-- 读 `SUBAGENT_RUNBOOK.md` 了解运行协议
+- 读 `docs/modules/subagent/SUBAGENT_RUNBOOK.md` 了解运行协议
 
 ---
 

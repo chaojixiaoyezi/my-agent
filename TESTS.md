@@ -1,5 +1,14 @@
 # TESTS
 
+## R205 长度限制的 TUI 提示
+
+对 Gateway ok=True + typed max-tokens、runtime unfinished/truncated 两种信封验证：返回失败提示但保留正文，
+真实 runtime reducer 中回合不再活动；正文含类似报码不触发，显式完成优先级保持。worker/runtime 56 passed。
+追加 3 个先红的历史用例，修复 native/普通历史和后台快照后的截断说明；相关显示 92 passed。
+正常写入/故障 repair/重复提交、后台实际结果交接/只在 final 保存、child 空正文/半截正文也纳入定向覆盖。
+11 个直接相关文件合计 431 例，429 passed / 2 原有 xfailed；未跑全仓 pytest。
+这些不是 provider 截断的真实 TUI 复验；有界同轮恢复及原场景最后验收仍独立进行。
+
 ## R204 精确请求的后台目标恢复
 
 将旧 task goal 与新用户 request 区分，复现目标回退后修复；使用真实 ConversationStore JSONL、分页与

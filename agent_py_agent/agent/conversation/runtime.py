@@ -1,5 +1,5 @@
-# LLM: 本模块是会话后台运行、唤醒和续接的权威入口；稳定 task 身份与逐轮请求必须分离，正文和工具历史按同一请求恢复。
-# 模块用途: 处理后台事件、上下文和投递；子代理返回时续接其原用户回合，不能把旧任务登记目标当作新请求。
+# LLM: 后台稳定 task 身份与逐轮请求分离，正文和工具历史按同一请求恢复；typed 结束原因随 canonical final 保存。
+# 模块用途: 处理后台事件、上下文和投递；子代理返回接回原用户目标，截断回复在历史中保留真实原因。
 from __future__ import annotations
 
 import hashlib
@@ -1216,8 +1216,8 @@ class BackgroundMainAgentRuntime:
         return committed_content, delivery_status
 
 
-# LLM: 本入口运行一次后台工作片，冻结 sink 的展示副本后返回；不能提交 transcript、投递或生命周期状态。
-# 函数用途: 调用后台主代理，同步 main 活动，并把本轮完整过程交给消息提交方。
+# LLM: 运行一次后台工作片，把结果的 typed turn-end 随冻结展示副本交接；不提交 transcript 或改变生命周期。
+# 函数用途: 调用后台主代理，把本轮过程和实际结束原因一起交给消息提交方，不让技术截断在恢复时丢失。
 def _invoke_background_main_agent(
     runtime: BackgroundMainAgentRuntime,
     thread: ConversationThread,
@@ -1262,7 +1262,11 @@ def _invoke_background_main_agent(
         activity_sink.fail()
         raise
     activity_sink.finish()
-    return result, activity_sink.display_history_snapshot()
+    from ..turn_end import result_turn_end_reason
+
+    snapshot = activity_sink.display_history_snapshot()
+    snapshot["turn_end_reason"] = result_turn_end_reason(result)
+    return result, snapshot
 
 
 # LLM: Background lifecycle wakes continue the same authoritative active turn. Like foreground
@@ -1472,8 +1476,8 @@ def _is_active_turn_lifecycle_continuation(
     )
 
 
-# LLM: canonical final 是正文及完整工作片展示的唯一持久位置；commentary 仅携带关联 ID，不复制整个快照。
-# 函数用途: 幂等保存后台过程正文和最终回复，提交成功后客户端才可按工作片 ID 排除旧缓冲。
+# LLM: canonical final 保存正文、过程和 host-owned turn-end；commentary 不携带终态，缺失原因不从文字补造。
+# 函数用途: 幂等保存后台回复及长度限制原因；提交成功后才由原工作片 ID 排除旧缓冲，不增加恢复调用。
 def _commit_background_response(
     runtime: BackgroundMainAgentRuntime,
     request: BackgroundRunRequest,
@@ -1497,6 +1501,9 @@ def _commit_background_response(
             **message_metadata,
             "background_transcript_request_id": display_snapshot.get("request_id", ""),
         }
+    from ..turn_end import normalize_turn_end_reason
+
+    end_reason = normalize_turn_end_reason((display_snapshot or {}).get("turn_end_reason"))
     delivery_key = _background_delivery_idempotency_key(request)
     for index, commentary in enumerate(assistant_commentaries, start=1):
         text = str(commentary or "").strip()
@@ -1528,6 +1535,7 @@ def _commit_background_response(
         "metadata": {
             **message_metadata, "assistant_part_id": "final",
             **({"background_display_turn": display_snapshot} if display_snapshot else {}),
+            **({"turn_end_reason": end_reason} if end_reason else {}),
         },
     }
     if delivery_key:

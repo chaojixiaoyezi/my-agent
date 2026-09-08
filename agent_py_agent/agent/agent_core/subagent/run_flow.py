@@ -1,5 +1,5 @@
 # LLM: 本模块串联同一 child 的尝试、模型轮和正式结果；Compact 续接不新建 run/attempt，失败交给生命周期处理。
-# 模块用途: 执行子代理任务并保存结果；长期压缩不是重派次数，修改时同步验证停止、恢复与工具显示身份。
+# 模块用途: 执行子代理并保存结果和 typed 截断说明；长期压缩不是重派次数，同步验证停止、恢复与显示身份。
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from ...conversation.authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from ...subagents.context_bundle_refs import runtime_task_attributes
+from ...turn_end import result_turn_end_reason
 from ..runner.context import restore_current_subagent_context, set_current_subagent_context
 from ..runtime.loop_models import RunParams
 from ..runtime_mixin import release_active_turn_inputs_for_compact
@@ -200,7 +201,7 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
 
 # LLM: 子代理始终使用自身 ConversationThread 和同一执行身份；只有已提交 Compact 才能续接，
 # 不以累计压缩次数判失败。停止、真实压缩失败和预算仍生效，工具显示批次不改变权限或副作用幂等身份。
-# 函数用途: 使用子代理自己的历史执行长期任务；每次成功压缩后继续原尝试，并保留各批工具的独立显示。
+# 函数用途: 使用子代理自己的历史执行长期任务；压缩后继续原尝试，落账后按真实结束原因显示正文或截断提示。
 def _run_subagent_model_turn(
     lifecycle,
     prompt: str,
@@ -264,6 +265,7 @@ def _run_subagent_model_turn(
                     transcript_sink.finish(
                         final_text=str(getattr(result, "response", "") or ""),
                         publish_final=True,
+                        end_reason=result_turn_end_reason(result),
                     )
                 return result
             (

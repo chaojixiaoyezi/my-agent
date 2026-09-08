@@ -1,10 +1,17 @@
 # Gateway Progress
 
+## R205 截断的实时与历史显示（本地）
+
+本地/Gateway 共用 typed 长度提示，半截正文仍保留。canonical final/repair 保存结束原因，后台只在 final
+写入，历史提示按原消息 ID 幂等重放；child 的实时结束流也显示。3 个历史红测后 11 文件定向 429 passed /
+2 原有 xfailed；尚未部署，有界恢复/真实截断复验未完成。当前唯一 Gateway 为 R204 / 3305553。
+
 ## R204 后台用户输入与稳定身份分离（本地通过）
 
 K 真实连续任务中 child wake 已有新 request，但背景目标只读旧 task goal，最终答错任务。
 现从同 thread 原消息精确恢复，缺失不猜、批量按消息顺序、旧无编号与 Audit 边界保持。
-179 focused passed / 2 原有 xfailed，待部署与真实 TUI 复验；不据此宣布连续任务全部通过。
+179 focused passed / 2 原有 xfailed，已部署；K/L 原 session 继续，新模型账为 MiniMax-M2.7。
+K 正等待新 worker；F/E/I 并行继续，完整连续任务和 child 返回正确目标还未验收。
 
 ## R203 计划显示不代表执行（本地，待原 TUI）
 

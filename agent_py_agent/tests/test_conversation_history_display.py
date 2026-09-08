@@ -44,6 +44,38 @@ def _rows(*, failed: bool = False) -> list[SimpleNamespace]:
     return rows
 
 
+@pytest.mark.parametrize("native", [False, True])
+def test_length_limited_history_keeps_body_and_typed_notice_without_replay(native):
+    rows = _rows()
+    rows[-1].content = "下面继续修改"
+    rows[-1].metadata["turn_end_reason"] = "max-tokens"
+    if not native:
+        rows[-1].metadata.pop("canonical_native_messages")
+    before = copy.deepcopy(rows)
+    events = conversation_history_display_events(rows)
+    assert events[-1]["kind"] == "system_message"
+    assert "长度限制" in events[-1]["payload"]["text"]
+    assert events[-2]["payload"]["text"] == "下面继续修改"
+    runtime = TuiRuntime("truncated-history")
+    runtime.publish_recovered_history([], display_events=events)
+    snapshot = runtime.store.snapshot()
+    assert any(block.text == "下面继续修改" for block in snapshot.stable_blocks)
+    assert sum("长度限制" in block.text for block in snapshot.stable_blocks) == 1
+    assert not snapshot.has_active_work and not snapshot.queued_inputs
+    runtime.publish_recovered_history([], display_events=events)
+    assert runtime.store.snapshot().stable_blocks == snapshot.stable_blocks
+    assert rows == before
+
+
+@pytest.mark.parametrize("reason", ["", "completed", "unknown", "error"])
+def test_history_does_not_infer_truncation_from_prose_or_unknown_reason(reason):
+    rows = _rows()
+    rows[-1].content = "MODEL_RESPONSE_TRUNCATED 只是文档中的例子"
+    rows[-1].metadata["turn_end_reason"] = reason
+    events = conversation_history_display_events(rows)
+    assert not any(event["kind"] == "system_message" for event in events)
+
+
 @pytest.mark.parametrize("failed", [False, True])
 def test_rich_restore_preserves_order_and_never_requeues_or_mutates(failed):
     rows = _rows(failed=failed)

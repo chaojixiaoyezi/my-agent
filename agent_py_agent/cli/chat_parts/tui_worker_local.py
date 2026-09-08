@@ -16,11 +16,11 @@ from ...agent.gateway_parts.response_renderer import (
 )
 from ...agent.memory_archive.tokens import estimate_tokens
 from .tui_runtime import TuiTurnSummary
-from .tui_worker_paths import _nonnegative_int
+from .tui_worker_paths import _model_length_error, _nonnegative_int
 
 
-# LLM: local path 把 adapter 原样交给 agent.run，使模型 delta 与 structured tool progress 共用稳定 block identity。
-# 函数用途: 执行一次本地主代理回合并返回回复与结构化 TUI 终态。
+# LLM: local adapter 保留模型 delta/tool 身份；与 Gateway 共用 typed 长度限制，不以正文猜成功，不额外调用模型。
+# 函数用途: 执行本地回合，返回完整或被截断的实际回复与明确终态提示。
 def _worker_local_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
     with register_interruptible(conversation_request_interrupt_name(ctx.job.request_id)):
         result = ctx.cfg.agent.run(
@@ -48,8 +48,9 @@ def _worker_local_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
     with ctx.cfg.state_lock:
         ctx.cfg.last_token_estimate_ref[0] = context_tokens
     runtime_status = str(getattr(result, "runtime_status", "ok") or "ok").lower()
-    ok = runtime_status not in {"failed", "error", "cancelled"}
-    error = "" if ok else str(getattr(result, "runtime_reason", "") or runtime_status)
+    error = _model_length_error(result)
+    ok = not error and runtime_status not in {"failed", "error", "cancelled"}
+    error = error or ("" if ok else str(getattr(result, "runtime_reason", "") or runtime_status))
     summary = TuiTurnSummary(
         response_text=text,
         ok=ok,

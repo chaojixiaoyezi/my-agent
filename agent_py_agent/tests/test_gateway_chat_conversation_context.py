@@ -83,6 +83,7 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
     _gateway_task_attributes,
     _GatewayActiveTurnTransition,
     _GatewayAskRunContext,
+    _GatewayAssistantTurn,
     _GatewayConversationContext,
     _GatewayConversationLoadRequest,
     _GatewayRunParamsRequest,
@@ -339,6 +340,55 @@ def test_named_audit_projects_durable_task_deadline_into_current_run(tmp_path):
     assert attrs["run_workspace"]["task_root"] == link.task_path
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, monkeypatch, deferred):
+    from agent_py_agent.agent.gateway_parts import request_execution as module
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=False), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread({
+        "canonical_user_id": "local-agent", "channel": "chat",
+        "channel_conversation_id": "length-session", "channel_user_id": "local-agent",
+    })
+    conversation = _GatewayConversationContext(thread_id=thread.thread_id)
+    context = _GatewayAskRunContext(
+        agent=agent, request={"metadata": {"channel": "chat"}},
+        request_id="req-length", request_path=tmp_path / "request.json",
+        response_path=tmp_path / "response.json", on_chunk=None,
+    )
+    result = SimpleNamespace(
+        response="接下来修改", runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
+        assistant_commentary_messages=["我在核对现有代码"],
+        canonical_native_messages=[{"role": "assistant", "content": "接下来修改"}],
+    )
+    append = store.append_message
+
+    # LLM: 只在 pytest 临时存储模拟 final 写入失败，commentary 正常；生产 repair 负责后续补交。
+    # 函数用途: 核对同一结束原因在瞬时写盘失败后仍能随原消息完整恢复。
+    def fail_final(payload):
+        if payload.get("metadata", {}).get("assistant_part_id") == "final":
+            raise OSError("test final write failure")
+        return append(payload)
+
+    with monkeypatch.context() as patch:
+        if deferred:
+            patch.setattr(store, "append_message", fail_final)
+        module._persist_gateway_assistant_result(context, conversation, result)
+    if deferred:
+        assert result.conversation_persist_degraded
+        errors = []
+        module._repair_gateway_conversation_messages(store, thread.thread_id, errors)
+        assert errors == []
+    rows = store.recent_messages(thread.thread_id, limit=0)
+    assert [row.content for row in rows] == ["我在核对现有代码", "接下来修改"]
+    assert "turn_end_reason" not in rows[0].metadata
+    assert rows[-1].metadata["turn_end_reason"] == "max-tokens"
+    assert rows[-1].metadata["canonical_native_messages"]["messages"][-1]["content"] == "接下来修改"
+    before = store._message_path(thread.thread_id).read_bytes()
+    module._persist_gateway_assistant_result(context, conversation, result)
+    assert store._message_path(thread.thread_id).read_bytes() == before
+
+
 def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
@@ -370,7 +420,7 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
         request_id="gw-first",
         role="assistant",
         content="你好，小叶子。",
-        canonical_native_messages=[
+        assistant_turn=_GatewayAssistantTurn(native_messages=[
             {
                 "role": "user",
                 "content": [{"type": "text", "text": "# User Task\n你好，我叫小叶子"}],
@@ -401,7 +451,7 @@ def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
                 "role": "assistant",
                 "content": [{"type": "text", "text": "你好，小叶子。"}],
             },
-        ],
+        ]),
     )
     second = _conversation_context(agent, request, "gw-second", "我叫什么？")
     assert second.thread_id == first.thread_id

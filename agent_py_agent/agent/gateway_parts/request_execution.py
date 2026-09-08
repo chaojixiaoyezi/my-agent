@@ -2,7 +2,8 @@
 # published by RuntimeDB binding before model entry. Never infer it from a reused display task.
 # Request-affine claims are bound before acquisition and retained until terminal commit; unknown
 # operation recovery has a typed public error. Exception prose never decides retry or bypass.
-# 模块用途: 执行网关请求，传递真实运行身份并恢复原回合；恢复受阻时区分执行结果未确认与会话读写失败。
+# Canonical final and its delayed repair preserve the same host-owned turn-end and native data.
+# 模块用途: 执行网关请求并恢复真实回合；保存原正文及结束原因，延迟补交不能把被截断的回复显示成完整成功。
 from __future__ import annotations
 
 """execution helpers keep one claimed gateway request inside focused contexts.
@@ -98,6 +99,7 @@ from ..conversation.tool_context_window import (
 from ..conversation.tool_input_progress import public_tool_input_progress
 from ..ingestion.source_binding import public_audit_source_bindings
 from ..tooling.operation_verification import public_operation_verification
+from ..turn_end import normalize_turn_end_reason, result_turn_end_reason
 from .approval_session import (
     ToolApprovalSessionCache,
     agent_tool_approval_session_cache,
@@ -859,6 +861,24 @@ class _GatewayHistoryRow:
     role: str
     content: str
     metadata: dict[str, object] = field(default_factory=dict)
+
+
+# LLM: 这是同一结果的不可变传输包，不是第二份会话事实源；正常提交和 repair 必须使用相同投影。
+# 类用途: 把已收到的原生消息和宿主结束原因一起交给 final 持久化，不增加机器完成判断。
+@dataclass(frozen=True)
+class _GatewayAssistantTurn:
+    native_messages: object = None
+    end_reason: str = ""
+
+    # LLM: 仅构建新的 metadata 字典；不改原生内容、不写文件、不推断缺失 reason。
+    # 函数用途: 为正常落账与延迟补交生成同一份 canonical 回合元数据。
+    def metadata(self) -> dict[str, object]:
+        metadata: dict[str, object] = {}
+        if envelope := canonical_native_messages_envelope(self.native_messages):
+            metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = envelope
+        if reason := normalize_turn_end_reason(self.end_reason):
+            metadata["turn_end_reason"] = reason
+        return metadata
 
 
 # LLM: The gateway preflight carries only host-resolved request inputs plus any one-call deferred
@@ -1640,6 +1660,8 @@ def _gateway_request_is_active_turn_recovery(request: object, request_id: str) -
     return str(row.get("priority") or "").strip().lower() == "recovery" and requeued_at > 0
 
 
+# LLM: 把实际模型回复、native IR 和 typed 结束原因作为同一 final 提交；写失败保存相同 repair，不重做模型。
+# 函数用途: 保存主代理的完整或半截回复及其技术原因，停止控制不作为模型正文持久化。
 def _persist_gateway_assistant_result(
     context: _GatewayAskRunContext,
     conversation: _GatewayConversationContext,
@@ -1683,6 +1705,10 @@ def _persist_gateway_assistant_result(
     if not commentaries_persisted:
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant commentary append deferred for repair"
+    assistant_turn = _GatewayAssistantTurn(
+        native_messages=getattr(result, "canonical_native_messages", None),
+        end_reason=result_turn_end_reason(result),
+    )
     if not _append_gateway_conversation_message(
         context.agent,
         context.request,
@@ -1693,7 +1719,7 @@ def _persist_gateway_assistant_result(
         delivery_artifacts=channel_delivery["artifacts"],
         operation_verification=channel_delivery.get("operation_verification"),
         terminal_tool_fold=terminal_tool_fold,
-        canonical_native_messages=getattr(result, "canonical_native_messages", None),
+        assistant_turn=assistant_turn,
         assistant_part_id="final",
     ):
         _queue_gateway_conversation_repair(
@@ -1706,7 +1732,7 @@ def _persist_gateway_assistant_result(
             delivery_artifacts=channel_delivery["artifacts"],
             operation_verification=channel_delivery.get("operation_verification"),
             terminal_tool_fold=terminal_tool_fold,
-            canonical_native_messages=getattr(result, "canonical_native_messages", None),
+            assistant_turn=assistant_turn,
             assistant_part_id="final",
         )
         result.conversation_persist_degraded = True
@@ -3629,7 +3655,7 @@ def _latest_conversation_messages(
 # LLM: Assistant prose, artifacts, operation facts, and one immutable terminal tool fold are
 # persisted in separate fields. The public body must stay unchanged while later model turns may
 # consume the bounded fold from metadata.
-# 函数用途: 幂等追加 Gateway 消息，并分栏保存统一请求身份、产物、操作核验和工具终态折叠。
+# 函数用途: 幂等追加 Gateway 消息，分栏保存请求身份、产物、工具折叠及 final 的原生消息和结束原因。
 def _append_gateway_conversation_message(
     agent: SimpleAgent,
     request: dict,
@@ -3641,7 +3667,7 @@ def _append_gateway_conversation_message(
     delivery_artifacts: object = (),
     operation_verification: object = None,
     terminal_tool_fold: object = None,
-    canonical_native_messages: object = None,
+    assistant_turn: _GatewayAssistantTurn | None = None,
     assistant_part_id: str = "final",
 ) -> bool:
     if not conversation.thread_id or not content:
@@ -3684,10 +3710,8 @@ def _append_gateway_conversation_message(
             fold = dict(terminal_tool_fold)
             if fold:
                 entry_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
-        if role == "assistant":
-            native_envelope = canonical_native_messages_envelope(canonical_native_messages)
-            if native_envelope:
-                entry_metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = native_envelope
+        if role == "assistant" and normalized_part_id == "final" and assistant_turn is not None:
+            entry_metadata.update(assistant_turn.metadata())
         entry = store.append_message(
             {
                 "thread_id": conversation.thread_id,
@@ -3723,8 +3747,8 @@ def _append_gateway_conversation_message(
 
 
 # LLM: Delayed repair preserves the same canonical request identity, sanitized body, artifacts,
-# operation facts, and immutable terminal fold as normal append; no repair path may lose history.
-# 函数用途: transcript 暂时写失败时保存与正常路径完全一致、可幂等恢复的消息记录。
+# operation facts, terminal native messages and turn-end reason as normal append; no repair may lose history.
+# 函数用途: 暂时写失败时保存与正常路径一致的消息和结束原因，补交只写原结果、不再次执行任务。
 def _queue_gateway_conversation_repair(
     agent: SimpleAgent,
     request: dict,
@@ -3736,7 +3760,7 @@ def _queue_gateway_conversation_repair(
     delivery_artifacts: object = (),
     operation_verification: object = None,
     terminal_tool_fold: object = None,
-    canonical_native_messages: object = None,
+    assistant_turn: _GatewayAssistantTurn | None = None,
     assistant_part_id: str = "final",
 ) -> None:
     store = getattr(agent, "conversation_store", None)
@@ -3762,10 +3786,8 @@ def _queue_gateway_conversation_repair(
         fold = dict(terminal_tool_fold)
         if fold:
             repair_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
-    if role == "assistant":
-        native_envelope = canonical_native_messages_envelope(canonical_native_messages)
-        if native_envelope:
-            repair_metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = native_envelope
+    if role == "assistant" and normalized_part_id == "final" and assistant_turn is not None:
+        repair_metadata.update(assistant_turn.metadata())
     payload = {
         "thread_id": conversation.thread_id,
         "role": role,
