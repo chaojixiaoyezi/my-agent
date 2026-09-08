@@ -1,5 +1,10 @@
 # Gateway Structure
 
+## R209 展开装饰保留实时提示
+
+`TuiFrameProvider.frame` 将实时 context 健康作为 `preserve_footer` 传给 transcript decorator；冻结正文和
+搜索状态照常维护，故障时不覆盖原底栏，不从文案判断健康，不修改 Gateway/业务状态。
+
 ## R208 刷新健康单一投影
 
 `_background_notice_loop` 的已有 bool 结果经 `publish_background_sync_status` 发布变化事件；唯一 reducer

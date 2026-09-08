@@ -1,5 +1,11 @@
 # DESIGN LEDGER
 
+## 2026-09-08 冻结正文不冻结客户端故障提示【状态：R209 本地修复】
+
+R208 真 Ctrl+O 暴露二次 decorator 重写 footer：主 renderer 已告警，但展开模式又盖回快捷键。
+沿 终端交互 独立连接警告边界，frame provider 将实时 typed 健康传给 decorator 保留原底栏；冻结正文、
+搜索高亮/计数保持原状态，连接恢复后自动恢复模式说明，不从字符串内容判断提示优先级。
+
 ## 2026-09-08 客户端刷新健康与任务活动分离【状态：R208 本地实现，待 TUI】
 
 - 对照 会话运行时 `tui/src/app/app_server_events.rs` 的显式 Disconnected，以及 终端交互

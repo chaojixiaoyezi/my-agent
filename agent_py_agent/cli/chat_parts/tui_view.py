@@ -1,5 +1,5 @@
 # LLM: 本模块把 typed snapshot renderer 接入 prompt_toolkit；画面缓存与冻结正文随当前 store 切换，只管显示，不持有业务执行权；空选区右键必须无副作用。
-# 模块用途: 提供可滚动 transcript control、固定 overlay/footer 内容和稳定 block cache，替代字符串 TextArea+行前缀 lexer。
+# 模块用途: 提供可滚动正文、固定提示与缓存；展开冻结正文不能遮住当前客户端的刷新故障提示。
 
 from __future__ import annotations
 
@@ -131,7 +131,7 @@ class TuiFrameProvider:
         self.invalidate()
 
     # LLM: frame key覆盖 block版本、queue、permission、status 与 context；diagnostics 不可见所以不触发重绘。
-    # 函数用途: 返回当前宽度的共享渲染帧。
+    # 函数用途: 返回共享渲染帧；展开模式仍保留实时刷新健康提示，不用旧冻结正文决定连接状态。
     def frame(self, width: int) -> TuiRenderFrame:
         normalized_width = max(1, int(width or 1))
         live_snapshot = self.state_store.snapshot()
@@ -156,6 +156,7 @@ class TuiFrameProvider:
             rendered = self.transcript_state.decorate_frame(
                 rendered,
                 width=normalized_width,
+                preserve_footer=context.background_sync_failed,
             )
         rendered = sanitize_tui_render_frame(rendered)
         with self._lock:

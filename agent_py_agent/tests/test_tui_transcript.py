@@ -8,6 +8,28 @@ from agent_py_agent.cli.chat_parts.tui_view import TuiFrameProvider
 from agent_py_agent.cli.chat_parts.tui_view_model import TuiStateStore
 
 
+def test_frozen_detailed_transcript_keeps_live_refresh_warning_and_recovers():
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("frozen-refresh-warning")
+    state = TuiTranscriptModeState()
+    state.enter(runtime.store.snapshot())
+    provider = TuiFrameProvider(
+        runtime.store,
+        lambda width: TuiRenderContext(
+            width=width, detailed_transcript=True,
+            background_sync_failed=runtime.store.snapshot().background_sync_failed,
+        ),
+        transcript_state=state,
+    )
+    normal_footer = provider.frame(100).footer
+    runtime.publish_background_sync_status(ok=False)
+    assert "状态刷新失败" in fragments_text(provider.frame(100).footer)
+    runtime.publish_background_sync_status(ok=True)
+    assert provider.frame(100).footer == normal_footer
+    assert state.snapshot().active is True
+
+
 def _provider(
     store: TuiStateStore,
     state: TuiTranscriptModeState,

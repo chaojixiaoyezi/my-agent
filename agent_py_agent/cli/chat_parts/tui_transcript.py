@@ -1,5 +1,5 @@
 # LLM: 本模块是 Ctrl-O transcript 模式、冻结快照与全文搜索的唯一 UI 状态源；切代理必须重绑显示快照，不写会话或运行状态。
-# 模块用途: 提供 终端交互 风格的详细 transcript、less 式搜索/导航、resize 失效和搜索高亮。
+# 模块用途: 提供详细 transcript、less 式搜索和冻结正文；当前客户端的故障提示不能被模式说明覆盖。
 
 from __future__ import annotations
 
@@ -229,9 +229,11 @@ class TuiTranscriptModeState:
         self._notify()
         return line
 
-    # LLM: decorate_frame 在一次 render 内重建宽度相关匹配并只改 formatted fragments/footer；原始 block/frame 不被篡改。
-    # 函数用途: 为 transcript frame 添加搜索高亮、计数和详细模式 footer。
-    def decorate_frame(self, frame: TuiRenderFrame, *, width: int) -> TuiRenderFrame:
+    # LLM: 只装饰格式化行和搜索结果；preserve_footer 来自实时 typed context，不能解析提示文案或冻结正文判断健康。
+    # 函数用途: 添加搜索高亮与模式说明；有高优先级实时提示时保留原底栏，不清除搜索状态。
+    def decorate_frame(
+        self, frame: TuiRenderFrame, *, width: int, preserve_footer: bool = False,
+    ) -> TuiRenderFrame:
         normalized_width = max(1, int(width or 1))
         with self._lock:
             if not self._active:
@@ -261,7 +263,7 @@ class TuiTranscriptModeState:
             matches,
             current_index=current_index,
         )
-        footer = _transcript_footer(
+        footer = frame.footer if preserve_footer else _transcript_footer(
             normalized_width,
             show_all=show_all,
             search_open=search_open,

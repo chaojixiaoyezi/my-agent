@@ -1,5 +1,11 @@
 # TESTS
 
+## R209 真展开模式组合回归
+
+R208 的真 PTY 中展开 footer 被 decorator 覆盖；新增经过 `TuiFrameProvider` 和冻结 snapshot 的先红用例，
+验证健康失败可见、恢复模式提示且不退出展开。不能只以直接 renderer 测试代替完整视图与真实 TUI。
+transcript/view/renderer/agent-navigation/threading 五文件共 102 passed，严格本地检查通过，未跑全仓 pytest。
+
 ## R208 刷新健康
 
 失败/重复失败/恢复保持原退避和任务快照；当前前台活动计时、排队输入不变。主/子页面、Ctrl+O 展开、

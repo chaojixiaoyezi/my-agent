@@ -1,5 +1,14 @@
 # STATUS
 
+## R209 真 TUI 抓到展开底栏覆盖（本地修复中）
+
+- R208 独立客户端已部署，唯一 Gateway 3336610 未重启。Go 同会话恢复正确 1/6，Ctrl+Home 看旧调研后
+  仍保留当前清单；主/子普通视图显式状态刷新失败，恢复后自动追上，原三个 run/attempt 身份不变。
+- 真实 Ctrl+O 测试发现 transcript decorator 会盖掉底栏故障提示，直接 renderer 单测未覆盖这个组合。
+  已补真实 frame provider 的先红用例，按实时健康标记保留底栏，不读取提示文案，不改变冻结/搜索/队列。
+- R209 五个相关文件共 102 passed，Ruff/doc sync/strict code-size/diff/clean-package 通过，真实新版展开待验。
+- 零引用旧 R206 安装回收 651146927 字节，包和依赖已备份；R208 环境已安装，未删复刻项目或任务历史。
+
 ## R208 后台刷新失败显式可见（本地通过，待真实 TUI）
 
 - BUG-143：轮询失败仅退避，旧 Working 会假装仍实时。新增客户端 typed 刷新健康，主/子页面与展开模式
