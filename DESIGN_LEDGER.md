@@ -1,5 +1,15 @@
 # DESIGN LEDGER
 
+## 2026-09-08 工具历史保留公开调用预览【状态：R218 真实复现，修复中】
+
+R217 三页真实 TUI 验证中，原页和在线观察页有 `Bash(命令)`，重新 resume 后八条命令均只剩 `Bash`。
+已保存的 canonical 快照仍有脱敏 `detail`，但两个 live adapter 仅在 started 时复制为显示字段
+`invocation`，终态快照及恢复没有这一副本。参考 会话运行时 CommandExecutionCompletionItem 保留 command、
+终端交互 按 tool_use_id 关联原调用和结果；本项目在唯一显示 metadata 投影中转换已有公开 detail，
+删除 adapter 的重复转换。显式 invocation 优先，非工具/非文本 detail 不转换，不读取原始参数或补跑工具。
+旧快照无需重写，模型历史、缓存、权限和状态不变。实时、恢复和失败工具均需定向及真实 TUI 验证。
+同轮另发现空闲 resume 缺 Context 数字，先保留独立待查，不用估算旧数冒充当前上下文。
+
 ## 2026-09-08 前台完整过程复用会话显示流【状态：R217 本地实现，真实 TUI 待验】
 
 参考 会话运行时 的同 thread item delta 通知和 终端交互 的即时消息源更新；前台公开 chunk 接入既有

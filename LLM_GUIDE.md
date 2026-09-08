@@ -21,6 +21,9 @@
 
 ## 2026-08-23 当前运行基线
 
+- 工具标题在唯一显示 metadata 层从已有公开 detail 投影；实时与恢复共用，显式 invocation 优先。
+  不因缺 started 事件丢掉命令预览，不回读原参数、不修改旧 canonical 历史或增加模型调用。
+
 - 前台公开 chunk 复用同会话过程 mapper，foreground_transcript 与已提交消息能力独立协商。
   原页按 exact Gateway 请求去重；先收 canonical 消息再补未覆盖增量，不能让思考显示在提问前。
   完整块快照随 final/repair 保存，最终回复按精确 ID 原子接替候选；流关闭只清显示，不判工具或任务成功。

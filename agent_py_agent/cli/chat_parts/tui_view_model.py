@@ -1,5 +1,5 @@
 # LLM: 本模块是 typed TUI event 到可渲染快照的唯一 reducer；不得读取模型正文猜状态，也不得执行工具、权限或会话动作。
-# 模块用途: 管理稳定历史、候选块与界面状态；canonical final 按精确 ID 接替候选，流关闭不决定任务终态。
+# 模块用途: 管理稳定历史、候选块与界面状态；工具预览统一投影，canonical final 精确接替候选，流关闭不决定终态。
 
 from __future__ import annotations
 
@@ -1214,8 +1214,8 @@ def _context_usage_from_mapping(
     )
 
 
-# LLM: metadata 白名单防止未知 payload 或秘密被 renderer/debug 无意展示。
-# 函数用途: 选择允许进入显示块的结构化元数据。
+# LLM: metadata 白名单防止未知字段泄漏；工具标题只由既有公开 detail 投影，显式 invocation 优先，不回读原参数。
+# 函数用途: 统一实时和恢复块的安全元数据，让缺 started 帧的历史也保留调用预览；不执行工具或修改原事件。
 def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "severity",
@@ -1256,6 +1256,12 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "received_chars",
     }
     metadata = {key: payload[key] for key in allowed if key in payload}
+    if (
+        "invocation" not in metadata
+        and isinstance(payload.get("tool"), str) and payload["tool"]
+        and isinstance(payload.get("detail"), str)
+    ):
+        metadata["invocation"] = payload["detail"]
     raw_goals = payload.get("goals")
     if isinstance(raw_goals, list | tuple):
         metadata["goals"] = _public_goal_rows(raw_goals)

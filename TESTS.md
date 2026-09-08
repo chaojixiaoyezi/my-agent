@@ -1,5 +1,18 @@
 # TESTS
 
+## R217/R218 真实同步、历史与修复定位
+
+R217源码1108abc，wheel SHA256 `7ac875eb2b2ddde64b6a70da9d616edcbac12dbbcb86b5c575ed6d5b61c84ecf`，
+唯一Gateway3593187；ma-r217-110-live/-mirror/-resume共享sess_1788885531_d7d9966b。
+gwreq-1788886126-2e0a40837c7c45d8b4448301d4ed176c、thread-1c105512b18046df：18次MiniMax，0重试，220.815秒。
+cache-write112679/cache-read759824/output7324/普通输入0/Compact0/child0。
+`r217-1108abc/live-initial.json` 保存执行中两页相同diff和工具；`ui-three-pages.json` 保存普通400行与
+Ctrl+O头尾，随后还原尺寸和窗口选项；`live-middle.json` 与 `live-afterresume.json` 的fresh canonical完全相同。
+各页user/final均一次、思考18；resume丢八条Bash调用标题，原记录的detail仍在，不将此列为完整恢复通过。
+R218新增成功/失败、缺started、显式invocation优先与非文本过滤定位，3红后初组140、扩展209 focused通过。
+Ruff、doc sync、strict code-size（hard0）、diff与clean-package均通过，未跑全仓pytest、未推远端。
+新增修复只改显示投影，不重写模型IR、记忆、权限或工具副作用；真TUI复验不能用单测替代。
+
 ## R216 真实三页验收证据
 
 源码50cdfaf，wheel SHA256 `5a133a5e63cae791388f4d56d2e331eb1490f8f5b046e22cc1a1d89baf340df1`。

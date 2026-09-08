@@ -1,5 +1,21 @@
 # STATUS
 
+## R218 历史工具标题补修；R217 完整实时过程真 TUI 分项通过
+
+- R217 独立包 `1108abc` 已部署，唯一 Gateway 3593187；新客户端 `ma-r217-110-live` / `-mirror`
+  同 owner `p1-r217-live`、session `sess_1788885531_d7d9966b`，实际普通任务使用 MiniMax-M2.7。
+- request `gwreq-1788886126-2e0a40837c7c45d8b4448301d4ed176c`，thread `thread-1c105512b18046df`，
+  220.815 秒后完成。运行中两页均有思考、工具、diff；final 后第三页 resume 各有一条 user/final、18个思考块。
+  三页均无 Working；恢复前后 canonical 消息/用量完全不变。实时/提交/正文恢复分项通过，未代写业务。
+- 18次真实模型调用、0重试，普通输入0、cache-write112679、cache-read759824、输出7324、Compact0、child0。
+- BUG-151：resume 后八条 Bash 标题丢命令预览；canonical 仍有公开 detail，旧 adapter 只在 started 复制 invocation。
+  已改为唯一 metadata 投影并删除两处重复转换，初组140、扩展209 focused及本地严格gate通过，客户端真实复验待做。
+  空闲 resume 缺 Context 数字另列 OBS-R217-IDLE-CONTEXT，不能据此推断模型丢记忆。
+- 连续原会话完成大型游戏、两次普通追问，第二个大型超级玛丽任务已进入 coordinator→四个孙代理；仍在执行。
+  LAN失败有新只读证据：服务器 firewalld 运行且未放行9090，开发机失败而服务器HTTP200，原DUT排除服务端无依据。
+- 本地 Qwen 仍只保留基础调用验证，不追加大任务/child。主A/子B参数已部署，跨模型child真实组合仍待验。
+
+
 ## R216 已部署；前台 user/final 同步三页真实通过
 
 - 独立包 `50cdfaf`，唯一 Gateway 3578746 → 3585410，tmux `ma-gateway-r216-110`；旧包/配置保留。

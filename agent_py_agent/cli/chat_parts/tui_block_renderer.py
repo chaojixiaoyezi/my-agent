@@ -1946,7 +1946,7 @@ def _render_tool(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
     return tuple(lines)
 
 
-# LLM: 工具标题参数只来自 started invocation 或已脱敏 display.path；换行和宽度在 UI 层裁剪，不允许回读原始工具参数。
+# LLM: 工具标题参数只来自公共 metadata 的 invocation 或已脱敏 display.path；实时/恢复共用，不回读原始工具参数。
 # 函数用途: 生成 `Bash(command)`、`Update(path)`、`Write(path)` 形式的单行标题。
 def _tool_title(block: TuiBlock, display: dict[str, Any], width: int) -> str:
     base = _tool_display_name(block.title or str(block.metadata.get("tool") or "Tool"))

@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## R218 工具预览的唯一投影
+
+`_structured_tool_progress` 已在各阶段保留脱敏 detail；`BackgroundTranscriptSink` 与 TUI adapter 均直接转发。
+`tui_view_model._public_metadata` 仅对工具的文本 detail 建立 invocation，显式 invocation 优先；终态快照及旧
+canonical 恢复复用同一 reducer，因此不要求重写历史、保留started副本或从模型原始参数重新推导标题。
+
 ## R217 公开过程与 final 交接
 
 `GatewayForegroundTranscriptSink` 适配前台 chunk，复用 `BackgroundTranscriptSink` 工具/思考/Compact 映射；

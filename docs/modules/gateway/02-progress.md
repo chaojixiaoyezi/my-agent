@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R217 真实过程验收与 R218 标题补修
+
+独立1108abc包、唯一Gateway3593187；新owner任务18次MiniMax/0重试，原/观察页实时内容一致。
+第三页恢复user/final各一条、18个思考、无Working，canonical及用量未变；但工具终态快照没有started的
+invocation副本。R218由公共metadata统一投影已有detail，删除sink重复转换，140 focused通过。
+先部署客户端验证旧记录，Gateway长递归任务不重启；空闲Context缺失及提交前崩溃过程仍未封板。
+
 ## R217 同会话前台完整过程（本地实现）
 
 原 rich chunk 同时进入共享公开过程 mapper；按宿主请求精确去重，最终块接替候选且随 canonical final/repair

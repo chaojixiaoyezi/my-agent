@@ -1,7 +1,7 @@
 # LLM: 本模块是 chat worker/Gateway structured rows 到 TuiEvent 的唯一 adapter；它不渲染、不执行工具，也不把 legacy 文案当状态。
 # 后台流身份仅管理展示续接，换流不得清空本页面历史、待输入回执或已恢复工作片。
 # 历史工具卡不再驱动实时 Todo；当前计划只由实时工具/活动快照发布，恢复和向前翻页都遵守这一边界。
-# 模块用途: 为 session、公开模型选择、输入、回合和工具发布有序事件；显示投影不改变执行配置。
+# 模块用途: 为 session、公开模型选择、输入、回合和工具发布有序事件；保留公开调用字段，不分阶段复制标题或改变执行配置。
 
 from __future__ import annotations
 
@@ -2484,8 +2484,8 @@ def _tool_block_id(request_id: str, progress: dict[str, Any]) -> str:
     )
 
 
-# LLM: tool payload 白名单保持与 reducer public metadata 对齐，不复制 legacy_text 或未知内部字段。
-# 函数用途: 生成工具显示事件 payload。
+# LLM: tool payload 只转发公开字段，调用预览统一由 reducer metadata 投影，不再只在 started 制造副本。
+# 函数用途: 生成实时工具显示事件；保留公开 detail，和恢复历史使用同一标题来源，不复制未知内部字段。
 def _tool_payload(progress: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "tool",
@@ -2508,10 +2508,7 @@ def _tool_payload(progress: dict[str, Any]) -> dict[str, Any]:
         "task_progress_generation_id",
         "task_progress_plan_revision",
     }
-    payload = {key: progress[key] for key in allowed if key in progress}
-    if str(progress.get("phase") or "").strip().lower() == "started" and progress.get("detail"):
-        payload["invocation"] = progress["detail"]
-    return payload
+    return {key: progress[key] for key in allowed if key in progress}
 
 
 # LLM: terminal 映射只认 typed phase/ok，未知 phase 保持 progress，不根据本地化 status 文案判断。

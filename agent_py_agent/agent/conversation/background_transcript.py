@@ -4,7 +4,7 @@
 # ring. Child callers may replace the event writer with their durable bounded JSONL;
 # main 同时按块保留完整工作片快照，最终由 canonical 消息提交；两条投影都不拥有生命周期或权限。
 # 易失游标必须与当前 Agent 的 stream_id 配对，重建 Agent 后不能用旧进程序号跳过新事件。
-# 模块用途: 将主/子代理公开过程转成同一展示事件；前台仅附精确宿主请求关联，供原页去重。
+# 模块用途: 将主/子代理公开过程转成同一展示事件，保留公开调用摘要；前台附精确宿主请求关联，供原页去重。
 
 from __future__ import annotations
 
@@ -289,10 +289,8 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         self._thinking_delta_batcher.reset()
         return True
 
-    # LLM: Tool events already come from _structured_tool_progress. The optional
-    # legacy text keeps the shared typed writer protocol without becoming data.
-    # This layer whitelists fields and never parses status prose for authority.
-    # 函数用途: 将主代理或子代理工具阶段映射为现有 TUI 工具卡片事件，忽略旧文本副本。
+    # LLM: 仅转发 _structured_tool_progress 的白名单；公共 detail 在实时/终态中同源保留，标题由显示 metadata 统一投影。
+    # 函数用途: 将主/子代理工具阶段发布为卡片事件，忽略旧文本副本，不解析文案或在 started 额外保存预览副本。
     def write_progress(
         self,
         progress: Mapping[str, object],
@@ -307,8 +305,6 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         phase = str(progress.get("phase") or "updated").strip().lower()
         if phase == "started":
             self._flush_model_commentary()
-            if progress.get("detail"):
-                public["invocation"] = copy.deepcopy(progress["detail"])
         if block_id not in self._tool_blocks:
             self._tool_blocks.add(block_id)
             self._event("tool_started", "started", block_id, public)

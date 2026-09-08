@@ -1,5 +1,15 @@
 # TEST CHECKLIST
 
+## R217/R218 完整过程与恢复
+
+- [x] 两个新版同session TUI实时显示思考、工具与diff；真实MiniMax调用，无第二Gateway。
+- [x] final后第三页恢复，user/final各一次、18个思考、无Working；canonical消息/用量hash不变。
+- [x] 真实发现Bash命令标题在resume丢失；三个先红定位后，140 focused通过。
+- [ ] 新客户端在同一真实历史恢复八条命令预览，旧记录/用量不得改写。
+- [ ] 空闲resume缺Context数字（OBS-R217-IDLE-CONTEXT）定位及真实复验。
+- [ ] 前台提交前崩溃/让出片、取消/插话组合的完整过程耐久化，不以本片通过替代。
+- [ ] 同会话第二个递归大任务及追加完成；当前coordinator与四个孙代理仍在运行链。
+
 ## R216 同会话前台已提交消息
 
 - [x] 同 session 原页发送一次普通任务，观察页显示 user/final，原页各一次（R216真实）。
