@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R210 真 TUI 分项结果
+
+受控升级唯一 Gateway 为 3494500，原 Go/家庭工具两会话的 main 数字和常规阶段同步；新真实 MiniMax
+17 次完成、0失败。原 Go child 同 run、新 attempt 接续并保留 compact17，不证明完整重启/副作用矩阵。
+真实发现 permission_requested 没进入共享活动，原页等待确认却显示工具执行中；下一片只补等待显示。
+原 Go 的确认框保留；共享正文和 final 增量尚未做，不能把标量通过当完整 BUG-146 通过。
+
 ## R210 前台 main 数字/阶段（本地，真实 TUI 待验）
 
 原 chunk 后发布到同一 owner/thread 标量，不增加读请求/模型调用。前台与后台互换时用显示工作片身份

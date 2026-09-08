@@ -1,5 +1,13 @@
 # TESTS
 
+## R210 真 TUI 与受控部署
+
+证据 `r210-5cf63a3/evidence-first-live.json`：原 Go main 和新观察页都是 51.1k / compact 12 / read_file；
+第二 owner 家庭工具两页 58.4k、后台等待时 92.9k，同 session 同源数字分项通过。真实17次 MiniMax-M2.7
+完成、0失败，后续 child 仍运行；不用模型自述当完整产物验收。总307 passed / 2既有xfailed，全部本地严格 gate 通过。
+另捕获真实取消授权等待未同步（BUG-147），以及子页首次顶部且 46 new messages 的定位行为；Ctrl+End
+后新工具可见。不批准授权、不用超时硬终结任务；完整正文同步和同 child 差值问题保留未完成。
+
 ## R210 前台 main 显示投影
 
 115 focused（gateway_main_activity、conversation_agent_activity、gateway_verbose_progress、gateway_streaming、
