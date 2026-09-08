@@ -1,5 +1,18 @@
 # COMPLETED
 
+## R219 最近上下文耐久显示（本地实现，真 TUI 待验）
+
+主/子在同一模型 preflight 将数字保存到 exact thread，删除旧 child run 属性的写读旁路。
+Context 与 Working 分离，空闲可恢复；Compact 成功清代，迟到旧帧和读取失败不覆盖最新已知状态。
+子代理名册与详情同次读取数字及代数，未知显示破折号；遥测不进入模型 context bundle，不改计费或校准。
+324 focused通过，尚未受控部署/真实TUI复验，不能据此关闭 OBS-R217-IDLE-CONTEXT。
+
+## R219 具体工具拒绝分支（真实 TUI）
+
+ma-r219-110-deny与同session观察页正确等待；在原页拒绝唯一terminal_session(python3)审批。
+handler_executed=false/APPROVAL_REJECTED，账本没有被拒绝operation；原请求继续并done，两页无Working。
+MiniMax12调用/0重试。模型把脚本演示夸大为交互验证，业务质量未通过；没有替DUT补写或执行业务代码。
+
 ## R218 原真实会话命令标题恢复通过
 
 ma-r218-110-live-resume使用82da8d1独立客户端，8条Bash调用预览恢复；展开头尾与原页逐字一致，

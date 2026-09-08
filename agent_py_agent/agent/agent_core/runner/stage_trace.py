@@ -1,11 +1,13 @@
 
+# LLM: 阶段追踪负责真实 runner 活动与心跳；上下文数值由统一 preflight 写入 thread，不在此重复落盘。
+# 模块用途: 记录子代理模型/工具阶段与心跳，不用调试文本推导任务完成或权限。
 from __future__ import annotations
 
 """Refs-only runner stage tracing.
 
 这里不是普通业务日志。普通阶段短事件只在当前 SimpleAgent 正处于 subagent runner
-上下文且 `subagent_debug_trace_level` 打开时写入；上下文用量则始终写入 exact run
-的纯数字展示投影。持久 Compact 次数只读独立 ConversationThread generation。
+上下文且 `subagent_debug_trace_level` 打开时写入。上下文用量已统一在 model preflight
+写入各自 ConversationThread，不再于此重复保存；阶段和心跳路径保持不变。
 """
 
 import logging
@@ -29,16 +31,6 @@ class RunnerModelStageTraceRequest:
     prompt: str = ""
     response: Any = None
     exc: BaseException | None = None
-
-
-# LLM: This request carries only the public numeric context snapshot calculated
-# by the canonical model preflight path; no provider-visible content is allowed.
-# 类用途: 把一次子代理模型调用前的上下文 token 总量交给 run 状态投影。
-@dataclass(frozen=True)
-class RunnerModelContextUsageTraceRequest:
-    agent: Any
-    params: Any
-    usage: dict[str, object]
 
 
 # LLM: Streaming activity carries counts and transport phase only; model text/reasoning and tool
@@ -184,79 +176,6 @@ def trace_runner_provider_retry_scheduled(
             },
         )
     )
-
-
-# LLM: Context usage is persisted only for the exact active subagent identity.
-# It updates a bounded numeric display snapshot without changing current_step,
-# lifecycle state, completion, retry, or authorization.
-# 函数用途: 实时记录子代理当前模型可见上下文总量，供 TUI/Web 展示。
-def trace_runner_model_context_usage(
-    request: RunnerModelContextUsageTraceRequest,
-) -> None:
-    run_id = current_subagent_run_id(request.agent)
-    if not run_id:
-        return
-    usage = _public_runner_context_usage(request.usage)
-    if not usage:
-        return
-    try:
-        task = request.agent.subagents.load(run_id)
-    except Exception as exc:
-        _warn_runner_trace_error(
-            exc,
-            context="runner_stage_trace.context_usage.load",
-            run_id=run_id,
-        )
-        return
-    task = _touch_active_heartbeat_chain(request.agent.subagents, task)
-    now = time.time()
-    attrs = dict(getattr(task, "attributes", {}) or {})
-    attrs["model_visible_context_usage"] = {**usage, "updated_at": now}
-    task.attributes = attrs
-    task.heartbeat_at = now
-    task.updated_at = now
-    try:
-        request.agent.subagents.save(task)
-    except Exception as exc:
-        _warn_runner_trace_error(
-            exc,
-            context="runner_stage_trace.context_usage.save",
-            run_id=run_id,
-        )
-
-
-# LLM: The public context schema is a closed numeric projection. Unknown keys,
-# booleans, negative values, and arbitrary nested data are dropped before save.
-# 函数用途: 清洗子代理上下文用量，确保状态账本不混入 prompt 或工具正文。
-def _public_runner_context_usage(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
-        return {}
-    if str(value.get("schema") or "") != "model_visible_context_usage.v1":
-        return {}
-    keys = (
-        "context_window_tokens",
-        "compact_trigger_tokens",
-        "current_tokens",
-        "prompt_tokens",
-        "messages_tokens",
-        "runtime_guidance_tokens",
-        "tool_schema_tokens",
-    )
-    normalized: dict[str, object] = {
-        "schema": "model_visible_context_usage.v1",
-        "estimated": value.get("estimated") is True,
-        "protocol": str(value.get("protocol") or "")[:24],
-    }
-    for key in keys:
-        raw = value.get(key)
-        if isinstance(raw, bool):
-            normalized[key] = 0
-            continue
-        try:
-            normalized[key] = max(0, int(raw or 0))
-        except (TypeError, ValueError):
-            normalized[key] = 0
-    return normalized
 
 
 def trace_runner_tool_call_started(request: RunnerToolStageTraceRequest) -> None:

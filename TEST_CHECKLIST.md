@@ -1,5 +1,13 @@
 # TEST CHECKLIST
 
+## R219 当前切片
+
+- [x] 真实TUI原页拒绝具体工具；观察页同步解除等待，handler未执行且零对应operation。
+- [x] 原request继续并最终done，两页Working收起；保留模型夸大“交互验证”的质量失败。
+- [x] 主/子preflight写exact thread、同代投影、Compact清空、迟到保护及模型bundle排除（focused）。
+- [ ] 单Gateway新版部署后真实main/child/恢复Context一致，重启读取不补模型调用。
+- [ ] 审批并发/冻结、capability deny/GAP、精确恢复等完整P0矩阵，不以本分支代替。
+
 ## R217/R218 完整过程与恢复
 
 - [x] 两个新版同session TUI实时显示思考、工具与diff；真实MiniMax调用，无第二Gateway。

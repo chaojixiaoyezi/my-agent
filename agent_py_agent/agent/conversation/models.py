@@ -1,4 +1,6 @@
 
+# LLM: 本模块定义 canonical 会话状态；显示遥测不得进入模型上下文或替代 Compact/计费事实源。
+# 模块用途: 保存会话、消息、运行关联和独立数值快照的结构化协议。
 from __future__ import annotations
 
 import uuid
@@ -307,9 +309,9 @@ class ConversationCompactCommit:
 
 
 # LLM: ConversationThread is the sole durable authority for transcript, compact cursor/checkpoint,
-# provider context calibration, compact failure circuit, and the latest workspace projection; task
+# provider context calibration, display-only preflight usage, compact failure circuit, and the latest workspace projection; task
 # lifecycle remains in ThreadTaskLink.
-# 类用途: 保存一个用户会话的长期状态，其中压缩点、供应商真实上下文基线、连续失败和最近工作区投影随 thread 保留。
+# 类用途: 保存会话压缩点、模型校准和独立的最近上下文展示快照，任务运行状态仍由 task link 保存。
 @dataclass(frozen=True)
 class ConversationThread:
     thread_id: str
@@ -334,6 +336,9 @@ class ConversationThread:
     # every committed history rewrite clears it atomically with the compact cursor.
     # 字段用途: 保存上次模型真实看到的输入量，避免后台唤醒后丢失校准而反复提前压缩。
     provider_context_observation: dict[str, Any] = field(default_factory=dict)
+    # LLM: 最近 preflight 的纯数字显示记录，不是计费或校准权威；Compact 与此字段在同一原子提交清代。
+    # 字段用途: 让主/子代理空闲和重新打开后仍能展示最后一次调用前的上下文。
+    model_context_usage: dict[str, Any] = field(default_factory=dict)
     # LLM: LLM summary prose cannot be the authority for whether a compacted
     # assistant turn actually executed a side effect.  This bounded public
     # ledger is advanced atomically with the compact cursor and injected beside
@@ -353,9 +358,9 @@ class ConversationThread:
     runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: Persist v8 transcript/tool compact sources, provider calibration, guards, latest
+    # LLM: Persist v8 transcript/tool compact sources, provider calibration, numeric display usage, guards, latest
     # workspace projection and client cwd together.
-    # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典，并保存压缩来源、模型校准与客户端工作目录。
+    # 函数用途: 将会话状态与最近上下文数字一并写成 JSON，供重启恢复读取。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -364,9 +369,9 @@ class ConversationThread:
         payload["active_task_ids"] = list(self.active_task_ids)
         return payload
 
-    # LLM: Older records load with no provider calibration and zero live-tool compact sources;
+    # LLM: Older records load with no provider calibration/display usage and zero live-tool compact sources;
     # missing runtime facts are never inferred from summary prose.
-    # 函数用途: 兼容读取旧会话记录；缺少模型校准、工具压缩数、checkpoint、失败状态或客户端目录时使用安全空值。
+    # 函数用途: 读取旧会话时缺少上下文快照保持未知，不从校准数或历史正文推断显示数字。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
         bindings = data.get("channel_bindings")
@@ -407,6 +412,11 @@ class ConversationThread:
             provider_context_observation=(
                 data.get("provider_context_observation")
                 if isinstance(data.get("provider_context_observation"), dict)
+                else {}
+            ),
+            model_context_usage=(
+                data.get("model_context_usage")
+                if isinstance(data.get("model_context_usage"), dict)
                 else {}
             ),
             compact_operation_evidence=(

@@ -3697,9 +3697,13 @@ def _latest_thread_with_load_error(state: _BackgroundContextLoad) -> Conversatio
         return None
 
 
+# LLM: 最小模型上下文与完整 bundle 使用相同的显示排除边界；读取失败不能把 UI 遥测写进 prompt。
+# 函数用途: 提供缺少其它会话材料时的最小运行上下文，不包含 Context 展示数字。
 def _minimal_context_bundle(thread: ConversationThread) -> dict[str, Any]:
+    thread_payload = thread.to_dict()
+    thread_payload.pop("model_context_usage", None)
     return {
-        "thread": thread.to_dict(),
+        "thread": thread_payload,
         "messages": [],
         "tasks": [],
         "channel_bindings": [item.to_dict() for item in thread.channel_bindings],

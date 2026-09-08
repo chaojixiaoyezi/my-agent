@@ -1,5 +1,12 @@
 # Subagent Structure
 
+## R219 上下文快照与 Compact 同源
+
+`call_runtime` 在真实 preflight 写入 exact `agent_thread_id` 的 `ConversationThread.model_context_usage`。
+`context_usage` 只接受数字协议并验证 Compact generation；旧 stage_trace/run 属性的写读入口删除。
+名册和子页同次读取数字及代次，缺值用 `context_known=false` 显示破折号，不能把未知说成零 token。
+原 runner 阶段追踪继续刷新心跳，不改生命周期；显示字段从模型 bundle 排除，计费和校准继续用原账本。
+
 ## 独立模型选择入口
 
 `create_subagents.model` / `items[].model` → `create_policy.create_task_attributes` →
@@ -322,7 +329,7 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   Todo 展示关联。当前 active task 的 Todo 只含 canonical `id/title/status`。提示词、回复、工具
   活动/输出、路径、权限和 secret 均不进入该 schema。
 - 当前上下文 token 来自统一 provider preflight 的 `model_visible_context_usage.v1.current_tokens`，在每次
-  真实 child 模型调用前写入 exact run 的有界数字快照；不是累计账单 token。Compact 次数只读该 child
+  真实 child 模型调用前写入 exact agent thread 的有界数字快照；不是累计账单 token。Compact 次数只读该 child
   `agent_thread_id` 的 `ConversationThread.compact_generation`；transcript 旧段和运行中 native IR 都先提交
   同一 checkpoint/CAS 后才推进该数。控制面、TUI 和后续 Web 不得各算一套，缺失/损坏事实按空展示处理
   且不改变 run 状态。

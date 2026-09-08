@@ -11,7 +11,7 @@ the display cache into another lifecycle authority.
 # links and subagent runs to bounded public activity rows. It must never become
 # a lifecycle, authorization, retry, or completion authority.
 # 前台与后台 main 共用唯一数值/阶段投影，显式审批等待仍属于活动回合；历史正文和生命周期不得由此驱动。
-# 模块用途: 为 TUI 和后续 Web 提供同一份会话主任务与直属子代理状态快照。
+# 模块用途: 为 TUI/Web 投影主任务与子代理状态；上下文数字独立从各自 canonical thread 读取，不制造活动状态。
 
 from __future__ import annotations
 
@@ -24,10 +24,6 @@ from typing import Any
 from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
 from ..subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
-from ..subagents.services.control_plane_projection import (
-    runtime_compact_count,
-    runtime_context_token_count,
-)
 from ..task_progress import (
     read_task_progress_report,
     task_progress_display_identity,
@@ -39,6 +35,8 @@ from .agent_transcript import (
 )
 from .background_transcript import BackgroundTranscriptSink
 from .channels import project_user_reply, redact_host_absolute_paths
+from .context_usage import context_usage_from_thread
+from .context_usage import public_context_usage as _public_context_usage
 from .models import (
     THREAD_TASK_LINK_ACTIVE_STATUS,
     THREAD_TASK_LINK_INACTIVE_STATUSES,
@@ -52,16 +50,6 @@ _MAX_PROJECTED_GOALS = 16
 _ACTIVITY_TEXT_LIMIT = 240
 _AGENT_PROMPT_TEXT_LIMIT = 10_000
 _GOAL_OBJECTIVE_TEXT_LIMIT = 4_000
-_CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
-_CONTEXT_USAGE_TOKEN_FIELDS = (
-    "context_window_tokens",
-    "compact_trigger_tokens",
-    "current_tokens",
-    "prompt_tokens",
-    "messages_tokens",
-    "runtime_guidance_tokens",
-    "tool_schema_tokens",
-)
 _MAIN_ACTIVITY_STATE_ATTR = "_conversation_main_activity_projection"
 _MAIN_ACTIVITY_LOCK_ATTR = "_conversation_main_activity_projection_lock"
 _MAIN_ACTIVITY_SETUP_LOCK = threading.Lock()
@@ -350,12 +338,14 @@ def background_main_activity(
 
 # LLM: ConversationAgentActivity is an immutable, display-only projection. Lifecycle
 # decisions must continue to read ThreadTaskLink and SubAgentTask, never this snapshot.
-# 类用途: 汇总一个会话当前活跃主任务及其直属子代理，供 TUI 和后续 Web 共用。
+# 类用途: 汇总活跃主任务和子代理，另存不依赖任务是否活跃的最近上下文展示。
 @dataclass(frozen=True)
 class ConversationAgentActivity:
     active_task_count: int = 0
     compact_count: int = 0
     main_activity: dict[str, object] | None = None
+    context_usage: dict[str, object] | None = None
+    context_usage_projection_ok: bool = True
     goals: tuple[dict[str, object], ...] = ()
     subagents: tuple[dict[str, object], ...] = ()
     task_progress_items: tuple[dict[str, object], ...] = ()
@@ -370,13 +360,15 @@ class ConversationAgentActivity:
 
     # LLM: JSON output contains only bounded public fields; canonical task/run
     # records and load errors remain in their existing stores.
-    # 函数用途: 生成可直接由 Gateway 返回的有界 JSON 投影。
+    # 函数用途: 生成 Gateway 有界投影，空上下文表示没有本代快照，不表示上下文被删除。
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": _SCHEMA_VERSION,
             "active_task_count": max(0, int(self.active_task_count or 0)),
             "compact_count": max(0, int(self.compact_count or 0)),
             "main_activity": dict(self.main_activity or {}),
+            "context_usage": dict(self.context_usage or {}),
+            "context_usage_projection_ok": self.context_usage_projection_ok,
             "goals": [dict(row) for row in self.goals],
             "subagents": [dict(row) for row in self.subagents],
             "task_progress_items": [dict(row) for row in self.task_progress_items],
@@ -397,13 +389,13 @@ class ConversationAgentActivity:
 # LLM: This is the single read adapter from conversation task identity to direct
 # child run activity. It must not infer roots from prompt text or expose descendants
 # outside the active, already-authenticated thread.
-# 函数用途: 读取一个会话正在执行的任务，并列出这些任务直属子代理的实时状态。
+# 函数用途: 读取会话及直属子代理的状态，空闲也返回同代上下文数字，不启动或延长任务。
 def conversation_agent_activity(
     agent: object,
     store: object,
     thread_id: str,
 ) -> ConversationAgentActivity:
-    compact_count, compact_warnings = _conversation_compact_count(store, thread_id)
+    compact_count, context_usage, compact_warnings = _conversation_context_state(store, thread_id)
     goals, goal_warnings = _conversation_goal_rows(store, thread_id)
     active_links, link_warnings = _active_task_links(store, thread_id)
     workspace_task_id = _conversation_workspace_task_id(store, thread_id)
@@ -423,6 +415,8 @@ def conversation_agent_activity(
         return ConversationAgentActivity(
             active_task_count=0,
             compact_count=compact_count,
+            context_usage=context_usage,
+            context_usage_projection_ok=not compact_warnings,
             goals=tuple(goals),
             active_task_projection_ok=not link_warnings,
             goal_projection_ok=not goal_warnings,
@@ -470,6 +464,8 @@ def conversation_agent_activity(
     return ConversationAgentActivity(
         active_task_count=len(live_task_ids),
         compact_count=compact_count,
+        context_usage=context_usage,
+        context_usage_projection_ok=not compact_warnings,
         main_activity=main_activity,
         goals=tuple(goals),
         subagents=tuple(visible),
@@ -690,7 +686,8 @@ def conversation_agent_view(
     if manager is None or not selected:
         raise FileNotFoundError(selected or "subagent")
     task = manager.load(selected)
-    row = _subagent_row(agent, task, conversation_store=store)
+    context_state = _subagent_context_state(task, store)
+    row = _subagent_row(agent, task, conversation_store=store, context_state=context_state)
     rows, warnings = _child_subagent_rows(
         agent,
         task,
@@ -737,7 +734,7 @@ def conversation_agent_view(
                 task,
                 lifecycle_phase=str(row.get("lifecycle_phase") or ""),
             ),
-            "context_usage": _subagent_context_usage(task),
+            "context_usage": context_state[1],
         },
         "terminal": terminal,
         "children": rows[:_MAX_PROJECTED_SUBAGENTS],
@@ -771,23 +768,22 @@ def conversation_agent_view(
     }
 
 
-# LLM: The durable ConversationThread generation is the only main-agent compact counter;
-# display consumers must not count compact progress events or infer completions from text.
-# 函数用途: 从当前会话权威 thread 读取已经成功提交的 Compact 次数，读取失败只产生展示告警。
-def _conversation_compact_count(
+# LLM: generation 与数值从同一 thread 读取，旧代快照不得配上新代数；不从累计用量或活动文字推断。
+# 函数用途: 一次读取会话压缩次数及其最近上下文数字，空闲和重启后使用同一权威记录。
+def _conversation_context_state(
     store: object,
     thread_id: str,
-) -> tuple[int, list[str]]:
+) -> tuple[int, dict[str, object], list[str]]:
     loader = getattr(store, "load_thread_report", None)
     if not callable(loader):
-        return 0, []
+        return 0, {}, []
     try:
         thread, load_error = loader(thread_id)
     except Exception:
-        return 0, ["conversation_thread_unavailable"]
+        return 0, {}, ["conversation_thread_unavailable"]
     count = max(0, _safe_int(getattr(thread, "compact_generation", 0)))
     warnings = ["conversation_thread_load_error"] if load_error else []
-    return count, warnings
+    return count, context_usage_from_thread(thread) if not load_error else {}, warnings
 
 
 # LLM: active_task_ids is only a resumability index; every returned row is
@@ -1002,21 +998,6 @@ def _owner_runtime_root(agent: object) -> Path | None:
     return Path(root).expanduser().resolve(strict=False) if root else None
 
 
-# LLM: Numeric context sanitization mirrors the public Gateway contract. It
-# rejects the wrong schema and strips all content-bearing or unknown values.
-# 函数用途: 清洗后台 main 的实时上下文快照，只保留数字和协议标记。
-def _public_context_usage(value: object) -> dict[str, object]:
-    if not isinstance(value, dict) or value.get("schema") != _CONTEXT_USAGE_SCHEMA:
-        return {}
-    protocol = str(value.get("protocol") or "")
-    return {
-        "schema": _CONTEXT_USAGE_SCHEMA,
-        "estimated": value.get("estimated") is True,
-        **{key: max(0, _safe_int(value.get(key))) for key in _CONTEXT_USAGE_TOKEN_FIELDS},
-        "protocol": protocol if protocol in {"native", "text"} else "unknown",
-    }
-
-
 # LLM: Direct-child selection uses only root/parent/depth fields from canonical
 # SubAgentTask rows. A grandchild remains visible through its own parent surface,
 # not flattened into the main user's default list.
@@ -1218,13 +1199,15 @@ def _subagent_sort_key(task: object) -> tuple[int, float, str]:
 # LLM: This row exposes one bounded human-facing task description and numeric
 # live context usage, but still omits response, tool output, paths, permissions,
 # and runtime activity prose. Explicit covers ids support display joins only.
-# 函数用途: 把直属子代理压成界面需要的职责短标题、状态、上下文用量与 Todo 关联。
+# 函数用途: 生成子代理职责和状态；上下文与 Compact 次数使用同一次 thread 读取，避免混代。
 def _subagent_row(
     agent: object,
     task: object,
     *,
     conversation_store: object | None = None,
+    context_state: tuple[int, dict[str, object], list[str]] | None = None,
 ) -> dict[str, object]:
+    compact_count, context_usage, _ = context_state if context_state is not None else _subagent_context_state(task, conversation_store)
     status = str(getattr(task, "status", "") or "").strip().upper()
     lifecycle_phase = _subagent_lifecycle_phase(agent, task, status=status)
     return {
@@ -1241,11 +1224,9 @@ def _subagent_row(
         "lifecycle_phase": lifecycle_phase,
         "description": _subagent_description(task),
         "attempts": max(0, _safe_int(getattr(task, "runner_attempts", 0))),
-        "context_tokens": max(0, runtime_context_token_count(task)),
-        "compact_count": max(
-            0,
-            runtime_compact_count(task, conversation_store),
-        ),
+        "context_tokens": context_usage.get("current_tokens", 0),
+        "context_known": bool(context_usage),
+        "compact_count": compact_count,
         "progress_item_ids": _progress_item_ids(task),
         "created_at": max(0.0, _safe_float(getattr(task, "created_at", 0.0))),
         "updated_at": max(0.0, _safe_float(getattr(task, "updated_at", 0.0))),
@@ -1254,13 +1235,13 @@ def _subagent_row(
     }
 
 
-# LLM: The child context strip reuses the frozen provider-preflight schema and
-# strips every content-bearing or unknown attribute before HTTP/TUI exposure.
-# 函数用途: 读取一个子代理最近一次模型调用前的完整数字上下文快照。
-def _subagent_context_usage(task: object) -> dict[str, object]:
-    attrs = getattr(task, "attributes", None)
-    usage = attrs.get("model_visible_context_usage") if isinstance(attrs, dict) else None
-    return _public_context_usage(usage)
+# LLM: 子页和名册从同一 agent_thread_id 一次读取代次与数字；旧 run 属性不作为回退事实源。
+# 函数用途: 读取子代理最近上下文及其压缩代次，成功压缩后旧快照不可复活。
+def _subagent_context_state(task: object, store: object | None) -> tuple[int, dict[str, object], list[str]]:
+    thread_id = str(getattr(task, "agent_thread_id", "") or "").strip()
+    if not thread_id:
+        return 0, {}, []
+    return _conversation_context_state(store, thread_id)
 
 
 # LLM: Activity text is presentation-only and comes from typed tool/current-step

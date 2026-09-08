@@ -501,7 +501,7 @@ def _consume_background_transcript_projection(
 # LLM: The monitor may project only the typed conversation-agent snapshot built
 # from canonical task links and run records. Invalid values leave the current UI
 # unchanged instead of guessing activity from notice prose.
-# 函数用途: 将会话中的真实主任务与直属子代理状态更新到固定底部区域，并返回画面是否变化。
+# 函数用途: 更新主任务、子代理与独立上下文数字；数字读取失败保留旧帧，不能把未知当清空。
 def _publish_background_activity(
     tui_runtime: object,
     value: object,
@@ -541,6 +541,7 @@ def _publish_background_activity(
             {
                 "compact_count": compact_count,
                 "main_activity": value.get("main_activity"),
+                "context_usage": value.get("context_usage") if value.get("context_usage_projection_ok") is not False else None,
                 "goals": goals,
                 "subagents": subagents,
                 "task_progress": task_progress,

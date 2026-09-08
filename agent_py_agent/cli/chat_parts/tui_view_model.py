@@ -1152,8 +1152,8 @@ def _status_for_turn_event(status: TuiStatus, event: TuiEvent) -> TuiStatus:
     )
 
 
-# LLM: 数值状态合并只接受显式 payload 字段并保留无效值前的合法事实；context_usage 仅接受冻结 schema 的数字白名单。
-# 函数用途: 合并 token、工具轮次、实时上下文、活动和显示模式。
+# LLM: 数值仅取 typed payload；只有显式 context_usage_cleared 才撤下旧快照，坏 schema 不清合法数字。
+# 函数用途: 合并状态与最近上下文，空闲恢复显示数字，成功压缩后不保留压缩前的假读数。
 def _status_with_update(status: TuiStatus, event: TuiEvent) -> TuiStatus:
     context_usage = _context_usage_from_mapping(
         event.payload.get("context_usage"),
@@ -1164,6 +1164,11 @@ def _status_with_update(status: TuiStatus, event: TuiEvent) -> TuiStatus:
         status.context_tokens,
     )
     raw_context_usage = event.payload.get("context_usage")
+    if event.payload.get("compact_count") is not None and _nonnegative_int(event.payload["compact_count"], 0) < status.compact_count:
+        context_usage, context_tokens = status.context_usage, status.context_tokens
+        raw_context_usage = None
+    elif event.payload.get("context_usage_cleared") is True:
+        context_usage, context_tokens = None, 0
     if (
         context_usage is not None
         and isinstance(raw_context_usage, Mapping)
@@ -1337,6 +1342,7 @@ _PUBLIC_SUBAGENT_FIELDS = frozenset(
         "description",
         "attempts",
         "context_tokens",
+        "context_known",
         "compact_count",
         "progress_item_ids",
         "created_at",

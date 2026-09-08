@@ -1,5 +1,17 @@
 # TESTS
 
+## R219 Context 统一与具体审批拒绝
+
+主/子精确thread、空闲恢复、Compact清代/旧代拒绝、读取失败保帧、owner隔离、模型bundle字节稳定、
+真实preflight同口径和未知不冒充零均有定向覆盖。相关14文件324 passed；不跑全仓pytest。
+`test_conversation_context_usage.py` 的六个修前失败包含真实TUI问题对应的空闲数字丢失；新增API缺失的
+失败仅为实现驱动，不能冒充六个线上bug。真实Context恢复与Gateway重启还未验收。
+
+真实拒绝证据在 `r219-tui/evidence-waiting.json`、`evidence-denied.json`、`evidence-final.json`，
+session sess_1788889170_9f196206，request gwreq-1788889366-68da42889e844b038c15b9094577072b。
+唯一审批 approval:c0d1f5f4ac740a987867e7e3 由原TUI拒绝，handler_executed=false，operation不存在。
+观察页无额外审批框，原请求完成后两页静止；模型改用脚本并夸大交互验证，不能按done记为业务合格。
+
 ## R218 原记录真实复验
 
 源码82da8d1，wheel SHA256 `de6ab4f7cc18dcff1c89cc144d8c6d4a0c6215ba4c2fb5d530a734a0a0f7dbca`，

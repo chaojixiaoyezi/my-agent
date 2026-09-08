@@ -15,6 +15,7 @@ from ...contracts.model_call_ledger import (
     ModelCallStartedParams,
     ModelCallTimeoutParams,
 )
+from ...conversation.context_usage import record_model_context_usage
 from ...memory_archive import estimate_tokens
 from ..tool_stream import ToolBoundaryChunkFilter
 from .call_monitor import (
@@ -33,7 +34,7 @@ from .usage import (
 )
 
 # LLM: 本模块把 provider/model 生命周期写入唯一 ModelCallLedger，并只投影结构化计数与超时事实。
-# 模块用途: 连接一次真实模型调用与账本、动态超时、流式活动观测和最终统计。
+# 模块用途: 连接真实调用与账本、超时、流式观测和统计；主/子 preflight 数字统一保存到各自会话。
 
 
 # LLM: The caller may pass the exact precomputed context snapshot so timeout, ledger, TUI and
@@ -94,10 +95,8 @@ def start_model_call_record(
     return ledger, call_id, estimate
 
 
-# LLM: Live context display is an optional typed sink capability for durable
-# task turns only. Missing/isolated capabilities stay silent; raw prompts,
-# messages, guidance, and tool schemas must never be passed to the sink.
-# 函数用途: 在真实任务调用开始前投影无正文 token 快照；临时表达轮只计费、不覆盖任务界面。
+# LLM: 真实工作片先持久化同一 numeric preflight 再投影，主/子都绑定 exact thread；隔离表达轮不覆盖。
+# 函数用途: 在调用开始前保存并展示上下文数字，让空闲恢复不依赖仍在 Working 或内存里的旧帧。
 def _publish_model_context_usage(
     request: object,
     usage: dict[str, object],
@@ -105,7 +104,7 @@ def _publish_model_context_usage(
     params = getattr(request, "params", None)
     if not _context_usage_projection_enabled(params):
         return False
-    _publish_subagent_context_usage(request, usage)
+    record_model_context_usage(getattr(request, "agent", None), params, usage)
     sink = getattr(params, "effective_on_chunk", None)
     writer = getattr(sink, "write_context_usage", None)
     if not callable(writer):
@@ -119,29 +118,6 @@ def _publish_model_context_usage(
 # 函数用途: 阻止临时表达轮把真实主任务的上下文数字覆盖成一个很小的假读数。
 def _context_usage_projection_enabled(params: object) -> bool:
     return str(getattr(params, "context_scope", "") or "").strip().lower() != "isolated"
-
-
-# LLM: A task-local runner has no foreground TUI sink, so its provider-visible
-# context snapshot must cross the process boundary through the canonical child
-# run record. The runner trace accepts numbers only and never receives prompt,
-# messages, tool schemas, or guidance text.
-# 函数用途: 每次子代理真正调用模型前，把当前上下文总 token 写入该 run 的只读展示快照。
-def _publish_subagent_context_usage(
-    request: object,
-    usage: dict[str, object],
-) -> None:
-    from ..runner.stage_trace import (
-        RunnerModelContextUsageTraceRequest,
-        trace_runner_model_context_usage,
-    )
-
-    trace_runner_model_context_usage(
-        RunnerModelContextUsageTraceRequest(
-            agent=getattr(request, "agent", None),
-            params=getattr(request, "params", None),
-            usage=usage,
-        )
-    )
 
 
 # LLM: The model ledger owns token/first-event accounting. An optional status callback receives

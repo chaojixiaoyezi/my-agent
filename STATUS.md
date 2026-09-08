@@ -1,5 +1,15 @@
 # STATUS
 
+## R219 审批拒绝真 TUI 分项通过；Context 统一修复待部署
+
+- ma-r219-110-deny / -view，owner p0-r219-deny：精确审批拒绝后工具回执为 APPROVAL_REJECTED、
+  handler_executed=false，执行账没有该 operation；原 request 继续并 done，两页不再 Working。
+- 同一任务12次MiniMax、0重试，输入96806/cache-read347302/输出6430。开发者等待选择约2296.7秒，
+  不能把该人工等待计成模型响应慢。模型改用脚本后夸大交互验证，独立记录为报告质量待修，不算业务通过。
+- 空闲恢复缺 Context 已本地修复：主/子同一 preflight 数字写入各自 thread，Compact 原子清代，
+  数字不驱动 Working，模型 bundle 不含该显示字段；子页和名册同次读取代次与数字。324 focused通过。
+- 尚未部署/真 TUI 复验本片 Context；旧记录缺快照不猜数，完整P0/P1、提交前崩溃过程、跨模型child仍开放。
+
 ## R218 客户端真实历史复验通过
 
 - `82da8d1` 独立非editable客户端，tmux `ma-r218-110-live-resume`；Gateway保持R217/3593187，未重启、未换默认launcher。

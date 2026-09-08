@@ -1,5 +1,12 @@
 # Gateway Structure
 
+## R219 代次化 Context
+
+`call_runtime` 在同一 preflight 保存公开数字到 `ConversationThread.model_context_usage`；
+`context_usage` 共用 schema 清洗、exact thread 与 generation 检查，`store.update_compact_state` 原子清除。
+`agent_activity` 独立投影 main 数字，child 名册/详情共用同次读取；`tui_threading/runtime/view_model` 区别
+未知字段、显式清空和读取失败。不触发模型调用、不延长活动、不读取另一 owner；模型 bundle 主/最小路径排除字段。
+
 ## R218 工具预览的唯一投影
 
 `_structured_tool_progress` 已在各阶段保留脱敏 detail；`BackgroundTranscriptSink` 与 TUI adapter 均直接转发。

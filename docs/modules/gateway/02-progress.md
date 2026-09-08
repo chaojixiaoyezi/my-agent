@@ -1,5 +1,11 @@
 # Gateway Progress
 
+## R219 最近上下文独立于 Working（本地修复中）
+
+主/子使用同一 preflight 数字记录到精确 thread，空闲 activity 单独返回 context_usage；成功 Compact 原子清代。
+客户端区别显式空与读取失败，旧代迟到不覆盖新值；完整/最小模型 bundle 均排除遥测，不能影响缓存前缀。
+原 R219 具体工具拒绝 TUI 已返回，未启动被拒绝 PTY；报告仍夸大交互验证，单列质量缺口。Context 真 TUI 待验。
+
 ## R218 客户端复验通过，Gateway未重启
 
 82da8d1独立客户端恢复R217真实任务：8条Bash标题、Ctrl+O头尾与原页一致；canonical消息/用量未变。

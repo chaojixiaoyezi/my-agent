@@ -1,4 +1,6 @@
 
+# LLM: 控制面只是 canonical task/thread 的查询投影；数字上下文由会话层读取，不回读旧 run 属性。
+# 模块用途: 同步子代理身份、阶段和压缩代次到 SQLite 查询表，不调度或修改业务状态。
 from __future__ import annotations
 
 """sync subagent task state into LocalStore runtime control-plane tables.
@@ -95,26 +97,6 @@ def _agent_conversation_thread(
     except Exception:
         return None
     return thread if error is None else None
-
-
-# LLM: The child-row token value is the latest canonical provider-visible
-# context snapshot, not cumulative billing usage. It is written before each real
-# model call and read only from the exact run's structured attributes.
-# 函数用途: 读取子代理当前上下文总 token，每次新的模型调用前都会刷新。
-def runtime_context_token_count(task: SubAgentTask) -> int:
-    attrs = getattr(task, "attributes", None)
-    usage = attrs.get("model_visible_context_usage") if isinstance(attrs, dict) else None
-    if not isinstance(usage, dict):
-        return 0
-    if str(usage.get("schema") or "") != "model_visible_context_usage.v1":
-        return 0
-    value = usage.get("current_tokens")
-    if isinstance(value, bool):
-        return 0
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
 
 
 def _agent_run_metadata(task: SubAgentTask) -> dict[str, object]:

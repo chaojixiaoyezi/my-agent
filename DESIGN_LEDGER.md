@@ -1,5 +1,15 @@
 # DESIGN LEDGER
 
+## 2026-09-08 最近上下文快照独立于执行活动【状态：R219 修复中，真实 TUI 待验】
+
+R217/R218 真实恢复页没有 Context，原因是数字只挂在易失 main_activity 下，空闲时正确清除主活动却同时
+失去数字；不能因此保留假 Working。对照 会话运行时 持久 TokenCount 与独立 set_token_info，终端交互 从
+Compact 边界后的最近 API 消息读取用量。主/子统一将已有 preflight 数字快照保存到各自精确
+ConversationThread，不重新估算历史，不从累计计费或校准值反推；旧 child run 属性不再作数字事实源。
+显示记录与 provider 校准、计费分离，带 Compact generation；成功 Compact 原子清除，迟到旧代写入拒绝。
+缺记录保持未知，不伪造旧值；TUI 空闲投影不驱动 Working/Todo、调度或额外模型请求。
+需验证同 owner 多 thread、主/子、代次、隔离调用、重连/重启及零额外 provider 调用；仅定向通过不得封板。
+
 ## 2026-09-08 工具历史保留公开调用预览【状态：R218 客户端真实复验通过】
 
 R217 三页真实 TUI 验证中，原页和在线观察页有 `Bash(命令)`，重新 resume 后八条命令均只剩 `Bash`。

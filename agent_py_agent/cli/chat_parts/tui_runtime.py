@@ -388,13 +388,14 @@ class _TuiTaskProgressProjection:
 
 # LLM: Controller state is replaced atomically under the owning runtime lock so
 # activity rows, Todo projection, counters, and visibility cannot mix poll frames.
-# 类用途: 保存底部 Working 区一次完整、已清洗的界面状态。
+# 类用途: 保存 Working 区与独立上下文数值；数字已知不代表后台任务仍活跃。
 @dataclass(frozen=True)
 class _TuiBackgroundActivityState:
     count: int = 0
     started_at: float = 0.0
     compact_count: int = 0
     main_activity: dict[str, object] = field(default_factory=dict)
+    context_usage: dict[str, object] | None = None
     goals: tuple[dict[str, object], ...] = ()
     subagents: tuple[dict[str, object], ...] = ()
     task_progress: _TuiTaskProgressProjection = field(
@@ -440,6 +441,7 @@ class _TuiBackgroundActivityController:
         block_id = f"background-activity:{owner.session_id}"
         with owner._lock:
             current = self._state
+            current = replace(current, compact_count=max(current.compact_count, owner.store.snapshot().status.compact_count))
             next_state = _next_background_activity_state(current, count, snapshot)
             if next_state == current:
                 return False
@@ -519,6 +521,7 @@ _SUBAGENT_ACTIVITY_FIELDS = frozenset(
         "description",
         "attempts",
         "context_tokens",
+        "context_known",
         "compact_count",
         "progress_item_ids",
         "created_at",
@@ -546,7 +549,7 @@ _GOAL_ACTIVITY_FIELDS = frozenset(
 # LLM: Poll snapshots are normalized as one frame. Missing fields retain active
 # values only where the prior contract did; invalid subagent/progress projections
 # cannot clear a known-good frame.
-# 函数用途: 将一次 Gateway/本地活动轮询整理成下一份原子底部状态。
+# 函数用途: 整理同一轮询帧，旧 Compact 代的迟到数字不覆盖当前快照，空闲数字不扩大活动谓词。
 def _next_background_activity_state(
     current: _TuiBackgroundActivityState,
     count: int,
@@ -593,6 +596,12 @@ def _next_background_activity_state(
         started_at=current.started_at,
         compact_count=compact_count,
         main_activity=main_activity,
+        context_usage=(
+            _normalize_context_usage(snapshot["context_usage"])
+            if isinstance(snapshot.get("context_usage"), Mapping)
+            and (snapshot.get("compact_count") is None or _nonnegative_int(snapshot["compact_count"]) >= current.compact_count)
+            else current.context_usage
+        ),
         goals=goals,
         subagents=subagents,
         task_progress=task_progress,
@@ -618,13 +627,14 @@ def _normalize_task_progress_projection(
     )
 
 
-# LLM: Event payload construction reads one immutable state and exposes only the
-# same bounded public fields accepted by the reducer.
-# 函数用途: 将底部 Working 状态转换成单条 typed TUI 事件。
+# LLM: 数字与活动独立，canonical 空字典显式撤下旧快照；没有新字段的快照不清除已知数字。
+# 函数用途: 将活动和最近上下文转换为同帧 typed 事件，空闲数字不制造 Working。
 def _background_activity_payload(
     state: _TuiBackgroundActivityState,
 ) -> dict[str, object]:
-    context_usage = state.main_activity.get("context_usage")
+    context_usage = state.context_usage
+    if context_usage is None:
+        context_usage = state.main_activity.get("context_usage")
     return {
         "active_task_count": state.count,
         "compact_count": state.compact_count,
@@ -634,6 +644,7 @@ def _background_activity_payload(
         "subagents": [dict(row) for row in state.subagents],
         **_task_progress_payload(state.task_progress),
         "hidden_subagent_count": state.hidden_subagent_count,
+        "context_usage_cleared": state.context_usage == {},
         **(
             {"context_usage": dict(context_usage)}
             if isinstance(context_usage, dict)

@@ -1,5 +1,11 @@
 # Subagent Progress
 
+## R219 主/子上下文统一（本地修复中）
+
+删除 runner trace 的旧 run 属性数字写入与读取；统一在模型 preflight 写入该 child 的 agent_thread_id。
+阶段/心跳仍走原 trace。主列表和 child 详情从同次 thread 读取数字及 Compact 代数，不再混代；缺值显示未知。
+成功 Compact 清掉旧代快照，下一次调用重建；不迁移猜测旧数字，真实子页/恢复组合仍待验。
+
 ## R214 可选独立模型（本地实现，真实 child 待验）
 
 对照 会话运行时 spawn 的父配置继承与创建前显式模型覆盖；model 可填写本 owner /model 新增配置的精确名称或 ID。

@@ -155,9 +155,10 @@ def test_start_record_native_accounting_matches_unified() -> None:
 
 
 def test_start_record_persists_live_context_total_for_subagent(tmp_path: Path) -> None:
-    """The same preflight total used by the provider is projected to the exact child run."""
+    """The exact child thread stores the same preflight total; run attributes no longer own it."""
     from dataclasses import replace
 
+    from agent_py_agent.agent.conversation.store import ConversationStore
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 
     agent = _agent(protocol="native")
@@ -168,14 +169,17 @@ def test_start_record_persists_live_context_total_for_subagent(tmp_path: Path) -
     manager.save(task)
     agent.subagents = manager
     agent._current_subagent_run_id = task.id
-    params = replace(_params(protocol="native", prompt=PROMPT), run_id=task.id)
+    agent.conversation_store = ConversationStore(tmp_path / "conversations")
+    thread = agent.conversation_store.get_or_create_thread({"canonical_user_id": "child", "channel_conversation_id": task.id})
+    params = replace(_params(protocol="native", prompt=PROMPT), run_id=task.id, task_attributes={"agent_thread_id": thread.thread_id})
 
     recorded = _recorded_input_tokens(agent, params, PROMPT)
-    usage = manager.load(task.id).attributes["model_visible_context_usage"]
+    usage = agent.conversation_store.load_thread(thread.thread_id).model_context_usage
 
     assert usage["schema"] == "model_visible_context_usage.v1"
     assert usage["current_tokens"] == recorded
-    assert usage["updated_at"] > 0
+    assert usage["compact_generation"] == 0
+    assert "model_visible_context_usage" not in manager.load(task.id).attributes
 
 
 def test_start_record_native_accounting_scales_with_ir() -> None:

@@ -1,6 +1,6 @@
 # LLM: Canonical conversation persistence owns messages and execution claims; recovery ownership
 # is structured and atomic, and never inferred from model text. Check Gateway terminal cleanup.
-# 模块用途: 保存会话、消息及执行归属；前台恢复专属租约须由原请求继续或在终态释放。
+# 模块用途: 保存会话、消息、代次化上下文展示及执行归属；前台恢复专属租约须由原请求继续或在终态释放。
 """Conversation store for threads, messages, tasks, observations, guidance,
 wake signals, progress policies, and background claims.
 """
@@ -684,8 +684,8 @@ class ConversationThreadStore(ConversationBaseStore):
             ),
         )
 
-    # LLM: One CAS advances transcript and live-tool source totals with the same summary/checkpoint.
-    # 函数用途: 原子提交一次会话压缩，并同时保存累计消息数和工具往返数。
+    # LLM: One CAS advances transcript/live-tool totals and clears both prior-generation calibration and display usage.
+    # 函数用途: 原子提交压缩及累计来源，清除旧代上下文显示和校准，不改写原始消息。
     def update_compact_state(
         self,
         thread_id: str,
@@ -723,6 +723,7 @@ class ConversationThreadStore(ConversationBaseStore):
                 compact_failure_updated_at=0.0,
                 compact_failure_code="",
                 provider_context_observation={},
+                model_context_usage={},
                 updated_at=current,
             )
 
@@ -1560,7 +1561,31 @@ def _updated_task_link(
     )
 
 
+# LLM: 模型计费事件与 preflight 显示分别保存，各自有唯一口径；共享 store 原子写入，不新增旁路文件。
+# 类用途: 保存模型调用的消耗账及最近上下文显示，后者不能作为费用或任务完成证据。
 class ConversationModelUsageStore(ConversationMessageStore):
+    # LLM: 显示快照只接受纯数字协议；generation CAS 防止压缩后写回旧数，不更新会话活跃时间或聊天历史。
+    # 函数用途: 原子保存当前主/子代理最近一次调用前的上下文，失败或旧代不能覆盖当前值。
+    def update_model_context_usage(
+        self,
+        thread_id: str,
+        usage: dict[str, Any],
+        *,
+        expected_compact_generation: int,
+    ) -> ConversationThread:
+        from .context_usage import public_context_usage
+
+        public = public_context_usage(usage)
+
+        def apply(thread: ConversationThread) -> ConversationThread:
+            if not public or thread.compact_generation != expected_compact_generation:
+                return thread
+            return replace(thread, model_context_usage={
+                **public, "compact_generation": expected_compact_generation,
+            })
+
+        return self._update_thread_atomic(thread_id, apply)
+
     # LLM: This is the one durable per-thread usage append. The event id is a
     # host-generated idempotency key; conflicting reuse fails closed instead of
     # silently changing historical cost facts.
@@ -5830,6 +5855,8 @@ class ConversationStore(ConversationClaimStore):
         bundle, _load_errors = self.context_bundle_report(thread_id, recent_limit=recent_limit)
         return bundle
 
+    # LLM: 模型上下文只投影会话内容和运行事实，model_context_usage 仅供 UI，不得扰动缓存前缀。
+    # 函数用途: 读取会话上下文及加载错误，排除展示遥测，原持久 thread 完整保留。
     def context_bundle_report(
         self,
         thread_id: str,
@@ -5846,8 +5873,10 @@ class ConversationStore(ConversationClaimStore):
             "thread", thread_id, limit=recent_limit
         )
         goals, goal_error = self.load_goals_report(thread_id)
+        thread_payload = thread.to_dict()
+        thread_payload.pop("model_context_usage", None)
         return {
-            "thread": thread.to_dict(),
+            "thread": thread_payload,
             "messages": [item.to_dict() for item in messages],
             "tasks": [item.to_dict() for item in tasks],
             "channel_bindings": [item.to_dict() for item in thread.channel_bindings],

@@ -655,7 +655,7 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
     store = SimpleNamespace(
         root=tmp_path,
         load_thread_report=lambda _thread_id: (
-            SimpleNamespace(compact_generation=1),
+            SimpleNamespace(compact_generation=1, model_context_usage={**usage, "compact_generation": 1}),
             None,
         ),
         recent_messages_report=lambda _thread_id, *, limit: (
@@ -740,6 +740,10 @@ def test_conversation_agent_activity_reads_child_thread_generation_only(
         load_thread_report=lambda thread_id: (
             SimpleNamespace(
                 compact_generation=(2 if thread_id == task.agent_thread_id else 0),
+                model_context_usage=(
+                    {"schema": "model_visible_context_usage.v1", "current_tokens": 12_345, "compact_generation": 2}
+                    if thread_id == task.agent_thread_id else {}
+                ),
                 compact_checkpoint_id=(
                     "compact-child-2" if thread_id == task.agent_thread_id else ""
                 ),

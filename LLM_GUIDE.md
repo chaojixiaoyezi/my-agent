@@ -21,6 +21,10 @@
 
 ## 2026-08-23 当前运行基线
 
+- 主/子上下文显示统一从各自 ConversationThread.model_context_usage 读取同代 preflight 数字，不依赖活跃
+  main_activity，也不回读旧 child 属性。成功 Compact 同一 CAS 清除；空闲恢复不额外调用模型，不显示假 Working。
+  该遥测必须排除于完整/最小模型 context bundle，不能扰动缓存；缺快照是未知，不从累计计费或校准值猜测。
+
 - 工具标题在唯一显示 metadata 层从已有公开 detail 投影；实时与恢复共用，显式 invocation 优先。
   不因缺 started 事件丢掉命令预览，不回读原参数、不修改旧 canonical 历史或增加模型调用。
 
