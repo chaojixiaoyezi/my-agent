@@ -3923,3 +3923,13 @@ my-agent scenario-test
 - 当前相关五文件 focused 运行到 100% 通过；PyCompile、Ruff、strict code-size（hard=0）已通过。尚未部署，
   下一步构建 wheel 后用 fresh R130 TUI 再做相同安全点重启，并核对文件摘要、operation 数、attempt generation、
   Compact、最终回复与单 Gateway 身份。
+## R217 前台实时过程本地已接通，真实 TUI 尚未验收
+
+- 已接通思考、工具、候选回复、重连、Compact 和插话消费；同一 final/repair 保存公开过程快照。
+  原页精确请求去重，观察页最终块原子接替半句；取消/异常清显示而不伪造工具成功或任务终态。
+- 定向测试发现并修复接收顺序：先 canonical 用户/完整消息，再补未被覆盖的增量，避免思考先于提问。
+  初组137、扩大后349 focused通过（正常/延迟补交均覆盖）；严格尺寸检查无 hard，未跑全仓pytest。
+- 原 R216 会话已完成七 child 游戏任务及一次网络追问；真实进程仍监听 0.0.0.0:9090、本机 HTTP 200，
+  但开发机外部连接失败。游戏质量和 LAN 可达未通过；DUT 追问仅据本机访问就排除服务端，结论不充分。
+- 当前部署仍是 R216；R217 待完整定向回归与严格 gate 后升级唯一 Gateway，保留旧 TUI/原任务和配置。
+- 本地 Ruff、doc sync、diff、clean-package 已通过；线上 CI 未作为验收来源，尚未推送远端。

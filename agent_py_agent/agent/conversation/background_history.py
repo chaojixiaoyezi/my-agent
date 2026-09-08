@@ -68,8 +68,8 @@ class BackgroundTurnHistory:
             }
 
 
-# LLM: 完整快照必须与 canonical 行的 exact thread/task/request 身份相符；不完整或畸形快照不能抑制实时事件。
-# 函数用途: 校验消息中的展示快照，缺少新字段的旧历史继续按已有消息/native 内容恢复。
+# LLM: 完整快照必须匹配 canonical thread 和显示 request；后台校验 task，前台校验精确 Gateway 请求而非缺省 task。
+# 函数用途: 校验已提交显示片及候选替换编号；畸形快照不能隐藏增量或删除其它片的候选块。
 def background_display_turn_from_row(row: object) -> dict | None:
     metadata = getattr(row, "metadata", None)
     if not isinstance(metadata, dict) or metadata.get("assistant_part_id") != "final":
@@ -78,15 +78,22 @@ def background_display_turn_from_row(row: object) -> dict | None:
     if not isinstance(value, dict):
         return None
     request_id = str(value.get("request_id") or "")
+    gateway_id = value.get("gateway_request_id")
+    foreground = isinstance(gateway_id, str) and bool(gateway_id) and not metadata.get("background_delivery_reason")
+    if gateway_id is not None and not foreground:
+        return None
     if (
         value.get("schema_version") != BACKGROUND_DISPLAY_TURN_SCHEMA
         or value.get("complete") is not True
         or value.get("thread_id") != getattr(row, "thread_id", "")
-        or value.get("task_id") != metadata.get("task_id")
+        or (gateway_id != metadata.get("gateway_request_id") if foreground else value.get("task_id") != metadata.get("task_id"))
         or not request_id.startswith(f"bg-main:{value['thread_id']}:")
         or request_id != metadata.get("background_transcript_request_id")
         or not isinstance(value.get("events"), list)
     ):
+        return None
+    replacement = value.get("live_final_block_id")
+    if replacement is not None and (not foreground or not isinstance(replacement, str) or not replacement.startswith(f"{request_id}:assistant:")):
         return None
     seen = set()
     for event in value["events"]:

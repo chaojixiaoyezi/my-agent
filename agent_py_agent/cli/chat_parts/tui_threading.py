@@ -203,7 +203,7 @@ def _consume_background_notices(
 # process-event cursor paired with its stream identity. Only a new stream can reset the event
 # sequence; canonical message offsets never rewind. Typed activity controls poll cadence.
 # Invalid responses enter the existing exponential backoff without clearing display state.
-# 函数用途: 从单 Gateway 拉取活动、过程事件和最终回复，并记录下一轮是否需要秒级刷新。
+# 函数用途: 先按 canonical 顺序收用户/完整消息，再补未覆盖的易失过程；避免思考先于用户输入或 final 重复。
 def _consume_gateway_background_snapshot(
     agent: object,
     session_id: str,
@@ -246,15 +246,6 @@ def _consume_gateway_background_snapshot(
         or "active_task_count" in payload
         else False
     )
-    transcript_ok, transcript_changed = _consume_background_transcript_projection(
-        tui_runtime,
-        payload.get("transcript_events"),
-        payload.get("event_cursor"),
-        event_cursor,
-        stream_id=payload.get("event_stream_id"),
-    )
-    if not transcript_ok:
-        return False
     raw = payload.get("notices")
     cursor = payload.get("cursor")
     if not isinstance(raw, list) or type(cursor) is not int or cursor < message_after:
@@ -265,6 +256,15 @@ def _consume_gateway_background_snapshot(
     for row in fresh:
         if not _publish_background_notice_row(tui_runtime, row, seen):
             return False
+    transcript_ok, transcript_changed = _consume_background_transcript_projection(
+        tui_runtime,
+        payload.get("transcript_events"),
+        payload.get("event_cursor"),
+        event_cursor,
+        stream_id=payload.get("event_stream_id"),
+    )
+    if not transcript_ok:
+        return False
     tui_runtime.background_message_cursor = cursor
     agent_view_ok, agent_view_changed = _consume_selected_agent_view(
         agent,

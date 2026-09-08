@@ -4,7 +4,7 @@
 # ring. Child callers may replace the event writer with their durable bounded JSONL;
 # main 同时按块保留完整工作片快照，最终由 canonical 消息提交；两条投影都不拥有生命周期或权限。
 # 易失游标必须与当前 Agent 的 stream_id 配对，重建 Agent 后不能用旧进程序号跳过新事件。
-# 模块用途: 将后台主代理或子代理的思考、工具、diff 和 typed 截断说明转成同一展示事件，供 TUI/Web 增量读取。
+# 模块用途: 将主/子代理公开过程转成同一展示事件；前台仅附精确宿主请求关联，供原页去重。
 
 from __future__ import annotations
 
@@ -40,7 +40,11 @@ _TRANSCRIPT_SETUP_LOCK = threading.Lock()
 BACKGROUND_TRANSCRIPT_EVENT_KINDS = frozenset(
     {
         "active_turn_input_consumed",
+        "assistant_started",
+        "assistant_delta",
+        "assistant_discarded",
         "assistant_completed",
+        "transcript_stream_closed",
         "thinking_started",
         "thinking_delta",
         "thinking_completed",
@@ -94,6 +98,18 @@ _CONTEXT_COMPACTION_FIELDS = frozenset(
         "preserved_pairs",
     }
 )
+
+
+# LLM: 仅聚合宿主已解析的显示来源；不自行查找 owner/请求，也不参与任务或权限判断。
+# 类用途: 把会话、任务、显示片及可选前台请求作为一组传给共享事件环，避免长参数表错位。
+@dataclass(frozen=True)
+class TranscriptSource:
+    thread_id: str
+    task_id: str
+    request_id: str
+    gateway_request_id: str = ""
+
+
 # LLM: One thread state owns only a monotonic display cursor and a bounded ring.
 # Clearing retained rows for a new task must not reset either sequence counter.
 # 类用途: 保存一个会话当前任务的易失展示事件和连续游标。
@@ -152,7 +168,7 @@ class _ThinkingDeltaBatcher:
 class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressSinkMixin):
     # LLM: Construction allocates one display-only turn identity; canonical task
     # and thread ids are inputs, while the generated request id is not authority.
-    # 函数用途: 为一次后台续轮创建事件块编号和完整块快照；child 的耐久 writer 继续自行保存。
+    # 函数用途: 为一片公开过程创建编号和完整快照；可选前台请求号只供显示去重，child writer 保持原合同。
     def __init__(
         self,
         agent: object,
@@ -161,13 +177,13 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         task_id: str,
         request_id: str = "",
         event_writer: object | None = None,
+        gateway_request_id: str = "",
     ) -> None:
         self.agent = agent
         self.thread_id = str(thread_id or "").strip()
         self.task_id = str(task_id or "").strip()
-        self._event_writer = (
-            event_writer if callable(event_writer) else append_background_transcript_event
-        )
+        self.gateway_request_id = gateway_request_id
+        self._event_writer = event_writer if callable(event_writer) else None
         self.request_id = str(request_id or "").strip() or begin_background_transcript_turn(
             agent,
             thread_id=self.thread_id,
@@ -485,7 +501,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
 
     # LLM: Every event append keeps the writer's exact canonical thread/task and
     # generated display request identity; callers cannot substitute another run.
-    # 函数用途: 先保留完整展示块，再发布临时增量；传输失败不能抹掉最终可恢复的过程。
+    # 函数用途: 先保留完整块再发布增量；前台携带精确请求关联，旧 child writer 不被强加新参数。
     def _event(
         self,
         kind: str,
@@ -496,16 +512,13 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         if self._display_history is not None:
             self._display_history.record(kind, phase, block_id, payload)
         try:
-            self._event_writer(
-                self.agent,
-                thread_id=self.thread_id,
-                task_id=self.task_id,
-                request_id=self.request_id,
-                kind=kind,
-                phase=phase,
-                block_id=block_id,
-                payload=payload,
-            )
+            event = {"kind": kind, "phase": phase, "block_id": block_id, "payload": payload}
+            if self._event_writer is None:
+                append_background_transcript_event(
+                    self.agent, source=TranscriptSource(self.thread_id, self.task_id, self.request_id, self.gateway_request_id), **event,
+                )
+            else:
+                self._event_writer(self.agent, thread_id=self.thread_id, task_id=self.task_id, request_id=self.request_id, **event)
         except (OSError, RuntimeError, TypeError, ValueError):
             # 展示投影丢失不能把真实模型轮变成失败；canonical transcript、task
             # lifecycle 和工具结果仍由各自权威存储收口。
@@ -641,20 +654,18 @@ def begin_background_transcript_turn(
 # LLM: Append accepts only the frozen public event vocabulary and scalar
 # identities. Payloads are deep-copied because tool display dictionaries remain
 # mutable in the executing thread; no event can affect task or transcript state.
-# 函数用途: 向指定会话追加一条有界后台展示事件并返回新游标。
+# 函数用途: 追加有界会话展示事件；可选宿主请求号只用于客户端能力过滤和原页去重，不授权执行。
 def append_background_transcript_event(
     agent: object,
     *,
-    thread_id: str,
-    task_id: str,
-    request_id: str,
+    source: TranscriptSource,
     kind: str,
     phase: str,
     block_id: str,
     payload: Mapping[str, object] | None = None,
 ) -> int:
-    thread_key = str(thread_id or "").strip()
-    request_key = str(request_id or "").strip()
+    thread_key = str(source.thread_id or "").strip()
+    request_key = str(source.request_id or "").strip()
     block_key = str(block_id or "").strip()
     event_kind = str(kind or "").strip()
     event_phase = str(phase or "").strip()
@@ -666,7 +677,7 @@ def append_background_transcript_event(
         or event_phase not in BACKGROUND_TRANSCRIPT_EVENT_PHASES
     ):
         return 0
-    task_key = str(task_id or "").strip()
+    task_key = str(source.task_id or "").strip()
     lock = _background_transcript_lock(agent)
     with lock:
         rows = _background_transcript_rows(agent)
@@ -689,6 +700,7 @@ def append_background_transcript_event(
             "phase": event_phase,
             "block_id": block_key,
             "payload": copy.deepcopy(dict(payload or {})),
+            **({"gateway_request_id": source.gateway_request_id} if source.gateway_request_id else {}),
         }
         if len(state.events) >= BACKGROUND_TRANSCRIPT_MAX_EVENTS and state.events:
             state.truncated_through_seq = max(
@@ -793,6 +805,7 @@ __all__ = [
     "BACKGROUND_TRANSCRIPT_EVENT_PHASES",
     "BACKGROUND_TRANSCRIPT_SCHEMA",
     "BackgroundTranscriptSink",
+    "TranscriptSource",
     "append_background_transcript_event",
     "begin_background_transcript_turn",
     "public_background_transcript_text",

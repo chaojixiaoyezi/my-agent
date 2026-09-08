@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## R217 公开过程与 final 交接
+
+`GatewayForegroundTranscriptSink` 适配前台 chunk，复用 `BackgroundTranscriptSink` 工具/思考/Compact 映射；
+`TranscriptSource` 聚合显示来源，Gateway ID 不混进正文 payload。candidate delta 使用同片稳定编号，
+typed 插话丢弃半句，真正 final 把完整快照交给 `_GatewayAssistantTurn` 的正常提交/repair 共用 metadata。
+`background_display_turn_from_row` 按前台 request 或后台 task 分别校验，`history_group_identity` 保持前台
+user/commentary/final 同组；metadata 不进入 provider history。客户端先处理 canonical 消息，再补未覆盖流；
+原子候选替换只影响 active assistant，流关闭不影响权限或业务状态。旧客户端需明确 foreground_transcript。
+
 ## R216 已提交消息的同会话投影
 
 `submit_gateway_ask` 在原子入队前调用可选 on_request_allocated，TUI 仅登记显示去重，运行控制引用

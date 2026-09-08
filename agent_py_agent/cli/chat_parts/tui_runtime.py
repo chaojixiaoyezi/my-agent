@@ -29,7 +29,11 @@ _HISTORY_LIVE_PLAN_FIELDS = frozenset({
 _BACKGROUND_TRANSCRIPT_KINDS = frozenset(
     {
         "active_turn_input_consumed",
+        "assistant_started",
+        "assistant_delta",
+        "assistant_discarded",
         "assistant_completed",
+        "transcript_stream_closed",
         "thinking_started",
         "thinking_delta",
         "thinking_completed",
@@ -828,7 +832,7 @@ class _TuiConversationBoundaryRuntimeMixin:
             return inserted
 
     # LLM: 静态事件不接管 Todo；本页前台按 exact 请求去重，后台独立工作片仍显示，不改 canonical 原记录。
-    # 函数用途: 恢复历史卡片及顺序，避免本页已显示的前台回复被分页或通知重复追加。
+    # 函数用途: 恢复历史卡片和顺序；校验后的 final 原子接替同片候选，本页前台仍按请求去重。
     def _publish_recovered_display_events(self, events: tuple[dict[str, object], ...]) -> None:
         background_blocks: dict[str, list[str]] = {}
         for item in events:
@@ -851,10 +855,17 @@ class _TuiConversationBoundaryRuntimeMixin:
             ):
                 continue
             display_payload = {key: value for key, value in payload.items() if key not in _HISTORY_LIVE_PLAN_FIELDS}
+            covered = str(item.get("covered_background_request_id") or "")
+            replacement = item.get("replaces_live_block_id")
+            if (
+                kind == "assistant_completed" and request_id.startswith("history:")
+                and covered.startswith("bg-main:") and isinstance(replacement, str)
+                and replacement.startswith(f"{covered}:assistant:")
+            ):
+                display_payload["replaces_live_block_id"] = replacement
             self._publish(kind, phase, block_id, display_payload, request_id=request_id)
             if request_id.startswith("bg-main:"):
                 background_blocks.setdefault(request_id, []).append(block_id)
-            covered = str(item.get("covered_background_request_id") or "")
             if kind == "assistant_completed" and request_id.startswith("history:") and covered.startswith("bg-main:"):
                 self._publish(
                     "history_blocks_reordered", "completed", f"{covered}:history-order",
@@ -1104,7 +1115,7 @@ class _TuiBackgroundActivityRuntimeMixin:
     # LLM: Background transcript rows are a display-only Gateway projection.
     # This entry accepts only the frozen schema and the explicit bg-main or
     # bg-agent namespace, then reuses one sequencer/reducer for the current page.
-    # 函数用途: 接收实时过程；只跳过完整快照已覆盖的旧显示，未完成工作片和插话消费回执继续接收。
+    # 函数用途: 接收同会话公开过程；原页跳过自己的前台副本，完整快照覆盖后不再重放旧流。
     def publish_background_transcript_events(self, value: object) -> int:
         if not isinstance(value, list | tuple):
             return 0
@@ -1117,6 +1128,9 @@ class _TuiBackgroundActivityRuntimeMixin:
             except (TypeError, ValueError):
                 continue
             consumed_cursor = max(consumed_cursor, remote_seq)
+            gateway_id = item.get("gateway_request_id")
+            if isinstance(gateway_id, str) and gateway_id in self._owned_gateway_requests:
+                continue
             request_id = str(item.get("request_id") or "").strip()
             block_id = str(item.get("block_id") or "").strip()
             kind = str(item.get("kind") or "").strip()

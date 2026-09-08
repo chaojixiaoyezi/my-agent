@@ -3831,3 +3831,11 @@ ruff check \
   ```
 
   结果 223 passed。真 TUI 标签将在同 wheel 的 MiniMax-M2.7 长会话继续验收。
+## R217 前台完整过程定向验证
+
+`test_gateway_foreground_transcript.py` 覆盖真实 writer → 共用事件环 → TUI reducer → canonical final/恢复，
+包括完整/缺开始/不收增量、原页去重、先用户后过程、插话候选丢弃、精确来源损坏拒绝、取消/异常关闭、
+Compact 后重复轮号工具以及旧客户端能力过滤。显示字段不改变 provider history；137 focused已通过。
+另把真实 final append/repair 夹具扩到 rich/non-rich，10个相关文件扩大回归349 passed；真TUI仍待做。
+检查命令采用 `pytest -o addopts='' -q --tb=short`，包含 gateway foreground/main、background history/notice、
+conversation history/message、agent control、threading、gateway chat context/control；没有运行全仓 pytest。

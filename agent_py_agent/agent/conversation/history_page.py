@@ -13,10 +13,12 @@ from .models import MessageLogEntry
 
 
 # LLM: 显示分组只依据持久身份字段；正文、时间和任务名称不得成为分组依据。
-# 函数用途: 为分页和显示投影返回同一工作片身份，避免两处对回合边界理解不同。
+# 函数用途: 为分页和展示返回同一工作片身份；前台 final 的显示快照不能把本轮 user/commentary 拆到另一组。
 def history_group_identity(row: object) -> str:
     metadata = getattr(row, "metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
+    if metadata.get("gateway_request_id") and not metadata.get("background_delivery_reason"):
+        return str(metadata.get("conversation_request_id") or metadata["gateway_request_id"])
     return str(
         metadata.get("background_transcript_request_id")
         or metadata.get("conversation_request_id")

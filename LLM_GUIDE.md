@@ -21,6 +21,11 @@
 
 ## 2026-08-23 当前运行基线
 
+- 前台公开 chunk 复用同会话过程 mapper，foreground_transcript 与已提交消息能力独立协商。
+  原页按 exact Gateway 请求去重；先收 canonical 消息再补未覆盖增量，不能让思考显示在提问前。
+  完整块快照随 final/repair 保存，最终回复按精确 ID 原子接替候选；流关闭只清显示，不判工具或任务成功。
+  这些 metadata 不进入模型历史；本地验证不代替真实 TUI，提交前崩溃的完整过程耐久化仍另列待验。
+
 - 同会话前台已提交 user/final 复用 canonical 消息分页，客户端显式声明 foreground_messages 后才发送。
   原页在原子入队前登记宿主 request ID 去重；后台续片不能因原请求号被隐藏，显示字段不进入模型历史。
   用户块用 message ID，分批/恢复不换编号。实时前台思考/工具流仍独立待验，不能以 final 同步代替。

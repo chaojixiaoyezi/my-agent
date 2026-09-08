@@ -3,7 +3,7 @@
 # Request-affine claims are bound before acquisition and retained until terminal commit; unknown
 # operation recovery has a typed public error. Exception prose never decides retry or bypass.
 # Canonical final and its delayed repair preserve the same host-owned turn-end and native data.
-# 前台 chunk 同步更新已有 owner/thread main 标量；显示故障不能中止请求，不影响消息或模型缓存。
+# 前台 chunk 同步更新已有 owner/thread main 标量和公开过程；完整显示快照随 canonical final/repair 保存，不进入模型缓存。
 # 模块用途: 执行网关请求并恢复真实回合；保存原正文及结束原因，延迟补交不能把被截断的回复显示成完整成功。
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ Gateway responses expose both per-turn and cumulative token estimates. CLI/TUI
 status should use the cumulative field when showing current context pressure.
 """
 
+import copy
 import json
 import logging
 import os
@@ -207,7 +208,7 @@ def close_chunk_stream(chunk_path: Path) -> None:
 
 
 # LLM: BufferedChunkStreamWriter 是 Gateway run 的公开事件出口；审批与富 transcript 必须分别来自显式客户端能力，普通客户端不得收到思考或大段工具展示数据。
-# 公开事件先沿原 chunk 落盘，再投影 main 数字/阶段；同会话其他窗口不能只看到旧后台状态。
+# 公开事件先沿原 chunk 落盘，再投影 main 数字/阶段与公开过程；显示故障不能中止真实请求。
 # 类用途: 缓冲模型/工具事件，并为支持的 TUI 投递逐轮说明、折叠思考、结构化结果和审批等待。
 @dataclass
 class BufferedChunkStreamWriter:
@@ -232,6 +233,7 @@ class BufferedChunkStreamWriter:
     interactive_approvals: bool = False
     rich_transcript: bool = False
     main_activity_sink: object | None = field(default=None, repr=False)
+    transcript_sink: object | None = field(default=None, repr=False)
     # Gateway request writer 不是会话本体；这里只绑定 owner Agent 持有的进程内缓存及
     # 本轮已经解析完成的精确作用域，避免每个请求各自维护一份假“会话”状态。
     _approval_session_cache: ToolApprovalSessionCache | None = field(
@@ -246,13 +248,15 @@ class BufferedChunkStreamWriter:
     def __call__(self, text: str) -> None:
         self.write(text)
 
-    # LLM: 原 chunk 是公开事件出口；标量投影不改变 payload/顺序，异常只丢展示，不能反噬模型回合。
-    # 函数用途: 发布一个已清洗事件，并将其数值和阶段同步给同会话的 main 状态条。
+    # LLM: 原 chunk 是公开事件出口；两种投影不改变 payload/顺序，异常只丢展示，不能反噬模型回合。
+    # 函数用途: 发布已清洗事件，分别同步同会话的状态条和正文，不扩大审批入口。
     def _write_event(self, event: dict[str, object]) -> None:
         write_chunk_event(self.chunk_path, event)
-        if callable(self.main_activity_sink):
+        for sink in (self.main_activity_sink, self.transcript_sink):
+            if not callable(sink):
+                continue
             try:
-                self.main_activity_sink(event)
+                sink(event)
             except (OSError, RuntimeError, TypeError, ValueError):
                 pass
 
@@ -309,8 +313,8 @@ class BufferedChunkStreamWriter:
         except (OSError, RuntimeError, TypeError, ValueError):
             return ""
 
-    # LLM: steering 只清空未确认段并重开普通客户端首段额度；rich transcript 的逐轮语义保持不变。
-    # 函数用途: 用户在活动回合补充输入后，为下一次模型说明建立新分段。
+    # LLM: steering 只清空未确认段并重开普通客户端首段额度；同会话公开投影在同一 typed 边界丢弃候选。
+    # 函数用途: 补充输入进入活动回合后建立新分段，不让旧半句混入后续回答。
     def begin_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
         """Allow one new model-authored commentary after live user steering.
 
@@ -322,7 +326,12 @@ class BufferedChunkStreamWriter:
         self._model_delta_buffer.clear()
         self._model_delta_chars = 0
         self._commentary_emitted = False
-        del client_message_ids
+        begin = getattr(self.transcript_sink, "begin_active_turn_input", None)
+        if callable(begin):
+            try:
+                begin(client_message_ids)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
 
     # LLM: This event is emitted only after ConversationStore committed consumed at the
     # provider-accepted prompt boundary. Text lets reconnecting clients replay the committed
@@ -647,17 +656,30 @@ class BufferedChunkStreamWriter:
         """Return exact structured progress observed during this request."""
         return self._observed_tool_rounds
 
-    # LLM: 先刷新原事件，后关闭本请求显示阶段；任务终态和后台唤醒仍由 canonical runtime 负责。
-    # 函数用途: 收口前台输出及其 main 活动提示，不删除已有上下文数字。
+    # LLM: 先刷新原事件，后关闭本请求的标量与过程投影；任务终态和后台唤醒仍由 canonical runtime 负责。
+    # 函数用途: 收口前台输出和遗留动画，不把流关闭当作工具/任务成功。
     def close(self) -> None:
         self.flush()
         close_chunk_stream(self.chunk_path)
-        closer = getattr(self.main_activity_sink, "close", None)
-        if callable(closer):
-            try:
-                closer()
-            except (OSError, RuntimeError, TypeError, ValueError):
-                pass
+        for sink in (self.main_activity_sink, self.transcript_sink):
+            closer = getattr(sink, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    pass
+
+    # LLM: 在 final 持久化前排空增量并冻结同片显示；失败不改变模型结果，也不新增第二份持久正文。
+    # 函数用途: 给正常提交和延迟补交提供完整过程快照，候选块由最终消息按编号接替。
+    def prepare_display_history(self) -> dict:
+        self.flush()
+        prepare = getattr(self.transcript_sink, "prepare_final", None)
+        if not callable(prepare):
+            return {}
+        try:
+            return prepare()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return {}
 
     # LLM: The returned copy contains only tool-boundary-confirmed assistant messages. It is
     # the typed handoff into ConversationStore and never includes an uncommitted final candidate.
@@ -871,20 +893,24 @@ class _GatewayHistoryRow:
 
 
 # LLM: 这是同一结果的不可变传输包，不是第二份会话事实源；正常提交和 repair 必须使用相同投影。
-# 类用途: 把已收到的原生消息和宿主结束原因一起交给 final 持久化，不增加机器完成判断。
+# 类用途: 将原生消息、结束原因与独立显示快照一起交给 final/repair，展示数据不进入模型历史。
 @dataclass(frozen=True)
 class _GatewayAssistantTurn:
     native_messages: object = None
     end_reason: str = ""
+    display_snapshot: dict | None = None
 
     # LLM: 仅构建新的 metadata 字典；不改原生内容、不写文件、不推断缺失 reason。
-    # 函数用途: 为正常落账与延迟补交生成同一份 canonical 回合元数据。
+    # 函数用途: 为正常落账与延迟补交生成同一份元数据；显示快照复制后传出，避免调用方污染原包。
     def metadata(self) -> dict[str, object]:
         metadata: dict[str, object] = {}
         if envelope := canonical_native_messages_envelope(self.native_messages):
             metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = envelope
         if reason := normalize_turn_end_reason(self.end_reason):
             metadata["turn_end_reason"] = reason
+        if self.display_snapshot:
+            metadata["background_transcript_request_id"] = self.display_snapshot["request_id"]
+            metadata["background_display_turn"] = copy.deepcopy(self.display_snapshot)
         return metadata
 
 
@@ -1272,14 +1298,19 @@ def _run_gateway_ask_with_model(context: _GatewayAskRunContext):
 
 
 # LLM: 只在取得会话执行车道后调用，绑定宿主解析的 owner/thread/task，普通客户端不扩展公开范围。
-# 函数用途: 将富 TUI 的前台事件接到已有 main 状态表，后续任务晋升仍读原请求的结构化绑定。
+# 函数用途: 将富 TUI 前台接到同会话标量与公开过程流，后续任务晋升仍读原请求的结构化绑定。
 def _configure_gateway_main_activity(context: _GatewayAskRunContext, conversation: _GatewayConversationContext) -> None:
     writer = context.on_chunk
     if not isinstance(writer, BufferedChunkStreamWriter) or not writer.rich_transcript or not conversation.thread_id:
         return
+    from .foreground_transcript import GatewayForegroundTranscriptSink
     from .main_activity import GatewayMainActivitySink
 
     writer.main_activity_sink = GatewayMainActivitySink(
+        context.agent, thread_id=conversation.thread_id, request_id=context.request_id, request=context.request,
+        task_id=str(getattr(conversation.workspace_task, "task_id", "") or ""),
+    )
+    writer.transcript_sink = GatewayForegroundTranscriptSink(
         context.agent, thread_id=conversation.thread_id, request_id=context.request_id, request=context.request,
         task_id=str(getattr(conversation.workspace_task, "task_id", "") or ""),
     )
@@ -1692,7 +1723,7 @@ def _gateway_request_is_active_turn_recovery(request: object, request_id: str) -
 
 
 # LLM: 把实际模型回复、native IR 和 typed 结束原因作为同一 final 提交；写失败保存相同 repair，不重做模型。
-# 函数用途: 保存主代理的完整或半截回复及其技术原因，停止控制不作为模型正文持久化。
+# 函数用途: 保存主代理回复、技术原因和同片公开过程；停止控制不作为模型正文，repair 不重做模型。
 def _persist_gateway_assistant_result(
     context: _GatewayAskRunContext,
     conversation: _GatewayConversationContext,
@@ -1739,6 +1770,7 @@ def _persist_gateway_assistant_result(
     assistant_turn = _GatewayAssistantTurn(
         native_messages=getattr(result, "canonical_native_messages", None),
         end_reason=result_turn_end_reason(result),
+        display_snapshot=context.on_chunk.prepare_display_history() if isinstance(context.on_chunk, BufferedChunkStreamWriter) else None,
     )
     if not _append_gateway_conversation_message(
         context.agent,

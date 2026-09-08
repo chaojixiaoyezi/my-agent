@@ -1,5 +1,11 @@
 # Gateway Progress
 
+## R217 同会话前台完整过程（本地实现）
+
+原 rich chunk 同时进入共享公开过程 mapper；按宿主请求精确去重，最终块接替候选且随 canonical final/repair
+保存完整过程。先收 canonical 消息再补增量，解决思考早于用户输入。137 focused，通过旧能力/取消/缺帧/恢复
+边界；新 Gateway 真 TUI 待验，默认子代理耐久 writer、模型请求、审批与任务状态不改。
+
 ## R216 真实消息同步分项通过
 
 50cdfaf独立包升级唯一Gateway为3585410；原页/观察页/恢复页同session真实输入与final各一条，无Working残留。

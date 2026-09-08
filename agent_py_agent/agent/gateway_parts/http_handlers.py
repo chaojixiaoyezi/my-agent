@@ -985,8 +985,8 @@ def handle_control_status(handler, server) -> None:
     handler._send_json(200, gateway_control_operation_status_payload(receipt))
 
 
-# LLM: 可信 owner/thread 选择分页；前台 user/final 仅发给显式支持同请求去重的客户端，不授予执行权。
-# 函数用途: 在同一查询中投影已提交消息及活动，旧客户端继续原后台通知语义。
+# LLM: 可信 owner/thread 选择分页；前台消息与实时过程独立声明去重能力，不授予执行权或隐式升级旧页。
+# 函数用途: 在同一查询中投影已提交消息、公开过程和活动，旧客户端继续原通知语义。
 def handle_client_notices(handler, server) -> None:
     """S-BG1: 返回当前会话的进行中任务数和后台主代理轮完成通知。
 
@@ -1035,6 +1035,10 @@ def handle_client_notices(handler, server) -> None:
         include_foreground=bool(
             isinstance(body.get("client_capabilities"), dict)
             and body["client_capabilities"].get("foreground_messages") is True
+        ),
+        include_foreground_transcript=bool(
+            isinstance(body.get("client_capabilities"), dict)
+            and body["client_capabilities"].get("foreground_transcript") is True
         ),
     )
     handler._send_json(200, result)
@@ -1214,7 +1218,7 @@ def _send_agent_control_error(handler, error: AgentControlError) -> None:
 # projection from canonical runs; neither notices nor that projection can
 # create task state, authorize work, retry, or decide completion. Process-stream identity is
 # echoed with its event sequence, independently from the durable message byte cursor.
-# 函数用途: 读取已鉴权会话的活动和消息；按客户端显式能力开放前台消息，热/冷 owner 路径一致。
+# 函数用途: 按显式能力分别开放已提交消息与前台过程；旧页跳过新流但照常推进同一游标，不因轮询初始化 owner。
 def read_gateway_client_notices(
     agent: object,
     *,
@@ -1224,6 +1228,7 @@ def read_gateway_client_notices(
     event_stream_id: str = "",
     interactive_approvals: bool = False,
     include_foreground: bool = False,
+    include_foreground_transcript: bool = False,
 ) -> dict[str, object]:
     """返回当前 thread 的活动投影、后台过程事件与 after 之后的通知。"""
     from ..conversation.store import ConversationStore
@@ -1301,7 +1306,7 @@ def read_gateway_client_notices(
         "ok": notices_ok,
         "notices": notices,
         "cursor": cursor,
-        "transcript_events": transcript["events"],
+        "transcript_events": [row for row in transcript["events"] if include_foreground_transcript or not row.get("gateway_request_id")],
         "event_cursor": transcript["cursor"],
         "event_stream_id": transcript["stream_id"],
         "events_truncated": transcript["truncated"],

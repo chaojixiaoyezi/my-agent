@@ -69,7 +69,7 @@ def _turn_end_events(rows: list[object]) -> list[dict[str, object]]:
 
 
 # LLM: user/final 使用 canonical message ID，分页不能改变用户块编号；后台完整快照优先，不公开 native 内部输入。
-# 函数用途: 恢复一轮输入和 native 内容，让分批到达与完整恢复得到同一用户消息，不按文字去重。
+# 函数用途: 恢复完整同片输入/过程；前台 final 可按验证后的候选 ID 原位接替，不按文字去重。
 def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
     request_id = f"history:{identity}"
     events = [
@@ -83,6 +83,8 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
             events.extend({**item, "schema": HISTORY_DISPLAY_SCHEMA} for item in snapshot["events"])
             final_event = public_assistant_message_event(row)
             final_event["covered_background_request_id"] = snapshot["request_id"]
+            if replacement := snapshot.get("live_final_block_id"):
+                final_event["replaces_live_block_id"] = replacement
             events.append(final_event)
             return events
     native = next((

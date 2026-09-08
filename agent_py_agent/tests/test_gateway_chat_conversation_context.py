@@ -341,7 +341,8 @@ def test_named_audit_projects_durable_task_deadline_into_current_run(tmp_path):
 
 
 @pytest.mark.parametrize("deferred", [False, True])
-def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, monkeypatch, deferred):
+@pytest.mark.parametrize("rich", [False, True])
+def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, monkeypatch, deferred, rich):
     from agent_py_agent.agent.gateway_parts import request_execution as module
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=False), tmp_path)
@@ -354,8 +355,13 @@ def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, m
     context = _GatewayAskRunContext(
         agent=agent, request={"metadata": {"channel": "chat"}},
         request_id="req-length", request_path=tmp_path / "request.json",
-        response_path=tmp_path / "response.json", on_chunk=None,
+        response_path=tmp_path / "response.json",
+        on_chunk=module.BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True) if rich else None,
     )
+    if rich:
+        module._configure_gateway_main_activity(context, conversation)
+        context.on_chunk.write_thinking("先检查现有文件", duration_seconds=2)
+        context.on_chunk.write_model("接下来修改")
     result = SimpleNamespace(
         response="接下来修改", runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
         assistant_commentary_messages=["我在核对现有代码"],
@@ -384,6 +390,16 @@ def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, m
     assert "turn_end_reason" not in rows[0].metadata
     assert rows[-1].metadata["turn_end_reason"] == "max-tokens"
     assert rows[-1].metadata["canonical_native_messages"]["messages"][-1]["content"] == "接下来修改"
+    if rich:
+        from agent_py_agent.agent.conversation.background_history import (
+            background_display_turn_from_row,
+        )
+
+        snapshot = background_display_turn_from_row(rows[-1])
+        assert snapshot and snapshot["complete"] is True
+        assert snapshot["gateway_request_id"] == "req-length"
+        assert snapshot["events"][0]["payload"]["text"] == "先检查现有文件"
+        assert snapshot["live_final_block_id"].startswith(snapshot["request_id"] + ":assistant:")
     before = store._message_path(thread.thread_id).read_bytes()
     module._persist_gateway_assistant_result(context, conversation, result)
     assert store._message_path(thread.thread_id).read_bytes() == before

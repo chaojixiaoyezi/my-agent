@@ -1,5 +1,5 @@
 # LLM: 本模块是 typed TUI event 到可渲染快照的唯一 reducer；不得读取模型正文猜状态，也不得执行工具、权限或会话动作。
-# 模块用途: 管理稳定历史块、活动块、权限覆盖层、输入队列、状态和有界诊断；刷新健康独立于任务终态。
+# 模块用途: 管理稳定历史、候选块与界面状态；canonical final 按精确 ID 接替候选，流关闭不决定任务终态。
 
 from __future__ import annotations
 
@@ -306,6 +306,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "assistant_started": self._handle_block_started,
             "assistant_delta": self._handle_block_delta,
             "assistant_completed": self._handle_block_completed,
+            "assistant_discarded": self._handle_block_discarded,
+            "transcript_stream_closed": self._handle_transcript_stream_closed,
             "thinking_started": self._handle_block_started,
             "thinking_delta": self._handle_block_delta,
             "thinking_completed": self._handle_block_completed,
@@ -657,14 +659,38 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             updated_seq=event.seq,
         )
 
-    # LLM: terminal event 优先采用显式完整 text；无 active 时仅允许带完整正文的响应文件恢复创建。
-    # 函数用途: 将 assistant/thinking 活动块原子冻结为稳定历史。
+    # LLM: canonical final 可接替已验证的同片候选 ID，不能删除稳定历史或其它角色；重放无副作用。
+    # 函数用途: 将完整正文原子替换活动半句并固定为历史，避免先删再添造成闪烁或两份回复。
     def _handle_block_completed(self, event: TuiEvent) -> None:
+        old_id = event.payload.get("replaces_live_block_id")
+        if (
+            event.kind == "assistant_completed" and event.request_id.startswith("history:")
+            and isinstance(old_id, str) and old_id.startswith("bg-main:")
+            and event.block_id not in self._stable_ids
+        ):
+            candidate = self.active_blocks.get(old_id)
+            if candidate is not None and candidate.role == "assistant":
+                self.active_blocks.pop(old_id)
+                self.active_blocks[event.block_id] = replace(candidate, block_id=event.block_id, kind=event.kind)
         self._freeze_block(event, role=_role_for_kind(event.kind))
 
-    # LLM: discarded 仅删除同 identity 的空易失块；它不能删除稳定历史，也不能把
-    # 未知 block 当作成功，以免迟到事件抹掉已经可见的思考内容。
-    # 函数用途: 当模型没有提供显式思考时，移除初始等待动画而不留下空历史行。
+    # LLM: 只清 exact display request 的活动块，不关闭真实 turn/权限；未知工具/Compact 保留中性缺口提示。
+    # 函数用途: 前台取消或异常且没有 final 时收起孤立动画，不能将未观察到的执行结果标成成功。
+    def _handle_transcript_stream_closed(self, event: TuiEvent) -> None:
+        if not event.request_id.startswith("bg-main:"):
+            return
+        for key, block in tuple(self.active_blocks.items()):
+            if not key.startswith(f"{event.request_id}:") or block.role not in {"assistant", "thinking", "tool_input", "tool", "compact"}:
+                continue
+            self.active_blocks.pop(key)
+            if block.role in {"tool", "compact"}:
+                self._append_stable(replace(
+                    block, role="system", kind="system_message", phase="completed",
+                    text=f"{block.title or '过程块'}：本工作片未保存完整结果。", detail="", updated_seq=event.seq,
+                ), event)
+
+    # LLM: discarded 仅删除同 identity 的易失块，不能删除稳定历史或把未知 block 当作成功；仅 typed 边界可调用。
+    # 函数用途: 移除空思考动画或插话前未确认的候选半句，不抹掉已提交的回复和思考。
     def _handle_block_discarded(self, event: TuiEvent) -> None:
         if event.block_id in self._stable_ids:
             self.record_diagnostic("DISCARD_STABLE_BLOCK_REJECTED", event)
