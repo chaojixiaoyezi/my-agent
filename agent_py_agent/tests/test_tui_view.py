@@ -510,6 +510,23 @@ def test_selection_uses_prompt_toolkit_source_indexes_for_wide_characters() -> N
     assert highlighted == "甲乙丙丁"
 
 
+def test_right_click_without_selection_does_not_interrupt_the_event_loop() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("right-copy-no-selection", clock=lambda: 5.94)
+    store.publish(seq.emit("user_message", "completed", "user", {"text": "没有选区也可以右键"}))
+    control = TuiTranscriptControl(_provider(store))
+    control.create_content(40, 5)
+    copied: list[str] = []
+    control.set_copy_on_select(copied.append)
+    for event_type in (MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_UP):
+        result = control.mouse_handler(
+            MouseEvent(Point(x=4, y=0), event_type, MouseButton.RIGHT, frozenset())
+        )
+        assert result is None
+    assert copied == []
+    assert control.selected_text() == ""
+
+
 def test_right_click_copies_wide_selection_once_and_keeps_highlight() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("selection-right-copy", clock=lambda: 5.95)

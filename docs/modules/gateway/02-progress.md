@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R206 客户端复制和失联观察
+
+R205 已部署；原 Gateway 3334055 明确收到 SIGINT 退出，原状态保存后恢复唯一 3336610，原 Go run 继续。
+这不证明信号发送者或所有副作用去重。未选中文字的右键报错已本地修复，38 focused 通过，真 TUI 待验。
+新的同会话客户端出现旧 Todo；断线保留旧 Working 却无失联说明，二者仍待修。当前定向 provider 夹具
+只限制标记 owner 一次真实响应长度，结束后仍需安全恢复直连。
+
 ## R205 截断的实时与历史显示（本地）
 
 本地/Gateway 共用 typed 长度提示，半截正文仍保留。canonical final/repair 保存结束原因，后台只在 final

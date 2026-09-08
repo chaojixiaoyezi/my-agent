@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## R206 无选区不是复制异常
+
+`tui_view._selected_text` 将 None 视为正常空选区，与 终端交互 `selection.ts:getSelectedText` 一致；
+调用方仍只复制非空文本，鼠标坐标/中文切片不改。它是客户端显示修复，不新增 Gateway 请求或修改运行账。
+失联时旧活动快照的健康标记和恢复 Todo 来源仍待独立修复，不靠本片推断任务状态。
+
 ## R205 模型长度与交付状态分离
 
 轻量 worker 的 `_model_length_error` 复用 `turn_end.result_turn_end_reason/turn_end_notice`；summary.ok

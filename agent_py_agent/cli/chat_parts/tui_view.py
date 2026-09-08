@@ -1,4 +1,4 @@
-# LLM: 本模块把 typed snapshot renderer 接入 prompt_toolkit；画面缓存与冻结正文随当前 store 切换，只管显示，不持有业务执行权。
+# LLM: 本模块把 typed snapshot renderer 接入 prompt_toolkit；画面缓存与冻结正文随当前 store 切换，只管显示，不持有业务执行权；空选区右键必须无副作用。
 # 模块用途: 提供可滚动 transcript control、固定 overlay/footer 内容和稳定 block cache，替代字符串 TextArea+行前缀 lexer。
 
 from __future__ import annotations
@@ -934,13 +934,13 @@ def _ordered_selection(selection: TuiTextSelection) -> tuple[Point, Point]:
     )
 
 
-# LLM: 复制从 formatted line 的可见文本投影生成，并直接按源字符索引切片；中文宽字符不可再次换算显示列。
-# 函数用途: 提取选区中的纯文本并保留跨行换行。
+# LLM: 复制从 formatted line 的可见文本投影生成，直接按源字符索引切片；空选区返回空串，不得中断事件循环或写空剪贴板。
+# 函数用途: 提取选中文字并保留跨行换行；未拖选或缩放清空选区后的右键不做复制，中文坐标不重复换算。
 def _selected_text(
     lines: tuple[FormattedLine, ...],
-    selection: TuiTextSelection,
+    selection: TuiTextSelection | None,
 ) -> str:
-    if not lines:
+    if selection is None or not lines:
         return ""
     start, end = _ordered_selection(selection)
     if start == end:

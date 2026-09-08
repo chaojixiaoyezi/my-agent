@@ -1,11 +1,20 @@
 # TEST CHECKLIST
 
+## R206 空选区与失联/恢复状态
+
+- [x] 新测试窗口空选区右键真实异常；终端交互 对照、定位先红后绿，38 focused 通过。
+- [ ] 新版真实 TUI 中无选区右键无异常，正常中文复制不退化。
+- [x] Gateway SIGINT 原始退出状态保存；恢复唯一 Gateway 后原 Go 子代理同 run 继续，compact 继续增加。
+- [ ] 断线明确展示快照失联，不让旧 Working 冒充当前执行状态；不擅自修改任务终态。
+- [ ] 同会话恢复清单与原窗口保持当前任务一致；主/子数值差异继续采样，不凭推测改计数器。
+
 ## R205 截断提示
 
 - [x] 实时 local/Gateway 共用 typed 长度判断；保留非流式半截正文，不把 transport ok 当完整模型答复；56 focused。
 - [x] 本地持久历史与后台快照保留独立 typed 提示；正常提交/repair 同源、重放不重复，child 实时结束也显示。
 - [x] 11 文件定向回归 429 passed / 2 原有 xfailed，Ruff/doc sync/strict code-size 通过；无全仓 pytest。
 - [ ] 新版真实 provider 截断及后续消息续作；不能把显示回归算真实 TUI 通过。
+- [x] R205 原 TUI 真实 MiniMax SSE max_tokens、半截正文、明确提示和 Working 收起一致；后续恢复/续作单列。
 - [ ] 对照 终端交互 的有界同轮恢复，保持工具副作用、取消和费用账的原边界。
 
 ## R204 后台逐轮输入归属

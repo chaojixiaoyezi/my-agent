@@ -1,5 +1,11 @@
 # TESTS
 
+## R206 空选区右键
+
+真实 TUI 的 `_selected_text(None)` traceback 作为失败来源。新增正常右键 down/up、空选区不复制的
+定位测试先红后绿；连同中文源索引、已有选区复制、transcript 与主/子导航共 38 focused 通过。
+尚需新版真实 PTY 的无选区右键/正常拖选复制组合验收，不把单测替代操作系统剪贴板验证。
+
 ## R205 长度限制的 TUI 提示
 
 对 Gateway ok=True + typed max-tokens、runtime unfinished/truncated 两种信封验证：返回失败提示但保留正文，
