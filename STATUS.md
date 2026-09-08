@@ -1,21 +1,29 @@
 # STATUS
 
-## R206 空选区右键与 Go 子页停滞排查（本地修复，待客户端真验）
+## R206 空选区右键（已部署客户端，真实 PTY 分项通过）与 Go 停滞排查
 
 - 新截断测试 TUI 的真实右键触发 `_selected_text(None)`，抛出 `AttributeError: ... anchor` 并进入
   Press ENTER 对话框。对照 终端交互 `src/ink/selection.ts:getSelectedText`，空选区直接返回空文本，
   不写空剪贴板、不影响中文源索引。定位测试先红；view/transcript/navigation 共 38 focused 通过。
+- 提交 fb09d97 / wheel SHA 9eb887cc51adfe4081f6d7afc62b24ee0d6b326b05a0cf4fbc0e54befcafdd34，独立
+  R206 客户端 `ma-r206-110-copy` / 3362381 精确恢复 sess_1788833043_7468173a。真实标准终端鼠标序列验证
+  空选区右键不报错且 tmux buffer SHA 不变；中文整句拖选/右键完整复制，历史截断提示仍显示。
+  证据 deploy/r206-fb09d97/mouse-live-evidence.json；未验证本机 OS 剪贴板，不将 tmux buffer 等同于它。
 - R205 实际已经部署；原 Gateway 3334055 于 1788833241.341 收到 SIGINT 正常停止，信号发送者未知。
   保留退出状态后恢复唯一 Gateway 3336610 和定向 provider 夹具 3336601，原 Go 三个 run 沿原身份继续。
   不能把 tmux 父进程当信号发送者，也不能把断线期间的旧 Working 当仍在执行。
 - 独立同会话观察窗口 `ma-r206-110-go-view` 不提交业务需求：一次主/子对照均为 74.5k / compact 1；
   随后两名子代理继续到 compact 2。上下文数值不同仍待捕捉，不能宣称已修。新窗口恢复了旧 17/18 清单，
   原窗口已为 Go 的 1/6，另记显示快照缺口。断线不显示失联、恢复清单过期均未修复。
+- 第二次父/子同步均为 83.4k / compact 4；原 Go 最新两代执行片的受管操作账含 59 次成功、24 次失败，
+  仍在改文件/编译；失败包括补丁缺前缀、old_string 不匹配和 standardSink 缺 Matches 方法。不能说完全
+  卡死，也不能把反复返工当有效交付。当前进度账本正确保存 Go 计划，显示层旧 generation 过滤待复现修复。
 - `ma-r205-110-truncation` 原请求在夹具触发前失败，不能算截断验收；已从同一真实 TUI 提交普通续作消息。
   续作的真实 MiniMax 请求 124 被定向限为 512 tokens，原生 SSE 返回 max_tokens，TUI 正确保留半截正文、
   显示长度限制并停止 Working；final msg-eab9b9cf7bbd49cb 保存同一原因。历史恢复与有界续作仍待验。
   唯一 Gateway / MiniMax-M2.7 保持；临时代理 api_base 尚需安全恢复直连。零引用 R200 环境回收约
   651 MB，项目包和重建依赖已备份，用户项目/历史未删。
+- R206 同一真实 TUI 已追加普通继续消息，检查截断后原项目还能接着完成；Gateway 3336610 未为客户端升级重启。
 
 ## R205 截断提示与持久历史（本地，未部署）
 

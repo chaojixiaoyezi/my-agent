@@ -4,7 +4,8 @@
 
 真实 TUI 的 `_selected_text(None)` traceback 作为失败来源。新增正常右键 down/up、空选区不复制的
 定位测试先红后绿；连同中文源索引、已有选区复制、transcript 与主/子导航共 38 focused 通过。
-尚需新版真实 PTY 的无选区右键/正常拖选复制组合验收，不把单测替代操作系统剪贴板验证。
+R206 真 PTY 已按标准 SGR 序列通过无选区右键、旧 tmux buffer 哈希不变、中文整句拖选/右键完整复制。
+同 session 恢复后的 typed 截断提示可见。证据 mouse-live-evidence.json；本机 OS 剪贴板仍未核验。
 
 ## R205 长度限制的 TUI 提示
 
