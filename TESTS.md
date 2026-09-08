@@ -1,5 +1,12 @@
 # TESTS
 
+## R211 /model（真实 TUI 待验）
+
+新增 test_model_profiles.py、test_tui_model_menu.py、test_gateway_model_profiles.py：定向验证脱敏、0600、并发新增、同 ID 幂等/冲突、
+owner 隔离、配置损坏不覆盖、执行中选择不热改、子代理恢复原模型、显式窗口不探测，以及真实
+prompt_toolkit 按键新增/选择/退出、密钥不进入 input_history。它们不代替单 Gateway 真机和 MiniMax 调用验收。
+
+
 ## R210 真 TUI 与受控部署
 
 证据 `r210-5cf63a3/evidence-first-live.json`：原 Go main 和新观察页都是 51.1k / compact 12 / read_file；

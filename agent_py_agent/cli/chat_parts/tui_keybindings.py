@@ -450,6 +450,13 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         _restore_stash_after_submit(params)
         event.app.invalidate()
         return
+    if text == "/model":
+        from .tui_model_menu import run_model_menu
+
+        event.app.create_background_task(run_model_menu(
+            event.app, params.agent, str(params.current_session_id or "default"), _required_tui_runtime(params),
+        ))
+        return
     if _tui_handle_command(params=_handle_command_params(params, text)):
         if params.stop_event.is_set():
             event.app.exit()

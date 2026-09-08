@@ -1710,6 +1710,14 @@ my-agent subagent-run <run_id> --execute
 | `--max-cards <n>` | `0` | 最多注入多少张能力卡，`0` 表示不限制。 |
 | `--no-probe` | `false` | 执行前不做通道健康检查。 |
 
+## TUI `/model`
+
+在 TUI 输入 `/model`，选择“新增模型”或“选择已有模型”。新增可选择 OpenAI 风格或 Anthropic 风格，
+填写模型名称、接口基础地址、密钥和总上下文窗口 tokens；Auth 认证暂只预留。
+Tab/Shift+Tab 切换表单字段，保存后回到菜单，再选择该模型启用；返回/退出/Esc 不保存尚未提交的草稿。
+菜单中的 Esc 不停止代理。保存只验证格式，不代表接口连通；密钥以掩码显示，不进入聊天/输入历史。
+配置按用户保存，后续主工作片采用选择，运行中的工作片和已有 child 保持原模型。
+
 ## `bench-model`
 
 ```powershell

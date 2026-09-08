@@ -475,8 +475,8 @@ def _config_bool(agent, key: str, default: bool) -> bool:
 
 
 # LLM: Direct and nested create paths share this attribute builder. The host-bound parent tool
-# snapshot overwrites any input lookalike without entering model/idempotency parameters.
-# 函数用途: 归一子代理属性，并把当前父回合真实工具上限安全写入顶层或孙代理任务。
+# snapshot and model profile reference overwrite input lookalikes without entering model/idempotency parameters.
+# 函数用途: 归一子代理属性，安全写入父回合工具上限与模型引用，让重启后的子代理仍继承原模型。
 def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
     attrs = (
         dict(raw_params.get("attributes") or {})
@@ -515,6 +515,9 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
     _add_current_task_workspace(attrs, agent)
     _inherit_audit_guarantee(attrs, agent)
     _clamp_service_window_to_audit_deadline(attrs)
+    from ...settings.model_profiles import inherit_model_profile
+
+    inherit_model_profile(attrs, agent)
     return attrs
 
 

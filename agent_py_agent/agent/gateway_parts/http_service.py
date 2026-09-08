@@ -4,7 +4,7 @@ from __future__ import annotations
 """HTTP service for gateway using a bounded standard-library HTTP server.
 
 这个文件实现 gateway 的 HTTP 接口：POST /ask、POST /control、GET /control-status/<id>、
-GET /result/<id>、GET /progress/<id>、GET /status、POST /stop。
+GET /result/<id>、GET /progress/<id>、GET /status、POST /stop、POST /client/models（私有模型配置，不入聊天队列）。
 用标准库 http.server + 固定 daemon worker 池实现有界并发。
 支持多租户鉴权：外部通道请求需要 X-User-Id / X-Channel header。
 """
@@ -189,6 +189,11 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/client/memory":
             self._handle_client_memory()
+            return
+        if self.path == "/client/models":
+            from .model_profile_service import handle_client_models
+
+            handle_client_models(self, _server_instance)
             return
         if self.path == "/client/history":
             self._handle_client_history()

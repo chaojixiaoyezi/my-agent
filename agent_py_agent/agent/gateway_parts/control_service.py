@@ -731,7 +731,7 @@ def _execute_compact_control(
 
 
 # LLM: The registered manual Compact may mutate only the exact idle owner/thread, holds the shared
-# lane, and uses the ordinary native model surface. Interruption never advances cursor/generation.
+# lane, and uses the ordinary native model surface with the selected owner model snapshot. Interruption never advances cursor/generation.
 # 函数用途: 以普通模型缓存面执行已登记的手动压缩，并区分用户停止、占用冲突和真实失败。
 def _execute_registered_compact_control(
     base_agent: object,
@@ -763,7 +763,9 @@ def _execute_registered_compact_control(
                 True,
                 "当前会话没有新的已完成历史需要压缩。",
             )
-        with _manual_compact_lane(owner_agent, store, thread.thread_id):
+        from ..settings.model_scope import selected_model_scope
+
+        with _manual_compact_lane(owner_agent, store, thread.thread_id), selected_model_scope(owner_agent):
             refreshed = store.load_thread(thread.thread_id)
             if refreshed is None:
                 raise OSError("conversation thread disappeared before manual compact")

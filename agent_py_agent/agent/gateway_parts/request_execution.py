@@ -1229,6 +1229,15 @@ def _start_gateway_request_lease(
 # LLM: 持有精确恢复车道后准备 canonical 会话并绑定 main 显示；显示不能授予执行权或成为状态源。
 # 函数用途: 执行 Gateway 对话，固定归属、读取上下文，并同步同会话窗口的前台活动。
 def _run_gateway_ask(context: _GatewayAskRunContext):
+    from ..settings.model_scope import selected_model_scope
+
+    with selected_model_scope(context.agent):
+        return _run_gateway_ask_with_model(context)
+
+
+# LLM: 主工作片已绑定不可变模型快照，预检查、Compact 和实际执行必须共用该配置。
+# 函数用途: 执行已选模型的会话主链，等待车道与授权不会改变本轮接口或密钥。
+def _run_gateway_ask_with_model(context: _GatewayAskRunContext):
     request = context.request
     prompt = str(request.get("prompt") or request.get("goal") or "").strip()
     if not prompt:

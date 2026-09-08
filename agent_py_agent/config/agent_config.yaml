@@ -626,6 +626,9 @@ max_tokens: 16314
 # 当前模型真实上下文窗口 token 数。compact/preflight 用它计算何时折叠；
 # 不要和 chat_context_window_chars 混用，后者只是聊天界面的字符预算。
 model_context_window_tokens: 128000
+# 是否把上述窗口视为显式总容量，不再由 provider metadata 覆盖。
+# /model 保存的各模型窗口自动采用此语义；部署默认 false 保持既有探测优先行为。
+model_context_window_explicit: false
 
 # 采样温度
 temperature: 0.2

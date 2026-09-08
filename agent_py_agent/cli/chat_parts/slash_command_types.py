@@ -43,6 +43,7 @@ CHAT_SLASH_COMMANDS = (
     ),
     SlashCommandSpec("status", "/status", "查看当前窗口状态", submit_on_enter=True),
     SlashCommandSpec("context", "/context", "查看真实上下文用量", submit_on_enter=True),
+    SlashCommandSpec("model", "/model", "新增或选择模型、接口和上下文窗口", submit_on_enter=True),
     SlashCommandSpec(
         "compact",
         "/compact [补充要求]",

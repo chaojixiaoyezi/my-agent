@@ -220,6 +220,10 @@ exact id 放入 `covers`；child 进入 canonical `DONE` 后宿主只按该 id �
 
 ## Compact 后
 
+用户通过 `/model` 选择自定义模型时，新 child 的 `host_model_profile.v1` 由父级真实配置来源生成，
+忽略模型参数里的同名伪造属性。子代理在 owner/dispatch 授权后按该私有引用恢复接口、密钥和显式窗口；
+菜单后续切换不热改当前 child。未使用自定义模型的旧任务保持原部署配置继承，不做批量迁移。
+
 main/child/grandchild 现在各自从独立 ConversationThread 的 summary/raw tail 恢复，并全部走同一
 Conversation Compact。task-local 只保留子代理权限、Memory 隔离和运行工作区，不再生成旧 compact apply/
 continue。排障时以 `task.agent_thread_id -> ConversationThread.compact_generation/checkpoint_id` 为正式次数与

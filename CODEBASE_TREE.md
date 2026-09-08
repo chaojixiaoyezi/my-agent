@@ -20,6 +20,7 @@ agent_py_agent/
 |   |   |-- tui.py                      # chat TUI 生命周期、唯一 runtime/worker/preflight 接线与返回码
 |   |   |-- tui_block_renderer.py       # typed snapshot 到欢迎/消息/思考/工具/权限/队列/footer formatted lines
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
+|   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
 |   |   |-- tui_input_delivery.py       # 活动回合输入的持久 outbox、同 ID 对账与排队接管
 |   |   |-- tui_control_delivery.py     # slash 控制命令的持久 outbox、稳定操作 ID 与只读状态对账
 |   |   |-- tui_interaction.py          # stash、Ctrl-R、paste 与 `?` help 的线程安全输入状态机
@@ -165,6 +166,8 @@ agent_py_agent/
 |   |   |-- delivery.py                # 通道 input_receipt/request_result 三态回送、CAS 与重启去重
 |   |   `-- ingress.py                 # POST 前 durable ingress、冲突隔离与单线程全链恢复
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
+|   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
+|   |   |-- model_scope.py              # 主工作片冻结 config/backend/prompts，切换不热改在途执行
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
 |   |   |-- audit_activation.py        # 显式 `/audit` 前缀 -> guarantee/window 结构化激活
 |   |   `-- tool_output_paths.py       # Memory/工具共用的 owner/task 输出归档与索引路径权威
@@ -296,6 +299,9 @@ docs/
 ### 关键文件说明
 
 - `agent/gateway_parts/main_activity.py`：前台请求与后台共用 main 标量；绑定当前 task、隔离迟到工作片，不驱动执行。
+- `agent/gateway_parts/model_profile_service.py`：authenticated owner 的模型菜单接口，不经聊天队列或模型。
+- `agent/settings/model_profiles.py` 与 `model_scope.py`：用户模型存储和运行快照；敏感配置位于宿主 config/model-profiles，非业务目录。
+- `cli/chat_parts/tui_model_menu.py`：真实 TUI 模型菜单，保存/返回与模型执行分离。
 - `agent_py_agent/tests/test_gateway_main_activity.py`：前后台数值/阶段共享、任务晋升、跨会话拒绝、迟到关闭和显示故障验证。
 - `agent_py_agent/tests/test_shell_stdin.py`：使用独立宿主管道验证批处理 EOF、输入不串和显式管道，不读取真实用户输入。
 - `agent/conversation/history_page.py`：显示专用倒读页与工作片身份，双游标不回灌模型。

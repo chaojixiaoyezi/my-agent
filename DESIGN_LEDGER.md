@@ -4063,3 +4063,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   generation 自动 final。R133 在唯一 coordinator 已以 `SUBAGENTS_ACTIVE` 等待两名直属 worker 时顺序重启，
   两名 worker 不复制，原 coordinator 与原 main 依次生成下一 attempt 并自然完成。三种安全点均由独立 fresh
   MiniMax-M2.7 TUI 证明，不互相外推。
+# /model 用户模型配置（实现中）
+
+按用户保存 OpenAI/Anthropic 接口、模型名、地址、私密密钥及显式上下文窗口；Auth 暂留入口。
+配置菜单不送模型，当前工作片不热换模型；设计与验证边界见 [TUI_MODEL_PROFILES](docs/design/TUI_MODEL_PROFILES.md)。

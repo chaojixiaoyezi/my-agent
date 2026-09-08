@@ -6,8 +6,14 @@ from collections.abc import Mapping
 DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 
 
+# LLM: 用户显式窗口是配置权威，优先于可选 metadata；未显式配置时沿用 provider 优先，不额外探测。
+# 函数用途: 给真实模型压力与 Compact 计算同一窗口，避免菜单配置只影响显示。
 def resolve_model_context_window_tokens(agent: object) -> int:
     backend = getattr(agent, "backend", None)
+    if bool(getattr(getattr(agent, "config", None), "model_context_window_explicit", False)):
+        configured = _configured_context_window(agent, backend)
+        if configured > 0:
+            return configured
     provider_window = _provider_context_window(backend)
     if provider_window > 0:
         return provider_window

@@ -140,6 +140,8 @@ def _resume_direct_parent_after_session(worker: object, child_run_id: str) -> No
         )
 
 
+# LLM: 先做 owner/dispatch 授权，再从宿主记录恢复创建时模型引用；用户后来切模型不能改写当前 child。
+# 函数用途: 构造子代理执行依赖，复用原 task overlay，并为重启后的自定义模型恢复正确接口和窗口。
 def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
     worker = simple_agent_cls(params.config, params.root)
     _attach_worker_runtime(worker, params)
@@ -154,8 +156,10 @@ def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
             requester_owner=str(getattr(worker.subagents, "owner_id", "") or ""),
         ),
     )
+    from ...settings.model_profiles import inherited_model_config
+
     effective_config = apply_task_runtime_config_overlay(
-        params.config,
+        inherited_model_config(worker, task),
         task,
         workspace_root=worker.subagents.workspace_root,
     )

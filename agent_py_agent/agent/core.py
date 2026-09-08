@@ -92,6 +92,7 @@ from .prompting_parts import PromptBuilder
 from .runtime_db.operation_store_selector import select_operation_store
 from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService, ScheduleTool
 from .settings import AgentConfig
+from .settings.model_scope import ModelScopedAttribute
 from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
 from .tooling.computer_use_profile import computer_use_mcp_servers
@@ -293,6 +294,8 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
     )
 
 
+# LLM: 模型依赖按执行作用域覆盖；其它 owner/runtime/存储依赖保持原权威对象，不复制整套 Agent。
+# 类用途: 组装主代理，并让同用户切模型不会热改正在工作的其它线程。
 class SimpleAgent(
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
@@ -311,6 +314,9 @@ class SimpleAgent(
     _current_run_task_workspace = ThreadLocalAgentAttribute("_current_run_task_workspace")
     _current_tool_loop_params = ThreadLocalAgentAttribute("_current_tool_loop_params")
     _current_skill_snapshot = ThreadLocalAgentAttribute("_current_skill_snapshot")
+    config = ModelScopedAttribute("config")
+    backend = ModelScopedAttribute("backend")
+    prompts = ModelScopedAttribute("prompts")
 
     def __init__(
         self,

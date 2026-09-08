@@ -1271,3 +1271,7 @@ generic `create_attempt` 和 `recover_attempt_unknown` 不感知 transport marke
 `_bind_main_agent_authority`；旧操作不会被 RuntimeDB 重开，模型只从 carried records 获得已做事实。任何
 EXECUTING/UNKNOWN、已启动但未 settle、缺 archive、operation 字段冲突或 DIRTY/MUTATING 资源都返回结构化
 blocked，由 Gateway 停止该 request，避免重复副作用。
+# R211 模型菜单接口
+
+`model_profile_service.handle_client_models` 为 `/client/models` 提供 owner 认证后的 list/add/select。
+密钥不进入 ask/control/notice 队列；私有配置文件和运行快照分别由 settings/model_profiles 与 model_scope 负责。

@@ -3001,3 +3001,8 @@ R183 真机仍失败：正确旧 Go 绝对路径被重写成 HANDOVER 所在目�
   worker generation 1 正在运行时顺序重启；worker 无重复，原 coordinator generation 2 集成后原 main
   generation 2 汇报，91 个 unittest 全通过。R132 因模型多派一层 coordinator 且错过等待窗口只保留负样本。
   至此主代理活跃、main 等直属 child、coordinator 等孙代理三个真 TUI 重启安全点全部通过。
+# R211 /model 配置主链（真实 TUI 待验）
+
+新增 owner 认证后的 `/client/models`，列表不返回密钥，保存与选择走同一私有原子配置文件。
+主工作片（前台/后台/手动 Compact）冻结模型依赖，不热改另一个会话的 Agent；子代理按创建时引用恢复。
+当前处于定向验证与打包阶段，BUG-146/147 继续保留，不能将菜单功能当成原同步问题已修复。

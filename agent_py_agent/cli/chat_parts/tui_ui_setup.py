@@ -88,7 +88,6 @@ def _make_render_context_factory(
     transcript_state: TuiTranscriptModeState,
 ):
     agent_name = str(getattr(params.agent.config, "agent_name", "my-agent") or "my-agent")
-    model_name = str(getattr(params.agent.config, "model_name", "") or "")
     root = getattr(params.agent, "root", "")
     try:
         workspace = str(Path(root)) if root else ""
@@ -118,7 +117,7 @@ def _make_render_context_factory(
         return TuiRenderContext(
             width=width,
             agent_name=agent_name,
-            model_name=model_name,
+            model_name=str(getattr(params.agent.config, "model_name", "") or ""),
             workspace=workspace,
             detailed_transcript=transcript_snapshot.active,
             show_all=transcript_snapshot.show_all,
@@ -699,7 +698,8 @@ def _assemble_tui_application(
     from prompt_toolkit.application import Application
     from prompt_toolkit.cursor_shapes import CursorShape
     from prompt_toolkit.filters import Condition
-    from prompt_toolkit.layout import DynamicContainer, Layout
+    from prompt_toolkit.key_binding import ConditionalKeyBindings
+    from prompt_toolkit.layout import DynamicContainer, FloatContainer, Layout
 
     body = DynamicContainer(
         lambda: (
@@ -710,8 +710,10 @@ def _assemble_tui_application(
             else normal_body
         )
     )
-    layout = Layout(body, focused_element=parts.input_area)
-    key_bindings = _make_tui_keybindings(params, parts)
+    model_host = FloatContainer(content=body, floats=[])
+    layout = Layout(model_host, focused_element=parts.input_area)
+    key_bindings = ConditionalKeyBindings(_make_tui_keybindings(params, parts),
+        Condition(lambda: not getattr(app, "_my_agent_model_menu_active", False)))
     app = Application(
         layout=layout,
         key_bindings=key_bindings,
@@ -724,7 +726,7 @@ def _assemble_tui_application(
         cursor=CursorShape.BLOCK,
         min_redraw_interval=APP_REDRAW_INTERVAL_SECONDS,
         max_render_postpone_time=APP_RENDER_POSTPONE_SECONDS,
-        before_render=lambda application: _before_tui_render(
+        before_render=lambda application: None if getattr(application, "_my_agent_model_menu_active", False) else _before_tui_render(
             application,
             parts.input_area,
             parts.transcript_view,
@@ -734,6 +736,8 @@ def _assemble_tui_application(
             parts.runtime,
         ),
     )
+    app._my_agent_model_float_container = model_host
+    app._my_agent_model_menu_active = False
     _configure_escape_timeouts(app)
     parts.transcript_view.provider.set_invalidate_callback(app.invalidate)
     parts.transcript_view.overlay_provider.set_invalidate_callback(app.invalidate)

@@ -541,6 +541,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     request_timeout: int = 240
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
     model_context_window_tokens: int = 128_000
+    # /model 保存的用户窗口为显式容量；默认部署仍保留原 provider metadata 优先策略。
+    model_context_window_explicit: bool = False
     temperature: str = "0.2"
     anthropic_version: str = "2023-06-01"
     # Anthropic-compatible 原生多轮工具请求是否写 cache_control 断点。仅影响 native

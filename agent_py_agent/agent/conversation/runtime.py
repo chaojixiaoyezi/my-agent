@@ -1225,6 +1225,21 @@ def _invoke_background_main_agent(
     goal_context: GoalRuntimeContext,
     delivery_availability: tuple[bool | None, bool | None],
 ) -> tuple[object, dict[str, object]]:
+    from ..settings.model_scope import selected_model_scope
+
+    with selected_model_scope(runtime.agent):
+        return _invoke_background_main_agent_with_model(runtime, thread, request, goal_context, delivery_availability)
+
+
+# LLM: 后台一整片（包括 Compact）复用作用域模型快照；不因此新建线程、工作片或控制记录。
+# 函数用途: 用当前选定模型继续后台主代理，子代理仍从创建时的配置继承。
+def _invoke_background_main_agent_with_model(
+    runtime: BackgroundMainAgentRuntime,
+    thread: ConversationThread,
+    request: BackgroundRunRequest,
+    goal_context: GoalRuntimeContext,
+    delivery_availability: tuple[bool | None, bool | None],
+) -> tuple[object, dict[str, object]]:
     proactive_delivery_available, transcript_delivery_available = delivery_availability
     wake_prompt = background_prompt(
         request.reason,

@@ -1,5 +1,13 @@
 # STATUS
 
+## R211 /model 已实现，准备真实 TUI 验收
+
+- 新增/选择模型、OpenAI 与 Anthropic 接口、Auth 预留、密钥掩码、保存/返回/退出和自定上下文已落地。
+- owner 私有配置原子保存；主工作片冻结 config/backend/prompts，子代理保存创建时引用以供恢复。
+- 定向模型菜单与继承验证 105 passed；后台、配置与流式相关回归 254 passed / 2 既有 xfailed（两组有重叠）。
+  Ruff/doc sync/strict code-size/diff/clean-package 通过；未跑全仓 pytest。真实 MiniMax TUI 尚待验证。
+- 原 Go 授权等待展示、完整前台正文跨窗口同步和原 P0/P1 保持开放，不把菜单通过当底座全部通过。
+
 ## R209 真 TUI 复验完成；BUG-146 前台跨窗口投影待修
 
 - ma-r208-110-go-check 已运行 R209 wheel 023db9996a9ed5fd22dfb7743c31ff2fa5d34468cc7664c9a668f90f3895a544；

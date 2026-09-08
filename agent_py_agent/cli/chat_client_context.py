@@ -160,6 +160,16 @@ class GatewayChatClientAgent:
     def gateway_request_identity(self) -> dict[str, str]:
         return _gateway_request_identity(self.owner_identity)
 
+    # LLM: 模型表单走 authenticated owner 专用接口，不进入 ask/history；未收到回执时明确未知，不自动重发密钥。
+    # 函数用途: 读取、保存或选择当前用户模型；返回数据必须为服务端脱敏列表。
+    def request_models(self, *, session_id: str, operation: str, **payload) -> dict:
+        status, body = self.post_gateway_json("/client/models", {
+            **payload, "operation": operation, "conversation_id": session_id,
+        }, timeout=10.0)
+        if body:
+            return body
+        return {"ok": False, "http_status": status, "message": "Gateway 未确认操作结果；请重新打开列表确认。"}
+
     # LLM: Session lifecycle is submitted to the already running Gateway's typed HTTP contract,
     # preserving owner resolution without constructing another local MemoryCuratorService.
     # 函数用途: 退出或重置会话时通知 Gateway 登记记忆策展事件，失败按 best-effort 返回 False。
