@@ -1,12 +1,13 @@
 # ROADMAP
 
-## R220 普通派工 IO 误复用已本地修复，下一步真实 TUI
+## R220 派工误复用已部署，真实 TUI 在测试机断联前运行中
 
 解决问题：R219真TUI模型发出5项不同职责，宿主把同输入/输出的僵尸和UI并入植物run，只建3个，吞掉两项任务。
 已读会话运行时 multi_agents/spawn.rs，以及本项目create_context自动IO合同、create_constraints复用链和原始回执。
 已删除普通派工按IO引用猜身份的两个生成入口，保留精确operation重放、显式幂等与Audit工作范围。
 247项focused及1项Audit并发显式work_scope通过；五个先红定位包含真实5→3和LOCAL/MANAGED实际创建工具。
-接下来独立包单Gateway运行同类多子代理真TUI；本地通过不代替线上执行证据。
+f5b98e9独立包/唯一Gateway3614482运行同类多子代理真TUI，两页可见5child工作；原始回执与完整终态仍未核完。
+随后本机到.10网络不可达，真实通过暂不宣称；恢复连接后继续ma-r220-110-dispatch的原请求，不重发prompt。
 不根据goal文本判断不同任务，不恢复文件锁或机器质量验收。该片与未提交过程耐久化、原P0/P1继续推进。
 
 ## R219 统一 Context 的真实恢复已通过

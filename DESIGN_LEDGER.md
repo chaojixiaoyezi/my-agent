@@ -1,6 +1,6 @@
 # DESIGN LEDGER
 
-## 2026-09-08 派工引用不能冒充派工身份【状态：R220 修复中，真实 TUI 待验】
+## 2026-09-08 派工引用不能冒充派工身份【状态：R220 已部署，真实 TUI 最终待验】
 
 R219 真实五项派工中，植物/僵尸/UI 有不同 covers 与职责，却共享 index.html 输入输出；宿主自动生成
 system_derived_io_scope 合同，并把后两项都复用为植物 child。真实回执 created=3、reused 同一 run 两次，
@@ -10,6 +10,7 @@ ManagedOperationStore：精确 operation 已终态时重放原回执，输入冲
 删除 create_context 自动 IO 合同及 work_scope.py 的 IO 哈希生成；显式幂等、Audit work_scope、恢复、owner 与安全门
 仍保留。不解析 goal 判相似，也不增加文件锁或机器质量判官。旧任务不重写或重派；新派工不匹配其旧 IO 身份。
 定向复现真实 5→3、同文字不同调用、LOCAL/MANAGED 精确重放与新调用；同输入/输出绝不能吞掉独立派工项。
+f5b98e9已独立包部署，真TUI两页出现5个运行child；随后测试机网络不可达，未拿到完整原始回执/终态，不标真实通过。
 
 ## 2026-09-08 最近上下文快照独立于执行活动【状态：R219 真实 TUI 分项通过】
 

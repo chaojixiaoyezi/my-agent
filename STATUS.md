@@ -1,12 +1,18 @@
 # STATUS
 
-## R220 派工误合并本地已修，准备真实复验
+## R220 派工误合并已部署，真实任务进行中后测试机断联
 
 - 删除普通派工的自动IO合同与work_scope哈希，共去掉两个相同文件猜身份的来源，显式身份不改。
 - 五个用例先红，其中精确重现5items→3run；修后247 focused + 1项Audit显式身份并发通过。
 - LOCAL/MANAGED真实创建handler的同operation重放不重复创建，新operation不复用共享文件child。
 - 模型配置定向包含在内；本地Qwen仍保持基础短对话，未追加大任务或child。
-- 下一步单Gateway MiniMax真实TUI；当前Gateway仍R219/3606014，默认launcher未改，BUG-152待真实关闭。
+- f5b98e9独立包已部署，唯一Gateway3614482/MiniMax；旧R219包与配置保留，默认launcher未改。
+- ma-r220-110-dispatch / -view，owner p0-r220-dispatch，session sess_1788900090_2613e9a2，
+  root gwreq-1788900146-7ba25d7774444080bc2469af6e7803d8，主thread-e776c714c2b6475f。
+  同一普通游戏prompt只发一次；断联前两页均见5个运行child、各自ctx，主等待5child，Context32.3k。
+- 真实完整闭环尚未通过：SSH开始超时，随后Network is unreachable；本机当前192.168.93网段。
+  没有证据证明远端任务停止，不能重发。派工原始回执采集尚未取到，不能只以UI人数认定BUG-152关闭。
+- 下次先恢复网络并核验原run/子树/账本，再做最终产物和后续插话；不重新创建Gateway或另发同一任务。
 - 原P0/P1与未提交过程耐久化继续开放；本轮不跑全仓pytest、不推远端Git。
 
 ## R219 Context 真实恢复通过；下一片修 BUG-152 派工误复用
