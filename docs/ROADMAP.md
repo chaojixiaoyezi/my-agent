@@ -1,10 +1,18 @@
 # ROADMAP
 
-## R219 下一片：统一 Context 的真实恢复验收
+## R220 下一片：修复普通派工的 IO 引用误复用
+
+解决问题：R219真TUI模型发出5项不同职责，宿主把同输入/输出的僵尸和UI并入植物run，只建3个，吞掉两项任务。
+已读会话运行时 multi_agents/spawn.rs，以及本项目create_context自动IO合同、create_constraints复用链和原始回执。
+先保留精确ToolCall/operation重试幂等，删除普通派工按IO引用猜身份的路径，再跑同类多子代理真TUI。
+不根据goal文本判断不同任务，不恢复文件锁或机器质量验收。该片与未提交过程耐久化、原P0/P1继续推进。
+
+## R219 统一 Context 的真实恢复已通过
 
 解决问题：主代理空闲后数值跟着 main_activity 消失，子代理数字又在 run 属性里，容易与 Compact 代次混用。
 已统一到各自 canonical thread；同代纯数字 preflight、独立空闲投影和模型输入排除均实现，324 focused通过。
-下一步受控单Gateway升级后用真实主/子任务与精确resume验证，不从旧校准/累计token捏造历史数字。
+已独立包单Gateway升级，真实主/子与精确resume通过，三页80.7k、零补调用；child压缩后56.1k/compact1一致。
+运行中Gateway三安全点重启、Compact动画/取消、孙代理组合仍未因本次通过而关闭；不猜旧记录数字。
 R219真实审批拒绝分支已经核对未执行/继续/结束，报告夸大“交互验证”另列待修；整体目标不缩小。
 
 ## R218 已复验；下一片为空闲 Context 和未提交过程

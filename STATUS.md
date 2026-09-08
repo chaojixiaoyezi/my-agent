@@ -1,6 +1,19 @@
 # STATUS
 
-## R219 审批拒绝真 TUI 分项通过；Context 统一修复待部署
+## R219 Context 真实恢复通过；下一片修 BUG-152 派工误复用
+
+- 5ad6696 独立包已受控部署，唯一 Gateway 3606014、MiniMax-M2.7；旧包保留，默认 launcher 未改。
+- ma-r219-110-context / -view / -resume，同 sess_1788895999_838dcf9f，主/四 child 最终 done。
+  三页主 Context 80.7k 且无 Working；恢复前后 canonical、执行账、模型账完全相同，零补调用。
+- 运行中及终态子代理名册/详情与各自 thread 数字一致；整合 child 实际 Compact 1，结束后均 56.1k。
+- 1196.859 秒，107 次 MiniMax / 0 重试；普通输入462864，cache-write161332/read4634433，输出62204。
+- BUG-152：首批5项中僵尸/UI被自动IO引用合同误复用到植物child，实际只创建3个；另有整合child。
+  原始模型参数、工具原始回执和canonical身份均保存；先修宿主身份规则，不怪模型、不代补游戏代码。
+- 游戏本机50080 HTTP200，开发机连接拒绝，业务仍未通过。Gateway约415MiB，三页各76/114/84MiB，磁盘余428MiB。
+- 本地324 focused及严格gate通过，无全仓/远端推送；运行中重启、提交前过程、P0/P1其余矩阵和跨模型child仍开放。
+  本地Qwen保持基础短对话范围，没有追加任务；跨模型入口已支持但真实跨模型组合未冒充通过。
+
+## R219 审批拒绝真 TUI 分项通过；Context 本地修复记录
 
 - ma-r219-110-deny / -view，owner p0-r219-deny：精确审批拒绝后工具回执为 APPROVAL_REJECTED、
   handler_executed=false，执行账没有该 operation；原 request 继续并 done，两页不再 Working。
@@ -8,7 +21,7 @@
   不能把该人工等待计成模型响应慢。模型改用脚本后夸大交互验证，独立记录为报告质量待修，不算业务通过。
 - 空闲恢复缺 Context 已本地修复：主/子同一 preflight 数字写入各自 thread，Compact 原子清代，
   数字不驱动 Working，模型 bundle 不含该显示字段；子页和名册同次读取代次与数字。324 focused通过。
-- 尚未部署/真 TUI 复验本片 Context；旧记录缺快照不猜数，完整P0/P1、提交前崩溃过程、跨模型child仍开放。
+- 本地阶段尚未部署；其后真实Context结果见本页最新记录。旧记录缺快照不猜数，其他边界仍开放。
 
 ## R218 客户端真实历史复验通过
 

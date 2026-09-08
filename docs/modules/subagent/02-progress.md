@@ -1,10 +1,13 @@
 # Subagent Progress
 
-## R219 主/子上下文统一（本地修复中）
+## R219 主/子上下文统一（真实 TUI 分项通过）
 
 删除 runner trace 的旧 run 属性数字写入与读取；统一在模型 preflight 写入该 child 的 agent_thread_id。
 阶段/心跳仍走原 trace。主列表和 child 详情从同次 thread 读取数字及 Compact 代数，不再混代；缺值显示未知。
-成功 Compact 清掉旧代快照，下一次调用重建；不迁移猜测旧数字，真实子页/恢复组合仍待验。
+成功 Compact 清掉旧代快照，下一次调用重建；不迁移猜测旧数字。
+四child名册/详情/同代thread数字一致，整合child成功Compact1后56149，恢复不补调模型。
+首批5items却只生成3run：自动IO引用合同把僵尸/UI误复用为植物child；BUG-152待修，不是模型少派。
+先保留ToolCall/operation精确重试，再删除普通派工按文件引用猜身份的逻辑，会话运行时 spawn为对照。
 
 ## R214 可选独立模型（本地实现，真实 child 待验）
 

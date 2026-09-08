@@ -1,6 +1,14 @@
 # DESIGN LEDGER
 
-## 2026-09-08 最近上下文快照独立于执行活动【状态：R219 修复中，真实 TUI 待验】
+## 2026-09-08 派工引用不能冒充派工身份【状态：BUG-152 已复现，下一片待修】
+
+R219 真实五项派工中，植物/僵尸/UI 有不同 covers 与职责，却共享 index.html 输入输出；宿主自动生成
+system_derived_io_scope 合同，并把后两项都复用为植物 child。真实回执 created=3、reused 同一 run 两次，
+不能归因于模型少传条目。会话运行时 multi_agents/spawn.rs 按显式创建生成新 thread、返回精确身份，不按文件引用合并。
+下一片先核对本项目既有 ToolCall/operation 的精确重试幂等，再移除普通派工的自动 IO 引用复用；
+显式幂等、恢复、owner 与安全门仍保留。不解析 goal 判相似，也不增加文件锁或机器质量判官。
+
+## 2026-09-08 最近上下文快照独立于执行活动【状态：R219 真实 TUI 分项通过】
 
 R217/R218 真实恢复页没有 Context，原因是数字只挂在易失 main_activity 下，空闲时正确清除主活动却同时
 失去数字；不能因此保留假 Working。对照 会话运行时 持久 TokenCount 与独立 set_token_info，终端交互 从
@@ -9,6 +17,10 @@ ConversationThread，不重新估算历史，不从累计计费或校准值反�
 显示记录与 provider 校准、计费分离，带 Compact generation；成功 Compact 原子清除，迟到旧代写入拒绝。
 缺记录保持未知，不伪造旧值；TUI 空闲投影不驱动 Working/Todo、调度或额外模型请求。
 需验证同 owner 多 thread、主/子、代次、隔离调用、重连/重启及零额外 provider 调用；仅定向通过不得封板。
+5ad6696 单 Gateway 部署后，真实游戏主/四 child 均有同代快照；三页空闲 80.7k、无 Working，恢复前后
+canonical/执行/模型账完全相同。整合 child 真 Compact 1 后名册/详情均 56.1k；不以此覆盖动画/取消或运行中重启矩阵。
+提交前过程耐久化仍开放：对照 会话运行时 session/mod.rs 的 persist_rollout_items 后 deliver_event_raw；
+本项目 BackgroundTurnHistory 仅内存收集到 final，下一片不能新增另一份模型正文或以完成快照冒充中断耐久性。
 
 ## 2026-09-08 工具历史保留公开调用预览【状态：R218 客户端真实复验通过】
 

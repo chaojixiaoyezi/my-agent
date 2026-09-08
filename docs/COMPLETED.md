@@ -1,11 +1,13 @@
 # COMPLETED
 
-## R219 最近上下文耐久显示（本地实现，真 TUI 待验）
+## R219 最近上下文耐久显示（真实 TUI 分项通过）
 
 主/子在同一模型 preflight 将数字保存到 exact thread，删除旧 child run 属性的写读旁路。
 Context 与 Working 分离，空闲可恢复；Compact 成功清代，迟到旧帧和读取失败不覆盖最新已知状态。
 子代理名册与详情同次读取数字及代数，未知显示破折号；遥测不进入模型 context bundle，不改计费或校准。
-324 focused通过，尚未受控部署/真实TUI复验，不能据此关闭 OBS-R217-IDLE-CONTEXT。
+324 focused与严格gate通过；5ad6696独立包/唯一Gateway3606014，三页80.7k且无Working，精确resume零补调用。
+四child名册/详情/持久thread一致，其中整合child真Compact1后56.1k；OBS-R217-IDLE-CONTEXT为FIXED_TUI_RESTORE。
+运行中重启、Compact取消/动画等仍开放；本次游戏请求5项却只建3个，另建整合child，BUG-152身份误复用待修。
 
 ## R219 具体工具拒绝分支（真实 TUI）
 

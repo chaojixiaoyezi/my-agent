@@ -5,7 +5,10 @@
 - [x] 真实TUI原页拒绝具体工具；观察页同步解除等待，handler未执行且零对应operation。
 - [x] 原request继续并最终done，两页Working收起；保留模型夸大“交互验证”的质量失败。
 - [x] 主/子preflight写exact thread、同代投影、Compact清空、迟到保护及模型bundle排除（focused）。
-- [ ] 单Gateway新版部署后真实main/child/恢复Context一致，重启读取不补模型调用。
+- [x] 单Gateway新版部署后真实main/child/新客户端resume Context一致，读取不补模型调用。
+- [x] child实际Compact1后，名册/详情/持久thread同为56149；主三页80706，空闲无Working。
+- [ ] BUG-152：5项派工被自动IO引用身份合成3run；修复后保持精确重试幂等并真TUI复验。
+- [ ] 正在任务中重启Gateway的三个安全点、Compact动画/取消和孙代理组合，另行验收。
 - [ ] 审批并发/冻结、capability deny/GAP、精确恢复等完整P0矩阵，不以本分支代替。
 
 ## R217/R218 完整过程与恢复
@@ -14,7 +17,7 @@
 - [x] final后第三页恢复，user/final各一次、18个思考、无Working；canonical消息/用量hash不变。
 - [x] 真实发现Bash命令标题在resume丢失；三个先红定位后，140 focused通过。
 - [x] R218新客户端同一真实历史恢复八条命令预览，展开头尾与原页逐字一致，旧记录/用量未改写。
-- [ ] 空闲resume缺Context数字（OBS-R217-IDLE-CONTEXT）定位及真实复验。
+- [x] 空闲resume缺Context数字（OBS-R217-IDLE-CONTEXT）定位及真实复验：R219三页与零补调用通过。
 - [ ] 前台提交前崩溃/让出片、取消/插话组合的完整过程耐久化，不以本片通过替代。
 - [x] 同会话第二个递归大任务及追加均返回，coordinator与四个孙代理done；游戏质量和LAN排障失败不算通过。
 

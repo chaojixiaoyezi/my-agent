@@ -5,7 +5,16 @@
 主/子精确thread、空闲恢复、Compact清代/旧代拒绝、读取失败保帧、owner隔离、模型bundle字节稳定、
 真实preflight同口径和未知不冒充零均有定向覆盖。相关14文件324 passed；不跑全仓pytest。
 `test_conversation_context_usage.py` 的六个修前失败包含真实TUI问题对应的空闲数字丢失；新增API缺失的
-失败仅为实现驱动，不能冒充六个线上bug。真实Context恢复与Gateway重启还未验收。
+失败仅为实现驱动，不能冒充六个线上bug。真实Context恢复已验，任务运行中Gateway重启矩阵仍开放。
+
+5ad6696 wheel SHA256 `074537cd05984c8dd6b3fb2a979ae3f396b4db4c52ab4730cea3d8a185cd0cb0`，
+唯一Gateway3606014；ma-r219-110-context/-view/-resume，session sess_1788895999_838dcf9f。
+request gwreq-1788896115-a3c6f231b1e34bd2ace567105d92ccd0 / thread-96ec7b4343f94981。
+三页空闲Context80706/Compact0，无Working；context-evidence-final/resumed.json的canonical、operations、thread完全相同。
+四child列表/详情/同代thread一致；context-evidence-compactchild.json有真实子页56149/Compact1。
+context-verification.json记录107调用0重试、1196.859秒及费用口径；不将模型done当业务质量通过。
+creation-index.json与creation-original-output.json保留BUG-152五项请求→三run、同一run复用两次的真实证据。
+resource-and-network.json记录本机HTTP200、外部拒绝及RSS；未修改DUT业务或防火墙。
 
 真实拒绝证据在 `r219-tui/evidence-waiting.json`、`evidence-denied.json`、`evidence-final.json`，
 session sess_1788889170_9f196206，request gwreq-1788889366-68da42889e844b038c15b9094577072b。

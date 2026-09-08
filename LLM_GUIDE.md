@@ -21,6 +21,9 @@
 
 ## 2026-08-23 当前运行基线
 
+- R219 Context 三页恢复及压缩后child数字已真TUI分项通过；普通派工自动IO引用合同误复用另列BUG-152。
+  修复前先核对精确ToolCall/operation重试身份；不能以相同输入/输出推断两个职责是同一child。
+
 - 主/子上下文显示统一从各自 ConversationThread.model_context_usage 读取同代 preflight 数字，不依赖活跃
   main_activity，也不回读旧 child 属性。成功 Compact 同一 CAS 清除；空闲恢复不额外调用模型，不显示假 Working。
   该遥测必须排除于完整/最小模型 context bundle，不能扰动缓存；缺快照是未知，不从累计计费或校准值猜测。
