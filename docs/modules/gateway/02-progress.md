@@ -1,5 +1,11 @@
 # Gateway Progress
 
+## R209 真复验与下一个缺口
+
+展开/上翻时失联警告与恢复通过，8428 读取夹具已停止，原配置直连；Gateway 3336610 与业务 run 没重启。
+新发现 BUG-146：同 session 的 foreground 工具/context 只在发送窗口可见，没有合入 background 主活动投影。
+现有 request progress 可证实追问已收到；完整答复、Go/家庭工具整合与全目标仍待验。
+
 ## R209 展开提示补缺
 
 R208 真 TUI 的清单恢复和普通主/子故障提示通过；Ctrl+O 二次装饰盖掉底栏，补 frame provider 组合修复。

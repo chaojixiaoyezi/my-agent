@@ -1,5 +1,13 @@
 # DESIGN LEDGER
 
+## 2026-09-08 前台与后台会话展示统一【状态：BUG-146 已定位入口差异，未实现】
+
+- 真实同 session 对照：发送追问的原 TUI 有前台工具与 context，新观察 TUI 只有 user 和旧后台过程。
+  前台请求 chunk 与 `BackgroundMainActivitySink` 没有合入同一 owner/thread 显示流；刷新成功不能证明完整。
+- 下一片先对照 会话运行时 同 thread 的 active-turn 事件投递，再把 foreground 的 typed 过程/上下文纳入现有
+  会话展示源；保持 request/run/attempt 精确身份、单 Gateway、消息去重与历史/模型上下文边界。
+  不加第二计数器、额外 LLM 调用，不靠摘要文案判断当前正在做什么；本轮只登记，不宣称已修。
+
 ## 2026-09-08 冻结正文不冻结客户端故障提示【状态：R209 本地修复】
 
 R208 真 Ctrl+O 暴露二次 decorator 重写 footer：主 renderer 已告警，但展开模式又盖回快捷键。

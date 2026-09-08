@@ -1,5 +1,20 @@
 # STATUS
 
+## R209 真 TUI 复验完成；BUG-146 前台跨窗口投影待修
+
+- ma-r208-110-go-check 已运行 R209 wheel 023db9996a9ed5fd22dfb7743c31ff2fa5d34468cc7664c9a668f90f3895a544；
+  child Ctrl+O 展开并上翻到任务首段，状态读取失败警告持续可见，恢复后还在原位置且模式提示恢复。
+  真实退避前几档为 0.512/1.119/2.018/4.078/8.038 秒，未添加模型调用或结束任务。
+- 8428 专用读取夹具已退出，观察 TUI 3437061 按原配置直连；唯一 Gateway 3336610 / MiniMax-M2.7 未重启。
+  R209 仅在两个自建客户端和夹具退出、环境零引用后替换 wheel，复用依赖；原 R205 Gateway 环境未改。
+- 原 Go 追问 gwreq-1788843971-aefe11868e5b48e2bf96633ac4314572 已收到，progress 有“先读真实状态”说明；
+  完整回复未回，不把收到当响应速度通过。Go 目前还剩一名 worker，长期重复读取/编译/修复仍未交付。
+- BUG-146：原 K 正在显示前台工具和 110.6k，精确同 session 新观察窗口只见新用户消息、旧后台过程，
+  main context 为空。`BackgroundMainActivitySink` 仅在 background runtime 接入；foreground 的 chunk
+  未进入同一会话展示投影。记录在 final-evidence.json，下一步统一源，不用文案/假 Working 补齐。
+- 家庭工具的新普通整合请求已真实调用 MiniMax-M2.7 四次（0 failed），两名新 worker 并行；模块接口不兼容
+  和完整交付仍待验。OS 剪贴板、上下文数值差异、完整 P0/P1 目标都未因本轮局部通过而关闭。
+
 ## R209 真 TUI 抓到展开底栏覆盖（本地修复中）
 
 - R208 独立客户端已部署，唯一 Gateway 3336610 未重启。Go 同会话恢复正确 1/6，Ctrl+Home 看旧调研后

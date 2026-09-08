@@ -1,5 +1,12 @@
 # TESTS
 
+## R209 真 TUI 结果
+
+原 Go 同会话的 child 详情经 Ctrl+O 展开并上翻到首段，notes 读取定向 503 时底栏警告保持，恢复后仍保持
+展开/原阅读位置且快捷键提示恢复。probe-failed-detailed-top/recovered-detailed-top.json 与 final-evidence.json
+已保存；专用 8428 代理退出并直连恢复，唯一 Gateway 与原 run 未重启。真实用量新增 MiniMax-M2.7 四次。
+同 session 新窗口未同步前台工具/context 另记 BUG-146；当前数值差异与整个 P0/P1 不冒充通过。
+
 ## R209 真展开模式组合回归
 
 R208 的真 PTY 中展开 footer 被 decorator 覆盖；新增经过 `TuiFrameProvider` 和冻结 snapshot 的先红用例，
