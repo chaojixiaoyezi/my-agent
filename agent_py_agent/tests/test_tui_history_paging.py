@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from copy import deepcopy
 from types import SimpleNamespace
 
 from agent_py_agent.cli.chat_parts.history import GatewayChatHistorySnapshot
@@ -20,6 +21,48 @@ def _events(label, count=5):
         "request_id": f"history:{label}-{index}", "block_id": f"history:{label}-{index}:assistant",
         "payload": {"text": f"{label}-{index}\n中文正文第二行\n第三行"},
     } for index in range(count))
+
+
+# LLM: helper 模拟持久工具卡携带的原计划投影，不写 canonical 文件，也不执行任务。
+# 函数用途: 重现长会话恢复时旧 Todo 抢占实时清单的输入形状。
+def _history_plan_event(generation, revision=2):
+    return {
+        "schema": "conversation_history_display.v1", "kind": "tool_completed", "phase": "completed",
+        "request_id": "bg-main:old-report", "block_id": "bg-main:old-report:plan",
+        "payload": {
+            "tool": "task_progress", "detail": "旧计划的完整工具回执仍可展开",
+            "task_progress_items": [{"id": "old", "title": "旧调研清单", "status": "in_progress"}],
+            "task_progress_generation_id": generation, "task_progress_plan_revision": revision,
+        },
+    }
+
+
+def test_recovered_tool_plan_does_not_pin_live_generation():
+    runtime = TuiRuntime("restored-long-session")
+    event = _history_plan_event("old-request")
+    original = deepcopy(event)
+    runtime.publish_recovered_history([], display_events=(event,))
+    current = [{"id": "current", "title": "当前 Go 复刻清单", "status": "in_progress"}]
+    runtime.update_background_activity(1, {"task_progress": {
+        "items": current, "generation_id": "current-request", "plan_revision": 2,
+    }})
+    snapshot = runtime.store.snapshot()
+    todo = next(block for block in snapshot.active_blocks if block.role == "todo")
+    assert todo.metadata["items"] == current
+    assert todo.metadata["task_progress_generation_id"] == "current-request"
+    assert any(block.detail == original["payload"]["detail"] for block in snapshot.stable_blocks)
+    assert event == original, "历史原始记录不可被清理显示字段时改写"
+
+
+def test_older_page_plan_cannot_overwrite_same_generation_live_plan():
+    _controller, runtime, _view = _pager()
+    current = [{"id": "current", "title": "保留当前任务", "status": "done"}]
+    runtime.publish_task_progress_snapshot(current, generation_id="same-request", plan_revision=2)
+    runtime.prepend_history_page((_history_plan_event("same-request", 99),),
+                                 expected_before=500, next_before=0)
+    todo = next(block for block in runtime.store.snapshot().active_blocks if block.role == "todo")
+    assert todo.metadata["items"] == current
+    assert todo.metadata["task_progress_plan_revision"] == 2
 
 
 # LLM: 使用真实 runtime/provider/reducer，fake app 只负责 UI 调度，不替代历史或权限实现。

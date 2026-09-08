@@ -1,5 +1,6 @@
 # LLM: 本模块是 chat worker/Gateway structured rows 到 TuiEvent 的唯一 adapter；它不渲染、不执行工具，也不把 legacy 文案当状态。
 # 后台流身份仅管理展示续接，换流不得清空本页面历史、待输入回执或已恢复工作片。
+# 历史工具卡不再驱动实时 Todo；当前计划只由实时工具/活动快照发布，恢复和向前翻页都遵守这一边界。
 # 模块用途: 为 session、输入队列、回合、流式助手、思考和工具发布有序事件；执行活动结束后不因残留 Todo 空转刷新。
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ from .tui_permission_queue import TuiPermissionCoordinator, TuiPermissionRuntime
 from .tui_view_model import TuiStateStore
 
 _BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
+_HISTORY_LIVE_PLAN_FIELDS = frozenset({
+    "task_progress_items", "task_progress_generation_id", "task_progress_plan_revision",
+})
 _BACKGROUND_TRANSCRIPT_KINDS = frozenset(
     {
         "active_turn_input_consumed",
@@ -823,8 +827,9 @@ class _TuiConversationBoundaryRuntimeMixin:
             self.history_before_cursor = next_before
             return inserted
 
-    # LLM: 只接受静态公开终态；后台快照沿原 block ID，完整 final 发布成功才重基该工作片，不执行控制或恢复活动。
-    # 函数用途: 按原顺序恢复显示，并记住已完整恢复的后台工作片，避免旧工具跑到 final 后面。
+    # LLM: 只接受静态公开终态；历史 payload 的副本撤掉实时 Todo 字段，不能锁代或覆盖当前计划。
+    # 完整 final 发布成功才重基原工作片；不改 canonical 原记录、不执行控制、不恢复活动。
+    # 函数用途: 恢复历史卡片和原工作片顺序，但把底部当前清单留给实时活动快照，向前翻页也不覆盖它。
     def _publish_recovered_display_events(self, events: tuple[dict[str, object], ...]) -> None:
         background_blocks: dict[str, list[str]] = {}
         for item in events:
@@ -843,7 +848,8 @@ class _TuiConversationBoundaryRuntimeMixin:
                 or not isinstance(payload, Mapping)
             ):
                 continue
-            self._publish(kind, phase, block_id, dict(payload), request_id=request_id)
+            display_payload = {key: value for key, value in payload.items() if key not in _HISTORY_LIVE_PLAN_FIELDS}
+            self._publish(kind, phase, block_id, display_payload, request_id=request_id)
             if request_id.startswith("bg-main:"):
                 background_blocks.setdefault(request_id, []).append(block_id)
             covered = str(item.get("covered_background_request_id") or "")

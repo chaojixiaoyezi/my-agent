@@ -1,5 +1,10 @@
 # TESTS
 
+## R207 历史与当前计划隔离
+
+两个先红用例覆盖“旧代历史锁住当前代”和“上翻旧页覆盖同代最新计划”；原输入字典、历史工具详情保持。
+历史分页、runtime、threading、view-model 和 conversation-history-display 共 89 focused 通过，真实恢复待验。
+
 ## R206 空选区右键
 
 真实 TUI 的 `_selected_text(None)` traceback 作为失败来源。新增正常右键 down/up、空选区不复制的

@@ -1,5 +1,14 @@
 # DESIGN LEDGER
 
+## 2026-09-08 历史展示不能接管实时 Todo【状态：R207 定位与修复中】
+
+- BUG-144 的当前 canonical 账本已保存 Go 清单；旧清单来自历史工具投影。恢复历史不能让旧工具携带的
+  `task_progress_items/generation_id/revision` 锁住当前清单代次，向前翻页更不能回写实时面板。
+- 对照 会话运行时 `chatwidget/turn_runtime.rs:on_plan_update` 的 typed 计划更新与历史卡片区分；my-agent 保留
+  完整历史卡片和原 metadata，只有送入显示 reducer 的历史副本撤掉实时 Todo 控制字段。当前面板继续
+  从原 authenticated activity/工具事件读取，不新增状态源、模型请求，不删进度账或改缓存。
+- Gateway 失联展示另修：必须保留最后快照并说明刷新失败，不能根据读失败擅自结束任务；沿用当前退避。
+
 ## 2026-09-08 空选区复制与失联显示【状态：BUG-142 本地修复；其余待定位】
 
 - 空选区是鼠标的正常状态，不是异常；复制投影返回空串且不调用剪贴板写入，不能中断 TUI 事件循环。

@@ -1,5 +1,12 @@
 # STATUS
 
+## R207 历史清单不再接管实时面板（本地通过，待真实恢复）
+
+- BUG-144 已由两个先红用例重现：旧工具恢复先锁代，当前 Go 清单被拒；向前补页还可覆盖同代面板。
+- 历史显示副本撤掉三项实时 Todo 字段，原工具详情、canonical metadata、模型上下文和进度文件不变。
+  当前清单仍由原实时工具/活动快照更新；89 focused 通过，尚未部署客户端，不以单测关闭 BUG-144。
+- 原 Go 两 worker 与截断后的家庭工具三 worker 仍在唯一 R205 Gateway / MiniMax-M2.7 下运行。
+
 ## R206 空选区右键（已部署客户端，真实 PTY 分项通过）与 Go 停滞排查
 
 - 新截断测试 TUI 的真实右键触发 `_selected_text(None)`，抛出 `AttributeError: ... anchor` 并进入

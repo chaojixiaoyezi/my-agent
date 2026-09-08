@@ -1,5 +1,10 @@
 # Gateway Structure
 
+## R207 静态历史不发布实时清单
+
+`_publish_recovered_display_events` 共用 `_HISTORY_LIVE_PLAN_FIELDS` 撤掉显示副本的实时 Todo 字段，
+保留 tool 详情、block ID、原顺序与完整后台 final 覆盖信息；原 metadata 不改，实时工具/活动快照仍是面板来源。
+
 ## R206 无选区不是复制异常
 
 `tui_view._selected_text` 将 None 视为正常空选区，与 终端交互 `selection.ts:getSelectedText` 一致；
