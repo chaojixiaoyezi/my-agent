@@ -704,7 +704,7 @@ def test_child_transcript_publishes_consumed_input_only_after_provider_acceptanc
 
 
 def test_background_reconnect_rebases_only_process_cursor(tmp_path: Path) -> None:
-    """真实消息库与 reducer 跨 Agent 重建后接新流，旧正文和消息字节游标都保留。"""
+    """换流不重基canonical游标；新完成块追加后物理游标前进，模型正文和旧文件前缀不变。"""
     from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
     from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
     from agent_py_agent.agent.gateway_parts.http_handlers import read_gateway_client_notices
@@ -729,7 +729,7 @@ def test_background_reconnect_rebases_only_process_cursor(tmp_path: Path) -> Non
     assert _consume_background_notices(Client(), "session-1", runtime, [None], seen, cursor)
     old_stream = runtime.background_event_stream_id
     old_blocks = tuple(runtime.store.snapshot().stable_blocks)
-    message_after = store.message_byte_offset_after(thread.thread_id, final.message_id)
+    message_after = store.history_page_report(thread.thread_id).after
     assert cursor == [10] and runtime.background_message_cursor == message_after
     before = store._message_path(thread.thread_id).read_bytes()
 
@@ -737,6 +737,7 @@ def test_background_reconnect_rebases_only_process_cursor(tmp_path: Path) -> Non
     # 新 Agent 还没产生事件的第一次读取也要换代，不能沿用上一进程的大游标。
     assert _consume_background_notices(Client(), "session-1", runtime, [None], seen, cursor)
     assert cursor == [0] and runtime.background_event_stream_id != old_stream
+    assert runtime.background_message_cursor == message_after
     assert tuple(runtime.store.snapshot().stable_blocks) == old_blocks
     restarted = BackgroundTranscriptSink(source[0], thread_id=thread.thread_id, task_id="task-a")
     restarted.write_thinking("重连后的公开块")
@@ -744,8 +745,9 @@ def test_background_reconnect_rebases_only_process_cursor(tmp_path: Path) -> Non
     blocks = tuple(runtime.store.snapshot().stable_blocks)
     assert blocks[:len(old_blocks)] == old_blocks
     assert blocks[-1].text == "重连后的公开块" and cursor == [2]
-    assert runtime.background_message_cursor == message_after
-    assert store._message_path(thread.thread_id).read_bytes() == before
+    assert runtime.background_message_cursor == store.history_page_report(thread.thread_id).after > message_after
+    assert store._message_path(thread.thread_id).read_bytes().startswith(before)
+    assert store.recent_messages(thread.thread_id, limit=0) == [final]
     assert _consume_background_notices(Client(), "session-1", runtime, [None], seen, cursor)
     assert tuple(runtime.store.snapshot().stable_blocks) == blocks
 
@@ -804,7 +806,7 @@ def test_background_stream_ack_requires_valid_page_and_successful_publish():
 
 
 def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) -> None:
-    """独立 event_after 游标不会与最终通知 created_at 游标互相覆盖。"""
+    """独立event_after不覆盖canonical字节游标；旧客户端跳过display类型但仍前进物理位置。"""
     from agent_py_agent.agent.conversation.background_transcript import (
         BackgroundTranscriptSink,
     )
@@ -861,7 +863,8 @@ def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) 
         "tool_started",
     ]
     assert first["event_cursor"] == 2
-    assert first["cursor"] == 0.0
+    assert first["cursor"] == store.history_page_report(thread.thread_id).after > 0
+    assert first["notices"] == []
 
     second = read_gateway_client_notices(
         agent,
@@ -872,6 +875,7 @@ def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) 
     )
     assert second["transcript_events"] == []
     assert second["event_cursor"] == 2
+    assert second["cursor"] == first["cursor"]
 
 
 def test_tui_notice_loop_consumes_background_transcript_once() -> None:
@@ -1436,6 +1440,7 @@ def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
     from agent_py_agent.agent.conversation.store import ConversationStore
     from agent_py_agent.agent.gateway_parts import http_handlers
     from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
@@ -1499,10 +1504,26 @@ def test_gateway_notice_cold_owner_replays_exact_durable_final_without_agent(
         page = http_handlers.read_gateway_client_notices(
             SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path)),
             scope=GatewayControlScope("cold-user", "tui-test", "cold-session", resolved_owner=owner),
-            after=snapshot["cursor"], include_foreground=capable,
+            after=snapshot["cursor"], display=http_handlers.NoticeDisplayCapabilities(foreground_messages=capable),
         )
         assert page["ok"] and [row["message_id"] for row in page["notices"]] == expected
         assert page["owner_state"] == "cold" and not store.goals_dir.exists()
+
+    sink = BackgroundTranscriptSink(SimpleNamespace(conversation_store=store), thread_id=thread.thread_id, task_id="task-a")
+    sink.write_thinking("重启前保存的完整过程")
+    after = store.message_byte_offset_after(thread.thread_id, foreground.message_id)
+    for capable in (False, True):
+        page = http_handlers.read_gateway_client_notices(
+            SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path)),
+            scope=GatewayControlScope("cold-user", "tui-test", "cold-session", resolved_owner=owner),
+            after=after, display=http_handlers.NoticeDisplayCapabilities(display_checkpoints=capable),
+        )
+        assert page["ok"] and len(page["notices"]) == int(capable)
+        assert page["cursor"] == store.history_page_report(thread.thread_id).after > after
+        assert page["owner_state"] == "cold" and not store.goals_dir.exists()
+        if capable:
+            assert page["notices"][0]["display_kind"] == "process_event"
+            assert page["notices"][0]["display_events"][0]["payload"]["text"] == "重启前保存的完整过程"
 
 
 def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:

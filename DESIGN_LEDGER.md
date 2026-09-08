@@ -1,5 +1,22 @@
 # DESIGN LEDGER
 
+## 2026-09-08 已完成公开过程逐块进入 canonical 历史【状态：R221 定向通过，未部署/真 TUI 待验】
+
+解决 BUG-146 的剩余崩溃窗口：main 的 BackgroundTurnHistory 原先在内存累积到 final，child 的
+agent_transcript_events 又是有界传输流，二者都不能单独证明长期完整历史。参考 会话运行时 session/mod.rs
+的 persist_rollout_items→deliver_event_raw 与逐 ResponseItem 保存，完整公开块先追加到同一会话消息账本。
+使用显式 role=display 和 conversation_display_event.v1 metadata，不伪装成助手回复或任务完成；开始块
+仅供恢复时提示结果未知，逐 token 增量继续只走传输。最终快照覆盖同显示工作片，不能覆盖其它工作片。
+这些记录不更新 thread 活动时间，不进入模型历史、Compact 输入、Memory Curator 或最近消息条数；
+显示分页/实时字节游标仍读取 canonical 原文件。保存失败可见告警，任务本身不被展示错误中断。
+先覆盖进程重开、已完成块/未知工具、final 去重、缓存输入不变、Memory 游标和跨 thread 过滤，再真 TUI。
+R220 网络阻断前原任务不重派；本片没有真实 TUI 证据前，不宣称历史耐久性已通过。
+
+288项相关focused通过。实时补页用显式 `display_checkpoints` 能力和无正文的 `process_event`，旧客户端仍推进
+原物理游标但不收新类型；冷owner不初始化Agent。前台按Gateway请求、child按attempt保持同片分页。
+只持久工具started占位，不存空thinking开始、逐token或控制事件；恢复的typed未知工具可被同block真实终态
+原位补齐，已知终态不可覆盖。新TUI/旧原始文件不需要模型补调用；存储失败明确告警但不把真实任务变成失败。
+
 ## 2026-09-08 派工引用不能冒充派工身份【状态：R220 已部署，真实 TUI 最终待验】
 
 R219 真实五项派工中，植物/僵尸/UI 有不同 covers 与职责，却共享 index.html 输入输出；宿主自动生成

@@ -32,7 +32,7 @@ from agent_py_agent.cli.chat_parts.tui_threading import (
 def _foreground(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread({"canonical_user_id": "owner-a"})
-    agent = SimpleNamespace()
+    agent = SimpleNamespace(conversation_store=store)
     request = {"conversation_runtime": {"request_id": "gwreq-live", "thread_id": thread.thread_id, "task_id": "task-a"}}
     writer = BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", rich_transcript=True)
     context = SimpleNamespace(agent=agent, on_chunk=writer, request_id="gwreq-live", request=request)
@@ -223,6 +223,7 @@ def test_original_nonrich_chunk_contract_and_display_failures_do_not_break_execu
 
 
 def test_notices_negotiate_live_stream_separately_from_committed_messages(tmp_path):
+    from agent_py_agent.agent.conversation.message_stream import NoticeDisplayCapabilities
     from agent_py_agent.agent.gateway_parts.foreground_transcript import (
         GatewayForegroundTranscriptSink,
     )
@@ -235,8 +236,8 @@ def test_notices_negotiate_live_stream_separately_from_committed_messages(tmp_pa
     foreground({"kind": "thinking_delta", "text": "前台显式思考"})
     background = BackgroundTranscriptSink(agent, thread_id=thread.thread_id, task_id="task-root")
     background.write_thinking("独立后台过程")
-    old = read_gateway_client_notices(agent, scope=scope, after=0, include_foreground=True)
-    new = read_gateway_client_notices(agent, scope=scope, after=0, include_foreground=True, include_foreground_transcript=True)
+    old = read_gateway_client_notices(agent, scope=scope, after=0, display=NoticeDisplayCapabilities(foreground_messages=True))
+    new = read_gateway_client_notices(agent, scope=scope, after=0, display=NoticeDisplayCapabilities(foreground_messages=True, foreground_transcript=True))
     assert all(not row.get("gateway_request_id") for row in old["transcript_events"])
     assert any(row.get("gateway_request_id") == "gwreq-live" for row in new["transcript_events"])
     assert old["event_cursor"] == new["event_cursor"] > 0

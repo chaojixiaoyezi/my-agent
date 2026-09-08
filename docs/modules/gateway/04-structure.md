@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## R221 逐块公开过程检查点
+
+`conversation/display_checkpoint.py` 校验公开事件并由sink写入同thread的messages JSONL；role=display、content为空、
+schema=conversation_display_event.v1。主/子writer在投递前保存完整块，工具started仅供静态未知占位。
+`ConversationMessageStore`的模型/Compact/Memory读取统一跳过display；history_page和顺读字节游标仍读原文件。
+`history_display`按精确Gateway请求/child attempt组合，完整final快照覆盖同片检查点；无快照保留未提交过程。
+`NoticeDisplayCapabilities`是readonly显示协议快照，独立于审批能力。新客户端声明display_checkpoints后，
+`message_stream`返回无正文process_event；冷owner使用同一路径，不加载Agent，不把display写成第二份assistant。
+TUI共享reducer以history_incomplete布尔标记识别工具未知占位，只允许同block完整工具结果原位补齐。
+其余已知终态仍不可覆盖；检查点不是完整工作片，不提前把同request的后续活动流标记为已恢复。
+
 ## R219 代次化 Context
 
 `call_runtime` 在同一 preflight 保存公开数字到 `ConversationThread.model_context_usage`；

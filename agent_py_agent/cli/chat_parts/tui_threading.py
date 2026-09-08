@@ -288,7 +288,7 @@ def _consume_gateway_background_snapshot(
 # LLM: Embedded/local mode reads the same agent-owned projection and event ring without HTTP.
 # ConversationStore is the only message source; the typed active count affects only the
 # next display delay, while the event ring stays display-only and uses the same stream handshake.
-# 函数用途: 在本地完整 Agent 模式消费后台活动、过程事件和最终通知，并更新空闲刷新节奏。
+# 函数用途: 本地模式共用canonical过程检查点与后台活动流；只推进成功显示的游标，不改变模型输入。
 def _consume_local_background_snapshot(
     agent: object,
     store: object,
@@ -350,6 +350,7 @@ def _consume_local_background_snapshot(
 
     fresh, cursor, messages_ok = read_background_response_page(
         store, thread_id, after=max(0, int(getattr(tui_runtime, "background_message_cursor", 0))),
+        include_display_checkpoints=True,
     )
     if not messages_ok:
         return False
@@ -609,8 +610,8 @@ def _consume_selected_agent_view(
     return True, bool(applier(run_id, payload))
 
 
-# LLM: user 必须带 canonical 显示事件；前台请求关联仅用于原页去重，发布成功后才确认消息游标。
-# 函数用途: 发布同会话已提交输入/回复；不同消息的相同正文保留，原发送页的同源副本跳过。
+# LLM: user/process必须带canonical显示事件；process没有正文，发布后才确认消息游标，不改变运行或审批。
+# 函数用途: 发布已提交输入、回复及完整过程块；同源副本去重，保存但未final的过程也可显示。
 def _publish_background_notice_row(
     tui_runtime: object,
     row: dict[str, object],
@@ -621,8 +622,8 @@ def _publish_background_notice_row(
     message_id = str(row.get("message_id") or "")
     if (
         row.get("schema_version") != "background_message.v1"
-        or row.get("display_kind") not in {"assistant_response", "user_message"}
-        or row.get("display_kind") == "user_message" and not isinstance(row.get("display_events"), list)
+        or row.get("display_kind") not in {"assistant_response", "user_message", "process_event"}
+        or row.get("display_kind") in {"user_message", "process_event"} and not isinstance(row.get("display_events"), list)
         or not message_id or not thread_id
     ):
         return False
@@ -632,7 +633,7 @@ def _publish_background_notice_row(
     publisher = getattr(tui_runtime, "publish_background_response", None)
     if not callable(publisher):
         return False
-    if content:
+    if content or row.get("display_events"):
         display_events = row.get("display_events")
         publisher(content, thread_id=thread_id, message_id=message_id, **(
             {"display_events": tuple(display_events)} if isinstance(display_events, list) else {}

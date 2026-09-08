@@ -1,6 +1,6 @@
 # LLM: Canonical conversation persistence owns messages and execution claims; recovery ownership
 # is structured and atomic, and never inferred from model text. Check Gateway terminal cleanup.
-# 模块用途: 保存会话、消息、代次化上下文展示及执行归属；前台恢复专属租约须由原请求继续或在终态释放。
+# 模块用途: 保存会话、消息、公开过程及执行归属；display行不进入模型/记忆读取，不改变线程活动或执行归属。
 """Conversation store for threads, messages, tasks, observations, guidance,
 wake signals, progress policies, and background claims.
 """
@@ -39,6 +39,11 @@ from .audit_requirements import (
     append_audit_pending_requirement,
     append_audit_user_requirement,
     published_audit_requirement,
+)
+from .display_checkpoint import (
+    DISPLAY_CHECKPOINT_ROLE,
+    display_checkpoint_event,
+    is_display_checkpoint,
 )
 from .models import (
     THREAD_GOAL_OBJECTIVE_MAX_CHARS,
@@ -973,7 +978,7 @@ def _message_entry_by_id_in_path(
 
 
 # LLM: 消息存储保持 canonical append-only 身份，显示分页只是只读投影；写入与模型历史调用方仍使用原合同。
-# 类用途: 保存会话消息并提供精确查找、实时顺读和向前翻页，不另建正文副本。
+# 类用途: 保存消息和display公开块；模型侧读取排除display，实时/历史显示仍从同一原文件顺读或翻页。
 class ConversationMessageStore(ConversationThreadStore):
     # LLM: 历史页只从当前 store 的 canonical 路径倒读；不修改消息、Compact、模型上下文或实时消费位置。
     # 函数用途: 提供独立向前游标，让客户端按需补更早记录，而不是固定截断或全量载入会话。
@@ -1006,6 +1011,19 @@ class ConversationMessageStore(ConversationThreadStore):
                 updated_at=max(latest.updated_at, entry.created_at),
             ),
         )
+        return entry
+
+    # LLM: typed display只能进入本thread canonical账本；不更新updated_at、不索引Memory、不触及执行或Compact状态。
+    # 函数用途: 逐块保存已公开过程；失败向上报告，不能把这类记录当助手回复或用来凑最近对话条数。
+    def append_display_checkpoint(self, thread_id: str, metadata: dict) -> MessageLogEntry:
+        thread = self._require_thread(thread_id)
+        entry = MessageLogEntry(
+            message_id=new_id("msg"), thread_id=thread.thread_id, role=DISPLAY_CHECKPOINT_ROLE,
+            content="", created_at=now(None), metadata=metadata,
+        )
+        if display_checkpoint_event(entry) is None:
+            raise ValueError("invalid canonical display checkpoint")
+        append_jsonl(self._message_path(thread.thread_id), entry.to_dict(), sort_keys=True)
         return entry
 
     def append_message_once(self, request: dict, *, dedupe_key: str) -> MessageLogEntry:
@@ -1050,25 +1068,26 @@ class ConversationMessageStore(ConversationThreadStore):
         entries, _errors = self.recent_messages_report(thread_id, limit=limit)
         return entries
 
+    # LLM: 模型/记忆读取排除display；逐步扩大尾读窗口，不能让大量过程块挤掉真正用户/助手消息。
+    # 函数用途: 读取最近对话及损坏报告；完整显示分页使用独立原文件游标，不复用模型消息条数。
     def recent_messages_report(
         self,
         thread_id: str,
         *,
         limit: int = 20,
     ) -> tuple[list[MessageLogEntry], list[dict[str, Any]]]:
-        # 尾部倒读：limit>0 时只解析最后一段，长会话不再全量加载。
-        # 多读一倍冗余行，留给 _message_entries 过滤非消息行后仍能凑满 limit。
         message_path = self._message_path(thread_id)
         if not message_path.exists():
             return [], []
-        report = read_jsonl_tail_report(
-            message_path,
-            context="conversation.messages.read",
-            limit=0 if limit <= 0 else max(limit * 2, limit + 8),
-        )
-        entries, parse_errors = _message_entries(report.rows)
-        selected = entries if limit <= 0 else entries[-limit:]
-        return selected, [*report.load_errors, *parse_errors]
+        read_limit = 0 if limit <= 0 else max(limit * 2, limit + 8)
+        while True:
+            report = read_jsonl_tail_report(message_path, context="conversation.messages.read", limit=read_limit)
+            entries, parse_errors = _message_entries(report.rows)
+            selected = [entry for entry in entries if not is_display_checkpoint(entry)]
+            errors = [*report.load_errors, *parse_errors]
+            if errors or limit <= 0 or len(selected) >= limit or len(report.rows) < read_limit:
+                return (selected if limit <= 0 else selected[-limit:]), errors
+            read_limit *= 2
 
     # LLM: 显示流只接受同 thread JSONL 完整行后的字节游标；不回扫前缀，不改模型历史，损坏/截断不能假装空页。
     # 函数用途: 为恢复后的实时显示顺序读取一页 canonical 消息，并返回下一条应读取的位置。
@@ -1104,8 +1123,8 @@ class ConversationMessageStore(ConversationThreadStore):
         except Exception as exc:
             return [], max(0, int(after)), [_jsonl_error(exc, "conversation.messages.page", path=path)]
 
-    # LLM: Memory Curator 只能从精确 message_id 后顺序读取有界批次；不得每次全量重放 transcript。
-    # 函数用途: 从 append-only ConversationStore 游标后流式读取至多 limit 条消息和结构化错误。
+    # LLM: Memory Curator从精确message_id后读取对话；display行既不进模型也不占批量条数，物理读取仍顺序推进。
+    # 函数用途: 跳过展示记录后收集有界真实消息；不改变调用方已消费的消息编号或正式记忆。
     def messages_after_report(
         self,
         thread_id: str,
@@ -1146,7 +1165,7 @@ class ConversationMessageStore(ConversationThreadStore):
                     if error is not None:
                         errors.append(error)
                         break
-                    if row is not None:
+                    if row is not None and not is_display_checkpoint(row):
                         rows.append(row)
             entries, parse_errors = _message_entries(rows)
             return entries, [*errors, *parse_errors]
@@ -1169,6 +1188,8 @@ class ConversationMessageStore(ConversationThreadStore):
         except Exception as exc:
             return None, [_jsonl_error(exc, "conversation.messages.by_id", path=path)]
 
+    # LLM: Compact输入只含真实会话消息；display行仍留在canonical文件，压缩游标必须锚定真实消息而非展示块。
+    # 函数用途: 读取未压缩的对话尾部，防止过程显示增加压缩次数或成为摘要/缓存输入。
     def messages_after_compact_report(
         self,
         thread: ConversationThread,
@@ -1205,7 +1226,7 @@ class ConversationMessageStore(ConversationThreadStore):
             elif row is not None:
                 rows.append(row)
         entries, parse_errors = _message_entries(rows)
-        return entries, [*errors, *parse_errors]
+        return [entry for entry in entries if not is_display_checkpoint(entry)], [*errors, *parse_errors]
 
     def message_byte_offset_after(self, thread_id: str, message_id: str) -> int:
         """Return the byte position immediately after a message in the raw ledger."""

@@ -1,5 +1,18 @@
 # STATUS
 
+## R221 未final过程持久化：本地通过，真实验收受网络阻断
+
+- 主/子公开完整思考、过程回复与工具结果逐块追加canonical会话账本；没有工具结果时恢复明确未知。
+- 仅完整块和工具开始占位写盘，控制/逐token/未提交最终候选不写；失败告警，真实任务继续。
+- 模型上下文bundle、native消息、Compact尾部、Memory批次和thread活动时间不受display行影响；
+  这是定向输入不变证据，不冒充供应商缓存命中测试。物理游标会随真实追加前进，不在Gateway换流时重基。
+- 主/子同片分页与final去重、冷owner无初始化、旧客户端跳过新类型、真实终态补未知卡片均有覆盖。
+- 13文件288 focused通过；本地Qwen没有新调用或child，主A/子B配置链路额外39focused通过。
+- 本地严格gate已通过：Ruff、doc sync、strict code-size（hard0）、diff、clean-package；无全仓pytest或远端Git推送。
+- .10本轮再次SSH超时，未部署/未重启Gateway；R220原请求是否完成仍未知，不能重发prompt。
+- 建议连接恢复后先核对R220原始回执/子树/产物，再为R221报出tmux进行单Gateway真实重启验收；
+  三安全点重启、跨模型child与其余P0/P1仍开放，不新增Gateway绕过阻断。
+
 ## R220 派工误合并已部署，真实任务进行中后测试机断联
 
 - 删除普通派工的自动IO合同与work_scope哈希，共去掉两个相同文件猜身份的来源，显式身份不改。

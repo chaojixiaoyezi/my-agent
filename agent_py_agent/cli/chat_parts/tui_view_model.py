@@ -1,5 +1,5 @@
 # LLM: 本模块是 typed TUI event 到可渲染快照的唯一 reducer；不得读取模型正文猜状态，也不得执行工具、权限或会话动作。
-# 模块用途: 管理稳定历史、候选块与界面状态；工具预览统一投影，canonical final 精确接替候选，流关闭不决定终态。
+# 模块用途: 管理历史、候选与界面状态；明确的历史缺口可被同块完整结果替换，已知终态不被重放改写。
 
 from __future__ import annotations
 
@@ -1018,10 +1018,12 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         if overflow > 0:
             del self.stable_blocks[:overflow]
 
-    # LLM: freeze 是 active→stable 的唯一出口；terminal-only 恢复必须携带显式完整 text/detail/title。
-    # 函数用途: 完成活动块，或从带完整内容的 terminal event 恢复一个稳定块。
+    # LLM: freeze是active→stable出口；已有真实终态不覆盖，仅同block的typed历史缺口可升级为完整工具结果。
+    # 函数用途: 固定完整内容并补回恢复时未知的工具结果，不新增重复卡片、不改变任务状态。
     def _freeze_block(self, event: TuiEvent, *, role: str) -> None:
         if event.block_id in self._stable_ids:
+            if self._resolve_history_placeholder(event):
+                return
             self.record_diagnostic("TERMINAL_BLOCK_REPLAY", event)
             return
         active = self.active_blocks.pop(event.block_id, None)
@@ -1052,6 +1054,21 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             metadata={**active.metadata, **_public_metadata(event.payload)},
         )
         self._append_stable(block, event)
+
+    # LLM: 仅替换host标记history_incomplete的system占位；精确block+bg请求+工具终态校验，正文不能授予覆盖权。
+    # 函数用途: 页面恢复后收到迟到的真实工具结果时原位补齐；旧开始事件和真实已知终态保持不可覆盖。
+    def _resolve_history_placeholder(self, event: TuiEvent) -> bool:
+        if (event.kind not in {"tool_completed", "tool_failed"} or event.phase not in {"completed", "failed"}
+                or not event.request_id.startswith(("bg-main:", "bg-agent:"))
+                or not event.block_id.startswith(f"{event.request_id}:") or not _terminal_has_content(event.payload)):
+            return False
+        for index, block in enumerate(self.stable_blocks):
+            if block.block_id != event.block_id or block.role != "system" or block.metadata.get("history_incomplete") is not True:
+                continue
+            complete = self._block_from_event(event, role="tool", phase=event.phase)
+            self.stable_blocks[index] = replace(complete, created_seq=block.created_seq, detail=_tool_terminal_detail(event, complete))
+            return True
+        return False
 
 
 # LLM: TuiStateStore 将 journal 与 reducer 锁在同一原子 publish 内，并只在接受新事件后通知 UI。
@@ -1219,8 +1236,8 @@ def _context_usage_from_mapping(
     )
 
 
-# LLM: metadata 白名单防止未知字段泄漏；工具标题只由既有公开 detail 投影，显式 invocation 优先，不回读原参数。
-# 函数用途: 统一实时和恢复块的安全元数据，让缺 started 帧的历史也保留调用预览；不执行工具或修改原事件。
+# LLM: 白名单保留显示字段及host历史缺口标记；标题由公开detail投影，标记不影响运行或控制权限。
+# 函数用途: 统一实时与恢复的安全元数据，允许同一工具结果补齐缺口，不回读原始参数。
 def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "severity",
@@ -1259,6 +1276,7 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "hidden_subagent_count",
         "stream_index",
         "received_chars",
+        "history_incomplete",
     }
     metadata = {key: payload[key] for key in allowed if key in payload}
     if (

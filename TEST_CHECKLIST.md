@@ -1,5 +1,15 @@
 # TEST CHECKLIST
 
+## R221 未final过程保存
+
+- [x] 主/子完整公开块先写canonical记录再投递；仅完整块及工具started，无逐token/权限/未提交final。
+- [x] 重开/分页保留同片；full final只覆盖同request，child native不重复；未知卡片可由同block终态补齐。
+- [x] 输入bundle/native/Compact/Memory与thread活动时间不变，密集display不挤最近真实对话。
+- [x] 冷owner不初始化Agent；实时process_event显式协商；旧客户端跳过新类型但物理游标正确前进。
+- [x] 存储失败一次公开警告而真实流继续，私密异常正文不进入界面或日志；24项新测/相关总288通过。
+- [ ] 同一真实TUI任务在主活跃/等child/等grandchild三个安全点重启唯一Gateway后，过程完整、零重派/零假终态。
+- [ ] 新部署后跨原页/观察页/resume/child页验证差分、展开、迟到结果与Context；不能以定向测试代替。
+
 ## R220 派工身份修复
 
 - [x] 五项普通派工共享IO仍保留五个run/目标；不生成自动幂等合同或work_scope（focused）。

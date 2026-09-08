@@ -16,6 +16,8 @@ from collections.abc import Iterable
 from copy import deepcopy
 from typing import Any
 
+from .display_checkpoint import is_display_checkpoint
+
 CANONICAL_NATIVE_MESSAGES_METADATA_KEY = "canonical_native_messages"
 CANONICAL_NATIVE_MESSAGES_SCHEMA = "conversation_native_messages.v1"
 
@@ -50,9 +52,10 @@ def canonical_native_messages_from_metadata(metadata: object) -> tuple[dict[str,
 # LLM: A final-row canonical envelope replaces every visible row bearing the same structured
 # request identity for provider replay only. Visible prose is still preserved independently for
 # TUI/search/text backends, and turns without an envelope keep the legacy role/text projection.
-# 函数用途: 按原顺序把会话尾部整理成下一轮可直接复用的原生消息，工具调用与结果不会降级成散文。
+# display rows are excluded before envelope selection, including malformed or forged display metadata.
+# 函数用途: 排除纯展示行后恢复原生消息；display中即使有伪造native metadata也不能污染下一轮缓存或输入。
 def provider_history_messages_from_rows(rows: Iterable[object]) -> tuple[dict[str, Any], ...]:
-    selected = list(rows)
+    selected = [row for row in rows if not is_display_checkpoint(row)]
     envelopes: dict[str, tuple[dict[str, Any], ...]] = {}
     anonymous_envelopes: dict[str, tuple[dict[str, Any], ...]] = {}
     for row in selected:

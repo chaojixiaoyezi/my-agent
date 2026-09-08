@@ -39,7 +39,7 @@ from ..conversation.control_commands import (
     parse_conversation_control,
     parse_conversation_task_command,
 )
-from ..conversation.message_stream import read_background_response_page
+from ..conversation.message_stream import NoticeDisplayCapabilities, read_background_response_page
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .client_service import execute_gateway_client_memory, read_gateway_client_history
 from .control_operation_service import (
@@ -986,7 +986,7 @@ def handle_control_status(handler, server) -> None:
 
 
 # LLM: 可信 owner/thread 选择分页；前台消息与实时过程独立声明去重能力，不授予执行权或隐式升级旧页。
-# 函数用途: 在同一查询中投影已提交消息、公开过程和活动，旧客户端继续原通知语义。
+# 函数用途: 读取显式显示能力并投影消息/检查点/活动；旧客户端保持旧类型，控制授权仍独立。
 def handle_client_notices(handler, server) -> None:
     """S-BG1: 返回当前会话的进行中任务数和后台主代理轮完成通知。
 
@@ -1032,14 +1032,7 @@ def handle_client_notices(handler, server) -> None:
             isinstance(body.get("client_capabilities"), dict)
             and body["client_capabilities"].get("tool_approval") is True
         ),
-        include_foreground=bool(
-            isinstance(body.get("client_capabilities"), dict)
-            and body["client_capabilities"].get("foreground_messages") is True
-        ),
-        include_foreground_transcript=bool(
-            isinstance(body.get("client_capabilities"), dict)
-            and body["client_capabilities"].get("foreground_transcript") is True
-        ),
+        display=NoticeDisplayCapabilities.from_payload(body.get("client_capabilities")),
     )
     handler._send_json(200, result)
 
@@ -1218,7 +1211,7 @@ def _send_agent_control_error(handler, error: AgentControlError) -> None:
 # projection from canonical runs; neither notices nor that projection can
 # create task state, authorize work, retry, or decide completion. Process-stream identity is
 # echoed with its event sequence, independently from the durable message byte cursor.
-# 函数用途: 按显式能力分别开放已提交消息与前台过程；旧页跳过新流但照常推进同一游标，不因轮询初始化 owner。
+# 函数用途: 按显式能力开放正文、前台流及完整检查点；旧页跳过新类型，轮询不初始化owner。
 def read_gateway_client_notices(
     agent: object,
     *,
@@ -1227,12 +1220,12 @@ def read_gateway_client_notices(
     event_after: int = 0,
     event_stream_id: str = "",
     interactive_approvals: bool = False,
-    include_foreground: bool = False,
-    include_foreground_transcript: bool = False,
+    display: NoticeDisplayCapabilities | None = None,
 ) -> dict[str, object]:
     """返回当前 thread 的活动投影、后台过程事件与 after 之后的通知。"""
     from ..conversation.store import ConversationStore
 
+    display = display if display is not None else NoticeDisplayCapabilities()
     conversation_id = str(getattr(scope, "conversation_id", "") or "").strip()
     if not conversation_id:
         return _empty_gateway_notice_response(
@@ -1255,7 +1248,7 @@ def read_gateway_client_notices(
             after=after,
             event_after=event_after,
             event_stream_id=event_stream_id,
-            include_foreground=include_foreground,
+            display=display,
         )
     store = getattr(owner_agent, "conversation_store", None)
     if not isinstance(store, ConversationStore):
@@ -1300,13 +1293,14 @@ def read_gateway_client_notices(
     activity_payload = activity.to_dict()
     active_task_count = activity.active_task_count
     notices, cursor, notices_ok = read_background_response_page(
-        store, thread_id, after=after, include_foreground=include_foreground,
+        store, thread_id, after=after, include_foreground=display.foreground_messages,
+        include_display_checkpoints=display.display_checkpoints,
     )
     payload = {
         "ok": notices_ok,
         "notices": notices,
         "cursor": cursor,
-        "transcript_events": [row for row in transcript["events"] if include_foreground_transcript or not row.get("gateway_request_id")],
+        "transcript_events": [row for row in transcript["events"] if display.foreground_transcript or not row.get("gateway_request_id")],
         "event_cursor": transcript["cursor"],
         "event_stream_id": transcript["stream_id"],
         "events_truncated": transcript["truncated"],
@@ -1324,7 +1318,7 @@ def read_gateway_client_notices(
 # layouts, and replay the newest exact channel binding without constructing Agent/backend/tool
 # state. Volatile activity and approval state intentionally remain empty until the owner is loaded;
 # an echoed stream cursor keeps the client unchanged until a new real stream exists.
-# 函数用途: 重启后从冷用户已有会话库读取消息，保持前台能力声明，不因轮询拉起整套 Agent。
+# 函数用途: 冷用户直接读取已提交正文/完整过程，保持能力声明，不因恢复历史拉起整套Agent。
 def _read_cold_owner_notice_projection(
     base_agent: object,
     *,
@@ -1332,7 +1326,7 @@ def _read_cold_owner_notice_projection(
     after: int,
     event_after: int,
     event_stream_id: str,
-    include_foreground: bool = False,
+    display: NoticeDisplayCapabilities,
 ) -> dict[str, object]:
     from ..conversation.store import ConversationStore
     from ..owner_wake_discovery import existing_conversation_store_roots
@@ -1384,7 +1378,8 @@ def _read_cold_owner_notice_projection(
     _updated_at, _root_key, store, thread = max(candidates, key=lambda item: item[:2])
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
     notices, cursor, notices_ok = read_background_response_page(
-        store, thread_id, after=after, include_foreground=include_foreground,
+        store, thread_id, after=after, include_foreground=display.foreground_messages,
+        include_display_checkpoints=display.display_checkpoints,
     )
     if not notices_ok:
         payload["ok"] = False

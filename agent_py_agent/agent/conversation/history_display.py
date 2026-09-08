@@ -1,5 +1,5 @@
 # LLM: 本模块只把同 owner/thread 已保存的会话及 typed turn-end 投影为显示事件；不执行工具、不改变模型历史。
-# 模块用途: 给恢复和子代理页共用正文、思考、工具与长度限制提示，保留原消息身份，不从文字判断完成。
+# 模块用途: 恢复已提交正文及逐块过程检查点；不重复同片快照，不把未保存终态的工具当完成。
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from ..turn_end import turn_end_notice
 from .background_history import background_display_turn_from_row
 from .background_transcript import public_background_transcript_text
+from .display_checkpoint import DISPLAY_CHECKPOINT_ROLE, display_checkpoint_events
 from .history_page import history_group_identity
 from .models import is_audit_background_transcript_entry
 from .native_history import canonical_native_messages_from_metadata
@@ -17,7 +18,7 @@ HISTORY_DISPLAY_SCHEMA = "conversation_history_display.v1"
 
 
 # LLM: 已授权同会话记录按工作片组合；前台 ID 仅供发起页去重，后台续片不得借原请求号被过滤。
-# 函数用途: 投影公开消息和结束提示，恢复与实时消息沿相同编号显示，不修改模型历史。
+# 函数用途: 按canonical来源投影公开消息、完整检查点与结束提示；display不能引入控制或运行状态。
 def conversation_history_display_events(
     rows: Sequence[object],
 ) -> tuple[dict[str, object], ...]:
@@ -25,7 +26,7 @@ def conversation_history_display_events(
     for row in rows:
         if is_audit_background_transcript_entry(row):
             continue
-        if getattr(row, "role", "") not in {"user", "assistant"}:
+        if getattr(row, "role", "") not in {"user", "assistant", DISPLAY_CHECKPOINT_ROLE}:
             continue
         identity = history_group_identity(row)
         groups.setdefault(identity, []).append(row)
@@ -68,8 +69,8 @@ def _turn_end_events(rows: list[object]) -> list[dict[str, object]]:
     return events
 
 
-# LLM: user/final 使用 canonical message ID，分页不能改变用户块编号；后台完整快照优先，不公开 native 内部输入。
-# 函数用途: 恢复完整同片输入/过程；前台 final 可按验证后的候选 ID 原位接替，不按文字去重。
+# LLM: user/final 使用 canonical message ID；完整快照仅覆盖自己的检查点，无快照时优先公开检查点而非native副本。
+# 函数用途: 恢复同片输入和逐块过程，保留崩溃前旧工作片；最终回复独立提交，不把模型中间快照当回复。
 def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
     request_id = f"history:{identity}"
     events = [
@@ -78,6 +79,9 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
         if row.role == "user" and getattr(row, "content", "")
     ]
     assistants = [row for row in rows if row.role == "assistant"]
+    snapshots = [snapshot for row in assistants if (snapshot := background_display_turn_from_row(row))]
+    checkpoints = display_checkpoint_events(rows, covered_requests={item["request_id"] for item in snapshots})
+    events.extend(checkpoints)
     for row in reversed(assistants):
         if snapshot := background_display_turn_from_row(row):
             events.extend({**item, "schema": HISTORY_DISPLAY_SCHEMA} for item in snapshot["events"])
@@ -87,6 +91,10 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
                 final_event["replaces_live_block_id"] = replacement
             events.append(final_event)
             return events
+    if checkpoints:
+        events.extend(public_assistant_message_event(row) for row in assistants
+                      if getattr(row, "metadata", {}).get("assistant_part_id") == "final" and row.content)
+        return events
     native = next((
         messages for row in reversed(assistants)
         if (messages := canonical_native_messages_from_metadata(getattr(row, "metadata", None)))

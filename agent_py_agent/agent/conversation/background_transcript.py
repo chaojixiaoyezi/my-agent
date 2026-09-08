@@ -2,7 +2,7 @@
 
 # LLM: This module owns the shared public event mapper and the main-agent volatile
 # ring. Child callers may replace the event writer with their durable bounded JSONL;
-# main 同时按块保留完整工作片快照，最终由 canonical 消息提交；两条投影都不拥有生命周期或权限。
+# 主/子完整公开块先写canonical display记录，再投递；最终快照保留，展示不拥有生命周期或权限。
 # 易失游标必须与当前 Agent 的 stream_id 配对，重建 Agent 后不能用旧进程序号跳过新事件。
 # 模块用途: 将主/子代理公开过程转成同一展示事件，保留公开调用摘要；前台附精确宿主请求关联，供原页去重。
 
@@ -21,6 +21,7 @@ from .agent_tool_approval import SubagentToolApprovalSinkMixin
 from .background_history import BackgroundTurnHistory
 from .channels import project_user_reply, redact_host_absolute_paths
 from .compact_progress import normalize_conversation_compact_progress
+from .display_checkpoint import DisplayCheckpointWriter
 from .tool_input_progress import ToolInputProgressSinkMixin
 
 BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
@@ -168,7 +169,7 @@ class _ThinkingDeltaBatcher:
 class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressSinkMixin):
     # LLM: Construction allocates one display-only turn identity; canonical task
     # and thread ids are inputs, while the generated request id is not authority.
-    # 函数用途: 为一片公开过程创建编号和完整快照；可选前台请求号只供显示去重，child writer 保持原合同。
+    # 函数用途: 为一片过程绑定逐块持久化及最终快照；前台请求号仅显示去重，child传输writer保持原合同。
     def __init__(
         self,
         agent: object,
@@ -184,6 +185,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         self.task_id = str(task_id or "").strip()
         self.gateway_request_id = gateway_request_id
         self._event_writer = event_writer if callable(event_writer) else None
+        self._checkpoint_writer = DisplayCheckpointWriter(agent)
         self.request_id = str(request_id or "").strip() or begin_background_transcript_turn(
             agent,
             thread_id=self.thread_id,
@@ -290,7 +292,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         return True
 
     # LLM: 仅转发 _structured_tool_progress 的白名单；公共 detail 在实时/终态中同源保留，标题由显示 metadata 统一投影。
-    # 函数用途: 将主/子代理工具阶段发布为卡片事件，忽略旧文本副本，不解析文案或在 started 额外保存预览副本。
+    # 函数用途: 将主/子工具阶段发布为卡片并沿共享事件入口保存；只用公开字段，不解析旧文本副本。
     def write_progress(
         self,
         progress: Mapping[str, object],
@@ -497,7 +499,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
 
     # LLM: Every event append keeps the writer's exact canonical thread/task and
     # generated display request identity; callers cannot substitute another run.
-    # 函数用途: 先保留完整块再发布增量；前台携带精确请求关联，旧 child writer 不被强加新参数。
+    # 函数用途: 先逐块写入canonical历史再发增量；保存故障告警但不终止任务，child传输签名保持不变。
     def _event(
         self,
         kind: str,
@@ -507,6 +509,10 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     ) -> None:
         if self._display_history is not None:
             self._display_history.record(kind, phase, block_id, payload)
+        failed = self._checkpoint_writer.record(
+            thread_id=self.thread_id, task_id=self.task_id, request_id=self.request_id,
+            gateway_request_id=self.gateway_request_id, kind=kind, phase=phase, block_id=block_id, payload=payload,
+        )
         try:
             event = {"kind": kind, "phase": phase, "block_id": block_id, "payload": payload}
             if self._event_writer is None:
@@ -515,6 +521,13 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
                 )
             else:
                 self._event_writer(self.agent, thread_id=self.thread_id, task_id=self.task_id, request_id=self.request_id, **event)
+            if failed:
+                warning = {"kind": "system_message", "phase": "failed", "block_id": f"{self.request_id}:history-write-failed",
+                           "payload": {"text": "历史记录暂时保存失败；当前任务继续运行，恢复历史可能不完整。"}}
+                if self._event_writer is None:
+                    append_background_transcript_event(self.agent, source=TranscriptSource(self.thread_id, self.task_id, self.request_id, self.gateway_request_id), **warning)
+                else:
+                    self._event_writer(self.agent, thread_id=self.thread_id, task_id=self.task_id, request_id=self.request_id, **warning)
         except (OSError, RuntimeError, TypeError, ValueError):
             # 展示投影丢失不能把真实模型轮变成失败；canonical transcript、task
             # lifecycle 和工具结果仍由各自权威存储收口。

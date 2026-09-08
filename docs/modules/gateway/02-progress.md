@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R221 已完成公开过程先持久再投递（本地通过，待真实验收）
+
+按会话运行时 session.send_event_raw_with_persistence/record_conversation_items读取持久先行链，及终端交互
+sessionStorage.insertMessageChain、messages.handleMessageFromStream的完整消息与增量分离，适配本项目canonical账本。
+共享sink逐块写display记录，Gateway冷热owner按typed显示能力投影process_event；TUI原位补缺口，不动任务/权限。
+13文件288focused通过；.10仍不可达，未部署，不把本地重开当真实Gateway安全点恢复通过。
+
 ## R219 最近上下文独立于 Working（真实 TUI 分项通过）
 
 主/子使用同一 preflight 数字记录到精确 thread，空闲 activity 单独返回 context_usage；成功 Compact 原子清代。

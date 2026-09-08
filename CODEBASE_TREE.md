@@ -138,6 +138,7 @@ agent_py_agent/
 |   |   |-- agent_tool_approval.py     # child exact ToolApprovalRequest 的 owner 耐久记录、consumer 租约与决定等待
 |   |   |-- background_transcript.py  # 后台 main/child 的有界 typed 过程事件环与 child 工具审批 sink
 |   |   |-- background_history.py     # 后台完整展示块快照，随 canonical final 保存并用于恢复重基
+|   |   |-- display_checkpoint.py     # canonical逐块公开过程校验/写入、恢复未知占位与显示去重
 |   |   |-- auxiliary_model_call.py   # Compact 等会话辅助模型调用的统一记账、退避、并发闸和成本统计
 |   |   |-- tool_context_window.py    # text/native 共用的有界工具历史窗口与稳定前缀投影
 |   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
@@ -153,7 +154,7 @@ agent_py_agent/
 |   |   |-- native_history.py           # 完成回合的 provider 原生消息信封、校验与按请求替换式恢复
 |   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
 |   |   |-- history_page.py             # canonical 字节边界向前分页和完整工作片分组
-|   |   |-- message_stream.py           # 从同一消息账本分页投影后台 final，恢复与实时共用 ID/游标
+|   |   |-- message_stream.py           # 同账本正文与显式协商的过程检查点投影，共用 ID/字节游标
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
 |   |   |-- runtime.py                  # 后台主代理调度热循环：wake_queue 到期消费、三源对账(5min)、事件提前醒取消闹钟
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
@@ -313,9 +314,11 @@ docs/
 - `cli/chat_parts/tui_history.py`：每个 TUI 单一的按需旧页读取器，不持有后台任务或历史副本。
 
 - `agent_py_agent/tests/test_conversation_message_stream.py`：canonical 消息分页、恢复竞态、损坏游标和实时/历史幂等验证。
+- `agent_py_agent/tests/test_conversation_display_checkpoint.py`：未final主/子过程恢复、输入不变、精确覆盖与未知卡片补齐。
 - `agent_py_agent/tests/test_background_history_snapshot.py`：完整后台块快照、慢客户端补帧、损坏快照拒绝重基、
   Compact 重调工具身份和 provider 历史不变验证。
-- `agent/conversation/message_stream.py`：后台 final 的唯一公开增量投影，复用 ConversationStore，不另存 notices 正文。
+- `agent/conversation/message_stream.py`：正文及显式协商检查点的唯一公开增量投影，复用 ConversationStore，不另存 notices 正文。
+- `agent/conversation/display_checkpoint.py`：公开完整块的typed检查点，保存到同thread会话账本并排除模型/Compact/Memory。
 - `agent/conversation/context_usage.py`：各代理最近上下文的统一数字投影；与 Working、模型输入、计费和校准分离。
 - `agent/conversation/background_history.py`：按稳定块 ID 保存后台完整终态展示，逐 token 增量不重复存储；
   canonical final 提交前不授权 TUI 丢弃旧事件，不进入 provider history 或 Compact 输入。

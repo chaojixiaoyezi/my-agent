@@ -843,7 +843,7 @@ class _TuiConversationBoundaryRuntimeMixin:
             return inserted
 
     # LLM: 静态事件不接管 Todo；本页前台按 exact 请求去重，后台独立工作片仍显示，不改 canonical 原记录。
-    # 函数用途: 恢复历史卡片和顺序；校验后的 final 原子接替同片候选，本页前台仍按请求去重。
+    # 函数用途: 恢复主/子历史卡片与完成检查点；final接替同片候选，未final的检查点不重基活动流。
     def _publish_recovered_display_events(self, events: tuple[dict[str, object], ...]) -> None:
         background_blocks: dict[str, list[str]] = {}
         for item in events:
@@ -857,7 +857,7 @@ class _TuiConversationBoundaryRuntimeMixin:
             payload = item.get("payload")
             if (
                 item.get("schema") != "conversation_history_display.v1"
-                or not request_id.startswith(("history:", "bg-main:"))
+                or not request_id.startswith(("history:", "bg-main:", "bg-agent:"))
                 or not block_id.startswith(f"{request_id}:")
                 or kind not in {"user_message", "assistant_completed", "thinking_completed",
                                "tool_completed", "tool_failed", "system_message"}
@@ -1095,14 +1095,14 @@ class _TuiBackgroundActivityRuntimeMixin:
 
 
     # LLM: 消息与恢复共享稳定块 ID；仅明确前台请求可命中本页去重，后台不能借原请求号跳过。
-    # 函数用途: 显示同会话已提交消息及快照，原发送页不重复追加自己的用户消息和回复。
+    # 函数用途: 显示已提交正文或有事件无正文的过程块；原发送页去重，不把检查点包装成空助手回复。
     def publish_background_response(
         self, content: str, *, thread_id: str, message_id: str,
         display_events: tuple[dict[str, object], ...] = (),
         gateway_request_id: str = "",
     ) -> None:
         text = str(content or "").strip()
-        if not text or not thread_id or not message_id:
+        if (not text and not display_events) or not thread_id or not message_id:
             return
         request_id = f"history:{thread_id}:{message_id}"
         with self._lock:

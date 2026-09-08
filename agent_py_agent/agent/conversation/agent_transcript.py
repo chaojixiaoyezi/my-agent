@@ -1,9 +1,9 @@
 """Process-shared public transcript events for one delegated agent run."""
 
-# LLM: This module is the only durable display-event bridge between a child runner
-# subprocess and owner-facing clients. Rows are bounded public projections only;
+# LLM: This module is the bounded incremental bridge between a child runner
+# subprocess and owner-facing clients; completed public blocks also live in the canonical conversation ledger.
 # ConversationThread, SubAgentTask, guidance, cancellation, and lifecycle remain authoritative.
-# 模块用途: 将子代理进程里的思考、工具、diff 和 Compact 展示事件写入有界 JSONL，供 TUI/Web 增量查看。
+# 模块用途: 写入子代理有界增量流供实时查看；裁剪该流不删除同thread已保存的完整公开过程。
 
 from __future__ import annotations
 

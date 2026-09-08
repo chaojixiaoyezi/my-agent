@@ -1,5 +1,19 @@
 # TESTS
 
+## R221 逐块公开过程存储
+
+相关13文件288 focused通过（含新文件24项）；另模型配置与模型菜单39项通过，没有新增真实模型调用。
+定位包含：先恢复未知工具、再收到同ID完成结果却不能更新的一项修前失败；另一红测为新能力参数尚未实现，
+不能当成线上故障。两项旧断线测试按新的真实物理追加更新精确游标断言，仍验证旧字节前缀与模型消息不变。
+
+新 `test_conversation_display_checkpoint.py` 使用真实ConversationStore/主child mapper/TUI reducer：
+未final重开、同片分页、final快照精确覆盖、child native去重、迟到结果、损坏内外层身份拒绝、写失败不中断、
+控制/逐token不落盘、128过程块不挤对话、完整model bundle/native/Compact/Memory输入排除、实时重放无假Working。
+既有 foreground writer 夹具绑定真实ConversationStore；cold-owner测试同时验证检查点只读及能力协商。
+这都是本地定位，不是业务TUI验收；.10不可达时不新建Gateway、不重派原请求。真实分项待网络恢复后执行。
+严格gate最终通过：Ruff/doc-sync/strict尺寸hard0/diff/clean-package；新文件已登记到Git索引后打包检查通过。
+初次尺寸检查发现HTTP参数过多，已合成同一typed显示能力快照；没有增加兼容入口或放宽尺寸门。
+
 ## R219 Context 统一与具体审批拒绝
 
 主/子精确thread、空闲恢复、Compact清代/旧代拒绝、读取失败保帧、owner隔离、模型bundle字节稳定、

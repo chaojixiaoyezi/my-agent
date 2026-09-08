@@ -21,6 +21,11 @@
 
 ## 2026-08-23 当前运行基线
 
+- 主/子完整公开过程先追加同thread的canonical display记录再投递；逐token、空思考开始与控制事件不入该账。
+  display排除于模型/Compact/Memory输入及最近对话条数，不改thread活动时间；同片final快照只覆盖自己的检查点。
+  实时读取显式协商display_checkpoints，未知工具占位仅被精确同block真实结果原位补齐，不改变执行终态。
+  R221已本地定向通过，尚未部署/真实重启验收；旧缺失记录不猜测或补模型调用。
+
 - 普通派工不按 IO 引用生成 idempotency_contract 或 work_scope_key；已删自动生成模块。
   精确 ToolCall/operation 仍重放原回执，显式幂等与 Audit 身份不变，UNKNOWN 不盲目重做。
   R219 的 5→3 吞派工 BUG-152 已定向复现并修复；真实 TUI 待验，旧任务不重写或自动重派。

@@ -249,7 +249,7 @@ class GatewayChatClientAgent:
         }
 
     # LLM: canonical 游标不随进程流重置；显式声明能按请求去重前台消息，旧客户端不被强发未知用户事件。
-    # 函数用途: 分别声明前台消息/过程去重能力；拉取同会话公开投影，失败不清空已有显示。
+    # 函数用途: 显式声明前台和检查点能力；沿同一持久游标补过程，失败不清空已有显示。
     def request_background_notices(
         self,
         session_id: str,
@@ -265,7 +265,7 @@ class GatewayChatClientAgent:
                 "after": max(0, int(after or 0)),
                 "event_after": max(0, int(event_after or 0)),
                 "event_stream_id": event_stream_id,
-                "client_capabilities": {"tool_approval": True, "foreground_messages": True, "foreground_transcript": True},
+                "client_capabilities": {"tool_approval": True, "foreground_messages": True, "foreground_transcript": True, "display_checkpoints": True},
                 "user_id": "local-agent",
                 "channel": "chat",
                 "conversation_id": str(session_id or "default"),
