@@ -10,6 +10,10 @@
 - 13文件288 focused通过；本地Qwen没有新调用或child，主A/子B配置链路额外39focused通过。
 - 本地严格gate已通过：Ruff、doc sync、strict code-size（hard0）、diff、clean-package；无全仓pytest或远端Git推送。
 - .10本轮再次SSH超时，未部署/未重启Gateway；R220原请求是否完成仍未知，不能重发prompt。
+- `9dd6676` 的独立wheel已构建，ZIP完整性与离开源码目录后的安装导入通过；临时venv复用本机依赖，
+  6个模块全部来自已安装包，显示能力严格布尔解析通过。没有启动本机Gateway或新模型调用。
+- 包SHA256为 `99939ac9a1de9e97828a8f21fef75a90b4e38f39e7a460f465ab2419821ad4a6`。
+  这是部署准备证据，不是远端部署/真实TUI通过；恢复顺序已记入TUI问题账本，不继续堆叠未真验的新改动。
 - 建议连接恢复后先核对R220原始回执/子树/产物，再为R221报出tmux进行单Gateway真实重启验收；
   三安全点重启、跨模型child与其余P0/P1仍开放，不新增Gateway绕过阻断。
 
