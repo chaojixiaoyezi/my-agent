@@ -1,5 +1,5 @@
 # LLM: 本模块只把 TuiRuntime 的 typed snapshot 接入 prompt_toolkit 布局；不得恢复字符串 transcript、前缀 lexer 或第二状态 store。
-# 模块用途: 创建 终端交互 风格的行内对话区、权限区、输入区和底部提示，并连接重绘与命令输出。
+# 模块用途: 创建行内对话、权限、输入和底部提示；每个代理视图都显示当前客户端的真实刷新健康。
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def _make_input_prompt_window() -> Any:
 
 
 # LLM: context factory 只读取公开配置、typed TUI status/block 和显示时钟；模型正文与业务对象不得成为动画事实源。
-# 函数用途: 为当前终端宽度生成带回合耗时、实时上下文、token 和工具活动状态的渲染上下文。
+# 函数用途: 生成当前代理的渲染上下文；主/子页面共用当前客户端后台读取健康，切页不掩盖故障。
 def _make_render_context_factory(
     params: MakeTuiAppParams,
     interaction: TuiInteractionState,
@@ -97,6 +97,8 @@ def _make_render_context_factory(
     runtime = _required_runtime(params)
     navigation = params.agent_navigation
 
+    # LLM: 子页面内容来自其独立 runtime，连接健康只读取 root runtime，避免产生多份相互矛盾的健康状态。
+    # 函数用途: 按页面和宽度读取展示数据，不改模型上下文、任务状态或导航位置。
     def make_context(width: int) -> TuiRenderContext:
         interaction_snapshot = interaction.snapshot()
         transcript_snapshot = transcript_state.snapshot()
@@ -111,6 +113,7 @@ def _make_render_context_factory(
             else None
         )
         view_snapshot = active_runtime.store.snapshot()
+        sync_snapshot = view_snapshot if active_runtime is runtime else runtime.store.snapshot()
         status = view_snapshot.status
         return TuiRenderContext(
             width=width,
@@ -133,6 +136,7 @@ def _make_render_context_factory(
                 for block in view_snapshot.active_blocks
             ),
             notice=active_runtime.notice(),
+            background_sync_failed=sync_snapshot.background_sync_failed,
             has_stash=interaction_snapshot.has_stash,
             is_pasting=interaction_snapshot.is_pasting,
             help_open=interaction_snapshot.help_open,

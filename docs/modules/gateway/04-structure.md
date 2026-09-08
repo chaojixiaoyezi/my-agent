@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## R208 刷新健康单一投影
+
+`_background_notice_loop` 的已有 bool 结果经 `publish_background_sync_status` 发布变化事件；唯一 reducer
+保存 `background_sync_failed`，独立于 `TuiStatus`，健康变更不触碰活动时钟。context factory 在子页仍读
+root 健康；renderer 显示旧快照警告，沿既有退避恢复，不写任何 Gateway/业务状态。
+
 ## R207 静态历史不发布实时清单
 
 `_publish_recovered_display_events` 共用 `_HISTORY_LIVE_PLAN_FIELDS` 撤掉显示副本的实时 Todo 字段，

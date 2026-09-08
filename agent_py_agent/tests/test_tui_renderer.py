@@ -229,6 +229,32 @@ def test_footer_explains_native_copy_escape_hatch_without_hiding_history() -> No
     ),)
 
 
+@pytest.mark.parametrize("focused_run", ["", "child-run"])
+@pytest.mark.parametrize("detailed", [False, True])
+def test_failed_background_refresh_is_visible_in_every_agent_view(focused_run, detailed):
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("refresh-render")
+    runtime.update_background_activity(1)
+    snapshot = runtime.store.snapshot()
+    cache = TuiBlockRenderCache()
+    contexts = [
+        TuiRenderContext(
+            width=100, now=100, background_sync_failed=failed,
+            focused_agent_run_id=focused_run, focused_agent_name="child" if focused_run else "main",
+            detailed_transcript=detailed,
+        )
+        for failed in (False, True, False)
+    ]
+    frames = [render_tui_snapshot(snapshot, context, cache=cache) for context in contexts]
+
+    assert "状态刷新失败" in fragments_text(frames[1].footer)
+    assert "正在重试" in fragments_text(frames[1].footer)
+    assert "状态未同步" in _frame_text(frames[1])
+    assert "Working" not in _frame_text(frames[1])
+    assert _frame_text(frames[0]) == _frame_text(frames[2])
+
+
 def test_narrow_frame_never_exceeds_width_and_uses_single_column_card() -> None:
     frame = render_tui_snapshot(
         _fixture_store().snapshot(),

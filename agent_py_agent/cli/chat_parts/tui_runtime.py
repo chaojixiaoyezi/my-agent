@@ -1,7 +1,7 @@
 # LLM: 本模块是 chat worker/Gateway structured rows 到 TuiEvent 的唯一 adapter；它不渲染、不执行工具，也不把 legacy 文案当状态。
 # 后台流身份仅管理展示续接，换流不得清空本页面历史、待输入回执或已恢复工作片。
 # 历史工具卡不再驱动实时 Todo；当前计划只由实时工具/活动快照发布，恢复和向前翻页都遵守这一边界。
-# 模块用途: 为 session、输入队列、回合、流式助手、思考和工具发布有序事件；执行活动结束后不因残留 Todo 空转刷新。
+# 模块用途: 为 session、输入、回合和工具发布有序事件；刷新失败独立展示，不当成业务失败或任务进展。
 
 from __future__ import annotations
 
@@ -1248,6 +1248,18 @@ class TuiRuntime(
         self._lock = threading.RLock()
         self._permission_coordinator = TuiPermissionCoordinator(self)
         self._background_activity = _TuiBackgroundActivityController(self)
+
+    # LLM: 仅将后台完整读取结果投影为 UI 健康事件；重复结果不写 journal，不改 Gateway/turn/队列状态。
+    # 函数用途: 刷新失败时通知界面显示旧状态提示，恢复后清除；返回是否需要重绘。
+    def publish_background_sync_status(self, *, ok: bool) -> bool:
+        if not isinstance(ok, bool):
+            raise ValueError("background sync requires boolean ok")
+        with self._lock:
+            if self.store.snapshot().background_sync_failed == (not ok):
+                return False
+            return self._publish(
+                "background_sync_changed", "updated", f"sync:{self.session_id}", {"ok": ok},
+            ).accepted
 
     # LLM: publish_session 只携带公开品牌/模型/目录元数据，真实配置与 secret 不进入 UI event。
     # 函数用途: 发布一次欢迎卡事件。

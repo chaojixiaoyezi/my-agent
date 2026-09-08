@@ -9,6 +9,29 @@ from agent_py_agent.cli.chat_parts.tui_threading import (
 )
 
 
+def test_child_context_uses_root_client_refresh_health_without_copying_state():
+    from agent_py_agent.cli.chat_parts.tui_interaction import TuiInteractionState
+    from agent_py_agent.cli.chat_parts.tui_transcript import TuiTranscriptModeState
+    from agent_py_agent.cli.chat_parts.tui_ui_setup import _make_render_context_factory
+
+    root = TuiRuntime("root")
+    child = TuiRuntime("child")
+    params = SimpleNamespace(
+        agent=SimpleNamespace(config=SimpleNamespace(), root=""),
+        tui_runtime=root,
+        agent_navigation=SimpleNamespace(active_runtime=lambda: child),
+    )
+    factory = _make_render_context_factory(
+        params, TuiInteractionState(), TuiTranscriptModeState()
+    )
+    assert factory(100).background_sync_failed is False
+    root.publish_background_sync_status(ok=False)
+    assert factory(100).background_sync_failed is True
+    assert child.store.snapshot().background_sync_failed is False
+    root.publish_background_sync_status(ok=True)
+    assert factory(100).background_sync_failed is False
+
+
 class _FiniteStop:
     def __init__(self, ticks: int) -> None:
         self._remaining = ticks

@@ -1,6 +1,6 @@
 # LLM: 本模块只启动 TUI worker 与轻量动画刷新线程；业务事件仍由 worker/runtime 发布，刷新线程不得改 reducer 状态。
 # 过程轮询按流身份与序号一起确认；换进程只重基易失游标，不重置 canonical 消息位置。
-# 模块用途: 组装后台任务参数，并以 终端交互 接近的帧率驱动 spinner/临时提示重绘。
+# 模块用途: 组装后台任务参数，驱动 spinner/提示重绘；后台读取失败显式显示，不能假装状态仍实时。
 
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
 # LLM: The first snapshot is immediate. Foreground/background-active sessions poll at one second;
 # inactive sessions poll at five seconds. Transport failures use a separate exponential backoff
 # that resets after the next valid snapshot, so detached TUIs cannot storm the single Gateway.
-# 函数用途: 持续检查当前会话更新；有工作时每秒刷新，空闲或断线时自动放慢。
+# 函数用途: 持续检查当前会话更新；失败沿原退避节奏重试并标记状态未同步，不终止后台任务。
 def _background_notice_loop(
     stop_event: threading.Event,
     agent: object,
@@ -128,8 +128,12 @@ def _background_notice_loop(
                 agent_navigation,
             )
         except Exception:
-            # 监视失败绝不打扰会话；按同一退避合同等待下一轮。
+            # 监视失败不改业务状态；显示旧快照警告后沿原退避合同等待下一轮。
             snapshot_ok = False
+        health_publisher = getattr(tui_runtime, "publish_background_sync_status", None)
+        if callable(health_publisher) and health_publisher(ok=snapshot_ok):
+            if app_ref and app_ref[0] is not None:
+                app_ref[0].invalidate()
         if snapshot_ok:
             foreground_running = bool(
                 foreground_running_ref and foreground_running_ref[0]

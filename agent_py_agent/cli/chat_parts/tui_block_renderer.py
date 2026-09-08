@@ -1,5 +1,5 @@
 # LLM: 本模块是 TuiViewSnapshot 到 prompt_toolkit formatted lines 的唯一 block renderer；不得读取原始模型文本猜工具、权限或生命周期。
-# 模块用途: 生成消息、权限、队列和底部提示；执行代次不冒充重试数，未勾完清单不冒充正在执行。
+# 模块用途: 生成消息、权限、队列和底部提示；快照刷新失败显式提示，旧 Working 不冒充实时进展。
 
 from __future__ import annotations
 
@@ -183,7 +183,7 @@ TERMINAL_BUNNY_AVATAR_COMPACT = (
 
 
 # LLM: TuiRenderContext 固定所有会影响 golden 的显示输入，时钟/尺寸/品牌都不能从全局隐式读取。
-# 类用途: 指定一次 TUI 渲染的宽度、产品映射、详细模式和动画帧。
+# 类用途: 指定一次 TUI 渲染的宽度、模式、动画帧和后台刷新健康，不授予任务状态变更权。
 @dataclass(frozen=True)
 class TuiRenderContext:
     width: int
@@ -203,6 +203,7 @@ class TuiRenderContext:
     output_tokens: int = 0
     has_active_tools: bool = False
     notice: str = ""
+    background_sync_failed: bool = False
     has_stash: bool = False
     is_pasting: bool = False
     help_open: bool = False
@@ -216,9 +217,10 @@ class TuiRenderContext:
     agent_view_depth: int = 0
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
-    # 函数用途: 规范渲染上下文，保证动画索引非负。
+    # 函数用途: 规范渲染上下文，保证动画索引非负和刷新健康使用布尔标记。
     def __post_init__(self) -> None:
         object.__setattr__(self, "width", max(1, int(self.width or 1)))
+        object.__setattr__(self, "background_sync_failed", bool(self.background_sync_failed))
         object.__setattr__(self, "agent_name", str(self.agent_name or "my-agent"))
         object.__setattr__(self, "version", str(self.version or ""))
         object.__setattr__(self, "model_name", str(self.model_name or ""))
@@ -284,7 +286,7 @@ class TuiRenderContext:
 
 
 # LLM: frame provider 必须复用 renderer 的可见上下文规则；Todo 的时钟只在 snapshot.has_active_work 时进入 key。
-# 函数用途: 生成完整画面的上下文缓存键，避免空闲长会话或未勾完的清单被动画时钟反复重绘。
+# 函数用途: 生成完整画面的缓存键，刷新健康变化必须重绘，避免恢复连接后仍显示旧警告。
 def tui_render_context_key(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -353,6 +355,7 @@ def tui_render_context_key(
         context.output_tokens,
         context.has_active_tools,
         context.notice,
+        context.background_sync_failed,
         context.has_stash,
         context.is_pasting,
         context.help_open,
@@ -642,7 +645,7 @@ def _render_connection(
 # projection and mirrors 终端交互's animated SpinnerWithVerb at transcript tail.
 # Fixed prefix/suffix reserve their columns before the activity is truncated, so
 # arbitrary thinking text can never wrap this removable display state.
-# 函数用途: 在最新正文与 Context/Todo 之间用严格单行显示 main 动画、短动作和耗时。
+# 函数用途: 在正文与 Context/Todo 之间显示主行；快照读取失败改为静态的上次状态，不推断任务已结束。
 def _render_background_activity(
     block: TuiBlock,
     context: TuiRenderContext,
@@ -679,7 +682,12 @@ def _render_background_activity(
         if focused_status == "DONE"
         else "class:tui-subagent-running"
     )
-    if focused_terminal:
+    if context.background_sync_failed:
+        prefix = (
+            ("class:tui-context-warning", "! 状态未同步"),
+            ("class:tui-muted", f" · {context.focused_agent_name} · 上次"),
+        )
+    elif focused_terminal:
         terminal_icon, terminal_label, terminal_style = _subagent_status_display(
             focused_status
         )
@@ -1225,7 +1233,7 @@ def _tool_input_animation_key(
 
 # LLM: Background animation uses its own typed start timestamp and count; it
 # must not borrow the completed foreground turn's token/stall metrics.
-# 函数用途: 生成后台 Working 块的动画与秒数缓存键。
+# 函数用途: 生成后台 Working 的缓存键；刷新失败时保持静态提示，不用动画冒充实时进展。
 def _background_animation_key(
     block: TuiBlock,
     context: TuiRenderContext,
@@ -1233,9 +1241,12 @@ def _background_animation_key(
     started_at = float(block.metadata.get("started_at") or 0.0)
     elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
     return (
-        context.spinner_index % math.lcm(len(SPINNER_GLYPHS), len("Working")),
+        0 if context.background_sync_failed else (
+            context.spinner_index % math.lcm(len(SPINNER_GLYPHS), len("Working"))
+        ),
         elapsed,
         int(block.metadata.get("active_task_count") or 0),
+        context.background_sync_failed,
     )
 
 
@@ -2766,7 +2777,7 @@ def _render_pending_input_message(
 
 
 # LLM: footer 只读 structured mode/status/permission/help；详细模式和运行中提示优先级固定。
-# 函数用途: 返回输入框下方的快捷键提示或按真实 my-agent 能力映射的帮助面板。
+# 函数用途: 返回输入框下提示；状态读取失败在主/子页面和展开模式下可见，不掩盖权限或粘贴操作。
 def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> FormattedLine:
     if snapshot.permission is not None:
         return ()
@@ -2776,6 +2787,9 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
     if context.is_pasting:
         text = "  Pasting text…"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
+    if context.background_sync_failed:
+        text = "  状态刷新失败，显示上次状态；正在重试"
+        return (("class:tui-context-warning", _fit_text(text, context.width, "left").rstrip()),)
     if context.help_open:
         return _render_help_footer(context.width)
     if context.detailed_transcript:

@@ -1,5 +1,5 @@
 # LLM: 本模块是 typed TUI event 到可渲染快照的唯一 reducer；不得读取模型正文猜状态，也不得执行工具、权限或会话动作。
-# 模块用途: 管理稳定历史块、活动块、权限覆盖层、输入队列、状态和有界诊断；快照把执行活动与未完成清单分开。
+# 模块用途: 管理稳定历史块、活动块、权限覆盖层、输入队列、状态和有界诊断；刷新健康独立于任务终态。
 
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ class TuiDiagnostic:
 
 
 # LLM: TuiViewSnapshot 是 UI 线程读取的不可变投影；活动谓词只供显示/刷新，不改 Todo 或运行账，调用方不得修改 reducer。
-# 类用途: 一次性取得历史、活动块、队列、overlay、status 和 diagnostics，统一判断页面是否仍有真实执行。
+# 类用途: 一次性取得历史、活动块、队列、overlay、status 和 diagnostics；刷新失败只标记数据可能过时。
 @dataclass(frozen=True)
 class TuiViewSnapshot:
     stable_blocks: tuple[TuiBlock, ...]
@@ -119,6 +119,7 @@ class TuiViewSnapshot:
     permission: TuiPermissionOverlay | None
     status: TuiStatus
     diagnostics: tuple[TuiDiagnostic, ...]
+    background_sync_failed: bool = False
 
     # LLM: Display activity comes from the current turn phase or canonical background count,
     # never from unfinished Todo items; renderer and refresh cadence must share this predicate.
@@ -257,7 +258,7 @@ class _TuiPermissionReducerMixin:
 # 类用途: 顺序应用已通过 journal 的事件，并维持 active→stable 一次冻结。
 class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # LLM: handler registry 明确列出已理解 kind，未知 kind 只记诊断，不把 payload 当文本透传。
-    # 函数用途: 初始化空 view model 和事件处理表。
+    # 函数用途: 初始化空 view model、独立的快照刷新健康标记和事件处理表。
     def __init__(
         self,
         *,
@@ -270,6 +271,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self.queued_inputs: list[TuiQueuedInput] = []
         self.permission: TuiPermissionOverlay | None = None
         self.status = TuiStatus()
+        self.background_sync_failed = False
         self.diagnostics: list[TuiDiagnostic] = []
         self.max_diagnostics = max(1, int(max_diagnostics or 1))
         self.max_stable_blocks = max(1, int(max_stable_blocks or 1))
@@ -280,6 +282,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "session_started": self._handle_session_started,
             "connection_started": self._handle_connection_started,
             "connection_resolved": self._handle_connection_resolved,
+            "background_sync_changed": self._handle_background_sync_changed,
             "background_activity_started": self._handle_background_activity_started,
             "background_activity_updated": self._handle_background_activity_updated,
             "background_activity_completed": self._handle_background_activity_completed,
@@ -388,11 +391,12 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         except (KeyError, TypeError, ValueError):
             self.record_diagnostic("INVALID_EVENT_PAYLOAD", event)
 
-    # LLM: 活动时间只由已识别 typed event 的 created_at 推进；它只影响 spinner stall 投影，不改变 turn/tool 业务状态。
-    # 函数用途: 在运行或中断中的回合收到新事件后刷新最后活动时间。
+    # LLM: 活动时间由已识别任务事件推进；客户端刷新健康不能冒充模型进展或重置 stall 计时。
+    # 函数用途: 运行回合收到新任务事件后刷新活动时间，忽略状态连接失败/恢复通知。
     def _touch_active_status(self, event: TuiEvent) -> None:
         if (
-            self.status.phase in {"running", "interrupting"}
+            event.kind != "background_sync_changed"
+            and self.status.phase in {"running", "interrupting"}
             and event.created_at > self.status.last_event_at
         ):
             self.status = replace(self.status, last_event_at=event.created_at)
@@ -407,7 +411,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             del self.diagnostics[: len(self.diagnostics) - self.max_diagnostics]
 
     # LLM: snapshot 按 stable 顺序和 active 插入顺序复制，不暴露内部可变容器。
-    # 函数用途: 返回当前不可变渲染快照。
+    # 函数用途: 返回当前不可变渲染快照，同时保留与任务运行状态分离的刷新健康。
     def snapshot(self) -> TuiViewSnapshot:
         return TuiViewSnapshot(
             stable_blocks=tuple(self.stable_blocks),
@@ -417,7 +421,16 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             permission=self.permission,
             status=self.status,
             diagnostics=tuple(self.diagnostics),
+            background_sync_failed=self.background_sync_failed,
         )
+
+    # LLM: 刷新结果必须是 typed bool，只改变本客户端显示健康；不得清空旧快照、终结任务或清除待发消息。
+    # 函数用途: 标记后台状态是否读取失败，成功后收起提示；不把一次网络故障判断为代理失败。
+    def _handle_background_sync_changed(self, event: TuiEvent) -> None:
+        ok = event.payload.get("ok")
+        if not isinstance(ok, bool):
+            raise ValueError("background sync requires boolean ok")
+        self.background_sync_failed = not ok
 
     # LLM: session_started 只生成一次欢迎块；同 block 重放由 stable id 幂等。
     # 函数用途: 建立带品牌/版本/模型/目录元数据的启动块。

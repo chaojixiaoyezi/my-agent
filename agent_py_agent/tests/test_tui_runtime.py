@@ -3,9 +3,32 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from agent_py_agent.agent.contracts.tool_approval import build_tool_approval_request
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnSummary
+
+
+def test_sync_health_does_not_move_foreground_activity_clock_or_clear_queues():
+    runtime = TuiRuntime("sync-is-not-turn-activity")
+    runtime.enqueue_prompt("active", "继续开发", queued=False)
+    runtime.begin_turn("active")
+    runtime.enqueue_prompt("next", "稍后查验结果", queued=True)
+    before = runtime.store.snapshot()
+
+    assert runtime.publish_background_sync_status(ok=False) is True
+    assert runtime.publish_background_sync_status(ok=False) is False
+    failed = runtime.store.snapshot()
+    assert failed.background_sync_failed is True
+    assert failed.status == before.status
+    assert failed.queued_inputs == before.queued_inputs
+    assert failed.active_blocks == before.active_blocks
+    assert failed.stable_blocks == before.stable_blocks
+    assert runtime.publish_background_sync_status(ok=True) is True
+    assert runtime.store.snapshot() == before
+    with pytest.raises(ValueError, match="boolean"):
+        runtime.publish_background_sync_status(ok="false")
 
 
 def _approval_request(request_id: str):

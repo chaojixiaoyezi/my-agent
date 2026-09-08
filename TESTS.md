@@ -1,5 +1,11 @@
 # TESTS
 
+## R208 刷新健康
+
+失败/重复失败/恢复保持原退避和任务快照；当前前台活动计时、排队输入不变。主/子页面、Ctrl+O 展开、
+缓存失效与 root 健康共用已覆盖。background notice、renderer、runtime、view model、threading、history
+paging 六文件共 166 passed，无全仓 pytest；真实客户端断线与恢复仍待验，不以单测关闭 BUG-143。
+
 ## R207 历史与当前计划隔离
 
 两个先红用例覆盖“旧代历史锁住当前代”和“上翻旧页覆盖同代最新计划”；原输入字典、历史工具详情保持。

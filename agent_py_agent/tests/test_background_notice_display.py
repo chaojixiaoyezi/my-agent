@@ -1204,6 +1204,41 @@ def test_tui_notice_loop_slows_healthy_idle_sessions(monkeypatch) -> None:
     assert waits == [5.0, 5.0]
 
 
+def test_notice_loop_exposes_failed_refresh_without_changing_task(monkeypatch) -> None:
+    from agent_py_agent.cli.chat_parts import tui_threading
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("refresh-health")
+    runtime.update_background_activity(1)
+    before = runtime.store.snapshot()
+    outcomes = iter((False, False, True))
+    observed = []
+    redraws = []
+
+    class StopEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, delay):
+            snapshot = runtime.store.snapshot()
+            observed.append((snapshot.background_sync_failed, delay))
+            assert snapshot.active_blocks == before.active_blocks
+            assert snapshot.status == before.status
+            assert snapshot.pending_steers == before.pending_steers
+            return len(observed) == 3
+
+    monkeypatch.setattr(
+        tui_threading, "_consume_background_notices", lambda *args: next(outcomes)
+    )
+    tui_threading._background_notice_loop(
+        StopEvent(), object(), runtime.session_id, runtime,
+        [SimpleNamespace(invalidate=lambda: redraws.append(True))],
+    )
+
+    assert observed == [(True, 0.5), (True, 1.0), (False, 1.0)]
+    assert len(redraws) == 2
+
+
 def test_tui_notice_loop_keeps_active_background_session_realtime(monkeypatch) -> None:
     """runtime 已接收 typed active count 时，即使前台空闲也继续每秒刷新。"""
     from agent_py_agent.cli.chat_parts import tui_threading
