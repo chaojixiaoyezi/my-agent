@@ -577,11 +577,15 @@ def test_subagent_wake_restores_original_task_and_root_tool_history(tmp_path) ->
         {
             "thread_id": thread.thread_id,
             "task_id": root_id,
-            "goal": objective,
+            "goal": "上一个被截断的调研追问",
             "status": "active",
             "task_path": str(task_root),
         }
     )
+    store.append_message({
+        "thread_id": thread.thread_id, "role": "user", "content": objective,
+        "metadata": {"conversation_request_id": foreground_request_id},
+    })
     request = BackgroundRunRequest(
         thread_id=thread.thread_id,
         task_id=root_id,
@@ -645,8 +649,62 @@ def test_subagent_wake_keeps_objective_in_user_task_slot() -> None:
     assert injections == ["[active-turn-continuation]\n读取本次子代理完成事件后继续"]
 
 
+@pytest.mark.parametrize("tail_count", [0, 180])
+def test_lifecycle_objective_pages_exact_requests_without_rewriting_history(tmp_path, tail_count):
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_request_objective,
+    )
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({"canonical_user_id": "owner", "channel": "tui", "channel_conversation_id": "same"})
+    for request_id, content in (("old", "旧目标"), ("first", "第一轮原话"), ("second", "第二轮原话"), ("unrelated", "不要猜最近一轮")):
+        store.append_message({"thread_id": thread.thread_id, "role": "user", "content": content,
+                              "metadata": {"conversation_request_id": request_id}})
+    store.append_message({"thread_id": thread.thread_id, "role": "user", "content": "这是插话不是原任务",
+                          "metadata": {"gateway_request_id": "second", "kind": "active_turn_user_input"}})
+    for index in range(tail_count):
+        store.append_message({"thread_id": thread.thread_id, "role": "assistant", "content": f"工具片 {index}",
+                              "metadata": {"conversation_request_id": f"different-{index}"}})
+    path = store._message_path(thread.thread_id)
+    before = path.read_bytes()
+    request = BackgroundRunRequest(thread_id=thread.thread_id, task_id="old", reason="subagent_runner_finished",
+        wake_signal={"metadata": {"conversation_request_id": "second", "events": [
+            {"metadata": {"conversation_request_id": "first"}},
+            {"metadata": {"conversation_request_id": "second"}},
+        ]}})
+
+    assert _background_request_objective(store, request) == "第一轮原话\n\n第二轮原话"
+    assert path.read_bytes() == before
+    assert store.load_thread(thread.thread_id).compact_generation == thread.compact_generation
+
+
+@pytest.mark.parametrize("failure", ["missing", "foreign_thread", "corrupt"])
+def test_lifecycle_explicit_input_failure_cannot_fall_back_to_old_task(tmp_path, failure):
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _goal_runtime_context,
+    )
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({"canonical_user_id": "owner", "channel": "tui", "channel_conversation_id": "same"})
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "old", "goal": "不得接回的旧目标", "status": "active"})
+    if failure == "foreign_thread":
+        other = store.get_or_create_thread({"canonical_user_id": "other", "channel": "tui", "channel_conversation_id": "other"})
+        store.append_message({"thread_id": other.thread_id, "role": "user", "content": "其他会话的同编号",
+                              "metadata": {"conversation_request_id": "new"}})
+    if failure == "corrupt":
+        store._message_path(thread.thread_id).write_text('{"bad":\n')
+    request = BackgroundRunRequest(thread_id=thread.thread_id, task_id="old", reason="subagent_runner_finished",
+                                   wake_signal={"metadata": {"conversation_request_id": "new"}})
+    with pytest.raises(DataCorruptionError, match="background request"):
+        _goal_runtime_context(SimpleNamespace(), store, request)
+    assert store.load_task_link("old").goal == "不得接回的旧目标"
+
+
+@pytest.mark.parametrize("explicit_request", [False, True])
 def test_subagent_wake_provider_prompt_keeps_original_task_after_runtime_injection(
-    tmp_path,
+    tmp_path, explicit_request,
 ) -> None:
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
@@ -670,11 +728,16 @@ def test_subagent_wake_provider_prompt_keeps_original_task_after_runtime_injecti
         {
             "thread_id": thread.thread_id,
             "task_id": "root-continuation",
-            "goal": objective,
+            "goal": "旧任务未完成，不能冒充当前请求" if explicit_request else objective,
             "status": "active",
             "task_path": str(task_root),
         }
     )
+    if explicit_request:
+        store.append_message({
+            "thread_id": thread.thread_id, "role": "user", "content": objective,
+            "metadata": {"conversation_request_id": "current-request"},
+        })
     runtime = BackgroundMainAgentRuntime(
         agent=agent,
         store=store,
@@ -686,6 +749,7 @@ def test_subagent_wake_provider_prompt_keeps_original_task_after_runtime_injecti
             "thread_id": thread.thread_id,
             "task_id": "root-continuation",
             "reason": "subagent_runner_finished",
+            "wake_signal": {"metadata": {"conversation_request_id": "current-request"}} if explicit_request else {},
             "now": 20.0,
         }
     )
@@ -696,6 +760,7 @@ def test_subagent_wake_provider_prompt_keeps_original_task_after_runtime_injecti
     user_task_at = prompt.index(f"# User Task\n{objective}")
     assert user_task_at < continuation_at
     assert "A subagent lifecycle event resumed this same task" in prompt
+    assert "# User Task\n旧任务未完成，不能冒充当前请求" not in prompt
 
 
 def test_claimed_background_turn_can_use_its_own_task_workspace(tmp_path) -> None:
@@ -4681,6 +4746,10 @@ def test_done_child_wake_with_carried_successful_spawn_closes_root_task(
             "task_path": str(task_root),
         }
     )
+    store.append_message({
+        "thread_id": thread.thread_id, "role": "user", "content": "由子代理完成实现后汇总",
+        "metadata": {"conversation_request_id": "foreground-request"},
+    })
     channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
 

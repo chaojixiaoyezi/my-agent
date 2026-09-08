@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## R204 后台原文定位
+
+`_goal_runtime_context` 的生命周期分支使用 `_background_request_objective`，按 wake 的请求编号在
+canonical transcript 分页定位 user 输入；`history_page_report` 只提供无副作用读取，临时游标不写入状态。
+稳定 task link 继续提供路径与旧事件目标，原文缺失抛出 DataCorruptionError，不能回落错误旧目标。
+
 ## R203 Todo 动画活动源
 
 `TuiViewSnapshot.has_active_work` 是显示与刷新共用的只读活动谓词；`_render_fixed_todo` 只增加本地

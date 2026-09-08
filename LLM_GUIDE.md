@@ -21,6 +21,10 @@
 
 ## 2026-08-23 当前运行基线
 
+- lifecycle wake 恢复任务目标与工具索引共用 exact conversation_request_id；用户正文从同 owner/thread
+  canonical transcript 分页找回，不能把复用的 task link.goal 当成后续回合目标。批量按账本顺序读取，
+  明确编号缺失或损坏要报错，不猜最近任务、不改旧账；无编号的旧 wake 继续原 task link 路径。
+
 - Ctrl+O 冻结正文也属于当前代理页面。frame-provider 换 typed store 时同步重绑冻结 snapshot、清空旧
   搜索坐标并保留详细档位；同 store 刷新不解冻，不把后台新消息偷加进当前冻结画面。
 

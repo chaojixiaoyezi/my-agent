@@ -1,5 +1,11 @@
 # Gateway Progress
 
+## R204 后台用户输入与稳定身份分离（本地通过）
+
+K 真实连续任务中 child wake 已有新 request，但背景目标只读旧 task goal，最终答错任务。
+现从同 thread 原消息精确恢复，缺失不猜、批量按消息顺序、旧无编号与 Audit 边界保持。
+179 focused passed / 2 原有 xfailed，待部署与真实 TUI 复验；不据此宣布连续任务全部通过。
+
 ## R203 计划显示不代表执行（本地，待原 TUI）
 
 前台 phase 与后台 active count 共用快照谓词；空闲 Todo 保留未完成事实但不再闪动或维持周期刷新。

@@ -1,5 +1,12 @@
 # TEST CHECKLIST
 
+## R204 后台逐轮输入归属
+
+- [x] 保留 K 真实错误 final/wake/任务/消息/执行代证据，旧 goal 与新 request 不一致的定位测试先红。
+- [x] 同 task 新请求正文和工具记录精确恢复；分页、批量顺序、插话、缺失/损坏/错 thread、legacy 和真实 prompt 回归。
+- [x] 原 canonical 正文、Compact、task link 不被读取过程重写；179 passed / 2 原有 xfailed。
+- [ ] 新版真实长 TUI 连续任务/递归返回后接续正确目标，实际工具与最终交付复核。
+
 ## R203 Todo 终态与截断观察
 
 - [x] 原 F final 后 Todo 持续闪动；两个定位用例先红，144 focused 通过。

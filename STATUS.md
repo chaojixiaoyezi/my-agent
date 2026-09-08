@@ -1,13 +1,24 @@
 # STATUS
 
+## R204 子代理返回后错接旧目标（本地修复，待真实复验）
+
+- K 调研→两次追问→Go 复刻的真实长链失败：wake 带新请求，但 task link 仍是被截断的旧追问；
+  background 最终 msg-b2275c96b8f44e2c 汇报旧调研，没有继续复刻整合。不能再仅按身份复用解释为正常。
+- 目标恢复现按 lifecycle wake 的 exact conversation_request_id 读取同 owner/thread canonical 用户正文，
+  task/root/路径和旧账不变；缺失/损坏明确失败，无请求编号的旧事件保留原路径，Audit 独立事件不套用。
+- 一个真实结构复现先红；181 个相关用例中 179 passed / 2 原有 xfailed，覆盖分页、批量顺序、错误会话、
+  插话不冒充原请求、原正文/Compact 不改写，以及实际 provider prompt。真实 TUI 与部署尚未验收。
+- R203 客户端已在原 F/E 恢复并用 MiniMax 继续任务；F 恢复时 Todo 显示“待继续”且静止，完整忙闲组合待验。
+  R201 零引用环境已回收约 651 MB，保留包和依赖；R189 受保护客户端未动。Gateway 仍 R202 / 3271274。
+
 ## R203 未完成清单不代表执行仍活跃（本地通过，待原 TUI）
 
 - F 已 final/输入空闲，Todo 仍闪动；两个定位用例先红。快照统一区分实际前台/后台活动与模型清单状态，
   空闲时保留未勾完项、显示“待继续”、停止动画和周期刷新；不代替模型完成 Todo，不修改后端账。
 - 对照 会话运行时 history_cell/plans.rs 与 终端交互 TaskListV2.tsx 的静态计划状态；保留用户要求的运行期动画。
   144 focused 通过，待部署客户端并在原 TUI 验证；不把单测当产品验收。
-- K 旧追问的事件已证实 runtime_status=unfinished / MODEL_RESPONSE_TRUNCATED，而前端只显示半句回复。
-  新复刻沿用其未结束 task，不能仅由旧 parent id 判定派错父级。截断提示/恢复链路为新开口 BUG-140。
+- K 旧追问为 unfinished / MODEL_RESPONSE_TRUNCATED，前端只显示半句；后续已确认错误目标恢复，见 R204。
+  截断提示/恢复链路另为 BUG-140，尚未闭环。
 
 ## R202 普通命令等待宿主输入（已部署，真实分项复验）
 

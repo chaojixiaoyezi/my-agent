@@ -1,5 +1,15 @@
 # DESIGN LEDGER
 
+## 2026-09-08 后台续片恢复精确用户回合【状态：BUG-141 修复中】
+
+- K 同一 TUI 在调研追问被截断后继续派发 Go 复刻；child wake 已携带新 conversation_request_id，
+  后台却把旧 task link.goal 放回 User Task，最终只汇报旧调研。证据已保存，不补发任务或修改失败账掩盖。
+- 对照 会话运行时 agent/control.rs 独立的 parent_thread_id / parent_turn_id：稳定父子树和逐轮输入必须分开。
+  task link 继续管运行归属/归档路径，lifecycle wake 的精确请求编号从同 owner/thread canonical transcript
+  恢复原用户正文；批量信封按账本顺序保留对应输入，不按标题、内容、目录或最近任务猜目标。
+- 已有明确请求编号却找不到原消息时显性报恢复错误，不偷用旧目标；无请求编号的旧信封继续走既有 task
+  link 恢复。只读原账本，不能改写历史、Compact、缓存前缀、权限或 child 身份，也不添加业务完成验收。
+
 ## 2026-09-07 清单状态与执行活动分离【状态：R203 本地通过，待 TUI】
 
 - Todo 的 in_progress 是模型维护的计划事实，不等于当前存在执行。只由快照的前台 phase 或后台 active count

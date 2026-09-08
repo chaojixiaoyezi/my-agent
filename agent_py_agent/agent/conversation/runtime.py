@@ -1,5 +1,5 @@
-# LLM: 本模块是会话后台运行、唤醒、投递和任务续接的权威入口；同一 active task 的结构化身份与工具历史必须跨工作片延续。
-# 模块用途: 处理会话后台事件、子代理完成唤醒、上下文投影、任务状态和消息投递。
+# LLM: 本模块是会话后台运行、唤醒和续接的权威入口；稳定 task 身份与逐轮请求必须分离，正文和工具历史按同一请求恢复。
+# 模块用途: 处理后台事件、上下文和投递；子代理返回时续接其原用户回合，不能把旧任务登记目标当作新请求。
 from __future__ import annotations
 
 import hashlib
@@ -742,9 +742,9 @@ def _material_tool_success_count(
     return count
 
 
-# LLM: 同一后台轮只能采样一次 child phase；prompt、finalization 与公开投递必须共用该快照，
-#   不能在模型运行前后各读一次状态并把两个时刻拼成一个错误结论。
-# 函数用途: 读取当前显式目标，并冻结本轮开始时的子代理树阶段。
+# LLM: 同一后台轮只采样一次目标/child phase；task link 管路径和身份，lifecycle 请求编号管原用户正文。
+# prompt、finalization 与公开投递共用快照，原消息缺失不得默默改用别轮目标；只读，不改历史或任务账。
+# 函数用途: 固定后台续接的正确用户要求与子树阶段，避免新任务完成后主代理回去回答旧任务。
 def _goal_runtime_context(
     agent: object,
     store: ConversationStore,
@@ -759,6 +759,8 @@ def _goal_runtime_context(
         request.thread_id,
         task_id,
     )
+    if not link_error and _is_active_turn_lifecycle_continuation(request, task_objective):
+        task_objective = _background_request_objective(store, request) or task_objective
     phase = ""
     state_error = link_error
     if str(request.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS:
@@ -795,9 +797,9 @@ def _goal_runtime_context(
     )
 
 
-# LLM: The task link is the durable source of the original active objective and workspace.
-# A missing/corrupt link must fail soft into the existing bounded context, never invent prose.
-# 函数用途: 从精确 thread/task 绑定读取原任务和任务目录，供后台续接复用。
+# LLM: Task link owns the durable workspace and the objective of wakes without a request id.
+# Lifecycle requests resolve their own user input separately; never overwrite this historical link.
+# 函数用途: 读取运行目录和原始登记目标；后续回合的正文须由精确请求另取，不能改写旧登记来凑新目标。
 def _background_task_continuation_fields(
     store: ConversationStore,
     thread_id: str,
@@ -823,6 +825,37 @@ def _background_task_continuation_fields(
         str(getattr(link, "task_path", "") or "").strip(),
         "",
     )
+
+
+# LLM: Resolve only host-owned wake request ids in this store/thread's canonical transcript.
+# Page cursors are ephemeral reads, not model state. Missing/corrupt explicit inputs fail visibly;
+# guidance/assistant prose cannot impersonate the initial input, and no history/Compact is written.
+# 函数用途: 子代理返回时按派工请求找回用户原话，逐页读取避免长期会话全量加载，批量唤醒保持原消息顺序。
+def _background_request_objective(store: ConversationStore, request: BackgroundRunRequest) -> str:
+    pending = set(_background_active_turn_request_ids(request))
+    if not pending:
+        return ""
+    selected: list[str] = []
+    before: int | None = None
+    while pending:
+        page = store.history_page_report(request.thread_id, before=before, limit=80)
+        if page.errors:
+            raise DataCorruptionError("background request transcript is unreadable")
+        for row in reversed(page.rows):
+            metadata = row.metadata if isinstance(row.metadata, dict) else {}
+            request_id = str(metadata.get(CONVERSATION_REQUEST_ID_ATTR) or metadata.get("gateway_request_id") or "")
+            if row.role != "user" or metadata.get("kind") == "active_turn_user_input" or request_id not in pending:
+                continue
+            if row.thread_id != request.thread_id or not row.content.strip():
+                raise DataCorruptionError("background request input is invalid")
+            selected.append(row.content)
+            pending.remove(request_id)
+        if not pending:
+            return "\n\n".join(reversed(selected))
+        if not page.before or (before is not None and page.before >= before):
+            raise DataCorruptionError("background request input is missing from its conversation")
+        before = page.before
+    return ""
 
 
 class BackgroundMainAgentRuntime:

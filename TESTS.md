@@ -1,5 +1,12 @@
 # TESTS
 
+## R204 精确请求的后台目标恢复
+
+将旧 task goal 与新用户 request 区分，复现目标回退后修复；使用真实 ConversationStore JSONL、分页与
+后台 provider prompt 组装测试，不从 final 内容生成运行事实。批量信封按原消息顺序，超过 80 条可继续查，
+插话不替代原输入；明确请求缺失/跨 thread/损坏时不能偷接旧目标，旧无编号 wake 仍可恢复。
+后台运行/错误/唤醒与历史分页 181 例中 179 passed、2 原有 xfailed；最终仍需真实 MiniMax TUI 连续任务验收。
+
 ## R203 Todo 活动与终态
 
 两个真实状态复现分别验证 runtime 不再因未勾完项保持周期刷新，以及真实 renderer/frame key 在空闲后稳定。
