@@ -1,16 +1,18 @@
-# LLM: 配置接口沿用 Gateway 可信来源与 owner 解析；正文只能传显式操作和模型字段，不能指定 owner 或文件路径。
-# 模块用途: 为 TUI 提供私有模型列表、保存和选择，不把密钥写入聊天队列。
+# LLM: 配置接口沿用 Gateway 可信 owner 解析和 canonical 路径；冷用户不能触发 Agent/后端/工具初始化，保持配置读写独立。
+# 模块用途: 为 TUI 提供私有模型列表、保存和选择，不把密钥写入聊天队列，也不启动用户后台服务。
 
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from ..settings.model_profiles import ModelProfileError, execute_model_profile_operation
-from .control_service import resolve_gateway_scope_agent
+from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
+from .control_service import resolve_gateway_scope_owner
 
 
-# LLM: 列表永不回传密钥；只返回受控错误，不序列化任意异常或请求内容，不发起模型调用。
-# 函数用途: 接受一个已认证用户的模型配置操作，持久化成功后才返回成功。
+# LLM: 列表永不回传密钥；只解析可信身份并读写唯一配置，不进入 owner pool；同步检查冷 owner 与跨用户 API 用例。
+# 函数用途: 为已认证用户直接读取或原子保存模型配置，落盘后才返回成功，避免被完整 Agent 初始化拖慢。
 def handle_client_models(handler, server) -> None:
     from .http_handlers import (
         _gateway_control_scope,
@@ -30,8 +32,11 @@ def handle_client_models(handler, server) -> None:
             raise ModelProfileError("缺少会话编号。")
         user_id, channel = _request_channel(handler)
         scope = _gateway_control_scope(handler, body, user_id=user_id, channel=channel)
-        agent = resolve_gateway_scope_agent(server.agent, scope)
-        result = execute_model_profile_operation(agent, str(body.get("operation") or ""), body)
+        owner = resolve_gateway_scope_owner(server.agent, scope)
+        base_home = server.agent.home_paths
+        scoped_home = home_paths_with_owner(base_home, resolve_owner_home(base_home.root, owner))
+        config_host = SimpleNamespace(home_paths=scoped_home, config=server.agent.config)
+        result = execute_model_profile_operation(config_host, str(body.get("operation") or ""), body)
     except json.JSONDecodeError:
         handler._send_json(400, {"ok": False, "message": "模型配置请求格式错误。"})
         return

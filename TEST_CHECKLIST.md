@@ -1,5 +1,14 @@
 # TEST CHECKLIST
 
+## R212 模型选择真实传输边界
+
+- [x] 本次使用独立owner的canonical工具策略禁止创建子代理；真实运行表child=0。
+- [x] 抓取TUI模型标签与provider实际请求不一致，撤回“Qwen普通轮已通过”的早期判断。
+- [x] 真实保护Thread成功/异常两先红用例；修复后选中config/backend/prompts一致，外层默认恢复。
+- [x] 冷owner列表/新增/选择不进入Agent pool；58相关focused通过。
+- [ ] 部署同一修复包，在真实TUI中重新核对Qwen provider请求、模型用量与完整交付。
+- [ ] 同模型长上下文压缩复验；旧混用模型的超窗失败不作为Qwen自身结论。
+
 ## R211 /model 真 TUI 分项
 
 - [x] ma-r211-110-models：Auth 预留与返回、字段掩码、非法窗口阻止保存、保存与选择独立。

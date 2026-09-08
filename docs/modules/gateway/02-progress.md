@@ -1,5 +1,11 @@
 # Gateway Progress
 
+## R212 模型配置与真实传输（本地修复，待部署）
+
+真实Qwen任务反证：菜单配置在保护线程丢失，普通模型轮回落部署默认，压缩才请求Qwen。
+保护线程复制工作片Context；纯模型配置API只解析可信owner与canonical路径，不初始化完整Agent。
+58 focused通过，含真实Thread成功/异常和冷owner读写先红用例。旧任务未算Qwen通过，不重启在途模型做假验收。
+
 ## R210 真 TUI 分项结果
 
 受控升级唯一 Gateway 为 3494500，原 Go/家庭工具两会话的 main 数字和常规阶段同步；新真实 MiniMax

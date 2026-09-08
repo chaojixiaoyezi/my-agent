@@ -222,3 +222,36 @@ def test_explicit_window_does_not_call_metadata():
     host = SimpleNamespace(config=AgentConfig(model_context_window_tokens=96000, model_context_window_explicit=True),
                            backend=SimpleNamespace(provider_context_window_tokens=forbidden))
     assert resolve_model_context_window_tokens(host) == 96000
+
+
+@pytest.mark.parametrize("backend_fails", [False, True])
+def test_selected_model_survives_real_transport_guard_thread(tmp_path, monkeypatch, backend_fails):
+    from agent_py_agent.agent.agent_core import tool_model_generation as generation
+    from agent_py_agent.agent.settings import model_scope
+
+    host = Host(tmp_path)
+    original = host.config
+    key, _ = add(host, model_name="chosen-model")
+    execute_model_profile_operation(host, "select", {"profile_id": key})
+    monkeypatch.setattr(model_scope, "_profile_backend", lambda agent, config: SimpleNamespace(name=config.model_name))
+    monkeypatch.setattr(generation, "_effective_model_request_timeout_seconds", lambda *args: 1.0)
+    observed = []
+
+    def generate(backend, prompt, state):
+        observed.append((backend.name, host.config.model_name, host.prompts.config.model_name, threading.get_ident()))
+        if backend_fails:
+            raise RuntimeError("provider-test-failure")
+        return SimpleNamespace(text="done")
+
+    monkeypatch.setattr(generation, "_invoke_backend_generate", generate)
+    request = SimpleNamespace(agent=host, prompt="ordinary task")
+    with selected_model_scope(host):
+        if backend_fails:
+            with pytest.raises(RuntimeError, match="provider-test-failure"):
+                generation._generate_with_wall_timeout(request, SimpleNamespace())
+        else:
+            assert generation._generate_with_wall_timeout(request, SimpleNamespace()).text == "done"
+        assert host.config.model_name == "chosen-model"
+    assert len(observed) == 1 and observed[0][:3] == ("chosen-model",) * 3
+    assert observed[0][3] != threading.get_ident()
+    assert host.config is original

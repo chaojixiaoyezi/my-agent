@@ -1,5 +1,31 @@
 # TESTS
 
+## R212 模型归属反证与线程修复（真实复验待做）
+
+本轮账单任务失败，59 工具轮、1275.267秒、child=0。服务日志没有对应的 Qwen 普通执行轮，
+仅有能力探针和最后压缩 HTTP400（288149 输入 > 262144 窗口）。保护线程未继承选中模型上下文，
+导致普通轮回退部署默认而压缩使用选中模型；下节早期“真实工具任务”不能认定为 Qwen 已通过。
+
+`test_selected_model_survives_real_transport_guard_thread` 成功/异常两路径修前实际观察到 deployment，
+不是 chosen-model。保护线程通过 `copy_context().run` 执行后两例通过，并保持退出后原默认对象。
+`test_cold_owner_model_menu_does_not_initialize_agent` 修前500，配置API改为纯 owner/path 后通过，
+新增/选择不创建 owner workspace、Agent pool 或后台服务。模型/菜单/超时保护相关共58 focused通过。
+这只表示本地定位与回归通过；需部署同一源码后用真实 TUI 和真实 provider 日志重新验收。
+
+## R212 本地模型 /model 与主代理从零任务
+
+用户指定本机 Qwen 与 262144 窗口，且禁止本次派子代理。为兼顾真实单 Gateway 与现有任务，
+使用 `.10` R211 已部署包、独立 owner `p1-r212-qwen-main`，经本机已监听的局域网模型端口访问同一服务；
+SSH 转发被服务端策略拒绝，未改策略或开新端口。`/v1/models` 是连通性检查，不算模型任务验收。
+模型配置新增/保存/选择及业务任务均经 `ma-r212-110-qwen-main` 真实 TUI，未用 API 代投业务 prompt。
+禁用派工使用 owner `tool_policy.json` 的 `disabled_tools`，不只依赖测试 prompt，也不改其它用户的能力。
+
+真实任务覆盖 CSV 账单解析、重复导入与真实同额交易、退款/坏数据、样例、自动测试与使用说明。
+目前已显示真实思考、工具参数流、写文件、编辑、命令成功/失败后继续；child=0，窗口262144。
+实际最终回复、用量账本、测试结果与完整交付仍待收尾；测试者未补业务代码或修改失败断言。
+证据目录 `r212-qwen-main` 的 `setup.json/prompt.json/evidence-in-progress.json` 保留独立身份、单 Gateway、
+命令结果计数与 canonical 消息哈希。BUG-148/149 见真实 TUI 审计，不把保存未知当保存失败或重复新增。
+
 ## R211 模型窗口真实执行与 overlay 组合
 
 ma-r211-110-models 经真实 /model 保存 Anthropic/MiniMax-M2.7/96000，菜单/Auth/非法窗口期间 canonical

@@ -1,5 +1,24 @@
 # DESIGN LEDGER
 
+## 2026-09-08 模型快照贯穿真实传输线程【状态：BUG-150 本地修复，待真实复验】
+
+R212 真实 provider 日志反证：/model 选择只在父线程生效，普通生成的 timeout-guard Thread 回到部署默认，
+压缩同步请求却保持选中模型。显示窗口/调用前标签不能证明实际模型，也不能据此统计跨模型成本。
+对照 会话运行时 `core/src/tasks/regular.rs` 的 `Arc<TurnContext>` 贯穿普通执行；本项目在同一个 HTTP保护线程入口
+复制当前 Context，而非热改共享Agent或另造后端路径。config/backend/prompts及可信工作片绑定一起保留；
+成功、异常均退出该副本，取消仍传给真正HTTP线程。模型选择跨工作片语义不变，不影响其它owner的快照。
+两个真实Thread先红用例复现回落默认，修复后通过；普通生成/菜单/模型配置共58 focused通过，真TUI复验待做。
+
+## 2026-09-08 模型菜单不能依赖冷用户完整初始化【状态：R212 本地修复，待真实复验】
+
+R212 首次保存回执超时但配置实际已落盘，列表随后确认同一 profile ID。当前 `/client/models` 会先
+`resolve_gateway_scope_agent`，因此纯配置操作也可能触发整套冷 owner Agent 装配；当次阶段耗时未采集，
+不能将全部延迟归于这一环。对照 会话运行时 `app-server/src/request_processors/config_processor.rs` 的
+`read/value_write/batch_write` 走 ConfigManager，以及本项目已有 `resolve_gateway_scope_owner` 的轻量身份入口，
+已让模型菜单仅依赖可信 owner、canonical 配置路径和部署默认值，不启动工具/模型/记忆后台。
+保留保存同 ID 幂等、未知结果明确对账和原子私密落盘；不靠延长超时掩盖初始化依赖。
+另需明确展示模型选择后的当前模型，避免历史欢迎卡的旧部署默认被误当实际请求配置。
+
 ## 2026-09-08 模型选择贯穿子孙运行配置【状态：R211 组合用例修复中】
 
 配置 overlay 会规范化 source 并丢掉宿主 profile ID，且首版只给 model_name 提升优先级，

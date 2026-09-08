@@ -1,9 +1,10 @@
-# LLM: Model generation owns the timeout-guard thread, stream filtering, provider error normalization, and propagation of typed task interruption into that real transport thread.
-# 模块用途: 统一调用模型，处理超时、流式输出和上下文压力，并让用户停止能真正传到模型连接。
+# LLM: Model generation owns the transport guard; preserve the caller's frozen model/owner context and typed interruption in that thread. Keep profile-switch and timeout tests together.
+# 模块用途: 统一模型调用、超时与流式输出，把当前模型配置和停止信号传到真正的请求线程，避免显示与实际模型不一致。
 from __future__ import annotations
 
 import os
 import time
+from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -811,11 +812,8 @@ def _trace_model_failure(request: ModelGenerateParams, exc: BaseException) -> No
     )
 
 
-# LLM: The caller owns the typed task identity while the provider runs in a guard thread; relay interruption to that child before returning.
-# 函数用途: 用超时保护线程调模型，并把外层任务的停止信号转发给真正读模型响应的线程。
-# LLM: This wrapper chooses direct or timeout-guard execution; the deeper shared backend boundary
-# owns the durable pre-provider submission hook for every physical attempt.
-# 函数用途: 按配置直接调用模型或启动超时守护线程，并统一等待结果。
+# LLM: Both execution paths use the same frozen ContextVars; snapshot before spawning the guard so config/backend/prompts cannot revert to deployment defaults. Preserve submission hooks and typed cancellation.
+# 函数用途: 按配置直接调用模型或启动保护线程；新线程继承当前工作片的模型与身份，停止仍精确传到实际连接。
 def _generate_with_wall_timeout(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
@@ -837,7 +835,8 @@ def _generate_with_wall_timeout(
         finally:
             set_interrupt(False)
 
-    worker = Thread(target=_target, name="my-agent-model-generate-timeout-guard", daemon=True)
+    execution_context = copy_context()
+    worker = Thread(target=execution_context.run, args=(_target,), name="my-agent-model-generate-timeout-guard", daemon=True)
     worker.start()
     with register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
         return _wait_for_generation_result(request, state, results, worker, timeout)

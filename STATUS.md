@@ -1,5 +1,30 @@
 # STATUS
 
+## R212 实测失败并撤回 Qwen 普通轮通过判断；BUG-150 本地已修
+
+- 实际任务 1275.267 秒、59 工具轮后失败，child=0；压缩 HTTP 400 显示输入 288149 > 窗口 262144。
+- 对照本机 provider 日志：普通任务期间没有对应的连续 Qwen 生成，只有能力探针与最后失败的压缩请求。
+  保护线程未继承 `selected_model_scope` 的 ContextVars，config/backend/prompts 回到了部署默认。
+  因而此前 TUI 显示 262.1k、工具正常工作不能算 Qwen 普通轮通过，早期“已真实调用本地模型”判断撤回。
+- 新增真实 Thread 的成功/异常先红用例，复现选择模型变回部署默认；修复为执行边界复制工作片 Context。
+  58 focused 通过，原取消/超时路径通过；尚未部署复验，不将修复前的调用台账用于模型成本对照。
+- 冷 owner 菜单已移除完整 Agent 初始化依赖，保存仍沿可信 owner 和唯一私有文件源；先红用例修后通过。
+  欢迎卡旧标签仍待处理；压缩超窗须在模型真正一致后重测，不把此次混用模型样本归于 Qwen 本身。
+
+## R212 测试设置与早期观测（模型归属结论被上节更正）
+
+- 按用户本轮要求改测本机 OpenAI-compatible 服务，完整服务模型 ID 为
+  `qwen3.8-flash-next-rvn-iq3-xs-uncensored`，显式窗口 262144。
+  `ma-r212-110-qwen-main` 使用 `.10` 既有单 Gateway 3526903；不重启本机旧 Gateway、不新增 Gateway。
+- 新 owner `p1-r212-qwen-main` 的 canonical tool policy 禁用 `create_subagents`，仅影响本次测试。
+  经真实 `/model` 新增、选择后，通过 TUI 一次提交账单工具从零实现/样例/自动测试/使用说明任务。
+- request `gwreq-1788861710-bbc5299c4e674ed881ceb0a913b55da6` 已真实显示思考、Write/Update/Bash 和错误后继续修正；
+  采样 context 23.7k → 121.5k / 262.1k，compact 0；运行账本只有当前主 run，child 数为 0。
+  此时尚无最终 model_usage；窗口和工具显示不是实际 provider 模型证据，见上节纠正。
+- 新发现 BUG-148：首次保存返回“结果未确认”，随后列表/私有配置确认同 ID 已保存；未重复新增。
+  BUG-149：切换成功后旧欢迎卡仍显示部署默认 MiniMax，实际工作窗口已为 262.1k；待修展示来源。
+- 本轮不改业务产物、不派开发子代理。已有其它 owner 的 MiniMax 长任务保持原模型，本地 overlay 补修仍未部署。
+
 ## R211 已部署并真 TUI 部分通过；模型 overlay 补修待部署
 
 - 唯一 Gateway 3526903，独立非 editable R211 环境；新增 my-agent 包与旧环境分离，未改旧运行包。

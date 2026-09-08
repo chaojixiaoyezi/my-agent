@@ -6,6 +6,13 @@
 typed kind。`publish_main_activity` 是前后台唯一标量写入点；`MainActivitySource` 只在显示层隔离工作片，
 新任务不继承旧 task 的上下文，旧工作片迟到事件不盖新状态。正文/权限/生命周期仍走原路径。
 
+## R212 模型配置不经过执行池
+
+`handle_client_models` 沿 `resolve_gateway_scope_owner` 获取可信身份，`resolve_owner_home/home_paths_with_owner`
+派生唯一配置位置，使用部署默认配置提供默认选项。配置读写不调用 owner pool、不加载工具或记忆服务。
+实际任务仍通过原执行入口构造owner Agent；HTTP保护线程显式复制已冻结的Context，禁止回落部署默认模型。
+此改动不放宽权限，不改变模型记录格式、原子保存、同ID幂等或现有任务/历史来源。
+
 ## R209 展开装饰保留实时提示
 
 `TuiFrameProvider.frame` 将实时 context 健康作为 `preserve_footer` 传给 transcript decorator；冻结正文和
