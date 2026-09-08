@@ -1,5 +1,14 @@
 # TESTS
 
+## R213 BUG-150 部署后真实传输分项
+
+源码3a5b9fc，wheel SHA256 `155c71600ca6468338017f905bea89e0ffd05151f121496fb931a27fd0ebf524`。
+唯一Gateway3561271，`ma-r213-110-qwen-main` 使用fresh owner禁用派工；TUI/model重新新增/保存/选择，
+新用户保存正常返回，无R212的未知回执。相同普通中文任务通过TUI提交一次。
+provider日志6931普通轮处理18711输入、168输出；7106继续生成，Gateway socket同刻指向本机模型端口。
+运行账首条run_command成功、child=0，显示262144窗口；证据为 `qwen-evidence-actual-provider.json` 与
+`provider-after-start.log`，本轮可以确认普通传输使用选中模型，但完整交付/长上下文/成本统计仍待结束。
+
 ## R212 模型归属反证与线程修复（真实复验待做）
 
 本轮账单任务失败，59 工具轮、1275.267秒、child=0。服务日志没有对应的 Qwen 普通执行轮，

@@ -1,5 +1,16 @@
 # STATUS
 
+## R213 已部署并确认真实 Qwen 普通轮；完整任务进行中
+
+- 已提交 `3a5b9fc`，独立非editable R213包；唯一Gateway由3526903受控切换为3561271，
+  `ma-gateway-r213-110`。旧包/私有配置/切换前屏幕均保留，未改旧运行包或其他用户的模型选择。
+- 新 `ma-r213-110-qwen-main` / owner `p1-r213-qwen-main` 禁用派工，经真实/model新增、保存立即确认、选择Qwen与262144。
+  与R212相同的普通账单任务一次通过TUI提交，request `gwreq-1788865401-fc1fcfa7bab74b97b7cde99fcda05c32`。
+- `qwen-evidence-actual-provider.json`：Gateway3561271实际连接本机模型端口，child=0，首条run_command成功；
+  本机provider日志出现能力探针之后的普通任务6931（18711输入/168输出）及连续任务7106生成，已非只有探针/压缩。
+  输入/输出和耗时来自provider日志，不以TUI窗口标签代替模型归属；长任务仍在执行，未判完整通过。
+- /model线程边界、overlay修复均在当前包中。欢迎卡旧标签仍未修；同模型Compact和最终交付等待这次真实任务结果。
+
 ## R212 实测失败并撤回 Qwen 普通轮通过判断；BUG-150 本地已修
 
 - 实际任务 1275.267 秒、59 工具轮后失败，child=0；压缩 HTTP 400 显示输入 288149 > 窗口 262144。
