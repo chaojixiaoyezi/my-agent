@@ -67,6 +67,8 @@ create_subagents 单项/批项的可选 model 解析当前 owner 的已新增配
 用量账一笔 openai_compatible / Qwen / 18286 输入、62 输出、16659 cache-read，provider 总生成约3.865秒。
 原 Qwen 大任务按用户要求通过 Esc 停止。切到部署默认 MiniMax，欢迎区立即同步，再切回 Qwen。
 Gateway 3561271 未重启，两次菜单选择前后用量账 SHA256 相同，没有额外模型调用。
+本轮只读复核原窗口及 canonical 账本，仍为同一笔调用和零 child；当前模型配置/菜单/继承 45 项定向通过。
+补齐独立 child 模型的使用说明，没有新增生产逻辑，也没有把本地基础测试扩大为大型任务或跨模型 child 验收。
 
 ## R214 欢迎区跟随模型选择（本地已修，真实 TUI 待验）
 

@@ -42,6 +42,8 @@ BUG-146两个入口已定位：foreground chunk只有发起页消费；message_s
 欢迎区 117 focused 及 ma-r214-110-model-label 新开读取、真实切换已通过；Qwen 问候正常结束，child=0。
 子代理 model 参数已本地实现，支持本 owner 已新增配置、默认继承、整批预检及恢复。跨模型 child 真 TUI 待验；
 这次本地模型不做此子代理测试，也不增加新 Gateway。
+本轮复核现有 Qwen 真 TUI 与 canonical 用量，仍为一次短对话、child=0；模型配置/菜单/继承 45 项定向通过，
+无新增模型调用或生产代码改动。使用约定已补入 `docs/design/TUI_MODEL_PROFILES.md`。
 按用户最新要求，本地 Qwen 不再做大型账单任务，已在原 TUI 通过 Esc 停止；接下来验证简单回复。
 原底座 P0/P1 保持开放，不把本地模型连接或此显示修复视作封板。
 
