@@ -1,7 +1,7 @@
 # LLM: 本模块是 chat worker/Gateway structured rows 到 TuiEvent 的唯一 adapter；它不渲染、不执行工具，也不把 legacy 文案当状态。
 # 后台流身份仅管理展示续接，换流不得清空本页面历史、待输入回执或已恢复工作片。
 # 历史工具卡不再驱动实时 Todo；当前计划只由实时工具/活动快照发布，恢复和向前翻页都遵守这一边界。
-# 模块用途: 为 session、输入、回合和工具发布有序事件；刷新失败独立展示，不当成业务失败或任务进展。
+# 模块用途: 为 session、公开模型选择、输入、回合和工具发布有序事件；显示投影不改变执行配置。
 
 from __future__ import annotations
 
@@ -1270,6 +1270,11 @@ class TuiRuntime(
             f"session:{self.session_id}",
             {"version": version, "model": model, "workspace": workspace},
         )
+
+    # LLM: 已确认的模型选择只进显示事件；禁止携带密钥、接口或修改正在运行的模型快照。
+    # 函数用途: 刷新欢迎卡模型名，不新增聊天消息或重置会话。
+    def publish_model_selection(self, model: str) -> JournalAppendResult:
+        return self._publish("session_model_selected", "updated", f"session:{self.session_id}", {"model": model})
 
     # LLM: readiness start 是从真实 Gateway wait 发出的临时 UI 事实；它不创建 turn、请求或第二个健康状态源。
     # 函数用途: 在 TUI 中开始显示 Gateway 连接动画。

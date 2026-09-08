@@ -244,11 +244,15 @@ def _make_start_worker_params(
     )
 
 
-# LLM: 后台准备只读 exact session，将预览和显示分开更新；HTTP 不阻塞界面，失败或退出后不能用空历史启动 worker。
-# 函数用途: 服务就绪后恢复原会话；不执行任务、不回灌模型、不更改 Compact 或权限。
+# LLM: 后台准备读取已确认模型选择及可选 exact session 历史；HTTP 不阻塞界面，不修改执行快照。
+# 函数用途: 服务就绪后刷新模型显示并按需恢复原会话，退出后忽略迟到结果。
 def _prepare_gateway_session(params: TuiRunParams, runtime, stop_event: threading.Event) -> str:
     from .history import chat_history_max_turns, load_gateway_chat_history
+    from .tui_model_menu import refresh_model_selection
 
+    refresh_model_selection(params.agent, params.current_session_id, runtime, stop_event)
+    if stop_event.is_set() or not params.restore_session_history:
+        return ""
     try:
         restored = load_gateway_chat_history(
             params.agent, params.current_session_id,
@@ -270,7 +274,7 @@ def _prepare_gateway_session(params: TuiRunParams, runtime, stop_event: threadin
 
 
 # LLM: Gateway 显式恢复在 preflight readiness 后、worker 前进行；本地已加载显示可立即发布，恢复事件不进任务队列。
-# 函数用途: 先显示可交互界面，再完成连接与历史准备，成功后接收任务或退出。
+# 函数用途: 先显示界面，再同步模型名和准备历史；本地配置在启动前读取，不影响正在运行的代理。
 def run_tui(*, params: TuiRunParams) -> int:
     from agent_py_agent import __version__
 
@@ -288,6 +292,10 @@ def run_tui(*, params: TuiRunParams) -> int:
         model=str(getattr(params.agent.config, "model_name", "") or ""),
         workspace=str(getattr(params.agent, "root", "") or ""),
     )
+    if not params.use_gateway:
+        from .tui_model_menu import refresh_model_selection
+
+        refresh_model_selection(params.agent, params.current_session_id, tui_runtime)
     tui_runtime.publish_recovered_history(
         params.conversation_history, display_events=params.recovered_display_events,
         message_cursor=params.recovered_message_cursor,
@@ -339,7 +347,7 @@ def run_tui(*, params: TuiRunParams) -> int:
                 on_ready=start_workers,
                 prepare_session=(
                     lambda: _prepare_gateway_session(params, tui_runtime, stop_event)
-                ) if params.restore_session_history else None,
+                ),
             ))
     else:
         pre_run = start_workers

@@ -253,7 +253,7 @@ def test_resume_preparation_publishes_only_successful_live_session(outcome) -> N
             request_chat_history=request_history,
         ),
         current_session_id="exact-session", history_lock=threading.Lock(),
-        conversation_history=[],
+        conversation_history=[], restore_session_history=True,
     )
     error = _prepare_gateway_session(params, runtime, stop)
     assert reads == [("exact-session", 20)]

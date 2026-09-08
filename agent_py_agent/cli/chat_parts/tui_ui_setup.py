@@ -97,7 +97,7 @@ def _make_render_context_factory(
     navigation = params.agent_navigation
 
     # LLM: 子页面内容来自其独立 runtime，连接健康只读取 root runtime，避免产生多份相互矛盾的健康状态。
-    # 函数用途: 按页面和宽度读取展示数据，不改模型上下文、任务状态或导航位置。
+    # 函数用途: 按页面和宽度读取展示数据；已确认模型名跟随实时选择，展开历史也不会冻结旧标签。
     def make_context(width: int) -> TuiRenderContext:
         interaction_snapshot = interaction.snapshot()
         transcript_snapshot = transcript_state.snapshot()
@@ -117,7 +117,7 @@ def _make_render_context_factory(
         return TuiRenderContext(
             width=width,
             agent_name=agent_name,
-            model_name=str(getattr(params.agent.config, "model_name", "") or ""),
+            model_name=view_snapshot.selected_model_name or str(getattr(params.agent.config, "model_name", "") or ""),
             workspace=workspace,
             detailed_transcript=transcript_snapshot.active,
             show_all=transcript_snapshot.show_all,

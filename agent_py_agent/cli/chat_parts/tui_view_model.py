@@ -109,7 +109,7 @@ class TuiDiagnostic:
 
 
 # LLM: TuiViewSnapshot 是 UI 线程读取的不可变投影；活动谓词只供显示/刷新，不改 Todo 或运行账，调用方不得修改 reducer。
-# 类用途: 一次性取得历史、活动块、队列、overlay、status 和 diagnostics；刷新失败只标记数据可能过时。
+# 类用途: 一次性取得历史、活动、队列和确认后的模型显示名；这些投影不改变执行配置。
 @dataclass(frozen=True)
 class TuiViewSnapshot:
     stable_blocks: tuple[TuiBlock, ...]
@@ -120,6 +120,7 @@ class TuiViewSnapshot:
     status: TuiStatus
     diagnostics: tuple[TuiDiagnostic, ...]
     background_sync_failed: bool = False
+    selected_model_name: str = ""
 
     # LLM: Display activity comes from the current turn phase or canonical background count,
     # never from unfinished Todo items; renderer and refresh cadence must share this predicate.
@@ -258,7 +259,7 @@ class _TuiPermissionReducerMixin:
 # 类用途: 顺序应用已通过 journal 的事件，并维持 active→stable 一次冻结。
 class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # LLM: handler registry 明确列出已理解 kind，未知 kind 只记诊断，不把 payload 当文本透传。
-    # 函数用途: 初始化空 view model、独立的快照刷新健康标记和事件处理表。
+    # 函数用途: 初始化空 view model、确认后的模型显示名、独立的刷新健康标记和事件处理表。
     def __init__(
         self,
         *,
@@ -272,6 +273,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self.permission: TuiPermissionOverlay | None = None
         self.status = TuiStatus()
         self.background_sync_failed = False
+        self.selected_model_name = ""
         self.diagnostics: list[TuiDiagnostic] = []
         self.max_diagnostics = max(1, int(max_diagnostics or 1))
         self.max_stable_blocks = max(1, int(max_stable_blocks or 1))
@@ -280,6 +282,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self._task_progress_plan_revision = 0
         self._handlers: dict[str, Callable[[TuiEvent], None]] = {
             "session_started": self._handle_session_started,
+            "session_model_selected": self._handle_session_model_selected,
             "connection_started": self._handle_connection_started,
             "connection_resolved": self._handle_connection_resolved,
             "background_sync_changed": self._handle_background_sync_changed,
@@ -422,6 +425,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             status=self.status,
             diagnostics=tuple(self.diagnostics),
             background_sync_failed=self.background_sync_failed,
+            selected_model_name=self.selected_model_name,
         )
 
     # LLM: 刷新结果必须是 typed bool，只改变本客户端显示健康；不得清空旧快照、终结任务或清除待发消息。
@@ -432,11 +436,20 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             raise ValueError("background sync requires boolean ok")
         self.background_sync_failed = not ok
 
-    # LLM: session_started 只生成一次欢迎块；同 block 重放由 stable id 幂等。
-    # 函数用途: 建立带品牌/版本/模型/目录元数据的启动块。
+    # LLM: session_started 只生成一次欢迎块；初始模型名随后可被已确认的选择事件更新，不修改历史正文。
+    # 函数用途: 建立欢迎块和初始模型显示名。
     def _handle_session_started(self, event: TuiEvent) -> None:
         block = self._block_from_event(event, role="system", phase="completed")
         self._append_stable(block, event)
+        if not self.selected_model_name:
+            self.selected_model_name = str(event.payload.get("model") or "")
+
+    # LLM: 仅投影宿主确认的公开模型名，不重建欢迎块、切换后端或改变 active turn。
+    # 函数用途: 让顶部欢迎区随模型选择刷新，保留已有历史和当前执行。
+    def _handle_session_model_selected(self, event: TuiEvent) -> None:
+        model = event.payload.get("model")
+        if isinstance(model, str) and model.strip():
+            self.selected_model_name = model.strip()
 
     # LLM: connectivity 是真实 Gateway readiness 的临时显示块；同 id 重复启动不能覆盖既有活动或稳定消息。
     # 函数用途: 在欢迎区下方显示正在连接 Gateway 的原位 spinner。

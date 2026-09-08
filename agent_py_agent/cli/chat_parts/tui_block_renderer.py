@@ -1250,11 +1250,11 @@ def _background_animation_key(
     )
 
 
-# LLM: 欢迎卡保持 终端交互 95 列上限和宽/窄两种结构，品牌/版本/模型/目录使用 my-agent 显式映射，用户文案统一为中文。
-# 函数用途: 渲染中文启动欢迎卡和一行使用提示。
+# LLM: 欢迎卡保持 终端交互 宽/窄结构；实时确认的模型选择优先于启动块旧标签，不从响应正文猜模型。
+# 函数用途: 渲染中文欢迎卡和提示，切模型后立即更新模型名，长名继续按列宽裁短。
 def _render_welcome(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     version = str(block.metadata.get("version") or context.version)
-    model = str(block.metadata.get("model") or context.model_name or "模型不可用")
+    model = str(context.model_name or block.metadata.get("model") or "模型不可用")
     workspace = str(block.metadata.get("workspace") or context.workspace or ".")
     card_width = min(WELCOME_CARD_MAX_WIDTH, context.width)
     if card_width >= 80:

@@ -1,5 +1,5 @@
 # LLM: /model 是本机表单，不进入聊天、LLM 或 FileHistory；网络与文件操作在线程中执行，密钥只在掩码控件短暂保留。
-# 模块用途: 在现有 TUI 中选择或新增模型，退出取消表单不会打断主代理或子代理。
+# 模块用途: 在现有 TUI 中选择或新增模型，并在启动和选择确认后刷新欢迎区；不热改运行配置。
 
 from __future__ import annotations
 
@@ -82,14 +82,40 @@ async def _request(app, agent, session_id: str, operation: str, **payload) -> di
 # LLM: 文件/网络操作离开事件线程；只有固定 ModelProfileError 文案可公开，未知异常不得带出秘密。
 # 函数用途: 获取模型配置操作的确认结果，并安全处理可预期错误。
 async def _request_data(agent, session_id: str, operation: str, payload: dict) -> dict:
-    if getattr(agent, "gateway_client_only", False) is True:
-        return await asyncio.to_thread(agent.request_models, session_id=session_id, operation=operation, **payload)
+    return await asyncio.to_thread(_request_data_sync, agent, session_id, operation, payload)
+
+
+# LLM: 菜单与启动共用原配置入口；必须由启动前或后台线程调用，异常不泄漏秘密。
+# 函数用途: 读取或保存用户模型配置；Gateway 模式发认证请求，本地模式访问私有配置文件。
+def _request_data_sync(agent, session_id: str, operation: str, payload: dict) -> dict:
     try:
-        return await asyncio.to_thread(execute_model_profile_operation, agent, operation, payload)
+        if getattr(agent, "gateway_client_only", False) is True:
+            return agent.request_models(session_id=session_id, operation=operation, **payload)
+        return execute_model_profile_operation(agent, operation, payload)
     except ModelProfileError as exc:
         return {"ok": False, "message": str(exc)}
     except Exception:  # noqa: BLE001 不显示带有密钥或路径的未知异常
         return {"ok": False, "message": "模型配置操作失败，请检查本机配置目录是否可写。"}
+
+
+# LLM: 只认配置操作成功回执里的 selected ID；失败、取消和未选择的新增记录不得改变当前模型显示。
+# 函数用途: 从脱敏模型列表更新 TUI，整个配置和密钥都不进入显示事件。
+def _publish_selection(runtime, result: dict) -> None:
+    if result.get("ok") is True:
+        row = next((row for row in result["profiles"] if row["id"] == result["selected"]), None)
+        if row is not None:
+            runtime.publish_model_selection(row["model_name"])
+
+
+# LLM: 启动读取在 Gateway readiness 后的后台执行；退出后的迟到结果不发布，也不阻止正常历史恢复。
+# 函数用途: 新开或恢复 TUI 时读取已保存模型名；失败明确提示，不凭启动默认值声称同步成功。
+def refresh_model_selection(agent, session_id: str, runtime, stop_event=None) -> None:
+    result = _request_data_sync(agent, session_id, "list", {})
+    if stop_event is not None and stop_event.is_set():
+        return
+    _publish_selection(runtime, result)
+    if not result.get("ok"):
+        runtime.set_notice("当前模型名称尚未同步，可打开 /model 重新确认。", duration_seconds=6)
 
 
 # LLM: provider 的动作值是后端枚举，Auth 仅保留菜单项，不发登录请求、不落不完整记录。
@@ -145,12 +171,13 @@ async def _add_model(app, agent, session_id: str) -> str:
     return ""
 
 
-# LLM: 显式 ID 是唯一选项身份，同名配置也不能互相覆盖；成功才更新客户端公开模型标签，不读取密钥。
+# LLM: 显式 ID 是唯一选项身份；成功后发布公开模型显示事件，不能热改共享 Agent 的 config/backend。
 # 函数用途: 选择已保存模型，让当前用户后续工作片采用它。
-async def _select_model(app, agent, session_id: str) -> str:
+async def _select_model(app, agent, session_id: str, runtime) -> str:
     result = await _request(app, agent, session_id, "list")
     if not result.get("ok"):
         return str(result.get("message") or "无法读取模型列表。")
+    _publish_selection(runtime, result)
     rows = result["profiles"]
     choices = RadioList([(row["id"], f"{'● ' if row['id'] == result['selected'] else ''}{row['model_name']}"
                          f" · {row['model_backend']} · {row['model_context_window_tokens']} tokens"
@@ -164,9 +191,7 @@ async def _select_model(app, agent, session_id: str) -> str:
     if not result.get("ok"):
         return str(result.get("message") or "选择结果未知，请重新打开列表确认。")
     row = next(row for row in result["profiles"] if row["id"] == selected)
-    if getattr(agent, "gateway_client_only", False) is True:
-        agent.config.model_name = row["model_name"]
-        agent.config.model_context_window_tokens = row["model_context_window_tokens"]
+    _publish_selection(runtime, result)
     return f"已选择 {row['model_name']}，上下文 {row['model_context_window_tokens']} tokens。当前执行不被中断。"
 
 
@@ -182,7 +207,7 @@ async def run_model_menu(app, agent, session_id: str, runtime) -> None:
                                    (("进入", lambda: choices.current_value), ("退出", None)), focus=choices)
             if action is None:
                 return
-            message = await (_add_model(app, agent, session_id) if action == "add" else _select_model(app, agent, session_id)) or message
+            message = await (_add_model(app, agent, session_id) if action == "add" else _select_model(app, agent, session_id, runtime)) or message
     except Exception:  # noqa: BLE001 TUI 菜单错误不得关闭 Agent 或泄露秘密
         runtime.set_notice("模型菜单暂时不可用，聊天任务未被停止。", duration_seconds=6)
     finally:
