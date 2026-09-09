@@ -1,5 +1,17 @@
 # TESTS
 
+## 正式库提交 gate（未通过，未推送）
+
+18文件377项定向通过。默认Python3.14的全量在收集阶段缺pyte/hypothesis而停止，未执行全量用例；
+改用仓库已有、依赖齐全的Python3.12.13环境后完整执行一次：15765项，15667通过、37失败、
+61跳过/预期失败，657.824秒。没有安装新依赖、跳过失败断言或为了提交调整产品实现。
+原始JUnit为本轮私有临时产物focused.xml/full-py312.xml，不把带测试机路径的完整XML加入仓库。
+
+Ruff、doc sync、strict code-size（hard0）、diff、clean-package均通过；现有R221独立wheel的资源与
+发布边界通过。额外import-boundary发现Gateway跨层导入runtime.loop_support，亦被全量packaging用例捕获。
+失败按完整文件/场景登记在TUI问题账本最新章节；先区分过期测试合同和真实回归，不增加skip/xfail遮盖。
+本次只是提交前本地gate，不关闭任何真实TUI问题；严格gate失败时不推送正式main、不声称线上CI通过。
+
 ## R221 逐块公开过程存储
 
 相关13文件288 focused通过（含新文件24项）；另模型配置与模型菜单39项通过，没有新增真实模型调用。
