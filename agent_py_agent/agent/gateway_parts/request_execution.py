@@ -1520,7 +1520,7 @@ def _gateway_overflow_carry(
 
 
 # LLM: Transcript Compact has first claim on completed history and reuses pending one-call tools
-# from the carried archive. Otherwise only the same thread's active-turn checkpoint/CAS may retry.
+# from tooling's pure archive reducer. Otherwise only the same thread's active-turn checkpoint/CAS may retry.
 # 函数用途: 携带溢出工具缓存面，为 Gateway 推进 transcript 或 active-turn Compact，并刷新会话上下文。
 def _gateway_compact_overflowing_turn(
     context: _GatewayAskRunContext,
@@ -1529,7 +1529,7 @@ def _gateway_compact_overflowing_turn(
     run_params: RunParams,
     carried_archive_tool_calls: list[dict[str, object]],
 ) -> _GatewayConversationContext:
-    from ..agent_core.runtime.loop_support import pending_carried_loaded_tool_names
+    from ..tooling.tool_search_state import pending_carried_loaded_tool_names
 
     request = context.request
     refreshed = _gateway_conversation_context(

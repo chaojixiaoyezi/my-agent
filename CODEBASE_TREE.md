@@ -188,6 +188,7 @@ agent_py_agent/
 |   |   |-- computer_use_server.py    # 启动开源执行器并复用其 PyAutoGUI 补齐滚轮工具
 |   |   |-- models.py                 # ToolModelSpec、ToolRuntimePolicy、ToolRuntime/Snapshot 与 handler outcome
 |   |   |-- runtime_contracts.py      # 唯一 canonical ToolCall/ToolResult、ToolChoice、协议与 operation 合同
+|   |   |-- tool_search_state.py      # 主/子/Gateway 共用的纯工具发现归档投影，不导入执行循环
 |   |   |-- input_schema.py           # 唯一 input_schema 规范化、强类型纠正和完整执行前校验
 |   |   |-- action_policy.py          # 副作用前唯一 allow/ask/deny 聚合决策
 |   |   |-- executor.py               # approval、sandbox、handler、账本、核对、持久化与投影状态机
@@ -301,6 +302,9 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `agent/tooling/tool_search_state.py`：只读最新结构化工具轮的未消费工具名称；不修改授权、缓存归档或运行状态。
+- `agent_py_agent/tests/test_tool_search_state.py`：验证当前轮、旧尾记录、损坏信封和自然语言不能授予临时工具。
 
 - `agent/gateway_parts/main_activity.py`：前台请求与后台共用 main 标量；绑定当前 task、隔离迟到工作片，不驱动执行。
 - `agent/gateway_parts/foreground_transcript.py`：同会话公开过程、候选增量与 final 快照，不拥有运行或审批权限。

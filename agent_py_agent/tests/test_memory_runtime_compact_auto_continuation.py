@@ -636,9 +636,9 @@ def test_run_auto_compact_continuation_reuses_original_task_workspace(tmp_path):
         run_id="run-workspace-continuation",
     )
 
-    date_roots = list((agent.home_paths.owner_tasks_dir).glob("*/*"))
-    task_names = sorted(path.name for path in date_roots if path.is_dir())
-    assert task_names == ["分析-all-agent-项目并写中文报告"]
+    date_roots = list(agent.home_paths.owner_runs_dir.glob("*/*"))
+    assert len(date_roots) == 1
+    assert not list(agent.home_paths.owner_tasks_dir.glob("*/*/work/run_workspace.json"))
     workspace = json.loads((date_roots[0] / "work" / "run_workspace.json").read_text(encoding="utf-8"))
     assert workspace["run_id"] == "run-workspace-continuation"
 

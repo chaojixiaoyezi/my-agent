@@ -160,11 +160,11 @@ class GatewayChatClientAgent:
     def gateway_request_identity(self) -> dict[str, str]:
         return _gateway_request_identity(self.owner_identity)
 
-    # LLM: 模型表单走 authenticated owner 专用接口，不进入 ask/history；未收到回执时明确未知，不自动重发密钥。
+    # LLM: 模型表单以独立payload映射走authenticated owner接口；身份字段由宿主覆盖，不进入ask/history或自动重发密钥。
     # 函数用途: 读取、保存或选择当前用户模型；返回数据必须为服务端脱敏列表。
-    def request_models(self, *, session_id: str, operation: str, **payload) -> dict:
+    def request_models(self, *, session_id: str, operation: str, payload: dict[str, object] | None = None) -> dict:
         status, body = self.post_gateway_json("/client/models", {
-            **payload, "operation": operation, "conversation_id": session_id,
+            **(payload or {}), "operation": operation, "conversation_id": session_id,
         }, timeout=10.0)
         if body:
             return body

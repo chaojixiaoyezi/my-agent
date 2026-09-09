@@ -1414,7 +1414,7 @@ def _next_background_overflow_carry(
 
 
 # LLM: The latest ConversationThread and canonical Compact CAS are the only retry authority. The
-# carried archive supplies pending one-call tools; interrupt crosses summary/commit, display does not.
+# tooling's pure archive reducer supplies pending one-call tools; interrupt crosses summary/commit, display does not.
 # 函数用途: 以后台主代理已完成历史和当前工具归档可中断地压缩，并返回同一轮继续用的最新线程。
 def _compact_background_main_thread(
     runtime: BackgroundMainAgentRuntime,
@@ -1425,7 +1425,7 @@ def _compact_background_main_thread(
     run_params: RunParams,
     carried_archive_tool_calls: list[dict[str, object]],
 ) -> ConversationThread:
-    from ..agent_core.runtime.loop_support import pending_carried_loaded_tool_names
+    from ..tooling.tool_search_state import pending_carried_loaded_tool_names
     from .compact import ConversationCompactOptions, prepare_conversation_context
     from .compact_provider_surface import ConversationCompactModelSurface
 

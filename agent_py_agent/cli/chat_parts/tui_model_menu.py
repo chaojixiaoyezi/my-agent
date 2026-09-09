@@ -61,9 +61,9 @@ async def _dialog(app, title: str, body, actions: tuple, *, focus=None):
         app.invalidate()
 
 
-# LLM: 请求走现有 owner 认证客户端，保存重试复用 profile_id；结果未知不能宣称失败或自动生成另一记录。
+# LLM: 请求参数通过单独payload映射传递；走现有owner认证，保存重试复用profile_id，未知结果不自动另建记录。
 # 函数用途: 在不阻塞 TUI 绘制的情况下读取、保存或选择配置。
-async def _request(app, agent, session_id: str, operation: str, **payload) -> dict:
+async def _request(app, agent, session_id: str, operation: str, payload: dict[str, object] | None = None) -> dict:
     waiting = TextArea(text="正在等待配置操作确认…（不会向模型发请求）", read_only=True, height=2)
     busy = Float(content=Dialog(title="模型配置", body=waiting, buttons=[], with_background=True))
     host = app._my_agent_model_float_container
@@ -72,7 +72,7 @@ async def _request(app, agent, session_id: str, operation: str, **payload) -> di
     app.layout.focus(waiting)
     app.invalidate()
     try:
-        return await _request_data(agent, session_id, operation, payload)
+        return await _request_data(agent, session_id, operation, payload or {})
     finally:
         host.floats.remove(busy)
         app.layout.focus(previous)
@@ -85,12 +85,12 @@ async def _request_data(agent, session_id: str, operation: str, payload: dict) -
     return await asyncio.to_thread(_request_data_sync, agent, session_id, operation, payload)
 
 
-# LLM: 菜单与启动共用原配置入口；必须由启动前或后台线程调用，异常不泄漏秘密。
+# LLM: 菜单与启动共用原配置入口，Gateway只传显式payload映射；必须由后台线程调用，异常不泄漏秘密。
 # 函数用途: 读取或保存用户模型配置；Gateway 模式发认证请求，本地模式访问私有配置文件。
 def _request_data_sync(agent, session_id: str, operation: str, payload: dict) -> dict:
     try:
         if getattr(agent, "gateway_client_only", False) is True:
-            return agent.request_models(session_id=session_id, operation=operation, **payload)
+            return agent.request_models(session_id=session_id, operation=operation, payload=payload)
         return execute_model_profile_operation(agent, operation, payload)
     except ModelProfileError as exc:
         return {"ok": False, "message": str(exc)}
@@ -161,7 +161,7 @@ async def _add_model(app, agent, session_id: str) -> str:
             except ValueError as exc:
                 notice.text = str(exc)
                 continue
-            result = await _request(app, agent, session_id, "add", profile_id=profile_id, profile=profile)
+            result = await _request(app, agent, session_id, "add", {"profile_id": profile_id, "profile": profile})
             profile.clear()
             if result.get("ok"):
                 return "保存成功。进入“选择已有模型”后可启用；尚未测试接口连接。"
@@ -187,7 +187,7 @@ async def _select_model(app, agent, session_id: str, runtime) -> str:
                               (("选择并保存", lambda: choices.current_value), ("返回", None)), focus=choices)
     if selected is None:
         return ""
-    result = await _request(app, agent, session_id, "select", profile_id=selected)
+    result = await _request(app, agent, session_id, "select", {"profile_id": selected})
     if not result.get("ok"):
         return str(result.get("message") or "选择结果未知，请重新打开列表确认。")
     row = next(row for row in result["profiles"] if row["id"] == selected)

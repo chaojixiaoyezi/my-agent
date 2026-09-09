@@ -1,5 +1,6 @@
 # LLM: 本模块是工具/合同错误码到恢复动作的唯一分类表；控制流读取 code，不得解析用户或模型错误文案。
 #   Persona CAS 冲突保留原错误码；分类表不证明是否写入，副作用事实必须由实际 handler 提供。
+#   回合结果未知和父级授权快照缺失不可自动重放或补授权，必须分别核实事实或报告阻塞。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -230,6 +231,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recovery_hint=(
             "当前消息无法写入权威会话记录；不要执行模型或副作用，待存储恢复后重试本轮。"
         ),
+    ),
+    "ACTIVE_TURN_OUTCOME_UNCERTAIN": ErrorContract(
+        code="ACTIVE_TURN_OUTCOME_UNCERTAIN",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原工作片已有操作但终态未确认；先核对原操作回执与外部事实，不得重复执行整个任务。",
     ),
     "CONVERSATION_CONTEXT_REQUIRED": ErrorContract(
         code="CONVERSATION_CONTEXT_REQUIRED",
@@ -642,6 +650,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint="已授权的 Skill 快照缺失、被禁用或内容已变化；停止使用旧授权，由父代理按当前快照重新授权。",
+    ),
+    "PARENT_TOOL_SNAPSHOT_UNAVAILABLE": ErrorContract(
+        code="PARENT_TOOL_SNAPSHOT_UNAVAILABLE",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="父级工具权限快照暂不可读取；先恢复该运行的权威快照，不能借用其他用户或进程的工具权限。",
+    ),
+    "PARENT_CREATION_SNAPSHOT_MISSING": ErrorContract(
+        code="PARENT_CREATION_SNAPSHOT_MISSING",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="旧任务缺少创建时的父级工具快照；仅使用宿主提供的显式兼容事实，不自行补造身份或扩大权限。",
     ),
     "SANDBOX_UNAVAILABLE": ErrorContract(
         code="SANDBOX_UNAVAILABLE",

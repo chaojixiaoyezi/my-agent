@@ -1236,7 +1236,7 @@ def test_parallel_segment_cancellation_blocks_later_barrier_and_pairs_every_call
     ]
 
 
-def test_tool_round_rebases_placeholder_paths_after_conversation_task_selection():
+def test_tool_round_preserves_explicit_paths_despite_legacy_rebase_metadata():
     old_root = "/owner/tasks/req-new"
     selected_root = "/owner/tasks/req-old"
     attrs = {
@@ -1275,13 +1275,13 @@ def test_tool_round_rebases_placeholder_paths_after_conversation_task_selection(
     assert executed == [
         {
             "tool": "create_subagents",
-            "goal": f"在 {selected_root}/output 继续实现",
-            "output_files": [f"{selected_root}/output/app.py"],
+            "goal": f"在 {old_root}/output 继续实现",
+            "output_files": [f"{old_root}/output/app.py"],
         }
     ]
 
 
-def test_tool_round_rebases_from_exact_request_when_agent_thread_local_is_missing():
+def test_tool_round_preserves_explicit_cwd_without_agent_thread_local():
     owner_root = "/owner"
     selected_root = "/owner/tasks/2026-08-29/task-a"
     attrs = {
@@ -1320,12 +1320,12 @@ def test_tool_round_rebases_from_exact_request_when_agent_thread_local_is_missin
         {
             "tool": "run_command",
             "command": "mkdir -p workspace-check",
-            "working_dir": selected_root,
+            "working_dir": owner_root,
         }
     ]
 
 
-def test_tool_round_workspace_rebase_is_idempotent_when_target_is_below_source():
+def test_tool_round_does_not_rewrite_mixed_paths_in_natural_language():
     owner_root = "/owner"
     selected_root = "/owner/tasks/2026-08-29/task-a"
     attrs = {
@@ -1369,7 +1369,7 @@ def test_tool_round_workspace_rebase_is_idempotent_when_target_is_below_source()
         {
             "tool": "create_subagents",
             "goal": (
-                f"新产物写到 {selected_root}/research/new.md；"
+                f"新产物写到 {owner_root}/research/new.md；"
                 f"已转换产物保持 {already_rebased}。"
             ),
             "output_files": [already_rebased],

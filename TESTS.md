@@ -1,5 +1,17 @@
 # TESTS
 
+## 正式库提交 gate 修复复验
+
+先前全量的37项失败已逐组定位。相关23个文件共514项：485通过（含1个已有XPASS）、29个已有XFAIL、
+0失败/错误，44.546秒。未重复全仓pytest。工作区测试改按已批准的owner home与runs身份契约断言，
+保留精确run终态、跨owner/符号链接拒绝、相同task保留产物、同prompt新run分离和Compact连续归档。
+新增7项逐级路径/符号链接检查、3项工具发现纯投影和1项未知结果/缺授权不可自动重试分类检查。
+Adapter恢复样本补齐未模拟的progress IO，防止误连本机8420；失败也必须停止自己的测试worker。
+规模worker改走现有持久队列，验证真实claim、会话历史/群主体和同trace重放零新增模型调用。
+原始JUnit为本轮私有临时产物repaired-gate.xml；本轮修复不把本地测试当成新真实TUI或飞书验收。
+本地严格gate通过：Ruff、doc-sync、strict code-size（hard0）、diff、clean-package和import-boundary。
+线上CI未作为验收来源。首次失败报告保留在下面，属于已完成定位的历史记录。
+
 ## 正式库提交 gate（未通过，未推送）
 
 18文件377项定向通过。默认Python3.14的全量在收集阶段缺pyte/hypothesis而停止，未执行全量用例；

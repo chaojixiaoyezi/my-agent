@@ -125,11 +125,15 @@ def test_gateway_history_restore_uses_only_complete_foreground_cli_turns() -> No
             }
             return SimpleNamespace(thread_id="thread-resume"), None
 
-        def recent_messages_report(self, thread_id, *, limit):
+        def history_page_report(self, thread_id, *, before, limit):
             assert thread_id == "thread-resume"
+            assert before is None
             assert limit == 16
-            return rows, []
+            return SimpleNamespace(rows=rows, errors=(), after=len(rows), before=0)
 
+    for index, row in enumerate(rows):
+        row.message_id = f"msg-{index}"
+        row.thread_id = "thread-resume"
     snapshot = load_gateway_chat_history(
         SimpleNamespace(conversation_store=Store()),
         "sess-resume",
@@ -148,9 +152,10 @@ def test_gateway_history_restore_preserves_structured_load_error() -> None:
         def resolve_thread_report(self, **_kwargs):
             return SimpleNamespace(thread_id="thread-bad"), None
 
-        def recent_messages_report(self, _thread_id, *, limit):
+        def history_page_report(self, _thread_id, *, before, limit):
+            assert before is None
             assert limit == 16
-            return [], [load_error]
+            return SimpleNamespace(rows=[], errors=(load_error,), after=0, before=0)
 
     snapshot = load_gateway_chat_history(
         SimpleNamespace(conversation_store=Store()),

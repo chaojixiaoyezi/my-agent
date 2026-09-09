@@ -744,11 +744,14 @@ class TestChannelManagerDurableDelivery:
             "_submit_gateway_payload",
             return_value=GatewayAskSubmission("req_restart"),
         ) as submit, patch.object(second, "_poll_gateway_once", return_value="恢复后的答案") as poll, \
+             patch.object(second._reply_delivery, "_poll_progress", return_value=([], 0)), \
              patch.object(second_adapter, "finalize_response", return_value=True) as finalizer:
             finalizer.side_effect = lambda *_args: delivered.set() or True
-            second.start_all()
-            assert delivered.wait(1.0)
-            second.stop_all()
+            try:
+                second.start_all()
+                assert delivered.wait(1.0)
+            finally:
+                second.stop_all()
             submit.assert_called_once()
             poll.assert_called()
             finalizer.assert_called_once()
@@ -1356,6 +1359,8 @@ class TestChannelManagerDurableDelivery:
             "_poll_gateway_once",
             return_value="崩溃点前平台已接收的回复",
         ), patch.object(
+            first._reply_delivery, "_poll_progress", return_value=([], 0),
+        ), patch.object(
             first._reply_delivery.store,
             "mark_terminal_claimed",
             side_effect=OSError("simulated receipt write crash"),
@@ -1379,7 +1384,7 @@ class TestChannelManagerDurableDelivery:
             second,
             "_poll_gateway_once",
             return_value="崩溃点前平台已接收的回复",
-        ):
+        ), patch.object(second._reply_delivery, "_poll_progress", return_value=([], 0)):
             assert second._reply_delivery.run_once() == 1
 
         assert attempts == [

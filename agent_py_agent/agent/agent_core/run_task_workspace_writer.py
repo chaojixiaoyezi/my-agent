@@ -269,22 +269,26 @@ def _terminal_workspace_status(params: object, result: object) -> str:
     return "FAILED"
 
 
-# LLM: 终态写入只允许 owner tasks 真实子目录，路径链上出现 symlink 时必须 fail-closed。
-# 函数用途: 确认待收尾目录属于当前用户，防止误改共享目录或其他用户目录。
+# LLM: 终态写入以 canonical owner home 为边界，不用 tasks/runs 名称授权；逐级拒绝符号链接。
+# 函数用途: 确认运行归档属于当前用户；具体 run/task 身份仍由 finish_run_workspace 在锁内核对。
 def _workspace_is_owner_scoped(agent: object, root: Path) -> bool:
     home_paths = getattr(agent, "home_paths", None)
-    owner_tasks = getattr(home_paths, "owner_tasks_dir", None)
-    if owner_tasks is None:
+    owner_home = getattr(home_paths, "owner_home_dir", None)
+    if owner_home is None:
         return False
     try:
+        owner = Path(owner_home).expanduser()
         unresolved_root = Path(root).expanduser()
-        resolved_root = unresolved_root.resolve(strict=False)
-        resolved_root.relative_to(Path(owner_tasks).expanduser().resolve(strict=False))
-        state_path = resolved_root / "work" / "state.json"
-        return not any(
-            path.is_symlink()
-            for path in (unresolved_root, unresolved_root / "work", state_path)
-        )
+        relative = unresolved_root.relative_to(owner)
+        if not relative.parts or ".." in relative.parts:
+            return False
+        unresolved_root.resolve(strict=False).relative_to(owner.resolve(strict=False))
+        current = owner
+        for part in (*relative.parts, "work", "state.json"):
+            if current.is_symlink():
+                return False
+            current = current / part
+        return not current.is_symlink()
     except (OSError, RuntimeError, ValueError):
         return False
 

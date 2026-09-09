@@ -302,8 +302,8 @@ def test_descendant_batch_respects_shared_owner_capacity_atomically(tmp_path):
     assert [task.id for task in agent.subagents.list_runs()] == [parent.id]
 
 
-def test_descendant_create_normalizes_relative_outputs_to_canonical_task_root(tmp_path):
-    """递归派工和顶层派工共用同一相对产物路径解析，不复制到 owner/output 旁路。"""
+def test_descendant_create_normalizes_relative_outputs_to_explicit_cwd(tmp_path):
+    """递归派工使用同 owner 的显式 cwd，不从 run 归档推导业务路径。"""
     from agent_py_agent.agent.agent_core.hierarchy_tools import _hierarchy_child_spec
     from agent_py_agent.agent.agent_core.runner.context import (
         restore_current_subagent_context,
@@ -320,6 +320,9 @@ def test_descendant_create_normalizes_relative_outputs_to_canonical_task_root(tm
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
+            my_agent_owner_provider="tui",
+            my_agent_owner_kind="user",
+            my_agent_owner_id="nested-user",
             subagent_workspace="subs",
         ),
         tmp_path,
@@ -361,6 +364,7 @@ def test_descendant_create_normalizes_relative_outputs_to_canonical_task_root(tm
         agent,
         run_id=parent.id,
         task_attributes={
+            "conversation_execution_cwd": str(task_root),
             "run_workspace": {
                 "task_root": str(task_root),
                 "work_dir": str(task_root / "work"),
@@ -390,11 +394,8 @@ def test_descendant_create_normalizes_relative_outputs_to_canonical_task_root(tm
         for name in ("GRANDCHILD_RESEARCH.md", "SOURCES.md", "PORTING_CHECKLIST.md")
     ]
     assert spec.attributes["output_refs"] == expected
-    assert spec.extra_write_roots == [
-        str((task_root / "restart-grandchild").resolve(strict=False)),
-        str(task_root.resolve(strict=False)),
-    ]
-    assert str(owner_root.resolve(strict=False)) not in spec.extra_write_roots
+    assert spec.extra_write_roots == [str(owner_root.resolve(strict=False))]
+    assert all(Path(ref).is_relative_to(owner_root) for ref in spec.attributes["output_refs"])
     assert not any("/output/restart-grandchild/" in ref for ref in expected)
 
     scheduled = agent.subagents.hierarchy.schedule_child_runs(

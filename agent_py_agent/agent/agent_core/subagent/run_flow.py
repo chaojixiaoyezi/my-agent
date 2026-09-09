@@ -511,14 +511,14 @@ def _subagent_compact_model_surface(
     )
 
 
-# LLM: Overflow restoration must use the shared typed archive reducer; do not inspect model text,
+# LLM: Overflow restoration must use tooling's shared typed archive reducer; do not inspect model text,
 # tool names, or the transient inner loop object after Agent.run has returned.
 # 函数用途: 从子代理本轮权威工具归档恢复一次性工具 Schema，并生成下一次 transcript Compact 缓存面。
 def _pending_subagent_compact_model_surface(
     context: object,
     records: list[dict[str, object]],
 ) -> object:
-    from ..runtime.loop_support import pending_carried_loaded_tool_names
+    from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 
     return _subagent_compact_model_surface(
         context,

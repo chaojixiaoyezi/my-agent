@@ -9,6 +9,7 @@ import json
 import logging
 import threading
 from collections.abc import Mapping
+from typing import TypedDict
 
 DISPLAY_CHECKPOINT_ROLE = "display"
 DISPLAY_CHECKPOINT_SCHEMA = "conversation_display_event.v1"
@@ -16,6 +17,19 @@ _TERMINAL_KINDS = frozenset({
     "assistant_completed", "thinking_completed", "tool_completed", "tool_failed", "system_message",
 })
 _START_KINDS = frozenset({"tool_started"})
+
+
+# LLM: 检查点输入列明宿主身份和公开事件字段；不是开放参数入口，也不能包含控制/授权决定。
+# 类用途: 约束主子过程保存的入参结构；真实身份与公开事件仍由下方校验器检查。
+class DisplayCheckpointInput(TypedDict):
+    thread_id: str
+    task_id: str
+    request_id: str
+    gateway_request_id: str
+    kind: str
+    phase: str
+    block_id: str
+    payload: Mapping[str, object]
 
 
 # LLM: role 是显示记录的硬边界，即使 metadata 损坏也不能投给模型或 Memory；不解析正文。
@@ -115,9 +129,9 @@ class DisplayCheckpointWriter:
         self._lock = threading.Lock()
         self.failed = False
 
-    # LLM: 输入必须是已净化的公开事件；只有保存成功才记去重，失败允许下一完整块重试且向调用方返回一次告警信号。
+    # LLM: 输入是明确字段的公开检查点；只有保存成功才记去重，失败允许下一完整块重试并返回一次告警信号。
     # 函数用途: 保存一个过程检查点并报告新增保存故障；不会把异常路径或工具私密参数交给界面。
-    def record(self, **fields) -> bool:
+    def record(self, fields: DisplayCheckpointInput) -> bool:
         if not callable(self._append):
             return False
         metadata = display_checkpoint_metadata(**fields)

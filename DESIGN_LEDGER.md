@@ -1,5 +1,16 @@
 # DESIGN LEDGER
 
+## 2026-09-09 正式库提交前修正【状态：本地定向及严格 gate 通过，待正式库合流】
+
+解决问题：`runs` 归档迁移后 standalone 收尾仍只认 `tasks`，以及规模入口绕过 Gateway claim。
+运行归档收尾只看 canonical owner home、逐级符号链接和锁内精确 run/task 身份，不看业务目录名字。
+规模入口复用既有持久请求与执行主链，不移除活动回合围栏；公开响应提交后才投递。
+工具发现的纯恢复投影归 tooling 单一入口；未知副作用不自动重试，父级授权快照缺失不补授权。
+参考 会话运行时 `core/src/session/mod.rs` 的显式 cwd、`rollout/src/recorder.rs` 的结构化会话身份、
+`core/src/session/turn.rs` 的 active turn 输入和 `core/src/tools/context.rs` 的 typed 工具搜索结果。
+过期测试按已批准的家目录语义迁移，保留 owner/路径逃逸/精确身份/连续 Compact 检查；没有新增 skip。
+截图与 CCSwitch 的 Provider 菜单扩展属于下一片：先完成正式库提交，再实现并用真实 TUI 做模型基础连通验证。
+
 ## 2026-09-08 已完成公开过程逐块进入 canonical 历史【状态：R221 定向通过，未部署/真 TUI 待验】
 
 解决 BUG-146 的剩余崩溃窗口：main 的 BackgroundTurnHistory 原先在内存累积到 final，child 的

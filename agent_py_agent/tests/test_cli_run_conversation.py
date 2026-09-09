@@ -128,7 +128,7 @@ def test_cli_run_user_message_is_authoritative_before_remember(tmp_path) -> None
     ]
     assert agent.conversation_store.task_links(threads[0].thread_id) == []
 
-    state_paths = list(agent.home_paths.owner_tasks_dir.rglob("work/state.json"))
+    state_paths = list(agent.home_paths.owner_runs_dir.rglob("work/state.json"))
     assert len(state_paths) == 1
     state = json.loads(state_paths[0].read_text(encoding="utf-8"))
     assert state["status"] == "DONE"

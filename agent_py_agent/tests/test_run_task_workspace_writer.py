@@ -1,5 +1,46 @@
 from __future__ import annotations
 
+import pytest
+
+
+@pytest.mark.parametrize("folder", ["runs", "tasks", "projects/custom"])
+def test_terminal_archive_scope_uses_owner_home_not_business_folder_name(tmp_path, folder):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _workspace_is_owner_scoped
+
+    owner = tmp_path / "owner"
+    archive = owner / folder / "run-a"
+    archive.mkdir(parents=True)
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=owner))
+    assert _workspace_is_owner_scoped(agent, archive)
+    assert not _workspace_is_owner_scoped(agent, tmp_path / "other-owner" / "run-a")
+    assert not _workspace_is_owner_scoped(agent, owner)
+    assert not _workspace_is_owner_scoped(agent, owner / ".." / "other-owner")
+
+
+@pytest.mark.parametrize("target_part", ["date", "archive", "work", "state"])
+def test_terminal_archive_scope_rejects_links_at_every_owner_relative_level(tmp_path, target_part):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _workspace_is_owner_scoped
+
+    owner = tmp_path / "owner"
+    archive = owner / "runs" / "date" / "run-a"
+    target = {
+        "date": archive.parent, "archive": archive, "work": archive / "work",
+        "state": archive / "work/state.json",
+    }[target_part]
+    target.parent.mkdir(parents=True)
+    destination = owner / "linked-target"
+    if target_part == "state":
+        destination.write_text("{}")
+    else:
+        destination.mkdir()
+    target.symlink_to(destination, target_is_directory=target_part != "state")
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=owner))
+    assert not _workspace_is_owner_scoped(agent, archive)
+
 
 def test_tool_output_archive_root_stays_fixed_when_turn_is_promoted(tmp_path) -> None:
     from types import SimpleNamespace

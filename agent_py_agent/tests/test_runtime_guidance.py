@@ -6,6 +6,7 @@ import threading
 import time
 import weakref
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -403,9 +404,9 @@ def test_two_real_agent_runs_do_not_cross_prompt_task_or_workspace(tmp_path, mon
         assert prompt == f"{name} 的独立提示"
         assert actual_request == request_id
         assert task_id == f"task-{name}"
-        assert name in workspace
+        assert Path(workspace).is_relative_to(agent.home_paths.owner_runs_dir)
         other = "background" if name == "chat" else "chat"
-        assert other not in workspace
+        assert workspace != observed[f"req-{other}"][3]
 
 
 def test_missing_guidance_queue_is_an_empty_collection(tmp_path) -> None:

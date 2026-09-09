@@ -1,5 +1,13 @@
 # Gateway Structure
 
+## 规模入口与工具状态依赖归一
+
+`scale_downstream` 通过现有 `write_gateway_request_once → _process_gateway_request_path` 执行，
+claim 的 execution_attempt_id/lease_epoch 与标准 Gateway 相同，不另建后台 Gateway 或放松 active turn。
+owner 快照包含 canonical queue，公开 response 读取后才提交快照和投递。缺结果/未知仍报错，不盲目重放。
+`tooling/tool_search_state.py` 承担纯结构化归档读取；Gateway、后台主代理、child 和运行循环均依赖它。
+公开检查点 writer 与 `/model` 请求参数改为明确输入对象，不再开放 `**fields/**payload` 服务入口。
+
 ## R221 逐块公开过程检查点
 
 `conversation/display_checkpoint.py` 校验公开事件并由sink写入同thread的messages JSONL；role=display、content为空、

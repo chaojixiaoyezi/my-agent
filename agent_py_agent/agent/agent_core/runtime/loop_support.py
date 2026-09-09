@@ -1,3 +1,6 @@
+# LLM: 本模块装配运行恢复状态与上下文，工具发现归档必须复用 tooling 的纯投影，不能反向要求 Gateway 导入运行循环。
+# 模块用途: 为主链准备记忆、一次性工具和续跑输入；缓存面与权限分别由各自权威模块维护。
+
 from __future__ import annotations
 
 import json
@@ -26,6 +29,7 @@ from ...memory_store import (
 )
 from ...runtime_errors import runtime_error_report
 from ...tooling.output_projection import project_tool_output_body
+from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import CompressionContext, ToolLoopExecuteParams
@@ -1094,52 +1098,6 @@ def reconstructed_model_tool_context(
         run_id=run_id,
         task_id=task_id,
     ).tool_context
-
-
-# LLM: Only typed tool_search result envelopes can restore an ephemeral schema after overflow;
-# callers in foreground/background/child Compact must reuse this same reducer to preserve cache shape.
-# 函数用途: 从携带的工具归档中恢复尚未被下一次成功模型调用消费的临时工具名称。
-def pending_carried_loaded_tool_names(records: list[dict[str, object]]) -> set[str]:
-    """Restore only a tool_search selection not yet consumed by a later model round."""
-
-    rounded = [
-        (round_no, record)
-        for record in records
-        if (round_no := _carried_tool_round(record)) is not None
-    ]
-    if rounded:
-        latest_round = max(round_no for round_no, _ in rounded)
-        return {
-            name
-            for round_no, record in rounded
-            if round_no == latest_round
-            for name in _carried_loaded_tool_names(record)
-        }
-    # Legacy carried records did not include a round.  Only a final standalone
-    # tool_search can still be known to be pending; never resurrect discoveries
-    # from an arbitrary older record.
-    return _carried_loaded_tool_names(records[-1]) if records else set()
-
-
-def _carried_tool_round(record: dict[str, object]) -> int | None:
-    try:
-        value = int(record.get("tool_round"))
-    except (TypeError, ValueError):
-        return None
-    return max(0, value)
-
-
-def _carried_loaded_tool_names(record: dict[str, object]) -> set[str]:
-    envelope = record.get("tool_result_envelope")
-    if not isinstance(envelope, dict):
-        return set()
-    search = envelope.get("tool_search")
-    if not isinstance(search, dict):
-        return set()
-    names = search.get("loaded_tool_names")
-    if not isinstance(names, list):
-        return set()
-    return {str(item).strip() for item in names if str(item).strip()}
 
 
 def _tool_context_with_optional_semantic_summary(

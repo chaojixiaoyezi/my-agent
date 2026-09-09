@@ -1,4 +1,5 @@
-"""规模 worker 的内置真实下游：租户/用户隔离 Agent 运行并可靠回复飞书原消息。"""
+# LLM: 规模入口复用 Gateway 的持久请求、认领、精确回合与终态主链；owner 快照先提交再投递，不另造执行旁路。
+# 模块用途: 在租户和用户隔离的工作副本中处理消息，保存会话后回复原消息；异常交回现有队列。
 
 from __future__ import annotations
 
@@ -15,10 +16,14 @@ from pathlib import Path
 from agent_py_agent.agent.adapter.feishu import FeishuAdapter
 from agent_py_agent.agent.adapter.protocol import feishu_conversation_id
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.gateway_parts.request_execution import (
-    _GatewayAskRunContext,
-    _run_gateway_ask,
+from agent_py_agent.agent.gateway_parts.io import (
+    gateway_response_path,
+    read_json_file,
+    write_gateway_request_once,
 )
+from agent_py_agent.agent.gateway_parts.paths import gateway_paths
+from agent_py_agent.agent.gateway_parts.queue_service import ensure_gateway_folders
+from agent_py_agent.agent.gateway_parts.request_worker import _process_gateway_request_path
 from agent_py_agent.agent.observability.tracing import TraceContext
 from agent_py_agent.agent.owner_object_store import owner_store_from_runtime
 from agent_py_agent.agent.scale_runtime import ScaleRole, ScaleRuntimeConfig
@@ -97,6 +102,8 @@ class _AgentSlot:
         self.lock = threading.Lock()
 
 
+# LLM: 每个 owner 串行 checkout/commit，Gateway 自己维护每个请求的执行代次；不得共享 owner 的可变 Agent。
+# 类用途: 管理规模 worker 中的用户隔离运行及结果投递，任何失败保留给上游重试判断。
 class ScaleAgentPool:
     """同进程锁 + PG advisory lock；owner 文件只在单次执行期间落本地缓存。"""
 
@@ -135,6 +142,8 @@ class ScaleAgentPool:
         finally:
             shutil.rmtree(execution, ignore_errors=True)
 
+    # LLM: Gateway 的公开结构化响应是唯一投递来源；必须先提交 owner 快照，不能退回原始模型正文。
+    # 函数用途: 在用户快照事务内执行一轮并返回回复和用量，空回复不确认队列消息。
     def _execute_and_commit(
         self,
         message: ScaleMessage,
@@ -143,21 +152,21 @@ class ScaleAgentPool:
     ) -> tuple[str, int]:
         with self._store.checkout(message.tenant, message.owner_kind, message.owner_id, paths.owner_home):
             agent = self._build_agent(message, paths.home_root, paths.workspace)
-            result = self._run_conversation_turn(agent, message, trace, paths)
-            response = str(result.response or "").strip()
+            result = self._run_conversation_turn(agent, message, trace)
+            response = str(result.get("response") or "").strip()
             if not response:
                 raise RuntimeError("Agent 返回空响应，拒绝确认队列消息")
-            tokens = max(0, int(result.turn_token_estimate or result.prompt_token_estimate or 0))
+            tokens = max(0, int(result.get("turn_token_estimate") or result.get("prompt_token_estimate") or 0))
             return response, tokens
 
+    # LLM: 普通和规模入口必须走相同持久队列认领；相同 trace 重放不得覆盖请求或重复执行已完成的工具。
+    # 函数用途: 将一条结构化通道消息交给现有 Gateway worker；不启动额外 Gateway，不绕过 active turn 校验。
     def _run_conversation_turn(
         self,
         agent: SimpleAgent,
         message: ScaleMessage,
         trace: TraceContext,
-        paths: _ExecutionPaths,
-    ):
-        """让 scale Feishu 复用普通 gateway 的权威 transcript 主链。"""
+    ) -> dict:
         conversation_id = str(message.conversation_id or "").strip()
         channel_user_id = str(message.channel_user_id or "").strip()
         if not conversation_id or not channel_user_id:
@@ -168,9 +177,11 @@ class ScaleAgentPool:
         request = {
             "id": trace.trace_id,
             "kind": "ask",
+            "user_id": channel_user_id,
             "prompt": message.prompt,
             "save": True,
             "source": "scale_feishu",
+            "status": "pending",
             "metadata": {
                 "channel": "feishu",
                 "message_id": message.message_id,
@@ -178,6 +189,8 @@ class ScaleAgentPool:
                 "trace_id": trace.trace_id,
                 "channel_conversation_id": conversation_id,
                 "channel_user_id": channel_user_id,
+                "channel_chat_type": "group" if is_group else "p2p",
+                "channel_chat_id": message.owner_id if is_group else conversation_id,
             },
             "conversation": {
                 "channel": "feishu",
@@ -189,17 +202,19 @@ class ScaleAgentPool:
                 "lane": "chat",
             },
         }
-        runtime_dir = paths.workspace / ".scale-gateway"
-        return _run_gateway_ask(
-            _GatewayAskRunContext(
-                agent=agent,
-                request=request,
-                request_path=runtime_dir / f"{trace.trace_id}.request.json",
-                response_path=runtime_dir / f"{trace.trace_id}.response.json",
-                request_id=trace.trace_id,
-                on_chunk=lambda _chunk: None,
-            )
-        )
+        request["metadata"]["client_input_digest"] = hashlib.sha256(
+            json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        queue_paths = gateway_paths(agent)
+        ensure_gateway_folders(queue_paths)
+        request_path, _created = write_gateway_request_once(queue_paths, request)
+        if request_path.parent == queue_paths.inbox:
+            _process_gateway_request_path(agent, queue_paths, request_path, f"scale-{trace.trace_id}")
+        response = read_json_file(gateway_response_path(queue_paths, trace.trace_id))
+        if not response.get("ok"):
+            code = str(response.get("error_code") or "GATEWAY_RESPONSE_UNAVAILABLE")
+            raise RuntimeError(f"规模 Gateway 请求未成功：{code}")
+        return response
 
     def _slot(self, message: ScaleMessage) -> _AgentSlot:
         key = (message.tenant, message.owner_kind, message.owner_id)

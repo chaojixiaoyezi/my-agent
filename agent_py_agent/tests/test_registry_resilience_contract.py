@@ -819,14 +819,14 @@ def _task_scoped_apply_patch_request(
     patch: str,
 ) -> RegistryToolInvokeRequest:
     tool = ApplyPatchTool(
-        owner_root,
+        task_root,
         access_options=filesystem_access_options(owner_scope_root=str(owner_root)),
     )
     return _with_test_runtime(RegistryToolInvokeRequest(
         tool_name="apply_patch",
         arguments={"patch": patch},
         tools={"apply_patch": tool},
-        workspace_root=owner_root,
+        workspace_root=task_root,
         workspace_roots=[owner_root],
         allowed_tools=["apply_patch"],
         write_boundary={
@@ -842,7 +842,7 @@ def _task_scoped_apply_patch_request(
     ))
 
 
-def test_task_scoped_apply_patch_resolves_work_delete_to_current_task(
+def test_explicit_cwd_apply_patch_resolves_work_delete_without_archive_rebase(
     tmp_path: Path,
 ) -> None:
     owner_root = tmp_path / "owner"

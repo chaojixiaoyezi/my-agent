@@ -58,6 +58,21 @@ def test_unknown_code_fails_closed_to_blocked():
     assert envelope.actions[0]["recommended_action"] == RecoveryAction.REPORT_BLOCKER.value
 
 
+def test_missing_authority_and_uncertain_side_effects_never_auto_retry():
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    expected = {
+        "ACTIVE_TURN_OUTCOME_UNCERTAIN": RecoveryAction.MANUAL_REVIEW.value,
+        "PARENT_CREATION_SNAPSHOT_MISSING": RecoveryAction.REPORT_BLOCKER.value,
+        "PARENT_TOOL_SNAPSHOT_UNAVAILABLE": RecoveryAction.REPORT_BLOCKER.value,
+    }
+    for code, action in expected.items():
+        contract = error_contract(code)
+        assert contract.code == code
+        assert contract.retryable is False
+        assert contract.recommended_action == action
+
+
 def test_exact_code_policy_wins_over_family_prefix():
     """精确码策略优先于家族前缀（同前缀下行为可分化）。"""
     # TARGET_COVERAGE_MISSING 精确码 -> continue；同家族其它码 -> 家族策略

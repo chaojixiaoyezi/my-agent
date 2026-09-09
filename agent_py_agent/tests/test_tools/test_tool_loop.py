@@ -509,7 +509,7 @@ def test_tool_loop_reuses_one_workspace_context_snapshot_across_model_rounds(tmp
     agent.prompts.snapshot_workspace_context.assert_called_once_with()
 
 
-def test_tool_loop_projects_live_promoted_workspace_from_same_write_boundary(tmp_path):
+def test_tool_loop_archive_does_not_replace_owner_execution_cwd(tmp_path):
     service_cwd = tmp_path / "service-cwd"
     service_cwd.mkdir()
     agent = SimpleAgent(
@@ -553,7 +553,7 @@ def test_tool_loop_projects_live_promoted_workspace_from_same_write_boundary(tmp
     projected = _runtime_workspace_context(agent, params)
 
     assert projected is not None
-    assert f"当前工具工作目录（仅供执行定位）: {task_root.resolve()}" in projected
+    assert f"当前工具工作目录（仅供执行定位）: {agent.home_paths.owner_home_dir}" in projected
     assert f"task_output_dir: {output_dir}" not in projected
     assert f"task_work_dir: {work_dir}" not in projected
     assert str(service_cwd.resolve()) not in projected

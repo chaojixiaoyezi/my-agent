@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date
 from pathlib import Path
@@ -7,6 +8,13 @@ from pathlib import Path
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_store import MemoryRecord
 from agent_py_agent.agent.settings import AgentConfig
+
+
+# LLM: 独立检查结构化身份对应的归档契约，不能把 prompt 标题当作路径或复用依据。
+# 函数用途: 定位预期运行记录，供测试核对它在当前用户的 runs 中而不侵入业务 tasks。
+def _run_root(agent: SimpleAgent, identity: str) -> Path:
+    root = agent.home_paths.owner_runs_dir / date.today().isoformat()
+    return root / hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
 
 def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
@@ -82,9 +90,7 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
 
     agent.run("做一个示例网站", request_id="req-1", run_id="run-1", task_id="示例网站 E2E")
 
-    task_root = (
-        home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "示例网站-e2e"
-    )
+    task_root = _run_root(agent, "示例网站 E2E")
     assert (task_root / "output").is_dir()
     assert (task_root / "work").is_dir()
     assert (task_root / "work" / "runtime").is_dir()
@@ -103,9 +109,10 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     assert state["primary_run_id"] == "run-1"
     assert (task_root / "work" / "timeline.jsonl").read_text(encoding="utf-8").strip()
     assert not (home / "tasks").exists()
+    assert not list(agent.home_paths.owner_tasks_dir.glob("*/*/work/run_workspace.json"))
 
 
-def test_saved_run_uses_prompt_slug_when_only_machine_ids_are_available(tmp_path: Path):
+def test_saved_run_uses_opaque_identity_when_only_machine_ids_are_available(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
@@ -115,11 +122,12 @@ def test_saved_run_uses_prompt_slug_when_only_machine_ids_are_available(tmp_path
 
     agent.run("分析多个项目源码并写一份中文报告", request_id="gw-123", run_id="run-456")
 
-    date_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat()
+    date_root = agent.home_paths.owner_runs_dir / date.today().isoformat()
     task_dirs = [item for item in date_root.iterdir() if item.is_dir()]
     assert len(task_dirs) == 1
     assert task_dirs[0].name not in {"gw-123", "run-456"}
     assert not task_dirs[0].name.startswith(("gw-", "run-", "req-"))
+    assert task_dirs[0] == _run_root(agent, "run-456")
     workspace = json.loads(
         (task_dirs[0] / "work" / "run_workspace.json").read_text(encoding="utf-8")
     )
@@ -127,11 +135,8 @@ def test_saved_run_uses_prompt_slug_when_only_machine_ids_are_available(tmp_path
     assert workspace["run_id"] == "run-456"
 
 
-def test_same_prompt_new_run_reuses_task_workspace_with_timeline(tmp_path: Path):
-    """R8 接力实锤后的语义裁决:同一 prompt 的新 run 复用同一任务目录接续
-    (配置注释承诺"同一 prompt 会复用同一个任务目录,并用 work/timeline.jsonl
-    记录多次 run";旧断言"各开一个目录"钉的是实现缺陷——接力会变重做,
-    原 progress/产物/expected_outputs 声明全部失效)。"""
+def test_same_prompt_new_run_keeps_independent_identity_and_timeline(tmp_path: Path):
+    """相同需求不代表相同任务；只有显式 task_id 才允许继续同一运行归档。"""
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
@@ -143,37 +148,25 @@ def test_same_prompt_new_run_reuses_task_workspace_with_timeline(tmp_path: Path)
     agent.run(prompt, request_id="req-one", run_id="run-one")
     agent.run(prompt, request_id="req-two", run_id="run-two")
 
-    date_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat()
+    date_root = agent.home_paths.owner_runs_dir / date.today().isoformat()
     task_dirs = sorted(item for item in date_root.iterdir() if item.is_dir())
-    assert len(task_dirs) == 1, "同 prompt 接力必须复用同一任务目录"
-    assert task_dirs[0].name == "分析-all-agent-项目并写中文报告"
-    workspace = json.loads(
-        (task_dirs[0] / "work" / "run_workspace.json").read_text(encoding="utf-8")
-    )
-    state = json.loads((task_dirs[0] / "work" / "state.json").read_text(encoding="utf-8"))
-    manifest = json.loads(
-        (task_dirs[0] / "work" / "refs" / "artifacts" / "manifest.json").read_text(encoding="utf-8")
-    )
-    timeline = [
-        json.loads(line)
-        for line in (task_dirs[0] / "work" / "timeline.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ]
-    assert workspace["run_id"] == "run-two", "工作区身份随最新 run 更新"
-    assert state["task_id"] == "run-two" and state["primary_run_id"] == "run-two"
-    assert manifest["task_id"] == "run-two" and manifest["run_id"] == "run-two"
-    assert 'task_id: "run-two"' in (task_dirs[0] / "work" / "task.yaml").read_text(encoding="utf-8")
-    assert workspace["prompt_fingerprint"]
-    assert len(timeline) == 4, "timeline 为每一次 run 记录开始与结构化终态"
-    assert [
-        (event["event_type"], event["run_id"], event.get("status", "")) for event in timeline
-    ] == [
-        ("run_workspace_saved", "run-one", ""),
-        ("run_workspace_finished", "run-one", "DONE"),
-        ("run_workspace_saved", "run-two", ""),
-        ("run_workspace_finished", "run-two", "DONE"),
-    ]
+    assert len(task_dirs) == 2
+    for suffix in ("one", "two"):
+        run_id = f"run-{suffix}"
+        work = _run_root(agent, run_id) / "work"
+        workspace = json.loads((work / "run_workspace.json").read_text(encoding="utf-8"))
+        state = json.loads((work / "state.json").read_text(encoding="utf-8"))
+        manifest = json.loads((work / "refs/artifacts/manifest.json").read_text(encoding="utf-8"))
+        assert workspace["run_id"] == run_id
+        assert workspace["request_id"] == f"req-{suffix}"
+        assert state["task_id"] == run_id and state["primary_run_id"] == run_id
+        assert manifest["task_id"] == run_id and manifest["run_id"] == run_id
+        assert f'task_id: "{run_id}"' in (work / "task.yaml").read_text(encoding="utf-8")
+        timeline = [json.loads(line) for line in (work / "timeline.jsonl").read_text().splitlines()]
+        assert [(row["event_type"], row["run_id"], row.get("status", "")) for row in timeline] == [
+            ("run_workspace_saved", run_id, ""),
+            ("run_workspace_finished", run_id, "DONE"),
+        ]
 
 
 def test_same_task_resume_refreshes_run_identity_without_losing_workspace_facts(tmp_path: Path):
@@ -186,7 +179,7 @@ def test_same_task_resume_refreshes_run_identity_without_losing_workspace_facts(
 
     prompt = "持续维护同一个项目"
     agent.run(prompt, request_id="req-one", run_id="run-one", task_id="goal-one")
-    task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "goal-one"
+    task_root = _run_root(agent, "goal-one")
     state_path = task_root / "work" / "state.json"
     manifest_path = task_root / "work" / "refs" / "artifacts" / "manifest.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -214,6 +207,7 @@ def test_same_task_resume_refreshes_run_identity_without_losing_workspace_facts(
     assert resumed_manifest["request_id"] == "req-two"
     assert resumed_manifest["run_id"] == "run-two"
     assert resumed_manifest["artifacts"] == [{"path": "output/report.md"}]
+    assert len(list(agent.home_paths.owner_runs_dir.glob("*/*/work/run_workspace.json"))) == 1
 
 
 def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
@@ -239,11 +233,14 @@ def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
     agent.run("分析 all-agent 项目并写中文报告", request_id="req-one", run_id="run-one")
 
     assert not (old_work / "run_workspace.json").exists()
-    new_task = owner_tasks / "分析-all-agent-项目并写中文报告-run-one"
+    new_task = _run_root(agent, "run-one")
     assert (new_task / "work" / "run_workspace.json").exists()
+    assert json.loads((old_work / "state.json").read_text()) == {
+        "request_id": "req-one", "primary_run_id": "run-one",
+    }
 
 
-def test_long_project_prompt_gets_short_relevant_task_workspace_name(tmp_path: Path):
+def test_long_project_prompt_labels_archive_without_selecting_its_path(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
@@ -252,20 +249,12 @@ def test_long_project_prompt_gets_short_relevant_task_workspace_name(tmp_path: P
     agent = SimpleAgent(cfg, repo)
 
     prompt = (
-        "你现在只做一件事：认真阅读 /Users/example/study-agent/all-agent 下面的项目，"
+        f"认真阅读 {tmp_path / 'references' / 'all-agent'} 下面的项目，"
         "分析这些项目的架构、模块和功能。\n\n要求：不要修改源码，最终写中文报告。"
     )
     agent.run(prompt, request_id="req-all-agent", run_id="run-all-agent")
 
-    task_root = (
-        home
-        / "owners"
-        / "local"
-        / "main"
-        / "tasks"
-        / date.today().isoformat()
-        / "all-agent-架构分析"
-    )
+    task_root = _run_root(agent, "run-all-agent")
     assert (task_root / "output").is_dir()
     workspace = json.loads((task_root / "work" / "run_workspace.json").read_text(encoding="utf-8"))
     task_yaml = (task_root / "work" / "task.yaml").read_text(encoding="utf-8")
@@ -304,10 +293,11 @@ def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
     feishu.run("整理飞书任务", request_id="req-f", run_id="run-f", task_id="任务A")
     wechat.run("整理微信任务", request_id="req-w", run_id="run-w", task_id="任务A")
 
-    feishu_root = home / "owners" / "providers" / "feishu" / "users" / "u001" / "tasks"
-    wechat_root = home / "owners" / "providers" / "wechat" / "users" / "u001" / "tasks"
-    assert (feishu_root / date.today().isoformat() / "任务a" / "work" / "state.json").exists()
-    assert (wechat_root / date.today().isoformat() / "任务a" / "work" / "state.json").exists()
+    feishu_root = _run_root(feishu, "任务A")
+    wechat_root = _run_root(wechat, "任务A")
+    assert (feishu_root / "work" / "state.json").exists()
+    assert (wechat_root / "work" / "state.json").exists()
+    assert feishu_root != wechat_root
     assert feishu.home_paths.owner_id == "providers/feishu/users/u001"
     assert wechat.home_paths.owner_id == "providers/wechat/users/u001"
 
@@ -325,12 +315,11 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     )
 
     assert "# Main Agent Context Bundle v1" in result.prompt
-    task_root = (
-        home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "主代理任务"
-    )
+    task_root = _run_root(agent, "主代理任务")
     assert "# Current Task Workspace" in result.prompt
-    assert f"- output_dir: {task_root / 'output'}" in result.prompt
-    assert f"- work_dir: {task_root / 'work'}" in result.prompt
+    assert f"- cwd: {agent.home_paths.owner_home_dir}" in result.prompt
+    assert f"- output_dir: {task_root / 'output'}" not in result.prompt
+    assert f"- work_dir: {task_root / 'work'}" not in result.prompt
     assert result.main_context_bundle_path
     bundle_path = Path(result.main_context_bundle_path)
     assert bundle_path.exists()

@@ -1,5 +1,15 @@
 # STATUS
 
+## 正式库提交 gate 修复复验：514 项零失败，本地严格 gate 已通过
+
+- 修正真实遗漏：运行归档改为runs后，standalone收尾仍只接受tasks；现在按owner home和锁内精确身份处理。
+- 规模worker复用普通Gateway入队/claim/执行/终态；保留active-turn围栏，补足user/group身份，不增加Gateway。
+- 临时工具恢复下沉tooling，3个开放参数入口收成明确数据参数，3个错误码登记不可盲重试/不可补授权。
+- 更新旧目录、路径改写、历史分页和未claim执行夹具；Adapter样本显式模拟progress，防止误连本机服务。
+- 23文件514项定向0失败（29已有XFAIL），未再跑全仓。Ruff/doc-sync/strict尺寸hard0/diff/clean-package与导入边界均通过。
+- 可继续保留双方历史合流正式main；线上CI尚未作为验收来源，不force push。
+- 没有新真实模型/TUI验收、测试机部署或Release；旧P0/P1保持原状态。下一片才扩展Provider模型菜单。
+
 ## 正式 my-agent 提交前检查：本地代码已提交，远端推送被全量 gate 阻止
 
 - 已确认origin为正式chaojixiaoyezi/my-agent，远端main为63422888；与当前实现没有共同祖先。

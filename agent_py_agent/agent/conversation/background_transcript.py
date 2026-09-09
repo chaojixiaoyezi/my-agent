@@ -497,8 +497,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
             f"{_nonnegative_int(progress.get('call_index'))}"
         )
 
-    # LLM: Every event append keeps the writer's exact canonical thread/task and
-    # generated display request identity; callers cannot substitute another run.
+    # LLM: 每次追加通过明确检查点字段保留 sink 的 canonical thread/task/request；不能替换成其他 run。
     # 函数用途: 先逐块写入canonical历史再发增量；保存故障告警但不终止任务，child传输签名保持不变。
     def _event(
         self,
@@ -509,10 +508,11 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     ) -> None:
         if self._display_history is not None:
             self._display_history.record(kind, phase, block_id, payload)
-        failed = self._checkpoint_writer.record(
-            thread_id=self.thread_id, task_id=self.task_id, request_id=self.request_id,
-            gateway_request_id=self.gateway_request_id, kind=kind, phase=phase, block_id=block_id, payload=payload,
-        )
+        failed = self._checkpoint_writer.record({
+            "thread_id": self.thread_id, "task_id": self.task_id, "request_id": self.request_id,
+            "gateway_request_id": self.gateway_request_id, "kind": kind, "phase": phase,
+            "block_id": block_id, "payload": payload,
+        })
         try:
             event = {"kind": kind, "phase": phase, "block_id": block_id, "payload": payload}
             if self._event_writer is None:

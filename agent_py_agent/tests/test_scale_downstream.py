@@ -22,9 +22,11 @@ class _RecordingEchoBackend(EchoBackend):
 
     def __init__(self) -> None:
         self.message_calls: list[list[dict[str, object]]] = []
+        self.prompt_calls: list[str] = []
 
     def generate(self, prompt: str, **kwargs):
         self.message_calls.append(list(kwargs.get("messages") or []))
+        self.prompt_calls.append(prompt)
         return super().generate(prompt, **kwargs)
 
 
@@ -90,7 +92,7 @@ def test_owner_snapshot_commits_before_external_reply(tmp_path, monkeypatch) -> 
     class Agent:
         def run(self, *_args, **_kwargs):
             events.append("run")
-            return SimpleNamespace(response="done", turn_token_estimate=7, prompt_token_estimate=0)
+            return {"response": "done", "turn_token_estimate": 7, "prompt_token_estimate": 0}
 
     class Adapter:
         def reply_message(self, message_id: str, response: str) -> bool:
@@ -113,13 +115,11 @@ def test_owner_snapshot_commits_before_external_reply(tmp_path, monkeypatch) -> 
 
 def test_direct_scale_turn_without_conversation_identity_fails_closed(tmp_path) -> None:
     pool = object.__new__(ScaleAgentPool)
-    paths = _ExecutionPaths(tmp_path / "home", tmp_path / "workspace", tmp_path / "owner")
     with pytest.raises(ValueError, match="conversation_id/channel_user_id"):
         pool._run_conversation_turn(
             SimpleNamespace(),
             ScaleMessage("acme", "user", "ou_user", "你好", "om_1"),
             TraceContext("1" * 32, "2" * 16),
-            paths,
         )
 
 
@@ -130,6 +130,9 @@ def test_scale_turn_reuses_gateway_transcript_and_isolates_other_conversation(tm
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(home_root),
+            my_agent_owner_provider="feishu",
+            my_agent_owner_kind="user",
+            my_agent_owner_id="ou_user",
             prompt_files=[],
         ),
         workspace,
@@ -137,7 +140,6 @@ def test_scale_turn_reuses_gateway_transcript_and_isolates_other_conversation(tm
     backend = _RecordingEchoBackend()
     agent.backend = backend
     pool = object.__new__(ScaleAgentPool)
-    paths = _ExecutionPaths(home_root, workspace, home_root / "owners" / "unused")
     first = ScaleMessage(
         "acme",
         "user",
@@ -170,29 +172,29 @@ def test_scale_turn_reuses_gateway_transcript_and_isolates_other_conversation(tm
         agent,
         first,
         TraceContext("1" * 32, "2" * 16),
-        paths,
     )
     second_result = pool._run_conversation_turn(
         agent,
         second,
         TraceContext("3" * 32, "4" * 16),
-        paths,
     )
     second_messages = backend.message_calls[-1]
     other_result = pool._run_conversation_turn(
         agent,
         other,
         TraceContext("5" * 32, "6" * 16),
-        paths,
     )
     other_messages = backend.message_calls[-1]
 
-    assert first_result.response
+    assert first_result["response"]
     assert "请记住本会话代号是青黛" in str(second_messages)
     assert "这是 echo 后端的本地响应" in str(second_messages)
     assert "请记住本会话代号是青黛" not in str(other_messages)
-    assert "# Conversation Transcript" not in second_result.prompt
-    assert "# Conversation Transcript" not in other_result.prompt
+    assert second_result["ok"] and other_result["ok"]
+    assert all("# Conversation Transcript" not in prompt for prompt in backend.prompt_calls)
+    calls_before_replay = len(backend.message_calls)
+    assert pool._run_conversation_turn(agent, first, TraceContext("1" * 32, "2" * 16)) == first_result
+    assert len(backend.message_calls) == calls_before_replay
 
 
 def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp_path) -> None:
@@ -202,6 +204,9 @@ def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(home_root),
+            my_agent_owner_provider="feishu",
+            my_agent_owner_kind="group",
+            my_agent_owner_id="oc_group",
             prompt_files=[],
         ),
         workspace,
@@ -209,7 +214,6 @@ def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp
     backend = _RecordingEchoBackend()
     agent.backend = backend
     pool = object.__new__(ScaleAgentPool)
-    paths = _ExecutionPaths(home_root, workspace, home_root / "owners" / "unused")
     first = ScaleMessage(
         "acme", "group", "oc_group", "群里约定代号是远山", "om_1", "oc_group", "ou_a"
     )
@@ -217,9 +221,10 @@ def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp
         "acme", "group", "oc_group", "刚才群里约定了什么？", "om_2", "oc_group", "ou_b"
     )
 
-    pool._run_conversation_turn(agent, first, TraceContext("7" * 32, "8" * 16), paths)
-    result = pool._run_conversation_turn(agent, second, TraceContext("9" * 32, "a" * 16), paths)
+    pool._run_conversation_turn(agent, first, TraceContext("7" * 32, "8" * 16))
+    result = pool._run_conversation_turn(agent, second, TraceContext("9" * 32, "a" * 16))
 
     assert "群里约定代号是远山" in str(backend.message_calls[-1])
-    assert "# Conversation Transcript" not in result.prompt
+    assert result["ok"]
+    assert all("# Conversation Transcript" not in prompt for prompt in backend.prompt_calls)
     assert len(list(agent.conversation_store.threads_dir.glob("*.json"))) == 1

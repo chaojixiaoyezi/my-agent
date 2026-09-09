@@ -195,7 +195,9 @@ def test_gateway_response_loss_retries_the_exact_persisted_payload_after_restart
         second,
         "_submit_gateway_payload",
         side_effect=accept_replay,
-    ), patch.object(second, "_poll_gateway_once", return_value=None):
+    ), patch.object(second, "_poll_gateway_once", return_value=None), patch.object(
+        second._reply_delivery, "_poll_progress", return_value=([], 0),
+    ):
         assert second._delivery_worker.run_once() == 1
 
     assert submitted_bodies[0] == submitted_bodies[1]
@@ -235,7 +237,9 @@ def test_adapter_crash_after_gateway_response_resumes_without_reposting(
         second_adapter,
         "send_progress_placeholder",
         return_value="typing-recovered",
-    ), patch.object(second, "_poll_gateway_once", return_value=None):
+    ), patch.object(second, "_poll_gateway_once", return_value=None), patch.object(
+        second._reply_delivery, "_poll_progress", return_value=([], 0),
+    ):
         assert second._delivery_worker.run_once() == 1
 
     repost.assert_not_called()

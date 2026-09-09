@@ -11,7 +11,6 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import (
     AdapterPaths,
     GatewayAskParams,
-    _handle_gateway_request,
     _process_gateway_requests,
     gateway_paths,
     gateway_stale_processing,
@@ -21,6 +20,9 @@ from agent_py_agent.agent.gateway_parts import (
     submit_gateway_ask,
     write_json_file,
 )
+from agent_py_agent.agent.gateway_parts.io import gateway_response_path
+from agent_py_agent.agent.gateway_parts.queue_service import ensure_gateway_folders
+from agent_py_agent.agent.gateway_parts.request_worker import _process_gateway_request_path
 from agent_py_agent.agent.io import append_jsonl
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.memory_store import JsonlMemory
@@ -229,7 +231,9 @@ def test_gateway_request_indexes_logs_to_local_store():
             ),
         )
 
-        response = _handle_gateway_request(agent, request_path)
+        ensure_gateway_folders(paths)
+        assert _process_gateway_request_path(agent, paths, request_path, "local-store-test")
+        response = read_json_file(gateway_response_path(paths, request_path.stem))
         hits = agent.local_store.search("gateway 日志测试", source_type="gateway_request")
 
         assert response["ok"] is True
@@ -259,7 +263,9 @@ def test_gateway_request_writes_runtime_fact_when_saved():
             ),
         )
 
-        response = _handle_gateway_request(agent, request_path)
+        ensure_gateway_folders(paths)
+        assert _process_gateway_request_path(agent, paths, request_path, "local-store-test")
+        response = read_json_file(gateway_response_path(paths, request_path.stem))
 
         assert response["ok"] is True
         fact_path = (
@@ -299,7 +305,9 @@ def test_gateway_request_can_override_resume_context():
             ),
         )
 
-        response = _handle_gateway_request(agent, request_path)
+        ensure_gateway_folders(paths)
+        assert _process_gateway_request_path(agent, paths, request_path, "local-store-test")
+        response = read_json_file(gateway_response_path(paths, request_path.stem))
 
         assert response["ok"] is True
         assert response["memory_resume_context_injected"] is True

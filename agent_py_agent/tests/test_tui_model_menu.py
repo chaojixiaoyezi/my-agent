@@ -85,7 +85,7 @@ def test_saved_model_label_refresh_does_not_change_execution_or_history(tmp_path
     execute_model_profile_operation(host, "select", {"profile_id": profile_id})
     source = host if not gateway else SimpleNamespace(
         gateway_client_only=True,
-        request_models=lambda **kwargs: execute_model_profile_operation(host, kwargs.pop("operation"), kwargs),
+        request_models=lambda *, session_id, operation, payload: execute_model_profile_operation(host, operation, payload),
     )
     runtime = TuiRuntime("saved-choice")
     runtime.publish_session(version="0.3.0", model="deployment-model", workspace="workspace")

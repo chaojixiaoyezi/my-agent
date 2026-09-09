@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## 正式库提交前主链修正（本地定向，真实通道待验）
+
+规模 worker 不再直接调用未认领的 `_run_gateway_ask`，改走同一持久入队、精确 claim、执行和终态链。
+请求携带真实 user/group 通道身份，相同 trace 与输入摘要重放不再重复执行；结果读取公开 response 投影。
+Gateway 的 Compact 临时工具读取移到 `tooling/tool_search_state.py`，消除反向导入执行循环，没有授权豁免。
+已通过规模私聊连续历史、另一会话隔离、同群成员共享和同请求重放定向；不宣称真实飞书测试通过。
+
 ## R221 已完成公开过程先持久再投递（本地通过，待真实验收）
 
 按会话运行时 session.send_event_raw_with_persistence/record_conversation_items读取持久先行链，及终端交互
