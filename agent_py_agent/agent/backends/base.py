@@ -31,6 +31,7 @@ from .errors import (
 )
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
+from .provider_headers import endpoint_parts, request_headers
 from .stream_parsers import StreamCompletion
 from .usage_metadata import (
     collect_anthropic_stream_with_completion,
@@ -116,6 +117,8 @@ class ModelResponse:
     tool_protocol_violations: list[dict[str, str]] = field(default_factory=list)
 
 
+# LLM: 后端连接选项是工作片冻结快照；请求头配置和模型名/密钥一起缓存，不能在流式请求中热改。
+# 类用途: 保存 HTTP 模型后端的连接、生成和兼容选项。
 @dataclass(frozen=True)
 class BackendOptions:
     """Connection and generation options shared by HTTP model backends."""
@@ -128,8 +131,11 @@ class BackendOptions:
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
     context_window_tokens: int = 0
     temperature: float = 0.2
+    temperature_explicit: bool = False
     stream_enabled: bool = True
     prompt_cache_enabled: bool = True
+    custom_headers: dict[str, str] = field(default_factory=dict)
+    session_header: str = ""
 
 
 # LLM: OpenAI 请求对象把 system 与 user 面分开保存；任何适配器都不得靠标题文本重新猜角色。
@@ -317,12 +323,16 @@ class EchoBackend(BaseBackend):
 
 # LLM: 所有内置 HTTP backend 都必须把 system_instruction 映射到供应商真实高优先级字段，而非拼回 user prompt。
 # 类用途: 共享真实模型 HTTP、能力探针、连接和 metadata 逻辑，并声明支持独立 system 指令。
+# LLM: HTTP 主链统一应用连接和会话头；新的协议必须复用同一传输、取消与超时语义。
+# 类用途: 为模型接口提供 HTTP 请求、能力探测和上下文目录读取。
 class HttpBackend(BaseBackend):
     """真实模型后端共用的 HTTP 请求基础逻辑。"""
 
     supports_system_instructions = True
     supports_provider_request_options = True
 
+    # LLM: 复制所有可变选项；后续多线程仅用 request-local 会话身份，不能修改共享后端头部。
+    # 函数用途: 初始化一个可安全复用的模型后端。
     def __init__(
         self,
         options: BackendOptions,
@@ -333,6 +343,8 @@ class HttpBackend(BaseBackend):
         self.request_timeout = int(options.request_timeout)
         self.connect_timeout = float(options.connect_timeout)
         self.max_tokens = int(options.max_tokens)
+        self.custom_headers = dict(options.custom_headers)
+        self.session_header = options.session_header
         # 本地配置与供应商事实分开保存；不能再把 fallback 冒充 provider metadata。
         self.configured_context_window_tokens = int(options.context_window_tokens or 0)
         # 兼容既有只读调用方；context-window resolver 会识别 configured_ 字段，绝不把本属性
@@ -343,6 +355,7 @@ class HttpBackend(BaseBackend):
         self._provider_context_window_cache: int | None = None
         self.model_metadata: dict[str, Any] = {}
         self.temperature = float(options.temperature)
+        self.temperature_explicit = options.temperature_explicit
         self.stream_enabled = bool(options.stream_enabled)
         self.prompt_cache_enabled = bool(options.prompt_cache_enabled)
         # Streaming HTTP transports enforce request_timeout as an SSE idle
@@ -511,8 +524,8 @@ class HttpBackend(BaseBackend):
             )
         )
 
-    # LLM: This is the only adapter from backend state plus request-local options into the immutable transport envelope.
-    # 函数用途: 组装一次 GatewayRequest，同时保留稳定 idle 和本轮独立首事件预算。
+    # LLM: 唯一传输封装应用显式请求头和宿主会话；认证不被覆盖，URL 不重复 /v1，首包预算保持 request-local。
+    # 函数用途: 组装统一的 HTTP 请求，不改变流式空闲/取消/重试行为。
     def _gateway_request(
         self,
         path: str,
@@ -522,12 +535,13 @@ class HttpBackend(BaseBackend):
         first_event_timeout_seconds: float | None = None,
     ) -> GatewayRequest:
         """Build the immutable gateway request envelope used by all HTTP calls."""
+        api_base, path = endpoint_parts(self.api_base, path)
         return GatewayRequest(
-            api_base=self.api_base,
+            api_base=api_base,
             api_key=self.api_key,
             path=path,
             payload=payload,
-            headers=headers,
+            headers=request_headers(headers, self.custom_headers, self.session_header),
             timeout=self.request_timeout,
             connect_timeout=self.connect_timeout,
             first_event_timeout=first_event_timeout_seconds,
@@ -546,6 +560,7 @@ class HttpBackend(BaseBackend):
                     model_name=self.model_name,
                     request_timeout=self.request_timeout,
                     connect_timeout=self.connect_timeout,
+                    custom_headers=request_headers({}, self.custom_headers, self.session_header),
                 )
             )
             self.model_metadata = metadata.record
@@ -1482,6 +1497,8 @@ def _response_preview(obj: object, *, max_chars: int = 1000) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + "... [truncated]"
 
 
+# LLM: 只按显式协议构造后端，请求头快照与模型配置一起生效；不按模型名称猜测或失败后换接口。
+# 函数用途: 创建指定协议的模型适配器。
 def get_backend(name: str, config: Any | None = None) -> BaseBackend:
     """Resolve a configured backend name to a backend adapter instance."""
 
@@ -1498,12 +1515,19 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         max_tokens=config.max_tokens,
         context_window_tokens=getattr(config, "model_context_window_tokens", 0),
         temperature=float(config.temperature),
+        temperature_explicit=getattr(config, "model_temperature_explicit", False),
         stream_enabled=getattr(config, "stream_enabled", True),
         prompt_cache_enabled=getattr(config, "anthropic_prompt_cache_enabled", True),
+        custom_headers=getattr(config, "model_custom_headers", {}),
+        session_header=getattr(config, "model_session_header", ""),
     )
 
     if name == "openai_compatible":
         return OpenAICompatibleBackend(common)
+    if name == "openai_responses":
+        from .responses import OpenAIResponsesBackend
+
+        return OpenAIResponsesBackend(common)
     if name == "anthropic_compatible":
         return AnthropicCompatibleBackend(
             common,
@@ -1511,5 +1535,5 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         )
 
     raise ValueError(
-        "未知模型后端: %s。当前内置 echo / openai_compatible / anthropic_compatible。" % name
+        "未知模型后端: %s。当前内置 echo / openai_compatible / openai_responses / anthropic_compatible。" % name
     )

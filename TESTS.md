@@ -3921,3 +3921,15 @@ Compact 后重复轮号工具以及旧客户端能力过滤。显示字段不改
 另把真实 final append/repair 夹具扩到 rich/non-rich，10个相关文件扩大回归349 passed；真TUI仍待做。
 检查命令采用 `pytest -o addopts='' -q --tb=short`，包含 gateway foreground/main、background history/notice、
 conversation history/message、agent control、threading、gateway chat context/control；没有运行全仓 pytest。
+# R222 模型配置与协议基础验证（完成）
+
+服务商/模型配置、v1 迁移、隔离/秘密/原子写入、Responses typed 工具和流边界、TUI 菜单，
+加原有后端/原生工具/不完整响应/message adapter/Gateway 模型/配置/Compact，共 13 文件 291 focused 通过。
+本片不跑全仓 pytest。真实验证只经本机 `ma-r222-models` 的 `/model` 浮层，不从 shell/API 代发业务任务。
+单 Gateway 8420；隔离 home。Go key 仅掩码框输入、0600 私有文件保存，无聊天/输入历史或仓库内容。
+依官方模型目录逐个配置 35 项；接口类型依 Go 官方端点表，容量依 models.dev 明确 limit.context；
+hy3-preview 缺确切容量，暂用手填保守 128000，不能把它当供应商容量事实。
+最终 26 正常、7 上游不可用、2 待训练条款；Kimi 温度 1 后已通过，其余失败配置保留停用。
+自定义服务商保存/删除、编辑留空保留密钥、启停模型、远端模型列表及退出已在真实菜单验证；
+MiniMax 选择后顶部同步，主界面普通问候收到真实回复，无多子代理任务。详见 R222_MODEL_PROVIDER_REPORT.md。
+仅发送短问候；不调用 native 能力探针、不运行工具、不派 child，不把基本连通当作任务功能验收。

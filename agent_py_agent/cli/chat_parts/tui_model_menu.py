@@ -1,5 +1,5 @@
 # LLM: /model 是本机表单，不进入聊天、LLM 或 FileHistory；网络与文件操作在线程中执行，密钥只在掩码控件短暂保留。
-# 模块用途: 在现有 TUI 中选择或新增模型，并在启动和选择确认后刷新欢迎区；不热改运行配置。
+# 模块用途: 在现有 TUI 管理服务商和模型、主动测试连接，并在选择确认后刷新欢迎区；不热改运行配置。
 
 from __future__ import annotations
 
@@ -62,9 +62,10 @@ async def _dialog(app, title: str, body, actions: tuple, *, focus=None):
 
 
 # LLM: 请求参数通过单独payload映射传递；走现有owner认证，保存重试复用profile_id，未知结果不自动另建记录。
-# 函数用途: 在不阻塞 TUI 绘制的情况下读取、保存或选择配置。
+# 函数用途: 不阻塞 TUI 绘制地管理配置或执行用户明确选择的连接检查，等待提示区分网络与纯配置操作。
 async def _request(app, agent, session_id: str, operation: str, payload: dict[str, object] | None = None) -> dict:
-    waiting = TextArea(text="正在等待配置操作确认…（不会向模型发请求）", read_only=True, height=2)
+    text = "正在发送短问候，等待模型回复…" if operation == "probe" else "正在读取模型目录…" if operation == "discover" else "正在等待配置操作确认…（不会向模型发请求）"
+    waiting = TextArea(text=text, read_only=True, height=2)
     busy = Float(content=Dialog(title="模型配置", body=waiting, buttons=[], with_background=True))
     host = app._my_agent_model_float_container
     previous = app.layout.current_window
@@ -120,12 +121,13 @@ def refresh_model_selection(agent, session_id: str, runtime, stop_event=None) ->
 
 # LLM: provider 的动作值是后端枚举，Auth 仅保留菜单项，不发登录请求、不落不完整记录。
 # 函数用途: 选择新模型的接口类型。
-async def _choose_interface(app):
+async def _choose_interface(app, *, default=None):
     choices = RadioList([
         ("openai_compatible", "OpenAI 风格（Chat Completions）"),
         ("anthropic_compatible", "Anthropic 风格（Messages）"),
+        ("openai_responses", "OpenAI Responses（响应 / 工具流）"),
         ("auth", "Auth 认证（暂未开放）"),
-    ], select_on_focus=True)
+    ], default=default, select_on_focus=True)
     while True:
         value = await _dialog(app, "新增模型 · 选择接口", choices,
                               (("下一步", lambda: choices.current_value), ("返回", None)), focus=choices)
@@ -178,7 +180,7 @@ async def _select_model(app, agent, session_id: str, runtime) -> str:
     if not result.get("ok"):
         return str(result.get("message") or "无法读取模型列表。")
     _publish_selection(runtime, result)
-    rows = result["profiles"]
+    rows = [row for row in result["profiles"] if row["id"] == "default" or row.get("available", True)]
     choices = RadioList([(row["id"], f"{'● ' if row['id'] == result['selected'] else ''}{row['model_name']}"
                          f" · {row['model_backend']} · {row['model_context_window_tokens']} tokens"
                          f"{'（部署默认）' if row['id'] == 'default' else ' · ' + row['api_base']}") for row in rows],
@@ -196,18 +198,28 @@ async def _select_model(app, agent, session_id: str, runtime) -> str:
 
 
 # LLM: 菜单始终在现有事件循环内；期间隔离聊天键盘处理，退出后恢复，异常不打印请求或密钥。
-# 函数用途: 打开 /model 的新增、选择、退出入口。
+# 函数用途: 打开 /model 的快捷新增、选择、服务商管理和主动测试入口。
 async def run_model_menu(app, agent, session_id: str, runtime) -> None:
     app._my_agent_model_menu_active = True
     message = "配置仅影响当前用户；正在执行的工作片保持原模型。"
+    from .tui_provider_menu import manage_providers, test_connection
+
     try:
         while True:
-            choices = RadioList([("select", "选择已有模型"), ("add", "新增模型")], select_on_focus=True)
+            choices = RadioList([("select", "选择已有模型"), ("add", "新增模型（快捷）"),
+                ("provider_add", "新增服务商（支持多个模型）"), ("providers", "管理服务商 / 模型 / 请求头"),
+                ("probe", "连接测试（短问候，不做任务）")], select_on_focus=True)
             action = await _dialog(app, "模型配置 /model", HSplit([Label(message), choices]),
                                    (("进入", lambda: choices.current_value), ("退出", None)), focus=choices)
             if action is None:
                 return
-            message = await (_add_model(app, agent, session_id) if action == "add" else _select_model(app, agent, session_id, runtime)) or message
+            if action in {"provider_add", "providers"}:
+                update = await manage_providers(app, agent, session_id, create=action == "provider_add")
+            elif action == "probe":
+                update = await test_connection(app, agent, session_id)
+            else:
+                update = await (_add_model(app, agent, session_id) if action == "add" else _select_model(app, agent, session_id, runtime))
+            message = update or message
     except Exception:  # noqa: BLE001 TUI 菜单错误不得关闭 Agent 或泄露秘密
         runtime.set_notice("模型菜单暂时不可用，聊天任务未被停止。", duration_seconds=6)
     finally:

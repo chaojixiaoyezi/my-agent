@@ -1,5 +1,24 @@
 # DESIGN LEDGER
 
+## 2026-09-09 Provider /model 扩展【状态：通用配置与真实短测完成】
+
+正式库 main 已正常非强推到 f47f2002，保留原正式库和当前实现历史；本地严格 gate 通过。
+解决问题：同一服务商重复录入密钥、不能编辑/启停、接口与请求头不匹配导致模型拒绝。
+沿用 owner 私有配置的唯一文件，v1 显式迁移到 v2 provider + model 引用；原 profile UUID 保持，
+运行工作片保留已冻结配置。服务商维护 ID、展示名、地址、密钥、请求头、会话头和能力；
+模型维护接口、上下文、可选独立温度和用途，不限制模型品牌或名称白名单。
+菜单配置不进入聊天/LLM/输入历史，保存不自动发模型请求。
+连接测试和模型目录发现由用户显式发起，前者只发短问候、不创建任务、不执行工具；Auth 仅预留。
+参考 CCSwitch src/lib/requestOverrides.ts 的请求头保护、provider 编辑保留密钥语义，
+会话运行时 core/src/client.rs 的会话头贯穿普通请求与 Compact；OpenAI Responses 官方协议按 typed
+items/SSE 映射现有原生工具历史，不能用助手文字推断工具调用或完成。
+OpenCode Go 使用 my-agent 自身 User-Agent 和每 owner/thread 稳定的 x-opencode-session，
+不复制截图 UUID，不伪造其它产品认证身份；“仿照”本片仅指配置/协议兼容，不声称复制完整产品行为。
+291 focused 通过；真 TUI 共 35 个模型：26 正常、7 上游不可用、2 待用户同意训练条款，后 9 个保留停用。
+本片接通三种接口，不等于实现所有供应商独有 API；Auth 未实现，Embedding 仅目录配置。
+旧 R221/跨模型 child 等真实 TUI 待验项仍保留，模型连通成功不能替代长期任务验收。
+新模型计价目录不完整另行记录，不用基础短测猜价格；见 docs/audits/R222_MODEL_PROVIDER_REPORT.md。
+
 ## 2026-09-09 正式库提交前修正【状态：本地定向及严格 gate 通过，待正式库合流】
 
 解决问题：`runs` 归档迁移后 standalone 收尾仍只认 `tasks`，以及规模入口绕过 Gateway claim。

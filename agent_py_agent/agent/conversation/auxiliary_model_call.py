@@ -18,6 +18,7 @@ from ..agent_core.model.call_runtime import (
 )
 from ..backends import ProviderRequestOptions
 from ..backends.gateway_helpers import provider_attempt_observer
+from ..backends.provider_headers import provider_runtime_scope
 from ..contracts.model_call_ledger import (
     ModelCallActivityParams,
     ModelCallFirstTokenParams,
@@ -46,6 +47,7 @@ class AuxiliaryModelCallRequest:
     request_id: str = ""
     run_id: str = ""
     task_id: str = ""
+    thread_id: str = ""
     purpose: str = "auxiliary"
 
 
@@ -130,7 +132,7 @@ def _start_auxiliary_call(
 
 # LLM: The one-shot provider call shares global admission and typed transport observations with the
 # main loop. Callbacks account only token counts/attempt facts and cannot expose summary bodies.
-# 函数用途: 在全局并发槽内执行一次辅助请求，并把流式活动和 HTTP 重试写入同一本模型账。
+# 函数用途: 绑定原 owner/thread 会话头，在全局并发槽执行辅助请求，并把流式活动和 HTTP 重试写入同一本模型账。
 def _invoke_auxiliary_generate(
     request: AuxiliaryModelCallRequest,
     generate: object,
@@ -146,7 +148,7 @@ def _invoke_auxiliary_generate(
         record_model_provider_attempt(ledger, call_id, event)
 
     prompt = request.prompt if isinstance(request.prompt, str) else str(request.prompt or "")
-    with provider_attempt_observer(_observe_provider_attempt):
+    with provider_runtime_scope(request.agent, request), provider_attempt_observer(_observe_provider_attempt):
         with global_llm_admission_slot():
             llm_inflight(1)
             try:

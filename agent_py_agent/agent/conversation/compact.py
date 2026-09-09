@@ -173,6 +173,7 @@ class _CompactSummaryCall:
     request_id: str = ""
     run_id: str = ""
     task_id: str = ""
+    thread_id: str = ""
     compact_generation: int = 0
     provider_surface: ConversationCompactProviderSurface | None = None
 
@@ -610,6 +611,7 @@ def _build_compact_candidate(
         evidence,
         compact_rows,
         call=_CompactSummaryCall(
+            thread_id=request.thread.thread_id,
             custom_instructions=request.custom_instructions,
             request_id=request.request_id,
             run_id=request.run_id,
@@ -921,6 +923,7 @@ def _summarize(
             run_id=selected_call.run_id,
             task_id=selected_call.task_id,
             purpose="conversation_compact_summary",
+            thread_id=selected_call.thread_id,
         )
     )
     summary = (

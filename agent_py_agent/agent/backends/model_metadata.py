@@ -1,3 +1,5 @@
+# LLM: 模型目录只提供结构化容量事实，鉴权及自定义头与生成快照一致，失败不冒充成功。
+# 模块用途: 按需发现供应商的模型容量，不从名称猜容量。
 from __future__ import annotations
 
 """Provider model metadata discovery kept separate from generation backends."""
@@ -28,6 +30,8 @@ class ProviderModelMetadata:
     record: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: metadata 请求继承模型配置快照，头部不进入公开模型记录。
+# 类用途: 描述目录请求的连接及兼容信息。
 @dataclass(frozen=True)
 class ProviderMetadataOptions:
     """Connection identity and bounded timeouts for metadata discovery."""
@@ -37,6 +41,7 @@ class ProviderMetadataOptions:
     model_name: str
     request_timeout: int
     connect_timeout: float
+    custom_headers: dict[str, str] = field(default_factory=dict)
 
 
 # LLM: Only explicit provider metadata is authoritative. Missing fields return zero so the
@@ -44,6 +49,7 @@ class ProviderMetadataOptions:
 # 人类: 模型目录探测失败不影响正常聊天；每个后端实例会缓存本函数结果。
 def discover_provider_model_metadata(options: ProviderMetadataOptions) -> ProviderModelMetadata:
     headers = {
+        **options.custom_headers,
         "Accept": "application/json",
         "Authorization": f"Bearer {options.api_key}",
         "x-api-key": options.api_key,

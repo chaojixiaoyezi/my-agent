@@ -77,6 +77,7 @@ workspace_task_path_template: "tasks/{date}/{task_slug}"
 # - openai_compatible: 走 /chat/completions
 # - anthropic_compatible: 走 /v1/messages
 model_backend: "anthropic_compatible"
+# 也支持 openai_compatible（Chat）或 openai_responses（Responses）；Auth 尚未实现。
 
 # 记忆文件路径：JSONL 格式，每行一条记录
 memory_path: ""
@@ -613,6 +614,11 @@ api_key: ""
 # macOS / Linux 示例：export AGENT_API_KEY="你的key"
 api_key_env: "AGENT_API_KEY"
 
+# 可选自定义模型请求头（JSON/YAML 对象）；禁止覆盖认证、Cookie 和 HTTP 传输字段。
+model_custom_headers: {}
+# 可选稳定会话头名称，例如 OpenCode Go 的 x-opencode-session；值由宿主生成，勿写静态 UUID。
+model_session_header: ""
+
 # 模型名称
 model_name: "deepseek-v4-flash"
 
@@ -631,7 +637,11 @@ model_context_window_tokens: 128000
 model_context_window_explicit: false
 
 # 采样温度
+# /model 的模型独立温度可覆盖此值，留空沿用；不按模型名称写死温度。
 temperature: 0.2
+# Responses 接口默认不发送温度（部分推理模型不接受）；显式 true 才发送上述温度。
+# /model 每模型填写温度自动显式启用，Chat/Messages 仍按原逻辑发送。
+model_temperature_explicit: false
 
 # Anthropic API 版本
 anthropic_version: "2023-06-01"

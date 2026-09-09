@@ -21,6 +21,13 @@
 
 ## 2026-08-23 当前运行基线
 
+- `/model` 已扩展 provider/model v2：一个服务商一份私有密钥，多个模型各有协议/容量/用途。
+  v1 读时显式迁移，首次保存才落盘，保持 profile UUID；工作片冻结整组配置，不热改执行。
+  自定义头不能覆盖认证/传输，OpenCode Go 预设采用自身 UA 与宿主 owner/thread 稳定 session header。
+  Responses 复用正式 HTTP 主链；探针/Compact 同一会话头，已完成 reasoning 密文仅同模型回放。
+  获取目录/短问候必须用户明确操作，保存/编辑不发模型请求；短测试没有任务、工具、子代理。
+  Auth 仅预留；Embedding 本片只管理目录用途，不能选为主/子模型，不声称已接入记忆向量后端。
+
 - 主/子完整公开过程先追加同thread的canonical display记录再投递；逐token、空思考开始与控制事件不入该账。
   display排除于模型/Compact/Memory输入及最近对话条数，不改thread活动时间；同片final快照只覆盖自己的检查点。
   实时读取显式协商display_checkpoints，未知工具占位仅被精确同block真实结果原位补齐，不改变执行终态。

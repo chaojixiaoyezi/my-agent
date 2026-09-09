@@ -186,7 +186,7 @@ class SimpleAgentRuntimeMixin:
             )
         )
 
-    # LLM: run 的工具权限只接受 allowed_tools；主工作片冻结用户模型选择，task_local 继承创建时配置，不中途换模型。
+    # LLM: run 的工具权限只接受 allowed_tools；工作片冻结模型及宿主会话身份，探针/Compact/子代理不能混用头或模型。
     # 函数用途: 规范化一次用户请求，绑定本轮模型配置，再进入共享运行、压缩、工具和保存主链。
     def run(
         self,
@@ -235,9 +235,10 @@ class SimpleAgentRuntimeMixin:
                 context_scope=context_scope,
             ),
         )
+        from ..backends.provider_headers import provider_runtime_scope
         from ..settings.model_scope import selected_model_scope
 
-        with selected_model_scope(self, inherited=params.context_scope == "task_local"):
+        with provider_runtime_scope(self, params), selected_model_scope(self, inherited=params.context_scope == "task_local"):
             return _run_with_params(self, user_prompt, params)
 
     def _build_finalize_context(self, params: FinalizeParams):

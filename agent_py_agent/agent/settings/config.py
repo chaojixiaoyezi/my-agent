@@ -537,6 +537,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     api_base: str = "https://api.openai.com/v1"
     api_key: str = ""
     api_key_env: str = "AGENT_API_KEY"
+    # 显式兼容头只影响模型请求；认证由 api_key 负责，会话头由宿主逐会话生成。
+    model_custom_headers: dict[str, str] = field(default_factory=dict)
+    model_session_header: str = ""
     model_name: str = "gpt-4o-mini"
     request_timeout: int = 240
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
@@ -544,6 +547,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # /model 保存的用户窗口为显式容量；默认部署仍保留原 provider metadata 优先策略。
     model_context_window_explicit: bool = False
     temperature: str = "0.2"
+    # Responses 缺省不发送温度；明确配置时才发送，/model 填温度自动启用。
+    model_temperature_explicit: bool = False
     anthropic_version: str = "2023-06-01"
     # Anthropic-compatible 原生多轮工具请求是否写 cache_control 断点。仅影响 native
     # 工具循环；普通单次聊天不额外创建主动缓存，兼容端点不支持时可显式关闭。

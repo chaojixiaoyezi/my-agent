@@ -68,7 +68,7 @@ def anthropic_prompt_cache_projection(
     )
 
 
-# LLM: This is the only Anthropic message projection selector. Disabled and ordinary text paths
+# LLM: Responses 专属密文不发送给 Anthropic；除此以外这是唯一 Anthropic 消息投影入口。Disabled and ordinary text paths
 # must retain the legacy payload shape; enabled native paths delegate to cache breakpoint logic.
 # 函数用途: 按配置选择旧消息形态或主动缓存形态，让 backend 请求组装保持单一入口。
 def anthropic_messages_with_optional_cache(
@@ -81,6 +81,10 @@ def anthropic_messages_with_optional_cache(
     stable_system_cache_active: bool = False,
     structured_native_layout_active: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if messages is not None:
+        messages = [{**row, "content": [block for block in row["content"] if block.get("type") != "responses_reasoning"]}
+                    if isinstance(row.get("content"), list) else row for row in messages]
+        messages = [row for row in messages if row.get("content")]
     if structured_native_layout_active and messages is not None:
         prepared_messages = _append_only_structured_messages(
             stable_user_prefix=stable_user_prefix,

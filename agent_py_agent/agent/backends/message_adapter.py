@@ -149,7 +149,7 @@ def _assistant_message(turn: AssistantTurn) -> dict[str, Any] | None:
     return {"role": "assistant", "content": content}
 
 
-# LLM: 这是保存块的最后出站白名单；只保留 Anthropic 输入协议允许的字段，并让 canonical ToolCall 成为工具参数唯一事实源。
+# LLM: 保存块最后白名单保留各协议 typed 原生块；Responses reasoning 仅由其适配器消费，canonical ToolCall 仍是唯一工具事实。
 # 函数用途: 清洗并按原顺序回放 assistant content blocks，同时补齐未出现在保存块里的真实工具调用。
 def _replay_assistant_content_blocks(turn: AssistantTurn) -> list[dict[str, Any]]:
     raw_blocks = turn.content_blocks
@@ -162,6 +162,12 @@ def _replay_assistant_content_blocks(turn: AssistantTurn) -> list[dict[str, Any]
         if not isinstance(raw, dict):
             continue
         block_type = str(raw.get("type") or "")
+        if block_type == "responses_reasoning":
+            from .responses_wire import reasoning_item
+
+            if isinstance(raw.get("model"), str) and (item := reasoning_item(raw.get("item"))):
+                replayed.append({"type": "responses_reasoning", "model": raw["model"], "item": item})
+            continue
         if block_type == "text":
             replayed.append({"type": "text", "text": str(raw.get("text") or "")})
             continue

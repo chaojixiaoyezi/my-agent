@@ -51,7 +51,7 @@ def test_tui_menu_add_select_cancel_and_secret_history(tmp_path):
                     data = read_model_profiles(model_profiles_path(host.home_paths))
                     assert len(data["profiles"]) == 1
                     row = next(iter(data["profiles"].values()))
-                    assert row["api_key"] == "only-private-secret"
+                    assert data["providers"][row["provider_id"]]["api_key"] == "only-private-secret"
                     assert row["model_context_window_tokens"] == 96000
                     assert runtime.store.snapshot().selected_model_name == "deployment-model"
                     pipe.send_bytes(b"\r")  # 选择已有模型

@@ -50,6 +50,9 @@ def _profile_backend(agent: object, config: object):
 
     values = [getattr(config, key) for key in (
         "model_backend", "model_name", "api_base", "api_key", "model_context_window_tokens", "max_tokens",
+        "model_custom_headers", "model_session_header",
+        "temperature", "stream_enabled", "anthropic_prompt_cache_enabled", "anthropic_version", "request_timeout",
+        "model_temperature_explicit",
     )]
     key = hashlib.sha256(json.dumps(values).encode()).hexdigest()
     with _CACHE_LOCK:

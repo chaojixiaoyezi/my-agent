@@ -1,5 +1,17 @@
 # STATUS
 
+## R222 通用 /model 管理与 35 模型真实短测完成
+
+- 正式 my-agent/main 已是 f47f2002，原两份历史保留，本地严格 gate 通过，未 force push。
+- 通用服务商/多模型新增、编辑、删除、启停、密钥留空保留/明确清空、目录发现与三种协议已实现，不限制品牌名单。
+- 本机 `ma-r222-models`、单 Gateway：35 个 Go 模型逐个短测，最终 26 正常、7 上游不可用、2 需用户同意训练条款。
+- Kimi 独立温度改为 1 后真实复验通过；9 个未通过配置保留但停用，不代用户接受条款。
+- 291 focused 通过；真实菜单完成自定义服务商保存/删除、编辑留空保密钥、目录发现、选择与普通 MiniMax 问候。
+- 本地严格 gate 已通过：Ruff、doc sync、strict code-size（hard 0）、diff、clean-package，另导入边界 0 问题。
+- 真实用量发现新模型缺单价而采用默认估算；不把连接成功当任务、工具或跨模型 child 验收。
+- .10 已恢复 SSH，现有唯一 Gateway pid 1699；重启后无旧 tmux；.7 仍连接超时。本片未部署到测试机或重发旧任务。
+- 配置在独立验证 home，不覆盖用户日常配置；完整字段、35 项结果和待处理问题见 [R222 报告](docs/audits/R222_MODEL_PROVIDER_REPORT.md)。
+
 ## 正式库提交 gate 修复复验：514 项零失败，本地严格 gate 已通过
 
 - 修正真实遗漏：运行归档改为runs后，standalone收尾仍只接受tasks；现在按owner home和锁内精确身份处理。

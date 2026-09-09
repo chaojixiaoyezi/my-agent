@@ -1,0 +1,192 @@
+# LLM: Provider 表单仅调用认证配置 API；密码不进历史，网络测试必须通过独立明确按钮。
+# 模块用途: 提供服务商编辑、多模型管理、目录发现和短连接测试，复用当前 TUI 浮层。
+from __future__ import annotations
+
+import json
+from uuid import uuid4
+
+from prompt_toolkit.filters import to_filter
+from prompt_toolkit.layout import HSplit, ScrollablePane
+from prompt_toolkit.widgets import Checkbox, Label, RadioList, TextArea
+
+from .tui_model_menu import _choose_interface, _dialog, _request
+
+
+# LLM: 字段无持久 history，密码始终掩码；长度校验由唯一服务端 schema 负责。
+# 函数用途: 创建一个可 Tab 切换的单行配置框。
+def _field(text="", *, secret=False):
+    return TextArea(text=str(text), height=1, multiline=False, password=secret)
+
+
+# LLM: 仅渲染当前用户 API 的脱敏列表；ID 是操作对象，展示名称不做机器判断。
+# 函数用途: 选择一项已有模型或服务商，Esc 返回。
+async def _choose(app, title: str, rows: list[tuple]):
+    if not rows:
+        await _dialog(app, title, Label("暂无可用配置，请先新增。"), (("返回", None),))
+        return None
+    choices = RadioList(rows, select_on_focus=True)
+    return await _dialog(app, title, choices, (("进入", lambda: choices.current_value), ("返回", None)), focus=choices)
+
+
+# LLM: 内置预设只提供公开端点和本产品 UA，不伪造客户端认证或复制截图会话号。
+# 函数用途: 新建时可使用 OpenCode Go 的官方接入地址，密钥仍由用户填写。
+async def _provider_preset(app) -> dict | None:
+    preset = await _choose(app, "新增服务商 · 选择模板", [("custom", "自定义服务商"), ("go", "OpenCode Go")])
+    if preset is None:
+        return None
+    return {"id": "opencode-go", "display_name": "OpenCode Go", "api_base": "https://opencode.ai/zen/go/v1",
+            "session_header": "x-opencode-session"} if preset == "go" else {}
+
+
+# LLM: 空密钥/空头编辑保留，清空需要显式 checkbox；保存不选择模型、不发模型请求，关闭清除内存密码。
+# 函数用途: 新增或编辑服务商，长表单在小终端可滚动。
+async def _edit_provider(app, agent, session: str, existing: dict | None = None) -> str:
+    preset = existing if existing is not None else await _provider_preset(app)
+    if preset is None:
+        return ""
+    identity = _field(preset.get("id", ""))
+    if existing:
+        identity.buffer.read_only = to_filter(True)
+    name, address = _field(preset.get("display_name", "")), _field(preset.get("api_base", ""))
+    secret, session_header = _field(secret=True), _field(preset.get("session_header", ""))
+    headers = TextArea(text="", height=3, multiline=True)
+    enabled = Checkbox("启用服务商", checked=preset.get("enabled", True))
+    agentic = Checkbox("Agentic（对话/工具）", checked="agentic" in preset.get("capabilities", ["agentic"]))
+    embedding = Checkbox("Embedding（目录配置；不用于聊天）", checked="embedding" in preset.get("capabilities", []))
+    clear_key, clear_headers = Checkbox("清空已保存密钥"), Checkbox("清空已保存自定义头")
+    notice = Label("")
+    form = HSplit([Label("Provider ID（保存后不变）"), identity, Label("展示名"), name, Label("Base URL"), address,
+        Label("API Key（留空保留；不会进入聊天记录）"), secret, enabled, agentic, embedding,
+        Label("稳定会话头名称（可空；值由 my-agent 生成）"), session_header,
+        Label("自定义请求头 JSON（留空保留）"), headers, clear_key, clear_headers,
+        Label("Tab 切换 · 长表单自动滚动 · Esc 不保存退出"), notice])
+    try:
+        while await _dialog(app, "编辑服务商" if existing else "新增服务商", ScrollablePane(form, max_available_height=22),
+                           (("保存", True), ("退出", None)), focus=name if existing else identity):
+            try:
+                parsed = json.loads(headers.text) if headers.text.strip() else None
+            except ValueError:
+                notice.text = "自定义请求头不是有效 JSON 对象。"
+                continue
+            result = await _request(app, agent, session, "save_provider", {"provider_id": identity.text,
+                "editing": existing is not None, "clear_key": clear_key.checked, "clear_headers": clear_headers.checked,
+                "provider": {"display_name": name.text, "api_base": address.text, "api_key": secret.text,
+                    "enabled": enabled.checked, "capabilities": [v for v, c in (("agentic", agentic), ("embedding", embedding)) if c.checked],
+                    "custom_headers": parsed, "session_header": session_header.text}})
+            if result.get("ok"):
+                return "服务商已保存；可以为它新增多个模型。未发模型请求。"
+            notice.text = str(result.get("message") or "保存未确认，请刷新列表。")
+    finally:
+        secret.text = ""
+        headers.text = ""
+    return ""
+
+
+# LLM: 每模型显式选择协议/容量，不依据名称猜测；profile UUID 新建一次可安全重试保存。
+# 函数用途: 为一个服务商新增或编辑模型名称、上下文、用途和启停。
+async def _edit_model(app, agent, session: str, provider_id: str, row: dict | None = None) -> str:
+    backend = await _choose_interface(app, default=(row or {}).get("model_backend"))
+    if backend is None:
+        return ""
+    data = row or {}
+    name = _field(data.get("model_name", ""))
+    window = _field(data.get("model_context_window_tokens") or 128000)
+    temperature = _field(data.get("temperature", ""))
+    enabled = Checkbox("启用模型", checked=data.get("enabled", True))
+    capability = RadioList([("agentic", "Agentic 对话/工具"), ("embedding", "Embedding 目录配置")],
+                           default=data.get("capability", "agentic"), select_on_focus=True)
+    notice = Label("")
+    body = HSplit([Label("模型名称（区分大小写）"), name, Label("总上下文 tokens（按供应商说明填写）"), window,
+                   Label("温度 0–2（留空沿用部署值；按供应商要求填写）"), temperature,
+                   enabled, capability, notice, Label("Tab 切换 · Esc 不保存返回")])
+    identity = data.get("id") or str(uuid4())
+    while await _dialog(app, "编辑模型" if data.get("id") else "新增模型", body,
+                       (("保存", True), ("返回", None)), focus=name):
+        result = await _request(app, agent, session, "save_model", {"profile_id": identity, "editing": bool(data.get("id")),
+            "profile": {"provider_id": provider_id, "model_backend": backend, "model_name": name.text,
+                        "model_context_window_tokens": window.text, "temperature": temperature.text,
+                        "enabled": enabled.checked, "capability": capability.current_value}})
+        if result.get("ok"):
+            return "模型已保存；选择后将在后续工作片生效。"
+        notice.text = str(result.get("message") or "保存未确认。")
+    return ""
+
+
+# LLM: 目录发现明确发一次 GET，选中目录条目不自动启用；容量缺失必须让用户填写。
+# 函数用途: 获取模型名称列表并打开所选模型的配置表单。
+async def _discover_models(app, agent, session: str, provider: str) -> str:
+    result = await _request(app, agent, session, "discover", {"provider_id": provider})
+    if not result.get("ok"):
+        return str(result.get("message") or "目录读取失败。")
+    rows = result["models"]
+    name = await _choose(app, "发现模型 · 选择后确认接口及容量", [(row["model_name"], row["model_name"]) for row in rows])
+    if name is None:
+        return ""
+    row = next(row for row in rows if row["model_name"] == name)
+    return await _edit_model(app, agent, session, provider, row)
+
+
+# LLM: 删除须二次明确确认，宿主拒绝删除仍有引用的服务商和当前模型；取消无任何副作用。
+# 函数用途: 确认移除一项配置，不影响已经冻结的运行工作片。
+async def _delete(app, agent, session: str, operation: str, key: str) -> str:
+    if not await _dialog(app, "删除配置", Label("删除后，引用此配置的旧任务再次恢复可能报配置不存在。\n确定删除？"),
+                         (("删除", True), ("取消", None))):
+        return ""
+    field = "provider_id" if operation == "delete_provider" else "profile_id"
+    result = await _request(app, agent, session, operation, {field: key})
+    return "配置已删除。" if result.get("ok") else str(result.get("message") or "未确认删除。")
+
+
+# LLM: 所有菜单动作先刷新同 owner 配置，外部修改/删除后不得操作另一项；配置和测试入口分离。
+# 函数用途: 管理一个服务商下的多个模型、编辑服务商或发现目录。
+async def manage_providers(app, agent, session: str, *, create=False) -> str:
+    if create:
+        return await _edit_provider(app, agent, session)
+    result = await _request(app, agent, session, "list")
+    if not result.get("ok"):
+        return str(result.get("message") or "无法读取服务商。")
+    providers = result.get("providers", [])
+    provider = await _choose(app, "服务商列表", [(row["id"], f"{row['display_name']} · {row['id']} · {'启用' if row['enabled'] else '停用'}") for row in providers])
+    if provider is None:
+        return ""
+    action = await _choose(app, "服务商管理", [("edit", "编辑服务商 / 密钥 / 请求头"), ("add", "新增模型"),
+        ("models", "编辑或删除已有模型"), ("discover", "获取远端模型列表"), ("delete", "删除服务商")])
+    if action == "edit":
+        return await _edit_provider(app, agent, session, next(row for row in providers if row["id"] == provider))
+    if action == "add":
+        return await _edit_model(app, agent, session, provider)
+    if action == "discover":
+        return await _discover_models(app, agent, session, provider)
+    if action == "delete":
+        return await _delete(app, agent, session, "delete_provider", provider)
+    if action == "models":
+        models = [row for row in result["profiles"] if row.get("provider_id") == provider]
+        key = await _choose(app, "模型列表", [(row["id"], row["model_name"]) for row in models])
+        if key:
+            operation = await _choose(app, "模型管理", [("edit", "编辑模型（名称 / 接口 / 上下文）"), ("delete", "删除模型")])
+            if operation == "edit":
+                return await _edit_model(app, agent, session, provider, next(row for row in models if row["id"] == key))
+            if operation == "delete":
+                return await _delete(app, agent, session, "delete_model", key)
+    return ""
+
+
+# LLM: 测试明确说明有模型请求；成功不自动切模型，不把 basic probe 当任务验收，结果只在浮层展示。
+# 函数用途: 为选定模型发送短问候，让用户看到实际返回和耗时。
+async def test_connection(app, agent, session: str) -> str:
+    result = await _request(app, agent, session, "list")
+    rows = [row for row in result.get("profiles", []) if row.get("available")]
+    key = await _choose(app, "连接测试 · 选择模型", [(row["id"], f"{row['model_name']} · {row['model_backend']}") for row in rows])
+    if key is None:
+        return ""
+    if not await _dialog(app, "连接测试", Label("将发送一条短问候，会产生少量模型用量。\n不做任务、不派子代理、不执行工具、不切换当前模型。"),
+                         (("开始测试", True), ("返回", None))):
+        return ""
+    result = await _request(app, agent, session, "probe", {"profile_id": key, "session_id": session})
+    message = str(result.get("message") or "测试结果未知，请不要反复点击。")
+    body = f"{message}\n模型：{result.get('model_name', '')}\n耗时：{result.get('elapsed_seconds', '?')} 秒\n{result.get('reply', '')}"
+    if result.get("error_type"):
+        body += f"\n错误类型：{result['error_type']} · HTTP {result.get('status_code', 0)}"
+        body += "\n" + str(result.get("provider_message") or "")
+    await _dialog(app, "连接测试结果", TextArea(text=body, read_only=True, width=72, height=10), (("返回", None),))
+    return message

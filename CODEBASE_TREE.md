@@ -21,6 +21,7 @@ agent_py_agent/
 |   |   |-- tui_block_renderer.py       # typed snapshot 到欢迎/消息/思考/工具/权限/队列/footer formatted lines
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
 |   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
+|   |   |-- tui_provider_menu.py        # 服务商、多模型编辑、启停、目录发现和明确短连接测试
 |   |   |-- tui_input_delivery.py       # 活动回合输入的持久 outbox、同 ID 对账与排队接管
 |   |   |-- tui_control_delivery.py     # slash 控制命令的持久 outbox、稳定操作 ID 与只读状态对账
 |   |   |-- tui_interaction.py          # stash、Ctrl-R、paste 与 `?` help 的线程安全输入状态机
@@ -171,6 +172,9 @@ agent_py_agent/
 |   |   `-- ingress.py                 # POST 前 durable ingress、冲突隔离与单线程全链恢复
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
+|   |   |-- model_provider_schema.py    # provider/model v2 校验、v1 显式迁移与单份连接快照解析
+|   |   |-- model_provider_operations.py # 锁内服务商/模型管理，密钥保留与显式清除
+|   |   |-- model_provider_network.py   # 用户主动目录 GET/短问候，不执行工具或创建任务
 |   |   |-- model_scope.py              # 主工作片冻结 config/backend/prompts，切换不热改在途执行
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
 |   |   |-- audit_activation.py        # 显式 `/audit` 前缀 -> guarantee/window 结构化激活
@@ -216,6 +220,9 @@ agent_py_agent/
 |   |   `-- memory_context.py          # 非权威、可转义且可统一剥离的召回记忆信封
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
 |   `-- backends/                      # 模型后端适配、run 固定协议/tool_choice、原生工具历史与结构化生成
+|       |-- provider_headers.py        # 自定义头保护、owner/thread 稳定会话头及 endpoint 拼接
+|       |-- responses.py               # Responses 协议生成入口，复用正式 HTTP/取消/超时主链
+|       |-- responses_wire.py          # typed SSE/items 与既有工具历史映射、加密 reasoning 回放
 |       |-- anthropic_prompt_cache.py  # Anthropic tools/system/最新 history 断点与追加式 user 投影
 |       |-- base.py                    # 各 provider HTTP 请求、流式解析与统一 Backend 工厂
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
@@ -281,6 +288,7 @@ deploy/
 docs/
 |-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
 |-- audits/TUI_FUNCTION_AUDIT_20260828.md # 真实 TUI 逐功能结果、问题根因、修复影响与复验证据账
+|-- audits/R222_MODEL_PROVIDER_REPORT.md # 通用模型管理、35模型短测结果、具体修复与剩余问题
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
 |-- design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md # 后台命令 host 所有权、跨进程记录与安全回收设计
 |-- design/FEATURE-20260818-终端交互-tui-parity.md # 终端交互 TUI Python 原生复刻的用户行为、事件架构与验收规格
@@ -312,6 +320,9 @@ docs/
 - `agent/gateway_parts/model_profile_service.py`：authenticated owner 的模型菜单接口，不经聊天队列或模型。
 - `agent/settings/model_profiles.py` 与 `model_scope.py`：用户模型存储和运行快照；敏感配置位于宿主 config/model-profiles，非业务目录。
 - `cli/chat_parts/tui_model_menu.py`：真实 TUI 模型菜单，保存/返回与模型执行分离。
+- `cli/chat_parts/tui_provider_menu.py`：同一个 provider 管理多个模型；敏感字段仅表单暂存，短测试明确提示消耗。
+- `agent/settings/model_provider_*.py`：v2 存储 schema/锁内修改/用户主动网络操作，配置只在 owner 私有文件存在一份。
+- `agent/backends/provider_headers.py`、`responses.py`、`responses_wire.py`：统一身份与三种协议；不复制其他产品认证身份。
 - `agent_py_agent/tests/test_gateway_main_activity.py`：前后台数值/阶段共享、任务晋升、跨会话拒绝、迟到关闭和显示故障验证。
 - `agent_py_agent/tests/test_shell_stdin.py`：使用独立宿主管道验证批处理 EOF、输入不串和显式管道，不读取真实用户输入。
 - `agent/conversation/history_page.py`：显示专用倒读页与工作片身份，双游标不回灌模型。

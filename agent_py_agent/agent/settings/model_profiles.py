@@ -9,19 +9,19 @@ import os
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from ..common.json_io import locked_json_path
-
-_SCHEMA = "owner_model_profiles.v1"
-_BACKENDS = {"openai_compatible", "anthropic_compatible"}
-
-
-# LLM: 只有这个类型的固定验证文案可以经 HTTP 公开；其它异常必须统一脱敏。
-# 类用途: 表示可安全显示给用户的模型配置错误。
-class ModelProfileError(ValueError):
-    pass
+from .model_provider_schema import (
+    SCHEMA,
+    ModelProfileError,
+    migrate_v1,
+    resolved_model,
+    validate_model,
+    validate_model_profile,
+    validate_provider,
+    validate_provider_id,
+)
 
 
 # LLM: 路径只由可信 home/owner 身份决定，不接受客户端指定路径或从模型名拼文件名。
@@ -32,47 +32,26 @@ def model_profiles_path(home_paths: object) -> Path:
     return Path(home_paths.config_dir) / "model-profiles" / f"{digest}.json"
 
 
-# LLM: 字段验证只检查类型与协议格式，不发请求，不把错误值（可能含密钥）拼进错误信息。
-# 函数用途: 校验用户填写的模型信息，保留大小写敏感的模型名称。
-def validate_model_profile(value: object) -> dict[str, object]:
-    if not isinstance(value, dict) or value.get("model_backend") not in _BACKENDS:
-        raise ModelProfileError("请选择 OpenAI 或 Anthropic 接口；Auth 暂未开放。")
-    row = {key: str(value.get(key) or "").strip() for key in ("model_name", "api_base", "api_key")}
-    if any(not item or len(item) > 4096 or any(ord(c) < 32 for c in item) for item in row.values()):
-        raise ModelProfileError("模型名称、地址和密钥不能为空，且不能包含换行或控制字符。")
-    try:
-        url = urlsplit(row["api_base"])
-        valid_url = url.scheme in {"http", "https"} and bool(url.hostname) and not (
-            url.username or url.password or url.query or url.fragment
-        )
-        _ = url.port
-    except ValueError:
-        valid_url = False
-    if not valid_url:
-        raise ModelProfileError("地址须为 http(s) 接口基础地址，不要包含密钥、查询参数或片段。")
-    window = value.get("model_context_window_tokens")
-    if isinstance(window, bool) or not str(window).isascii() or not str(window).isdigit() or not 4096 <= int(window) <= 2**31 - 1:
-        raise ModelProfileError("上下文窗口请填写 4096 至 2147483647 之间的整数 tokens。")
-    row.update(model_backend=value["model_backend"], model_context_window_tokens=int(window))
-    row["api_base"] = row["api_base"].rstrip("/")
-    return row
-
-
-# LLM: 文件损坏必须显式拒绝，优化模式也校验结构；读取只投影声明字段，不回传文件中的额外秘密。
-# 函数用途: 读取完整私有配置，仅供宿主执行与菜单保存使用。
+# LLM: 只认显式 schema，v1 迁移不落盘；损坏/悬空引用必须拒绝，不覆盖已有秘密。
+# 函数用途: 读取当前用户的唯一 provider/model 配置并检查引用完整性。
 def read_model_profiles(path: Path) -> dict:
     if not path.exists():
-        return {"schema": _SCHEMA, "selected": "default", "profiles": {}}
+        return {"schema": SCHEMA, "selected": "default", "providers": {}, "profiles": {}}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if data["schema"] != _SCHEMA or not isinstance(data["profiles"], dict):
+        if data["schema"] == "owner_model_profiles.v1":
+            data = migrate_v1(data)
+        if data["schema"] != SCHEMA or not isinstance(data["profiles"], dict) or not isinstance(data["providers"], dict):
             raise ModelProfileError("模型配置结构无效。")
+        data["providers"] = {validate_provider_id(key): validate_provider(row) for key, row in data["providers"].items()}
         for profile_id, row in data["profiles"].items():
             UUID(profile_id)
-            data["profiles"][profile_id] = validate_model_profile(row)
+            data["profiles"][profile_id] = validate_model(row)
+            if row["provider_id"] not in data["providers"]:
+                raise ModelProfileError("模型引用的服务商不存在。")
         if data["selected"] != "default" and data["selected"] not in data["profiles"]:
             raise ModelProfileError("模型配置选择无效。")
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise ModelProfileError("模型配置文件损坏，未覆盖已有配置。") from exc
     return data
 
@@ -91,52 +70,48 @@ def _save_profiles(path: Path, data: dict) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-# LLM: 列表仅公开非秘密字段和 has_key，不返回 key/env/config path，默认项来自实际部署快照。
-# 函数用途: 给菜单显示当前选择与已有模型，包括不改写原 YAML 的部署默认选项。
+# LLM: model/provider 列表只含白名单字段，密钥和任意自定义头值不公开；默认来自真实部署快照。
+# 函数用途: 提供可选择的模型和可管理的服务商投影，不泄漏私有字段。
 def public_model_profiles(data: dict, config: object) -> dict:
     default = {key: getattr(config, key, "") for key in (
         "model_backend", "model_name", "model_context_window_tokens",
     )}
     rows = [{"id": "default", **default, "api_base": "（使用部署配置）", "has_key": True}]
     for profile_id, row in data["profiles"].items():
-        rows.append({"id": profile_id, **{key: value for key, value in row.items() if key != "api_key"}, "has_key": bool(row["api_key"])})
-    return {"ok": True, "selected": data["selected"], "profiles": rows}
+        provider = data["providers"][row["provider_id"]]
+        rows.append({"id": profile_id, **row, "api_base": provider["api_base"],
+                     "provider_name": provider["display_name"], "has_key": bool(provider["api_key"]),
+                     "available": bool(row["enabled"] and provider["enabled"] and provider["api_key"]
+                                       and row["capability"] == "agentic" and "agentic" in provider["capabilities"])})
+    providers = [{"id": key, **{field: row[field] for field in (
+        "display_name", "api_base", "enabled", "capabilities", "session_header")},
+        "has_key": bool(row["api_key"]), "header_names": sorted(row["custom_headers"])} for key, row in data["providers"].items()]
+    return {"ok": True, "selected": data["selected"], "profiles": rows, "providers": providers}
 
 
-# LLM: 写入只接受 add/select；add ID 由客户端生成以支持同一保存重试，异值重用拒绝，选择和新增不互相覆盖。
-# 函数用途: 按用户锁读取、增加或选择模型，返回脱敏菜单；没有任何模型或网络调用。
+# LLM: 配置写入锁内原子进行；网络操作只允许显式 discover/probe，且不持有配置锁或执行工具。
+# 函数用途: 处理模型菜单的管理、选择与主动连接检查，返回脱敏回执。
 def execute_model_profile_operation(agent: object, operation: str, payload: dict) -> dict:
     path = model_profiles_path(agent.home_paths)
     if operation == "list":
         return public_model_profiles(read_model_profiles(path), agent.config)
-    if operation not in {"add", "select"}:
-        raise ModelProfileError("不支持的模型配置操作。")
-    profile_id = str(payload.get("profile_id") or "")
-    if profile_id != "default" or operation == "add":
-        try:
-            UUID(profile_id)
-        except ValueError as exc:
-            raise ModelProfileError("模型配置编号无效。") from exc
-    row = validate_model_profile(payload.get("profile")) if operation == "add" else None
+    if operation in {"discover", "probe"}:
+        from .model_provider_network import execute_provider_network
+
+        return execute_provider_network(agent, read_model_profiles(path), operation, payload)
+    from .model_provider_operations import mutate_profiles
+
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     with locked_json_path(path):
         data = read_model_profiles(path)
-        if operation == "add":
-            previous = data["profiles"].get(profile_id)
-            if previous is not None and previous != row:
-                raise ModelProfileError("这个保存编号已被使用，请重新打开新增模型。")
-            data["profiles"][profile_id] = row
-        elif profile_id == "default" or profile_id in data["profiles"]:
-            data["selected"] = profile_id
-        else:
-            raise ModelProfileError("模型配置不存在，请刷新列表。")
+        mutate_profiles(data, operation, payload)
         _save_profiles(path, data)
     return public_model_profiles(data, agent.config)
 
 
-# LLM: 模型整组字段共享显式选择的来源与优先级；旧 task overlay 不能拆开模型名、地址、密钥和窗口。
-# 函数用途: 在新工作片开始时生成模型配置快照，正在运行的旧快照不受后续菜单操作影响。
+# LLM: provider+model 在单次文件快照内解析，头/密钥/协议一起冻结；旧 task overlay 不得拆开该组合。
+# 函数用途: 新工作片使用用户选择，已有执行不被修改，禁用或删除的原模型不自动替换。
 def selected_model_config(agent: object, *, profile_id: str | None = None):
     data = read_model_profiles(model_profiles_path(agent.home_paths))
     selected = data["selected"] if profile_id is None else profile_id
@@ -144,10 +119,11 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
         return agent.config
     if selected not in data["profiles"]:
         raise ModelProfileError("任务原模型配置已不存在，不能静默换成其它模型。")
-    row = data["profiles"][selected]
-    config = replace(agent.config, **row, api_key_env="", model_context_window_explicit=True)
+    row = resolved_model(data, selected)
+    config = replace(agent.config, **row, api_key_env="", model_context_window_explicit=True,
+                     model_temperature_explicit="temperature" in row or agent.config.model_temperature_explicit)
     config.max_tokens = min(config.max_tokens, int(row["model_context_window_tokens"]) // 4)
-    fields = {*row, "api_key_env", "model_context_window_explicit", "max_tokens"}
+    fields = {*row, "api_key_env", "model_context_window_explicit", "model_temperature_explicit", "max_tokens"}
     config.config_sources = {**config.config_sources, **{key: {
         "source": "owner_model_profile", "priority": 90, "profile_id": selected,
     } for key in fields}}
@@ -159,12 +135,15 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
 def resolve_child_model_profile(agent: object, model: object) -> str:
     if not isinstance(model, str) or not model.strip():
         raise ModelProfileError("子代理 model 请填写 /model 中已新增的模型名称或配置编号；省略则继承父级。")
-    profiles = read_model_profiles(model_profiles_path(agent.home_paths))["profiles"]
+    data = read_model_profiles(model_profiles_path(agent.home_paths))
+    profiles = data["profiles"]
     model = model.strip()
     if model in profiles:
+        resolved_model(data, model)
         return model
     matches = [key for key, row in profiles.items() if row["model_name"] == model]
     if len(matches) == 1:
+        resolved_model(data, matches[0])
         return matches[0]
     available = [{"id": key, "model_name": row["model_name"]} for key, row in profiles.items()]
     reason = "模型名称有多个配置，请使用编号。" if matches else "当前用户尚未新增这个模型，请通过 /model 配置。"

@@ -1,6 +1,6 @@
 """Coercion helpers for memory-related config fields."""
 
-# LLM: Every Memory config field must normalize through this typed table; invalid values warn and use one declared default.
+# LLM: Every Memory config field must normalize through this typed table; provider choices include the same Responses adapter as main. Invalid values warn and use one declared default.
 # 模块用途: 校验 Memory/Curator 配置类型、枚举与范围，并生成不含秘密的结构化警告。
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ _FIELDS = (
     _FieldSpec(
         "memory_curator_provider",
         "choice",
-        choices={"auto", "echo", "openai_compatible", "anthropic_compatible"},
+        choices={"auto", "echo", "openai_compatible", "anthropic_compatible", "openai_responses"},
     ),
     _FieldSpec("memory_curator_model", "string", max_chars=200),
     _FieldSpec("memory_curator_interval_seconds", "int", 60, 604_800),
