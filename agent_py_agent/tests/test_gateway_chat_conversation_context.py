@@ -4055,7 +4055,8 @@ def test_new_turn_projects_completed_workspace_candidates_without_selecting_them
     original = owner_home / "tasks" / "2026-09-03" / "星河日志分析器"
     second = owner_home / "tasks" / "2026-09-03" / "云尺目录体检器"
     detached = owner_home / "tasks" / "2026-09-03" / "后台巡检"
-    for path in (original, second, detached):
+    internal_run = Path(agent.home_paths.owner_runs_dir) / "2026-09-03" / "internal-record"
+    for path in (original, second, detached, internal_run):
         (path / "work").mkdir(parents=True)
         (path / "output").mkdir()
     rows = (
@@ -4063,6 +4064,7 @@ def test_new_turn_projects_completed_workspace_candidates_without_selecting_them
         ("task-ruler", "云尺目录体检器", second, 2.0, "foreground"),
         ("task-star-new", "星河日志分析器", original, 3.0, "foreground"),
         ("task-detached", "后台巡检", detached, 4.0, "detached"),
+        ("task-internal", "执行记录不是业务项目", internal_run, 4.5, "foreground"),
     )
     for task_id, goal, path, now, cancellation_scope in rows:
         agent.conversation_store.bind_task(
@@ -4122,6 +4124,7 @@ def test_new_turn_projects_completed_workspace_candidates_without_selecting_them
     assert "task-star-old" not in injection
     assert "task-detached" not in injection
     assert "task-missing" not in injection
+    assert "task-internal" not in injection
     assert attrs is not None
     assert CONVERSATION_WORKSPACE_TASK_ID_ATTR not in attrs
     assert "run_workspace" not in attrs

@@ -1417,9 +1417,8 @@ def _render_user(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
 
 
 # LLM: assistant marker 与 Markdown 只做视觉组合；typed process 仍是完整会话消息，
-# 不能因为后面还有工具调用就默认折成一行并藏掉详细汇报；process 的每个正文
-# fragment 必须追加 muted 终端角色，不能只染前面的圆点。
-# 函数用途: 渲染带 ● marker 的完整助手 Markdown 块，过程段整段浅灰，最终段保持正文色。
+# 不能因为后面还有工具调用就折叠或染成思考色；只有思考块和快捷键提示使用灰色。
+# 函数用途: 渲染完整助手 Markdown；包括插话答复和工作进展，均保持正常正文色。
 def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     content_width = max(1, context.width - 2)
     text = _bounded_render_text(
@@ -1429,20 +1428,18 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
     markdown_lines = render_markdown(text, MarkdownRenderContext(width=content_width))
     lines: list[FormattedLine] = []
     first_content = True
-    process = bool(block.metadata.get("process"))
     for line in markdown_lines:
         if not fragments_text(line):
             lines.append(())
             continue
         marker = "● " if first_content else "  "
         fold_hint = _is_fold_hint_line(line)
-        if (first_content and process) or fold_hint:
+        if fold_hint:
             style = "class:tui-muted"
         else:
             style = "class:tui-assistant-marker" if first_content else ""
-        if process or fold_hint:
-            # 终端交互 的过程说明/快捷键提示是整行 dim；只给 marker 上色会让真正
-            # 的文字继续继承普通 Markdown 正文颜色。
+        if fold_hint:
+            # 折叠提示不是模型答复，仍作为辅助文案浅灰显示。
             line = _append_terminal_role(line, "class:tui-muted")
         lines.append(((style, marker), *line))
         first_content = False

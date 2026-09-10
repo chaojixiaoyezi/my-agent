@@ -1,5 +1,10 @@
 # Subagent Progress
 
+## R227 通用交互终端默认工具（待真 TUI 验收）
+
+普通 coding 与可写角色的 SHELL_SESSION_TOOLS 增加 terminal_session；主代理无需逐项填写。
+public create 原有“基础工具 + 显式补充”语义不变；read_only、Audit 精确授权和 owner 禁用不扩权。
+
 ## R223 外部审计复核
 
 - `create_subagents` 的存储/内部异常不再归为参数错误；保留 error_type、分类及可能部分创建的事实，

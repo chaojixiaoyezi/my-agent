@@ -176,6 +176,8 @@ class _CompactSummaryCall:
     thread_id: str = ""
     compact_generation: int = 0
     provider_surface: ConversationCompactProviderSurface | None = None
+    interrupt_check: CompactInterruptCheck | None = None
+    source_progress: Callable[[int, int], object] | None = None
 
 
 # LLM: Never derive owner or thread authority from prompt text in this projection.
@@ -519,6 +521,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
                 compact_rows,
                 retained_tail,
                 provider_surface=provider_surface,
+                progress_range=(summarize_percent, measure_percent),
             )
         except InterruptedError:
             raise
@@ -591,14 +594,16 @@ def _commit_compact_candidate_or_record_failure(
 
 
 # LLM: This helper may call the model through the frozen non-executing provider surface but cannot
-# write any state. Every candidate is measured against the complete next-turn projection.
-# 函数用途: 用同一缓存面为指定旧段生成摘要候选，并按完整下一轮输入重新计算压缩后 token。
+# write any state. Every candidate is measured against the complete next-turn projection;
+# source coverage drives display progress, never time-based invented completion.
+# 函数用途: 按同一缓存面分段摘要并报告真实覆盖进度，再按完整下一轮输入重新计算大小。
 def _build_compact_candidate(
     request: _CompactRunRequest,
     compact_rows: list[MessageLogEntry],
     retained_tail: list[MessageLogEntry],
     *,
     provider_surface: ConversationCompactProviderSurface | None,
+    progress_range: tuple[int, int] = (15, 65),
 ) -> _CompactCandidate:
     raise_if_compact_interrupted(request.interrupt_check)
     evidence = _merge_compact_operation_evidence(
@@ -618,6 +623,11 @@ def _build_compact_candidate(
             task_id=request.task_id,
             compact_generation=request.thread.compact_generation,
             provider_surface=provider_surface,
+            interrupt_check=request.interrupt_check,
+            source_progress=lambda covered, total: _emit_compact_progress(
+                request, phase="progress", stage="summarizing",
+                percent=progress_range[0] + int((progress_range[1] - progress_range[0]) * covered / max(1, total)),
+            ),
         ),
     )
     raise_if_compact_interrupted(request.interrupt_check)
@@ -907,12 +917,10 @@ def _summarize(
             else None
         )
         system_instruction = provider_surface.system_instruction
-    from .auxiliary_model_call import (
-        AuxiliaryModelCallRequest,
-        generate_auxiliary_model_response,
-    )
+    from .auxiliary_model_call import AuxiliaryModelCallRequest
+    from .compact_request_budget import generate_bounded_compact_response
 
-    response = generate_auxiliary_model_response(
+    response = generate_bounded_compact_response(
         AuxiliaryModelCallRequest(
             agent=agent,
             prompt=prompt,
@@ -924,7 +932,9 @@ def _summarize(
             task_id=selected_call.task_id,
             purpose="conversation_compact_summary",
             thread_id=selected_call.thread_id,
-        )
+        ),
+        interrupt_check=selected_call.interrupt_check,
+        source_progress=selected_call.source_progress,
     )
     summary = (
         ""
@@ -970,6 +980,10 @@ def _conversation_summary_instruction(
             "small tasks. Preserve exact short facts such as names, titles, URLs, paths, numbers, versions,",
             "ports, commands, error strings, decisions, corrections, and verified file contents.",
             "Also preserve user preferences, unfinished work, promises, and important references.",
+            "Use separate sections for the user's primary goal, current work, exact project/file paths,",
+            "verified results, unfinished tasks, and the next step. A progress-check request does not",
+            "replace the larger task it refers to. Retain the original requirements unless the user changed them.",
+            "Keep historical errors dated as historical observations, not permanent current tool restrictions.",
             "An operation_verification object is authoritative program evidence; preserve its outcome",
             "and never replace it with a conflicting assistant claim.",
             "Do not invent facts, instructions, tool results, or long-term memories. Do not call tools.",
@@ -1187,13 +1201,14 @@ def _bounded_compact_text(text: str, limit: int) -> str:
 
 
 # LLM: compact 可以压缩自然语言，但不能压缩掉或改写程序记录的操作终态；该账本只合并
-# assistant message metadata 中已经公开化的 operation_verification，不读消息正文。
-# 函数用途: 将历次 compact 的公开操作核验与本次被压缩消息原子合并成有界证据链。
+# assistant metadata 的 operation_verification 和匹配原生工具的路径参数，不读消息正文。
+# 函数用途: 合并公开操作核验与原样历史路径提示；和摘要同一次 checkpoint/CAS 提交，不依赖模型记住目录。
 def _merge_compact_operation_evidence(
     previous: object,
     rows: list[MessageLogEntry],
 ) -> dict[str, object]:
     from ..tooling.operation_verification import public_operation_verification
+    from .compact_tool_refs import merge_compact_tool_refs
 
     prior = (
         previous
@@ -1253,6 +1268,7 @@ def _merge_compact_operation_evidence(
             operation_event_count - len(events),
         ),
         "events": events,
+        "observed_tool_paths": merge_compact_tool_refs(prior.get("observed_tool_paths"), rows),
     }
 
 

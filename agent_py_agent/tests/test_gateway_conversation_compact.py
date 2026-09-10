@@ -47,6 +47,17 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 
 
+# LLM: These tests intentionally use tiny policy thresholds to exercise checkpoint/tail/CAS
+# behavior, while the fake provider has no wire limit. Physical request budgeting is tested with
+# explicit small windows and complete source coverage in test_compact_request_budget.
+# 函数用途: 隔离旧会话状态测试的人工触发线和 fake 后端容量，避免完整工具表大于玩具窗口。
+@pytest.fixture(autouse=True)
+def _fake_summary_provider_capacity(monkeypatch):
+    from agent_py_agent.agent.conversation import compact_request_budget
+
+    monkeypatch.setattr(compact_request_budget, "resolve_model_context_window_tokens", lambda _agent: 1_000_000)
+
+
 # Test helper: production transcript Compact now uses the same native provider surface as a normal
 # turn, so summary fakes must explicitly declare native-tool capability instead of taking a text path.
 class _NativeSummaryBackend:
@@ -728,7 +739,7 @@ def test_same_thread_accumulates_beyond_recent_turn_setting_until_compact(tmp_pa
 def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_path) -> None:
     # 给稳定 system/workspace prompt 留出小幅演进余量；本测试验证的是 transcript
     # 成功压缩与 owner 索引，不应卡在候选刚好高于优选 recovery target 的单 token 边界。
-    agent = _agent(tmp_path, context_tokens=13_000, max_turns=3)
+    agent = _agent(tmp_path, context_tokens=16_000, max_turns=3)
     backend = _SummaryBackend()
     agent.backend = backend
     request = _request()
@@ -891,11 +902,13 @@ def test_repeated_compact_checkpoints_form_one_generation_chain(tmp_path) -> Non
 
 
 def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_path) -> None:
-    agent = _agent(tmp_path, context_tokens=2_000)
+    # 初始化会话时不能先用小于固定 prompt 的窗口；该测试随后才显式制造坏候选。
+    agent = _agent(tmp_path, context_tokens=20_000)
     backend = _OversizedSummaryBackend()
     agent.backend = backend
     request = _request("ou_bad_candidate")
     context = _context(agent, request, "gw-create", "开始")
+    agent.config.model_context_window_tokens = 2_000
     for index in range(2):
         for role in ("user", "assistant"):
             assert _append_gateway_conversation_message(

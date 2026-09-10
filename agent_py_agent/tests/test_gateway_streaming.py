@@ -4,6 +4,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from agent_py_agent.agent.contracts.tool_approval import (
     ToolApprovalDecision,
@@ -19,9 +20,32 @@ from agent_py_agent.agent.gateway_parts.permission_bridge import (
 )
 from agent_py_agent.agent.gateway_parts.request_execution import (
     BufferedChunkStreamWriter,
+    _gateway_compact_progress_callback,
     close_chunk_stream,
 )
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
+
+
+def test_compact_start_publishes_selected_model_window_before_progress(tmp_path: Path, monkeypatch):
+    from agent_py_agent.agent.agent_core.runtime import context_compactor
+
+    policy = SimpleNamespace(context_window_tokens=200_000)
+    monkeypatch.setattr(context_compactor, "runtime_compact_policy", lambda agent: policy)
+    path = gateway_chunk_path(_make_paths(tmp_path), "cross-model-compact")
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True)
+    callback = _gateway_compact_progress_callback(writer, agent=object())
+    callback({
+        "schema": "conversation_compaction_progress.v1", "phase": "started", "stage": "preparing",
+        "percent": 5, "generation": 1, "source_kind": "conversation_transcript",
+        "commit_authority": "conversation_thread", "operation_id": "transcript:cross-model",
+        "before_tokens": 595_000, "trigger_tokens": 180_000,
+    })
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["kind"] for row in rows] == ["context_usage_updated", "conversation_compaction_progress"]
+    assert rows[0]["context_usage"]["context_window_tokens"] == 200_000
+    assert rows[0]["context_usage"]["current_tokens"] == 595_000
+    assert rows[0]["context_usage"]["compact_trigger_tokens"] == 180_000
+    assert _gateway_compact_progress_callback(lambda text: None, agent=object()) is None
 
 
 def _make_paths(tmp_path: Path) -> GatewayPaths:

@@ -1,5 +1,15 @@
 # Gateway Progress
 
+R227 跨窗口真 TUI 已完成 595K → 16K 的 transcript 压缩，但后续找错项目目录，不能认定连续任务通过。
+新增结构化原样工具路径投影并排除内部 runs 候选，补定向后继续真 TUI；错误源码丢失结论保留为失败样本。
+
+## R227 压缩失败定位与修复中
+
+真实切模型样本：DeepSeek 大窗口历史约 56 万 tokens，切 MiniMax 后摘要请求越界；原先被包装成
+CONVERSATION_PERSISTENCE_UNAVAILABLE。现在保留 COMPACT 错误码和原异常链，提示历史未删除。
+尾部预算计入 canonical native 工具历史；超大摘要请求按当前窗口分段，全段成功后才提交一次游标。
+本机用户任务只读；定向与测试机真 TUI 验收分开记账，不把代码落地当作验收完成。
+
 ## R226 当前模型与用户自主权限
 
 `gateway_status` 的 caller_model 绑定调用者工作片，启动默认值降为 deployment_defaults，避免 DeepSeek 被误报。

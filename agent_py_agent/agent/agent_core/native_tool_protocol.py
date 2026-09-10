@@ -1,12 +1,11 @@
+# LLM: 工具参数只来自冻结快照，通用授权规则只在 provider system 传一次；本模块不更改运行时权限。
+# 模块用途: 固定原生工具协议并渲染模型工具列表，避免工具说明重复堆叠系统提示。
 from __future__ import annotations
 
 """Run-fixed tool protocol capability, selection and provider schema surface."""
 
-from dataclasses import replace
 from typing import Any
 
-from ..model_guidance import ACTION_AUTHORIZATION_GUIDANCE
-from ..tooling.models import ToolModelSpec, ToolRuntimePolicy, ToolRuntimeSnapshot
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolProtocolSnapshot
 
 _NATIVE_PROTOCOL = "native"
@@ -71,8 +70,8 @@ def native_tool_protocol_value(tool_protocol: object) -> str:
     raise ValueError(f"invalid tool protocol: {value}")
 
 
-# LLM: 原生工具说明必须从同一 ToolRuntimeSnapshot 投影；授权提示只影响模型选择，不能替代结构化执行门。
-# 函数用途: 给模型生成本轮真实可用的原生工具列表，并在可能改状态的工具旁提醒用户授权边界。
+# LLM: 原生工具只投影同一快照；通用授权文字由 provider_system_instruction 唯一承载，不按工具重复追加，也不改执行权限。
+# 函数用途: 给模型生成本轮可用的原生工具和精确参数，避免每个工具再复制整段系统规则。
 def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] | None:
     """Render schemas from the immutable runtime snapshot for a native turn."""
 
@@ -89,46 +88,8 @@ def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] 
         loaded_tool_names=getattr(params, "loaded_tool_names", None),
         runtime_snapshot=snapshot,
     )
-    specs = _with_action_authorization_guidance(specs, snapshot)
     tools = tool_model_specs_to_anthropic_tools(specs)
     return tools or None
-
-
-# LLM: 是否可能产生副作用只读取 canonical runtime policy，不得按工具名或说明文字维护名单。
-# 函数用途: 为可能改状态的工具追加稳定提示；纯只读工具保持原说明，避免浪费上下文。
-def _with_action_authorization_guidance(
-    specs: list[ToolModelSpec],
-    runtime_snapshot: object,
-) -> list[ToolModelSpec]:
-    if not isinstance(runtime_snapshot, ToolRuntimeSnapshot):
-        return specs
-    projected: list[ToolModelSpec] = []
-    for spec in specs:
-        runtime = runtime_snapshot.runtime(spec.name)
-        if runtime is None or not _policy_may_change_state(runtime.runtime_policy):
-            projected.append(spec)
-            continue
-        description = spec.description
-        if ACTION_AUTHORIZATION_GUIDANCE not in description:
-            description = f"{description}\n\n{ACTION_AUTHORIZATION_GUIDANCE}"
-        projected.append(replace(spec, description=description))
-    return projected
-
-
-# LLM: command strategy 和任何 mutating/dangerous 变体都代表模型可选择有副作用参数；具体调用仍由执行门解析。
-# 函数用途: 根据工具已有的 effect 声明判断它是否需要展示授权提示。
-def _policy_may_change_state(policy: ToolRuntimePolicy) -> bool:
-    resolver = policy.effect_resolver
-    if resolver.strategy == "command" or resolver.default_effect != "read_only":
-        return True
-    return any(
-        effect != "read_only"
-        for _field_name, variants in resolver.by_parameter
-        for _value, effect in variants
-    ) or any(
-        effect != "read_only"
-        for _conditions, effect in resolver.by_parameter_combinations
-    )
 
 
 def _declared_capability(

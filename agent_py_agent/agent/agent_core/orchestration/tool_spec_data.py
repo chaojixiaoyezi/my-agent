@@ -1,6 +1,5 @@
-# LLM: Keep model-facing orchestration metadata compact and aligned with the
-# exact-covers contract; optional output hints must never become write authority.
-# 模块用途: 集中保存子代理编排工具给模型看的参数说明和示例，修改运行语义时要同步工具规格测试。
+# LLM: 参数说明只补充工具级规则；嵌套 role 复用顶层索引，产物线索不是权限，不指定已废弃的固定输出目录。
+# 模块用途: 集中保存派工参数与示例；瘦身时保留 exact covers、模型选择、角色和工作区含义。
 
 from __future__ import annotations
 
@@ -49,11 +48,8 @@ _CREATE_PARAMETERS = {
 _CREATE_PARAMETER_DETAILS = {
     "goal": "与用户命令 /goal 无关；普通聊天任务也可派工。单派时写清这个子代理要交付什么并保留全部硬约束；items 批量模式可省略顶层 goal，每项自己的 goal 才是 child 的完整工作边界。",
     "items": (
-        "仅一次派多个可同时立即运行、彼此不等待结果的任务时用；"
-        + _CREATE_DEPENDENCY_ORDER_RULE
-        + _CREATE_DISJOINT_WRITE_SCOPE_RULE
-        + "顶层 goal 可选写整批目的，每个元素必须含自己的独立 "
-        "goal、别传空 items。资料线索放 item.input_refs；covers/output_files 都是可选结构化提示，只有事实匹配时才填。"
+        "批量并行任务；非空列表，每项包含独立 goal，顶层 goal 可省略。依赖顺序与写入分工见工具说明。"
+        "资料放各 item.input_refs；covers/output_files 是可选结构化线索。"
     ),
     "description": "只写一句职责短标题，例如“实现超级玛丽核心玩法”；不要写过程、状态、路径或完整任务要求。省略时界面会截取 goal 开头。",
     "role": "优先用模板角色。可用角色模板索引：\n{role_template_index}",
@@ -65,11 +61,8 @@ _CREATE_PARAMETER_DETAILS = {
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
     "output_files": (
         "可选；用户明确保存路径时用于保留交付身份与协调线索。它不是权限、完整写集或创建前置条件，"
-        "普通 child 的父级工作区写权仍由宿主继承；提供时必须位于当前 workspace。阅读/分析目录是 input_refs。"
-        "同批多个 item 可以声明共同 task root；宿主不会把路径相同或祖先关系当成目录锁。"
-        "真正可能改同一文件或模块时，仍应在 goal 中缩窄独占范围或改为分批。"
-        "协作阶段的中间产物优先放当前任务 work/child_outputs 或工具返回的默认路径；"
-        "output_dir 更适合最终交付，或用户明确要求放到某个普通输出目录时使用。"
+        "路径仍服从当前 workspace 权限。阅读资料用 input_refs。"
+        "同批多个 item 可以声明共同 task root；具体输出使用约定业务目录或工具返回的真实路径，不猜内部目录。"
     ),
     "replacement_for_run_ids": "用于结构化接管卡住或过时的旧 run。",
     "related_finding_id": (
@@ -83,13 +76,13 @@ _CREATE_PARAMETER_DETAILS = {
         "和文档引用由运行时从该绑定补入，禁止猜 watch_id。"
     ),
     "covers": (
-        "语法可选；凡 child 原样承接一个已存在 open 清单项，就应复制该 exact id（来自 task_progress "
-        "items 或 coverage.targets），不要因为字段可选而漏掉。只有额外工作或关系不能确定时才省略。"
-        "未知、已关闭或跨 item 重复的 id 会使整批原子拒绝；省略时 child 按真实 run_id 单独登记，不会给现有 Todo 打勾。"
-        "返工已关闭项先用 task_progress 对原 id 传 status=in_progress, correction=true，再绑定原 id；绝不能拿无关 open id 顶替。"
+        "承接已有 Todo 时复制 items/coverage.targets 的 exact id，不要因为字段可选而漏掉；额外工作可省略。"
+        "未知、已关闭或跨 item 重复 id 会整批拒绝。返工先对原 id 更新 in_progress、correction=true。"
+        "绑定项随 child DONE 打勾；省略则由父级据实更新，不拿无关 id 顶替。"
     ),
 }
 _CREATE_ITEM_PARAMETER_DETAILS = {
+    "role": "与顶层 role 使用同一模板索引；省略时为 worker。",
     "goal": (
         "每个 item 都必填；只写这一个子代理要完成和交付的具体工作，不要复制顶层整批 goal。"
         "该 goal 是 child 的完整工作边界，不要把兄弟 item 也塞进来；编码任务要同时写清共同目标目录"

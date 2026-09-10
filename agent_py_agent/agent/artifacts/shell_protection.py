@@ -1,7 +1,7 @@
 """LLM: Protect registered artifacts around foreground shell execution.
 
-模块用途: shell 无法复用 write_file 的逐文件写前校验，因此命令开始前把 ready 产物原子备份到
-owner 私有数据区，结束后复核并只保留真正发生变化所需的恢复副本。
+模块用途: shell 无法复用 write_file 的逐文件写前校验，因此命令开始前备份当前范围内仍存在的 ready 产物。
+越界或已消失的旧引用只记跳过计数，不读取外部路径、不修改登记，也不阻断无关命令；符号链接等结构错误仍拒绝。
 """
 
 from __future__ import annotations
@@ -122,8 +122,8 @@ class OpenedArtifactSource:
             self.descriptor = -1
 
 
-# LLM: Backup storage is injected from HomePaths and must never be derived from the mutable task cwd.
-# 函数用途: 把当前 ready 产物复制到 owner 私有数据区，为即将执行的前台 shell 留恢复引用。
+# LLM: 备份只覆盖受信根内存在的普通文件；过时/越界 registry 引用不是当前命令的执行前置条件。selection_counts 只写计数，不泄露路径。
+# 函数用途: 为当前可保护产物建立私有前像；跳过不存在或权限外的旧引用，保留真正备份失败和 no-follow 防护。
 def snapshot_ready_artifacts(
     workspace_root: str | Path,
     backup_store_root: str | Path | None,
@@ -132,6 +132,7 @@ def snapshot_ready_artifacts(
     run_scope: object = None,
     tool_call_id: str = "",
     operation_id: str = "",
+    selection_counts: dict[str, int] | None = None,
 ) -> list[ShellArtifactSnapshot]:
     """Copy current ready artifacts so shell damage has a restore reference."""
 
@@ -171,12 +172,9 @@ def snapshot_ready_artifacts(
     snapshots: list[ShellArtifactSnapshot] = []
     try:
         for record in ready:
-            try:
-                opened = _open_regular_source(record.path, trusted_roots)
-            except FileNotFoundError as exc:
-                raise OSError(
-                    "registered ready artifact disappeared before shell backup"
-                ) from exc
+            opened = _open_snapshot_candidate(record.path, trusted_roots, selection_counts)
+            if opened is None:
+                continue
             try:
                 backup, digest, size_bytes = _write_atomic_backup(
                     opened,
@@ -200,6 +198,8 @@ def snapshot_ready_artifacts(
                     operation_key=operation_key,
                 )
             )
+        if not snapshots:
+            return []
         _write_shell_operation_state(
             store_root,
             operation_key,
@@ -222,6 +222,26 @@ def snapshot_ready_artifacts(
         _prune_empty_backup_dirs(operation_dir, store_root / _BACKUP_SCHEMA)
         raise
     return snapshots
+
+
+# LLM: 范围判断发生在任何文件解析/打开之前；只吞掉明确的旧引用缺失/越界，权限、符号链接、设备和损坏错误继续失败关闭。
+# 函数用途: 选择当前存在且允许读取的产物；过期临时文件不能让用户以后的所有普通命令失效。
+def _open_snapshot_candidate(
+    raw_path: str,
+    trusted_roots: tuple[Path, ...] | None,
+    selection_counts: dict[str, int] | None,
+) -> OpenedArtifactSource | None:
+    try:
+        return _open_regular_source(raw_path, trusted_roots)
+    except FileNotFoundError:
+        reason = "source_missing"
+    except ArtifactSourceBoundaryError as exc:
+        if exc.code != "ARTIFACT_SOURCE_SCOPE_BLOCKED":
+            raise
+        reason = "outside_source_roots"
+    if selection_counts is not None:
+        selection_counts[reason] = selection_counts.get(reason, 0) + 1
+    return None
 
 
 # LLM: Explicit host metadata is authoritative. The reserved tool_output role/kind is a migration

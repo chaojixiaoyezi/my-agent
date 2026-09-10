@@ -6,6 +6,7 @@ import shlex
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,6 +116,97 @@ def test_terminal_session_requires_existing_session(tmp_path: Path) -> None:
 
     assert result.ok is False
     assert result.error_code == "PROCESS_NOT_FOUND"
+
+
+# LLM: 使用真实 ToolExecutor 与耐久操作账本；不能用 handler 的局部结果代替整链错误归类。
+# 函数用途: 将 PTY 控制调用送过授权和副作用核对，验证零写入不会变成 UNKNOWN。
+def _execute_transport(tmp_path, tool, arguments):
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.tooling.executor import ToolExecutor, ToolExecutorRequest
+    from agent_py_agent.tests._tool_runtime_harness import (
+        canonical_test_call,
+        runtime_snapshot_for_tools,
+    )
+
+    snapshot = runtime_snapshot_for_tools({"terminal_session": tool})
+    store = LocalStore(tmp_path / "operations.db", enable_fts=False)
+    execution = ToolExecutor().execute(ToolExecutorRequest(
+        call=canonical_test_call(snapshot, "terminal_session", arguments),
+        runtime_snapshot=snapshot, workspace_root=tmp_path, workspace_roots=(tmp_path,),
+        approval_mode="auto", operation_store=store, operation_store_required=True,
+        operation_owner_id="test-owner",
+    ))
+    rows = store.list_tool_operations(owner_id="test-owner", run_id=snapshot.run_id)
+    return execution.result, rows
+
+
+@pytest.mark.parametrize("action", ["write", "resize", "close"])
+def test_missing_pty_transport_is_not_an_unknown_effect(tmp_path, action):
+    result, operations = _execute_transport(tmp_path, _tool(tmp_path), {
+        "action": action, "session_id": "bg-old-handle",
+        **({"data": "hello"} if action == "write" else {}),
+        **({"columns": 80, "rows": 24} if action == "resize" else {}),
+    })
+
+    assert result.handler_executed
+    assert result.error_code == "PROCESS_NOT_FOUND"
+    assert result.effect_outcome == "not_started"
+    assert len(operations) == 1
+    assert operations[0].status == "failed"
+    assert operations[0].result["effect_outcome"] == "not_started"
+
+
+@pytest.mark.parametrize("written", [0, 2])
+def test_pty_partial_input_retains_unknown_effect(tmp_path, monkeypatch, written):
+    from agent_py_agent.agent.tooling.pty_sessions import PtyWriteError
+
+    def fail_write(*args):
+        raise PtyWriteError("TOOL_TIMEOUT", written)
+
+    monkeypatch.setattr(pty_session_registry, "write", fail_write)
+    result, operations = _execute_transport(tmp_path, _tool(tmp_path), {
+        "action": "write", "session_id": "pty-existing", "data": "hello",
+    })
+    expected = "unknown" if written else "not_started"
+    assert result.effect_outcome == expected
+    assert operations[0].status == ("unknown" if written else "failed")
+    assert (result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN") is bool(written)
+
+
+def test_pty_exited_before_write_reports_zero_bytes(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(pty_session_registry, "get", lambda *args: SimpleNamespace(
+        closed=True, process=SimpleNamespace(poll=lambda: 0), write_lock=threading.Lock(),
+    ))
+    result = _tool(tmp_path).execute({"action": "write", "session_id": "exited", "data": "x"})
+    assert not result.ok
+    assert result.effect_outcome == "not_started"
+    assert result.result_envelope["bytes_written"] == 0
+
+
+def test_pty_exit_after_completed_write_does_not_erase_delivery(tmp_path, monkeypatch):
+    # 成功返回代表字节已交给内核；进程随即退出不能反向变成未执行或 UNKNOWN。
+    monkeypatch.setattr(pty_session_registry, "write", lambda *args: SimpleNamespace(
+        closed=True, process=SimpleNamespace(poll=lambda: 0),
+    ))
+    result = _tool(tmp_path).execute({"action": "write", "session_id": "finished", "data": "x"})
+    assert _payload(result)["bytes"] == 1
+
+
+def test_other_conversation_cannot_write_pty_and_does_not_halt_turn(tmp_path):
+    tool = _tool(tmp_path)
+    started = _payload(tool.execute({
+        "action": "start", "command": f"{shlex.quote(sys.executable)} -q",
+        "__run_scope": {"owner_id": "owner-a", "session_id": "thread-a"},
+    }))
+    result = tool.execute({
+        "action": "write", "session_id": started["session_id"], "data": "print(42)",
+        "__run_scope": {"owner_id": "owner-a", "session_id": "thread-b"},
+    })
+    assert result.error_code == "PROCESS_NOT_FOUND"
+    assert result.effect_outcome == "not_started"
+    assert pty_session_registry.get(started["session_id"]).process.poll() is None
 
 
 def test_terminal_session_carries_structured_write_roots_to_sandbox(

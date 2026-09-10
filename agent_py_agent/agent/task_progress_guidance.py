@@ -24,11 +24,13 @@ def task_progress_closeout_guidance_enabled(agent: object) -> bool:
     return bool(getattr(config, "task_progress_closeout_guidance_enabled", True))
 
 
-# LLM: This always-visible sentence mirrors 会话运行时/终端交互 plan discipline but remains
-# advisory. It must never inspect prose, mutate a ledger, schedule a continuation, or gate final.
-# 函数用途: 给每轮模型上下文加入 Todo 实时更新与最终回复前核对纪律，避免长任务后清单停在旧状态。
+# LLM: 本段只说明 exact-id 计划投影；显式 covers 的 DONE 事件可更新计划，其余仍由模型维护，不能据此机器判定交付。
+# 函数用途: 提醒模型更新 Todo，区分结构化子代理绑定打勾与宿主猜测完成，不调度续跑。
 def task_progress_model_discipline() -> str:
-    return "task_progress 是软清单；完成即按 exact id 更新，回复前核对；未完/阻塞如实保留，宿主不自动打勾或续跑。"
+    return (
+        "task_progress 是软清单；回复前核对 exact id。显式 covers 绑定的子代理 DONE 会按 id 更新，"
+        "未绑定项由你据实更新；宿主不猜测完成，也不因清单未完自动续跑。"
+    )
 
 
 # LLM: The returned contract is advisory and exact-id-only. A model may close an

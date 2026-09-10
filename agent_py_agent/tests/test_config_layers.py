@@ -30,6 +30,8 @@ def test_shipped_system_prompt_matches_schema_default() -> None:
     assert "清单只是模型自查，不是宿主机器验收" in shipped
     assert "不能把 `|| true`、`|| echo` 等忽略失败包装后的外层成功当成内部成功" in shipped
     assert "有效测试不得仅为变绿而删除、跳过、放宽断言或改成只测存在" in shipped
+    assert "不重复索要已有授权" in shipped
+    assert "先读取与当前目标直接相关的现有代码" in shipped
     assert "go.mod" not in shipped
     assert "Rust" not in shipped
 

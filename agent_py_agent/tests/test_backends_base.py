@@ -875,13 +875,16 @@ def test_deepseek_request_local_thinking_disable(api_base, expected, stream):
         assert ordinary["tool_choice"] == "auto"
 
 
-def test_deepseek_cold_probe_honors_disabled_thinking_and_caches_success():
-    """覆盖真实失败链：运行前原生探针经 OpenAI 组包，不能把忘传参数误报成 key 错误。"""
-    backend = OpenAICompatibleBackend(_options(api_base="https://api.deepseek.com"))
+@pytest.mark.parametrize("api_base", [
+    "https://api.deepseek.com", "https://opencode.ai/zen/go/v1", "https://other.example/v1",
+])
+def test_cold_probe_uses_normal_auto_surface_and_caches_success(api_base):
+    """支持 auto 的思考模型无需支持强制工具参数；仍以真实 nonce 工具块证明原生能力。"""
+    backend = OpenAICompatibleBackend(_options(api_base=api_base))
 
     def provider(payload, *_args, **_kwargs):
-        assert payload["thinking"] == {"type": "disabled"}
-        assert payload["tool_choice"]["function"]["name"] == "my_agent_capability_probe"
+        assert "thinking" not in payload
+        assert payload["tool_choice"] == "auto"
         return _echoing_probe_generate(payload["messages"][-1]["content"])
 
     with patch.object(backend, "_generate_stream", side_effect=provider) as send:

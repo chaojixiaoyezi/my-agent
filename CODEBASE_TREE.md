@@ -151,6 +151,8 @@ agent_py_agent/
 |   |   |-- closeout.py                # 收口状态机 decide_closeout(四改之 2): 终态 done/cancelled/wait_human/wait_handoff/resume_round
 |   |   |-- compact.py                  # 唯一 thread compact：候选验证、一次 CAS 提交与近期 raw tail
 |   |   |-- compact_provider_surface.py # transcript Compact 复用普通轮 stable prompt/system/tools/messages 的缓存面
+|   |   |-- compact_request_budget.py   # 按当前模型窗口顺序分段摘要，完整覆盖历史且失败不推进游标
+|   |   |-- compact_tool_refs.py        # 从匹配原生工具往返保留原样路径线索，不靠模型摘要记忆目录
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
 |   |   |-- compact_checkpoint.py       # owner-scoped 完整 compact 恢复点与代际引用
 |   |   |-- active_turn_compact.py      # 跨工作片工具 archive 到同一 checkpoint/CAS 的恢复压缩与模型投影
@@ -298,6 +300,7 @@ docs/
 |-- audits/R222_MODEL_PROVIDER_REPORT.md # 通用模型管理、35模型短测结果、具体修复与剩余问题
 |-- audits/R223_87_ITEM_REMEDIATION.md # 87 项外部审计逐项复核、修复证据和未验边界
 |-- audits/R226_PERMISSIONS_MODEL_REPORT.md # 当前模型身份与主/子自主权限修复、真实 TUI 证据和部署边界
+|-- audits/R227_MODEL_COMPACT_TUI_REPORT.md # 模型切换、压缩续接、子终端、正文与 Shell 故障的真实验收台账
 |-- audits/r223-report/                 # R223 中文只读 HTML 报告的独立公开目录，不放配置或任务产物
 |   `-- index.html                     # 87 项大白话、技术说明、剩余问题与验证证据快照，无外部依赖
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
@@ -322,8 +325,11 @@ docs/
 
 ### 关键文件说明
 
+- `agent/conversation/compact_tool_refs.py`：checkpoint 的历史路径投影；仅认结构化原生调用和成功回执，不解析命令/摘要或赋予权限。
+- `agent/conversation/compact_request_budget.py`：当前模型窗口内的摘要请求预算和连续分段；不持有历史游标或另建状态源。
 - `docs/audits/r223-report/index.html`：R223 台账的人工阅读快照；只开放此目录提供 HTTP，不能把仓库或 owner home 当静态根目录。
 - `docs/audits/R226_PERMISSIONS_MODEL_REPORT.md`：权限菜单、当前模型与并行上下文修复的验收台账；区分 TUI 实测、定向回归和本机待切换版本。
+- `docs/audits/R227_MODEL_COMPACT_TUI_REPORT.md`：区分大窗口压缩成功与后续业务续接失败，记录原样工具路径恢复与部署复验。
 - `agent/common/text_file_window.py`：64 KiB 流式索引、有限检查点与页面 cookie；编码和字符坐标只保留一个实现。
 - `agent/common/file_version.py`：read_file 返回观察版本，write/edit/patch 明确携带前置条件；外部写入者不被强制纳管。
 - `agent/tooling/process_output_capture.py`：前台进程每流最多保留 4 MiB，仍持续排空并公开不完整事实，不假装完整大输出归档。

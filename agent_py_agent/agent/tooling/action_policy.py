@@ -217,6 +217,8 @@ def _runtime_for_call(
     return runtime, None
 
 
+# LLM: 用冻结 schema 校验原生调用，只归一化无歧义类型；拒绝时返回公开参数名而不泄露参数值或宿主字段。
+# 函数用途: 执行前检查参数并给出修正线索，不静默丢弃模型填错的字段，也不把错误参数送进 handler。
 def _schema_decision(call: ToolCall, runtime: ToolRuntime) -> ActionDecision | None:
     # Host-only values are injected after the provider call and are deliberately
     # absent from the model-visible schema.  Validate the exact provider-owned
@@ -248,6 +250,7 @@ def _schema_decision(call: ToolCall, runtime: ToolRuntime) -> ActionDecision | N
         evidence={
             "tool_name": call.tool_name,
             "issues": [item.to_dict() for item in validation.issues],
+            "allowed_parameters": sorted(runtime.model_spec.input_schema.get("properties", {})),
         },
     )
 

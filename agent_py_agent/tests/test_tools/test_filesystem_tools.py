@@ -19,7 +19,7 @@ from agent_py_agent.agent.tooling import filesystem_path_recovery as path_recove
 from agent_py_agent.agent.tooling._filesystem_find import FindFilesTool
 from agent_py_agent.agent.tooling._filesystem_list import ListFilesTool
 from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
-from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
+from agent_py_agent.agent.tooling._filesystem_read import FileSystemAccessOptions, ReadFileTool
 from agent_py_agent.agent.tooling._filesystem_search import SearchTextTool
 from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
 from agent_py_agent.agent.tooling.cancellation import (
@@ -368,6 +368,37 @@ def test_read_file_allows_exact_final_report_but_routes_other_agent_status_refs(
     assert payload["child_result_index_row"]["artifact_registry_refs"][0]["artifact_id"] == "result-1"
     assert output_result.ok is True
     assert "declared child result" in output_result.output
+
+
+def test_read_file_reads_runner_context_material_but_not_control_state(tmp_path: Path):
+    workspace = tmp_path / "owner"
+    agent_dir = workspace / "runs" / "2026-09-10" / "run-test" / "work" / "agents" / "subagent-123"
+    agent_dir.mkdir(parents=True)
+    tool = ReadFileTool(workspace, max_chars=2000)
+    for name in ("CONTEXT_BUNDLE.md", "context_bundle.json"):
+        target = agent_dir / name
+        target.write_text('{"goal":"existing project","task_path":"tasks/project"}', encoding="utf-8")
+        result = tool.execute({"path": str(target)})
+        assert result.ok, result.output
+        assert "existing project" in result.output
+        assert "file_version=" in result.output
+    state = agent_dir / "canonical_state.json"
+    state.write_text('{"status":"RUNNING"}', encoding="utf-8")
+    assert tool.execute({"path": str(state)}).error_code == "WRONG_STATUS_SURFACE"
+
+
+def test_read_file_context_material_does_not_bypass_owner_boundary(tmp_path: Path):
+    workspace = tmp_path / "owner-one"
+    workspace.mkdir()
+    other = tmp_path / "owner-two" / "work" / "agents" / "subagent-123" / "CONTEXT_BUNDLE.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("another owner private task", encoding="utf-8")
+    tool = ReadFileTool(workspace, max_chars=2000, access_options=FileSystemAccessOptions(
+        owner_scope_root=str(workspace),
+    ))
+    result = tool.execute({"path": str(other)})
+    assert not result.ok
+    assert "another owner private task" not in result.output
 
 
 def test_read_file_resolves_stale_task_dir_to_canonical_agent_final_report(

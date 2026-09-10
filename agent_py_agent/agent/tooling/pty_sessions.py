@@ -270,8 +270,8 @@ class PtySessionRegistry:
             return None
         return session
 
-    # LLM: PTY 输入不能静默部分写入；锁与内核背压共用期限，取消明确报告已写字节以防盲重放。
-    # 函数用途: 分段写完一份输入，五秒内无法排空则返回带部分写入事实的错误。
+    # LLM: 写入前的退出和部分写入分开报告；成功返回证明全部字节已提交，不能再用事后 poll 抹掉此事实。
+    # 函数用途: 分段写完一份输入，锁等待/背压共用五秒期限；未写或部分写入均带明确字节数。
     def write(
         self,
         session_id: str,
@@ -279,12 +279,14 @@ class PtySessionRegistry:
         access_scope: PtyAccessScope | None = None,
     ) -> PtySession | None:
         session = self.get(session_id, access_scope)
-        if session is None or session.closed or session.process.poll() is not None:
-            return session
+        if session is None:
+            return None
         deadline, written = time.monotonic() + _WRITE_TIMEOUT_SECONDS, 0
         while not session.write_lock.acquire(timeout=0.02):
             _check_write_deadline(deadline, written)
         try:
+            if session.closed or session.process.poll() is not None:
+                raise PtyWriteError("COMMAND_FAILED", 0)
             while written < len(data):
                 _check_write_deadline(deadline, written)
                 try:
@@ -411,6 +413,8 @@ class TerminalSessionTool(BaseTool):
         name="terminal_session",
         description=(
             "启动并操作真实 PTY 交互终端会话，支持 list/start/write/read/resize/close。"
+            "start 立即返回 session_id，进程可继续运行；用 read 读取后续输出，用 write 输入。"
+            "不接受 run_in_background；非交互后台命令使用 run_command 的该参数。"
             "resize 必须使用结构化 columns/rows；发送终端 ESC 文本不能代替真实尺寸调整。"
         ),
         input_schema={
@@ -423,7 +427,7 @@ class TerminalSessionTool(BaseTool):
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "write/read/resize/close 所需 PTY session id。",
+                    "description": "本工具 start/list 返回的 PTY 句柄；不能填 run_command 的后台进程编号。",
                 },
                 "command": {"type": "string", "description": "start 所需命令。"},
                 "working_dir": {
@@ -627,8 +631,8 @@ class TerminalSessionTool(BaseTool):
             }
         )
 
-    # LLM: 向模型暴露真实写入字节和未知剩余效果；不能只返回普通 COMMAND_FAILED 诱导整段重发。
-    # 函数用途: 校验输入后写入终端，清楚报告取消、背压和部分提交。
+    # LLM: 不存在的精确权限句柄为 not_started；写入成功仅证明字节提交，不宣称终端中的业务已完成。
+    # 函数用途: 校验输入后写入终端，区分零写入、取消和部分提交，让模型纠正工具而非误停整轮。
     def _write(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
         data = str(params.get("data") or "")
@@ -636,9 +640,11 @@ class TerminalSessionTool(BaseTool):
             data += "\n"
         encoded = data.encode("utf-8")
         if not session_id or not encoded:
-            return self._error("TOOL_INVALID_ARGUMENTS", "write 需要 session_id 和非空 data")
+            return self._error("TOOL_INVALID_ARGUMENTS", "write 需要 session_id 和非空 data",
+                               effect_outcome="not_started")
         if len(encoded) > _MAX_WRITE_BYTES:
-            return self._error("TOOL_INVALID_ARGUMENTS", f"PTY write 超过 {_MAX_WRITE_BYTES} 字节")
+            return self._error("TOOL_INVALID_ARGUMENTS", f"PTY write 超过 {_MAX_WRITE_BYTES} 字节",
+                               effect_outcome="not_started")
         try:
             session = pty_session_registry.write(session_id, encoded, self._access_scope(params))
         except PtyWriteError as exc:
@@ -648,9 +654,8 @@ class TerminalSessionTool(BaseTool):
         except OSError as exc:
             return self._error("COMMAND_FAILED", str(exc))
         if session is None:
-            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
-        if session.process.poll() is not None or session.closed:
-            return self._error("COMMAND_FAILED", f"PTY session 已结束: {session_id}")
+            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}；请用本工具 list 核对句柄",
+                               effect_outcome="not_started")
         return self._ok({"status": "written", "session_id": session_id, "bytes": len(encoded)})
 
     def _read(self, params: dict[str, Any]) -> ToolHandlerOutcome:
@@ -677,9 +682,8 @@ class TerminalSessionTool(BaseTool):
             }
         )
 
-    # LLM: Resize validates dimensions before the registry touches the fd and reports the kernel
-    # geometry read back from the PTY. A write acknowledgement is not evidence of a resize.
-    # 函数用途: 用结构化行列数调整一个运行中的交互终端，并回报内核实际采用的尺寸。
+    # LLM: 参数和句柄拒绝发生在 ioctl 前，明确未执行；真实 ioctl 异常仍不猜测最终效果。
+    # 函数用途: 按结构化行列数调整终端并回报内核尺寸，避免无效句柄误触发未知副作用停机。
     def _resize(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
         try:
@@ -689,6 +693,7 @@ class TerminalSessionTool(BaseTool):
             return self._error(
                 "TOOL_INVALID_ARGUMENTS",
                 "resize 需要 session_id、columns 和 rows",
+                effect_outcome="not_started",
             )
         if (
             not session_id
@@ -698,6 +703,7 @@ class TerminalSessionTool(BaseTool):
             return self._error(
                 "TOOL_INVALID_ARGUMENTS",
                 "resize 的 columns/rows 必须在 1-1000 之间",
+                effect_outcome="not_started",
             )
         try:
             session = pty_session_registry.resize(
@@ -709,7 +715,8 @@ class TerminalSessionTool(BaseTool):
         except OSError as exc:
             return self._error("COMMAND_FAILED", str(exc))
         if session is None:
-            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
+            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}",
+                               effect_outcome="not_started")
         if session.process.poll() is not None or session.closed:
             return self._error("COMMAND_FAILED", f"PTY session 已结束: {session_id}")
         actual = os.get_terminal_size(session.master_fd)
@@ -722,11 +729,14 @@ class TerminalSessionTool(BaseTool):
             }
         )
 
+    # LLM: close 仅访问当前权限内的句柄；查无句柄时没有发送信号，不得记为未知副作用。
+    # 函数用途: 关闭当前会话拥有的交互终端，缺失或过期句柄交还模型纠正。
     def _close(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
         session = pty_session_registry.close(session_id, self._access_scope(params))
         if session is None:
-            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
+            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}",
+                               effect_outcome="not_started")
         return self._ok(
             {
                 "status": "closed",
@@ -740,8 +750,11 @@ class TerminalSessionTool(BaseTool):
             self.model_spec.name, True, json.dumps(payload, ensure_ascii=False)
         )
 
-    def _error(self, code: str, message: str) -> ToolHandlerOutcome:
-        return ToolHandlerOutcome(self.model_spec.name, False, message, error_code=code)
+    # LLM: effect_outcome 只接受调用点掌握的执行事实，不能按错误文案猜测或统一放宽所有失败。
+    # 函数用途: 构造工具失败结果，让执行器正确区分未执行与可能已发生的副作用。
+    def _error(self, code: str, message: str, *, effect_outcome: str = "") -> ToolHandlerOutcome:
+        return ToolHandlerOutcome(self.model_spec.name, False, message, error_code=code,
+                                  effect_outcome=effect_outcome)
 
 
 # LLM: This projection is the only model-visible PTY listing shape. Keep OS process identifiers

@@ -1,3 +1,5 @@
+# LLM: 工具只通过本执行状态机进入 handler；错误展示读取结构化裁决，不扩大权限或自动修写参数。
+# 模块用途: 统一工具校验、授权、执行和结果记录；拒绝时给出可定位原因，保证未执行与已执行明确区分。
 from __future__ import annotations
 
 """The only state machine allowed to enter a registered tool handler."""
@@ -970,6 +972,8 @@ def _result_refs(outcome: ToolHandlerOutcome) -> tuple[ToolResultRef, ...]:
     return tuple(refs)
 
 
+# LLM: 只渲染 ActionPolicy 的结构化裁决；公开 schema 和命令门位置可展示，原始参数值/密钥不可回显。
+# 函数用途: 让模型和用户知道具体哪里被拦，减少盲猜参数；此处不改变授权结果、不自动重试。
 def _decision_message(decision: ActionDecision) -> str:
     if decision.status == "ask":
         return "Approval or explicit user confirmation is required before this tool can run."
@@ -982,9 +986,34 @@ def _decision_message(decision: ActionDecision) -> str:
     rendered_issues = _render_validation_issues(decision.evidence.get("issues"))
     if rendered_issues:
         message += " 参数问题: " + rendered_issues
+        allowed = decision.evidence.get("allowed_parameters")
+        if isinstance(allowed, list) and all(isinstance(name, str) for name in allowed):
+            message += "。该工具接受的参数: " + ", ".join(allowed)
+    gate = decision.evidence.get("gate")
+    if isinstance(gate, dict):
+        message += _render_gate_findings(gate.get("findings"))
     return message
 
 
+# LLM: 只输出已判定 finding 中的字段名/命令名/规则名，不重新解析 shell、不输出 argv 或用户数据。
+# 函数用途: 给拒绝提示补上具体命中的命令或规则，例如命令链中的 rm；安全门仍维持原判定。
+def _render_gate_findings(raw: object) -> str:
+    if not isinstance(raw, list):
+        return ""
+    details: list[str] = []
+    for finding in raw[:4]:
+        evidence = finding.get("evidence") if isinstance(finding, dict) else None
+        if not isinstance(evidence, dict):
+            continue
+        for key, label in (("field", "参数"), ("executable", "命令"), ("pattern", "规则")):
+            value = evidence.get(key)
+            if isinstance(value, str) and value:
+                details.append(f"{label}={json.dumps(value[:128], ensure_ascii=False)}")
+    return "。拦截位置: " + "; ".join(details) if details else ""
+
+
+# LLM: schema issue 是唯一诊断来源，不能靠模型错误文字识别参数；保留有界输出及不打印参数值的约束。
+# 函数用途: 把参数缺失、额外字段或类型错误解释成可操作说明，供模型在下一次调用自行修正。
 def _render_validation_issues(raw: object) -> str:
     """把 schema 校验的字段级诊断渲染成模型可读文本(recovery_hint 承诺的 名:期望类型)。
 

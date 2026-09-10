@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-"""Stable host guidance shared by provider system channels and native tools."""
+"""Stable host guidance carried once by the provider system channel."""
 
 # LLM: 这里是验证表述与动作授权软提示的唯一正文；它们不能参与宿主状态、权限或完成判断。
-# 模块用途: 让完整 Prompt 和可能改状态的原生工具共用同一套用户授权边界，避免两处文案逐渐打架。
+# 模块用途: 在系统通道集中说明验证和授权边界；工具定义不再逐项复制，减少重复与语义冲突。
 
 VERIFICATION_EVIDENCE_GUIDANCE = (
     "每次行动和最终回复前重新核对验证与授权边界。只把目标观察点真实执行到的结果写成已验证："
@@ -14,10 +14,10 @@ VERIFICATION_EVIDENCE_GUIDANCE = (
 )
 
 ACTION_AUTHORIZATION_GUIDANCE = (
-    "只有用户明确要求相应的修改、创建、启动、停止、安装、部署、派工或其他状态变更时，"
-    "才可以采取对应的有副作用动作。若用户只要求查看、核对、确认、检查、诊断、解释、比较、"
-    "对比或汇报，必须保持只读；任何工具若无法只读使用就不要调用。不得写文件、改配置、"
-    "启动或停止服务、安装或部署、创建后台进程、任务或派发子代理，也不要在发现问题后自行修复。"
+    "行动必须落在用户已授权的目标和当前权限内。仅要求查看、解释或诊断时，做必要的只读检查，"
+    "不要自行修改、安装、部署或对外发送；明确要求修复或构建时，可执行范围内正常实现与验证步骤，"
+    "无需为每个步骤重复询问。可按任务需要使用已授权工具或只读分工，但不能借子代理扩大目标或权限。"
+    "新增的高风险、不可逆或对外动作不在原请求范围内时先取得授权；宿主审批、owner 隔离及专用确认规则始终有效。"
 )
 
 VERIFICATION_EVIDENCE_BOUNDARY = (

@@ -36,9 +36,14 @@ class SystemCommandRoutingError(RuntimeError):
 
 # LLM: Client-visible failure prose is selected only from structured error_code; provider and
 # client-workspace and active-turn recovery failures never expose raw exception text or suggest unsafe replay.
-# 函数用途: 用明确中文区分请求失败原因；结果未确认时说明为何停止恢复，不笼统建议重新执行。
+# 函数用途: 区分压缩、持久化和执行结果未确认；压缩失败保留历史，不暗示文件损坏或需要重做任务。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
+    if code.startswith("COMPACT_"):
+        return (
+            "上下文压缩未完成，原始历史和任务文件仍保留，本轮没有继续执行。"
+            "请查看压缩诊断；切换更大上下文的模型后可继续原会话。"
+        )
     messages = {
         "PROVIDER_REQUEST_REJECTED": (
             "模型服务拒绝了当前配置。请检查接口地址、模型名称和密钥是否属于同一服务后重试。"

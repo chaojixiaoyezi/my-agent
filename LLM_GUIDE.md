@@ -21,10 +21,19 @@
 
 ## 2026-08-23 当前运行基线
 
+- R227 统一授权指导只由 provider system 承载，原生工具严格投影冻结 Schema；不要恢复逐工具复制长规则。
+  普通阶段报告/清单不触发无条件续跑。Compact 新增的路径索引只作查找提示，不是权限、状态或文件存在证据。
+  无效 PTY 句柄是零副作用失败；部分输入未知仍受保护，不能以“模型能自纠”为由统一放宽 UNKNOWN。
+
+- 常规真实模型验收默认走 MiniMax 官方接口的 MiniMax-M2.7，禁用 工具运行时 转接作为默认测试源。
+  端点核对与专项模型验证边界见 [TESTS.md](TESTS.md)；不要因此静默改用户日常会话的模型选择。
+
 - `/permissions` / F4 是显式用户权限控制，保存到 owner 既有 tool_policy.json；ask、auto 与 full-access 分明。
   Full Access 只给可信 local/main，子代理仍有 owner 墙；auto 不豁免 SOUL 本人确认、禁用工具与灾难保护。
   审批在工具边界读取，路径权限新工作片冻结；模型与工具线程必须继承同一执行 Context，不热改共享 Agent。
   gateway_status 的 caller_model 才是本次配置模型；deployment_defaults 不代表当前会话模型。
+  R226 本机已获用户授权切换全局入口并重启唯一 Gateway，真 TUI 的 F4 与 DeepSeek 短问答通过。
+  服务重启会恢复耐久请求，不等于用户停止；结束旧等待必须走精确会话控制，不能删除/手改请求文件。
 
 - 所有产品名称与说明统一为 my-agent；品牌清理不迁移实际检出或 owner home，不改变协议、权限或模型配置。
   历史说明以中性占位展示旧路径／会话，原始定位按提交和运行编号追溯；第三方工具命令保留真实拼写。

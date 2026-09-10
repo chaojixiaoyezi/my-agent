@@ -907,10 +907,45 @@ def test_shell_ready_artifact_without_canonical_backup_root_fails_closed(
     assert not (workspace.parent / ".my-agent-artifact-backups").exists()
 
 
-def test_shell_rejects_forged_ready_artifact_outside_owner_scope(
+def test_full_access_artifact_roots_allow_empty_supplemental_reads(tmp_path: Path) -> None:
+    """管理员 full + 无写根限制时，registry 注入的空读根不能被误解为全盘禁读。"""
+    from agent_py_agent.agent.tooling.shell import _artifact_source_roots
+
+    tool = ShellTool(tmp_path, options=ShellToolOptions(access_mode="full-access"))
+    assert _artifact_source_roots(tool, None, (), effective_access_mode="full-access") is None
+    assert _artifact_source_roots(tool, (), (), effective_access_mode="full-access") == ()
+    scoped = ShellTool(tmp_path, options=ShellToolOptions(owner_scope_root=str(tmp_path)))
+    assert _artifact_source_roots(scoped, (), (), effective_access_mode="full-access") == ()
+
+
+def test_full_access_shell_runs_with_registered_artifact_and_empty_read_roots(tmp_path: Path) -> None:
+    """复现真实 registry 参数：管理员无写根限制时，已有产物不能让普通命令启动前失败。"""
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "report.md"
+    artifact.write_text("ready", encoding="utf-8")
+    register_artifact(ArtifactRegistration(workspace_root=workspace, path=artifact, status="ready"))
+    backup_root = tmp_path / "owner" / "artifact_backups"
+    tool = ShellTool(workspace, options=ShellToolOptions(artifact_backup_root=backup_root))
+
+    result = tool.execute({
+        "command": "pwd",
+        "__access_mode": "full-access",
+        "__sandbox_read_roots": [],
+    })
+
+    assert result.ok is True
+    assert str(workspace) in result.output
+    assert artifact.read_text(encoding="utf-8") == "ready"
+    assert not list(backup_root.rglob("*.blob"))
+
+
+def test_shell_ignores_outside_artifact_without_reading_or_changing_it(
     tmp_path: Path,
 ) -> None:
-    """Writable registry data cannot make the host pre-backup read outside the owner wall."""
+    """越界旧引用不授权宿主读取外部文件，也不应阻断范围内普通命令。"""
     from agent_py_agent.agent.artifacts.registry import (
         ArtifactRegistration,
         register_observed_artifact,
@@ -942,12 +977,46 @@ def test_shell_rejects_forged_ready_artifact_outside_owner_scope(
 
     result = tool.execute({"command": "printf started > command-started.txt"})
 
-    assert result.ok is False
-    assert result.error_code == "ARTIFACT_BACKUP_FAILED"
-    assert result.effect_outcome == "not_started"
+    assert result.ok is True
     assert "outside-secret" not in result.output
-    assert not (owner / "command-started.txt").exists()
+    assert (owner / "command-started.txt").read_text() == "started"
+    assert outside.read_text() == "secret"
     assert not list(backup_root.rglob("*.blob"))
+    assert result.result_envelope["artifact_protection"]["skipped_sources"] == {
+        "outside_source_roots": 1,
+    }
+
+
+def test_shell_skips_missing_old_source_but_still_protects_current_artifact(tmp_path):
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        register_observed_artifact,
+    )
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    current = owner / "current.txt"
+    current.write_text("keep", encoding="utf-8")
+    for name in ("missing.txt", "current.txt"):
+        register_observed_artifact(
+            ArtifactRegistration(
+                workspace_root=owner, path=owner / name,
+                artifact_id=name, kind="file", mime_type="text/plain", status="ready",
+                source="historical-test",
+            ),
+            observed_sha256="before", observed_size_bytes=4,
+        )
+    tool = ShellTool(owner, options=ShellToolOptions(artifact_backup_root=owner / "private"))
+
+    result = tool.execute({"command": "printf ready"})
+
+    assert result.ok is True
+    assert current.read_text() == "keep"
+    assert not (owner / "missing.txt").exists()
+    summary = result.result_envelope["artifact_protection"]
+    assert summary["snapshots"] == 1
+    assert summary["skipped_sources"] == {"source_missing": 1}
+    assert len(summary["unchanged"]) == 1
 
 
 def test_shell_rejects_symlink_ready_artifact_before_backup(tmp_path: Path) -> None:
@@ -1332,11 +1401,14 @@ def test_shell_full_access_handler_honors_per_call_workspace_downgrade(
         }
     )
 
-    assert result.ok is False
-    assert result.error_code == "ARTIFACT_BACKUP_FAILED"
-    assert result.effect_outcome == "not_started"
-    assert not (workspace / "command-started.txt").exists()
+    assert result.ok is True
+    assert (workspace / "command-started.txt").read_text() == "started"
+    assert outside.read_text() == "secret"
     assert not list(backup_root.rglob("*.blob"))
+    # 收窄必须影响真实备份范围；若错误沿用 Full Access，这里不会出现越界跳过计数。
+    assert result.result_envelope["artifact_protection"]["skipped_sources"] == {
+        "outside_source_roots": 1,
+    }
 
 
 @pytest.mark.parametrize("symlink_component", ["data", "artifacts"])

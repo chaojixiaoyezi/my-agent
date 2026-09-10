@@ -1489,9 +1489,8 @@ def _execute_with_artifact_protection(
     return _commit_protected_shell_outcome(request, prepared, outcome)
 
 
-# LLM: Every preimage and its durable prepared phase must exist before the process starts. Failure
-# returns not_started and exposes only the opaque operation ref, never the owner-store path.
-# 函数用途: 为一次前台 shell 准备已登记产物前像并推进私有恢复清单。
+# LLM: 当前可保护产物的前像和 prepared 必须先落盘；历史缺失/越界引用只带计数，不能扩大读取权限或阻断无关命令。
+# 函数用途: 为一次前台 shell 准备安全范围内的产物前像，保留备份失败关闭和私有恢复清单。
 def _prepare_shell_artifact_execution(
     request: _ShellArtifactExecutionRequest,
 ) -> _ShellArtifactExecutionState | ToolHandlerOutcome:
@@ -1503,6 +1502,7 @@ def _prepare_shell_artifact_execution(
         read_roots,
         effective_access_mode=request.effective_access_mode,
     )
+    selection_counts: dict[str, int] = {}
     try:
         artifact_snapshots = snapshot_ready_artifacts(
             tool.workspace_root,
@@ -1511,6 +1511,7 @@ def _prepare_shell_artifact_execution(
             run_scope=request.run_scope,
             tool_call_id=request.tool_call_id,
             operation_id=request.operation_id,
+            selection_counts=selection_counts,
         )
     except (OSError, ValueError):
         logger.exception("artifact pre-backup failed before shell start")
@@ -1526,6 +1527,7 @@ def _prepare_shell_artifact_execution(
         "changed": [],
         "invalid": [],
         "cleanup_deferred": [],
+        "skipped_sources": selection_counts,
     }
     if not artifact_snapshots:
         return _ShellArtifactExecutionState([], source_roots, summary, "", "")
@@ -1557,9 +1559,8 @@ def _prepare_shell_artifact_execution(
     )
 
 
-# LLM: Postcheck is the sole bridge from process completion to artifact registry projection. Any
-# structural read/write failure keeps the command effect unknown and retains all recovery bytes.
-# 函数用途: 命令退出后复核所有受保护产物，并生成不泄露宿主路径的简短结果。
+# LLM: 退出后只复核本次实际快照；保留选择计数，不能把跳过的历史引用算为已保护或当前命令破坏。
+# 函数用途: 复核命令涉及的受保护产物并保留过时引用诊断；真正复核失败仍报告效果未知。
 def _postcheck_shell_artifacts(
     request: _ShellArtifactExecutionRequest,
     prepared: _ShellArtifactExecutionState,
@@ -1576,6 +1577,7 @@ def _postcheck_shell_artifacts(
                 backup_store_root=request.tool.artifact_backup_root,
                 source_roots=prepared.source_roots,
             )
+            summary["skipped_sources"] = prepared.summary.get("skipped_sources", {})
         except (OSError, ValueError):
             logger.exception("artifact postcheck failed after shell exit")
             output = (
@@ -1586,6 +1588,11 @@ def _postcheck_shell_artifacts(
     protection_note = shell_artifact_protection_note(summary)
     if protection_note:
         output = f"{output}\n{protection_note}"
+    if skipped := summary.get("skipped_sources"):
+        output += (
+            f"\n[artifact_protection] skipped_sources={json.dumps(skipped, sort_keys=True)}; "
+            "旧引用缺失或不在本次读取范围，未读取或修改这些路径；仅保护当前范围内实际存在的产物。"
+        )
     return output, summary, False
 
 
@@ -1693,8 +1700,8 @@ def _commit_protected_shell_outcome(
 
 
 # LLM: Source roots come only from the immutable runtime boundary. Owner-scoped runs use the
-# explicit sandbox read/write view; explicit local-admin Full Access is the sole unrestricted
-# sentinel. A bare workspace-write tool stays bounded to its configured workspace roots.
+# explicit sandbox read/write view; admin Full Access with no write restriction keeps its
+# unrestricted sentinel even when the registry projects an empty supplemental read-root list.
 # 函数用途: 计算 shell 前后允许宿主读取并保护的产物范围，阻止注册表伪造路径越权。
 def _artifact_source_roots(
     tool: ShellTool,
@@ -1705,7 +1712,12 @@ def _artifact_source_roots(
 ) -> tuple[Path, ...] | None:
     owner_root = getattr(tool.path_access_policy, "owner_scope_root", None)
     boundary_supplied = sandbox_write_roots is not None or sandbox_read_roots is not None
-    if not owner_root and effective_access_mode == "full-access" and not boundary_supplied:
+    if (
+        not owner_root
+        and effective_access_mode == "full-access"
+        and sandbox_write_roots is None
+        and not sandbox_read_roots
+    ):
         return None
     roots: list[Path] = []
     for value in (

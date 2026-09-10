@@ -1,5 +1,15 @@
 # Gateway Structure
 
+## R227 跨模型窗口与错误分层
+
+`conversation/compact_guard.py` 用原生请求投影计量近期尾部；`compact_request_budget.py` 负责当前
+窗口的摘要请求预算、连续原文片段和 typed overflow 缩小请求。原 transcript/checkpoint/CAS 仍由
+`compact.py` 单一入口负责，辅助请求继续进入同一本模型账，不新增工具执行权限或记忆存储。
+`request_execution._load_gateway_compact_context` 保留独立压缩异常，`request_errors` 渲染对应安全提示。
+`compact_tool_refs.py` 从原生工具参数与匹配成功回执生成原样路径线索，在同一 checkpoint/CAS 保存；
+`observed_tool_paths` 只是历史定位数据，不替代 cwd、权限或文件是否仍存在。旧 task link 的内部 runs 路径
+不会再成为业务项目候选。开始压缩时先发当前模型用量事件，分段完成时更新真实覆盖进度。
+
 ## R226 审批模式和当前模型事实
 
 `approval_mode_service.handle_client_approval_mode` 复用现有 HTTP 认证及 scope owner 解析，

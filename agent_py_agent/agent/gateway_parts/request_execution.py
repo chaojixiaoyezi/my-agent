@@ -1582,7 +1582,7 @@ def _gateway_compact_overflowing_turn(
             request_id=context.request_id,
             attempt_id=str(request.get("execution_attempt_id") or context.request_id),
             task_prompt=prompt,
-            progress_callback=_gateway_compact_progress_callback(context.on_chunk),
+            progress_callback=_gateway_compact_progress_callback(context.on_chunk, agent=context.agent),
             interrupt_check=is_interrupted,
         ),
     )
@@ -2048,13 +2048,37 @@ def _publish_gateway_compact_boundary(on_chunk: object, generation: int) -> None
         writer(generation)
 
 
-# LLM: Compact 回调只从 Gateway writer 的显式 typed 方法取得，普通 callable 不接收显示事件。
-# 函数用途: 在 rich TUI 支持时返回会话 Compact 进度出口，其他客户端保持静默。
+# LLM: Only typed writers receive progress. At Compact start, publish the frozen current model's
+# window with the preflight estimate, not the previous model's stale usage; no history is mutated.
+# 函数用途: 压缩开始时先刷新当前模型窗口和实际待压缩大小，再展示进度，避免切模型后仍显示旧容量。
 def _gateway_compact_progress_callback(
     on_chunk: object,
+    *,
+    agent: object | None = None,
 ) -> Callable[[dict[str, object]], object] | None:
     writer = getattr(on_chunk, "write_conversation_compact_progress", None)
-    return writer if callable(writer) else None
+    if not callable(writer):
+        return None
+
+    # LLM: The callback only projects structured Compact facts and the same selected-model policy.
+    # 函数用途: 把开始时的新模型用量和后续进度送到原事件流，不额外发模型请求。
+    def publish(payload: dict[str, object]) -> object:
+        usage_writer = getattr(on_chunk, "write_context_usage", None)
+        if agent is not None and payload.get("phase") == "started" and callable(usage_writer):
+            from ..agent_core.runtime.context_compactor import runtime_compact_policy
+
+            policy = runtime_compact_policy(agent)
+            usage_writer({
+                "schema": _CONTEXT_USAGE_SCHEMA,
+                "estimated": True,
+                "protocol": "unknown",
+                "context_window_tokens": policy.context_window_tokens,
+                "compact_trigger_tokens": payload.get("trigger_tokens", 0),
+                "current_tokens": payload.get("before_tokens", 0),
+            })
+        return writer(payload)
+
+    return publish
 
 
 def _require_gateway_conversation_ready(
@@ -2545,6 +2569,7 @@ def _gateway_conversation_context(
         workspace_task,
         load_errors,
         request_id=inputs.request_id,
+        owner_run_root=getattr(getattr(agent, "home_paths", None), "owner_runs_dir", ""),
     )
     subagent_completions = _gateway_subagent_completion_context(
         store,
@@ -2691,8 +2716,8 @@ def _path_is_within(path: Path, root: Path) -> bool:
 
 
 # LLM: Gateway preflight shares the registered request interrupt with Compact. User stop propagates
-# unchanged; only real compact errors become bounded load diagnostics with the original thread.
-# 函数用途: 加载并按需压缩 Gateway 会话；停止立即退出，真实失败才保留旧线程并登记诊断。
+# unchanged; compact failures keep their own typed error code and cannot become transcript corruption.
+# 函数用途: 加载并按需压缩 Gateway 会话；停止立即退出，压缩失败保留原记录并单独报错。
 def _load_gateway_compact_context(
     inputs: _GatewayConversationLoadRequest,
     store: object,
@@ -2711,7 +2736,7 @@ def _load_gateway_compact_context(
                 current_prompt=inputs.prompt,
                 exclude_request_id=inputs.request_id,
                 force=force,
-                progress_callback=_gateway_compact_progress_callback(inputs.on_chunk),
+                progress_callback=_gateway_compact_progress_callback(inputs.on_chunk, agent=inputs.agent),
                 interrupt_check=is_interrupted,
                 model_surface=ConversationCompactModelSurface(
                     prompt_files=tuple(
@@ -2727,8 +2752,12 @@ def _load_gateway_compact_context(
     except InterruptedError:
         raise
     except Exception as exc:
-        load_errors.append(_conversation_error(exc, "gateway.conversation.compact"))
-        return thread, (), 0, {}
+        from ..conversation.compact_guard import ConversationCompactError, compact_exception_code
+
+        # 压缩失败不是 transcript 损坏；保留独立错误码且让原始异常留在诊断链。
+        raise ConversationCompactError(
+            "上下文压缩未完成，原始会话记录保留不变", code=compact_exception_code(exc)
+        ) from exc
     return (
         compact.thread,
         compact.messages,
@@ -3110,8 +3139,8 @@ def _existing_gateway_workspace_path(value: object) -> str:
 
 # LLM: This bounded projection exposes only canonical completed-task directories from the same
 # owner/thread. It is discovery context, never workspace selection or execution authority; exact
-# tool paths still pass the normal owner scope and runtime rebind gates.
-# 函数用途: 列出同一会话最近完成的任务目录候选，供模型理解用户对旧工作的指代并先查原目录。
+# tool paths still pass scope checks. Canonical internal run records are not business directories.
+# 函数用途: 列出同会话真实业务目录候选，排除内部执行记录，避免续作时去 runs 里误找源码。
 def _gateway_recent_task_workspaces(
     store: object,
     thread: object,
@@ -3119,6 +3148,7 @@ def _gateway_recent_task_workspaces(
     load_errors: list[dict],
     *,
     request_id: str,
+    owner_run_root: object = "",
 ) -> tuple[dict[str, str], ...]:
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
     owner_home_text = str(getattr(thread, "owner_home", "") or "").strip()
@@ -3140,6 +3170,7 @@ def _gateway_recent_task_workspaces(
     )
     rows: list[dict[str, str]] = []
     seen_paths: set[str] = set()
+    run_root = _existing_gateway_workspace_path(owner_run_root)
     ordered = sorted(
         links,
         key=lambda link: (
@@ -3159,6 +3190,9 @@ def _gateway_recent_task_workspaces(
         if not task_path or task_path == current_path or task_path in seen_paths:
             continue
         if not _path_is_within(Path(task_path), owner_home):
+            continue
+        # 内部执行记录不是用户业务项目；不要把 runs/<日期>/<hash> 当成旧代码所在地。
+        if run_root and _path_is_within(Path(task_path), Path(run_root)):
             continue
         goal = " ".join(str(getattr(link, "goal", "") or "").split())[:160]
         rows.append(
@@ -3358,6 +3392,7 @@ def _append_conversation_operation_evidence(
                 "## Program-Verified Operations From Compacted History",
                 "- 下面 JSON 是完整程序账本的有界投影，不是模型摘要或聊天自述。",
                 "- 凡涉及是否真正保存、修改、发送、创建或删除，若与上方摘要冲突，必须以此 JSON 为准。",
+                "- observed_tool_paths 保留历史成功工具的原样路径参数，仅供定位；不是当前 cwd、权限或仍存在的保证。续作先核对这些路径，不凭摘要猜新目录或断言源码被清理。",
                 (
                     f"- full_operation_evidence_ref: {conversation.compact_operation_evidence_ref}"
                     if conversation.compact_operation_evidence_ref
@@ -3388,8 +3423,11 @@ def _append_conversation_operation_evidence(
 
 # LLM: Aggregate counts remain complete while only the newest detailed events stay hot. Full
 # events are never deleted: the compact checkpoint ref above remains the authoritative source.
-# 函数用途: 将操作证据压成固定上限的模型视图，保留完整总数并标明省略的详细事件数。
+# Historical tool paths remain exact bounded hints and cannot grant filesystem authority.
+# 函数用途: 投影有界操作总数与原样路径线索；不把摘要措辞或历史路径变成当前权限。
 def _prompt_operation_evidence(value: object) -> dict[str, object]:
+    from ..conversation.compact_tool_refs import normalize_compact_tool_refs
+
     if not isinstance(value, dict):
         return {}
     events = [item for item in value.get("events", []) if isinstance(item, dict)]
@@ -3414,6 +3452,7 @@ def _prompt_operation_evidence(value: object) -> dict[str, object]:
             "events": kept,
             "omitted_event_count": already_omitted + max(0, len(events) - len(kept)),
             "prompt_event_limit": _MAX_PROMPT_OPERATION_EVIDENCE_EVENTS,
+            "observed_tool_paths": normalize_compact_tool_refs(value.get("observed_tool_paths")),
         }
     )
     return projection

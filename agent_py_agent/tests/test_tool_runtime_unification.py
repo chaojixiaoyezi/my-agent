@@ -246,6 +246,25 @@ def test_unknown_command_passes_without_approval(tmp_path: Path) -> None:
     assert tool.executions == 1
 
 
+def test_schema_error_lists_public_fields_without_parameter_values(tmp_path: Path) -> None:
+    tool = _SchemaTool()
+    arguments = {"mode": "brief", "limit": 1, "untrusted": "do-not-echo-this-value"}
+    execution = _execute(tmp_path, tool, _call(tool, arguments))
+    assert "该工具接受的参数: limit, mode" in execution.result.output
+    assert "do-not-echo-this-value" not in execution.result.output
+    assert execution.decision.evidence["allowed_parameters"] == ["limit", "mode"]
+    assert not execution.result.handler_executed
+
+
+def test_command_denial_identifies_delete_without_echoing_arguments(tmp_path: Path) -> None:
+    tool = _CountingTool(command=True)
+    execution = _execute(tmp_path, tool, _call(tool, {"command": "rm -f private-database.db"}))
+    assert execution.result.error_code == "COMMAND_DESTRUCTIVE_DELETE_BLOCKED"
+    assert '命令="rm"' in execution.result.output
+    assert "private-database.db" not in execution.result.output
+    assert tool.executions == 0
+
+
 def test_dangerous_command_needs_exact_approval_binding(tmp_path: Path) -> None:
     tool = _CountingTool(command=True)
     call = _call(tool, {"command": "git push origin main"})
@@ -395,6 +414,19 @@ def test_terminal_session_start_needs_approval_before_handler(tmp_path: Path) ->
     assert second.decision.resolved_effect == "dangerous"
     assert second.result.handler_executed is True
     assert [item["action"] for item in executed] == ["start"]
+
+
+def test_terminal_session_background_parameter_is_not_silently_accepted(tmp_path: Path) -> None:
+    request, executed = _terminal_start_request(tmp_path)
+    request = replace(request, call=replace(
+        request.call, arguments={**request.call.arguments, "run_in_background": True},
+    ))
+    result = ToolExecutor().execute(request).result
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "$.run_in_background" in result.output
+    assert "该工具接受的参数: action, append_newline, columns, command" in result.output
+    assert "start 立即返回 session_id" in TerminalSessionTool.model_spec.description
+    assert executed == []
 
 
 def test_terminal_session_existing_transport_does_not_reprompt(tmp_path: Path) -> None:

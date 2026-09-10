@@ -236,8 +236,11 @@ class TestReadPromptFiles:
         assert "update_persona" in result[0]
         assert "action=batch" in result[0]
         assert "operations" in result[0]
-        assert "每一轮只能二选一" in result[0]
-        assert "同一轮立即调用对应工具" in result[0]
+        assert "普通问答可以直接回答" in result[0]
+        assert "在同一轮调用对应工具" in result[0]
+        assert "建立清单、写出阶段文件都不会启动后台续跑" in result[0]
+        assert "系统会根据真实接收状态生成简短回执" not in result[0]
+        assert "按你的编码知识先写可运行骨架" not in result[0]
         assert "主代理只能协调 / 不准自己写 / 只能由子代理执行" in result[0]
         assert "不能成为主代理静默接管功能实现的授权" in result[0]
         assert "让一个刚回来的用户也能单独看懂" in result[0]
@@ -380,7 +383,8 @@ class TestBuildBasic:
 
         assert "task_progress 是软清单" in rendered
         assert "回复前核对" in rendered
-        assert "宿主不自动打勾或续跑" in rendered
+        assert "显式 covers 绑定的子代理 DONE 会按 id 更新" in rendered
+        assert "宿主不猜测完成，也不因清单未完自动续跑" in rendered
 
     def test_workspace_context_can_disable_extra_todo_closeout_discipline(self, tmp_path):
         builder = PromptBuilder(
@@ -454,12 +458,11 @@ class TestBuildBasic:
         assert "不要为了形式单独建立检查点" in result
         assert "不要把内部记录动作反复当作用户进度回复" in result
         assert "task_progress 是软清单" in result
-        # 分析/取证/研究类通常落报告，但本轮用户的明确只读/不落盘要求优先。
-        assert "得出结论后通常要把发现、依据和结论写成报告文件交付再收尾" in result
+        # 诊断不推断写文件授权，构建也不能用报告冒充实现。
+        assert "普通分析、诊断或对比可以直接在对话中回答" in result
         assert "用户明确要求只读、不要修改、不要落盘或只在对话中回答时" in result
         assert "不能创建报告文件，也不能把写报告文件列入 task_progress" in result
-        # 但纯问答/查值类本就无交付物，不强行文件化（保留原有保护，避免噪音）
-        assert "只有纯问答、闲聊、一次性查值这类本就没有交付物的任务，才不必写文件" in result
+        assert "实现任务不能用报告代替功能交付" in result
 
     def test_build_includes_refs_first_delegation_hint(self, tmp_path):
         """主代理派工时应优先传资料 refs，不要先把所有正文塞进 root 上下文。"""

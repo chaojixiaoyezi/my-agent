@@ -168,7 +168,7 @@ class ProviderRequestOptions:
     first_event_timeout_seconds: float | None = None
 
 
-# 原生工具能力探针的最大尝试次数(弱模型偶发无视强制 tool_choice 回散文,
+# 原生工具能力探针的最大尝试次数(模型偶发未按探针要求调用工具而回散文,
 # 单发误判"不支持 native"; 有界重试后仍无结构化调用才判不支持)。
 _PROBE_MAX_ATTEMPTS = 3
 
@@ -194,6 +194,8 @@ class BaseBackend:
         """Return provider-advertised context capacity, or zero when unavailable."""
         return 0
 
+    # LLM: The base implementation declares no native transport; HTTP subclasses own live probing.
+    # 函数用途: 为没有原生工具协议的后端返回明确的不支持事实，不发网络请求。
     def probe_tool_capability(self) -> ProviderToolCapability:
         """Return an explicit unsupported fact for backends without native tools."""
 
@@ -367,12 +369,14 @@ class HttpBackend(BaseBackend):
         # as a total wall-clock limit while valid events keep arriving.
         self.stream_timeout_is_idle = self.stream_enabled
 
+    # LLM: Serialize provider probes per backend instance and cache only proven-positive facts.
+    # 函数用途: 并发冷启动共用一次有界协议探测，失败不缓存，避免暂时失败永久阻断后续任务。
     def probe_tool_capability(self) -> ProviderToolCapability:
         """Run a harmless structured-call probe (bounded retries) and cache only
         a proven-positive result.
 
-        真机 2026-08-17 MiniMax 弱模型: 探针单发时灵时不灵(模型偶尔无视
-        强制 tool_choice 回散文)→ 单发探针把"没调用工具"误判成"模型不
+        真机 2026-08-17 MiniMax: 探针单发时灵时不灵(模型偶尔无视
+        工具调用要求而回散文)→ 单发探针把"没调用工具"误判成"模型不
         支持 native", 聊天直接报 ToolProtocolSelectionError。修: ①同一
         探针最多重试 _PROBE_MAX_ATTEMPTS 次(每次新 nonce), 一次结构化
         调用即通过; ②失败不缓存——进程存活期间下一轮再探(弱模型抖动
@@ -390,8 +394,9 @@ class HttpBackend(BaseBackend):
                 return cached
             return self._probe_tool_capability_uncached()
 
-    # LLM: Caller holds `_provider_tool_capability_lock`; this method may perform provider I/O and only a proven-positive capability is cached.
-    # 函数用途: 真正执行一次有界工具能力探测；Gateway 并发请求只能由一个线程进入。
+    # LLM: Caller holds `_provider_tool_capability_lock`; probe the ordinary auto tool-choice
+    # surface, not forced-call or reasoning-disable support. Only a matching nonce proves support.
+    # 函数用途: 用普通工具选择发起有界探测并缓存阳性结果，不执行工具；避免思考模型被强制参数挡住。
     def _probe_tool_capability_uncached(self) -> ProviderToolCapability:
         # 2026-08-17 真机: gateway 进程环境缺 AGENT_API_KEY → generate 抛
         # ValueError("api_key 为空") 被探针 except 吞成"不支持 native",
@@ -426,8 +431,7 @@ class HttpBackend(BaseBackend):
                         f"{nonce}. Do not answer in prose."
                     ),
                     tools=[probe_tool],
-                    tool_choice=ToolChoice.specific("my_agent_capability_probe"),
-                    request_options=ProviderRequestOptions(thinking_disabled=True),
+                    tool_choice=ToolChoice.auto("native_capability_probe"),
                 )
             except (ProviderRecoverableError, ProviderConfigurationError):
                 # EXEC-41b: provider 侧失败(429 额度/限流/超时/连接)不是"不支持

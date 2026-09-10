@@ -808,6 +808,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
         assert "read_file" in call_kwargs["params"].allowed_tools
         assert "write_file" in call_kwargs["params"].allowed_tools
+        assert "terminal_session" in call_kwargs["params"].allowed_tools
         assert "apply_patch" in call_kwargs["params"].allowed_tools
         assert "run_command" in call_kwargs["params"].allowed_tools
         assert "create_subagents" not in call_kwargs["params"].allowed_tools

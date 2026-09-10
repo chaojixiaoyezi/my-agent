@@ -1,4 +1,6 @@
 
+# LLM: 编排工具 Schema 是公开参数事实源；说明按工具/参数职责分层，不重复整段系统规则，不用路径描述扩大权限。
+# 模块用途: 生成派工和计划工具的原生定义；压缩说明不删字段、约束或子代理能力。
 from __future__ import annotations
 
 from copy import deepcopy
@@ -60,10 +62,8 @@ def _hints(
     )
 
 
-# LLM: Native nested item properties need the same model-facing descriptions as
-# top-level fields; otherwise providers see only bare types and often copy one
-# batch description into every child. This helper changes schema guidance only.
-# 函数用途: 为 create_subagents 的每个 items[] 字段补齐说明，让模型逐项填写职责短标题。
+# LLM: 嵌套参数保留本项 goal/职责说明；role 引用同工具顶层索引，不重复整份角色目录。字段和验证规则不变。
+# 函数用途: 为 create_subagents 的每个 items[] 字段补齐必要说明，批量项也能选择相同工具、模型和角色。
 def _create_subagents_input_schema() -> dict[str, object]:
     details = _with_role_template_index(_CREATE_PARAMETER_DETAILS)
     schema = _input_schema(
@@ -88,29 +88,20 @@ def _create_subagents_input_schema() -> dict[str, object]:
     return schema
 
 
-# LLM: 这是递归创建唯一模型合同；单派 goal 与批量 items 由运行时做 one-of
-# 校验，items 每项 goal 仍必填；保持自动启动和事件回传，不重加旧控制参数。
-# 函数用途: 构造 create_subagents 给模型看的说明和 JSON Schema。
+# LLM: 工具级说明保留并发/分工语义，参数级说明负责 covers/output_files 细节；不宣称 owner 内业务目录互相隔离。
+# 函数用途: 构造统一递归派工工具，减少重复文案但保持自动启动、事件回传与完整参数。
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
         description=(
-            "把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 "
-            "create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有"
-            "查询或推进工具。只派一个时传非空 goal；需要多个时传 items，每项都要有独立 goal，顶层 goal "
-            "只是可选批次说明。goal 与 items 都没有时会返回可恢复参数错误。"
+            "把独立工作交给下级代理；主、子、孙代理共用此工具。创建后立即运行，进展、阻塞和完成事件"
+            "自动通知直接父级，不需要轮询或额外推进；查看或引导已有下级使用当前工具列表中的对应能力。"
+            "单派传 goal；批量传 items，每项 goal 必填，顶层 goal 只是可选批次说明。"
             + _CREATE_DEPENDENCY_ORDER_RULE
             + _CREATE_DISJOINT_WRITE_SCOPE_RULE
-            + "不支持 operations、count 或 max_concurrency 参数。covers 是语法可选的 "
-            "task_progress exact-id 映射：凡 child 原样承接一个已存在 open 项都应复制该 exact id；只有额外工作或关系"
-            "不能确定时才省略。提供的未知、已关闭或跨 "
-            "item 重复 id 会整批拒绝；省略时 child 按真实 run_id 单独显示，不会给现有 Todo 打勾。返工已关闭项先用 "
-            "task_progress 对原 id 传 status=in_progress, correction=true，再绑定原 id；绝不能拿无关 open id 顶替。"
-            "output_files 也是可选交付/协调提示，不是权限、完整写集或机器锁；可以省略，同批 child "
-            "可以共享父级 task root，但所有路径仍必须位于当前 workspace。真正会改同一文件或模块时，"
-            "仍要在 goal 中缩窄独占范围或分批。"
-            "普通 child 自动继承父级工作区权限；goal、output_files 和 capability grant 都不能扩到兄弟"
-            "目录。不要为了显得忙而派，也不要重复创建同一任务。派工后的统一职责边界："
+            + "凡 child 原样承接一个已存在 open 项，在 covers 中复制 exact id，具体限制见参数说明。"
+            "普通 child 继承父级已授权的 owner 工作区；同一 owner 的业务目录不是额外隔离墙，"
+            "但 goal 和产物路径不能扩大当前权限。不要重复派工或为凑数量派工。派工后的职责边界："
             + coordinator_tool_boundary_text()
         ),
         input_schema=_create_subagents_input_schema(),

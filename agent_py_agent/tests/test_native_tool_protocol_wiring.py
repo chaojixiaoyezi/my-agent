@@ -11,7 +11,10 @@ from agent_py_agent.agent.agent_core.native_tool_protocol import (
     resolve_native_tools,
     select_tool_protocol,
 )
-from agent_py_agent.agent.model_guidance import ACTION_AUTHORIZATION_GUIDANCE
+from agent_py_agent.agent.model_guidance import (
+    ACTION_AUTHORIZATION_GUIDANCE,
+    provider_system_instruction,
+)
 from agent_py_agent.agent.tooling.models import (
     EffectResolverPolicy,
     ToolModelSpec,
@@ -340,9 +343,11 @@ def _effect_guidance_snapshot() -> tuple[list[ToolModelSpec], ToolRuntimeSnapsho
     return specs, snapshot
 
 
-def test_resolve_native_tools_adds_soft_authorization_only_to_effectful_tools():
+def test_resolve_native_tools_keeps_exact_specs_and_single_system_authorization():
     specs, snapshot = _effect_guidance_snapshot()
     agent = _agent(protocol="native", native_supported=True)
+    agent.backend.supports_system_instructions = True
+    agent.backend.supports_provider_request_options = True
     agent.tools = _SnapshotRegistry(snapshot)
     params = SimpleNamespace(
         allowed_tools=None,
@@ -354,13 +359,13 @@ def test_resolve_native_tools_adds_soft_authorization_only_to_effectful_tools():
     tools = resolve_native_tools(agent, params)
 
     by_name = {tool["name"]: tool for tool in tools or []}
-    assert "授权边界" not in by_name["read_file"]["description"]
-    for name in ("run_command", "process_session", "write_file"):
-        description = by_name[name]["description"]
-        assert description.startswith(f"{name} desc")
-        assert description.count("只有用户明确要求相应的修改") == 1
-        assert description.endswith(ACTION_AUTHORIZATION_GUIDANCE)
-        assert "只要求查看、核对、确认、检查、诊断、解释、比较、对比或汇报" in description
-        assert "任何工具若无法只读使用就不要调用" in description
-    assert by_name["run_command"]["input_schema"] == specs[1].input_schema
+    for spec in specs:
+        assert by_name[spec.name]["description"] == spec.description
+        assert by_name[spec.name]["input_schema"] == spec.input_schema
+        assert ACTION_AUTHORIZATION_GUIDANCE not in by_name[spec.name]["description"]
+    system = provider_system_instruction(agent.backend)
+    assert system.count(ACTION_AUTHORIZATION_GUIDANCE) == 1
+    assert "仅要求查看、解释或诊断时，做必要的只读检查" in system
+    assert "不能借子代理扩大目标或权限" in system
+    assert "宿主审批、owner 隔离及专用确认规则始终有效" in system
     assert snapshot.specs == tuple(specs)

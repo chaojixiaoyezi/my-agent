@@ -1663,8 +1663,8 @@ def test_assistant_fold_hint_is_gray() -> None:
     assert all(style.endswith("class:tui-muted") for style, _text in visible_fragments)
 
 
-def test_assistant_process_block_is_entirely_gray_but_final_is_not() -> None:
-    """typed process 的 marker 和 Markdown 正文都应浅灰，终稿仍保持正文色。"""
+def test_assistant_process_and_final_keep_normal_body_color() -> None:
+    """插话后的过程答复也是正文；只有独立 thinking 块和提示使用灰色。"""
     store = TuiStateStore()
     seq = TuiEventSequencer("assistant-process-color", clock=lambda: 100.0)
     store.publish(
@@ -1704,6 +1704,6 @@ def test_assistant_process_block_is_entirely_gray_but_final_is_not() -> None:
     ]
 
     assert process_fragments
-    assert all(style.endswith("class:tui-muted") for style, _text in process_fragments)
+    assert all("class:tui-muted" not in style for style, _text in process_fragments)
     assert final_fragments
     assert any(not style.endswith("class:tui-muted") for style, _text in final_fragments)

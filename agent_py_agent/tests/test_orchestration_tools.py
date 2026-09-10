@@ -44,6 +44,7 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
 
     assert "模板位置" not in role_detail
     assert "worker" in role_detail
+    assert "同一模板索引" in spec.input_schema["properties"]["items"]["items"]["properties"]["role"]["description"]
     assert "你是执行子代理" not in role_detail
     assert "count" not in spec.parameter_descriptions
     assert "count" not in spec.input_schema["properties"]
@@ -70,6 +71,10 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "同批 child 可以共享父级 task root" in spec.description
     assert "不是完整写集、权限或机器锁" in spec.description
     assert "顶层 goal 只是可选批次说明" in spec.description
+    assert "没有查询或推进工具" not in spec.description
+    assert "不能扩到兄弟目录" not in spec.description
+    assert "业务目录不是额外隔离墙" in spec.description
+    assert "work/child_outputs" not in spec.parameter_descriptions["output_files"]
 
 
 def test_create_subagents_inherits_current_task_workspace(tmp_path):

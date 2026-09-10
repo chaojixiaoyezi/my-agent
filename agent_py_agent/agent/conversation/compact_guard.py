@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, TypeAlias
 from ..memory_archive import estimate_tokens
 from ..runtime_errors import RecoverableRuntimeError
 from .models import ConversationThread, MessageLogEntry
+from .native_history import provider_history_messages_from_rows
 
 if TYPE_CHECKING:
     from .store import ConversationStore
@@ -27,9 +28,12 @@ CompactInterruptCheck: TypeAlias = Callable[[], bool]
 class ConversationCompactError(RecoverableRuntimeError):
     category = "conversation_compact"
 
+    # LLM: Keep the Compact-specific code and generic runtime error_code identical for Gateway propagation.
+    # 函数用途: 保留具体压缩失败原因，避免外围把窗口越界误报成会话文件损坏。
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
         self.code = str(code)
+        self.error_code = self.code
 
 
 # LLM: This typed failure prevents repeated model calls while the persisted thread circuit cools.
@@ -110,11 +114,13 @@ def _complete_turn_starts(
     return complete
 
 
-# LLM: Tail budgeting uses the same estimator as the complete request projection.
-# 函数用途: 估算一段原始对话消息的 token，用于近期尾部上限。
+# LLM: Tail budgeting includes canonical native tool history, not only visible prose;
+# otherwise a short final reply can hide hundreds of thousands of retained tokens.
+# 函数用途: 按正文和真实原生工具历史的较大值计算尾部，避免保留区暗藏整轮巨大工具输出。
 def _message_rows_tokens(rows: list[MessageLogEntry]) -> int:
-    return estimate_tokens(
-        [{"role": row.role, "content": row.content} for row in rows]
+    return max(
+        estimate_tokens([{"role": row.role, "content": row.content} for row in rows]),
+        estimate_tokens(provider_history_messages_from_rows(rows)),
     )
 
 

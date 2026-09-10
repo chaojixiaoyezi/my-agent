@@ -42,6 +42,28 @@ def _make_agent(tmp_path: Path) -> tuple[SimpleAgent, object]:
     return agent, paths
 
 
+def test_compact_failure_keeps_its_typed_code_and_does_not_claim_data_corruption(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.backends.errors import ProviderContextWindowError
+    from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
+    from agent_py_agent.agent.gateway_parts.request_errors import gateway_client_error_message
+
+    def fail(*_args, **_kwargs):
+        raise ProviderContextWindowError("source exceeds provider window")
+
+    monkeypatch.setattr(request_execution, "prepare_conversation_context", fail)
+    inputs = SimpleNamespace(agent=object(), prompt="继续", request_id="r", on_chunk=None,
+                             request={}, loaded_tool_names=())
+    with pytest.raises(ConversationCompactError) as caught:
+        request_execution._load_gateway_compact_context(inputs, object(), object(), [])
+    assert caught.value.error_code == "COMPACT_MODEL_CONTEXT_WINDOW_EXCEEDED"
+    message = gateway_client_error_message(caught.value.error_code)
+    assert "压缩未完成" in message
+    assert "仍保留" in message
+    assert "无法可靠读取" not in message
+
+
 @pytest.mark.parametrize("reason", ["operation_outcome_uncertain", "identity_mismatch"])
 def test_recovery_uncertainty_has_structured_safe_client_error(monkeypatch, reason):
     from types import SimpleNamespace

@@ -1,4 +1,7 @@
-"""Role template loading, snapshots, and runner capability decisions."""
+"""LLM: Role defaults share the common shell surface; exact/read-only grants remain bounded.
+
+模块用途: 加载角色快照与通用工具默认值；交互终端和普通命令都受 owner 权限控制。
+"""
 
 from __future__ import annotations
 
@@ -24,7 +27,10 @@ WORKER_WRITE_TOOLS = list(WRITE_TOOL_ORDER)
 REPORT_WRITE_TOOLS = list(WRITE_TOOL_ORDER)
 SHELL_TOOL = "run_command"
 PROCESS_SESSION_TOOL = "process_session"
-SHELL_SESSION_TOOLS = (SHELL_TOOL, PROCESS_SESSION_TOOL)
+# LLM: Default writable children receive PTY access without per-spawn tool plumbing;
+# exact and read-only scopes still use their own explicit grants and final owner policy.
+# 常量用途: 普通执行子代理开箱携带命令、后台续接与交互终端，不依靠主代理逐项补工具。
+SHELL_SESSION_TOOLS = (SHELL_TOOL, PROCESS_SESSION_TOOL, "terminal_session")
 CAPABILITY_REQUEST_TOOL = "capability_request"
 COLLABORATION_TOOLS: list[str] = []
 RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(

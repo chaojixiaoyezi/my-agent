@@ -1,5 +1,11 @@
 # Subagent Structure
 
+## R227 默认终端工具面
+
+`role_templates.SHELL_SESSION_TOOLS` 是普通命令、后台续接、PTY 的统一默认组合；公开派工的
+`orchestration/tool_grants.py` 和可写角色默认消费它。PTY 不成为 run_command 显式授权的隐式依赖，
+因此精确只读/Audit 授权保持原边界，最终执行仍受 owner 与父代理范围约束。
+
 ## R223 失败与共享文件契约
 
 `orchestration_tools.CreateSubagentsTool` 的异常分支保留客观系统故障，不伪造 schema 错误；

@@ -1,5 +1,5 @@
-
-
+# LLM: 文件参数与内部状态引用的共享读取辅助；上下文交接材料不是运行状态 API，读取仍服从 owner/path 边界。
+# 模块用途: 校验文件参数、定位可读产物并说明误读内部状态的原因；不能从文档内容推导执行权限。
 from __future__ import annotations
 
 import json
@@ -18,8 +18,6 @@ _INTERNAL_AGENT_STATUS_FILES = frozenset(
         "summary.md",
         "checkpoint.json",
         "canonical_state.json",
-        "context_bundle.json",
-        "CONTEXT_BUNDLE.md",
     }
 )
 _INTERNAL_AGENT_STATUS_DIRS = frozenset({"compactions", "progress"})
@@ -146,6 +144,8 @@ def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list
     return resolved
 
 
+# LLM: 仅把运行控制/状态投影转为结构化指引；runner 显式交给模型的 context bundle 必须可按普通文件读取。
+# 函数用途: 识别误当产物读取的内部状态路径，不阻止子代理阅读自己的任务上下文材料。
 def _internal_agent_status_ref(
     path: Path,
     *,
