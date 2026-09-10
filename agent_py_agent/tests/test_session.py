@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from agent_py_agent.agent.session import Session, SessionManager, generate_session_id
+from agent_py_agent.agent.session import Session, generate_session_id
 from agent_py_agent.agent.session.manager import SessionManager
 from agent_py_agent.agent.session.resume import format_resume_context, resume_session
 

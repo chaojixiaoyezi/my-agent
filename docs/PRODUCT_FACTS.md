@@ -1,5 +1,7 @@
 # 当前产品事实
 
+> 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
+
 能力基线更新时间：2026-09-04（`my-agent` 测试机）；2026-09-08 统一正式产品名称。本文是当前工作树能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
@@ -135,7 +137,7 @@
 - 模型可见工具按每轮 runtime snapshot 的真实 availability 生成；本地 transcript 没有主动外部通道时
   不再展示 `send_message`，有结构化 provider/target/root/proactive capability 的 owner 才展示。该结论已由
   `.13` 同一普通中文问候修复前后 A/B 复验。
-- 测试部署仅为 `192.0.2.13:/root/my-agent`；Gateway 为 MiniMax-M2.7、8420、队列 0/0，TUI 留在
+- 测试部署仅为 `192.0.2.13:${MY_AGENT_CHECKOUT}`；Gateway 为 MiniMax-M2.7、8420、队列 0/0，TUI 留在
   tmux `my-agent-tui:work`。最终部署/回滚/ANSI/secret 扫描证据位于
   `/root/tui-parity-evidence/final-20260818T071817CST/final-deploy/`。
 - 该状态不适用于 `192.0.2.10`、青禾的 `my_agent` 或其它 checkout，也不代表远程 `main` 已发布。

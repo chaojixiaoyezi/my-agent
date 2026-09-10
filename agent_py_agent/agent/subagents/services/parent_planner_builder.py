@@ -1,7 +1,14 @@
 
+# LLM: 规划记录只归档结构化决定和诊断，不从 message/summary 反推动作或授权。
+# 模块用途: 组装父代理规划记录、报告与日志字段，供调度服务展示和审计。
 """Parent planner record, report and log helpers."""
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_py_agent.agent.subagents.reports import ParentPlannerRecord
 
 import time
 from dataclasses import dataclass

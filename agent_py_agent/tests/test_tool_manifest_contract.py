@@ -39,7 +39,7 @@ def test_tool_manifest_projects_runtime_policy_without_duplicate_approval_flag()
     assert policy["approval_policy"] == {"mode": "dangerous"}
     assert policy["sandbox_policy"] == {
         "mode": "required",
-        "uncontained_by_parameter": [{"field": "path", "values": ["host"]}],
+        "contained_by_parameter": [{"field": "path", "values": ["host"]}],
     }
     assert policy["idempotency_policy"] == {"scope": "operation"}
     assert policy["timeout_policy"] == {"seconds": 20}
@@ -109,7 +109,7 @@ def _tool_manifest_payload() -> dict[str, object]:
             approval_policy=ApprovalPolicy("dangerous"),
             sandbox_policy=SandboxPolicy(
                 "required",
-                uncontained_by_parameter=(("path", ("host",)),),
+                contained_by_parameter=(("path", ("host",)),),
             ),
             idempotency_policy=IdempotencyPolicy("operation"),
             timeout_policy=TimeoutPolicy(20),

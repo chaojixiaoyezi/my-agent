@@ -176,9 +176,8 @@ class ScheduleTool(BaseTool):
             # 存储异常可能发生在落盘期间，工具无法证明副作用是否已发生。
             return _error(str(exc), "SCHEDULER_UNAVAILABLE", effect_outcome="unknown")
 
-    # LLM: Read projections combine job authority with the repository's exact active-run
-    # snapshot; keep writes delegated to repository CAS methods and never infer running state.
-    # 函数用途: 执行具体定时动作，并让 list/get 能直接告诉模型任务是否已经在途运行。
+    # LLM: list 以权威 job 和 active-run 快照投影，遵守声明的 limit 并返回截断事实；写入仍由 repository CAS 管理。
+    # 函数用途: 执行定时动作，列表不再忽略用户的条数上限，也不把截断当作全部。
     def _execute(self, repository, action: str, params: dict[str, object]) -> ToolHandlerOutcome:
         if action == "status":
             return _success(action, {"scheduler": repository.runtime_snapshot()})
@@ -194,8 +193,10 @@ class ScheduleTool(BaseTool):
                             include_prompt=False,
                             active_run=active_runs.get(str(job["job_id"])),
                         )
-                        for job in jobs
+                        for job in jobs[:_limit(params)]
                     ],
+                    "total": len(jobs),
+                    "has_more": len(jobs) > _limit(params),
                     "load_error_codes": [*errors, *run_errors],
                 },
             )

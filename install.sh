@@ -58,6 +58,8 @@ ensure_python() {
   python3 -c 'import venv' 2>/dev/null || pkg_install python3-venv || true
 }
 
+# LLM: 获取安装源码不得删除非本安装器管理的目录；拉取失败保持已有内容，来源与版本写入安装输出。
+# 函数用途: 复用显式本地源码或已有 Git 检出；新安装只使用不存在的目标，防止用户文件被覆盖。
 obtain_source() {
   if [ -n "$LOCAL_SRC" ]; then
     log "从本地源码安装: $LOCAL_SRC"
@@ -69,7 +71,9 @@ obtain_source() {
   if [ -d "$SRC_DIR/.git" ]; then
     log "已有检出,git pull 更新: $SRC_DIR"; git -C "$SRC_DIR" pull --ff-only || die "git pull 失败,请检查 $SRC_DIR。"
   else
-    log "克隆 $REPO ($BRANCH) → $SRC_DIR"; rm -rf "$SRC_DIR"
+    [ ! -e "$SRC_DIR" ] && [ ! -L "$SRC_DIR" ] \
+      || die "目标已存在且不是 Git 检出，未修改任何内容: ${SRC_DIR}。请选择新的 MYAGENT_SRC_DIR，或用 MYAGENT_SRC 指定源码。"
+    log "克隆 $REPO ($BRANCH) → $SRC_DIR"
     git clone --depth 1 --branch "$BRANCH" "$REPO" "$SRC_DIR" || die "git clone 失败(检查 repo/分支/网络/凭据)。"
   fi
 }

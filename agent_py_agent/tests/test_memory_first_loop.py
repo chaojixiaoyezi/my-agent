@@ -13,7 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import agent_py_agent.agent.agent_core._compression_service as compression_service
 import agent_py_agent.agent.agent_core.runtime.loop_support as runtime_loop_support
 import agent_py_agent.agent.agent_core.runtime_mixin as runtime_mixin
 from agent_py_agent.agent.core import SimpleAgent
@@ -132,17 +131,14 @@ def test_memory_archive_list_can_filter_by_archive_level(tmp_path, capsys):
     assert payload["records"][0]["archive_level"] == 3
 
 
-def test_compression_hook_failure_blocks_run_and_audits_event(tmp_path, monkeypatch):
-    """LLM: verify failed pre-compression snapshot stops compression and writes an audit event.
-
-    给人看的解释：
-    这是这批改动里最硬的门禁：snapshot 失败就不能压缩，也不能静默跳过。
-    """
+def test_output_token_budget_does_not_trigger_fake_memory_compaction(tmp_path, monkeypatch):
+    """输出预算不能作为输入压缩阈值，也不能触发旧伪摘要旁路。"""
 
     def boom(*args, **kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(compression_service, "write_compression_snapshot", boom)
+    import agent_py_agent.agent.memory_archive as archive
+    monkeypatch.setattr(archive, "write_compression_snapshot", boom)
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
@@ -154,15 +150,12 @@ def test_compression_hook_failure_blocks_run_and_audits_event(tmp_path, monkeypa
         tmp_path,
     )
 
-    with pytest.raises(RuntimeError, match="compression blocked"):
-        agent.run("这是一段很长的用户输入，用来强制触发 compression hook。", save=False)
-
-    events = _read_jsonl(agent.local_store.events_path)
-    assert events[-1]["event_type"] == "memory_compression_snapshot_failed"
-    assert "disk full" in events[-1]["payload"]["error"]
+    result = agent.run("这是一段比输出 token 上限更长的输入，但还没到上下文压缩点。", save=False)
+    assert result.compression_applied is False
+    assert not result.compression_snapshot_id
 
 
-def test_runtime_compression_receives_routed_and_resume_context(monkeypatch):
+def test_runtime_loop_preserves_routed_and_resume_context(monkeypatch):
     routed_context = SimpleNamespace(
         injected_sections=["### Routed Memory\nmemory/routing/rules/compact.md"],
         required_read_paths=["memory/routing/rules/compact.md"],
@@ -199,8 +192,7 @@ def test_runtime_compression_receives_routed_and_resume_context(monkeypatch):
         prepared,
         runtime_loop_support.RunParams(request_id="req-compact"),
     )
-    runtime_loop_support._execute_runtime_compression(agent, params)
-    ctx = captured["ctx"]
+    ctx = params
 
     assert ctx.routed_context is routed_context
     assert ctx.resume_context_section.startswith("### Auto Recovery Context")
@@ -218,11 +210,6 @@ def _runtime_context_capture_agent(captured: dict[str, object]):
         def list(self):
             return []
 
-    class Compression:
-        def check_and_apply(self, ctx):
-            captured["ctx"] = ctx
-            return ctx.memories, "snapshot-1", "snapshots/snapshot-1.json", True
-
     class Agent:
         root = Path(".")
         memory = Memory()
@@ -236,9 +223,6 @@ def _runtime_context_capture_agent(captured: dict[str, object]):
             memory_rule_auto_read_limit=2,
         )
         tools = SimpleNamespace(owner_type="main_agent")
-
-        def _get_services(self):
-            return SimpleNamespace(compression=Compression())
 
     return Agent()
 

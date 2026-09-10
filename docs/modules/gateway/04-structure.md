@@ -1,5 +1,15 @@
 # Gateway Structure
 
+## R223 工具一致性与资源界限
+
+`common/text_file_window.py` 为普通/按行/按字符读取提供同一编码和有界索引；
+`common/file_version.py` 给 read_file 暴露观察版本，write/edit 的 expected_version 与 patch 的
+expected_versions 在提交前复核。它们不建立任务锁、不改变 owner 权限，也不是覆盖外部写入者的内核 CAS。
+`tooling/process_output_capture.py` 负责前台进程的有界内存排空；截断后不能把保留的前缀称作完整归档，
+需要完整大输出的任务应写入自己的文件后分页读取。PTY 会话使用预留容量及有期限非阻塞写入。
+`mcp_client.py` 的 canonical content 与 preview 分离；发现分页及协议锁共享 deadline，通知取消只记录
+已发送意图。MCP/PTY/HTTP 的资源界限属于执行层，不增加 Gateway 或按任务新建守护进程。
+
 ## 规模入口与工具状态依赖归一
 
 `scale_downstream` 通过现有 `write_gateway_request_once → _process_gateway_request_path` 执行，
@@ -652,11 +662,11 @@ audit Agent 为空而回退 daemon cwd。
   `tool_name/run_id/operation_id/idempotency_key/args_hash` 组成的 binding 和有限 decision 枚举；标题、
   option label、feedback 都只用于展示或后续模型上下文。
 - `run_command` 的 command parser 与结构化 effect mapping 由同一 `EffectResolverPolicy` 取最高风险。
-  sandbox 包含性另由 canonical `SandboxPolicy.uncontained_by_parameter` 显式声明：
+  sandbox 包含性另由 canonical `SandboxPolicy.contained_by_parameter` 正向显式声明：
   `run_in_background=true` 和 `terminal_session.action=start` 都越过单次 handler 存活，且当前
   bwrap 共享主机网络，因此不能用 `sandbox=required` 免掉 exact approval。这条门只读
-  typed 工具参数和 binding，不解析 prompt 或命令的业务含义。PTY 已批准 start 后的
-  `write/read/close` 只操作原 session，不重复弹窗。
+  typed 工具参数和 binding，不解析 prompt 或命令的业务含义。PTY 的 `resize/close` 可声明为受管会话内动作；
+  `write` 能在既有终端执行新命令，不能因为 start 曾获批就一概豁免新的危险效果。
 - child capability grant 与 `approved_actions` 分账：前者只投影允许的工具、命令、路径和网络 scope，
   后者才按 exact `tool_name/run_id/operation_id/idempotency_key/args_hash` 批准一次具体副作用。
   `controlled_exec` 当前经 `subprocess.Popen` 执行且没有 OS sandbox，因此声明 `sandbox=none`；即使 grant

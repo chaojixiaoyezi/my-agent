@@ -1,5 +1,58 @@
 # TESTS
 
+## R224 正式提交前联合验收
+
+范围包括 R222 保留的 DeepSeek 兼容修复、R223 整改、报告和 R224 名称统一。43 个相关文件重新联合运行：
+**980 passed、2 skipped、1 xfailed，43.33 秒**。沿用既有 skip/xfail，没有跑全仓 pytest；与下面历史批次重叠，不能累加。
+Ruff、doc-sync、strict code-size（生产 hard 0、baseline 未放宽）、diff、clean-package、import-boundary 全通过。
+真实 TUI 的品牌验证见下一节；R223 7 次真实模型请求仍属于原验收记录，不算本次新请求。
+线上 CI 没有作为本地验收来源；Git 发布状态见正式 main 提交记录，测试机部署和未覆盖长链路仍开放。
+
+## R224 名称统一验证
+
+turn_end、cli_manual_resume、runtime_db_recover_stale、container_install 共44项定向通过，未跑全仓。
+四个生产模块以去注释/docstring 后 AST 对照确认运行逻辑不变；不把文字替换变成运行分支调整。
+四个历史 Shell 助手语法通过；SSH 以本地替身验证密钥和私有密码路径、参数保留及不使用明文密码命令参数，
+未发真实 SSH 或复活旧长任务。真实 TUI 为本机 ma-r224-brand：启动名称 my-agent、/help、/status 正常，
+实际所选模型 minimax-m2.7；唯一 Gateway 不重启，请求账本始终16条，零新模型任务。
+扫描排除第三方实际命令／对照路径及 handshake 等单词片段；我方旧产品名称不保留。
+
+> 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
+
+## R223 HTML 报告验证（不是新增底座验收）
+
+纯静态报告用 HTML 解析器检查标签闭合、唯一 ID、全部锚点、87 项双语条目、六类精确计数及七条 TUI 请求。
+逐项与 R223 原台账核对原因、修法、影响和证据全部保留；检查无外部资产、密钥特征或私有配置路径。
+独立公开目录的 loopback/LAN HTTP 200、监听 0.0.0.0:8813 和越界路径 404 已确认。
+未做浏览器交互/视觉验收；不因此重复全仓测试、调用模型或关闭任何原未验项。
+
+## R223 外部 87 项审计回归与真实 TUI
+
+最终42个相关文件联合focused：1037 passed、2 skipped、1 xfailed，50.67秒。覆盖本轮改动测试与
+background/TUI/conversation history、owner home、dispatch liveness、native Compact、scheduler、ingestion
+和delivery相邻入口，保留R222 provider测试。没有新增skip/xfail或重复全仓pytest。
+首轮949通过、1失败：Shell新增capture结构后旧pipeline断言未同步；补完整字段断言（不删除失败校验），
+相关154通过，再跑最终联合零失败。中间批次重叠，不累计为独立通过数。
+
+Ruff（含F821/F811）、doc-sync、strict code-size（生产hard0、未改baseline）、diff、clean-package与
+import-boundary全通过。clean-package曾因5个本轮新增文件未登记阻塞，intent-to-add登记预期源码/测试/文档后通过，
+不是忽略产物或关闭检查。线上CI没有作为验收来源，本轮未推送。
+
+真实验收只通过本机单Gateway的MiniMax-M2.7 TUI布置普通中文任务：图书资料、两项长期记忆和精确修改、
+官方资料教程、16000条日志汇总/失败恢复、旧会话恢复后继续改旧目录和最终重启续问。7个request均done，模型重试0；
+仍保留工具参数自纠正和模型产物措辞不实，不以终态替代质量。旧会话恢复和Ctrl+Home已真实验证，
+空闲/status显示已选模型已真实复验。MCP故障测试为真实stdio fixture，不称MCP真TUI已验。
+全部87项、tmux、request ID、边界和实际产物检查见 [R223报告](docs/audits/R223_87_ITEM_REMEDIATION.md)。
+
+## DeepSeek 官方双接口复验（R222 后续）
+
+真实 `/model` 为两个官方 base URL 各保存 Flash、Pro、Vision-Exp，六项连接短测均正常。
+进一步切换主聊天发现 OpenAI 原生探针的思考关闭标志丢失，HTTP 400；不是配置保存失败。
+新增 11 项定向，其中 5 项修前失败：官方根路径与 `/v1`、流式/非流式、本轮关闭后普通下一轮不变、
+其它主机/伪后缀不注入专有字段、完整原生探针成功只缓存一次。修后相关 7 文件共 178 项通过。
+不重复全仓 pytest。真实六个模型/协议组合只发普通问候，不执行任务/业务工具/child，不测图像或满上下文。
+原始 TUI 截图、失败与成功的 canonical request 回执分开保留；完整结果见模型报告，未通过项不抹除。
+
 ## 正式库提交 gate 修复复验
 
 先前全量的37项失败已逐组定位。相关23个文件共514项：485通过（含1个已有XPASS）、29个已有XFAIL、
@@ -2210,7 +2263,7 @@ python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_idemp
 这份直接证据覆盖“后台第二批”，但不覆盖“先创建一名后，在其仍活跃时发第二次独立创建调用”；后者继续
 以 focused 回归为当前证据，不得把同批原子创建夸成 exact 真机覆盖。
 
-Prompt 4 r6 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r6-ea91639` 和固定
+Prompt 4 r6 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux `<历史会话:p4-lazygit-r6-ea91639>` 和固定
 `jesseduffield/lazygit@ea916395`，只输入一次原样 prompt。10 个 child 全部自然 DONE、3 个真实 Compact，
 main 自主补派并把 Todo 全部打钩；但 canonical 产物只有 9,543 行、55 个空桩、5 个测试定义，8 项集成
 测试全部 skip，另有两套未整合输出，因此 r6 仍判失败。部署候选后的 r7 除继续做原版代码/测试/运行审计，
@@ -2218,7 +2271,7 @@ main 自主补派并把 Todo 全部打钩；但 canonical 产物只有 9,543 行
 一项 `items` 的系统 child 沿 sibling 历史编号；Todo 标题显示真实 `完成 X/Y · 进行中 Z`，四行折叠不冒充
 完成数。open Todo 仍不得成为宿主自动续轮或质量验收门。
 
-Prompt 4 r7 使用同一固定源码，在 fresh cwd/tmux `dsh-p4-lazygit-r7-ea91639` 只输入一次原样 prompt。
+Prompt 4 r7 使用同一固定源码，在 fresh cwd/tmux `<历史会话:p4-lazygit-r7-ea91639>` 只输入一次原样 prompt。
 r6 的四个投影缺口全部通过真实 TUI：isolated thinking/context 不再污染主任务，单项补派连续到
 worker-6/7，Todo 从 0/11 到 11/11 均显示真实计数与四行视窗。任务产物仍失败：只有 6,985 行产品代码，
 主 App 仅欢迎页；安装和 App 构造都失败。模型先看到 6 个、后看到 2 个测试失败，却删除
@@ -2234,7 +2287,7 @@ session 退出后既有 `auto_start_orphan_run` 应立即续派同一个 run。�
 也不能把 root 工具授给 child。fresh r9 仍只输入一次原样 Prompt 4，并核对不存在
 `ordinary_task_resume(task_id=child)`、不存在 main/child 双执行器，PENDING child 能自行续跑。
 
-Prompt 4 r9 使用 `93e18f6`、`.7` 唯一 Gateway、tmux `dsh-p4-lazygit-r9-ea91639` 和同一固定源码，
+Prompt 4 r9 使用 `93e18f6`、`.7` 唯一 Gateway、tmux `<历史会话:p4-lazygit-r9-ea91639>` 和同一固定源码，
 仍只输入一次原样 prompt。5 名 child 的 thread/parent/runner 身份正确，未出现 child
 `ordinary_task_resume` 或双执行器；但没有自然 PENDING 样本。新失败是未声明 `output_files` 的 child 被
 运行时强塞 task-local Markdown，runner 文件合同又称其为“用户要求的业务产物”，两名编码 child 只交
@@ -2243,7 +2296,7 @@ Prompt 4 r9 使用 `93e18f6`、`.7` 唯一 Gateway、tmux `dsh-p4-lazygit-r9-ea9
 completion wake 和 child result index 都没有系统默认业务 ref；child 仍通过最终消息与
 `final_report_ref` 完成交接；显式输出路径继续锚定、授权和锁冲突；测试者仍不追加推动消息或修改产物。
 
-Prompt 4 r10 使用 `0c6c916`、`.7` 唯一 Gateway、tmux `dsh-p4-lazygit-r10-ea91639` 和固定
+Prompt 4 r10 使用 `0c6c916`、`.7` 唯一 Gateway、tmux `<历史会话:p4-lazygit-r10-ea91639>` 和固定
 `jesseduffield/lazygit@ea916395`，仍只输入一次原样 prompt。前两名 Rust child 没有系统默认业务 ref，
 但第二次 completion wake 后 root 改成 Go 并派出“只建基础框架”任务。r11 必须用 fresh cwd/tmux 证明：
 每次 child lifecycle wake 的 provider `User Task/root_user_prompt` 都是同一原始 Prompt 4；synthetic wake
@@ -2251,7 +2304,7 @@ Prompt 4 r10 使用 `0c6c916`、`.7` 唯一 Gateway、tmux `dsh-p4-lazygit-r10-e
 child 私有调用不混入；已选目标语言和完整范围不因连续 child 完成而重置。仍只输入一次原样 prompt，测试者
 不得修改产物或给技术推动消息。
 
-`931ee20` 在 `.7` 唯一 Gateway 上以 tmux `dsh-p3-research-931ee20-verify` 执行第 3 条原样任务，prompt
+`931ee20` 在 `.7` 唯一 Gateway 上以 tmux `<历史会话:p3-research-931ee20-verify>` 执行第 3 条原样任务，prompt
 只输入一次。4 个 child 的短职责、实时 context 总 token、一次 attempt 自然 DONE 和 Todo 打标均正确；
 但 main 只收到不含最终正文/报告 ref 的生命周期通知，猜测 `research_reports/` 后反问用户，未继续第二批，
 因此该轮判定失败。canonical 证据显示四份 `task.result` 和每个
@@ -2263,7 +2316,7 @@ wake 在一次模型轮的 `metadata.events` 中全部可见；背景总上下�
 和四个报告 ref；只确认实际进入本轮的 wake，新到事件继续 pending；失败与 Audit worker 不参加成功批。
 修复后必须用全新 tmux/cwd 重跑同一 Prompt 3，仍只输入一次且不得给 main 发送“去哪个目录找”的提示。
 
-`fd7d2b9` 部署后的第二轮使用 tmux `dsh-p3-research-fd7d2b9-verify2`，首次 4 名 child 的完成信封全部被
+`fd7d2b9` 部署后的第二轮使用 tmux `<历史会话:p3-research-fd7d2b9-verify2>`，首次 4 名 child 的完成信封全部被
 main 消费并触发第二批，第二批 代理运行时/长期助手 的两份信封也被消费；但最终只创建 6/8 名 child，漏掉
 轻量运行时/通道运行时，横向汇总仍结束。canonical 文件证明 8 项原计划保存在 task-path 账本且仍 open，而后台
 Task Runtime State 旧代码读取 request-id 账本。对应回归必须在相同 owner 下同时建立两份不同摘要的账本，
@@ -2277,7 +2330,7 @@ Task Runtime State 旧代码读取 request-id 账本。对应回归必须在相�
 必须保存 `BLOCKED/UNVERIFIED/runner_worker_error`，不得被异常处理分支的二次错误掩盖。
 
 `7c052f2` 在 `.7` 唯一 Gateway 上的第 1 条原样任务使用 tmux
-`dsh-p1-pvz-7c052f2`，测试者只输入一次 prompt，六个 child 全部自然 DONE。最终
+`<历史会话:p1-pvz-7c052f2>`，测试者只输入一次 prompt，六个 child 全部自然 DONE。最终
 `/root/abc` 共 9 个文件，`0.0.0.0:8080` 监听，loopback HTTP 200；该轮同时抓到三个真实
 回归点：首条 Todo 在 task 晋升前写入 request-id 账本，派工后却使用 task-path 账本；显式
 `covers=[Todo id]` 未进入 child 展示投影，所以 8 项全未勾选；一次 main 模型轮返回被误显示为
@@ -2692,7 +2745,7 @@ summary/窗口标记、遗失最新用户纠正、留下 tool-use/tool-result �
 同时要用超过 90% 但未达完整窗口的 no-save 输入证明它没有获得落盘 Compact 权限，
 避免为了修 UI 暗改执行边界。
 2026-08-22 真机证据：`192.0.2.7` 唯一 Gateway、MiniMax-M2.7、tmux
-`dsh-p3-774c7fe-compact`，只发送一次原样 Prompt 3。main 首轮 27.5k、终屏 61.5k 均显示
+`<历史会话:p3-774c7fe-compact>`，只发送一次原样 Prompt 3。main 首轮 27.5k、终屏 61.5k 均显示
 `压缩点 90%`；8 个 child 全部 DONE，最高 98.6k，本轮不得写成真实 Compact 触发验证。
 
 Gateway/IM 投递回归还必须覆盖：同一进度批次重试使用稳定 provider 幂等键，不同 progress cursor 与
@@ -2834,7 +2887,7 @@ provider overflow 强制 Compact、上一代摘要合并、checkpoint-before-CAS
 硬编码机器裁决。
 
 2026-08-22 的正式 Prompt 2 基线证据：机器 `192.0.2.7`、tmux
-`dsh-p2-mario-993ce4f`、cwd `/root/dsh-tui-p2-993ce4f`、模型 `MiniMax-M2.7`，只发送了本文件原样
+`<历史会话:p2-mario-993ce4f>`、cwd `<历史工作目录:tui-p2-993ce4f>`、模型 `MiniMax-M2.7`，只发送了本文件原样
 Prompt 2。首次 ask、后台 main、6 个 child 和全部命令 working_dir 均保持该 cwd；child 职责行分别为
 “玩家控制/物理引擎/敌人AI/道具系统/关卡设计/游戏HTML”，6 个 child 一次 attempt DONE，`bbb/`
 产物齐全，`0.0.0.0:8082` HTTP 200。该轮同时固定了四个待复测失败样本：main context 停在 8.7k、
@@ -2842,8 +2895,8 @@ canonical Todo 5/5 而 TUI 未更新、第二批 child 名称重号、main 在�
 候选部署后的复测仍必须用同一原样 Prompt 2、新 cwd、新 tmux、唯一 Gateway；测试者不得追加“继续”、
 技术提示或旁路修复。
 
-`f5dc695` 的新鲜 Prompt 2 复验使用 tmux `dsh-p2-mario-f5dc695-verify`、cwd
-`/root/dsh-tui-p2-f5dc695-verify`，证明 main context、跨批编号和 8 个 child 一次 attempt DONE 已生效；
+`f5dc695` 的新鲜 Prompt 2 复验使用 tmux `<历史会话:p2-mario-f5dc695-verify>`、cwd
+`<历史工作目录:tui-p2-f5dc695-verify>`，证明 main context、跨批编号和 8 个 child 一次 attempt DONE 已生效；
 wake durable 文件创建到后台 claim 约 7.56 秒。下一候选必须重点确认：批量每个 item 的职责短标题互不
 复制且只概括该 child 工作；main/child 任意长文本严格单行；最终 notice 不让 exact child seed Todo
 复现；用户要求纯委派时 main 不再写 child 的功能代码。仍只发送一个原样用户 prompt，不允许测试者追加
@@ -2920,10 +2973,10 @@ lazygit commit 上只输入一次原样 Prompt 4，测试者不得安装工具�
 与职责短句保持真实。
 
 `e94f8ec` 部署后的 fresh r19 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux
-`dsh-p4-lazygit-r19-ea91639` 和 `jesseduffield/lazygit@ea916395`，仍只输入一次原样 Prompt 4。root 建立
+`<历史会话:p4-lazygit-r19-ea91639>` 和 `jesseduffield/lazygit@ea916395`，仍只输入一次原样 Prompt 4。root 建立
 8 项 Todo，5 名 child 全部一次自然 DONE；第五名在 113.8k 触发 canonical Compact，TUI 从 `compact 0`
 更新为 `compact 1`，压缩后 39.3k 并继续完成。root 真实执行 port 的测试得到 112 passed；但独立产物
-smoke 的 tmux `dsh-p4-product-r19-ea91639` 只有背景色、零可见组件。源码证明 `LazyGitScreen.compose()`
+smoke 的 tmux `<历史会话:p4-product-r19-ea91639>` 只有背景色、零可见组件。源码证明 `LazyGitScreen.compose()`
 虽已定义，`LazyGitApp` 却从未 compose/register/push 它。原项目 957 个生产文件、114,376 行物理生产代码，
 port 只有 30 个生产文件、5,404 行生产代码；5 个测试文件不能证明完整功能等价。r19 在 final 前自行关闭
 8/8 Todo，故没有直接命中 open-Todo 核对分支；该分支仍以 native provider-message focused 回归为发布

@@ -208,14 +208,14 @@ def test_publish_sandbox_tmp_outputs(tmp_path):
     work = root / "work"
     output = root / "output"
     sandbox_tmp = work / ".sandbox-tmp"
-    (sandbox_tmp / "dsh-stability" / "proj").mkdir(parents=True)
-    (sandbox_tmp / "dsh-stability" / "proj" / "main.py").write_text("print(1)", encoding="utf-8")
+    (sandbox_tmp / "my-agent-stability" / "proj").mkdir(parents=True)
+    (sandbox_tmp / "my-agent-stability" / "proj" / "main.py").write_text("print(1)", encoding="utf-8")
     (sandbox_tmp / "keep.txt").write_text("keep", encoding="utf-8")
 
     published = _publish_sandbox_tmp_outputs(root, run_id="run-test")
 
     assert len(published) == 2
-    assert (output / ".sandbox-tmp" / "dsh-stability" / "proj" / "main.py").is_file()
+    assert (output / ".sandbox-tmp" / "my-agent-stability" / "proj" / "main.py").is_file()
     assert (output / ".sandbox-tmp" / "keep.txt").is_file()
     timeline = (work / "timeline.jsonl").read_text(encoding="utf-8")
     assert "sandbox_tmp_published" in timeline

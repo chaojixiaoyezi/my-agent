@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..common.encoding_detect import detect_encoding, detect_line_ending, encode_text
+from ..common.encoding_detect import encode_like_original
+from ..common.file_version import StaleFileVersionError, check_file_version, file_version
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from ..contracts.recovery import RecoveryAction
 from ..run_intent import reference_write_feedback
@@ -88,6 +89,7 @@ class WriteRequest:
     mode: str
     target: Path
     content_policy: Any | None
+    observed_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,7 @@ class WriteFileTool(FileSystemTool):
             input_schema={
                 "type": "object",
                 "properties": {
+                    "expected_version": {"type": "string", "description": "基于 read_file 内容修改时，填它返回的 file_version；过期会拒绝覆盖，需重新读取合并。"},
                     "path": {
                         "type": "string",
                         "description": "相对工作区的目标文件路径；缺失父目录会自动创建。",
@@ -179,6 +182,10 @@ class WriteFileTool(FileSystemTool):
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             request = _write_request(self, params)
+        except StaleFileVersionError as exc:
+            return ToolHandlerOutcome("write_file", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
+        except OSError as exc:
+            return ToolHandlerOutcome("write_file", False, f"读取原文件失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
         except WriteScopeError as exc:
             return ToolHandlerOutcome(
                 "write_file",
@@ -243,6 +250,7 @@ class WriteFileTool(FileSystemTool):
         )
         result = _write_result("write_file", target, output, web_decision)
         result.result_envelope["bytes_written"] = len(request.data)
+        result.result_envelope["file_version"] = file_version(target)
         if before_content is not None and request.content is not None:
             result.result_envelope["display"] = build_text_diff_display(
                 self.display_path(target),
@@ -274,7 +282,9 @@ def _atomic_write_or_error(
             append=request.mode == "append",
         )
         with tool.quota_changes([change]):
-            _atomic_write_bytes(target, request.data, mode=request.mode)
+            _atomic_write_bytes(target, request.data, mode=request.mode, expected_version=request.observed_version)
+    except StaleFileVersionError as exc:
+        return ToolHandlerOutcome("write_file", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
     except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
         return owner_quota_error_result("write_file", exc)
     except ValueError as exc:
@@ -296,11 +306,14 @@ def _atomic_write_or_error(
     return None
 
 
+# LLM: 原格式探测前固定 observed version；显式 expected_version 绑定模型先前读取，不由路径或正文推断。
+# 函数用途: 解析写入参数、核对版本，再按原格式编码；此阶段不修改文件。
 def _write_request(tool: WriteFileTool, params: dict[str, Any]) -> WriteRequest:
     raw_path = _required_path(params.get("path"))
     content, data = _write_payload(params)
     write_mode = _write_mode(params)
     target = tool.resolve_write_path(raw_path)
+    observed_version = check_file_version(target, params.get("expected_version"))
     if content is not None:  # 文本写入:写既有文件时保留其原编码/换行,不静默改成 utf-8/LF(审计 #23)
         data = _preserve_existing_encoding(target, content, write_mode, data)
     content_policy = _content_policy(raw_path, content, tool.max_inline_content_chars)
@@ -311,24 +324,22 @@ def _write_request(tool: WriteFileTool, params: dict[str, Any]) -> WriteRequest:
         mode=write_mode,
         target=target,
         content_policy=content_policy,
+        observed_version=observed_version,
     )
 
 
+# LLM: 追加与覆盖都使用同一原格式编码器；读取或编码失败必须先报错，不允许默认 UTF-8 覆盖未知字节。
+# 函数用途: 写文件前保留原编码、BOM、端序和换行；新文件继续使用 UTF-8。
 def _preserve_existing_encoding(
     target: Path, content: str, mode: str, default_data: bytes
 ) -> bytes:
     """写既有文本文件时按其原编码+原换行写回(审计 #23):非 UTF-8/CRLF 文件不被静默改坏。
 
-    仅当覆盖/追加且目标已存在才探测;新文件/读不到时用默认 utf-8。Shift-JIS/GBK/Latin-1、带 BOM、
-    CRLF 文件写回保持原格式,不污染 diff、不坏构建。原编码表示不了新内容时 encode_text 退 utf-8。
+    仅当覆盖/追加且目标已存在才探测；无法读取或编码时不写盘，不生成混合编码文件。
     """
     if mode not in ("overwrite", "append") or not target.exists():
         return default_data
-    try:
-        raw = target.read_bytes()
-    except OSError:
-        return default_data
-    return encode_text(content, detect_encoding(raw), detect_line_ending(raw))
+    return encode_like_original(content, target.read_bytes(), append=mode == "append")
 
 
 def _system_ledger_write_blocked_result(message: str) -> ToolHandlerOutcome:
@@ -499,15 +510,29 @@ def _write_output(request: WriteOutputRequest) -> str:
     return "\n".join(notes)
 
 
-def _atomic_write_bytes(target: Path, data: bytes, *, mode: str = "overwrite") -> None:
+# LLM: 单文件发布保留普通权限但不继承提权位；create_only 通过原子 link 防止检查后并发覆盖。
+# 函数用途: 写临时文件、校验后发布；移动时继承源普通权限，新文件默认私有，失败清理临时文件。
+def _atomic_write_bytes(
+    target: Path, data: bytes, *, mode: str = "overwrite",
+    create_only: bool = False, file_mode: int | None = None, expected_version: str | None = None,
+) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
+    check_file_version(target, expected_version)
+    original_mode = file_mode if file_mode is not None else (target.stat().st_mode & 0o777 if target.exists() else None)
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{target.name}.", suffix=_temp_suffix_for(target), dir=str(target.parent)
     )
     try:
         _write_temp_bytes(fd, target, data, mode=mode)
         _validate_final_artifact_candidate(Path(tmp_name), target)
-        os.replace(tmp_name, target)
+        if original_mode is not None:
+            os.chmod(tmp_name, original_mode & 0o777)
+        check_file_version(target, expected_version)
+        if create_only:
+            os.link(tmp_name, target)
+            _unlink_temp_file(tmp_name)
+        else:
+            os.replace(tmp_name, target)
     except Exception:
         _unlink_temp_file(tmp_name)
         raise

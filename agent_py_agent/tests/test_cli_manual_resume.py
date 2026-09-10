@@ -352,7 +352,7 @@ def test_auto_resume_requires_active_goal(tmp_path):
 
 
 def test_auto_resume_with_active_goal(tmp_path):
-    """有 active goal 时授权自动续跑(dsh goal-driver 同款)。"""
+    """有 active goal 时授权自动续跑(任务运行时 goal-driver 同款)。"""
     from agent_py_agent.cli.resume_loop import _auto_resume_authorized
 
     class _GoalStore(_FakeStore):

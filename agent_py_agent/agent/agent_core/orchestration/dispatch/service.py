@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_py_agent.agent.subagents.reports import DispatchWatchRecord
+
+from typing import Any
 
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
@@ -16,7 +21,7 @@ from ....subagents.services.actions import ActionApplyOptions
 from ....subagents.services.dispatch.params import DispatchRecordParams, DispatchWatchRecordParams
 
 if TYPE_CHECKING:
-    from ..core import SimpleAgent
+    from agent_py_agent.agent.core import SimpleAgent
 
 _CAPABILITY_ROUTE_ACTIONS = {
     "WOULD_GRANT": "would_grant",

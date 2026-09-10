@@ -177,6 +177,8 @@ agent_py_agent/
 |   |   |-- model_provider_network.py   # 用户主动目录 GET/短问候，不执行工具或创建任务
 |   |   |-- model_scope.py              # 主工作片冻结 config/backend/prompts，切换不热改在途执行
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
+|   |   |-- text_file_window.py          # 普通/按行/字符读取共用的有界编码索引、seek 游标和版本失效
+|   |   |-- file_version.py              # 观察版本与显式写前置条件；不建立任务锁或冒充内核 CAS
 |   |   |-- audit_activation.py        # 显式 `/audit` 前缀 -> guarantee/window 结构化激活
 |   |   `-- tool_output_paths.py       # Memory/工具共用的 owner/task 输出归档与索引路径权威
 |   |-- concurrency/                   # 重试/退避（jittered backoff）、锁、per-thread 协作中断
@@ -188,6 +190,7 @@ agent_py_agent/
 |   |   |-- tool_approval.py           # 工具审批 request/decision/binding 与跨层调用身份协议
 |   |   `-- tool_input_schema.py       # 工具参数有限 JSON Schema 纠正/完整校验与脱敏问题路径
 |   |-- tooling/                       # 唯一 ToolRuntime/ActionPolicy/ToolExecutor、写入边界与结果投影
+|   |   |-- process_output_capture.py   # stdout/stderr 有界保留与持续排空，公开截断和完整性
 |   |   |-- computer_use_profile.py   # MIT 开源桌面执行器的 local/main + Full Access MCP 薄装配与 effect 边界
 |   |   |-- computer_use_server.py    # 启动开源执行器并复用其 PyAutoGUI 补齐滚轮工具
 |   |   |-- models.py                 # ToolModelSpec、ToolRuntimePolicy、ToolRuntime/Snapshot 与 handler outcome
@@ -227,6 +230,7 @@ agent_py_agent/
 |       |-- base.py                    # 各 provider HTTP 请求、流式解析与统一 Backend 工厂
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- test_r223_audit_regressions.py   # 外部审计的编码、版本、并发、MCP、输出、网络和恢复故障注入
 |   |-- fixtures/tui/                   # 固定尺寸/时间线的非敏感 TUI PTY 动作 fixture
 |   |-- test_adapter_ingress.py         # adapter POST 前落盘、幂等/隔离、响应丢失与崩溃恢复回归
 |   |-- test_agent_transcript.py        # 子代理公开过程事件的增量游标、隔离和有界裁剪回归
@@ -289,6 +293,9 @@ docs/
 |-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
 |-- audits/TUI_FUNCTION_AUDIT_20260828.md # 真实 TUI 逐功能结果、问题根因、修复影响与复验证据账
 |-- audits/R222_MODEL_PROVIDER_REPORT.md # 通用模型管理、35模型短测结果、具体修复与剩余问题
+|-- audits/R223_87_ITEM_REMEDIATION.md # 87 项外部审计逐项复核、修复证据和未验边界
+|-- audits/r223-report/                 # R223 中文只读 HTML 报告的独立公开目录，不放配置或任务产物
+|   `-- index.html                     # 87 项大白话、技术说明、剩余问题与验证证据快照，无外部依赖
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
 |-- design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md # 后台命令 host 所有权、跨进程记录与安全回收设计
 |-- design/FEATURE-20260818-终端交互-tui-parity.md # 终端交互 TUI Python 原生复刻的用户行为、事件架构与验收规格
@@ -310,6 +317,13 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `docs/audits/r223-report/index.html`：R223 台账的人工阅读快照；只开放此目录提供 HTTP，不能把仓库或 owner home 当静态根目录。
+- `agent/common/text_file_window.py`：64 KiB 流式索引、有限检查点与页面 cookie；编码和字符坐标只保留一个实现。
+- `agent/common/file_version.py`：read_file 返回观察版本，write/edit/patch 明确携带前置条件；外部写入者不被强制纳管。
+- `agent/tooling/process_output_capture.py`：前台进程每流最多保留 4 MiB，仍持续排空并公开不完整事实，不假装完整大输出归档。
+- `agent_py_agent/tests/test_r223_audit_regressions.py`：本轮底层故障样本；真实 TUI 另记在 R223 审计报告，不相互冒充。
+- 已删除 `agent/agent_core/_compression_service.py` 的旧记忆拼接路径；正式 Compact 仍由 ConversationStore/checkpoint/CAS 负责。
 
 - `agent/tooling/tool_search_state.py`：只读最新结构化工具轮的未消费工具名称；不修改授权、缓存归档或运行状态。
 - `agent_py_agent/tests/test_tool_search_state.py`：验证当前轮、旧尾记录、损坏信封和自然语言不能授予临时工具。

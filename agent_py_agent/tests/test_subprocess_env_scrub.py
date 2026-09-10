@@ -46,3 +46,9 @@ def test_passthrough_cannot_override_self_managed_credential():
 
 def test_empty_env():
     assert scrub_subprocess_env({}) == {}
+
+
+def test_secret_names_cannot_hide_behind_safe_prefixes_or_case():
+    secrets = dict.fromkeys(("HOME_API_KEY", "USER_TOKEN", "PYTHON_SECRET", "PIP_PASSWORD", "XDG_PRIVATE_KEY", "agent_api_key", "minimax_api_key"), "test-only")
+    assert scrub_subprocess_env(secrets) == {}
+    assert scrub_subprocess_env(secrets, passthrough=frozenset({"agent_api_key"})) == {}

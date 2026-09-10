@@ -34,8 +34,6 @@ _LONG_TERM_TARGET_TYPES = frozenset({"long_term_fact", "event", "project"})
 
 # 写路径查重:表述变体(LCS 覆盖率)与长度差双闸,只合并"逐字近重复"的同一断言,
 # 绝不把不同事实(加信息/换词义)并掉——漏并多存一条,误并丢信息,后者更糟。
-_MERGE_CONTENT_SIMILARITY = 0.90
-_MERGE_MAX_LENGTH_RATIO = 0.20
 
 # 英文关键词抽取:只收 ASCII 词面(结构化),不做词义判断;用于 BM25 臂跨语言命中。
 _EN_KEYWORD_MIN_LEN = 3
@@ -405,7 +403,7 @@ class _PromotionCommitMixin:
             return self._commit_long_term_add(candidate, existing)
         return self._commit_long_term_existing(candidate, existing)
 
-    # LLM: add 走逐字近重复合入或全新条目;冲突/幂等失败以稳定码抛出,由主流程转为 blocked。
+    # LLM: add 不得隐式转换为 replace；同 subject/scope 的冲突要求显式目标，不同主体分别保存。
     # 函数用途: 提交新增长期事实(add 分支)。
     def _commit_long_term_add(
         self,
@@ -417,25 +415,6 @@ class _PromotionCommitMixin:
                 "SUBJECT_SCOPE_CONFLICT_REQUIRES_REPLACE",
                 tuple(item.entry_id for item in existing),
             )
-        # 写路径查重:同 scope 内"逐字近重复"的旧断言合入旧条目不新增;跨 subject 变体非矛盾。
-        near = _near_duplicate_in_scope(self.long_term.all(), candidate)
-        if near is not None:
-            record = self.long_term.apply_batch(
-                [
-                    {
-                        "action": "replace",
-                        "entry_id": near.entry_id,
-                        "content": candidate.content,
-                        "kind": _long_term_kind(candidate.candidate_type),
-                        "tags": _merged_tags(near, candidate),
-                        "attributes": _long_term_attributes(candidate),
-                        "source": f"candidate:{candidate.candidate_id}",
-                        "expires_at": _expiry_epoch(candidate.valid_until),
-                        "expected_version": near.version,
-                    }
-                ]
-            )[0]
-            return "memory/long_term/memory.jsonl#" + record.entry_id
         entry_id = "memory-" + hashlib.sha256(
             candidate.candidate_id.encode("utf-8")
         ).hexdigest()[:24]
@@ -918,72 +897,6 @@ def _absolute_authority_block(candidate: MemoryCandidate) -> str:
     return ""
 
 
-# LLM: 查重是字符级确定性算法(LCS 覆盖率+长度差),不解析词义,不依赖 embedding 端点。
-# 函数用途: 归一化正文后计算两段文字的 LCS 覆盖率。
-def _text_similarity(a: str, b: str) -> float:
-    ta = "".join(str(a or "").lower().split())
-    tb = "".join(str(b or "").lower().split())
-    if not ta or not tb:
-        return 0.0
-    if ta == tb:
-        return 1.0
-    if abs(len(ta) - len(tb)) / max(len(ta), len(tb)) > _MERGE_MAX_LENGTH_RATIO:
-        return 0.0
-    lcs = _lcs_length(ta, tb)
-    return 2.0 * lcs / (len(ta) + len(tb))
-
-
-def _lcs_length(a: str, b: str) -> int:
-    if not a or not b:
-        return 0
-    if len(a) > len(b):
-        a, b = b, a
-    prev = [0] * (len(b) + 1)
-    for row in range(len(a)):
-        cur = [0] * (len(b) + 1)
-        ach = a[row]
-        for col in range(len(b)):
-            if ach == b[col]:
-                cur[col + 1] = prev[col] + 1
-            else:
-                cur[col + 1] = prev[col + 1] if prev[col + 1] >= cur[col] else cur[col]
-        prev = cur
-    return prev[-1]
-
-
-# LLM: 查重范围限定同 scope;跨 scope 近重复是不同语境的记忆,不得合并。
-# 函数用途: 在同 scope active 记录里找与候选内容"逐字近重复"的条目。
-def _near_duplicate_in_scope(
-    records: list[MemoryRecord],
-    candidate: MemoryCandidate,
-) -> MemoryRecord | None:
-    scope = MemoryScope.from_value(candidate.scope)
-    best: MemoryRecord | None = None
-    best_score = 0.0
-    for record in records:
-        attributes = record.attributes if isinstance(record.attributes, dict) else {}
-        if not _same_scope_identity(
-            str(attributes.get("scope_type") or "legacy"),
-            attributes.get("scope_key") or "legacy",
-            scope,
-        ):
-            continue
-        score = _text_similarity(candidate.content, record.content)
-        if score > best_score:
-            best, best_score = record, score
-    if best is None or best_score < _MERGE_CONTENT_SIMILARITY:
-        return None
-    return best
-
-
-# LLM: 合并时保留旧条目身份(subject_key/entry_id 不动),正文用新表述,证据与标签追加去重。
-# 函数用途: 把候选证据并入被查重命中的旧条目 tags。
-def _merged_tags(prior: MemoryRecord, candidate: MemoryCandidate) -> list[str]:
-    merged = [str(tag) for tag in (prior.tags or [])]
-    for tag in (candidate.candidate_type, candidate.origin):
-        if tag and tag not in merged:
-            merged.append(tag)
-    return merged[:12]
 
 
 # LLM: 英文关键词只做词面抽取(ASCII 词/小写/停用词过滤),不做词义或翻译判断。

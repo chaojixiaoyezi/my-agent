@@ -650,6 +650,9 @@ def _summarize_live_compact(
     interrupt_check = partial(_native_compact_interrupted, params)
     try:
         raise_if_compact_interrupted(interrupt_check)
+        from ._finalization_service import _request_memory_curator
+
+        _request_memory_curator(agent, "pre_compact")
         summary = _native_tool_history_summary(
             agent,
             params,

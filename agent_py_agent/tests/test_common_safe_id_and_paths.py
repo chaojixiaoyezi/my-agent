@@ -58,7 +58,6 @@ def test_read_text_lines_cached_serves_unchanged_and_invalidates(tmp_path):
 def test_model_endpoint_env_exported_for_subprocesses(tmp_path, monkeypatch):
     """R13c 实锤钉子:agent 初始化必须把自用端点暴露为 AGENT_API_BASE/
     AGENT_MODEL_NAME(子进程 LLM 子调用不再猜端点);用户已设值不覆盖。"""
-    import os
 
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig

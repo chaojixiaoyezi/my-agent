@@ -1,5 +1,15 @@
 # Subagent Progress
 
+## R223 外部审计复核
+
+- `create_subagents` 的存储/内部异常不再归为参数错误；保留 error_type、分类及可能部分创建的事实，
+  后续先查询现有子代理，不能根据失败文本盲目再派一批。
+- 父子等待状态加载失败明确返回 unavailable/error_count，不再用“检查了零项”冒充健康。
+- 共享 owner home 仍允许正常协作，不重新加入任务目录锁。文件工具新增显式乐观版本检查，
+  但 Shell/外部编辑器未参与此协议时不能宣称强制单写者或内核 CAS。
+- 历史恢复、旧 final 精确去重、跨任务目录操作读取当前回归；主/子完整长历史仍需分项真 TUI 验收。
+  逐项状态与本轮证据见 [R223](../../audits/R223_87_ITEM_REMEDIATION.md)。
+
 ## R219 主/子上下文统一（真实 TUI 分项通过）
 
 删除 runner trace 的旧 run 属性数字写入与读取；统一在模型 preflight 写入该 child 的 agent_thread_id。

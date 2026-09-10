@@ -8,6 +8,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from ..common.encoding_detect import decode_bytes, encode_like_original
+from ..common.file_version import StaleFileVersionError, check_file_version, file_version
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, OwnerQuotaUnavailable
 from ._filesystem_display import build_text_diff_display
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
@@ -40,6 +42,18 @@ class PatchTargetMissingError(ValueError):
     """
 
 
+# LLM: 批量补丁不是文件系统事务；保留已提交路径与失败目标，不得把部分写入说成零副作用。
+# 类用途: 将多文件执行中途失败的事实带回工具结果。
+class PatchApplyError(OSError):
+    # LLM: 只保存本次执行的结构化路径与异常类型；不执行补偿覆盖，避免毁掉并发修改。
+    # 函数用途: 包装补丁执行失败和此前已生效的路径。
+    def __init__(self, cause: Exception, touched: list[str], failed_path: str):
+        super().__init__(str(cause))
+        self.touched = list(touched)
+        self.failed_path = failed_path
+        self.error_code = "STALE_VERSION" if isinstance(cause, StaleFileVersionError) else "TOOL_EXECUTION_FAILED"
+
+
 # LLM: The patch schema stays 会话运行时 and now routes small exact
 # replacements toward edit_file; hints are selection guidance, not authority.
 # 函数用途: 构建 apply_patch 的模型说明，讲清多文件补丁语法和少量局部修改的更合适入口。
@@ -68,7 +82,9 @@ def _build_apply_patch_model_spec() -> ToolModelSpec:
                         "再在 + 版本后写新增行；最后一行必须是 *** End Patch。"
                         "不要使用 ---/+++ 统一 diff。"
                     ),
-                }
+                },
+                "expected_versions": {"type": "object", "additionalProperties": {"type": "string"},
+                                      "description": "基于读取修改时，填路径到 read_file.file_version 的映射；过期先重读合并。"},
             },
             "required": ["patch"],
             "additionalProperties": False,
@@ -117,6 +133,8 @@ class ApplyPatchTool(FileSystemTool):
             access_options,
         )
 
+    # LLM: 资源锁目标来自完整补丁协议；移动必须同时包含源与目的路径，不从正文猜测。
+    # 函数用途: 解析整份补丁的全部写入资源，供统一执行入口使用。
     # seq 253 #5：apply_patch 的写目标在 patch 文本里（Add/Update/Delete File
     # 逐目标），不在 resource_scopes 参数中——经协议从 patch 结构化解析全部
     # 目标文件，operation lock 逐目标覆盖（多文件 patch 全上锁）。
@@ -136,11 +154,14 @@ class ApplyPatchTool(FileSystemTool):
             return ()
         roots: list[str] = []
         for change in changes:
-            path = Path(str(change.get("path") or ""))
-            if not path.is_absolute():
-                path = workspace_root / path
-            roots.append(str(path.resolve()))
-        return tuple(roots)
+            for raw_path in (change.get("path"), change.get("move_to")):
+                if not raw_path:
+                    continue
+                path = Path(str(raw_path))
+                if not path.is_absolute():
+                    path = workspace_root / path
+                roots.append(str(path.resolve()))
+        return tuple(dict.fromkeys(roots))
 
     # LLM: 成功结果附带预检阶段生成的有界结构化 diff；display 仅供客户端渲染，不参与写入、配额或成功判断。
     # 函数用途: 校验并应用一份文本补丁，同时返回单文件或多文件的终端差异展示数据。
@@ -148,6 +169,7 @@ class ApplyPatchTool(FileSystemTool):
         try:
             patch = _text_param(params.get("patch"), name="patch", max_chars=_MAX_WRITE_TEXT_CHARS)
             changes = _parse_simple_patch(patch)
+            versions = _patch_expected_versions(changes, self, params.get("expected_versions"))
             if approval_error := _persona_patch_approval_error(changes, self):
                 return ToolHandlerOutcome(
                     "apply_patch",
@@ -157,9 +179,18 @@ class ApplyPatchTool(FileSystemTool):
                 )
             quota_changes, display = _preview_patch_quota_changes(changes, self)
             with self.quota_changes(quota_changes):
-                touched = _apply_simple_patch(changes, self)
+                touched = _apply_simple_patch(changes, self, versions=versions)
+        except StaleFileVersionError as exc:
+            return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
         except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
             return owner_quota_error_result("apply_patch", exc)
+        except PatchApplyError as exc:
+            return ToolHandlerOutcome(
+                "apply_patch", False, f"补丁未全部完成，已提交 {len(exc.touched)} 个路径；失败目标 {exc.failed_path}: {exc}",
+                error_code=exc.error_code, effect_outcome="failed" if exc.touched else "not_started" if exc.error_code == "STALE_VERSION" else "unknown",
+                result_envelope={"files_modified": exc.touched, "failed_path": exc.failed_path,
+                                 "partial_commit": bool(exc.touched), "failed_path_effect": "unknown"},
+            )
         except PatchTargetMissingError as exc:
             # 目标文件不存在(Update/Delete)→PATH_NOT_FOUND(改路径/先定位)，而非
             # TOOL_INVALID_ARGUMENTS——后者会让模型反复重写补丁文本而非确认路径。
@@ -240,7 +271,7 @@ def _parse_add_file(lines: list[str], index: int) -> tuple[dict[str, Any], int]:
     return {"type": "add", "path": path, "content": content}, index
 
 
-# LLM: Update headers require a path and a real mutation (or an explicit move); rejecting no-op sections prevents false succeeded operations and mirrors 会话运行时's empty-hunk contract.
+# LLM: 每个 @@ 对应独立 hunk，保留显式上下文和 EOF 标记；不得把不相邻块拼成一个字符串。
 # 函数用途: 解析更新/移动段；空补丁不能伪装成成功，并用完整追加示例帮助模型一次修对。
 def _parse_update_file(lines: list[str], index: int) -> tuple[dict[str, Any], int]:
     path = lines[index].removeprefix("*** Update File: ").strip()
@@ -250,16 +281,34 @@ def _parse_update_file(lines: list[str], index: int) -> tuple[dict[str, Any], in
     move_to, index = _parse_optional_move(lines, index)
     old: list[str] = []
     new: list[str] = []
-    while index < len(lines) - 1 and not lines[index].startswith("*** "):
-        _append_update_line(lines[index], old, new)
+    chunks: list[dict[str, Any]] = []
+    context = ""
+    end_of_file = False
+    while index < len(lines) - 1:
+        line = lines[index]
+        if line == "*** End of File":
+            end_of_file = True
+            index += 1
+            break
+        if line.startswith("*** "):
+            break
+        if line.startswith("@@"):
+            if old or new:
+                chunks.append({"old": old, "new": new, "context": context, "eof": False})
+                old, new = [], []
+            context = line[2:].lstrip()
+        else:
+            _append_update_line(line, old, new)
         index += 1
-    if not move_to and old == new:
+    if old or new:
+        chunks.append({"old": old, "new": new, "context": context, "eof": end_of_file})
+    if not move_to and not any(chunk["old"] != chunk["new"] for chunk in chunks):
         raise ValueError(
             f"Update File 段不能为空或只有未变上下文: {path}。"
             "替换示例：-old\\n+new；末尾追加示例："
             "-last line\\n+last line\\n+appended line"
         )
-    return {"type": "update", "path": path, "move_to": move_to, "old": old, "new": new}, index
+    return {"type": "update", "path": path, "move_to": move_to, "chunks": chunks}, index
 
 
 def _parse_optional_move(lines: list[str], index: int) -> tuple[str, int]:
@@ -285,8 +334,6 @@ def _append_update_line(current: str, old: list[str], new: list[str]) -> None:
     if current.startswith("+"):
         new.append(current[1:])
         return
-    if current.startswith("@@"):
-        return
     raise ValueError(
         f"无法解析 Update 补丁行: {current}。每行必须以 +（新增）、-（删除）"
         "或一个真实空格（未变化上下文）开头；例如：-old\\n+new。"
@@ -294,22 +341,52 @@ def _append_update_line(current: str, old: list[str], new: list[str]) -> None:
     )
 
 
-def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool) -> list[str]:
+# LLM: 同份补丁的自有修改推进本地观察版本；外部版本变化必须报部分提交，不能回滚覆盖并发写入。
+# 函数用途: 按顺序执行预检过的补丁，每个目标提交前复核版本。
+def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool, *, versions: dict | None = None) -> list[str]:
     touched: list[str] = []
     for change in changes:
-        kind = str(change["type"])
         target = tool.resolve_write_path(str(change["path"]))
-        if kind == "add":
-            _apply_add_patch(change, target, tool, touched)
-            continue
-        if kind == "delete":
-            _apply_delete_patch(target, tool, touched)
-            continue
-        if kind == "update":
-            _apply_update_patch(change, target, tool, touched)
-            continue
-        raise ValueError(f"未知补丁类型: {kind}")
+        previous_count = len(touched)
+        try:
+            if versions is not None:
+                check_file_version(target, versions.get(target))
+            _apply_patch_change(change, target, tool, touched)
+            if versions is not None:
+                changed = (tool.resolve_write_path(name) for name in touched[previous_count:])
+                versions.update((path, file_version(path)) for path in changed)
+        except (OSError, ValueError) as exc:
+            raise PatchApplyError(exc, touched, tool.display_path(target)) from exc
     return touched
+
+
+# LLM: 单目标分发不拥有版本或事务权威；调用方保存前置版本和已提交列表，失败不得隐藏部分副作用。
+# 函数用途: 执行已解析的增删改操作，成功写入路径追加到调用方的提交记录。
+def _apply_patch_change(change: dict, target: Path, tool: FileSystemTool, touched: list[str]) -> None:
+    kind = str(change["type"])
+    if kind == "add":
+        _apply_add_patch(change, target, tool, touched)
+    elif kind == "delete":
+        _apply_delete_patch(target, tool, touched)
+    elif kind == "update":
+        _apply_update_patch(change, target, tool, touched)
+    else:
+        raise ValueError(f"未知补丁类型: {kind}")
+
+
+# LLM: 版本映射只能指向当前补丁实际目标，权限仍由 resolve_write_path 决定；不构造任务目录所有权。
+# 函数用途: 验证预期版本并冻结预检前文件状态，供整份补丁后续核对。
+def _patch_expected_versions(changes: list, tool: FileSystemTool, expected: object) -> dict[Path, str]:
+    if expected is not None and not isinstance(expected, dict):
+        raise ValueError("expected_versions 必须是路径到版本字符串的对象")
+    paths = list(_persona_patch_paths(changes, tool))
+    versions = {path: file_version(path) for path in paths}
+    for raw, version in (expected or {}).items():
+        path = tool.resolve_write_path(raw)
+        if path not in versions:
+            raise ValueError("expected_versions 只能包含当前补丁的目标路径")
+        versions[path] = check_file_version(path, version)
+    return versions
 
 
 # LLM: 预检必须按补丁顺序模拟同路径的连续变更，并同时生成与最终字节一致的 UI diff；UI 数据不能反向改变配额裁决。
@@ -360,11 +437,12 @@ def _preview_patch_quota_changes(
             raise ValueError(f"未知补丁类型: {kind}")
         if existing is None:
             raise PatchTargetMissingError(f"更新文件不存在: {tool.display_path(target)}")
-        content = existing.decode("utf-8")
-        old, new = _replacement_text(change, content, tool.display_path(target))
-        updated_text = content.replace(old, new, 1)
-        updated = updated_text.encode("utf-8")
+        content = decode_bytes(existing)[0].replace("\r\n", "\n").replace("\r", "\n")
+        updated_text = _apply_update_chunks(change, content, tool.display_path(target))
+        updated = encode_like_original(updated_text, existing)
         destination = _patch_destination(change, target, tool)
+        if destination != target and current_bytes(destination) is not None:
+            raise ValueError(f"移动目标已存在，未覆盖: {tool.display_path(destination)}")
         states[destination] = updated
         if destination != target:
             states[target] = None
@@ -386,7 +464,7 @@ def _preview_patch_quota_changes(
 # 函数用途: 尝试把补丁目标字节解成 UTF-8 文本供差异展示。
 def _decode_patch_display_text(content: bytes) -> str | None:
     try:
-        return content.decode("utf-8")
+        return decode_bytes(content)[0]
     except UnicodeError:
         return None
 
@@ -421,6 +499,8 @@ def _persona_patch_paths(changes: list[dict[str, Any]], tool: FileSystemTool) ->
             yield tool.resolve_write_path(move_to)
 
 
+# LLM: add 的发布使用原子“不存在才创建”；不能以提前 exists 检查充当并发保护。
+# 函数用途: 新增补丁文件并登记已落盘目标，保留其他调用并发创建的文件。
 def _apply_add_patch(
     change: dict[str, Any],
     target: Path,
@@ -429,7 +509,7 @@ def _apply_add_patch(
 ) -> None:
     if target.exists():
         raise ValueError(f"新增文件已存在: {tool.display_path(target)}")
-    _atomic_write_bytes(target, str(change["content"]).encode("utf-8"))
+    _atomic_write_bytes(target, str(change["content"]).encode("utf-8"), create_only=True)
     touched.append(tool.display_path(target))
 
 
@@ -442,6 +522,8 @@ def _apply_delete_patch(target: Path, tool: FileSystemTool, touched: list[str]) 
     touched.append(tool.display_path(target))
 
 
+# LLM: 编辑使用原始字节格式；移动通过 create_only 发布，源删除前先登记目标以报告部分副作用。
+# 函数用途: 更新或移动补丁文件，保留编码和可执行位；目标已存在或并发出现时不覆盖。
 def _apply_update_patch(
     change: dict[str, Any],
     target: Path,
@@ -450,38 +532,59 @@ def _apply_update_patch(
 ) -> None:
     if not target.exists():
         raise PatchTargetMissingError(f"更新文件不存在: {tool.display_path(target)}")
-    content = target.read_text(encoding="utf-8")
-    old, new = _replacement_text(change, content, tool.display_path(target))
-    updated = content.replace(old, new, 1)
+    observed_version = file_version(target)
+    original = target.read_bytes()
+    content = decode_bytes(original)[0].replace("\r\n", "\n").replace("\r", "\n")
+    updated = _apply_update_chunks(change, content, tool.display_path(target))
     destination = _patch_destination(change, target, tool)
-    _atomic_write_bytes(destination, updated.encode("utf-8"))
-    if destination != target:
-        target.unlink()
+    if destination != target and destination.exists():
+        raise ValueError(f"移动目标已存在，未覆盖: {tool.display_path(destination)}")
+    check_file_version(target, observed_version)
+    _atomic_write_bytes(destination, encode_like_original(updated, original),
+                        create_only=destination != target, file_mode=target.stat().st_mode & 0o777,
+                        expected_version=observed_version if destination == target else "absent")
     touched.append(tool.display_path(destination))
+    if destination != target:
+        check_file_version(target, observed_version)
+        target.unlink()
+        touched.append(tool.display_path(target))
 
 
-# LLM: Context mismatch feedback follows 会话运行时 by returning the exact expected
-# old lines, while staying bounded and pointing small edits to edit_file.  It
-# must never relax apply_patch's byte-accurate match or mutate the file on miss.
-# 函数用途: 找到补丁要替换的原文；未命中时回显有界的期望行，帮助模型修正空格或改用局部编辑工具。
-def _replacement_text(change: dict[str, Any], content: str, display_path: str) -> tuple[str, str]:
-    old = "\n".join(change["old"]) + "\n"
-    new = "\n".join(change["new"]) + "\n"
-    if old in content:
-        return old, new
-    old = old.rstrip("\n")
-    new = new.rstrip("\n")
-    if old not in content:
-        expected = old
-        if len(expected) > _MAX_MISSING_CONTEXT_PREVIEW_CHARS:
-            expected = expected[:_MAX_MISSING_CONTEXT_PREVIEW_CHARS] + "\n…（期望行已截断）"
-        raise ValueError(
-            f"补丁上下文未命中: {display_path}\n"
-            "未找到以下补丁原始行（逐字匹配，包含空格与缩进）:\n"
-            f"{expected}\n"
-            "请读取目标位置的最新片段后重试；只改一处或少数片段时可改用 edit_file。"
-        )
-    return old, new
+# LLM: 先在原行数组定位各块、最后逆序应用；歧义必须要求更多上下文。
+# 函数用途: 应用独立的多 hunk，保留未改区域；删除、EOF 与纯追加均有明确语义。
+def _apply_update_chunks(change: dict[str, Any], content: str, display_path: str) -> str:
+    lines = content.split("\n")
+    trailing_newline = bool(lines and lines[-1] == "")
+    if trailing_newline:
+        lines.pop()
+    cursor = 0
+    replacements: list[tuple[int, int, list[str]]] = []
+    for chunk in change["chunks"]:
+        context = chunk["context"]
+        if context:
+            positions = [i for i in range(cursor, len(lines)) if lines[i] == context]
+            if len(positions) != 1:
+                raise ValueError(f"补丁跳转上下文未唯一命中: {display_path}: {context}")
+            cursor = positions[0] + 1
+        old, new = chunk["old"], chunk["new"]
+        if not old:
+            replacements.append((len(lines), 0, new))
+            continue
+        matches = [i for i in range(cursor, len(lines) - len(old) + 1)
+                   if lines[i:i + len(old)] == old and (not chunk["eof"] or i + len(old) == len(lines))]
+        if len(matches) != 1:
+            expected = "\n".join(old)[:_MAX_MISSING_CONTEXT_PREVIEW_CHARS]
+            reason = "未命中" if not matches else "不唯一"
+            raise ValueError(
+                f"补丁上下文{reason}: {display_path}\n未找到唯一的以下补丁原始行:\n{expected}\n"
+                "请 read_file 读取最新原文并增加上下文；局部修改也可用 edit_file。"
+            )
+        start = matches[0]
+        replacements.append((start, len(old), new))
+        cursor = start + len(old)
+    for start, count, new in reversed(replacements):
+        lines[start:start + count] = new
+    return "\n".join(lines) + ("\n" if trailing_newline and lines else "")
 
 
 def _patch_destination(change: dict[str, Any], target: Path, tool: FileSystemTool) -> Path:

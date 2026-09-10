@@ -332,10 +332,8 @@ def _nested_create_params(
     }
 
 
-# LLM: Root child creation shares the current tool cancellation token.  ToolCancelled must
-# escape the diagnostic fallback so the canonical Tool Gateway records CANCELLED rather than
-# misclassifying an explicit /stop as an invalid model argument.
-# 函数用途: 在唯一创建事务里创建根子代理；用户停止时立即退出安全点并交给停止侧收口已落盘记录。
+# LLM: 显式参数验证自行返回参数码；事务逃逸的异常属于服务/存储错误，可能已部分创建，不能教模型删参数盲重试。
+# 函数用途: 在唯一事务里创建子代理，取消交给停止链，系统故障返回可核对的未知副作用事实。
 def execute_create_subagents_service(
     agent: SimpleAgent,
     params: dict[str, object],
@@ -348,25 +346,25 @@ def execute_create_subagents_service(
     except ToolCancelled:
         raise
     except Exception as exc:
-        # create_subagents 在真实 dispatch 路径上会偶发崩溃(真机 B1/R3:合法 goal+output_files
-        # 调用也抛异常,堆栈没落到任何日志,模型只看到无信息、retryable=False 的 UNKNOWN_ERROR 兜底码
-        # 就放弃、退回主代理独自写)。这里兜住异常:① 记完整 traceback 便于定位;② 把异常类型+摘要
-        # 写进报错消息(工具账本里就能看到崩在哪);③ 用 retryable 的 TOOL_INVALID_ARGUMENTS 让模型
-        # 换简单写法重试,而不是吞成 UNKNOWN_ERROR 直接弃疗。
         import logging
         import traceback as _tb
 
+        from ..common.log_redaction import redact_sensitive_text
+
         logging.getLogger(__name__).error(
             "create_subagents crashed: %s\n%s",
-            exc,
-            _tb.format_exc(),
+            type(exc).__name__,
+            redact_sensitive_text(_tb.format_exc()),
         )
         return ToolHandlerOutcome(
             "create_subagents",
             False,
-            f"create_subagents 执行时内部出错({type(exc).__name__}: {exc})。多半是某个参数触发的内部问题——"
-            "换最简单的写法重试:只传一个 goal、先别带 output_files 等附加字段。别因此就改回自己写。",
-            error_code="TOOL_INVALID_ARGUMENTS",
+            f"子代理创建服务出错（{type(exc).__name__}），不是已经确认的参数错误。"
+            "可能已有部分创建；先用 list_agents 核对当前子代理，避免重复派工。",
+            error_code="TOOL_EXECUTION_FAILED",
+            effect_outcome="unknown",
+            result_envelope={"error_type": type(exc).__name__, "partial_creation_possible": True,
+                             "error_category": "storage" if isinstance(exc, OSError) else "internal"},
         )
 
 

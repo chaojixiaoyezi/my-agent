@@ -7,6 +7,7 @@ from __future__ import annotations
 # 模块用途: 提供长期事实的稳定 ID 新增/替换/删除、原子批处理、hard delete 与 active 召回。
 
 import json
+import logging
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
@@ -172,6 +173,7 @@ class _JsonlMemoryIdentityMixin:
         ops_path: str | Path | None = None,
         candidate_service: CandidateService | None = None,
         embedder: object | None = None,
+        semantic_status: dict[str, str] | None = None,
         quota_enforcer: OwnerQuotaEnforcer | None = None,
     ):
         """初始化 JSONL 记忆文件位置，并确保父目录存在。
@@ -190,6 +192,8 @@ class _JsonlMemoryIdentityMixin:
         self.candidate_service = candidate_service
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._embedder = embedder  # 配了 → 记忆召回加一路语义向量(检索拓宽 #1);None → 纯关键词
+        self._semantic_status = dict(semantic_status or {"state": "configured" if embedder is not None else "disabled"})
+        self._semantic_errors: dict[str, str] = {}
         self._vector_store_cache = None
         self.quota_enforcer = quota_enforcer
         # 访问信号缓冲:命中先累积内存,随下一次写原子落盘,避免每次召回都写一次文件。
@@ -493,15 +497,17 @@ class _JsonlMemoryMutationMixin:
 # 类用途: 提供关键词/语义融合与 scope 内确定性召回。
 class _JsonlMemorySearchMixin:
     # LLM: 每个向量命中必须按 active entry ID 和正文逐字复核，旧向量不能复活历史内容。
-    # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果。
+    # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果，失败保留可观察降级状态。
     def _semantic_records(self, query: str, top_k: int) -> list[MemoryRecord]:
-        store = self._vector_store()
-        if store is None:
-            return []
         try:
+            store = self._vector_store()
+            if store is None:
+                return []
             query_vec = self._embedder.embed([query])[0]
             hits = store.search(query_vec, top_k=top_k)
-        except Exception:
+            self._record_semantic_health("search")
+        except Exception as exc:
+            self._record_semantic_health("search", exc)
             return []
         active = {record.entry_id: record for record in self.all()}
         records: list[MemoryRecord] = []
@@ -785,7 +791,7 @@ class _JsonlMemoryLifecycleMixin:
         load_error_count = len(report.load_errors) + invalid_records
         return {
             "state": "available",
-            "health": "degraded" if load_error_count else "healthy",
+            "health": "degraded" if load_error_count or self._semantic_status.get("state") == "degraded" else "healthy",
             "active_total": len(active),
             "active_by_kind": by_kind,
             "event_total": len(events),
@@ -793,12 +799,28 @@ class _JsonlMemoryLifecycleMixin:
             "load_error_codes": sorted(set(error_codes)),
             "text_index": "configured" if self.local_store is not None else "unconfigured",
             "semantic_index": "configured" if self._embedder is not None else "unconfigured",
+            "semantic_recall": dict(self._semantic_status),
         }
 
 
 # LLM: This mixin owns reads and rebuildable search projections; it never becomes the formal memory authority.
 # 类用途: 从 active JSONL 读取并执行关键词、FTS 与可选向量召回。
 class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixin, JsonlMemoryIndexMixin):
+    # LLM: 按操作独立记录派生索引错误；只有该操作成功才清除，检索成功不能掩盖索引写失败。
+    # 函数用途: 更新健康投影并给出不含密钥/正文的警告，正式 JSONL 状态不受影响。
+    def _record_semantic_health(self, operation: str, error: Exception | None = None) -> None:
+        if error is None:
+            self._semantic_errors.pop(operation, None)
+        else:
+            code = type(error).__name__
+            if self._semantic_errors.get(operation) != code:
+                logging.getLogger(__name__).warning("语义记忆 %s 降级（%s），正式记忆保留", operation, code)
+            self._semantic_errors[operation] = code
+        self._semantic_status = {
+            "state": "degraded" if self._semantic_errors else "configured",
+            **({"errors": dict(self._semantic_errors)} if self._semantic_errors else {}),
+        }
+
     # LLM: 向量库位于当前 owner memory 根且仅是 lazy projection；无 embedder 时必须完全关闭。
     # 函数用途: 获取当前 owner 的可重建向量索引实例。
     def _vector_store(self):
@@ -815,16 +837,17 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
         return self._vector_store_cache
 
     # LLM: 向量写失败不改变权威提交；metadata 仍需携带可与 active JSONL 复核的完整身份。
-    # 函数用途: 尽力把一条正式记忆写入向量索引。
+    # 函数用途: 尽力把一条正式记忆写入向量索引，失败进入健康诊断，不回滚正式记忆。
     def _index_vector(self, record: MemoryRecord) -> None:
-        store = self._vector_store()
-        if store is None:
-            return
         try:
+            store = self._vector_store()
+            if store is None:
+                return
             vector = self._embedder.embed([record.content])[0]
             store.upsert(_record_vec_id(record), vector, text=record.content, metadata=_record_payload(record))
-        except Exception:
-            pass  # 向量索引失败不打断记忆写入(JSONL 才是事实源)
+            self._record_semantic_health("index")
+        except Exception as exc:
+            self._record_semantic_health("index", exc)
 
     # LLM: 删除只针对精确 entry ID 的派生向量，失败不能使索引获得事实权威。
     # 函数用途: 尽力清除一条已删除记忆的向量项。

@@ -21,7 +21,6 @@ from types import SimpleNamespace
 from ..conversation.authority import conversation_transcript_is_authoritative
 from ..conversation.task_state import conversation_task_link_is_terminal
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
-from ._compression_service import CompressionService
 from ._finalization_service import FinalizationService
 from ._runtime_params import FinalizeContext
 from .cli_run_conversation import (
@@ -56,17 +55,9 @@ from .runtime.run_params import (
 
 @dataclass
 class _RuntimeServices:
-    compression: CompressionService
     finalization: FinalizationService
 
 
-@dataclass(frozen=True)
-class _CompressionSnapshotRequest:
-    user_prompt: object
-    memories: object
-    runtime_injections: object
-    routed_context: object
-    resume_context_section: object
 
 
 @dataclass(frozen=True)
@@ -151,40 +142,10 @@ class SimpleAgentRuntimeMixin:
     def _get_services(self) -> _RuntimeServices:
         if self._services is None:
             self._services = _RuntimeServices(
-                compression=CompressionService(self),
                 finalization=FinalizationService(self),
             )
         return self._services
 
-    def _compress_memories(self, memories: list[object], *, keep_recent: int) -> list[object]:
-        return self._get_services().compression._compress_memories(
-            memories, keep_recent=keep_recent
-        )
-
-    def _build_compression_snapshot_content(
-        self,
-        *,
-        params: _CompressionSnapshotRequest | None = None,
-        user_prompt=None,
-        memories=None,
-        runtime_injections=None,
-        routed_context=None,
-        resume_context_section=None,
-    ):
-        from ._compression_service import CompressionSnapshotContentParams
-
-        values = params or _CompressionSnapshotRequest(
-            user_prompt, memories, runtime_injections, routed_context, resume_context_section
-        )
-        return self._get_services().compression._build_compression_snapshot_content(
-            CompressionSnapshotContentParams(
-                user_prompt=values.user_prompt,
-                memories=values.memories,
-                runtime_injections=values.runtime_injections,
-                routed_context=values.routed_context,
-                resume_context_section=values.resume_context_section,
-            )
-        )
 
     # LLM: run 的工具权限只接受 allowed_tools；工作片冻结模型及宿主会话身份，探针/Compact/子代理不能混用头或模型。
     # 函数用途: 规范化一次用户请求，绑定本轮模型配置，再进入共享运行、压缩、工具和保存主链。

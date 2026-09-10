@@ -745,7 +745,9 @@ def test_read_file_line_mode_honors_request_max_chars_below_tool_cap():
         assert "next_call=read_file(start_line=" in result.output
         assert "max_chars=2000" in result.output
         assert "next_start_line=" in result.output
-        assert len(result.output) < 260
+    body, version = result.output.rsplit("\nfile_version=", 1)
+    assert len(body) < 260
+    assert len(version) <= 80
 
 
 def test_read_file_single_long_line_reports_next_offset_and_resumes():
@@ -757,14 +759,16 @@ def test_read_file_single_long_line_reports_next_offset_and_resumes():
         read_tool = ReadFileTool(workspace, max_chars=80)
 
         first = read_tool.execute({"path": "one-line.txt"})
-        second = read_tool.execute({"path": "one-line.txt", "offset": 80, "max_chars": 120})
+        next_offset = first.result_envelope["read_window"]["next_offset"]
+        second = read_tool.execute({"path": "one-line.txt", "offset": next_offset, "max_chars": 120})
 
         assert first.ok
         assert "PARTIAL view only" in first.output
-        assert "next_offset=80" in first.output
+        assert next_offset == 77  # 80 展示字符减去三字符的行号前缀，不能跳过原文。
+        assert first.result_envelope["read_window"]["complete"] is False
         assert second.ok
         assert "NEEDLE-IN-LATE-CHUNK" in second.output
-        assert "offset=80" in second.output
+        assert "offset=77" in second.output
 
 
 def test_read_file_char_window_streams_without_full_read(monkeypatch):
@@ -1565,3 +1569,45 @@ def test_apply_patch_tool_updates_text():
 
         assert result.ok
         assert target.read_text(encoding="utf-8") == "def hello():\n    return 'new'\n"
+# R223: 这些是定位边界的实际文件测试；真实 TUI 验收另外记录。
+def test_patch_independent_hunks_preserve_middle(tmp_path):
+    from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
+    path = tmp_path / "module.txt"
+    path.write_text("first\nunchanged one\nunchanged two\nlast\n")
+    tool = ApplyPatchTool(tmp_path)
+    result = tool.execute({"patch": "*** Begin Patch\n*** Update File: module.txt\n@@\n-first\n+FIRST\n@@\n-last\n+LAST\n*** End of File\n*** End Patch"})
+    assert result.ok, result.output
+    assert path.read_text() == "FIRST\nunchanged one\nunchanged two\nLAST\n"
+
+
+def test_patch_rejects_ambiguous_hunk_and_existing_move_destination(tmp_path):
+    from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
+    source, dest = tmp_path / "a", tmp_path / "b"
+    source.write_text("same\nsame\n")
+    dest.write_text("preserve\n")
+    tool = ApplyPatchTool(tmp_path)
+    result = tool.execute({"patch": "*** Begin Patch\n*** Update File: a\n-same\n+changed\n*** End Patch"})
+    assert not result.ok and "不唯一" in result.output
+    result = tool.execute({"patch": "*** Begin Patch\n*** Update File: a\n*** Move to: b\n*** End Patch"})
+    assert not result.ok
+    assert source.read_text() == "same\nsame\n" and dest.read_text() == "preserve\n"
+    roots = tool.effective_write_roots({"patch": "*** Begin Patch\n*** Update File: a\n*** Move to: b\n*** End Patch"}, None, tmp_path)
+    assert set(roots) == {str(source.resolve()), str(dest.resolve())}
+
+
+def test_patch_reports_first_commit_when_second_write_fails(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import _filesystem_patch as patch_module
+    source, dest = tmp_path / "a", tmp_path / "b"
+    source.write_text("old\n")
+    dest.write_text("old\n")
+    write = patch_module._atomic_write_bytes
+    def fail_second(path, data, **kwargs):
+        if path.name == "b":
+            raise OSError("injected disk error")
+        write(path, data, **kwargs)
+    monkeypatch.setattr(patch_module, "_atomic_write_bytes", fail_second)
+    result = patch_module.ApplyPatchTool(tmp_path).execute({"patch": "*** Begin Patch\n*** Update File: a\n-old\n+new\n*** Update File: b\n-old\n+new\n*** End Patch"})
+    assert not result.ok and result.effect_outcome == "failed"
+    assert result.result_envelope["partial_commit"] is True
+    assert result.result_envelope["files_modified"] == ["a"]
+    assert source.read_text() == "new\n" and dest.read_text() == "old\n"

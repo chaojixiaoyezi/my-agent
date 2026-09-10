@@ -1,3 +1,5 @@
+# LLM: 模型协议在此统一转换；请求级思考控制不得改共享后端、普通回合或其它供应商字段。
+# 模块用途: 发送模型请求并规范化文本、工具、思考和用量；兼容修复须回归流式与非流式调用。
 from __future__ import annotations
 
 """模型后端适配层。
@@ -16,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
@@ -95,7 +98,7 @@ class ModelResponse:
     runtime_status: str = "ok"
     runtime_reason: str = ""
     runtime_source: str = ""
-    # LLM: 仅由宿主运行时写入 DSH 风格 turn/end.reason；模型正文和验收结果不得设置。
+    # LLM: 仅由宿主运行时写入 宿主协议 turn/end.reason；模型正文和验收结果不得设置。
     # 字段用途: 让主代理、子代理、Gateway 与 TUI 使用同一个本轮结束原因。
     turn_end_reason: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
@@ -138,8 +141,8 @@ class BackendOptions:
     session_header: str = ""
 
 
-# LLM: OpenAI 请求对象把 system 与 user 面分开保存；任何适配器都不得靠标题文本重新猜角色。
-# 类用途: 汇总一次 OpenAI-compatible 调用的高优先级规则、用户输入、工具和输出格式选项。
+# LLM: OpenAI 请求对象按 typed 字段保留 system 和请求级思考控制；子适配器只发送其协议支持的字段。
+# 类用途: 汇总一次 OpenAI-compatible 调用的规则、用户输入、工具、思考开关和输出格式选项。
 @dataclass(frozen=True)
 class _OpenAIGenerateRequest:
     prompt: str
@@ -151,6 +154,7 @@ class _OpenAIGenerateRequest:
     messages: list[dict[str, Any]] | None = None
     response_schema: dict[str, Any] | None = None
     json_object: bool = False
+    thinking_disabled: bool = False
     max_output_tokens: int | None = None
     first_event_timeout_seconds: float | None = None
 
@@ -580,8 +584,8 @@ class OpenAICompatibleBackend(HttpBackend):
         return self.api_base + "/chat/completions"
 
     # LLM: OpenAI-compatible 传输必须保持 system -> 规范会话/当前 user -> 原生工具历史的追加顺序；
-    # reasoning observer 是展示事件边界，不能进入 prompt、状态或工具裁决。
-    # 函数用途: 调用 chat/completions，把宿主规则放入真正的 role=system 消息，并转发兼容端点的思考流。
+    # reasoning observer 是展示边界；typed thinking_disabled 必须转交组包器，不能在中间请求对象丢失。
+    # 函数用途: 调用 chat/completions，传递宿主规则、本次思考开关和流式展示，不改变后续请求。
     def generate(
         self,
         prompt: str,
@@ -603,6 +607,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 tools=tools,
                 tool_choice=tool_choice,
                 messages=messages,
+                thinking_disabled=provider_options.thinking_disabled,
                 first_event_timeout_seconds=provider_options.first_event_timeout_seconds,
             )
         )
@@ -642,15 +647,17 @@ class OpenAICompatibleBackend(HttpBackend):
             )
         )
 
-    # LLM: payload 角色由 typed request 字段决定；prompt 标题和模型正文都不能提升成 system，
-    # reasoning_content 只经观察器与白名单历史块离开适配器。
-    # 函数用途: 组装一次 OpenAI-compatible 请求并选择流式或非流式解析。
+    # LLM: 角色和思考控制来自 typed request；DeepSeek 专有字段仅按官方精确主机启用，不能从模型名猜代理协议。
+    # 函数用途: 组装并发送一次 OpenAI-compatible 请求；普通思考不变，其它端点不注入不支持的参数。
     def _generate(self, request: _OpenAIGenerateRequest) -> ModelResponse:
         payload = {
             "model": self.model_name,
             "max_tokens": _bounded_output_tokens(self.max_tokens, request.max_output_tokens),
             "temperature": self.temperature,
         }
+        if request.thinking_disabled and urlsplit(self.api_base).hostname == "api.deepseek.com":
+            # 参考 轻量运行时 的 thinkingFormat 适配：官方默认开思考，强制工具探针须显式关闭；不是通用 OpenAI 字段。
+            payload["thinking"] = {"type": "disabled"}
         if request.messages is not None:
             payload["messages"] = _openai_messages_from_native(
                 request.messages,

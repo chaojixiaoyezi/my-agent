@@ -1,5 +1,42 @@
 # STATUS
 
+## R224 正式提交批次：名称清理与本地严格验收完成
+
+- 本次纳入此前保留的 R222 DeepSeek 双协议修复、R223 87 项整改及 HTML 报告、R224 名称统一；
+  目标是正式 my-agent/main，不新建分叉产品、不重写历史。下方各轮“未提交”指当时的历史快照。
+- 我方产品名称与公开说明统一为 my-agent；真实检出、用户数据和运行会话不搬迁，第三方命令不冒名替换。
+  两处历史测试脚本不再内置密码，改用私有环境或 SSH 密钥，不改测试机账号密码。
+- 提交前重新选择 43 个相关测试文件：980 passed、2 skipped、1 xfailed，43.33 秒；与先前批次重叠，不能累加。
+  Ruff、doc-sync、strict code-size（hard 0）、diff、clean-package、import-boundary 全通过，未跑全仓 pytest。
+- ma-r224-brand 的真实 TUI 启动、/help、/status 通过，唯一 Gateway 不重启、没有新增 LLM 任务。
+  这不是 R223 剩余长链路验收；未部署 1.7/1.10，未创建 Release 或修改版本号，线上 CI 不作为本地验收来源。
+- Git 实际提交与推送结果以 [正式 main 提交记录](https://github.com/chaojixiaoyezi/my-agent/commits/main/) 为准；
+  剩余问题继续按 [R223 逐项台账](docs/audits/R223_87_ITEM_REMEDIATION.md) 的未关闭边界处理。
+
+> 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
+
+## R223 87 项外部审计：本轮修复与逐项结果
+
+- 全部87项已核对：60本轮修复、8部分修复、3当前已有修复、1旧判断不成立、9能力边界、6待环境验收。
+  具体原因、修改、影响和未关闭边界见 [87项完整表](docs/audits/R223_87_ITEM_REMEDIATION.md)，不称87项全修完。
+- 修复覆盖文件编码/权限/补丁/有界读取、乐观版本、Shell效果和输出采集、PTY资源、HTTP跳转/缓存/总预算、
+  MCP stdio、记忆误合并和语义降级、同thread历史、子代理错误分类、schedule limit、旧假压缩和静态漏检。
+- 42文件联合focused：1037通过、2跳过、1预期失败，50.67秒；Ruff/doc-sync/strict尺寸hard0/diff/clean-package/
+  import-boundary均通过。不放宽baseline，不重复全仓pytest；线上CI没有作为验收来源。
+- 本机单Gateway、MiniMax-M2.7，5个TUI会话共7次真实请求均终态；包括16000条日志和恢复旧会话继续修改。
+  产物核验和模型质量问题分开记录；这些任务未触发Compact，不冒充长期多次Compact验收。
+- 真TUI额外发现并修复空闲/status显示启动占位模型的问题，已复验显示minimax-m2.7。
+- 保留此前R222未提交工作；本轮未提交、未推送、未部署1.7/1.10。用户家内任务不加锁、记忆仍自主维护。
+
+## DeepSeek 官方两种接口：已修兼容问题，真 TUI 通过
+
+- 官方 Flash、Pro、Vision-Exp 各配置 Chat / Messages，六项短连接和六项普通主界面问候均通过。
+- 发现并修复 OpenAI 请求对象漏传本轮思考关闭标志，导致运行前能力探针 HTTP 400；正常思考不关闭。
+- 普通聊天单轮约 2.1–5.1 秒，真实模型/协议账本匹配、零重试、零业务工具/子代理；Vision-Exp 只测文字。
+- 新增 11 项定向（5 项先红），相关 7 文件 178 项通过；Ruff/doc sync/strict 尺寸 hard0/diff/clean-package 全通过。
+- 本机 `ma-r222-models`，独立验证 home、单 Gateway 已加载本地修复；六条配置保留，不覆盖日常用户设置。
+- 本轮未推送或部署测试机，不声称复杂任务、视觉、跨模型 child 或满上下文已验；见 [详细记录](docs/audits/R222_MODEL_PROVIDER_REPORT.md#deepseek-官方双接口复验)。
+
 ## R222 通用 /model 管理与 35 模型真实短测完成
 
 - 正式 my-agent/main 已是 f47f2002，原两份历史保留，本地严格 gate 通过，未 force push。
@@ -2129,7 +2166,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-23 Prompt 4 r19：子代理/Compact 稳定，生成产物真实启动白屏
 
 - `e94f8ec` 已推送并部署到 `192.0.2.7` 的唯一 Gateway。fresh tmux
-  `dsh-p4-lazygit-r19-ea91639` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；
+  `<历史会话:p4-lazygit-r19-ea91639>` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；
   MiniMax-M2.7 自主选择 Python + Textual、建立 8 项 Todo，并在首批 5 名超过容量被原子拒绝后自行改成
   合法批次。最终 5 名 child 全部自然 `DONE`，没有失败、取消或重试；root 也随 lifecycle event 自然醒来，
   没有测试者追加推动消息、安装工具链或修改产物。
@@ -2139,7 +2176,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
   `TOOL_OPERATION_OUTCOME_UNKNOWN / TOOL_TIMEOUT`，没有把超时伪装成成功。
 - 任务产物仍明确不合格。原项目有 957 个非测试 Go 文件、114,376 行物理生产代码；生成的 port 只有
   30 个 Python 源文件、5,404 行生产代码和 5 个测试文件、1,842 行测试。112 个测试只覆盖它自己缩小后的
-  实现。独立真实产物 TUI `dsh-p4-product-r19-ea91639` 进程持续存活却整屏空白：入口创建
+  实现。独立真实产物 TUI `<历史会话:p4-product-r19-ea91639>` 进程持续存活却整屏空白：入口创建
   `LazyGitApp`，但该 App 从未 compose、注册或 push 已定义的 `LazyGitScreen`，所以 Textual 只挂载空默认
   screen。该轮不能算“完整复刻”或可运行交付。
 - r19 的模型在 final 前主动把 8/8 Todo 全部关闭，因此现场没有产生
@@ -2149,7 +2186,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 
 ## 2026-08-23 Prompt 4 r18：5/8 Todo 未完成却被写成 DONE（本地修复候选）
 
-- `2d03803` 部署后的 fresh tmux `dsh-p4-lazygit-r18-ea91639` 在固定
+- `2d03803` 部署后的 fresh tmux `<历史会话:p4-lazygit-r18-ea91639>` 在固定
   `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；MiniMax-M2.7 自主选 Rust、建立 8 项 Todo
   并创建 child。最终只有 5/8 项关闭；构建、自动测试和端到端验证仍为 `pending`，机器也没有 Rust/Cargo，
   canonical `next_action` 明确是等待工具链后继续验证，但 root 最终仍称“完整代码已生成”。
@@ -2166,7 +2203,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-23 Prompt 4 r17：直接 goal 改善，mandatory covers 造成 Git 返工错绑 GUI（本地修复候选）
 
 - `4c3a59d` 已推送并部署到 `.7` 唯一 Gateway。fresh tmux
-  `dsh-p4-lazygit-r17-ea91639` 在固定 lazygit 提交上只输入一次原样 Prompt 4；MiniMax-M2.7 自主选 Rust、
+  `<历史会话:p4-lazygit-r17-ea91639>` 在固定 lazygit 提交上只输入一次原样 Prompt 4；MiniMax-M2.7 自主选 Rust、
   建 7 项 Todo，并创建 3 名 child。首名只做骨架，第二名只做 TUI，均未再替 Git/GUI 兄弟扩做；前三名
   DONE 后 root 也自然醒来，证明 child 直接 goal 边界和 lifecycle 主链改善。
 - 第三名 Git child 将完整 Rust Git 模块写到 cwd 根部的 `Cargo.toml + src/git/`，没有写入已有
@@ -2182,7 +2219,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-23 Prompt 4 r16：自主派工通过，child 越过直接 goal 写到兄弟任务（本地修复候选）
 
 - `b7005a8` 已推送并部署到 `.7` 唯一 Gateway。fresh tmux
-  `dsh-p4-lazygit-r16-ea91639` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；
+  `<历史会话:p4-lazygit-r16-ea91639>` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；
   MiniMax-M2.7 不再反问语言，而是自主选择 Rust、建立 7 项 Todo，并在一次漏 `covers` 的 typed 拒绝后
   自行修参，创建了带 exact `covers` 的第一名 child。第一名 DONE 后 root 自然醒来并创建第二名 child，
   证明 assumptions-first、显式计划绑定和 lifecycle wake 主链都已通过。
@@ -2199,7 +2236,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-23 Prompt 4 r15：默认模型把安全次要选择退回用户（本地修复候选）
 
 - `bdcc7d1` 已推送并部署到 `.7` 唯一 Gateway。fresh tmux
-  `dsh-p4-lazygit-r15-ea91639` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；
+  `<历史会话:p4-lazygit-r15-ea91639>` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；
   MiniMax-M2.7 读取项目后停止，要求用户选择 Rust、Python 或其它语言。现场没有 Todo、没有 child、没有
   功能写入，只有 TUI 自己的 `.chat_history`，因此 r15 明确失败，不能验证显式 covers 修复。
 - 相同模型、相同源码、相同 prompt 的 会话运行时 tmux `会话运行时-p4-lazygit-r15-ea91639` 先连续探索源码，证明
@@ -2213,7 +2250,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-23 Prompt 4 r14：主代理唤醒正常，旧 goal 自动绑定造成 Todo 假完成（本地修复候选）
 
 - `c5cc7c2` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux
-  `dsh-p4-lazygit-r14-ea91639` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；root
+  `<历史会话:p4-lazygit-r14-ea91639>` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；root
   建立 9 项 Todo，并创建“项目结构与基础框架”child。该 child 实际落下 Rust 项目文件并自然 DONE，root
   随 lifecycle event 醒来创建第二名“Git命令核心实现”child，证明本轮主代理等待/唤醒和第二批派工正常。
 - r14 同时抓到一个确定性假进度：第一名 child 没有显式 `covers`，goal 只是列出 `src/i18n/`、
@@ -2229,7 +2266,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-22 Prompt 4 r13：创建前原子合同通过，错误分类表漏码（本地修复候选）
 
 - `611ee55` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux
-  `dsh-p4-lazygit-r13-ea91639` 对固定 `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4；GitHub
+  `<历史会话:p4-lazygit-r13-ea91639>` 对固定 `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4；GitHub
   当前约 8.1 万 stars，本地为 957 个生产 Go 文件、91,175 行功能代码、118 个测试文件、368 个测试函数。
 - root 先建立 8 项计划，同一模型轮分 5 批尝试把多个 child 绑定到同一个粗粒度 Todo。五批均在任何 run
   落盘前返回 `SUBAGENT_PLANNED_DELEGATION_INVALID + effect_outcome=not_started`，现场 child 数始终为 0。
@@ -2248,7 +2285,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-22 Prompt 4 r12b：active-turn 连续性通过，漏绑计划与兄弟目录把 child 拖入权限死路（本地修复候选）
 
 - `5f1f485` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux
-  `dsh-p4-lazygit-r12b-ea91639` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；本地
+  `<历史会话:p4-lazygit-r12b-ea91639>` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；本地
   基线为 957 个非测试 Go 文件、91,073 行功能代码、118 个测试文件和 368 个测试函数。
 - native active-turn handoff 已实锤：child wake 后 root 仍保持原始完整复刻目标、用户禁止 main 写功能代码
   的边界和既定语言，嵌套 Todo/派工参数也没有再变成空数组。该轮的新失败发生在 child 真正创建之前：
@@ -2265,7 +2302,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-22 Prompt 4 r11：原任务保持，但 carried 工具参数与原生历史仍断档（本地修复候选）
 
 - `a190378` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux
-  `dsh-p4-lazygit-r11-ea91639` 在固定 lazygit 提交上只输入一次原样 Prompt 4；首批 4 名 child 完成后，
+  `<历史会话:p4-lazygit-r11-ea91639>` 在固定 lazygit 提交上只输入一次原样 Prompt 4；首批 4 名 child 完成后，
   root 保持 Python + Textual 和完整复刻目标，没有再退回 Go/基础骨架，证明 exact objective/task/path 修复生效。
 - r11 继续暴露同一 active turn 的第二层断点：root 工具索引虽然恢复了 47 条调用，但持久参数投影把
   `task_progress.items` 与 `create_subagents.items` 这类嵌套对象裁成 `[]`；native builder 又不把重建的
@@ -2281,7 +2318,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-22 Prompt 4 r10：假产物合同已消失，child wake 把原任务换成新任务（本地修复候选）
 
 - `0c6c916` 已通过本地严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux
-  `dsh-p4-lazygit-r10-ea91639` 在 `/root/tui-tests/dsh-p4-lazygit-r10-ea91639` 对固定
+  `<历史会话:p4-lazygit-r10-ea91639>` 在 `<历史工作目录:p4-lazygit-r10-ea91639>` 对固定
   `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4；GitHub API 当轮为 81,556 stars，本地为
   957 个生产 Go 文件、91,175 行非空非纯注释功能代码、118 个测试文件、368 个测试函数。
 - r10 证明系统默认 Markdown 假合同已退出新 child 主链：前两名 Rust child 都按最终消息/typed result
@@ -2299,7 +2336,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-22 Prompt 4 r9：身份收口通过，默认 Markdown 假合同诱导 child 只写报告（本地修复候选）
 
 - `93e18f6` 已通过本地严格 gate、推送并部署到 `.7` 唯一 Gateway。tmux
-  `dsh-p4-lazygit-r9-ea91639` 在 fresh cwd 对 `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4；
+  `<历史会话:p4-lazygit-r9-ea91639>` 在 fresh cwd 对 `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4；
   当前 GitHub API 为 81,554 stars，本轮本地口径为 957 个生产 Go 文件、91,015 行功能代码、118 个测试
   文件、368 个测试函数。
 - 首批 4 个 child 与补派 worker-5 都保持 exact `agent_thread_id` / parent thread；没有 child
@@ -2318,7 +2355,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 
 ## 2026-08-22 Prompt 4 r8：child 身份串入主代理与共享 PID 阻塞重试（本地修复候选）
 
-- `b3c2daa` 已部署到 `.7` 唯一 Gateway；tmux `dsh-p4-lazygit-r8-ea91639` 在干净 cwd 对
+- `b3c2daa` 已部署到 `.7` 唯一 Gateway；tmux `<历史会话:p4-lazygit-r8-ea91639>` 在干净 cwd 对
   `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4。源码本地统计为 957 个生产 Go 文件、
   91,175 行功能代码、118 个测试文件和 368 个 `Test` 函数。
 - 一名 child 因 `MODEL_RESPONSE_TRUNCATED` 回到 `PENDING`，但它的 task-local `background_start.pid`
@@ -2334,7 +2371,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 
 ## 2026-08-22 Prompt 4 r7：TUI 投影通过，弱化测试后误报完整（本地验证纪律候选）
 
-- `19d4cea` 已部署到 `.7` 唯一 Gateway；tmux `dsh-p4-lazygit-r7-ea91639` 在干净 cwd 对
+- `19d4cea` 已部署到 `.7` 唯一 Gateway；tmux `<历史会话:p4-lazygit-r7-ea91639>` 在干净 cwd 对
   `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4。7 个 child 全部自然 DONE，单项补派连续编号
   worker-6/7；isolated thinking/context 污染未复现，Todo 使用 `完成 X/Y · 进行中 Z` 并最终 11/11。
 - 产物仍远未复刻：`py-lazygit` 只有 29 个生产 Python 文件、6,985 行功能代码、2 个测试文件、20 个
@@ -2348,7 +2385,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 
 ## 2026-08-22 Prompt 4 r6：生命周期与 Compact 进步，产物仍远未复刻（本地展示修复候选）
 
-- `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r6-ea91639` 只输入一次原样 Prompt 4；固定
+- `.7` 唯一 Gateway、MiniMax-M2.7、tmux `<历史会话:p4-lazygit-r6-ea91639>` 只输入一次原样 Prompt 4；固定
   `jesseduffield/lazygit@ea916395` 仍按 957 个生产 Go 文件、91,175 行功能代码、118 个测试文件和
   368 个测试函数作为原版基线。10 名 child 全部自然 `DONE`，3 名各发生一次 canonical Compact；main
   收齐首批后自主补派修复/测试、运行整合命令，Todo 全部打钩并自然结束，没有用户推动或测试者旁路写代码。
@@ -2364,7 +2401,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 
 ## 2026-08-22 Prompt 4 r5：七个 child 稳定完成，但 main 在 `4/18` 时过早收尾（本地修复候选）
 
-- `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r5-ea91639` 只输入一次原样 Prompt 4。
+- `.7` 唯一 Gateway、MiniMax-M2.7、tmux `<历史会话:p4-lazygit-r5-ea91639>` 只输入一次原样 Prompt 4。
   固定源码为 `jesseduffield/lazygit@ea916395`；按本轮口径排除测试后共 957 个 Go 文件、91,175 行
   非空且非纯 `//` 的生产代码，满足 >40k 门槛。7 个 child 全部一次生命周期自然 `DONE`，没有 r4 的
   PENDING/重复失败误杀，证明 `26e1034` 的可恢复工具失败链已进入真实运行。
@@ -2385,7 +2422,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-22 Prompt 4 r4：Compact 已续跑，重复失败机器闸误杀 child（本地修复候选）
 
 - `83faddb` 已推送并部署到 `.7` 唯一 Gateway。全新 tmux
-  `dsh-p4-lazygit-r4-ea91639` 只输入一次原样 Prompt 4；worker-2 的 generation 1 从
+  `<历史会话:p4-lazygit-r4-ea91639>` 只输入一次原样 Prompt 4；worker-2 的 generation 1 从
   116,644 降到 37,483 tokens，checkpoint summary 已包含目标、路径、完成工作、错误和下一步，随后继续
   创建 `remote.py`、`sync.py`。这证明 Compact 指令顺序和同一 thread 续跑已经修复。
 - r4 继续暴露一个独立底座错误：另一 child 的项目根 `run_command` 临时占写锁，worker-3 前部
@@ -2419,7 +2456,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
   CAS 失败时恢复压缩前 IR/tool-context，只更新同一 thread failure circuit；presentation/no-save 辅助回合
   仍可临时整理窗口，但不得成为 `compact N`。
 - `680e209` 的 201 项 focused 回归及本地严格 gate 已通过并推送/部署 `.7` 唯一 Gateway。全新 tmux
-  `dsh-p4-lazygit-r3-ea91639` 只输入一次原样 Prompt 4：worker-3 在 119,295 tokens 越过 115,200 触发线后，
+  `<历史会话:p4-lazygit-r3-ea91639>` 只输入一次原样 Prompt 4：worker-3 在 119,295 tokens 越过 115,200 触发线后，
   checkpoint generation 1、`source_kind=live_tool_ir`、移除 44 对/保留 9 对、降至 36,586；TUI 同步显示
   `compact 1` 且 child 继续运行。这证明 canonical 计数、落账、窗口下降与不中断主链已修复。
 - 同一 checkpoint 暴露新的摘要质量失败：summary 只有普通续写“接下来创建 theme/constants”，没有任务、
@@ -2436,7 +2473,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
   因此 `compact 0` 是真实结果，不冒充压缩成功证据。
 - 同轮终屏暴露 presentation/no-save 模型调用把公开压缩点错投影成 100%。`774c7fe` 已
   保持配置压缩点 90% 稳定，同时保留 save=False 不落盘、未到完整窗口不返回
-  context-overflow 的执行边界。新 tmux `dsh-p3-774c7fe-compact` 只输入一次原样 Prompt 3：
+  context-overflow 的执行边界。新 tmux `<历史会话:p3-774c7fe-compact>` 只输入一次原样 Prompt 3：
   首轮 `27.5k/128k · 压缩点 90%`，最终 presentation 仍是 `61.5k/128k · 压缩点 90%`。
   8 个 child 全部一次 attempt DONE，最高 工具运行时 约 98.6k，未达 115.2k，因此本轮只证明
   触发点投影和长 child 稳定，不冒充“真发生了一次 Compact”。
@@ -2446,7 +2483,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 
 ## 2026-08-22 Prompt 3 子代理误挂起（本地候选）
 
-- `ac1f4dc` 已推送并部署 `.7`；全新 tmux `dsh-p3-research-ac1f4dc-verify3` 使用唯一 Gateway 和
+- `ac1f4dc` 已推送并部署 `.7`；全新 tmux `<历史会话:p3-research-ac1f4dc-verify3>` 使用唯一 Gateway 和
   MiniMax-M2.7，只输入一次原样 Prompt 3。TUI 已真实证明默认 Todo `4/9`、`Ctrl+T` 展开/收起、main
   固定 Working、child 实时 context token 与常驻 `compact 0` 生效。
 - 四名首批 child 中三名 DONE；代理运行时 的 shell 在进程启动前被内部状态面规则拒绝，旧结果却未声明
@@ -2486,7 +2523,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-22 会话运行时 式子代理完成交接（`fd7d2b9` 已部署，Prompt 3 仍失败）
 
 - `931ee20` 已推送并部署 `.7`。唯一 Gateway、`MiniMax-M2.7`、全新 tmux
-  `dsh-p3-research-931ee20-verify` 的原样 Prompt 3 只输入一次：4 个 child 分别显示“调研 轻量运行时 项目 / 调研
+  `<历史会话:p3-research-931ee20-verify>` 的原样 Prompt 3 只输入一次：4 个 child 分别显示“调研 轻量运行时 项目 / 调研
   工具运行时 项目 / 调研 会话运行时 项目 / 调研 终端交互 项目”，context 总 token 实时变化，4 个 child 都一次
   attempt 自然 `DONE`。这证明短职责行、main 单行 Working、Todo/child 布局和终态打标已经进入真实链路。
 - 同轮没有通过最终交付：四份 canonical `task.result` 和 `work/agents/<run>/final_report.md` 都存在，但
@@ -2497,7 +2534,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
   `completion_message` 仅作整合证据，完整正文由 `final_report_ref` 读取，并同时携带 declared/artifact refs。
   同树成功通知按上下文预算合成一次 `metadata.events`；只确认本轮真正选入的信封，失败和 Audit worker
   不进入该批。上下文压缩可缩短正文，但必须保留 active wake 的 metadata、全部批成员和报告引用。
-- `fd7d2b9` 已推送并部署；全新 tmux `dsh-p3-research-fd7d2b9-verify2` 只发送一次原样 Prompt 3。
+- `fd7d2b9` 已推送并部署；全新 tmux `<历史会话:p3-research-fd7d2b9-verify2>` 只发送一次原样 Prompt 3。
   第一批 4 个 child 完成后 main 能读取结果并继续创建第二批，证明 completion envelope/wake 已进入真实
   主链；但第二批只创建 代理运行时/长期助手，整单共 6 个 child，漏掉 轻量运行时/通道运行时，最终又把已有
   终端交互 结果误报为“未找到”。因此该正式任务仍判失败，下一步必须查 canonical 批次覆盖和结果消费，
@@ -2505,14 +2542,14 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 
 ## 2026-08-22 后台主代理、Todo 与子代理职责行（本地候选）
 
-- `f5dc695` 已推送并部署 `.7`。tmux `dsh-p2-mario-f5dc695-verify` 的全新原样 Prompt 2 证明 main
+- `f5dc695` 已推送并部署 `.7`。tmux `<历史会话:p2-mario-f5dc695-verify>` 的全新原样 Prompt 2 证明 main
   context 已实时变化、跨批 child 名称从 1 连续到 8、8 个 child 均一次 attempt DONE；wake 文件从创建到
   后台 claim 约 7.56 秒，并非事件丢失。该轮新暴露：第二批四行都复制顶层“超级玛丽游戏并行开发”、
   main 的长 thinking 把 Working 撑成多行、最终 notice 让隐藏的 child seed Todo 重新出现，且 main 在
   child 完成后又亲自修改功能文件，造成用户感知的额外约 7 分钟。
 - `993ce4f` 已推送并部署 `.7`，唯一 Gateway 为 MiniMax-M2.7。tmux
-  `dsh-p2-mario-993ce4f` 的原样提示词 2 已证明首次 ask、后台 main、6 个 child 与全部工具都保持
-  `/root/dsh-tui-p2-993ce4f`；产物正确落在 `bbb/`，服务监听 `0.0.0.0:8082` 且 HTTP 200。
+  `<历史会话:p2-mario-993ce4f>` 的原样提示词 2 已证明首次 ask、后台 main、6 个 child 与全部工具都保持
+  `<历史工作目录:tui-p2-993ce4f>`；产物正确落在 `bbb/`，服务监听 `0.0.0.0:8082` 且 HTTP 200。
 - child 行已经符合当前产品口径：短字只概括职责，如“玩家控制”“敌人AI”“关卡设计”；后半段显示
   exact run 当前总 context token、Compact 和真实重试。它不显示路径、模型聊天状态或长 goal，每行按
   终端宽度截断。6 个 child 均一次 attempt 自然 DONE，最后一个完成后约 16 秒唤醒 main。
@@ -2529,7 +2566,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 
 ## 2026-08-22 单 Gateway 多目录启动失败已定位（本地候选）
 
-- `.7` 正式提示词 2 的 TUI 从 `/root/dsh-tui-p2-f5d28b8` 启动时在 `Connecting to Gateway` 退出，prompt
+- `.7` 正式提示词 2 的 TUI 从 `<历史工作目录:tui-p2-f5d28b8>` 启动时在 `Connecting to Gateway` 退出，prompt
   未发送、没有创建任务。不是 MiniMax 变慢，而是 Gateway 队列路径错误绑定了客户端 cwd hash。
 - 当前候选把 Gateway/adapter 固定到 owner service runtime，并将客户端 cwd/roots 作为 ask/thread v6
   的结构化字段传到前台、后台、工具和 child；非法目录在模型调用前关闭式失败。
@@ -2589,7 +2626,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
   attempts。TUI 现在把这些行固定放在 composer 附近，不进可滚动 transcript；默认不展开孙代理，也不
   泄露工具输出、路径或权限。只读面已落地，用户对任意后代的 message/interrupt/resume/
   cancel 共享控制协议只完成设计，未冒充为已实现。
-- `714c0c8` 已推送并部署到 `192.0.2.7:/root/my-agent`，测试机保持一个真实 Gateway，配置仍为
+- `714c0c8` 已推送并部署到 `192.0.2.7:${MY_AGENT_CHECKOUT}`，测试机保持一个真实 Gateway，配置仍为
   `anthropic_compatible + MiniMax-M2.7`。真实 TUI 一次普通中文要求两个 child 分别写 `a.txt`/`b.txt`：
   两个 child 均一次 attempt，在 46 秒和 52 秒自然 `DONE`；固定活动区依次显示等待启动、模型响应、
   工具活动和 `0 进行中 · 2 完成`，两份 UTF-8 文件内容正确。测试者没有给主代理或 child 发“继续”。
@@ -2723,7 +2760,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
   已有选区时右键按下直接复用 clipboard/tmux/OSC 52 出口，右键松开只收口且保留高亮。正文和输入框的
   中文完整选区、单次复制及原 handler 不介入已有确定性回归，六文件 focused 从 105 增至 107 项通过。
 - 修复提交 `167c98d5d81a1576ccbbc4172ccfe0df9f884885` 已推送远端 `main`，并按用户更新后的测试机地址
-  部署到 `192.0.2.7:/root/my-agent`。部署前 HEAD、tracked diff、进程、端口、tmux pane 与生效配置
+  部署到 `192.0.2.7:${MY_AGENT_CHECKOUT}`。部署前 HEAD、tracked diff、进程、端口、tmux pane 与生效配置
   证据保存在 `/root/tui-parity-evidence/deploy-20260820-235922-gray-copy/`；远端 `.background_jobs/`、
   `owners/`、key 和运行时配置均未覆盖。
 - 本地和测试机 TUI renderer/view/input/ANSI/PTY/chat focused 105 项均通过。测试机保持一个 Gateway
@@ -2804,10 +2841,10 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 ## 2026-08-18 `.13` 单 Gateway 部署收口
 
 - 本地代码提交 `4b6d0246a9324dc99eb4c8a99d0e975d68fda8eb` 已部署到测试机
-  `192.0.2.13:/root/my-agent`；部署前源码、脏补丁、进程与 tmux 证据保存在
+  `192.0.2.13:${MY_AGENT_CHECKOUT}`；部署前源码、脏补丁、进程与 tmux 证据保存在
   `/root/tui-parity-evidence/deploy-20260819T085713CST/`，可用于回滚。
 - 测试机已停止 `18420` 至 `18425` 的六个隔离 Gateway，只保留 `127.0.0.1:8420` 主实例；
-  `dsh-input`、`dsh-render`、`dsh-isolation`、`dsh-lifecycle`、`dsh-steer-e2e` 和 `dsh-replica`
+  `<历史会话:input>`、`<历史会话:render>`、`<历史会话:isolation>`、`<历史会话:lifecycle>`、`<历史会话:steer-e2e>` 和 `<历史会话:replica>`
   六个 TUI 均从同一 Gateway workspace attach 并进入 READY，用户原有 TUI 未停止。
 - 后续真机功能、极限、并发和恢复测试一律使用这一个 Gateway；多个用例通过独立 TUI/会话制造并行，
   不再为测试场景启动额外 Gateway。
@@ -2828,7 +2865,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 
 ## 2026-08-18 第四路补充消息未插入与四路续跑
 
-- `dsh-lifecycle` 的两条普通输入并未丢失：旧 TUI 显示 `Press up to edit queued messages`，随后在长任务结束
+- `<历史会话:lifecycle>` 的两条普通输入并未丢失：旧 TUI 显示 `Press up to edit queued messages`，随后在长任务结束
   后分别成为两个新回合。根因是 `_tui_enqueue_job` 无条件创建 ChatJob；HTTP `/ask` 已有 active-turn steer，
   但本地文件队列 TUI 绕过了这条路。queue preview 同时被追加到滚动 transcript，所以离尾观察时会消失。
 - 本地候选让 Gateway 活动回合普通 Enter 先调用 canonical `/control`，使用 opaque client `message_id` 建立
@@ -2914,7 +2951,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 - 本地相关 Gateway/TUI/ToolRuntime/closeout/PTY focused tests 已运行到 100%（预期 xfail 保留）；changed-file
   Ruff 通过，strict code-size 在把超限 2 行的 adapter helper 移出类体后通过。本轮远低于 10,000 行，按
   用户约定不重复全仓 pytest。
-- `.13` 已备份并部署到 `192.0.2.13:/root/my-agent`，只重启 PID 对应的 Gateway 和 tmux `work` TUI。
+- `.13` 已备份并部署到 `192.0.2.13:${MY_AGENT_CHECKOUT}`，只重启 PID 对应的 Gateway 和 tmux `work` TUI。
   首个真实请求 `gwreq-1787021814-bf2c56532474434883093fa46525b878` 显示了 thinking、逐轮说明、写入预览、
   红蓝 diff、命令输出和红色编译错误，但在 127 个工具轮后被旧底座误判的 `ECONNREFUSED` 终止，不能算交付通过。
 - typed 连接拒绝现按 HTTP `2/5/15` 秒和模型回合 `10/25/45/100/180` 秒两层有界退避；修复部署后，独立续作请求
@@ -2938,7 +2975,7 @@ BUG-111 继续收口完整过程/恢复快照/实时缓冲；BUG-115 已查到�
 - 本地 TUI focused 327 项到 100%；本轮代码/测试超过 10,000 行，额外一次全仓 pytest 收集 24,663 项、
   运行到 100% 且退出 0。changed-file Ruff、doc sync、strict code-size、diff 和 staged clean-package
   通过；全仓 Ruff 的 119 项均由 clean HEAD 的 122 项历史集合覆盖，不属于本任务新增。
-- `192.0.2.13:/root/my-agent` 最终包覆盖 70 个文件、删除 5 个废弃文件，hash、rollback、ANSI、
+- `192.0.2.13:${MY_AGENT_CHECKOUT}` 最终包覆盖 70 个文件、删除 5 个废弃文件，hash、rollback、ANSI、
   focused test、Gateway/TUI 健康和 secret 扫描证据位于
   `/root/tui-parity-evidence/final-20260818T071817CST/final-deploy/`。该事实只属于 `.13`，与青禾的
   `my_agent` checkout、机器和任务无关。

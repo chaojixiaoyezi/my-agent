@@ -4,7 +4,7 @@ LLM: 本模块只归一化宿主已经掌握的运行事实，不能读取模型
 验收结果。主代理、子代理、Gateway 和 TUI 必须共享这里的六种 reason；新增或
 修改 reason 时同步检查 AgentRunResult、SubAgentRunnerResult、持久化投影和定向
 测试。只读技术提示与归一化共用这里的协议，不成为模型正文或恢复命令。
-协议取自 DSH ``turn/end.reason``，继续/停止循环仍由 会话运行时 式工具调用与 pending input 决定。
+``turn/end.reason`` 表达宿主轮结束原因；继续或停止循环由工具调用与 pending input 决定。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from enum import Enum
 
 
-# LLM: 枚举值必须与 DSH turn/end.reason 的公开 kind 保持一一对应；不要加入质量判定状态。
+# LLM: 枚举值必须与公开 turn/end.reason kind 保持一致；不要加入质量判定状态。
 # 类用途: 表示一次模型工具循环结束时可观察到的六种客观原因。
 class TurnEndReason(str, Enum):
     COMPLETED = "completed"
@@ -46,7 +46,7 @@ def normalize_turn_end_reason(value: object) -> str:
 
 # LLM: 优先级是显式宿主 reason > provider stop_reason > runtime status/reason；
 # 任何分支都不得查看 assistant 正文、verification_status、tests 或 artifact。
-# 函数用途: 把现有运行状态转换成唯一的 DSH 风格结束原因。
+# 函数用途: 把现有运行状态转换成唯一的 宿主协议结束原因。
 def infer_turn_end_reason(
     *,
     explicit: object = "",

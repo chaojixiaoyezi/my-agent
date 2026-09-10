@@ -341,8 +341,6 @@ def now(value: float | None = None) -> float:
 
 
 # Conversation runtime channel snapshots
-from .models import ConversationThread
-from .store import ConversationStore
 
 
 class ChannelMessageRuntime:
@@ -404,7 +402,6 @@ def _agent_owner_home(agent: object) -> str:
 
 
 from dataclasses import dataclass
-from typing import Any
 
 # Background wake turns are normal continuations of the same Agent.  This is
 # the common capability surface before owner/task policy applies reductions.
@@ -662,8 +659,6 @@ def _is_subagent_lifecycle_wake(request: BackgroundToolPolicyRequest) -> bool:
 # Conversation runtime worker
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 
 from ..agent_core.runtime.loop_models import RunParams
 from ..runtime_errors import DataCorruptionError
@@ -677,8 +672,7 @@ from .channels import (
     project_user_reply,
     supports_transcript_delivery,
 )
-from .models import BackgroundMainAgentReport, WakeSignal
-from .store import ConversationStore
+from .models import BackgroundMainAgentReport
 
 
 @dataclass(frozen=True)
@@ -3007,7 +3001,6 @@ def _policy_snapshot_from_request(request: BackgroundRunRequest) -> dict[str, An
 
 # Conversation runtime context
 from dataclasses import dataclass
-from typing import Any
 
 from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..artifacts.registry import latest_artifact_records
@@ -3018,8 +3011,6 @@ from .context_budget import (
     background_context_budget_from_config,
     bounded_background_context_payload,
 )
-from .models import ConversationThread
-from .store import ConversationStore
 
 
 @dataclass(frozen=True)
@@ -3756,9 +3747,8 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..settings.defaults import default_config_int
-from .models import BackgroundMainAgentReport, ObservationEvent, ProgressPolicy, WakeSignal
+from .models import ProgressPolicy
 
 # 后台 claim 心跳是 daemon 线程，其异常必须结构化落日志而非裸崩 stderr 杀线程。
 _HEARTBEAT_LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
@@ -3806,7 +3796,6 @@ _LEDGER_GC_INTERVAL_SECONDS = 6 * 3600
 _POLICY_FAILURE_BASE_BACKOFF_SECONDS = 300
 _POLICY_FAILURE_MAX_BACKOFF_SECONDS = 3600
 _POLICY_FAILURE_RETIRE_AFTER = 3
-from .store import ConversationStore
 
 if TYPE_CHECKING:
     from ..collaboration import CollaborationStore
@@ -6186,7 +6175,6 @@ def _policy_failure_backoff(failures: int, policy_id: str) -> float:
     可精确断言区间;抖动只做跨 policy 错峰(防多个失败 policy 同秒齐醒),不改变
     退避的量级结构。
     """
-    import hashlib
 
     base = min(
         _POLICY_FAILURE_BASE_BACKOFF_SECONDS * (2 ** max(0, int(failures) - 1)),

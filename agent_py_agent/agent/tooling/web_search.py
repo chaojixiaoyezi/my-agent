@@ -388,6 +388,8 @@ class WebSearchTool(BaseTool):
                 self.providers,
                 request.query,
                 request.limit,
+                allowed_domains=request.allowed_domains,
+                blocked_domains=request.blocked_domains,
             )
         except ToolCancelled:
             return ToolHandlerOutcome(
@@ -424,7 +426,12 @@ def _search_request_from_params(params: dict[str, Any], max_results: int) -> _Se
     )
 
 
-def _search_with_providers(providers: list[WebSearchProvider], query: str, limit: int) -> _ProviderSearchResult:
+# LLM: provider 是否命中必须在域名过滤之后判断；未满足用户范围时继续下个真实来源。
+# 函数用途: 搜索并过滤来源，避免第一家返回无关域名就挡住后面的有效结果。
+def _search_with_providers(
+    providers: list[WebSearchProvider], query: str, limit: int, *,
+    allowed_domains: list[str] | None = None, blocked_domains: list[str] | None = None,
+) -> _ProviderSearchResult:
     failures: list[dict[str, str]] = []
     for provider in providers:
         if cancellation_requested():
@@ -440,17 +447,27 @@ def _search_with_providers(providers: list[WebSearchProvider], query: str, limit
             failures.append({"provider": provider.name, "error": exc.__class__.__name__})
             continue
         if rows:
-            return _ProviderSearchResult(provider.name, rows, failures)
+            candidate = _ProviderSearchResult(provider.name, rows, failures)
+            valid = _filter_search_results(_normalized_provider_results(candidate),
+                                            allowed_domains=allowed_domains or [], blocked_domains=blocked_domains or [])
+            urls = {item.url for item in valid}
+            filtered = [row for row in rows if str(row.get("url", "")) in urls]
+            if filtered:
+                return _ProviderSearchResult(provider.name, filtered, failures)
     return _ProviderSearchResult("", [], failures)
 
 
+# LLM: 搜索 HTML 与抓取正文一样必须有读取上限；超过容量报告来源失败，不能先读完再切片。
+# 函数用途: 可取消地读取最多 2 MiB 搜索页面，避免异常上游撑爆内存。
 def _read_search_response(request: urllib.request.Request, timeout: int) -> str:
     if cancellation_requested():
         raise ToolCancelled("cancelled")
     with urllib.request.urlopen(request, timeout=timeout) as response:
         with register_cancellation_callback(response.close):
             try:
-                body = response.read()
+                body = response.read(2 * 1024 * 1024 + 1)
+                if len(body) > 2 * 1024 * 1024:
+                    raise ValueError("搜索响应超过 2 MiB 上限")
             except (OSError, ValueError) as exc:
                 if cancellation_requested():
                     raise ToolCancelled("cancelled") from exc

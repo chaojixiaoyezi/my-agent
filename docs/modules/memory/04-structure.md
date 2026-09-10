@@ -1,5 +1,18 @@
 # Memory Structure
 
+## R223 当前边界
+
+- `promotion.py` 的 add 不能用相似度推断 replace；修改身份来自明确 entry_id/version，事实来源核验
+  不等于现实真实性鉴定。偏好与 Persona 继续使用原路由，记忆工具示例与自主写入语义一致。
+- `jsonl.py` 的 runtime_snapshot.semantic_recall 公开配置/初始化/索引/查询状态；语义降级不删除
+  正式 JSONL。诊断只含错误类型，不含凭据、记忆正文或模型地址。
+- `local_storage/search.py` 优先从 canonical conversation_runtime.thread_id 解析身份，在 SQL LIMIT
+  前过滤 around 查询；缺身份返回明确时间邻居，不猜归属。
+- 旧 CompressionService 及其 snapshot 包装已删除。max_tokens 只作为输出预算，不再触发把多条旧记忆
+  拼接成“摘要”的辅助路径；真实 Compact generation、checkpoint 和模型辅助调用账本维持原权威。
+- `tool_ir_compact.py` 的二分试探只修改同一 IR 的临时副本，异常恢复原历史；最短前缀策略不改变
+  `preserve_newest_pair`、摘要覆盖或不可删事实边界，provider cache 成本需另测。
+
 本文只描述当前记忆主链路（单 owner 视角，local/main 下的持久化事实源）。
 
 ## 事实源

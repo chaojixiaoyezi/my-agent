@@ -1205,8 +1205,22 @@ def test_routing_index_rebuild_is_byte_deterministic(tmp_path: Path) -> None:
     assert b"my-agent-lesson-meta" not in second
 
 
-def test_near_duplicate_merge_updates_existing_entry_not_add(tmp_path: Path):
-    """写路径查重:跨 subject 的逐字近重复合入旧条目,不新增(治重复记录膨胀)。"""
+@pytest.mark.parametrize("second_text", [
+    "生产服务 prod-b 使用 8081 端口，监听所有网卡，保留访问日志。",
+    "生产服务 prod-a 不使用 8080 端口，监听所有网卡，保留访问日志。",
+])
+def test_similar_add_preserves_distinct_subjects(tmp_path: Path, second_text):
+    service, conversations, thread = _runtime(tmp_path)
+    original = "生产服务 prod-a 使用 8080 端口，监听所有网卡，保留访问日志。"
+    first = _explicit(service, conversations, thread, content=original, subject_key="prod-a")
+    assert service.promote(first.candidate_id, automatic=True).promoted
+    second = _explicit(service, conversations, thread, content=second_text, subject_key="prod-b")
+    assert service.promote(second.candidate_id, automatic=True).promoted
+    assert {r.content for r in service.long_term.all()} == {original, second_text}
+
+
+def test_near_duplicate_add_does_not_rewrite_another_subject(tmp_path: Path):
+    """相似措辞不是同一主体的结构化证据；新增不能暗中覆盖旧记忆。"""
     service, conversations, thread = _runtime(tmp_path)
     first = _explicit(
         service, conversations, thread,
@@ -1225,10 +1239,9 @@ def test_near_duplicate_merge_updates_existing_entry_not_add(tmp_path: Path):
     result = service.promote(second.candidate_id, automatic=True)
     assert result.promoted
     records = service.long_term.all()
-    assert len(records) == 1, "近重复必须合并,不新增"
-    assert records[0].entry_id == first_ref, "合并保留原条目身份"
-    assert records[0].content == "祥子买了两次车"
-    assert first_ref in result.promotion_ref
+    assert len(records) == 2
+    assert next(r for r in records if r.entry_id == first_ref).content == "祥子买了两次车。"
+    assert first_ref not in result.promotion_ref
 
 
 def test_distinct_facts_never_merged_by_content_similarity(tmp_path: Path):

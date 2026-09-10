@@ -254,7 +254,6 @@ def _trace_runner_stage(bundle: RunnerStageTraceBundle) -> None:
 # 每个离散模型/工具边界更新一次 canonical child state，供父级状态面和 TUI 判断是否仍在工作。
 # 函数用途: 把“正在请求模型/正在用哪个工具/工具刚成功或失败”写进子代理状态，避免只剩空 RUNNING 心跳。
 def _persist_runner_activity(manager: Any, task: Any, bundle: RunnerStageTraceBundle) -> Any:
-    import time
 
     now = time.time()
     summary, tool = _runner_activity_summary(bundle)
@@ -354,7 +353,6 @@ def _runner_activity_summary(bundle: RunnerStageTraceBundle) -> tuple[str, str]:
 
 
 def _touch_active_heartbeat_chain(manager: Any, task: Any) -> Any:
-    import time
 
     now = time.time()
     current = task

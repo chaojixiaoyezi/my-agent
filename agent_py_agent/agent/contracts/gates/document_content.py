@@ -285,7 +285,6 @@ import re
 import zipfile
 from dataclasses import dataclass
 from html import unescape
-from pathlib import Path
 from xml.etree import ElementTree
 
 

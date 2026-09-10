@@ -159,16 +159,16 @@ def reconcile_parent_wait_for_child(
     return _reconcile_parent_wait(manager, parent_id)
 
 
-# LLM: Crash recovery reconciles stale wait markers before ordinary orphan
-# revival so a completed child cannot leave its parent parked forever.
-# 函数用途: 周期巡检所有等孩子的父代理，补偿进程重启期间丢失的事件。
+# LLM: 等待账不可读时返回 unavailable 和错误类型，不把未知伪装为 checked=0 的健康快照。
+# 函数用途: 补偿父子唤醒事件，并向监督层明确报告本次是否真的完成扫描。
 def reconcile_all_parent_waits(manager: Any) -> dict[str, object]:
     checked = 0
     released: list[str] = []
     try:
         tasks = manager.list_runs()
-    except Exception:
-        return {"checked": 0, "released": 0, "released_run_ids": []}
+    except Exception as exc:
+        return {"ok": False, "state": "unavailable", "checked": None, "released": 0,
+                "released_run_ids": [], "error_code": "PARENT_WAIT_LOAD_ERROR", "error_type": type(exc).__name__}
     for task in tasks:
         if not parent_wait_blocks_dispatch(task):
             continue
@@ -177,6 +177,8 @@ def reconcile_all_parent_waits(manager: Any) -> dict[str, object]:
         if decision.should_resume:
             released.append(decision.parent_run_id)
     return {
+        "ok": True,
+        "state": "available",
         "checked": checked,
         "released": len(released),
         "released_run_ids": released,

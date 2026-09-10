@@ -19,6 +19,8 @@ from agent_py_agent.agent.common.encoding_detect import (
     detect_line_ending,
     encode_text,
 )
+from agent_py_agent.agent.tooling._filesystem_edit import EditFileTool
+from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
 from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
 from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
 
@@ -51,10 +53,9 @@ def test_line_ending_detection_and_apply() -> None:
     assert encode_text("x\ny\nz", "utf-8", "\r\n") == b"x\r\ny\r\nz"  # 换行风格应用
 
 
-def test_encode_falls_back_to_utf8_for_unrepresentable() -> None:
-    # 往 Shift-JIS 加 emoji(原编码无法表示)→ 退 utf-8,不丢字符不报错
-    out = encode_text("emoji \U0001f600 test", "shift_jis", "\n")
-    assert out.decode("utf-8") == "emoji \U0001f600 test"
+def test_encode_rejects_unrepresentable_without_mixing_encoding() -> None:
+    with pytest.raises(UnicodeEncodeError):
+        encode_text("emoji \U0001f600 test", "shift_jis", "\n")
 
 
 # ---------- ReadFileTool 集成 ----------
@@ -111,3 +112,50 @@ def test_write_new_file_defaults_utf8(tmp_path: Path) -> None:
     assert result.ok is True
     assert (workspace / "new.txt").read_bytes() == "新文件 hello".encode()  # 新文件默认 utf-8
     assert detect_encoding((workspace / "new.txt").read_bytes()) == "utf-8"
+
+
+@pytest.mark.parametrize("codec,bom", [
+    ("utf-16-le", codecs.BOM_UTF16_LE), ("utf-16-be", codecs.BOM_UTF16_BE),
+    ("utf-32-le", codecs.BOM_UTF32_LE), ("utf-32-be", codecs.BOM_UTF32_BE),
+    ("utf-8", codecs.BOM_UTF8),
+])
+def test_append_preserves_endian_single_bom_and_line_endings(tmp_path, codec, bom):
+    path = tmp_path / "notes.txt"
+    path.write_bytes(bom + "甲\r\n".encode(codec))
+    result = WriteFileTool(tmp_path).execute({"path": "notes.txt", "mode": "append", "content": "乙\n"})
+    assert result.ok, result.output
+    assert path.read_bytes() == bom + "甲\r\n乙\r\n".encode(codec)
+
+
+def test_unrepresentable_append_leaves_original_intact(tmp_path):
+    path = tmp_path / "jp.txt"
+    original = _JP.encode("shift_jis")
+    path.write_bytes(original)
+    result = WriteFileTool(tmp_path).execute({"path": "jp.txt", "mode": "append", "content": "🙂"})
+    assert not result.ok
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("tool_name", ["write", "edit", "patch"])
+def test_text_changes_preserve_permissions_encoding_and_crlf(tmp_path, tool_name):
+    path = tmp_path / "script.txt"
+    bom = codecs.BOM_UTF16_BE
+    path.write_bytes(bom + "甲\r\n乙\r\n".encode("utf-16-be"))
+    path.chmod(0o755)
+    if tool_name == "write":
+        result = WriteFileTool(tmp_path).execute({"path": "script.txt", "content": "甲\n丙\n"})
+    elif tool_name == "edit":
+        result = EditFileTool(tmp_path).execute({"path": "script.txt", "old_string": "乙", "new_string": "丙"})
+    else:
+        result = ApplyPatchTool(tmp_path).execute({"patch": "*** Begin Patch\n*** Update File: script.txt\n-乙\n+丙\n*** End Patch"})
+    assert result.ok, result.output
+    assert path.read_bytes() == bom + "甲\r\n丙\r\n".encode("utf-16-be")
+    assert path.stat().st_mode & 0o777 == 0o755
+
+
+def test_edit_does_not_normalize_semantic_whitespace_by_default(tmp_path):
+    path = tmp_path / "script.py"
+    path.write_text('pattern = "a  b"\n')
+    result = EditFileTool(tmp_path).execute({"path": "script.py", "old_string": 'pattern = "a b"', "new_string": 'pattern = "c"'})
+    assert not result.ok
+    assert path.read_text() == 'pattern = "a  b"\n'

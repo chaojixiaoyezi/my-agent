@@ -66,7 +66,7 @@ def test_fuzzy_line_trim_match_reindents(tmp_path):
     # 多行 + 模型给无缩进版(精确子串失配)→ 行trim 容错命中,reindent 补回文件 8 空格缩进
     f = tmp_path / "e.py"
     f.write_text("if x:\n        a = 1\n        b = 2\n", encoding="utf-8")
-    res = _tool(tmp_path).execute({"path": "e.py", "old_string": "a = 1\nb = 2", "new_string": "a = 100\nb = 200"})
+    res = _tool(tmp_path).execute({"path": "e.py", "old_string": "a = 1\nb = 2", "new_string": "a = 100\nb = 200", "allow_fuzzy": True})
     assert res.ok and "line_trimmed" in res.output
     assert f.read_text(encoding="utf-8") == "if x:\n        a = 100\n        b = 200\n", "容错命中后必须保留原缩进"
 
@@ -75,7 +75,7 @@ def test_fuzzy_whitespace_normalized_match(tmp_path):
     # 行内空白不一致(多个空格 vs 单空格)→ 全空白归一命中
     f = tmp_path / "f.py"
     f.write_text("a   =    1 + 2\n", encoding="utf-8")
-    res = _tool(tmp_path).execute({"path": "f.py", "old_string": "a = 1 + 2", "new_string": "a = 99"})
+    res = _tool(tmp_path).execute({"path": "f.py", "old_string": "a = 1 + 2", "new_string": "a = 99", "allow_fuzzy": True})
     assert res.ok and "whitespace_normalized" in res.output
     assert f.read_text(encoding="utf-8") == "a = 99\n"
 

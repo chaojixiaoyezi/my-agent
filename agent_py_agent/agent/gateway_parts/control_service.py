@@ -2141,8 +2141,8 @@ def _cancel_request_subagents_async(
     ).start()
 
 
-# LLM: Status projects only public runtime facts; tool names, commands, paths and steer history stay private.
-# 函数用途：汇总当前请求、排队数、最近阶段、子代理和会话压缩状态。
+# LLM: 状态仅投影当前请求事实；空闲时读同 owner 的当前模型选择，不把 Gateway 启动占位配置当真实模型。
+# 函数用途：汇总当前请求、排队数、最近阶段、子代理和压缩状态；读取模型设置不发请求或写配置。
 def _gateway_task_status(
     base_agent: object,
     paths: GatewayPaths,
@@ -2194,11 +2194,25 @@ def _gateway_task_status(
         subagent_running=subagents[1],
         subagent_done=subagents[2],
         subagent_failed=subagents[3],
-        model_name=str(getattr(getattr(owner_agent, "config", None), "model_name", "") or ""),
+        model_name=_status_model_name(owner_agent, idle=display_selected is None),
         compact_generation=compact_generation,
         verbose_level=verbose_level,
         durable_work=_named_durable_statuses(owner_agent, paths, scope),
     )
+
+
+# LLM: 活跃请求沿用调用方配置，不重读可能已变的 owner 选择；空闲才读取 /model，失败只显示不可用，不泄漏密钥。
+# 函数用途: 为 /status 选取与当前会话状态相符的模型名，不改变 Agent 配置或启动 backend。
+def _status_model_name(owner_agent: object, *, idle: bool) -> str:
+    config = getattr(owner_agent, "config", None)
+    if idle and getattr(owner_agent, "home_paths", None) is not None:
+        from ..settings.model_profiles import selected_model_config
+
+        try:
+            config = selected_model_config(owner_agent)
+        except (ValueError, OSError, TypeError):
+            return "当前模型配置不可用"
+    return str(getattr(config, "model_name", "") or "")
 
 
 def _named_durable_statuses(

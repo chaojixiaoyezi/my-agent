@@ -1,5 +1,36 @@
 # COMPLETED
 
+## R224 产品名称统一为 my-agent（本地完成）
+
+解决问题：仓库说明、代码注释和历史测试标签残留旧后缀，正式产品名称不一致。
+统一我方名称、测试环境变量和新测试会话前缀；历史路径改明确占位，不伪造目录或旧会话已经更名。
+四个生产模块仅注释/docstring 变化，AST 等价；测试样本目录改名保持同一断言。
+测试助手凭据从私有环境或 SSH 密钥读取，删除两个写死密码默认值；不改任何测试机账号密码。
+44 项定向通过、Shell 语法与 SSH 替身两种认证路径通过；ma-r224-brand 真 TUI 启动、/help、/status 通过。
+同一 Gateway 请求账本前后均16条，无新增 LLM 任务；未部署测试机。
+随后按用户要求纳入正式提交批次，联合 43 文件 980 通过、2 跳过、1 预期失败，本地严格 gate 全通过；不累计重叠测试数。
+第三方 任务运行时 自身可执行命令和对照路径保留；产品功能、数据路径和旧 Git 历史不迁移。
+
+> 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
+
+## R223 修复状态 HTML 阅读版
+
+解决问题：87 项台账不易直观看懂“修了什么、没修什么、为什么、怎么改、有什么影响”。
+新增独立静态 HTML，87 项逐条给大白话场景和可展开技术说明；六类状态、后续优先项、七次真实 TUI 证据分开呈现。
+R222 模型配置成果与清单外的空闲模型名修复另列，不重复计数，不把未验场景归为通过。
+HTML 结构、87 项及六类计数、七条请求、全部锚点、原台账原因/修法/边界/证据完整性检查通过。
+独立报告目录监听 0.0.0.0:8813；loopback 和本机 LAN 地址 HTTP 200，越界文件请求 404。
+无第三方或远端资源、无模型请求；未做浏览器交互验收，也未重新运行底座测试或部署测试机。
+报告是快照，不是运行事实源。访问入口与公开范围见 [R223 台账](audits/R223_87_ITEM_REMEDIATION.md#html-阅读版)。
+
+## DeepSeek 官方双接口兼容修复与短聊天复验
+
+官方 Chat 的中间请求对象漏传 `thinking_disabled`，原生探针被默认思考模式 HTTP 400 拒绝；Messages 原路径正常。
+保留 typed 请求意图，仅向精确官方主机发送专有参数，不按模型名套用其它中转、不全局关闭思考。
+新增 11 项定向、相关 178 项通过；本地严格静态 gate 通过，未跑全仓。
+单 Gateway / ma-r222-models 的三个型号×两种协议，连接短测与普通问候全部通过；无业务工具和 child。
+Vision-Exp 只测文字，容量配置不是满载验收；只加载本机修复，未推送、未部署测试机。
+
 ## R222 通用模型配置与三种接口（真实短测完成）
 
 服务商与模型分离；任意同协议模型可填写名称/地址/密钥/上下文，不按 工具运行时 品牌名单限制。
@@ -1115,7 +1146,7 @@ child Ctrl+O/上翻、503 故障、恢复均保持底栏健康及阅读位置。
   typed journal/reducer、stable/active blocks、Markdown/code/diff、spinner/tool/permission、输入/history/
   search/completion/paste/queue、scroll/transcript/mouse/resize、interrupt/exit 和 canonical history resume
   均已接通，旧字符串 lexer/transcript/stream 路径已删除。85 项矩阵结案为 38 `VERIFIED`、38
-  `MAPPED_VERIFIED`、9 `NOT_APPLICABLE`。`192.0.2.13:/root/my-agent` 最终部署 70 个文件、删除
+  `MAPPED_VERIFIED`、9 `NOT_APPLICABLE`。`192.0.2.13:${MY_AGENT_CHECKOUT}` 最终部署 70 个文件、删除
   5 个废弃文件并保留回滚包；MiniMax-M2.7 Gateway/TUI 健康，secret 实值扫描 0 命中。详细任务见
   `docs/tasks/completed/TASK-20260818-终端交互-tui-parity.md`。
 - 后续四路真机观察已重开其中 C17：旧版运行中普通 Enter 实际等待为下一回合，且 queue preview 会随

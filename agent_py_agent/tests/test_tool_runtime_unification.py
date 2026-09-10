@@ -310,22 +310,18 @@ def _background_shell_request(
     )
 
 
-def test_managed_background_command_uses_required_sandbox_without_false_approval(
+def test_managed_background_command_sandbox_does_not_approve_external_effects(
     tmp_path: Path,
 ) -> None:
     request, executed = _background_shell_request(tmp_path)
     execution = ToolExecutor().execute(request)
 
-    assert execution.decision.status == "allow"
-    assert execution.decision.reason_codes == ()
+    assert execution.decision.status == "ask"
+    assert "APPROVAL_REQUIRED" in execution.decision.reason_codes
     assert execution.decision.resolved_effect == "dangerous"
-    assert execution.decision.approval_request is None
-    assert execution.decision.sandbox_plan["mode"] == "required"
-    assert execution.result.handler_executed is True
-    assert len(executed) == 1
-    assert executed[0]["command"] == "python3 -m http.server 8765 --bind 0.0.0.0"
-    assert executed[0]["run_in_background"] is True
-    assert executed[0]["timeout"] == 30
+    assert execution.decision.approval_request is not None
+    assert execution.result.handler_executed is False
+    assert executed == []
 
 
 # LLM: 夹具复用真实 terminal_session schema/policy，但不得真正创建 PTY 或子进程。
@@ -427,12 +423,12 @@ def test_terminal_session_existing_transport_does_not_reprompt(tmp_path: Path) -
         )
         execution = ToolExecutor().execute(replace(request, call=call))
 
-        assert execution.decision.status == "allow"
-        assert execution.result.handler_executed is True
+        expected = "ask" if arguments["action"] == "write" else "allow"
+        assert execution.decision.status == expected
+        assert execution.result.handler_executed is (expected == "allow")
 
     assert [item["action"] for item in executed] == [
         "list",
-        "write",
         "read",
         "resize",
         "close",
@@ -861,7 +857,7 @@ def test_runtime_snapshot_rejects_policy_field_missing_from_public_schema() -> N
         tool.runtime_policy,
         sandbox_policy=SandboxPolicy(
             "required",
-            uncontained_by_parameter=(("missing", ("true",)),),
+            contained_by_parameter=(("missing", ("true",)),),
         ),
     )
 
@@ -869,7 +865,7 @@ def test_runtime_snapshot_rejects_policy_field_missing_from_public_schema() -> N
         ToolRuntime(tool.model_spec, bad_effect_policy, tool)
     with pytest.raises(ValueError, match="resource scope.*missing"):
         ToolRuntime(tool.model_spec, bad_scope_policy, tool)
-    with pytest.raises(ValueError, match="sandbox uncontained effect.*missing"):
+    with pytest.raises(ValueError, match="sandbox contained effect.*missing"):
         ToolRuntime(tool.model_spec, bad_sandbox_policy, tool)
 
 

@@ -1,5 +1,32 @@
 # ROADMAP
 
+## R224 正式产品名称已统一，纳入正式提交批次
+
+解决问题：历史说明和测试助手还残留旧产品后缀，容易被误认为独立产品或分叉标签。
+名称、说明、测试前缀与源码定位已清理；实际目录不迁移，核心 Python 运行逻辑保持 AST 等价。
+44 项定向与真实 TUI 启动／帮助／状态通过，无新增模型任务。按用户要求，与此前保留的 DeepSeek、R223 和报告一起提交；
+整批 43 文件联合 focused 为 980 通过、2 跳过、1 预期失败，本地严格 gate 全通过。
+后续优先受控部署同一版本后验剩余长链路；不能只凭本次名称回归关闭 R223 其他边界。
+
+> 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
+
+## R223 87 项审计首轮完成，部分边界仍开放
+
+解决问题：旧清单混合真实漏洞、历史修复和能力边界，不能整体判为当前 87 个缺陷。
+按数据安全、文件语义、协议资源、记忆恢复分批定位与修复；状态和证据统一记录到
+[R223 台账](audits/R223_87_ITEM_REMEDIATION.md)。60本轮修复、8部分修复、3已有修复、1不成立、9能力边界、6待环境。
+配套 [HTML 技术与大白话阅读版](audits/r223-report/index.html) 已完成；只读快照分列剩余动作，未新增底座修复或放宽验收。
+1037 focused通过与七次真实MiniMax请求分开记账，不把单测算真机或业务质量通过。
+下一批优先同文件并发/搜索后备差异/取消/长主子历史；Windows、IM ACK和公平跨harness评测另立验收边界。
+
+## DeepSeek 官方双接口复验完成
+
+解决问题：连接短测成功，但正常聊天被运行前强制工具探针的思考参数缺失阻断。
+补齐 OpenAI 请求级思考开关的官方方言转换；不关闭普通思考、不改其它端点或工具授权。
+Flash/Pro/Vision-Exp 的 Chat 与 Messages 共六条配置，在 `/model` 和实际主聊天均通过；178 focused 与严格静态 gate 通过。
+本机独立验证配置保留，未推送或部署测试机。下一步可提交此修复，跨模型 child/复杂工具仍单独验收，不能套用短测结论。
+见 [完整证据与边界](audits/R222_MODEL_PROVIDER_REPORT.md#deepseek-官方双接口复验)。
+
 ## R222 /model 通用配置完成；任务能力不按短测封板
 
 解决问题：重复密钥、不能编辑/启停、多模型不同接口造成拒绝，以及请求头/Compact 会话路由不一致。
@@ -907,8 +934,8 @@ Gateway 中创建 child，但首个 ask 因薄 TUI 的 audit Agent 为空而漏�
 短标题、实时上下文 token 和单行宽度预算。`0ffbfe4` 部署后的正式 TUI 已证明 workspace 与三条 child 行
 正确，但 Todo 仍重复完整 child goal；`669c228` 已按 exact run id 只在视图隐藏重复 seed。继续观察又证明
 自动 wake 的 `run-*` 丢失 thread cwd，relative child output 回落 `/root`；`993ce4f` 在后台 turn 构造处
-恢复同一 thread 快照。全新 tmux `dsh-p2-mario-993ce4f` 已证明首次 ask、后台 main、6 个 child 与工具
-working_dir 全部保持 `/root/dsh-tui-p2-993ce4f`，最终 `bbb/` 产物齐全且 HTTP 200。该项不再等待专项
+恢复同一 thread 快照。全新 tmux `<历史会话:p2-mario-993ce4f>` 已证明首次 ask、后台 main、6 个 child 与工具
+working_dir 全部保持 `<历史工作目录:tui-p2-993ce4f>`，最终 `bbb/` 产物齐全且 HTTP 200。该项不再等待专项
 补丁；后续四个正式任务仍持续对账，发现回归时只修 thread/turn workspace 主链，不增 cwd fallback。
 
 ### TUI 活动状态、跟随滚动与 Compact 真机复验
@@ -1055,7 +1082,7 @@ lane 占位的样本：durable wake 与 ready 事实均正常，但重启前未�
 的本机终端亲自粘贴确认，自动化不能冒充这一步通过；同一普通中文游戏 prompt 还要证明 child 自动
 完成后父级无需用户发“继续”，能读到产物、整合到 `/root/abc` 并实际监听 `0.0.0.0:8080`。
 
-边界：当前测试机为 `192.0.2.7:/root/my-agent`；保持单 Gateway、多 TUI、tmux 观察会话和远端
+边界：当前测试机为 `192.0.2.7:${MY_AGENT_CHECKOUT}`；保持单 Gateway、多 TUI、tmux 观察会话和远端
 key/config/runtime 数据，不触碰其它项目。较早大切片已按约定执行过一次全仓 pytest；当前切片远低于
 10,000 行，只跑相关 focused tests 与远端提交前严格 gate，不重复浪费时间跑全仓。
 
@@ -1073,7 +1100,7 @@ ConversationThread 接线。创建时以 exact `agent_thread_id` 建立无通道
 IR 与 provider overflow 由 `conversation/live_tool_compact.py` 适配到同一个 checkpoint/CAS、失败熔断与
 summary 权威，注入和 raw tail 仍与 main 共用。
 task-local 工具/Memory/写边界保持不变，只有 durable Compact owner 改为 ConversationStore。
-`774c7fe` 部署后，全新 tmux `dsh-p3-774c7fe-compact` 的原样 Prompt 3 已证明首轮和终屏都是
+`774c7fe` 部署后，全新 tmux `<历史会话:p3-774c7fe-compact>` 的原样 Prompt 3 已证明首轮和终屏都是
 `压缩点 90%`；8 个 child 全部 DONE，最高上下文 98.6k，未达 115.2k，所以真实 child
 Compact 触发仍需下一个更长任务复验。同轮 main 最终只整合 7/8 且 Todo 未勾选，
 作为结果批次覆盖与 typed covers 绑定的独立失败样本保留，不计入 Compact 通过。
@@ -1107,7 +1134,7 @@ r5 已在全新目录与 tmux 中只投递一次原样 Prompt 4：7 个 child �
 仍 final，产物只是 3,210 行 Pre-Alpha 子集。现场同时出现三套同义 Todo、两个单独补派 worker 同名。
 这证明下一层问题是模型执行上下文与 typed 计划绑定，而不是应该恢复机器质量验收。
 
-`b7d513c` 已推送并部署后，r6 在 tmux `dsh-p4-lazygit-r6-ea91639` 对固定
+`b7d513c` 已推送并部署后，r6 在 tmux `<历史会话:p4-lazygit-r6-ea91639>` 对固定
 `jesseduffield/lazygit@ea916395` 只投递一次原样 Prompt 4。10 名 child 全部自然 `DONE`，其中 3 名真实
 Compact 一次；main 等首批结束后又自主补派修复/测试 child，Todo 最终全部打钩并自然 `DONE`，没有用户
 发送“继续”。这证明软持续纪律、事件唤醒与 Compact 主链有进步，但任务仍判失败：三套并列输出未整合，
@@ -1120,7 +1147,7 @@ r6 同时抓到四个与样例无关的展示/身份缺口：用户回执的 `is
 `TaskListV2`：isolated 调用仍记成本但不投影 thinking/context；系统单项批次沿 sibling 序号；Todo 标题改为
 `完成 X/Y · 进行中 Z`，四行窗口与完成率彻底分开。200 项 focused 回归通过。
 
-`19d4cea` 已推送并部署到 `.7` 唯一 Gateway。全新 tmux `dsh-p4-lazygit-r7-ea91639` 在干净 cwd 对同一
+`19d4cea` 已推送并部署到 `.7` 唯一 Gateway。全新 tmux `<历史会话:p4-lazygit-r7-ea91639>` 在干净 cwd 对同一
 固定 lazygit commit 只投递一次原样 Prompt 4：7 个 child 全部自然 DONE，补派单项正确连续为 worker-6/7；
 isolated 私有 thinking 未再显示，main context 没有被表达轮的小数字覆盖，Todo 从 0/11 到 11/11 均显示
 真实完成数和四行视窗。四个 r6 展示/身份问题因此通过真实 TUI。
@@ -1134,7 +1161,7 @@ r7 的交付本身仍是 P0 失败：产物只有 29 个生产 Python 文件、6
 再只投递一次原样 Prompt 4，重点看
 模型能否保留完整范围、修真实失败而不是删测试，并按真实运行结果收尾。测试者仍不得旁路改被测产物。
 
-`b3c2daa` 部署后的 r8 在 tmux `dsh-p4-lazygit-r8-ea91639` 对同一固定源码仍只投递一次原样 Prompt 4。
+`b3c2daa` 部署后的 r8 在 tmux `<历史会话:p4-lazygit-r8-ea91639>` 对同一固定源码仍只投递一次原样 Prompt 4。
 范围软纪律让产物早期增长到 793 个 Rust 文件、9,718 行，但运行链路被新的 P0 身份问题污染：一个 child
 因截断回到 PENDING 后，其启动记录仍指向承载兄弟的共享批次 PID，无法重试；child finalize 又建立
 `ordinary_task_resume(task_id=child, thread_id=root)`，root 后台模型于是带着 child task 身份和主工具运行，
@@ -1240,7 +1267,7 @@ workaround；需要一项全新 Node 任务证明底座默认值首次就生效�
 Ruff、py_compile 已通过；Fiber 自身早于部署启动，只能证明模型 workaround，不算底座 E2E。测试者在下一
 Node 任务仍只观察，不能修改任务产物。
 
-边界：仍只修改 `/Users/example/my-agent`、部署 `192.0.2.13:/root/my-agent`；不触碰青禾项目，
+边界：仍只修改 `${MY_AGENT_CHECKOUT}`、部署 `192.0.2.13:${MY_AGENT_CHECKOUT}`；不触碰青禾项目，
 不输出测试机 key，小于 10,000 行的本轮修复只跑 focused tests。
 
 ### Memory v2 单一主链收敛

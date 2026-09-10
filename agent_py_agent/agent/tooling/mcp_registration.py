@@ -127,6 +127,8 @@ class MCPProxyTool(BaseTool):
             return ToolAvailability.ready()
         return ToolAvailability.unavailable("MCP stdio server 当前未运行")
 
+    # LLM: 保留完整 MCP canonical 块交给统一外置/预览链；未知模态不假装已作为视觉输入消费。
+    # 函数用途: 转发已授权调用，返回完整文本与类型化内容；错误仍保留真实状态。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         arguments = {
             key: value
@@ -145,20 +147,21 @@ class MCPProxyTool(BaseTool):
             )
 
         content = sanitize_credentials(str(result.get("content") or ""))
-        if result.get("isError"):
-            # server 把工具自身的失败放在 content 里（isError=true）。如实回传 + 标错误码，
-            # 让模型知道是工具执行失败（可调参重试）而非框架错误。
-            return self._error_result(content or "MCP 工具返回错误", "TOOL_EXECUTION_FAILED")
-
         payload: dict[str, Any] = {"result": content}
+        failed = bool(result.get("isError"))
+        if failed:
+            payload["error"] = content or "MCP 工具返回错误"
+        if isinstance(result.get("content_blocks"), list):
+            payload["content"] = redact_sensitive_value(result["content_blocks"])
         if result.get("structuredContent") is not None:
             payload["structuredContent"] = redact_sensitive_value(
                 result["structuredContent"]
             )
         return ToolHandlerOutcome(
             self.model_spec.name,
-            True,
+            not failed,
             json.dumps(payload, ensure_ascii=False),
+            error_code="TOOL_EXECUTION_FAILED" if failed else "",
         )
 
     def _error_result(self, message: str, error_code: str) -> ToolHandlerOutcome:

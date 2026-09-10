@@ -1,3 +1,5 @@
+# LLM: CLI 续跑只由既有结构化 Goal 和显式 resume 控制；名称整理不能改变授权、收口或恢复链。
+# 模块用途: 执行已授权的 Goal 接续和用户恢复，本轮仅更新说明，不新增后台轮询或模型调用。
 """CLI Goal 续跑与用户显式 resume 执行器。
 
 普通 ``run`` 只执行一轮；只有 exact active Goal 才能在进程内进入下一轮。
@@ -219,9 +221,11 @@ class ResumeRunOnce:
 # 常量权威在 conversation/closeout.py 的收口状态机, 这里 import 复用。
 
 
+# LLM: 只读取既有 conversation goal 的结构化 active 状态；品牌注释调整不得改变普通回合不自动续跑的边界。
+# 函数用途: 判断当前任务是否显式授权 Goal 续跑；不写账、不启动模型，读取失败仍保守拒绝。
 def _auto_resume_authorized(agent: object, runner: object) -> bool:
     """EXEC-39(owner 拍板): 正常不自动续跑——只有任务有 active goal 时才
-    授权 CLI 自动续跑(dsh goal-round-driver 同款: 用户/模型显式设了持续
+    授权 CLI 自动续跑(用户/模型显式设了持续
     目标+预算, idle 驱动才启动)。无 goal 时收口即停, 用户 run --resume
     手动继续。"""
     store = getattr(agent, "conversation_store", None)

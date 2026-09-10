@@ -1,5 +1,7 @@
 
 
+# LLM: CLI 记忆查询复用 owner home 和 canonical route index；查询不授予跨 owner 权限或晋升候选。
+# 模块用途: 解析记忆检索与路由查询参数，按当前用户边界展示可用记录和相关文件。
 from __future__ import annotations
 
 import json
@@ -45,7 +47,7 @@ def _load_and_validate_routes(index_path: Path, agent) -> tuple[list[MemoryRoute
 
 
 def _load_routes_for_matching(index_path: Path, agent, args) -> tuple[list[MemoryRoute], list[MemoryRouteMatch], list[str], list[str]]:
-    from ...agent.memory_routing import load_routes, match_routes, resolve_required_paths
+    from ...agent.memory_routing import load_routes
 
     routes = load_routes(index_path)
     matches = match_routes(args.query, routes, limit=args.limit)

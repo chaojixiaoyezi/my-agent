@@ -1,4 +1,6 @@
 
+# LLM: MCP stdio 协议边界；工具结果完整保留到统一输出归档，协议错误不能作为空成功。
+# 模块用途: 管理有期限、可取消的 MCP 子进程连接；仅承诺已实现的 tools 能力，不承诺 HTTP、sampling 或 tasks。
 from __future__ import annotations
 
 """标准库实现的 MCP (Model Context Protocol) stdio 客户端。
@@ -9,7 +11,7 @@ from __future__ import annotations
 
 为什么不用官方 mcp SDK：标杆 长期助手 用官方 SDK（ClientSession/stdio_client），但本环境
 没装该 SDK。MCP stdio 传输本质就是「子进程 + 按行收发 JSON-RPC」，标准库 subprocess 足矣，
-零新增依赖。这里只实现 stdio 传输的最小可用但完整子集（同步、单连接、按 server 超时）。
+零新增依赖。这里只实现 stdio tools 链路（同步、单连接、每请求总期限），不声称覆盖完整 MCP。
 
 设计取舍（对齐严格约束）：
 - 可选加法：没配 mcp_servers 就完全不起任何子进程（零开销）。
@@ -20,9 +22,9 @@ from __future__ import annotations
   日志里 server env 的 secret 只打键名不打值。
 - 进程生命周期：每个 server 一个长驻子进程，stop() 优雅关闭（先 terminate 再 kill 兜底）。
 
-并发模型：每个 ``MCPStdioClient`` 有一把 ``_lock``，同一 server 的 JSON-RPC 请求串行化
-（stdio 是单条流，交叉读写会串号）。一个后台读线程把 server 的输出按行解析成 JSON-RPC 消息，
-按 id 投递给等待的请求；通知（无 id）当前仅记录后丢弃（最小实现，不订阅 list_changed）。
+并发模型：本实现用 ``_lock`` 将同一 server 的请求串行化，不代表 JSON-RPC 不能多路复用。
+后台读线程按在途 ID 投递响应；tools/list_changed 推进目录代次，下一运行边界重新完整发现工具。
+请求排队、写入和等待共享 deadline；超时取消通知不代表远端动作一定已经停止或回滚。
 """
 
 import atexit
@@ -33,6 +35,7 @@ import re
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,14 +45,14 @@ from .cancellation import cancellation_requested, register_cancellation_callback
 logger = logging.getLogger(__name__)
 
 # my-agent 侧协商的 MCP 协议版本。2024-11-05 是稳定且被绝大多数 server 接受的版本；
-# server 在 initialize 回包里给自己的 protocolVersion，我们不强校验（最大兼容）。
+# server 在 initialize 回包里必须返回已支持版本；未知版本不能按成功握手继续。
 MCP_PROTOCOL_VERSION = "2024-11-05"
+_SUPPORTED_PROTOCOL_VERSIONS = frozenset({"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"})
 
 _DEFAULT_CONNECT_TIMEOUT = 30.0  # initialize 握手超时（秒）
 _DEFAULT_TOOL_TIMEOUT = 60.0     # 单次 tools/call 超时（秒）
 _STOP_GRACE_SECONDS = 5.0        # 关闭时等子进程优雅退出的宽限期
-# 单条工具结果喂给模型的文本上限（≈4K token）。模型上下文才 1M token，一个工具结果再大也消化不了、
-# 反而挤爆上下文，超了就截断带标记。对齐 codebase 其他工具输出量级（快照 8K / 进程 4K）。
+# 仅限制独立 preview；完整 content 与 blocks 交给统一工具输出归档，不能在协议归一化阶段丢正文。
 _DEFAULT_MAX_CONTENT_CHARS = 16 * 1024
 # 读 server stdout 的单行字符上限（纯防 OOM 安全底线）。话痨/失控/被入侵的 server 吐一行超大 JSON
 # 时，readline 会无上限读进内存；这里超限即丢弃该消息，绝不让一行把 agent 内存撑爆。
@@ -269,6 +272,8 @@ def _coerce_positive_int(value: object, default: int) -> int:
     return result if result > 0 else default
 
 
+# LLM: 本函数只是文本投影，原始 typed blocks 另行保留；未适配的模态不能假装已经看懂。
+# 函数用途: 提取 MCP 文本及内嵌资源正文，其它模态显示类型提示。
 def _render_content_block(block: object) -> str:
     """把一个 MCP content 块渲染成一行文本（非 dict / 未知类型返回空串）。"""
     if not isinstance(block, dict):
@@ -281,7 +286,8 @@ def _render_content_block(block: object) -> str:
     if btype == "resource":
         res = block.get("resource")
         uri = res.get("uri") if isinstance(res, dict) else ""
-        return f"[resource {uri}]"
+        text = res.get("text") if isinstance(res, dict) else None
+        return f"[resource {uri}]" + (f"\n{text}" if isinstance(text, str) else "")
     return ""
 
 
@@ -297,13 +303,19 @@ def _unwrap_jsonrpc(server_name: str, payload: dict[str, Any], method: str) -> A
     )
 
 
+# LLM: 保留完整 canonical content 后才由 ToolExecutor 做预览/归档；协议错误不能归一化成空成功。
+# 函数用途: 校验工具结果结构，保留 typed blocks 和全文，同时给出独立有界预览。
 def _normalize_call_result(result: object, max_chars: int = _DEFAULT_MAX_CONTENT_CHARS) -> dict[str, Any]:
-    """把 MCP CallToolResult 的 content 块归一化成纯文本 + 错误标志;文本超 max_chars 截断带标记。"""
-    if not isinstance(result, dict):
-        return {"content": "", "isError": False}
-    parts = [text for block in (result.get("content") or []) if (text := _render_content_block(block))]
+    if (not isinstance(result, dict) or not isinstance(result.get("content"), list)
+            or not isinstance(result.get("isError", False), bool)
+            or any(not isinstance(block, dict) or not isinstance(block.get("type"), str) for block in result["content"])):
+        raise MCPError("MCP tools/call 返回无效的 CallToolResult", code="MCP_PROTOCOL_ERROR")
+    parts = [text for block in result["content"] if (text := _render_content_block(block))]
+    text = "\n".join(parts)
     normalized: dict[str, Any] = {
-        "content": _truncate_content("\n".join(parts), max_chars),
+        "content": text,
+        "content_blocks": result["content"],
+        "preview": _truncate_content(text, max_chars),
         "isError": bool(result.get("isError")),
     }
     if result.get("structuredContent") is not None:
@@ -311,11 +323,71 @@ def _normalize_call_result(result: object, max_chars: int = _DEFAULT_MAX_CONTENT
     return normalized
 
 
+# LLM: 仅创建可丢弃的展示预览，调用方必须同时保留 canonical content。
+# 函数用途: 缩短单独的 MCP 预览字段，不修改完整结果。
 def _truncate_content(content: str, max_chars: int) -> str:
-    """工具结果文本超上限就截断带标记(模型上下文有限,过长结果只会挤爆上下文)。"""
     if max_chars <= 0 or len(content) <= max_chars:
         return content
     return content[:max_chars] + f"\n…[MCP 结果过长,已截断到 {max_chars} 字符]"
+
+
+# LLM: 目录发现共享总 deadline；循环游标、重复名称和非法 schema 均拒绝发布，不降为空 schema。
+# 函数用途: 遍历 tools/list 并校验完整工具表；网络调用仍由传入的唯一客户端请求入口负责。
+def _discover_tools(request, timeout: float) -> list[MCPToolInfo]:
+    tools: dict[str, MCPToolInfo] = {}
+    deadline = time.monotonic() + timeout
+    cursor = ""
+    seen: set[str] = set()
+    for _page in range(100):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MCPError("MCP 工具发现超过总期限", code="MCP_TIMEOUT")
+        result = request("tools/list", {"cursor": cursor} if cursor else {}, timeout=remaining)
+        if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+            raise MCPError("MCP tools/list 返回格式错误", code="MCP_PROTOCOL_ERROR")
+        for item in result["tools"]:
+            tool = _parse_tool_info(item)
+            if tool.name in tools:
+                raise MCPError("MCP 工具名称重复", code="MCP_PROTOCOL_ERROR")
+            tools[tool.name] = tool
+        cursor = result.get("nextCursor")
+        if cursor is None:
+            return list(tools.values())
+        if not isinstance(cursor, str) or not cursor or cursor in seen:
+            raise MCPError("MCP tools/list 游标错误或循环", code="MCP_PROTOCOL_ERROR")
+        seen.add(cursor)
+    raise MCPError("MCP tools/list 超过分页安全上限", code="MCP_PROTOCOL_ERROR")
+
+
+# LLM: 远端工具定义属于不可信协议输入；此处验证形状，不扩大其 effect/approval 权限。
+# 函数用途: 将合法的 tools/list 条目转换为本地只读定义，错误条目保留协议失败语义。
+def _parse_tool_info(item: object) -> MCPToolInfo:
+    if not isinstance(item, dict):
+        raise MCPError("MCP 工具定义不是对象", code="MCP_PROTOCOL_ERROR")
+    name = item.get("name")
+    schema = item.get("inputSchema")
+    description = item.get("description", "")
+    if not isinstance(name, str) or not name.strip() or not isinstance(schema, dict) or not isinstance(description, str):
+        raise MCPError("MCP 工具名称、说明或 inputSchema 格式错误", code="MCP_PROTOCOL_ERROR")
+    return MCPToolInfo(name=name, description=description, input_schema=schema)
+
+
+# LLM: 协议锁必须计入请求总期限；只检查本调用取消 token，拿到锁后所有退出路径都释放。
+# 函数用途: 有期限、可取消地等待 MCP 请求锁或写锁，不把排队时间藏在 timeout 之外。
+@contextmanager
+def _bounded_lock(lock, deadline: float, *, allow_cancelled: bool = False):
+    while True:
+        if cancellation_requested() and not allow_cancelled:
+            raise MCPError("MCP 排队已取消", code="MCP_CANCELLED")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MCPError("MCP 排队超时", code="MCP_TIMEOUT")
+        if lock.acquire(timeout=min(remaining, 0.05)):
+            break
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 # LLM: MCP 客户端持有唯一 server 子进程事实；工具可用性只能读取这里，不能另建健康检查连接。
@@ -333,11 +405,14 @@ class MCPStdioClient:
         self.config = config
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()          # 串行化本 server 的 JSON-RPC 请求
+        self._write_lock = threading.Lock()
         self._lifecycle_lock = threading.RLock()
         self._next_id = 1
         self._reader: threading.Thread | None = None
         self._responses: dict[int, dict[str, Any]] = {}
-        self._abandoned_response_ids: set[int] = set()
+        self._pending_request_ids: set[int] = set()
+        self.tools_changed = False
+        self._tools_generation = 0
         self._responses_cv = threading.Condition()
         self._reader_done = threading.Event()
         self._stderr_tail = _StderrTail(config.name)  # 子进程 stderr 末尾若干行，用于诊断
@@ -417,6 +492,8 @@ class MCPStdioClient:
         # 避免 MCP server 子进程变孤儿。stop() 幂等，重复调用安全。沿用 browser_session 的约定。
         atexit.register(self.stop)
 
+    # LLM: 握手只接受已实现版本及对象能力；不支持的版本关闭传输，不声明空成功。
+    # 函数用途: 协商协议并发送 initialized 通知。
     def _handshake(self) -> None:
         """initialize 请求 + 等待 capabilities + 发 notifications/initialized。"""
         init_params = {
@@ -425,9 +502,11 @@ class MCPStdioClient:
             "clientInfo": {"name": "my-agent", "version": "1.0"},
         }
         result = self._request("initialize", init_params, timeout=self.config.connect_timeout)
-        if isinstance(result, dict):
-            self.server_info = result.get("serverInfo") or {}
-            self.capabilities = result.get("capabilities") or {}
+        if (not isinstance(result, dict) or result.get("protocolVersion") not in _SUPPORTED_PROTOCOL_VERSIONS
+                or not isinstance(result.get("capabilities"), dict) or not isinstance(result.get("serverInfo"), dict)):
+            raise MCPError("MCP 握手版本或能力结构不受支持", code="MCP_PROTOCOL_ERROR")
+        self.server_info = result["serverInfo"]
+        self.capabilities = result["capabilities"]
         # 握手第三步：通知 server 客户端已就绪（无需回包）。
         self._notify("notifications/initialized", {})
 
@@ -464,11 +543,14 @@ class MCPStdioClient:
             self.stop()
             if old_reader is not None and old_reader.is_alive():
                 old_reader.join(timeout=_STOP_GRACE_SECONDS)
+                if old_reader.is_alive():
+                    raise MCPError("旧 MCP 读取线程尚未退出，拒绝混用两代连接", code="MCP_CONNECTION_CLOSED")
             with self._responses_cv:
                 self._responses.clear()
+                self._pending_request_ids.clear()
             self._reader_done.clear()
             self._reader = None
-            self._next_id = 1
+            self.tools_changed = False
             self.server_info = {}
             self.capabilities = {}
             self.start()
@@ -500,27 +582,13 @@ class MCPStdioClient:
 
     # -- JSON-RPC over stdio -------------------------------------------------
 
+    # LLM: tools/list 必须穷尽分页；重复 cursor、同名或错误结构拒绝发布残缺目录。
+    # 函数用途: 获取完整远程工具表，并清除已消费的变更通知。
     def list_tools(self) -> list[MCPToolInfo]:
         """``tools/list``：发现 server 暴露的工具。失败抛 MCPError。"""
-        result = self._request("tools/list", {}, timeout=self.config.connect_timeout)
-        tools_raw = []
-        if isinstance(result, dict):
-            tools_raw = result.get("tools") or []
-        tools: list[MCPToolInfo] = []
-        for item in tools_raw:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name") or "").strip()
-            if not name:
-                continue
-            schema = item.get("inputSchema")
-            tools.append(
-                MCPToolInfo(
-                    name=name,
-                    description=str(item.get("description") or ""),
-                    input_schema=schema if isinstance(schema, dict) else {},
-                )
-            )
+        generation = self._tools_generation
+        tools = _discover_tools(self._request, self.config.connect_timeout)
+        self.tools_changed = generation != self._tools_generation
         return tools
 
     def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -537,22 +605,45 @@ class MCPStdioClient:
         )
         return _normalize_call_result(result, self.config.max_content_chars)
 
+    # LLM: 总 deadline 从排队前开始；取消/超时只终止等待，不证明远程副作用未发生。
+    # 函数用途: 串行发送带唯一 ID 的请求，所有退出路径清理在途表并尽力通知远端取消。
     def _request(self, method: str, params: dict[str, Any], *, timeout: float) -> Any:
-        """发一条 JSON-RPC 请求并阻塞等结果（按 server 超时）。"""
-        with self._lock:
+        deadline = time.monotonic() + max(0.01, timeout)
+        with _bounded_lock(self._lock, deadline):
             req_id = self._next_id
             self._next_id += 1
             message = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
-            self._send(message)
-            return self._await_response(req_id, method, timeout)
+            with self._responses_cv:
+                self._pending_request_ids.add(req_id)
+            sent = False
+            try:
+                self._send(message, deadline=deadline)
+                sent = True
+                return self._await_response(req_id, method, max(0, deadline - time.monotonic()))
+            except MCPError as exc:
+                if sent and method != "initialize" and exc.code in {"MCP_CANCELLED", "MCP_TIMEOUT"}:
+                    try:
+                        self._send({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                                    "params": {"requestId": req_id, "reason": exc.code}},
+                                   deadline=time.monotonic() + 0.2, allow_cancelled=True)
+                    except MCPError:
+                        pass
+                raise
+            finally:
+                with self._responses_cv:
+                    self._pending_request_ids.discard(req_id)
+                    self._responses.pop(req_id, None)
 
+    # LLM: 通知与请求共用排队 deadline；没有 request ID 就不等待响应。
+    # 函数用途: 在连接期限内发出初始化等通知，不无限等候请求锁。
     def _notify(self, method: str, params: dict[str, Any]) -> None:
-        """发一条 JSON-RPC 通知（无 id，不等回包）。"""
-        with self._lock:
-            self._send({"jsonrpc": "2.0", "method": method, "params": params})
+        deadline = time.monotonic() + self.config.connect_timeout
+        with _bounded_lock(self._lock, deadline):
+            self._send({"jsonrpc": "2.0", "method": method, "params": params}, deadline=deadline)
 
-    def _send(self, message: dict[str, Any]) -> None:
-        """把一条 JSON-RPC 消息按行写进子进程 stdin。"""
+    # LLM: 每条连接只有一项写入；背压消耗总 deadline，半帧失败必须销毁连接，禁止续写取消帧。
+    # 函数用途: 跨平台写入完整 JSON-RPC 帧；超时终止传输进程，不谎称远端副作用回滚。
+    def _send(self, message: dict[str, Any], *, deadline: float | None = None, allow_cancelled: bool = False) -> None:
         proc = self._proc
         if proc is None or proc.stdin is None or proc.stdin.closed:
             raise MCPError(
@@ -560,8 +651,37 @@ class MCPStdioClient:
                 code="MCP_CONNECTION_CLOSED",
             )
         try:
-            proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-            proc.stdin.flush()
+            until = deadline if deadline is not None else time.monotonic() + self.config.connect_timeout
+            with _bounded_lock(self._write_lock, until, allow_cancelled=allow_cancelled):
+                payload = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
+                if len(payload) > self.config.max_line_chars:
+                    raise MCPError("MCP 请求超过单帧大小上限", code="MCP_PROTOCOL_ERROR")
+                complete = threading.Event()
+                failures: list[OSError] = []
+
+                # LLM: 此线程只持有一帧和一个 fd；调用方超时会杀整个 transport 以解除管道背压。
+                # 函数用途: 排空一帧字节并通知等待者；不使用文本缓冲，避免拆开 UTF-8 字符。
+                def write_frame() -> None:
+                    try:
+                        remaining = memoryview(payload)
+                        while remaining:
+                            remaining = remaining[os.write(proc.stdin.fileno(), remaining):]
+                    except (OSError, ValueError) as exc:
+                        failures.append(OSError(str(exc)))
+                    finally:
+                        complete.set()
+
+                writer = threading.Thread(target=write_frame, name=f"mcp-writer-{self.config.name}", daemon=True)
+                writer.start()
+                while not complete.wait(timeout=0.01):
+                    if cancellation_requested() and not allow_cancelled:
+                        self._kill_process()
+                        raise MCPError("MCP 发送已取消", code="MCP_CANCELLED")
+                    if time.monotonic() >= until:
+                        self._kill_process()
+                        raise MCPError("MCP 写入超时", code="MCP_TIMEOUT")
+                if failures:
+                    raise failures[0]
         except (BrokenPipeError, OSError) as exc:
             raise MCPError(
                 f"MCP server '{self.config.name}' 写入失败（子进程可能已退出）：{exc}",
@@ -570,7 +690,7 @@ class MCPStdioClient:
 
     def _await_response(self, req_id: int, method: str, timeout: float) -> Any:
         """轮询等待指定 id 的响应；超时 / 进程提前死 都转成 MCPError。"""
-        deadline = time.monotonic() + max(0.1, timeout)
+        deadline = time.monotonic() + max(0, timeout)
         def wake_waiter() -> None:
             with self._responses_cv:
                 self._responses_cv.notify_all()
@@ -579,7 +699,6 @@ class MCPStdioClient:
             with self._responses_cv:
                 while True:
                     if cancellation_requested():
-                        self._abandoned_response_ids.add(req_id)
                         raise MCPError(
                             f"MCP server '{self.config.name}' 调用 {method} 已取消",
                             code="MCP_CANCELLED",
@@ -591,7 +710,7 @@ class MCPStdioClient:
                         # 读线程已结束（子进程退出 / stdout EOF）但没拿到本请求的响应。
                         raise MCPError(
                             f"MCP server '{self.config.name}' 在响应 {method} 前断开连接"
-                            f"{self._stderr_hint()}",
+                            f"{self._stderr_tail.hint()}",
                             code="MCP_CONNECTION_CLOSED",
                         )
                     remaining = deadline - time.monotonic()
@@ -650,32 +769,33 @@ class MCPStdioClient:
             return
         self._dispatch_message(message)
 
+    # LLM: method 区分服务端请求/通知，result/error 才是响应；仅接收精确在途 ID，迟到和未知响应不积压。
+    # 函数用途: 分发 JSON-RPC 消息，标记目录变化并拒绝把服务端请求混入客户端响应。
     def _dispatch_message(self, message: object) -> None:
-        """把一条解析好的消息投递：有 id 的是响应；无 id 的是通知（仅记录）。"""
-        if not isinstance(message, dict):
+        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
             return
         msg_id = message.get("id")
-        if msg_id is None:
-            # 通知（如 notifications/tools/list_changed）：最小实现仅记录，不订阅刷新。
-            method = message.get("method")
-            if method:
-                logger.debug("MCP server '%s' 通知: %s", self.config.name, method)
+        method = message.get("method")
+        if isinstance(method, str):
+            if msg_id is None:
+                if method == "notifications/tools/list_changed":
+                    self._tools_generation += 1
+                    self.tools_changed = True
+            else:
+                response = ({"result": {}} if method == "ping" else
+                            {"error": {"code": -32601, "message": "Client method not supported"}})
+                try:
+                    self._send({"jsonrpc": "2.0", "id": msg_id, **response})
+                except MCPError:
+                    pass
             return
-        try:
-            key = int(msg_id)
-        except (TypeError, ValueError):
+        if type(msg_id) is not int or ("result" in message) == ("error" in message):
             return
         with self._responses_cv:
-            if key in self._abandoned_response_ids:
-                self._abandoned_response_ids.discard(key)
+            if msg_id not in self._pending_request_ids:
                 return
-            self._responses[key] = message
+            self._responses.setdefault(msg_id, message)
             self._responses_cv.notify_all()
-
-    def _stderr_hint(self) -> str:
-        """把 stderr 末尾几行拼成（已脱敏的）诊断提示，附在断连错误后。"""
-        return self._stderr_tail.hint()
-
 
 class _StderrTail:
     """抽干子进程 stderr 并保留末尾若干行，用于失败诊断（避免管道塞满死锁）。
@@ -689,15 +809,17 @@ class _StderrTail:
         self._keep = keep
         self._lines: list[str] = []
 
+    # LLM: stderr 同时限制每段与保留段数；没有换行的失控输出也不能无限分配。
+    # 函数用途: 持续排空错误管道，仅留有界、脱敏的末尾诊断。
     def drain(self, stream: object) -> None:
         if stream is None:
             return
         try:
-            for raw in stream:  # type: ignore[attr-defined]
+            for raw in iter(lambda: stream.readline(4096), ""):  # type: ignore[attr-defined]
                 line = raw.rstrip("\n")
                 if not line:
                     continue
-                self._lines.append(line)
+                self._lines.append(sanitize_credentials(line))
                 if len(self._lines) > self._keep:
                     del self._lines[: len(self._lines) - self._keep]
         except (OSError, ValueError):

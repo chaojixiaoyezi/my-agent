@@ -1,8 +1,11 @@
+# LLM: 归档读取以 host 身份和逻辑 ref 为权限源；预算预留与结算必须原子化。
+# 模块用途: 分页读取大工具输出，并限制同一个 run 的并发读取总量。
 from __future__ import annotations
 
 """tool implementation for explicit externalized artifact reads."""
 
 import json
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,48 +39,51 @@ class ArtifactReadBudgetRequest:
     now: float | None = None
 
 
+# LLM: pending 预留与已消费账共用一把短锁；读盘在锁外，失败必须释放预留。
+# 类用途: 防止同一 run 的并发读取都通过检查而合计超预算。
 class ArtifactReadBudget:
+    # LLM: 容量 0 保持不限制；记录只保留计费窗口和正在读取的请求。
+    # 函数用途: 初始化进程内读取配额，不读写用户记忆。
     def __init__(self, *, window_seconds: int, max_chars: int) -> None:
         self.window_seconds = max(0, int(window_seconds or 0))
         self.max_chars = max(0, int(max_chars or 0))
         self._events_by_run: dict[str, list[tuple[float, int]]] = {}
+        self._pending: dict[object, tuple[str, int]] = {}
+        self._lock = threading.Lock()
 
-    def preflight(self, request: ArtifactReadBudgetRequest) -> str:
+    # LLM: 检查和记 pending 不能分离；返回 token 只能由同一预算对象结算一次。
+    # 函数用途: 为即将读取的正文原子预留额度，拒绝时不发生读盘。
+    def reserve(self, request: ArtifactReadBudgetRequest) -> tuple[object | None, str]:
         run_id = str(request.run_id or "").strip()
         if not run_id or self.window_seconds <= 0 or self.max_chars <= 0:
-            return ""
+            return None, ""
         requested = max(0, int(request.requested_chars))
         if requested <= 0:
-            return ""
+            return None, ""
         now = float(time.monotonic() if request.now is None else request.now)
-        events = self._fresh_events(run_id, now)
-        used = sum(chars for _, chars in events)
-        if used + requested > self.max_chars:
-            return _budget_error(
-                run_id,
-                self.max_chars,
-                self.window_seconds,
-                f"已用 {used} 字符，本次请求 {requested} 字符",
-            )
-        return ""
+        with self._lock:
+            for key in list(self._events_by_run):
+                fresh = [item for item in self._events_by_run[key] if item[0] > now - self.window_seconds]
+                if fresh:
+                    self._events_by_run[key] = fresh
+                else:
+                    del self._events_by_run[key]
+            used = sum(chars for _, chars in self._events_by_run.get(run_id, []))
+            used += sum(chars for owner, chars in self._pending.values() if owner == run_id)
+            if used + requested > self.max_chars:
+                return None, _budget_error(run_id, self.max_chars, self.window_seconds,
+                                           f"已用和预留 {used} 字符，本次请求 {requested} 字符")
+            token = object()
+            self._pending[token] = (run_id, requested)
+            return token, ""
 
-    def commit(self, run_id: str, chars: int, *, now: float | None = None) -> None:
-        scoped_run = str(run_id or "").strip()
-        if not scoped_run or self.window_seconds <= 0 or self.max_chars <= 0:
-            return
-        timestamp = float(time.monotonic() if now is None else now)
-        events = self._fresh_events(scoped_run, timestamp)
-        events.append((timestamp, max(0, int(chars))))
-        self._events_by_run[scoped_run] = events
-
-    def _fresh_events(self, run_id: str, now: float) -> list[tuple[float, int]]:
-        events = [
-            item
-            for item in self._events_by_run.get(run_id, [])
-            if item[0] > now - self.window_seconds
-        ]
-        self._events_by_run[run_id] = events
-        return events
+    # LLM: 只结算已登记 token；异常/取消传 0 释放预留，不能为失败读取扣成功额度。
+    # 函数用途: 读盘结束后按实际返回字符结算，并移除在途额度。
+    def settle(self, token: object | None, chars: int) -> None:
+        with self._lock:
+            entry = self._pending.pop(token, None)
+            if entry is not None and chars > 0:
+                self._events_by_run.setdefault(entry[0], []).append((time.monotonic(), int(chars)))
 
 
 # LLM: This is the sole model-facing reader for archived tool output. Host paths and run identity
@@ -207,7 +213,7 @@ class ReadArtifactTool(BaseTool):
         request = _read_request_from_params(
             self.root, params, default_read_chars=self.default_read_chars
         )
-        budget_error = self.read_budget.preflight(
+        reservation, budget_error = self.read_budget.reserve(
             ArtifactReadBudgetRequest(
                 run_id=request.run_id,
                 requested_chars=_budget_requested_chars(request),
@@ -217,10 +223,14 @@ class ReadArtifactTool(BaseTool):
             return ToolHandlerOutcome(
                 self.model_spec.name, False, budget_error, error_code="QUOTA_EXCEEDED"
             )
-        payload = read_tool_output_artifact(request)
-        ok = payload.get("ok") is True
-        if ok:
-            self.read_budget.commit(request.run_id, int(payload.get("content_chars") or 0))
+        charged = 0
+        try:
+            payload = read_tool_output_artifact(request)
+            ok = payload.get("ok") is True
+            if ok:
+                charged = int(payload.get("content_chars") or 0)
+        finally:
+            self.read_budget.settle(reservation, charged)
         model_payload = _model_visible_read_payload(payload)
         return ToolHandlerOutcome(
             self.model_spec.name,

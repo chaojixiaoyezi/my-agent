@@ -1,5 +1,13 @@
 # Live Lab Structure
 
+R224：`test-campaign/harness.sh` 的公共 kill_* 入口保持，私有 SSH 助手和环境前缀统一为 my-agent；
+`scripts/stability/run_p1*.sh` 从显式 MY_AGENT_CHECKOUT 或脚本检出根定位，quota_resume_guard 从远端私有环境定位。
+这些历史测试脚本不进入产品普通回合，不因名称清理自动运行。
+
+R223：`main_agent_limit_cases._assert_storm_report/_assert_interrupt_honesty` 依赖显式传入的 lab 测试实例；
+F821/F811 不再在仓库全局关闭。`test_r223_audit_regressions.py` 是底层故障注入，不是 TUI 测试替身。
+真实模型验收记录 tmux、单 Gateway、request ID、工具轮次、终态和实际产物；不以模型说“完成”作为质量分数。
+
 Live Lab 现在只作为真实链路验证辅助，不作为主架构来源。
 
 保留目标：

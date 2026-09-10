@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 """implements gateway scenario tests for restart recovery, stale lease, and delayed response handling.
 
 给人看的解释：
@@ -47,7 +49,6 @@ class ScenarioGatewayRecoveryBackend:
 
 
 def _restart_case_write_processing_payload(gpaths, request_id):
-    import os
     import time
 
     processing_path = gpaths.processing / f"{request_id}.json"

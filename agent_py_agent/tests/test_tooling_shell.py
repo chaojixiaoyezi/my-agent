@@ -484,7 +484,7 @@ class TestShellToolEdgeCases:
 def test_failure_effect_outcome_three_state_classification():
     """失败副作用四态分类(长期助手 三态 + failed,判定层只认结构化信号):
 
-    只读命令失败 → not_started(明确失败,重做安全,不再说成「结果不确定」);
+    命令是否只读不能证明进程未启动；没有进程事实时不声明零副作用。
     进程完整退出自报失败(退出码已捕获)→ failed(确定性失败,模型读输出修正,
     不归 unknown 禁继续——2026-08-15 长代码真机 unittest 校验失败任务死);
     无退出码证据的写命令失败 → 不声明(沿通用合同保守 unknown 防重做);
@@ -493,8 +493,8 @@ def test_failure_effect_outcome_three_state_classification():
     from agent_py_agent.agent.tooling.shell import ShellTool
 
     classify = ShellTool._failure_effect_outcome
-    # 只读命令(grep)完整退出失败 → not_started
-    assert classify("grep foo bar.txt", False, "COMMAND_FAILED") == "not_started"
+    # 没有退出事实时不从命令字符串猜测执行效果。
+    assert classify("grep foo bar.txt", False, "COMMAND_FAILED") == ""
     # 写命令(重定向)失败但无退出码证据 → 不声明 → 保守 unknown
     assert classify("echo x > f.txt", False, "COMMAND_FAILED") == ""
     # 写命令(重定向)失败但进程完整退出(退出码已捕获)→ 确定性 failed

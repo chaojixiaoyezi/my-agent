@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_py_agent.cli.chat_parts.control_runtime import ChatControlState
+
 import threading
 from dataclasses import dataclass
 

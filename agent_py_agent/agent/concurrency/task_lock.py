@@ -1,10 +1,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_py_agent.agent.settings import AgentConfig
+
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING
 
 from ..settings.defaults import default_config_int
 from .exceptions import LockAcquisitionError

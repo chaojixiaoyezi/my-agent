@@ -5,8 +5,8 @@ from __future__ import annotations
 
 """native 模式下 compact 对结构化 IR 历史的「整对」回收（Step 3）。
 
-为什么要单独一层：text 协议的 compact 四件套（``microcompact`` / ``ptl_retry`` /
-``window`` / ``_compression_service``）都操作 ``tool_context: list[str]`` 文本——它们
+为什么要单独一层：text 协议的输出窗口与超限回收（``microcompact`` / ``ptl_retry`` /
+``window``）操作 ``tool_context: list[str]`` 文本——它们
 为省 token **故意「留调用头、挖掉结果正文」**。这种「半摘」在文本协议下无害（文本协议
 容忍残缺），但在 native 下 IR 会被翻成 Anthropic 原生 messages：assistant 的
 ``tool_use`` block 必须有配对的 ``tool_result``。只挖结果正文 = 留下「有 tool_use 无
@@ -33,8 +33,8 @@ tool_use id）。直接对这串 ToolResult 套用「保最近 / 预算」策略
 条目 → tool_use id」的映射（按 ``[tool-record round=N index=M]`` 标记 join），供需要
 从文本回收联动 IR 的场景与单测使用。
 
-灰度红线：本模块只在 ``native_tool_use_active`` 为真时被调用；text 协议的 compact 行为
-一字不动。
+本模块只在 ``native_tool_use_active`` 为真时被调用，不生成摘要或另写 Compact 代次。
+旧的记忆拼接 CompressionService 已移除；正式会话摘要由 ConversationStore/checkpoint 链负责。
 """
 
 import re
@@ -69,7 +69,7 @@ def reclaim_oldest_native_ir_pairs(params: object, *, fraction: float) -> int:
 # assistant turns and the newest pair; a caller holding a complete replacement summary may release
 # both the final pair and fully covered tool-bearing assistant turns and stale runtime facts in the
 # retired prefix. The newest facts and all UserTurn items are never candidates.
-# 函数用途: 逐对回收最旧工具往返；完整摘要覆盖时一起回收旧思考和状态，保留用户原话与当前状态。
+# 函数用途: 二分定位满足预算的最短退休前缀，减少重复完整估算；失败恢复原历史，保留用户原话与当前状态。
 def compact_native_ir_to_token_budget(
     params: object,
     *,
@@ -89,7 +89,8 @@ def compact_native_ir_to_token_budget(
     ``preserve_newest_pair=False``，让单条巨型最新回执也能被摘要替换；并显式传
     ``drop_completed_tool_turns=True``，才能删除这些工具所属、已被摘要覆盖的旧 assistant
     正文及连续退休前缀中的旧运行状态，最新状态始终保留。返回实际删除的配对数。
-    估算器即使因取整暂时没有下降，循环也只遍历有限的调用，不会卡死。
+    完整请求估算器必须对退休前缀单调不增。二分寻找最少删除数，取整平台不会卡死；
+    每次试探使用同一原历史，估算失败则恢复原历史，不做额外模型请求或落盘。
     """
     if max_tokens <= 0:
         return 0
@@ -97,16 +98,30 @@ def compact_native_ir_to_token_budget(
     if not ordered_ids or _nonnegative_estimate(token_estimator) <= max_tokens:
         return 0
     candidates = ordered_ids[:-1] if preserve_newest_pair else ordered_ids
-    removed = 0
-    for call_id in candidates:
-        if _nonnegative_estimate(token_estimator) <= max_tokens:
-            break
-        removed += drop_tool_call_pairs(
+    if not candidates:
+        return 0
+    history = native_tool_ir_history(params)
+    original = list(history)
+    lower, upper = 1, len(candidates)
+    try:
+        while lower < upper:
+            middle = (lower + upper) // 2
+            history[:] = original
+            drop_tool_call_pairs(
+                params, set(candidates[:middle]),
+                drop_completed_tool_turns=drop_completed_tool_turns,
+            )
+            if _nonnegative_estimate(token_estimator) <= max_tokens:
+                upper = middle
+            else:
+                lower = middle + 1
+    finally:
+        history[:] = original
+    return drop_tool_call_pairs(
             params,
-            {call_id},
+            set(candidates[:lower]),
             drop_completed_tool_turns=drop_completed_tool_turns,
         )
-    return removed
 
 
 def tool_use_ids_for_tool_records(history: list[Any], tool_record_entries: list[str]) -> set[str]:

@@ -117,7 +117,6 @@ ignore = [
   "E501",   # line length — handled by formatter/editor
   "E402",   # module-level import not at top — historical, many intentional
   "F841",   # unused variable — historical debt
-  "F821",   # undefined name — historical (TYPE_CHECKING, runtime eval)
   "SIM105", # suppressible exception — historical try/except patterns
   "B007",   # unused loop variable — historical
   "SIM108", # if-else-block vs ternary — readability preference
@@ -134,7 +133,6 @@ ignore = [
   "F402",   # import shadowed by loop var — historical
   "UP031",  # printf string formatting — historical
   "F401",   # unused import — historical re-exports in __init__.py
-  "F811",   # redefined name — historical test imports
 ]
 
 [tool.ruff.lint.per-file-ignores]

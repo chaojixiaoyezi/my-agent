@@ -1,8 +1,10 @@
 # TUI 极限测试矩阵
 
+> 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
+
 本文是 5 路真实 TUI 实验室的权威测试账本。它记录可复现操作和客观证据，不把模型自述、窗口标题动画、
-测试数量或夹具结果冒充真实后端通过。测试机固定为 `192.0.2.13`，会话固定为 `dsh-replica`、
-`dsh-input`、`dsh-render`、`dsh-lifecycle`、`dsh-isolation`；禁止触碰 PID `830976`。
+测试数量或夹具结果冒充真实后端通过。测试机固定为 `192.0.2.13`，会话固定为 `<历史会话:replica>`、
+`<历史会话:input>`、`<历史会话:render>`、`<历史会话:lifecycle>`、`<历史会话:isolation>`；禁止触碰 PID `830976`。
 
 ## 状态与轮转合同
 
@@ -44,13 +46,13 @@
 | OPS-001 | Goal 持续轮转 | 四路 | 四会话已启动 | 同时核对 request/事件/进程；完成路留证并续例 | 不因单例结束长期空闲；标题不作事实源 | 2026-08-18 23:08 发现三路完成，留证后续上 R3；四路恢复运行 | `/root/tui-extreme-lab/{input,lifecycle,isolation}/evidence/rotation/round-20260818-2308-final.ansi`；新 request 见各路行 | 测试编排 | PASSED | 下一次巡检继续执行 |
 | OPS-002 | 隔离合同 | 五路 | 五套 runtime 已建 | 对照 owner/thread/task/workspace/evidence 和 PID | 五路 ID、目录和进程不串；不触碰 830976 | 已建立独立目录与 tmux；完整串线审计未结束 | tmux `list-panes -a`、各路 runtime 与 request tree | 编排/隔离 | RUNNING | PENDING |
 | OPS-003 | 证据合同 | 五路 | 任一用例结束 | 保存 ANSI、events、request、资源、最短复现 | 模型最终文字不作为通过证据 | 已用于轮转 R2→R3 | 各路 `evidence/` | 测试治理 | RUNNING | PENDING |
-| OPS-004 | SRC-TMUX-ADV / 观察者误窗 | lifecycle | 同会话含 TUI 与 Gateway 两个 window | 观察者误切 Gateway 后连续按方向键，再切回 TUI | 后台窗输入不得冒充 TUI 乱码；被测任务不中断；观察命令能明确回到 TUI | 真实复现成排 `^[[A/^[[B`；根因是 session 当前 window=1 的后台日志窗，不是 renderer；切回 window 0 后 TUI 正常、Python 任务仍活 | `/root/tui-extreme-lab/lifecycle/evidence/rotation/observer-on-gateway-window-escape-bytes.ansi`；`list-windows`/pane process | tmux harness | PASSED | `Ctrl-b 0` 或 `tmux select-window -t dsh-lifecycle:0` 可恢复；后续隔离后台窗 |
+| OPS-004 | SRC-TMUX-ADV / 观察者误窗 | lifecycle | 同会话含 TUI 与 Gateway 两个 window | 观察者误切 Gateway 后连续按方向键，再切回 TUI | 后台窗输入不得冒充 TUI 乱码；被测任务不中断；观察命令能明确回到 TUI | 真实复现成排 `^[[A/^[[B`；根因是 session 当前 window=1 的后台日志窗，不是 renderer；切回 window 0 后 TUI 正常、Python 任务仍活 | `/root/tui-extreme-lab/lifecycle/evidence/rotation/observer-on-gateway-window-escape-bytes.ansi`；`list-windows`/pane process | tmux harness | PASSED | `Ctrl-b 0` 或 `tmux select-window -t "$TUI_SESSION:0"` 可恢复；后续隔离后台窗 |
 | M-001 | reducer 确定性 | 本地 | 固定事件序列 | 重放相同 typed events 多次及重复事件 | canonical snapshot 深比较完全一致 | focused reducer 用例已有，完整矩阵未执行 | `test_tui_runtime.py`、`test_tui_view_model.py` | TUI reducer | RUNNING | PENDING |
 | M-002 | SRC-PTK | 本地 | app session + pipe input | 逐字、按键、paste、resize 输入；断言应用状态 | 不依赖 stdout 时序；输入状态精确 | 新增 bracketed paste 紧跟 CR 的完整 app 测试并通过；其余矩阵未全跑 | `test_tui_prompt_toolkit_pipe.py::test_bracketed_paste_followed_immediately_by_enter_submits_once` | 输入 | RUNNING | 0ms 路径 PASSED |
 | M-003 | 真实 PTY | 本地/.13 | 固定 TERM/locale/尺寸 | PTY 启动、字节输入、信号、EOF、抓原始输出 | 可重放；退出 tty 状态恢复 | 基础 recorder/test 已存在，极限项未全跑 | `scripts/tui_pty_recorder.py`、`test_tui_pty.py` | 终端协议 | PENDING | PENDING |
 | M-004 | SRC-TMUX-ADV | 五路 | 真实 tmux pane | `send-keys`、`-H`、paste、resize、capture、detach | 操作可重复且 pane 身份不漂移 | 正在日常使用，边界矩阵未完成 | tmux 控制日志 | harness/TUI | RUNNING | PENDING |
 | M-005 | ANSI/cell snapshot | render/isolation | 固定事件与尺寸 | 录 ANSI，解析 cell，重放并深比较 | 样式变化不能改 canonical 文本/状态 | 基础脚本已存在 | `scripts/tui_ansi_snapshot.py`、`test_tui_ansi_snapshot.py` | 渲染 | PENDING | PENDING |
-| M-006 | SRC-FREE 差分 | input/render | 相同尺寸与事件序列 | 分别驱动 终端交互 与本 TUI | 明确允许差异外，布局/按键/队列/折叠行为一致 | 参考会话已启动，完整序列未跑 | `ref-终端交互`、`ref-终端交互-probe`、`dsh-*` capture | TUI parity | RUNNING | PENDING |
+| M-006 | SRC-FREE 差分 | input/render | 相同尺寸与事件序列 | 分别驱动 终端交互 与本 TUI | 明确允许差异外，布局/按键/队列/折叠行为一致 | 参考会话已启动，完整序列未跑 | `ref-终端交互`、`ref-终端交互-probe`、`<历史会话:*>` capture | TUI parity | RUNNING | PENDING |
 | M-007 | 变形测试 | 四路 | 固定逻辑事件 | 只改变 chunk、速度、resize、detach 时机 | canonical 状态、消息顺序、最终文本不变 | 未执行 | — | 多层 | PENDING | PENDING |
 | M-008 | SRC-HYPOTHESIS | 本地 | 状态模型已定义 | 随机 input/scroll/resize/stream/permission/compact/reconnect | 不变量恒真；失败缩减并保存 seed | 测试文件已存在，覆盖审计未完成 | `test_tui_stateful.py` | 状态机 | PENDING | PENDING |
 | M-009 | 两两组合 | 四路 | 单因素值表冻结 | 生成并跑 all-pairs | 每对参数值至少同例出现一次 | 未执行 | pairwise manifest 待生成 | 测试设计 | PENDING | PENDING |
@@ -60,7 +62,7 @@
 | M-013 | 性能与 soak | 四路 | 采样器就绪 | 长流、10k blocks、慢消费者、多客户端，周期采样 | UI 可响应；资源有界；退出无孤儿 | 未执行 | CPU/RSS/fd/thread/file-size 时序待建 | 性能 | PENDING | PENDING |
 | M-014 | SRC-TMUX-CONTROL | render/isolation | control client 接入 | 暂停读取触发 flow control，再恢复 | 不丢控制事件；观察者不改变窗口尺寸 | 未执行 | `%output`/`%pause` 原始流待存 | harness/终端 | PENDING | PENDING |
 
-## 输入、编辑、队列与鼠标矩阵（`dsh-input`）
+## 输入、编辑、队列与鼠标矩阵（`<历史会话:input>`）
 
 | 测试ID | 来源或风险依据 | 所属 TUI | 前置状态 | 操作序列 | 期望不变量 | 实际结果 | ANSI/截图/事件/日志/进程证据 | 问题所属层 | 修复状态 | 复验结果 |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -95,7 +97,7 @@
 | I-029 | fork/session 操作时输入 | input | resume/fork/compact 正在切换 | 快速 Esc/Esc/Enter、paste、普通字符 | 输入不重放到新 thread；不会链式创建会话 | 未执行 | event/request/thread tree | 会话/TUI | PENDING | PENDING |
 | I-030 | active steer 响应丢失 | lifecycle | Gateway 已接受但 HTTP 客户端 2s 内未拿到响应 | 提交普通补充，服务端追加并消费；客户端把 timeout 当 False | unknown 不得等同 rejected；同一正文不能再进入 follow-up queue | 真实发生：`steer-e10ecb4542a94960` 已在 chunk 事件消费并进入当前 turn，但 TUI 又显示为 queued；测试者用 Up 回取并清空，避免实际双执行 | `active-steer-timeout-duplicate-queue.ansi`；chunk event line 19 | control/guidance idempotency | FAILED | 推荐 accepted/rejected/unknown + `channel_message_id` 幂等；待用户确认底座方案 A |
 
-## 消息、Markdown、tool、diff 与滚动矩阵（`dsh-render`）
+## 消息、Markdown、tool、diff 与滚动矩阵（`<历史会话:render>`）
 
 | 测试ID | 来源或风险依据 | 所属 TUI | 前置状态 | 操作序列 | 期望不变量 | 实际结果 | ANSI/截图/事件/日志/进程证据 | 问题所属层 | 修复状态 | 复验结果 |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -123,7 +125,7 @@
 | R-022 | stalled await | render | provider/tool await 挂起 | 同时输入 Esc、滚动、help、resize | UI 主循环仍响应；允许中断并留证 | 未执行 | heartbeat/stack/PTY | event loop | PENDING | PENDING |
 | R-023 | 工具 Schema 与模型调用相悖 | lifecycle | 模型调用 `task_progress` | 模型发送带 `todos` 的调用，Registry 校验后继续 | Schema 必须与模型可见定义一致；确定性参数错可返工且不冒充完成 | 真机被 `$.todos: 未声明字段` 拦截，模型随后绕过清单直接写代码；是否为 provider/schema 生成问题待对照 会话运行时 与当前工具 spec | `active-steer-two-consumed.ansi`；request `gwreq-1787067879-f0924c6fcf464b148a7bd840b2533f43` | ToolRuntime/模型工具协议 | FAILED | 底座候选，先讨论再改 |
 
-## 启停、断线、重试、compact 与恢复矩阵（`dsh-lifecycle`）
+## 启停、断线、重试、compact 与恢复矩阵（`<历史会话:lifecycle>`）
 
 | 测试ID | 来源或风险依据 | 所属 TUI | 前置状态 | 操作序列 | 期望不变量 | 实际结果 | ANSI/截图/事件/日志/进程证据 | 问题所属层 | 修复状态 | 复验结果 |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -151,7 +153,7 @@
 | L-022 | resume 代际 | lifecycle | 多次中断/compact | resume、再输入、再次中断 | thread/task/request 身份保持；历史无重复/缺口 | 未执行 | thread ledger/events | conversation | PENDING | PENDING |
 | L-023 | 观察者误入后台窗 | lifecycle | tmux session 有 `tui`/`gateway` 两窗 | 第四个观察终端停在 window 1 并按 Up/Down | 不把观察 harness 的后台 stdin 回显误报成产品乱码；切回不影响任务 | window 1 留下大量 `^[[A/^[[B`，window 0 同时正常；切回 0 后任务继续 | OPS-004 证据；pane `%31` Python alive | harness | PASSED | 已恢复；后续观察默认锁定 window 0 |
 
-## 并发、隔离、安全、尺寸与性能矩阵（`dsh-isolation`）
+## 并发、隔离、安全、尺寸与性能矩阵（`<历史会话:isolation>`）
 
 | 测试ID | 来源或风险依据 | 所属 TUI | 前置状态 | 操作序列 | 期望不变量 | 实际结果 | ANSI/截图/事件/日志/进程证据 | 问题所属层 | 修复状态 | 复验结果 |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -179,7 +181,7 @@
 | S-022 | secret/redaction | isolation | canary secret | 放入模型/tool/错误/terminal control payload | UI/日志/证据只出现脱敏值；OSC52 不能复制 | 未执行 | canary scan | security | PENDING | PENDING |
 | S-023 | symlink/TOCTOU | isolation | workspace 内外路径 | 校验后换链接、并发 rename、权限决定期间替换 | 实际操作时再次约束；越界无副作用 | 未执行 | inode/path/tool ledger | sandbox | PENDING | PENDING |
 
-## Fiber 复刻与 Agent 产物矩阵（`dsh-replica`）
+## Fiber 复刻与 Agent 产物矩阵（`<历史会话:replica>`）
 
 | 测试ID | 来源或风险依据 | 所属 TUI | 前置状态 | 操作序列 | 期望不变量 | 实际结果 | ANSI/截图/事件/日志/进程证据 | 问题所属层 | 修复状态 | 复验结果 |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -197,11 +199,11 @@
 
 | 会话 | 当前轮 | request | 状态 | 下一次领取方向 |
 |---|---|---|---|---|
-| `dsh-replica` | Fiber→TypeScript 完整复刻 | `gwreq-1787058767-efe3906cde2041fa8d882b2771f6d8bd` | RUNNING | 终态后执行 P-003…P-009 全量独立审计 |
-| `dsh-input` | 1,649 字符多行旅行清单，大 paste 后立即 Enter | `gwreq-1787068941-2ed4288876f04b8c9af382ee858fc35b` | RUNNING | 结束后跑 100k paste、I-011/I-012 导航 |
-| `dsh-render` | 控制字符、Bidi、零宽与复杂 diff 安全显示 | `gwreq-1787069068-efbb6908954e4eb2a5673e03883b7bd6` | RUNNING | R-007…R-010 分块与乱序 fixture |
-| `dsh-lifecycle` | 数千任务、十次随机中断、损坏检查点与快速重启 | `gwreq-1787069069-36eaa996ddae4b4a93dfdb7a7590b9fd` | RUNNING | 观察 90% 自动 compact；复验明确 rejected steer |
-| `dsh-isolation` | 8 人保险箱、并发、只读、链接、特殊名称、备份恢复 | `gwreq-1787069069-10eaac87cdaf486186a8de2a76ca8ebe` | RUNNING | S-007…S-010 终端控制序列夹具 |
+| `<历史会话:replica>` | Fiber→TypeScript 完整复刻 | `gwreq-1787058767-efe3906cde2041fa8d882b2771f6d8bd` | RUNNING | 终态后执行 P-003…P-009 全量独立审计 |
+| `<历史会话:input>` | 1,649 字符多行旅行清单，大 paste 后立即 Enter | `gwreq-1787068941-2ed4288876f04b8c9af382ee858fc35b` | RUNNING | 结束后跑 100k paste、I-011/I-012 导航 |
+| `<历史会话:render>` | 控制字符、Bidi、零宽与复杂 diff 安全显示 | `gwreq-1787069068-efbb6908954e4eb2a5673e03883b7bd6` | RUNNING | R-007…R-010 分块与乱序 fixture |
+| `<历史会话:lifecycle>` | 数千任务、十次随机中断、损坏检查点与快速重启 | `gwreq-1787069069-36eaa996ddae4b4a93dfdb7a7590b9fd` | RUNNING | 观察 90% 自动 compact；复验明确 rejected steer |
+| `<历史会话:isolation>` | 8 人保险箱、并发、只读、链接、特殊名称、备份恢复 | `gwreq-1787069069-10eaac87cdaf486186a8de2a76ca8ebe` | RUNNING | S-007…S-010 终端控制序列夹具 |
 
 ## 关闭条件
 

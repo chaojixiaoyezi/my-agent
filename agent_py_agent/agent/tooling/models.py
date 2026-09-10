@@ -312,44 +312,44 @@ class ApprovalPolicy:
 @dataclass(frozen=True)
 class SandboxPolicy:
     mode: str = "inherit"
-    uncontained_by_parameter: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    contained_by_parameter: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
-    # LLM: 这份 mapping 会直接影响是否弹用户审批，字段/值必须非空、唯一并保留精确匹配。
-    # 函数用途: 校验并固化 sandbox 模式和未被隔离的结构化参数变体。
+    # LLM: contained 是经工具作者核验的正向变体白名单；不能用 required 标签默认豁免未知外部副作用。
+    # 函数用途: 校验沙箱和明确受包含的操作变体，未声明的变体继续正常审批。
     def __post_init__(self) -> None:
         mode = str(self.mode or "").strip().lower()
         if mode not in {"inherit", "required", "none"}:
             raise ValueError(f"invalid tool sandbox mode: {mode}")
-        if mode != "required" and self.uncontained_by_parameter:
-            raise ValueError("sandbox uncontained mappings require mode=required")
+        if mode != "required" and self.contained_by_parameter:
+            raise ValueError("sandbox contained mappings require mode=required")
         normalized_mappings: list[tuple[str, tuple[str, ...]]] = []
         seen_fields: set[str] = set()
-        for raw_field_name, raw_values in self.uncontained_by_parameter:
+        for raw_field_name, raw_values in self.contained_by_parameter:
             field_name = str(raw_field_name or "").strip()
             if not field_name:
-                raise ValueError("sandbox uncontained parameter name is required")
+                raise ValueError("sandbox contained parameter name is required")
             if field_name in seen_fields:
-                raise ValueError(f"duplicate sandbox uncontained parameter: {field_name}")
+                raise ValueError(f"duplicate sandbox contained parameter: {field_name}")
             seen_fields.add(field_name)
             values = tuple(str(value).strip() for value in raw_values if str(value).strip())
             if not values or len(values) != len(set(values)):
-                raise ValueError(f"invalid sandbox uncontained values: {field_name}")
+                raise ValueError(f"invalid sandbox contained values: {field_name}")
             normalized_mappings.append((field_name, values))
         object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "uncontained_by_parameter", tuple(normalized_mappings))
+        object.__setattr__(self, "contained_by_parameter", tuple(normalized_mappings))
 
 
-# LLM: 这是 sandbox 免审批的唯一包含性裁决；只匹配 policy 声明的结构化参数，不读命令或正文。
-# 函数用途: 判断当前工具变体的副作用是否真的被该 sandbox 边界包住。
+# LLM: required 只是要求沙箱，不证明网络、输入和派生进程等效果受包含；仅精确匹配全部正向变体才能豁免。
+# 函数用途: 判断已核验的具体控制动作是否可按沙箱包含处理，默认不豁免。
 def sandbox_effect_is_contained(policy: SandboxPolicy, arguments: object) -> bool:
-    if policy.mode != "required":
+    if policy.mode != "required" or not policy.contained_by_parameter:
         return False
     values = arguments if isinstance(arguments, dict) else {}
-    for field_name, uncontained_values in policy.uncontained_by_parameter:
+    for field_name, contained_values in policy.contained_by_parameter:
         if field_name not in values:
-            continue
+            return False
         value = _parameter_variant(values.get(field_name))
-        if value in uncontained_values:
+        if value not in contained_values:
             return False
     return True
 
@@ -969,12 +969,12 @@ def _validate_runtime_policy(
             resolver.command_parameter,
             "command effect resolver",
         )
-    for field_name, _values in runtime_policy.sandbox_policy.uncontained_by_parameter:
+    for field_name, _values in runtime_policy.sandbox_policy.contained_by_parameter:
         _require_public_input_parameter(
             model_spec,
             public_names,
             field_name,
-            "sandbox uncontained effect",
+            "sandbox contained effect",
         )
     for name in runtime_policy.resource_scopes.parameter_names:
         _require_runtime_input_parameter(

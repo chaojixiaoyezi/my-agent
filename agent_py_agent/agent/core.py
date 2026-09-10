@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -192,12 +193,15 @@ def _wire_memory_authorities(
         agent.home_paths.owner_memory_candidates_jsonl,
         quota_enforcer=agent.owner_quota,
     )
+    semantic_status: dict[str, str] = {}
+    embedder = _build_memory_embedder(config, diagnostics=semantic_status)
     agent.memory = JsonlMemory(
         paths["memory_path"],
         local_store=agent.local_store,
         ops_path=getattr(agent.home_paths, "owner_memory_ops_jsonl", None),
         candidate_service=agent.memory_candidates,
-        embedder=_build_memory_embedder(config),
+        embedder=embedder,
+        semantic_status=semantic_status,
         quota_enforcer=agent.owner_quota,
     )
     agent.persona_repository = PersonaRepository.from_home_paths(
@@ -581,16 +585,22 @@ def _embedding_api_key(config: AgentConfig) -> str:
     )
 
 
-def _build_memory_embedder(config: AgentConfig):
+# LLM: 构建失败仅影响派生向量检索；诊断必须区分未开启、未配置和初始化失败，不记录密钥或异常正文。
+# 函数用途: 创建可选记忆向量接口，向健康面板报告降级原因，不中断正式记忆读写。
+def _build_memory_embedder(config: AgentConfig, *, diagnostics: dict[str, str] | None = None):
     """记忆语义召回的 embedder(检索拓宽 #1):默认关 / 没配 embedding 模型 → None(纯关键词,不变)。
 
-    配了 memory_semantic_recall=true + memory_embedding_model 才建,走 agent 同款 api_base/key
-    (OpenAI 兼容 /embeddings)。建失败/未配一律 None,记忆召回降级纯关键词不崩。
+    配了 memory_semantic_recall=true + memory_embedding_model 才建。
+    失败保留纯关键词召回，同时发出结构化诊断和不含凭据的警告。
     """
+    status = diagnostics if diagnostics is not None else {}
+    status.update(state="disabled")
     if not getattr(config, "memory_semantic_recall", False):
         return None
     model = str(getattr(config, "memory_embedding_model", "") or "").strip()
     if not model:
+        status.update(state="degraded", error_code="MEMORY_EMBEDDING_MODEL_MISSING")
+        logging.getLogger(__name__).warning("语义记忆已开启，但未配置 embedding 模型；当前使用关键词召回")
         return None
     try:
         from .retrieval.embedding import MiniMaxEmbedder, OpenAICompatibleEmbedder
@@ -600,10 +610,14 @@ def _build_memory_embedder(config: AgentConfig):
         api_base = str(getattr(config, "memory_embedding_api_base", "") or "") or str(
             getattr(config, "api_base", "") or ""
         )
-        if model.startswith("embo"):  # MiniMax 原生 embedding(非 OpenAI 兼容,单独适配器)
-            return MiniMaxEmbedder(api_base=api_base, model=model, api_key=api_key)
-        return OpenAICompatibleEmbedder(api_base=api_base, model=model, api_key=api_key)
-    except Exception:
+        factory = MiniMaxEmbedder if model.startswith("embo") else OpenAICompatibleEmbedder
+        embedder = factory(api_base=api_base, model=model, api_key=api_key)
+        status.clear()
+        status.update(state="configured")
+        return embedder
+    except Exception as exc:
+        status.update(state="degraded", error_code="MEMORY_EMBEDDING_INIT_FAILED", error_type=type(exc).__name__)
+        logging.getLogger(__name__).warning("语义记忆初始化失败（%s）；当前使用关键词召回", type(exc).__name__)
         return None
 
 

@@ -1,5 +1,13 @@
 # Subagent Structure
 
+## R223 失败与共享文件契约
+
+`orchestration_tools.CreateSubagentsTool` 的异常分支保留客观系统故障，不伪造 schema 错误；
+`direct_parent_lifecycle` 和 `capability_auto_sweep` 的检查失败保留 unavailable 事实。
+底层已有任务 ID/operation 幂等不变，结果只提示先核查可能已创建的对象，不自动选择重派。
+文件读写一致性通过 `common/file_version.py` 的观察版本及明确前置条件表达，不从 parent/child 角色、
+交付路径或任务名字推导写权限。兄弟代理共享家目录的协作和跨 owner 硬边界不变。
+
 ## R219 上下文快照与 Compact 同源
 
 `call_runtime` 在真实 preflight 写入 exact `agent_thread_id` 的 `ConversationThread.model_context_usage`。

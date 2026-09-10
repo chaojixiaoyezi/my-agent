@@ -1,5 +1,18 @@
 # Memory Progress
 
+## 2026-09-09 R223 记忆、历史与 Compact 复核
+
+- add 删除 LCS 相似度覆盖，只做精确重复去重；更新依赖明确 entry_id/version。记忆仍由各 owner 的
+  Agent 自主维护，只有 SOUL 等待用户确认。两个服务端口的真 TUI 独立保存及精确更新均通过。
+- 嵌入模型构建和向量读写失败公开 degraded/operation/error_type，日志不写密钥或异常正文；
+  JSONL 正式记忆保留，某个操作恢复不能掩盖另一个操作仍失败。
+- `session_search` around 模式按锚点 thread_id 限定上下文；旧记录没有身份时明确是时间邻居，
+  不再把并发会话记录包装成同一段对话。
+- 删除按输出 max_tokens 触发的旧 `_compression_service` 拼接路径及无调用包装，保留唯一正式
+  ConversationStore/checkpoint/CAS 压缩链；pre_compact 策展接到真实摘要入口。
+- native IR 使用单调预算估算器二分寻找最短可退休前缀，保留用户原话、当前事实和工具配对。
+  128 对记录的回归估算次数不超过 10；不新增模型请求、不承诺任意 provider 的缓存 TTL。
+
 ## 2026-09-04 Compact 最低水位与缓存安全辅助调用
 
 - native live Compact 的资格预估改为在 IR 副本上执行与提交阶段相同的完整工具对回收，不再用空历史假设

@@ -64,6 +64,7 @@ from .models import (
     ToolRuntimePolicy,
     TrustedParameterBinding,
 )
+from .process_output_capture import ProcessOutputCapture
 from .process_registry import (
     BackgroundProcess,
     ProcessAccessScope,
@@ -88,22 +89,6 @@ _ACCESS_MODES = frozenset({"restricted", "workspace-write", "full-access"})
 _ACCESS_MODE_RANK = {"restricted": 0, "workspace-write": 1, "full-access": 2}
 _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
 _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
-# shell 解释器错误前缀白名单(command not found 判定用, 2026-08-14):
-# bash/sh/zsh 找不到命令时 stderr 固定以 "<shell>: " 开头(如
-# "/bin/bash: 行 1: cmd: 未找到命令" 中文 locale 亦然), 不随 locale 变;
-# 显式 `exit 127` 的命令自身 stderr 无此前缀——命令确实执行过, 副作用可能
-# 已发生, 不得误判 not_started。只做前缀白名单(结构化来源标识), 不匹配
-# 错误内容文本(禁 NL 匹配铁律)。
-_SHELL_ERROR_PREFIXES = (
-    "bash: ",
-    "/bin/bash: ",
-    "sh: ",
-    "/bin/sh: ",
-    "dash: ",
-    "/bin/dash: ",
-    "zsh: ",
-    "/bin/zsh: ",
-)
 _INTERNAL_AGENT_PATH_RE = re.compile(
     r"(?P<prefix>(?:^|[\s'\";|&])(?:\S*/)?tasks/\S+/work/agents(?:/|\b)|(?:^|[\s'\";|&])work/agents(?:/|\b))",
     re.I,
@@ -520,37 +505,14 @@ def _kill_process_group(proc: subprocess.Popen) -> ProcessTerminationReceipt:
     return terminate_process_tree(proc.pid, proc)
 
 
-# LLM: 有界读取超时前输出，后代仍持有管道时不无限等待；关闭本地句柄不等于远端进程已退出。
-# 函数用途: 回收命令输出与直接子进程，保留已有文本，并明确管道是否真正排空。
-def _drain_terminated_process(proc: subprocess.Popen[str]) -> tuple[str, str, bool]:
-    try:
-        stdout, stderr = proc.communicate(timeout=_PROCESS_PIPE_DRAIN_SECONDS)
-        return _process_output_text(stdout), _process_output_text(stderr), True
-    except subprocess.TimeoutExpired as exc:
-        stdout, stderr = _process_output_text(exc.output), _process_output_text(exc.stderr)
-        _kill_process_group(proc)
-    for stream in (proc.stdout, proc.stderr):
-        try:
-            if stream is not None:
-                stream.close()
-        except OSError:
-            continue
-    try:
-        proc.wait(timeout=0.5)
-    except (subprocess.TimeoutExpired, ChildProcessError):
-        pass
-    return stdout, stderr, False
-
-
 # LLM: subprocess 的 TimeoutExpired 在 text 模式也可能携带 bytes；此处仅做展示解码。
 # 函数用途: 将已捕获的输出统一为文本，保留中文并避免 None 或 bytes 破坏结果格式化。
 def _process_output_text(value: str | bytes | None) -> str:
     return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
 
 
-# LLM: 前台宿主 shell 与 bwrap shell 共用同一超时/进程组回收语义；不要让隔离分支
-#   复制出另一套 communicate 行为，否则超时会重新产生孙进程孤儿。
-# 函数用途: 等待前台命令完成；超时则终止进程树，并把实际输出及退出回执交给工具层而不丢弃证据。
+# LLM: 前台宿主与沙箱共用有界采集和进程树终止；超限只截断保留内容，继续排空，不能假装完整输出。
+# 函数用途: 等待命令完成；取消/超时清理进程，返回有限输出、完整性和终止事实。
 def _communicate_process(
     proc: subprocess.Popen[str],
     *,
@@ -558,24 +520,29 @@ def _communicate_process(
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
     deadline = time.monotonic() + max(0.0, float(timeout))
+    capture = ProcessOutputCapture(proc)
     with register_cancellation_callback(lambda: _kill_process_group(proc)):
         while True:
             if is_interrupted() or cancellation_requested():
                 _kill_process_group(proc)
-                _drain_terminated_process(proc)
+                capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
                 raise CommandInterruptedError(command)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 termination = _kill_process_group(proc)
-                out, err, drained = _drain_terminated_process(proc)
-                raise CommandTimeoutError(command, timeout, out, err, termination, drained)
-            try:
-                out, err = proc.communicate(timeout=min(0.2, remaining))
+                drained = capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
+                out, err, facts = capture.result()
+                error = CommandTimeoutError(command, timeout, out, err, termination, drained)
+                error.capture = facts
+                raise error
+            if proc.poll() is not None and capture.done():
+                out, err, facts = capture.result()
                 if cancellation_requested():
                     raise CommandInterruptedError(command)
-                return subprocess.CompletedProcess(command, proc.returncode, out, err)
-            except subprocess.TimeoutExpired:
-                continue
+                result = subprocess.CompletedProcess(command, proc.returncode, out, err)
+                result.capture = facts
+                return result
+            time.sleep(min(0.02, remaining))
 
 
 # 函数用途: 判断 run_command 是否请求后台模式(布尔或 "true"/"1"/"yes" 字符串)。
@@ -629,18 +596,39 @@ def _heredoc_delimiters_from_shell_line(line: str) -> list[tuple[str, bool]]:
     return delimiters
 
 
-# LLM: 持久进程只有 run_in_background 一条权威启动路径；这里识别 shell 语法 token，
-#   不能用正则匹配自然语言，也不能把 heredoc/引号内的 & 或 2>&1 重定向误判为后台操作符。
-# 函数用途: 判断命令是否试图用 shell 的独立 & 操作符绕开后台进程注册表。
+# LLM: 这里只识别外层未引用的独立 &，不是任意 Shell 程序的安全证明；真正边界仍是沙箱和进程树管理。
+# 函数用途: 保留引号、转义和注释信息，避免把字符串内的 & 或文件描述符重定向当成后台启动。
 def _contains_unmanaged_background_operator(command: str) -> bool:
-    try:
-        shell_syntax = _shell_syntax_without_heredoc_bodies(command)
-        lexer = shlex.shlex(shell_syntax, posix=True, punctuation_chars=";&|<>")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        return "&" in tuple(lexer)
-    except ValueError:
-        return False
+    syntax = _shell_syntax_without_heredoc_bodies(command)
+    quote, index = "", 0
+    while index < len(syntax):
+        char = syntax[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char == "#" and (index == 0 or syntax[index - 1].isspace()):
+            newline = syntax.find("\n", index)
+            index = len(syntax) if newline < 0 else newline + 1
+            continue
+        if char == "&":
+            previous = syntax[index - 1] if index else ""
+            following = syntax[index + 1] if index + 1 < len(syntax) else ""
+            if following == "&":
+                index += 2
+                continue
+            if previous not in {"<", ">", "|"} and following != ">":
+                return True
+        index += 1
+    return False
 
 
 # LLM: 错误正文只解释如何改成唯一受管形态，控制流仍由已注册 error_code 和
@@ -965,7 +953,7 @@ def _build_shell_tool_model_spec(
                 "Run a project build script such as make or npm run.",
                 "Inspect processes, ports, network state, or other system information.",
                 "Execute a one-off script or command-line tool.",
-                "脚本里需要调用 LLM（翻译/摘要/分类等）时：子进程环境自带 AGENT_API_KEY、AGENT_API_BASE、AGENT_MODEL_NAME（与本代理同款 anthropic 兼容端点），直接用它们初始化客户端，不要猜测其他服务商端点。",
+                "子进程不继承本代理模型或网关密钥。脚本需要独立外部服务时，使用用户为该用途显式配置的凭据；不要假设 AGENT_API_KEY 可用，也不要读取宿主私有配置。",
             ),
             avoid_when=(
                 "Use read_file / write_file when only file IO is needed.",
@@ -1756,7 +1744,7 @@ def _shell_execution_target(
     )
 
 
-# LLM: 只读取本地执行器生成的进程状态、退出码和终止回执；TOOL_TIMEOUT 字符串不是退出证明。
+# LLM: 只读取本地执行器生成的进程状态、退出码和终止回执；127/stderr/命令分类均不能证明零副作用。
 # 函数用途: 区分未启动、已终止的失败与未知执行；failed 仍可能有部分写入，不等同于可自动重放。
 def _shell_failure_effect_outcome(
     command: str,
@@ -1765,7 +1753,7 @@ def _shell_failure_effect_outcome(
     output: str = "",
     process_facts: dict[str, object] | None = None,
 ) -> str:
-    _ = output
+    _ = command, output
     if ok or not error_code:
         return ""
     if error_code == "TOOL_TIMEOUT":
@@ -1782,19 +1770,6 @@ def _shell_failure_effect_outcome(
         return "unknown"
     if error_code != "COMMAND_FAILED":
         return ""
-    # exit 127 plus a shell-owned stderr prefix proves the target command never started.
-    if isinstance(process_facts, dict) and int(
-        process_facts.get("return_code") or 0
-    ) == 127:
-        stderr_head = str(process_facts.get("stderr_head") or "")
-        if stderr_head.startswith(_SHELL_ERROR_PREFIXES):
-            return "not_started"
-    try:
-        analysis = analyze_command(command)
-    except Exception:  # noqa: BLE001 - 判定失败时保守沿用通用 unknown 合同
-        return ""
-    if analysis.resolved_effect == "read_only":
-        return "not_started"
     if (
         isinstance(process_facts, dict)
         and str(process_facts.get("status") or "") == "exited"
@@ -1826,6 +1801,9 @@ def _run_shell_process_text(
             sandbox_protected_paths,
         )
         output = _format_process_result(result, tool.max_output_chars)
+        capture = getattr(result, "capture", {})
+        if capture and not capture.get("complete", True):
+            output += "\n[输出不完整] 管道采集达到保留上限或读取失败；如需完整内容，请将命令输出重定向到文件后分页读取。"
         ok = result.returncode == 0
         if not ok:
             output += (
@@ -1843,6 +1821,7 @@ def _run_shell_process_text(
                 "return_code": int(result.returncode),
                 "command_succeeded": ok,
                 "stderr_chars": len(stderr),
+                "capture": capture,
                 "stderr_head": stderr[:80],
                 "_display": _command_display(result, tool.max_output_chars),
             },
@@ -1877,6 +1856,8 @@ def _run_shell_process_text(
 # 函数用途: 整理超时前标准输出与错误输出，给模型看排查线索，并给持久工具账本保存退出证据。
 def _shell_timeout_result(exc, command: str, timeout: int, max_output_chars: int) -> tuple[str, dict]:
     facts: dict[str, object] = {"status": "timed_out", "timeout_seconds": timeout}
+    if getattr(exc, "capture", None):
+        facts["capture"] = exc.capture
     code = None
     if isinstance(exc, CommandTimeoutError):
         facts.update(termination=asdict(exc.termination), pipes_drained=exc.pipes_drained)

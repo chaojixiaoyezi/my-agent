@@ -1,6 +1,9 @@
+# LLM: payload 只投影 canonical task/run 字段，不拥有状态迁移或目录授权；写入由明确的归档调用方负责。
+# 模块用途: 构建任务状态、时间线和归档引用，供工作区同步使用，不从摘要文字猜状态。
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from ...common.json_io import append_jsonl_records, read_json_object

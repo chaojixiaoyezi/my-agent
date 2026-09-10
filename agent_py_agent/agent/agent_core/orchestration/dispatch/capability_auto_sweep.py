@@ -382,23 +382,26 @@ def _merge_orphan_revive_summary(
         )
 
 
-# LLM: Parent-wait crash compensation is isolated from the broader supervisor;
-# malformed state degrades to zero counters and leaves generic recovery running.
-# 函数用途: 调和耐久直属等待记录，并返回监督统计。
+# LLM: 一路等待巡检失败不停止其他监督，但必须留下独立失败计数而非零检查假健康。
+# 函数用途: 调和直属等待账，把成功扫描与读取失败分开计数并记录告警。
 def _reconcile_direct_parent_waits(agent: Any) -> dict[str, int]:
     try:
         from ....subagents.direct_parent_lifecycle import reconcile_all_parent_waits
 
         wait_summary = reconcile_all_parent_waits(getattr(agent, "subagents", None))
+        if wait_summary.get("ok") is False:
+            _LOGGER.warning("direct parent wait unavailable: %s", wait_summary.get("error_type"))
         return {
             "direct_parent_waits_checked": int(wait_summary.get("checked") or 0),
             "direct_parent_waits_released": int(wait_summary.get("released") or 0),
+            "direct_parent_waits_errors": int(wait_summary.get("ok") is False),
         }
     except Exception:
-        _LOGGER.debug("supervision direct parent wait reconcile failed", exc_info=True)
+        _LOGGER.warning("supervision direct parent wait reconcile failed", exc_info=True)
         return {
             "direct_parent_waits_checked": 0,
             "direct_parent_waits_released": 0,
+            "direct_parent_waits_errors": 1,
         }
 
 

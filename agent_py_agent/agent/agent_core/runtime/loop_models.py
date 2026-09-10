@@ -159,12 +159,6 @@ class RuntimeLoopResult:
     canonical_native_messages: list[dict[str, object]]
 
 
-@dataclass
-class CompressionLoopResult:
-    memories: list
-    snapshot_id: str
-    snapshot_path: str
-    applied: bool
 
 
 @dataclass

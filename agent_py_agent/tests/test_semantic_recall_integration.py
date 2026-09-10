@@ -44,7 +44,7 @@ def test_simpleagent_wires_embedder_from_config(tmp_path) -> None:
 
 
 def test_per_user_vector_isolation(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(core, "_build_memory_embedder", lambda config: LocalHashingEmbedder(dim=128))  # 强制本地确定性
+    monkeypatch.setattr(core, "_build_memory_embedder", lambda config, **kwargs: LocalHashingEmbedder(dim=128))  # 强制本地确定性
     base = _agent(tmp_path, scoping=True)
     alice = _resolve_request_agent(base, _req("alice"))
     bob = _resolve_request_agent(base, _req("bob"))
@@ -59,7 +59,7 @@ def test_per_user_vector_isolation(tmp_path, monkeypatch) -> None:
 
 
 def test_scoping_off_shares_one_vector_store(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(core, "_build_memory_embedder", lambda config: LocalHashingEmbedder(dim=128))
+    monkeypatch.setattr(core, "_build_memory_embedder", lambda config, **kwargs: LocalHashingEmbedder(dim=128))
     base = _agent(tmp_path, scoping=False)
     a = _resolve_request_agent(base, _req("alice"))
     b = _resolve_request_agent(base, _req("bob"))

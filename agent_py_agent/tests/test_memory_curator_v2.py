@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.agent_core._compression_service import CompressionService
 from agent_py_agent.agent.agent_core._finalization_service import _request_memory_curator
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import ConversationStore
@@ -1037,7 +1036,7 @@ def test_compact_task_and_lifecycle_triggers_share_one_durable_state(tmp_path: P
     service = _service(tmp_path, _StaticStructuredBackend({}), store)
     agent = SimpleNamespace(memory_curator=service)
 
-    CompressionService(agent)._request_curator_pre_compact()
+    _request_memory_curator(agent, "pre_compact")
     _request_memory_curator(agent, "task_complete")
     service.request("session_close")
     service.request("reset")
@@ -1518,7 +1517,7 @@ def test_reinjection_chain_never_grows_formal_memory(tmp_path: Path) -> None:
     assert len(by_id) == 2
     # 复述候选如实保留 model_inferred 来源 → 自动晋升闸在 promotion 层拦截(见
     # test_model_inferred_never_auto_promotes);user_explicit 重复走写路径查重
-    # (见 test_near_duplicate_merge_updates_existing_entry_not_add)。本测试核验
+    # （只有精确重复去重，相似事实不覆盖）。本测试核验
     # curator 提炼环节不把复述伪装成用户要求。
     repeated = next(item for item in by_id.values() if item.origin == "model_inferred")
     assert repeated.content == "祥子买了两次车。"

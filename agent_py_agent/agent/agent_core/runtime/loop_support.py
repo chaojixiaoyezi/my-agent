@@ -32,13 +32,12 @@ from ...tooling.output_projection import project_tool_output_body
 from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
-from .._runtime_params import CompressionContext, ToolLoopExecuteParams
+from .._runtime_params import ToolLoopExecuteParams
 from .._tool_loop_service import ToolLoopService
 from ..parameters import _one_shot_tool_call_keys
 from ..tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
-    CompressionLoopResult,
     FinalizeParams,
     PreparedRuntimeContext,
     RunParams,
@@ -565,12 +564,11 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             protocol_snapshot=tool_protocol_snapshot,
         )
     )
-    compression = _execute_runtime_compression(agent, params)
     loop_params = _tool_loop_execute_params(
         agent,
         RuntimeToolLoopSeed(
             params=params,
-            memories=compression.memories,
+            memories=params.memories,
             tool_catalog_section=tool_catalog_section,
             tool_recommendations_section=tool_recommendations_section,
             tool_runtime_snapshot=tool_runtime_snapshot,
@@ -586,9 +584,9 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         final_prompt=final_prompt,
         final_response=final_response,
         tool_rounds=tool_rounds,
-        compression_snapshot_id=compression.snapshot_id,
-        compression_snapshot_path=compression.snapshot_path,
-        compression_applied=compression.applied,
+        compression_snapshot_id="",
+        compression_snapshot_path="",
+        compression_applied=False,
         executed_tools=loop_params.executed_tools,
         archive_tool_calls=loop_params.archive_tool_calls,
         active_turn_user_inputs=list(loop_params.active_turn_user_inputs),
@@ -737,23 +735,6 @@ def _queue_audit_source_provision_reply(
     )
 
 
-def _execute_runtime_compression(agent, params: RuntimeLoopParams) -> CompressionLoopResult:
-    compression_svc = agent._get_services().compression
-    compression_ctx = CompressionContext(
-        user_prompt=params.root_user_prompt or params.user_prompt,
-        memories=params.memories,
-        runtime_injections=params.runtime_injections,
-        routed_context=params.routed_context,
-        resume_context_section=params.resume_context_section,
-        request_id=params.request_id,
-        run_id=params.run_id,
-        task_id=params.task_id,
-        source=params.source,
-    )
-    memories, snapshot_id, snapshot_path, applied = compression_svc.check_and_apply(compression_ctx)
-    return CompressionLoopResult(
-        memories=memories, snapshot_id=snapshot_id, snapshot_path=snapshot_path, applied=applied
-    )
 
 
 def _is_task_local_context(value: object) -> bool:

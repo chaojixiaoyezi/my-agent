@@ -408,7 +408,6 @@ def _record_table_header() -> list[str]:
 __all__ = ["render_real_run_review_markdown"]
 
 # Real-run review entrypoints
-from pathlib import Path
 
 
 def review_real_run_tree(

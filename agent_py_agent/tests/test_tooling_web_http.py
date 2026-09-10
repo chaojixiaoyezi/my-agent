@@ -5,6 +5,58 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+@pytest.mark.parametrize("status,method,expected", [
+    (301, "POST", "GET"), (302, "POST", "GET"), (303, "PUT", "GET"),
+    (303, "HEAD", "HEAD"), (307, "POST", "POST"), (308, "PATCH", "PATCH"),
+])
+def test_redirect_preserves_protocol_and_drops_cross_origin_credentials(status, method, expected):
+    from agent_py_agent.agent.tooling.web_fetch_runtime import (
+        FetchRawRequest,
+        PinResult,
+        fetch_raw_response,
+    )
+
+    redirect = MagicMock(status=status)
+    redirect.getheader.return_value = "https://other.example/final"
+    final = MagicMock(status=200, headers={})
+    final.read.return_value = b"ok"
+    with patch("agent_py_agent.agent.tooling.web_fetch_runtime._send_pinned") as send:
+        send.side_effect = [(MagicMock(), redirect), (MagicMock(), final)]
+        result = fetch_raw_response(
+            FetchRawRequest("web_fetch", "https://first.example/start", method,
+                            {"Authorization": "test-credential", "Cookie": "test-cookie",
+                             "X-Api-Key": "test-key", "Content-Type": "application/json",
+                             "Content-Length": "2", "User-Agent": "test"}, b"{}", 5),
+            format_http_error=lambda *args: None, resolve_pin=lambda url: PinResult("127.0.0.1", None),
+        )
+    assert result.status == 200
+    hop = send.call_args_list[1].args[0]
+    assert hop.request.method == expected
+    assert not ({k.lower() for k in hop.request.headers} & {"authorization", "cookie", "x-api-key", "content-length"})
+    assert hop.body == (b"{}" if expected == method and status != 303 else None)
+    redirect.read.assert_not_called()
+
+
+@pytest.mark.parametrize("host,port,scheme,expected", [
+    ("example.test", 8080, "http", "example.test:8080"),
+    ("::1", 9443, "https", "[::1]:9443"),
+    ("::1", 80, "http", "[::1]"),
+])
+def test_pinned_host_header_includes_authority(host, port, scheme, expected):
+    from agent_py_agent.agent.tooling.web_fetch_runtime import (
+        FetchRawRequest,
+        _HopReq,
+        _send_pinned,
+        _Target,
+    )
+    request = FetchRawRequest("web_fetch", "http://example.test/", "GET", {}, None, 3)
+    with patch("agent_py_agent.agent.tooling.web_fetch_runtime._open_pinned") as connect:
+        _send_pinned(_HopReq(_Target(scheme, host, port, "127.0.0.1"), request, request.url, None))
+        assert connect.return_value.request.call_args.kwargs["headers"]["Host"] == expected
+
 
 def _private_resolver(_host: str) -> tuple[str, ...]:
     return ("127.0.0.1",)

@@ -1,5 +1,13 @@
 
+# LLM: 子代理动作执行依据 typed action/status 和显式 run 身份，副作用必须落入动作记录；类型注解不改变调用关系。
+# 模块用途: 执行管理器选择的子代理动作并登记结果，保留 dry-run、权限与失败证据。
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_py_agent.agent.subagents.model_task import SubAgentTask
+    from agent_py_agent.agent.subagents.reports import ActionApplyReport
 
 """action apply service for subagent tasks.
 
@@ -8,7 +16,7 @@ SubAgentManager 通过当前服务组合调用这里。
 """
 
 import time
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ...models import SubAgentPlanActionsOptions
 from ..indexing.records import IndexReportParams

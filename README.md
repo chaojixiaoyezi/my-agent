@@ -3,7 +3,8 @@
 一个用 Python 标准库搭起来的个人通用智能体底座。
 
 后续版本统一以 **my-agent** 发布，正式仓库为 [chaojixiaoyezi/my-agent](https://github.com/chaojixiaoyezi/my-agent)。
-安装命令仍为 `my-agent`，已有 `~/.my-agent` 用户数据不因改名迁移；历史测试记录中的旧名称和路径保留原样。
+安装命令、产品说明和发布名称统一为 `my-agent`，已有 `~/.my-agent` 用户数据不因改名迁移。
+历史说明使用中性路径与会话占位，不假装旧目录已更名；原始定位仍可按提交和运行编号追溯。
 
 它现在不是单纯聊天脚本，而是在逐步变成一个可常驻、可审计、可恢复、能跑多层子代理任务的本地工作台。
 
@@ -50,7 +51,7 @@ MYAGENT_SRC="$PWD" bash install.sh --container
 宿主 venv 只推荐开发使用；没有 Linux bwrap 时，owner-scoped `run_command` 会安全拒绝。
 
 ```bash
-cd /Users/example/my_agent/my-agent
+cd /path/to/my-agent
 # 进入项目根目录；后面的命令都默认在这里执行。
 
 python3 --version

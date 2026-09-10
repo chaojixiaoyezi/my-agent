@@ -738,13 +738,15 @@ def _close_registry_clients(registry: ToolRegistry) -> None:
     registry._mcp_retry_state.clear()
 
 
+# LLM: 远程目录变化只在新运行边界发布；不改变已冻结快照，不在普通可用性查询里发网络请求。
+# 函数用途: 在运行前恢复断开的 MCP 连接，或重新发现已收到 list_changed 的工具目录。
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     clients = list(getattr(registry, "_mcp_clients", ()) or ())
-    if not clients or all(client.is_running() for client in clients):
+    if not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients):
         return
     with registry._mcp_prepare_lock:
         for client in list(getattr(registry, "_mcp_clients", ()) or ()):
-            if client.is_running():
+            if client.is_running() and not getattr(client, "tools_changed", False):
                 registry._mcp_retry_state.pop(id(client), None)
                 continue
             _reconnect_registry_client_if_due(registry, client)

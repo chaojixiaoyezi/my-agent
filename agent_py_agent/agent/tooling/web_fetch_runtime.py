@@ -10,9 +10,11 @@ import os
 import re
 import socket
 import ssl
+import threading
+import time
 import urllib.error
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -71,6 +73,11 @@ class FetchFormatRequest:
 
 _MAX_REDIRECTS = 5
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_CROSS_ORIGIN_SAFE_HEADERS = frozenset({
+    "accept", "accept-encoding", "accept-language", "cache-control", "content-language",
+    "content-type", "if-match", "if-modified-since", "if-none-match", "if-unmodified-since",
+    "pragma", "range", "user-agent",
+})
 
 
 @dataclass(frozen=True)
@@ -101,6 +108,7 @@ class _HopReq:
 class _HopOutcome:
     redirect_to: str
     result: RawResponseParts | ToolHandlerOutcome | None
+    status: int = 0
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -168,6 +176,8 @@ def _network_failure(tool: str, exc: BaseException) -> ToolHandlerOutcome:
     return ToolHandlerOutcome(tool, False, f"请求失败: {exc.__class__.__name__}", error_code="NETWORK_REQUEST_FAILED")
 
 
+# LLM: 每跳保持 IP pin/SSRF 校验；跨 origin 只转发安全头，方法与正文按重定向状态转换。
+# 函数用途: 发起有界 HTTP 抓取，关闭重定向连接而不下载无用正文。
 def fetch_raw_response(request: FetchRawRequest, *, format_http_error, resolve_pin) -> RawResponseParts | ToolHandlerOutcome:
     """逐跳:每个 URL(含每个重定向目标)先过 resolve_pin(网关校验+取固定 IP),再 pin 到该 IP 连接。
 
@@ -175,6 +185,7 @@ def fetch_raw_response(request: FetchRawRequest, *, format_http_error, resolve_p
     (2) 重定向绕过——每个 3xx 目标重新过网关,不安全则拒,绝不盲目跟随到内网/云 metadata。
     """
     url, body = request.url, request.data
+    deadline = time.monotonic() + max(0.0, float(request.timeout))
     for _hop in range(_MAX_REDIRECTS + 1):
         if cancellation_requested():
             return _network_failure(request.tool, ToolCancelled("cancelled"))
@@ -183,32 +194,103 @@ def fetch_raw_response(request: FetchRawRequest, *, format_http_error, resolve_p
             return pin.error  # 初始或某重定向目标没过网关
         if not pin.ip:
             return ToolHandlerOutcome(request.tool, False, "主机解析失败", error_code="NETWORK_REQUEST_FAILED")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _network_failure(request.tool, TimeoutError())
+        request = replace(request, timeout=remaining)
         outcome = _do_hop(_HopReq(_target_for(url, pin.ip), request, url, body), format_http_error)
         if outcome.redirect_to:
-            url, body = outcome.redirect_to, None
+            request = _redirect_request(request, url, outcome.redirect_to, outcome.status)
+            url, body = request.url, request.data
             continue
         return outcome.result
     return ToolHandlerOutcome(request.tool, False, "重定向次数过多", error_code="TOO_MANY_REDIRECTS")
 
 
+# LLM: 重定向连接不会复用，不得无界 drain 响应体；关闭连接仍需覆盖取消与异常路径。
+# 函数用途: 执行一跳并返回结构化状态，或读取受大小上限保护的最终正文。
 def _do_hop(hop: _HopReq, format_http_error) -> _HopOutcome:
     conn: http.client.HTTPConnection | None = None
     try:
         conn, resp = _send_pinned(hop)
-        with register_cancellation_callback(conn.close):
+        with register_cancellation_callback(lambda: _abort_connection(conn)):
             if cancellation_requested():
                 raise ToolCancelled("cancelled")
             location = _redirect_target(resp, hop.url)
             if location:
-                resp.read()  # 排空再换下一跳
-                return _HopOutcome(location, None)
-            return _HopOutcome("", _finalize_hop(hop, resp, format_http_error))
-    except (ToolCancelled, TimeoutError, OSError, ssl.SSLError) as exc:
+                return _HopOutcome(location, None, resp.status)
+            result = _finalize_hop(hop, resp, format_http_error)
+            if _connection_timed_out(conn):
+                raise TimeoutError()
+            return _HopOutcome("", result)
+    except (ToolCancelled, TimeoutError, OSError, ssl.SSLError, http.client.HTTPException) as exc:
         # 连接或读取被取消/超时/断流时使用同一结构化网络结果。
-        return _HopOutcome("", _network_failure(hop.request.tool, exc))
+        return _HopOutcome("", _network_failure(hop.request.tool, TimeoutError() if _connection_timed_out(conn) else exc))
     finally:
         if conn is not None:
+            timer = getattr(conn, "_request_deadline_timer", None)
+            if timer is not None:
+                timer.cancel()
             conn.close()
+
+
+# LLM: deadline 是整次请求预算，不是每次 recv 的空闲超时；关闭 socket 才能打断持续滴流和响应文件对象。
+# 函数用途: 终止底层 HTTP I/O；关闭只作用于本次连接，不代表远端回滚请求。
+def _abort_connection(conn) -> None:
+    sock = getattr(conn, "_request_socket", None) or getattr(conn, "sock", None)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    conn.close()
+
+
+# LLM: 超时标记由宿主 Timer 设置，不能从 HTTP 响应正文或报错文案推断。
+# 函数用途: 判断当前连接是否已耗尽请求总预算。
+def _connection_timed_out(conn) -> bool:
+    event = getattr(conn, "_request_deadline_expired", None)
+    return event is not None and event.is_set() is True
+
+
+# LLM: timer 与 socket timeout 共用上层剩余预算；释放 timer 的责任属于最终响应或发送失败路径。
+# 函数用途: 为一条连接启动总超时中断，阻止服务端持续少量发字节拖长请求。
+def _start_request_deadline(conn, timeout: float) -> None:
+    event = threading.Event()
+    conn._request_deadline_expired = event
+    # LLM: 回调只设置宿主超时事实并中断当前连接，不修改工具账本。
+    # 函数用途: 到期唤醒正在等待头部或正文的请求线程。
+    def expire():
+        event.set()
+        _abort_connection(conn)
+    timer = threading.Timer(max(0.0, float(timeout)), expire)
+    timer.daemon = True
+    conn._request_deadline_timer = timer
+    timer.start()
+
+
+# LLM: 重定向原点包含 scheme/host/port；未知自定义头不能因换域而泄露，307/308 不得丢请求体。
+# 函数用途: 按 HTTP 重定向语义产生下一跳请求；不修改调用者原始配置。
+def _redirect_request(request: FetchRawRequest, source: str, target: str, status: int) -> FetchRawRequest:
+    old, new = _target_for(source, ""), _target_for(target, "")
+    same_origin = (old.scheme, old.host, old.port) == (new.scheme, new.host, new.port)
+    headers = {k: v for k, v in request.headers.items()
+               if same_origin or k.lower() in _CROSS_ORIGIN_SAFE_HEADERS}
+    method, data = request.method, request.data
+    if status == 303 or (status in {301, 302} and method == "POST"):
+        method = "HEAD" if method == "HEAD" else "GET"
+        data = None
+        headers = {k: v for k, v in headers.items()
+                   if k.lower() not in {"content-type", "content-length", "transfer-encoding", "content-encoding"}}
+    return replace(request, url=target, method=method, headers=headers, data=data)
+
+
+# LLM: Host 默认值必须包含非默认端口与 IPv6 方括号；显式首跳 header 不在这里改写。
+# 函数用途: 为固定 IP 连接生成原 URL 的 HTTP authority。
+def _target_authority(target: _Target) -> str:
+    host = f"[{target.host}]" if ":" in target.host else target.host
+    default_port = 443 if target.scheme == "https" else 80
+    return host if target.port == default_port else f"{host}:{target.port}"
 
 
 # LLM: 请求头在这里完成协议级默认值；不得覆盖调用者显式 header，也不得绕过固定 IP 连接。
@@ -216,12 +298,13 @@ def _do_hop(hop: _HopReq, format_http_error) -> _HopOutcome:
 def _send_pinned(hop: _HopReq) -> tuple[http.client.HTTPConnection, Any]:
 
     conn = _open_pinned(hop.target, hop.request.timeout)
+    _start_request_deadline(conn, hop.request.timeout)
     try:
-        with register_cancellation_callback(conn.close):
+        with register_cancellation_callback(lambda: _abort_connection(conn)):
             if cancellation_requested():
                 raise ToolCancelled("cancelled")
             headers = dict(hop.request.headers)
-            _setdefault_header(headers, "Host", hop.target.host)
+            _setdefault_header(headers, "Host", _target_authority(hop.target))
             _setdefault_header(headers, "Accept-Encoding", "gzip, deflate")
             conn.request(
                 hop.request.method,
@@ -229,9 +312,13 @@ def _send_pinned(hop: _HopReq) -> tuple[http.client.HTTPConnection, Any]:
                 body=hop.body,
                 headers=headers,
             )
+            conn._request_socket = getattr(conn, "sock", None)
             return conn, conn.getresponse()
     except BaseException:
+        conn._request_deadline_timer.cancel()
         conn.close()
+        if _connection_timed_out(conn):
+            raise TimeoutError() from None
         raise
 
 

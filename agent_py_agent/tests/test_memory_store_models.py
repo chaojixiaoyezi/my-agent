@@ -1,6 +1,7 @@
 """记忆存储数据模型测试 - memory_store/models.py 记忆数据模型、类型定义。"""
 from __future__ import annotations
 
+import json
 import time
 
 from agent_py_agent.agent.memory_store.jsonl import MemoryRecord
@@ -54,9 +55,6 @@ class TestMemoryRecordModel:
         """验证基本 to_json 输出。"""
         record = MemoryRecord(role="assistant", content="回复内容")
         json_str = record.to_json()
-        parsed = json.loads(json_str) if 'json' in dir() else None
-
-        import json
         parsed = json.loads(json_str)
         assert parsed["role"] == "assistant"
         assert parsed["content"] == "回复内容"

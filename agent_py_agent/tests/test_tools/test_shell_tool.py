@@ -322,28 +322,39 @@ def test_shell_tool_pipeline_cannot_hide_failed_gate(shell_tool: ShellTool) -> N
         "command_succeeded": False,
         "stderr_chars": 0,
         "stderr_head": "",
+        "capture": {
+            "complete": True,
+            "truncated": False,
+            "bytes_seen": {"stdout": 0, "stderr": 0},
+            "bytes_retained": {"stdout": 0, "stderr": 0},
+            "errors": {},
+            "limit_bytes_per_stream": 4 * 1024 * 1024,
+        },
     }
 
 
 @pytest.mark.skipif(os.name == "nt", reason="exit 127 判定是 POSIX shell 契约")
-def test_shell_tool_command_not_found_effect_outcome_not_started(shell_tool: ShellTool) -> None:
-    """command not found(exit 127)是确定性零副作用失败,必须归 not_started 而非 unknown。
-
-    2026-08-14 ④类复刻真机实证: tar 未安装时解压命令 0.15s 立即失败被归
-    「副作用结果不确定」→ 模型拿不到真实原因 → 任务死在第一步。exit 127 是
-    shell 从未 exec 的结构化事实,必须终态 FAILED 让模型能改命令继续。
-    判定只用结构化信号: return_code==127 且 stderr_chars>0——**不匹配错误
-    文本**(2026-08-14 真机: testbox 中文 locale 报「未找到命令」, 英文文本
-    匹配在中文环境失效, 违反「禁 NL 匹配」铁律)。
-    """
+def test_shell_tool_command_not_found_effect_outcome_failed(shell_tool: ShellTool) -> None:
+    """127 证明 shell 失败退出，不证明前置重定向或命令没产生副作用；保留真实原因。"""
     result = shell_tool.execute({"command": "definitely_not_a_command_xyz_12345 -x"})
     assert result.ok is False
     assert result.error_code == "COMMAND_FAILED"
-    assert result.effect_outcome == "not_started"
+    assert result.effect_outcome == "failed"
     assert result.result_envelope["process"]["return_code"] == 127
     assert result.result_envelope["process"]["stderr_chars"] > 0
     # 输出必须保留 shell 真实原因,模型才能改命令
     assert result.output  # 非空即含 stderr 证据
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell")
+def test_shell_127_after_write_is_not_zero_effect(shell_tool: ShellTool) -> None:
+    result = shell_tool.execute({
+        "command": "printf audit >> audit-127.txt; nonexistent_audit_command_223"
+    })
+    assert (shell_tool.workspace_root / "audit-127.txt").read_text() == "audit"
+    assert result.error_code == "COMMAND_FAILED"
+    assert result.result_envelope["process"]["return_code"] == 127
+    assert result.effect_outcome == "failed"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="exit 127 判定是 POSIX shell 契约")

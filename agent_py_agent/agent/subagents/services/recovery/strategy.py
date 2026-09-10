@@ -1,5 +1,9 @@
 
+# LLM: 恢复资格只读取当前 TaskStatus、refs 和显式停止事实；未知状态不能触发重跑或接管。
+# 模块用途: 为失败或停滞子代理生成结构化恢复方案，实际控制仍由管理器执行并记账。
 from __future__ import annotations
+
+from typing import Any
 
 """Refs-first recovery strategy for failed or stalled subagent runs.
 

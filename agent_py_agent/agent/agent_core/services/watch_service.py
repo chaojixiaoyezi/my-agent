@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_py_agent.agent.subagents.reports import DispatchWatchReport
+
 import json
 import os
 import time as time_module
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
@@ -33,7 +37,7 @@ from ..orchestration.dispatch.params import (
 )
 
 if TYPE_CHECKING:
-    from ..core import SimpleAgent
+    from agent_py_agent.agent.core import SimpleAgent
 
 
 @dataclass(frozen=True)

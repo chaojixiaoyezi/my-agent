@@ -235,7 +235,6 @@ class TestGatewayHTTPIntegration:
 
         port = find_free_port()
         # Import the server class directly
-        from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPServer
 
         server = GatewayHTTPServer(port, mock_paths)
         server.start()

@@ -148,9 +148,9 @@ def _runtime_policy_item(policy: object) -> dict[str, object]:
         "approval_policy": {"mode": policy.approval_policy.mode},
         "sandbox_policy": {
             "mode": policy.sandbox_policy.mode,
-            "uncontained_by_parameter": [
+            "contained_by_parameter": [
                 {"field": field_name, "values": list(values)}
-                for field_name, values in policy.sandbox_policy.uncontained_by_parameter
+                for field_name, values in policy.sandbox_policy.contained_by_parameter
             ],
         },
         "idempotency_policy": {"scope": policy.idempotency_policy.scope},

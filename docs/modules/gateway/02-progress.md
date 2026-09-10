@@ -1,5 +1,19 @@
 # Gateway Progress
 
+> 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
+
+## R223 执行与工具协议审计
+
+- Shell 127 明确为进程失败，不宣称前置操作没有发生；凭据剥离优先于环境变量安全前缀。
+  stdout/stderr 各保留最多 4 MiB 并继续排空，完整性、截断与真实字节数进入结构化回执。
+- PTY 启动先预留容量，写入背压共享期限，历史已退出对象有界；Windows 缺 ConPTY 明确不可用。
+- 沙箱包含性改成正向 `contained_by_parameter` 声明，不把未声明的危险动作视为已被沙箱包含。
+- HTTP 跳转清理跨域敏感头、按状态维护 method/body；缓存容量/过期/刷新、批量抓取参数与字节预算明确。
+  连接与读取用总 deadline 中断持续滴流，DNS 解析本身的不可中断边界仍单列。
+- MCP stdio 完整分页与目录代次、在途 ID、发送/等锁总期限、取消通知、正文归档和有界 stderr 均补回归；
+  不把已保存多媒体 block 等同于已实现所有模型视觉/音频消费能力。
+- `schedule list` 按 limit 返回并给出 total/has_more；外部 IM ACK 丢失和高吞吐摄取仍须专项环境验收。
+
 ## 正式库提交前主链修正（本地定向，真实通道待验）
 
 规模 worker 不再直接调用未认领的 `_run_gateway_ask`，改走同一持久入队、精确 claim、执行和终态链。
@@ -1072,7 +1086,7 @@ R183 真机仍失败：正确旧 Go 绝对路径被重写成 HANDOVER 所在目�
 
 ## 2026-08-18 TUI typed stream、可中断传输与工具审批续跑
 
-- 最终候选已精确部署到 `192.0.2.13:/root/my-agent`：70 个文件与本机 SHA-256 一致、5 个废弃
+- 最终候选已精确部署到 `192.0.2.13:${MY_AGENT_CHECKOUT}`：70 个文件与本机 SHA-256 一致、5 个废弃
   文件确认不存在，覆盖前文件已打回滚包。canonical `/root` Gateway 为 running/8420/队列 0/0，
   `my-agent-tui:work` 在 80→120 resize、帮助页和 idle 首帧后仍存活；MiniMax-M2.7 key 只从既有环境读取，
   实际 key 字节扫描部署文件和 evidence 均为 0 命中。
@@ -2993,7 +3007,7 @@ R183 真机仍失败：正确旧 Go 绝对路径被重写成 HANDOVER 所在目�
 
 ## 2026-08-22 单 Gateway 多项目 cwd 主链候选
 
-- 真机第二条正式 TUI 在 `/root/dsh-tui-p2-f5d28b8` 启动时卡在 `Connecting to Gateway`，没有提交用户
+- 真机第二条正式 TUI 在 `<历史工作目录:tui-p2-f5d28b8>` 启动时卡在 `Connecting to Gateway`，没有提交用户
   prompt。根因是 pid/heartbeat/queue 跟客户端 cwd 一起落到 workspace hash；已运行 Gateway 位于
   `/root` 的 hash，客户端却探测另一套空队列。
 - 对照 会话运行时 `ThreadStartParams.cwd/runtime_workspace_roots` 与 turn cwd override 后，Gateway/adapter

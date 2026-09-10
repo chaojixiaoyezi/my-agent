@@ -1,4 +1,6 @@
 
+# LLM: 搜索只读 owner LocalStore 派生索引；有结构化会话归属的 around 查询不能混入其它会话。
+# 模块用途: 统一全文检索、最近列表和会话内时间邻居查询，不从记录正文推断身份。
 from __future__ import annotations
 
 import re
@@ -51,6 +53,8 @@ class LocalStoreSearchMixin:
             ).fetchall()
         return [self._row_to_result(row) for row in rows]
 
+    # LLM: 窗口沿锚记录的结构化 thread 取数；旧记录没有归属时仅代表时间邻居。
+    # 函数用途: 查询锚点前后各若干条记录，保持 source/visibility 和会话条件一致。
     def records_around(
         self, record_id: str, *, window: int = 5,
         source_type: str | None = None, visibility: str | None = None,
@@ -179,6 +183,8 @@ class _WindowSide:
     window: int
 
 
+# LLM: 会话约束进入 SQL 后才 LIMIT，避免跨会话记录占掉配额；缺身份时不能捏造会话关系。
+# 函数用途: 校验锚记录的过滤条件，并在同一会话内提取时间窗口。
 def _records_around(
     store: Any,
     record_id: str,
@@ -194,7 +200,14 @@ def _records_around(
     anchor = store.get_record(record_id) if hasattr(store, "get_record") else None
     if anchor is None:
         return [], 0, 0
+    if (filters[0] and anchor.source_type != filters[0]) or (filters[1] and anchor.visibility != filters[1]):
+        return [], 0, 0
     where, params = store._record_filters(source_type=filters[0], visibility=filters[1])
+    thread_id = record_thread_id(anchor.metadata)
+    if thread_id:
+        prefix = f"{where} AND" if where else "WHERE"
+        where = f"{prefix} COALESCE(NULLIF(json_extract(metadata_json, '$.conversation_runtime.thread_id'), ''), json_extract(metadata_json, '$.thread_id')) = ?"
+        params = [*params, thread_id]
     side = _WindowSide(where=where, params=params, anchor=anchor, window=max(1, window))
     with store._connection() as conn:
         after = _fetch_window_side(conn, side, after=True)
@@ -202,6 +215,17 @@ def _records_around(
     before_results = [store._row_to_result(row) for row in before][::-1]
     after_results = [store._row_to_result(row) for row in after]
     return [*before_results, anchor, *after_results], len(before_results), len(after_results)
+
+
+# LLM: 只读取宿主写入的结构化 metadata；正文、标题、task_path 都不能代替 thread 身份。
+# 函数用途: 取当前记录的会话 ID，供查询约束和结果标签共用。
+def record_thread_id(metadata: object) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    runtime = metadata.get("conversation_runtime")
+    value = runtime.get("thread_id") if isinstance(runtime, dict) else None
+    value = value or metadata.get("thread_id")
+    return value if isinstance(value, str) else ""
 
 
 def _fetch_window_side(conn: sqlite3.Connection, side: _WindowSide, *, after: bool) -> list[sqlite3.Row]:

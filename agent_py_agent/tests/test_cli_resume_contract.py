@@ -305,7 +305,6 @@ def test_settle_continuation_round_keeps_nonterminal(repo):
 
 def test_record_budget_exhausted_event(repo):
     """预算耗尽写 continuation_budget_exhausted 事件（审查意见5，绝不 DONE）。"""
-    from agent_py_agent.cli.resume_contract import record_budget_exhausted
 
     rec = repo.record_run_creation(owner_id="local/main", goal="g", run_id="run-3", role="main")
     agent = SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo))

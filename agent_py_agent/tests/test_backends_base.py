@@ -842,3 +842,50 @@ def test_probe_missing_api_key_raises_config_error(tmp_path):
     backend = HttpBackend(_options(api_key=""))
     with pytest.raises(ValueError, match="api_key"):
         backend.probe_tool_capability()
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("api_base,expected", [
+    ("https://api.deepseek.com", True),
+    ("https://api.deepseek.com/v1", True),
+    ("https://api.openai.com/v1", False),
+    ("https://proxy.example.com/deepseek", False),
+    ("https://api.deepseek.com.example.com", False),
+])
+def test_deepseek_request_local_thinking_disable(api_base, expected, stream):
+    """显式关闭思考到达官方协议；普通下一轮和其他端点不被永久关闭或塞入专有字段。"""
+    from agent_py_agent.agent.backends.base import ProviderRequestOptions
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+
+    backend = OpenAICompatibleBackend(_options(api_base=api_base, stream_enabled=stream,
+                                              model_name="arbitrary-model-name"))
+    response = ModelResponse(text="hi", backend=backend.name) if stream else {
+        "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]}
+    method = "_generate_stream" if stream else "request_json"
+    tool = {"name": "check", "input_schema": {"type": "object", "properties": {}}}
+    with patch.object(backend, method, return_value=response) as send:
+        backend.generate("short", tools=[tool], tool_choice=ToolChoice.specific("check"),
+                         request_options=ProviderRequestOptions(thinking_disabled=True))
+        payload = send.call_args.args[0 if stream else 1]
+        assert payload.get("thinking") == ({"type": "disabled"} if expected else None)
+        assert payload["tool_choice"]["function"]["name"] == "check"
+        backend.generate("ordinary", tools=[tool], tool_choice=ToolChoice.auto())
+        ordinary = send.call_args.args[0 if stream else 1]
+        assert "thinking" not in ordinary
+        assert ordinary["tool_choice"] == "auto"
+
+
+def test_deepseek_cold_probe_honors_disabled_thinking_and_caches_success():
+    """覆盖真实失败链：运行前原生探针经 OpenAI 组包，不能把忘传参数误报成 key 错误。"""
+    backend = OpenAICompatibleBackend(_options(api_base="https://api.deepseek.com"))
+
+    def provider(payload, *_args, **_kwargs):
+        assert payload["thinking"] == {"type": "disabled"}
+        assert payload["tool_choice"]["function"]["name"] == "my_agent_capability_probe"
+        return _echoing_probe_generate(payload["messages"][-1]["content"])
+
+    with patch.object(backend, "_generate_stream", side_effect=provider) as send:
+        capability = backend.probe_tool_capability()
+        assert capability.native_supported
+        assert backend.probe_tool_capability() is capability
+        assert send.call_count == 1

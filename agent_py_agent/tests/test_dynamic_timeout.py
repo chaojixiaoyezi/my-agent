@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from agent_py_agent.agent.settings import AgentConfig
+
 """LLM: tests for dynamic timeout calculation.
 
 给人看的解释：

@@ -1,6 +1,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_py_agent.agent.core import SimpleAgent
+
 from pathlib import Path
 
 from agent_py_agent.agent.capability.config import CapabilityConfig

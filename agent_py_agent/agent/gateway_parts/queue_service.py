@@ -1,9 +1,16 @@
+# LLM: Gateway 队列与租约的结构化状态是唯一调度事实；类型导入不能引入运行时循环依赖。
+# 模块用途: 扫描持久队列、领取与恢复请求，协调租约和文件状态，不从展示文案推断任务状态。
 """Queue iteration and state management for gateway processing.
 
 The service owns queue scanning, file state transitions, and lease management.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_py_agent.agent.core import SimpleAgent
 
 import json
 import threading

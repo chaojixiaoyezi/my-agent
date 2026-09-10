@@ -1,5 +1,53 @@
 # DESIGN LEDGER
 
+## 2026-09-09 R224 正式产品名称统一【状态：实现与提交前验收完成】
+
+产品及仓库说明统一使用 my-agent，旧测试标记不再作为产品标签；本轮不改变功能或运行协议。
+历史检出目录、会话和工作目录在公开说明中使用中性占位，真实定位继续按提交与 request/run ID 追溯；
+不移动当前检出、用户数据、远端部署目录，不重命名运行中的 tmux，不重写 Git 历史。
+第三方 任务运行时 的简称展开为全名；它自身可执行命令和实际对照源码路径保留，不改成我方命令。
+测试助手配置统一到 MY_AGENT_TEST_*；旧明文密码移除，改为私有环境或 SSH 密钥。历史启动脚本通过
+MY_AGENT_CHECKOUT 定位源码，不用产品标签猜实际检出；远端旧部署需在其私有环境中显式配置已有路径。
+四个生产 Python 模块去掉注释/docstring 后 AST 等价；44 项定向通过。真实 TUI ma-r224-brand 的
+启动、/help、/status 已验，MiniMax-M2.7、单 Gateway；请求账本前后均16条，没有新模型任务。
+用户随后明确要求提交；整批追加 43 文件联合 focused（980 通过、2 跳过、1 预期失败）及全部本地严格 gate，
+与此前保留的 DeepSeek、R223 和报告一起纳入正式提交批次。未部署测试机，也未把本次命名检查当作 R223 剩余功能验收。
+
+> 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
+
+## 2026-09-09 R223 外部 87 项审计复核【状态：实现与逐项复核完成，验收边界见台账】
+
+旧提交的风险清单不直接等于当前缺陷数，逐项按当前事实分类，见
+[R223 逐项台账](docs/audits/R223_87_ITEM_REMEDIATION.md)。先修数据/凭据/执行效果，再补资源和恢复证据。
+记忆 add 不得根据相似度转换成 replace；显式目标、scope、版本与原证据晋升链仍是唯一写入依据。
+Shell 127 和 stderr 前缀不能证明没执行，已退出失败保留 failed；不恢复机器质量判官或家内任务目录锁。
+HTTP 跨 origin 移除非安全头，307/308 保留方法/正文；重定向连接关闭不下载无界无用正文。
+文本保持 BOM、端序、普通权限和换行，原编码无法表示时不写盘；空白编辑默认精确，容错为显式参数。
+多文件补丁中途失败不假装回滚，报告已提交路径及失败目标；完整事务/CAS 未验前不声称保证。
+read_file 共用有界编码索引并返回 `file_version`，write/edit 的 `expected_version` 与 patch 的
+`expected_versions` 显式校验观察版本。未携带版本或外部进程不参与协议时，不能宣称读后写全程强 CAS。
+Shell 两条流各保留 4 MiB，超出仍排空并报告 capture 完整性；PTY 容量先预留，写背压有截止，历史有界。
+沙箱包含性以 `contained_by_parameter` 正向声明，未声明效果不能因存在沙箱就免审批。
+MCP 以 stdio tools 为已实现边界：分页/代次、在途 ID、总请求期限、取消通知和原始结果保留；不伪称完整 MCP。
+删除旧 CompressionService 及无用包装，把策展挂到真实 Compact；native IR 二分最短退休前缀，
+不增加请求或新的压缩账本。长期记忆嵌入降级公开诊断，around 历史优先同 thread，旧无身份记录明确标记时间邻居。
+能力扩展另立边界：Windows ConPTY、MCP HTTP/高级能力、插件完整生命周期、外部 IM ACK 对账和公平跨 harness
+评测未实现或未验，不以静态绿色关闭。配置与用户权限不因测试放宽；本轮未部署测试机、未推送远端。
+
+## 2026-09-09 DeepSeek 官方双接口【状态：兼容修复与真实聊天复验完成】
+
+R222 短连接测试通过后，普通 TUI 的原生工具能力探针被 HTTP 400 拒绝。原因是
+OpenAI 中间请求对象丢失已有 `ProviderRequestOptions.thinking_disabled`；不是 key 或模型名错误。
+沿原 typed 控制补齐传递；只对配置中的精确 `api.deepseek.com` 主机发送其专有 thinking 参数，
+不从模型名猜中转商协议，不向标准 OpenAI/未知端点塞不支持的字段，也不全局关闭主代理思考。
+会话运行时 `core/src/client.rs` 常规工具为 auto；终端交互 `utils/permissions/yoloClassifier.ts`
+按模型事实处理强制工具的思考配置；轻量运行时 `ai/src/providers/openai-completions.ts` 的 thinkingFormat
+完成 DeepSeek 方言转换。本次不删除能力探针、不修改工具执行门或错误重试策略。
+已有请求级开关的 bug fix，不新增全局配置或模型调用。第三方中转的显式兼容配置仍需独立设计与验证。
+完整证据追加到 [R222 模型报告](docs/audits/R222_MODEL_PROVIDER_REPORT.md)，不把短问候当复杂任务验收。
+六个模型/协议组合的连接短测和普通 TUI 问候均通过，正式聊天各一轮、零重试、零业务工具调用。
+178 项定向及本地严格静态 gate 通过；仅重启本轮独立验证 home 的单 Gateway，未部署测试机。
+
 ## 2026-09-09 Provider /model 扩展【状态：通用配置与真实短测完成】
 
 正式库 main 已正常非强推到 f47f2002，保留原正式库和当前实现历史；本地严格 gate 通过。
@@ -2105,7 +2153,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   方只报因，承诺文案由 state 唯一决定（"会自动继续"仅当 machine 真的会
   续）。保留 EXEC-30/35/39 语义与 resume 能力（goal/cron 模式用）。
 - 参考：会话运行时 无系统侧收口机（模型自然停=done，goal 扩展只做目标层轮次）、
-  dsh /goal = goal-round-driver 同款。
+  任务运行时 /goal = goal-round-driver 同款。
 - 实施切 5 步（见文档 §6），每步独立提交。
 
 ## gateway 移交线删除与自动接力重建方向【状态：已删除，重建待 goal/cron 设计】
@@ -2117,7 +2165,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 重建方向(goal/cron 模式设计时): 以持久事实为单一权威新建自动接力
   驱动——未完成任务 = task link active + state.json 非终态 + runtime.db
   非终态(现有 unfinished_task_ids 三源交叉已具备), 驱动 = goal-round
-  driver(dsh 同款)+ cron tick; 同时解决唤醒轮每 2 分钟全量扫描问题
+  driver(任务运行时 同款)+ cron tick; 同时解决唤醒轮每 2 分钟全量扫描问题
   (增量游标/单次扫描多消费)。
 
 ## 唤醒轮全量扫描治理【状态：已实施 2b——wake_queue 热层+对账分频，收尾项见下节】
@@ -2337,7 +2385,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   parity matrix，不用自然语言假装能力存在。
 - 参考验收：外部 终端交互 provider 不作为 UI fixture 依赖，使用 loopback deterministic Anthropic
   协议服务驱动黑盒；MiniMax-M2.7 只做 my-agent 真机验收。两类证据分开，key 不进入任何 artifact。
-- 测试机边界：仅 `192.0.2.13:/root/my-agent`，tmux `my-agent-tui`；现有 dirty tree 不归本任务，
+- 测试机边界：仅 `192.0.2.13:${MY_AGENT_CHECKOUT}`，tmux `my-agent-tui`；现有 dirty tree 不归本任务，
   每轮按精确文件 hash 部署，并保留 `/root/tui-parity-evidence/baseline-20260818T0043CST` 回滚基线。
 - 原验收矩阵共 85 项。2026-08-18 后续四路真机观察重开 C17：旧实现把运行中普通 Enter 错送下一轮，且
   queue preview 位于可滚动 transcript。当前为 37 `VERIFIED`、38 `MAPPED_VERIFIED`、9
@@ -2494,13 +2542,13 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 后台主代理的可交付最终正文以普通 `assistant_completed` 进入 transcript，不再伪装成灰色系统通知；被
   delivery contract 抑制或没有正文的内部轮不写用户通知。一次模型轮返回只将 main 活动设为
   `waiting`，不得在 child 仍活跃时写“整理最终回复”；显示层按结构化 child 状态改显“等待 N 个子代理”。
-- `.7` 的 `7c052f2` 在 tmux `dsh-p1-pvz-7c052f2` 输入第 1 个原样重任务：第一批请求
+- `.7` 的 `7c052f2` 在 tmux `<历史会话:p1-pvz-7c052f2>` 输入第 1 个原样重任务：第一批请求
   5 个 child 被容量合同整批拒绝后，模型自然改为 4 个，随后又派 2 个整合/服务 child；6 个
   child 全部 DONE，合计约 238.2k tokens、Compact 均为 0。最终 `/root/abc` 有 9 个文件，
   `0.0.0.0:8080` 真实监听且 loopback HTTP 200；但 8 个 Todo 全未勾选，main 仍错放在输入框下方。
   本候选修复已通过 147 项 focused tests，仍须部署后用下一条原样 TUI 任务验收新布局与勾选。
-- `.7` 的 `993ce4f` 在 tmux `dsh-p2-mario-993ce4f` 完成第 2 个原样重任务：首次请求、后台 main、
-  6 个 child 与全部命令都保持 `/root/dsh-tui-p2-993ce4f`，产物落在 `bbb/`，`0.0.0.0:8082`
+- `.7` 的 `993ce4f` 在 tmux `<历史会话:p2-mario-993ce4f>` 完成第 2 个原样重任务：首次请求、后台 main、
+  6 个 child 与全部命令都保持 `<历史工作目录:tui-p2-993ce4f>`，产物落在 `bbb/`，`0.0.0.0:8082`
   返回 HTTP 200。child 行已稳定显示“玩家控制/物理引擎/敌人AI/道具系统/关卡设计/游戏HTML”、实时
   当前 context 和 Compact；6 个 child 全部一次 attempt 自然 DONE，最后一个完成后约 16 秒唤醒 main。
   同轮也确认三个底层缺口：main context 停在启动快照、Todo 的 canonical 5/5 没投影回 TUI、第二批

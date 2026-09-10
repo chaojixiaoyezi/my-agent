@@ -71,7 +71,6 @@ def test_regression_gateway_late_pending_tracking():
         os.unlink(late_pending_path)
 
     # 模拟：请求超时被记录
-    import json
     with open(late_pending_path, "w") as f:
         json.dump({"request_id": "req-123", "timeout_at": "2026-05-01T12:00:00Z"}, f)
 

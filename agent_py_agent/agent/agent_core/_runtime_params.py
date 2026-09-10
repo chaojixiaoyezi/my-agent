@@ -136,17 +136,6 @@ class ToolLoopExecuteParams:
     runtime_rejected_actions: list[dict[str, str]] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class CompressionContext:
-    user_prompt: str
-    memories: list
-    runtime_injections: list
-    routed_context: Any
-    resume_context_section: str
-    request_id: str
-    run_id: str
-    task_id: str
-    source: str
 
 
 @dataclass(frozen=True)

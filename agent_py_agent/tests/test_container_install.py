@@ -7,6 +7,32 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
+
+@pytest.mark.parametrize("as_symlink", [False, True])
+def test_obtain_source_never_deletes_non_checkout(tmp_path, as_symlink):
+    repo = Path(__file__).resolve().parents[2]
+    original = tmp_path / "documents"
+    original.mkdir()
+    sentinel = original / "keep.txt"
+    sentinel.write_text("user-owned", encoding="utf-8")
+    target = tmp_path / "source"
+    if as_symlink:
+        target.symlink_to(original, target_is_directory=True)
+    else:
+        target = original
+    script = (repo / "install.sh").read_text().rsplit('\nmain "$@"', 1)[0]
+    result = subprocess.run(
+        ["bash", "-c", script + "\nobtain_source\n"],
+        env={**os.environ, "MYAGENT_SRC": "", "MYAGENT_SRC_DIR": str(target),
+             "MYAGENT_REPO": str(tmp_path / "unavailable-repository")},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode != 0
+    assert target.exists(), result.stderr
+    assert sentinel.read_text() == "user-owned"
+
 
 def test_container_install_builds_probes_and_writes_transparent_wrapper(tmp_path) -> None:
     repo = Path(__file__).resolve().parents[2]

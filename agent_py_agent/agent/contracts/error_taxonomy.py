@@ -21,6 +21,21 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "STALE_VERSION": ErrorContract(
+        code="STALE_VERSION", category="state", retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="文件版本已变化；重新 read_file，合并其他修改，并使用新版本号。不要直接重放旧写入。",
+    ),
+    "PTY_UNAVAILABLE": ErrorContract(
+        code="PTY_UNAVAILABLE", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHOOSE_REGISTERED_TOOL.value,
+        recovery_hint="当前平台没有交互终端后端；非交互命令可用 run_command，不要反复创建 PTY。",
+    ),
+    "PTY_WRITE_FAILED": ErrorContract(
+        code="PTY_WRITE_FAILED", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="交互终端写入失败；先读取终端状态与 bytes_written，避免重复发送已部分执行的输入。",
+    ),
     "GATEWAY_WORKSPACE_INVALID": ErrorContract(
         code="GATEWAY_WORKSPACE_INVALID",
         category="path",

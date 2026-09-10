@@ -1,3 +1,5 @@
+# LLM: 文件工具共用的文本编码边界；禁止在追加时回退另一编码，BOM 与原字节序必须保持。
+# 模块用途: 探测文本格式并严格按原格式编码，无法表示新内容时在写盘前报错。
 """文件编码探测 + 换行风格保留(审计 #23):读写非 UTF-8 企业文件不再失败/不静默改坏。
 
 覆盖几十国企业代码库含大量非 UTF-8 文件:日本 Shift-JIS、中国 GBK/GB18030、西欧 Latin-1,还有
@@ -77,11 +79,14 @@ def detect_encoding(data: bytes) -> str:
         return best[1] if best else "utf-8"
 
 
+# LLM: UTF-16/32 的换行必须先按 BOM 解码；不能把分散在代码单元里的 CR/LF 当成单字节文本。
+# 函数用途: 根据文本字符而非 UTF-16 原始字节统计主导换行风格。
 def detect_line_ending(data: bytes) -> str:
     """探测主导换行风格:CRLF / CR / LF(多数胜出,无换行则 LF)。"""
-    crlf = data.count(b"\r\n")
-    cr = data.count(b"\r") - crlf
-    lf = data.count(b"\n") - crlf
+    text = data.decode(_bom_encoding(data)) if _bom_encoding(data) else data.decode("latin-1")
+    crlf = text.count("\r\n")
+    cr = text.count("\r") - crlf
+    lf = text.count("\n") - crlf
     if crlf and crlf >= lf and crlf >= cr:
         return "\r\n"
     if cr and cr > lf:
@@ -94,10 +99,26 @@ def _apply_line_ending(content: str, ending: str) -> str:
     return unified if ending == "\n" else unified.replace("\n", ending)
 
 
+# LLM: 编码失败必须抛出并保持源文件；隐式 UTF-8 回退会让追加文件混合编码。
+# 函数用途: 按显式编码和换行风格生成字节；调用方在写盘前处理错误。
 def encode_text(content: str, encoding: str, line_ending: str) -> bytes:
-    """按指定编码 + 换行风格编码文本。原编码表示不了新内容时退 utf-8(不丢字符,不静默截断)。"""
+    """严格按指定编码和换行风格编码，不静默转换成另一编码。"""
     normalized = _apply_line_ending(content, line_ending)
-    try:
-        return normalized.encode(encoding)
-    except (UnicodeEncodeError, LookupError):
-        return normalized.encode("utf-8")  # 如往 Shift-JIS 加 emoji:原编码无法表示,退 utf-8
+    return normalized.encode(encoding)
+
+
+# LLM: 覆盖保持原 BOM 和端序，追加只生成无 BOM 的片段；原文解码失败不得猜测另一格式写回。
+# 函数用途: 为 write/edit/patch 生成与源文件一致的文本字节。
+def encode_like_original(content: str, original: bytes, *, append: bool = False) -> bytes:
+    _text, encoding = decode_bytes(original)
+    prefix = b""
+    for bom, codec in (
+        (codecs.BOM_UTF32_LE, "utf-32-le"), (codecs.BOM_UTF32_BE, "utf-32-be"),
+        (codecs.BOM_UTF16_LE, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be"),
+        (codecs.BOM_UTF8, "utf-8"),
+    ):
+        if original.startswith(bom):
+            encoding, prefix = codec, bom
+            break
+    body = encode_text(content, encoding, detect_line_ending(original))
+    return (b"" if append else prefix) + body

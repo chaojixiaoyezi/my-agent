@@ -6,10 +6,9 @@
 #     ① DISCOVERY  —— 传 query:trigram FTS5 全文检索历史记录,每条带 snippet。
 #     ② SCROLL     —— 传 around_id:以某条记录为锚,按时间序取前后窗口(无 FTS)。
 #     ③ BROWSE     —— 不传参:按时间倒序列出最近记录(标题/预览/时间)。
-#   与 长期助手 的差异:my-agent 的事实单元是 record(非逐条 message),没有
-#   session 血缘/连续 message-id,故 scroll 用 updated_at 时间序当滚动轴、不做
-#   血缘去重/rebind;模式名(discover/scroll/browse)与返回字段(snippet/window/
-#   messages_before/after/count)对齐 长期助手 语义。Gateway 记录额外投影 host-authored
+#   与 长期助手 的差异:my-agent 的事实单元是 record(非逐条 message)。scroll 有
+#   结构化 thread_id 时限在同一会话；没有归属的旧记录明确标为时间邻居。
+#   返回字段 messages 是历史协议字段，不代表每项都是一条原始对话消息。Gateway 投影 host-authored
 #   task_ref，供“回到上次项目”拿到精确路径，不从自然语言猜 cwd。契约:只读零副作用;
 #   空库/无命中返回结构化提示不报错；给精确 input_schema（对齐原生 tool_use 改造规范）。
 # 模块用途: 让模型能检索/翻看本地历史记录(普通聊天、记忆、任务产物、归档),回答"我们之前
@@ -19,6 +18,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from ..local_storage.search import record_thread_id
 from ..tooling.models import (
     BaseTool,
     ConcurrencyPolicy,
@@ -181,7 +181,8 @@ def _prioritize_historical_task_refs(results: list[dict[str, Any]]) -> list[dict
     return [*task_results, *prose_results]
 
 
-# 函数用途: scroll 形态——以 around_id 为锚,按时间序返回前后窗口(无 FTS,纯翻看)。
+# LLM: around 结果必须说明是同会话记录还是无归属时间邻居，不可冒充完整聊天上下文。
+# 函数用途: 翻看历史窗口，给模型返回实际会话范围和完整性边界。
 def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | None) -> dict[str, Any]:
     records, before, after = store.records_around(around_id, window=window, source_type=source_type)
     if not records:
@@ -192,15 +193,21 @@ def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | N
             "count": 0,
             "hint": f"未找到记录 id={around_id};它可能不存在或不属于该 source_type。",
         }
+    anchor = next(rec for rec in records if rec.id == around_id)
+    thread_id = record_thread_id(anchor.metadata)
     return {
         "mode": "scroll",
         "around_id": around_id,
+        "context_kind": "same_thread_records" if thread_id else "record_time_neighbors",
+        "thread_id": thread_id,
         "window": window,
         "messages": [_shape_record(rec, anchor_id=around_id) for rec in records],
         "count": len(records),
         "messages_before": before,
         "messages_after": after,
         "hint": (
+            ("同一会话的记录窗口，不等于完整逐条消息。" if thread_id else "无会话归属的时间邻近记录，不代表同一会话。")
+            +
             "向后翻:用最后一条的 id 当 around_id 再调;向前翻:用第一条的 id。"
             " before/after 小于 window 说明已到历史的一端。"
         ),
@@ -277,6 +284,9 @@ def _history_scope(metadata: object) -> dict[str, str]:
         for key in allowed
         if str(metadata.get(key) or "").strip()
     }
+    thread_id = record_thread_id(metadata)
+    if thread_id:
+        result["thread_id"] = thread_id
     attributes = metadata.get("attributes")
     if isinstance(attributes, dict):
         for key in ("scope_type", "scope_key", "applies_when", "excludes_when"):

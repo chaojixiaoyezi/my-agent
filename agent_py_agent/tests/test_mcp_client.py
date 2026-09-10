@@ -45,6 +45,44 @@ from agent_py_agent.agent.tooling.mcp_registration import (
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.parametrize("payload", [None, "bad", [], {}, {"content": None}, {"content": [] , "isError": "false"}])
+def test_malformed_tool_result_is_protocol_failure(payload):
+    from agent_py_agent.agent.tooling.mcp_client import _normalize_call_result
+    with pytest.raises(MCPError) as error:
+        _normalize_call_result(payload)
+    assert error.value.code == "MCP_PROTOCOL_ERROR"
+
+
+def test_unknown_response_is_not_retained():
+    client = MCPStdioClient(MCPServerConfig("test", "unused"))
+    for number in range(1000):
+        client._dispatch_message({"jsonrpc": "2.0", "id": number, "result": {}})
+    assert client._responses == {}
+
+
+def test_list_tools_follows_cursor_and_rejects_cycles(monkeypatch):
+    client = MCPStdioClient(MCPServerConfig("test", "unused"))
+    calls = []
+    def request(method, params, **kwargs):
+        calls.append(params)
+        return {"tools": [{"name": "second" if params else "first", "inputSchema": {}}],
+                **({} if params else {"nextCursor": "page2"})}
+    monkeypatch.setattr(client, "_request", request)
+    assert [t.name for t in client.list_tools()] == ["first", "second"]
+    assert calls == [{}, {"cursor": "page2"}]
+
+
+def test_call_result_keeps_canonical_blocks_and_complete_text():
+    from agent_py_agent.agent.tooling.mcp_client import _normalize_call_result
+    blocks = [{"type": "text", "text": "long" * 10000},
+              {"type": "resource", "resource": {"uri": "test://notes", "text": "resource body"}},
+              {"type": "image", "mimeType": "image/png", "data": "dGVzdA=="}]
+    result = _normalize_call_result({"content": blocks}, 30)
+    assert result["content_blocks"] == blocks
+    assert "long" * 10000 in result["content"]
+    assert "resource body" in result["content"]
+
+
 # ---------------------------------------------------------------------------
 # 自包含 stdio MCP server 脚本（实现最小 JSON-RPC over stdio：换行分隔 JSON）。
 # 暴露两个工具：echo(text) 和 add(a, b)。
@@ -144,7 +182,7 @@ _HANG_ON_CALL_SERVER = textwrap.dedent(
         method = req.get("method")
         rid = req.get("id")
         if method == "initialize":
-            send({"jsonrpc": "2.0", "id": rid, "result": {"capabilities": {}, "serverInfo": {}}})
+            send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {}}})
         elif method == "tools/list":
             send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
                 {"name": "slow", "description": "never returns", "inputSchema": {}}
@@ -359,7 +397,7 @@ _ENV_ECHO_SERVER = textwrap.dedent(
             continue
         req = json.loads(line); m = req.get("method"); rid = req.get("id")
         if m == "initialize":
-            send({"jsonrpc": "2.0", "id": rid, "result": {"capabilities": {}, "serverInfo": {"name": "env"}}})
+            send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "env"}}})
         elif m == "notifications/initialized":
             pass
         elif m == "tools/list":
@@ -453,7 +491,7 @@ _NOISY_SERVER = textwrap.dedent(
             raw("[1, 2, 3]")                                       # JSON 数组(非 dict 消息)
             raw("42")                                              # JSON 数字
             send({"jsonrpc": "2.0", "method": "notifications/progress"})  # 无 id 通知
-            send({"jsonrpc": "2.0", "id": rid, "result": {"capabilities": {}, "serverInfo": {"name": "noisy"}}})
+            send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "noisy"}}})
         elif m == "notifications/initialized":
             pass
         elif m == "tools/list":
@@ -493,7 +531,7 @@ _TOOL_ERROR_SERVER = textwrap.dedent(
             continue
         req = json.loads(line); m = req.get("method"); rid = req.get("id")
         if m == "initialize":
-            send({"jsonrpc": "2.0", "id": rid, "result": {"capabilities": {}, "serverInfo": {}}})
+            send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {}}})
         elif m == "notifications/initialized":
             pass
         elif m == "tools/list":
@@ -535,7 +573,8 @@ def test_content_block_rendering_and_normalize():
         {"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}, {"type": "image", "mimeType": "x"}]}
     )
     assert "a\nb" in norm["content"]  # 文本块拼接,非文本块不进正文
-    assert _normalize_call_result("garbage") == {"content": "", "isError": False}  # 非 dict → 安全默认
+    with pytest.raises(MCPError):
+        _normalize_call_result("garbage")
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +595,7 @@ _BIG_CONTENT_SERVER = textwrap.dedent(
             continue
         req = json.loads(line); m = req.get("method"); rid = req.get("id")
         if m == "initialize":
-            send({"jsonrpc": "2.0", "id": rid, "result": {"capabilities": {}, "serverInfo": {}}})
+            send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {}}})
         elif m == "notifications/initialized":
             pass
         elif m == "tools/list":
@@ -569,14 +608,15 @@ _BIG_CONTENT_SERVER = textwrap.dedent(
 )
 
 
-def test_oversized_content_is_truncated():
+def test_oversized_content_retains_canonical_and_bounds_preview():
     """工具结果文本超内容上限 → 截断带标记(模型上下文有限,过长结果只会挤爆上下文)。"""
     client = MCPStdioClient(_config(_BIG_CONTENT_SERVER, name="big"))  # 默认内容上限 16KB
     try:
         client.start()
         result = client.call_tool("big", {})
-        assert len(result["content"]) <= 16 * 1024 + 80  # 截到 ~16KB(+ 标记)
-        assert "已截断" in result["content"]  # 带截断标记,模型知道被截
+        assert result["content"] == "Y" * 100000
+        assert len(result["preview"]) <= 16 * 1024 + 80
+        assert "已截断" in result["preview"]
     finally:
         client.stop()
 
@@ -595,7 +635,7 @@ _MIXED_SIZE_SERVER = textwrap.dedent(
             continue
         req = json.loads(line); m = req.get("method"); rid = req.get("id")
         if m == "initialize":
-            send({"jsonrpc": "2.0", "id": rid, "result": {"capabilities": {}, "serverInfo": {}}})
+            send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {}}})
         elif m == "notifications/initialized":
             pass
         elif m == "tools/list":

@@ -38,8 +38,8 @@ _MEMORY_ORIGINS = frozenset({"user_explicit", "tool_verified", "model_inferred"}
 _MEMORY_ACTIONS = frozenset({"add", "replace", "remove"})
 
 
-# LLM: Memory only supplies its business schema; Tool Runtime owns all protocol and policy fields.
-# 函数用途: 描述 remember 唯一的模型可见输入结构。
+# LLM: Memory 提供业务 schema；说明必须与自主晋升、显式目标版本、Persona 路由一致，不承诺候选都需人工审批。
+# 函数用途: 描述事实记忆的新增、查询和精确修改方式，不把个人偏好误导到 remember。
 def build_remember_model_spec() -> ToolModelSpec:
     scope_schema = _remember_scope_schema()
     operation_schema = _remember_operation_schema(scope_schema)
@@ -49,8 +49,9 @@ def build_remember_model_spec() -> ToolModelSpec:
             "管理需要正式持久化并按明确 scope 召回的具体事实、事件和项目知识。"
             "session scope 的寿命只跟当前真实会话走，不得另填 valid_from/valid_until；"
             "需要按时间过期时使用 temporary scope。新增先进入统一候选并核验证据；"
-            "无冲突的 user_explicit/tool_verified 新事实可按保守策略晋升。模型推断、替换和删除只形成候选，"
-            "等待统一审核。用户亲口提供或明确要求保存的内容必须使用 user_explicit，即使同轮工具也验证过；"
+            "无冲突的 user_explicit/tool_verified 新事实可自主晋升。替换和删除必须指定 entry_id 与版本，"
+            "经统一证据和安全核验后在本次调用自主生效；不满足条件时返回未晋升原因，不等待用户逐条审批。"
+            "模型推断不得伪装成已验证事实。用户亲口提供或明确要求保存的内容必须使用 user_explicit，即使同轮工具也验证过；"
             "只有事实本身来自成功工具结果时才使用 tool_verified，并提交该调用的精确 evidence_refs。"
             "个人记忆默认写入当前 owner 的 personal 范围，调用时省略 scope 即可；不要把用户 ID 当 scope_key。"
             "用户画像、称呼和长期沟通偏好使用 update_persona；教训使用候选到 lesson 链。"
@@ -71,8 +72,8 @@ def build_remember_model_spec() -> ToolModelSpec:
             ),
             keywords=("记住", "remember", "长期事实", "项目知识", "事件"),
             examples=(
-                '{"tool":"remember","action":"add","content":"用户偏好先看风险再看方案",'
-                '"kind":"fact","origin":"user_explicit","subject_key":"preference.answer_order"}',
+                '{"tool":"remember","action":"add","content":"社区图书借阅服务使用8080端口",'
+                '"kind":"fact","origin":"user_explicit","subject_key":"library.loan_service.port"}',
                 '{"tool":"remember","action":"add","content":"moneywise 项目使用 UTC 保存时间",'
                 '"kind":"project","origin":"user_explicit","subject_key":"project.moneywise.timezone",'
                 '"scope":{"scope_type":"project","scope_key":"project:moneywise"}}',

@@ -1,9 +1,12 @@
+# LLM: PTY 的容量、写入背压和历史缓冲由唯一注册表管理；会话身份不能代替权限边界。
+# 模块用途: 在 POSIX 提供有界、可取消的交互终端；Windows 暂无 ConPTY，不虚报支持。
 from __future__ import annotations
 
 """Bounded interactive PTY sessions using the same shell policy and sandbox gate."""
 
 import json
 import os
+import select
 import signal
 import subprocess
 import threading
@@ -13,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.gates.command_policy import evaluate_command_policy
+from .cancellation import cancellation_requested
 from .models import (
     BaseTool,
     EffectResolverPolicy,
@@ -20,6 +24,7 @@ from .models import (
     OutputPolicy,
     ResourceScopePolicy,
     SandboxPolicy,
+    ToolAvailability,
     ToolHandlerOutcome,
     ToolInputPolicy,
     ToolModelHints,
@@ -41,6 +46,7 @@ from .shell import (
 _MAX_SESSIONS = 32
 _MAX_BUFFER_BYTES = 1_000_000
 _MAX_WRITE_BYTES = 64_000
+_WRITE_TIMEOUT_SECONDS = 5.0
 _DEFAULT_READ_BYTES = 32_000
 _MAX_TERMINAL_COLUMNS = 1000
 _MAX_TERMINAL_ROWS = 1000
@@ -62,6 +68,7 @@ class PtySession:
     base_cursor: int = 0
     next_cursor: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
+    write_lock: threading.Lock = field(default_factory=threading.Lock)
     closed: bool = False
 
     def append(self, chunk: bytes) -> None:
@@ -142,14 +149,16 @@ def _pty_access_scope(
 # and mutation must validate the immutable PtyAccessScope before touching a process.
 # 类用途: 统一登记、列出、读写、调尺寸和关闭有界交互终端，防止跨用户或跨会话接管。
 class PtySessionRegistry:
+    # LLM: 创建中也占容量；历史最多保留最近一批终态，计数 ID 不在 clear 后复用。
+    # 函数用途: 初始化唯一会话表和并发创建预留。
     def __init__(self) -> None:
         self._sessions: dict[str, PtySession] = {}
         self._counter = 0
         self._lock = threading.Lock()
+        self._pending_starts = 0
 
-    # LLM: Capture the complete access scope at spawn and pass every filesystem field into the
-    # same AttemptExecutionSandbox used by non-interactive shell commands.
-    # 函数用途: 在当前请求权限下启动 PTY，并把受保护路径一起锁定到会话。
+    # LLM: 容量检查即预留，所有 spawn 成败路径必须释放预留；运行进程仍并行。
+    # 函数用途: 在当前权限下有界创建终端，防并发检查都通过导致突破数量限制。
     def start(
         self,
         command: str,
@@ -162,14 +171,27 @@ class PtySessionRegistry:
     ) -> PtySession:
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
-        import pty
-
         with self._lock:
+            self._prune_finished()
             active = sum(session.process.poll() is None for session in self._sessions.values())
-            if active >= _MAX_SESSIONS:
+            if active + self._pending_starts >= _MAX_SESSIONS:
                 raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSIONS}")
             self._counter += 1
             session_id = f"pty-{self._counter}-{int(time.time())}"
+            self._pending_starts += 1
+        try:
+            return self._spawn(session_id, command, target, owner_home, write_roots,
+                               read_roots, protected_write_paths, run_scope)
+        finally:
+            with self._lock:
+                self._pending_starts -= 1
+
+    # LLM: 只有已预留容量的 start 可调用；两端 fd 在失败时都关闭，成功后登记同一权限快照。
+    # 函数用途: 启动实际 PTY 子进程并开启输出排空线程。
+    def _spawn(self, session_id, command, target, owner_home, write_roots, read_roots,
+               protected_write_paths, run_scope) -> PtySession:
+        import pty
+
         access_scope = _pty_access_scope(
             owner_home,
             write_roots,
@@ -187,6 +209,7 @@ class PtySessionRegistry:
         )
         master_fd, slave_fd = pty.openpty()
         try:
+            os.set_blocking(master_fd, False)
             process = subprocess.Popen(
                 exec_arg,
                 shell=use_shell,
@@ -217,6 +240,13 @@ class PtySessionRegistry:
         threading.Thread(target=self._drain, args=(session,), daemon=True).start()
         return session
 
+    # LLM: 调用方持有 registry 锁；仅淘汰已结束且 fd 已关闭的历史，不中断任何活跃进程。
+    # 函数用途: 保留最近 32 个已结束 PTY，避免常驻 Gateway 累积历史对象和缓冲。
+    def _prune_finished(self) -> None:
+        finished = [key for key, item in self._sessions.items() if item.closed and item.process.poll() is not None]
+        for key in finished[:-_MAX_SESSIONS]:
+            del self._sessions[key]
+
     # LLM: Listing is an exact-scope projection over the bounded in-memory registry; never expose
     # sessions from another owner/conversation or use session-id knowledge as authorization.
     # 函数用途: 列出当前可信用户会话能访问的交互终端，包括已结束终端的真实状态。
@@ -240,6 +270,8 @@ class PtySessionRegistry:
             return None
         return session
 
+    # LLM: PTY 输入不能静默部分写入；锁与内核背压共用期限，取消明确报告已写字节以防盲重放。
+    # 函数用途: 分段写完一份输入，五秒内无法排空则返回带部分写入事实的错误。
     def write(
         self,
         session_id: str,
@@ -249,7 +281,21 @@ class PtySessionRegistry:
         session = self.get(session_id, access_scope)
         if session is None or session.closed or session.process.poll() is not None:
             return session
-        os.write(session.master_fd, data)
+        deadline, written = time.monotonic() + _WRITE_TIMEOUT_SECONDS, 0
+        while not session.write_lock.acquire(timeout=0.02):
+            _check_write_deadline(deadline, written)
+        try:
+            while written < len(data):
+                _check_write_deadline(deadline, written)
+                try:
+                    if select.select([], [session.master_fd], [], 0.02)[1]:
+                        written += os.write(session.master_fd, data[written:])
+                except BlockingIOError:
+                    continue
+                except OSError as exc:
+                    raise PtyWriteError("PTY_WRITE_FAILED", written) from exc
+        finally:
+            session.write_lock.release()
         session.last_active_at = time.time()
         return session
 
@@ -301,18 +347,25 @@ class PtySessionRegistry:
             self.close(session_id)
         with self._lock:
             self._sessions.clear()
-            self._counter = 0
 
+    # LLM: fd 为非阻塞，暂时无输出不等于退出；只有 EOF/真实错误才关闭。
+    # 函数用途: 连续排空 PTY 输出，在终态清理有界历史。
     def _drain(self, session: PtySession) -> None:
         while not session.closed:
             try:
+                if not select.select([session.master_fd], [], [], 0.1)[0]:
+                    continue
                 chunk = os.read(session.master_fd, 4096)
+            except BlockingIOError:
+                continue
             except OSError:
                 break
             if not chunk:
                 break
             session.append(chunk)
         self._close_fd(session)
+        with self._lock:
+            self._prune_finished()
 
     @staticmethod
     def _close_fd(session: PtySession) -> None:
@@ -327,6 +380,25 @@ class PtySessionRegistry:
 
 
 pty_session_registry = PtySessionRegistry()
+
+
+# LLM: 写错误携带已接受字节数；既有会话不因输入失败被销毁或假装没有执行。
+# 类用途: 表达 PTY 超时、取消和部分写入。
+class PtyWriteError(OSError):
+    # LLM: code 与 written 为结构化事实，不能从展示文本解析。
+    # 函数用途: 保存写入中止原因和已写数量。
+    def __init__(self, code: str, written: int) -> None:
+        super().__init__(f"{code}: 已写入 {written} 字节，剩余输入未确认；不要整段盲重放")
+        self.code, self.written = code, written
+
+
+# LLM: 锁等待和系统写入调用同一取消/时间判断。
+# 函数用途: 在输入写入安全点停止等待并保留部分进度。
+def _check_write_deadline(deadline: float, written: int) -> None:
+    if cancellation_requested():
+        raise PtyWriteError("CANCELLED", written)
+    if time.monotonic() >= deadline:
+        raise PtyWriteError("TOOL_TIMEOUT", written)
 
 
 # LLM: terminal_session 必须将 start 视为一次新的可持久命令授权；list/write/read/resize/close
@@ -409,7 +481,7 @@ class TerminalSessionTool(BaseTool):
         ),
         sandbox_policy=SandboxPolicy(
             "required",
-            uncontained_by_parameter=(("action", ("start",)),),
+            contained_by_parameter=(("action", ("resize", "close")),),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(
@@ -441,6 +513,13 @@ class TerminalSessionTool(BaseTool):
 
     def __init__(self, shell_tool: ShellTool):
         self.shell_tool = shell_tool
+
+    # LLM: 能力发现与最终执行都按平台事实，不把 PowerShell 可用当成 ConPTY 可用。
+    # 函数用途: 未实现 Windows PTY 时从模型可用工具快照中移除，POSIX 复用 Shell 沙箱检查。
+    def availability(self) -> ToolAvailability:
+        if os.name == "nt":
+            return ToolAvailability.unavailable("当前节点未提供 Windows ConPTY 后端", error_code="PTY_UNAVAILABLE")
+        return self.shell_tool.availability()
 
     # seq 253 #5：与 ShellTool 同沙箱语义——bwrap 可写全部 allowed_write_roots，
     # 执行写根经协议结构化声明，operation lock 全量覆盖（不按 internal 参数名特判）。
@@ -548,6 +627,8 @@ class TerminalSessionTool(BaseTool):
             }
         )
 
+    # LLM: 向模型暴露真实写入字节和未知剩余效果；不能只返回普通 COMMAND_FAILED 诱导整段重发。
+    # 函数用途: 校验输入后写入终端，清楚报告取消、背压和部分提交。
     def _write(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
         data = str(params.get("data") or "")
@@ -560,6 +641,10 @@ class TerminalSessionTool(BaseTool):
             return self._error("TOOL_INVALID_ARGUMENTS", f"PTY write 超过 {_MAX_WRITE_BYTES} 字节")
         try:
             session = pty_session_registry.write(session_id, encoded, self._access_scope(params))
+        except PtyWriteError as exc:
+            return ToolHandlerOutcome("terminal_session", False, str(exc), error_code=exc.code,
+                                      effect_outcome="unknown" if exc.written else "not_started",
+                                      result_envelope={"bytes_written": exc.written, "bytes_requested": len(encoded)})
         except OSError as exc:
             return self._error("COMMAND_FAILED", str(exc))
         if session is None:

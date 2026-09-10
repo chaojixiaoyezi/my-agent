@@ -1,4 +1,5 @@
-
+# LLM: 普通文件的行/字符分页共用格式索引；输出裁剪必须提供不跳字的结构化游标。
+# 模块用途: 安全读取有界正文，准确区分完整文件、局部行和半行截断。
 from __future__ import annotations
 
 import json
@@ -6,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..common.encoding_detect import decode_bytes
+from ..common.file_version import StaleFileVersionError, check_file_version, file_version
+from ..common.text_file_window import text_file_index
 from ..path_recovery_hints import suggest_workspace_typo_target
 from ._filesystem_helpers import (
     _canonical_agent_final_report_target,
@@ -49,15 +51,6 @@ class CharWindowView:
     total_chars: int
     requested_limit: int
     default_max_chars: int
-
-
-@dataclass(frozen=True)
-class NumberedReadLinesRequest:
-    lines: list[str]
-    start_line: int
-    end_line: int
-    max_chars: int
-    continuation_max_chars: int
 
 
 @dataclass(frozen=True)
@@ -152,7 +145,17 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
             json.dumps(internal_ref, ensure_ascii=False, indent=2),
             error_code="WRONG_STATUS_SURFACE",
         )
-    outcome = _ordinary_file_result(request)
+    try:
+        version = file_version(target)
+        outcome = _ordinary_file_result(request)
+        if outcome.ok:
+            check_file_version(target, version)
+            outcome.result_envelope["file_version"] = version
+            outcome.output += f"\nfile_version={version}"
+    except StaleFileVersionError as exc:
+        return ToolHandlerOutcome("read_file", False, str(exc), error_code="STALE_VERSION", retryable=True)
+    except OSError as exc:
+        return ToolHandlerOutcome("read_file", False, f"读取文件失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
     if redirected_from:
         outcome.result_envelope["path_resolution"] = {
             "authority": "owner_agent_projection",
@@ -162,6 +165,8 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
     return outcome
 
 
+# LLM: 行读取不再 read_bytes 整文件；统计与字符页共用有界索引，错误按输入/编码/IO 分类。
+# 函数用途: 为普通文件返回可续读的行或字符窗口。
 def _ordinary_file_result(request: ReadFileRequest) -> ToolHandlerOutcome:
     target = request.target
     if _has_char_window_params(request.params):
@@ -172,12 +177,64 @@ def _ordinary_file_result(request: ReadFileRequest) -> ToolHandlerOutcome:
             default_max_chars=request.max_chars,
         ))
     try:
-        # 编码探测(审计 #23):BOM→UTF-8→charset-normalizer,Shift-JIS/GBK/Latin-1/带 BOM 文件可读,
-        # 不再因非 UTF-8 硬失败;真二进制/测不出仍抛 UnicodeDecodeError 维持"无法读取"语义。
-        content, _encoding = decode_bytes(target.read_bytes())
+        return _stream_numbered_result(request)
     except UnicodeDecodeError:
         return ToolHandlerOutcome("read_file", False, "文件不是有效文本（编码探测失败），无法读取。", error_code="TOOL_EXECUTION_FAILED")
-    return _numbered_text_result(content, request.params, request.max_chars)
+    except ValueError as exc:
+        return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+    except OSError as exc:
+        return ToolHandlerOutcome("read_file", False, f"读取文件失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
+
+
+# LLM: 每次 readline 自带长度上限；半行续读 offset 使用原正文坐标，不包含展示行号。
+# 函数用途: 只保留请求行的有限文字，遇到超长行切换为字符游标，不跳过剩余部分。
+def _stream_numbered_result(request: ReadFileRequest) -> ToolHandlerOutcome:
+    index = text_file_index(request.tool, request.target)
+    params = request.params
+    start = _int_param(params.get("start_line"), name="start_line", default=1, min_value=1)
+    end = _int_param(params.get("end_line"), name="end_line", default=max(index.total_lines, 1), min_value=1)
+    if start > max(index.total_lines, 1) and params.get("end_line") is None:
+        raise ValueError(_past_eof_line_message(start, index.total_lines))
+    if end < start:
+        raise ValueError("end_line 不能小于 start_line")
+    if start > max(index.total_lines, 1):
+        raise ValueError(_past_eof_line_message(start, index.total_lines))
+    if not index.total_chars:
+        return ToolHandlerOutcome("read_file", True, "(空文件)")
+    limit = _line_max_chars(params, request.max_chars)
+    rendered, used, number, offset, last = [], 0, 1, 0, start - 1
+    with index.open() as handle:
+        while number < start:
+            part = handle.readline(65536)
+            if not part:
+                break
+            offset += len(part)
+            number += int(part.endswith("\n"))
+        while number <= min(end, index.total_lines):
+            part = handle.readline(limit + 1)
+            prefix = f"{number}: "
+            item = prefix + part.rstrip("\n")
+            if used + int(bool(rendered)) + len(item) > limit:
+                if rendered:
+                    rendered.append(_truncated_read_footer(TruncatedReadFooterRequest(
+                        index.total_lines, number, limit, request.max_chars)))
+                    break
+                visible = max(1, limit - len(prefix))
+                body = part[:visible]
+                window = _char_read_window(offset, len(body), index.total_chars)
+                footer = _truncated_read_footer(TruncatedReadFooterRequest(
+                    index.total_lines, number, limit, request.max_chars, offset + len(body)))
+                index.check_current()
+                return ToolHandlerOutcome("read_file", True, f"{prefix}{body}\n{footer}",
+                                          result_envelope={"read_window": window})
+            rendered.append(item)
+            used += len(item) + int(len(rendered) > 1)
+            offset += len(part)
+            last = number
+            number += 1
+    index.check_current()
+    return ToolHandlerOutcome("read_file", True, "\n".join(rendered),
+                              result_envelope={"read_window": _line_read_window(start, last, index.total_lines)})
 
 
 def _not_file_result(tool, target: Path) -> ToolHandlerOutcome:
@@ -197,43 +254,6 @@ def _not_file_result(tool, target: Path) -> ToolHandlerOutcome:
             error_code="PATH_IS_DIRECTORY",
         )
     return ToolHandlerOutcome("read_file", False, f"目标不是文件: {tool.display_path(target)}", error_code="PATH_INVALID")
-
-
-def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) -> ToolHandlerOutcome:
-    if _has_char_window_params(params):
-        return _char_window_result(content, params, max_chars)
-    lines = content.splitlines()
-    raw_end_line = params.get("end_line")
-    try:
-        start_line = _int_param(
-            params.get("start_line"),
-            name="start_line",
-            default=1,
-            min_value=1,
-        )
-        end_line = _int_param(
-            raw_end_line,
-            name="end_line",
-            default=max(len(lines), 1),
-            min_value=1,
-        )
-        line_max_chars = _line_max_chars(params, max_chars)
-    except ValueError as exc:
-        return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
-    error = _line_range_error(lines, start_line, end_line, raw_end_line)
-    if error:
-        return ToolHandlerOutcome("read_file", False, error, error_code="TOOL_INVALID_ARGUMENTS")
-    if not lines:
-        return ToolHandlerOutcome("read_file", True, "(空文件)")
-    result, read_window = _render_numbered_read_lines(NumberedReadLinesRequest(
-        lines=lines,
-        start_line=start_line,
-        end_line=end_line,
-        max_chars=line_max_chars,
-        continuation_max_chars=max_chars,
-    ))
-    envelope = {"read_window": read_window} if read_window else {}
-    return ToolHandlerOutcome("read_file", True, result or "(空文件)", result_envelope=envelope)
 
 
 def _has_char_window_params(params: dict[str, Any]) -> bool:
@@ -258,68 +278,20 @@ def _line_max_chars(params: dict[str, Any], default_max_chars: int) -> int:
     return min(requested, default_max_chars)
 
 
-def _char_window_result(content: str, params: dict[str, Any], default_max_chars: int) -> ToolHandlerOutcome:
-    try:
-        offset = _int_param(
-            params.get("offset")
-            if params.get("offset") is not None
-            else params.get("start_char"),
-            name="offset",
-            default=0,
-            min_value=0,
-        )
-        limit = _int_param(
-            params.get("max_chars"),
-            name="max_chars",
-            default=default_max_chars,
-            min_value=1,
-        )
-    except ValueError as exc:
-        return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
-    if offset >= len(content):
-        return _offset_out_of_range_result(offset, len(content))
-    window = content[offset : offset + min(limit, default_max_chars)]
-    next_offset = offset + len(window)
-    header = f"[char-window offset={offset} chars={len(window)} total_chars={len(content)}]"
-    if next_offset < len(content):
-        capped_limit = min(limit, default_max_chars)
-        continuation_max_chars = _continuation_max_chars(capped_limit, default_max_chars)
-        footer = (
-            "PARTIAL view only; 这不是完整文件。"
-            f" total_chars={len(content)}; next_offset={next_offset}; limit_chars={capped_limit};"
-            f" recommended_next_max_chars={continuation_max_chars};"
-            f" next_call=read_file(offset={next_offset}, max_chars={continuation_max_chars})。"
-            " 最终报告前先把关键事实和 source offset 写入 task_progress 或 work 表。"
-        )
-        return ToolHandlerOutcome(
-            "read_file",
-            True,
-            f"{header}\n{window}\n{footer}",
-            result_envelope={"read_window": _char_read_window(offset, len(window), len(content))},
-        )
-    return ToolHandlerOutcome(
-        "read_file",
-        True,
-        f"{header}\n{window}",
-        result_envelope={"read_window": _char_read_window(offset, len(window), len(content))},
-    )
-
-
+# LLM: 字符页复用有版本的编码/检查点索引；解码错误不可落入 ValueError 参数分支。
+# 函数用途: 有界读取任意已识别编码的字符窗口，返回真实续读位置。
 def _char_window_file_result(request: CharWindowFileRequest) -> ToolHandlerOutcome:
     try:
         offset, limit = _char_window_values(request.params, request.default_max_chars)
-        total_chars = _cached_total_chars(request.tool, request.target)
-        if offset >= total_chars:
+        index = text_file_index(request.tool, request.target)
+        total_chars = index.total_chars
+        if offset > total_chars or (offset == total_chars and total_chars > 0):
             return _offset_out_of_range_result(offset, total_chars)
-        window = _read_char_window(
-            request.target,
-            offset=offset,
-            limit=min(limit, request.default_max_chars),
-        )
+        window = index.read(offset, min(limit, request.default_max_chars))
+    except UnicodeDecodeError:
+        return ToolHandlerOutcome("read_file", False, "文件不是有效文本（编码探测失败），无法读取。", error_code="TOOL_EXECUTION_FAILED")
     except ValueError as exc:
         return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
-    except UnicodeDecodeError:
-        return ToolHandlerOutcome("read_file", False, "文件不是有效 UTF-8 文本，无法读取。", error_code="TOOL_EXECUTION_FAILED")
     except OSError as exc:
         return ToolHandlerOutcome("read_file", False, f"读取文件失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
     return _char_window_view_result(CharWindowView(
@@ -385,47 +357,6 @@ def _offset_out_of_range_result(offset: int, total_chars: int) -> ToolHandlerOut
     )
 
 
-def _cached_total_chars(tool, target) -> int:
-    stat = target.stat()
-    key = (str(target), stat.st_mtime_ns, stat.st_size)
-    cache = getattr(tool, "_read_file_char_count_cache", None)
-    if not isinstance(cache, dict):
-        cache = {}
-        tool._read_file_char_count_cache = cache
-    cached = cache.get(key)
-    if isinstance(cached, int):
-        return cached
-    total = _count_chars_streaming(target)
-    cache.clear()
-    cache[key] = total
-    return total
-
-
-def _count_chars_streaming(target, *, chunk_size: int = 256 * 1024) -> int:
-    with target.open("r", encoding="utf-8") as handle:
-        return sum(len(chunk) for chunk in iter(lambda: handle.read(chunk_size), ""))
-
-
-def _read_char_window(target, *, offset: int, limit: int, chunk_size: int = 256 * 1024) -> str:
-    parts: list[str] = []
-    remaining_skip = offset
-    remaining_read = limit
-    with target.open("r", encoding="utf-8") as handle:
-        if not _skip_chars(handle, remaining_skip, chunk_size):
-            return ""
-        while remaining_read > 0 and (chunk := handle.read(min(remaining_read, chunk_size))):
-            parts.append(chunk)
-            remaining_read -= len(chunk)
-    return "".join(parts)
-
-
-def _skip_chars(handle, remaining_skip: int, chunk_size: int) -> bool:
-    while remaining_skip > 0:
-        skipped = handle.read(min(remaining_skip, chunk_size))
-        if not skipped:
-            return False
-        remaining_skip -= len(skipped)
-    return True
 
 
 def _missing_tool_artifact_typo_hint(tool, raw_path: str) -> str:
@@ -433,59 +364,6 @@ def _missing_tool_artifact_typo_hint(tool, raw_path: str) -> str:
     if not suggested:
         return ""
     return tool_output_artifact_typo_hint(raw_path, tool.workspace_root, suggested)
-
-
-def _line_range_error(lines: list[str], start_line: int, end_line: int, raw_end_line: object) -> str:
-    total_lines = len(lines)
-    if not lines and start_line > 1:
-        return "start_line 超出文件末尾：total_lines=0，文件为空。"
-    if not lines:
-        return ""
-    if start_line > total_lines and raw_end_line is None:
-        return _past_eof_line_message(start_line, total_lines)
-    if end_line < start_line:
-        return "end_line 不能小于 start_line"
-    if start_line > total_lines:
-        return _past_eof_line_message(start_line, total_lines)
-    return ""
-
-
-def _render_numbered_read_lines(request: NumberedReadLinesRequest) -> tuple[str, dict[str, int | bool | str]]:
-    rendered: list[str] = []
-    used_chars = 0
-    last_line = request.start_line - 1
-    for line_number, line in enumerate(
-        request.lines[request.start_line - 1 : request.end_line],
-        start=request.start_line,
-    ):
-        item = f"{line_number}: {line}"
-        separator = 1 if rendered else 0
-        if rendered and used_chars + separator + len(item) > request.max_chars:
-            rendered.append(_truncated_read_footer(TruncatedReadFooterRequest(
-                total_lines=len(request.lines),
-                next_start_line=line_number,
-                max_chars=request.max_chars,
-                continuation_max_chars=request.continuation_max_chars,
-            )))
-            return "\n".join(rendered), _line_read_window(request.start_line, last_line, len(request.lines))
-        if not rendered and len(item) > request.max_chars:
-            return (
-                "\n".join([
-                    item[:request.max_chars],
-                    _truncated_read_footer(TruncatedReadFooterRequest(
-                        total_lines=len(request.lines),
-                        next_start_line=min(line_number + 1, len(request.lines)),
-                        max_chars=request.max_chars,
-                        continuation_max_chars=request.continuation_max_chars,
-                        next_offset=request.max_chars,
-                    )),
-                ]),
-                _line_read_window(request.start_line, line_number, len(request.lines)),
-            )
-        rendered.append(item)
-        used_chars += separator + len(item)
-        last_line = line_number
-    return "\n".join(rendered), _line_read_window(request.start_line, last_line, len(request.lines))
 
 
 def _char_read_window(offset: int, chars: int, total_chars: int) -> dict[str, int | bool | str]:
@@ -496,7 +374,7 @@ def _char_read_window(offset: int, chars: int, total_chars: int) -> dict[str, in
         "chars": chars,
         "next_offset": next_offset,
         "total_chars": total_chars,
-        "complete": bool(total_chars and next_offset >= total_chars),
+        "complete": next_offset >= total_chars,
     }
 
 
@@ -523,7 +401,10 @@ def _truncated_read_footer(request: TruncatedReadFooterRequest) -> str:
         " 最终报告前先把关键事实和 source 行号写入 task_progress 或 work 表。"
     )
     if request.next_offset is not None:
-        footer += f"; next_offset={request.next_offset}"
+        footer = (
+            f"... 已截断；PARTIAL view only; 这不是完整文件。 next_offset={request.next_offset}; "
+            f"next_call=read_file(offset={request.next_offset}, max_chars={next_max_chars})。"
+        )
     return footer
 
 

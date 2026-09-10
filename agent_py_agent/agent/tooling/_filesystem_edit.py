@@ -1,22 +1,15 @@
-# LLM: edit_file 精确局部编辑工具(对照 5 主流 agent 的能力补齐,P0-1)。
-#   背景:my-agent 此前只有 write_file(全量覆写,改一行也要重写整个文件,费
-#   token 且易覆盖错)+ apply_patch(diff 格式,易写错),缺最高频的"把这段
-#   改成那段"工具——对照组 4/5(通道运行时/长期助手/终端交互/工具运行时)都有。
-#   设计超越点:不止精确匹配,带三级容错级联(精确 → 行首尾空白归一 → 行内
-#   空白归一),抄 工具运行时 edit.ts 的多策略匹配思路,直接超越只做精确匹配的
-#   会话运行时/终端交互——模型给的 old_string 缩进/空白和文件略有出入也能命中,
-#   大幅降低编辑失败率。契约:①old_string 必须能唯一定位,多处命中且未开
-#   replace_all 时报错并要求更多上下文(防误改);②容错命中时用文件里的真实
-#   文本做替换(不是模型给的近似文本),保证字节正确;③复用 FileSystemTool
-#   的路径解析 + 原子写(与 write_file/apply_patch 同一写入边界)。
-# 模块用途: 让模型像人改代码一样"找到这段、改成那段",找不准时自动放宽空白
-#   比对,而不是逼模型重写整个文件或硬拼 diff。
+# LLM: edit_file 默认精确且唯一匹配；空白容错只按 allow_fuzzy 显式启用，不能把字符串内空白视为无意义。
+#   与 write_file/apply_patch 共享权限、原编码、原子发布及乐观版本检查；不是跨所有写入者的内核 CAS。
+# 模块用途: 小范围修改已有文本，保留普通权限和原格式，并展示实际变化位置；陈旧版本要求重新读取。
 from __future__ import annotations
 
+import difflib
 import re
 from pathlib import Path
 from typing import Any
 
+from ..common.encoding_detect import decode_bytes, encode_like_original
+from ..common.file_version import StaleFileVersionError, check_file_version, file_version
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, OwnerQuotaUnavailable
 from ._filesystem_display import build_text_diff_display
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
@@ -46,16 +39,17 @@ from .models import (
 def _build_edit_file_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="edit_file",
-        description="把已有文本文件里的 old_string 精确替换成 new_string（带空白容错匹配）。改几行时首选，比 write_file 省、比 apply_patch 简单。编辑成功后结果里会包含替换位置的最新文件片段，可直接用于下一次编辑，无需 read_file 读回确认。",
+        description="把已有文本文件里的 old_string 精确替换成 new_string。改几行时首选；成功后返回实际修改处的新片段。空白容错需要显式 allow_fuzzy=true，字符串和正则中的空白可能有语义，默认不放宽。",
         input_schema={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "要编辑的文件路径。"},
+                "expected_version": {"type": "string", "description": "基于 read_file 修改时填它返回的 file_version；版本过期先重新读取合并。"},
                 "old_string": {
                     "type": "string",
                     "description": (
                         "必须能在文件中唯一定位；若多处相同，请多带上下文或设 replace_all=true。"
-                        "缩进或空白略有出入时会按文件中的真实文本容错匹配。"
+                        "默认逐字匹配；空白不一致时先读回原文。"
                     ),
                 },
                 "new_string": {
@@ -66,6 +60,7 @@ def _build_edit_file_model_spec() -> ToolModelSpec:
                     "type": "boolean",
                     "description": "true 时替换所有匹配处；默认只允许唯一匹配。",
                 },
+                "allow_fuzzy": {"type": "boolean", "default": False, "description": "显式允许空白容错；可能影响有语义的空白，默认 false。"},
             },
             "required": ["path", "old_string", "new_string"],
             "additionalProperties": False,
@@ -135,10 +130,19 @@ class EditFileTool(FileSystemTool):
                 retry_tool="read_file",
             ))
         try:
-            content = target.read_text(encoding="utf-8")
-            updated, strategy, count = _replace_in_content(content, old, new, replace_all=replace_all)
+            observed_version = check_file_version(target, params.get("expected_version"))
+            original = target.read_bytes()
+            content, _encoding = decode_bytes(original)
+            content = content.replace("\r\n", "\n").replace("\r", "\n")
+            updated, strategy, count = _replace_in_content(
+                content, old, new, replace_all=replace_all, allow_fuzzy=params.get("allow_fuzzy") is True,
+            )
+        except StaleFileVersionError as exc:
+            return ToolHandlerOutcome("edit_file", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
         except ValueError as exc:
             return ToolHandlerOutcome("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        except OSError as exc:
+            return ToolHandlerOutcome("edit_file", False, f"读取失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
         approval_error = _persona_approval_write_error(target, self.protected_persona_root)
         if approval_error:
             return ToolHandlerOutcome(
@@ -148,9 +152,11 @@ class EditFileTool(FileSystemTool):
         if persona_error:
             return ToolHandlerOutcome("edit_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED")
         try:
-            updated_bytes = updated.encode("utf-8")
+            updated_bytes = encode_like_original(updated, original)
             with self.quota_changes([OwnerQuotaChange(target, len(updated_bytes))]):
-                _atomic_write_bytes(target, updated_bytes)
+                _atomic_write_bytes(target, updated_bytes, expected_version=observed_version)
+        except StaleFileVersionError as exc:
+            return ToolHandlerOutcome("edit_file", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
         except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
             return owner_quota_error_result("edit_file", exc)
         except (OSError, UnicodeError) as exc:
@@ -172,6 +178,7 @@ class EditFileTool(FileSystemTool):
                 "path": str(target),
                 "target_path": str(target),
                 "replacement_count": count,
+                "file_version": file_version(target),
                 "strategy": strategy,
                 "display": build_text_diff_display(
                     self.display_path(target),
@@ -182,8 +189,9 @@ class EditFileTool(FileSystemTool):
         )
 
 
-# 函数用途: 在文件内容里定位并替换 old→new,精确优先,失配按三级容错降级。
-def _replace_in_content(content: str, old: str, new: str, *, replace_all: bool) -> tuple[str, str, int]:
+# LLM: 默认必须精确匹配；allow_fuzzy 是显式工具参数，不从语言或文件类型推测可忽略的空白。
+# 函数用途: 唯一定位并替换文本；只有明确打开容错时才尝试空白匹配。
+def _replace_in_content(content: str, old: str, new: str, *, replace_all: bool, allow_fuzzy: bool = False) -> tuple[str, str, int]:
     exact_count = content.count(old)
     if exact_count > 0:
         if exact_count > 1 and not replace_all:
@@ -192,7 +200,9 @@ def _replace_in_content(content: str, old: str, new: str, *, replace_all: bool) 
             )
         replaced = content.replace(old, new) if replace_all else content.replace(old, new, 1)
         return replaced, "exact", (exact_count if replace_all else 1)
-    return _fuzzy_replace(content, old, new, replace_all=replace_all)
+    if allow_fuzzy:
+        return _fuzzy_replace(content, old, new, replace_all=replace_all)
+    raise ValueError("old_string 未精确命中，请先 read_file 读取原文；确认空白可忽略时显式设 allow_fuzzy=true。")
 
 
 _LINE_TRIM = ("line_trimmed", lambda line: line.strip())
@@ -204,7 +214,10 @@ _WS_NORM = ("whitespace_normalized", lambda line: re.sub(r"\s+", " ", line).stri
 # 函数用途: 生成"替换后文件的最新片段"文本，供模型直接用于下一次编辑。
 def _replaced_context_preview(before: str, after: str, new_text: str, count: int) -> str:
     try:
-        pos = after.find(new_text) if count else -1
+        _ = new_text
+        changes = difflib.SequenceMatcher(None, before.splitlines(True), after.splitlines(True), autojunk=False)
+        first = next((op for op in changes.get_opcodes() if op[0] != "equal"), None)
+        pos = sum(len(line) for line in after.splitlines(True)[:first[3]]) if count and first else -1
         if pos < 0:
             return ""
         start = after.rfind("\n", 0, max(pos - 1, 0)) + 1

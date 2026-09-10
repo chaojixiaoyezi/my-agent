@@ -1,4 +1,6 @@
 
+# LLM: 子代理创建共用 canonical 身份、继承清单和 owner 权限；登记与落盘不能生成第二套身份来源。
+# 模块用途: 创建、注册和组织子代理任务，把结构化运行身份交给后续 worker 和持久仓库。
 """base task creation and lifecycle service.
 
 这里承接子代理任务创建、分割、注册卡等基础能力。
@@ -8,11 +10,16 @@ SubAgentManager 通过当前服务组合调用这里。
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_py_agent.agent.subagents.model_task import TakeoverRecord
+
 import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ...common.id_generator import new_id as _framework_new_id
 from ..authorization_gate import (
