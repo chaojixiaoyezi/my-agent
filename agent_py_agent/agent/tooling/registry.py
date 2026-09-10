@@ -1,3 +1,5 @@
+# LLM: 注册表与工作片权限视图共用 owner 策略读取器；可见性、Schema 和执行保持同一快照，不能热改共享工具。
+# 模块用途: 装配工具实现并把规范调用交给唯一执行器，提供不重建存储或 MCP 的权限视图。
 from __future__ import annotations
 
 """Bind tools into one immutable runtime snapshot and delegate canonical calls.
@@ -71,7 +73,7 @@ class CatalogRenderConfig:
     deferred_categories: list[str] = field(default_factory=list)
 
 
-# LLM: 该不可变参数对象是 ToolRegistry 装配的单一配置载体；新增字段要同步 core 装配、bootstrap 消费和 registry 测试。
+# LLM: ToolRegistry 的单一装配配置；审批读取器由 core 绑定 owner，不能接受模型回调；新增字段同步 bootstrap 与测试。
 # 类用途: 汇总工作区、权限、工具上限和可选后端配置，避免每类工具各自读取一套全局配置。
 @dataclass(frozen=True)
 class ToolRegistryParams:
@@ -133,6 +135,7 @@ class ToolRegistryParams:
     # 副作用默认 fail-closed；只有明确的无副作用合同探针/单元测试可显式关闭。
     operation_store_required: bool = True
     operation_owner_id: str = ""
+    approval_mode_reader: Callable[[], str] | None = None
 
 
 # LLM: list_tools 只能描述调用它的请求快照，不能退回进程级注册表或猜测 owner 类型。
@@ -374,10 +377,13 @@ def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]
 # LLM: Registry 是工具事实窄腰；注册、可见、搜索、Schema 与执行必须从同一请求快照派生。
 # 类用途: 组合进程级工具实现，并为每个 Agent run 生成权限与可用性的不可变交集。
 class ToolRegistry:
+    # LLM: 保存唯一构造配置供工作片派生权限视图；初始装配会注册工具与连接配置，派生视图不得重复建立服务。
+    # 函数用途: 初始化一个 owner 的工具表、检索和审批读取器，运行时按同一注册表完成授权与调用。
     def __init__(
         self,
         params: ToolRegistryParams,
     ):
+        self._construction_params = params
         self.workspace_root = params.workspace_root.resolve()
         self.workspace_roots = params.workspace_roots or [self.workspace_root]
         self.path_access_mode = params.path_access_mode
@@ -406,6 +412,7 @@ class ToolRegistry:
         self.operation_store = params.operation_store
         self.operation_store_required = params.operation_store_required
         self.operation_owner_id = str(params.operation_owner_id or "local/main").strip()
+        self.approval_mode_reader = params.approval_mode_reader
         self.retrieval_limit = params.retrieval_limit
         self.retriever = build_tool_retriever(params)
         register_base_tools(self, params)
@@ -422,6 +429,29 @@ class ToolRegistry:
             for client in self._mcp_clients
             if not client.is_running()
         }
+
+    # LLM: 权限视图只重建基础文件/进程工具；其他 handler、存储、MCP 连接仍共享原权威，不启动第二套服务。
+    # 函数用途: 给一个工作片生成独立权限视图，避免切 Full Access 热改同用户其他正在执行的会话。
+    def with_access_policy(self, *, access_mode: str, path_access_mode: str, owner_scope_root: str):
+        from copy import copy
+        from dataclasses import replace
+
+        params = replace(self._construction_params, access_mode=access_mode,
+                         path_access_mode=path_access_mode, owner_scope_root=owner_scope_root)
+        if params == self._construction_params:
+            return self
+        view = copy(self)
+        view._construction_params = params
+        view.path_access_mode = path_access_mode
+        view.owner_scope_root = owner_scope_root
+        view.tools = {}
+        register_base_tools(view, params)
+        view.register(ToolSearchTool(view))
+        view.register(ListToolsTool(view))
+        for name, tool in self.tools.items():
+            if name not in view.tools:
+                view.register(tool)
+        return view
 
     # LLM: 注册表只存进程级实现；是否能给某个请求使用由 runtime_snapshot 决定。
     # 函数用途: 按稳定工具名登记一个实现；重复名称必须在装配期失败，不能静默换 handler。
@@ -656,7 +686,7 @@ class ToolRegistry:
         )
 
     # LLM: Every gate and handler in one invocation must receive the same host-authored effective
-    # cwd/root set. Never let a model argument or one handler independently reinterpret cwd.
+    # cwd/root set. 审批模式在工具边界读取 owner 唯一策略；读取错误不得放行，也不能由模型参数覆盖。
     # 函数用途: 在本轮统一工作目录和授权根下执行工具，并返回可审计的标准执行结果。
     def execute_tool(
         self,
@@ -680,6 +710,10 @@ class ToolRegistry:
         effective_owner_scope = str(
             boundary.get("effective_owner_scope_root") or self.owner_scope_root or ""
         ).strip()
+        try:
+            approval_mode = self.approval_mode_reader() if self.approval_mode_reader else "ask"
+        except (OSError, ValueError):
+            approval_mode = "unavailable"
         return ToolExecutor().execute(
             ToolExecutorRequest(
                 call=call,
@@ -691,6 +725,7 @@ class ToolRegistry:
                 owner_scope_root=effective_owner_scope,
                 write_boundary=write_boundary,
                 runtime_guard_policy=self.runtime_guard_policy,
+                approval_mode=approval_mode,
                 operation_store=self.operation_store,
                 operation_store_required=self.operation_store_required,
                 operation_owner_id=self.operation_owner_id,

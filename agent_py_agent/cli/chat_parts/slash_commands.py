@@ -38,6 +38,7 @@ def handle_common_slash_command(
     handlers: tuple[SlashHandler, ...] = (
         _handle_help_command,
         _handle_sessions_command,
+        _handle_permissions_command,
         _handle_control_command,
         _handle_remember_command,
         _handle_memory_command,
@@ -50,6 +51,22 @@ def handle_common_slash_command(
         if result is not None:
             return result
     return False
+
+
+# LLM: plain 命令也只消费封闭枚举；Gateway 与本地共用权限配置入口，不进模型任务队列。
+# 函数用途: 无菜单终端可以查看模式，或用明确参数切换；rich TUI 的无参数命令打开菜单。
+def _handle_permissions_command(user: str, ctx: SlashCommandContext, include_plain_help: bool) -> bool | None:
+    del include_plain_help
+    if user != "/permissions" and not user.startswith("/permissions "):
+        return None
+    from .tui_permissions_menu import request_permissions
+
+    mode = user.removeprefix("/permissions").strip()
+    result = request_permissions(ctx.agent, ctx.conversation_id, "set" if mode else "get", mode or None)
+    ctx.print_line(str(result.get("message") or "权限配置操作失败。"))
+    if not mode:
+        ctx.print_line("用法：/permissions ask|auto|full-access；Full Access 仅本机管理员可用。")
+    return True
 
 
 # LLM: Local slash parsing delegates to the adapter-neutral typed control protocol.

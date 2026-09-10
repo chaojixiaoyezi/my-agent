@@ -298,8 +298,8 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
     )
 
 
-# LLM: 模型依赖按执行作用域覆盖；其它 owner/runtime/存储依赖保持原权威对象，不复制整套 Agent。
-# 类用途: 组装主代理，并让同用户切模型不会热改正在工作的其它线程。
+# LLM: 模型与工具权限依赖按执行作用域覆盖；其它 owner/runtime/存储依赖保持原权威对象，不复制整套 Agent。
+# 类用途: 组装主代理，让同用户切模型或权限不会热改正在工作的其它线程。
 class SimpleAgent(
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
@@ -321,6 +321,7 @@ class SimpleAgent(
     config = ModelScopedAttribute("config")
     backend = ModelScopedAttribute("backend")
     prompts = ModelScopedAttribute("prompts")
+    tools = ModelScopedAttribute("tools")
 
     def __init__(
         self,
@@ -785,9 +786,13 @@ def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple
     return workspace_root, workspace_roots
 
 
-# LLM: 这是 SimpleAgent 构造 ToolRegistry 的唯一装配入口；workspace、owner policy、工具配置和能力事实必须从同一 AgentConfig 注入。
+# LLM: ToolRegistry 唯一装配入口；工作区与工具配置来自同一 AgentConfig，审批读取器只绑定该 Agent 的可信 home。
 # 函数用途: 按当前 Agent 的工作区、权限和配置创建工具注册表，让工具执行与能力自我描述看到同一份运行事实。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
+    from functools import partial
+
+    from .user_space.approval_mode import read_approval_mode
+
     workspace_root = agent.effective_workspace_root
     workspace_roots = agent.effective_workspace_roots
     owner_scope_root, access_mode = _resolve_owner_scope_and_access(agent, config)
@@ -853,6 +858,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             operation_owner_id=str(
                 getattr(agent.home_paths, "owner_id", "") or "local/main"
             ),
+            approval_mode_reader=partial(read_approval_mode, agent.home_paths),
         )
     )
 

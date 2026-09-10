@@ -21,6 +21,11 @@
 
 ## 2026-08-23 当前运行基线
 
+- `/permissions` / F4 是显式用户权限控制，保存到 owner 既有 tool_policy.json；ask、auto 与 full-access 分明。
+  Full Access 只给可信 local/main，子代理仍有 owner 墙；auto 不豁免 SOUL 本人确认、禁用工具与灾难保护。
+  审批在工具边界读取，路径权限新工作片冻结；模型与工具线程必须继承同一执行 Context，不热改共享 Agent。
+  gateway_status 的 caller_model 才是本次配置模型；deployment_defaults 不代表当前会话模型。
+
 - 所有产品名称与说明统一为 my-agent；品牌清理不迁移实际检出或 owner home，不改变协议、权限或模型配置。
   历史说明以中性占位展示旧路径／会话，原始定位按提交和运行编号追溯；第三方工具命令保留真实拼写。
 

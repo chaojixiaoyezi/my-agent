@@ -111,9 +111,8 @@ def gateway_runtime_snapshot(
     return snapshot
 
 
-# LLM: This helper only shapes already-read Gateway facts. Keep the public snapshot schema stable
-# and do not perform additional I/O here; PID-record and optional log diagnostics stay in the caller.
-# 函数用途: 把状态、心跳、端点和队列事实组装成稳定的 Gateway 快照主体，便于各入口复用同一字段布局。
+# LLM: v2 将进程身份与启动默认模型分开；Gateway 服务多个 owner/会话，启动配置绝不能充当当前调用模型。
+# 函数用途: 组装网关健康事实；默认模型只标记为部署信息，不新增 I/O，也不猜当前会话使用哪个模型。
 def _gateway_runtime_base_snapshot(
     agent: SimpleAgent,
     paths: GatewayPaths,
@@ -134,16 +133,18 @@ def _gateway_runtime_base_snapshot(
     started_at = _float_value(state.get("started_at"))
     queue_counts = gateway_request_counts(paths, include_archives=False)
     return {
-        "schema": "gateway_runtime_snapshot.v1",
+        "schema": "gateway_runtime_snapshot.v2",
         "identity": {
-            "model_name": str(
-                state.get("model_name") or getattr(config, "model_name", "") or ""
-            ),
             "pid": running.pid,
             "process_start_time": None,
             "config_path": str(
                 state.get("config_path") or getattr(config, "config_path", "") or ""
             ),
+        },
+        "deployment_defaults": {
+            "model_name": str(state.get("model_name") or ""),
+            "scope": "gateway_startup_only",
+            "is_current_request_model": False,
         },
         "status": status,
         "alive": running.alive,

@@ -129,7 +129,9 @@ def test_gateway_runtime_snapshot_reports_canonical_endpoint_and_identity(
         "status_path": "/status",
         "metrics_path": "/metrics",
     }
-    assert snapshot["identity"]["model_name"] == "MiniMax-M2.7"
+    assert "model_name" not in snapshot["identity"]
+    assert snapshot["deployment_defaults"]["model_name"] == "MiniMax-M2.7"
+    assert snapshot["deployment_defaults"]["is_current_request_model"] is False
     assert snapshot["identity"]["config_path"] == "/tmp/testbox-single-gateway.yaml"
     assert snapshot["log_diagnostics"]["status"] == "quiet"
     assert "api_key" not in json.dumps(snapshot).lower()
@@ -142,13 +144,25 @@ def test_gateway_status_tool_returns_snapshot_without_raw_log(tmp_path: Path) ->
     payload = json.loads(result.output)
 
     assert result.ok is True
-    assert payload["schema"] == "gateway_runtime_snapshot.v1"
+    assert payload["schema"] == "gateway_runtime_snapshot.v2"
     assert result.output.index('"identity"') < result.output.index('"heartbeat"')
-    assert result.output.count("MiniMax-M2.7") == 1
     assert payload["http"]["port"] == 8420
-    assert payload["identity"]["model_name"] == "MiniMax-M2.7"
+    assert payload["caller_model"]["model_name"] == "MiniMax-M2.7"
     assert payload["log_diagnostics"]["raw_log_included"] is False
     assert "gateway ready" not in result.output
+
+
+def test_caller_model_does_not_use_gateway_startup_default(tmp_path: Path) -> None:
+    agent, _ = _running_gateway(tmp_path)
+    agent.config.model_name = "deepseek-v4-flash"
+    agent.config.config_sources = {"model_name": {"profile_id": "deepseek-current"}}
+    agent.backend = SimpleNamespace(name="anthropic_compatible", model_name="deepseek-v4-flash")
+    payload = json.loads(GatewayStatusTool(agent).execute({}).output)
+    assert payload["deployment_defaults"]["model_name"] == "MiniMax-M2.7"
+    assert payload["caller_model"] == {
+        "model_name": "deepseek-v4-flash", "backend": "anthropic_compatible",
+        "source": "calling_agent_execution_config", "profile_id": "deepseek-current",
+    }
 
 
 def test_gateway_run_state_persists_model_endpoint_and_log_boundary(tmp_path: Path) -> None:

@@ -1,5 +1,12 @@
 # Gateway Progress
 
+## R226 当前模型与用户自主权限
+
+`gateway_status` 的 caller_model 绑定调用者工作片，启动默认值降为 deployment_defaults，避免 DeepSeek 被误报。
+权限菜单走认证冷 owner 控制，不唤起模型；主/子工具共读 owner 的明确选择，挂起的精确审批可原地恢复。
+路径仍按工作片冻结，其他 owner 不变，子代理不继承 Full Access；`.10` 单 Gateway 两路真 TUI 已验，
+包括等待时切自主、并行 child 的 7 次 PTY 和 MiniMax/DeepSeek caller_model；本机新版未切换，旧任务未打断。
+
 > 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
 
 ## R223 执行与工具协议审计

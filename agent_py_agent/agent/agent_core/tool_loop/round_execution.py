@@ -7,6 +7,7 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass, replace
 from typing import ClassVar, Literal
 
@@ -684,6 +685,8 @@ def _effective_parallel_batch_limit(request: ToolRoundExecutionRequest) -> int:
     return min(limits) if limits else 0
 
 
+# LLM: 每个并行工具都携带独立 Context 副本，继承本工作片模型/权限；线程本地 runner 身份仍走原桥，不共享可进入的 Context。
+# 函数用途: 并发执行一组工具并保持原顺序记账，避免模型切换或权限选择在工作线程里退回部署默认。
 def _execute_parallel_segment(
     request: ToolRoundExecutionRequest,
     calls: list[ToolCall],
@@ -708,6 +711,7 @@ def _execute_parallel_segment(
         ) as pool:
             futures = [
                 pool.submit(
+                    copy_context().run,
                     _execute_parallel_call,
                     request,
                     idx,

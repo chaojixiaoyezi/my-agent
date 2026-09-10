@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## R226 审批模式和当前模型事实
+
+`approval_mode_service.handle_client_approval_mode` 复用现有 HTTP 认证及 scope owner 解析，
+`user_space/approval_mode.py` 锁内读改写唯一 tool_policy.json 可选 permission_mode；正文身份无授权效力。
+ToolRegistry 每调用读取审批模式，ActionPolicy 保留硬门，仅略过 auto 下非 always 的交互确认。
+permission_bridge 和 agent_tool_approval 接受宿主绑定的同 owner 模式提供者，精确拒绝/取消优先，不改原调用参数。
+selected_model_scope 冻结 config/backend/prompts/tools，基础工具视图复用连接与存储；并行线程独立复制 Context。
+gateway_runtime_snapshot.v2 的 deployment_defaults 标明非当前模型，GatewayStatusTool 加入 caller_model 白名单。
+
 ## R223 工具一致性与资源界限
 
 `common/text_file_window.py` 为普通/按行/按字符读取提供同一编码和有界索引；

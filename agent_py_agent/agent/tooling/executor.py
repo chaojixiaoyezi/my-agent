@@ -72,6 +72,8 @@ class ToolExecution:
     states: tuple[str, ...]
 
 
+# LLM: 模型参数与宿主执行配置分离；approval_mode 是 owner 控制面快照，不能从 ToolCall 参数提权。
+# 类用途: 汇总本次调用、权限、账本和取消上下文，供唯一执行器使用。
 @dataclass(frozen=True)
 class ToolExecutorRequest:
     call: ToolCall
@@ -83,6 +85,7 @@ class ToolExecutorRequest:
     owner_scope_root: str = ""
     write_boundary: dict[str, object] | None = None
     runtime_guard_policy: object | None = None
+    approval_mode: str = "ask"
     operation_store: object | None = None
     operation_store_required: bool = True
     operation_owner_id: str = "local/main"
@@ -173,6 +176,7 @@ class ToolExecutor:
                 owner_scope_root=request.owner_scope_root,
                 write_boundary=request.write_boundary,
                 runtime_guard_policy=request.runtime_guard_policy,
+                approval_mode=request.approval_mode,
                 required_action=request.required_action,
             )
         )

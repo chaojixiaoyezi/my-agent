@@ -208,7 +208,7 @@ def close_chunk_stream(chunk_path: Path) -> None:
 
 
 # LLM: BufferedChunkStreamWriter 是 Gateway run 的公开事件出口；审批与富 transcript 必须分别来自显式客户端能力，普通客户端不得收到思考或大段工具展示数据。
-# 公开事件先沿原 chunk 落盘，再投影 main 数字/阶段与公开过程；显示故障不能中止真实请求。
+# 公开事件先沿原 chunk 落盘，再投影 main 数字/阶段与公开过程；审批模式提供者由宿主绑定，显示故障不能中止请求。
 # 类用途: 缓冲模型/工具事件，并为支持的 TUI 投递逐轮说明、折叠思考、结构化结果和审批等待。
 @dataclass
 class BufferedChunkStreamWriter:
@@ -244,6 +244,7 @@ class BufferedChunkStreamWriter:
         default=None,
         repr=False,
     )
+    approval_mode_decision_provider: Callable | None = field(default=None, repr=False)
 
     def __call__(self, text: str) -> None:
         self.write(text)
@@ -582,8 +583,8 @@ class BufferedChunkStreamWriter:
         )
         return True
 
-    # LLM: 请求必须先发布再等待精确 decision 文件；未声明能力不等待，取消令牌使同一阻塞调用立即返回 cancelled。
-    # 函数用途: 将工具审批发给 Gateway 客户端并等待结构化答复。
+    # LLM: 精确请求先发布后等待；用户从菜单切自主可原地续跑，模式提供者由 owner 控制面绑定，不接受模型参数。
+    # 函数用途: 向客户端发布审批并等待决定或自主模式切换；取消保持优先。
     def request_permission(
         self,
         request_value: dict[str, object],
@@ -624,6 +625,7 @@ class BufferedChunkStreamWriter:
             self.chunk_path,
             request,
             cancellation_token=cancellation_token,
+            mode_decision_provider=self.approval_mode_decision_provider,
         )
         if session_key and str(decision.decision or "").strip().lower() == "approved_session":
             if approval_cache is not None:
@@ -1349,12 +1351,18 @@ def _execute_gateway_conversation_turn(
 
 
 # LLM: Approval scope must match the same canonical execution cwd passed to model/tool execution.
-# Missing owner, thread, or cwd disables reuse and therefore fails safe by prompting again.
-# 函数用途: 在模型开始前按用户、会话、任务目录和权限模式绑定“本会话允许”的真实生命周期。
+# Missing owner, thread, or cwd disables reuse; the mode provider is bound to the same authenticated owner, never model arguments.
+# 函数用途: 在模型开始前绑定“本会话允许”的生命周期和本用户自主模式，支持当前精确审批原地续跑。
 def _configure_gateway_approval_session(
     context: _GatewayAskRunContext,
     conversation: _GatewayConversationContext,
 ) -> None:
+    from functools import partial
+
+    from ..user_space.approval_mode import autonomous_tool_decision
+
+    if isinstance(context.on_chunk, BufferedChunkStreamWriter):
+        context.on_chunk.approval_mode_decision_provider = partial(autonomous_tool_decision, context.agent)
     configure = getattr(context.on_chunk, "configure_approval_session", None)
     if not callable(configure):
         return

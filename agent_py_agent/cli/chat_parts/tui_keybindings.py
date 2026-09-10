@@ -319,6 +319,9 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     _register_help_bindings(kb, params, filters, Condition)
     kb.add("c-l")(lambda e: _handle_ctrl_l_keybinding(e, params))
     kb.add("f6")(lambda e: _handle_f6_mouse_keybinding(e, params))
+    from .tui_permissions_menu import open_permissions_menu
+
+    kb.add("f4")(lambda e: open_permissions_menu(e, params))
     kb.add(
         "c-o",
         filter=~filters.history_search_active & ~filters.permission_active,
@@ -449,6 +452,11 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
     if _tui_submit_gateway_memory_command(event, params, text):
         _restore_stash_after_submit(params)
         event.app.invalidate()
+        return
+    if text == "/permissions" or text.startswith("/permissions "):
+        from .tui_permissions_menu import open_permissions_menu
+
+        open_permissions_menu(event, params, mode=text.removeprefix("/permissions").strip() or None)
         return
     if text == "/model":
         from .tui_model_menu import run_model_menu

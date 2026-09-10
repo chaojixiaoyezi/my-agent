@@ -196,7 +196,7 @@ def test_full_frame_matches_reference_message_geometry_at_120_columns() -> None:
     assert user_styles == ["class:tui-user-marker", "class:tui-user-text", "class:tui-user-fill"]
     assert frame.footer == ((
         "class:tui-muted",
-        "  ? 快捷键 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式",
+        "  ? 快捷键 · F4 权限 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式",
     ),)
 
 
@@ -225,7 +225,7 @@ def test_footer_explains_native_copy_escape_hatch_without_hiding_history() -> No
 
     assert frame.footer == ((
         "class:tui-muted",
-        "  ? 快捷键 · PgUp/Ctrl+Home 历史 · F6 恢复滚轮",
+        "  ? 快捷键 · F4 权限 · PgUp/Ctrl+Home 历史 · F6 恢复滚轮",
     ),)
 
 
@@ -383,7 +383,7 @@ def test_thinking_tool_and_permission_use_typed_phase() -> None:
         "❯ 1. Yes",
         "  2. No",
     ]
-    assert overlay[-1] == " Esc 取消 · Tab 补充说明"
+    assert overlay[-1] == " Esc 取消 · F4 权限模式 · Tab 补充说明"
     assert frame.footer == ()
 
 

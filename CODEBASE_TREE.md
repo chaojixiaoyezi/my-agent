@@ -21,6 +21,7 @@ agent_py_agent/
 |   |   |-- tui_block_renderer.py       # typed snapshot 到欢迎/消息/思考/工具/权限/队列/footer formatted lines
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
 |   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
+|   |   |-- tui_permissions_menu.py     # /permissions 与 F4 三档权限菜单、保存/取消及管理员确认
 |   |   |-- tui_provider_menu.py        # 服务商、多模型编辑、启停、目录发现和明确短连接测试
 |   |   |-- tui_input_delivery.py       # 活动回合输入的持久 outbox、同 ID 对账与排队接管
 |   |   |-- tui_control_delivery.py     # slash 控制命令的持久 outbox、稳定操作 ID 与只读状态对账
@@ -92,6 +93,7 @@ agent_py_agent/
 |   |   |-- execution/                 # 测试执行和记录
 |   |   `-- static_site/               # 静态站点检查
 |   |-- user_space/                    # owner home、task workspace、policy、可选 quota、doctor、自动 retention
+|   |   |-- approval_mode.py           # owner 显式审批模式与权限快照映射，子代理同源读取
 |   |   |-- owner_quota.py             # 显式非零磁盘上限的跨进程配额锁；0 时退出热路径
 |   |   |-- home_retention.py          # 结构化终态/时间清理、二次校验、trash tombstone 与 legal hold
 |   |   `-- owner_maintenance.py       # owner 维护间隔、状态记录与自动执行控制
@@ -119,6 +121,7 @@ agent_py_agent/
 |   |-- local_storage/                 # SQLite/FTS/文件事实源；ledger_redaction.py 精确擦除已删事实但保留幂等身份
 |   |-- runtime_db/                     # SQLite 运行事实源：Task 身份、TaskRun/AgentRun/Attempt 生命周期、wake 与投递账本
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
+|   |   |-- approval_mode_service.py   # /client/permissions 认证与冷 owner 控制入口
 |   |   |-- main_activity.py            # 前台 typed chunk 到共用 main 数字/阶段的只读投影，不复制正文
 |   |   |-- foreground_transcript.py    # 前台公开过程复用会话 mapper，候选与 canonical final 精确交接
 |   |   |-- approval_session.py        # owner/thread/cwd/权限精确作用域的有界进程内工具审批缓存
@@ -294,6 +297,7 @@ docs/
 |-- audits/TUI_FUNCTION_AUDIT_20260828.md # 真实 TUI 逐功能结果、问题根因、修复影响与复验证据账
 |-- audits/R222_MODEL_PROVIDER_REPORT.md # 通用模型管理、35模型短测结果、具体修复与剩余问题
 |-- audits/R223_87_ITEM_REMEDIATION.md # 87 项外部审计逐项复核、修复证据和未验边界
+|-- audits/R226_PERMISSIONS_MODEL_REPORT.md # 当前模型身份与主/子自主权限修复、真实 TUI 证据和部署边界
 |-- audits/r223-report/                 # R223 中文只读 HTML 报告的独立公开目录，不放配置或任务产物
 |   `-- index.html                     # 87 项大白话、技术说明、剩余问题与验证证据快照，无外部依赖
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
@@ -319,6 +323,7 @@ docs/
 ### 关键文件说明
 
 - `docs/audits/r223-report/index.html`：R223 台账的人工阅读快照；只开放此目录提供 HTTP，不能把仓库或 owner home 当静态根目录。
+- `docs/audits/R226_PERMISSIONS_MODEL_REPORT.md`：权限菜单、当前模型与并行上下文修复的验收台账；区分 TUI 实测、定向回归和本机待切换版本。
 - `agent/common/text_file_window.py`：64 KiB 流式索引、有限检查点与页面 cookie；编码和字符坐标只保留一个实现。
 - `agent/common/file_version.py`：read_file 返回观察版本，write/edit/patch 明确携带前置条件；外部写入者不被强制纳管。
 - `agent/tooling/process_output_capture.py`：前台进程每流最多保留 4 MiB，仍持续排空并公开不完整事实，不假装完整大输出归档。
@@ -332,6 +337,8 @@ docs/
 - `agent/gateway_parts/foreground_transcript.py`：同会话公开过程、候选增量与 final 快照，不拥有运行或审批权限。
 - `agent_py_agent/tests/test_gateway_foreground_transcript.py`：前台 writer、消息顺序、缺帧恢复、候选接替与隔离验证。
 - `agent/gateway_parts/model_profile_service.py`：authenticated owner 的模型菜单接口，不经聊天队列或模型。
+- `agent/gateway_parts/approval_mode_service.py`：认证 owner 的权限菜单服务，不允许正文伪造管理员。
+- `agent/user_space/approval_mode.py`：既有 owner 工具策略里的唯一用户审批模式读写与运行快照映射。
 - `agent/settings/model_profiles.py` 与 `model_scope.py`：用户模型存储和运行快照；敏感配置位于宿主 config/model-profiles，非业务目录。
 - `cli/chat_parts/tui_model_menu.py`：真实 TUI 模型菜单，保存/返回与模型执行分离。
 - `cli/chat_parts/tui_provider_menu.py`：同一个 provider 管理多个模型；敏感字段仅表单暂存，短测试明确提示消耗。

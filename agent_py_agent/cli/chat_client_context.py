@@ -170,6 +170,14 @@ class GatewayChatClientAgent:
             return body
         return {"ok": False, "http_status": status, "message": "Gateway 未确认操作结果；请重新打开列表确认。"}
 
+    # LLM: 复用薄客户端唯一认证身份；只发送显式模式枚举，不携带权限根、owner 路径或聊天指令。
+    # 函数用途: 读取或保存审批模式，网络结果不确定时提示重新读取，绝不假报已开启。
+    def request_permissions(self, *, session_id: str, operation: str, mode: str | None = None) -> dict:
+        status, body = self.post_gateway_json("/client/permissions", {
+            "operation": operation, "mode": mode, "conversation_id": session_id,
+        }, timeout=10.0)
+        return body or {"ok": False, "http_status": status, "message": "Gateway 未确认权限设置；请重新打开 /permissions 核对。"}
+
     # LLM: Session lifecycle is submitted to the already running Gateway's typed HTTP contract,
     # preserving owner resolution without constructing another local MemoryCuratorService.
     # 函数用途: 退出或重置会话时通知 Gateway 登记记忆策展事件，失败按 best-effort 返回 False。

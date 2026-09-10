@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
@@ -48,14 +48,15 @@ def write_gateway_permission_decision(
     return target
 
 
-# LLM: 等待只接受 schema 校验、request_id、permission_id 和完整 binding 均匹配的原子文件；取消永远优先于批准。
-# 函数用途: 阻塞等待 Gateway 审批答复，或在运行被取消时返回 cancelled。
+# LLM: 等待只认精确决定或宿主绑定的用户模式提供者；取消和已写入的用户决定优先，模式不改变原调用参数。
+# 函数用途: 等待审批或自主模式切换；取消立即返回，不需要重启当前任务。
 def wait_for_gateway_permission_decision(
     chunk_path: Path,
     request_value: ToolApprovalRequest | Mapping[str, object],
     *,
     cancellation_token: object | None = None,
     poll_seconds: float = _APPROVAL_POLL_SECONDS,
+    mode_decision_provider: Callable[[ToolApprovalRequest], ToolApprovalDecision | None] | None = None,
 ) -> ToolApprovalDecision:
     request = _approval_request(request_value)
     target = gateway_permission_decision_path(chunk_path, request)
@@ -70,6 +71,10 @@ def wait_for_gateway_permission_decision(
             decision = _verified_gateway_decision(request, report.payload)
             _remove_consumed_decision(target)
             return decision
+        if mode_decision_provider is not None:
+            decision = mode_decision_provider(request)
+            if decision is not None:
+                return decision
         time.sleep(interval)
 
 

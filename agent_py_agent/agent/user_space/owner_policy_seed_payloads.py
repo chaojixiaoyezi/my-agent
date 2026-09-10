@@ -78,8 +78,8 @@ def default_skill_policy_payload() -> dict[str, object]:
     }
 
 
-# LLM: 工具禁用列表是结构化机器事实；空列表表示继承其他安全边界而非全权限。
-# 函数用途: 返回新 owner 的默认工具策略。
+# LLM: 禁用表和可选 permission_mode 同属唯一 owner 工具策略；无选择时保持部署行为，模式只能由用户控制入口设置。
+# 函数用途: 返回新用户的默认工具策略，不赋予全权限或自动取消本人确认。
 def default_tool_policy_payload() -> dict[str, object]:
     return {
         "schema_version": "tool-policy.v1",

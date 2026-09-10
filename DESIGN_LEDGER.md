@@ -1,5 +1,36 @@
 # DESIGN LEDGER
 
+## 2026-09-09 R226 当前模型事实与主/子代理统一自主权限【状态：实现、320 定向与 .10 真 TUI 通过，本机待切换】
+
+解决两个用户痛点：切到 DeepSeek 后状态工具误报部署默认模型；主/子代理普通工具审批频繁打断用户。
+gateway_runtime_snapshot.v2 将 deployment_defaults 与 caller_model 分离，后者读取本工作片真实 config/backend；
+并行工具线程携带独立 Context 副本，不能回退到启动模型/权限。该字段证明调用配置，不鉴定供应商内部模型。
+新增 /permissions 和 F4，默认确认/自主工作/管理员 Full Access 均带解释；保存沿用 owner tool_policy.json，
+不新建平行策略文件。只有可信 local/main 身份可选 Full Access，TUI 默认管理员不等于默认全盘开放。
+auto 只免可选工具确认；禁用工具、权限墙、灾难命令、SOUL 本人确认继续生效，子代理不继承管理员全盘权限。
+工具边界读取本用户最新审批选择；等待中的主/子精确调用可因显式模式变更原地续跑，不依赖主代理先处理消息。
+路径权限在新工作片冻结，已有片不热改；注册表只生成基础工具权限视图，MCP、存储和执行身份仍是原权威。
+参考 会话运行时 permission_popups.rs 的显式受限选项和 tools/parallel.rs 的 StepContext 跨执行传递；
+终端交互 PermissionMode.ts 的模式解释。未增加 LLM 自动审批员、语言授权解析或替用户批准任意越界操作。
+真 TUI 已验证管理员/普通菜单、MiniMax/DeepSeek 当前身份、主审批等待时 F4 切自主、三子代理完整任务，
+以及主代理同期工作时子代理 7 次真正 PTY 调用。工具分配错误样本单列，不因补测通过抹去失败证据。
+详见 [R226 台账](docs/audits/R226_PERMISSIONS_MODEL_REPORT.md)；本机新版 staged，旧用户审批等待未打断。
+
+## 2026-09-09 R225 本机正式安装、目录命名与剩余 TUI 验收【状态：进行中】
+
+本机命令仍指向另一旧检出的 editable 环境，需替换为正式 my-agent 的独立 wheel runtime；
+只替换命令入口，不删除旧源码、用户配置、记忆或任务。每机一个 Gateway，主日常 owner 与测试 owner 分开。
+业务任务目录名由模型概括目标，不能把用户原话的开头截断当标题；续作找原目录，用户明确名称优先。
+沿现有 home_context_enabled 和 workspace_task_path_template 加强同一稳定指南，不增加取名模型调用、
+业务状态分类、目录锁、自然语言权限裁决或全家扫描，不批量重命名旧成果。旧版入口与提示不足分别记录。
+已参考 会话运行时 context/user_instructions.rs、通道运行时 workspace.ts / system-prompt.ts / agent-workspace 文档，
+以及本机 通道运行时 的 AGENTS、MEMORY 与 tasks/task-execution、context-resume 规则；只采用整理与按需恢复，
+不复制其私人人格、强制建档、质量闸门或 skill 火花池。通道运行时 合同索引仅导航，结论来自具体源码。
+用户追加的横向实时统计先设计：借鉴 任务运行时 StatsLine 与 session-stats 投影；
+位置优先为 Working/Context 与 Todo 之间的一行状态，计数与速度来自结构化真实记录，不从正文/历史视窗猜。
+模型步骤、工具调用、重试、Compact 和当前/累计 token 必须区分；缺真实 decode 计时不可显示伪精确 tok/s。
+本片验收台账记录普通 TUI 原始需求、会话/请求/子代理编号、工具结果、产物和未覆盖边界。
+
 ## 2026-09-09 R224 正式产品名称统一【状态：实现与提交前验收完成】
 
 产品及仓库说明统一使用 my-agent，旧测试标记不再作为产品标签；本轮不改变功能或运行协议。

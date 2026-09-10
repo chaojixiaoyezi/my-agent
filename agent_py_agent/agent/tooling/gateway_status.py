@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Expose the current local Gateway's canonical runtime facts to the main agent."""
 
-# LLM: This model-facing surface is admin-local and read-only. It must reuse Gateway state,
+# LLM: 当前模型只读调用者冻结的 config/backend，不能读 Gateway 启动默认值或后来切换的 owner 选择。This surface reuses Gateway state,
 # heartbeat, validated PID records and lifecycle-bounded diagnostics; never fall back to ps/ss,
 # guessed ports, raw logs, request bodies, or credentials.
 # 模块用途: 让本机管理员主代理直接读取唯一 Gateway 的权威健康事实，避免靠 shell 猜进程和端口。
@@ -34,9 +34,11 @@ class GatewayStatusTool(BaseTool):
         name="gateway_status",
         description=(
             "读取当前 my-agent 唯一 Gateway 的权威运行状态。检查 Gateway 健康、真实监听端口、"
-            "当前模型、配置来源、队列或日志噪声时必须优先使用本工具；不要用 ps/ss 猜端口，"
+            "本次调用模型、配置来源、队列或日志噪声时必须优先使用本工具；不要用 ps/ss 猜端口，"
             "也不要把 /health 当作状态端点，HTTP 状态端点由结果中的 status_path 给出。"
-            "向用户汇报 identity 中的模型名、PID 和配置路径时必须逐字复制，不要改写版本号。"
+            "本次模型只看 caller_model.model_name；deployment_defaults 只是网关启动默认值，"
+            "不能拿它或旧历史中的 identity.model_name 回答‘你是什么模型’。"
+            "模型名是请求配置，不是供应商内部模型身份的独立鉴定；不要改写版本号。"
         ),
         input_schema={
             "type": "object",
@@ -96,9 +98,8 @@ class GatewayStatusTool(BaseTool):
     def __init__(self, agent: object) -> None:
         self.agent = agent
 
-    # LLM: Boolean input only controls bounded aggregate diagnostics. The snapshot helper performs
-    # all process validation and redaction so this layer never acquires a second health algorithm.
-    # 函数用途: 读取并返回结构化 Gateway 状态；默认包含本生命周期日志异常计数。
+    # LLM: caller_model 与真实模型请求共用执行上下文绑定；仅读白名单，不泄漏 key/headers，也不热切正在工作的模型。
+    # 函数用途: 返回网关健康信息和本次真正配置的模型，防止多个会话共享网关时答成启动默认模型。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         include_diagnostics = params.get("include_log_diagnostics", True)
         snapshot = gateway_runtime_snapshot(
@@ -106,6 +107,15 @@ class GatewayStatusTool(BaseTool):
             gateway_paths(self.agent),
             include_log_diagnostics=bool(include_diagnostics),
         )
+        config = getattr(self.agent, "config", None)
+        backend = getattr(self.agent, "backend", None)
+        source = (getattr(config, "config_sources", {}) or {}).get("model_name", {})
+        snapshot["caller_model"] = {
+            "model_name": str(getattr(backend, "model_name", "") or getattr(config, "model_name", "") or ""),
+            "backend": str(getattr(backend, "name", "") or getattr(config, "model_backend", "") or ""),
+            "source": "calling_agent_execution_config",
+            "profile_id": str(source.get("profile_id") or ""),
+        }
         return ToolHandlerOutcome(
             self.model_spec.name,
             True,

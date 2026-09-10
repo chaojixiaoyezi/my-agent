@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from ..common.json_io import (
@@ -51,9 +52,8 @@ class SubagentToolApprovalSinkMixin:
     thread_id: str
     task_id: str
 
-    # LLM: The returned mapping is the shared ToolApprovalDecision contract;
-    # exceptions fail closed as unavailable and never become an implicit grant.
-    # 函数用途: 把子代理当前具体工具调用送到所属用户界面审批并等待结果。
+    # LLM: 子代理沿用同 owner 的显式自主策略；当前挂起请求可原地续跑，异常返回 unavailable，不能放宽权限根。
+    # 函数用途: 默认确认时上送精确审批；用户切自主后不用逐个点子代理审批。
     def request_permission(
         self,
         request_value: Mapping[str, object],
@@ -61,6 +61,8 @@ class SubagentToolApprovalSinkMixin:
         cancellation_token: object | None = None,
     ) -> dict[str, object]:
         try:
+            from ..user_space.approval_mode import autonomous_tool_decision
+
             request = ToolApprovalRequest.from_mapping(request_value)
             session_key = _approval_session_key(request)
             approved_keys = getattr(self, "_subagent_approved_session_keys", set())
@@ -78,6 +80,7 @@ class SubagentToolApprovalSinkMixin:
             decision = wait_for_subagent_tool_approval(
                 handle,
                 cancellation_token=cancellation_token,
+                mode_decision_provider=partial(autonomous_tool_decision, self.agent),
             )
             if decision.decision == "approved_session" and session_key:
                 approved_keys = set(approved_keys)
@@ -126,10 +129,10 @@ def publish_subagent_tool_approval(
     return SubagentToolApprovalHandle(root_task_id, selected, path, request, created_at)
 
 
-# LLM: Waiting accepts only the exact record and typed decision. A structured
+# LLM: Waiting accepts the exact record or an owner-bound mode provider. A structured
 # cancellation wins, while an absent interactive consumer fails closed instead
 # of leaving an IM/background child permanently blocked.
-# 函数用途: 等待用户界面的批准或拒绝；界面不存在/离线时安全返回 unavailable。
+# 函数用途: 等待精确决定或用户切换自主模式；后者不依赖界面持续在线，取消优先。
 def wait_for_subagent_tool_approval(
     handle: SubagentToolApprovalHandle,
     *,
@@ -137,6 +140,7 @@ def wait_for_subagent_tool_approval(
     poll_seconds: float = SUBAGENT_TOOL_APPROVAL_POLL_SECONDS,
     discovery_seconds: float = SUBAGENT_TOOL_APPROVAL_DISCOVERY_SECONDS,
     consumer_lease_seconds: float = SUBAGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS,
+    mode_decision_provider: Callable[[ToolApprovalRequest], ToolApprovalDecision | None] | None = None,
 ) -> ToolApprovalDecision:
     interval = max(0.01, float(poll_seconds or SUBAGENT_TOOL_APPROVAL_POLL_SECONDS))
     while True:
@@ -150,6 +154,11 @@ def wait_for_subagent_tool_approval(
         if decision is not None:
             _remove_exact_record(handle)
             return decision
+        if mode_decision_provider is not None:
+            decision = mode_decision_provider(handle.request)
+            if decision is not None:
+                _remove_exact_record(handle)
+                return decision
         now = time.time()
         lease_seen_at = _consumer_seen_at(handle.path.parent, handle.root_task_id)
         lease_fresh = now - lease_seen_at <= max(1.0, float(consumer_lease_seconds))

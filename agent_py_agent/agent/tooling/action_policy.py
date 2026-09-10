@@ -1,3 +1,5 @@
+# LLM: 所有副作用前走唯一 ActionPolicy；用户自主选择只免可选确认，不替代身份、参数、路径和命令硬门。
+# 模块用途: 将宿主运行快照和本次调用合成可审计的允许、询问或拒绝决定，本模块不执行工具。
 from __future__ import annotations
 
 """The single pre-effect authorization decision for canonical tool calls."""
@@ -89,6 +91,8 @@ class ActionDecision:
         }
 
 
+# LLM: approval_mode 只能由 owner 控制面读入；此快照不能混入模型自报权限，修改时同步 ToolExecutorRequest。
+# 类用途: 保存本次工具裁决所需的调用、工作目录、安全边界和用户审批选择。
 @dataclass(frozen=True)
 class ActionPolicyRequest:
     call: ToolCall
@@ -100,15 +104,22 @@ class ActionPolicyRequest:
     owner_scope_root: str = ""
     write_boundary: dict[str, object] | None = None
     runtime_guard_policy: object | None = None
+    approval_mode: str = "ask"
     required_action: object | None = None
     now: float = 0.0
 
 
+# LLM: 先执行客观安全门，再考虑可选确认；返回结构化事实供唯一执行器消费，不在这里运行 handler。
+# 类用途: 给一次工具调用做统一授权判断，不靠模型正文决定权限。
 class ActionPolicy:
     """Evaluate every host-owned gate once, before a handler can run."""
 
+    # LLM: 权限模式由宿主注入，未知值 fail-closed；auto 不替代参数、身份、路径、命令和禁用工具硬门。
+    # 函数用途: 对一次调用做统一安全裁决，只有可选交互确认受用户自主模式影响。
     def decide(self, request: ActionPolicyRequest) -> ActionDecision:
         call = request.call
+        if request.approval_mode not in {"ask", "auto"}:
+            return _deny("APPROVAL_MODE_UNAVAILABLE")
         snapshot = request.runtime_snapshot
         runtime, early = _runtime_for_call(call, snapshot)
         if early is not None:
@@ -177,6 +188,7 @@ class ActionPolicy:
                 "schema_hash": call.schema_hash,
                 "snapshot_hash": snapshot.snapshot_hash,
                 "args_hash": call.args_hash,
+                "approval_mode": request.approval_mode,
             },
             sandbox_plan=_sandbox_plan(request, runtime, effect),
             resolved_effect=effect,
@@ -394,8 +406,8 @@ def _task_boundary_decision(
     return None
 
 
-# LLM: sandbox 只能免掉它真正包住的危险效果；越过当前隔离边界的结构化变体必须走精确审批绑定。
-# 函数用途: 按工具审批模式、sandbox 包含性和已批准记录决定放行、询问或拒绝。
+# LLM: auto 只免去当前权限内的可选交互确认；此前路径/命令/身份硬门及随后护栏继续执行，always 本人确认不可绕过。
+# 函数用途: 结合用户审批选择、工具策略和精确批准记录决定是否需要弹窗，不把自主模式变成 Full Access。
 def _approval_decision(
     request: ActionPolicyRequest,
     runtime: ToolRuntime,
@@ -420,6 +432,8 @@ def _approval_decision(
         or (mode == "dangerous" and effect == "dangerous")
     )
     if not required:
+        return None
+    if request.approval_mode == "auto" and mode != "always":
         return None
     boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
     approved = boundary.get("approved_actions")

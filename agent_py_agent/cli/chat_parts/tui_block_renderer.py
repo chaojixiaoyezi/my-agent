@@ -2235,7 +2235,8 @@ def _render_system(block: TuiBlock, context: TuiRenderContext) -> tuple[Formatte
 
 
 # LLM: permission renderer 只显示 reducer overlay options/selection，decision 仍由 input controller typed intent 执行。
-# 函数用途: 渲染固定底部审批面板。
+# LLM: 审批只投影精确调用与选项；F4 入口允许用户主动切模式，不把可见文案变成自动授权。
+# 函数用途: 渲染底部审批面板，并提示如何调整后续主/子代理的审批方式。
 def _render_permission(
     permission: TuiPermissionOverlay,
     context: TuiRenderContext,
@@ -2281,7 +2282,7 @@ def _render_permission(
         )
     selected_option = permission.options[permission.selected_index]
     feedback_enabled = bool(selected_option.get("feedback_type"))
-    hint = " Esc 取消"
+    hint = " Esc 取消 · F4 权限模式"
     if feedback_enabled and not permission.feedback_mode:
         hint += " · Tab 补充说明"
     lines.extend(
@@ -2850,7 +2851,7 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
     ):
         text = f"  /stop 停止后台任务 · {history_hint}"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
-    text = f"  ? 快捷键 · {history_hint}"
+    text = f"  ? 快捷键 · F4 权限 · {history_hint}"
     return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
 
 

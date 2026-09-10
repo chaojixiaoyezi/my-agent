@@ -1,5 +1,5 @@
-# LLM: 本模块只在工作片入口冻结用户选择的模型；共享 Agent 的其它线程和正在运行的子代理不得被热改。
-# 模块用途: 把模型配置、后端和提示构造器一起绑定到当前执行上下文，离开时原样恢复。
+# LLM: 工作片入口冻结模型及用户显式路径权限；共享 Agent 其他线程不被热改，子代理不能继承管理员全盘权限。
+# 模块用途: 绑定模型、提示和工具权限视图；存储、会话、MCP 连接仍使用原权威，离开时恢复。
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ _BINDINGS: ContextVar[dict | None] = ContextVar("model_profile_bindings", defaul
 _CACHE_LOCK = threading.Lock()
 
 
-# LLM: 未进入作用域时保持原 instance 属性语义；作用域仅覆盖三个模型依赖，不替换存储、工具和执行身份。
-# 类用途: 让同一用户不同会话在切模型前后安全并行，不互相覆盖 config/backend/prompts。
+# LLM: 未进入作用域时保持原 instance 属性语义；作用域只覆盖工作片依赖，不替换存储和执行身份。
+# 类用途: 让同一用户不同会话切模型、权限后安全并行，不互相覆盖配置、后端、提示或工具视图。
 class ModelScopedAttribute:
     # LLM: 属性名由宿主类声明，不接收用户内容。
     # 函数用途: 绑定一个可被执行作用域临时覆盖的依赖。
@@ -30,7 +30,7 @@ class ModelScopedAttribute:
         if instance is None:
             return self
         row = (_BINDINGS.get() or {}).get(id(instance))
-        if row is not None and row[0] is instance:
+        if row is not None and row[0] is instance and self.name in row[1]:
             return row[1][self.name]
         try:
             return instance.__dict__[self.name]
@@ -67,22 +67,36 @@ def _profile_backend(agent: object, config: object):
         return cache[key]
 
 
-# LLM: 只绑定真正支持 descriptor 的 Agent；嵌套调用复用同一快照，异常/取消也必须清理，不读取模型文字。
-# 函数用途: 在新主工作片开始时采用用户配置；已有执行和子代理继承的配置不被中途替换。
+# LLM: 只绑定 descriptor Agent；嵌套调用复用快照，退出恢复；权限配置同 config 一起冻结，不复制整个 Agent 或生成新 MCP。
+# 函数用途: 工作片开始时采用用户选择，模型与工具看到相同权限；子代理继承模型但保持家目录边界。
 @contextmanager
 def selected_model_scope(agent: object, *, inherited: bool = False):
-    if inherited or not isinstance(getattr(type(agent), "config", None), ModelScopedAttribute) or id(agent) in (_BINDINGS.get() or {}):
+    if not isinstance(getattr(type(agent), "config", None), ModelScopedAttribute) or id(agent) in (_BINDINGS.get() or {}):
         yield
         return
-    config = selected_model_config(agent)
+    from ..user_space.approval_mode import permission_config
+
+    model_config = agent.config if inherited else selected_model_config(agent)
+    config = permission_config(model_config, agent.home_paths, inherited=inherited)
     if config is agent.config:
         yield
         return
     prompts = copy(agent.prompts)
     prompts.config = config
-    token = _BINDINGS.set({**(_BINDINGS.get() or {}), id(agent): (agent, {
-        "config": config, "backend": _profile_backend(agent, config), "prompts": prompts,
-    })})
+    values = {
+        "config": config,
+        "backend": agent.backend if model_config is agent.config else _profile_backend(agent, config),
+        "prompts": prompts,
+    }
+    if isinstance(getattr(type(agent), "tools", None), ModelScopedAttribute):
+        from ..core import _resolve_owner_scope_and_access
+
+        owner_root, access = _resolve_owner_scope_and_access(agent, config)
+        values["tools"] = agent.tools.with_access_policy(
+            access_mode=access, path_access_mode="full" if not owner_root else config.path_access_mode,
+            owner_scope_root=owner_root,
+        )
+    token = _BINDINGS.set({**(_BINDINGS.get() or {}), id(agent): (agent, values)})
     try:
         yield
     finally:

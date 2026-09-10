@@ -1,5 +1,19 @@
 # TESTS
 
+## R226 模型身份与审批模式
+
+新增 test_owner_approval_mode、test_gateway_approval_mode、test_tui_permissions_menu；覆盖明确模式、
+坏 JSON/枚举、owner 隔离、伪造管理员、Full Access、子代理上限、待审批原地恢复和真实按键表单。
+并行工具快照先红：读取 deployment-model/workspace-write，修复 Context 传递后读取本轮选定模型/full-access。
+定向与真 TUI 分开；测试 owner 使用 MiniMax-M2.7，模型身份问题额外用已配置 DeepSeek 短问答验证。
+14 个相关文件联合 **320 passed，10.61 秒**；未跑全仓。Ruff、doc-sync、strict code-size、diff、clean-package、
+import-boundary 通过；不凭进程存在或模型口头报告判定通过。
+`.10` 单 Gateway 的 ma-r226-permissions 与 ma-r226-children 已实操：两类身份菜单、Full 二次确认、
+MiniMax/DeepSeek 切换后 caller_model 正确、主审批等待时 F4 选 auto 原地完成 7 次 PTY、三 child 完整任务，
+并追加一个 child 真正 7 次 PTY 全成功。普通命令冒充交互终端、分配错工具两个失败样本不计作 PTY 通过。
+请求/run ID 与本机 staged、`.10` 已部署、`.7` 未连通的边界见
+[R226 台账](docs/audits/R226_PERMISSIONS_MODEL_REPORT.md)。
+
 ## R224 正式提交前联合验收
 
 范围包括 R222 保留的 DeepSeek 兼容修复、R223 整改、报告和 R224 名称统一。43 个相关文件重新联合运行：
