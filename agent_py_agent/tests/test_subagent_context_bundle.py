@@ -374,7 +374,7 @@ def test_context_bundle_exposes_controlled_exec_grant_refs(tmp_path) -> None:
                 "commands": ["rm", "rmdir", "unlink"],
                 "requires_apply": True,
                 "command_allowlist_required": False,
-                "completion_requires": ["moved=true", "trash_manifest_ref"],
+                "completion_requires": ["trash.moved=true", "trash.manifest_ref"],
             },
         }
     ]

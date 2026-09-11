@@ -38,6 +38,14 @@ public create 原有“基础工具 + 显式补充”语义不变；read_only、
 任何 child 物化前返回可修错误，整批不部分创建；不同显式模型参与原去重键，不改变无 model 的旧键。
 本地配置、创建、递归和幂等共 117 focused 通过；本次用户要求 Qwen 不派 child，真实跨模型 TUI 尚未执行，不冒充通过。
 
+## R232 回收结果字段名与真实 payload 对齐（本地，待真 TUI）
+
+`controlled_exec_grant_refs` 的 `delete_policy.completion_requires` 改为 `trash.moved=true` /
+`trash.manifest_ref`，因为真实回收结果在 `payload.trash`（`asdict(TaskTrashMoveResult)`）里；
+原来的顶层 `moved=true` / `trash_manifest_ref` 会让子代理去核对不存在的字段。
+同一批把 runner 合同提示与通用 error hint 统一到同一组字段名，只改文案与断言，
+不放宽 grant、权限、回收实现。29 项相关 focused 通过；真实 TUI 回收验收仍由主线负责。
+
 ## R205 子代理的长度限制提示（本地，待 TUI）
 
 child 的 canonical final 与实时展示共用主代理 turn-end 归一化；正文为空或半截时均可说明长度限制。

@@ -79,7 +79,9 @@ def _controlled_exec_grant_ref(grant: CapabilityGrant) -> dict[str, object]:
             "commands": sorted(_DELETE_COMMANDS),
             "requires_apply": True,
             "command_allowlist_required": False,
-            "completion_requires": ["moved=true", "trash_manifest_ref"],
+            # 字段名必须与真实 payload 对齐：回收结果在 payload.trash(asdict(TaskTrashMoveResult)) 里，
+            # 写成顶层 moved/trash_manifest_ref 会让子代理去核对不存在的字段。
+            "completion_requires": ["trash.moved=true", "trash.manifest_ref"],
         },
     }
 

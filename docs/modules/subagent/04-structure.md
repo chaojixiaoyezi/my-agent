@@ -1,5 +1,11 @@
 # Subagent Structure
 
+## R232 回收结果字段名
+
+`delete_policy.completion_requires` 是模型侧自查清单，字段名必须与 `controlled_exec` 的
+`payload.trash` 结构一致（`trash.moved` / `trash.manifest_ref`）；它仍是软提示，
+不参与授权、执行或完成判定，机器判定只看结构化 payload 与 grant/路径门。
+
 ## R228 角色与授权分离
 
 `role_template_catalog/builtin/bug_finder.json` 只负责职责软提示；`model_guidance` 对主/子共同说明检查范围、

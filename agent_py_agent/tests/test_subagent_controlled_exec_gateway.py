@@ -75,7 +75,7 @@ def test_controlled_exec_refs_include_controlled_exec_tool_grants(tmp_path: Path
                 "commands": ["rm", "rmdir", "unlink"],
                 "requires_apply": True,
                 "command_allowlist_required": False,
-                "completion_requires": ["moved=true", "trash_manifest_ref"],
+                "completion_requires": ["trash.moved=true", "trash.manifest_ref"],
             },
         }
     ]
