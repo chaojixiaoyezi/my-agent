@@ -1,5 +1,23 @@
 # DESIGN LEDGER
 
+## 2026-09-11 R231 部署与真 TUI 验收【状态：部署完成，单任务验收通过；两个新问题待处理】
+
+已推送 `ab53853b` 到 my-agent/main 并部署本机 `runtime-r231`（旧 `runtime-r229d` 目录保留可回退），
+单 Gateway pid 79812，TUI 显示 deepseek-v4-flash。真 TUI 单任务：
+`gwreq-1789125576-69b931ee8c7247fb907fe3d0ee5168a5`，status=done / ok=true / attempts=1 /
+processing_failure_count=0 / turn_phase=closed，耗时约 218 秒，22 次工具调用，0 错误、0 次 HTTP 400。
+机器事实：三个 write_file（5125/4583/4780 字节、41/53/55 行）全部 succeeded 无截断；
+`rm -rf` 被 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED` 挡在 authorization 阶段（handler 未执行），
+随后按提示改走 apply_patch 删除三个文件成功；read_file 回读展示真实 53 行正文；74 条
+`tool_input_progress` 证明长参数生成期有实时进度（修掉"看着像卡死"）。
+**本轮未覆盖**：这两个文件只有 4~5KB，没有触发供应商长度上限，因此截断分块恢复的真机路径
+**没有被这次验收走到**，只有单测与适配器端到端用例证明它可达，不能写成真机已验。
+新发现问题一：成品汇报里工具名被替换成"相关操作"，来自
+`tooling/operation_verification.py::hide_internal_tool_labels`（有意隐藏内部协议标签），
+读起来像"用 相关操作 成功写入"，而实时 transcript 显示真实工具名，归档与实时不一致。
+新发现问题二：当前没有可用的目录删除/回收工具——`apply_patch` 只能删文件，`tool_search` 两次
+无匹配，`rmdir` 被挡，任务目录最后留空目录；模型如实说明了未完成，没有假称成功。
+
 ## R232 截断长内容写的有界恢复接回未完成路径【状态：实现与定向测试通过】
 
 R231 让不完整响应整轮零执行，方向正确，但适配器对 `truncated` 响应返回空 `calls`，使 P0-2
