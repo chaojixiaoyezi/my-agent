@@ -21,6 +21,9 @@
 
 ## 当前运行边界（R228 发布候选，验收状态看 STATUS）
 
+R230 整合状态见 `docs/audits/R230_CONSOLIDATED_FIXES.md`。SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
+派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。
+
 追加修复见 `docs/audits/R229_LIVE_FAILURES.md`：普通 assistant 的原生思考也须跨轮回放，
 请求拒绝不等同密钥错误；前台/背景展示交接只按宿主 request ID，不按相同文本删除消息。
 长选区的 OSC 52 长度预算不影响 native/tmux stdin；未知上游 400 不以轮换 session header 自动重试。

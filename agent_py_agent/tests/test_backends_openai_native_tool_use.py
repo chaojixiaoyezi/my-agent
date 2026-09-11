@@ -34,6 +34,66 @@ _TOOLS = [
 ]
 
 
+def test_openai_tool_arguments_report_live_progress_before_completion():
+    backend = OpenAICompatibleBackend(replace(_OPTIONS, stream_enabled=True))
+    progress = []
+    sequence = []
+    secret = "private-file-content" * 600
+
+    def events(path, payload, headers):
+        yield json.dumps({"choices": [{"delta": {"reasoning_content": "准备写文件"}}]})
+        yield json.dumps({"choices": [{"delta": {"reasoning_content": "，已准备好", "tool_calls": [
+            {"index": 0, "id": "c0", "function": {"name": "write_file", "arguments": '{"content":"'}}
+        ]}}]})
+        assert progress and progress[0]["phase"] == "started"
+        assert sequence == ["thinking-end", "progress-started"]
+        yield json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": secret}}
+        ]}}]})
+        assert progress[-1]["received_chars"] > 8192
+        yield json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 1, "id": "c1", "function": {"name": "read_file", "arguments": '{"path":"a"}'}},
+            {"index": 0, "function": {"arguments": '"}'}}
+        ]}, "finish_reason": "tool_calls"}]})
+        yield "[DONE]"
+
+    class Thinking:
+        def __call__(self, chunk):
+            pass
+
+        def complete(self, text):
+            assert text == "准备写文件，已准备好"
+            sequence.append("thinking-end")
+
+    def on_progress(row):
+        progress.append(row)
+        sequence.append("progress-" + row["phase"])
+
+    backend.request_stream_iter = events
+    response = backend.generate("写文件", tools=_TOOLS, on_chunk=lambda _: None,
+                                on_thinking_delta=Thinking(), on_tool_input_progress=on_progress)
+    assert response.tool_use_blocks[0]["input"]["content"] == secret
+    assert response.tool_use_blocks[1]["input"] == {"path": "a"}
+    assert {p["stream_index"] for p in progress if p["phase"] == "ready"} == {0, 1}
+    assert all(set(p) == {"schema", "phase", "stream_index", "tool", "received_chars"} for p in progress)
+    assert secret not in json.dumps(progress)
+
+
+def test_openai_tool_progress_callback_failure_does_not_drop_tool():
+    backend = OpenAICompatibleBackend(replace(_OPTIONS, stream_enabled=True))
+    backend.request_stream_iter = lambda *_: iter([
+        json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c", "function": {"name": "read_file", "arguments": '{"path":"a"}'}}
+        ]}, "finish_reason": "tool_calls"}]}), "[DONE]",
+    ])
+
+    def broken(_):
+        raise RuntimeError("UI failure")
+
+    response = backend.generate("read", tools=_TOOLS, on_chunk=lambda _: None, on_tool_input_progress=broken)
+    assert response.tool_use_blocks == [{"id": "c", "name": "read_file", "input": {"path": "a"}}]
+
+
 @pytest.mark.parametrize("endpoint,model,required", [
     ("https://api.deepseek.com/v1", "deepseek-v4-flash", True),
     ("https://opencode.ai/zen/go/v1", "deepseek-v4-flash", True),

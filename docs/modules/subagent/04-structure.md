@@ -241,7 +241,8 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 ## 2026-08-24 Coordinator policy 与后台展示事件边界
 
 - `agent_core/orchestration/coordinator_policy.py` 是主代理工具发现、任意层 coordinator runner 和创建回执
-  共用的派工后职责说明。`coordinator_execution_scope.v1` 只区分允许的协调/整合/测试/汇报与禁止重复实现；
+  共用的派工后职责说明。R230 `coordinator_execution_scope.v2` 保留用户授权内不冲突的本地工作；
+  派工不产生永久禁写，用户明确的主代理实现限制仍保留。后台唤醒共用同一份软指导；
   它是模型执行指导，不是 write boundary、工具授权、任务完成或质量验收事实。
 - `conversation/agent_activity.py` 继续只拥有固定 main/child/Todo scalar projection；
   `conversation/background_transcript.py` 独立保存每 thread 最多 1024 条易失公开事件。两者都不是会话

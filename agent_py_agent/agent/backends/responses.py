@@ -10,6 +10,8 @@ from .responses_wire import collect_response, input_items, response_fields
 # 类用途: 适配支持 OpenAI Responses 的供应商。
 class OpenAIResponsesBackend(OpenAICompatibleBackend):
     name = "openai_responses"
+    # 此适配器尚未投影 Responses 工具参数增量，不能继承 Chat 已实现能力的标志。
+    supports_tool_input_progress = False
 
     # LLM: capability 记录使用真实规范接口，不推断模型家族。
     # 函数用途: 返回能力探针使用的接口地址。

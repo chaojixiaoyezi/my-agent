@@ -60,9 +60,9 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert item_schema["properties"]["output_files"]["type"] == "array"
     assert "交付身份与协调线索" in spec.parameter_descriptions["output_files"]
     assert "同批多个 item 可以声明共同 task root" in spec.parameter_descriptions["output_files"]
-    assert "角色就变为协调者" in spec.description
-    assert "不要重做已经委派的任务" in spec.description
-    assert "replacement child" in spec.description
+    assert "派工不会永久改变你的职责" in spec.description
+    assert "不要重复下级正在执行的工作" in spec.description
+    assert "用户明确要求主代理不写功能代码" in spec.description
     assert "goal 里写‘先 A 后 B’不会形成执行顺序" in spec.description
     assert "等 A 的生命周期完成事件自动唤醒后" in spec.description
     assert "并行编码任务必须拆成互不重叠的文件或模块写入范围" in spec.description

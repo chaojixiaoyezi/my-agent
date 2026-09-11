@@ -349,7 +349,7 @@ class TestOpenAICompatibleBackend:
             {"type": "text", "text": "answer"},
         ]
 
-    def test_generate_stream_normalizes_cumulative_openai_chunks(self):
+    def test_generate_stream_preserves_prefix_overlapping_openai_deltas(self):
         backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
         chunks: list[str] = []
 
@@ -373,15 +373,16 @@ class TestOpenAICompatibleBackend:
         backend.request_stream_iter = request_stream_iter
         resp = backend.generate("test prompt", on_chunk=chunks.append)
 
-        assert resp.text == '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
-        assert chunks == [
+        expected = [
             "[TOOL_CALL]\n",
-            '{"tool"',
-            ':"read_file"',
-            ',"path":"README.md"}\n[/TOOL_CALL]',
+            '[TOOL_CALL]\n{"tool"',
+            '[TOOL_CALL]\n{"tool":"read_file"',
+            '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]',
         ]
+        assert resp.text == "".join(expected)
+        assert chunks == expected
 
-    def test_generate_stream_normalizes_delta_then_cumulative_openai_chunks(self):
+    def test_generate_stream_does_not_guess_openai_snapshot_from_text(self):
         backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
         chunks: list[str] = []
 
@@ -394,8 +395,8 @@ class TestOpenAICompatibleBackend:
         backend.request_stream_iter = request_stream_iter
         resp = backend.generate("test prompt", on_chunk=chunks.append)
 
-        assert resp.text == "alpha-beta-gamma"
-        assert chunks == ["alpha", "-beta", "-gamma"]
+        assert chunks == ["alpha", "-beta", "alpha-beta", "alpha-beta-gamma"]
+        assert resp.text == "".join(chunks)
 
     def test_generate_stream_preserves_identical_openai_delta_chunks(self):
         backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
@@ -551,7 +552,7 @@ class TestAnthropicCompatibleBackend:
             "after-second",
         ]
 
-    def test_generate_stream_normalizes_cumulative_anthropic_chunks(self):
+    def test_generate_stream_preserves_prefix_overlapping_anthropic_deltas(self):
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
         chunks: list[str] = []
 
@@ -564,10 +565,10 @@ class TestAnthropicCompatibleBackend:
         backend.request_stream_iter = request_stream_iter
         resp = backend.generate("test prompt", on_chunk=chunks.append)
 
-        assert resp.text == "abcdefgh"
-        assert chunks == ["abc", "def", "gh"]
+        assert resp.text == "abcabcdefabcdefgh"
+        assert chunks == ["abc", "abcdef", "abcdefgh"]
 
-    def test_generate_stream_normalizes_delta_then_cumulative_anthropic_chunks(self):
+    def test_generate_stream_does_not_guess_anthropic_snapshot_from_text(self):
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
         chunks: list[str] = []
 
@@ -580,8 +581,8 @@ class TestAnthropicCompatibleBackend:
         backend.request_stream_iter = request_stream_iter
         resp = backend.generate("test prompt", on_chunk=chunks.append)
 
-        assert resp.text == "alpha-beta-gamma"
-        assert chunks == ["alpha", "-beta", "-gamma"]
+        assert chunks == ["alpha", "-beta", "alpha-beta", "alpha-beta-gamma"]
+        assert resp.text == "".join(chunks)
 
     def test_generate_stream_retries_once_on_empty_text(self):
         backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))

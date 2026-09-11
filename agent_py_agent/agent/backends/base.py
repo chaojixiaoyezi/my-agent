@@ -149,6 +149,7 @@ class _OpenAIGenerateRequest:
     system_instruction: str = ""
     on_chunk: Callable[[str], None] | None = None
     on_thinking_delta: Callable[[str], None] | None = None
+    on_tool_input_progress: Callable[[dict[str, object]], None] | None = None
     tools: list[dict[str, Any]] | None = None
     tool_choice: ToolChoice | None = None
     messages: list[dict[str, Any]] | None = None
@@ -583,12 +584,13 @@ class OpenAICompatibleBackend(HttpBackend):
     # OpenAI-compatible chat 流没有统一 block-stop，但 reasoning_content 在首段正文或
     # 流结束时有确定边界；适配器会在该边界调用同一 typed complete observer。
     supports_thinking_completion = True
+    supports_tool_input_progress = True
 
     def _tool_endpoint(self) -> str:
         return self.api_base + "/chat/completions"
 
     # LLM: OpenAI-compatible 传输必须保持 system -> 规范会话/当前 user -> 原生工具历史的追加顺序；
-    # reasoning observer 是展示边界；typed thinking_disabled 必须转交组包器，不能在中间请求对象丢失。
+    # reasoning 和工具参数计数是展示边界；请求开关与观察器必须转交组包器，不能丢失或影响执行。
     # 函数用途: 调用 chat/completions，传递宿主规则、本次思考开关和流式展示，不改变后续请求。
     def generate(
         self,
@@ -598,6 +600,7 @@ class OpenAICompatibleBackend(HttpBackend):
         tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
+        on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
         request_options: ProviderRequestOptions | None = None,
     ) -> ModelResponse:
         """Call the OpenAI-compatible chat completion endpoint."""
@@ -608,6 +611,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 system_instruction=provider_options.system_instruction,
                 on_chunk=on_chunk,
                 on_thinking_delta=on_thinking_delta,
+                on_tool_input_progress=on_tool_input_progress,
                 tools=tools,
                 tool_choice=tool_choice,
                 messages=messages,
@@ -707,6 +711,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 headers,
                 on_chunk=request.on_chunk,
                 on_thinking_delta=request.on_thinking_delta,
+                on_tool_input_progress=request.on_tool_input_progress,
                 first_event_timeout_seconds=request.first_event_timeout_seconds,
             )
         obj = self.request_json("/chat/completions", payload, headers)
@@ -717,8 +722,8 @@ class OpenAICompatibleBackend(HttpBackend):
         )
 
     # LLM: reasoning_content 与正文必须走不同观察器，并在正文/工具或流结束前封口思考块；
-    # 回调失败不能改变模型响应和工具执行。
-    # 函数用途: 解析 OpenAI SSE，同时流式展示正文与兼容模型返回的思考过程。
+    # 工具参数开始立即封口思考并发布计数；回调失败不能改变模型响应和工具执行。
+    # 函数用途: 解析 OpenAI SSE，同时展示正文、思考与长工具参数的实时准备进度。
     def _generate_stream(
         self,
         payload: dict[str, Any],
@@ -726,6 +731,7 @@ class OpenAICompatibleBackend(HttpBackend):
         on_chunk: Callable[[str], None] | None = None,
         on_thinking_delta: Callable[[str], None] | None = None,
         first_event_timeout_seconds: float | None = None,
+        on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
     ) -> ModelResponse:
         """Parse OpenAI SSE and concatenate delta.content chunks."""
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
@@ -739,6 +745,7 @@ class OpenAICompatibleBackend(HttpBackend):
             ),
             on_chunk=on_chunk,
             on_thinking_delta=on_thinking_delta,
+            on_tool_input_progress=on_tool_input_progress,
         )
         assistant_blocks = _openai_assistant_content_blocks(
             reasoning=_openai_reasoning_from_completion(completion),

@@ -39,10 +39,10 @@ def test_integration_prompt_is_evidence_based_without_fixed_orchestration():
     assert "does not require" in prompt
     assert "goal_digest" not in prompt
     assert "findings_ledger" not in prompt
-    assert "main agent remains their coordinator" in prompt
-    assert "do not author the delegated implementation yourself" in prompt
+    assert "派工不会永久改变你的职责" in prompt
+    assert "用户明确要求主代理不写功能代码" in prompt
     assert "只要当前用户目标仍有你已知的未完成部分" in prompt
-    assert "continue coordinating instead of returning a partial final report" in prompt
+    assert "continue authorized work instead of returning a partial final report" in prompt
     assert "委派只是分工，不会缩小用户原始目标" in prompt
     assert "有效测试不得仅为变绿而删除、跳过、放宽断言" in prompt
 
@@ -53,9 +53,11 @@ def test_coordinator_policy_does_not_silently_take_over_delegated_work():
     )
 
     policy = "\n".join(coordinator_execution_policy_lines())
-    assert "角色就变为协调者" in policy
-    assert "不要重做已经委派的任务" in policy
-    assert "replacement child" in policy
+    assert "派工不会永久改变你的职责" in policy
+    assert "不要重复下级正在执行的工作" in policy
+    assert "用户明确要求主代理不写功能代码" in policy
+    assert "不冲突的工作" in policy
+    assert "角色就变为协调者" not in policy
     assert "诚实列出未完成项不能代替继续工作" in policy
     assert "下级卡住时，你可以直接完成" not in policy
 

@@ -1,4 +1,5 @@
-
+# LLM: 消费 typed SSE delta；禁止依据正文前缀去重或猜测 snapshot，展示与返回正文必须逐字一致。
+# 模块用途: 汇总模型的流式正文、思考、工具块和用量，保留原始顺序及停止边界。
 from __future__ import annotations
 
 import time
@@ -45,10 +46,13 @@ def collect_openai_stream(
     return text, usage
 
 
+# LLM: OpenAI delta.content 是增量；回调和最终正文使用同一份原文，不能据重复字符改变协议。
+# 函数用途: 收集一次 OpenAI 流并完成思考展示，返回正文、工具、用量和停止事实。
 def collect_openai_stream_with_completion(
     lines: Iterable[str],
     on_chunk: Callable[[str], None] | None = None,
     on_thinking_delta: Callable[[str], None] | None = None,
+    on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
     """收集 OpenAI-compatible SSE，并把 reasoning_content 与正文分流。
 
@@ -56,19 +60,24 @@ def collect_openai_stream_with_completion(
     思考终态；普通 callback 只接收增量。任何展示回调异常都不能中断模型响应。
     """
     parts: list[str] = []
-    accumulated = ""
-    previous_raw = ""
     usage: dict[str, Any] = {}
     blocks: list[dict[str, Any]] = []
     thinking_parts: list[str] = []
     thinking_closed = False
     thinking_complete = getattr(on_thinking_delta, "complete", None)
+    tool_input_emitter = _ToolInputProgressEmitter(on_tool_input_progress)
     events = openai_stream_events(lines)
     completion = StreamCompletion()
     while True:
         event, completion, done = _next_stream_event(events, completion)
         if done:
             break
+        progress = getattr(event, "tool_input_progress", None)
+        if progress is not None:
+            thinking_closed = _complete_openai_thinking(
+                thinking_parts, thinking_complete, already_closed=thinking_closed,
+            )
+            tool_input_emitter.accept(progress)
         block = getattr(event, "tool_use_block", None)
         if block is not None:
             thinking_closed = _complete_openai_thinking(
@@ -98,19 +107,14 @@ def collect_openai_stream_with_completion(
             thinking_complete,
             already_closed=thinking_closed,
         )
-        chunk = _stream_delta(previous_raw, accumulated, content)
-        previous_raw = content
-        if not chunk:
-            continue
-        parts.append(chunk)
-        accumulated += chunk
-        _emit_chunk(on_chunk, chunk)
+        parts.append(content)
+        _emit_chunk(on_chunk, content)
     _complete_openai_thinking(
         thinking_parts,
         thinking_complete,
         already_closed=thinking_closed,
     )
-    return accumulated, usage, blocks, completion
+    return "".join(parts), usage, blocks, completion
 
 
 # LLM: Chat Completions 没有统一 reasoning block-stop；只允许在正文/工具开始或流结束的
@@ -155,7 +159,7 @@ def collect_anthropic_stream_with_tools(
 
 
 # LLM: 该收集器是 Anthropic 文本/思考/工具块与脱敏参数进度的分流边界；
-# thinking complete 必须在原 content_block_stop 处先于后续正文发布，任一 callback 失败不得影响完整响应。
+# thinking complete 必须在原 content_block_stop 处先于后续正文发布，text_delta 逐字追加，不猜累计快照。
 # 函数用途: 收集一次 Anthropic SSE 的正文、用量、工具块和完整性，并按块边界发送思考终态与展示计数。
 def collect_anthropic_stream_with_completion(
     lines: Iterable[str],
@@ -178,8 +182,6 @@ def collect_anthropic_stream_with_completion(
     character counters, batched before leaving this collector.
     """
     parts: list[str] = []
-    accumulated = ""
-    previous_raw = ""
     usage: dict[str, Any] = {}
     blocks: list[dict[str, Any]] = []
     tool_input_emitter = _ToolInputProgressEmitter(on_tool_input_progress)
@@ -219,14 +221,9 @@ def collect_anthropic_stream_with_completion(
         content = str(getattr(event, "content", "") or "")
         if not content:
             continue
-        chunk = _stream_delta(previous_raw, accumulated, content)
-        previous_raw = content
-        if not chunk:
-            continue
-        parts.append(chunk)
-        accumulated += chunk
-        _emit_chunk(on_chunk, chunk)
-    return accumulated, usage, blocks, completion
+        parts.append(content)
+        _emit_chunk(on_chunk, content)
+    return "".join(parts), usage, blocks, completion
 
 
 # LLM: 该对象只抑制过密的展示回调，不能吞掉 started/ready，也不能把原始
@@ -292,47 +289,6 @@ def _next_stream_event(events: Any, completion: StreamCompletion) -> tuple[Any, 
     except StopIteration as stop:
         value = stop.value
         return None, value if isinstance(value, StreamCompletion) else completion, True
-
-
-def _collect_stream_events(
-    events: Iterable[object],
-    on_chunk: Callable[[str], None] | None = None,
-) -> tuple[str, dict[str, Any]]:
-    parts: list[str] = []
-    accumulated = ""
-    previous_raw = ""
-    usage: dict[str, Any] = {}
-    for event in events:
-        event_usage = getattr(event, "usage", None)
-        if event_usage:
-            usage = merge_usage(usage, event_usage)
-        content = str(getattr(event, "content", "") or "")
-        if not content:
-            continue
-        chunk = _stream_delta(previous_raw, accumulated, content)
-        previous_raw = content
-        if not chunk:
-            continue
-        parts.append(chunk)
-        accumulated += chunk
-        _emit_chunk(on_chunk, chunk)
-    return accumulated, usage
-
-
-def _stream_delta(previous_raw: str, accumulated: str, content: str) -> str:
-    # Some OpenAI/Anthropic-compatible relays emit ordinary deltas first, then
-    # one cumulative snapshot. Compare against the delivered text before the
-    # prior-raw check so A, B, AB does not become ABAB. The accumulated !=
-    # previous_raw guard preserves a legitimate pair of identical delta chunks.
-    if (
-        accumulated
-        and accumulated != previous_raw
-        and content.startswith(accumulated)
-    ):
-        return content[len(accumulated) :]
-    if previous_raw and len(content) > len(previous_raw) and content.startswith(previous_raw):
-        return content[len(previous_raw) :]
-    return content
 
 
 def _emit_chunk(on_chunk: Callable[[str], None] | None, content: str) -> None:

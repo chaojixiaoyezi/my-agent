@@ -1,5 +1,5 @@
-# LLM: 后台稳定 task 身份与逐轮请求分离，正文和工具历史按同一请求恢复；typed 结束原因随 canonical final 保存。
-# 模块用途: 处理后台事件、上下文和投递；子代理返回接回原用户目标，截断回复在历史中保留真实原因。
+# LLM: 后台稳定 task 身份与逐轮请求分离；唤醒共用 coordinator 软指导，不能生成永久禁写或额外授权。
+# 模块用途: 处理后台事件、上下文和投递；子代理返回接回原用户目标和分工，截断回复保留真实原因。
 from __future__ import annotations
 
 import hashlib
@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from ..agent_core.orchestration.coordinator_policy import coordinator_tool_boundary_text
 from ..agent_core.runtime.task_identity import conversation_task_progress_ledger_id
 from ..backends.errors import (
     is_provider_quota_exhausted_error,
@@ -97,20 +98,16 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "the parent's authority ceiling. When that fact is true and no typed owner/workspace "
     "conflict exists, resolve it with grant directly; do not deny merely because the "
     "current model-facing catalog hides child-requested tools. If unavailable_tools is "
-    "non-empty, grant will fail closed. A later dangerous ToolCall remains a separate exact user-approval "
-    "event even after capability grant. "
-    "Once this task has delegated actual work to subagents, the main agent remains "
-    "their coordinator: read and integrate existing outputs, run allowed tests, and "
-    "report results, but do not author the delegated implementation yourself. If a "
-    "functional gap remains, guide the exact child or delegate that gap to a new or "
-    "replacement child. A child failure, capacity limit, or terminal event does not "
-    "silently transfer delegated implementation back to the main agent. "
+    "non-empty, grant will fail closed. "
+    "后续工具调用仍由当前 owner 的工具权限策略裁决；能力授予不绕过审批，也不意味着已有授权的动作必须再次询问用户。"
+    + coordinator_tool_boundary_text()
+    + " "
     "If the structured projection says rows were omitted, use the supplied refs "
     "or wait for another lifecycle event before reporting them. Do not ask the user "
     "how to find an already delivered child result when its completion message or "
     "readable report ref is present. Avoid duplicate work and polling. "
     "If known objective gaps remain and the available tools or child capacity can still address "
-    "them, continue coordinating instead of returning a partial final report. Report completion "
+    "them, continue authorized work instead of returning a partial final report. Report completion "
     "only when the current objective and runtime facts support it. Reconcile the canonical "
     "task_progress plan on every child completion: explicit covers are already credited by the "
     "host; for an unbound child, update only the exact existing item ids that your own delegation "

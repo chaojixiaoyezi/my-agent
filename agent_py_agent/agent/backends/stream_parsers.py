@@ -71,8 +71,8 @@ def openai_stream_contents(lines: Iterable[str]) -> Iterator[str]:
             yield event.content
 
 
-# LLM: SSE delta 是增量，thinking 的存在与空字符串要分别保存；消费者不可将空字段当成未返回。
-# 函数用途: 分离正文、思考和工具事件，并在收尾保留下一轮所需的原生思考字段。
+# LLM: SSE delta 是增量；工具参数过程只投影计数，完整工具仍在流结束解析，不能据进度提前执行。
+# 函数用途: 分离正文、思考和工具准备进度，保持空 thinking 字段及多工具独立序号。
 def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
     tool_acc = _OpenAIToolCallAccumulator()
     reasoning_parts: list[str] = []
@@ -89,7 +89,6 @@ def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         choices = obj.get("choices", [])
         choice = choices[0] if choices and isinstance(choices[0], dict) else {}
         delta = choice.get("delta", {}) if isinstance(choice.get("delta"), dict) else {}
-        tool_acc.consume(delta.get("tool_calls"))
         content = delta.get("content")
         reasoning = delta.get("reasoning_content")
         reasoning_present = reasoning_present or "reasoning_content" in delta
@@ -98,8 +97,12 @@ def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         if isinstance(reasoning, str) and reasoning:
             reasoning_parts.append(reasoning)
             yield StreamEvent(thinking_content=reasoning)
+        for progress in tool_acc.consume(delta.get("tool_calls")):
+            yield StreamEvent(tool_input_progress=progress)
         if content or usage:
             yield StreamEvent(content=str(content or ""), usage=usage or None)
+    for progress in tool_acc.completed_progress():
+        yield StreamEvent(tool_input_progress=progress)
     blocks, parse_failed = tool_acc.finish()
     for block in blocks:
         yield StreamEvent(tool_use_block=block)
@@ -115,13 +118,20 @@ def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
     )
 
 
+# LLM: OpenAI tool index 是流内身份，原始 JSON 只在累积器内保存；观察器不能取得半截参数。
+# 类用途: 分别拼接并行工具参数，并对外提供不含业务内容的字符进度。
 class _OpenAIToolCallAccumulator:
+    # LLM: 每个响应独立实例，禁止跨模型调用复用工具缓冲或序号。
+    # 函数用途: 初始化单次响应的工具参数缓冲。
     def __init__(self) -> None:
         self._calls: dict[int, dict[str, str]] = {}
 
-    def consume(self, raw_calls: object) -> None:
+    # LLM: 这里只接受供应商结构化 index/name/arguments；返回计数不代表 JSON 合法或调用已执行。
+    # 函数用途: 收集本帧各工具的增量，并返回开始或进行中的脱敏快照。
+    def consume(self, raw_calls: object) -> list[dict[str, Any]]:
+        progress = []
         if not isinstance(raw_calls, list):
-            return
+            return progress
         for raw in raw_calls:
             if not isinstance(raw, dict):
                 continue
@@ -129,12 +139,29 @@ class _OpenAIToolCallAccumulator:
                 index = int(raw.get("index", 0) or 0)
             except (TypeError, ValueError):
                 continue
+            new = index not in self._calls
             call = self._calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
             call["id"] += str(raw.get("id") or "")
             function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
             call["name"] += str(function.get("name") or "")
             call["arguments"] += str(function.get("arguments") or "")
+            progress.append(self._progress(index, call, "started" if new else "streaming"))
+        return progress
 
+    # LLM: ready 仅关闭临时展示；finish 仍独立检查完整 JSON，截断不能通过此事件获得执行许可。
+    # 函数用途: 在流收尾时关闭每个已开始工具的准备进度。
+    def completed_progress(self) -> list[dict[str, Any]]:
+        return [self._progress(index, call, "ready") for index, call in sorted(self._calls.items())]
+
+    # LLM: 白名单与 Anthropic 共用，不暴露 call id、路径、JSON 或正文，也不建立新工具账。
+    # 函数用途: 生成可供界面节流器使用的工具名、序号及累计字符数。
+    @staticmethod
+    def _progress(index: int, call: dict[str, str], phase: str) -> dict[str, Any]:
+        return {"schema": TOOL_INPUT_PROGRESS_SCHEMA, "phase": phase, "stream_index": index,
+                "tool": call["name"] or "Tool", "received_chars": len(call["arguments"])}
+
+    # LLM: 仅完整响应收尾可解析工具输入，格式异常以 parse_failed 上报，不按展示进度猜成功。
+    # 函数用途: 将各工具 JSON 转为标准调用块，保持原 index 顺序和不完整信号。
     def finish(self) -> tuple[list[dict[str, Any]], bool]:
         blocks: list[dict[str, Any]] = []
         parse_failed = False

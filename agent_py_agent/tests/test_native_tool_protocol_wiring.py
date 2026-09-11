@@ -366,6 +366,7 @@ def test_resolve_native_tools_keeps_exact_specs_and_single_system_authorization(
     system = provider_system_instruction(agent.backend)
     assert system.count(ACTION_AUTHORIZATION_GUIDANCE) == 1
     assert "仅要求查看、解释或诊断时，做必要的只读检查" in system
-    assert "不能借子代理扩大目标或权限" in system
+    assert "只读分工须向子代理保留同样的检查范围" in system
+    assert "角色、工具可用性和 Full Access 都不代表新增业务目标的授权" in system
     assert "宿主审批、owner 隔离及专用确认规则始终有效" in system
     assert snapshot.specs == tuple(specs)
