@@ -11,13 +11,33 @@ from pathlib import Path, PureWindowsPath
 # LLM: An explicit command argument overrides config only when it is a non-empty path-like value.
 # 函数用途: 从命令参数中读取明确指定的工作区，并展开为绝对路径。
 def explicit_workspace_root(args) -> Path | None:
+    roots = explicit_workspace_roots(args)
+    return roots[0] if roots else None
+
+
+# LLM: 一次声明多个目录是显式意图，必须逐项解析而不是把整个字符串当一条路径
+# （"a,b" 被当成一条路径会得到一个不存在的目录名）。逗号分隔与列表配置共用这条解析。
+# 函数用途: 返回命令行显式声明的全部工作目录，保持声明顺序并去重。
+def explicit_workspace_roots(args) -> list[Path]:
     raw = getattr(args, "workspace_root", None)
-    if not isinstance(raw, (str, Path)):
-        return None
-    text = str(raw).strip()
-    if not text:
-        return None
-    return Path(text).expanduser().resolve()
+    if raw is None:
+        # --workspace 与既有 --workspace-root 共用同一条解析路径，避免两套语义。
+        raw = getattr(args, "workspace", None)
+    if isinstance(raw, (list, tuple)):
+        values = [str(item) for item in raw]
+    elif isinstance(raw, (str, Path)):
+        values = str(raw).split(",")
+    else:
+        return []
+    roots: list[Path] = []
+    for value in values:
+        text = value.strip()
+        if not text:
+            continue
+        resolved = Path(text).expanduser().resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
 
 
 # LLM: Process cwd is not an owner or permission fact. All CLI/Gateway entrypoints with no

@@ -27,6 +27,7 @@ from ..agent.user_space.runtime_paths import (
 )
 from .workspace_resolution import (
     explicit_workspace_root,
+    explicit_workspace_roots,
     owner_home_workspace_root,
     resolve_workspace_roots,
     validate_requested_workspace_roots,
@@ -580,9 +581,10 @@ def _http_error_json(exc: urllib.error.HTTPError) -> tuple[int, dict[str, object
 # 函数用途: 构造连接同一个后台 Gateway、但会话和工作目录属于当前用户的轻量客户端。
 def make_gateway_chat_client(args) -> GatewayChatClientAgent:
     config = apply_runtime_config_environment(load_config(args.config))
-    explicit_root = explicit_workspace_root(args)
-    if explicit_root is not None:
-        config.workspace_root = str(explicit_root)
+    # 一次声明多个目录时，整串会被当成一条路径——必须逐项解析后再写回配置。
+    explicit_roots = explicit_workspace_roots(args)
+    if explicit_roots:
+        config.workspace_root = [str(root) for root in explicit_roots]
     base_home = home_paths(configured_home_root(config))
     owner_identity = owner_identity_from_config(config)
     owner = resolve_owner_home(base_home.root, owner_identity)

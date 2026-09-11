@@ -30,6 +30,7 @@ from .bootstrap import (
 )
 from .workspace_resolution import (
     explicit_workspace_root,
+    explicit_workspace_roots,
     owner_home_workspace_root,
     resolve_workspace_root,
     resolve_workspace_roots,
@@ -43,9 +44,10 @@ PLAIN_CHAT_PROMPT = "user> "
 def make_agent(args) -> SimpleAgent:
 
     config = apply_runtime_config_environment(load_config(args.config))
-    explicit_root = explicit_workspace_root(args)
-    if explicit_root is not None:
-        config.workspace_root = str(explicit_root)
+    # 一次声明多个目录时，整串会被当成一条路径——必须逐项解析后再写回配置。
+    explicit_roots = explicit_workspace_roots(args)
+    if explicit_roots:
+        config.workspace_root = [str(root) for root in explicit_roots]
     roots = resolve_workspace_roots(
         config,
         args.config,

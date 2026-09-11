@@ -48,6 +48,7 @@ def _add_shared_chat_arguments(parser: argparse.ArgumentParser) -> None:
     # 函数用途: 让用户显式指定本次会话的工作目录（可多个），据此派生派工与第二层写作用域。
     parser.add_argument(
         "--workspace",
+        dest="workspace_root",
         default=None,
         help="显式指定本次会话的工作目录；多个目录用逗号分隔。不传则沿用 owner home",
     )
