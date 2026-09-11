@@ -185,8 +185,9 @@ class TestPostJson:
 
     @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
-    def test_unexplained_400_does_not_spend_a_second_request(self, mock_urlopen, mock_sleep):
-        """没有原因说明不能证明瞬时故障，即使夹具下一轮成功也没有自动重试权。"""
+    def test_unlabeled_400_spends_one_bounded_retry(self, mock_urlopen, mock_sleep):
+        """真机证据(2026-09-11 四路复刻)：body 既无 message/type/code 的空洞 400 是供应商瞬时拒绝，
+        同一 payload 重放即成功；此前直接终结子代理导致大量白干。现改为有界重试一次。"""
         from io import BytesIO
 
         silent = urllib.error.HTTPError(
@@ -194,7 +195,7 @@ class TestPostJson:
             400,
             "Bad Request",
             {"Content-Type": "application/json"},
-            BytesIO(b'{"model":"deepseek-v4-flash"}'),
+            BytesIO(b'{"object":"error","model":"deepseek-v4-flash"}'),
         )
         second = MagicMock()
         second.read.return_value = json.dumps({"content": "after retry"}).encode()
@@ -202,20 +203,43 @@ class TestPostJson:
         second.__exit__ = MagicMock(return_value=False)
         mock_urlopen.side_effect = [silent, second]
 
+        from agent_py_agent.agent.backends.gateway_helpers import post_json
+
+        assert post_json(_request()) == {"content": "after retry"}
+        assert mock_urlopen.call_count == 2, "空洞 400 只重试一次"
+        mock_sleep.assert_not_called()
+
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
+    def test_unlabeled_400_stays_bounded_and_typed(self, mock_urlopen, mock_sleep):
+        """连续空洞 400 仍然是有界的：最多多花一次请求，随后抛 typed 拒绝，不掩盖错误。"""
+        from io import BytesIO
+
+        def _silent():
+            return urllib.error.HTTPError(
+                "https://api.example.com",
+                400,
+                "Bad Request",
+                {"Content-Type": "application/json"},
+                BytesIO(b'{"object":"error","model":"deepseek-v4-flash"}'),
+            )
+
+        mock_urlopen.side_effect = [_silent(), _silent(), _silent()]
+
         from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError
         from agent_py_agent.agent.backends.gateway_helpers import post_json
 
         with pytest.raises(ProviderRequestRejectedError) as error:
             post_json(_request())
         assert error.value.status_code == 400
-        assert mock_urlopen.call_count == 1
+        assert mock_urlopen.call_count == 2
         mock_sleep.assert_not_called()
 
-    @pytest.mark.parametrize("body", [b'', b'not-json', b'[]', b'{"object":"error","model":"deepseek-v4-flash"}'])
+    @pytest.mark.parametrize("body", [b'', b'not-json', b'[]'])
     @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_unexplained_400_retains_request_rejection(self, mock_urlopen, mock_sleep, body):
-        """空正文、畸形 JSON 和真实回显错误均保留 HTTP 400，不能伪装成断线。"""
+        """空正文与畸形 JSON 不是"供应商未给原因"，仍保留 HTTP 400 且不重试。"""
         from io import BytesIO
 
         silent = urllib.error.HTTPError(

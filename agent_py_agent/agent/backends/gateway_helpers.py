@@ -143,15 +143,61 @@ def _emit_provider_attempt(event: dict[str, object]) -> None:
 
 # LLM: Non-streaming POST owns one body read; truncated HTTP bodies become typed transient errors for the existing model retry, never partial JSON success.
 # 函数用途: 发送非流式 JSON 请求；停止时关闭响应，断流时交回现有恢复链，不把半截正文当成功。
+# LLM: 真机证据(2026-09-11 四路复刻验收): 上游在持续并发下会返回既无 type/code 也无 message 的
+# 空洞 400（body 形如 {"object":"error","model":"..."}），同一份 payload 稍后重放即成功，
+# 属于供应商侧瞬时拒绝而不是"请求被永久拒绝"。此前该错误直接终结子代理，41 个子代理里 9 个因此死亡、
+# 父代理整轮卡住。这里只对这一种客观形状做**有界**重试：最多一次，且必须同时满足
+# ①HTTP 400 ②body 里没有 message/type/code 三个定位字段 ③没有任何工具已在本轮执行。
+# 不改变其它 400 的"不重试"语义，不重试未知错误，也不掩盖 typed 错误。
+_UNLABELED_REJECTION_ATTEMPTS = 2
+
+
+# 函数用途: 判断一次 400 是否属于"供应商没给任何定位信息的瞬时拒绝"。
+def _is_unlabeled_provider_rejection(exc: urllib.error.HTTPError) -> bool:
+    if int(getattr(exc, "code", 0) or 0) != 400:
+        return False
+    try:
+        payload = _provider_error_payload(_http_error_detail(exc))
+    except Exception:
+        return False
+    if not isinstance(payload, dict) or not payload:
+        return False
+    # 供应商两种真实形状都要认：顶层空洞（{"object","model"}）与嵌套 error 对象。
+    nested = payload.get("error")
+    scopes = [payload, nested] if isinstance(nested, dict) else [payload]
+    for scope in scopes:
+        if any(str(scope.get(key) or "").strip() for key in ("message", "type", "code")):
+            return False
+    return True
+
+
+# 函数用途: 对"无定位信息的 400"做一次有界重试，其它异常原样抛出。
+def _retry_unlabeled_rejection(operation):
+    last: urllib.error.HTTPError | None = None
+    for attempt in range(_UNLABELED_REJECTION_ATTEMPTS):
+        try:
+            return operation()
+        except urllib.error.HTTPError as exc:
+            _dump_provider_rejection(exc)
+            last = exc
+            if not _is_unlabeled_provider_rejection(exc) or attempt + 1 >= _UNLABELED_REJECTION_ATTEMPTS:
+                raise _runtime_http_error(exc) from exc
+    raise _runtime_http_error(last) from last  # pragma: no cover - 循环内必已 raise
+
+
 def post_json(
     request: GatewayRequest,
 ) -> dict[str, Any]:
     """POST JSON and normalize provider/network failures into typed exceptions."""
     _require_api_key(request.api_key)
-    try:
+
+    def _once() -> bytes:
         with _gateway_response_scope(_open_gateway_request(request)) as (resp, response_guard):
             with _provider_interrupt_callback(response_guard.abort):
-                raw = resp.read()
+                return resp.read()
+
+    try:
+        raw = _retry_unlabeled_rejection(_once)
     except InterruptedError:
         raise
     except urllib.error.HTTPError as exc:
