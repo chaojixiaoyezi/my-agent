@@ -33,35 +33,30 @@ class StreamEvent:
     tool_input_progress: dict[str, Any] | None = None
 
 
-# 截断检测的常量:Anthropic message_delta.stop_reason 取这些值时，表示模型在写完整
-# 工具参数 JSON 之前就被 token 上限/长度上限切断（MiniMax 长 content native 写入的主因）。
-_TRUNCATING_STOP_REASONS = frozenset({"max_tokens", "length"})
-
-
 # LLM: 这是流结束的结构化事实；assistant_content_blocks 不直接作为可见 chunk，显式 rich transcript 只能由上层收尾筛出 type=thinking 正文。
 # 类用途: 汇总一条流是否完整、停止原因，以及下一轮请求需要原样续接的有序 assistant 块。
 @dataclass(frozen=True)
 class StreamCompletion:
-    """Anthropic SSE 流是否正常收尾的体检结果（``anthropic_stream_events`` 的 return 值）。
-
-    native 截断检测专用：流在 ``message_stop`` 之前就 EOF（代理/CDN 截断、服务端冲完
-    部分缓冲就断），或 ``message_delta.stop_reason`` ∈ {max_tokens,length} 且仍有未闭合的
-    tool_use 参数缓冲 → 这一帧 tool_use 的参数 JSON 是半截的。text 协议消费者忽略此值，
-    行为零变化。``truncated`` 把这两类信号收成一个布尔，交给 ModelResponse 带出。
-    """
+    """流结束事实；参数错误与缺失终态分开，长度/过滤继续保留供应商 stop_reason。"""
 
     saw_message_stop: bool = False
     stop_reason: str = ""
     open_tool_buffer: bool = False
     assistant_content_blocks: tuple[dict[str, Any], ...] = ()
 
+    # LLM: 只检查供应商结构事实；不把坏 JSON 或断流猜成 token 上限。
+    # 函数用途: 返回供应商停止原因之外的完整性错误，供公共响应合同分类。
+    @property
+    def incomplete_reason(self) -> str:
+        if self.open_tool_buffer:
+            return "invalid_tool_arguments"
+        return "" if self.saw_message_stop or self.stop_reason else "stream_eof"
+
+    # LLM: 布尔仅决定零工具执行，不决定续跑类型；真实原因由 incomplete_reason/stop_reason 保留。
+    # 函数用途: 供既有消费者查询本次响应是否不完整。
     @property
     def truncated(self) -> bool:
-        if self.open_tool_buffer:
-            return True
-        # 流在 message_stop / stop_reason 之前就 EOF：半截响应（含被切断的 tool-call JSON）
-        # 绝不能当完整成功（对照 claw client.py chat_stream 的 not(saw_stop or stop_reason)）。
-        return not (self.saw_message_stop or self.stop_reason)
+        return bool(self.incomplete_reason or self.stop_reason in {"length", "max_tokens", "content_filter"})
 
 
 def openai_stream_contents(lines: Iterable[str]) -> Iterator[str]:
@@ -160,7 +155,7 @@ class _OpenAIToolCallAccumulator:
         return {"schema": TOOL_INPUT_PROGRESS_SCHEMA, "phase": phase, "stream_index": index,
                 "tool": call["name"] or "Tool", "received_chars": len(call["arguments"])}
 
-    # LLM: 仅完整响应收尾可解析工具输入，格式异常以 parse_failed 上报，不按展示进度猜成功。
+    # LLM: 参数必须是完整 JSON 对象；坏块不能猜成空对象，整轮失败由响应边界统一处理。
     # 函数用途: 将各工具 JSON 转为标准调用块，保持原 index 顺序和不完整信号。
     def finish(self) -> tuple[list[dict[str, Any]], bool]:
         blocks: list[dict[str, Any]] = []
@@ -168,13 +163,13 @@ class _OpenAIToolCallAccumulator:
         for index in sorted(self._calls):
             call = self._calls[index]
             try:
-                parsed = json.loads(call["arguments"] or "{}")
+                parsed = json.loads(call["arguments"])
             except (json.JSONDecodeError, TypeError):
-                parsed = {}
                 parse_failed = True
+                continue
             if not isinstance(parsed, dict):
-                parsed = {}
                 parse_failed = True
+                continue
             blocks.append({"id": call["id"], "name": call["name"], "input": parsed})
         return blocks, parse_failed
 
@@ -243,6 +238,8 @@ def anthropic_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
     )
 
 
+# LLM: 单响应累积器必须保留所有已见错误，后续好块不能清掉坏块事实；不外发半截输入。
+# 类用途: 拼接 Anthropic 工具块，仅完整对象生成工具候选，整轮由响应边界统一判定。
 class _AnthropicToolUseAccumulator:
     """Accumulates Anthropic streamed tool_use blocks across SSE events.
 
@@ -252,12 +249,15 @@ class _AnthropicToolUseAccumulator:
     parse it on stop, returning the finished ``{"id","name","input"}`` block.
     """
 
+    # LLM: 每次请求独立创建，错误标记在这一整个响应内保持单调。
+    # 函数用途: 初始化当前工具与本轮失败事实。
     def __init__(self) -> None:
         self._index: int | None = None
         self._id: str = ""
         self._name: str = ""
         self._buffer: str = ""
         self._last_parse_failed: bool = False
+        self._initial_input: dict[str, Any] = {}
 
     def has_open_buffer(self) -> bool:
         """流结束时是否仍有半截的 tool_use 参数缓冲。
@@ -317,7 +317,10 @@ class _AnthropicToolUseAccumulator:
             "received_chars": len(self._buffer),
         }
 
+    # LLM: 后续块不能清除前块错误；未闭合块被新块覆盖同样记为协议损坏。
+    # 函数用途: 记录新工具原始身份和初始对象，不猜补非对象输入。
     def _on_start(self, obj: dict[str, Any]) -> None:
+        self._last_parse_failed = self._last_parse_failed or self._index is not None
         block = obj.get("content_block")
         if not isinstance(block, dict) or block.get("type") != "tool_use":
             self._index = None
@@ -326,24 +329,30 @@ class _AnthropicToolUseAccumulator:
         self._id = str(block.get("id", "") or "")
         self._name = str(block.get("name", "") or "")
         self._buffer = ""
-        self._last_parse_failed = False  # 新 tool_use 块开始：清掉上一块的截断标记
+        initial = block.get("input", {})
+        self._initial_input = initial if isinstance(initial, dict) else {}
+        self._last_parse_failed = self._last_parse_failed or not isinstance(initial, dict)
 
+    # LLM: 参数增量必须属于同一 block index，防止其它内容块污染工具输入。
+    # 函数用途: 追加当前工具的原始 JSON 增量，不执行或发布参数内容。
     def _on_delta(self, obj: dict[str, Any]) -> None:
-        if self._index is None:
+        if self._index is None or obj.get("index") != self._index:
             return
         delta = obj.get("delta")
         if isinstance(delta, dict) and delta.get("type") == "input_json_delta":
             self._buffer += str(delta.get("partial_json", "") or "")
 
+    # LLM: 任意坏块只返回失败标记；空增量沿用 start 的真实对象，不猜补残缺 JSON。
+    # 函数用途: 关闭一个工具候选并保留整个响应的损坏事实。
     def _on_stop(self, obj: dict[str, Any]) -> dict[str, Any] | None:
         if self._index is None or obj.get("index") != self._index:
             return None
-        parsed, parse_failed = _parse_tool_input(self._buffer)
-        self._last_parse_failed = parse_failed
+        parsed, parse_failed = _parse_tool_input(self._buffer) if self._buffer else (self._initial_input, False)
+        self._last_parse_failed = self._last_parse_failed or parse_failed
         block = {"id": self._id, "name": self._name, "input": parsed}
         self._index = None
         self._buffer = ""
-        return block
+        return None if parse_failed else block
 
 
 # LLM: 该累积器是 Anthropic 流式响应块进入下一轮请求的白名单边界；只接受协议允许回放的四类块并保留到达顺序。
@@ -432,14 +441,17 @@ class _AnthropicAssistantContentAccumulator:
         elif block_type == "tool_use" and delta_type == "input_json_delta":
             self._input_buffer += str(delta.get("partial_json") or "")
 
-    # LLM: tool_use 的 input 必须以已解析 dict 回放；损坏 JSON 留给既有截断检测处理，不能把半截字符串放进下一轮请求。
+# LLM: tool_use 的 input 必须以已解析 dict 回放；损坏 JSON 不生成工具块，整轮终态由工具累积器保留。
     # 函数用途: 在 content_block_stop 时闭合当前块、记录顺序并返回它。
     def _on_stop(self, obj: dict[str, Any]) -> dict[str, Any] | None:
         if self._block is None or obj.get("index") != self._index:
             return None
         block = self._block
         if block.get("type") == "tool_use" and self._input_buffer.strip():
-            parsed, _parse_failed = _parse_tool_input(self._input_buffer)
+            parsed, parse_failed = _parse_tool_input(self._input_buffer)
+            if parse_failed:
+                self._index, self._block, self._input_buffer = None, None, ""
+                return None
             block["input"] = parsed
         self._completed.append(block)
         self._index = None
@@ -448,22 +460,17 @@ class _AnthropicAssistantContentAccumulator:
         return block
 
 
+# LLM: 调用方必须检查失败标记；空增量合法，但损坏 JSON/数组/标量绝不是空对象调用。
+# 函数用途: 校验工具 JSON 的对象形态，不修复或推测参数。
 def _parse_tool_input(buffer: str) -> tuple[dict[str, Any], bool]:
-    """Parse a tool_use input-JSON buffer; return ``(input_dict, parse_failed)``.
-
-    ``parse_failed`` distinguishes a *truncated/broken* JSON buffer (non-empty text that
-    fails ``json.loads`` → likely cut off mid-stream) from a legitimately empty buffer.
-    The returned dict is always a real dict so downstream block consumers stay unchanged;
-    truncation is signalled out-of-band via this flag (not by mutating the block).
-    """
     text = buffer.strip()
     if not text:
         return {}, False
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        return {}, True  # 非空但解析失败 = 半截 JSON（截断特征），标记带出但仍回空 dict
-    return (parsed if isinstance(parsed, dict) else {}), False
+        return {}, True
+    return (parsed, False) if isinstance(parsed, dict) else ({}, True)
 
 
 def json_object_or_none(line: str) -> dict[str, Any] | None:

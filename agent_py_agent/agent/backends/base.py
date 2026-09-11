@@ -35,6 +35,7 @@ from .errors import (
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
 from .provider_headers import endpoint_parts, request_headers
+from .response_completion import incomplete_response_fields, without_tool_blocks
 from .stream_parsers import StreamCompletion
 from .usage_metadata import (
     collect_anthropic_stream_with_completion,
@@ -42,25 +43,6 @@ from .usage_metadata import (
     openai_stream_payload,
     usage_dict,
 )
-
-# 会话运行时/长期助手 keep a length-truncated turn's completed text and continue the
-# loop instead of killing the run.  Anthropic-compatible providers expose the
-# fact through ``stop_reason=max_tokens``; OpenAI-compatible providers use
-# ``finish_reason=length``.  Truncation is no longer a fatal adapter error:
-# the adapter returns a ``truncated`` ModelResponse whose text is preserved and
-# whose tool blocks are dropped (a truncated tool call cannot be executed
-# safely), matching harness assembler behavior; the tool loop then continues
-# with the partial text as this turn's assistant message.
-_INCOMPLETE_STOP_REASONS = frozenset({"max_tokens", "length"})
-
-
-# LLM: 截断不再 raise 致命错误（真机 2026-08-16 长任务复刻：deepseek-v4-flash
-# 单轮输出上限内写长文件时 stop_reason=max_tokens → 适配器 raise → 整个 run
-# 终止 RC=2；harness/轻量运行时 同场景保留文本继续循环，任务不中断）。
-# 函数用途: 判断供应商停止原因是否属截断（max_tokens/length）。
-def _incomplete_stop_reason(stop_reason: object) -> bool:
-    return str(stop_reason or "").strip().lower() in _INCOMPLETE_STOP_REASONS
-
 
 def _bounded_output_tokens(configured: int, requested: int | None) -> int:
     if requested is None:
@@ -109,11 +91,10 @@ class ModelResponse:
     # 它主要供下一轮原生消息回放；只有显式 rich transcript sink 会另行投影 type=thinking 的正文，
     # signature/redacted_thinking/tool_use 仍不得进入用户可见事件。
     assistant_content_blocks: list[dict[str, Any]] = field(default_factory=list)
-    # native 流式响应在 message_stop 前 EOF，或 stop_reason∈{max_tokens,length} 且仍有
-    # 未闭合的 tool_use 参数缓冲 → True：这次响应（含 tool_use 参数 JSON）疑似被截断。
-    # 默认 False；非流式与 text 协议恒 False，且只有 native 恢复/降级逻辑消费它，零回归。
+    # 原生响应不完整时为 True：工具整轮零执行，具体长度/断流/坏参数原因由上述 typed 终态区分。
+    # 流式与非流式共用；不能把这个布尔单独当成输出上限或自动重试依据。
     truncated: bool = False
-    # 上游返回的原始 stop_reason(观测/审计用;自动续写后为最后一段的 stop_reason)。
+    # 上游返回的原始 stop_reason；EOF 没有该字段时保持空，不推断成 max_tokens。
     stop_reason: str = ""
     # 传输/流边界在形成完整响应前发现的结构化工具协议错误。这里只能由宿主适配层写入；
     # 模型正文不能设置该字段，也不能借此制造可执行 ToolCall。
@@ -730,7 +711,7 @@ class OpenAICompatibleBackend(HttpBackend):
         )
 
     # LLM: reasoning_content 与正文必须走不同观察器，并在正文/工具或流结束前封口思考块；
-    # 工具参数开始立即封口思考并发布计数；回调失败不能改变模型响应和工具执行。
+    # 工具参数开始立即封口思考并发布计数；不完整响应零工具执行且保留 typed 终态与可归档部分。
     # 函数用途: 解析 OpenAI SSE，同时展示正文、思考与长工具参数的实时准备进度。
     def _generate_stream(
         self,
@@ -760,17 +741,15 @@ class OpenAICompatibleBackend(HttpBackend):
             text=text,
             tool_blocks=blocks,
         )
-        if _incomplete_stop_reason(completion.stop_reason):
-            # 截断：保留已收文本，丢弃工具调用块（截断的工具调用不能安全执行），
-            # 标记 truncated 让工具循环下一轮继续（harness assembler 同款）。
+        incomplete = incomplete_response_fields(completion.stop_reason, incomplete_reason=completion.incomplete_reason)
+        if incomplete:
             return ModelResponse(
                 text=text,
                 backend=self.name,
                 usage=usage,
                 tool_use_blocks=[],
-                assistant_content_blocks=assistant_blocks,
-                truncated=True,
-                stop_reason=completion.stop_reason,
+                assistant_content_blocks=without_tool_blocks(assistant_blocks),
+                **incomplete,
             )
         if not text and not blocks and payload.get("tools"):
             raise ProviderResponseError(
@@ -788,7 +767,7 @@ class OpenAICompatibleBackend(HttpBackend):
         )
 
 
-# LLM: 保留 reasoning_content 的显式存在性（空值也保留），不把普通正文或错误内容当成思考。
+# LLM: 保留 reasoning_content 的显式存在性；坏参数/截断整轮零执行，思考与正文仍可归档。
 # 函数用途: 解析非流式回复，生成和 SSE 相同的正文、工具及原生思考历史，供跨轮回放。
 def _openai_non_stream_response(
     obj: dict[str, Any],
@@ -811,8 +790,8 @@ def _openai_non_stream_response(
             f"无法解析 OpenAI-compatible 响应: {_response_preview(obj)}"
         ) from exc
     finish_reason = str(choice.get("finish_reason") or "")
-    if _incomplete_stop_reason(finish_reason):
-        # 截断：保留文本、丢弃工具块、标记 truncated（工具循环下一轮继续）。
+    incomplete = incomplete_response_fields(finish_reason, incomplete_reason="invalid_tool_arguments" if malformed else "")
+    if incomplete:
         return ModelResponse(
             text=text,
             backend=backend_name,
@@ -823,8 +802,7 @@ def _openai_non_stream_response(
                 text=text,
                 tool_blocks=[],
             ),
-            truncated=True,
-            stop_reason=finish_reason,
+            **incomplete,
         )
     if not text and not blocks and tools_requested:
         raise ProviderResponseError(
@@ -1075,6 +1053,8 @@ def _openai_user_messages(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return translated
 
 
+# LLM: JSON 必须是完整对象；坏块不上报为空参数调用，错误标记由响应层执行整轮零工具边界。
+# 函数用途: 提取非流式工具参数，区分真实空对象与损坏/缺失参数。
 def _openai_tool_use_blocks(message: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
     raw_calls = message.get("tool_calls")
     if not isinstance(raw_calls, list):
@@ -1089,14 +1069,14 @@ def _openai_tool_use_blocks(message: dict[str, Any]) -> tuple[list[dict[str, Any
         arguments = function.get("arguments")
         try:
             tool_input = (
-                arguments if isinstance(arguments, dict) else json.loads(str(arguments or "{}"))
+                arguments if isinstance(arguments, dict) else json.loads(arguments)
             )
         except (json.JSONDecodeError, TypeError, ValueError):
-            tool_input = {}
             malformed = True
+            continue
         if not isinstance(tool_input, dict):
-            tool_input = {}
             malformed = True
+            continue
         blocks.append(
             {
                 "id": str(raw.get("id") or ""),
@@ -1313,7 +1293,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             )
         return self._generate_non_stream(payload, headers)
 
-    # LLM: 非流式 Anthropic 响应必须同时保留可见正文、规范化工具调用和可安全回放的完整 assistant 块；三者不能互相替代。
+    # LLM: 非流式响应按同一完整性合同保留正文/思考，坏工具参数不能猜补或绕过整轮零执行。
     # 函数用途: 请求一次非流式 Anthropic-compatible 响应，并整理成运行时统一结果。
     def _generate_non_stream(
         self, payload: dict[str, Any], headers: dict[str, str]
@@ -1326,22 +1306,22 @@ class AnthropicCompatibleBackend(HttpBackend):
             obj = self.request_json("/v1/messages", payload, headers)
             try:
                 text = _anthropic_text_from_response(obj)
-                blocks = _anthropic_tool_use_blocks(obj)
+                blocks, malformed = _anthropic_tool_use_blocks(obj)
                 assistant_blocks = _anthropic_assistant_content_blocks(obj)
             except Exception as exc:
                 raise ProviderResponseError(
                     f"无法解析 Anthropic-compatible 响应: {_response_preview(obj)}"
                 ) from exc
-            if _incomplete_stop_reason(obj.get("stop_reason")):
-                # 截断：保留文本、丢弃工具块、标记 truncated（工具循环继续）。
+            incomplete = incomplete_response_fields(str(obj.get("stop_reason") or ""),
+                incomplete_reason="invalid_tool_arguments" if malformed else "")
+            if incomplete:
                 return ModelResponse(
                     text=text,
                     backend=self.name,
                     usage=usage_dict(obj.get("usage")),
                     tool_use_blocks=[],
-                    assistant_content_blocks=[],
-                    truncated=True,
-                    stop_reason=str(obj.get("stop_reason") or ""),
+                    assistant_content_blocks=without_tool_blocks(assistant_blocks),
+                    **incomplete,
                 )
             if text or blocks or attempt > 0 or not _anthropic_has_thinking_without_text(obj):
                 break
@@ -1361,7 +1341,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         )
 
     # LLM: 流式 Anthropic 响应由 StreamCompletion 带回完整有序 assistant 块；thinking delta/block-stop 与
-    # 工具参数计数各走显式 observer，均不得混入 on_chunk、用户正文或重复 response fallback。
+    # 工具参数计数各走显式 observer；EOF/坏参数不重试为空响应，不执行工具，不丢弃已闭合正文/思考。
     # 函数用途: 收集流式响应、保留内部历史，并按供应商块顺序投影思考和工具参数进度。
     def _generate_stream(
         self,
@@ -1383,17 +1363,15 @@ class AnthropicCompatibleBackend(HttpBackend):
                 on_tool_input_progress=on_tool_input_progress,
                 first_event_timeout_seconds=first_event_timeout_seconds,
             )
-            if _incomplete_stop_reason(completion.stop_reason):
-                # 截断：保留文本、丢弃工具块、标记 truncated（工具循环下一轮继续，
-                # harness assembler 同款：截断时丢弃全部 tool-call 块）。
+            incomplete = incomplete_response_fields(completion.stop_reason, incomplete_reason=completion.incomplete_reason)
+            if incomplete:
                 return ModelResponse(
                     text=text,
                     backend=self.name,
                     usage=usage,
                     tool_use_blocks=[],
-                    assistant_content_blocks=[],
-                    truncated=True,
-                    stop_reason=completion.stop_reason,
+                    assistant_content_blocks=without_tool_blocks(list(completion.assistant_content_blocks)),
+                    **incomplete,
                 )
             if text or blocks or attempt > 0:
                 break
@@ -1474,28 +1452,29 @@ def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
     return str(text or "")
 
 
-def _anthropic_tool_use_blocks(obj: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract type==tool_use blocks from a non-stream Anthropic response.
-
-    Each block is normalized to ``{"id","name","input"}``; ``input`` defaults
-    to an empty dict when absent or malformed.
-    """
+# LLM: 原生 input 必须是对象；缺失/坏值只报告协议失败，不转成可以执行的空参数。
+# 函数用途: 读取 Anthropic 非流式工具块，并返回整轮是否存在损坏输入。
+def _anthropic_tool_use_blocks(obj: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
     parts = obj.get("content", [])
     if not isinstance(parts, list):
-        return []
+        return [], False
     blocks: list[dict[str, Any]] = []
+    malformed = False
     for part in parts:
         if not isinstance(part, dict) or part.get("type") != "tool_use":
             continue
         tool_input = part.get("input")
+        if not isinstance(tool_input, dict):
+            malformed = True
+            continue
         blocks.append(
             {
                 "id": str(part.get("id", "") or ""),
                 "name": str(part.get("name", "") or ""),
-                "input": tool_input if isinstance(tool_input, dict) else {},
+                "input": tool_input,
             }
         )
-    return blocks
+    return blocks, malformed
 
 
 # LLM: 该白名单是 Anthropic 响应块进入下一轮请求的唯一边界；禁止原样回放未来新增的输出专用字段。

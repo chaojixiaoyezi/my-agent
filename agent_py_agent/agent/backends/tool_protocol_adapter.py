@@ -75,6 +75,8 @@ class ProviderToolCallResult:
         return not self.violations
 
 
+# LLM: 冻结协议/运行身份不变；截断响应整轮零执行并交还已有 provider 终态，不生成修参重试。
+# 函数用途: 将完整模型响应转换成规范工具调用；不完整响应绝不能凭残存好块启动工具。
 def canonical_tool_calls_from_response(
     request: ProviderToolCallRequest,
 ) -> ProviderToolCallResult:
@@ -90,6 +92,8 @@ def canonical_tool_calls_from_response(
                 ),
             )
         )
+    if bool(getattr(request.response, "truncated", False)):
+        return ProviderToolCallResult()
     boundary_violations = _boundary_violations(request.response, request.protocol.source_protocol)
     if boundary_violations:
         adapted = ProviderToolCallResult(violations=boundary_violations)

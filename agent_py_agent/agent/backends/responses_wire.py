@@ -6,6 +6,7 @@ import json
 
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from .errors import ProviderResponseError
+from .response_completion import incomplete_response_fields, without_tool_blocks
 
 
 # LLM: 仅白名单 reasoning item 可跨轮回放，不保存服务端 response id 或开启远端会话存储。
@@ -115,7 +116,7 @@ def collect_response(lines, on_chunk, on_thinking) -> dict:
     return terminal
 
 
-# LLM: tool JSON 必须完整且是对象；truncated 返回文本但清空全部工具，和现有两种协议一致。
+# LLM: tool JSON 必须完整且是对象；原 incomplete_details.reason 保留，EOF/过滤/坏参数不能伪装为 max_tokens。
 # 函数用途: 解析最终输出为公共 ModelResponse 字段，原生 reasoning 密文永不当正文。
 def response_fields(obj: dict, model: str) -> dict:
     status = obj.get("status")
@@ -141,11 +142,13 @@ def response_fields(obj: dict, model: str) -> dict:
                 blocks.append(call)
             malformed = malformed or not call
     malformed = malformed or len({call["id"] for call in calls}) != len(calls)
-    truncated = status == "incomplete" or malformed
+    stop_reason = str((obj.get("incomplete_details") or {}).get("reason") or "") if status == "incomplete" else "end_turn"
+    failure = "invalid_tool_arguments" if malformed else (stop_reason or "unknown") if status == "incomplete" else ""
+    incomplete = incomplete_response_fields(stop_reason, incomplete_reason=failure)
     return {"text": "".join(text), "usage": obj.get("usage") or {},
-            "tool_use_blocks": [] if truncated else calls,
-            "assistant_content_blocks": [b for b in blocks if b["type"] != "tool_use"] if truncated else blocks,
-            "truncated": truncated, "stop_reason": "max_tokens" if truncated else "end_turn"}
+            "tool_use_blocks": [] if incomplete else calls,
+            "assistant_content_blocks": without_tool_blocks(blocks) if incomplete else blocks,
+            **(incomplete or {"truncated": False, "stop_reason": stop_reason})}
 
 
 # LLM: JSON 和 call_id/name 都合法才产生 canonical 工具块；任何不完整值返回空，不猜补参数。
