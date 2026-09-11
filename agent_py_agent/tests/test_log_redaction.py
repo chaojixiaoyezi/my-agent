@@ -180,3 +180,16 @@ def test_source_private_keys_and_nested_quoted_credentials_still_masked() -> Non
     )
     safe = redact_sensitive_text(source, code_file=True)
     assert safe == '`?token=${encodeURIComponent("<redacted>")}`\n<redacted-private-key>'
+
+
+@pytest.mark.parametrize("secret", ["abc,def", "abc'def", 'abc"def', 'abc`def', 'abc(def)', 'abc[def]'])
+def test_log_query_credentials_do_not_leak_after_source_delimiters(secret: str) -> None:
+    safe = redact_sensitive_text(f'GET https://host/path?token={secret}&page=1 status=200')
+    assert safe == 'GET https://host/path?token=<redacted>&page=1 status=200'
+
+
+@pytest.mark.parametrize("secret", ["abc,def", "abc'def", 'abc"def', 'abc`def', 'abc(def)', 'abc[def]'])
+@pytest.mark.parametrize("scheme", ["https", "postgres"])
+def test_log_userinfo_credentials_do_not_leak_after_source_delimiters(secret: str, scheme: str) -> None:
+    safe = redact_sensitive_text(f'{scheme}://user:{secret}@host/path status=200')
+    assert safe == f'{scheme}://user:<redacted>@host/path status=200'

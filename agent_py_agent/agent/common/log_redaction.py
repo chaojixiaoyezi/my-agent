@@ -50,11 +50,14 @@ _SOURCE_URL_SLOT_RE = re.compile(_SOURCE_URL_SLOT)
 # 槽和普通字符互斥，避免无 @ 的长模板在 userinfo 匹配中指数回溯；兼容 Python 3.10。
 _NOT_SOURCE_URL_SLOT = rf'(?!{_SOURCE_URL_SLOT})'
 _URL_VALUE = rf'(?:{_SOURCE_URL_SLOT}|{_NOT_SOURCE_URL_SLOT}[^&#\s\]\)\"\'`,;])+'
-_SENSITIVE_QUERY_RE = re.compile(
-    r"(?i)([?&](?:access_key|access_token|api_?key|client_secret|credential|id_token|"
+_SENSITIVE_QUERY_PREFIX = (
+    r"([?&](?:access_key|access_token|api_?key|client_secret|credential|id_token|"
     r"password|refresh_token|secret|signature|tenant_access_token|ticket|token|"
-    rf"verification_token|x-amz-credential|x-amz-signature)=)({_URL_VALUE})"
+    r"verification_token|x-amz-credential|x-amz-signature)=)"
 )
+_SENSITIVE_QUERY_RE = re.compile(rf"(?i){_SENSITIVE_QUERY_PREFIX}({_URL_VALUE})")
+# 日志不按源码标点分段：逗号、引号或括号可能就是真凭证的一部分，宁可隐藏尾部标点也不能泄漏尾段。
+_LOG_SENSITIVE_QUERY_RE = re.compile(rf"(?i){_SENSITIVE_QUERY_PREFIX}([^&#\s]+)")
 _AUTHORIZATION_RE = re.compile(r"(?i)(\bAuthorization\s*:\s*Bearer\s+)([^\s,;]+)")
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(\b(?:access_key|access_token|api_?key|app_secret|client_secret|master_key|"
@@ -72,6 +75,7 @@ _URL_PASSWORD_RE = re.compile(
     rf'((?:{_SOURCE_URL_SLOT}|{_NOT_SOURCE_URL_SLOT}[^/@?\#\s\"\'`])+)(@)'
 )
 _URL_TEMPLATE_USERINFO_RE = re.compile(rf'(\b[A-Za-z][A-Za-z0-9+.-]*://)({_SOURCE_URL_SLOT})(@)')
+_LOG_URL_PASSWORD_RE = re.compile(r'(\b[A-Za-z][A-Za-z0-9+.-]*://[^:/?#\s@]+:)([^@\s]+)(@)')
 _SOURCE_STRING_RE = re.compile(r'''(["'])((?:\\.|(?!\1)[^\\\r\n])*)\1''')
 _KNOWN_SECRET_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{10,}|github_pat_[A-Za-z0-9_]{10,}|"
@@ -105,7 +109,8 @@ def redact_sensitive_text(
     text = str(value)
     if not text:
         return text
-    text = _SENSITIVE_QUERY_RE.sub(
+    query_pattern = _SENSITIVE_QUERY_RE if code_file else _LOG_SENSITIVE_QUERY_RE
+    text = query_pattern.sub(
         lambda match: (
             redacted_marker
             if redact_assignment_labels
@@ -138,7 +143,8 @@ def redact_sensitive_text(
             ),
             text,
         )
-    text = _URL_PASSWORD_RE.sub(
+    password_pattern = _URL_PASSWORD_RE if code_file else _LOG_URL_PASSWORD_RE
+    text = password_pattern.sub(
         lambda match: match.group(1) + _redact_url_value(match.group(2), code_file, redacted_marker) + match.group(3),
         text,
     )
