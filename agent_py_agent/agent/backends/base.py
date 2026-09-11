@@ -662,9 +662,10 @@ class OpenAICompatibleBackend(HttpBackend):
         payload.update(chat_sampling_fields(self.api_base, self.model_name, top_p=self.top_p,
             temperature=self.temperature, temperature_explicit=self.temperature_explicit,
             thinking_disabled=request.thinking_disabled))
-        if request.thinking_disabled and urlsplit(self.api_base).hostname == "api.deepseek.com":
-            # 参考 轻量运行时 的 thinkingFormat 适配：官方默认开思考，强制工具探针须显式关闭；不是通用 OpenAI 字段。
-            payload["thinking"] = {"type": "disabled"}
+        if request.thinking_disabled:
+            # 参考 轻量运行时 的 thinkingFormat 适配：官方与 Zen/Go 都默认开思考，强制工具探针须显式关闭；
+            # 不是通用 OpenAI 字段，因此只在已核对端点的分支里写入。
+            _disable_thinking_for(payload, api_base=self.api_base)
         if request.messages is not None:
             payload["messages"] = _openai_messages_from_native(
                 request.messages,
@@ -683,9 +684,10 @@ class OpenAICompatibleBackend(HttpBackend):
 
             payload["tools"] = _openai_tools_from_native(tools)
             payload["tool_choice"] = openai_tool_choice(request.tool_choice or ToolChoice.auto())
-            _complete_required_reasoning_fields(
+            if _requires_thinking_disabled(
                 payload["messages"], api_base=self.api_base, model_name=self.model_name,
-            )
+            ):
+                _disable_thinking_for(payload, api_base=self.api_base)
         elif request.tool_choice is not None and request.tool_choice.mode == "none":
             payload["tool_choice"] = "none"
         if request.response_schema is not None:
@@ -835,21 +837,46 @@ def _openai_non_stream_response(
     )
 
 
-# LLM: 只适配已核对的接口/模型组合；字段默认值仅修改本次 wire payload，绝不回写旧历史。
-# 空值不是恢复出的思考，也不允许覆盖真实 reasoning。其它模型和自定义未知网关保持原消息。
-# 函数用途: 旧会话或跨模型历史未保存思考时，为要求该字段的 DeepSeek 工具请求补空字段。
-def _complete_required_reasoning_fields(
+# LLM: 真机证据(2026-09-11): OpenCode Go 与 DeepSeek 官方在思考模式下会拒绝
+# "assistant 有工具调用但缺少 reasoning_content" 的历史——上游原文
+# "The `reasoning_content` in the thinking mode must be passed back to the API"。
+# 实测：给旧历史补空串不能满足该要求(空串不等于思考原文)，必须显式关闭思考模式或回传真实原文。
+# 因此这里只做两件事：①仅真实非空思考进入 wire 字段；②历史不完整时关思考。
+# 不再补空字段——它既救不了旧会话，又让日志与历史看起来像"有思考"。
+# 函数用途: 判断本次出站历史能否满足思考模式，不满足则显式请求关闭思考。
+def _thinking_mode_supported(messages: list[dict[str, Any]]) -> bool:
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        if not str(message.get("reasoning_content") or "").strip():
+            return False
+    return True
+
+
+# LLM: 只适配已核对的接口/模型组合(DeepSeek 官方 OpenAI 方言与 工具运行时 Zen/Go)；未知网关保持原消息。
+# 历史无法满足思考模式时显式关闭，而不是伪造字段值冒充思考原文。
+# 函数用途: 返回本次是否必须显式关闭思考，供 payload 组装使用。
+def _requires_thinking_disabled(
     messages: list[dict[str, Any]], *, api_base: str, model_name: str,
-) -> None:
+) -> bool:
     endpoint = urlsplit(api_base)
     known_endpoint = endpoint.hostname == "api.deepseek.com" or (
         endpoint.hostname == "opencode.ai" and endpoint.path.startswith("/zen/")
     )
     if not known_endpoint or not model_name.lower().startswith("deepseek-"):
-        return
-    for message in messages:
-        if message.get("role") == "assistant":
-            message.setdefault("reasoning_content", "")
+        return False
+    return not _thinking_mode_supported(messages)
+
+
+# LLM: thinking 是 DeepSeek/Zen 方言的显式关闭开关，不是通用 OpenAI 字段；只写给已核对端点。
+# 函数用途: 在已知 DeepSeek 方言端点上写入关闭思考的请求字段；未知网关不写。
+def _disable_thinking_for(payload: dict[str, Any], *, api_base: str) -> None:
+    endpoint = urlsplit(api_base)
+    known_endpoint = endpoint.hostname == "api.deepseek.com" or (
+        endpoint.hostname == "opencode.ai" and endpoint.path.startswith("/zen/")
+    )
+    if known_endpoint:
+        payload["thinking"] = {"type": "disabled"}
 
 
 def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -969,10 +996,12 @@ def _openai_message_from_native(message: dict[str, Any]) -> list[dict[str, Any]]
 # 函数用途: 把规范化 assistant 块恢复成 Chat Completions 消息，避免插话或最终答复后的工具请求丢失思考字段。
 def _openai_assistant_messages(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     texts = [str(block.get("text") or "") for block in blocks if block.get("type") == "text"]
+    # 空思考块必须按"没有思考"处理：写空串会变成上游拒绝的 reasoning_content=""，
+    # 也会让"历史是否满足思考模式"的判定失真。
     reasoning = [
-        str(block.get("thinking") or "")
-        for block in blocks
-        if block.get("type") == "thinking"
+        text
+        for text in (str(block.get("thinking") or "") for block in blocks if block.get("type") == "thinking")
+        if text.strip()
     ]
     calls = [_openai_function_call(block) for block in blocks if block.get("type") == "tool_use"]
     if texts or calls or reasoning:

@@ -122,8 +122,10 @@ def test_known_reasoning_dialect_replays_legacy_history_without_mutating_it(endp
     backend.request_json = request_json
     backend.generate("继续", messages=messages, tools=_TOOLS)
     assistants = [m for m in captured["messages"] if m["role"] == "assistant"]
-    assert ("reasoning_content" in assistants[0]) is required
-    assert assistants[0].get("reasoning_content", "") == ""
+    # R233 真机修正：旧历史缺思考原文时，补空串不能满足思考模式，必须显式关思考。
+    assert ("thinking" in captured) is required
+    assert captured.get("thinking") == ({"type": "disabled"} if required else None)
+    assert "reasoning_content" not in assistants[0]
     assert assistants[1]["reasoning_content"] == "真实原始思考"
     assert json.dumps(messages, ensure_ascii=False) == before
 
@@ -243,9 +245,11 @@ def test_openai_replays_reasoning_on_final_before_followup_with_tools(reasoning)
     backend.request_json = request_json
     backend.generate("原任务", messages=messages, tools=_TOOLS)
     sent = captured["messages"][1]
-    assert sent == {"role": "assistant", "content": "已定位，接下来继续。",
-                    "reasoning_content": reasoning}
-    assert messages[0]["content"][0]["thinking"] == reasoning
+    expected = {"role": "assistant", "content": "已定位，接下来继续。"}
+    if reasoning.strip():
+        expected["reasoning_content"] = reasoning
+    assert sent == expected, "空思考块不得产出空 reasoning_content 字段"
+    assert messages[0]["content"][0]["thinking"] == reasoning, "历史本身不得被改写"
 
 
 def test_openai_plain_assistant_does_not_invent_reasoning_metadata() -> None:
@@ -276,8 +280,9 @@ def test_openai_response_reasoning_presence_survives_native_replay(stream, reaso
     response = backend.generate("任务", tools=_TOOLS)
     replay = _openai_assistant_messages(response.assistant_content_blocks)[0]
     assert response.text == message["content"]
-    assert ("reasoning_content" in replay) is (reasoning is not None)
-    if reasoning is not None:
+    # 归档仍保留"是否返回过思考字段"；但出站字段只在有真实思考原文时才写。
+    assert ("reasoning_content" in replay) is bool(reasoning and reasoning.strip())
+    if reasoning and reasoning.strip():
         assert replay["reasoning_content"] == reasoning
 
 
@@ -498,3 +503,97 @@ def test_openai_length_native_arguments_are_rejected_as_incomplete() -> None:
     response = backend.generate("read", tools=_TOOLS)
     assert response.truncated is True
     assert getattr(response, "stop_reason", "") == "length"
+
+
+# --------------------------------------------------------------------------- #
+# R233: 思考模式与历史一致性（真机 2026-09-11 OpenCode Go / deepseek-v4-flash）
+# 上游原文: The `reasoning_content` in the thinking mode must be passed back to the API.
+# 补空串不能满足该要求；历史不完整时必须显式关思考，完整时才回传真实原文。
+# --------------------------------------------------------------------------- #
+
+
+def _openai_backend_capturing(captured):
+    from agent_py_agent.agent.backends.base import BackendOptions, OpenAICompatibleBackend
+
+    backend = OpenAICompatibleBackend(
+        BackendOptions(
+            api_base="https://opencode.ai/zen/go/v1",
+            api_key="test-key",
+            model_name="deepseek-v4-flash",
+            stream_enabled=False,
+        )
+    )
+
+    def fake_request_json(path, payload, headers):
+        del path, headers
+        captured["payload"] = payload
+        return {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {},
+        }
+
+    backend.request_json = fake_request_json
+    return backend
+
+
+def _tool_call_round_messages(reasoning):
+    """一条带工具调用的 assistant 历史；reasoning 为 None 表示旧历史没有思考块。"""
+    blocks = []
+    if reasoning is not None:
+        blocks.append({"type": "thinking", "thinking": reasoning})
+    blocks.append({"type": "tool_use", "id": "call_1", "name": "read_file", "input": {"path": "a.txt"}})
+    return [
+        {"role": "user", "content": [{"type": "text", "text": "读文件"}]},
+        {"role": "assistant", "content": blocks},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "内容"}]},
+    ]
+
+
+def test_legacy_history_without_reasoning_disables_thinking_mode():
+    captured = {}
+    backend = _openai_backend_capturing(captured)
+    backend.generate("继续", tools=_TOOLS, messages=_tool_call_round_messages(None))
+
+    payload = captured["payload"]
+    assert payload["thinking"] == {"type": "disabled"}, "旧历史缺思考时必须显式关思考，否则上游 400"
+    assistant = next(m for m in payload["messages"] if m.get("role") == "assistant")
+    assert "reasoning_content" not in assistant, "补空串既救不了旧会话，又会伪装成有思考"
+
+
+def test_empty_thinking_block_does_not_become_empty_reasoning_field():
+    captured = {}
+    backend = _openai_backend_capturing(captured)
+    backend.generate("继续", tools=_TOOLS, messages=_tool_call_round_messages(""))
+
+    payload = captured["payload"]
+    assistant = next(m for m in payload["messages"] if m.get("role") == "assistant")
+    assert "reasoning_content" not in assistant
+    assert payload["thinking"] == {"type": "disabled"}
+
+
+def test_complete_reasoning_history_keeps_thinking_mode_and_original_text():
+    captured = {}
+    backend = _openai_backend_capturing(captured)
+    backend.generate("继续", tools=_TOOLS, messages=_tool_call_round_messages("我需要先读文件"))
+
+    payload = captured["payload"]
+    assert "thinking" not in payload, "历史满足思考模式时不得擅自关闭"
+    assistant = next(m for m in payload["messages"] if m.get("role") == "assistant")
+    assert assistant["reasoning_content"] == "我需要先读文件", "必须回传真实思考原文"
+
+
+def test_unknown_gateway_never_receives_deepseek_thinking_field():
+    from agent_py_agent.agent.backends.base import BackendOptions, OpenAICompatibleBackend
+
+    captured = {}
+    backend = OpenAICompatibleBackend(
+        BackendOptions(api_base="https://example.test/v1", api_key="k",
+                       model_name="deepseek-v4-flash", stream_enabled=False)
+    )
+    backend.request_json = lambda path, payload, headers: (
+        captured.__setitem__("payload", payload)
+        or {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {}}
+    )
+    backend.generate("继续", tools=_TOOLS, messages=_tool_call_round_messages(None))
+
+    assert "thinking" not in captured["payload"], "未知网关不得被强塞专有字段"
