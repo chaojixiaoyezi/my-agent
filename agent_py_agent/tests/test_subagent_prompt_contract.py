@@ -111,8 +111,11 @@ def test_runner_prompt_tells_controlled_exec_leaf_to_apply_and_report_refs():
     assert "stdout_ref、audit_ref" in prompt
     assert "command=[\"python3\",\"-c\"" in prompt
     assert "delete_policy.mode=task_trash" in prompt
-    assert "moved=true" in prompt
-    assert "trash_manifest_ref" in prompt
+    # LLM: 模型侧字段名必须与 controlled_exec 的 payload.trash(asdict(TaskTrashMoveResult)) 一致，
+    # 不能在提示里写成裸 moved 或顶层 trash_manifest_ref，否则子代理会去核对不存在的字段。
+    assert "trash.moved=true" in prompt
+    assert "trash.manifest_ref" in prompt
+    assert "moved=true 且有 trash_manifest_ref" not in prompt
 
 
 def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_useful():
@@ -131,20 +134,32 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     prompt = _build_subagent_runner_prompt(context)
 
     assert "coordinator" in prompt
-    assert "拥有完整基础读写能力" in prompt
-    assert "先读取最小必要材料" in prompt
-    assert "不要在派工前把所有正文" in prompt
-    assert "先创建 child；创建后它会自动运行" in prompt
+    # LLM: R230(13dfa50f) 用统一软边界替换了“coordinator 拥有完整基础读写能力”；派工不再等于永久禁写，
+    # 断言必须跟 canonical 文案走，既不能保留已删除的旧口号，也不能反向要求产品恢复旧措辞。
+    assert "派工不会永久改变你的职责或用户授权" in prompt
+    assert "继续做用户授权内不冲突的工作" in prompt
+    assert "紧急且下一步直接依赖的工作可在用户允许范围内自己处理" in prompt
+    # LLM: 已删除的旧口号改为反断言，防止产品把这套“永久协调禁写”措辞加回来；
+    # 当前真实边界由唯一 coordinator 角色模板给出（先确认边界再派工、不静默接管、仍可做未派工的简单任务）。
+    assert "不要在派工前把所有正文" not in prompt
+    assert "先创建 child；创建后它会自动运行" not in prompt
+    assert "简单任务可以一开始就直接做" not in prompt
+    assert "原样传递父级指定的文件名" not in prompt
+    assert "先读取最小必要材料" not in prompt
+    assert "先读最小必要材料来确认目标、目录和质量边界" in prompt
     assert "不要把所有 child 正文一次性吞回自己的上下文" in prompt
+    assert "不要与它重复工作" in prompt
+    assert "不要在 child 失败、容量不足或结束后静默接管该实现" in prompt
+    assert "尚未派工的简单任务可以直接完成" in prompt
     assert "是否派工由目标规模、可并行性和用户要求决定" in prompt
-    assert "简单任务可以一开始就直接做" in prompt
     assert "不要误以为只能创建 worker" in prompt
     assert "下一层仍使用统一的 create_subagents" in prompt
     assert "创建 child 时" in prompt
+    assert "不需要额外推进" in prompt
     assert "不要替后代提前提交 capability_request" in prompt
     assert "由真正需要该能力的 runner 正式申请" in prompt
     assert "不要让 worker/writer 代写 coordinator 自己的协调证据" in prompt
-    assert "原样传递父级指定的文件名" in prompt
+    assert "原样传递父级指定的文件名" not in prompt
     assert "可以混建" in prompt
     assert "scheduling_warnings" not in prompt
     assert "domain_mismatch" not in prompt

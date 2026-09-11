@@ -1,5 +1,35 @@
 # DESIGN LEDGER
 
+## 2026-09-11 R230 收尾：工具循环不再按正文启发式催停【状态：实现与定向测试通过，未提交】
+
+删除 `_tool_loop_service.py` 的“连续 5 轮只有工具调用、正文为空就注入停止指令”兜底：该判据只看
+`response.text` 是否为空，不读工具成败、结果变化或计划进度，还会把提示词拼进 `params.user_prompt`
+改写用户原始任务，并用正文 marker 判断是否已注入。工作片只按结构化响应、中断和预算推进，
+重复观察走工具结果账（成功重复软提醒），不恢复任何按正文关键词推断停工或完成的启发式。
+对照 会话运行时 `会话运行时-rs/core/src/session/turn.rs` 的 follow-up/终态推进；回归用例
+`test_silent_successful_tool_rounds_do_not_rewrite_user_request` 已能抓回旧行为。
+边界：只删启发式，不新增自动收口策略，也不放宽工具安全与预算门。
+
+同一收尾：子代理 controlled_exec 合同里的回收字段名与真实 payload 对齐（`trash.moved` /
+`trash.manifest_ref`，来自 `controlled_exec` 的 `payload.trash`），不再写不存在的顶层
+`trash_manifest_ref` 与裸 `moved`。
+
+## R231 未完成响应协议【状态：分支 `会话运行时/r231-incomplete-protocol`（a2c227a4）已实现，未合入主线】
+
+按供应商结构化终态判定未完成响应：无显式终态、坏工具参数或内容过滤时整轮零工具执行，
+不把坏 JSON 猜成可执行 `{}`；长度上限、断流、内容过滤各自保留真实原因；已闭合正文与思考继续归档，
+只移除未执行工具块。21 项新反例、134 项后端联合测试在该分支通过，主线合入前另有 6 项失败。
+**合入阻塞（已核）**：`_native_truncated_write_decision` 的 P0-2 长内容分块恢复以“截断空参 write_file”
+进入，而适配器对 `truncated` 响应直接返回空 `calls`，该恢复与 `NATIVE_TRUNCATED_WRITE_LOOP` 出口变为不可达；
+`_protocol_violation_decision` 也不接收 `ToolProtocolViolation`，恢复信号无处落地。
+失败的 6 项即此冲突的不同侧面：`test_native_truncated_write_recovery.py` 5 项（恢复分支与出口不可达，
+`StreamCompletion.truncated` 只在 max_tokens 下为真）、`test_backends_native_tool_use.py::
+test_non_stream_malformed_input_falls_back_to_empty_dict` 1 项（旧断言要求坏 input 猜成 `{}`，
+新语义要求整轮零工具）。两类都属“旧行为被有意替换”，不能靠改断言蒙混，也不能保留两套语义。
+对照 会话运行时 `会话运行时-api/src/sse/responses.rs:423` 把未完成响应升成致命错误：不要照搬，也不要静默丢弃恢复能力。
+下一步必须显式二选一——按结构化事实把恢复接回未完成路径，或明确停用该恢复并从 `会话运行时-main`/长期助手
+找到替代分块写策略；在此决定前不把该分支合入 main。
+
 ## R230 同轮现场修复【状态：开发与原会话验收中】
 
 解决长响应、重复工具与终端交互叠加后难以持续工作的缺口。SSE 已声明的 delta 必须逐字追加，

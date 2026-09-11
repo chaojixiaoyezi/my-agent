@@ -1,5 +1,14 @@
 # STATUS
 
+## R230 收尾：工具循环启发式催停已删（定向通过，未提交）
+
+删除“连续 5 轮无正文就注入停止指令”的兜底；它只看正文是否为空判断停工，还会把提示拼进用户请求。
+回归用例已能抓回旧行为，`test_tool_loop.py` 19 passed / 24 xfailed / 1 xpassed。
+同批修正子代理回收字段名（`trash.moved` / `trash.manifest_ref`）与 R230 协调职责改文案后遗留的陈旧断言。
+R231 未完成响应协议在分支 `会话运行时/r231-incomplete-protocol`（a2c227a4），**未合入**：它会切断 P0-2
+截断分块写恢复与 `NATIVE_TRUNCATED_WRITE_LOOP` 出口，合入前需先决定恢复路径，证据见 `DESIGN_LEDGER.md`。
+本轮没有部署，也没有跑真 TUI 验收。
+
 ## R230 用户现场同轮修复（整合验收中）
 
 当前工程和现场状态见 [R230](docs/audits/R230_CONSOLIDATED_FIXES.md)。成功重复观察、复制顺序、SSE 字节保真、

@@ -1,5 +1,15 @@
 # TESTS
 
+## R230 收尾：工具循环启发式催停删除
+
+`test_tools/test_tool_loop.py::test_silent_successful_tool_rounds_do_not_rewrite_user_request`
+用真实工具循环驱动七轮“只有工具、没有正文”的读取，断言 7 次读取真实成功、模型收到 8 次请求，
+且任何一轮组包都不含被追加的停止指令。已先对旧实现验证为红，再对删除后的实现为绿；
+该文件本轮 19 passed / 24 xfailed / 1 xpassed。测试样例必须写进 `agent.effective_workspace_root`，
+写进 pytest tmp 根会因 owner 墙全部 PATH_NOT_FOUND，不能用删掉成功执行断言的写法蒙混。
+同批：`test_subagent_prompt_contract.py` 对齐 R230 协调职责新文案与 `trash.moved`/`trash.manifest_ref` 字段名。
+R231 未完成响应协议在分支 `会话运行时/r231-incomplete-protocol`，其 6 项失败与合入阻塞见 `DESIGN_LEDGER.md`。
+
 ## R230 同轮联合修复
 
 逐项先红后绿并最终走真实 TUI：SSE 前缀相似的合法增量、多工具参数进度和思考结束顺序、

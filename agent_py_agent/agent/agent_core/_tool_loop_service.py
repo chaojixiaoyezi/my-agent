@@ -173,12 +173,6 @@ class _NativeCompactPlan:
     forced: bool
 
 
-# R2-2: 无进展兜底——模型连续多轮纯工具调用且无正文产出(陷入循环/工具卡住)时,
-# 注入收口提示, 不无限空转。阈值 5 轮; 任一正文输出即重置。
-_STALE_ROUND_LIMIT = 5
-_STALE_NUDGE_MARKER = "[system] 你已连续多轮只调用工具而没有输出任何正文/结论。"
-
-
 def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     config = getattr(agent, "config", None)
     if hasattr(config, "max_tool_rounds"):
@@ -1478,14 +1472,12 @@ def _pending_turn_input_invalidates_response(agent, params: ToolLoopExecuteParam
     return True
 
 
-# LLM: This is the bounded model/tool slice. A task-local parent with active
-# direct children exits as typed interrupted instead of polling or closing DONE.
-# 函数用途: 执行当前工作片的模型与工具循环，并在等直属孩子时安全让出。
+# LLM: 工作片只按结构化响应/中断/预算推进，不能从有无正文猜停工或改写用户请求；重复观察走工具结果账。
+# 函数用途: 执行主子共用的模型工具循环，保留连续工具工作；等待直属孩子时安全让出而不假报完成。
 def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecuteParams):
     final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
     repair_counters, provider_response_repairs = ToolLoopRepairCounters(), 0
-    stale_rounds = 0
 
     while True:
         if is_interrupted():
@@ -1521,26 +1513,6 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             continue
         if natural_reply_verdict == "finish":
             break
-        # R2-2: 连续无正文产出的工具轮 → 注入收口提示(防 40 分钟空转)
-        response_text = str(getattr(final_response, "text", "") or "").strip()
-        tool_calls = list(getattr(final_response, "tool_use_blocks", None) or ())
-        if tool_calls and not response_text:
-            stale_rounds += 1
-        else:
-            stale_rounds = 0
-        if stale_rounds >= _STALE_ROUND_LIMIT and _STALE_NUDGE_MARKER not in str(
-            getattr(params, "user_prompt", "") or ""
-        ):
-            params = replace(
-                params,
-                user_prompt=(
-                    str(getattr(params, "user_prompt", "") or "")
-                    + "\n\n"
-                    + _STALE_NUDGE_MARKER
-                    + "请停止循环, 基于已有信息直接收口回答。"
-                ),
-            )
-            stale_rounds = 0
         repair_counters, action = _response_action(service._agent, params, final_response, repair_counters)
         # 会话运行时 root/child lifecycle boundary: only a plain final response is
         # deferred.  Real tool calls remain executable while children run.

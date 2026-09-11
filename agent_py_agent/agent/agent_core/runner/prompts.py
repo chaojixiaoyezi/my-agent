@@ -398,8 +398,8 @@ def _controlled_exec_contract_lines(context: SubAgentExecutionContext) -> list[s
         "必须用 apply=true，并在最终 refs 中写出执行 payload 里的 stdout_ref、audit_ref。"
         "复杂 python 片段优先用 argv 数组，例如 command=[\"python3\",\"-c\",\"print('x' * 2000)\"]，避免 shell 引号歧义。",
         "- rm/rmdir/unlink 不会进入 command_allowlist，这是安全设计；"
-        "如果 controlled_exec_grants.delete_policy.mode=task_trash，已有 controlled_exec grant 时直接调用 controlled_exec apply=true 执行删除命令，工具会改走 task_trash 并返回 trash_manifest_ref，"
-        "不要为了裸 rm 再提交 capability_request；只有 moved=true 且有 trash_manifest_ref 才能把删除验收写成 PASS。",
+        "如果 controlled_exec_grants.delete_policy.mode=task_trash，已有 controlled_exec grant 时直接调用 controlled_exec apply=true 执行删除命令，工具会改走 task_trash 并在 payload.trash 里返回 moved/manifest_ref，"
+        "不要为了裸 rm 再提交 capability_request；只有 trash.moved=true 且有 trash.manifest_ref 才能把删除验收写成 PASS。",
     ]
 
 

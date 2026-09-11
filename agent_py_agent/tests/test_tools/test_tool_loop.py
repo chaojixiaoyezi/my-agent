@@ -241,6 +241,52 @@ class _UnlimitedRoundsBackend(_NativeFakeBackend):
         return ModelResponse(text="无限轮数配置已正常收口", backend=self.name)
 
 
+# LLM: 假后端顺序请求不同文件并最终自己收口；不发网络，真实工具循环必须保持原用户请求不变。
+# 类用途: 回归有进展但连续不说正文的原生工具工作，避免被轮数启发式催停。
+class _SilentProgressBackend(_NativeFakeBackend):
+    name = "fake_silent_progress"
+
+    # LLM: 记录每次实际模型输入以检查宿主是否篡改任务，不模拟工具执行结果。
+    # 函数用途: 初始化轮数与请求记录，供七轮不同文件读取的断言使用。
+    def __init__(self):
+        self.prompts = []
+
+    # LLM: 前七轮没有正文但有有效工具调用；第八轮明确 final，与提示文字无关。
+    # 函数用途: 驱动真实读取并保存组包结果，让测试发现中途追加的停止指令。
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
+        self.prompts.append(prompt)
+        number = len(self.prompts)
+        if number <= 7:
+            return ModelResponse(
+                text="",
+                tool_use_blocks=[{"id": f"call_progress_{number}", "name": "read_file",
+                                  "input": {"path": f"part-{number}.txt"}}],
+                backend=self.name,
+            )
+        return ModelResponse(text="已读完全部记录并汇总。", backend=self.name)
+
+
+def test_silent_successful_tool_rounds_do_not_rewrite_user_request(tmp_path):
+    # LLM: root 只是构造参数，文件工具读的是 owner 墙生效后的 effective_workspace_root；
+    # 样例必须写进该根，否则模型请求的相对路径全部 PATH_NOT_FOUND，读不到就证明不了“真执行过”。
+    # 函数用途: 用真实工具循环证明合法连续读取既成功执行、又不会被宿主改写用户请求收口。
+    agent = SimpleAgent(_text_agent_config(enable_tools=True, max_tool_rounds=20), tmp_path)
+    workspace = Path(agent.effective_workspace_root)
+    for number in range(1, 8):
+        (workspace / f"part-{number}.txt").write_text(f"记录内容 {number}", encoding="utf-8")
+    backend = _SilentProgressBackend()
+    agent.backend = backend
+    result = agent.run("检查各份记录，完成后汇总。", save=False, allowed_tools=["read_file"])
+    assert result.response == "已读完全部记录并汇总。"
+    assert len(backend.prompts) == 8
+    assert all("你已连续多轮只调用工具" not in prompt for prompt in backend.prompts)
+    assert all("请停止循环, 基于已有信息直接收口回答" not in prompt for prompt in backend.prompts)
+    assert len(result.executed_tools) == 7, [
+        {key: row.get(key) for key in ("ok", "error_code", "output_preview", "failure", "effect")}
+        for row in result.archive_tool_calls
+    ]
+
+
 class _GatewayNaturalDispatchReplyBackend(_NativeFakeBackend):
     name = "fake_gateway_natural_dispatch_reply"
 
