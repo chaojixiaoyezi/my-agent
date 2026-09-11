@@ -13,6 +13,7 @@ from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ...common.value_parsing import text_value as _text
 from ...contracts.state_machine import RunStateFacts, can_dispatch
 from ...conversation.authority import (
+    conversation_execution_cwd,
     conversation_runtime_workspace_roots,
     current_conversation_task_attributes,
 )
@@ -70,6 +71,12 @@ def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: s
 # LLM: 普通后代同享 canonical owner home；精确 Audit 父级保持原授权，不受旧 task 窄目录影响。
 # 函数用途: 从真实父级身份与 owner 读取文件上界；缺 owner 的独立运行环境仍按宿主既有写根。
 def _direct_parent_product_write_roots(agent: object) -> list[str]:
+    return _unique_roots([*_direct_parent_declared_write_roots(agent), *_second_layer_work_roots(agent)])
+
+
+# LLM: 原继承规则保持不变；第二层作用域只在它之上追加，不改动精确 worker 的既有收窄。
+# 函数用途: 按原规则返回直接父级已授权的产品写根。
+def _direct_parent_declared_write_roots(agent: object) -> list[str]:
     manager = getattr(agent, "subagents", None)
     current = getattr(agent, "_current_run_params", None)
     delegated_run_id = current_subagent_run_id(agent)
@@ -124,6 +131,38 @@ def _current_conversation_product_write_roots(agent: object) -> list[str]:
         for raw in conversation_runtime_workspace_roots(attrs)
         if (path := _resolved_path(raw)) is not None
     )
+
+
+# LLM: 文件系统根级目录是操作系统本体而不是"工作目录"：管理员即使 full-access 也不把它
+#   自动继承给子代理。这是写死的少量常量，不是可扩张的名单，也不做任何危险判断。
+#   判断只看归一化后的真实路径，不读模型文字。
+# 常量用途: 列出不得作为子代理第二层作用域自动继承的根级目录。
+_UNINHERITABLE_ROOT_DIRS = ("/", "/System", "/usr", "/bin", "/sbin", "/private/etc", "/etc")
+
+
+# LLM: 管理员 full-access 解除 owner 墙后，子代理仍只继承"父代理当时真正工作的那个目录及其子树"，
+#   而不是父代理的 full-access 档位；普通用户有 owner 墙时不追加，行为完全不变。
+#   来源必须是宿主写入的 conversation_execution_cwd，模型无法用它自己的一句话改写。
+# 函数用途: 返回可以下发给子代理的第二层工作目录作用域（管理员在 owner 墙外工作时）。
+def _second_layer_work_roots(agent: object) -> list[str]:
+    tools = getattr(agent, "tools", None)
+    if _resolved_path(getattr(tools, "owner_scope_root", None)) is not None:
+        return []
+    home = _resolved_path(getattr(getattr(agent, "home_paths", None), "owner_home_dir", None))
+    if home is not None:
+        return []
+    attrs = current_conversation_task_attributes(agent)
+    candidates = [conversation_execution_cwd(attrs), *conversation_runtime_workspace_roots(attrs)]
+    roots: list[str] = []
+    for raw in candidates:
+        path = _resolved_path(raw)
+        if path is None:
+            continue
+        text = str(path)
+        if text in _UNINHERITABLE_ROOT_DIRS:
+            continue
+        roots.append(text)
+    return _unique_roots(roots)
 
 
 # LLM: 精确或无 owner 的父级只继承已授权的产品根；运行归档不能凭目录结构生成文件权限。

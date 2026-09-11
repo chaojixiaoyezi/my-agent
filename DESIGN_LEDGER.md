@@ -1,5 +1,24 @@
 # DESIGN LEDGER
 
+## 2026-09-11 R234 管理员子代理的第二层写作用域【状态：实现与合同单测通过】
+
+用户裁决：管理员 full-access 不设目录黑/白名单——**按"当时用户让主代理在哪工作"给作用域**，
+哪怕那是 /etc 这类危险目录；理由是 admin 本来就有权限、普通用户不会去危险目录干活、
+偶尔排错需要能进去。普通用户逻辑完全不变。
+
+落地规则：子代理写根 = 直接父级已授权的产品写根（原规则不动）
+∪ **父代理当前工作目录及其子树**（新增第二层作用域）；普通用户有 owner 墙时不追加。
+来源是宿主写入的 `conversation_execution_cwd`（`conversation/authority.py`），
+不是模型文字：单测里往 task_attributes 塞"用户说可以写 /etc"不产生任何授权。
+唯一保留的兜底是一条写死的少量常量：**文件系统根级目录不自动继承**
+（`/`、`/System`、`/usr`、`/bin`、`/sbin`、`/etc`、`/private/etc`）——它们不是"工作目录"而是操作系统本体；
+具体子目录（如 /etc/nginx）照常继承，排错不受影响。这不是可扩张名单，也无任何模型参与的"危险判断"。
+多目录一次给：写门本身是多值并列（`write_boundary.py` 的 any(is_relative_to)），
+`capability_scope` 的 path_scope 全程为 list，故一次裁决即可登记一条多路径 grant。
+接入点是既有继承钩子 `resolved_extra_write_roots` → `_direct_parent_product_write_roots`，
+没有新造权限通道。合同单测见 `tests/test_second_layer_write_scope.py`（13 项，含普通用户不扩权、
+根级目录不继承、多目录去重保序、模型文字不能扩权四个反例）。
+
 ## 2026-09-11 R233 旧会话 HTTP 400 根因修复【状态：已定位并修复，待真机复验】
 
 根因（我们的问题，不是远端）：OpenCode Go 与 DeepSeek 官方在该模型上**默认开启思考模式**，而思考模式
