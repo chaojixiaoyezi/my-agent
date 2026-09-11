@@ -21,6 +21,11 @@
 
 ## 当前运行边界（R228 发布候选，验收状态看 STATUS）
 
+追加修复见 `docs/audits/R229_LIVE_FAILURES.md`：普通 assistant 的原生思考也须跨轮回放，
+请求拒绝不等同密钥错误；前台/背景展示交接只按宿主 request ID，不按相同文本删除消息。
+长选区的 OSC 52 长度预算不影响 native/tmux stdin；未知上游 400 不以轮换 session header 自动重试。
+内部 runtime_fact 同样区分请求拒绝与配置错误；typed 不可重试事实不能被错误正文覆盖。全选与复制绑定当前视口。
+
 本入口只保留现行规则与导航；逐轮修复/失败证据见 `docs/audits/`、`DESIGN_LEDGER.md` 和
 `docs/COMPLETED.md`。旧轮次的“已通过”不替代当前发布验收，“待验”也不覆盖后续精确证据。
 

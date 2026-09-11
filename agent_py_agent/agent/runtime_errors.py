@@ -1,4 +1,5 @@
-"""Structured runtime error reports for recoverable agent bookkeeping failures."""
+# LLM: 统一运行错误报告供主子代理及持久事实消费；typed 请求拒绝不是配置错误，文案不能扩展恢复权限。
+# 模块用途: 把异常转成模型和运维能理解的分类，不把一次拒绝说成此前工作未执行。
 
 from __future__ import annotations
 
@@ -8,9 +9,11 @@ from typing import Any
 from .backends.errors import (
     ProviderConfigurationError,
     ProviderRecoverableError,
+    ProviderRequestRejectedError,
     ProviderResponseError,
     is_provider_timeout_error,
     is_provider_transient_error,
+    provider_error_http_status,
 )
 from .runtime_db.operations import RuntimeExecutionBusyError
 
@@ -86,6 +89,8 @@ class RuntimeErrorTemplate:
     operator_message: str
 
 
+# LLM: 分类优先遵循异常类型；请求拒绝必须在配置父类前处理，调用方不得从 model_message 推断重试或执行结果。
+# 函数用途: 生成主代理、子代理和运行账共用的小型错误报告，不推测服务端未返回的拒绝原因。
 def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, Any]:
     """Return the canonical small report for model-visible recoverable errors."""
     if isinstance(exc, DataCorruptionError):
@@ -123,6 +128,21 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
         )
     if isinstance(exc, ProviderRecoverableError):
         return _report(exc, _provider_supply_template(exc), context=context)
+    if isinstance(exc, ProviderRequestRejectedError):
+        report = _report(
+            exc,
+            _template(
+                "provider_request_rejected",
+                "模型服务拒绝了本次请求；具体原因尚未确定，请查看请求诊断。此前已执行的工作不会因此撤销。",
+                "provider rejected this request; cause is not established",
+                recoverable=False,
+            ),
+            context=context,
+        )
+        status = provider_error_http_status(exc)
+        if status is not None:
+            report["http_status"] = status
+        return report
     if isinstance(exc, ProviderConfigurationError):
         return _report(
             exc,

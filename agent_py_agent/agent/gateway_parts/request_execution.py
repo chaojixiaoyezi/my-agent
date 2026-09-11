@@ -1,7 +1,8 @@
 # LLM: Gateway holds transport and conversation projections; actual execution identity is
 # published by RuntimeDB binding before model entry. Never infer it from a reused display task.
 # Request-affine claims are bound before acquisition and retained until terminal commit; unknown
-# operation recovery has a typed public error. Exception prose never decides retry or bypass.
+# operation recovery has a typed public error. Exception prose never decides retry or bypass;
+# request rejection projects only its validated HTTP status, never private response bodies.
 # Canonical final and its delayed repair preserve the same host-owned turn-end and native data.
 # 前台 chunk 同步更新已有 owner/thread main 标量和公开过程；完整显示快照随 canonical final/repair 保存，不进入模型缓存。
 # 模块用途: 执行网关请求并恢复真实回合；保存原正文及结束原因，延迟补交不能把被截断的回复显示成完整成功。
@@ -4146,8 +4147,8 @@ def _complete_gateway_request_audit(
     )
 
 
-# LLM: 每个 claimed request 只创建一个 chunk writer；审批能力只读 client_capabilities.tool_approval，不能按 source 或活跃终端猜测。
-# 函数用途: 执行一条 Gateway 请求、维护 lease/chunk，并写入最终响应。
+# LLM: 每个 claimed request 只创建一个 chunk writer；审批只读 client_capabilities，失败只投影 typed HTTP 事实，不把异常正文公开或用作重试依据。
+# 函数用途: 执行一条 Gateway 请求、维护 lease/chunk，并保存已有执行与本次失败的真实响应。
 def _handle_gateway_request(
     agent: SimpleAgent,
     request_path: Path,
@@ -4193,7 +4194,7 @@ def _handle_gateway_request(
     try:
         _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
     except Exception as exc:
-        from .request_errors import gateway_client_error_message
+        from .request_errors import gateway_client_error_message, gateway_provider_error_projection
 
         error_code = response.get("error_code") or str(
             getattr(exc, "error_code", "") or type(exc).__name__.upper()
@@ -4205,6 +4206,7 @@ def _handle_gateway_request(
                 "error_code": error_code,
                 "error": f"{type(exc).__name__}: {exc}",
                 "user_error": gateway_client_error_message(error_code),
+                **gateway_provider_error_projection(exc),
             }
         )
     finally:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.backends.errors import (
+    ProviderConfigurationError,
     ProviderContextWindowError,
     ProviderRequestRejectedError,
     ProviderTimeoutError,
@@ -63,15 +64,24 @@ def test_provider_timeout_and_response_errors_are_recoverable() -> None:
     assert context_window["category"] == "provider_response"
 
 
-def test_provider_request_rejection_is_configuration_error_not_programmer_bug() -> None:
+def test_provider_request_rejection_is_not_configuration_or_programmer_bug() -> None:
     payload = runtime_error_report(
-        ProviderRequestRejectedError("HTTP 401: model rejected", status_code=401)
+        ProviderRequestRejectedError("HTTP 400: request rejected", status_code=400)
     )
 
     assert payload["recoverable"] is False
-    assert payload["category"] == "provider_configuration"
+    assert payload["category"] == "provider_request_rejected"
     assert payload["error_type"] == "ProviderRequestRejectedError"
     assert payload["category"] != "programmer_bug"
+    assert "密钥" not in payload["model_message"]
+    assert "此前" in payload["model_message"]
+    assert payload["http_status"] == 400
+
+
+def test_configuration_error_keeps_configuration_report() -> None:
+    payload = runtime_error_report(ProviderConfigurationError("missing endpoint"))
+    assert payload["category"] == "provider_configuration"
+    assert payload["recoverable"] is False
 
 
 def test_live_execution_lock_conflict_is_recoverable_busy_not_programmer_bug() -> None:

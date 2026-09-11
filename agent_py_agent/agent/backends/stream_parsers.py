@@ -1,4 +1,5 @@
-
+# LLM: 解析供应商流为 typed delta/completion，保留原生字段存在性，不做正文去重或任务控制。
+# 模块用途: 将 SSE 分为正文、思考、工具参数和用量；修改时检查流式结束与下轮历史回放。
 from __future__ import annotations
 
 import json
@@ -70,9 +71,12 @@ def openai_stream_contents(lines: Iterable[str]) -> Iterator[str]:
             yield event.content
 
 
+# LLM: SSE delta 是增量，thinking 的存在与空字符串要分别保存；消费者不可将空字段当成未返回。
+# 函数用途: 分离正文、思考和工具事件，并在收尾保留下一轮所需的原生思考字段。
 def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
     tool_acc = _OpenAIToolCallAccumulator()
     reasoning_parts: list[str] = []
+    reasoning_present = False
     saw_done = False
     finish_reason = ""
     for line in lines:
@@ -88,6 +92,7 @@ def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         tool_acc.consume(delta.get("tool_calls"))
         content = delta.get("content")
         reasoning = delta.get("reasoning_content")
+        reasoning_present = reasoning_present or "reasoning_content" in delta
         finish_reason = str(choice.get("finish_reason") or "") or finish_reason
         usage = _usage_dict(obj.get("usage"))
         if isinstance(reasoning, str) and reasoning:
@@ -104,7 +109,7 @@ def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         open_tool_buffer=parse_failed,
         assistant_content_blocks=(
             ({"type": "thinking", "thinking": "".join(reasoning_parts)},)
-            if reasoning_parts
+            if reasoning_present
             else ()
         ),
     )

@@ -27,6 +27,39 @@ from agent_py_agent.agent.gateway_parts.request_worker import (
 from agent_py_agent.agent.settings import AgentConfig
 
 
+def test_request_rejection_does_not_guess_credentials_or_deny_prior_work():
+    from agent_py_agent.agent.backends.errors import (
+        ProviderRequestRejectedError,
+        provider_configuration_report,
+    )
+    from agent_py_agent.agent.gateway_parts.request_errors import gateway_client_error_message
+
+    exc = ProviderRequestRejectedError("HTTP 400", status_code=400)
+    for text in (gateway_client_error_message(exc.error_code), provider_configuration_report(exc)):
+        assert "请求" in text
+        assert "配置" not in text
+        assert "均未执行" not in text
+        assert "密钥" not in text
+
+
+@pytest.mark.parametrize("status", [400, 401, 422, 0, True, "400", 900])
+def test_rejection_projection_exposes_only_typed_http_status(status):
+    from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError
+    from agent_py_agent.agent.gateway_parts.request_errors import gateway_provider_error_projection
+
+    exc = ProviderRequestRejectedError("private error HTTP 503", details={"key": "private-value"})
+    exc.status_code = status
+    projection = gateway_provider_error_projection(exc)
+    assert projection["error_origin"] == "model_provider"
+    assert "private" not in json.dumps(projection)
+    if type(status) is int and 100 <= status <= 599:
+        assert projection["http_status"] == status
+        assert f"HTTP {status}" in projection["user_error"]
+    else:
+        assert "http_status" not in projection
+        assert "HTTP" not in projection["user_error"]
+
+
 def _make_agent(tmp_path: Path) -> tuple[SimpleAgent, object]:
     cfg = AgentConfig(
         model_backend="echo",
@@ -340,7 +373,9 @@ def test_failed_request_preserves_structured_tool_progress_in_terminal_response(
             },
             "",
         )
-        raise RuntimeError("provider failed after tools")
+        from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError
+
+        raise ProviderRequestRejectedError("private provider response", status_code=400)
 
     monkeypatch.setattr(request_execution, "_run_gateway_ask", fail_after_progress)
 
@@ -349,6 +384,10 @@ def test_failed_request_preserves_structured_tool_progress_in_terminal_response(
     assert response["ok"] is False
     assert response["status"] == "failed"
     assert response["tool_rounds"] == 3
+    assert response["http_status"] == 400
+    assert response["error_origin"] == "model_provider"
+    assert "HTTP 400" in response["user_error"]
+    assert "private" not in response["user_error"]
 
 
 def test_failed_request_archive_preserves_typed_terminal_cause(

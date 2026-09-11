@@ -303,6 +303,7 @@ docs/
 |-- audits/R226_PERMISSIONS_MODEL_REPORT.md # 当前模型身份与主/子自主权限修复、真实 TUI 证据和部署边界
 |-- audits/R227_MODEL_COMPACT_TUI_REPORT.md # 模型切换、压缩续接、子终端、正文与 Shell 故障的真实验收台账
 |-- audits/R228_RELEASE_CANDIDATE.md     # 发布候选的误判修复、代码文档清理、包检查与真实验收边界
+|-- audits/R229_LIVE_FAILURES.md         # 现场请求拒绝、重复输出、读取投影和 TUI 交接的故障证据
 |-- audits/r223-report/                 # R223 中文只读 HTML 报告的独立公开目录，不放配置或任务产物
 |   `-- index.html                     # 87 项大白话、技术说明、剩余问题与验证证据快照，无外部依赖
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
@@ -333,6 +334,7 @@ docs/
 - `docs/audits/R226_PERMISSIONS_MODEL_REPORT.md`：权限菜单、当前模型与并行上下文修复的验收台账；区分 TUI 实测、定向回归和本机待切换版本。
 - `docs/audits/R227_MODEL_COMPACT_TUI_REPORT.md`：区分大窗口压缩成功与后续业务续接失败，记录原样工具路径恢复与部署复验。
 - `docs/audits/R228_RELEASE_CANDIDATE.md`：本批次发布条件、失败样本、修复影响与尚未关闭的外部/业务问题；不把收集测试算成全部执行通过。
+- `docs/audits/R229_LIVE_FAILURES.md`：本轮故障的现场编号、技术原因、大白话、修法与待验边界。
 - `agent_py_agent/vendor/bubblewrap/`：离线 bwrap 的第三方许可与对应源码材料；升级二进制时同步更新并验包。
 - `agent/common/text_file_window.py`：64 KiB 流式索引、有限检查点与页面 cookie；编码和字符坐标只保留一个实现。
 - `agent/common/file_version.py`：read_file 返回观察版本，write/edit/patch 明确携带前置条件；外部写入者不被强制纳管。

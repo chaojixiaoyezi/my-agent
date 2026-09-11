@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from ..backends.errors import ProviderRequestRejectedError, provider_error_http_status
 from ..runtime_errors import runtime_error_report
 
 
@@ -36,7 +37,7 @@ class SystemCommandRoutingError(RuntimeError):
 
 # LLM: Client-visible failure prose is selected only from structured error_code; provider and
 # client-workspace and active-turn recovery failures never expose raw exception text or suggest unsafe replay.
-# 函数用途: 区分压缩、持久化和执行结果未确认；压缩失败保留历史，不暗示文件损坏或需要重做任务。
+# 函数用途: 区分压缩、持久化与请求拒绝；不把未知 400 归咎密钥，不否定失败前已执行的工作。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
     if code.startswith("COMPACT_"):
@@ -46,7 +47,7 @@ def gateway_client_error_message(error_code: object) -> str:
         )
     messages = {
         "PROVIDER_REQUEST_REJECTED": (
-            "模型服务拒绝了当前配置。请检查接口地址、模型名称和密钥是否属于同一服务后重试。"
+            "模型服务拒绝了本次请求，本轮已停止。具体原因请查看请求诊断；此前已执行的工作不会因此撤销。"
         ),
         "PROVIDER_CONFIGURATION_INVALID": (
             "模型服务配置不可用。请检查接口地址、模型名称和密钥是否属于同一服务后重试。"
@@ -72,6 +73,20 @@ def gateway_client_error_message(error_code: object) -> str:
         ),
     }
     return messages.get(code, "任务处理失败，请稍后重试；如持续失败，请查看运行诊断。")
+
+
+# LLM: 仅 typed 请求拒绝追加来源和 HTTP 白名单；不公开 details/body/headers，也不凭文本把主请求归咎子代理。
+# 函数用途: 给当前请求失败补上可见状态码，让用户定位这一轮，未知原因仍保持未知。
+def gateway_provider_error_projection(exc: BaseException) -> dict:
+    if not isinstance(exc, ProviderRequestRejectedError):
+        return {}
+    status = provider_error_http_status(exc)
+    message = gateway_client_error_message(exc.error_code)
+    projection = {"error_origin": "model_provider", "user_error": message}
+    if status is not None:
+        projection["http_status"] = status
+        projection["user_error"] = f"模型请求 HTTP {status}：{message}"
+    return projection
 
 
 def gateway_request_load_error_response(

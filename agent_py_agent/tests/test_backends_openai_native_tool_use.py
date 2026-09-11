@@ -34,6 +34,40 @@ _TOOLS = [
 ]
 
 
+@pytest.mark.parametrize("endpoint,model,required", [
+    ("https://api.deepseek.com/v1", "deepseek-v4-flash", True),
+    ("https://opencode.ai/zen/go/v1", "deepseek-v4-flash", True),
+    ("https://opencode.ai/zen/v1", "deepseek-v4-pro", True),
+    ("https://opencode.ai/zen/go/v1", "minimax-m2.7", False),
+    ("https://api.example.com/v1", "deepseek-v4-flash", False),
+    ("https://api.deepseek.com.example.org/v1", "deepseek-v4-flash", False),
+])
+def test_known_reasoning_dialect_replays_legacy_history_without_mutating_it(endpoint, model, required):
+    backend = OpenAICompatibleBackend(replace(_OPTIONS, api_base=endpoint, model_name=model))
+    messages = [
+        {"role": "assistant", "content": "旧文本答复"},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "真实原始思考"},
+            {"type": "tool_use", "id": "c", "name": "read_file", "input": {"path": "a"}},
+        ]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c", "content": "a"}]},
+    ]
+    before = json.dumps(messages, ensure_ascii=False)
+    captured = {}
+
+    def request_json(path, payload, headers):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "继续"}, "finish_reason": "stop"}]}
+
+    backend.request_json = request_json
+    backend.generate("继续", messages=messages, tools=_TOOLS)
+    assistants = [m for m in captured["messages"] if m["role"] == "assistant"]
+    assert ("reasoning_content" in assistants[0]) is required
+    assert assistants[0].get("reasoning_content", "") == ""
+    assert assistants[1]["reasoning_content"] == "真实原始思考"
+    assert json.dumps(messages, ensure_ascii=False) == before
+
+
 def test_openai_non_stream_extracts_native_tool_calls_and_translates_schema() -> None:
     backend = OpenAICompatibleBackend(_OPTIONS)
     captured = {}
@@ -131,6 +165,60 @@ def test_openai_native_history_translates_tool_calls_and_results() -> None:
     assert sent[2]["reasoning_content"] == "I should inspect the file."
     assert sent[2]["tool_calls"][0]["function"]["arguments"] == '{"path": "README.md"}'
     assert sent[3] == {"role": "tool", "tool_call_id": "call_1", "content": "file contents"}
+
+
+@pytest.mark.parametrize("reasoning", ["本轮已确认文件位置。", ""])
+def test_openai_replays_reasoning_on_final_before_followup_with_tools(reasoning) -> None:
+    backend = OpenAICompatibleBackend(_OPTIONS)
+    captured = {}
+    messages = [{"role": "assistant", "content": [
+        {"type": "thinking", "thinking": reasoning},
+        {"type": "text", "text": "已定位，接下来继续。"},
+    ]}, {"role": "user", "content": [{"type": "text", "text": "现在进展如何？"}]}]
+
+    def request_json(path, payload, headers):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "继续"}, "finish_reason": "stop"}]}
+
+    backend.request_json = request_json
+    backend.generate("原任务", messages=messages, tools=_TOOLS)
+    sent = captured["messages"][1]
+    assert sent == {"role": "assistant", "content": "已定位，接下来继续。",
+                    "reasoning_content": reasoning}
+    assert messages[0]["content"][0]["thinking"] == reasoning
+
+
+def test_openai_plain_assistant_does_not_invent_reasoning_metadata() -> None:
+    from agent_py_agent.agent.backends.base import _openai_assistant_messages
+
+    assert _openai_assistant_messages([{"type": "text", "text": "hello"}]) == [
+        {"role": "assistant", "content": "hello"}
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("reasoning", [None, "", "已经确认。"])
+def test_openai_response_reasoning_presence_survives_native_replay(stream, reasoning):
+    from agent_py_agent.agent.backends.base import _openai_assistant_messages
+
+    backend = OpenAICompatibleBackend(replace(_OPTIONS, stream_enabled=stream))
+    message = {"content": "已完成这一步。"}
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
+    if stream:
+        backend.request_stream = lambda *_: [
+            json.dumps({"choices": [{"delta": message, "finish_reason": "stop"}]}), "[DONE]",
+        ]
+    else:
+        backend.request_json = lambda *_: {
+            "choices": [{"message": message, "finish_reason": "stop"}]
+        }
+    response = backend.generate("任务", tools=_TOOLS)
+    replay = _openai_assistant_messages(response.assistant_content_blocks)[0]
+    assert response.text == message["content"]
+    assert ("reasoning_content" in replay) is (reasoning is not None)
+    if reasoning is not None:
+        assert replay["reasoning_content"] == reasoning
 
 
 def test_openai_empty_native_history_keeps_system_before_original_user_prompt() -> None:

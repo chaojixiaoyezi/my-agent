@@ -1540,6 +1540,71 @@ def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:
     assert notices[0].block_id != notices[1].block_id
 
 
+def test_late_foreground_attachment_replaces_early_history_not_other_messages(tmp_path):
+    from agent_py_agent.agent.conversation.history_display import (
+        conversation_history_display_events,
+    )
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnSummary
+
+    store, thread = _message_store(tmp_path)
+    user = store.append_message({
+        "thread_id": thread.thread_id, "role": "user", "content": "你是什么模型",
+        "metadata": {"gateway_request_id": "gwreq-queued"},
+    })
+    final = store.append_message({
+        "thread_id": thread.thread_id, "role": "assistant", "content": "本轮回答",
+        "metadata": {"gateway_request_id": "gwreq-queued", "assistant_part_id": "final"},
+    })
+    events = conversation_history_display_events((user, final))
+    runtime = TuiRuntime("session-1")
+    observer = TuiRuntime("observer")
+    runtime.enqueue_prompt("different-request", user.content, queued=False)
+    for view in (runtime, observer):
+        view.publish_recovered_history((), display_events=events)
+    before = store.message_byte_offset_after(thread.thread_id, final.message_id)
+
+    runtime.register_gateway_request("gwreq-queued")
+    runtime.register_gateway_request("gwreq-queued")
+    runtime.enqueue_prompt("gwreq-queued", user.content, queued=True)
+    runtime.begin_turn("gwreq-queued")
+    runtime.complete_turn("gwreq-queued", TuiTurnSummary(response_text=final.content))
+    runtime.publish_recovered_history((), display_events=events)
+
+    assert [(b.role, b.text) for b in runtime.store.snapshot().stable_blocks] == [
+        ("user", user.content), ("user", user.content), ("assistant", final.content),
+    ]
+    assert [(b.role, b.text) for b in observer.store.snapshot().stable_blocks] == [
+        ("user", user.content), ("assistant", final.content),
+    ]
+    assert not runtime.store.snapshot().queued_inputs
+    assert store.message_byte_offset_after(thread.thread_id, final.message_id) == before
+
+
+def test_late_foreground_attachment_retires_early_stream_and_simple_final():
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("session-early-stream")
+    stream = "bg-main:thread:attempt"
+    event = {
+        "schema": "background_transcript_event.v1", "seq": 1,
+        "request_id": stream, "block_id": f"{stream}:thinking:1",
+        "kind": "thinking_started", "phase": "started", "payload": {},
+        "gateway_request_id": "gwreq-queued",
+    }
+    # 使用产品实际 schema，避免一个被拒绝的夹具冒充成功去重。
+    from agent_py_agent.cli.chat_parts.tui_runtime import _BACKGROUND_TRANSCRIPT_SCHEMA
+    event["schema"] = _BACKGROUND_TRANSCRIPT_SCHEMA
+    runtime.publish_background_transcript_events([event])
+    assert runtime.store.snapshot().active_blocks
+    runtime.publish_background_response(
+        "已完成", thread_id="thread", message_id="message", gateway_request_id="gwreq-queued",
+    )
+    runtime.register_gateway_request("gwreq-queued")
+    runtime.publish_background_transcript_events([{**event, "seq": 2}])
+    assert not runtime.store.snapshot().active_blocks
+    assert not runtime.store.snapshot().stable_blocks
+
+
 def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     from agent_py_agent.cli.chat_parts.tui_block_renderer import (
         TuiRenderContext,

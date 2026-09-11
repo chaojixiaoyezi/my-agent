@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## R229 错误与显示边界
+
+`request_errors.gateway_client_error_message` 只按结构化错误码选择文案，PROVIDER_REQUEST_REJECTED
+不等同配置或凭据错误，不声称此前没有工具执行；内部异常仍不直接公开。
+前台 request 所有权只用于客户端显示去重，不能改变 Gateway canonical 消息、执行状态与消费游标。
+`runtime_error_report` 在配置父类之前归类 typed 请求拒绝；`provider_error_http_status` 只读合法整数属性，
+供分类与 `gateway_provider_error_projection` 共用。私有 response body/details/headers 不进入公开错误提示。
+`provider_transient_auto_resume` 对配置/拒绝先上抛，不能经正文 capacity/timeout 扩大重试范围。
+
 ## R228 快照写入与摘要请求边界
 
 `context_usage.save_context_usage_snapshot` 复用 ConversationStore 的 generation CAS；Gateway 仅消费

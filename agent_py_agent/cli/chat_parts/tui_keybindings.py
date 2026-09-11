@@ -1013,7 +1013,7 @@ def _tui_enqueue_job(
 
 # LLM: Gateway has already created the canonical queued request. This job only attaches the
 # existing request id to the one worker queue; it must never POST the user text a second time.
-# 函数用途: 把 Gateway 自动转入下一轮的请求接到本地 TUI 队列中继续显示。
+# 函数用途: 先按确切请求号接回显示、撤下同源副本，再加入本地队列；不二次提交用户文字。
 def _tui_attach_gateway_job(
     params: TuiCreateKeybindingsParams,
     text: str,
@@ -1045,6 +1045,7 @@ def _tui_attach_gateway_job(
     with params.state_lock:
         params.pending_jobs_ref_for_enqueue[0] += 1
     runtime = _required_tui_runtime(params)
+    runtime.register_gateway_request(request_id)
     runtime.enqueue_prompt(request_id, display_text, queued=True)
     params.jobs.put(job)
 
@@ -1858,15 +1859,15 @@ def _copy_transcript_selection(event, params: TuiCreateKeybindingsParams) -> boo
     return True
 
 
-# LLM: clipboard 输出仅编码用户已显式选中的可见文本；超大文本仍进 app clipboard，但不发送可能被终端截断的 OSC 52。
-# 函数用途: 同时写 prompt_toolkit 内部剪贴板、本机系统剪贴板和终端 OSC 52 剪贴板。
+# LLM: clipboard 只复制显式选区；OSC 52 的长度预算不能截断 native/stdin/tmux 通道。
+# 函数用途: 同时写应用、本机和 tmux 剪贴板；仅超大终端控制序列不发送，避免长文本看似复制却丢失。
 def _write_selection_clipboard(application: Any, text: str) -> None:
     from prompt_toolkit.clipboard import ClipboardData
 
     normalized = str(text or "")
     application.clipboard.set_data(ClipboardData(normalized))
     encoded = normalized.encode("utf-8")
-    if not encoded or len(encoded) > 100_000:
+    if not encoded:
         return
     # native 路径先于 tmux/OSC 52 启动（终端交互 同款）：无 SSH_CONNECTION 时本机
     # 剪贴板工具直接写系统剪贴板，避免快速切走焦点后粘贴被 tmux 等待拖慢。
@@ -1884,6 +1885,8 @@ def _write_selection_clipboard(application: Any, text: str) -> None:
             name="my-agent-tui-clipboard",
             daemon=True,
         ).start()
+    if len(encoded) > 100_000:
+        return
     output = getattr(application, "output", None)
     write_raw = getattr(output, "write_raw", None)
     if not callable(write_raw):
@@ -1954,11 +1957,11 @@ def _run_clipboard_tool(args: list[str], text: str) -> bool:
 
 # LLM: Documented tmux releases put clipboard write-through on `set-buffer -w`,
 # not `load-buffer`. iTerm2 keeps the stdin-only buffer path because tmux OSC 52
-# write-through can terminate that SSH client; raw OSC remains a best-effort path.
-# 函数用途: 把已选文本写入 tmux buffer，并在兼容终端上转发到外层剪贴板。
+# write-through can terminate that SSH client; large selections also use stdin to avoid ARG_MAX.
+# 函数用途: 把选区放进 tmux 缓冲；长文本不塞命令参数或超大 OSC，普通文本才尝试外层剪贴板转发。
 def _load_tmux_clipboard_buffer(text: str) -> bool:
     normalized = str(text or "")
-    if os.environ.get("LC_TERMINAL") == "iTerm2":
+    if os.environ.get("LC_TERMINAL") == "iTerm2" or len(normalized.encode("utf-8")) > 100_000:
         args = ["tmux", "load-buffer", "-"]
         run_kwargs: dict[str, Any] = {"input": normalized, "text": True}
     else:

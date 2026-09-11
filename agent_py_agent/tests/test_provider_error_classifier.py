@@ -10,8 +10,10 @@ from __future__ import annotations
 import pytest
 
 from agent_py_agent.agent.backends.errors import (
+    ProviderConfigurationError,
     ProviderContextWindowError,
     ProviderQuotaExhaustedError,
+    ProviderRequestRejectedError,
     ProviderTransientError,
 )
 from agent_py_agent.agent.contracts.provider_error_classifier import (
@@ -20,6 +22,35 @@ from agent_py_agent.agent.contracts.provider_error_classifier import (
 )
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.parametrize("status", [400, 401, 422])
+def test_typed_rejection_status_wins_over_retry_words(status: int) -> None:
+    from agent_py_agent.agent.agent_core.provider_transient_auto_resume import (
+        _raise_unless_provider_transient,
+    )
+
+    error = ProviderRequestRejectedError(
+        "invalid request for model capacity setting; reference HTTP 503", status_code=status,
+    )
+    result = classify_provider_error(error)
+    assert result.status_code == status
+    assert not result.retryable and not result.should_compress
+    with pytest.raises(ProviderRequestRejectedError) as caught:
+        _raise_unless_provider_transient(error)
+    assert caught.value is error
+
+
+def test_typed_configuration_does_not_enter_text_retry_fallback() -> None:
+    from agent_py_agent.agent.agent_core.provider_transient_auto_resume import (
+        _raise_unless_provider_transient,
+    )
+
+    error = ProviderConfigurationError("timeout value is invalid")
+    result = classify_provider_error(error)
+    assert not result.retryable and not result.should_compress
+    with pytest.raises(ProviderConfigurationError):
+        _raise_unless_provider_transient(error)
 
 
 @pytest.mark.parametrize(

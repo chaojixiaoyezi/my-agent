@@ -18,6 +18,32 @@ def _provider(store: TuiStateStore) -> TuiFrameProvider:
     return TuiFrameProvider(store, lambda width: TuiRenderContext(width=width))
 
 
+def test_view_select_all_routes_to_active_viewport_and_preserves_other_selection() -> None:
+    from agent_py_agent.cli.chat_parts.tui_transcript import TuiTranscriptModeState
+
+    store = TuiStateStore()
+    seq = TuiEventSequencer("select-all-view", clock=lambda: 1.0)
+    store.publish(seq.emit("assistant_completed", "completed", "answer", {"text": "第一行\n第二行"}))
+    mode = TuiTranscriptModeState()
+    view = make_tui_transcript_view(
+        store, lambda width: TuiRenderContext(width=width), transcript_state=mode,
+    )
+    view.control.create_content(80, 5)
+    view.select_all()
+    normal = view.selected_text()
+    assert "第一行" in normal and "第二行" in normal
+
+    view.clear_selection()
+    mode.enter(store.snapshot())
+    mode.toggle_show_all()
+    view.modal_control.create_content(80, 5)
+    view.select_all()
+    assert "第一行" in view.selected_text() and "第二行" in view.selected_text()
+    assert view.control.selected_text() == ""
+    mode.exit()
+    assert view.selected_text() == ""
+
+
 def test_control_reads_formatted_lines_without_building_transcript_string() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("view", clock=lambda: 1.0)

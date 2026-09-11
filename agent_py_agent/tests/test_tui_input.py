@@ -1794,3 +1794,32 @@ def test_write_selection_clipboard_starts_native_thread_when_local(monkeypatch) 
 
     assert [name for name, _ in started] == ["_copy_native_clipboard"]
     assert app.clipboard.get_data().text == "本地复制"
+
+
+def test_large_selection_uses_native_and_tmux_without_oversized_osc(monkeypatch) -> None:
+    from prompt_toolkit.clipboard import InMemoryClipboard
+
+    started = []
+    raw = []
+    app = SimpleNamespace(clipboard=InMemoryClipboard(), output=SimpleNamespace(write_raw=raw.append))
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setenv("TMUX", "test")
+    monkeypatch.setattr(tui_keybindings.threading.Thread, "start",
+                        lambda thread: started.append((thread._target.__name__, thread._args)))
+    text = "长文本复制" * 9000
+    tui_keybindings._write_selection_clipboard(app, text)
+    assert [name for name, _ in started] == ["_copy_native_clipboard", "_load_tmux_clipboard_buffer"]
+    assert all(args == (text,) for _, args in started)
+    assert app.clipboard.get_data().text == text
+    assert raw == []
+
+
+def test_large_tmux_selection_uses_stdin_instead_of_argv(monkeypatch) -> None:
+    calls = []
+    monkeypatch.delenv("LC_TERMINAL", raising=False)
+    monkeypatch.setattr(tui_keybindings.subprocess, "run",
+                        lambda args, **kwargs: calls.append((args, kwargs)) or SimpleNamespace(returncode=0))
+    text = "长选区" * 50000
+    assert tui_keybindings._load_tmux_clipboard_buffer(text)
+    assert calls[0][0] == ["tmux", "load-buffer", "-"]
+    assert calls[0][1]["input"] == text

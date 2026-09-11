@@ -1,5 +1,16 @@
 # COMPLETED
 
+## R229 已落地切片（原长会话请求拒绝仍开放）
+
+修正前台/背景交接重复显示，按宿主 request ID 定位，不删除相同文本的不同请求。
+OpenAI-compatible 普通 assistant 也保留真实/显式空思考；已知 DeepSeek/Zen 工具协议补齐旧历史空字段，
+仅改出站副本，不伪造旧思考或修改 canonical。未知请求拒绝不再提示密钥错或否认此前执行。
+长选区不再被 OSC 52 预算连带阻断系统剪贴板；超大 tmux 文本通过 stdin，避免参数长度上限。
+追加 Ctrl+A view 接线、主子 runtime_fact 分类与 typed 拒绝不进入文本重试；安全 HTTP 投影不含私有正文。
+最终 14 文件 463 项定向通过；.10 OpenCode Go 新会话和两个 child 已验，本机旧长会话继续 400。
+本机 R229d 已部署，原 TUI 166215 字节复制与 HTTP 400 显示通过，配置/任务/记忆不变；
+完整状态见 [R229 台账](audits/R229_LIVE_FAILURES.md)，不计整批结案。
+
 ## R228 已落地切片（不代表整批已发布）
 
 Context 压缩窗口与持久数字同源；HTTP 400 不再猜 transient；bug-finder 检查职责不暗含修复，验证指令区分

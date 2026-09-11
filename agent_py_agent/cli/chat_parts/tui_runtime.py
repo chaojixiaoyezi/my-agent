@@ -843,7 +843,7 @@ class _TuiConversationBoundaryRuntimeMixin:
             return inserted
 
     # LLM: 静态事件不接管 Todo；本页前台按 exact 请求去重，后台独立工作片仍显示，不改 canonical 原记录。
-    # 函数用途: 恢复主/子历史卡片与完成检查点；final接替同片候选，未final的检查点不重基活动流。
+    # 函数用途: 恢复主/子历史卡片并保留前台来源编号，供迟到接回时替换副本；不改原始会话。
     def _publish_recovered_display_events(self, events: tuple[dict[str, object], ...]) -> None:
         background_blocks: dict[str, list[str]] = {}
         for item in events:
@@ -866,6 +866,9 @@ class _TuiConversationBoundaryRuntimeMixin:
             ):
                 continue
             display_payload = {key: value for key, value in payload.items() if key not in _HISTORY_LIVE_PLAN_FIELDS}
+            display_payload.pop("foreground_gateway_request_id", None)
+            if isinstance(gateway_id, str) and gateway_id:
+                display_payload["foreground_gateway_request_id"] = gateway_id
             covered = str(item.get("covered_background_request_id") or "")
             replacement = item.get("replaces_live_block_id")
             if (
@@ -1006,6 +1009,19 @@ class _TuiConversationBoundaryRuntimeMixin:
 # and must not gain independent state or event sequencing.
 # 类用途: 为 TuiRuntime 提供后台主任务和直属子代理快照的唯一公开更新入口。
 class _TuiBackgroundActivityRuntimeMixin:
+    # LLM: 仅登记宿主分配的 request ID；和背景事件消费持有同一显示锁，不改变执行权限或状态。
+    # 函数用途: 前台接回排队请求时撤下早到背景副本，并拒绝晚到副本；相同正文不同请求不合并。
+    def register_gateway_request(self, request_id: str) -> None:
+        normalized = _required_request_id(request_id)
+        with self._lock:
+            if normalized in self._owned_gateway_requests:
+                return
+            self._owned_gateway_requests.add(normalized)
+            self._publish(
+                "foreground_request_attached", "completed", f"foreground-attach:{normalized}",
+                {"gateway_request_id": normalized}, request_id=normalized,
+            )
+
     # LLM: This is the single readback for display polling cadence; it delegates to the same
     # controller that consumes canonical activity snapshots and never parses rendered text.
     # 函数用途: 告诉后台轮询线程当前会话是否需要保持一秒刷新。
@@ -1119,7 +1135,7 @@ class _TuiBackgroundActivityRuntimeMixin:
                 "assistant_completed",
                 "completed",
                 block_id,
-                {"text": text},
+                {"text": text, "foreground_gateway_request_id": gateway_request_id},
                 request_id=request_id,
             )
 
@@ -1128,6 +1144,13 @@ class _TuiBackgroundActivityRuntimeMixin:
     # bg-agent namespace, then reuses one sequencer/reducer for the current page.
     # 函数用途: 接收同会话公开过程；原页跳过自己的前台副本，完整快照覆盖后不再重放旧流。
     def publish_background_transcript_events(self, value: object) -> int:
+        with self._lock:
+            return self._publish_background_transcript_events_locked(value)
+
+    # LLM: Caller holds the display lock through filtering and publishing so a concurrent foreground
+    # handoff cannot admit a stale observer event between the ownership check and reducer update.
+    # 函数用途: 在同一显示锁内消费观察流、记录来源并推进游标，避免排队回执与事件到达竞争。
+    def _publish_background_transcript_events_locked(self, value: object) -> int:
         if not isinstance(value, list | tuple):
             return 0
         consumed_cursor = 0
@@ -1182,11 +1205,15 @@ class _TuiBackgroundActivityRuntimeMixin:
                         skip_message_ids=set(promoted_ids),
                     )
                 continue
+            display_payload = dict(payload)
+            display_payload.pop("foreground_gateway_request_id", None)
+            if isinstance(gateway_id, str) and gateway_id:
+                display_payload["foreground_gateway_request_id"] = gateway_id
             self._publish(
                 kind,
                 phase,
                 block_id,
-                dict(payload),
+                display_payload,
                 request_id=request_id,
             )
         return consumed_cursor
@@ -1546,12 +1573,6 @@ class TuiRuntime(
             block.role in {"connection", "thinking", "compact"}
             for block in snapshot.active_blocks
         )
-
-    # LLM: 只在原子入队前登记宿主分配编号；集合没有执行权，也不改变用于停止/插话的 running ref。
-    # 函数用途: 标记这条请求已有本页显示通路，后到的同源历史只推进游标，不重复落屏。
-    def register_gateway_request(self, request_id: str) -> None:
-        with self._lock:
-            self._owned_gateway_requests.add(_required_request_id(request_id))
 
     # LLM: begin_turn 每 request 只创建一次 adapter，重复 worker dequeue 返回同对象但不重放 turn_started；
     # show-prompt 诊断轮可显式延迟 assistant 正文，保证终态 prompt 先于 response 落屏。

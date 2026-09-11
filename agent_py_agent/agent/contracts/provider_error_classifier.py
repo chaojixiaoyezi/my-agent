@@ -16,9 +16,11 @@ from dataclasses import dataclass
 from enum import Enum
 
 from ..backends.errors import (
+    ProviderConfigurationError,
     is_provider_context_window_error,
     is_provider_quota_exhausted_error,
     is_provider_transient_error,
+    provider_error_http_status,
 )
 
 
@@ -69,11 +71,19 @@ _RETRYABLE = frozenset(
 )
 
 
-# LLM: 分类唯一入口。优先级:typed 错误(系统事实)> 状态码/文本特征 > unknown。
+# LLM: 分类唯一入口。优先级:typed 错误和 status_code > 裸异常文本 > unknown；配置/请求拒绝绝不被正文升级为重试或压缩。
 #   unknown 保守不重试(掩盖真实故障比多失败一次更糟)。
 # 函数用途: 给一个 provider 异常定性:什么错、能不能重试、要不要先压缩。
 def classify_provider_error(exc: BaseException) -> ClassifiedProviderError:
     message = str(exc or "")[:500]
+    if isinstance(exc, ProviderConfigurationError):
+        status = provider_error_http_status(exc)
+        return ClassifiedProviderError(
+            _reason_from_status(status) or ProviderFailureReason.UNKNOWN,
+            retryable=False,
+            status_code=status,
+            message=message,
+        )
     if is_provider_quota_exhausted_error(exc):
         return ClassifiedProviderError(
             ProviderFailureReason.BILLING, retryable=False, status_code=_status_code(message), message=message

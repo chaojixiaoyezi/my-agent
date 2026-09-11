@@ -651,8 +651,9 @@ class OpenAICompatibleBackend(HttpBackend):
             )
         )
 
-    # LLM: 角色和思考控制来自 typed request；DeepSeek 专有字段仅按官方精确主机启用，不能从模型名猜代理协议。
-    # 函数用途: 组装并发送一次 OpenAI-compatible 请求；普通思考不变，其它端点不注入不支持的参数。
+    # LLM: 角色与思考控制来自 typed request；已知 DeepSeek/Zen 方言补齐旧历史缺失字段，
+    # 不能改写 canonical 历史或把空占位说成找回思考，其它端点不注入专有字段。
+    # 函数用途: 组装并发送一次 Chat 请求，保持模型开关并让旧会话满足已知接口的消息协议。
     def _generate(self, request: _OpenAIGenerateRequest) -> ModelResponse:
         payload = {
             "model": self.model_name,
@@ -680,6 +681,9 @@ class OpenAICompatibleBackend(HttpBackend):
 
             payload["tools"] = _openai_tools_from_native(tools)
             payload["tool_choice"] = openai_tool_choice(request.tool_choice or ToolChoice.auto())
+            _complete_required_reasoning_fields(
+                payload["messages"], api_base=self.api_base, model_name=self.model_name,
+            )
         elif request.tool_choice is not None and request.tool_choice.mode == "none":
             payload["tool_choice"] = "none"
         if request.response_schema is not None:
@@ -769,6 +773,8 @@ class OpenAICompatibleBackend(HttpBackend):
         )
 
 
+# LLM: 保留 reasoning_content 的显式存在性（空值也保留），不把普通正文或错误内容当成思考。
+# 函数用途: 解析非流式回复，生成和 SSE 相同的正文、工具及原生思考历史，供跨轮回放。
 def _openai_non_stream_response(
     obj: dict[str, Any],
     *,
@@ -783,7 +789,7 @@ def _openai_non_stream_response(
         ):
             raise ValueError("message has neither content, reasoning, nor tool_calls")
         text = str(message.get("content") or "")
-        reasoning = str(message.get("reasoning_content") or "")
+        reasoning = str(message.get("reasoning_content") or "") if "reasoning_content" in message else None
         blocks, malformed = _openai_tool_use_blocks(message)
     except Exception as exc:
         raise ProviderResponseError(
@@ -823,6 +829,23 @@ def _openai_non_stream_response(
         truncated=malformed,
         stop_reason=finish_reason,
     )
+
+
+# LLM: 只适配已核对的接口/模型组合；字段默认值仅修改本次 wire payload，绝不回写旧历史。
+# 空值不是恢复出的思考，也不允许覆盖真实 reasoning。其它模型和自定义未知网关保持原消息。
+# 函数用途: 旧会话或跨模型历史未保存思考时，为要求该字段的 DeepSeek 工具请求补空字段。
+def _complete_required_reasoning_fields(
+    messages: list[dict[str, Any]], *, api_base: str, model_name: str,
+) -> None:
+    endpoint = urlsplit(api_base)
+    known_endpoint = endpoint.hostname == "api.deepseek.com" or (
+        endpoint.hostname == "opencode.ai" and endpoint.path.startswith("/zen/")
+    )
+    if not known_endpoint or not model_name.lower().startswith("deepseek-"):
+        return
+    for message in messages:
+        if message.get("role") == "assistant":
+            message.setdefault("reasoning_content", "")
 
 
 def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -937,6 +960,9 @@ def _openai_message_from_native(message: dict[str, Any]) -> list[dict[str, Any]]
     return []
 
 
+# LLM: 所有真实 thinking 块（包括显式空块）都随 assistant 原样回放，不仅是 tool_use 轮；
+# 普通文本不制造厂商扩展字段。改动须同步检查流式/非流式解析和跨轮 native history。
+# 函数用途: 把规范化 assistant 块恢复成 Chat Completions 消息，避免插话或最终答复后的工具请求丢失思考字段。
 def _openai_assistant_messages(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     texts = [str(block.get("text") or "") for block in blocks if block.get("type") == "text"]
     reasoning = [
@@ -945,30 +971,28 @@ def _openai_assistant_messages(blocks: list[dict[str, Any]]) -> list[dict[str, A
         if block.get("type") == "thinking"
     ]
     calls = [_openai_function_call(block) for block in blocks if block.get("type") == "tool_use"]
-    if texts or calls:
+    if texts or calls or reasoning:
         message: dict[str, Any] = {"role": "assistant", "content": "".join(texts) or None}
         if calls:
             message["tool_calls"] = calls
-            reasoning_text = "".join(reasoning)
-            if reasoning_text:
-                # DeepSeek/Qwen 的 OpenAI-compatible 合同只要求在工具调用轮回放
-                # reasoning_content；普通 assistant 文本不加扩展字段，兼容严格端点。
-                message["reasoning_content"] = reasoning_text
+        if reasoning:
+            # 普通答复同样属于 reasoning 历史，不能按是否调工具丢弃。
+            message["reasoning_content"] = "".join(reasoning)
         return [message]
     return []
 
 
 # LLM: OpenAI-compatible reasoning/text/tool_calls 进入 canonical IR 前只能经过这一白名单，
 # 未知 message 字段不得原样回放到后续请求。
-# 函数用途: 把一次 Chat Completions 回复整理成可显示、可续接的有序 assistant 块。
+# 函数用途: 把回复整理成有序块，None 表示未返回思考字段，空字符串表示返回了空思考；不混淆两者。
 def _openai_assistant_content_blocks(
     *,
-    reasoning: str,
+    reasoning: str | None,
     text: str,
     tool_blocks: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
-    if reasoning:
+    if reasoning is not None:
         blocks.append({"type": "thinking", "thinking": reasoning})
     if text:
         blocks.append({"type": "text", "text": text})
@@ -986,13 +1010,14 @@ def _openai_assistant_content_blocks(
 
 # LLM: StreamCompletion 只允许携带白名单 assistant blocks；本帮助函数只读取 thinking，
 # 不接受正文、工具参数或未知 provider 扩展字段。
-# 函数用途: 从 OpenAI-compatible 流收尾事实中取得完整思考文本。
-def _openai_reasoning_from_completion(completion: StreamCompletion) -> str:
-    return "".join(
+# 函数用途: 取得完整思考文本，无思考块时返回 None，让普通模型保持原协议。
+def _openai_reasoning_from_completion(completion: StreamCompletion) -> str | None:
+    parts = [
         str(block.get("thinking") or "")
         for block in completion.assistant_content_blocks
         if isinstance(block, dict) and block.get("type") == "thinking"
-    )
+    ]
+    return "".join(parts) if parts else None
 
 
 def _openai_function_call(block: dict[str, Any]) -> dict[str, Any]:

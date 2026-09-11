@@ -1,4 +1,5 @@
-"""Typed provider errors shared by CLI, runners, and recovery code."""
+# LLM: 模型异常类型和合法 HTTP 属性是分类/恢复的事实源；安全展示不能从异常正文推断状态码或配置错误。
+# 模块用途: 统一 CLI、主子执行和恢复的模型错误边界，并投影可公开的 HTTP 数值。
 
 from __future__ import annotations
 
@@ -25,8 +26,8 @@ class ProviderConnectionError(ProviderConfigurationError):
     error_code = "PROVIDER_CONNECTION_FAILED"
 
 
-# LLM: A provider-declared 4xx rejection is a typed permanent provider/configuration fact; it must bypass capability fallback and transport retry while retaining structured status/details for diagnostics.
-# 类用途: 表示模型服务明确拒绝了当前请求或配置，提醒调用方检查接口、模型和密钥组合，而不是误报为工具能力不足。
+# LLM: 4xx 请求拒绝绕过能力 fallback 和原请求盲重试，但不证明密钥错误；保留 status/details 供诊断。
+# 类用途: 表示服务拒绝了这次请求，可能是消息协议或参数问题，不把先前已成功执行的工作算成未执行。
 class ProviderRequestRejectedError(ProviderConfigurationError):
     """The provider permanently rejected the configured request."""
 
@@ -42,6 +43,13 @@ class ProviderRequestRejectedError(ProviderConfigurationError):
         super().__init__(message)
         self.status_code = max(0, int(status_code or 0))
         self.details = details
+
+
+# LLM: 只接受异常上的真实整数 HTTP 属性，不解析正文、details 或布尔值；供诊断和分类共同使用。
+# 函数用途: 返回可安全显示的 HTTP 状态码，缺失或非法时明确返回 None。
+def provider_error_http_status(exc: BaseException) -> int | None:
+    status = getattr(exc, "status_code", None)
+    return status if type(status) is int and 100 <= status <= 599 else None
 
 
 # LLM: Provider timeout stage is a closed machine contract shared with the ledger; user-facing text never selects recovery behavior.
@@ -177,12 +185,19 @@ def provider_recoverable_report(exc: BaseException, *, timeout_seconds: object =
     )
 
 
-# LLM: Permanent provider configuration reports are shared by direct CLI and service adapters; do not include secrets or infer remediation from raw message text.
-# 函数用途: 给用户说明模型服务配置不匹配，并保留原始错误供本机诊断。
+# LLM: CLI 按异常类型区分请求拒绝与配置错误；此入口不知道此前工具是否运行，不能作零执行断言。
+# 函数用途: 输出本次失败的性质和已有诊断，不误导用户修改密钥或重做已完成工作。
 def provider_configuration_report(exc: BaseException) -> str:
+    if isinstance(exc, ProviderRequestRejectedError):
+        return (
+            "[provider_request_rejected]\n"
+            "模型服务拒绝了本次请求，本轮已停止；此前已执行的工作不会因此撤销。\n"
+            f"error={exc}\n"
+            "请查看请求诊断确定原因，不要直接重做整个任务。"
+        )
     return (
         "[provider_configuration]\n"
-        "模型服务拒绝或无法使用当前配置，本次模型和工具均未执行。\n"
+        "本次模型请求无法使用当前配置，本轮已停止；此前已执行的工作不会因此撤销。\n"
         f"error={exc}\n"
         "请检查接口地址、模型名称和密钥是否属于同一服务后重试。"
     )

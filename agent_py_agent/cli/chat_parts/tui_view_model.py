@@ -339,6 +339,23 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "status_updated": self._handle_status_updated,
             "history_blocks_reordered": self._handle_history_blocks_reordered,
             "history_page_prepended": self._handle_history_page_prepended,
+            "foreground_request_attached": self._handle_foreground_request_attached,
+        }
+
+    # LLM: Only typed foreground provenance selects disposable observer copies. Keep stable seen IDs
+    # to reject late replay; do not touch canonical messages, other requests, queues, Todo or status.
+    # 函数用途: 同请求转由前台流显示时撤下已抢先到达的历史/活动副本，原始对话和其他请求不受影响。
+    def _handle_foreground_request_attached(self, event: TuiEvent) -> None:
+        request_id = str(event.payload.get("gateway_request_id") or "").strip()
+        if not request_id or request_id != event.request_id:
+            return
+        self.stable_blocks[:] = [
+            block for block in self.stable_blocks
+            if block.metadata.get("foreground_gateway_request_id") != request_id
+        ]
+        self.active_blocks = {
+            key: block for key, block in self.active_blocks.items()
+            if block.metadata.get("foreground_gateway_request_id") != request_id
         }
 
     # LLM: 按 canonical 块 ID 重排并沿用原 created_seq 显示槽位，防止 renderer 抵消顺序；不改 journal、内容或活动。
@@ -1240,6 +1257,7 @@ def _context_usage_from_mapping(
 # 函数用途: 统一实时与恢复的安全元数据，允许同一工具结果补齐缺口，不回读原始参数。
 def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
+        "foreground_gateway_request_id",
         "severity",
         "tool",
         "round",

@@ -1,4 +1,4 @@
-# LLM: 本模块把 typed snapshot renderer 接入 prompt_toolkit；画面缓存与冻结正文随当前 store 切换，只管显示，不持有业务执行权；空选区右键必须无副作用。
+# LLM: 本模块把 typed snapshot renderer 接入 prompt_toolkit；缓存、全选与复制随当前 store/viewport 路由，只管显示；空选区右键不得触发业务动作。
 # 模块用途: 提供可滚动正文、固定提示与缓存；展开冻结正文不能遮住当前客户端的刷新故障提示。
 
 from __future__ import annotations
@@ -699,6 +699,11 @@ class TuiTranscriptView:
     # 函数用途: 返回当前可见 transcript 的鼠标选中文本。
     def selected_text(self) -> str:
         return self._active_control().selected_text()
+
+    # LLM: 全选与读取选区必须指向同一个 active control；不选另一个代理或隐藏视口，不改会话历史。
+    # 函数用途: 将 Ctrl+A 接到当前正文视口，供 Ctrl+C 复制已加载的全部可见内容。
+    def select_all(self) -> None:
+        self._active_control().select_all()
 
     # LLM: 清选区委托当前 viewport，不影响另一模式被冻结的消息状态。
     # 函数用途: 清除当前可见 transcript 的选区。

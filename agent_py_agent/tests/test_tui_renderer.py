@@ -1542,24 +1542,6 @@ def test_live_thinking_content_visible_by_default() -> None:
     assert "class:tui-thinking-detail" in styles
 
 
-def test_transcript_select_all_marks_full_selection() -> None:
-    """Ctrl+A 全选：选区覆盖全部可见行，selected_text 可提取。"""
-    store = TuiStateStore()
-    seq = TuiEventSequencer("select-all", clock=lambda: 100.0)
-    store.publish(seq.emit("turn_started", "started", "turn"))
-    store.publish(
-        seq.emit(
-            "assistant_completed",
-            "completed",
-            "assistant",
-            {"text": "第一行\n第二行"},
-        )
-    )
-    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
-    # 通过 view 选择（store 无 view，直接验证 select_all 依赖的行数据已渲染）
-    assert frame.transcript_lines
-
-
 def test_thinking_expanded_content_is_gray_in_transcript() -> None:
     """Ctrl+O 展开后的 thinking 内容保持灰色（与正文区分，终端交互 对齐）。"""
     from agent_py_agent.cli.chat_parts.tui_events import TuiEventSequencer

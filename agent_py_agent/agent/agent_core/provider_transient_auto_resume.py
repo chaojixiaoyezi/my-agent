@@ -1,3 +1,5 @@
+# LLM: 模型采样退避只放行 typed 瞬时错或无类型异常的分类结果；配置/请求拒绝不能被文本放大恢复范围。
+# 模块用途: 在可恢复网络故障中等待并重试当前模型调用，保留中断和既有次数预算，不重放工具副作用。
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -9,6 +11,7 @@ from ..backends import (
     is_provider_stream_timeout_error,
     is_provider_transient_error,
 )
+from ..backends.errors import ProviderConfigurationError
 from ..concurrency.interrupt import is_interrupted, wait_interruptibly
 from ..concurrency.retry import apply_retry_jitter
 from ..settings.runtime_guard_config import RuntimeGuardPolicy, runtime_guard_data
@@ -84,13 +87,15 @@ def _raise_if_interrupted() -> None:
         raise InterruptedError("provider 重试循环已收到任务中断, 停止重试")
 
 
-# LLM: 可重试判定升级(批3 2-1 收口):typed transient 之外,经分类器
+# LLM: typed 配置/请求拒绝先上抛；typed transient 之外,经分类器
 #   (contracts/provider_error_classifier,长期助手 蓝本)判为 rate_limit/
 #   overloaded/server_error/timeout 的裸异常同样进入重试;auth/billing/format/
 #   context_overflow/unknown 照旧上抛(context_overflow 由上层 ptl_retry 链
 #   接手压缩,unknown 保守快速浮出)。模型全程无感。
 # 函数用途: 这个错值不值得原地重试?值得就放行去等待,不值得立刻抛给上层。
 def _raise_unless_provider_transient(exc: Exception) -> None:
+    if isinstance(exc, ProviderConfigurationError):
+        raise exc
     # 会话运行时 对 dropped/idle response stream 重发同一 sampling request，并在 UI
     # 展示 reconnect 进度。这里仅放行结构化 first_event/stream_idle；工具尚未
     # 执行，重放的是模型采样而不是副作用。wall_clock/provider_declared/legacy
