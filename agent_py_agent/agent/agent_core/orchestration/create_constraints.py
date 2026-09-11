@@ -146,10 +146,9 @@ _UNINHERITABLE_ROOT_DIRS = ("/", "/System", "/usr", "/bin", "/sbin", "/private/e
 # 函数用途: 返回可以下发给子代理的第二层工作目录作用域（管理员在 owner 墙外工作时）。
 def _second_layer_work_roots(agent: object) -> list[str]:
     tools = getattr(agent, "tools", None)
+    # owner 墙存在（普通用户/默认管理员）→ 不追加任何第二层作用域；
+    # 只有管理员显式选了 full-access、owner 墙被解除时（owner_scope_root 为空）才派生。
     if _resolved_path(getattr(tools, "owner_scope_root", None)) is not None:
-        return []
-    home = _resolved_path(getattr(getattr(agent, "home_paths", None), "owner_home_dir", None))
-    if home is not None:
         return []
     attrs = current_conversation_task_attributes(agent)
     candidates = [conversation_execution_cwd(attrs), *conversation_runtime_workspace_roots(attrs)]

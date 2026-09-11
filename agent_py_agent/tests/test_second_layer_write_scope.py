@@ -49,10 +49,13 @@ def test_normal_user_with_owner_wall_gets_nothing_extra(tmp_path):
     assert _second_layer_work_roots(agent) == []
 
 
-def test_admin_with_owner_home_is_not_widened(tmp_path):
-    """没有解除 owner 墙的管理员同样不扩权。"""
-    agent = _agent(owner_scope="", owner_home=str(tmp_path), cwd=str(tmp_path / "proj"))
-    assert _second_layer_work_roots(agent) == []
+def test_owner_home_alone_does_not_block_second_layer(tmp_path):
+    """判定只看 owner 墙是否存在（owner_scope_root），不看 owner_home 字符串：
+    管理员选 full-access 后 owner 墙被解除，此时 owner_home 仍然有值，不应因此失效。"""
+    work = tmp_path / "proj"
+    work.mkdir()
+    agent = _agent(owner_scope="", owner_home=str(tmp_path), cwd=str(work))
+    assert _second_layer_work_roots(agent) == [str(work)]
 
 
 @pytest.mark.parametrize("root", _UNINHERITABLE_ROOT_DIRS)
