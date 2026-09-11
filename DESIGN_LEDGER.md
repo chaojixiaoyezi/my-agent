@@ -1,5 +1,29 @@
 # DESIGN LEDGER
 
+## 2026-09-11 R236 第二层作用域的真机验证结论【状态：实现保留，但当前不会生效——需产品决策】
+
+真机验证（四路复刻 + 管理员 full-access）结论：**上一提交的能力在当前形态下永远不会触发**，
+原因不是实现 bug，而是与一条**故意的安全不变量**冲突：
+
+`cli/workspace_resolution.py::owner_home_workspace_root` 明确写着
+"Process cwd is not an owner or permission fact"，所有无显式 workspace 的 CLI/Gateway 入口
+一律把工作目录定到 owner home（注释原话：让从 /root 或任意项目启动的 TUI 都先回到自己家）。
+实测证实：客户端 POST 的 `workspace.cwd` 是 `/Users/example/.my-agent/owners/local/main`
+而不是进程真实 cwd；`conversation_execution_cwd` 因此恒等于 owner home，
+`_second_layer_work_roots` 拿到的就是 owner home（并且它已被原有 product_write_roots 覆盖），
+所以子代理写根不会变化——12/12 新子代理实测都没有拿到目标目录。
+
+这不是可以靠改判据绕过的：如果让进程 cwd 成为权限来源，就等于推翻上面那条不变量，
+会重新打开"从 /root 启动就把 /root 当工作目录"这个已经被修过的洞。
+因此**保持现状**，并把选择权交回用户，三条路：
+①引入显式声明（如 chat/CLI 增加 `--workspace <dir>`），由用户在 full-access 下明确指定工作目录，
+再据它派生第二层作用域——这是干净且与现有不变量一致的做法；
+②维持"工作目录恒为 owner home"，第二层作用域功能保留但不生效（默认安全）；
+③放弃进程 cwd 路线，改为"派工时由主代理把已在授权范围内的目录显式声明为子代理交付根"。
+
+同时确认并保留本轮真正生效的两项修复：无定位信息 400 的有界重试（R235，实测把 22% 子代理死亡率
+的攻击面收掉）、以及根级目录不自动继承的兜底常量。
+
 ## 2026-09-11 R235 无定位信息 400 的有界重试【状态：实现与合同单测通过，已部署待复验】
 
 四路换语言复刻验收实测：41 个子代理里 **9 个**因 `HTTP 400: {"object":"error","model":"deepseek-v4-flash"}`
