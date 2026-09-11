@@ -155,6 +155,7 @@ def post_json(
     except InterruptedError:
         raise
     except urllib.error.HTTPError as exc:
+        _dump_provider_rejection(exc)
         raise _runtime_http_error(exc) from exc
     except _NETWORK_IO_ERRORS as exc:
         if _provider_is_interrupted():
@@ -182,6 +183,7 @@ def get_json(request: GatewayRequest) -> dict[str, Any]:
     except InterruptedError:
         raise
     except urllib.error.HTTPError as exc:
+        _dump_provider_rejection(exc)
         raise _runtime_http_error(exc) from exc
     except _NETWORK_IO_ERRORS as exc:
         if _provider_is_interrupted():
@@ -218,6 +220,7 @@ def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
     except InterruptedError:
         raise
     except urllib.error.HTTPError as exc:
+        _dump_provider_rejection(exc)
         raise _runtime_http_error(exc) from exc
     except (*_NETWORK_IO_ERRORS, ValueError) as exc:
         if _provider_is_interrupted():
@@ -885,6 +888,30 @@ def _require_api_key(api_key: str) -> None:
 
 
 # LLM: Typed provider facts own recovery; unknown 4xx stays rejected with diagnostic details,
+# LLM: 供应商 400 的 body 可能只是空洞对象(真机 2026-09-11: {"object":"error","model":...})，
+# 结构化错误里拿不到原因；把完整响应头与 body 落到诊断文件，才能定位真实拒绝理由。
+# 只在显式设置 MY_AGENT_PROVIDER_DUMP 时写，且不含密钥；写失败绝不反噬主链路。
+# 函数用途: 按需记录一次被拒请求的完整供应商响应，供后续定位。
+def _dump_provider_rejection(exc: urllib.error.HTTPError) -> None:
+    import os
+
+    target = str(os.environ.get("MY_AGENT_PROVIDER_DUMP") or "").strip()
+    if not target:
+        return
+    try:
+        headers = {str(key): str(value) for key, value in (getattr(exc, "headers", None) or {}).items()}
+        record = {
+            "kind": "provider_rejection",
+            "status": int(getattr(exc, "code", 0) or 0),
+            "response_headers": headers,
+            "response_body": _http_error_detail(exc)[:4000],
+        }
+        with open(target, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        return
+
+
 # never transient merely because the provider omitted its explanation.
 # 函数用途: 保留请求拒绝、额度、上下文超限与临时服务失败的区别，供主子代理同样处理。
 def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
