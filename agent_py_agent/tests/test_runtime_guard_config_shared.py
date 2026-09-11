@@ -8,6 +8,7 @@ def test_runtime_guard_file_contains_tool_repeat_guard_defaults():
         readonly_no_progress_threshold,
         repeat_fail_threshold,
         repeated_failure_halt_threshold,
+        repeated_success_hint_threshold,
         terminal_block_enabled,
     )
 
@@ -16,10 +17,38 @@ def test_runtime_guard_file_contains_tool_repeat_guard_defaults():
 
     assert repeat_fail_threshold(Params()) == 10
     assert readonly_no_progress_threshold(Params()) == 3
+    assert repeated_success_hint_threshold(Params()) == 5
     assert terminal_block_enabled(Params()) is False
     assert repeated_failure_halt_threshold(Params()) == 15
     assert hard_failure_halt_enabled(Params()) is False
     assert hard_failure_halt_threshold(Params()) == 15
+
+
+def test_repeated_success_observation_defaults_and_frozen_overrides():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_guard.call_guardrail import tool_guardrail_policy
+    from agent_py_agent.agent.agent_core.tool_guard.call_guardrail_config import (
+        DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD,
+        repeated_success_hint_threshold,
+    )
+    from agent_py_agent.agent.contracts.gates.tool_guardrail import ToolGuardrailConfig
+    from agent_py_agent.agent.settings.runtime_guard_config import runtime_guard_policy
+
+    default_policy = runtime_guard_policy()
+    assert default_policy.values["repeated_success_hint_threshold"] == 5
+    assert DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD == 5
+    assert ToolGuardrailConfig().repeated_success_hint_threshold == 5
+    params = SimpleNamespace(
+        runtime_guard_policy=runtime_guard_policy(overrides={"repeated_success_hint_threshold": 7}),
+        task_attributes={},
+    )
+    assert repeated_success_hint_threshold(params) == 7
+    assert tool_guardrail_policy(params)["repeated_success_hint_threshold"] == 7
+    params.task_attributes = {"repeated_success_hint_threshold": 2}
+    assert repeated_success_hint_threshold(params) == 2
+    params.task_attributes = {"repeated_success_hint_threshold": 0}
+    assert repeated_success_hint_threshold(params) == 0
 
 
 def test_runtime_guard_file_contains_tool_rate_limit_defaults():

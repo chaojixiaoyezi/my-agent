@@ -1,3 +1,5 @@
+# LLM: 工具结果后的观测只写现有有界记录并返回软提示；安全 effect、审批、执行和 UNKNOWN 仍由原合同控制。
+# 模块用途: 将真实工具调用结果交给重复门与成功重复观察，并为下一模型轮提供短提醒。
 from __future__ import annotations
 
 from ...contracts.gates.tool_guardrail import (
@@ -6,6 +8,7 @@ from ...contracts.gates.tool_guardrail import (
     evaluate_tool_guardrail_gate,
     failure_class_of_result,
     record_tool_guardrail_result,
+    repeated_success_observation,
     result_hash_for_guardrail,
 )
 from ...tooling.models import tool_effect_for_runtime_policy
@@ -13,6 +16,7 @@ from ...tooling.runtime_contracts import ToolCall, ToolResult
 from .call_guardrail_config import (
     readonly_no_progress_threshold,
     repeat_fail_threshold,
+    repeated_success_hint_threshold,
 )
 from .call_guardrail_config import (
     terminal_block_enabled as configured_terminal_block_enabled,
@@ -29,14 +33,19 @@ def tool_guardrail_records(agent: object) -> tuple[dict[str, object], ...]:
     return tuple(dict(item) for item in records if isinstance(item, dict))
 
 
+# LLM: 该快照沿原 write_boundary 传递；新成功阈值不由 ActionPolicy 用作阻断依据。
+# 函数用途: 导出当前工作片实际生效的重复门和软提醒参数。
 def tool_guardrail_policy(params: object) -> dict[str, object]:
     return {
         "repeat_fail_threshold": repeat_fail_threshold(params),
         "readonly_no_progress_threshold": readonly_no_progress_threshold(params),
         "terminal_block_enabled": configured_terminal_block_enabled(params),
+        "repeated_success_hint_threshold": repeated_success_hint_threshold(params),
     }
 
 
+# LLM: 先落规范调用事实，再计算观察；只读 gate 的进展边界保留为记录而非删除，不改变任何安全 effect。
+# 函数用途: 更新同一有界工具账并生成下一轮软提示，避免成功 Shell 复读完全没有提醒。
 def record_tool_guard_observation(
     agent: object,
     runtime_params: object,
@@ -44,23 +53,28 @@ def record_tool_guard_observation(
     result: ToolResult,
 ) -> str:
     facts = _facts_from_result(runtime_params, call, result)
-    if result.ok and not facts.is_readonly:
-        _set_tool_guardrail_records(
-            agent,
-            _records_without_readonly_no_progress(tool_guardrail_records(agent)),
-        )
     records = record_tool_guardrail_result(
         tool_guardrail_records(agent),
         facts,
         max_records=_MAX_RECORDS,
     )
     _set_tool_guardrail_records(agent, records)
+    config = ToolGuardrailConfig(**tool_guardrail_policy(runtime_params))
     decision = evaluate_tool_guardrail_gate(
         _facts_for_next_hint(facts),
-        config=ToolGuardrailConfig(**tool_guardrail_policy(runtime_params)),
+        config=config,
         records=records,
     )
-    return decision.model_message if decision.allowed and decision.findings else ""
+    if decision.findings:
+        return decision.model_message if decision.allowed else ""
+    finding = repeated_success_observation(
+        facts, records, threshold=config.repeated_success_hint_threshold,
+    )
+    if finding is None:
+        return ""
+    records[-1]["repeated_success_hint_count"] = finding.evidence["count"]
+    _set_tool_guardrail_records(agent, records)
+    return finding.message[:500]
 
 
 def clear_consecutive_failure_segment(
@@ -94,6 +108,8 @@ def clear_consecutive_failure_segment(
     _set_tool_guardrail_records(agent, tuple(remaining))
 
 
+# LLM: 哈希取规范结果正文，不含 call ID/耗时；UNKNOWN、未执行或幂等回放不计入成功观测。
+# 函数用途: 从工具事实提取安全分类与重复诊断，安全分类和是否提醒分别判断。
 def _facts_from_result(
     runtime_params: object,
     call: ToolCall,
@@ -101,7 +117,16 @@ def _facts_from_result(
 ) -> ToolGuardrailFacts:
     effect = _resolved_effect(runtime_params, call, result)
     is_readonly = effect == "read_only"
-    output_hash = result_hash_for_guardrail(result.output) if result.ok and is_readonly else ""
+    output_hash = result_hash_for_guardrail(result.output) if result.ok else ""
+    operation = result.operation
+    observed_success = (
+        result.ok and result.handler_executed and result.effect_outcome in {"", "confirmed"}
+        and (operation is None or (
+            operation.status == "succeeded" and not operation.replayed
+            and operation.handler_executed
+            and operation.effect_outcome in {"", "confirmed"}
+        ))
+    )
     return ToolGuardrailFacts(
         tool_name=call.tool_name,
         args_hash=call.args_hash,
@@ -109,6 +134,8 @@ def _facts_from_result(
         result_hash=output_hash,
         is_readonly=is_readonly,
         failure_class=_failure_class(result) if not result.ok else "",
+        observed_success=observed_success,
+        run_id=call.run_id,
     )
 
 
@@ -136,16 +163,6 @@ def _facts_for_next_hint(facts: ToolGuardrailFacts) -> ToolGuardrailFacts:
         result_hash=facts.result_hash,
         is_readonly=facts.is_readonly,
         failure_class=facts.failure_class,
-    )
-
-
-def _records_without_readonly_no_progress(
-    records: tuple[dict[str, object], ...],
-) -> tuple[dict[str, object], ...]:
-    return tuple(
-        dict(record)
-        for record in records
-        if record.get("failed") is True or not str(record.get("result_hash") or "")
     )
 
 
