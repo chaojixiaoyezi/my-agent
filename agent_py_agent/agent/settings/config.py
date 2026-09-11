@@ -1,8 +1,8 @@
 
 from __future__ import annotations
 
-# LLM: 配置默认值须与随包 YAML 一致；提示词只指导模型，真实授权和完成状态仍由结构化运行时决定。
-# 模块用途: 定义并加载 Agent 配置，统一默认人格、持续执行与用户确认口径。
+# LLM: 配置默认值须与随包 YAML 一致；可选 top_p 不给未知端点强加默认，权限与完成状态仍读取结构化事实。
+# 模块用途: 定义并加载 Agent 配置，统一采样、默认人格、持续执行与用户确认口径。
 """智能体配置加载工具。
 
 这个模块干的事情不复杂，但很关键：
@@ -304,8 +304,8 @@ class _RuntimeBudgetConfigFields:
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
-# LLM: AgentConfig is the public configuration authority; Memory Curator defaults must mirror YAML and MemorySettings.
-# 类用途: 汇总主模型、工具、Gateway、Memory 和子代理运行时配置。
+# LLM: AgentConfig 是公开配置权威；采样默认与 YAML 一致，Memory 默认同时对齐 MemorySettings。
+# 类用途: 汇总主模型采样、工具、Gateway、Memory 和子代理运行时配置。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
@@ -549,6 +549,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # /model 保存的用户窗口为显式容量；默认部署仍保留原 provider metadata 优先策略。
     model_context_window_explicit: bool = False
     temperature: str = "0.2"
+    # top_p 留空不覆盖普通模型；已核对的 DeepSeek V4 Flash 使用供应商采样默认。
+    top_p: float | None = None
     # Responses 缺省不发送温度；明确配置时才发送，/model 填温度自动启用。
     model_temperature_explicit: bool = False
     anthropic_version: str = "2023-06-01"

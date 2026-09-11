@@ -1,3 +1,5 @@
+# LLM: 各配置域共用默认和校验，采样只规范化显式值，不在配置层猜供应商或产生请求。
+# 模块用途: 将 YAML/覆盖配置转成运行字段，非法值返回可观察告警并采用既有默认。
 """Domain-specific normalize services for config fields.
 
 Was split across _normalize_core_fields / _normalize_home_fields /
@@ -10,6 +12,7 @@ from __future__ import annotations
 import math
 import os
 
+from ...backends.sampling import validate_top_p
 from ...path_access_policy import normalize_path_access_mode
 from ..defaults import default_agent_config
 from ._coercion import CoercionService
@@ -134,8 +137,8 @@ def _temperature_value(raw_temp: object) -> float | None:
 # LLM: 规范化显式协议选择，Responses 与 Chat/Messages 使用同一配置链，不从模型名猜协议。
 # 类用途: 检查模型连接、容量和请求选项的配置值。
 class ModelFieldsService:
-    # LLM: 不发模型请求或改持久配置；非法值按既有规则告警并使用默认值。
-    # 函数用途: 统一模型字段的类型和范围，供 YAML/overlay 共用。
+    # LLM: 不发模型请求或改持久配置；top_p 与模型表单共用范围校验，非法 YAML 按既有规则告警回默认。
+    # 函数用途: 统一模型字段的类型和范围，供 YAML/overlay 共用；None 保留为不覆盖供应商采样。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
@@ -153,6 +156,11 @@ class ModelFieldsService:
         ))
         warnings.extend(_apply_bool_fields(out, defaults, ("auto_bench_model_on_first_use",)))
         warnings.extend(_normalize_temperature(out, defaults))
+        try:
+            out["top_p"] = validate_top_p(out.get("top_p", defaults.top_p))
+        except ValueError as exc:
+            out["top_p"] = defaults.top_p
+            warnings.append(str(exc))
         return out, warnings
 
 

@@ -1,5 +1,5 @@
-# LLM: Responses 适配复用 HTTP 主链、原生工具合同和工作片配置；不启用远端存储，不自动换协议。
-# 模块用途: 支持 /responses 的文本、工具调用、流式摘要、JSON 输出及用量统计。
+# LLM: Responses 适配复用 HTTP 主链、原生工具和工作片采样配置；不启用远端存储，不自动换协议。
+# 模块用途: 支持 /responses 的显式采样、文本、工具调用、流式摘要、JSON 输出及用量统计。
 from __future__ import annotations
 
 from .base import ModelResponse, OpenAICompatibleBackend, _bounded_output_tokens, _tools_for_choice
@@ -20,14 +20,16 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
 
         return "".join(endpoint_parts(self.api_base, "/responses"))
 
-    # LLM: 不把 temperature/隐式 reasoning 参数硬塞给所有 Responses 模型；工具强制选择来自 typed choice。
-    # 函数用途: 用既有私有配置发送一次请求，并转成上层通用模型结果。
+    # LLM: Responses 只发送显式采样配置，不沿用 Chat 的供应商默认；工具选择仍来自 typed choice。
+    # 函数用途: 用工作片冻结的私有配置及 top_p 发送一次请求，转成上层通用模型结果。
     def _generate(self, request) -> ModelResponse:
         payload = {"model": self.model_name, "store": False, "include": ["reasoning.encrypted_content"],
                    "max_output_tokens": _bounded_output_tokens(self.max_tokens, request.max_output_tokens),
                    "input": input_items(request.prompt, request.messages, request.system_instruction, self.model_name)}
         if self.temperature_explicit:
             payload["temperature"] = self.temperature
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
         tools = _tools_for_choice(request.tools, request.tool_choice)
         if tools:
             payload["tools"] = [{"type": "function", "name": tool["name"], "description": tool.get("description", ""),

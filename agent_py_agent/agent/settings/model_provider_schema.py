@@ -1,5 +1,5 @@
-# LLM: provider/model 的结构和迁移只有这个事实源；公开投影不能包含 key 或自定义头值。
-# 模块用途: 校验服务商与模型引用，让多个模型共享一份私有连接配置。
+# LLM: provider/model 的结构和采样校验只有这个事实源；公开投影不能包含 key 或自定义头值。
+# 模块用途: 校验服务商、模型引用与可选采样，让多个模型共享一份私有连接配置。
 from __future__ import annotations
 
 import math
@@ -7,6 +7,7 @@ import re
 from urllib.parse import urlsplit
 
 from ..backends.provider_headers import validate_headers, validate_session_header
+from ..backends.sampling import validate_top_p
 
 SCHEMA = "owner_model_profiles.v2"
 BACKENDS = {"openai_compatible", "anthropic_compatible", "openai_responses"}
@@ -69,8 +70,8 @@ def validate_provider(value: object) -> dict:
             "custom_headers": headers, "session_header": session}
 
 
-# LLM: 模型引用不持有第二份 secret；上下文来自显式整数配置，未知模型名称允许透传。
-# 函数用途: 检查模型协议、用途、容量及可选独立温度，Embedding 不能当主/子代理聊天模型。
+# LLM: 模型引用不持有第二份 secret；top_p/温度按独立模型保存，未知模型名称允许透传。
+# 函数用途: 检查模型协议、用途、容量及可选采样值，非法数值不能悄悄保存或发往上游。
 def validate_model(value: object) -> dict:
     if not isinstance(value, dict) or value.get("model_backend") not in BACKENDS:
         raise ModelProfileError("请选择 OpenAI Chat、OpenAI Responses 或 Anthropic；Auth 暂未开放。")
@@ -95,11 +96,17 @@ def validate_model(value: object) -> dict:
         if isinstance(temperature, bool) or not math.isfinite(number) or not 0 <= number <= 2:
             raise ModelProfileError("温度须留空或填写 0 至 2 的数值。")
         result["temperature"] = str(number)
+    try:
+        top_p = validate_top_p(value.get("top_p"))
+    except ValueError as exc:
+        raise ModelProfileError(str(exc)) from exc
+    if top_p is not None:
+        result["top_p"] = top_p
     return result
 
 
-# LLM: 保留已有 add API 的扁平输入验证，内部立即变成 provider 引用；未知字段不传入 AgentConfig。
-# 函数用途: 校验快捷新增表单和旧 v1 迁移所需的完整连接信息。
+# LLM: 扁平输入立即变成 provider 引用；保留显式采样，未知字段不传入 AgentConfig。
+# 函数用途: 校验快捷新增和旧 v1 迁移的完整连接信息，避免该入口悄悄丢掉温度或 top_p。
 def validate_model_profile(value: object) -> dict:
     if not isinstance(value, dict):
         raise ModelProfileError("模型配置须为对象。")
@@ -108,7 +115,7 @@ def validate_model_profile(value: object) -> dict:
         "custom_headers": value.get("model_custom_headers", {}), "session_header": value.get("model_session_header", "")})
     if not provider["api_key"]:
         raise ModelProfileError("模型名称、地址和密钥不能为空。")
-    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens")}
+    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p") if key in model}
     row.update(api_base=provider["api_base"], api_key=provider["api_key"])
     if provider["custom_headers"]:
         row["model_custom_headers"] = provider["custom_headers"]
@@ -129,14 +136,14 @@ def migrate_v1(data: dict) -> dict:
     return migrated
 
 
-# LLM: 唯一解析点将 model 引用和 provider 快照合并成运行配置；禁用或缺 key 不静默回落默认模型。
-# 函数用途: 获得一个可发送 Agent 请求的模型配置，不返回 provider 的展示或管理字段。
+# LLM: 唯一解析点将 model/provider 合并为含可选 top_p 的运行快照；缺省不覆盖部署采样，禁用不回落默认模型。
+# 函数用途: 获得可发送请求的连接和采样配置，不返回展示或管理字段，不发模型请求。
 def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True) -> dict:
     model = data["profiles"][profile_id]
     provider = data["providers"][model["provider_id"]]
     if require_enabled and (not model["enabled"] or not provider["enabled"] or not provider["api_key"]
                             or model["capability"] != "agentic" or "agentic" not in provider["capabilities"]):
         raise ModelProfileError("这个模型或服务商未启用、缺少密钥，或不是 Agentic 模型。")
-    return {**{key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature") if key in model},
+    return {**{key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p") if key in model},
             "api_base": provider["api_base"], "api_key": provider["api_key"],
             "model_custom_headers": dict(provider["custom_headers"]), "model_session_header": provider["session_header"]}

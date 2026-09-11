@@ -1,5 +1,5 @@
-# LLM: 模型协议在此统一转换；请求级思考控制不得改共享后端、普通回合或其它供应商字段。
-# 模块用途: 发送模型请求并规范化文本、工具、思考和用量；兼容修复须回归流式与非流式调用。
+# LLM: 模型协议在此统一转换；采样和思考控制按配置/精确协议，不改共享后端、身份或其它供应商字段。
+# 模块用途: 发送采样配置与模型请求，规范化文本、工具、思考和用量；须回归流式与非流式调用。
 from __future__ import annotations
 
 """模型后端适配层。
@@ -120,8 +120,8 @@ class ModelResponse:
     tool_protocol_violations: list[dict[str, str]] = field(default_factory=list)
 
 
-# LLM: 后端连接选项是工作片冻结快照；请求头配置和模型名/密钥一起缓存，不能在流式请求中热改。
-# 类用途: 保存 HTTP 模型后端的连接、生成和兼容选项。
+# LLM: 后端连接与 top_p/温度是工作片冻结快照；请求头和模型名/密钥一起缓存，流式请求中不可热改。
+# 类用途: 保存 HTTP 模型后端的连接、采样和兼容选项。
 @dataclass(frozen=True)
 class BackendOptions:
     """Connection and generation options shared by HTTP model backends."""
@@ -139,6 +139,7 @@ class BackendOptions:
     prompt_cache_enabled: bool = True
     custom_headers: dict[str, str] = field(default_factory=dict)
     session_header: str = ""
+    top_p: float | None = None
 
 
 # LLM: OpenAI 请求对象按 typed 字段保留 system 和请求级思考控制；子适配器只发送其协议支持的字段。
@@ -338,8 +339,8 @@ class HttpBackend(BaseBackend):
     supports_system_instructions = True
     supports_provider_request_options = True
 
-    # LLM: 复制所有可变选项；后续多线程仅用 request-local 会话身份，不能修改共享后端头部。
-    # 函数用途: 初始化一个可安全复用的模型后端。
+    # LLM: 复制可变选项并校验 top_p；多线程仅用 request-local 身份，不能热改共享后端采样或头部。
+    # 函数用途: 初始化可安全复用的后端，非法采样在发送 HTTP 之前报错。
     def __init__(
         self,
         options: BackendOptions,
@@ -363,6 +364,9 @@ class HttpBackend(BaseBackend):
         self.model_metadata: dict[str, Any] = {}
         self.temperature = float(options.temperature)
         self.temperature_explicit = options.temperature_explicit
+        from .sampling import validate_top_p
+
+        self.top_p = validate_top_p(options.top_p)
         self.stream_enabled = bool(options.stream_enabled)
         self.prompt_cache_enabled = bool(options.prompt_cache_enabled)
         # Streaming HTTP transports enforce request_timeout as an SSE idle
@@ -655,15 +659,19 @@ class OpenAICompatibleBackend(HttpBackend):
             )
         )
 
-    # LLM: 角色与思考控制来自 typed request；已知 DeepSeek/Zen 方言补齐旧历史缺失字段，
-    # 不能改写 canonical 历史或把空占位说成找回思考，其它端点不注入专有字段。
-    # 函数用途: 组装并发送一次 Chat 请求，保持模型开关并让旧会话满足已知接口的消息协议。
+    # LLM: 角色与思考控制来自 typed request；精确端点/型号可采用采样默认，显式温度保留，
+    # 已知 DeepSeek/Zen 出站补空 reasoning 不修改 canonical 或声称找回思考。
+    # 函数用途: 组装 Chat 的采样、历史与工具请求；不改会话编号或添加失败重试。
     def _generate(self, request: _OpenAIGenerateRequest) -> ModelResponse:
+        from .sampling import chat_sampling_fields
+
         payload = {
             "model": self.model_name,
             "max_tokens": _bounded_output_tokens(self.max_tokens, request.max_output_tokens),
-            "temperature": self.temperature,
         }
+        payload.update(chat_sampling_fields(self.api_base, self.model_name, top_p=self.top_p,
+            temperature=self.temperature, temperature_explicit=self.temperature_explicit,
+            thinking_disabled=request.thinking_disabled))
         if request.thinking_disabled and urlsplit(self.api_base).hostname == "api.deepseek.com":
             # 参考 轻量运行时 的 thinkingFormat 适配：官方默认开思考，强制工具探针须显式关闭；不是通用 OpenAI 字段。
             payload["thinking"] = {"type": "disabled"}
@@ -1226,9 +1234,8 @@ class AnthropicCompatibleBackend(HttpBackend):
             max_output_tokens=max_tokens,
         )
 
-    # LLM: This is the single Anthropic payload builder; stream observers pass through unchanged
-    # and never enter the provider payload or create a second response path.
-    # 函数用途: 组装并发送 Anthropic-compatible 请求，同时原样传递可选流式展示观察器。
+    # LLM: Anthropic 单一组包入口仅发送显式 top_p，不套用 Chat 方言默认；流观察器不得进入 payload。
+    # 函数用途: 组装并发送 Anthropic-compatible 连接/采样配置，同时传递流式展示观察器。
     def _generate_request(
         self,
         prompt: str,
@@ -1254,6 +1261,8 @@ class AnthropicCompatibleBackend(HttpBackend):
             ),
             "temperature": self.temperature if temperature is None else float(temperature),
         }
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
         cache_projection = anthropic_prompt_cache_projection(
             system_instruction=system_instruction,
             prompt=prompt,
@@ -1540,8 +1549,8 @@ def _response_preview(obj: object, *, max_chars: int = 1000) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + "... [truncated]"
 
 
-# LLM: 只按显式协议构造后端，请求头快照与模型配置一起生效；不按模型名称猜测或失败后换接口。
-# 函数用途: 创建指定协议的模型适配器。
+# LLM: 只按显式协议构造后端，请求头/top_p/温度与模型配置同快照；不因失败换接口。
+# 函数用途: 创建指定协议的适配器，让 YAML 和模型级采样配置进入真实请求。
 def get_backend(name: str, config: Any | None = None) -> BaseBackend:
     """Resolve a configured backend name to a backend adapter instance."""
 
@@ -1559,6 +1568,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         context_window_tokens=getattr(config, "model_context_window_tokens", 0),
         temperature=float(config.temperature),
         temperature_explicit=getattr(config, "model_temperature_explicit", False),
+        top_p=getattr(config, "top_p", None),
         stream_enabled=getattr(config, "stream_enabled", True),
         prompt_cache_enabled=getattr(config, "anthropic_prompt_cache_enabled", True),
         custom_headers=getattr(config, "model_custom_headers", {}),

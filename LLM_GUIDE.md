@@ -64,6 +64,9 @@ R230 整合状态见 `docs/audits/R230_CONSOLIDATED_FIXES.md`。SSE delta 原样
   不能逐工具重复长规则。实际 native Schema 必须与冻结工具快照相同。
 - 连接/首事件/流间隔超时分开，健康慢流没有隐式总墙钟；停止贯穿请求和退避。
   明确 HTTP 400 不因缺少解释自动重试；429、5xx、网络瞬断仍走 typed 有界恢复。
+- 采样 top_p 是可选配置：普通端点默认省略，模型级覆盖与连接同快照、同缓存键。
+  已核对的精确官方/工具运行时 V4 Flash Chat 采用 0.95；用户显式温度不被删除。
+  不按任意模型名或代理猜默认，不以调整采样代替 400 根因诊断，详见 `docs/design/TUI_MODEL_PROFILES.md`。
 - 工具操作身份、owner、run/task/parent/root 和副作用结果均读取结构化事实。
   明确零副作用失败可交模型修参；部分写入/执行效果未知仍保持 UNKNOWN，不自动重放。
   Shell/controlled_exec 是非交互批处理（stdin=DEVNULL），交互用独立 PTY；后台句柄不是 PTY 句柄。

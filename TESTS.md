@@ -6,6 +6,14 @@
 成功 Shell 穿插 Read 的重复观察、复制异步顺序/退出/OSC、用户限定职责与普通并行分工。
 各线 focused 数量不能相加；最终联合、安装版本和原会话结果记在 [R230 台账](docs/audits/R230_CONSOLIDATED_FIXES.md)。
 
+## R230 采样配置切片
+
+`test_provider_sampling.py` 覆盖 finite/range、YAML、精确端点正反例、协议下限、显式温度、三协议出站、
+流式/非流式组包、profile 保存/清空、冻结缓存、子代理继承、旧任务 overlay 和菜单字段提交。
+传输均替换为本地 fake；与模型配置/后端现有定向联合验证，不执行全仓或发模型请求。
+本切片 9 文件联合 273 项通过；Ruff、doc-sync、strict code-size 与 diff 检查通过。
+真实 TUI 由主线合并部署后负责，不用本切片单测关闭旧 HTTP 400/复读。
+
 ## R229 现场故障回归（进行中）
 
 覆盖普通 assistant/空值/SSE/非流式/插话后的工具请求思考回放，无思考模型不得制造字段。

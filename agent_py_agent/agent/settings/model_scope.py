@@ -43,15 +43,15 @@ class ModelScopedAttribute:
         instance.__dict__[self.name] = value
 
 
-# LLM: 后端缓存只按完整模型配置快照摘要命中；有界、同 owner，并保留 backend 的能力探针缓存。
-# 函数用途: 切换模型时按需创建后端，再次使用相同配置时不重复初始化或探测。
+# LLM: 后端缓存按含 top_p 的完整模型配置快照命中；有界、同 owner，不热改已有执行后端。
+# 函数用途: 切换模型或采样配置时创建对应后端，相同快照复用连接与探针缓存。
 def _profile_backend(agent: object, config: object):
     from ..backends import get_backend
 
     values = [getattr(config, key) for key in (
         "model_backend", "model_name", "api_base", "api_key", "model_context_window_tokens", "max_tokens",
         "model_custom_headers", "model_session_header",
-        "temperature", "stream_enabled", "anthropic_prompt_cache_enabled", "anthropic_version", "request_timeout",
+        "temperature", "top_p", "stream_enabled", "anthropic_prompt_cache_enabled", "anthropic_version", "request_timeout",
         "model_temperature_explicit",
     )]
     key = hashlib.sha256(json.dumps(values).encode()).hexdigest()

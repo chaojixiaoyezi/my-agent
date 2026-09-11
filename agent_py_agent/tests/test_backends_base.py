@@ -670,6 +670,7 @@ class TestGetBackend:
         config.max_tokens = 1024
         config.model_context_window_tokens = 234567
         config.temperature = "0.7"
+        config.top_p = None
         config.stream_enabled = True
         config.anthropic_version = "2023-06-01"
 
@@ -686,6 +687,7 @@ class TestGetBackend:
         config.max_tokens = 1024
         config.model_context_window_tokens = 200000
         config.temperature = "0.7"
+        config.top_p = None
         config.stream_enabled = True
         config.anthropic_version = "2023-06-01"
         config.anthropic_prompt_cache_enabled = False

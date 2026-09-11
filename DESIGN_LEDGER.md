@@ -12,6 +12,14 @@
 包括整合、修正与测试；只有用户明确限制谁写功能时才在软提示中保留该范围。创建、唤醒、runner
 共用同一职责提示，`coordinator_execution_scope.v2` 仍只作说明，不是执行权限或完成门。
 
+## 2026-09-11 R230 精确端点采样配置【状态：273 项定向通过，待主线真 TUI】
+
+解决 工具运行时 新版给 DeepSeek V4 Flash 设 top_p=0.95、而本项目未提供 top_p 配置的差距。
+统一 YAML/dataclass、owner 模型表单与冻结 backend 快照；None 让普通端点省略，显式值经有限范围校验。
+只为已核对官方/OpenCode Go/Zen 精确端点及 V4 Flash 型号使用默认与协议下限，未知代理不强加。
+不改变 session、重试、工具和历史；这不是旧会话 400 或复读根因已证实。细节见
+[模型配置](docs/design/TUI_MODEL_PROFILES.md#采样参数)。真实 TUI 验收由主线统一部署执行。
+
 R229 追加边界：历史缺少 reasoning 的兼容只在已核对的 DeepSeek 官方 / 工具运行时 Zen 工具请求出站层补空字段，
 不把空字段写回 canonical 或声称恢复思考；普通未知网关不盲加字段。新会话通过、旧会话仍拒绝分别记录，
 继续以真实请求结构定位，不自动重试无解释 400。细节见 `docs/audits/R229_LIVE_FAILURES.md`。
