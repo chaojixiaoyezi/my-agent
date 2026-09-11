@@ -57,6 +57,32 @@ def _bounded_output_tokens(configured: int, requested: int | None) -> int:
 
 # LLM: Request-local stream controls are forwarded only when present so legacy/fake stream callables keep their established signature.
 # 函数用途: 调用真实或测试流入口；只有本轮确有独立首包预算时才附加新参数。
+# LLM: 供应商 400 只回空洞 body 时，唯一可靠的定位材料就是本地出站结构。默认关闭，
+# 只在显式设置环境变量时落一份不含密钥的 dump，避免日常运行产生隐私副本。
+# 函数用途: 按需把出站 payload 的结构写入诊断文件，供定位供应商拒绝原因。
+def dump_provider_payload(payload: dict[str, Any], *, path: str) -> None:
+    import os
+
+    target = str(os.environ.get("MY_AGENT_PROVIDER_DUMP") or "").strip()
+    if not target:
+        return
+    try:
+        record = {
+            "path": path,
+            "model": payload.get("model"),
+            "thinking": payload.get("thinking"),
+            "has_tools": "tools" in payload,
+            "tool_choice": payload.get("tool_choice"),
+            "message_count": len(payload.get("messages") or []),
+            "payload": payload,
+        }
+        with open(target, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        # 诊断绝不反噬主链路：任何写入失败都只放弃本次 dump。
+        return
+
+
 def _request_stream_lines(
     lines,
     path: str,
@@ -705,6 +731,7 @@ class OpenAICompatibleBackend(HttpBackend):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
+        dump_provider_payload(payload, path="/chat/completions")
         if self.stream_enabled:
             return self._generate_stream(
                 payload,
