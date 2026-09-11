@@ -230,8 +230,114 @@ def test_structured_tool_progress_hides_externalized_blob_path() -> None:
     )
 
     assert payload["detail"] == "https://example.com/report"
-    assert payload["output"] == "run-web:call-web"
+    assert payload["output"] == "bounded preview"
+    assert result.metadata["archive_output_record"]["scoped_call_id"] == "run-web:call-web"
+    assert result.content_blocks[-1].ref == "/private/owner/blobs/tool-output.json"
     assert "/private/owner" not in json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("tool_name", ["read_artifact", "read_file", "task_progress"])
+def test_externalized_progress_retains_safe_preview_for_main_child_and_tui(tool_name, monkeypatch) -> None:
+    from pathlib import Path
+
+    from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    call = _canonical_calls([{"tool": tool_name}])[0]
+    request = _round_request(
+        agent=SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir="/private/owner")),
+        params=SimpleNamespace(tool_context=[]), tool_rounds=2,
+        response=ModelResponse(text="", backend="test"), calls=[{"tool": tool_name}],
+        execute_one=lambda _request: None, record_one=lambda _record: None,
+    )
+    preview = "1: public tool result\n2: /private/owner/tasks/report.md"
+    archive = {"output_externalized": True, "scoped_call_id": "run:call",
+               "output_path": "/private/owner/blobs/raw.json", "output_preview": preview}
+    result = ToolResult.succeeded(call, "fallback should not replace archive preview",
+                                 facts=ToolSuccessFacts(metadata={"archive_output_record": archive}))
+
+    def forbid_blob_read(*args, **kwargs):
+        raise AssertionError("display must not open externalized output")
+
+    monkeypatch.setattr(Path, "open", forbid_blob_read)
+    progress = _structured_tool_progress(
+        ToolProgressEvent(request, 0, call, "finished", "完成", result=result), tool_name, "",
+    )
+    assert "1: public tool result" in progress["output"]
+    assert "~/.my-agent/owner/tasks/report.md" in progress["output"]
+    assert "raw.json" not in progress["output"] and "run:call" not in progress["output"]
+    assert result.metadata["archive_output_record"] == archive
+
+    for task_id, thread_id, request_id in (
+        ("", "thread-main", "bg-main:thread-main:attempt"),
+        ("child", "thread-child", "bg-agent:child:attempt"),
+    ):
+        events = []
+        sink = BackgroundTranscriptSink(SimpleNamespace(), task_id=task_id, thread_id=thread_id,
+                                        request_id=request_id,
+                                        event_writer=lambda _agent, **event: events.append(event))
+        sink.write_progress(progress)
+        assert events[-1]["kind"] == "tool_completed"
+        assert events[-1]["payload"]["output"] == progress["output"]
+    runtime = TuiRuntime("display-test")
+    runtime.begin_turn("request-test").write_progress(progress)
+    tool_block = next(block for block in runtime.store.snapshot().stable_blocks if block.role == "tool")
+    assert tool_block.detail == progress["output"]
+
+
+@pytest.mark.parametrize("preview", [None, "", 123, {}, []])
+def test_externalized_missing_preview_uses_inline_text_not_ref(preview) -> None:
+    call = _canonical_calls([{"tool": "read_file"}])[0]
+    request = _round_request(agent=SimpleNamespace(), params=SimpleNamespace(tool_context=[]), tool_rounds=1,
+                             response=ModelResponse(text="", backend="test"), calls=[{"tool": "read_file"}],
+                             execute_one=lambda _request: None, record_one=lambda _record: None)
+    result = ToolResult.succeeded(call, facts=ToolSuccessFacts(
+        content_blocks=(ToolContentBlock("text", text="safe inline preview"),
+                        ToolContentBlock("ref", ref="/private/blobs/raw.json")),
+        metadata={"archive_output_record": {"output_externalized": True,
+                                            "scoped_call_id": "run:call", "output_preview": preview}},
+    ))
+    progress = _structured_tool_progress(
+        ToolProgressEvent(request, 0, call, "finished", "完成", result=result), "read_file", "",
+    )
+    assert progress["output"] == "safe inline preview"
+
+
+def test_externalized_failed_diagnostic_preserves_head_tail_and_redacts_secret() -> None:
+    call = _canonical_calls([{"tool": "run_command"}])[0]
+    request = _round_request(agent=SimpleNamespace(), params=SimpleNamespace(tool_context=[]), tool_rounds=1,
+                             response=ModelResponse(text="", backend="test"), calls=[{"tool": "run_command"}],
+                             execute_one=lambda _request: None, record_one=lambda _record: None)
+    preview = "error[E0433]: missing module\nAuthorization: Bearer fixture-secret-value\n" + "x" * 10000 + "\nerror: 3 previous errors"
+    result = ToolResult.failed(call, "raw body must not appear", error_code="COMMAND_FAILED",
+                               failure_stage="handler", facts=ToolFailureFacts(metadata={
+                                   "archive_output_record": {"output_externalized": True,
+                                       "scoped_call_id": "run:call", "output_preview": preview},
+                               }))
+    progress = _structured_tool_progress(
+        ToolProgressEvent(request, 0, call, "failed", "失败", result=result), "run_command", "",
+    )
+    assert progress["ok"] is False
+    assert progress["output"].startswith("error[E0433]")
+    assert progress["output"].endswith("error: 3 previous errors")
+    assert "fixture-secret-value" not in progress["output"]
+    assert "内容过长" in progress["output"] and len(progress["output"]) < 1700
+
+
+def test_externalized_ref_only_has_honest_empty_preview() -> None:
+    call = _canonical_calls([{"tool": "read_file"}])[0]
+    request = _round_request(agent=SimpleNamespace(), params=SimpleNamespace(tool_context=[]), tool_rounds=1,
+                             response=ModelResponse(text="", backend="test"), calls=[{"tool": "read_file"}],
+                             execute_one=lambda _request: None, record_one=lambda _record: None)
+    result = ToolResult.succeeded(call, facts=ToolSuccessFacts(
+        content_blocks=(ToolContentBlock("ref", ref="/private/blobs/raw.json"),),
+        metadata={"archive_output_record": {"output_externalized": True, "scoped_call_id": "run:call"}},
+    ))
+    progress = _structured_tool_progress(
+        ToolProgressEvent(request, 0, call, "finished", "完成", result=result), "read_file", "",
+    )
+    assert "暂无文字预览" in progress["output"]
+    assert "run:call" not in progress["output"] and "raw.json" not in progress["output"]
 
 
 def test_non_callable_typed_sink_receives_child_tool_and_process_events() -> None:

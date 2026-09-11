@@ -1371,16 +1371,19 @@ def _structured_tool_progress(
     return payload
 
 
-# LLM: 外置工具结果的物理 blob 路径只供宿主归档；TUI 进度最多展示稳定 scoped call id，不能把路径当用户结果。
-# 函数用途: 为工具完成卡生成安全短摘要；普通结果显示正文，外置结果显示可识别的逻辑引用。
+# LLM: 外置输出展示既有安全 preview 或 typed inline text，不读取 blob、不展开 refs；正文仍经统一公开脱敏和大小预算。
+# 函数用途: 为主/子工具卡保留真实结果预览，避免 Read/计划等一归档就只剩操作号；归档身份和完整结果不改写。
 def _tool_progress_output(event: ToolProgressEvent) -> str:
     result = event.result
     if result is None:
         return ""
     archive = result.metadata.get("archive_output_record")
     if isinstance(archive, Mapping) and archive.get("output_externalized") is True:
-        scoped_call_id = str(archive.get("scoped_call_id") or "").strip()
-        return scoped_call_id or "完整输出已安全归档"
+        preview = archive.get("output_preview")
+        if not isinstance(preview, str) or not preview.strip():
+            # ToolResult.output 会把 ref 物理路径也拼入正文；这里只取已经投影好的文字块。
+            preview = "\n".join(block.text for block in result.content_blocks if block.type == "text")
+        return _public_progress_text(event, preview, max_chars=1600) or "完整输出已归档（暂无文字预览）"
     return _public_progress_text(event, result.output, max_chars=1600)
 
 
