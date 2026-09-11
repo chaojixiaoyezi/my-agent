@@ -1,6 +1,7 @@
 # LLM: 本模块是工具/合同错误码到恢复动作的唯一分类表；控制流读取 code，不得解析用户或模型错误文案。
 #   Persona CAS 冲突保留原错误码；分类表不证明是否写入，副作用事实必须由实际 handler 提供。
 #   回合结果未知和父级授权快照缺失不可自动重放或补授权，必须分别核实事实或报告阻塞。
+#   删除恢复文案只指向可发现的真实工具和既有 grant；不能把内部回收流程当工具或授予权限。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -9,6 +10,18 @@ import re
 from dataclasses import dataclass
 
 from .recovery import RecoveryAction
+
+# LLM: 两种危险删除诊断共享同一软恢复说明；执行权仍由工具可见性、父级 grant 和审批/路径门决定。
+# 配置用途: 告诉模型怎样找到受控回收入口，避免反复寻找不存在的 task_trash 工具。
+_MANAGED_DELETE_RECOVERY_HINT = (
+    "若要删除允许写入范围内的单个文本文件，使用 apply_patch 的 *** Delete File。"
+    "目录或批量回收先用 tool_search 查找 controlled_exec 并读取实际 schema。"
+    "仅当工具可见且已有覆盖目标的父级 grant 时，按 command/cwd、必要时 grant_id 调用；"
+    "可先 apply=false 预览，apply=true 仍须通过现有审批和路径限制。"
+    "task_trash 是内部流程，不是工具名；实际回收后核对 trash.moved=true 和 trash.manifest_ref。"
+    "未发现工具或缺少 grant 时如实说明该能力缺口，继续其它可做工作；"
+    "不要伪造授权、假称已回收或换 shell/删除命令绕过。"
+)
 
 
 @dataclass(frozen=True)
@@ -1051,8 +1064,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint=(
-            "命令命中破坏性模式；不得原样重试。删除允许写入范围内的单个文本文件时，"
-            "使用 apply_patch 的 *** Delete File；删除目录或批量内容时使用正式 task_trash 流程。"
+            "命令命中破坏性模式；不得原样重试。" + _MANAGED_DELETE_RECOVERY_HINT
         ),
     ),
     "COMMAND_DESTRUCTIVE_DELETE_BLOCKED": ErrorContract(
@@ -1062,8 +1074,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint=(
             "shell 删除命令不属于普通命令执行主链；不得改写参数或换 rm/rmdir/unlink 重试。"
-            "删除允许写入范围内的单个文本文件时，使用 apply_patch 的 *** Delete File；"
-            "删除目录或批量内容时使用正式 task_trash 流程。"
+            + _MANAGED_DELETE_RECOVERY_HINT
         ),
     ),
     "COMMAND_SHELL_OPERATOR_BLOCKED": ErrorContract(

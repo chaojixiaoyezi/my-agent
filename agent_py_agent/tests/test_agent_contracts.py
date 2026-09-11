@@ -1,5 +1,48 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
+
+@pytest.mark.parametrize("code", ["COMMAND_DANGEROUS_PATTERN_BLOCKED", "COMMAND_DESTRUCTIVE_DELETE_BLOCKED"])
+def test_delete_recovery_discovers_real_tool_without_granting_authority(code: str) -> None:
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+    from agent_py_agent.agent.tooling.controlled_exec import ControlledExecTool
+
+    contract = error_contract(code)
+    hint = contract.recovery_hint
+    assert len(hint) <= 500
+    assert contract.category == "permission"
+    assert contract.retryable is False
+    assert contract.recommended_action == "change_strategy"
+    assert "tool_search" in hint
+    assert ControlledExecTool.model_spec.name in hint
+    assert {"command", "cwd", "grant_id", "apply"} <= set(ControlledExecTool.model_spec.input_schema["properties"])
+    assert "apply=false" in hint and "apply=true" in hint
+    assert "工具可见" in hint and "已有覆盖目标的父级 grant" in hint
+    assert "现有审批和路径限制" in hint
+    assert "task_trash 是内部流程，不是工具名" in hint
+    assert "未发现工具或缺少 grant" in hint
+    assert "不要伪造授权" in hint
+    assert "apply_patch" in hint and "*** Delete File" in hint
+
+
+def test_delete_recovery_receipt_fields_match_real_controlled_exec_output() -> None:
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+    from agent_py_agent.agent.subagents.task_trash import TaskTrashMoveResult
+    from agent_py_agent.agent.tooling.controlled_exec import _trash_payload
+
+    payload = json.loads(_trash_payload(
+        TaskTrashMoveResult(True, "source", "trash/source", "trash/manifest.jsonl"),
+        "existing-grant", "delete_requires_task_trash",
+    ))
+    hint = error_contract("COMMAND_DESTRUCTIVE_DELETE_BLOCKED").recovery_hint
+    assert payload["trash"]["moved"] is True
+    assert payload["trash"]["manifest_ref"]
+    assert "trash.moved=true" in hint and "trash.manifest_ref" in hint
+    assert "trash_manifest_ref" not in hint
+
 
 def test_error_taxonomy_classifies_failures_and_recommends_recovery() -> None:
     from agent_py_agent.agent.contracts.error_taxonomy import classify_error, error_contract
