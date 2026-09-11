@@ -1341,13 +1341,13 @@ def test_ctrl_c_with_transcript_selection_copies_before_interrupt(monkeypatch) -
     monkeypatch.setattr(
         tui_keybindings,
         "_write_selection_clipboard",
-        lambda _application, text: copied.append(text),
+        lambda _application, text, *, notify: (copied.append(text), notify("正在复制…")),
     )
 
     tui_keybindings._handle_ctrl_c_keybinding(SimpleNamespace(app=app), params)
 
     assert copied == ["selected output"]
-    assert runtime.notice() == "Copied 15 chars"
+    assert runtime.notice() == "正在复制…"
 
 
 def test_ctrl_c_copies_input_selection_without_clearing_highlight(monkeypatch) -> None:
@@ -1367,14 +1367,14 @@ def test_ctrl_c_copies_input_selection_without_clearing_highlight(monkeypatch) -
     monkeypatch.setattr(
         tui_keybindings,
         "_write_selection_clipboard",
-        lambda _application, text: copied.append(text),
+        lambda _application, text, *, notify: (copied.append(text), notify("正在复制…")),
     )
 
     tui_keybindings._handle_ctrl_c_keybinding(SimpleNamespace(app=app), params)
 
     assert copied == ["复制中文"]
     assert input_area.buffer.selection_state is not None
-    assert runtime.notice() == "Copied 4 chars"
+    assert runtime.notice() == "正在复制…"
 
 
 def test_ctrl_t_toggles_todo_view_without_editing_input() -> None:
@@ -1724,7 +1724,7 @@ def test_native_clipboard_runs_pbcopy_when_local_macos(monkeypatch) -> None:
     monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
 
     assert tui_keybindings._run_clipboard_tool(["pbcopy"], "正文") is True
-    tui_keybindings._copy_native_clipboard("正文")
+    assert tui_keybindings._copy_native_clipboard("正文") is True
     assert calls[1] == (["pbcopy"], "正文")
 
 
@@ -1743,36 +1743,42 @@ def test_native_clipboard_skipped_over_ssh(monkeypatch) -> None:
     assert calls == []
 
 
-def test_linux_clipboard_tool_probe_wayland_then_x11_and_caches(monkeypatch) -> None:
+def test_linux_clipboard_caches_only_successful_command(monkeypatch) -> None:
+    calls = []
     monkeypatch.setattr(tui_keybindings, "_linux_clipboard_tool_cache", None)
-    monkeypatch.setattr(
-        tui_keybindings.shutil,
-        "which",
-        lambda name: "/usr/bin/" + name if name in {"wl-copy", "xsel"} else None,
-    )
-
-    assert tui_keybindings._linux_clipboard_tool() == ["wl-copy"]
-    # 第二次命中缓存，不再探测
-    monkeypatch.setattr(
-        tui_keybindings.shutil,
-        "which",
-        lambda name: None,
-    )
-    assert tui_keybindings._linux_clipboard_tool() == ["wl-copy"]
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-test")
+    monkeypatch.setenv("DISPLAY", ":test")
+    monkeypatch.setattr(tui_keybindings, "_run_clipboard_tool",
+                        lambda args, text: calls.append(args[0]) is None and args[0] == "xsel")
+    assert tui_keybindings._copy_linux_clipboard("第一次") is True
+    assert calls == ["wl-copy", "xclip", "xsel"]
+    calls.clear()
+    assert tui_keybindings._copy_linux_clipboard("第二次") is True
+    assert calls == ["xsel"]
 
 
-def test_linux_clipboard_tool_falls_back_to_xclip(monkeypatch) -> None:
-    monkeypatch.setattr(tui_keybindings, "_linux_clipboard_tool_cache", None)
-    monkeypatch.setattr(
-        tui_keybindings.shutil,
-        "which",
-        lambda name: "/usr/bin/xclip" if name == "xclip" else None,
-    )
+def test_linux_clipboard_invalid_cache_does_not_block_other_display(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(tui_keybindings, "_linux_clipboard_tool_cache", ["wl-copy"])
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("DISPLAY", ":test")
+    monkeypatch.setattr(tui_keybindings, "_run_clipboard_tool",
+                        lambda args, text: calls.append(args[0]) is None)
+    assert tui_keybindings._copy_linux_clipboard("正文") is True
+    assert calls == ["xclip"]
 
-    assert tui_keybindings._linux_clipboard_tool() == ["xclip", "-selection", "clipboard"]
+
+def test_linux_clipboard_failure_is_not_cached(monkeypatch) -> None:
+    monkeypatch.setattr(tui_keybindings, "_linux_clipboard_tool_cache", ["wl-copy"])
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-test")
+    monkeypatch.setenv("DISPLAY", ":test")
+    monkeypatch.setattr(tui_keybindings, "_run_clipboard_tool", lambda args, text: False)
+    assert tui_keybindings._copy_linux_clipboard("正文") is False
+    assert tui_keybindings._linux_clipboard_tool_cache is None
 
 
-def test_write_selection_clipboard_starts_native_thread_when_local(monkeypatch) -> None:
+def test_write_selection_clipboard_starts_one_ordered_worker_when_local(monkeypatch) -> None:
     from prompt_toolkit.clipboard import InMemoryClipboard
 
     started: list[tuple[str, tuple]] = []
@@ -1792,7 +1798,9 @@ def test_write_selection_clipboard_starts_native_thread_when_local(monkeypatch) 
 
     tui_keybindings._write_selection_clipboard(app, "本地复制")
 
-    assert [name for name, _ in started] == ["_copy_native_clipboard"]
+    assert [name for name, _ in started] == ["_run"]
+    assert app._my_agent_clipboard_projector._pending.native is True
+    assert app._my_agent_clipboard_projector._pending.tmux is False
     assert app.clipboard.get_data().text == "本地复制"
 
 
@@ -1808,8 +1816,10 @@ def test_large_selection_uses_native_and_tmux_without_oversized_osc(monkeypatch)
                         lambda thread: started.append((thread._target.__name__, thread._args)))
     text = "长文本复制" * 9000
     tui_keybindings._write_selection_clipboard(app, text)
-    assert [name for name, _ in started] == ["_copy_native_clipboard", "_load_tmux_clipboard_buffer"]
-    assert all(args == (text,) for _, args in started)
+    assert [name for name, _ in started] == ["_run"]
+    pending = app._my_agent_clipboard_projector._pending
+    assert pending.native is True and pending.tmux is True
+    assert pending.text == text and pending.terminal_copy() is False
     assert app.clipboard.get_data().text == text
     assert raw == []
 

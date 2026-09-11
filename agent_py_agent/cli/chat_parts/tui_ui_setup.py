@@ -742,20 +742,14 @@ def _assemble_tui_application(
     parts.transcript_view.provider.set_invalidate_callback(app.invalidate)
     parts.transcript_view.overlay_provider.set_invalidate_callback(app.invalidate)
 
-    # LLM: 默认 TUI mouse 模式必须同时保有 终端交互 式滚轮与应用内选区复制；settled selection
-    # 投影到 application/tmux/OSC52，但 SSH notice 不得声称不可观测的外层系统剪贴板一定已改变。
-    # 函数用途: 在 TUI 鼠标模式松手或右键后投影最终选区，并提示远程复制失败时可按 F6 使用原生复制。
+    # LLM: 默认 TUI 鼠标模式同时支持滚轮与选区复制；回执绑定发起页面，由有序 projector 根据实际通道结果给出。
+    # 函数用途: 松手或右键后异步复制最终选区；不在系统复制完成前声称成功，也不因随后切换子代理把回执发错页面。
     def copy_settled_selection(text: str) -> None:
-        _write_selection_clipboard(app, text)
         active_runtime = parts.runtime
         runtime_reader = getattr(params.agent_navigation, "active_runtime", None)
         if callable(runtime_reader):
             active_runtime = runtime_reader()
-        if os.environ.get("SSH_CONNECTION"):
-            notice = f"已选中 {len(text)} 个字符；已尝试复制，粘贴无效可按 F6 原生复制"
-        else:
-            notice = f"已复制 {len(text)} 个字符"
-        active_runtime.set_notice(notice, duration_seconds=2.5)
+        _write_selection_clipboard(app, text, notify=active_runtime.set_notice)
         app.invalidate()
 
     parts.transcript_view.set_copy_on_select(copy_settled_selection)

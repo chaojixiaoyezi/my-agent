@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import base64
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -23,6 +22,7 @@ from .tui import (
     _tui_handle_command,
     _tui_request_exit,
 )
+from .tui_clipboard import ClipboardProjector, ClipboardResult
 from .tui_input import (
     TuiCompletion,
     apply_selected_completion,
@@ -1819,8 +1819,7 @@ def _copy_input_selection(event, params: TuiCreateKeybindingsParams) -> bool:
     selected_text = _selected_input_text(params.input_area.buffer)
     if not selected_text:
         return False
-    _write_selection_clipboard(event.app, selected_text)
-    _required_tui_runtime(params).set_notice(f"Copied {len(selected_text)} chars")
+    _write_selection_clipboard(event.app, selected_text, notify=_active_tui_runtime(params).set_notice)
     event.app.invalidate()
     return True
 
@@ -1853,15 +1852,14 @@ def _copy_transcript_selection(event, params: TuiCreateKeybindingsParams) -> boo
     )
     if not selected_text:
         return False
-    _write_selection_clipboard(event.app, selected_text)
-    _required_tui_runtime(params).set_notice(f"Copied {len(selected_text)} chars")
+    _write_selection_clipboard(event.app, selected_text, notify=_active_tui_runtime(params).set_notice)
     event.app.invalidate()
     return True
 
 
-# LLM: clipboard 只复制显式选区；OSC 52 的长度预算不能截断 native/stdin/tmux 通道。
-# 函数用途: 同时写应用、本机和 tmux 剪贴板；仅超大终端控制序列不发送，避免长文本看似复制却丢失。
-def _write_selection_clipboard(application: Any, text: str) -> None:
+# LLM: clipboard 只复制显式选区；应用立即写入，native/tmux 经同 app 有界串行队列，OSC/回执在 UI 线程再次校验代次。
+# 函数用途: 保留最新应用选区，异步按序投影本机和 tmux；只在真实结果返回后报告对应通道成功。
+def _write_selection_clipboard(application: Any, text: str, *, notify: Any = None) -> None:
     from prompt_toolkit.clipboard import ClipboardData
 
     normalized = str(text or "")
@@ -1869,76 +1867,109 @@ def _write_selection_clipboard(application: Any, text: str) -> None:
     encoded = normalized.encode("utf-8")
     if not encoded:
         return
-    # native 路径先于 tmux/OSC 52 启动（终端交互 同款）：无 SSH_CONNECTION 时本机
-    # 剪贴板工具直接写系统剪贴板，避免快速切走焦点后粘贴被 tmux 等待拖慢。
-    if not os.environ.get("SSH_CONNECTION"):
-        threading.Thread(
-            target=_copy_native_clipboard,
-            args=(normalized,),
-            name="my-agent-tui-clipboard-native",
-            daemon=True,
-        ).start()
-    if os.environ.get("TMUX"):
-        threading.Thread(
-            target=_load_tmux_clipboard_buffer,
-            args=(normalized,),
-            name="my-agent-tui-clipboard",
-            daemon=True,
-        ).start()
+    if callable(notify):
+        notify(f"正在复制 {len(normalized)} 个字符…")
+    projector = getattr(application, "_my_agent_clipboard_projector", None)
+    if projector is None:
+        projector = ClipboardProjector(_copy_native_clipboard, _load_tmux_clipboard_buffer)
+        application._my_agent_clipboard_projector = projector
+        future = getattr(application, "future", None)
+        if future is not None:
+            future.add_done_callback(lambda _future: projector.close())
+    projector.submit(
+        normalized, native=not bool(os.environ.get("SSH_CONNECTION")),
+        tmux=bool(os.environ.get("TMUX")), terminal_copy=lambda: _write_clipboard_osc(application, encoded),
+        dispatch=lambda callback: _dispatch_clipboard_receipt(application, callback),
+        completed=lambda result: _show_clipboard_receipt(application, notify, result),
+    )
+
+
+# LLM: OSC 写出只能标记 sent，无法证明外层终端支持或授权；100KB 预算仅限此控制序列，不影响应用/native/tmux。
+# 函数用途: 在 UI 线程发送有界终端复制请求，写失败不阻断其它剪贴板通道。
+def _write_clipboard_osc(application: Any, encoded: bytes) -> bool:
     if len(encoded) > 100_000:
-        return
+        return False
     output = getattr(application, "output", None)
     write_raw = getattr(output, "write_raw", None)
     if not callable(write_raw):
-        return
+        return False
     payload = base64.b64encode(encoded).decode("ascii")
-    write_raw(_osc52_sequence(payload, inside_tmux=bool(os.environ.get("TMUX"))))
-    flush = getattr(output, "flush", None)
-    if callable(flush):
-        flush()
+    try:
+        write_raw(_osc52_sequence(payload, inside_tmux=bool(os.environ.get("TMUX"))))
+        flush = getattr(output, "flush", None)
+        if callable(flush):
+            flush()
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+# LLM: worker 回执只能投回原 app 的 loop；已结束 app 丢弃回调，不能更新另一个 TUI 或重启 loop。
+# 函数用途: 把复制结果安全送回界面线程；无运行 loop 的定向调用直接交付。
+def _dispatch_clipboard_receipt(application: Any, callback: Any) -> None:
+    future = getattr(application, "future", None)
+    if future is not None and future.done():
+        return
+    loop = getattr(application, "loop", None)
+    if loop is None:
+        callback()
+    else:
+        loop.call_soon_threadsafe(callback)
+
+
+# LLM: 回执只包含字数和通道结果，不能再次读取剪贴板确认或输出被复制正文；projector 已在 UI 线程校验 generation。
+# 函数用途: 在原发起页面显示准确复制结果并刷新，不把发送终端请求当系统成功。
+def _show_clipboard_receipt(application: Any, notify: Any, result: ClipboardResult) -> None:
+    if callable(notify):
+        notify(result.notice())
+    invalidate = getattr(application, "invalidate", None)
+    if callable(invalidate):
+        invalidate()
 
 
 # LLM: SSH 会话（tmux pane 继承 SSH_TTY）不能以 SSH_TTY 判断远端；SSH_CONNECTION 在 tmux 默认
-# update-environment 中会被清除，本地 attach 后 native 自动恢复。失败静默，OSC 52 可能已成功。
-# 函数用途: 用本机剪贴板工具把文本写入系统剪贴板（仅本地无 SSH 会话时；远端写的是远端剪贴板）。
-def _copy_native_clipboard(text: str) -> None:
+# update-environment 中会被清除，新进程按实际环境选择；结果必须交回 projector，不能先宣称系统复制成功。
+# 函数用途: 用本机剪贴板工具写入系统剪贴板并返回真实结果；SSH 不写远端系统剪贴板。
+def _copy_native_clipboard(text: str) -> bool:
     if os.environ.get("SSH_CONNECTION"):
-        return
+        return False
     if sys.platform == "darwin":
-        _run_clipboard_tool(["pbcopy"], text)
-        return
+        return _run_clipboard_tool(["pbcopy"], text)
     if sys.platform.startswith("linux"):
-        tool = _linux_clipboard_tool()
-        if tool is not None:
-            _run_clipboard_tool(tool, text)
-        return
+        return _copy_linux_clipboard(text)
     if sys.platform == "win32":
-        _run_clipboard_tool(["clip"], text)
+        return _run_clipboard_tool(["clip"], text)
+    return False
 
 
 _linux_clipboard_tool_cache: list[str] | None = None
 _linux_clipboard_tool_lock = threading.Lock()
 
 
-# LLM: Linux 剪贴板工具探测结果缓存，避免每次鼠标松手重复探测（终端交互 同款缓存）。
-# 函数用途: 按 Wayland→X11 顺序探测可用剪贴板命令；无可用返回 None。
-def _linux_clipboard_tool() -> list[str] | None:
+# LLM: Linux 仅缓存实际成功的通道；安装命令不证明当前 display 可用，失败须清缓存并允许同次尝试其它环境适用通道。
+# 函数用途: 按当前 Wayland/X11 环境复制，防止已安装但不可用的 wl-copy 永久挡住 xclip。
+def _copy_linux_clipboard(text: str) -> bool:
     global _linux_clipboard_tool_cache
+    candidates = []
+    if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_RUNTIME_DIR"):
+        candidates.append(["wl-copy"])
+    if os.environ.get("DISPLAY"):
+        candidates.extend((["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]))
     with _linux_clipboard_tool_lock:
-        if _linux_clipboard_tool_cache is not None:
-            return _linux_clipboard_tool_cache or None
-        for candidate in (
-            ["wl-copy"],
-            ["xclip", "-selection", "clipboard"],
-            ["xsel", "--clipboard", "--input"],
-        ):
-            if shutil.which(candidate[0]) is not None:
+        cached = _linux_clipboard_tool_cache
+        if cached in candidates:
+            candidates.remove(cached)
+            candidates.insert(0, cached)
+        _linux_clipboard_tool_cache = None
+        for candidate in candidates:
+            if _run_clipboard_tool(candidate, text):
                 _linux_clipboard_tool_cache = candidate
-                return candidate
-        _linux_clipboard_tool_cache = []
-        return None
+                return True
+        return False
 
 
+# LLM: native helper 的 stdin 只来自显式选区；stdout/stderr 不进入日志，单次子进程有两秒上限并返回真实 exit 状态。
+# 函数用途: 执行一个本机复制命令，失败不清空任何剪贴板，也不泄露选区。
 def _run_clipboard_tool(args: list[str], text: str) -> bool:
     try:
         result = subprocess.run(
