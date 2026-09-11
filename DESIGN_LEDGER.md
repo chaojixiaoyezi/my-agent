@@ -1,5 +1,26 @@
 # DESIGN LEDGER
 
+## 2026-09-11 R239 显式声明工作目录时不再继承 owner home【状态：实现与单测通过】
+
+真机实测（四路富 TUI 换语言复刻，管理员 full-access + `--workspace`）暴露：子代理的
+`allowed_write_roots` 里**同时**出现父代理 owner home 与目标目录：
+
+```
+.../runs/.../work/agents/subagent-...   (自己的)
+/Users/example/.my-agent/owners/local/main   ← 父代理 home（不该再给）
+/private/tmp/ma-eval/port-echo-python         ← 目标目录（第二层作用域，正确）
+```
+
+根因是两个函数叠加：`_current_conversation_product_write_roots` **无条件先返回 owner home**，
+`_second_layer_work_roots`（R234 新增）再追加显式工作目录。后果是子代理有两个写根，
+完全可能把产物写回老家而不是交付目录——这正是本轮"产物没落到目标目录"的直接原因。
+
+修法：**显式声明优先**——`conversation_runtime_workspace_roots` 非空时直接返回声明目录，
+不再附带 owner home；未声明时保持原语义（普通 child 仍从 owner home 继承），普通用户零变化。
+配套更新 `test_orchestration_tools` 里一条旧期望（原来断言后代继承 owner home，
+现按新语义断言继承显式声明的 task root——授权来自显式声明，不靠隐式包含）。
+新增两条反例单测，联合 157 项通过。
+
 ## 2026-09-11 R238 显式工作目录声明（管理员第二层作用域的落地前提）【状态：实现与单测通过】
 
 R236 的结论是"第二层作用域机制正确，但默认路径上父代理工作目录恒为 owner home，因此没有增量"。

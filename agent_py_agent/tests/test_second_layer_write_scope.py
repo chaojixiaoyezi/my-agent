@@ -131,3 +131,51 @@ def test_explicit_workspace_outside_home_is_rejected_for_normal_user(tmp_path):
     roots = resolve_workspace_roots(config, str(tmp_path / "x.yaml"))
     with pytest.raises(ValueError):
         validate_requested_workspace_roots(config, roots)
+
+
+# --------------------------------------------------------------------------- #
+# 显式声明工作目录时不得再继承 owner home（否则子代理会把产物写回老家）
+# --------------------------------------------------------------------------- #
+
+
+def test_declared_workspace_replaces_owner_home_in_child_write_roots(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.orchestration.create_constraints import (
+        _current_conversation_product_write_roots,
+    )
+
+    home = SimpleNamespace(owner_home_dir="/Users/example/.my-agent/owners/local/main")
+    project = tmp_path / "proj"
+    project.mkdir()
+    attrs = {
+        "conversation_thread_id": "t1",
+        "conversation_execution_cwd": str(project),
+        "conversation_runtime_workspace_roots": [str(project)],
+    }
+    agent = SimpleNamespace(
+        tools=SimpleNamespace(owner_scope_root=""),
+        home_paths=home,
+        _current_run_params=SimpleNamespace(task_attributes=attrs),
+        subagents=None,
+    )
+    roots = _current_conversation_product_write_roots(agent)
+    assert roots == [str(project)]
+    assert "/Users/example/.my-agent/owners/local/main" not in roots
+
+
+def test_undeclared_workspace_keeps_owner_home_inheritance(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.orchestration.create_constraints import (
+        _current_conversation_product_write_roots,
+    )
+
+    home = SimpleNamespace(owner_home_dir=str(tmp_path))
+    agent = SimpleNamespace(
+        tools=SimpleNamespace(owner_scope_root=str(tmp_path)),
+        home_paths=home,
+        _current_run_params=SimpleNamespace(task_attributes={"conversation_thread_id": "t1"}),
+        subagents=None,
+    )
+    assert _current_conversation_product_write_roots(agent) == [str(tmp_path)]

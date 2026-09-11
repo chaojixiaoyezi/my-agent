@@ -2176,8 +2176,36 @@ def _goal_wake_waits_for_child_event(
             return False
     except Exception:
         return False
+    # LLM: 互等死锁修复(2026-09-11 真机实测)。子代理"等父级裁决"时在状态上仍是 active，
+    # 若这里一律跳过父级唤醒，就会出现"父级等孩子结束、孩子等父级授权"的双向等待：
+    # 实测父代理整轮卡死 20 分钟以上。因此只要存在**需要父级处理的 OPEN 能力申请**，
+    # 就必须放行唤醒——这正是父级唯一能推进的动作。
+    # 函数用途: 有孩子等待父级裁决时不再抑制父级唤醒。
+    if _related_children_need_parent_decision(agent, task_id):
+        return False
     phase, state_error = _goal_subagent_phase(agent, task_id)
     return not state_error and phase == "subagents_active"
+
+
+# LLM: 判据只看结构化事实——孩子的 capability_requests 里是否有需要父级裁决的 OPEN 项；
+# 不解析子代理正文，也不猜测阻塞原因。
+# 函数用途: 判断某个 goal 任务下是否有子代理正在等待父级裁决。
+def _related_children_need_parent_decision(agent: object, root_task_id: str) -> bool:
+    try:
+        related, state_error = _related_subagent_runs(agent, root_task_id)
+    except Exception:
+        return False
+    if state_error:
+        return False
+    from ..subagents.model_capabilities import capability_request_requires_parent_resolution
+
+    for task in related:
+        for request in getattr(task, "capability_requests", []) or []:
+            if capability_request_requires_parent_resolution(getattr(request, "status", "OPEN")):
+                return True
+        if any(str(getattr(gap, "status", "")) == "OPEN" for gap in getattr(task, "capability_gaps", []) or []):
+            return True
+    return False
 
 
 def _wake_signal_should_skip(

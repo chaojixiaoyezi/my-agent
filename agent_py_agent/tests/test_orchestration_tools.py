@@ -399,8 +399,11 @@ def test_descendant_create_normalizes_relative_outputs_to_explicit_cwd(tmp_path)
         for name in ("GRANDCHILD_RESEARCH.md", "SOURCES.md", "PORTING_CHECKLIST.md")
     ]
     assert spec.attributes["output_refs"] == expected
-    assert spec.extra_write_roots == [str(owner_root.resolve(strict=False))]
-    assert all(Path(ref).is_relative_to(owner_root) for ref in spec.attributes["output_refs"])
+    # R239(2026-09-11): 父代理已显式声明工作目录(conversation_execution_cwd=task_root)时，
+    # 它就是本轮唯一产品写范围，后代不再继承 owner home——否则会出现"同时拿到上级 home
+    # 与目标目录"的双写根，实测会把产物写回老家。授权来自显式声明，不靠隐式包含。
+    assert spec.extra_write_roots == [str(task_root.resolve(strict=False))]
+    assert all(Path(ref).is_relative_to(task_root) for ref in spec.attributes["output_refs"])
     assert not any("/output/restart-grandchild/" in ref for ref in expected)
 
     scheduled = agent.subagents.hierarchy.schedule_child_runs(

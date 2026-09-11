@@ -122,15 +122,23 @@ def delegated_product_write_roots(agent: object) -> tuple[str, ...]:
 # LLM: 普通 child 从宿主 owner home 继承文件范围；运行账本目录不产生产品权限，精确 worker 在上游排除。
 # 函数用途: 把用户完整的家目录交给普通子代理使用，不因本轮处理另一个 task 而收窄。
 def _current_conversation_product_write_roots(agent: object) -> list[str]:
-    home = _resolved_path(getattr(getattr(agent, "home_paths", None), "owner_home_dir", None))
-    if home is not None:
-        return [str(home)]
     attrs = current_conversation_task_attributes(agent)
-    return _unique_roots(
+    declared = _unique_roots(
         str(path)
         for raw in conversation_runtime_workspace_roots(attrs)
         if (path := _resolved_path(raw)) is not None
     )
+    # LLM: 用户显式声明了工作目录时，它就是本轮唯一的产品写范围——不能再把 owner home
+    # 一并继承下去。否则子代理会同时拿到 home 与目标目录两个写根，把产物写回老家而不是
+    # 交付目录（2026-09-11 真机实测：子代理写根里同时出现
+    # owners/local/main 与 /tmp/ma-eval/port-echo-python）。
+    # 未声明时维持原语义：普通 child 仍从 owner home 继承文件范围，行为不变。
+    if declared:
+        return declared
+    home = _resolved_path(getattr(getattr(agent, "home_paths", None), "owner_home_dir", None))
+    if home is not None:
+        return [str(home)]
+    return []
 
 
 # LLM: 文件系统根级目录是操作系统本体而不是"工作目录"：管理员即使 full-access 也不把它
