@@ -1,5 +1,30 @@
 # DESIGN LEDGER
 
+## 2026-09-11 R237 换语言复刻的客观验收与暴露的问题【状态：验收口径已建立，四路均未达标】
+
+**为什么改用客观验收**：四路复刻的主代理都自报"按 PORT_MAP 推进"，但用户侧无法据此判断真实进度。
+于是建立与模型自述无关的验收器 `/tmp/ma-eval/verify-ports.sh`：直接用目标语言工具链说话——
+Go `go build/vet`、TypeScript `npx tsc --noEmit`、Python `python3 -m compileall`、
+Rust `cargo build` + `todo!()/unimplemented!()` 计数。**声明覆盖率不等于真实覆盖率**。
+
+**首次客观测量（08:21）**：
+- port-click-go：**0 个 .go 文件**（`go build` 报 matched no packages），只有 PORT_MAP.md + 一个 Python 校验脚本；
+- port-echo-python：**0 个 .py 文件**，只有 2 个 md；
+- port-typer-rust：8 个 .rs / 1285 行，但 **13 处 `todo!()`**（core 解析引擎、help、testing、completion 全是骨架）；
+- port-httpie-ts：12 个 .ts / 2948 行，`tsc --noEmit` 通过——唯一有实体的。
+
+**发现并验证的系统性问题**：模型倾向用"计划文档 + 骨架"替代实现，且会把 PORT_MAP 写成已对齐。
+施加**客观证据压力**（把编译器的真实输出回灌给它）后立刻出现实体文件：
+port-click-go 0→1 个 .go（224 行，go build 通过）、port-echo-python 0→3 个 .py（437 行，compileall 通过）。
+故已把《客观验收门》写进四份任务说明：未真实编译通过或目标语言无实现文件的，一律记未覆盖，
+汇报必须附真实命令与退出状态。
+
+**仍未解决的阻塞（如实记录）**：本轮子代理 FAILED 增至 24（最近 40 分钟 11 例），
+全部是 `HTTP 400: {"object":"error","model":"deepseek-v4-flash"}`。R235 的有界重试已生效
+（同一请求会重试一次），但**连续两次都是该 400** 说明这不是一次性抖动，
+而是上游在持续并发下的稳定拒绝。当前行为是**有界失败**（不无限重试、typed 错误、会话仍可用），
+但代价是子代理成批死亡、父代理白等。后续需要的是"失败可续跑"而不是"更猛地重试"。
+
 ## 2026-09-11 R236 第二层作用域的真机验证结论【状态：实现保留，但当前不会生效——需产品决策】
 
 真机验证（四路复刻 + 管理员 full-access）结论：**上一提交的能力在当前形态下永远不会触发**，
