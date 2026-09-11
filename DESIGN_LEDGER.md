@@ -1,5 +1,24 @@
 # DESIGN LEDGER
 
+## 2026-09-11 R242 富 TUI 下 send-keys 丢输入 + tsc 回归被客观门拦住【状态：均已定位，前者已定规】
+
+**问题一（操作层，真缺陷但属测试手法）**：我给四路富 TUI 各下发一条相同指令，
+实际只有 **1 个会话**收到（另 3 个会话最近请求仍是 28 分钟前）。
+根因是 `tmux send-keys` 一次性发文本 + Enter 太快，prompt_toolkit 只接住了一部分。
+定规：向富 TUI 投递必须「先 Escape → 发文本 → 停 ≥1s → 发 Enter → 停数秒」，
+改法后 **4/4 全部收到**。这条要写进以后的验收操作规范，否则会出现"以为下发了、其实没发"的假象。
+
+**问题二（产品层，被客观门成功拦截）**：port-httpie-ts 此前 `tsc --noEmit` exit=0，
+主代理继续加文件后变成 **exit=2、28 个类型错误**
+（`Cannot find name 'SEPARATOR_DATA_STRING_NESTED_KEY'`、`Set<string>` 当索引、
+基类成员缺 `override`、`HTTPMessage._orig` 未初始化等）。
+**这正是《客观验收门》存在的意义**：模型自述"已按 PORT_MAP 推进"，
+但真实类型检查是不通过的；若只看自述就会把它记成完成。
+处置：把真实错误清单回灌给 port-2，要求先修到 `tsc --noEmit` 通过再写 FINAL.md。
+
+**本轮客观结果**：click-go build ✅ 2435 行、echo-python compileall ✅ 3382 行、
+typer-rust cargo build ✅；httpie-ts 因上述回归暂不合格。三路已交付 FINAL.md（91/88/98 行）。
+
 ## 2026-09-11 R241 子代理在大上下文下被供应商持续 400【状态：真机复现，待确认是额度/长度限制】
 
 R240 之后继续实测，拿到更精确的规律：
