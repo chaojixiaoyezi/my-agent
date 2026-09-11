@@ -171,3 +171,21 @@ __all__ = [
     "resolve_workspace_roots",
     "validate_requested_workspace_roots",
 ]
+
+# LLM: 用户在 F4 选的审批/权限模式存在 owner tool_policy.json，不在 YAML。显式工作目录的
+# 硬门读的是 config.access_mode，因此校验前必须先应用持久化模式，否则管理员开了 Full Access
+# 也会被判成 WorkspaceOnly（真机实测）。这条对 TUI 与完整 Agent 两条入口必须一致。
+# 函数用途: 读取 owner 持久化权限模式并应用到 config，供工作目录校验使用。
+def config_with_owner_permission_mode(config):
+    from ..agent.user_space.approval_mode import permission_config
+    from ..agent.user_space.home_layout import home_paths
+    from ..agent.user_space.home_root import configured_home_root
+    from ..agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        owner_identity_from_config,
+        resolve_owner_home,
+    )
+
+    base_home = home_paths(configured_home_root(config))
+    owner = resolve_owner_home(base_home.root, owner_identity_from_config(config))
+    return permission_config(config, home_paths_with_owner(base_home, owner))

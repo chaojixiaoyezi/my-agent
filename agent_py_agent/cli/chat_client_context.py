@@ -26,6 +26,7 @@ from ..agent.user_space.runtime_paths import (
     resolve_runtime_paths_for_agent,
 )
 from .workspace_resolution import (
+    config_with_owner_permission_mode,
     explicit_workspace_root,
     explicit_workspace_roots,
     owner_home_workspace_root,
@@ -586,12 +587,7 @@ def make_gateway_chat_client(args) -> GatewayChatClientAgent:
     owner_identity = owner_identity_from_config(config)
     owner = resolve_owner_home(base_home.root, owner_identity)
     scoped_home = home_paths_with_owner(base_home, owner)
-    # 用户在 F4 里选的审批/权限模式存在 owner tool_policy.json 里，不在 YAML。
-    # 校验显式工作目录前必须先把它应用到 config，否则管理员明明开了 Full Access
-    # 也会被 WorkspaceOnly 误拒（真机实测）。
-    from ..agent.user_space.approval_mode import permission_config
-
-    config = permission_config(config, scoped_home)
+    config = config_with_owner_permission_mode(config)
     explicit_roots = explicit_workspace_roots(args)
     if explicit_roots:
         config.workspace_root = [str(root) for root in explicit_roots]
