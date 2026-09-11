@@ -1,5 +1,10 @@
 # Subagent Structure
 
+## R228 角色与授权分离
+
+`role_template_catalog/builtin/bug_finder.json` 只负责职责软提示；`model_guidance` 对主/子共同说明检查范围、
+委派不扩权与证据边界。工具 Schema/结构化能力仍由原角色快照提供，修复没有新增角色专项机器判断。
+
 ## R227 默认终端工具面
 
 `role_templates.SHELL_SESSION_TOOLS` 是普通命令、后台续接、PTY 的统一默认组合；公开派工的

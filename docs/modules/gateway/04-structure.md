@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## R228 快照写入与摘要请求边界
+
+`context_usage.save_context_usage_snapshot` 复用 ConversationStore 的 generation CAS；Gateway 仅消费
+`compact_progress.context_window_tokens`，不重复解析模型容量。`compact_request_budget` 的可容纳单次请求
+保持原缓存面；分段请求改用纯摘要 system、空工具和结构化 tool_choice=none，保留原摘要指令和连续源数据。
+失败形状分为 EMPTY/TOOL_CALL/TRUNCATED，不保存模型正文；无效摘要不推进源覆盖或持久压缩代次。
+`compact._bounded_landmark_section` 在原预算内先按最近顺序选择用户原话，再分配助手结论，最终仍按时间输出；
+只按原角色标签选择，不从自然语言推断权限/任务状态，不把全文混排后拦腰裁掉用户要求。
+
 ## R227 跨模型窗口与错误分层
 
 `conversation/compact_guard.py` 用原生请求投影计量近期尾部；`compact_request_budget.py` 负责当前

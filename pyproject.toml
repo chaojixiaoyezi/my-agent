@@ -74,6 +74,7 @@ agent_py_agent = [
   "agent/subagents/role_template_catalog/builtin/*.json",
   "skills/**/*",
   "vendor/bin/*",
+  "vendor/bubblewrap/*",  # 随二进制携带原许可、对应源码与来源说明
 ]
 
 [tool.pytest.ini_options]

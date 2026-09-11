@@ -63,11 +63,16 @@ def is_dev_only_module(module_name: str) -> bool:
     return base.startswith("offline_") or base in DEV_ONLY_CONTRACT_MODULES
 
 
+# LLM: Reject unsafe archive paths before release scanners touch a matching source path; the same
+# rule also excludes developer modules during builds. Normal package/runtime paths stay unchanged.
+# 函数用途: 统一拒绝越界归档路径和开发专用模块，防止验包时沿恶意文件名读取仓库之外的文件。
 def forbidden_distribution_member(member_name: str) -> bool:
     """Return True when an archive member cannot belong to a production wheel."""
 
     path = PurePosixPath(str(member_name or "").replace("\\", "/"))
     parts = path.parts
+    if path.is_absolute() or ".." in parts or (parts and ":" in parts[0]):
+        return True
     if len(parts) >= 2 and parts[:2] == ("agent_py_agent", "tests"):
         return True
     if path.suffix != ".py" or not parts or parts[0] != "agent_py_agent":

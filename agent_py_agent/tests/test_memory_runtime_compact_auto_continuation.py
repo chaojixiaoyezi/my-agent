@@ -707,9 +707,6 @@ def test_auto_compact_uses_local_prompt_estimate_when_provider_underreports(tmp_
     assert result.memory_compact_ratio >= 0.5
 
 
-@pytest.mark.xfail(
-    reason="EXEC-31b: native 工具轮改变了第二次 compact 续接的 ready 判定(第一次续接+工具轮后第二段 depth 停在 1); compact 链深度计数待适配"
-)
 def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress(tmp_path):
     # 本测试构造"连续两次 compact 续接"的压力剧本；显式关闭单轮 PTL retry，
     # 否则第二次溢出会被 PTL 轻量自救（回收旧工具结果重试成功），走不到第二次
@@ -745,7 +742,10 @@ def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress
     assert len(metadata_files) >= 2
     assert result.memory_compact_auto_continued is True
     assert result.memory_compact_auto_continuation_depth == 2
-    assert (tmp_path / "outputs" / "compact-repeat.txt").read_text(encoding="utf-8") == "继续后写入一次进展。"
+    # 默认产品 cwd 已统一到 owner home；不能再用测试进程的启动目录寻找产物并把失败长期 xfail。
+    output = agent.home_paths.owner_home_dir / "outputs" / "compact-repeat.txt"
+    assert output.read_text(encoding="utf-8") == "继续后写入一次进展。"
+    assert not (tmp_path / "outputs" / "compact-repeat.txt").exists()
 
 
 def test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_refs() -> None:

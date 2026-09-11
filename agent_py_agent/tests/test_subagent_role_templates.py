@@ -19,6 +19,23 @@ from agent_py_agent.agent.subagents.role_templates import (
 BUILTIN_ROLE_IDS = ["bug_finder", "coordinator", "researcher", "tester", "worker", "writer"]
 
 
+def test_reviewer_does_not_expand_diagnosis_to_unsolicited_repairs():
+    from agent_py_agent.agent.model_guidance import (
+        ACTION_AUTHORIZATION_GUIDANCE,
+        VERIFICATION_EVIDENCE_GUIDANCE,
+    )
+
+    template = load_role_template_store().get("bug_finder")
+    assert "仅要求检查或诊断时保持只读" in template.prompt_zh
+    assert "不强制新建报告文件" in template.prompt_zh
+    assert "如果问题很小" not in template.prompt_zh
+    assert "不能把查找问题改写成发现后直接修复" in ACTION_AUTHORIZATION_GUIDANCE
+    assert "当前版本而非旧进程或旧产物" in VERIFICATION_EVIDENCE_GUIDANCE
+    # 软职责不是硬权限，不砍掉明确要求修复时需要的工具。
+    assert template.can_write is True
+    assert "edit_file" in template.default_tools
+
+
 def _write_ppt_polisher_template(template_dir) -> None:
     template_dir.mkdir()
     (template_dir / "ppt_polisher.json").write_text(

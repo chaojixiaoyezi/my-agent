@@ -1582,7 +1582,9 @@ def _gateway_compact_overflowing_turn(
             request_id=context.request_id,
             attempt_id=str(request.get("execution_attempt_id") or context.request_id),
             task_prompt=prompt,
-            progress_callback=_gateway_compact_progress_callback(context.on_chunk, agent=context.agent),
+            progress_callback=_gateway_compact_progress_callback(
+                context.on_chunk, store=store, thread=latest,
+            ),
             interrupt_check=is_interrupted,
         ),
     )
@@ -2048,34 +2050,37 @@ def _publish_gateway_compact_boundary(on_chunk: object, generation: int) -> None
         writer(generation)
 
 
-# LLM: Only typed writers receive progress. At Compact start, publish the frozen current model's
-# window with the preflight estimate, not the previous model's stale usage; no history is mutated.
-# 函数用途: 压缩开始时先刷新当前模型窗口和实际待压缩大小，再展示进度，避免切模型后仍显示旧容量。
+# LLM: Compact start saves numeric telemetry in the exact thread before publication, using the
+# captured generation CAS. This is display-only, not history, billing or Compact authority.
+# 函数用途: 压缩开始先保存同一会话的新容量再通知界面，避免后台刷新恢复旧模型数字；遥测失败不打断压缩。
 def _gateway_compact_progress_callback(
     on_chunk: object,
     *,
-    agent: object | None = None,
+    store: object | None = None,
+    thread: object | None = None,
 ) -> Callable[[dict[str, object]], object] | None:
     writer = getattr(on_chunk, "write_conversation_compact_progress", None)
     if not callable(writer):
         return None
 
-    # LLM: The callback only projects structured Compact facts and the same selected-model policy.
-    # 函数用途: 把开始时的新模型用量和后续进度送到原事件流，不额外发模型请求。
+    # LLM: Same-generation numeric writes happen before the public event; failed telemetry does
+    # not change the original compact callback or result, and does not add model calls.
+    # 函数用途: 先落当前线程的显示快照，再送出进度，原聊天历史与成本账本不变。
     def publish(payload: dict[str, object]) -> object:
         usage_writer = getattr(on_chunk, "write_context_usage", None)
-        if agent is not None and payload.get("phase") == "started" and callable(usage_writer):
-            from ..agent_core.runtime.context_compactor import runtime_compact_policy
-
-            policy = runtime_compact_policy(agent)
-            usage_writer({
+        if payload.get("phase") == "started" and payload.get("context_window_tokens") and callable(usage_writer):
+            usage = {
                 "schema": _CONTEXT_USAGE_SCHEMA,
                 "estimated": True,
                 "protocol": "unknown",
-                "context_window_tokens": policy.context_window_tokens,
+                "context_window_tokens": payload["context_window_tokens"],
                 "compact_trigger_tokens": payload.get("trigger_tokens", 0),
                 "current_tokens": payload.get("before_tokens", 0),
-            })
+            }
+            from ..conversation.context_usage import save_context_usage_snapshot
+
+            save_context_usage_snapshot(store, thread, usage)
+            usage_writer(usage)
         return writer(payload)
 
     return publish
@@ -2736,7 +2741,9 @@ def _load_gateway_compact_context(
                 current_prompt=inputs.prompt,
                 exclude_request_id=inputs.request_id,
                 force=force,
-                progress_callback=_gateway_compact_progress_callback(inputs.on_chunk, agent=inputs.agent),
+                progress_callback=_gateway_compact_progress_callback(
+                    inputs.on_chunk, store=store, thread=thread,
+                ),
                 interrupt_check=is_interrupted,
                 model_surface=ConversationCompactModelSurface(
                     prompt_files=tuple(

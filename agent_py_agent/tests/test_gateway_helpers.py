@@ -185,8 +185,8 @@ class TestPostJson:
 
     @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
-    def test_silent_400_retries_before_success(self, mock_urlopen, mock_sleep):
-        """聚合网关的哑 400(响应体只有请求回显)是瞬时错误,应重试而不是永久放弃。"""
+    def test_unexplained_400_does_not_spend_a_second_request(self, mock_urlopen, mock_sleep):
+        """没有原因说明不能证明瞬时故障，即使夹具下一轮成功也没有自动重试权。"""
         from io import BytesIO
 
         silent = urllib.error.HTTPError(
@@ -202,15 +202,20 @@ class TestPostJson:
         second.__exit__ = MagicMock(return_value=False)
         mock_urlopen.side_effect = [silent, second]
 
+        from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError
         from agent_py_agent.agent.backends.gateway_helpers import post_json
 
-        assert post_json(_request()) == {"content": "after retry"}
-        assert mock_urlopen.call_count == 2
+        with pytest.raises(ProviderRequestRejectedError) as error:
+            post_json(_request())
+        assert error.value.status_code == 400
+        assert mock_urlopen.call_count == 1
+        mock_sleep.assert_not_called()
 
+    @pytest.mark.parametrize("body", [b'', b'not-json', b'[]', b'{"object":"error","model":"deepseek-v4-flash"}'])
     @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
-    def test_silent_400_exhaustion_is_transient_error(self, mock_urlopen, mock_sleep):
-        """哑 400 重试耗尽后归类可恢复瞬时错误,不能当程序 bug 一票否决任务。"""
+    def test_unexplained_400_retains_request_rejection(self, mock_urlopen, mock_sleep, body):
+        """空正文、畸形 JSON 和真实回显错误均保留 HTTP 400，不能伪装成断线。"""
         from io import BytesIO
 
         silent = urllib.error.HTTPError(
@@ -218,16 +223,18 @@ class TestPostJson:
             400,
             "Bad Request",
             {"Content-Type": "application/json"},
-            BytesIO(b'{"model":"deepseek-v4-flash"}'),
+            BytesIO(body),
         )
         mock_urlopen.side_effect = [silent, silent, silent, silent]
 
-        from agent_py_agent.agent.backends.errors import ProviderTransientError
+        from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError
         from agent_py_agent.agent.backends.gateway_helpers import post_json
 
-        with pytest.raises(ProviderTransientError):
+        with pytest.raises(ProviderRequestRejectedError) as error:
             post_json(_request())
-        assert mock_urlopen.call_count == 4  # 首轮 + 3 次重试后抛
+        assert error.value.status_code == 400
+        assert mock_urlopen.call_count == 1
+        mock_sleep.assert_not_called()
 
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_explicit_400_stays_permanent(self, mock_urlopen):

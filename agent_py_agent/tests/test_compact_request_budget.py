@@ -13,6 +13,7 @@ from agent_py_agent.agent.conversation.compact_guard import (
 )
 from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.conversation.native_history import canonical_native_messages_envelope
+from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 
 
 # LLM: Fake requests have an explicit small model window and no live credential or persistence.
@@ -46,8 +47,9 @@ def test_large_native_history_is_fully_covered_with_bounded_calls(monkeypatch):
 
     def generate(candidate):
         assert candidate.prompt == request.prompt
-        assert candidate.tools == request.tools
-        assert candidate.system_instruction == request.system_instruction
+        assert candidate.tools == []
+        assert candidate.tool_choice.mode == "none"
+        assert candidate.system_instruction != request.system_instruction
         assert budget_module._request_tokens(candidate) <= 1472
         text = candidate.messages[0]["content"][0]["text"]
         segments.append(text.split("]：\n", 1)[1])
@@ -89,6 +91,55 @@ def test_segment_failure_and_stop_never_skip_to_later_sources(monkeypatch):
     with pytest.raises(InterruptedError):
         budget_module.generate_bounded_compact_response(request, interrupt_check=lambda: True)
     assert len(calls) == 1
+
+
+def test_segment_surface_retains_summary_rules_not_executor_prefix(monkeypatch):
+    from dataclasses import replace
+
+    request = replace(_request("旧任务继续执行" * 3000), prompt=CacheStructuredPrompt(
+        "调用工具直到工作完成", "保留任务 A 的端口 3000；用户要求重点保留验收结果"
+    ))
+    calls = []
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response",
+                        lambda r: calls.append(r) or ModelResponse(text="摘要", backend="fake"))
+    budget_module.generate_bounded_compact_response(request)
+    assert len(calls) > 1
+    assert all(r.prompt == request.prompt.cache_layout.volatile_suffix for r in calls)
+    assert all(r.tools == [] and r.tool_choice.mode == "none" for r in calls)
+
+
+@pytest.mark.parametrize(("response", "code"), [
+    (ModelResponse(text="", backend="fake"), "EMPTY"),
+    (ModelResponse(text="执行工作", backend="fake", tool_use_blocks=[{"name": "run_command"}]), "TOOL_CALL"),
+    (ModelResponse(text="只有前半段", backend="fake", truncated=True), "TRUNCATED"),
+    (ModelResponse(text="只有前半段", backend="fake", stop_reason="max_tokens"), "TRUNCATED"),
+])
+def test_invalid_segment_does_not_advance_source_or_expose_text(monkeypatch, caplog, response, code):
+    progress = []
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: response)
+    with pytest.raises(ConversationCompactError) as exc:
+        budget_module.generate_bounded_compact_response(
+            _request("PRIVATE-HISTORY" * 3000), source_progress=lambda *p: progress.append(p)
+        )
+    assert exc.value.code == f"COMPACT_SEGMENT_SUMMARY_{code}"
+    assert progress == []
+    assert "PRIVATE-HISTORY" not in caplog.text
+    assert "只有前半段" not in caplog.text
+
+
+def test_auxiliary_success_metrics_are_recorded(monkeypatch):
+    from agent_py_agent.agent.conversation import auxiliary_model_call as auxiliary
+
+    response = ModelResponse(text="摘要", backend="fake")
+    recorded = []
+    agent = SimpleNamespace(backend=SimpleNamespace(generate=lambda *a, **k: response))
+    monkeypatch.setattr(auxiliary, "_start_auxiliary_call", lambda *a: (object(), "call"))
+    monkeypatch.setattr(auxiliary, "_invoke_auxiliary_generate", lambda *a: response)
+    monkeypatch.setattr(auxiliary, "record_model_call_finished", lambda *a: None)
+    monkeypatch.setattr(auxiliary, "_record_auxiliary_cost", lambda *a: None)
+    monkeypatch.setattr(auxiliary, "record_llm_call", lambda *a, **k: recorded.append(k))
+    assert auxiliary.generate_auxiliary_model_response(AuxiliaryModelCallRequest(agent, "摘要")) is response
+    assert recorded == [{"ok": True}]
 
 
 def test_tail_budget_counts_hidden_native_tool_history():

@@ -28,9 +28,8 @@ subagent 的核心问题不是“能不能多开几个 worker”，而是怎样�
 
 ## 相关旧文档
 
-- [docs/design/subagent-quality-contract.md](../../design/subagent-quality-contract.md)
 - [DESIGN_LEDGER.md](../../../DESIGN_LEDGER.md)
-- [SUBAGENT_RUNBOOK.md](../../../SUBAGENT_RUNBOOK.md)
+- [SUBAGENT_RUNBOOK.md](SUBAGENT_RUNBOOK.md)
 - [TEST_CHECKLIST.md](../../../TEST_CHECKLIST.md)
 
 ## 当前第一版索引 / 待补齐

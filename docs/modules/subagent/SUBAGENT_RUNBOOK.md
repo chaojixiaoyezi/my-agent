@@ -116,8 +116,8 @@ ToolExecutor 对原 ToolCall 原地重试，不新造工具参数；拒绝/取�
 因此项目目录本来就在父级 workspace 内时，父级无需为 child 重复申请或声明权限。
 
 `output_files` 可记录用户明确的目标文件/目录，批量创建时可由负责写入的 item 分别声明；它负责交付
-身份、结果读取顺序和冲突提示，不是普通 child 的完整写集或写权限来源。可以省略；同批多项一旦主动
-提供，相同路径或祖先/子目录声明会在任何 child 落盘前整批退回，要求缩窄独占范围或改为分批。提供的
+身份和结果读取顺序，不是普通 child 的完整写集或写权限来源。可以省略；同批可以声明共享项目目录，
+不因相同或祖先/子目录路径自动合并、拒绝或生成独占锁。具体文件的并行分工由父级安排。提供的
 路径也不能扩大到父级 workspace 外。命名 Audit/exact-scope worker 不继承普通产品写区，只使用其精确结构化授权。
 
 root 继续对用户完整目标负责；普通 child 只把直接父级给自己的当前 `goal` 当作本轮完整工作边界，必须
@@ -134,14 +134,15 @@ root 继续对用户完整目标负责；普通 child 只把直接父级给自�
 用 `task_progress` 对原 id 传 `status=in_progress, correction=true` 显式重开，再绑定原 id；不能为了通过
 创建门拿下一个无关 open id 顶替。
 
-路径解析与父级 cwd 一致：裸 `abc/index.html` 表示当前可信 workspace 下的 `abc/index.html`；只有显式
-`output/report.md` 和 `work/notes.md` 才分别表示当前 task 内部的 output/work。绝对路径保留原目标，继续
+路径解析与父级 cwd 一致：`abc/index.html`、`output/report.md`、`work/notes.md` 都是相对当前可信 cwd
+的普通路径；没有内部 work/output 魔法重定向。绝对路径保留原目标，继续
 由结构化写边界允许或拒绝，不能静默搬到内部 output 后冒充成功。
 
 allow 与 forbidden 同时命中时按最具体路径条目决定，同层由 forbidden 胜出。例如 `/root` 仍可作为宽泛
 保护，但 `/root/.my-agent/.../output/abc` 的更窄明确授权必须可写；反过来，同一路径被禁止时不能绕过。
 
-没有用户指定目标时，child 使用系统分配的 task-local work/output 路径，父级从创建回执或生命周期事件
+没有用户指定目标时，child 继承父级可信 cwd 与 owner home 上界，按软整理约定在用户家中安排目录；
+内部 run 工作区只保存运行记录，不强制作为业务产物目录。父级从创建回执或生命周期事件
 里的 `child_output_read_order`、`primary_artifact_refs`、`expected_outputs` 读取结果。
 
 ## 插话、取消与替代
@@ -155,7 +156,8 @@ allow 与 forbidden 同时命中时按最具体路径条目决定，同层由 fo
 - 权限裁决只读宿主提供的 exact `capability_request` 与 `parent_tool_authority`。根 child 的上限来自创建当轮
   不可变 Tool Gateway 快照，孙代理来自直属父 run 当前 execution context；模型不能用“我好像没有这个工具”
   或 child 自报字段替代。申请位于上限内时父级自主 grant，同一 run 续跑；超出时结构化 deny/fail closed。
-- capability grant 不是具体危险动作的批准。获批工具真正执行时仍按 ToolCall effect/policy 向用户逐次审批；
+- capability grant 不是具体危险动作的批准。获批工具执行时仍按 ToolCall effect/policy 和 owner 当前审批模式裁决，
+  仅 `ask` 请求交用户确认；自主/管理员 Full Access 不再为范围内每个子代理动作逐次弹窗；
   排障必须分别找 capability request/grant、runner session、tool approval 和 tool result 四份账。
 - MCP 短名只在直属父快照中存在唯一 exact 末段命中时由宿主规范成完整 `mcp__server__tool`；重名或未知
   不猜。若父级有全部 exact 工具而 request 已变 GAP，说明旧语义路由抢跑，不能让父级重复 deny 或新建替身。

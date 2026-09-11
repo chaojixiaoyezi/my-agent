@@ -168,6 +168,7 @@ def _build_active_turn_compact_plan(
             "commit_authority": COMPACT_AUTHORITY_CONVERSATION,
             "before_tokens": before_tokens,
             "trigger_tokens": max(0, int(policy.trigger_tokens or 0)),
+            "context_window_tokens": max(0, int(policy.context_window_tokens or 0)),
             "source_messages": len(source_ids) * 2,
         },
     )

@@ -4,6 +4,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import pytest
+
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -83,6 +85,42 @@ def test_distribution_boundary_rejects_members_missing_from_current_source(tmp_p
     ]
 
 
+def test_distribution_boundary_rejects_stale_bytes_under_current_filenames(tmp_path):
+    from scripts.check_distribution_boundary import source_mismatched_members
+
+    source = tmp_path / "source"
+    module = source / "agent_py_agent/agent/runtime.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("current = True\n", encoding="utf-8")
+    wheel = tmp_path / "stale.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("agent_py_agent/agent/runtime.py", "current = False\n")
+    assert source_mismatched_members(wheel, source) == ["agent_py_agent/agent/runtime.py"]
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.write(module, module.relative_to(source).as_posix())
+    assert source_mismatched_members(wheel, source) == []
+
+
+def test_distribution_content_scan_does_not_follow_escape_paths(tmp_path, monkeypatch):
+    from package_boundary_policy import forbidden_distribution_member
+    from scripts.check_distribution_boundary import source_mismatched_members
+
+    source = tmp_path / "source"
+    (source / "agent_py_agent").mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private", encoding="utf-8")
+    (source / "agent_py_agent/link.txt").symlink_to(outside)
+    wheel = tmp_path / "unsafe.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("agent_py_agent/../../outside.txt", "private")
+        archive.writestr("agent_py_agent/link.txt", "private")
+    monkeypatch.setattr(Path, "read_bytes", lambda p: pytest.fail("must not read external source"))
+    assert forbidden_distribution_member("agent_py_agent/../../outside.txt")
+    assert forbidden_distribution_member("C:/external.txt")
+    assert forbidden_distribution_member("/external.txt")
+    assert source_mismatched_members(wheel, source) == ["agent_py_agent/link.txt"]
+
+
 def test_distribution_boundary_rejects_omitted_runtime_resources(tmp_path):
     from scripts.check_distribution_boundary import missing_runtime_resource_members
 
@@ -90,6 +128,8 @@ def test_distribution_boundary_rejects_omitted_runtime_resources(tmp_path):
     skill = source_root / "agent_py_agent" / "skills" / "builtin" / "quality" / "verify" / "SKILL.md"
     prompt = source_root / "agent_py_agent" / "prompts" / "default.md"
     config = source_root / "agent_py_agent" / "config" / "agent_config.yaml"
+    license_file = source_root / "agent_py_agent/vendor/bubblewrap/COPYING"
+    source_archive = source_root / "agent_py_agent/vendor/bubblewrap/bubblewrap.src.rpm"
     role = (
         source_root
         / "agent_py_agent"
@@ -99,7 +139,7 @@ def test_distribution_boundary_rejects_omitted_runtime_resources(tmp_path):
         / "builtin"
         / "coordinator.json"
     )
-    for path in (skill, prompt, config, role):
+    for path in (skill, prompt, config, role, license_file, source_archive):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("runtime resource", encoding="utf-8")
     wheel = tmp_path / "sample.whl"
@@ -110,7 +150,22 @@ def test_distribution_boundary_rejects_omitted_runtime_resources(tmp_path):
         "agent_py_agent/agent/subagents/role_template_catalog/builtin/coordinator.json",
         "agent_py_agent/config/agent_config.yaml",
         "agent_py_agent/skills/builtin/quality/verify/SKILL.md",
+        "agent_py_agent/vendor/bubblewrap/COPYING",
+        "agent_py_agent/vendor/bubblewrap/bubblewrap.src.rpm",
     ]
+
+
+def test_bundled_sandbox_has_matching_corresponding_source_and_license():
+    import hashlib
+
+    root = Path(__file__).resolve().parents[2] / "agent_py_agent/vendor"
+    assert hashlib.sha256((root / "bin/bwrap.linux-x86_64").read_bytes()).hexdigest() == (
+        "fd4f98cc36c1b326f7dedafb6f134c6f6bc51771ff2f984651f9a256e8c3c33d"
+    )
+    assert hashlib.sha256((root / "bubblewrap/bubblewrap-0.8.0-2.oe2403sp3.src.rpm").read_bytes()).hexdigest() == (
+        "3e619886b93170cf20a6dc87dd0bbf2f1e09e3a9c68b6a112dbadfd385cbb7ab"
+    )
+    assert "GNU LIBRARY GENERAL PUBLIC LICENSE" in (root / "bubblewrap/COPYING").read_text()
 
 
 def test_current_production_import_boundaries_have_no_unapproved_findings():

@@ -166,7 +166,7 @@ def example(...):
 - 修改项目结构时更新 `CODEBASE_TREE.md`。
 - 修改测试策略或新增验证方式时更新 `TESTS.md` 或 `TEST_CHECKLIST.md`。
 - 过程记录类文件如 `RUNLOG.md`、`RESULT.md`、`EVIDENCE.md` 按任务需要更新，不做无意义刷屏。
-- 并行开发或多 worktree 开发时先读 `WORKSTREAMS.md`，完成后按 `HANDOFF_TEMPLATE.md` 写交接。
+- 并行开发或多 worktree 开发时先读 `docs/WORKSTREAMS.md`，完成后按 `docs/tasks/HANDOFF_TEMPLATE.md` 写交接。
 
 ## 完成汇报规范
 

@@ -146,7 +146,9 @@ def test_mcp_timeout_sends_cancellation_to_real_server(tmp_path):
     # textwrap.dedent 后服务循环缩进为四格。
     server = server.replace('    if method == "initialize":',
         '    if method == "notifications/cancelled":\n'
-        f'        open({str(observed)!r}, "w").write(json.dumps(req["params"]))\n'
+        f'        with open({str(observed.with_suffix(".tmp"))!r}, "w") as output:\n'
+        '            output.write(json.dumps(req["params"]))\n'
+        f'        __import__("os").replace({str(observed.with_suffix(".tmp"))!r}, {str(observed)!r})\n'
         '    elif method == "initialize":')
     client = mcp.MCPStdioClient(_config(server, timeout=0.1))
     try:

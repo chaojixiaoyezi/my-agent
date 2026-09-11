@@ -1,5 +1,12 @@
 # Subagent Progress
 
+## R228 检查分工不隐含修复授权
+
+builtin bug-finder 删除“发现小问题可自行修复”和强制写报告文案；代码审查、诊断与修复按实际委派目标区分。
+仍保留真实修复任务需要的工具能力，不用角色名硬拦写操作；owner/权限合同不变。
+Runbook 清除共享 output 拒绝、work/output 魔法目录和全部逐次审批的过时说明。定向回归覆盖当前合同，
+真实复验与剩余模型行为问题见 R228 发布候选台账。
+
 ## R227 通用交互终端默认工具（待真 TUI 验收）
 
 普通 coding 与可写角色的 SHELL_SESSION_TOOLS 增加 terminal_session；主代理无需逐项填写。

@@ -46,7 +46,7 @@ _COMPACT_SOURCE_AUTHORITY_PAIRS = frozenset(
 
 
 # LLM: Historical v1 events predate source fields. Missing both fields maps to one
-# explicit legacy display pair; partial or contradictory pairs fail closed.
+# explicit legacy display pair; optional model window is copied, never inferred from a threshold.
 # 函数用途: 把一条外部 Compact 进度整理成固定公开字段，拒绝未知来源与提交权限组合。
 def normalize_conversation_compact_progress(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
@@ -91,6 +91,8 @@ def normalize_conversation_compact_progress(value: object) -> dict[str, object]:
     }
     if error_code:
         payload["error_code"] = error_code
+    if "context_window_tokens" in value:
+        payload["context_window_tokens"] = _nonnegative_int(value["context_window_tokens"])
     return payload
 
 

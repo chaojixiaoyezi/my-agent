@@ -577,6 +577,38 @@ def test_compact_landmarks_survive_later_generation_without_suffix_duplication()
     assert '- assistant_final: "第一行 first-line，第二行 second-line。"' in second
 
 
+def test_long_final_answers_cannot_displace_short_user_requirements_from_landmarks():
+    from agent_py_agent.agent.conversation.compact import _summary_with_conversation_landmarks
+
+    rows = []
+    for i in range(18):
+        rows.extend([
+            MessageLogEntry(message_id=f"u{i}", thread_id="t", role="user",
+                            content=f"用户要求-{i}：沿用原分工，功能实现交给子代理，主代理负责测试整合。"),
+            MessageLogEntry(message_id=f"a{i}", thread_id="t", role="assistant",
+                            content=f"旧结论-{i}：" + "尚未验证的长篇分析。" * 180,
+                            metadata={"assistant_part_id": "final"}),
+        ])
+    first = _summary_with_conversation_landmarks("粗略摘要", "", rows, max_chars=6000)
+    assert len(first.split("\n\n", 1)[1]) <= 6000
+    assert all(f"用户要求-{i}：" in first for i in range(18))
+    assert "- omitted:" in first
+    second = _summary_with_conversation_landmarks("新摘要", first, [], max_chars=6000)
+    assert all(f"用户要求-{i}：" in second for i in range(18))
+    assert second.count("## Exact Conversation Landmarks") == 1
+
+
+def test_landmark_user_overflow_prefers_recent_requests_without_growing_budget():
+    from agent_py_agent.agent.conversation.compact import _bounded_landmark_section
+
+    entries = [f'- user: "request-{i} ' + "x" * 240 + '"' for i in range(20)]
+    selected = _bounded_landmark_section(entries, 800)
+    assert len(selected) <= 800
+    assert "request-19 " in selected
+    assert "request-0 " not in selected
+    assert "remain in the original transcript" in selected
+
+
 def test_compact_progress_callback_reports_real_pipeline_stages(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=20_000)
     agent.backend = _SummaryBackend()

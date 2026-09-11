@@ -1,5 +1,18 @@
 # TESTS
 
+## R228 发布候选验收（当前轮）
+
+全仓执行 AST、Ruff、import/doc-sync/code-size/包边界与测试收集；按改动运行联合 focused，不反复全仓 pytest。
+新增 Context 同代 CAS/轮询不回弹、无解释 400 零重试、只读角色、分段无工具/完整字符覆盖/失败分类、辅助指标、
+第三方许可及源码漏包守卫。300K 字符 child 的旧“摘要恰好一次”断言改为跨段源完整覆盖且正式只提交一代。
+原本机 TUI `ma-r227-local-resume`：R228a 捕获 COMPACT_SEGMENT_SUMMARY_UNAVAILABLE，原历史未删；
+R228b 同 session 成功提交 generation 3 并实际继续工具调用。窗口够用的请求仍验证同一个对象/缓存面不变，
+超窗分段已不具备原生历史前缀，采用无工具的独立摘要；不能把分段情形写成“固定完整缓存面不变”。
+计数、请求、包验收与剩余范围统一记在 [R228 台账](docs/audits/R228_RELEASE_CANDIDATE.md)。
+最终联合 35 文件 539 passed / 18.32 秒，无 skip/xfail；全仓 15967 项收集成功但未执行全仓。
+Ruff、doc-sync、strict code-size、diff、clean-package、import-boundary 和最终 wheel 字节/资源边界全部通过。
+新增验包守卫还拒绝归档 `..`/绝对/盘符路径和源码外向符号链接；不能为了比较旧包读取仓库外文件。
+
 ## R227 当前失败链回归（进行中）
 
 基于真实请求定位：工具运行时 冷探针强制工具参数、跨模型小窗口 Compact、正文灰色与 Shell 备份边界。

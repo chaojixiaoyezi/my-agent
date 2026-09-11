@@ -572,7 +572,13 @@ def test_subagent_preflight_compacts_large_completed_history_before_sampling(
 
     thread = agent.conversation_store.load_thread(task.agent_thread_id)
     assert result.ok
-    assert len(backend.summary_prompts) == 1
+    # 300K 字符源超过 64K 窗口，必须分段而不是单次超窗发送；每段禁用执行工具，全部覆盖后仅提交一代。
+    assert len(backend.summary_prompts) > 1
+    assert all(k["tools"] == [] and k["tool_choice"].mode == "none" for k in backend.summary_kwargs)
+    source = "".join(k["messages"][0]["content"][0]["text"].split("]：\n", 1)[1]
+                     for k in backend.summary_kwargs)
+    assert "old requirement " + "x" * 150_000 in source
+    assert "old completed work " + "y" * 150_000 in source
     assert len(backend.model_prompts) == 1
     assert "Earlier Conversation Summary (generation 1)" in json.dumps(
         backend.model_messages[0],

@@ -26,26 +26,66 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 
 
-def test_compact_start_publishes_selected_model_window_before_progress(tmp_path: Path, monkeypatch):
-    from agent_py_agent.agent.agent_core.runtime import context_compactor
-
-    policy = SimpleNamespace(context_window_tokens=200_000)
-    monkeypatch.setattr(context_compactor, "runtime_compact_policy", lambda agent: policy)
+def test_compact_start_publishes_selected_model_window_before_progress(tmp_path: Path):
     path = gateway_chunk_path(_make_paths(tmp_path), "cross-model-compact")
     writer = BufferedChunkStreamWriter(path, rich_transcript=True)
-    callback = _gateway_compact_progress_callback(writer, agent=object())
+    callback = _gateway_compact_progress_callback(writer)
     callback({
         "schema": "conversation_compaction_progress.v1", "phase": "started", "stage": "preparing",
         "percent": 5, "generation": 1, "source_kind": "conversation_transcript",
         "commit_authority": "conversation_thread", "operation_id": "transcript:cross-model",
-        "before_tokens": 595_000, "trigger_tokens": 180_000,
+        "before_tokens": 595_000, "trigger_tokens": 180_000, "context_window_tokens": 200_000,
     })
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     assert [row["kind"] for row in rows] == ["context_usage_updated", "conversation_compaction_progress"]
     assert rows[0]["context_usage"]["context_window_tokens"] == 200_000
     assert rows[0]["context_usage"]["current_tokens"] == 595_000
     assert rows[0]["context_usage"]["compact_trigger_tokens"] == 180_000
-    assert _gateway_compact_progress_callback(lambda text: None, agent=object()) is None
+    assert _gateway_compact_progress_callback(lambda text: None) is None
+
+
+def test_compact_start_updates_canonical_usage_before_tui_poll(tmp_path):
+    from agent_py_agent.agent.conversation.agent_activity import conversation_agent_activity
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({"canonical_user_id": "alice"})
+    old = {"schema": "model_visible_context_usage.v1", "context_window_tokens": 1_000_000,
+           "current_tokens": 164_000, "estimated": True}
+    store.update_model_context_usage(thread.thread_id, old, expected_compact_generation=0)
+    original_bundle = store.context_bundle(thread.thread_id)
+    runtime = TuiRuntime("compact-model-switch")
+    runtime.update_background_activity(0, {"compact_count": 0, "context_usage": old})
+
+    def receive_usage(usage):
+        # 与真实状态轮询相同的持久读取，必须在收到实时帧前已经看见新容量。
+        projection = conversation_agent_activity(SimpleNamespace(), store, thread.thread_id).to_dict()
+        runtime.update_background_activity(0, projection)
+        assert runtime.store.snapshot().status.context_usage.context_window_tokens == 200_000
+
+    writer = SimpleNamespace(write_context_usage=receive_usage, write_conversation_compact_progress=lambda value: True)
+    callback = _gateway_compact_progress_callback(writer, store=store, thread=thread)
+    callback({"phase": "started", "before_tokens": 438_000, "trigger_tokens": 180_000, "context_window_tokens": 200_000})
+    runtime.update_background_activity(0, conversation_agent_activity(SimpleNamespace(), store, thread.thread_id).to_dict())
+    assert runtime.store.snapshot().status.context_usage.current_tokens == 438_000
+    assert store.context_bundle(thread.thread_id) == original_bundle
+    assert store.load_thread(thread.thread_id).updated_at == thread.updated_at
+
+
+def test_compact_start_telemetry_failure_does_not_stop_progress():
+    events = []
+
+    def fail(*args, **kwargs):
+        raise OSError("private path not for display")
+
+    writer = SimpleNamespace(write_context_usage=lambda value: events.append("usage"),
+                             write_conversation_compact_progress=lambda value: events.append("progress"))
+    callback = _gateway_compact_progress_callback(writer,
+        store=SimpleNamespace(update_model_context_usage=fail),
+        thread=SimpleNamespace(thread_id="test-thread", compact_generation=0))
+    callback({"phase": "started", "before_tokens": 438_000, "context_window_tokens": 200_000})
+    assert events == ["usage", "progress"]
 
 
 def _make_paths(tmp_path: Path) -> GatewayPaths:

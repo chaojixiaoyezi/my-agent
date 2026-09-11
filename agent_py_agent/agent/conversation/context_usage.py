@@ -59,16 +59,30 @@ def record_model_context_usage(agent: object, params: object, usage: object) -> 
     thread_id = str(attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") or "").strip()
     store = getattr(agent, "conversation_store", None)
     loader = getattr(store, "load_thread_report", None)
-    updater = getattr(store, "update_model_context_usage", None)
     public = public_context_usage(usage)
-    if not thread_id or not public or not callable(loader) or not callable(updater):
+    if not thread_id or not public or not callable(loader):
         return False
     try:
         thread, error = loader(thread_id)
         if error is not None or thread is None:
             return False
+        return save_context_usage_snapshot(store, thread, public)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _LOGGER.warning("context usage telemetry could not be saved", exc_info=False)
+        return False
+
+
+# LLM: Shared preflight/Compact display persistence uses an already resolved owner-local thread
+# and its captured generation; telemetry errors must not change execution, history or costs.
+# 函数用途: 主子调用和压缩预检查共用一个数值保存入口；旧代拒绝写回，写失败仅记录告警。
+def save_context_usage_snapshot(store: object, thread: object, usage: object) -> bool:
+    updater = getattr(store, "update_model_context_usage", None)
+    public = public_context_usage(usage)
+    if thread is None or not public or not callable(updater):
+        return False
+    try:
         generation = thread.compact_generation
-        updated = updater(thread_id, public, expected_compact_generation=generation)
+        updated = updater(thread.thread_id, public, expected_compact_generation=generation)
         return updated.compact_generation == generation and context_usage_from_thread(updated) == public
     except (OSError, RuntimeError, TypeError, ValueError):
         _LOGGER.warning("context usage telemetry could not be saved", exc_info=False)

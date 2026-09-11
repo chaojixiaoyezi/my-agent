@@ -16,6 +16,7 @@ from ..agent_core.model.call_runtime import (
     record_model_call_finished,
     record_model_provider_attempt,
 )
+from ..agent_core.model.llm_metrics import record_llm_call
 from ..backends import ProviderRequestOptions
 from ..backends.gateway_helpers import provider_attempt_observer
 from ..backends.provider_headers import provider_runtime_scope
@@ -53,7 +54,7 @@ class AuxiliaryModelCallRequest:
 
 # LLM: Every physical auxiliary request is appended to the same ModelCallLedger as normal turns.
 # Provider transport owns retry and timeout behavior; this wrapper never starts an orphan thread.
-# 函数用途: 调用一次辅助模型并完整记录 token、缓存命中、HTTP 重试、耗时和费用。
+# 函数用途: 调用一次辅助模型并记录 token、缓存、重试、耗时和费用；成功与失败共享已绑定的指标入口。
 def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> object:
     agent = request.agent
     backend = getattr(agent, "backend", None)
@@ -76,8 +77,6 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
     except Exception as exc:
         record_model_call_failed(ledger, call_id, exc)
         try:
-            from ..agent_core.model.llm_metrics import record_llm_call
-
             record_llm_call(label, time.monotonic() - started_at, None, ok=False)
         except Exception:
             pass

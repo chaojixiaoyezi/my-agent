@@ -455,7 +455,7 @@ capability requests 和 refs 由宿主持久化并自动递给直接父级；子
 Gateway/会话任务及其递归 child 的普通相对路径都从用户项目 cwd 解析。内部 task root 是状态目录，
 不是项目目录；只有显式写成 `work/...` 或 `output/...` 时才进入宿主管理的任务命名空间。
 
-详细说明见仓库根目录的 [SUBAGENT_RUNBOOK.md](../SUBAGENT_RUNBOOK.md)。
+详细说明见 [Subagent Runbook](../docs/modules/subagent/SUBAGENT_RUNBOOK.md)。
 
 ## Gateway 与工作目录
 

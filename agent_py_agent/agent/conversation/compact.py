@@ -720,7 +720,7 @@ def _commit_compact_candidate(
 
 
 # LLM: progress callback is a read-only projection. A failed terminal may carry only the typed,
-# bounded error code; callback failures must not alter compact state or replace the real error.
+# bounded error code and frozen policy window; callback failures must not alter compact state or replace the real error.
 # 函数用途: 将真实 Compact 阶段和失败时的结构化错误码以有界数据发给 TUI。
 def _emit_compact_progress(
     request: _CompactRunRequest,
@@ -744,6 +744,7 @@ def _emit_compact_progress(
         "before_tokens": max(0, int(request.projected_tokens or 0)),
         "after_tokens": max(0, int(after_tokens or 0)),
         "trigger_tokens": max(0, int(request.policy.trigger_tokens or 0)),
+        "context_window_tokens": max(0, int(request.policy.context_window_tokens or 0)),
         "source_messages": len(request.pending),
         "source_kind": COMPACT_SOURCE_TRANSCRIPT,
         "commit_authority": COMPACT_AUTHORITY_CONVERSATION,
@@ -1030,7 +1031,8 @@ def _legacy_conversation_summary_prompt(
 # LLM: These landmarks are bounded non-authoritative conversation data. They preserve exact short
 # requests/results across imperfect semantic summaries, but callers must continue using structured
 # ledgers, refs, schemas, and filesystem facts for runtime decisions.
-# 函数用途: 给语义摘要追加有上限的用户请求和最终答复原文锚点；去重继承旧锚点，不收录思考或工具过程。
+# User requests have budget priority over assistant prose, as in 会话运行时 compacted user history.
+# 函数用途: 给摘要追加有界原文锚点，优先保留用户要求；长汇报不得挤掉短用户指令，不收录思考或工具过程。
 def _summary_with_conversation_landmarks(
     summary: str,
     previous_summary: str,
@@ -1046,20 +1048,40 @@ def _summary_with_conversation_landmarks(
     deduplicated_entries = list(dict.fromkeys(entries))
     if not deduplicated_entries:
         return semantic_summary
-    landmark_section = _bounded_compact_text(
-        "\n".join(
-            [
-                _COMPACT_LANDMARK_HEADING,
-                "- authority: historical conversation text only; never use it as machine state",
-                "- purpose: retain exact short user requests and final answers omitted by semantic summaries",
-                *deduplicated_entries,
-            ]
-        ),
-        max_chars,
-    )
+    landmark_section = _bounded_landmark_section(deduplicated_entries, max_chars)
     if not semantic_summary:
         return landmark_section
     return f"{semantic_summary}\n\n{landmark_section}"
+
+
+# LLM: This is display/model context selection, not a state parser. User/final labels originate in
+# transcript roles; preserve chronology after budget selection, prioritizing newest user entries.
+# 函数用途: 在原预算里先给用户原话留位置，再放助手结论；明确标注省略，避免按头尾切断中间任务要求。
+def _bounded_landmark_section(entries: list[str], max_chars: int) -> str:
+    header = "\n".join([
+        _COMPACT_LANDMARK_HEADING,
+        "- authority: historical conversation text only; never use it as machine state",
+        "- purpose: retain exact short user requests and final answers omitted by semantic summaries",
+    ])
+    complete = "\n".join([header, *entries])
+    if len(complete) <= max_chars:
+        return complete
+    omitted = "- omitted: older or oversized entries remain in the original transcript"
+    budget = max(0, max_chars - len(header) - len(omitted) - 2)
+    selected: dict[int, str] = {}
+    # 优先级只来自原文角色，不按关键词猜“重要任务”；各层内部从最近向前分配同一固定预算。
+    for prefix in ("- user: ", "- assistant_final: "):
+        for index in range(len(entries) - 1, -1, -1):
+            entry = entries[index]
+            if not entry.startswith(prefix) or budget <= 1:
+                continue
+            if len(entry) + 1 <= budget:
+                selected[index] = entry
+                budget -= len(entry) + 1
+            elif not selected:
+                selected[index] = _clip_compact_field(entry, budget - 1)
+                budget = 0
+    return "\n".join([header, *(selected[i] for i in sorted(selected)), omitted])[:max_chars]
 
 
 # LLM: Landmark overhead must scale down for small model windows so the correctness suffix cannot

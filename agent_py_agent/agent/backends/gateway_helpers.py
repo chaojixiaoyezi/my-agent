@@ -832,12 +832,13 @@ class _SplitTimeoutHTTPSHandler(urllib.request.HTTPSHandler):
         )
 
 
+# LLM: HTTP retry follows explicit status/quota facts; a missing explanation cannot upgrade 400
+# into a transient failure or trigger repeated expensive model submissions.
+# 函数用途: 根据 HTTP 状态决定现有有界退避；错误正文缺少说明不代表可以重试。
 def _should_retry_http_error(exc: urllib.error.HTTPError, attempt: int, last_attempt: int) -> bool:
     code = int(getattr(exc, "code", 0) or 0)
     if code == 429 and _provider_error_indicates_quota_exhausted(_http_error_detail(exc)):
         return False
-    if _is_silent_bad_request(exc):
-        return attempt < last_attempt
     return attempt < last_attempt and code in _RETRYABLE_HTTP_STATUS_CODES
 
 
@@ -883,6 +884,9 @@ def _require_api_key(api_key: str) -> None:
         raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
 
 
+# LLM: Typed provider facts own recovery; unknown 4xx stays rejected with diagnostic details,
+# never transient merely because the provider omitted its explanation.
+# 函数用途: 保留请求拒绝、额度、上下文超限与临时服务失败的区别，供主子代理同样处理。
 def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     """Classify provider HTTP errors at the backend boundary."""
     detail = _http_error_detail(exc)
@@ -903,8 +907,6 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
             )
         return ProviderUsageLimitError(f"HTTP {exc.code}: {detail}")
     if code in _RETRYABLE_HTTP_STATUS_CODES or code >= 500:
-        return ProviderTransientError(f"HTTP {exc.code}: {detail}")
-    if _is_silent_bad_request(exc):
         return ProviderTransientError(f"HTTP {exc.code}: {detail}")
     return ProviderRequestRejectedError(
         f"HTTP {exc.code}: {detail}",
@@ -1083,28 +1085,6 @@ def _provider_error_payload(detail: str) -> object:
         return json.loads(detail)
     except (TypeError, ValueError):
         return {}
-
-
-def _is_silent_bad_request(exc: urllib.error.HTTPError) -> bool:
-    """A 400 whose body carries no error/message explanation (echo-only or empty).
-
-    聚合网关(如 工具运行时)偶发对瞬时拒绝回 400,且响应体只有请求字段回显(如
-    {"model": ...})或空,没有 error/message 说明拒绝原因——同样的请求稍后即成功。
-    这类"哑 400"不是请求本身无效:按可恢复瞬时错误进重试链,而不是当程序 bug
-    一票否决整个任务(真机实锤:记住任务被哑 400 永久放弃,记忆没写入,后续
-    召回全错)。带明确错误说明(error/message 字段)的 400 保持永久失败语义。
-    判据只用结构化字段存在性,不做文本匹配。
-    """
-    code = int(getattr(exc, "code", 0) or 0)
-    if code != 400:
-        return False
-    detail = _http_error_detail(exc)
-    if not detail.strip():
-        return True
-    payload = _provider_error_payload(detail)
-    if not isinstance(payload, dict):
-        return True
-    return "error" not in payload and "message" not in payload
 
 
 def _stream_deadline_offset(timeout: int | float) -> float:

@@ -27,9 +27,7 @@ Live Lab 是为了把“代码测试通过”再往前推一步：用可见、�
 
 - [TESTS.md](../../../TESTS.md)
 - [DESIGN_LEDGER.md](../../../DESIGN_LEDGER.md)
-- [ACCEPTANCE.md](../../../ACCEPTANCE.md)
-- [EVIDENCE.md](../../../EVIDENCE.md)
-- [LOG_ANALYSIS_BACKLOG.md](../../../LOG_ANALYSIS_BACKLOG.md)
+- [TEST_CHECKLIST.md](../../../TEST_CHECKLIST.md)：当前验收检查表；旧独立 ACCEPTANCE/EVIDENCE/LOG_ANALYSIS_BACKLOG 已退休，不再作为执行入口。
 
 ## 当前第一版索引 / 待补齐
 

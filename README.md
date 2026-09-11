@@ -478,7 +478,7 @@ scripts/open_workstream.sh memory
 # macOS 新开一个可见 Terminal，进入 memory 开发线。
 ```
 
-每条线的职责边界和交接格式见 [WORKSTREAMS.md](WORKSTREAMS.md) 和 [HANDOFF_TEMPLATE.md](HANDOFF_TEMPLATE.md)。
+每条线的职责边界和交接格式见 [WORKSTREAMS.md](docs/WORKSTREAMS.md) 和 [HANDOFF_TEMPLATE.md](docs/tasks/HANDOFF_TEMPLATE.md)。
 
 ## 配置文件
 
@@ -562,8 +562,8 @@ agent_py_agent/config/capability_config.yaml
 - [docs/ROADMAP.md](docs/ROADMAP.md)：待做/进行中功能清单，开工前必读。
 - [docs/COMPLETED.md](docs/COMPLETED.md)：已落地功能清单，收工后必改。
 - [CLI_REFERENCE.md](CLI_REFERENCE.md)：完整命令和参数手册。
-- [SUBAGENT_RUNBOOK.md](SUBAGENT_RUNBOOK.md)：subagent、capability 和 runner 详细手册。
-- [WORKSTREAMS.md](WORKSTREAMS.md)：并行开发线和 worktree 规则。
+- [SUBAGENT_RUNBOOK.md](docs/modules/subagent/SUBAGENT_RUNBOOK.md)：subagent、capability 和 runner 详细手册。
+- [WORKSTREAMS.md](docs/WORKSTREAMS.md)：并行开发线和 worktree 规则。
 - [AGENTS.md](AGENTS.md)：后续 AI 开发者必须遵守的开发规范。
 - [CODEBASE_TREE.md](CODEBASE_TREE.md)：目录树和关键文件职责。
 - [DESIGN_LEDGER.md](DESIGN_LEDGER.md)：设计想法、落地状态和后续方向的主导航。

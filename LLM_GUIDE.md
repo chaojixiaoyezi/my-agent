@@ -19,370 +19,66 @@
 
 ---
 
-## 2026-08-23 当前运行基线
+## 当前运行边界（R228 发布候选，验收状态看 STATUS）
 
-- R227 统一授权指导只由 provider system 承载，原生工具严格投影冻结 Schema；不要恢复逐工具复制长规则。
-  普通阶段报告/清单不触发无条件续跑。Compact 新增的路径索引只作查找提示，不是权限、状态或文件存在证据。
-  无效 PTY 句柄是零副作用失败；部分输入未知仍受保护，不能以“模型能自纠”为由统一放宽 UNKNOWN。
+本入口只保留现行规则与导航；逐轮修复/失败证据见 `docs/audits/`、`DESIGN_LEDGER.md` 和
+`docs/COMPLETED.md`。旧轮次的“已通过”不替代当前发布验收，“待验”也不覆盖后续精确证据。
 
-- 常规真实模型验收默认走 MiniMax 官方接口的 MiniMax-M2.7，禁用 工具运行时 转接作为默认测试源。
-  端点核对与专项模型验证边界见 [TESTS.md](TESTS.md)；不要因此静默改用户日常会话的模型选择。
-
-- `/permissions` / F4 是显式用户权限控制，保存到 owner 既有 tool_policy.json；ask、auto 与 full-access 分明。
-  Full Access 只给可信 local/main，子代理仍有 owner 墙；auto 不豁免 SOUL 本人确认、禁用工具与灾难保护。
-  审批在工具边界读取，路径权限新工作片冻结；模型与工具线程必须继承同一执行 Context，不热改共享 Agent。
-  gateway_status 的 caller_model 才是本次配置模型；deployment_defaults 不代表当前会话模型。
-  R226 本机已获用户授权切换全局入口并重启唯一 Gateway，真 TUI 的 F4 与 DeepSeek 短问答通过。
-  服务重启会恢复耐久请求，不等于用户停止；结束旧等待必须走精确会话控制，不能删除/手改请求文件。
-
-- 所有产品名称与说明统一为 my-agent；品牌清理不迁移实际检出或 owner home，不改变协议、权限或模型配置。
-  历史说明以中性占位展示旧路径／会话，原始定位按提交和运行编号追溯；第三方工具命令保留真实拼写。
-
-- R223 的 87 项复核有独立 HTML 阅读快照 `docs/audits/r223-report/index.html`；该目录只放公开报告，
-  不放模型配置或用户产物。它不替代正式 Markdown 证据台账，不是运行事实源或第二个 Gateway。
-
-- DeepSeek 官方 Chat 的请求级 `thinking_disabled` 已贯通中间请求对象，避免原生探针因默认思考而 400。
-  专有字段只发送给精确官方主机；不按模型名称猜中转商，不改普通回合思考、其它端点或工具权限。
-  `/model` 的短连接测试不经过完整 Agent 初始化，验收还须切换后在主聊天发短问候并核对真实终态。
-
-- `/model` 已扩展 provider/model v2：一个服务商一份私有密钥，多个模型各有协议/容量/用途。
-  v1 读时显式迁移，首次保存才落盘，保持 profile UUID；工作片冻结整组配置，不热改执行。
-  自定义头不能覆盖认证/传输，OpenCode Go 预设采用自身 UA 与宿主 owner/thread 稳定 session header。
-  Responses 复用正式 HTTP 主链；探针/Compact 同一会话头，已完成 reasoning 密文仅同模型回放。
-  获取目录/短问候必须用户明确操作，保存/编辑不发模型请求；短测试没有任务、工具、子代理。
-  Auth 仅预留；Embedding 本片只管理目录用途，不能选为主/子模型，不声称已接入记忆向量后端。
-
-- 主/子完整公开过程先追加同thread的canonical display记录再投递；逐token、空思考开始与控制事件不入该账。
-  display排除于模型/Compact/Memory输入及最近对话条数，不改thread活动时间；同片final快照只覆盖自己的检查点。
-  实时读取显式协商display_checkpoints，未知工具占位仅被精确同block真实结果原位补齐，不改变执行终态。
-  R221已本地定向通过，尚未部署/真实重启验收；旧缺失记录不猜测或补模型调用。
-
-- 普通派工不按 IO 引用生成 idempotency_contract 或 work_scope_key；已删自动生成模块。
-  精确 ToolCall/operation 仍重放原回执，显式幂等与 Audit 身份不变，UNKNOWN 不盲目重做。
-  R219 的 5→3 吞派工 BUG-152 已定向复现并修复；真实 TUI 待验，旧任务不重写或自动重派。
-
-- 主/子上下文显示统一从各自 ConversationThread.model_context_usage 读取同代 preflight 数字，不依赖活跃
-  main_activity，也不回读旧 child 属性。成功 Compact 同一 CAS 清除；空闲恢复不额外调用模型，不显示假 Working。
-  该遥测必须排除于完整/最小模型 context bundle，不能扰动缓存；缺快照是未知，不从累计计费或校准值猜测。
-
-- 工具标题在唯一显示 metadata 层从已有公开 detail 投影；实时与恢复共用，显式 invocation 优先。
-  不因缺 started 事件丢掉命令预览，不回读原参数、不修改旧 canonical 历史或增加模型调用。
-
-- 前台公开 chunk 复用同会话过程 mapper，foreground_transcript 与已提交消息能力独立协商。
-  原页按 exact Gateway 请求去重；先收 canonical 消息再补未覆盖增量，不能让思考显示在提问前。
-  完整块快照随 final/repair 保存，最终回复按精确 ID 原子接替候选；流关闭只清显示，不判工具或任务成功。
-  这些 metadata 不进入模型历史；本地验证不代替真实 TUI，提交前崩溃的完整过程耐久化仍另列待验。
-
-- 同会话前台已提交 user/final 复用 canonical 消息分页，客户端显式声明 foreground_messages 后才发送。
-  原页在原子入队前登记宿主 request ID 去重；后台续片不能因原请求号被隐藏，显示字段不进入模型历史。
-  用户块用 message ID，分批/恢复不换编号。实时前台思考/工具流仍独立待验，不能以 final 同步代替。
-
-- 同会话观察窗口的 main 等待审批只来自 permission_requested/resolved 的精确 ID；未决审批期间
-  数值可刷新但其他工作事件不能覆盖等待。静态提示不新增审批入口、不改授权决定或任务终态。
-
-- 欢迎区模型名来自启动/选择配置成功回执的 typed 显示投影，不能固定读取启动块旧标签。
-  /model 取消、失败及只新增不选择不改变当前标签；不热改 Agent 运行配置，展开历史也显示最新选择。
-
-- create_subagents 的可选 model 仅引用本 owner 经 /model 新增的配置（精确名称或 ID），省略继承当前父级。
-  先验证整批再创建，绑定同一 host_model_profile.v1 供子孙/恢复使用；不传端点/密钥、不改变主模型选择。
-  本地 Qwen 按用户要求仅验基础短对话，不追加大型或 child 任务；独立模型入口的定向通过不等于跨模型真 TUI 通过。
-
-- 模型配置快照必须穿过实际HTTP调用的保护线程；新 Thread 显式继承当前 Context，不能只在调用前
-  显示选中模型却实际请求部署默认。取消/异常退出不得污染另一工作片；真实验收须核对 provider 边界。
-  `/client/models` 仅解析可信owner及canonical配置路径，不为纯配置菜单初始化完整用户Agent。
-
-- 2026-09-08 起正式名称和后续发布仓库统一为 my-agent；当前检出路径及历史证据不随品牌更名自动搬迁。
-  下一次正式发布先保留目标仓库历史，不强推覆盖、不修改另一检出的未提交文件；用户数据仍在 ~/.my-agent。
-  首次全量gate的37项失败已分类修复，514项相关定向零失败、本地严格gate通过；正式库合流须保留双边历史。
-  standalone归档按owner home和锁内身份收尾；scale必须入队claim，不能直接调用未持久的运行上下文。
-
-- `/model` 是显式配置菜单，不进入 LLM/聊天队列。owner 私有模型配置只在新主工作片绑定，config/backend/
-  prompts 三者同步冻结，当前执行不热改；子代理保存创建时的模型引用，恢复时不偷换到后来选择。
-  模型整组字段共享显式选择优先级，无关 task overlay 必须保留该引用，孙代理也适用。
-  用户设置的总窗口参与真实 Compact 压力计算，模型切换不删除 canonical 历史，不能承诺跨供应商缓存。
-
-- Ctrl+O 的二次搜索/模式装饰必须保留 typed 高优先级刷新警告；冻结历史不等于冻结连接健康。
-
-- 客户端完整快照读取失败必须展示状态未同步，主/子页面共用 root 的 typed 刷新健康；沿既有退避重试，
-  不修改任务终态、队列、历史或模型活动计时。不能把恢复连接当模型取得新进展。
-
-- 历史卡片及向前补页只恢复正文/工具/思考，不消费携带的实时 Todo 控制字段；原 metadata 不改，当前面板
-  仍读当前活动快照。不能让旧历史的 generation/revision 锁住或覆盖新用户回合的计划。
-
-- transcript 无选区的右键是正常空操作；选中文字统一按源索引提取，空串不写剪贴板、不抛事件循环异常。
-  Gateway 断线与旧 Working/恢复清单过期仍待修，不将失联猜成任务完成或失败。
-
-- TUI Gateway ok 只表示请求交付，不保证模型输出完整；typed max-tokens 要明确提示，保留实际回复正文。
-  技术错误提示与模型正文分开，final metadata 保存同一 typed 结束原因，正常提交/补交不能分叉。
-  后台与 child 共用归一化和显示文案，历史按原消息 ID 重放；不按正文猜截断、不因此增加模型调用。
-  有界恢复和真实 TUI 截断复验尚未完成。
-
-- lifecycle wake 恢复任务目标与工具索引共用 exact conversation_request_id；用户正文从同 owner/thread
-  canonical transcript 分页找回，不能把复用的 task link.goal 当成后续回合目标。批量按账本顺序读取，
-  明确编号缺失或损坏要报错，不猜最近任务、不改旧账；无编号的旧 wake 继续原 task link 路径。
-
-- Ctrl+O 冻结正文也属于当前代理页面。frame-provider 换 typed store 时同步重绑冻结 snapshot、清空旧
-  搜索坐标并保留详细档位；同 store 刷新不解冻，不把后台新消息偷加进当前冻结画面。
-
-- 普通 child/coordinator 接续不能用累计 runner_attempts 作为生命周期上限；它也包含正常等孩子后的
-  工作片。孤儿恢复复用同一 runner candidate，真实 FAILED/TIMEOUT 仍走既有重试策略；live session、
-  未退出 attempt、owner/conversation、直属等待、能力和 UNKNOWN 门不得旁路。
-
-- 显示历史通过同 owner canonical JSONL 向前分页，读取到的最早行与实时续读末行各持一个游标。
-  行数目标不能拆坏一个连续工作片；仅在用户上翻时异步补页，不重写模型历史或缓存前缀。
-  视口以 block ID/块内行定位；Ctrl+O 可补旧前缀，不混入冻结之后的回复，子页不消费 root 游标。
-
-- Gateway 前台执行车道先持久绑定 exact request/thread，再在原 active-turn transition 下领取。
-  恢复专属 claim 不因 TTL 或宿主退出被后台/另一请求接管；原请求可恢复，终态提交才释放。
-  完成、失败、停止与启动补交共用 exact-task 原子清理；清理失败只补交结果，不重做模型工作。
-  普通后台 claim 不改变，权限、UNKNOWN、运行身份和模型完成语义不放宽。
-
-- HTTP `IncompleteRead` 属于 provider 断流，不得作为未知 runner 编程错误一跳终止长任务；同一 transport
-  错误边界覆盖 JSON、metadata GET、SSE list/iterator 和响应头。open 复用原 HTTP 退避，body 交原模型重试。
-  用户中断不重连，watchdog 超时保留真实阶段；半截响应不返回可执行工具，不增加整任务重做旁路。
-
-- native 运行事实按宿主来源分段，普通轮只追加同来源相对最新 IR 有变化的内容；A→B→A 不能因 ever-seen
-  去重而丢掉最后 A。预检查与真实发送共用无副作用投影，发送时才提交 IR；动态包不污染稳定校准指纹。
-  完整诊断 prompt 从分段无损生成，不能另存独立副本或从标题解析来源；text 协议不变。
-
-- native Compact 只在完整替代摘要已经覆盖时，随连续退休的工具前缀回收旧 RuntimeFactsTurn；每个来源的
-  最新快照、真实 UserTurn、保留工具尾部和 carried handoff 始终保留。最低水位探针与实际提交共用该结构规则，取消或
-  CAS 失败还原全部 IR。普通轮继续 append-only，不把回收逻辑挪到每次请求或孤儿清理，也不删正式工具账本。
-
-- 后台易失过程游标必须与 owner Agent 的 stream ID 成对传输；只有换流才能重基序号，发布成功才确认。
-  canonical 消息字节位置不跟随进程重置，已有输入/审批/历史不清空。冷 owner 不因轮询构建 Agent。
-  子代理最终回复必须携带原 thread/message ID，不能用回复正文作为 legacy 去重键。
-  R189 原 TUI 已通过在线单 Gateway 重启与终态 child 查看/展开/返回；未提交过程持久化仍未封板，见 FT-172～174。
-
-- 后台唤醒也必须把执行 cwd 与内部 run_workspace 分离：task link 只恢复归档、标题和运行属性，
-  相对文件路径从可信 thread cwd 或 canonical owner home 解析。不能因为任务进入后台就重新用 runs
-  记录目录覆盖工作位置；显式外部 cwd 继续由既有 owner/Full Access 边界检查，不新增授权旁路。
-
-- 子代理成功 Compact 后继续同一 run/thread/attempt，不以累计次数结束长回合；真实压缩失败、停止和
-  原有预算照常生效。模型执行批次只区分工具显示 ID，不改变副作用身份。父级自动清理不覆盖已结束 child
-  的结果/失败原因；显式用户控制与独立 Audit 结算不走这条被动清理判断。
-
-- 后台已提交工作片的公开过程快照随 canonical final metadata 保存，使用同一组 block ID 恢复和实时补帧。
-  只有完整快照恢复成功后才按 exact 工作片 ID 重基临时环，未完成工作片和用户消费回执不能被丢弃。
-  展示 metadata 不进入模型请求；提交前崩溃/让出执行片的全过程持久化和长历史分页仍是独立未完成项。
-
-- 恢复和后台 final 使用 canonical thread/message ID，不再从 notices 第二份正文创建新显示块。历史快照交接
-  实际末行字节位置，实时页只能在发布成功后推进；不能按正文相似度去重或用当前时间跳过未知消息。
-  这只影响展示，不更改模型历史、缓存或 Compact。升级同步更换 Gateway/TUI，旧 notices 文件不删除。
-
-- 普通主代理与子代理的文件权限墙是 canonical owner home；业务 tasks、output、work、workspace 目录名
-  不参与权限、执行选择或参数重写。工具的显式路径和正文保持原样，普通相对路径以真实 cwd 解析。
-  新宿主运行记录落在 owner_runs_dir/日期/身份哈希，与用户项目分开；旧 tasks 运行引用仍可恢复，不搬迁用户文件。
-  稳定目录指南复用 Owner Scope 和 home_context_enabled；workspace_task_path_template 仅是模型整理建议，
-  不新增取名模型调用或家目录全量扫描，主/子代理共用。SOUL 确认、owner 隔离、control-plane 与 exact Audit 保留。
-
-- Gateway TUI 的显式 resume 复用同一可见 preflight：readiness 后才读取授权 owner/session 的 canonical
-  历史，恢复成功后才启动 worker。历史读取不在界面线程做 HTTP；失败明确退出，已退出客户端的迟到结果
-  不得重启 worker。本地/普通终端模式保留既有恢复路径，不引入空历史或重复 Gateway 兜底。
-
-- 普通工具的 workspace 只是当前 turn 调度/审计事实，不进入跨 run 持久目录锁。
-  父子代理共享当前用户的 home 文件范围，operation 幂等、精确逻辑锁、active turn、owner 墙和沙箱仍保留。
-  任务晋升不改变 cwd；默认从 owner home 工作，用户明确指定的外部位置仍须满足宿主 Full Access。
-  普通子代理不会继承管理员的外部 cwd；任何代理都不得继承单 Gateway daemon 的 /root。
-- 模型成本统计复用唯一 `ModelCallLedger`，按 request/run 累计 provider input/output/
-  cache-read/cache-creation，明细裁剪不截断总账。无 provider usage 时按结构化估算
-  单独计数。TUI `ctx` 只表示当前上下文压力，不得当成任务累计消耗。
-- Anthropic-compatible 原生多轮工具循环由 backend 按 tools → prompt → messages 顺序主动投影
-  `cache_control`：稳定工具尾、首条真实任务和最新历史块最多占三个宿主断点，且必须 copy-on-write，
-  不能污染 canonical native IR 或推进 Compact。普通单次 text 请求保持原样；兼容端点不支持时只通过
-  `anthropic_prompt_cache_enabled=false` 关闭。`messages=None` 只表示 text；native 第一轮即使历史为空也必须
-  明确传 `messages=[]`，从首次请求缓存稳定工具和 prompt。是否命中只看 provider usage ledger 的
-  cache-write/cache-read。
-- provider 的 typed `socket.gaierror` 与 会话运行时 `ConnectionFailed` 一样先走现有 2/5/15 秒有界 HTTP 退避；
-  DNS 瞬断不能一跳终止数小时 child。三次耗尽后仍返回 typed transient failure 供既有模型轮恢复，畸形
-  URL、认证、代理配置和普通错误字符串不因此取得重试权；每个物理 attempt 继续进入唯一调用账。
-
-- 根代理的默认 `system_prompt` 采用 会话运行时 Default 的 assumptions-first 软纪律：明确目标下先从 cwd、代码、
-  用户约束和工具事实补信息；安全可逆的次要选择由模型采用合理默认并继续。只有无法从上下文取得、且任何
-  合理假设都会造成实质偏离、越权或不可逆风险的关键缺口才问一个简短问题。该纪律不解析用户正文、不生成
-  机器状态、不恢复完成验收；发布 YAML 与 dataclass 默认值必须逐字一致，用户仍可通过唯一
-  `system_prompt` 配置入口覆盖。
-- 会话的 workspace_task_id 和 run_workspace 是状态/导航/恢复引用，不决定用户文件落点。
-  exact request、Goal 和 child wake 可复用运行身份；普通新轮建立独立记录，但 cwd 和 home 文件范围不变。
-  文件路径不再触发运行回绑、进度账搬迁或旧路径重写。历史 task 状态不会阻止使用同 home 的已有文件。
-- 子代理完成、阻塞或能力申请唤醒不是一条新用户任务，而是原 root active turn 的后续工作片。必须从
-  exact thread/task link 恢复原始 objective 和 task path：原始 objective 继续占据 `User Task` /
-  `root_user_prompt`，结构化 wake 只作为 runtime continuation 注入。该 root 自己的 canonical tool-output
-  index 按 child 完成信封携带的 exact `conversation_request_id` 恢复已执行工具、一次性派工去重和有界执行
-  轨迹；durable task id 不能冒充 active turn id，字段落盘前的旧行只可由同值 `request_id` 精确兼容；嵌套 Todo/派工参数
-  必须以限深、限宽、凭据脱敏的 JSON 保留，不能退化成空数组。跨进程索引不能伪造原始 ToolCall/ToolResult
-  配对；native 续跑用唯一 `CompactionSummary` handoff 持续携带这批事实，精确副作用仍以 archive、operation
-  ledger、artifact refs 和当前文件为准。child 私有索引、其它 task 和 detached Audit 事件不得混入。
-  后台每工作片的新增工具额度在恢复历史后保持不变；现有 Todo 更新必须复用 exact id。派 child 时只有
-  调用方显式提供的 `create_subagents.items[].covers` 才建立映射，不从标题或 goal 猜关系；未绑定 child
-  以真实 run id 形成独立进度行，不关闭现有 Todo。
-- lifecycle wake 恢复的耐久工具索引必须同时保留 bounded `tool_execution` 与 `tool_operation`；副作用
-  工具不能因跨后台工作片丢失 operation 终态而从 succeeded 退化为 unverified，也不能只凭 `ok=true`
-  反推成功。系统生成的精确 `work/agents/<run>/final_report.md` 是完成信封的有界交接投影，可由
-  `read_file` 读取；若模型保留 exact run id 却拼入过期 task 目录，读取层只可经同 owner 的 canonical agent
-  projection 找回这一片叶子并再次经过读权限门。同目录其它状态文件、目录枚举和 shell 读取继续拒绝，
-  报告正文不参与完成裁决。
-- 当前 canonical `task_progress` 已有计划时，`create_subagents` 在任何 child 落盘前执行一份原子结构预检：
-  `covers` 与 `output_files` 都是可选结构化提示。提供的 covers 必须绑定仍 open、且未被同批其它 item
-  占用的 exact id；已有直属兄弟处于 PLANNING/PENDING/RUNNING/BLOCKED/PAUSED 时也继续占用自己的 exact
-  covers，除非调用方用 `replacement_for_run_ids` 明确接管该 run。提供的 output 必须位于父级 workspace；
-  同批 child 可以共享同一 task root，路径相同或祖先关系不再形成目录锁。省略 output 时宿主不猜实际写集。
-  省略 covers 时 child 按真实 run id 记进度，
-  不会给现有 Todo 打勾。无效的显式值统一返回 `effect_outcome=not_started + required_repairs`，整批零创建。
-  这个合同不读 goal/标题/代码量，不判断质量或完成，也不能靠 capability grant 扩到兄弟目录；模型修正
-  结构化参数后重试原任务。它的控制报码必须
-  在唯一 `error_taxonomy` 登记为可修参数错误，不能让外层降成 `UNKNOWN_ERROR` 后误导模型报告阻塞。
-  历史“goal 正文里恰好出现 Todo id 就自动补 covers”分支已经删除；`i18n`、`config` 这类既可能是目录名
-  又可能是计划 id 的文本不能取得绑定权威，缺少显式 `covers` 时保持未绑定并走真实 child 进度行。
-  已关闭项需要返工时，先用 `task_progress` 对原 id 传 `status=in_progress, correction=true`，再选择绑定；
-  也可省略 covers，但不能拿无关的下一个 open id 顶替。
-  模型侧纪律比运行时语法更严格：凡 child 原样承接一个现有 open 项，都应把该 exact id 复制到对应
-  `covers`；只有额外工作或关系不能确定时才省略。未绑定 child 完成后，直接父级必须依据自己的派工事实
-  与当前证据，用 `task_progress` 更新已经证实完成的原计划 exact id；宿主仍不按标题或 goal 自动猜映射。
-  `task_progress` 回执、后台 Task Runtime State 与 child completion wake 都投影同一条软合同；派工回执的
-  `open_target_ids` 必须排除 child run_id 自动种出的展示行，只列真正的原计划项。
-- 普通主代理和子代理共用 `turn_end.reason`：`completed` / `blocked` /
-  `max-tokens` / `aborted` / `error` / `interrupted`。它只表示一轮为什么结束，
-  不从模型正文、验收清单、产物数量或测试描述反推完成。
-- 递归协作只有一个创建入口 `create_subagents`，创建成功后宿主立即自动启动。
-  模型不再看到 `dispatch_subagents` 或 `schedule_child_subagents`；内部 dispatcher
-  只是启动、恢复与有界重试引擎，不是人工推动工具。
-- `create_subagents.items` 只放可立即并发、彼此不等待未来结果的工作；同批 child 不会因为 goal 写了
-  “先 A 后 B”而串行。B 必须读取 A 的修复、产物或结论时，先只创建 A，等 typed lifecycle wake 后再创建
-  B。该边界沿用 会话运行时 的独立 sidecar 软纪律，宿主不解析 goal/role、不新增依赖状态机或机器质量验收。
-- 并行代码 child 必须按 会话运行时 的 disjoint write set 软纪律拆分：每个 item 的 goal 同时写清共同目标目录和
-  该项独占的文件/模块范围，职责宽到会覆盖兄弟项或会修改同一文件/模块时不得同批创建。`output_files`
-  可以辅助说明交付范围，但仍不是完整写集、权限或机器锁；宿主不解析 goal 猜路径，也不恢复目录锁。
-  唯一 output 硬反馈只检查显式路径仍位于父级 workspace；是否会真实写冲突继续由模型按职责分工、分批和
-  工具事实处理，不能把共享项目根误判成冲突。
-- `orchestration` 不进渐进披露折叠区；`create_subagents`、`send_guidance`、
-  `cancel_subagents` 和 `resolve_capability_requests` 必须从前台首次模型调用就直接可见。
-  `tool_search` 继续用于 /goal、外部协作、web、vision、meta 和 MCP 等延迟能力。
-- 子代理生命周期事件直接唤醒父级；不再为每批 child 登记周期性 LLM 巡场或 `wait` 推进。
-  `send_guidance` 只接受一个直接下级 `target` 和一段 `message`，不支持广播、跨层催办或验收。
-- 子代理创建下一层后，宿主立即以 `interrupted/SUBAGENTS_ACTIVE` 结束当前工作片，
-  并用精确直属 run ids 的耐久等待记录排除孤儿误复活。成功兄弟收齐后只唤醒一次；
-  失败、缺状态或 capability 阻塞立即唤醒直属父级。父级新工作片直接获得有界
-  `direct_children` 状态、结果 refs 和待裁决请求，不需要查树或 shell `sleep`。
-- 每个 child 的断点与续跑只归自己的 runner/agent thread；`context_scope=task_local` 不得创建
-  `ordinary_task_resume` 或租用主代理后台回合。任何误指向 child task id 的旧后台 policy/wake 都在
-  调用模型前关闭并由 child runner 接管，主代理不能携带 child 身份或权限运行。一次 runner 结果重新
-  落为 `PENDING` 时只释放该 run 的启动占位；共享批次宿主 PID 仍活着不能阻止这个 child 立即续派。
-- `task_progress` 是当前模型的软计划/记事账本，不是业务质量验收器。普通模型给出 plain final 时，宿主
-  不因 `pending/in_progress/unknown` 项拒绝正文、追加隐藏模型调用或自动续跑；开启
-  `task_progress_closeout_guidance_enabled` 时，现有正常模型请求会在工具回执和后台 Task Runtime State 中收到
-  当前展示代次的 exact open ids，提醒模型在最终回复前自主用 `task_progress` 关闭已有证据完成的原 id。
-  同一开关还会用一条 会话运行时/终端交互 式短纪律替换每轮 Workspace Context 里旧的 task_progress 说明：完成项
-  及时按 exact id 更新，回复前再核对，未完成/阻塞保持真实。它不叠加大段常驻 prompt，避免侵占 Compact
-  恢复余量。
-  后台 Task Runtime State 在生成该提醒前，必须与 `task_progress` 读取入口共用 canonical child DONE + 显式
-  `covers` 对账，避免 TUI 已显示 child 完成而持久账本仍把原项列为 pending。该提醒不按标题、final 文案或
-  产物名猜完成，root 自己负责的项仍由模型显式调用关闭。清单继续进入同 thread 的
-  下一回合、Compact 和 TUI，供模型或用户以后继续。只有显式 `/goal` 的 open plan、直属 child 等待、
-  UNKNOWN 副作用、权限和取消各自保留 typed 生命周期。新账本项必须有稳定
-  `id + title + status`，避免空白行。
-- `task_progress(action=read)` 默认只读当前 active turn 的 canonical 账本。模型若把当前结构化
-  `task_id` 显式填进 `run_id`，该值只作为当前账本别名并经过共享 task-path resolver；只有与当前任务
-  不同的明确 run id 才按历史账本精确读取。不能让 request/task id 在后台续片中旁生一份空 Todo。
-- canonical `task_progress.v1` 继续保存同一长期 task-path 的完整软计划历史；TUI/Web 的当前清单另读账本内
-  host-owned `display_plan(generation_id/revision/item_ids)`。普通用户回合以 exact conversation request id
-  换代并只展示本代明确更新/派工的 ids，同一 lifecycle wake/child 续片沿原代补项。前端在 dequeue 时先
-  登记期望代次，旧后台轮或最终 notice 的迟到快照不能把上一阶段 Todo 顶回来；该投影不删除历史项、不参与
-  完成、恢复或验收。没有 `display_plan` 的升级中任务仍兼容展示完整旧账本。
-- 模型侧旧 `raise_event` 已删除。进展、工具活动、阻塞、权限申请和终态都由宿主从真实 runner/thread
-  事件写入；模型不能靠自报事件证明自己还活着。子代理 canonical state 会保存有界的“模型响应中 / 正在
-  使用工具 / 工具成功或失败”短状态，不保存 prompt、response、工具输出或隐式推理正文。
-- 父代理对下级的日常控制面只剩创建、给一个直属下级发补充消息、打断/取消直属下级，以及处理
-  直属下级的结构化 capability 请求。模型没有查树、等待、巡场或“再推动一次”工具；`/status`、TUI
-  和恢复逻辑仍读取宿主内部代理树投影。模型的取消合同也不暴露 dry-run、进程参数或整树回执，
-  防止把打断工具变成另一个巡检入口。
-- TUI 只读可观察面从 active task link 和 canonical child run 生成有界直属快照，在输入框附近固定显示
-  子代理名称、status、职责、耗时、当前上下文和 Compact 次数。attempts 只作执行诊断，不推断成失败重试。
-  它不进 transcript，不暴露 goal/工具输出/路径/权限，也不参与
-  完成、重试或验收。未来用户直控必须先落一份 TUI/Web/IM 共用的 owner-scoped typed
-  protocol；不允许前端直改子代理账本。
-- `context_scope=isolated` 只用于把结构化事实改写成一句用户可见回执：该物理模型调用继续进入成本与调用
-  账本，但不得把自己的 thinking 或小上下文数字投影成主任务状态。Todo 标题显示 typed 完成数/总数与
-  运行数，默认四行只是视窗；系统生成的单项 `items` 补派也必须沿同一父级 sibling 历史连续编号。
-- 主代理和 child lifecycle wake 对用户完整目标负责；子代理只把直接父级交给自己的当前 `goal` 当作完整
-  工作边界，不能因为 root 目标更大而实现未交给自己的兄弟计划项。两层共用 会话运行时 式持续完成与验证软纪律：
-  骨架/空壳/最小欢迎页只能算阶段；验证要覆盖实际入口，安装、构建、启动或关键路径失败后必须修正并重跑。
-  能重现当前缺陷的有效测试不得为了变绿而删除、skip、放宽断言或降成存在性检查。这些仍然只是模型执行
-  提示，不读取代码量、不解析完成文案，也不恢复宿主机器质量验收。
-- 单 Gateway 内后台回合按 `owner + thread_id` 分车道：同会话仍由持久 run claim 串行，
-  同 owner 的不同 TUI/会话在显式全局上限和 `background_threads_per_owner` 上限内并发。
-  一个旧会话的长 policy 回合不能占住整个用户的子代理完成唤醒。
-- 普通 child 自动继承直接父级的结构化工作区上界，孙代理逐层继承同一上界；不要求模型重复声明父级
-  本来就能写的目录。`output_files` 可记录用户明确交付目标和冲突线索，批量时可由负责写入的 item 分别
-  声明；它不是完整写集或写权限，也不能把父级工作区外的自然语言路径变成权限。同批显式声明可以共享
-  task root，创建入口不再据此加目录锁；模型没有声明产物时，
-  编排器不得凭空生成 Markdown
-  业务交付合同；child 的 typed status、最终回复与系统 `final_report_ref` 已构成 会话运行时 式完成交接。
-  历史 `system_default_output_ref=true` 只作旧账恢复，不进入模型可见文件合同或父级 expected outputs。
-  命名 Audit/exact-scope worker 继续只用精确授权。
-- 写边界使用 会话运行时 同款“最具体路径条目优先、同层 deny 胜出”：宽泛的 `/root` 保护不能误伤其下更窄的
-  task output 授权，但同路径或更窄的禁止规则仍然拒绝。
-- 历史 `acceptance_checks` / `verification_status` 字段仅为旧账本可读兼容，不进入当前
-  TaskEnvelope、runner 模型摘要、父级 wake 或树摘要，也不参与启动/完成判定。
-- 普通 shell 不允许绕过直属生命周期事件去读 `work/agents/*` 内部状态文件；该门发生在进程启动前，
-  必须返回 `WRONG_STATUS_SURFACE + effect_outcome=not_started` 给模型改用正式结果引用，不能误判成
-  `TOOL_OPERATION_OUTCOME_UNKNOWN` 后中断整轮。真正已经启动且副作用终态未知的命令仍保持 fail-closed。
-- 普通 run_command、controlled_exec 和 attempt.run 是非交互批处理，spawn 必须显式 stdin=DEVNULL；
-  不继承 Gateway/TUI 的 stdin，不因宿主前台/后台启动而改变行为。命令自身管道/重定向和独立 PTY/MCP 输入保持。
-- TUI 的 Todo 状态与真实执行活动分离：只以快照前台 phase/后台 active count 驱动动画，空闲保留未完成项并
-  显示“待继续”，不得因模型漏勾而持续刷新，也不得由 final 自动把计划改为 done。帧缓存遵循同一活动谓词。
-- shell 超时不按错误码豁免 UNKNOWN，也不按调用次数解除保护。唯一进程终止入口的可信回执证明观察到的
-  进程树已终止、直接进程有退出码且管道排空后，才把此次超时记为确定失败并保留部分输出供模型排查。
-  确定失败可能留下部分文件，不等于事务回滚，不自动重放同一个 operation；旧 UNKNOWN 记录不自动洗白。
-  Gateway 恢复遇到 `operation_outcome_uncertain` 对外返回专用说明，其他持久化失败仍保持各自原因。
-- Compact 的当前语义是每个 main/child/grandchild 各有独立 ConversationThread，并只认同一 owner/thread
-  checkpoint + generation CAS。transcript 旧段由 `conversation/compact.py` 提交；运行中 native IR 由
-  `conversation/live_tool_compact.py` 适配到同一账本，provider overflow 也不得账外删工具对。TUI/Web/SQLite
-  只读 generation；presentation/no-save 临时窗口事件不计数，旧 durable apply/attribute 不回读。live 摘要
-  请求必须保持“原任务 user 在前、native history 居中、synthetic Compact user 最后”的 会话运行时 顺序。
-  摘要 provider 失败时不推进 generation，原上下文完整保留；熔断账和 TUI 失败块优先携带异常的 typed
-  `error_code`（如 `COMPACT_MODEL_EMPTY_RESPONSE`），没有结构码时才退到异常类名，绝不解析错误正文。
-- provider context observation 只是一代内的压力校准：必须同时匹配 exact thread、Compact generation 与
-  backend/model/protocol/system/stable-prompt/tools 稳定指纹；动态 messages/guidance 不进指纹。缺失、漂移或
-  usage 不可信时回退原始估算。它不充当成本、累计 token 或完成事实，ModelCallLedger 仍是计费唯一权威。
-- 本地 `channel=tui` 是 ConversationStore 承载的 transcript channel。后台 model-authored commentary/final
-  必须先按 exact wake/request/part 幂等进入 canonical history，再投影 notice；没有 TUI adapter 可以不发送，
-  但不能省略历史。未知外部 channel 继续 fail closed，notice/footer 不能反向成为模型历史事实源。
-- 显式 resume 的问答预览不能充当 TUI 正文。Gateway 从同 owner/thread 的 canonical 消息另投影
-  display-only 用户输入、思考、过程回复、工具和 final；TUI 复用正常 reducer，显示事件不能进模型上下文或
-  任务队列。native user 内部注入、签名与工具参数不透传，工具状态只读 typed `is_error`。已不存在于原生
-  快照中的 Compact 前过程仍须按归档恢复，不能用缺失尾部声称全历史已通过。
-- wheel 部署必须使用独立 non-editable runtime venv，并核对进程 executable、pip Location/Editable metadata、
-  `module.__file__` 与 schema；中性 cwd 只是其中一门，旧 venv 的 editable `.pth` 即使在 `/root` 也会导入
-  旧 checkout。默认 `my-agent` launcher 必须可回滚地指向同一 runtime venv，避免 Gateway 新而 TUI 旧。
-  源码运行模式只允许 checkout 与待验 revision 完全一致。
-- 普通回合工具终态折叠只追加一次确定性、脱敏投影，未发生真正 Compact 时旧模型历史必须保持稳定前缀；
-  缓存命中只读取 provider usage 账，不以 Context 估算冒充。手动 `/compact` 成功后，Gateway 控制结果通过
-  `task_status.compact_generation` 返回 canonical 代数，TUI 立即发布同一 typed boundary 并撤下压缩前的
-  provider-visible Context 快照；下一次真实模型调用再刷新精确数字，不能继续显示旧 `compact 0`，也不能
-  为刷新界面额外调用模型或从成功文案反解析代数。TUI 启动、恢复或空闲轮询时，即使当前没有 Working 块，
-  也必须消费 activity snapshot 中的 canonical generation；同一 session 的代数只能单调增加，迟到旧帧不能回退。
-- 原生请求固定顺序为稳定 system/tools、committed Compact summary、已结束 user/assistant、当前 user、
-  append-only 当前轮 native IR、当前动态尾部。当前 user 只能在 wire messages 出现一次；生命周期 wake、
-  后续插话和恢复注入只能进入 IR 后的动态尾部，不能改写旧会话前缀。流式超时拆成
-  connect、动态首事件和滚动 idle：首条有效 SSE data 后每个有效事件重置 idle，健康慢流没有隐式总墙钟；
-  非流式总预算继续有界，显式 `/stop` 必须能打断连接、首包、流间隔和退避。
-- 工具边界前后的 assistant commentary 是正式用户可见消息：同一 request 用
-  `assistant_part_id=commentary:N` 逐段完整落账，最终回复用 `assistant_part_id=final`。历史预览只把 final
-  配成该轮答复，但不能把 commentary 隐藏到 `Ctrl+O` 或按固定字符数裁掉；普通历史仅允许按最老的完整消息
-  边界收缩投影，真正旧前缀替换只发生在 Compact。工具原始大输出继续走 reducer/archive。
-- 缓存成本只按 provider ledger 核算。缓存创建没有独立单价时按普通输入 5；样本
-  `B=357,639`（普通输入+缓存创建）、`H=235,041`（缓存命中）时，缓存价 0.1/1 的总成本分别为
-  `1,811,699.1`/`2,023,236`，相对全部普通输入 `2,963,400` 节省约 38.86%/31.73%。任意改写
-  100,000 token 稳定前缀会额外损失 490,000/400,000 计价单位，所以普通轮 append-only 优先于小幅裁剪。
-- TUI transcript 的 follow/离尾状态属于每个 main/child 页面各自的 process-local viewport。提交有效消息、
-  首次进入新页面或显式回到底部时，prompt_toolkit `Window.get_vertical_scroll` 必须把 control 的尾部锚点
-  落到真实窗口；手动滚轮/PgUp 离尾后保持原阅读位置，不因后台输出或切换页面复用旧 Window scroll。
-- TUI thinking 按 provider 调用逐块保持时间顺序：有正文的活动块留在其真实位置，空 spinner 才固定在底部；
-  Anthropic-compatible 必须在原 `content_block_stop` 发布 typed thinking terminal，再允许后续 text delta。
-  response 级完整 thinking 只给不支持该边界的后端兜底，不能在 final 后重放；旧流的迟到终态也只能消费
-  一次，不能新建底部思考。多个模型调用不得覆盖上一块，空首块通过 typed discard 删除。工具前 commentary
-  和最终长报告默认完整显示；`Ctrl+O` 只负责展开被折叠的工具细节。滚轮一格移动一行。
+- 每台机器一个 Gateway，多个 TUI 是独立客户端/会话。wheel 使用 non-editable 独立 runtime，
+  Gateway 与默认 TUI 入口必须同版；检查 executable、module.__file__、安装位置和实际配置，保留回滚。
+- 常规真实模型验收默认官网 MiniMax-M2.7；检查实际 provider/端点，不按同名模型推断。
+  用户明确指定的其它协议/模型单独验证；私有凭据不进仓库、不输出，不静默切用户日常模型。
+- 产品名与发布库是 my-agent；品牌清理不搬迁检出、owner home、真实 tmux 或任务数据。
+- `/model` 管理 owner 私有 provider/model v2；获取目录、短测必须显式操作。保存/编辑不调用模型。
+  新工作片冻结模型/端点/密钥/容量/请求头整组配置，子孙继承创建时引用，显式 model 只解析本 owner 配置。
+  Auth 仍预留；Embedding 只管理目录用途，不能选作主子模型。详见 `docs/design/TUI_MODEL_PROFILES.md`。
+- `/permissions` / F4 使用 owner tool_policy.json 的 ask、auto、full-access；Full Access 仅可信管理员。
+  工具执行线程继承工作片 Context；角色、工具可用性、Full Access 都不增加用户未要求的工作目标。
+  capability grant 与具体工具批准是不同事实；SOUL 专用确认、owner 墙、灾难保护仍有效。
+- 普通主子代理默认在 canonical owner home 工作；tasks/output/work 只作整理建议，不形成目录锁。
+  执行 cwd 与内部 owner_runs_dir 分离，后台恢复不能继承 daemon 的 cwd。用户明确外部 cwd 仍经权限门。
+  文件整理/命名共用 home_context_enabled 与 workspace_task_path_template 软提示，不靠标题猜运行身份。
+- 每个 owner/thread 只有一份 canonical transcript；task link、child wake、展示投影不得建立第二份模型历史。
+  新消息只追加，普通轮不改旧缓存前缀。任务切换不删除历史/记忆，真正摘要替换只在 Compact。
+  详见 `docs/design/CONVERSATION_CONTEXT_DESIGN.md`。
+- main/child/grandchild 各自用 ConversationThread 的 checkpoint + generation CAS 提交 Compact。
+  失败/停止不推进代次，不把普通窗口化计成压缩。源历史/精确工具账保留；已退休前缀只能随已提交摘要回收。
+  空摘要、失败熔断、重放和取消以当前实现与该模块文档为准，不新增旁路摘要或独立计数。
+- Context 是本线程模型 preflight 压力，不是累计计费。压缩开始的实际窗口由压缩模块提供，
+  先保存同代数值再通知 TUI；成功提交清旧数字。显示遥测、计数和进度不得进入模型输入/缓存前缀。
+  ModelCallLedger 是成本唯一权威；缓存命中以 provider usage 为准，不能用估算或比例推测账单。
+- 大窗口切小窗口用有预算的连续分段摘要；覆盖所有来源后才提交，typed overflow 可缩小请求，
+  网络/认证错误不伪装成超窗。observed_tool_paths 仅是有界查找提示，不是权限或文件存在证据。
+  能容纳的单次请求保留原缓存面；分段采用无执行工具的摘要角色。原文锚点在固定预算内优先保留用户原话，
+  助手长结论不能挤掉短用户要求；超预算仍有明确省略，原 transcript 不删除，不承诺摘要无损。
+- 原生请求保持稳定 system/tools、已提交摘要/历史、当前 user、append-only native IR、动态事实尾部顺序。
+  一个 user 只出现一次；模型/工具快照必须与真实请求一致。Provider system 是授权/验证软指导的唯一正文，
+  不能逐工具重复长规则。实际 native Schema 必须与冻结工具快照相同。
+- 连接/首事件/流间隔超时分开，健康慢流没有隐式总墙钟；停止贯穿请求和退避。
+  明确 HTTP 400 不因缺少解释自动重试；429、5xx、网络瞬断仍走 typed 有界恢复。
+- 工具操作身份、owner、run/task/parent/root 和副作用结果均读取结构化事实。
+  明确零副作用失败可交模型修参；部分写入/执行效果未知仍保持 UNKNOWN，不自动重放。
+  Shell/controlled_exec 是非交互批处理（stdin=DEVNULL），交互用独立 PTY；后台句柄不是 PTY 句柄。
+- 普通子代理直接创建并自动运行；角色/权限快照决定是否可递归，不能解析 goal 扩权。
+  正常进度靠直属生命周期事件；list_agents 只供按需查看，不轮询或手工推动。
+  用户插话/停止/查看走同一 owner-scoped 结构化控制协议。详见 `docs/modules/subagent/SUBAGENT_RUNBOOK.md`。
+- 派工以显式 covers 绑定原 Todo，output_files 可选且不授予额外权限；共享项目目录不代表冲突。
+  同一 operation 重放回原回执，普通不同创建不能因 IO 路径相同被合并。依赖/独占写集由模型合理分工，
+  不能用自然语言猜依赖、自动生成目录锁或自动派整批 QA/repair。
+- Todo 是软计划，不是完成验收；普通 final 不因未勾完而被挡或暗中续跑。只有显式 /goal 和既有
+  child 等待、审批、UNKNOWN 保留各自生命周期。UI 清单读 display_plan 的 exact generation/revision；
+  历史页只恢复正文，不能用旧 Todo 覆盖当前计划。
+- 模型不再请求工具就结束本轮；turn_end.reason 不证明项目完成。失败原因、未验证范围需模型如实说明，
+  编译/旧版本成功不能代替新版启动和业务验证；不能拿无响应、空日志猜成沙箱限制。
+- 用户可见 commentary、thinking、tool、final 以 typed block/message/request ID 同步主子页面与 canonical
+  display 账；display 不进入模型/Compact/Memory。分页和实时游标分开，Ctrl+O 不切换代理身份。
+  Working 只由真实活动驱动，Todo 未勾完不能维持动画；流关闭不能判断任务/工具成功。
+- 思考结束默认折叠，正文/final 完整显示；空思考占位可撤下，完整思考保持原顺序，不能在 final 后重放。
+  每个主子页面独立滚动锚点，手动上翻不追尾，回到底部或发送消息才恢复跟随；滚轮每格一行。
+- 长期记忆只在本 owner 维护，USER/AGENTS 与普通 memory 可自主更新；SOUL 修改仍需用户本人确认，
+  不允许文件工具绕过。Skill 逐轮冻结索引、按需读正文；自学习默认关，仅候选可自动生成，正式 Skill 要确认。
+- 生产包不得带开发验收 harness、tests、运行数据或废弃源码。包边界、import 边界与定向测试都要过；
+  不通过增加 baseline、skip/xfail 或删除真实失败证据“清绿”。完整发布门见 AGENTS.md。
 
 ---
 
@@ -393,7 +89,7 @@ my-agent/                          ← 项目根目录
 ├── LLM_GUIDE.md                   ← 【你正在读的文件】LLM 入口
 ├── DESIGN_LEDGER.md               ← 设计台账（所有设计决策的来源）
 ├── STATUS.md                      ← 当前状态、测试基线、推荐下一步
-├── GATEWAY_DESIGN.md              ← Gateway 架构设计
+├── docs/design/GATEWAY_DESIGN.md  ← Gateway 架构设计
 ├── MEMORY_BACKLOG.md              ← 记忆系统痛点和设计原则
 ├── DISCUSSION_BACKLOG.md          ← 系统问题讨论
 ├── docs/
@@ -401,7 +97,7 @@ my-agent/                          ← 项目根目录
 │   ├── COMPLETED.md               ← 【必读】已落地功能清单
 │   ├── design/                    ← 模块设计文档
 │   │   ├── README.md              ← 模块设计文档索引
-│   │   └── subagent-quality-contract.md
+│   │   └── CONVERSATION_CONTEXT_DESIGN.md
 │   └── modules/                   ← 模块四件套（discussion/progress/purpose/structure）
 │       ├── README.md
 │       ├── subagent/
@@ -552,7 +248,7 @@ def example(...):
 |------|------|---------|
 | `DESIGN_LEDGER.md` | 设计决策主台账，只放摘要和导航 | 每次设计决策变更 |
 | `docs/design/*.md` | 模块级详细设计 | 模块设计变更时 |
-| `GATEWAY_DESIGN.md` | Gateway 专项设计 | Gateway 架构变更时 |
+| `docs/design/GATEWAY_DESIGN.md` | Gateway 专项设计 | Gateway 架构变更时 |
 | `*_BACKLOG.md` | 痛点收集和设计原则 | 发现新痛点时 |
 
 ### 状态层
@@ -595,8 +291,8 @@ def example(...):
 3. **事实与质量分开**：路径、权限、工具终态和产物存在性仍是结构化事实；“做得够不够好”由模型/用户继续复核，不设通用硬门。
 4. **patch 不自动应用**：patch 审核器只审核状态，不自动应用 diff（除非有独立审核链路）。
 5. **自学习必须用户确认**：学习候选必须经过用户确认才能变成正式 skill。
-6. **默认 dry-run**：所有调度/执行命令默认 dry-run，只有显式开关才改状态。
-7. **不删文件**：action apply 不删除文件，不覆盖已有内容。
+6. **执行模式以入口合同为准**：TUI 正常委派会实际执行；显式 dry-run 的管理入口只做预览，不能把旧管理命令默认值推广到所有任务。
+7. **删除与覆盖受权限和副作用合同控制**：不能对用户宣称全产品“不删文件”；高风险目标需明确授权和精确路径，失败不伪装成功。
 8. **文件第一事实源**：机器判断必须读 JSON/JSONL，Markdown 台账不是事实源。
 9. **每个功能写"解决问题"**：不能只罗列模块名。
 10. **通道故障 ≠ 任务失败**：runtime/session/adapter 故障不等于任务本身失败。
@@ -611,7 +307,7 @@ def example(...):
 2. 读 `DESIGN_LEDGER.md`，确认没有设计冲突。
 3. 读 `agent/DIRECTORY_GUIDE.md`，确认代码放哪里。
 4. 写代码、写测试。
-5. 跑 `python3 -m pytest -q` 确认全量通过。
+5. 先跑相关定向测试，再做真实 TUI 验收；全仓 pytest 频率遵守 AGENTS.md，不因新功能机械重复全仓。
 6. 更新 `docs/ROADMAP.md`（改状态）和 `docs/COMPLETED.md`（新增记录）。
 7. 如果涉及设计决策，更新 `DESIGN_LEDGER.md`。
 
@@ -619,7 +315,7 @@ def example(...):
 
 1. 读相关代码和测试。
 2. 修 bug、补测试。
-3. 跑 `python3 -m pytest -q` 确认全量通过。
+3. 跑相关定向测试并复验原真实 TUI 失败样本；不能把定向通过写成端到端通过。
 4. 如果 bug 揭示了设计问题，更新 `DESIGN_LEDGER.md`。
 
 ### 我要重构代码
@@ -627,7 +323,7 @@ def example(...):
 1. 读 `agent/DIRECTORY_GUIDE.md`，确认边界。
 2. 读 `DESIGN_LEDGER.md` "代码体检与后续拆分计划"条目。
 3. 只移动一个低耦合区域，同步迁移调用点，不新增旧入口转发壳。
-4. 跑完整测试后再继续。
+4. 跑直接调用方和相邻模块定向测试，远端提交前执行 AGENTS.md 全部严格 gate。
 5. 不在同一轮同时改行为和大移动文件。
 
 ### 我不确定该不该改

@@ -41,6 +41,10 @@ bwrap 负责 tenant 文件和进程视图；容器 runtime 负责 Pod 与宿主�
 `vendor/bin/bwrap.linux-x86_64`，只作 Linux amd64 离线兜底。发现顺序是系统包优先、
 同架构 vendor 其次；macOS/Windows 不伪装成可用。
 
+R228 发布检查补齐 `vendor/bubblewrap/`：原发行包 COPYING、对应源码 RPM、构建说明和 SHA256。
+已确认随包二进制与 openEuler 24.03 LTS SP3 的 bubblewrap 0.8.0-2 原包一致。包验收同时检查这些材料，
+不能只带二进制漏掉许可/源码；本次未升级二进制，不将此来源核对声称为完整安全审计。
+
 构建期只运行 `--binary-only`，证明最终镜像里的二进制能加载。namespace、mount、seccomp
 是否真的允许，只能在最终 runtime/node 上确认，所以 worker 启动和 K8s probe 运行完整自检。
 

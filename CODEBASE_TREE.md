@@ -9,6 +9,7 @@ TUI_EXTREME_TEST_MATRIX.md              # 五路 TUI 持续轮转、边界/组�
 agent_py_agent/
 |-- __main__.py                         # python -m agent_py_agent CLI 入口
 |-- config/                             # 默认 YAML 配置
+|-- vendor/bubblewrap/                  # 随 Linux 离线二进制携带的许可、对应源码 RPM、构建及来源说明
 |-- cli/                                # 命令行、chat/TUI、gateway 管理、诊断维护命令
 |   |-- chat.py                         # 本地 chat 入口
 |   |-- chat_client_context.py          # 轻量 Gateway TUI 客户端、活动输入三态与 input-status 查询
@@ -301,6 +302,7 @@ docs/
 |-- audits/R223_87_ITEM_REMEDIATION.md # 87 项外部审计逐项复核、修复证据和未验边界
 |-- audits/R226_PERMISSIONS_MODEL_REPORT.md # 当前模型身份与主/子自主权限修复、真实 TUI 证据和部署边界
 |-- audits/R227_MODEL_COMPACT_TUI_REPORT.md # 模型切换、压缩续接、子终端、正文与 Shell 故障的真实验收台账
+|-- audits/R228_RELEASE_CANDIDATE.md     # 发布候选的误判修复、代码文档清理、包检查与真实验收边界
 |-- audits/r223-report/                 # R223 中文只读 HTML 报告的独立公开目录，不放配置或任务产物
 |   `-- index.html                     # 87 项大白话、技术说明、剩余问题与验证证据快照，无外部依赖
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
@@ -330,6 +332,8 @@ docs/
 - `docs/audits/r223-report/index.html`：R223 台账的人工阅读快照；只开放此目录提供 HTTP，不能把仓库或 owner home 当静态根目录。
 - `docs/audits/R226_PERMISSIONS_MODEL_REPORT.md`：权限菜单、当前模型与并行上下文修复的验收台账；区分 TUI 实测、定向回归和本机待切换版本。
 - `docs/audits/R227_MODEL_COMPACT_TUI_REPORT.md`：区分大窗口压缩成功与后续业务续接失败，记录原样工具路径恢复与部署复验。
+- `docs/audits/R228_RELEASE_CANDIDATE.md`：本批次发布条件、失败样本、修复影响与尚未关闭的外部/业务问题；不把收集测试算成全部执行通过。
+- `agent_py_agent/vendor/bubblewrap/`：离线 bwrap 的第三方许可与对应源码材料；升级二进制时同步更新并验包。
 - `agent/common/text_file_window.py`：64 KiB 流式索引、有限检查点与页面 cookie；编码和字符坐标只保留一个实现。
 - `agent/common/file_version.py`：read_file 返回观察版本，write/edit/patch 明确携带前置条件；外部写入者不被强制纳管。
 - `agent/tooling/process_output_capture.py`：前台进程每流最多保留 4 MiB，仍持续排空并公开不完整事实，不假装完整大输出归档。

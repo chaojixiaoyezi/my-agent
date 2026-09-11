@@ -32,7 +32,6 @@
 | [tool-runtime-unification.md](tool-runtime-unification.md) | ToolRuntime / ToolCall / ToolResult / ActionPolicy / ToolExecutor | 完成 | 参考证据、完整架构、迁移删除表、并行边界和完成证据 |
 | [SUBAGENT_TOOL_APPROVAL_BRIDGE.md](SUBAGENT_TOOL_APPROVAL_BRIDGE.md) | child exact tool approval / owner TUI FIFO | 真机通过 | 子代理具体审批的唯一记录、租约、授权、队列与失败语义 |
 | [MANAGED_BACKGROUND_PROCESS_SESSIONS.md](MANAGED_BACKGROUND_PROCESS_SESSIONS.md) | 受管后台进程会话 | 真机通过 | one-shot runner 之外的 host 所有权、持久记录、PID 身份与进程树回收 |
-| [subagent-quality-contract.md](subagent-quality-contract.md) | subagent 派工与验收 | 设计中 | 质量契约、受控施工队、context pack、producer/critic/reviewer、用户少说模式 |
 | [main-agent-contract-testing.md](main-agent-contract-testing.md) | 主代理合同驱动测试 | 进行中 | 真实环境降级为最终收口，主开发切到合同单测、fake tool、fake LLM 和 replay |
 | [P1_MAINLINE_CONVERGENCE.md](P1_MAINLINE_CONVERGENCE.md) | P1 主链收敛 | 本地验收通过 | import/wheel 边界、唯一入口与插件链、语义检索、PTY、LSP、OpenAI native tools |
 | [P2_SCALE_MAINLINE.md](P2_SCALE_MAINLINE.md) | P2 规模主链 | 部分可用 | PG/Redis/OTel/migration、正式 scale 入口与诚实缺口 |

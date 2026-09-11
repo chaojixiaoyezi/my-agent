@@ -109,6 +109,21 @@ def test_delayed_old_generation_cannot_restore_stale_context():
     assert runtime.store.snapshot().status.context_usage.current_tokens == 55_000
 
 
+def test_compact_preflight_cannot_write_through_a_new_generation(tmp_path):
+    from agent_py_agent.agent.conversation.context_usage import save_context_usage_snapshot
+    from agent_py_agent.agent.conversation.models import ConversationCompactCommit
+
+    store = ConversationStore(tmp_path)
+    thread = store.get_or_create_thread({"canonical_user_id": "alice"})
+    store.update_compact_state(thread.thread_id, expected_generation=0, commit=ConversationCompactCommit(
+        summary="保留已有任务", operation_evidence={}, checkpoint_id="new-generation",
+        compacted_through_message_id="", compacted_through_byte_offset=0,
+        source_messages=0, source_tool_pairs=0,
+    ))
+    assert save_context_usage_snapshot(store, thread, usage()) is False
+    assert store.load_thread(thread.thread_id).model_context_usage == {}
+
+
 def test_model_context_display_whitelist_and_corrupt_generation(tmp_path):
     from agent_py_agent.agent.conversation.context_usage import context_usage_from_thread
     store = ConversationStore(tmp_path)
