@@ -35,7 +35,11 @@ from .errors import (
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
 from .provider_headers import endpoint_parts, request_headers
-from .response_completion import incomplete_response_fields, without_tool_blocks
+from .response_completion import (
+    incomplete_response_fields,
+    truncated_tool_names,
+    without_tool_blocks,
+)
 from .stream_parsers import StreamCompletion
 from .usage_metadata import (
     collect_anthropic_stream_with_completion,
@@ -43,6 +47,7 @@ from .usage_metadata import (
     openai_stream_payload,
     usage_dict,
 )
+
 
 def _bounded_output_tokens(configured: int, requested: int | None) -> int:
     if requested is None:
@@ -96,6 +101,10 @@ class ModelResponse:
     truncated: bool = False
     # 上游返回的原始 stop_reason；EOF 没有该字段时保持空，不推断成 max_tokens。
     stop_reason: str = ""
+    # 不完整响应里被丢弃工具调用的工具名（去重、保序）。只作结构化事实：整轮仍零工具执行，
+    # 但工具循环要凭它判断"这次截断的是哪个工具"，才能给出分块写等有界恢复，而不是静默当无事发生。
+    # 没有可识别工具名时保持空，调用方不得据此推测工具或伪造调用。
+    truncated_tool_names: list[str] = field(default_factory=list)
     # 传输/流边界在形成完整响应前发现的结构化工具协议错误。这里只能由宿主适配层写入；
     # 模型正文不能设置该字段，也不能借此制造可执行 ToolCall。
     tool_protocol_violations: list[dict[str, str]] = field(default_factory=list)
@@ -749,6 +758,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 usage=usage,
                 tool_use_blocks=[],
                 assistant_content_blocks=without_tool_blocks(assistant_blocks),
+                truncated_tool_names=truncated_tool_names(completion.tool_names),
                 **incomplete,
             )
         if not text and not blocks and payload.get("tools"):
@@ -784,7 +794,7 @@ def _openai_non_stream_response(
             raise ValueError("message has neither content, reasoning, nor tool_calls")
         text = str(message.get("content") or "")
         reasoning = str(message.get("reasoning_content") or "") if "reasoning_content" in message else None
-        blocks, malformed = _openai_tool_use_blocks(message)
+        blocks, malformed, dropped_names = _openai_tool_use_blocks(message)
     except Exception as exc:
         raise ProviderResponseError(
             f"无法解析 OpenAI-compatible 响应: {_response_preview(obj)}"
@@ -802,6 +812,7 @@ def _openai_non_stream_response(
                 text=text,
                 tool_blocks=[],
             ),
+            truncated_tool_names=truncated_tool_names(dropped_names),
             **incomplete,
         )
     if not text and not blocks and tools_requested:
@@ -1055,12 +1066,13 @@ def _openai_user_messages(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # LLM: JSON 必须是完整对象；坏块不上报为空参数调用，错误标记由响应层执行整轮零工具边界。
 # 函数用途: 提取非流式工具参数，区分真实空对象与损坏/缺失参数。
-def _openai_tool_use_blocks(message: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+def _openai_tool_use_blocks(message: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, list[str]]:
     raw_calls = message.get("tool_calls")
     if not isinstance(raw_calls, list):
-        return [], False
+        return [], False, []
     blocks: list[dict[str, Any]] = []
     malformed = False
+    dropped: list[str] = []
     for raw in raw_calls:
         if not isinstance(raw, dict):
             malformed = True
@@ -1073,9 +1085,11 @@ def _openai_tool_use_blocks(message: dict[str, Any]) -> tuple[list[dict[str, Any
             )
         except (json.JSONDecodeError, TypeError, ValueError):
             malformed = True
+            dropped.append(str(function.get("name") or ""))
             continue
         if not isinstance(tool_input, dict):
             malformed = True
+            dropped.append(str(function.get("name") or ""))
             continue
         blocks.append(
             {
@@ -1084,7 +1098,7 @@ def _openai_tool_use_blocks(message: dict[str, Any]) -> tuple[list[dict[str, Any
                 "input": tool_input,
             }
         )
-    return blocks, malformed
+    return blocks, malformed, dropped
 
 
 class AnthropicCompatibleBackend(HttpBackend):
@@ -1306,7 +1320,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             obj = self.request_json("/v1/messages", payload, headers)
             try:
                 text = _anthropic_text_from_response(obj)
-                blocks, malformed = _anthropic_tool_use_blocks(obj)
+                blocks, malformed, dropped_names = _anthropic_tool_use_blocks(obj)
                 assistant_blocks = _anthropic_assistant_content_blocks(obj)
             except Exception as exc:
                 raise ProviderResponseError(
@@ -1321,6 +1335,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                     usage=usage_dict(obj.get("usage")),
                     tool_use_blocks=[],
                     assistant_content_blocks=without_tool_blocks(assistant_blocks),
+                    truncated_tool_names=truncated_tool_names(dropped_names),
                     **incomplete,
                 )
             if text or blocks or attempt > 0 or not _anthropic_has_thinking_without_text(obj):
@@ -1371,6 +1386,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                     usage=usage,
                     tool_use_blocks=[],
                     assistant_content_blocks=without_tool_blocks(list(completion.assistant_content_blocks)),
+                    truncated_tool_names=truncated_tool_names(completion.tool_names),
                     **incomplete,
                 )
             if text or blocks or attempt > 0:
@@ -1454,18 +1470,20 @@ def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
 
 # LLM: 原生 input 必须是对象；缺失/坏值只报告协议失败，不转成可以执行的空参数。
 # 函数用途: 读取 Anthropic 非流式工具块，并返回整轮是否存在损坏输入。
-def _anthropic_tool_use_blocks(obj: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+def _anthropic_tool_use_blocks(obj: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, list[str]]:
     parts = obj.get("content", [])
     if not isinstance(parts, list):
-        return [], False
+        return [], False, []
     blocks: list[dict[str, Any]] = []
     malformed = False
+    dropped: list[str] = []
     for part in parts:
         if not isinstance(part, dict) or part.get("type") != "tool_use":
             continue
         tool_input = part.get("input")
         if not isinstance(tool_input, dict):
             malformed = True
+            dropped.append(str(part.get("name", "") or ""))
             continue
         blocks.append(
             {
@@ -1474,7 +1492,7 @@ def _anthropic_tool_use_blocks(obj: dict[str, Any]) -> tuple[list[dict[str, Any]
                 "input": tool_input,
             }
         )
-    return blocks, malformed
+    return blocks, malformed, dropped
 
 
 # LLM: 该白名单是 Anthropic 响应块进入下一轮请求的唯一边界；禁止原样回放未来新增的输出专用字段。

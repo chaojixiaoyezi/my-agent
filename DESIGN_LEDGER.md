@@ -1,5 +1,21 @@
 # DESIGN LEDGER
 
+## R232 截断长内容写的有界恢复接回未完成路径【状态：实现与定向测试通过】
+
+R231 让不完整响应整轮零执行，方向正确，但适配器对 `truncated` 响应返回空 `calls`，使 P0-2
+长内容分块恢复与 `NATIVE_TRUNCATED_WRITE_LOOP` 出口不可达；那段恢复治的是 MiniMax 长 content
+被截断成空参后反复重生成死循环的现场问题，不能随协议修复一起消失。
+接回方式只用结构化事实，不猜正文也不放宽执行：供应商解析层把被丢弃工具的真实 name 放进
+`ModelResponse.truncated_tool_names`（`StreamCompletion.tool_names` 同源），工具循环在
+`_protocol_violation_decision` 之前先看这个字段；命中 `write_file`/`apply_patch` 才注入分块写恢复。
+整轮零执行边界不变：探针 `ToolCall` 只用于给恢复上下文提供真实工具名，不进入执行列表，
+参数门、授权与执行路径看不到它。上限改按独立计数 `truncated_write_repairs` 计算——零执行流程
+不再产生 `write_file` 失败记录，继续沿用 guardrail 记录会让出口永不可达；该计数与协议修复预算分开。
+对照 会话运行时 `会话运行时-api/src/sse/responses.rs:423`：会话运行时 把未完成响应升成致命错误，没有恢复路径；
+本项目保留分块恢复是有意的能力差异，理由就是上面那条现场死循环。
+端到端用例 `test_truncated_stream_reaches_recovery_through_real_adapter` 走真实 SSE + 真实适配器，
+同时验证"零执行"与"恢复可达"，防止再次出现只改一层就断链。
+
 ## R231 模型响应完整性【状态：已合入 main；被切断的截断恢复由 R232 接回】
 
 解决未正常结束的原生工具响应仍可执行、坏 JSON 被猜成空参数，以及 Responses 把 EOF/内容过滤误标为长度上限。

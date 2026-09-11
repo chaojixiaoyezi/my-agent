@@ -8,7 +8,7 @@
 该文件本轮 19 passed / 24 xfailed / 1 xpassed。测试样例必须写进 `agent.effective_workspace_root`，
 写进 pytest tmp 根会因 owner 墙全部 PATH_NOT_FOUND，不能用删掉成功执行断言的写法蒙混。
 同批：`test_subagent_prompt_contract.py` 对齐 R230 协调职责新文案与 `trash.moved`/`trash.manifest_ref` 字段名。
-R231 未完成响应协议在分支 `会话运行时/r231-incomplete-protocol`，其 6 项失败与合入阻塞见 `DESIGN_LEDGER.md`。
+R231/R232：`test_native_truncated_write_recovery.py` 用真实 SSE + 真实适配器证明「截断 → 整轮零执行 → 仍可达分块写恢复 → 达上限硬出口」，并验证完整写入不被恢复抢走；`test_provider_completion_boundary.py` 覆盖三协议未完成终态；联合 356 passed / 24 xfailed / 1 xpassed（含工具循环与原生协议）。
 
 ## R230 同轮联合修复
 

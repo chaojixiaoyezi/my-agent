@@ -33,6 +33,10 @@ from agent_py_agent.agent.backends.stream_parsers import (
     StreamCompletion,
     anthropic_stream_events,
 )
+from agent_py_agent.agent.backends.tool_protocol_adapter import (
+    ProviderToolCallRequest,
+    canonical_tool_calls_from_response,
+)
 from agent_py_agent.agent.backends.usage_metadata import (
     collect_anthropic_stream_with_completion,
     collect_anthropic_stream_with_tools,
@@ -108,9 +112,11 @@ def test_truncated_stream_is_flagged_not_silently_empty():
     text, usage, blocks, completion = collect_anthropic_stream_with_completion(_truncated_write_sse_lines())
 
     assert completion.truncated is True, "max_tokens + 未闭合 tool 参数 = 截断,必须标记"
-    # input 仍是合法 dict(下游契约不变),但截断信号已独立带出,不再是无声的 {}。
-    assert blocks[0]["name"] == "write_file"
-    assert blocks[0]["input"] == {}  # 半截 JSON 解析失败回空 dict,但有 truncated 标志兜底
+    # R231 起坏参数不再猜成 {} 生成候选；R232 把被丢弃的工具名单独带出，
+    # 让工具循环仍能识别"这次截断的是 write_file"并给分块恢复。
+    assert blocks == [], "半截参数不得生成可执行候选"
+    assert completion.incomplete_reason == "invalid_tool_arguments"
+    assert completion.tool_names == ("write_file",)
     del text, usage
 
 
@@ -162,7 +168,9 @@ def test_stream_completion_truncated_property():
     assert StreamCompletion(saw_message_stop=False, stop_reason="").truncated is True  # EOF
     assert StreamCompletion(stop_reason="max_tokens", open_tool_buffer=True).truncated is True
     # max_tokens 但无未闭合工具缓冲(纯文本被截)→ 不当工具截断处理(避免误伤文本)。
-    assert StreamCompletion(stop_reason="max_tokens", open_tool_buffer=False).truncated is False
+    # R232: truncated 只表示"这次响应不完整"，长度上限同样是不完整；是否续跑由 typed 原因决定。
+    assert StreamCompletion(stop_reason="max_tokens", open_tool_buffer=False).truncated is True
+    assert StreamCompletion(saw_message_stop=True, stop_reason="end_turn").truncated is False
 
 
 # --------------------------------------------------------------------------- #
@@ -240,12 +248,13 @@ def _decide(agent, response: ModelResponse, params: ToolLoopExecuteParams):
 
 
 def _truncated_empty_write_response() -> ModelResponse:
-    # flatten 后空参 write_file(path/content 都丢) + truncated。
+    # 截断响应：不提供可执行候选，只带真实工具名（R231 的安全边界 + R232 的恢复事实）。
     return ModelResponse(
         text="",
         backend="anthropic_compatible",
-        tool_use_blocks=[{"id": "call_minimax_1", "name": "write_file", "input": {}}],
+        tool_use_blocks=[],
         truncated=True,
+        truncated_tool_names=["write_file"],
     )
 
 
@@ -265,11 +274,21 @@ def test_truncated_empty_write_activates_recovery_continue(tmp_path: Path):
 
 
 def test_truncated_empty_write_breaks_after_limit(tmp_path: Path):
-    # 已有 (LIMIT-1) 次连续同类失败记录在案,本轮第 LIMIT 次 → break 出口。
-    prior = tuple(_failure_record() for _ in range(_NATIVE_TRUNCATED_WRITE_LOOP_LIMIT - 1))
-    agent = _decision_agent(tmp_path, guardrail_records=prior)
+    # 整轮零执行不再产生 write_file 失败记录，上限改按本轮已发生的分块纠偏次数计：
+    # 已有 (LIMIT-1) 次纠偏在案,本轮第 LIMIT 次 → break 出口。
+    agent = _decision_agent(tmp_path)
     params = _params()
-    decision = _decide(agent, _truncated_empty_write_response(), params)
+    counters = ToolLoopRepairCounters(
+        truncated_write_repairs=_NATIVE_TRUNCATED_WRITE_LOOP_LIMIT - 1
+    )
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=_truncated_empty_write_response(),
+            counters=counters,
+        )
+    )
 
     assert decision.action == "break", "连续达到上限必须有真正的循环出口"
     assert decision.response is not None
@@ -292,7 +311,22 @@ def test_non_truncated_empty_write_does_not_trigger_recovery(tmp_path: Path):
 
 
 def test_complete_write_with_truncated_flag_not_hijacked(tmp_path: Path):
-    # 即便 truncated=True,只要 write_file 参数完整(path+content 齐),就不当截断空参处理 → 正常执行。
+    # 未截断的完整写入不得被恢复分支抢走：不带 truncated_tool_names 时决策层只走常规工具路径。
+    agent = _decision_agent(tmp_path)
+    params = _params()
+    response = ModelResponse(
+        text="",
+        backend="anthropic_compatible",
+        tool_use_blocks=[{"id": "c", "name": "write_file", "input": {"path": "a.md", "content": "x"}}],
+    )
+    decision = _decide(agent, response, params)
+    assert decision.action == "run_tools"
+    assert decision.calls[0].arguments["path"] == "a.md"
+    assert decision.calls[0].source_protocol == "native"
+
+
+def test_complete_write_with_truncated_flag_stays_zero_execution(tmp_path: Path):
+    # R231 的 G5 边界优先：即便参数完整，只要本轮被判定不完整就不执行，也不被改成恢复轮次。
     agent = _decision_agent(tmp_path)
     params = _params()
     response = ModelResponse(
@@ -302,9 +336,8 @@ def test_complete_write_with_truncated_flag_not_hijacked(tmp_path: Path):
         truncated=True,
     )
     decision = _decide(agent, response, params)
-    assert decision.action == "run_tools"
-    assert decision.calls[0].arguments["path"] == "a.md"
-    assert decision.calls[0].source_protocol == "native"
+    assert decision.calls == []
+    assert params.tool_context == [], "没有真实截断工具名时不得伪造分块恢复指令"
 
 
 # --------------------------------------------------------------------------- #
@@ -369,3 +402,75 @@ def test_anthropic_stream_events_returns_completion_via_stopiteration():
         completion = stop.value
     assert isinstance(completion, StreamCompletion)
     assert completion.truncated is True
+
+
+# --------------------------------------------------------------------------- #
+# R232 端到端:真实 SSE → 适配器 → 决策，恢复链必须可达（不是只测手搓 ModelResponse）。
+# --------------------------------------------------------------------------- #
+
+
+def test_truncated_stream_reaches_recovery_through_real_adapter(tmp_path: Path):
+    # LLM: 这条用例守的是 R231 合入时踩过的坑——适配器对不完整响应返回空 calls，
+    # 若恢复只认 calls，截断写就永远进不了分块纠偏。必须走真实 SSE 解析与真实适配器。
+    # 函数用途: 证明"截断 → 零执行 → 仍给分块恢复"这条链真的可达。
+    _text, _usage, _blocks, completion = collect_anthropic_stream_with_completion(
+        _truncated_write_sse_lines()
+    )
+    response = ModelResponse(
+        text="",
+        backend="anthropic_compatible",
+        tool_use_blocks=[],
+        truncated=completion.truncated,
+        stop_reason=completion.stop_reason,
+        truncated_tool_names=list(completion.tool_names),
+    )
+    agent = _decision_agent(tmp_path)
+    params = _params()
+
+    adapted = canonical_tool_calls_from_response(
+        ProviderToolCallRequest(
+            response=response,
+            protocol=params.tool_protocol_snapshot,
+            runtime_snapshot=params.tool_runtime_snapshot,
+            turn_id="run-1:model:1",
+            attempt_id="attempt-1",
+        )
+    )
+    assert adapted.calls == (), "不完整响应整轮零执行是 G5 边界，不能被恢复绕开"
+
+    decision = _decide(agent, response, params)
+    assert decision.action == "continue"
+    assert decision.calls == []
+    joined = "\n".join(params.tool_context)
+    assert "截断" in joined
+    assert 'mode="append"' in joined, "恢复指令必须真的教模型分块续写，而不是通用格式纠偏"
+
+
+def test_truncated_stream_recovery_breaks_after_limit(tmp_path: Path):
+    # LLM: 零执行流程不再产生 write_file 失败记录，上限改由本轮纠偏计数决定；这条守住硬出口。
+    # 函数用途: 证明连续截断最终会给出带证据的终止出口，而不是无限重试。
+    _text, _usage, _blocks, completion = collect_anthropic_stream_with_completion(
+        _truncated_write_sse_lines()
+    )
+    response = ModelResponse(
+        text="",
+        backend="anthropic_compatible",
+        tool_use_blocks=[],
+        truncated=True,
+        stop_reason=completion.stop_reason,
+        truncated_tool_names=list(completion.tool_names),
+    )
+    params = _params()
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=_decision_agent(tmp_path),
+            params=params,
+            response=response,
+            counters=ToolLoopRepairCounters(
+                truncated_write_repairs=_NATIVE_TRUNCATED_WRITE_LOOP_LIMIT - 1
+            ),
+        )
+    )
+    assert decision.action == "break"
+    assert decision.response is not None
+    assert decision.response.runtime_reason == "NATIVE_TRUNCATED_WRITE_LOOP"

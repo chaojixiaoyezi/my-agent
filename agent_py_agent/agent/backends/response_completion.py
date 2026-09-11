@@ -31,3 +31,31 @@ def incomplete_response_fields(stop_reason: str, *, incomplete_reason: str = "")
 # 函数用途: 返回可保留的 assistant 内容副本，避免未执行工具使整条回复无法归档。
 def without_tool_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [dict(block) for block in blocks if block.get("type") != "tool_use"]
+
+
+# LLM: 只读取响应里真实出现过的 name，不按工具职责补全或猜类型；返回结果只用于让上层判断
+# "该给哪个工具发有界恢复"，绝不能据此生成可执行调用。
+# 函数用途: 收集本次未完成响应中被丢弃工具的工具名，去重保序，供工具循环做有界恢复。
+def truncated_tool_names(*sources: object) -> list[str]:
+    names: list[str] = []
+    for source in sources:
+        considered = source if isinstance(source, (list, tuple)) else ()
+        for item in considered:
+            name = _observed_tool_name(item)
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+# LLM: 兼容三种真实来源：纯字符串名、已解析块、OpenAI 原始 tool_calls 条目；其它形态一律忽略。
+# 函数用途: 从单个条目取出供应商给出的工具名，取不到就返回空串。
+def _observed_tool_name(item: object) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    if not isinstance(item, dict):
+        return ""
+    name = str(item.get("name") or "").strip()
+    if name:
+        return name
+    function = item.get("function")
+    return str(function.get("name") or "").strip() if isinstance(function, dict) else ""

@@ -43,6 +43,9 @@ class StreamCompletion:
     stop_reason: str = ""
     open_tool_buffer: bool = False
     assistant_content_blocks: tuple[dict[str, Any], ...] = ()
+    # 本帧出现过的工具名（去重保序）。只是供应商事实，用于未完成响应指认被丢弃的工具，
+    # 不授权执行、不参与 JSON 合法性判断。
+    tool_names: tuple[str, ...] = ()
 
     # LLM: 只检查供应商结构事实；不把坏 JSON 或断流猜成 token 上限。
     # 函数用途: 返回供应商停止原因之外的完整性错误，供公共响应合同分类。
@@ -110,6 +113,7 @@ def openai_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
             if reasoning_present
             else ()
         ),
+        tool_names=tool_acc.tool_names(),
     )
 
 
@@ -154,6 +158,15 @@ class _OpenAIToolCallAccumulator:
     def _progress(index: int, call: dict[str, str], phase: str) -> dict[str, Any]:
         return {"schema": TOOL_INPUT_PROGRESS_SCHEMA, "phase": phase, "stream_index": index,
                 "tool": call["name"] or "Tool", "received_chars": len(call["arguments"])}
+
+    # LLM: 工具名在流里独立于参数到达，可安全外发；它只说明"这一轮尝试调用了哪些工具"。
+    # 函数用途: 按流内 index 顺序返回已见工具名，供未完成响应识别被丢弃的工具。
+    def tool_names(self) -> tuple[str, ...]:
+        return tuple(
+            str(self._calls[index]["name"] or "").strip()
+            for index in sorted(self._calls)
+            if str(self._calls[index]["name"] or "").strip()
+        )
 
     # LLM: 参数必须是完整 JSON 对象；坏块不能猜成空对象，整轮失败由响应边界统一处理。
     # 函数用途: 将各工具 JSON 转为标准调用块，保持原 index 顺序和不完整信号。
@@ -235,6 +248,7 @@ def anthropic_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
         stop_reason=stop_reason,
         open_tool_buffer=tool_acc.has_open_buffer(),
         assistant_content_blocks=assistant_acc.completed_blocks(),
+        tool_names=tool_acc.tool_names(),
     )
 
 
@@ -258,6 +272,17 @@ class _AnthropicToolUseAccumulator:
         self._buffer: str = ""
         self._last_parse_failed: bool = False
         self._initial_input: dict[str, Any] = {}
+        self._seen_names: list[str] = []
+
+    # LLM: 工具名来自 content_block_start 的结构字段，与参数增量是否合法无关。
+    # 函数用途: 返回本响应出现过的工具名（去重保序），供未完成响应指认被丢弃工具。
+    def tool_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        for name in self._seen_names:
+            cleaned = str(name or "").strip()
+            if cleaned and cleaned not in names:
+                names.append(cleaned)
+        return tuple(names)
 
     def has_open_buffer(self) -> bool:
         """流结束时是否仍有半截的 tool_use 参数缓冲。
@@ -328,6 +353,8 @@ class _AnthropicToolUseAccumulator:
         self._index = obj.get("index")
         self._id = str(block.get("id", "") or "")
         self._name = str(block.get("name", "") or "")
+        if self._name.strip():
+            self._seen_names.append(self._name)
         self._buffer = ""
         initial = block.get("input", {})
         self._initial_input = initial if isinstance(initial, dict) else {}

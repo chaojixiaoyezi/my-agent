@@ -5,8 +5,8 @@
 删除“连续 5 轮无正文就注入停止指令”的兜底；它只看正文是否为空判断停工，还会把提示拼进用户请求。
 回归用例已能抓回旧行为，`test_tool_loop.py` 19 passed / 24 xfailed / 1 xpassed。
 同批修正子代理回收字段名（`trash.moved` / `trash.manifest_ref`）与 R230 协调职责改文案后遗留的陈旧断言。
-R231 未完成响应协议在分支 `会话运行时/r231-incomplete-protocol`（a2c227a4），**未合入**：它会切断 P0-2
-截断分块写恢复与 `NATIVE_TRUNCATED_WRITE_LOOP` 出口，合入前需先决定恢复路径，证据见 `DESIGN_LEDGER.md`。
+R231 未完成响应协议已合入（坏参数不猜 `{}`、EOF/坏参数/内容过滤各留 typed 原因）；
+它切断的 P0-2 截断分块写恢复已由 R232 用结构化 `truncated_tool_names` 接回，零执行边界不变。
 本轮没有部署，也没有跑真 TUI 验收。
 
 ## R230 用户现场同轮修复（整合验收中）

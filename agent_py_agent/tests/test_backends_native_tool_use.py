@@ -658,7 +658,9 @@ def test_non_stream_without_tools_omits_tools_key_and_keeps_blocks_empty():
     assert "tools" not in captured["payload"]
 
 
-def test_non_stream_malformed_input_falls_back_to_empty_dict():
+def test_non_stream_malformed_input_never_becomes_empty_dict_call():
+    # R231 起坏 input 不再猜成 {}：整轮零工具执行，但工具名作为结构化事实带出，
+    # 供工具循环判断"被丢弃的是哪个工具"（R232 的截断长内容恢复依赖它）。
     backend = AnthropicCompatibleBackend(_options(stream_enabled=False))
     backend.request_json = lambda path, payload, headers: {
         "content": [{"type": "tool_use", "id": "t", "name": "read_file", "input": "not-a-dict"}]
@@ -666,7 +668,10 @@ def test_non_stream_malformed_input_falls_back_to_empty_dict():
 
     resp = backend.generate("go", tools=_TOOLS)
 
-    assert resp.tool_use_blocks == [{"id": "t", "name": "read_file", "input": {}}]
+    assert resp.tool_use_blocks == []
+    assert resp.truncated is True
+    assert resp.runtime_reason == "MODEL_TOOL_ARGUMENTS_INVALID"
+    assert resp.truncated_tool_names == ["read_file"]
 
 
 # --- streaming input_json_delta accumulation -------------------------------

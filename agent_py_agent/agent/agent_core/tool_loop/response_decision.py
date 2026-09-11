@@ -62,6 +62,8 @@ class ToolLoopRepairCounters:
     unresolved_runtime_issue_redirects: int = 0
     protocol_repairs: int = 0
     empty_text_repairs: int = 0
+    # R232: 截断长内容写的分块纠偏次数，和协议修复分开计数，避免互相吃掉预算。
+    truncated_write_repairs: int = 0
 
 
 # LLM: repair counters 只记录真实协议修复次数，不再承载任何工作风格或检查点提醒状态。
@@ -72,6 +74,7 @@ def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
         protocol_repairs=counters.protocol_repairs,
         empty_text_repairs=counters.empty_text_repairs,
+        truncated_write_repairs=counters.truncated_write_repairs,
     )
 
 
@@ -83,6 +86,7 @@ def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopR
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
         protocol_repairs=counters.protocol_repairs,
         empty_text_repairs=counters.empty_text_repairs,
+        truncated_write_repairs=counters.truncated_write_repairs,
     )
 
 
@@ -92,6 +96,19 @@ def _inc_protocol(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
         protocol_repairs=counters.protocol_repairs + 1,
         empty_text_repairs=counters.empty_text_repairs,
+        truncated_write_repairs=counters.truncated_write_repairs,
+    )
+
+
+# LLM: 截断分块纠偏与协议修复分开计数：两者预算不能互相吞掉，也不能共用一个上限解释。
+# 函数用途: 增加一次"截断长内容写"的分块纠偏计数。
+def _inc_truncated_write(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        protected_marker_repairs=counters.protected_marker_repairs,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        protocol_repairs=counters.protocol_repairs,
+        empty_text_repairs=counters.empty_text_repairs,
+        truncated_write_repairs=counters.truncated_write_repairs + 1,
     )
 
 
@@ -104,6 +121,7 @@ def _inc_empty_text(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
         protocol_repairs=counters.protocol_repairs,
         empty_text_repairs=counters.empty_text_repairs + 1,
+        truncated_write_repairs=counters.truncated_write_repairs,
     )
 
 
@@ -171,6 +189,13 @@ def tool_loop_response_decision(
         return ToolLoopResponseDecision("break", final, [], request.counters)
 
     adapted = _tool_calls_from_response(request)
+    # R232: 未完成响应仍然整轮零执行，但被丢弃的工具名是供应商事实，先给有界恢复一次机会。
+    # 没有它，截断的 write_file 只会退化成通用格式纠偏，现场问题回到"反复重生成又截断"的死循环。
+    truncated_write = _truncated_tool_recovery_decision(
+        request, _truncated_tool_names_from_response(request.response)
+    )
+    if truncated_write is not None:
+        return truncated_write
     # G5(2026-08-10 用户裁决):adapter 恒不返回 calls+violations 并存——任何
     # 协议错误(未闭合/截断/JSON 损坏/fence/超限)即「不完整响应」,整轮零执行
     # (calls==()),违规反馈走 _protocol_violation_decision;全好块才执行。
@@ -489,6 +514,74 @@ def _tool_calls_decision(
 # 分块纠偏机会后仍截断就停，并把真实失败原因交给最终回复。
 _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT = 3
 _TRUNCATED_WRITE_FAILURE_CLASS = "code:TOOL_PARAMETER_REQUIRED"
+# 长内容工具：被截断后需要"分块写"这类有界恢复，而不是通用格式纠偏。
+_TRUNCATED_LONG_CONTENT_TOOLS = frozenset({"write_file", "apply_patch"})
+
+
+# LLM: 未完成响应整轮零执行后，恢复入口只能来自供应商结构化事实 response.truncated_tool_names；
+# 命中长内容工具时先给一次有界分块纠偏，超过上限直接硬出口，绝不据此生成可执行调用。
+# 函数用途: 把截断的工具名接回长内容恢复，避免截断 write 退化成死循环或无声失败。
+def _truncated_tool_recovery_decision(
+    request: ToolLoopResponseDecisionRequest,
+    names: list[str],
+) -> ToolLoopResponseDecision | None:
+    if not _native_tool_use_active(request.params):
+        return None
+    if not bool(getattr(request.response, "truncated", False)):
+        return None
+    if not any(name in _TRUNCATED_LONG_CONTENT_TOOLS for name in names):
+        return None
+    return _native_truncated_write_decision(request, _truncated_probe_calls(request, names))
+
+
+def _truncated_tool_names_from_response(response: object) -> list[str]:
+    raw = getattr(response, "truncated_tool_names", None) or ()
+    if not isinstance(raw, (list, tuple)):
+        return []
+    names: list[str] = []
+    for item in raw:
+        name = str(item or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _truncated_probe_calls(
+    request: ToolLoopResponseDecisionRequest,
+    names: list[str],
+) -> list[ToolCall]:
+    """只为给恢复上下文提供真实工具名，不是可执行调用：不进入执行列表，参数只带截断标记。
+
+    身份字段沿用本轮 run/turn/attempt，便于审计把恢复指令追到具体尝试；
+    参数门、授权与执行路径都不会看到这些对象（本轮整轮零执行）。
+    """
+    params = request.params
+    snapshot = getattr(params, "tool_runtime_snapshot", None)
+    run_id = str(getattr(params, "run_id", "") or "") or "truncated-probe"
+    turn_id = str(getattr(request, "turn_id", "") or "") or f"{run_id}:truncated-probe"
+    attempt_id = str(getattr(params, "attempt_id", "") or getattr(params, "request_id", "") or "") or run_id
+    probes: list[ToolCall] = []
+    for index, name in enumerate(names, start=1):
+        if name not in _TRUNCATED_LONG_CONTENT_TOOLS:
+            continue
+        # schema_hash 必须取本轮运行快照的真实值：它只是身份字段，不代表该调用被授权执行。
+        runtime = snapshot.runtime(name) if snapshot is not None and hasattr(snapshot, "runtime") else None
+        schema_hash = str(getattr(getattr(runtime, "model_spec", None), "schema_hash", "") or "")
+        if not schema_hash.startswith("sha256:"):
+            continue
+        probes.append(
+            ToolCall(
+                call_id=f"truncated-probe-{index}",
+                tool_name=name,
+                arguments={"truncated": True},
+                source_protocol="native",
+                schema_hash=schema_hash,
+                run_id=run_id,
+                turn_id=turn_id,
+                attempt_id=attempt_id,
+            )
+        )
+    return probes
 
 
 def _native_truncated_write_decision(
@@ -507,18 +600,18 @@ def _native_truncated_write_decision(
         return None
     if not _has_truncated_empty_write(calls):
         return None
-    prior_failures = _consecutive_truncated_write_failures(request.agent)
-    if prior_failures + 1 >= _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT:
+    # R232: 整轮零执行后不再产生 write_file 失败记录，上限必须按本轮已发生的分块纠偏次数计，
+    # 否则该出口永不可达，截断写会退回"反复重生成又截断"的死循环。
+    attempts = int(request.counters.truncated_write_repairs) + 1
+    if attempts >= _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT:
         return ToolLoopResponseDecision(
             "break",
-            _native_truncated_write_loop_break_response(
-                request.response.backend, prior_failures + 1
-            ),
+            _native_truncated_write_loop_break_response(request.response.backend, attempts),
             [],
             request.counters,
         )
     request.params.tool_context.append(_native_truncated_write_recovery_context(calls))
-    return ToolLoopResponseDecision("continue", None, [], request.counters)
+    return ToolLoopResponseDecision("continue", None, [], _inc_truncated_write(request.counters))
 
 
 def _has_truncated_empty_write(calls: list[ToolCall]) -> bool:
