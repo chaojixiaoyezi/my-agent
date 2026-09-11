@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import logging
 
+import pytest
+
 from agent_py_agent.agent.common.log_redaction import (
     install_log_redaction,
     redact_sensitive_text,
@@ -87,3 +89,94 @@ def test_code_file_mode_preserves_placeholders_but_redacts_real_tokens() -> None
     assert 'api_key = os.getenv("API_KEY")' in safe
     assert "sk-abcdefghij123456" not in safe
     assert "<redacted>" in safe
+
+
+@pytest.mark.parametrize("source", [
+    'axios.post(`${base}/incoming?token=${notification.token}`, data, config);',
+    'axios.post(`${base}?token=${encodeURIComponent(notification.token)}&page=1`, data);',
+    'axios.get(`${base}?apikey=${config["token"]}&message=${message}`, config);',
+    'url = f"https://example.test?token={config[\'token\']}&page=1"\nnext_step()',
+    'url = f"https://example.test?token={quote(token)}&page=1"',
+    'url = "https://example.test?token={token}".format(token=token)',
+    'url := fmt.Sprintf("https://example.test?token=%s&page=1", token)',
+    'url := fmt.Sprintf(`https://example.test?token=%[1]s`, token)',
+    'url = "https://example.test?token=%(token)s" % values',
+    'dsn = f"postgresql://{user}:{password}@{host}/db"',
+    'dsn = `postgresql://${user}:${encodeURIComponent(password)}@${host}/db`;',
+    'dsn := fmt.Sprintf("postgres://%s:%s@host/db", user, password)',
+    'url = f"https://{user}:{password}@host/path"',
+])
+def test_source_url_references_preserve_complete_syntax(source: str) -> None:
+    assert redact_sensitive_text(source, code_file=True) == source
+
+
+@pytest.mark.parametrize("quote", ['"', "'", "`"])
+def test_source_url_literal_secrets_are_masked_without_swallowing_delimiters(quote: str) -> None:
+    source = f"use({quote}https://host/path?token=opaque-secret{quote}, config)\nnext_step()"
+    expected = source.replace("opaque-secret", "<redacted>")
+    assert redact_sensitive_text(source, code_file=True) == expected
+
+
+@pytest.mark.parametrize("source,expected", [
+    ('`?token=${token}&api_key=live-secret`', '`?token=${token}&api_key=<redacted>`'),
+    ('`?token=live-secret${token}`', '`?token=<redacted>${token}`'),
+    ('`?token=${token}live-secret`', '`?token=${token}<redacted>`'),
+    ('`?token=${"live-secret"}`', '`?token=${"<redacted>"}`'),
+    ("f'?token={\"live-secret\"}'", "f'?token={\"<redacted>\"}'"),
+    ('`?token=${encodeURIComponent("live-secret")}`', '`?token=${encodeURIComponent("<redacted>")}`'),
+    ('`https://${"user:pass"}@host/path`', '`https://${"<redacted>"}@host/path`'),
+    ('f"postgres://{user}:{\'live-secret\'}@host/db"', 'f"postgres://{user}:{\'<redacted>\'}@host/db"'),
+    ('"https://user:live-secret@host/path"', '"https://user:<redacted>@host/path"'),
+    ('"postgres://user:live-secret@host/db"', '"postgres://user:<redacted>@host/db"'),
+])
+def test_source_dynamic_and_literal_credentials_are_handled_separately(source: str, expected: str) -> None:
+    assert redact_sensitive_text(source, code_file=True) == expected
+
+
+def test_source_redaction_keeps_known_key_scan_inside_preserved_expressions() -> None:
+    source = '`?token=${config["sk-abcdefghij123456"]}`\nAuthorization: Bearer sk-abcdefghij123456'
+    safe = redact_sensitive_text(source, code_file=True)
+    assert 'sk-abcdefghij123456' not in safe
+    assert safe.startswith('`?token=${config["<redacted>"]}`\n')
+
+
+@pytest.mark.parametrize("source", [
+    'url = "postgres://user:password"\n@decorator\ndef f(): pass',
+    'url = "https://host/path:user@example.test"',
+    'url = "https://host/path?q=user:password@example.test"',
+    'url = "postgres://host/db?q=user:password@example.test"',
+    'url = "https://host/path?token=" + token\nnext_step()',
+])
+def test_url_redaction_does_not_cross_code_or_authority_boundaries(source: str) -> None:
+    assert redact_sensitive_text(source, code_file=True) == source
+
+
+def test_log_mode_does_not_exempt_source_looking_credential_values() -> None:
+    safe = redact_sensitive_text('https://host?token=${opaque_token}&page=1')
+    assert 'opaque_token' not in safe
+    assert 'page=1' in safe
+
+
+def test_many_source_slots_without_authority_terminator_do_not_backtrack() -> None:
+    source = 'url = "https://user:' + '${token}' * 1000 + '"\nnext_step()'
+    assert redact_sensitive_text(source, code_file=True) == source
+
+
+def test_model_tool_output_projection_preserves_source_and_masks_literal_secrets() -> None:
+    from agent_py_agent.agent.tooling.output_projection import model_tool_output_body
+
+    source = '29: axios.post(`${base}?token=${encodeURIComponent(config.token)}&api_key=live-secret`, data);'
+    projected = model_tool_output_body(
+        tool="read_file", output=source,
+        result_envelope={"tool_output_policy": {"trust": "runtime", "redaction": "source_code"}},
+    )
+    assert projected == source.replace("live-secret", "<redacted>")
+
+
+def test_source_private_keys_and_nested_quoted_credentials_still_masked() -> None:
+    source = (
+        '`?token=${encodeURIComponent("live-secret")}`\n'
+        '-----BEGIN PRIVATE KEY-----\nopaque-key-material\n-----END PRIVATE KEY-----'
+    )
+    safe = redact_sensitive_text(source, code_file=True)
+    assert safe == '`?token=${encodeURIComponent("<redacted>")}`\n<redacted-private-key>'
