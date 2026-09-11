@@ -13,8 +13,16 @@
 `_second_layer_work_roots` 拿到的就是 owner home（并且它已被原有 product_write_roots 覆盖），
 所以子代理写根不会变化——12/12 新子代理实测都没有拿到目标目录。
 
-这不是可以靠改判据绕过的：如果让进程 cwd 成为权限来源，就等于推翻上面那条不变量，
-会重新打开"从 /root 启动就把 /root 当工作目录"这个已经被修过的洞。
+**修正上一段的表述（本轮实测补充）**：机制本身是对的，只是在本机 TUI 场景下"无事可做"——
+实测父代理在 full-access + TUI 下的 `allowed_write_roots` 就是 owner home
+（`workspace.cwd` 被钉在 owner home），第二层派生出的也正是 owner home，
+而它**已被原有 `product_write_roots` 覆盖**，所以子代理写根不变。
+也就是说：**当父代理工作目录确实在 owner home 之外时（例如会话显式声明了外部 workspace），
+这个机制就会生效**；当前默认那条"TUI 从任意目录启动都回自己家"的路径上它不产生增量。
+不是死代码，也不是被不变量阻断的逻辑冲突。
+
+仍然不能做的是：让**进程 cwd** 直接成为权限来源——那会推翻
+"Process cwd is not an owner or permission fact"，重新打开"从 /root 启动就把 /root 当工作目录"的洞。
 因此**保持现状**，并把选择权交回用户，三条路：
 ①引入显式声明（如 chat/CLI 增加 `--workspace <dir>`），由用户在 full-access 下明确指定工作目录，
 再据它派生第二层作用域——这是干净且与现有不变量一致的做法；
