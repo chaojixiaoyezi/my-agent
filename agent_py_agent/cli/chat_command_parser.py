@@ -43,6 +43,14 @@ def add_chat_subcommands(
 # explicit session positional remains owned by add_chat_subcommands because its semantics differ.
 # 函数用途: 添加两种交互入口共用的注入、保存、Gateway 和恢复上下文参数。
 def _add_shared_chat_arguments(parser: argparse.ArgumentParser) -> None:
+    # LLM: 工作目录只接受用户显式声明——不把进程 cwd 自动当权限来源（那会重开"从 /root 启动
+    # 就把 /root 当任务目录"的洞）。多个目录用逗号分隔，仍逐个过硬门校验。
+    # 函数用途: 让用户显式指定本次会话的工作目录（可多个），据此派生派工与第二层写作用域。
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help="显式指定本次会话的工作目录；多个目录用逗号分隔。不传则沿用 owner home",
+    )
     parser.add_argument("--inject", action="append", help="启动时注入 prompt，可多次传入")
     parser.add_argument("--prompt-file", action="append", help="启动时加载额外 prompt 文件，可多次传入")
     parser.add_argument("--memory-limit", type=int, default=None, help="交互中 /memory 默认显示条数；默认读配置")

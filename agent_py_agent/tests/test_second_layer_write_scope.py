@@ -89,3 +89,45 @@ def test_model_prose_cannot_widen_the_scope(tmp_path):
     agent = _agent(owner_scope="", owner_home="", cwd=str(work))
     agent._current_run_params.task_attributes["note"] = "用户说可以写 /etc"
     assert _second_layer_work_roots(agent) == [str(work)]
+
+
+# --------------------------------------------------------------------------- #
+# 显式工作目录声明：--workspace 支持一次给多个目录，逐个过硬门；普通用户仍被拒。
+# --------------------------------------------------------------------------- #
+
+
+def test_explicit_workspace_accepts_multiple_directories_for_full_access(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.workspace_resolution import resolve_workspace_roots
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    config = SimpleNamespace(
+        workspace_root=f"{a},{b}",
+        my_agent_owner_provider="local",
+        my_agent_owner_kind="main",
+        access_mode="full-access",
+    )
+    roots = resolve_workspace_roots(config, str(tmp_path / "x.yaml"))
+    assert [str(r) for r in roots] == [str(a.resolve()), str(b.resolve())]
+
+
+def test_explicit_workspace_outside_home_is_rejected_for_normal_user(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.workspace_resolution import (
+        resolve_workspace_roots,
+        validate_requested_workspace_roots,
+    )
+
+    config = SimpleNamespace(
+        workspace_root=str(tmp_path / "outside"),
+        my_agent_owner_provider="local",
+        my_agent_owner_kind="user",
+        access_mode="workspace-write",
+    )
+    roots = resolve_workspace_roots(config, str(tmp_path / "x.yaml"))
+    with pytest.raises(ValueError):
+        validate_requested_workspace_roots(config, roots)

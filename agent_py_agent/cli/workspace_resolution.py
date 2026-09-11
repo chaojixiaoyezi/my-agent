@@ -96,6 +96,10 @@ def resolve_workspace_roots(
 def _raw_workspace_roots(raw_value: object) -> list[object]:
     if isinstance(raw_value, list):
         return raw_value
+    # 显式声明支持"一次给多个目录"：字符串里的逗号分隔成多项，逐项仍走同一套硬门校验。
+    text = str(raw_value or "")
+    if "," in text:
+        return [part.strip() for part in text.split(",") if part.strip()]
     return [raw_value]
 
 
