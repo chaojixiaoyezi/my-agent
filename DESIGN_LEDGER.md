@@ -69,11 +69,20 @@
      stop_reason=max_tokens`，旧代码在此必然抛 `COMPACT_SEGMENT_SUMMARY_TRUNCATED` 整轮作废；
      修复后第 2 次调用带纠正提示、把片段从 12382 字符缩到 6324 字符重试成功，压缩完整跑完、无降级标记；
   5) 缩到最小材料再跑一次（2 段）全部正常，确认修复没有引入额外调用。
-- TUI 级：用隔离 home（`/tmp/ma-eval/verify-r255/home`，不改用户正式配置）起 `--direct`/gateway 会话验证到
-  "模型确实切到 MiniMax-M2.7、preflight 如实报 `model_visible_tokens/context_window/compact_threshold`"，
-  但该临时 home 的 gateway 会话存储未初始化成功（`CONVERSATION_PERSISTENCE_UNAVAILABLE`），
-  `/compact` 只能在 canonical gateway 会话里跑，故 TUI 级最终复测留到用户真实卡住的会话
-  `ma-port-2`（539.8k/200k，正是失败现场）上执行。
+- TUI 级（**用户在真实会话 `ma-port-2` 复测通过，2026-09-11 23:55**）：
+  用户在失败的同一会话（`thread-e86355c2aea04416`，模型 MiniMax-M2.7 / 200k）里执行 `/compact`，
+  **失败形态真实复现**：网关日志新增一条
+  `Compact segment invalid: reason=TOOL_CALL text_chars=1040 tool_calls=2 truncated=False`
+  ——与 22:50 那次 `TOOL_CALL` 同类（这次 2 个工具块 + 1040 字正文）。
+  修复后的行为：**原地纠正一次即拿到有效摘要，没有再抛 `COMPACT_SEGMENT_SUMMARY_*`，也没有触发机械降级**
+  （日志 `Compact segment degraded` 计数为 0），压缩正常提交：
+  checkpoint `compact-2-56dc669a6cb3f38839fa`、`generation 1 → 2`、`status=validated_candidate`、
+  `projected_tokens_before=539770 → projected_tokens_after=27064`（目标线 120000）、
+  源区间 `3960095 → 7584094` 字节、保留尾部 4 条消息；
+  线程账 `compact_consecutive_failures: 1 → 0`、`compact_failure_code` 清空。
+  界面状态行：`Context ~539.8k/200.0k · 270% · compact 1` → `~39.5k/200.0k · 20% · compact 2`，
+  会话继续正常应答。**修复前该场景的必然结果是把已成功的分段一起作废并停止本轮。**
+- 仍**未复现**的只剩"纯工具块无正文"这一支（5 轮真机 + 本次真机都带正文）；该分支由合同单测覆盖降级路径。
 
 ## 2026-09-11 R252 出口不再改写模型原话 + 计划板/插话/截断/配置四处底座修复【状态：已修，真机验收通过（部分项只能合同单测覆盖）】
 
