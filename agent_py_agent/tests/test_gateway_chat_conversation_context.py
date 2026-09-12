@@ -342,7 +342,8 @@ def test_named_audit_projects_durable_task_deadline_into_current_run(tmp_path):
 
 @pytest.mark.parametrize("deferred", [False, True])
 @pytest.mark.parametrize("rich", [False, True])
-def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, monkeypatch, deferred, rich):
+@pytest.mark.parametrize("body", ["接下来修改", ""])
+def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, monkeypatch, deferred, rich, body):
     from agent_py_agent.agent.gateway_parts import request_execution as module
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=False), tmp_path)
@@ -361,11 +362,12 @@ def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, m
     if rich:
         module._configure_gateway_main_activity(context, conversation)
         context.on_chunk.write_thinking("先检查现有文件", duration_seconds=2)
-        context.on_chunk.write_model("接下来修改")
+        if body:
+            context.on_chunk.write_model(body)
     result = SimpleNamespace(
-        response="接下来修改", runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
+        response=body, runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
         assistant_commentary_messages=["我在核对现有代码"],
-        canonical_native_messages=[{"role": "assistant", "content": "接下来修改"}],
+        canonical_native_messages=[{"role": "assistant", "content": body or [{"type": "thinking", "thinking": "尚未完成"}]}],
     )
     append = store.append_message
 
@@ -386,10 +388,13 @@ def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, m
         module._repair_gateway_conversation_messages(store, thread.thread_id, errors)
         assert errors == []
     rows = store.recent_messages(thread.thread_id, limit=0)
-    assert [row.content for row in rows] == ["我在核对现有代码", "接下来修改"]
+    assert [row.content for row in rows] == ["我在核对现有代码", body]
     assert "turn_end_reason" not in rows[0].metadata
     assert rows[-1].metadata["turn_end_reason"] == "max-tokens"
-    assert rows[-1].metadata["canonical_native_messages"]["messages"][-1]["content"] == "接下来修改"
+    assert rows[-1].metadata["canonical_native_messages"]["messages"] == result.canonical_native_messages
+    from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
+
+    assert provider_history_messages_from_rows(rows) == tuple(result.canonical_native_messages)
     if rich:
         from agent_py_agent.agent.conversation.background_history import (
             background_display_turn_from_row,
@@ -399,7 +404,10 @@ def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, m
         assert snapshot and snapshot["complete"] is True
         assert snapshot["gateway_request_id"] == "req-length"
         assert snapshot["events"][0]["payload"]["text"] == "先检查现有文件"
-        assert snapshot["live_final_block_id"].startswith(snapshot["request_id"] + ":assistant:")
+        if body:
+            assert snapshot["live_final_block_id"].startswith(snapshot["request_id"] + ":assistant:")
+        else:
+            assert "live_final_block_id" not in snapshot
     before = store._message_path(thread.thread_id).read_bytes()
     module._persist_gateway_assistant_result(context, conversation, result)
     assert store._message_path(thread.thread_id).read_bytes() == before

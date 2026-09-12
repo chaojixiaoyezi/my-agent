@@ -75,6 +75,90 @@ def _make_agent(tmp_path: Path) -> tuple[SimpleAgent, object]:
     return agent, paths
 
 
+@pytest.mark.parametrize("override", [
+    {"response": "已生成的半段正文"},
+    {"runtime_status": "ok"},
+    {"runtime_reason": "MODEL_RESPONSE_FILTERED"},
+    {"turn_end_reason": "completed"},
+])
+def test_empty_reply_projection_never_guesses_truncation(override):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts.request_errors import (
+        gateway_empty_model_response_projection,
+    )
+
+    fields = dict(response="", runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED")
+    assert gateway_empty_model_response_projection(SimpleNamespace(**(fields | override))) == {}
+
+
+def test_empty_truncated_reply_keeps_typed_terminal_and_native_history(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.models import AgentRunResult
+    from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
+
+    agent, paths = _make_agent(tmp_path)
+    request_id = "gw-empty-truncated"
+    request_path = paths.processing / f"{request_id}.json"
+    request_path.write_text(json.dumps({
+        "id": request_id, "kind": "ask", "status": "processing", "turn_phase": "open", "prompt": "整理这些本地记录",
+        "execution_attempt_id": "claimed-truncated-attempt",
+        "conversation": {"channel": "chat", "channel_conversation_id": "truncated-session",
+                         "channel_user_id": "local-agent", "canonical_user_id": "local-agent"},
+    }), encoding="utf-8")
+    native = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "read-1", "name": "read_file", "input": {"path": "notes.md"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "read-1", "content": "已读取的本地记录"}]},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "整理中"}]},
+    ]
+    calls = []
+
+    def run(*_args, **_kwargs):
+        calls.append(1)
+        return AgentRunResult(
+            prompt="", response="", backend="echo", used_memories=0, tool_rounds=1,
+            runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
+            runtime_source="model_provider", turn_end_reason="max-tokens",
+            canonical_native_messages=native,
+        )
+
+    monkeypatch.setattr(agent, "run", run)
+    response = _handle_gateway_request(agent, request_path)
+    assert calls == [1], response.get("error")
+    assert response["ok"] is False and response["status"] == "failed"
+    assert response["error_code"] == "MODEL_RESPONSE_TRUNCATED"
+    assert response["runtime_status"] == "unfinished"
+    assert response["runtime_source"] == "model_provider"
+    assert response["turn_end_reason"] == "max-tokens"
+    assert response["response"] == response["channel_delivery"]["content"] == ""
+    assert response["tool_rounds"] == 1
+    assert response["user_error"] == "本次模型输出达到上限，尚未形成完整正文；已有工具操作和历史保留。"
+    assert "任务处理失败" not in response["user_error"]
+    thread = agent.conversation_store.list_threads()[0]
+    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=0)
+    assert rows[-1].role == "assistant" and rows[-1].content == ""
+    assert rows[-1].metadata["turn_end_reason"] == "max-tokens"
+    assert list(provider_history_messages_from_rows(rows)) == native
+    _finish_claimed_gateway_request(
+        paths, request_path, request_id, response, conversation_store=agent.conversation_store,
+    )
+    assert not request_path.exists()
+    assert (paths.failed / request_path.name).exists()
+    terminal = read_json_file(paths.terminal / request_path.name)
+    assert terminal["terminal_response"]["error_code"] == "MODEL_RESPONSE_TRUNCATED"
+
+
+def test_untyped_empty_reply_still_has_no_deliverable_response(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts.request_errors import UserReplyUnavailableError
+
+    with pytest.raises(UserReplyUnavailableError):
+        request_execution._persist_gateway_assistant_result(
+            SimpleNamespace(), SimpleNamespace(),
+            SimpleNamespace(response="", runtime_status="ok", thinking="MODEL_RESPONSE_TRUNCATED"),
+        )
+
+
 def test_compact_failure_keeps_its_typed_code_and_does_not_claim_data_corruption(monkeypatch):
     from types import SimpleNamespace
 

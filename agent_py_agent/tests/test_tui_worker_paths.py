@@ -259,6 +259,26 @@ def test_length_notice_does_not_parse_response_or_override_explicit_completion()
     assert "长度限制" in _model_length_error(SimpleNamespace(runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED"))
 
 
+def test_empty_truncated_reply_ends_working_without_fake_assistant_body():
+    from agent_py_agent.agent.gateway_parts.request_errors import (
+        gateway_empty_model_response_projection,
+    )
+
+    ctx, runtime = _context()
+    adapter = runtime.begin_turn("empty-truncated")
+    response = gateway_empty_model_response_projection(SimpleNamespace(
+        response="", runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
+    ))
+    text, recorded, summary = _gateway_outcome(ctx, response)
+    assert text == "" and not recorded and not summary.ok
+    assert "尚未形成完整正文" in summary.error
+    adapter.finalize(summary)
+    snapshot = runtime.store.snapshot()
+    assert not snapshot.has_active_work
+    assert not any(block.role == "assistant" for block in snapshot.stable_blocks)
+    assert any("已有工具操作和历史保留" in block.text for block in snapshot.stable_blocks)
+
+
 def test_gateway_outcome_without_typed_code_uses_safe_generic_error() -> None:
     ctx, _runtime = _context()
 

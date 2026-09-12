@@ -1,5 +1,5 @@
-# LLM: 客户端只接收结构化错误码对应的安全文案；内部异常与恢复明细不能直接公开。
-# 模块用途: 统一 Gateway 请求失败的响应，并区分模型连接、会话读写与执行结果未确认。
+# LLM: 客户端只接收结构化错误码对应的安全文案；保留模型截断事实，不公开内部异常或把思考当正文。
+# 模块用途: 统一 Gateway 请求失败和空正文截断的响应，区分模型连接、长度限制、会话读写与执行结果未确认。
 from __future__ import annotations
 
 """Shared gateway request error response builders."""
@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..backends.errors import ProviderRequestRejectedError, provider_error_http_status
 from ..runtime_errors import runtime_error_report
+from ..turn_end import result_turn_end_reason
 
 
 class ConversationPersistenceError(RuntimeError):
@@ -37,7 +38,7 @@ class SystemCommandRoutingError(RuntimeError):
 
 # LLM: Client-visible failure prose is selected only from structured error_code; provider and
 # client-workspace and active-turn recovery failures never expose raw exception text or suggest unsafe replay.
-# 函数用途: 区分压缩、持久化与请求拒绝；不把未知 400 归咎密钥，不否定失败前已执行的工作。
+# 函数用途: 区分压缩、输出截断、持久化与请求拒绝；不把未知 400 归咎密钥，不否定此前已执行的工作。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
     if code.startswith("COMPACT_"):
@@ -46,6 +47,9 @@ def gateway_client_error_message(error_code: object) -> str:
             "请查看压缩诊断；切换更大上下文的模型后可继续原会话。"
         )
     messages = {
+        "MODEL_RESPONSE_TRUNCATED": (
+            "本次模型输出达到上限，尚未形成完整正文；已有工具操作和历史保留。"
+        ),
         "PROVIDER_REQUEST_REJECTED": (
             "模型服务拒绝了本次请求，本轮已停止。具体原因请查看请求诊断；此前已执行的工作不会因此撤销。"
         ),
@@ -73,6 +77,25 @@ def gateway_client_error_message(error_code: object) -> str:
         ),
     }
     return messages.get(code, "任务处理失败，请稍后重试；如持续失败，请查看运行诊断。")
+
+
+# LLM: 只投影宿主结果中 unfinished + MODEL_RESPONSE_TRUNCATED + max-tokens 的空正文；显式完成优先，不解析思考或启动重试。
+# 函数用途: 避免空正文检查吞掉供应商已报告的输出上限，保持本轮失败与任务已有工作分开。
+def gateway_empty_model_response_projection(result: object) -> dict:
+    if (
+        str(getattr(result, "response", "") or "").strip()
+        or str(getattr(result, "runtime_status", "") or "") != "unfinished"
+        or str(getattr(result, "runtime_reason", "") or "") != "MODEL_RESPONSE_TRUNCATED"
+        or result_turn_end_reason(result) != "max-tokens"
+    ):
+        return {}
+    return {
+        "ok": False,
+        "status": "failed",
+        "error_code": "MODEL_RESPONSE_TRUNCATED",
+        "turn_end_reason": "max-tokens",
+        "user_error": gateway_client_error_message("MODEL_RESPONSE_TRUNCATED"),
+    }
 
 
 # LLM: 仅 typed 请求拒绝追加来源和 HTTP 白名单；不公开 details/body/headers，也不凭文本把主请求归咎子代理。
