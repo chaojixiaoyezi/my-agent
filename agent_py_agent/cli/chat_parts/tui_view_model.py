@@ -279,6 +279,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self.max_stable_blocks = max(1, int(max_stable_blocks or 1))
         self._stable_ids: set[str] = set()
         self._task_progress_generation_id = ""
+        # 本轮聊天请求的身份（只用于展示去重/诊断），与计划代次严格分开。
+        self._task_progress_turn_id = ""
         self._task_progress_plan_revision = 0
         self._handlers: dict[str, Callable[[TuiEvent], None]] = {
             "session_started": self._handle_session_started,
@@ -553,14 +555,17 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # durable ledger, child status, completion, or scheduling.
     # 函数用途: 开始新用户回合时收起上一轮 Todo，并拒绝随后迟到的旧快照。
     def _handle_task_progress_generation_started(self, event: TuiEvent) -> None:
+        # LLM: 这里只登记"新一轮开始了"，**不能**据此清空 Todo 面板或改写计划代次。
+        #   代次属于计划（服务端按任务账本下发），聊天轮次属于用户消息；把两者当同一个东西，
+        #   就会出现"用户插话问进度 → 面板消失"（2026-09-11 真机）。真正的计划切换由
+        #   _consume_task_progress_items 里"带内容的异代次快照"表达。
+        # 函数用途: 校验新回合事件的结构化身份，不做任何面板副作用。
         generation_id = str(
             event.payload.get("task_progress_generation_id") or ""
         ).strip()
         if not generation_id:
             raise ValueError("task_progress_generation_id required")
-        self._task_progress_generation_id = generation_id
-        self._task_progress_plan_revision = 0
-        self.active_blocks.pop("todo:task_progress", None)
+        self._task_progress_turn_id = generation_id
 
     # LLM: 用户消息始终直接进入稳定历史，不能留在 active 后被模型终态覆盖。
     # 函数用途: 追加一个用户输入块。
@@ -808,8 +813,13 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         ).strip()
         expected_generation = self._task_progress_generation_id
         if expected_generation and incoming_generation != expected_generation:
-            return
-        if incoming_generation and not expected_generation:
+            # 异代次：空快照一律忽略（新一轮还没写计划时的空投影不能清掉仍在执行的计划）；
+            # 带内容的快照说明确实换了另一份计划，接受它并重建面板。
+            if not items:
+                return
+            self._task_progress_generation_id = incoming_generation
+            self._task_progress_plan_revision = 0
+        elif incoming_generation and not expected_generation:
             self._task_progress_generation_id = incoming_generation
         incoming_revision = _nonnegative_int(
             event.payload.get("task_progress_plan_revision"),

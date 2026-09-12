@@ -75,7 +75,9 @@ def test_delta_without_start_and_unknown_kind_fail_closed() -> None:
     ]
 
 
-def test_todo_generation_clears_old_turn_and_rejects_late_snapshot() -> None:
+def test_todo_plan_survives_new_turn_and_still_rejects_late_snapshot() -> None:
+    """回归（2026-09-11 真机）：回合开始事件不得清面板；异代次空快照不得清面板；
+    异代次**带内容**快照才是真正的计划切换。"""
     store = TuiStateStore()
     seq = _sequencer()
     store.publish(
@@ -105,7 +107,22 @@ def test_todo_generation_clears_old_turn_and_rejects_late_snapshot() -> None:
             },
         )
     )
-    assert not any(block.role == "todo" for block in store.snapshot().active_blocks)
+    assert any(block.role == "todo" for block in store.snapshot().active_blocks)
+
+    # 新一轮的空快照（还没有计划）不能清掉仍在执行的计划。
+    store.publish(
+        seq.emit(
+            "task_progress_snapshot",
+            "updated",
+            "todo-snapshot-new-empty",
+            {
+                "task_progress_items": [],
+                "task_progress_generation_id": "turn-new",
+                "task_progress_plan_revision": 0,
+            },
+        )
+    )
+    assert any(block.role == "todo" for block in store.snapshot().active_blocks)
 
     store.publish(
         seq.emit(
@@ -121,7 +138,7 @@ def test_todo_generation_clears_old_turn_and_rejects_late_snapshot() -> None:
             },
         )
     )
-    assert not any(block.role == "todo" for block in store.snapshot().active_blocks)
+    assert any(block.role == "todo" for block in store.snapshot().active_blocks)
 
     store.publish(
         seq.emit(

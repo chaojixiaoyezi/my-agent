@@ -60,9 +60,11 @@ from ..conversation.authority import (
     CONVERSATION_WORKSPACE_TASK_STATUS_ATTR,
 )
 from ..conversation.channels import (
+    project_host_paths_for_channel,
     project_user_reply,
     redact_host_absolute_paths,
     redact_structured_identifiers,
+    thread_channel,
 )
 from ..conversation.compact import (
     ConversationCompactOptions,
@@ -231,6 +233,9 @@ class BufferedChunkStreamWriter:
     _tool_input_active: bool = False
     _identifier_redactions: tuple[tuple[object, str], ...] = ()
     _observed_tool_rounds: int = 0
+    # LLM: 出口正文里的宿主绝对路径是否保留，只由这条请求的通道事实决定（本机私有通道保留，
+    #   外部/未知通道收敛成 basename）。不得从正文内容判断，也不得整体取消脱敏。
+    delivery_channel: str = ""
     interactive_approvals: bool = False
     rich_transcript: bool = False
     main_activity_sink: object | None = field(default=None, repr=False)
@@ -452,7 +457,7 @@ class BufferedChunkStreamWriter:
         if not self.rich_transcript:
             return
         content = redact_structured_identifiers(
-            redact_host_absolute_paths(str(text or "")),
+            project_host_paths_for_channel(str(text or ""), self.delivery_channel),
             self._identifier_redactions,
         )
         if not content:
@@ -716,7 +721,7 @@ class BufferedChunkStreamWriter:
     def _public_model_text(self, text: object, *, max_chars: int) -> str:
         projection = project_user_reply(str(text or ""))
         content = redact_structured_identifiers(
-            redact_host_absolute_paths(projection.content),
+            project_host_paths_for_channel(projection.content, self.delivery_channel),
             self._identifier_redactions,
         ).strip()
         if max_chars <= 0 or len(content) <= max_chars:
@@ -755,7 +760,7 @@ class BufferedChunkStreamWriter:
         self._model_delta_chars = 0
         self._last_model_delta_flush_at = time.monotonic()
         content = redact_structured_identifiers(
-            redact_host_absolute_paths(raw),
+            project_host_paths_for_channel(raw, self.delivery_channel),
             self._identifier_redactions,
         )
         if not content:
@@ -1754,7 +1759,10 @@ def _persist_gateway_assistant_result(
         raise UserReplyUnavailableError("模型没有生成可安全交付的自然回复")
     channel_delivery = delivery_projection.to_dict()
     public_content = redact_structured_identifiers(
-        redact_host_absolute_paths(delivery_projection.content),
+        project_host_paths_for_channel(
+            delivery_projection.content,
+            _gateway_conversation_channel(context, conversation),
+        ),
         _gateway_identifier_redactions(context, conversation, result=result),
     )
     channel_delivery["content"] = public_content
@@ -1826,11 +1834,12 @@ def _persist_gateway_assistant_commentaries(
     if not isinstance(raw_messages, (list, tuple)):
         return True
     identifiers = _gateway_identifier_redactions(context, conversation, result=result)
+    channel = _gateway_conversation_channel(context, conversation)
     all_persisted = True
     for index, raw in enumerate(raw_messages, start=1):
         projection = project_user_reply(str(raw or ""))
         content = redact_structured_identifiers(
-            redact_host_absolute_paths(projection.content),
+            project_host_paths_for_channel(projection.content, channel),
             identifiers,
         ).strip()
         if not content:
@@ -4106,8 +4115,24 @@ def _prepare_gateway_request_context(agent: SimpleAgent, request_path: Path) -> 
     audit_request_processing(agent, context)
     return context
 
+# LLM: 收尾窗口里到达的插话可能还没被任何模型安全点认领；用户消息不能因为"那一轮刚好结束"而
+#   永久失联。这里只释放 pending 回执（已进提示的 reserved/submitted 不动），交给下一轮认领。
+#   fail-silent：恢复动作绝不反噬回合收口，也不改交付状态。
+# 函数用途: 在 Gateway 回合终态释放未被认领的补充消息。
+def _release_unclaimed_turn_guidance(context: dict) -> None:
+    agent = context.get("agent")
+    store = getattr(agent, "conversation_store", None)
+    release = getattr(store, "release_unclaimed_guidance_for_turn", None)
+    if not callable(release):
+        return
+    try:
+        release(str(context.get("request_id") or ""))
+    except Exception:
+        return
+
 
 def _finalize_gateway_response(context: dict, response: dict) -> None:
+    _release_unclaimed_turn_guidance(context)
     ended_at = time.time()
     _copy_final_lease_fields(response, context["request_path"])
     response["ended_at"] = ended_at
@@ -4188,6 +4213,7 @@ def _handle_gateway_request(
         chunk_path_abs,
         interactive_approvals=_gateway_client_supports_tool_approval(context["request"]),
         rich_transcript=_gateway_client_supports_rich_transcript(context["request"]),
+        delivery_channel=_gateway_request_channel(context["request"]),
     )
 
     execution_started_mono = time.monotonic()
@@ -4264,6 +4290,31 @@ def _gateway_client_supports_tool_approval(request: object) -> bool:
 
 # LLM: 富 transcript 只能由 client_capabilities.rich_transcript 精确布尔真值开启，source/TTY/verbose 都不能隐式扩大输出面。
 # 函数用途: 判断请求客户端是否显式支持思考、逐轮说明和结构化工具结果。
+# LLM: 通道身份只从结构化请求字段读取（客户端声明的 channel、请求 source），不解析正文，
+#   也不按"看起来像不像本机"猜。缺失时返回空串，按外部通道 fail-closed 处理。
+# 函数用途: 取得这条 Gateway 请求的通道身份，供出口决定宿主路径展示策略。
+def _gateway_request_channel(request: object) -> str:
+    if not isinstance(request, dict):
+        return ""
+    metadata = request.get("metadata")
+    declared = metadata.get("channel") if isinstance(metadata, dict) else None
+    return str(declared or request.get("source") or request.get("channel") or "").strip().lower()
+
+
+# LLM: 会话通道是交付与落账共用的同一份权威事实（客户端声明优先，其次请求 source，
+#   最后回到 store 里这条会话登记的通道）。三个来源都是结构化字段，缺失即按外部通道处理。
+# 函数用途: 取得本次交付/落账所用会话的通道身份。
+def _gateway_conversation_channel(context: object, conversation: object) -> str:
+    request = getattr(context, "request", None)
+    channel = _gateway_request_channel(request)
+    if channel:
+        return channel
+    return thread_channel(
+        getattr(getattr(context, "agent", None), "conversation_store", None),
+        getattr(conversation, "thread_id", ""),
+    )
+
+
 def _gateway_client_supports_rich_transcript(request: object) -> bool:
     if not isinstance(request, dict):
         return False

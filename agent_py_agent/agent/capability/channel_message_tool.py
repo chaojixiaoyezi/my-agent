@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..artifacts.registry import ArtifactRegistryRecord, resolve_artifact_record_report
-from ..conversation.channels import project_user_reply, redact_host_absolute_paths
+from ..conversation.channels import (
+    project_host_paths_for_channel,
+    project_user_reply,
+    redact_host_absolute_paths,
+)
 from ..delivery import (
     ChannelAttachment,
     DeliveryContext,
@@ -556,7 +560,9 @@ def _success_result(
                 "delivery_status": "sent",
                 "source_owner_delivery": True,
                 "channel": provider,
-                "content": redact_host_absolute_paths(project_user_reply(message).content),
+                "content": project_host_paths_for_channel(
+                    project_user_reply(message).content, provider
+                ),
                 "receipt_id": str(payload.get("receipt_id") or ""),
                 "evidence_refs": list(evidence_refs),
                 "deduplicated": False,

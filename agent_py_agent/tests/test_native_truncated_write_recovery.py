@@ -336,8 +336,13 @@ def test_complete_write_with_truncated_flag_stays_zero_execution(tmp_path: Path)
         truncated=True,
     )
     decision = _decide(agent, response, params)
+    # R248：判定不完整仍然整轮零执行；区别是现在会先给一次**轮内**续跑（有界），而不是直接收口。
+    # 不变式：续跑指令不得点名任何工具、不得假定上一轮调用了哪个工具（那才是"伪造恢复指令"）。
     assert decision.calls == []
-    assert params.tool_context == [], "没有真实截断工具名时不得伪造分块恢复指令"
+    resumes = [item for item in params.tool_context if "output-limit-resume" in str(item)]
+    assert len(resumes) == 1
+    for name in ("write_file", "apply_patch", "edit_file"):
+        assert name not in resumes[0], f"续跑指令不得点名工具: {name}"
 
 
 # --------------------------------------------------------------------------- #

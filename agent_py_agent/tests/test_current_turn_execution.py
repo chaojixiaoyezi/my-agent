@@ -662,3 +662,25 @@ def test_execution_facts_are_after_active_user_task(tmp_path) -> None:
     assert rendered.index("# User Task\n请保存这个偏好") < rendered.index(
         "# Current Turn Execution Facts"
     )
+
+
+# LLM: 回归（2026-09-11 真机）：label 集来自本轮的 mutation 记录，遮蔽对象只能是内部协议形状
+#   "tool/action"。裸工具名（含下划线）是用户可读的功能名，不能一起换掉——真机界面出现过
+#   "可以用 相关操作 设置" 与 "相关操作_configured: false"，正是把模型正确的回答改成了读不通的句子。
+# 函数用途: 验证裸工具名保留、tool/action 组合仍被遮蔽。
+def test_bare_tool_name_survives_protocol_label_hiding() -> None:
+    verification = {
+        "operations": [
+            {"tool": "user_config", "action": "set", "effect": "mutating", "ok": True},
+            {"tool": "write_file", "action": "executed", "effect": "mutating", "ok": True},
+        ]
+    }
+    rendered = redact_executed_operation_labels(
+        "这个键可以用 user_config 改；user_config/set 这次没有执行。",
+        verification,
+    )
+    assert "可以用 user_config 改" in rendered
+    assert "user_config/set" not in rendered
+    assert "相关操作 这次没有执行" in rendered
+    # 裸的 write_file 也必须保留（用户看得懂的功能名）。
+    assert redact_executed_operation_labels("用 write_file 落盘", verification) == "用 write_file 落盘"

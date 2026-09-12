@@ -32,7 +32,11 @@ from ..conversation.agent_control import (
     send_agent_guidance,
 )
 from ..conversation.background_transcript import read_background_transcript_events
-from ..conversation.channels import project_user_reply, redact_host_absolute_paths
+from ..conversation.channels import (
+    project_host_paths_for_channel,
+    project_user_reply,
+    redact_host_absolute_paths,
+)
 from ..conversation.control_commands import (
     ConversationControlCommand,
     ConversationControlResult,
@@ -325,14 +329,18 @@ def handle_progress(handler, server) -> None:
             {"request_id": request_id, "events": [], "next": since},
         )
         return
-    events, next_cursor = _read_public_progress_events(actual_path, since)
+    events, next_cursor = _read_public_progress_events(
+        actual_path, since, channel=_request_channel(handler)[1]
+    )
     handler._send_json(
         200,
         {"request_id": request_id, "events": events, "next": next_cursor},
     )
 
 
-def _read_public_progress_events(path, since: int) -> tuple[list[dict[str, object]], int]:
+def _read_public_progress_events(
+    path, since: int, *, channel: str = ""
+) -> tuple[list[dict[str, object]], int]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError):
@@ -348,8 +356,10 @@ def _read_public_progress_events(path, since: int) -> tuple[list[dict[str, objec
         if row.get("kind") == "assistant_commentary":
             # Model commentary is safe at every verbose level only after the
             # same user-facing projection used by final channel delivery.
-            text = redact_host_absolute_paths(
-                project_user_reply(row.get("text", "")).content
+            # 本机私有通道保留宿主绝对路径（用户要能直接复制），外部通道仍收敛成 basename。
+            text = project_host_paths_for_channel(
+                project_user_reply(row.get("text", "")).content,
+                channel,
             ).strip()
             if text:
                 events.append({"kind": "assistant_commentary", "text": text})

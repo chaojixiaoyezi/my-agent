@@ -5595,3 +5595,77 @@ def _conversation_context(agent: SimpleAgent, request: dict, request_id: str, pr
     return _gateway_conversation_context(
         _GatewayConversationLoadRequest(agent, request, request_id, prompt)
     )
+
+
+# LLM: 回归（2026-09-11 真机 + 代码路径核对）：插话回执把 expected_turn_id 当"只能由这一轮认领"的
+#   硬约束，若那一轮在认领前结束（用户在主代理收尾窗口插话），这条用户消息就永远等不到能认领它的
+#   轮次。回合终态必须释放仍未认领（pending）的回执，让它被后续轮次接手；已经进过提示的
+#   reserved/submitted 回执不能被动。
+# 函数用途: 验证回合收尾释放未认领插话、且不碰已认领回执。
+def test_finalize_gateway_response_releases_unclaimed_turn_guidance(tmp_path):
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path)
+    turn = "gwreq-turn-under-test"
+    pending = store.append_guidance_once(
+        {
+            "message": "插话：给我绝对路径",
+            "sender": "local-agent",
+            "target_type": "task",
+            "target_id": turn,
+            "priority": "high",
+            "delivery": "current_task",
+            "metadata": {
+                "kind": "active_turn_user_input",
+                "expected_turn_id": turn,
+                "conversation_id": "sess-1",
+                "channel_message_id": "steer-1",
+            },
+        },
+        dedupe_key="steer-key-1",
+    )
+    submitted = store.append_guidance_once(
+        {
+            "message": "插话：已经进了提示",
+            "sender": "local-agent",
+            "target_type": "task",
+            "target_id": turn,
+            "priority": "high",
+            "delivery": "current_task",
+            "metadata": {
+                "kind": "active_turn_user_input",
+                "expected_turn_id": turn,
+                "conversation_id": "sess-1",
+                "channel_message_id": "steer-2",
+            },
+        },
+        dedupe_key="steer-key-2",
+    )
+    assert store.claim_guidance_once_for_turn(
+        submitted, expected_turn_id=turn, attempt_id="attempt-1"
+    ) is True
+    store.mark_guidance_entries_submitted(
+        turn, [submitted], attempt_id="attempt-1", provider_call_id="call-1"
+    )
+
+    released = store.release_unclaimed_guidance_for_turn(turn)
+    assert released == 1
+
+    pending_receipt = store.guidance_once_receipt("steer-key-1")
+    submitted_receipt = store.guidance_once_receipt("steer-key-2")
+    # 释放只记在回执的 migration 上：entry metadata 参与回执/投影一致性与正文指纹，不能改。
+    assert pending_receipt.migration.get("released_turn_ids") == [turn]
+    assert str(pending_receipt.entry.metadata.get("expected_turn_id") or "") == turn
+    assert pending_receipt.status == "pending"
+    # 已认领（reserved/submitted）的回执不受释放影响。
+    assert submitted_receipt.migration.get("released_turn_ids") in (None, [])
+    assert submitted_receipt.status == "submitted"
+
+    # 释放之后，下一轮（不同 turn id）可以认领它。
+    assert store.claim_guidance_once_for_turn(
+        pending_receipt.entry, expected_turn_id="gwreq-next-turn", attempt_id="attempt-2"
+    ) is True
+    # 未释放的回执仍然拒绝跨轮认领：插话只属于当时的活动轮次。
+    assert store.claim_guidance_once_for_turn(
+        submitted_receipt.entry, expected_turn_id="gwreq-next-turn", attempt_id="attempt-3"
+    ) is False

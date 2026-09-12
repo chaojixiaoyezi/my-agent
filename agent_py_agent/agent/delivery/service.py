@@ -17,6 +17,7 @@ from ..conversation.channels import (
     DeliveryReceipt,
     ReplyEnvelope,
     leads_with_internal_signal,
+    project_host_paths_for_channel,
     project_user_reply,
     redact_delivery_context_identifiers,
     redact_host_absolute_paths,
@@ -115,7 +116,7 @@ class DeliveryService:
             return replace(receipt, delivery_status="suppressed")
         projection = project_user_reply(raw_content)
         content = redact_delivery_context_identifiers(
-            redact_host_absolute_paths(projection.content),
+            project_host_paths_for_channel(projection.content, channel),
             context,
         )
         receipt = replace(receipt, content=content)

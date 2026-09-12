@@ -168,9 +168,11 @@ def redact_executed_operation_labels(
         tool = str(operation.get("tool") or "").strip()
         action = str(operation.get("action") or "").strip()
         if tool and action:
+            # 只遮蔽内部协议形状 "tool/action"（如 write_file/executed）。裸工具名不再遮蔽：
+            # 它是用户可读的功能名，模型正常回答"你可以用 user_config 改这个值"时不该被改成
+            # "相关操作"——那会把正确回答改成无法理解的句子（2026-09-11 真机：界面上出现
+            # "可以用 相关操作 设置" 与 "相关操作_configured: false"）。
             labels.add(f"{tool}/{action}")
-        if tool and any(marker in tool for marker in ("_", "-", ".")):
-            labels.add(tool)
     projected = str(content or "")
     for label in sorted(labels, key=len, reverse=True):
         projected = projected.replace(label, "相关操作")

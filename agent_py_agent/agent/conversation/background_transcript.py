@@ -19,7 +19,12 @@ from uuid import uuid4
 
 from .agent_tool_approval import SubagentToolApprovalSinkMixin
 from .background_history import BackgroundTurnHistory
-from .channels import project_user_reply, redact_host_absolute_paths
+from .channels import (
+    project_host_paths_for_channel,
+    project_user_reply,
+    redact_host_absolute_paths,
+    thread_channel,
+)
 from .compact_progress import normalize_conversation_compact_progress
 from .display_checkpoint import DisplayCheckpointWriter
 from .tool_input_progress import ToolInputProgressSinkMixin
@@ -182,6 +187,9 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     ) -> None:
         self.agent = agent
         self.thread_id = str(thread_id or "").strip()
+        self.channel = thread_channel(
+            getattr(agent, "conversation_store", None), self.thread_id
+        )
         self.task_id = str(task_id or "").strip()
         self.gateway_request_id = gateway_request_id
         self._event_writer = event_writer if callable(event_writer) else None
@@ -270,7 +278,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     # or creates a terminal-recoverable pair when no delta was observed.
     # 函数用途: 用完整思考正文和真实耗时收口当前思考块。
     def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> bool:
-        content = public_background_transcript_text(text)
+        content = public_background_transcript_text(text, channel=self.channel)
         if not content and not self._thinking_active:
             return False
         self._ensure_thinking_started()
@@ -458,7 +466,9 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     # complete gray process block; this mirrors Gateway rich commentary and avoids final duplication.
     # 函数用途: 把工具调用前的模型说明冻结成完整灰色过程消息并登记为正式 commentary。
     def _flush_model_commentary(self) -> None:
-        content = public_background_transcript_text(self._model_text, limit=0)
+        content = public_background_transcript_text(
+            self._model_text, limit=0, channel=self.channel
+        )
         self._model_text = ""
         if not content:
             return
@@ -476,7 +486,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     # exact normalized equality is display dedupe only and never affects state.
     # 函数用途: 将子代理本轮正式回复追加到详情页；若同文已在工具前展示则跳过重复卡片。
     def _publish_final_response(self, text: str) -> None:
-        content = public_background_transcript_text(text, limit=0)
+        content = public_background_transcript_text(text, limit=0, channel=self.channel)
         if not content or content in self._committed_commentary:
             return
         self._assistant_index += 1
@@ -761,9 +771,11 @@ def read_background_transcript_events(
 # LLM: Model-authored text always passes through user projection and host-path redaction.
 # A positive limit bounds volatile thinking; zero preserves committed assistant prose intact.
 # 函数用途: 整理可公开正文；limit=0 时不做第二层字符裁剪。
-def public_background_transcript_text(value: object, *, limit: int = 12_000) -> str:
+def public_background_transcript_text(
+    value: object, *, limit: int = 12_000, channel: object = ""
+) -> str:
     projected = project_user_reply(str(value or "")).content
-    content = redact_host_absolute_paths(projected).strip()
+    content = project_host_paths_for_channel(projected, channel).strip()
     max_chars = max(0, int(limit))
     if max_chars == 0:
         return content

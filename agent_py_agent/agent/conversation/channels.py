@@ -33,6 +33,25 @@ TRANSCRIPT_DELIVERY_CHANNELS = frozenset(
 def supports_transcript_delivery(channel: str) -> bool:
     return str(channel or "").strip().lower() in TRANSCRIPT_DELIVERY_CHANNELS
 
+
+# LLM: 本机私有交互通道＝"交付正文就是给这台机器的 owner 自己看的"，文件也都在他自己盘上。
+# 这些通道必须保留可用绝对路径：用户要的是能直接粘到终端/Finder 的路径，砍成 basename 等于
+# 把模型的正确答案改成看起来错的（2026-09-11 真机：用户连问三次"要 / 开头的绝对路径"，界面
+# 始终显示 `src/`，因为出口把 `/Users/.../src/` 变成了最后一段）。外部通道（IM 等）与未知
+# 通道继续按 basename 脱敏，避免把宿主目录拓扑发给别人；判定只看通道事实，不看正文。
+# 常量用途: 声明保留宿主绝对路径的本机私有通道集合。
+LOCAL_PRIVATE_CHANNELS = frozenset(
+    {"local", "cli", "terminal", "chat", "tui", "gateway-cli"}
+)
+
+
+# 函数用途: 按通道决定正文里的宿主绝对路径是保留还是收敛成 basename。
+def project_host_paths_for_channel(text: object, channel: object) -> str:
+    if str(channel or "").strip().lower() in LOCAL_PRIVATE_CHANNELS:
+        return str(text or "")
+    return redact_host_absolute_paths(str(text or ""))
+
+
 # 内部交付/运行信号前缀:这些是出口门/调度用的结构化标记,不是给用户看的正文。
 # 真实投递服务(delivery.service)据此拦截"以记号开头"的整条回复;
 # 用户投影据此压制整条内部运行信号。
@@ -306,9 +325,25 @@ __all__ = [
     "FakeDeliveryService",
     "ReplyEnvelope",
     "TRANSCRIPT_DELIVERY_CHANNELS",
+    "LOCAL_PRIVATE_CHANNELS",
     "UserReplyProjection",
     "leads_with_internal_signal",
     "supports_transcript_delivery",
     "project_user_reply",
+    "project_host_paths_for_channel",
+    "thread_channel",
     "redact_host_absolute_paths",
 ]
+
+
+# LLM: 通道身份是会话库里的结构化事实；缺失或读失败一律返回空串，由调用方按外部通道 fail-closed。
+# 函数用途: 从会话库读取某条线程登记的通道，供出口决定宿主路径展示策略。
+def thread_channel(store: object, thread_id: object) -> str:
+    tid = str(thread_id or "").strip()
+    if store is None or not tid:
+        return ""
+    try:
+        thread = store.thread_for_task(tid)
+    except Exception:
+        return ""
+    return str(getattr(thread, "channel", "") or "").strip().lower()

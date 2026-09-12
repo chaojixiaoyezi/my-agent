@@ -152,7 +152,12 @@ def test_multiple_provider_thinking_blocks_keep_chronological_order() -> None:
     ]
 
 
-def test_begin_turn_uses_canonical_generation_and_clears_previous_todo() -> None:
+def test_begin_turn_keeps_previous_todo_and_switches_plan_on_new_snapshot() -> None:
+    """回归（2026-09-11 真机）：插话开新回合不能清掉仍在执行的计划面板。
+
+    旧行为把"每条聊天请求"当成"新的计划代次"，begin_turn 直接 pop 掉 Todo，用户在主代理
+    收尾时问一句进度，面板就永久消失。计划代次属于服务端任务账本，聊天轮次属于用户消息，
+    两者必须分开；真正的计划切换由"带内容的异代次快照"表达。"""
     runtime = TuiRuntime("session-generation")
     runtime.publish_task_progress_snapshot(
         [{"id": "old", "title": "旧任务", "status": "in_progress"}],
@@ -168,17 +173,30 @@ def test_begin_turn_uses_canonical_generation_and_clears_previous_todo() -> None
         task_progress_generation_id="gateway-new",
     )
 
-    assert not any(
-        block.role == "todo" for block in runtime.store.snapshot().active_blocks
+    # 新回合开始：面板必须还在（原缺陷就是这里被 pop 掉）。
+    todo = next(
+        block for block in runtime.store.snapshot().active_blocks if block.role == "todo"
     )
+    assert [item["id"] for item in todo.metadata["items"]] == ["old"]
+
+    # 旧代次的迟到快照仍然拒收：面板内容不变。
     runtime.publish_task_progress_snapshot(
         [{"id": "old", "title": "旧任务", "status": "done"}],
         generation_id="gateway-old",
         plan_revision=3,
     )
-    assert not any(
-        block.role == "todo" for block in runtime.store.snapshot().active_blocks
+    todo = next(
+        block for block in runtime.store.snapshot().active_blocks if block.role == "todo"
     )
+    assert [item["id"] for item in todo.metadata["items"]] == ["old"]
+
+    # 异代次的空快照（新一轮还没写计划）同样不能清掉仍在执行的计划。
+    runtime.publish_task_progress_snapshot(
+        [],
+        generation_id="gateway-new",
+        plan_revision=0,
+    )
+    assert any(block.role == "todo" for block in runtime.store.snapshot().active_blocks)
     runtime.publish_task_progress_snapshot(
         [{"id": "new", "title": "新任务", "status": "in_progress"}],
         generation_id="gateway-new",

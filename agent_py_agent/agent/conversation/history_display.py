@@ -73,8 +73,19 @@ def _turn_end_events(rows: list[object]) -> list[dict[str, object]]:
 # 函数用途: 恢复同片输入和逐块过程，保留崩溃前旧工作片；最终回复独立提交，不把模型中间快照当回复。
 def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
     request_id = f"history:{identity}"
+    # LLM: 历史回放的宿主路径策略必须与实时出口一致，且以**这条记录落账时的通道**为权威事实；
+    #   否则实时保留绝对路径、回放又砍成 basename，同一条消息在界面上前后不一致。
+    # 函数用途: 取得本组历史记录所属通道（多条时取第一条非空）。
+    channel = next(
+        (
+            str(getattr(row, "channel", "") or "").strip().lower()
+            for row in rows
+            if str(getattr(row, "channel", "") or "").strip()
+        ),
+        "",
+    )
     events = [
-        _event(request_id, f"user:{row.message_id}", "user_message", {"text": _public(row.content)})
+        _event(request_id, f"user:{row.message_id}", "user_message", {"text": _public(row.content, channel)})
         for row in rows
         if row.role == "user" and getattr(row, "content", "")
     ]
@@ -116,7 +127,7 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
     )
     earlier_prose = assistants[:max(0, len(assistants) - native_prose_count)]
     events.extend(
-        _event(request_id, f"earlier:{index}", "assistant_completed", {"text": _public(row.content)})
+        _event(request_id, f"earlier:{index}", "assistant_completed", {"text": _public(row.content, channel)})
         for index, row in enumerate(earlier_prose)
         if getattr(row, "content", "")
     )
@@ -125,7 +136,8 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
         if str(getattr(row, "metadata", {}).get("assistant_part_id") or "final") == "final"
     ), None)
     events.extend(_native_events(
-        request_id, native, final_text=_public(final.content) if final is not None else None,
+        request_id, native, channel=channel,
+        final_text=_public(final.content, channel) if final is not None else None,
     ))
     if final is not None and final.content:
         events.append(public_assistant_message_event(final))
@@ -136,13 +148,15 @@ def _turn_events(identity: str, rows: list[object]) -> list[dict[str, object]]:
 # 函数用途: 将一条已提交助手消息转换成稳定显示块，同一消息重放不再插入第二条。
 def public_assistant_message_event(row: object) -> dict[str, object]:
     request_id = f"history:{row.thread_id}:{row.message_id}"
-    return _event(request_id, "assistant", "assistant_completed", {"text": _public(row.content)})
+    return _event(request_id, "assistant", "assistant_completed", {
+        "text": _public(row.content, getattr(row, "channel", "")),
+    })
 
 
 # LLM: 原生类型是唯一映射依据；tool_result 按精确 id 配对；跳过由调用方追加的 canonical final，签名/注入/参数不透传。
 # 函数用途: 按原顺序重放灰色思考、正文与工具结果；缺失结果明确显示未知，绝不伪造成功。
 def _native_events(
-    request_id: str, messages: tuple[dict, ...], *, final_text: str | None,
+    request_id: str, messages: tuple[dict, ...], *, channel: object = "", final_text: str | None,
 ) -> list[dict[str, object]]:
     results = {
         str(block.get("tool_use_id") or ""): block
@@ -166,7 +180,7 @@ def _native_events(
         if kind == "text" and index == terminal_index and final_text is not None:
             continue
         if kind in {"text", "thinking"}:
-            text = _public(block.get("thinking" if kind == "thinking" else "text"))
+            text = _public(block.get("thinking" if kind == "thinking" else "text"), channel)
             if text:
                 events.append(_event(
                     request_id, key,
@@ -178,16 +192,16 @@ def _native_events(
             if not call_id or call_id in seen_calls:
                 continue
             seen_calls.add(call_id)
-            events.append(_tool_event(request_id, key, block, results.get(call_id)))
+            events.append(_tool_event(request_id, key, block, results.get(call_id), channel))
     return events
 
 
 # LLM: 工具终态仅由 provider-neutral is_error 布尔值表述，不从输出中的成功/失败字样反推副作用状态。
 # 函数用途: 为已保存工具结果构建同款折叠卡；无结果或无状态时生成中性的历史缺口说明。
 def _tool_event(
-    request_id: str, key: str, call: Mapping, result: Mapping | None,
+    request_id: str, key: str, call: Mapping, result: Mapping | None, channel: object = "",
 ) -> dict[str, object]:
-    name = _public(call.get("name"))
+    name = _public(call.get("name"), channel)
     if result is None or not isinstance(result.get("is_error"), bool):
         return _event(request_id, key, "system_message", {
             "text": f"{name}：已保存调用，这段历史没有完整的工具结果状态。",
@@ -203,7 +217,7 @@ def _tool_event(
     failed = result["is_error"]
     return _event(
         request_id, key, "tool_failed" if failed else "tool_completed",
-        {"tool": name, "output": _public(content), "ok": not failed},
+        {"tool": name, "output": _public(content, channel), "ok": not failed},
         phase="failed" if failed else "completed",
     )
 
@@ -219,8 +233,8 @@ def _blocks(message: Mapping) -> list[dict]:
 
 # LLM: 使用与现有 main/child transcript 相同的公开正文清洗；不截断普通回复，也不泄漏宿主绝对路径。
 # 函数用途: 清洗供前端显示的字符串，不改变原账本内容。
-def _public(value: object) -> str:
-    return public_background_transcript_text(str(value or ""), limit=0)
+def _public(value: object, channel: object = "") -> str:
+    return public_background_transcript_text(str(value or ""), limit=0, channel=channel)
 
 
 # LLM: 展示 ID 来自持久回合身份与块位置，可幂等重放；此信封没有任何控制、执行或持久化权。

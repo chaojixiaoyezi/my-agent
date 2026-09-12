@@ -65,7 +65,36 @@ class ToolLoopRepairCounters:
     empty_text_repairs: int = 0
     # R232: 截断长内容写的分块纠偏次数，和协议修复分开计数，避免互相吃掉预算。
     truncated_write_repairs: int = 0
+    # R248: 最终答复被输出上限截断后的轮内续跑次数（不重启整轮，见 _truncated_final_resume）。
+    truncated_output_repairs: int = 0
 
+
+# LLM: 截断续跑与"分块写纠偏"是两件事：前者针对最终答复被输出上限截断，后者针对工具参数被截断。
+#   分开计数，避免互相吃掉预算。
+# 函数用途: 增加一次截断续跑计数，同时保留其他修复计数。
+def _inc_truncated_output(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        protected_marker_repairs=counters.protected_marker_repairs,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        protocol_repairs=counters.protocol_repairs,
+        empty_text_repairs=counters.empty_text_repairs,
+        truncated_write_repairs=counters.truncated_write_repairs,
+        truncated_output_repairs=counters.truncated_output_repairs + 1,
+    )
+
+
+# LLM: 输出上限截断后的续跑指令照抄成熟 harness 的做法（终端交互 query.ts 的
+#   "Resume directly — no apology, no recap … break remaining work into smaller pieces"）：
+#   明确禁止道歉/复述，要求接着断点写，并把剩余工作拆小；不引入任何"关键词判合格"的机器验收。
+# 常量用途: 截断续跑回灌给模型的宿主指令。
+_TRUNCATED_OUTPUT_RESUME_LIMIT = 2
+_TRUNCATED_OUTPUT_RESUME = (
+    "[output-limit-resume]\n"
+    "上一条回复被供应商输出上限截断了，不能当作完成。请直接从被截断处接着写："
+    "不要道歉、不要复述已经写过的内容、不要总结。"
+    "把剩余工作拆成更小的块，每块做完立刻落盘或执行，再继续下一块；"
+    "需要调用工具就直接调用。本条指令不指定任何具体工具，也不假定上一轮调用了哪个工具。"
+)
 
 # LLM: repair counters 只记录真实协议修复次数，不再承载任何工作风格或检查点提醒状态。
 # 函数用途: 增加一次内部工具标记修复计数，同时保留其他错误修复计数。
@@ -76,6 +105,7 @@ def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
         protocol_repairs=counters.protocol_repairs,
         empty_text_repairs=counters.empty_text_repairs,
         truncated_write_repairs=counters.truncated_write_repairs,
+        truncated_output_repairs=counters.truncated_output_repairs,
     )
 
 
@@ -88,6 +118,7 @@ def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopR
         protocol_repairs=counters.protocol_repairs,
         empty_text_repairs=counters.empty_text_repairs,
         truncated_write_repairs=counters.truncated_write_repairs,
+        truncated_output_repairs=counters.truncated_output_repairs,
     )
 
 
@@ -98,6 +129,7 @@ def _inc_protocol(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
         protocol_repairs=counters.protocol_repairs + 1,
         empty_text_repairs=counters.empty_text_repairs,
         truncated_write_repairs=counters.truncated_write_repairs,
+        truncated_output_repairs=counters.truncated_output_repairs,
     )
 
 
@@ -110,6 +142,7 @@ def _inc_truncated_write(counters: ToolLoopRepairCounters) -> ToolLoopRepairCoun
         protocol_repairs=counters.protocol_repairs,
         empty_text_repairs=counters.empty_text_repairs,
         truncated_write_repairs=counters.truncated_write_repairs + 1,
+        truncated_output_repairs=counters.truncated_output_repairs,
     )
 
 
@@ -123,6 +156,7 @@ def _inc_empty_text(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
         protocol_repairs=counters.protocol_repairs,
         empty_text_repairs=counters.empty_text_repairs + 1,
         truncated_write_repairs=counters.truncated_write_repairs,
+        truncated_output_repairs=counters.truncated_output_repairs,
     )
 
 
@@ -748,8 +782,16 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             request.params.tool_context.append(deliverable_block)
             return ToolLoopResponseDecision("continue", None, [], request.counters)
         if bool(getattr(final_response, "truncated", False)):
-            # EXEC-05 长任务真机: 最终答复被供应商输出上限截断(max_tokens/length)
-            # 不能当作完成交付——标记 unfinished, CLI RC=2, 用户可续跑补全。
+            # EXEC-05 长任务真机: 最终答复被供应商输出上限截断(max_tokens/length)不能当作完成交付。
+            # R248(2026-09-11 真机): 原来只标记 unfinished 就收口，恢复靠**管理器重启整个 runner 轮次**，
+            #   于是同一策略原地打转——两个子代理各被截断 3/4 次、重启 4/5 个 attempt、耗掉 35 分钟才
+            #   碰巧跑完。这里改成轮内续跑：先把断点续写指令回灌，同一个 run 再走一轮；超限才按
+            #   unfinished 收口，让上游按既有恢复路径处理。
+            if request.counters.truncated_output_repairs < _TRUNCATED_OUTPUT_RESUME_LIMIT:
+                request.params.tool_context.append(_TRUNCATED_OUTPUT_RESUME)
+                return ToolLoopResponseDecision(
+                    "continue", None, [], _inc_truncated_output(request.counters)
+                )
             final_response = replace(
                 final_response,
                 runtime_status="unfinished",

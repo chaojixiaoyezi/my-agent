@@ -99,6 +99,7 @@ from .subagents.manager import SubAgentManager
 from .tooling.computer_use_profile import computer_use_mcp_servers
 from .tooling.gateway_status import GatewayStatusTool
 from .tooling.registry import ToolRegistry, ToolRegistryParams
+from .tooling.user_config_tool import UserConfigTool
 from .user_space.home_indexes import register_owner_ref
 from .user_space.home_layout import ensure_my_agent_home
 from .user_space.home_root import configured_home_root
@@ -963,6 +964,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 不注册这项能力，从工具快照源头避免跨用户泄露。
     if str(getattr(agent.tools, "owner_type", "") or "") == "main_agent":
         agent.tools.register(GatewayStatusTool(agent))
+        # 用户级配置的受控入口：读生效值/来源，改白名单项；安全边界不可写。
+        # 真机问题：用户问"能不能改 compact 阈值"，模型没有任何入口，只能凭空答"我没权限"。
+        agent.tools.register(UserConfigTool(agent))
     agent.tools.register(CapabilityRequestTool(agent))
     agent.tools.register(TaskProgressTool(agent))
     agent.tools.register(GetGoalTool(agent))

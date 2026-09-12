@@ -3210,8 +3210,14 @@ class ConversationGuidanceStore(ConversationObservationStore):
                 receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
             )
             receipt_turn_id = str(receipt_metadata.get("expected_turn_id") or "").strip()
-            if receipt_turn_id and receipt_turn_id != str(expected_turn_id or "").strip():
-                return False
+            requested_turn_id = str(expected_turn_id or "").strip()
+            if receipt_turn_id and receipt_turn_id != requested_turn_id:
+                # 例外只有一种：那一轮在认领前就结束了，回合终态已把回执标记为"释放"。
+                # 未被释放的回执仍然拒绝跨轮认领（保持"插话只属于当时的活动轮次"）。
+                released = receipt.migration.get("released_turn_ids")
+                released_ids = released if isinstance(released, list) else []
+                if receipt_turn_id not in {str(item or "").strip() for item in released_ids}:
+                    return False
             if receipt.status != "pending":
                 return False
             normalized_attempt_id = str(attempt_id or "").strip()
@@ -4202,6 +4208,66 @@ class ConversationGuidanceStore(ConversationObservationStore):
     # LLM: This projection is repaired whenever an active receipt is opened. Terminalization can
     # therefore inspect only one exact turn; corrupt refs are isolated to that turn.
     # 函数用途: 为活动补充回执写入一个按回合分桶的小索引引用。
+    # LLM: 插话回执把 expected_turn_id 当"只能由这一轮认领"的硬约束。若那一轮在认领前就结束
+    #   （用户在主代理收尾窗口里插话就会这样），这条插话永远等不到能认领它的轮次——用户看到的
+    #   就是"我插了话，没人回"。这里在轮次终态时只松开**尚未被认领**（status=pending）的回执，
+    #   让下一轮可以认领；已 reserved/submitted 的回执不动（那些已经进了提示，模型见过）。
+    #   只改结构化字段与索引，不读正文、不改交付状态。
+    # 函数用途: 回合结束时释放仍未被任何轮次认领的补充消息，使其可被后续轮次接手。
+    def release_unclaimed_guidance_for_turn(self, turn_id: str) -> int:
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return 0
+        bucket = self.guidance_turn_index_dir / hashlib.sha256(
+            normalized.encode("utf-8")
+        ).hexdigest()
+        if not bucket.is_dir():
+            return 0
+        released = 0
+        for path in sorted(bucket.glob("*.json")):
+            try:
+                report = read_json_file_report(
+                    path, context="conversation.guidance_turn_index.read"
+                )
+                payload = report.payload
+                if report.load_error is not None or not payload:
+                    continue
+                dedupe_key = str(payload.get("dedupe_key") or "").strip()
+                if not dedupe_key or str(payload.get("expected_turn_id") or "") != normalized:
+                    continue
+                receipt_path = self._guidance_dedupe_path(dedupe_key)
+                transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+                with locked_file_transition(transition):
+                    receipt = self._read_guidance_once_receipt(receipt_path)
+                    if receipt is None or receipt.status != "pending":
+                        continue
+                    metadata = (
+                        receipt.entry.metadata
+                        if isinstance(receipt.entry.metadata, dict)
+                        else {}
+                    )
+                    if str(metadata.get("expected_turn_id") or "").strip() != normalized:
+                        continue
+                    # entry.metadata 参与回执行/投影一致性校验与正文指纹，这里一个字都不改；
+                    # 释放只记在回执自己的 migration 上（receipt 级字段，不进 entry）。
+                    migration = dict(receipt.migration)
+                    released_ids = list(migration.get("released_turn_ids") or [])
+                    if normalized not in released_ids:
+                        released_ids.append(normalized)
+                    migration["released_turn_ids"] = released_ids[-20:]
+                    updated = replace(
+                        receipt,
+                        updated_at=time.time(),
+                        migration=migration,
+                    )
+                    write_json_file_atomic(receipt_path, updated.to_dict())
+                    released += 1
+                _unlink_quietly(path)
+            except Exception:
+                # 释放是兜底恢复动作：单条损坏不能打断回合收口，也不能影响其他插话。
+                continue
+        return released
+
     def _ensure_guidance_turn_receipt_index(self, receipt: GuidanceOnceReceipt) -> None:
         metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
         turn_id = str(metadata.get("expected_turn_id") or "").strip()

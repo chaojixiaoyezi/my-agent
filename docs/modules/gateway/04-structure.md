@@ -1,5 +1,17 @@
 # Gateway Structure
 
+## R249/R248 出口投影与插话归属
+
+`conversation.channels.project_host_paths_for_channel` 是"正文里的宿主绝对路径要不要保留"的唯一判定：
+只读通道事实（本机私有通道保留，外部/未知收敛成 basename），不解析正文。Gateway 的流式 writer、
+交付投影、commentary 落账、HTTP commentary 回放与投递服务都调用它；`thread_channel` 从会话库读取
+持久通道事实。
+`ConversationStore.release_unclaimed_guidance_for_turn` 只改回执级 `migration.released_turn_ids`，
+不动 entry metadata（它参与回执/投影一致性与正文指纹）；`claim_guidance_once_for_turn` 仅对已释放的
+回执允许跨轮认领。
+`tooling.operation_verification.redact_executed_operation_labels` 只遮蔽 `tool/action` 组合，裸工具名
+属于用户可读功能名，不遮蔽。
+
 ## R229 错误与显示边界
 
 `request_errors.gateway_client_error_message` 只按结构化错误码选择文案，PROVIDER_REQUEST_REJECTED

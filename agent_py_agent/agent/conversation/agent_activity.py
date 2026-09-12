@@ -456,9 +456,7 @@ def conversation_agent_activity(
         preferred_task_id=_conversation_workspace_task_id(store, thread_id),
         hidden_item_ids=_row_run_ids(rows),
     )
-    # 已结束任务仍保留子代理名册供进入查看，但不再把模型未勾选的旧 Todo 画成“正在做”。
-    # 空快照沿用同一 generation/revision，TUI 可精确收起面板而不改写持久账本。
-    if display_links and all(_task_link_is_inactive(link) for link in display_links):
+    if _todo_panel_should_collapse(display_links, rows):
         progress_items = ()
     visible = rows[:_MAX_PROJECTED_SUBAGENTS]
     return ConversationAgentActivity(
@@ -489,6 +487,21 @@ def conversation_agent_activity(
                 )
             )
         ),
+    )
+
+
+# LLM: 已结束任务仍保留子代理名册供进入查看，但不再把模型未勾选的旧 Todo 画成"正在做"：
+#   只有在**这个任务确实没有在跑的子代理**时才收起面板。链接结束 ≠ 计划结束——用户在主代理收尾时
+#   插话问进度，该轮 link 会立刻变非活跃，但子代理还在跑；若此时收起面板，用户看到的就是"计划消失了"
+#   （2026-09-11 真机）。渲染器已有 active_execution/"待继续"表达"不闪动"，不需要靠清空面板表达。
+#   判据只看结构化行状态，不读正文。
+# 函数用途: 判断 Todo 面板是否应当收起（全部展示链接终态且没有在跑的子代理）。
+def _todo_panel_should_collapse(display_links: list[object], rows: list[dict[str, object]]) -> bool:
+    if not display_links or not all(_task_link_is_inactive(link) for link in display_links):
+        return False
+    return not any(
+        str(row.get("status") or "").strip().upper() not in SUBAGENT_ENDED_STATUSES
+        for row in rows
     )
 
 
