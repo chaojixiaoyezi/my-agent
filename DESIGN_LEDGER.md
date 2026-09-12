@@ -83,8 +83,20 @@ read_file /private/tmp 与 /tmp 均 PATH_OWNER_SCOPE_BLOCKED（只能靠 run_com
 | ③ 逐次授权下发 | `registry_invoke._request_local_tool_for_invocation` | 只下发 `workspace_root`/`workspace_roots`，没有下发"墙外已授权根" | 新增 `_granted_external_work_roots()`，从 `write_boundary` 派生并写入 handler |
 
 **同一概念在四处各有一份墙**（中央路径门 / 账本作用域 / 文件工具策略 / shell 沙箱），而"用户声明的工作目录"
-只打通了其中一部分——这正是"一个概念一个权威位置"被破坏后的典型形态。①③ 已按同一权威收敛；
-shell 沙箱的 `COMMAND_ACCESS_DENIED: 当前 owner 只能在自己的 WorkspaceOnly 范围内执行命令` 仍需单独处理。
+只打通了其中一部分——这正是"一个概念一个权威位置"被破坏后的典型形态。①②③ 已按同一权威收敛；
+④（命令工作目录）也已按同一规则修好：`ShellTool` 增加 `granted_external_roots`，命中宿主授权根时按无墙策略复核。
+
+**真机验收（部署 r251 后实测，不是单测结论）**：
+
+| 场景 | 修前 | 修后（r251 实测） |
+|---|---|---|
+| 子代理 write_file 写墙外声明目录 | `WRITE_FORBIDDEN`，文件不存在 | 文件落盘且内容正确，子代理 DONE（14 秒） |
+| 子代理 read_file / list_files 读该目录 | `TOOL_INVALID_ARGUMENTS`（错误码错标） | 正常读回，哈希与写入一致 |
+| 子代理 run_command 在该目录执行 | `COMMAND_ACCESS_DENIED: 当前 owner 只能在自己的 WorkspaceOnly 范围内执行命令` | `pwd` 输出 `/private/tmp/ma-eval/deadlock-testA`，23 秒 DONE |
+
+**同一概念在四处各有一份墙**（中央路径门 / 账本作用域 / 文件工具策略 / shell 命令目录）——这句话是本轮最值得记住的结论：
+"用户显式声明的 --workspace" 只要漏掉其中一处，就会表现成"模型只读不写 / 写了不落盘"这种看起来像模型能力问题的现象。
+以后再遇到同类现象，先按这四处逐一核对，不要先怀疑模型。
 
 **顺手修掉的两处 HEAD 红测试 + 一处真缺陷（都不是本轮引入）**：
 - `test_rg_python_common_contract_parity` 三次跑必挂——根因是 `rg` 走并行遍历，命中顺序在多次运行之间会变，
