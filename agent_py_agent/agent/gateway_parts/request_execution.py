@@ -5,7 +5,7 @@
 # request rejection projects only its validated HTTP status, never private response bodies.
 # Canonical final and its delayed repair preserve the same host-owned turn-end and native data.
 # 前台 chunk 同步更新已有 owner/thread main 标量和公开过程；完整显示快照随 canonical final/repair 保存，不进入模型缓存。
-# 模块用途: 执行网关请求并恢复真实回合；保存原正文及结束原因，延迟补交不能把被截断的回复显示成完整成功。
+# 模块用途: 执行网关请求并恢复真实回合；保存原正文及结束原因，输出截断和坏工具参数不能显示成完整成功。
 from __future__ import annotations
 
 """execution helpers keep one claimed gateway request inside focused contexts.
@@ -134,7 +134,7 @@ from .request_errors import (
     ConversationPersistenceError,
     SystemCommandRoutingError,
     UserReplyUnavailableError,
-    gateway_empty_model_response_projection,
+    gateway_model_response_error_projection,
     gateway_request_load_error_response,
 )
 from .response_renderer import is_silent_user_stop
@@ -1138,8 +1138,8 @@ def _build_gateway_response_base(context: _GatewayResponseBaseContext) -> dict:
     }
 
 
-# LLM: Gateway 对外 response 只放 user-facing projection；模型 token 只转发结构化账本，空正文截断保持 typed 终态而非正常完成。
-# 函数用途: 整理最终响应；输出上限结束本轮等待并给出准确原因，不改变已有工作或自动重跑。
+# LLM: Gateway 对外 response 只放 user-facing projection；模型 token 只转发结构化账本，供应商错误和空正文截断保持 typed 终态。
+# 函数用途: 整理最终响应；模型未完整返回时结束本轮等待并给出准确原因，不改变已有工作或自动重跑。
 def _update_response_from_result(response: dict, result, request: dict) -> None:
     channel_delivery = dict(getattr(result, "channel_delivery", {}) or {})
     public_delivery = _public_channel_delivery(channel_delivery)
@@ -1212,7 +1212,7 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "channel_delivery": public_delivery,
         }
     )
-    response.update(gateway_empty_model_response_projection(result))
+    response.update(gateway_model_response_error_projection(result))
 
 
 # LLM: Gateway 客户端不需要服务器 path；跨轮复用引用只进 owner transcript metadata，不进公开响应。
@@ -1752,7 +1752,7 @@ def _gateway_request_is_active_turn_recovery(request: object, request_id: str) -
     return str(row.get("priority") or "").strip().lower() == "recovery" and requeued_at > 0
 
 
-# LLM: 把实际模型回复、native IR 和 typed 结束原因作为同一 final 提交；空正文截断仍保留元数据，写失败保存相同 repair，不重做模型。
+# LLM: 把实际模型回复、native IR 和 typed 结束原因作为同一 final 提交；空正文截断或模型错误仍保留元数据，写失败保存相同 repair，不重做模型。
 # 函数用途: 保存主代理回复、技术原因和同片公开过程；空正文只记终态，不把思考或技术提示伪造成模型答复。
 def _persist_gateway_assistant_result(
     context: _GatewayAskRunContext,
@@ -1769,7 +1769,7 @@ def _persist_gateway_assistant_result(
     delivery_projection = project_user_reply(str(getattr(result, "response", "") or ""))
     if delivery_projection.internal_signal:
         raise UserReplyUnavailableError("任务只返回了运行时内部信号，没有生成可交付给用户的回复")
-    if not delivery_projection.content and not gateway_empty_model_response_projection(result):
+    if not delivery_projection.content and not gateway_model_response_error_projection(result):
         raise UserReplyUnavailableError("模型没有生成可安全交付的自然回复")
     channel_delivery = delivery_projection.to_dict()
     public_content = redact_structured_identifiers(
@@ -3796,7 +3796,7 @@ def _latest_conversation_messages(
 # LLM: Assistant prose, artifacts, operation facts, and one immutable terminal tool fold are
 # persisted in separate fields. The public body must stay unchanged while later model turns may
 # consume the bounded fold from metadata.
-# 函数用途: 幂等追加 Gateway 消息；空正文截断也落 final 元数据以保留工具历史，不生成替代正文。
+# 函数用途: 幂等追加 Gateway 消息；空正文截断或模型错误也落 final 元数据以保留工具历史，不生成替代正文。
 def _append_gateway_conversation_message(
     agent: SimpleAgent,
     request: dict,
@@ -3813,7 +3813,7 @@ def _append_gateway_conversation_message(
 ) -> bool:
     empty_terminal = (
         role == "assistant" and assistant_part_id == "final"
-        and assistant_turn is not None and assistant_turn.end_reason == "max-tokens"
+        and assistant_turn is not None and assistant_turn.end_reason in {"max-tokens", "error"}
     )
     if not conversation.thread_id or (not content and not empty_terminal):
         return not conversation.thread_id
@@ -3893,7 +3893,7 @@ def _append_gateway_conversation_message(
 
 # LLM: Delayed repair preserves the same canonical request identity, sanitized body, artifacts,
 # operation facts, terminal native messages and turn-end reason as normal append; no repair may lose history.
-# 函数用途: 暂时写失败时保存与正常路径一致的消息和结束原因，包括空正文截断；补交只写原结果、不再次执行任务。
+# 函数用途: 暂时写失败时保存与正常路径一致的消息和结束原因，包括空正文截断或模型错误；补交只写原结果、不再次执行任务。
 def _queue_gateway_conversation_repair(
     agent: SimpleAgent,
     request: dict,
@@ -3912,7 +3912,7 @@ def _queue_gateway_conversation_repair(
     root = getattr(store, "root", None)
     empty_terminal = (
         role == "assistant" and assistant_part_id == "final"
-        and assistant_turn is not None and assistant_turn.end_reason == "max-tokens"
+        and assistant_turn is not None and assistant_turn.end_reason in {"max-tokens", "error"}
     )
     if not root or not conversation.thread_id or (not content and not empty_terminal):
         return

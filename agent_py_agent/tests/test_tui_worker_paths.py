@@ -261,12 +261,12 @@ def test_length_notice_does_not_parse_response_or_override_explicit_completion()
 
 def test_empty_truncated_reply_ends_working_without_fake_assistant_body():
     from agent_py_agent.agent.gateway_parts.request_errors import (
-        gateway_empty_model_response_projection,
+        gateway_model_response_error_projection,
     )
 
     ctx, runtime = _context()
     adapter = runtime.begin_turn("empty-truncated")
-    response = gateway_empty_model_response_projection(SimpleNamespace(
+    response = gateway_model_response_error_projection(SimpleNamespace(
         response="", runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
     ))
     text, recorded, summary = _gateway_outcome(ctx, response)
@@ -277,6 +277,28 @@ def test_empty_truncated_reply_ends_working_without_fake_assistant_body():
     assert not snapshot.has_active_work
     assert not any(block.role == "assistant" for block in snapshot.stable_blocks)
     assert any("已有工具操作和历史保留" in block.text for block in snapshot.stable_blocks)
+
+
+def test_provider_tool_argument_error_preserves_public_body_and_stops_working():
+    from agent_py_agent.agent.gateway_parts.request_errors import (
+        gateway_model_response_error_projection,
+    )
+
+    ctx, runtime = _context()
+    adapter = runtime.begin_turn("tool-argument-error")
+    adapter.write_model("已读取本地记录。")
+    response = dict(response="已读取本地记录。", runtime_status="error",
+                    runtime_reason="MODEL_TOOL_ARGUMENTS_INVALID", runtime_source="model_provider",
+                    turn_end_reason="error")
+    response.update(gateway_model_response_error_projection(response))
+    text, recorded, summary = _gateway_outcome(ctx, response)
+    assert text == "已读取本地记录。" and not recorded and not summary.ok
+    assert "参数不完整或格式无效" in summary.error
+    adapter.finalize(summary)
+    snapshot = runtime.store.snapshot()
+    assert not snapshot.has_active_work
+    assert sum(block.role == "assistant" and block.text == text for block in snapshot.stable_blocks) == 1
+    assert any("本次调用未执行" in block.text for block in snapshot.stable_blocks)
 
 
 def test_gateway_outcome_without_typed_code_uses_safe_generic_error() -> None:

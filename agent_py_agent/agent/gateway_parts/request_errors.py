@@ -5,6 +5,7 @@ from __future__ import annotations
 """Shared gateway request error response builders."""
 
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from ..backends.errors import ProviderRequestRejectedError, provider_error_http_status
@@ -50,6 +51,11 @@ def gateway_client_error_message(error_code: object) -> str:
         "MODEL_RESPONSE_TRUNCATED": (
             "本次模型输出达到上限，尚未形成完整正文；已有工具操作和历史保留。"
         ),
+        "MODEL_TOOL_ARGUMENTS_INVALID": (
+            "模型返回的工具调用参数不完整或格式无效，本次调用未执行，本轮已停止；已有工具操作和历史保留。"
+        ),
+        "MODEL_STREAM_INCOMPLETE": "模型响应流未完整结束，本轮已停止；已有工具操作和历史保留。",
+        "MODEL_RESPONSE_CONTENT_FILTERED": "模型服务过滤了本次响应，本轮已停止；已有工具操作和历史保留。",
         "PROVIDER_REQUEST_REJECTED": (
             "模型服务拒绝了本次请求，本轮已停止。具体原因请查看请求诊断；此前已执行的工作不会因此撤销。"
         ),
@@ -76,25 +82,35 @@ def gateway_client_error_message(error_code: object) -> str:
             "请查看运行诊断后再恢复。"
         ),
     }
-    return messages.get(code, "任务处理失败，请稍后重试；如持续失败，请查看运行诊断。")
+    if code in messages:
+        return messages[code]
+    if code.startswith("MODEL_"):
+        return "模型本轮响应未完成，具体原因请查看请求诊断；已有工具操作和历史保留。"
+    return "任务处理失败，请稍后重试；如持续失败，请查看运行诊断。"
 
 
-# LLM: 只投影宿主结果中 unfinished + MODEL_RESPONSE_TRUNCATED + max-tokens 的空正文；显式完成优先，不解析思考或启动重试。
-# 函数用途: 避免空正文检查吞掉供应商已报告的输出上限，保持本轮失败与任务已有工作分开。
-def gateway_empty_model_response_projection(result: object) -> dict:
-    if (
-        str(getattr(result, "response", "") or "").strip()
-        or str(getattr(result, "runtime_status", "") or "") != "unfinished"
-        or str(getattr(result, "runtime_reason", "") or "") != "MODEL_RESPONSE_TRUNCATED"
-        or result_turn_end_reason(result) != "max-tokens"
-    ):
+# LLM: 只投影宿主 typed provider error 或空正文截断；显式完成优先，不解析正文/思考、不修改结果或启动重试。
+# 函数用途: 防止模型有半句正文就掩盖坏工具参数等错误；保留本轮真实技术终态，不否认已有工作。
+def gateway_model_response_error_projection(result: object) -> dict:
+    field = result.get if isinstance(result, Mapping) else lambda key: getattr(result, key, "")
+    status, code = field("runtime_status"), str(field("runtime_reason") or "")
+    end = result_turn_end_reason(result)
+    empty_truncated = (
+        not str(field("response") or "").strip() and status == "unfinished"
+        and code == "MODEL_RESPONSE_TRUNCATED" and end == "max-tokens"
+    )
+    provider_error = (
+        status == "error" and end == "error" and code.startswith("MODEL_")
+        and field("runtime_source") == "model_provider"
+    )
+    if not (empty_truncated or provider_error):
         return {}
     return {
         "ok": False,
         "status": "failed",
-        "error_code": "MODEL_RESPONSE_TRUNCATED",
-        "turn_end_reason": "max-tokens",
-        "user_error": gateway_client_error_message("MODEL_RESPONSE_TRUNCATED"),
+        "error_code": code,
+        "turn_end_reason": end,
+        "user_error": gateway_client_error_message(code),
     }
 
 

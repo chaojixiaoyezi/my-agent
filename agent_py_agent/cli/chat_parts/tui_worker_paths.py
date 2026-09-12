@@ -116,8 +116,8 @@ def _gateway_timeout(cfg: Any) -> float:
     return float(cfg.agent.config.gateway_request_timeout)
 
 
-# LLM: Gateway ok 只表示交付成功；typed max-tokens 仍是未完整响应。保留实际正文并显示原因，silent stop 不落正文。
-# 函数用途: 把 Gateway response 转为统一终态，防止半句话被当作正常答完。
+# LLM: Gateway typed provider error 保留已安全投影正文，技术错误另列；max-tokens 仍非完整回复，silent stop 不落正文。
+# 函数用途: 把 Gateway response 转为统一终态；不把坏工具参数前的半句话当正常完成，也不丢掉该段正文。
 def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, TuiTurnSummary]:
     from ...agent.gateway_parts.response_renderer import (
         current_context_token_estimate,
@@ -134,13 +134,17 @@ def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, Tui
             + "\n===== RESPONSE ====="
         )
     if not response.get("ok"):
-        from ...agent.gateway_parts.request_errors import gateway_client_error_message
+        from ...agent.gateway_parts.request_errors import (
+            gateway_client_error_message,
+            gateway_model_response_error_projection,
+        )
 
         error = str(
             response.get("user_error")
             or gateway_client_error_message(response.get("error_code"))
         )
-        return "", False, TuiTurnSummary(ok=False, error=error)
+        text = str(response.get("response") or "") if gateway_model_response_error_projection(response) else ""
+        return text, False, TuiTurnSummary(response_text=text, ok=False, error=error)
     text = str(response.get("response") or "")
     context_tokens = current_context_token_estimate(response)
     with ctx.cfg.state_lock:

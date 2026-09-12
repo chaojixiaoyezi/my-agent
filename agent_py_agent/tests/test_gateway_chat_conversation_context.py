@@ -343,7 +343,11 @@ def test_named_audit_projects_durable_task_deadline_into_current_run(tmp_path):
 @pytest.mark.parametrize("deferred", [False, True])
 @pytest.mark.parametrize("rich", [False, True])
 @pytest.mark.parametrize("body", ["接下来修改", ""])
-def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, monkeypatch, deferred, rich, body):
+@pytest.mark.parametrize("status,reason,end", [
+    ("unfinished", "MODEL_RESPONSE_TRUNCATED", "max-tokens"),
+    ("error", "MODEL_TOOL_ARGUMENTS_INVALID", "error"),
+])
+def test_gateway_final_persists_typed_model_failure_including_repair(tmp_path, monkeypatch, deferred, rich, body, status, reason, end):
     from agent_py_agent.agent.gateway_parts import request_execution as module
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=False), tmp_path)
@@ -365,7 +369,7 @@ def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, m
         if body:
             context.on_chunk.write_model(body)
     result = SimpleNamespace(
-        response=body, runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
+        response=body, runtime_status=status, runtime_reason=reason, runtime_source="model_provider",
         assistant_commentary_messages=["我在核对现有代码"],
         canonical_native_messages=[{"role": "assistant", "content": body or [{"type": "thinking", "thinking": "尚未完成"}]}],
     )
@@ -390,7 +394,7 @@ def test_gateway_final_persists_typed_length_reason_including_repair(tmp_path, m
     rows = store.recent_messages(thread.thread_id, limit=0)
     assert [row.content for row in rows] == ["我在核对现有代码", body]
     assert "turn_end_reason" not in rows[0].metadata
-    assert rows[-1].metadata["turn_end_reason"] == "max-tokens"
+    assert rows[-1].metadata["turn_end_reason"] == end
     assert rows[-1].metadata["canonical_native_messages"]["messages"] == result.canonical_native_messages
     from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
 

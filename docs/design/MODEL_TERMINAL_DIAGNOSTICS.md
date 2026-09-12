@@ -1,4 +1,4 @@
-# 模型空正文截断的终态诊断
+# 模型不完整响应的终态诊断
 
 ## 问题与边界
 
@@ -9,7 +9,7 @@
 ## 对照与实现
 
 - 对照本机 会话运行时 `会话运行时-rs/core/src/session/turn.rs` 的 `ResponseEvent::Completed` 分支：原始模型响应完成、用量记账、是否存在最后正文与后续执行是分开的结构化事实。这里适配已有 `AgentRunResult` 与 `turn_end`，不照搬另一个控制循环。
-- `request_errors.gateway_empty_model_response_projection` 只接受空正文、`runtime_status=unfinished`、`runtime_reason=MODEL_RESPONSE_TRUNCATED` 且归一化结束原因为 `max-tokens` 的组合。显式 `completed` 不会被推断覆盖，其他错误和普通空回复保持原处理。
+- `request_errors.gateway_model_response_error_projection` 接受空正文、`runtime_status=unfinished`、`runtime_reason=MODEL_RESPONSE_TRUNCATED` 且结束原因为 `max-tokens` 的组合；也接受 `runtime_source=model_provider`、`runtime_status=error`、`turn_end_reason=error`、`MODEL_*` 原因码的运行结果。显式 `completed` 不会被推断覆盖，工具权限等非模型错误和普通空回复保持原处理。
 - `request_execution` 将该空正文 final 按原请求 ID 幂等落账：正文仍为空，保留原生消息、工具结果、显示快照与结束原因。落账失败仍走原有相同 payload 的延迟补交，不重新调用模型。
 - 请求完成装配后返回 `ok=false / status=failed / error_code=MODEL_RESPONSE_TRUNCATED`，同时保留 `runtime_status=unfinished`、供应商来源、工具轮数与 `turn_end_reason=max-tokens`。`failed` 是本次请求生命周期终态，不是整项任务未做任何工作的判定；已有排队/Working 收口不变。
 - 用户看到的技术提示是“本次模型输出达到上限，尚未形成完整正文；已有工具操作和历史保留。”提示只作为系统错误展示，不放进模型正文；空正文不会作为 IM 回复内容。有部分正文的既有截断路径保持原样。
@@ -19,3 +19,9 @@
 定向回归覆盖：空正文截断完整通过 Gateway 运行结果、原生历史落账、请求终态提交；一轮只调用一次模拟模型；有正文截断与空正文截断分别覆盖普通和 rich transcript、立即落账和延迟 repair；工具结果可从 canonical native 历史还原；普通空正文和显式完成不被误分类；TUI 复用已有错误事件显示提示、结束 Working，不添加伪造或空白助手回复。
 
 验收不运行原业务任务。真实 TUI 验收由集成方使用无害本地任务进行，不能把上述离线回归当作已完成真实模型测试。
+
+## 有正文但工具协议失败
+
+模型可能先写出简短正文，再返回不完整或格式无效的工具参数。后端会将整组未完成工具调用隔离为零执行，并提供 `MODEL_TOOL_ARGUMENTS_INVALID / error`。原 Gateway 只要正文非空就返回 `ok=true / done`，TUI 又只识别长度上限，因此用户看到半句正文后空闲，以为任务仍将继续。
+
+此类结果现在按原结构化错误投影为本轮 `failed`，提示“模型返回的工具调用参数不完整或格式无效，本次调用未执行，本轮已停止；已有工具操作和历史保留。”真实正文与原生历史保持原样；TUI 先显示已有正文，再显示单独错误并关闭 Working。断流、响应过滤以及新增的 `MODEL_*` 供应商错误同样保留原错误码，不猜成配置、密钥或额度问题。没有改动参数解析器、重构缺失参数、执行残缺调用或增加自动续跑。

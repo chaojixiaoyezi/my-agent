@@ -85,14 +85,19 @@ def test_empty_reply_projection_never_guesses_truncation(override):
     from types import SimpleNamespace
 
     from agent_py_agent.agent.gateway_parts.request_errors import (
-        gateway_empty_model_response_projection,
+        gateway_model_response_error_projection,
     )
 
     fields = dict(response="", runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED")
-    assert gateway_empty_model_response_projection(SimpleNamespace(**(fields | override))) == {}
+    assert gateway_model_response_error_projection(SimpleNamespace(**(fields | override))) == {}
 
 
-def test_empty_truncated_reply_keeps_typed_terminal_and_native_history(tmp_path, monkeypatch):
+@pytest.mark.parametrize("body,status,reason,end", [
+    ("", "unfinished", "MODEL_RESPONSE_TRUNCATED", "max-tokens"),
+    ("已读取记录，接下来整理。", "error", "MODEL_TOOL_ARGUMENTS_INVALID", "error"),
+    ("", "error", "MODEL_TOOL_ARGUMENTS_INVALID", "error"),
+])
+def test_model_failure_keeps_typed_terminal_and_native_history(tmp_path, monkeypatch, body, status, reason, end):
     from agent_py_agent.agent.agent_core.models import AgentRunResult
     from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
 
@@ -115,9 +120,9 @@ def test_empty_truncated_reply_keeps_typed_terminal_and_native_history(tmp_path,
     def run(*_args, **_kwargs):
         calls.append(1)
         return AgentRunResult(
-            prompt="", response="", backend="echo", used_memories=0, tool_rounds=1,
-            runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
-            runtime_source="model_provider", turn_end_reason="max-tokens",
+            prompt="", response=body, backend="echo", used_memories=0, tool_rounds=1,
+            runtime_status=status, runtime_reason=reason,
+            runtime_source="model_provider", turn_end_reason=end,
             canonical_native_messages=native,
         )
 
@@ -125,18 +130,21 @@ def test_empty_truncated_reply_keeps_typed_terminal_and_native_history(tmp_path,
     response = _handle_gateway_request(agent, request_path)
     assert calls == [1], response.get("error")
     assert response["ok"] is False and response["status"] == "failed"
-    assert response["error_code"] == "MODEL_RESPONSE_TRUNCATED"
-    assert response["runtime_status"] == "unfinished"
+    assert response["error_code"] == reason
+    assert response["runtime_status"] == status
     assert response["runtime_source"] == "model_provider"
-    assert response["turn_end_reason"] == "max-tokens"
-    assert response["response"] == response["channel_delivery"]["content"] == ""
+    assert response["turn_end_reason"] == end
+    assert response["response"] == response["channel_delivery"]["content"] == body
     assert response["tool_rounds"] == 1
-    assert response["user_error"] == "本次模型输出达到上限，尚未形成完整正文；已有工具操作和历史保留。"
+    assert "已有工具操作和历史保留" in response["user_error"]
+    if reason == "MODEL_TOOL_ARGUMENTS_INVALID":
+        assert "参数不完整或格式无效" in response["user_error"]
+        assert "本次调用未执行" in response["user_error"]
     assert "任务处理失败" not in response["user_error"]
     thread = agent.conversation_store.list_threads()[0]
     rows = agent.conversation_store.recent_messages(thread.thread_id, limit=0)
-    assert rows[-1].role == "assistant" and rows[-1].content == ""
-    assert rows[-1].metadata["turn_end_reason"] == "max-tokens"
+    assert rows[-1].role == "assistant" and rows[-1].content == body
+    assert rows[-1].metadata["turn_end_reason"] == end
     assert list(provider_history_messages_from_rows(rows)) == native
     _finish_claimed_gateway_request(
         paths, request_path, request_id, response, conversation_store=agent.conversation_store,
@@ -144,7 +152,23 @@ def test_empty_truncated_reply_keeps_typed_terminal_and_native_history(tmp_path,
     assert not request_path.exists()
     assert (paths.failed / request_path.name).exists()
     terminal = read_json_file(paths.terminal / request_path.name)
-    assert terminal["terminal_response"]["error_code"] == "MODEL_RESPONSE_TRUNCATED"
+    assert terminal["terminal_response"]["error_code"] == reason
+
+
+def test_provider_error_projection_only_reads_typed_fields():
+    from agent_py_agent.agent.gateway_parts.request_errors import (
+        gateway_model_response_error_projection,
+    )
+
+    fields = dict(response="普通正文", runtime_status="error", runtime_reason="MODEL_TOOL_ARGUMENTS_INVALID",
+                  runtime_source="model_provider", turn_end_reason="error")
+    assert gateway_model_response_error_projection(fields)["error_code"] == "MODEL_TOOL_ARGUMENTS_INVALID"
+    assert gateway_model_response_error_projection(fields | {"turn_end_reason": "completed"}) == {}
+    assert gateway_model_response_error_projection(fields | {"runtime_source": "tool_loop"}) == {}
+    assert gateway_model_response_error_projection(fields | {"runtime_reason": "TOOL_PERMISSION_DENIED"}) == {}
+    unknown = gateway_model_response_error_projection(fields | {"runtime_reason": "MODEL_NEW_PROVIDER_ERROR"})
+    assert unknown["error_code"] == "MODEL_NEW_PROVIDER_ERROR"
+    assert "任务处理失败" not in unknown["user_error"]
 
 
 def test_untyped_empty_reply_still_has_no_deliverable_response(tmp_path):
