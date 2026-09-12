@@ -2134,7 +2134,41 @@ def _wake_signal_is_stale(
         return _signal_task_link_is_terminal(agent, store, signal, reason)
     if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return False
+    # LLM: 真机复现(2026-09-11, 受控场景)修复"父级已空闲、孩子等裁决"的双向等待：
+    # 能力申请类唤醒进到这里时，父代理**自己那一轮已经 done**，于是
+    # _signal_task_link_is_terminal 判"父 task terminal"→把唤醒当过期丢弃
+    # （实测 created_at 与 handled_at 只差 0.8 秒、父代理零新回合，子代理永久 BLOCKED）。
+    # 但"父轮次结束"恰恰是子代理在等它的前提：只有父代理真的再跑一轮才能裁决。
+    # 因此只要源子代理仍有 OPEN 能力申请/gap，这类唤醒就不得按过期丢弃。
+    # 判据只看结构化字段；不解析子代理正文，也不猜测阻塞原因。
+    if reason == "subagent_capability_request_open" and _source_child_awaits_parent_decision(
+        agent, signal
+    ):
+        return False
     return _signal_task_link_is_terminal(agent, store, signal, reason)
+
+
+# LLM: 从唤醒信号的源子代理读结构化申请状态；读不到一律返回 False（保持原过期判定，不放宽唤醒）。
+# 函数用途: 判断该唤醒的源子代理是否仍在等待父级裁决。
+def _source_child_awaits_parent_decision(agent: object, signal: object) -> bool:
+    manager = getattr(agent, "subagents", None)
+    run_id = str(getattr(signal, "source_agent_id", "") or "").strip()
+    if manager is None or not run_id:
+        return False
+    try:
+        task = manager.load(run_id)
+    except Exception:
+        return False
+    if task is None:
+        return False
+    from ..subagents.model_capabilities import capability_request_requires_parent_resolution
+
+    for request in getattr(task, "capability_requests", []) or []:
+        if capability_request_requires_parent_resolution(getattr(request, "status", "OPEN")):
+            return True
+    return any(
+        str(getattr(gap, "status", "")) == "OPEN" for gap in getattr(task, "capability_gaps", []) or []
+    )
 
 
 def _signal_task_link_is_terminal(

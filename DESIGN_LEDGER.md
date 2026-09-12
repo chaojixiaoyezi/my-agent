@@ -1,5 +1,32 @@
 # DESIGN LEDGER
 
+## 2026-09-11 R245 父级空闲、孩子等裁决的唤醒被当过期丢弃【状态：受控复现已定位并修复，待复测】
+
+**受控复现（这次是真实场景，不是读代码推断）**：在 `--workspace /tmp/ma-eval/deadlock-test` 起一个富 TUI，
+让主代理派子代理写工作目录之外的 `/tmp/ma-eval/out-of-scope/probe.txt`。结构化事实：
+
+| 环节 | 实测结果 |
+|---|---|
+| 子代理写入 | `PATH_OWNER_SCOPE_BLOCKED`，`failure_stage=authorization`（拦截正确）|
+| 子代理状态 | BLOCKED，`failure_type=capability_request` |
+| 能力申请 | `capreq-1789172278-e5f07105` status=GAP，等待父级 grant |
+| 唤醒信号 | 网关日志确有 `reason=subagent_capability_request_open` |
+| **唤醒结局** | **created_at 1789172278 → handled_at 1789172279，仅 0.8 秒就被标记 handled，父代理零新回合** |
+
+**根因（推翻我上一轮的猜测）**：`subagent_capability_request_open` 属于
+`SUBAGENT_LIFECYCLE_WAKE_REASONS`，走的是 `_wake_signal_is_stale` → `_signal_task_link_is_terminal`：
+它判断的是**父代理自己那一轮 task 是否 terminal**——父轮次已经 done，于是判定唤醒"过期"并丢弃。
+但"父轮次结束"恰恰是子代理在等它的前提：只有父代理再跑一轮才能裁决，所以这里必须放行。
+**上一轮我加在 `_goal_wake_waits_for_child_event`（`thread_goal_continue` 路径）的修复根本没被走到**，
+因此当时"已部署"并不等于"已修好"——这正是"读代码推断的因果不足以支撑结论"的又一例证。
+
+**修法**：在 `_signal_task_link_is_terminal` 之前加结构化判据——当
+`reason == "subagent_capability_request_open"` 且**源子代理仍有 OPEN 的能力申请/gap** 时，
+不按过期丢弃。读不到子代理时保持原判定（不放宽唤醒）。三处修复互补：
+`thread_goal_continue` 路径、能力申请路径、以及 R244 记的读取预算与客观门。
+
+合同单测 3 条（OPEN 放行 / GRANTED 仍按原规则 / 读不到不放宽），联合 186 项通过。
+
 ## 2026-09-11 R244 换语言复刻的能力上限与失败形态【状态：已量化，结论是目标超出该模型能力】
 
 **结论（连续 4 轮实测得出，不再反复尝试）**：用 工具运行时 `deepseek-v4-flash` 做"1 万~2 万行库的

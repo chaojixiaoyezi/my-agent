@@ -179,3 +179,59 @@ def test_undeclared_workspace_keeps_owner_home_inheritance(tmp_path):
         subagents=None,
     )
     assert _current_conversation_product_write_roots(agent) == [str(tmp_path)]
+
+
+# --------------------------------------------------------------------------- #
+# R245 唤醒过期判据：父轮次结束 ≠ 子代理不需要裁决
+# --------------------------------------------------------------------------- #
+
+
+def test_capability_open_wake_not_dropped_when_parent_turn_ended(tmp_path):
+    """受控真机场景固化：父代理轮次已 done、子代理仍 OPEN，唤醒不得被当过期丢弃。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.runtime import _source_child_awaits_parent_decision
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
+
+    child = SimpleNamespace(
+        capability_requests=[CapabilityRequest(
+            id="capreq-1", from_run_id="sub-1", problem="越界写入",
+            needed_capability="write_file", status="OPEN",
+        )],
+        capability_gaps=[],
+    )
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda run_id: child))
+    signal = SimpleNamespace(source_agent_id="sub-1")
+    assert _source_child_awaits_parent_decision(agent, signal) is True
+
+
+def test_granted_capability_wake_still_follows_terminal_rule(tmp_path):
+    """已批准/已关闭的申请不阻止原有过期判定，避免放宽唤醒。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.runtime import _source_child_awaits_parent_decision
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
+
+    child = SimpleNamespace(
+        capability_requests=[CapabilityRequest(
+            id="capreq-1", from_run_id="sub-1", problem="越界写入",
+            needed_capability="write_file", status="GRANTED",
+        )],
+        capability_gaps=[],
+    )
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda run_id: child))
+    assert _source_child_awaits_parent_decision(agent, SimpleNamespace(source_agent_id="sub-1")) is False
+
+
+def test_unreadable_child_keeps_original_terminal_rule():
+    """读不到子代理时不放宽：仍按原过期判定处理。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.runtime import _source_child_awaits_parent_decision
+
+    def _boom(run_id):
+        raise FileNotFoundError(run_id)
+
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=_boom))
+    assert _source_child_awaits_parent_decision(agent, SimpleNamespace(source_agent_id="sub-x")) is False
+    assert _source_child_awaits_parent_decision(SimpleNamespace(), SimpleNamespace(source_agent_id="")) is False
