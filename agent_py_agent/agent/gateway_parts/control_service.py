@@ -24,6 +24,7 @@ from ..conversation.compact import (
     prepare_conversation_context,
     render_conversation_context_usage,
 )
+from ..conversation.compact_guard import ConversationCompactError
 from ..conversation.compact_provider_surface import ConversationCompactModelSurface
 from ..conversation.control_commands import (
     ConversationControlCommand,
@@ -816,6 +817,18 @@ def _execute_registered_compact_control(
             False,
             "当前会话正被另一个执行轮占用，本次未压缩；请稍后重试。",
             error_code="COMPACT_LANE_BUSY",
+        )
+    except ConversationCompactError as exc:
+        # LLM: 压缩失败是 typed 运行时事实。像 COMPACT_FIXED_PREFIX_TOO_LARGE 这种"当前窗口根本装不下"
+        #   的失败重试永远不会成功，不能统一回一句"请稍后重试"误导用户反复等——如实回报失败码与原话。
+        # 函数用途: 把 typed 压缩失败如实上报，保留原始原因与失败码。
+        code = str(getattr(exc, "error_code", "") or getattr(exc, "code", "") or "COMPACT_FAILED")
+        detail = str(exc) or "手动 compact 未完成，会话游标保持原状。"
+        return ConversationControlResult(
+            "compact",
+            False,
+            f"{detail}（失败码 {code}；会话游标保持原状）",
+            error_code=code,
         )
     except Exception:
         return ConversationControlResult(

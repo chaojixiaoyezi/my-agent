@@ -1,4 +1,15 @@
-# Gateway Progress
+## R254 手动 compact 的失败如实上报（三种既有红测试的根因与处置）
+
+用户看到"手动 compact 未完成，请稍后重试"时，有一类失败**重试永远不会成功**：当模型窗口装不下
+压缩指令与预留输出（例如窗口 20k、输出预算没按系统自身约定夹到 window//4），守卫会以
+`COMPACT_FIXED_PREFIX_TOO_LARGE` fail-closed 拒绝。现在该 typed 失败按原话与失败码上报，
+不再折成"请稍后重试"，也不改会话游标。
+
+同时处置三条长期红测试（都**不是**产品回归）：`test_tooling_web` 的取消关闭阻塞读用例，其 fake
+响应没跟上生产端新增的 `read(size)` 读取上限（TypeError 提前失败，测不到契约）；两条
+`test_manual_compact_*` 的 fixture 用 20k 窗口却保留默认 16k 输出预算，与系统自身
+`max_tokens ≤ window//4`（`settings/model_profiles.py`）的约定不一致，被守卫正确地拒了。
+前者补 fake 签名，后者把 fixture 夹到 4096，并新增一条"typed 失败必须如实上报"的回归测试。
 
 ## R249 出口正文不再改写模型的原话（绝对路径 / 工具名）
 

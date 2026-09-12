@@ -2804,6 +2804,9 @@ def test_context_control_reads_the_same_thread_and_auto_compact_policy(tmp_path)
             model_backend="echo",
             model_name="test-model",
             model_context_window_tokens=20_000,
+            # 与系统自身约定一致：max_tokens ≤ window//4（model_profiles 就是这么夹的）。
+            # 不夹的话，压缩守卫会判“固定前缀+预留输出装不进 20k 窗口”而 fail-closed。
+            max_tokens=4_096,
             memory_compact_auto_trigger_percent=90,
             gateway_per_user_owner_scoping=False,
         ),
@@ -2862,6 +2865,9 @@ def test_manual_compact_uses_canonical_checkpoint_lane_and_custom_instructions(t
         AgentConfig(
             model_backend="echo",
             model_context_window_tokens=20_000,
+            # 与系统自身约定一致：max_tokens ≤ window//4（model_profiles 就是这么夹的）。
+            # 不夹的话，压缩守卫会判“固定前缀+预留输出装不进 20k 窗口”而 fail-closed。
+            max_tokens=4_096,
             gateway_per_user_owner_scoping=False,
         ),
         tmp_path,
@@ -2983,6 +2989,9 @@ def test_manual_compact_stop_interrupts_provider_and_preserves_generation(tmp_pa
         AgentConfig(
             model_backend="echo",
             model_context_window_tokens=20_000,
+            # 与系统自身约定一致：max_tokens ≤ window//4（model_profiles 就是这么夹的）。
+            # 不夹的话，压缩守卫会判“固定前缀+预留输出装不进 20k 窗口”而 fail-closed。
+            max_tokens=4_096,
             gateway_per_user_owner_scoping=False,
         ),
         tmp_path,
@@ -4098,3 +4107,59 @@ def test_input_queue_refuses_orphan_projection_without_canonical(tmp_path) -> No
             queue_gateway_input_locked(paths, receipt)
 
     assert not (paths.inbox / f"{request_id}.json").exists()
+
+
+# LLM: 回归（2026-09-11）：像 COMPACT_FIXED_PREFIX_TOO_LARGE 这种"当前模型窗口根本装不下"的失败，
+#   重试永远不会成功。统一回"请稍后重试"会让用户一直等一个不可能成功的操作；必须如实回报失败码与原话。
+# 函数用途: 验证 typed 压缩失败被如实上报而不是被折成通用失败。
+def test_manual_compact_reports_typed_failure_instead_of_generic_retry(tmp_path) -> None:
+    class SummaryBackend:
+        name = "summary-test"
+
+        def probe_tool_capability(self):
+            return _native_test_capability(self.name, "local://manual-compact-typed-failure")
+
+        def generate(self, prompt: str, **_kwargs) -> ModelResponse:
+            return ModelResponse(text="已保留的会话摘要", backend=self.name)
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            # 故意保留"窗口 20k 但输出预算没夹"的形态：压缩守卫必须 fail-closed 拒绝，
+            # 并且把 typed 失败码如实报出来（这正是它该怎么表现）。
+            model_context_window_tokens=20_000,
+            gateway_per_user_owner_scoping=False,
+        ),
+        tmp_path,
+    )
+    agent.backend = SummaryBackend()
+    paths = gateway_paths(agent)
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "u-1",
+            "channel": "feishu",
+            "channel_conversation_id": "c-1",
+            "channel_user_id": "u-1",
+        }
+    )
+    for role in ("user", "assistant"):
+        agent.conversation_store.append_message(
+            {
+                "thread_id": thread.thread_id,
+                "role": role,
+                "content": f"需要压缩的 {role} 消息",
+                "channel": "feishu",
+            }
+        )
+
+    result = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/compact 优先保留未完成事项"),
+        _scope(),
+    )
+
+    assert result.ok is False
+    assert result.error_code == "COMPACT_FIXED_PREFIX_TOO_LARGE"
+    assert "无法容纳" in result.message
+    assert "请稍后重试" not in result.message

@@ -109,7 +109,9 @@ class TestWebSearchTool:
                 self.close()
                 return False
 
-            def read(self):
+            # 生产端带读取上限调用 read(size)（web_search._read_search_response），
+            # fake 必须接受该参数，否则会以 TypeError 提前失败、测不到"取消关闭阻塞读"这条契约。
+            def read(self, *_args):
                 reading.set()
                 assert closed.wait(3)
                 return b""

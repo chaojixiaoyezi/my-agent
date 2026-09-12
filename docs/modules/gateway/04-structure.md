@@ -1,4 +1,8 @@
-# Gateway Structure
+## R254 compact 失败的 typed 传播
+
+`control_service` 手动 compact 分支对 `ConversationCompactError` 单独处理：返回 `error_code=exc.error_code`
+与原始 message，只有未知异常才回落到通用 `COMPACT_FAILED` + "请稍后重试"。判定只看 typed 异常类型，
+不解析文案。
 
 ## R249/R248 出口投影与插话归属
 
