@@ -1,6 +1,7 @@
 """会话模型选择：同 owner 并行、跨 owner、重启和冻结执行片；不发模型请求。"""
 
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
@@ -77,6 +78,20 @@ def test_two_windows_same_session_observe_selection(tmp_path):
     second = execute_local_model_operation(host, "same", "select", {"profile_id": a})
     assert first["thread_id"] == second["thread_id"]
     assert execute_local_model_operation(host, "same", "list", {})["selected"] == a
+
+
+def test_first_open_same_session_concurrently_creates_one_thread(tmp_path):
+    host = host_with_store(tmp_path)
+    gate = threading.Barrier(8)
+
+    def open_window(_):
+        gate.wait(timeout=5)
+        return execute_local_model_operation(host, "new-session", "list", {})["thread_id"]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ids = list(pool.map(open_window, range(8)))
+    assert len(set(ids)) == 1
+    assert len(list(host.conversation_store.threads_dir.glob("*.json"))) == 1
 
 
 def test_work_slice_snapshot_and_default_nested_scope_are_stable(tmp_path, monkeypatch):

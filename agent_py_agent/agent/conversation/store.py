@@ -554,7 +554,18 @@ def _read_json_object_report(
 
 
 class ConversationThreadStore(ConversationBaseStore):
+    # LLM: 通道绑定的查找与创建共用短事务锁；不能与单文件索引锁同路径，不锁模型执行或串行不同会话。
+    # 函数用途: 两个窗口首次同时打开同一 session 时只生成一个 thread，避免之后模型选择和消息各走一份。
     def get_or_create_thread(self, request: dict) -> ConversationThread:
+        identity = _binding_key(request.get("channel", ""), request.get("channel_conversation_id", ""),
+                                request.get("channel_user_id", ""))
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        with locked_file_transition(self.threads_dir / f".channel-{digest}"):
+            return self._get_or_create_bound_thread(request)
+
+    # LLM: 仅在同通道绑定事务锁内调用；显式 reuse_latest 仍保留原有语义，不根据模型名推断会话。
+    # 函数用途: 查找绑定、显式复用或创建会话，并在退出短事务前提交索引。
+    def _get_or_create_bound_thread(self, request: dict) -> ConversationThread:
         existing, binding_error = self.resolve_thread_report(
             channel=request.get("channel", ""),
             channel_conversation_id=request.get("channel_conversation_id", ""),
