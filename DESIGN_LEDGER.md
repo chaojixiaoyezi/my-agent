@@ -1,5 +1,80 @@
 # DESIGN LEDGER
 
+## 2026-09-11 R255 大窗口切小窗口后分段 Compact 失败：单发路径有兜底、分段路径直接致命【状态：已修，合同单测通过，真机待复测】
+
+**真机故障（用户会话 ma-port-2）**：`~/.my-agent/config/model-profiles` 把模型切到
+`MiniMax-M2.7`（anthropic_compatible，200k 窗口）后，原 1M 窗口下积累的历史已 **539.8k tokens**，
+自动压缩进入**分段摘要**链并在某一段失败，界面留
+`! 上下文压缩失败，原上下文已保留 · COMPACT_SEGMENT_SUMMARY_TOOL_CALL`，本轮**没有继续执行**。
+网关日志（`workspace/runtime/services/gateway/gateway.log`）给出唯一现场事实：
+`Compact segment invalid: reason=TOOL_CALL text_chars=259 tool_calls=3 truncated=False`。
+
+**逐条核对另一位 agent 的 6 条结论（结论 / 我的核实）**：
+- **①「核对 tools=[]、tool_choice=none 是否真传到供应商」——部分成立，但结论要改写**：`_call_backend`
+  确实带着 `tools=[]` 与 `ToolChoice.none` 调用后端，但 Anthropic 兼容适配层
+  `_tools_for_choice(tools, none) -> []`、`if selected_tools:` 才写 `payload["tools"]/["tool_choice"]`，
+  所以**空工具面在线上请求里根本不出现这两个字段**（无 tools 时发 `tool_choice` 反而会被部分端点 400）。
+  结论：不是"适配层把设置弄丢了"，而是**没有任何线上手段能强制供应商不产出工具调用**，
+  容错必须在响应侧，不能在请求侧。
+- **②「是否把历史里的工具协议文本误识别成真实工具调用」——不成立（已核实）**：文本协议路径已删（EXEC-31b），
+  摘要链不经过 `tool_protocol_adapter`；`response.tool_use_blocks` 只在结构化字段上产生
+  （Anthropic SSE `content_block_start.type=tool_use` / 非流 `content[].type=tool_use`）。
+  即 blocks 是供应商侧真发出来的结构化工具块，不是我们扫文本扫出来的。
+- **③「摘要流程绝不能执行其中的工具调用」——成立且本来就成立，但当前反应过度**：压缩链没有任何执行器，
+  工具块既不执行也不落盘；问题是它把整轮压缩**判死**（`COMPACT_SEGMENT_SUMMARY_TOOL_CALL`），
+  连同已经成功的分段一起作废，用户被卡在 270% 上下文。
+- **④「无效摘要要有界纠正，不能每次从头浪费全部压缩成本」——成立，是本轮主要缺口**：原实现一次不合格即抛错，
+  没有原地重试；下次 `/compact` 又从第 0 段重算。已修（见下）。
+- **⑤「所有分段成功且满足窗口预算后才提交，失败保留原历史」——成立，且既有实现已经做到**：候选只有在
+  `projected_tokens_after <= recovery_target_tokens`（或低于触发线的 fallback）时才进
+  `_commit_compact_candidate`，否则 `COMPACT_CANDIDATE_TOO_LARGE`；失败路径不碰 checkpoint/CAS，
+  原历史与任务文件保留。本轮的机械降级仍走同一条候选校验，没有绕过窗口预算。
+- **⑥「用真实 TUI 验证」——采纳**（见文末验收状态）。
+
+**我独立复核时额外发现的两处缺陷（另一位 agent 未提，且比 ① 更接近真因）**：
+1. **同一概念两套策略**：单发摘要路径（`compact.py`）遇到工具块是"当空摘要 + 机械兜底照常提交"，
+   分段路径却直接抛致命错误。`_mechanical_conversation_summary` 早就是被接受的设计，
+   分段链缺的正是这一层，属于实现不一致而不是策略选择。
+2. **末段原始响应会被调用方二次校验，可能把残缺正文当成整段历史**：`generate_bounded_compact_response`
+   原来返回**最后一段的原始响应对象**，而调用方按 `response.text` / `tool_use_blocks` 独立判定；
+   末段被截断时 `text` 非空且无工具块 → 调用方会把"只有后半段"当成整份摘要提交（静默丢记忆）。
+
+**修改（只动一个模块 + 其单测）**：
+- `agent_py_agent/agent/conversation/compact_request_budget.py`
+  - 新增**原地有界纠正**：无效片段按**结构化原因**（TOOL_CALL / EMPTY / TRUNCATED）在同一字节区间重试，
+    上限 `_SEGMENT_REPAIR_LIMIT=2`；TOOL_CALL/EMPTY 加"没有可调用工具、不要输出工具标记、只输出摘要正文"
+    的纠正提示，TRUNCATED 改为**缩段**（只允许缩到原片段一半，防止把源切成大量碎片放大调用次数）。
+  - 纠正耗尽后**不再让整轮压缩作废**：该段用**确定性机械摘录**替代（`[compact-segment-mechanical-fallback]`
+    + reason + `source_range` + 有界摘录），压缩继续走完并按 ⑤ 的预算校验提交；全过程只记形状与计数，
+    日志不含正文（沿用既有红线）。
+  - **降级摘录不进"此前摘要"**：降级内容是宿主账目而不是模型摘要，塞进 carry 会让后续每段请求膨胀、
+    把源切得更碎；现在模型只看到自己的摘要，摘录由宿主在最终候选里按区间标注。
+  - 返回值改为**已校验的累计摘要**（`_verified_segment_response`：清空 `tool_use_blocks`、`truncated=False`、
+    截断 stop_reason 归零），修掉上面第 2 条缺陷。
+- 验收：`agent_py_agent/tests/test_compact_request_budget.py` 重写 3 条编码旧契约的用例并新增 3 条
+  （降级后源覆盖连续且铺满 / 持久截断不碎片化且调用次数有界 / 无效片段原地纠正且提示按原因 / 末段失败返回累计摘要）；
+  另跑 `test_gateway_conversation_compact`、`test_memory_compact*`、`test_compact_circuit_breaker`、
+  `test_compact_progress`、`test_compact_semantic_summary`、`test_compact_tool_refs` 全绿。
+- **未做（需单独立项）**：会话运行时 有 `CompactionReason::ModelDownshift` 与**无模型 token-budget compact**
+  （`compact_token_budget.rs`：直接 `start_new_context_window` 不开模型），我们只有模型摘要一条路；
+  若供应商持续拒绝做摘要，用户仍只能靠"切回大窗口模型"。本轮只保证"一次不听话的模型答复不再把会话卡死"。
+
+**验收状态**：合同单测通过；**链路级真机已验证，TUI 级待用户在场复测**。
+- 真机（真实 `MiniMax-M2.7`（api.minimax.cn/anthropic）+ 修复后代码，脚本
+  `/tmp/ma-eval/verify-r255/real_provider_compact.py`，共 5 轮）：
+  1) 声明窗口 20k、96k 字符源 → 8 段全部正常摘要，无工具块；
+  2) 声明窗口 200k（用户同量级窗口）、963k 字符源、7 段、每段 ~16 万字符输入 → 全部正常；
+  3) 材料内嵌 MiniMax 自身工具标记文本 + 旧系统指令 → 仍无工具块（**TOOL_CALL 未复现**，如实记录）；
+  4) **复现到同类真实失效并验证修复生效**：第 1 段真机返回 `text_chars=0 truncated=True
+     stop_reason=max_tokens`，旧代码在此必然抛 `COMPACT_SEGMENT_SUMMARY_TRUNCATED` 整轮作废；
+     修复后第 2 次调用带纠正提示、把片段从 12382 字符缩到 6324 字符重试成功，压缩完整跑完、无降级标记；
+  5) 缩到最小材料再跑一次（2 段）全部正常，确认修复没有引入额外调用。
+- TUI 级：用隔离 home（`/tmp/ma-eval/verify-r255/home`，不改用户正式配置）起 `--direct`/gateway 会话验证到
+  "模型确实切到 MiniMax-M2.7、preflight 如实报 `model_visible_tokens/context_window/compact_threshold`"，
+  但该临时 home 的 gateway 会话存储未初始化成功（`CONVERSATION_PERSISTENCE_UNAVAILABLE`），
+  `/compact` 只能在 canonical gateway 会话里跑，故 TUI 级最终复测留到用户真实卡住的会话
+  `ma-port-2`（539.8k/200k，正是失败现场）上执行。
+
 ## 2026-09-11 R252 出口不再改写模型原话 + 计划板/插话/截断/配置四处底座修复【状态：已修，真机验收通过（部分项只能合同单测覆盖）】
 
 本轮按"另一个 agent 的诊断 + 我自己的独立复核"逐条落地，**真机验收在专用 tmux `ma-r252`/`ma-r253`**

@@ -1,4 +1,5 @@
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,21 @@ def _request(text: str) -> AuxiliaryModelCallRequest:
         messages=[{"role": "user", "content": [{"type": "text", "text": text}]}],
         purpose="conversation_compact_summary",
     )
+
+
+# LLM: Mechanical fallback markers are the only place a degraded segment records which source bytes
+# it stands for, so contiguity here is the regression guard for "never drop history silently".
+# 函数用途: 校验降级摘要的覆盖区间首尾相接且铺满整段源历史，任何源字节都没有被跳过。
+def responses_cover_source(text: str, total: int) -> bool:
+    ranges = [
+        (int(start), int(end))
+        for start, end in re.findall(r"- source_range: \[(\d+):(\d+)/\d+\]", text)
+    ]
+    if not ranges:
+        return False
+    if ranges[0][0] != 0 or ranges[-1][1] != total:
+        return False
+    return all(previous_end == start for (_, previous_end), (start, _) in zip(ranges, ranges[1:]))
 
 
 def test_fitting_request_preserves_exact_cache_surface(monkeypatch):
@@ -81,16 +97,42 @@ def test_typed_provider_overflow_reduces_request_without_losing_source(monkeypat
     assert "".join(r.messages[0]["content"][0]["text"].split("]：\n", 1)[1] for r in calls[1:]) == json.dumps(request.messages, ensure_ascii=False)
 
 
-def test_segment_failure_and_stop_never_skip_to_later_sources(monkeypatch):
+def test_degraded_segment_keeps_source_coverage_and_stops_on_interrupt(monkeypatch, caplog):
     request = _request("历史记录" * 10000)
     calls = []
+    progress = []
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or ModelResponse(text="", backend="fake"))
-    with pytest.raises(ConversationCompactError, match="有效摘要"):
-        budget_module.generate_bounded_compact_response(request)
-    assert len(calls) == 1
+    response = budget_module.generate_bounded_compact_response(request, source_progress=lambda *p: progress.append(p))
+    total = len(json.dumps(request.messages, ensure_ascii=False))
+    assert progress[-1] == (total, total)
+    # 每个片段最多一次首答加有界纠正，仍无有效摘要就机械降级，不再让整轮压缩作废。
+    assert len(calls) % (1 + budget_module._SEGMENT_REPAIR_LIMIT) == 0
+    assert responses_cover_source(response.text, total)
+    assert response.tool_use_blocks == [] and response.truncated is False
+    assert "PRIVATE-HISTORY" not in caplog.text
+    before = len(calls)
     with pytest.raises(InterruptedError):
         budget_module.generate_bounded_compact_response(request, interrupt_check=lambda: True)
-    assert len(calls) == 1
+    assert len(calls) == before
+
+
+def test_persistent_truncation_shrinks_once_then_degrades_without_fragmenting(monkeypatch):
+    request = _request("历史记录" * 10000)
+    healthy = []
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: healthy.append(r) or ModelResponse(text="摘要", backend="fake"))
+    budget_module.generate_bounded_compact_response(request)
+    truncated = []
+    monkeypatch.setattr(
+        budget_module,
+        "generate_auxiliary_model_response",
+        lambda r: truncated.append(r) or ModelResponse(text="只有前半段", backend="fake", truncated=True),
+    )
+    response = budget_module.generate_bounded_compact_response(request)
+    total = len(json.dumps(request.messages, ensure_ascii=False))
+    # 缩段只允许到原片段一半，避免把一个片段碎成大量微小片段而放大调用次数。
+    assert len(truncated) <= 8 * len(healthy)
+    assert "只有前半段" not in response.text
+    assert responses_cover_source(response.text, total)
 
 
 def test_segment_surface_retains_summary_rules_not_executor_prefix(monkeypatch):
@@ -108,23 +150,47 @@ def test_segment_surface_retains_summary_rules_not_executor_prefix(monkeypatch):
     assert all(r.tools == [] and r.tool_choice.mode == "none" for r in calls)
 
 
-@pytest.mark.parametrize(("response", "code"), [
-    (ModelResponse(text="", backend="fake"), "EMPTY"),
-    (ModelResponse(text="执行工作", backend="fake", tool_use_blocks=[{"name": "run_command"}]), "TOOL_CALL"),
-    (ModelResponse(text="只有前半段", backend="fake", truncated=True), "TRUNCATED"),
-    (ModelResponse(text="只有前半段", backend="fake", stop_reason="max_tokens"), "TRUNCATED"),
+@pytest.mark.parametrize(("response", "code", "hint"), [
+    (ModelResponse(text="", backend="fake"), "EMPTY", "没有输出摘要正文"),
+    (
+        ModelResponse(text="执行工作", backend="fake", tool_use_blocks=[{"name": "run_command"}]),
+        "TOOL_CALL",
+        "不要输出工具调用",
+    ),
 ])
-def test_invalid_segment_does_not_advance_source_or_expose_text(monkeypatch, caplog, response, code):
-    progress = []
-    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: response)
-    with pytest.raises(ConversationCompactError) as exc:
-        budget_module.generate_bounded_compact_response(
-            _request("PRIVATE-HISTORY" * 3000), source_progress=lambda *p: progress.append(p)
-        )
-    assert exc.value.code == f"COMPACT_SEGMENT_SUMMARY_{code}"
-    assert progress == []
-    assert "PRIVATE-HISTORY" not in caplog.text
-    assert "只有前半段" not in caplog.text
+def test_invalid_segment_repairs_in_place_then_degrades(monkeypatch, caplog, response, code, hint):
+    calls = []
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or response)
+    result = budget_module.generate_bounded_compact_response(_request("很短的历史记录" * 500))
+    texts = [call.messages[0]["content"][0]["text"] for call in calls]
+    first_segment = texts[: 1 + budget_module._SEGMENT_REPAIR_LIMIT]
+    assert "纠正要求" not in first_segment[0]
+    assert hint in first_segment[1] and hint in first_segment[2]
+    # 同一条源片段被原地纠正，覆盖区间不变。
+    assert len({text.split("历史 JSON 连续片段 ", 1)[1].split("：", 1)[0] for text in first_segment}) == 1
+    assert f"- reason: {code}" in result.text
+    assert "执行工作" not in result.text
+    assert "很短的历史记录" not in caplog.text and "执行工作" not in caplog.text
+
+
+def test_final_segment_failure_returns_carried_summary_not_raw_reply(monkeypatch):
+    request = _request("历史记录" * 10000)
+    calls = []
+
+    def generate(candidate):
+        calls.append(candidate)
+        if len(calls) == 1:
+            return ModelResponse(text="第一段已确认的摘要", backend="fake")
+        return ModelResponse(text="只有后半段", backend="fake", truncated=True)
+
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
+    response = budget_module.generate_bounded_compact_response(request)
+    # 末段原始答复不完整时，返回值必须是已校验的累计摘要，否则调用方会拿残缺正文当整段历史。
+    assert response.truncated is False and response.tool_use_blocks == []
+    assert response.stop_reason == ""
+    assert "第一段已确认的摘要" in response.text
+    assert "[compact-segment-mechanical-fallback]" in response.text
+    assert "只有后半段" not in response.text
 
 
 def test_auxiliary_success_metrics_are_recorded(monkeypatch):
