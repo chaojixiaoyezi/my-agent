@@ -134,6 +134,12 @@ def rg_args(rg_path: str, target: Path, request: SearchRequest) -> list[str]:
         "--no-config",
         "--no-messages",
         "--no-follow",
+        # LLM: rg 默认并行遍历，命中顺序在多次运行之间会变；工具输出必须可复现——同参数同结果
+        #   是重复调用护栏、结果 hash 和证据复算的前提，也要和 Python 回退实现的排序目录遍历一致。
+        #   --sort path 会关掉并行并按路径稳定排序（代价是失去并行，搜索仍受 limit 约束）。
+        # 人类: 少了这个参数，同样的搜索两次可能给出不同顺序，测试和证据都不可复现。
+        "--sort",
+        "path",
     ]
     if request.literal:
         args.append("--fixed-strings")

@@ -91,6 +91,35 @@ def _child_agent(*, owner_home: Path, manager_scope: str = "") -> types.SimpleNa
     )
 
 
+# LLM: owner 墙存在时，账本里的 owner-home 收窄不能覆盖宿主创建时下发的墙外授权根：
+#   真机复测（2026-09-11 deadlock-test5）就是被这一步覆盖后，运行时 allowed_write_roots 只剩
+#   owner home，写门直接给出 WRITE_FORBIDDEN，子代理只能上抛能力申请。
+# 函数用途: 验证 owner 作用域收窄保留已授权的墙外工作目录。
+def test_owner_scoped_child_keeps_granted_external_root(tmp_path):
+    owner_home = _owner_home(tmp_path)
+    project = tmp_path / "work" / "port-click-go"
+    task_root = owner_home / "runs" / "2026-09-11" / "abc"
+    for path in (owner_home, project, task_root):
+        path.mkdir(parents=True, exist_ok=True)
+
+    params = _child_params(
+        project=project,
+        owner_home=owner_home,
+        task_root=task_root,
+        granted=[str(task_root), str(owner_home), str(project)],
+        declared_cwd=str(project),
+    )
+    boundary = write_boundary_with_runtime_ledger(
+        _child_agent(owner_home=owner_home, manager_scope=str(owner_home)),
+        params,
+    )
+
+    assert str(project) in boundary["allowed_write_roots"]
+    assert str(project) in boundary["execution_workspace_roots"]
+    assert str(owner_home) in boundary["allowed_write_roots"]
+    assert boundary.get("execution_cwd") == str(project)
+
+
 # LLM: 这是本文件的核心回归——墙外已授权根必须出现在执行根里，否则路径门只会看到 owner home。
 # 函数用途: 验证子代理 boundary 把 allowed_write_roots 的墙外根投影成 execution_workspace_roots。
 def test_child_boundary_projects_granted_external_root(tmp_path):
@@ -238,3 +267,45 @@ def test_no_granted_external_root_keeps_boundary_unchanged(tmp_path):
     )
     boundary = write_boundary_with_runtime_ledger(_child_agent(owner_home=owner_home), params)
     assert not boundary.get("execution_workspace_roots")
+
+
+# LLM: handler 自己的 owner 墙是第四份墙：中央门和写边界门放行后，文件工具仍会用
+#   `path_access_policy.check` 再判一次。逃生前必须只认宿主下发的 granted_external_roots，
+#   不能认 workspace_roots（否则"改一个可变列表"就能放权）。
+# 函数用途: 验证文件工具在宿主授权根内读写放行，未授权路径与凭据文件仍拒。
+def test_file_tool_owner_wall_escape_requires_host_grant(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling._filesystem_read import filesystem_access_options
+    from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool, WriteFileToolOptions
+
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "my-agent"))
+    owner_home = _owner_home(tmp_path)
+    project = tmp_path / "work" / "port-click-go"
+    other = tmp_path / "work" / "someone-else"
+    for path in (owner_home, project, other):
+        path.mkdir(parents=True, exist_ok=True)
+
+    tool = WriteFileTool(
+        owner_home,
+        [owner_home],
+        WriteFileToolOptions(
+            access_options=filesystem_access_options(owner_scope_root=str(owner_home))
+        ),
+    )
+
+    blocked = tool.execute({"path": str(project / "a.go"), "content": "package a"})
+    assert blocked.ok is False
+    assert not (project / "a.go").exists()
+
+    tool.workspace_roots = [owner_home.resolve(), project.resolve()]
+    still_blocked = tool.execute({"path": str(project / "a.go"), "content": "package a"})
+    assert still_blocked.ok is False, "改 workspace_roots 不能放宽 owner 墙"
+    assert not (project / "a.go").exists()
+
+    tool.granted_external_roots = (project.resolve(),)
+    written = tool.execute({"path": str(project / "a.go"), "content": "package a"})
+    assert written.ok is True, written.output
+    assert (project / "a.go").read_text(encoding="utf-8") == "package a"
+
+    outside = tool.execute({"path": str(other / "b.go"), "content": "package b"})
+    assert outside.ok is False
+    assert not (other / "b.go").exists()

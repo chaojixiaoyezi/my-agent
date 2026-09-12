@@ -577,6 +577,8 @@ def _apply_update_chunks(change: dict[str, Any], content: str, display_path: str
             reason = "未命中" if not matches else "不唯一"
             raise ValueError(
                 f"补丁上下文{reason}: {display_path}\n未找到唯一的以下补丁原始行:\n{expected}\n"
+                "匹配按「精确→忽略行尾空白→忽略首尾空白」三级放宽，"
+                "所以上下文包含空格与缩进差异通常仍能命中；"
                 "请 read_file 读取最新原文并增加上下文；局部修改也可用 edit_file。"
             )
         start = matches[0]

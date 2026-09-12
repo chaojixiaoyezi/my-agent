@@ -73,6 +73,28 @@ read_file /private/tmp 与 /tmp 均 PATH_OWNER_SCOPE_BLOCKED（只能靠 run_com
   并在声明 cwd 落在这些根内时把 `execution_cwd` 对齐过去。它只搬动已授权的根，不放宽
   `allowed_write_roots`，也不引入新写权限。
 
+**真机复测又抓出三层同族问题（读代码推断真的不够）**：修完上面三处后真机复测，子代理仍然写不进去。
+我在**已部署的运行时**里临时加了一段边界转储（用完即删），拿到逐次调用的真实边界，才定位到剩下三层：
+
+| 层 | 位置 | 复测前事实 | 处置 |
+|---|---|---|---|
+| ① 账本执行根 | `tool_runtime_ledger._attach_owner_task_write_scope` | owner 墙分支把 `allowed_write_roots` **覆盖**成 `[owner home]`，创建时下发的墙外授权被抹掉 | 只保留"墙外已授权根"，不再覆盖（本轮新增） |
+| ② handler 自己的 owner 墙 | `_filesystem_read.FileSystemTool.resolve_path` | 中央门放行后，文件工具又用 `path_access_policy.check` 判一次，墙外目标直接判死 → `WRITE_FORBIDDEN` / `list_files` 报 `TOOL_INVALID_ARGUMENTS`（错误码还错标成"参数无效"）| 新增 `check_path_access`：与中央路径门同一逃生规则，且**只认宿主逐次下发的 `granted_external_roots`**，不认可变的 `workspace_roots`（否则"改一个列表就放权"） |
+| ③ 逐次授权下发 | `registry_invoke._request_local_tool_for_invocation` | 只下发 `workspace_root`/`workspace_roots`，没有下发"墙外已授权根" | 新增 `_granted_external_work_roots()`，从 `write_boundary` 派生并写入 handler |
+
+**同一概念在四处各有一份墙**（中央路径门 / 账本作用域 / 文件工具策略 / shell 沙箱），而"用户声明的工作目录"
+只打通了其中一部分——这正是"一个概念一个权威位置"被破坏后的典型形态。①③ 已按同一权威收敛；
+shell 沙箱的 `COMMAND_ACCESS_DENIED: 当前 owner 只能在自己的 WorkspaceOnly 范围内执行命令` 仍需单独处理。
+
+**顺手修掉的两处 HEAD 红测试 + 一处真缺陷（都不是本轮引入）**：
+- `test_rg_python_common_contract_parity` 三次跑必挂——根因是 `rg` 走并行遍历，命中顺序在多次运行之间会变，
+  与 Python 回退实现的排序遍历不一致。这是**产品缺陷不只是测试问题**：同参数同结果 hash 是重复调用护栏、
+  结果 hash 与证据复算的前提。修法是给 `rg` 加 `--sort path`（关并行、按路径稳定排序），修后 5/5 稳定通过。
+- `test_tooling_filesystem_write` / `test_tool_failure_error_code_semantics` 两条断言的是改造前的补丁报错文案；
+  补丁失配消息恢复"匹配会忽略行尾/首尾空白"的修复指引（模型据此才敢重试而不是放弃）。
+- 仍有 1 条与本轮无关的 HEAD 红测试（`test_tooling_web` 的取消关闭响应计时用例）与 1 条未注册码历史问题，
+  已记录，未在本轮处置。
+
 **验证**：新增 `agent_py_agent/tests/test_child_external_workspace_scope.py` 6 条合同单测
 （投影生效 / 路径门由拒转放行 / 未授权的墙外路径仍拒 / 根级目录永不投影 / 投影不放宽写边界 /
 没有墙外授权就不凭空派生）。修前第 1 条如实失败（`execution_workspace_roots` 只有 owner home）。

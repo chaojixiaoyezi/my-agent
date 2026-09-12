@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..path_access_policy import PathAccessPolicy
+from ..path_access_policy import PathAccessDecision, PathAccessPolicy
 from ..path_recovery_hints import suggest_workspace_typo_target
 from ..user_space.owner_quota import (
     OwnerQuotaChange,
@@ -123,6 +123,12 @@ class FileSystemTool(BaseTool):
         access = access_options or FileSystemAccessOptions()
         self.workspace_root = workspace_root.resolve()
         self.workspace_roots = _normalized_workspace_roots(self.workspace_root, workspace_roots)
+        # LLM: 只有宿主从结构化 write_boundary 下发的"墙外已授权根"才允许穿过 owner 墙；
+        #   这个字段默认空，普通调用方（含测试里直接改 workspace_roots 的场景）拿不到它，
+        #   因此单纯篡改 workspace_roots 不会放宽 owner 隔离。
+        # 人类: 这是 owner 墙的逃生口白名单，只能由 registry 逐次调用组装，不要从模型参数或
+        #   workspace_roots 反推。
+        self.granted_external_roots: tuple[Path, ...] = ()
         self.path_access_policy = PathAccessPolicy.from_values(
             mode=access.path_access_mode,
             dangerous_roots=access.path_dangerous_roots,
@@ -163,7 +169,7 @@ class FileSystemTool(BaseTool):
             candidate = candidate.resolve(strict=False)
         except (OSError, RuntimeError) as exc:
             raise ValueError("路径解析失败，请检查路径是否有效。") from exc
-        decision = self.path_access_policy.check(candidate)
+        decision = self.check_path_access(candidate)
         if decision.allowed:
             return candidate
         hint = _workspace_typo_error(raw_text, self.workspace_root, self.workspace_roots)
@@ -176,6 +182,24 @@ class FileSystemTool(BaseTool):
                 raise ToolOutputArtifactRedirectError(hint)
             raise ValueError(hint)
         raise PathAccessError(decision.message or "路径访问被拒绝。")
+
+    # LLM: owner 墙的逃生口必须和中央路径门 (`contracts/gates/path_url_command._path_finding`)
+    #   一致：只有目标确实落在**宿主逐次下发的墙外已授权根**(granted_external_roots) 里才放行，
+    #   危险目录、凭据文件名这些与 owner 无关的硬拦继续生效。少了这一步，子代理在用户显式声明的
+    #   项目目录里会先被 handler 自己的 owner 墙判死，中央门和写边界门放行也没用
+    #   （2026-09-11 真机：write_file 报 WRITE_FORBIDDEN、list_files 报 TOOL_INVALID_ARGUMENTS，
+    #   文件始终不落盘）。
+    # 函数用途: 统一 owner 墙裁决，并在宿主已授权的墙外工作根内按"无 owner 墙"策略复核。
+    def check_path_access(self, resolved: Path) -> PathAccessDecision:
+        decision = self.path_access_policy.check(resolved)
+        if decision.allowed or decision.code != "PATH_OWNER_SCOPE_BLOCKED":
+            return decision
+        if not any(_path_is_under(resolved, root) for root in self.granted_external_roots):
+            return decision
+        return PathAccessPolicy.from_values(
+            mode=self.path_access_policy.mode,
+            dangerous_roots=self.path_access_policy.dangerous_roots,
+        ).check(resolved)
 
     # LLM: owner-scoped 的写操作只能落在当前结构化 workspace_roots；registry 会把
     #   本轮明确授权的外部输出根临时加入该列表。读操作仍走 resolve_path 的既有策略。

@@ -367,21 +367,14 @@ def _attach_granted_execution_workspace_roots(
     agent: object,
     params: object,
 ) -> None:
-    if _string_list(boundary.get("execution_workspace_roots")):
-        return
     owner_home = _resolved_path(boundary.get("canonical_owner_home_root")) or _resolved_path(
         getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
     )
-    granted = inheritable_declared_work_roots(
-        boundary.get("allowed_write_roots"),
-        owner_home=owner_home,
-    )
-    if owner_home is not None:
-        granted = [root for root in granted if not _is_relative_to(Path(root), owner_home)]
+    granted = _granted_external_roots(boundary, owner_home)
     if not granted:
         return
-    roots = [str(owner_home)] if owner_home is not None else []
-    boundary["execution_workspace_roots"] = list(dict.fromkeys([*roots, *granted]))
+    existing = _string_list(boundary.get("execution_workspace_roots"))
+    boundary["execution_workspace_roots"] = list(dict.fromkeys([*existing, *granted]))
     attrs = getattr(params, "task_attributes", None)
     declared_cwd = _resolved_path(
         attrs.get(CONVERSATION_EXECUTION_CWD_ATTR) if isinstance(attrs, dict) else ""
@@ -391,6 +384,23 @@ def _attach_granted_execution_workspace_roots(
     ):
         # 父代理已经把"在这里干活"作为结构化事实下发；只有它落在已授权根内才当工作目录。
         boundary["execution_cwd"] = str(declared_cwd)
+
+
+# LLM: "墙外已授权根"只从当前写边界的结构化字段派生；系统根目录、宿主控制面、其它 owner 的家
+#   都由 inheritable_declared_work_roots 过滤掉。owner_home 为空（无 owner 墙）时返回空，
+#   因为此时路径门本来就不按 owner 墙裁决，不需要投影。
+# 函数用途: 返回当前写边界里位于 owner 墙外、且允许继承的工作根。
+def _granted_external_roots(
+    boundary: dict[str, object],
+    owner_home: Path | None,
+) -> list[str]:
+    if owner_home is None:
+        return []
+    granted = inheritable_declared_work_roots(
+        boundary.get("allowed_write_roots"),
+        owner_home=owner_home,
+    )
+    return [root for root in granted if not _is_relative_to(Path(root), owner_home)]
 
 
 # LLM: 普通 main/child 的文件墙是同一 owner home；Audit 精确授权和 control_plane 不扩大。
@@ -420,8 +430,13 @@ def _attach_owner_task_write_scope(
     if scope != "control_plane" and boundary.get("read_scope_mode") != "exact":
         # 用户自己的 owner home 是 WorkspaceOnly 的完整产品工作区。任务目录、旧项目和
         # 用户直接放在 home 下的文件都可写；框架控制面由 forbidden_write_roots 另行保护。
-        boundary["allowed_write_roots"] = [str(owner_root)]
-        boundary["execution_workspace_roots"] = [str(owner_root)]
+        # 但宿主创建时下发的"墙外显式工作目录"是结构化授权，不能被 owner home 覆盖：
+        # 覆盖会让子代理在用户声明的项目目录里拿 WRITE_FORBIDDEN（2026-09-11 真机复测：
+        # 创建时 allowed_write_roots 含目标目录，运行时只剩 owner home，写门直接拒绝）。
+        boundary["allowed_write_roots"] = list(
+            dict.fromkeys([str(owner_root), *_granted_external_roots(boundary, owner_root)])
+        )
+        boundary["execution_workspace_roots"] = list(boundary["allowed_write_roots"])
         return
 
     task_root_text = _text(boundary.get("task_root"))

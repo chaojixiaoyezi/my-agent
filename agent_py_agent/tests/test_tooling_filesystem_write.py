@@ -435,7 +435,7 @@ def test_apply_patch_rejects_unmatched_context(tmp_path: Path) -> None:
 
     assert not result.ok
     assert "上下文未命中" in result.output
-    assert "未找到以下补丁原始行" in result.output
+    assert "未找到唯一的以下补丁原始行" in result.output
     assert "missing" in result.output
     assert "edit_file" in result.output
 
