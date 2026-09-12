@@ -1909,14 +1909,18 @@ class TuiTurnEventAdapter:
         with self._lock:
             return self._tool_input_projector.publish(value)
 
-    # LLM: 完整 thinking 事件优先冻结活动增量块；若正文已经封口了同一块，迟到终态只能被消费一次，
-    # 不能在正文后创建第二个 thinking。真正下一轮由新 delta 或工具边界清掉该兼容标记。
-    # 函数用途: 收口一次模型调用的思考块，并丢弃旧 Gateway 在正文后补发的重复全文。
-    def finalize_thinking(self, text: str, *, duration_seconds: float = 0.0) -> bool:
+    # LLM: 完整thinking冻结活动增量块并携带公开归档ref；已封口且无新delta时迟到ref只能附到旧ID。
+    # 函数用途: 收口思考并保留完整原文引用，迟到终态不在正文后创建第二个思考。
+    def finalize_thinking(self, text: str, *, duration_seconds: float = 0.0,
+                          display_archive_ref: dict | None = None,
+                          history_incomplete: bool = False) -> bool:
         with self._lock:
             content = str(text or "")
             if not self._thinking_active and self._late_thinking_completion_expected:
                 self._late_thinking_completion_expected = False
+                if display_archive_ref:
+                    self.runtime._publish("thinking_completed", "completed", self.thinking_block_id,
+                                          {"display_archive_ref": display_archive_ref}, request_id=self.request_id)
                 return False
             if not content and not self._thinking_active:
                 return False
@@ -1930,6 +1934,8 @@ class TuiTurnEventAdapter:
                 {
                     "text": self._thinking_text,
                     "duration_seconds": max(0.0, float(duration_seconds or 0.0)),
+                    **({"display_archive_ref": display_archive_ref} if display_archive_ref else {}),
+                    **({"history_incomplete": True} if history_incomplete else {}),
                 },
                 request_id=self.request_id,
             )
@@ -2054,13 +2060,14 @@ class TuiTurnEventAdapter:
 
     # LLM: progress 只读取结构化 event；真实 started 先清参数临时行，legacy_text
     # 参数为旧调用兼容但不得参与 phase/tool/id 决策。
-    # 函数用途: 收起参数进度，发布工具生命周期并冻结工具前助手 commentary。
+    # 函数用途: 真实工具开始先冻结上一思考和 commentary，避免下一轮增量继续写进旧思考位置。
     def write_progress(self, event: dict[str, object], legacy_text: str = "") -> None:
         del legacy_text
         progress = dict(event or {})
         with self._lock:
-            self._late_thinking_completion_expected = False
             if str(progress.get("phase") or "").strip().lower() == "started":
+                if self._complete_thinking():
+                    self._late_thinking_completion_expected = True
                 self._tool_input_projector.clear()
             self._complete_active_assistant(process=True)
             self._publish_tool_progress(progress)
@@ -2353,6 +2360,8 @@ def _consume_gateway_turn_event(
         return adapter.finalize_thinking(
             str(payload.get("text") or ""),
             duration_seconds=float(payload.get("duration_seconds") or 0.0),
+            display_archive_ref=payload.get("display_archive_ref") if isinstance(payload.get("display_archive_ref"), dict) else None,
+            history_incomplete=payload.get("history_incomplete") is True,
         )
     if kind == "thinking_delta":
         return adapter.write_thinking_delta(str(payload.get("text") or ""))
@@ -2528,6 +2537,7 @@ def _tool_payload(progress: dict[str, Any]) -> dict[str, Any]:
         "detail",
         "output",
         "display",
+        "display_archive_ref",
         "ok",
         "handler_executed",
         "duration_ms",

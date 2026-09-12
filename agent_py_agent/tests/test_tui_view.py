@@ -327,12 +327,13 @@ def test_new_messages_footer_pill_click_restores_follow_tail() -> None:
         )
     )
     assert view.control.scroll_indicator() == "1 new message"
-    footer = view.footer_control.create_content(40, 1).get_line(0)
+    footer_content = view.footer_control.create_content(40, 3)
+    footer = footer_content.get_line(footer_content.line_count - 1)
     pill_start = sum(len(text) for _style, text in footer[:-1])
 
     result = view.footer_control.mouse_handler(
         MouseEvent(
-            Point(x=pill_start + 1, y=0),
+            Point(x=pill_start + 1, y=footer_content.line_count - 1),
             MouseEventType.MOUSE_UP,
             MouseButton.LEFT,
             frozenset(),

@@ -1,5 +1,5 @@
 # LLM: 本模块是文本文件工具到富 TUI 的唯一 diff/write 展示构造器；返回值只供 UI 投影，不参与写入、授权、验收或工具成功判断。
-# 模块用途: 把文件修改整理成带行号的增删行，或把整文件写入整理成有界内容预览。
+# 模块用途: 捕获文件修改当时完整的增删行/写入内容，供不可变展示归档及有界预览。
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 
-# LLM: diff 行由 before/after 结构化比较生成，renderer 不得从自然语言 output 反推；行表有硬上限但总增删数保持完整。
-# 函数用途: 生成带旧/新行号、上下文和隐藏数量的终端 diff 展示数据。
+# LLM: diff行由before/after结构化比较生成；原始行表完整交给展示归档，UI预览不能成为历史唯一来源。
+# 函数用途: 保存带旧/新行号的完整修改快照，避免后续全展开时内容已经丢失。
 def build_text_diff_display(path: str, before: str, after: str) -> dict[str, Any]:
     before_lines = before.splitlines()
     after_lines = after.splitlines()
@@ -66,19 +66,18 @@ def build_text_diff_display(path: str, before: str, after: str) -> dict[str, Any
                             "text": line,
                         }
                     )
-    visible, hidden = _bounded_diff_rows(rows, max_rows=180)
     return {
         "kind": "diff",
         "path": str(path),
         "lines_added": lines_added,
         "lines_removed": lines_removed,
-        "lines": visible,
-        "hidden_lines": hidden,
+        "lines": rows,
+        "hidden_lines": 0,
     }
 
 
-# LLM: 文本预览按行裁剪并显式报告 hidden_lines；二进制只展示字节事实，绝不尝试解码或把 base64 当正文。
-# 函数用途: 生成 终端交互 风格的写文件摘要和可展开内容行。
+# LLM: 写入时捕获完整不可变正文交给展示归档；传输预览预算由公开投影负责，不能提前丢掉历史。
+# 函数用途: 保存工具执行当时的完整写入展示；二进制仅展示字节数。
 def build_write_display(
     *,
     path: str,
@@ -100,8 +99,6 @@ def build_write_display(
     all_lines = content.splitlines()
     if content and not all_lines:
         all_lines = [content]
-    max_lines = 180
-    visible_lines = all_lines[:max_lines]
     return {
         "kind": "write",
         "path": str(path),
@@ -109,8 +106,8 @@ def build_write_display(
         "bytes": max(0, int(bytes_written or 0)),
         "binary": False,
         "total_lines": len(all_lines),
-        "lines": visible_lines,
-        "hidden_lines": max(0, len(all_lines) - len(visible_lines)),
+        "lines": all_lines,
+        "hidden_lines": 0,
     }
 
 
@@ -129,21 +126,6 @@ def existing_utf8_text_for_display(path: Path) -> str | None:
 # 函数用途: 把 SequenceMatcher 的零基区间起点转成常见 diff 范围起点。
 def _diff_range_start(start: int, end: int) -> int:
     return start if start == end else start + 1
-
-
-# LLM: 大 diff 保留头尾而不是只留头，确保终端仍能看到结束处的错误/收尾改动；hidden_lines 是显式展示事实。
-# 函数用途: 将结构化 diff 行裁到有界大小并返回省略数量。
-def _bounded_diff_rows(
-    rows: list[dict[str, Any]],
-    *,
-    max_rows: int,
-) -> tuple[list[dict[str, Any]], int]:
-    limit = max(1, int(max_rows or 1))
-    if len(rows) <= limit:
-        return rows, 0
-    head = limit * 2 // 3
-    tail = limit - head
-    return [*rows[:head], *rows[-tail:]], len(rows) - limit
 
 
 __all__ = [

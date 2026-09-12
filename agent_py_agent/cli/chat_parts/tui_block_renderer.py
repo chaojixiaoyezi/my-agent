@@ -1447,7 +1447,7 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
 
 
 # LLM: thinking 展开/折叠只由 context mode 与 typed phase 决定，正文内容不能触发展开。
-# 函数用途: 渲染活动 spinner 或已完成思考摘要/详细正文。
+# 函数用途: 渲染活动 spinner 或完成摘要；预览先限排版预算，完整原文由Ctrl+E分页。
 def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     # 对齐 终端交互：思考统一浅灰（tui-thinking），stalled 不换红；
     # 活动态默认显示内容（实时可见），超长折叠提示展开。
@@ -1470,15 +1470,16 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
         )
         lines: list[FormattedLine] = list(activity_lines)
         if block.text:
-            # 活动思考内容默认显示（灰色，终端交互 行为）；超 50 行折叠
-            content_lines = _thinking_content_lines(block.text, context, closed=False)
-            if len(content_lines) > _THINKING_LIVE_MAX_LINES:
+            # 先限制Markdown输入，再按视口折叠；不能先排版十万字再丢掉大部分。
+            preview, truncated = _thinking_preview_text(block.text, live=True)
+            content_lines = _thinking_content_lines(preview, context, closed=False)
+            if truncated or len(content_lines) > _THINKING_LIVE_MAX_LINES:
                 lines.extend(content_lines[:_THINKING_LIVE_MAX_LINES])
                 lines.append(
                     (
                         (
                             "class:tui-thinking",
-                            f"  … 思考内容共 {len(content_lines)} 行，Ctrl+O 查看全部",
+                            "  … 思考预览已折叠，Ctrl+O 后 Ctrl+E 分页查看完整原文",
                         ),
                     )
                 )
@@ -1490,7 +1491,7 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
         return ()
     title = _thinking_title(block)
     # 对齐 终端交互 的 hidePastThinking：流式思考结束后只保留灰色摘要行；
-    # Ctrl+O 进入 detailed transcript 时才恢复完整正文。折叠不删除 typed block。
+    # Ctrl+O为详细预览，Ctrl+E为完整原文分页；折叠不删除typed block。
     lines: list[FormattedLine] = list(
         wrap_fragments(
             (("class:tui-thinking", f"{title}（Ctrl+O 展开）"),),
@@ -1501,9 +1502,21 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
     )
     if not context.detailed_transcript:
         return tuple(lines)
-    content_lines = _thinking_content_lines(detail, context, closed=True)
+    preview, truncated = _thinking_preview_text(detail, live=False)
+    content_lines = _thinking_content_lines(preview, context, closed=True)
     lines.extend(content_lines)
+    if truncated:
+        lines.append((("class:tui-muted", "… 思考预览已折叠，Ctrl+E 分页查看完整原文"),))
     return tuple(lines)
+
+
+# LLM: 仅裁显示副本，限制Markdown每次排版字数/行数；完整typed block不变，不能用作模型上下文。
+# 函数用途: 避免慢模型长思考每个delta或动画帧都重新排版全部历史文本。
+def _thinking_preview_text(text: str, *, live: bool) -> tuple[str, bool]:
+    char_limit, line_limit = (4_000, 50) if live else (12_000, 200)
+    prefix = text[:char_limit]
+    rows = prefix.split("\n", line_limit)
+    return "\n".join(rows[:line_limit]), len(text) > char_limit or len(rows) > line_limit
 
 
 # LLM: Durable Compact renders provider-backed milestones only. Manual control operations cannot

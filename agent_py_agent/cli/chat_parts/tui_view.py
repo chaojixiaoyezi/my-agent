@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from prompt_toolkit.data_structures import Point
@@ -104,6 +104,7 @@ class TuiFrameProvider:
         self._cached_key: tuple[Any, ...] | None = None
         self._cached_frame: TuiRenderFrame | None = None
         self._invalidate_callback: Callable[[], None] | None = None
+        self.return_to_input: Callable[[], None] | None = None
         self._lock = threading.Lock()
         self._subscribed_store_ids: set[int] = {id(state_store)}
         self.state_store.subscribe(self.invalidate)
@@ -151,7 +152,14 @@ class TuiFrameProvider:
             self.last_width = normalized_width
             if key == self._cached_key and self._cached_frame is not None:
                 return self._cached_frame
-        rendered = render_tui_snapshot(snapshot, context, cache=self.block_cache)
+        if self.transcript_state is not None and self.transcript_state.snapshot().show_all:
+            # 原文分页不先渲染全量块；完整历史仅建立轻量页索引，当前页独立排版。
+            rendered = render_tui_snapshot(
+                replace(snapshot, stable_blocks=(), active_blocks=()), context,
+            )
+            rendered = replace(rendered, transcript_lines=self.transcript_state.complete_page_lines(normalized_width))
+        else:
+            rendered = render_tui_snapshot(snapshot, context, cache=self.block_cache)
         if self.transcript_state is not None:
             rendered = self.transcript_state.decorate_frame(
                 rendered,
@@ -456,6 +464,12 @@ class TuiTranscriptControl(UIControl):
         noun = "message" if count == 1 else "messages"
         return f"{count} new {noun}"
 
+    # LLM: 读取已由scroll_indicator刷新过的typed未读ID集合，不解析展示字符串。
+    # 函数用途: 为独立中文跳底按钮保留未读数量，避免按钮改版丢失新消息提醒。
+    def unseen_message_count(self) -> int:
+        with self._lock:
+            return len(self._unseen_block_ids) if not self.follow else 0
+
     # LLM: 复制只读取最近一次 create_content 的可见行与结构化选区；没有非空选区时返回空串，调用方才能继续执行中断。
     # 函数用途: 返回当前鼠标选中的纯文本，跨行时用换行连接。
     def selected_text(self) -> str:
@@ -676,7 +690,9 @@ class TuiTranscriptView:
     # LLM: end 恢复 follow-tail，不根据当前显示文本长度计算位置。
     # 函数用途: 跳到 transcript 末尾。
     def end(self) -> None:
-        self._active_control().move_end()
+        self.transcript_state.exit()
+        self.control.move_end()
+        self.provider.invalidate()
 
     # LLM: jump_search_match 只接收 transcript_state 计算出的可见行，不能按搜索文案重新扫描正文。
     # 函数用途: 将详细 transcript 滚动到当前搜索命中。
@@ -786,7 +802,7 @@ def make_tui_transcript_view(
         return modal_control if mode_state.snapshot().active else control
 
     footer_control = FormattedTextControl(
-        lambda: _decorated_footer(provider, active_control())
+        lambda: _decorated_footer(provider, active_control(), control)
     )
     return TuiTranscriptView(
         provider,
@@ -805,43 +821,75 @@ def make_tui_transcript_view(
 
 
 # LLM: 未读指示器只装饰 renderer footer，不写回 TuiViewModel；其计数来自 control 冻结的 typed block identities。
-# 函数用途: 在离开尾部后追加 终端交互 风格的跳底/新消息 pill 文案。
+# 函数用途: 离底或冻结时独立显示中文跳底按钮，保留未读数，完整浏览额外显示页按钮。
 def _decorated_footer(
     provider: TuiFrameProvider,
     control: TuiTranscriptControl,
+    live_control: TuiTranscriptControl | None = None,
 ) -> list[tuple[Any, ...]]:
     footer: list[tuple[Any, ...]] = list(provider.frame(provider.last_width).footer)
     indicator = control.scroll_indicator()
+    state = provider.transcript_state.snapshot() if provider.transcript_state is not None else None
+    if state is not None and state.show_all:
+        footer.extend((
+            ("", "\n"),
+            ("class:tui-new-messages", " [ 上一页 ] ", _detail_page_mouse_handler(provider, control, -1)),
+            ("class:tui-new-messages", " [ 下一页 ] ", _detail_page_mouse_handler(provider, control, 1)),
+        ))
+    if state is not None and state.active:
+        indicator = indicator or "frozen"
     if indicator is None:
         return footer
     if footer:
-        footer.append(("", "  "))
+        footer.append(("", "\n"))
+    count = control.unseen_message_count()
     footer.append(
         (
             "class:tui-new-messages",
-            f" {indicator} ↓ ",
-            _jump_to_bottom_mouse_handler(provider, control),
+            " ↓ 回到最新 (Ctrl+End) " + (f"· {count} 条新消息" if count else ""),
+            _jump_to_bottom_mouse_handler(provider, live_control or control),
         )
     )
     return footer
 
 
-# LLM: footer pill 只在左键释放时恢复当前 viewport 的 follow-tail；它不根据显示文案定位消息，也不修改 transcript/state store。
-# 函数用途: 让 `N new messages ↓` 像 终端交互 一样可点击并立即回到最新消息。
+# LLM: 左键释放退出冻结显示并恢复当前live viewport follow和输入焦点；不修改模型历史或任务状态。
+# 函数用途: 点击中文跳底按钮直接回到真正的新消息，不停留在冻结快照末尾。
 def _jump_to_bottom_mouse_handler(
     provider: TuiFrameProvider,
     control: TuiTranscriptControl,
 ) -> Callable[[MouseEvent], Any]:
+    # LLM: 仅消费左键释放，不传播任何执行或停止动作。
+    # 函数用途: 处理跳底点击，保持当前代理视角。
     def handle(mouse_event: MouseEvent):
         if (
             mouse_event.event_type == MouseEventType.MOUSE_UP
             and mouse_event.button == MouseButton.LEFT
         ):
+            if provider.transcript_state is not None:
+                provider.transcript_state.exit()
             control.move_end()
+            if provider.return_to_input is not None:
+                provider.return_to_input()
             provider.invalidate()
             return None
         return NotImplemented
 
+    return handle
+
+
+# LLM: 翻页点击仅变更当前冻结原文的页号，不能调用历史执行、改变选中代理或写文件。
+# 函数用途: 给完整浏览页提供可点击的上一页/下一页，并从新页顶部阅读。
+def _detail_page_mouse_handler(provider: TuiFrameProvider, control: TuiTranscriptControl, delta: int):
+    # LLM: 仅消费左键释放，页码仍由state边界验证。
+    # 函数用途: 切换当前原文页并重置该页滚动位置。
+    def handle(mouse_event: MouseEvent):
+        if mouse_event.event_type == MouseEventType.MOUSE_UP and mouse_event.button == MouseButton.LEFT:
+            if provider.transcript_state is not None and provider.transcript_state.move_complete_page(delta):
+                control.jump_to(0)
+                provider.invalidate()
+            return None
+        return NotImplemented
     return handle
 
 
@@ -887,6 +935,8 @@ def _transcript_frame_key(state: TuiTranscriptModeState) -> tuple[Any, ...]:
         snapshot.show_all,
         snapshot.search_open,
         snapshot.search_query,
+        snapshot.complete_page,
+        snapshot.complete_revision,
     )
 
 

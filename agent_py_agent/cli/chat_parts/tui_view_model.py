@@ -1049,6 +1049,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # 函数用途: 固定完整内容并补回恢复时未知的工具结果，不新增重复卡片、不改变任务状态。
     def _freeze_block(self, event: TuiEvent, *, role: str) -> None:
         if event.block_id in self._stable_ids:
+            if self._attach_thinking_archive(event):
+                return
             if self._resolve_history_placeholder(event):
                 return
             self.record_diagnostic("TERMINAL_BLOCK_REPLAY", event)
@@ -1081,6 +1083,20 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             metadata={**active.metadata, **_public_metadata(event.payload)},
         )
         self._append_stable(block, event)
+
+    # LLM: 仅同一已冻结thinking首次附公开原文ref；不改终态、正文或位置，不允许覆盖既有归档。
+    # 函数用途: 工具边界后才到的完整思考可补原文链接，不能再建一个底部思考或关闭新轮块。
+    def _attach_thinking_archive(self, event: TuiEvent) -> bool:
+        reference = event.payload.get("display_archive_ref")
+        if event.kind != "thinking_completed" or not isinstance(reference, dict) or reference.get("schema") != "display_archive_ref.v1":
+            return False
+        for index, block in enumerate(self.stable_blocks):
+            if block.block_id == event.block_id and block.role == "thinking" and not block.metadata.get("display_archive_ref"):
+                self.stable_blocks[index] = replace(block, updated_seq=event.seq, metadata={
+                    **block.metadata, "display_archive_ref": dict(reference), "history_incomplete": False,
+                })
+                return True
+        return False
 
     # LLM: 仅替换host标记history_incomplete的system占位；精确block+bg请求+工具终态校验，正文不能授予覆盖权。
     # 函数用途: 页面恢复后收到迟到的真实工具结果时原位补齐；旧开始事件和真实已知终态保持不可覆盖。
@@ -1278,6 +1294,7 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "duration_ms",
         "handler_executed",
         "display",
+        "display_archive_ref",
         "invocation",
         "duration_seconds",
         "started_at",

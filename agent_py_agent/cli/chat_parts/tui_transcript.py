@@ -4,10 +4,17 @@
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from .tui_block_renderer import TuiRenderFrame
+from .tui_complete_detail import (
+    CompleteDetailPage,
+    CompleteDetailPages,
+    archive_page_rows,
+    build_complete_detail_pages,
+)
 from .tui_markdown import FormattedLine, display_width_text, fragments_text
 from .tui_view_model import TuiViewSnapshot
 
@@ -31,6 +38,9 @@ class TuiTranscriptModeSnapshot:
     search_query: str = ""
     match_count: int = 0
     current_match: int = 0
+    complete_page: int = 0
+    complete_page_count: int = 0
+    complete_revision: int = 0
 
 
 # LLM: TuiTranscriptModeState 在同一锁内维护模式和搜索；冻结 snapshot 只属于当前显示来源，control 动作仍由外层 keybinding 调用。
@@ -41,6 +51,11 @@ class TuiTranscriptModeState:
     def __init__(self, invalidate: Callable[[], None] | None = None) -> None:
         self._active = False
         self._show_all = False
+        self._complete_pages: CompleteDetailPages | tuple = ()
+        self._complete_page = 0
+        self._complete_cache: OrderedDict[tuple[str, int], CompleteDetailPage] = OrderedDict()
+        self._complete_revision = 0
+        self.request_complete_page: Callable[[dict, int], None] | None = None
         self._search_open = False
         self._committed_query = ""
         self._editing_query = ""
@@ -73,6 +88,9 @@ class TuiTranscriptModeState:
                 search_query=query,
                 match_count=len(self._matches),
                 current_match=current,
+                complete_page=self._complete_page,
+                complete_page_count=len(self._complete_pages),
+                complete_revision=self._complete_revision,
             )
 
     # LLM: enter 冻结一次不可变 view snapshot；后续 live 事件继续进 canonical store，但不会改写本次 transcript 视图。
@@ -84,6 +102,9 @@ class TuiTranscriptModeState:
             self._active = True
             self._show_all = False
             self._frozen_snapshot = snapshot
+            self._complete_pages = ()
+            self._complete_page = 0
+            self._complete_cache.clear()
             self._reset_search_locked()
         self._notify()
         return True
@@ -97,6 +118,9 @@ class TuiTranscriptModeState:
             self._active = False
             self._show_all = False
             self._frozen_snapshot = None
+            self._complete_pages = ()
+            self._complete_page = 0
+            self._complete_cache.clear()
             self._reset_search_locked()
         self._notify()
         return True
@@ -128,6 +152,9 @@ class TuiTranscriptModeState:
             if not self._active:
                 return
             self._frozen_snapshot = snapshot
+            self._complete_pages = ()
+            self._complete_page = 0
+            self._complete_cache.clear()
             self._reset_search_locked()
         self._notify()
 
@@ -145,6 +172,8 @@ class TuiTranscriptModeState:
             self._frozen_snapshot = replace(frozen, stable_blocks=(
                 *prefix, *(welcome.get(block.block_id, block) for block in frozen.stable_blocks),
             ))
+            self._complete_pages = ()
+            self._complete_page = 0
             self._matches, self._matches_query = (), ""
         self._notify()
 
@@ -158,6 +187,80 @@ class TuiTranscriptModeState:
             enabled = self._show_all
         self._notify()
         return enabled
+
+    # LLM: 原文页只由当前冻结快照构造一次，切页不读文件、不调用模型、不更新持久历史。
+    # 函数用途: 返回完整浏览的当前有界页，所有页面均可继续翻阅。
+    def complete_page_lines(self, width: int) -> tuple[FormattedLine, ...]:
+        with self._lock:
+            if not self._active or not self._show_all or self._frozen_snapshot is None:
+                return ()
+            if not self._complete_pages:
+                self._complete_pages = build_complete_detail_pages(self._frozen_snapshot)
+            page = self._complete_pages[self._complete_page]
+            if page.reference is not None:
+                key = (str(page.reference["archive_id"]), page.remote_page)
+                cached = self._complete_cache.get(key)
+                if cached is None:
+                    callback = self.request_complete_page
+                else:
+                    page, callback = cached, None
+            else:
+                callback = None
+        if page.reference is not None:
+            if callback is not None:
+                callback(page.reference, page.remote_page)
+            return ((("class:tui-muted", "正在读取完整原文…（不会调用模型）"),),)
+        return page.render(width)
+
+    # LLM: 归档结果按opaque archive_id/page定位；不直接操作模型历史，缓存最多八页，失败也有可重试提示。
+    # 函数用途: 接收一页公开原文，丢弃已退出或已切换代理的迟到结果。
+    def accept_complete_page(self, reference: dict, page_index: int, payload: dict) -> None:
+        with self._lock:
+            key = (str(reference.get("archive_id") or ""), page_index)
+            if not self._active or not any(
+                page.reference is not None and page.reference.get("archive_id") == key[0]
+                for page in getattr(self._complete_pages, "segments", ())
+            ):
+                return
+            rows = payload.get("rows")
+            try:
+                if payload.get("ok") is not True or payload.get("page_index") != page_index:
+                    raise ValueError("invalid page response")
+                page = archive_page_rows(rows)
+            except (TypeError, ValueError):
+                page = CompleteDetailPage((("class:tui-error", "完整原文读取失败；按 R 重试，原预览保留。"),))
+            self._complete_cache[key] = page
+            self._complete_cache.move_to_end(key)
+            while len(self._complete_cache) > 8:
+                self._complete_cache.popitem(last=False)
+            self._complete_revision += 1
+        self._notify()
+
+    # LLM: 显式重试只清当前页缓存，不重执行工具、不自动持续重试、不动其他页面。
+    # 函数用途: 允许用户在网络恢复后重新读取失败的归档页。
+    def retry_complete_page(self) -> None:
+        with self._lock:
+            if not self._active or not self._show_all or not self._complete_pages:
+                return
+            page = self._complete_pages[self._complete_page]
+            if page.reference is not None:
+                self._complete_cache.pop((str(page.reference["archive_id"]), page.remote_page), None)
+                self._complete_revision += 1
+        self._notify()
+
+    # LLM: 页号按已构造的展示页面边界移动，不能用于模型历史或Gateway游标。
+    # 函数用途: 在完整原文中翻页；到达首尾返回False，不循环跳转。
+    def move_complete_page(self, delta: int) -> bool:
+        with self._lock:
+            if not self._active or not self._show_all or not self._complete_pages:
+                return False
+            target = max(0, min(len(self._complete_pages) - 1, self._complete_page + int(delta)))
+            if target == self._complete_page:
+                return False
+            self._complete_page = target
+            self._reset_search_locked()
+        self._notify()
+        return True
 
     # LLM: open_search 保存进入搜索前的 committed query 与滚动锚点；编辑框总从空串开始，匹配 less 的 `/` 习惯。
     # 函数用途: 打开 transcript 搜索栏。
@@ -270,6 +373,12 @@ class TuiTranscriptModeState:
             match_count=len(matches),
             current_match=current_index + 1 if matches else 0,
         )
+        if show_all and not preserve_footer:
+            state = self.snapshot()
+            footer = (("class:tui-muted", (
+                f"完整原文 {state.complete_page + 1}/{max(1, state.complete_page_count)} 页"
+                " · [ 上一页 · ] 下一页 · Ctrl+E 收起 · / 搜本页"
+            )),)
         return replace(frame, transcript_lines=highlighted, footer=footer)
 
     # LLM: current_match_line 只返回已渲染宽度下的当前位置；调用前若 frame 未计算则返回 None。

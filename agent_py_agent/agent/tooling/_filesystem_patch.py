@@ -469,18 +469,17 @@ def _decode_patch_display_text(content: bytes) -> str | None:
         return None
 
 
-# LLM: 单文件沿用 diff schema，多文件使用显式 patch/files 投影；数量裁剪只限制 UI envelope，不遗漏真实 files_modified。
-# 函数用途: 将若干文件差异整理成有界的补丁展示结构。
+# LLM: 单文件沿用diff schema，多文件保存完整执行时快照；只在持久展示归档后生成有界传输预览。
+# 函数用途: 保留补丁当时的全部文件差异，不从之后可能被修改的磁盘文件重建。
 def _patch_display(files: list[dict[str, Any]]) -> dict[str, Any]:
     if len(files) == 1:
         return files[0]
     if not files:
         return {}
-    limit = 50
     return {
         "kind": "patch",
-        "files": files[:limit],
-        "hidden_files": max(0, len(files) - limit),
+        "files": files,
+        "hidden_files": 0,
     }
 
 

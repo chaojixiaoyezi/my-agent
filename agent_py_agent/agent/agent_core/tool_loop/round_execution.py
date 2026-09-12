@@ -1353,6 +1353,11 @@ def _structured_tool_progress(
         display = _public_progress_display(event, raw_display)
         if display:
             payload["display"] = display
+        if event.phase == "finished":
+            from .display_archive import archive_tool_display
+            reference = archive_tool_display(event, raw_display)
+            if reference:
+                payload["display_archive_ref"] = reference
         if bool(event.result.ok):
             items = _task_progress_items_from_result(event.result)
             if items is not None:
@@ -1420,11 +1425,13 @@ def _task_progress_identity_from_result(result: ToolResult) -> tuple[str, int]:
     return generation_id, revision
 
 
+# LLM: 所有工具公开文本共享凭据/内部协议净化；None只取消显示字数限制，不取消净化。
+# 函数用途: 生成安全展示文本，完整归档保留未被净化改动的原始缩进和空白。
 def _public_progress_text(
     event: ToolProgressEvent,
     value: object,
     *,
-    max_chars: int,
+    max_chars: int | None,
 ) -> str:
     from ...conversation.channels import INTERNAL_SIGNAL_PREFIXES, project_user_reply
     from ...tooling.mcp_client import sanitize_credentials
@@ -1437,8 +1444,9 @@ def _public_progress_text(
     )
     if owner_home:
         text = text.replace(owner_home, "~/.my-agent/owner")
-    text = project_user_reply(text).content
-    if len(text) <= max_chars:
+    projected = project_user_reply(text).content
+    text = text if max_chars is None and projected == text.strip() else projected
+    if max_chars is None or len(text) <= max_chars:
         return text
     keep_head = max_chars * 2 // 3
     keep_tail = max_chars - keep_head
@@ -1478,7 +1486,7 @@ def _public_progress_display(
             "lines_added": _nonnegative_progress_int(value.get("lines_added")),
             "lines_removed": _nonnegative_progress_int(value.get("lines_removed")),
             "lines": rows,
-            "hidden_lines": _nonnegative_progress_int(value.get("hidden_lines")),
+            "hidden_lines": _nonnegative_progress_int(value.get("hidden_lines")) + max(0, len(raw_rows) - 180 if isinstance(raw_rows, list) else 0),
         }
     if kind == "write":
         raw_lines = value.get("lines")
@@ -1494,7 +1502,7 @@ def _public_progress_display(
             "binary": value.get("binary") is True,
             "total_lines": _nonnegative_progress_int(value.get("total_lines")),
             "lines": lines,
-            "hidden_lines": _nonnegative_progress_int(value.get("hidden_lines")),
+            "hidden_lines": _nonnegative_progress_int(value.get("hidden_lines")) + max(0, len(raw_lines) - 180 if isinstance(raw_lines, list) else 0),
         }
     if kind == "patch":
         raw_files = value.get("files")

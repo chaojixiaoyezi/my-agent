@@ -212,6 +212,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         self._late_thinking_completion_expected = False
         self._thinking_truncated = False
         self._thinking_started_at = 0.0
+        self._closed_thinking_block_id = ""
         self._thinking_delta_batcher = _ThinkingDeltaBatcher()
         self._model_text = ""
         self._committed_commentary: list[str] = []
@@ -288,6 +289,13 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
                        history_incomplete: bool = False) -> bool:
         if not self._thinking_active and self._late_thinking_completion_expected:
             self._late_thinking_completion_expected = False
+            full = public_background_transcript_text(text, limit=0, channel=self.channel)
+            extra = ({"display_archive_ref": display_archive_ref} if display_archive_ref
+                     else {} if history_incomplete else _thinking_archive_payload(self, full))
+            if extra.get("display_archive_ref") and self._closed_thinking_block_id:
+                self._event("thinking_completed", "completed", self._closed_thinking_block_id, {
+                    "text": public_background_transcript_text(text, channel=self.channel), **extra,
+                })
             return False
         full_content = public_background_transcript_text(text, limit=0, channel=self.channel)
         content = public_background_transcript_text(text, channel=self.channel)
@@ -455,6 +463,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     # 函数用途: 冻结尚未收到终态的思考，让下一次delta创建新块并保留真实事件顺序。
     def _close_thinking_boundary(self) -> None:
         if self._thinking_active:
+            self._closed_thinking_block_id = self._thinking_block_id
             self.write_thinking(self._thinking_text, history_incomplete=self._thinking_truncated,
                                 duration_seconds=max(0.0, time.time() - self._thinking_started_at))
             self._late_thinking_completion_expected = True

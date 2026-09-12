@@ -242,9 +242,15 @@ def _register_transcript_bindings(
     params: TuiCreateKeybindingsParams,
     filters: _TuiBindingFilters,
 ) -> None:
+    from prompt_toolkit.filters import Condition
+
     navigation = filters.transcript_navigation
+    full_navigation = navigation & Condition(lambda: _required_transcript_state(params).snapshot().show_all)
     search_active = filters.transcript_search_active
     kb.add("c-e", filter=navigation)(lambda e: _handle_transcript_show_all(e, params))
+    kb.add("[", filter=full_navigation)(lambda e: _handle_complete_page(e, params, -1))
+    kb.add("]", filter=full_navigation)(lambda e: _handle_complete_page(e, params, 1))
+    kb.add("R", filter=full_navigation)(lambda _e: _required_transcript_state(params).retry_complete_page())
     kb.add("c-a", filter=navigation)(lambda e: _handle_transcript_select_all(e, params))
     kb.add("q", filter=navigation)(lambda e: _exit_transcript_mode(e, params))
     kb.add("escape", filter=navigation, eager=True)(lambda e: _exit_transcript_mode(e, params))
@@ -269,7 +275,7 @@ def _register_transcript_bindings(
         lambda e: _scroll_transcript(params, max(1, int(e.arg)))
     )
     kb.add("home", filter=navigation)(lambda e: _scroll_transcript_home(params))
-    kb.add("end", filter=navigation)(lambda e: _scroll_transcript_end(params))
+    kb.add("end", filter=navigation)(lambda e: _jump_latest_keybinding(e, params))
     kb.add("enter", filter=search_active)(lambda e: _commit_transcript_search(e, params))
     kb.add("escape", filter=search_active, eager=True)(
         lambda e: _cancel_transcript_search(e, params)
@@ -297,7 +303,7 @@ def _register_scroll_bindings(
         lambda e: _scroll_transcript(params, params.transcript_scroll_lines)
     )
     kb.add(keys.ControlHome, filter=scroll_active)(lambda e: _scroll_transcript_home(params))
-    kb.add(keys.ControlEnd, filter=scroll_active)(lambda e: _scroll_transcript_end(params))
+    kb.add(keys.ControlEnd, filter=scroll_active)(lambda e: _jump_latest_keybinding(e, params))
     kb.add(keys.ScrollUp, filter=scroll_active)(lambda e: _scroll_transcript(params, -1))
     kb.add(keys.ScrollDown, filter=scroll_active)(lambda e: _scroll_transcript(params, 1))
 
@@ -310,6 +316,8 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     from prompt_toolkit.keys import Keys
 
     kb = KeyBindings()
+    if params.transcript_area is not None and hasattr(params.transcript_area, "provider"):
+        params.transcript_area.provider.return_to_input = lambda: _focus_chat_input(params)
     if params.use_gateway:
         _ensure_active_input_reconciler(params)
         _ensure_control_operation_reconciler(params)
@@ -2341,6 +2349,31 @@ def _handle_ctrl_e_keybinding(event, params: TuiCreateKeybindingsParams) -> None
 # 函数用途: 在详细 transcript 中显示全部或恢复折叠。
 def _handle_transcript_show_all(event, params: TuiCreateKeybindingsParams) -> None:
     _required_transcript_state(params).toggle_show_all()
+    params.transcript_area.modal_control.jump_to(0)
+    event.app.invalidate()
+
+
+# LLM: 页键只操作完整原文的本地分页状态，不发送输入、不改变模型上下文或代理身份。
+# 函数用途: 在完整查看时翻页，普通详细预览中不生效。
+def _handle_complete_page(event, params: TuiCreateKeybindingsParams, delta: int) -> None:
+    if _required_transcript_state(params).move_complete_page(delta):
+        params.transcript_area.modal_control.jump_to(0)
+        event.app.invalidate()
+
+
+# LLM: 焦点恢复只由明确回到最新动作调用，不能抢占用户的普通上翻、搜索或模型选择。
+# 函数用途: 退出冻结阅读后把键盘交还输入框。
+def _focus_chat_input(params: TuiCreateKeybindingsParams) -> None:
+    from prompt_toolkit.application import get_app
+
+    get_app().layout.focus(params.input_area)
+
+
+# LLM: Ctrl+End/End 共用视图的真实live尾部入口，结束阅读而非结束代理任务。
+# 函数用途: 一次回到新消息底部、恢复跟随和输入焦点。
+def _jump_latest_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    _scroll_transcript_end(params)
+    event.app.layout.focus(params.input_area)
     event.app.invalidate()
 
 

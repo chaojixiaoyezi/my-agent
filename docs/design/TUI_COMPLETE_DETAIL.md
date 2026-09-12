@@ -43,7 +43,8 @@
 明确失败的归档只能保留缺失提示，不能将已裁预览二次归档当成全文。
 
 现有 writer 的 thinking 回调没有provider item/call ID。真实边界后、下一delta前的旧全文
-会被忽略；若旧调用全文晚到下一调用delta之后，仍需要上游显式item身份才能可靠分辨。
+只能给原block补原文ref，不能新增块或改变原位置；若旧调用全文晚到下一调用delta之后，
+仍需要上游显式item身份才能可靠分辨。
 本切片不以文本相似度猜归属，不宣称已经补齐这个跨调用乱序身份协议。
 
 ## 参考
@@ -67,3 +68,5 @@
 foreground继承、attempt切换、100K思考预裁不改原文。`test_tool_display_archive.py`覆盖
 原始长行/缩进、child identity、immutable write快照、checkpoint ref回放及存档失败隔离。
 完整键盘pipe验证Ctrl+O/Ctrl+E/翻页/Ctrl+End以及回到输入后方括号不被快捷键吞掉。
+本切片与归档、Gateway前置长思考接点联测：392项focused通过；相关Ruff、diff、strict
+code-size通过。全仓pytest与真实LLM未运行；真实TUI由主线统一执行，不把pipe测试称为真模型验收。
