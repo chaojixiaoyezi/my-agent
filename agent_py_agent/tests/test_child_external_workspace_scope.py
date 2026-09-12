@@ -309,3 +309,60 @@ def test_file_tool_owner_wall_escape_requires_host_grant(tmp_path, monkeypatch):
     outside = tool.execute({"path": str(other / "b.go"), "content": "package b"})
     assert outside.ok is False
     assert not (other / "b.go").exists()
+
+
+# LLM: 命令执行是第四份 owner 墙：文件工具放行后，run_command 的 working_dir 仍会用
+#   path_access_policy 再判一次（真机报 COMMAND_ACCESS_DENIED: 当前 owner 只能在
+#   WorkspaceOnly 范围内执行命令）。逃生口与文件工具同一规则、同一份宿主授权。
+# 函数用途: 验证命令工作目录在墙外已授权根内放行，未授权目录仍拒。
+def test_shell_working_dir_escape_requires_host_grant(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.shell import (
+        ShellTool,
+        ShellToolOptions,
+        _working_dir_from_params,
+    )
+
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "my-agent"))
+    owner_home = _owner_home(tmp_path)
+    project = tmp_path / "work" / "port-click-go"
+    other = tmp_path / "work" / "someone-else"
+    for path in (owner_home, project, other):
+        path.mkdir(parents=True, exist_ok=True)
+
+    tool = ShellTool(
+        owner_home,
+        options=ShellToolOptions(
+            workspace_roots=[owner_home],
+            owner_scope_root=str(owner_home),
+            access_mode="workspace-write",
+        ),
+    )
+
+    denied = _working_dir_from_params(
+        {"working_dir": str(project)},
+        tool.workspace_root,
+        workspace_roots=[owner_home, project.resolve()],
+        path_access_policy=tool.path_access_policy,
+        access_mode="workspace-write",
+    )
+    assert not isinstance(denied, Path)
+
+    allowed = _working_dir_from_params(
+        {"working_dir": str(project)},
+        tool.workspace_root,
+        workspace_roots=[owner_home, project.resolve()],
+        path_access_policy=tool.path_access_policy,
+        access_mode="workspace-write",
+        granted_external_roots=(project.resolve(),),
+    )
+    assert isinstance(allowed, Path) and allowed == project.resolve()
+
+    still_denied = _working_dir_from_params(
+        {"working_dir": str(other)},
+        tool.workspace_root,
+        workspace_roots=[owner_home, project.resolve()],
+        path_access_policy=tool.path_access_policy,
+        access_mode="workspace-write",
+        granted_external_roots=(project.resolve(),),
+    )
+    assert not isinstance(still_denied, Path)

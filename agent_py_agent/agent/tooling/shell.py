@@ -296,6 +296,7 @@ def _working_dir_from_params(
     workspace_roots: list[Path] | None = None,
     path_access_policy: PathAccessPolicy | None = None,
     access_mode: str = _DEFAULT_ACCESS_MODE,
+    granted_external_roots: tuple[Path, ...] | None = None,
 ) -> Path | ToolHandlerOutcome:
     working_dir = str(params.get("working_dir", "")).strip()
     target = Path(working_dir).expanduser() if working_dir else workspace_root
@@ -315,6 +316,14 @@ def _working_dir_from_params(
     # projection. A normal user cannot turn full-access text or an injected root into host access.
     if path_access_policy is not None and path_access_policy.owner_scope_root is not None:
         decision = path_access_policy.check(target)
+        if not decision.allowed and _path_inside_any_root(target, granted_external_roots or ()):
+            # LLM: 用户显式声明的工作目录（宿主写进 write_boundary 的墙外授权根）和文件工具
+            #   走同一条逃生规则：危险目录、凭据文件、跨 owner 仍由无墙策略继续拦。
+            # 人类: 少了这一步，子代理在用户指定的项目目录里连 pwd/ls 都跑不了。
+            decision = PathAccessPolicy.from_values(
+                mode=path_access_policy.mode,
+                dangerous_roots=path_access_policy.dangerous_roots,
+            ).check(target)
         roots = workspace_roots or [workspace_root]
         if not decision.allowed or not _path_inside_any_root(target, roots):
             return ToolHandlerOutcome(
@@ -1037,6 +1046,11 @@ class ShellTool(BaseTool):
         self.workspace_roots = [
             root.resolve() for root in (options.workspace_roots or [self.workspace_root])
         ]
+        # LLM: owner 墙的逃生口只认宿主逐次下发的"墙外已授权工作根"（registry 从
+        #   write_boundary 派生），不认 workspace_roots 这种可变列表；默认空 = 完全保持
+        #   WorkspaceOnly 语义。
+        # 人类: 用户显式 --workspace 声明到 owner home 之外的目录时，命令才能在那里执行。
+        self.granted_external_roots: tuple[Path, ...] = ()
         self.path_access_policy = PathAccessPolicy.from_values(
             mode=options.path_access_mode,
             dangerous_roots=options.path_dangerous_roots,
@@ -1753,6 +1767,7 @@ def _shell_execution_target(
         workspace_roots=tool.workspace_roots,
         path_access_policy=tool.path_access_policy,
         access_mode=effective_access_mode,
+        granted_external_roots=tuple(getattr(tool, "granted_external_roots", ()) or ()),
     )
 
 
