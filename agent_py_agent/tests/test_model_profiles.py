@@ -56,7 +56,7 @@ def test_private_profile_roundtrip_and_default(tmp_path):
     assert "secret" not in json.dumps(result)
     assert result["selected"] == "default"
     assert selected_model_config(host) is host.config
-    result = execute_model_profile_operation(host, "select", {"profile_id": key})
+    result = execute_model_profile_operation(host, "set_default", {"profile_id": key})
     assert result["selected"] == key
     cfg = selected_model_config(host)
     assert cfg.model_name == "MiniMax-M2.7" and cfg.api_key_env == ""
@@ -104,7 +104,7 @@ def test_concurrent_saves_and_owner_isolation(tmp_path):
     assert len(read_model_profiles(model_profiles_path(alice.home_paths))["profiles"]) == 12
     assert read_model_profiles(model_profiles_path(bob.home_paths))["profiles"] == {}
     with pytest.raises(ValueError):
-        execute_model_profile_operation(bob, "select", {"profile_id": ids[0]})
+        execute_model_profile_operation(bob, "set_default", {"profile_id": ids[0]})
 
 
 def test_corrupt_file_not_overwritten(tmp_path):
@@ -149,7 +149,7 @@ def test_model_scope_freezes_and_restores_across_concurrent_selection(tmp_path):
     old_config, old_backend = host.config, host.backend
     first, _ = add(host)
     second, _ = add(host, model_name="another-model", model_context_window_tokens=128000)
-    execute_model_profile_operation(host, "select", {"profile_id": first})
+    execute_model_profile_operation(host, "set_default", {"profile_id": first})
     with selected_model_scope(host):
         backend = host.backend
         assert host.config.model_name == "MiniMax-M2.7"
@@ -158,7 +158,7 @@ def test_model_scope_freezes_and_restores_across_concurrent_selection(tmp_path):
 
         def other_thread():
             observations.append(host.config is old_config)
-            execute_model_profile_operation(host, "select", {"profile_id": second})
+            execute_model_profile_operation(host, "set_default", {"profile_id": second})
             with selected_model_scope(host):
                 observations.append(host.config.model_name == "another-model")
 
@@ -179,12 +179,12 @@ def test_model_scope_freezes_and_restores_across_concurrent_selection(tmp_path):
 def test_child_inherits_exact_profile_after_selection_changes(tmp_path):
     host = Host(tmp_path)
     key, _ = add(host)
-    execute_model_profile_operation(host, "select", {"profile_id": key})
+    execute_model_profile_operation(host, "set_default", {"profile_id": key})
     attrs = {"host_model_profile.v1": {"profile_id": "spoofed"}}
     with selected_model_scope(host):
         inherit_model_profile(attrs, host)
     assert attrs == {"host_model_profile.v1": {"profile_id": key}}
-    execute_model_profile_operation(host, "select", {"profile_id": "default"})
+    execute_model_profile_operation(host, "set_default", {"profile_id": "default"})
     recovered = inherited_model_config(host, SimpleNamespace(attributes=attrs))
     assert recovered.model_name == "MiniMax-M2.7" and recovered.model_context_window_tokens == 96000
     child = Host(tmp_path)
@@ -192,14 +192,14 @@ def test_child_inherits_exact_profile_after_selection_changes(tmp_path):
     with selected_model_scope(child, inherited=True):
         assert child.config is recovered
     inherit_model_profile(attrs, host)
-    assert attrs == {}
+    assert attrs == {"host_model_profile.v1": {"profile_id": "default"}}
 
 
 def test_child_can_select_saved_model_without_switching_parent(tmp_path):
     host = Host(tmp_path)
     a, _ = add(host, model_name="model-A")
     b, _ = add(host, model_name="model-B", model_backend="openai_compatible", model_context_window_tokens=262144)
-    execute_model_profile_operation(host, "select", {"profile_id": a})
+    execute_model_profile_operation(host, "set_default", {"profile_id": a})
     attrs = {"host_model_profile.v1": {"profile_id": "spoofed"}}
     with selected_model_scope(host):
         inherit_model_profile(attrs, host, model="model-B")
@@ -212,7 +212,7 @@ def test_child_can_select_saved_model_without_switching_parent(tmp_path):
     grandchild_attrs = {}
     inherit_model_profile(grandchild_attrs, child)
     assert grandchild_attrs == attrs
-    execute_model_profile_operation(host, "select", {"profile_id": "default"})
+    execute_model_profile_operation(host, "set_default", {"profile_id": "default"})
     assert inherited_model_config(host, SimpleNamespace(attributes=grandchild_attrs)).model_name == "model-B"
 
 
@@ -292,7 +292,7 @@ def test_different_child_models_do_not_share_creation_guard_identity():
 def test_task_overlay_preserves_model_reference_and_full_selected_profile(tmp_path):
     host = Host(tmp_path)
     key, _ = add(host)
-    execute_model_profile_operation(host, "select", {"profile_id": key})
+    execute_model_profile_operation(host, "set_default", {"profile_id": key})
     config = selected_model_config(host)
     overlay = tmp_path / "task-runtime.yaml"
     overlay.write_text("tool_timeout_seconds: 31\nmodel_context_window_tokens: 128000\napi_base: https://stale.test\n")
@@ -304,7 +304,7 @@ def test_task_overlay_preserves_model_reference_and_full_selected_profile(tmp_pa
     attrs = {}
     inherit_model_profile(attrs, child)
     assert attrs == {"host_model_profile.v1": {"profile_id": key}}
-    execute_model_profile_operation(host, "select", {"profile_id": "default"})
+    execute_model_profile_operation(host, "set_default", {"profile_id": "default"})
     grandchild = inherited_model_config(host, SimpleNamespace(attributes=attrs))
     assert grandchild.model_context_window_tokens == 96000
 
@@ -326,7 +326,7 @@ def test_selected_model_survives_real_transport_guard_thread(tmp_path, monkeypat
     host = Host(tmp_path)
     original = host.config
     key, _ = add(host, model_name="chosen-model")
-    execute_model_profile_operation(host, "select", {"profile_id": key})
+    execute_model_profile_operation(host, "set_default", {"profile_id": key})
     monkeypatch.setattr(model_scope, "_profile_backend", lambda agent, config: SimpleNamespace(name=config.model_name))
     monkeypatch.setattr(generation, "_effective_model_request_timeout_seconds", lambda *args: 1.0)
     observed = []

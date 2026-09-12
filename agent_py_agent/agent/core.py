@@ -388,7 +388,11 @@ class SimpleAgent(
         )
         self.prompts.capability_router = self.capability_router
         self.backend = get_backend(config.model_backend, config)
-        self.conversation_store = ConversationStore(paths["conversation_workspace"])
+        from .settings.thread_model_selection import default_model_profile_id
+
+        self.conversation_store = ConversationStore(
+            paths["conversation_workspace"], model_default=lambda: default_model_profile_id(self),
+        )
         _wire_memory_curator(self, config)
         self.collaboration_store = CollaborationStore(paths["collaboration_workspace"])
         self.scheduler_repository = SchedulerRepository(

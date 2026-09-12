@@ -199,7 +199,11 @@ class SimpleAgentRuntimeMixin:
         from ..backends.provider_headers import provider_runtime_scope
         from ..settings.model_scope import selected_model_scope
 
-        with provider_runtime_scope(self, params), selected_model_scope(self, inherited=params.context_scope == "task_local"):
+        attrs = params.task_attributes or {}
+        with provider_runtime_scope(self, params), selected_model_scope(
+            self, inherited=params.context_scope == "task_local",
+            thread_id=str(attrs.get("conversation_thread_id") or ""),
+        ):
             return _run_with_params(self, user_prompt, params)
 
     def _build_finalize_context(self, params: FinalizeParams):

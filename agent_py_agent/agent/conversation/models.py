@@ -7,7 +7,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "conversation_thread.v8"
+SCHEMA_VERSION = "conversation_thread.v9"
 
 THREAD_TASK_LINK_ACTIVE_STATUS = "active"
 THREAD_TASK_LINK_INACTIVE_STATUSES = frozenset(
@@ -309,15 +309,18 @@ class ConversationCompactCommit:
 
 
 # LLM: ConversationThread is the sole durable authority for transcript, compact cursor/checkpoint,
-# provider context calibration, display-only preflight usage, compact failure circuit, and the latest workspace projection; task
+# model profile reference, provider context calibration, display-only preflight usage, compact failure circuit, and the latest workspace projection; task
 # lifecycle remains in ThreadTaskLink.
-# 类用途: 保存会话压缩点、模型校准和独立的最近上下文展示快照，任务运行状态仍由 task link 保存。
+# 类用途: 保存会话模型选择、压缩点和上下文快照，任务运行状态仍由 task link 保存。
 @dataclass(frozen=True)
 class ConversationThread:
     thread_id: str
     canonical_user_id: str
     owner_id: str = ""
     owner_home: str = ""
+    # LLM: 仅存 owner 配置引用，不保存密钥；空串表示旧记录尚未首次冻结，不是每轮跟随用户默认。
+    # 字段用途: 固定当前会话的模型，多个窗口打开同一会话共享，不同会话互不改变。
+    model_profile_id: str = ""
     title: str = ""
     status: str = "active"
     summary: str = ""
@@ -358,9 +361,9 @@ class ConversationThread:
     runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: Persist v8 transcript/tool compact sources, provider calibration, numeric display usage, guards, latest
+    # LLM: Persist v9 model reference, transcript/tool compact sources, calibration, numeric display usage, guards, latest
     # workspace projection and client cwd together.
-    # 函数用途: 将会话状态与最近上下文数字一并写成 JSON，供重启恢复读取。
+    # 函数用途: 将会话模型引用和上下文状态一并写成 JSON，供重启恢复读取，不保存模型密钥。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -383,6 +386,7 @@ class ConversationThread:
             canonical_user_id=str(data.get("canonical_user_id") or ""),
             owner_id=str(data.get("owner_id") or ""),
             owner_home=str(data.get("owner_home") or ""),
+            model_profile_id=str(data.get("model_profile_id") or ""),
             title=str(data.get("title") or ""),
             status=str(data.get("status") or "active"),
             summary=str(data.get("summary") or ""),

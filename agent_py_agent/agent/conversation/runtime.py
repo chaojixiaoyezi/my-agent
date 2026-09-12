@@ -1207,8 +1207,8 @@ class BackgroundMainAgentRuntime:
         return committed_content, delivery_status
 
 
-# LLM: 运行一次后台工作片，把结果的 typed turn-end 随冻结展示副本交接；不提交 transcript 或改变生命周期。
-# 函数用途: 调用后台主代理，把本轮过程和实际结束原因一起交给消息提交方，不让技术截断在恢复时丢失。
+# LLM: 后台按 canonical thread 的模型引用冻结一次配置，再交接 typed turn-end；不重读 owner 选择或改生命周期。
+# 函数用途: 用本会话模型运行后台工作片，保留真实结束原因；用户其他窗口选模型不会改变这个任务。
 def _invoke_background_main_agent(
     runtime: BackgroundMainAgentRuntime,
     thread: ConversationThread,
@@ -1218,7 +1218,7 @@ def _invoke_background_main_agent(
 ) -> tuple[object, dict[str, object]]:
     from ..settings.model_scope import selected_model_scope
 
-    with selected_model_scope(runtime.agent):
+    with selected_model_scope(runtime.agent, thread_id=thread.thread_id):
         return _invoke_background_main_agent_with_model(runtime, thread, request, goal_context, delivery_availability)
 
 

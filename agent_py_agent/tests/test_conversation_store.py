@@ -701,7 +701,7 @@ def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> No
     assert reopened.workspace_task_id == "task-1"
     assert reopened.active_task_ids == ()
     payload = json.loads(reopened_store._thread_path(thread.thread_id).read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "conversation_thread.v8"
+    assert payload["schema_version"] == "conversation_thread.v9"
 
 
 def test_thread_persists_client_cwd_across_requests_without_override(tmp_path) -> None:

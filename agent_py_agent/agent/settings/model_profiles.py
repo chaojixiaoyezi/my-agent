@@ -89,12 +89,23 @@ def public_model_profiles(data: dict, config: object) -> dict:
     return {"ok": True, "selected": data["selected"], "profiles": rows, "providers": providers}
 
 
-# LLM: 配置写入锁内原子进行；网络操作只允许显式 discover/probe，且不持有配置锁或执行工具。
-# 函数用途: 处理模型菜单的管理、选择与主动连接检查，返回脱敏回执。
-def execute_model_profile_operation(agent: object, operation: str, payload: dict) -> dict:
+# LLM: 目录写入锁内原子进行；select 只改 thread 引用，set_default 只改未来默认；网络仅显式 discover/probe。
+# 函数用途: 管理私有模型并区分当前会话选择与用户默认，返回不含密钥的回执。
+def execute_model_profile_operation(agent: object, operation: str, payload: dict, *, thread_id: str = "") -> dict:
     path = model_profiles_path(agent.home_paths)
+    if thread_id:
+        from .thread_model_selection import thread_model_profile_id
+
+        thread_model_profile_id(agent, thread_id)
+    if operation == "select":
+        from .thread_model_selection import thread_model_profile_id
+
+        if not thread_id:
+            raise ModelProfileError("选择模型需要当前会话；修改新会话默认值请使用 set_default。")
+        thread_model_profile_id(agent, thread_id, select=str(payload.get("profile_id") or ""))
+        operation = "list"
     if operation == "list":
-        return public_model_profiles(read_model_profiles(path), agent.config)
+        return _model_selection_projection(agent, read_model_profiles(path), thread_id)
     if operation in {"discover", "probe"}:
         from .model_provider_network import execute_provider_network
 
@@ -105,9 +116,22 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
     path.parent.chmod(0o700)
     with locked_json_path(path):
         data = read_model_profiles(path)
-        mutate_profiles(data, operation, payload)
+        mutate_profiles(data, "select" if operation == "set_default" else operation, payload)
         _save_profiles(path, data)
-    return public_model_profiles(data, agent.config)
+    return _model_selection_projection(agent, data, thread_id)
+
+
+# LLM: 列表不含秘密；selected 是当前会话，default_selected 仅表示未来新会话，不将默认变化投射成旧会话切换。
+# 函数用途: 为模型菜单区分“本会话”与“我的新会话默认模型”。
+def _model_selection_projection(agent: object, data: dict, thread_id: str) -> dict:
+    result = public_model_profiles(data, agent.config)
+    result.update(default_selected=data["selected"], selection_scope="thread" if thread_id else "owner_default",
+                  thread_id=thread_id)
+    if thread_id:
+        from .thread_model_selection import thread_model_profile_id
+
+        result["selected"] = thread_model_profile_id(agent, thread_id)
+    return result
 
 
 # LLM: provider+model 在单次文件快照内解析，头/密钥/协议一起冻结；旧 task overlay 不得拆开该组合。
@@ -150,8 +174,8 @@ def resolve_child_model_profile(agent: object, model: object) -> str:
     raise ModelProfileError(reason + " 可用配置：" + json.dumps(available, ensure_ascii=False))
 
 
-# LLM: 宿主属性先移除伪造值；显式 model 解析后冻结 ID，否则继承父级当前快照，不改用户选择或运行配置。
-# 函数用途: 在 child 创建前记录选定模型，子孙和恢复都走同一私有配置引用。
+# LLM: 宿主属性先移除伪造值；显式 model 冻结 ID，否则继承父级快照，包括明确的 default，不能重读 owner 默认。
+# 函数用途: 在 child 创建前记录选定模型，子孙和恢复引用创建时模型而不随父会话后续切换。
 def inherit_model_profile(attrs: dict, agent: object, *, model: object = None) -> None:
     attrs.pop("host_model_profile.v1", None)
     if model is not None:
@@ -159,17 +183,25 @@ def inherit_model_profile(attrs: dict, agent: object, *, model: object = None) -
         return
     sources = getattr(getattr(agent, "config", None), "config_sources", {})
     source = sources.get("model_name", {}) if isinstance(sources, dict) else {}
-    if source.get("source") == "owner_model_profile" and source.get("profile_id"):
-        attrs["host_model_profile.v1"] = {"profile_id": source["profile_id"]}
+    selected = source.get("profile_id") if source.get("source") == "owner_model_profile" else "default"
+    attrs["host_model_profile.v1"] = {"profile_id": selected or "default"}
 
 
-# LLM: 任务经过 owner/dispatch 授权后才能读此引用；不存在或损坏时失败，不借用其它用户配置。
-# 函数用途: 给重启后的子代理恢复它创建时的模型，不采用用户后来选择的新模型。
+# LLM: 任务先经 owner/dispatch 授权；已物化 child thread 是选择权威，创建引用只初始化未物化/旧线程，不读 owner 默认。
+# 函数用途: 给重启后的子代理恢复其独立线程模型；父会话后续切换不会覆盖子代理。
 def inherited_model_config(agent: object, task: object):
     attrs = getattr(task, "attributes", {}) or {}
     ref = attrs.get("host_model_profile.v1")
-    if ref is None:
-        return agent.config
-    if not isinstance(ref, dict) or not isinstance(ref.get("profile_id"), str):
+    if ref is not None and (not isinstance(ref, dict) or not isinstance(ref.get("profile_id"), str)):
         raise ModelProfileError("子代理模型配置引用损坏。")
-    return selected_model_config(agent, profile_id=ref["profile_id"])
+    profile_id = ref["profile_id"] if ref is not None else "default"
+    store = getattr(agent, "conversation_store", None)
+    thread_id = str(getattr(task, "agent_thread_id", "") or "")
+    thread = store.load_thread(thread_id) if store is not None and thread_id else None
+    if thread is not None:
+        from .thread_model_selection import thread_model_config, thread_model_profile_id
+
+        if not thread.model_profile_id:
+            thread_model_profile_id(agent, thread_id, select=profile_id)
+        return thread_model_config(agent, thread_id)
+    return selected_model_config(agent, profile_id=profile_id)

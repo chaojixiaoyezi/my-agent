@@ -686,10 +686,11 @@ def _execute_context_control(
         owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
         thread = _conversation_thread_for_scope(store, scope)
-        usage = inspect_conversation_context(owner_agent, store, thread)
-        model_name = str(
-            getattr(getattr(owner_agent, "config", None), "model_name", "") or ""
-        )
+        from ..settings.model_scope import selected_model_scope
+
+        with selected_model_scope(owner_agent, thread_id=thread.thread_id if thread else "", active=False):
+            usage = inspect_conversation_context(owner_agent, store, thread)
+            model_name = str(getattr(getattr(owner_agent, "config", None), "model_name", "") or "")
         return ConversationControlResult(
             "context",
             True,
@@ -766,7 +767,7 @@ def _execute_registered_compact_control(
             )
         from ..settings.model_scope import selected_model_scope
 
-        with _manual_compact_lane(owner_agent, store, thread.thread_id), selected_model_scope(owner_agent):
+        with _manual_compact_lane(owner_agent, store, thread.thread_id), selected_model_scope(owner_agent, thread_id=thread.thread_id):
             refreshed = store.load_thread(thread.thread_id)
             if refreshed is None:
                 raise OSError("conversation thread disappeared before manual compact")
@@ -2207,22 +2208,32 @@ def _gateway_task_status(
         subagent_running=subagents[1],
         subagent_done=subagents[2],
         subagent_failed=subagents[3],
-        model_name=_status_model_name(owner_agent, idle=display_selected is None),
+        model_name=_status_model_name(owner_agent, idle=display_selected is None, scope=scope),
         compact_generation=compact_generation,
         verbose_level=verbose_level,
         durable_work=_named_durable_statuses(owner_agent, paths, scope),
     )
 
 
-# LLM: 活跃请求沿用调用方配置，不重读可能已变的 owner 选择；空闲才读取 /model，失败只显示不可用，不泄漏密钥。
-# 函数用途: 为 /status 选取与当前会话状态相符的模型名，不改变 Agent 配置或启动 backend。
-def _status_model_name(owner_agent: object, *, idle: bool) -> str:
+# LLM: 活跃工作片只读实际冻结模型名投影；空闲读取 canonical thread 选择，未绑定才读未来默认；不初始化 backend。
+# 函数用途: /status 区分“本轮仍使用原模型”和“下一轮已选择新模型”，不会串到其他会话或暴露密钥。
+def _status_model_name(owner_agent: object, *, idle: bool, scope: GatewayControlScope | None = None) -> str:
     config = getattr(owner_agent, "config", None)
-    if idle and getattr(owner_agent, "home_paths", None) is not None:
+    if getattr(owner_agent, "home_paths", None) is not None:
         from ..settings.model_profiles import selected_model_config
+        from ..settings.model_scope import active_thread_model_name
+        from ..settings.thread_model_selection import thread_model_config
 
         try:
-            config = selected_model_config(owner_agent)
+            store = getattr(owner_agent, "conversation_store", None)
+            thread = _conversation_thread_for_scope(store, scope) if store is not None and scope is not None else None
+            if thread is not None:
+                live_name = active_thread_model_name(owner_agent, thread.thread_id) if not idle else ""
+                if live_name:
+                    return live_name
+                config = thread_model_config(owner_agent, thread.thread_id)
+            elif idle:
+                config = selected_model_config(owner_agent)
         except (ValueError, OSError, TypeError):
             return "当前模型配置不可用"
     return str(getattr(config, "model_name", "") or "")

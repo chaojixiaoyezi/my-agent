@@ -43,7 +43,7 @@ def test_shared_provider_edit_key_retention_and_disable(tmp_path):
     host = Host(tmp_path)
     provider(host)
     first, second = model(host), model(host, "model-b")
-    op(host, "select", {"profile_id": first})
+    op(host, "set_default", {"profile_id": first})
     before = selected_model_config(host)
     result = op(host, "save_provider", {"provider_id": "service", "editing": True,
         "provider": {"display_name": "新版", "api_key": "", "custom_headers": None}})
@@ -63,14 +63,14 @@ def test_delete_and_embedding_guard(tmp_path):
     host = Host(tmp_path)
     provider(host)
     first = model(host)
-    op(host, "select", {"profile_id": first})
+    op(host, "set_default", {"profile_id": first})
     for action, payload in [("delete_model", {"profile_id": first}), ("delete_provider", {"provider_id": "service"})]:
         with pytest.raises(ValueError):
             op(host, action, payload)
     second = model(host, "embed", capability="embedding")
     with pytest.raises(ValueError):
-        op(host, "select", {"profile_id": second})
-    op(host, "select", {"profile_id": "default"})
+        op(host, "set_default", {"profile_id": second})
+    op(host, "set_default", {"profile_id": "default"})
     op(host, "delete_model", {"profile_id": first})
     op(host, "delete_model", {"profile_id": second})
     op(host, "delete_provider", {"provider_id": "service"})
@@ -86,7 +86,7 @@ def test_v1_read_only_migration_preserves_profile_uuid(tmp_path):
     before = path.read_bytes()
     assert selected_model_config(host).model_name == "MiniMax-M2.7"
     assert path.read_bytes() == before
-    op(host, "select", {"profile_id": key})
+    op(host, "set_default", {"profile_id": key})
     assert read_model_profiles(path)["schema"] == "owner_model_profiles.v2"
     assert op(host, "list", {})["selected"] == key
 

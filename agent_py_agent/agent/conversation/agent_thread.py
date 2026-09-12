@@ -107,6 +107,7 @@ def ensure_subagent_thread(manager: object, task: object) -> ConversationThread 
             "canonical_user_id": owner_id or run_id,
             "owner_id": owner_id,
             "owner_home": str(getattr(manager, "owner_home_dir", "") or "").strip(),
+            "model_profile_id": str((attrs.get("host_model_profile.v1") or {}).get("profile_id") or "default"),
             "title": title,
             "cwd": cwd,
             "runtime_workspace_roots": roots,

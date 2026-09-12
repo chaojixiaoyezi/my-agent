@@ -110,4 +110,6 @@ def test_cold_owner_model_menu_does_not_initialize_agent(tmp_path, monkeypatch):
         assert handler.reply[0] == 200 and handler.reply[1]["ok"]
     assert handler.reply[1]["selected"] == profile_id
     assert initialized == []
-    assert not (tmp_path / "owners").exists()
+    assert handler.reply[1]["thread_id"].startswith("thread-")
+    assert handler.reply[1]["default_selected"] == "default"
+    assert not list((tmp_path / "owners").rglob("model_usage/*.jsonl"))

@@ -16,6 +16,14 @@ _BINDINGS: ContextVar[dict | None] = ContextVar("model_profile_bindings", defaul
 _CACHE_LOCK = threading.Lock()
 
 
+# LLM: 这是进程内显示投影，不存密钥或路由权威；真实请求仍只消费 ContextVar 中的不可变工作片。
+# 函数用途: /status 在用户提前切模型时仍显示进行中工作片实际使用的模型。
+def active_thread_model_name(agent: object, thread_id: str) -> str:
+    with _CACHE_LOCK:
+        rows = getattr(agent, "_model_profile_live_names", {}).get(thread_id, {})
+        return next(reversed(rows.values()), "") if rows else ""
+
+
 # LLM: 未进入作用域时保持原 instance 属性语义；作用域只覆盖工作片依赖，不替换存储和执行身份。
 # 类用途: 让同一用户不同会话切模型、权限后安全并行，不互相覆盖配置、后端、提示或工具视图。
 class ModelScopedAttribute:
@@ -67,20 +75,20 @@ def _profile_backend(agent: object, config: object):
         return cache[key]
 
 
-# LLM: 只绑定 descriptor Agent；嵌套调用复用快照，退出恢复；权限配置同 config 一起冻结，不复制整个 Agent 或生成新 MCP。
-# 函数用途: 工作片开始时采用用户选择，模型与工具看到相同权限；子代理继承模型但保持家目录边界。
+# LLM: 只绑定 descriptor Agent；即使部署默认也冻结绑定，防止嵌套运行重读 owner 默认；退出恢复，不新建 MCP。
+# 函数用途: 工作片按 canonical thread 选模型，期间切换仅影响下一片；子代理继承模型但保持家目录边界。
 @contextmanager
-def selected_model_scope(agent: object, *, inherited: bool = False):
+def selected_model_scope(agent: object, *, inherited: bool = False, thread_id: str = "", active: bool = True):
     if not isinstance(getattr(type(agent), "config", None), ModelScopedAttribute) or id(agent) in (_BINDINGS.get() or {}):
         yield
         return
     from ..user_space.approval_mode import permission_config
+    from .thread_model_selection import thread_model_config
 
-    model_config = agent.config if inherited else selected_model_config(agent)
+    model_config = agent.config if inherited else (
+        thread_model_config(agent, thread_id) if thread_id else selected_model_config(agent)
+    )
     config = permission_config(model_config, agent.home_paths, inherited=inherited)
-    if config is agent.config:
-        yield
-        return
     prompts = copy(agent.prompts)
     prompts.config = config
     values = {
@@ -97,7 +105,20 @@ def selected_model_scope(agent: object, *, inherited: bool = False):
             owner_scope_root=owner_root,
         )
     token = _BINDINGS.set({**(_BINDINGS.get() or {}), id(agent): (agent, values)})
+    display_key = object()
+    if thread_id and active:
+        with _CACHE_LOCK:
+            names = getattr(agent, "_model_profile_live_names", None)
+            if names is None:
+                names = agent._model_profile_live_names = {}
+            names.setdefault(thread_id, {})[display_key] = str(config.model_name)
     try:
         yield
     finally:
+        if thread_id and active:
+            with _CACHE_LOCK:
+                names = agent._model_profile_live_names
+                names.get(thread_id, {}).pop(display_key, None)
+                if not names.get(thread_id):
+                    names.pop(thread_id, None)
         _BINDINGS.reset(token)

@@ -357,9 +357,11 @@ class ConversationBaseStore:
     # directories. Runtime writers keep the default initialize=True; read-only callers must never
     # pass initialize=False for a path that has not already been resolved inside an authenticated
     # owner home.
-    # 函数用途: 初始化会话存储路径；被动重放可选择只读打开现有目录。
-    def __init__(self, root: str | Path, *, initialize: bool = True):
+    # 新会话模型引用通过宿主 callback 一次性取得；store 不读取私有配置或复制密钥。
+    # 函数用途: 初始化会话路径与新会话默认解析器；被动重放可只读打开现有目录。
+    def __init__(self, root: str | Path, *, initialize: bool = True, model_default: Callable[[], str] | None = None):
         self.root = Path(root)
+        self.model_default = model_default
         self.threads_dir = self.root / "threads"
         self.messages_dir = self.root / "messages"
         self.model_usage_dir = self.root / "model_usage"
@@ -877,6 +879,8 @@ class ConversationThreadStore(ConversationBaseStore):
             }
         )
 
+    # LLM: 新 thread 原子保存当前 owner 默认模型引用；已有 thread 的模型绝不在重新绑定通道时更新。
+    # 函数用途: 创建持久会话并冻结其初始模型，再登记通道索引，后续默认变化只影响将来新会话。
     def _create_thread(self, kwargs: dict) -> ConversationThread:
         current = now(kwargs.get("now"))
         thread = ConversationThread(
@@ -884,6 +888,7 @@ class ConversationThreadStore(ConversationBaseStore):
             canonical_user_id=kwargs.get("canonical_user_id", ""),
             owner_id=str(kwargs.get("owner_id") or ""),
             owner_home=str(kwargs.get("owner_home") or ""),
+            model_profile_id=self.model_default() if self.model_default is not None else "",
             title=kwargs.get("title", ""),
             created_at=current,
             updated_at=current,
