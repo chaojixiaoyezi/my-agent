@@ -553,6 +553,30 @@ def _read_json_object_report(
         return {}, report
 
 
+# LLM: 仅由持有同通道绑定事务锁的 store 入口调用；显式 reuse_latest 保留原语义，不按模型名猜会话。
+# 函数用途: 在短事务内查找、显式复用或创建会话并提交索引，不持有模型执行锁。
+def _get_or_create_bound_thread(store, request: dict) -> ConversationThread:
+    existing, binding_error = store.resolve_thread_report(
+        channel=request.get("channel", ""),
+        channel_conversation_id=request.get("channel_conversation_id", ""),
+        channel_user_id=request.get("channel_user_id", ""),
+    )
+    if binding_error is not None:
+        raise DataCorruptionError(str(binding_error))
+    if existing is not None:
+        return store._bind_existing(existing.thread_id, request)
+    latest = None
+    if request.get("reuse_latest_for_user"):
+        latest, latest_error = store.latest_thread_for_user_report(request.get("canonical_user_id", ""))
+        if latest_error is not None:
+            raise DataCorruptionError(str(latest_error))
+    if latest is not None:
+        return store._bind_existing(latest.thread_id, request)
+    return store._create_thread(request)
+
+
+# LLM: 本 store 维护唯一会话元数据和绑定索引，原子更新不能覆盖并发消息/Compact 字段。
+# 类用途: 创建、绑定和更新会话记录；模型执行不在这些短文件事务中进行。
 class ConversationThreadStore(ConversationBaseStore):
     # LLM: 通道绑定的查找与创建共用短事务锁；不能与单文件索引锁同路径，不锁模型执行或串行不同会话。
     # 函数用途: 两个窗口首次同时打开同一 session 时只生成一个 thread，避免之后模型选择和消息各走一份。
@@ -561,30 +585,7 @@ class ConversationThreadStore(ConversationBaseStore):
                                 request.get("channel_user_id", ""))
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         with locked_file_transition(self.threads_dir / f".channel-{digest}"):
-            return self._get_or_create_bound_thread(request)
-
-    # LLM: 仅在同通道绑定事务锁内调用；显式 reuse_latest 仍保留原有语义，不根据模型名推断会话。
-    # 函数用途: 查找绑定、显式复用或创建会话，并在退出短事务前提交索引。
-    def _get_or_create_bound_thread(self, request: dict) -> ConversationThread:
-        existing, binding_error = self.resolve_thread_report(
-            channel=request.get("channel", ""),
-            channel_conversation_id=request.get("channel_conversation_id", ""),
-            channel_user_id=request.get("channel_user_id", ""),
-        )
-        if binding_error is not None:
-            raise DataCorruptionError(str(binding_error))
-        if existing is not None:
-            return self._bind_existing(existing.thread_id, request)
-        latest = None
-        if request.get("reuse_latest_for_user"):
-            latest, latest_error = self.latest_thread_for_user_report(
-                request.get("canonical_user_id", "")
-            )
-            if latest_error is not None:
-                raise DataCorruptionError(str(latest_error))
-        if latest is not None:
-            return self._bind_existing(latest.thread_id, request)
-        return self._create_thread(request)
+            return _get_or_create_bound_thread(self, request)
 
     # LLM: Keep this adapter small; exact-id creation and collision checks live in
     # agent_thread_store so the channel-bound store does not absorb agent runtime policy.

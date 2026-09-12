@@ -22,6 +22,12 @@ from .model_provider_schema import (
     validate_provider,
     validate_provider_id,
 )
+from .shared_model_catalog import (
+    public_shared_profiles,
+    resolve_shared_model,
+    set_shared_profile,
+    shared_profile_key,
+)
 
 
 # LLM: 路径只由可信 home/owner 身份决定，不接受客户端指定路径或从模型名拼文件名。
@@ -49,7 +55,7 @@ def read_model_profiles(path: Path) -> dict:
             data["profiles"][profile_id] = validate_model(row)
             if row["provider_id"] not in data["providers"]:
                 raise ModelProfileError("模型引用的服务商不存在。")
-        if data["selected"] != "default" and data["selected"] not in data["profiles"]:
+        if data["selected"] != "default" and data["selected"] not in data["profiles"] and not shared_profile_key(data["selected"]):
             raise ModelProfileError("模型配置选择无效。")
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise ModelProfileError("模型配置文件损坏，未覆盖已有配置。") from exc
@@ -89,8 +95,8 @@ def public_model_profiles(data: dict, config: object) -> dict:
     return {"ok": True, "selected": data["selected"], "profiles": rows, "providers": providers}
 
 
-# LLM: 目录写入锁内原子进行；select 只改 thread 引用，set_default 只改未来默认；网络仅显式 discover/probe。
-# 函数用途: 管理私有模型并区分当前会话选择与用户默认，返回不含密钥的回执。
+# LLM: 目录写入锁内原子进行；select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用。
+# 函数用途: 管理会话选择、用户默认和显式共享；网络仅在用户主动 discover/probe 时请求，回执不含密钥。
 def execute_model_profile_operation(agent: object, operation: str, payload: dict, *, thread_id: str = "") -> dict:
     path = model_profiles_path(agent.home_paths)
     if thread_id:
@@ -104,6 +110,9 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
             raise ModelProfileError("选择模型需要当前会话；修改新会话默认值请使用 set_default。")
         thread_model_profile_id(agent, thread_id, select=str(payload.get("profile_id") or ""))
         operation = "list"
+    if operation == "set_shared":
+        set_shared_profile(agent, payload.get("profile_id"), payload.get("enabled"))
+        operation = "list"
     if operation == "list":
         return _model_selection_projection(agent, read_model_profiles(path), thread_id)
     if operation in {"discover", "probe"}:
@@ -116,34 +125,54 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
     path.parent.chmod(0o700)
     with locked_json_path(path):
         data = read_model_profiles(path)
-        mutate_profiles(data, "select" if operation == "set_default" else operation, payload)
+        selected = str(payload.get("profile_id") or "")
+        if operation == "set_default" and shared_profile_key(selected):
+            resolve_shared_model(agent.home_paths, selected)
+            data["selected"] = selected
+        else:
+            mutate_profiles(data, "select" if operation == "set_default" else operation, payload)
         _save_profiles(path, data)
     return _model_selection_projection(agent, data, thread_id)
 
 
-# LLM: 列表不含秘密；selected 是当前会话，default_selected 仅表示未来新会话，不将默认变化投射成旧会话切换。
-# 函数用途: 为模型菜单区分“本会话”与“我的新会话默认模型”。
+# LLM: 列表只含私有及管理员显式发布的公开字段；共享不是复制 secrets，默认变化不能投射成旧会话切换。
+# 函数用途: 为菜单区分会话、默认与共享选项；普通用户不会看到其他用户的私有模型。
 def _model_selection_projection(agent: object, data: dict, thread_id: str) -> dict:
+    from ..user_space.approval_mode import is_permission_admin
+
     result = public_model_profiles(data, agent.config)
+    try:
+        shared = public_shared_profiles(agent.home_paths)
+    except (ModelProfileError, OSError):
+        shared = []
+        result["warning"] = "共享模型目录暂不可用；仍可选择自己的私有模型或部署默认。"
+    result["can_share"] = is_permission_admin(agent.home_paths)
+    if result["can_share"]:
+        shared_keys = {shared_profile_key(row["id"]) for row in shared}
+        for row in result["profiles"]:
+            row["shared_enabled"] = row["id"] in shared_keys
+    result["profiles"].extend(shared)
     result.update(default_selected=data["selected"], selection_scope="thread" if thread_id else "owner_default",
                   thread_id=thread_id)
     if thread_id:
         from .thread_model_selection import thread_model_profile_id
 
         result["selected"] = thread_model_profile_id(agent, thread_id)
+    result["selection_available"] = any(row["id"] == result["selected"] and row.get("available", True)
+                                        for row in result["profiles"])
+    if not result["selection_available"]:
+        result["warning"] = "本会话选定模型已不可用，请重新选择；系统没有自动切换到其他模型。"
     return result
 
 
-# LLM: provider+model 在单次文件快照内解析，头/密钥/协议一起冻结；旧 task overlay 不得拆开该组合。
-# 函数用途: 新工作片使用用户选择，已有执行不被修改，禁用或删除的原模型不自动替换。
+# LLM: provider/model/secret/protocol 按选择的私有或授权共享引用整组冻结，旧 task overlay 不得拆开该组合。
+# 函数用途: 新工作片解析选定模型，已执行快照不改；禁用、删除或撤销共享均明确报错，不偷偷换模型。
 def selected_model_config(agent: object, *, profile_id: str | None = None):
     data = read_model_profiles(model_profiles_path(agent.home_paths))
     selected = data["selected"] if profile_id is None else profile_id
     if selected == "default":
         return agent.config
-    if selected not in data["profiles"]:
-        raise ModelProfileError("任务原模型配置已不存在，不能静默换成其它模型。")
-    row = resolved_model(data, selected)
+    row = _resolved_profile(agent, data, selected)
     config = replace(agent.config, **row, api_key_env="", model_context_window_explicit=True,
                      model_temperature_explicit="temperature" in row or agent.config.model_temperature_explicit)
     config.max_tokens = min(config.max_tokens, int(row["model_context_window_tokens"]) // 4)
@@ -154,22 +183,36 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
     return config
 
 
-# LLM: 显式 model 只按当前 owner 保存的 ID/唯一模型名精确解析；不接受端点、密钥或跨 owner 引用。
-# 函数用途: 找到子代理要使用的已有配置；重名需用编号消歧，未知配置在创建前拒绝。
+# LLM: 只检查单份连接数据，子代理创建前校验无需构造运行 backend/config；共享必须核验目录授权。
+# 函数用途: 将可用模型编号解析成连接字段，未知模型明确失败。
+def _resolved_profile(agent: object, data: dict, selected: str) -> dict:
+    if shared_profile_key(selected):
+        return resolve_shared_model(agent.home_paths, selected)
+    if selected not in data["profiles"]:
+        raise ModelProfileError("任务原模型配置已不存在，不能静默换成其它模型。")
+    return resolved_model(data, selected)
+
+
+# LLM: 显式 model 只按当前 owner 私有及管理员已发布模型精确解析；不接受端点、密钥或未授权 owner 引用。
+# 函数用途: 找到子代理可用模型；私有/共享重名必须用编号消歧，未知配置在创建前拒绝。
 def resolve_child_model_profile(agent: object, model: object) -> str:
+    from ..user_space.approval_mode import is_permission_admin
+
     if not isinstance(model, str) or not model.strip():
         raise ModelProfileError("子代理 model 请填写 /model 中已新增的模型名称或配置编号；省略则继承父级。")
     data = read_model_profiles(model_profiles_path(agent.home_paths))
     profiles = data["profiles"]
     model = model.strip()
-    if model in profiles:
-        resolved_model(data, model)
+    if model in profiles or shared_profile_key(model):
+        _resolved_profile(agent, data, model)
         return model
-    matches = [key for key, row in profiles.items() if row["model_name"] == model]
-    if len(matches) == 1:
-        resolved_model(data, matches[0])
-        return matches[0]
     available = [{"id": key, "model_name": row["model_name"]} for key, row in profiles.items()]
+    available.extend({"id": row["id"], "model_name": row["model_name"]} for row in public_shared_profiles(agent.home_paths)
+                     if not (is_permission_admin(agent.home_paths) and shared_profile_key(row["id"]) in profiles))
+    matches = [row["id"] for row in available if row["model_name"] == model]
+    if len(matches) == 1:
+        _resolved_profile(agent, data, matches[0])
+        return matches[0]
     reason = "模型名称有多个配置，请使用编号。" if matches else "当前用户尚未新增这个模型，请通过 /model 配置。"
     raise ModelProfileError(reason + " 可用配置：" + json.dumps(available, ensure_ascii=False))
 

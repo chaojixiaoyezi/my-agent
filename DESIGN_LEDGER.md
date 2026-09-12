@@ -1,5 +1,17 @@
 # DESIGN LEDGER
 
+## 会话级模型选择与完整显示（2026-09-12，集成验收中）
+
+- 当前会话模型权威为 `ConversationThread.model_profile_id`；owner selected 只初始化新会话。
+  活动工作片冻结整组协议、端点、凭证和容量；默认变化不影响既有会话。
+- `/model` 显式区分会话选择与新会话默认。管理员逐个发布共享引用，默认不共享，不复制密钥。
+  共享目录损坏或撤销不锁死私有模型菜单，实际模型调用仍严格核验可用性。
+- 同一 channel binding 的首次创建为短原子事务，避免同时开两个窗口分裂成两条 canonical thread。
+- 长显示使用完整原文归档与有界分页；显示存储不进入模型、Compact 或 Memory 输入。
+- 本轮保留独立 Compact 修复提交 `e301cae2` / `214fc0cf`，没有修改其摘要预算实现。
+- 模块细节见 [会话模型选择](docs/design/SESSION_MODEL_SELECTION.md) 与
+  [共享模型目录](docs/design/SHARED_MODEL_CATALOG.md)。状态：代码/定向验证已落地，真实 TUI 验收单独记录。
+
 ## 2026-09-11 R255 大窗口切小窗口后分段 Compact 失败：单发路径有兜底、分段路径直接致命【状态：已修，合同单测通过，真机待复测】
 
 **真机故障（用户会话 ma-port-2）**：`~/.my-agent/config/model-profiles` 把模型切到

@@ -32,7 +32,7 @@ class Host:
     prompts = ModelScopedAttribute("prompts")
 
     def __init__(self, path, owner="alice"):
-        self.home_paths = SimpleNamespace(config_dir=path, owner_provider="local", owner_kind="user", owner_id=owner)
+        self.home_paths = SimpleNamespace(root=path.parent, config_dir=path, owner_provider="local", owner_kind="user", owner_id=owner)
         self.config = AgentConfig(model_name="deployment-model", api_key="deployment-secret")
         self.backend = SimpleNamespace(name="deployment")
         self.prompts = SimpleNamespace(config=self.config)

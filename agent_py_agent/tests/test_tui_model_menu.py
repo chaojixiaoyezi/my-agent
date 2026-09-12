@@ -10,9 +10,11 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from agent_py_agent.agent.settings.model_profiles import model_profiles_path, read_model_profiles
+from agent_py_agent.agent.settings.thread_model_selection import execute_local_model_operation
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
-from agent_py_agent.tests.test_model_profiles import Host, add
+from agent_py_agent.tests.test_model_profiles import add
+from agent_py_agent.tests.test_thread_model_selection import host_with_store
 from agent_py_agent.tests.test_tui_prompt_toolkit_pipe import _app_params
 
 
@@ -25,9 +27,10 @@ def test_tui_menu_add_select_cancel_and_secret_history(tmp_path):
         runtime = TuiRuntime("models")
         runtime.publish_session(version="0.3.0", model="deployment-model", workspace=str(tmp_path))
         params = _app_params(tmp_path, runtime)
-        host = Host(tmp_path / "config")
+        host = host_with_store(tmp_path)
         params.agent.home_paths = host.home_paths
         params.agent.config = host.config
+        params.agent.conversation_store = host.conversation_store
         host.config.session_workspace = str(tmp_path / "sessions")
         with create_pipe_input() as pipe:
             with create_app_session(input=pipe, output=DummyOutput()):
@@ -59,7 +62,8 @@ def test_tui_menu_add_select_cancel_and_secret_history(tmp_path):
                     pipe.send_bytes(b"\x1b[B\r")
                     await settle()
                     data = read_model_profiles(model_profiles_path(host.home_paths))
-                    assert data["selected"] != "default"
+                    assert data["selected"] == "default"
+                    assert execute_local_model_operation(host, params.current_session_id, "list", {})["selected"] != "default"
                     assert runtime.store.snapshot().selected_model_name == "MiniMax-M2.7"
                     assert host.config.model_name == "deployment-model"
                     pipe.send_bytes(b"\x1b")
@@ -77,15 +81,14 @@ def test_tui_menu_add_select_cancel_and_secret_history(tmp_path):
 
 @pytest.mark.parametrize("gateway", [False, True])
 def test_saved_model_label_refresh_does_not_change_execution_or_history(tmp_path, gateway):
-    from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
     from agent_py_agent.cli.chat_parts.tui_model_menu import refresh_model_selection
 
-    host = Host(tmp_path / "config")
+    host = host_with_store(tmp_path)
     profile_id, _ = add(host, model_name="qwen-test")
-    execute_model_profile_operation(host, "select", {"profile_id": profile_id})
+    execute_local_model_operation(host, "saved-choice", "select", {"profile_id": profile_id})
     source = host if not gateway else SimpleNamespace(
         gateway_client_only=True,
-        request_models=lambda *, session_id, operation, payload: execute_model_profile_operation(host, operation, payload),
+        request_models=lambda *, session_id, operation, payload: execute_local_model_operation(host, session_id, operation, payload),
     )
     runtime = TuiRuntime("saved-choice")
     runtime.publish_session(version="0.3.0", model="deployment-model", workspace="workspace")
@@ -99,7 +102,7 @@ def test_saved_model_label_refresh_does_not_change_execution_or_history(tmp_path
     assert host.config.model_name == "deployment-model"
     stopped = threading.Event()
     stopped.set()
-    execute_model_profile_operation(host, "select", {"profile_id": "default"})
+    execute_local_model_operation(host, "saved-choice", "select", {"profile_id": "default"})
     refresh_model_selection(source, "saved-choice", runtime, stopped)
     assert runtime.store.snapshot().selected_model_name == "qwen-test"
     refresh_model_selection(source, "saved-choice", runtime)
@@ -115,6 +118,16 @@ def test_model_refresh_failure_keeps_last_confirmed_display():
     refresh_model_selection(source, "unavailable", runtime)
     assert runtime.store.snapshot().selected_model_name == "confirmed-model"
     assert "尚未同步" in runtime.notice()
+
+
+def test_revoked_selection_does_not_keep_misleading_deployment_banner():
+    from agent_py_agent.cli.chat_parts.tui_model_menu import _publish_selection
+
+    runtime = TuiRuntime("revoked")
+    runtime.publish_model_selection("deployment-model")
+    _publish_selection(runtime, {"ok": True, "selection_available": False, "warning": "原模型已撤销"})
+    assert "不可用" in runtime.store.snapshot().selected_model_name
+    assert "撤销" in runtime.notice()
 
 
 @pytest.mark.parametrize("width", [58, 120])

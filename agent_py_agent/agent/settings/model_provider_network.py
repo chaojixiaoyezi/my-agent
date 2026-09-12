@@ -9,7 +9,13 @@ from types import SimpleNamespace
 from ..backends import get_backend
 from ..backends.gateway_helpers import GatewayRequest, get_json
 from ..backends.provider_headers import provider_runtime_scope, request_headers
-from .model_provider_schema import ModelProfileError, resolved_model
+from .model_provider_schema import (
+    ModelProfileError,
+    resolved_model,
+    validate_model,
+    validate_provider,
+)
+from .shared_model_catalog import resolve_shared_model, shared_profile_key
 
 
 # LLM: 目录内容是服务商数据，只投影 ID/显式容量，不执行建议命令，不按名称猜协议或自动启用模型。
@@ -47,17 +53,19 @@ def _probe(agent: object, data: dict, profile_id: str) -> dict:
     started = time.monotonic()
     response = backend.generate("你好，请简短回复一句问候。")
     elapsed = round(time.monotonic() - started, 2)
-    text = str(response.text or "").replace(config.api_key, "[已隐藏密钥]")
+    text = _redact_network_text(str(response.text or ""), data)
     ok = bool(text.strip()) and not response.truncated and not response.tool_use_blocks
     return {"ok": ok, "profile_id": profile_id, "model_name": config.model_name, "elapsed_seconds": elapsed,
             "reply": text[:500], "usage": response.usage, "truncated": response.truncated,
             "message": "已收到正常回复；仅证明基本调用可用，未执行任务。" if ok else "请求已结束，但未得到完整文字回复；不能标记通过。"}
 
 
-# LLM: 身份来自已认证 owner 与当前菜单会话，失败仅返回类型/结构状态；不打印上游正文或密钥。
+# LLM: 身份来自已认证 owner，共享 probe 只读取已发布的完整快照，纳入相同秘密脱敏；不落盘临时连接数据。
 # 函数用途: 在不持有配置文件锁的情况下进行一次用户明确要求的目录/连接测试。
 def execute_provider_network(agent: object, data: dict, operation: str, payload: dict) -> dict:
     identity = str(payload.get("session_id") or payload.get("conversation_id") or "model-menu")
+    if operation == "probe" and shared_profile_key(payload.get("profile_id")):
+        data = _shared_probe_data(agent, data, str(payload["profile_id"]))
     started = time.monotonic()
     model = data["profiles"].get(str(payload.get("profile_id") or ""), {})
     try:
@@ -77,11 +85,21 @@ def execute_provider_network(agent: object, data: dict, operation: str, payload:
                 "error_type": type(exc).__name__, "status_code": int(getattr(exc, "status_code", 0) or 0)}
 
 
+# LLM: 只构造一次请求的内存快照供 probe 和错误脱敏共用，不能保存至普通用户 provider 文件或返回客户端。
+# 函数用途: 让共享模型连接测试复用正式请求与密钥清洗，不另造网络客户端。
+def _shared_probe_data(agent: object, data: dict, profile_id: str) -> dict:
+    row = resolve_shared_model(agent.home_paths, profile_id)
+    provider_id = "shared-" + shared_profile_key(profile_id)
+    provider = validate_provider({**row, "display_name": row["model_name"],
+        "custom_headers": row.get("model_custom_headers", {}), "session_header": row.get("model_session_header", "")})
+    model = validate_model({**row, "provider_id": provider_id})
+    return {**data, "profiles": {**data["profiles"], profile_id: model},
+            "providers": {**data["providers"], provider_id: provider}}
+
+
 # LLM: 上游原因只作为用户诊断材料，不决定恢复/路由；只公开 message/code，统一移除已存密钥、头值和控制字符。
 # 函数用途: 让连接失败能看出模型下线、区域限制等具体原因，而不是一律猜配置错。
 def _provider_message(exc: Exception, data: dict) -> str:
-    from ..common.log_redaction import redact_sensitive_text
-
     detail = getattr(exc, "details", None)
     detail = detail.get("provider_error", {}) if isinstance(detail, dict) else {}
     error = detail.get("error", detail) if isinstance(detail, dict) else {}
@@ -89,9 +107,17 @@ def _provider_message(exc: Exception, data: dict) -> str:
         text = str(error.get("message") or error.get("code") or "")
     else:
         text = str(error) if isinstance(error, str) else ""
+    return _redact_network_text(text, data)[:500]
+
+
+# LLM: 成功回复和异常诊断复用同一秘密清洗，包含本次共享模型的私有快照；不把快照保存或公开。
+# 函数用途: 清除上游回显的 API Key、所有自定义请求头值和控制字符。
+def _redact_network_text(text: str, data: dict) -> str:
+    from ..common.log_redaction import redact_sensitive_text
+
     for row in data["providers"].values():
         secrets = [row["api_key"], *row["custom_headers"].values()]
         for secret in secrets:
             if secret:
                 text = text.replace(secret, "[已隐藏]")
-    return "".join(char for char in redact_sensitive_text(text) if ord(char) >= 32)[:500]
+    return "".join(char for char in redact_sensitive_text(text) if ord(char) >= 32)

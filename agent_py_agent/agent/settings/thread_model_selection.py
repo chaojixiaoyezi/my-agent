@@ -60,8 +60,9 @@ def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None
     if select is None and thread.model_profile_id:
         return thread.model_profile_id
     selected = default_model_profile_id(agent) if select is None else select
-    # 在写会话前验证整组配置；禁用、悬空或跨 owner 引用不能静默改选。
-    selected_model_config(agent, profile_id=selected)
+    # 显式选择必须先验证；旧记录只迁移编号，原共享被撤销时仍需能打开菜单另选，而实际执行会拒绝。
+    if select is not None:
+        selected_model_config(agent, profile_id=selected)
 
     # LLM: 更新函数在最新 thread 锁内运行；旧记录初始化不得覆盖另一个窗口刚提交的显式选择。
     # 函数用途: 原子保存选择，保留压缩与消息游标；只在实际换模型时清理失效的数值投影。
