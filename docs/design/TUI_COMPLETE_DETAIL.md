@@ -1,0 +1,69 @@
+# 完整原文浏览与回到最新
+
+状态：已实现，定向验证通过；真实 TUI 验收由主线另行执行。主线统一更新索引、ROADMAP 和 TESTS。
+
+## 解决问题
+
+旧 Ctrl+E 只放开部分前端行数；正文2000行、活动思考50行、工具上游预览180行以及
+每行终端宽度裁剪仍会丢失可见内容。旧完整提示没有区分内容未加载、未保存和仅折叠。
+回到底入口混在长底栏末尾，冻结详情的“到底”还只是旧快照尾部。
+
+## 交互
+
+- 普通视图保留现有清晰的 Markdown、工具预览和已完成思考折叠。
+- Ctrl+O 进入冻结的详细阅读；Ctrl+E 进入完整原文分页，再按回到详细预览。
+- 完整原文保留正文字符与工具增删行样式，不重新解释 Markdown；长行换行而不删右侧。
+- 页内使用现有滚轮、选择和复制；`[`、`]` 或中文按钮翻页。页码明确说明目前只显示一页。
+- `/` 搜索在完整原文模式只搜当前页，提示明确标注，不谎称已经搜到未加载的归档页。
+- 离开底部，或处于冻结阅读时，独立显示「↓ 回到最新 (Ctrl+End)」。点击或 Ctrl+End
+  退出冻结阅读，到当前主/子代理的 live 尾部并恢复输入焦点和跟随，不停止代理、不发消息。
+- 详情 End 同样回到最新；Esc 原有语义不变，不把它重定义为页面返回。
+
+## 资源与历史边界
+
+本地已加载原文按256行、12000字符双预算分页，超长逻辑行拆成2000字符片段，
+每次仅格式化当前页。不把几万行一次画进终端，也不删掉中间文本来假称全部。
+页索引是进程内的显示状态，不进入模型请求、Compact、会话消息或记忆。
+远端归档采用稀疏页索引，十万页也只保存一条引用；按需异步读取当前页，最多缓存8页。
+失败页明确提示 `R` 重试，不自动重执行工具。页面内同一逻辑行的分片会重新拼接后换行；
+跨页长行仍按分页边界继续，选择复制仅覆盖当前页，不声称一次复制跨越未加载页面。
+
+工具write/diff/patch必须捕获执行当时的完整快照，不能读取当前文件补造历史差异。
+不可变归档、owner鉴权分页与轻量ref由独立展示归档模块承载；TUI不得自行访问宿主路径。
+旧事件已经被裁剪且没有完整归档时，显示缺失说明，不承诺能恢复模型或工具未保存的内容。
+正在生成的思考只显示当前已经收到的内容；冻结阅读不会偷偷替换新版本，完成后可回到最新再打开全文。
+
+## 思考时序与慢模型
+
+原问题有两处生产原因：真实 tool-start 没有关闭上一活动思考；预览先对全部思考做 Markdown
+排版，再只显示前50行。修复后真实工具边界和模型 attempt 边界先冻结上一思考，下一delta
+创建新 block。前台/后台/子代理共用同一展示边界，不能靠正文猜测任务是否结束。
+活动预览在排版前限制4000字符/50逻辑行，详细预览12000字符/200逻辑行；原始block不修改。
+长思考终态在服务端保存已公开净化的不可变原文，事件仍保留有界预览和ref。
+明确失败的归档只能保留缺失提示，不能将已裁预览二次归档当成全文。
+
+现有 writer 的 thinking 回调没有provider item/call ID。真实边界后、下一delta前的旧全文
+会被忽略；若旧调用全文晚到下一调用delta之后，仍需要上游显式item身份才能可靠分辨。
+本切片不以文本相似度猜归属，不宣称已经补齐这个跨调用乱序身份协议。
+
+## 参考
+
+按行为适配本机终端交互，不复制其代码：
+
+- `src/keybindings/defaultBindings.ts`：Transcript的Ctrl+E及互斥快捷键。
+- `src/components/Messages.tsx`、`src/hooks/useVirtualScroll.ts`：以挂载/渲染预算代替历史总量截断。
+- `src/components/messages/AssistantThinkingMessage.tsx`：详细模式展示已有thinking。
+- `src/components/FullscreenLayout.tsx`：离底即出现独立Jump to bottom按钮。
+- `src/components/ScrollKeybindingHandler.tsx`：到底恢复sticky，不因为新输出强抢阅读位置。
+- 终端交互 `src/services/api/模型助手.ts`：contentBlocks[part.index]和content_block_stop分隔思考。
+- 会话运行时 `会话运行时-rs/tui/src/chatwidget/streaming.rs`：reasoning-final收口并清空旧buffer。
+
+## 验证
+
+`test_tui_complete_detail.py`覆盖12000行逐页无缺失、活动思考50行之外、超宽中文原文、
+冻结期间收到新消息后回到真正live尾部。旧transcript/view/input测试继续保持。
+主线另做真实 TUI 的主/子页、窄终端、超大归档、复制、切页失败/重试及模型缓存不变验收。
+`test_thinking_display_boundaries.py`先有5项红测再修，覆盖无正文/全文终态的工具边界、
+foreground继承、attempt切换、100K思考预裁不改原文。`test_tool_display_archive.py`覆盖
+原始长行/缩进、child identity、immutable write快照、checkpoint ref回放及存档失败隔离。
+完整键盘pipe验证Ctrl+O/Ctrl+E/翻页/Ctrl+End以及回到输入后方括号不被快捷键吞掉。

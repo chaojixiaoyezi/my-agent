@@ -84,6 +84,7 @@ _TOOL_PAYLOAD_FIELDS = frozenset(
         "detail",
         "output",
         "display",
+        "display_archive_ref",
         "ok",
         "handler_executed",
         "duration_ms",
@@ -208,6 +209,9 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         self._thinking_block_id = ""
         self._thinking_text = ""
         self._thinking_active = False
+        self._late_thinking_completion_expected = False
+        self._thinking_truncated = False
+        self._thinking_started_at = 0.0
         self._thinking_delta_batcher = _ThinkingDeltaBatcher()
         self._model_text = ""
         self._committed_commentary: list[str] = []
@@ -258,11 +262,14 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     def write_thinking_delta(self, text: str) -> bool:
         remaining = BACKGROUND_TRANSCRIPT_TEXT_LIMIT - len(self._thinking_text)
         if remaining <= 0:
+            self._thinking_truncated = True
             return False
-        content = redact_host_absolute_paths(str(text or ""))[:remaining]
+        raw = redact_host_absolute_paths(str(text or ""))
+        content = raw[:remaining]
         if not content:
             return False
         self._ensure_thinking_started()
+        self._thinking_truncated = self._thinking_truncated or len(raw) > remaining
         self._thinking_text += content
         batch = self._thinking_delta_batcher.append(content)
         if batch:
@@ -274,10 +281,15 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
             )
         return True
 
-    # LLM: A full explicit thinking result freezes the currently streamed block,
-    # or creates a terminal-recoverable pair when no delta was observed.
-    # 函数用途: 用完整思考正文和真实耗时收口当前思考块。
-    def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> bool:
+    # LLM: 全文终态冻结当前块；显式ref沿用，history_incomplete禁止把已裁预览再次归档冒充全文。
+    # 函数用途: 用完整思考和耗时收口，忽略上一边界后、下一思考前补发的旧全文。
+    def write_thinking(self, text: str, *, duration_seconds: float = 0.0,
+                       display_archive_ref: dict | None = None,
+                       history_incomplete: bool = False) -> bool:
+        if not self._thinking_active and self._late_thinking_completion_expected:
+            self._late_thinking_completion_expected = False
+            return False
+        full_content = public_background_transcript_text(text, limit=0, channel=self.channel)
         content = public_background_transcript_text(text, channel=self.channel)
         if not content and not self._thinking_active:
             return False
@@ -291,16 +303,20 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
             {
                 "text": self._thinking_text,
                 "duration_seconds": max(0.0, float(duration_seconds or 0.0)),
+                **({"history_incomplete": True} if history_incomplete
+                   else {"display_archive_ref": display_archive_ref} if display_archive_ref
+                   else _thinking_archive_payload(self, full_content)),
             },
         )
         self._thinking_active = False
         self._thinking_block_id = ""
         self._thinking_text = ""
+        self._thinking_truncated = False
         self._thinking_delta_batcher.reset()
         return True
 
     # LLM: 仅转发 _structured_tool_progress 的白名单；公共 detail 在实时/终态中同源保留，标题由显示 metadata 统一投影。
-    # 函数用途: 将主/子工具阶段发布为卡片并沿共享事件入口保存；只用公开字段，不解析旧文本副本。
+    # 函数用途: 工具开始先关闭前一思考，再发布主/子卡片；避免缺失全文终态导致跨轮追加。
     def write_progress(
         self,
         progress: Mapping[str, object],
@@ -314,6 +330,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         block_id = self._tool_block_id(progress)
         phase = str(progress.get("phase") or "updated").strip().lower()
         if phase == "started":
+            self._close_thinking_boundary()
             self._flush_model_commentary()
         if block_id not in self._tool_blocks:
             self._tool_blocks.add(block_id)
@@ -410,7 +427,7 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     ) -> None:
         self._clear_tool_input_progress()
         if self._thinking_active:
-            self.write_thinking(self._thinking_text)
+            self.write_thinking(self._thinking_text, history_incomplete=self._thinking_truncated)
         self._model_text = ""
         if publish_final:
             self._publish_final_response(final_text)
@@ -429,9 +446,18 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         return self._display_history.snapshot() if self._display_history is not None else {}
 
     # LLM: 同一工作片 Compact 重调 agent.run 时轮号会重置，宿主 attempt 序号必须进入工具块身份。
-    # 函数用途: 切换本工作片的模型执行批次，防止压缩后的同号工具覆盖压缩前的工具显示。
+    # 函数用途: 切换模型批次时关闭旧思考，防止压缩后同号工具或新思考覆盖旧显示。
     def begin_model_attempt(self, attempt: int) -> None:
+        self._close_thinking_boundary()
         self._tool_attempt = max(0, int(attempt))
+
+    # LLM: 仅真实工具/attempt边界调用；不根据文本推断是否结束，不触碰模型输入。
+    # 函数用途: 冻结尚未收到终态的思考，让下一次delta创建新块并保留真实事件顺序。
+    def _close_thinking_boundary(self) -> None:
+        if self._thinking_active:
+            self.write_thinking(self._thinking_text, history_incomplete=self._thinking_truncated,
+                                duration_seconds=max(0.0, time.time() - self._thinking_started_at))
+            self._late_thinking_completion_expected = True
 
     # LLM: This immutable projection contains only segments promoted at real tool boundaries;
     # callers persist it before the terminal response using typed assistant part ids.
@@ -451,15 +477,18 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
     def _ensure_thinking_started(self) -> None:
         if self._thinking_active:
             return
+        self._late_thinking_completion_expected = False
+        self._thinking_truncated = False
         self._thinking_index += 1
         self._thinking_block_id = f"{self.request_id}:thinking:{self._thinking_index}"
         self._thinking_active = True
         self._thinking_delta_batcher.reset()
+        self._thinking_started_at = time.time()
         self._event(
             "thinking_started",
             "started",
             self._thinking_block_id,
-            {"started_at": time.time()},
+            {"started_at": self._thinking_started_at},
         )
 
     # LLM: Only a real tool-start boundary promotes tentative model text to a
@@ -784,6 +813,20 @@ def public_background_transcript_text(
     keep_head = max_chars * 2 // 3
     keep_tail = max_chars - keep_head
     return f"{content[:keep_head]}\n…（内容过长，已省略）…\n{content[-keep_tail:]}"
+
+
+# LLM: 完整显式思考只保存公开净化后的字符串，事件仍有界；存档失败不改变模型或任务状态。
+# 函数用途: 超长思考结束时保留不可变原文供Ctrl+E读取，避免12K预览变成永久丢失。
+def _thinking_archive_payload(sink: BackgroundTranscriptSink, text: str) -> dict:
+    if len(text) <= 12_000:
+        return {}
+    try:
+        from .display_archive import archive_display_rows
+        reference = archive_display_rows(sink.agent, thread_id=sink.thread_id,
+                                         rows=({"kind": "thinking", "text": row} for row in text.split("\n")))
+        return {"display_archive_ref": reference}
+    except Exception:  # noqa: BLE001 显示失败不得重跑模型，也不得暴露路径/凭据
+        return {"history_incomplete": True}
 
 
 # LLM: Terminal mapping reads only typed phase/ok. Status and output prose are
