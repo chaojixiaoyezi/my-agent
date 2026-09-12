@@ -258,6 +258,19 @@ class GatewayChatClientAgent:
             "load_errors": [{"error_code": "GATEWAY_UNAVAILABLE"}],
         }
 
+    # LLM: Immutable display pages use the same authenticated owner identity as history; callers
+    # run this blocking client method outside the TUI event loop and never open a server path.
+    # 函数用途: 按公开引用读取一页完整原文；网络失败不清空已有预览或重新提交模型任务。
+    def request_display_page(
+        self, *, session_id: str, reference: dict[str, object], page_index: int,
+    ) -> dict[str, object]:
+        _status, body = self.post_gateway_json(
+            "/client/display-page",
+            {"conversation_id": session_id, "reference": reference, "page_index": page_index},
+            timeout=10.0,
+        )
+        return body or {"ok": False, "error_code": "GATEWAY_UNAVAILABLE", "message": "完整原文暂时不可读取。"}
+
     # LLM: canonical 游标不随进程流重置；显式声明能按请求去重前台消息，旧客户端不被强发未知用户事件。
     # 函数用途: 显式声明前台和检查点能力；沿同一持久游标补过程，失败不清空已有显示。
     def request_background_notices(

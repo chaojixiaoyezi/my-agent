@@ -179,8 +179,8 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             return
         self._send_json(404, {"error": "not found"})
 
-    # LLM: 各控制入口复用认证中间件；模型/权限菜单不进入普通任务队列，权限保存仍由服务端核验 owner。
-    # 函数用途: 将 HTTP POST 分发到对应控制服务，不根据正文用户名称推断管理员。
+    # LLM: 各控制/原文分页入口复用认证中间件；显示只读不进任务队列，权限保存仍由服务端核验 owner。
+    # 函数用途: 将 HTTP POST 分发到对应服务，原文页也必须校验用户和会话，不从正文推断权限。
     def do_POST(self) -> None:
         self._inject_auth_middleware()
         if self.path == "/ask":
@@ -204,6 +204,11 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/client/history":
             self._handle_client_history()
+            return
+        if self.path == "/client/display-page":
+            from .display_archive_service import handle_client_display_page
+
+            handle_client_display_page(self, _server_instance)
             return
         if self.path == "/client/notices":
             self._handle_client_notices()
