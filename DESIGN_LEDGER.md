@@ -20,9 +20,15 @@
 **上一轮我加在 `_goal_wake_waits_for_child_event`（`thread_goal_continue` 路径）的修复根本没被走到**，
 因此当时"已部署"并不等于"已修好"——这正是"读代码推断的因果不足以支撑结论"的又一例证。
 
-**修法**：在 `_signal_task_link_is_terminal` 之前加结构化判据——当
-`reason == "subagent_capability_request_open"` 且**源子代理仍有 OPEN 的能力申请/gap** 时，
-不按过期丢弃。读不到子代理时保持原判定（不放宽唤醒）。三处修复互补：
+**修法**：在 `_signal_task_link_is_terminal` 之前加结构化判据——源子代理仍在等待父级裁决时
+不按过期丢弃。**第二、三次复测又纠正了两处我的误判**：
+①第一次修完复测，唤醒仍在 0.13 秒被丢——因为我把条件只挂在
+`reason == "subagent_capability_request_open"`，而该判据依赖的
+`capability_request_requires_parent_resolution()` 对**真实状态 `GAP` 返回 False**；
+②深查才发现 `GAP` 是**终态**（`CAPABILITY_REQUEST_TERMINAL_STATUSES` 含 GAP）——router 其实
+已经路由过，只是结论是"无匹配能力"，于是另记了一条 `capability_gaps=['OPEN']`。
+**真正等待父级的是那条 OPEN gap，不是申请本身。** 补上 gap 分支后才真正生效。
+第①点也是本仓库"读代码推断的因果不足以支撑结论"的第三次实例：修完必须真机复测。三处修复互补：
 `thread_goal_continue` 路径、能力申请路径、以及 R244 记的读取预算与客观门。
 
 合同单测 3 条（OPEN 放行 / GRANTED 仍按原规则 / 读不到不放宽），联合 186 项通过。

@@ -2141,9 +2141,10 @@ def _wake_signal_is_stale(
     # 但"父轮次结束"恰恰是子代理在等它的前提：只有父代理真的再跑一轮才能裁决。
     # 因此只要源子代理仍有 OPEN 能力申请/gap，这类唤醒就不得按过期丢弃。
     # 判据只看结构化字段；不解析子代理正文，也不猜测阻塞原因。
-    if reason == "subagent_capability_request_open" and _source_child_awaits_parent_decision(
-        agent, signal
-    ):
+    if reason in {
+        "subagent_capability_request_open",
+        "subagent_runner_finished",
+    } and _source_child_awaits_parent_decision(agent, signal):
         return False
     return _signal_task_link_is_terminal(agent, store, signal, reason)
 
@@ -2166,8 +2167,11 @@ def _source_child_awaits_parent_decision(agent: object, signal: object) -> bool:
     for request in getattr(task, "capability_requests", []) or []:
         if capability_request_requires_parent_resolution(getattr(request, "status", "OPEN")):
             return True
+    # 真机实测(2026-09-11)：route 完成后 request 会进入终态 GAP（"无匹配能力"），
+    # 真正等待父级的是它留下的 OPEN capability_gap（需要 triage）。只查 request 会漏掉这一整类。
     return any(
-        str(getattr(gap, "status", "")) == "OPEN" for gap in getattr(task, "capability_gaps", []) or []
+        str(getattr(gap, "status", "")).strip().upper() == "OPEN"
+        for gap in getattr(task, "capability_gaps", []) or []
     )
 
 

@@ -235,3 +235,32 @@ def test_unreadable_child_keeps_original_terminal_rule():
     agent = SimpleNamespace(subagents=SimpleNamespace(load=_boom))
     assert _source_child_awaits_parent_decision(agent, SimpleNamespace(source_agent_id="sub-x")) is False
     assert _source_child_awaits_parent_decision(SimpleNamespace(), SimpleNamespace(source_agent_id="")) is False
+
+
+def test_open_capability_gap_also_awaits_parent_decision():
+    """真机实测：路由后 request 进入终态 GAP，真正等待父级的是留下的 OPEN gap。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.runtime import _source_child_awaits_parent_decision
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
+
+    child = SimpleNamespace(
+        capability_requests=[CapabilityRequest(
+            id="capreq-1", from_run_id="sub-1", problem="越界写入",
+            needed_capability="write_file", status="GAP",
+        )],
+        capability_gaps=[SimpleNamespace(status="OPEN")],
+    )
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda run_id: child))
+    assert _source_child_awaits_parent_decision(agent, SimpleNamespace(source_agent_id="sub-1")) is True
+
+
+def test_closed_gap_does_not_hold_the_wake():
+    """gap 已关闭时不再拦唤醒，保持原过期判定。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.runtime import _source_child_awaits_parent_decision
+
+    child = SimpleNamespace(capability_requests=[], capability_gaps=[SimpleNamespace(status="CLOSED")])
+    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda run_id: child))
+    assert _source_child_awaits_parent_decision(agent, SimpleNamespace(source_agent_id="sub-1")) is False
