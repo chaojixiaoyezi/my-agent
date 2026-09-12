@@ -33,12 +33,15 @@ class TestOrchestrationToolsSpec:
         assert "role" in spec.parameter_descriptions
         assert "bug_finder" in spec.parameter_descriptions["role"]
         assert "writer" in spec.parameter_descriptions["role"]
-        assert "资料线索" in spec.parameter_descriptions["items"]
-        assert "可选结构化提示" in spec.parameter_descriptions["items"]
-        assert "goal 里写‘先 A 后 B’不会形成执行顺序" in spec.parameter_descriptions["items"]
-        assert "等 A 的生命周期完成事件自动唤醒后" in spec.parameter_descriptions["items"]
+        # 2026-09-10「精简冲突提示」把工具级规则从逐参数文本挪到工具 description，
+        # 所以断言要跟着搬到规则真正所在的位置，而不是继续要求参数文本里出现过这些句子。
+        assert "资料线索" in spec.parameter_descriptions["input_refs"]
+        assert "goal 里写‘先 A 后 B’不会形成执行顺序" in spec.description
+        assert "等 A 的生命周期完成事件自动唤醒后" in spec.description
+        assert "依赖顺序" in spec.parameter_descriptions["items"]
         assert "已有 Todo 时每项必须" not in spec.parameter_descriptions["items"]
-        assert "绝不能拿无关 open id 顶替" in spec.parameter_descriptions["covers"]
+        # 同样是一句话的措辞精简：语义保留（不得拿无关 id 顶替），句子改为"不拿无关 id 顶替"。
+        assert "不拿无关 id 顶替" in spec.parameter_descriptions["covers"]
         assert "不是权限、完整写集或创建前置条件" in spec.parameter_descriptions["output_files"]
         assert "extra_write_roots" not in spec.parameter_descriptions["items"]
         assert "context_manifest" not in spec.parameter_descriptions
