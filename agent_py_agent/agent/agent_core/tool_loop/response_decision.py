@@ -29,6 +29,7 @@ from ..tool_guard.unresolved_runtime_issue import (
     has_unresolved_runtime_issues,
     unresolved_runtime_issue_context,
 )
+from .deliverable_closeout import deliverable_closeout_block
 
 _PROTECTED_TOOL_MARKERS = (
     "[tool-record",
@@ -739,6 +740,13 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         # 很多任务没有落盘交付概念; 对照 会话运行时/轻量运行时 均无产出门, 模型自决
         # 何时交付(EXEC-31 edit 回显 + prompt 禁重读已在行为层引导);
         # 防假完成交由"如实报告"合同与 UNKNOWN 安全闸。
+        # EXEC-39(2026-09-11): 在子代理 run 里恢复它的**严格子集**——只校验宿主自己声明过的
+        # 交付清单(required_file_refs/output_refs…)，主代理用户会话永不生效，且有界放行。
+        # 真机证据: 子代理声明了要写 core_*.go，收工时一个都不存在却报完成。
+        deliverable_block = deliverable_closeout_block(request.params)
+        if deliverable_block:
+            request.params.tool_context.append(deliverable_block)
+            return ToolLoopResponseDecision("continue", None, [], request.counters)
         if bool(getattr(final_response, "truncated", False)):
             # EXEC-05 长任务真机: 最终答复被供应商输出上限截断(max_tokens/length)
             # 不能当作完成交付——标记 unfinished, CLI RC=2, 用户可续跑补全。
