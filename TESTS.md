@@ -1,5 +1,22 @@
 # TESTS
 
+## 2026-09-12 会话模型隔离、完整显示与准确终态
+
+本轮合并后重点回归：`test_display_archive.py`、`test_gateway_thinking_archive.py`、
+`test_tui_complete_detail.py`、`test_tool_display_archive.py`、`test_thinking_display_boundaries.py`、
+`test_tui_model_menu.py`、`test_thread_model_selection.py`、`test_shared_model_catalog.py`、
+`test_gateway_request_runtime_errors.py`、`test_tui_worker_paths.py`，合计 152 项通过。
+其中涵盖真实 prompt_toolkit 按键与本地 HTTP 路由，但不等同真实模型端到端。
+
+真实 TUI 使用测试机单 Gateway，独立同 owner 双会话与不同 owner 会话，检查菜单选择、
+原文分页、回到实时尾部、工具/思考次序、模型真实调用账本；新窗口名称必须在测试前告知用户。
+测试不发送用户原业务扫描任务、不修改 Compact 摘要算法，不用单元测试替代实际 TUI 结果。
+具体设计：[完整显示](docs/design/TUI_COMPLETE_DETAIL.md)、[归档分页](docs/design/DISPLAY_ARCHIVE_PAGING.md)、
+[模型终态诊断](docs/design/MODEL_TERMINAL_DIAGNOSTICS.md)。
+五路真实 TUI 的结果和未关闭边界见 [验收报告](docs/audits/SESSION_UI_ACCEPTANCE.md)。
+模型目录/服务商/会话绑定另有 243 项集成回归通过；数字不与有重叠的首轮相加。
+归档和快按修复合入后的最终联合组为 390 项通过；不以这些回归替代上述五路真 TUI。
+
 ## R230 收尾：工具循环启发式催停删除
 
 `test_tools/test_tool_loop.py::test_silent_successful_tool_rounds_do_not_rewrite_user_request`
