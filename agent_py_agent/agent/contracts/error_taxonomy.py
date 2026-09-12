@@ -2146,6 +2146,31 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="相同只读调用没有新增信息；复用已有结果、改变查询范围或推进下一步。",
     ),
+    # 同参同结果的成功调用被重复执行时给出的 P1 提醒（不阻断工具）。它由 GateFinding 产出，
+    # 未注册会 fallback 成 UNKNOWN_ERROR(retryable=False)，把"复用已有结果"误导成"报阻塞放弃"。
+    "TOOL_REPEATED_SUCCESS_OBSERVATION": ErrorContract(
+        code="TOOL_REPEATED_SUCCESS_OBSERVATION",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REUSE_PREVIOUS_RESULT.value,
+        recovery_hint="相同参数已成功执行且结果相同；结果相同不代表完成，先复用已有结果或换能提供新信息的步骤。",
+    ),
+    # 语义记忆（embedding）诊断码：属于本机配置状态，不是工具失败；注册后不再被当成
+    # UNKNOWN_ERROR 让模型误以为任务失败。两者都只降级为关键词召回，主链路继续。
+    "MEMORY_EMBEDDING_MODEL_MISSING": ErrorContract(
+        code="MEMORY_EMBEDDING_MODEL_MISSING",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="语义记忆已开启但没配置 embedding 模型；当前退回关键词召回，需用户配置模型后才启用。",
+    ),
+    "MEMORY_EMBEDDING_INIT_FAILED": ErrorContract(
+        code="MEMORY_EMBEDDING_INIT_FAILED",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="embedding 客户端初始化失败（端点或凭据）；当前退回关键词召回，需用户核对 embedding 配置。",
+    ),
     "TOOL_RATE_LIMIT_IDENTITY_MISSING": ErrorContract(
         code="TOOL_RATE_LIMIT_IDENTITY_MISSING",
         category="tool",

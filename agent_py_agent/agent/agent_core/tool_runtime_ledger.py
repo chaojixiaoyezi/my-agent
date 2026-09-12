@@ -16,6 +16,7 @@ from ..conversation.authority import (
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
 )
 from ..local_storage import RuntimeGateLedgerRecord
+from ..path_access_policy import inheritable_declared_work_roots
 from ..tooling.runtime_contracts import tool_arguments_hash
 from .run_task_workspace_writer import current_run_tool_output_archive_root
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
@@ -110,6 +111,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     _attach_owner_task_write_scope(merged, agent, params)
     _attach_transient_named_work_write_scope(merged, agent, params)
     _attach_owner_control_write_guards(merged, agent)
+    _attach_granted_execution_workspace_roots(merged, agent, params)
     guardrail_rows = tool_guardrail_records(agent)
     if guardrail_rows:
         merged["tool_guardrail_records"] = _merged_tool_guardrail_rows(
@@ -351,6 +353,44 @@ def _attach_main_conversation_execution_cwd(
         return
     roots = _string_list(boundary.get("allowed_write_roots"))
     boundary["allowed_write_roots"] = list(dict.fromkeys([*roots, *execution_roots]))
+
+
+# LLM: 子代理的产品写根在创建时就由宿主写进 allowed_write_roots；工具执行根必须从同一权威派生，
+#   否则路径门只认 owner home / registry 根，会把已经授权的墙外工作目录判成
+#   PATH_OWNER_SCOPE_BLOCKED（2026-09-11 真机：4 个子代理各写一个 core_*.go，收工时 6 个文件
+#   一个都不存在，子代理自己提交的能力申请里写明"allowed_write_roots 含目标目录但仍被拦"）。
+#   只投影"已经授权、且位于 owner 墙外"的根；系统根目录、宿主控制面、其它 owner 的家一律不投影。
+#   这一层只补执行根，不放宽 allowed_write_roots，也不引入任何新的写权限。
+# 函数用途: 让 owner 墙外的已授权工作目录真正成为本次调用的工作根与相对路径起点。
+def _attach_granted_execution_workspace_roots(
+    boundary: dict[str, object],
+    agent: object,
+    params: object,
+) -> None:
+    if _string_list(boundary.get("execution_workspace_roots")):
+        return
+    owner_home = _resolved_path(boundary.get("canonical_owner_home_root")) or _resolved_path(
+        getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+    )
+    granted = inheritable_declared_work_roots(
+        boundary.get("allowed_write_roots"),
+        owner_home=owner_home,
+    )
+    if owner_home is not None:
+        granted = [root for root in granted if not _is_relative_to(Path(root), owner_home)]
+    if not granted:
+        return
+    roots = [str(owner_home)] if owner_home is not None else []
+    boundary["execution_workspace_roots"] = list(dict.fromkeys([*roots, *granted]))
+    attrs = getattr(params, "task_attributes", None)
+    declared_cwd = _resolved_path(
+        attrs.get(CONVERSATION_EXECUTION_CWD_ATTR) if isinstance(attrs, dict) else ""
+    )
+    if declared_cwd is not None and any(
+        _is_relative_to(declared_cwd, Path(root)) for root in granted
+    ):
+        # 父代理已经把"在这里干活"作为结构化事实下发；只有它落在已授权根内才当工作目录。
+        boundary["execution_cwd"] = str(declared_cwd)
 
 
 # LLM: 普通 main/child 的文件墙是同一 owner home；Audit 精确授权和 control_plane 不扩大。

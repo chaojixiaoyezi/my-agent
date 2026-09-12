@@ -17,6 +17,10 @@ from ...conversation.authority import (
     conversation_runtime_workspace_roots,
     current_conversation_task_attributes,
 )
+from ...path_access_policy import (
+    UNINHERITABLE_ROOT_DIRS,
+    inheritable_declared_work_roots,
+)
 from ...subagents.models import SUBAGENT_REUSABLE_STATUSES, task_status_in
 from ...subagents.role_templates import role_template_snapshot_for_role
 from ...subagents.services.base import CreateRunParams
@@ -141,11 +145,10 @@ def _current_conversation_product_write_roots(agent: object) -> list[str]:
     return []
 
 
-# LLM: 文件系统根级目录是操作系统本体而不是"工作目录"：管理员即使 full-access 也不把它
-#   自动继承给子代理。这是写死的少量常量，不是可扩张的名单，也不做任何危险判断。
-#   判断只看归一化后的真实路径，不读模型文字。
-# 常量用途: 列出不得作为子代理第二层作用域自动继承的根级目录。
-_UNINHERITABLE_ROOT_DIRS = ("/", "/System", "/usr", "/bin", "/sbin", "/private/etc", "/etc")
+# LLM: 文件系统根级目录与"可继承工作根"判据收敛在 path_access_policy，本模块只做子代理视角的复用，
+#   不再自己维护第二份常量或第二套 parents 遍历。
+# 常量用途: 不得作为子代理第二层作用域自动继承的根级目录（唯一权威在 path_access_policy）。
+_UNINHERITABLE_ROOT_DIRS = UNINHERITABLE_ROOT_DIRS
 
 
 # LLM: 管理员 full-access 解除 owner 墙后，子代理仍只继承"父代理当时真正工作的那个目录及其子树"，
@@ -160,16 +163,10 @@ def _second_layer_work_roots(agent: object) -> list[str]:
         return []
     attrs = current_conversation_task_attributes(agent)
     candidates = [conversation_execution_cwd(attrs), *conversation_runtime_workspace_roots(attrs)]
-    roots: list[str] = []
-    for raw in candidates:
-        path = _resolved_path(raw)
-        if path is None:
-            continue
-        text = str(path)
-        if text in _UNINHERITABLE_ROOT_DIRS:
-            continue
-        roots.append(text)
-    return _unique_roots(roots)
+    return inheritable_declared_work_roots(
+        candidates,
+        owner_home=getattr(getattr(agent, "home_paths", None), "owner_home_dir", ""),
+    )
 
 
 # LLM: 精确或无 owner 的父级只继承已授权的产品根；运行归档不能凭目录结构生成文件权限。

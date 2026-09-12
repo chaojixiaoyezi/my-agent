@@ -37,6 +37,7 @@ from ..runner.prompts import SUBAGENT_DEFAULT_PLAN, SUBAGENT_DEFAULT_THOUGHT
 from ..runner.ref_fields import params_input_refs, params_output_refs
 from ..spawn_role_seed import is_explicit_root_role
 from .create_constraints import (
+    inheritable_declared_work_roots,
     resolved_extra_write_roots,
 )
 from .create_context import create_context_manifest, create_context_packs
@@ -942,17 +943,24 @@ def _inherit_current_conversation_workspace_attrs(
     if not cwd:
         return
     home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
-    roots = list(conversation_runtime_workspace_roots(current_attrs))
+    declared = inheritable_declared_work_roots(
+        conversation_runtime_workspace_roots(current_attrs),
+        owner_home=home,
+    )
     if home:
         owner = Path(home).expanduser().resolve(strict=False)
-        if not Path(cwd).expanduser().resolve(strict=False).is_relative_to(owner):
+        cwd_path = Path(cwd).expanduser().resolve(strict=False)
+        # 用户显式声明的工作目录是宿主写入的结构化事实，可以下发给子代理（R239：声明优先）。
+        # 只有"不可继承"的声明（系统根目录、宿主控制面）才退回 owner home——既不因为一条
+        # 历史属性重新授予系统目录，也不把用户声明过的项目目录误降级成家目录。
+        # cwd 只参与这一步判定，不塞进 roots：roots 描述的是"声明过的工作根集合"本身。
+        if not cwd_path.is_relative_to(owner) and not inheritable_declared_work_roots(
+            [cwd], owner_home=home
+        ):
             cwd = str(owner)
-        roots = [
-            str(Path(value).expanduser().resolve(strict=False))
-            for value in roots
-            if Path(value).expanduser().resolve(strict=False).is_relative_to(owner)
-        ]
-        roots = list(dict.fromkeys([str(owner), *roots]))
+        roots = list(dict.fromkeys([str(owner), *declared]))
+    else:
+        roots = declared
     attrs[CONVERSATION_EXECUTION_CWD_ATTR] = cwd
     attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = roots
 

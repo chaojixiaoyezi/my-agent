@@ -5082,12 +5082,21 @@ def test_gateway_subagent_relative_outputs_keep_actual_cwd_not_runtime_archive(t
     assert create_params.attributes["output_refs"] == [
         str((client_root / "bbb" / "index.html").resolve())
     ]
-    assert create_params.extra_write_roots == [str(agent.home_paths.owner_home_dir.resolve())]
+    # R239（用户确认）：用户显式声明了工作目录时，它就是本轮唯一的产品写范围，不再回落 owner home，
+    # 否则子代理会把产物写回老家而不是交付目录（2026-09-11 真机实测）。output_refs 与写根必须同源。
+    assert create_params.extra_write_roots == [str(client_root.resolve())]
 
 
-def test_gateway_child_inherits_home_without_declaring_outputs(
+def test_gateway_child_inherits_declared_workspace_over_home(
     tmp_path,
 ):
+    """R239 合同：会话显式声明了工作目录时，子代理继承**声明目录**，不再回落 owner home。
+
+    原用例断言的是 R239 之前的行为（子代理无论父级在哪都拿 owner home）。2026-09-11 真机实测
+    证明那会让子代理把产物写回老家、并且在 owner 墙外完全写不进去（PATH_OWNER_SCOPE_BLOCKED），
+    因此改为断言"声明优先"，并保留一条"未声明则继承 owner home"的用例（见下一个测试）。
+    """
+
     service_root = tmp_path / "service"
     client_root = tmp_path / "client-project"
     task_root = tmp_path / "home" / "task"
@@ -5126,14 +5135,56 @@ def test_gateway_child_inherits_home_without_declaring_outputs(
     finally:
         delattr(agent, "_current_run_params")
 
-    task_root_text = str(agent.home_paths.owner_home_dir.resolve())
-    assert create_params.extra_write_roots == [task_root_text]
-    assert task.attributes["workspace_root"] == task_root_text
-    assert task.attributes["workspace_roots"] == [task_root_text]
-    assert task_root_text in task.allowed_write_roots
-    assert context.context_bundle["workspace_refs"]["owner_workspace_dir"] == task_root_text
-    assert context.write_boundary["execution_cwd"] == task_root_text
-    assert task_root_text in context.write_boundary["allowed_write_roots"]
+    declared_text = str(client_root.resolve())
+    owner_home_text = str(agent.home_paths.owner_home_dir.resolve())
+    assert create_params.extra_write_roots == [declared_text]
+    assert task.attributes["workspace_root"] == declared_text
+    # 执行根清单保留"家 + 声明目录"两项：家始终是 owner 自己的工作区，声明目录是本轮项目目录。
+    # 真正决定能写哪里的是 extra_write_roots / allowed_write_roots，那里只留声明目录。
+    assert task.attributes["workspace_roots"] == [owner_home_text, declared_text]
+    assert declared_text in task.allowed_write_roots
+    assert owner_home_text not in create_params.extra_write_roots
+    assert context.write_boundary["execution_cwd"] == declared_text
+    assert declared_text in context.write_boundary["allowed_write_roots"]
+
+
+def test_gateway_child_inherits_home_when_no_workspace_declared(
+    tmp_path,
+):
+    """未声明工作目录时维持原语义：子代理继承 owner home，行为不变。"""
+
+    service_root = tmp_path / "service"
+    task_root = tmp_path / "home" / "task"
+    (task_root / "output").mkdir(parents=True)
+    (task_root / "work").mkdir()
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        service_root,
+    )
+    agent._current_run_task_workspace = str(task_root)
+    agent._current_run_params = RunParams(
+        request_id="gw-cwd-home-child",
+        run_id="gw-cwd-home-child",
+        task_id="gw-cwd-home-child",
+        task_attributes={
+            "conversation_thread_id": "thread-cwd-home-child",
+            "conversation_task_id": "gw-cwd-home-child",
+        },
+    )
+    try:
+        create_params = create_run_params(
+            agent,
+            {
+                "goal": "整理家目录里的资料",
+                "allowed_tools": ["read_file", "write_file"],
+            },
+            "整理家目录里的资料",
+            ["read_file", "write_file"],
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert create_params.extra_write_roots == [str(agent.home_paths.owner_home_dir.resolve())]
 
 
 def test_gateway_subagent_records_originating_conversation_request(tmp_path):

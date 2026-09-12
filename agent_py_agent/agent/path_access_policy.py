@@ -29,6 +29,12 @@ DEFAULT_DANGEROUS_PATH_ROOTS = (
 )
 _VALID_MODES = {PATH_ACCESS_MODE_NORMAL, PATH_ACCESS_MODE_FULL}
 
+# 文件系统根级目录是操作系统本体而不是"工作目录"：管理员即使 full-access 也不把它自动
+# 继承给子代理或当成工具执行根。这是写死的少量常量，不是可扩张的名单，也不做任何危险判断；
+# 判据只看归一化后的真实路径，不读模型文字。
+# 常量用途: 列出不得作为可继承工作根自动下发的根级目录。
+UNINHERITABLE_ROOT_DIRS = ("/", "/System", "/usr", "/bin", "/sbin", "/private/etc", "/etc")
+
 # 选项1-B 凭据文件名 denylist(抄 长期助手 file_safety):这些每每装 API key/密码,文件工具一律拒。
 _CREDENTIAL_FILENAMES = frozenset(
     {
@@ -252,10 +258,51 @@ def _home_root_from_owner_scope(owner_scope_root: Path) -> Path | None:
     guess.
     """
 
-    for candidate in (owner_scope_root, *owner_scope_root.parents):
+    return agent_home_root_for_owner(owner_scope_root) or _my_agent_home_root()
+
+
+# LLM: 任何需要区分"用户工作目录"与"my-agent 运行记录区"的模块都必须用这一个推导，
+# 不要再各写一份 parents 遍历；布局不是 owners/<provider>/<owner> 时返回 None，调用方
+# 自行决定回退，不能把 None 当成"整个 home 都不可用"。
+# 函数用途: 从可信 owner home 反推 my-agent 数据根（例如 ~/.my-agent）。
+def agent_home_root_for_owner(owner_home: object) -> Path | None:
+    resolved = _normalized_root(owner_home)
+    if resolved is None:
+        return None
+    for candidate in (resolved, *resolved.parents):
         if candidate.name == "owners":
             return candidate.parent
-    return _my_agent_home_root()
+    return None
+
+
+# LLM: 用户显式声明的工作目录（宿主写入 conversation_execution_cwd /
+#   conversation_runtime_workspace_roots，或已授权的 allowed_write_roots）是结构化事实，
+#   可以下发成子代理工作根与工具执行根；但文件系统根级目录、以及 my-agent 自己的运行记录区
+#   （runs/agents/data/logs/其它 owner 的家）永远不是工作目录。
+#   判据只用归一化路径，不读 goal 文字、不读模型自报的产物路径；无法解析的输入按"没有事实"丢弃。
+# 函数用途: 把"声明过或已授权的目录"过滤成可以继承给子代理和工具执行层的可信工作根。
+def inheritable_declared_work_roots(
+    raw_roots: object,
+    *,
+    owner_home: object = "",
+) -> list[str]:
+    home = _normalized_root(owner_home)
+    agent_home = agent_home_root_for_owner(home) if home is not None else None
+    roots: list[str] = []
+    for raw in raw_roots if isinstance(raw_roots, (list, tuple)) else ():
+        path = _normalized_root(raw)
+        if path is None:
+            continue
+        text = str(path)
+        if text in UNINHERITABLE_ROOT_DIRS:
+            continue
+        if agent_home is not None and _is_relative_to(path, agent_home):
+            if home is None or not _is_relative_to(path, home):
+                # 数据根里只有这个 owner 自己的家算工作区；其余是宿主控制面。
+                continue
+        if text not in roots:
+            roots.append(text)
+    return roots
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -271,7 +318,10 @@ __all__ = [
     "DEFAULT_PATH_ACCESS_MODE",
     "PATH_ACCESS_MODE_FULL",
     "PATH_ACCESS_MODE_NORMAL",
+    "UNINHERITABLE_ROOT_DIRS",
     "PathAccessDecision",
     "PathAccessPolicy",
+    "agent_home_root_for_owner",
+    "inheritable_declared_work_roots",
     "normalize_path_access_mode",
 ]

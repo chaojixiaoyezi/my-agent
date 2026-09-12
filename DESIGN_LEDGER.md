@@ -1,5 +1,90 @@
 # DESIGN LEDGER
 
+## 2026-09-11 R247 对照 会话运行时 / 终端交互 的剩余问题解法与优先级【状态：已调研，按优先级分步落地】
+
+对 R240/R244 记的三种失败形态和 R245 的唤醒问题，按要求先做"对照组阅读"：会话运行时
+（`~/study-agent/all-agent/会话运行时-main`，Rust）与 终端交互（`~/study-agent/all-agent/终端交互-main`，TS）逐条查证，
+结论只写读到的代码路径，不写猜测。关键结论与"本仓库该怎么做"如下。
+
+**先纠正一个我自己的误判**：R240/R244 把"只读不写""写了不落盘"归因成"读取预算"和"单轮吞吐"，
+对照阅读后发现**两者共用一个更硬的结构性原因**——见 R246：owner 墙外的已授权工作目录只进了
+`allowed_write_roots`，没有投影成执行根，子代理在目标目录里**读写都被硬拦**。子代理自己提交的
+能力申请里已经把这条写明（"allowed_write_roots 含目标目录，但 write_file 仍 PATH_OWNER_SCOPE_BLOCKED"）。
+所以下面这些是"修完 R246 之后仍然存在"的问题。
+
+| 缺陷 | 会话运行时 的做法 | 终端交互 的做法 | 本仓库结论 |
+|---|---|---|---|
+| 只读不写（终态由模型宣布） | **没有**产物/closeout 概念（全仓 grep `deliverable`/`closeout` = 0）；空产出是合法终态 `Completed(None)` | `SubagentStop` hook 可返回 `decision:"block"` + reason，harness 据此**再跑一轮**（`src/query.ts:1282-1306`），但**默认没有**这条规则 | 抄 hook 的形状：在 turn 边界用**文件系统事实**否决收尾（有/无写入回执），必须有次数上限 |
+| 声称写了但没落盘 | 不做校验，靠 prompt 里一句"review the uploaded changes" | **不做校验**；只有 prompt 契约 + 另一个 LLM verification 子代理 | 补两者都没有的一层：写工具返回结构化 A/M/D 回执 + stat/hash 对账（会话运行时 `apply-patch/src/lib.rs:870-885` 有回执、无对账） |
+| 单轮 200~400 行封顶 | 输入 patch 从不截断，只截断工具输出（`core/src/tools/mod.rs:75-112`） | 输出上限默认 32k、截断时**先升到 64k 重试一次**，再注入"Resume directly — no apology, no recap"并 `continue`，上限 3 次（`src/query.ts:1199-1252`） | 我们已有等价的有界分块纠偏（`_NATIVE_TRUNCATED_WRITE_LOOP_LIMIT=3`）；**缺的是"先升上限再重试"这一步**，而 `max_tokens: 16314` 本身就是 200~400 行的机械来源，需真机实验确认供应商可接受的上限 |
+| 父级不被唤醒 | `trigger_turn: bool` 显式区分"只投递"和"投递并唤醒"（`protocol.rs:748`）；唤醒判定收敛成三重门 `maybe_start_turn_for_pending_work`（`tasks/mod.rs:475-525`） | 模块级优先级队列 + `notified` 恰好一次 + idle 时 `useEffect` 拉取（`utils/messageQueueManager.ts:53`、`useQueueProcessor.ts:48-67`） | 我们已按结构化原因修好能力申请唤醒（R245）；**建议补**：唤醒判定保持单一入口，且 mailbox 要落盘（会话运行时 是纯内存，重启即丢） |
+| 子代理行为不一致（有时申请、有时自我了结） | 子代理**从不判断"我该不该问"**，只在 IO 循环里发事件，由 harness 统一路由（`会话运行时_delegate.rs:319-384`）；策略禁止时返回**空授予**而不是报错（`session/mod.rs:2443-2463`）；连续 3 次拒绝熔断 | 能力不可用时**显式 deny + 结构化理由** `decisionReason:{type:'asyncAgent'}`（`utils/permissions/permissions.ts:929-952`）；`AskUserQuestion` 从子代理工具池里**物理移除** | 抄"统一 finally 路径 + 结构化拒绝理由"：被权限墙拦下的子代理不允许以 DONE 收尾，终态必须带结构化理由码 |
+| 读取无预算 | 无 step limit（全仓 0 命中）；有**整棵 agent 树共享**的加权 token 预算 `RolloutBudget`，output 与 prefill 分开计权，超限 `Err(SessionBudgetExceeded)`，配多档数字提醒 + "别再开新活、收尾"指令（`rollout_budget.rs:43-52`、`goals/budget_limit.md:14`） | `maxTurns` 可选、内置 agent 均未设，**默认无限轮次** | 抄 会话运行时 的加权预算形状（output 权重 > input 权重，让"只读不写"更快顶到阈值），**不要**抄 终端交互 的无限轮次 |
+
+**三条被证伪的假设，别再往那个方向找参考**：① 会话运行时 没有 artifact/deliverable/closeout 概念；
+② 会话运行时 没有 step/turn/max_iterations 上限；③ 两家都没有"声称写了 vs 实际落盘"的校验代码。
+
+**建议落地顺序**（前一条是后一条的前提，且都能独立验证）：
+1. R246 的授权根投影（已修）：没有它，后面所有"要求子代理产出"的约束都只会把它逼成 BLOCKED。
+2. 终态产物门（抄 终端交互 的 SubagentStop 形状，用文件系统事实 + 写入回执对账，**带上限**）——
+   同时治"只读不写""写了不落盘""自我了结"三种表现。
+3. 输出上限升级重试（抄 终端交互）：需先用真机实验确认供应商可接受的 `max_tokens`，不能凭猜改默认值。
+4. 加权共享预算（抄 会话运行时 `RolloutBudget`）+ 结构化 compaction ledger（`{done, remaining, blockers, refs}`）。
+5. mailbox / 唤醒队列落盘 + 单一唤醒入口（会话运行时 的短板，我们已有 wake 队列，补齐交付语义即可）。
+
+## 2026-09-11 R246 owner 墙外的已授权工作目录对子代理不可达（"只读不写/写了不落盘"的真实根因）【状态：已定位并修复，合同单测通过，待真机复测】
+
+**真机证据（不是读代码推断）**：R244 那轮"4 个并行子代理各写一个 `core_*.go`，收工 6 个文件一个都不存在"，
+子代理自己的 `capability_requests[0]` 里写得很清楚：
+
+```
+task output_contract 要求产物写到 /tmp/ma-eval/port-click-go/core_types.go，
+write_boundary.allowed_write_roots 与 product_write_roots 均包含
+/private/tmp/ma-eval/port-click-go，但当前所有写入通道都被拦截：
+write_file 对 /private/tmp 与 /tmp 的绝对路径均报 PATH_OWNER_SCOPE_BLOCKED（handler 未执行）；
+run_command 沙箱（file_scope=owner_workspace_only）写文件报 Operation not permitted；
+read_file /private/tmp 与 /tmp 均 PATH_OWNER_SCOPE_BLOCKED（只能靠 run_command sed 读）。
+```
+
+同一个 run 的 `write_boundary` 结构化事实：`allowed_write_roots` **有**目标目录，
+`execution_workspace_roots` **缺失**，`execution_cwd` 是 owner home。也就是说
+**"授权"和"执行根"是两份互相矛盾的权威**：写边界说可以写，执行/路径门只认 owner home。
+
+**链路（每一环都有代码位置）**：
+1. `_inherit_current_conversation_workspace_attrs`（`create_policy.py`）把子代理继承到的
+   `conversation_execution_cwd` / `conversation_runtime_workspace_roots` 一律**夹回 owner home**；
+2. `_attach_main_conversation_execution_cwd`（`tool_runtime_ledger.py`）对 `task_local` 提前 return，
+   注释写着"子代理 cwd 已由 runner_context 的结构化项目写合同给出"——但那份合同只写了
+   `allowed_write_roots`，**从来没有产出 `execution_workspace_roots`**；
+3. `registry._execution_workspace_roots` 于是回落成 registry 根（owner home）；
+4. 路径门 `_path_url_command_decision` 排在写边界门之前，它的唯一逃生口是
+   `_under_any_root(resolved, request.roots)`——roots 里没有目标目录，于是硬拒
+   `PATH_OWNER_SCOPE_BLOCKED`，后面的 `validate_write_boundary` 根本没机会跑。
+
+**修法（三处同源，不新增任何权限）**：
+- 新增唯一权威 `inheritable_declared_work_roots()`（`agent/path_access_policy.py`）：过滤掉
+  文件系统根级目录（`/`、`/etc`、`/System`…）和 my-agent 运行记录区（`runs/agents/data/logs/`
+  以及**其它 owner 的家**），其余声明目录可继承；`_UNINHERITABLE_ROOT_DIRS` 也收敛到同一处，
+  消灭第二份常量。
+- `_inherit_current_conversation_workspace_attrs` 不再把用户声明的项目目录降级成 owner home；
+  不可继承的声明才回落。`workspace_roots` 保持"家 + 声明目录"，**产品写范围仍然只有声明目录**（R239 不改）。
+- `tool_runtime_ledger` 新增 `_attach_granted_execution_workspace_roots()`：把
+  `allowed_write_roots` 里**位于 owner 墙外**的那些根投影成 `execution_workspace_roots`，
+  并在声明 cwd 落在这些根内时把 `execution_cwd` 对齐过去。它只搬动已授权的根，不放宽
+  `allowed_write_roots`，也不引入新写权限。
+
+**验证**：新增 `agent_py_agent/tests/test_child_external_workspace_scope.py` 6 条合同单测
+（投影生效 / 路径门由拒转放行 / 未授权的墙外路径仍拒 / 根级目录永不投影 / 投影不放宽写边界 /
+没有墙外授权就不凭空派生）。修前第 1 条如实失败（`execution_workspace_roots` 只有 owner home）。
+
+**顺带修掉两处 HEAD 上的红测试**（不是本轮引入，是我之前 R239 提交时漏跑导致的）：
+`test_gateway_chat_conversation_context` 两条仍断言"子代理无论父级在哪都拿 owner home"，
+已改为断言 R239 合同（声明优先），并补一条"未声明则继承 owner home"的用例；
+`test_recovery_code_policy` 两条报了三个未注册码（`TOOL_REPEATED_SUCCESS_OBSERVATION`、
+`MEMORY_EMBEDDING_MODEL_MISSING`、`MEMORY_EMBEDDING_INIT_FAILED`），已在 `ERROR_CONTRACTS` 注册，
+否则工具被门拦时会 fallback 成 UNKNOWN_ERROR 误导模型放弃。
+
+
 ## 2026-09-11 R245 父级空闲、孩子等裁决的唤醒被当过期丢弃【状态：受控复现已定位并修复，待复测】
 
 **受控复现（这次是真实场景，不是读代码推断）**：在 `--workspace /tmp/ma-eval/deadlock-test` 起一个富 TUI，
