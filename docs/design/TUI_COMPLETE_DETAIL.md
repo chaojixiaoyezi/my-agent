@@ -68,5 +68,7 @@
 foreground继承、attempt切换、100K思考预裁不改原文。`test_tool_display_archive.py`覆盖
 原始长行/缩进、child identity、immutable write快照、checkpoint ref回放及存档失败隔离。
 完整键盘pipe验证Ctrl+O/Ctrl+E/翻页/Ctrl+End以及回到输入后方括号不被快捷键吞掉。
+真实TUI补测发现快速连续Ctrl+O/Ctrl+E/翻页会在首帧前吞页键：页键现与渲染共用一次
+本地稀疏索引初始化，不等待首帧、也不预取网络；空系统占位不再画没有内容的原文标题。
 本切片与归档、Gateway前置长思考接点联测：392项focused通过；相关Ruff、diff、strict
 code-size通过。全仓pytest与真实LLM未运行；真实TUI由主线统一执行，不把pipe测试称为真模型验收。

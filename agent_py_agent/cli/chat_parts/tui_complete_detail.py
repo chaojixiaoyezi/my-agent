@@ -107,9 +107,11 @@ def _split_row(text: str) -> Iterator[str]:
 
 
 # LLM: role 和 display.kind 是唯一格式来源；正文不能决定状态，内部执行参数不进入展示。
-# 函数用途: 将一个公开消息块转换为保留原文的行，思考灰色、工具差异保留增删颜色。
+# 函数用途: 将公开消息转换为原文行；空系统占位不画假标题，思考灰色、差异保留增删颜色。
 def _block_rows(block: TuiBlock) -> Iterator[tuple[str, str]]:
     if block.role in {"todo", "background", "connection", "session"}:
+        return
+    if block.role == "system" and not (block.text or block.detail or block.title):
         return
     labels = {"user": "用户", "assistant": "助手", "thinking": "思考", "tool": "工具"}
     style = "class:tui-thinking-detail" if block.role == "thinking" else "class:tui-tool-output"

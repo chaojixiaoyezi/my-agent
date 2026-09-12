@@ -194,8 +194,7 @@ class TuiTranscriptModeState:
         with self._lock:
             if not self._active or not self._show_all or self._frozen_snapshot is None:
                 return ()
-            if not self._complete_pages:
-                self._complete_pages = build_complete_detail_pages(self._frozen_snapshot)
+            self._ensure_complete_pages_locked()
             page = self._complete_pages[self._complete_page]
             if page.reference is not None:
                 key = (str(page.reference["archive_id"]), page.remote_page)
@@ -248,12 +247,13 @@ class TuiTranscriptModeState:
                 self._complete_revision += 1
         self._notify()
 
-    # LLM: 页号按已构造的展示页面边界移动，不能用于模型历史或Gateway游标。
-    # 函数用途: 在完整原文中翻页；到达首尾返回False，不循环跳转。
+    # LLM: 首次翻页与首帧渲染共享本地索引初始化；页键不能因渲染尚未执行而丢弃，不预取网络。
+    # 函数用途: 完整原文刚打开也能立即翻页，到达首尾返回False，不循环跳转。
     def move_complete_page(self, delta: int) -> bool:
         with self._lock:
-            if not self._active or not self._show_all or not self._complete_pages:
+            if not self._active or not self._show_all or self._frozen_snapshot is None:
                 return False
+            self._ensure_complete_pages_locked()
             target = max(0, min(len(self._complete_pages) - 1, self._complete_page + int(delta)))
             if target == self._complete_page:
                 return False
@@ -261,6 +261,12 @@ class TuiTranscriptModeState:
             self._reset_search_locked()
         self._notify()
         return True
+
+    # LLM: 调用方持state锁；只建立冻结数据的稀疏显示索引，不读归档、不改模型或请求历史。
+    # 函数用途: 为首帧和快按翻页共用一次本地初始化，避免界面是否渲染成为按键生效条件。
+    def _ensure_complete_pages_locked(self) -> None:
+        if not self._complete_pages and self._frozen_snapshot is not None:
+            self._complete_pages = build_complete_detail_pages(self._frozen_snapshot)
 
     # LLM: open_search 保存进入搜索前的 committed query 与滚动锚点；编辑框总从空串开始，匹配 less 的 `/` 习惯。
     # 函数用途: 打开 transcript 搜索栏。

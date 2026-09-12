@@ -63,6 +63,22 @@ def test_jump_latest_leaves_frozen_transcript_and_restores_live_tail():
     assert "LIVE-NEW" in str(view.provider.frame(80).transcript_lines)
 
 
+def test_fast_page_key_before_first_render_builds_index_without_network():
+    _, _, state, view = _fixture("assistant_completed", "\n".join(f"row-{i}" for i in range(900)))
+    requests = []
+    state.request_complete_page = lambda *args: requests.append(args)
+    assert state.snapshot().complete_page_count == 0
+    assert state.move_complete_page(1)
+    assert state.snapshot().complete_page == 1
+    assert requests == []
+    assert "row-255" in str(view.provider.frame(80).transcript_lines)
+
+
+def test_empty_system_placeholder_is_not_an_empty_original_header():
+    _, _, _, view = _fixture("system_message", "")
+    assert "── system" not in str(view.provider.frame(80).transcript_lines)
+
+
 def test_remote_page_sparse_index_requests_only_current_page_and_rebind_discards_late_reply():
     store = TuiStateStore()
     seq = TuiEventSequencer("remote")
@@ -132,13 +148,14 @@ def test_real_key_pipeline_complete_pages_then_ctrl_end_returns_input(tmp_path):
             task = asyncio.create_task(app.run_async())
             try:
                 await asyncio.sleep(.05)
-                pipe.send_bytes(b"\x0f\x05")
+                pipe.send_bytes(b"\x0f\x05]")
                 await asyncio.sleep(.1)
                 assert parts.transcript_state.snapshot().show_all
                 assert parts.transcript_state.snapshot().complete_page_count > 1
+                assert parts.transcript_state.snapshot().complete_page == 1
                 pipe.send_text("]")
                 await asyncio.sleep(.05)
-                assert parts.transcript_state.snapshot().complete_page == 1
+                assert parts.transcript_state.snapshot().complete_page == 2
                 pipe.send_bytes(b"\x05")
                 await asyncio.sleep(.05)
                 assert not parts.transcript_state.snapshot().show_all
