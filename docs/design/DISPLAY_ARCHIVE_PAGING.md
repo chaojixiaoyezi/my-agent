@@ -35,12 +35,26 @@ HTTP 必须通过现有 trusted source/owner 解析。先确认当前绑定线�
 历史子代理任务结束后仍可查看其旧显示，不靠当前 workspace task 锁限制只读历史。
 旧版本只有预览而无归档时必须提示“完整原文缺失”，不能宣称已全部显示，也不能从改过的文件重算。
 
+## 前台长思考的入口
+
+Gateway 的 `BufferedChunkStreamWriter.write_thinking` 曾在通知 foreground sink 之前裁到 12K 字符，
+所以只在下游保存原文仍会存到残缺版本。现在 writer 先完整执行公开投影，再调用同一个
+`_thinking_archive_payload` 保存快照，chunk 仅包含有界预览和 `display_archive_ref`。
+`GatewayForegroundTranscriptSink` 将引用透传给 `BackgroundTranscriptSink.write_thinking`，不重复归档。
+存档失败必须透传 `history_incomplete=true`，否则下游会把已裁预览误存成“完整原文”。
+没有绑定 owner/thread sink 的独立 writer 不能猜目录，超长内容只显示缺失事实；非 rich 客户端仍不显示思考。
+
+普通模型正文没有同样的前置字符裁剪：model delta 原样累计，工具边界 commentary 使用 `max_chars=0`，
+后台 commentary/final 使用 `limit=0`。本切片不改变这些正文的保存或模型上下文，只修显示思考的提前裁剪。
+
 ## 验证与交接
 
 定向测试覆盖长中文行精确重建、空行、多页、原数据变化后的快照、跨 owner/跨会话拒绝、后代读取、
 路径引用拒绝、页码/页大小上限、软链接、损坏归档和客户端载荷。真实 TUI 由主线统一验证并记录 tmux。
 本分支运行 `test_display_archive.py`、`test_gateway_client_service.py`、`test_chat_client_context.py`，
 共 36 项通过；包含真实本机 HTTP route，不包含真实 LLM 或 TUI。相关 Ruff、diff 检查及严格尺寸门通过。
+前台思考入口追加 `test_gateway_thinking_archive.py` 联合 foreground 与 archive 测试共 38 项通过：
+确认完整原文重建、只归档一次、现场/检查点/最终快照的引用一致、失败不把预览重存成全文，以及普通长正文未裁剪。
 显示生产者与事件白名单由 TUI 工作线接入；共享台账、目录树、发布文档由主线合并，避免并行覆盖。
 
 建议下一步：主线先合并 API 与显示生产者，确认 ref 从现场事件到历史回放不丢，再通过同 Gateway 的真实

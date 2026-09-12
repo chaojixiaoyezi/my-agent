@@ -43,8 +43,8 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
                 return
             self._consume_event(event)
 
-    # LLM: 调用方持显示锁；字段映射只接收既有公开 schema，不处理异常正文或动态工具参数。
-    # 函数用途: 分派已经确认来源的公开事件，未知种类保持忽略，避免不断叠加嵌套状态分支。
+    # LLM: 调用方持显示锁；长思考只沿用 writer 已保存的引用与缺失事实，不把裁后预览再次归档成全文。
+    # 函数用途: 分派公开事件并透传完整原文引用；未知种类保持忽略，不处理控制或动态工具参数。
     def _consume_event(self, event: dict[str, object]) -> None:
         kind = event.get("kind")
         text_writer = {"thinking_delta": self.write_thinking_delta, "model_delta": self.write_model}.get(kind)
@@ -63,7 +63,12 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
                 structured[1](value)
             return
         if kind == "assistant_thinking":
-            self.write_thinking(str(event.get("text") or ""), duration_seconds=float(event.get("duration_seconds") or 0))
+            reference = event.get("display_archive_ref")
+            self.write_thinking(
+                str(event.get("text") or ""), duration_seconds=float(event.get("duration_seconds") or 0),
+                display_archive_ref=reference if isinstance(reference, dict) else None,
+                history_incomplete=event.get("history_incomplete") is True,
+            )
             return
         if kind == "assistant_commentary":
             self._model_text = str(event.get("text") or "")

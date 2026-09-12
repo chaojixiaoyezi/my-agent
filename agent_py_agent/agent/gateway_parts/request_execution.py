@@ -433,20 +433,28 @@ class BufferedChunkStreamWriter:
             },
         )
 
-    # LLM: Full thinking is emitted before pending assistant deltas. The model-generation
-    # finalizer owns this order; calling the general flush here would invert it again.
-    # 函数用途: 将一次模型调用的可展示思考先写成独立 Gateway 事件，再由调用方刷新正文。
+    # LLM: Sanitize the full thinking before preview clipping and archive through the bound
+    # owner/thread sink. Events carry only preview/ref; display failure never changes model state.
+    # 函数用途: 保留完整公开思考原文，再发送有界预览和引用；保持思考先于正文，不丢失长思考中间部分。
     def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> None:
         if not self.rich_transcript:
             return
-        content = self._public_model_text(text, max_chars=12_000)
-        if not content:
+        full_content = self._public_model_text(text, max_chars=0)
+        if not full_content:
             return
+        archived = {}
+        content = full_content
+        if len(full_content) > 12_000:
+            from ..conversation.background_transcript import _thinking_archive_payload
+
+            archived = _thinking_archive_payload(self.transcript_sink, full_content)
+            content = self._public_model_text(full_content, max_chars=12_000)
         self._write_event(
             {
                 "kind": "assistant_thinking",
                 "text": content,
                 "duration_seconds": max(0.0, round(float(duration_seconds or 0.0), 3)),
+                **archived,
             },
         )
 
