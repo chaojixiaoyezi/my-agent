@@ -1,7 +1,7 @@
 # LLM: 本模块是 chat worker/Gateway structured rows 到 TuiEvent 的唯一 adapter；它不渲染、不执行工具，也不把 legacy 文案当状态。
 # 后台流身份仅管理展示续接，换流不得清空本页面历史、待输入回执或已恢复工作片。
 # 历史工具卡不再驱动实时 Todo；当前计划只由实时工具/活动快照发布，恢复和向前翻页都遵守这一边界。
-# 模块用途: 为 session、公开模型选择、输入、回合和工具发布有序事件；保留公开调用字段，不分阶段复制标题或改变执行配置。
+# 模块用途: 发布会话、输入、回合和工具有序事件；保留公开原文及缺失字段，不重复标题或改变执行配置。
 
 from __future__ import annotations
 
@@ -2525,8 +2525,8 @@ def _tool_block_id(request_id: str, progress: dict[str, Any]) -> str:
     )
 
 
-# LLM: tool payload 只转发公开字段，调用预览统一由 reducer metadata 投影，不再只在 started 制造副本。
-# 函数用途: 生成实时工具显示事件；保留公开 detail，和恢复历史使用同一标题来源，不复制未知内部字段。
+# LLM: tool payload只转发公开字段；原文ref与history_incomplete同源保留，不能把采集缺口当工具失败或正文状态。
+# 函数用途: 生成实时工具事件，与恢复历史同样保留调用摘要及原文缺失标记，不复制内部字段。
 def _tool_payload(progress: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "tool",
@@ -2538,6 +2538,7 @@ def _tool_payload(progress: dict[str, Any]) -> dict[str, Any]:
         "output",
         "display",
         "display_archive_ref",
+        "history_incomplete",
         "ok",
         "handler_executed",
         "duration_ms",

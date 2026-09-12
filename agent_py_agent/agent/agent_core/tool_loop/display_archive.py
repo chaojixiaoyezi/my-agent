@@ -34,6 +34,15 @@ def _safe_rows(event: Any, raw_display: object) -> Iterator[dict[str, str]]:
         yield {"kind": row["kind"], "text": _public_progress_text(event, row["text"], max_chars=None)}
 
 
+# LLM: 只读取handler结构化采集事实，旧预览truncated同样不能当完整原文；不解析输出中的省略文字。
+# 函数用途: 判断命令原展示是否已经丢失内容，让事件和完整页同时如实提示缺口。
+def command_display_incomplete(display: object) -> bool:
+    return isinstance(display, dict) and display.get("kind") == "command" and (
+        display.get("capture_complete") is False or display.get("stdout_truncated") is True
+        or display.get("stderr_truncated") is True
+    )
+
+
 # LLM: 原始工具内容只能沿注册索引和哈希验证读取，禁止把客户端路径作为宿主读权限。
 # 函数用途: 外置结果复用已有工具归档；小结果使用真实ToolResult，不读取当前业务文件。
 def _original_output(event: Any) -> str:
@@ -57,8 +66,8 @@ def _original_output(event: Any) -> str:
     return str(payload.get("content") or "")
 
 
-# LLM: kind来自工具公开display协议；只保留实际输出和行号，不把工具正文解释为代码或指令。
-# 函数用途: 把完整写入、差异、补丁和stdout/stderr序列化成通道无关的展示行。
+# LLM: kind和capture字段来自handler协议；不把文本解释为状态，采集缺口在第一页显示且不能隐式恢复。
+# 函数用途: 序列化实际写入、差异和stdout/stderr；超采集上限只展示已保留部分并说明缺失。
 def _display_rows(display: dict[str, Any]) -> Iterator[dict[str, str]]:
     kind = display.get("kind")
     if display.get("path"):
@@ -80,7 +89,10 @@ def _display_rows(display: dict[str, Any]) -> Iterator[dict[str, str]]:
         if display.get("binary"):
             yield {"kind": "text", "text": f"二进制内容：{display.get('bytes', 0)} 字节"}
     if kind == "command":
-        yield {"kind": "header", "text": f"退出码：{display.get('return_code', '未知')}"}
+        if command_display_incomplete(display):
+            yield {"kind": "notice", "text": "命令输出采集不完整：以下仅为已保存内容；未保留部分无法恢复。"}
+        code = display.get("return_code")
+        yield {"kind": "header", "text": f"退出码：{code if code is not None else '未知'}"}
         for stream in ("stdout", "stderr"):
             for text in str(display.get(stream) or "").split("\n"):
                 yield {"kind": stream, "text": text}

@@ -4,7 +4,7 @@
 # ring. Child callers may replace the event writer with their durable bounded JSONL;
 # 主/子完整公开块先写canonical display记录，再投递；最终快照保留，展示不拥有生命周期或权限。
 # 易失游标必须与当前 Agent 的 stream_id 配对，重建 Agent 后不能用旧进程序号跳过新事件。
-# 模块用途: 将主/子代理公开过程转成同一展示事件，保留公开调用摘要；前台附精确宿主请求关联，供原页去重。
+# 模块用途: 统一主/子公开事件，保留调用摘要、原文引用和采集缺失标记；前台附精确宿主请求关联去重。
 
 from __future__ import annotations
 
@@ -85,6 +85,7 @@ _TOOL_PAYLOAD_FIELDS = frozenset(
         "output",
         "display",
         "display_archive_ref",
+        "history_incomplete",
         "ok",
         "handler_executed",
         "duration_ms",

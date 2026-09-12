@@ -1,5 +1,5 @@
-# LLM: 普通 shell 显式关闭宿主 stdin，交互归独立 PTY；退出、超时和取消仍共用可信进程回执。
-# 模块用途: 在用户权限内执行命令并整理输出、进程及产物保护记录，保留超时前输出供模型排查。
+# LLM: 普通 shell 关闭宿主 stdin，交互归独立 PTY；捕获全文与模型预览分离，展示归档不得拿裁剪预览充全文。
+# 模块用途: 在用户权限内执行命令并整理输出、进程及产物保护记录，保留有界采集原文和真实缺失事实。
 from __future__ import annotations
 
 import hashlib
@@ -390,26 +390,24 @@ def _format_process_result(result: subprocess.CompletedProcess[str], max_output_
     )
 
 
-# LLM: shell 富展示直接读取 CompletedProcess 的 stdout/stderr/returncode；renderer 不得从格式化 output 文本反解析机器事实，预览仍有独立硬上限。
-# 函数用途: 为终端生成分栏的标准输出、错误输出、行数和截断状态。
-def _command_display(
-    result: subprocess.CompletedProcess[str],
-    max_output_chars: int,
-) -> dict[str, object]:
+# LLM: 保存当次 CompletedProcess 的采集全文，供统一 owner/thread archive 在事件预览前冻结；模型正文仍由 _format_process_result 限额。
+# 函数用途: 保留命令原始标准/错误输出和采集缺口；不能重读业务文件，也不能把采集上限外的字节称为已保存。
+def _command_display(result: subprocess.CompletedProcess[str]) -> dict[str, object]:
     stdout = str(result.stdout or "")
     stderr = str(result.stderr or "")
-    preview_limit = min(max(1, int(max_output_chars or 1)), 12_000)
-    stdout_preview, stdout_truncated = _bounded_output(stdout, preview_limit)
-    stderr_preview, stderr_truncated = _bounded_output(stderr, preview_limit)
+    capture = getattr(result, "capture", {})
+    capture = capture if isinstance(capture, dict) else {}
+    seen, retained = capture.get("bytes_seen", {}), capture.get("bytes_retained", {})
     return {
         "kind": "command",
-        "return_code": int(result.returncode),
-        "stdout": stdout_preview,
-        "stderr": stderr_preview,
+        "return_code": int(result.returncode) if result.returncode is not None else None,
+        "stdout": stdout,
+        "stderr": stderr,
         "stdout_lines": stdout.count("\n") + (1 if stdout else 0),
         "stderr_lines": stderr.count("\n") + (1 if stderr else 0),
-        "stdout_truncated": stdout_truncated,
-        "stderr_truncated": stderr_truncated,
+        "stdout_truncated": seen.get("stdout", 0) > retained.get("stdout", 0),
+        "stderr_truncated": seen.get("stderr", 0) > retained.get("stderr", 0),
+        "capture_complete": capture.get("complete") is not False,
     }
 
 
@@ -1806,9 +1804,8 @@ def _shell_failure_effect_outcome(
     return ""
 
 
-# LLM: Foreground execution returns one typed process envelope for every exit path. Timeout and
-# cancellation preserve distinct codes and trusted termination receipts; generic timeouts remain unknown.
-# 函数用途: 运行前台命令，统一返回输出与退出事实；超时保留已产生的输出，不冒充命令成功或回滚。
+# LLM: 各退出路径保留独立进程事实；模型body受限，display保留本次有界采集全文，不能重新运行命令补齐显示。
+# 函数用途: 运行前台命令并分别返回模型预览与原文展示；超时和取消不冒充成功或回滚。
 def _run_shell_process_text(
     tool: ShellTool,
     command: str,
@@ -1850,7 +1847,7 @@ def _run_shell_process_text(
                 "stderr_chars": len(stderr),
                 "capture": capture,
                 "stderr_head": stderr[:80],
-                "_display": _command_display(result, tool.max_output_chars),
+                "_display": _command_display(result),
             },
         )
     except subprocess.TimeoutExpired as exc:
@@ -1879,8 +1876,8 @@ def _run_shell_process_text(
         )
 
 
-# LLM: 只有 CommandTimeoutError 的本地回执携带终止事实；普通 TimeoutExpired 保留 unknown。
-# 函数用途: 整理超时前标准输出与错误输出，给模型看排查线索，并给持久工具账本保存退出证据。
+# LLM: 只有 CommandTimeoutError 的回执证明终止；所有 timeout 保留已采集display，未确认排空必须标记不完整。
+# 函数用途: 超时后保存当次输出供展开排查，仍保持模型预览限额与未知终止事实，不重跑命令。
 def _shell_timeout_result(exc, command: str, timeout: int, max_output_chars: int) -> tuple[str, dict]:
     facts: dict[str, object] = {"status": "timed_out", "timeout_seconds": timeout}
     if getattr(exc, "capture", None):
@@ -1892,8 +1889,10 @@ def _shell_timeout_result(exc, command: str, timeout: int, max_output_chars: int
     result = subprocess.CompletedProcess(
         command, code, _process_output_text(exc.output), _process_output_text(exc.stderr)
     )
-    if code is not None:
-        facts["_display"] = _command_display(result, max_output_chars)
+    result.capture = dict(facts.get("capture") or {})
+    if not isinstance(exc, CommandTimeoutError) or not exc.pipes_drained:
+        result.capture["complete"] = False
+    facts["_display"] = _command_display(result)
     output = f"TOOL_TIMEOUT: 命令执行超时 timeout ({timeout}s)\n"
     output += _format_process_result(result, max_output_chars)
     output += "\n[note] 超时不是成功；命令可能已经改动部分文件，请根据输出与现有结果排查，不自动重放。"

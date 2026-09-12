@@ -47,6 +47,24 @@ Gateway 的 `BufferedChunkStreamWriter.write_thinking` 曾在通知 foreground s
 普通模型正文没有同样的前置字符裁剪：model delta 原样累计，工具边界 commentary 使用 `max_chars=0`，
 后台 commentary/final 使用 `limit=0`。本切片不改变这些正文的保存或模型上下文，只修显示思考的提前裁剪。
 
+## 命令采集原文与模型预览
+
+追加只读审计发现 `shell._command_display` 在富展示进入统一归档前也裁到 12K；通用工具输出归档保存的
+`outcome.output` 同样已是模型预览，不能从它恢复丢失的中段。现已取消这一次源头显示裁剪：当次
+`CompletedProcess.stdout/stderr` 作为 handler display 原文，经统一公开净化、owner/thread 原文归档之后，
+Gateway 事件仍各只携带 8K 预览和 opaque ref。模型正文 `_format_process_result` 的既有限额保持不变。
+不从当前业务文件或客户端传入路径读取内容，不重跑命令来伪造原输出。
+
+参考依据：会话运行时 `core/src/tools/events.rs::emit_exec_stage/emit_exec_end` 将真实捕获的 stdout/stderr
+与模型 `formatted_output` 分开；终端交互 `src/tools/BashTool/BashTool.tsx` 在短预览以外保留本次
+输出到 tool-results。本项目复用已实现的 owner-scoped display archive，不新增另一种路径引用格式。
+
+`ProcessOutputCapture` 每流 4 MiB 的保留上限及持续排空行为未改。真正超过采集上限、管道读取失败或
+超时未确认排空时，`capture_complete=false`、`history_incomplete=true` 和归档首页缺失提示一并保留；
+仍可浏览已经采集到的部分，但不能宣称进程输出全部已保存。旧 command display 的 typed
+`stdout_truncated/stderr_truncated` 同样声明缺口，不解析正文里的“省略”字样决定完整性。
+未知终止码展示“未知”，不把超时或采集缺失当作成功，也不改变操作账本的真实终态。
+
 ## 验证与交接
 
 定向测试覆盖长中文行精确重建、空行、多页、原数据变化后的快照、跨 owner/跨会话拒绝、后代读取、
@@ -56,6 +74,10 @@ Gateway 的 `BufferedChunkStreamWriter.write_thinking` 曾在通知 foreground s
 前台思考入口追加 `test_gateway_thinking_archive.py` 联合 foreground 与 archive 测试共 38 项通过：
 确认完整原文重建、只归档一次、现场/检查点/最终快照的引用一致、失败不把预览重存成全文，以及普通长正文未裁剪。
 显示生产者与事件白名单由 TUI 工作线接入；共享台账、目录树、发布文档由主线合并，避免并行覆盖。
+命令源头修复追加 `test_tool_display_archive.py`：主/子长 stdout 与 stderr 精确分页重建、事件预算、
+归档快照不随源对象变化、模型预览不变、真实小容量管道采集缺口、未知 timeout 和旧预览缺失提示。
+联合工具进度、工具 Gateway、归档、思考、进程退出回收和 TUI 浏览/runtime 共 161 项通过；
+Ruff、diff 与严格尺寸门通过。没有在本分支部署、调用真实模型或操作用户 TUI，真机验收由主线负责。
 
 建议下一步：主线先合并 API 与显示生产者，确认 ref 从现场事件到历史回放不丢，再通过同 Gateway 的真实
 TUI 检查 Ctrl+O/Ctrl+E、长 diff 与主子历史。不要用后端定向通过代替完整 TUI 验收。

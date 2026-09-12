@@ -1316,9 +1316,8 @@ def _task_progress_projection_from_mapping(
     return payload if isinstance(payload.get("items"), list) else None
 
 
-# LLM: The event projection contains typed public progress only; canonical Todo
-# rows may be copied from an explicit successful tool result, never from prose.
-# 函数用途: 把一条工具生命周期事件整理成 TUI 可消费的结构化进度。
+# LLM: 事件仅含公开预览/ref和typed事实；归档先于事件裁剪，缺失只认handler字段，不能改变工具或Todo终态。
+# 函数用途: 把工具进度整理成有界显示，完成时保存原文并如实说明采集不完整。
 def _structured_tool_progress(
     event: ToolProgressEvent,
     tool_name: str,
@@ -1354,10 +1353,12 @@ def _structured_tool_progress(
         if display:
             payload["display"] = display
         if event.phase == "finished":
-            from .display_archive import archive_tool_display
+            from .display_archive import archive_tool_display, command_display_incomplete
             reference = archive_tool_display(event, raw_display)
             if reference:
                 payload["display_archive_ref"] = reference
+            if command_display_incomplete(raw_display):
+                payload["history_incomplete"] = True
         if bool(event.result.ok):
             items = _task_progress_items_from_result(event.result)
             if items is not None:
@@ -1453,8 +1454,8 @@ def _public_progress_text(
     return f"{text[:keep_head]}\n…（内容过长，已省略）…\n{text[-keep_tail:]}"
 
 
-# LLM: 富工具展示只接受已知公共字段并逐字符串复用凭据/路径脱敏；未知 handler envelope 键永远不能直接穿透到 Gateway/TUI。
-# 函数用途: 将 diff、patch、write、command 的内部 display envelope 投影成有界、可安全渲染的结构化数据。
+# LLM: 富展示只白名单投影公开预览；捕获原文归archive，command的预览截断与采集完整性不得混为一谈。
+# 函数用途: 对diff、patch、write、command安全限长；未知handler字段不穿透Gateway/TUI。
 def _public_progress_display(
     event: ToolProgressEvent,
     value: object,
@@ -1528,8 +1529,9 @@ def _public_progress_display(
             "stderr": _public_progress_text(event, value.get("stderr"), max_chars=8_000),
             "stdout_lines": _nonnegative_progress_int(value.get("stdout_lines")),
             "stderr_lines": _nonnegative_progress_int(value.get("stderr_lines")),
-            "stdout_truncated": value.get("stdout_truncated") is True,
-            "stderr_truncated": value.get("stderr_truncated") is True,
+            "stdout_truncated": value.get("stdout_truncated") is True or len(str(value.get("stdout") or "")) > 8_000,
+            "stderr_truncated": value.get("stderr_truncated") is True or len(str(value.get("stderr") or "")) > 8_000,
+            "capture_complete": value.get("capture_complete") is not False,
         }
     summary = _public_progress_text(event, value.get("summary"), max_chars=800)
     return {"kind": kind[:40] or "generic", "summary": summary} if summary else {}

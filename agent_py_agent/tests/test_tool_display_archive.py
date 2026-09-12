@@ -1,4 +1,9 @@
+import json
+import subprocess
+import sys
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolProgressEvent,
@@ -10,6 +15,12 @@ from agent_py_agent.agent.conversation.display_archive import read_display_archi
 from agent_py_agent.agent.conversation.display_checkpoint import display_checkpoint_events
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.tooling.runtime_contracts import ToolResult, ToolSuccessFacts
+from agent_py_agent.agent.tooling.shell import (
+    _command_display,
+    _format_process_result,
+    _run_shell_process_text,
+    _shell_timeout_result,
+)
 from agent_py_agent.tests.test_tool_round_execution import _canonical_calls, _round_request
 
 
@@ -118,3 +129,86 @@ def test_late_full_thinking_attaches_to_closed_block_after_tool_boundary(tmp_pat
     assert len(thinking) == 1
     assert thinking[0].metadata["display_archive_ref"] == ref_row["payload"]["display_archive_ref"]
     assert thinking[0].metadata["history_incomplete"] is False
+
+
+# LLM: 页按row_index重建，不把2000字分片当原始换行；只读取fixture自己的canonical store。
+# 函数用途: 还原完整公开行以检查被预览省略的中段是否真正保存。
+def _archive_rows(event, payload):
+    ref = payload["display_archive_ref"]
+    restored = ["" for _ in range(ref["row_count"])]
+    for index in range(ref["page_count"]):
+        for row in read_display_archive_page(event.request.agent.conversation_store, ref, index)["rows"]:
+            restored[row["row_index"]] += row["text"]
+    return restored
+
+
+@pytest.mark.parametrize("child", [False, True])
+def test_shell_keeps_captured_original_before_preview_and_archive(tmp_path, child):
+    stdout = "\n".join(f"    stdout-{index}: " + "界🙂" * 200 for index in range(80))
+    stderr = "\n".join(f"stderr-{index}" for index in range(1500))
+    process = subprocess.CompletedProcess("fixture", 0, stdout, stderr)
+    tool = SimpleNamespace(max_output_chars=120, _run_command=lambda *_: process)
+    body, ok, error, facts = _run_shell_process_text(tool, "fixture", tmp_path, 30, None, None, None)
+    assert ok and not error and body == _format_process_result(process, 120)
+    assert "stdout-40:" not in body and len(body) < 1000
+    source = facts.pop("_display")
+    assert source["stdout"] == stdout and source["stderr"] == stderr
+    event, thread = _event(tmp_path, source, body, child=child)
+    payload = _structured_tool_progress(event, "run_command", "fixture")
+    assert payload["display_archive_ref"]["thread_id"] == thread.thread_id
+    assert payload.get("history_incomplete") is not True
+    assert payload["display"]["stdout_truncated"] and payload["display"]["stderr_truncated"]
+    assert payload["display"]["capture_complete"] is True
+    assert "stdout-40:" not in payload["display"]["stdout"]
+    assert len(json.dumps(payload, ensure_ascii=False)) < 20000
+    source["stdout"], source["stderr"] = "later stdout", "later stderr"
+    rows = _archive_rows(event, payload)
+    assert rows == ["退出码：0", *stdout.split("\n"), *stderr.split("\n")]
+    assert event.result.output == body
+
+
+def test_actual_capture_limit_is_explicit_in_archive_and_history(tmp_path):
+    from agent_py_agent.agent.tooling.process_output_capture import ProcessOutputCapture
+    from agent_py_agent.cli.chat_parts.tui_runtime import _tool_payload
+
+    with subprocess.Popen([sys.executable, "-c", "print('x' * 5000)"],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        capture = ProcessOutputCapture(process, max_bytes=1024)
+        code = process.wait(timeout=5)
+        assert capture.finish(5)
+        stdout, stderr, facts = capture.result()
+    assert not facts["complete"] and facts["truncated"]
+    completed = subprocess.CompletedProcess("fixture", code, stdout, stderr)
+    completed.capture = facts
+    event, thread = _event(tmp_path, _command_display(completed))
+    payload = _structured_tool_progress(event, "run_command", "fixture")
+    assert payload["history_incomplete"] is True
+    assert payload["display"]["capture_complete"] is False
+    rows = _archive_rows(event, payload)
+    assert "采集不完整" in rows[0] and stdout in rows
+    assert _tool_payload(payload)["history_incomplete"] is True
+    sink = BackgroundTranscriptSink(event.request.agent, thread_id=thread.thread_id, task_id="task")
+    sink.write_progress(payload)
+    history, _, _ = event.request.agent.conversation_store.message_page_after_offset_report(thread.thread_id, after=0)
+    assert any(row["payload"].get("history_incomplete") is True for row in display_checkpoint_events(history))
+
+
+def test_timeout_keeps_available_original_without_claiming_complete_capture(tmp_path):
+    text = "first\n" + "中" * 30000 + "\nlast"
+    exc = subprocess.TimeoutExpired("fixture", 5, output=text.encode(), stderr=b"partial error")
+    body, facts = _shell_timeout_result(exc, "fixture", 5, 120)
+    display = facts["_display"]
+    assert display["stdout"] == text and display["return_code"] is None
+    assert display["capture_complete"] is False and len(body) < 1000
+    event, _ = _event(tmp_path, display, body)
+    payload = _structured_tool_progress(event, "run_command", "fixture")
+    assert payload["history_incomplete"] is True
+    assert text in "\n".join(_archive_rows(event, payload))
+
+
+def test_legacy_command_preview_cannot_be_claimed_as_full_original(tmp_path):
+    event, _ = _event(tmp_path, {"kind": "command", "stdout": "old partial output",
+                               "stdout_truncated": True, "return_code": 0})
+    payload = _structured_tool_progress(event, "run_command", "fixture")
+    assert payload["history_incomplete"] is True
+    assert "采集不完整" in _archive_rows(event, payload)[0]
