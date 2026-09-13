@@ -368,7 +368,11 @@ def test_curator_backend_follows_owner_selected_profile(tmp_path):
     assert getattr(fallback_backend, "name", "") == "echo"
 
     key, _result = add(host)
-    execute_model_profile_operation(host, "set_default", {"profile_id": key})
+    # 不依赖具体 operation 名（不同分支的模型菜单操作集不同）：直接把 store 的 selected 指到该 profile。
+    store_path = model_profiles_path(host.home_paths)
+    store_data = json.loads(store_path.read_text(encoding="utf-8"))
+    store_data["selected"] = key
+    store_path.write_text(json.dumps(store_data, ensure_ascii=False), encoding="utf-8")
     backend, provider, model = _build_memory_curator_backend(host, placeholder, curator_config)
     assert (provider, model) == ("anthropic_compatible", "MiniMax-M2.7")
     assert getattr(backend, "name", "") == "anthropic_compatible"
