@@ -110,10 +110,19 @@ def cache_creation_input_token_usage(response: object) -> int:
 
 
 def goal_token_usage(response: object) -> int:
-    """Match 会话运行时 goal accounting: non-cached input plus output tokens."""
-    input_tokens = input_token_usage(response) or 0
+    """Match 会话运行时 goal accounting: non-cached input plus output tokens.
+
+    使用"供应商可见总输入（已按协议归一）+ 输出，再减去缓存命中"的口径：
+    Anthropic 兼容的总输入含 cache read + cache write，OpenAI 的 prompt_tokens 已含嵌套 cached；
+    两者都只能减去 *缓存命中* 部分。旧实现减的是"嵌套 details 里的 cached"，对 Anthropic 恒为 0，
+    于是把缓存命中当普通输入全部计入（实测 100 普通 + 200 写 + 700 读 + 50 出 时算成 150 而非 350）。
+    """
+    visible_input = provider_visible_input_token_usage(response)
+    if visible_input is None:
+        visible_input = input_token_usage(response) or 0
+    cached_read = reported_cache_read_token_usage(response)
     output_tokens = output_token_usage(response) or 0
-    return max(0, input_tokens - cached_input_token_usage(response)) + output_tokens
+    return max(0, visible_input - cached_read) + output_tokens
 
 
 def _first_positive_int(values: tuple[object, ...]) -> int | None:

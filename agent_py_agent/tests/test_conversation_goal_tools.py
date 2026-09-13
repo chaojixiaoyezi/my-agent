@@ -505,3 +505,39 @@ def test_update_goal_blocked_preserves_resumable_task(tmp_path) -> None:
     assert agent.conversation_store.load_goal(thread.thread_id).status == "blocked"
     links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
     assert links[goal.task_id].status == "interrupted"
+
+
+# LLM: Goal 预算口径必须跨协议等价：两种协议的"总输入"含义不同（Anthropic 三字段互斥、
+# OpenAI prompt_tokens 已含嵌套 cached），只有减去"缓存命中"后才可比，缓存写入不能免费。
+# 函数用途: 用文档示例锁定去缓存命中的 Goal 扣减口径，防止回退成"只减嵌套 cached"。
+def test_goal_token_usage_is_protocol_equivalent_and_keeps_cache_writes() -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.model.usage import goal_token_usage
+
+    anthropic = SimpleNamespace(
+        usage={
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 700,
+            "output_tokens": 50,
+        }
+    )
+    openai = SimpleNamespace(
+        usage={
+            "prompt_tokens": 1000,
+            "prompt_tokens_details": {"cached_tokens": 700},
+            "completion_tokens": 50,
+        }
+    )
+    assert goal_token_usage(anthropic) == goal_token_usage(openai) == 350
+
+    all_hit = SimpleNamespace(
+        usage={"input_tokens": 0, "cache_read_input_tokens": 700, "output_tokens": 50}
+    )
+    assert goal_token_usage(all_hit) == 50  # 命中不算预算，但输出照扣
+
+    write_only = SimpleNamespace(
+        usage={"input_tokens": 0, "cache_creation_input_tokens": 200, "output_tokens": 50}
+    )
+    assert goal_token_usage(write_only) == 250  # 缓存写入不是免费

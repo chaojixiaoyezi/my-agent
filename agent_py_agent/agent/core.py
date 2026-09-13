@@ -145,22 +145,38 @@ def _export_model_endpoint_env(config) -> None:
 # it must not create a second agent loop or tool registry.
 # 函数用途: 为无工具后台策展构造独立非流式模型适配器，并返回解析后的 provider/model 标识。
 def _build_memory_curator_backend(
+    agent: object,
     config: AgentConfig,
     curator_config: MemoryCuratorConfig,
 ) -> tuple[object, str, str]:
+    profile_config = _curator_profile_config(agent, config)
     provider = (
-        str(config.model_backend)
+        str(profile_config.model_backend)
         if curator_config.provider in {"", "auto"}
         else curator_config.provider
     )
-    model = curator_config.model or str(config.model_name)
+    model = curator_config.model or str(profile_config.model_name)
     scoped_config = replace(
-        config,
+        profile_config,
         model_backend=provider,
         model_name=model,
         stream_enabled=False,
     )
     return get_backend(provider, scoped_config), provider, model
+
+
+# LLM: 策展是后台消费者，用户选择保存在 owner model profile 里、只在请求路径经
+# selected_model_scope 生效；若直接读基础 config，会把部署占位默认（echo/gpt-4o-mini）当成真实模型，
+# 实测导致抽取输出永远过不了 schema（CURATOR_SCHEMA_INVALID）。
+# 函数用途: 解析 owner 当前选中的模型配置；profile 缺失或损坏时回落基础 config，不静默换模型。
+def _curator_profile_config(agent: object, config: AgentConfig) -> AgentConfig:
+    from .settings.model_profiles import selected_model_config
+
+    try:
+        resolved = selected_model_config(agent)
+    except Exception:  # noqa: BLE001 - 配置问题不能让策展构造失败，回落基础 config 并由 run 账如实记录
+        return config
+    return resolved if isinstance(resolved, AgentConfig) else config
 
 
 # LLM: The composition root is the only adapter allowed to join Memory Store with the existing
@@ -240,7 +256,7 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
         ),
     )
     curator_config = MemoryCuratorConfig.from_agent_config(config)
-    backend, provider, model = _build_memory_curator_backend(config, curator_config)
+    backend, provider, model = _build_memory_curator_backend(agent, config, curator_config)
     daily_store = DailyMemoryStore(
         agent.home_paths.owner_memory_daily_dir,
         quota_enforcer=agent.owner_quota,

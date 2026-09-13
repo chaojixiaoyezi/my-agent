@@ -16,6 +16,7 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
     completion_response_after_tool_round,
 )
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.conversation import runtime as runtime_module
 from agent_py_agent.agent.conversation.models import WakeSignal
 from agent_py_agent.agent.conversation.runtime import (
     _successful_completion_waiting_for_batch,
@@ -592,3 +593,52 @@ def test_completion_batch_uses_root_reader_without_full_history_scan() -> None:
 
     assert _successful_completion_waiting_for_batch(scheduler, signal, 10.0) is False
     assert seen == ["root-indexed"]
+
+
+# LLM: 一轮 ready 扫描里同一 root_task_id 可能有 6 条 DONE 通知，每条都查一次同根全树
+# 就是 6 次 exists/stat/deepcopy；单次扫描缓存必须把它压成每个根一次，
+# 但不得跨调用存在（直接调用/其它入口仍必须读到最新树状态）。
+# 函数用途: 验证同一次扫描内同根只查一次，且不同根各自查一次。
+def test_ready_scan_checks_each_root_tree_once(monkeypatch) -> None:
+    store = SimpleNamespace(
+        pending_wake_signals=lambda limit=0: (
+            _root_done_signal("wake-a1", "root-a"),
+            _root_done_signal("wake-a2", "root-a"),
+            _root_done_signal("wake-a3", "root-a"),
+            _root_done_signal("wake-b1", "root-b"),
+        ),
+        unhandled_observations_requiring_main=lambda limit=0: (),
+        list_progress_policies_report=lambda enabled_only=True: ((), ()),
+    )
+    scheduler = SimpleNamespace(
+        runtime=SimpleNamespace(agent=SimpleNamespace(subagents=object())),
+        _config_limit=lambda _name: 0,
+        store=store,
+        _wake_retry_after={},
+        _supply_backoff=SimpleNamespace(should_attempt=lambda _thread_id, _now: True),
+    )
+    checked: list[str] = []
+
+    def fake_related(_agent, root_task_id: str):
+        checked.append(root_task_id)
+        return (), None
+
+    monkeypatch.setattr(runtime_module, "_related_subagent_runs", fake_related)
+    monkeypatch.setattr(runtime_module, "_background_authority_recovery_block", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_module, "_runnable_due_policies", lambda *a, **k: ((), ()))
+
+    ready = runtime_module._ready_background_thread_ids(scheduler, current=10.0)
+
+    assert checked == ["root-a", "root-b"]
+    assert len(ready) == len(set(ready))
+
+
+def _root_done_signal(wake_signal_id: str, root_task_id: str) -> WakeSignal:
+    return WakeSignal(
+        wake_signal_id=wake_signal_id,
+        thread_id=f"thread-{root_task_id}",
+        reason="subagent_runner_finished",
+        root_task_id=root_task_id,
+        created_at=1.0,
+        metadata={"status": "DONE"},
+    )

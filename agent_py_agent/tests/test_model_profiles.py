@@ -349,3 +349,27 @@ def test_selected_model_survives_real_transport_guard_thread(tmp_path, monkeypat
     assert len(observed) == 1 and observed[0][:3] == ("chosen-model",) * 3
     assert observed[0][3] != threading.get_ident()
     assert host.config is original
+
+
+# LLM: 策展是后台消费者，必须走 owner 选中的 profile，而不是部署占位默认（echo/gpt-4o-mini）；
+# 这条回归防止再次把占位模型当成真实模型、让抽取永远过不了 schema。
+# 函数用途: 验证策展后端按 owner 选择解析 provider/model，profile 缺失时回落基础 config。
+def test_curator_backend_follows_owner_selected_profile(tmp_path):
+    from agent_py_agent.agent.core import _build_memory_curator_backend
+    from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorConfig
+
+    host = Host(tmp_path)
+    placeholder = AgentConfig(model_backend="echo", model_name="gpt-4o-mini")
+    curator_config = MemoryCuratorConfig.from_agent_config(placeholder)
+
+    # 未选择 profile 时按 owner 自己的 config（部署默认）解析，不静默换模型
+    fallback_backend, provider, model = _build_memory_curator_backend(host, placeholder, curator_config)
+    assert (provider, model) == ("echo", "deployment-model")
+    assert getattr(fallback_backend, "name", "") == "echo"
+
+    key, _result = add(host)
+    execute_model_profile_operation(host, "set_default", {"profile_id": key})
+    backend, provider, model = _build_memory_curator_backend(host, placeholder, curator_config)
+    assert (provider, model) == ("anthropic_compatible", "MiniMax-M2.7")
+    assert getattr(backend, "name", "") == "anthropic_compatible"
+    assert getattr(backend, "api_key", "") == "only-private-secret"
