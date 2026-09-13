@@ -1595,3 +1595,38 @@ def test_conversation_jsonl_reader_still_reports_real_corruption(tmp_path) -> No
     assert [row["ok"] for row in report.rows] == [1]
     assert len(report.load_errors) == 3
     assert all(item.get("path") == str(path) for item in report.load_errors)
+
+
+# LLM: 迁移到 LF 边界时最容易犯的是"把包装套错位置"：曾把 jsonl_lines(reversed(text)) 与
+# jsonl_lines(enumerate(text), start=1) 写出来，前者让 jsonl_lines 收到 reversed 对象
+# （AttributeError: 'reversed' object has no attribute 'split'），在真机上表现为子代理
+# runner 直接 FAILED。这两条路径（控制面 JSONL 读、归档写后倒序回读校验）必须有守卫。
+# 函数用途: 验证 memory_archive 的两处倒序/带序号读取在 NEL 正文下仍可用。
+def test_memory_archive_jsonl_readers_handle_unicode_separators(tmp_path) -> None:
+    import json as _json
+
+    from agent_py_agent.agent.memory_archive import control_plane, storage
+
+    tricky = "记录\u0085正文\u2028续\u2029尾"
+    path = tmp_path / "ledger.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                _json.dumps({"event_id": "e1", "content": tricky}, ensure_ascii=False),
+                _json.dumps({"event_id": "e2", "content": "普通"}, ensure_ascii=False),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = control_plane._read_jsonl(path)
+    assert [row.get("event_id") for row in rows] == ["e1", "e2"]
+    assert rows[0]["content"] == tricky
+
+    storage._verify_record_exists(
+        path,
+        key="event_id",
+        value="e1",
+        expected={"event_id": "e1", "content": tricky},
+    )

@@ -187,8 +187,9 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
+    # 顺序必须是"先按 LF 切记录、再 enumerate"：把 enumerate 交给 jsonl_lines 会丢掉行号语义并直接报错。
     # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-    for line_number, line in jsonl_lines(enumerate(path.read_text(encoding="utf-8")), start=1):
+    for line_number, line in enumerate(jsonl_lines(path.read_text(encoding="utf-8")), start=1):
         if line.strip():
             rows.append(_decode_line(path, line_number, line))
     return rows

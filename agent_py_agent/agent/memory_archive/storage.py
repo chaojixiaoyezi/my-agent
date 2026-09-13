@@ -119,10 +119,15 @@ def append_raw_event(root: str | Path, event: RawMemoryEvent) -> Path:
 
 
 def _verify_record_exists(path: Path, *, key: str, value: str, expected: dict[str, Any]) -> None:
-    """Read a JSONL file backwards and confirm the just-written record is present."""
+    """Read a JSONL file backwards and confirm the just-written record is present.
+
+    顺序必须是"先按 LF 切记录、再倒序"：把 reversed 结果交给 jsonl_lines 会得到
+    'reversed' object has no attribute 'split'，真机上表现为子代理 runner 直接 FAILED。
+    """
+
     normalized_expected = _normalized_json(expected)
     # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-    for line in jsonl_lines(reversed(path.read_text(encoding="utf-8"))):
+    for line in reversed(jsonl_lines(path.read_text(encoding="utf-8"))):
         if not line.strip():
             continue
         try:
