@@ -1000,6 +1000,16 @@ def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
     return diagnostic
 
 
+# LLM: run 账的字段集是**严格 v2 契约**（`from_record` 要求键集合完全一致，历史行必须能读回来），
+# 所以诊断不能新增 dataclass 字段——那会让所有既有行校验失败，把失败记账本身变成
+# CURATOR_RUN_AUDIT_FAILED（本仓库真机踩过）。改为写进既有 `warnings`（v2 字段、有界、可解析）。
+# 函数用途: 把失败诊断编码为一条稳定的 warning 文本，供运维读账定位。
+def _failure_diagnostic_warning(diagnostic: dict[str, object]) -> str:
+    return "failure_diagnostic=" + json.dumps(
+        diagnostic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
 def _failed_run_record(
     context: _RunContext,
     *,
@@ -1024,7 +1034,13 @@ def _failed_run_record(
             context.state_before.last_processed_audit_event_id,
         ),
         recovery=context.recovery,
-        failure_diagnostic=dict(failure_diagnostic or {}),
+        # 注意必须是显式单元素元组：`(X if cond else ())` 只是分组，会让 warnings 变成字符串，
+        # 触发 "warnings must be an array" → 失败记账自己变成 CURATOR_RUN_AUDIT_FAILED。
+        warnings=(
+            (_failure_diagnostic_warning(dict(failure_diagnostic)),)
+            if failure_diagnostic
+            else ()
+        ),
     )
 
 

@@ -47,10 +47,6 @@ class CuratorRunRecord:
     cursor_before: dict[str, object] = field(default_factory=dict)
     cursor_after: dict[str, object] = field(default_factory=dict)
     recovery: dict[str, object] = field(default_factory=dict)
-    # 失败诊断只保留**机器可判定的形状**：异常类名 + 供应商 HTTP 状态码（有则记）。
-    # 供应商异常正文、prompt、记忆内容一律不落盘（沿用既有红线），但"只知道失败码"会让
-    # CURATOR_MODEL_FAILED 这类通用码无法定位——本轮 real-machine 故障正是卡在这里。
-    failure_diagnostic: dict[str, object] = field(default_factory=dict)
     schema_version: str = CURATOR_RUN_SCHEMA_VERSION
     record_id: str = ""
 

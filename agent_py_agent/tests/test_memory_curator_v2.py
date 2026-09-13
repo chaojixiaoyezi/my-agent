@@ -1804,6 +1804,7 @@ def test_curator_task_alias_replay_does_not_duplicate_occurrence(tmp_path: Path)
 # 同时不得落供应商异常正文。这条锁住诊断字段的存在与边界。
 # 函数用途: 验证失败诊断只含异常类名与（可选）HTTP 状态码。
 def test_curator_failure_diagnostic_records_shape_not_provider_text() -> None:
+    import agent_py_agent.agent.memory_store.curator as curator_module
     from agent_py_agent.agent.memory_store.curator import _failure_diagnostic
 
     class _Rejected(RuntimeError):
@@ -1815,3 +1816,12 @@ def test_curator_failure_diagnostic_records_shape_not_provider_text() -> None:
 
     plain = _failure_diagnostic(RuntimeError("boom"))
     assert plain == {"error_type": "RuntimeError"}
+
+    # 诊断只能走既有 warnings 字段：新增 dataclass 字段会让 from_record 的严格 v2 键集校验
+    # 拒绝所有历史行，把失败记账变成 CURATOR_RUN_AUDIT_FAILED（真机踩过）。
+    from agent_py_agent.agent.memory_store.curator_run_log import CuratorRunRecord
+
+    assert "failure_diagnostic" not in CuratorRunRecord.__dataclass_fields__
+    encoded = curator_module._failure_diagnostic_warning(diagnostic)
+    assert encoded.startswith("failure_diagnostic=")
+    assert json.loads(encoded.split("=", 1)[1])["provider_http_status"] == 429
