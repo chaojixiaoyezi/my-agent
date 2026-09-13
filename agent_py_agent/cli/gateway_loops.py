@@ -1496,6 +1496,7 @@ def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -
             "wake_handled": bool(getattr(report, "wake_handled", False)),
             "commit_kind": str(getattr(report, "commit_kind", "") or ""),
             "message_id": str(getattr(report, "message_id", "") or ""),
+            "route_ownership": str(getattr(report, "route_ownership", "") or ""),
             "response_chars": len(response),
             "task_status": str(getattr(report, "task_status", "") or ""),
         }
@@ -1504,7 +1505,8 @@ def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -
             "[gateway-background-main] "
             f"reason={payload['reason']} task={payload['task_id']} thread={payload['thread_id']} "
             f"delivery={payload['delivery_status']} commit={payload['commit_kind']} "
-            f"wake_handled={payload['wake_handled']} chars={payload['response_chars']}",
+            f"route={payload['route_ownership']} wake_handled={payload['wake_handled']} "
+            f"chars={payload['response_chars']}",
             flush=True,
         )
 

@@ -325,6 +325,7 @@ def test_background_report_log_carries_real_delivery_facts(tmp_path, monkeypatch
         task_status="active",
         commit_kind="canonical_record",
         message_id="msg-1",
+        route_ownership="undeclared",
     )
 
     gateway_loops._record_background_main_reports(agent, [report])
@@ -336,6 +337,7 @@ def test_background_report_log_carries_real_delivery_facts(tmp_path, monkeypatch
     assert payload["wake_handled"] is True
     assert payload["commit_kind"] == "canonical_record"
     assert payload["message_id"] == "msg-1"
+    assert payload["route_ownership"] == "undeclared"
     assert payload["response_chars"] == len("阶段汇报正文")
     assert json.loads(json.dumps(payload, ensure_ascii=False))["task_status"] == "active"
 

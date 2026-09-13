@@ -13,6 +13,8 @@
    外发义务只读声明：声明过 + 有 target 就欠一次真实外送，适配器掉线/凭据缺失/工厂失败都不能把义务抹掉；
    未声明通道继续 fail-closed、永不外发。`_background_route_ownership()` 返回
    `local`/`external`/`undeclared`，报告与日志都带 `route_ownership`。
+   归属字段 `route_ownership` 同时进报告与 `background_reported` 日志/事件（`local`/`external`/`undeclared`），
+   排障时可直接区分"不该发"与"没发成"。
 3. **整封 envelope 冻结与幂等重投**：冻结载荷升到 `wake-owner-delivery.v2`，同时保存正文、附件
    （`delivery_artifacts`）、过程回复、审计引用、canonical metadata、`external_sent`/`receipt_id` 与归属；
    纯附件回复现在同样会冻结（以前直接跳过，重投只能重跑模型并丢附件）。重投若发现外发已成功，只补本地

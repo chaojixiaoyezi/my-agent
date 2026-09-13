@@ -35,8 +35,9 @@
   的报告不能把 canonical 追加当成"已上报"，否则审计台账会记下一次并不存在的交付。
 - **`_record_background_main_reports` 日志必须带真实投递事实**：payload 包含
   `delivery_status`/`delivery_reason`/`wake_handled`/`commit_kind`/`message_id`/`response_chars`/
-  `task_status`。只打印 reason/task/thread 会让"答复到底有没有出去"无法事后复原（R279 真实故障的排障
-  盲区）。`BackgroundDeliveryCommit` 是这条链路的唯一结构化事实源，日志与报告都从它投影。
+  `task_status`/`route_ownership`。只打印 reason/task/thread 会让"答复到底有没有出去、是不该发还是没发
+  成"无法事后复原（R279 真实故障的排障盲区）。`BackgroundDeliveryCommit` 与报告上的
+  `route_ownership` 是这条链路的唯一结构化事实源，日志与报告都从它们投影。
 
 ## R274 scheduler 只读路径的锁边界（GW-03 收尾）
 
