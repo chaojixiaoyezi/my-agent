@@ -1,5 +1,24 @@
 # Gateway Structure
 
+## R272 合法排队必须有结构化等待信号
+
+- 请求因准入限流(`global_inflight`/`user_inflight`/`conversation_busy`)或恢复退避留在 inbox 时，
+  worker 每次扫描都会在**请求文件本身**写 `admission_wait_at` + `admission_wait_reason` +
+  `admission_wait_count`（首次还写 `admission_wait_since`）。**禁止**在这条路径上写
+  `status`/`lease_heartbeat_at`/`lease_started_at`/`lease_epoch`/`execution_attempt_id` 或任何模型字段——
+  等待只证明"队列条目仍在合法等待准入"，不得伪装成已认领或模型在推进。
+- 写入必须**节流**（`_ADMISSION_WAIT_REFRESH_SECONDS`）且受**总预算**约束
+  （`AdmissionLimits.admission_wait_budget_seconds` ← `gateway_admission_wait_budget_seconds`，默认 3600s）。
+  超出预算后停止续期并只留一次 `admission_wait_expired_at`：客户端按自己的空闲窗口如实报等待超时，
+  **请求本身不被丢弃**，车道空出后仍按原顺序被认领。
+- 客户端不需要新字段：它已经按 chunk/inbox/processing 三种文件的活动续期，因此这些写入天然成为
+  "合法存活"信号。收口条件保持不变：网关停写→空闲窗口超时；取消→文件消失→超时；终态→终态记录；
+  崩溃恢复→新网关继续按同一预算写。**禁止**改成"队列文件存在就无限续期"。
+- `GatewayAdmission.try_acquire_report()` 是唯一的结构化准入判定（空串=已获取），`try_acquire()`
+  只是它的布尔包装；新增准入分支时必须同时给出原因码，禁止再从调用顺序推断原因。
+
+# Gateway Structure
+
 ## R270 插话三段状态：排队 / 已提交 / 已确认
 
 - 插话（active turn input）有**三个**彼此独立的结构化边界，展示层必须分开表达，禁止合并成一个"已送入"：

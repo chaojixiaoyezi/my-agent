@@ -2380,6 +2380,7 @@ def _render_input_status(
                 snapshot.pending_steers,
                 snapshot.queued_inputs,
                 context,
+                turn_active=snapshot.status.phase in {"running", "interrupting"},
             )
         )
     else:
@@ -2750,11 +2751,13 @@ def _render_pending_steers(
     submitted = tuple(item for item in pending_steers if item.state == "submitted")
     lines: list[FormattedLine] = []
     if queued:
-        label = (
-            "子代理已结束；以下插话未获模型消费确认，不会自动重发"
-            if child_terminal
-            else "将在下一次工具调用后送入当前回合"
-        )
+        if child_terminal:
+            label = "子代理已结束；以下插话未获模型消费确认，不会自动重发"
+        elif turn_active:
+            label = "将在下一次工具调用后送入当前回合"
+        else:
+            # 主回合已经终态:再承诺"下一次工具调用"就是假话(那一轮不会再有工具调用)。
+            label = "当前回合已结束；以下插话未获模型消费确认"
         lines.extend(_pending_steer_label(label, context))
         for item in queued:
             lines.extend(_render_pending_input_message(item.text, context, italic=False))
@@ -2790,6 +2793,8 @@ def _render_compact_input_receipts(
     pending_steers: tuple[TuiPendingSteer, ...],
     queued_inputs: tuple[TuiQueuedInput, ...],
     context: TuiRenderContext,
+    *,
+    turn_active: bool = True,
 ) -> tuple[FormattedLine, ...]:
     if context.width < 4:
         return ()
@@ -2812,20 +2817,23 @@ def _render_compact_input_receipts(
     queued_steers = tuple(item for item in pending_steers if item.state != "submitted")
     submitted_steers = tuple(item for item in pending_steers if item.state == "submitted")
     if queued_steers:
-        pending_label = (
-            "• 子代理已结束；插话未获消费确认"
-            if child_terminal
-            else "• 等待当前回合接收"
-        )
+        # 与完整等待视图同源的真实终态:主回合/子代理已结束时不得再承诺"等待接收"或"下一次工具调用"。
+        if child_terminal:
+            pending_label = "• 子代理已结束；插话未获消费确认"
+        elif turn_active:
+            pending_label = "• 等待当前回合接收"
+        else:
+            pending_label = "• 当前回合已结束；插话未获消费确认"
         append_single_line(f"{pending_label}（{len(queued_steers)} 条）")
         append_single_line(f"  ↳ {queued_steers[0].text}")
     if submitted_steers:
         # 已提交项的正文已经在历史里,压缩视图只报数量与真实状态,不重复正文。
-        submitted_label = (
-            "• 子代理已结束；插话已送入但未获确认"
-            if child_terminal
-            else "• 已送入当前回合（等待模型回应）"
-        )
+        if child_terminal:
+            submitted_label = "• 子代理已结束；插话已送入但未获确认"
+        elif turn_active:
+            submitted_label = "• 已送入当前回合（等待模型回应）"
+        else:
+            submitted_label = "• 已送入当前回合但未获模型确认"
         append_single_line(f"{submitted_label}（{len(submitted_steers)} 条）")
     if queued_inputs:
         append_single_line(f"• 已排队的后续消息（{len(queued_inputs)} 条）")

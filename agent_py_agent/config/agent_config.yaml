@@ -390,6 +390,13 @@ gateway_stop_timeout: 20
 # 把它作为连续无请求租约/流式活动的超时，不用总墙钟误杀仍在工作的长任务。
 # gateway_request_poll_interval 是后台 worker 空闲时多久检查一次 pending，单位秒，可填小数。
 gateway_request_timeout: 300
+
+# 排队等准入时,允许多久把"仍在合法等待"这一结构化事实持续告知客户端(秒)。
+# - 请求因为车道/配额占满而留在 inbox 时,worker 会在请求文件里周期性写 admission_wait_at;
+#   客户端只要看到这个结构化活动就继续等,不会把"合法排队"误判成超时。
+# - 超过这个总时长后停止续期:客户端按自己的空闲窗口如实报等待超时(有界),请求本身不被丢弃,
+#   车道空出后仍按原顺序执行。默认 3600(1 小时)。
+gateway_admission_wait_budget_seconds: 3600
 gateway_request_poll_interval: 0.2
 # gateway ask 两层限流（取代原 gateway_request_workers 单层总闸）：
 # - gateway_user_inflight_limit：每用户同时在飞上限（"小坑"，防一个用户独吞把别人饿死）。

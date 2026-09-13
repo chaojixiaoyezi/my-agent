@@ -345,3 +345,139 @@ def test_render_snapshot_keeps_legacy_pending_steer_construction_working() -> No
     legacy = TuiPendingSteer(message_id="steer-1", text="补充 A", seq=1)
     assert legacy.state == "queued"
     assert replace(legacy, state="submitted").provider_call_id == ""
+
+
+# --------------------------------------------------------------------------------------
+# ④ 确认是终态:迟到/重放的"已提交"不得把已确认消息降级
+# --------------------------------------------------------------------------------------
+def test_confirmed_steer_is_not_demoted_by_late_submitted_event() -> None:
+    """复现验收序列: added -> submitted -> promoted -> submitted,等待项数量必须 1/1/0/0。"""
+    store = TuiStateStore()
+    seq = _steer_seq(store)
+    payload = {"message_id": "steer-1", "text": "补充 A"}
+
+    store.publish(seq.emit("steer_added", "queued", "steer:1", dict(payload)))
+    assert len(store.snapshot().pending_steers) == 1
+
+    store.publish(seq.emit("steer_submitted", "started", "steer:1", dict(payload)))
+    assert len(store.snapshot().pending_steers) == 1
+    assert store.snapshot().pending_steers[0].state == "submitted"
+
+    store.publish(
+        seq.emit("steer_promoted", "completed", "user:req:steer:steer-1", {"message_id": "steer-1"})
+    )
+    assert len(store.snapshot().pending_steers) == 0
+
+    store.publish(seq.emit("steer_submitted", "started", "steer:1", dict(payload)))
+
+    assert len(store.snapshot().pending_steers) == 0, "已确认消息不得被迟到的已提交事件重新挂起"
+    assert _count("补充 A", _transcript_lines(store)) == 1, "用户行不得重复也不得消失"
+    assert _status_lines(store) == []
+    confirmed_replays = [
+        item for item in store.snapshot().diagnostics if item.code == "STEER_CONFIRMED_REPLAY"
+    ]
+    assert len(confirmed_replays) == 1
+
+
+def test_confirmed_steer_blocks_late_added_and_removed_events() -> None:
+    """确认后同 id 的 added/removed 都是陈旧重放:不得复活等待项。"""
+    store = TuiStateStore()
+    seq = _steer_seq(store)
+    store.publish(
+        seq.emit("steer_promoted", "completed", "user:req:steer:steer-7", {"message_id": "steer-7"})
+    )
+    before_blocks = len(store.snapshot().stable_blocks)
+
+    store.publish(
+        seq.emit("steer_added", "queued", "steer:steer-7", {"message_id": "steer-7", "text": "旧正文"})
+    )
+    store.publish(
+        seq.emit("steer_removed", "removed", "steer:steer-7", {"message_id": "steer-7"})
+    )
+
+    assert store.snapshot().pending_steers == ()
+    assert len(store.snapshot().stable_blocks) == before_blocks
+
+
+def test_reconnect_confirmation_blocks_replayed_submitted() -> None:
+    """重连/切视角:先收到持久已确认身份,再收到重放的已提交事件,不得降级也不得重复建行。"""
+    store = TuiStateStore()
+    seq = _steer_seq(store)
+
+    store.publish(seq.emit("steer_confirmed", "completed", "steer:steer-9", {"message_id": "steer-9"}))
+    store.publish(
+        seq.emit(
+            "steer_submitted",
+            "started",
+            "steer:steer-9",
+            {"message_id": "steer-9", "text": "重连补放", "provider_call_id": "call-9"},
+        )
+    )
+    store.publish(
+        seq.emit("user_message", "completed", "user:req:steer:steer-9", {"message_id": "steer-9", "text": "重连补放"})
+    )
+
+    assert store.snapshot().pending_steers == ()
+    assert _count("重连补放", _transcript_lines(store)) == 1
+
+
+# --------------------------------------------------------------------------------------
+# ⑤ 短屏压缩视图:与完整视图同源的真实终态
+# --------------------------------------------------------------------------------------
+def _flood_receipts(store: TuiStateStore, sequencer, *, kind: str, count: int = 8) -> None:
+    for index in range(count):
+        store.publish(
+            sequencer.emit(
+                "steer_submitted" if kind == "submitted" else "steer_added",
+                "started" if kind == "submitted" else "queued",
+                f"steer:{kind}-{index}",
+                {"message_id": f"{kind}-{index}", "text": f"补充 {index}"},
+            )
+        )
+
+
+def test_compact_receipts_submitted_reflects_terminal_main_turn() -> None:
+    """短屏压缩视图:主回合失败后不得再显示"等待模型回应"。"""
+    store = TuiStateStore()
+    seq = _steer_seq(store)
+    _flood_receipts(store, seq, kind="submitted")
+
+    running = _status_lines(store)
+    assert any("已送入当前回合（等待模型回应）" in line for line in running), running
+
+    store.publish(seq.emit("turn_failed", "failed", "turn", {"error": "provider timeout"}))
+
+    failed = _status_lines(store)
+    assert any("已送入当前回合但未获模型确认" in line for line in failed), failed
+    assert not any("等待模型回应" in line for line in failed)
+
+
+def test_compact_receipts_queued_does_not_promise_tool_round_after_terminal() -> None:
+    """短屏压缩视图:主回合终态后不得承诺"等待接收"或"下一次工具调用"。"""
+    store = TuiStateStore()
+    seq = _steer_seq(store)
+    _flood_receipts(store, seq, kind="queued")
+
+    running = _status_lines(store)
+    assert any("等待当前回合接收" in line for line in running), running
+
+    store.publish(seq.emit("turn_completed", "completed", "turn", {}))
+
+    done = _status_lines(store)
+    assert any("当前回合已结束；插话未获消费确认" in line for line in done), done
+    assert not any("等待当前回合接收" in line for line in done)
+    assert not any("下一次工具调用" in line for line in done)
+
+
+def test_full_pending_view_queued_label_is_truthful_after_terminal() -> None:
+    """完整等待视图同样不得在终态承诺"将在下一次工具调用后送入"。"""
+    store = TuiStateStore()
+    seq = _steer_seq(store)
+    store.publish(
+        seq.emit("steer_added", "queued", "steer:1", {"message_id": "steer-1", "text": "补充 A"})
+    )
+    store.publish(seq.emit("turn_interrupted", "interrupted", "turn", {}))
+
+    status = _status_lines(store)
+    assert status[0] == "• 当前回合已结束；以下插话未获模型消费确认", status
+    assert not any("下一次工具调用" in line for line in status)

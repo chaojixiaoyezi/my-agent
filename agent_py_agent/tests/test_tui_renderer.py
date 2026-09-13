@@ -875,6 +875,8 @@ def test_pending_and_queued_inputs_stay_fixed_above_composer() -> None:
 def test_input_receipt_flood_collapses_without_changing_canonical_queue() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("queue-flood-render", clock=lambda: 50.0)
+    # 插话只属于活动回合:先开一个回合并让状态机进入 running,等待区才会如实说"等待当前回合接收"。
+    store.publish(seq.emit("turn_started", "started", "turn"))
     for index in range(7):
         store.publish(
             seq.emit(

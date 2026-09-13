@@ -1223,6 +1223,13 @@ class _TuiBackgroundActivityRuntimeMixin:
                         request_id=request_id,
                         skip_message_ids=set(promoted_ids),
                     )
+                    # 已确认是终态:重连/切视角时按纯身份补一次确认事件,挡住此后任何迟到的
+                    # "已提交/已入队"重放把这条消息重新挂成未确认(用户行已由上面补放)。
+                    _confirm_active_turn_input_ids(
+                        self,
+                        message_ids,
+                        request_id=request_id,
+                    )
                 continue
             display_payload = dict(payload)
             display_payload.pop("foreground_gateway_request_id", None)
@@ -2423,7 +2430,14 @@ def _consume_gateway_turn_event(
         )
         return True
     if kind == "active_turn_input_consumed":
-        adapter.confirm_gateway_active_turn_input(_active_input_message_ids(payload))
+        consumed_ids = _active_input_message_ids(payload)
+        adapter.confirm_gateway_active_turn_input(consumed_ids)
+        # 终态身份与"本地是否持有等待项"无关:同一批 id 一律标成已确认,迟到重放不得降级。
+        _confirm_active_turn_input_ids(
+            adapter.runtime,
+            consumed_ids,
+            request_id=adapter.request_id,
+        )
         return True
     if kind == "context_usage_updated" and isinstance(
         payload.get("context_usage"),
@@ -2583,6 +2597,37 @@ def _replay_consumed_active_turn_inputs(
             {"message_id": message_id, "text": text},
             request_id=request_id,
         )
+
+
+# LLM: 已确认(consumed)是插话的终态身份事实,与正文无关。重连客户端即使没有本地等待项,也必须把
+# 这批 id 标成终态,否则随后重放的"已提交"事件会把已确认消息重新挂成未确认。
+# 函数用途: 按精确 message_id 发布"已确认"身份事件(不造用户行、不写账本)。
+def _confirm_active_turn_input_ids(
+    runtime: TuiRuntime,
+    message_ids: tuple[str, ...],
+    *,
+    request_id: str,
+) -> tuple[str, ...]:
+    normalized_request_id = _required_request_id(request_id)
+    normalized_ids = tuple(
+        dict.fromkeys(
+            _required_message_id(message_id)
+            for message_id in tuple(message_ids or ())
+            if str(message_id or "").strip()
+        )
+    )
+    confirmed: list[str] = []
+    with runtime._lock:
+        for message_id in normalized_ids:
+            runtime._publish(
+                "steer_confirmed",
+                "completed",
+                f"steer:{message_id}",
+                {"message_id": message_id},
+                request_id=normalized_request_id,
+            )
+            confirmed.append(message_id)
+    return tuple(confirmed)
 
 
 # LLM: 重连客户端同样没有本会话的等待项,但**已提交**事件是持久事实,必须能重放出同一批用户行

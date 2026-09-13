@@ -139,13 +139,31 @@ class GatewayAdmission:
         *,
         conversation_key: str = "",
     ) -> bool:
+        return self.try_acquire_report(
+            user_key,
+            user_limit,
+            global_limit,
+            conversation_key=conversation_key,
+        ) == ""
+
+    # LLM: 准入失败必须给出**结构化原因**(哪一层限流),排队等待信号与诊断都只认这个原因码,
+    # 不从文案或调用顺序推断。返回空串=已获取。
+    # 函数用途: 尝试获取准入并返回原因码(global_inflight/user_inflight/conversation_busy)。
+    def try_acquire_report(
+        self,
+        user_key: str,
+        user_limit: int,
+        global_limit: int,
+        *,
+        conversation_key: str = "",
+    ) -> str:
         with self._lock:
             if self._total >= max(1, global_limit):
-                return False
+                return "global_inflight"
             if self._per_user.get(user_key, 0) >= max(1, user_limit):
-                return False
+                return "user_inflight"
             if conversation_key and self._per_conversation.get(conversation_key, 0) >= 1:
-                return False
+                return "conversation_busy"
             self._per_user[user_key] = self._per_user.get(user_key, 0) + 1
             if conversation_key:
                 self._per_conversation[conversation_key] = (
@@ -153,7 +171,7 @@ class GatewayAdmission:
                 )
             self._total += 1
         gateway_inflight(1)
-        return True
+        return ""
 
     def release(self, user_key: str, *, conversation_key: str = "") -> None:
         with self._lock:
@@ -208,10 +226,32 @@ def request_conversation_key(payload: dict) -> str:
     return "\x1f".join((user_key, channel, channel_conversation_id))
 
 
+# LLM: 合法排队的结构化信号。请求因为准入限流(或恢复退避)留在 inbox 时,worker 每次扫描都
+# 会在**请求文件本身**写一次 admission_wait_at,证明"这个队列条目此刻仍在合法等待准入"。
+# 它只写等待事实:不写 status/lease_heartbeat_at/lease_started_at/模型字段,因此不会被任何
+# 消费方误读成"已经认领/模型在推进"。写入有节流(见 _ADMISSION_WAIT_REFRESH_SECONDS)且只在
+# 预算内(见 AdmissionLimits.admission_wait_budget_seconds)有效:网关停写=客户端无活动,按
+# 自己的空闲窗口收口;取消/终态=请求文件消失或出现终态记录;崩溃恢复=新网关继续按同一预算写。
+_ADMISSION_WAIT_REFRESH_SECONDS = 30.0
+_ADMISSION_WAIT_FIELDS = ("admission_wait_at", "admission_wait_reason", "admission_wait_count")
+
+
+# 函数用途: 读取正浮点配置,坏值/非正值回退默认。
+def _positive_float(value: object, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 @dataclass(frozen=True)
 class AdmissionLimits:
     user_inflight: int
     global_inflight: int
+    # 允许把"仍在合法排队"这一事实告知客户端的最长总时长;超过就停止续期(客户端会在自己的
+    # 空闲窗口内收口),避免"只看队列文件存在就无限续期"。
+    admission_wait_budget_seconds: float = 3600.0
 
     @classmethod
     def from_config(cls, config: object) -> AdmissionLimits:
@@ -219,6 +259,9 @@ class AdmissionLimits:
             user_inflight=_positive_int(getattr(config, "gateway_user_inflight_limit", 8), 8),
             global_inflight=_positive_int(
                 getattr(config, "gateway_global_inflight_limit", 500), 500
+            ),
+            admission_wait_budget_seconds=_positive_float(
+                getattr(config, "gateway_admission_wait_budget_seconds", 3600.0), 3600.0
             ),
         )
 
@@ -251,6 +294,12 @@ def dispatch_pending_requests(
     for request in _iter_pending_requests(paths):
         if _request_deferred_until_later(request):
             deferred_present = True
+            # 恢复退避也是合法排队:同样发结构化等待信号(原因码区分),客户端不按超时误判。
+            _record_admission_wait(
+                request,
+                reason="retry_backoff",
+                budget_seconds=limits.admission_wait_budget_seconds,
+            )
             continue
         outcome = _admit_and_submit(paths, request, (limits, submit))
         claimed += 1 if outcome == "claimed" else 0
@@ -272,12 +321,19 @@ def _admit_and_submit(
     limits, submit = lane
     user_key = request_user_key(request.payload)
     conversation_key = request_conversation_key(request.payload)
-    if not admission.try_acquire(
+    blocked_reason = admission.try_acquire_report(
         user_key,
         limits.user_inflight,
         limits.global_inflight,
         conversation_key=conversation_key,
-    ):
+    )
+    if blocked_reason:
+        # 合法排队:把"仍在等准入"这一事实写成结构化字段,客户端据此续期而不是误判超时。
+        _record_admission_wait(
+            request,
+            reason=blocked_reason,
+            budget_seconds=limits.admission_wait_budget_seconds,
+        )
         return "blocked"
     claim = claim_request(paths, request.path)
     if claim is None:
@@ -290,6 +346,76 @@ def _admit_and_submit(
         admission.release(user_key, conversation_key=conversation_key)
         raise
     return "claimed"
+
+
+# LLM: 只改"等待事实"字段,绝不碰 status/lease/模型进展字段;写入前先做节流判断,读-改-写
+# 走既有原子更新原语(与其它请求文件写者同一把文件锁语义),因此并发扫描不会互相覆盖。
+# 超出预算后不再续期,只留一次 admission_wait_expired_at 供诊断:客户端会在自己的空闲窗口内
+# 收口(有界),请求本身不被丢弃,车道空出后仍会按原顺序被认领。
+# 函数用途: 在被准入限流的排队请求上记录一次结构化"合法等待"信号(有节流、有总预算)。
+def _record_admission_wait(
+    request: _PendingGatewayRequest,
+    *,
+    reason: str,
+    budget_seconds: float,
+) -> None:
+    now = time.time()
+    payload = request.payload or {}
+    waited_since = _admission_wait_since(payload, request.path)
+    try:
+        last_signal = float(payload.get("admission_wait_at") or 0.0)
+    except (TypeError, ValueError):
+        last_signal = 0.0
+    expired = bool(payload.get("admission_wait_expired_at"))
+    if waited_since and budget_seconds > 0 and now - waited_since > budget_seconds:
+        if expired:
+            return
+        _write_admission_wait_field(request.path, {"admission_wait_expired_at": now})
+        return
+    if last_signal and now - last_signal < _ADMISSION_WAIT_REFRESH_SECONDS:
+        return
+    try:
+        count = max(0, int(payload.get("admission_wait_count") or 0))
+    except (TypeError, ValueError):
+        count = 0
+    _write_admission_wait_field(
+        request.path,
+        {
+            "admission_wait_at": now,
+            "admission_wait_reason": str(reason or ""),
+            "admission_wait_count": count + 1,
+            "admission_wait_since": waited_since or now,
+        },
+    )
+
+
+# 函数用途: 等待起点=首次记录的时刻,缺失时回退请求进队时刻(created_at/submitted_at)。
+def _admission_wait_since(payload: dict, request_path: Path) -> float:
+    for key in ("admission_wait_since", "created_at", "submitted_at"):
+        try:
+            value = float(payload.get(key) or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            return value
+    try:
+        return request_path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+# 函数用途: 用原子读-改-写把等待字段写进队列请求文件;失败只放弃本次信号,不影响扫描。
+def _write_admission_wait_field(request_path: Path, fields: dict[str, object]) -> bool:
+    def apply(current: dict) -> dict:
+        updated = dict(current or {})
+        updated.update(fields)
+        return updated
+
+    try:
+        update_json_file_atomic(request_path, apply, require_existing=True)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 # LLM: Synchronous worker callers wait on the immutable canonical terminal record. A response

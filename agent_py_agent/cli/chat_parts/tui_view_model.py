@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -274,6 +275,9 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self.active_blocks: dict[str, TuiBlock] = {}
         self.pending_steers: list[TuiPendingSteer] = []
         self.queued_inputs: list[TuiQueuedInput] = []
+        # 已确认(consumed)插话的身份集合:确认是终态,任何迟到/重放的"已提交/已入队"事件都不得
+        # 把它降级回未确认。只按 client message_id 记录(正文不参与判定),条目有界。
+        self._confirmed_steer_ids: OrderedDict[str, None] = OrderedDict()
         self.permission: TuiPermissionOverlay | None = None
         self.status = TuiStatus()
         self.background_sync_failed = False
@@ -334,6 +338,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "steer_removed": self._handle_steer_removed,
             "steer_promoted": self._handle_steer_promoted,
             "steer_submitted": self._handle_steer_submitted,
+            "steer_confirmed": self._handle_steer_confirmed,
             "queue_added": self._handle_queue_added,
             "queue_removed": self._handle_queue_removed,
             "queue_restored": self._handle_queue_removed,
@@ -903,6 +908,9 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         message_id = str(event.payload.get("message_id") or "").strip()
         if not message_id:
             raise ValueError("steer message_id required")
+        if self._steer_confirmed(message_id):
+            self.record_diagnostic("STEER_CONFIRMED_REPLAY", event)
+            return
         if any(item.message_id == message_id for item in self.pending_steers):
             self.record_diagnostic("STEER_ID_REPLAY", event)
             return
@@ -920,6 +928,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # 函数用途: Gateway 未接收活动回合补充时，撤下对应的等待提示。
     def _handle_steer_removed(self, event: TuiEvent) -> None:
         message_id = str(event.payload.get("message_id") or "").strip()
+        if self._steer_confirmed(message_id):
+            return
         before = len(self.pending_steers)
         self.pending_steers[:] = [
             item for item in self.pending_steers if item.message_id != message_id
@@ -933,6 +943,9 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # 函数用途: 模型运行时确认收到补充消息后，按原提交位置把它从等待区移入对话历史。
     def _handle_steer_promoted(self, event: TuiEvent) -> None:
         message_id = str(event.payload.get("message_id") or "").strip()
+        if not message_id:
+            raise ValueError("steer message_id required")
+        self._mark_steer_confirmed(message_id)
         pending = next(
             (item for item in self.pending_steers if item.message_id == message_id),
             None,
@@ -966,6 +979,10 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         message_id = str(event.payload.get("message_id") or "").strip()
         if not message_id:
             raise ValueError("steer message_id required")
+        if self._steer_confirmed(message_id):
+            # 确认是终态:迟到的已提交事件不得把已确认消息重新挂成"未确认"。
+            self.record_diagnostic("STEER_CONFIRMED_REPLAY", event)
+            return
         text = str(event.payload.get("text") or "")
         provider_call_id = str(event.payload.get("provider_call_id") or "")
         pending = next(
@@ -1006,6 +1023,34 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             created_seq=pending.seq,
         )
         self._insert_promoted_user(block, submitted)
+
+    # LLM: 重连/切换视角时,持久已确认事件只带身份(不带本地等待项)。这里只把身份记进终态集合,
+    # 让随后的迟到"已提交/已入队"事件被挡掉;用户行由已消费重放单独负责,不在这里造第二份历史。
+    # 函数用途: 按精确 message_id 记录"该插话已获模型确认"这一终态。
+    def _handle_steer_confirmed(self, event: TuiEvent) -> None:
+        message_id = str(event.payload.get("message_id") or "").strip()
+        if not message_id:
+            raise ValueError("steer message_id required")
+        self._mark_steer_confirmed(message_id)
+        self.pending_steers[:] = [
+            item for item in self.pending_steers if item.message_id != message_id
+        ]
+
+    # LLM: 确认集合只有身份与顺序,没有正文;条目有界(超出淘汰最旧),淘汰只可能让一条极老的
+    # 重复事件重新变成可处理,不会伪造确认。
+    # 函数用途: 记录一次已确认插话身份。
+    def _mark_steer_confirmed(self, message_id: str) -> None:
+        normalized = str(message_id or "").strip()
+        if not normalized:
+            return
+        self._confirmed_steer_ids[normalized] = None
+        self._confirmed_steer_ids.move_to_end(normalized)
+        while len(self._confirmed_steer_ids) > _MAX_CONFIRMED_STEER_IDS:
+            self._confirmed_steer_ids.popitem(last=False)
+
+    # 函数用途: 判断某条插话是否已经处于"已确认"终态。
+    def _steer_confirmed(self, message_id: str) -> bool:
+        return str(message_id or "").strip() in self._confirmed_steer_ids
 
     # LLM: This insertion is intentionally scoped to one promoted user message and one request.
     # Global stable ordering remains completion-ordered, while a delayed transport receipt may
@@ -1175,6 +1220,10 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
 
 # LLM: TuiStateStore 将 journal 与 reducer 锁在同一原子 publish 内，并只在接受新事件后通知 UI。
 # 类用途: 提供跨 worker/UI 线程安全的 publish、snapshot 和 redraw 订阅。
+# LLM: 已确认身份集合上界:确认是终态,条目只保留最近若干条身份即可挡住现实的迟到/重放事件。
+_MAX_CONFIRMED_STEER_IDS = 1024
+
+
 class TuiStateStore:
     # LLM: store 只拥有显示账和 reducer，不持有业务 agent/tool executor。
     # 函数用途: 创建可选自定义 journal/reducer 的状态容器。

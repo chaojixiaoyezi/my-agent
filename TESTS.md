@@ -1,5 +1,20 @@
 # TESTS
 
+## 2026-09-13 R272 合法排队等待信号 + 插话确认终态 + 短屏真实终态
+
+- `test_gateway_admission_wait.py`（12 例）：结构化等待字段写入且**不含** lease/status/模型字段、节流
+  窗口内不重复写、超预算只写一次 `admission_wait_expired_at`、恢复退避请求同样有信号、被正常认领的请求
+  不带等待字段；客户端在只有等待信号时持续等到终态、停写后窗口内收口、取消后窗口内收口；
+  **真实 worker + 真实客户端**端到端（断言 worker 真的扫了多轮且写了多次信号），以及关掉信号后同一
+  场景必然超时的负向对照。
+- `test_tui_injected_input_states.py`（17 例，新增 6 例）：added→submitted→promoted→submitted 后
+  pending 必须为 1/1/0/0；确认终态挡住迟到的 submitted/added/removed；重连"先确认身份再收到重放已提交"
+  不降级；短屏压缩视图在主回合失败/结束后不再显示"等待模型回应"，queued 在终态不显示"等待当前回合接收"
+  或"下一次工具调用"；完整视图 queued 终态文案同源；慢流中状态不倒退。
+
+守卫有效性：去掉确认守卫后 2 例必红（已验证）；把等待信号关掉后客户端用例必超时（负向对照已在套件内）。
+本轮 focused 11 个套件 275+ 项通过。**不等同真机验收**：部署后的真 TUI 验收清单见 DESIGN_LEDGER R272。
+
 ## 2026-09-13 R271 慢模型/长任务活性合同的受控验证
 
 新增 `agent_py_agent/tests/test_slow_model_liveness.py`（11 例），按"连接/首包等待、流式无进展、
