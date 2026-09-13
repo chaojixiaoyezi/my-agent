@@ -1,5 +1,42 @@
 # DESIGN LEDGER
 
+## 2026-09-12 R266 读取侧索引有界性缺口：条目预算从未生效 + 已删名字永久驻留【状态：已修+受控验收，未部署】
+
+监督者探针（本机复现，逐字一致）证明 R265 的读取侧索引**上界在写路径上从未执行**：
+`max_entries=4` 连续写入 12 个不同文件名（dict 负载）→ `entries=12 / records=0 / evictions=0`；
+端到端"磁盘只剩 1 个文件、累计 40 个名字"→ `entries=40`，40 个已删名字全部驻留。根因两条：
+①淘汰条件只看 `_records`，而记录数只对 JSONL 分片(list 负载)非零，唤醒信号与进度策略是 dict，
+记录数恒为 0；②`ordered_paths` 每轮重新枚举却不清理"当前目录已不存在"的条目。
+
+修复（`conversation/store.py`，通用机制）：`_entries` 改 `OrderedDict`，**条目数与记录数两条预算
+各自独立生效**、谁先到顶淘汰谁（LRU）；`_drop_entry()` 统一记账（命中失配/覆盖写/淘汰/清理共用），
+避免 `_records` 漏减让记录预算二次失真；`lookup` 命中改 `move_to_end`（真 LRU）；新增
+`_scan_dir_match_names()`（`os.scandir`，把"目录不可列出"与"目录为空"分开——glob 在权限不足时
+静默返回空列表，会把瞬时故障当成"文件都被删了"）与 `prune_missing()`（清理前再用一次 stat 复核；
+`live_names is None` 时一条都不清并计 `dir_unreadable`；条目绑定 `path`，清理只在同目录内生效）；
+`stats()` 新增 `prunes`/`dir_unreadable`。`limit`/`status`/`enabled` 过滤、排序、`load_errors`
+内容与顺序、游标与写入路径**零改动**；`dir_too_large` 整体回退全量扫描的既有语义保留。
+
+**复核又修掉该修复自带的两个口径问题**（先红后绿，非子代理自述）：①成员过滤 `is_file()/is_dir()`
+比 `Path.glob` 窄——glob 对最后一段只按名字匹配，断链符号链接/FIFO/同名目录都算成员；被丢掉的
+断链 `wake-*.json` 不再产生 load_error，而 runtime/guidance 消费方以"有 load_error 就不消费"作硬门，
+静默丢文件等于绕过硬门。②`dir_too_large` 计数改用比查询模式更宽的 `*.json*`，会让触发点随模式漂移；
+现改为与 `ordered_paths` 传入的 pattern 逐字相同。
+
+**证据**：新增 6 例（`test_store_scan_indexes.py`），4 例有界性用例在修复前代码上**全部失败**，
+两个口径用例在注入缺陷后**各自失败**；focused 65 passed（22+43），18 个消费者套件 442 项
+（437 passed / 5 xfailed，EXIT=0）；随机化不变量压测 3 种子 × 240 步（每步四类查询热/冷逐字一致
++ `entries==len(_entries)` + `records==Σentry.records` + 驻留不含已删名字）全通过。
+
+**性能（配对交替、同一夹具、基线 = 索引落地前的 a1366609）**：wake 3.76-3.78x、
+observation 7.60x（基线 1000 次读/6500 次解析 → 1 次读）、policy 4.14-4.32x；
+**有界性修复自身成本 1.00x/1.04x/0.94x（噪声内）**。
+
+**未做/风险**：①索引仍不跨进程/重启；②`dir_too_large`（目录文件数 > `max_entries`）时整体不可用
+是既有语义，此场景条目数归零、上界由"回退全量扫描"保证；③wake 目录里若出现 FIFO，读它会阻塞
+——这是**索引之前就存在**的行为（`Path.glob` 同样返回它，随后 `read_text` 阻塞），本切片不改变；
+④`prunes` 只在目录可完整列出且条目 stat 失败时增长，权限抖动最坏慢一轮；⑤**未部署、未真机**。
+
 ## 2026-09-12 R265 GW-03 收口：wake/observation/policy 索引 + waiting 投影 + owner 事实缓存【状态：已修+受控验收，未部署】
 
 GW-03 三个分片一次收口，全部先实测再修：

@@ -8,6 +8,7 @@ from __future__ import annotations
 """
 
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.conversation import store as store_module
 from agent_py_agent.agent.conversation.store import (
     _SCAN_INDEX_MAX_RECORDS_PER_FILE,
     _SCAN_INDEX_SCHEMA,
@@ -240,6 +242,22 @@ def _disable_index(store: ConversationStore, *names: str) -> None:
         index = store._scan_index(name)  # noqa: SLF001 - 验收需要直接操作索引状态
         index.max_entries = 0
         index.clear()
+
+
+# LLM: 有界性验收需要把上限压到人能数清的规模(默认 8192 条无法在测试里造出来),因此统一
+# 通过这个 helper 打开热 store 并设定 wake 两个队列的条目上限;条目上界是唯一被改的东西,
+# 查询语义与生产默认完全一致。
+# 函数用途: 打开一个把唤醒队列索引条目上限压到 max_entries 的热 store。
+def _bounded_wake_store(root: Path, max_entries: int) -> ConversationStore:
+    store = ConversationStore(root)
+    for kind in ("urgent", "normal"):
+        store._scan_index(f"wake:{kind}").max_entries = max_entries  # noqa: SLF001
+    return store
+
+
+# 函数用途: 读一个索引的 entries/records/evictions/prunes 诊断快照(有界性断言的统一入口)。
+def _index_stats(store: ConversationStore, name: str) -> dict:
+    return store._scan_index(name).stats()  # noqa: SLF001 - 验收需要直接读索引统计
 
 
 # LLM: 四种损坏形态分别对应"索引文件版本不符/索引被清空/条目指纹过期/条目主键被污染",
@@ -589,6 +607,268 @@ def test_scan_index_stays_bounded_and_reports_structured_warnings(tmp_path) -> N
         "entry_record_budget_exceeded"
     ]
     assert budget_index.stats()["records"] <= budget_index.stats()["max_records"]
+
+
+def test_scan_index_entries_budget_holds_under_name_rotation(tmp_path) -> None:
+    """文件轮换/删除: 连续创建 N>max_entries 个不同名文件并穿插删除。"""
+    root = tmp_path / "conversations"
+    limit = 4
+    store = _bounded_wake_store(root, limit)
+    queue = store.wake_queue_dir / "urgent"
+
+    live: dict[str, Path] = {}
+    for position in range(12):
+        name = f"wake-rot-{position:02d}"
+        live[name] = _seed_wake(root, "urgent", name, created_at=100.0 + position)
+        # 每轮删掉最早的一个:磁盘上同时存在的文件数始终远小于累计名字数。
+        if position >= 3:
+            live.pop(f"wake-rot-{position - 3:02d}").unlink()
+        assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root))
+        assert _index_stats(store, "wake:urgent")["entries"] <= limit, position
+
+    # 被删名字不得驻留:条目集合恰好等于磁盘上真实存在的文件名集合。
+    assert {path.name for path in queue.glob("*.json")} == {
+        f"{name}.json" for name in live
+    }
+    retained = set(store._scan_index("wake:urgent")._entries)  # noqa: SLF001
+    assert retained == {path.name for path in queue.glob("*.json")}
+    assert retained.isdisjoint({f"wake-rot-{position:02d}.json" for position in range(9)})
+
+    # 收尾:全部删光后热索引必须回到空,且查询与冷 store 逐字一致。
+    for path in list(live.values()):
+        path.unlink()
+    assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root)) == ([], [])
+    final = _index_stats(store, "wake:urgent")
+    assert final["entries"] == 0
+    assert final["prunes"] > 0
+
+
+def test_scan_index_entries_budget_when_live_set_stays_small(tmp_path) -> None:
+    """磁盘同时存在的文件数(1) < 上限,累计出现过的名字(63) >> 上限。"""
+    root = tmp_path / "conversations"
+    limit = 4
+    store = _bounded_wake_store(root, limit)
+
+    for position in range(63):
+        name = f"wake-churn-{position:03d}"
+        path = _seed_wake(root, "urgent", name, created_at=1.0 + position)
+        assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root))
+        path.unlink()
+        assert _index_stats(store, "wake:urgent")["entries"] <= limit, position
+
+    survivor = _seed_wake(root, "urgent", "wake-churn-final", created_at=999.0)
+    hot = _wake_snapshot(store)
+    assert hot == _wake_snapshot(ConversationStore(root))
+    assert [item["wake_signal_id"] for item in hot[0]] == ["wake-churn-final"]
+    assert hot[1] == []
+    stats = _index_stats(store, "wake:urgent")
+    assert stats["entries"] <= limit
+    assert set(store._scan_index("wake:urgent")._entries) == {  # noqa: SLF001
+        survivor.name
+    }
+
+
+def test_scan_index_lru_evicts_oldest_when_one_scan_exceeds_limit(tmp_path) -> None:
+    """累计名字超过上限: 单轮写入超过上限时按 LRU 淘汰,查询结果不受影响。"""
+    root = tmp_path / "conversations"
+    limit = 4
+    store = ConversationStore(root)
+    index = store._scan_index("wake:urgent")  # noqa: SLF001
+    index.max_entries = limit
+
+    # (1) 纯索引层: 单轮写入 6 条(dict 负载,记录数恒为 0)必须仍受条目预算约束。
+    for position in range(6):
+        index.store(
+            Path(f"/probe/wake_queue/urgent/entry-{position:02d}.json"),
+            (1, position + 1, position, position),
+            ok=True,
+            payload={"wake_signal_id": f"entry-{position:02d}"},
+        )
+    assert index.stats()["entries"] == limit
+    assert index.stats()["evictions"] == 2
+    assert set(index._entries) == {f"entry-{position:02d}.json" for position in range(2, 6)}
+
+    # (2) 真实查询路径: 同一轮里出现 6 个文件时,目录规模本身超上限 → 整体回退全量扫描,
+    # 既不写入也不淘汰,但结果必须与冷 store 逐字一致(上界只影响耗时)。
+    names = [f"wake-burst-{position:02d}" for position in range(6)]
+    for position, name in enumerate(names):
+        _seed_wake(root, "urgent", name, created_at=1.0 + position)
+    index.clear()
+    hot = _wake_snapshot(store)
+    assert hot == _wake_snapshot(ConversationStore(root))
+    assert [item["wake_signal_id"] for item in hot[0]] == names
+    assert hot[1] == []
+    assert index.stats()["entries"] == 0
+    assert any(item["reason"] == "dir_too_large" for item in index.warnings)
+    for name in names:
+        (root / "wake_queue" / "urgent" / f"{name}.json").unlink()
+
+    # (3) 单轮内扫描超过上限个文件: 目录规模本身超上限 → 整体回退全量扫描(不写入也不淘汰),
+    # 条目数不许越界,结果仍与冷 store 逐字一致;条目维度的 LRU 语义由 (1) 直接对索引断言。
+    steady = [f"wake-steady-{position:02d}" for position in range(6)]
+    for position, name in enumerate(steady[:4]):
+        _seed_wake(root, "urgent", name, created_at=200.0 + position)
+        assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root))
+    assert index.stats()["entries"] == limit, index.stats()
+    for offset, name in enumerate(steady[4:], start=4):
+        _seed_wake(root, "urgent", name, created_at=200.0 + offset)
+        assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root))
+        # 目录里已有 5/6 个文件 > 上限 4: 本轮整体不可用,条目数不许越界。
+        assert index.stats()["entries"] <= limit, index.stats()
+    assert index.stats()["records"] == 0
+
+    # (4) 长时间轮换: 磁盘上同时只有 2 个文件(始终小于上限),累计名字远多于上限,
+    # 条目数必须稳定贴在上限而不是随累计名字数增长。
+    for name in steady:
+        (root / "wake_queue" / "urgent" / f"{name}.json").unlink()
+    _wake_snapshot(store)
+    for position in range(20):
+        name = f"wake-churn-{position:02d}"
+        _seed_wake(root, "urgent", name, created_at=400.0 + position)
+        assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root)), position
+        if position >= 2:
+            (root / "wake_queue" / "urgent" / f"wake-churn-{position - 2:02d}.json").unlink()
+        stats = index.stats()
+        assert stats["entries"] <= limit, (position, stats)
+        assert stats["records"] == 0
+    assert index.stats()["prunes"] > 0
+
+
+def test_scan_index_does_not_prune_when_directory_is_unreadable(
+    tmp_path, monkeypatch
+) -> None:
+    """不误删: 目录短暂不可读时不得清空有效条目,查询必须回退全量扫描且结果一致。"""
+    root = tmp_path / "conversations"
+    store = _bounded_wake_store(root, 4)
+    for position in range(3):
+        _seed_wake(root, "urgent", f"wake-kept-{position}", created_at=1.0 + position)
+    baseline = _wake_snapshot(store)
+    index = store._scan_index("wake:urgent")  # noqa: SLF001
+    before = set(index._entries)
+    assert before == {f"wake-kept-{position}.json" for position in range(3)}
+
+    # 模拟"目录暂时读不到"(权限抖动/IO 故障),区别于"目录为空"。CPython 的 os.scandir 是
+    # C 槽位、改不动,所以这里直接对目标目录让生产用的 listing 助手返回 None(它只在
+    # OSError 分支返回 None),从而确定性地走"不可列出"状态机。
+    real_match_names = store_module._scan_dir_match_names  # noqa: SLF001
+    real_glob = Path.glob
+    blocked = store.wake_queue_dir / "urgent"
+
+    def unreadable_match_names(directory, pattern):
+        if Path(directory) == blocked:
+            return None
+        return real_match_names(directory, pattern)
+
+    def broken_glob(self, pattern, *args, **kwargs):
+        if self == blocked:
+            raise PermissionError("模拟目录暂时不可读")
+        return real_glob(self, pattern, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        # 情形一: 目录列不出来,但旧路径(glob)仍能枚举 → 结果与基线逐字一致。
+        patch.setattr(store_module, "_scan_dir_match_names", unreadable_match_names)
+        snapshot = _wake_snapshot(store)
+        assert snapshot == baseline
+        assert set(index._entries) == before, "目录不可读时不得清掉任何有效条目"
+        assert index.stats()["prunes"] == 0
+        # 情形二: 目录连枚举都失败 → 干净的"空结果",绝不能是半截结果;索引仍不被清。
+        patch.setattr(store_module.Path, "glob", broken_glob)
+        again = _wake_snapshot(store)
+        assert again == ([], [])
+        stats = index.stats()
+        assert set(index._entries) == before
+        assert stats["prunes"] == 0
+
+    assert stats["dir_unreadable"] >= 2
+    # 降级原因可观测,且按 (reason,key) 去重,不刷屏。
+    assert [item["reason"] for item in index.warnings] == ["dir_unreadable"]
+    assert stats["entries"] <= stats["max_entries"]
+
+    # 目录恢复可读后,热索引必须回到与冷 store 逐字一致的结果。
+    assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root)) == baseline
+
+
+def test_scan_index_enumeration_matches_glob_for_non_regular_entries(tmp_path) -> None:
+    """枚举成员口径必须与 Path.glob 逐字相同: 非普通文件也算成员,不许被静默过滤掉。"""
+    root = tmp_path / "conversations"
+    queue = root / "wake_queue" / "urgent"
+    queue.mkdir(parents=True, exist_ok=True)
+    _seed_wake(root, "urgent", "wake-live", created_at=1.0)
+    (queue / "wake-old.json.bak").write_text("{}", encoding="utf-8")
+    (queue / ".wake-hidden.json").write_text("{}", encoding="utf-8")
+    (queue / "wake-中文.json").write_text("{}", encoding="utf-8")
+    (queue / "wake-dir.json").mkdir(parents=True, exist_ok=True)
+    (queue / "wake-upper.JSON").write_text("{}", encoding="utf-8")
+    ghosts: list[str] = []
+    try:
+        os.symlink(queue / "never-existed.json", queue / "wake-ghost.json")
+        ghosts.append("wake-ghost.json")
+    except OSError:  # pragma: no cover - 平台不允许建符号链接时只跳过这一项
+        pass
+
+    # (1) 成员集合与 Path.glob 逐字相同。非普通条目(FIFO 等)单独放在一个 store 永远不会
+    # 读到的目录里: 读 FIFO 会阻塞(既有行为,与本索引无关),不能拿它去喂真实查询。
+    parity = tmp_path / "parity"
+    parity.mkdir()
+    (parity / "a.json").write_text("{}", encoding="utf-8")
+    (parity / "b.jsonl").write_text("{}", encoding="utf-8")
+    (parity / "c.json.bak").write_text("{}", encoding="utf-8")
+    (parity / "UPPER.JSON").write_text("{}", encoding="utf-8")
+    (parity / "sub.json").mkdir()
+    try:
+        os.symlink(parity / "never-existed.json", parity / "broken.json")
+    except OSError:  # pragma: no cover - 同上
+        pass
+    if hasattr(os, "mkfifo"):
+        try:
+            os.mkfifo(parity / "fifo.json")
+        except OSError:  # pragma: no cover - 同上
+            pass
+    for pattern in ("*.json", "*.json*", "*.jsonl", "*.JSON"):
+        expected = {path.name for path in parity.glob(pattern)}
+        assert store_module._scan_dir_match_names(parity, pattern) == expected, pattern  # noqa: SLF001
+        assert store_module._scan_dir_match_names(queue, pattern) == {  # noqa: SLF001
+            path.name for path in queue.glob(pattern)
+        }, pattern
+
+    # (2) 安全语义: 断链/不可读成员必须照旧产出结构化 load_error。runtime/guidance 消费方
+    # 以"有 load_error 就不消费"作硬门,索引不许把这类文件静默跳过(那等于绕过硬门)。
+    store = ConversationStore(root)
+    hot = _wake_snapshot(store)
+    cold = _wake_snapshot(ConversationStore(root))
+    assert hot == cold
+    assert "wake-live" in [item["wake_signal_id"] for item in hot[0]]
+    failed = {Path(item["path"]).name for item in hot[1]}
+    assert failed >= set(ghosts)
+    assert failed >= {"wake-dir.json"}
+    # 再来一轮(热索引已建立)必须仍然看得见这些失败文件。
+    assert _wake_snapshot(store) == hot
+
+
+def test_scan_index_dir_too_large_uses_the_query_pattern(tmp_path) -> None:
+    """上界口径必须与被扫描的文件集合同源: 不匹配查询模式的文件不得抬高 dir_too_large。"""
+    root = tmp_path / "conversations"
+    limit = 4
+    store = _bounded_wake_store(root, limit)
+    queue = store.wake_queue_dir / "urgent"
+
+    for position in range(limit - 1):
+        _seed_wake(root, "urgent", f"wake-live-{position}", created_at=1.0 + position)
+    # 目录里另有 4 个不匹配 *.json 的邻居: 它们不是本轮要扫的目标,不得计入上界。
+    for position in range(4):
+        (queue / f"wake-noise-{position}.json.bak").write_text("{}", encoding="utf-8")
+    index = store._scan_index("wake:urgent")  # noqa: SLF001
+    assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root))
+    assert index.stats()["entries"] == limit - 1
+    assert [item["reason"] for item in index.warnings] == []
+
+    # 真正匹配的文件数超过上界时,照旧整体回退全量扫描并留结构化告警。
+    for position in range(2):
+        _seed_wake(root, "urgent", f"wake-extra-{position}", created_at=50.0 + position)
+    hot = _wake_snapshot(store)
+    assert hot == _wake_snapshot(ConversationStore(root))
+    assert len(hot[0]) == limit + 1
+    assert [item["reason"] for item in index.warnings] == ["dir_too_large"]
 
 
 def test_scan_index_schema_constant_is_self_consistent(tmp_path) -> None:

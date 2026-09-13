@@ -11,12 +11,15 @@ import hashlib
 import json
 import logging
 import math
+import os
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import ExitStack, nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -263,7 +266,16 @@ def read_jsonl_tail_report(path: Path, *, context: str, limit: int) -> JsonlRead
 # 都回退到权威文件读取。索引不是第二套状态,也不参与唤醒、到期或恢复裁决:
 #   * 不写盘:纯进程内派生投影,进程重启即冷启动=全量扫描,结果不变;
 #   * 不权威:每次使用前用指纹与权威文件核对,索引被清空/污染只会变慢,不会变结果;
-#   * 有界:条目数与缓存记录数都有硬上限,超限的目录整体回退全量扫描并记结构化告警。
+#   * 有界:条目数与缓存记录数是两条**各自独立生效**的预算,谁先到顶淘汰谁(LRU),超限的
+#     目录整体回退全量扫描并记结构化告警。
+#
+# 记账单位必须覆盖全部负载形态:只有 JSONL 分片的负载是 list,唤醒信号与进度策略的负载
+# 是 dict,"记录数"恒为 0。旧实现只按记录数淘汰,于是 dict 负载的目录在 entries 维度完全
+# 不受约束(实测 max_entries=4 时能驻留 41 个已删除文件名)。因此本模块:
+#   * 淘汰同时看 len(_entries) > max_entries 与 _records > _SCAN_INDEX_MAX_RECORDS;
+#   * 列出目录成功时清理"已被删除/轮换掉的文件名"的条目(清理前必须确认文件真的不可 stat,
+#     目录自身不可列出时一条都不清,绝不把"暂时读不到"当成"已删除");
+#   * 新增 prunes / dir_unreadable 计数,让清理与降级都可观测。
 _SCAN_INDEX_SCHEMA = "conversation.scan_index.v1"
 _SCAN_INDEX_WARNING_LIMIT = 32
 _SCAN_INDEX_MAX_ENTRIES = 8192
@@ -301,12 +313,40 @@ class _ScanIndexEntry:
     payload: Any
     error: dict[str, Any] | None = None
     records: int = 0
+    # 绝对路径用于"该条目绑定哪个目录"的判定:清理只在同目录范围内进行(wake 目录下的
+    # 条目永远不该因为 progress_policies 目录少了个同名文件而被清掉)。
+    path: str = ""
+
+
+# LLM: 这里用 os.scandir 而不是 Path.glob,唯一目的是把"目录自身读不到"与"目录为空"分开:
+# glob 在权限不足时静默返回空列表,调用方会把一次瞬时故障当成"文件都被删了",进而清掉
+# 全部有效投影。scandir 会抛 OSError,于是这里能明确返回 None(不可列出)而不是空集合。
+# 成员口径必须与 Path.glob 逐字一致:glob 对最后一段**只按名字匹配、不看条目类型**,断链
+# 符号链接、FIFO、名字匹配的目录都会被列出。绝不能加 is_file()/is_dir() 过滤——那会让
+# 调用方"少看一批文件":断链的 wake-*.json 本来会产生一条 load_error,而 runtime/guidance
+# 消费方以"有 load_error 就不消费"作硬门,静默丢文件等于悄悄绕过该硬门。
+# 函数用途: 列出目录下匹配单段 fnmatch 模式的名字(成员集合与 Path.glob 相同),目录不存在
+# 或不是目录视为空集合,目录不可列出返回 None。
+def _scan_dir_match_names(directory: Path, pattern: str) -> frozenset[str] | None:
+    try:
+        with os.scandir(directory) as items:
+            return frozenset(
+                item.name for item in items if fnmatchcase(item.name, pattern)
+            )
+    except FileNotFoundError:
+        # 目录还没建 = 权威空集合,与旧 glob 的行为一致(不算不可读,不误清)。
+        return frozenset()
+    except NotADirectoryError:
+        return frozenset()
+    except OSError:
+        return None
 
 
 class _ScanIndex:
     # LLM: 该对象只保存"上次权威读取的负载",不保存任何裁决状态;调用方必须先给出刚刚
     # stat 到的指纹才能取用条目,因此并发写只会造成未命中,不会读到过期内容。
-    # 类用途: 单个台账目录的进程内增量索引,带 LRU 上限、告警去重和结构化统计。
+    # 类用途: 单个台账目录的进程内增量索引,条目数与记录数双重 LRU 上限、目录删名清理、
+    # 告警去重和结构化统计。
     def __init__(self, name: str, *, max_entries: int = _SCAN_INDEX_MAX_ENTRIES) -> None:
         self.name = name
         self.schema = _SCAN_INDEX_SCHEMA
@@ -316,7 +356,11 @@ class _ScanIndex:
         self.misses = 0
         self.stale = 0
         self.evictions = 0
-        self._entries: dict[str, _ScanIndexEntry] = {}
+        # 因"目录里已不存在该文件名"被清掉的条目数,与预算淘汰分开计数,便于诊断轮换频率。
+        self.prunes = 0
+        # 目录本身列不出来(权限/IO 异常)的次数。该状态下一次都不清,只整体回退全量扫描。
+        self.dir_unreadable = 0
+        self._entries: OrderedDict[str, _ScanIndexEntry] = OrderedDict()
         self._records = 0
         self._order_names: frozenset[str] | None = None
         self._order_paths: list[Path] | None = None
@@ -325,19 +369,58 @@ class _ScanIndex:
     # LLM: 目录扫描的 canonical 顺序完全由"文件名集合"决定(同一父目录、目录内名字唯一),
     # 因此按 frozenset(名字) 记忆排序结果:集合没变就直接复用,集合变了才重新排序。排序是
     # 集合的纯函数,所以这不是新的顺序规则,只是不再每轮为几千个 Path 做 pathlib 比较;
-    # glob 的调用方式与 pattern 完全不变,文件集合仍每轮重新枚举。
+    # 文件集合仍每轮重新枚举(见 _scan_index_usable 的同一份 listing)。
+    # 目录列不出来时退回旧的 glob 口径继续枚举:枚举失败绝不能让调用方少看一批文件,清不清理
+    # 是 _scan_index_usable 的事,与"本次能看到哪些路径"无关。
     # 函数用途: 返回目录下匹配 pattern 的路径,按旧实现的 canonical 顺序排列;返回值只读。
     def ordered_paths(self, directory: Path, pattern: str) -> list[Path]:
-        paths = list(directory.glob(pattern))
-        names = frozenset(path.name for path in paths)
+        names = _scan_dir_match_names(directory, pattern)
+        if names is None:
+            # 目录读不到 ≠ 目录是空的,因此这里也绝不更新排序记忆,否则"暂时读不到"会被记成
+            # "目录为空"并在下一次冒充权威集合。glob 的返回值仍然给出真实路径。
+            try:
+                return sorted(directory.glob(pattern))
+            except OSError:
+                return []
         with self._lock:
             if names == self._order_names and self._order_paths is not None:
                 return self._order_paths
-        paths.sort()
+        paths = sorted(directory / name for name in names)
         with self._lock:
             self._order_names = names
             self._order_paths = paths
         return paths
+
+    # LLM: 清理只在"目录这一次真的被完整列出"之后发生,而且每个候选名字都要再用一次
+    # stat 复核:stat 成功说明文件还在(只是本轮没进匹配集合),一条都不清。因此权限抖动、
+    # 并发 rename、glob 瞬时失败都不会误删有效投影,最坏只是慢一轮。
+    # live_names 为 None 表示目录本轮不可列出:保持全部投影不动并计入 dir_unreadable,
+    # 绝不能把"暂时读不到"当成"已删除"而清掉索引。
+    # 函数用途: 丢弃"绑定到该目录且文件已确认消失"的条目,返回清理条数;目录不可列出时返回 -1。
+    def prune_missing(self, directory: Path, live_names: frozenset[str] | None) -> int:
+        if live_names is None:
+            with self._lock:
+                self.dir_unreadable += 1
+            return -1
+        prefix = f"{directory}{os.sep}"
+        with self._lock:
+            candidates = [
+                name
+                for name, entry in self._entries.items()
+                if name not in live_names and entry.path.startswith(prefix)
+            ]
+        dropped = 0
+        for name in candidates:
+            with self._lock:
+                entry = self._entries.get(name)
+            if entry is None or _file_fingerprint(Path(entry.path)) is not None:
+                continue
+            with self._lock:
+                if name in self._entries:
+                    self._drop_entry(name)
+                    self.prunes += 1
+                    dropped += 1
+        return dropped
 
     # LLM: 告警按 (reason,key) 去重并有上限,避免轮询路径刷日志;这是"索引不可用已回退
     # 全量扫描"的结构化事实,不是错误状态,消费方不得据此改变唤醒/恢复裁决。
@@ -378,25 +461,24 @@ class _ScanIndex:
                 self.misses += 1
                 return None
             if entry.fingerprint != fingerprint:
-                self._entries.pop(name, None)
-                self._records -= entry.records
+                self._drop_entry(name)
                 self.stale += 1
                 return None
             if entry.ok and identity_key and not _scan_index_identity_matches(
                 entry.payload, identity_key, path.stem
             ):
-                self._entries.pop(name, None)
-                self._records -= entry.records
+                self._drop_entry(name)
                 self.warn("entry_identity_mismatch", key=name, path=str(path))
                 return None
-            self._entries.pop(name, None)
-            self._entries[name] = entry
+            self._entries.move_to_end(name)
             self.hits += 1
             return entry
 
     # LLM: 写入只发生在"刚完成一次权威读取且读前读后指纹一致"之后,因此投影与磁盘字节
-    # 同源;同一文件重复写入是幂等的(覆盖同名条目),不会产生第二份账。
-    # 函数用途: 记录一次权威读取结果;超记录预算时拒绝缓存并记结构化告警。
+    # 同源;同一文件重复写入是幂等的(覆盖同名条目,不产生第二份账),并且写完后立即按
+    # **条目数 + 记录数**两条预算做 LRU 淘汰——只按记录数淘汰时,dict 负载(记录恒为 0)
+    # 的目录会让 max_entries 完全失效,长期轮换文件名就能无限占内存。
+    # 函数用途: 记录一次权威读取结果;超单文件记录预算时拒绝缓存并记结构化告警。
     def store(
         self,
         path: Path,
@@ -418,15 +500,24 @@ class _ScanIndex:
             )
             return
         with self._lock:
-            previous = self._entries.pop(name, None)
-            if previous is not None:
-                self._records -= previous.records
-            while self._entries and self._records + records > _SCAN_INDEX_MAX_RECORDS:
-                oldest = next(iter(self._entries))
-                evicted = self._entries.pop(oldest)
-                self._records -= evicted.records
-                self.evictions += 1
-            if self._records + records > _SCAN_INDEX_MAX_RECORDS:
+            self._drop_entry(name)
+            self._entries[name] = _ScanIndexEntry(
+                fingerprint=fingerprint,
+                ok=ok,
+                payload=payload,
+                error=error,
+                records=records,
+                path=str(path),
+            )
+            self._records += records
+            while self._entries and (
+                len(self._entries) > self.max_entries
+                or (self._records > _SCAN_INDEX_MAX_RECORDS and len(self._entries) > 1)
+            ):
+                self._evict_oldest()
+            if self._records > _SCAN_INDEX_MAX_RECORDS:
+                # 单条负载本身超全局记录预算:不缓存它(与旧口径一致),避免为它清空整个索引。
+                self._drop_entry(name)
                 self.warn(
                     "record_budget_exceeded",
                     key=name,
@@ -434,15 +525,21 @@ class _ScanIndex:
                     records=records,
                     limit=_SCAN_INDEX_MAX_RECORDS,
                 )
-                return
-            self._entries[name] = _ScanIndexEntry(
-                fingerprint=fingerprint,
-                ok=ok,
-                payload=payload,
-                error=error,
-                records=records,
-            )
-            self._records += records
+
+    # LLM: 淘汰与显式丢弃共用同一条记账路径,否则 _records 会因漏减而失真,让记录维度
+    # 预算跟着失效。任何移除条目的地方都必须走这里。
+    # 函数用途: 移除一条投影并同步记录数记账。
+    def _drop_entry(self, name: str) -> None:
+        entry = self._entries.pop(name, None)
+        if entry is None:
+            return
+        self._records -= entry.records
+
+    # 函数用途: 按 LRU 淘汰最旧的一条投影并计入 evictions。
+    def _evict_oldest(self) -> None:
+        oldest = next(iter(self._entries))
+        self._drop_entry(oldest)
+        self.evictions += 1
 
     # LLM: 清空等价于冷启动,只影响耗时;保留告警与计数便于诊断。
     # 函数用途: 丢弃全部投影条目(供失效处理与测试)。
@@ -451,7 +548,7 @@ class _ScanIndex:
             self._entries.clear()
             self._records = 0
 
-    # 函数用途: 返回该索引的条目/记录占用与命中统计,供诊断和测试断言。
+    # 函数用途: 返回该索引的条目/记录占用、淘汰/清理/降级计数与命中统计,供诊断和测试断言。
     def stats(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -465,6 +562,8 @@ class _ScanIndex:
                 "misses": self.misses,
                 "stale": self.stale,
                 "evictions": self.evictions,
+                "prunes": self.prunes,
+                "dir_unreadable": self.dir_unreadable,
                 "warnings": list(self.warnings),
             }
 
@@ -742,8 +841,15 @@ class ConversationBaseStore:
 
     # LLM: 该判定只回答"这次能不能用投影加速",不回答任何业务问题;不可用时本次调用整体
     # 退回全量权威扫描并留结构化告警,因此索引缺失/损坏永远不会让人少读一条记录。
-    # 函数用途: 判断本次扫描能否使用增量索引(校验 schema 与条目规模上限)。
-    def _scan_index_usable(self, index: _ScanIndex, *, key: str, entries: int) -> bool:
+    # 判定同时承担"跟盘对账":上界若只按当前目录文件数判断,被删除/轮换掉的旧文件名条目
+    # 会一直驻留(实测 max_entries=4 时驻留 41 个已删名字)。因此这里重新列一次目录,并在
+    # **列目录成功**时清掉已确认消失文件名的投影;目录列不出来时一条都不清,只降级全量扫描。
+    # pattern 必须与调用方 ordered_paths 用的那个逐字相同:上界口径与"本次实际要扫的文件
+    # 集合"必须同源,否则给目录换一个更宽的模式就会凭空改变 dir_too_large 的触发点。
+    # 函数用途: 判断本次扫描能否使用增量索引,并清理绑定到该目录的已删名字投影。
+    def _scan_index_usable(
+        self, index: _ScanIndex, *, key: str, directory: Path, pattern: str
+    ) -> bool:
         if index.schema != _SCAN_INDEX_SCHEMA:
             index.warn(
                 "index_rejected",
@@ -752,6 +858,13 @@ class ConversationBaseStore:
                 found=str(index.schema),
             )
             return False
+        live_names = _scan_dir_match_names(directory, pattern)
+        if index.prune_missing(directory, live_names) < 0:
+            # 目录暂时读不到(权限/IO 抖动):保持全部投影不动,本次退回全量扫描,
+            # 结果依旧正确,绝不用"读不到"冒充"已删除"。
+            index.warn("dir_unreadable", key=key, path=str(directory))
+            return False
+        entries = len(live_names or ())
         if entries > index.max_entries:
             index.warn(
                 "dir_too_large",
@@ -3112,7 +3225,9 @@ class ConversationObservationStore(ConversationTaskStore):
         handled = self._read_observation_handled()
         index = self._scan_index("observations")
         paths = index.ordered_paths(self.observations_dir, "*.jsonl")
-        use_index = self._scan_index_usable(index, key="observations", entries=len(paths))
+        use_index = self._scan_index_usable(
+            index, key="observations", directory=self.observations_dir, pattern="*.jsonl"
+        )
         events: list[ObservationEvent] = []
         for path in paths:
             # 读取目标仍按 path.stem 反推(与旧实现 recent_observations(path.stem) 完全同路),
@@ -5606,7 +5721,7 @@ class ConversationWakeStore(ConversationGoalStore):
         index = self._scan_index(f"wake:{kind}")
         paths = index.ordered_paths(self.wake_queue_dir / kind, "*.json")
         use_index = self._scan_index_usable(
-            index, key=f"wake:{kind}", entries=len(paths)
+            index, key=f"wake:{kind}", directory=self.wake_queue_dir / kind, pattern="*.json"
         )
         for path in paths:
             _ok, payload, error = self._indexed_payload(
@@ -5793,7 +5908,7 @@ class ConversationProgressStore(ConversationWakeStore):
         index = self._scan_index("progress_policies")
         paths = index.ordered_paths(self.policies_dir, "*.json")
         use_index = self._scan_index_usable(
-            index, key="progress_policies", entries=len(paths)
+            index, key="progress_policies", directory=self.policies_dir, pattern="*.json"
         )
         for path in paths:
             _ok, payload, error = self._indexed_payload(

@@ -1,5 +1,43 @@
 # TESTS
 
+## 2026-09-12 R266 读取侧索引的有界性缺口（监督者 12 名字探针）
+
+监督者探针证明 R265 的读取侧索引**上界没有生效**：`max_entries=4` 时连续写入 12 个不同文件名，
+`entries=12 / records=0 / evictions=0`——淘汰只看记录数，而唤醒信号与进度策略的负载是 dict，
+记录数恒为 0，于是条目预算在写路径上从未真正执行；`ordered_paths` 每轮重新枚举却**从不清理**
+已删除/轮换掉的名字，端到端实测"磁盘只剩 1 个文件、累计 40 个名字"时驻留 40 条。
+
+修复（`conversation/store.py`，通用机制，非 wake/策略专项）：`_entries` 改 `OrderedDict`，
+条目数与记录数**两条预算各自独立生效**、谁先到顶淘汰谁（LRU）；`_drop_entry()` 统一记账，
+供命中失配、覆盖写、淘汰、清理共用；新增 `_scan_dir_match_names()`（`os.scandir`，把"目录
+不可列出"与"目录为空"分开，glob 在权限不足时会静默返回空列表）与 `prune_missing()`
+（清理前再用一次 stat 复核，目录不可列出时一条都不清），`stats()` 新增 `prunes`/`dir_unreadable`。
+
+本轮同时修掉该修复自带的两个口径问题（由复核发现，先红后绿）：
+① 成员过滤用了 `is_file()/is_dir()`，而 `Path.glob` 对最后一段只按名字匹配——断链符号链接、
+FIFO、同名目录都算成员；被过滤掉的 `wake-*.json` 不再产生 load_error，而 runtime/guidance
+消费方以"有 load_error 就不消费"作硬门，静默丢文件等于绕过该硬门。
+② `dir_too_large` 的计数改用比查询模式更宽的 `*.json*`，会给换模式就改变触发点；现改为与
+`ordered_paths` 传入的 pattern 逐字相同。
+
+新增 6 例（`test_store_scan_indexes.py`）：名字轮换下条目预算恒成立且驻留集合 == 磁盘真实集合、
+当前集合恒小于上限时 63 次轮换不增长、单轮写入超上限时 LRU 语义可断言、目录不可读时一条不删、
+枚举与 `Path.glob` 同口径且断链条目照旧产生 load_error、`dir_too_large` 只认同模式文件。
+把关守卫有效性：把这 4 例有界性用例跑在修复前的 `store.py` 上全部失败；把上述 ①② 两个口径问题
+注入修复后的 `store.py`，对应两例也失败。
+
+独立复现（本轮复核，非子代理自述）：纯内存探针 `entries=12→4`（evictions=8，留最新 4 个）；
+端到端探针 `entries=40→1`（prunes=39，驻留集合 == 磁盘真实文件集合，冷热结果一致）。
+随机化不变量压测 3 个种子 × 240 步（每步 4 类查询热/冷逐字比对 + `entries==len(_entries)`
++ `records==Σentry.records` + 驻留不含已删名字）全通过。
+
+性能（配对交替、同一夹具、基线 = 索引落地前的 `a1366609`）：wake `3.76-3.78x`、
+observation `7.60x`（基线 1000 次读/6500 次解析 → 1 次读）、policy `4.14-4.32x`；
+有界性修复自身成本 `1.00x/1.04x/0.94x`（噪声内）。
+
+本轮 focused：`test_store_scan_indexes.py`(22) + `test_conversation_store.py`(43) = 65 passed；18 个消费者
+套件 442 项（437 passed / 5 xfailed，EXIT=0）。**不等同真机验收**：真机 TUI 与部署未做（运行时仍为 r261）。
+
 ## 2026-09-12 R263 门槛5 探针的无损交付（撤掉长度二选一）
 
 新增 `agent_py_agent/tests/test_timeout_recovery_delivery.py` 8 例：两条已产生的合法答复按到达顺序
