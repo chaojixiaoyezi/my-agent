@@ -1,5 +1,27 @@
 # Gateway Structure
 
+## R279 后台答复的 canonical 记录与外部投递解耦
+
+- **canonical 记录不再由渠道能力决定**：`conversation/runtime.py::_record_response` 只要拿到模型产出的
+  可交付正文（非空投影或附件），且该路线以本地权威会话为交付面（`transcript` 路线）或**本来就没有外发
+  目标**（未注册渠道、无 target），就必须把 final 写进所属 thread。渠道能力只决定"能不能外发"，
+  不决定"要不要记账"；未注册渠道继续 fail-closed，`DeliveryService._prepare` 仍返回
+  `not_applicable/CHANNEL_PROACTIVE_UNSUPPORTED`，绝不因为渠道名像 IM 就打开一条新外发通道。
+- **欠外发却没送达的正文冻结在唤醒上**：`cache_pending_wake_delivery` 的适用范围从"审计容量通知"扩展到
+  "任何有外发义务但未 `sent` 的唤醒"。这类唤醒**不确认**（`wake_handled=false`），下一 tick 由
+  `_execute_wake_signal → redeliver_cached_wake` 只重投冻结正文，**不再花一次模型轮**；重投再次失败时
+  冻结载荷保持不变，不允许退化成重跑业务。有外发义务的真实 IM 路线保持原有边界——失败草稿不写进本地
+  transcript，靠冻结重投兜底。
+- **唤醒确认是结构化事实判定**：`_background_owner_delivery_committed` 不再按事件类型默认返回 True。
+  只有 `delivery_status == "sent"`，或"没有外发义务且 `BackgroundDeliveryCommit.persisted` 为真"才算
+  完成；两者都不成立的唤醒留在队列里重投。投递层显式 `suppressed` 的正文既不外发也不落账。
+- **审计回执不得冒领**：`_record_transcript_audit_refs` 只在 `transcript_route` 为真时写；外发路线失败
+  的报告不能把 canonical 追加当成"已上报"，否则审计台账会记下一次并不存在的交付。
+- **`_record_background_main_reports` 日志必须带真实投递事实**：payload 包含
+  `delivery_status`/`delivery_reason`/`wake_handled`/`commit_kind`/`message_id`/`response_chars`/
+  `task_status`。只打印 reason/task/thread 会让"答复到底有没有出去"无法事后复原（R279 真实故障的排障
+  盲区）。`BackgroundDeliveryCommit` 是这条链路的唯一结构化事实源，日志与报告都从它投影。
+
 ## R274 scheduler 只读路径的锁边界（GW-03 收尾）
 
 - **只读投影一律走 `SchedulerRepository._store_snapshot()`**：锁外读一次字节 + 解析，锁内只用一次

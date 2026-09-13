@@ -1,5 +1,32 @@
 # DESIGN LEDGER
 
+## 2026-09-13 R279 后台答复落账与外部投递解耦（canonical ≠ transport）【状态：已修+守卫测试，未部署】
+
+**问题（用户现场真实故障）**：一次 owner 身份 = provider 名（`release-validation`）的测试运行里，
+后台最终答复走 `_record_response` 的落账判定
+`supports_transcript_delivery(channel) and delivery_status == "not_applicable"`：该渠道既没有
+proactive 外发能力、也不在本地 transcript 白名单，于是**模型已经写出的正文既没外发也没落 canonical**；
+`_background_owner_delivery_committed` 对非审计事件又直接 `return True`，唤醒被确认、队列条目删除，
+答复永久丢失。`background_reported` 日志只有 reason/task/thread，事后无法复原"答复去哪了"。
+
+**架构决定（可长期引用的边界）**：
+1. **canonical 记录与外部投递是两条独立事实。** 一条路线"要不要给 owner 留下这条回复"由
+   *这条路线是否以本地权威会话为交付面，或本来就没有任何外发目标* 决定，与投递状态无关；
+   渠道能力只回答"能不能外发"。未注册渠道继续 fail-closed（`CHANNEL_PROACTIVE_UNSUPPORTED`），
+   **不新增渠道白名单、不打开未注册 IM 通道、不放松 owner 隔离**。
+2. **有外发义务却没送达的正文冻结在唤醒上**，唤醒保持未确认；下一 tick 复用既有
+   `redeliver_cached_wake` **只重投这份正文，不再调用模型**（"未送达只重投、不重跑业务"）。
+3. **唤醒确认是结构化事实判定**，不按事件类型默认放行。
+4. **审计回执不得冒领**：外发失败的报告不能把 canonical 追加当成"已上报"。
+5. `BackgroundDeliveryCommit` 是这条链路的唯一结构化事实源（`external_delivery` / `canonical_record` /
+   `outbox_pending` / `suppressed` / `none` + `message_id`），报告与 `background_reported` 日志都从它投影。
+
+**红/绿对照（同一脚本、真实 `DeliveryService` + 默认 registry、隔离 `MY_AGENT_HOME`）**：
+`release-validation` canonical 行 0 → 1；`chat`/`tui` 保持 1；三者唤醒确认语义不变（现在由真实提交支撑）。
+
+**守卫**：`agent_py_agent/tests/test_background_owner_delivery_commit.py`（7 项）；详细条款见
+`docs/modules/gateway/04-structure.md` 的 R279 小节。
+
 ## 2026-09-13 R274 GW-03 收尾：scheduler 剩余锁内全量解析（只修真热点）+ 本轮验收状态汇总【状态：已修+受控验收，未部署】
 
 **盘点**：AST 粗筛出 48 个"锁临界区内出现全量解析原语"的调用点，按"文件是否可能很大 + 调用频率"判优先级。

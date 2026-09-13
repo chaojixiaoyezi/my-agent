@@ -198,8 +198,19 @@ def test_background_invocation_snapshot_commits_only_with_canonical_final(tmp_pa
     kwargs = {"receipt": SimpleNamespace(), "committed_content": result.response, "evidence_refs": (),
               "message_metadata": {"task_id": "task-a", "background_delivery_reason": "scheduled_progress_report"},
               "display_snapshot": snapshot}
-    runtime_module._commit_background_response(runtime, request, context, delivery_status="failed", transcript_record=False, **kwargs)
+    # 欠一次真实外发且没有本地归属权的路线：外发失败不得落 canonical，
+    # 但正文必须由冻结重投兜住（见 test_background_owner_delivery_commit.py）。
+    external = DeliveryContext(channel="feishu", target="open-id-a", thread_id=thread.thread_id)
+    uncommitted = runtime_module._commit_background_response(
+        runtime, request, external, delivery_status="failed",
+        canonical_record=False, transcript_route=False, **kwargs)
+    assert uncommitted.persisted is False
+    assert uncommitted.commit_kind == "none"
     assert not store.recent_messages(thread.thread_id)
-    runtime_module._commit_background_response(runtime, request, context, delivery_status="not_applicable", transcript_record=True, **kwargs)
+    committed = runtime_module._commit_background_response(
+        runtime, request, context, delivery_status="not_applicable",
+        canonical_record=True, transcript_route=True, **kwargs)
+    assert committed.persisted is True
+    assert committed.commit_kind == "canonical_record"
     final = store.recent_messages(thread.thread_id)[0]
     assert background_display_turn_from_row(final) == snapshot

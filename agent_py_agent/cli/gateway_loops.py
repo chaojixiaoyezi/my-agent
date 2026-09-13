@@ -1477,8 +1477,12 @@ class _GatewayOrphanReconciler:
         return report
 
 
+# LLM: 后台报告日志是事后排障的唯一入口，必须带上真实投递结果、唤醒确认和正文引用；
+# 只打印 reason/task/thread 会让“答复到底有没有出去”无法从日志复原。
+# 函数用途: 记录每条后台主代理报告的结构化投递事实。
 def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -> None:
     for report in reports:
+        response = str(getattr(report, "response", "") or "")
         payload = {
             "status": "background_reported",
             "thread_id": str(getattr(report, "thread_id", "") or ""),
@@ -1487,11 +1491,20 @@ def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -
             "route_channel": str(getattr(report, "route_channel", "") or ""),
             "route_target": str(getattr(report, "route_target", "") or ""),
             "created_at": float(getattr(report, "created_at", 0.0) or 0.0),
+            "delivery_status": str(getattr(report, "delivery_status", "") or ""),
+            "delivery_reason": str(getattr(report, "delivery_reason", "") or ""),
+            "wake_handled": bool(getattr(report, "wake_handled", False)),
+            "commit_kind": str(getattr(report, "commit_kind", "") or ""),
+            "message_id": str(getattr(report, "message_id", "") or ""),
+            "response_chars": len(response),
+            "task_status": str(getattr(report, "task_status", "") or ""),
         }
         log_gateway_event(agent, "gateway_background_main_reported", payload)
         print(
             "[gateway-background-main] "
-            f"reason={payload['reason']} task={payload['task_id']} thread={payload['thread_id']}",
+            f"reason={payload['reason']} task={payload['task_id']} thread={payload['thread_id']} "
+            f"delivery={payload['delivery_status']} commit={payload['commit_kind']} "
+            f"wake_handled={payload['wake_handled']} chars={payload['response_chars']}",
             flush=True,
         )
 

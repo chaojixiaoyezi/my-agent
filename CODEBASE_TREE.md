@@ -397,6 +397,8 @@ docs/
 - `agent_py_agent/tests/test_conversation_display_checkpoint.py`：未final主/子过程恢复、输入不变、精确覆盖与未知卡片补齐。
 - `agent_py_agent/tests/test_background_history_snapshot.py`：完整后台块快照、慢客户端补帧、损坏快照拒绝重基、
   Compact 重调工具身份和 provider 历史不变验证。
+- `agent_py_agent/tests/test_background_owner_delivery_commit.py`：后台答复 canonical 落账与外部投递解耦、
+  未注册渠道 fail-closed、未送达正文冻结重投不重跑模型、审计回执不冒领和后台报告日志字段守卫。
 - `agent/conversation/message_stream.py`：正文及显式协商检查点的唯一公开增量投影，复用 ConversationStore，不另存 notices 正文。
 - `agent/conversation/display_checkpoint.py`：公开完整块的typed检查点，保存到同thread会话账本并排除模型/Compact/Memory。
 - `agent/conversation/context_usage.py`：各代理最近上下文的统一数字投影；与 Working、模型输入、计费和校准分离。

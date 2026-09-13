@@ -30,6 +30,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "ConversationScope": ("compact", "ConversationScope"),
     "conversation_scope": ("compact", "conversation_scope"),
     "prepare_conversation_context": ("compact", "prepare_conversation_context"),
+    "BackgroundDeliveryCommit": ("models", "BackgroundDeliveryCommit"),
     "BackgroundMainAgentReport": ("models", "BackgroundMainAgentReport"),
     "ChannelBinding": ("models", "ChannelBinding"),
     "ConversationThread": ("models", "ConversationThread"),

@@ -1,5 +1,37 @@
 # Gateway Progress
 
+## 2026-09-13 R279 后台最终答复丢失：canonical 记录与外部投递解耦
+
+真实故障（用户现场，07:04:08 起 480s 的一次 TUI 请求后 `USER_REPLY_UNAVAILABLE`）复盘出的底座缺口：
+测试运行把 owner 的 provider 名（`release-validation`）当成了投递渠道，而 `_record_response` 的落账
+判定是 `supports_transcript_delivery(channel) and delivery_status == "not_applicable"`——该渠道两种能力
+都不具备，于是模型已经写出的最终正文**既没有外发、也没有写进 canonical thread**；同时
+`_background_owner_delivery_committed` 对非审计事件直接 `return True`，唤醒被确认、队列条目被删除，
+答复永久丢失，日志里也只有一个不带 `delivery_status` 的 `background_reported`。
+
+本轮改动（**不加渠道白名单、不打开未知 IM 通道、不放松 owner 隔离**）：
+- `BackgroundDeliveryCommit`（`conversation/models.py`）成为一次后台答复落账的唯一结构化事实，
+  区分 `external_delivery`/`canonical_record`/`outbox_pending`/`suppressed`/`none`，并带 `message_id`。
+- `_record_response` 用"这条路线是否以本地权威会话为交付面，或本来就没有外发目标"决定 canonical 记录，
+  与投递状态解耦；`_commit_background_response` 不再用 `transcript_record` 门控正文落账。
+- 有外发义务但未 `sent` 的正文冻结在唤醒上（原审计容量专用机制通用化），唤醒保持未确认，
+  下一 tick 由既有 `redeliver_cached_wake` **只重投这份正文**，不再调用模型。
+- `_background_owner_delivery_committed` 改为按结构化提交事实判定；`background_reported` 日志补齐
+  `delivery_status`/`delivery_reason`/`wake_handled`/`commit_kind`/`message_id`/`response_chars`。
+
+同一脚本（真实 `DeliveryService` + 默认 registry，隔离 `MY_AGENT_HOME`）在修复前 HEAD `3719e674` 与
+修复后工作树的红/绿对照：
+
+| 渠道 | canonical 行(前→后) | 唤醒确认 | 修复后 commit_kind |
+|---|---|---|---|
+| `chat` | 1 → 1 | True → True | `canonical_record` |
+| `tui` | 1 → 1 | True → True | `canonical_record` |
+| `release-validation`（未注册身份） | **0 → 1** | True → True | `canonical_record` |
+
+守卫测试：`agent_py_agent/tests/test_background_owner_delivery_commit.py`（7 项，含"旧实现必红"
+判定式与"重投再次失败仍不重跑模型"）。回归范围：background/scheduler/wake/delivery/dispatch 共 17 个
+测试文件全绿。
+
 ## 2026-09-13 R274 GW-03 收尾：scheduler 剩余"锁内全量解析"只读路径收口
 
 盘点（AST 粗筛 48 个"锁临界区内出现全量解析原语"的调用点）后按同负载测量判断，只修**真热点**：

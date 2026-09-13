@@ -669,7 +669,7 @@ from .channels import (
     project_user_reply,
     supports_transcript_delivery,
 )
-from .models import BackgroundMainAgentReport
+from .models import BackgroundDeliveryCommit, BackgroundMainAgentReport
 
 
 @dataclass(frozen=True)
@@ -849,6 +849,101 @@ def _background_request_objective(store: ConversationStore, request: BackgroundR
     return ""
 
 
+# LLM: 一片后台工作的交付输入必须一次性冻结：模型产出、投递判定、路线能力、工具计数都来自
+# 同一片 run，收口阶段不得重新采样；字段用默认值只是为了少写样板，语义上全部必填。
+# 类用途: 承载 run_once 收口阶段需要的全部结构化事实。
+@dataclass(frozen=True)
+class _BackgroundSlicePlan:
+    request: BackgroundRunRequest
+    delivery_context: DeliveryContext
+    channel: str
+    target: str
+    response: str
+    deliver: bool
+    delivery_reason: str
+    route_supports_proactive: bool = False
+    route_supports_transcript: bool = False
+    delivery_artifacts: tuple[dict[str, object], ...] = ()
+    message_tool_deliveries: tuple[dict[str, object], ...] = ()
+    operation_verification: dict[str, object] | None = None
+    assistant_commentaries: tuple[str, ...] = ()
+    display_snapshot: dict[str, object] | None = None
+    counters: tuple[int, int, int] = (0, 0, 0)
+
+
+# LLM: 交付收口只有一条路径：能自己外发的走 message-tool 直投镜像，其余走 _record_response 的
+# canonical 落账 + 冻结重投；唤醒确认只读结构化提交事实。禁止在这里新增按渠道名的分支。
+# 函数用途: 把一片后台模型产出交付给 owner，并返回结构化报告。
+def _complete_background_slice(
+    runtime: BackgroundMainAgentRuntime,
+    plan: _BackgroundSlicePlan,
+) -> BackgroundMainAgentReport:
+    request = plan.request
+    if _message_tool_delivery_satisfied(request, plan.message_tool_deliveries):
+        # 通道运行时's cron runner treats committed message-tool delivery as the
+        # source reply and skips its announce fallback. Mirror the payload into
+        # the same transcript, but never call the channel a second time.
+        reported_content = _mirror_message_tool_deliveries(
+            runtime.store,
+            request,
+            plan.delivery_context,
+            plan.message_tool_deliveries,
+        )
+        delivery_status = "sent"
+        delivery_reason = _message_tool_delivery_reason(request)
+        commit = BackgroundDeliveryCommit(
+            content=reported_content,
+            delivery_status=delivery_status,
+            persisted=False,
+            commit_kind="external_delivery",
+            transcript_route=plan.route_supports_transcript,
+        )
+    else:
+        commit = runtime._record_response(
+            request,
+            plan.delivery_context,
+            plan.response,
+            delivery_artifacts=plan.delivery_artifacts,
+            operation_verification=plan.operation_verification,
+            assistant_commentaries=plan.assistant_commentaries,
+            display_snapshot=plan.display_snapshot,
+            deliver=plan.deliver,
+            delivery_reason=plan.delivery_reason,
+            route_supports_proactive=plan.route_supports_proactive,
+            route_supports_transcript=plan.route_supports_transcript,
+        )
+        reported_content = commit.content
+        delivery_status = commit.delivery_status
+        delivery_reason = plan.delivery_reason
+    # 唤醒只有在答复真的落到某个权威位置（外发成功或 canonical 记录）时才确认；
+    # 有外发义务却未送达的路线留给冻结重投，绝不重跑业务。
+    wake_handled = _background_owner_delivery_committed(
+        request,
+        target=plan.target,
+        route_supports_proactive=plan.route_supports_proactive,
+        commit=commit,
+    )
+    tool_call_count, tool_success_count, material_progress_count = plan.counters
+    return BackgroundMainAgentReport(
+        thread_id=request.thread_id,
+        task_id=request.task_id,
+        reason=request.reason,
+        response=reported_content,
+        route_channel=plan.channel,
+        route_target=plan.target,
+        created_at=request.now,
+        tool_call_count=tool_call_count,
+        tool_success_count=tool_success_count,
+        material_progress_count=material_progress_count,
+        delivery_status=delivery_status,
+        delivery_reason=delivery_reason,
+        wake_handled=wake_handled,
+        task_status=_background_task_link_status(runtime.agent, request, store=runtime.store),
+        commit_kind=commit.commit_kind,
+        message_id=commit.message_id,
+    )
+
+
 class BackgroundMainAgentRuntime:
     def __init__(
         self,
@@ -920,56 +1015,25 @@ class BackgroundMainAgentRuntime:
             resolved_route_supports_transcript=route_supports_transcript,
             sampled_subagent_phase=goal_context.subagent_phase,
         )
-        if _message_tool_delivery_satisfied(request, message_tool_deliveries):
-            # 通道运行时's cron runner treats committed message-tool delivery as the
-            # source reply and skips its announce fallback. Mirror the payload into
-            # the same transcript, but never call the channel a second time.
-            reported_content = _mirror_message_tool_deliveries(
-                self.store,
-                request,
-                delivery_context,
-                message_tool_deliveries,
-            )
-            delivery_status = "sent"
-            delivery_reason = _message_tool_delivery_reason(request)
-            wake_handled = True
-        else:
-            reported_content, delivery_status = self._record_response(
-                request,
-                delivery_context,
-                response,
+        return _complete_background_slice(
+            self,
+            _BackgroundSlicePlan(
+                request=request,
+                delivery_context=delivery_context,
+                channel=channel,
+                target=target,
+                response=response,
                 delivery_artifacts=delivery_artifacts,
+                message_tool_deliveries=message_tool_deliveries,
                 operation_verification=operation_verification,
                 assistant_commentaries=assistant_commentaries,
                 display_snapshot=display_snapshot,
                 deliver=deliver,
                 delivery_reason=delivery_reason,
-                route_supports_transcript=route_supports_transcript,
-            )
-            wake_handled = _background_owner_delivery_committed(
-                request,
-                channel=channel,
-                target=target,
                 route_supports_proactive=route_supports_proactive,
                 route_supports_transcript=route_supports_transcript,
-                delivery_status=delivery_status,
-                content=reported_content,
-            )
-        return BackgroundMainAgentReport(
-            thread_id=request.thread_id,
-            task_id=request.task_id,
-            reason=request.reason,
-            response=reported_content,
-            route_channel=channel,
-            route_target=target,
-            created_at=request.now,
-            tool_call_count=tool_call_count,
-            tool_success_count=tool_success_count,
-            material_progress_count=material_progress_count,
-            delivery_status=delivery_status,
-            delivery_reason=delivery_reason,
-            wake_handled=wake_handled,
-            task_status=_background_task_link_status(self.agent, request, store=self.store),
+                counters=(tool_call_count, tool_success_count, material_progress_count),
+            ),
         )
 
     def redeliver_cached_wake(
@@ -1004,35 +1068,35 @@ class BackgroundMainAgentRuntime:
         )
         route_supports_proactive = bool(target and self.channels.supports_proactive(channel))
         route_supports_transcript = _route_supports_transcript(self.channels, channel)
-        content, delivery_status = self._record_response(
+        commit = self._record_response(
             request,
             delivery_context,
             str(prepared.get("content") or ""),
             deliver=True,
             delivery_reason="cached_owner_delivery_retry",
+            route_supports_proactive=route_supports_proactive,
             route_supports_transcript=route_supports_transcript,
         )
         wake_handled = _background_owner_delivery_committed(
             request,
-            channel=channel,
             target=target,
             route_supports_proactive=route_supports_proactive,
-            route_supports_transcript=route_supports_transcript,
-            delivery_status=delivery_status,
-            content=content,
+            commit=commit,
         )
         return BackgroundMainAgentReport(
             thread_id=signal.thread_id,
             task_id=signal.root_task_id,
             reason=signal.reason,
-            response=content,
+            response=commit.content,
             route_channel=channel,
             route_target=target,
             created_at=now,
-            delivery_status=delivery_status,
+            delivery_status=commit.delivery_status,
             delivery_reason="cached_owner_delivery_retry",
             wake_handled=wake_handled,
             task_status=_background_task_link_status(self.agent, request, store=self.store),
+            commit_kind=commit.commit_kind,
+            message_id=commit.message_id,
         )
 
     # LLM: GoalRuntimeContext 是唯一采样；返回的显示快照只供 final 持久化，不能注入模型或改变 child phase。
@@ -1103,8 +1167,9 @@ class BackgroundMainAgentRuntime:
             display_snapshot,
         )
 
-    # LLM: 只有已投递或权威本地提交才保存 final 及完整显示快照；旧消息没有快照时不猜测补造过程。
-    # 函数用途: 处理渠道投递并将真实正文和本工作片显示交给唯一会话提交层。
+    # LLM: canonical 记录与外部投递是两条独立事实：正文归属看本地会话能力，外发成功与否只看回执。
+    # 未送达但有外发义务的正文必须冻结在唤醒上重投，不能在无记录的情况下确认唤醒。
+    # 函数用途: 处理渠道投递，并把真实正文和本工作片显示交给唯一会话提交层。
     def _record_response(
         self,
         request: BackgroundRunRequest,
@@ -1117,24 +1182,21 @@ class BackgroundMainAgentRuntime:
         display_snapshot: dict[str, object] | None = None,
         deliver: bool,
         delivery_reason: str,
+        route_supports_proactive: bool | None = None,
         route_supports_transcript: bool | None = None,
-    ) -> tuple[str, str]:
+    ) -> BackgroundDeliveryCommit:
         # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
         # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
         projection = project_user_reply(internal_content)
-        if not deliver:
-            return projection.content, "suppressed"
-        terminal_status = _background_task_link_status(self.agent, request, store=self.store)
-        goal_terminal_delivery = delivery_reason in {
-            "thread_goal_blocked",
-            "thread_goal_budget_limited",
-            "thread_goal_usage_limited",
-        }
-        if (
-            terminal_status in {"abandoned", "cancelled", "interrupted", "superseded"}
-            and not goal_terminal_delivery
+        if _background_reply_suppressed(
+            self,
+            request,
+            delivery_reason=delivery_reason,
+            deliver=deliver,
+            projection_content=projection.content,
+            has_attachments=bool(_channel_attachments(delivery_artifacts)),
         ):
-            return projection.content, "suppressed"
+            return _uncommitted_delivery(projection.content if deliver else "", "suppressed")
         # ReplyEnvelope is a user-content envelope, not an internal protocol carrier.
         # Sending the already projected text also keeps the real DeliveryService from
         # having to distinguish a valid completion signal from other internal signals.
@@ -1144,8 +1206,6 @@ class BackgroundMainAgentRuntime:
             if _audit_finding_report_event(request)
             else _background_evidence_refs(request)
         )
-        if not projection.content.strip() and not attachments:
-            return "", "suppressed"
         envelope = ReplyEnvelope(
             content=projection.content,
             attachments=attachments,
@@ -1161,21 +1221,28 @@ class BackgroundMainAgentRuntime:
         }
         if operation_verification is not None:
             message_metadata["operation_verification"] = operation_verification
-        if _audit_capacity_report_event(request) and not attachments:
-            wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-            wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
-            if wake_signal_id:
-                self.store.cache_pending_wake_delivery(
-                    wake_signal_id,
-                    {
-                        "schema_version": "wake-owner-delivery.v1",
-                        "reason": request.reason,
-                        "task_id": request.task_id,
-                        "content": projection.content,
-                        "evidence_refs": list(evidence_refs),
-                        "created_at": time.time(),
-                    },
-                )
+        wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+        wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
+        transcript_route = bool(
+            supports_transcript_delivery(delivery_context.channel)
+            if route_supports_transcript is None
+            else route_supports_transcript
+        )
+        proactive_route = bool(
+            _channels_support_proactive(self.channels, delivery_context.channel)
+            if route_supports_proactive is None
+            else route_supports_proactive
+        )
+        # canonical thread 只有在它确实是这条答复唯一可能的归属地时才承担记录责任：
+        # 本地权威会话路线，或完全没有外发目标的路线（例如未注册渠道/测试身份）。
+        # 有外发义务的真实 IM 路线保持“不进本地 transcript”，靠下面的冻结重投防丢失。
+        canonical_record = bool(
+            transcript_route
+            or not _background_delivery_obligation(
+                target=delivery_context.target,
+                route_supports_proactive=proactive_route,
+            )
+        )
         receipt = self.channels.deliver(delivery_context, envelope)
         delivery_status = str(getattr(receipt, "delivery_status", "") or "sent")
         # The delivery service owns final user-boundary redaction.  Persist the
@@ -1183,28 +1250,110 @@ class BackgroundMainAgentRuntime:
         # transcript never diverge; simple test/legacy receipts without content
         # retain the already-sanitized projection as a compatibility fallback.
         committed_content = str(getattr(receipt, "content", projection.content) or "")
-        transcript_record = bool(
-            (
-                supports_transcript_delivery(delivery_context.channel)
-                if route_supports_transcript is None
-                else route_supports_transcript
-            )
-            and delivery_status == "not_applicable"
+        outbox_frozen = _freeze_pending_owner_delivery(
+            self.store,
+            _OwnerDeliveryFreeze(
+                request=request,
+                wake_signal_id=wake_signal_id,
+                content=projection.content,
+                evidence_refs=evidence_refs,
+                delivery_status=delivery_status,
+                target=delivery_context.target,
+                proactive_route=proactive_route,
+                has_attachments=bool(attachments),
+            ),
         )
-        _commit_background_response(
+        return _commit_background_response(
             self,
             request,
             delivery_context,
             receipt=receipt,
             delivery_status=delivery_status,
             committed_content=committed_content,
-            transcript_record=transcript_record,
+            canonical_record=canonical_record,
+            transcript_route=transcript_route,
             evidence_refs=evidence_refs,
             message_metadata=message_metadata,
             assistant_commentaries=assistant_commentaries,
             display_snapshot=display_snapshot,
+            outbox_frozen=outbox_frozen,
         )
-        return committed_content, delivery_status
+
+
+# LLM: 冻结判定所需的全部事实；target 必须用已解析的投递目标，不能回读 request.route_target。
+# 类用途: 承载“这条未送达正文是否要冻结在唤醒上”的结构化输入。
+@dataclass(frozen=True)
+class _OwnerDeliveryFreeze:
+    request: BackgroundRunRequest
+    wake_signal_id: str
+    content: str
+    evidence_refs: tuple[str, ...]
+    delivery_status: str
+    target: str
+    proactive_route: bool
+    has_attachments: bool = False
+
+
+# LLM: 未送达正文的冻结是“只重投、不重跑业务”的唯一依据，必须写在这条唤醒本身上；
+# 没有 wake signal id、没有正文、或投递层明确抑制时不冻结。
+# 函数用途: 把有外发义务但未送达的 owner 正文冻结到待处理唤醒上，返回是否已冻结。
+def _freeze_pending_owner_delivery(
+    store: ConversationStore,
+    freeze: _OwnerDeliveryFreeze,
+) -> bool:
+    if freeze.has_attachments or not str(freeze.content or "").strip() or not freeze.wake_signal_id:
+        return False
+    if str(freeze.delivery_status or "").strip().lower() in {"sent", "suppressed"}:
+        return False
+    # 条件与“哪条路线需要外发”一致：有外发义务的路线，或沿用原有语义的审计容量通知。
+    if not (
+        _background_delivery_obligation(
+            target=freeze.target,
+            route_supports_proactive=freeze.proactive_route,
+        )
+        or _audit_capacity_report_event(freeze.request)
+    ):
+        return False
+    store.cache_pending_wake_delivery(
+        freeze.wake_signal_id,
+        {
+            "schema_version": "wake-owner-delivery.v1",
+            "reason": freeze.request.reason,
+            "task_id": freeze.request.task_id,
+            "content": freeze.content,
+            "evidence_refs": list(freeze.evidence_refs),
+            "created_at": time.time(),
+        },
+    )
+    return True
+
+
+# LLM: 投递前的三道抑制判定必须同源：未授权投递、任务已终态、没有可交付正文。它们都表示
+# “这片回复不面向 owner”，因此既不外发也不落 canonical；goal 终态交付是唯一例外。
+# 函数用途: 判断这片后台回复是否在调用投递服务之前就应被抑制。
+def _background_reply_suppressed(
+    runtime: BackgroundMainAgentRuntime,
+    request: BackgroundRunRequest,
+    *,
+    delivery_reason: str,
+    deliver: bool,
+    projection_content: str,
+    has_attachments: bool,
+) -> bool:
+    if not deliver:
+        return True
+    terminal_status = _background_task_link_status(runtime.agent, request, store=runtime.store)
+    goal_terminal_delivery = delivery_reason in {
+        "thread_goal_blocked",
+        "thread_goal_budget_limited",
+        "thread_goal_usage_limited",
+    }
+    if (
+        terminal_status in {"abandoned", "cancelled", "interrupted", "superseded"}
+        and not goal_terminal_delivery
+    ):
+        return True
+    return not str(projection_content or "").strip() and not has_attachments
 
 
 # LLM: 后台按 canonical thread 的模型引用冻结一次配置，再交接 typed turn-end；不重读 owner 选择或改生命周期。
@@ -1483,7 +1632,8 @@ def _is_active_turn_lifecycle_continuation(
 
 
 # LLM: canonical final 保存正文、过程和 host-owned turn-end；commentary 不携带终态，缺失原因不从文字补造。
-# 函数用途: 幂等保存后台回复及长度限制原因；提交成功后才由原工作片 ID 排除旧缓冲，不增加恢复调用。
+# 外发结果只作为 metadata 事实，不参与“要不要给 owner 留下这条回复”的判定。
+# 函数用途: 幂等保存后台回复及长度限制原因，并返回结构化落账结果。
 def _commit_background_response(
     runtime: BackgroundMainAgentRuntime,
     request: BackgroundRunRequest,
@@ -1492,16 +1642,40 @@ def _commit_background_response(
     receipt: object,
     delivery_status: str,
     committed_content: str,
-    transcript_record: bool,
+    canonical_record: bool,
+    transcript_route: bool,
     evidence_refs: tuple[str, ...],
     message_metadata: dict[str, object],
     assistant_commentaries: tuple[str, ...] = (),
     display_snapshot: dict[str, object] | None = None,
-) -> None:
-    """Persist only a provider-committed or authoritative local delivery."""
+    outbox_frozen: bool = False,
+) -> BackgroundDeliveryCommit:
+    """Persist one owner-visible reply, independently of its transport outcome."""
 
-    if delivery_status != "sent" and not transcript_record:
-        return
+    status = str(delivery_status or "").strip().lower()
+    has_body = bool(str(committed_content or "").strip()) or bool(
+        message_metadata.get("delivery_artifacts")
+    )
+    if status == "suppressed":
+        # 投递层判定这是内部协议正文：既不外发，也不能落成用户消息。
+        return BackgroundDeliveryCommit(
+            content=committed_content,
+            delivery_status=status,
+            persisted=False,
+            commit_kind="suppressed",
+            transcript_route=transcript_route,
+            outbox_frozen=outbox_frozen,
+        )
+    if status != "sent" and (not canonical_record or not has_body):
+        # 没有可交付正文，或这条路线既不能外发也没有本地归属：只保留冻结重投事实。
+        return BackgroundDeliveryCommit(
+            content=committed_content,
+            delivery_status=status,
+            persisted=False,
+            commit_kind="outbox_pending" if outbox_frozen else "none",
+            transcript_route=transcript_route,
+            outbox_frozen=outbox_frozen,
+        )
     if display_snapshot:
         message_metadata = {
             **message_metadata,
@@ -1511,28 +1685,14 @@ def _commit_background_response(
 
     end_reason = normalize_turn_end_reason((display_snapshot or {}).get("turn_end_reason"))
     delivery_key = _background_delivery_idempotency_key(request)
-    for index, commentary in enumerate(assistant_commentaries, start=1):
-        text = str(commentary or "").strip()
-        if not text:
-            continue
-        commentary_request = {
-            "thread_id": request.thread_id,
-            "role": "assistant",
-            "content": text,
-            "channel": delivery_context.channel,
-            "metadata": {
-                **message_metadata,
-                "assistant_part_id": f"commentary:{index}",
-                "process": True,
-            },
-        }
-        if delivery_key:
-            runtime.store.append_message_once(
-                commentary_request,
-                dedupe_key=f"owner_delivery:{delivery_key}:commentary:{index}",
-            )
-        else:
-            runtime.store.append_message(commentary_request)
+    _append_owner_commentaries(
+        runtime.store,
+        request,
+        delivery_context,
+        message_metadata=message_metadata,
+        delivery_key=delivery_key,
+        assistant_commentaries=assistant_commentaries,
+    )
     message_request = {
         "thread_id": request.thread_id,
         "role": "assistant",
@@ -1551,17 +1711,63 @@ def _commit_background_response(
         )
     else:
         message_entry = runtime.store.append_message(message_request)
-    if delivery_status == "sent":
+    if status == "sent":
         _record_delivered_audit_refs(runtime.agent, receipt)
-    elif _audit_finding_report_event(request):
+    elif transcript_route and _audit_finding_report_event(request):
         # CLI/Gateway transcript routes have no provider receipt. Their local
         # transcript append is the durable commit and therefore the receipt.
+        # 外发路线失败时绝不能冒领这条回执：审计台账只认真正的本地权威交付面。
         _record_transcript_audit_refs(
             runtime.agent,
             evidence_refs,
             message_entry=message_entry,
             channel=delivery_context.channel,
         )
+    return BackgroundDeliveryCommit(
+        content=committed_content,
+        delivery_status=status,
+        persisted=True,
+        message_id=str(getattr(message_entry, "message_id", "") or ""),
+        commit_kind="external_delivery" if status == "sent" else "canonical_record",
+        transcript_route=transcript_route,
+        outbox_frozen=outbox_frozen,
+    )
+
+
+# LLM: 过程回复与 final 共享同一批 metadata 和同一份投递幂等键；重投时必须逐条去重，
+# 不能因为重放而把 commentary 追加第二遍。
+# 函数用途: 按 typed part 顺序幂等追加一片后台工作的过程回复。
+def _append_owner_commentaries(
+    store: ConversationStore,
+    request: BackgroundRunRequest,
+    delivery_context: DeliveryContext,
+    *,
+    message_metadata: dict[str, object],
+    delivery_key: str,
+    assistant_commentaries: tuple[str, ...],
+) -> None:
+    for index, commentary in enumerate(assistant_commentaries, start=1):
+        text = str(commentary or "").strip()
+        if not text:
+            continue
+        commentary_request = {
+            "thread_id": request.thread_id,
+            "role": "assistant",
+            "content": text,
+            "channel": delivery_context.channel,
+            "metadata": {
+                **message_metadata,
+                "assistant_part_id": f"commentary:{index}",
+                "process": True,
+            },
+        }
+        if delivery_key:
+            store.append_message_once(
+                commentary_request,
+                dedupe_key=f"owner_delivery:{delivery_key}:commentary:{index}",
+            )
+        else:
+            store.append_message(commentary_request)
 
 
 def _background_evidence_refs(
@@ -2003,26 +2209,55 @@ def _terminal_subagent_delivery_decision(
     )
 
 
+# LLM: 一条路线只有在同时具备 proactive 能力和真实目标时才欠用户一次外发。
+# 未注册渠道、测试身份、无 target 的本地路线都不在此列，也不得被当成 IM 通道打开。
+# 函数用途: 判断当前后台路线是否必须真正外发才算完成。
+def _background_delivery_obligation(*, target: str, route_supports_proactive: bool) -> bool:
+    return bool(route_supports_proactive and str(target or "").strip())
+
+
+# LLM: 没有可落账正文时的统一结果：正文只是给上层的投影，persisted 必须为 False。
+# 函数用途: 构造一条未提交的投递结果（内部抑制/空正文/终态任务）。
+def _uncommitted_delivery(content: str, delivery_status: str) -> BackgroundDeliveryCommit:
+    return BackgroundDeliveryCommit(
+        content=str(content or ""),
+        delivery_status=delivery_status,
+        persisted=False,
+        commit_kind=delivery_status if delivery_status == "suppressed" else "none",
+    )
+
+
+# LLM: 唤醒确认是结构化事实判断，不再按事件类型默认放行：只有“外发成功”或“答复已经
+# 落到自己的权威记录且这条路线本来就不欠外发”才算处理完成。既没送达也没记账的唤醒必须
+# 留在队列里，由冻结重投路径补发正文，绝不重新调用模型。
+# 函数用途: 判断一条后台唤醒是否已经真正完成了对 owner 的交付。
 def _background_owner_delivery_committed(
     request: BackgroundRunRequest,
     *,
-    channel: str,
     target: str,
     route_supports_proactive: bool,
-    route_supports_transcript: bool,
-    delivery_status: str,
-    content: str,
+    commit: BackgroundDeliveryCommit,
 ) -> bool:
     """Acknowledge owner-facing wakes only after their real delivery commit."""
 
-    if not _audit_owner_report_event(request):
+    status = str(commit.delivery_status or "").strip().lower()
+    if status == "sent":
         return True
-    status = str(delivery_status or "").strip().lower()
-    if route_supports_transcript:
-        # ``_record_response`` appends this exact model-authored content before
-        # returning ``not_applicable``.  Empty/suppressed drafts never count.
-        return bool(str(content or "").strip()) and status in {"not_applicable", "sent"}
-    return bool(target) and route_supports_proactive and status == "sent"
+    if status == "suppressed":
+        # 投递层显式判定这是内部协议内容：交付义务归零，重投只会得到同样结论。
+        # 审计类唤醒沿用原有更严格判定，避免未上报的发现被静默吞掉。
+        return not _audit_owner_report_event(request)
+    obligation = _background_delivery_obligation(
+        target=target,
+        route_supports_proactive=route_supports_proactive,
+    )
+    if obligation:
+        # 欠 owner 一次真实外发：canonical 记录只是安全网，不能替代送达。
+        return False
+    if commit.persisted:
+        return True
+    # 既没有外发义务，也没有留下任何权威记录：唤醒不能确认，否则答复会静默消失。
+    return False
 
 
 # LLM: 生产与测试投递服务应显式声明 transcript 能力；旧测试替身没有该
@@ -2033,6 +2268,14 @@ def _route_supports_transcript(channels: object, channel: str) -> bool:
     if callable(probe):
         return bool(probe(channel))
     return supports_transcript_delivery(channel)
+
+
+# LLM: 主动外呼能力只认投递服务声明；服务缺失时一律视为不能外发（fail-closed），
+# 绝不因为渠道名字看起来像 IM 就打开一条未注册的外发通道。
+# 函数用途: 读取当前投递边界对某通道的 proactive 外发能力。
+def _channels_support_proactive(channels: object, channel: str) -> bool:
+    probe = getattr(channels, "supports_proactive", None)
+    return bool(probe(channel)) if callable(probe) else False
 
 
 def _matching_goal_status(

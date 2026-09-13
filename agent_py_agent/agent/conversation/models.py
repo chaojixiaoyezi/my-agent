@@ -473,6 +473,27 @@ def _runtime_workspace_roots(value: object) -> tuple[str, ...]:
     return tuple(str(item) for item in items if str(item or "").strip())
 
 
+# LLM: 一次后台答复的权威落账事实。canonical 记录 (persisted) 与外部送达 (delivery_status)
+# 是两条独立事实：外发失败不得抹掉 owner 的会话记录，会话记录也不得冒领外部送达。
+# 唤醒确认、重投和排障只读这里的结构化字段，不得从正文或渠道名反推。
+# 类用途: 记录一条后台回复最终落在哪里，以及下次唤醒是否还需要只重投这份正文。
+@dataclass(frozen=True)
+class BackgroundDeliveryCommit:
+    content: str
+    delivery_status: str
+    # canonical thread 是否留下了这条回复；保证答复可查，但不等于外部送达。
+    persisted: bool
+    # canonical 提交产生的消息 ID；空表示没有本地记录。重投与排障的正文引用。
+    message_id: str = ""
+    # external_delivery(外发成功) / canonical_record(本地权威记录) /
+    # outbox_pending(已冻结待重投) / suppressed(投递层判定为内部协议) / none(无可交付正文)
+    commit_kind: str = "none"
+    # 该路线能否以本地权威会话作为交付面（决定审计回执能否记在 canonical 主体上）。
+    transcript_route: bool = False
+    # 未送达的正文是否已冻结在本条唤醒上，供下次 tick 只重投、不重跑业务。
+    outbox_frozen: bool = False
+
+
 # LLM: One background slice report separates delivery receipt from exact durable task lifecycle;
 # scheduler callers must never equate a model response with completion while task_status is active.
 # 类用途: 汇总后台主代理一片工作的回复、工具统计、投递结果和结构化任务状态。
@@ -500,6 +521,10 @@ class BackgroundMainAgentReport:
     # The exact conversation task link is the scheduler's completion authority. A model slice may
     # return while this remains active because durable child/lifecycle work will continue later.
     task_status: str = ""
+    # 这片回复最终落在哪里(见 BackgroundDeliveryCommit)。日志和排障读这两个字段，
+    # 不再出现“投递状态缺失、正文引用为空”的盲区。
+    commit_kind: str = "none"
+    message_id: str = ""
 
 
 # LLM: One immutable event preserves the model-call summary produced by one

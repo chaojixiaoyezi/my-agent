@@ -1202,10 +1202,12 @@ def test_tui_background_final_is_canonical_history_and_retry_is_idempotent(tmp_p
         delivery_reason="root_subagents_terminal",
     )
 
-    assert first == (second[0], "not_applicable")
-    assert second[1] == "not_applicable"
+    assert first.content == second.content
+    assert first.delivery_status == second.delivery_status == "not_applicable"
+    assert first.commit_kind == "canonical_record" and first.persisted
+    assert second.message_id == first.message_id
     rows = store.recent_messages(thread.thread_id, limit=0)
-    assert [row.content for row in rows] == [first[0]]
+    assert [row.content for row in rows] == [first.content]
     assert rows[0].channel == "tui"
     assert rows[0].metadata["assistant_part_id"] == "final"
     load_errors: list[dict] = []
@@ -1216,7 +1218,7 @@ def test_tui_background_final_is_canonical_history_and_retry_is_idempotent(tmp_p
         load_errors,
     )
     assert load_errors == []
-    assert history == (("assistant", first[0]),)
+    assert history == (("assistant", first.content),)
 
 
 def test_internal_audit_report_commits_source_refs_after_transcript_append(
@@ -1312,8 +1314,11 @@ def test_internal_audit_report_commits_source_refs_after_transcript_append(
         delivery_reason="audit_finding_report",
     )
 
-    assert first == ("发现一项高风险事件。", "not_applicable")
-    assert second == first
+    assert first.content == "发现一项高风险事件。"
+    assert first.delivery_status == "not_applicable"
+    assert first.commit_kind == "canonical_record"
+    assert second.content == first.content
+    assert second.message_id == first.message_id
     messages = store.recent_messages(thread.thread_id, limit=0)
     assert len(messages) == 1
     assert recorded == [
