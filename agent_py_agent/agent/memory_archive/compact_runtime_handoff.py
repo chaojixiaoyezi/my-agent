@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+from ..common.json_io import jsonl_lines
+
 """Runtime handoff facts for compact/resume.
 
 The handoff may point to recent guidance and active child agents, but its
@@ -312,7 +314,8 @@ def _read_json_dict(path: Path) -> dict[str, Any]:
 
 def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(path.read_text(encoding="utf-8"))
     except OSError:
         return []
     return [payload for line in lines if isinstance((payload := _json_line(line)), dict)]

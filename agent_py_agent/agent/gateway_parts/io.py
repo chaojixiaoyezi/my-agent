@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..common.json_io import write_text_file_atomic
+from ..common.json_io import jsonl_lines, write_text_file_atomic
 from ..io import append_jsonl
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .paths import GatewayPaths
@@ -631,7 +631,8 @@ def _gateway_history_snapshot(
         cached = _GATEWAY_HISTORY_CACHE.get(key)
     if cached is not None and cached[0] == stamp:
         return list(cached[1]), dict(cached[2])
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+    lines = jsonl_lines(path.read_text(encoding="utf-8")) if path.exists() else []
     index: dict[str, _GatewayHistoryIndexEntry] = {}
     for line in lines:
         try:

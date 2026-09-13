@@ -18,6 +18,8 @@ import json
 import shutil
 from pathlib import Path
 
+from ..common.json_io import jsonl_lines
+
 # capability/builtin_seed.py -> parents[2] = agent_py_agent
 _BUILTIN_SRC = Path(__file__).resolve().parents[2] / "skills" / "builtin"
 
@@ -75,7 +77,8 @@ def _mirror_builtin(src: Path, shared_builtin_dir: Path) -> None:
 def _count_index_lines(skills_index_jsonl: Path) -> int:
     if not skills_index_jsonl.is_file():
         return 0
-    return sum(1 for line in skills_index_jsonl.read_text(encoding="utf-8").splitlines() if line.strip())
+    # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+    return sum(1 for line in jsonl_lines(skills_index_jsonl.read_text(encoding="utf-8")) if line.strip())
 
 
 def sync_skill_index(

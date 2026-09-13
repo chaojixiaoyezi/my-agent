@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..common.json_io import jsonl_lines
+
 if TYPE_CHECKING:
     from ..settings.config import AgentConfig
 
@@ -69,7 +71,8 @@ def _normalize_query_params(
 
 def _iter_audit_dicts(path: Path):
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
         return
     for line in lines:
@@ -235,7 +238,8 @@ class AuditQuery:
         """Clean up entries older than cutoff_time; return deleted count."""
         deleted_count = 0
         try:
-            lines = self._audit_file.read_text(encoding="utf-8").splitlines()
+            # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+            lines = jsonl_lines(self._audit_file.read_text(encoding="utf-8"))
             kept_lines, deleted_count = _cleanup_audit_lines(lines, cutoff_time)
             temp_file.write_text("\n".join(kept_lines) + ("\n" if kept_lines else ""), encoding="utf-8")
         except OSError:

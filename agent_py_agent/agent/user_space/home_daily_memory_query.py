@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import jsonl_lines
 from ..runtime_errors import runtime_error_report
 from .home_layout import MyAgentHomePaths, home_paths
 
@@ -68,7 +69,8 @@ def _read_daily_file_report(path: Path, request: DailyMemoryQuery) -> DailyMemor
     load_errors: list[dict[str, object]] = []
     date_key = path.stem
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as exc:
         return DailyMemoryRecordsReport([], [_daily_memory_load_error(path, exc, line_no=0)])
     for line_no, line in enumerate(lines, start=1):

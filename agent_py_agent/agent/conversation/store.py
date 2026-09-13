@@ -23,7 +23,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import write_text_file_atomic
+from ..common.json_io import jsonl_lines, read_jsonl_text_lines, write_text_file_atomic
 from ..gateway_parts.daemon_metadata import build_process_identity, process_identity_is_live
 from ..gateway_parts.io import (
     locked_file_transition,
@@ -197,8 +197,10 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def read_jsonl_report(path: Path, *, context: str) -> JsonlReadReport:
+    # 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法 JSON 字符串字符处
+    # 切开一条完整记录，制造假 JSON 错误并把可读账本判成损坏（真实事故见 jsonl_lines 注释）。
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = read_jsonl_text_lines(path)
     except OSError as exc:
         return JsonlReadReport([], [_jsonl_error(exc, context, path=path)])
     rows: list[dict[str, Any]] = []
@@ -240,7 +242,8 @@ def read_jsonl_tail_report(path: Path, *, context: str, limit: int) -> JsonlRead
         data, pos = _read_tail_bytes(path, limit)
     except OSError as exc:
         return JsonlReadReport([], [_jsonl_error(exc, context, path=path)])
-    lines = data.decode("utf-8", errors="replace").splitlines()
+    # 尾部倒读同样只按 LF 切记录；跨块截断的首行仍按下面的既有规则丢弃。
+    lines = list(jsonl_lines(data.decode("utf-8", errors="replace")))
     if pos > 0 and lines:
         lines = lines[1:]
     selected = [line for line in lines if line.strip()][-limit:]
@@ -1833,7 +1836,9 @@ def _sync_task_workspace_summary_status(
         raise ValueError("task workspace summary path cannot use symbolic links")
     summary_path.resolve(strict=False).relative_to(task_root)
     status = str(state.get("status") or "UNKNOWN").strip().upper() or "UNKNOWN"
-    lines = summary_path.read_text(encoding="utf-8").splitlines()
+    # 这个函数会按行重写文件，所以边界必须与写回时用的 "\n" 一致：用 splitlines() 会把
+    # 摘要正文里的 NEL/U+2028 等字符当成换行切开，重写时又被落成 LF——静默改写任务产物。
+    lines = list(jsonl_lines(summary_path.read_text(encoding="utf-8")))
     next_lines: list[str] = []
     status_found = False
     step_found = False

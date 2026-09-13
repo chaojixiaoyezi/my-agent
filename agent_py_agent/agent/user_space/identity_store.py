@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..common.json_io import read_jsonl_objects_report
+from ..common.json_io import jsonl_lines, read_jsonl_objects_report
 from ..common.path_segments import safe_path_segment
 from ..io import append_jsonl
 from .home_layout import MyAgentHomePaths
@@ -190,7 +190,8 @@ def list_canonical_identity_links(home: MyAgentHomePaths, *, canonical_user_id: 
     if not path.exists():
         return []
     links: list[CanonicalIdentityLink] = []
-    for row in path.read_text(encoding="utf-8").splitlines():
+    # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+    for row in jsonl_lines(path.read_text(encoding="utf-8")):
         payload = _json_object(row)
         if not payload:
             continue

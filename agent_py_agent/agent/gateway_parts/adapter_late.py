@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..common.json_io import jsonl_lines
+
 """late gateway responses for file adapter requests."""
 
 import json
@@ -70,7 +72,8 @@ def _iter_late_pending_entries_report(late_path: Path) -> _LatePendingEntriesRep
     raw_unreadable_lines: list[str] = []
     load_errors: list[dict] = []
     try:
-        lines = late_path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(late_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as exc:
         return _LatePendingEntriesReport([], [], [_late_pending_load_error(late_path, exc)])
     for line_number, line in enumerate(lines, start=1):

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import jsonl_lines
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup
 from .tool_output_externalizer import model_visible_tool_parameters
 
@@ -94,7 +95,8 @@ def _read_tool_output_index(workspace: Path) -> list[dict[str, Any]]:
 def _read_tool_output_index_path(path: Path) -> list[dict[str, Any]]:
     return [
         payload
-        for line in path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        for line in jsonl_lines(path.read_text(encoding="utf-8"))
         if (payload := _json_line(line))
     ]
 

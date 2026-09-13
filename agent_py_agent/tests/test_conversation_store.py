@@ -1518,3 +1518,80 @@ def test_unhandled_observations_requiring_main_keeps_order_limit_and_handled_fil
         assert [item.to_dict() for item in store.unhandled_observations_requiring_main(limit=0)] == [
             item.to_dict() for item in events
         ]
+
+
+# LLM: JSONL 记录边界只能是物理 LF。真实事故：子代理 transcript 的 JSON 字符串里带 U+0085(NEL)，
+# splitlines() 把一条完整记录切成两条 → 按 LF 读 0 错误、按 splitlines 读 19 错误，child 被判
+# conversation transcript is unreadable 而整体 FAILED。这里锁住"合法字符不被当边界"和
+# "真正的坏行仍然报错"两侧，防止用过滤字符/吞坏行的方式掩盖。
+# 函数用途: 验证 jsonl_lines 只按 LF 切记录，并保留字符串内的 Unicode 行分隔字符。
+def test_jsonl_lines_only_split_on_physical_lf() -> None:
+    from agent_py_agent.agent.common.json_io import jsonl_lines
+
+    nel = "\u0085"
+    paragraph = "\u2028"
+    line_sep = "\u2029"
+    payload = json.dumps(
+        {"content": f"第一段{nel}第二段{paragraph}第三段{line_sep}第四段"},
+        ensure_ascii=False,
+    )
+    text = payload + "\n" + '{"content": "普通记录"}' + "\n"
+
+    lines = jsonl_lines(text)
+    assert len(lines) == 2
+    assert json.loads(lines[0])["content"] == f"第一段{nel}第二段{paragraph}第三段{line_sep}第四段"
+    assert json.loads(lines[1])["content"] == "普通记录"
+    # 对照：str.splitlines() 会把这一条记录切成 4 条，正是事故成因。
+    assert len(text.splitlines()) > len(lines)
+    assert jsonl_lines("") == ()
+    assert jsonl_lines('{"a": 1}') == ('{"a": 1}',)
+    assert jsonl_lines('{"a": 1}\r\n') == ('{"a": 1}',)
+
+
+# LLM: 会话账本是子代理 transcript 的权威来源；带 Unicode 行分隔字符的正文必须能读回，
+# 且读取报告不能出现 load_errors（load_errors 会让 append_message_once 抛 DataCorruptionError）。
+# 函数用途: 验证带 NEL/U+2028/U+2029 的消息可写可读且不产生损坏报告。
+def test_conversation_jsonl_reader_keeps_unicode_line_separators(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.store import (
+        ConversationStore,
+        read_jsonl_report,
+    )
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({"canonical_user_id": "owner-a"})
+    tricky = "首行\u0085次行\u2028三行\u2029四行"
+    store.append_message(
+        {"thread_id": thread.thread_id, "role": "assistant", "content": tricky}
+    )
+    store.append_message(
+        {"thread_id": thread.thread_id, "role": "assistant", "content": "普通正文"}
+    )
+
+    report = store.recent_messages_report(thread.thread_id, limit=0)
+    rows, load_errors = report
+    assert load_errors == []
+    assert [row.content for row in rows] == [tricky, "普通正文"]
+
+    path = store.messages_dir / f"{thread.thread_id}.jsonl"
+    raw = read_jsonl_report(path, context="guard")
+    assert raw.load_errors == []
+    assert len(raw.rows) == 2
+
+
+# LLM: 真正的截断/非法 JSON 仍然必须报结构化错误：修复只改"记录边界"，不允许变成吞坏行。
+# 函数用途: 验证半行、非法 JSON 与非对象行仍产生 load_errors。
+def test_conversation_jsonl_reader_still_reports_real_corruption(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.store import read_jsonl_report
+
+    path = tmp_path / "broken.jsonl"
+    path.write_text(
+        '{"ok": 1}\n'
+        '{"truncated": \n'
+        'not json at all\n'
+        '[1, 2, 3]\n',
+        encoding="utf-8",
+    )
+    report = read_jsonl_report(path, context="guard-broken")
+    assert [row["ok"] for row in report.rows] == [1]
+    assert len(report.load_errors) == 3
+    assert all(item.get("path") == str(path) for item in report.load_errors)

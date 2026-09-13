@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ...common.json_io import jsonl_lines
+
 """explicit refs-only-to-body reader for externalized tool output artifacts."""
 
 import hashlib
@@ -287,7 +289,8 @@ def _unique_record_by_basename(records: list[dict[str, Any]], filename: str) -> 
 
 def _index_records(index_path: Path) -> list[dict[str, Any]]:
     try:
-        lines = index_path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(index_path.read_text(encoding="utf-8"))
     except OSError:
         return []
     records: list[dict[str, Any]] = []

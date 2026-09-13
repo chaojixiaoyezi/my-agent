@@ -1,5 +1,20 @@
 # Memory Structure
 
+## 2026-09-13 R283 JSONL 记录边界统一为物理 LF（真实事故修复）
+
+**事故**：子代理 transcript 的 JSON 字符串里含 U+0085(NEL)，`path.read_text().splitlines()` 在 NEL
+处把一条完整记录切成两条 → 2026-09-13 三个 child（`subagent-1789309101-d6832a68/-72be5b55/-ec2d50a9`）
+的 `runner_result`/`final_report` 报 `conversation transcript is unreadable`，`append_message_once`
+因 `recent_messages_report` 的 load_errors 抛 `DataCorruptionError`，整个 child 判 FAILED。
+同一批文件按物理 LF 读：175/162/154 条记录、0 错误；按 `splitlines()` 读：190/163/158 行、19/2/5 个 JSON 错误。
+
+**修复边界**：唯一实现 `common/json_io.py::jsonl_lines()`——只按物理 LF 切记录（末尾容忍一个 `\r`），
+保留字符串内的 NEL/U+2028/U+2029/VT/FF/FS 等字符；**不清洗字符、不吞坏行**。真正的半行、截断、
+非法 JSON、非对象行仍然逐条产生结构化 `load_errors`（守卫测试两侧都锁）。所有 JSONL 读取点统一改用它，
+包括会话账本全量/尾部倒读、协作账本、审计账本读取与重写、memory_archive 各分片、gateway history/late/
+http 事件、takeover readiness、CLI resume、identity/daily memory。会按行重写文件的路径（审计清理、
+task workspace 摘要同步）同样改用它，避免"读时切开、写回落成 LF"的静默改写。
+
 ## R264 策展尝试形状的边界
 
 - `curator_model_attempt={...}` 是**诊断投影**，只含计数/耗时/异常类名，权威仍是 `failure_code` 与事务状态；

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ...common.json_io import append_jsonl_records, read_json_object
+from ...common.json_io import append_jsonl_records, jsonl_lines, read_json_object
 
 
 def state_payload(task_id: str, run_id: str, task: Any, now: float) -> dict[str, object]:
@@ -55,7 +55,8 @@ def _last_event_signature(path: Path) -> tuple[object, ...] | None:
     if not path.exists():
         return None
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(path.read_text(encoding="utf-8"))
     except OSError:
         return None
     for line in reversed(lines):

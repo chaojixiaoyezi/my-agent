@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...common.json_io import jsonl_lines
 from ...common.value_parsing import dedupe_strings
 from ...subagents.services.agent_run_state import read_agent_state_payload
 from ...task_progress import progress_path, read_task_progress_report, task_progress_summary
@@ -221,7 +222,8 @@ def _items_from_file(path: Path, json_keys: tuple[str, ...]) -> list[str]:
 
 def _items_from_markdown(path: Path) -> list[str]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(path.read_text(encoding="utf-8"))
     except OSError:
         return []
     return [item for line in lines if (item := _strip_markdown_item(line))]

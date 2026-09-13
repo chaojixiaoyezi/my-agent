@@ -16,6 +16,8 @@ from agent_py_agent.agent.ingestion.source_http import SourceHttpRequest
 from agent_py_agent.agent.ingestion.watch_state import list_states, load_state
 from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
 
+from ..common.json_io import jsonl_lines
+
 
 @dataclass(frozen=True)
 class ContinuousProofPolicy:
@@ -161,7 +163,8 @@ def append_snapshot(path: Path, snapshot: dict[str, Any]) -> None:
 def read_snapshots(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(path.read_text(encoding="utf-8"))
     except OSError:
         return rows
     for line in lines:

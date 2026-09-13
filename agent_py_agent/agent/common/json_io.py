@@ -158,6 +158,29 @@ def write_json_file_atomic_unlocked(path: Path, payload: object, *, sort_keys: b
         _unlink_tmp_file(tmp)
 
 
+# LLM: JSONL 的记录边界只有一个：物理 LF。禁止用 str.splitlines()——它会在
+# U+000B/U+000C/U+001C-U+001E/U+0085(NEL)/U+2028/U+2029 处切开，而这些字符完全可以是
+# 合法 JSON 字符串的内容（真实事故：子代理 transcript 里一个 U+0085 把一条记录切成两条，
+# 按 LF 读 0 个错误、按 splitlines 读 19 个错误，child 被判 conversation transcript is
+# unreadable 而整体 FAILED）。这里只做边界切分，不清洗字符、不吞坏行：真正的半行/截断/
+# 非法 JSON 仍然交给调用方逐条报结构化错误。
+# 函数用途: 按 JSONL 记录边界（物理 LF）切分文本，保留字符串内的 NEL/U+2028/U+2029 等字符。
+def jsonl_lines(text: str) -> tuple[str, ...]:
+    if not text:
+        return ()
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    # 兼容 CRLF 写入方：只在记录末尾去掉一个 \r，绝不把记录内部的字符当边界。
+    return tuple(line[:-1] if line.endswith("\r") else line for line in lines)
+
+
+# LLM: 读 JSONL 文件也必须走同一条边界规则；调用方拿到的是记录列表，不是"文本行"。
+# 函数用途: 读一个 JSONL 文件的记录列表（仅按 LF 切分）。
+def read_jsonl_text_lines(path: Path) -> tuple[str, ...]:
+    return jsonl_lines(path.read_text(encoding="utf-8"))
+
+
 def read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
     """Read JSONL objects, skipping blank or malformed rows."""
 
@@ -172,7 +195,7 @@ def read_jsonl_objects_report(path: Path, *, context: str = "json_io.read_jsonl_
     records: list[dict[str, Any]] = []
     load_errors: list[dict[str, object]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = list(read_jsonl_text_lines(path))
     except (OSError, UnicodeDecodeError) as exc:
         return JsonlObjectsReadReport([], [_jsonl_load_error(path, exc, context, line_no=0)])
     for line_no, line in enumerate(lines, start=1):
@@ -352,7 +375,7 @@ def read_text_lines_cached(path: Path) -> tuple[str, ...]:
         hit = _TEXT_LINES_CACHE.get(key)
         if hit is not None and hit[0] == signature:
             return hit[1]
-    lines = tuple(path.read_text(encoding="utf-8").splitlines())
+    lines = read_jsonl_text_lines(path)
     with _TEXT_LINES_CACHE_GUARD:
         while len(_TEXT_LINES_CACHE) >= _TEXT_LINES_CACHE_MAX:
             _TEXT_LINES_CACHE.pop(next(iter(_TEXT_LINES_CACHE)))

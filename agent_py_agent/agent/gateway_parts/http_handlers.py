@@ -3,6 +3,8 @@
 # 模块用途: 接收 Gateway HTTP 请求并转给正式会话、控制与展示入口，统一返回结构化结果。
 from __future__ import annotations
 
+from ..common.json_io import jsonl_lines
+
 """Endpoint handlers used by the gateway HTTP server.
 
 `POST /ask` is the canonical ingress for both ordinary channel messages and
@@ -342,7 +344,8 @@ def _read_public_progress_events(
     path, since: int, *, channel: str = ""
 ) -> tuple[list[dict[str, object]], int]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError):
         return [], since
     events: list[dict[str, object]] = []

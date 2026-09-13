@@ -15,7 +15,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from ..common.json_io import locked_json_path, write_text_file_atomic_unlocked
+from ..common.json_io import jsonl_lines, locked_json_path, write_text_file_atomic_unlocked
 from .candidate_models import MemoryCandidate, utc_now_iso
 from .security import scan_memory_content
 
@@ -401,7 +401,8 @@ def _read_hot_records(path: Path) -> list[HotRuleRecord]:
     if not path.exists():
         return []
     records: list[HotRuleRecord] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+    for line in jsonl_lines(path.read_text(encoding="utf-8")):
         if not line.startswith(_HOT_META_PREFIX) or not line.endswith(_META_SUFFIX):
             continue
         payload = json.loads(line[len(_HOT_META_PREFIX) : -len(_META_SUFFIX)])

@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+from ...common.json_io import jsonl_lines
+
 """non-destructive memory compact apply records.
 
 Human version:
@@ -604,7 +606,8 @@ def _latest_record_for_plan(path: Path, plan_id: str) -> dict[str, Any]:
 
 def _iter_jsonl_records(path: Path) -> list[dict[str, Any]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(path.read_text(encoding="utf-8"))
     except OSError:
         return []
     records: list[dict[str, Any]] = []

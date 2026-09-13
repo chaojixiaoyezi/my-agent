@@ -1,5 +1,12 @@
 # ROADMAP
 
+## R283 JSONL 记录边界修复（已修，待真机多子代理验收）
+
+子代理 transcript 含 U+0085(NEL) 时被 `splitlines()` 切成假记录 → child 判 transscript unreadable 而 FAILED。
+已改为统一 `jsonl_lines()`（只按物理 LF），覆盖会话/协作/审计/memory_archive/gateway/CLI 全部 JSONL 读取点
+与重写路径；真实三份失败文件只读重放 175/162/154 条、0 错误。待做：.10 真机 TUI 跑一个"含合法行分隔字符的
+多子代理读写任务 + 连续插话"，确认子代理不再因此失败。
+
 ## R279 后台答复落账解耦与结构化路线归属（已修已部署，验收继续）
 
 - 已修：canonical 落账与外部投递解耦（provider 名当渠道不再丢答复）；有外发义务却未送达的**整封 envelope**

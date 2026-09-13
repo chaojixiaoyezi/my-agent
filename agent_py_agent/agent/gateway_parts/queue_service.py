@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..common.json_io import jsonl_lines
+
 if TYPE_CHECKING:
     from agent_py_agent.agent.core import SimpleAgent
 
@@ -129,7 +131,8 @@ def _rebuild_gateway_history_index_report(agent: SimpleAgent, paths: GatewayPath
     if not paths.history.exists():
         return GatewayIndexRebuildReport(count, load_errors)
     try:
-        lines = paths.history.read_text(encoding="utf-8").splitlines()
+        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+        lines = jsonl_lines(paths.history.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as exc:
         return GatewayIndexRebuildReport(
             count,

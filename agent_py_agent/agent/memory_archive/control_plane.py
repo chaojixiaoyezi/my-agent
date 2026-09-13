@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+from ..common.json_io import jsonl_lines
+
 """read-only control-plane queries for runtime memory.
 
 Human version:
@@ -185,7 +187,8 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+    for line_number, line in jsonl_lines(enumerate(path.read_text(encoding="utf-8")), start=1):
         if line.strip():
             rows.append(_decode_line(path, line_number, line))
     return rows

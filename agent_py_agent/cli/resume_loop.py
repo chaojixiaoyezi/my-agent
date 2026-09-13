@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ..agent.agent_core.cli_run_conversation import bind_cli_run_conversation
 from ..agent.agent_core.runtime.loop_models import RunParams
+from ..agent.common.json_io import jsonl_lines
 from ..agent.conversation.closeout import (
     STATE_DONE,
     STATE_RESUME_ROUND,
@@ -658,7 +659,8 @@ def _load_task_facts(agent: object, task_ref: str) -> dict | None:
             # task.yaml 由 workspace 写入器生成, 是简单的 "key: JSON 值" 行格式
             # (项目不依赖第三方 yaml 库, 这里做最小解析)。
             meta: dict = {}
-            for line in task_yaml.read_text(encoding="utf-8").splitlines():
+            # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
+            for line in jsonl_lines(task_yaml.read_text(encoding="utf-8")):
                 line = line.strip()
                 if not line or line.startswith("#") or ":" not in line:
                     continue
