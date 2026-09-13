@@ -1,6 +1,9 @@
 # Memory Structure
 
 ## R257 策展失败账的字段边界
+- `CuratorRunRecord` 的字段集是**严格 v2 契约**：`from_record` 要求键集合与 dataclass 完全一致，
+  因此**绝不允许**为了一时诊断新增字段（会让所有历史行 fail-closed；真机踩过 `CURATOR_RUN_AUDIT_FAILED`）。
+  失败诊断走既有 `warnings`，格式固定为 `failure_diagnostic=` + 紧凑 JSON（sort_keys）。
 
 - `CuratorRunRecord.failure_diagnostic` 是**诊断投影**，不是失败权威：权威仍是 `failure_code` +
   attempt/lease 状态。字段只允许机器可判定形状（异常类名、可选 HTTP 状态码），

@@ -1,6 +1,11 @@
 # Memory Progress
 
 ## 2026-09-12 R257 策展失败账记录可判定形状
+- **回归与更正（同日）**：第一版给 `CuratorRunRecord` 新增 `failure_diagnostic` 字段，触发两处连锁故障，
+  真机把失败记账本身变成 `CURATOR_RUN_AUDIT_FAILED`：① `from_record` 要求存盘键集合与 v2 schema **完全一致**，
+  新增字段让所有历史行校验失败；② 回退字段后 `warnings=(X if cond else ())` 是分组不是元组，传入字符串命中
+  `warnings must be an array`。最终实现：**schema 一字段不加**，诊断以 `failure_diagnostic={json}` 写进既有
+  `warnings`（v2 字段、≤300 字符/≤32 条、可解析）；测试锁定"不得新增字段 + 编码可解析 + 真实 14 行历史分片可追加"。
 
 - 真机故障：占位模型修好后，run 账从 `echo/gpt-4o-mini` 变成真模型（`anthropic_compatible/qwen3.8-flash`），
   但失败码换成 `CURATOR_MODEL_FAILED`。该码是 `_failure_code` 的兜底分支，而供应商异常正文按红线不落盘，
