@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.owner_scoped_pool import ActiveOwnerRegistry
 from agent_py_agent.agent.owner_wake_discovery import (
+    discover_owner_home_page,
     discover_wake_pending_owner_page,
     discover_wake_pending_owners,
     seed_registry_from_disk,
@@ -788,3 +793,250 @@ def test_seed_registry_preserves_hard_owners_when_soft_evicted(tmp_path) -> None
     assert {o.owner_id for o in registry.snapshot()} == {"u-z-hard1", "u-z-hard2"}
     assert registry.hard_snapshot() != []
     assert registry.soft_snapshot() == []
+
+
+# ---------------------------------------------------------------------------
+# 分页目录快照:一次枚举 + 整体排序供相邻页复用(owner 数 > 页大小时,网关的唤醒种入/
+# orphan 发现会在相邻 tick 连跑相邻页,旧实现每页都重扫全部 owner home)。
+# 快照只是查询投影:结构签名或 TTL 一变就重新枚举,owner 事实仍然逐页读盘裁决。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def snapshots():
+    """分页快照是模块级缓存:用例前后都清空,避免跨用例复用影响枚举计数与失效断言。"""
+    from agent_py_agent.agent import owner_wake_discovery as module
+
+    module._OWNER_HOME_SNAPSHOTS.clear()
+    yield module
+    module._OWNER_HOME_SNAPSHOTS.clear()
+
+
+def _count_enumerations(module, monkeypatch) -> dict[str, int]:
+    """统计 _candidate_owner_homes 被完整消费的次数(全量枚举的直接证据)。"""
+    counter = {"calls": 0}
+    original = module._candidate_owner_homes
+
+    def counting(providers_root):
+        counter["calls"] += 1
+        yield from original(providers_root)
+
+    monkeypatch.setattr(module, "_candidate_owner_homes", counting)
+    return counter
+
+
+def _paged_targets(
+    module,
+    owners: Path,
+    *,
+    limit: int,
+    after_cursor=None,
+    max_pages: int = 50,
+) -> list[list[tuple[str, str, str]]]:
+    """按游标链翻到终点,返回每页的 (provider, kind, owner_id) 列表。
+
+    有界循环:游标不前进属于回归,必须显式失败而不是把测试挂死。
+    """
+    pages: list[list[tuple[str, str, str]]] = []
+    cursor = after_cursor
+    for _ in range(max_pages):
+        page = module.discover_owner_home_page(owners, limit=limit, after_cursor=cursor)
+        pages.append(
+            [
+                (target.identity.provider, target.identity.owner_kind, target.identity.owner_id)
+                for target in page.targets
+            ]
+        )
+        cursor = page.next_cursor
+        if cursor is None:
+            return pages
+    raise AssertionError("pagination did not terminate")
+
+
+def test_paged_sweep_enumerates_all_owner_homes_only_once(snapshots, monkeypatch, tmp_path) -> None:
+    """owner 数 > 页大小:整轮 7 页只做一次全量枚举,且每页仍只取自己那段。"""
+    owners = tmp_path / "owners"
+    expected = {f"u{index:03d}" for index in range(200)}
+    for owner_id in expected:
+        _write_policy(_store_root(owners, "feishu", "users", owner_id, "runtime"), "p", enabled=True)
+    counter = _count_enumerations(snapshots, monkeypatch)
+
+    seen: list[str] = []
+    pages = 0
+    cursor = None
+    while True:
+        page = discover_wake_pending_owner_page(owners, limit=32, after_cursor=cursor)
+        seen.extend(owner.owner_id for owner in page.owners)
+        pages += 1
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+
+    assert pages == 7  # 200 / 32
+    assert counter["calls"] == 1
+    assert len(seen) == 200 == len(set(seen))
+    assert set(seen) == expected
+
+    # 紧接着再扫一轮(快照未过期、目录未变)复用同一份枚举:稳态下每轮只枚举一次。
+    assert discover_wake_pending_owner_page(owners, limit=32).owners
+    assert counter["calls"] == 1
+
+
+def test_snapshot_reused_across_pages_keeps_same_page_boundaries(snapshots, tmp_path) -> None:
+    """复用快照不改变分页边界:页大小/游标链产生的页切分与逐页枚举一致。"""
+    owners = tmp_path / "owners"
+    for index in range(5):
+        _owner_home(owners, "feishu", "users", f"u{index}")
+
+    pages = _paged_targets(snapshots, owners, limit=2)
+
+    assert [[owner_id for _, _, owner_id in page] for page in pages] == [
+        ["u0", "u1"],
+        ["u2", "u3"],
+        ["u4"],
+    ]
+
+
+def test_snapshot_invalidated_when_owner_added_mid_sweep(snapshots, monkeypatch, tmp_path) -> None:
+    """分页途中新增 owner:签名变化 → 重新枚举,新 owner 在游标键之后被正常取到。"""
+    owners = tmp_path / "owners"
+    for index in range(6):
+        _owner_home(owners, "feishu", "users", f"u{index}")
+    counter = _count_enumerations(snapshots, monkeypatch)
+
+    first = discover_owner_home_page(owners, limit=2)
+    assert [target.identity.owner_id for target in first.targets] == ["u0", "u1"]
+    bucket_dir = owners / "providers" / "feishu" / "users"
+    signature_before = snapshots._owner_home_signature(owners / "providers")
+
+    _owner_home(owners, "feishu", "users", "u9")  # 键排在游标之后,仍应被本轮发现
+    assert snapshots._owner_home_signature(owners / "providers") != signature_before
+    assert bucket_dir.is_dir()
+
+    rest = _paged_targets(snapshots, owners, limit=2, after_cursor=first.next_cursor)
+    ids = [owner_id for page in rest for _, _, owner_id in page]
+
+    assert ids == ["u2", "u3", "u4", "u5", "u9"]
+    assert len(ids) == len(set(ids))
+    assert counter["calls"] == 2  # 页 1 一次 + 目录变化后重新枚举一次
+
+
+def test_snapshot_invalidated_when_owner_removed_mid_sweep(snapshots, monkeypatch, tmp_path) -> None:
+    """分页途中删除 owner:签名变化 → 重新枚举,已删 owner 不会作为幽灵项返回。"""
+    owners = tmp_path / "owners"
+    for index in range(6):
+        _owner_home(owners, "feishu", "users", f"u{index}")
+    counter = _count_enumerations(snapshots, monkeypatch)
+
+    first = discover_owner_home_page(owners, limit=2)
+    assert [target.identity.owner_id for target in first.targets] == ["u0", "u1"]
+
+    shutil.rmtree(owners / "providers" / "feishu" / "users" / "u3")
+    rest = _paged_targets(snapshots, owners, limit=2, after_cursor=first.next_cursor)
+    ids = [owner_id for page in rest for _, _, owner_id in page]
+
+    assert ids == ["u2", "u4", "u5"]
+    assert "u3" not in ids
+    assert counter["calls"] == 2
+
+
+def test_snapshot_ttl_bound_forces_reenumeration(snapshots, monkeypatch, tmp_path) -> None:
+    """TTL 上界:即使签名不变也不能无限期复用(负 TTL = 立即过期,逐页都必须重新枚举)。"""
+    monkeypatch.setattr(snapshots, "_SNAPSHOT_TTL_SECONDS", -1.0)
+    owners = tmp_path / "owners"
+    for index in range(6):
+        _owner_home(owners, "feishu", "users", f"u{index}")
+    counter = _count_enumerations(snapshots, monkeypatch)
+
+    pages = _paged_targets(snapshots, owners, limit=2)
+
+    assert [owner_id for page in pages for _, _, owner_id in page] == [
+        "u0",
+        "u1",
+        "u2",
+        "u3",
+        "u4",
+        "u5",
+    ]
+    assert counter["calls"] == 3  # 3 页 = 3 次全量枚举:过期即失效
+
+
+def test_owner_home_snapshot_cache_is_bounded(snapshots, tmp_path) -> None:
+    """条目数上界:多套 providers 根也不会让快照缓存无限增长。"""
+    for index in range(snapshots._SNAPSHOT_MAX_ENTRIES + 2):
+        root = tmp_path / f"owners-{index}"
+        _owner_home(root, "feishu", "users", "u0")
+        discover_owner_home_page(root, limit=8)
+
+    assert len(snapshots._OWNER_HOME_SNAPSHOTS) <= snapshots._SNAPSHOT_MAX_ENTRIES
+
+
+def test_single_page_matches_full_enumeration_order(snapshots, monkeypatch, tmp_path) -> None:
+    """owner 数 ≤ 页大小:结果与「直接全量枚举 + 整体排序」逐字一致(零行为变化)。"""
+    owners = tmp_path / "owners"
+    _owner_home(owners, "feishu", "groups", "g1")
+    _owner_home(owners, "feishu", "users", "u1")
+    _owner_home(owners, "qq", "users", "u2")
+    counter = _count_enumerations(snapshots, monkeypatch)
+    expected = [
+        (provider, owner_kind, owner_home.name)
+        for provider, owner_kind, owner_home in sorted(
+            snapshots._candidate_owner_homes(owners / "providers"),
+            key=lambda item: snapshots._owner_cursor(item[0], item[1], item[2].name),
+        )
+    ]
+    assert expected == [
+        ("feishu", "group", "g1"),
+        ("feishu", "user", "u1"),
+        ("qq", "user", "u2"),
+    ]
+
+    first = discover_owner_home_page(owners, limit=64)
+    again = discover_owner_home_page(owners, limit=64)
+
+    for page in (first, again):
+        assert [
+            (target.identity.provider, target.identity.owner_kind, target.identity.owner_id)
+            for target in page.targets
+        ] == expected
+        assert page.next_cursor is None
+        assert page.scanned == 3
+    assert counter["calls"] == 2  # 对照用的一次全量枚举 + 首页冷启动枚举(再次调用走快照)
+
+
+def test_owner_facts_are_read_live_not_cached(snapshots, tmp_path) -> None:
+    """快照只投影目录结构:同一份快照的后续页仍然逐页读盘判事实,不当第二套权威状态。"""
+    owners = tmp_path / "owners"
+    for index in range(4):
+        _owner_home(owners, "feishu", "users", f"u{index}")
+
+    first = discover_wake_pending_owner_page(owners, limit=2)
+    assert first.owners == ()
+
+    _write_policy(_store_root(owners, "feishu", "users", "u2", "runtime"), "p", enabled=True)
+    second = discover_wake_pending_owner_page(owners, limit=2, after_cursor=first.next_cursor)
+
+    assert [owner.owner_id for owner in second.owners] == ["u2"]
+
+
+def test_concurrent_pagination_reads_consistent_pages(snapshots, tmp_path) -> None:
+    """三个调用方在不同线程翻页(网关实况):共享快照不产生异常或缺失项。"""
+    owners = tmp_path / "owners"
+    expected = {f"u{index:03d}" for index in range(60)}
+    for owner_id in expected:
+        _write_policy(_store_root(owners, "feishu", "users", owner_id, "runtime"), "p", enabled=True)
+
+    def sweep() -> set[str]:
+        found: set[str] = set()
+        cursor = None
+        while True:
+            page = discover_wake_pending_owner_page(owners, limit=16, after_cursor=cursor)
+            found.update(owner.owner_id for owner in page.owners)
+            cursor = page.next_cursor
+            if cursor is None:
+                return found
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: sweep(), range(8)))
+
+    assert results == [expected] * 8

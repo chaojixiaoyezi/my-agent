@@ -1,5 +1,15 @@
 # Gateway Structure
 
+## R258 owner 目录快照的边界
+
+- `discover_owner_home_page` 现在读**有界快照**（`_OwnerHomeSnapshot`）：命中条件 = 结构签名一致
+  且未超 `_SNAPSHOT_TTL_SECONDS`(30s)；缓存条目上界 4，进程重启即为空。快照只是查询投影，
+  不得被当作权威 owner 台账；owner 事实（policy/wake/curator/账本）永远逐盘现读，不进快照。
+- 游标是排序键 `(provider, kind, owner_id)`，不是下标：改分页实现时不得把它换成 offset，
+  否则新增/删除 owner 会导致丢项或重复。
+
+# Gateway Structure
+
 ## R256 启动就绪的边界
 
 - `cli/gateway_process.py` 的就绪判据是"**state 或 heartbeat 任一**匹配 PID 且声明 running"，

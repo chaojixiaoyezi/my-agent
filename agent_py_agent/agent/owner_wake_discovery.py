@@ -15,14 +15,23 @@ enabled 的 policy 文件存在 / wake_queue 待处理信号文件存在 / 在�
 后两项是宿主级重启停摆的补口径(真机实锤:重启后重新派发的子代理卡 PENDING 12 分钟
 不恢复、数据源游标冻死——PENDING run 不发 wake 信号,盯守 policy 又可能已被退休,
 只有这两样的 owner 对旧口径完全隐形,永不入表 → 名下 supervision/续派/唤醒全部不跑)。
+
+分页发现不再每页重扫全部 owner home:``discover_owner_home_page`` 读一份有界目录快照
+(一次枚举 + 整体排序,供同一轮分页的相邻页复用),失效口径 = 目录结构签名
+(mtime_ns + inode + 条目数)变化,或复用超过 ``_SNAPSHOT_TTL_SECONDS``。快照只是查询
+投影,不是第二套权威状态:进程重启后缓存为空、首次调用就是一次全新枚举;游标始终是
+排序键(不是下标),owner 增删只会把续页位置对齐到键边界,不会丢项或重复。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
 import time
 from bisect import bisect_right
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +69,15 @@ _CURATOR_FAILURE_BACKOFF_SECONDS = 300
 _PROVIDER_BUCKET_KINDS = {"users": "user", "groups": "group"}
 OwnerWakeCursor = tuple[str, str, str]
 
+# 分页目录快照:一次「枚举 + 整体排序」的结果投影,供同一轮分页的相邻页复用。
+# 两个复用上界都必须成立才算命中——结构签名一致(TTL 内)+ 未超过 TTL。快照不是权威
+# 状态:进程重启后缓存为空,首次调用与「无缓存」逐字一致;条目数上界防止路径种类
+# (多租户/多测试目录)把缓存撑大。
+_SNAPSHOT_TTL_SECONDS = 30.0
+_SNAPSHOT_MAX_ENTRIES = 4
+_OWNER_HOME_SNAPSHOTS: OrderedDict[str, _OwnerHomeSnapshot] = OrderedDict()
+_SNAPSHOT_LOCK = threading.Lock()
+
 
 @dataclass(frozen=True)
 class OwnerHomeDiscoveryTarget:
@@ -90,6 +108,21 @@ class OwnerWakeSeedPage:
     seeded: int
     next_cursor: OwnerWakeCursor | None
     scanned: int
+
+
+@dataclass(frozen=True)
+class _OwnerHomeSnapshot:
+    """providers 根目录的一次枚举投影:已排序候选 + 预计算排序键 + 失效签名。
+
+    LLM: ``candidates`` 与 ``keys`` 必须同序同源(同一份 candidates 派生),分页的
+    bisect 定位只依赖 keys;快照是不可变值对象,复用期间不得原地修改。
+    类用途: 让「取第 N 页」不再重新枚举排序全部 owner home 的只读缓存条目。
+    """
+
+    signature: tuple[Any, ...]
+    created_at: float
+    candidates: tuple[tuple[str, str, Path], ...]
+    keys: tuple[OwnerWakeCursor, ...]
 
 
 def discover_wake_pending_owners(owners_dir: str | Path, *, limit: int = 64) -> list[Any]:
@@ -126,6 +159,14 @@ def discover_wake_pending_owner_page(
     )
 
 
+# LLM: Pagination reads one bounded, invalidatable directory snapshot instead of
+# re-enumerating and re-sorting every owner home per page. The page contract is unchanged:
+# the resume position still comes from bisect_right over the same sort key on the same
+# sorted candidate order, so adding or removing an owner cannot make a page repeat or skip
+# an owner that is still present. Do not add pagination state here — callers own cursors.
+# 函数用途: 取一页 owner home(不判事实),网关的唤醒种入/owner 维护/orphan 三条路径各自
+# 带游标翻页。改动时要同步 cli/gateway_loops.py 的三个调用点与
+# tests/test_owner_wake_discovery.py 的分页/失效用例。
 def discover_owner_home_page(
     owners_dir: str | Path,
     *,
@@ -136,11 +177,9 @@ def discover_owner_home_page(
     providers_root = Path(owners_dir) / "providers"
     if not providers_root.is_dir():
         return OwnerHomeDiscoveryPage((), None, 0)
-    candidates = sorted(
-        _candidate_owner_homes(providers_root),
-        key=lambda item: _owner_cursor(item[0], item[1], item[2].name),
-    )
-    start = _candidate_start(candidates, after_cursor)
+    snapshot = _owner_home_snapshot(providers_root)
+    candidates = snapshot.candidates
+    start = _candidate_start(snapshot.keys, after_cursor)
     scanned = 0
     targets: list[OwnerHomeDiscoveryTarget] = []
     page_size = max(1, limit)
@@ -161,13 +200,92 @@ def discover_owner_home_page(
     return OwnerHomeDiscoveryPage(tuple(targets), next_cursor, scanned)
 
 
+def _owner_home_snapshot(providers_root: Path) -> _OwnerHomeSnapshot:
+    """取 providers 根的有界目录快照:命中即复用,否则重新枚举并整体排序。
+
+    LLM: 失效有两个上界,必须同时成立才复用——① 结构签名(_owner_home_signature)与当前
+    磁盘一致;② 距快照生成不超过 _SNAPSHOT_TTL_SECONDS(monotonic 计时,不受系统改钟影响)。
+    签名在枚举之前计算,因此「枚举期间目录又变了」只会让下次校验失效,不会存下一个比内容
+    更新的签名。多线程安全:目录 I/O 在锁外做,只有缓存读写持锁。
+    函数用途: 让相邻页(网关在 owner 数 > 页大小时相邻 tick 连跑)共享同一次全量枚举排序;
+    缓存条目按 _SNAPSHOT_MAX_ENTRIES 淘汰,不随路径种类无限增长。
+    """
+    cache_key = str(providers_root)
+    now = time.monotonic()
+    signature = _owner_home_signature(providers_root)
+    with _SNAPSHOT_LOCK:
+        cached = _OWNER_HOME_SNAPSHOTS.get(cache_key)
+        if (
+            cached is not None
+            and now - cached.created_at <= _SNAPSHOT_TTL_SECONDS
+            and cached.signature == signature
+        ):
+            _OWNER_HOME_SNAPSHOTS.move_to_end(cache_key)
+            return cached
+    candidates = tuple(
+        sorted(
+            _candidate_owner_homes(providers_root),
+            key=lambda item: _owner_cursor(item[0], item[1], item[2].name),
+        )
+    )
+    snapshot = _OwnerHomeSnapshot(
+        signature=signature,
+        created_at=now,
+        candidates=candidates,
+        keys=tuple(_owner_cursor(provider, kind, home.name) for provider, kind, home in candidates),
+    )
+    with _SNAPSHOT_LOCK:
+        _OWNER_HOME_SNAPSHOTS[cache_key] = snapshot
+        _OWNER_HOME_SNAPSHOTS.move_to_end(cache_key)
+        while len(_OWNER_HOME_SNAPSHOTS) > _SNAPSHOT_MAX_ENTRIES:
+            _OWNER_HOME_SNAPSHOTS.popitem(last=False)
+    return snapshot
+
+
+def _owner_home_signature(providers_root: Path) -> tuple[Any, ...]:
+    """枚举所读目录的结构签名:provider 集合 + 每个 owner bucket 目录的元数据指纹。
+
+    LLM: 与 _candidate_owner_homes 复用同一个 _provider_buckets 迭代器,保证签名覆盖枚举
+    读到的每一个目录(口径漂移会漏失效,改 _candidate_owner_homes 必须同步这里)。只读目录
+    元数据,不逐条目 stat,因此成本与 owner 数近似无关。
+    函数用途: 判断上一轮枚举结果能否继续复用;新增/删除/替换 owner 目录都会改变签名。
+    """
+    entries: list[tuple[str, str, tuple[int, int, int]]] = []
+    for provider_dir, owner_kind, bucket_dir in _provider_buckets(providers_root):
+        entries.append((provider_dir.name, owner_kind, _bucket_signature(bucket_dir)))
+    return tuple(entries)
+
+
+def _bucket_signature(bucket_dir: Path) -> tuple[int, int, int]:
+    """单个 owner bucket 目录的 (mtime_ns, inode, 条目数) 指纹。
+
+    LLM: mtime_ns 覆盖「目录内条目增删改名」,inode 覆盖「整目录被删除后重建」,条目数覆盖
+    时间戳粒度粗的文件系统上同一时刻内的增删。任一维度不可读用 -1 占位:不可读状态自身也
+    是可比签名,恢复可读后指纹必然变化,不会永久误命中。
+    函数用途: 给 _owner_home_signature 提供单目录指纹;不做递归,只有 stat + 一次 listdir。
+    """
+    try:
+        status = bucket_dir.stat()
+    except OSError:
+        return (-1, -1, -1)
+    try:
+        count = len(os.listdir(bucket_dir))
+    except OSError:
+        count = -1
+    return (status.st_mtime_ns, status.st_ino, count)
+
+
+# LLM: The cursor is a sort key, never an index: resuming is "first key strictly greater than
+# the last emitted key" over the same ordered key space, so owner insert/delete can only shift
+# the boundary, never duplicate or skip an owner that is still present. keys and candidates
+# must come from the same snapshot.
+# 函数用途: 在已排序键上定位续页起点;after_cursor 为 None 表示从头开始。
 def _candidate_start(
-    candidates: list[tuple[str, str, Path]],
+    keys: tuple[OwnerWakeCursor, ...],
     after_cursor: OwnerWakeCursor | None,
 ) -> int:
     if after_cursor is None:
         return 0
-    keys = [_owner_cursor(provider, owner_kind, owner_home.name) for provider, owner_kind, owner_home in candidates]
     return bisect_right(keys, after_cursor)
 
 

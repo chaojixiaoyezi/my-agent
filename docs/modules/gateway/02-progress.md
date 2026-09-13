@@ -1,5 +1,22 @@
 # Gateway Progress
 
+## 2026-09-12 R258 owner 发现分页不再每页全量枚举
+
+- 现场（交接文档 GW-03）：`owner_wake_discovery.discover_owner_home_page` 每取一页都
+  `sorted(_candidate_owner_homes(providers_root))` 全量枚举+整体排序，只用其中 `limit` 个；
+  owner 数 > 页大小(64) 时相邻页在相邻 tick（约 1s）连跑，每页各来一次全量枚举。
+- 修法：新增**有界目录快照**（结构签名 = providers 根下 provider 集合 + 每个 owner bucket 的
+  mtime_ns/inode/条目数；外加 30s TTL 与 4 条 LRU 上界）。签名在枚举前取，枚举期间目录变化只会
+  让下次失效；游标仍是排序键（`bisect_right`），新增 owner 在游标前跳过、之后照常取到，删除 owner
+  由签名变化立刻重新枚举。**每页仍逐盘做 owner 事实判定**，缓存只复用目录清单，不构成第二套权威状态。
+- 真机基准（500 个合成 owner home、limit=64、8 页）：枚举量 4000 → 500 条目/轮，
+  一次全量枚举+排序+建键 2.32ms vs 签名检查 0.16ms（≈14×）；同进程交替 A/B 总耗时 0.0661 → 0.0470（1.40×）。
+  正确性：两口径都 seen/unique=500、无丢项无重复。
+- 边界：`_GatewayOwnerMaintenanceController` 的 60s tick > 30s TTL，该路径每页仍重新枚举（其速率下枚举非瓶颈）；
+  剩余耗时主因是每页 64 个目标的 `_owner_fact_kind` 事实判定，本次**有意未缓存**，属另一条待办。
+
+# Gateway Progress
+
 ## 2026-09-12 R256 启动就绪的代际判据与 macOS 出生时间
 
 - 现场（交接文档 GW-01 复核）：`_gateway_ready_for_pid` 只比对 `pid` 数值 + `status == "running"`，
