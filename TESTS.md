@@ -1,5 +1,19 @@
 # TESTS
 
+## 2026-09-13 R276 运行版本按安装文件逐项核对（证据校正）
+
+- 核对对象：`~/.local/share/my-agent/runtime-r261/lib/python3.14/site-packages/agent_py_agent`（Gateway pid 97872 的
+  cwd 指向 `runtime-r261`），构建来源 `file:///tmp/ma-eval/wheels-r261/my_agent-0.3.0-py3-none-any.whl`。
+- 核对结论：**安装包与部署线 `/tmp/ma-eval/deploy-r256`（`eb042d67`）抽查的 9 个关键文件 sha256 全部相同**；
+  已装的部分（TUI 净化 memo / 预览字符预算 / 渲染缓存字节预算、用量协议归一 + 费用读写分档、Goal 去缓存、
+  策展失败诊断与自适应缩批、owner 分页快照、"只承诺不动作→轮内有界续跑一次"）**在运行包里**；
+  未装的部分（统一就绪判据、R1 有序段落交付、waiting 投影 + owner 事实缓存、GW-03 全部、慢模型排队信号、
+  插话三态新增部分）不在包里。
+- 不能按发布名或 Git 祖先推断：同一份包里 `status_rendering.py` 停在 `17a01f9f`、`scheduler/repository.py`
+  停在 `3379c214`，而 `tui_block_renderer.py` 的 sha256 不等于仓库任一提交（只等于部署线），
+  且缺少仓库已有的 `_thinking_preview_text`（展示线 `fb03cec9`）。
+- 每项的三段拆分（已安装 / 待部署 / 真 TUI 未验）见 `DESIGN_LEDGER.md` R274 的验收状态汇总表。
+
 ## 2026-09-13 R275 证据收尾：原编号验收表 + 基准脚本入库
 
 - `DESIGN_LEDGER.md` R274 小节替换为**按最初交接文档原编号**的完整验收表（UI-01..04 / TOK-01..03 /

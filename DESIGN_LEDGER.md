@@ -23,35 +23,53 @@ transcript 尾部，量级在 KB 级。
 `_mutation_scope`（每调度事件一次，锁内 ~21ms）记为**已测量残余**，本轮不改（CAS 读-改-写不适用该模式）。
 其余 40+ 处锁内解析均为小文件，未发现量级影响，记为结论不再扩项。
 
-**验收状态汇总（按最初交接文档的原编号；"待部署"= 代码已在 main、运行版本不含，真机未验）**
+**验收状态汇总（按最初交接文档的原编号；运行版本栏 = 只读核对安装文件的结果，不按发布名或 Git 祖先推断）**
+
+核对方法与结论（本次证据校正）：
+- 运行包路径 `~/.local/share/my-agent/runtime-r261/lib/python3.14/site-packages/agent_py_agent`（Gateway pid 97872 的
+  cwd 指向 `runtime-r261`）；构建来源 `file:///tmp/ma-eval/wheels-r261/my_agent-0.3.0-py3-none-any.whl`。
+- **该安装包与部署线 `/tmp/ma-eval/deploy-r256`（`eb042d67`）逐文件 sha256 相同**（抽查 9 个关键文件全部一致），
+  即运行版本 = 部署线最后几个提交的状态，**既不等于 main，也不等于"全部提交都不在"**。
+- 已安装 = 部署线里存在的等价提交（括号内为 main 上的对应提交）；待部署 = main 有、包内核对无。
+  部署线提交：`3d99fb0f`(=`09b5e12b`)、`3fbf596d`(=`8135b143`)、`09181aa7`(=`39763c03`)、
+  `c221764c`(=`1b3b8db2`)、`3344e2b8`(=`c73f582e`)、`bab0941a`/`ce236af4`(=`006ed31b`/`75292f20`)、
+  `67695dbc`(=`ebb90d0c`)、`13017023`(=`06dd91ca`)、`eb042d67`(=`85a460b7`)。
 
 原有 A/B/C 三线（A=TUI 性能，B=用量/Goal/费用，C=Gateway）：
 
-| 编号 | 问题 | 状态 | 提交 | 受控证据来源 | 运行版本 / 真 TUI |
-|---|---|---|---|---|---|
-| UI-01 | Working 动画刷新遍历+拼接+两次净化全部历史 | **确认已修**（热帧 5.5–5.9×） | `8135b143` | `test_tui_markdown.py`、`test_tui_renderer.py`；进程内微基准（热帧 2000 块 96.16→17.38ms） | r261 不含；真 TUI 待部署 |
-| UI-02 | 巨大单行绕过预览预算 | **确认已修**（1M 单行 494.65→4.88ms / 101×，17,773→171 显示行） | `8135b143` | `test_tui_renderer.py`（`_bounded_render_text` 字符预算） | r261 不含；真 TUI 待部署 |
-| UI-03 | live 渲染版本累积，缓存只限条目不限字节 | **确认已修**（流式缓存 7683 万字符 → 1.04 万） | `8135b143`、`8628bdd1` | `test_tui_renderer.py`（`TuiBlockRenderCache` 字节预算 + 同块新版本即弃旧） | r261 不含；真 TUI 待部署 |
-| UI-04 | 事件批量持锁、高频拼接放大输入延迟 | **证据不足待测**（未测出现场输入延迟/锁等待占比） | 无（未改锁架构） | 交接文档自己也只给"源码风险" | r261 不含；**真 TUI 输入延迟未测** |
-| TOK-01 | Anthropic/OpenAI 输入含义混用，累计处理量错误 | **确认已修**（协议归一 + 历史只读重算） | `1b3b8db2`、`0c834f12` | `test_model_call_ledger.py`（`normalize_usage` 四种口径） | r261 不含；真机账本复核待部署 |
-| TOK-02 | Anthropic 格式 Goal 漏计新写缓存 | **确认已修** | `39763c03` | `test_conversation_goal_tools.py`（`goal_token_usage = max(0, 可见输入 − 已报告缓存读) + 输出`） | r261 不含；真机 Goal 数字待部署 |
-| TOK-03 | 内部费用缺缓存读写分档 | **确认已修** | `1b3b8db2` | `test_model_pricing.py`（`ModelPrice` 读/写分档、未声明即不算、4 段环境变量） | r261 不含；真机费用待部署 |
-| GW-01 | 启动 liveness/readiness 两种判据，可能过早请求或误报失败 | **确认已修**（组合 B/E 先复现误 ready 再修） | `012df819`、`51163568` | `test_gateway_readiness_generation.py`、`test_tui_preflight.py`、`test_gateway_commands.py` | r261 不含；真 TUI 启动/等待超时待部署 |
-| GW-02 | 同根完成通知重复检查、复制任务树、后台候选过滤过晚 | **确认已修**（同根树单轮去重 + waiting 投影 + owner 事实缓存） | `39763c03`、`ce238ac4` | `test_scheduler_scan_costs.py`、`test_scheduler_runtime.py`；真实形状 warm 3.06×/3.80×（owner 事实）、4.7×（waiting 投影） | r261 不含；真 TUI 待部署 |
-| GW-03 | 历史事件、调度记录、owner 发现缺增量化 | **确认已修**（含后续两轮收口与一次缺口修复） | `06dd91ca`、`33cb683b`、`ce238ac4`、`c95cd6ed`、`8c914dbb`、`1aed3c75` | `test_store_scan_indexes.py`、`test_scheduler_scan_costs.py`、`test_owner_wake_discovery.py`；配对基准 `scripts/bench/` | r261 不含；真 TUI 待部署 |
+| 编号 | 问题 | 状态 | 已安装（r261 包内核对） | 待部署（main 有、包内无） | 受控证据来源 | 真 TUI |
+|---|---|---|---|---|---|---|
+| UI-01 | 动画刷新遍历+拼接+两次净化全部历史 | **确认已修** | **已装**：包内 `tui_markdown.py` 有净化 memo（`3fbf596d`/`8135b143`） | 无 | `test_tui_markdown.py`、`test_tui_renderer.py` | **未验** |
+| UI-02 | 巨大单行绕过预览预算 | **确认已修** | **已装**：包内 `tui_block_renderer.py` 有 `_ASSISTANT_RENDER_MAX_CHARS=10000`/`DETAIL=40000` 与 `_bounded_render_text(max_chars)` | 无 | `test_tui_renderer.py` | **未验** |
+| UI-03 | 渲染版本累积、缓存不限字节 | **确认已修** | **已装**：包内有 `_drop_entry`/`_rendered_char_count` 字节预算与同块弃旧 | 无 | `test_tui_renderer.py` | **未验** |
+| UI-04 | 事件批量持锁/输入延迟 | **证据不足待测** | 未改（包与 main 一致地没有改动锁架构） | 无（也不需要新增语义） | 交接文档自身只给"源码风险" | **输入延迟从未量化** |
+| TOK-01 | 输入含义混用、累计处理量错误 | **确认已修** | **已装**：包内 `usage.py` 有 `normalize_usage`（`c221764c`/`1b3b8db2`） | 无 | `test_model_call_ledger.py` | **未验** |
+| TOK-02 | Goal 漏计新写缓存 | **确认已修** | **已装**：包内 `goal_token_usage` 去缓存命中口径（`09181aa7`/`39763c03`） | 无 | `test_conversation_goal_tools.py` | **未验** |
+| TOK-03 | 费用缺缓存读写分档 | **确认已修** | **已装**：包内 `model_pricing.py` 有 `cost_usd_breakdown` 读写分档 | 无 | `test_model_pricing.py` | **未验** |
+| GW-01 | 启动 liveness/readiness 两种判据 | **确认已修（源码层）** | **部分已装**：包内有启动代际/pid 判据（`c221764c` 的 `gateway_process.py`/`daemon_metadata.py` 部分）；**无**统一判据 `gateway_readiness`/`_record_precedence` | `012df819`、`51163568`（统一判据 + 心跳代际） | `test_gateway_readiness_generation.py`、`test_tui_preflight.py` | **未验** |
+| GW-02 | 同根重复检查/复制任务树/候选过滤过晚 | **确认已修** | **部分已装**：owner 分页有界快照已装（`13017023`/`06dd91ca`）；**无** waiting 投影缓存与 owner 事实缓存 | `ce238ac4` | `test_owner_wake_discovery.py`、`test_scheduler_scan_costs.py`、`test_scheduler_runtime.py` | **未验** |
+| GW-03 | 历史/调度/owner 发现缺增量化 | **确认已修** | **未装**：包内 `conversation/store.py` 无任何读取侧索引，`scheduler/repository.py` 仍是 `3379c214` 版（无 waiting 投影、无只读快照） | `33cb683b`、`c95cd6ed`、`8c914dbb`、`1aed3c75` | `test_store_scan_indexes.py`、`test_scheduler_scan_costs.py`、`scripts/bench/` | **未验** |
 
-后续新增的四条线：
+后续新增四条线：
 
-| 编号 | 问题 | 状态 | 提交 | 受控证据来源 | 运行版本 / 真 TUI |
-|---|---|---|---|---|---|
-| R1 | 超时恢复的终答交付（撤长度启发式，改有序段落全保留 + 归属绑定） | **已修，监督复核未签字**（页面明确"不能只凭提交名验收"） | `5d181f24`（前身 `718d7a27` 已判不合格）、`ebb90d0c`、`3434898d` | `test_timeout_recovery_delivery.py`(8)、`test_provider_timeout_*.py` | r261 不含；**真 TUI 两枪形态待部署** |
-| 策展写账与真实成功 | 失败账形状可判定 + 诊断走既有字段（修回审计回归） | **写账已修；真实成功未达成**（`last_success_at` 仍 2026-09-09） | `006ed31b`、`75292f20`、`c73f582e`、`11297c56`、`f84a2e28`、`717d6b35` | `test_curator_timeout_observability.py`、`test_curator_timeout_adaptive.py`、`test_memory_migration_v2.py`；只读槽位时间线（`total_slots=1`） | r261 已含诊断；**成功轮需用户先定端点策略** |
-| 慢模型长期工作 | 推进中的请求不被固定总时限/lease/watchdog 误杀 | **已修 + 受控验证** | `73d1b38a`、`7752adf5`、`403c85bf`、`79c08473` | `test_slow_model_liveness.py`(11)、`test_gateway_admission_wait.py`(20) | r261 不含；**真机慢首包/慢流/长工具待部署** |
-| 插话（排队/已提交/已确认） | 模型已引用插话而界面仍写"稍后送入"；已确认被迟到事件降级 | **已修 + 受控验证** | `1bd057f1`、`7752adf5` | `test_tui_injected_input_states.py`(17)、`test_gateway_foreground_transcript.py` | r261 不含；**真 TUI 三态/重连/失败待部署** |
+| 编号 | 问题 | 状态 | 已安装（r261 包内核对） | 待部署 | 受控证据来源 | 真 TUI |
+|---|---|---|---|---|---|---|
+| R1 | 超时恢复的终答交付 | **源码层已改，真实 TUI 未签字** | **部分已装**：包内已有"只承诺不动作 → 轮内有界续跑一次"（`67695dbc`/`ebb90d0c`） | `5d181f24`（撤长度启发式、改有序段落 + final_prompt 传播）、`3434898d` | `test_timeout_recovery_delivery.py`(8)、`test_provider_timeout_continuation.py` | **未验**（监督已读源码 diff，不等于 TUI 验收签字） |
+| 策展写账与真实成功 | 失败账形状 + 诊断走既有字段 | **写账已装；真实成功未达成**（`last_success_at` 仍 2026-09-09） | **已装**：包内 `curator.py` 有 `failure_diagnostic`，`curator_backend.py` 有自适应缩批 | `11297c56`、`f84a2e28`（尝试形状可观测、根因收窄） | `test_curator_timeout_adaptive.py`、`test_curator_timeout_observability.py`、`docs/audits/R264_CURATOR_ENDPOINT_CONTENTION.md` | 现场只读观测已做；**成功轮未达** |
+| 慢模型长期工作 | 推进中的请求不被固定时限误杀 | **已修 + 受控验证** | **未装**：包内 `request_worker.py` 无 `admission_wait`/`try_acquire_report` | `73d1b38a`、`7752adf5`、`403c85bf`、`79c08473` | `test_slow_model_liveness.py`(11)、`test_gateway_admission_wait.py`(20) | **未验** |
+| 插话（排队/已提交/已确认） | 模型已引用插话而界面写"稍后送入" | **已修 + 受控验证** | **部分已装**：包内 `guidance.py` 有既有 `mark_injected_turn_input_submitted`/`acknowledge_injected_turn_input`、TUI 有 `steer_promoted`；**无** sink 的 `submit_active_turn_input`、`steer_submitted`/`steer_confirmed`/`_confirmed_steer_ids` | `1bd057f1`、`7752adf5` | `test_tui_injected_input_states.py`(17)、`test_gateway_foreground_transcript.py` | **未验** |
 
-证据边界（不冒称）：以上"确认已修"只覆盖**代码 + 受控测试/纯内存基准**；凡是标"待部署"的都没有真实 TUI 证据，
-也没有在运行版本上出现过。UI-04 与冷帧 Markdown 排版瓶颈是**未解项**（需另行批准做"散文跳读"探针）。
-运行版本：当前部署 `runtime-r261`，Gateway pid 97872（未重启）；以上提交均**不在**运行版本内。
+**另需记住的两条核对事实**（不能拿发布名或 Git 祖先推断）：
+
+1. 包内 `cli/chat_parts/tui_block_renderer.py` 的 sha256 **不等于仓库任一提交**的该文件，只与部署线 `eb042d67` 相同：
+   它含 UI-02/UI-03 的字符/字节预算，但**没有**仓库已有的 `_thinking_preview_text`（来自展示线 `fb03cec9`）。
+   即"部分修复在包里"与"展示线的后续改进不在包里"同时成立。
+2. 包内 `agent/gateway_parts/status_rendering.py` 停留在 `17a01f9f`（2026-09-09），`agent/scheduler/repository.py`
+   停留在 `3379c214`（2026-08-30）——**同一份运行包里不同文件的版本跨度很大**，逐项核对只能按文件做。
+
+证据边界：以上"确认已修"只覆盖**代码 + 受控测试/纯内存基准**；UI-04 输入延迟与冷帧 Markdown 排版是**未解/未量化项**，
+两者不要混为一谈（前者是测量缺失，后者是要改排版语义才能动的问题）。
+运行版本：当前部署 `runtime-r261`，Gateway pid 97872（未重启）。**不要用一句话概括包内包含哪些修复**：已按安装文件逐项核对，见上表"已安装/待部署"两栏；构建来源是 `/tmp/ma-eval/wheels-r261` 的 wheel，与部署线 `eb042d67` 逐文件一致，与 main 则相差多个提交。
 待用户决定：部署授权与构建来源、策展模型与端点策略、部署后的真 TUI 验收清单。
 
 ## 2026-09-13 R273 更正：撤掉排队等待总预算；A 项改为"先判定后签名"的顺序（含配对实测）【状态：已修+受控验收，未部署】
