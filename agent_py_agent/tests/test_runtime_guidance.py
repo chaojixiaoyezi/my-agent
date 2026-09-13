@@ -38,7 +38,6 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
     _delegated_work_facts,
     completion_response_after_tool_round,
     queue_interim_reply_for_active_named_work,
-    queue_interim_reply_for_open_subagents,
     queue_reply_for_audit_prepare,
 )
 from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
@@ -1800,8 +1799,7 @@ def test_open_subagents_queue_interim_reply_without_reading_model_prose() -> Non
         ),
     )
 
-    # 契约变更（R279 复审）：不再排队"subagents_active"回执；活跃子代理只在 agent tree 展示。
-    assert queue_interim_reply_for_open_subagents(agent, params, tool_rounds=4) is False
+    # 契约变更（R279 复审）：宿主回执入口已删除，活跃子代理只在 agent tree/child 面板展示。
     assert pending_natural_user_reply(params) is None
     assert _delegated_work_facts(agent, params) == {
         "schema": "delegated_work.v2",
@@ -1873,7 +1871,6 @@ def test_open_subagents_receipt_exposes_flattened_topology_instead_of_inventing_
         subagents=SimpleNamespace(list_runs=lambda: runs),
     )
 
-    assert queue_interim_reply_for_open_subagents(agent, params, tool_rounds=2) is False
     assert pending_natural_user_reply(params) is None
 
     topology = _delegated_work_facts(agent, params)["topology"]
@@ -2615,9 +2612,7 @@ def test_sticky_background_task_does_not_replace_unrelated_chat_reply() -> None:
         ),
     )
 
-    queued = queue_interim_reply_for_open_subagents(agent, params, tool_rounds=0)
-
-    assert queued is False
+    # 宿主回执入口已删除：这里只能断言"没有任何宿主排队的用户回复"。
     assert pending_natural_user_reply(params) is None
 
 
@@ -2639,11 +2634,46 @@ def test_active_turn_keeps_its_bound_subagent_interim_reply() -> None:
         ),
     )
 
-    queued = queue_interim_reply_for_open_subagents(agent, params, tool_rounds=1)
-
-    assert queued is False
     assert pending_natural_user_reply(params) is None
     assert _delegated_work_facts(agent, params)["status_counts"] == {"RUNNING": 1}
+
+
+# LLM: 主/子递归同规则：task_local 父级在直属孩子仍活跃时，保留模型真实正文与真实 turn-end，
+# 只写 direct_child_wait 依赖事实；不改写为 interrupted，也不取消仍在跑的孩子。
+# 函数用途: 验证递归父级的等待不改写模型正文/终态，且等待 marker 仍被写入。
+def test_task_local_wait_keeps_model_reply_and_turn_end(monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core.tool_loop.completion import (
+        task_local_wait_response_for_open_subagents,
+    )
+
+    params = _tool_loop_params(
+        context_scope="task_local",
+        root_user_prompt="父级子代理内部任务",
+        executed_tools=["create_subagents"],
+    )
+    marked: list[str] = []
+    monkeypatch.setattr(
+        "agent_py_agent.agent.subagents.direct_parent_lifecycle.mark_parent_waiting_for_direct_children",
+        lambda _manager, parent_id: marked.append(str(parent_id)) or ["child-1"],
+    )
+    agent = SimpleNamespace(
+        backend=SimpleNamespace(name="unit"),
+        subagents=SimpleNamespace(),
+    )
+    model_reply = ModelResponse(
+        text="父级本轮已产出可交付正文。",
+        backend="unit",
+        turn_end_reason="completed",
+    )
+
+    waited = task_local_wait_response_for_open_subagents(agent, params, response=model_reply)
+
+    assert waited is not None
+    assert waited.text == "父级本轮已产出可交付正文。", "模型真实正文不得被改写"
+    assert waited.turn_end_reason == "completed", "模型真实 turn-end 不得被改成 interrupted"
+    assert waited.runtime_status == "unfinished"
+    assert waited.runtime_reason == "SUBAGENTS_ACTIVE"
+    assert marked, "等待必须落成 direct_child_wait 依赖事实"
 
 
 def test_task_local_subagent_never_enters_parent_user_reply_phase() -> None:
@@ -2659,9 +2689,6 @@ def test_task_local_subagent_never_enters_parent_user_reply_phase() -> None:
         ),
     )
 
-    queued = queue_interim_reply_for_open_subagents(agent, params, tool_rounds=1)
-
-    assert queued is False
     assert pending_natural_user_reply(params) is None
 
 

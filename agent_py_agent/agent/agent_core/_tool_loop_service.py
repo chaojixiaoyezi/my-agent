@@ -95,7 +95,6 @@ from .tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
     queue_interim_reply_for_active_named_work,
-    queue_interim_reply_for_open_subagents,
     queue_interim_reply_for_tool_round_limit,
     queue_reply_for_audit_prepare,
     task_local_wait_response_for_open_subagents,
@@ -1534,9 +1533,9 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             ):
                 final_response = wait_response
                 break
-            # 子代理仍活跃只是状态/展示事实（agent tree/child 面板已在展示），
-            # 不得替换模型自己写的正文、也不得把一轮正常答复改写成宿主回执后继续空转。
-            # 后续工作由明确的子代理生命周期事件唤醒（会话运行时 的 wait_agent 同样由模型显式调用）。
+            # 子代理仍活跃只是状态/展示事实（agent tree/child 面板已在展示）：既不替换模型正文，
+            # 也不改写 turn-end。task_local 的等待由 completion.py 的 direct_child_wait marker
+            # + 子代理生命周期事件负责；主/子递归同规则。
             if queue_interim_reply_for_active_named_work(
                 service._agent,
                 params,

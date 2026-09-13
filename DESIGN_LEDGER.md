@@ -1,5 +1,21 @@
 # DESIGN LEDGER
 
+## 2026-09-13 R285 后台历史种子三态 + 任务范围 + 递归等待对称
+
+1. **读不到历史不再静默降级**：`_background_conversation_history_seed` 返回三态
+   （`ready` / `unreadable` / `disabled`），异常与 load_errors 都带结构化错误；
+   `_background_history_seed_or_raise` 对 `unreadable` 抛 `BackgroundHistoryUnavailableError`
+   （error_code `BACKGROUND_HISTORY_UNAVAILABLE`，带 load_errors/detail）→ 本片失败、唤醒不确认、可重试。
+   以前 `except Exception: return None` 会让调用方 `include_recent_messages=True` 退回有界摘要继续跑模型，
+   把"历史读取失败"伪装成"上下文骤降"。
+2. **复用既有结构化任务范围**：种子的行选择改为先取 `_context_bundle` 的任务范围投影
+   （detached named task 的创建锚点 + 精确 lineage），再按 `message_id` 过滤未压缩行；
+   范围为空即合法空历史。此前直接吞全 thread 未压缩行会把创建锚点之后、属于别的任务的消息带进
+   detached 工作。投影只走历史两步（行选择 + provider 消息），不牵入 recent_artifacts。
+3. **递归等待与 root 对称**：`task_local_wait_response_for_open_subagents` 保留模型真实正文与真实
+   turn-end（不再强制 `interrupted`），等待只作为 `direct_child_wait` 依赖事实 + `SUBAGENTS_ACTIVE`
+   状态；删除已无用的 `queue_interim_reply_for_open_subagents` 空壳入口、导出与旧注释，不再维持两套语义。
+
 ## 2026-09-13 R284 后台续接 + 等待语义 + 终态静默 + Goal 唯一性【状态：已修+守卫测试】
 
 - **后台续接（同一权威）**：后台工作片以前不带 `conversation_history_seed`，`_native_provider_history_messages(seed=None)`

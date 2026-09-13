@@ -737,3 +737,118 @@ def test_legacy_v1_frozen_payload_still_redelivers(tmp_path) -> None:
         "老版本冻结的正文。"
     ]
     assert BackgroundRunRequest is not None
+
+
+# ---------------------------------------------------------------------------
+# R285：后台历史种子三态（可读/确实为空/读不到）+ detached 任务范围
+# ---------------------------------------------------------------------------
+
+
+def _seed_agent(tmp_path, *, thread_channel: str = "tui"):
+    from agent_py_agent.agent.conversation import runtime as runtime_module
+
+    agent, _backend = _agent(tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-seed",
+            "channel": thread_channel,
+            "channel_conversation_id": "session-seed",
+            "channel_user_id": "owner-seed",
+        }
+    )
+    return runtime_module, agent, store, thread
+
+
+def test_background_history_seed_distinguishes_empty_from_unreadable(tmp_path, monkeypatch) -> None:
+    """读不到历史必须是 typed 失败：不得静默退回有界摘要继续调用模型。"""
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+
+    runtime_module, agent, store, thread = _seed_agent(tmp_path)
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id="task-seed",
+        reason="scheduled_progress_report",
+    )
+
+    # ① 正常空历史：合法空，不报错。
+    empty = runtime_module._background_conversation_history_seed(agent, store, thread, request)
+    assert empty.status == "ready"
+    assert empty.seed is not None and empty.seed.messages == ()
+
+    # ② 真实读取失败（OSError 注入）：unreadable + load_errors 保留。
+    def boom(_thread):
+        raise OSError("disk read failed")
+
+    monkeypatch.setattr(store, "messages_after_compact_report", boom, raising=False)
+    unreadable = runtime_module._background_conversation_history_seed(agent, store, thread, request)
+    assert unreadable.status == "unreadable"
+    assert unreadable.seed is None
+    assert unreadable.load_errors, "读取失败必须带结构化 load_errors"
+    monkeypatch.undo()
+
+    # ③ 坏 JSON 行：load_errors 非空 → 同样按 unreadable 处理，不静默降级。
+    messages_dir = store.messages_dir
+    messages_dir.mkdir(parents=True, exist_ok=True)
+    (messages_dir / f"{thread.thread_id}.jsonl").write_text(
+        '{"role": "user", "content": "ok"}\n{"role": "user", "content": \n',
+        encoding="utf-8",
+    )
+    broken = runtime_module._background_conversation_history_seed(agent, store, thread, request)
+    assert broken.status == "unreadable"
+    assert broken.load_errors
+
+
+def test_background_history_seed_keeps_detached_named_task_scope(tmp_path) -> None:
+    """detached named task 不得吞入创建锚点之后属于别任务的消息（复用既有结构化范围）。"""
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+
+    runtime_module, agent, store, thread = _seed_agent(tmp_path)
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "创建前的普通聊天",
+            "channel": "tui",
+            "metadata": {"conversation_request_id": "chat-before"},
+            "now": 50.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-A",
+            "goal": "持续整理某来源",
+            "status": "active",
+            "work_kind": "goal",
+            "work_name": "saved-A",
+            "cancellation_scope": "detached",
+            "now": 100.0,
+        }
+    )
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "FUTURE_UNRELATED_TASK_B",
+            "channel": "tui",
+            "metadata": {"conversation_task_id": "task-B", "conversation_request_id": "chat-b"},
+            "now": 200.0,
+        }
+    )
+
+    result = runtime_module._background_conversation_history_seed(
+        agent,
+        store,
+        thread,
+        BackgroundRunRequest(thread_id=thread.thread_id, task_id="task-A", reason="scheduled_progress_report"),
+    )
+
+    assert result.status == "ready", result.detail
+    assert result.seed is not None
+    rendered = json.dumps(
+        {"messages": list(result.seed.messages), "canonical": list(result.seed.canonical_messages)},
+        ensure_ascii=False,
+    )
+    assert "FUTURE_UNRELATED_TASK_B" not in rendered, "detached 工作不得吞入后续别任务的消息"
+    assert "创建前的普通聊天" in rendered, "创建锚点之前的历史必须保留"

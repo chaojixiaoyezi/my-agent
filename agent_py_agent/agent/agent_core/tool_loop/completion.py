@@ -119,13 +119,16 @@ def task_local_wait_response_for_open_subagents(
         or getattr(getattr(agent, "backend", None), "name", "")
         or "tool_loop"
     )
+    # 保留模型真实正文与真实 turn-end：等待是"依赖事实"（上面已写 direct_child_wait marker），
+    # 不是把一轮正常答复改写成 interrupted 的理由。runtime_status=unfinished 表示本片没结束工作，
+    # turn_end_reason 沿用模型自己的结束原因（缺失时留空，由上层归一）。
     return ModelResponse(
         text=str(getattr(response, "text", "") or ""),
         backend=backend,
         runtime_status="unfinished",
         runtime_reason="SUBAGENTS_ACTIVE",
         runtime_source="subagent_lifecycle",
-        turn_end_reason="interrupted",
+        turn_end_reason=str(getattr(response, "turn_end_reason", "") or ""),
     )
 
 
@@ -154,21 +157,6 @@ def _context_refresh_transition_response(
         runtime_source="tool_loop",
         turn_end_reason="max-tokens",
     )
-
-
-# LLM: 子代理仍活跃是状态/展示事实，不是"替换模型正文"的理由。历史上这里会在模型想收口时
-# 用宿主回执改写用户可见回复并继续采样，导致用户看不到模型真实终答、主代理表现为"偏等子代理"。
-# 现在只保留结构化事实：活跃子代理由 agent tree/child 面板展示，后续工作由明确的子代理生命周期
-# 事件唤醒。禁止恢复"用宿主回执替换模型正文"，也禁止加强制忙碌 prompt 或无用派工。
-# 函数用途: 保留旧入口但恒不介入收口；活跃子代理不再改写任何模型回复。
-def queue_interim_reply_for_open_subagents(
-    agent: object,
-    params: ToolLoopExecuteParams,
-    *,
-    tool_rounds: int,
-) -> bool:
-    del agent, params, tool_rounds
-    return False
 
 
 # LLM: A named Audit turn may end its current model call while its typed duration or durable
@@ -771,7 +759,6 @@ __all__ = [
     "ToolRoundCompletionRequest",
     "completion_response_after_tool_round",
     "queue_interim_reply_for_active_named_work",
-    "queue_interim_reply_for_open_subagents",
     "queue_interim_reply_for_tool_round_limit",
     "queue_reply_for_audit_prepare",
     "task_local_wait_response_for_open_subagents",

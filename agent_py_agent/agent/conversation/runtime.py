@@ -23,7 +23,7 @@ from ..contracts.subagent_completion import (
     DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
     subagent_completion_context_from_observations,
 )
-from ..runtime_errors import compact_error_message
+from ..runtime_errors import compact_error_message, runtime_error_report
 from ..settings.config import DEFAULT_EXECUTION_PERSISTENCE
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.role_templates import active_model_subagent_tools
@@ -1584,11 +1584,12 @@ def _run_background_main_turn_with_compact(
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] = []
     for _attempt in range(8):
-        history_seed = _background_conversation_history_seed(
+        history_seed = _background_history_seed_or_raise(
             runtime.agent,
             runtime.store,
             current,
             request,
+            proactive_delivery_available=proactive_delivery_available,
         )
         run_params = _run_params(
             current.thread_id,
@@ -3025,55 +3026,176 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
 # LLM: 后台轮的 run_id 必须优先绑定明确 task_id；线程级兜底身份只能用于无任务事件，
 # 否则同一 thread 的后续任务会误复用上一任务的 AgentRun 权威链。
 # 函数用途: 把一次后台唤醒转换成主代理运行参数，并保留任务、工具和投递边界。
+# LLM: 解析种子并把"历史读不到"升级成 typed 错误：读不到时不许退回有界摘要继续跑模型，
+# 那会把"读取失败"伪装成"上下文骤降"，让模型在缺历史时作答。抛错 → 本片失败、唤醒不确认、可重试。
+# 函数用途: 取得本片可用的历史种子，或抛出 BackgroundHistoryUnavailableError。
+def _background_history_seed_or_raise(
+    agent: object,
+    store: ConversationStore | None,
+    thread: ConversationThread | None,
+    request: BackgroundRunRequest,
+    *,
+    proactive_delivery_available: bool | None = None,
+) -> object | None:
+    result = _background_conversation_history_seed(
+        agent,
+        store,
+        thread,
+        request,
+        _tool_policy_request(
+            agent,
+            request,
+            proactive_delivery_available=proactive_delivery_available,
+        ),
+    )
+    if result.status == "unreadable":
+        raise BackgroundHistoryUnavailableError(
+            "background conversation history is unreadable",
+            load_errors=list(result.load_errors),
+            detail=result.detail,
+        )
+    return result.seed
+
+
+# LLM: 后台历史不可读是可恢复的运行事实，不是"空历史"。抛这个 typed 错误让上层：
+# ① 不确认唤醒（保留 pending，可重试）；② 把 load_errors 写进失败诊断；③ 绝不带缺失历史继续调用模型。
+# 类用途: 表示后台工作片所需的会话历史读取/解析失败。
+class BackgroundHistoryUnavailableError(RuntimeError):
+    # LLM: 错误码与结构化 load_errors 必须可被上层读取，禁止只留一句自然语言。
+    # 函数用途: 构造一个带 load_errors 与细节的后台历史不可用错误。
+    def __init__(
+        self,
+        message: str,
+        *,
+        load_errors: list[dict[str, Any]] | None = None,
+        detail: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.error_code = "BACKGROUND_HISTORY_UNAVAILABLE"
+        self.load_errors = list(load_errors or [])
+        self.detail = str(detail or "")
+
+
+# LLM: 后台历史种子的结果必须区分三态，不能把"读不到"和"确实没有"混成同一个 None：
+# - ready: 拿到权威行并投影成功（可能为空历史，那是合法空）；
+# - unreadable: 历史读取/解析失败（load_errors 非空或抛错）→ 调用方必须按 typed 错误处理，
+#   保留可恢复状态（唤醒不确认、可重试），**不得**退回有界摘要继续跑模型——那会把"历史读取失败"
+#   伪装成"上下文骤降"；
+# - disabled: 窄范围审计事件等按设计不使用会话历史。
+# 调用方（_run_background_main_turn_with_compact）读 status 决定是否继续，load_errors 一路带出去。
+# 类用途: 承载后台历史种子的三态结果与结构化读取错误。
+@dataclass(frozen=True)
+class _BackgroundHistorySeedResult:
+    status: str
+    seed: object | None = None
+    load_errors: tuple[dict[str, Any], ...] = ()
+    detail: str = ""
+
+
 # LLM: 后台工作片必须与前台共用同一份 canonical 历史投影与同一个 Compact 权威：
-# Gateway 走 conversation_history_seed（未压缩尾部行 + provider 消息投影），后台之前不带 seed，
+# Gateway 走 conversation_history_seed（任务范围行 + provider 消息投影），后台之前不带 seed，
 # _native_provider_history_messages 直接得到空历史，只剩一份有界摘要副本——那不是"续接同一会话"，
-# 而是换了套丢工具细节的摘要。这里复用同一投影实现，但**只读**：不在后台切片里另起一次压缩
-# （压缩由本片既有的 context_overflow→compact 路径与前台 Compact 权威负责），否则每次唤醒都可能
-# 触发一次带模型调用的压缩，把历史换成一页摘要并污染调用序。
-# 函数用途: 为后台工作片构造与前台同源的会话历史种子（同一 Compact 状态 + 同一 provider 投影）。
+# 而是换了套丢工具细节的摘要。这里复用同一实现，同时：
+#   ① 行选择必须复用既有结构化任务范围（detached named task 的创建锚点 + 精确 lineage），
+#      不能直接吞全 thread 未压缩行（会把后来别的任务的消息带进 detached 工作）；
+#   ② 读取失败给 typed 结果，绝不静默退回摘要；
+#   ③ 只读：不在后台切片里另起一次压缩（压缩由本片 context_overflow 路径与前台 Compact 负责）。
+# 函数用途: 为后台工作片构造与前台同源的会话历史种子（三态结果）。
 def _background_conversation_history_seed(
     agent: object,
     store: ConversationStore | None,
     thread: ConversationThread | None,
     request: BackgroundRunRequest,
-):
+    policy_request: BackgroundToolPolicyRequest | None = None,
+) -> _BackgroundHistorySeedResult:
     if store is None or thread is None:
-        return None
+        return _BackgroundHistorySeedResult("unreadable", detail="conversation store unavailable")
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
     if not thread_id:
-        return None
+        return _BackgroundHistorySeedResult("unreadable", detail="thread identity unavailable")
     # 窄范围审计事件（finding/capacity）是"一条结构化事件"，不是会话续接：
     # 它们必须只看到事件事实与审计目标，不能把 owner 的旧聊天历史带进模型输入。
     if _narrow_audit_event_reason(getattr(request, "reason", "")):
-        return None
+        return _BackgroundHistorySeedResult("disabled", detail="narrow audit event")
+    load_errors: list[dict[str, Any]] = []
+    scope_state = _BackgroundContextLoad(
+        agent,
+        store,
+        thread,
+        str(getattr(request, "task_id", "") or "").strip(),
+        getattr(agent, "config", None),
+        policy_request,
+        load_errors,
+    )
+    try:
+        scoped = _context_bundle(scope_state)
+    except Exception as exc:
+        load_errors.append(runtime_error_report(exc, context="background_history.scope"))
+        return _BackgroundHistorySeedResult(
+            "unreadable",
+            load_errors=tuple(load_errors),
+            detail=f"context bundle failed: {type(exc).__name__}",
+        )
+    if load_errors:
+        # 读取/解析错误必须上报，不得被"空历史"掩盖。
+        return _BackgroundHistorySeedResult(
+            "unreadable",
+            load_errors=tuple(load_errors),
+            detail="conversation context reported load errors",
+        )
     try:
         from ..agent_core.runtime.context_compactor import runtime_compact_policy
-        from ..gateway_parts.request_execution import _gateway_conversation_refs
+        from ..gateway_parts.request_execution import _gateway_conversation_history_rows
         from .compact import _uncompacted_conversation_rows
         from .models import ConversationHistorySeed
+        from .native_history import provider_history_messages_from_rows
 
         rows = _uncompacted_conversation_rows(store, thread)
+        allowed = {
+            str(row.get("message_id") or "")
+            for row in _dict_rows(scoped.get("messages"))
+            if str(row.get("message_id") or "").strip()
+        }
+        # 复用同一份行选择结果：范围外的历史（detached named task 创建锚点之前的无关后续任务行）
+        # 一律不进 seed；scoped 为空就得到合法的空历史。
+        scoped_rows = [row for row in rows if str(getattr(row, "message_id", "") or "") in allowed]
         budget = int(getattr(runtime_compact_policy(agent), "trigger_tokens", 0) or 0)
-        load_errors: list[dict] = []
-        history, canonical_history, _artifacts = _gateway_conversation_refs(
+        # 只用历史投影两步（行选择 + provider 消息），不牵入 recent_artifacts 等与续接无关的投影。
+        selected_rows = _gateway_conversation_history_rows(
             agent,
             thread_id,
             "",
             load_errors,
-            history_rows=rows,
-            history_token_budget=budget,
+            rows=tuple(scoped_rows),
+            token_budget=budget,
         )
+        history = tuple((row.role, row.content) for row in selected_rows)
+        canonical_history = provider_history_messages_from_rows(selected_rows)
     except InterruptedError:
         raise
-    except Exception:
-        # 投影失败不得让后台工作片"带着空历史继续跑"：宁可无 seed，也不伪造一份摘要。
-        return None
-    return ConversationHistorySeed(
-        compact_summary=str(getattr(thread, "summary", "") or ""),
-        compact_generation=max(0, int(getattr(thread, "compact_generation", 0) or 0)),
-        messages=tuple(history),
-        canonical_messages=tuple(canonical_history),
+    except Exception as exc:
+        load_errors.append(runtime_error_report(exc, context="background_history.projection"))
+        return _BackgroundHistorySeedResult(
+            "unreadable",
+            load_errors=tuple(load_errors),
+            detail=f"history projection failed: {type(exc).__name__}",
+        )
+    if load_errors:
+        return _BackgroundHistorySeedResult(
+            "unreadable",
+            load_errors=tuple(load_errors),
+            detail="history projection reported load errors",
+        )
+    scoped_thread = scoped.get("thread") if isinstance(scoped.get("thread"), dict) else {}
+    return _BackgroundHistorySeedResult(
+        "ready",
+        seed=ConversationHistorySeed(
+            # detached named task 的 summary/代次按既有投影口径（创建锚点之前的摘要才继承）。
+            compact_summary=str(scoped_thread.get("summary") or ""),
+            compact_generation=max(0, int(scoped_thread.get("compact_generation", 0) or 0)),
+            messages=tuple(history),
+            canonical_messages=tuple(canonical_history),
+        ),
     )
 
 
@@ -3603,7 +3725,6 @@ from dataclasses import dataclass
 
 from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..artifacts.registry import latest_artifact_records
-from ..runtime_errors import runtime_error_report
 from ..settings.defaults import default_config_value
 from .context_budget import (
     BackgroundContextPayloadRequest,

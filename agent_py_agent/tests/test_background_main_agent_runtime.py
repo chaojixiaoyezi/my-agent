@@ -73,6 +73,12 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
     observed_params: list[RunParams] = []
 
     class Agent:
+        # 历史种子需要读会话范围配置；生产 AgentConfig 一直有这些字段，桩必须同样提供。
+        config = SimpleNamespace(
+            conversation_context_recent_limit=0,
+            background_context_max_total_tokens=8000,
+        )
+
         def run(self, _prompt, *, params):
             observed_params.append(params)
             if len(observed_params) == 1:
@@ -87,6 +93,14 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
         def load_thread_report(self, thread_id):
             assert thread_id == original.thread_id
             return original, None
+
+        def context_bundle_report(self, thread_id, *, recent_limit=0):
+            del recent_limit
+            return {"thread": {"thread_id": thread_id}}, []
+
+        def messages_after_compact_report(self, _thread):
+            return [], []
+
 
     class Sink:
         def begin_model_attempt(self, _attempt):
@@ -174,6 +188,12 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
     generations: list[int] = []
 
     class Agent:
+        # 历史种子需要读会话范围配置；生产 AgentConfig 一直有这些字段，桩必须同样提供。
+        config = SimpleNamespace(
+            conversation_context_recent_limit=0,
+            background_context_max_total_tokens=8000,
+        )
+
         def run(self, _prompt, *, params):
             del params
             return SimpleNamespace(
@@ -183,7 +203,13 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
             )
 
     class Store:
-        pass
+        def context_bundle_report(self, thread_id, *, recent_limit=0):
+            del recent_limit
+            return {"thread": {"thread_id": thread_id}}, []
+
+        def messages_after_compact_report(self, _thread):
+            return [], []
+
 
     class Sink:
         def begin_model_attempt(self, _attempt):
@@ -245,6 +271,14 @@ def test_background_scheduler_treats_compact_slice_yield_as_clean_continuation(
     class Store:
         def finish_background_run(self, request):
             finished.append(dict(request))
+
+        def context_bundle_report(self, thread_id, *, recent_limit=0):
+            del recent_limit
+            return {"thread": {"thread_id": thread_id}}, []
+
+        def messages_after_compact_report(self, _thread):
+            return [], []
+
 
     class Heartbeat:
         def stop(self):
@@ -309,6 +343,12 @@ def test_background_overflow_compacts_carried_active_turn_when_transcript_is_emp
     observed_params: list[RunParams] = []
 
     class Agent:
+        # 历史种子需要读会话范围配置；生产 AgentConfig 一直有这些字段，桩必须同样提供。
+        config = SimpleNamespace(
+            conversation_context_recent_limit=0,
+            background_context_max_total_tokens=8000,
+        )
+
         def run(self, _prompt, *, params):
             observed_params.append(params)
             if len(observed_params) == 1:
@@ -323,6 +363,13 @@ def test_background_overflow_compacts_carried_active_turn_when_transcript_is_emp
         def load_thread_report(self, thread_id):
             assert thread_id == original.thread_id
             return original, None
+
+        def context_bundle_report(self, thread_id, *, recent_limit=0):
+            del recent_limit
+            return {"thread": {"thread_id": thread_id}}, []
+
+        def messages_after_compact_report(self, _thread):
+            return [], []
 
     class Sink:
         def begin_model_attempt(self, _attempt):
