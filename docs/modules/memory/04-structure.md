@@ -1,5 +1,20 @@
 # Memory Structure
 
+## R256 迁移预检的稳态边界
+
+- `migration.py` 的 `_MigrationServiceCore.apply()` 现在先读 marker 再决定是否 `_scan()`：
+  稳态判据 `_steady_state_current` 要求 marker 的 `schema_version` 等于
+  `MEMORY_MIGRATION_SCHEMA_VERSION`、`status == "complete"`、marker 读无错，且
+  `_legacy_sources_at_contract_paths` 在契约位置未发现遗留目录。任一条件不满足即回落完整扫描，
+  因此"迁移该不该做"的裁决权仍在完整扫描与已冻结快照，短路只回答"无事可做"。
+- `_legacy_sources_at_contract_paths` / `_recorded_paths` / `_path_present` 是**只读派生探针**，
+  不是第二套权威状态：它只按已知写入形状点名 stat（owner home 根、`owner_data_dir`、
+  `owner_tasks_dir/<date>/<task>/work/<legacy-name>`、显式工作区根、marker 记录过的位置），
+  符号链接与存在性任一成立都回落完整扫描；`_LEGACY_SOURCE_NAMES` 是唯一权威名清单。
+- marker 新增 `legacy_gate_dirs`/`learning_dirs` 两个字段（追加，不覆盖既有字段），
+  记录上次 complete 扫描确认过的位置；旧 marker 缺这两个字段按"无记录"处理，不影响既有语义。
+- `plan()`（dry-run）保持完整扫描，用于诊断与人工核对；性能优化只作用于每轮策展都会调用的 `apply()`。
+
 ## R223 当前边界
 
 - `promotion.py` 的 add 不能用相似度推断 replace；修改身份来自明确 entry_id/version，事实来源核验

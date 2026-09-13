@@ -41,6 +41,9 @@ from .retention_models import RETENTION_SCHEMA_VERSION, MemoryRetentionPolicy
 MEMORY_MIGRATION_SCHEMA_VERSION = "my-agent.memory-migration.v2"
 _MARKER_NAME = "migration.json"
 _LEGACY_ARCHIVE_DIR = "memory-migration"
+# LLM: 唯一权威的遗留来源目录名；写入方已删除，只剩迁移读取方，任何新增都必须先补测试。
+# 常量用途: 迁移扫描与稳态探针共用的遗留目录名清单。
+_LEGACY_SOURCE_NAMES = ("memory_gate", "learning_drafts")
 _MAX_CANDIDATE_CHARS = 2_000
 _CONTENT_KEYS = ("content", "candidate_content", "body", "text", "lesson", "summary", "claim")
 
@@ -189,12 +192,24 @@ class _MigrationServiceCore:
         )
 
     # LLM: apply 在 owner 迁移锁内重新扫描、完整备份并执行；失败必须恢复所有被改目标且不写 complete marker。
+    # 稳态短路：marker 已是同一迁移版本的 complete 且契约位置无遗留目录时，跳过整棵 owner home 的递归遍历
+    # （该遍历在真实 owner home 上是分钟级：agents/ 42 万条、tasks/ 17 万条、data/ 16 万条）。
     # 函数用途: 显式应用 Memory v2 迁移并返回可恢复归档位置。
     def apply(self) -> MemoryMigrationReport:
         lock_path = self.memory_dir / ".migration-v2"
         with locked_json_path(lock_path):
-            snapshot = self._scan()
             marker, marker_error = self._read_marker()
+            if self._steady_state_current(marker, marker_error):
+                return MemoryMigrationReport(
+                    schema_version=MEMORY_MIGRATION_SCHEMA_VERSION,
+                    applied=False,
+                    already_current=True,
+                    findings=(),
+                    marker_path=str(self.marker_path),
+                    run_id=str(marker.get("run_id") or ""),
+                    backup_dir=str(marker.get("backup_dir") or ""),
+                )
+            snapshot = self._scan()
             errors = (*snapshot.errors, *((marker_error,) if marker_error is not None else ()))
             if errors:
                 return MemoryMigrationReport(
@@ -229,6 +244,10 @@ class _MigrationServiceCore:
                         "source_fingerprint": snapshot.fingerprint,
                         "backup_dir": str(backup_dir),
                         "completed_at": _utc_now(),
+                        # 记录本次确认过的遗留目录位置：下次稳态判断按点名复查这些位置，
+                        # 不再为了重新发现它们而递归遍历整棵 owner home。
+                        "legacy_gate_dirs": [str(path) for path in snapshot.legacy_gate_dirs],
+                        "learning_dirs": [str(path) for path in snapshot.learning_dirs],
                         **counters,
                     },
                 )
@@ -265,6 +284,34 @@ class _MigrationServiceCore:
                 marker_path=str(self.marker_path),
                 run_id=run_id,
             )
+
+    # LLM: 稳态判据只读 marker 与固定契约位置，不做递归遍历，也不改变任何迁移语义；
+    # marker 缺失、读坏、schema 版本不同或任一契约位置出现遗留目录时一律回落到完整扫描。
+    # 函数用途: 判断当前 owner 是否已经完成本版本迁移且没有新的遗留来源，决定能否跳过全量扫描。
+    def _steady_state_current(
+        self,
+        marker: dict[str, object],
+        marker_error: MemoryMigrationError | None,
+    ) -> bool:
+        if marker_error is not None:
+            return False
+        if marker.get("schema_version") != MEMORY_MIGRATION_SCHEMA_VERSION:
+            return False
+        if str(marker.get("status") or "") != "complete":
+            return False
+        return not _legacy_sources_at_contract_paths(
+            owner_home=self.owner_home,
+            tasks_dir=Path(
+                getattr(self.home, "owner_tasks_dir", Path(self.owner_home) / "tasks")
+            ),
+            data_dir=Path(
+                getattr(self.home, "owner_data_dir", Path(self.owner_home) / "data")
+            ),
+            recorded_gate_dirs=marker.get("legacy_gate_dirs"),
+            recorded_learning_dirs=marker.get("learning_dirs"),
+            explicit_learning_dirs=self.legacy_learning_dirs,
+        )
+
 
 # LLM: 扫描 mixin 只建立不可变快照，不写 marker、备份或任何规范账本。
 # 类用途: 集中组织各类 legacy 数据的只读扫描步骤。
@@ -566,6 +613,50 @@ class MemoryMigrationService(
     _MigrationLegacyProjectionMixin,
 ):
     pass
+
+
+# LLM: 遗留来源的廉价探针只按已知写入形状点名检查（owner home 根、data/、tasks/<date>/<task>/work/、
+# 管理员显式传入的工作区根、以及上次 complete 扫描记录过的位置），命中即回落到完整递归扫描。
+# 这里不枚举"所有可能深度"：memory_gate / learning_drafts 的写入方已被删除，稳态下不存在新来源。
+# 函数用途: 用几十次 stat 代替一次整棵 owner home 的递归遍历，判断是否还有遗留目录需要迁移。
+def _legacy_sources_at_contract_paths(
+    *,
+    owner_home: Path,
+    tasks_dir: Path,
+    data_dir: Path,
+    recorded_gate_dirs: object = None,
+    recorded_learning_dirs: object = None,
+    explicit_learning_dirs: Iterable[str | Path] = (),
+) -> bool:
+    candidates: list[Path] = [
+        *((owner_home / name) for name in _LEGACY_SOURCE_NAMES),
+        data_dir / "learning_drafts",
+    ]
+    if tasks_dir.is_dir():
+        # 历史写入方的真实形状：<tasks>/<date>/<task>/work/<legacy-name>（迁移测试同形状）。
+        for name in _LEGACY_SOURCE_NAMES:
+            candidates.extend(tasks_dir.glob(f"*/*/work/{name}"))
+    candidates.extend(Path(path) for path in explicit_learning_dirs)
+    candidates.extend(_recorded_paths(recorded_gate_dirs))
+    candidates.extend(_recorded_paths(recorded_learning_dirs))
+    return any(_path_present(path) for path in candidates)
+
+
+# LLM: marker 里的历史位置是 JSON 列表；形状不对时按"无记录"处理，不能因此跳过扫描。
+# 函数用途: 把 marker 记录的位置还原成路径列表。
+def _recorded_paths(value: object) -> list[Path]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [Path(str(item)) for item in value if str(item or "").strip()]
+
+
+# LLM: 存在性或符号链接任一成立都要回落完整扫描：符号链接在完整扫描里是 fail-closed 错误。
+# 函数用途: 判断一个契约位置是否仍指向遗留来源。
+def _path_present(path: Path) -> bool:
+    try:
+        return path.exists() or path.is_symlink()
+    except OSError:
+        return True
 
 
 # LLM: Directory discovery is restricted to explicit legacy names and administrator-supplied workspace roots.

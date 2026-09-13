@@ -575,3 +575,62 @@ def test_legacy_retention_policy_is_backed_up_and_converted_once(tmp_path: Path)
         for item in manifest["files"]
     )
     assert migration.apply().already_current is True
+
+
+# LLM: 稳态短路是 CPU 修复，不是迁移语义变更：marker 已是本版本 complete 且契约位置无遗留目录时，
+# 不允许为了"再确认一次"递归遍历整棵 owner home（真实 home 上是分钟级）。
+# 函数用途: 验证第二次 apply 在读 marker 后直接返回，不再调用完整扫描。
+def test_apply_skips_full_scan_when_marker_is_current_and_no_legacy_sources(
+    tmp_path: Path, monkeypatch
+):
+    _home, _candidates, _long_term, _daily, _lessons, migration = _runtime(tmp_path)
+    first = migration.apply()
+    assert first.ok is True
+    assert migration.marker_path.is_file()
+    scans: list[str] = []
+    original = migration._scan
+    monkeypatch.setattr(
+        type(migration),
+        "_scan",
+        lambda self: scans.append("scan") or original(),
+    )
+    second = migration.apply()
+    assert second.ok is True
+    assert second.already_current is True
+    assert scans == []
+    marker = json.loads(migration.marker_path.read_text(encoding="utf-8"))
+    assert marker["status"] == "complete"
+    assert marker["schema_version"] == "my-agent.memory-migration.v2"
+
+
+# LLM: complete marker 之后重新出现的遗留目录必须仍然被迁移：契约位置探针命中即回落到完整扫描。
+# 函数用途: 验证 tasks/<date>/<task>/work/memory_gate 形状的新遗留目录不会被稳态短路跳过。
+def test_apply_rescans_when_legacy_dir_reappears_after_complete_marker(tmp_path: Path):
+    home, _candidates, _long_term, _daily, _lessons, migration = _runtime(tmp_path)
+    assert migration.apply().ok is True
+    gate = home.owner_tasks_dir / "2026-09-12" / "task-late" / "work" / "memory_gate"
+    _write_jsonl(gate / "candidates.jsonl", {"content": "complete 之后重新出现的旧发现。"})
+    report = migration.apply()
+    assert report.ok is True
+    assert "task_memory_gate" in {finding.category for finding in report.findings}
+    assert report.applied is True
+
+
+# LLM: schema 版本不同的 marker 不构成稳态事实，必须照旧完整扫描。
+# 函数用途: 验证 marker schema_version 不匹配时不会跳过扫描。
+def test_apply_rescans_when_marker_schema_version_differs(tmp_path: Path, monkeypatch):
+    _home, _candidates, _long_term, _daily, _lessons, migration = _runtime(tmp_path)
+    assert migration.apply().ok is True
+    marker = json.loads(migration.marker_path.read_text(encoding="utf-8"))
+    marker["schema_version"] = "my-agent.memory-migration.v1"
+    migration.marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    scans: list[str] = []
+    original = migration._scan
+    monkeypatch.setattr(
+        type(migration),
+        "_scan",
+        lambda self: scans.append("scan") or original(),
+    )
+    report = migration.apply()
+    assert report.ok is True
+    assert scans == ["scan"]

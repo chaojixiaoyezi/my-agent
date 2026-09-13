@@ -1,5 +1,35 @@
 # Memory Progress
 
+## 2026-09-12 R256 迁移预检的稳态短路：后台维护不再每次递归整棵 owner home
+
+- 现场：用户本机网关（runtime-r255）空队列空闲时仍稳定烧 **27%~45% 单核**（10 分钟窗口均值 26.8%、
+  中位 21.4%、峰值 70.3%；另有 90/100 秒窗口 16.58%/19.09% 与瞬时尖峰 ~50% 的独立采样）。
+- 归因（采样 + 一手计时）：热点在 `memory-curator_*` 线程的 `lstat`/`opendir` 递归遍历。链条是
+  策展 `run_if_due → run → _preflight_migration → MemoryMigrationService.apply() → _scan() →
+  _new_migration_scan_state → _safe_named_dirs(owner_home, "memory_gate"/"learning_drafts")`，
+  而 `_safe_named_dirs` 对**整个 owner home** 做 `rglob`。本机实测该 home 规模：`agents/` 42.4 万条目
+  （90 秒未走完）、`tasks/` 17.6 万（90 秒未走完）、`data/` 16.0 万（57.7 秒）。
+  **`rglob("memory_gate")` 单次 428.0 秒、`rglob("learning_drafts")` 单次 157.9 秒，合计约 586 秒**，
+  与当日一次策展 run 的实际耗时 10 分 30 秒吻合。
+- 触发频率：策展状态长期带 `pending_reasons: [interval, task_complete, session_close]`，且
+  `last_failure_code=CURATOR_SCHEMA_INVALID`（最近一次成功在 09-09），于是每约 8 分钟重试一次，
+  每次都先走一遍上述分钟级遍历 → 线程几乎一直在走文件系统。
+- 修法（**只改热路径 `apply()`，不动迁移语义**）：marker 读到同一迁移版本的 `complete`、且
+  `_legacy_sources_at_contract_paths` 在契约位置（owner home 根、`data/`、`tasks/<date>/<task>/work/<name>`、
+  管理员显式传入的工作区根、以及上次 complete 扫描记录过的位置）没有发现遗留目录时，直接返回
+  `already_current`，不再 `_scan()`。marker 缺失/读坏/schema 版本不同/任一契约位置命中 → 一律回落完整扫描。
+  marker 新增记录本次确认过的 `legacy_gate_dirs`/`learning_dirs`，供下次点名复查。
+  `plan()`（dry-run）保持完整扫描不变，诊断完整性不受影响。
+- 真机成本对照（只读实测同一 home）：稳态探针中位 **443 ms**（冷启动首测 4.6 秒），
+  对完整扫描的 **586 秒**。契约形状取自迁移测试与历史写入方：
+  `tasks/<date>/<task>/work/memory_gate`。
+- 边界与未做：`memory_gate`/`learning_drafts` 的**写入方已被删除**（`subagents/manager.py:367`），
+  所以"complete 之后不会长出新遗留目录"是当前事实，不是永久假设；若将来恢复写入方，必须同时复核
+  本探针的契约形状。**另发现（未修，属模型解析，需与该线负责人协调）**：策展后端由
+  `_build_memory_curator_backend` 从基础 config 解析，实测拿到 `provider=echo / model=gpt-4o-mini`
+  占位默认（run 账可见），因此抽取输出永远过不了 schema → `CURATOR_SCHEMA_INVALID`；后台主代理链路
+  已按 canonical thread 走 `selected_model_scope`，只有策展没有。
+
 ## 2026-09-09 R223 记忆、历史与 Compact 复核
 
 - add 删除 LCS 相似度覆盖，只做精确重复去重；更新依赖明确 entry_id/version。记忆仍由各 owner 的
