@@ -1,5 +1,23 @@
 # TESTS
 
+## 2026-09-13 R271 慢模型/长任务活性合同的受控验证
+
+新增 `agent_py_agent/tests/test_slow_model_liveness.py`（11 例），按"连接/首包等待、流式无进展、
+总时长、明确服务失败"四类逐层钉住既有合同：
+
+- ① 提供方等待：流式结果晚于总预算仍被接受（总时长不判死）；非流式超预算给出显式
+  `ProviderTimeoutError(wall_clock)`；用户停止在传输收口窗口内生效；provider HTTP 失败立刻上抛。
+- ② 客户端等待：慢持续流超过初始 deadline 仍等到终态且推进期间的 chunk 被消费；只有租约心跳活动时
+  继续等；完全没有活动在空闲窗口内收口；窗口后迟到触碰不复活已收口等待。
+- ③ 服务端租约心跳：无显示活动时持续刷新租约（连续 ≥3 次单调递增）。
+- ④ 长工具租约：handler 阻塞期间滚动续租（≥2 次、到期单调递增），返回后立即停止续租。
+
+本轮 focused：`test_slow_model_liveness.py` + `test_gateway_client.py` + `test_tool_model_generation.py` +
+`test_dynamic_timeout.py` + `test_activity_timeout.py` + `test_provider_timeout_acceptance.py` +
+`test_provider_timeout_continuation.py` 共 110 项通过。
+**不等同真机验收**：慢首包/慢流/长工具/子代理等待/插话 + TUI 输入滚动复制停止主子切换必须在部署后
+用真实本地慢模型验收。
+
 ## 2026-09-13 R270 插话三段状态的受控回归
 
 新增 `agent_py_agent/tests/test_tui_injected_input_states.py`（11 例）与
