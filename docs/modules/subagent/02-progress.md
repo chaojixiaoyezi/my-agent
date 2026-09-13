@@ -1,5 +1,22 @@
 # Subagent Progress
 
+## 2026-09-13 R285.1 精确 attempt 的终态收口（僵尸 RUNNING 根因）
+
+**冲突如何形成**：模型流异常（`stream_eof` → `MODEL_STREAM_INCOMPLETE`）后，
+`_settle_main_agent_run_status` 按"可续跑族"只结清 attempt（`agent_attempts.status=done`），把
+`agent_runs.status` 留在 `created` 等 resume；随后 runner 对该 attempt 回写 FAILED，
+`_managed_runtime_result_conflict` 的组合判定只接受 `run∈{"","created"} ∧ attempt=running`、
+`done/done`、`failed|cancelled 对齐`，**以及 turn_end 映射为 PENDING/BLOCKED 的情形**——
+`MODEL_STREAM_INCOMPLETE` 映射 FAILED，于是被判冲突并**静默丢弃**（旧实现的 `_make_quick_result`
+不写文件/不写 record/不发事件/不发 wake）→ 任务永久 RUNNING，父代理永远收不到完成信号。
+
+**正确语义（已改）**：`run=created + attempt=done` 就是"宿主已按可续跑族结清 attempt、run 留给
+resume"的签名；该 attempt 不会再产出，runner 对**同一个 attempt** 的终态回写是唯一事实来源。
+因此 `_runner_result_matches_settled_attempt` 在 `is_current` 为真的前提下，接受
+`FAILED/CANCELLED`（turn_end 与 status 必须一致）并按其收口 run；PENDING/BLOCKED 原规则不变。
+**过期保护未放宽**：stale/superseded/abandoned attempt 仍在更早的闸口被拒，测试同时锁两侧。
+另：冲突被拒时一律写 `closeout_blocked`(`reason=runner_result_conflict`) 结构化诊断，不再静默。
+
 ## 2026-09-13 R284 后台上下文续接 / 主代理等待 / 终态静默 / Goal 唯一性
 
 1. **后台工作片与前台共用同一份 canonical 历史投影**：`conversation/runtime.py::_background_conversation_history_seed`

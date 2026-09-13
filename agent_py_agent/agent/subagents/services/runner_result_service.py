@@ -414,15 +414,32 @@ def _runner_result_matches_settled_attempt(
     attempt_status: str,
     params: RecordRunnerResultParams,
 ) -> bool:
+    """Decide whether one exact attempt's settled state still accepts this result.
+
+    ``run=created + attempt=done`` 是宿主按"可续跑族"（如 MODEL_STREAM_INCOMPLETE）
+    提前结清 attempt、把 run 留给 resume 的签名。此时该 attempt 已经没有后续产出，
+    runner 对**同一个 attempt** 的终态回写是唯一事实来源：
+      - turn_end 映射为 PENDING/BLOCKED（可续跑）→ 按原规则接受；
+      - 映射为 FAILED/CANCELLED（本次事故形态）→ 也要接受并按该终态收口 run，
+        否则任务永久停在 RUNNING，且 runner_result/唤醒全部写不出来。
+    过期与换代保护不变：调用方只在 authority.is_current 为真时走到这里，
+    stale/superseded/abandoned 的 attempt 仍在前面被拒。
+    """
+
     if run_status not in {"", "created"} or attempt_status != "done":
         return False
     raw_status = str(params.status or "").strip().upper()
     expected_status, _failure_type, _ok = subagent_outcome_for_turn_end(
         params.turn_end_reason
     )
-    if expected_status not in {
+    if expected_status in {
         TaskStatus.PENDING.value,
         TaskStatus.BLOCKED.value,
     }:
-        return False
-    return raw_status == expected_status
+        return raw_status == expected_status
+    if expected_status in {
+        TaskStatus.FAILED.value,
+        TaskStatus.CANCELLED.value,
+    }:
+        return raw_status == expected_status
+    return False
