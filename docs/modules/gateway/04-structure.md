@@ -1,5 +1,20 @@
 # Gateway Structure
 
+## R274 scheduler 只读路径的锁边界（GW-03 收尾）
+
+- **只读投影一律走 `SchedulerRepository._store_snapshot()`**：锁外读一次字节 + 解析，锁内只用一次
+  `_store_stat_key()` 复核"这份字节仍是当前文件"；复核不过或探针不可用才退回锁内权威读取
+  `_load_store_unlocked()`。覆盖 `queued_runs`（每个调度 tick）、`list_jobs`、`get_job`、
+  `active_runs_by_job`、`corruption_report`、`runtime_snapshot`。**禁止**在这些路径上恢复
+  "锁内 `_load_store_unlocked()` + 全量逐条解析"。
+- **写路径不适用**：`_mutation_scope` 必须保持锁内读-改-写（claim/heartbeat/finish/reserve 的 CAS 语义），
+  它是已测量的残余（N=10000 条 run 时锁持有约 21ms，调用频率为每个调度事件一次），本轮未改。
+- 单次读者用 `_probe_store_bytes(..., digest=False)`：这类读者不复用结论，摘要算出来没人比对，
+  4-5MB 账本上 blake2b 要几毫秒。**跨调用缓存（waiting 投影）必须保持 `digest=True`**，它的命中判定
+  依赖内容摘要兜住"同 stat 不同内容"。
+
+# Gateway Structure
+
 ## R272 合法排队必须有结构化等待信号
 
 - 请求因准入限流(`global_inflight`/`user_inflight`/`conversation_busy`)或恢复退避留在 inbox 时，

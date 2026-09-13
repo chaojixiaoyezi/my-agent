@@ -57,6 +57,7 @@ def _repository(root: Path) -> SchedulerRepository:
 
 def _run_row(run_id: str, status: str, *, waiting_since: float = 0.0) -> dict[str, object]:
     return {
+        "scheduled_for": 1_000.0,
         "schema_version": "scheduler_run.v1",
         "owner": dict(_OWNER),
         "run_id": run_id,
@@ -364,7 +365,7 @@ def test_waiting_runs_ignores_stale_probe_and_reparses(tmp_path, waiting_project
     assert _wanting_ids(repository.waiting_runs()[0]) == ["srun_000", "srun_001"]
 
     stale = repository_module._StoreBytesProbe(stat_key=(-1, -1, -1, -1), digest="stale", data=b"{}")
-    monkeypatch.setattr(repository_module, "_probe_store_bytes", lambda path: stale)
+    monkeypatch.setattr(repository_module, "_probe_store_bytes", lambda path, **kwargs: stale)
 
     rows, errors = repository.waiting_runs()
 
@@ -691,7 +692,7 @@ def test_runtime_snapshot_ignores_stale_probe(tmp_path, monkeypatch) -> None:
     """探针字节已过期(读盘后账本又被改写): 绝不返回探针结论,退回锁内权威读取。"""
     repository = _runtime_fixture(tmp_path)
     stale = repository_module._StoreBytesProbe(stat_key=(-1, -1, -1, -1), digest="stale", data=b"{}")
-    monkeypatch.setattr(repository_module, "_probe_store_bytes", lambda path: stale)
+    monkeypatch.setattr(repository_module, "_probe_store_bytes", lambda path, **kwargs: stale)
 
     snapshot = repository.runtime_snapshot()
 
@@ -711,7 +712,7 @@ def test_runtime_snapshot_falls_back_when_probe_bytes_are_unreadable(
     broken = repository_module._StoreBytesProbe(
         stat_key=(-1, -1, -1, -1), digest="stale", data=b"{ not json"
     )
-    monkeypatch.setattr(repository_module, "_probe_store_bytes", lambda path: broken)
+    monkeypatch.setattr(repository_module, "_probe_store_bytes", lambda path, **kwargs: broken)
 
     snapshot = repository.runtime_snapshot()
 
@@ -1308,3 +1309,67 @@ def test_fact_signature_digest_changes_on_every_relevant_edit(fact_cache, tmp_pa
     settled = home / "agents" / "run-1" / "state.json"
     settled.write_text(json.dumps({"run_id": "run-1", "status": "DONE"}), encoding="utf-8")
     assert digest() != after_ledger
+
+
+def test_scheduler_read_paths_do_not_parse_inside_the_lock(tmp_path, monkeypatch) -> None:
+    """GW-03 收尾: 只读路径不得在锁内读盘或全量解析(逐条插桩断言,不靠计时)。
+
+    覆盖每个调度 tick 都会跑的 queued_runs,以及工具/诊断路径 list_jobs/get_job/
+    active_runs_by_job/corruption_report。写路径(_mutation_scope)必须保持锁内读-改-写,不在本用例范围。
+    """
+    repository = _runtime_fixture(tmp_path)
+    held = {"now": False}
+    observed: list[tuple[str, bool]] = []
+    lock_entries: list[int] = []
+    real_lock = repository_module.locked_json_path
+    real_probe = repository_module._probe_store_bytes
+    real_load_bytes = SchedulerRepository._load_store_from_bytes_unlocked
+    real_load_locked = SchedulerRepository._load_store_unlocked
+    real_parse = SchedulerRepository._parse_run
+
+    @contextlib.contextmanager
+    def tracking_lock(path):
+        with real_lock(path):
+            lock_entries.append(1)
+            held["now"] = True
+            try:
+                yield
+            finally:
+                held["now"] = False
+
+    def probe(path, **kwargs):
+        observed.append(("probe", held["now"]))
+        return real_probe(path, **kwargs)
+
+    def load_bytes(self, data):
+        observed.append(("parse_store", held["now"]))
+        return real_load_bytes(self, data)
+
+    def load_locked(self):
+        observed.append(("load_locked", held["now"]))
+        return real_load_locked(self)
+
+    def parse_run(self, raw, *, terminal=False):
+        observed.append(("parse_run", held["now"]))
+        return real_parse(self, raw, terminal=terminal)
+
+    monkeypatch.setattr(repository_module, "locked_json_path", tracking_lock)
+    monkeypatch.setattr(repository_module, "_probe_store_bytes", probe)
+    monkeypatch.setattr(SchedulerRepository, "_load_store_from_bytes_unlocked", load_bytes)
+    monkeypatch.setattr(SchedulerRepository, "_load_store_unlocked", load_locked)
+    monkeypatch.setattr(SchedulerRepository, "_parse_run", parse_run)
+
+    repository.queued_runs(limit=8)
+    repository.active_runs_by_job()
+    jobs, _errors = repository.list_jobs()
+    assert jobs, "夹具必须至少有一个可读 job(否则 get_job 用例不成立)"
+    repository.get_job(str(jobs[0]["job_id"]))
+    repository.corruption_report()
+
+    assert lock_entries, "只读路径仍必须在锁内做字节版本复核"
+    assert ("parse_store", True) not in observed, "JSON 全量解析不得发生在持锁期间"
+    assert ("load_locked", True) not in observed, "探针可用时不得在锁内做权威读取"
+    assert not [name for name, locked in observed if name == "parse_run" and locked], (
+        "逐 run 解析不得发生在持锁期间"
+    )
+    assert [name for name, _locked in observed].count("parse_run") > 0, "逐 run 解析必须真的发生过"

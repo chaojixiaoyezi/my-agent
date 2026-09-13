@@ -160,17 +160,15 @@ class _SchedulerJobOperations:
     def list_jobs(
         self, *, include_deleted: bool = False
     ) -> tuple[list[dict[str, object]], list[str]]:
-        with locked_json_path(self.store_path):
-            store = self._load_store_unlocked()
-            jobs, errors = self._valid_jobs(store)
+        store = self._store_snapshot()
+        jobs, errors = self._valid_jobs(store)
         selected = [job for job in jobs if include_deleted or job["status"] != "deleted"]
         selected.sort(key=lambda job: (float(job.get("next_run_at") or 1e30), str(job["job_id"])))
         return deepcopy(selected), errors
 
     def get_job(self, job_id: str, *, include_deleted: bool = False) -> dict[str, object]:
-        with locked_json_path(self.store_path):
-            store = self._load_store_unlocked()
-            job = self._require_job(store, job_id)
+        store = self._store_snapshot()
+        job = self._require_job(store, job_id)
         if job["status"] == "deleted" and not include_deleted:
             raise SchedulerNotFoundError(f"scheduler job not found: {job_id}")
         return deepcopy(job)
@@ -346,34 +344,31 @@ class _SchedulerRunOperations:
 
     def queued_runs(self, *, now: float | None = None, limit: int = 64) -> list[dict[str, object]]:
         current = _now(now)
-        with locked_json_path(self.store_path):
-            store = self._load_store_unlocked()
-            rows: list[dict[str, object]] = []
-            for raw in store["runs"].values():
-                run, _error = self._parse_run(raw)
-                if run is None or run["status"] != "queued":
-                    continue
-                if float(run.get("dispatch_after") or 0.0) > current:
-                    continue
-                rows.append(run)
+        store = self._store_snapshot()
+        rows: list[dict[str, object]] = []
+        for raw in store["runs"].values():
+            run, _error = self._parse_run(raw)
+            if run is None or run["status"] != "queued":
+                continue
+            if float(run.get("dispatch_after") or 0.0) > current:
+                continue
+            rows.append(run)
         rows.sort(key=lambda run: (float(run["scheduled_for"]), str(run["run_id"])))
         return deepcopy(rows[: max(1, int(limit or 1))])
 
     def get_active_run(self, run_id: str) -> dict[str, object] | None:
         """Return one nonterminal run without exposing the mutable store object."""
 
-        with locked_json_path(self.store_path):
-            store = self._load_store_unlocked()
-            run, _error = self._parse_run(store["runs"].get(str(run_id or "")))
+        store = self._store_snapshot()
+        run, _error = self._parse_run(store["runs"].get(str(run_id or "")))
         return deepcopy(run) if run is not None else None
 
     # LLM: Schedule list/get surfaces must project live queued/claimed/running/waiting facts from
     # the same owner ledger; callers must not infer activity from an empty last_run_at.
     # 函数用途: 一次读取当前 owner 的全部在途定时执行，供状态展示区分排队、执行与等待后续事件。
     def active_runs_by_job(self) -> tuple[dict[str, dict[str, object]], list[str]]:
-        with locked_json_path(self.store_path):
-            store = self._load_store_unlocked()
-            runs, errors = self._valid_runs(store)
+        store = self._store_snapshot()
+        runs, errors = self._valid_runs(store)
         active: dict[str, dict[str, object]] = {}
         for run in sorted(
             runs,
@@ -571,7 +566,7 @@ class _SchedulerRunOperations:
 
     # 函数用途: 产出 runtime_snapshot 的字段元组;锁外解析 + 锁内一次 stat 复核,复核不过才退回权威读取。
     def _runtime_snapshot_summary(self) -> tuple[int, int, int, list[str], list[str]]:
-        probe = _probe_store_bytes(self.store_path)
+        probe = _probe_store_bytes(self.store_path, digest=False)
         if probe is not None:
             try:
                 # 探针字节与摘要绑定同一次读取:锁内复核 stat 键相等即可确认"解析的就是当前文件版本"。
@@ -589,6 +584,25 @@ class _SchedulerRunOperations:
                         return summary
         with locked_json_path(self.store_path):
             return self._runtime_summary_from_store(self._load_store_unlocked())
+
+    # LLM: 只读投影的统一入口。锁内**不允许**再出现读盘或全量解析:先在锁外读一次字节并解析,
+    # 锁内只用一次 stat 复核"这份字节仍是当前文件";复核不过或探针不可用才退回锁内权威读取。
+    # 单次调用绑定单次读到的字节,因此不需要跨调用的缓存/摘要比对(与 runtime_snapshot 同一形状)。
+    # 写路径不适用:它必须在锁内做读-改-写,不在这里改动。
+    # 函数用途: 取得一份"已验证仍是当前文件"的 owner 账本快照,供各类只读投影使用。
+    def _store_snapshot(self) -> dict[str, Any]:
+        probe = _probe_store_bytes(self.store_path, digest=False)
+        if probe is not None:
+            try:
+                store = self._load_store_from_bytes_unlocked(probe.data)
+            except Exception:  # noqa: BLE001 - 探针坏 ≠ 账本坏: 交给下面的权威读取判定
+                store = None
+            if store is not None:
+                with locked_json_path(self.store_path):
+                    if _store_stat_key(self.store_path) == probe.stat_key:
+                        return store
+        with locked_json_path(self.store_path):
+            return self._load_store_unlocked()
 
     # LLM: 纯函数式的账本投影(不做 I/O、不读共享状态),因此锁内锁外调用都不改变语义:
     # jobs 侧与 list_jobs(include_deleted=False) 同源同过滤,schedule 种类只看未删除 job;
@@ -872,10 +886,9 @@ class _SchedulerStoreSupport:
         坏记录(schema 不符/截断写/手改)由逐条解析跳过并在此汇总, 不再静默
         丢弃; 不覆盖原文件(只读)。健康记录照常调度(隔离不瘫痪)。
         """
-        with locked_json_path(self.store_path):
-            store = self._load_store_unlocked()
-            _jobs, job_errors = self._valid_jobs(store)
-            _runs, run_errors = self._valid_runs(store)
+        store = self._store_snapshot()
+        _jobs, job_errors = self._valid_jobs(store)
+        _runs, run_errors = self._valid_runs(store)
         return {
             "schema_version": store.get("schema_version"),
             "owner": dict(store.get("owner") or {}),
@@ -1179,12 +1192,17 @@ def _store_bytes_digest(data: bytes) -> str:
     return hashlib.blake2b(data, digest_size=16).hexdigest()
 
 
-def _probe_store_bytes(path: Path) -> _StoreBytesProbe | None:
-    """锁外探针: 一次 stat + 一次读字节 + 内容摘要,三者绑定同一份内容。
+def _probe_store_bytes(path: Path, *, digest: bool = True) -> _StoreBytesProbe | None:
+    """锁外探针: 一次 stat + 一次读字节 (+ 可选内容摘要),三者绑定同一份内容。
 
     LLM: 命中判定要求"探针 stat == 锁内 stat",所以锁外读到的字节与锁内看到的文件版本一致;
     不一致(外部改写竞态)时调用方会丢弃探针,回退锁内权威读取路径。返回 None 表示文件缺失/
     不可读,调用方同样走权威路径。
+
+    ``digest=False`` 只服务"单次调用、锁内只复核 stat 键"的读者(见 ``_store_snapshot``): 这类
+    读者不复用结论,摘要算出来也没人比对,而 4-5MB 账本上 blake2b 要花几毫秒——不必要地拖慢每次
+    读取。跨调用缓存(waiting 投影)必须保持 digest=True:它的命中判定依赖内容摘要兜住"同 stat
+    不同内容"。
     """
     stat_key = _store_stat_key(path)
     if stat_key is None:
@@ -1192,7 +1210,11 @@ def _probe_store_bytes(path: Path) -> _StoreBytesProbe | None:
     data = _read_store_bytes(path)
     if data is None:
         return None
-    return _StoreBytesProbe(stat_key=stat_key, digest=_store_bytes_digest(data), data=data)
+    return _StoreBytesProbe(
+        stat_key=stat_key,
+        digest=_store_bytes_digest(data) if digest else "",
+        data=data,
+    )
 
 
 def _parse_json_object_bytes(
