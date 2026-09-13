@@ -1,5 +1,32 @@
 # DESIGN LEDGER
 
+## 2026-09-12 R258 门槛5 续跑：可恢复超时后"只承诺不动作"不再静默收口【状态：已修+单测，未部署】
+
+真机现象：`ma-port-2` 里模型回了一句"在的，刚才超时了，我重新来。"然后什么都不发生（提示符空着）。
+根因不在"没有重试"——`_retry_once_after_timeout`（tool_model_generation.py，"门槛5"）早已存在且有界
+（最多一次、fail-closed：孤儿 tool_use/歧义输入/stream-idle 一律不重试）。缺口在**重试打完之后的裁决层**：
+零工具调用的承诺走 `_no_tool_calls_decision` 的 `break` 直接成为终态，除截断续跑外没有第二条"再问一次"的路；
+而"我重新来"是自然语言，按铁律不能驱动机器行为。
+
+修法（接缝 = 裁决层决策 + 生成层登记结构化事实）：
+- 生成层：`_retry_once_after_timeout` **重试成功**分支登记
+  `live_archive_state["_provider_timeout_resume_turns"][model_turn] = {reason, timeout_stage, tool_rounds}`；
+  资格判定 0 行修改（不放宽 fail-closed）。
+- 裁决层：新增 `provider_timeout_resume_repairs` 计数与 `_PROVIDER_TIMEOUT_RESUME_LIMIT = 1`；
+  空正文让位既有 empty-text nudge，预算用尽按原语义收口（`decision.response is response`，不伪造终态）。
+- 触发全程不看模型文本（专项用例用 5 种文案验证行为一致）；续跑那一枪 `calls == []`，不重放任何工具。
+- 预算与截断续跑**独立**（不互吃）；in-turn 完成，不走 manager 的 auto-continue 深度预算。
+
+证据：`test_provider_timeout_continuation.py` 13 例（含真实 `_execute_tool_loop_service` + 真实生成路径的端到端：
+`backend.calls == 3` = 超时/门槛5重试/续跑，第 2 次出站 prompt 带 `[provider-timeout-resume]`，
+`_run_tool_round` 从未被调用），加 `test_native_truncated_write_recovery`、`test_truncated_output_resume` 全绿。
+
+未做（有意保守）：**不具门槛5资格的超时**（孤儿 tool_use/歧义输入）仍会在生成层上抛，根本没有响应可裁决 →
+仍无续跑；要覆盖它必须动 fail-closed 判定或外层退避链，属单独评估。续跑事实随 `live_archive_state` 不持久化
+（跨进程 resume 后最多少一次续跑，不会多）。**本轮只有单测与 fake 后端端到端，未部署、未做真机验收。**
+
+# DESIGN LEDGER
+
 ## 2026-09-12 R256 交接文档复核结论 + 两处底座修复（迁移预检 586 秒/次、TUI 热帧净化重复）【状态：已修并推送，未部署、未做真实 TUI 验收】
 
 本轮任务是另一 agent 的《my-agent 底座修复交接说明》（基线 `64ded920`）复核 + 按 A/B/C 三线修复。

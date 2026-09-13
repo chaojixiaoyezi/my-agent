@@ -70,6 +70,12 @@ from .tool_stream import (
 _TOOL_STREAM_POLL_SECONDS = 0.05
 _MODEL_INTERRUPT_DRAIN_SECONDS = 1.0
 _RUNNER_STREAM_ACTIVITY_STATE_KEY = "_runner_model_stream_activity_projection"
+# 门槛5 续跑: 本轮模型调用的结构化失败事实登记在 live_archive_state 上, 只记
+# 「哪个 model turn 序号发生过可恢复的供应商超时」; 消费方(response_decision)
+# 按序号精确匹配, 不做时间窗/文本推断。
+_PROVIDER_TIMEOUT_RESUME_STATE_KEY = "_provider_timeout_resume_turns"
+# 仅用于结构化诊断(不参与任何判定): 记下是哪一档超时被重试救回来的。
+_RESUMABLE_PROVIDER_FAILURE_TIMEOUT = "provider_timeout_retried"
 
 
 @dataclass(frozen=True)
@@ -166,6 +172,62 @@ def _record_run_cost(request: ModelGenerateParams, response: object) -> None:
     record_run_cost(owner, run_id, model, response)
 
 
+# LLM: 门槛5 重试本身一行都不放宽(fail-closed 资格判定保持原样)；本函数只在重试
+# **确实发生过且拿到了响应** 时登记一条结构化续跑资格事实——「这个 model turn 曾经
+# 因供应商超时被重试, 而且重试这一枪是打出去了的」。重试失败/不具资格时抛原异常,
+# 因此正常收口的响应里绝不会有这条事实。
+# 函数用途: 把当前 model turn 序号登记为「可续跑」, 供工具轮裁决层在同一序号上放行
+# 至多一次轮内续跑(不解析模型正文, 不重放工具)。
+def _record_provider_timeout_resume_eligibility(
+    request: ModelGenerateParams,
+    exc: ProviderTimeoutError,
+) -> None:
+    state = getattr(request.params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    sequence = _model_turn_sequence(params=request.params)
+    if sequence <= 0:
+        return
+    turns = state.get(_PROVIDER_TIMEOUT_RESUME_STATE_KEY)
+    if not isinstance(turns, dict):
+        turns = {}
+        state[_PROVIDER_TIMEOUT_RESUME_STATE_KEY] = turns
+    turns[sequence] = {
+        "reason": _RESUMABLE_PROVIDER_FAILURE_TIMEOUT,
+        "timeout_stage": str(getattr(exc, "stage", "") or "provider_wall"),
+        "tool_rounds": int(getattr(request, "tool_rounds", 0) or 0),
+    }
+
+
+# LLM: 只读 live_archive_state 上的宿主序号字段, 不再另起一套 turn 计数源；
+# 拿不到(伪 params/旧调用方)时返回 0 = 「本轮没有可续跑资格」, fail-closed。
+# 函数用途: 读取当前 model turn 的宿主序号(与 _begin_model_turn_identity 同源)。
+def _model_turn_sequence(params: object) -> int:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return 0
+    try:
+        return max(0, int(state.get("_model_turn_sequence") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: 这是工具轮裁决层唯一允许读取的「本轮可恢复供应商失败」结构化事实入口；
+# 判据是本次物理调用所属 model turn 序号被登记过, 与模型正文、工具名、文案无关。
+# 调用方(response_decision._no_tool_calls_decision)只按它决定是否续跑一次,
+# 不得据此放宽门槛5 的重试资格, 也不得重放任何已执行工具。
+# 函数用途: 查询「产出这条响应的那次模型调用之前, 本轮是否发生过被重试救回的供应商超时」。
+def provider_timeout_resume_eligible(params: object) -> bool:
+    sequence = _model_turn_sequence(params)
+    if sequence <= 0:
+        return False
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    turns = state.get(_PROVIDER_TIMEOUT_RESUME_STATE_KEY)
+    return isinstance(turns, dict) and sequence in turns
+
+
 def _generate_or_recover_context_pressure(
     request: ModelGenerateParams, state: _ModelGenerationState
 ) -> tuple[object, _ModelGenerationState]:
@@ -255,6 +317,11 @@ def _retry_once_after_timeout(
             retry_state,
             retry_state.first_token_timeout_seconds,
         )
+        # 门槛5 续跑(2026 真机): 重试已经打出去了, 但模型可能只回一句「我重新来」
+        # 就结束(零工具调用) —— 那时旧行为会静默收口, 用户看到承诺 + 空提示符。
+        # 这里只登记结构化事实, 决策仍归工具轮裁决层, 且只重发模型调用+一条宿主
+        # 指令, 绝不重放工具。
+        _record_provider_timeout_resume_eligibility(request, exc)
         return response, retry_state
     except ProviderTimeoutError as exc:
         _record_provider_timeout(_provider_timeout_record(request, retry_state, exc))

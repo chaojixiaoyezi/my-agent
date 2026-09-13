@@ -67,6 +67,9 @@ class ToolLoopRepairCounters:
     truncated_write_repairs: int = 0
     # R248: 最终答复被输出上限截断后的轮内续跑次数（不重启整轮，见 _truncated_final_resume）。
     truncated_output_repairs: int = 0
+    # 门槛5 续跑: 本轮模型调用被供应商超时打断且重试救回后，模型零工具调用只回一句承诺
+    # 时的轮内续跑次数（至多 1 次，与截断续跑分开计数、互不吃预算）。
+    provider_timeout_resume_repairs: int = 0
 
 
 # LLM: 截断续跑与"分块写纠偏"是两件事：前者针对最终答复被输出上限截断，后者针对工具参数被截断。
@@ -80,6 +83,21 @@ def _inc_truncated_output(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
         empty_text_repairs=counters.empty_text_repairs,
         truncated_write_repairs=counters.truncated_write_repairs,
         truncated_output_repairs=counters.truncated_output_repairs + 1,
+        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
+    )
+
+
+# LLM: 超时续跑同样是有界的一次性修复，计数与截断续跑、协议修复、空正文 nudge 全部独立。
+# 函数用途: 增加一次"供应商超时重试后模型只承诺不动作"的轮内续跑计数。
+def _inc_provider_timeout_resume(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        protected_marker_repairs=counters.protected_marker_repairs,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        protocol_repairs=counters.protocol_repairs,
+        empty_text_repairs=counters.empty_text_repairs,
+        truncated_write_repairs=counters.truncated_write_repairs,
+        truncated_output_repairs=counters.truncated_output_repairs,
+        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs + 1,
     )
 
 
@@ -96,6 +114,21 @@ _TRUNCATED_OUTPUT_RESUME = (
     "需要调用工具就直接调用。本条指令不指定任何具体工具，也不假定上一轮调用了哪个工具。"
 )
 
+# LLM: 供应商超时续跑与输出截断续跑是两件事：前者针对「本轮模型调用被供应商超时打断、
+#   门槛5 重试救回来了，但模型只回一句承诺就停」；后者针对「最终答复被输出上限截断」。
+#   各自独立计数，任何一方的预算都不能吃掉另一方；门槛5 的重试资格一行都不放宽——
+#   这里只处理「重试已经结束之后」，而且只重发模型调用 + 一条宿主指令，绝不重放工具。
+# 常量用途: 超时续跑回灌给模型的宿主指令（至多一次）。
+_PROVIDER_TIMEOUT_RESUME_LIMIT = 1
+_PROVIDER_TIMEOUT_RESUME = (
+    "[provider-timeout-resume]\n"
+    "上一条回复之前，本轮模型调用已经被供应商超时打断过一次并重试过。"
+    "如果本轮工作还没做完，请直接从断点继续把剩余工作做完："
+    "不要道歉、不要复述已经做过的步骤、不要承诺「我重新来」。"
+    "需要调用工具就直接调用。本条指令不指定任何具体工具，"
+    "也不假定上一轮调用了哪个工具；宿主没有重放任何已执行的工具。"
+)
+
 # LLM: repair counters 只记录真实协议修复次数，不再承载任何工作风格或检查点提醒状态。
 # 函数用途: 增加一次内部工具标记修复计数，同时保留其他错误修复计数。
 def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
@@ -106,6 +139,7 @@ def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
         empty_text_repairs=counters.empty_text_repairs,
         truncated_write_repairs=counters.truncated_write_repairs,
         truncated_output_repairs=counters.truncated_output_repairs,
+        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
     )
 
 
@@ -119,6 +153,7 @@ def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopR
         empty_text_repairs=counters.empty_text_repairs,
         truncated_write_repairs=counters.truncated_write_repairs,
         truncated_output_repairs=counters.truncated_output_repairs,
+        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
     )
 
 
@@ -130,6 +165,7 @@ def _inc_protocol(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
         empty_text_repairs=counters.empty_text_repairs,
         truncated_write_repairs=counters.truncated_write_repairs,
         truncated_output_repairs=counters.truncated_output_repairs,
+        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
     )
 
 
@@ -143,6 +179,7 @@ def _inc_truncated_write(counters: ToolLoopRepairCounters) -> ToolLoopRepairCoun
         empty_text_repairs=counters.empty_text_repairs,
         truncated_write_repairs=counters.truncated_write_repairs + 1,
         truncated_output_repairs=counters.truncated_output_repairs,
+        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
     )
 
 
@@ -157,6 +194,7 @@ def _inc_empty_text(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
         empty_text_repairs=counters.empty_text_repairs + 1,
         truncated_write_repairs=counters.truncated_write_repairs,
         truncated_output_repairs=counters.truncated_output_repairs,
+        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
     )
 
 
@@ -741,6 +779,12 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         return _unresolved_runtime_issue_decision(unresolved_issue_decision)
     if not request.has_protected_marker:
         response_text = str(getattr(request.response, "text", "") or "").strip()
+        # 门槛5 续跑(真机: 超时后模型只回「我重新来」)：本轮结构化地发生过被重试救回的
+        # 供应商超时，而模型这一轮零工具调用、只给了正文 —— 只承诺不动作。旧行为直接
+        # break 把承诺当收口，用户看到一句承诺 + 空提示符。这里至多续跑一次。
+        timeout_resume = _provider_timeout_resume_decision(request, response_text)
+        if timeout_resume is not None:
+            return timeout_resume
         reply_required = active_turn_user_reply_required(request.params)
         if reply_required and response_text:
             satisfy_active_turn_user_reply(request.params)
@@ -805,6 +849,33 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         )
     final = protected_tool_marker_block_response(request.response.backend)
     return ToolLoopResponseDecision("break", final, [], request.counters)
+
+
+# LLM: 触发完全结构化：只认「产出这条响应的那次物理模型调用所属的 model turn 序号被
+#   生成层登记为『本轮发生过被重试救回的供应商超时』」（live_archive_state 上的结构化
+#   字段，与账本同源），绝不读模型正文——把承诺换成任意其它文本，行为完全一致。
+#   门槛5 的重试资格判定一行未动：本函数只处理「重试已经结束之后」；能走到这里说明
+#   重试那一枪已经打出去了、供应商也真的答了（否则这里拿到的是异常而不是响应）。
+#   有界: 每次裁决最多一次，计数与截断续跑互不吃预算；只追加一条宿主指令，不重放工具。
+# 函数用途: 本轮「可恢复供应商失败 + 模型零工具调用只承诺」时给出至多一次轮内续跑。
+def _provider_timeout_resume_decision(
+    request: _NoToolCallsRequest,
+    response_text: str,
+) -> ToolLoopResponseDecision | None:
+    if not response_text:
+        # 空正文属于既有 empty-text nudge 的预算，两条路径不互相记账。
+        return None
+    if request.counters.provider_timeout_resume_repairs >= _PROVIDER_TIMEOUT_RESUME_LIMIT:
+        # 续跑预算用尽：按原语义收口（承诺当普通 plain final 返回），不进入无限续跑。
+        return None
+    from ..tool_model_generation import provider_timeout_resume_eligible
+
+    if not provider_timeout_resume_eligible(request.params):
+        return None
+    request.params.tool_context.append(_PROVIDER_TIMEOUT_RESUME)
+    return ToolLoopResponseDecision(
+        "continue", None, [], _inc_provider_timeout_resume(request.counters)
+    )
 
 
 def _is_runtime_status_response(response: object) -> bool:
