@@ -253,6 +253,222 @@ def read_jsonl_tail_report(path: Path, *, context: str, limit: int) -> JsonlRead
     return JsonlReadReport(rows, errors)
 
 
+# ---------------------------------------------------------------------------
+# bounded scan indexes
+# ---------------------------------------------------------------------------
+#
+# 唤醒队列、观察分片、进度策略这三处台账原先都是"每轮全量 glob + 逐文件解析 + 再过滤"。
+# 这里给出统一的**读取侧增量索引**:按文件指纹(ino,size,mtime_ns,ctime_ns)判断上次
+# 读到的权威负载是否仍然等于磁盘字节;任何不一致(新增/改写/删除/schema 不匹配/超尺寸)
+# 都回退到权威文件读取。索引不是第二套状态,也不参与唤醒、到期或恢复裁决:
+#   * 不写盘:纯进程内派生投影,进程重启即冷启动=全量扫描,结果不变;
+#   * 不权威:每次使用前用指纹与权威文件核对,索引被清空/污染只会变慢,不会变结果;
+#   * 有界:条目数与缓存记录数都有硬上限,超限的目录整体回退全量扫描并记结构化告警。
+_SCAN_INDEX_SCHEMA = "conversation.scan_index.v1"
+_SCAN_INDEX_WARNING_LIMIT = 32
+_SCAN_INDEX_MAX_ENTRIES = 8192
+_SCAN_INDEX_MAX_RECORDS = 30000
+_SCAN_INDEX_MAX_RECORDS_PER_FILE = 10000
+_SCAN_INDEX_REGISTRY_LOCK = threading.Lock()
+
+
+# LLM: 指纹必须覆盖"文件身份+内容+元数据变更"三类事实:原子替换(write_json_file_atomic)
+# 会换 inode,JSONL 追加会改 size/mtime,原地改写会改 ctime;任一项变化即视为索引条目过期。
+# 函数用途: 取一个台账文件当前指纹;文件不可 stat 时返回 None 表示索引不可用。
+def _file_fingerprint(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+# LLM: 身份字段(file stem 与记录内主键)必须一致,否则该投影条目视为不可信并强制回到权威
+# 读取;这既能拦住被污染的投影,也不会改变"文件名与主键不一致"的既有语义(仍按主键返回)。
+# 函数用途: 校验一条投影负载的主键是否与文件名 stem 相符。
+def _scan_index_identity_matches(payload: object, identity_key: str, expected: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get(identity_key) or "") == expected
+
+
+@dataclass(frozen=True)
+class _ScanIndexEntry:
+    """一条派生投影:权威文件的指纹 + 该次权威读取的结果(负载或结构化错误)。"""
+
+    fingerprint: tuple[int, int, int, int]
+    ok: bool
+    payload: Any
+    error: dict[str, Any] | None = None
+    records: int = 0
+
+
+class _ScanIndex:
+    # LLM: 该对象只保存"上次权威读取的负载",不保存任何裁决状态;调用方必须先给出刚刚
+    # stat 到的指纹才能取用条目,因此并发写只会造成未命中,不会读到过期内容。
+    # 类用途: 单个台账目录的进程内增量索引,带 LRU 上限、告警去重和结构化统计。
+    def __init__(self, name: str, *, max_entries: int = _SCAN_INDEX_MAX_ENTRIES) -> None:
+        self.name = name
+        self.schema = _SCAN_INDEX_SCHEMA
+        self.max_entries = max(0, int(max_entries))
+        self.warnings: list[dict[str, Any]] = []
+        self.hits = 0
+        self.misses = 0
+        self.stale = 0
+        self.evictions = 0
+        self._entries: dict[str, _ScanIndexEntry] = {}
+        self._records = 0
+        self._order_names: frozenset[str] | None = None
+        self._order_paths: list[Path] | None = None
+        self._lock = threading.RLock()
+
+    # LLM: 目录扫描的 canonical 顺序完全由"文件名集合"决定(同一父目录、目录内名字唯一),
+    # 因此按 frozenset(名字) 记忆排序结果:集合没变就直接复用,集合变了才重新排序。排序是
+    # 集合的纯函数,所以这不是新的顺序规则,只是不再每轮为几千个 Path 做 pathlib 比较;
+    # glob 的调用方式与 pattern 完全不变,文件集合仍每轮重新枚举。
+    # 函数用途: 返回目录下匹配 pattern 的路径,按旧实现的 canonical 顺序排列;返回值只读。
+    def ordered_paths(self, directory: Path, pattern: str) -> list[Path]:
+        paths = list(directory.glob(pattern))
+        names = frozenset(path.name for path in paths)
+        with self._lock:
+            if names == self._order_names and self._order_paths is not None:
+                return self._order_paths
+        paths.sort()
+        with self._lock:
+            self._order_names = names
+            self._order_paths = paths
+        return paths
+
+    # LLM: 告警按 (reason,key) 去重并有上限,避免轮询路径刷日志;这是"索引不可用已回退
+    # 全量扫描"的结构化事实,不是错误状态,消费方不得据此改变唤醒/恢复裁决。
+    # 函数用途: 记录并输出一条结构化索引告警(去重、有界)。
+    def warn(self, reason: str, *, key: str = "", **fields: Any) -> dict[str, Any]:
+        record = {
+            "schema": "conversation.scan_index.warning.v1",
+            "index": self.name,
+            "reason": str(reason),
+            "key": str(key),
+            **fields,
+        }
+        with self._lock:
+            duplicate = any(
+                item.get("reason") == record["reason"] and item.get("key") == record["key"]
+                for item in self.warnings
+            )
+            if duplicate:
+                return record
+            if len(self.warnings) < _SCAN_INDEX_WARNING_LIMIT:
+                self.warnings.append(record)
+        _STORE_LOGGER.warning(
+            "conversation.scan_index.unusable %s",
+            json.dumps(record, ensure_ascii=False, sort_keys=True),
+        )
+        return record
+
+    # LLM: 命中条件=指纹逐字段相等(+ 主键身份相符);指纹不等条目立即丢弃并计为 stale,
+    # 由调用方读取权威文件后重新写入,绝不"部分信任"。
+    # 函数用途: 用刚取到的指纹查一条可用投影;不可用返回 None(调用方回退权威读取)。
+    def lookup(
+        self, path: Path, fingerprint: tuple[int, int, int, int], *, identity_key: str = ""
+    ) -> _ScanIndexEntry | None:
+        name = path.name
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is None:
+                self.misses += 1
+                return None
+            if entry.fingerprint != fingerprint:
+                self._entries.pop(name, None)
+                self._records -= entry.records
+                self.stale += 1
+                return None
+            if entry.ok and identity_key and not _scan_index_identity_matches(
+                entry.payload, identity_key, path.stem
+            ):
+                self._entries.pop(name, None)
+                self._records -= entry.records
+                self.warn("entry_identity_mismatch", key=name, path=str(path))
+                return None
+            self._entries.pop(name, None)
+            self._entries[name] = entry
+            self.hits += 1
+            return entry
+
+    # LLM: 写入只发生在"刚完成一次权威读取且读前读后指纹一致"之后,因此投影与磁盘字节
+    # 同源;同一文件重复写入是幂等的(覆盖同名条目),不会产生第二份账。
+    # 函数用途: 记录一次权威读取结果;超记录预算时拒绝缓存并记结构化告警。
+    def store(
+        self,
+        path: Path,
+        fingerprint: tuple[int, int, int, int],
+        *,
+        ok: bool,
+        payload: Any,
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        name = path.name
+        records = len(payload) if ok and isinstance(payload, list) else 0
+        if records > _SCAN_INDEX_MAX_RECORDS_PER_FILE:
+            self.warn(
+                "entry_record_budget_exceeded",
+                key=name,
+                path=str(path),
+                records=records,
+                limit=_SCAN_INDEX_MAX_RECORDS_PER_FILE,
+            )
+            return
+        with self._lock:
+            previous = self._entries.pop(name, None)
+            if previous is not None:
+                self._records -= previous.records
+            while self._entries and self._records + records > _SCAN_INDEX_MAX_RECORDS:
+                oldest = next(iter(self._entries))
+                evicted = self._entries.pop(oldest)
+                self._records -= evicted.records
+                self.evictions += 1
+            if self._records + records > _SCAN_INDEX_MAX_RECORDS:
+                self.warn(
+                    "record_budget_exceeded",
+                    key=name,
+                    path=str(path),
+                    records=records,
+                    limit=_SCAN_INDEX_MAX_RECORDS,
+                )
+                return
+            self._entries[name] = _ScanIndexEntry(
+                fingerprint=fingerprint,
+                ok=ok,
+                payload=payload,
+                error=error,
+                records=records,
+            )
+            self._records += records
+
+    # LLM: 清空等价于冷启动,只影响耗时;保留告警与计数便于诊断。
+    # 函数用途: 丢弃全部投影条目(供失效处理与测试)。
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._records = 0
+
+    # 函数用途: 返回该索引的条目/记录占用与命中统计,供诊断和测试断言。
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "index": self.name,
+                "schema": self.schema,
+                "entries": len(self._entries),
+                "records": self._records,
+                "max_entries": self.max_entries,
+                "max_records": _SCAN_INDEX_MAX_RECORDS,
+                "hits": self.hits,
+                "misses": self.misses,
+                "stale": self.stale,
+                "evictions": self.evictions,
+                "warnings": list(self.warnings),
+            }
+
+
 def now(value: float | None = None) -> float:
     return float(time.time() if value is None else value)
 
@@ -503,6 +719,89 @@ class ConversationBaseStore:
         return (
             self.wake_dedupe_dir / f"{safe_file_stem(thread_id)}.{safe_file_stem(dedupe_key)}.json"
         )
+
+    # LLM: 读取侧增量索引按 store 实例惰性建在实例 __dict__ 上,不写盘、不进 __init__;
+    # 进程重启或索引被丢弃只会让下一次调用退回全量权威扫描,绝不改变任何返回语义。
+    # 函数用途: 取得某个台账目录(唤醒/观察/策略)的进程内增量索引。
+    def _scan_index(self, name: str) -> _ScanIndex:
+        registry = self.__dict__.get("_scan_index_registry")
+        if registry is None:
+            with _SCAN_INDEX_REGISTRY_LOCK:
+                registry = self.__dict__.get("_scan_index_registry")
+                if registry is None:
+                    registry = {}
+                    self.__dict__["_scan_index_registry"] = registry
+        index = registry.get(name)
+        if index is None:
+            with _SCAN_INDEX_REGISTRY_LOCK:
+                index = registry.get(name)
+                if index is None:
+                    index = _ScanIndex(name)
+                    registry[name] = index
+        return index
+
+    # LLM: 该判定只回答"这次能不能用投影加速",不回答任何业务问题;不可用时本次调用整体
+    # 退回全量权威扫描并留结构化告警,因此索引缺失/损坏永远不会让人少读一条记录。
+    # 函数用途: 判断本次扫描能否使用增量索引(校验 schema 与条目规模上限)。
+    def _scan_index_usable(self, index: _ScanIndex, *, key: str, entries: int) -> bool:
+        if index.schema != _SCAN_INDEX_SCHEMA:
+            index.warn(
+                "index_rejected",
+                key=key,
+                expected=_SCAN_INDEX_SCHEMA,
+                found=str(index.schema),
+            )
+            return False
+        if entries > index.max_entries:
+            index.warn(
+                "dir_too_large",
+                key=key,
+                entries=int(entries),
+                limit=int(index.max_entries),
+            )
+            return False
+        return True
+
+    # LLM: 复用投影的前提是"文件指纹与写入投影时逐字段相同";读权威文件前后再各取一次
+    # 指纹,期间发生并发写就不入索引,避免把半新内容固化。索引只省 I/O,过滤/排序/limit
+    # 语义完全仍由调用方按权威负载判定。
+    # 函数用途: 读一个台账文件,命中有效投影就复用,否则读权威文件并刷新投影。
+    def _indexed_payload(
+        self,
+        index: _ScanIndex,
+        path: Path,
+        reader: Callable[[Path], tuple[bool, Any, dict[str, Any] | None]],
+        *,
+        identity_key: str = "",
+        use_index: bool = True,
+    ) -> tuple[bool, Any, dict[str, Any] | None]:
+        current = _file_fingerprint(path)
+        if use_index and current is not None:
+            entry = index.lookup(path, current, identity_key=identity_key)
+            if entry is not None:
+                # 结构化错误按"每次一份副本"交还:旧实现每次读取都新建错误字典,副本能保证
+                # 消费方改自己拿到的 error 对象时不会污染索引里保存的那一份。
+                return (
+                    entry.ok,
+                    entry.payload,
+                    dict(entry.error) if entry.error is not None else None,
+                )
+        ok, payload, error = reader(path)
+        if use_index:
+            after = _file_fingerprint(path)
+            if ok and after is not None and after == current:
+                if not identity_key or _scan_index_identity_matches(
+                    payload, identity_key, path.stem
+                ):
+                    index.store(
+                        path,
+                        after,
+                        ok=ok,
+                        payload=payload,
+                        # 索引只持有自己私有的错误副本,不与被调用方共享同一个 dict。
+                        error=dict(error) if error is not None else None,
+                    )
+        return ok, payload, error
 
 
 # ---------------------------------------------------------------------------
@@ -2742,6 +3041,17 @@ def _observation_events(
     return events, errors
 
 
+# LLM: 观察分片是追加式 JSONL,索引负载就是 read_jsonl_report 的原始行;脏行会让该分片
+# 保持"读权威"路径(不入索引),以免把带解析错误的快照固化下来。
+# 函数用途: 读取一个观察分片的权威行,供增量索引与全量扫描共用同一解析口径。
+def _read_observation_shard_entry(
+    path: Path,
+) -> tuple[bool, list[dict[str, Any]] | None, dict[str, Any] | None]:
+    report = read_jsonl_report(path, context="conversation.observations.read")
+    error = report.load_errors[0] if report.load_errors else None
+    return error is None, report.rows, error
+
+
 class ConversationObservationStore(ConversationTaskStore):
     # LLM: Observation append owns its ledger row and activity time only; other thread fields are
     # preserved by the atomic latest-record updater.
@@ -2794,13 +3104,33 @@ class ConversationObservationStore(ConversationTaskStore):
         selected = events if limit <= 0 else events[-limit:]
         return selected, [*report.load_errors, *parse_errors]
 
+    # LLM: 观察事件是全 owner 级台账,轮询路径每轮都要读全部未处理项;这里把"每分片重复
+    # 读取 handled 映射"收敛为一次读取,并用增量索引跳过未变化分片的重复解析。返回集合、
+    # 顺序(先全序 stable sort 再 limit)、handled/requires_* 过滤语义与旧实现逐字一致。
+    # 函数用途: 汇总所有会话里要求主代理处理且尚未处理的观察事件,按观察时间升序取前 limit 条。
     def unhandled_observations_requiring_main(self, *, limit: int = 20) -> list[ObservationEvent]:
-        events = [
-            event
-            for path in sorted(self.observations_dir.glob("*.jsonl"))
-            for event in self.recent_observations(path.stem, limit=0, include_handled=False)
-            if event.requires_main_agent or event.requires_llm_report
-        ]
+        handled = self._read_observation_handled()
+        index = self._scan_index("observations")
+        paths = index.ordered_paths(self.observations_dir, "*.jsonl")
+        use_index = self._scan_index_usable(index, key="observations", entries=len(paths))
+        events: list[ObservationEvent] = []
+        for path in paths:
+            # 读取目标仍按 path.stem 反推(与旧实现 recent_observations(path.stem) 完全同路),
+            # 因此文件名与 thread_id 约定不一致时仍然读不到东西,不会因为换了扫描方式而多读。
+            target = self._observation_path(path.stem)
+            _ok, rows, _error = self._indexed_payload(
+                index,
+                target,
+                _read_observation_shard_entry,
+                use_index=use_index,
+            )
+            parsed, _parse_errors = _observation_events(rows or [], handled)
+            events.extend(
+                event
+                for event in parsed
+                if event.handled_at <= 0
+                and (event.requires_main_agent or event.requires_llm_report)
+            )
         events.sort(key=lambda item: item.observed_at)
         return events if limit <= 0 else events[:limit]
 
@@ -4562,16 +4892,44 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
-def _read_wake_signal(path: Path) -> tuple[WakeSignal | None, dict[str, Any] | None]:
+# LLM: 解析与建模拆成两步,唯一目的是让读取侧增量索引能缓存"磁盘原始负载"而仍然复用
+# 同一份错误口径(runtime_error_report + context + path,逐字与旧实现相同,不含 traceback,
+# 因此错误字典对同一份字节是确定性的、可缓存)。任何一步失败都返回同一种结构化错误。
+# 函数用途: 读取并解析一条唤醒信号文件,返回磁盘原始负载或结构化错误。
+def _read_wake_signal_payload(path: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError(f"wake signal file is {type(payload).__name__}, expected object")
+        return payload, None
+    except Exception as exc:
+        report = runtime_error_report(exc, context="conversation.wake_signal.read")
+        report["path"] = str(path)
+        return None, report
+
+
+# LLM: 建模失败与解析失败共用同一 context/path 口径,消费方(guidance/运行时)以 load_error
+# 是否存在作硬门,因此这里绝不能吞掉任何一条失败事实。
+# 函数用途: 把一条已解析的唤醒信号负载建模成 WakeSignal,失败时给出同口径错误报告。
+def _wake_signal_from_payload(
+    path: Path, payload: dict[str, Any]
+) -> tuple[WakeSignal | None, dict[str, Any] | None]:
+    try:
         return WakeSignal.from_dict(payload), None
     except Exception as exc:
         report = runtime_error_report(exc, context="conversation.wake_signal.read")
         report["path"] = str(path)
         return None, report
+
+
+# LLM: 该读取器只解析不改语义:负载就是磁盘字节的 json.loads 结果,错误就是旧
+# _read_wake_signal 的同一份结构化报告,因此增量索引缓存的正是权威读取事实。
+# 函数用途: 增量索引与全量扫描共用的读取器,统一 (ok, 负载, 错误) 形状;解析失败时 ok=False。
+def _read_wake_signal_entry(
+    path: Path,
+) -> tuple[bool, dict[str, Any] | None, dict[str, Any] | None]:
+    payload, error = _read_wake_signal_payload(path)
+    return payload is not None, payload, error
 
 
 _UNFINISHED_GOAL_STATUSES = THREAD_GOAL_STATUSES - {"complete"}
@@ -5238,13 +5596,34 @@ class ConversationWakeStore(ConversationGoalStore):
         signals, _load_errors = self._pending_signals_report(kind)
         return signals
 
+    # LLM: 唤醒队列的每轮全量解析在这里收敛为增量索引:未变化文件复用上次权威读取的负载,
+    # 变化/新增文件仍按 _read_wake_signal_payload + _wake_signal_from_payload 同路解析。
+    # load_error 集合必须逐条保持原样——runtime/guidance 消费方以"有 load_error 就不消费"
+    # 作硬门,因此失败文件的结构化错误同样被索引缓存,不得被跳过。
     def _pending_signals_report(self, kind: str) -> tuple[list[WakeSignal], list[dict[str, Any]]]:
         signals: list[WakeSignal] = []
         load_errors: list[dict[str, Any]] = []
-        for path in sorted((self.wake_queue_dir / kind).glob("*.json")):
-            signal, error = _read_wake_signal(path)
+        index = self._scan_index(f"wake:{kind}")
+        paths = index.ordered_paths(self.wake_queue_dir / kind, "*.json")
+        use_index = self._scan_index_usable(
+            index, key=f"wake:{kind}", entries=len(paths)
+        )
+        for path in paths:
+            _ok, payload, error = self._indexed_payload(
+                index,
+                path,
+                _read_wake_signal_entry,
+                identity_key="wake_signal_id",
+                use_index=use_index,
+            )
             if error is not None:
                 load_errors.append(error)
+            if payload is None:
+                continue
+            signal, signal_error = _wake_signal_from_payload(path, payload)
+            if signal_error is not None:
+                load_errors.append(signal_error)
+                continue
             if signal is not None and signal.status == "pending":
                 signals.append(signal)
         return signals, load_errors
@@ -5292,14 +5671,51 @@ def _progress_policy_read_error(path: Path, exc: BaseException) -> dict[str, Any
     return report
 
 
-def _read_progress_policy_report(path: Path) -> tuple[ProgressPolicy | None, dict[str, Any] | None]:
+# LLM: 解析与建模拆两步,唯一目的是让读取侧增量索引缓存"磁盘原始负载"而仍复用同一份
+# 错误口径(与旧 _read_progress_policy_report 逐字相同的报告:context + path + policy_id,
+# 不含 traceback,因此对同一份字节确定性可缓存)。
+# 函数用途: 读取并解析一个进度策略文件,返回磁盘原始负载或结构化错误。
+def _read_progress_policy_payload(
+    path: Path,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError(f"progress policy is {type(data).__name__}, expected object")
-        return ProgressPolicy.from_dict(data), None
+        return data, None
     except (OSError, UnicodeError, ValueError) as exc:
         return None, _progress_policy_read_error(path, exc)
+
+
+# LLM: 建模失败与解析失败共用 _progress_policy_read_error,保证 load_error 集合逐条不变。
+# 函数用途: 把一份已解析的策略负载建模成 ProgressPolicy,失败时给出同口径错误报告。
+def _progress_policy_from_payload(
+    path: Path, payload: dict[str, Any]
+) -> tuple[ProgressPolicy | None, dict[str, Any] | None]:
+    try:
+        return ProgressPolicy.from_dict(payload), None
+    except (OSError, UnicodeError, ValueError) as exc:
+        return None, _progress_policy_read_error(path, exc)
+
+
+# LLM: 旧实现的 try 块只覆盖"解析 + 建模"两步,拆开后两步的异常类型与错误报告完全一致,
+# 因此 load_error 的 category/error_type/message/context/path/policy_id 逐字不变。
+# 函数用途: 读取一个进度策略文件并建模,失败时返回同口径结构化错误。
+def _read_progress_policy_report(path: Path) -> tuple[ProgressPolicy | None, dict[str, Any] | None]:
+    payload, error = _read_progress_policy_payload(path)
+    if payload is None:
+        return None, error
+    return _progress_policy_from_payload(path, payload)
+
+
+# LLM: 增量索引与全量扫描共用同一读取器;解析失败时 ok=False,调用方按原语义把它计入
+# load_errors,因此索引不会让任何一条策略读取失败被静默跳过。
+# 函数用途: 进度策略文件的索引读取器,统一 (ok, 负载, 错误) 形状。
+def _read_progress_policy_entry(
+    path: Path,
+) -> tuple[bool, dict[str, Any] | None, dict[str, Any] | None]:
+    payload, error = _read_progress_policy_payload(path)
+    return payload is not None, payload, error
 
 
 # 无进展退避封顶倍数:间隔最多拉长到 8×(streak≥3 封顶),够让卡死任务把资源让给活任务,
@@ -5366,13 +5782,31 @@ class ConversationProgressStore(ConversationWakeStore):
         policies, _ = self.list_progress_policies_report(enabled_only=enabled_only)
         return policies
 
+    # LLM: 策略目录原先每轮全量解析(即便只为了 enabled 过滤)。这里用同一份增量索引跳过
+    # 未变化文件的重复解析;enabled 过滤、按 next_due_at 排序、到期筛选仍由调用方按权威
+    # 负载判定,load_error 集合逐条不变。
     def list_progress_policies_report(
         self, *, enabled_only: bool = False
     ) -> tuple[list[ProgressPolicy], list[dict[str, Any]]]:
         policies: list[ProgressPolicy] = []
         load_errors: list[dict[str, Any]] = []
-        for path in sorted(self.policies_dir.glob("*.json")):
-            policy, error = _read_progress_policy_report(path)
+        index = self._scan_index("progress_policies")
+        paths = index.ordered_paths(self.policies_dir, "*.json")
+        use_index = self._scan_index_usable(
+            index, key="progress_policies", entries=len(paths)
+        )
+        for path in paths:
+            _ok, payload, error = self._indexed_payload(
+                index,
+                path,
+                _read_progress_policy_entry,
+                identity_key="policy_id",
+                use_index=use_index,
+            )
+            policy: ProgressPolicy | None = None
+            if payload is not None:
+                # 负载与解析错误互斥,因此这里换成"建模阶段"的同口径错误,一个文件仍只贡献一条错误。
+                policy, error = _progress_policy_from_payload(path, payload)
             if policy is not None:
                 policies.append(policy)
             if error is not None:

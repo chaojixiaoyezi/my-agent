@@ -1442,3 +1442,79 @@ def test_mark_progress_failed_records_backoff_and_retires(tmp_path) -> None:
     assert retired.metadata["failure_count"] == 3
     assert retired.metadata["retired_at"] == 50.0
     assert policy.policy_id not in {p.policy_id for p in store.due_progress_policies(now=100.0)}
+
+
+# 读取侧增量索引只允许改变耗时。这里把唤醒查询的四个语义(urgent 优先、created_at 升序、
+# limit 截断、status 过滤)和 load_error 门钉死在真实 store 上:调用方
+# (runtime/guidance)以"load_error 非空即不消费"作硬门,所以坏文件必须每轮都被报出来。
+def test_wake_pending_report_keeps_order_limit_status_filter_and_load_errors(
+    tmp_path,
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    normal = store.raise_wake_signal({'thread_id': thread.thread_id, 'reason': "agent_event", 'urgency': "normal", 'now': 20.0})
+    urgent_late = store.raise_wake_signal({'thread_id': thread.thread_id, 'reason': "agent_event", 'urgency': "urgent", 'now': 22.0})
+    urgent_early = store.raise_wake_signal({'thread_id': thread.thread_id, 'reason': "agent_event", 'urgency': "urgent", 'now': 21.0})
+    # 崩溃窗口残留:队列目录里状态已不是 pending 的文件不得被返回。
+    leftover = store.wake_queue_dir / "urgent" / "wake-handled-left.json"
+    leftover.write_text(
+        json.dumps(
+            {
+                "wake_signal_id": "wake-handled-left",
+                "thread_id": thread.thread_id,
+                "urgency": "urgent",
+                "created_at": 1.0,
+                "status": "handled",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (store.wake_queue_dir / "normal" / "wake-broken.json").write_text("{not json", encoding="utf-8")
+
+    expected_order = [urgent_early.wake_signal_id, urgent_late.wake_signal_id, normal.wake_signal_id]
+    signals, errors = store.pending_wake_signals_report(limit=0)
+    assert [item.wake_signal_id for item in signals] == expected_order
+    assert errors and errors[0]["context"] == "conversation.wake_signal.read"
+
+    capped, capped_errors = store.pending_wake_signals_report(limit=2)
+    assert [item.wake_signal_id for item in capped] == expected_order[:2]
+    urgent_only, _ = store.pending_wake_signals_report(limit=0, include_normal=False)
+    assert [item.wake_signal_id for item in urgent_only] == expected_order[:2]
+
+    # 重复调用必须逐字稳定:信号、顺序、limit 截断、以及 load_error 全集。
+    for _ in range(3):
+        repeated, repeated_errors = store.pending_wake_signals_report(limit=0)
+        repeated_capped, repeated_capped_errors = store.pending_wake_signals_report(limit=2)
+        assert [item.to_dict() for item in repeated] == [item.to_dict() for item in signals]
+        assert repeated_errors == errors
+        assert [item.to_dict() for item in repeated_capped] == [item.to_dict() for item in capped]
+        assert repeated_capped_errors == capped_errors
+
+
+# 观察查询的语义同样钉死:已处理(handled 映射或行内 handled_at)不返回、二者其一的
+# requires 标记才返回、按 observed_at 升序、limit 取最早 N 条,重复调用结果一致。
+def test_unhandled_observations_requiring_main_keeps_order_limit_and_handled_filter(
+    tmp_path,
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    other = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-2", 'channel_user_id': "user-1", 'now': 11.0})
+    first = store.append_observation({'thread_id': thread.thread_id, 'event_type': "child_agent_event", 'summary': "最早", 'requires_main_agent': True, 'now': 30.0})
+    second = store.append_observation({'thread_id': other.thread_id, 'event_type': "child_agent_event", 'summary': "需要模型报告", 'requires_llm_report': True, 'now': 31.0})
+    plain = store.append_observation({'thread_id': thread.thread_id, 'event_type': "child_agent_event", 'summary': "不需要主代理", 'now': 32.0})
+    handled = store.append_observation({'thread_id': other.thread_id, 'event_type': "child_agent_event", 'summary': "已处理", 'requires_main_agent': True, 'now': 33.0})
+    store.mark_observations_handled([handled.observation_id], now=34.0)
+
+    events = store.unhandled_observations_requiring_main(limit=0)
+    assert [item.observation_id for item in events] == [first.observation_id, second.observation_id]
+    assert plain.observation_id not in {item.observation_id for item in events}
+    assert handled.observation_id not in {item.observation_id for item in events}
+    assert [item.observed_at for item in events] == sorted(item.observed_at for item in events)
+    assert [
+        item.observation_id for item in store.unhandled_observations_requiring_main(limit=1)
+    ] == [first.observation_id]
+
+    for _ in range(3):
+        assert [item.to_dict() for item in store.unhandled_observations_requiring_main(limit=0)] == [
+            item.to_dict() for item in events
+        ]
