@@ -1,5 +1,23 @@
 # Gateway Structure
 
+## 2026-09-14 R291 收口待重试事实必须进入硬事实发现层（否则恢复链跑不到）
+
+**问题（本轮自查发现）**：runner 终态收口的待重试事实落在子代理 canonical task 的 attributes 上，
+而 Gateway 的 reconcile 车道只扫"硬事实 owner"（`_owner_has_hard_facts`）。收口写库失败或
+"收口后通知前中断"时，run/task 都已是终态、也**没有** pending wake 信号，因此该 owner 不构成硬事实
+——待重试事实虽然持久化了，却永远不会被推进，恢复链形同虚设。这是"持久化了但没人来读"的可达性缺口。
+
+**修法（结构化投影 + 发现层同一个判据）**：
+
+1. `build_owner_agent_projection` 增加结构化布尔量 `runtime_closeout_pending`（权威仍是 canonical
+   task 的 attributes；投影只是让 owner 级扫描不用猜 workspace slug）。
+2. `_has_unfinished_subagent_run` 除 `_UNFINISHED_RUN_STATUSES` 外，把
+   `runtime_closeout_pending=true` 也算作未完成硬事实 → owner 重新进入 reconcile 车道，
+   `recover_pending_closeouts()` 才能补收口与补通知。
+
+**边界**：只投影一个布尔量，不把 WAL 全文写进 owner 投影；终态且无待重试收口的 run 仍不是硬事实
+（反向用例固定），避免每次 reconcile 无意义扫全量 owner。
+
 ## 2026-09-13 R283 JSONL 记录边界统一为物理 LF（真实事故修复）
 
 **事故**：子代理 transcript 的 JSON 字符串里含 U+0085(NEL)，`path.read_text().splitlines()` 在 NEL

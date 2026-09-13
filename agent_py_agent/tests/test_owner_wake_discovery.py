@@ -1040,3 +1040,43 @@ def test_concurrent_pagination_reads_consistent_pages(snapshots, tmp_path) -> No
         results = list(pool.map(lambda _: sweep(), range(8)))
 
     assert results == [expected] * 8
+
+
+# LLM: 终态 run + 未完成收口事实必须仍被判定为硬事实：否则 Gateway 的 reconcile 车道
+# 不会来推进待重试收口，恢复链永不执行（run/task 已终态、也没有 wake 信号）。
+# 函数用途: 验证 runtime_closeout_pending 投影能让 owner 重新进入硬事实车道。
+def test_owner_with_pending_runtime_closeout_is_a_hard_fact(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-closeout")
+    # 终态 run（无未完成状态）+ 待重试收口事实。
+    run_dir = home / "agents" / "subagent-1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "owner-agent-projection.v1",
+                "agent_id": "subagent-1",
+                "run_id": "subagent-1",
+                "status": "FAILED",
+                "runtime_closeout_pending": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    found = discover_wake_pending_owners(owners)
+
+    assert [(o.provider, o.owner_id) for o in found] == [("unknown", "u-closeout")]
+
+
+# LLM: 反向用例——终态且没有待重试收口事实的 run 不得被当成硬事实，
+# 否则每次 reconcile 都会无意义地扫全量 owner（软活不能伪装成硬活）。
+# 函数用途: 验证终态 run 不会仅因存在就被判为硬事实。
+def test_terminal_run_without_closeout_is_not_a_hard_fact(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-quiet")
+    _write_run(home, "subagent-1", "FAILED")
+
+    found = discover_wake_pending_owners(owners)
+
+    assert found == []

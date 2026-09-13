@@ -1,5 +1,12 @@
 # Subagent Progress
 
+### R291 追加：owner 投影新增 runtime_closeout_pending
+
+`build_owner_agent_projection` 增加结构化布尔量 `runtime_closeout_pending`（来自 canonical task
+`attributes.runtime_closeout_pending`）。它不是新的权威，只是让 owner 级发现层能看见"这个终态 run
+还有一笔收口/通知欠账"，从而让 Gateway reconcile 车道继续驱动恢复；权威与恢复语义仍在
+`services/runtime_closeout.py`。
+
 ## 2026-09-14 R291 收口可恢复：待重试事实 + 一致终态重入（修 e00866d2 剩余两缺口）
 
 **缺口 1（收口写库失败被吞）**：`settle_runtime_run_for_result` 把写库异常 `catch Exception → None`，

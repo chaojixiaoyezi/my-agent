@@ -54,6 +54,15 @@ def build_agent_state_locator(task: SubAgentTask, state: AgentRunState) -> dict[
 
 
 def build_owner_agent_projection(task: SubAgentTask, state: AgentRunState) -> dict[str, Any]:
+    # LLM: 待重试的 runner 收口事实必须能被 owner 级发现层看见：否则 run 已终态、task 也已终态的
+    # owner 不构成"硬事实"，Gateway 的 reconcile 车道不会来推进它，恢复链就永远跑不到。
+    # 这里只投影一个结构化布尔量，权威仍是 canonical task 的 attributes。
+    from .runtime_closeout import RUNTIME_CLOSEOUT_ATTR
+
+    attrs = getattr(task, "attributes", {}) or {}
+    pending_closeout = isinstance(attrs, dict) and isinstance(
+        attrs.get(RUNTIME_CLOSEOUT_ATTR), dict
+    )
     return {
         "schema_version": "owner-agent-projection.v1",
         "agent_id": task.id,
@@ -75,6 +84,7 @@ def build_owner_agent_projection(task: SubAgentTask, state: AgentRunState) -> di
         "result_file_ref": str(getattr(task, "runner_result_file", "") or ""),
         "final_report_ref": str(getattr(task, "agent_run_final_report_md", "") or ""),
         "latest_tool_progress_ref": _latest_tool_progress_ref(task),
+        "runtime_closeout_pending": bool(pending_closeout),
         "canonical_state_ref": str(state.canonical_path or ""),
         "task_workspace_dir": task.task_workspace_dir,
         "agent_run_workspace_dir": task.agent_run_workspace_dir,

@@ -920,6 +920,9 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
     权威任务记录会分布在 workspace runtime 下，而这个投影专门用来让
     owner 级扫描不用猜每个 workspace slug。
 
+    除"未完成状态"外，``runtime_closeout_pending`` 同样是硬事实：runner 终态收口写库失败、
+    或收口后父级通知前中断时，run/task 都已是终态、且还没有 wake 信号，如果这里不认它，
+    Gateway 的 reconcile 车道就不会来推进这条待重试事实，恢复链永远跑不到。
     倒序扫(run 目录名带时间戳,新的更可能未完成),命中即停;坏文件跳过。"""
     agents_dir = owner_home / "agents"
     if not agents_dir.is_dir():
@@ -933,7 +936,11 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError):
             continue
-        if isinstance(payload, dict) and str(payload.get("status") or "").strip().upper() in _UNFINISHED_RUN_STATUSES:
+        if not isinstance(payload, dict):
+            continue
+        if bool(payload.get("runtime_closeout_pending")):
+            return True
+        if str(payload.get("status") or "").strip().upper() in _UNFINISHED_RUN_STATUSES:
             return True
     return False
 
