@@ -90,6 +90,7 @@ agent_py_agent/
 |   |   |   |-- dispatch/               # dispatch/watch/parent planner 报告
 |   |   |   |-- runner_context_service.py # 执行上下文和边界文件
 |   |   |   |-- runner_result_service.py # runner result 写回和副作用
+|   |   |   |-- runtime_closeout.py    # runner 终态收口的可恢复 WAL + 一致终态重入 + 恢复扫描
 |   |   |   |-- board/                  # board、due-check、action-plan
 |   |   |   |-- actions/                # action-plan 应用、取消/接管动作
 |   |   |   |-- hierarchy/              # 多层调度和恢复包

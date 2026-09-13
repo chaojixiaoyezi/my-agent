@@ -117,7 +117,10 @@ def test_task_local_create_yields_and_wait_marker_blocks_orphan_restart(tmp_path
     assert response is not None
     assert response.runtime_status == "unfinished"
     assert response.runtime_reason == "SUBAGENTS_ACTIVE"
-    assert response.turn_end_reason == "interrupted"
+    # r285：等待是 direct_child_wait 依赖事实，不再把一轮正常答复改写成 interrupted。
+    # turn_end_reason 沿用模型自己的结束原因（本用例模型未给 → 留空，由上层归一）。
+    assert response.turn_end_reason == ""
+    assert response.turn_end_reason != "interrupted"
     assert response.text == "created"
     assert parent_wait_blocks_dispatch(refreshed) is True
     assert _is_dispatch_runner_candidate(refreshed) is False

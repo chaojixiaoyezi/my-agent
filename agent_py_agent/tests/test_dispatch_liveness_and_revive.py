@@ -23,6 +23,7 @@ from agent_py_agent.agent.common.audit_activation import (
 )
 from agent_py_agent.agent.conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state, state_dir
+from agent_py_agent.agent.runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.process_control import is_pid_alive
@@ -1299,4 +1300,280 @@ def test_blocked_runner_result_does_not_settle_runtime_run(tmp_path: Path) -> No
     assert result.status == "BLOCKED"
     run_after = manager.runtime_db.agent_run_for_run_id(task.id)
     assert run_after is not None
-    assert str(run_after["status"] or "") != "done", "可恢复等待不得被收口成终态"
+    # 非终态结论必须排除**全部**终态，而不是只排除 done：failed/cancelled 同样是把
+    # 可恢复等待误判成结束。
+    observed = str(run_after["status"] or "")
+    assert observed not in AGENT_RUN_TERMINAL_STATUSES, (
+        f"可恢复等待不得被收口成任何终态（观测到 {observed!r}）"
+    )
+    attempt_rows = manager.runtime_db.attempts_for_run(str(run_after["agent_run_id"]))
+    # 本 fixture 没有宿主 settle_agent_attempt，收口语义必须"什么都不做"：
+    # attempt 保持 running、没被 closeout 顺带结束。
+    assert [str(row["status"]) for row in attempt_rows] == ["running"], (
+        "非终态结论不得顺带结清 attempt"
+    )
+    assert all(float(row["ended_at"] or 0.0) == 0.0 for row in attempt_rows)
+    events = manager.runtime_db.events_for_attempt(attempt_id, limit=100)
+    assert not any(str(item["event_type"] or "") == "agent_run.completed" for item in events), (
+        "非终态结论不得写 agent_run.completed"
+    )
+
+
+# LLM: 可恢复收口的三个真实缺口共用同一组生产助手（settle / WAL / 恢复扫描），因此在这里
+# 用"真实 runtime.db + 真实会话存储 + 真实落盘 runner_result"造出事故形态，而不是打桩断言：
+#   1) 收口已提交、父级通知前中断 → 恢复链必须补通知，且只补一次；
+#   2) 收口写库一次失败 → 必须留下可诊断的待重试事实，恢复链补收口后再补通知；
+#   3) 重复恢复 → 不产生重复终态事件、不产生重复父级唤醒。
+# 函数用途: 构造一个带父会话绑定的真实子代理 run，并返回收口测试所需的事实。
+def _closeout_fixture(tmp_path: Path, *, owner: str):
+    import json as _json
+
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.subagents.services.runner_result_service import (
+        RecordRunnerResultParams,
+    )
+
+    manager = SubAgentManager(
+        tmp_path / "subagents",
+        owner_id=owner,
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    store = ConversationStore(tmp_path / "conversations")
+    manager.conversation_store = store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": f"{owner}-parent",
+            "channel": "tui",
+            "channel_conversation_id": f"{owner}-session",
+            "channel_user_id": f"{owner}-parent",
+        }
+    )
+    task = manager.create_run(goal="recoverable closeout", thought="", plan=["finish"], depth=1)
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    attempt_id = prepared.runner_active_attempt_id
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": task.id,
+            "goal": "recoverable closeout",
+            "status": "active",
+        }
+    )
+    child = manager.load(task.id)
+    child.attributes = {
+        **dict(child.attributes or {}),
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": task.id,
+    }
+    manager.save(child)
+    authority = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert authority is not None
+    agent_run_id = str(authority["agent_run_id"])
+    # 生产入口：宿主按可续跑族只结清 attempt，run 保持 created。
+    settled = manager.runtime_db.settle_agent_attempt(
+        agent_run_id=agent_run_id,
+        attempt_id=attempt_id,
+        payload={"status": "attempt_done", "run_status": "created", "runtime_status": "error"},
+    )
+    assert settled.get("settled") is True, settled
+    params = RecordRunnerResultParams(
+        run_id=task.id,
+        dry_run=False,
+        ok=False,
+        message="runner 执行失败: MODEL_STREAM_INCOMPLETE",
+        attempt_id=attempt_id,
+        status="FAILED",
+        turn_end_reason="error",
+        failure_type="runner_error",
+    )
+    return manager, store, task, attempt_id, agent_run_id, params, _json
+
+
+# LLM: 只统计"这个 exact attempt 的真实唤醒信号"：按 wake_signal_id 去重 pending/handled 两份，
+# 去重回执文件（wake_dedupe.v1，无 reason）不是唤醒，换代后的新 attempt 也不能被算成重复。
+# 函数用途: 统计唤醒队列里属于某 attempt 的结构化唤醒数量。
+def _wakes_for_attempt(tmp_path: Path, task_id: str, attempt_id: str):
+    import json as _json
+
+    seen: dict[str, tuple[Path, dict]] = {}
+    for candidate in sorted(tmp_path.rglob("*.json")):
+        try:
+            payload = _json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("reason") or "") != "subagent_runner_finished":
+            continue
+        key = str(payload.get("dedupe_key") or "")
+        if not key.startswith(f"subagent-finished:{task_id}:"):
+            continue
+        if not key.endswith(f":{attempt_id}"):
+            continue
+        wake_signal_id = str(payload.get("wake_signal_id") or candidate.stem)
+        seen.setdefault(wake_signal_id, (candidate, payload))
+    return list(seen.values())
+
+
+# LLM: 缺口 1——run 已收口但父级通知前中断：事实必须在盘、恢复链必须补通知且只补一次。
+# 函数用途: 验证"收口后通知前中断"可恢复，且通知不重。
+def test_closeout_interrupted_before_notify_recovers_once(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents import runner_completion_wake
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, store, task, attempt_id, agent_run_id, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/closeout-interrupted"
+    )
+    # 注入"通知前中断"：在真正的发布点之前抛错（等同进程在收口后、通知前被杀）。
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("interrupted before notify")
+
+    original = runner_completion_wake.notify_parent_on_runner_result
+    runner_completion_wake.notify_parent_on_runner_result = _explode
+    try:
+        result = manager.runner_result.record_runner_result(params)
+    finally:
+        runner_completion_wake.notify_parent_on_runner_result = original
+    assert result.status == "FAILED"
+
+    # 收口已提交（run 终态 + 事件），但父级还没收到通知。
+    run_row = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert str(run_row["status"] or "") == "failed"
+    assert _wakes_for_attempt(tmp_path, task.id, attempt_id) == [], "中断时不能假装已通知"
+    fact = runtime_closeout.pending_closeout(manager.load(task.id))
+    assert fact is not None, "中断必须留下持久化的待重试事实"
+    assert str(fact["attempt_id"]) == attempt_id
+    assert str(fact["target_run_status"]) == "failed"
+
+    # 恢复：补通知且只补一次。
+    summary = runtime_closeout.recover_pending_closeouts(manager)
+    assert summary["runtime_closeouts_recovered"] == 1, summary
+    wakes = _wakes_for_attempt(tmp_path, task.id, attempt_id)
+    assert len(wakes) == 1, f"恢复必须恰好补一次通知，实际 {len(wakes)}"
+    assert str(wakes[0][1].get("reason") or "") == "subagent_runner_finished"
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None, "交付完成后必须清账"
+
+    # 重复恢复：不得再发一次。
+    again = runtime_closeout.recover_pending_closeouts(manager)
+    assert again["runtime_closeouts_recovered"] == 0, again
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1, "重复恢复不得重复通知"
+
+
+# LLM: 缺口 2——收口写库一次失败：不得静默返回 None，必须留下可诊断的待重试事实，
+# 恢复链补收口后再补通知；期间父级绝不能被当成"已完成"唤醒。
+# 函数用途: 验证收口写库失败一次后可恢复，且恢复前不通知、恢复后恰通知一次。
+def test_closeout_write_failure_leaves_retryable_fact_then_recovers(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, store, task, attempt_id, agent_run_id, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/closeout-write-fail"
+    )
+    repo = manager.runtime_db
+    original_settle = repo.settle_agent_run
+    calls = {"count": 0, "failures": 0}
+
+    def _fail_once(*args, **kwargs):
+        calls["count"] += 1
+        if calls["failures"] == 0:
+            calls["failures"] += 1
+            raise RuntimeError("runtime.db temporarily unavailable")
+        return original_settle(*args, **kwargs)
+
+    repo.settle_agent_run = _fail_once
+    try:
+        result = manager.runner_result.record_runner_result(params)
+    finally:
+        repo.settle_agent_run = original_settle
+    assert result.status == "FAILED"
+    assert calls["failures"] == 1, "本用例要求恰好注入一次写库失败"
+
+    # 权威 run 仍是 created：收口没落成，且不能被冒充成已完成。
+    run_row = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert str(run_row["status"] or "") == "created", dict(run_row)
+    assert _wakes_for_attempt(tmp_path, task.id, attempt_id) == [], (
+        "收口未提交时父级绝不能被唤醒成已完成"
+    )
+    fact = runtime_closeout.pending_closeout(manager.load(task.id))
+    assert fact is not None, "写库失败必须留下持久化待重试事实，而不是静默 fail-soft"
+    assert str(fact["closeout_state"]) == "write_error"
+    assert "unavailable" in str(fact["closeout_detail"]), fact["closeout_detail"]
+
+    # 恢复：先补收口，再补通知。
+    summary = runtime_closeout.recover_pending_closeouts(manager)
+    assert summary["runtime_closeouts_recovered"] == 1, summary
+    run_after = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert str(run_after["status"] or "") == "failed", dict(run_after)
+    events = manager.runtime_db.events_for_attempt(attempt_id, limit=100)
+    assert sum(
+        1 for item in events if str(item["event_type"] or "") == "agent_run.completed"
+    ) == 1, "恢复收口必须恰好写一次终态事件"
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1, "恢复后必须恰好通知一次"
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
+
+
+# LLM: 缺口 2 续——重复恢复必须幂等：不重复终态事件、不重复父级唤醒。
+# 函数用途: 连续多次恢复后断言事实不重复。
+def test_repeated_closeout_recovery_is_idempotent(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents import runner_completion_wake
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, store, task, attempt_id, agent_run_id, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/closeout-idempotent"
+    )
+    # 真实形态：先让收口提交、通知在"中断"中丢失，留下真实落盘的 runner_result 与 WAL。
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("interrupted before notify")
+
+    original = runner_completion_wake.notify_parent_on_runner_result
+    runner_completion_wake.notify_parent_on_runner_result = _explode
+    try:
+        manager.runner_result.record_runner_result(params)
+    finally:
+        runner_completion_wake.notify_parent_on_runner_result = original
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is not None
+    summaries = [runtime_closeout.recover_pending_closeouts(manager) for _ in range(3)]
+    assert summaries[0]["runtime_closeouts_recovered"] == 1, summaries
+    assert all(item["runtime_closeouts_recovered"] == 0 for item in summaries[1:]), summaries
+    events = manager.runtime_db.events_for_attempt(attempt_id, limit=100)
+    assert sum(
+        1 for item in events if str(item["event_type"] or "") == "agent_run.completed"
+    ) == 1, "重复恢复不得重复收口"
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1, "重复恢复不得重复通知"
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
+
+
+# LLM: 缺口 2 的终态一致性：同一 exact current attempt 的一致终态可重入完成交付，
+# 冲突终态仍拒——修复前 run=failed + attempt=done + incoming=failed 会被误判为冲突。
+# 函数用途: 验证终态一致性规则不再拒绝可重入的一致终态。
+def test_consistent_terminal_result_is_reentrant_but_conflict_is_rejected(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.services.runner_result_service import (
+        _managed_runtime_result_conflict,
+    )
+
+    manager, store, task, attempt_id, agent_run_id, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/closeout-consistent"
+    )
+    # 先正常收口：run=failed，而 attempt 因 settle_agent_run 只改未 ended 的 attempt 仍为 done。
+    manager.runner_result.record_runner_result(params)
+    run_row = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert str(run_row["status"] or "") == "failed"
+    facts = manager.runtime_db.runner_result_commit_authority(
+        run_id=task.id, attempt_id=attempt_id
+    )
+    assert facts is not None
+    assert str(facts["run_status"]) == "failed"
+    assert str(facts["attempt_status"]) == "done", (
+        "真实事故形态：settle_agent_run 不改已 ended 的 attempt，run 已 failed 而 attempt 仍 done"
+    )
+    assert bool(facts["is_current"]) is True
+
+    # 一致终态必须可重入（修复前这里会被判成 conflicting terminal fact）。
+    assert _managed_runtime_result_conflict(
+        manager, manager.load(task.id), params
+    ) == "", "同一 exact current attempt 的一致终态必须可重入完成交付"
+
+    # 冲突终态仍拒：run=failed 收到 DONE。
+    conflicting = type(params)(**{**vars(params), "status": "DONE", "turn_end_reason": "completed"})
+    assert _managed_runtime_result_conflict(
+        manager, manager.load(task.id), conflicting
+    ) != "", "与权威终态冲突的结论必须仍被拒绝"

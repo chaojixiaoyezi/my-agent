@@ -1,5 +1,43 @@
 # Subagent Progress
 
+## 2026-09-14 R291 收口可恢复：待重试事实 + 一致终态重入（修 e00866d2 剩余两缺口）
+
+**缺口 1（收口写库失败被吞）**：`settle_runtime_run_for_result` 把写库异常 `catch Exception → None`，
+`record_runner_result` 丢弃返回值并无条件 `notify_parent`；`settled=False` 同样无人处理。结果：
+task/wake 已是终态而 runtime 仍 `created`，且**既没有记录也没有持久化待重试事实**，临时写库失败会
+永久留成矛盾；监督者指出这不是 fail-soft 记录。
+
+**缺口 2（re-entrant 被误判为冲突）**：`settle_agent_run` 只改「未 ended」的 attempt，所以真实事故
+形态是 `run=failed + attempt=done`。该形态下同一 `is_current=True` 的 FAILED 重放被
+`_managed_runtime_result_conflict` 判成 `conflicting with runtime terminal fact run=failed attempt=done
+incoming=failed`——只有 `failed+failed` 才放行。若在「run 收口后、父 wake 前」中断，重放无法补通知。
+旧单测只看 `replay_same.status==FAILED` + 事件数不变，被拒的 quick-result 也能通过，不是真幂等恢复。
+
+**语义（对照既有结构化 run/attempt + 持久化结果 + wake 去重主链）**：
+
+1. **收口结果结构化**（新模块 `agent/subagents/services/runtime_closeout.py`）：`settle_runtime_run_for_result`
+   返回 `state ∈ {settled, already_consistent, not_applicable, write_error, unknown_status, missing_run,
+   conflict, stale_attempt}`；写库异常不再返回 `None`，而是 `write_error` + 有界错误文本。
+2. **事实先行、未提交不通知**：终态结论先在子代理 canonical task 的 `attributes.runtime_closeout_pending`
+   落版本化 WAL（`subagent-runtime-closeout.v1`，存 run/attempt/agent_run/目标终态/turn_end/结果与
+   output 引用/交付状态/重试次数），再动权威账本；`retryable` 时保留事实并**不唤醒父级**，
+   `rejected`（冲突/换代）只留 `closeout_blocked` 诊断且绝不覆盖既有终态。
+3. **恢复只补记账/通知**：既有关键sweep（`supervise_stalled_orphans`）确定性调用
+   `recover_pending_closeouts()`：补 settle 权威 run → 补父级 wake → 清事实；不重跑 runner、
+   不建新任务、不读自然语言、不依赖文本触发。单条推进失败不拖垮整轮。
+4. **一致终态可重入**：run 已是终态时只放行 `incoming_terminal == run_status`（同一 exact current
+   attempt 的一致终态，含 `run=failed + attempt=done + incoming=failed`），冲突终态与 stale/换代仍拒。
+5. **通知不丢不重**：wake 去重键按 exact attempt 定身份
+   （`subagent-finished:{task}:{status}:{attempt}`，attempt 未知时退回既有形态），并新增
+   `ConversationStore.wake_delivery_receipt()` 回执查询；同一 attempt 已 pending/handled 时回报
+   `already_delivered` 不重发，换代后的新 attempt 仍正常通知。
+
+**验收**：`test_closeout_interrupted_before_notify_recovers_once`（收口后通知前中断 → 恢复恰补一次）、
+`test_closeout_write_failure_leaves_retryable_fact_then_recovers`（写库一次失败 → 留事实、不通知、
+恢复后补收口+补通知）、`test_repeated_closeout_recovery_is_idempotent`（重复恢复幂等）、
+`test_consistent_terminal_result_is_reentrant_but_conflict_is_rejected`（重入放行/冲突仍拒）；
+BLOCKED 用例改为排除**全部**终态（`AGENT_RUN_TERMINAL_STATUSES`）并断言 attempt 未被顺带结清。
+
 ## 2026-09-13 R287 runner 最终结论必须收口 runtime 权威 run
 
 **问题（真实 TUI 注入后独立 SQL 发现）**：宿主机对"可续跑族"（如 `MODEL_STREAM_INCOMPLETE`）只调

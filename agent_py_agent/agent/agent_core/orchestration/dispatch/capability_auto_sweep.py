@@ -26,6 +26,7 @@ from ....subagents.models import (
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
     task_status_in,
 )
+from ....subagents.services.runtime_closeout import recover_pending_closeouts
 from .conversation_lifecycle_gate import conversation_lifecycle_decisions
 from .params import DispatchParams
 from .tool_helpers import _dispatch_capability_config
@@ -278,6 +279,9 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         "stalled_source_hosts_terminated": 0,
         "orphans_revived": 0,
         "orphan_authority_recovery_blocked": 0,
+        "runtime_closeouts_recovered": 0,
+        "runtime_closeouts_pending": 0,
+        "runtime_closeouts_rejected": 0,
     }
     try:
         manager = getattr(agent, "subagents", None)
@@ -325,6 +329,14 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         )
     except Exception:
         _LOGGER.debug("supervision running reclaim failed", exc_info=True)
+    # LLM: runner 终态收口的待重试事实由这个既有关键sweep确定性推进：只补记账（settle 权威
+    # run）与补通知（父级 wake），不重跑业务、不建新任务、不读任何自然语言。收口写库临时
+    # 失败或"收口后通知前中断"由此收敛，而不是永久留成 task 终态 / runtime created 的矛盾。
+    # 函数用途: 推进所有待重试的子代理 runner 收口事实。
+    try:
+        summary.update(recover_pending_closeouts(manager))
+    except Exception:
+        _LOGGER.debug("supervision runtime closeout recovery failed", exc_info=True)
     summary.update(_reconcile_direct_parent_waits(agent))
     try:
         # Crash/stall recovery is latency-sensitive: once a dead attempt has

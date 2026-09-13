@@ -28,7 +28,9 @@ _COMPLETION_EVIDENCE_REF_LIMIT = 20
 # LLM: Normal runner results notify only statuses that need parent model attention. User-controlled
 # cancellation uses the sibling entry below so model-owned cancel_subagents remains an in-turn fact
 # and cannot create a duplicate background wake.
-# 函数用途: 子代理自然结束后按既有唤醒状态集合通知直属父级。
+# 投递结果是结构化事实（delivered / already_delivered / skipped / failed），供可恢复收口链判定
+# "要不要重发"，不解析任何文本。
+# 函数用途: 子代理自然结束后按既有唤醒状态集合通知直属父级，并回报投递结果。
 def notify_parent_on_runner_result(
     manager: Any,
     task: Any,
@@ -36,20 +38,22 @@ def notify_parent_on_runner_result(
     output_payload: dict[str, object],
     *,
     parent_thread: Any | None = None,
-) -> None:
+    attempt_id: str = "",
+) -> str:
     store = getattr(manager, "conversation_store", None)
     if store is None or bool(getattr(result, "dry_run", False)):
-        return
+        return "skipped"
     status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip()
     if not task_status_in(status, SUBAGENT_WAKE_STATUSES):
-        return
-    _notify_parent_terminal(
+        return "skipped"
+    return _notify_parent_terminal(
         manager,
         task,
         result,
         output_payload,
         status=status,
         parent_thread=parent_thread,
+        attempt_id=attempt_id,
     )
 
 
@@ -79,6 +83,10 @@ def notify_parent_on_controlled_cancel(
 # LLM: Natural completion and authorized external cancellation converge here after their distinct
 # admission rules. One exact task/thread pair updates the projection and publishes at most one
 # deduplicated root wake; nested children never skip their persisted direct parent.
+# 可恢复语义：去重键按 **exact attempt** 定身份（attempt 缺失时退回既有 task+status 形态，行为不变）。
+# 同一 attempt 的唤醒若已发出（pending/handled），本入口回报 already_delivered 而不再重发——
+# 「通知不重」；换 attempt 属新事实，绝不因旧 attempt 已交付而被吞掉——「通知不丢」。
+# 投递异常返回 failed 并沿用既有错误落账。
 # 函数用途: 用同一结构化终态信封更新会话，并在目标直属根会话时发布一次唤醒。
 def _notify_parent_terminal(
     manager: Any,
@@ -88,20 +96,37 @@ def _notify_parent_terminal(
     *,
     status: str,
     parent_thread: Any | None,
-) -> None:
+    attempt_id: str = "",
+) -> str:
     store = getattr(manager, "conversation_store", None)
     if store is None:
-        return
+        return "skipped"
     task_id = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "").strip()
     if not task_id:
-        return
+        return "skipped"
     try:
         thread = parent_thread or store.thread_for_task(task_id)
         if thread is None:
-            return
+            return "skipped"
         store.update_task_status({"task_id": task_id, "status": status})
         if _has_persisted_subagent_parent(manager, task):
-            return
+            return "skipped"
+        # 去重身份 = task + status + exact attempt（attempt 未知时保持既有 task+status 形态）。
+        # 这样同一 attempt 的重复投递会被识别，而换代后的新 attempt 仍能正常通知父级。
+        normalized_attempt = str(attempt_id or "").strip()
+        dedupe_key = (
+            f"subagent-finished:{task_id}:{status}:{normalized_attempt}"
+            if normalized_attempt
+            else f"subagent-finished:{task_id}:{status}"
+        )
+        # 已有同一去重键的唤醒（待消费或已消费）→ 视为已投递，绝不重发。
+        receipt = getattr(store, "wake_delivery_receipt", None)
+        if callable(receipt):
+            try:
+                if str(receipt(thread.thread_id, dedupe_key) or "") in {"pending", "handled"}:
+                    return "already_delivered"
+            except Exception:  # noqa: BLE001 - 回执查询失败不得阻断正常投递
+                pass
         root_task_id = str(getattr(task, "root_id", "") or task_id)
         metadata = _metadata(task, result, output_payload)
         evidence_refs = _completion_evidence_refs(task, output_payload, metadata)
@@ -123,7 +148,7 @@ def _notify_parent_terminal(
                 status=status,
                 metadata=metadata,
             )
-            return
+            return "delivered"
         # Publish through the store's wake-first pair operation. Two separate writes let the
         # scheduler consume the observation in the tiny gap before its wake existed, causing
         # duplicate background turns and duplicate IM progress fragments.
@@ -147,13 +172,15 @@ def _notify_parent_terminal(
                 "source_agent_id": task_id,
                 "parent_agent_id": str(getattr(task, "parent_id", "") or ""),
                 "root_task_id": root_task_id,
-                "dedupe_key": f"subagent-finished:{task_id}:{status}",
+                "dedupe_key": dedupe_key,
                 "evidence_refs": evidence_refs,
                 "metadata": metadata,
             },
         )
+        return "delivered"
     except Exception as exc:
         _record_wake_error(manager, task, result, exc)
+        return "failed"
 
 
 def _raise_internal_audit_source_wake(

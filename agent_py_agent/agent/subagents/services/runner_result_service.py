@@ -6,6 +6,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from ...runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from ...turn_end import subagent_outcome_for_turn_end
 from ..manager_runner_result_payload import (
     BuildAndPersistContext,
@@ -26,6 +27,17 @@ from ..result_processors import (
 from ..runner_rendering import render_runner_result_markdown
 from ..tool_failure_ledger import record_tool_failure_ledger
 from ..utils import _apply_missing_paths
+from .runtime_closeout import (
+    COMMITTED_CLOSEOUT_STATES,
+    REJECTED_CLOSEOUT_STATES,
+    RETRYABLE_CLOSEOUT_STATES,
+    clear_closeout,
+    closeout_target_run_status,
+    deliver_parent_wake,
+    record_closeout_event,
+    record_pending_closeout,
+    settle_runtime_run_for_result,
+)
 
 
 def _runner_append_debrief(task, parsed):
@@ -189,14 +201,48 @@ class SubAgentRunnerResultService:
             result,
             _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
         )
-        # 顺序：任务/结果落账 → runtime 权威 run 收口 → 再通知父级。
-        # 否则父级会在"任务已 FAILED、run 仍 created"的矛盾窗里被唤醒。
-        settle_runtime_run_for_result(self.manager, task, params, result)
+        # 顺序（可恢复）：先写待重试事实 → runtime 权威 run 收口 → 提交成功才通知父级 → 清除事实。
+        # 1) 事实先行：收口写库失败、或进程在收口后通知前中断时，"还要补收口/补通知"必须已经
+        #    持久化，否则 task/wake 终态而 runtime 仍 created 的矛盾会永久留档。
+        # 2) 未提交不通知：收口没落成时父级绝不能被当成"已完成"唤醒。
+        target_run_status = closeout_target_run_status(params, result, task)
+        wal_active = False
+        if target_run_status:
+            wal_active = record_pending_closeout(
+                self.manager, task, params, result,
+                {"state": "pending", "target_run_status": target_run_status},
+            )
+        outcome = settle_runtime_run_for_result(self.manager, task, params, result)
+        state = str(outcome.get("state") or "")
+        if state in RETRYABLE_CLOSEOUT_STATES:
+            # 权威事实尚未落成：保留待重试事实，由确定性恢复链补收口与补通知，本片不冒充完成。
+            if wal_active:
+                record_pending_closeout(self.manager, task, params, result, outcome)
+            record_closeout_event(
+                self.manager, task, event_type="closeout_pending", params=params, outcome=outcome
+            )
+            return result
+        if state in REJECTED_CLOSEOUT_STATES:
+            # 与权威终态冲突或已换代：拒绝交付，只留诊断（绝不覆盖既有终态）。
+            record_closeout_event(
+                self.manager, task, event_type="closeout_blocked", params=params, outcome=outcome
+            )
+            if wal_active:
+                clear_closeout(self.manager, task)
+            return result
         from ..debug_trace import SubAgentRunnerTraceRequest, trace_runner_result
-        from ..runner_completion_wake import notify_parent_on_runner_result
 
         trace_runner_result(SubAgentRunnerTraceRequest(self.manager, task, result, params))
-        notify_parent_on_runner_result(self.manager, task, result, output_payload)
+        delivery = deliver_parent_wake(
+            self.manager, task, result, output_payload,
+            attempt_id=str(getattr(params, "attempt_id", "") or ""),
+        )
+        if wal_active:
+            if delivery == "failed":
+                # 收口已提交但通知未成：事实留档，恢复链只补通知，不重跑业务。
+                record_pending_closeout(self.manager, task, params, result, outcome)
+            else:
+                clear_closeout(self.manager, task)
         return result
 
     def _runner_result_build_context(
@@ -332,58 +378,6 @@ class SubAgentRunnerResultService:
         )
 
 
-# LLM: runner 的最终 typed 结论必须与 runtime 权威 run 状态一致：宿主机在可续跑族
-# （流不完整/上下文溢出等）只结清 attempt、把 run 留 created 等 resume；一旦 runner 给出
-# **最终终态**，同一条 exact current attempt 的 run 也要一并收口，否则 task 说 FAILED、
-# runtime 说 created，父级/监督在同一事实上看到两种矛盾结论。
-# 语义映射（只在 attempt 仍是 exact current 时生效，stale/换代保护不动）：
-#   FAILED→failed、CANCELLED→cancelled、DONE→done；
-#   PENDING/BLOCKED/RUNNING 等非终态**不收口**（可恢复等待不能被误结束）。
-# 收口失败（写库异常、stale attempt）只 fail-soft 记录，不改变已落账的 runner 结论。
-# 函数用途: 按 runner 最终结论收口对应的 runtime run；非终态或不可收口时不做任何事。
-def settle_runtime_run_for_result(
-    manager: object,
-    task: SubAgentTask,
-    params: RecordRunnerResultParams,
-    result: SubAgentRunnerResult,
-) -> dict[str, object] | None:
-    if bool(getattr(params, "dry_run", False)):
-        return None
-    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip().upper()
-    run_status = {
-        TaskStatus.FAILED.value: "failed",
-        TaskStatus.CANCELLED.value: "cancelled",
-        TaskStatus.DONE.value: "done",
-    }.get(status)
-    if run_status is None:
-        return None
-    repo = getattr(manager, "runtime_db", None)
-    if repo is None:
-        return None
-    try:
-        authority = repo.agent_run_for_run_id(str(task.id or ""))
-        if authority is None:
-            return None
-        agent_run_id = str(authority["agent_run_id"] or "")
-        if not agent_run_id:
-            return None
-        return repo.settle_agent_run(
-            agent_run_id=agent_run_id,
-            status=run_status,
-            attempt_id=str(params.attempt_id or ""),
-            payload={
-                "status": status,
-                "runner_result": True,
-                "turn_end_reason": str(getattr(params, "turn_end_reason", "") or ""),
-                "runtime_status": "error" if run_status != "done" else "ok",
-                "runtime_reason": str(getattr(result, "message", "") or "")[:200],
-                "runtime_source": "subagent_runner",
-            },
-        )
-    except Exception:
-        return None
-
-
 # LLM: Runtime terminal states are host-owned facts. A settled nonterminal
 # slice accepts only the matching host turn reason; completed/cancelled/failed
 # results still require the corresponding run-level settlement.
@@ -411,12 +405,17 @@ def _managed_runtime_result_conflict(
     incoming_terminal = _runner_runtime_terminal_status(params)
     if _runner_result_matches_settled_attempt(run_status, attempt_status, params):
         return ""
-    if run_status == "done" and attempt_status == "done":
-        return ""
-    if run_status in {"failed", "cancelled"} and (
-        attempt_status == run_status and incoming_terminal == run_status
-    ):
-        return ""
+    if run_status in AGENT_RUN_TERMINAL_STATUSES:
+        # 权威 run 已终态：只接受**同一 exact current attempt 的一致终态**重入。
+        # 这是"run 收口后、父级通知前中断"以及重复交付的幂等补写路径：
+        # 收口可能只写了 run（settle_agent_run 不动已 ended 的 attempt），因此
+        # run=failed + attempt=done + incoming=failed 是**一致**组合，必须放行；
+        # 过期/换代在更上面已拒，冲突终态（run=done 收 FAILED 等）仍一律拒绝。
+        if incoming_terminal and incoming_terminal == run_status:
+            return ""
+        if not incoming_terminal and run_status == "done" and attempt_status == "done":
+            # 既有非终态投影放行规则保持不变，不引入新的拒绝面。
+            return ""
     return (
         "ignored runner result conflicting with runtime terminal fact "
         f"run={run_status or 'unknown'} attempt={attempt_status or 'unknown'} "

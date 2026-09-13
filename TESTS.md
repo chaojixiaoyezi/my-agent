@@ -1,5 +1,26 @@
 # TESTS
 
+## 2026-09-14 R291 收口可恢复（三场景 + 终态一致性）
+
+- 集成用例（`test_dispatch_liveness_and_revive.py`，全部走真实 runtime.db + 真实 ConversationStore +
+  真实落盘 `runner_result.json`，只在真正的通知发布点注入"中断"）：
+  - `test_closeout_interrupted_before_notify_recovers_once`：收口已提交、父级通知前中断 →
+    事实必须在盘、恢复链恰补一次通知、重复恢复不再补。
+  - `test_closeout_write_failure_leaves_retryable_fact_then_recovers`：注入一次 `settle_agent_run`
+    写库失败 → run 仍 `created`、**不通知**、留下 `closeout_state=write_error` 的可诊断事实；
+    恢复后 run=`failed`、恰好一条 `agent_run.completed`、恰好一次父级唤醒。
+  - `test_repeated_closeout_recovery_is_idempotent`：连续三次恢复 → 终态事件与唤醒都不重复。
+  - `test_consistent_terminal_result_is_reentrant_but_conflict_is_rejected`：`run=failed +
+    attempt=done + incoming=failed` 必须放行（同一 exact current attempt 的一致终态可重入），
+    冲突终态（run=failed 收 DONE）仍拒。
+- `test_blocked_runner_result_does_not_settle_runtime_run` 收紧：非终态结论必须排除**全部**终态
+  （`AGENT_RUN_TERMINAL_STATUSES`，不再只断言 `!= done`），并断言 attempt 未被顺带结清、
+  没有 `agent_run.completed`。
+- 唤醒计数 helper 按 `wake_signal_id` 去重 pending/handled，只统计带 `reason` 的真实唤醒信号，
+  不把 `wake_dedupe.v1` 回执算成唤醒。
+- 修复一条 r285 遗留的过期断言（`test_direct_parent_lifecycle.py`：等待语义已不再强制
+  `turn_end_reason="interrupted"`），该用例在改动前即为红的。
+
 # TESTS
 
 ## 2026-09-13 R283 JSONL 记录边界（真实事故）

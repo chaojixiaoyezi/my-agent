@@ -1,5 +1,25 @@
 # DESIGN LEDGER
 
+## 2026-09-14 R291 runner 收口可恢复：待重试事实 + 一致终态重入
+
+1. **收口失败不再被吞**：`settle_runtime_run_for_result` 不再 `catch Exception → None`，返回结构化
+   outcome（settled / already_consistent / not_applicable / write_error / unknown_status / missing_run /
+   conflict / stale_attempt）；`record_runner_result` 按其结果决定是否通知父级。
+2. **事实先行（WAL）**：终态结论先在 `attributes.runtime_closeout_pending`
+   （`subagent-runtime-closeout.v1`）落持久化待重试事实（run/attempt/agent_run/目标终态/结果引用/
+   交付状态/重试计数），再动 runtime 权威账本；收口未提交**不唤醒父级**（不冒充完成），
+   冲突/换代只留 `closeout_blocked` 诊断。
+3. **确定性恢复**：既有关键sweep `supervise_stalled_orphans` 调 `recover_pending_closeouts()`，
+   只补 settle 与父级 wake，不重跑业务、不建任务、不依赖普通文本触发；单条失败不拖垮整轮。
+4. **一致终态可重入**：run 已终态时只放行 `incoming_terminal == run_status`
+   （同一 exact current attempt；含真实形态 `run=failed + attempt=done + incoming=failed`），
+   冲突终态与 stale/换代仍拒——修 e00866d2 把可重入误判为 `conflicting terminal fact`。
+5. **通知不丢不重**：`subagent-finished:{task}:{status}:{attempt}` 按 attempt 定去重身份 +
+   `ConversationStore.wake_delivery_receipt()` 回执；同 attempt 已 pending/handled → `already_delivered`
+   不重发，换代后新 attempt 仍通知。
+6. **验收边界**：三个恢复场景（收口后通知前中断 / 写库一次失败 / 重复恢复）+ 终态一致性均为
+   真实 runtime.db + 真实会话存储 + 真实落盘 runner_result 的集成用例；真 TUI 注入验收见下一轮记录。
+
 ## 2026-09-13 R286 历史范围裁决与展示索引分离（修 f7bd5349 截短）+ 真实链路收口验收
 
 1. **修历史截短回归**：f7bd5349 用 `_context_bundle` 的 `scoped.messages`（`recent_limit=20` 展示索引）

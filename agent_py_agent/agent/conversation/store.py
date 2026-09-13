@@ -822,6 +822,29 @@ class ConversationBaseStore:
             self.wake_dedupe_dir / f"{safe_file_stem(thread_id)}.{safe_file_stem(dedupe_key)}.json"
         )
 
+    # LLM: 投递回执只回答"这个精确去重键的唤醒是否已经发出/已被消费"，供可恢复通知判定
+    # "不重"；它不创建、不修改任何唤醒，也不改变 pending/handled 的既有语义。
+    # 函数用途: 查询某去重键对应的唤醒当前处于 pending、handled 还是从未发出。
+    def wake_delivery_receipt(self, thread_id: str, dedupe_key: str) -> str:
+        """Return 'pending' | 'handled' | '' for one exact dedupe key."""
+
+        if not thread_id or not dedupe_key:
+            return ""
+        try:
+            receipt = read_json_file(self._wake_dedupe_path(thread_id, dedupe_key))
+        except Exception:
+            return ""
+        if not isinstance(receipt, dict):
+            return ""
+        wake_signal_id = str(receipt.get("wake_signal_id") or "").strip()
+        if not wake_signal_id:
+            return ""
+        if self._find_wake_signal_path(wake_signal_id) is not None:
+            return "pending"
+        if (self.wake_handled_dir / f"{wake_signal_id}.json").exists():
+            return "handled"
+        return ""
+
     # LLM: 读取侧增量索引按 store 实例惰性建在实例 __dict__ 上,不写盘、不进 __init__;
     # 进程重启或索引被丢弃只会让下一次调用退回全量权威扫描,绝不改变任何返回语义。
     # 函数用途: 取得某个台账目录(唤醒/观察/策略)的进程内增量索引。
