@@ -3036,49 +3036,24 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
 # 普通连续会话（无 task / 非 detached）完整继承未压缩历史。
 # 函数用途: 用已加载的 scope 事实过滤权威未压缩行，返回可进入模型的历史行。
 def _history_scope_rows(
-    scoped: dict[str, Any],
+    decision: _TaskScopeDecision,
     rows: list[MessageLogEntry],
 ) -> list[MessageLogEntry]:
     if not rows:
         return []
-    task_rows = _dict_rows(scoped.get("tasks"))
-    anchor_link = next(
-        (
-            row
-            for row in task_rows
-            if _is_detached_named_task_link(row)
-        ),
-        None,
-    )
-    if anchor_link is None:
+    # 只有"本轮 exact task 确实是 detached named"才应用锚点/lineage；
+    # 普通轮、无 task 轮（含 bundle 里恰好存在旧 Goal）必须完整继承历史。
+    if not decision.detached or not decision.exact_link:
         return list(rows)
     # 同一份算法：把权威行投影成 dict 交给既有 detached 行选择器，再按 message_id 映射回对象，
     # 避免 operational 摘要与 native seed 各维护一份锚点/lineage 规则而长期漂移。
     by_id = {str(getattr(row, "message_id", "") or ""): row for row in rows}
     payload = [row.to_dict() for row in rows]
-    task_ids = _task_context_ids_from_rows(task_rows, anchor_link)
     selected_ids = {
         str(row.get("message_id") or "")
-        for row in _detached_task_rows(payload, anchor_link, task_ids)
+        for row in _detached_task_rows(payload, dict(decision.exact_link), set(decision.task_ids))
     }
     return [row for message_id, row in by_id.items() if message_id in selected_ids]
-
-
-# LLM: lineage 身份只从已加载的 task 行推导（同一份 scope 事实），不再读磁盘任务链接。
-# 函数用途: 从 scope 的 task 行推导某 detached 任务的后代 run 身份集合。
-def _task_context_ids_from_rows(
-    task_rows: list[dict[str, Any]],
-    link: dict[str, Any],
-) -> set[str]:
-    task_id = str(link.get("task_id") or "").strip()
-    root_id = str(link.get("parent_id") or link.get("root_id") or "").strip() or task_id
-    task_ids = {item for item in {task_id, root_id} if item}
-    for row in task_rows:
-        for key in ("task_id", "parent_id", "root_id", "parent_run_id", "root_run_id"):
-            value = str(row.get(key) or "").strip()
-            if value:
-                task_ids.add(value)
-    return task_ids
 
 
 # LLM: 解析种子并把"历史读不到"升级成 typed 错误：读不到时不许退回有界摘要继续跑模型，
@@ -3206,10 +3181,12 @@ def _background_conversation_history_seed(
         from .native_history import provider_history_messages_from_rows
 
         rows = _uncompacted_conversation_rows(store, thread)
-        # 权威历史 = 全部未压缩行；任务范围裁决按既有 lineage 规则在**这些行上**执行，
-        # 不能拿 context_bundle 的 recent_limit=20 展示索引当权限白名单（那会把普通会话
-        # 的长历史截成最后 20 条，重新制造上下文骤降）。
-        scoped_rows = _history_scope_rows(scoped, rows)
+        # 权威历史 = 全部未压缩行；范围裁决用与 operational 摘要**同一份** decision
+        # （来自本轮显式 task 身份 + 已加载 bundle），既不重读盘、也不按第几个 task 猜身份。
+        scoped_rows = _history_scope_rows(
+            _task_scope_decision(scope_state, scoped),
+            rows,
+        )
         budget = int(getattr(runtime_compact_policy(agent), "trigger_tokens", 0) or 0)
         # 只用历史投影两步（行选择 + provider 消息），不牵入 recent_artifacts 等与续接无关的投影。
         selected_rows = _gateway_conversation_history_rows(
@@ -4093,6 +4070,40 @@ def _context_bundle(state: _BackgroundContextLoad) -> dict[str, Any]:
         return _minimal_context_bundle(state.thread)
 
 
+# LLM: 任务范围裁决只能由"本轮显式 task 身份 + 已加载的同一份 bundle"形成一次，
+# 供 operational 摘要与 native 历史种子共用。禁止按"第几个/最新一个 task"猜身份，
+# 也禁止把全部 scoped task 的父/root id 无差别并成 lineage（那会放宽范围）。
+# 类用途: 承载一次任务范围裁决的结构化事实。
+@dataclass(frozen=True)
+class _TaskScopeDecision:
+    task_id: str
+    task_ids: frozenset[str]
+    exact_link: dict[str, Any] | None
+    detached: bool
+
+
+# LLM: exact_link 必须按本轮 task_id 精确匹配；无 task_id 的普通事件不做任何范围收缩。
+# 函数用途: 用已加载的 bundle 与本轮 task_id 形成唯一范围裁决。
+def _task_scope_decision(
+    state: _BackgroundContextLoad,
+    bundle: dict[str, Any],
+) -> _TaskScopeDecision:
+    task_id = str(state.task_id or "").strip()
+    task_rows = _dict_rows(bundle.get("tasks"))
+    if not task_id:
+        return _TaskScopeDecision("", frozenset(), None, False)
+    exact_link = next(
+        (row for row in task_rows if str(row.get("task_id") or "").strip() == task_id),
+        None,
+    )
+    return _TaskScopeDecision(
+        task_id=task_id,
+        task_ids=frozenset(_task_context_ids(state)),
+        exact_link=exact_link,
+        detached=_is_detached_named_task_link(exact_link),
+    )
+
+
 def _task_scoped_operational_context(
     state: _BackgroundContextLoad,
     bundle: dict[str, Any],
@@ -4106,14 +4117,11 @@ def _task_scoped_operational_context(
     user turns.  This remains one transcript and one compact authority; the
     projection neither copies history nor classifies natural-language text.
     """
-    if not state.task_id:
+    decision = _task_scope_decision(state, bundle)
+    if not decision.task_id:
         return bundle
-    task_ids = _task_context_ids(state)
+    task_ids = set(decision.task_ids)
     task_rows = _dict_rows(bundle.get("tasks"))
-    exact_link = next(
-        (row for row in task_rows if str(row.get("task_id") or "").strip() == state.task_id),
-        None,
-    )
     scoped = dict(bundle)
     scoped["tasks"] = [row for row in task_rows if _context_row_matches_task_ids(row, task_ids)]
     scoped["observations"] = [
@@ -4126,8 +4134,8 @@ def _task_scoped_operational_context(
         for row in _dict_rows(bundle.get("goals"))
         if _context_row_matches_task_ids(row, task_ids)
     ]
-    if _is_detached_named_task_link(exact_link):
-        return _detached_named_task_context(state, scoped, exact_link or {}, task_ids)
+    if decision.detached:
+        return _detached_named_task_context(state, scoped, decision.exact_link or {}, task_ids)
     return scoped
 
 

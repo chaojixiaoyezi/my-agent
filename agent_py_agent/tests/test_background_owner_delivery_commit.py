@@ -932,63 +932,98 @@ def test_background_history_seed_ignores_display_rows_when_scoping(tmp_path) -> 
     assert "display_checkpoint" not in rendered
 
 
-# LLM: 范围裁决的输入必须是"已经读成功的同一份 scope 事实"：旧实现单独读 task link，
-# 读失败→link=None→默认返回全部行（fail-open），把"读取失败"洗成"普通会话"。
-# 函数用途: 验证 scope 事实里带 detached 锚点时按锚点/lineage 过滤，且不依赖任何磁盘重读。
-def test_history_scope_rows_uses_loaded_scope_facts_without_reread() -> None:
-    from agent_py_agent.agent.conversation.models import MessageLogEntry
-    from agent_py_agent.agent.conversation.runtime import _history_scope_rows
-
-    rows = [
-        MessageLogEntry(
-            message_id=f"msg-{index}",
-            thread_id="thread-1",
-            role="user",
-            content=f"row-{index}",
-            created_at=1000.0 + index,
-            metadata={"conversation_request_id": f"req-{index}"},
-        )
-        for index in range(50)
-    ]
-    # scope 事实：detached named task，创建锚点 = msg-4（之前的历史属于创建前快照）。
-    scoped = {
-        "tasks": [
-            {
-                "task_id": "task-A",
-                "work_kind": "goal",
-                "work_name": "saved-A",
-                "cancellation_scope": "detached",
-                "created_at": 1000.0,
-                "context_anchor_message_id": "msg-4",
-            }
-        ]
-    }
-
-    selected = _history_scope_rows(scoped, rows)
-    ids = [row.message_id for row in selected]
-
-    assert ids == [f"msg-{index}" for index in range(5)], ids
-    # 无 detached task 时（普通会话）必须完整返回全部行。
-    assert len(_history_scope_rows({"tasks": []}, rows)) == 50
-
-
-# LLM: 普通会话的边界不能因范围裁决而改变：50/100 行 + display 穿插都要完整。
-# 函数用途: 验证无 detached scope 时 100 行历史（含 display 行）全部保留。
-def test_history_scope_rows_keeps_plain_history_intact() -> None:
+# LLM: 范围裁决只能用"本轮显式 task 身份 + 已加载 bundle"形成一次，并且只有本轮 exact task
+# 确实是 detached named 时才应用锚点/lineage。历史里恰好存在旧 Goal 不能改变普通轮的范围。
+# 函数用途: 覆盖 无task+旧Goal / 普通task+旧Goal / 两个detached乱序 / A不含B未来消息 / 普通轮保留today。
+def test_history_scope_rows_uses_exact_current_task_only() -> None:
     from agent_py_agent.agent.conversation.models import MessageLogEntry
     from agent_py_agent.agent.conversation.runtime import (
         _history_scope_rows,
+        _TaskScopeDecision,
     )
 
-    rows = [
-        MessageLogEntry(
-            message_id=f"m-{index}",
+    def _row(message_id: str, created_at: float, task_id: str = "") -> MessageLogEntry:
+        metadata = {"conversation_task_id": task_id} if task_id else {}
+        return MessageLogEntry(
+            message_id=message_id,
             thread_id="thread-1",
             role="user",
-            content=f"c-{index}",
-            created_at=2000.0 + index,
-            metadata={},
+            content=message_id,
+            created_at=created_at,
+            metadata=metadata,
         )
-        for index in range(100)
+
+    rows = [_row("before", 50.0), _row("today", 200.0)]
+    detached_a = {
+        "task_id": "detached-A",
+        "work_kind": "goal",
+        "work_name": "named A",
+        "cancellation_scope": "detached",
+        "created_at": 100.0,
+        "context_anchor_message_id": "before",
+    }
+
+    # ① 无 task 的普通事件：bundle 里恰有旧 detached Goal，也必须两条全留。
+    plain = _TaskScopeDecision("", frozenset(), None, False)
+    assert [row.message_id for row in _history_scope_rows(plain, rows)] == ["before", "today"]
+
+    # ② 本轮是普通 task（非 detached）：同样完整继承。
+    ordinary = _TaskScopeDecision("plain-task", frozenset({"plain-task"}), {"task_id": "plain-task"}, False)
+    assert [row.message_id for row in _history_scope_rows(ordinary, rows)] == ["before", "today"]
+
+    # ③ 本轮 exact task 是 detached A：按锚点只保留创建前历史。
+    current_a = _TaskScopeDecision("detached-A", frozenset({"detached-A"}), detached_a, True)
+    assert [row.message_id for row in _history_scope_rows(current_a, rows)] == ["before"]
+
+    # ④ 换顺序/换身份不改变结果（不做"第一个 detached"猜测）。
+    detached_b = {
+        "task_id": "detached-B",
+        "work_kind": "goal",
+        "work_name": "named B",
+        "cancellation_scope": "detached",
+        "created_at": 1000.0,
+        "context_anchor_message_id": "today",
+    }
+    current_b = _TaskScopeDecision("detached-B", frozenset({"detached-B"}), detached_b, True)
+    assert [row.message_id for row in _history_scope_rows(current_b, rows)] == ["before", "today"]
+    assert [row.message_id for row in _history_scope_rows(current_a, rows)] == ["before"]
+
+
+# LLM: 当前 detached A 不得吞入后来属于 B 的消息；A 自己的 lineage 行仍保留。
+# 函数用途: 验证 lineage 过滤按当前 task 身份生效。
+def test_history_scope_rows_keeps_current_task_lineage_only() -> None:
+    from agent_py_agent.agent.conversation.models import MessageLogEntry
+    from agent_py_agent.agent.conversation.runtime import (
+        _history_scope_rows,
+        _TaskScopeDecision,
+    )
+
+    def _row(message_id: str, created_at: float, task_id: str = "") -> MessageLogEntry:
+        metadata = {"conversation_task_id": task_id} if task_id else {}
+        return MessageLogEntry(
+            message_id=message_id,
+            thread_id="thread-1",
+            role="user",
+            content=message_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+    rows = [
+        _row("before", 50.0),
+        _row("a-work", 150.0, "detached-A"),
+        _row("b-future", 250.0, "detached-B"),
     ]
-    assert len(_history_scope_rows({"tasks": [{"task_id": "t", "work_kind": "audit", "work_name": ""}]}, rows)) == 100
+    link_a = {
+        "task_id": "detached-A",
+        "work_kind": "goal",
+        "work_name": "named A",
+        "cancellation_scope": "detached",
+        "created_at": 100.0,
+        "context_anchor_message_id": "before",
+    }
+    decision = _TaskScopeDecision("detached-A", frozenset({"detached-A"}), link_a, True)
+
+    ids = [row.message_id for row in _history_scope_rows(decision, rows)]
+    assert ids == ["before", "a-work"], ids
+    assert "b-future" not in ids
