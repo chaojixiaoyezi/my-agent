@@ -3031,89 +3031,54 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
 # - 权威历史 = store 里全部未压缩 canonical 行（长会话不能被展示索引截短）；
 # - 范围裁决只对 **显式 detached named task** 生效，规则完全复用既有创建锚点 + 精确 lineage；
 # - context_bundle 的 recent_limit 只是有界 operational 展示，绝不作为"哪些历史有资格进模型"的白名单。
+# 关键：裁决输入必须来自**已经读成功的同一份 scope 事实**（scoped["tasks"]），不得再单独读一次
+# task link——那次读失败会被当成"没有 detached task"而放行全部历史（fail-open），把读取失败洗成普通会话。
 # 普通连续会话（无 task / 非 detached）完整继承未压缩历史。
-# 函数用途: 按既有任务范围规则过滤权威未压缩行，返回可进入模型的历史行。
+# 函数用途: 用已加载的 scope 事实过滤权威未压缩行，返回可进入模型的历史行。
 def _history_scope_rows(
-    store: ConversationStore,
-    thread: ConversationThread,
-    task_id: str,
+    scoped: dict[str, Any],
     rows: list[MessageLogEntry],
 ) -> list[MessageLogEntry]:
-    selected_task_id = str(task_id or "").strip()
-    if not selected_task_id or not rows:
-        return list(rows)
-    try:
-        link_record = store.load_task_link(selected_task_id)
-    except Exception:
-        link_record = None
-    link = (
-        {
-            "task_id": str(getattr(link_record, "task_id", "") or ""),
-            "created_at": float(getattr(link_record, "created_at", 0.0) or 0.0),
-            "cancellation_scope": str(getattr(link_record, "cancellation_scope", "") or ""),
-            "work_kind": str(getattr(link_record, "work_kind", "") or ""),
-            "work_name": str(getattr(link_record, "work_name", "") or ""),
-            "context_anchor_message_id": str(
-                getattr(link_record, "context_anchor_message_id", "") or ""
-            ),
-        }
-        if link_record is not None
-        else None
-    )
-    if not _is_detached_named_task_link(link):
-        return list(rows)
-    state = _BackgroundContextLoad(
-        agent=None,
-        store=store,
-        thread=thread,
-        task_id=selected_task_id,
-        config=None,
-        policy_request=None,
-        load_errors=[],
-    )
-    task_ids = _task_context_ids(state)
-    anchor_id = str((link or {}).get("context_anchor_message_id") or "").strip()
-    try:
-        created_at = float((link or {}).get("created_at") or 0.0)
-    except (TypeError, ValueError):
-        created_at = 0.0
-    before_anchor = bool(anchor_id)
-    anchor_found = not anchor_id
-    selected: list[MessageLogEntry] = []
-    for row in rows:
-        metadata = row.metadata if isinstance(row.metadata, dict) else {}
-        exact_task_row = _context_row_matches_task_ids(
-            {"metadata": metadata, "task_id": str(metadata.get("conversation_task_id") or "")},
-            task_ids,
-        )
-        snapshot_row = False
-        if anchor_id and before_anchor:
-            snapshot_row = True
-            if str(getattr(row, "message_id", "") or "") == anchor_id:
-                before_anchor = False
-                anchor_found = True
-        elif not anchor_id:
-            snapshot_row = float(getattr(row, "created_at", 0.0) or 0.0) <= created_at
-        if exact_task_row or snapshot_row:
-            selected.append(row)
-    if anchor_id and not anchor_found:
-        return [
+    if not rows:
+        return []
+    task_rows = _dict_rows(scoped.get("tasks"))
+    anchor_link = next(
+        (
             row
-            for row in rows
-            if _context_row_matches_task_ids(
-                {
-                    "metadata": row.metadata if isinstance(row.metadata, dict) else {},
-                    "task_id": str(
-                        (row.metadata if isinstance(row.metadata, dict) else {}).get(
-                            "conversation_task_id"
-                        )
-                        or ""
-                    ),
-                },
-                task_ids,
-            )
-        ]
-    return selected
+            for row in task_rows
+            if _is_detached_named_task_link(row)
+        ),
+        None,
+    )
+    if anchor_link is None:
+        return list(rows)
+    # 同一份算法：把权威行投影成 dict 交给既有 detached 行选择器，再按 message_id 映射回对象，
+    # 避免 operational 摘要与 native seed 各维护一份锚点/lineage 规则而长期漂移。
+    by_id = {str(getattr(row, "message_id", "") or ""): row for row in rows}
+    payload = [row.to_dict() for row in rows]
+    task_ids = _task_context_ids_from_rows(task_rows, anchor_link)
+    selected_ids = {
+        str(row.get("message_id") or "")
+        for row in _detached_task_rows(payload, anchor_link, task_ids)
+    }
+    return [row for message_id, row in by_id.items() if message_id in selected_ids]
+
+
+# LLM: lineage 身份只从已加载的 task 行推导（同一份 scope 事实），不再读磁盘任务链接。
+# 函数用途: 从 scope 的 task 行推导某 detached 任务的后代 run 身份集合。
+def _task_context_ids_from_rows(
+    task_rows: list[dict[str, Any]],
+    link: dict[str, Any],
+) -> set[str]:
+    task_id = str(link.get("task_id") or "").strip()
+    root_id = str(link.get("parent_id") or link.get("root_id") or "").strip() or task_id
+    task_ids = {item for item in {task_id, root_id} if item}
+    for row in task_rows:
+        for key in ("task_id", "parent_id", "root_id", "parent_run_id", "root_run_id"):
+            value = str(row.get(key) or "").strip()
+            if value:
+                task_ids.add(value)
+    return task_ids
 
 
 # LLM: 解析种子并把"历史读不到"升级成 typed 错误：读不到时不许退回有界摘要继续跑模型，
@@ -3244,7 +3209,7 @@ def _background_conversation_history_seed(
         # 权威历史 = 全部未压缩行；任务范围裁决按既有 lineage 规则在**这些行上**执行，
         # 不能拿 context_bundle 的 recent_limit=20 展示索引当权限白名单（那会把普通会话
         # 的长历史截成最后 20 条，重新制造上下文骤降）。
-        scoped_rows = _history_scope_rows(store, thread, scope_state.task_id, rows)
+        scoped_rows = _history_scope_rows(scoped, rows)
         budget = int(getattr(runtime_compact_policy(agent), "trigger_tokens", 0) or 0)
         # 只用历史投影两步（行选择 + provider 消息），不牵入 recent_artifacts 等与续接无关的投影。
         selected_rows = _gateway_conversation_history_rows(

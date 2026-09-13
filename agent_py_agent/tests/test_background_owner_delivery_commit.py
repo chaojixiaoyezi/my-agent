@@ -930,3 +930,65 @@ def test_background_history_seed_ignores_display_rows_when_scoping(tmp_path) -> 
     rendered = json.dumps(list(result.seed.messages), ensure_ascii=False)
     assert "history-0" in rendered and "history-39" in rendered
     assert "display_checkpoint" not in rendered
+
+
+# LLM: 范围裁决的输入必须是"已经读成功的同一份 scope 事实"：旧实现单独读 task link，
+# 读失败→link=None→默认返回全部行（fail-open），把"读取失败"洗成"普通会话"。
+# 函数用途: 验证 scope 事实里带 detached 锚点时按锚点/lineage 过滤，且不依赖任何磁盘重读。
+def test_history_scope_rows_uses_loaded_scope_facts_without_reread() -> None:
+    from agent_py_agent.agent.conversation.models import MessageLogEntry
+    from agent_py_agent.agent.conversation.runtime import _history_scope_rows
+
+    rows = [
+        MessageLogEntry(
+            message_id=f"msg-{index}",
+            thread_id="thread-1",
+            role="user",
+            content=f"row-{index}",
+            created_at=1000.0 + index,
+            metadata={"conversation_request_id": f"req-{index}"},
+        )
+        for index in range(50)
+    ]
+    # scope 事实：detached named task，创建锚点 = msg-4（之前的历史属于创建前快照）。
+    scoped = {
+        "tasks": [
+            {
+                "task_id": "task-A",
+                "work_kind": "goal",
+                "work_name": "saved-A",
+                "cancellation_scope": "detached",
+                "created_at": 1000.0,
+                "context_anchor_message_id": "msg-4",
+            }
+        ]
+    }
+
+    selected = _history_scope_rows(scoped, rows)
+    ids = [row.message_id for row in selected]
+
+    assert ids == [f"msg-{index}" for index in range(5)], ids
+    # 无 detached task 时（普通会话）必须完整返回全部行。
+    assert len(_history_scope_rows({"tasks": []}, rows)) == 50
+
+
+# LLM: 普通会话的边界不能因范围裁决而改变：50/100 行 + display 穿插都要完整。
+# 函数用途: 验证无 detached scope 时 100 行历史（含 display 行）全部保留。
+def test_history_scope_rows_keeps_plain_history_intact() -> None:
+    from agent_py_agent.agent.conversation.models import MessageLogEntry
+    from agent_py_agent.agent.conversation.runtime import (
+        _history_scope_rows,
+    )
+
+    rows = [
+        MessageLogEntry(
+            message_id=f"m-{index}",
+            thread_id="thread-1",
+            role="user",
+            content=f"c-{index}",
+            created_at=2000.0 + index,
+            metadata={},
+        )
+        for index in range(100)
+    ]
+    assert len(_history_scope_rows({"tasks": [{"task_id": "t", "work_kind": "audit", "work_name": ""}]}, rows)) == 100

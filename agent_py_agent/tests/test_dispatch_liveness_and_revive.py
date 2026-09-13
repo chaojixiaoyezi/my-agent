@@ -1095,15 +1095,18 @@ def test_closed_audit_source_worker_is_never_revived_as_pending_orphan(
     assert manager.load(task.id).status == "CANCELLED"
 
 
-# LLM: 真实链路验收（f856ddd3）：显式流不完整 → 宿主按可续跑族只结清 attempt（run 仍 created）
-# → runner 对**同一 attempt** 报 FAILED，必须能被权威账本接受并落成 run 终态 + agent_run.completed；
-# 过期 attempt（换代后）仍必须被拒。用真实 SubAgentManager + 真实 runtime.db（临时 owner），
-# 不 mock 冲突判定本身。
-# 函数用途: 验证"同一 attempt 的流不完整终态"能收口，而"过期 attempt"仍被拒。
+# LLM: 真实链路验收（f856ddd3）：走生产入口 settle_agent_attempt 造出事故形态
+# （run=created、attempt=done、ended_at>0、is_current=True），再经真正的 RecordRunnerResult 入口
+# 验证 task 终态 / runner_result / 直属父 wake 一致；过期保护用**真实下一代 attempt** 验证。
+# 函数用途: 验证流不完整后的同一 attempt 能收口、旧代结果仍被拒、且父级真的收到唤醒。
 def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path) -> None:
+    import json as _json
+
+    from agent_py_agent.agent.conversation import ConversationStore
     from agent_py_agent.agent.subagents.services.runner_result_service import (
         RecordRunnerResultParams,
         _managed_runtime_result_conflict,
+        _runner_result_matches_settled_attempt,
     )
 
     manager = SubAgentManager(
@@ -1111,21 +1114,16 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
         owner_id="tui-test/stream-incomplete",
         owner_home_dir=str(tmp_path / "owner"),
     )
-    task = manager.create_run(
-        goal="stream incomplete closure",
-        thought="",
-        plan=["finish"],
-        depth=1,
-    )
+    task = manager.create_run(goal="stream incomplete closure", thought="", plan=["finish"], depth=1)
     prepared = manager.lifecycle.prepare_runner_attempt(task.id)
     attempt_id = prepared.runner_active_attempt_id
     authority = manager.runtime_db.agent_run_for_run_id(task.id)
     assert authority is not None
+    agent_run_id = str(authority["agent_run_id"])
 
-    # 事故形态：宿主按"可续跑族"结清 attempt（run_status 留 created）。
-    settled = manager.runtime_db.settle_agent_run(
-        agent_run_id=str(authority["agent_run_id"]),
-        status="created",
+    # 生产入口：宿主按"可续跑族"只结清 attempt，AgentRun 仍保持 created（runtime_mixin.py:483 同路）。
+    settled = manager.runtime_db.settle_agent_attempt(
+        agent_run_id=agent_run_id,
         attempt_id=attempt_id,
         payload={
             "status": "attempt_done",
@@ -1136,53 +1134,117 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
             "tool_rounds": 3,
         },
     )
-    # settle 只接受终态集；"created" 不是终态，因此这里显式断言它没有假装成功。
-    assert settled.get("settled") is False
-    assert settled.get("reason") == "invalid_status"
+    assert settled.get("settled") is True, settled
+
+    # guard 之前的硬事实。
+    facts = manager.runtime_db.runner_result_commit_authority(run_id=task.id, attempt_id=attempt_id)
+    assert facts is not None
+    assert facts["run_status"] == "created"
+    assert facts["attempt_status"] == "done"
+    assert facts["is_current"] is True
+    run_row = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert run_row is not None and str(run_row["status"] or "") == "created"
+    attempt_rows = manager.runtime_db.attempts_for_run(agent_run_id)
+    assert [str(row["status"]) for row in attempt_rows] == ["done"]
+    assert float(attempt_rows[0]["ended_at"] or 0.0) > 0.0
 
     params = RecordRunnerResultParams(
         run_id=task.id,
         dry_run=False,
         ok=False,
-        message="",
+        message="runner 执行失败: MODEL_STREAM_INCOMPLETE",
         attempt_id=attempt_id,
         status="FAILED",
         turn_end_reason="error",
+        failure_type="runner_error",
     )
 
-    conflict = _managed_runtime_result_conflict(manager, manager.load(task.id), params)
-    assert conflict == "", f"同一 attempt 的失败终态必须可收口，实际冲突: {conflict}"
+    # 旧规则（只放行 PENDING/BLOCKED）在同一事实上必然拒绝：这就是修复前的事故分支。
+    old_rule_accepts = (
+        str(facts["run_status"]) in {"", "created"}
+        and str(facts["attempt_status"]) == "done"
+        and str(params.status or "").strip().upper() in {"PENDING", "BLOCKED"}
+    )
+    assert old_rule_accepts is False, "旧规则必须拒绝 FAILED 终态（修复前事故形态）"
+    assert _runner_result_matches_settled_attempt("created", "done", params) is True
+    assert _managed_runtime_result_conflict(manager, manager.load(task.id), params) == ""
 
-    # 换代后的过期 attempt 仍必须被拒（不放宽过期保护）。
-    stale_params = RecordRunnerResultParams(
-        run_id=task.id,
-        dry_run=False,
-        ok=False,
-        message="",
-        attempt_id="attempt-does-not-exist",
-        status="FAILED",
-        turn_end_reason="error",
-    )
-    stale_conflict = _managed_runtime_result_conflict(manager, manager.load(task.id), stale_params)
-    assert stale_conflict != "", "不存在的/过期的 attempt 绝不能被接纳"
+    # 真正的落账入口：写 runner_result + task 终态。
+    result = manager.runner_result.record_runner_result(params)
+    assert result.ok is False and result.status == "FAILED", result.status
+    reloaded = manager.load(task.id)
+    assert str(reloaded.status or "").upper() == "FAILED"
+    assert Path(str(getattr(reloaded, "runner_result_file", "") or "")).exists()
 
-    # 冲突放行后，权威账本必须真的能落成终态 + agent_run.completed（诊断事件不等于父级收到）。
-    final = manager.runtime_db.settle_agent_run(
-        agent_run_id=str(authority["agent_run_id"]),
-        status="failed",
-        attempt_id=attempt_id,
-        payload={
-            "status": "FAILED",
-            "runtime_status": "error",
-            "runtime_reason": "MODEL_STREAM_INCOMPLETE",
-            "runtime_source": "model_provider",
-            "tool_rounds": 3,
-        },
+    # 过期保护：真实创建下一代 attempt 后，旧代结果必须仍被拒。
+    next_prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    next_attempt_id = next_prepared.runner_active_attempt_id
+    assert next_attempt_id != attempt_id
+    stale_conflict = _managed_runtime_result_conflict(
+        manager,
+        manager.load(task.id),
+        RecordRunnerResultParams(
+            run_id=task.id,
+            dry_run=False,
+            ok=False,
+            message="",
+            attempt_id=attempt_id,
+            status="FAILED",
+            turn_end_reason="error",
+        ),
     )
-    assert final.get("settled") is True, final
-    run_row = manager.runtime_db.agent_run_for_run_id(task.id)
-    assert run_row is not None and str(run_row["status"] or "") == "failed"
-    events = manager.runtime_db.events_for_attempt(attempt_id, limit=50)
-    assert any(str(item["event_type"] or "") == "agent_run.completed" for item in events), (
-        "run 终态必须落 agent_run.completed 事件，否则父级/监督看不到收口"
+    assert stale_conflict != "", "旧代 attempt 的结果绝不能被接纳"
+
+    # 直属父级唤醒：诊断事件不等于父级收到；接上父会话后用**当前代** attempt 重放失败结果。
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-parent",
+            "channel": "tui",
+            "channel_conversation_id": "session-parent",
+            "channel_user_id": "owner-parent",
+        }
     )
+    parent = manager.create_run(goal="parent waits for child", thought="", plan=["wait"], depth=1)
+    manager.conversation_store = store
+    # 直属父级唤醒按"孩子的 task → thread"绑定解析（store.thread_for_task），先建立该绑定。
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": task.id,
+            "goal": "stream incomplete closure",
+            "status": "active",
+        }
+    )
+    child = manager.load(task.id)
+    child.attributes = {
+        **dict(child.attributes or {}),
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": parent.id,
+    }
+    manager.save(child)
+    replay = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            dry_run=False,
+            ok=False,
+            message="runner 执行失败: MODEL_STREAM_INCOMPLETE",
+            attempt_id=next_attempt_id,
+            status="FAILED",
+            turn_end_reason="error",
+            failure_type="runner_error",
+        )
+    )
+    assert replay.status == "FAILED"
+
+    wake_payloads = []
+    for candidate in sorted(tmp_path.rglob("*.json")):
+        try:
+            payload = _json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(payload, dict) and "subagent-finished" in str(payload.get("dedupe_key") or ""):
+            wake_payloads.append(payload)
+    assert wake_payloads, "有父会话时 record_runner_result 必须给直属父级发结构化唤醒"
+    assert str(wake_payloads[-1].get("reason") or "") == "subagent_runner_finished"
+    assert str((wake_payloads[-1].get("metadata") or {}).get("status") or "").upper() == "FAILED"
