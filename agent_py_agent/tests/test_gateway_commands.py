@@ -958,8 +958,10 @@ def test_readiness_authority_reports_starting_ready_failed_and_stopped(tmp_path:
 
 
 # LLM: 发布顺序保持"HTTP bind → heartbeat → state"，所以 heartbeat 的 running 与 state 的 running 同等可信，
-#   state 还停在 starting 时也不能把已 bind 的网关判成未就绪。
-# 函数用途: 验证 state/heartbeat 任一 running 即就绪的既有语义没有被新判据改掉。
+#   state 还停在 starting 时也不能把已 bind 的网关判成未就绪。这条"覆盖 starting"是唯一允许的覆盖方向：
+#   state 一旦越过 starting（failed / interrupted / http_server_error），它的结论就是权威，
+#   后台 heartbeat 的周期 running 不许把它改写成 ready（见 test_gateway_readiness_generation.py）。
+# 函数用途: 验证 state/heartbeat 交叉的边界语义没有被新判据改掉。
 def test_readiness_heartbeat_running_is_enough_when_state_still_starting(tmp_path: Path) -> None:
     import os
 
@@ -975,6 +977,14 @@ def test_readiness_heartbeat_running_is_enough_when_state_still_starting(tmp_pat
     assert readiness.ready is True
     assert readiness.source == "heartbeat"
     assert readiness.status == "running"
+
+    # 边界：state 越过 starting 后，同一个 running heartbeat 不得再放行。
+    _write_readiness_status(paths, pid=os.getpid(), status="failed")
+    failed = gateway_readiness(paths)
+
+    assert failed.ready is False
+    assert (failed.state, failed.reason) == ("failed", "GATEWAY_START_FAILED")
+    assert failed.source == "state"
 
 
 # LLM: 陈旧代际必须由结构化时间字段拒绝：PID 记录锚点（本次启动）比 state.started_at 新 600s 时，

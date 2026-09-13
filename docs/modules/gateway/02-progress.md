@@ -1,5 +1,36 @@
 # Gateway Progress
 
+## 2026-09-12 R263 GW-01 残留：误 ready 已复现并修复（心跳代际 + 记录优先级）
+
+- **可达性先证后修**（受控 tmp 文件 + 真实写入方，不动共享网关）：
+  · 组合 B「同 PID：heartbeat=running（旧格式无 started_at）+ state=failed」——真子进程跑 `cmd_gateway_run` +
+    父进程按 `cmd_gateway_start` 原样等待，20ms 采样磁盘：`t+0.79s ready=True`（合法发布）→ `t+1.31s
+    state=failed 而 heartbeat=running，ready 仍 True（进程 poll()=None）`→ `t+1.80s heartbeat=failed ready=False`。
+    窗口约 0.5s（`http_server.stop()`+3×`join(timeout=2)`），是 0.2s 轮询的 2 倍以上；改前附着观察者 5/5 误判
+    `alive=True` 并向正在退出的网关提交 HTTP，改后 5/5 `alive=False` 且发布窗口仍 5/5 ready。
+  · 组合 E「heartbeat=running + state=http_server_error」——**永久误 ready**（服务循环不看 HTTP 服务、心跳线程
+    继续写 running），改前 3/3 ready，改后 3/3 `failed/GATEWAY_START_FAILED`。
+- 修法一（写入侧，`cli/gateway_loops.py` 仅心跳写入函数 + 其私有 helper）：心跳载荷新增 `started_at`，
+  取自**同 pid 的 state 记录**（与 state running 同源），终止清理时继承同 pid 既有心跳里的同一值；
+  两条都取不到写 0.0（=判据既有"无法证明陈旧"的兼容语义）。不读 mtime、不抄别的进程代。
+  **踩坑记录**：第一版给心跳循环调用点加关键字参数，导致测试替身签名不匹配 → `except Exception` 吞掉
+  AttributeError → 心跳永不写成功、永不 set stop_event → pytest 挂死；改为"写入函数内部解析锚点"后签名不变。
+- 修法二（判据侧，`agent/gateway_parts/status_rendering.py`）：新增显式 `_record_precedence`/`_record_replaces` ——
+  **档 3** = state 已越过 starting 占位（生命周期所有者权威，后台周期心跳不得改写成 ready）；**档 2** = 任一来源
+  running（发布顺序 HTTP bind→heartbeat→state，state 仍 starting 时心跳必须能胜出）；**档 1** = 其余，同级保留 state。
+  删除旧"running 优先"梯子；`_GATEWAY_FAILED_STATUSES` 加入 `http_server_error`。唯一权威仍是 `gateway_readiness`。
+- 未改：HTTP bind → heartbeat → state 发布顺序、任何 timeout/间隔、`cli/gateway_process.py`（0 改动）、退出码语义。
+- 证据：`test_gateway_readiness_generation`（新增 9 例，用真实写入方 + 真实判据，不注入判据替身）、
+  `test_gateway_commands`、`test_tui_preflight` 共 66 passed；邻近 7 套 + gateway_client/cli_chat 全过；
+  ruff/code-size(hard=0)/diff 通过。**未部署、未真机**。
+- 未做/风险：①旧格式心跳（无 started_at）仍被接受——刻意兼容边界，否则升级期健康旧网关会被判死；
+  代价是"旧心跳残留 + PID 复用"仍可能误 ready，需一次重启后消失；②`cli/gateway_process.py` 的失败/终止
+  state 载荷没有 started_at（本轮无该文件权限），PID 复用下 µs 级窗口可能瞬时"误失败"（不是误 ready）；
+  ③心跳新鲜度（`updated_at` 老化）刻意未纳入判据；④顺带发现 `gateway_loops.py:1568` 的 `except Exception`
+  会吞掉写入方签名漂移（正是本轮踩到的坑），判活只看文件存在性——建议后续单独收紧。
+
+# Gateway Progress
+
 ## 2026-09-12 R261 启动就绪判据统一（alive/starting/ready/failed 四态 + 消除 TUI 过早 prepare 竞态）
 
 - 现场（交接文档 GW-01 复核）：就绪事实有两套实现——`cli/gateway_process.py` 的 `_gateway_ready_for_pid`

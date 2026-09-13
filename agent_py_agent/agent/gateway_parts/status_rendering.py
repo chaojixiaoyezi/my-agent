@@ -2,7 +2,10 @@ from __future__ import annotations
 
 # LLM: Gateway 的 alive / starting / ready / failed 判据只有一份实现，就在本模块的
 #   gateway_readiness() 与 wait_for_gateway_readiness()：readiness 的唯一来源是
-#   _gateway_record_facts()（state/heartbeat 任一记录匹配本次代际且 status=running）。
+#   _gateway_record_facts()——先按 pid + 代际（started_at）过滤，再按 _record_precedence
+#   的显式优先级选出一条本代权威记录；只有它 status=running 才算 ready，且 state 已越过
+#   starting 占位阶段后不允许被后台 heartbeat 的周期 running 覆盖（否则 state 已 failed
+#   仍会被误判 ready）。
 #   CLI gateway start、CLI 等待、TUI preflight 都必须调用它，任何调用方都不允许再写
 #   "PID 活就算就绪"。判据只读结构化字段（PID 记录代际锚点、state/heartbeat 的
 #   pid/status/started_at），不读文案、不看文件 mtime。等待使用单调时钟有界预算，
@@ -77,9 +80,16 @@ REASON_GATEWAY_START_TIMEOUT = "GATEWAY_START_TIMEOUT"
 REASON_GATEWAY_NOT_READY = "GATEWAY_NOT_READY"
 
 _GATEWAY_RUNNING_STATUS = "running"
-_GATEWAY_FAILED_STATUSES = ("failed", "interrupted")
-# 多个记录同时匹配时按这个顺序选出最能解释当前阶段的状态，避免 state/heartbeat 交叉时误报。
-_GATEWAY_RECORD_STATUS_PRIORITY = (_GATEWAY_RUNNING_STATUS,) + _GATEWAY_FAILED_STATUSES
+# LLM: state 还停在 starting 只说明"生命周期所有者尚未发布 running"，不代表失败；它是唯一允许被
+#   heartbeat 的 running 覆盖的占位状态（发布顺序 HTTP bind → heartbeat → state）。
+_GATEWAY_STARTING_STATUS = "starting"
+# LLM: 这几个状态表示"本代已经不可能再提供服务"：failed/interrupted 由生命周期所有者在服务循环结束后
+#   写入（gateway_process.py 的终止/失败记录），http_server_error 由 HTTP 服务线程崩溃时写入
+#   （http_service.py 的 _record_serve_error）。三者都必须按失败暴露，不能被后台 heartbeat 的
+#   周期 running 掩盖——否则调用方会对着一个不会再响应的网关继续放行请求。
+_GATEWAY_FAILED_STATUSES = ("failed", "interrupted", "http_server_error")
+_GATEWAY_SOURCE_STATE = "state"
+_GATEWAY_SOURCE_HEARTBEAT = "heartbeat"
 _GATEWAY_READY_POLL_SECONDS = 0.2
 
 
@@ -389,15 +399,17 @@ def _record_is_current_generation(payload: dict, not_before: float, *, tolerance
     return started >= not_before - max(0.0, tolerance)
 
 
-# LLM: 只读 state/heartbeat 的结构化字段（pid/status/started_at）：任一记录匹配该 PID 且属于本代
-#   且 status=running 即 ready，这是 ready 的唯一定义。heartbeat 没有 started_at 时按"无法证明陈旧"
-#   接受，与既有代际容差一致；本函数不写文件、不改发布顺序。
+# LLM: 只读 state/heartbeat 的结构化字段（pid/status/started_at）：先按 pid + 代际字段过滤掉别人的记录，
+#   再按 _record_precedence 的显式优先级选出本代权威状态。ready 的唯一定义仍是"权威记录 status=running"。
+#   heartbeat 的 started_at 由写入方补齐（gateway_loops 的 _write_gateway_heartbeat），这样 heartbeat
+#   分支也能做代际校验；旧格式（无 started_at）按"无法证明陈旧"接受，保持向后兼容。
+#   本函数不写文件、不改发布顺序。
 # 函数用途: 汇总某个 PID 在当前代次下的 Gateway 状态记录事实，供就绪判据与启动诊断复用。
 def _gateway_record_facts(paths: GatewayPaths, pid: int, not_before: float) -> _GatewayRecordFacts:
     facts = _GatewayRecordFacts()
     for source, path, context in (
-        ("state", paths.state, "gateway.readiness.state.read"),
-        ("heartbeat", paths.heartbeat, "gateway.readiness.heartbeat.read"),
+        (_GATEWAY_SOURCE_STATE, paths.state, "gateway.readiness.state.read"),
+        (_GATEWAY_SOURCE_HEARTBEAT, paths.heartbeat, "gateway.readiness.heartbeat.read"),
     ):
         report = read_json_file_report(path, context=context)
         if report.load_error:
@@ -408,7 +420,7 @@ def _gateway_record_facts(paths: GatewayPaths, pid: int, not_before: float) -> _
         if not_before > 0 and not _record_is_current_generation(payload, not_before):
             continue
         status = str(payload.get("status") or "")
-        if facts.source and _status_priority(status) >= _status_priority(facts.status):
+        if facts.source and not _record_replaces(source, status, facts.source, facts.status):
             continue
         facts = _GatewayRecordFacts(
             status=status,
@@ -420,13 +432,37 @@ def _gateway_record_facts(paths: GatewayPaths, pid: int, not_before: float) -> _
     return facts
 
 
-# LLM: 记录状态排序只服务展示与分型，不改变 ready 定义；未知状态排最后，仍保留为可观测事实。
-# 函数用途: 返回状态在代际记录优先级中的位置，数字越小越能代表当前阶段。
-def _status_priority(status: str) -> int:
-    try:
-        return _GATEWAY_RECORD_STATUS_PRIORITY.index(status)
-    except ValueError:
-        return len(_GATEWAY_RECORD_STATUS_PRIORITY)
+# LLM: state/heartbeat 交叉时的代际优先级，显式写在这里，不依赖读取顺序、不依赖状态枚举的巧合：
+#   3 = state 已越过 starting 占位阶段：生命周期所有者（setup → 发布 → 终止/失败）的结论是权威，
+#       后台 heartbeat 的周期 running 不允许把它改写成 ready。GW-01 残留就出在这里：state 已写
+#       failed（gateway_process.py:762/771）而 heartbeat 还留着最后一次 running（gateway_loops.py:1567，
+#       心跳线程要到 _cmd_gateway_run_cleanup 才停），旧判据用 running 覆盖 failed → 误 ready。
+#   2 = 任一来源的 running：发布顺序是 HTTP bind → heartbeat running → state running
+#       （gateway_process.py:405-409），所以 state 还停在 starting 时 heartbeat 的 running 必须能胜出。
+#   1 = 其余（state 的 starting 占位、空/未知状态、heartbeat 的失败或未知）：只作诊断事实。
+# 函数用途: 返回一条记录在代际优先级中的档位，数字越大越能代表本代状态。
+def _record_precedence(source: str, status: str) -> int:
+    if source == _GATEWAY_SOURCE_STATE and status and status != _GATEWAY_STARTING_STATUS:
+        return 3
+    if status == _GATEWAY_RUNNING_STATUS:
+        return 2
+    return 1
+
+
+# LLM: 同级时生命周期所有者（state）优先；同源不会同时有两条记录。只比较两条已经过 pid+代际过滤的记录，
+#   不看文件名、不看文件 mtime、不看读取顺序。
+# 函数用途: 判断候选记录是否应当替换当前记录。
+def _record_replaces(
+    candidate_source: str,
+    candidate_status: str,
+    current_source: str,
+    current_status: str,
+) -> bool:
+    candidate_rank = _record_precedence(candidate_source, candidate_status)
+    current_rank = _record_precedence(current_source, current_status)
+    if candidate_rank != current_rank:
+        return candidate_rank > current_rank
+    return current_source != _GATEWAY_SOURCE_STATE and candidate_source == _GATEWAY_SOURCE_STATE
 
 
 # LLM: 兼容投影：只回答"本代是否已发布 running 记录"，进程存活由调用方（spawn 方 poll()）提供，
@@ -460,8 +496,8 @@ def _generation_anchor(paths: GatewayPaths, not_before: float) -> float:
     return max(float(not_before or 0.0), gateway_generation_anchor(paths))
 
 
-# LLM: 只做状态归类，不改写记录事实；failed 记录在进程还活着时也按 failed 暴露，避免把服务自身
-#   失败当成"仍在启动"骗用户继续等。
+# LLM: 只做状态归类，不改写记录事实；failed/interrupted/http_server_error 记录在进程还活着时也按
+#   failed 暴露，避免把服务自身失败当成"仍在启动"骗用户继续等。
 # 函数用途: 把进程存活事实与记录事实归成四态之一及对应结构化 reason。
 def _readiness_state(alive: bool, facts: _GatewayRecordFacts) -> tuple[str, str]:
     if alive and facts.ready:

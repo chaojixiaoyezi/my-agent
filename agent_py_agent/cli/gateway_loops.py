@@ -1570,6 +1570,12 @@ def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Ev
         stop_event.wait(max(1, agent.config.gateway_heartbeat_interval))
 
 
+# LLM: 心跳是本代"HTTP 已 bind 并可服务"的发布信号，所以它必须带代际锚点 started_at（语义与 state 的
+#   started_at 相同），否则同 PID 的上一代残留 running 无法被 status_rendering._record_is_current_generation
+#   拒绝，判据只能靠 pid+running 误判就绪。锚点在写入函数内部解析（见 _heartbeat_generation_started_at），
+#   调用方签名与发布顺序都不变：心跳循环照旧只传 status/pid，终止清理心跳也不新增参数。
+#   本函数只写心跳文件，不改 state。
+# 函数用途: 写入一份 Gateway 心跳载荷（含本代 started_at），供外部判活、判就绪与诊断读取。
 def _write_gateway_heartbeat(
     paths: GatewayPaths,
     agent: SimpleAgent,
@@ -1582,6 +1588,7 @@ def _write_gateway_heartbeat(
         {
             "status": status,
             "pid": pid,
+            "started_at": _heartbeat_generation_started_at(paths, pid),
             "updated_at": time.time(),
             "gateway_workspace": str(paths.root),
             "subagent_workspace": str(agent.subagents.workspace),
@@ -1592,6 +1599,53 @@ def _write_gateway_heartbeat(
             "inflight": admission.snapshot(),
         },
     )
+
+
+# LLM: 心跳的 started_at 必须与 state 的 started_at 同源，所以先读"同 pid 的 state 记录"的 started_at
+#   （生命周期所有者发布 running 时写的正是 context.process_started_at），再退到"同 pid 的既有心跳"
+#   里已经写下的同一个值——终止清理时 state 已被改写成不含 started_at 的终止记录，只能靠它继承。
+#   两条都取不到就写 0.0：判据把 0.0 当"无法证明是旧代"，与补字段之前完全一致，旧格式心跳不会突然被判死。
+#   只认同 pid 的记录，绝不把别的进程代的锚点抄过来；不读文件 mtime、不猜时钟、不新增调用方参数。
+# 函数用途: 解析本次心跳写入应当携带的代际锚点时间（epoch 秒）。
+def _heartbeat_generation_started_at(paths: GatewayPaths, pid: int) -> float:
+    for payload in (_read_json_payload(paths.state), _read_json_payload(paths.heartbeat)):
+        if _positive_int(payload.get("pid")) != _positive_int(pid):
+            continue
+        started_at = _positive_float(payload.get("started_at"))
+        if started_at > 0:
+            return started_at
+    return 0.0
+
+
+# LLM: state/heartbeat 都是非原子写，读旧载荷只为继承一个字段；任何解析/IO 问题都必须降级成空字典，
+#   绝不能把异常抛回心跳写入路径（心跳一停，外部会把它当成网关死亡）。
+# 函数用途: 尽力读取一份 JSON 对象载荷，失败返回空字典。
+def _read_json_payload(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+# LLM: 时间字段可能是字符串/None/负数（旧记录或人工改过），只接受正数，其余按"没有"处理。
+# 函数用途: 把任意值转成正浮点数，非正数或解析失败返回 0.0。
+def _positive_float(value: object) -> float:
+    try:
+        parsed = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if parsed > 0 else 0.0
+
+
+# LLM: pid 字段同样可能缺失或非法，非正数一律按"不匹配"处理，避免把别的进程代当成本代。
+# 函数用途: 把任意值转成正整数，非正数或解析失败返回 0。
+def _positive_int(value: object) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _print_gateway_loop_error(context: str, worker_id: str, exc: BaseException) -> None:

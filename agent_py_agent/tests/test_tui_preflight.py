@@ -468,6 +468,35 @@ def test_preflight_ignores_stale_running_state_from_earlier_generation(tmp_path:
     assert outcome.pid == pid
 
 
+# LLM: GW-01 残留的 TUI 侧回归：state 已由真实失败写入方写成 failed，而心跳文件仍是本代最后一次
+#   running（心跳线程要到清理阶段才停），旧判据会在这里放行并去 prepare_session。
+#   现在必须按结构化失败分型退出，且绝不触达会话恢复。
+# 函数用途: 验证 running 心跳掩盖不了 state=failed，preflight 报 GATEWAY_START_FAILED。
+def test_preflight_reports_failed_state_not_masked_by_running_heartbeat(tmp_path: Path) -> None:
+    paths = _gateway_paths(tmp_path)
+    pid = os.getpid()
+    anchor = time.time()
+    prepared: list[str] = []
+    _write_pid_record(paths, pid, anchor_at=anchor)
+    _write_status(paths, pid=pid, status="failed", started_at=anchor)
+    # 心跳仍写着 running：这既是本代心跳线程的最后一次写入，也是旧格式（无 started_at）的兼容形状。
+    _write_status(paths, pid=pid, status="running", started_at=anchor, path=paths.heartbeat)
+
+    application = _application()
+    runtime = TuiRuntime("preflight-failed-not-masked")
+    thread = start_tui_gateway_preflight(TuiGatewayPreflight(
+        application=application, runtime=runtime, paths=paths, timeout_seconds=0.4,
+        stop_event=threading.Event(), on_ready=lambda: None,
+        prepare_session=lambda: prepared.append("history") or "",
+    ))
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert prepared == []
+    assert application.result == 2
+    assert runtime.store.snapshot().stable_blocks[0].metadata["error_code"] == "GATEWAY_START_FAILED"
+
+
 @pytest.mark.parametrize("outcome", ["ready", "failed", "closed", "raised"])
 def test_resume_preparation_publishes_only_successful_live_session(outcome) -> None:
     stop = threading.Event()

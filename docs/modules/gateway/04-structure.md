@@ -1,5 +1,17 @@
 # Gateway Structure
 
+## R263 就绪判据的记录优先级与心跳代际
+
+- `gateway_readiness` 仍是**唯一权威**；记录选择由 `_record_precedence`/`_record_replaces` 显式决定，
+  与读取顺序无关：state 越过 starting 占位时 state 权威（后台周期心跳不得把 failed/http_server_error
+  改写成 ready）；state 仍 starting 时允许 heartbeat 的 running 胜出（发布顺序 HTTP bind→heartbeat→state）。
+  **不要**恢复"running 优先"的旧梯子，也不要新增第二套判据。
+- 心跳载荷现在带 `started_at`（写入函数内部从同 pid 的 state/旧心跳继承，取不到写 0.0 = 兼容"无法证明陈旧"）。
+  改心跳写入时不得改调用方签名（历史踩坑：签名漂移会被 `except Exception` 吞掉并挂死等待）。
+- `_GATEWAY_FAILED_STATUSES` 含 `http_server_error`：HTTP 服务线程已死属服务自身失败。
+
+# Gateway Structure
+
 ## R261 就绪判据的唯一权威
 
 - **ready 只在 `status_rendering._gateway_record_facts()` 定义一次**：state/heartbeat 任一记录 pid 匹配、
