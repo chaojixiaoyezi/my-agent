@@ -1,5 +1,22 @@
 # DESIGN LEDGER
 
+## 2026-09-12 R262 A 线冷帧：净化 transl 表 + ASCII 段批处理 + cluster 宽度缓存【状态：已修+配对实测，未部署】
+
+- 基线（HEAD 85a460b7，2000 块 / width 120）：整帧冷帧 294.0ms，其中 markdown-it parse 42.6%、
+  layout 39.9%（`_append_wrapped` 32.2%）、整帧净化 6.4%。
+- 修法：①净化改预编译 `str.translate` 表（Cc/Cs 固定区间，保留 \n/\t），逐字符 `unicodedata.category`
+  下沉为一次 C 级扫描；②换行器对"纯 ASCII 连续段"整段批处理（段尾可能被组合符/VS16/emoji 并入 cluster 的位置
+  交回通用逻辑，出现 ZWJ 整段退回）；③`_cluster_width` lru_cache(4096)；④助手每行只 join 一次可见文本。
+- **配对实测（同进程交错 A/B，CPU==wall）**：中英混排 1.18–1.22×、ASCII/代码为主 1.35–1.37×、
+  纯中文 1.20–1.21×；热帧无回归（14.37→14.27ms，噪声内）。
+  **更正**：第一轮"2.5×"是机器负载漂移假象（loadavg 5–27，14 用户共用），单次 wall 前后对比在此机不可信。
+- 等价性：与 HEAD 纯净旧树逐字节 diff **44,970 例全一致**（markdown 28,944 + wrap 15,560 + sanitize 406 + 整帧 60，
+  含样式与 `block_line_offsets`），系统 py3.14 与 .venv py3.12 双环境一致；新增 6 例锁定。
+- 未做/否决：token 缓存（冷帧 distinct 命中率 0%）、段落级懒渲染（渲染器无视口概念 + 需重验锚点/搜索/复制）、
+  禁用 markdown-it 规则/改全局 logging。残留：parse 仍 51%、`_append_wrapped` 56.7ms。
+
+# DESIGN LEDGER
+
 ## 2026-09-12 R258 门槛5 续跑：可恢复超时后"只承诺不动作"不再静默收口【状态：已修+单测，未部署】
 
 真机现象：`ma-port-2` 里模型回了一句"在的，刚才超时了，我重新来。"然后什么都不发生（提示符空着）。

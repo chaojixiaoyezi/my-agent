@@ -1747,3 +1747,35 @@ def test_sanitize_terminal_text_keeps_semantics_and_bounds_memo() -> None:
     cached_after_short = _memoized_sanitize.cache_info().currsize
     sanitize_terminal_text("x" * (_SANITIZE_MEMO_MAX_CHARS + 1))
     assert _memoized_sanitize.cache_info().currsize == cached_after_short
+
+
+# R257: 冷帧渲染快路径不得改变助手正文的逐行输出：标记、浅灰折叠提示的样式与位置、块起始行锚点
+# 都必须与优化前一致；这里用固定 golden 行锁住 _render_assistant 的单次 fragments_text 改造。
+def test_assistant_frame_lines_stay_byte_identical_after_render_fast_paths() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("render-golden", clock=lambda: 100.0)
+    store.publish(seq.emit("turn_started", "started", "turn"))
+    store.publish(
+        seq.emit(
+            "assistant_completed",
+            "completed",
+            "assistant",
+            {"text": "\n".join(f"第 {i} 行正文内容" for i in range(1, 301))},
+        )
+    )
+    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
+    lines = frame.transcript_lines
+
+    assert len(lines) == 154
+    assert lines[0] == (
+        ("class:tui-assistant-marker", "● "),
+        ("", "第 1 行正文内容"),
+    )
+    assert lines[1] == (("", "  "), ("", "第 2 行正文内容"))
+    assert lines[133] == (
+        ("class:tui-muted", "  "),
+        ("class:tui-muted", "… 中间 147 行已折叠 (ctrl+o 展开更多) …"),
+    )
+    assert lines[134] == (("", "  "), ("", "第 281 行正文内容"))
+    assert lines[153] == (("", "  "), ("", "第 300 行正文内容"))
+    assert frame.block_line_offsets == (("assistant", 0),)

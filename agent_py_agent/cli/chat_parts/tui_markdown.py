@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -24,6 +25,10 @@ FormattedLine = tuple[Fragment, ...]
 # 常量用途: 短 fragment 净化缓存的最大条目数与单条最大字符数。
 _SANITIZE_MEMO_ENTRIES = 8_192
 _SANITIZE_MEMO_MAX_CHARS = 512
+
+# LLM: cluster 宽度缓存条目上限；TUI 常用字符集远小于该值，命中率接近 100%，越界后 LRU 淘汰只影响速度。
+# 常量用途: 单个 grapheme cluster 显示宽度缓存的条目数上限。
+_CLUSTER_WIDTH_ENTRIES = 4_096
 
 
 # LLM: Every model/tool/user string is untrusted terminal data. This helper removes C0/C1
@@ -49,19 +54,24 @@ def _memoized_sanitize(value: str) -> str:
     return _strip_terminal_controls(value)
 
 
-# LLM: 逐字符判定是净化成本主体（每帧百万次 unicodedata.category），这条实现保持原语义不变。
+# LLM: Cc(C0/C1) 与 Cs(代理区) 是 Unicode 固定区间：U+0000..U+001F、U+007F..U+009F、U+D800..U+DFFF。
+# 这里把它们预先编译成 translate 表，使逐字符 unicodedata.category 判定下沉为一次 C 级扫描；
+# \t(U+0009) 与 \n(U+000A) 属于 Cc 但必须保留，因此显式排除在删除集合之外。
+_TERMINAL_CONTROL_TABLE: dict[int, None] = dict.fromkeys(
+    (
+        *range(0x00, 0x09),
+        *range(0x0B, 0x20),
+        *range(0x7F, 0xA0),
+        *range(0xD800, 0xE000),
+    )
+)
+
+
+# LLM: 逐字符判定改成等价 translate 表后输出逐字符相同（同集合删除、同集合保留），只是不再有 Python 级循环；
+# 调用方（sanitize_terminal_text、memo）与安全边界不变，新增控制字符仍需改这里而不是改 Category 判定。
 # 函数用途: 实际执行控制字符过滤。
 def _strip_terminal_controls(value: str) -> str:
-    sanitized: list[str] = []
-    for char in value:
-        if char in {"\n", "\t"}:
-            sanitized.append(char)
-            continue
-        category = unicodedata.category(char)
-        if category in {"Cc", "Cs"}:
-            continue
-        sanitized.append(char)
-    return "".join(sanitized)
+    return value.translate(_TERMINAL_CONTROL_TABLE)
 
 
 # LLM: MarkdownRenderContext 只承载可复现的宽度和外层前缀；业务身份不能进入语法渲染。
@@ -510,7 +520,57 @@ def _append_table_row(
     _append_wrapped(lines, tuple(fragments), context, prefix)
 
 
+# LLM: cluster 宽度只由 cluster 文本决定，缓存命中不会改变几何；maxsize 是有界内存约束，
+# 淘汰只影响速度。emoji ZWJ 序列与含组合符的 cluster 也会入缓存，因此键必须保留完整 cluster 文本。
+# 函数用途: 带缓存的 cluster 显示宽度计算。
+@lru_cache(maxsize=_CLUSTER_WIDTH_ENTRIES)
+def _cluster_width(cluster: str) -> int:
+    return max(0, wcswidth(cluster))
+
+
+# LLM: 只在"文本里没有 ZWJ"时使用：此时可打印 ASCII 字符必然自成 cluster（能并入前一 cluster 的
+# 只有组合符/变体选择符/emoji 修饰符/ZWJ/区域码配对，它们全都不是 ASCII），因此可以按段批处理。
+# 命中该正则的连续 ASCII 段宽度恒等于字符数，未命中的段落仍交给 _graphemes 做完整聚类。
+_PLAIN_ASCII_RUN = re.compile(r"[ -~]+")
+
+
+# LLM: 与 _graphemes 的 joins 判定同源：这些字符会把前一个字符并进同一 cluster，因此不能作为
+# "可批量 ASCII 段"的结束位置。ZWJ 与区域码配对不在此列——前者会整体退回通用聚类，后者要求两侧
+# 都是区域码，而 ASCII 段里不含区域码。
+# 函数用途: 判断一个字符是否会与前一字符组成同一个 grapheme cluster。
+def _joins_previous_cluster(char: str) -> bool:
+    codepoint = ord(char)
+    return bool(
+        unicodedata.combining(char)
+        or 0xFE00 <= codepoint <= 0xFE0F
+        or 0x1F3FB <= codepoint <= 0x1F3FF
+    )
+
+
+# LLM: 把一段文本切成"可打印 ASCII 连续段"与"其余段落"交替的序列，供 _append_wrapped 批处理；
+# 切分只允许落在真实 cluster 边界上（段尾 ASCII 字符若会被后面的组合符并入 cluster，就交回通用段落），
+# 因此顺序、内容与聚类结果都和整段交给 _graphemes 时一致。
+# 函数用途: 为换行器产出 (文本, 是否为纯可打印 ASCII 段) 序列。
+def _iter_chunk_parts(text: str):
+    position = 0
+    for match in _PLAIN_ASCII_RUN.finditer(text):
+        start, end = match.start(), match.end()
+        if end < len(text) and _joins_previous_cluster(text[end]):
+            end -= 1
+        if end <= start:
+            continue
+        if start > position:
+            yield text[position:start], False
+        yield text[start:end], True
+        position = end
+    if position < len(text):
+        yield text[position:], False
+
+
 # LLM: wrapper 以 grapheme cluster 和 wcswidth 计算列，显式 newline 强制换行；控制字符宽度按零处理。
+# 纯可打印 ASCII 段落走整段快路径，它与逐 cluster 循环逐字等价：这些字符各自成 cluster、宽度恒为 1、
+# 整段放得下时循环里的换行/丢空白分支都不会命中，追加后由行尾 _merge_fragments 合并回同一样式。
+# 出现 ZWJ 时 ASCII 可能被并入前一 cluster，因此整段退回通用聚类，保证与旧实现完全一致。
 # 函数用途: 将一组 fragments 包装成不超过 context.width 的多行并追加到结果。
 def _append_wrapped(
     lines: list[FormattedLine],
@@ -524,36 +584,43 @@ def _append_wrapped(
     prefix_width = display_width_fragments(prefix)
     current: list[Fragment] = list(prefix)
     current_width = prefix_width
-    for style, cluster in _styled_clusters(fragments):
-        if cluster == "\n":
-            lines.append(tuple(_merge_fragments(current)))
-            current = list(next_prefix)
-            current_width = display_width_fragments(next_prefix)
-            prefix_width = current_width
+    for style, text in fragments:
+        normalized = str(text).replace("\t", "    ")
+        if not normalized:
             continue
-        cluster_width = max(0, wcswidth(cluster))
-        if current_width > prefix_width and current_width + cluster_width > context.width:
-            lines.append(tuple(_merge_fragments(current)))
-            current = list(next_prefix)
-            current_width = display_width_fragments(next_prefix)
-            prefix_width = current_width
-            if cluster.isspace():
+        if "\u200d" in normalized:
+            parts = ((normalized, False),)
+        else:
+            parts = _iter_chunk_parts(normalized)
+        for part, is_plain_ascii in parts:
+            if is_plain_ascii and current_width + len(part) <= context.width:
+                current.append((style, part))
+                current_width += len(part)
                 continue
-        current.append((style, cluster))
-        current_width += cluster_width
+            for cluster in _graphemes(part):
+                if cluster == "\n":
+                    lines.append(tuple(_merge_fragments(current)))
+                    current = list(next_prefix)
+                    current_width = display_width_fragments(next_prefix)
+                    prefix_width = current_width
+                    continue
+                cluster_width = _cluster_width(cluster)
+                # 换行判定与"换行点空白丢弃"合并成同一层分支，保持与历史实现相同的嵌套深度和语义：
+                # 一旦在此换行，落在行首的空白 cluster 不写入。
+                wraps = current_width > prefix_width and current_width + cluster_width > context.width
+                if wraps:
+                    lines.append(tuple(_merge_fragments(current)))
+                    current = list(next_prefix)
+                    current_width = display_width_fragments(next_prefix)
+                    prefix_width = current_width
+                if not (wraps and cluster.isspace()):
+                    current.append((style, cluster))
+                    current_width += cluster_width
     lines.append(tuple(_merge_fragments(current)))
 
 
-# LLM: fragment cluster 迭代保留原 style，并把 tab 显式展开；ANSI 控制符不应出现在这里。
-# 函数用途: 将样式文本拆成 Unicode grapheme 近似单元和 newline。
-def _styled_clusters(fragments: FormattedLine):
-    for style, text in fragments:
-        normalized = str(text).replace("\t", "    ")
-        for cluster in _graphemes(normalized):
-            yield style, cluster
-
-
 # LLM: grapheme 近似覆盖 combining、variation selector、emoji modifier、ZWJ 和国旗区域码，宽度最终由 wcswidth 裁决。
+# _append_wrapped 直接以它迭代"已展开 tab"的文本；删除调用方时不要退回按 UTF-16 码位切分。
 # 函数用途: 将文本拆成不会把常见 emoji/组合字符从中间断开的单元。
 def _graphemes(text: str):
     cluster = ""

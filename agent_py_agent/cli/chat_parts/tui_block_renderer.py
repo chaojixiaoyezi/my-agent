@@ -1468,11 +1468,14 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
     lines: list[FormattedLine] = []
     first_content = True
     for line in markdown_lines:
-        if not fragments_text(line):
+        # 每行只拼一次可见文本：既有实现把 fragments_text 走两遍（空行判断 + 折叠提示识别），
+        # 长历史冷帧里这是每行一次的额外 join；识别规则本身不变。
+        line_text = fragments_text(line)
+        if not line_text:
             lines.append(())
             continue
         marker = "● " if first_content else "  "
-        fold_hint = _is_fold_hint_line(line)
+        fold_hint = _is_fold_hint_text(line_text)
         if fold_hint:
             style = "class:tui-muted"
         else:
@@ -1744,11 +1747,12 @@ def _append_terminal_role(line: FormattedLine, role: str) -> FormattedLine:
     )
 
 
-# LLM: 折叠提示识别只作用于 renderer 自己生成的固定投影，不得用于状态迁移或模型正文裁决。
-# 函数用途: 判断一行是否为 renderer 的中段折叠提示，以便整行使用浅灰提示色。
-def _is_fold_hint_line(line: FormattedLine) -> bool:
-    text = fragments_text(line).strip()
-    return text.startswith("… 中间") and "行已折叠" in text
+# LLM: 折叠提示识别只作用于 renderer 自己生成的固定投影，不得用于状态迁移或模型正文裁决；
+# 入口接收已经拼好的可见文本，调用方不得再为同一行调用 fragments_text 第二次。
+# 函数用途: 判断一行可见文本是否为 renderer 的中段折叠提示，以便整行使用浅灰提示色。
+def _is_fold_hint_text(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.startswith("… 中间") and "行已折叠" in stripped
 
 
 def _bounded_user_text(text: str) -> str:
