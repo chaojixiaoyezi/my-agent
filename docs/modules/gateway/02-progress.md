@@ -1,5 +1,29 @@
 # Gateway Progress
 
+## 2026-09-12 R261 启动就绪判据统一（alive/starting/ready/failed 四态 + 消除 TUI 过早 prepare 竞态）
+
+- 现场（交接文档 GW-01 复核）：就绪事实有两套实现——`cli/gateway_process.py` 的 `_gateway_ready_for_pid`
+  带 `not_before` 代际校验，而 `agent/gateway_parts/status_rendering.py` 的 `gateway_running` /
+  `wait_for_gateway_running` **只读 PID 存活**；`cli/chat_parts/tui_preflight.py` 在 PID 活之后立刻
+  `prepare_session()`（HTTP 读恢复历史），HTTP 尚未 bind 时失败即 exit 2，用户看到的是"会话历史恢复失败"。
+- 修法：唯一权威改为 `status_rendering.gateway_readiness()`（四态 ready/starting/failed/stopped）与
+  `wait_for_gateway_readiness()`（有界等待，结局 ready/failed/timeout 各带稳定 reason 码）。ready 的唯一定义 =
+  state/heartbeat 任一记录 pid 匹配 + 代际校验通过（`_record_is_current_generation`，容差仍 2.0s）+ `status=running`。
+  `gateway_process` 只做转发导入，发布顺序、容差、`cmd_gateway_start` 退出码一字未动；判据放 agent 层是为了
+  不让 TUI 启动路径反向 import 整个 CLI/Gateway 运行时。
+- TUI 行为：starting 期间 footer 显示「Gateway 启动中…（等待 HTTP 就绪）已等待 Ns」并**有界等待**，不再
+  提前 prepare_session；真失败分型呈现（等待中进程消退 → `GATEWAY_PROCESS_EXITED`；记录 failed →
+  `GATEWAY_START_FAILED`）；预算耗尽 → `GATEWAY_START_TIMEOUT`；从未运行 → `GATEWAY_NOT_READY`。
+  **未加长任何 timeout**（监督者禁止项）。
+- 证据：`test_gateway_commands` + `test_tui_preflight` 56 passed（新增 11 例）+ 18 个相关测试文件 416 passed；
+  受控验收用 fake 子进程 + tmp 状态文件（不重启真网关）：六种时序判定逐条命中。**真机验收未做**。
+- 边界与未做：heartbeat 载荷没有 `started_at`（在 `cli/gateway_loops.py`，本轮未授权改）→ heartbeat 分支
+  只能靠 pid+running，无法证明代际（与旧语义一致，判据已支持该字段，补字段即自动收紧）；
+  `gateway_running` 的布尔语义仍是"进程存活"，保持 status/adapter/supervisor 展示语义不变；
+  "等待开始前网关就已不在运行"会走完有界预算再报 `GATEWAY_NOT_READY`（容忍并发启动，不误判进程消退）。
+
+# Gateway Progress
+
 ## 2026-09-12 R258 owner 发现分页不再每页全量枚举
 
 - 现场（交接文档 GW-03）：`owner_wake_discovery.discover_owner_home_page` 每取一页都

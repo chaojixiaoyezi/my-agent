@@ -1,5 +1,18 @@
 # Gateway Structure
 
+## R261 就绪判据的唯一权威
+
+- **ready 只在 `status_rendering._gateway_record_facts()` 定义一次**：state/heartbeat 任一记录 pid 匹配、
+  代际校验通过、`status == "running"`。`_readiness_state()` 再把进程存活合进来得到四态。
+  任何新调用方都必须走 `gateway_readiness()` / `wait_for_gateway_readiness()`，**不得**再写
+  "PID 活就算就绪"的第二套判据。
+- 代际锚点 `gateway_generation_anchor()` 只读 PID 记录的结构化时间字段（started_at/spawned_at/ISO updated_at），
+  **不得用文件 mtime** 推断代际；容差 2.0s 是既有契约，不要在别处复制或改动它。
+- `cli/gateway_process.py` 仅转发导入上述判据（`__all__` 导出），其 HTTP bind → heartbeat → state 的发布顺序
+  与 `cmd_gateway_start` 退出码语义是硬约束。
+
+# Gateway Structure
+
 ## R258 owner 目录快照的边界
 
 - `discover_owner_home_page` 现在读**有界快照**（`_OwnerHomeSnapshot`）：命中条件 = 结构签名一致

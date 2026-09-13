@@ -798,6 +798,7 @@ class TestGatewayServiceWorkingDirectory:
 
 
 # LLM: 就绪判据必须区分"本次启动的这一代"和"上一代/同 PID 的陈旧记录"：pid+status 相同不足以证明。
+# 这两个入口现在从 agent.gateway_parts.status_rendering 复用唯一实现，gateway_process 只做导出。
 # 函数用途: 验证 not_before 代际校验与字段缺失时的向后兼容。
 def test_gateway_ready_requires_current_generation(tmp_path) -> None:
     from agent_py_agent.cli.gateway_process import (
@@ -827,3 +828,262 @@ def test_gateway_ready_requires_current_generation(tmp_path) -> None:
     # 缺字段的旧格式按"无法证明陈旧"处理（向后兼容）
     assert _record_is_current_generation({}, spawned_at) is True
     assert _record_is_current_generation({"started_at": "bad"}, spawned_at) is True
+
+
+# ---------------------------------------------------------------------------
+# 统一就绪判据（唯一权威）：真实 tmp 状态文件 + fake 进程，不启动真 Gateway、不碰用户状态目录
+# ---------------------------------------------------------------------------
+
+
+# LLM: 就绪判据的受控验收只允许写真实结构化文件（PID 记录 / state / heartbeat），不注入判据替身。
+# 函数用途: 构造测试专用 Gateway 路径合同，全部落在 tmp 目录内。
+def _readiness_paths(tmp_path: Path):
+    from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
+
+    return GatewayPaths(
+        root=tmp_path / "gateway",
+        pid=tmp_path / "gateway" / "gateway.pid",
+        adapter_pid=tmp_path / "gateway" / "adapter.pid",
+        state=tmp_path / "gateway" / "state.json",
+        heartbeat=tmp_path / "gateway" / "heartbeat.json",
+        stop_request=tmp_path / "gateway" / "stop.request",
+        log=tmp_path / "gateway" / "gateway.log",
+        inbox=tmp_path / "gateway" / "requests" / "pending",
+        processing=tmp_path / "gateway" / "requests" / "processing",
+        done=tmp_path / "gateway" / "requests" / "done",
+        failed=tmp_path / "gateway" / "requests" / "failed",
+        responses=tmp_path / "gateway" / "responses",
+        history=tmp_path / "gateway" / "gateway_requests.jsonl",
+    )
+
+
+# LLM: PID 记录必须带真实进程出生时间，否则 get_running_pid_report 会按 PID 复用把记录当陈旧清掉；
+#   updated_at 是本次启动的代际锚点，判据用它排除上一代残留。
+# 函数用途: 为指定进程写一份可核验的 PID 记录。
+def _write_readiness_pid_record(paths, pid: int, *, anchor_at: float | None = None) -> None:
+    import time as time_module
+    from datetime import datetime, timezone
+
+    from agent_py_agent.agent.gateway_parts.daemon_metadata import _get_process_start_time
+
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.pid.write_text(
+        json.dumps(
+            {
+                "pid": int(pid),
+                "kind": "my-agent-gateway",
+                "start_time": _get_process_start_time(int(pid)),
+                "updated_at": datetime.fromtimestamp(
+                    anchor_at if anchor_at is not None else time_module.time(),
+                    timezone.utc,
+                ).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+# LLM: state/heartbeat 是判据唯一读取的结构化来源；测试只写文件，不替换判定函数。
+# 函数用途: 写一份 Gateway 状态记录（pid/status/started_at）。
+def _write_readiness_status(
+    paths,
+    *,
+    pid: int,
+    status: str,
+    started_at: float | None = None,
+    heartbeat: bool = False,
+) -> None:
+    import time as time_module
+
+    paths.root.mkdir(parents=True, exist_ok=True)
+    target = paths.heartbeat if heartbeat else paths.state
+    target.write_text(
+        json.dumps(
+            {
+                "pid": int(pid),
+                "status": status,
+                "started_at": time_module.time() if started_at is None else started_at,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+# LLM: fake 进程只提供 spawn 方的存活事实（pid + poll），不冒充 Gateway 进程本身。
+# 类用途: 模拟 Popen 形状的子进程，用于验证 gateway start 的等待分型。
+class _FakeSpawnedProcess:
+    # LLM: exit_code=None 表示仍存活；poll 返回非 None 表示已退出。
+    # 函数用途: 记录伪造 PID 与退出码。
+    def __init__(self, pid: int, *, exit_code: int | None = None) -> None:
+        self.pid = int(pid)
+        self.exit_code = exit_code
+
+    # LLM: 与 Popen.poll() 同语义：None 表示进程仍在运行。
+    # 函数用途: 返回伪造的退出码。
+    def poll(self):
+        return self.exit_code
+
+
+# LLM: 四态判据是唯一权威：alive/starting/ready/failed 只能来自 gateway_readiness，不允许调用方各写一套。
+# 函数用途: 验证进程存活事实与 state 记录如何组合成四种结构化状态。
+def test_readiness_authority_reports_starting_ready_failed_and_stopped(tmp_path: Path) -> None:
+    import os
+
+    from agent_py_agent.agent.gateway_parts.status_rendering import gateway_readiness
+
+    paths = _readiness_paths(tmp_path)
+    _write_readiness_pid_record(paths, os.getpid())
+
+    _write_readiness_status(paths, pid=os.getpid(), status="starting")
+    starting = gateway_readiness(paths)
+    assert (starting.state, starting.reason) == ("starting", "GATEWAY_STARTING")
+    assert starting.ready is False and starting.process_alive is True
+    assert starting.source == "state"
+
+    _write_readiness_status(paths, pid=os.getpid(), status="running")
+    ready = gateway_readiness(paths)
+    assert (ready.state, ready.reason) == ("ready", "GATEWAY_READY")
+    assert ready.ready is True and ready.pid == os.getpid()
+
+    _write_readiness_status(paths, pid=os.getpid(), status="failed")
+    failed = gateway_readiness(paths)
+    assert (failed.state, failed.reason) == ("failed", "GATEWAY_START_FAILED")
+    assert failed.ready is False
+
+    paths.pid.unlink()
+    paths.state.unlink()
+    stopped = gateway_readiness(paths)
+    assert (stopped.state, stopped.reason) == ("stopped", "GATEWAY_NOT_READY")
+    assert stopped.process_alive is False and stopped.pid is None
+
+
+# LLM: 发布顺序保持"HTTP bind → heartbeat → state"，所以 heartbeat 的 running 与 state 的 running 同等可信，
+#   state 还停在 starting 时也不能把已 bind 的网关判成未就绪。
+# 函数用途: 验证 state/heartbeat 任一 running 即就绪的既有语义没有被新判据改掉。
+def test_readiness_heartbeat_running_is_enough_when_state_still_starting(tmp_path: Path) -> None:
+    import os
+
+    from agent_py_agent.agent.gateway_parts.status_rendering import gateway_readiness
+
+    paths = _readiness_paths(tmp_path)
+    _write_readiness_pid_record(paths, os.getpid())
+    _write_readiness_status(paths, pid=os.getpid(), status="starting")
+    _write_readiness_status(paths, pid=os.getpid(), status="running", heartbeat=True)
+
+    readiness = gateway_readiness(paths)
+
+    assert readiness.ready is True
+    assert readiness.source == "heartbeat"
+    assert readiness.status == "running"
+
+
+# LLM: 陈旧代际必须由结构化时间字段拒绝：PID 记录锚点（本次启动）比 state.started_at 新 600s 时，
+#   同 PID 的 running 记录属于上一代，不得算 ready。
+# 函数用途: 验证 gateway_readiness 使用 PID 记录锚点做代际过滤。
+def test_readiness_rejects_state_older_than_pid_record_generation(tmp_path: Path) -> None:
+    import os
+    import time
+
+    from agent_py_agent.agent.gateway_parts.status_rendering import (
+        _gateway_ready_for_pid,
+        gateway_readiness,
+    )
+
+    paths = _readiness_paths(tmp_path)
+    anchor = time.time()
+    _write_readiness_pid_record(paths, os.getpid(), anchor_at=anchor)
+    _write_readiness_status(paths, pid=os.getpid(), status="running", started_at=anchor - 600)
+
+    assert gateway_readiness(paths).ready is False
+    # 只按记录层看它确实是 running：拒绝它的是代际判据，不是别的条件。
+    assert _gateway_ready_for_pid(paths, os.getpid()) is True
+    assert _gateway_ready_for_pid(paths, os.getpid(), not_before=anchor) is False
+
+
+# LLM: 等待结局必须用结构化 state+reason 分型：超时但仍在启动 ≠ 从未启动 ≠ 进程已退出 ≠ 服务失败。
+# 函数用途: 验证四种等待结局的可区分性。
+def test_wait_for_readiness_distinguishes_timeout_failure_and_exit(tmp_path: Path) -> None:
+    import os
+
+    from agent_py_agent.agent.gateway_parts.status_rendering import wait_for_gateway_readiness
+
+    paths = _readiness_paths(tmp_path)
+    _write_readiness_pid_record(paths, os.getpid())
+    _write_readiness_status(paths, pid=os.getpid(), status="starting")
+
+    starting_timeout = wait_for_gateway_readiness(paths, 0.3)
+    assert (starting_timeout.state, starting_timeout.reason) == ("timeout", "GATEWAY_START_TIMEOUT")
+    assert starting_timeout.last.state == "starting"
+    assert starting_timeout.observed_alive is True
+    assert starting_timeout.ready is False
+
+    _write_readiness_status(paths, pid=os.getpid(), status="failed")
+    service_failed = wait_for_gateway_readiness(paths, 0.3)
+    assert (service_failed.state, service_failed.reason) == ("failed", "GATEWAY_START_FAILED")
+
+    paths.state.unlink()
+    paths.pid.unlink()
+    never_started = wait_for_gateway_readiness(paths, 0.3)
+    assert (never_started.state, never_started.reason) == ("timeout", "GATEWAY_NOT_READY")
+    assert never_started.last.state == "stopped"
+    assert never_started.observed_alive is False
+
+    _write_readiness_pid_record(paths, os.getpid())
+    _write_readiness_status(paths, pid=os.getpid(), status="starting")
+    process_exited = wait_for_gateway_readiness(
+        paths,
+        5.0,
+        process=_FakeSpawnedProcess(os.getpid(), exit_code=1),
+    )
+    assert (process_exited.state, process_exited.reason) == ("failed", "GATEWAY_PROCESS_EXITED")
+    assert process_exited.elapsed_seconds < 1.0
+
+
+# LLM: cmd_gateway_start 的等待必须复用唯一判据：就绪来自本代 running 记录，子进程死亡走 poll() 快速失败；
+#   预算、发布顺序和退出码语义保持不变。
+# 函数用途: 验证 gateway start 等待在 starting 记录上超时、在 running 记录上就绪、在子进程死亡时快速失败。
+def test_gateway_start_wait_reuses_canonical_readiness(tmp_path: Path) -> None:
+    import os
+
+    from agent_py_agent.cli.gateway_process import _wait_for_gateway_start_ready
+
+    paths = _readiness_paths(tmp_path)
+    _write_readiness_pid_record(paths, os.getpid())
+    _write_readiness_status(paths, pid=os.getpid(), status="starting")
+    alive_process = _FakeSpawnedProcess(os.getpid())
+
+    assert _wait_for_gateway_start_ready(paths, alive_process, timeout=0.3) is False
+
+    _write_readiness_status(paths, pid=os.getpid(), status="running")
+    assert _wait_for_gateway_start_ready(paths, alive_process, timeout=0.3) is True
+
+    dead_process = _FakeSpawnedProcess(os.getpid(), exit_code=1)
+    assert _wait_for_gateway_start_ready(paths, dead_process, timeout=5.0) is False
+
+
+# LLM: 失败分型只改呈现，不改退出码：gateway start 仍返回 2，但 stderr 必须给出结构化 reason。
+# 函数用途: 验证子进程退出时 cmd_gateway_start 返回 2 且打印 GATEWAY_PROCESS_EXITED。
+def test_cmd_gateway_start_failure_keeps_exit_code_two_with_typed_reason(tmp_path: Path, capsys) -> None:
+    from agent_py_agent.cli.gateway_process import cmd_gateway_start
+
+    paths = _readiness_paths(tmp_path)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    agent = SimpleNamespace(
+        root=tmp_path,
+        config=SimpleNamespace(gateway_stop_timeout=5, gateway_ready_timeout_seconds=0.2),
+    )
+    args = SimpleNamespace(config=str(tmp_path / "config.yaml"), force=False)
+    mock_process = _FakeSpawnedProcess(99999, exit_code=1)
+
+    with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=agent), \
+         patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=paths), \
+         patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=None), \
+         patch("agent_py_agent.cli.gateway_process._get_process_start_time", return_value=None), \
+         patch("agent_py_agent.cli.gateway_process._wait_for_gateway_start_ready", return_value=False), \
+         patch("subprocess.Popen", return_value=mock_process):
+        result = cmd_gateway_start(args)
+
+    assert result == 2
+    stderr = capsys.readouterr().err
+    assert "did not become ready before timeout" in stderr
+    assert "reason=GATEWAY_PROCESS_EXITED" in stderr

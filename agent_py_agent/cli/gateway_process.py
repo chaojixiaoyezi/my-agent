@@ -53,6 +53,15 @@ from ..agent.gateway_parts.http_service import (
     start_http_server,
 )
 from ..agent.gateway_parts.io import read_json_file, read_json_file_report, write_json_file_atomic
+
+# LLM: 就绪判据只有一份实现，位于 agent.gateway_parts.status_rendering：state/heartbeat 任一匹配 PID、
+#   且记录属于本次 spawn 的那一代（not_before − 容差）、且 status=running 才算就绪。这里只导入转发，
+#   禁止在本文件或任何调用方再写第二套"PID 活就算好"的判断。
+from ..agent.gateway_parts.status_rendering import (
+    _gateway_ready_for_pid,
+    _record_is_current_generation,
+    wait_for_gateway_readiness,
+)
 from ..agent.runtime_errors import runtime_error_report
 from .common import ROOT, make_agent
 from .gateway_loops import (
@@ -258,49 +267,18 @@ def _write_gateway_start_files(paths, *, pid: int, command: list[str]) -> None:
     )
 
 
-# LLM: state 与 heartbeat 任一匹配即算就绪（异步文件不要求同时落盘），但必须同时排除"陈旧状态误判"：
-# 上一代网关崩溃/被替换后留下的同 PID 记录、或 pid 被复用时，pid+status 相同并不代表这是本次启动的子进程。
-# not_before 是本次 spawn 的时刻，只有 started_at ≥ not_before − 容差的记录才算这一代。
-# 函数用途: 判断某个 PID 是否已发布 running，且该记录属于本次启动的那一代。
-def _gateway_ready_for_pid(paths: GatewayPaths, pid: int, *, not_before: float = 0.0) -> bool:
-    for path, context in (
-        (paths.state, "gateway.start.state.read"),
-        (paths.heartbeat, "gateway.start.heartbeat.read"),
-    ):
-        report = read_json_file_report(path, context=context)
-        payload = report.payload
-        if int(payload.get("pid") or 0) != pid or str(payload.get("status") or "") != "running":
-            continue
-        if not_before > 0 and not _record_is_current_generation(payload, not_before):
-            continue
-        return True
-    return False
-
-
-# LLM: 判定只读结构化时间字段；缺字段的旧格式按"无法证明是旧代"处理（保持向后兼容，不用自然语言或
-# 文件 mtime 猜）。容差覆盖父子进程写盘时差，避免把刚发布的这一代误判成陈旧。
-# 函数用途: 判断一条 running 记录是否由本次启动之后的那一代进程写出。
-def _record_is_current_generation(payload: dict, not_before: float, *, tolerance: float = 2.0) -> bool:
-    started_at = payload.get("started_at")
-    try:
-        started = float(started_at or 0.0)
-    except (TypeError, ValueError):
-        return True
-    if started <= 0.0:
-        return True
-    return started >= not_before - max(0.0, tolerance)
-
-
+# LLM: cmd_gateway_start 的就绪等待复用唯一权威：子进程存活事实来自 spawn 方 poll()，代际下界是本函数
+#   记录的时刻。预算、发布顺序与返回语义不变——就绪 True，子进程先死或超时 False（cmd_gateway_start
+#   统一映射成退出码 2）；具体失败分型由 status_rendering 的 state/reason 提供。
+# 函数用途: 在给定秒数内等待本次 spawn 的子进程真正发布 running 记录。
 def _wait_for_gateway_start_ready(paths: GatewayPaths, process, *, timeout: float) -> bool:
-    deadline = time.time() + max(0.0, timeout)
-    not_before = time.time()
-    while time.time() <= deadline:
-        if _gateway_ready_for_pid(paths, int(process.pid), not_before=not_before):
-            return True
-        if process.poll() is not None:
-            return False
-        time.sleep(0.2)
-    return _gateway_ready_for_pid(paths, int(process.pid), not_before=not_before)
+    outcome = wait_for_gateway_readiness(
+        paths,
+        timeout,
+        process=process,
+        not_before=time.time(),
+    )
+    return outcome.ready
 
 
 # LLM: Ordinary CLI attempts are reconciled by the long-lived Gateway before workers start. This
@@ -747,7 +725,14 @@ def cmd_gateway_start(args) -> int:
     print(f"state: {paths.state}")
     print(f"log: {paths.log}")
     if not ready:
+        # 失败必须分型：超时（可能仍在启动）、子进程已退出、服务自身发布 failed 对用户呈现不同 reason，
+        # 但退出码语义保持不变，仍是 2。
+        outcome = wait_for_gateway_readiness(paths, 0.0, process=process)
         print("gateway started but did not become ready before timeout", file=sys.stderr)
+        print(
+            f"  readiness={outcome.state} reason={outcome.reason} pid={process.pid}",
+            file=sys.stderr,
+        )
         return 2
     return 0
 
@@ -986,4 +971,7 @@ __all__ = [
     "_gateway_request_loop",
     "_gateway_background_main_loop",
     "_write_gateway_heartbeat",
+    "_gateway_ready_for_pid",
+    "_record_is_current_generation",
+    "wait_for_gateway_readiness",
 ]
