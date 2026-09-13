@@ -153,6 +153,7 @@ def test_unregistered_identity_route_still_records_reply_in_canonical_thread(tmp
     assert report.wake_handled is True
     assert report.delivery_status == "not_applicable"
     assert report.commit_kind == "canonical_record"
+    assert report.route_ownership == "undeclared", "报告必须带结构化路线归属供排障区分"
     rows = store.recent_messages(thread.thread_id, limit=0)
     assert [row.content for row in rows] == [report.response]
     assert report.message_id == rows[0].message_id

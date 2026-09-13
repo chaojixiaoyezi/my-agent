@@ -944,6 +944,7 @@ def _complete_background_slice(
         task_status=_background_task_link_status(runtime.agent, request, store=runtime.store),
         commit_kind=commit.commit_kind,
         message_id=commit.message_id,
+        route_ownership=plan.route_ownership,
     )
 
 
