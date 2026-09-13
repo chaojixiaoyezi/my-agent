@@ -35,6 +35,7 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
+    _delegated_work_facts,
     completion_response_after_tool_round,
     queue_interim_reply_for_active_named_work,
     queue_interim_reply_for_open_subagents,
@@ -1799,14 +1800,10 @@ def test_open_subagents_queue_interim_reply_without_reading_model_prose() -> Non
         ),
     )
 
-    queued = queue_interim_reply_for_open_subagents(agent, params, tool_rounds=4)
-
-    assert queued is True
-    phase = pending_natural_user_reply(params)
-    assert phase is not None
-    assert phase["kind"] == "subagents_active"
-    assert phase["facts"]["reply_is_interim"] is True
-    assert phase["facts"]["delegated_work"] == {
+    # 契约变更（R279 复审）：不再排队"subagents_active"回执；活跃子代理只在 agent tree 展示。
+    assert queue_interim_reply_for_open_subagents(agent, params, tool_rounds=4) is False
+    assert pending_natural_user_reply(params) is None
+    assert _delegated_work_facts(agent, params) == {
         "schema": "delegated_work.v2",
         "authority": "subagent_store",
         "total": 3,
@@ -1876,17 +1873,14 @@ def test_open_subagents_receipt_exposes_flattened_topology_instead_of_inventing_
         subagents=SimpleNamespace(list_runs=lambda: runs),
     )
 
-    assert queue_interim_reply_for_open_subagents(agent, params, tool_rounds=2) is True
+    assert queue_interim_reply_for_open_subagents(agent, params, tool_rounds=2) is False
+    assert pending_natural_user_reply(params) is None
 
-    phase = pending_natural_user_reply(params)
-    assert phase is not None
-    topology = phase["facts"]["delegated_work"]["topology"]
+    topology = _delegated_work_facts(agent, params)["topology"]
     assert topology["direct_child_count"] == 4
     assert topology["descendant_count"] == 0
     assert topology["nested_delegation_observed"] is False
     assert {row["parent_scope"] for row in topology["nodes"]} == {"root"}
-    reply_params = natural_user_reply_model_params(params)
-    assert "不得把直属 worker 改称孙代理" in reply_params.user_prompt
 
 
 def test_active_named_audit_replaces_premature_final_with_model_interim(
@@ -2647,10 +2641,9 @@ def test_active_turn_keeps_its_bound_subagent_interim_reply() -> None:
 
     queued = queue_interim_reply_for_open_subagents(agent, params, tool_rounds=1)
 
-    assert queued is True
-    phase = pending_natural_user_reply(params)
-    assert phase is not None
-    assert phase["facts"]["delegated_work"]["status_counts"] == {"RUNNING": 1}
+    assert queued is False
+    assert pending_natural_user_reply(params) is None
+    assert _delegated_work_facts(agent, params)["status_counts"] == {"RUNNING": 1}
 
 
 def test_task_local_subagent_never_enters_parent_user_reply_phase() -> None:
@@ -2723,8 +2716,10 @@ def test_direct_root_final_is_replaced_by_model_interim_while_child_runs(
         ),
     )
 
-    assert len(backend.prompts) == 2
-    assert response.text.startswith("三项检查已经完成两项")
+    # 契约变更（R279 复审）：子代理仍活跃只作为状态/展示事实，宿主不再用回执替换模型正文。
+    # 模型自己写的终答就是用户看到的答复，本轮正常结束；后续由子代理生命周期事件唤醒。
+    assert len(backend.prompts) == 1
+    assert response.text == "三项工作已经全部完成。"
 
 
 def test_natural_reply_does_not_guess_runtime_state_from_prose() -> None:

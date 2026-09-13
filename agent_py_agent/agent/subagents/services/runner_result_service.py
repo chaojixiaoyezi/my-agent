@@ -258,8 +258,53 @@ class SubAgentRunnerResultService:
                 return self._make_quick_result(task, dry_run, False, f"ignored stale runner result for non-active attempt {normalized_attempt_id}")
             conflict = self._managed_runtime_result_conflict(task, params)
             if conflict:
+                # 终态冲突绝不能静默：真实事故里 run=created + attempt=done 的组合被这里拒掉，
+                # 既不写 runner_result 也不写任何诊断，任务永久停在 RUNNING 且无人可查。
+                self._record_conflict_diagnostic(task, params, conflict=conflict)
                 return self._make_quick_result(task, dry_run, False, conflict)
         return None
+
+    # LLM: 终态冲突是"账本已收口、任务投影未收口"的唯一信号源；必须落一条结构化事件
+    # （closeout_blocked + reason=runner_result_conflict）才能被恢复链与排障看到。
+    # 诊断写入本身 fail-soft：诊断失败不得改变拒绝语义，也不能吞掉原始冲突原因。
+    # 函数用途: 记录一次被运行时终态闸拒绝的 runner 结果。
+    def _record_conflict_diagnostic(
+        self,
+        task: SubAgentTask,
+        params: RecordRunnerResultParams,
+        *,
+        conflict: str,
+    ) -> None:
+        repo = getattr(self, "runtime_db", None)
+        append = getattr(repo, "append_event", None)
+        if not callable(append):
+            return
+        try:
+            authority = repo.runner_result_commit_authority(
+                run_id=str(task.id or ""),
+                attempt_id=str(params.attempt_id or ""),
+            ) or {}
+        except Exception:
+            authority = {}
+        try:
+            append(
+                event_type="closeout_blocked",
+                attempt_id=str(params.attempt_id or ""),
+                agent_run_id=str((authority or {}).get("agent_run_id") or ""),
+                task_run_id=str((authority or {}).get("task_run_id") or ""),
+                payload={
+                    "schema_version": "subagent-closeout-conflict.v1",
+                    "reason": "runner_result_conflict",
+                    "conflict": str(conflict),
+                    "run_status": str((authority or {}).get("run_status") or ""),
+                    "attempt_status": str((authority or {}).get("attempt_status") or ""),
+                    "incoming_status": str(getattr(params, "status", "") or ""),
+                    "incoming_turn_end_reason": str(getattr(params, "turn_end_reason", "") or ""),
+                    "task_status": str(_task_text_attr(task, "status") or ""),
+                },
+            )
+        except Exception:
+            return
 
     # LLM: Keep the service class as orchestration only; the commit-fence rules
     # live in one module helper so adding lifecycle cases does not grow this class.

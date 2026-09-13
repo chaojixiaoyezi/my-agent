@@ -7248,8 +7248,11 @@ def test_background_context_budget_truncates_large_messages(tmp_path) -> None:
     prompt = backend.provider_texts[0]
 
     assert len(reports) == 1
-    assert "A" * 2000 not in prompt
-    assert "truncated" in prompt
+    # 后台工作片现在与前台共用同一份 canonical 历史投影：长正文按会话权威原样续接，
+    # 不再被 8000 token 的有界摘要副本截断；同时 markdown 里不得再重复一份 Recent Messages。
+    assert "A" * 2000 in prompt
+    assert "## Recent Messages" not in prompt
+    assert '"estimated": true' in prompt or "A" * 2000 in prompt
 
 
 def test_scheduler_recovers_due_policy_after_process_restart(tmp_path) -> None:

@@ -1,5 +1,15 @@
 # ROADMAP
 
+## R284 后台上下文续接 / 等待语义 / 终态静默 / Goal 唯一性（已修，待真机验收）
+
+- 后台工作片现在与前台共用同一份 canonical 历史投影与 Compact 权威（不再只带 8000 token 摘要副本），
+  `context_markdown` 不再重复注入历史；窄审计事件保持窄。
+- 主代理等待不再替换模型正文：活跃子代理只是状态/展示事实，由子代理生命周期事件唤醒后续工作。
+- 终态冲突（run=created + attempt=done）不再静默，写 `closeout_blocked` 结构化诊断；
+  僵尸 RUNNING 的自动收口（gate 放宽 + supervision 候选）仍是**待决策项**，需与 owner 确认是否允许
+  监督进程改写既有 task 终态。
+- 同 task 未完成目标不得隐式再建（名字不同也拒绝）；不按 updated_at 猜、不自动 supersede。
+
 ## R283 JSONL 记录边界修复（已修，待真机多子代理验收）
 
 子代理 transcript 含 U+0085(NEL) 时被 `splitlines()` 切成假记录 → child 判 transscript unreadable 而 FAILED。

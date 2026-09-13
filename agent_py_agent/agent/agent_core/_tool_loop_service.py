@@ -1534,12 +1534,9 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             ):
                 final_response = wait_response
                 break
-            if queue_interim_reply_for_open_subagents(
-                service._agent,
-                params,
-                tool_rounds=tool_rounds,
-            ):
-                continue
+            # 子代理仍活跃只是状态/展示事实（agent tree/child 面板已在展示），
+            # 不得替换模型自己写的正文、也不得把一轮正常答复改写成宿主回执后继续空转。
+            # 后续工作由明确的子代理生命周期事件唤醒（会话运行时 的 wait_agent 同样由模型显式调用）。
             if queue_interim_reply_for_active_named_work(
                 service._agent,
                 params,

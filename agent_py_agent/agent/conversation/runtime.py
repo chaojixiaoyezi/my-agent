@@ -1584,6 +1584,12 @@ def _run_background_main_turn_with_compact(
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] = []
     for _attempt in range(8):
+        history_seed = _background_conversation_history_seed(
+            runtime.agent,
+            runtime.store,
+            current,
+            request,
+        )
         run_params = _run_params(
             current.thread_id,
             request,
@@ -1591,6 +1597,7 @@ def _run_background_main_turn_with_compact(
             goal_context=goal_context,
             proactive_delivery_available=proactive_delivery_available,
             thread=current,
+            history_seed=history_seed,
         )
         if carried_archive_tool_calls is None:
             carried_archive_tool_calls = list(run_params.carried_archive_tool_calls or [])
@@ -1604,6 +1611,9 @@ def _run_background_main_turn_with_compact(
                 thread=current,
                 request=request,
                 proactive_delivery_available=proactive_delivery_available,
+                # 已经带上 canonical 历史时不再重复注入最近消息副本：
+                # 两份历史会重复计费、并且摘要副本没有工具细节。
+                include_recent_messages=history_seed is None,
             ),
             *continuation_injection,
         ]
@@ -3015,6 +3025,58 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
 # LLM: 后台轮的 run_id 必须优先绑定明确 task_id；线程级兜底身份只能用于无任务事件，
 # 否则同一 thread 的后续任务会误复用上一任务的 AgentRun 权威链。
 # 函数用途: 把一次后台唤醒转换成主代理运行参数，并保留任务、工具和投递边界。
+# LLM: 后台工作片必须与前台共用同一份 canonical 历史投影与同一个 Compact 权威：
+# Gateway 走 conversation_history_seed（未压缩尾部行 + provider 消息投影），后台之前不带 seed，
+# _native_provider_history_messages 直接得到空历史，只剩一份有界摘要副本——那不是"续接同一会话"，
+# 而是换了套丢工具细节的摘要。这里复用同一投影实现，但**只读**：不在后台切片里另起一次压缩
+# （压缩由本片既有的 context_overflow→compact 路径与前台 Compact 权威负责），否则每次唤醒都可能
+# 触发一次带模型调用的压缩，把历史换成一页摘要并污染调用序。
+# 函数用途: 为后台工作片构造与前台同源的会话历史种子（同一 Compact 状态 + 同一 provider 投影）。
+def _background_conversation_history_seed(
+    agent: object,
+    store: ConversationStore | None,
+    thread: ConversationThread | None,
+    request: BackgroundRunRequest,
+):
+    if store is None or thread is None:
+        return None
+    thread_id = str(getattr(thread, "thread_id", "") or "").strip()
+    if not thread_id:
+        return None
+    # 窄范围审计事件（finding/capacity）是"一条结构化事件"，不是会话续接：
+    # 它们必须只看到事件事实与审计目标，不能把 owner 的旧聊天历史带进模型输入。
+    if _narrow_audit_event_reason(getattr(request, "reason", "")):
+        return None
+    try:
+        from ..agent_core.runtime.context_compactor import runtime_compact_policy
+        from ..gateway_parts.request_execution import _gateway_conversation_refs
+        from .compact import _uncompacted_conversation_rows
+        from .models import ConversationHistorySeed
+
+        rows = _uncompacted_conversation_rows(store, thread)
+        budget = int(getattr(runtime_compact_policy(agent), "trigger_tokens", 0) or 0)
+        load_errors: list[dict] = []
+        history, canonical_history, _artifacts = _gateway_conversation_refs(
+            agent,
+            thread_id,
+            "",
+            load_errors,
+            history_rows=rows,
+            history_token_budget=budget,
+        )
+    except InterruptedError:
+        raise
+    except Exception:
+        # 投影失败不得让后台工作片"带着空历史继续跑"：宁可无 seed，也不伪造一份摘要。
+        return None
+    return ConversationHistorySeed(
+        compact_summary=str(getattr(thread, "summary", "") or ""),
+        compact_generation=max(0, int(getattr(thread, "compact_generation", 0) or 0)),
+        messages=tuple(history),
+        canonical_messages=tuple(canonical_history),
+    )
+
+
 def _run_params(
     thread_id: str,
     request: BackgroundRunRequest,
@@ -3023,6 +3085,7 @@ def _run_params(
     goal_context: GoalRuntimeContext | None = None,
     proactive_delivery_available: bool | None = None,
     thread: ConversationThread | None = None,
+    history_seed: object | None = None,
 ) -> RunParams:
     config = getattr(agent, "config", None)
     conversation_store = getattr(agent, "conversation_store", None)
@@ -3086,6 +3149,8 @@ def _run_params(
             else ""
         ),
         carried_archive_tool_calls=carried_tool_calls,
+        # 与前台同源的会话历史：后台切片不再只带一份有界摘要指针。
+        conversation_history_seed=history_seed,
     )
 
 
@@ -3568,6 +3633,7 @@ def context_markdown(
     thread: ConversationThread,
     request,
     proactive_delivery_available: bool | None = None,
+    include_recent_messages: bool = True,
 ) -> str:
     policy_request = _tool_policy_request(
         agent,
@@ -3596,7 +3662,6 @@ def context_markdown(
         ("Conversation Thread", bounded.get("thread") or {}),
         ("Runtime Load Errors", bounded.get("load_errors") or []),
         ("Task Runtime State", bounded.get("task_runtime_state") or {}),
-        ("Recent Messages", bounded.get("messages") or []),
         ("Bound Tasks", bounded.get("tasks") or []),
         ("Channel Bindings", bounded.get("channel_bindings") or []),
         ("Recent Observations", bounded.get("observations") or []),
@@ -3607,6 +3672,9 @@ def context_markdown(
         ("Background Context Projection", bounded.get("_projection") or {}),
         ("Control Action Policy", policy_decision.to_dict()),
     ]
+    if include_recent_messages:
+        # 只有"没有 canonical 历史种子"的历史遗留路径才需要这份有界摘要副本。
+        sections.insert(5, ("Recent Messages", bounded.get("messages") or []))
     if _narrow_audit_event_reason(getattr(request, "reason", "")):
         # A finding or capacity wake is one exact owner-facing event, not a
         # general supervision tick. Giving the model sibling counts, old chat

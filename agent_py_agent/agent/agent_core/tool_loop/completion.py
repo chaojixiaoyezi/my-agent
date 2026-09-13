@@ -156,39 +156,19 @@ def _context_refresh_transition_response(
     )
 
 
+# LLM: 子代理仍活跃是状态/展示事实，不是"替换模型正文"的理由。历史上这里会在模型想收口时
+# 用宿主回执改写用户可见回复并继续采样，导致用户看不到模型真实终答、主代理表现为"偏等子代理"。
+# 现在只保留结构化事实：活跃子代理由 agent tree/child 面板展示，后续工作由明确的子代理生命周期
+# 事件唤醒。禁止恢复"用宿主回执替换模型正文"，也禁止加强制忙碌 prompt 或无用派工。
+# 函数用途: 保留旧入口但恒不介入收口；活跃子代理不再改写任何模型回复。
 def queue_interim_reply_for_open_subagents(
     agent: object,
     params: ToolLoopExecuteParams,
     *,
     tool_rounds: int,
 ) -> bool:
-    # 会话运行时 keeps parent and child turns as distinct sessions.  A child turn
-    # returns its machine-readable result to the parent; it never enters the
-    # parent's user-facing presentation phase.  ``context_scope`` is our
-    # structured session boundary, so do not infer this from prompt wording or
-    # agent names.
-    if str(getattr(params, "context_scope", "") or "") == "task_local":
-        return False
-    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
-    if str(attrs.get(CONVERSATION_BACKGROUND_EVENT_REASON_ATTR) or "").strip():
-        # One typed background event owns this turn's user-facing reply. Open
-        # descendants remain visible in their durable ledger, but their generic
-        # lifecycle presentation must not replace the exact event report.
-        return False
-    delegated = _delegated_work_facts(agent, params)
-    if not _delegated_work_has_open_runs(delegated):
-        return False
-    queue_natural_user_reply(
-        params,
-        kind="subagents_active",
-        facts=_interim_reply_facts(
-            agent,
-            params,
-            tool_rounds=tool_rounds,
-            delegated=delegated,
-        ),
-    )
-    return True
+    del agent, params, tool_rounds
+    return False
 
 
 # LLM: A named Audit turn may end its current model call while its typed duration or durable

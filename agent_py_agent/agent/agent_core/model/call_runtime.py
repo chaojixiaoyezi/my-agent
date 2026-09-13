@@ -191,6 +191,12 @@ def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: 
             cached_input_tokens=reported_cache_read_token_usage(response),
             cache_creation_input_tokens=cache_creation_input_token_usage(response),
             provider_usage_reported=bool(response_usage(response)),
+            # 流末事实必须随调用落账：真实事故（provider 断流 → 空正文 → USER_REPLY_UNAVAILABLE）
+            # 事后只能从 attempt 事件侧推，因为 finish_reason/stop_reason/turn_end 当时没有落盘。
+            stop_reason=str(getattr(response, "stop_reason", "") or ""),
+            runtime_reason=str(getattr(response, "runtime_reason", "") or ""),
+            turn_end_reason=str(getattr(response, "turn_end_reason", "") or ""),
+            truncated=bool(getattr(response, "truncated", False)),
         )
     )
 

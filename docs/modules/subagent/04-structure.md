@@ -1,5 +1,23 @@
 # Subagent Structure
 
+## 2026-09-13 R284 后台上下文续接 / 主代理等待 / 终态静默 / Goal 唯一性
+
+1. **后台工作片与前台共用同一份 canonical 历史投影**：`conversation/runtime.py::_background_conversation_history_seed`
+   复用 Gateway 的 `_gateway_conversation_refs`（未压缩尾部行 + provider 消息投影，含工具块），
+   `_run_params(..., history_seed=)` 写入 `RunParams.conversation_history_seed`，`context_markdown` 在
+   有 seed 时**不再重复注入** `## Recent Messages` 摘要副本；窄范围审计事件（finding/capacity）保持
+   只有事件事实、不带 owner 历史。压缩仍由前台 Compact 与本片 `context_overflow→compact` 路径负责，
+   seed 构造**只读**、不触发压缩。
+2. **主代理等待不再替换模型正文**：`queue_interim_reply_for_open_subagents` 恒返回 False，
+   `_tool_loop_service` 不再因活跃子代理改写用户可见回复并继续空转；活跃子代理只作为状态/展示事实，
+   后续工作由明确的子代理生命周期事件唤醒（对齐 会话运行时 `wait_agent` 由模型显式调用）。
+3. **终态冲突不再静默**：runner 结果被运行时终态闸拒绝时，写
+   `closeout_blocked` + `reason=runner_result_conflict` 结构化事件（含 run/attempt/incoming/task 状态）。
+4. **同一 task 只允许一个未完成目标**：`store.create_goal` 与 `create_goal` 工具都拒绝在同 task 上
+   隐式再建（名字不同也拒绝）；不按 updated_at 猜、不自动 supersede，收口只由显式 `update_goal`。
+5. **流末事实落账**：模型调用账本记录 `stop_reason`/`runtime_reason`/`turn_end_reason`/`truncated`，
+   空正文/断流类事故可直接从调用账本读出。
+
 ## 2026-09-13 R283 JSONL 记录边界统一为物理 LF（真实事故修复）
 
 **事故**：子代理 transcript 的 JSON 字符串里含 U+0085(NEL)，`path.read_text().splitlines()` 在 NEL

@@ -65,6 +65,12 @@ class ModelCallFinishParams:
     cache_creation_input_tokens: int = 0
     provider_usage_reported: bool = False
     cache_suspected: bool = False
+    # LLM: 流末结构化事实：空正文/断流类事故必须能从调用账本直接读出，而不是事后从别的事件反推。
+    # 字段用途: 记录 provider stop_reason、运行时归一原因与本轮结束原因（诊断用，不参与裁决）。
+    stop_reason: str = ""
+    runtime_reason: str = ""
+    turn_end_reason: str = ""
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,12 @@ class ModelCallRecord:
     output_tokens: int = 0
     accounted_input_tokens: int = 0
     cached_input_tokens: int = 0
+    # LLM: 流末结构化事实（诊断）：空正文/断流事故不再需要从 attempt 事件侧反推。
+    # 字段用途: 保存 provider stop_reason、运行时归一原因与本轮结束原因。
+    stop_reason: str = ""
+    runtime_reason: str = ""
+    turn_end_reason: str = ""
+    truncated: bool = False
     cache_creation_input_tokens: int = 0
     provider_usage_reported: bool = False
     output_tokens_seen: int = 0
@@ -511,6 +523,10 @@ class ModelCallLedger:
                 ),
                 provider_usage_reported=bool(params.provider_usage_reported),
                 cache_suspected=record.cache_suspected or params.cache_suspected,
+                stop_reason=str(params.stop_reason or record.stop_reason or ""),
+                runtime_reason=str(params.runtime_reason or record.runtime_reason or ""),
+                turn_end_reason=str(params.turn_end_reason or record.turn_end_reason or ""),
+                truncated=bool(params.truncated or record.truncated),
                 events=_append_event(record.events, "finished"),
             )
             self._replace(updated)

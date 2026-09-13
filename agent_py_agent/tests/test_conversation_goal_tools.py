@@ -541,3 +541,23 @@ def test_goal_token_usage_is_protocol_equivalent_and_keeps_cache_writes() -> Non
         usage={"input_tokens": 0, "cache_creation_input_tokens": 200, "output_tokens": 50}
     )
     assert goal_token_usage(write_only) == 250  # 缓存写入不是免费
+
+
+# LLM: 真实事故回归：同一 task 上先后建了两条 active 目标（名字不同即绕过旧守卫），
+# 之后 get_goal/update_goal 恒 GOAL_STATE_CONFLICT，_matching_goal_status 也把该 task 的
+# goal 当成"不存在"。这里锁住"同 task 未完成目标不得再建"，并且不做隐式 supersede。
+# 函数用途: 验证命名不同的第二条同 task 目标会被拒绝且不产生新的 active 记录。
+def test_create_goal_rejects_second_unfinished_goal_on_same_task(tmp_path) -> None:
+    agent, thread, existing = _goal_agent(tmp_path)
+    first = agent.conversation_store.load_goal(thread.thread_id, task_id=existing.task_id)
+    assert first is not None and first.status == "active"
+
+    rejected = agent.tools.tools["create_goal"].execute(
+        {"objective": "资产级全量测试", "name": "大厂SRC资产级全量测试"}
+    )
+
+    assert rejected.ok is False
+    goals = agent.conversation_store.load_goals(thread.thread_id)
+    same_task = [goal for goal in goals if goal.task_id == existing.task_id]
+    assert len(same_task) == 1, "同 task 不得出现第二条未完成目标"
+    assert same_task[0].goal_id == existing.goal_id

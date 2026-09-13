@@ -5326,6 +5326,15 @@ class ConversationGoalStore(ConversationGoalClockStore):
                     str(error.get("message") or "conversation goal read failed")
                 )
             unfinished = [goal for goal in existing if goal.status in _UNFINISHED_GOAL_STATUSES]
+            # 同一 task 只允许一个未完成目标：名字不同不能成为绕过口（真实事故：同 task 上出现
+            # 两条 active，get_goal/update_goal 从此恒 GOAL_STATE_CONFLICT，活跃目标门也失效）。
+            # 收口只由显式 update_goal 完成，这里既不按 updated_at 猜、也不隐式 supersede 旧目标。
+            task_id = str(request.get("task_id") or "").strip()
+            if task_id and any(goal.task_id == task_id for goal in unfinished):
+                raise ValueError(
+                    "an unfinished goal already exists for this exact task; "
+                    "close or update it explicitly instead of creating another"
+                )
             if name:
                 if any(goal.name.casefold() == name.casefold() for goal in unfinished):
                     raise ValueError(f"an unfinished goal named {name!r} already exists")

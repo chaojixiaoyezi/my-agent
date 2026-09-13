@@ -1,5 +1,23 @@
 # DESIGN LEDGER
 
+## 2026-09-13 R284 后台续接 + 等待语义 + 终态静默 + Goal 唯一性【状态：已修+守卫测试】
+
+- **后台续接（同一权威）**：后台工作片以前不带 `conversation_history_seed`，`_native_provider_history_messages(seed=None)`
+  直接空历史，只剩 `context_markdown` 的有界摘要副本 → 前台 500K 级上下文、后台 5 万级，模型"续接"其实换了一套
+  丢工具细节的摘要。现在后台复用 Gateway 同一投影（`_gateway_conversation_refs` + 未压缩尾部行 + provider 消息
+  含工具块），`context_markdown` 不再重复注入 Recent Messages；窄审计事件仍只给事件事实。压缩权威不变，
+  seed 只读、不触发压缩（避免每次唤醒都跑一次带模型调用的压缩）。
+- **等待语义（对齐 会话运行时）**：删除"模型想收口时用宿主回执替换用户可见回复并继续采样"的分支；
+  模型真实正文与真实 turn-end 保留，活跃子代理只作为状态/展示事实，后续由子代理生命周期事件唤醒。
+  task_local 分支保持写 `direct_child_wait` marker（依赖事实），同样不改写模型正文。
+- **终态静默（真实事故）**：run=`created` + attempt=`done` 的 runner 结果被 `_managed_runtime_result_conflict`
+  拒绝时**零落盘诊断**，两个子代理因此永久停在 RUNNING。现在拒绝即写
+  `closeout_blocked`/`reason=runner_result_conflict` 结构化事件。
+- **Goal 唯一性（会话运行时 语义）**：同一 task 上只允许一个未完成目标；名字不同也拒绝隐式再建，
+  不按 `updated_at` 猜、不自动 supersede。既有双 active 原现场保留为证据（不自动修数据）。
+- **流末落账**：模型调用账本新增 `stop_reason`/`runtime_reason`/`turn_end_reason`/`truncated`，
+  断流空正文类事故可直接从调用账本读出，不再只能从 attempt 事件反推。
+
 ## 2026-09-13 R283 JSONL 记录边界 = 物理 LF（底座合同）【状态：已修+守卫测试】
 
 - **合同**：JSONL 记录边界只有一个——物理 LF。任何"按行读 JSONL"的实现禁止使用 `str.splitlines()`

@@ -183,6 +183,29 @@ class CreateGoalTool(BaseTool):
         if params.get("duration_seconds") is not None:
             request["duration_seconds"] = params.get("duration_seconds")
         store = self.agent.conversation_store
+        # 会话运行时 语义：同一身份（thread + task）只允许一个未完成目标。已有未完成目标时
+        # 必须由模型显式 update_goal 收口或改写，**不能**隐式再建一条 active（真实事故：
+        # 同 task 出现两条 active，导致 get_goal/update_goal 恒 GOAL_STATE_CONFLICT，
+        # 且 _matching_goal_status 把该 task 的 goal 当成"不存在"）。
+        # 这里不猜、不按 updated_at 取代旧目标，也不自动 supersede：直接拒绝并给出结构化原因。
+        try:
+            existing_goals = store.load_goals(thread_id)
+        except Exception:
+            existing_goals = []
+        if any(
+            str(getattr(item, "task_id", "") or "") == task_id
+            and str(getattr(item, "status", "") or "").strip().lower() != "complete"
+            for item in existing_goals or []
+        ):
+            return _error(
+                "create_goal",
+                (
+                    "this task already has an unfinished goal; "
+                    "update it explicitly with update_goal (no implicit supersede)"
+                ),
+                "GOAL_STATE_CONFLICT",
+                effect_outcome="not_started",
+            )
         try:
             with store.goal_transition_guard(thread_id):
                 goal = store.create_goal(request)
