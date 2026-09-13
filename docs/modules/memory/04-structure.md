@@ -1,5 +1,14 @@
 # Memory Structure
 
+## 2026-09-13 R283.1 迁移错位修复（真机验收发现）
+
+第一版 LF 边界迁移用正则批量替换，有两处包装错位：`jsonl_lines(reversed(text))`（storage 写后回读校验）
+与 `jsonl_lines(enumerate(text), start=1)`（control_plane 只读投影）。前者让 `jsonl_lines` 收到 reversed 对象，
+抛 `AttributeError: 'reversed' object has no attribute 'split'`；.10 真机 TUI 多子代理验收里，子代理
+`live_archive` 写后回读走这条路径 → runner 直接 FAILED（`runner 执行失败: 'reversed' object has no attribute 'split'`）。
+两处已改为"先按 LF 切记录、再 reversed/enumerate"，并为两条路径补 NEL 守卫测试。
+**教训**：批量迁移必须逐点复核包装层次，不能只看替换后的文本是否"像对的"；修复后必须真机重放。
+
 ## 2026-09-13 R283 JSONL 记录边界统一为物理 LF（真实事故修复）
 
 **事故**：子代理 transcript 的 JSON 字符串里含 U+0085(NEL)，`path.read_text().splitlines()` 在 NEL
