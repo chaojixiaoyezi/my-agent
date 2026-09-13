@@ -3,8 +3,12 @@
 ## R286 历史范围裁决与展示索引分离（已修，待真机验收）
 
 后台历史种子改为"完整未压缩行 + 既有 detached 范围裁决"，不再拿 recent_limit=20 展示索引当白名单
-（f7bd5349 的截短回归已修，含 21/50/100 条与 display 穿插守卫）。真实 runtime.db 链路验收：
-同一 attempt 的流不完整终态可收口为 run 终态 + agent_run.completed；过期 attempt 仍被拒。
+（f7bd5349 的截短回归已修，含 21/50/100 条与 display 穿插守卫）；范围裁决只读已加载的同一份 scope 事实
+（不再单独读 task link，避免读失败被当成"普通会话"而 fail-open）。
+账本级集成验收（走 settle_agent_attempt + RecordRunnerResult 生产入口）：同一 attempt 的流不完整终态可收口为
+task FAILED + runner_result + 直属父 wake；旧规则下该用例确认失败；过期 attempt 仍被拒。
+**未完成**：真 TUI 的断流/写回失败/重连注入、128K 级多回合长会话、慢模型帧耗时、400–600K（受 .10 128K
+窗口限制，改用无模型出站前缀重放 + 128K 同比例证据，不宣称达到 400K）。
 
 ## R284 后台上下文续接 / 等待语义 / 终态静默 / Goal 唯一性（已修，待真机验收）
 

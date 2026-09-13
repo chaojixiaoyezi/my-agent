@@ -10,7 +10,13 @@
    - **展示摘要** = `context_bundle(recent_limit=20)` 只供 markdown，不再参与权限判断。
    守卫：21/50/100 条普通历史完整继承（含首条）、40 条 display 行穿插不影响条数、detached 场景
    仍排除锚点之后属于别任务的消息。
-2. **真实链路收口验收（f856ddd3）**：用真实 `SubAgentManager` + 真实 runtime.db 复现事故形态
+2. **真实链路收口验收（f856ddd3，已按生产入口重做）**：走生产入口 `settle_agent_attempt` 造出
+   run=created/attempt=done/ended_at>0/is_current=True，断言旧规则（只放行 PENDING/BLOCKED）必然拒绝 FAILED
+   （把规则临时改回旧行为时该用例确认 FAILED），新规则接受后经真正 `RecordRunnerResult` 落
+   task FAILED + runner_result 文件 + 直属父 wake（`subagent-finished` / `subagent_runner_finished` / FAILED）；
+   过期保护用真实下一代 attempt 验证旧代结果被拒。**注**：这是账本级集成验收，**不等于**真 TUI 注入验收；
+   真 TUI 的断流/写回失败/重连注入仍是未完成项。
+   历史记录（早期版本）：用真实 `SubAgentManager` + 真实 runtime.db 复现事故形态
    （宿主按可续跑族只结清 attempt、run 留 created），runner 对同一 attempt 报 FAILED 不再被判冲突；
    随后 `settle_agent_run(status=failed)` 落成 run 终态 + `agent_run.completed` 事件（父级/监督能看到收口）；
    不存在的 attempt 仍被拒（过期保护未放宽）。
