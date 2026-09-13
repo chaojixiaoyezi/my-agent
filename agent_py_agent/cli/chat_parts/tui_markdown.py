@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from markdown_it import MarkdownIt
@@ -19,6 +20,11 @@ from wcwidth import wcswidth
 Fragment = tuple[str, str]
 FormattedLine = tuple[Fragment, ...]
 
+# LLM: 净化 memo 的边界：单条上限决定"不缓存长正文"，条目上限决定常驻内存；两者都必须有界。
+# 常量用途: 短 fragment 净化缓存的最大条目数与单条最大字符数。
+_SANITIZE_MEMO_ENTRIES = 8_192
+_SANITIZE_MEMO_MAX_CHARS = 512
+
 
 # LLM: Every model/tool/user string is untrusted terminal data. This helper removes C0/C1
 # controls and lone surrogates while preserving newline/tab and all printable Unicode, including
@@ -27,8 +33,27 @@ FormattedLine = tuple[Fragment, ...]
 # 函数用途: 清除可能执行清屏、移光标、响铃、改标题、写剪贴板或开启控制串的字符；普通换行、
 # 制表符、中文、RTL 和 Emoji 仍按原文显示。
 def sanitize_terminal_text(text: object) -> str:
+    value = str(text or "")
+    # 渲染器与 view 会对同一帧净化两次（安全边界不合并），稳定历史每一帧又是同一批 fragment；
+    # 短文本走有界 memo 后第二次与后续帧都命中，长文本/巨行不进 memo，避免缓存长正文本身。
+    if len(value) <= _SANITIZE_MEMO_MAX_CHARS:
+        return _memoized_sanitize(value)
+    return _strip_terminal_controls(value)
+
+
+# LLM: 净化是纯函数，memo 只影响速度；缓存键是 fragment 文本本身，条数与单条长度都设上限，
+# 因此不会像渲染缓存那样随流式版本增长，长正文也不会被缓存持有。
+# 函数用途: 为短 fragment 提供有界净化缓存。
+@lru_cache(maxsize=_SANITIZE_MEMO_ENTRIES)
+def _memoized_sanitize(value: str) -> str:
+    return _strip_terminal_controls(value)
+
+
+# LLM: 逐字符判定是净化成本主体（每帧百万次 unicodedata.category），这条实现保持原语义不变。
+# 函数用途: 实际执行控制字符过滤。
+def _strip_terminal_controls(value: str) -> str:
     sanitized: list[str] = []
-    for char in str(text or ""):
+    for char in value:
         if char in {"\n", "\t"}:
             sanitized.append(char)
             continue

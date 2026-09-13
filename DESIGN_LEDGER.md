@@ -1,5 +1,51 @@
 # DESIGN LEDGER
 
+## 2026-09-12 R256 交接文档复核结论 + 两处底座修复（迁移预检 586 秒/次、TUI 热帧净化重复）【状态：已修并推送，未部署、未做真实 TUI 验收】
+
+本轮任务是另一 agent 的《my-agent 底座修复交接说明》（基线 `64ded920`）复核 + 按 A/B/C 三线修复。
+**先复核后动手**：三条线各做独立只读复核（A 线 18 条断言、B 线 10 条、C 线 14 条），逐条给判定与证据，
+再修一手确认的问题。复核原始数字记在 `/tmp/verify_tui/`、`/tmp/tokcheck/`、`/tmp/cpu_window.sh`。
+
+**交接文档的结论质量**：证据分级诚实（多处主动标"推算/非实测"），无结构性错误；但有以下问题需要在
+接手时扣除：(A) UI-03 的 6,050,946 字符是**所有版本源文本累计和**，缓存实留渲染文本仅 985,998（8.9×），
+且真实 token 流下是 1363 条/7683 万字符（文档低估）；UI-04"UI 与 runtime 共用同一把锁"不准确（`Lock`+`RLock`
+锁链）；UI-01 把键构造/排序与净化并列，实测净化占热帧约 100%、键+排序仅 0.1ms；全部绝对毫秒本机不可复现
+（慢 1.3–2.2×，但 1M 单行的 17,773 显示行完全一致）。(B) `cost_ledger.py` 路径错、`scale_downstream.py:147`
+位置错（该文件无计价代码，按输入计价在 `worker_handler.py:195`）、"应扣 206,908"歧义（它是去缓存命中后
+**仍应计入**的 Goal 口径量）、`provider_visible_input_token_usage` 被列进"生效调用链"（它只作用于 Context 校准）。
+(C) "3.043 秒出生→ready"证据不足（本机 0.115–1.114s，且 macOS 无 `/proc`，代码无 OS 出生时间戳）；
+"已含代际防护"过度声称（ready 判据没有，pid 文件层在本机恒空转）；`prepare_tick → ready_thread_ids` 箭头错
+（兄弟调用）；`/proc` 方法在 Darwin 不可执行、55.2% 不能当常态；GW-03 漏第三个同类消费者
+`_GatewayOwnerMaintenanceController`（60s 同一全量枚举）与"多页时相邻页约 1s 连跑"。
+
+**文档漏掉、我一手核实并修掉的两条**：
+
+1. **迁移预检每次递归整棵 owner home（本机空转 CPU 真凶）**：`memory-curator_*` 线程在
+   `run_if_due → run → _preflight_migration → apply() → _scan() → _safe_named_dirs(owner_home, ...)`
+   里对整个 home 做 `rglob`。实测该 home `agents/` 42.4 万条目、`tasks/` 17.6 万、`data/` 16.0 万；
+   **`rglob("memory_gate")` 428.0s + `rglob("learning_drafts")` 157.9s ≈ 586s/次**，与一次策展 run 的
+   10 分 30 秒吻合；策展长期带 `pending_reasons` 且 `last_failure_code=CURATOR_SCHEMA_INVALID`，
+   每约 8 分钟重试一次 → 空转 **27%~45% 单核**（10 分钟均值 26.8%、中位 21.4%、峰值 70.3%）。
+   修法：`apply()` 先读 marker，稳态（同版本 complete + 契约位置探针无命中）直接 `already_current`；
+   marker 缺失/读坏/schema 不符/任一契约位置命中 → 回落完整扫描；marker 追加记录已确认位置；
+   `plan()` 保持全量扫描。**实测稳态探针 443ms（冷启动 4.6s）对完整扫描 586s**。提交 `09b5e12b`。
+2. **TUI 热帧成本几乎全在"每帧两次全帧净化"**：`render_tui_snapshot` 已净化整帧，`TuiFrameProvider.frame`
+   因装饰器可能新增行又净化一次；而 `sanitize_terminal_text` 逐字符 `unicodedata.category`。
+   修法：给净化加**有界 memo**（≤512 字符、8192 条；长正文不进 memo），两遍净化与后续帧都命中。
+   同时按交接文档 UI-02/UI-03 修另外两处：`_bounded_render_text` 增加**字符预算**（正文 10K/展开 40K、
+   工具展开 40K，排版前生效，只裁显示投影）、`TuiBlockRenderCache` 增加**字符预算（默认 6M）**并在同一活动块
+   出新版本时立即丢弃旧版本。
+   真机（本机 in-process）前后对照：热帧 100/500/2000 块 **4.63/24.0/96.16ms → 0.79/4.16/17.38ms（5.5–5.9×）**；
+   1M 单行正文 **494.65ms/17,773 行 → 4.88ms/171 行（101×）**；真实流式缓存
+   **1363 条/7683 万字符 → 1 条/1.04 万字符**。冷帧（2000 块）仍 440ms，瓶颈是 Markdown 排版本身，属未解项。
+
+**边界与未做**：未碰 Compact 摘要/裁剪、模型切换逻辑、另一 agent 的展示归档/分页语义；本轮所有测量都是
+进程内微基准与只读采样，**不等于真实 TUI 验收**；两处修复都**未部署**（网关仍 runtime-r255），A 线真机验收
+需先决定部署口径（是否连带另一 agent 的 12 个展示提交）。**另发现未修（属模型解析，需协调）**：策展后端
+`_build_memory_curator_backend` 从基础 config 解析，实测 `provider=echo / model=gpt-4o-mini` 占位默认，
+导致抽取永远过不了 schema，记忆提炼自 09-09 起失效；后台主代理链路已按 canonical thread 走
+`selected_model_scope`，只有策展没有。
+
 ## 会话级模型选择与完整显示（2026-09-12，真实 TUI 验收）
 
 - 当前会话模型权威为 `ConversationThread.model_profile_id`；owner selected 只初始化新会话。

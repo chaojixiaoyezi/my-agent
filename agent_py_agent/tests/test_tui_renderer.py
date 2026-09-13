@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unicodedata
+from dataclasses import replace
 
 import pytest
 
@@ -1689,3 +1690,60 @@ def test_assistant_process_and_final_keep_normal_body_color() -> None:
     assert all("class:tui-muted" not in style for style, _text in process_fragments)
     assert final_fragments
     assert any(not style.endswith("class:tui-muted") for style, _text in final_fragments)
+
+
+# R256: 行数上限挡不住无换行巨行；字符预算必须在 Markdown 排版前生效，且只影响显示投影。
+def test_giant_single_line_assistant_is_bounded_before_markdown_layout() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("giant-assistant", clock=lambda: 61.0)
+    text = "A" * 1_048_576
+    store.publish(seq.emit("assistant_started", "started", "assistant"))
+    store.publish(seq.emit("assistant_delta", "delta", "assistant", {"text": text}))
+
+    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=120))
+    rendered = "\n".join(fragments_text(line) for line in frame.transcript_lines)
+
+    assert store.snapshot().active_blocks[0].text == text  # 原文与上下文不受影响
+    assert "字符已折叠" in rendered
+    assert len(rendered) < 20_000
+
+
+# R256: 同一活动块每更新一版都会产生新 key；只限条数时缓存字符量随版本数增长，必须同时受字符预算约束。
+def test_live_block_cache_keeps_only_latest_version_and_respects_char_budget() -> None:
+    cache = TuiBlockRenderCache(max_entries=10_000, max_chars=2_000)
+    context = TuiRenderContext(width=120, now=100.0)
+    block = TuiBlock(
+        block_id="live-1",
+        kind="assistant_delta",
+        role="assistant",
+        phase="delta",
+        text="",
+    )
+    for index in range(40):
+        block = replace(block, text="正文片段 " * 200, updated_seq=index + 1)
+        cache.render(block, replace(context, now=100.0 + index))
+
+    stats = cache.stats()
+    assert stats.entries <= 2          # 同一 block 只保留最新版本
+    assert cache._chars <= cache.max_chars
+
+
+# R256: 净化字节语义不变（控制字符清除、换行/制表/中文/emoji 保留），且长文本不进 memo。
+def test_sanitize_terminal_text_keeps_semantics_and_bounds_memo() -> None:
+    from agent_py_agent.cli.chat_parts.tui_markdown import (
+        _SANITIZE_MEMO_MAX_CHARS,
+        _memoized_sanitize,
+        sanitize_terminal_text,
+    )
+
+    raw = "a\x1b[31mb\x07\n中文😀\tend"
+    cleaned = sanitize_terminal_text(raw)
+    assert "\x1b" not in cleaned and "\x07" not in cleaned
+    assert "中文😀" in cleaned and "\n" in cleaned and "\t" in cleaned
+    assert sanitize_terminal_text(cleaned) == cleaned  # 幂等
+
+    _memoized_sanitize.cache_clear()
+    sanitize_terminal_text("cache-me")
+    cached_after_short = _memoized_sanitize.cache_info().currsize
+    sanitize_terminal_text("x" * (_SANITIZE_MEMO_MAX_CHARS + 1))
+    assert _memoized_sanitize.cache_info().currsize == cached_after_short

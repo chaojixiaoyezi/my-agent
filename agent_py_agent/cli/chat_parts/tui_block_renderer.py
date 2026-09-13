@@ -48,11 +48,17 @@ USER_MESSAGE_HEAD_CHARS = 2_500
 # 只裁 UI 投影, canonical block.text 原文保留(与 _bounded_user_text 同思路)。
 _ASSISTANT_RENDER_MAX_LINES = 200
 _ASSISTANT_RENDER_DETAIL_MAX_LINES = 2_000
+# R256: 行数上限挡不住"无换行巨行"——单行 1M 字符仍会整段进 Markdown 排版（实测 494ms/帧、
+# 生成 17773 显示行）。字符预算必须在排版前生效，与用户消息路径（USER_MESSAGE_MAX_CHARS）对齐；
+# 只裁显示投影，canonical block.text 与发给模型的上下文都不受影响，完整原文仍走 Ctrl+E 分页。
+_ASSISTANT_RENDER_MAX_CHARS = 10_000
+_ASSISTANT_RENDER_DETAIL_MAX_CHARS = 40_000
 # 活动思考内容的默认可见行数上限（终端交互 行为：灰色实时可见；
 # 超长折叠为提示行，Ctrl+O 看全部）。
 _THINKING_LIVE_MAX_LINES = 50
 _TOOL_RENDER_MAX_LINES = 200
 _TOOL_RENDER_DETAIL_MAX_LINES = 2_000
+_TOOL_RENDER_DETAIL_MAX_CHARS = 40_000
 USER_MESSAGE_TAIL_CHARS = 2_500
 SPINNER_METRICS_AFTER_SECONDS = 30.0
 SPINNER_STALL_AFTER_SECONDS = 3.0
@@ -411,14 +417,26 @@ def _is_live_stream_block(block: TuiBlock) -> bool:
     return block.role in {"thinking", "compact", "tool_input"} and block.phase not in TERMINAL_RENDER_PHASES
 
 
+# LLM: 字符记账只需要量级正确：按 fragment 可见文本长度求和，不含样式与对象开销；
+# 目的是给渲染缓存一个可验证的上界，不是精确内存统计，也不参与任何业务判定。
+# 函数用途: 估算一个 block 渲染结果占用的字符量。
+def _rendered_char_count(lines: tuple[FormattedLine, ...]) -> int:
+    return sum(len(str(fragment[1])) for line in lines for fragment in line)
+
+
 # LLM: TuiBlockRenderCache 只缓存 immutable block 输出；key 含 updated_seq/宽度/显示模式，绝不跨语义版本复用。
 # 类用途: 避免流式活动块更新时重新渲染全部稳定历史，并把缓存限制在显式上限内。
 class TuiBlockRenderCache:
-    # LLM: max_entries 是 UI 内存边界，裁剪只影响重渲染性能，不改变 transcript 事实。
-    # 函数用途: 创建一个有界 LRU block cache。
-    def __init__(self, *, max_entries: int = 20_000) -> None:
+    # LLM: max_entries 与 max_chars 都是 UI 内存边界，裁剪只影响重渲染性能，不改变 transcript 事实。
+    # 流式活动块每更新一版就会新增一个 key（含 updated_seq），只限条数时缓存字符量实测可达最终文本数百倍；
+    # 因此同时按字符预算淘汰，并在同一 block 出新版本时立刻丢掉旧版本。
+    # 函数用途: 创建一个有界（条数 + 字符）的 LRU block cache。
+    def __init__(self, *, max_entries: int = 20_000, max_chars: int = 6_000_000) -> None:
         self.max_entries = max(1, int(max_entries or 1))
+        self.max_chars = max(1, int(max_chars or 1))
         self._entries: OrderedDict[tuple[Any, ...], tuple[FormattedLine, ...]] = OrderedDict()
+        self._entry_chars: dict[tuple[Any, ...], int] = {}
+        self._chars = 0
         self._hits = 0
         self._misses = 0
         self._live_last_key: dict[str, tuple[Any, ...]] = {}
@@ -441,21 +459,37 @@ class TuiBlockRenderCache:
                     # 复用最近一次渲染：流式增量不逐帧全量重渲染（万字块展开时避免卡死）。
                     return stale
         rendered = _render_block(block, context)
-        self._entries[key] = rendered
-        self._entries.move_to_end(key)
-        self._misses += 1
         if _is_live_stream_block(block):
+            previous_key = self._live_last_key.get(block.block_id)
+            if previous_key is not None and previous_key != key:
+                # 同一活动块只保留最新渲染版本：旧版本除了占内存没有其它读取方。
+                self._drop_entry(previous_key)
             self._live_last_key[block.block_id] = key
             self._live_last_at[block.block_id] = context.now
-        while len(self._entries) > self.max_entries:
-            self._entries.popitem(last=False)
+        self._entries[key] = rendered
+        self._entries.move_to_end(key)
+        self._entry_chars[key] = _rendered_char_count(rendered)
+        self._chars += self._entry_chars[key]
+        self._misses += 1
+        while self._entries and (
+            len(self._entries) > self.max_entries or self._chars > self.max_chars
+        ):
+            self._drop_entry(next(iter(self._entries)))
         return rendered
+
+    # LLM: 淘汰与显式丢弃共用同一条记账路径，字符预算不能因漏减而失真。
+    # 函数用途: 移除一个缓存条目并同步字符记账。
+    def _drop_entry(self, key: tuple[Any, ...]) -> None:
+        if self._entries.pop(key, None) is None:
+            return
+        self._chars -= self._entry_chars.pop(key, 0)
+        if self._chars < 0:
+            self._chars = 0
 
     # LLM: stats 只读取计数，调用方不能取得内部 OrderedDict 后篡改缓存。
     # 函数用途: 返回当前缓存诊断快照。
     def stats(self) -> TuiRenderCacheStats:
         return TuiRenderCacheStats(self._hits, self._misses, len(self._entries))
-
 
 # LLM: render_tui_snapshot 只组合 snapshot 中 typed block/order；active/stable 通过 created_seq 合流但不改写 reducer。
 # 终端交互's SpinnerWithVerb 位于消息区末尾，因此 main 活动从 background block 单独放到 transcript 末尾。
@@ -1424,6 +1458,11 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
     text = _bounded_render_text(
         block.text,
         max_lines=_ASSISTANT_RENDER_DETAIL_MAX_LINES if context.detailed_transcript else _ASSISTANT_RENDER_MAX_LINES,
+        max_chars=(
+            _ASSISTANT_RENDER_DETAIL_MAX_CHARS
+            if context.detailed_transcript
+            else _ASSISTANT_RENDER_MAX_CHARS
+        ),
     )
     markdown_lines = render_markdown(text, MarkdownRenderContext(width=content_width))
     lines: list[FormattedLine] = []
@@ -1664,9 +1703,12 @@ def _thinking_title(block: TuiBlock) -> str:
 # LLM: 显示上限与 终端交互 的公开 UserPromptMessage 合同一致；只裁 UI 投影，完整 prompt 仍留在 canonical event/执行链。
 # 函数用途: 对超长用户消息保留头尾各 2500 字符，并标出中间隐藏行数。
 # LLM: 渲染投影截断(头尾保留 + 中间折叠提示); 只作用于渲染层, block.text 原文不变。
-# 函数用途: 超长文本渲染前裁剪, 防 TUI 被输出洪水拖垮。
-def _bounded_render_text(text: str, *, max_lines: int) -> str:
+# 字符预算先于 Markdown 排版生效（max_chars>0），行预算再作用一次；两者都只影响显示。
+# 函数用途: 超长文本渲染前裁剪, 防 TUI 被输出洪水(含无换行巨行)拖垮。
+def _bounded_render_text(text: str, *, max_lines: int, max_chars: int = 0) -> str:
     normalized = str(text or "")
+    if max_chars > 0 and len(normalized) > max_chars:
+        normalized = _clip_render_chars(normalized, max_chars)
     lines = normalized.split("\n")
     if len(lines) <= max_lines:
         return normalized
@@ -1676,6 +1718,18 @@ def _bounded_render_text(text: str, *, max_lines: int) -> str:
     tail = lines[-tail_count:]
     hidden = len(lines) - head_count - tail_count
     return "\n".join(head) + f"\n… 中间 {hidden} 行已折叠 (ctrl+o 展开更多) …\n" + "\n".join(tail)
+
+
+# LLM: 字符级折叠与行级折叠同语义：保留头尾、标出隐藏量、给同一个 Ctrl+O 提示；
+# 只在渲染投影上工作，不写回 block.text，也不参与任何发给模型的上下文。
+# 函数用途: 把超长正文裁到字符预算内，优先保住开头与结尾。
+def _clip_render_chars(text: str, max_chars: int) -> str:
+    head_chars = max(1, max_chars * 3 // 5)
+    tail_chars = max(1, max_chars - head_chars)
+    hidden = len(text) - head_chars - tail_chars
+    return (
+        f"{text[:head_chars]}\n… 中间 {hidden} 字符已折叠 (ctrl+o 展开更多) …\n{text[-tail_chars:]}"
+    )
 
 
 # LLM: role 必须追加在 fragment 原样式之后，让容器级 muted/thinking 前景色覆盖 Markdown token 颜色，同时保留 bold/italic/underline 属性。
@@ -1933,6 +1987,7 @@ def _render_tool(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
         detail_lines = _bounded_render_text(
             "\n".join(detail_lines),
             max_lines=_TOOL_RENDER_DETAIL_MAX_LINES,
+            max_chars=_TOOL_RENDER_DETAIL_MAX_CHARS,
         ).splitlines()
     visible_lines = detail_lines if context.show_all else detail_lines[:TOOL_PREVIEW_MAX_LINES]
     for index, detail_line in enumerate(visible_lines):
