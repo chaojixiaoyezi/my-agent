@@ -1,5 +1,15 @@
 # Memory Structure
 
+## R262 策展超时缩批的边界
+
+- `curator_backend.extract_with_retries` 现在返回 `CuratorExtractionAttempt`（实际输入快照 + 解析结果 + 缩批次数）；
+  调用方**必须用 attempt.batch** 做证据验证、游标与提交，否则缩批后 identity manifest 与实际输入不一致。
+- 缩批是**内存输入整形**，不是新状态：不得写入游标/账本/state；截断只允许截前缀，尾部必须留在游标之后被下一轮重放。
+- 超时判定只看异常类型（`is_curator_timeout_error`），不得读异常正文；缩批上界与 lease 预算护栏两条公式
+  与 `curator._lease_seconds` 必须同步修改（两处注释已标注）。
+
+# Memory Structure
+
 ## R257 策展失败账的字段边界
 - `CuratorRunRecord` 的字段集是**严格 v2 契约**：`from_record` 要求键集合与 dataclass 完全一致，
   因此**绝不允许**为了一时诊断新增字段（会让所有历史行 fail-closed；真机踩过 `CURATOR_RUN_AUDIT_FAILED`）。

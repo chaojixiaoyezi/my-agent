@@ -421,10 +421,19 @@ class _CuratorExecutionMixin:
             return self._commit_batch(
                 context, batch, None, extra_warnings=migration_warnings
             )
-        extraction = extract_with_retries(self.backend, self.config, batch)
-        validated = validate_extraction(extraction, batch, owner_id=self.owner_id)
+        # 提取可能因超时按比例缩批重试,返回的 batch 才是本次真正喂给模型的输入快照:
+        # 证据验证、processed 前缀和游标推进都必须按同一快照计算,否则等待重放时引用不上。
+        attempt = extract_with_retries(self.backend, self.config, batch)
+        if attempt.shrink_attempts:
+            migration_warnings = (
+                *migration_warnings,
+                f"memory_curator_input_shrunk:{attempt.shrink_attempts}",
+            )
+        validated = validate_extraction(
+            attempt.extraction, attempt.batch, owner_id=self.owner_id
+        )
         return self._commit_batch(
-            context, batch, validated, extra_warnings=migration_warnings
+            context, attempt.batch, validated, extra_warnings=migration_warnings
         )
 
     # LLM: 升级自愈:每次持 lease 提炼前幂等应用 Memory v2 迁移,失败只记 warning 不阻断。
@@ -1161,6 +1170,8 @@ def _lease_seconds(config: MemoryCuratorConfig) -> int:
     # 模型调用超时按输入规模自适应放大(adaptive_timeout_seconds),lease 必须覆盖
     # 最坏情况(输入达 max_input_chars 上限)的两次尝试加提交缓冲——否则长文提炼时
     # lease 先于模型调用过期,运行中 batch 会被误判 busy/丢失。
+    # 同一上界也是 curator_backend 的超时缩批预算护栏:缩批重试不得把模型调用总时长推出
+    # 本 lease,两处公式必须同步修改。
     worst_case_timeout = adaptive_timeout_seconds(
         config.timeout_seconds, config.max_input_chars
     )

@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import queue
 import threading
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass, replace
+from typing import TypeVar
 
 from .candidate_models import (
     CANDIDATE_TYPES,
@@ -36,6 +38,73 @@ class CuratorModelTimeoutError(TimeoutError):
     pass
 
 
+# LLM: 缩批重试使用**独立**的有限步数,不读写 config.max_retries(后者只表示非超时错误的
+# 同输入重试次数)。两者互不污染:非超时错误永不缩批,超时永不消耗同输入重试额度。
+# 3 步 + 每次至少减半,足以把 40000 字符上限的输入降到千字符量级;写死为模块常量而不是新增
+# 配置项,因为它是"绝不无界重试"的护栏,不该被配置放大成无界。
+_TIMEOUT_SHRINK_LIMIT = 3
+
+# LLM: 缩批下限:仍然存在的输入族至少保留 1 条,绝不产生空消息/空审计批次——空批既无证据也不
+# 可能推进游标,只会白花一次调用。
+_TIMEOUT_SHRINK_FLOOR = 1
+
+_ShrinkItem = TypeVar("_ShrinkItem")
+
+
+# LLM: 一次成功提取返回**实际使用的输入快照**,因为缩批后的 identity manifest 变小,证据验证和
+# 游标计算都必须按同一快照进行,否则 processed 覆盖会对不上。
+# 类用途: 保存一次自适应提取的输入快照、解析结果与已用缩批步数。
+@dataclass(frozen=True)
+class CuratorExtractionAttempt:
+    batch: CuratorInputBatch
+    extraction: CuratorExtraction
+    shrink_attempts: int = 0
+
+
+# LLM: 超时判定只读异常类型(含 MRO 类名),绝不解析异常正文——供应商正文可能夹带请求体和
+# 密钥;类名推导也让新供应商超时类型自动归类,不依赖封闭枚举。ProviderTimeoutError 继承
+# RuntimeError(不是 TimeoutError),必须靠类名覆盖。
+# 函数用途: 判断一次模型调用失败是否属于超时。
+def is_curator_timeout_error(exc: BaseException) -> bool:
+    if isinstance(exc, (CuratorModelTimeoutError, TimeoutError)):
+        return True
+    return any("timeout" in cls.__name__.lower() for cls in type(exc).__mro__)
+
+
+# LLM: 缩批只做确定性**前缀**截断:游标只推进连续 processed 前缀,所以被丢弃的尾部天然留在
+# 原地、下一轮从同一游标重放——零丢失,也不需要第二套游标语义。
+# 函数用途: 把一个输入序列按比例(向上取半)缩小,已到下限时返回 None。
+def _shrink_prefix(
+    items: Sequence[_ShrinkItem],
+    *,
+    floor: int,
+) -> tuple[_ShrinkItem, ...] | None:
+    if len(items) <= floor:
+        return None
+    return tuple(items[: max(floor, (len(items) + 1) // 2)])
+
+
+# LLM: 缩批是超时专用的输入整形:只改本次模型可见的输入,不写 state、不碰游标、不落账。
+# formal_memories 是有界只读比对投影(≤6000 字符)且不参与 processed/unresolved 清单,保持
+# 不变以保留冲突检测上下文。
+# 函数用途: 超时后按比例缩小本批消息与审计输入,已到下限(不能再缩小)时返回 None。
+def shrink_batch_for_timeout(
+    batch: CuratorInputBatch,
+    *,
+    min_items: int = _TIMEOUT_SHRINK_FLOOR,
+) -> CuratorInputBatch | None:
+    floor = max(1, int(min_items))
+    messages = _shrink_prefix(batch.messages, floor=floor)
+    audit_events = _shrink_prefix(batch.audit_events, floor=floor)
+    if messages is None and audit_events is None:
+        return None
+    return replace(
+        batch,
+        messages=batch.messages if messages is None else messages,
+        audit_events=batch.audit_events if audit_events is None else audit_events,
+    )
+
+
 # LLM: Timeout budget grows with the actual prompt so that long ingest (novel/長文 bulk load)
 # gets enough wall-clock budget on slow providers, while short inputs keep the configured base.
 # 函数用途: 按输入规模自适应放大模型调用超时(每 chars_per_unit 字符追加一个基础预算,封顶 max_multiplier 倍)。
@@ -51,20 +120,35 @@ def adaptive_timeout_seconds(
 
 
 # LLM: Retries reuse the identical bounded prompt/schema; switching provider/model cannot change
-# the host output contract or evidence checks.
-# 函数用途: 调用后台模型并返回严格解析的 CuratorExtraction。
+# the host output contract or evidence checks. 超时则改用更小的输入快照重试(有界自适应),而不是
+# 加长等待或关掉超时:输入变小才会真正变快。
+# 函数用途: 调用后台模型并返回实际使用的输入快照与严格解析的 CuratorExtraction。
 def extract_with_retries(
     backend: object,
     config: MemoryCuratorConfig,
     batch: CuratorInputBatch,
-) -> CuratorExtraction:
+) -> CuratorExtractionAttempt:
     prompt = curator_prompt(batch)
     if len(prompt) > config.max_input_chars:
         raise ValueError("CURATOR_INPUT_BUDGET_EXCEEDED")
-    last_error: BaseException | None = None
     schema = curator_response_schema()
-    timeout_seconds = adaptive_timeout_seconds(config.timeout_seconds, len(prompt))
-    for _attempt in range(config.max_retries + 1):
+    effective = batch
+    # LLM: lease(curator._lease_seconds = 同式 + 90s 提交缓冲)覆盖的模型调用总时长就是下面的
+    # budget_seconds。缩批重试不得把总时长推出 lease,否则 lease 先过期、成功提取也提交不了
+    # (整批白跑)。既有 max_retries 路径天然满足该上界(每次自适应超时都 ≤ max_input_chars 的
+    # 上界),所以这条护栏只在超时缩批时生效,不改变原有尝试次数。
+    granted_seconds = 0
+    budget_seconds = adaptive_timeout_seconds(
+        config.timeout_seconds, config.max_input_chars
+    ) * max(1, config.max_retries + 1)
+    retries_left = config.max_retries
+    shrinks_left = _TIMEOUT_SHRINK_LIMIT
+    last_error: BaseException | None = None
+    while True:
+        timeout_seconds = adaptive_timeout_seconds(config.timeout_seconds, len(prompt))
+        if granted_seconds + timeout_seconds > budget_seconds:
+            break  # 预算耗尽: 有界收口,不再发新调用,按最后一次异常分类失败
+        granted_seconds += timeout_seconds
         try:
             response = call_backend_with_timeout(
                 backend,
@@ -72,9 +156,35 @@ def extract_with_retries(
                 response_schema=schema,
                 timeout_seconds=timeout_seconds,
             )
-            return parse_curator_extraction(str(getattr(response, "text", "") or ""))
+            return CuratorExtractionAttempt(
+                batch=effective,
+                extraction=parse_curator_extraction(
+                    str(getattr(response, "text", "") or "")
+                ),
+                shrink_attempts=_TIMEOUT_SHRINK_LIMIT - shrinks_left,
+            )
         except Exception as exc:
             last_error = exc
+            timed_out = is_curator_timeout_error(exc)
+            smaller = (
+                shrink_batch_for_timeout(effective)
+                if timed_out and shrinks_left > 0
+                else None
+            )
+            if smaller is not None:
+                # 缩批只改本次模型输入:state、游标、run 账一概不动;成功提交仍走同一事务路径,
+                # 被丢弃的尾部不在 processed 前缀内,下一轮从同一游标重放(不丢数据)。
+                effective = smaller
+                shrinks_left -= 1
+                prompt = curator_prompt(effective)
+                continue
+            if not timed_out and retries_left > 0:
+                # 非超时错误(如供应商拒绝/schema 失败)保持原有语义:同输入重试,不缩批。
+                retries_left -= 1
+                continue
+            # 超时不消耗同输入重试额度:同一份已超时的输入再试一次没有新信息。缩到下限
+            # (shrink_batch_for_timeout 返回 None)或缩批/时长预算用尽,即按原语义 typed 失败。
+            break
     assert last_error is not None
     raise last_error
 
@@ -165,8 +275,11 @@ def _enum_values(values: Collection[str]) -> str:
 
 
 __all__ = [
+    "CuratorExtractionAttempt",
     "CuratorModelTimeoutError",
     "call_backend_with_timeout",
     "curator_prompt",
     "extract_with_retries",
+    "is_curator_timeout_error",
+    "shrink_batch_for_timeout",
 ]

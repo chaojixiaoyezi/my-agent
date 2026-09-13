@@ -1,5 +1,24 @@
 # Memory Progress
 
+## 2026-09-12 R262 策展超时改为有界自适应缩批
+
+- 真机诊断（r260 上线后首轮 run 落盘）：`failure_diagnostic={"error_type":"ProviderTimeoutError"}` —— 第三个原因
+  是**模型调用超时**（非 schema、非鉴权）。对照实验：同 profile 手工小 prompt 调 `generate_structured` 秒级成功，
+  问题出在策展的大批量输入（batch 80 条 / 40k 字符）。
+- 修法（不靠加长 timeout）：一次调用超时后**缩小输入重试** —— 消息与审计各自独立地"向上取半"截断**前缀**
+  （8→4→2→1），下限 1（`_TIMEOUT_SHRINK_FLOOR`，到下限不再发调用，绝不空批）；独立上界
+  `_TIMEOUT_SHRINK_LIMIT=3` 与 `config.max_retries` **互不污染**（超时只扣缩批计数，非超时错误只扣同输入重试）；
+  另加 lease 时长护栏（缩批产生的总调用预算不得超过租约，防租约中途过期）。
+- 游标/事务安全：缩批只做内存输入整形，不写游标/账本；只截前缀，`next_cursors` 仍只推进连续 processed 前缀，
+  被丢尾部留到下一轮重放；提交仍只有 `_commit_batch → committer.commit` 一条路径。成功且真发生缩批时，
+  run 账追加 warning `memory_curator_input_shrunk:N`（便于真机核对）。
+- 证据：`test_curator_timeout_adaptive` 新增 12 例；连同 curator 相关套件 70 passed；附加回归 152+34 passed；
+  变异验证（`_TIMEOUT_SHRINK_LIMIT=0` → 4 例红；去掉护栏 → 预算 2520s > lease 1530s）。
+- 未做：真机确认（需等下一轮 curator 出成功行 + shrink warning）；"单条输入本身即超时"属有意边界（缩到 1 条
+  仍超时则按原语义 typed 失败）。
+
+# Memory Progress
+
 ## 2026-09-12 R257 策展失败账记录可判定形状
 - **回归与更正（同日）**：第一版给 `CuratorRunRecord` 新增 `failure_diagnostic` 字段，触发两处连锁故障，
   真机把失败记账本身变成 `CURATOR_RUN_AUDIT_FAILED`：① `from_record` 要求存盘键集合与 v2 schema **完全一致**，
