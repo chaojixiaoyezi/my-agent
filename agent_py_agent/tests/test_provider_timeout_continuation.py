@@ -1,4 +1,5 @@
-"""LLM: 门槛5 续跑合同单测——「可恢复供应商失败 + 模型零工具调用只承诺」不再静默收口。
+"""LLM: 门槛5 续跑合同单测——「可恢复供应商失败 + 本轮确实做过工作 + 模型零工具调用只承诺」
+不再静默收口。
 
 真机证据（用户 TUI 会话）：模型请求超时 → 门槛5 重试救回来 → 模型只回一句
 「在的，刚才超时了，我重新来。」→ 之后什么都没发生，提示符空着。旧行为把这句话
@@ -6,9 +7,11 @@
 机器决策）。
 
 规则（与既有策略的边界）：
-- 触发只用结构化事实：本轮那次物理模型调用所属的 model turn 序号被生成层登记为
-  「发生过被重试救回的供应商超时」。绝不读模型正文——把承诺换成任意其它文本，
-  行为完全一致（见 test_resume_is_text_independent）。
+- 触发只用结构化事实，两条同时成立才续跑（收窄 R1，见 test_provider_timeout_resume_narrowing.py）：
+  ① 本轮那次物理模型调用所属的 model turn 序号被生成层登记为「发生过被重试救回的供应商
+     超时」；② 本 run 的工具账本 ``executed_tools`` 非空 = 本轮确实干过活。
+  绝不读模型正文——把承诺换成任意其它文本，行为完全一致（见 test_resume_is_text_independent）。
+  纯问答轮（零工具执行）被超时救回后，那一枪的正文就是终答，不再被追问一次顶掉。
 - 门槛5 的 fail-closed 重试资格判定一行未放宽：续跑只在「重试确实打出去且拿到了
   响应」之后发生；不具资格/重试再超时的路径照旧抛 ProviderTimeoutError。
 - 有界：至多 1 次，与截断续跑（_TRUNCATED_OUTPUT_RESUME_LIMIT）分开计数、互不吃预算。
@@ -70,6 +73,9 @@ def _agent(backend: object) -> SimpleNamespace:
 
 # LLM: 每次调用一个新的 params 实例（live_archive_state 是同一 run 的结构化事实容器，
 #   不能被测试之间串用）。native 协议是工具轮真实形态，采用它。
+#   账本预置一条「本轮已执行过工具」：收窄(R1)后它是续跑的第二个必要条件，本文件钉的正是
+#   真机形状「干活干到一半超时」；纯问答轮形状（零工具执行 → 原样交付那一枪正文）由
+#   test_provider_timeout_resume_narrowing.py 覆盖。
 # 函数用途: 构造一次工具模型轮所需的运行参数。
 def _params(*, run_id: str = "run-timeout") -> ToolLoopExecuteParams:
     return ToolLoopExecuteParams(
@@ -88,7 +94,7 @@ def _params(*, run_id: str = "run-timeout") -> ToolLoopExecuteParams:
         run_id=run_id,
         task_id=f"{run_id}-task",
         one_shot_tool_calls=set(),
-        executed_tools=[],
+        executed_tools=["read_file"],
         archive_tool_calls=[],
         tool_protocol_snapshot=make_test_protocol_snapshot(
             run_id=run_id,
@@ -207,11 +213,12 @@ def test_healthy_turn_registers_no_resume_fact() -> None:
 
 
 def test_timeout_then_zero_tool_call_promise_resumes_once() -> None:
-    """(a) 结构化超时 + 模型零工具调用只承诺 -> 恰好 1 次续跑，发出的是宿主指令。"""
+    """(a) 结构化超时 + 本轮执行过工具 + 模型零工具调用只承诺 -> 恰好 1 次续跑。"""
     params = _params()
     backend = _TimeoutThenPromiseBackend("在的，刚才超时了，我重新来。")
     _agent_obj, response = _generate(backend, params)
 
+    assert params.executed_tools == ["read_file"], "前提：本轮确实做过工具工作（收窄后的必要条件）"
     before = list(params.executed_tools)
     decision = _no_tool_calls_decision(_no_tool_request(params, response))
 
@@ -420,7 +427,8 @@ def test_loop_resumes_and_sends_host_instruction(monkeypatch) -> None:
     agent = _LoopAgent(backend, prompts)
     params = _params(run_id="run-e2e")
 
-    # 该 run 里没有任何工具执行；工具轮执行入口一旦被调用即说明续跑重放了工具。
+    # 该 run 的账本已预置「本轮执行过工具」（收窄后的第二个续跑事实）；循环里不再有新工具
+    # 执行，工具轮执行入口一旦被调用即说明续跑重放了工具。
     executed: list[object] = []
     service = ToolLoopService(agent)
     monkeypatch.setattr(
@@ -439,7 +447,8 @@ def test_loop_resumes_and_sends_host_instruction(monkeypatch) -> None:
     _prompt, response, _rounds = _execute_tool_loop_service(service, params)
 
     assert backend.calls == 3, (
-        "超时 1 次 + 门槛5 重试 1 次 + 续跑 1 次；续跑上限用尽后不再有第 4 次"
+        "超时 1 次 + 门槛5 重试 1 次 + 续跑 1 次；续跑那一枪是新的 model turn，"
+        "没有超时事实，不会再有第 4 次"
     )
     assert response.text == "在的，刚才超时了，我重新来。", "超限后按原语义收口"
     assert executed == [], "续跑绝不进入工具执行路径"

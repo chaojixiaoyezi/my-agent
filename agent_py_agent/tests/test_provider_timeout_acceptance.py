@@ -482,6 +482,8 @@ def test_timeout_in_executed_but_unrecorded_window_is_fail_closed(tmp_path) -> N
 
     # 对照组：同样的夹具只把配对补上，闸门立刻放行 —— 红/绿差异只来自配对事实。
     params_control = _params(run_id="run-accept-window-control")
+    # 收窄(R1)后资格还需第二条事实：本轮确实执行过工具（本对照组的 IR 里已有配对工具结果）。
+    params_control.executed_tools.append("read_file")
     confirmed = canonical_history_call(
         "read_file",
         _READ_ARGS,
@@ -518,6 +520,7 @@ def test_stale_fact_from_earlier_sample_never_resumes_a_healthy_answer(
 ) -> None:
     """同一 params 里更早的物理调用失败过，也不能让**本轮健康回答**被续跑。"""
     params = _params(run_id="run-accept-stale")
+    params.executed_tools.append("read_file")  # 收窄(R1)：资格还需「本轮确实执行过工具」
     timeout_backend = _ScriptedBackend(["TIMEOUT", _PROMISE])
     agent = _FakeAgent(timeout_backend, _RecordingPrompts(), tmp_path)
     first = _generate(agent, params)
@@ -572,6 +575,7 @@ def test_healthy_loop_delivers_promise_verbatim_without_extra_sample(
 def test_provider_resume_does_not_consume_any_other_repair_budget(tmp_path) -> None:
     """超时续跑只在自己的格子上 +1，其它修复计数逐字段不变。"""
     params = _params(run_id="run-accept-budget")
+    params.executed_tools.append("read_file")  # 收窄(R1)：资格还需「本轮确实执行过工具」
     agent = _FakeAgent(_ScriptedBackend(["TIMEOUT", _PROMISE]), _RecordingPrompts(), tmp_path)
     response = _generate(agent, params)
     assert provider_timeout_resume_eligible(params) is True
@@ -595,6 +599,7 @@ def test_provider_resume_does_not_consume_any_other_repair_budget(tmp_path) -> N
 def test_exhausted_provider_budget_hands_over_to_truncated_resume(tmp_path) -> None:
     """超时续跑预算用尽后，截断续跑仍按自己的预算独立生效。"""
     params = _params(run_id="run-accept-budget-truncated")
+    params.executed_tools.append("read_file")  # 收窄(R1)：资格还需「本轮确实执行过工具」
     agent = _FakeAgent(_ScriptedBackend(["TIMEOUT", _PROMISE]), _RecordingPrompts(), tmp_path)
     _generate(agent, params)
     assert provider_timeout_resume_eligible(params) is True
@@ -660,6 +665,7 @@ def test_empty_text_leaves_the_slot_to_the_existing_empty_text_nudge(tmp_path) -
 def test_resume_reaches_the_production_decision_entry(tmp_path) -> None:
     """经真实入口 tool_loop_response_decision 复核资格链路（不是只有内部函数生效）。"""
     params = _params(run_id="run-accept-entry")
+    params.executed_tools.append("read_file")  # 收窄(R1)：资格还需「本轮确实执行过工具」
     agent = _FakeAgent(_ScriptedBackend(["TIMEOUT", _PROMISE]), _RecordingPrompts(), tmp_path)
     response = _generate(agent, params)
 
@@ -680,15 +686,12 @@ def test_resume_reaches_the_production_decision_entry(tmp_path) -> None:
 # ---------------------------------------------------------------- 3b. 行为刻画（设计取舍）
 
 
-def test_recoverable_timeout_also_buys_one_extra_sample_for_a_complete_answer(
-    monkeypatch, tmp_path
-) -> None:
-    """行为刻画：触发完全结构化、不读正文，代价是**已完整作答的重试也会被追问一次**。
+def test_no_tool_work_round_delivers_that_sample_verbatim(monkeypatch, tmp_path) -> None:
+    """收窄(R1)后的行为：零工具执行 + 超时救回 + 完整终答 -> 不续跑，那一枪的正文原样交付。
 
-    时序：第 1 枪超时 → 门槛5 重试那一枪给出完整答复「答案是 2。」→ 本轮仍被追问一次
-    （续跑预算可用、零工具调用、非空正文）→ 用户最终看到的是续跑那一枪的正文。
-    这是 ebb90d0c 明示的设计取舍（"触发零文本匹配"），不是缺陷；作为残留风险证据，
-    用于评估「合法终答被替换」的代价，并在报告里给出可选收窄建议。
+    时序：第 1 枪超时 → 门槛5 重试那一枪给出完整答复「答案是 2。」→ 本轮从未执行过工具
+    （纯问答轮，无未完成工作迹象）→ 资格判定第二条件不成立 → 不续跑 → 用户看到的就是
+    「答案是 2。」。收窄前这里会多买一枪，把该正文顶掉（见 R1 验收发现）。
     """
     complete_answer = "答案是 2。"
     resumed_answer = "已完成，无需继续。"
@@ -696,14 +699,17 @@ def test_recoverable_timeout_also_buys_one_extra_sample_for_a_complete_answer(
         monkeypatch,
         tmp_path,
         ["TIMEOUT", complete_answer, resumed_answer],
-        run_id="run-accept-tradeoff",
+        run_id="run-accept-narrowed-qa",
     )
 
-    assert run.backend.calls == 3, "超时 + 重试（完整答复）+ 续跑"
-    assert run.response.text == resumed_answer
-    assert run.response.text != complete_answer, "重试那一枪的完整答复被续跑那一枪取代"
-    assert run.params.tool_context == [_PROVIDER_TIMEOUT_RESUME]
-    assert run.tool_round_calls == [], "全程零工具调用，仍被追问一次"
+    assert run.backend.calls == 2, "超时 + 重试；零工具执行的轮不再多买一枪"
+    assert run.response.text == complete_answer, "重试那一枪的完整答复必须原样交付"
+    assert resumed_answer not in run.params.tool_context
+    assert run.params.tool_context == []
+    assert run.params.executed_tools == [], "全程零工具执行 = 无未完成工作迹象"
+    assert run.tool_round_calls == []
+    assert provider_timeout_resume_eligible(run.params) is False
+    assert all(_PROVIDER_TIMEOUT_RESUME not in prompt for prompt in run.backend.prompts)
 
 
 # ---------------------------------------------------------------- 4. fail-closed 四闸门行为面

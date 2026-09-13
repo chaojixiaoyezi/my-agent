@@ -72,7 +72,8 @@ _MODEL_INTERRUPT_DRAIN_SECONDS = 1.0
 _RUNNER_STREAM_ACTIVITY_STATE_KEY = "_runner_model_stream_activity_projection"
 # 门槛5 续跑: 本轮模型调用的结构化失败事实登记在 live_archive_state 上, 只记
 # 「哪个 model turn 序号发生过可恢复的供应商超时」; 消费方(response_decision)
-# 按序号精确匹配, 不做时间窗/文本推断。
+# 按序号精确匹配, 不做时间窗/文本推断。这条事实只是续跑的必要条件之一——完整资格
+# 还要求本轮确实做过工具工作(见 provider_timeout_resume_eligible)。
 _PROVIDER_TIMEOUT_RESUME_STATE_KEY = "_provider_timeout_resume_turns"
 # 仅用于结构化诊断(不参与任何判定): 记下是哪一档超时被重试救回来的。
 _RESUMABLE_PROVIDER_FAILURE_TIMEOUT = "provider_timeout_retried"
@@ -173,11 +174,12 @@ def _record_run_cost(request: ModelGenerateParams, response: object) -> None:
 
 
 # LLM: 门槛5 重试本身一行都不放宽(fail-closed 资格判定保持原样)；本函数只在重试
-# **确实发生过且拿到了响应** 时登记一条结构化续跑资格事实——「这个 model turn 曾经
-# 因供应商超时被重试, 而且重试这一枪是打出去了的」。重试失败/不具资格时抛原异常,
-# 因此正常收口的响应里绝不会有这条事实。
-# 函数用途: 把当前 model turn 序号登记为「可续跑」, 供工具轮裁决层在同一序号上放行
-# 至多一次轮内续跑(不解析模型正文, 不重放工具)。
+# **确实发生过且拿到了响应** 时登记一条结构化事实——「这个 model turn 曾经因供应商
+# 超时被重试, 而且重试这一枪是打出去了的」。它是续跑的必要条件, 不是充分条件:
+# 是否放行还由 provider_timeout_resume_eligible 叠加「本轮确实做过工具工作」判定。
+# 重试失败/不具资格时抛原异常, 因此正常收口的响应里绝不会有这条事实。
+# 函数用途: 把当前 model turn 序号登记为「超时已被重试救回」, 供工具轮裁决层在同一
+# 序号上判定是否放行至多一次轮内续跑(不解析模型正文, 不重放工具)。
 def _record_provider_timeout_resume_eligibility(
     request: ModelGenerateParams,
     exc: ProviderTimeoutError,
@@ -214,9 +216,12 @@ def _model_turn_sequence(params: object) -> int:
 
 # LLM: 这是工具轮裁决层唯一允许读取的「本轮可恢复供应商失败」结构化事实入口；
 # 判据是本次物理调用所属 model turn 序号被登记过, 与模型正文、工具名、文案无关。
+# 收窄(R1 独立验收): 除「超时被重试救回」外, 还必须同时成立「本轮确实做过工作」——
+# 否则纯问答轮(零工具执行)被救回后, 那一枪的完整终答会被一次多余的追问顶掉,
+# 用户再也看不到它(信息丢失)。两条判据都是结构化事实, 都不读正文。
 # 调用方(response_decision._no_tool_calls_decision)只按它决定是否续跑一次,
 # 不得据此放宽门槛5 的重试资格, 也不得重放任何已执行工具。
-# 函数用途: 查询「产出这条响应的那次模型调用之前, 本轮是否发生过被重试救回的供应商超时」。
+# 函数用途: 查询「产出这条响应的那次模型调用之前, 本轮是否『超时被重试救回且确实做过工具工作』」。
 def provider_timeout_resume_eligible(params: object) -> bool:
     sequence = _model_turn_sequence(params)
     if sequence <= 0:
@@ -225,7 +230,20 @@ def provider_timeout_resume_eligible(params: object) -> bool:
     if not isinstance(state, dict):
         return False
     turns = state.get(_PROVIDER_TIMEOUT_RESUME_STATE_KEY)
-    return isinstance(turns, dict) and sequence in turns
+    if not (isinstance(turns, dict) and sequence in turns):
+        return False
+    return _turn_has_executed_tools(params)
+
+
+# LLM: 「本轮确实做过工作」的唯一权威读法 = run 级工具账本 executed_tools（只有真实执行
+# 成功的工具由 _record_tool_call 写入, compact 续跑按同口径重建、不归零）。它与
+# _no_tool_calls_decision 的空正文 nudge、finalization_compact_auto 的进展判定同源,
+# 不另建计数源、不读 IR/正文; 拿不到该字段(伪 params)时返回 False = 不可续跑, fail-closed。
+# 未采用「未闭合 required_actions」: 工具循环契约快照恒为空(见 runtime/loop_support.py
+# _required_action_contract_snapshot), 拿它做判据会让续跑永不触发, 不是更权威而是失效。
+# 函数用途: 判断本 run 是否已真实执行过工具, 即是否存在「未完成工作」的结构化迹象。
+def _turn_has_executed_tools(params: object) -> bool:
+    return bool(list(getattr(params, "executed_tools", None) or []))
 
 
 def _generate_or_recover_context_pressure(
