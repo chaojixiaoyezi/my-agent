@@ -76,11 +76,9 @@ def _payload(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _limits(*, budget: float = 3600.0) -> rw.AdmissionLimits:
-    # 同会话顺序键保证第二个请求必然被限流(conversation_busy),不需要占满全局坑。
-    return rw.AdmissionLimits(
-        user_inflight=8, global_inflight=500, admission_wait_budget_seconds=budget
-    )
+def _limits() -> rw.AdmissionLimits:
+    # 同会话顺序键保证请求必然被限流(conversation_busy),不需要占满全局坑。
+    return rw.AdmissionLimits(user_inflight=8, global_inflight=500)
 
 
 def _hold_conversation(admission, payload: dict) -> None:
@@ -134,21 +132,55 @@ def test_admission_wait_write_is_cadenced(tmp_path, fresh_admission) -> None:
     assert _payload(queued)["admission_wait_count"] == first + 1
 
 
-def test_admission_wait_stops_after_budget_and_marks_expiry(tmp_path, fresh_admission) -> None:
+@pytest.mark.parametrize(
+    "waited_seconds",
+    [
+        3601.0,  # 刚过 1 小时
+        12 * 3600.0,  # 半天
+        72 * 3600.0,  # 3 天
+        30 * 24 * 3600.0,  # 30 天
+    ],
+)
+def test_admission_wait_has_no_cumulative_lifetime(
+    tmp_path, fresh_admission, waited_seconds
+) -> None:
+    """健康网关持续证明"仍在合法等待"时,累计等待多久都不判失败、不停止续期。
+
+    只有"权威收口"(取消/终态/网关真的停写)才结束等待;不做"等够多久就前台报失败、后台照常执行"。
+    """
     paths = _paths(tmp_path)
-    queued = _enqueue(paths, "req-queued", "u-1", created_at=time.time() - 7200)
+    created = time.time() - waited_seconds
+    queued = _enqueue(paths, "req-queued", "u-1", created_at=created)
+    _hold_conversation(fresh_admission, _payload(queued))
+    payload = _payload(queued)
+    # 预置"很久以前写过一次信号"的状态:节流窗口已过,应继续写新信号
+    payload["admission_wait_since"] = created
+    payload["admission_wait_at"] = created + 1
+    payload["admission_wait_count"] = 1
+    queued.write_text(json.dumps(payload), encoding="utf-8")
+
+    rw.dispatch_pending_requests(paths, _limits(), lambda p, u, c: None)
+
+    updated = _payload(queued)
+    assert updated["admission_wait_count"] == 2, "累计等待再久也必须继续发新的等待信号"
+    assert updated["admission_wait_at"] > created + 1
+    assert "admission_wait_expired_at" not in updated, "不得发明等待过期事实"
+    assert updated["status"] == "queued"
+
+
+def test_admission_wait_survives_many_throttled_rounds(tmp_path, fresh_admission, monkeypatch) -> None:
+    """节流只决定"多久写一次",不决定"还能写多久":连续多轮扫描后信号必须一直存在。"""
+    monkeypatch.setattr(rw, "_ADMISSION_WAIT_REFRESH_SECONDS", 0.0)
+    paths = _paths(tmp_path)
+    queued = _enqueue(paths, "req-queued", "u-1", created_at=time.time() - 10 * 24 * 3600)
     _hold_conversation(fresh_admission, _payload(queued))
 
-    rw.dispatch_pending_requests(paths, _limits(budget=60.0), lambda p, u, c: None)
+    for _ in range(5):
+        rw.dispatch_pending_requests(paths, _limits(), lambda p, u, c: None)
 
     payload = _payload(queued)
-    assert payload.get("admission_wait_expired_at", 0) > 0, "超预算必须留结构化过期事实"
-    assert "admission_wait_at" not in payload, "超预算后不得再续期"
-
-    # 再扫描一次:过期事实只写一次
-    expired_at = payload["admission_wait_expired_at"]
-    rw.dispatch_pending_requests(paths, _limits(budget=60.0), lambda p, u, c: None)
-    assert _payload(queued)["admission_wait_expired_at"] == expired_at
+    assert payload["admission_wait_count"] == 5
+    assert "admission_wait_expired_at" not in payload
 
 
 def test_deferred_retry_requests_also_get_wait_signal(tmp_path, fresh_admission) -> None:

@@ -229,29 +229,21 @@ def request_conversation_key(payload: dict) -> str:
 # LLM: 合法排队的结构化信号。请求因为准入限流(或恢复退避)留在 inbox 时,worker 每次扫描都
 # 会在**请求文件本身**写一次 admission_wait_at,证明"这个队列条目此刻仍在合法等待准入"。
 # 它只写等待事实:不写 status/lease_heartbeat_at/lease_started_at/模型字段,因此不会被任何
-# 消费方误读成"已经认领/模型在推进"。写入有节流(见 _ADMISSION_WAIT_REFRESH_SECONDS)且只在
-# 预算内(见 AdmissionLimits.admission_wait_budget_seconds)有效:网关停写=客户端无活动,按
-# 自己的空闲窗口收口;取消/终态=请求文件消失或出现终态记录;崩溃恢复=新网关继续按同一预算写。
+# 消费方误读成"已经认领/模型在推进"。
+#
+# 这里**没有**累计等待上限:健康网关只要还在证明"仍在合法等待",等待就不该因为总时长被判失败
+# (慢模型/长回合占用车道是正常工作状态)。收口只来自权威事实:网关停写→客户端按自己的空闲窗口
+# 收口;取消→队列条目消失→同样收口;权威终态→读到终态记录;崩溃恢复→新网关继续写,真死则停写。
+# 写入只做节流(见 _ADMISSION_WAIT_REFRESH_SECONDS),不做"到点停止续期"——那会把前台报失败与
+# 后台照常执行同时留在系统里。
 _ADMISSION_WAIT_REFRESH_SECONDS = 30.0
 _ADMISSION_WAIT_FIELDS = ("admission_wait_at", "admission_wait_reason", "admission_wait_count")
-
-
-# 函数用途: 读取正浮点配置,坏值/非正值回退默认。
-def _positive_float(value: object, default: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
 
 
 @dataclass(frozen=True)
 class AdmissionLimits:
     user_inflight: int
     global_inflight: int
-    # 允许把"仍在合法排队"这一事实告知客户端的最长总时长;超过就停止续期(客户端会在自己的
-    # 空闲窗口内收口),避免"只看队列文件存在就无限续期"。
-    admission_wait_budget_seconds: float = 3600.0
 
     @classmethod
     def from_config(cls, config: object) -> AdmissionLimits:
@@ -259,9 +251,6 @@ class AdmissionLimits:
             user_inflight=_positive_int(getattr(config, "gateway_user_inflight_limit", 8), 8),
             global_inflight=_positive_int(
                 getattr(config, "gateway_global_inflight_limit", 500), 500
-            ),
-            admission_wait_budget_seconds=_positive_float(
-                getattr(config, "gateway_admission_wait_budget_seconds", 3600.0), 3600.0
             ),
         )
 
@@ -295,11 +284,7 @@ def dispatch_pending_requests(
         if _request_deferred_until_later(request):
             deferred_present = True
             # 恢复退避也是合法排队:同样发结构化等待信号(原因码区分),客户端不按超时误判。
-            _record_admission_wait(
-                request,
-                reason="retry_backoff",
-                budget_seconds=limits.admission_wait_budget_seconds,
-            )
+            _record_admission_wait(request, reason="retry_backoff")
             continue
         outcome = _admit_and_submit(paths, request, (limits, submit))
         claimed += 1 if outcome == "claimed" else 0
@@ -329,11 +314,7 @@ def _admit_and_submit(
     )
     if blocked_reason:
         # 合法排队:把"仍在等准入"这一事实写成结构化字段,客户端据此续期而不是误判超时。
-        _record_admission_wait(
-            request,
-            reason=blocked_reason,
-            budget_seconds=limits.admission_wait_budget_seconds,
-        )
+        _record_admission_wait(request, reason=blocked_reason)
         return "blocked"
     claim = claim_request(paths, request.path)
     if claim is None:
@@ -350,15 +331,10 @@ def _admit_and_submit(
 
 # LLM: 只改"等待事实"字段,绝不碰 status/lease/模型进展字段;写入前先做节流判断,读-改-写
 # 走既有原子更新原语(与其它请求文件写者同一把文件锁语义),因此并发扫描不会互相覆盖。
-# 超出预算后不再续期,只留一次 admission_wait_expired_at 供诊断:客户端会在自己的空闲窗口内
-# 收口(有界),请求本身不被丢弃,车道空出后仍会按原顺序被认领。
-# 函数用途: 在被准入限流的排队请求上记录一次结构化"合法等待"信号(有节流、有总预算)。
-def _record_admission_wait(
-    request: _PendingGatewayRequest,
-    *,
-    reason: str,
-    budget_seconds: float,
-) -> None:
+# 只按节流窗口决定是否再写一次,不按累计等待时长停止:停止续期等价于"前台报失败、后台照常执行",
+# 那是隐式语义。权威收口由取消/终态/真实失活负责。
+# 函数用途: 在被准入限流的排队请求上记录一次结构化"合法等待"信号(只做节流,不做累计上限)。
+def _record_admission_wait(request: _PendingGatewayRequest, *, reason: str) -> None:
     now = time.time()
     payload = request.payload or {}
     waited_since = _admission_wait_since(payload, request.path)
@@ -366,12 +342,6 @@ def _record_admission_wait(
         last_signal = float(payload.get("admission_wait_at") or 0.0)
     except (TypeError, ValueError):
         last_signal = 0.0
-    expired = bool(payload.get("admission_wait_expired_at"))
-    if waited_since and budget_seconds > 0 and now - waited_since > budget_seconds:
-        if expired:
-            return
-        _write_admission_wait_field(request.path, {"admission_wait_expired_at": now})
-        return
     if last_signal and now - last_signal < _ADMISSION_WAIT_REFRESH_SECONDS:
         return
     try:

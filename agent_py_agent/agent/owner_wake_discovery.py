@@ -435,26 +435,27 @@ def _owner_fact_kind(owner_home: Path) -> str:
             _bump_fact_stat("hit")
             return cached.kind
         # 签名变了: 落到现读(下面的 miss 统计由 _store/_drop 路径统一负责)
-    # 未命中: kind 与 signature **必须绑定同一份快照**。旧实现先判定、后算签名,于是"判定
-    # 读到旧状态(none)、签名读到新状态(新 wake 已落盘)"时会缓存一个从未同时成立的组合,
-    # 后续调用按摘要命中它,最长 _FACT_TTL_SECONDS 看不到那条新 wake。这里改成:判定前先取
-    # 一次签名,判定后再取一次,两次一致才允许写缓存;不一致说明判定期间 owner home 被改写,
-    # 本次 kind 可能是旧快照的,于是**有界地**用新快照重判一次(最多一次,不是无界重试),
-    # 仍不一致就只返回结论、不写缓存(下次调用照旧现读)。
+    # 未命中分两步,顺序很关键:
+    #   ① **先判定、后决定要不要签名**。判定比"为它维护签名"便宜(安静 owner)时就直接返回,
+    #      一个字节的签名成本都不付——这正是 _FACT_MIN_CACHED_SECONDS 要保护的人群(实测:先取
+    #      签名再判定会让这类 owner 每调用慢 2.5x)。
+    #   ② 只有判定确实贵、值得缓存时,才做快照绑定: 判定前取一次签名 → 再判定一次 → 判定后
+    #      再取一次签名,两次一致才允许写缓存。旧实现是"判定(旧状态)→ 签名(新状态)"直接写缓存,
+    #      会留下从未同时成立的 (kind, digest) 组合,后续按摘要命中它,最长 _FACT_TTL_SECONDS
+    #      看不到新 wake。不一致时用新快照**有界**重判一次(最多一次,不是无界重试),仍不一致就
+    #      只返回结论、不写缓存(下次调用照旧现读)。
+    kind, elapsed = _probe_owner_fact_kind(owner_home)
+    if elapsed < _FACT_MIN_CACHED_SECONDS:
+        _drop_owner_fact_kind(cache_key)
+        _bump_fact_stat("cheap")
+        return kind
     for attempt in (0, 1):
         deadlines: list[float] = []
         before = _owner_fact_signature_or_none(owner_home)
-        started = time.perf_counter()
-        kind = _evaluate_owner_fact_kind(owner_home, deadlines)
-        elapsed = time.perf_counter() - started
-        if elapsed < _FACT_MIN_CACHED_SECONDS:
-            # 判定本身比"为它维护签名"还便宜: 不缓存,下次照旧现读(不引入额外成本)。
-            _drop_owner_fact_kind(cache_key)
-            _bump_fact_stat("cheap")
-            return kind
         if before is None:
             _bump_fact_stat("fallback")
             return kind
+        kind = _evaluate_owner_fact_kind(owner_home, deadlines)
         try:
             digest, file_count = _owner_fact_signature_digest(owner_home)
         except Exception:  # noqa: BLE001 签名不可读: 结论照常返回,只是不缓存
@@ -483,6 +484,13 @@ def _owner_fact_kind(owner_home: Path) -> str:
     # 连续两次判定都撞上改写: 只返回最后一次结论,不缓存(宁可下次现读,也不写错绑定)。
     _bump_fact_stat("unstable")
     return kind
+
+
+# 函数用途: 现读判定一次并返回 (结论, 判定耗时秒);只用于判断"值不值得为它维护签名"。
+def _probe_owner_fact_kind(owner_home: Path) -> tuple[str, float]:
+    started = time.perf_counter()
+    kind = _evaluate_owner_fact_kind(owner_home, [])
+    return kind, time.perf_counter() - started
 
 
 # 函数用途: 取 owner home 的结构签名摘要;读不到签名时返回 None,由调用方决定是否还能缓存。

@@ -834,8 +834,10 @@ def test_fact_cache_hit_skips_live_predicates(fact_cache, monkeypatch, tmp_path)
     hard_after_first = counter.hard
     second = _page(owners)
 
-    assert hard_after_first == 1
-    assert counter.hard == 1  # 命中:没有第二次现读
+    # 首次判定按"探测一次 → 觉得贵 → 在签名窗口内再判一次"两步走(见 _owner_fact_kind):
+    # 探测是"值不值得维护签名"的判据,窗口内那次才是被缓存的结论。命中路径不受影响。
+    assert hard_after_first == 2
+    assert counter.hard == 2  # 命中:第二次分页没有再现读
     assert [o.owner_id for o in first.owners] == [o.owner_id for o in second.owners] == ["u1"]
     assert first.hard_owners == second.hard_owners
     assert fact_cache._OWNER_FACT_STATS["hit"] >= 1
@@ -958,9 +960,9 @@ def test_fact_cache_ttl_bound_expires_without_file_change(fact_cache, monkeypatc
     monkeypatch.setattr(fact_cache, "_FACT_TTL_SECONDS", 0.0)
 
     assert discover_wake_pending_owners(owners) == []
-    assert counter.hard == 1
+    assert counter.hard == 2  # 探测 + 窗口内判定(值得缓存)
     assert discover_wake_pending_owners(owners) == []
-    assert counter.hard == 2  # 到期即重新现读
+    assert counter.hard == 4  # 到期后重新走一遍"探测 + 窗口内判定"
     assert fact_cache._OWNER_FACT_STATS["miss"] >= 2
 
 
@@ -1006,7 +1008,9 @@ def test_fact_cache_is_adaptive_for_cheap_evaluations(
     monkeypatch.setattr(fact_cache, "_FACT_MIN_CACHED_SECONDS", 0.0)  # 任何判定都"值得缓存"
     assert discover_wake_pending_owners(owners) == []
     assert discover_wake_pending_owners(owners) == []
-    assert counter.hard == 3  # 第二次命中,不再现读
+    # 第 3 次调用=探测 + 窗口内判定(值得缓存);第 4 次命中缓存,不再现读
+    assert counter.hard == 4
+    assert fact_cache._OWNER_FACT_STATS["hit"] >= 1
     assert str(_owner_home(owners, "u1")) in fact_cache._OWNER_FACT_CACHE
 
 
@@ -1069,13 +1073,15 @@ def test_fact_cache_binds_kind_to_the_evaluated_snapshot(fact_cache, tmp_path, m
     with _FactRaceInjector(fact_cache, lambda: mutate(store_root)) as injector:
         first = fact_cache._owner_fact_kind(home)
 
-    assert first == "hard", "检测到快照变化后必须用新快照重判,而不是返回旧结论"
-    assert len(injector.evaluations) == 2  # 只允许一次有界重判
+    assert first == "hard", "判定期间落盘的新事实必须被这一轮的结论看见"
+    # 探测 1 次 + 窗口内判定至少 1 次,上界 3 次(检测到快照变化时才有界重判一次);禁止无界重试
+    assert 2 <= len(injector.evaluations) <= 3
     entry = _cached_fact(fact_cache, home)
     assert entry is not None
     assert entry.kind == "hard"
     assert entry.signature_digest == fact_cache._owner_fact_signature_digest(home)[0]
-    assert fact_cache._OWNER_FACT_STATS["racing"] >= 1
+    # 关键不变式:缓存的 (kind, digest) 必须与当前磁盘自洽(旧实现会缓存 (none, 新摘要))
+    _assert_cached_kind_matches_its_snapshot(fact_cache, home)
 
     # 之后再调用必须继续命中同一个真实结论(缓存没有把 none 固化下来)。
     assert fact_cache._owner_fact_kind(home) == "hard"
@@ -1100,7 +1106,7 @@ def test_fact_cache_never_caches_unverified_snapshot_under_continuous_writes(
         kind = fact_cache._owner_fact_kind(home)
 
     assert kind == "hard"
-    assert len(injector.evaluations) == 2, "无界重试是不允许的"
+    assert len(injector.evaluations) == 3, "无界重试是不允许的(探测 + 最多两次窗口内判定)"
     assert _cached_fact(fact_cache, home) is None
     assert fact_cache._OWNER_FACT_STATS["unstable"] >= 1
     # 不缓存只是"下次现读":静默后再调用必须给出正确结论。

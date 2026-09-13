@@ -7,13 +7,14 @@
   `admission_wait_count`（首次还写 `admission_wait_since`）。**禁止**在这条路径上写
   `status`/`lease_heartbeat_at`/`lease_started_at`/`lease_epoch`/`execution_attempt_id` 或任何模型字段——
   等待只证明"队列条目仍在合法等待准入"，不得伪装成已认领或模型在推进。
-- 写入必须**节流**（`_ADMISSION_WAIT_REFRESH_SECONDS`）且受**总预算**约束
-  （`AdmissionLimits.admission_wait_budget_seconds` ← `gateway_admission_wait_budget_seconds`，默认 3600s）。
-  超出预算后停止续期并只留一次 `admission_wait_expired_at`：客户端按自己的空闲窗口如实报等待超时，
-  **请求本身不被丢弃**，车道空出后仍按原顺序被认领。
+- 写入只做**节流**（`_ADMISSION_WAIT_REFRESH_SECONDS`），**没有累计等待上限**：健康网关只要还在证明
+  "仍在合法等待"，等待就不能因为总时长被判失败（慢模型/长回合占用车道是正常工作状态）。**禁止**加
+  "等够多久停止续期"的到点策略——那等于"前台报失败、后台照常执行"的隐式语义。若将来确实需要用户可选的
+  等待截止策略，必须单独提案，不作为 bug 修复的默认行为。
 - 客户端不需要新字段：它已经按 chunk/inbox/processing 三种文件的活动续期，因此这些写入天然成为
-  "合法存活"信号。收口条件保持不变：网关停写→空闲窗口超时；取消→文件消失→超时；终态→终态记录；
-  崩溃恢复→新网关继续按同一预算写。**禁止**改成"队列文件存在就无限续期"。
+  "合法存活"信号。收口只来自**权威事实**：网关停写（真失活）→客户端按自己的空闲窗口收口；取消→队列
+  条目消失→同样收口；权威终态→读到终态记录；崩溃恢复→新网关继续写，真死则停写。**禁止**改成"队列
+  文件存在就无限续期"（那只证明文件在，不证明有人在推进）。
 - 没有进队时间戳的老请求/旁路生产者：第一次写等待信号时必须把**改写前的文件 mtime** 钉成
   `created_at`，否则排序回退用 mtime 会让它每轮都被挤到更后面（自己制造饥饿）。
 - `GatewayAdmission.try_acquire_report()` 是唯一的结构化准入判定（空串=已获取），`try_acquire()`
