@@ -353,3 +353,25 @@ def test_without_worker_signal_the_same_client_wait_times_out(
     assert response == {}
     assert elapsed < 3.0
     assert "admission_wait_at" not in _payload(queued)
+
+
+def test_legacy_request_without_queue_timestamp_keeps_stable_order(
+    tmp_path, fresh_admission
+) -> None:
+    """老请求没有进队时间戳时,等待信号的写入不得让它每轮都被排到更后面(制造饥饿)。"""
+    paths = _paths(tmp_path)
+    path = _enqueue(paths, "req-legacy", "u-1")
+    payload = _payload(path)
+    for key in ("created_at", "submitted_at", "requeued_at"):
+        payload.pop(key, None)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    original_mtime = path.stat().st_mtime
+    _hold_conversation(fresh_admission, payload)
+
+    rw.dispatch_pending_requests(paths, _limits(), lambda p, u, c: None)
+    first = _payload(path)
+    assert first["created_at"] == original_mtime, "首次写信号必须钉住进队顺序位"
+
+    time.sleep(0.02)
+    rw.dispatch_pending_requests(paths, _limits(), lambda p, u, c: None)
+    assert _payload(path)["created_at"] == first["created_at"], "顺序位不得随后续信号漂移"

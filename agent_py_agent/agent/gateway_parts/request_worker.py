@@ -378,15 +378,29 @@ def _record_admission_wait(
         count = max(0, int(payload.get("admission_wait_count") or 0))
     except (TypeError, ValueError):
         count = 0
-    _write_admission_wait_field(
-        request.path,
-        {
-            "admission_wait_at": now,
-            "admission_wait_reason": str(reason or ""),
-            "admission_wait_count": count + 1,
-            "admission_wait_since": waited_since or now,
-        },
-    )
+    fields: dict[str, object] = {
+        "admission_wait_at": now,
+        "admission_wait_reason": str(reason or ""),
+        "admission_wait_count": count + 1,
+        "admission_wait_since": waited_since or now,
+    }
+    if waited_since and not _has_queue_order_timestamp(payload):
+        # 老请求/旁路生产者可能没有任何进队时间戳,此时排序回退用文件 mtime;我们改写文件会把
+        # 它一直往后挤(等于自己制造饥饿)。第一次写等待信号时把"改写前的 mtime"钉成 created_at,
+        # 顺序从此稳定,不再随等待信号漂移。
+        fields["created_at"] = waited_since
+    _write_admission_wait_field(request.path, fields)
+
+
+# 函数用途: 判断请求是否已经带有进队顺序时间戳(created_at/submitted_at/requeued_at)。
+def _has_queue_order_timestamp(payload: dict) -> bool:
+    for key in ("created_at", "submitted_at", "requeued_at"):
+        try:
+            if float(payload.get(key) or 0.0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 # 函数用途: 等待起点=首次记录的时刻,缺失时回退请求进队时刻(created_at/submitted_at)。
