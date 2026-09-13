@@ -1,5 +1,27 @@
 # DESIGN LEDGER
 
+## 2026-09-13 R268 策展槽位占用时间线（只读观测，补上"队列占用"直接证据）【状态：证据，未改代码】
+
+用只读轮询（`lsof` 连接数 + `/slots` 的 `is_processing`/`n_prompt_tokens`/`n_prompt_tokens_cache`，
+不记录任何正文）在 r261 真实部署上取得时间线，补上 R264 第 6 节列出的"缺失证据②"：
+
+- 端点 `127.0.0.1:8901` 是 **`total_slots=1`** 的 llama-server（`RVN-Qwen3.8-Flash-Next-IQ3_XS`）；
+  r261 的 owner 选择档案是 `qwen3.8-flash`，**策展与主对话共用同一个槽位**。
+- 07:00:05–07:15:04Z（899s/282 样本）：槽位 624s 处于处理中，网关并发连接最多 4 条。
+- 期间唯一策展运行 `07:03:36.679Z → 07:11:41.118Z`（484.4s）失败于 `ProviderTimeoutError`；
+  **该运行开始 5 秒后槽位即 busy 并连续占用到 07:11:48**——整个租约期内槽位没有空过。
+  两类流量可区分：交互式（prompt≈19.6k→24.8k、`n_prompt_tokens_cache=19581`≈100% 复用）与
+  新鲜大 prompt（`cached=0`、8192→70120）；槽位稳态解码实测 **21.7 tok/s**。
+- 证据强度：从"连接存在"升级为"租约期内槽位持续 busy + 单槽服务端上多条我方连接"；
+  **仍未**取得请求级身份（不抓 payload）与"本地空闲时同形状对照"（不为对照中断活跃任务），
+  因此"争用是唯一真根因"的口径不变——仍是高概率判断，不是已证事实。
+- 今天 26 次策展全失败：`CURATOR_SCHEMA_INVALID`×11（00:02–01:44Z，各 ≈133–138s，模型有答复但
+  JSON 不合 schema）与 `CURATOR_MODEL_FAILED`×15（01:53–06:58Z，各 ≈484s）。`last_success_at` 仍为 09-09。
+
+处置选项（需用户决定，本轮未执行）：①策展独立端点/实例；②llama-server `--parallel ≥2`；
+③端点被占时快速失败 + 结构化证据；④压缩策展单次 prompt/输出规模。详见
+[docs/audits/R264_CURATOR_ENDPOINT_CONTENTION.md](docs/audits/R264_CURATOR_ENDPOINT_CONTENTION.md) 第 7 节。
+
 ## 2026-09-12 R267 scheduler status 的锁内全量解析收口：锁外解析 + 锁内一次字节复核【状态：已修+受控验收，未部署】
 
 R265 遗留的"其它锁内全量解析点"先测量后修。`SchedulerRepository.runtime_snapshot()`
