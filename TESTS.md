@@ -1,5 +1,16 @@
 # TESTS
 
+## 2026-09-13 R275 证据收尾：原编号验收表 + 基准脚本入库
+
+- `DESIGN_LEDGER.md` R274 小节替换为**按最初交接文档原编号**的完整验收表（UI-01..04 / TOK-01..03 /
+  GW-01..03 + R1 超时恢复 / 策展写账与真实成功 / 慢模型 / 插话），每项给出状态、提交、受控证据来源、
+  运行版本与真 TUI 边界；未部署项一律标"待部署"，UI-04 标"证据不足待测"。
+- 配对基准入库：`scripts/bench/measure_scheduler_reads.py`、`scripts/bench/bench_owner_fact_kind.py`、
+  `scripts/bench/paired_owner_fact_kind.py` + `scripts/bench/README.md`（复现命令、判据、两组独立采样说明）。
+  脚本仅 stdlib、只含结构化夹具，无个人路径/密钥/正文；`python3 scripts/bench/measure_scheduler_reads.py
+  --runs 2000 --rounds 3` 与 `FORCE_CHEAP=1 python3 scripts/bench/bench_owner_fact_kind.py --scenario empty`
+  已在入库版本上冒烟通过。
+
 ## 2026-09-13 R274 scheduler 只读路径不在锁内解析
 
 - `test_scheduler_scan_costs.py::test_scheduler_read_paths_do_not_parse_inside_the_lock`：插桩断言
