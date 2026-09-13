@@ -420,11 +420,23 @@ def advance_pending_closeout(manager: Any, task: Any, fact: dict[str, Any]) -> d
             return {"advanced": False, "state": "cleanup_failed", "rejected": True}
         return {"advanced": False, "state": str(outcome.get("state") or ""), "rejected": True}
     if outcome.get("state") not in COMMITTED_CLOSEOUT_STATES | {CLOSEOUT_NOT_APPLICABLE}:
-        # 仍未收口（写库失败等可重试形态）：更新事实里的诊断字段，等待下一次恢复。
-        record_pending_closeout(manager, task, params, result, outcome,
-                                delivery=str(fact.get("delivery") or _DELIVERY_PENDING))
-        record_closeout_event(manager, task, event_type="closeout_pending", params=params, outcome=outcome)
-        return {"advanced": False, "state": str(outcome.get("state") or "")}
+        # 仍未收口（写库失败 / 状态未知等可重试形态）：刷新事实里的诊断字段，等待下一次恢复。
+        refreshed = record_pending_closeout(
+            manager, task, params, result, outcome,
+            delivery=str(fact.get("delivery") or _DELIVERY_PENDING),
+        )
+        # LLM: 可重试形态会一直挂着（例如 run 状态一直没被修复），所以诊断事件必须有界：
+        # 只在首个周期以及每 10 次重试时落一条，避免每个 reconcile 周期都写一条造成事件洪泛。
+        attempts = int((pending_closeout(task) or {}).get("attempts") or 0)
+        if attempts <= 1 or attempts % 10 == 0:
+            record_closeout_event(
+                manager, task, event_type="closeout_pending", params=params, outcome=outcome
+            )
+        return {
+            "advanced": False,
+            "state": str(outcome.get("state") or ""),
+            "fact_persisted": refreshed,
+        }
     if str(fact.get("delivery") or "") == _DELIVERY_DELIVERED:
         # 已交付：只需清账。清账失败**不能**报成功——事实还在，下一轮还会看到它。
         if not clear_closeout(manager, task):

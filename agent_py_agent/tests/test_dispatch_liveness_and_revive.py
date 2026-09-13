@@ -1739,3 +1739,51 @@ def test_closeout_cleanup_failure_is_not_reported_as_success(tmp_path: Path) -> 
     assert summary["runtime_closeouts_recovered"] == 1, summary
     assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1, "已交付的通知不得重发"
+
+
+# LLM: 真机缺口（104 轮注入复现）：run 状态未知/脏时，旧守卫把它当"权威冲突"直接丢弃 runner
+# 的最终结论 —— 没有 runner_result、没有待重试事实、没有父级通知，子代理永久 RUNNING。
+# 未知状态不是权威终态事实：结论必须照常落账并留下可诊断的待重试事实（不猜成功、不覆盖未知行），
+# 记录被修复后再补收口与通知。函数用途: 固定未知状态下的可诊断、可恢复语义。
+def test_unknown_run_status_keeps_conclusion_diagnosable_not_silently_dropped(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, store, task, attempt_id, agent_run_id, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/unknown-run-status"
+    )
+    # 复现现场：执行中把权威 run 状态改成未知值（仅这条新 run）。
+    with manager.runtime_db.transaction() as conn:
+        conn.execute("UPDATE agent_runs SET status='quarantined-test' WHERE agent_run_id=?",
+                     (agent_run_id,))
+
+    result = manager.runner_result.record_runner_result(params)
+    assert result.status == "FAILED"
+    # 结论不再被静默丢弃：结果文件、任务终态、可诊断事实都在。
+    reloaded = manager.load(task.id)
+    assert Path(str(getattr(reloaded, "runner_result_file", "") or "")).exists(), (
+        "未知 run 状态不得让 runner 结论被静默丢弃"
+    )
+    assert str(reloaded.status or "").upper() == "FAILED", "子代理不得停留在永久 RUNNING"
+    fact = runtime_closeout.pending_closeout(reloaded)
+    assert fact is not None, "必须留下可诊断的待重试收口事实"
+    assert str(fact["closeout_state"]) == runtime_closeout.CLOSEOUT_UNKNOWN_STATUS, fact["closeout_state"]
+    # 不猜成功、不冒充完成：未知 run 状态不得被改写，也不得通知父级。
+    assert str(manager.runtime_db.agent_run_for_run_id(task.id)["status"] or "") == "quarantined-test"
+    assert _wakes_for_attempt(tmp_path, task.id, attempt_id) == [], (
+        "状态未知时不得把结论当成功通知父级"
+    )
+    events = manager.runtime_db.events_for_attempt(attempt_id, limit=100)
+    assert not any(str(e["event_type"] or "") == "agent_run.completed" for e in events)
+
+    # 记录被修复 → 恢复链补收口与补通知，恰好一次。
+    with manager.runtime_db.transaction() as conn:
+        conn.execute("UPDATE agent_runs SET status='created' WHERE agent_run_id=?", (agent_run_id,))
+    summary = runtime_closeout.recover_pending_closeouts(manager)
+    assert summary["runtime_closeouts_recovered"] == 1, summary
+    assert str(manager.runtime_db.agent_run_for_run_id(task.id)["status"] or "") == "failed"
+    events_after = manager.runtime_db.events_for_attempt(attempt_id, limit=200)
+    assert sum(
+        1 for e in events_after if str(e["event_type"] or "") == "agent_run.completed"
+    ) == 1
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None

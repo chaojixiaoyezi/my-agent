@@ -6,7 +6,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from ...runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
+from ...runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES, RUN_STATUS_LEGACY_CREATED
 from ...turn_end import subagent_outcome_for_turn_end
 from ..manager_runner_result_payload import (
     BuildAndPersistContext,
@@ -409,6 +409,13 @@ def _managed_runtime_result_conflict(
     run_status = str(authority.get("run_status") or "")
     attempt_status = str(authority.get("attempt_status") or "")
     if run_status in {"", "created"} and attempt_status == "running":
+        return ""
+    if run_status not in RUN_STATUS_LEGACY_CREATED and run_status not in AGENT_RUN_TERMINAL_STATUSES:
+        # LLM: 未知/脏 run 状态**不是**"权威终态事实"，不能据此丢弃 runner 的最终结论。
+        # 真机缺口：状态未知时这里直接判冲突，结论被静默丢掉——没有 runner_result、没有待重试
+        # 事实、没有父级通知，子代理永久 RUNNING（现场：注入后 status_conflict + 挂住）。
+        # 现在让结论照常落账，run 收口由 closeout 记为 unknown_status 待重试：不猜成功、不覆盖
+        # 未知状态、不改写权威行；记录修复后再补收口与通知（恢复只补状态与通知）。
         return ""
     incoming_terminal = _runner_runtime_terminal_status(params)
     if _runner_result_matches_settled_attempt(run_status, attempt_status, params):

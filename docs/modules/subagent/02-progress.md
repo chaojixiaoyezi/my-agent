@@ -1,5 +1,23 @@
 # Subagent Progress
 
+### R291 追加：未知/脏 run 状态不再静默丢弃 runner 结论（僵尸根因之一）
+
+**现场（104 轮真机注入）**：执行中把 run 状态改成未知值后，`status_conflict` 被写下、runner 停止，
+但**没有 runner_result、没有待重试事实、没有父级唤醒**，task 停在 RUNNING；把记录改回合法 `created`
+后仍挂住。根因之一是 `_managed_runtime_result_conflict` 把"未知/脏 run 状态"当成权威冲突直接丢弃结论。
+
+**语义修正**：未知/脏 run 状态**不是**权威终态事实，不得据此丢弃 runner 的最终结论。现在结论照常落账
+（runner_result + task 投影），run 收口由 closeout 记为 `unknown_status` 待重试：不猜成功、不覆盖未知行、
+不改写权威状态，也不通知父级；记录被修复后再补收口与通知。配合 `runtime_closeout_pending` 投影，
+owner 仍会被发现层当硬事实驱动，恢复链每周期重试（诊断事件有界：首个周期与每 10 次各一条）。
+
+**仍未覆盖（未验）**：runner 在**没有任何结论**的情况下消失（例如进程在切片中途死亡且从未登记
+runner session）时，`_dead_running_reclaim_facts` 因 `if not session: return None` 直接放弃，
+open attempt 会一直挂着。它的判据应当建立在"执行器确证退出/失去宿主所有权"的结构化事实上
+（execution lock 的 holder pid+start_token 存活判定、无 in-flight 工具操作、runner session 的
+ended/进程事实），而不是心跳年龄或"没有输出"；健康慢首包/持续慢流/合法工具进行中必须继续存活。
+本分支尚未实现，留待下一轮单独设计 + 真机验收。
+
 ### R291 追加：收口事实写不进去时不得继续不可恢复的后续动作
 
 **缺口（监督者复现）**：`record_pending_closeout` 返回 False 时旧实现只把 `wal_active` 置 False，
