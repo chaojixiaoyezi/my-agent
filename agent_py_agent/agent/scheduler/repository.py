@@ -9,9 +9,12 @@ the durable pre-admission pattern used by 通道运行时 and 长期助手.
 
 import hashlib
 import json
+import logging
 import os
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
@@ -27,6 +30,7 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_json_file_atomic_unlocked,
 )
+from ..runtime_errors import runtime_error_report
 from ..user_space.owner_quota import (
     OwnerQuotaAdmission,
     OwnerQuotaChange,
@@ -53,6 +57,24 @@ _MAX_NAME_CHARS = 160
 _MAX_PROMPT_CHARS = 32_000
 _MAX_SKILL_REFS = 32
 _MANUAL_DISPATCH_DELAY_SECONDS = 2.0
+
+_LOGGER = logging.getLogger(__name__)
+
+# LLM: ``waiting_runs`` is called once per conversation tick (runtime.prepare_tick ->
+# SchedulerService.reconcile_waiting_runs) and used to re-parse the whole owner ledger every time
+# even when the file had not changed. The projection below binds the parsed waiting rows to the
+# exact bytes they came from: (mtime_ns, size, inode, device) + a blake2b digest of the raw file.
+# A hit therefore requires the same stat key *and* the same content digest, so any external or
+# in-process rewrite (even same-size, same-timestamp) invalidates it. store.json stays the single
+# authority; this is a read-through projection of it, never a second source of state.
+_WAITING_PROJECTION_MAX_ENTRIES = 4
+_WAITING_PROJECTION_MAX_ROWS = 512
+_WAITING_PROJECTION_CACHE: OrderedDict[tuple[str, str, str, str], _WaitingRunsProjection] = (
+    OrderedDict()
+)
+_WAITING_PROJECTION_LOCK = threading.Lock()
+# 结构化可观测计数:命中/回退/守卫。测试与现场体检用它证明缓存真的在生效、且异常时确实回退。
+_WAITING_PROJECTION_STATS: dict[str, int] = {"hit": 0, "miss": 0, "guard": 0, "skip": 0}
 
 
 class SchedulerRepositoryError(RuntimeError):
@@ -553,19 +575,16 @@ class _SchedulerRunOperations:
 class _SchedulerWaitingRunOperations:
     # LLM: Restart reconciliation needs a bounded snapshot of runs whose model slice ended while
     # their same-id conversation task stayed active. This is read-only and never scans task prose.
+    # The returned rows are always deepcopies of the cached projection, so callers can neither
+    # mutate cached state nor observe a projection that no longer matches store.json bytes.
     # 函数用途: 读取等待任务终态的定时执行，供 Gateway 生命周期对账。
     def waiting_runs(self) -> tuple[list[dict[str, object]], list[str]]:
+        # 读盘与内容摘要在锁外完成: 锁内只做 stat 复核 + 命中判定(或对已读字节做解析),
+        # 因此锁持有时间只会比"锁内 read + 全量解析"更短,不会更长。
+        probe = _probe_store_bytes(self.store_path)
         with locked_json_path(self.store_path):
-            store = self._load_store_unlocked()
-            runs, errors = self._valid_runs(store)
-        selected = [run for run in runs if str(run.get("status") or "") == "waiting"]
-        selected.sort(
-            key=lambda item: (
-                float(item.get("waiting_since") or item.get("started_at") or 0.0),
-                str(item["run_id"]),
-            )
-        )
-        return deepcopy(selected), errors
+            projection = self._waiting_runs_projection_unlocked(probe)
+        return [deepcopy(row) for row in projection.rows], list(projection.errors)
 
     # LLM: A model slice may legitimately yield after spawning durable child work. Preserve the
     # scheduler run as waiting without a live process claim; queued dispatch must never reclaim it.
@@ -638,9 +657,29 @@ class _SchedulerStoreSupport:
 
     def _load_store_unlocked(self) -> dict[str, Any]:
         report = read_json_object_report(self.store_path, context="scheduler.store.read")
-        if report.load_error is not None:
+        return self._validate_store_unlocked(report.payload, report.load_error)
+
+    def _load_store_from_bytes_unlocked(self, data: bytes) -> dict[str, Any]:
+        """从"已经读进内存的 store.json 字节"解析,语义与 _load_store_unlocked 逐字一致。
+
+        LLM: 缓存路径必须先拿到内容摘要再解析,若先摘要后重新读盘,解析到的字节和摘要绑定的
+        字节可能不是同一份(外部原地改写窗口)→ 会缓存一份"内容摘要属于新文件、结果属于旧
+        文件"的投影。这里让"读一次字节"同时供摘要和解析使用,绑定天然精确。坏 JSON/非对象/
+        缺字段的处理与 read_json_object_report 同款(runtime_error_report + path),
+        因此两条路径的异常语义不漂移,见 tests/test_scheduler_scan_costs.py 的一致性用例。
+        """
+        payload, load_error = _parse_json_object_bytes(self.store_path, data)
+        return self._validate_store_unlocked(payload, load_error)
+
+    def _validate_store_unlocked(
+        self,
+        payload: dict[str, Any],
+        load_error: dict[str, object] | None,
+    ) -> dict[str, Any]:
+        """校验已解析的 store 负载并返回权威字典(空负载 → 空账本默认值)。"""
+        if load_error is not None:
             raise SchedulerStateError("owner scheduler store is unreadable")
-        if not report.payload:
+        if not payload:
             return {
                 "schema_version": _STORE_SCHEMA,
                 "owner": dict(self.owner),
@@ -648,7 +687,7 @@ class _SchedulerStoreSupport:
                 "runs": {},
                 "updated_at": 0.0,
             }
-        store = report.payload
+        store = payload
         if store.get("schema_version") != _STORE_SCHEMA:
             raise SchedulerStateError("unsupported owner scheduler store schema")
         if store.get("owner") != self.owner:
@@ -656,6 +695,96 @@ class _SchedulerStoreSupport:
         if not isinstance(store.get("jobs"), dict) or not isinstance(store.get("runs"), dict):
             raise SchedulerStateError("owner scheduler store jobs/runs must be objects")
         return store
+
+    def _waiting_runs_projection_unlocked(self, probe: _StoreBytesProbe | None) -> _WaitingRunsProjection:
+        """读 store.json 并返回 waiting 行投影;未变化的数据不重复解析。
+
+        LLM: 命中条件是"锁内 stat 键与缓存一致 + 锁外读到的字节与锁内 stat 一致 + 字节摘要
+        与缓存一致",三条都要成立:
+        ① stat 键(mtime_ns/size/inode/device)覆盖"文件被替换/被截断/被原子改写";
+        ② 锁外探针与锁内 stat 一致,保证"摘要绑定的那份字节"就是当前文件;
+        ③ 内容摘要覆盖"时间戳粒度粗的文件系统上同尺寸原地改写"。
+        任一条不成立都退到 _parse_waiting_projection_unlocked 全量解析(①②不成立时还打结构化
+        告警/guard 计数),绝不返回陈旧结论。投影只缓存 waiting 行与错误码,调用方每次拿到 deepcopy。
+        """
+        cache_key = self.waiting_projection_cache_key()
+        stat_key = _store_stat_key(self.store_path)
+        if stat_key is None:
+            # 文件缺失/不可 stat:不能绑定任何投影,冷路径(语义: 空账本或结构化读失败)。
+            _drop_waiting_projection(cache_key)
+            return self._parse_waiting_projection_unlocked(None)
+        cached = _cached_waiting_projection(cache_key)
+        usable_probe = probe if (probe is not None and probe.stat_key == stat_key) else None
+        if cached is not None and cached.stat_key == stat_key and usable_probe is not None:
+            if usable_probe.digest == cached.digest:
+                _bump_projection_stat("hit")
+                with _WAITING_PROJECTION_LOCK:
+                    _WAITING_PROJECTION_CACHE.move_to_end(cache_key)
+                return cached
+            _bump_projection_stat("guard")
+            _LOGGER.warning(
+                "scheduler waiting projection guard fallback: stat key unchanged but content "
+                "digest differs; re-parsing owner store",
+                extra={
+                    "event": "scheduler_waiting_projection_guard",
+                    "store_path": str(self.store_path),
+                    "stat_key": stat_key,
+                },
+            )
+            _drop_waiting_projection(cache_key)
+        return self._parse_waiting_projection_unlocked(usable_probe)
+
+    def waiting_projection_cache_key(self) -> tuple[str, str, str, str]:
+        """投影缓存键: 账本路径 + owner 身份(owner 参与逐条校验,不能跨 owner 复用)。"""
+        return (
+            str(self.store_path),
+            str(self.owner.get("provider") or ""),
+            str(self.owner.get("kind") or ""),
+            str(self.owner.get("id") or ""),
+        )
+
+    def _parse_waiting_projection_unlocked(
+        self,
+        probe: _StoreBytesProbe | None,
+    ) -> _WaitingRunsProjection:
+        """全量解析 store.json 并(可选)写入有界投影缓存;任何异常都不留下脏缓存。
+
+        ``probe`` 是锁外已经读好并算好摘要的那份字节(与锁内 stat 一致时可用):解析因此不需要
+        在锁内做 I/O 或哈希,锁持有时间不会比改动前更长。probe 不可用就回退唯一权威读取路径
+        (锁内 read_json_object_report),由它给结构化结果;这条回退路不写缓存。
+        """
+        cache_key = self.waiting_projection_cache_key()
+        try:
+            if probe is not None:
+                store = self._load_store_from_bytes_unlocked(probe.data)
+            else:
+                store = self._load_store_unlocked()
+            runs, errors = self._valid_runs(store)
+        except Exception:
+            _drop_waiting_projection(cache_key)
+            raise
+        rows = tuple(_select_waiting_runs(runs))
+        projection = _WaitingRunsProjection(
+            stat_key=probe.stat_key if probe is not None else (-1, -1, -1, -1),
+            digest=probe.digest if probe is not None else "",
+            rows=rows,
+            errors=tuple(errors),
+        )
+        _bump_projection_stat("miss")
+        if probe is None or len(rows) > _WAITING_PROJECTION_MAX_ROWS:
+            # 字节不可用 / 超界行数: 不缓存,退化为逐次全量解析(与改动前同,不会更差)。
+            _bump_projection_stat("skip")
+            return projection
+        if _store_stat_key(self.store_path) != probe.stat_key:
+            # 解析期间账本又被改写: 本次结论照常返回,但不写缓存(下次重新解析,不赌)。
+            _bump_projection_stat("skip")
+            return projection
+        with _WAITING_PROJECTION_LOCK:
+            _WAITING_PROJECTION_CACHE[cache_key] = projection
+            _WAITING_PROJECTION_CACHE.move_to_end(cache_key)
+            while len(_WAITING_PROJECTION_CACHE) > _WAITING_PROJECTION_MAX_ENTRIES:
+                _WAITING_PROJECTION_CACHE.popitem(last=False)
+        return projection
 
     def _write_store_unlocked(
         self,
@@ -958,6 +1087,124 @@ class SchedulerRepository(
         )
         self.due_index = due_index
         self.root.mkdir(parents=True, exist_ok=True)
+
+
+# LLM: One parsed ``waiting_runs`` result bound to the exact store.json bytes it was parsed from.
+# ``stat_key``/``digest`` are the invalidation evidence; ``rows``/``errors`` are the projection.
+# A projection is never authority: every mutation still writes store.json and every hit still
+# re-verifies the file's stat key and content digest before it is served.
+# 类用途: 让每轮对账不再重复解析没变过的 store.json,同时保证外部改写立刻可见。
+@dataclass(frozen=True)
+class _WaitingRunsProjection:
+    stat_key: tuple[int, int, int, int]
+    digest: str
+    rows: tuple[dict[str, object], ...]
+    errors: tuple[str, ...]
+
+
+# LLM: One lock-free read of store.json bound to the stat key observed just before it. The probe
+# is only usable while the in-lock stat still matches, which is what lets the locked section parse
+# already-read bytes instead of doing I/O and hashing while holding the owner lock.
+# 类用途: 把"读盘 + 内容摘要"移出临界区,锁内只做版本复核与命中判定。
+@dataclass(frozen=True)
+class _StoreBytesProbe:
+    stat_key: tuple[int, int, int, int]
+    digest: str
+    data: bytes
+
+
+def _store_stat_key(path: Path) -> tuple[int, int, int, int] | None:
+    """store.json 的 (mtime_ns, size, inode, device) 指纹;不可读返回 None。"""
+    try:
+        status = path.stat()
+    except OSError:
+        return None
+    return (status.st_mtime_ns, status.st_size, status.st_ino, status.st_dev)
+
+
+def _read_store_bytes(path: Path) -> bytes | None:
+    """读 store.json 原始字节(摘要与解析共用同一份,保证绑定精确);失败返回 None。"""
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _store_bytes_digest(data: bytes) -> str:
+    """内容摘要(blake2b-128): 覆盖时间戳粒度粗的文件系统上的同尺寸原地改写。"""
+    return hashlib.blake2b(data, digest_size=16).hexdigest()
+
+
+def _probe_store_bytes(path: Path) -> _StoreBytesProbe | None:
+    """锁外探针: 一次 stat + 一次读字节 + 内容摘要,三者绑定同一份内容。
+
+    LLM: 命中判定要求"探针 stat == 锁内 stat",所以锁外读到的字节与锁内看到的文件版本一致;
+    不一致(外部改写竞态)时调用方会丢弃探针,回退锁内权威读取路径。返回 None 表示文件缺失/
+    不可读,调用方同样走权威路径。
+    """
+    stat_key = _store_stat_key(path)
+    if stat_key is None:
+        return None
+    data = _read_store_bytes(path)
+    if data is None:
+        return None
+    return _StoreBytesProbe(stat_key=stat_key, digest=_store_bytes_digest(data), data=data)
+
+
+def _parse_json_object_bytes(
+    path: Path,
+    data: bytes,
+) -> tuple[dict[str, Any], dict[str, object] | None]:
+    """把原始字节解析成 JSON 对象,错误语义与 common.json_io.read_json_object_report 一致。
+
+    返回 (payload, load_error): 坏 JSON/非法 UTF-8/根不是对象 → payload={} + 结构化错误;
+    合法对象 → (payload, None)。调用方据此抛 SchedulerStateError,行为与权威读取路径相同。
+    """
+    context = "scheduler.store.read"
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        report = runtime_error_report(exc, context=context)
+        report["path"] = str(path)
+        return {}, report
+    if isinstance(payload, dict):
+        return payload, None
+    report = runtime_error_report(
+        ValueError(f"JSON root is {type(payload).__name__}, expected object"),
+        context=context,
+    )
+    report["path"] = str(path)
+    return {}, report
+
+
+def _bump_projection_stat(name: str) -> None:
+    """投影缓存结构化计数(命中/回退/守卫/跳过);缺键容忍,计数永不影响主链路。"""
+    with _WAITING_PROJECTION_LOCK:
+        _WAITING_PROJECTION_STATS[name] = int(_WAITING_PROJECTION_STATS.get(name, 0)) + 1
+
+
+def _cached_waiting_projection(cache_key: tuple[str, str, str, str]) -> _WaitingRunsProjection | None:
+    """读投影缓存条目(只读快照,不改变 LRU 顺序;命中确认后再 move_to_end)。"""
+    with _WAITING_PROJECTION_LOCK:
+        return _WAITING_PROJECTION_CACHE.get(cache_key)
+
+
+def _drop_waiting_projection(cache_key: tuple[str, str, str, str]) -> None:
+    """主动丢弃缓存条目(解析失败/内容摘要守卫/文件消失时的保守回退)。"""
+    with _WAITING_PROJECTION_LOCK:
+        _WAITING_PROJECTION_CACHE.pop(cache_key, None)
+
+
+def _select_waiting_runs(runs: list[dict[str, object]]) -> list[dict[str, object]]:
+    """从逐条解析结果中筛出 waiting 行并按 (waiting_since, run_id) 排序(逐字保留原语义)。"""
+    selected = [run for run in runs if str(run.get("status") or "") == "waiting"]
+    selected.sort(
+        key=lambda item: (
+            float(item.get("waiting_since") or item.get("started_at") or 0.0),
+            str(item["run_id"]),
+        )
+    )
+    return selected
 
 
 def _process_state(pid: int) -> str:

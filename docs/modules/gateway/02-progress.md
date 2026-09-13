@@ -1,5 +1,32 @@
 # Gateway Progress
 
+## 2026-09-12 R265 GW-03 收口：等待任务投影缓存 + owner 事实判定缓存
+
+- 实测（交错 A/B，本机 load 一度 12.96，故只报比值）：
+  · `scheduler/repository.waiting_runs` 每轮在锁内全量解析 store.json：N=10000 条 run 时 **16.1ms、锁持有 14.0ms**，
+    其中绝大多数 run 并非 waiting；命中投影后 **3.4ms、锁持有 9µs（4.7x）**，冷路径锁持有 14.6→15.1ms（+3%，噪声内，
+    因为内容摘要的读盘被挪到锁外）。
+  · `owner_wake_discovery._owner_fact_kind` 占整页成本 **96.6%–99.4%**（本机 19 owner 真实形状 warm≈cold，
+    证明事实判定此前完全没缓存）；加结构化签名缓存后真实形状 warm **3.06x / 3.80x**（19/95 owner），
+    按 120s 重扫、5 轮 1 miss 摊薄为 **1.73x / 2.0x**；安静 owner 因自适应阈值（判定 <0.3ms 不缓存）保持中性。
+- 修法：`waiting_runs` 改为**锁外探针（stat+读字节+blake2b-128 摘要）+ 锁内三重校验**（锁内 stat 键、锁外探针 stat 键、
+    探针摘要三者一致才命中），行数上界 512、条目上界 4；`_owner_fact_kind` 改为**结构化签名**（覆盖判定读到的全部路径：
+    会话存储根/wake_queue/progress_policies/messages/agents state/tasks/runs/audit/watch_state/memory policy/curator state/
+    candidates/scheduler store.json/runtime.db+wal+shm 的逐条目 mtime_ns+size+ino）+ 时间边界（policy/job 到点、策展
+    interval/退避/日终/日切、watch 窗口关闭、执行权锁 30s 重探）+ 600s 兜底 TTL，条目上界 1024。
+- 三态一致性：缓存命中 / 清缓存 / 全新实例三者结果逐字段相等；**外部改写立即可见**；**同 stat 不同内容**（等长改写 +
+  还原 mtime_ns）被内容摘要守卫拦下（`scheduler_waiting_projection_guard` 计数）；解析期间被改写则不写缓存；
+  owner 侧覆盖新增/删除/原地改写（policy enabled 翻转、子代理 PENDING→DONE）与时间边界用例。
+- 为什么不是第二套权威状态：每次调用都重读字节重算摘要，缓存只是"绑定在当前字节上的解析投影"；
+  写路径未变，缓存不参与任何状态变更；异常/超界一律回退权威路径并计数。
+- 证据：`test_owner_wake_discovery` + 新增 `test_scheduler_scan_costs` 74 passed；26 个 scheduler/owner/wake 相关套件
+  204 passed；ruff/code-size(hard=0)/diff 通过。**未部署、未真机**。
+- 未做/风险：①miss 路径变慢 1.5–1.7x（签名遍历+watch 窗口读盘），文件频繁变化的 owner 收益归零；②600s TTL 是兜底，
+  签名覆盖不到的"同尺寸原地改写 + 系统改钟"最坏陈旧窗口 10 分钟（(a) 侧有内容摘要无此问题）；③缓存命中会跳过
+  `unfinished_task_ids` 的自愈投影，而自愈本身会改签名 → 最迟下一个 miss 触发；④`runtime_snapshot` 等其它锁内全量解析点未收口。
+
+# Gateway Progress
+
 ## 2026-09-12 R263 GW-01 残留：误 ready 已复现并修复（心跳代际 + 记录优先级）
 
 - **可达性先证后修**（受控 tmp 文件 + 真实写入方，不动共享网关）：

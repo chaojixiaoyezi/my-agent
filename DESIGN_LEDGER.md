@@ -1,5 +1,37 @@
 # DESIGN LEDGER
 
+## 2026-09-12 R265 GW-03 收口：wake/observation/policy 索引 + waiting 投影 + owner 事实缓存【状态：已修+受控验收，未部署】
+
+GW-03 三个分片一次收口，全部先实测再修：
+
+1. **store 三处全量扫描**（`conversation/store.py`）：实测 wake 每条查询读 5000 文件/5000 次解析/3.2MB/~370-425ms
+   且 `limit` 对 I/O 无效、observation 1000 次读里 500 次是 `observation_handled.json` 被每分片重读（14.7MB/6500 次解析）、
+   policy 200 文件里 50 条 disabled 白读。改为进程内**有界读取侧索引**（指纹 ino+size+mtime_ns+ctime_ns + 权威负载；
+   不等即丢条目回退；schema/预算/主键异常整次退回全量扫描 + 结构化告警；写入路径不感知索引）→
+   **wake 3.9-4.7x、observation 7.2-7.7x、policy 4.3-4.8x**。
+2. **等待任务每轮全量解析**（`scheduler/repository.py`）：N=10000 条 run 时锁内解析 **16.1ms/锁持有 14.0ms**（绝大多数非 waiting）。
+   改为**锁外探针 + 锁内三重校验**（锁内 stat 键 / 锁外探针 stat 键 / blake2b-128 内容摘要三者一致）→ 命中 3.4ms/**锁持有 9µs**（4.7x），
+   冷路径锁持有 +3%（噪声内）。
+3. **owner 事实判定逐页重复**（`owner_wake_discovery.py`）：实测占整页 **96.6%-99.4%**、warm≈cold（完全没缓存）。
+   改为**结构化签名**（判定实际读到的全部路径逐条目 mtime_ns/size/ino + runtime.db/-wal/-shm）+ **时间边界**
+   （policy/job 到点、策展 interval/退避/日终/日切、watch 窗口关闭、执行权锁 30s 重探）+ 600s 兜底 TTL，
+   自适应阈值（判定 <0.3ms 不缓存，安静 owner 中性）→ 真实形状 warm **3.06x/3.80x**，摊薄 **1.7-2.0x**。
+
+**三态一致性**：三类查询与两类缓存都验证"命中/清缓存/全新实例/索引损坏"结果逐字一致；**外部改写立即可见**；
+**同 stat 不同内容**被内容摘要守卫拦下；解析期改写不写缓存；owner 侧覆盖新增/删除/**原地改写**（policy enabled 翻转、
+子代理 PENDING→DONE）与时间边界。**不是第二套权威状态**：每次调用重读字节重算摘要，缓存只是绑定在当前字节上的解析投影，
+写路径未变、异常/超界一律回退权威路径。
+
+**证据**：store 侧 59 passed + 26 消费者套件 862 passed/7 xfailed；scheduler/owner 侧 74 passed + 204 passed；
+ruff/strict code-size(hard=0)/diff/import-boundary/contract-pyramid 通过。
+
+**未做/风险**：①store 索引不跨进程/重启（重启首轮同修复前），热路径仍 5000 次 stat + from_dict；
+②owner 事实缓存 miss 变慢 1.5-1.7x、600s TTL 对"同尺寸原地改写+粗粒度时间戳"最坏陈旧 10 分钟、命中会跳过
+`unfinished_task_ids` 自愈投影（自愈改签名，最迟下一 miss 闭环）；③`runtime_snapshot` 等其它锁内全量解析点未收口；
+④**未部署、未真机**——需要新 Gateway 版本的验收一律标"待部署"。
+
+# DESIGN LEDGER
+
 ## 2026-09-12 R263 门槛5 探针交付改为无损有序段落：撤掉"按正文长度二选一"并修正跨枪归属【状态：已修+单测，未部署】
 
 验收监督判定上一版（HEAD 718d7a27）的 `_provider_timeout_probe_final_response` **不是无损**：它按

@@ -1,5 +1,18 @@
 # Gateway Structure
 
+## R265 两类扫描缓存的边界
+
+- `scheduler/repository` 的 waiting 投影缓存：键=(store.json 路径, owner 身份)，命中需**锁内 stat 键 + 锁外探针 stat 键 +
+  内容摘要(blake2b-128)** 三者一致；行数>512 或条目>4 不缓存；解析异常/身份不符/文件缺失一律回退 `_load_store_unlocked()`。
+  **禁止**把内容摘要换成"只看目录/文件 mtime"——那会重新引入"等长原地改写不失效"的错判。
+- `owner_wake_discovery` 的事实判定缓存：键=owner home 下**判定实际读到的路径**的逐条目 (mtime_ns,size,ino) 折叠摘要 +
+  时间边界；命中前提是签名一致且未过边界。**禁止**为了提速删掉逐条目 stat（目录 mtime 不足以捕捉原地改写）。
+  可调旋钮只有 `_FACT_TTL_SECONDS` 与 `_FACT_MIN_CACHED_SECONDS`，两者都是纯性能参数、不改变结论。
+- 两侧都必须保留结构化计数与告警事件（`_WAITING_PROJECTION_STATS`/`scheduler_waiting_projection_guard`、
+  `_OWNER_FACT_STATS`），异常路径要能看出来；缓存丢失只应让成本回到改动前。
+
+# Gateway Structure
+
 ## R263 就绪判据的记录优先级与心跳代际
 
 - `gateway_readiness` 仍是**唯一权威**；记录选择由 `_record_precedence`/`_record_replaces` 显式决定，
