@@ -2874,6 +2874,23 @@ class RuntimeRepository(
             ).fetchall()
         return [conn_row_to_event(row) for row in rows]
 
+    # LLM: 只按事件类型做有界倒序查询，供"某个结构事实是否留下过"的恢复扫描使用；
+    # 它不参与状态裁决，也不做全表聚合，调用方必须自带 limit。
+    # 函数用途: 读取某一类运行时事件的最新若干条（恢复链据此找回未落盘事实的精确身份）。
+    def recent_events_of_type(self, event_type: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        normalized = str(event_type or "").strip()
+        if not normalized:
+            return []
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM runtime_events WHERE event_type = ?
+                ORDER BY seq DESC LIMIT ?
+                """,
+                (normalized, int(limit)),
+            ).fetchall()
+        return [conn_row_to_event(row) for row in rows]
+
 
 def conn_row_to_event(row: sqlite3.Row) -> dict[str, Any]:
     return {

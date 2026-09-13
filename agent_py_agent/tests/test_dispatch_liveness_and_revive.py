@@ -1627,3 +1627,115 @@ def test_rejected_closeout_fact_is_cleared_once_not_retried(tmp_path: Path) -> N
     # 权威终态与既有唤醒不受影响。
     assert str(manager.runtime_db.agent_run_for_run_id(task.id)["status"] or "") == "failed"
     assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+
+
+# LLM: 监督者复现的缺口：WAL 保存失败时 record_pending_closeout 返回 False，旧实现只把
+# wal_active 置 False，随后仍 settle + deliver —— 一旦 deliver 失败，父级永远收不到通知，
+# 且没有任何持久化重试或诊断。本用例用"零文件/零 LLM 控制流重放"固定正确形态：
+# 事实没能持久化时不得继续不可恢复的后续动作，必须在另一个存储域留下可达恢复事实。
+# 注入点精确：只在 canonical task 已经带上 WAL 属性的那次 manager.save 上失败
+# （前一步的结果保存必须真的成功，不能用整个 task 文件不可写代替）。
+# 函数用途: 验证 WAL 保存失败后停止收口/通知、留下可达事实，且恢复后收口与通知不丢不重。
+def test_closeout_fact_save_failure_stops_and_stays_recoverable(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, store, task, attempt_id, agent_run_id, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/closeout-wal-save-fail"
+    )
+    original_save = manager.save
+    seen = {"wal_failures": 0, "normal_saves": 0}
+
+    def flaky_save(saved_task, **kwargs):
+        attrs = getattr(saved_task, "attributes", {}) or {}
+        if isinstance(attrs, dict) and "runtime_closeout_pending" in attrs:
+            seen["wal_failures"] += 1
+            raise OSError("injected WAL save failure")
+        seen["normal_saves"] += 1
+        return original_save(saved_task, **kwargs)
+
+    manager.save = flaky_save
+    try:
+        result = manager.runner_result.record_runner_result(params)
+    finally:
+        manager.save = original_save
+    assert result.status == "FAILED"
+    # 结果本身已经保存成功（注入只打在 WAL 那一次保存上）。
+    assert seen["normal_saves"] >= 1, "结果保存必须发生在注入之前且成功"
+    assert seen["wal_failures"] >= 1, "必须真的注入到 WAL 那次保存"
+    assert Path(str(getattr(manager.load(task.id), "runner_result_file", "") or "")).exists()
+
+    # 事实没落成 → 不得继续收口与通知（否则会留下无法恢复的窗口）。
+    run_row = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert str(run_row["status"] or "") == "created", (
+        "WAL 未持久化时不得继续收口（避免不可恢复的后续动作）"
+    )
+    assert _wakes_for_attempt(tmp_path, task.id, attempt_id) == [], "不得在无恢复依据时通知父级"
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
+    # 但恢复依据必须在另一个存储域里可达。
+    events = manager.runtime_db.events_for_attempt(attempt_id, limit=100)
+    unpersisted = [e for e in events if str(e["event_type"] or "") == "closeout_unpersisted"]
+    assert unpersisted, "WAL 写不进去时必须在 runtime 事件账本留下可达恢复事实"
+    payload = unpersisted[0]["payload"]
+    assert payload["run_id"] == task.id and payload["attempt_id"] == attempt_id
+    assert str(payload.get("agent_run_id") or "") == agent_run_id
+
+    # 存储恢复可写后：恢复链把事件还原成 WAL，再补收口与补通知，恰好一次。
+    summary = runtime_closeout.recover_pending_closeouts(manager)
+    assert summary["runtime_closeouts_restored"] == 1, summary
+    assert summary["runtime_closeouts_recovered"] == 1, summary
+    run_after = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert str(run_after["status"] or "") == "failed", dict(run_after)
+    events_after = manager.runtime_db.events_for_attempt(attempt_id, limit=200)
+    assert sum(
+        1 for e in events_after if str(e["event_type"] or "") == "agent_run.completed"
+    ) == 1, "恢复收口必须恰好写一次终态事件"
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1, "恢复后必须恰好通知一次"
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
+
+    # 重复恢复仍然幂等。
+    again = runtime_closeout.recover_pending_closeouts(manager)
+    assert again["runtime_closeouts_recovered"] == 0, again
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+
+
+# LLM: clear_closeout / mark_closeout_delivered 失败时绝不能报 advanced 成功，也不能让一次成功
+# 的父级通知因为清账失败被重发（"不重"）。函数用途: 固定清账失败时的诚实回报与去重边界。
+def test_closeout_cleanup_failure_is_not_reported_as_success(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, store, task, attempt_id, agent_run_id, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/closeout-cleanup-fail"
+    )
+    # 先正常收口一次（产生一条真实唤醒），再人为恢复出"已提交、待交付"的事实。
+    manager.runner_result.record_runner_result(params)
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+    task_loaded = manager.load(task.id)
+    assert runtime_closeout.record_pending_closeout(
+        manager, task_loaded, params,
+        manager.runner_result._make_quick_result(task_loaded, False, False, params.message),
+        {"state": "already_consistent", "target_run_status": "failed",
+         "agent_run_id": agent_run_id, "attempt_id": attempt_id},
+    )
+    original_save = manager.save
+
+    def failing_save(saved_task, **kwargs):
+        raise OSError("injected save failure during cleanup")
+
+    manager.save = failing_save
+    try:
+        outcome = runtime_closeout.advance_pending_closeout(
+            manager, manager.load(task.id), runtime_closeout.pending_closeout(manager.load(task.id))
+        )
+    finally:
+        manager.save = original_save
+    assert outcome.get("advanced") is not True, (
+        "清账/交付标记写不进去时报 advanced 成功会让恢复链误判已完成"
+    )
+    # 通知不重：唤醒仍然是 1 条（回执判定 already_delivered），且事实仍在等待下一轮。
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1
+
+    # 存储恢复后，恢复链清账且不再重发。
+    summary = runtime_closeout.recover_pending_closeouts(manager)
+    assert summary["runtime_closeouts_recovered"] == 1, summary
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1, "已交付的通知不得重发"

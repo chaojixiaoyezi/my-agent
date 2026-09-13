@@ -1,5 +1,29 @@
 # Subagent Progress
 
+### R291 追加：收口事实写不进去时不得继续不可恢复的后续动作
+
+**缺口（监督者复现）**：`record_pending_closeout` 返回 False 时旧实现只把 `wal_active` 置 False，
+随后**仍** settle、**仍** deliver；一旦 deliver 失败，父级永远收不到通知，且没有持久化重试也没有诊断
+——注释写的"先成功持久化再收口"并未落实。`clear_closeout` 的返回值同样被忽略，清账失败会报 advanced 成功。
+
+**修法（都在既有结果/恢复主链内，不另造队列）**：
+
+1. `ensure_closeout_fact()` 返回三态 `persisted / unpersisted / not_required`：canonical task WAL
+   写失败先重试一次（吸收瞬时抖动）。
+2. 仍失败 → `record_unpersisted_closeout()` 在 **runtime 事件账本**（另一个存储域）落
+   `closeout_unpersisted` 事件，带精确身份（run/attempt/agent_run/target_status/turn_end/结果与
+   output 引用）；两处都写不进去则响亮记录并**停止**本片收口与通知（不再继续不可恢复的动作）。
+3. `restore_unpersisted_closeouts()` 在 task 存储恢复可写后把事件还原成正式 WAL，再走既有推进；
+   事件账本 append-only，用同身份的 `closeout_restored` 标记做消费判定，避免每周期重复还原。
+4. 交付顺序改为「先持久化 delivered，再清账」；`clear_closeout` 失败不再报 advanced 成功
+   （新增 `cleanup_failed` / `delivery_mark_unpersisted` 两个诚实回报状态），已交付的唤醒不会因为
+   清账失败被重发。
+
+守卫用例：`test_closeout_fact_save_failure_stops_and_stays_recoverable`（只在 canonical task
+已带 WAL 属性的那次 `manager.save` 上注入失败，确保前一步结果保存真的成功；断言不 settle/不通知、
+事件账本留下可达事实、恢复后收口与通知恰好一次、重复恢复幂等）、
+`test_closeout_cleanup_failure_is_not_reported_as_success`（清账失败不得报成功、通知不重）。
+
 ### R291 追加：被拒收口事实只诊断一次后清账
 
 恢复链原先对被拒事实（`stale_attempt` / 冲突终态）只写诊断、不清账：由于重试永远不会成功，

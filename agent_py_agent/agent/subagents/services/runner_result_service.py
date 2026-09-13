@@ -28,14 +28,15 @@ from ..runner_rendering import render_runner_result_markdown
 from ..tool_failure_ledger import record_tool_failure_ledger
 from ..utils import _apply_missing_paths
 from .runtime_closeout import (
-    COMMITTED_CLOSEOUT_STATES,
     REJECTED_CLOSEOUT_STATES,
     RETRYABLE_CLOSEOUT_STATES,
     clear_closeout,
     closeout_target_run_status,
     deliver_parent_wake,
+    ensure_closeout_fact,
+    mark_closeout_delivered,
     record_closeout_event,
-    record_pending_closeout,
+    record_unpersisted_closeout,
     settle_runtime_run_for_result,
 )
 
@@ -201,23 +202,28 @@ class SubAgentRunnerResultService:
             result,
             _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
         )
-        # 顺序（可恢复）：先写待重试事实 → runtime 权威 run 收口 → 提交成功才通知父级 → 清除事实。
+        # 顺序（可恢复）：先写待重试事实 → runtime 权威 run 收口 → 提交成功才通知父级 → 持久化"已交付"再清账。
         # 1) 事实先行：收口写库失败、或进程在收口后通知前中断时，"还要补收口/补通知"必须已经
         #    持久化，否则 task/wake 终态而 runtime 仍 created 的矛盾会永久留档。
-        # 2) 未提交不通知：收口没落成时父级绝不能被当成"已完成"唤醒。
+        # 2) 事实必须以**某种**权威介质落下来才算数：canonical task WAL 写不进去时，退到 runtime
+        #    事件账本（另一个存储域）留同身份的可达恢复事实；两处都写不进去时**不再继续**收口与
+        #    通知（否则会留下"父级永远收不到通知且无人可查"的窗口），改为留下响亮诊断后返回。
         target_run_status = closeout_target_run_status(params, result, task)
-        wal_active = False
+        wal_state = "not_required"
         if target_run_status:
-            wal_active = record_pending_closeout(
+            wal_state = ensure_closeout_fact(
                 self.manager, task, params, result,
                 {"state": "pending", "target_run_status": target_run_status},
             )
+            if wal_state == "unpersisted":
+                record_unpersisted_closeout(self.manager, task, params, result)
+                return result
         outcome = settle_runtime_run_for_result(self.manager, task, params, result)
         state = str(outcome.get("state") or "")
         if state in RETRYABLE_CLOSEOUT_STATES:
-            # 权威事实尚未落成：保留待重试事实，由确定性恢复链补收口与补通知，本片不冒充完成。
-            if wal_active:
-                record_pending_closeout(self.manager, task, params, result, outcome)
+            # 权威事实尚未落成：刷新待重试事实，由确定性恢复链补收口与补通知，本片不冒充完成。
+            if wal_state != "not_required":
+                ensure_closeout_fact(self.manager, task, params, result, outcome)
             record_closeout_event(
                 self.manager, task, event_type="closeout_pending", params=params, outcome=outcome
             )
@@ -227,7 +233,7 @@ class SubAgentRunnerResultService:
             record_closeout_event(
                 self.manager, task, event_type="closeout_blocked", params=params, outcome=outcome
             )
-            if wal_active:
+            if wal_state == "persisted":
                 clear_closeout(self.manager, task)
             return result
         from ..debug_trace import SubAgentRunnerTraceRequest, trace_runner_result
@@ -237,11 +243,13 @@ class SubAgentRunnerResultService:
             self.manager, task, result, output_payload,
             attempt_id=str(getattr(params, "attempt_id", "") or ""),
         )
-        if wal_active:
+        if wal_state == "persisted":
             if delivery == "failed":
                 # 收口已提交但通知未成：事实留档，恢复链只补通知，不重跑业务。
-                record_pending_closeout(self.manager, task, params, result, outcome)
+                ensure_closeout_fact(self.manager, task, params, result, outcome)
             else:
+                # 「不重」要求先把"已交付"持久化再清账：清账失败时恢复链会看到 delivered 而跳过重发。
+                mark_closeout_delivered(self.manager, task, params, result, outcome)
                 clear_closeout(self.manager, task)
         return result
 
