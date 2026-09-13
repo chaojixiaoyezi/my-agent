@@ -1,5 +1,24 @@
 # Subagent Structure
 
+## 2026-09-13 R287 runner 最终结论必须收口 runtime 权威 run
+
+**问题（真实 TUI 注入后独立 SQL 发现）**：宿主机对"可续跑族"（如 `MODEL_STREAM_INCOMPLETE`）只调
+`settle_agent_attempt` 结清 attempt、把 `agent_runs.status` 留在 `created` 等 resume；`record_runner_result`
+通过 guard 后只写 task/runner_result 并通知父级，**没有收口 run**。结果同一事实上出现两种矛盾结论：
+`canonical_state.status=FAILED` / `runner_result=FAILED` / 父 wake 已消费，而 runtime.db 仍是
+`run_status=created`、只有 `agent_attempt.completed`、没有 `agent_run.completed`。
+
+**语义（对照既有状态机）**：runner 的最终 typed 结论就是该 exact current attempt 的终态事实，因此
+`settle_runtime_run_for_result()` 在 `_post_result_side_effects` 之后、**notify_parent 之前**按结论收口 run：
+`FAILED→failed`、`CANCELLED→cancelled`、`DONE→done`；**PENDING/BLOCKED/RUNNING 等非终态不收口**
+（可恢复等待/Compact/健康慢流不得被误结束）。收口只针对 `agent_run_for_run_id` 指向的同一条 run，并带
+`attempt_id`（stale/换代保护不变）；`settle_agent_run` 本身是单事务 CAS 且以第一次为准 → 重放幂等。
+收口失败（stale attempt / 写库异常）fail-soft，不改变已落账的 runner 结论，也不阻塞父级唤醒。
+**顺序**：任务与 runner_result 落账 → run 收口 → 父级唤醒，避免父级在矛盾窗里被唤醒。
+
+**验收**：账本级集成测试断言最终 `agent_runs.status=failed` + `agent_run.completed` 存在 + 重放不重复收口；
+新增非终态用例断言 `BLOCKED` 不给 run 写终态。
+
 ## 2026-09-13 R285.1 精确 attempt 的终态收口（僵尸 RUNNING 根因）
 
 **冲突如何形成**：模型流异常（`stream_eof` → `MODEL_STREAM_INCOMPLETE`）后，

@@ -189,6 +189,9 @@ class SubAgentRunnerResultService:
             result,
             _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
         )
+        # 顺序：任务/结果落账 → runtime 权威 run 收口 → 再通知父级。
+        # 否则父级会在"任务已 FAILED、run 仍 created"的矛盾窗里被唤醒。
+        settle_runtime_run_for_result(self.manager, task, params, result)
         from ..debug_trace import SubAgentRunnerTraceRequest, trace_runner_result
         from ..runner_completion_wake import notify_parent_on_runner_result
 
@@ -327,6 +330,58 @@ class SubAgentRunnerResultService:
             result_file=task.runner_result_file, result_json=task.runner_result_json,
             output_json=task.output_json, created_at=time.time(),
         )
+
+
+# LLM: runner 的最终 typed 结论必须与 runtime 权威 run 状态一致：宿主机在可续跑族
+# （流不完整/上下文溢出等）只结清 attempt、把 run 留 created 等 resume；一旦 runner 给出
+# **最终终态**，同一条 exact current attempt 的 run 也要一并收口，否则 task 说 FAILED、
+# runtime 说 created，父级/监督在同一事实上看到两种矛盾结论。
+# 语义映射（只在 attempt 仍是 exact current 时生效，stale/换代保护不动）：
+#   FAILED→failed、CANCELLED→cancelled、DONE→done；
+#   PENDING/BLOCKED/RUNNING 等非终态**不收口**（可恢复等待不能被误结束）。
+# 收口失败（写库异常、stale attempt）只 fail-soft 记录，不改变已落账的 runner 结论。
+# 函数用途: 按 runner 最终结论收口对应的 runtime run；非终态或不可收口时不做任何事。
+def settle_runtime_run_for_result(
+    manager: object,
+    task: SubAgentTask,
+    params: RecordRunnerResultParams,
+    result: SubAgentRunnerResult,
+) -> dict[str, object] | None:
+    if bool(getattr(params, "dry_run", False)):
+        return None
+    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip().upper()
+    run_status = {
+        TaskStatus.FAILED.value: "failed",
+        TaskStatus.CANCELLED.value: "cancelled",
+        TaskStatus.DONE.value: "done",
+    }.get(status)
+    if run_status is None:
+        return None
+    repo = getattr(manager, "runtime_db", None)
+    if repo is None:
+        return None
+    try:
+        authority = repo.agent_run_for_run_id(str(task.id or ""))
+        if authority is None:
+            return None
+        agent_run_id = str(authority["agent_run_id"] or "")
+        if not agent_run_id:
+            return None
+        return repo.settle_agent_run(
+            agent_run_id=agent_run_id,
+            status=run_status,
+            attempt_id=str(params.attempt_id or ""),
+            payload={
+                "status": status,
+                "runner_result": True,
+                "turn_end_reason": str(getattr(params, "turn_end_reason", "") or ""),
+                "runtime_status": "error" if run_status != "done" else "ok",
+                "runtime_reason": str(getattr(result, "message", "") or "")[:200],
+                "runtime_source": "subagent_runner",
+            },
+        )
+    except Exception:
+        return None
 
 
 # LLM: Runtime terminal states are host-owned facts. A settled nonterminal

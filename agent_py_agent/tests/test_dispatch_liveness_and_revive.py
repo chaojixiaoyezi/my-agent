@@ -1176,6 +1176,26 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
     assert str(reloaded.status or "").upper() == "FAILED"
     assert Path(str(getattr(reloaded, "runner_result_file", "") or "")).exists()
 
+    # 关键：runner 最终结论必须把 runtime 权威 run 一并收口（task 说 FAILED、run 不能还停在 created）。
+    run_after = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert run_after is not None and str(run_after["status"] or "") == "failed", dict(run_after)
+    events_after = manager.runtime_db.events_for_attempt(attempt_id, limit=100)
+    assert any(str(item["event_type"] or "") == "agent_run.completed" for item in events_after), (
+        "最终 FAILED 必须落 agent_run.completed，不能只有 agent_attempt.completed"
+    )
+
+    # 重放幂等：同一结果再写一次，不新增 run 终态事件、不重复业务。
+    completed_before = sum(
+        1 for item in events_after if str(item["event_type"] or "") == "agent_run.completed"
+    )
+    replay_same = manager.runner_result.record_runner_result(params)
+    assert replay_same.status == "FAILED"
+    events_replay = manager.runtime_db.events_for_attempt(attempt_id, limit=100)
+    assert sum(
+        1 for item in events_replay if str(item["event_type"] or "") == "agent_run.completed"
+    ) == completed_before, "重放不得重复收口"
+    assert str(manager.runtime_db.agent_run_for_run_id(task.id)["status"] or "") == "failed"
+
     # 过期保护：真实创建下一代 attempt 后，旧代结果必须仍被拒。
     next_prepared = manager.lifecycle.prepare_runner_attempt(task.id)
     next_attempt_id = next_prepared.runner_active_attempt_id
@@ -1248,3 +1268,35 @@ def test_stream_incomplete_same_attempt_closes_authoritative_run(tmp_path: Path)
     assert wake_payloads, "有父会话时 record_runner_result 必须给直属父级发结构化唤醒"
     assert str(wake_payloads[-1].get("reason") or "") == "subagent_runner_finished"
     assert str((wake_payloads[-1].get("metadata") or {}).get("status") or "").upper() == "FAILED"
+
+# LLM: 非终态（PENDING/BLOCKED）是可恢复等待，绝不能被当成最终失败收口 run。
+# 函数用途: 验证非终态 runner 结论不会给 runtime run 写终态。
+def test_blocked_runner_result_does_not_settle_runtime_run(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.services.runner_result_service import (
+        RecordRunnerResultParams,
+    )
+
+    manager = SubAgentManager(
+        tmp_path / "subagents",
+        owner_id="tui-test/blocked-no-settle",
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    task = manager.create_run(goal="blocked stays resumable", thought="", plan=["wait"], depth=1)
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    attempt_id = prepared.runner_active_attempt_id
+
+    result = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            dry_run=False,
+            ok=False,
+            message="runner 本轮结束: blocked",
+            attempt_id=attempt_id,
+            status="BLOCKED",
+            turn_end_reason="blocked",
+        )
+    )
+    assert result.status == "BLOCKED"
+    run_after = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert run_after is not None
+    assert str(run_after["status"] or "") != "done", "可恢复等待不得被收口成终态"
