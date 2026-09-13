@@ -1,5 +1,23 @@
 # Gateway Structure
 
+## R269 两类缓存的绑定与原子性（验收反馈 A/B/C 的合同）
+
+- **owner 事实缓存必须把 kind 与 signature 绑在同一份快照上**：先取"判定前签名"→ 现读判定 → 再取一次签名，
+  两次一致才允许写缓存；不一致说明判定期间 owner home 被改写，本次结论可能是旧快照的，**有界地**用新快照
+  重判一次（最多一次，禁止无界重试），仍不一致就只返回结论、不写缓存（下次现读）。**禁止**回到"先判定、
+  后签名"的顺序——那会缓存出 `(kind=none, digest=有新 wake 的状态)` 这种从未同时成立的组合，后续按摘要
+  命中它，最长 `_FACT_TTL_SECONDS`（600s）看不到新 wake。计数 `racing`/`unstable` 用于观察该路径。
+- **waiting 投影的命中判定与 LRU 更新必须同锁原子**：投影缓存是多 owner 共享的（不同 owner 的 store.json
+  文件锁互不互斥），上限只有 `_WAITING_PROJECTION_MAX_ENTRIES` 条。**禁止**"先 lookup 释放锁、再单独
+  move_to_end"——中间任何其它 owner 的写入都能把该 key 挤掉，随后 `move_to_end` 直接 KeyError 冒到等待任务
+  对账路径。唯一入口是 `_lookup_waiting_projection()`：读条目 + 核对 stat 键 + 核对内容摘要 + 提到最新，
+  四件事同一把锁内完成，并区分"有条目但摘要变了"（guard 回退）与"没有条目"。
+- **坏探针 ≠ 坏账本**：`runtime_snapshot` 锁外解析探针字节失败时（旧字节/瞬时截断），必须退回锁内权威读取
+  `_load_store_unlocked()`，不得直接把 `unavailable` 返回给调用方；只有**当前**账本本身不可读才允许
+  `unavailable`。三种情况（复核不通过、探针为 None、探针解析失败）走同一条回退路。
+
+# Gateway Structure
+
 ## R267 scheduler status 的锁内全量解析边界
 
 - `scheduler/repository.py::runtime_snapshot`（模型 `scheduler status` 的唯一实现）**禁止**在持锁期间做

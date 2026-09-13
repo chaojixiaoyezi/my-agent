@@ -113,7 +113,14 @@ _EXEC_LOCK_REPROBE_SECONDS = 30.0
 _FACT_MIN_CACHED_SECONDS = 3e-4
 _OWNER_FACT_CACHE: OrderedDict[str, _OwnerFactCacheEntry] = OrderedDict()
 _OWNER_FACT_LOCK = threading.Lock()
-_OWNER_FACT_STATS: dict[str, int] = {"hit": 0, "miss": 0, "fallback": 0, "cheap": 0}
+_OWNER_FACT_STATS: dict[str, int] = {
+    "hit": 0,
+    "miss": 0,
+    "fallback": 0,
+    "cheap": 0,
+    "racing": 0,
+    "unstable": 0,
+}
 
 
 @dataclass(frozen=True)
@@ -428,35 +435,63 @@ def _owner_fact_kind(owner_home: Path) -> str:
             _bump_fact_stat("hit")
             return cached.kind
         # 签名变了: 落到现读(下面的 miss 统计由 _store/_drop 路径统一负责)
-    deadlines: list[float] = []
-    started = time.perf_counter()
-    kind = _evaluate_owner_fact_kind(owner_home, deadlines)
-    elapsed = time.perf_counter() - started
-    if elapsed < _FACT_MIN_CACHED_SECONDS:
-        # 判定本身比"为它维护签名"还便宜: 不缓存,下次照旧现读(不引入额外成本)。
+    # 未命中: kind 与 signature **必须绑定同一份快照**。旧实现先判定、后算签名,于是"判定
+    # 读到旧状态(none)、签名读到新状态(新 wake 已落盘)"时会缓存一个从未同时成立的组合,
+    # 后续调用按摘要命中它,最长 _FACT_TTL_SECONDS 看不到那条新 wake。这里改成:判定前先取
+    # 一次签名,判定后再取一次,两次一致才允许写缓存;不一致说明判定期间 owner home 被改写,
+    # 本次 kind 可能是旧快照的,于是**有界地**用新快照重判一次(最多一次,不是无界重试),
+    # 仍不一致就只返回结论、不写缓存(下次调用照旧现读)。
+    for attempt in (0, 1):
+        deadlines: list[float] = []
+        before = _owner_fact_signature_or_none(owner_home)
+        started = time.perf_counter()
+        kind = _evaluate_owner_fact_kind(owner_home, deadlines)
+        elapsed = time.perf_counter() - started
+        if elapsed < _FACT_MIN_CACHED_SECONDS:
+            # 判定本身比"为它维护签名"还便宜: 不缓存,下次照旧现读(不引入额外成本)。
+            _drop_owner_fact_kind(cache_key)
+            _bump_fact_stat("cheap")
+            return kind
+        if before is None:
+            _bump_fact_stat("fallback")
+            return kind
+        try:
+            digest, file_count = _owner_fact_signature_digest(owner_home)
+        except Exception:  # noqa: BLE001 签名不可读: 结论照常返回,只是不缓存
+            _bump_fact_stat("fallback")
+            return kind
+        if digest == before:
+            # 时间边界用墙钟(time.time,与各谓词同域)表达,再折算成 monotonic 有效期(不受改钟影响)。
+            budget = _FACT_TTL_SECONDS
+            if deadlines:
+                budget = min(budget, max(0.0, min(deadlines) - time.time()))
+            _store_owner_fact_kind(
+                cache_key,
+                _OwnerFactCacheEntry(
+                    signature_digest=digest,
+                    valid_until=time.monotonic() + budget,
+                    kind=kind,
+                    files=file_count,
+                ),
+            )
+            _bump_fact_stat("miss")
+            return kind
         _drop_owner_fact_kind(cache_key)
-        _bump_fact_stat("cheap")
-        return kind
-    try:
-        digest, file_count = _owner_fact_signature_digest(owner_home)
-    except Exception:  # noqa: BLE001 签名不可读: 结论照常返回,只是不缓存
-        _bump_fact_stat("fallback")
-        return kind
-    # 时间边界用墙钟(time.time,与各谓词同域)表达,再折算成 monotonic 有效期(不受改钟影响)。
-    budget = _FACT_TTL_SECONDS
-    if deadlines:
-        budget = min(budget, max(0.0, min(deadlines) - time.time()))
-    _store_owner_fact_kind(
-        cache_key,
-        _OwnerFactCacheEntry(
-            signature_digest=digest,
-            valid_until=time.monotonic() + budget,
-            kind=kind,
-            files=file_count,
-        ),
-    )
-    _bump_fact_stat("miss")
+        if attempt == 0:
+            _bump_fact_stat("racing")
+            continue
+    # 连续两次判定都撞上改写: 只返回最后一次结论,不缓存(宁可下次现读,也不写错绑定)。
+    _bump_fact_stat("unstable")
     return kind
+
+
+# 函数用途: 取 owner home 的结构签名摘要;读不到签名时返回 None,由调用方决定是否还能缓存。
+def _owner_fact_signature_or_none(owner_home: Path) -> str | None:
+    try:
+        digest, _files = _owner_fact_signature_digest(owner_home)
+    except Exception:  # noqa: BLE001 签名不可读: 调用方按"不能绑定快照"处理
+        return None
+    return digest
 
 
 def _evaluate_owner_fact_kind(owner_home: Path, deadlines: list[float]) -> str:

@@ -1,5 +1,26 @@
 # Gateway Progress
 
+## 2026-09-13 R269 验收反馈 A/B/C：事实缓存快照绑定、投影命中原子化、坏探针回退
+
+三条都是上一轮我自己的提交留下的缺陷，逐条先复现再修（都不改变对外语义）：
+
+- **A（`ce238ac4` 的 `_owner_fact_kind`）**：旧顺序是"先判定、后签名"，两者可以落在不同快照上。
+  真实函数受控交错复现（判定返回后、签名计算前写入一条 pending wake）：第一次 `none`、第二次仍 `none`，
+  且只现读 1 次，缓存里留下 `(kind=none, digest=有新 wake 的状态)`——后续按摘要命中它，最长 600s 发现不了
+  新 wake。改为：判定前先取签名 → 判定 → 再取签名，两次一致才写缓存；不一致就有界重判一次（最多一次），
+  仍不一致只返回结论不缓存。修复后同一探针：第一次即 `hard`、共 2 次判定、缓存条目与当前磁盘自洽。
+- **B（`ce238ac4` 的 waiting 投影）**：命中路径"先 lookup 释放锁、再单独 `move_to_end`"，而投影缓存是
+  多 owner 共享的（上限 4 条，不同 owner 的文件锁不互斥）。纯内存探针（填满 4 条 → 命中窗口内让第 5 个
+  owner 写入触发 LRU 淘汰）复现 `KeyError(<cache key>)`。改为 `_lookup_waiting_projection()`：
+  读条目 + 核对 stat 键 + 核对摘要 + 提级，全部同一把锁内完成，并区分 guard 与 miss。
+- **C（`8c914dbb` 的 `runtime_snapshot`）**：文档承诺"解析异常也退回锁内权威读取"，但锁外解析
+  `probe.data` 没有 try，异常被外层变成 `unavailable`。坏/旧探针字节 + 有效账本的竞态下会误报不可用。
+  已按文档修：探针解析失败退回 `_load_store_unlocked()`，只有当前账本本身不可读才 `unavailable`。
+
+审计：全仓 `move_to_end` 调用点逐一核对，"lookup 后再单独 touch"的非原子形态只有 waiting 投影这一处
+（`web_fetch_tools`/`home_indexes`/`owner_scoped_pool`/`approval_session`/`background_transcript`/`_ScanIndex`
+/owner 快照都在同一把锁内）。本轮不改模型作用域、权限、Compact、游标或用户任务。
+
 ## 2026-09-12 R267 scheduler status 的锁内全量解析收口（先测量后修）
 
 - 实测 `SchedulerRepository.runtime_snapshot()`（模型显式 `scheduler status` 的唯一实现）改动前每次调用

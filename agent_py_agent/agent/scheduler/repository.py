@@ -573,13 +573,20 @@ class _SchedulerRunOperations:
     def _runtime_snapshot_summary(self) -> tuple[int, int, int, list[str], list[str]]:
         probe = _probe_store_bytes(self.store_path)
         if probe is not None:
-            # 探针字节与摘要绑定同一次读取:锁内复核 stat 键相等即可确认"解析的就是当前文件版本"。
-            summary = self._runtime_summary_from_store(
-                self._load_store_from_bytes_unlocked(probe.data)
-            )
-            with locked_json_path(self.store_path):
-                if _store_stat_key(self.store_path) == probe.stat_key:
-                    return summary
+            try:
+                # 探针字节与摘要绑定同一次读取:锁内复核 stat 键相等即可确认"解析的就是当前文件版本"。
+                summary = self._runtime_summary_from_store(
+                    self._load_store_from_bytes_unlocked(probe.data)
+                )
+            except Exception:  # noqa: BLE001 - 探针本身坏 ≠ 账本坏: 交给下面的权威读取判定
+                # 锁外读到的那份字节可能是旧的/瞬时截断的,而磁盘上的账本此刻已经有效。因此
+                # **不能**把"探针解析失败"当成"账本不可用"(那会让 runtime_snapshot 报
+                # unavailable,而真实账本明明可读),一律退回锁内权威读取。
+                summary = None
+            if summary is not None:
+                with locked_json_path(self.store_path):
+                    if _store_stat_key(self.store_path) == probe.stat_key:
+                        return summary
         with locked_json_path(self.store_path):
             return self._runtime_summary_from_store(self._load_store_unlocked())
 
@@ -749,25 +756,26 @@ class _SchedulerStoreSupport:
             # 文件缺失/不可 stat:不能绑定任何投影,冷路径(语义: 空账本或结构化读失败)。
             _drop_waiting_projection(cache_key)
             return self._parse_waiting_projection_unlocked(None)
-        cached = _cached_waiting_projection(cache_key)
         usable_probe = probe if (probe is not None and probe.stat_key == stat_key) else None
-        if cached is not None and cached.stat_key == stat_key and usable_probe is not None:
-            if usable_probe.digest == cached.digest:
-                _bump_projection_stat("hit")
-                with _WAITING_PROJECTION_LOCK:
-                    _WAITING_PROJECTION_CACHE.move_to_end(cache_key)
-                return cached
-            _bump_projection_stat("guard")
-            _LOGGER.warning(
-                "scheduler waiting projection guard fallback: stat key unchanged but content "
-                "digest differs; re-parsing owner store",
-                extra={
-                    "event": "scheduler_waiting_projection_guard",
-                    "store_path": str(self.store_path),
-                    "stat_key": stat_key,
-                },
+        if usable_probe is not None:
+            hit, stale = _lookup_waiting_projection(
+                cache_key, stat_key=stat_key, digest=usable_probe.digest
             )
-            _drop_waiting_projection(cache_key)
+            if hit is not None:
+                _bump_projection_stat("hit")
+                return hit
+            if stale:
+                _bump_projection_stat("guard")
+                _LOGGER.warning(
+                    "scheduler waiting projection guard fallback: stat key unchanged but content "
+                    "digest differs; re-parsing owner store",
+                    extra={
+                        "event": "scheduler_waiting_projection_guard",
+                        "store_path": str(self.store_path),
+                        "stat_key": stat_key,
+                    },
+                )
+                _drop_waiting_projection(cache_key)
         return self._parse_waiting_projection_unlocked(usable_probe)
 
     def waiting_projection_cache_key(self) -> tuple[str, str, str, str]:
@@ -1220,9 +1228,31 @@ def _bump_projection_stat(name: str) -> None:
 
 
 def _cached_waiting_projection(cache_key: tuple[str, str, str, str]) -> _WaitingRunsProjection | None:
-    """读投影缓存条目(只读快照,不改变 LRU 顺序;命中确认后再 move_to_end)。"""
+    """读投影缓存条目(只读快照,不改变 LRU 顺序;命中判定请走 _lookup_waiting_projection)。"""
     with _WAITING_PROJECTION_LOCK:
         return _WAITING_PROJECTION_CACHE.get(cache_key)
+
+
+# LLM: 命中判定与 LRU 更新必须**同锁原子**完成。投影缓存是多 owner 共享的(每个 owner 的
+# store.json 文件锁互不互斥),旧实现"先 lookup 释放锁、再单独 move_to_end"中间会被其它 owner
+# 的写入淘汰掉这条 key(上限只有 _WAITING_PROJECTION_MAX_ENTRIES 条),随后 move_to_end 直接
+# KeyError 冒到等待任务对账路径。这里把"读条目 + 核对 stat 键 + 核对内容摘要 + 提到最新"放进
+# 同一把锁:条目要么整条命中(并原子提级),要么整条不命中,不存在"确认过却又消失"的中间态。
+# 函数用途: 原子判定投影是否命中;第二个返回值表示"有条目但内容摘要已变"(调用方据此走守卫回退)。
+def _lookup_waiting_projection(
+    cache_key: tuple[str, str, str, str],
+    *,
+    stat_key: tuple[int, int, int, int],
+    digest: str,
+) -> tuple[_WaitingRunsProjection | None, bool]:
+    with _WAITING_PROJECTION_LOCK:
+        entry = _WAITING_PROJECTION_CACHE.get(cache_key)
+        if entry is None or entry.stat_key != stat_key:
+            return None, False
+        if entry.digest != digest:
+            return None, True
+        _WAITING_PROJECTION_CACHE.move_to_end(cache_key)
+        return entry, False
 
 
 def _drop_waiting_projection(cache_key: tuple[str, str, str, str]) -> None:

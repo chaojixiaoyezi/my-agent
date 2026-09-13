@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -412,6 +413,91 @@ def test_waiting_projection_cache_is_bounded(tmp_path, waiting_projection) -> No
     assert len(waiting_projection._WAITING_PROJECTION_CACHE) <= limit
 
 
+def test_waiting_projection_hit_survives_concurrent_lru_eviction(
+    tmp_path, waiting_projection, monkeypatch
+) -> None:
+    """B 项验收回归: 命中判定与 LRU 更新必须原子,别的 owner 淘汰该 key 不得让调用崩。
+
+    投影缓存是多 owner 共享的(不同 owner 的 store.json 文件锁不互斥),上限只有 4 条。
+    旧实现"先 lookup 释放锁、再单独 move_to_end",中间被其它 owner 的写入挤掉就 KeyError。
+    这里在命中路径上注入一次真实淘汰(填满缓存后让第 5 个 owner 写入)。
+    """
+    limit = waiting_projection._WAITING_PROJECTION_MAX_ENTRIES
+    target = tmp_path / "owner-0" / "scheduler"
+    target.mkdir(parents=True)
+    _write_store(target / "store.json", _store_with_waiting(1))
+    repository = _repository(target)
+    assert _wanting_ids(repository.waiting_runs()[0]) == ["srun_000"]
+    key = repository.waiting_projection_cache_key()
+    # 其它 owner 填到"刚好满":目标 key 成为 LRU 最旧但仍驻留,下一次淘汰就是它
+    for index in range(1, limit):
+        root = tmp_path / f"owner-{index}" / "scheduler"
+        root.mkdir(parents=True)
+        _write_store(root / "store.json", _store_with_waiting(1))
+        _repository(root).waiting_runs()
+    assert key in waiting_projection._WAITING_PROJECTION_CACHE
+
+    real_bump = waiting_projection._bump_projection_stat
+    injected = {"done": False}
+
+    def bump_with_eviction(name: str) -> None:
+        real_bump(name)
+        if name == "hit" and not injected["done"]:
+            injected["done"] = True
+            intruder = tmp_path / "intruder" / "scheduler"
+            intruder.mkdir(parents=True)
+            _write_store(intruder / "store.json", _store_with_waiting(1))
+            _repository(intruder).waiting_runs()  # 另一 owner 写入 → LRU 淘汰目标 key
+
+    monkeypatch.setattr(waiting_projection, "_bump_projection_stat", bump_with_eviction)
+
+    rows, errors = repository.waiting_runs()
+
+    assert injected["done"], "必现竞态:注入必须真的发生,否则用例退化成空转"
+    assert errors == []
+    assert _wanting_ids(rows) == ["srun_000"]
+
+
+def test_waiting_runs_is_thread_safe_across_many_owners(tmp_path, waiting_projection) -> None:
+    """5+ owner 并发: 结果按 owner 隔离、无异常,缓存始终有界。"""
+    owners = []
+    for index in range(6):
+        root = tmp_path / f"owner-{index}" / "scheduler"
+        root.mkdir(parents=True)
+        _write_store(root / "store.json", _store_with_waiting(index + 1))
+        owners.append((_repository(root), [f"srun_{position:03d}" for position in range(index + 1)]))
+
+    errors: list[BaseException] = []
+    mismatches: list[tuple[int, list[str]]] = []
+
+    def hammer(position: int, repository, expected: list[str]) -> None:
+        try:
+            for _ in range(25):
+                rows, load_errors = repository.waiting_runs()
+                if load_errors or _wanting_ids(rows) != expected:
+                    mismatches.append((position, _wanting_ids(rows)))
+        except BaseException as exc:  # pragma: no cover - 把线程异常带回主线程断言
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=hammer, args=(position, repository, expected))
+        for position, (repository, expected) in enumerate(owners)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert errors == []
+    assert mismatches == []
+    assert len(waiting_projection._WAITING_PROJECTION_CACHE) <= (
+        waiting_projection._WAITING_PROJECTION_MAX_ENTRIES
+    )
+    # 并发结束后每个 owner 仍然给出自己的 waiting 行(缓存淘汰只影响耗时,不影响结论)。
+    for repository, expected in owners:
+        assert _wanting_ids(repository.waiting_runs()[0]) == expected
+
+
 def test_byte_parse_matches_authoritative_reader(tmp_path) -> None:
     """缓存路径的字节解析与 read_json_object_report 的错误语义一致(不漂移)。"""
     from agent_py_agent.agent.common.json_io import read_json_object_report
@@ -611,6 +697,28 @@ def test_runtime_snapshot_ignores_stale_probe(tmp_path, monkeypatch) -> None:
 
     assert snapshot == _reference_runtime_snapshot(repository)
     assert snapshot["active_runs"] == 3  # 不是探针里的空账本
+
+
+def test_runtime_snapshot_falls_back_when_probe_bytes_are_unreadable(
+    tmp_path, monkeypatch
+) -> None:
+    """C 项验收回归: 坏的/旧的探针字节不得把可读账本报成 unavailable。
+
+    真实竞态:锁外探针读到的是旧字节(或截断字节),解析失败;而此刻磁盘上的账本已经有效。
+    文档承诺"复核不通过或探针不可用一律退回锁内权威读取",代码必须一致。
+    """
+    repository = _runtime_fixture(tmp_path)
+    broken = repository_module._StoreBytesProbe(
+        stat_key=(-1, -1, -1, -1), digest="stale", data=b"{ not json"
+    )
+    monkeypatch.setattr(repository_module, "_probe_store_bytes", lambda path: broken)
+
+    snapshot = repository.runtime_snapshot()
+
+    assert snapshot == _reference_runtime_snapshot(repository)
+    assert snapshot["state"] == "available"
+    assert snapshot["active_runs"] == 3
+    assert snapshot["active_jobs"] == 1
 
 
 def test_runtime_snapshot_unavailable_on_corrupt_store(tmp_path) -> None:
@@ -900,6 +1008,178 @@ def test_fact_cache_is_adaptive_for_cheap_evaluations(
     assert discover_wake_pending_owners(owners) == []
     assert counter.hard == 3  # 第二次命中,不再现读
     assert str(_owner_home(owners, "u1")) in fact_cache._OWNER_FACT_CACHE
+
+
+# LLM: A 项验收回归。旧实现"先判定、后签名",两者可能落在不同快照上,于是缓存出
+# (kind=旧状态结论, digest=新状态摘要) 这种从未同时成立的组合,后续按摘要命中它,
+# 最长 _FACT_TTL_SECONDS 看不到新 wake/policy。下面用**真实函数 + 受控磁盘交错**覆盖:
+# 只在"判定已返回、签名尚未计算"这个真实竞态窗口里写入新事实。
+class _FactRaceInjector:
+    """在判定返回之后、签名计算之前写入新事实,复现真实的 evaluate/signature 竞态。"""
+
+    def __init__(self, fact_module, mutate, *, times: int = 1) -> None:
+        self.module = fact_module
+        self.mutate = mutate
+        self.times = times
+        self.evaluations: list[str] = []
+        self._original = fact_module._evaluate_owner_fact_kind
+        self._original_signature = fact_module._owner_fact_signature_digest
+
+    def __enter__(self):
+        injector = self
+
+        def evaluate(owner_home, deadlines):  # noqa: ANN001
+            kind = injector._original(owner_home, deadlines)
+            injector.evaluations.append(kind)
+            if len(injector.evaluations) <= injector.times:
+                injector.mutate()
+            return kind
+
+        self.module._evaluate_owner_fact_kind = evaluate
+        return self
+
+    def __exit__(self, *exc):
+        self.module._evaluate_owner_fact_kind = self._original
+        self.module._owner_fact_signature_digest = self._original_signature
+        return False
+
+
+def _cached_fact(fact_module, home: Path):
+    return fact_module._OWNER_FACT_CACHE.get(str(home))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda store_root: _write_wake(store_root, "race-wake"), id="new-wake"),
+        pytest.param(
+            lambda store_root: _write_policy(
+                store_root, "race-policy", enabled=True, next_due_at=time.time() - 1
+            ),
+            id="new-policy",
+        ),
+    ],
+)
+def test_fact_cache_binds_kind_to_the_evaluated_snapshot(fact_cache, tmp_path, mutate) -> None:
+    """判定期间新增 wake/policy: 结论必须落在新快照上,且绝不缓存未经验证的组合。"""
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "u1")
+    store_root = _store_root(home)
+
+    with _FactRaceInjector(fact_cache, lambda: mutate(store_root)) as injector:
+        first = fact_cache._owner_fact_kind(home)
+
+    assert first == "hard", "检测到快照变化后必须用新快照重判,而不是返回旧结论"
+    assert len(injector.evaluations) == 2  # 只允许一次有界重判
+    entry = _cached_fact(fact_cache, home)
+    assert entry is not None
+    assert entry.kind == "hard"
+    assert entry.signature_digest == fact_cache._owner_fact_signature_digest(home)[0]
+    assert fact_cache._OWNER_FACT_STATS["racing"] >= 1
+
+    # 之后再调用必须继续命中同一个真实结论(缓存没有把 none 固化下来)。
+    assert fact_cache._owner_fact_kind(home) == "hard"
+    assert fact_cache._OWNER_FACT_STATS["hit"] >= 1
+    _assert_cached_kind_matches_its_snapshot(fact_cache, home)
+
+
+def test_fact_cache_never_caches_unverified_snapshot_under_continuous_writes(
+    fact_cache, tmp_path
+) -> None:
+    """判定期间持续被改写: 有界重判后只返回结论、不写缓存,也不允许异常冒泡。"""
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "u1")
+    store_root = _store_root(home)
+    counter = {"n": 0}
+
+    def always_write() -> None:
+        counter["n"] += 1
+        _write_wake(store_root, f"churn-{counter['n']}")
+
+    with _FactRaceInjector(fact_cache, always_write, times=99) as injector:
+        kind = fact_cache._owner_fact_kind(home)
+
+    assert kind == "hard"
+    assert len(injector.evaluations) == 2, "无界重试是不允许的"
+    assert _cached_fact(fact_cache, home) is None
+    assert fact_cache._OWNER_FACT_STATS["unstable"] >= 1
+    # 不缓存只是"下次现读":静默后再调用必须给出正确结论。
+    assert fact_cache._owner_fact_kind(home) == "hard"
+    _assert_cached_kind_matches_its_snapshot(fact_cache, home)
+
+
+def test_fact_cache_discovers_new_wake_within_one_call_under_concurrency(
+    fact_cache, tmp_path
+) -> None:
+    """并发读者 + 真实写入者: 写入停止后下一次调用必须发现新 wake(陈旧上界 ≤1 次调用)。
+
+    并发本身只证明"不崩";这里再叠加受控竞态注入,保证**至少一次**判定跨在快照变化上,
+    否则旧实现可能整轮都没撞上竞态,用例退化成空转。
+    """
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "u1")
+    store_root = _store_root(home)
+    stop = threading.Event()
+    errors: list[BaseException] = []
+    observations: list[str] = []
+    counter = {"n": 0}
+
+    def write_one() -> None:
+        counter["n"] += 1
+        _write_wake(store_root, f"concurrent-{counter['n']}")
+        _write_policy(store_root, f"p-{counter['n']}", enabled=True, next_due_at=time.time() - 1)
+
+    def writer() -> None:
+        try:
+            for _ in range(40):
+                if stop.is_set():
+                    return
+                write_one()
+                time.sleep(0.002)
+        except BaseException as exc:  # pragma: no cover - 只用于把线程异常带回主线程
+            errors.append(exc)
+
+    def reader() -> None:
+        try:
+            for _ in range(200):
+                if stop.is_set():
+                    return
+                observations.append(fact_cache._owner_fact_kind(home))
+        except BaseException as exc:  # pragma: no cover - 同上
+            errors.append(exc)
+
+    with _FactRaceInjector(fact_cache, write_one, times=3):
+        threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        stop.set()
+
+    assert errors == []
+    assert observations, "读者线程必须真的跑过判定"
+    # 写入者已停止:最多一次调用(可能撞上竞态而只返回不缓存)之后必须给出 hard。
+    results = [fact_cache._owner_fact_kind(home) for _ in range(2)]
+    assert results[-1] == "hard"
+    assert "none" not in results[1:], f"新 wake 不得被陈旧结论压住: {results}"
+    _assert_cached_kind_matches_its_snapshot(fact_cache, home)
+
+
+# LLM: 缓存不变式(判据是"摘要相同 ⇒ 结论必须相同"):只要条目摘要等于当前磁盘摘要,
+# 它的 kind 就必须等于当前现读结论。旧实现会在竞态下留下 (none, 新状态摘要) 组合,
+# 这条断言因此能稳定判定"缓存是否绑定了一份真实存在过的快照"。
+# 函数用途: 断言事实缓存里没有与当前磁盘自相矛盾的条目。
+def _assert_cached_kind_matches_its_snapshot(fact_module, home: Path) -> None:
+    entry = fact_module._OWNER_FACT_CACHE.get(str(home))
+    if entry is None:
+        return
+    current_digest, _files = fact_module._owner_fact_signature_digest(home)
+    if entry.signature_digest != current_digest:
+        return
+    live_kind = fact_module._evaluate_owner_fact_kind(home, [])
+    assert entry.kind == live_kind, (
+        f"缓存条目与当前磁盘状态矛盾: cached={entry.kind} live={live_kind}"
+    )
 
 
 def test_fact_cache_three_state_consistency(fact_cache, tmp_path) -> None:

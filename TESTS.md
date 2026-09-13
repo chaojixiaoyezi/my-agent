@@ -1,5 +1,24 @@
 # TESTS
 
+## 2026-09-13 R269 验收反馈 A/B/C 的受控回归
+
+三条缺陷各自先用**真实函数 + 受控交错**复现，再修，再用"旧实现必红"的方式验证守卫有效性：
+
+- A（事实判定缓存的快照绑定，4 例，`test_scheduler_scan_costs.py` 第③组）：
+  `test_fact_cache_binds_kind_to_the_evaluated_snapshot[new-wake/new-policy]`（判定返回后、签名计算前写入
+  新 wake/policy：修复前返回 none 且只判 1 次，修复后返回 hard、恰好 2 次判定）、
+  `test_fact_cache_never_caches_unverified_snapshot_under_continuous_writes`（持续改写：有界重判后不缓存、
+  无异常、`unstable` 计数）、`test_fact_cache_discovers_new_wake_within_one_call_under_concurrency`
+  （真实并发读者+写入者，收尾断言"摘要相同 ⇒ 结论相同"的缓存不变式）。前 3 例在旧实现上必红。
+- B（投影命中原子化，2 例，第①组）：`test_waiting_projection_hit_survives_concurrent_lru_eviction`
+  （4 条填满 + 命中窗口内第 5 个 owner 写入触发 LRU 淘汰：旧实现必现 `KeyError`）、
+  `test_waiting_runs_is_thread_safe_across_many_owners`（6 owner × 25 轮并发，结果按 owner 隔离、缓存有界）。
+- C（坏探针回退，1 例，第②组）：`test_runtime_snapshot_falls_back_when_probe_bytes_are_unreadable`
+  （旧/坏探针字节 + 有效账本：旧实现误报 `unavailable/SchedulerStateError`，修复后与参考投影逐字一致）。
+
+审计附注：全仓 `move_to_end` 调用点均已核对，"lookup 后再单独 touch"的非原子形态只有 waiting 投影这一处。
+**不等同真机验收**：部署与真 TUI 未做（运行时仍 r261）。
+
 ## 2026-09-12 R267 scheduler status 的锁内全量解析收口
 
 先测量再修：`SchedulerRepository.runtime_snapshot()`（模型显式 `scheduler status` 的唯一实现）
