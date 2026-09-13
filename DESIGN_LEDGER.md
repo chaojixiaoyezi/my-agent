@@ -1,5 +1,20 @@
 # DESIGN LEDGER
 
+## 2026-09-13 R286 历史范围裁决与展示索引分离（修 f7bd5349 截短）+ 真实链路收口验收
+
+1. **修历史截短回归**：f7bd5349 用 `_context_bundle` 的 `scoped.messages`（`recent_limit=20` 展示索引）
+   当"哪些历史能进模型"的白名单，导致普通长会话后台切片只剩最后 20 条。现在明确分开：
+   - **权威历史** = `_uncompacted_conversation_rows` 的全部未压缩 canonical 行；
+   - **范围裁决** = 仅对显式 detached named task 生效，规则复用既有创建锚点
+     （`context_anchor_message_id` / `created_at`）与精确 lineage（`_task_context_ids`）；
+   - **展示摘要** = `context_bundle(recent_limit=20)` 只供 markdown，不再参与权限判断。
+   守卫：21/50/100 条普通历史完整继承（含首条）、40 条 display 行穿插不影响条数、detached 场景
+   仍排除锚点之后属于别任务的消息。
+2. **真实链路收口验收（f856ddd3）**：用真实 `SubAgentManager` + 真实 runtime.db 复现事故形态
+   （宿主按可续跑族只结清 attempt、run 留 created），runner 对同一 attempt 报 FAILED 不再被判冲突；
+   随后 `settle_agent_run(status=failed)` 落成 run 终态 + `agent_run.completed` 事件（父级/监督能看到收口）；
+   不存在的 attempt 仍被拒（过期保护未放宽）。
+
 ## 2026-09-13 R285 后台历史种子三态 + 任务范围 + 递归等待对称
 
 1. **读不到历史不再静默降级**：`_background_conversation_history_seed` 返回三态

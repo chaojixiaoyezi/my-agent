@@ -1,5 +1,11 @@
 # ROADMAP
 
+## R286 历史范围裁决与展示索引分离（已修，待真机验收）
+
+后台历史种子改为"完整未压缩行 + 既有 detached 范围裁决"，不再拿 recent_limit=20 展示索引当白名单
+（f7bd5349 的截短回归已修，含 21/50/100 条与 display 穿插守卫）。真实 runtime.db 链路验收：
+同一 attempt 的流不完整终态可收口为 run 终态 + agent_run.completed；过期 attempt 仍被拒。
+
 ## R284 后台上下文续接 / 等待语义 / 终态静默 / Goal 唯一性（已修，待真机验收）
 
 - 后台工作片现在与前台共用同一份 canonical 历史投影与 Compact 权威（不再只带 8000 token 摘要副本），

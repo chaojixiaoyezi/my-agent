@@ -47,6 +47,7 @@ from .models import (
     SUBAGENT_LIFECYCLE_WAKE_REASONS,
     THREAD_TASK_LINK_ACTIVE_STATUS,
     ConversationThread,
+    MessageLogEntry,
     ObservationEvent,
     WakeSignal,
 )
@@ -3026,6 +3027,95 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
 # LLM: 后台轮的 run_id 必须优先绑定明确 task_id；线程级兜底身份只能用于无任务事件，
 # 否则同一 thread 的后续任务会误复用上一任务的 AgentRun 权威链。
 # 函数用途: 把一次后台唤醒转换成主代理运行参数，并保留任务、工具和投递边界。
+# LLM: 会话历史的"范围裁决"与"展示摘要"必须分开：
+# - 权威历史 = store 里全部未压缩 canonical 行（长会话不能被展示索引截短）；
+# - 范围裁决只对 **显式 detached named task** 生效，规则完全复用既有创建锚点 + 精确 lineage；
+# - context_bundle 的 recent_limit 只是有界 operational 展示，绝不作为"哪些历史有资格进模型"的白名单。
+# 普通连续会话（无 task / 非 detached）完整继承未压缩历史。
+# 函数用途: 按既有任务范围规则过滤权威未压缩行，返回可进入模型的历史行。
+def _history_scope_rows(
+    store: ConversationStore,
+    thread: ConversationThread,
+    task_id: str,
+    rows: list[MessageLogEntry],
+) -> list[MessageLogEntry]:
+    selected_task_id = str(task_id or "").strip()
+    if not selected_task_id or not rows:
+        return list(rows)
+    try:
+        link_record = store.load_task_link(selected_task_id)
+    except Exception:
+        link_record = None
+    link = (
+        {
+            "task_id": str(getattr(link_record, "task_id", "") or ""),
+            "created_at": float(getattr(link_record, "created_at", 0.0) or 0.0),
+            "cancellation_scope": str(getattr(link_record, "cancellation_scope", "") or ""),
+            "work_kind": str(getattr(link_record, "work_kind", "") or ""),
+            "work_name": str(getattr(link_record, "work_name", "") or ""),
+            "context_anchor_message_id": str(
+                getattr(link_record, "context_anchor_message_id", "") or ""
+            ),
+        }
+        if link_record is not None
+        else None
+    )
+    if not _is_detached_named_task_link(link):
+        return list(rows)
+    state = _BackgroundContextLoad(
+        agent=None,
+        store=store,
+        thread=thread,
+        task_id=selected_task_id,
+        config=None,
+        policy_request=None,
+        load_errors=[],
+    )
+    task_ids = _task_context_ids(state)
+    anchor_id = str((link or {}).get("context_anchor_message_id") or "").strip()
+    try:
+        created_at = float((link or {}).get("created_at") or 0.0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    before_anchor = bool(anchor_id)
+    anchor_found = not anchor_id
+    selected: list[MessageLogEntry] = []
+    for row in rows:
+        metadata = row.metadata if isinstance(row.metadata, dict) else {}
+        exact_task_row = _context_row_matches_task_ids(
+            {"metadata": metadata, "task_id": str(metadata.get("conversation_task_id") or "")},
+            task_ids,
+        )
+        snapshot_row = False
+        if anchor_id and before_anchor:
+            snapshot_row = True
+            if str(getattr(row, "message_id", "") or "") == anchor_id:
+                before_anchor = False
+                anchor_found = True
+        elif not anchor_id:
+            snapshot_row = float(getattr(row, "created_at", 0.0) or 0.0) <= created_at
+        if exact_task_row or snapshot_row:
+            selected.append(row)
+    if anchor_id and not anchor_found:
+        return [
+            row
+            for row in rows
+            if _context_row_matches_task_ids(
+                {
+                    "metadata": row.metadata if isinstance(row.metadata, dict) else {},
+                    "task_id": str(
+                        (row.metadata if isinstance(row.metadata, dict) else {}).get(
+                            "conversation_task_id"
+                        )
+                        or ""
+                    ),
+                },
+                task_ids,
+            )
+        ]
+    return selected
+
+
 # LLM: 解析种子并把"历史读不到"升级成 typed 错误：读不到时不许退回有界摘要继续跑模型，
 # 那会把"读取失败"伪装成"上下文骤降"，让模型在缺历史时作答。抛错 → 本片失败、唤醒不确认、可重试。
 # 函数用途: 取得本片可用的历史种子，或抛出 BackgroundHistoryUnavailableError。
@@ -3151,14 +3241,10 @@ def _background_conversation_history_seed(
         from .native_history import provider_history_messages_from_rows
 
         rows = _uncompacted_conversation_rows(store, thread)
-        allowed = {
-            str(row.get("message_id") or "")
-            for row in _dict_rows(scoped.get("messages"))
-            if str(row.get("message_id") or "").strip()
-        }
-        # 复用同一份行选择结果：范围外的历史（detached named task 创建锚点之前的无关后续任务行）
-        # 一律不进 seed；scoped 为空就得到合法的空历史。
-        scoped_rows = [row for row in rows if str(getattr(row, "message_id", "") or "") in allowed]
+        # 权威历史 = 全部未压缩行；任务范围裁决按既有 lineage 规则在**这些行上**执行，
+        # 不能拿 context_bundle 的 recent_limit=20 展示索引当权限白名单（那会把普通会话
+        # 的长历史截成最后 20 条，重新制造上下文骤降）。
+        scoped_rows = _history_scope_rows(store, thread, scope_state.task_id, rows)
         budget = int(getattr(runtime_compact_policy(agent), "trigger_tokens", 0) or 0)
         # 只用历史投影两步（行选择 + provider 消息），不牵入 recent_artifacts 等与续接无关的投影。
         selected_rows = _gateway_conversation_history_rows(

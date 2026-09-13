@@ -18,6 +18,8 @@ import json
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
@@ -852,3 +854,79 @@ def test_background_history_seed_keeps_detached_named_task_scope(tmp_path) -> No
     )
     assert "FUTURE_UNRELATED_TASK_B" not in rendered, "detached 工作不得吞入后续别任务的消息"
     assert "创建前的普通聊天" in rendered, "创建锚点之前的历史必须保留"
+
+
+# LLM: f7bd5349 曾把 context_bundle 的 recent_limit=20 展示索引当成"哪些历史能进模型"的白名单，
+# 于是普通长会话的后台切片只剩最后 20 条（重新制造上下文骤降）。权威历史必须来自完整未压缩行，
+# 展示索引只能用于 markdown 摘要。
+# 函数用途: 验证普通连续会话超过 20/100 条时仍完整继承未压缩历史。
+@pytest.mark.parametrize("row_count", [21, 50, 100])
+def test_background_history_seed_keeps_full_uncompacted_history(tmp_path, row_count) -> None:
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+
+    runtime_module, agent, store, thread = _seed_agent(tmp_path)
+    for index in range(row_count):
+        store.append_message(
+            {
+                "thread_id": thread.thread_id,
+                "role": "user",
+                "content": f"ordinary-history-{index}",
+                "channel": "tui",
+                "metadata": {"conversation_request_id": f"req-{index}"},
+                "now": 1000.0 + index,
+            }
+        )
+
+    result = runtime_module._background_conversation_history_seed(
+        agent,
+        store,
+        thread,
+        BackgroundRunRequest(thread_id=thread.thread_id, reason="scheduled_progress_report"),
+    )
+
+    assert result.status == "ready", result.detail
+    rendered = json.dumps(list(result.seed.messages), ensure_ascii=False)
+    assert "ordinary-history-0" in rendered, "最早的历史不得被展示索引截掉"
+    assert f"ordinary-history-{row_count - 1}" in rendered
+    assert len(result.seed.messages) == row_count
+
+
+# LLM: display 行是展示投影，不属于模型历史；穿插大量 display 行不能影响权威历史条数。
+# 函数用途: 验证超过 20 条 display 行穿插时种子仍取全部非 display 未压缩行。
+def test_background_history_seed_ignores_display_rows_when_scoping(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+
+    runtime_module, agent, store, thread = _seed_agent(tmp_path)
+    for index in range(40):
+        store.append_message(
+            {
+                "thread_id": thread.thread_id,
+                "role": "user",
+                "content": f"history-{index}",
+                "channel": "tui",
+                "metadata": {"conversation_request_id": f"req-{index}"},
+                "now": 2000.0 + index,
+            }
+        )
+        store.append_message(
+            {
+                "thread_id": thread.thread_id,
+                "role": "display",
+                "content": "",
+                "channel": "internal",
+                "metadata": {"display_checkpoint": {"index": index}},
+                "now": 2000.5 + index,
+            }
+        )
+
+    result = runtime_module._background_conversation_history_seed(
+        agent,
+        store,
+        thread,
+        BackgroundRunRequest(thread_id=thread.thread_id, reason="scheduled_progress_report"),
+    )
+
+    assert result.status == "ready", result.detail
+    rendered = json.dumps(list(result.seed.messages), ensure_ascii=False)
+    assert "history-0" in rendered and "history-39" in rendered
+    assert "display_checkpoint" not in rendered
