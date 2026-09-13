@@ -147,10 +147,15 @@ class _ToolStepRequest:
     current_prompt: str
 
 
+# LLM: 收口回复和"产出它的那次出站 prompt"必须一起流转——被丢弃过 prompt 的那条路径会让
+#   主循环把上一轮的 prompt 与这一轮的回复配对（跨请求混配，usage/prompt_token 归属跟着错）。
+#   归属面只允许传递，不许在这里做任何裁决。
+# 类用途: 延迟工具调用收口的结果（轮数 + 回复 + 产出该回复的 prompt）。
 @dataclass(frozen=True)
 class _PendingDeferredToolDrainResult:
     tool_rounds: int
     final_response: ModelResponse | None = None
+    final_prompt: str = ""
 
 
 # LLM: This is one immutable candidate for reducing native history; binding and generation are
@@ -1485,11 +1490,16 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             break
         # R1-03：每轮续租执行权锁（fail-silent），活 worker 持续占有防误接管。
         _renew_exec_lock_if_held(service._agent, params)
-        tool_rounds, pending_final, drained = _pending_drain_outcome(service, params, tool_rounds)
+        tool_rounds, pending_final, drained, pending_prompt = _pending_drain_outcome(
+            service, params, tool_rounds
+        )
         if drained and pending_final is None:
             continue
         if drained:
             final_response = pending_final
+            # 归属面: 收口回复自带"产出它的那次出站 prompt"时就用它，绝不与上一轮的 prompt 混配
+            # （没有自带 prompt 的宿主合成回复保持上一轮的值，语义不变）。
+            final_prompt = pending_prompt or final_prompt
             break
         (
             final_prompt,
@@ -1596,12 +1606,12 @@ def _routed_action_step(action):
 
 
 
-# 函数用途: 把 pending 延迟工具调用的双分支收成一次裁决,返回(轮数, 最终回复, 是否命中)。
+# 函数用途: 把 pending 延迟工具调用的双分支收成一次裁决,返回(轮数, 最终回复, 是否命中, 产出回复的 prompt)。
 def _pending_drain_outcome(service, params, tool_rounds):
     pending = _drain_pending_deferred_tool_calls(service, params, tool_rounds)
     if pending is None:
-        return tool_rounds, None, False
-    return pending.tool_rounds, pending.final_response, True
+        return tool_rounds, None, False, ""
+    return pending.tool_rounds, pending.final_response, True, pending.final_prompt
 
 
 class ToolLoopService:
@@ -1666,8 +1676,9 @@ def _drain_pending_deferred_tool_calls(
         ):
             return _PendingDeferredToolDrainResult(tool_rounds)
         final_prompt, final_response = service._final_response_after_tool_limit(params, tool_rounds)
-        del final_prompt
-        return _PendingDeferredToolDrainResult(tool_rounds, final_response)
+        # 这一枪是真的模型生成：它的 prompt 必须跟着回复一起回到主循环，否则返回给调用方的
+        # prompt 会是上一轮的（跨请求配对）。这里只传递归属，不改任何裁决。
+        return _PendingDeferredToolDrainResult(tool_rounds, final_response, final_prompt)
     next_round = tool_rounds + 1
     next_round, final_response = service._run_tool_round(
         ToolRoundExecutionRequest(

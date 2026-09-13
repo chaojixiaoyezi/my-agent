@@ -1,5 +1,58 @@
 # DESIGN LEDGER
 
+## 2026-09-12 R263 门槛5 探针交付改为无损有序段落：撤掉"按正文长度二选一"并修正跨枪归属【状态：已修+单测，未部署】
+
+验收监督判定上一版（HEAD 718d7a27）的 `_provider_timeout_probe_final_response` **不是无损**：它按
+`len(Q) >= len(P)` 在「探针之前那一枪 P」与「探针那一枪 Q」之间二选一，冗长的旧承诺/错误总结会
+压掉较短的新纠正/正确结论；而且交付 P 时主循环返回的 `final_prompt` 仍属探针那一枪、`final_response`
+属上一枪，prompt/response/usage 三者跨请求混配。
+
+对照 会话运行时（`会话运行时-rs`）的做法：**合法输出按有序 item 序列保留，重试不回滚已产生的 item**——
+- `core/src/stream_events_utils.rs:288-380` `handle_output_item_done`：每个 `OutputItemDone` 立即
+  `record_completed_response_item`（写 history + 发 `ItemCompleted`），不等整轮结束。
+- `core/src/context_manager/history.rs:125-139` `record_items`：只 push，不去重、不替换。
+- `core/src/session/turn.rs:2238-2248`：流错误（`会话运行时ErrorDetails::Stream` 可重试，`protocol/src/error.rs:383`）
+  直接带错退出，**已 record 的 item 留在有序序列里**；`core/src/session/turn.rs:1329-1400`
+  `run_sampling_request` 重试用 `sess.clone_history().for_prompt(...)` 重建 prompt，因此重试那一枪
+  是在"P 已在历史里"的上下文上再产出 Q，两条都在。
+- 归属同类事实：`ItemStarted/ItemCompleted` 带 `thread_id/turn_id/item.id`
+  （`protocol/src/protocol.rs:1831-1856`），`RawResponseCompletedEvent.response_id + token_usage`
+  按**每次响应**记用量（`protocol/src/protocol.rs:1826-1829`，落账在 `session/turn.rs:2488-2510`），
+  而不是挂在某一轮指针上。
+
+落到本仓库（交付通道是单条 `ModelResponse.text`，不是 item 流）：
+- `_provider_timeout_probe_delivery`：两枪的**合法正文按到达顺序**用空行作为段落边界投影成交付正文，
+  逐字不改；只有该段自己的结构字段能排除它——`truncated`（本就不属于合法终答，仓库既有截断契约）、
+  空正文（没有字符可投影）；**没有长度比较、没有语义判定、没有"哪一段更像终答"**。
+- 交付对象只从**当前轮**响应派生（`replace(terminal, text=...)`），所以主循环返回的
+  `final_prompt`（本轮出站 prompt）、`final_response`、`usage` 三者来源结构性同一，跨枪混配不可能出现。
+- 段落来源（turn_id + 序号 + 用量 + 是否投影 + 结构化排除原因）写进
+  `live_archive_state["_assistant_delivery_segments"]`（探针登记同时记下 P 自己的来源轮次）。
+- `continue` 时前导段按原来源续挂（`_carry_provider_timeout_probe_segment`）：截断续跑/协议修复等
+  中间态不再把"已产生但还没交付"的段落吞掉；工具调用分支保持既有契约（工作继续，终答由后续轮给出）。
+- 空正文 nudge 增加一个结构条件：手上已有前导段时不再多买两枪（交付正文必然非空）。
+- 同链路第二处同类归属面（非探针路径）：`_tool_loop_service` 延迟工具收口的工具轮上限回复，其
+  prompt 原来被 `del final_prompt` 丢掉、返回给调用方的 prompt 是空的；现在随结果一起回传。
+
+未动：门槛5 四闸门、`_PROVIDER_TIMEOUT_RESUME_LIMIT=1`、探针指令文案、主循环裁决与工具执行语义、
+截断/协议/交付合同等既有闸门；探针登记的"紧邻"fail-closed 规则也不动（预算用尽且中间隔了超时物理
+尝试的那一格仍按原语义交付原响应，因为那一刻只剩一条候选）。
+
+证据：`test_timeout_recovery_delivery.py`（新增 8 例：(a) 长错误总结+短正确结论两条都保留、顺序与来源
+正确；(b) 承诺+完整答复两条都保留；(c) 探针带工具调用照旧执行、两枪不串；(d) prompt/response/usage
+同源（用量取自终答那一枪、owner=终答轮）；(d2) 延迟工具收口的 prompt 归属；(e) 零工具轮/预算用尽轮语义
+不变；另含截断终答与前导段续挂两例）；`test_provider_timeout_*.py` 四套 47 例、`test_truncated_output_resume`、
+`test_native_truncated_write_recovery` 全绿（改动的旧断言逐条在验收报告里说明为什么旧断言本身是错的）。
+
+未做/风险：①两枪的正文现在都会出现在交付正文里（这是"不丢弃"的直接代价，包含冗余的承诺句）；
+②探针那一枪的 prompt 不含 P 的正文（P 未回灌进 IR history），因此 Q 是在没看到 P 的条件下生成的
+—— 这是既有行为，本轮不动模型请求内容；③跨进程 resume 后探针登记与交付账本都不持久化（只影响
+一次轮内交付，不会多买枪）；④主循环的生命周期回执（未收口子代理/命名工作/审计准备）会接管交付并
+`continue`，那一格本轮交付（含前导段）不进入用户可见终答 —— 与既有"plain final 被生命周期回执接管"
+同源，属主循环裁决面，本轮按授权未动。**本轮只有单测与 fake 后端端到端，未部署、未做真机验收。**
+
+# DESIGN LEDGER
+
 ## 2026-09-12 R262 A 线冷帧：净化 transl 表 + ASCII 段批处理 + cluster 宽度缓存【状态：已修+配对实测，未部署】
 
 - 基线（HEAD 85a460b7，2000 块 / width 120）：整帧冷帧 294.0ms，其中 markdown-it parse 42.6%、

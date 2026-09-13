@@ -122,12 +122,24 @@ _TRUNCATED_OUTPUT_RESUME = (
 #   各自独立计数，任何一方的预算都不能吃掉另一方；门槛5 的重试资格一行都不放宽——
 #   这里只处理「重试已经结束之后」，而且只重发模型调用 + 一条宿主指令，绝不重放工具。
 # 续跑那一枪(R1 残留边界)只作**探针**：它只回答「还有没有真实工具工作要继续」。
-#   放行前把「被重试救回的那一枪」寄存在生成层(arm_provider_timeout_resume_probe)；
-#   探针零工具调用 = 没有工具工作要继续 -> 走无损交付 tie-break（见
-#   _provider_timeout_probe_final_response）：在那一枪与该枪之间原样交付正文更长的一条；
-#   探针带工具调用 = 真实工作继续 -> 丢弃寄存，走既有工具执行路径，tie-break 不介入。
+#   放行前把「被重试救回的那一枪」寄存在生成层(arm_provider_timeout_resume_probe, 连同它自己
+#   的来源 turn_id/序号)；探针零工具调用 = 没有工具工作要继续 -> 走**无损交付**（见
+#   _provider_timeout_probe_delivery）：两枪的合法正文按到达顺序合成同一次交付，任何一段都
+#   不被丢弃、不被长度比较、不被语义判定；交付对象只从当前轮响应派生，所以
+#   prompt/response/usage 三者的 request/turn 来源结构性同一。
+#   探针带工具调用 = 真实工作继续 -> 走既有工具执行路径，登记被消费但不参与交付投影。
 # 常量用途: 超时探针/续跑回灌给模型的宿主指令（至多一次）。
 _PROVIDER_TIMEOUT_RESUME_LIMIT = 1
+# 交付段落事实（结构性编码，不是正文匹配）：一段正文的来源，以及阻止它进入终答正文的客观原因。
+# 只有这两种原因会排除一段——两者都是该段自己的结构字段（供应商截断标志 / 空正文），
+# 与另一段写了什么、写了多长完全无关；宿主不得再引入任何"哪一段更像终答"的判断。
+_PRIOR_SEGMENT_ORIGIN = "provider_timeout_probe_prior"
+_TERMINAL_SEGMENT_ORIGIN = "terminal_response"
+_SEGMENT_TRUNCATED = "output_limit_truncated"
+_SEGMENT_EMPTY_TEXT = "empty_text"
+# 段间分隔符：会话运行时 用两个独立 assistant item 交付两段，本仓库的交付通道是单条正文，
+# 因此用空行作为段落边界投影（只加边界，不改写任何一段的字符）。
+_DELIVERY_SEGMENT_SEPARATOR = "\n\n"
 _PROVIDER_TIMEOUT_RESUME = (
     "[provider-timeout-resume]\n"
     "上一条回复之前，本轮模型调用已经被供应商超时打断过一次并重试过。"
@@ -254,20 +266,31 @@ class _NoToolCallsRequest:
     response: object
     counters: ToolLoopRepairCounters
     has_protected_marker: bool
-    # 门槛5 探针的回退候选: 由入口 tool_loop_response_decision 在本次裁决里一次性取出
-    # （生成层按「登记序号紧邻当前 model turn」判定）。只有「本次响应零工具调用」这一支才会
-    # 拿它参与无损交付 tie-break（P/Q 取更长者）；其余分支(工具调用/协议违规/生命周期终态)
-    # 只消费不使用，工具照既有路径执行。
-    probe_rollback_response: object | None = None
+    # 门槛5 探针的前导段落: 由入口 tool_loop_response_decision 在本次裁决里一次性取出
+    # （生成层按「登记序号紧邻当前 model turn」判定），是「已产生但还没交付」的上一枪正文
+    # 及其来源轮次（生成层 ProviderTimeoutProbeRollback: response + turn_id + sequence）；
+    # 只有「本次响应零工具调用、且走到终答交付」这一支才会把它按顺序投影进交付正文。
+    # 工具调用/协议修复/生命周期终态等分支只消费不使用，工具照既有路径执行。
+    probe_rollback: object | None = None
 
 
 def tool_loop_response_decision(
     request: ToolLoopResponseDecisionRequest,
 ) -> ToolLoopResponseDecision:
-    # 门槛5 探针: 任何一次裁决都消费掉上一枪留下的回退候选——登记的生命周期恰好是「探针那一枪」
-    # 这一个 model turn。工具调用 / 协议违规 / 生命周期终态都只消费不使用(工具照旧执行)，
-    # 只有「零工具调用」那一支才拿它参与无损交付选择；这里不读 response.text 做任何判定。
+    # 门槛5 探针: 任何一次裁决都消费掉上一枪留下的前导段落登记——登记的生命周期恰好是
+    # 「探针那一枪」这一个 model turn。这里不读 response.text 做任何判定。
     probe_rollback = _take_provider_timeout_probe_rollback(request.params)
+    decision = _decided_response(request, probe_rollback)
+    return _carry_provider_timeout_probe_segment(request.params, probe_rollback, decision)
+
+
+# LLM: 裁决本体(与入口分开只为让"消费登记 -> 裁决 -> 未交付则续挂前导段落"这条生命周期
+#   只有一个出口); 本函数不碰 live_archive_state 上的探针登记。
+# 函数用途: 按工具调用/协议/终答三类结构事实给出本轮裁决。
+def _decided_response(
+    request: ToolLoopResponseDecisionRequest,
+    probe_rollback: object | None,
+) -> ToolLoopResponseDecision:
     has_protected_marker = contains_protected_tool_marker(request.response.text)
     if has_protected_marker:
         request.params.tool_context.append(
@@ -306,9 +329,35 @@ def tool_loop_response_decision(
     )
 
 
+# LLM: 「已产生但还没交付」的段落不允许被中间态吞掉: 本次裁决只是 continue(截断续跑/协议修复/
+#   空正文 nudge/交付合同回灌等, 本轮还没交付任何东西)时, 按**原来源**把它重新挂到当前序号上,
+#   交给下一次真正的交付; 这样"无损"不依赖于"下一次一定立刻收口"。
+#   工具调用(run_tools)不续挂: 真实工作继续, 该段落已作为流式正文到达用户, 终答由后续轮给出
+#   —— 这是既有契约, 与"两枪语义不串"一致。
+#   不新增任何模型采样、不改任何修复计数、不改门槛5 的四个闸门。
+# 函数用途: 裁决为 continue 时把前导段落按原来源重新登记, 其余情况原样返回裁决。
+def _carry_provider_timeout_probe_segment(
+    params: object,
+    probe_rollback: object | None,
+    decision: ToolLoopResponseDecision,
+) -> ToolLoopResponseDecision:
+    if probe_rollback is None or decision.action != "continue":
+        return decision
+    from ..tool_model_generation import arm_provider_timeout_resume_probe
+
+    arm_provider_timeout_resume_probe(
+        params,
+        getattr(probe_rollback, "response", None),
+        source=probe_rollback,
+    )
+    return decision
+
+
 # LLM: 惰性导入(与 _provider_timeout_resume_decision 同一写法)避免模块级循环依赖；判定与
 #   清除都在生成层(序号来源唯一)，裁决层只是消费者，不自己解析 live_archive_state 的字段。
-# 函数用途: 取出并清空「探针之前那一枪的响应对象」，供「探针零工具调用」分支原样交付。
+#   返回的是「响应对象 + 它自己的来源轮次」的结构化记录——来源必须随段落一起流转，否则交付
+#   账本会把上一枪的正文记到当前轮名下。
+# 函数用途: 取出并清空「探针之前那一枪的响应对象与来源」，供终答交付按顺序合成。
 def _take_provider_timeout_probe_rollback(params: object) -> object | None:
     from ..tool_model_generation import take_provider_timeout_resume_probe
 
@@ -830,8 +879,12 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         # "You just executed tool calls but returned an empty response... continue")。
         # 执行过工具后模型空正文无工具调用 = 静默收口:直接 break 会让用户收不到
         # 任何回复(USER_REPLY_UNAVAILABLE)。有界重试(默认 2 次)后仍空 → 诚实失败。
+        # 例外(结构性): 上一枪的合法正文还在手上(probe_rollback) 时交付正文必然非空
+        # ——交付会把那一段按顺序投影进来(见 _provider_timeout_probe_delivery)，
+        # 所以这里不需要再买两枪 nudge；这不读正文内容，只看登记是否存在。
         if (
             not response_text
+            and request.probe_rollback is None
             and list(getattr(request.params, "executed_tools", None) or [])
             and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIRS
         ):
@@ -869,7 +922,15 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
                 runtime_reason="MODEL_RESPONSE_TRUNCATED",
                 runtime_source="tool_loop",
             )
-        return ToolLoopResponseDecision("break", final_response, [], request.counters)
+        # 交付出口（唯一）：若上一枪还有"已产生但没交付"的合法正文，按到达顺序无损并进这次交付；
+        # 交付对象仍取自本轮，因此 final_prompt/final_response/usage 的来源同一。没有前导段落时
+        # 原样返回 final_response（对象同一，零开销）。
+        return ToolLoopResponseDecision(
+            "break",
+            _provider_timeout_probe_delivery(request, final_response),
+            [],
+            request.counters,
+        )
     if request.counters.protected_marker_repairs < 1:
         return ToolLoopResponseDecision(
             "continue", None, [], _inc_protected_marker(request.counters)
@@ -892,16 +953,15 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
 #   正文更长的那一条（对象同一、逐字不变、runtime_status 不伪造，另一条不交付）。
 #   探针带工具调用则登记已在入口被消费掉，工具照既有路径执行，tie-break 不介入。
 # 函数用途: 本轮「可恢复供应商失败 + 确实做过工具工作 + 模型零工具调用只承诺」时给出
-# 至多一次轮内续跑；或把探针那一枪的判定收敛成「原样交付两条候选里更完整的那一条」。
+# 至多一次轮内续跑；前导段落还在手上时本轮就是交付裁决，不再买新枪。
 def _provider_timeout_resume_decision(
     request: _NoToolCallsRequest,
     response_text: str,
 ) -> ToolLoopResponseDecision | None:
-    probe_final = _provider_timeout_probe_final_response(request)
-    if probe_final is not None:
-        # 探针零工具调用: 不采用它做「继续工作」，只在 P/Q 之间做一次无损交付选择（更长者）。
-        # 计数不再 +1——探针本身在放行时已经计过一次，LIMIT=1 的语义不变。
-        return ToolLoopResponseDecision("break", probe_final, [], request.counters)
+    if request.probe_rollback is not None:
+        # 上一枪的合法正文还没交付: 本轮是**交付裁决**, 由 plain final 路径按顺序合成交付
+        # （不在这里二选一），因此不买新枪、计数也不 +1——探针在放行时已经计过一次，LIMIT=1 不变。
+        return None
     if not response_text:
         # 空正文属于既有 empty-text nudge 的预算，两条路径不互相记账。
         return None
@@ -924,42 +984,115 @@ def _provider_timeout_resume_decision(
     )
 
 
-# LLM: 交付层 tie-break —— 只决定「原样交付哪一条响应对象」，绝不参与状态、权限、验收、
-#   路由或完成度判定，也不改写任何一条的正文/runtime_status。
-#   为什么需要它：探针零工具调用时，两条候选 P（探针之前那一枪）与 Q（探针那一枪）在结构化
-#   层面完全不可区分——都是零工具调用、都通过了同一套终态/受保护标记闸门；但用户真正想要的
-#   「完整答复」在两种真实形状里分别是 P 和 Q：
-#     形状一(本边界要修的 bug): P=完整终答, Q=「已完成，无需继续。」  -> 应交付 P
-#     形状二(旧契约保住的路径): P=只承诺「我重新来」, Q=用文本把剩下的活干完 -> 应交付 Q
-#   没有任何结构化字段能把两者分开，于是用长度做无损代理：取正文更长的一条，两种形状都命中
-#   完整答复，另一条不交付。等长时保留既有契约（探针那一枪 = 更晚、上下文更多的一枪）。
-#   已知局限（必须知情）：长度只是代理指标，「冗长的道歉/复述」可能比真正的终答更长；因此它
-#   只作用于上面这一条交付选择，不得外溢到任何其它判定；也不引入任何「任务是否完成」判据。
-# 函数用途: 在探针之前那一枪与探针那一枪之间选一条原样交付（更长者；等长时探针那一枪）。
-def _provider_timeout_probe_final_response(request: _NoToolCallsRequest) -> object | None:
-    candidate = request.probe_rollback_response
-    if candidate is None:
-        return None
-    # P 自身被输出上限截断 = 已知不完整，不能当终答静默交付（与 _no_tool_calls_decision 里
-    # truncated 的既有语义同源）；此时退回原语义处理 Q，它仍有自己的截断续跑预算。
-    if bool(getattr(candidate, "truncated", False)):
-        return None
-    probe = request.response
-    if bool(getattr(probe, "truncated", False)):
-        # Q 已知被截断：不选它——截断续跑预算不能被这条交付选择绕过，只交付完整的 P。
-        return candidate
-    if _delivery_text_length(probe) >= _delivery_text_length(candidate):
-        # >= 而不是 >：等长是真正的信息平局，此时保留既有契约——交付更晚、上下文更多的那一枪
-        # （探针那一枪）。探针正文为空(0)时 P 必然更长得胜，不会把空正文交付出去。
-        return probe
-    return candidate
+# LLM: 交付层**无损合成**（取代旧的"按正文长度二选一"）：
+#   ① 把「探针之前那一枪」(probe_rollback, 已产生但还没交付) 与「这一枪」(terminal) 各自
+#      按自己的结构字段判定是否可投影: 被输出上限截断的段、空正文段不投影进终答正文
+#      （截断段本就不属于合法终答, 是仓库既有截断契约; 空段没有字符可投影），
+#      其余情况一律投影——**不做任何长度比较，不读正文做语义判定，不因内容丢弃任何一段**。
+#   ② 两段都投影时按**到达顺序**（先发生的在前）用空行作为段落边界拼成同一次交付；
+#      每段逐字不改（只加段间分隔符，不改写任何一段的字符）。
+#   ③ 交付对象只从 terminal 派生（replace 只换 text）：runtime_status/runtime_reason/
+#      usage/backend/stop_reason 全部是**本轮那次 request** 的，因此主循环返回的
+#      final_prompt（本轮出站 prompt）、final_response、usage 的 request/turn 来源结构性同一，
+#      不可能再出现"prompt 属探针那一枪、response 属上一枪"的跨枪混配。
+#   ④ 每段的来源（turn_id + 序号 + 用量）与顺序登记成结构化交付账本，供审计/验收读取；
+#      账本不参与裁决。被排除的段也记下来（含结构化排除原因），排除事实同样不被隐藏。
+#   ⑤ 只有 terminal 一段可投影时原样返回 terminal（对象同一），不制造无意义的副本。
+# 已知边界（必须知情，不是语义判定）：生命周期终态响应(runtime_status != ok)与宿主自己写的
+#   阻断文案不是"已产生的合法答复"，它们走各自分支，不参与本合成；那些分支里前导段落已作为
+#   流式正文到达用户。
+# 函数用途: 把「探针之前那一枪」的合法正文按顺序并进本轮的终答交付。
+def _provider_timeout_probe_delivery(request: _NoToolCallsRequest, terminal: object) -> object:
+    rollback = request.probe_rollback
+    if rollback is None:
+        return terminal
+    from ..tool_model_generation import (
+        current_model_turn_source,
+        record_assistant_delivery_segments,
+    )
+
+    current = current_model_turn_source(request.params)
+    rows = _delivery_segment_rows(rollback, terminal, current)
+    delivered = [row for row in rows if row["delivered"]]
+    record_assistant_delivery_segments(
+        request.params,
+        owner_turn_id=str(current.get("turn_id") or ""),
+        segments=rows,
+    )
+    if not delivered:
+        # 两段都不可投影（截断/空正文）: 保持既有语义——交付 terminal 自己（含它的 typed 截断事实）。
+        return terminal
+    if len(delivered) == 1 and delivered[0]["origin"] == _TERMINAL_SEGMENT_ORIGIN:
+        return terminal
+    return replace(
+        terminal,
+        text=_DELIVERY_SEGMENT_SEPARATOR.join(str(row["text"]) for row in delivered),
+    )
 
 
-# LLM: 唯一允许读正文长度的地方，且只服务上一条交付 tie-break；不解析、不匹配、不做语义判断，
-#   不把长度写进任何状态/门/计数。缺 text 字段时按 0 处理（fail-safe：交给既有契约那条）。
-# 函数用途: 取一条响应正文的长度，用作交付 tie-break 的代理指标。
-def _delivery_text_length(response: object) -> int:
-    return len(str(getattr(response, "text", "") or ""))
+# LLM: 段落可投影性只看该段自己的两个结构字段（truncated / 正文是否为空），与另一段无关：
+#   任何"哪一段更好/更长/更像终答"的判断都被禁止——缺结构化证据时宿主不得声称能区分完成度，
+#   也不得据此丢掉任何一条已产生的合法答复。空正文判定沿用既有 empty-text nudge 的 strip 口径。
+# 函数用途: 给出一个响应段的结构化排除原因（可投影时返回空串）。
+def _segment_exclusion_reason(response: object) -> str:
+    if bool(getattr(response, "truncated", False)):
+        return _SEGMENT_TRUNCATED
+    if not str(getattr(response, "text", "") or "").strip():
+        return _SEGMENT_EMPTY_TEXT
+    return ""
+
+
+# LLM: 段落行只取叶子字段（正文、用量、结构标志），不序列化活对象、不递归枚举；交付账本与
+#   终答正文用的是同一份逐字文本，因此"保留了什么、排除了什么"可逐条核对。
+# 函数用途: 把两段候选整理成有序（到达顺序）的交付段落行。
+def _delivery_segment_rows(
+    rollback: object,
+    terminal: object,
+    current: dict,
+) -> list[dict[str, object]]:
+    prior = getattr(rollback, "response", None)
+    rows = [
+        _delivery_segment_row(
+            order=0,
+            origin=_PRIOR_SEGMENT_ORIGIN,
+            response=prior,
+            turn_id=str(getattr(rollback, "turn_id", "") or ""),
+            sequence=int(getattr(rollback, "sequence", 0) or 0),
+        ),
+        _delivery_segment_row(
+            order=1,
+            origin=_TERMINAL_SEGMENT_ORIGIN,
+            response=terminal,
+            turn_id=str(current.get("turn_id") or ""),
+            sequence=int(current.get("sequence") or 0),
+        ),
+    ]
+    return rows
+
+
+# LLM: 单段行 = 一次交付里"这一段是谁产生的、排第几、有没有被投影进正文"的最小结构化事实；
+#   usage 只复制叶子字典（供应商用量是普通数据，不是活对象）。
+# 函数用途: 构造一条交付段落行。
+def _delivery_segment_row(
+    *,
+    order: int,
+    origin: str,
+    response: object,
+    turn_id: str,
+    sequence: int,
+) -> dict[str, object]:
+    reason = _segment_exclusion_reason(response)
+    usage = getattr(response, "usage", None)
+    return {
+        "order": order,
+        "origin": origin,
+        "turn_id": turn_id,
+        "sequence": sequence,
+        "delivered": not reason,
+        "excluded_reason": reason,
+        "text": str(getattr(response, "text", "") or ""),
+        "usage": dict(usage) if isinstance(usage, dict) else {},
+    }
 
 
 def _is_runtime_status_response(response: object) -> bool:

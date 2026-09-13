@@ -1,5 +1,30 @@
 # TESTS
 
+## 2026-09-12 R263 门槛5 探针的无损交付（撤掉长度二选一）
+
+新增 `agent_py_agent/tests/test_timeout_recovery_delivery.py` 8 例：两条已产生的合法答复按到达顺序
+逐字保留（长错误总结 + 短正确结论、承诺 + 完整答复都不得择一丢弃）、探针带工具调用照旧执行且两枪不串、
+prompt/response/usage 同属终答那一轮（用量取自终答那一枪、账本 owner = 终答轮）、延迟工具收口的
+prompt 归属、零工具执行轮与预算用尽轮语义不变、截断终答与前导段续挂。
+
+本轮 focused 回归命令（结果：全部通过）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_provider_timeout_acceptance.py \
+  agent_py_agent/tests/test_provider_timeout_continuation.py \
+  agent_py_agent/tests/test_provider_timeout_resume_narrowing.py \
+  agent_py_agent/tests/test_provider_timeout_resume_probe.py \
+  agent_py_agent/tests/test_timeout_recovery_delivery.py \
+  agent_py_agent/tests/test_truncated_output_resume.py \
+  agent_py_agent/tests/test_native_truncated_write_recovery.py -q
+```
+
+相关面回归另有 159 例通过（`test_response_decision_native_tool_use`、`test_deliverable_closeout_gate`、
+`test_no_action_gate_round`、`test_repeated_tool_failure_halt`、`test_tool_model_generation`、
+`test_timeout_gate5_retry`、`test_timeout_gate1_accounting`、`test_timeout_gate2_stages`、
+`test_timeout_budget_locked`、`test_subagent_runtime_guards`、`test_tool_context_ptl_retry`、
+`test_run_cost_ledger`）。全部为 fake 后端/本地夹具，**不等同真机验收**；真机验收未做。
+
 ## 2026-09-12 会话模型隔离、完整显示与准确终态
 
 本轮合并后重点回归：`test_display_archive.py`、`test_gateway_thinking_archive.py`、

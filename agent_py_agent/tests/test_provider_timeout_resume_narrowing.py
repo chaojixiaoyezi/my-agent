@@ -387,9 +387,9 @@ def test_no_tool_work_round_never_buys_an_extra_sample(monkeypatch, tmp_path) ->
 def test_tool_work_timeout_rescue_still_resumes_exactly_once(monkeypatch, tmp_path) -> None:
     """(b) 有工具执行 + 超时救回 + 零工具调用承诺 -> 真实循环里恰好放行 1 次探针。
 
-    R1 残留边界后这一枪是**探针**：它零工具调用 = 没有工具工作要继续，交付走无损 tie-break
-    （原样交付 P/Q 中正文更长的一条，等长时探针那一枪）。本剧本两句等长，故交付文本与旧契约
-    相同；采样次数、工具轮、工具副作用次数、指令出现位置等不变式全部不变。
+    R1 残留边界后这一枪是**探针**：它零工具调用 = 没有工具工作要继续，交付把两枪的合法正文
+    按到达顺序无损合成（承诺在前、探针那一枪在后）。采样次数、工具轮、工具副作用次数、
+    指令出现位置等不变式全部不变。
     """
     run = _drive_loop(
         monkeypatch,
@@ -402,8 +402,8 @@ def test_tool_work_timeout_rescue_still_resumes_exactly_once(monkeypatch, tmp_pa
     assert run.params.executed_tools == ["read_file"], "工作迹象来自产品自己的工具账本"
     assert run.tool_round_calls == [1], "整轮只进入一次工具轮"
     assert run.executed_one_calls == 1 and run.tool.handler_calls == 1, "工具副作用恰好一次"
-    assert len(_PROMISE) == len(_FINAL), "前提：本剧本命中等长 tie 默认"
-    assert run.response.text == _FINAL, "等长 tie 默认 = 探针那一枪（有工作的轮按原语义收口）"
+    assert len(_PROMISE) == len(_FINAL), "前提：本剧本两段等长"
+    assert run.response.text == f"{_PROMISE}\n\n{_FINAL}", "两段按到达顺序无损交付，长度不参与"
 
     with_instruction = [
         index

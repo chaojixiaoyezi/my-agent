@@ -9,13 +9,14 @@
 - 探针判定不变：①本 model turn 被生成层登记为「发生过被重试救回的供应商超时」、②本 run 工具账本
   ``executed_tools`` 非空、③这一枪零工具调用。三条都是结构化事实，门槛5 的四个 fail-closed 重试
   闸门一行未动。
-- 探针那一枪**零工具调用** = 没有任何工具工作要继续 -> 走**无损交付 tie-break**：在
-  {P = 探针之前那一枪, Q = 探针那一枪} 之间原样交付**正文更长的那一条**，另一条不交付；两条都
-  是原对象、逐字不改、``runtime_status`` 不伪造。两种真实形状（P 完整终答 / Q 承诺，与
-  P 承诺 / Q 完整终答）在结构化层面不可区分，只有正文长度能作无损代理（见
-  ``response_decision._provider_timeout_probe_final_response`` 的已知局限注释）。
+- 探针那一枪**零工具调用** = 没有任何工具工作要继续 -> 走**无损交付**：{P = 探针之前那一枪,
+  Q = 探针那一枪} 两条已产生的合法答复**按到达顺序合成为有序段落**（逐字投影，只加段落边界），
+  任何一段都不因正文长短/内容被丢弃，宿主也不读正文做语义判定。只有该段自己的结构字段能把它
+  排除出终答正文：该段被供应商输出上限截断（本就不属于合法终答）、该段正文为空（没有字符可投影）；
+  被排除的段仍以结构化原因记进交付账本（``live_archive_state["_assistant_delivery_segments"]``）。
+  交付对象只从**当前轮**响应派生，因此主循环返回的 prompt/response/usage 来源同一。
 - 探针那一枪**带工具调用** -> 登记在入口被消费掉，工具按既有工具轮路径真的执行，工作继续；
-  tie-break 不介入。
+  前导段不参与终答投影（真实工作继续时终答由收口那一枪给出）。
 - 有界：``_PROVIDER_TIMEOUT_RESUME_LIMIT`` 仍为 1，与截断续跑、其它修复计数互不吃预算；
   探针预算用尽后按原语义交付原响应。
 - 不重放工具：探针只追加一条宿主指令并 continue，``executed_tools`` 与 IR 工具结果都不得新增。
@@ -55,16 +56,18 @@ from agent_py_agent.tests._tool_runtime_harness import (
 
 # 供应商超时预算必须极小，才能让「挂起」的 fake 后端被墙钟保护拿下（与产品默认值无关）。
 _TINY_REQUEST_TIMEOUT = 0.02
-# 重试那一枪给出的完整终答（长）：R1 残留边界里被探针正文顶掉、用户再也看不到的那句话。
+# 重试那一枪给出的完整终答（长）：在探针那一枪之前产生，必须作为前导段落原样保留。
 _COMPLETE_ANSWER = "notes.md 里的配置项已经核对过：enable_tools 默认开启，剩余工作全部做完。"
-# 探针那一枪的短正文：结构化上「零工具调用」，长度上明显短于完整终答 -> 交付 P。
+# 探针那一枪的短正文：结构化上「零工具调用」，长度明显短于完整终答 -> 仍按序一并交付（长度不参与）。
 _PROBE_STUB = "已完成。"
-# 只承诺不动作的正文：形状二的 P（此时探针那一枪才是完整答复 -> 交付 Q）。
+# 只承诺不动作的正文：形状二的 P（此时探针那一枪才把活干完）。
 _PROMISE = "在的，刚才超时了，我重新来。"
 # 形状二的 Q：用文本把剩余活干完（长于 _PROMISE）。
 _CONTINUATION_ANSWER = "已从断点继续：read_file 的结果已核对，报告已写进 notes.md。"
-# 旧契约剧本用的等长正文（tie 默认 = 探针那一枪）。
+# 等长剧本用的收口正文（长度相等同样不构成"择一"理由）。
 _FINAL = "已从断点继续并完成剩余工作。"
+# 交付段落的边界：会话运行时 用两个 assistant item 交付两段，本仓库单条正文用空行投影。
+_SEGMENT_SEPARATOR = "\n\n"
 _SECOND_PROMISE = "第二次：我又只回了一句承诺。"
 _READ_ARGS = {"path": "notes.md"}
 _SECOND_READ_ARGS = {"path": "other.md"}
@@ -241,6 +244,21 @@ def _probe_entry(params: object) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
+# LLM: 交付账本是「这次交付由哪些段落按什么顺序合成」的唯一结构化记录；测试只读它，不解析正文语义。
+# 函数用途: 读当前 params 上的交付段落账本（无则 None）。
+def _delivery_ledger(params: object) -> dict | None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return None
+    entry = state.get("_assistant_delivery_segments")
+    return entry if isinstance(entry, dict) else None
+
+
+# 函数用途: 按既有交付投影规则把两段拼成期望正文（只加边界，不改写任何一段）。
+def _ordered_delivery(*texts: str) -> str:
+    return _SEGMENT_SEPARATOR.join(texts)
+
+
 # LLM: 一次真实工具轮循环的全部可观测事实；测试只读这些结构字段，不读模型正文做判定。
 # 类用途: 承载真实 _execute_tool_loop_service 跑完后的账本/时序证据。
 @dataclass
@@ -340,13 +358,17 @@ def _decide(params: ToolLoopExecuteParams, response: object, counters: ToolLoopR
     )
 
 
-# ------------------------------------------- (a) 探针零工具调用 -> 交付重试那一枪完整终答
+# ------------------------------------------- (a) 探针零工具调用 -> 两枪按序无损交付
 
 
 def test_probe_zero_tool_calls_delivers_the_retry_shot_answer_verbatim(
     monkeypatch, tmp_path
 ) -> None:
-    """(a) 工具 → 超时 → 重试给出完整终答 → 探针零工具调用 -> 交付那一枪原文、零额外副作用。"""
+    """(a) 工具 → 超时 → 重试给出完整终答 → 探针零工具调用 -> 两段按到达顺序交付、零额外副作用。
+
+    旧断言 ``run.response.text == _COMPLETE_ANSWER`` 本身是错的：它把"交付必须等于其中一条候选"
+    当成了正确性，于是长度 tie-break 才能把另一条合法答复丢掉。新契约下交付正文是两段的有序投影。
+    """
     run = _drive_loop(
         monkeypatch,
         tmp_path,
@@ -355,8 +377,15 @@ def test_probe_zero_tool_calls_delivers_the_retry_shot_answer_verbatim(
     )
 
     assert run.backend.calls == 4, "工具采样 + 超时 + 重试 + 探针：探针仍然发生（只多买一枪）"
-    assert run.response.text == _COMPLETE_ANSWER, "探针正文不得顶掉重试那一枪的完整终答"
-    assert _PROBE_STUB not in run.response.text, "另一条候选不参与交付"
+    assert run.response.text == _ordered_delivery(_COMPLETE_ANSWER, _PROBE_STUB), (
+        "两条合法答复都保留：先产生的在前，探针那一枪在后"
+    )
+    assert run.response.text.startswith(_COMPLETE_ANSWER), "前导段逐字在最前面，没有被改写或截断"
+    ledger = _delivery_ledger(run.params)
+    assert ledger is not None
+    assert [row["text"] for row in ledger["segments"]] == [_COMPLETE_ANSWER, _PROBE_STUB]
+    assert [row["delivered"] for row in ledger["segments"]] == [True, True]
+    assert ledger["segments"][0]["sequence"] < ledger["segments"][1]["sequence"], "顺序 = 产生顺序"
     assert run.response.runtime_status == "ok", "不得伪造终态（runtime_status 原样）"
     assert run.tool_round_calls == [1], "探针绝不进入工具执行路径"
     assert run.executed_one_calls == 1 and run.tool.handler_calls == 1, "工具副作用恰好一次"
@@ -472,7 +501,11 @@ def test_round_without_executed_tools_never_buys_a_probe(monkeypatch, tmp_path) 
 
 
 def test_probe_delivery_is_text_independent(monkeypatch, tmp_path) -> None:
-    """(e) 把探针正文换成任意其它文本（含英文、空承诺、乱码），交付结果完全一致。"""
+    """(e) 把探针正文换成任意其它文本（含英文、空承诺、乱码），交付结构完全一致。
+
+    旧断言 ``run.response.text == _COMPLETE_ANSWER`` + ``probe_text not in ...`` 本身是错的：
+    它要求"探针正文永不出现"，那正是"丢掉一条合法答复"的旧契约。
+    """
     for index, probe_text in enumerate(_PROBE_TEXT_VARIANTS):
         run = _drive_loop(
             monkeypatch,
@@ -482,14 +515,19 @@ def test_probe_delivery_is_text_independent(monkeypatch, tmp_path) -> None:
         )
 
         assert run.backend.calls == 4, probe_text
-        assert run.response.text == _COMPLETE_ANSWER, probe_text
-        assert probe_text not in run.response.text, probe_text
+        assert run.response.text == _ordered_delivery(_COMPLETE_ANSWER, probe_text), probe_text
+        ledger = _delivery_ledger(run.params)
+        assert [row["origin"] for row in ledger["segments"]] == [
+            "provider_timeout_probe_prior",
+            "terminal_response",
+        ], probe_text
+        assert [row["delivered"] for row in ledger["segments"]] == [True, True], probe_text
         assert run.tool_round_calls == [1], probe_text
         assert run.params.tool_context.count(_PROVIDER_TIMEOUT_RESUME) == 1, probe_text
 
 
 def test_probe_with_blank_text_still_delivers_the_earlier_answer(monkeypatch, tmp_path) -> None:
-    """(e2) 探针正文为空(仅空白)时同样交付探针之前那一枪：不进入 empty-text nudge 预算。"""
+    """(e2) 探针正文为空(仅空白)时交付探针之前那一枪：不进入 empty-text nudge 预算。"""
     run = _drive_loop(
         monkeypatch,
         tmp_path,
@@ -501,13 +539,22 @@ def test_probe_with_blank_text_still_delivers_the_earlier_answer(monkeypatch, tm
     assert run.response.text == _COMPLETE_ANSWER, "空探针正文不得让用户收到空交付"
     assert run.params.tool_context.count(_PROVIDER_TIMEOUT_RESUME) == 1
     assert _probe_entry(run.params) is None
+    ledger = _delivery_ledger(run.params)
+    assert ledger["segments"][1]["delivered"] is False, "空段没有字符可投影"
+    assert ledger["segments"][1]["excluded_reason"] == "empty_text", "排除原因是结构化字段"
+    assert ledger["segments"][0]["delivered"] is True, "前导段照旧交付"
 
 
-# ------------------------------------------- (f)(g) 无损交付 tie-break 的两种形状
+# ------------------------------------------- (f)(g)(h) 两种形状都无损、长度不参与
+
+# 旧实现按 ``len(Q) >= len(P)`` 在这两种形状里各丢掉一条：形状一丢短结论、形状二丢承诺。
+# 下面三条用例把"长度不参与交付"钉死：无论哪一段更长、或两段等长，交付正文与段落账本完全同构。
 
 
-def test_probe_zero_tool_calls_prefers_the_longer_complete_answer(monkeypatch, tmp_path) -> None:
-    """(f) P=完整终答(长) + Q=承诺(短) -> 交付 P，Q 的正文不出现在交付里。"""
+def test_probe_zero_tool_calls_keeps_the_longer_complete_answer_and_the_short_stub(
+    monkeypatch, tmp_path
+) -> None:
+    """(f) P=完整终答(长) + Q=承诺(短) -> 两条都在：P 在前，Q 在后，逐字不改。"""
     run = _drive_loop(
         monkeypatch,
         tmp_path,
@@ -515,15 +562,15 @@ def test_probe_zero_tool_calls_prefers_the_longer_complete_answer(monkeypatch, t
         run_id="run-probe-shape-complete",
     )
 
-    assert len(_COMPLETE_ANSWER) > len(_PROBE_STUB), "前提：完整终答更长"
-    assert run.response.text == _COMPLETE_ANSWER
-    assert _PROBE_STUB not in run.response.text
+    assert len(_COMPLETE_ANSWER) > len(_PROBE_STUB), "前提：完整终答更长（旧实现靠长度才会选它）"
+    assert run.response.text == _ordered_delivery(_COMPLETE_ANSWER, _PROBE_STUB)
+    assert run.response.text.index(_COMPLETE_ANSWER) < run.response.text.index(_PROBE_STUB)
 
 
-def test_probe_zero_tool_calls_prefers_the_longer_continuation_answer(
+def test_probe_zero_tool_calls_keeps_the_promise_and_the_longer_continuation_answer(
     monkeypatch, tmp_path
 ) -> None:
-    """(g) P=只承诺(短) + Q=用文本把活干完(长) -> 交付 Q，承诺正文不出现在交付里。"""
+    """(g) P=只承诺(短) + Q=用文本把活干完(长) -> 两条都在：承诺在前，答复在后。"""
     run = _drive_loop(
         monkeypatch,
         tmp_path,
@@ -532,12 +579,11 @@ def test_probe_zero_tool_calls_prefers_the_longer_continuation_answer(
     )
 
     assert len(_CONTINUATION_ANSWER) > len(_PROMISE), "前提：探针那一枪的答复更长"
-    assert run.response.text == _CONTINUATION_ANSWER, "无损 tie-break 必须命中真正的完整答复"
-    assert _PROMISE not in run.response.text
+    assert run.response.text == _ordered_delivery(_PROMISE, _CONTINUATION_ANSWER)
 
 
-def test_probe_tie_prefers_the_probe_sample_and_keeps_old_contract(monkeypatch, tmp_path) -> None:
-    """(h) 两条候选等长 = 信息平局 -> 保留既有契约（交付更晚、上下文更多的探针那一枪）。"""
+def test_probe_delivery_does_not_depend_on_length_at_all(monkeypatch, tmp_path) -> None:
+    """(h) 两段等长时同样不做"择一"：等长不再是一种需要默认值的平局。"""
     run = _drive_loop(
         monkeypatch,
         tmp_path,
@@ -546,15 +592,26 @@ def test_probe_tie_prefers_the_probe_sample_and_keeps_old_contract(monkeypatch, 
     )
 
     assert len(_PROMISE) == len(_FINAL), "前提：本剧本等长"
-    assert run.response.text == _FINAL
+    assert run.response.text == _ordered_delivery(_PROMISE, _FINAL)
     assert run.backend.calls == 4
+    ledger = _delivery_ledger(run.params)
+    assert [row["text"] for row in ledger["segments"]] == [_PROMISE, _FINAL], (
+        "等长与否都不改变段落集合：交付决策里不存在长度比较"
+    )
 
 
-# ------------------------------------------- (i) 对象同一 + 登记生命周期
+# ------------------------------------------- (i) 逐字保留 + 交付对象归属当前轮
 
 
-def test_probe_delivers_the_identical_response_object(tmp_path) -> None:
-    """(i) 交付的是**同一个响应对象**（不复制、不改写），登记消费一次、计数不重复 +1。"""
+def test_probe_delivery_keeps_segment_texts_verbatim_and_owns_the_terminal_response(
+    tmp_path,
+) -> None:
+    """(i) 两段正文逐字保留、来源分别登记；交付对象取自**当前轮**（prompt/response/usage 同源）。
+
+    旧断言 ``second.response is retried`` 本身是错的：它把"只交付 P 的同一对象"当成正确性，
+    即"必须丢掉一条"。新契约下交付对象取自终答那一轮（对象同一或只换 text 的 replace），
+    前导段以逐字文本 + 独立来源的形式保留，因此既没有丢弃，也没有跨枪混配。
+    """
     params = _params(run_id="run-probe-identity", executed_tools=["read_file"])
     backend = _ScriptedBackend(["TIMEOUT", _COMPLETE_ANSWER, _PROBE_STUB])
     agent = _FakeAgent(backend, _RecordingPrompts(), tmp_path)
@@ -566,38 +623,67 @@ def test_probe_delivers_the_identical_response_object(tmp_path) -> None:
     assert first.counters.provider_timeout_resume_repairs == 1
     entry = _probe_entry(params)
     assert entry is not None and entry["response"] is retried, "登记里寄存的就是那一枪的对象"
+    assert entry["source"]["sequence"] == params.live_archive_state["_model_turn_sequence"], (
+        "登记同时记下该段自己的来源轮次"
+    )
+    armed_turn_id = str(entry["source"]["turn_id"])
 
     probe = _generate(agent, params)  # 探针那一枪（Q）：真实 model turn，序号紧邻
     assert probe.text == _PROBE_STUB and probe is not retried
     second = _decide(params, probe, first.counters)
 
     assert second.action == "break"
-    assert second.response is retried, "原样交付同一个对象，不复制、不拼接、不改写"
-    assert second.response.text == _COMPLETE_ANSWER
+    assert second.response is not retried, "交付对象不再冒充上一枪的对象"
+    assert second.response.runtime_status == probe.runtime_status == "ok", "runtime_status 原样"
+    assert second.response.backend == probe.backend
+    assert second.response.text == _ordered_delivery(retried.text, probe.text), (
+        "两段都逐字保留（只是按顺序投影，原文没有被改写）"
+    )
+    ledger = _delivery_ledger(params)
+    assert [row["text"] for row in ledger["segments"]] == [retried.text, probe.text]
+    assert ledger["segments"][0]["turn_id"] == armed_turn_id, "前导段来源 = 登记时记下的那一轮"
+    assert ledger["owner_turn_id"] == params.live_archive_state["_current_model_turn_id"]
     assert second.counters.provider_timeout_resume_repairs == 1, "探针不再 +1（LIMIT=1 不变）"
     assert second.counters == first.counters, "交付选择不得改动任何修复计数"
     assert _probe_entry(params) is None, "登记消费一次即清除"
 
 
-def test_probe_with_protected_marker_consumes_the_rollback_without_delivering_it(tmp_path) -> None:
-    """(j) 探针那一枪带受保护工具标记 -> 走既有修复路径，只消费登记、不回退交付。"""
+def test_probe_with_protected_marker_keeps_the_prior_segment_pending(tmp_path) -> None:
+    """(j) 探针那一枪带受保护工具标记 -> 走既有修复路径；前导段不丢，按原来源续挂到下次交付。
+
+    旧断言 ``_probe_entry(params) is None``（"中间态就把登记丢掉"）本身是错的：那一刻本轮并没有
+    交付任何东西，丢掉登记等于丢掉一条已产生的合法答复。新契约只在**真的交付**、或探针那一枪
+    走工具执行路径时终结登记。
+    """
     params = _params(run_id="run-probe-marker", executed_tools=["read_file"])
-    backend = _ScriptedBackend(["TIMEOUT", _COMPLETE_ANSWER])
+    backend = _ScriptedBackend(["TIMEOUT", _COMPLETE_ANSWER, f"[tool-record] {_PROBE_STUB}"])
     agent = _FakeAgent(backend, _RecordingPrompts(), tmp_path)
 
     retried = _generate(agent, params)
     first = _decide(params, retried, ToolLoopRepairCounters())
     assert first.action == "continue"
-    assert _probe_entry(params) is not None
+    armed = _probe_entry(params)
+    assert armed is not None
+    armed_turn_id = str(armed["source"]["turn_id"])
+    armed_sequence = int(armed["source"]["sequence"])
 
-    # 探针那一枪带受保护标记：结构化判定为「需要修复」，不是普通终答。
-    probe = ModelResponse(text=f"[tool-record] {_PROBE_STUB}", backend=backend.name)
+    # 探针那一枪（真实 model turn，序号紧邻）带受保护标记：结构化判定为「需要修复」，不是普通终答。
+    probe = _generate(agent, params)
+    assert probe.text == f"[tool-record] {_PROBE_STUB}"
     second = _decide(params, probe, first.counters)
 
     assert second.action == "continue", "受保护标记仍走既有修复路径"
     assert second.counters.protected_marker_repairs == 1
     assert second.counters.provider_timeout_resume_repairs == 1, "探针不重复计数"
-    assert _probe_entry(params) is None, "非零工具调用分支只消费登记，不回退交付"
+    assert _delivery_ledger(params) is None, "本轮没有交付，不许产生交付账本"
+    rearmed = _probe_entry(params)
+    assert rearmed is not None and rearmed["response"] is retried, "前导段按原来源续挂，不被丢掉"
+    assert rearmed["source"] == {"turn_id": armed_turn_id, "sequence": armed_sequence}, (
+        "续挂必须保留它自己的来源轮次，不能改记到当前轮名下"
+    )
+    assert rearmed["armed_sequence"] == params.live_archive_state["_model_turn_sequence"], (
+        "相邻性锚点跟到当前轮，下一枪的交付才算紧邻"
+    )
 
 
 def test_probe_with_lifecycle_status_consumes_the_rollback_without_delivering_it(tmp_path) -> None:
@@ -647,9 +733,13 @@ def test_probe_registration_is_fail_closed_across_turns(tmp_path) -> None:
     assert take_provider_timeout_resume_probe(params) is None, "序号不紧邻不得交付陈旧答案"
     assert _probe_entry(params) is None, "陈旧登记必须被清除（消费一次）"
 
-    # 对照组：紧邻时取回的必须是同一个对象。
+    # 对照组：紧邻时取回的是同一个对象，且带上它自己的来源轮次。
+    # （访问器签名从"裸响应对象"改为"响应对象 + 来源"的结构化记录：旧断言本身没错，
+    #   但交付需要来源才能把段落记到正确的轮次上，所以这里改读 record.response。）
     retried_again = _generate(agent, params)  # 序号 5
     assert arm_provider_timeout_resume_probe(params, retried_again) is True
     _generate(agent, params)  # 序号 6 = 紧邻的探针那一枪
-    assert take_provider_timeout_resume_probe(params) is retried_again
+    taken = take_provider_timeout_resume_probe(params)
+    assert taken is not None and taken.response is retried_again
+    assert taken.sequence == 5 and taken.turn_id, "来源轮次随段落一起流转"
     assert _probe_entry(params) is None

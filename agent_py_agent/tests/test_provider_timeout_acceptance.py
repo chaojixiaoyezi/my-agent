@@ -6,13 +6,14 @@
 - 裁决层 ``agent_core/tool_loop/response_decision.py``：同一 model turn 上、模型零工具调用时
   至多放行一次宿主追问（``_PROVIDER_TIMEOUT_RESUME_LIMIT = 1``）。该追问（R1 残留边界后）
   只是**探针**：只回答「还有没有真实工具工作」。探针零工具调用 = 没有工具工作要继续 ->
-  在「探针之前那一枪 P」与「探针那一枪 Q」之间做无损交付 tie-break（原样交付正文更长的一条，
-  等长时保留既有契约 = Q）；探针带工具调用 -> 登记被丢弃，工具按既有工具轮路径执行。
+  两枪已产生的合法答复**按到达顺序无损合成同一次交付**（逐字投影、只加段落边界，不按长度二选一、
+  不读正文做语义判定；只有该段自己被截断或正文为空时才不投影，且排除原因结构化入账）；
+  探针带工具调用 -> 登记被消费且不参与交付投影，工具按既有工具轮路径执行。
 
 本文件与作者单测 ``test_provider_timeout_continuation.py`` 的分工：**不复用其断言**，只做四类对抗检查：
 1. 重复工具副作用：真实 ``_execute_tool_loop_service`` + 真实工具 handler 计数 + 真实产品记账
    （``_record_tool_call`` / IR 账本）。证明探针只多发一次模型采样、探针零工具调用时只做一次
-   无损交付选择（原样交付两条候选里更长的一条），``_run_tool_round``、
+   无损交付合成（两条候选按到达顺序逐字保留），``_run_tool_round``、
    工具 handler、工具账本在探针前后完全一致；并单独构造「工具已执行但结果尚未回灌」窗口的反例。
 2. 正常回答不被无端续跑：本轮物理调用零失败（含「同一 params 里更早的物理调用失败过」的陈旧事实）
    时，同样的承诺文本必须原样交付、续跑计数 0、账本无新调用。
@@ -351,9 +352,9 @@ def test_resume_adds_exactly_one_sample_and_never_replays_the_tool(
     """真实循环：工具执行 1 次 → 超时 → 重试 → 承诺 → 探针 1 次（不发工具）。
 
     R1 残留边界后这一枪是**探针**（只回答「还有没有真实工具工作」）：它零工具调用即
-    「没有工具工作要继续」，交付选择走无损 tie-break（正文更长者；等长时探针那一枪）。
-    本剧本 P/Q 等长，因此交付文本与旧契约相同（探针那一枪的 ``_FINAL``）；采样次数、工具轮、
-    账本、指令出现次数等不变式全部不变。
+    「没有工具工作要继续」，交付把两枪的合法正文按到达顺序无损合成（承诺在前、探针那一枪在后）。
+    采样次数、工具轮、账本、指令出现次数等不变式全部不变；只有"交付正文必须等于其中一条候选"
+    这条旧断言随长度 tie-break 一起作废——它本身就是"丢掉一条合法答复"的来源。
     """
     run = _drive_loop(
         monkeypatch,
@@ -367,11 +368,11 @@ def test_resume_adds_exactly_one_sample_and_never_replays_the_tool(
     assert run.executed_one_calls == 1
     assert run.tool.handler_calls == 1, "工具 handler 副作用必须恰好一次"
     assert run.rounds == 1
-    # 交付选择：探针零工具调用 -> 在「重试那一枪(P)」与「探针那一枪(Q)」之间原样交付正文更长
-    # 的一条。本条剧本里两句恰好等长，命中「等长时保留既有契约 = 探针那一枪」这条 tie 默认
-    # （见 response_decision._provider_timeout_probe_final_response）。
-    assert len(_PROMISE) == len(_FINAL), "前提：本剧本命中等长 tie 默认"
-    assert run.response.text == _FINAL
+    # 交付：探针零工具调用 -> 两枪的合法正文按到达顺序无损合成（见
+    # response_decision._provider_timeout_probe_delivery）。长度不参与任何判定，因此本剧本
+    # 等长与否都不影响段落集合与顺序。
+    assert len(_PROMISE) == len(_FINAL), "前提：本剧本两段等长"
+    assert run.response.text == f"{_PROMISE}\n\n{_FINAL}"
 
     # 探针指令恰好出现在一次出站请求里（= 这个机制只多买了一枪模型采样）。
     with_instruction = [
