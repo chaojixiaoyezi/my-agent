@@ -303,6 +303,7 @@ scripts/
 |-- tui_reference_fixture_server.py    # loopback 确定性 Anthropic 服务：驱动 TUI Markdown/思考/权限/错误黑盒场景
 |-- tui_pty_recorder.py                # argv-only PTY 黑盒录制器：按键/粘贴/resize、原始 ANSI、事件索引与脱敏 manifest
 `-- check_clean_package.py             # 工作树与真实发布制品的结构化干净度检查
+`-- reproject_model_usage.py           # 历史用量账本的只读重算投影（exact/partial/incomplete，不覆盖原账本）
 deploy/
 |-- Dockerfile                         # 内置系统 bubblewrap+tini，构建期 binary probe
 |-- seccomp-bwrap.json                 # 固定 Moby 默认 profile，仅放行 bwrap namespace/mount 系统调用

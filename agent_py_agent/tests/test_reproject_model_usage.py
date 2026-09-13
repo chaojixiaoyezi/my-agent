@@ -278,6 +278,68 @@ def test_reproject_mixed_protocol_file_is_incomplete_even_when_rows_are_exact(tm
     assert projection.reprojected_input_tokens == 1000 + 560
 
 
+def test_reproject_zero_rows_distinguish_real_zero_from_missing_columns(tmp_path: Path) -> None:
+    """真零行可以标 exact；"字段缺失导致的 0"不是真零，必须降级为 partial。"""
+    real_zero = _write_ledger(
+        tmp_path / "real_zero.jsonl",
+        [
+            _ledger_row(
+                "evt-21",
+                backends=["probe"],
+                provider_usage_call_count=0,
+                estimated_usage_call_count=0,
+            )
+        ],
+    )
+    missing_columns = _write_ledger(
+        tmp_path / "missing.jsonl",
+        [
+            _ledger_row(
+                "evt-22",
+                accounted_input_tokens=None,
+                output_tokens=None,
+                total_tokens=None,
+                cached_input_tokens=None,
+                cache_creation_input_tokens=None,
+                usage_breakdown=None,
+            )
+        ],
+    )
+
+    zero_projection = project_file(real_zero)
+    missing_projection = project_file(missing_columns)
+
+    assert zero_projection.confidence == CONFIDENCE_EXACT
+    assert zero_projection.rows[0].basis == "zero_usage_row"
+    assert missing_projection.confidence == CONFIDENCE_PARTIAL
+    assert "missing_columns=1" in missing_projection.notes
+
+
+def test_reproject_file_bounds_cover_exact_rows(tmp_path: Path) -> None:
+    """文件级区间必须把"没有区间的精确行"也算进上界，否则上界会小于主值。"""
+    ledger = _write_ledger(
+        tmp_path / "bounded.jsonl",
+        [
+            _ledger_row("evt-19", accounted_input_tokens=1000, output_tokens=50, cached_input_tokens=400),
+            _ledger_row(
+                "evt-20",
+                backends=["openai_compatible", "anthropic_compatible"],
+                accounted_input_tokens=1000,
+                output_tokens=50,
+                cached_input_tokens=400,
+                cache_creation_input_tokens=100,
+            ),
+        ],
+    )
+
+    projection = project_file(ledger)
+
+    assert projection.confidence == CONFIDENCE_INCOMPLETE
+    assert projection.reprojected_input_tokens == 1000 + 1000
+    assert projection.reprojected_input_tokens_high == 1000 + 1500
+    assert projection.reprojected_total_tokens_high == 1000 + 50 + 1500 + 50
+
+
 def test_reproject_cli_json_reports_counts_and_never_claims_exact_for_incomplete(tmp_path: Path) -> None:
     """CLI JSON：三类文件各有明确计数，字段名即机器契约。"""
     root = tmp_path / "workspaces"

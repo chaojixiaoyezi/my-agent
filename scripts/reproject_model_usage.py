@@ -63,7 +63,7 @@ OPENAI_COMPATIBLE = "openai_compatible"
 OPENAI_RESPONSES = "openai_responses"
 
 # LLM: 只有协议族标签能决定"缓存是否已含在输入总数里"；文件名、模型名不能。标签按语义推导
-# 而不是封闭枚举，遇到没见过的标签一律进 unknown 并降级为 incomplete——宁可标不完整，不许猜。
+# 而不是封闭枚举，遇到没见过的标签单独留证并把这一行降级（"无法归属"），宁可标不完整，不许猜。
 _ANTHROPIC_MARKER = "anthropic"
 _OPENAI_MARKER = "openai"
 _RESPONSES_MARKER = "responses"
@@ -289,6 +289,13 @@ def _breakdown_bucket(calls: dict[str, Any], name: str) -> dict[str, Any]:
     return bucket if isinstance(bucket, dict) else {}
 
 
+# 函数用途: 只接受列表/元组里的非空字符串，避免畸形字段被逐字符拆成后端标签。
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in (str(entry).strip() for entry in value) if item)
+
+
 # 函数用途: 把一条账本记录解析成 LedgerRow；无法识别的记录返回 None（由文件层计入 skipped）。
 def row_from_record(index: int, record: dict[str, Any]) -> LedgerRow | None:
     calls = record.get("model_calls")
@@ -302,8 +309,8 @@ def row_from_record(index: int, record: dict[str, Any]) -> LedgerRow | None:
         index=index,
         event_id=str(record.get("event_id") or ""),
         recorded_schema=str(calls.get("schema") or ""),
-        backends=tuple(str(item) for item in calls.get("backends") or () if str(item)),
-        models=tuple(str(item) for item in calls.get("models") or () if str(item)),
+        backends=_string_tuple(calls.get("backends")),
+        models=_string_tuple(calls.get("models")),
         accounted_input_tokens=_optional_int(calls.get("accounted_input_tokens")),
         output_tokens=_optional_int(calls.get("output_tokens")),
         cache_read_input_tokens=_optional_int(calls.get("cached_input_tokens")),
@@ -363,10 +370,6 @@ def row_confidence(
 ) -> str:
     accounted, _output, cache_read, cache_write = counters
     estimated_calls = row.estimated_call_count or 0
-    if protocol in (PROTOCOL_UNKNOWN, PROTOCOL_MIXED):
-        # 协议定不下来 → 不知道缓存读是否已含在总数里 → 不可归属，只能给区间。
-        notes.append("protocol_not_attributable")
-        return CONFIDENCE_INCOMPLETE
     confidence = CONFIDENCE_EXACT
     if missing:
         notes.append("missing_columns=" + ",".join(missing))
@@ -375,6 +378,10 @@ def row_confidence(
         # 本地估算不是供应商真值：可以展示，但不能当精确值。
         notes.append(f"estimated_usage_calls={estimated_calls}")
         confidence = CONFIDENCE_PARTIAL
+    if protocol in (PROTOCOL_UNKNOWN, PROTOCOL_MIXED):
+        # 协议定不下来 → 不知道缓存读是否已含在总数里 → 不可归属，只能给区间。
+        notes.append("protocol_not_attributable")
+        return CONFIDENCE_INCOMPLETE
     if protocol == ANTHROPIC and cache_write > 0 and accounted == cache_write:
         # 旧启发式在两个字段都缺失时会退回 cache_creation_input_tokens；数值恰好相等时无法区分
         # "未缓存输入"与"缓存写入"，再加一次就可能重复计数，因此降级为 partial。
@@ -409,7 +416,8 @@ def project_row(row: LedgerRow) -> RowProjection:
         legacy_total = accounted + output
         notes.append("ledger_total_tokens_missing")
 
-    if accounted == 0 and cache_read == 0 and cache_write == 0 and output == 0:
+    # 零用量行在任何协议下都精确为 0；但"字段缺失导致的 0"不是真零，必须继续走分栏判定。
+    if accounted == 0 and cache_read == 0 and cache_write == 0 and output == 0 and not missing:
         return RowProjection(
             index=row.index,
             event_id=row.event_id,
