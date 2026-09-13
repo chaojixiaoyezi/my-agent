@@ -4,8 +4,17 @@
 
 子代理 transcript 含 U+0085(NEL) 时被 `splitlines()` 切成假记录 → child 判 transscript unreadable 而 FAILED。
 已改为统一 `jsonl_lines()`（只按物理 LF），覆盖会话/协作/审计/memory_archive/gateway/CLI 全部 JSONL 读取点
-与重写路径；真实三份失败文件只读重放 175/162/154 条、0 错误。待做：.10 真机 TUI 跑一个"含合法行分隔字符的
-多子代理读写任务 + 连续插话"，确认子代理不再因此失败。
+与重写路径；真实三份失败文件只读重放 175/162/154 条、0 错误。
+.10 真机验收（r284 / `c403e9c4`）：两个子代理全 DONE，worker-2 transcript 含 NEL=4/U+2028=4/U+2029=4 仍读为
+13 条 0 错误；连续两次插话被消费并按插话重排汇总。首轮迁移曾把 `reversed(...)`/`enumerate(...)` 传错给
+`jsonl_lines` 导致子代理 FAILED，已修并补守卫测试（r283 → r284 重跑通过）。
+
+**主代理等待行为（取证完成，待处置决策）**：真实事故里主代理派工后这一轮被底座以
+`runtime_reason=SUBAGENTS_ACTIVE` / `turn_end_reason=interrupted` 结束，可见正文由宿主回执模型写出
+（模型自己写的 final 被替换）；`coordinator_policy` 却要求"能推进就继续、确实依赖未返回才等"。
+`completion.py:159-191` 的 root 分支会改写用户可见回复，`completion.py:97-129` 的 task_local 分支会写
+`direct_child_wait` marker 结束工作片。待定方案：让模型自己的终答生效（孩子事件再唤醒），
+或仅把"孩子仍在运行"作为展示/进度信息而不替换正文；**不采用**强制忙碌 prompt 或强制派工。
 
 ## R279 后台答复落账解耦与结构化路线归属（已修已部署，验收继续）
 

@@ -9,7 +9,14 @@
   `recent_messages_report` 无 load_errors；半行/非法 JSON/非对象行仍逐条报 `load_errors`。
 - 真实文件只读重放（本机 owner 账本）：`subagent-1789309101-d6832a68/-72be5b55/-ec2d50a9`
   全量读 175/162/154 条、0 错误，尾部倒读 20 条、0 错误（修复前 19/2/5 个 JSON 错误）。
-- 尚未关闭：.10 真机 TUI 的"含合法行分隔字符的多子代理读写 + 连续插话"验收；主代理等待行为取证。
+- **.10 真机验收已完成（r284 / `c403e9c4`）**：tmux `ma-r284-110-multi` / `ma-r284-110-main`，同 Gateway pid 714694。
+  两个子代理全 DONE；worker-2 transcript 含 NEL=4 / U+2028=4 / U+2029=4，安装版读为 13 条记录 0 错误；
+  运行中两次插话被 `active_turn_input_consumed` 消费，最终汇总按插话给出分隔符计数表格；
+  canonical `thread-26b98f1d8bf94dec` 有 430 字符 final，投递事实 `not_applicable/canonical_record/undeclared`。
+- **本轮引入并已修的回归**：首次批量迁移把 `jsonl_lines(reversed(text))` / `jsonl_lines(enumerate(text), start=1)`
+  写错包装层次，前者让子代理 `live_archive` 写后回读抛 `'reversed' object has no attribute 'split'`，
+  真机表现为 runner 直接 FAILED（r283 验收即此因）。已修为"先按 LF 切记录、再 reversed/enumerate"并补守卫测试。
+- 尚未关闭：主代理等待行为（底座 `SUBAGENTS_ACTIVE` 强制收口取代模型终答）的处置方案待定。
 
 ## 2026-09-13 R279 后台答复落账解耦 + 结构化路线归属 + 就绪预算（已修，含真机 TUI）
 
