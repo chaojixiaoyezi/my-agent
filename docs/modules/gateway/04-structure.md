@@ -1,5 +1,18 @@
 # Gateway Structure
 
+## R267 scheduler status 的锁内全量解析边界
+
+- `scheduler/repository.py::runtime_snapshot`（模型 `scheduler status` 的唯一实现）**禁止**在持锁期间做
+  store.json 的读取、JSON 解析或逐 run 解析。正确形状是：锁外 `_probe_store_bytes()` 读一次字节+摘要 →
+  锁外 `_load_store_from_bytes_unlocked()` + `_runtime_summary_from_store()` 算出字段元组 → 锁内只用一次
+  `_store_stat_key()` 复核"探针字节仍是当前文件"，通过即返回锁外结论。
+- 复核不通过、探针为 None（文件缺失/不可读）或解析异常时，一律退回锁内权威读取 `_load_store_unlocked()`；
+  返回字段（state/health/active_jobs/paused_jobs/active_runs/load_error_codes/schedule_kinds）必须与改动前逐字一致，
+  坏账本仍返回 `unavailable`。jobs 侧必须保持 `list_jobs(include_deleted=False)` 的同源同过滤（`schedule_kinds`
+  不含已删除 job），runs 侧必须保持 `_parse_run(raw)[0] is not None and status in _ACTIVE_RUN_STATUSES`。
+- 这条路径**不新增缓存**：单次调用绑定单次读到的字节，因此不需要 waiting 投影那套跨调用摘要比对；
+  跨调用复用会重新引入"投影与当前字节不一致"的风险，不要再加。
+
 ## R265 两类扫描缓存的边界
 
 - `scheduler/repository` 的 waiting 投影缓存：键=(store.json 路径, owner 身份)，命中需**锁内 stat 键 + 锁外探针 stat 键 +

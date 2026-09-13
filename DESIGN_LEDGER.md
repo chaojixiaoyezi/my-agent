@@ -1,5 +1,34 @@
 # DESIGN LEDGER
 
+## 2026-09-12 R267 scheduler status 的锁内全量解析收口：锁外解析 + 锁内一次字节复核【状态：已修+受控验收，未部署】
+
+R265 遗留的"其它锁内全量解析点"先测量后修。`SchedulerRepository.runtime_snapshot()`
+（模型显式发起的 `scheduler status` 唯一实现，`tool.py` 的 `action=status`）当时每次调用
+**进两次锁、每次都在锁内把整个 store.json 读一遍再全量解析**——实测 N=10000 条 run
+（4.2MB）：锁内 12.3ms + 15.4ms、`load_store` 2 次/调用、逐 run 解析 10000 次/调用，
+并发等同一把锁的竞争者中位等 13.4ms。N=2000 时锁内 2.2ms+2.9ms；N=200 时 0.23ms+0.30ms。
+
+修法与 R265 的 waiting 投影同源但更轻（不引入第二份缓存）：锁外 `_probe_store_bytes` 读一次
+字节+摘要 → 锁外完成全量解析（`_load_store_from_bytes_unlocked`）→ 锁内只做一次
+`_store_stat_key` 复核"这份字节仍是当前文件"，通过就直接返回锁外结论；复核不通过或探针
+不可用一律退回锁内权威读取 `_load_store_unlocked()`。jobs 侧与 `list_jobs(include_deleted=False)`
+同源同过滤（`schedule_kinds` 只看未删除 job），runs 侧沿用逐字相同的 `_parse_run` + 活跃状态
+判定，坏 run 跳过、坏账本仍返回 `unavailable`，返回字段与旧实现逐字一致。
+
+**配对交替实测（同一夹具、同一脚本、交替 5 轮、N=10000）**：锁内持有时长 **39.6ms → 0.010ms
+（≈3964x）**，并发等锁者中位 **33.9ms → 0.090ms（377x）**、p95 **46.6ms → 0.273ms（171x）**，
+总耗时中位 **75.5ms → 49.7ms（1.52x，少了一整次读+解析）**；`load_store`（锁内权威读取）
+0 次/调用。
+
+**证据**：新增 6 例（`test_scheduler_scan_costs.py`），含"与旧实现参考投影逐字相等"
+（active/paused/deleted job + 活跃/终态/坏 run 行）、"JSON 解析与逐 run 解析都不得发生在
+持锁期间"（确定性插桩断言，不靠计时）、外部改写立刻可见、陈旧探针退回权威读取、
+坏账本与缺账本两态与参考实现一致。
+
+**未做/风险**：①复核用 stat 键(mtime_ns/size/ino/dev)覆盖"探测→进锁"的窗口（微秒级），
+与 `_indexed_payload` 的指纹口径同强度，不做内容二次哈希；②该调用点频率低（仅模型显式
+`status`），收益集中在"不阻塞 scheduler claim/finish 锁"；③**未部署、未真机**。
+
 ## 2026-09-12 R266 读取侧索引有界性缺口：条目预算从未生效 + 已删名字永久驻留【状态：已修+受控验收，未部署】
 
 监督者探针（本机复现，逐字一致）证明 R265 的读取侧索引**上界在写路径上从未执行**：

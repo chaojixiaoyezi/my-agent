@@ -1,10 +1,13 @@
-"""扫描成本收口:waiting_runs 投影缓存与 owner 事实判定缓存的失效/一致性验收。
+"""扫描成本收口:waiting_runs 投影缓存、runtime_snapshot 锁内全量解析与 owner 事实判定缓存的验收。
 
-两组被测对象:
+三组被测对象:
   ① ``SchedulerRepository.waiting_runs`` 的 store.json 投影缓存(repository.py):
      命中不得重复解析、外部改写必须立刻可见、内容摘要守卫必须兜住"同 stat 不同内容"、
      缓存必须只是投影(命中/清缓存/外部改写三态结论一致)。
-  ② ``owner_wake_discovery._owner_fact_kind`` 的事实判定缓存(owner_wake_discovery.py):
+  ② ``SchedulerRepository.runtime_snapshot`` 的锁外解析(repository.py):字段必须与旧实现
+     (list_jobs + 锁内全量解析 runs)逐字一致,锁内不得再做 JSON 解析与逐 run 解析,
+     外部改写立刻可见、陈旧探针必须退回权威读取、坏账本仍返回 unavailable。
+  ③ ``owner_wake_discovery._owner_fact_kind`` 的事实判定缓存(owner_wake_discovery.py):
      键是 owner home 下相关文件的结构化签名,新增/删除/改写 wake、policy、子代理 run、
      任务账本、调度账本都必须立刻重新判定;时间边界之外的复用必须落在 TTL 内;
      签名异常一律回退现读。
@@ -12,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -30,6 +34,7 @@ from agent_py_agent.agent.owner_wake_discovery import (
     discover_wake_pending_owners,
 )
 from agent_py_agent.agent.scheduler.repository import (
+    SchedulerJobCreateRequest,
     SchedulerRepository,
     SchedulerStateError,
 )
@@ -429,7 +434,216 @@ def test_byte_parse_matches_authoritative_reader(tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------------------
-# ② owner 事实判定缓存
+# ② runtime_snapshot 锁外解析
+# --------------------------------------------------------------------------------------
+def _every(anchor: float = 1_000, seconds: int = 600) -> dict[str, object]:
+    return {"kind": "every", "every_seconds": seconds, "anchor_at": anchor, "timezone": "UTC"}
+
+
+def _seed_job(repository: SchedulerRepository, name: str, *, at: str = "cron") -> dict[str, object]:
+    schedule = _every() if at == "every" else {"kind": "cron", "expression": "0 9 * * *", "timezone": "UTC"}
+    job, _deduped = repository.create_job(
+        SchedulerJobCreateRequest(
+            name=name,
+            prompt=f"execute {name}",
+            thread_id="thread-1",
+            source_task_id="task-1",
+            schedule=schedule,
+            skill_refs=[],
+            source_request_id=f"request:{name}",
+            now=900,
+        )
+    )
+    return job
+
+
+# LLM: 参考实现逐字复刻改动前的 runtime_snapshot(list_jobs 进一次锁 + 锁内再读一次并全量解析
+# runs);新旧两条路径的返回字典必须完全相等,否则说明这次"把解析移出锁"改变了可观测语义。
+# 函数用途: 用旧实现口径算出 runtime_snapshot 的期望字典,供新旧一致性断言使用。
+def _reference_runtime_snapshot(repository: SchedulerRepository) -> dict[str, object]:
+    try:
+        jobs, errors = repository.list_jobs(include_deleted=False)
+        with repository_module.locked_json_path(repository.store_path):
+            store = repository._load_store_unlocked()  # noqa: SLF001
+            active_runs = sum(
+                1
+                for raw in store["runs"].values()
+                if (run := repository._parse_run(raw)[0]) is not None  # noqa: SLF001
+                and run["status"] in repository_module._ACTIVE_RUN_STATUSES
+            )
+    except Exception as exc:  # noqa: BLE001 - 与实现同款兜底,参考实现要能对齐 unavailable
+        return {
+            "state": "unavailable",
+            "health": "unavailable",
+            "active_jobs": 0,
+            "paused_jobs": 0,
+            "active_runs": 0,
+            "load_error_codes": [type(exc).__name__],
+        }
+    return {
+        "state": "available",
+        "health": "degraded" if errors else "healthy",
+        "active_jobs": sum(1 for job in jobs if job["status"] == "active"),
+        "paused_jobs": sum(1 for job in jobs if job["status"] == "paused"),
+        "active_runs": active_runs,
+        "load_error_codes": sorted(set(errors)),
+        "schedule_kinds": sorted({str(job["schedule"]["kind"]) for job in jobs}),
+    }
+
+
+def _runtime_fixture(tmp_path) -> SchedulerRepository:
+    """混合夹具: active/paused/deleted job + 活跃/终态/坏 run 行。"""
+    store_path = tmp_path / "scheduler" / "store.json"
+    store_path.parent.mkdir(parents=True)
+    repository = _repository(store_path.parent)
+    active = _seed_job(repository, "keep-every", at="every")
+    paused = _seed_job(repository, "keep-daily")
+    deleted = _seed_job(repository, "keep-gone")
+    repository.pause_job(str(paused["job_id"]), expected_version=paused["version"], now=950)
+    repository.delete_job(str(deleted["job_id"]), expected_version=deleted["version"], now=960)
+    assert active["status"] == "active"
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    store["jobs"]["job_broken"] = {"schema_version": "scheduler_job.v1", "job_id": "job_broken"}
+    store["runs"] = {
+        "srun_active_1": _run_row("srun_active_1", "queued"),
+        "srun_active_2": _run_row("srun_active_2", "running"),
+        "srun_active_3": _run_row("srun_active_3", "waiting", waiting_since=1_000.0),
+        "srun_done": _run_row("srun_done", "succeeded"),
+        "srun_broken": {"schema_version": "scheduler_run.v1", "run_id": "srun_broken"},
+        "srun_other_owner": {**_run_row("srun_other_owner", "running"), "owner": {"provider": "x"}},
+    }
+    store_path.write_text(json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return repository
+
+
+def test_runtime_snapshot_matches_reference_projection(tmp_path) -> None:
+    """字段口径不变: 与旧实现(list_jobs + 锁内全量解析)逐字相等。"""
+    repository = _runtime_fixture(tmp_path)
+
+    snapshot = repository.runtime_snapshot()
+
+    assert snapshot == _reference_runtime_snapshot(repository)
+    assert snapshot["state"] == "available"
+    assert snapshot["health"] == "degraded"  # 有一条坏 job → 错误码非空
+    assert snapshot["active_jobs"] == 1
+    assert snapshot["paused_jobs"] == 1
+    assert snapshot["active_runs"] == 3
+    assert snapshot["schedule_kinds"] == ["cron", "every"]
+    assert snapshot["load_error_codes"] == ["SCHEDULER_OWNER_MISMATCH"]  # 缺 owner 的 job 行
+
+
+def test_runtime_snapshot_parses_outside_the_lock(tmp_path, monkeypatch) -> None:
+    """锁内只复核字节版本: 逐 run 解析与 JSON 解析都不得发生在持锁期间。"""
+    repository = _runtime_fixture(tmp_path)
+    held = {"now": False}
+    observed: list[tuple[str, bool]] = []
+    real_lock = repository_module.locked_json_path
+    real_load_bytes = SchedulerRepository._load_store_from_bytes_unlocked
+    real_load_locked = SchedulerRepository._load_store_unlocked
+    real_parse = SchedulerRepository._parse_run
+    lock_entries: list[int] = []
+
+    @contextlib.contextmanager
+    def tracking_lock(path):
+        with real_lock(path):
+            lock_entries.append(1)
+            held["now"] = True
+            try:
+                yield
+            finally:
+                held["now"] = False
+
+    def load_bytes(self, data):
+        observed.append(("parse_store", held["now"]))
+        return real_load_bytes(self, data)
+
+    def load_locked(self):
+        observed.append(("load_locked", held["now"]))
+        return real_load_locked(self)
+
+    def parse_run(self, raw, *, terminal=False):
+        observed.append(("parse_run", held["now"]))
+        return real_parse(self, raw, terminal=terminal)
+
+    monkeypatch.setattr(repository_module, "locked_json_path", tracking_lock)
+    monkeypatch.setattr(SchedulerRepository, "_load_store_from_bytes_unlocked", load_bytes)
+    monkeypatch.setattr(SchedulerRepository, "_load_store_unlocked", load_locked)
+    monkeypatch.setattr(SchedulerRepository, "_parse_run", parse_run)
+
+    snapshot = repository.runtime_snapshot()
+
+    assert snapshot["active_runs"] == 3
+    assert lock_entries, "锁外解析不等于不进锁:版本复核仍必须在锁内完成"
+    assert ("parse_store", True) not in observed, "JSON 全量解析不得发生在持锁期间"
+    assert not [name for name, locked in observed if name == "parse_run" and locked], (
+        "逐 run 解析不得发生在持锁期间"
+    )
+    assert [name for name, _locked in observed].count("parse_run") == 6  # 6 条 run 全部解析
+    assert ("load_locked", False) not in observed, "探针可用时不得再走锁内权威读取"
+
+
+def test_runtime_snapshot_sees_external_rewrite_immediately(tmp_path) -> None:
+    """外部改写必须立刻可见: 不缓存、不返回陈旧结论。"""
+    repository = _runtime_fixture(tmp_path)
+    assert repository.runtime_snapshot()["active_runs"] == 3
+    store_path = repository.store_path
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    store["runs"]["srun_new"] = _run_row("srun_new", "claimed")
+    store["runs"]["srun_active_1"] = _run_row("srun_active_1", "succeeded")
+    store_path.write_text(json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    snapshot = repository.runtime_snapshot()
+
+    assert snapshot["active_runs"] == 3  # 新增 1 条 claimed、1 条 queued 变终态 → 净持平
+    assert snapshot == _reference_runtime_snapshot(repository)
+    store["runs"]["srun_active_2"] = _run_row("srun_active_2", "succeeded")
+    store_path.write_text(json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    assert repository.runtime_snapshot()["active_runs"] == 2
+
+
+def test_runtime_snapshot_ignores_stale_probe(tmp_path, monkeypatch) -> None:
+    """探针字节已过期(读盘后账本又被改写): 绝不返回探针结论,退回锁内权威读取。"""
+    repository = _runtime_fixture(tmp_path)
+    stale = repository_module._StoreBytesProbe(stat_key=(-1, -1, -1, -1), digest="stale", data=b"{}")
+    monkeypatch.setattr(repository_module, "_probe_store_bytes", lambda path: stale)
+
+    snapshot = repository.runtime_snapshot()
+
+    assert snapshot == _reference_runtime_snapshot(repository)
+    assert snapshot["active_runs"] == 3  # 不是探针里的空账本
+
+
+def test_runtime_snapshot_unavailable_on_corrupt_store(tmp_path) -> None:
+    """坏账本: 与旧实现同款 unavailable 兜底,不得抛给调用方。"""
+    store_path = tmp_path / "scheduler" / "store.json"
+    store_path.parent.mkdir(parents=True)
+    repository = _repository(store_path.parent)
+    store_path.write_text("{ not json", encoding="utf-8")
+
+    snapshot = repository.runtime_snapshot()
+
+    assert snapshot == _reference_runtime_snapshot(repository)
+    assert snapshot["state"] == "unavailable"
+    assert snapshot["load_error_codes"] == ["SchedulerStateError"]
+
+
+def test_runtime_snapshot_missing_store_is_empty_and_visible(tmp_path) -> None:
+    """账本还没建: available 且计数为 0;建好后下一次调用立刻反映。"""
+    root = tmp_path / "scheduler"
+    root.mkdir(parents=True)
+    repository = _repository(root)
+
+    missing = repository.runtime_snapshot()
+
+    assert missing == _reference_runtime_snapshot(repository)
+    assert missing["state"] == "available"
+    assert (missing["active_jobs"], missing["paused_jobs"], missing["active_runs"]) == (0, 0, 0)
+    _seed_job(repository, "later")
+    assert repository.runtime_snapshot()["active_jobs"] == 1
+
+
+# --------------------------------------------------------------------------------------
+# ③ owner 事实判定缓存
 # --------------------------------------------------------------------------------------
 def _owner_home(owners: Path, owner_id: str) -> Path:
     home = owners / "providers" / "feishu" / "users" / owner_id
