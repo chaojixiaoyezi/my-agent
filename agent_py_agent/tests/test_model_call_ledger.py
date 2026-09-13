@@ -670,3 +670,42 @@ def _ledger(clock: _FakeClock) -> ModelCallLedger:
         options=ModelCallLedgerOptions(max_records=4),
         context=ModelCallLedgerContext(now=clock.now),
     )
+
+
+# LLM: 累计处理量口径必须跨协议一致：Anthropic 三字段互斥（总数=未缓存+读+写）、OpenAI 的
+# prompt_tokens 与 Responses 的 input_tokens 已含缓存明细（不能再加一次）。这是 TOK-01 的回归锁。
+# 函数用途: 验证 normalize_usage 覆盖四种真实字段形状，并区分 0 与缺失。
+def test_normalize_usage_covers_protocol_shapes() -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.model.usage import input_token_usage, normalize_usage
+
+    anthropic = SimpleNamespace(
+        usage={
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 700,
+            "output_tokens": 50,
+        }
+    )
+    openai = SimpleNamespace(
+        usage={"prompt_tokens": 1000, "prompt_tokens_details": {"cached_tokens": 700}, "completion_tokens": 50}
+    )
+    responses = SimpleNamespace(
+        usage={"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 700}, "output_tokens": 50}
+    )
+    missing = SimpleNamespace(usage={"output_tokens": 50})
+
+    assert normalize_usage(anthropic).protocol == "anthropic_compatible"
+    assert normalize_usage(openai).protocol == "openai_compatible"
+    assert normalize_usage(responses).protocol == "openai_responses"
+
+    assert input_token_usage(anthropic) == 1000   # 100 + 700 + 200
+    assert input_token_usage(openai) == 1000      # prompt 已含缓存
+    assert input_token_usage(responses) == 1000   # input 已含嵌套缓存
+    assert normalize_usage(openai).cached_input_tokens == 700
+    assert normalize_usage(anthropic).cache_creation_input_tokens == 200
+
+    unknown = normalize_usage(missing)
+    assert unknown.protocol == "unknown" and unknown.partial is True
+    assert input_token_usage(missing) is None

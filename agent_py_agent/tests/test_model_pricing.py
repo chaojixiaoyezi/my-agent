@@ -88,3 +88,35 @@ def test_response_cost_usd_from_usage() -> None:
     assert response_cost_usd("claude-opus-4-8", response) == round(0.015 + 0.0375, 6)
     # usage 缺失 → 成本 0(不崩)
     assert response_cost_usd("claude-opus-4-8", SimpleNamespace()) == 0.0
+
+
+# LLM: 计费档位互斥：普通输入 = 总输入 − 缓存命中 − 缓存写入；缓存档缺失必须回落普通输入价并
+# 标 partial，既不假装精确也不把缓存当免费。这是 TOK-03 的回归锁。
+# 函数用途: 验证分档计价、缺档回落标记、以及 env 声明四段价生效。
+def test_cost_breakdown_prices_cache_tiers_and_marks_unknown_tiers() -> None:
+    set_pricing("tiered-model", ModelPrice(0.30, 1.20, cache_read_per_mtok_usd=0.03, cache_write_per_mtok_usd=0.375))
+    cost, partial = model_pricing.cost_usd_breakdown(
+        "tiered-model",
+        input_tokens=1000,
+        cached_input_tokens=700,
+        cache_creation_input_tokens=200,
+        output_tokens=50,
+    )
+    expect = 100 / 1e6 * 0.30 + 700 / 1e6 * 0.03 + 200 / 1e6 * 0.375 + 50 / 1e6 * 1.20
+    assert partial is False
+    assert abs(cost - expect) < 1e-9
+
+    set_pricing("no-tier-model", ModelPrice(1.0, 2.0))
+    cost, partial = model_pricing.cost_usd_breakdown(
+        "no-tier-model",
+        input_tokens=1000,
+        cached_input_tokens=700,
+        cache_creation_input_tokens=200,
+        output_tokens=50,
+    )
+    assert partial is True
+    assert abs(cost - (1000 / 1e6 * 1.0 + 50 / 1e6 * 2.0)) < 1e-9  # 全部回落普通输入价
+
+    _apply_env_entry("env-tiered:1.0/2.0/0.1/0.5")
+    price = resolve_price("env-tiered")
+    assert price.cache_read_per_mtok_usd == 0.1 and price.cache_write_per_mtok_usd == 0.5

@@ -1,3 +1,16 @@
+# Gateway Structure
+
+## R256 启动就绪的边界
+
+- `cli/gateway_process.py` 的就绪判据是"**state 或 heartbeat 任一**匹配 PID 且声明 running"，
+  并在 `_wait_for_gateway_start_ready` 里额外要求 `started_at` 属于本次 spawn 之后这一代
+  （`_record_is_current_generation`，容差 2 秒；缺字段的旧格式按兼容处理）。不要改成"两个文件都要匹配"，
+  那会制造新的竞态；也不要把代际校验搬到心跳侧。
+- `gateway_parts/daemon_metadata._get_process_start_time` 的返回值只用于**同一进程前后相等比较**：
+  Linux 是 `/proc` 的 clock ticks 整数，其它平台是 `ps -o lstart=` 字符串，取不到就是 None。
+  任何调用方都不得把它当时间戳参与排序或与 `time.time()` 混算。
+- ready 发布顺序（HTTP bind → heartbeat → state）保持不变，它是防"绑定失败却谎报启动成功"的硬约束。
+
 ## R254 compact 失败的 typed 传播
 
 `control_service` 手动 compact 分支对 `ConversationCompactError` 单独处理：返回 `error_code=exc.error_code`

@@ -22,8 +22,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ModelPrice:
-    input_per_mtok_usd: float   # 每百万输入 token 美元
+    input_per_mtok_usd: float   # 每百万输入 token 美元（普通输入；缓存档缺失时也作为回落价）
     output_per_mtok_usd: float  # 每百万输出 token 美元
+    # 缓存分档：None = 该模型未声明缓存单价。缺失时按普通输入价估算并标 partial，
+    # 既不假装精确，也不把缓存当免费（Anthropic 兼容的读写档与 OpenAI 的命中折扣都不同价）。
+    cache_read_per_mtok_usd: float | None = None
+    cache_write_per_mtok_usd: float | None = None
 
 
 # 默认单价(USD / 1M tokens,公开 list price 量级,可被 env/set_pricing 覆盖)。键用模型 ID 前缀,
@@ -81,12 +85,53 @@ def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     return round(cost, 6)
 
 
+# LLM: 计费档位互斥：普通输入 = 总输入 − 缓存命中 − 缓存写入（下限 0），缓存两档各自乘自己的价；
+# 未声明缓存价的模型回落普通输入价并把 partial 置 True（调用方据此标注"估算不完整"）。
+# 函数用途: 按归一用量分档估算 USD 成本，并返回是否用了回落价。
+def cost_usd_breakdown(
+    model: str,
+    *,
+    input_tokens: int,
+    cached_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> tuple[float, bool]:
+    price = resolve_price(model)
+    total_input = max(0, int(input_tokens or 0))
+    cache_read = max(0, min(int(cached_input_tokens or 0), total_input))
+    cache_write = max(0, min(int(cache_creation_input_tokens or 0), total_input - cache_read))
+    plain_input = max(0, total_input - cache_read - cache_write)
+
+    partial = False
+    read_price = price.cache_read_per_mtok_usd
+    if cache_read and read_price is None:
+        read_price, partial = price.input_per_mtok_usd, True
+    write_price = price.cache_write_per_mtok_usd
+    if cache_write and write_price is None:
+        write_price, partial = price.input_per_mtok_usd, True
+
+    cost = plain_input / 1_000_000 * price.input_per_mtok_usd
+    cost += cache_read / 1_000_000 * (read_price or 0.0)
+    cost += cache_write / 1_000_000 * (write_price or 0.0)
+    cost += max(0, int(output_tokens or 0)) / 1_000_000 * price.output_per_mtok_usd
+    return round(cost, 6), partial
+
+
 def _apply_env_entry(entry: str) -> None:
-    """解析一条 env 单价项 'model:input/output'(USD per Mtok),非法忽略并告警。"""
+    """解析一条 env 单价项 'model:input/output[/cache_read/cache_write]'(USD per Mtok)。
+    缓存两档可省略（省略即未声明，估算时回落普通输入价并标 partial）；非法项忽略并告警。"""
     name, _, spec = entry.partition(":")
-    inp, _, outp = spec.partition("/")
+    parts = spec.split("/")
+    if len(parts) not in {2, 4}:
+        logger.warning("忽略非法 AGENT_MODEL_PRICING 项: %r", entry)
+        return
     try:
-        price = ModelPrice(float(inp), float(outp))
+        price = ModelPrice(
+            float(parts[0]),
+            float(parts[1]),
+            cache_read_per_mtok_usd=float(parts[2]) if len(parts) == 4 else None,
+            cache_write_per_mtok_usd=float(parts[3]) if len(parts) == 4 else None,
+        )
     except ValueError:
         logger.warning("忽略非法 AGENT_MODEL_PRICING 项: %r", entry)
         return

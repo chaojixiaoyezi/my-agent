@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 
 def response_usage(response: object) -> dict[str, object]:
@@ -9,15 +10,82 @@ def response_usage(response: object) -> dict[str, object]:
     return dict(usage) if isinstance(usage, Mapping) else {}
 
 
-def input_token_usage(response: object) -> int | None:
+# LLM: 用量字段的协议形状必须按"字段组合"判定，不能按模型名猜：Anthropic 兼容把未缓存输入/
+# 缓存读/缓存写放在三个互斥顶层字段；OpenAI 兼容的 prompt_tokens 已含缓存明细；
+# OpenAI Responses 风格的 input_tokens 也含嵌套 input_tokens_details.cached_tokens。
+# 归一后 total 才是"模型实际看到的输入"，账本/成本/Goal 都只能读它，不许各自再猜一遍协议。
+# 类用途: 保存一次响应的归一用量，以及"是否存在缺字段"（partial 不得当成精确 0）。
+@dataclass(frozen=True)
+class NormalizedUsage:
+    protocol: str
+    input_tokens: int
+    cached_input_tokens: int
+    cache_creation_input_tokens: int
+    output_tokens: int
+    partial: bool
+
+
+# LLM: 归一入口是唯一的协议判定点；任何新增协议只在这里加分支，消费者不改。
+# 函数用途: 把供应商原始 usage 还原成"总输入 + 缓存命中 + 缓存写入 + 输出"的统一结构。
+def normalize_usage(response: object) -> NormalizedUsage:
     usage = response_usage(response)
-    return _first_positive_int(
-        (
-            usage.get("input_tokens"),
-            usage.get("prompt_tokens"),
-            usage.get("cache_creation_input_tokens"),
+    output_reported = output_token_usage(response)
+    output = output_reported or 0
+    partial = output_reported is None
+
+    nested = None
+    for key in ("input_tokens_details", "prompt_tokens_details"):
+        value = usage.get(key)
+        if isinstance(value, Mapping):
+            nested = value
+            break
+    nested_cached = None
+    if nested is not None:
+        nested_cached = _first_positive_int(
+            (nested.get("cached_tokens"), nested.get("cache_read_tokens"))
         )
+    top_read = _first_positive_int(
+        (usage.get("cache_read_input_tokens"), usage.get("cached_input_tokens"))
     )
+    top_write = _first_positive_int(
+        (usage.get("cache_creation_input_tokens"), usage.get("cache_write_input_tokens"))
+    )
+
+    prompt_total = _first_positive_int((usage.get("prompt_tokens"),))
+    if prompt_total is not None:
+        # OpenAI 兼容：prompt 总数已包含缓存明细，不能再加一次。
+        return NormalizedUsage(
+            "openai_compatible", prompt_total, nested_cached or 0, top_write or 0, output, partial
+        )
+
+    input_total = _first_positive_int((usage.get("input_tokens"),))
+    if input_total is not None:
+        if nested_cached is not None and top_read is None:
+            # OpenAI Responses 风格：input_tokens 已含嵌套缓存明细。
+            return NormalizedUsage(
+                "openai_responses", input_total, nested_cached, top_write or 0, output, partial
+            )
+        read = top_read or 0
+        write = top_write or 0
+        if usage.get("cache_read_input_tokens") is None and top_write is None and read == 0 and write == 0:
+            partial = True
+        return NormalizedUsage(
+            "anthropic_compatible", input_total + read + write, read, write, output, partial
+        )
+
+    if top_read is None and top_write is None:
+        partial = True
+    return NormalizedUsage("unknown", 0, top_read or 0, top_write or 0, output, partial)
+
+
+# LLM: 累计处理量口径 = 协议归一后的总输入（含缓存读写，重复读取也累计）；这是账本
+# accounted_input_tokens 的唯一来源，不能再用"取第一个非空字段"的旧启发式。
+# 函数用途: 读取本次响应的总输入 token。
+def input_token_usage(response: object) -> int | None:
+    normalized = normalize_usage(response)
+    if normalized.protocol == "unknown" and normalized.input_tokens == 0:
+        return None
+    return normalized.input_tokens
 
 
 # LLM: Provider-visible context and billing input are not always the same field shape. Anthropic

@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 
-from .usage import input_token_usage, output_token_usage
+from .usage import input_token_usage, normalize_usage, output_token_usage
 
 
 @dataclass(frozen=True)
@@ -79,9 +79,8 @@ def record_run_cost(owner: str, run_id: str, model: str, response: object) -> No
         return
     try:
         from ...llm_scale.cost_ledger import global_cost_ledger
-        from ...llm_scale.model_pricing import cost_usd
 
-        cost = cost_usd(model, input_token_usage(response) or 0, output_token_usage(response) or 0)
+        cost, _partial = usage_cost_usd(model, response)
         if cost > 0:
             global_cost_ledger().record(cost, tenant=owner or "", run_id=run_id or "")
     except Exception:
@@ -97,13 +96,27 @@ def record_llm_cost(model: str, response: object) -> None:
     if not model or response is None:
         return
     try:
-        from ...llm_scale.model_pricing import cost_usd
-
-        cost = cost_usd(model, input_token_usage(response) or 0, output_token_usage(response) or 0)
+        cost, _partial = usage_cost_usd(model, response)
         if cost > 0:
             _metrics().cost.inc(cost, labels={"model": model})
     except Exception:
         pass  # 成本埋点绝不影响 LLM 调用
+
+
+# LLM: 计费只读协议归一的用量（总输入/缓存命中/缓存写入/输出），不自己猜协议；分档价缺失时
+# 返回 partial=True 供调用方标注估算不完整。异常一律不外抛，埋点不能影响模型调用。
+# 函数用途: 用归一用量估算一次响应的 USD 成本。
+def usage_cost_usd(model: str, response: object) -> tuple[float, bool]:
+    from ...llm_scale.model_pricing import cost_usd_breakdown
+
+    normalized = normalize_usage(response)
+    return cost_usd_breakdown(
+        model,
+        input_tokens=normalized.input_tokens,
+        cached_input_tokens=normalized.cached_input_tokens,
+        cache_creation_input_tokens=normalized.cache_creation_input_tokens,
+        output_tokens=normalized.output_tokens,
+    )
 
 
 def reset_for_test() -> None:

@@ -258,27 +258,49 @@ def _write_gateway_start_files(paths, *, pid: int, command: list[str]) -> None:
     )
 
 
-def _gateway_ready_for_pid(paths: GatewayPaths, pid: int) -> bool:
+# LLM: state 与 heartbeat 任一匹配即算就绪（异步文件不要求同时落盘），但必须同时排除"陈旧状态误判"：
+# 上一代网关崩溃/被替换后留下的同 PID 记录、或 pid 被复用时，pid+status 相同并不代表这是本次启动的子进程。
+# not_before 是本次 spawn 的时刻，只有 started_at ≥ not_before − 容差的记录才算这一代。
+# 函数用途: 判断某个 PID 是否已发布 running，且该记录属于本次启动的那一代。
+def _gateway_ready_for_pid(paths: GatewayPaths, pid: int, *, not_before: float = 0.0) -> bool:
     for path, context in (
         (paths.state, "gateway.start.state.read"),
         (paths.heartbeat, "gateway.start.heartbeat.read"),
     ):
         report = read_json_file_report(path, context=context)
         payload = report.payload
-        if int(payload.get("pid") or 0) == pid and str(payload.get("status") or "") == "running":
-            return True
+        if int(payload.get("pid") or 0) != pid or str(payload.get("status") or "") != "running":
+            continue
+        if not_before > 0 and not _record_is_current_generation(payload, not_before):
+            continue
+        return True
     return False
+
+
+# LLM: 判定只读结构化时间字段；缺字段的旧格式按"无法证明是旧代"处理（保持向后兼容，不用自然语言或
+# 文件 mtime 猜）。容差覆盖父子进程写盘时差，避免把刚发布的这一代误判成陈旧。
+# 函数用途: 判断一条 running 记录是否由本次启动之后的那一代进程写出。
+def _record_is_current_generation(payload: dict, not_before: float, *, tolerance: float = 2.0) -> bool:
+    started_at = payload.get("started_at")
+    try:
+        started = float(started_at or 0.0)
+    except (TypeError, ValueError):
+        return True
+    if started <= 0.0:
+        return True
+    return started >= not_before - max(0.0, tolerance)
 
 
 def _wait_for_gateway_start_ready(paths: GatewayPaths, process, *, timeout: float) -> bool:
     deadline = time.time() + max(0.0, timeout)
+    not_before = time.time()
     while time.time() <= deadline:
-        if _gateway_ready_for_pid(paths, int(process.pid)):
+        if _gateway_ready_for_pid(paths, int(process.pid), not_before=not_before):
             return True
         if process.poll() is not None:
             return False
         time.sleep(0.2)
-    return _gateway_ready_for_pid(paths, int(process.pid))
+    return _gateway_ready_for_pid(paths, int(process.pid), not_before=not_before)
 
 
 # LLM: Ordinary CLI attempts are reconciled by the long-lived Gateway before workers start. This

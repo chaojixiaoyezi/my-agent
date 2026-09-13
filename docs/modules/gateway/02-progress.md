@@ -1,3 +1,26 @@
+# Gateway Progress
+
+## 2026-09-12 R256 启动就绪的代际判据与 macOS 出生时间
+
+- 现场（交接文档 GW-01 复核）：`_gateway_ready_for_pid` 只比对 `pid` 数值 + `status == "running"`，
+  state/heartbeat 任一命中即判就绪；`pid` 文件层的 PID 重用防护依赖 `_get_process_start_time`，
+  而它只读 `/proc/<pid>/stat` —— **macOS 无 /proc，实测返回 None**，该防护在本机恒空转
+  （pid 文件与 state 的 `start_time` 都是 null）。文档所称"3.043 秒出生→ready"在本机也复现不出
+  （实测 0.115–1.114 秒），已如实记为证据不足。
+- 修法一（就绪判据，`cli/gateway_process.py`）：`_gateway_ready_for_pid` 增加 `not_before` 代际参数，
+  由 `_wait_for_gateway_start_ready` 在 spawn 后取当前时刻传入；只有 `started_at >= not_before − 2s 容差`
+  的记录才算"本次启动的这一代"。缺 `started_at` 的旧格式按"无法证明陈旧"处理，保持向后兼容；
+  不传 `not_before` 时语义与原来完全一致。这消除的是"上一代/CID 复用留下的同 PID running 记录"被误判成就绪。
+- 修法二（出生时间来源，`gateway_parts/daemon_metadata.py`）：`_get_process_start_time` 在无 `/proc`
+  的平台回落 `ps -o lstart= -p <pid>`，返回稳定字符串（只用于同一进程的前后相等比较，不解析成时间戳）；
+  取值失败仍返回 None，调用方必须退化为"无法证明代际"。本机实测：`52778 → Sat Sep 12 18:48:14 2026`，
+  不存在的 pid → None。
+- 未做：文档要求的"把 `process_identity`（host_id/pid/start_time）纳入 ready 判据"只做了时间代际这一半；
+  跨主机/容器复用 host_id 的场景仍靠既有 pid 文件路径。`_wait_for_gateway_start_ready` 的 3 秒预算未改
+  （文档明确要求不要用加长 timeout 掩盖启动慢）。
+- 边界：`gateway_process.py` 里"HTTP bind 之后才发布 ready"的顺序未动（该注释是硬约束）；
+  本轮所有结论来自源码复核 + 单元测试 + 本机只读实测，**未做真实启动故障注入**。
+
 ## R254 手动 compact 的失败如实上报（三种既有红测试的根因与处置）
 
 用户看到"手动 compact 未完成，请稍后重试"时，有一类失败**重试永远不会成功**：当模型窗口装不下

@@ -795,3 +795,35 @@ class TestGatewayServiceWorkingDirectory:
         assert f"WorkingDirectory={service_cwd}" in systemd
         assert f"<string>{service_cwd}</string>" in launchd
         assert f"WorkingDirectory={gateway_service.PROJECT_ROOT}" not in systemd
+
+
+# LLM: 就绪判据必须区分"本次启动的这一代"和"上一代/同 PID 的陈旧记录"：pid+status 相同不足以证明。
+# 函数用途: 验证 not_before 代际校验与字段缺失时的向后兼容。
+def test_gateway_ready_requires_current_generation(tmp_path) -> None:
+    from agent_py_agent.cli.gateway_process import (
+        _gateway_ready_for_pid,
+        _record_is_current_generation,
+    )
+
+    state = tmp_path / "state.json"
+    heartbeat = tmp_path / "heartbeat.json"
+    paths = SimpleNamespace(state=state, heartbeat=heartbeat, pid=tmp_path / "pid.json")
+    spawned_at = 1_000.0
+
+    def write(payload):
+        state.write_text(json.dumps(payload), encoding="utf-8")
+
+    # 陈旧记录：同 PID、running，但 started_at 早于本次启动 → 不算就绪
+    write({"pid": 4242, "status": "running", "started_at": spawned_at - 60})
+    assert _gateway_ready_for_pid(paths, 4242, not_before=spawned_at) is False
+    assert _gateway_ready_for_pid(paths, 4242) is True  # 不传代际时保持原语义
+
+    # 本次启动的这一代 → 就绪
+    write({"pid": 4242, "status": "running", "started_at": spawned_at + 0.05})
+    assert _gateway_ready_for_pid(paths, 4242, not_before=spawned_at) is True
+
+    # 父进程写盘时差在容差内，不能把刚发布的一代误判成陈旧
+    assert _record_is_current_generation({"started_at": spawned_at - 1.0}, spawned_at) is True
+    # 缺字段的旧格式按"无法证明陈旧"处理（向后兼容）
+    assert _record_is_current_generation({}, spawned_at) is True
+    assert _record_is_current_generation({"started_at": "bad"}, spawned_at) is True

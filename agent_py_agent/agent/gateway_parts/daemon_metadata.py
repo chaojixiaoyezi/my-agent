@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 import uuid
@@ -24,7 +25,12 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _get_process_start_time(pid: int) -> int | None:
+def _get_process_start_time(pid: int) -> int | str | None:
+    """返回进程出生时间；只用于**同一进程的前后比较**（相等即同代），不是可换算的时间戳。
+
+    Linux 走 /proc/<pid>/stat 第 22 字段（clock ticks，整数）；没有 /proc 的平台（macOS 等）
+    走 `ps -o lstart=`，返回稳定字符串。两者都取不到时返回 None，调用方必须退化为"无法证明代际"。
+    """
     if sys.platform == "win32":
         return None
     stat_path = Path(f"/proc/{pid}/stat")
@@ -32,7 +38,19 @@ def _get_process_start_time(pid: int) -> int | None:
         # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
         return int(stat_path.read_text().split()[21])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
+        pass
+    # 非 Linux：用 ps 拿同一进程稳定的出生时间字符串（不解析成时间戳，只做相等比较）。
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(int(pid))],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
+    value = completed.stdout.strip()
+    return value or None
 
 
 # LLM: 后台租约只能在“同一进程域且旧 PID 身份已死”时提前接管；machine-id 还要叠加
