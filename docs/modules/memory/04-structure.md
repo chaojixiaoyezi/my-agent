@@ -1,5 +1,14 @@
 # Memory Structure
 
+## R257 策展失败账的字段边界
+
+- `CuratorRunRecord.failure_diagnostic` 是**诊断投影**，不是失败权威：权威仍是 `failure_code` +
+  attempt/lease 状态。字段只允许机器可判定形状（异常类名、可选 HTTP 状态码），
+  任何供应商正文、prompt 片段、记忆内容都不得进入，这条在执行 `_failure_diagnostic` 时强制。
+- 新增诊断字段不改变 run 账 schema_version（v2 追加可选字段），旧账本无需迁移。
+
+# Memory Structure
+
 ## R256 迁移预检的稳态边界
 
 - `migration.py` 的 `_MigrationServiceCore.apply()` 现在先读 marker 再决定是否 `_scan()`：

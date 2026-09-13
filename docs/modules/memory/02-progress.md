@@ -1,5 +1,17 @@
 # Memory Progress
 
+## 2026-09-12 R257 策展失败账记录可判定形状
+
+- 真机故障：占位模型修好后，run 账从 `echo/gpt-4o-mini` 变成真模型（`anthropic_compatible/qwen3.8-flash`），
+  但失败码换成 `CURATOR_MODEL_FAILED`。该码是 `_failure_code` 的兜底分支，而供应商异常正文按红线不落盘，
+  于是账本只剩"失败了"，无法区分超时、限流还是请求被拒——这正是本轮卡住的地方。
+- 修法：run 账新增 `failure_diagnostic`（只含 `error_type` 异常类名，以及异常自带时的
+  `provider_http_status`）；无状态码时不写该键，不伪装成已知。prompt、供应商正文、记忆内容仍不落盘。
+- 测试：`test_memory_curator_v2` 新增一条，锁定字段内容且断言供应商文本不出现在诊断里。
+- 未做：拿到诊断后对第三个原因（`CURATOR_MODEL_FAILED`）的修复；需下一次 run 落盘诊断后再定性。
+
+# Memory Progress
+
 ## 2026-09-12 R256 迁移预检的稳态短路：后台维护不再每次递归整棵 owner home
 
 - 现场：用户本机网关（runtime-r255）空队列空闲时仍稳定烧 **27%~45% 单核**（10 分钟窗口均值 26.8%、
