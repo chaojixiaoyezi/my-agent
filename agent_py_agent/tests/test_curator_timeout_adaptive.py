@@ -34,6 +34,7 @@ from agent_py_agent.agent.memory_store.curator_backend import (
     curator_prompt,
     extract_with_retries,
     is_curator_timeout_error,
+    last_model_attempts,
     shrink_batch_for_timeout,
 )
 from agent_py_agent.agent.memory_store.curator_inputs import (
@@ -44,6 +45,7 @@ from agent_py_agent.agent.memory_store.curator_inputs import (
 from agent_py_agent.agent.memory_store.curator_models import (
     CURATOR_OUTPUT_SCHEMA_VERSION,
     MemoryCuratorConfig,
+    curator_response_schema,
 )
 from agent_py_agent.agent.memory_store.curator_run_log import CuratorRunLog
 from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
@@ -442,6 +444,16 @@ def test_shrink_retries_stay_within_lease_budget(monkeypatch) -> None:
     lengths = [len(prompt) for prompt, _seconds in captured]
     assert lengths == sorted(lengths, reverse=True)
     assert lengths[0] > lengths[-1]
+    # 失败路径的形状账必须与真实发出的调用逐项对齐(不记正文,但要能被机器核对)。
+    shapes = last_model_attempts()
+    assert [row.attempt for row in shapes] == list(range(1, len(captured) + 1))
+    assert [row.prompt_chars for row in shapes] == lengths
+    assert [row.granted_seconds for row in shapes] == [
+        seconds for _prompt, seconds in captured
+    ]
+    assert [row.shrunk for row in shapes] == [False] + [True] * (len(captured) - 1)
+    assert {row.outcome for row in shapes} == {"ProviderTimeoutError"}
+    assert {row.schema_chars for row in shapes} == {len(json.dumps(curator_response_schema()))}
 
 
 # 函数用途: (a) 首次超时 → 缩批 → 成功:断言输入变小、重试期间游标不动、成功提交且尾部留待重放。
@@ -517,10 +529,20 @@ def test_repeated_timeouts_stop_at_bound_with_typed_failure(tmp_path: Path) -> N
     assert list((tmp_path / "memory" / "daily").glob("*.jsonl")) == []
     records = service.run_log.list()
     assert [record.failure_code for record in records] == ["CURATOR_MODEL_FAILED"]
-    # 既有 failure_diagnostic= 形状逐字保留,且不夹带供应商正文。
-    assert records[0].warnings == (
-        'failure_diagnostic={"error_type":"ProviderTimeoutError"}',
+    # 既有 failure_diagnostic= 形状逐字保留,且不夹带供应商正文;它前面新增的是每次调用的
+    # 无正文形状(见 test_curator_timeout_observability.py),让失败路径也能看出缩批真的发生过。
+    assert records[0].warnings[-1] == (
+        'failure_diagnostic={"error_type":"ProviderTimeoutError"}'
     )
+    shapes = [
+        json.loads(item.split("=", 1)[1])
+        for item in records[0].warnings
+        if item.startswith("curator_model_attempt=")
+    ]
+    assert [row["attempt"] for row in shapes] == [1, 2, 3, 4]
+    assert [row["prompt_chars"] for row in shapes] == lengths
+    assert [row["shrunk"] for row in shapes] == [False, True, True, True]
+    assert "个人电脑使用 macOS" not in "\n".join(records[0].warnings)
 
 
 # 函数用途: (b') 主机侧等待上限超时走既有超时码,诊断形状同样只含类名。
@@ -535,9 +557,12 @@ def test_host_bound_timeout_keeps_timeout_code_and_diagnostic_shape(tmp_path: Pa
 
     assert result.failure_code == "CURATOR_MODEL_TIMEOUT"
     records = service.run_log.list()
-    assert records[0].warnings == (
-        'failure_diagnostic={"error_type":"CuratorModelTimeoutError"}',
+    # failure_diagnostic= 仍是最后一条且形状逐字不变;前面多出的是本次唯一一次调用的无正文形状。
+    assert records[0].warnings[-1] == (
+        'failure_diagnostic={"error_type":"CuratorModelTimeoutError"}'
     )
+    assert len(records[0].warnings) == 2
+    assert records[0].warnings[0].startswith("curator_model_attempt=")
     assert service.state_store.load().per_thread_cursors == {}
 
 

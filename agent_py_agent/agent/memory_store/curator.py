@@ -18,9 +18,12 @@ from ..common.json_io import read_json_object_report
 from .candidate_models import CandidateObservation, host_promotion_mode, utc_now_iso
 from .candidates import CandidateService
 from .curator_backend import (
+    CuratorModelAttempt,
     CuratorModelTimeoutError,
     adaptive_timeout_seconds,
+    attempt_shape_payload,
     extract_with_retries,
+    last_model_attempts,
 )
 from .curator_commit import (
     CuratorBatchCommit,
@@ -242,6 +245,9 @@ class _CuratorLifecycleMixin:
                     finished_at=finished_at,
                     failure_code=failure_code,
                     failure_diagnostic=_failure_diagnostic(exc),
+                    # 缩批/重试的形状来自本线程最后一次 extract_with_retries;失败时它是唯一能
+                    # 说明"空批失败还是大批量超时"的证据,所以必须在失败审计里落盘。
+                    attempt_warnings=_attempt_shape_warnings(last_model_attempts()),
                 )
             )
         except Exception:
@@ -1019,6 +1025,30 @@ def _failure_diagnostic_warning(diagnostic: dict[str, object]) -> str:
     )
 
 
+# LLM: 失败路径原先只有最后一条异常类名,看不出"打了几次、每次输入多大、每次授权多少秒、实际
+# 等了多久、有没有缩批"(真机 2026-09-13 两轮 CURATOR_MODEL_FAILED 就是这样无法归因)。这里把
+# extract_with_retries 的逐次尝试形状编码成既有 warnings:每条只含宿主计数器与异常类名,同一
+# 键集顺序稳定,便于 grep/解析;绝不写 prompt、schema 或响应正文。warnings 的上限(≤300 字符/
+# 条、≤32 条)由 curator_run_log 的 _bounded_warnings 把关,这里先按同样口径硬裁剪,避免单条
+# 过长导致整次失败记账变成 CURATOR_RUN_AUDIT_FAILED。
+# 函数用途: 把逐次调用形状编码为稳定、有界的 warning 文本元组。
+def _attempt_shape_warnings(
+    attempts: tuple[CuratorModelAttempt, ...],
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    for attempt in attempts[:32]:
+        text = "curator_model_attempt=" + json.dumps(
+            attempt_shape_payload(attempt),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if len(text) > 300:
+            text = text[:300]
+        warnings.append(text)
+    return tuple(warnings)
+
+
 def _failed_run_record(
     context: _RunContext,
     *,
@@ -1027,6 +1057,7 @@ def _failed_run_record(
     finished_at: str,
     failure_code: str,
     failure_diagnostic: dict[str, object] | None = None,
+    attempt_warnings: tuple[str, ...] = (),
 ) -> CuratorRunRecord:
     return CuratorRunRecord(
         run_id=context.run_id,
@@ -1046,9 +1077,12 @@ def _failed_run_record(
         # 注意必须是显式单元素元组：`(X if cond else ())` 只是分组，会让 warnings 变成字符串，
         # 触发 "warnings must be an array" → 失败记账自己变成 CURATOR_RUN_AUDIT_FAILED。
         warnings=(
-            (_failure_diagnostic_warning(dict(failure_diagnostic)),)
-            if failure_diagnostic
-            else ()
+            *attempt_warnings,
+            *(
+                (_failure_diagnostic_warning(dict(failure_diagnostic)),)
+                if failure_diagnostic
+                else ()
+            ),
         ),
     )
 

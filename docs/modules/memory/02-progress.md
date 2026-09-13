@@ -1,5 +1,32 @@
 # Memory Progress
 
+## 2026-09-12 R264 策展超时的真根因（更正 R262 的缩批假设）+ 失败路径尝试形状可观测
+
+- **更正**：R262 把"策展超时"归因为输入规模并加了缩批，真机证据不支持这个方向。
+  `processed_messages=0 / processed_audit_events=0` **不是**"空批"证据——那两个字段只在成功提交时写
+  （`curator.py:582-583`），失败记录用的是 dataclass 默认值；而且空批在 `curator.py:420-423` 直接短路成功、
+  **根本不调模型**，所以"空批 + ProviderTimeoutError"本身自相矛盾。
+- **真根因（两层）**：①可观测缺陷——缩批只在成功路径落盘（`curator_backend.py:188-189` 失败时把尝试账整个丢掉），
+  失败账只有一条 `failure_diagnostic=`，无法判断缩批是否被触发；②运行环境——策展跑在**单槽本地 llama-server**
+  （`--parallel 1`、3bit GGUF、Metal、~16-22 tok/s）上，与主对话**争同一槽位**，90–270s 的挂钟超时必然先到；
+  实测同形状请求走远端真实端点 **2.0s 成功**，消掉"schema/prompt 形状本身超时"的假设。故缩批改不动结果。
+  今天 17 轮失败里有 8 轮时长集中在 484–489s（极稳定指纹）。
+- **本轮修复（只补可观测，不改语义）**：`CuratorModelAttempt` 每次模型调用记一条
+  （attempt / prompt_chars / schema_chars / granted_seconds / elapsed_ms / shrunk / outcome=异常类名），
+  ContextVar `_LAST_MODEL_ATTEMPTS` + `last_model_attempts()`；`curator.py` 的 `_attempt_shape_warnings()`
+  把每条编码成 `curator_model_attempt={...}` 走既有 warnings（键序固定、自限 300 字符/32 条），
+  原 `failure_diagnostic=` 仍是最后一条；另加同口径 logging.warning 便于真机即时定位。
+  **绝不记 prompt/schema/响应正文**；未新增 run 账 dataclass 字段（有 `set(to_record())==set(__dataclass_fields__)`
+  断言，防再次踩 `CURATOR_RUN_AUDIT_FAILED`）。语义护栏：只有 `call_backend_with_timeout` 的失败算"尝试失败"，
+  `parse_curator_extraction` 的宿主契约异常仍直接上抛（不缩批、不多打调用）。
+- 证据：`test_curator_timeout_observability`（新增 8 例）等三套 71 passed；扩展回归 57 passed；ruff 通过。
+- **未做（需决策）**：候选修法 ①给策展显式指定 provider/model（不走 owner selected profile，指向真实网络端点；
+  实测 2.0s）——属"用哪个模型"的用户选择，未擅自改；②`--parallel` ≥2 或让长请求不占满槽位——环境改动；
+  ③端点占用**快速失败**并如实留证（不空转 8 分钟、不伪装超时）——会改变 run 行为与 warnings，先给方案未实现。
+  真机生效需重启网关（不在本轮职责内）。
+
+# Memory Progress
+
 ## 2026-09-12 R262 策展超时改为有界自适应缩批
 
 - 真机诊断（r260 上线后首轮 run 落盘）：`failure_diagnostic={"error_type":"ProviderTimeoutError"}` —— 第三个原因

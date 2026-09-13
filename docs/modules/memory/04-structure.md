@@ -1,5 +1,15 @@
 # Memory Structure
 
+## R264 策展尝试形状的边界
+
+- `curator_model_attempt={...}` 是**诊断投影**，只含计数/耗时/异常类名，权威仍是 `failure_code` 与事务状态；
+  键序固定、单条 ≤300 字符、最多 32 条，走既有 `warnings`（**禁止**为诊断新增 run 账 dataclass 字段：
+  字段集是严格 v2 契约，新增会让所有历史行 fail-closed，真机踩过 `CURATOR_RUN_AUDIT_FAILED`）。
+- 尝试账用 ContextVar 承载且每轮 `extract_with_retries` 先清空 → 失败审计读到的只能是本轮证据；
+  不得把它做成跨轮累积的全局状态。
+
+# Memory Structure
+
 ## R262 策展超时缩批的边界
 
 - `curator_backend.extract_with_retries` 现在返回 `CuratorExtractionAttempt`（实际输入快照 + 解析结果 + 缩批次数）；

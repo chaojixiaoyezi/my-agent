@@ -6,9 +6,12 @@ from __future__ import annotations
 # loop, tool registry, shell, file writer, remember, persona, or Skill capability.
 # 模块用途: 构造非权威历史输入、执行有界超时重试并严格解析 CuratorExtraction。
 
+import contextvars
 import json
+import logging
 import queue
 import threading
+import time
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from typing import TypeVar
@@ -29,6 +32,8 @@ from .curator_models import (
     parse_curator_extraction,
 )
 from .daily import DAILY_ACTORS, DAILY_EVENT_TYPES
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # LLM: A timed-out daemon call may finish naturally but has no tools or commit references, so it
@@ -59,6 +64,54 @@ class CuratorExtractionAttempt:
     batch: CuratorInputBatch
     extraction: CuratorExtraction
     shrink_attempts: int = 0
+
+
+# LLM: 失败路径原先只抛最后一个异常,缩批/重试的**形状**随之丢失(真机 2026-09-13 两轮
+# CURATOR_MODEL_FAILED 账上只有 failure_diagnostic={"error_type":"ProviderTimeoutError"},
+# 看不出打了几次、每次输入多大、每次授权多少秒、有没有缩批)。这个记录只装机器可判定的标量:
+# 序号、prompt/schema 字符数、授予超时秒、实际耗时毫秒、是否缩批、异常类名——**绝不**装
+# prompt/schema/响应正文,所以可以安全进 run 账 warnings。
+# 类用途: 保存一次模型调用的无正文形状事实。
+@dataclass(frozen=True)
+class CuratorModelAttempt:
+    attempt: int
+    prompt_chars: int
+    schema_chars: int
+    granted_seconds: int
+    elapsed_ms: int
+    shrunk: bool
+    outcome: str
+
+
+# LLM: 只记录当前线程内**最后一次** extract_with_retries 的尝试形状。用 ContextVar 而不是全局
+# 变量: 网关里可能有多个 owner/线程,互不覆盖;每次调用先把值清空,保证失败审计绝不会把上一次
+# 运行(或另一个批次)的尝试当成本次证据。
+_LAST_MODEL_ATTEMPTS: contextvars.ContextVar[tuple[CuratorModelAttempt, ...] | None] = (
+    contextvars.ContextVar("memory_curator_last_model_attempts", default=None)
+)
+
+
+# LLM: 失败路径的唯一读取入口:没有调用过(或调用前就失败)时返回空元组,调用方据此什么都不记,
+# 不伪造"零次尝试"这种看起来像证据的假事实。
+# 函数用途: 返回当前执行线程内最后一次自适应提取的尝试形状。
+def last_model_attempts() -> tuple[CuratorModelAttempt, ...]:
+    return _LAST_MODEL_ATTEMPTS.get() or ()
+
+
+# LLM: 键集是固定的七项 allowlist(序号/prompt 字符数/schema 字符数/授予超时秒/实际耗时毫秒/
+# 是否缩批/结果类名),全部来自宿主自身计数器与异常类名;绝不取 str(exc) 或任何请求正文——
+# 供应商正文可能夹带请求体和密钥。
+# 函数用途: 把一次尝试的形状序列化为稳定、单行、有界的 JSON 文本。
+def attempt_shape_payload(attempt: CuratorModelAttempt) -> dict[str, object]:
+    return {
+        "attempt": attempt.attempt,
+        "prompt_chars": attempt.prompt_chars,
+        "schema_chars": attempt.schema_chars,
+        "granted_seconds": attempt.granted_seconds,
+        "elapsed_ms": attempt.elapsed_ms,
+        "shrunk": attempt.shrunk,
+        "outcome": attempt.outcome,
+    }
 
 
 # LLM: 超时判定只读异常类型(含 MRO 类名),绝不解析异常正文——供应商正文可能夹带请求体和
@@ -132,6 +185,7 @@ def extract_with_retries(
     if len(prompt) > config.max_input_chars:
         raise ValueError("CURATOR_INPUT_BUDGET_EXCEEDED")
     schema = curator_response_schema()
+    schema_chars = len(json.dumps(schema, ensure_ascii=False))
     effective = batch
     # LLM: lease(curator._lease_seconds = 同式 + 90s 提交缓冲)覆盖的模型调用总时长就是下面的
     # budget_seconds。缩批重试不得把总时长推出 lease,否则 lease 先过期、成功提取也提交不了
@@ -144,28 +198,51 @@ def extract_with_retries(
     retries_left = config.max_retries
     shrinks_left = _TIMEOUT_SHRINK_LIMIT
     last_error: BaseException | None = None
-    while True:
-        timeout_seconds = adaptive_timeout_seconds(config.timeout_seconds, len(prompt))
-        if granted_seconds + timeout_seconds > budget_seconds:
-            break  # 预算耗尽: 有界收口,不再发新调用,按最后一次异常分类失败
-        granted_seconds += timeout_seconds
-        try:
-            response = call_backend_with_timeout(
-                backend,
-                prompt=prompt,
-                response_schema=schema,
-                timeout_seconds=timeout_seconds,
+    shapes: list[CuratorModelAttempt] = []
+    token = _LAST_MODEL_ATTEMPTS.set(())
+    try:
+        while True:
+            timeout_seconds = adaptive_timeout_seconds(config.timeout_seconds, len(prompt))
+            if granted_seconds + timeout_seconds > budget_seconds:
+                break  # 预算耗尽: 有界收口,不再发新调用,按最后一次异常分类失败
+            granted_seconds += timeout_seconds
+            started = time.monotonic()
+            failure: BaseException | None = None
+            try:
+                response = call_backend_with_timeout(
+                    backend,
+                    prompt=prompt,
+                    response_schema=schema,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as exc:
+                failure = exc
+            # LLM: 只把**供应商调用**的失败当尝试失败。解析(parse_curator_extraction)失败属于宿主
+            # 契约错误:它不是"这次调用没跑出来",不能借它触发缩批或多打一次调用——语义必须与修复前
+            # 一致(解析异常直接冒出 extract_with_retries)。
+            shapes.append(
+                CuratorModelAttempt(
+                    attempt=len(shapes) + 1,
+                    prompt_chars=len(prompt),
+                    schema_chars=schema_chars,
+                    granted_seconds=timeout_seconds,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    shrunk=effective is not batch,
+                    outcome=type(failure).__name__ if failure is not None else "ok",
+                )
             )
-            return CuratorExtractionAttempt(
-                batch=effective,
-                extraction=parse_curator_extraction(
-                    str(getattr(response, "text", "") or "")
-                ),
-                shrink_attempts=_TIMEOUT_SHRINK_LIMIT - shrinks_left,
-            )
-        except Exception as exc:
-            last_error = exc
-            timed_out = is_curator_timeout_error(exc)
+            _LAST_MODEL_ATTEMPTS.set(tuple(shapes))
+            if failure is None:
+                # 成功形状同样留痕(含 result 类名),失败审计与成功运行都能看出调用形状。
+                return CuratorExtractionAttempt(
+                    batch=effective,
+                    extraction=parse_curator_extraction(
+                        str(getattr(response, "text", "") or "")
+                    ),
+                    shrink_attempts=_TIMEOUT_SHRINK_LIMIT - shrinks_left,
+                )
+            last_error = failure
+            timed_out = is_curator_timeout_error(failure)
             smaller = (
                 shrink_batch_for_timeout(effective)
                 if timed_out and shrinks_left > 0
@@ -185,8 +262,40 @@ def extract_with_retries(
             # 超时不消耗同输入重试额度:同一份已超时的输入再试一次没有新信息。缩到下限
             # (shrink_batch_for_timeout 返回 None)或缩批/时长预算用尽,即按原语义 typed 失败。
             break
+    finally:
+        # 只有"一次调用都没发生"时才回滚(比如预算在第 0 次就收口、或 prompt 组装前的早退):
+        # 那种情况必须清掉上一个调用者留下的形状,否则失败审计会把别人的尝试当成本次证据。
+        # 已经落了形状就保留到本次异常被分类落账之后再清(由下一次调用覆盖)。
+        if not shapes:
+            _LAST_MODEL_ATTEMPTS.reset(token)
+    if last_error is not None:
+        _LOGGER.warning(
+            "memory curator model calls failed: %s",
+            _attempt_shape_log_line(shapes),
+        )
     assert last_error is not None
     raise last_error
+
+
+# LLM: 失败审计只在**下一轮**维护 tick 才能读到账,而真机定位往往要看"当时那一次调用等了几秒"。
+# 这里按仓库既有 logging 约定(没有 handler 时 Python 落到 stderr,而网关把 stderr 收进
+# gateway.log)再打一行同口径的无正文摘要:prompt/schema 只给字符数,异常只给类名。
+# 函数用途: 把尝试形状渲染成一行可 grep 的日志摘要。
+def _attempt_shape_log_line(shapes: Sequence[CuratorModelAttempt]) -> str:
+    return " ".join(
+        "attempt=%d prompt_chars=%d schema_chars=%d granted_seconds=%d "
+        "elapsed_ms=%d shrunk=%s outcome=%s"
+        % (
+            item.attempt,
+            item.prompt_chars,
+            item.schema_chars,
+            item.granted_seconds,
+            item.elapsed_ms,
+            "true" if item.shrunk else "false",
+            item.outcome,
+        )
+        for item in shapes
+    )
 
 
 # LLM: Provider execution occurs in a daemon thread solely to enforce a hard wait bound; the
@@ -276,10 +385,14 @@ def _enum_values(values: Collection[str]) -> str:
 
 __all__ = [
     "CuratorExtractionAttempt",
+    "CuratorModelAttempt",
     "CuratorModelTimeoutError",
+    "adaptive_timeout_seconds",
+    "attempt_shape_payload",
     "call_backend_with_timeout",
     "curator_prompt",
     "extract_with_retries",
     "is_curator_timeout_error",
+    "last_model_attempts",
     "shrink_batch_for_timeout",
 ]
