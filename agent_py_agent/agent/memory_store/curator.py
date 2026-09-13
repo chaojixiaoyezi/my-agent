@@ -241,6 +241,7 @@ class _CuratorLifecycleMixin:
                     model=self.model_name,
                     finished_at=finished_at,
                     failure_code=failure_code,
+                    failure_diagnostic=_failure_diagnostic(exc),
                 )
             )
         except Exception:
@@ -981,6 +982,24 @@ def _corrupt_run_id(quarantine: dict[str, object]) -> str:
 # LLM: Failure audit preserves the acquired lease and recovery provenance but never serializes
 # exception text that may contain provider payload or user data.
 # 函数用途: 构造失败 run audit。
+def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
+    """只提取机器可判定的失败形状：异常类名 + 供应商 HTTP 状态码（能拿到才记）。
+
+    供应商异常正文、请求体、记忆内容一律不进入账本；没有状态码就不写这个键，避免伪装成已知。
+    """
+    diagnostic: dict[str, object] = {"error_type": type(exc).__name__}
+    for attr in ("http_status", "status_code"):
+        value = getattr(exc, attr, None)
+        try:
+            status = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if status > 0:
+            diagnostic["provider_http_status"] = status
+            break
+    return diagnostic
+
+
 def _failed_run_record(
     context: _RunContext,
     *,
@@ -988,6 +1007,7 @@ def _failed_run_record(
     model: str,
     finished_at: str,
     failure_code: str,
+    failure_diagnostic: dict[str, object] | None = None,
 ) -> CuratorRunRecord:
     return CuratorRunRecord(
         run_id=context.run_id,
@@ -1004,6 +1024,7 @@ def _failed_run_record(
             context.state_before.last_processed_audit_event_id,
         ),
         recovery=context.recovery,
+        failure_diagnostic=dict(failure_diagnostic or {}),
     )
 
 

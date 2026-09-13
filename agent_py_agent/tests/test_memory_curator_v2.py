@@ -1798,3 +1798,20 @@ def test_curator_task_alias_replay_does_not_duplicate_occurrence(tmp_path: Path)
     current = service.list()
     assert len(current) == 1
     assert current[0].occurrence_count == 1
+
+
+# LLM: 通用失败码（如 CURATOR_MODEL_FAILED）必须能带出机器可判定的形状，否则真机故障无法定位；
+# 同时不得落供应商异常正文。这条锁住诊断字段的存在与边界。
+# 函数用途: 验证失败诊断只含异常类名与（可选）HTTP 状态码。
+def test_curator_failure_diagnostic_records_shape_not_provider_text() -> None:
+    from agent_py_agent.agent.memory_store.curator import _failure_diagnostic
+
+    class _Rejected(RuntimeError):
+        http_status = 429
+
+    diagnostic = _failure_diagnostic(_Rejected("provider said: secret-token-xyz"))
+    assert diagnostic == {"error_type": "_Rejected", "provider_http_status": 429}
+    assert "secret-token-xyz" not in json.dumps(diagnostic, ensure_ascii=False)
+
+    plain = _failure_diagnostic(RuntimeError("boom"))
+    assert plain == {"error_type": "RuntimeError"}
