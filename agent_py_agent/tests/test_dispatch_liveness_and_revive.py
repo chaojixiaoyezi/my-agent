@@ -1577,3 +1577,53 @@ def test_consistent_terminal_result_is_reentrant_but_conflict_is_rejected(tmp_pa
     assert _managed_runtime_result_conflict(
         manager, manager.load(task.id), conflicting
     ) != "", "与权威终态冲突的结论必须仍被拒绝"
+
+
+# LLM: 被拒事实（换代/冲突）重试永远不会成功：诊断只写一次后必须清账，否则每个 reconcile
+# 周期都会重复写 closeout_blocked，且该 owner 会因这条永久事实被反复当成硬事实扫描。
+# 函数用途: 验证被拒事实只诊断一次、不无界重试、不产生事件洪泛。
+def test_rejected_closeout_fact_is_cleared_once_not_retried(tmp_path: Path) -> None:
+    from agent_py_agent.agent.subagents.services import runtime_closeout
+
+    manager, store, task, attempt_id, agent_run_id, params, _json = _closeout_fixture(
+        tmp_path, owner="tui-test/closeout-rejected"
+    )
+    # 先让收口提交并完成交付，再把 WAL 事实人为恢复出来但换成"已换代"的 attempt：
+    # 这样恢复链一定会拿到 stale_attempt 这个被拒结论。
+    manager.runner_result.record_runner_result(params)
+    task_loaded = manager.load(task.id)
+    superseded = type(params)(**{**vars(params), "attempt_id": "attempt-superseded-not-current"})
+    assert runtime_closeout.record_pending_closeout(
+        manager, task_loaded, superseded, manager.runner_result._make_quick_result(
+            task_loaded, False, False, params.message
+        ),
+        {"state": "pending", "target_run_status": "failed", "agent_run_id": agent_run_id,
+         "attempt_id": "attempt-superseded-not-current"},
+    )
+    fact = runtime_closeout.pending_closeout(manager.load(task.id))
+    assert fact is not None
+    assert str(fact["attempt_id"]) == "attempt-superseded-not-current"
+
+    first = runtime_closeout.recover_pending_closeouts(manager)
+    assert first["runtime_closeouts_rejected"] == 1, first
+    assert runtime_closeout.pending_closeout(manager.load(task.id)) is None, (
+        "被拒事实必须清账，不能每个周期重复重试"
+    )
+
+    # 后续周期：不再重试、不再写诊断事件。
+    events_before = manager.runtime_db.events_for_attempt(attempt_id, limit=200)
+    blocked_before = sum(
+        1 for item in events_before if str(item["event_type"] or "") == "closeout_blocked"
+    )
+    for _ in range(3):
+        again = runtime_closeout.recover_pending_closeouts(manager)
+        assert again["runtime_closeouts_rejected"] == 0, again
+        assert again["runtime_closeouts_pending"] == 0, again
+    events_after = manager.runtime_db.events_for_attempt(attempt_id, limit=200)
+    blocked_after = sum(
+        1 for item in events_after if str(item["event_type"] or "") == "closeout_blocked"
+    )
+    assert blocked_after == blocked_before, "被拒事实不得每周期重复写诊断事件"
+    # 权威终态与既有唤醒不受影响。
+    assert str(manager.runtime_db.agent_run_for_run_id(task.id)["status"] or "") == "failed"
+    assert len(_wakes_for_attempt(tmp_path, task.id, attempt_id)) == 1

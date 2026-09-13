@@ -1,5 +1,13 @@
 # Subagent Progress
 
+### R291 追加：被拒收口事实只诊断一次后清账
+
+恢复链原先对被拒事实（`stale_attempt` / 冲突终态）只写诊断、不清账：由于重试永远不会成功，
+每个 reconcile 周期都会重复写 `closeout_blocked`，且该 owner 会因这条永久事实被反复当成硬事实扫描
+（无界重试 + 事件洪泛）。现在被拒分支写一次诊断后 `clear_closeout()` 清账；权威 run/task 事实照旧成立，
+换代后的新 attempt 走它自己的正常收口与通知。守卫用例
+`test_rejected_closeout_fact_is_cleared_once_not_retried` 固定"只诊断一次、不无界重试、不洪泛"。
+
 ### R291 追加：owner 投影新增 runtime_closeout_pending
 
 `build_owner_agent_projection` 增加结构化布尔量 `runtime_closeout_pending`（来自 canonical task

@@ -318,10 +318,15 @@ def advance_pending_closeout(manager: Any, task: Any, fact: dict[str, Any]) -> d
         return {"advanced": False, "state": "runner_result_missing"}
     outcome = settle_runtime_run_for_result(manager, params=params, task=task, result=result)
     if outcome.get("state") in REJECTED_CLOSEOUT_STATES:
+        # LLM: 被拒（与权威终态冲突 / 已换代）不是"以后可能成"——重试永远不会成功。
+        # 所以诊断只写一次，然后清账：否则每个 reconcile 周期都会重复写事件，
+        # 且 owner 会因为这条永久事实一直被当成硬事实反复扫描（无界重试 + 事件洪泛）。
+        # 权威 run/task 事实已经成立，换代后的新 attempt 会走它自己的正常收口与通知。
         record_closeout_event(manager, task, event_type="closeout_blocked", params=params, outcome=outcome)
-        return {"advanced": False, "state": str(outcome.get("state") or "")}
+        clear_closeout(manager, task)
+        return {"advanced": False, "state": str(outcome.get("state") or ""), "rejected": True}
     if outcome.get("state") not in COMMITTED_CLOSEOUT_STATES | {CLOSEOUT_NOT_APPLICABLE}:
-        # 仍未收口：更新事实里的诊断字段，等待下一次恢复。
+        # 仍未收口（写库失败等可重试形态）：更新事实里的诊断字段，等待下一次恢复。
         record_pending_closeout(manager, task, params, result, outcome,
                                 delivery=str(fact.get("delivery") or _DELIVERY_PENDING))
         record_closeout_event(manager, task, event_type="closeout_pending", params=params, outcome=outcome)
