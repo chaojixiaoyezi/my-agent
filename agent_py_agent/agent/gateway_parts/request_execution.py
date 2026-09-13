@@ -341,6 +341,39 @@ class BufferedChunkStreamWriter:
             except (OSError, RuntimeError, TypeError, ValueError):
                 pass
 
+    # LLM: 与 consumed 严格区分:本事件只证明"这批补充输入已经进入这一次提供方调用的 prompt"
+    # (ConversationStore 已 committed submitted、后端调用即将发出),不证明模型处理过、不结算回复
+    # 欠账、也不清任何 pending 回执。发布它是为了让客户端在慢流/失败时也能立刻按真实位置看到
+    # 用户消息,而不是等整次响应返回后才由 consumed 补上。
+    # 函数用途: 在提供方调用发出前，向富客户端发布可重放的"已提交"用户消息事件。
+    def submit_active_turn_input(
+        self,
+        client_message_ids: tuple[str, ...],
+        *,
+        provider_call_id: str = "",
+        client_messages: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        message_ids = tuple(
+            item for item in (str(value or "").strip() for value in client_message_ids) if item
+        )
+        if self.rich_transcript and message_ids:
+            accepted = set(message_ids)
+            messages = [
+                {"message_id": message_id, "text": text}
+                for raw_id, raw_text in tuple(client_messages or ())
+                if (message_id := str(raw_id or "").strip()) in accepted
+                and (text := str(raw_text or ""))
+            ]
+            self.flush()
+            self._write_event(
+                {
+                    "kind": "active_turn_input_submitted",
+                    "client_message_ids": list(message_ids),
+                    "provider_call_id": str(provider_call_id or "").strip(),
+                    **({"messages": messages} if messages else {}),
+                },
+            )
+
     # LLM: This event is emitted only after ConversationStore committed consumed at the
     # provider-accepted prompt boundary. Text lets reconnecting clients replay the committed
     # user row, while ids remain the sole pending-receipt correlation authority.

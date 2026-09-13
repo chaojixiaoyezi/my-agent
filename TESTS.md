@@ -1,5 +1,25 @@
 # TESTS
 
+## 2026-09-13 R270 插话三段状态的受控回归
+
+新增 `agent_py_agent/tests/test_tui_injected_input_states.py`（11 例）与
+`test_gateway_foreground_transcript.py::test_submitted_steering_is_replayable_before_consumption`（1 例）：
+
+- 运行期：`test_submit_boundary_emits_submitted_fact_without_consuming`（提供方调用前发"已提交"、
+  身份 = client message_id + provider_call_id、**不**写 consumed、**不**建回复欠账，之后的确认仍走 consumed
+  且身份一致）、`test_submitted_fact_is_a_durable_transcript_kind`。
+- 展示层：已提交即按原序号进入可见历史且文案为"已送入当前回合，等待模型回应"（不再出现"将在下一次工具调用后
+  送入"）、已确认后只有一行、慢流中状态不倒退、失败后降级为"已送入但未获模型确认；不会自动重发"、
+  身份只认 message_id（同正文的另一条不受影响）。
+- 重连/主子：重复已提交事件不重复建行、重放"已提交+已确认"只产生一行且无诊断、子代理终态文案、
+  旧三字段构造兼容。
+- 持久层：前台 transcript 的 `submit_active_turn_input` 写入可重放的 `active_turn_input_submitted`，
+  且未确认前**不出现** `active_turn_input_consumed`；TUI 重放后用户行与 `state=submitted` 同时成立。
+
+守卫有效性：把 `mark_injected_turn_input_submitted` 的已提交播报还原为旧行为后，运行期用例必红（已验证）。
+本轮 focused：11 个受影响套件 499 项 EXIT=0。**不等同真机验收**：真 TUI（慢流/中断/重连/主子切换）
+必须部署后再做。
+
 ## 2026-09-13 R269 验收反馈 A/B/C 的受控回归
 
 三条缺陷各自先用**真实函数 + 受控交错**复现，再修，再用"旧实现必红"的方式验证守卫有效性：

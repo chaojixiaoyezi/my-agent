@@ -49,6 +49,10 @@ class TuiPendingSteer:
     message_id: str
     text: str
     seq: int
+    # "queued"=已入队但还没进 prompt;"submitted"=已进入本次提供方调用的 prompt 但未获模型确认。
+    # 两个状态都必须显示,但说辞不同;它绝不表示已消费(那由 steer_promoted 单独表达)。
+    state: str = "queued"
+    provider_call_id: str = ""
 
 
 # LLM: TuiPermissionOverlay 只投影 ActionPolicy 请求；decision 必须由 typed intent 送回授权主链。
@@ -329,6 +333,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "steer_added": self._handle_steer_added,
             "steer_removed": self._handle_steer_removed,
             "steer_promoted": self._handle_steer_promoted,
+            "steer_submitted": self._handle_steer_submitted,
             "queue_added": self._handle_queue_added,
             "queue_removed": self._handle_queue_removed,
             "queue_restored": self._handle_queue_removed,
@@ -938,6 +943,10 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self.pending_steers[:] = [
             item for item in self.pending_steers if item.message_id != message_id
         ]
+        if pending.state == "submitted":
+            # 已提交边界已经把这一行按原提交位置插进历史;消费确认只收掉"未确认"标记,
+            # 不允许再插第二行(重复行会让同一条用户消息在历史里出现两次)。
+            return
         promoted = replace(
             event,
             payload={**event.payload, "text": pending.text},
@@ -947,6 +956,56 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             created_seq=pending.seq,
         )
         self._insert_promoted_user(block, promoted)
+
+    # LLM: 已提交是独立于已确认的展示边界:消息确实进入了本次提供方调用的 prompt,但没有模型
+    # 答复。此时必须按**原提交序号**把它记入可见历史(慢流/失败时用户也要能看到自己发过什么),
+    # 同时在等待区保留"未获确认"事实。身份只用 client message_id,绝不按正文匹配;重复事件
+    # (重连补放)按同一个块 ID 去重,因此不会丢也不会重。
+    # 函数用途: 把已提交当前回合的补充消息按原位置记入历史，并保留未确认标记。
+    def _handle_steer_submitted(self, event: TuiEvent) -> None:
+        message_id = str(event.payload.get("message_id") or "").strip()
+        if not message_id:
+            raise ValueError("steer message_id required")
+        text = str(event.payload.get("text") or "")
+        provider_call_id = str(event.payload.get("provider_call_id") or "")
+        pending = next(
+            (item for item in self.pending_steers if item.message_id == message_id),
+            None,
+        )
+        if pending is None:
+            # 重连补放:本会话没有等待项,用事件里的同一身份补一条"已提交"记录(不是新消息)。
+            pending = TuiPendingSteer(
+                message_id=message_id,
+                text=text,
+                seq=event.seq,
+                state="submitted",
+                provider_call_id=provider_call_id,
+            )
+            self.pending_steers.append(pending)
+            self.pending_steers.sort(key=lambda item: item.seq)
+        else:
+            self.pending_steers[:] = [
+                replace(
+                    item,
+                    state="submitted",
+                    provider_call_id=provider_call_id or item.provider_call_id,
+                )
+                if item.message_id == message_id
+                else item
+                for item in self.pending_steers
+            ]
+        block_id = f"user:{str(event.request_id or '').strip()}:steer:{message_id}"
+        if block_id in self._stable_ids:
+            return  # 同一条消息的重复已提交事件:行已经在历史里,不再插第二行
+        submitted = replace(
+            event,
+            payload={**event.payload, "text": pending.text},
+        )
+        block = replace(
+            self._block_from_event(submitted, role="user", phase="completed"),
+            created_seq=pending.seq,
+        )
+        self._insert_promoted_user(block, submitted)
 
     # LLM: This insertion is intentionally scoped to one promoted user message and one request.
     # Global stable ordering remains completion-ordered, while a delayed transport receipt may

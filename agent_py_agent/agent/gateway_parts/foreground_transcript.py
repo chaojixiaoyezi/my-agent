@@ -87,6 +87,17 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
                 self._event("compact_boundary", "completed", f"{self.request_id}:compact:{generation}", {"compact_generation": generation})
                 self.begin_model_attempt(generation)
             return
+        if kind == "active_turn_input_submitted":
+            # 已提交与已消费走同一条转发路径,但语义严格更弱:它只表示这批输入已进入本次提供方
+            # 调用的 prompt,重连客户端据此立刻重建用户行,不得据此清等待项或结算回复欠账。
+            ids = event.get("client_message_ids")
+            rows = event.get("messages")
+            self.submit_active_turn_input(
+                tuple(ids) if isinstance(ids, list) else (),
+                provider_call_id=str(event.get("provider_call_id") or ""),
+                client_messages=tuple((row.get("message_id", ""), row.get("text", "")) for row in rows if isinstance(row, dict)) if isinstance(rows, list) else (),
+            )
+            return
         if kind == "active_turn_input_consumed":
             ids = event.get("client_message_ids")
             rows = event.get("messages")

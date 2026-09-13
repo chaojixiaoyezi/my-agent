@@ -299,7 +299,16 @@ def mark_injected_turn_input_submitted(
             state["_guidance_submission_id"] = str(provider_call_id).strip()
         return count
 
-    return int(_run_active_turn_transition(params, "submit", submit))
+    submitted = int(_run_active_turn_transition(params, "submit", submit))
+    if submitted:
+        # 已提交是**独立于已确认**的事实边界:账本已 committed submitted(提供方调用即将发出),
+        # 但还没有任何模型答复。把它发给展示层,客户端才能立刻按真实位置把用户消息记入历史,
+        # 而不是等到整次模型响应返回后的 acknowledge 才显示(慢流/失败时用户会以为没送进去)。
+        # 这里不消耗、不清回复欠账、不改任何账本状态,只是把已经发生的事实播出去。
+        _submit_active_turn_user_reply_segment(
+            params, submitted_entries, provider_call_id=provider_call_id
+        )
+    return submitted
 
 
 # LLM: A typed provider context rejection proves no prompt execution. Only that caller may restore
@@ -583,6 +592,46 @@ def _guidance_client_message_ids(entries: list[Any]) -> tuple[str, ...]:
         if message_id and message_id not in result:
             result.append(message_id)
     return tuple(result)
+
+
+# LLM: 已提交事件与已确认事件共用同一套身份(channel_message_id + request/provider_call),但语义严格
+# 更弱:它只证明"这条输入已经进入这一次提供方调用的 prompt",不证明模型处理过、更不结算任何回复欠账。
+# 展示层据此把用户消息提前记入历史,同时保留"未确认"事实;绝不能被当成 consumed。
+# 函数用途: 在提供方调用发出前，通知输出流发布"已提交"的用户消息事件。
+def _submit_active_turn_user_reply_segment(
+    params: object,
+    entries: list[Any],
+    *,
+    provider_call_id: str = "",
+) -> None:
+    sink = getattr(params, "effective_on_chunk", None)
+    if sink is None:
+        sink = getattr(params, "on_chunk", None)
+    submit = getattr(sink, "submit_active_turn_input", None)
+    if not callable(submit):
+        return
+    client_message_ids = _guidance_client_message_ids(entries)
+    if not client_message_ids:
+        return
+    client_messages = tuple(
+        (
+            str(
+                (getattr(entry, "metadata", {}) or {}).get("channel_message_id")
+                or ""
+            ).strip(),
+            str(getattr(entry, "message", "") or ""),
+        )
+        for entry in entries
+        if str(
+            (getattr(entry, "metadata", {}) or {}).get("channel_message_id")
+            or ""
+        ).strip()
+    )
+    submit(
+        client_message_ids,
+        provider_call_id=str(provider_call_id or "").strip(),
+        client_messages=client_messages,
+    )
 
 
 # LLM: Parent lifecycle wakes are an exact receiver mailbox, matching 会话运行时's direct

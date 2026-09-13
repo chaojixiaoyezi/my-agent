@@ -1,5 +1,30 @@
 # DESIGN LEDGER
 
+## 2026-09-13 R270 插话"排队/已提交/已确认"三段状态（用户现场：模型已引用插话，界面仍写"稍后送入"）【状态：已修+受控验收，未部署】
+
+现场：模型回复引用了新插话，底部仍显示"将在下一次工具调用后送入当前回合"，可见历史里没有这条用户消息。
+只读核对确认这是**状态边界缺失**而非渲染文案问题：`_tool_loop_service._model_turn_or_retry` 只在整次
+`next_tool_loop_model_response` 返回后才 `acknowledge_injected_turn_input`；`guidance._persist_guidance_transcript`
+只随 consumed 落盘；`tui_block_renderer._render_pending_steers` 把"未消费"一律渲染成"将在下一次工具调用后送入"。
+于是**已提交但未确认**这一真实中间态在整条链上没有任何人表达。
+
+修复（三段状态，事件全部带结构化身份）：
+- **排队**：`steer_added`（现状不变）。
+- **已提交**（新增）：`mark_injected_turn_input_submitted` 在账本 committed `submitted`、提供方调用发出前
+  调 sink 的 `submit_active_turn_input`（`request_execution` 写 `active_turn_input_submitted`；
+  `background_transcript` 同名实现并加入事件白名单；`foreground_transcript` 转发入站同名 kind）。
+  只发布事实：不消耗、不清回执、不建回复欠账、不改账本。
+- **已确认**：`active_turn_input_consumed`（现状不变，仍是唯一能清等待项/写 transcript 的边界）。
+- **展示**：已提交后用户消息**立刻**按原提交序号进入可见历史；等待区改为"已送入当前回合，等待模型回应"
+  且不再重复正文；已确认只收标记、**不再插第二行**；回合终态仍未确认时降级为"已送入但未获模型确认；不会
+  自动重发"；子代理视角同理。重连按持久事件重放，按块 ID 去重。
+- **身份**：只用 `channel_message_id` + `request_id` + `provider_call_id`；正文只做展示/重放，不参与判定。
+
+**验证**：新增 12 例（`test_tui_injected_input_states.py` 11 例 + 前台 transcript 1 例），覆盖
+"提交边界发事实且不消费"、"已提交即入历史且文案如实"、"慢流中不倒退成稍后送入"、"失败降级不承诺重发"、
+"身份不按正文匹配"、"重复事件不重复建行"、"重连重放不丢不重"、"子代理终态文案"。把 emit 钩子还原成旧行为后
+运行时用例必红（已验证）；11 个受影响套件 499 项 EXIT=0。**未部署、未真机**（真 TUI 验收需部署后做）。
+
 ## 2026-09-13 R269 验收反馈 A/B/C 修复：事实缓存快照绑定 + 投影命中原子化 + 坏探针回退【状态：已修+受控验收，未部署】
 
 三条都是 R265/R267 我自己的提交留下的缺陷，逐条先复现再修（对外语义零改动）：

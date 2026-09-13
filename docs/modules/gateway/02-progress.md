@@ -1,5 +1,23 @@
 # Gateway Progress
 
+## 2026-09-13 R270 插话三段状态：模型已引用插话、界面却仍写"稍后送入"
+
+用户现场:模型回复里已经引用了新插话,底部仍显示"将在下一次工具调用后送入当前回合",可见历史里也没有这条
+用户消息。只读核对确认根因在**状态边界缺失**:展示层只有"入队"和"已确认(consumed)"两态,而
+`acknowledge_injected_turn_input` 只在整次 `next_tool_loop_model_response` 返回后才执行
+(`_tool_loop_service.py`),`_persist_guidance_transcript` 也只随 consumed 落;慢流/失败时已提交这一
+真实中间态没有任何人表达,`_render_pending_steers` 只能把未消费一律写成"将在下一次工具调用后送入"。
+
+修复(不猜正文、不提前置 consumed、不重发):
+- 新增**已提交**事实边界:`mark_injected_turn_input_submitted` 在账本 committed `submitted`、提供方调用
+  即将发出时,向输出 sink 发 `submit_active_turn_input`(`request_execution` / `background_transcript`
+  / `foreground_transcript` 三处同名接口),事件携带 `client_message_ids` + `provider_call_id` + 有界正文。
+  该边界只播事实,不动账本、不结算回复欠账。
+- TUI:`steer_submitted` 后按原提交序号把用户消息记入可见历史,等待区改为"已送入当前回合，等待模型回应"
+  且不再重复正文;已确认(`steer_promoted`)只收标记不再插行;回合终态仍未确认时降级为
+  "已送入当前回合但未获模型确认；不会自动重发";子代理视角同理。重连按持久事件重放,块 ID 去重。
+- 身份只用 `channel_message_id`/`request_id`/`provider_call_id`,正文不参与任何判定。
+
 ## 2026-09-13 R269 验收反馈 A/B/C：事实缓存快照绑定、投影命中原子化、坏探针回退
 
 三条都是上一轮我自己的提交留下的缺陷，逐条先复现再修（都不改变对外语义）：

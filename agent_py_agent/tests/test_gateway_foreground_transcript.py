@@ -146,6 +146,31 @@ def test_steering_discards_uncommitted_candidate_and_confirms_exact_input(tmp_pa
     assert [b.text for b in snap.stable_blocks if b.role == "user"] == ["先看第二份"]
 
 
+def test_submitted_steering_is_replayable_before_consumption(tmp_path):
+    """已提交是独立于已确认的持久事实:重连客户端必须立刻看到用户行,同时保留未确认状态。"""
+    agent, writer, _, thread, _ = _foreground(tmp_path)
+    writer.begin_active_turn_input(("input-1",))
+    writer.submit_active_turn_input(
+        ("input-1",),
+        provider_call_id="call-7",
+        client_messages=(("input-1", "先看第二份"), ("other", "不能出现")),
+    )
+    writer.write_model("正在生成")
+    writer.flush()
+
+    events = read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)["events"]
+    kinds = [item.get("kind") for item in events]
+    assert "active_turn_input_submitted" in kinds
+    assert "active_turn_input_consumed" not in kinds  # 未确认前不得出现消费事件
+
+    runtime = TuiRuntime("observer")
+    runtime.publish_background_transcript_events(events)
+    snap = runtime.store.snapshot()
+    assert [b.text for b in snap.stable_blocks if b.role == "user"] == ["先看第二份"]
+    assert [item.state for item in snap.pending_steers] == ["submitted"]
+    assert all("不能出现" not in b.text for b in snap.stable_blocks)
+
+
 def test_close_without_final_settles_only_its_display_and_does_not_invent_tool_success(tmp_path):
     agent, writer, _, thread, _ = _foreground(tmp_path)
     writer.write_progress({"round": 1, "call_index": 0, "tool": "read_file", "phase": "started"}, "")

@@ -46,6 +46,7 @@ _TRANSCRIPT_SETUP_LOCK = threading.Lock()
 BACKGROUND_TRANSCRIPT_EVENT_KINDS = frozenset(
     {
         "active_turn_input_consumed",
+        "active_turn_input_submitted",
         "assistant_started",
         "assistant_delta",
         "assistant_discarded",
@@ -241,10 +242,20 @@ class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressS
         *,
         client_messages: tuple[tuple[str, str], ...] = (),
     ) -> None:
-        _emit_active_input_consumed(
-            self,
-            client_message_ids,
-            client_messages=client_messages,
+        _emit_active_input_consumed(self, client_message_ids, client_messages=client_messages)
+
+    # LLM: 已提交比已消费弱一档:它只证明这批插话进入了这一次提供方调用的 prompt,不证明模型
+    # 处理过,也不结算任何回复欠账。子代理详情页据此提前显示用户行,同时保留"未获确认"事实。
+    # 函数用途: 子代理插话进入提供方调用时发布可重放的"已提交"回执(不等于已消费)。
+    def submit_active_turn_input(
+        self,
+        client_message_ids: tuple[str, ...],
+        *,
+        provider_call_id: str = "",
+        client_messages: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        _emit_active_input_submitted(
+            self, client_message_ids, provider_call_id=provider_call_id, client_messages=client_messages
         )
 
     # LLM: Candidate answer deltas stay private until a subsequent tool start proves that
@@ -627,6 +638,43 @@ def _emit_active_input_consumed(
         f"{sink.request_id}:active-input:{sink._active_input_index}",
         {
             "client_message_ids": list(message_ids),
+            **({"messages": messages} if messages else {}),
+        },
+    )
+
+
+# LLM: 已提交回执与已消费回执共用同一批身份(channel_message_id),但用**不同的 kind 和块 ID 序号**
+# 发布,因此重连客户端能把两者分别重放:先按已提交显示用户行,再按已消费收起"未确认"标记。
+# 函数用途: 为一批刚进入提供方调用的子代理消息写可重放且有界的"已提交"展示回执。
+def _emit_active_input_submitted(
+    sink: BackgroundTranscriptSink,
+    client_message_ids: tuple[str, ...],
+    *,
+    provider_call_id: str = "",
+    client_messages: tuple[tuple[str, str], ...] = (),
+) -> None:
+    message_ids = _normalized_active_input_ids(client_message_ids)
+    if not message_ids:
+        return
+    accepted = set(message_ids)
+    messages = [
+        {
+            "message_id": message_id,
+            "text": text[:BACKGROUND_TRANSCRIPT_TEXT_LIMIT],
+            "truncated": len(text) > BACKGROUND_TRANSCRIPT_TEXT_LIMIT,
+        }
+        for raw_id, raw_text in tuple(client_messages or ())
+        if (message_id := str(raw_id or "").strip()) in accepted
+        and (text := str(raw_text or ""))
+    ]
+    sink._active_input_index += 1
+    sink._event(
+        "active_turn_input_submitted",
+        "started",
+        f"{sink.request_id}:active-input-submitted:{sink._active_input_index}",
+        {
+            "client_message_ids": list(message_ids),
+            "provider_call_id": str(provider_call_id or "").strip(),
             **({"messages": messages} if messages else {}),
         },
     )

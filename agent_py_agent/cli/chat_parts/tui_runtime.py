@@ -29,6 +29,7 @@ _HISTORY_LIVE_PLAN_FIELDS = frozenset({
 _BACKGROUND_TRANSCRIPT_KINDS = frozenset(
     {
         "active_turn_input_consumed",
+        "active_turn_input_submitted",
         "assistant_started",
         "assistant_delta",
         "assistant_discarded",
@@ -1181,6 +1182,24 @@ class _TuiBackgroundActivityRuntimeMixin:
                 continue
             if request_id in self._recovered_background_turns and kind != "active_turn_input_consumed":
                 continue
+            if kind == "active_turn_input_submitted":
+                raw_ids = payload.get("client_message_ids")
+                message_ids = tuple(
+                    dict.fromkeys(
+                        str(item or "").strip()
+                        for item in (raw_ids if isinstance(raw_ids, (list, tuple)) else ())
+                        if str(item or "").strip()
+                    )
+                )
+                if message_ids:
+                    _replay_submitted_active_turn_inputs(
+                        self,
+                        payload.get("messages"),
+                        request_id=request_id,
+                        provider_call_id=str(payload.get("provider_call_id") or ""),
+                        skip_message_ids=set(),
+                    )
+                continue
             if kind == "active_turn_input_consumed":
                 raw_ids = payload.get("client_message_ids")
                 message_ids = tuple(
@@ -1877,6 +1896,23 @@ class TuiTurnEventAdapter:
                 request_id=self.request_id,
             )
 
+    # LLM: Gateway 的 submitted 行早于任何模型正文到达,只表示"已进入本次提供方调用的 prompt"。
+    # 它不等于确认,因此只推进展示状态,绝不结算回复欠账或写回执。
+    # 函数用途: 显示已提交当前回合的补充消息(正文按原提交位置进入历史)。
+    def submit_gateway_active_turn_input(
+        self,
+        client_message_ids: tuple[str, ...],
+        *,
+        provider_call_id: str = "",
+    ) -> None:
+        with self._lock:
+            _submit_active_turn_input_ids(
+                self.runtime,
+                client_message_ids,
+                request_id=self.request_id,
+                provider_call_id=provider_call_id,
+            )
+
     # LLM: rich thinking 必须来自上游显式事件，并通过同一 active-block finalizer；
     # 不能另建终态块后把初始 spinner 留到最终收尾才关闭。
     # 函数用途: 把一次模型调用的完整思考按真实时序收口为独立块。
@@ -2380,20 +2416,14 @@ def _consume_gateway_turn_event(
         return True
     if kind == "runtime_progress":
         return adapter._publish_runtime_progress(payload)
-    if kind == "active_turn_input_consumed":
-        raw_message_ids = payload.get("client_message_ids")
-        message_ids = tuple(
-            dict.fromkeys(
-                str(value or "").strip()
-                for value in (
-                    raw_message_ids
-                    if isinstance(raw_message_ids, (list, tuple))
-                    else ()
-                )
-                if str(value or "").strip()
-            )
+    if kind == "active_turn_input_submitted":
+        adapter.submit_gateway_active_turn_input(
+            _active_input_message_ids(payload),
+            provider_call_id=str(payload.get("provider_call_id") or ""),
         )
-        adapter.confirm_gateway_active_turn_input(message_ids)
+        return True
+    if kind == "active_turn_input_consumed":
+        adapter.confirm_gateway_active_turn_input(_active_input_message_ids(payload))
         return True
     if kind == "context_usage_updated" and isinstance(
         payload.get("context_usage"),
@@ -2447,6 +2477,46 @@ def _required_message_id(value: str) -> str:
     if not normalized:
         raise ValueError("TUI active-turn message_id is required")
     return normalized
+
+
+# LLM: 已提交不等于已消费:运行时确认"这批补充输入已进入这一次提供方调用的 prompt"之后,客户端必须
+# 立刻按原提交位置把它显示出来(慢流/失败时也不能让用户以为没送进去),同时保留"尚未获模型确认"的事实。
+# 这里只搬动本地等待项的状态并发展示事件,不写任何账本、不清回复欠账、不触发重发。
+# 函数用途: 按精确 message_id 把本地等待项标记为"已提交当前回合"，并发布带身份的展示事件。
+def _submit_active_turn_input_ids(
+    runtime: TuiRuntime,
+    message_ids: tuple[str, ...],
+    *,
+    request_id: str,
+    provider_call_id: str = "",
+) -> tuple[str, ...]:
+    normalized_request_id = _required_request_id(request_id)
+    normalized_ids = tuple(
+        dict.fromkeys(
+            _required_message_id(message_id)
+            for message_id in tuple(message_ids or ())
+            if str(message_id or "").strip()
+        )
+    )
+    submitted_ids: list[str] = []
+    with runtime._lock:
+        for message_id in normalized_ids:
+            text = runtime._pending_steers.get(message_id)
+            if text is None:
+                continue
+            runtime._publish(
+                "steer_submitted",
+                "started",
+                f"steer:{message_id}",
+                {
+                    "message_id": message_id,
+                    "text": text,
+                    "provider_call_id": str(provider_call_id or "").strip(),
+                },
+                request_id=normalized_request_id,
+            )
+            submitted_ids.append(message_id)
+    return tuple(submitted_ids)
 
 
 # LLM: The exact promoted-id set prevents duplicate user rows when one consumed batch mixes
@@ -2513,6 +2583,54 @@ def _replay_consumed_active_turn_inputs(
             {"message_id": message_id, "text": text},
             request_id=request_id,
         )
+
+
+# LLM: 重连客户端同样没有本会话的等待项,但**已提交**事件是持久事实,必须能重放出同一批用户行
+# (不含已消费的收尾语义)。这里只发展示事件,由 view model 按精确 message_id 去重建行,绝不写账本。
+# 函数用途: 重连或重新进入子代理时，补回"已提交但尚未确认"的用户消息行。
+def _replay_submitted_active_turn_inputs(
+    runtime: TuiRuntime,
+    value: object,
+    *,
+    request_id: str,
+    provider_call_id: str = "",
+    skip_message_ids: set[str],
+) -> None:
+    if not isinstance(value, list | tuple):
+        return
+    seen: set[str] = set(skip_message_ids)
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        message_id = str(item.get("message_id") or "").strip()
+        text = str(item.get("text") or "")
+        if not message_id or not text or message_id in seen:
+            continue
+        seen.add(message_id)
+        runtime._publish(
+            "steer_submitted",
+            "started",
+            f"steer:{message_id}",
+            {
+                "message_id": message_id,
+                "text": text,
+                "provider_call_id": str(provider_call_id or "").strip(),
+            },
+            request_id=request_id,
+        )
+
+
+# LLM: 插话事件的 client message id 是唯一身份来源;这里只做去空与去重,不做任何正文匹配。
+# 函数用途: 从插话事件 payload 里取出去空去重后的 client message id 元组。
+def _active_input_message_ids(payload: Mapping) -> tuple[str, ...]:
+    raw = payload.get("client_message_ids")
+    return tuple(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in (raw if isinstance(raw, (list, tuple)) else ())
+            if str(value or "").strip()
+        )
+    )
 
 
 # LLM: 工具 block identity 只取 typed round/call_index，不使用 detail/output 文本。

@@ -2384,7 +2384,13 @@ def _render_input_status(
         )
     else:
         if snapshot.pending_steers:
-            lines.extend(_render_pending_steers(snapshot.pending_steers, context))
+            lines.extend(
+                _render_pending_steers(
+                    snapshot.pending_steers,
+                    context,
+                    turn_active=snapshot.status.phase in {"running", "interrupting"},
+                )
+            )
         if snapshot.queued_inputs:
             lines.extend(_render_queue(snapshot.queued_inputs, context))
     if context.context_usage is not None:
@@ -2731,6 +2737,8 @@ def _context_usage_style(current: int, trigger: int, window: int) -> str:
 def _render_pending_steers(
     pending_steers: tuple[TuiPendingSteer, ...],
     context: TuiRenderContext,
+    *,
+    turn_active: bool = True,
 ) -> tuple[FormattedLine, ...]:
     if context.width < 4:
         return ()
@@ -2738,23 +2746,40 @@ def _render_pending_steers(
         context.focused_agent_run_id
         and context.focused_agent_status in FOCUSED_AGENT_TERMINAL_STATUSES
     )
-    label = (
-        "子代理已结束；以下插话未获模型消费确认，不会自动重发"
-        if child_terminal
-        else "将在下一次工具调用后送入当前回合"
-    )
+    queued = tuple(item for item in pending_steers if item.state != "submitted")
+    submitted = tuple(item for item in pending_steers if item.state == "submitted")
     lines: list[FormattedLine] = []
-    lines.extend(
-        wrap_fragments(
-            (("class:tui-muted", label),),
-            width=context.width,
-            first_prefix=(("class:tui-muted", "• "),),
-            continuation_prefix=(("class:tui-muted", "  "),),
+    if queued:
+        label = (
+            "子代理已结束；以下插话未获模型消费确认，不会自动重发"
+            if child_terminal
+            else "将在下一次工具调用后送入当前回合"
         )
-    )
-    for item in pending_steers:
-        lines.extend(_render_pending_input_message(item.text, context, italic=False))
+        lines.extend(_pending_steer_label(label, context))
+        for item in queued:
+            lines.extend(_render_pending_input_message(item.text, context, italic=False))
+    if submitted:
+        # 正文已经按原提交位置进入上方历史,这里只说明"已提交/未确认"的真实状态,不重复正文,
+        # 也绝不再说"将在下一次工具调用后送入"(那会让用户以为还没送进去)。
+        if child_terminal:
+            label = "子代理已结束；以下插话已送入但未获模型确认，不会自动重发"
+        elif turn_active:
+            label = "已送入当前回合，等待模型回应"
+        else:
+            label = "已送入当前回合但未获模型确认；不会自动重发"
+        lines.extend(_pending_steer_label(label, context))
     return tuple(lines)
+
+
+# LLM: 等待区标题只是文案投影,不参与任何状态判定;身份与状态完全来自 typed 事件。
+# 函数用途: 按统一缩进渲染一条等待区说明行。
+def _pending_steer_label(label: str, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
+    return wrap_fragments(
+        (("class:tui-muted", label),),
+        width=context.width,
+        first_prefix=(("class:tui-muted", "• "),),
+        continuation_prefix=(("class:tui-muted", "  "),),
+    )
 
 
 # LLM: A receipt flood stays fully authoritative in TuiViewSnapshot, while this projection keeps
@@ -2784,14 +2809,24 @@ def _render_compact_input_receipts(
         ).rstrip()
         lines.append(((style, fitted),) if fitted else ())
 
-    if pending_steers:
+    queued_steers = tuple(item for item in pending_steers if item.state != "submitted")
+    submitted_steers = tuple(item for item in pending_steers if item.state == "submitted")
+    if queued_steers:
         pending_label = (
             "• 子代理已结束；插话未获消费确认"
             if child_terminal
             else "• 等待当前回合接收"
         )
-        append_single_line(f"{pending_label}（{len(pending_steers)} 条）")
-        append_single_line(f"  ↳ {pending_steers[0].text}")
+        append_single_line(f"{pending_label}（{len(queued_steers)} 条）")
+        append_single_line(f"  ↳ {queued_steers[0].text}")
+    if submitted_steers:
+        # 已提交项的正文已经在历史里,压缩视图只报数量与真实状态,不重复正文。
+        submitted_label = (
+            "• 子代理已结束；插话已送入但未获确认"
+            if child_terminal
+            else "• 已送入当前回合（等待模型回应）"
+        )
+        append_single_line(f"{submitted_label}（{len(submitted_steers)} 条）")
     if queued_inputs:
         append_single_line(f"• 已排队的后续消息（{len(queued_inputs)} 条）")
         append_single_line(f"  ↳ {queued_inputs[0].text}", italic=True)

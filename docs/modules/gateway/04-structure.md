@@ -1,5 +1,26 @@
 # Gateway Structure
 
+## R270 插话三段状态：排队 / 已提交 / 已确认
+
+- 插话（active turn input）有**三个**彼此独立的结构化边界，展示层必须分开表达，禁止合并成一个"已送入"：
+  · **排队**：`steer_added`（`enqueue_active_turn_input`）——已进入 Gateway 收件队列，还没进 prompt。
+  · **已提交**：`active_turn_input_submitted`（`mark_injected_turn_input_submitted` →
+    sink `submit_active_turn_input`）——账本已 committed `submitted`、提供方调用即将发出。
+    它证明"这批输入进入了这次 prompt"，**不**证明模型处理过、**不**结算回复欠账、**不**清任何回执。
+  · **已确认**：`active_turn_input_consumed`（`acknowledge_injected_turn_input`，发生在整次模型响应
+    返回之后）——唯一可以清等待项、写回复欠账、写 guidance transcript 的边界。
+- 身份只用 `channel_message_id`（→ guidance metadata → 事件 `client_message_ids`）+ `request_id` +
+  `provider_call_id`；**禁止**按正文匹配、按长度或顺序猜消费。正文只用于展示与重连重放，并受
+  `BACKGROUND_TRANSCRIPT_TEXT_LIMIT` 约束。
+- 展示规则（TUI）：已提交后用户消息**立刻**按原提交序号进入可见历史（`created_seq=pending.seq`），
+  等待区改成"已送入当前回合，等待模型回应"且不再重复正文；已确认只收起标记，**不得再插第二行**；
+  回合终态仍未确认时降级为"已送入但未获模型确认；不会自动重发"。重连靠持久事件重放
+  （`active_turn_input_submitted` + `active_turn_input_consumed`），按块 ID 去重，不丢不重。
+- 禁止事项：不得把已提交当成已消费（会让回复欠账提前消失）、不得为了显示提前置 `consumed`、
+  不得在未确认时自动重发同一条插话。
+
+# Gateway Structure
+
 ## R269 两类缓存的绑定与原子性（验收反馈 A/B/C 的合同）
 
 - **owner 事实缓存必须把 kind 与 signature 绑在同一份快照上**：先取"判定前签名"→ 现读判定 → 再取一次签名，
