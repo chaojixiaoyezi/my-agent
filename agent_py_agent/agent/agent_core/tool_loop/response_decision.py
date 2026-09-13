@@ -67,8 +67,10 @@ class ToolLoopRepairCounters:
     truncated_write_repairs: int = 0
     # R248: 最终答复被输出上限截断后的轮内续跑次数（不重启整轮，见 _truncated_final_resume）。
     truncated_output_repairs: int = 0
-    # 门槛5 续跑: 本轮模型调用被供应商超时打断且重试救回、**且本轮确实执行过工具**，模型
-    # 零工具调用只回一句承诺时的轮内续跑次数（至多 1 次，与截断续跑分开计数、互不吃预算）。
+    # 门槛5 续跑探针: 本轮模型调用被供应商超时打断且重试救回、**且本轮确实执行过工具**，模型
+    # 零工具调用只回一句承诺时放行的轮内探针次数（至多 1 次，与截断续跑分开计数、互不吃预算）。
+    # 探针那一枪零工具调用 → 在「探针之前那一枪」与该枪之间原样交付更长的一条（无损 tie-break），
+    # 探针本身不再 +1；探针带工具调用则一切按既有工具轮语义走。
     provider_timeout_resume_repairs: int = 0
 
 
@@ -119,7 +121,12 @@ _TRUNCATED_OUTPUT_RESUME = (
 #   被救回的那一枪就是终答，不得再追问一次把正文顶掉）；后者针对「最终答复被输出上限截断」。
 #   各自独立计数，任何一方的预算都不能吃掉另一方；门槛5 的重试资格一行都不放宽——
 #   这里只处理「重试已经结束之后」，而且只重发模型调用 + 一条宿主指令，绝不重放工具。
-# 常量用途: 超时续跑回灌给模型的宿主指令（至多一次）。
+# 续跑那一枪(R1 残留边界)只作**探针**：它只回答「还有没有真实工具工作要继续」。
+#   放行前把「被重试救回的那一枪」寄存在生成层(arm_provider_timeout_resume_probe)；
+#   探针零工具调用 = 没有工具工作要继续 -> 走无损交付 tie-break（见
+#   _provider_timeout_probe_final_response）：在那一枪与该枪之间原样交付正文更长的一条；
+#   探针带工具调用 = 真实工作继续 -> 丢弃寄存，走既有工具执行路径，tie-break 不介入。
+# 常量用途: 超时探针/续跑回灌给模型的宿主指令（至多一次）。
 _PROVIDER_TIMEOUT_RESUME_LIMIT = 1
 _PROVIDER_TIMEOUT_RESUME = (
     "[provider-timeout-resume]\n"
@@ -247,11 +254,20 @@ class _NoToolCallsRequest:
     response: object
     counters: ToolLoopRepairCounters
     has_protected_marker: bool
+    # 门槛5 探针的回退候选: 由入口 tool_loop_response_decision 在本次裁决里一次性取出
+    # （生成层按「登记序号紧邻当前 model turn」判定）。只有「本次响应零工具调用」这一支才会
+    # 拿它参与无损交付 tie-break（P/Q 取更长者）；其余分支(工具调用/协议违规/生命周期终态)
+    # 只消费不使用，工具照既有路径执行。
+    probe_rollback_response: object | None = None
 
 
 def tool_loop_response_decision(
     request: ToolLoopResponseDecisionRequest,
 ) -> ToolLoopResponseDecision:
+    # 门槛5 探针: 任何一次裁决都消费掉上一枪留下的回退候选——登记的生命周期恰好是「探针那一枪」
+    # 这一个 model turn。工具调用 / 协议违规 / 生命周期终态都只消费不使用(工具照旧执行)，
+    # 只有「零工具调用」那一支才拿它参与无损交付选择；这里不读 response.text 做任何判定。
+    probe_rollback = _take_provider_timeout_probe_rollback(request.params)
     has_protected_marker = contains_protected_tool_marker(request.response.text)
     if has_protected_marker:
         request.params.tool_context.append(
@@ -285,8 +301,18 @@ def tool_loop_response_decision(
             request.response,
             request.counters,
             has_protected_marker,
+            probe_rollback,
         )
     )
+
+
+# LLM: 惰性导入(与 _provider_timeout_resume_decision 同一写法)避免模块级循环依赖；判定与
+#   清除都在生成层(序号来源唯一)，裁决层只是消费者，不自己解析 live_archive_state 的字段。
+# 函数用途: 取出并清空「探针之前那一枪的响应对象」，供「探针零工具调用」分支原样交付。
+def _take_provider_timeout_probe_rollback(params: object) -> object | None:
+    from ..tool_model_generation import take_provider_timeout_resume_probe
+
+    return take_provider_timeout_resume_probe(params)
 
 
 def _tool_calls_from_response(
@@ -861,26 +887,79 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
 #   门槛5 的重试资格判定一行未动：本函数只处理「重试已经结束之后」；能走到这里说明
 #   重试那一枪已经打出去了、供应商也真的答了（否则这里拿到的是异常而不是响应）。
 #   有界: 每次裁决最多一次，计数与截断续跑互不吃预算；只追加一条宿主指令，不重放工具。
+#   探针(R1 残留边界): 放行之前先把这一枪的响应对象寄存在生成层；探针那一枪零工具调用时
+#   （= 没有任何工具工作要继续）走**无损交付 tie-break**：在探针之前那一枪与该枪之间原样交付
+#   正文更长的那一条（对象同一、逐字不变、runtime_status 不伪造，另一条不交付）。
+#   探针带工具调用则登记已在入口被消费掉，工具照既有路径执行，tie-break 不介入。
 # 函数用途: 本轮「可恢复供应商失败 + 确实做过工具工作 + 模型零工具调用只承诺」时给出
-# 至多一次轮内续跑。
+# 至多一次轮内续跑；或把探针那一枪的判定收敛成「原样交付两条候选里更完整的那一条」。
 def _provider_timeout_resume_decision(
     request: _NoToolCallsRequest,
     response_text: str,
 ) -> ToolLoopResponseDecision | None:
+    probe_final = _provider_timeout_probe_final_response(request)
+    if probe_final is not None:
+        # 探针零工具调用: 不采用它做「继续工作」，只在 P/Q 之间做一次无损交付选择（更长者）。
+        # 计数不再 +1——探针本身在放行时已经计过一次，LIMIT=1 的语义不变。
+        return ToolLoopResponseDecision("break", probe_final, [], request.counters)
     if not response_text:
         # 空正文属于既有 empty-text nudge 的预算，两条路径不互相记账。
         return None
     if request.counters.provider_timeout_resume_repairs >= _PROVIDER_TIMEOUT_RESUME_LIMIT:
-        # 续跑预算用尽：按原语义收口（承诺当普通 plain final 返回），不进入无限续跑。
+        # 续跑/探针预算用尽：按原语义收口（承诺当普通 plain final 返回），不进入无限续跑。
         return None
-    from ..tool_model_generation import provider_timeout_resume_eligible
+    from ..tool_model_generation import (
+        arm_provider_timeout_resume_probe,
+        provider_timeout_resume_eligible,
+    )
 
     if not provider_timeout_resume_eligible(request.params):
+        return None
+    if not arm_provider_timeout_resume_probe(request.params, request.response):
+        # 寄存不了回退原文就不买这一枪：否则探针正文会顶掉用户本该看到的终答(fail-safe)。
         return None
     request.params.tool_context.append(_PROVIDER_TIMEOUT_RESUME)
     return ToolLoopResponseDecision(
         "continue", None, [], _inc_provider_timeout_resume(request.counters)
     )
+
+
+# LLM: 交付层 tie-break —— 只决定「原样交付哪一条响应对象」，绝不参与状态、权限、验收、
+#   路由或完成度判定，也不改写任何一条的正文/runtime_status。
+#   为什么需要它：探针零工具调用时，两条候选 P（探针之前那一枪）与 Q（探针那一枪）在结构化
+#   层面完全不可区分——都是零工具调用、都通过了同一套终态/受保护标记闸门；但用户真正想要的
+#   「完整答复」在两种真实形状里分别是 P 和 Q：
+#     形状一(本边界要修的 bug): P=完整终答, Q=「已完成，无需继续。」  -> 应交付 P
+#     形状二(旧契约保住的路径): P=只承诺「我重新来」, Q=用文本把剩下的活干完 -> 应交付 Q
+#   没有任何结构化字段能把两者分开，于是用长度做无损代理：取正文更长的一条，两种形状都命中
+#   完整答复，另一条不交付。等长时保留既有契约（探针那一枪 = 更晚、上下文更多的一枪）。
+#   已知局限（必须知情）：长度只是代理指标，「冗长的道歉/复述」可能比真正的终答更长；因此它
+#   只作用于上面这一条交付选择，不得外溢到任何其它判定；也不引入任何「任务是否完成」判据。
+# 函数用途: 在探针之前那一枪与探针那一枪之间选一条原样交付（更长者；等长时探针那一枪）。
+def _provider_timeout_probe_final_response(request: _NoToolCallsRequest) -> object | None:
+    candidate = request.probe_rollback_response
+    if candidate is None:
+        return None
+    # P 自身被输出上限截断 = 已知不完整，不能当终答静默交付（与 _no_tool_calls_decision 里
+    # truncated 的既有语义同源）；此时退回原语义处理 Q，它仍有自己的截断续跑预算。
+    if bool(getattr(candidate, "truncated", False)):
+        return None
+    probe = request.response
+    if bool(getattr(probe, "truncated", False)):
+        # Q 已知被截断：不选它——截断续跑预算不能被这条交付选择绕过，只交付完整的 P。
+        return candidate
+    if _delivery_text_length(probe) >= _delivery_text_length(candidate):
+        # >= 而不是 >：等长是真正的信息平局，此时保留既有契约——交付更晚、上下文更多的那一枪
+        # （探针那一枪）。探针正文为空(0)时 P 必然更长得胜，不会把空正文交付出去。
+        return probe
+    return candidate
+
+
+# LLM: 唯一允许读正文长度的地方，且只服务上一条交付 tie-break；不解析、不匹配、不做语义判断，
+#   不把长度写进任何状态/门/计数。缺 text 字段时按 0 处理（fail-safe：交给既有契约那条）。
+# 函数用途: 取一条响应正文的长度，用作交付 tie-break 的代理指标。
+def _delivery_text_length(response: object) -> int:
+    return len(str(getattr(response, "text", "") or ""))
 
 
 def _is_runtime_status_response(response: object) -> bool:

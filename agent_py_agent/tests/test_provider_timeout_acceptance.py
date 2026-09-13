@@ -4,12 +4,16 @@
 - 生成层 ``agent_core/tool_model_generation.py``：门槛5 重试**成功**分支登记结构化事实
   ``live_archive_state["_provider_timeout_resume_turns"][model_turn]``。
 - 裁决层 ``agent_core/tool_loop/response_decision.py``：同一 model turn 上、模型零工具调用时
-  至多回灌一条宿主续跑指令（``_PROVIDER_TIMEOUT_RESUME_LIMIT = 1``）。
+  至多放行一次宿主追问（``_PROVIDER_TIMEOUT_RESUME_LIMIT = 1``）。该追问（R1 残留边界后）
+  只是**探针**：只回答「还有没有真实工具工作」。探针零工具调用 = 没有工具工作要继续 ->
+  在「探针之前那一枪 P」与「探针那一枪 Q」之间做无损交付 tie-break（原样交付正文更长的一条，
+  等长时保留既有契约 = Q）；探针带工具调用 -> 登记被丢弃，工具按既有工具轮路径执行。
 
 本文件与作者单测 ``test_provider_timeout_continuation.py`` 的分工：**不复用其断言**，只做四类对抗检查：
 1. 重复工具副作用：真实 ``_execute_tool_loop_service`` + 真实工具 handler 计数 + 真实产品记账
-   （``_record_tool_call`` / IR 账本）。证明续跑只多发一次模型采样，``_run_tool_round``、
-   工具 handler、工具账本在续跑前后完全一致；并单独构造「工具已执行但结果尚未回灌」窗口的反例。
+   （``_record_tool_call`` / IR 账本）。证明探针只多发一次模型采样、探针零工具调用时只做一次
+   无损交付选择（原样交付两条候选里更长的一条），``_run_tool_round``、
+   工具 handler、工具账本在探针前后完全一致；并单独构造「工具已执行但结果尚未回灌」窗口的反例。
 2. 正常回答不被无端续跑：本轮物理调用零失败（含「同一 params 里更早的物理调用失败过」的陈旧事实）
    时，同样的承诺文本必须原样交付、续跑计数 0、账本无新调用。
 3. 预算独立性：截断续跑与超时续跑各自计数互不吃；超时续跑用尽后按原语义交付原响应。
@@ -344,7 +348,13 @@ def _fact_entries(params: ToolLoopExecuteParams) -> dict:
 def test_resume_adds_exactly_one_sample_and_never_replays_the_tool(
     monkeypatch, tmp_path
 ) -> None:
-    """真实循环：工具执行 1 次 → 超时 → 重试 → 承诺 → 续跑 1 次（不发工具）。"""
+    """真实循环：工具执行 1 次 → 超时 → 重试 → 承诺 → 探针 1 次（不发工具）。
+
+    R1 残留边界后这一枪是**探针**（只回答「还有没有真实工具工作」）：它零工具调用即
+    「没有工具工作要继续」，交付选择走无损 tie-break（正文更长者；等长时探针那一枪）。
+    本剧本 P/Q 等长，因此交付文本与旧契约相同（探针那一枪的 ``_FINAL``）；采样次数、工具轮、
+    账本、指令出现次数等不变式全部不变。
+    """
     run = _drive_loop(
         monkeypatch,
         tmp_path,
@@ -352,19 +362,23 @@ def test_resume_adds_exactly_one_sample_and_never_replays_the_tool(
         run_id="run-accept-once",
     )
 
-    assert run.backend.calls == 4, "工具采样 + 超时 + 重试 + 续跑；续跑之后没有第 5 枪"
+    assert run.backend.calls == 4, "工具采样 + 超时 + 重试 + 探针；探针之后没有第 5 枪"
     assert run.tool_round_calls == [1], "整轮只允许进入一次工具轮"
     assert run.executed_one_calls == 1
     assert run.tool.handler_calls == 1, "工具 handler 副作用必须恰好一次"
     assert run.rounds == 1
+    # 交付选择：探针零工具调用 -> 在「重试那一枪(P)」与「探针那一枪(Q)」之间原样交付正文更长
+    # 的一条。本条剧本里两句恰好等长，命中「等长时保留既有契约 = 探针那一枪」这条 tie 默认
+    # （见 response_decision._provider_timeout_probe_final_response）。
+    assert len(_PROMISE) == len(_FINAL), "前提：本剧本命中等长 tie 默认"
     assert run.response.text == _FINAL
 
-    # 续跑指令恰好出现在一次出站请求里（= 这个机制只多买了一枪模型采样）。
+    # 探针指令恰好出现在一次出站请求里（= 这个机制只多买了一枪模型采样）。
     with_instruction = [
         index for index, prompt in enumerate(run.backend.prompts, start=1) if _PROVIDER_TIMEOUT_RESUME in prompt
     ]
-    assert with_instruction == [4], "只有续跑那一枪带宿主指令，重试那一枪不带"
-    assert "read:notes.md" in run.backend.prompts[3], "续跑建立在真实工具结果之上"
+    assert with_instruction == [4], "只有探针那一枪带宿主指令，重试那一枪不带"
+    assert "read:notes.md" in run.backend.prompts[3], "探针建立在真实工具结果之上"
 
     # 关键时序：工具只在第 1 次采样后执行过一次，之后每一次采样进入时账本完全相同。
     assert run.backend.entries[1] == run.backend.entries[2] == run.backend.entries[3]

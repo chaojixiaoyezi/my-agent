@@ -75,6 +75,14 @@ _RUNNER_STREAM_ACTIVITY_STATE_KEY = "_runner_model_stream_activity_projection"
 # 按序号精确匹配, 不做时间窗/文本推断。这条事实只是续跑的必要条件之一——完整资格
 # 还要求本轮确实做过工具工作(见 provider_timeout_resume_eligible)。
 _PROVIDER_TIMEOUT_RESUME_STATE_KEY = "_provider_timeout_resume_turns"
+# 门槛5 探针(R1 残留边界): 续跑那一枪只回答「还有没有真实工具工作」——它自己的正文是宿主
+# 追问出来的, 不代表用户那一轮的终答。放行探针之前, 生成层把「被超时重试救回的那一枪的响应
+# 对象」原样寄存在这里(只存对象引用, 不序列化、不复制正文):
+#   * 探针零工具调用 = 没有任何工具工作要继续 -> 裁决层做无损交付 tie-break: 在两条候选之间
+#     原样交付正文更长的一条(对象同一、逐字同一文本、runtime_status 原样), 另一条不交付;
+#   * 探针带工具调用  -> 真实工作继续, 按既有工具轮路径执行, 登记被丢弃(tie-break 不介入)。
+# 消费一次即 pop; 序号不紧邻(中间插了别的模型轮)一律 fail-closed 丢弃。
+_PROVIDER_TIMEOUT_RESUME_PROBE_STATE_KEY = "_provider_timeout_resume_probe"
 # 仅用于结构化诊断(不参与任何判定): 记下是哪一档超时被重试救回来的。
 _RESUMABLE_PROVIDER_FAILURE_TIMEOUT = "provider_timeout_retried"
 
@@ -244,6 +252,48 @@ def provider_timeout_resume_eligible(params: object) -> bool:
 # 函数用途: 判断本 run 是否已真实执行过工具, 即是否存在「未完成工作」的结构化迹象。
 def _turn_has_executed_tools(params: object) -> bool:
     return bool(list(getattr(params, "executed_tools", None) or []))
+
+
+# LLM: 探针登记/消费的唯一权威位置在生成层——这里才有 _model_turn_sequence 与超时事实表;
+# 裁决层只调用 arm/take, 不自己解析 live_archive_state 的字段名或序号, 也不读模型正文。
+# 返回 False = 拿不到结构化事实容器或序号: 调用方必须放弃这次追问(fail-safe)——
+# 寄不出回退原文就不该买那一枪, 否则探针正文会顶掉用户本该看到的终答。
+# 副作用: 往 live_archive_state 写入一个只在本轮存活的登记(存的是响应对象引用, 不序列化)。
+# 函数用途: 放行续跑探针之前, 把「探针之前那一枪的响应对象」登记为回退交付候选。
+def arm_provider_timeout_resume_probe(params: object, response: object) -> bool:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict) or response is None:
+        return False
+    sequence = _model_turn_sequence(params)
+    if sequence <= 0:
+        return False
+    state[_PROVIDER_TIMEOUT_RESUME_PROBE_STATE_KEY] = {
+        "armed_sequence": sequence,
+        "response": response,
+    }
+    return True
+
+
+# LLM: 消费一次的语义 = 「探针那一枪」就是登记之后紧邻的下一个 model turn。任何一次裁决都会
+# pop 掉登记, 所以登记的生命周期恰好一个模型轮; 序号不紧邻(中间插了自然语言返工/别的模型轮/
+# 陈旧登记)一律返回 None 且已清除 —— fail-closed: 宁可走原有语义, 也不交付陈旧正文。
+# 判定只用结构化事实(登记序号 vs 当前 _model_turn_sequence), 不读 response.text、不匹配词。
+# 副作用: 从 live_archive_state 删除登记(pop), 调用方每次裁决最多调用一次。
+# 函数用途: 取出并清空「探针之前那一枪的响应对象」; 不是紧邻探针那一枪时返回 None。
+def take_provider_timeout_resume_probe(params: object) -> object | None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return None
+    entry = state.pop(_PROVIDER_TIMEOUT_RESUME_PROBE_STATE_KEY, None)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        armed = int(entry.get("armed_sequence") or 0)
+    except (TypeError, ValueError):
+        return None
+    if armed <= 0 or _model_turn_sequence(params) != armed + 1:
+        return None
+    return entry.get("response")
 
 
 def _generate_or_recover_context_pressure(

@@ -385,7 +385,12 @@ def test_no_tool_work_round_never_buys_an_extra_sample(monkeypatch, tmp_path) ->
 
 
 def test_tool_work_timeout_rescue_still_resumes_exactly_once(monkeypatch, tmp_path) -> None:
-    """(b) 有工具执行 + 超时救回 + 零工具调用承诺 -> 真实循环里恰好续跑 1 次。"""
+    """(b) 有工具执行 + 超时救回 + 零工具调用承诺 -> 真实循环里恰好放行 1 次探针。
+
+    R1 残留边界后这一枪是**探针**：它零工具调用 = 没有工具工作要继续，交付走无损 tie-break
+    （原样交付 P/Q 中正文更长的一条，等长时探针那一枪）。本剧本两句等长，故交付文本与旧契约
+    相同；采样次数、工具轮、工具副作用次数、指令出现位置等不变式全部不变。
+    """
     run = _drive_loop(
         monkeypatch,
         tmp_path,
@@ -393,21 +398,22 @@ def test_tool_work_timeout_rescue_still_resumes_exactly_once(monkeypatch, tmp_pa
         run_id="run-narrow-work",
     )
 
-    assert run.backend.calls == 4, "工具采样 + 超时 + 重试 + 续跑；之后没有第 5 枪"
+    assert run.backend.calls == 4, "工具采样 + 超时 + 重试 + 探针；之后没有第 5 枪"
     assert run.params.executed_tools == ["read_file"], "工作迹象来自产品自己的工具账本"
     assert run.tool_round_calls == [1], "整轮只进入一次工具轮"
     assert run.executed_one_calls == 1 and run.tool.handler_calls == 1, "工具副作用恰好一次"
-    assert run.response.text == _FINAL, "续跑那一枪收口（有工作的轮按原语义续跑）"
+    assert len(_PROMISE) == len(_FINAL), "前提：本剧本命中等长 tie 默认"
+    assert run.response.text == _FINAL, "等长 tie 默认 = 探针那一枪（有工作的轮按原语义收口）"
 
     with_instruction = [
         index
         for index, prompt in enumerate(run.backend.prompts, start=1)
         if _PROVIDER_TIMEOUT_RESUME in prompt
     ]
-    assert with_instruction == [4], "只有续跑那一枪带宿主指令，重试那一枪不带"
+    assert with_instruction == [4], "只有探针那一枪带宿主指令，重试那一枪不带"
     assert run.params.tool_context.count(_PROVIDER_TIMEOUT_RESUME) == 1
-    assert "read:notes.md" in run.backend.prompts[3], "续跑建立在真实工具结果之上"
-    # 续跑不改账本：进入续跑那一枪时工具账本与重试那一枪完全相同。
+    assert "read:notes.md" in run.backend.prompts[3], "探针建立在真实工具结果之上"
+    # 探针不改账本：进入探针那一枪时工具账本与重试那一枪完全相同。
     assert run.backend.entries[1] == run.backend.entries[2] == run.backend.entries[3]
     assert _ledger_fingerprint(run.params) == {
         "executed_tools": ["read_file"],
@@ -419,7 +425,7 @@ def test_tool_work_timeout_rescue_still_resumes_exactly_once(monkeypatch, tmp_pa
         ("timed_out", 1),
         ("finished", 2),
         ("finished", 1),
-    ], "续跑是一枪新的 logical 采样，不是同一 logical turn 的第三次物理尝试"
+    ], "探针是一枪新的 logical 采样，不是同一 logical turn 的第三次物理尝试"
 
 
 # ---------------------------------------------------------------- (c) 正常完成不续跑
