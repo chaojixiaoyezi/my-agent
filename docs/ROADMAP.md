@@ -1,10 +1,30 @@
 # ROADMAP
 
-## R277 集成版真实 TUI 验收（进行中）
+## R279 后台答复落账解耦与结构化路线归属（已修已部署，验收继续）
 
-已在独立测试机部署 `9381cb9c`，保持一个 Gateway、两个隔离用户 TUI，用户本机未更新。
+- 已修：canonical 落账与外部投递解耦（provider 名当渠道不再丢答复）；有外发义务却未送达的**整封 envelope**
+  （正文/附件/过程/metadata）冻结在唤醒上，重投只重发、不重跑模型；外发成功但本地落账失败时重投只补落账、
+  绝不二次外发；路线归属改读"部署声明"（`declares_channel` + `declared_proactive`），适配器掉线/凭据缺失
+  不再把外发义务抹掉，未声明通道继续 fail-closed；`gateway restart --ready-timeout/--timeout` 让就绪预算
+  端到端可见（旧实现恒用 3s 配置值，冷启动会被误报 exit 2）。
+- 已部署：用户本机 `runtime-r279`（pid 82793，2026-09-13 07:51:46）、验收机 `runtime-venv-r279`（pid 700073）；
+  同一 wheel sha256 `ad8012…b217`，装包 1,121 文件逐字节核对。
+- 真机 TUI：多用户后台最终答复、未知渠道拒绝、插话续跑已有证据（`TESTS.md` R279）；慢模型长等待插桩帧耗时、
+  Goal 终态真机制备仍待做。
+- 未关闭的底座缺口（需语义决策，未自行改）：同一 task 上允许存在多条 `active` goal 会让
+  `get_goal`/`update_goal` 恒返回 `GOAL_STATE_CONFLICT`，并让 `_matching_goal_status` 把该 task 的 goal
+  当成"不存在"（活跃目标门失效）。选项：① `create_goal` 对同 task 已有未完成 goal 时显式 supersede；
+  ② 解析时按 `updated_at` 取最新并记录歧义 warning。需 owner 定语义后再改。
+- 证据缺口：`model_context_usage` 只有一个槽位、最后写入者覆盖，前台路径（整 thread 重放 ≈515–671K）与后台
+  路径（仅当轮有界指针 ≈50K）交替时界面会出现 10 倍级跳变；建议按路径分存或在投影里带 `path` 维度，
+  但**不得**改动 `_gateway_conversation_history_rows` 的 `supplied_rows` 旁路语义（那会真的开始裁剪前台历史）。
+
+## R277 集成版真实 TUI 验收（历史，已被 R279 取代）
+
+已在独立测试机部署 `9381cb9c`，保持一个 Gateway、两个隔离用户 TUI；**当时**用户本机未更新
+（用户本机已于 2026-09-13 07:51:46 切到 `runtime-r279`，该表述仅作历史记录）。
 等待子代理时插话、最终回答中追加、完整分页及回到底部、显式 Compact 后继续工具调用已有真实分项证据。
-继续核验多子代理整合交付、插话排列次序、慢模型与用量/策展边界，详见 `TESTS.md` R277；不以分项通过替代整轮验收。
+本轮最终汇报缺失项已由 R279 定位并修复（见上）。
 
 ## 会话模型隔离与完整显示（已实现，后续重点见验收表）
 

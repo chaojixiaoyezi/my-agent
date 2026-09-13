@@ -1,5 +1,21 @@
 # Gateway Structure
 
+## R279 复审补丁：声明级归属、整封 envelope 与就绪预算
+
+- **归属只读声明**：`_background_route_ownership(channels, channel)` 返回 `local`（transcript 路线，
+  canonical 即交付）/ `external`（部署声明过该通道且声明支持 proactive）/ `undeclared`（未声明，永不外发）。
+  它必须读 `declares_channel()` + `declared_proactive()`，**禁止**改用 `supports_proactive()` 这类
+  受 adapter 生命周期影响的探测——否则一次暂不可用就会把外发义务抹掉、吞掉通知。
+- **义务不可被能力抹掉**：`external` + 有 target ⇒ `_background_delivery_obligation` 为真，唤醒
+  `wake_handled=false`，冻结整封载荷等重投；未声明通道不欠外发但必须留 canonical 记录。
+- **整封 envelope 冻结**：`cache_pending_wake_delivery` 的载荷是 `wake-owner-delivery.v2`
+  （正文/`delivery_artifacts`/`assistant_commentaries`/`evidence_refs`/`message_metadata`/
+  `external_sent`/`receipt_id`/`ownership`）。触发条件只有两条：外部义务未完成，或该路线本该靠 canonical
+  交付却没落账。`external_sent=true` 的重投**只补落账、不二次外发**；`cache_pending_wake_delivery` 返回
+  None（唤醒不存在/已非 pending）时冻结不算成功。
+- **就绪预算**：`gateway start --ready-timeout`、`gateway restart --ready-timeout|--timeout` 决定
+  `_gateway_ready_budget_seconds`；只改等待时长，不改 `gateway_readiness` 的判据与 exit code 语义。
+
 ## R279 后台答复的 canonical 记录与外部投递解耦
 
 - **canonical 记录不再由渠道能力决定**：`conversation/runtime.py::_record_response` 只要拿到模型产出的

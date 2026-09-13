@@ -66,12 +66,23 @@ class _ScriptedBackend:
 
 
 class _ScriptedDelivery:
-    """按脚本给出投递结果的可控投递服务；只声明被显式打开的能力。"""
+    """按脚本给出投递结果的可控投递服务；声明与可用性分离建模。"""
 
-    def __init__(self, *, proactive: bool, status: str) -> None:
+    def __init__(
+        self,
+        *,
+        proactive: bool,
+        status: str,
+        declares: bool | None = None,
+        channel: str = "feishu",
+    ) -> None:
         self.proactive = proactive
         self.status = status
+        # declares=None 表示沿用旧替身行为：只有 proactive 通道算"声明过"。
+        self.declares = proactive if declares is None else declares
+        self.channel = channel
         self.sent: list[str] = []
+        self.envelopes: list[ReplyEnvelope] = []
 
     def supports_proactive(self, _channel: str) -> bool:
         return self.proactive
@@ -81,15 +92,22 @@ class _ScriptedDelivery:
 
         return supports_transcript_delivery(channel)
 
+    def declares_channel(self, channel: str) -> bool:
+        return bool(self.declares and str(channel or "").strip().lower() == self.channel)
+
+    def declared_proactive(self, channel: str) -> bool:
+        return bool(self.declares_channel(channel) and self.proactive)
+
     def deliver(self, context: DeliveryContext, envelope: ReplyEnvelope) -> object:
         self.sent.append(envelope.content)
+        self.envelopes.append(envelope)
         return SimpleNamespace(
             channel=context.channel,
             target=context.target,
             content=envelope.content,
             evidence_refs=envelope.evidence_refs,
-            delivery_status=self.status,
             receipt_id="receipt-1" if self.status == "sent" else "",
+            delivery_status=self.status,
         )
 
 
@@ -198,7 +216,7 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
     pending = store.pending_wake_signal(signal.wake_signal_id)
     assert pending is not None
     frozen = pending.metadata["owner_delivery"]
-    assert frozen["schema_version"] == "wake-owner-delivery.v1"
+    assert frozen["schema_version"] == "wake-owner-delivery.v2"
     assert frozen["content"] == "阶段汇报：已核对任务树，等待最后一个子代理。"
     # 欠外发的路线不把失败草稿写进本地 transcript（原有边界保持）。
     assert store.recent_messages(thread.thread_id, limit=0) == []
@@ -365,7 +383,7 @@ def test_old_implementation_would_have_lost_the_reply(tmp_path) -> None:
         runtime_module._background_owner_delivery_committed(
             request,
             target="r277-multi",
-            route_supports_proactive=False,
+            ownership="undeclared",
             commit=runtime_module.BackgroundDeliveryCommit(
                 content=commit.content,
                 delivery_status="not_applicable",
@@ -414,3 +432,305 @@ def test_frozen_payload_survives_a_repeated_failure(tmp_path) -> None:
     assert len(channels.sent) == 2
     assert set(channels.sent) == {"阶段汇报：还需要一个子代理收口。"}
     assert time.time() > 0
+
+
+# ---------------------------------------------------------------------------
+# R279 复审补充：结构化 route/transport 归属 + 整封 envelope 冻结与重投
+# ---------------------------------------------------------------------------
+
+
+def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path) -> None:
+    """声明过的外发通道即使当前不可用，也仍然欠 owner 一次外送，不能确认唤醒。"""
+    from agent_py_agent.agent.conversation.runtime import (
+        _ROUTE_EXTERNAL,
+        _background_route_ownership,
+    )
+
+    agent, _backend = _agent(tmp_path)
+    # 真实 registry 永远声明 feishu/qq（与凭据是否齐全无关）。
+    real = DeliveryService(build_default_channel_registry(agent.config))
+    assert real.declares_channel("feishu") is True
+    assert real.declared_proactive("feishu") is True
+    assert _background_route_ownership(real, "feishu") == _ROUTE_EXTERNAL
+    # 未注册渠道仍然 fail-closed。
+    assert real.declares_channel(UNREGISTERED_IDENTITY) is False
+
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-im",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-im",
+            "channel_user_id": "open-id-im",
+            "now": 1.0,
+        }
+    )
+    # proactive=True 但适配器不可用（缺少凭据 → adapter_for() 返回 None）：
+    # 投递服务会给出"声明过、但当前不可用"的回执，义务不能因此消失。
+    channels = _ScriptedDelivery(proactive=True, status="rejected")
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels),
+            "store": store,
+        }
+    )
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "scheduled_progress_report",
+            "root_task_id": "task-im",
+            "now": 2.0,
+        }
+    )
+
+    assert scheduler.tick(now=20.0) == []
+    assert len(_backend.prompts) == 1, "首次唤醒会跑一片模型"
+    pending = store.pending_wake_signal(signal.wake_signal_id)
+    assert pending is not None, "外发未完成时唤醒必须留在队列里"
+    assert pending.metadata["owner_delivery"]["external_sent"] is False
+    assert pending.metadata["owner_delivery"]["ownership"] == "external"
+
+    # "适配器恢复"：同一条唤醒的重投必须只重发冻结正文而不再调用模型。
+    channels.status = "sent"
+    report = scheduler.tick(now=51.0)
+    assert len(_backend.prompts) == 1, "重投不得再花一次模型轮"
+    assert [item.delivery_status for item in report] == ["sent"]
+    assert report[0].wake_handled is True
+    assert store.pending_wake_signal(signal.wake_signal_id) is None
+
+
+def test_attachment_envelope_is_frozen_and_redelivered_intact(tmp_path) -> None:
+    """正文+附件的外发失败必须整封冻结：重投带同样的附件，不丢过程回复。"""
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+
+    agent, _backend = _agent(tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-im",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-im",
+            "channel_user_id": "open-id-im",
+        }
+    )
+    channels = _ScriptedDelivery(proactive=True, status="failed")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    artifact = {
+        "artifact_id": "artifact-1",
+        "path": str(tmp_path / "report.md"),
+        "name": "report.md",
+        "kind": "file",
+        "ok": True,
+        "size_bytes": 12,
+    }
+    wake = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "scheduled_progress_report",
+            "root_task_id": "task-attach",
+            "now": 2.0,
+        }
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id="task-attach",
+        reason="scheduled_progress_report",
+        wake_signal={"wake_signal_id": wake.wake_signal_id, "root_task_id": "task-attach"},
+    )
+    context = DeliveryContext(
+        channel="feishu",
+        target="open-id-im",
+        mode="proactive",
+        thread_id=thread.thread_id,
+        task_id="task-attach",
+    )
+    commit = runtime._record_response(
+        request,
+        context,
+        "报告已生成，见附件。",
+        delivery_artifacts=(artifact,),
+        assistant_commentaries=("先写文件",),
+        deliver=True,
+        delivery_reason="non_subagent_completion",
+    )
+    assert commit.delivery_status == "failed"
+    assert commit.persisted is False
+
+    pending = store.pending_wake_signal(wake.wake_signal_id)
+    assert pending is not None
+    frozen = pending.metadata["owner_delivery"]
+    assert frozen["delivery_artifacts"] == [artifact]
+    assert frozen["assistant_commentaries"] == ["先写文件"]
+
+    channels.status = "sent"
+    report = runtime.redeliver_cached_wake(
+        pending,
+        channel="feishu",
+        target="open-id-im",
+        now=time.time(),
+    )
+    assert report is not None and report.wake_handled is True
+    assert channels.envelopes[-1].content == "报告已生成，见附件。"
+    assert [item.name for item in channels.envelopes[-1].attachments] == ["report.md"]
+
+
+def test_attachments_only_reply_is_frozen_and_redelivered(tmp_path) -> None:
+    """纯附件回复（无正文）同样必须冻结：以前直接跳过，重投只能重跑模型并丢附件。"""
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+
+    agent, _backend = _agent(tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-im",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-im",
+            "channel_user_id": "open-id-im",
+        }
+    )
+    channels = _ScriptedDelivery(proactive=True, status="failed")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    artifact = {
+        "artifact_id": "artifact-2",
+        "path": str(tmp_path / "only.bin"),
+        "name": "only.bin",
+        "ok": True,
+        "size_bytes": 4,
+    }
+    wake = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "scheduled_progress_report",
+            "root_task_id": "task-only",
+            "now": 2.0,
+        }
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id="task-only",
+        reason="scheduled_progress_report",
+        wake_signal={"wake_signal_id": wake.wake_signal_id, "root_task_id": "task-only"},
+    )
+    commit = runtime._record_response(
+        request,
+        DeliveryContext(
+            channel="feishu",
+            target="open-id-im",
+            mode="proactive",
+            thread_id=thread.thread_id,
+            task_id="task-only",
+        ),
+        "",
+        delivery_artifacts=(artifact,),
+        deliver=True,
+        delivery_reason="non_subagent_completion",
+    )
+    assert commit.delivery_status == "failed"
+    pending = store.pending_wake_signal(wake.wake_signal_id)
+    assert pending is not None, "纯附件回复也必须进入冻结重投"
+    assert pending.metadata["owner_delivery"]["content"] == ""
+
+    channels.status = "sent"
+    report = runtime.redeliver_cached_wake(
+        pending, channel="feishu", target="open-id-im", now=time.time()
+    )
+    assert report is not None and report.wake_handled is True
+    assert [item.name for item in channels.envelopes[-1].attachments] == ["only.bin"]
+
+
+def test_delivered_but_uncommitted_retry_does_not_send_twice(tmp_path) -> None:
+    """外发已成功、只差本地落账时，重投只能补落账，绝不能对用户重复发一次。"""
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+
+    agent, _backend = _agent(tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-tui",
+            "channel": "tui",
+            "channel_conversation_id": "session-tui",
+            "channel_user_id": "owner-tui",
+        }
+    )
+    channels = _ScriptedDelivery(proactive=True, status="sent")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    wake = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "scheduled_progress_report",
+            "root_task_id": "task-tui",
+            "now": 3.0,
+        }
+    )
+    # 模拟"外发成功但本地落账失败"：冻结载荷记录 external_sent=True。
+    store.cache_pending_wake_delivery(
+        wake.wake_signal_id,
+        {
+            "schema_version": "wake-owner-delivery.v2",
+            "reason": "scheduled_progress_report",
+            "task_id": "task-tui",
+            "content": "外发已经成功过的正文。",
+            "external_sent": True,
+            "receipt_id": "feishu-receipt-9",
+            "ownership": "local",
+            "created_at": time.time(),
+        },
+    )
+    pending = store.pending_wake_signal(wake.wake_signal_id)
+    assert pending is not None
+    report = runtime.redeliver_cached_wake(
+        pending, channel="tui", target="session-tui", now=time.time()
+    )
+
+    assert report is not None and report.wake_handled is True
+    assert channels.sent == [], "重投不得再次外发"
+    rows = store.recent_messages(thread.thread_id, limit=0)
+    assert [row.content for row in rows] == ["外发已经成功过的正文。"]
+
+
+def test_legacy_v1_frozen_payload_still_redelivers(tmp_path) -> None:
+    """历史 v1 冻结载荷（只有正文）必须继续可重投，不能因 schema 升级而丢答复。"""
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+
+    agent, _backend = _agent(tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-tui",
+            "channel": "tui",
+            "channel_conversation_id": "session-tui",
+            "channel_user_id": "owner-tui",
+        }
+    )
+    channels = _ScriptedDelivery(proactive=False, status="not_applicable", channel="tui")
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+    wake = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "scheduled_progress_report",
+            "root_task_id": "task-tui",
+            "now": 3.0,
+        }
+    )
+    store.cache_pending_wake_delivery(
+        wake.wake_signal_id,
+        {
+            "schema_version": "wake-owner-delivery.v1",
+            "reason": "scheduled_progress_report",
+            "task_id": "task-tui",
+            "content": "老版本冻结的正文。",
+            "evidence_refs": [],
+            "created_at": time.time(),
+        },
+    )
+    pending = store.pending_wake_signal(wake.wake_signal_id)
+    assert pending is not None
+    report = runtime.redeliver_cached_wake(
+        pending, channel="tui", target="session-tui", now=time.time()
+    )
+
+    assert report is not None and report.wake_handled is True
+    assert [row.content for row in store.recent_messages(thread.thread_id, limit=0)] == [
+        "老版本冻结的正文。"
+    ]
+    assert BackgroundRunRequest is not None

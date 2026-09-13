@@ -281,6 +281,20 @@ def _wait_for_gateway_start_ready(paths: GatewayPaths, process, *, timeout: floa
     return outcome.ready
 
 
+# LLM: 就绪预算必须可被调用方显式加长：默认 3 秒对冷启动（大 owner home、索引重建、排水刚结束）
+# 太短，会让"进程其实正在起来"被报成启动失败（exit 2）。显式值优先于配置默认值，配置默认值
+# 优先于内置 3 秒；这里只决定等多久，不改变就绪判据本身。
+# 函数用途: 解析本次 gateway start/restart 的就绪等待预算秒数。
+def _gateway_ready_budget_seconds(agent: object, requested: object) -> float:
+    config = getattr(agent, "config", None)
+    fallback = float(getattr(config, "gateway_ready_timeout_seconds", 3) or 3)
+    try:
+        explicit = float(requested) if requested is not None else 0.0
+    except (TypeError, ValueError):
+        explicit = 0.0
+    return explicit if explicit > 0 else fallback
+
+
 # LLM: Ordinary CLI attempts are reconciled by the long-lived Gateway before workers start. This
 # preserves the process-death proof in RuntimeRepository while keeping status and TUI startup pure.
 # 函数用途: Gateway 启动时收敛已证实宿主死亡的普通 run attempt，返回结构化数量和错误。
@@ -719,7 +733,7 @@ def cmd_gateway_start(args) -> int:
     ready = _wait_for_gateway_start_ready(
         paths,
         process,
-        timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 3) or 3),
+        timeout=_gateway_ready_budget_seconds(agent, getattr(args, "ready_timeout", None)),
     )
     print(f"gateway starting pid={process.pid}")
     print(f"state: {paths.state}")
@@ -906,6 +920,10 @@ def _force_kill_gateway(agent, paths: GatewayPaths, pid: int) -> bool:
     return True
 
 
+# LLM: restart 是"排水 + 冷启动"两段，预算必须端到端可见：--ready-timeout 显式优先；
+# 没给就用 --timeout（用户把 --timeout 理解成"整个重启最多等多久"），都没给才落配置默认值。
+# 禁止让 start 段永远只等内置 3 秒——那会把"仍在启动"误报成启动失败。
+# 函数用途: 重启 gateway，并把就绪等待预算透传给 start 段。
 def cmd_gateway_restart(args) -> int:
     stop_args = argparse.Namespace(
         config=args.config,
@@ -916,9 +934,11 @@ def cmd_gateway_restart(args) -> int:
     stop_code = cmd_gateway_stop(stop_args)
     if stop_code not in {0}:
         return stop_code
+    explicit_ready = getattr(args, "ready_timeout", None)
     start_args = argparse.Namespace(
         config=args.config,
         force=True,
+        ready_timeout=explicit_ready if explicit_ready is not None else args.timeout,
     )
     return cmd_gateway_start(start_args)
 

@@ -107,6 +107,11 @@ def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
 def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_start = gateway_sub.add_parser("start", help="启动后台 gateway")
     gateway_start.add_argument("--force", action="store_true", help="已有 gateway 运行时先尝试停止再启动")
+    gateway_start.add_argument(
+        "--ready-timeout",
+        type=float,
+        help="等待就绪的秒数，默认使用配置 gateway_ready_timeout_seconds；冷启动慢可显式加长",
+    )
     gateway_start.set_defaults(func=cmd_gateway_start)
 
     gateway_stop = gateway_sub.add_parser("stop", help="请求 gateway 停止")
@@ -116,7 +121,16 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_stop.set_defaults(func=cmd_gateway_stop)
 
     gateway_restart = gateway_sub.add_parser("restart", help="重启 gateway")
-    gateway_restart.add_argument("--timeout", type=float, help="等待正常停止的秒数，默认使用配置")
+    gateway_restart.add_argument(
+        "--timeout",
+        type=float,
+        help="等待正常停止的秒数，默认使用配置；未显式给 --ready-timeout 时也作为就绪等待预算",
+    )
+    gateway_restart.add_argument(
+        "--ready-timeout",
+        type=float,
+        help="等待新进程就绪的秒数，优先级高于 --timeout 与配置；冷启动慢时用它避免假失败",
+    )
     gateway_restart.add_argument("--force", action="store_true", help="停止超时后强制终止旧进程")
     gateway_restart.set_defaults(func=cmd_gateway_restart)
 

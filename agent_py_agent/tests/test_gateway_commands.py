@@ -1097,3 +1097,37 @@ def test_cmd_gateway_start_failure_keeps_exit_code_two_with_typed_reason(tmp_pat
     stderr = capsys.readouterr().err
     assert "did not become ready before timeout" in stderr
     assert "reason=GATEWAY_PROCESS_EXITED" in stderr
+
+
+# LLM: restart 的就绪预算必须端到端可见：显式 --ready-timeout > --timeout > 配置默认值。
+# 旧实现把 start 段永远钉在配置默认值（3s），冷启动稍慢就会被报成“启动失败”（exit 2），
+# 而进程其实正在起来。这里锁住优先级链，避免再次回归。
+# 函数用途: 验证 cmd_gateway_restart 把就绪预算透传给 start 段。
+def test_gateway_restart_forwards_ready_timeout_to_start():
+    from agent_py_agent.cli.gateway_process import cmd_gateway_restart
+
+    explicit = MagicMock(config="cfg.yaml", timeout=10.0, ready_timeout=42.0, force=False)
+    with patch("agent_py_agent.cli.gateway_process.cmd_gateway_stop", return_value=0), \
+         patch("agent_py_agent.cli.gateway_process.cmd_gateway_start", return_value=0) as start:
+        assert cmd_gateway_restart(explicit) == 0
+    assert start.call_args.args[0].ready_timeout == 42.0
+
+    fallback = MagicMock(config="cfg.yaml", timeout=17.0, ready_timeout=None, force=False)
+    with patch("agent_py_agent.cli.gateway_process.cmd_gateway_stop", return_value=0), \
+         patch("agent_py_agent.cli.gateway_process.cmd_gateway_start", return_value=0) as start:
+        assert cmd_gateway_restart(fallback) == 0
+    assert start.call_args.args[0].ready_timeout == 17.0
+
+
+# LLM: 就绪预算解析只改“等多久”，不改就绪判据；显式值优先，其次配置，最后内置 3 秒。
+# 函数用途: 验证 _gateway_ready_budget_seconds 的优先级与容错。
+def test_gateway_ready_budget_precedence():
+    from agent_py_agent.cli.gateway_process import _gateway_ready_budget_seconds
+
+    agent = SimpleNamespace(config=SimpleNamespace(gateway_ready_timeout_seconds=7.0))
+    assert _gateway_ready_budget_seconds(agent, 30) == 30.0
+    assert _gateway_ready_budget_seconds(agent, None) == 7.0
+    assert _gateway_ready_budget_seconds(agent, 0) == 7.0
+    assert _gateway_ready_budget_seconds(agent, "bad") == 7.0
+    bare = SimpleNamespace(config=SimpleNamespace())
+    assert _gateway_ready_budget_seconds(bare, None) == 3.0

@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from dataclasses import field, replace
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from ..agent_core.orchestration.coordinator_policy import coordinator_tool_boundary_text
@@ -863,6 +865,7 @@ class _BackgroundSlicePlan:
     delivery_reason: str
     route_supports_proactive: bool = False
     route_supports_transcript: bool = False
+    route_ownership: str = ""
     delivery_artifacts: tuple[dict[str, object], ...] = ()
     message_tool_deliveries: tuple[dict[str, object], ...] = ()
     operation_verification: dict[str, object] | None = None
@@ -909,7 +912,6 @@ def _complete_background_slice(
             display_snapshot=plan.display_snapshot,
             deliver=plan.deliver,
             delivery_reason=plan.delivery_reason,
-            route_supports_proactive=plan.route_supports_proactive,
             route_supports_transcript=plan.route_supports_transcript,
         )
         reported_content = commit.content
@@ -920,7 +922,8 @@ def _complete_background_slice(
     wake_handled = _background_owner_delivery_committed(
         request,
         target=plan.target,
-        route_supports_proactive=plan.route_supports_proactive,
+        ownership=plan.route_ownership,
+        canonical_record=bool(plan.route_supports_transcript or plan.route_ownership != _ROUTE_EXTERNAL),
         commit=commit,
     )
     tool_call_count, tool_success_count, material_progress_count = plan.counters
@@ -980,6 +983,8 @@ class BackgroundMainAgentRuntime:
         )
         route_supports_proactive = bool(target and self.channels.supports_proactive(channel))
         route_supports_transcript = _route_supports_transcript(self.channels, channel)
+        # 归属只读声明级事实：外发能力此刻是否可用不改变这条路线欠不欠一次真实外送。
+        route_ownership = _background_route_ownership(self.channels, channel)
         goal_context = _goal_runtime_context(self.agent, self.store, request)
         (
             response,
@@ -1032,6 +1037,7 @@ class BackgroundMainAgentRuntime:
                 delivery_reason=delivery_reason,
                 route_supports_proactive=route_supports_proactive,
                 route_supports_transcript=route_supports_transcript,
+                route_ownership=route_ownership,
                 counters=(tool_call_count, tool_success_count, material_progress_count),
             ),
         )
@@ -1066,21 +1072,25 @@ class BackgroundMainAgentRuntime:
             task_id=signal.root_task_id,
             idempotency_key=_background_delivery_idempotency_key(request),
         )
-        route_supports_proactive = bool(target and self.channels.supports_proactive(channel))
         route_supports_transcript = _route_supports_transcript(self.channels, channel)
+        ownership = _background_route_ownership(self.channels, channel)
+        frozen = _frozen_owner_delivery(prepared)
         commit = self._record_response(
             request,
             delivery_context,
-            str(prepared.get("content") or ""),
+            frozen.content,
+            delivery_artifacts=frozen.delivery_artifacts,
+            assistant_commentaries=frozen.assistant_commentaries,
             deliver=True,
             delivery_reason="cached_owner_delivery_retry",
-            route_supports_proactive=route_supports_proactive,
             route_supports_transcript=route_supports_transcript,
+            frozen_retry=frozen,
         )
         wake_handled = _background_owner_delivery_committed(
             request,
             target=target,
-            route_supports_proactive=route_supports_proactive,
+            ownership=ownership,
+            canonical_record=bool(route_supports_transcript or ownership != _ROUTE_EXTERNAL),
             commit=commit,
         )
         return BackgroundMainAgentReport(
@@ -1097,6 +1107,7 @@ class BackgroundMainAgentRuntime:
             task_status=_background_task_link_status(self.agent, request, store=self.store),
             commit_kind=commit.commit_kind,
             message_id=commit.message_id,
+            route_ownership=ownership,
         )
 
     # LLM: GoalRuntimeContext 是唯一采样；返回的显示快照只供 final 持久化，不能注入模型或改变 child phase。
@@ -1167,8 +1178,9 @@ class BackgroundMainAgentRuntime:
             display_snapshot,
         )
 
-    # LLM: canonical 记录与外部投递是两条独立事实：正文归属看本地会话能力，外发成功与否只看回执。
-    # 未送达但有外发义务的正文必须冻结在唤醒上重投，不能在无记录的情况下确认唤醒。
+    # LLM: canonical 记录与外部投递是两条独立事实：正文归属看路线归属（声明级），外发成功与否只看回执。
+    # 未送达但有外发义务的正文必须整封冻结在唤醒上重投，不能在无记录的情况下确认唤醒；
+    # frozen_retry 非空表示这是重投：整封 envelope（正文/附件/过程/metadata）都来自冻结载荷。
     # 函数用途: 处理渠道投递，并把真实正文和本工作片显示交给唯一会话提交层。
     def _record_response(
         self,
@@ -1184,6 +1196,7 @@ class BackgroundMainAgentRuntime:
         delivery_reason: str,
         route_supports_proactive: bool | None = None,
         route_supports_transcript: bool | None = None,
+        frozen_retry: _FrozenOwnerDelivery | None = None,
     ) -> BackgroundDeliveryCommit:
         # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
         # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
@@ -1202,130 +1215,257 @@ class BackgroundMainAgentRuntime:
         # having to distinguish a valid completion signal from other internal signals.
         attachments = _channel_attachments(delivery_artifacts)
         evidence_refs = (
-            _background_delivery_evidence_refs(request)
-            if _audit_finding_report_event(request)
-            else _background_evidence_refs(request)
+            frozen_retry.evidence_refs
+            if frozen_retry is not None and frozen_retry.evidence_refs
+            else (
+                _background_delivery_evidence_refs(request)
+                if _audit_finding_report_event(request)
+                else _background_evidence_refs(request)
+            )
         )
+        # 重投路径由 redeliver_cached_wake 把冻结载荷的 delivery_artifacts 当作 delivery_artifacts
+        # 传进来，因此附件与过程回复必须继续从参数推导；重投只额外接管 metadata 与"是否已外发"。
         envelope = ReplyEnvelope(
             content=projection.content,
             attachments=attachments,
             evidence_refs=evidence_refs,
         )
-        message_metadata: dict[str, object] = {
-            "reason": request.reason,
-            "task_id": request.task_id,
-            "delivery_artifacts": [dict(item) for item in delivery_artifacts],
-            "projection_status": projection.projection_status,
-            "background_delivery_reason": delivery_reason,
-            "evidence_refs": list(evidence_refs),
-        }
-        if operation_verification is not None:
-            message_metadata["operation_verification"] = operation_verification
+        message_metadata = _background_owner_message_metadata(
+            request,
+            delivery_reason=delivery_reason,
+            projection_status=projection.projection_status,
+            delivery_artifacts=delivery_artifacts,
+            evidence_refs=evidence_refs,
+            operation_verification=operation_verification,
+            frozen_retry=frozen_retry,
+        )
         wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
         wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
-        transcript_route = bool(
-            supports_transcript_delivery(delivery_context.channel)
-            if route_supports_transcript is None
-            else route_supports_transcript
+        route = _background_delivery_route(
+            self.channels,
+            delivery_context,
+            route_supports_transcript=route_supports_transcript,
         )
-        proactive_route = bool(
-            _channels_support_proactive(self.channels, delivery_context.channel)
-            if route_supports_proactive is None
-            else route_supports_proactive
+        receipt, delivery_status = _background_external_delivery(
+            self,
+            delivery_context,
+            envelope,
+            frozen_retry=frozen_retry,
         )
-        # canonical thread 只有在它确实是这条答复唯一可能的归属地时才承担记录责任：
-        # 本地权威会话路线，或完全没有外发目标的路线（例如未注册渠道/测试身份）。
-        # 有外发义务的真实 IM 路线保持“不进本地 transcript”，靠下面的冻结重投防丢失。
-        canonical_record = bool(
-            transcript_route
-            or not _background_delivery_obligation(
-                target=delivery_context.target,
-                route_supports_proactive=proactive_route,
-            )
-        )
-        receipt = self.channels.deliver(delivery_context, envelope)
-        delivery_status = str(getattr(receipt, "delivery_status", "") or "sent")
         # The delivery service owns final user-boundary redaction.  Persist the
         # exact content recorded by its receipt so external IM and local
         # transcript never diverge; simple test/legacy receipts without content
         # retain the already-sanitized projection as a compatibility fallback.
         committed_content = str(getattr(receipt, "content", projection.content) or "")
-        outbox_frozen = _freeze_pending_owner_delivery(
-            self.store,
-            _OwnerDeliveryFreeze(
-                request=request,
-                wake_signal_id=wake_signal_id,
-                content=projection.content,
-                evidence_refs=evidence_refs,
-                delivery_status=delivery_status,
-                target=delivery_context.target,
-                proactive_route=proactive_route,
-                has_attachments=bool(attachments),
-            ),
-        )
-        return _commit_background_response(
+        commit = _commit_background_response(
             self,
             request,
             delivery_context,
             receipt=receipt,
             delivery_status=delivery_status,
             committed_content=committed_content,
-            canonical_record=canonical_record,
-            transcript_route=transcript_route,
+            canonical_record=route.canonical_record,
+            transcript_route=route.transcript_route,
             evidence_refs=evidence_refs,
             message_metadata=message_metadata,
             assistant_commentaries=assistant_commentaries,
             display_snapshot=display_snapshot,
-            outbox_frozen=outbox_frozen,
+            audit_refs_settled=bool(frozen_retry is not None and frozen_retry.external_sent),
         )
+        frozen_now = _freeze_pending_owner_delivery(
+            self.store,
+            _OwnerDeliveryFreeze(
+                request=request,
+                wake_signal_id=wake_signal_id,
+                content=projection.content,
+                delivery_artifacts=delivery_artifacts,
+                assistant_commentaries=assistant_commentaries,
+                evidence_refs=evidence_refs,
+                message_metadata=message_metadata,
+                delivery_status=delivery_status,
+                receipt_id=str(getattr(receipt, "receipt_id", "") or ""),
+                target=delivery_context.target,
+                ownership=route.ownership,
+                canonical_record=route.canonical_record,
+                persisted=commit.persisted,
+            ),
+        )
+        return replace(commit, outbox_frozen=frozen_now) if frozen_now else commit
+
+
+# LLM: 重投载荷必须是整封 owner envelope 的不可变快照：正文、附件（delivery_artifacts）、
+# 过程回复、审计引用、canonical metadata、以及"外发是否已经成功"这一事实。
+# 只存正文会让重投丢附件/丢过程/重复外发；只存状态会让重投无从重建消息。
+# 类用途: 承载一条已冻结的 owner 交付载荷（v1/v2 载荷统一投影）。
+@dataclass(frozen=True)
+class _FrozenOwnerDelivery:
+    content: str
+    delivery_artifacts: tuple[dict[str, object], ...] = ()
+    assistant_commentaries: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    message_metadata: dict[str, object] = field(default_factory=dict)
+    external_sent: bool = False
+    receipt_id: str = ""
+    ownership: str = ""
 
 
 # LLM: 冻结判定所需的全部事实；target 必须用已解析的投递目标，不能回读 request.route_target。
-# 类用途: 承载“这条未送达正文是否要冻结在唤醒上”的结构化输入。
+# 类用途: 承载“这条答复是否要整封冻结在唤醒上”的结构化输入。
 @dataclass(frozen=True)
 class _OwnerDeliveryFreeze:
     request: BackgroundRunRequest
     wake_signal_id: str
     content: str
+    delivery_artifacts: tuple[dict[str, object], ...]
+    assistant_commentaries: tuple[str, ...]
     evidence_refs: tuple[str, ...]
+    message_metadata: dict[str, object]
     delivery_status: str
     target: str
-    proactive_route: bool
-    has_attachments: bool = False
+    ownership: str
+    canonical_record: bool
+    persisted: bool
+    receipt_id: str = ""
 
 
-# LLM: 未送达正文的冻结是“只重投、不重跑业务”的唯一依据，必须写在这条唤醒本身上；
-# 没有 wake signal id、没有正文、或投递层明确抑制时不冻结。
-# 函数用途: 把有外发义务但未送达的 owner 正文冻结到待处理唤醒上，返回是否已冻结。
+# LLM: 冻结的触发条件只有两条，都是"答复还没落到任何权威位置"：
+# ① 归属外部、有 target、但这次没送达（欠一次真实外发）；
+# ② 这条路线本来要靠 canonical 承担交付，但 canonical 没落账（例如外发成功后本地写失败）。
+# 附件与纯附件回复同样必须冻结——以前直接跳过附件，重投就只能重跑模型并丢掉附件。
+# 撤销/静默（suppressed）与空载荷永不冻结。
+# 函数用途: 把未完成的 owner 交付整封冻结到待处理唤醒上，返回是否已冻结。
 def _freeze_pending_owner_delivery(
     store: ConversationStore,
     freeze: _OwnerDeliveryFreeze,
 ) -> bool:
-    if freeze.has_attachments or not str(freeze.content or "").strip() or not freeze.wake_signal_id:
+    if not freeze.wake_signal_id:
         return False
-    if str(freeze.delivery_status or "").strip().lower() in {"sent", "suppressed"}:
+    if not (str(freeze.content or "").strip() or freeze.delivery_artifacts):
         return False
-    # 条件与“哪条路线需要外发”一致：有外发义务的路线，或沿用原有语义的审计容量通知。
+    status = str(freeze.delivery_status or "").strip().lower()
+    if status == "suppressed":
+        return False
+    obligation = _background_delivery_obligation(
+        target=freeze.target,
+        ownership=freeze.ownership,
+    )
+    external_pending = bool(obligation and status != "sent")
+    canonical_pending = bool(freeze.canonical_record and not freeze.persisted)
     if not (
-        _background_delivery_obligation(
-            target=freeze.target,
-            route_supports_proactive=freeze.proactive_route,
-        )
+        external_pending
+        or canonical_pending
         or _audit_capacity_report_event(freeze.request)
     ):
         return False
-    store.cache_pending_wake_delivery(
+    # 冻结成功与否必须来自 store 的真实写入结果：唤醒不存在/已不是 pending 时
+    # 载荷不会落盘，此时不能对外声称"已冻结、可重投"。
+    cached = store.cache_pending_wake_delivery(
         freeze.wake_signal_id,
         {
-            "schema_version": "wake-owner-delivery.v1",
+            "schema_version": "wake-owner-delivery.v2",
             "reason": freeze.request.reason,
             "task_id": freeze.request.task_id,
             "content": freeze.content,
+            "delivery_artifacts": [dict(item) for item in freeze.delivery_artifacts],
+            "assistant_commentaries": list(freeze.assistant_commentaries),
             "evidence_refs": list(freeze.evidence_refs),
+            "message_metadata": dict(freeze.message_metadata),
+            "external_sent": bool(status == "sent"),
+            "receipt_id": freeze.receipt_id,
+            "ownership": freeze.ownership,
+            "last_delivery_status": status,
             "created_at": time.time(),
         },
     )
-    return True
+    return cached is not None
+
+
+# LLM: 冻结载荷的读取必须 fail-closed：schema/reason/task_id 任一不匹配都不重投，
+# 载荷既可以是 v2（整封 envelope），也要能读旧 v1（只有正文）而不丢已冻结的答复。
+# 函数用途: 把唤醒上的冻结载荷投影成 _FrozenOwnerDelivery。
+def _frozen_owner_delivery(payload: dict[str, object]) -> _FrozenOwnerDelivery | None:
+    artifacts = payload.get("delivery_artifacts")
+    commentaries = payload.get("assistant_commentaries")
+    refs = payload.get("evidence_refs")
+    metadata = payload.get("message_metadata")
+    return _FrozenOwnerDelivery(
+        content=str(payload.get("content") or ""),
+        delivery_artifacts=tuple(
+            dict(item) for item in artifacts if isinstance(item, dict)
+        )
+        if isinstance(artifacts, list)
+        else (),
+        assistant_commentaries=tuple(
+            str(item) for item in commentaries if str(item or "").strip()
+        )
+        if isinstance(commentaries, list)
+        else (),
+        evidence_refs=tuple(str(item) for item in refs if isinstance(item, str) and item.strip())
+        if isinstance(refs, list)
+        else (),
+        message_metadata=dict(metadata) if isinstance(metadata, dict) else {},
+        external_sent=payload.get("external_sent") is True,
+        receipt_id=str(payload.get("receipt_id") or ""),
+        ownership=str(payload.get("ownership") or ""),
+    )
+
+
+# LLM: canonical 行 metadata 只能在这里构造：重投时 frozen metadata 是权威，
+# 只补齐本次重投的时间无关字段，避免重投把原始 task/refs/过程信息覆盖成重投时的值。
+# 函数用途: 组装后台 owner 消息的 canonical metadata。
+def _background_owner_message_metadata(
+    request: BackgroundRunRequest,
+    *,
+    delivery_reason: str,
+    projection_status: str,
+    delivery_artifacts: tuple[dict[str, object], ...],
+    evidence_refs: tuple[str, ...],
+    operation_verification: dict[str, object] | None,
+    frozen_retry: _FrozenOwnerDelivery | None,
+) -> dict[str, object]:
+    if frozen_retry is not None and frozen_retry.message_metadata:
+        return {
+            **frozen_retry.message_metadata,
+            "background_delivery_retry_reason": delivery_reason,
+        }
+    metadata: dict[str, object] = {
+        "reason": request.reason,
+        "task_id": request.task_id,
+        "delivery_artifacts": [dict(item) for item in delivery_artifacts],
+        "projection_status": projection_status,
+        "background_delivery_reason": delivery_reason,
+        "evidence_refs": list(evidence_refs),
+    }
+    if operation_verification is not None:
+        metadata["operation_verification"] = operation_verification
+    return metadata
+
+
+# LLM: 外部发送只有这一个出口：重投时若冻结载荷已证明外发成功，就绝不能再次外发
+# （只补本地 canonical），否则会对真实用户重复发消息。
+# 函数用途: 执行本次外部投递或复用冻结的外发事实，返回 (回执, 投递状态)。
+def _background_external_delivery(
+    runtime: BackgroundMainAgentRuntime,
+    delivery_context: DeliveryContext,
+    envelope: ReplyEnvelope,
+    *,
+    frozen_retry: _FrozenOwnerDelivery | None,
+) -> tuple[object, str]:
+    if frozen_retry is not None and frozen_retry.external_sent:
+        return (
+            SimpleNamespace(
+                delivery_status="sent",
+                channel=delivery_context.channel,
+                target=delivery_context.target,
+                content=envelope.content,
+                evidence_refs=envelope.evidence_refs,
+                receipt_id=frozen_retry.receipt_id,
+                replayed=True,
+            ),
+            "sent",
+        )
+    receipt = runtime.channels.deliver(delivery_context, envelope)
+    return receipt, str(getattr(receipt, "delivery_status", "") or "sent")
 
 
 # LLM: 投递前的三道抑制判定必须同源：未授权投递、任务已终态、没有可交付正文。它们都表示
@@ -1649,6 +1789,7 @@ def _commit_background_response(
     assistant_commentaries: tuple[str, ...] = (),
     display_snapshot: dict[str, object] | None = None,
     outbox_frozen: bool = False,
+    audit_refs_settled: bool = False,
 ) -> BackgroundDeliveryCommit:
     """Persist one owner-visible reply, independently of its transport outcome."""
 
@@ -1711,7 +1852,10 @@ def _commit_background_response(
         )
     else:
         message_entry = runtime.store.append_message(message_request)
-    if status == "sent":
+    if audit_refs_settled:
+        # 这次只是补本地落账：审计交付回执在真正外发成功时已经记过，绝不能重复记一遍。
+        pass
+    elif status == "sent":
         _record_delivered_audit_refs(runtime.agent, receipt)
     elif transcript_route and _audit_finding_report_event(request):
         # CLI/Gateway transcript routes have no provider receipt. Their local
@@ -1927,6 +2071,9 @@ def _audit_owner_report_event(request: BackgroundRunRequest) -> bool:
     return _audit_finding_report_event(request) or _audit_capacity_report_event(request)
 
 
+# LLM: 冻结载荷的读取必须 fail-closed：只接受本协议 schema、reason/task_id 与唤醒完全一致、
+# 且"有正文或有附件"的载荷（纯附件回复同样合法）。v1 只有正文，v2 才有整封 envelope。
+# 函数用途: 读取一条唤醒上已冻结的 owner 交付载荷，不匹配返回 None。
 def _cached_owner_delivery(signal: WakeSignal) -> dict[str, object] | None:
     raw_metadata = getattr(signal, "metadata", None)
     metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
@@ -1934,11 +2081,18 @@ def _cached_owner_delivery(signal: WakeSignal) -> dict[str, object] | None:
     if not isinstance(delivery, dict):
         return None
     if (
-        str(delivery.get("schema_version") or "") != "wake-owner-delivery.v1"
+        str(delivery.get("schema_version") or "")
+        not in {"wake-owner-delivery.v1", "wake-owner-delivery.v2"}
         or str(delivery.get("reason") or "") != str(signal.reason or "")
         or str(delivery.get("task_id") or "") != str(signal.root_task_id or "")
-        or not str(delivery.get("content") or "").strip()
     ):
+        return None
+    has_body = bool(str(delivery.get("content") or "").strip())
+    artifacts = delivery.get("delivery_artifacts")
+    has_attachments = bool(
+        [item for item in artifacts if isinstance(item, dict)] if isinstance(artifacts, list) else []
+    )
+    if not has_body and not has_attachments:
         return None
     return dict(delivery)
 
@@ -2209,11 +2363,72 @@ def _terminal_subagent_delivery_decision(
     )
 
 
-# LLM: 一条路线只有在同时具备 proactive 能力和真实目标时才欠用户一次外发。
-# 未注册渠道、测试身份、无 target 的本地路线都不在此列，也不得被当成 IM 通道打开。
+# LLM: 后台路线的归属只由"部署声明了什么"决定，不由"此刻能不能发"决定。
+# - local: 权威会话就是 owner 的读取面（transcript 路线），canonical 提交即交付；
+# - external: 部署声明过该通道且声明它支持 proactive 外发 ⇒ 这条路线欠 owner 一次真实外送，
+#   adapter 掉线/凭据缺失/工厂失败都只影响"这次能不能发"，不能抹掉义务；
+# - undeclared: 部署没有声明过这个通道 ⇒ 永不外发（fail-closed），canonical 是唯一归属。
+_ROUTE_LOCAL = "local"
+_ROUTE_EXTERNAL = "external"
+_ROUTE_UNDECLARED = "undeclared"
+
+
+# LLM: 声明与可用分离是本模块的硬边界：能力探测（supports_proactive）会被 adapter 生命周期影响，
+# 归属判定必须读声明（declares_channel + declared_proactive）。改这里要同步检查
+# delivery/registry.py::declares_channel 与 delivery/service.py 的同名投影。
+# 函数用途: 判断一条后台路线的归属类别（本地/外部/未声明）。
+def _background_route_ownership(channels: object, channel: str) -> str:
+    key = str(channel or "").strip().lower()
+    if not key or _route_supports_transcript(channels, key):
+        return _ROUTE_LOCAL
+    if not _channel_declares_transport(channels, key):
+        return _ROUTE_UNDECLARED
+    return _ROUTE_EXTERNAL if _channel_declares_proactive(channels, key) else _ROUTE_UNDECLARED
+
+
+# LLM: 一条路线只有在"归属外部 + 有真实目标"时才欠用户一次外发。未声明通道、
+# 无 target 的本地路线都不在此列，也不得被当成 IM 通道打开。
 # 函数用途: 判断当前后台路线是否必须真正外发才算完成。
-def _background_delivery_obligation(*, target: str, route_supports_proactive: bool) -> bool:
-    return bool(route_supports_proactive and str(target or "").strip())
+def _background_delivery_obligation(*, target: str, ownership: str) -> bool:
+    return bool(str(target or "").strip() and ownership == _ROUTE_EXTERNAL)
+
+
+# LLM: 一条答复的落账归属：transcript 路线或未声明通道由 canonical 承担交付，
+# 只有"声明外发 + 有目标"的路线才把 canonical 让给外发（靠冻结重投防丢失）。
+# 类用途: 承载一次后台投递的路线事实。
+@dataclass(frozen=True)
+class _OwnerDeliveryRoute:
+    transcript_route: bool
+    ownership: str
+    obligation: bool
+    canonical_record: bool
+
+
+# LLM: 路线事实只能由"投递边界声明 + 可信 context"推出；禁止在调用点各自推算，
+# 否则 canonical 归属、冻结触发和唤醒确认会各算一套。
+# 函数用途: 解析一次后台投递的路线事实。
+def _background_delivery_route(
+    channels: object,
+    delivery_context: DeliveryContext,
+    *,
+    route_supports_transcript: bool | None = None,
+) -> _OwnerDeliveryRoute:
+    transcript_route = bool(
+        supports_transcript_delivery(delivery_context.channel)
+        if route_supports_transcript is None
+        else route_supports_transcript
+    )
+    ownership = _background_route_ownership(channels, delivery_context.channel)
+    obligation = _background_delivery_obligation(
+        target=delivery_context.target,
+        ownership=ownership,
+    )
+    return _OwnerDeliveryRoute(
+        transcript_route=transcript_route,
+        ownership=ownership,
+        obligation=obligation,
+        canonical_record=bool(transcript_route or not obligation),
+    )
 
 
 # LLM: 没有可落账正文时的统一结果：正文只是给上层的投影，persisted 必须为 False。
@@ -2235,24 +2450,24 @@ def _background_owner_delivery_committed(
     request: BackgroundRunRequest,
     *,
     target: str,
-    route_supports_proactive: bool,
+    ownership: str,
     commit: BackgroundDeliveryCommit,
+    canonical_record: bool = False,
 ) -> bool:
     """Acknowledge owner-facing wakes only after their real delivery commit."""
 
     status = str(commit.delivery_status or "").strip().lower()
     if status == "sent":
-        return True
+        # 外发成功但这条路线本来要靠 canonical 承担交付时，本地落账失败同样不能确认：
+        # 否则"用户读过的那份记录"永远缺一条，而且没人会再补。
+        return bool(commit.persisted) or not canonical_record
     if status == "suppressed":
         # 投递层显式判定这是内部协议内容：交付义务归零，重投只会得到同样结论。
         # 审计类唤醒沿用原有更严格判定，避免未上报的发现被静默吞掉。
         return not _audit_owner_report_event(request)
-    obligation = _background_delivery_obligation(
-        target=target,
-        route_supports_proactive=route_supports_proactive,
-    )
-    if obligation:
+    if _background_delivery_obligation(target=target, ownership=ownership):
         # 欠 owner 一次真实外发：canonical 记录只是安全网，不能替代送达。
+        # 这里必须能"欠着不确认"，即使 adapter 当前不可用。
         return False
     if commit.persisted:
         return True
@@ -2270,12 +2485,24 @@ def _route_supports_transcript(channels: object, channel: str) -> bool:
     return supports_transcript_delivery(channel)
 
 
-# LLM: 主动外呼能力只认投递服务声明；服务缺失时一律视为不能外发（fail-closed），
-# 绝不因为渠道名字看起来像 IM 就打开一条未注册的外发通道。
-# 函数用途: 读取当前投递边界对某通道的 proactive 外发能力。
-def _channels_support_proactive(channels: object, channel: str) -> bool:
-    probe = getattr(channels, "supports_proactive", None)
-    return bool(probe(channel)) if callable(probe) else False
+# LLM: 归属用的"部署声明"探测：优先问投递服务的 declares_channel；测试替身没有该方法时
+# 回退到内置的 proactive 推送通道声明表，仍然只读声明、不探测 adapter 是否在线。
+# 函数用途: 判断投递边界是否声明过该外发通道。
+def _channel_declares_transport(channels: object, channel: str) -> bool:
+    probe = getattr(channels, "declares_channel", None)
+    if callable(probe):
+        return bool(probe(channel))
+    return str(channel or "").strip().lower() in PROACTIVE_PUSH_CHANNELS
+
+
+# LLM: 声明能力与可用性分离：declared_proactive 读注册表里的能力声明，adapter 当前是否
+# 构建成功、健康与否都不改变它。
+# 函数用途: 判断该通道被声明为支持 proactive 外发。
+def _channel_declares_proactive(channels: object, channel: str) -> bool:
+    probe = getattr(channels, "declared_proactive", None)
+    if callable(probe):
+        return bool(probe(channel))
+    return str(channel or "").strip().lower() in PROACTIVE_PUSH_CHANNELS
 
 
 def _matching_goal_status(

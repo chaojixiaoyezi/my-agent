@@ -525,6 +525,9 @@ class BackgroundMainAgentReport:
     # 不再出现“投递状态缺失、正文引用为空”的盲区。
     commit_kind: str = "none"
     message_id: str = ""
+    # 路线归属：local(本地会话就是读取面) / external(声明过外发、欠一次真实外送) /
+    # undeclared(部署没声明过该通道，永不外发)。排障时用它区分“没发”与“不该发”。
+    route_ownership: str = ""
 
 
 # LLM: One immutable event preserves the model-call summary produced by one

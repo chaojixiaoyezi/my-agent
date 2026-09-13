@@ -1,5 +1,23 @@
 # Gateway Progress
 
+## 2026-09-13 R279 复审补丁：restart 就绪预算假失败 + 路线归属与整封 envelope 重投
+
+三处复审发现的缺口，都已修并带守卫测试：
+
+1. **`gateway restart` 就绪预算假失败**：`--timeout` 只作用于 stop/drain，start 段的就绪等待恒取
+   `config.gateway_ready_timeout_seconds`（默认 3s）。验收机冷启动实测 4 秒级 → CLI 报
+   `GATEWAY_START_TIMEOUT`（exit 2），而进程其实正在起来。现在 `start`/`restart` 都接受
+   `--ready-timeout`，restart 未显式给时用 `--timeout`，都没给才落配置默认值；就绪判据本身不变。
+2. **路线归属改为声明级事实**：新增 `ChannelAdapterRegistry.declares_channel()` 与
+   `DeliveryService.declares_channel()/declared_proactive()`，"声明过"与"此刻能发"分开。后台路线的
+   外发义务只读声明：声明过 + 有 target 就欠一次真实外送，适配器掉线/凭据缺失/工厂失败都不能把义务抹掉；
+   未声明通道继续 fail-closed、永不外发。`_background_route_ownership()` 返回
+   `local`/`external`/`undeclared`，报告与日志都带 `route_ownership`。
+3. **整封 envelope 冻结与幂等重投**：冻结载荷升到 `wake-owner-delivery.v2`，同时保存正文、附件
+   （`delivery_artifacts`）、过程回复、审计引用、canonical metadata、`external_sent`/`receipt_id` 与归属；
+   纯附件回复现在同样会冻结（以前直接跳过，重投只能重跑模型并丢附件）。重投若发现外发已成功，只补本地
+   落账、**绝不二次外发**；v1 旧载荷继续可重投。冻结是否生效以 store 的真实写入结果为准。
+
 ## 2026-09-13 R279 后台最终答复丢失：canonical 记录与外部投递解耦
 
 真实故障（用户现场，07:04:08 起 480s 的一次 TUI 请求后 `USER_REPLY_UNAVAILABLE`）复盘出的底座缺口：

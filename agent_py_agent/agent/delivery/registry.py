@@ -169,6 +169,13 @@ class ChannelAdapterRegistry:
                 _channel_key(channel), ChannelCapabilities(text=False, reply=False)
             )
 
+    # LLM: "声明过这个通道"与"此刻能不能发"必须分开：adapter 掉线、凭据缺失、工厂构造失败只影响后者。
+    # 后台路由的外发义务归属只能读这个声明事实，否则一次暂时不可用就会把义务抹掉、吞掉通知。
+    # 函数用途: 判断当前部署是否声明过该通道（注册过 adapter 实例或懒工厂）。
+    def declares_channel(self, channel: str) -> bool:
+        with self._lock:
+            return _channel_key(channel) in self._capabilities
+
     # LLM: 生命周期调用方只能写当前协议 health state；正文异常不得参与健康状态推断。
     # 函数用途: 记录 adapter 已启动、停止或失败的结构化健康事实。
     def mark_health(

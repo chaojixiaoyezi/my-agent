@@ -1,11 +1,27 @@
 # TESTS
 
-## 2026-09-13 R277 单 Gateway 部署后的真实 TUI 分项验收（进行中）
+## 2026-09-13 R279 后台答复落账解耦 + 结构化路线归属 + 就绪预算（已修，含真机 TUI）
+
+- 远端提交基线：`c3650384`（step-2 落账解耦）与本次提交（结构化路线归属、整封 envelope 冻结重投、
+  restart 就绪预算）。focused tests 覆盖：`test_background_owner_delivery_commit.py`（12 项）、
+  `test_background_main_agent_runtime.py`、`test_background_history_snapshot.py`、
+  `test_gateway_commands.py`、scheduler/wake/delivery/dispatch 共 22 个文件全绿。
+- 真实故障复现与红/绿对照使用真实 `DeliveryService` + 默认 registry、隔离 `MY_AGENT_HOME`：
+  provider 名当渠道时 canonical 行 0 → 1；chat/tui 保持 1。
+- 真机 TUI（192.0.2.10，同一 Gateway pid 700073、MiniMax-M2.7，tmux `ma-r279-110-main` /
+  `ma-r279-110-multi`）：多用户后台最终答复落 canonical（394 / 297 字符 + `message_id`）、
+  未知渠道 fail-closed 不外发、插话续跑被 `active_turn_input_consumed` 消费后同一轮按注入要求重排。
+- 尚未关闭：慢模型长等待的插桩帧耗时、Goal 终态真机制备、`update_goal` 同 task 双 active 的语义决策
+  （见 `docs/ROADMAP.md` R279 未关闭项）。
+
+## 2026-09-13 R277 单 Gateway 部署后的真实 TUI 分项验收（历史，已被 R279 取代）
 
 - 基线 `9381cb9c`：459 项直接相关 focused tests、Ruff、doc sync、strict code-size、diff、clean-package 通过；
   未跑全仓 pytest，未使用线上 CI 作为验收来源。远端 main 已核对同一提交。
 - 独立运行包安装后逐字核对 1,121 个包文件，正常重启测试机唯一 Gateway；配置 hash 不变。
-  用户本机运行环境与会话未动。旧运行包保留用于回滚；清理的是无进程/服务引用的六套旧 venv。
+  【历史状态，已被 R279 取代】当时用户本机运行环境与会话未动；用户本机已于 2026-09-13 07:51:46
+  切到 `runtime-r279`（pid 97872 → 82793，见 `docs/ROADMAP.md` R279 段与部署记录）。
+  旧运行包保留用于回滚；清理的是无进程/服务引用的六套旧 venv。
 - 两个隔离用户真实 TUI 使用官方 MiniMax-M2.7：社区借阅工具与四子代理家庭账本工具。
   自然语言布置需求，测试者不代写业务代码。主代理最终输出期间追加要求后继续修改并重新交付；
   等待四子代理期间追加要求，主代理在全部返回前回复并发出四条 guidance，任务清单仍显示。

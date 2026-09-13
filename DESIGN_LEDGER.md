@@ -1,5 +1,21 @@
 # DESIGN LEDGER
 
+## 2026-09-13 R279 复审：声明级路线归属 + 整封 envelope 重投 + 就绪预算【状态：已修+守卫测试】
+
+- **归属与能力分离（长期边界）**：路线的外发义务只由"部署声明过什么"决定
+  （`ChannelAdapterRegistry.declares_channel` + 声明的 proactive 能力）。`supports_proactive()` 这类
+  可用性探测**不得**参与义务判定：adapter 掉线、凭据缺失、工厂失败都只影响"这次能不能发"。
+  未声明通道继续 fail-closed。归属三态 `local`/`external`/`undeclared` 进报告与日志。
+- **整封 envelope 冻结**：`wake-owner-delivery.v2` 保存正文+附件+过程回复+审计引用+canonical metadata
+  +`external_sent`/`receipt_id`。只存正文会让重投丢附件/丢过程；只存状态会让重投无从重建消息。
+  已证明外发成功的载荷重投时**只补本地落账**，绝不二次外发（幂等靠 `owner_delivery:{delivery_key}` 去重键）。
+- **就绪预算可显式加长**：`--ready-timeout` > `--timeout` > 配置默认；判据与 exit code 语义不变。
+- **取证结论（证据见 `docs/ROADMAP.md` R279）**：`current_tokens` 566K→50K 的跳变是**前后台两条拼装路径
+  交替写同一个单槽位快照**（前台整 thread 重放 ≈515–671K；后台只有当轮有界指针 ≈50K），不是压缩也不是裁剪；
+  用户截图的 641.7K 在 `requests/done/gwreq-…8848.chunks.jsonl` 首行得到确认。
+- **未关闭（需 owner 语义决策）**：同 task 多条 active goal 使 `update_goal` 恒 `GOAL_STATE_CONFLICT`
+  且 `_matching_goal_status` 视其为"不存在"；推荐 ①create 时 supersede 旧 goal，或 ②解析取最新并记歧义。
+
 ## 2026-09-13 R279 后台答复落账与外部投递解耦（canonical ≠ transport）【状态：已修+守卫测试，未部署】
 
 **问题（用户现场真实故障）**：一次 owner 身份 = provider 名（`release-validation`）的测试运行里，

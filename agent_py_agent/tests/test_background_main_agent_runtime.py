@@ -6196,7 +6196,7 @@ def test_capacity_wake_retry_reuses_frozen_reply_without_second_model_turn(
     assert len(backend.prompts) == 1
     cached = store.pending_wake_signal(signal.wake_signal_id)
     assert cached is not None
-    assert cached.metadata["owner_delivery"]["schema_version"] == ("wake-owner-delivery.v1")
+    assert cached.metadata["owner_delivery"]["schema_version"] == ("wake-owner-delivery.v2")
     assert scheduler.tick(now=51.0) == []
     assert len(backend.prompts) == 1
     assert store.pending_wake_signal(signal.wake_signal_id) is not None

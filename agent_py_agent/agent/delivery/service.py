@@ -80,6 +80,20 @@ class DeliveryService:
     def supports_proactive(self, channel: str) -> bool:
         return self.registry.capabilities_for(channel).proactive
 
+    # LLM: 声明与可用必须分开暴露：obligation/route 归属读声明，真实发送读可用性。
+    # 否则 adapter 掉线或凭据缺失就会被误判成"不欠外发"，通知被静默吞掉。
+    # 函数用途: 判断部署是否声明过该通道（与 adapter 当前是否可用无关）。
+    def declares_channel(self, channel: str) -> bool:
+        probe = getattr(self.registry, "declares_channel", None)
+        if callable(probe):
+            return bool(probe(channel))
+        return bool(self.registry.capabilities_for(channel).text)
+
+    # LLM: 声明能力同样与可用性无关；只有声明为 proactive 的通道才可能欠真实外发。
+    # 函数用途: 返回该通道声明的 proactive 能力（不探测 adapter 是否在线）。
+    def declared_proactive(self, channel: str) -> bool:
+        return bool(self.registry.capabilities_for(channel).proactive)
+
     # LLM: provider registry 只管外部 adapter；CLI/Gateway 的本地交付能力由会话协议
     # 统一声明，禁止把未知外部通道错降级成本地 transcript。
     # 函数用途: 判断当前通道能否以权威会话追加作为交付提交。
