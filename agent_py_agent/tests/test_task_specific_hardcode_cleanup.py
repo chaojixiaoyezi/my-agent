@@ -101,4 +101,4 @@ def test_structured_tool_and_contract_fixtures_use_neutral_sample_terms() -> Non
 
 
 def test_default_forbidden_write_roots_do_not_hardcode_reference_project_dirs() -> None:
-    assert all(not str(root).endswith(".openclaw") for root in policy_roots())
+    assert all(not str(root).endswith(".sample_c") for root in policy_roots())

@@ -71,9 +71,7 @@ make_excel.py
 make_excel_v2.py
 merge_github_trending.py
 
-# 模型助手 Code memory files (stored in ~/.模型助手/projects/, not in repo)
-# These are user-specific and should not be committed to git
-# If you want to track them, copy to docs/memory/ instead
+# 用户专属记忆保存在运行目录，不提交到 Git。
 
 # Temporary files
 tmp/

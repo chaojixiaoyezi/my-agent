@@ -254,26 +254,7 @@ skills/tools/workflows；随 wheel 发布的 builtin tools/skills 本身也是�
 所有普通最终回复、后台主动结果和显式附件发送经过统一 `DeliveryService`。IM adapter 不重新解释任务状态，
 也不把内部 XML、工具调用或子代理碎碎念投递给用户。
 
-## References checked
+## 实现边界
 
-- 会话运行时 current checkout `578c1b22`:
-  `会话运行时-rs/core/src/context_manager/history.rs`, `session/session.rs`, `session/turn.rs`, `tasks/compact.rs`,
-  `compact.rs`, `thread_manager.rs`. Adopted one thread history, steer as current-turn input, interrupt without
-  thread loss, tool-output-only truncation, whole-item paired removal, compact replacing the same history,
-  bounded recent user context and explicit before/after compact accounting.
-  The remaining nonblocking-wait lifecycle difference is recorded above.
-- 通道运行时: stable channel/session identity, active-run control, parent-only child aggregation and typed delivery
-  boundaries were checked. Its product-specific session defaults were not copied.
-- 长期助手 current checkout `4be38125af06`: gateway conversation keys, protected recent tail,
-  persisted ineffective/failure guards, cancellation/commit fence, memory provider separation and
-  shutdown/recovery boundaries were checked. Its compression algorithm and profile-wide memory layout were not copied.
-- 终端交互 current checkout `6b25ab6`: `src/services/compact/microCompact.ts` keeps local messages unchanged on the
-  cached path and removes tool results through API-layer cache edits; bounded messages-to-keep, before/after token
-  accounting, compact boundary events and repeated-failure circuit were also checked. Its TypeScript layout was not copied.
-- DeepSeek Harness current checkout: `docs/subsystems/compaction.md` and
-  `packages/compaction/compaction-basic/src/{region,summarizer,index}.ts` were checked for append-only event logging,
-  one surface replacement, priced recent-tail retention, tool-pair-balanced boundaries and prefix-cache-aligned summary
-  requests. Its Cordis service/event layout was not copied.
-
-The adaptation is limited to Python interfaces, owner-scoped file storage and my-agent runtime types. No
-Feishu-specific context branch or natural-language task classifier is part of this design.
+实现使用 Python 接口、owner 范围的文件存储和统一运行时类型。会话语义不依赖具体 IM 通道，
+也不通过自然语言分类器改变任务归属。设计与实际验收边界以 STATUS 和对应模块代码为准。

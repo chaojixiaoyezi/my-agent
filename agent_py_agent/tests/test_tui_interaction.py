@@ -91,7 +91,7 @@ def test_todo_expansion_toggle_is_display_only_and_redraws() -> None:
     assert len(redraws) == 2
 
 
-def test_mouse_capture_defaults_free_code_style_and_toggles_without_other_state() -> None:
+def test_mouse_capture_defaults_sample_d_style_and_toggles_without_other_state() -> None:
     redraws: list[bool] = []
     state = TuiInteractionState(lambda: redraws.append(True))
 

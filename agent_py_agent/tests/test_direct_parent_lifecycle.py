@@ -386,7 +386,7 @@ def test_nested_child_result_and_capability_do_not_wake_root_conversation(tmp_pa
 def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / "subagents")
     child = manager.create_run(
-        goal="调研 Codex",
+        goal="调研 sample-a",
         thought="执行",
         plan=["阅读源码"],
         role="researcher",
@@ -394,7 +394,7 @@ def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_p
         root_id="task-root",
     )
     final_report = child.agent_run_final_report_md
-    artifact = tmp_path / "codex-report.md"
+    artifact = tmp_path / "sample-a-report.md"
     Path(final_report).parent.mkdir(parents=True, exist_ok=True)
     Path(final_report).write_text("完整交接", encoding="utf-8")
     artifact.write_text("调研产物", encoding="utf-8")

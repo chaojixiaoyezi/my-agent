@@ -1449,7 +1449,7 @@ def test_tool_round_does_not_rewrite_mixed_paths_in_natural_language():
         executed.append(_payload(request.call))
         return _success(request, "{}")
 
-    already_rebased = f"{selected_root}/research/pi.md"
+    already_rebased = f"{selected_root}/research/sample-f.md"
     execute_tool_round(
         _round_request(
             agent=agent,

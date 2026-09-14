@@ -444,9 +444,9 @@ def test_items_without_output_files_keep_business_output_contract_empty(tmp_path
                 "agent_name": "ECC analyzer",
             },
             {
-                "goal": "分析 pi-main 并写报告。",
+                "goal": "分析 sample-f-main 并写报告。",
                 "role": "worker",
-                "agent_name": "pi analyzer",
+                "agent_name": "sample-f analyzer",
             },
         ],
     }).output)

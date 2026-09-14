@@ -1,15 +1,14 @@
 # my-agent 企业规模化容器镜像(Tier 5 部署)。多阶段:build 装依赖、runtime 精简。
 # 同一镜像跑两种进程:ASGI 入站(默认 CMD)与 worker(清单里覆盖 command)。
 #
-# 关键(研究核验三家做法后取最优):
+# 运行边界:
 #  - tini 作 PID 1:转发信号给整组 + 回收孤儿子进程(my-agent 跑大量工具子进程);
-#    claw 让应用直作 PID 1 会漏收僵尸,长期助手/通道运行时 都上了 tini —— 此处对齐更稳的一方。
-#  - 非 root 运行(USER appuser):安全基线。
+#  - 非 root 运行(USER appuser):避免默认扩大应用权限。
 #  - HEALTHCHECK 打 /healthz:容器层存活探测。
 
 FROM python:3.12-slim AS build
 WORKDIR /app
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY agent_py_agent ./agent_py_agent
 # 装规模 + 密钥两个 extra(PG/ASGI 驱动 + 加密)到独立前缀,便于 runtime 阶段整体拷贝
 RUN pip install --no-cache-dir --prefix=/install ".[scale,secrets]"

@@ -12,9 +12,7 @@ def test_contract_test_pyramid_gate_passes_current_repo() -> None:
 
     assert report.ok is True
     assert report.error_codes == ()
-    assert "openclaw-main" in report.reference_projects_checked
-    assert "hermes-agent-main" in report.reference_projects_checked
-    assert "codex-main" in report.reference_projects_checked
+    assert report.test_layers_checked == ("contract", "fake-tool", "fake-llm", "replay", "real-tui")
     assert main(["--repo-root", str(repo_root), "--json"]) == 0
 
 
@@ -39,9 +37,7 @@ def test_contract_test_pyramid_gate_rejects_production_task_specific_needles(tmp
     (docs / "main-agent-contract-testing.md").write_text(
         "\n".join(
             (
-                "AgentScope Claude Code Claw Code Codex Free Code Hermes LangChain LangGraph",
-                "OpenAI Agents SDK OpenClaude OpenClaw OpenHuman",
-                "my-agent-architecture-review my-agent-feature-card-message-runtime",
+                "## contract", "## fake-tool", "## fake-llm", "## replay", "## real-tui",
             )
         ),
         encoding="utf-8",
@@ -51,3 +47,15 @@ def test_contract_test_pyramid_gate_rejects_production_task_specific_needles(tmp
 
     assert report.ok is False
     assert "PRODUCTION_TASK_SPECIFIC_CONTRACT" in report.error_codes
+
+
+def test_contract_test_strategy_reports_missing_layers(tmp_path: Path) -> None:
+    from scripts.check_contract_test_pyramid import _check_test_strategy
+
+    docs = tmp_path / "docs" / "design"
+    docs.mkdir(parents=True)
+    (docs / "main-agent-contract-testing.md").write_text("## contract\n", encoding="utf-8")
+    findings: list[dict[str, str]] = []
+    assert _check_test_strategy(tmp_path, findings) == ["contract"]
+    assert len(findings) == 4
+    assert {item["code"] for item in findings} == {"TEST_LAYER_UNDOCUMENTED"}

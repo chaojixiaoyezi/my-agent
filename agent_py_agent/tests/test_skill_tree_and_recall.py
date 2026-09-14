@@ -128,7 +128,7 @@ def test_prompt_injection_exposes_budgeted_metadata_but_not_skill_body(
     assert _skill_context_chunks(SimpleNamespace(), "任意") == [], "router 缺席整段缺席"
 
 
-def test_skill_get_returns_codex_style_source_locator(
+def test_skill_get_returns_sample_a_style_source_locator(
     tmp_path: Path,
     skill_catalog_factory,
 ) -> None:

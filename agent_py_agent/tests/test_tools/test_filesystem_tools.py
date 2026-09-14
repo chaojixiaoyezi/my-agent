@@ -577,9 +577,9 @@ def test_filesystem_tool_reports_missing_external_path_without_permission_claim(
     """
     with tempfile.TemporaryDirectory() as td:
         base = Path(td).resolve()
-        workspace = base / "my-claude-code"
+        workspace = base / "my-sample_app"
         workspace.mkdir()
-        wrong = base / "wrong-user" / "my-claude-code" / "deliverables" / "shop" / "build"
+        wrong = base / "wrong-user" / "my-sample_app" / "deliverables" / "shop" / "build"
         suggested = workspace / "deliverables" / "shop" / "build"
         tool = ListFilesTool(workspace, max_entries=20)
 

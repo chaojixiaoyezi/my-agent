@@ -96,7 +96,7 @@ def test_goal_tool_errors_keep_registered_control_codes(tmp_path) -> None:
     assert invalid_create.error_code == "GOAL_INVALID_REQUEST"
 
 
-def test_get_goal_without_existing_goal_matches_codex_response(tmp_path) -> None:
+def test_get_goal_without_existing_goal_matches_sample_a_response(tmp_path) -> None:
     agent, thread, goal = _goal_agent(tmp_path)
     agent.conversation_store.delete_goal(thread.thread_id, expected_goal_id=goal.goal_id)
 
@@ -268,7 +268,7 @@ def test_stop_named_work_without_kind_fails_closed_on_cross_kind_name_conflict(
     assert links["audit-daily"].status == "active"
 
 
-def test_goal_objective_limit_and_public_schema_match_codex(tmp_path) -> None:
+def test_goal_objective_limit_and_public_schema_match_sample_a(tmp_path) -> None:
     agent, thread, goal = _goal_agent(tmp_path)
 
     with pytest.raises(ValueError, match="4000"):

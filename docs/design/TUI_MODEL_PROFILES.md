@@ -50,7 +50,7 @@
   已知 Flash 的非显式部署温度不发送，显式温度保留；其思考模式上游可能按协议忽略温度。
 - top_p 与模型/连接整组进入工作片快照及 backend 缓存键；编辑不会热改进行中工作片，后续工作片读取新值。
   main/child/Compact 共用后端，不修改会话、重试或历史。该改动不证明旧 400 或复读已修复。
-- 对照在线最新 [工具运行时 transform.ts](（外部资料链接已移出发布文档）)
+- 对照在线最新 工具运行时 transform.ts
   的 `topP/temperature`，以及 [DeepSeek 思考参数](https://api-docs.deepseek.com/guides/thinking_mode/)。
   本地 工具运行时 检出较旧，未用它代替在线最新版的采样规则；公开源码也不能证明线上部署具体路由版本。
 

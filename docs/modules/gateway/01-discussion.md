@@ -26,7 +26,7 @@ gateway 的目标是让 my-agent 不只是一次性 CLI 进程，而是可以后
 ## 相关旧文档
 
 - [GATEWAY_DESIGN.md](../../design/GATEWAY_DESIGN.md)
-- [GATEWAY_RESEARCH.md](../../design/GATEWAY_RESEARCH.md)
+- GATEWAY_RESEARCH.md
 - [ARCHITECTURE_GUIDE.md](../../design/ARCHITECTURE_GUIDE.md)
 - [DESIGN_LEDGER.md](../../../DESIGN_LEDGER.md)
 - [TESTS.md](../../../TESTS.md)

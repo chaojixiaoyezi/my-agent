@@ -7,16 +7,16 @@
 - [DESIGN_audit_guaranteed_mode.md](DESIGN_audit_guaranteed_mode.md) - 命名 `/audit` 通用来源工作者设计
 
 ## 已完成
-- [CHECKLIST_ROUND5.md](CHECKLIST_ROUND5.md) - Round 5 Checklist ✅
+- CHECKLIST_ROUND5.md - Round 5 Checklist ✅
 
 ## 交接文档
-- [HANDOFF_autonomous-dispatch-advanced.md](HANDOFF_autonomous-dispatch-advanced.md)
-- [HANDOFF_channel_adapter_framework.md](HANDOFF_channel_adapter_framework.md)
-- [HANDOFF_concurrency-audit.md](HANDOFF_concurrency-audit.md)
-- [HANDOFF_gateway-autonomous.md](HANDOFF_gateway-autonomous.md)
-- [HANDOFF_permission_model.md](HANDOFF_permission_model.md)
-- [HANDOFF_shell_tool.md](HANDOFF_shell_tool.md)
-- [HANDOFF_testing-hardening.md](HANDOFF_testing-hardening.md)
+- HANDOFF_autonomous-dispatch-advanced.md
+- HANDOFF_channel_adapter_framework.md
+- HANDOFF_concurrency-audit.md
+- HANDOFF_gateway-autonomous.md
+- HANDOFF_permission_model.md
+- HANDOFF_shell_tool.md
+- HANDOFF_testing-hardening.md
 - [HANDOFF_TEMPLATE.md](HANDOFF_TEMPLATE.md)
 
 ## 模板

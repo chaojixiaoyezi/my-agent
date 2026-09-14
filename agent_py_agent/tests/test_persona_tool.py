@@ -355,7 +355,7 @@ def test_update_persona_rejects_multiple_user_facts_in_one_call(tmp_path):
 
 def test_update_persona_batch_writes_all_grounded_user_facts_atomically(tmp_path):
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
-    agent._current_user_prompt = "以后请叫我青禾，回答时尽量简洁"
+    agent._current_user_prompt = "以后请叫我小明，回答时尽量简洁"
 
     result = UpdatePersonaTool(agent).execute(
         {
@@ -364,8 +364,8 @@ def test_update_persona_batch_writes_all_grounded_user_facts_atomically(tmp_path
             "operations": [
                 {
                     "action": "add",
-                    "content": "称呼:青禾",
-                    "source_quote": "以后请叫我青禾",
+                    "content": "称呼:小明",
+                    "source_quote": "以后请叫我小明",
                 },
                 {
                     "action": "add",
@@ -381,9 +381,9 @@ def test_update_persona_batch_writes_all_grounded_user_facts_atomically(tmp_path
     assert payload["action"] == "batch"
     assert len(payload["operations"]) == 2
     content = user.read_text(encoding="utf-8")
-    assert "- 称呼:青禾" in content
+    assert "- 称呼:小明" in content
     assert "- 回答偏好:尽量简洁" in content
-    assert content.count("称呼:青禾") == 1
+    assert content.count("称呼:小明") == 1
 
 
 def test_update_persona_batch_action_requires_operations(tmp_path):
@@ -397,14 +397,14 @@ def test_update_persona_batch_action_requires_operations(tmp_path):
 
 def test_update_persona_batch_does_not_require_natural_language_quotes(tmp_path):
     agent, _soul, user, _agents = _agent_with_paths(tmp_path)
-    agent._current_user_prompt = "以后请叫我青禾"
+    agent._current_user_prompt = "以后请叫我小明"
     result = UpdatePersonaTool(agent).execute(
         {
             "target": "user",
             "operations": [
                 {
                     "action": "add",
-                    "content": "称呼:青禾",
+                    "content": "称呼:小明",
                 },
                 {
                     "action": "add",
@@ -416,7 +416,7 @@ def test_update_persona_batch_does_not_require_natural_language_quotes(tmp_path)
 
     assert result.ok is True
     content = user.read_text(encoding="utf-8")
-    assert "称呼:青禾" in content
+    assert "称呼:小明" in content
     assert "回答偏好:尽量简洁" in content
 
 

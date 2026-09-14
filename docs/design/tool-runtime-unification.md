@@ -2,7 +2,7 @@
 
 Status: Complete; full/static/package and ordinary-Chinese real-model evidence recorded  
 Feature: [FEATURE-20260804-tool-runtime-unification.md](FEATURE-20260804-tool-runtime-unification.md)  
-Task: [TASK-20260804-1913-tool-runtime-unification.md](../tasks/completed/TASK-20260804-1913-tool-runtime-unification.md)
+Task: TASK-20260804-1913-tool-runtime-unification.md
 
 ## 1. 决策摘要
 
@@ -41,10 +41,10 @@ my-agent 的工具系统只保留这一条权威链：
 
 | Project | Checkout | HEAD | 精读入口 |
 | --- | --- | --- | --- |
-| 会话运行时 | `/Users/example/study-agent/all-agent/会话运行时-main` | `578c1b2230288104041e880a86d0f7f3a5ca6e47` | `会话运行时-rs/tools/src/responses_api.rs`, `tool_spec.rs`, `tool_executor.rs`; `会话运行时-rs/core/src/tools/router.rs`, `registry.rs`, `orchestrator.rs`, `parallel.rs`; `会话运行时-rs/execpolicy/src/decision.rs` |
-| 长期助手 | `/Users/example/study-agent/all-agent/长期助手-agent-main` | `0a62610f10cc34d696b2239b2c69fa1ba0f1ca63` | `tools/registry.py`, `tools/tool_result_storage.py`, `agent/tool_executor.py`, `agent/tool_dispatch_helpers.py`, `run_agent.py` |
-| 终端交互 | `/Users/example/study-agent/all-agent/终端交互-main` | `6b25ab68b103a269d6555c3daedc532630c67544` | `src/types/permissions.ts`, `src/tools/BashTool/bashPermissions.ts`, `pathValidation.ts`, `readOnlyValidation.ts`, `src/utils/shell/readOnlyCommandValidation.ts`, `src/utils/permissions/filesystem.ts`, `src/utils/hooks/ssrfGuard.ts` |
-| 通道运行时 | `/Users/example/study-agent/all-agent/通道运行时-main` | `9cf12734e675a1ec63abb09bf65e4f6d76835a1e` | `packages/tool-call-repair/src/contracts.ts`, `promote.ts`, `stream-normalizer.ts`; `src/agents/model-runtime-policy.ts`, `tool-policy-pipeline.ts`, `embedded-agent-runner/effective-tool-policy.ts`, `session-transcript-repair.ts` |
+| 会话运行时 | 对应模块代码 | `578c1b2230288104041e880a86d0f7f3a5ca6e47` | `会话运行时-rs/tools/src/responses_api.rs`, `tool_spec.rs`, `tool_executor.rs`; `会话运行时-rs/core/src/tools/router.rs`, `registry.rs`, `orchestrator.rs`, `parallel.rs`; `会话运行时-rs/execpolicy/src/decision.rs` |
+| 长期助手 | 对应模块代码 | `0a62610f10cc34d696b2239b2c69fa1ba0f1ca63` | `tools/registry.py`, `tools/tool_result_storage.py`, `agent/tool_executor.py`, `agent/tool_dispatch_helpers.py`, `run_agent.py` |
+| 终端交互 | 对应模块代码 | `6b25ab68b103a269d6555c3daedc532630c67544` | `src/types/permissions.ts`, `src/tools/BashTool/bashPermissions.ts`, `pathValidation.ts`, `readOnlyValidation.ts`, `src/utils/shell/readOnlyCommandValidation.ts`, `src/utils/permissions/filesystem.ts`, `src/utils/hooks/ssrfGuard.ts` |
+| 通道运行时 | 对应模块代码 | `9cf12734e675a1ec63abb09bf65e4f6d76835a1e` | `packages/tool-call-repair/src/contracts.ts`, `promote.ts`, `stream-normalizer.ts`; `src/agents/model-runtime-policy.ts`, `tool-policy-pipeline.ts`, `embedded-agent-runner/effective-tool-policy.ts`, `session-transcript-repair.ts` |
 
 四份合同索引 workbook 只用于定位当前源码，不作为行为结论：
 `会话运行时_contract_code_files.xlsx`、`长期助手_contract_code_files.xlsx`、

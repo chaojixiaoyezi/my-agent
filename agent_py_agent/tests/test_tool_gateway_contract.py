@@ -149,7 +149,7 @@ def test_concurrent_web_invocations_do_not_mutate_shared_private_host_grants(
         request=request,
         workspace_roots=[tmp_path],
     )
-    scoped_web.allowed_private_hosts = ("192.168.1.7",)
+    scoped_web.allowed_private_hosts = ("10.0.0.7",)
     scoped_web.allow_private_resolution = True
 
     assert scoped_web is not shared_web

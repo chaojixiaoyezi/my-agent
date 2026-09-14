@@ -521,8 +521,7 @@ def _created_tasks_result(
     )
     if relation_fence:
         payload["finding_investigation_fence"] = relation_fence
-    # 派工即种账本(学 终端应用 TodoWrite):模型的派工计划自动落成 task_progress 待办,
-    # 收口闸/出口续航才有账可守;note 同时在工具结果里当面提醒(终端应用 式 tool-result nudge)。
+    # 派工计划写入 task_progress 待办，供进度展示和续轮使用；note 同时进入工具结果。
     if seed := seed_dispatch_task_progress(agent, tasks):
         payload["task_progress_seed"] = {**seed, "note": DISPATCH_SEED_NOTE}
     # P1 covers 绑定回执:回显绑定/警示绑错 id/没绑时提醒清单还有 open 项可绑。

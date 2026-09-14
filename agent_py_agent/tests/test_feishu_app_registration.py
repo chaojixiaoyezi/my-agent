@@ -29,7 +29,7 @@ def test_init_ok_when_client_secret_supported():
         far.init_app_registration("feishu")  # 不抛即通过
 
 
-def test_begin_uses_raw_clean_url_without_openclaw_tag():
+def test_begin_uses_raw_clean_url_without_sample_c_tag():
     raw = {
         "device_code": "DEV123",
         "user_code": "U-9",

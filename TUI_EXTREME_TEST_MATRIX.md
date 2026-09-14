@@ -1,7 +1,5 @@
 # TUI 极限测试矩阵
 
-> 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
-
 本文是 5 路真实 TUI 实验室的权威测试账本。它记录可复现操作和客观证据，不把模型自述、窗口标题动画、
 测试数量或夹具结果冒充真实后端通过。测试机固定为 `192.0.2.13`，会话固定为 `<历史会话:replica>`、
 `<历史会话:input>`、`<历史会话:render>`、`<历史会话:lifecycle>`、`<历史会话:isolation>`；禁止触碰 PID `830976`。
@@ -22,9 +20,9 @@
 | 来源 | 原始依据 | 转成的测试风险 |
 |---|---|---|
 | SRC-FREE | 本机 `终端交互-main/src/ink/`、`src/components/PromptInput/`、`src/components/diff/`、`src/components/permissions/` | 参考界面、输入、终端、diff、权限的行为序列 |
-| SRC-会话运行时-PENDING | [会话运行时 pending input preview](（外部资料链接已移出发布文档）) | pending 与 queue 固定预览、三行截断、拒绝后保留 |
-| SRC-会话运行时-PASTE | [会话运行时 paste burst](（外部资料链接已移出发布文档）) 与 [chat composer](（外部资料链接已移出发布文档）) | 首字符延迟、快速字符、bracketed paste、大粘贴展开、立即 Enter |
-| SRC-会话运行时-TEST | [会话运行时 AGENTS testing guide](（外部资料链接已移出发布文档）) | 完整对象断言、TUI snapshot、benchmark |
+| SRC-会话运行时-PENDING | 会话运行时 pending input preview | pending 与 queue 固定预览、三行截断、拒绝后保留 |
+| SRC-会话运行时-PASTE | 会话运行时 paste burst 与 chat composer | 首字符延迟、快速字符、bracketed paste、大粘贴展开、立即 Enter |
+| SRC-会话运行时-TEST | 会话运行时 AGENTS testing guide | 完整对象断言、TUI snapshot、benchmark |
 | SRC-PTK | [prompt_toolkit unit testing](https://python-prompt-toolkit.readthedocs.io/en/stable/pages/advanced_topics/unit_testing.html) | `create_pipe_input`、`DummyOutput` 和应用状态断言 |
 | SRC-TMUX-CONTROL | [tmux Control Mode](https://github.com/tmux/tmux/wiki/Control-Mode) | `%output`、慢客户端 flow control、控制客户端大小 |
 | SRC-TMUX-ADV | [tmux Advanced Use](https://github.com/tmux/tmux/wiki/Advanced-Use) | `send-keys -H`、`capture-pane`、pane/window 状态 |

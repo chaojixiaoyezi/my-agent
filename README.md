@@ -2,7 +2,7 @@
 
 一个用 Python 标准库搭起来的个人通用智能体底座。
 
-后续版本统一以 **my-agent** 发布，正式仓库为 [chaojixiaoyezi/my-agent](https://github.com/chaojixiaoyezi/my-agent)。
+后续版本统一以 **my-agent** 发布，正式仓库为 [官方仓库](https://github.com/chaojixiaoyezi/my-agent)。
 安装命令、产品说明和发布名称统一为 `my-agent`，已有 `~/.my-agent` 用户数据不因改名迁移。
 历史说明使用中性路径与会话占位，不假装旧目录已更名；原始定位仍可按提交和运行编号追溯。
 

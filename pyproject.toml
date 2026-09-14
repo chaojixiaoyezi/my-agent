@@ -62,6 +62,7 @@ my-agent = "agent_py_agent.__main__:main"
 
 [tool.setuptools]
 include-package-data = false
+license-files = ["LICENSE", "NOTICE"]
 
 [tool.setuptools.packages.find]
 include = ["agent_py_agent*"]

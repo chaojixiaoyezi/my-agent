@@ -2,13 +2,13 @@
 # 模块用途: 启动子进程前剥离模型与网关密钥，保留普通运行变量及操作者显式放行的第三方凭据。
 from __future__ import annotations
 
-"""子进程环境凭据擦洗(选项1-C,抄 长期助手 local.py + env_passthrough 的 GHSA 修复)。
+"""子进程环境凭据过滤。
 
 真机实锤(bwrap --share-net 放行外网 + _subprocess_text_env 直接 dict(os.environ)):run_command
 子进程能看到 MINIMAX_API_KEY / AGENT_API_KEY / 飞书 app_secret,一句 `curl 带 $KEY` 就外泄。
 本模块在 spawn 前剥掉【我们自管的凭据】:命令干活要的普通变量(PATH/HOME/LANG…)留着,密钥不给。
 
-抄 长期助手 GHSA-rhgp-j443-p4rf 那条:放行注册表【不能覆盖自管凭据】——第三方 key 可显式放行,
+放行注册表【不能覆盖自管凭据】——第三方 key 可显式放行,
 但我们自己的 provider/网关凭据永远删、任何声明都盖不掉(防恶意 skill/子代理把 KEY 声明成放行偷走)。
 """
 

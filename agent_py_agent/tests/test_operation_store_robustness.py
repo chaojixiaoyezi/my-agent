@@ -940,7 +940,7 @@ def test_s248_logical_parameter_projects_text_scope(tmp_path):
 # LLM: Filesystem paths remain visible to policy/audit but must never enter the cross-run
 # operation lease after the 会话运行时 concurrency migration.
 # 函数用途: 验证普通目录锁被一次性过滤，精确控制面逻辑锁仍保留。
-def test_codex_style_durable_scopes_drop_workspace_and_keep_logical():
+def test_sample_a_style_durable_scopes_drop_workspace_and_keep_logical():
     assert _durable_operation_scopes(
         (
             "workspace:/root",

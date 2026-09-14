@@ -317,7 +317,7 @@ def test_subagent_workspace_sync_deduplicates_unchanged_status_events(tmp_path) 
     assert len(shared_messages) == baseline_shared_message_count
     assert len(agent_timeline) == baseline_agent_timeline_count
 
-    task.latest_summary = "最近 write_file codex-analysis.md"
+    task.latest_summary = "最近 write_file sample_a-analysis.md"
     task.updated_at += 0.01
     manager.save(task)
 

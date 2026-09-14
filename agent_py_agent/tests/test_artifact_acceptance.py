@@ -138,17 +138,17 @@ def test_markdown_local_reference_check_rejects_missing_tree_file(tmp_path):
     )
 
     source_root = tmp_path / "all-agent"
-    existing = source_root / "openclaude-main" / "src" / "QueryEngine.ts"
+    existing = source_root / "sample-e-main" / "src" / "QueryEngine.ts"
     existing.parent.mkdir(parents=True)
     existing.write_text("export class QueryEngine {}\n", encoding="utf-8")
-    (source_root / "openclaude-main" / "README.md").write_text("# openclaude\n", encoding="utf-8")
+    (source_root / "sample-e-main" / "README.md").write_text("# sample-e\n", encoding="utf-8")
 
     report_path = tmp_path / "output" / "report.md"
     report_path.parent.mkdir()
     report_path.write_text(
         "# Report\n\n"
         "```\n"
-        "openclaude-main/\n"
+        "sample-e-main/\n"
         "├── src/                  # source files\n"
         "│   ├── QueryEngine.ts    # existing file\n"
         "│   └── Agent.ts          # missing file\n"
@@ -167,7 +167,7 @@ def test_markdown_local_reference_check_rejects_missing_tree_file(tmp_path):
 
     assert report.ok is False
     missing = [item for item in report.findings if item.code == "MARKDOWN_LOCAL_REF_MISSING"]
-    assert [item.value for item in missing] == ["openclaude-main/src/Agent.ts"]
+    assert [item.value for item in missing] == ["sample-e-main/src/Agent.ts"]
 
 
 def test_markdown_local_reference_check_ignores_prose_and_inline_code_paths(tmp_path):

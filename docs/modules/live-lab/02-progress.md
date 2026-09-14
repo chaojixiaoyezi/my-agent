@@ -11,7 +11,7 @@ MY_AGENT_CHECKOUT，公开历史路径和会话改中性占位。本次不执行
 启用 F821/F811 后修复 `main_agent_limit_cases._assert_storm_report/_assert_interrupt_honesty` 的未定义 lab：
 调用方显式传入当前 LiveLab 实例，不从全局变量猜测试环境。测试辅助不能替被测 Agent 补业务文件。
 本轮 87 项审计将定向故障注入与真实 TUI 分开记录；多路 TUI 共享一个 Gateway，测试说明与观察命令
-见 [R223 台账](../../audits/R223_87_ITEM_REMEDIATION.md)。没有外部 IM/Windows/跨 harness 公平对照的项目保持未验。
+见 R223 台账。没有外部 IM/Windows/跨 harness 公平对照的项目保持未验。
 
 当前 Live Lab 已包含 `compact-stress` 真实压测入口，用来验证主代理在约 10MB 长文本、200K 上下文窗口、70% 自动 compact 条件下，能否多次 compact 后继续同一任务并产出完整报告。需要更长档位时可用 `MY_AGENT_COMPACT_STRESS_SIZE_MB=50` 单独跑。
 该 suite 默认把 `tool_read_max_chars` 设为 100000，让 200K 上下文窗口下的长文本读取以较大页推进，避免测试人为制造过多模型往返；验收合同同时要求 `read_file` coverage ledger 连续覆盖源文件，防止只靠局部搜索或口头声明通过。

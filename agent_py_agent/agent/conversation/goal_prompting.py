@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-"""会话运行时 goal steering text with only value interpolation adapted for my-agent."""
+"""持续目标的续跑、预算耗尽与目标修改提示模板。许可说明见仓库 NOTICE。"""
+
+# LLM: 只插入已持久化的目标和预算字段；用户目标仍是数据，不得成为高优先级系统指令。
+# 模块用途: 生成不同目标事件的模型提示，不自行改写目标状态或触发执行。
 
 from html import escape
 

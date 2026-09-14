@@ -1343,7 +1343,7 @@ def test_in_turn_workspace_binding_retargets_the_live_conversation_guidance_inbo
     assert inject_pending_guidance(agent, live_loop, now=6.0) is False
 
 
-def test_multiple_task_steers_keep_codex_style_fifo_order(tmp_path) -> None:
+def test_multiple_task_steers_keep_sample_a_style_fifo_order(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     for current, message in enumerate(
         (

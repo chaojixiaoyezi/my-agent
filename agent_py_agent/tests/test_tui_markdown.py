@@ -201,7 +201,7 @@ def test_sanitizer_matches_category_rule_on_control_ranges() -> None:
         assert _strip_terminal_controls(sample) == legacy(sample)
 
 
-def test_markdown_fixture_matches_free_code_block_geometry_and_roles() -> None:
+def test_markdown_fixture_matches_sample_d_block_geometry_and_roles() -> None:
     markdown = """## Fixture 标题
 
 - 中文宽字符：你好，终端

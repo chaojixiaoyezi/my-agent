@@ -46,7 +46,7 @@
           {
             "key": "tui_mouse_capture_default",
             "label": "tui_mouse_capture_default（tui mouse capture default）",
-            "description": "TUI 默认是否接管鼠标： - true（推荐）：Free Code 式 TUI 鼠标；滚轮直接浏览历史，左键拖选松手和右键都复制应用内选区。 远程终端会同时尝试写 tmux buffer/OSC52；外层系统剪贴板是否接受仍取决于终端配置。 - false：把鼠标交回宿主终端做原生拖选/右键；全屏备用屏幕中物理滚轮不会进入 TUI，历史改用 PgUp/Ctrl+Home。 - 运行中可按 F6 临时切换，本项只决定新 TUI 的初始模式。",
+            "description": "TUI 默认是否接管鼠标： - true（推荐）：终端交互 式 TUI 鼠标；滚轮直接浏览历史，左键拖选松手和右键都复制应用内选区。 远程终端会同时尝试写 tmux buffer/OSC52；外层系统剪贴板是否接受仍取决于终端配置。 - false：把鼠标交回宿主终端做原生拖选/右键；全屏备用屏幕中物理滚轮不会进入 TUI，历史改用 PgUp/Ctrl+Home。 - 运行中可按 F6 临时切换，本项只决定新 TUI 的初始模式。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -271,7 +271,7 @@
           {
             "key": "workspace_task_llm_title_enabled",
             "label": "workspace_task_llm_title_enabled（workspace task llm title enabled）",
-            "description": "OpenClaw 风格的可选 LLM 短标题：失败自动回退上面的确定性中文标题。 默认关闭，避免普通 IM 每个新目录都多等一次模型请求；正式任务入口可按需开启。",
+            "description": "通道运行时 风格的可选 LLM 短标题：失败自动回退上面的确定性中文标题。 默认关闭，避免普通 IM 每个新目录都多等一次模型请求；正式任务入口可按需开启。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
@@ -413,7 +413,7 @@
           {
             "key": "max_subagents",
             "label": "max_subagents（max subagents）",
-            "description": "同一根会话树同时最多保留多少个未结束子代理；不同 TUI/根任务互不占槽。 对照 Codex AgentControl：容量属于 root session，不由 owner 历史账本全局占用。 默认允许按 8 个独立职责一次铺开；终态 child 释放槽位，历史累计数量可以超过 8。",
+            "description": "同一根会话树同时最多保留多少个未结束子代理；不同 TUI/根任务互不占槽。 对照 会话运行时 AgentControl：容量属于 root session，不由 owner 历史账本全局占用。 默认允许按 8 个独立职责一次铺开；终态 child 释放槽位，历史累计数量可以超过 8。",
             "type": "number",
             "defaultValue": 8,
             "currentValue": 8,
@@ -1302,7 +1302,7 @@
           {
             "key": "max_parallel_tool_calls",
             "label": "max_parallel_tool_calls（max parallel tool calls）",
-            "description": "单轮内并行执行工具的数量上限（EXEC-01，默认 8）： - 空值=用代码默认 8（对齐 opencode/codex 常见并行度，防一次性工具过多烧上下文）。 - 显式正数=该上限；显式 0=不限制；单任务临时覆盖由任务属性显式传入。 - 并行段还会受工具并发契约（同写根互斥）与上下文预算约束，配置只是上限不是保证。",
+            "description": "单轮内并行执行工具的数量上限（EXEC-01，默认 8）： - 空值=用代码默认 8（对齐 工具运行时/会话运行时 常见并行度，防一次性工具过多烧上下文）。 - 显式正数=该上限；显式 0=不限制；单任务临时覆盖由任务属性显式传入。 - 并行段还会受工具并发契约（同写根互斥）与上下文预算约束，配置只是上限不是保证。",
             "type": "string",
             "defaultValue": "",
             "currentValue": "",
@@ -1944,7 +1944,7 @@
           {
             "key": "max_tool_rounds",
             "label": "max_tool_rounds（max tool rounds）",
-            "description": "工具轮数和单代理工具预算： - 空值=用代码默认 5000 轮(极高级别保护:正常深度任务几百轮远够,5000 只拦 真失控死循环，总轮数兜底是最后防线)。对齐 claude-code/codex 不截停 主循环:5000 等效 不限制,但真失控有硬顶,不会无限烧时间/成本。 - 普通可恢复工具失败只返给模型换路，不替模型结束 turn；精确同参重复调用门、 unknown_command_budget(200 次/10 分钟)、compact 防抖负责有界保护。 - 显式正数仍可限制,显式 0 才是真正不限制;单任务临时覆盖由任务属性显式传入。",
+            "description": "工具轮数和单代理工具预算： - 空值=用代码默认 5000 轮(极高级别保护:正常深度任务几百轮远够,5000 只拦 真失控死循环，总轮数兜底是最后防线)。 不截停 主循环:5000 等效 不限制,但真失控有硬顶,不会无限烧时间/成本。 - 普通可恢复工具失败只返给模型换路，不替模型结束 turn；精确同参重复调用门、 unknown_command_budget(200 次/10 分钟)、compact 防抖负责有界保护。 - 显式正数仍可限制,显式 0 才是真正不限制;单任务临时覆盖由任务属性显式传入。",
             "type": "string",
             "defaultValue": "",
             "currentValue": "",
@@ -2586,7 +2586,7 @@
           {
             "key": "tool_protocol",
             "label": "tool_protocol（tool protocol）",
-            "description": "工具调用协议固定 native（EXEC-31b：text 协议已删除——对照组 codex/pi/free-code 均只有 native 一种协议；不支持原生 tool_use 的模型会在 run 开始时报错，不做文本降级）。",
+            "description": "工具调用协议固定 native（EXEC-31b：text 协议已删除——统一原生工具协议 均只有 native 一种协议；不支持原生 tool_use 的模型会在 run 开始时报错，不做文本降级）。",
             "type": "string",
             "defaultValue": "native",
             "currentValue": "native",
@@ -3303,7 +3303,7 @@
           {
             "key": "memory_compact_semantic_summary_enabled",
             "label": "memory_compact_semantic_summary_enabled（memory compact semantic summary enabled）",
-            "description": "compact 续跑时对卸掉的“中段历史”做一次 LLM 语义摘要（短板6，学 hermes trajectory_compressor）： - 续跑靠 carried archive 记录逐条重建工具历史；默认会对中段记录调一次摘要模型，用一条语义摘要 折叠中段、原样保留首尾，把机械截断换成“这段做了什么/学到什么”的叙述，长任务续跑少丢上下文。 - 这是纯增强：不碰 raw archive / runtime_fact / work_state / artifact 等事实源。text 协议读取该投影； native 跨进程续跑把它装成一条 CompactionSummary handoff，不伪造旧工具对、不推进 compact generation。 - enabled=false 完全关闭（走纯机械重建）；摘要异常、供应商超时或无可用后端时静默回退机械重建。 - 不再另起一个无法取消的摘要线程计时器；慢模型沿用统一模型传输的首包和流空闲超时。",
+            "description": "compact 续跑时对卸掉的“中段历史”做一次 LLM 语义摘要： - 续跑靠 carried archive 记录逐条重建工具历史；默认会对中段记录调一次摘要模型，用一条语义摘要 折叠中段、原样保留首尾，把机械截断换成“这段做了什么/学到什么”的叙述，长任务续跑少丢上下文。 - 这是纯增强：不碰 raw archive / runtime_fact / work_state / artifact 等事实源。text 协议读取该投影； native 跨进程续跑把它装成一条 CompactionSummary handoff，不伪造旧工具对、不推进 compact generation。 - enabled=false 完全关闭（走纯机械重建）；摘要异常、供应商超时或无可用后端时静默回退机械重建。 - 不再另起一个无法取消的摘要线程计时器；慢模型沿用统一模型传输的首包和流空闲超时。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,

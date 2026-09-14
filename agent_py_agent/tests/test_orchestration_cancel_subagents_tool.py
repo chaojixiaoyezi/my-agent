@@ -301,7 +301,7 @@ def test_cancel_subagents_main_followup_keeps_stable_parent_identity(tmp_path):
     )
     child = agent.subagents.create_run(
         params=CreateRunParams(
-            goal="调研 OpenClaw",
+            goal="调研 sample_c",
             thought="等待主代理控制",
             plan=["调研"],
             allowed_tools=["read_file"],

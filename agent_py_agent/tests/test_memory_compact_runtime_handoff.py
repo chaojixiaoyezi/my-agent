@@ -178,7 +178,7 @@ def test_memory_compact_current_task_locator_overrides_archive_wrapper_and_old_a
         json.dumps(
             {
                 "id": "run-compact",
-                "goal": "审计当前 Codex 仓库并写出报告。",
+                "goal": "审计当前 sample_a 仓库并写出报告。",
                 "status": "RUNNING",
             },
             ensure_ascii=False,
@@ -217,7 +217,7 @@ def test_memory_compact_current_task_locator_overrides_archive_wrapper_and_old_a
 
     work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
 
-    assert work_state["goal"] == "审计当前 Codex 仓库并写出报告。"
+    assert work_state["goal"] == "审计当前 sample_a 仓库并写出报告。"
     assert work_state["next_step"] == ""
     assert "dry-run" not in work_state["goal"]
 
@@ -231,26 +231,26 @@ def test_memory_compact_work_state_records_tool_outputs_without_overriding_task_
         {
             "call_id": "2-1",
             "kind": "tool_output",
-            "parameters": {"path": "/repo/codex-main/README.md", "tool": "read_file"},
+            "parameters": {"path": "/repo/sample_a-main/README.md", "tool": "read_file"},
             "path": str(root / "blobs" / "tool_outputs" / "read_file-2-1.json"),
             "request_id": "request-compact",
             "run_id": "run-compact",
             "task_id": "run-compact",
             "scoped_call_id": "run-compact:2-1",
-            "source_input": "/repo/codex-main/README.md",
+            "source_input": "/repo/sample_a-main/README.md",
             "tool": "read_file",
             "size_bytes": 1234,
         },
         {
             "call_id": "3-1",
             "kind": "tool_output",
-            "parameters": {"path": "/repo/codex-main/codex-rs", "recursive": False, "tool": "list_files"},
+            "parameters": {"path": "/repo/sample_a-main/sample_a-rs", "recursive": False, "tool": "list_files"},
             "path": str(root / "blobs" / "tool_outputs" / "list_files-3-1.json"),
             "request_id": "request-compact",
             "run_id": "run-compact",
             "task_id": "run-compact",
             "scoped_call_id": "run-compact:3-1",
-            "source_input": "/repo/codex-main/codex-rs",
+            "source_input": "/repo/sample_a-main/sample_a-rs",
             "tool": "list_files",
             "size_bytes": 4321,
         },
@@ -271,10 +271,10 @@ def test_memory_compact_work_state_records_tool_outputs_without_overriding_task_
     work_state = json.loads(Path(result["refs"]["work_state_snapshot"]).read_text(encoding="utf-8"))
     resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=result["apply_id"]))
 
-    assert "/repo/codex-main/README.md" in work_state["read_files"]
-    assert work_state["tool_progress"][0]["source_path"] == "/repo/codex-main/README.md"
+    assert "/repo/sample_a-main/README.md" in work_state["read_files"]
+    assert work_state["tool_progress"][0]["source_path"] == "/repo/sample_a-main/README.md"
     assert work_state["next_step"] == "先看 dry-run，再决定是否启用 apply。"
-    assert "/repo/codex-main/README.md" in resume["context_block"]
+    assert "/repo/sample_a-main/README.md" in resume["context_block"]
     assert "先看 dry-run，再决定是否启用 apply。" in resume["context_block"]
 
 

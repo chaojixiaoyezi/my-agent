@@ -82,7 +82,7 @@ def test_subagent_save_with_child_root_id_keeps_parent_workspace_identity(tmp_pa
     (work / "summaries" / "current_summary.md").write_text("父任务当前摘要\n", encoding="utf-8")
 
     child = manager.create_run(
-        goal="分析 claude-code",
+        goal="分析 sample_app",
         thought="子代理 root_id 初始等于自己，但 run_workspace 指向父任务目录。",
         plan=["读源码", "写报告"],
         parent_id="run-main",

@@ -282,7 +282,7 @@ def test_memory_compact_work_state_reads_task_coverage_ledger(tmp_path: Path) ->
                         "checks": {"读 README": "done", "分析模块": "done", "写入报告": "done"},
                     },
                     {
-                        "id": "codex-main",
+                        "id": "sample_a-main",
                         "checks": {"读 README": "done", "分析模块": "pending", "写入报告": "pending"},
                     },
                 ],
@@ -303,7 +303,7 @@ def test_memory_compact_work_state_reads_task_coverage_ledger(tmp_path: Path) ->
     assert coverage["goal"] == "每个项目都要读 README、分析模块、写入报告。"
     assert coverage["counts"]["targets_total"] == 2
     assert coverage["counts"]["targets_done"] == 1
-    assert coverage["active_targets"][0]["id"] == "codex-main"
+    assert coverage["active_targets"][0]["id"] == "sample_a-main"
     assert coverage["active_targets"][0]["checks"]["分析模块"] == "pending"
 
 

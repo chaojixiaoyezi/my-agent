@@ -3,11 +3,6 @@ from __future__ import annotations
 
 """通用 append-only 文件轮转 + retention,防长跑磁盘撑爆。
 
-对照五项目最优解:
-- 长期助手 RotatingFileHandler(按大小轮转 + backup_count) —— 轮转骨架
-- 通道运行时 enforceSessionDiskBudget + pruneAfter(磁盘预算 + TTL) —— retention 维度
-- 工具运行时 `git gc --prune=7.days` —— 老段按龄清理
-
 设计要点(为"一条不丢"的存档量身):
 - 轮转不立即丢:主文件超 max_bytes → 改名 .1,旧 .1→.2 ...(可 gzip),只在超 retention
   (段数上限 / TTL / 总字节预算)时才真删最老段。
@@ -17,6 +12,9 @@ from __future__ import annotations
 - 单写者:单写者模型;轮转用 os.replace 原子改名,读者(poll/query)
   并发读时要么读到旧路径要么新路径,不撕裂。
 """
+
+# LLM: 轮转、压缩和保留期清理必须同步累计 pruned_lines；调用方以累计落盘数做完整性核对。
+# 模块用途: 按文件大小、段数、年龄和总预算轮转日志，清理旧段时保留可对账的累计计数。
 
 import gzip
 import os

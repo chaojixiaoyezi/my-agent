@@ -440,7 +440,7 @@ def test_apply_patch_rejects_unmatched_context(tmp_path: Path) -> None:
     assert "edit_file" in result.output
 
 
-def test_apply_patch_rejects_empty_update_like_codex(tmp_path: Path) -> None:
+def test_apply_patch_rejects_empty_update_like_sample_a(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "notes.txt").write_text("hello\n", encoding="utf-8")

@@ -255,15 +255,15 @@ def test_persona_add_fills_matching_empty_template_slot(tmp_path: Path) -> None:
         repository,
         "user",
         "add",
-        content="称呼:青禾",
-        source_quote="以后请叫我青禾",
+        content="称呼:小明",
+        source_quote="以后请叫我小明",
         confirmed=True,
     )
 
     assert result["changed"] is True
     content = user_path.read_text(encoding="utf-8")
-    assert content == "# USER\n\n## 画像\n- 称呼:青禾\n\n## 习惯\n"
-    assert content.count("称呼:青禾") == 1
+    assert content == "# USER\n\n## 画像\n- 称呼:小明\n\n## 习惯\n"
+    assert content.count("称呼:小明") == 1
 
 
 def test_persona_add_replaces_legacy_shipped_placeholder_hint(tmp_path: Path) -> None:
@@ -302,8 +302,8 @@ def test_persona_batch_applies_all_operations_as_one_version(tmp_path: Path) -> 
                 PersonaMutationRequest(
                     target="user",
                     action="add",
-                    content="称呼:青禾",
-                    source_quote="以后请叫我青禾",
+                    content="称呼:小明",
+                    source_quote="以后请叫我小明",
                     confirmed=True,
                 ),
                 PersonaMutationRequest(
@@ -322,7 +322,7 @@ def test_persona_batch_applies_all_operations_as_one_version(tmp_path: Path) -> 
     assert result["version"] == 1
     assert len(result["operations"]) == 2
     assert user_path.read_text(encoding="utf-8") == (
-        "# USER\n\n## 画像\n- 称呼:青禾\n\n## 习惯\n- 回答偏好:尽量简洁\n"
+        "# USER\n\n## 画像\n- 称呼:小明\n\n## 习惯\n- 回答偏好:尽量简洁\n"
     )
     history = repository.history("user")
     assert [row["action"] for row in history] == ["baseline", "batch"]
@@ -387,7 +387,7 @@ def test_persona_batch_is_all_or_nothing_when_later_operation_is_invalid(
                     PersonaMutationRequest(
                         target="user",
                         action="add",
-                        content="称呼:青禾",
+                        content="称呼:小明",
                         confirmed=True,
                     ),
                     PersonaMutationRequest(

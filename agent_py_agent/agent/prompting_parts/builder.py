@@ -627,7 +627,7 @@ def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
 
 
 def _strip_injection_comments(text: str) -> str:
-    """注入系统提示词前剥离 HTML 注释(对标 终端应用:<!-- --> 给人看、注入时隐藏、Read 时可见)。
+    """注入系统提示词前剥离 HTML 注释：注释供维护者查看，Read 原文件时仍可见。
     让人格/记忆模板里的引导注释零 token——模板可带丰富填写提示,却不占每轮上下文。"""
     import re
 

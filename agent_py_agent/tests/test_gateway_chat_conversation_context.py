@@ -5037,8 +5037,8 @@ def test_gateway_followup_subagent_lineage_uses_active_task_root(tmp_path):
     try:
         create_params = create_run_params(
             agent,
-            {"goal": "补齐 pi-main 分析", "allowed_tools": ["read_file"]},
-            "补齐 pi-main 分析",
+            {"goal": "补齐 sample-f-main 分析", "allowed_tools": ["read_file"]},
+            "补齐 sample-f-main 分析",
             ["read_file"],
         )
     finally:

@@ -1660,7 +1660,7 @@ def test_conversation_compact_keeps_persona_and_related_memory_in_next_prompt(tm
     backend = _SummaryBackend()
     agent.backend = backend
     agent.home_paths.owner_soul_md.write_text("人格原则：耐心、直接。\n", encoding="utf-8")
-    agent.home_paths.owner_user_md.write_text("称呼用户为青禾。\n", encoding="utf-8")
+    agent.home_paths.owner_user_md.write_text("称呼用户为小明。\n", encoding="utf-8")
     request = _request("ou_persona_memory")
     first = _context(agent, request, "gw-create", "开始")
     for index in range(20):
@@ -1702,7 +1702,7 @@ def test_conversation_compact_keeps_persona_and_related_memory_in_next_prompt(tm
     assert history_seed.compact_summary == compacted.compact_summary
     assert history_seed.compact_generation == 1
     assert "人格原则：耐心、直接。" in rendered
-    assert "称呼用户为青禾。" in rendered
+    assert "称呼用户为小明。" in rendered
     assert "长期暗号是白鹭湾" in rendered
     history_text = "\n".join(content for _role, content in history_seed.messages)
     assert "旧消息 0" not in history_text

@@ -1396,8 +1396,7 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
 - `scoped_locks.py` 只提供进程对进程互斥，【不提供】进程内线程互斥：同进程任意线程
   acquire 同一把锁都是持有者重入（刷新心跳），任意线程 release 都按进程维度删锁。
   单进程多线程的临界区（如 request worker 池内共享状态）禁止复用这把锁，应使用
-  `threading.Lock`（参考 `agent/io/jsonl.py` 的"线程锁 + flock"双层模式；对照组
-  长期助手 ProcessRegistry 同样将进程身份锁与线程互斥锁语义分离）。钉子：
+  `threading.Lock`（见 `agent/io/jsonl.py` 的线程锁与文件锁双层模式）。回归入口：
   `tests/test_real_io_concurrency.py::test_scoped_lock_process_singleton_reentrant_threads_and_cross_process_mutex`。
 - request/response/history 损坏要显式报告 load_error，不能渲染成“没有记录”。
 - USER 读取完成响应必须先用 pending/processing/done/failed 中的请求记录校验 owner；同 request id

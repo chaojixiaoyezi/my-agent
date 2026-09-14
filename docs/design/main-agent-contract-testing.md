@@ -1,32 +1,29 @@
-# Main Agent Contract Testing
+# 主代理测试分层
 
-当前测试策略：
+本规范只约束开发验证，不增加生产任务完成的机器验收门槛。状态、权限、身份和路径归属以结构化事实为准。
 
-- 普通合同和工具边界用 focused pytest 覆盖。
-- 真实 LLM 测试只用于最终验收主链路。
-- 用户 prompt 保持普通中文，不塞内部字段名。
-- 质量问题放到 evidence、repair、closeout，不提前变成无关硬门。
+## contract
 
-常用命令：
+定向单测覆盖配置、状态机、工具参数、权限、身份和账本。先定位所属模块，不针对用户提示词增加生产分支。
 
-```bash
-python3 -m pytest agent_py_agent/tests/test_turn_end.py agent_py_agent/tests/test_main_agent_state_machine_contract.py -q
-python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_tools.py agent_py_agent/tests/test_orchestration_tool_specs.py -q
-```
+## fake-tool
 
-参考项目映射：
+确定性工具替身覆盖成功、拒绝、超时、长输出、重复事件和进程消失。检查工具结果与实际执行状态是否一致。
 
-- agentscope-main: AgentScope
-- 终端应用: 模型助手 Code
-- claw-code-main: Claw Code
-- 会话运行时-main: 会话运行时
-- 终端交互-main: 终端交互
-- 长期助手-agent-main: 长期助手
-- langchain-master: LangChain
-- langgraph-main: LangGraph
-- openai-agents-python-main: OpenAI Agents SDK
-- openclaude-main: 代理运行时
-- 通道运行时-main: 通道运行时
-- openhuman-main: OpenHuman
-- my-agent-architecture-review-20260519-clean: my-agent-architecture-review
-- my-agent-feature-card-message-runtime: my-agent-feature-card-message-runtime
+## fake-llm
+
+模型替身覆盖流式分片、工具调用、插话、长度限制、模型切换和压缩边界。模型口头说完成不能修改结构化任务状态。
+
+## replay
+
+脱敏事件回放验证真实故障；保存调用身份、顺序、状态码和预期结果，不提交真实凭据、私人对话或测试机配置。
+
+## real-tui
+
+最终验收通过真实 TUI。用户需求用普通中文表达，由底座承担参数、权限和状态约束。记录供应商、会话范围、工具结果和产物；不能用测试者补写的文件冒充被测代理产物。
+
+短场景验证单个行为；长任务、连续对话和多子代理验证运行稳定性。未覆盖环境必须标明未验证，不从一次成功推断全面通过。
+
+## 执行方式
+
+运行 `python3 scripts/check_contract_test_pyramid.py --repo-root .` 检查分层，再运行相关 focused tests。提交前遵循 `AGENTS.md` 的严格 gate。测试目录、夹具与本说明一起维护。

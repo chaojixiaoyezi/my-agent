@@ -108,8 +108,8 @@ class TestTaskProgressCoverageTool:
                             "evidence": ["agentscope-main/README.md"],
                         },
                         {
-                            "id": "codex-main",
-                            "title": "Codex",
+                            "id": "sample_a-main",
+                            "title": "sample_a",
                             "status": "in_progress",
                             "checks": {"读基础信息": "done", "分析结构": "pending", "写进报告": "pending"},
                             "next": "继续看核心目录",
@@ -138,10 +138,10 @@ class TestTaskProgressCoverageTool:
                 "coverage": {
                     "targets": [
                         {
-                            "id": "codex-main",
-                            "title": "Codex",
+                            "id": "sample_a-main",
+                            "title": "sample_a",
                             "checks": {"读基础信息": "done", "分析结构": "pending"},
-                            "evidence": ["codex-main/README.md"],
+                            "evidence": ["sample_a-main/README.md"],
                         }
                     ]
                 }
@@ -154,9 +154,9 @@ class TestTaskProgressCoverageTool:
                 "coverage": {
                     "targets": [
                         {
-                            "id": "codex-main",
+                            "id": "sample_a-main",
                             "checks": {"分析结构": "done", "写进报告": "done"},
-                            "evidence": ["codex-main/README.md", "codex-main/core"],
+                            "evidence": ["sample_a-main/README.md", "sample_a-main/core"],
                         }
                     ]
                 }
@@ -167,7 +167,7 @@ class TestTaskProgressCoverageTool:
 
         target = payload["coverage"]["targets"][0]
         assert target["checks"] == {"读基础信息": "done", "分析结构": "done", "写进报告": "done"}
-        assert target["evidence"] == ["codex-main/README.md", "codex-main/core"]
+        assert target["evidence"] == ["sample_a-main/README.md", "sample_a-main/core"]
         assert payload["coverage"]["counts"]["targets_done"] == 1
 
     def test_coverage_ledger_does_not_shrink_when_later_update_has_subset(self, tmp_path):
@@ -614,7 +614,7 @@ class TestTaskProgressContinuationAndAliases:
                 "coverage": {
                     "targets": [
                         {
-                            "id": "codex-main",
+                            "id": "sample_a-main",
                             "checks": {
                                 "做什么的": "pending",
                                 "主要模块": "pending",
@@ -778,7 +778,7 @@ class TestTaskProgressCoverageRejectedAliases:
                 "summary": "开始分析五个项目。",
                 "coverage_targets": [
                     "agentscope-main:功能定位,主要模块,优点,缺点,借鉴点",
-                    "codex-main:功能定位,主要模块,优点,缺点,借鉴点",
+                    "sample_a-main:功能定位,主要模块,优点,缺点,借鉴点",
                 ],
             }
         )
@@ -801,13 +801,13 @@ class TestTaskProgressCoverageRejectedAliases:
                 "summary": "开始覆盖多个对象。",
                 "items": [
                     {
-                        "id": "free-code-main",
-                        "title": "free-code-main",
+                        "id": "sample_d-main",
+                        "title": "sample_d-main",
                         "fields_needed": ["功能定位", "主要模块", "借鉴点"],
                     }
                 ],
                 "coverage_targets": [
-                    "hermes-agent-main：功能定位，主要模块，优点，缺点，借鉴点",
+                    "sample_b-agent-main：功能定位，主要模块，优点，缺点，借鉴点",
                 ],
             }
         )
@@ -894,7 +894,7 @@ class TestTaskProgressCoverageRejectedAliases:
                 "coverage": "0/2 项目已分析",
                 "coverage_targets": [
                     {"name": "agentscope-main", "status": "pending", "missing_fields": ["主要模块", "借鉴点"]},
-                    {"name": "codex-main", "status": "pending", "missing_fields": []},
+                    {"name": "sample_a-main", "status": "pending", "missing_fields": []},
                 ],
             }
         )
@@ -1170,7 +1170,7 @@ class TestTaskProgressQualityHints:
                             "evidence": ["agentscope-main/README.md"],
                         },
                         {
-                            "id": "codex-main",
+                            "id": "sample_a-main",
                             "checks": {"读源码": "pending", "分析模块": "pending", "写进报告": "pending"},
                         },
                     ],
@@ -1183,7 +1183,7 @@ class TestTaskProgressQualityHints:
 
         assert hints["severity"] == "soft"
         assert hints["coverage_incomplete_count"] == 2
-        assert hints["coverage_incomplete_ids"] == ["agentscope-main", "codex-main"]
+        assert hints["coverage_incomplete_ids"] == ["agentscope-main", "sample_a-main"]
         assert any("继续补未完成对象" in item for item in hints["next_suggestions"])
         assert "先选一个未完成对象" in hints["soft_prompt"]
 

@@ -20,8 +20,8 @@ class TestCreateSubagentsToolCoordinatorSeed:
         mock_agent = MagicMock()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
-        mock_agent.subagents.workspace_root = Path("/Users/example/my-claude-code")
-        mock_agent.subagents.workspace_roots = [Path("/Users/example/my-claude-code")]
+        mock_agent.subagents.workspace_root = Path("/Users/example/my-sample_app")
+        mock_agent.subagents.workspace_roots = [Path("/Users/example/my-sample_app")]
 
         mock_task = MagicMock()
         mock_task.id = "coordinator_001"
@@ -38,7 +38,7 @@ class TestCreateSubagentsToolCoordinatorSeed:
                 "README/bug-report/test-report/acceptance-verdict inside the approved root."
             ),
             "role": "coordinator",
-            "extra_write_roots": ["/Users/example/my-claude-code/deliverables/role-template"],
+            "extra_write_roots": ["/Users/example/my-sample_app/deliverables/role-template"],
         })
 
         assert result.ok is True

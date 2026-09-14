@@ -1,7 +1,7 @@
 # 完整原文浏览与回到最新
 
 状态：已实现，定向验证与真实 TUI 主/子浏览、快速按键和回最新通过。
-实际模型任务、Bash 中段复验及未覆盖边界见 [验收报告](../audits/SESSION_UI_ACCEPTANCE.md)。
+当前未覆盖边界见 [STATUS](../../STATUS.md)；具体版本须重新做真实 TUI 验收。
 
 ## 解决问题
 
@@ -48,17 +48,6 @@
 仍需要上游显式item身份才能可靠分辨。
 本切片不以文本相似度猜归属，不宣称已经补齐这个跨调用乱序身份协议。
 
-## 参考
-
-按行为适配本机终端交互，不复制其代码：
-
-- `src/keybindings/defaultBindings.ts`：Transcript的Ctrl+E及互斥快捷键。
-- `src/components/Messages.tsx`、`src/hooks/useVirtualScroll.ts`：以挂载/渲染预算代替历史总量截断。
-- `src/components/messages/AssistantThinkingMessage.tsx`：详细模式展示已有thinking。
-- `src/components/FullscreenLayout.tsx`：离底即出现独立Jump to bottom按钮。
-- `src/components/ScrollKeybindingHandler.tsx`：到底恢复sticky，不因为新输出强抢阅读位置。
-- 终端交互 `src/services/api/模型助手.ts`：contentBlocks[part.index]和content_block_stop分隔思考。
-- 会话运行时 `会话运行时-rs/tui/src/chatwidget/streaming.rs`：reasoning-final收口并清空旧buffer。
 
 ## 验证
 

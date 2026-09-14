@@ -339,7 +339,7 @@ def test_tui_notice_transport_failure_preserves_projection_and_reports_failure()
     )
 
 
-def test_background_transcript_sink_reuses_free_code_diff_renderer() -> None:
+def test_background_transcript_sink_reuses_sample_d_diff_renderer() -> None:
     """后台 main 的过程、思考和 Update diff 进入同一 TUI block renderer。"""
     from agent_py_agent.agent.conversation.background_transcript import (
         BackgroundTranscriptSink,

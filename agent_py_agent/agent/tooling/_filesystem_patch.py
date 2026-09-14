@@ -61,7 +61,7 @@ def _build_apply_patch_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="apply_patch",
         description=(
-            "应用 Codex 格式文本补丁。每个文件头必须写成 *** Update File: <相对路径> "
+        "应用结构化文本补丁。每个文件头必须写成 *** Update File: <相对路径> "
             "（冒号后一个空格），Update 的每个正文行必须以 +、- 或一个真实空格开头。"
             "例如保留末行 last line 并在后面追加 appended line：\n"
             "*** Begin Patch\n*** Update File: notes.txt\n-last line\n+last line\n"
@@ -73,7 +73,7 @@ def _build_apply_patch_model_spec() -> ToolModelSpec:
                 "patch": {
                     "type": "string",
                     "description": (
-                        "严格使用 Codex apply_patch 语法：第一行必须是 *** Begin Patch；"
+        "严格使用 apply_patch 语法：第一行必须是 *** Begin Patch；"
                         "每个变更头必须把相对路径写在同一行，格式严格为 "
                         "*** Add File: <path>、*** Update File: <path> 或 "
                         "*** Delete File: <path>（冒号后有一个空格）；"

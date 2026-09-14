@@ -304,14 +304,14 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
             agent,
             {
                 "role": "worker",
-                "input_refs": [str(workspace / "codex-main")],
-                "output_files": [str(workspace / "output" / "codex-analysis.md")],
+                "input_refs": [str(workspace / "sample_a-main")],
+                "output_files": [str(workspace / "output" / "sample_a-analysis.md")],
             },
-            "分析 codex-main",
+            "分析 sample_a-main",
             ["read_file", "write_file"],
         )
 
-        expected = str((workspace / "output" / "codex-analysis.md").resolve(strict=False))
+        expected = str((workspace / "output" / "sample_a-analysis.md").resolve(strict=False))
         # 显式绝对路径保持身份，不能静默搬家；它是否可写由后续结构化权限门裁决。
         assert params.attributes["output_refs"] == [expected]
         assert params.extra_write_roots == [
@@ -513,7 +513,7 @@ class TestCreateSubagentsToolRelativeOutputResolution:
         params = create_run_params(
             agent,
             {"role": "worker", "output_files": [str(stale_output)]},
-            "分析 codex-main",
+            "分析 sample_a-main",
             ["read_file", "write_file"],
         )
 

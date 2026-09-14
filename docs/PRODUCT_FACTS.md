@@ -1,7 +1,5 @@
 # 当前产品事实
 
-> 名称整理：产品统一称 my-agent。历史检出路径使用 `${MY_AGENT_CHECKOUT}`，旧会话及测试目录用“历史…”占位；实际定位以对应提交和 request/run ID 的原始记录为准。本次未移动目录或重命名真实会话。
-
 能力基线更新时间：2026-09-04（`my-agent` 测试机）；2026-09-08 统一正式产品名称。本文是当前工作树能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
@@ -130,7 +128,7 @@
   Markdown/code/diff、thinking/tool/permission、输入/history/search/paste/completion/queue、scroll/transcript/
   mouse/resize、interrupt/exit 和 canonical session resume；终端交互 独有能力只做显式映射或不适用。
 - 85 项行为矩阵全部关闭：38 `VERIFIED`、38 `MAPPED_VERIFIED`、9 `NOT_APPLICABLE`；10k 回合/20k block
-  压测和 80/120/140 列回归通过。测试详情见 `docs/design/TUI_终端交互_PARITY_MATRIX.md`。
+  压测和 80/120/140 列回归通过。测试详情见 `docs/design/TUI_BEHAVIOR_CHECKLIST.md`。
 - `/context` 是自动 compact 同口径只读视图；自动 compact 按配置的 90% 窗口阈值运行，手动
   `/compact [instructions]` 只在空闲会话沿同一 checkpoint/generation 主链执行。`/effort` 可查询能力，
   但当前 MiniMax-M2.7 接口没有可调档位，设置会显式失败且不改变模型参数。
@@ -1499,7 +1497,7 @@ proof 的事实见下方 2026-07-12 收口快照。
 - 终端交互 实际源码核对 `src/services/tools/toolExecution.ts`、`toolOrchestration.ts` 与
   `src/hooks/useCanUseTool.tsx`：正式执行路径在动作边界统一调用 permission decision。
 
-本轮复用的是“动态工具也必须穿过不可绕过的 host 执行门”这一模式，不复制参考项目的工具数量或 UI。
+动态工具也必须穿过统一宿主执行门，工具数量和界面不构成授权依据。
 
 普通对话收口另核对了 长期助手、会话运行时 与 `fable_my-agent-claw`：复用了稳定 thread、逐轮历史和
 结构化工具续接；没有照搬 长期助手/会话运行时 的旧 goal 自动注入，也没有照搬 claw 的群聊首位发言人

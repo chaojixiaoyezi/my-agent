@@ -174,7 +174,7 @@ def test_profile_save_clear_and_backend_freeze(tmp_path):
     host.config.top_p = 0.7
     provider(host)
     key = model(host, top_p="0.97")
-    op(host, "select", {"profile_id": key})
+    op(host, "set_default", {"profile_id": key})
     first = selected_model_config(host)
     before = _profile_backend(host, first)
     assert first.top_p == before.top_p == 0.97
@@ -192,12 +192,12 @@ def test_profile_save_clear_and_backend_freeze(tmp_path):
 def test_profile_scope_and_child_inherit_top_p(tmp_path):
     host = Host(tmp_path)
     key, _ = add(host, top_p=0.93)
-    op(host, "select", {"profile_id": key})
+    op(host, "set_default", {"profile_id": key})
     attrs = {}
     with selected_model_scope(host):
         assert host.config.top_p == host.backend.top_p == 0.93
         inherit_model_profile(attrs, host)
-        op(host, "select", {"profile_id": "default"})
+        op(host, "set_default", {"profile_id": "default"})
         assert host.config.top_p == host.backend.top_p == 0.93
     assert host.config.top_p is None
     child = inherited_model_config(host, SimpleNamespace(attributes=attrs))

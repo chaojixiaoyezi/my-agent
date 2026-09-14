@@ -15,18 +15,18 @@ def test_evidence_contract_accepts_sourced_claims():
         EvidenceContractRequest(
             source_refs=[
                 EvidenceSourceRef(
-                    source_id="github-api-openclaw",
+                    source_id="github-api-sample-c",
                     source_type="api",
-                    uri="https://api.github.com/repos/openclaw/openclaw",
+                    uri="https://api.github.com/repos/sample-c/sample-c",
                     retrieved_at="2026-05-18T10:00:00Z",
                 )
             ],
             claims=[
                 EvidenceClaim(
-                    claim_id="openclaw-stars",
+                    claim_id="sample-c-stars",
                     field="stargazers_count",
                     value=372838,
-                    source_ids=["github-api-openclaw"],
+                    source_ids=["github-api-sample-c"],
                     verification_status="VERIFIED",
                 )
             ],

@@ -235,7 +235,7 @@ def test_unfinished_sibling_with_same_declared_output_does_not_claim_file_owners
     assert len(agent.subagents.list_runs()) == 2
 
 
-def test_overlapping_items_are_created_as_codex_style_shared_workspace_workers(tmp_path):
+def test_overlapping_items_are_created_as_sample_a_style_shared_workspace_workers(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
@@ -310,14 +310,14 @@ def test_background_main_may_add_independent_work_to_active_lineage(tmp_path):
     agent._current_run_params = _run_params("request-1", source="foreground")
     tool = CreateSubagentsTool(agent)
     first = json.loads(tool.execute({
-        "goal": "审计 Codex。",
-        "output_files": ["output/codex.md"],
+        "goal": "审计 sample_a。",
+        "output_files": ["output/sample_a.md"],
     }).output)
 
     agent._current_run_params = _run_params("bg-main-1", source="background_main_agent")
     result = tool.execute({
-        "goal": "同时审计 Hermes。",
-        "output_files": ["output/hermes.md"],
+        "goal": "同时审计 sample_b。",
+        "output_files": ["output/sample_b.md"],
     })
     payload = json.loads(result.output)
 
@@ -334,9 +334,9 @@ def test_background_main_still_reuses_explicit_idempotency_contract(tmp_path):
     agent._current_run_params = _run_params("request-1", source="foreground")
     tool = CreateSubagentsTool(agent)
     params = {
-        "goal": "审计 Codex。",
-        "output_files": ["output/codex.md"],
-        "context_packs": [_idempotency_pack("codex-audit", "output/codex.md")],
+        "goal": "审计 sample_a。",
+        "output_files": ["output/sample_a.md"],
+        "context_packs": [_idempotency_pack("sample_a-audit", "output/sample_a.md")],
     }
     first = json.loads(tool.execute(params).output)
 
@@ -355,12 +355,12 @@ def test_foreground_user_turn_may_add_independent_work_to_active_lineage(tmp_pat
     agent._current_run_params = _run_params("request-1", source="foreground")
     tool = CreateSubagentsTool(agent)
     first = json.loads(tool.execute({
-        "goal": "审计 Codex。",
-        "output_files": ["output/codex.md"],
+        "goal": "审计 sample_a。",
+        "output_files": ["output/sample_a.md"],
     }).output)
     second = tool.execute({
-        "goal": "同时审计 Hermes。",
-        "output_files": ["output/hermes.md"],
+        "goal": "同时审计 sample_b。",
+        "output_files": ["output/sample_b.md"],
     })
 
     assert second.ok is True
@@ -375,8 +375,8 @@ def test_background_main_may_create_after_lineage_ends_or_with_explicit_replacem
     agent._current_run_params = _run_params("request-1", source="foreground")
     tool = CreateSubagentsTool(agent)
     first = json.loads(tool.execute({
-        "goal": "审计 Codex。",
-        "output_files": ["output/codex.md"],
+        "goal": "审计 sample_a。",
+        "output_files": ["output/sample_a.md"],
     }).output)
     run = agent.subagents.load(first["created_run_ids"][0])
     run.status = "DONE"
@@ -385,14 +385,14 @@ def test_background_main_may_create_after_lineage_ends_or_with_explicit_replacem
 
     agent._current_run_params = _run_params("bg-main-1", source="background_main_agent")
     after_done = tool.execute({
-        "goal": "审计 Hermes。",
-        "output_files": ["output/hermes.md"],
+        "goal": "审计 sample_b。",
+        "output_files": ["output/sample_b.md"],
     })
     assert after_done.ok is True
 
     replacement = tool.execute({
-        "goal": "明确接管仍在执行的 Hermes 审计。",
-        "output_files": ["output/hermes-replacement.md"],
+        "goal": "明确接管仍在执行的 sample_b 审计。",
+        "output_files": ["output/sample_b-replacement.md"],
         "replacement_for_run_ids": json.loads(after_done.output)["created_run_ids"],
     })
     assert replacement.ok is True

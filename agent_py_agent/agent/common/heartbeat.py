@@ -3,14 +3,12 @@ from __future__ import annotations
 
 """通用进程心跳 + 存活检测,供常驻进程(daemon/gateway/采集器)崩溃可检测、可自愈。
 
-对照五项目最优解:
-- 工具运行时 flock(心跳文件 mtime + 60s stale 检测 + .breaker 竞争清理)
-- 通道运行时 gateway-lock(PID + port + cmdline 三重活性检测,30s 老化夺锁)
-- 会话运行时 pidfile(/proc start_time 防 PID 复用误判"活")
-
 核心洞察:仅靠"PID 是否存在"判活会被 PID 复用骗——老进程死了,系统把同号分配给新进程,
 误判"还活着"。这里把"进程启动时刻"一起当指纹:PID 在 且 start_time 匹配,才算"还是当初那个进程"。
 """
+
+# LLM: 进程身份必须联合 PID 与启动时间判断；调用方不能把普通心跳年龄当成进程退出证据。
+# 模块用途: 为后台服务保存心跳与精确进程身份，避免 PID 复用导致错误判活。
 
 import os
 import subprocess

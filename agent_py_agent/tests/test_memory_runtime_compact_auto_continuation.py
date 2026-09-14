@@ -759,20 +759,20 @@ def test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_r
             "current_phase": "compact_apply",
             "next_step": "合并已有研究笔记",
             "changed_files": ["outputs/final-report.md"],
-            "read_files": ["notes/openclaw.md", "notes/hermes.md"],
+            "read_files": ["notes/sample_c.md", "notes/sample_b.md"],
             "task_progress": {
                 "summary": "已读 12 个项目，剩余 3 个",
                 "next_action": "继续补剩余项目事实",
                 "counts": {"total": 15, "done": 12, "in_progress": 1},
                 "ref": "/tmp/task_progress/progress.json",
-                "active_items": [{"id": "project-13", "title": "补 Hermes", "status": "in_progress"}],
-                "recent_done_items": [{"id": "project-12", "title": "OpenClaw", "status": "done", "notes": "已读核心运行时"}],
+                "active_items": [{"id": "project-13", "title": "补 sample_b", "status": "in_progress"}],
+                "recent_done_items": [{"id": "project-12", "title": "sample_c", "status": "done", "notes": "已读核心运行时"}],
                 "quality_hints": {"messages": ["有些完成项缺 evidence。"]},
             },
             "tool_progress": [
                 {
                     "tool": "read_file",
-                    "source_path": "notes/hermes.md",
+                    "source_path": "notes/sample_b.md",
                     "artifact_ref": "run-1:tool-2",
                     "size_bytes": 4096,
                 }
@@ -790,14 +790,14 @@ def test_compact_auto_continue_injection_prioritizes_resume_focus_and_captured_r
     assert "把已有研究笔记合并进最终报告" in rendered
     assert "## Already Captured Refs" in rendered
     assert "outputs/final-report.md" in rendered
-    assert "notes/openclaw.md" in rendered
+    assert "notes/sample_c.md" in rendered
     assert "run-1:tool-2" in rendered
     assert "## Task Progress Ledger" in rendered
     assert "full_ledger_ref: /tmp/task_progress/progress.json" in rendered
     assert "逐项事实" in rendered
     assert "project-13" in rendered
     assert "## Exact Tool Output Index" in rendered
-    assert "source_path=notes/hermes.md" in rendered
+    assert "source_path=notes/sample_b.md" in rendered
     assert "精确字段" in rendered
     assert "不要先重读 compact 文件" in rendered
     assert "next_path" in rendered
@@ -883,12 +883,12 @@ def test_compact_auto_continue_injection_shows_completed_child_agents() -> None:
                             {
                                 "run_id": "subagent-child-a",
                                 "status": "DONE",
-                                "last_progress_summary": "已写 codex-main-report.md",
+                                "last_progress_summary": "已写 sample_a-main-report.md",
                             },
                             {
                                 "run_id": "subagent-child-b",
                                 "status": "DONE",
-                                "last_progress_summary": "已写 hermes-agent-main-report.md",
+                                "last_progress_summary": "已写 sample_b-agent-main-report.md",
                             },
                         ],
                     }
@@ -922,7 +922,7 @@ def test_compact_continue_packet_carries_task_state_refs_for_repeat_resume() -> 
                 "next_step": "合并已有研究笔记",
                 "next_actions": ["先合并已有笔记，再补缺口。"],
                 "changed_files": ["outputs/final-report.md"],
-                "read_files": ["notes/openclaw.md"],
+                "read_files": ["notes/sample_c.md"],
                 "artifact_refs": [
                     {
                         "kind": "tool_output",
@@ -955,7 +955,7 @@ def test_compact_continue_packet_carries_task_state_refs_for_repeat_resume() -> 
 
     assert focus["next_action"] == "先合并已有笔记，再补缺口。"
     assert "outputs/final-report.md" in refs["changed_files"]
-    assert "notes/openclaw.md" in refs["read_files"]
+    assert "notes/sample_c.md" in refs["read_files"]
     assert refs["artifact_refs"][0]["artifact_ref"] == "artifacts/search-result.json"
     assert refs["artifact_refs"][0]["source_path"] == "notes/search-source.md"
     assert packet["work_state_snapshot"]["tool_progress"][0]["source_path"] == "notes/search-source.md"
@@ -1475,7 +1475,7 @@ def test_compact_continue_packet_preserves_recorded_next_actions() -> None:
                 "next_step": "合并已有研究笔记",
                 "next_actions": ["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
                 "changed_files": [],
-                "read_files": ["notes/openclaw.md"],
+                "read_files": ["notes/sample_c.md"],
                 "artifact_refs": [],
             },
             consistency={"status": "ok"},

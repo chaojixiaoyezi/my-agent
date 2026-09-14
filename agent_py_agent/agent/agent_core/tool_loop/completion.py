@@ -74,18 +74,14 @@ def completion_response_after_tool_round(
             response=request.response,
         ):
             return wait_response
-        # 会话运行时's spawn_agent result is an ordinary tool result: the parent
+        # A child creation result is an ordinary tool result: the parent
         # model gets another sample in the same active turn and can immediately
         # call send_message.  Root create_subagents must preserve that control
         # opportunity; the generic open-child receipt is queued only if the
         # model later tries to finish while a direct child is still active.
-    # 工具轮后模型正文为空 ≠ 收口信号:长期助手/会话运行时/终端应用/通道运行时 四家参考产品
-    # 都是"工具→结果→继续采样"直到模型主动输出无工具调用的终态正文(参考调研 2026-08-07)。
-    # 真机铁证(2026-08-07, scrapy/celery 复刻):DeepSeek 经 工具运行时 网关工具轮后空正文
-    # 是在准备下一步工具调用,旧逻辑在此强制 queue 表达轮收口 → 每请求只调 1-2 个工具,
-    # 长任务推进极慢。现在返回 None,主循环带着工具结果继续;模型"空正文无工具"的静默收口
-    # 由 response_decision 的 长期助手 式 bounded nudge 兜底(参考 长期助手 "empty response"
-    # 塞用户消息要求继续),真正无产出时走诚实 USER_REPLY_UNAVAILABLE。
+    # 工具轮后正文为空不代表结束，主循环须带着工具结果继续采样。
+    # 没有工具也没有正文时，由 response_decision 处理有界重试；持续无产出报告
+    # USER_REPLY_UNAVAILABLE，不能把缺失结果冒充正常完成。
     return None
 
 

@@ -30,9 +30,9 @@ def test_ui_symbols_and_html_tags_do_not_trip_external_write_guard(tmp_path):
 
 
 def test_external_write_guard_allows_non_dangerous_external_targets():
-    workspace_root = "/Users/example/my-claude-code"
-    wrong_target = "/Users/other-user/my-claude-code/deliverables/shop/build"
-    suggested_target = "/Users/example/my-claude-code/deliverables/shop/build"
+    workspace_root = "/Users/example/my-sample_app"
+    wrong_target = "/Users/other-user/my-sample_app/deliverables/shop/build"
+    suggested_target = "/Users/example/my-sample_app/deliverables/shop/build"
     mock_agent = MagicMock()
     mock_agent.subagents.workspace_root = workspace_root
     mock_agent.subagents.workspace_roots = [workspace_root]
@@ -44,7 +44,7 @@ def test_external_write_guard_allows_non_dangerous_external_targets():
 
 
 def test_external_write_guard_ignores_url_image_sources(tmp_path):
-    workspace_root = tmp_path / "my-claude-code"
+    workspace_root = tmp_path / "my-sample_app"
     mock_agent = MagicMock()
     mock_agent.subagents.workspace_root = workspace_root
     mock_agent.subagents.workspace_roots = [workspace_root]
@@ -55,7 +55,7 @@ def test_external_write_guard_ignores_url_image_sources(tmp_path):
 
 
 def test_external_write_guard_ignores_bare_scheme_policy_text(tmp_path):
-    workspace_root = tmp_path / "my-claude-code"
+    workspace_root = tmp_path / "my-sample_app"
     mock_agent = MagicMock()
     mock_agent.subagents.workspace_root = workspace_root
     mock_agent.subagents.workspace_roots = [workspace_root]

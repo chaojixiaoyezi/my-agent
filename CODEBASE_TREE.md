@@ -1,5 +1,18 @@
 # Codebase Tree
 
+## 发布与开发入口
+
+```text
+|-- LICENSE                              # 主项目许可证
+|-- NOTICE                               # 适用的第三方版权与许可说明，随包发布
+|-- STATUS.md                            # 当前能力、开放问题与证据边界
+|-- DESIGN_LEDGER.md                     # 当前架构决策及模块设计导航
+|-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
+`-- docs/design/
+    |-- TUI_DESIGN.md                    # 终端布局、事件、输入与生命周期规范
+    `-- TUI_BEHAVIOR_CHECKLIST.md        # 不依赖历史流水的 TUI 验收场景
+```
+
 这份树只描述当前主链路。旧迁移入口、过渡计划和已删除模块不在这里保留。
 
 ```text
@@ -319,28 +332,17 @@ deploy/
 `-- k8s/                              # stable/canary、Gateway route、migration、monitor 与 DR 清单
 docs/
 |-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
-|-- audits/TUI_FUNCTION_AUDIT_20260828.md # 真实 TUI 逐功能结果、问题根因、修复影响与复验证据账
-|-- audits/R222_MODEL_PROVIDER_REPORT.md # 通用模型管理、35模型短测结果、具体修复与剩余问题
-|-- audits/R223_87_ITEM_REMEDIATION.md # 87 项外部审计逐项复核、修复证据和未验边界
-|-- audits/R226_PERMISSIONS_MODEL_REPORT.md # 当前模型身份与主/子自主权限修复、真实 TUI 证据和部署边界
-|-- audits/R227_MODEL_COMPACT_TUI_REPORT.md # 模型切换、压缩续接、子终端、正文与 Shell 故障的真实验收台账
-|-- audits/R228_RELEASE_CANDIDATE.md     # 发布候选的误判修复、代码文档清理、包检查与真实验收边界
-|-- audits/R229_LIVE_FAILURES.md         # 现场请求拒绝、重复输出、读取投影和 TUI 交接的故障证据
-|-- audits/SESSION_UI_ACCEPTANCE.md      # 会话模型隔离、完整展示与准确终态的真实 TUI 验收和剩余边界
 |-- audits/r223-report/                 # R223 中文只读 HTML 报告的独立公开目录，不放配置或任务产物
-|   `-- index.html                     # 87 项大白话、技术说明、剩余问题与验证证据快照，无外部依赖
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
 |-- design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md # 后台命令 host 所有权、跨进程记录与安全回收设计
-|-- design/FEATURE-20260818-终端交互-tui-parity.md # 终端交互 TUI Python 原生复刻的用户行为、事件架构与验收规格
-|-- design/TUI_终端交互_PARITY_MATRIX.md # 启动、消息、输入、权限、生命周期和命令映射逐项证据账
+|-- design/TUI_DESIGN.md # 终端交互 TUI Python 原生复刻的用户行为、事件架构与验收规格
+|-- design/TUI_BEHAVIOR_CHECKLIST.md # 启动、消息、输入、权限、生命周期和命令映射逐项证据账
 |-- tasks/completed/TASK-20260818-终端交互-tui-parity.md # 已完成 TUI 复刻实施、测试机边界和验收记录
 |-- design/FEATURE-20260804-tool-runtime-unification.md # 工具唯一主链的用户行为、需求与验收规格
 |-- design/tool-runtime-unification.md  # 工具参考证据、架构、迁移删除表与并行边界
-|-- tasks/completed/TASK-20260804-1913-tool-runtime-unification.md # 工具唯一主链实施与验收记录
-|-- design/AGENT_FOUNDATION_CAPABILITY_AUDIT_20260718.md # 自我描述、Shared、Memory、Persona、Compact、Skill、Workflow、配额、隐私和完成质量审计
 |-- design/P2_SCALE_ROLLOUT_DR_OWNER_STORE.md # 灰度/灾备/Owner store/24h proof 事实
 |-- architecture/BOUNDARY_RULES.md      # 分层和写入边界
-|-- architecture/MODEL_CATALOG_SNAPSHOT.md # 当前模型型号与未来声明式目录边界的可审计参考快照
+|-- architecture/MODEL_CATALOG_SNAPSHOT.md # 模型目录、配置覆盖及元数据维护边界
 |-- architecture/MODULE_OWNERSHIP.md    # 当前模块归属
 |-- architecture/MY_AGENT_HOME_LAYOUT.md# owner home 布局
 |-- modules/                            # 分模块结构和进展
@@ -359,12 +361,6 @@ docs/
 
 - `agent/conversation/compact_tool_refs.py`：checkpoint 的历史路径投影；仅认结构化原生调用和成功回执，不解析命令/摘要或赋予权限。
 - `agent/conversation/compact_request_budget.py`：当前模型窗口内的摘要请求预算和连续分段；不持有历史游标或另建状态源。
-- `docs/audits/r223-report/index.html`：R223 台账的人工阅读快照；只开放此目录提供 HTTP，不能把仓库或 owner home 当静态根目录。
-- `docs/audits/R226_PERMISSIONS_MODEL_REPORT.md`：权限菜单、当前模型与并行上下文修复的验收台账；区分 TUI 实测、定向回归和本机待切换版本。
-- `docs/audits/R227_MODEL_COMPACT_TUI_REPORT.md`：区分大窗口压缩成功与后续业务续接失败，记录原样工具路径恢复与部署复验。
-- `docs/audits/R228_RELEASE_CANDIDATE.md`：本批次发布条件、失败样本、修复影响与尚未关闭的外部/业务问题；不把收集测试算成全部执行通过。
-- `docs/audits/R229_LIVE_FAILURES.md`：本轮故障的现场编号、技术原因、大白话、修法与待验边界。
-- `docs/audits/SESSION_UI_ACCEPTANCE.md`：会话模型、展示归档、思考顺序及错误终态的验证对应表，不把定向回归冒充真模型验收。
 - `agent_py_agent/vendor/bubblewrap/`：离线 bwrap 的第三方许可与对应源码材料；升级二进制时同步更新并验包。
 - `agent/common/text_file_window.py`：64 KiB 流式索引、有限检查点与页面 cookie；编码和字符坐标只保留一个实现。
 - `agent/common/file_version.py`：read_file 返回观察版本，write/edit/patch 明确携带前置条件；外部写入者不被强制纳管。

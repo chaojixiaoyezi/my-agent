@@ -104,7 +104,7 @@ def test_hierarchy_schedule_duplicate_domain_ignores_shared_filesystem_paths(tmp
             child_specs=[
                 HierarchyChildSpec(
                     goal=(
-                        "在 /Users/example/my-claude-code/deliverables/stage7_shop_complete/build "
+                        "在 /Users/example/my-sample_app/deliverables/stage7_shop_complete/build "
                         "交付静态示例网站 HTML/CSS/JS。"
                     ),
                     role="coordinator",
@@ -113,7 +113,7 @@ def test_hierarchy_schedule_duplicate_domain_ignores_shared_filesystem_paths(tmp
                 HierarchyChildSpec(
                     goal=(
                         "协调测试子代理，为示例网站 demo 创建验收测试。测试文件写到 "
-                        "/Users/example/my-claude-code/deliverables/stage7_shop_complete/build/tests/。"
+                        "/Users/example/my-sample_app/deliverables/stage7_shop_complete/build/tests/。"
                     ),
                     role="coordinator",
                     agent_name="小小傻妞-测试协调",

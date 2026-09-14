@@ -29,12 +29,10 @@
 
 ## 能力分工
 
-- 长期助手：保留搜索和抽取的语义，但把抽取能力合进 `web_fetch`，减少模型选择成本。
-- 工具运行时：学习 `mode=text/markdown/html`、超时、大小限制、图片/二进制 attachment 思路。
-- 终端交互：学习 domain permission、缓存、大内容持久化和 WebFetch 用户代理。
-- 通道运行时：学习 SSRF、DNS、redirect、proxy 这些网络边界放到统一 fetch guard。
-- 会话运行时：学习网络审批和网络策略的会话级缓存。
-- 轻量运行时：学习 HTTP dispatcher/proxy 配置，不把代理细节塞进模型 prompt。
+- `web_fetch` 统一抓取与内容抽取，支持格式、超时、大小及附件边界。
+- fetch guard 统一处理 SSRF、DNS、重定向与代理策略。
+- 会话权限和网络审批复用统一策略；网络缓存与大内容归档分别管理。
+- HTTP 配置属于运行时，不把连接实现细节混入模型任务提示。
 
 ## 不做的事
 

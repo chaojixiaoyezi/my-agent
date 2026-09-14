@@ -68,7 +68,7 @@ def _pip_install_editable(repo: Path) -> tuple[int, str]:
 
 
 def add_update_subcommand(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("update", help="自更新:拉取最新代码并刷新依赖(像 openclaw update)")
+    parser = sub.add_parser("update", help="自更新:拉取最新代码并刷新依赖")
     parser.add_argument("--check", action="store_true", help="只检查有没有更新,不实际更新")
     parser.set_defaults(func=cmd_update)
 

@@ -1735,7 +1735,7 @@ def test_native_clipboard_skipped_over_ssh(monkeypatch) -> None:
         calls.append(args[0])
         return type("R", (), {"returncode": 0})()
 
-    monkeypatch.setenv("SSH_CONNECTION", "192.168.1.13 54321 10.0.0.1 22")
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.13 54321 10.0.0.1 22")
     monkeypatch.setattr(tui_keybindings.sys, "platform", "darwin")
     monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
 
