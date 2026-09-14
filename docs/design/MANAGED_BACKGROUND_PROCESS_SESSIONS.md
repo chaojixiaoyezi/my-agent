@@ -155,8 +155,8 @@ run_command(run_in_background=true)
 
 `ma-cleanup-process-pid-r10` 补充完成身份验收：模型只用 `bg-...` 作为管理句柄，`network_status` 返回
 `listener_pids=[1563961]`，与宿主 `ss` 的 18083 listener 一致；模型没有再用沙箱 `ps/lsof` 否定宿主事实，
-最终仍明确局域网未由另一台机器验证。r9 暴露的 compact 计数、路径双重 rebase 和审批复用问题单独留在
-`docs/audits/TUI_FUNCTION_AUDIT_20260828.md`，不混入本合同通过结论。
+最终仍明确局域网未由另一台机器验证。压缩、路径解析和审批复用是独立验收项，不混入本合同的
+进程生命周期结论；当前开放问题统一见 `STATUS.md`。
 
 `ma-cleanup-background-r27` 补充完成启动诚实性验收：18478 首次启动越过 0.5 秒观察期，返回
 `status=started` 和 `bg-1787946151-9c482822e21d4546`；同一会话第二次用完全相同参数启动时复用精确审批，

@@ -15,22 +15,22 @@
 5. **每次汇报必须带"建议下一步"**：父代理、子代理、其他线程和交接文档都要说明推荐后续动作、并行边界和风险守门点。
 6. **自然语言不当机器事实源**：用户 prompt、模型 summary、报告正文、guidance、角色描述只能做沟通和软引导；状态、权限、验收、恢复、派工和产物归属必须来自结构化字段、refs、工具结果、显式配置或文件系统事实。
 7. **主链路优先，兜底最后**：主链路没跑顺前不要加 fallback、旧路径兼容、影子入口、只转发 facade 或“还能跑”的旁路；确定不用的旧兼容要删。
-8. **参考成熟项目先于自己发明**：底座以 会话运行时 为第一参考；会话、active turn、Compact、Skill、工具、计划、子代理、停止和引导只要 会话运行时 有明确实现，就适配本项目既有 owner/thread/task 事实源，不再并行造一套。长期助手 只补 会话运行时 覆盖较少的长期 Memory、Persona、多用户持久调度和被动验证；通道运行时 只补 IM adapter、通道健康和投递边界。
+8. **复用已有底层协议**：会话、active turn、Compact、Skill、工具、计划、子代理、停止和引导统一使用本项目既有 owner/thread/task 事实源；长期记忆、人格、多用户调度和 IM 适配各守模块边界，不为同一概念再建一套状态机。
 
 ---
 
-## 当前运行边界（R228 发布候选，验收状态看 STATUS）
+## 当前运行边界（验收状态看 STATUS）
 
-R230 整合状态见 `docs/audits/R230_CONSOLIDATED_FIXES.md`。SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
+SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。
 
-追加修复见 `docs/audits/R229_LIVE_FAILURES.md`：普通 assistant 的原生思考也须跨轮回放，
+普通 assistant 的原生思考也须跨轮回放，
 请求拒绝不等同密钥错误；前台/背景展示交接只按宿主 request ID，不按相同文本删除消息。
 长选区的 OSC 52 长度预算不影响 native/tmux stdin；未知上游 400 不以轮换 session header 自动重试。
 内部 runtime_fact 同样区分请求拒绝与配置错误；typed 不可重试事实不能被错误正文覆盖。全选与复制绑定当前视口。
 
-本入口只保留现行规则与导航；逐轮修复/失败证据见 `docs/audits/`、`DESIGN_LEDGER.md` 和
-`docs/COMPLETED.md`。旧轮次的“已通过”不替代当前发布验收，“待验”也不覆盖后续精确证据。
+本入口只保留现行规则与导航；当前设计、已实现内容和开放问题分别见 `DESIGN_LEDGER.md`、
+`docs/COMPLETED.md` 和 `STATUS.md`。旧轮次的测试结果不替代当前发布验收。
 
 - 每台机器一个 Gateway，多个 TUI 是独立客户端/会话。wheel 使用 non-editable 独立 runtime，
   Gateway 与默认 TUI 入口必须同版；检查 executable、module.__file__、安装位置和实际配置，保留回滚。

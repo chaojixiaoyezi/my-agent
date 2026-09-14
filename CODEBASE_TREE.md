@@ -331,7 +331,7 @@ deploy/
 |-- seccomp-bwrap.PROVENANCE.md        # 上游 commit、许可、本地增量和升级验收说明
 `-- k8s/                              # stable/canary、Gateway route、migration、monitor 与 DR 清单
 docs/
-|-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
+|-- PRODUCT_FACTS.md                    # 当前功能与边界说明；发布风险统一指向 STATUS
 |-- audits/r223-report/                 # R223 中文只读 HTML 报告的独立公开目录，不放配置或任务产物
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
 |-- design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md # 后台命令 host 所有权、跨进程记录与安全回收设计
