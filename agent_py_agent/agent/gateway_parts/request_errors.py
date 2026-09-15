@@ -37,9 +37,8 @@ class SystemCommandRoutingError(RuntimeError):
     error_code = "SYSTEM_COMMAND_ROUTING_ERROR"
 
 
-# LLM: Client-visible failure prose is selected only from structured error_code; provider and
-# client-workspace and active-turn recovery failures never expose raw exception text or suggest unsafe replay.
-# 函数用途: 区分压缩、输出截断、持久化与请求拒绝；不把未知 400 归咎密钥，不否定此前已执行的工作。
+# LLM: 客户端错误仅按结构化 error_code 映射；未配置模型引导 /model，不虚构默认模型或泄露异常原文。
+# 函数用途: 区分尚未配置、压缩、截断、持久化与请求拒绝，不把未知 400 归咎密钥或建议不安全重放。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
     if code.startswith("COMPACT_"):
@@ -48,6 +47,7 @@ def gateway_client_error_message(error_code: object) -> str:
             "请查看压缩诊断；切换更大上下文的模型后可继续原会话。"
         )
     messages = {
+        "MODEL_NOT_CONFIGURED": "尚未配置模型，请先通过 /model 新增并选择模型；系统不会自动使用其它模型。",
         "MODEL_RESPONSE_TRUNCATED": (
             "本次模型输出达到上限，尚未形成完整正文；已有工具操作和历史保留。"
         ),

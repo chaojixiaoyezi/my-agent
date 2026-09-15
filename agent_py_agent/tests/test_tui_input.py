@@ -134,7 +134,11 @@ def test_escape_stops_focused_child_and_ctrl_g_back_only_navigates(monkeypatch) 
     assert stopped == ["child-a"]
 
 
-def test_empty_enter_expands_selected_goal_without_submitting_prompt(monkeypatch) -> None:
+def test_empty_enter_opens_selected_goal_editor_without_submitting_prompt(monkeypatch) -> None:
+    import asyncio
+
+    from agent_py_agent.cli.chat_parts import tui_goal_editor
+
     root = TuiRuntime("goal-enter-input")
     navigation = TuiAgentNavigationState(root)
     navigation.update_goal_rows(
@@ -155,6 +159,12 @@ def test_empty_enter_expands_selected_goal_without_submitting_prompt(monkeypatch
         lambda _event, _params: submitted.append(True),
     )
     invalidated: list[bool] = []
+    opened = []
+
+    async def open_editor(_app, editor_params):
+        opened.append(editor_params.agent_navigation.selected_goal()["goal_id"])
+
+    monkeypatch.setattr(tui_goal_editor, "open_goal_editor", open_editor)
     params = SimpleNamespace(
         input_area=TextArea(multiline=True),
         agent_navigation=navigation,
@@ -164,16 +174,17 @@ def test_empty_enter_expands_selected_goal_without_submitting_prompt(monkeypatch
         escape_armed_text_ref=[""],
     )
     event = SimpleNamespace(
-        app=SimpleNamespace(invalidate=lambda: invalidated.append(True)),
+        app=SimpleNamespace(invalidate=lambda: invalidated.append(True), create_background_task=asyncio.run),
     )
 
     tui_keybindings._handle_enter_keybinding(event, params)
 
     assert submitted == []
-    assert invalidated == [True]
+    assert invalidated == []
+    assert opened == ["goal-one"]
     snapshot = navigation.snapshot()
     assert snapshot.active_run_id == ""
-    assert snapshot.expanded_goal_id == "goal:goal-one"
+    assert snapshot.expanded_goal_id == ""
 
 
 def test_terminal_child_reject_clears_unsent_draft_before_parent_navigation() -> None:

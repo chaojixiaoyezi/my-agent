@@ -17,6 +17,7 @@ from ...agent.contracts.tool_approval import (
     ToolApprovalRequest,
 )
 from ...agent.conversation.compact_progress import normalize_conversation_compact_progress
+from ...agent.conversation.model_metrics import newer_model_metrics, public_model_metrics
 from ...agent.conversation.tool_input_progress import ToolInputProgressEventProjector
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventSequencer
 from .tui_permission_queue import TuiPermissionCoordinator, TuiPermissionRuntimeMixin
@@ -397,6 +398,7 @@ class _TuiBackgroundActivityState:
     compact_count: int = 0
     main_activity: dict[str, object] = field(default_factory=dict)
     context_usage: dict[str, object] | None = None
+    model_metrics: dict[str, object] | None = None
     goals: tuple[dict[str, object], ...] = ()
     subagents: tuple[dict[str, object], ...] = ()
     task_progress: _TuiTaskProgressProjection = field(
@@ -594,6 +596,7 @@ def _next_background_activity_state(
             task_progress = projected
     return _TuiBackgroundActivityState(
         count=count,
+        model_metrics=newer_model_metrics(current.model_metrics, snapshot.get("model_metrics")),
         started_at=current.started_at,
         compact_count=compact_count,
         main_activity=main_activity,
@@ -646,6 +649,7 @@ def _background_activity_payload(
         **_task_progress_payload(state.task_progress),
         "hidden_subagent_count": state.hidden_subagent_count,
         "context_usage_cleared": state.context_usage == {},
+        "model_metrics": dict(state.model_metrics or {}),
         **(
             {"context_usage": dict(context_usage)}
             if isinstance(context_usage, dict)
@@ -2006,6 +2010,15 @@ class TuiTurnEventAdapter:
             )
         return True
 
+    # LLM: 只发布状态数字，不创建正文块；字段清洗和回放排序交给同一投影协议。
+    # 函数用途: 模型开始、结算和工具解析后刷新统计条，不阻塞输入与滚动。
+    def write_model_metrics(self, metrics: Mapping[str, object]) -> bool:
+        public = public_model_metrics(metrics)
+        if not public:
+            return False
+        self.runtime._publish("status_updated", "updated", f"status:{self.request_id}", {"model_metrics": public}, request_id=self.request_id)
+        return True
+
     # LLM: A mid-turn context compaction becomes one stable, content-free system event. It does
     # not advance durable conversation compact_generation or infer anything from display text.
     # 函数用途: 在当前回合留下“裁剪前后 token 与工具对数”的可展开历史提示。
@@ -2439,6 +2452,8 @@ def _consume_gateway_turn_event(
             request_id=adapter.request_id,
         )
         return True
+    if kind == "model_metrics_updated" and isinstance(payload.get("model_metrics"), Mapping):
+        return adapter.write_model_metrics(payload["model_metrics"])
     if kind == "context_usage_updated" and isinstance(
         payload.get("context_usage"),
         Mapping,

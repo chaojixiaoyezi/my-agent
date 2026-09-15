@@ -277,6 +277,8 @@ def conversation_task_attributes(system_task: object) -> dict[str, object]:
 
 # LLM: Parse only the explicit goal lifecycle grammar; the objective body remains opaque model/user text.
 # 函数用途: 将 `/goal` 后缀解析为查看、创建、修改、暂停、恢复或清除操作。
+# LLM: 显式 slash command 才有控制权；名称或 goal ID 只作为结构化选择器，不从目标正文猜状态。
+# 函数用途: 解析持续目标的建立与精确暂停、恢复、清除命令，未命名目标仍可用简写。
 def _goal_command(trailing: object) -> ConversationControlCommand:
     value = str(trailing or "").strip()
     if not value:
@@ -299,13 +301,13 @@ def _goal_command(trailing: object) -> ConversationControlCommand:
             usage="用法：/goal 时长 名称 任务内容，例如 /goal 7d 周报整理 整理本周资料",
         )
     name, separator, action = value.partition(" ")
-    if separator and action.strip().casefold() == "clear":
+    if separator and action.strip().casefold() in {"pause", "resume", "clear"}:
         return ConversationControlCommand(
             "goal",
-            operation="clear",
+            operation=action.strip().casefold(),
             name=name.strip(),
             valid=bool(name.strip()),
-            usage="用法：/goal 名称 clear",
+            usage="用法：/goal 名称或目标编号 pause|resume|clear",
         )
     operation, _, remainder = value.partition(" ")
     operation = operation.lower()

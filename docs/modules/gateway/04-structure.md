@@ -1,5 +1,19 @@
 # Gateway Structure
 
+## 模型统计投影
+
+`request_execution.py::BufferedChunkStreamWriter.write_model_metrics` 发布 `model_metrics_updated`，
+只含统一白名单数字。前台 TUI 直接消费；后台和子代理通过所属 `ConversationThread.model_metrics`
+的数值快照读取。调用账本仍为权威，不新建收费账或模型状态机。详细口径见 [TUI 规范](../../design/TUI_DESIGN.md)。
+
+## 未配置模型与当前调用身份
+
+随包配置不预填协议、模型名和接口地址。`backends/base.py::get_backend` 对空配置创建未配置适配器，
+允许 Gateway/TUI 设置入口启动，但模型生成与工具能力探针返回 `MODEL_NOT_CONFIGURED`，不请求网络、
+不回退到其他服务。`request_errors.py` 将其投影为明确的 `/model` 配置提示。
+`status_rendering.py` 仅生成 Gateway 健康事实；`tooling/gateway_status.py` 绑定当前执行配置生成
+`caller_model`，不再返回易与当前会话混淆的启动默认模型。用户显式保存的模型选择保持不变。
+
 ## 2026-09-14 R291 收口待重试事实必须进入硬事实发现层（否则恢复链跑不到）
 
 **问题（本轮自查发现）**：runner 终态收口的待重试事实落在子代理 canonical task 的 attributes 上，
@@ -1219,6 +1233,14 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   验证。LSP 和已存在 PTY 的后续动作不被重写，命令正文不参与判断。
 - `agent/conversation/goal_tools.py`：持续目标轮的 `get_goal` / `create_goal` / `update_goal`；工具只能读写
   当前结构化 thread+task 绑定，模型只能通过 update 写 `complete` 或 `blocked` 终态。
+  三个工具默认首轮可见；显式工具授权和用户延迟配置仍生效。新增命名目标不复用已有目标任务。
+  create/get 回执提供当前目标及兄弟目标状态，后台目标已有执行通道不意味着当前回合还要重复派工。
+- `agent/conversation/goal_prompting.py`：目标回合展示 exact goal/task 与其他目标状态，子代理回报后
+  使用当前 Goal 正文作为本轮目标；原用户历史及后续插话仍保留，不按任务过滤历史。
+- `agent/conversation/goal_clock.py`：同一进程、canonical store 路径内共用计时字典和锁；多个 Store
+  实例轮流结算同一目标时不重复累计，同名 Goal 不跨 owner 共享。时钟为进程内状态，不计停机时间。
+- `agent/conversation/goal_recovery.py`：用户以名称或编号显式 resume 旧目标时检查共享任务冲突，
+  源任务已完成且执行释放后才准备独立任务并原子保存来源快照。查询或服务启动不自动迁移。
 - `agent/conversation/runtime.py`：每个后台续接 turn 都读取同一 thread 的 compact summary 与完整 raw tail；
   task id 只约束 wake、progress、workspace 和子代理树等运行事实，不能过滤消息或建立 task-scoped history。
   持续目标轮携带精确 goal id，未进入 complete/blocked/paused/cleared 才发布一个去重续跑 wake。scheduler
@@ -1421,9 +1443,9 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   文本分“聊天/任务”，也不接受外部 lane/task selector。`/audit`、`/goal` 只是同一 thread 上的显式
   overlay；多个命名项不建立第二份 transcript/compact。普通前台 turn 不猜多个 Goal 中谁是当前目标，
   后台续跑通过 exact `thread_goal_id + task_id` 只读取自己的目标。
-- 普通 `task_progress` 是当前 workspace 的可选恢复笔记；open item 不拦截模型最终回复、不追加隐藏
-  completion 提醒，也不安排后台 continuation。只有显式 `thread_goal_id` 的 `/goal` 使用 open-plan
-  lifecycle、暂停恢复和 durable continuation。
+- `task_progress` 是当前 workspace 的可选恢复笔记，普通模式和 Goal 模式都不以 open item 覆盖模型
+  最终回复。只有精确 active Goal 在安全回合边界发布一个去重 wake，既不依赖 Todo 也不依赖工具数量；
+  子代理等待只由生命周期事件接续。旧 Goal 周期策略到期时迁移为同一 wake，不再另起模型轮询。
 - 持久提醒由 `agent/scheduler/` 的 owner job/run 事实源和 `schedule` action tool 管理。
   到期时以 typed wake metadata 回到创建时的同一 thread，不读取用户文本推断身份或会话；
   `wait` 只负责 active task 内让出，两者不共享第二份 transcript/compact。

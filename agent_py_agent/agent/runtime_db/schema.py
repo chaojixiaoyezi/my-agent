@@ -151,6 +151,9 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_runtime_events_attempt ON runtime_events(attempt_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_runtime_events_type ON runtime_events(event_type, created_at)",
+    # 恢复页按序号前进；消费与重复事实按精确执行身份查找，不反复扫描全历史。
+    "CREATE INDEX IF NOT EXISTS idx_runtime_events_type_seq ON runtime_events(event_type, seq)",
+    "CREATE INDEX IF NOT EXISTS idx_runtime_events_type_identity ON runtime_events(event_type, agent_run_id, attempt_id, seq)",
     # ---------------------------------------------------------------- R2（G/H 节）
     # ToolOperation 状态机（G.1）：CLAIMED→EXECUTING(CAS handler_started_at)→
     # SUCCEEDED/FAILED/CANCELLED；EXECUTING 后无法证明零副作用一律 UNKNOWN（G.4）。

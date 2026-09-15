@@ -36,8 +36,7 @@ class GatewayStatusTool(BaseTool):
             "读取当前 my-agent 唯一 Gateway 的权威运行状态。检查 Gateway 健康、真实监听端口、"
             "本次调用模型、配置来源、队列或日志噪声时必须优先使用本工具；不要用 ps/ss 猜端口，"
             "也不要把 /health 当作状态端点，HTTP 状态端点由结果中的 status_path 给出。"
-            "本次模型只看 caller_model.model_name；deployment_defaults 只是网关启动默认值，"
-            "不能拿它或旧历史中的 identity.model_name 回答‘你是什么模型’。"
+            "本次模型只看 caller_model.model_name，不使用训练记忆或旧历史回答当前模型名称。"
             "模型名是请求配置，不是供应商内部模型身份的独立鉴定；不要改写版本号。"
         ),
         input_schema={

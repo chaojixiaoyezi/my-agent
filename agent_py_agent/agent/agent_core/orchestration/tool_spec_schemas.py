@@ -14,6 +14,7 @@ from typing import Any
 
 _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "goal": {"type": "string"},
+    "persistent_goal": {"type": "string", "minLength": 1, "maxLength": 4000},
     # 计划绑定紧跟 goal 展示给模型；它仍是可选字段，但承接已有 Todo 时应优先被看到并填写。
     "covers": {"type": "array", "items": {"type": "string"}},
     "description": {"type": "string", "maxLength": 240},

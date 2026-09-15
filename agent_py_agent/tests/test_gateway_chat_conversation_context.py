@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,7 +64,7 @@ from agent_py_agent.agent.conversation.task_promotion import (
     promote_current_conversation_task,
 )
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.gateway_parts.io import write_json_file
+from agent_py_agent.agent.gateway_parts.io import write_json_file, write_json_file_atomic
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.request_errors import (
     ConversationPersistenceError,
@@ -3187,7 +3188,18 @@ def test_sticky_workspace_with_missing_configured_path_still_fails_closed(tmp_pa
     assert followup.load_errors[0]["context"] == "gateway.conversation.workspace_task"
 
 
-def test_multiple_named_goals_expose_only_management_facts_to_an_ordinary_turn(tmp_path):
+# LLM: 仅向测试目录写入升级前的多目标记录，不绕过产品的新建限制；保留旧记录的独立任务归属。
+# 函数用途: 构造旧版第二个命名目标，让兼容回归继续验证旧用户数据不会丢失或串入普通聊天。
+def _persist_legacy_second_goal(store, first, *, name, objective):
+    second = replace(first, goal_id="goal-legacy-other", task_id="task-legacy-other", name=name, objective=objective)
+    path = store.goals_dir / f"{first.thread_id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["goals"].append(second.to_dict())
+    write_json_file_atomic(path, payload)
+    return second
+
+
+def test_legacy_multiple_named_goals_expose_only_management_facts_to_an_ordinary_turn(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
@@ -3201,25 +3213,18 @@ def test_multiple_named_goals_expose_only_management_facts_to_an_ordinary_turn(t
         }
     }
     conversation = _conversation_context(agent, request, "gw-first", "普通聊天")
-    for name, objective in (
-        ("周报整理", "持续整理周报"),
-        ("依赖升级", "持续检查依赖"),
-    ):
-        goal = agent.conversation_store.create_goal(
-            {
-                "thread_id": conversation.thread_id,
-                "name": name,
-                "objective": objective,
-            }
-        )
+    store = agent.conversation_store
+    first = store.create_goal({"thread_id": conversation.thread_id, "name": "周报整理", "objective": "持续整理周报"})
+    second = _persist_legacy_second_goal(store, first, name="依赖升级", objective="持续检查依赖")
+    for goal in (first, second):
         agent.conversation_store.bind_task(
             {
                 "thread_id": conversation.thread_id,
                 "task_id": goal.task_id,
-                "goal": objective,
+                "goal": goal.objective,
                 "status": "active",
                 "work_kind": "goal",
-                "work_name": name,
+                "work_name": goal.name,
                 "cancellation_scope": "detached",
             }
         )
@@ -5020,6 +5025,55 @@ def test_background_child_archive_cannot_overwrite_parent_goal_workspace_or_inde
     parent = next(ref for ref in refs if ref["task_id"] == "task-library")
     assert parent["title"] == "做图书馆运营方案"
     assert parent["task_path"] == str(workspace)
+
+
+@pytest.mark.parametrize("goal_complete", [False, True])
+@pytest.mark.parametrize("legacy_background_goal", [False, True])
+def test_named_foreground_goal_followup_can_guide_original_child(tmp_path, goal_complete, legacy_background_goal):
+    from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
+    request = {"conversation": {
+        "channel": "feishu", "channel_conversation_id": "goal-child-followup",
+        "channel_user_id": "u-1", "canonical_user_id": "u-1",
+    }}
+    conversation = _conversation_context(agent, request, "gw-parent", "建立交付评审 Goal")
+    params = RunParams(
+        request_id="gw-parent", run_id="gw-parent", task_id="gw-parent",
+        root_user_prompt="建立交付评审 Goal", task_attributes=_gateway_task_attributes(conversation),
+    )
+    agent._current_run_params = params
+    link = promote_current_conversation_task(agent)
+    assert link is not None and link.task_id == "gw-parent"
+    created = agent.tools.tools["create_goal"].execute({"name": "交付评审", "objective": "安排两名评审"})
+    assert created.ok
+    if legacy_background_goal:
+        store = agent.conversation_store
+        first = store.load_goal(conversation.thread_id, task_id=link.task_id)
+        second = _persist_legacy_second_goal(store, first, name="独立评审", objective="另一项后台工作")
+        store.bind_task({"thread_id": conversation.thread_id, "task_id": second.task_id,
+                         "goal": second.objective, "status": "active", "work_kind": "goal",
+                         "work_name": second.name, "cancellation_scope": "detached"})
+    child = agent.subagents.create_run(
+        goal="核验现有程序", thought="", plan=["实际核验"],
+        parent_id=link.task_id, root_id=link.task_id, depth=1,
+    )
+    if goal_complete:
+        assert agent.tools.tools["update_goal"].execute({"status": "complete"}).ok
+    followup = _conversation_context(agent, request, "gw-followup", "汇总时补上原因和影响")
+    assert not followup.load_errors
+    assert (followup.thread_goal is None) is goal_complete
+    attrs = _gateway_task_attributes(followup)
+    assert attrs["conversation_task_id"] == link.task_id
+    agent._current_run_params = RunParams(
+        request_id="gw-followup", run_id="gw-followup", task_id="gw-followup", task_attributes=attrs,
+    )
+    result = SendGuidanceTool(agent).execute({"target": child.id, "message": "汇总时补上原因和影响"})
+    assert result.ok, result.output
+    pending = agent.conversation_store.pending_guidance("agent_run", child.id)
+    assert len(pending) == 1 and pending[0].sender == link.task_id
 
 
 def test_gateway_followup_subagent_lineage_uses_active_task_root(tmp_path):

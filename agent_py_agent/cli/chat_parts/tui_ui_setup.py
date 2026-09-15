@@ -127,6 +127,7 @@ def _make_render_context_factory(
             status_last_event_at=status.last_event_at,
             context_tokens=status.context_tokens,
             context_usage=status.context_usage,
+            model_metrics=tuple(sorted(status.model_metrics.items())),
             compact_count=status.compact_count,
             output_tokens=status.output_tokens,
             has_active_tools=any(

@@ -75,6 +75,18 @@ capability 阻塞立即唤醒。新工作片从 canonical child state 获得结�
 
 ## 6. 验证要求
 
+执行器异常退出由 `runtime_db/executor_liveness.py` 记录 exact attempt 的进入/退出与进程身份。
+同宿主内存登记是当前执行区间的存活观测，持久元数据负责跨实例/跨进程恢复；没有 session 也可以
+根据原进程死亡事实恢复。宿主活着、未知线程、静默时间和心跳过期不能单独触发收口。
+没有结果的真实退出按 error/FAILED 落账并通知父级；若工具处于 EXECUTING/UNKNOWN 或已进入 handler
+但没有结论，则保留 unknown 执行权封存，子代理显示 BLOCKED 并通知父级核对，不自动重跑。
+来源岗位继续使用已有独立恢复策略，不在本轮改变其持续工作语义。
+
+未落盘收口事实通过 `pending_events_page` 在既有运行事件账本中分页轮转：消费标记按
+agent_run/attempt 精确去重，不限于最近若干条；扫描游标单独存于 metadata，进程重启仍可继续。
+读取一页不等于消费。单条失败保持待恢复，扫描到尾部后绕回重试；已有同身份 WAL 只补消费标记，
+已被新 attempt 取代的事件标为 superseded，不把旧结果写进新轮。
+
 - 六种 reason 的归一和主/子/Gateway 投影有定向测试；
 - 模型最终正文不被交付层改写；
 - 无 acceptance/evidence 的普通 child 可启动并自然 `DONE`；

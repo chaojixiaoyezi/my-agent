@@ -115,6 +115,22 @@ def test_goal_navigation_drops_malformed_rows_and_back_collapses_detail() -> Non
     assert navigation.snapshot().active_run_id == ""
 
 
+def test_child_goal_selection_survives_roster_refresh_and_back_stays_in_child() -> None:
+    navigation = TuiAgentNavigationState(TuiRuntime("child-goal-nav"))
+    navigation.update_rows("", [_row("child-a")])
+    navigation.move_selection(1)
+    navigation.enter_selected()
+    goal = {**_goal(), "revision": 3}
+    navigation.update_goal_rows([goal], parent_run_id="child-a")
+    navigation.move_selection(1)
+    navigation.update_rows("child-a", [_row("grandchild")])
+    assert navigation.selected_goal()["revision"] == 3
+    assert navigation.enter_selected() is True
+    assert navigation.back() is True
+    assert navigation.snapshot().active_run_id == "child-a"
+    assert navigation.snapshot().expanded_goal_id == ""
+
+
 def test_down_selects_children_enter_opens_and_back_never_stops() -> None:
     root = TuiRuntime("nav-root")
     navigation = TuiAgentNavigationState(root)

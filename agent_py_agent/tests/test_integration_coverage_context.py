@@ -41,9 +41,11 @@ def test_integration_prompt_is_evidence_based_without_fixed_orchestration():
     assert "findings_ledger" not in prompt
     assert "派工不会永久改变你的职责" in prompt
     assert "用户明确要求主代理不写功能代码" in prompt
-    assert "只要当前用户目标仍有你已知的未完成部分" in prompt
+    assert "只要本轮负责的目标仍有你已知的未完成部分" in prompt
+    assert "每个代理最多一个未结束 Goal" in prompt
+    assert "主子代理目标各自独立" in prompt
     assert "continue authorized work instead of returning a partial final report" in prompt
-    assert "委派只是分工，不会缩小用户原始目标" in prompt
+    assert "本轮自己创建的普通子代理只是分工，仍需接收结果、整合验证和交付" in prompt
     assert "有效测试不得仅为变绿而删除、跳过、放宽断言" in prompt
 
 

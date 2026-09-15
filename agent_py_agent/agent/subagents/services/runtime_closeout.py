@@ -464,52 +464,49 @@ def advance_pending_closeout(manager: Any, task: Any, fact: dict[str, Any]) -> d
     return {"advanced": True, "state": delivery}
 
 
-# LLM: canonical task 写不进去时留下的只是"事件账本里的身份"；task 恢复可写后，
-# 恢复链必须能把它还原成正式 WAL 事实，否则那条事件永远只是诊断、不是可达恢复依据。
-# 还原只写账（WAL），不执行任何业务动作；真正的收口/通知仍由既有推进路径完成。
-# 函数用途: 把"收口事实未能落盘"事件还原成 canonical WAL 事实。
+# LLM: 恢复只补 WAL，不执行业务。持久扫描游标与消费回执分离，页尾绕回保证坏记录可重试且不挡后项。
+# exact attempt 的消费回执无窗口限制；结果文件须与事件身份一致，不能把换代后的结果绑定到旧 attempt。
+# 函数用途: 分页还原未落盘收口事实；单条损坏不拖垮本页，成功持久化后才写消费回执。
 def restore_unpersisted_closeouts(manager: Any) -> int:
     repo = getattr(manager, "runtime_db", None)
-    lister = getattr(repo, "recent_events_of_type", None)
-    list_runs = getattr(manager, "list_runs", None)
-    if not callable(lister) or not callable(list_runs):
+    lister = getattr(repo, "pending_events_page", None)
+    if not callable(lister):
         return 0
     try:
-        events = list(lister(CLOSEOUT_UNPERSISTED_EVENT, limit=50) or [])
+        events = lister(
+            CLOSEOUT_UNPERSISTED_EVENT, consumed_event_type=CLOSEOUT_RESTORED_EVENT,
+            consumer=RUNTIME_CLOSEOUT_SCHEMA, limit=50,
+        )
     except Exception:  # noqa: BLE001 - 读不到就不还原，不影响其它恢复
         return 0
-    if not events:
-        return 0
-    # append-only 账本里用"同身份已还原"的标记做消费判定，避免每周期重复还原。
-    consumed: set[tuple[str, str]] = set()
-    try:
-        for marker in list(lister(CLOSEOUT_RESTORED_EVENT, limit=100) or []):
-            data = marker.get("payload") if isinstance(marker, dict) else None
-            if isinstance(data, dict):
-                consumed.add((str(data.get("run_id") or ""), str(data.get("attempt_id") or "")))
-    except Exception:  # noqa: BLE001
-        consumed = set()
-    tasks_by_id: dict[str, Any] = {}
     restored = 0
     for event in events:
-        payload = event.get("payload") if isinstance(event, dict) else None
-        if not isinstance(payload, dict):
-            continue
-        run_id = str(payload.get("run_id") or "").strip()
-        attempt_id = str(payload.get("attempt_id") or "").strip()
-        if not run_id or not attempt_id:
-            continue
-        if (run_id, attempt_id) in consumed:
-            continue
-        if run_id not in tasks_by_id:
-            try:
-                tasks_by_id[run_id] = manager.load(run_id)
-            except Exception:  # noqa: BLE001 - 单条读不到就跳过
-                tasks_by_id[run_id] = None
-        task = tasks_by_id.get(run_id)
-        if task is None or pending_closeout(task) is not None:
-            # 已有正式事实（或任务已不可读）：不重复还原。
-            continue
+        try:
+            restored += _restore_closeout_event(manager, event)
+        except Exception:  # noqa: BLE001 - 读写失败保持未消费，下次轮转还会重试
+            _LOGGER.debug("runtime closeout event restore failed", exc_info=True)
+    return restored
+
+
+# LLM: 只恢复 exact current 的结果引用；同身份 WAL 已存在时补消费回执，旧身份只记已淘汰，不覆盖新事实。
+# 函数用途: 还原一条事件到正式收口事实，并在成功保存后确认消费；失败会留在恢复分页中。
+def _restore_closeout_event(manager: Any, event: dict[str, Any]) -> int:
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or payload.get("schema_version") != RUNTIME_CLOSEOUT_SCHEMA:
+        return 0
+    run_id = str(payload.get("run_id") or "").strip()
+    attempt_id = str(payload.get("attempt_id") or "").strip()
+    if not run_id or not attempt_id or attempt_id != event.get("attempt_id"):
+        return 0
+    repo = manager.runtime_db
+    authority = repo.agent_run_for_run_id(run_id)
+    if authority is None or str(authority["agent_run_id"]) != str(event.get("agent_run_id") or ""):
+        return 0
+    task = manager.load(run_id)
+    existing = pending_closeout(task)
+    stale = str(authority["current_attempt_id"] or "") != attempt_id
+    restored = 0
+    if not stale and existing is None:
         target_status = str(payload.get("target_status") or "").strip().upper()
         fact = {
             "schema_version": RUNTIME_CLOSEOUT_SCHEMA,
@@ -530,26 +527,22 @@ def restore_unpersisted_closeouts(manager: Any) -> int:
             "updated_at": time.time(),
         }
         result = _load_persisted_runner_result(fact)
-        if result is None:
-            continue
-        outcome = {
-            "state": "pending",
-            "target_run_status": fact["target_run_status"],
-            "agent_run_id": fact["agent_run_id"],
-        }
+        if result is None or str(result.run_id) != run_id:
+            return 0
+        if str(result.status) != target_status:
+            return 0
         if not _store_closeout(manager, task, fact):
-            continue
-        restored += 1
-        try:
-            repo.append_event(
-                event_type=CLOSEOUT_RESTORED_EVENT,
-                attempt_id=attempt_id,
-                agent_run_id=str(event.get("agent_run_id") or ""),
-                payload={"schema_version": RUNTIME_CLOSEOUT_SCHEMA,
-                         "run_id": run_id, "attempt_id": attempt_id},
-            )
-        except Exception:  # noqa: BLE001 - 标记写不进去只会导致下一轮重复还原，不影响正确性
-            pass
+            return 0
+        restored = 1
+    elif not stale and str(existing.get("attempt_id") or "") != attempt_id:
+        return 0
+    repo.append_event(
+        event_type=CLOSEOUT_RESTORED_EVENT, attempt_id=attempt_id,
+        agent_run_id=str(event.get("agent_run_id") or ""),
+        payload={"schema_version": RUNTIME_CLOSEOUT_SCHEMA,
+                 "run_id": run_id, "attempt_id": attempt_id,
+                 "reason": "superseded" if stale else "wal_persisted"},
+    )
     return restored
 
 

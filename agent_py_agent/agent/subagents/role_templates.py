@@ -33,6 +33,9 @@ PROCESS_SESSION_TOOL = "process_session"
 SHELL_SESSION_TOOLS = (SHELL_TOOL, PROCESS_SESSION_TOOL, "terminal_session")
 CAPABILITY_REQUEST_TOOL = "capability_request"
 COLLABORATION_TOOLS: list[str] = []
+# LLM: Self-management is separate from delegation and business writes; explicit exact grants and owner caps still apply.
+# 常量用途: 主子代理复用 Goal 与 Todo 工具；叶子可管理自己的目标和清单，不因此获得派工权限。
+AGENT_PROGRESS_TOOLS = ["task_progress", "get_goal", "create_goal", "update_goal"]
 RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
     {
         "inspect_agent_tree",
@@ -46,6 +49,7 @@ RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
 # dispatch, model self-report events, or ancestor-wide controls here.
 # 配置用途: worker 保留通用执行能力；coordinator 额外获得创建、只读状态、直属插话、取消和权限裁决，进展由宿主回传。
 ROLE_BASE_TOOLS = [
+    *AGENT_PROGRESS_TOOLS,
     *READ_ONLY_TOOLS,
     *REPORT_WRITE_TOOLS,
     *SHELL_SESSION_TOOLS,

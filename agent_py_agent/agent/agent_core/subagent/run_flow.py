@@ -12,6 +12,7 @@ from ...conversation.active_turn_input import (
     merge_active_turn_user_inputs,
 )
 from ...conversation.agent_thread import (
+    AgentThreadTurnInput,
     append_subagent_thread_result,
     ensure_subagent_thread,
     prepare_subagent_thread_turn,
@@ -66,14 +67,27 @@ class SubagentOverflowCompactRequest:
     carried_archive_tool_calls: list[dict[str, object]]
     progress_callback: object
     model_surface: object
+    conversation_turn_id: str = ""
 
 
+# LLM: 真实执行区间在 exact attempt 下登记，finally 记录退出；探测/提示构造/模型/结果异常都可被监督发现。
+# 函数用途: 执行并记录同一子代理工作片，干跑不登记执行器，不改变原取消和结果收口语义。
 def run_subagent_flow(lifecycle, options: SubagentRunParams):
     """Run one subagent task from prompt construction through result persistence."""
     active_attempt_id = _prepare_subagent_attempt(lifecycle, options)
     if options.dry_run:
         _, prompt = _build_prompt(lifecycle, options)
         return lifecycle.record_dry_run(options.run_id, active_attempt_id, prompt)
+
+    from ...runtime_db.executor_liveness import attempt_executor
+
+    with attempt_executor(lifecycle.agent.subagents.runtime_db, options.run_id, active_attempt_id):
+        return _run_prepared_subagent(lifecycle, options, active_attempt_id)
+
+
+# LLM: 本函数运行在已登记的执行器内部；结果与异常沿原生命周期入口处理，不新增业务完成裁决。
+# 函数用途: 依次探测、构造提示并执行当前子代理工作片。
+def _run_prepared_subagent(lifecycle, options: SubagentRunParams, active_attempt_id: str):
 
     probe_blocked = _probe_subagent_channel(lifecycle, options, active_attempt_id)
     if probe_blocked is not None:
@@ -199,25 +213,44 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
     )
 
 
+# LLM: Goal persistence reuses the exact runner and permission scope; a typed non-normal end never schedules another turn.
+# 函数用途: 子代理目标未完成时接着执行下一对话轮，普通 prompt-only 派工仍只执行原有模型循环。
+def _run_subagent_model_turn(lifecycle, prompt, context, task_attributes, *, task, attempt_id):
+    from ...conversation.goal_delegation import active_delegated_goal_after_turn
+    from ...conversation.goal_prompting import continuation_prompt
+
+    turn_number = 0
+    while True:
+        turn_id = f"{attempt_id}-goal-{turn_number}" if turn_number else attempt_id
+        result = _run_subagent_conversation_turn(
+            lifecycle, AgentThreadTurnInput(prompt, attempt_id, turn_id), context, task_attributes, task=task,
+        )
+        goal = active_delegated_goal_after_turn(lifecycle.agent, task, result)
+        if goal is None:
+            return result
+        turn_number += 1
+        prompt = continuation_prompt(goal)
+
+
 # LLM: 子代理始终使用自身 ConversationThread 和同一执行身份；只有已提交 Compact 才能续接，
 # 不以累计压缩次数判失败。停止、真实压缩失败和预算仍生效，工具显示批次不改变权限或副作用幂等身份。
 # 函数用途: 使用子代理自己的历史执行长期任务；压缩后继续原尝试，落账后按真实结束原因显示正文或截断提示。
-def _run_subagent_model_turn(
+def _run_subagent_conversation_turn(
     lifecycle,
-    prompt: str,
+    turn: AgentThreadTurnInput,
     context,
     task_attributes: dict[str, object],
     *,
     task: object,
-    attempt_id: str,
 ):
     agent = lifecycle.agent
+    prompt, attempt_id, conversation_turn_id = turn.prompt, turn.attempt_id, turn.turn_id
     carried_archive_tool_calls: list[dict[str, object]] = []
     carried_active_turn_user_inputs: list[dict[str, object]] = []
     thread = ensure_subagent_thread(getattr(agent, "subagents", None), task)
     if thread is None:
         raise RuntimeError("subagent ConversationStore is unavailable")
-    transcript_sink = _open_subagent_transcript_sink(agent, task, thread, attempt_id)
+    transcript_sink = _open_subagent_transcript_sink(agent, task, thread, conversation_turn_id)
     compact_progress = (
         transcript_sink.write_conversation_compact_progress
         if transcript_sink is not None
@@ -228,8 +261,7 @@ def _run_subagent_model_turn(
         current = prepare_subagent_thread_turn(
             agent,
             task,
-            prompt=prompt,
-            attempt_id=attempt_id,
+            turn=turn,
             progress_callback=compact_progress,
             interrupt_check=is_interrupted,
             model_surface=model_surface,
@@ -255,18 +287,7 @@ def _run_subagent_model_turn(
             if str(getattr(result, "runtime_status", "") or "").strip().lower() != (
                 "context_overflow"
             ):
-                append_subagent_thread_result(
-                    agent,
-                    task,
-                    attempt_id=attempt_id,
-                    result=result,
-                )
-                if transcript_sink is not None:
-                    transcript_sink.finish(
-                        final_text=str(getattr(result, "response", "") or ""),
-                        publish_final=True,
-                        end_reason=result_turn_end_reason(result),
-                    )
+                _complete_subagent_conversation_turn(agent, task, turn, result, transcript_sink)
                 return result
             (
                 carried_archive_tool_calls,
@@ -284,6 +305,7 @@ def _run_subagent_model_turn(
                 SubagentOverflowCompactRequest(
                     prompt=prompt,
                     attempt_id=attempt_id,
+                    conversation_turn_id=conversation_turn_id,
                     task_attributes=task_attributes,
                     current=current,
                     carried_archive_tool_calls=carried_archive_tool_calls,
@@ -301,6 +323,18 @@ def _run_subagent_model_turn(
         raise
     finally:
         _trim_subagent_transcript(agent, task, enabled=transcript_sink is not None)
+
+
+# LLM: Normalize typed Goal stop before canonical history/display publication; completing a logical turn does not settle its runner.
+# 函数用途: 保存子代理某一对话轮的完整回复并同步界面，下一 Goal 轮使用新轮次编号，不覆盖本轮。
+def _complete_subagent_conversation_turn(agent, task, turn, result, transcript_sink):
+    from ...conversation.goal_delegation import active_delegated_goal_after_turn
+
+    active_delegated_goal_after_turn(agent, task, result)
+    append_subagent_thread_result(agent, task, attempt_id=turn.attempt_id, result=result, turn_id=turn.turn_id)
+    if transcript_sink is not None:
+        transcript_sink.finish(final_text=str(getattr(result, "response", "") or ""), publish_final=True,
+                               end_reason=result_turn_end_reason(result))
 
 
 # LLM: Overflow retries may carry only typed tool progress and active-turn input records. These
@@ -343,8 +377,7 @@ def _compact_subagent_overflowing_turn(
     refreshed = prepare_subagent_thread_turn(
         agent,
         task,
-        prompt=request.prompt,
-        attempt_id=request.attempt_id,
+        turn=AgentThreadTurnInput(request.prompt, request.attempt_id, request.conversation_turn_id),
         force=True,
         progress_callback=request.progress_callback,
         interrupt_check=is_interrupted,
@@ -383,7 +416,7 @@ def _compact_subagent_active_turn_archive(
         request.carried_archive_tool_calls,
         ActiveTurnArchiveCompactRequest(
             task_attributes=request.task_attributes,
-            request_id=str(request.attempt_id or ""),
+            request_id=str(request.conversation_turn_id or request.attempt_id or ""),
             attempt_id=str(request.attempt_id or ""),
             task_prompt=request.prompt,
             progress_callback=request.progress_callback,
@@ -395,8 +428,7 @@ def _compact_subagent_active_turn_archive(
     refreshed = prepare_subagent_thread_turn(
         agent,
         task,
-        prompt=request.prompt,
-        attempt_id=request.attempt_id,
+        turn=AgentThreadTurnInput(request.prompt, request.attempt_id, request.conversation_turn_id),
         progress_callback=request.progress_callback,
         interrupt_check=is_interrupted,
         model_surface=request.model_surface,

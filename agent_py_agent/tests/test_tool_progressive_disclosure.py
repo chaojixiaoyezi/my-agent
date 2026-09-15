@@ -29,9 +29,9 @@ def _agent(tmp_path, **overrides) -> SimpleAgent:
     return SimpleAgent(cfg, str(tmp_path))
 
 
-def test_deferred_collaboration_tools_collapsed_in_main_catalog(tmp_path) -> None:
-    """collaboration 工具的完整 spec 不在主目录正文，但折叠行列出其名字。"""
-    agent = _agent(tmp_path)
+def test_explicitly_deferred_goal_tools_collapsed_in_main_catalog(tmp_path) -> None:
+    """用户显式选择折叠 Goal 时仍尊重配置，默认工具可见性由另一测试覆盖。"""
+    agent = _agent(tmp_path, tool_catalog_deferred_categories=["goal"])
     section = agent.tools.render_catalog_section()
     assert "⊞" in section  # 折叠行存在
     body, fold = section.split("⊞", 1)
@@ -54,13 +54,14 @@ def test_native_visible_surface_keeps_recursive_agent_control_direct(tmp_path) -
     assert "send_guidance" in names
     assert "cancel_subagents" in names
     assert "resolve_capability_requests" in names
-    assert "get_goal" not in names
+    assert "get_goal" in names
     assert "inspect_agent_tree" not in names
-    assert "create_goal" not in names
+    assert "create_goal" in names
+    assert "update_goal" in names
 
 
 def test_tool_search_searches_and_loads_full_specs_in_one_call(tmp_path) -> None:
-    agent = _agent(tmp_path)
+    agent = _agent(tmp_path, tool_catalog_deferred_categories=["goal"])
     result = agent.tools.tools["tool_search"].execute(
         {"query": "get_goal 查看持续目标", "limit": 4}
     )

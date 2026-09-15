@@ -47,6 +47,7 @@ def test_card_and_prompt_defaults_match_shipped_config():
     config_path = Path(__file__).parents[1] / "config" / "agent_config.yaml"
     shipped = load_config(config_path)
     defaults = AgentConfig()
+    assert defaults.system_prompt == shipped.system_prompt
     assert defaults.prompt_files == shipped.prompt_files == ["builtin:prompts/default.md"]
     assert defaults.feishu_session_lock_enabled is shipped.feishu_session_lock_enabled is True
     assert defaults.feishu_personal_idle_lock_seconds == shipped.feishu_personal_idle_lock_seconds == 10800
@@ -54,7 +55,6 @@ def test_card_and_prompt_defaults_match_shipped_config():
     assert defaults.gateway_per_user_owner_scoping is shipped.gateway_per_user_owner_scoping is True
     assert defaults.tool_catalog_deferred_categories == shipped.tool_catalog_deferred_categories == [
         "collaboration",
-        "goal",
         "web",
         "vision",
         "meta",
@@ -63,6 +63,22 @@ def test_card_and_prompt_defaults_match_shipped_config():
     assert defaults.tool_catalog_include_examples is shipped.tool_catalog_include_examples is False
     assert defaults.tool_catalog_entry_max_chars == shipped.tool_catalog_entry_max_chars == 700
     assert config_path.read_text(encoding="utf-8").count("gateway_per_user_owner_scoping:") == 1
+
+
+def test_default_persistence_distinguishes_independent_goals_from_delegated_work(tmp_path):
+    from agent_py_agent.agent.settings.config import DEFAULT_DELEGATED_EXECUTION_PERSISTENCE
+
+    prompt = AgentConfig().system_prompt
+    assert "运行时存在 current_goal 时，本轮负责该目标的完整要求" in prompt
+    assert "每个代理最多一个未结束 Goal" in prompt
+    assert "主子代理目标各自独立" in prompt
+    assert "本轮自己创建的普通子代理只是分工，仍需接收结果、整合验证和交付" in prompt
+    assert "只要当前用户目标仍有你已知的未完成部分" not in prompt
+    assert "主子代理可按复杂度自行选择用 task_progress 建清单或直接执行" in prompt
+    assert "普通任务不自动建立 Goal" in prompt
+    assert "直接父级给你的当前 goal 是本轮完整工作边界" in DEFAULT_DELEGATED_EXECUTION_PERSISTENCE
+    custom = load_config(_write_config(tmp_path, ['system_prompt: "用户自行维护的提示"']))
+    assert custom.system_prompt == "用户自行维护的提示"
 
 
 def test_terminal_tool_fold_defaults_match_shipped_config() -> None:
@@ -171,7 +187,7 @@ def test_normalize_agent_config_invalid_model_backend():
     data = {"model_backend": "openai"}
     normalized, warnings = normalize_agent_config(data)
     assert any("model_backend" in w for w in warnings)
-    assert normalized["model_backend"] == "echo"
+    assert normalized["model_backend"] == ""
 
 
 def test_normalize_agent_config_temperature_range():
@@ -217,7 +233,7 @@ def test_load_config_warns_on_bad_values(tmp_path):
         ],
     )
     config = load_config(config_path)
-    assert config.model_backend == "echo"  # default
+    assert config.model_backend == ""  # 无效协议不自动使用模型
     assert config.request_timeout == 240  # default
     assert len(config.config_warnings) >= 3  # backend + timeout + temperature + unknown key
 

@@ -687,6 +687,27 @@ def test_gate_blocked_does_not_schedule(monkeypatch):
     assert goal.calls == []
 
 
+@pytest.mark.parametrize("status", ["needs_user_input", "approval_required", "failed", "error", "cancelled"])
+def test_goal_does_not_bypass_host_stop_state(monkeypatch, status):
+    goal = _patch_resume(monkeypatch)
+    ctx = _ctx(
+        task_attributes={"thread_goal_id": "goal-1", "conversation_thread_id": "thread-1", "conversation_task_id": "task-root"},
+        final_response=SimpleNamespace(text="阶段情况", backend="test", runtime_status=status),
+    )
+    _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
+    assert goal.calls == []
+
+
+def test_goal_normal_final_without_tools_schedules_goal_driver(monkeypatch):
+    goal = _patch_resume(monkeypatch)
+    ctx = _ctx(
+        task_attributes={"thread_goal_id": "goal-1", "conversation_thread_id": "thread-1", "conversation_task_id": "task-root"},
+        final_response=SimpleNamespace(text="下一阶段继续整理", backend="test", runtime_status="ok"),
+    )
+    _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
+    assert goal.calls == [{"task_id": "task-root", "thread_id": "thread-1", "goal_id": "goal-1"}]
+
+
 def test_non_gate_unknown_reason_does_not_schedule(monkeypatch):
     goal = _patch_resume(monkeypatch)
     ctx = _ctx(
@@ -807,7 +828,7 @@ def test_explicit_goal_unfinished_turn_schedules_goal_driver(monkeypatch):
     _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
 
     assert goal.calls == [
-        {"task_id": "task-root", "thread_id": "thread-1", "due_now": True}
+        {"task_id": "task-root", "thread_id": "thread-1", "goal_id": "goal-1"}
     ]
 
 

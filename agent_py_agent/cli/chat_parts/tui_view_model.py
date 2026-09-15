@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ...agent.conversation.model_metrics import newer_model_metrics
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventJournal
 
 TERMINAL_BLOCK_PHASES = frozenset({"completed", "failed", "interrupted"})
@@ -101,6 +102,7 @@ class TuiStatus:
     compact_count: int = 0
     mode: str = "default"
     context_usage: TuiContextUsage | None = None
+    model_metrics: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: TuiDiagnostic 记录被拒绝/未知/非法事件的有界机器事实，默认不作为用户消息显示。
@@ -1359,6 +1361,7 @@ def _status_with_update(status: TuiStatus, event: TuiEvent) -> TuiStatus:
         ),
         mode=str(event.payload.get("mode") or status.mode),
         context_usage=context_usage,
+        model_metrics=newer_model_metrics(status.model_metrics, event.payload.get("model_metrics")),
     )
 
 
@@ -1457,6 +1460,7 @@ _PUBLIC_MAIN_ACTIVITY_FIELDS = frozenset(
 _PUBLIC_GOAL_FIELDS = frozenset(
     {
         "goal_id",
+        "revision",
         "name",
         "objective",
         "status",

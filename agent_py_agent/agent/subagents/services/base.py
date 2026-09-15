@@ -453,13 +453,16 @@ class SubAgentBaseService:
         self._finalize_task(task, params.parent_id)
         return task
 
-    # LLM: A delegated run receives its exact ConversationThread before lifecycle publication.
+    # LLM: A delegated run receives its exact ConversationThread and explicitly requested Goal before lifecycle publication.
     # Standalone unmanaged managers without a ConversationStore remain valid test/index adapters.
     # 函数用途: 创建子代理任务时同步建立它自己的会话线程，供后续 Compact 和恢复使用。
     def _materialize_agent_thread(self, task: SubAgentTask) -> None:
         from ...conversation.agent_thread import ensure_subagent_thread
 
         ensure_subagent_thread(self.manager, task)
+        from ...conversation.goal_delegation import seed_delegated_goal
+
+        seed_delegated_goal(self.manager, task)
 
     def _write_authority_records(self, task: SubAgentTask, params: CreateRunParams) -> None:
         """R1：create_run 权威主链写入（A.4/A.5/A.6/A.7/A.9）。

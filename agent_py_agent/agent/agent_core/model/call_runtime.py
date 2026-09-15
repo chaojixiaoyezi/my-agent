@@ -16,6 +16,7 @@ from ...contracts.model_call_ledger import (
     ModelCallTimeoutParams,
 )
 from ...conversation.context_usage import record_model_context_usage
+from ...conversation.model_metrics import publish_model_metrics
 from ...memory_archive import estimate_tokens
 from ..tool_stream import ToolBoundaryChunkFilter
 from .call_monitor import (
@@ -40,7 +41,7 @@ from .usage import (
 # LLM: The caller may pass the exact precomputed context snapshot so timeout, ledger, TUI and
 # provider-observation calibration all share one measurement; fallback construction preserves old
 # auxiliary/test callers without creating a second accounting path.
-# 函数用途: 建立一次模型调用账本，并复用同一份上下文快照计算慢模型超时。
+# 函数用途: 建立一次模型调用账本，投影真实轮次，并复用同一份上下文快照计算慢模型超时。
 def start_model_call_record(
     request: object,
     *,
@@ -92,6 +93,7 @@ def start_model_call_record(
         )
     )
     _publish_model_context_usage(request, context_snapshot.to_public_dict())
+    publish_model_metrics(agent, params, pending=True)
     return ledger, call_id, estimate
 
 

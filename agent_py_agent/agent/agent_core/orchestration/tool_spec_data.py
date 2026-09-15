@@ -23,6 +23,7 @@ _CREATE_USE_CASES = [
 _CREATE_KEYWORDS = ["子代理", "派工", "拆分", "任务", "分别", "分头", "并行", "不同项目", "各项目", "subagent", "delegate", "spawn"]
 _CREATE_PARAMETERS = {
     "goal": "只派一个子代理时必填，写这个子代理的完整目标；使用 items 批量派工时可选，只作整批说明，不替代每项自己的 goal",
+    "persistent_goal": "可选持续目标正文；提供时为这个 child 创建唯一 Goal，正常回合结束后继续到完成或明确阻塞。省略是普通 prompt 派工，子代理的 Todo 可自行选择使用",
     "items": (
         "一次派多个可同时立即运行、彼此不等结果的任务时使用；每项必须自带独立 goal，顶层 goal 可省略。"
         "编码项还必须在 goal 中说明互不重叠的文件或模块写入职责；可共享同一父级 task root。只派一个时直接传 goal"

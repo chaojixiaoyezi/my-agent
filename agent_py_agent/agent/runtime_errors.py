@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .backends.errors import (
+    ModelNotConfiguredError,
     ProviderConfigurationError,
     ProviderRecoverableError,
     ProviderRequestRejectedError,
@@ -143,6 +144,12 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
         if status is not None:
             report["http_status"] = status
         return report
+    if isinstance(exc, ModelNotConfiguredError):
+        return _report(
+            exc,
+            _template("model_not_configured", str(exc), "model has not been configured", recoverable=False),
+            context=context,
+        )
     if isinstance(exc, ProviderConfigurationError):
         return _report(
             exc,

@@ -175,6 +175,8 @@ class SubAgentRunnerResultService:
         self.manager.indexing.index_runner_result(result, output_payload)
         return len(memory_candidates)
 
+    # LLM: 正式结果先持久化恢复事实再收口和通知；执行器退出且副作用未知的 BLOCKED 也保留通知 WAL。
+    # 函数用途: 写回当前子代理结果并可靠通知父级，旧 attempt 不得覆盖新轮，UNKNOWN 不得自动重跑。
     def record_runner_result(
         self,
         params: RecordRunnerResultParams,
@@ -210,7 +212,7 @@ class SubAgentRunnerResultService:
         #    通知（否则会留下"父级永远收不到通知且无人可查"的窗口），改为留下响亮诊断后返回。
         target_run_status = closeout_target_run_status(params, result, task)
         wal_state = "not_required"
-        if target_run_status:
+        if target_run_status or params.failure_type == "executor_effects_unknown":
             wal_state = ensure_closeout_fact(
                 self.manager, task, params, result,
                 {"state": "pending", "target_run_status": target_run_status},

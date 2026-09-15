@@ -40,7 +40,7 @@ class TestNormalizeAgentConfig:
         """验证无效后端回退到默认值。"""
         data = {"model_backend": "invalid"}
         normalized, warnings = normalize_agent_config(data)
-        assert normalized["model_backend"] == "echo"  # 默认值
+        assert normalized["model_backend"] == ""  # 未配置，不能自动使用离线或真实模型
         assert len(warnings) > 0
 
     def test_normalize_request_timeout_valid(self):
@@ -316,7 +316,7 @@ class TestNormalizeSubagentAgentConfig:
     def test_normalize_empty_dict(self):
         """验证空字典使用所有默认值。"""
         normalized, warnings = normalize_agent_config({})
-        assert normalized["model_backend"] == "echo"
+        assert normalized["model_backend"] == ""
         assert normalized["request_timeout"] == 240
         assert len(warnings) == 0
 

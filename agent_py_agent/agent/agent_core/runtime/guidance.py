@@ -388,33 +388,42 @@ def release_reserved_turn_input_after_attempt(
     return tuple(_run_active_turn_transition(params, "release", release_reserved))
 
 
+# LLM: All guidance lookups share exact agent mailboxes; child task_id may carry root lineage but must never grant the root's inbox.
+# 函数用途: 读取当前代理的未读补充；主代理用自己的持久任务，子代理仅用自身 run 和 agent_thread。
+def _pending_guidance_for_current_agent(store, params, *, limit):
+    request_id = str(getattr(params, "request_id", "") or "").strip()
+    run_id = str(getattr(params, "run_id", "") or "").strip()
+    child = str(getattr(params, "context_scope", "") or "") == "task_local"
+    task_id = run_id if child else durable_task_id(params)
+    if child and not run_id:
+        return [], "", None
+    entries = []
+    if request_id:
+        entries.extend(store.pending_guidance("request", request_id, limit=limit))
+    if not child and task_id and task_id != request_id:
+        entries.extend(store.pending_guidance("request", task_id, limit=limit))
+    if run_id:
+        entries.extend(store.pending_guidance("agent_run", run_id, limit=limit))
+    if task_id:
+        entries.extend(store.pending_guidance("task", task_id, limit=limit))
+    if child:
+        attrs = getattr(params, "task_attributes", None) or {}
+        thread_id, warning = str(attrs.get("agent_thread_id") or ""), None
+    else:
+        thread_id, warning = _thread_id_for_task(store, task_id)
+    if thread_id:
+        entries.extend(store.pending_guidance("thread", thread_id, limit=limit))
+    return entries, task_id, warning
+
+
+# LLM: Reserve input only from the current agent's authorized mailboxes under its exact turn guard, then mutate this prompt only.
+# 函数用途: 在模型安全点认领并注入本代理消息，不消费父级或兄弟消息。
 def inject_pending_guidance(agent: object, params: object, *, now: float | None = None) -> bool:
     store = getattr(agent, "conversation_store", None)
     if store is None:
         return False
-    entries = []
     request_id = str(getattr(params, "request_id", "") or "").strip()
-    run_id = str(getattr(params, "run_id", "") or "").strip()
-    task_id = durable_task_id(params)
-    if request_id:
-        entries.extend(store.pending_guidance("request", request_id, limit=20))
-    if task_id and task_id != request_id:
-        # A steer can arrive while the foreground gateway request is still live,
-        # before its durable task binding becomes the selected control target.
-        # A later durable turn has a new request id but keeps the original task
-        # identity. Read the original request inbox by that exact task id so a
-        # crash or turn boundary cannot strand an unacknowledged steer.
-        entries.extend(store.pending_guidance("request", task_id, limit=20))
-    if run_id:
-        entries.extend(store.pending_guidance("agent_run", run_id, limit=20))
-    if task_id:
-        # /btw 与 会话运行时 steer 一致：绑定当前执行中的持久任务，按 FIFO 在下一安全点
-        # 作为新输入投递一次。未被消费前可跨崩溃保留；一旦 delivered，不再当作
-        # 新输入回放；确认后由同一 thread transcript 在后续 turn 中保留。
-        entries.extend(store.pending_guidance("task", task_id, limit=20))
-    thread_id, thread_lookup_error = _thread_id_for_task(store, task_id)
-    if thread_id:
-        entries.extend(store.pending_guidance("thread", thread_id, limit=20))
+    entries, task_id, thread_lookup_error = _pending_guidance_for_current_agent(store, params, limit=20)
     entries = _guidance_not_yet_injected(params, _dedupe_guidance(entries))
     warning = _render_guidance_lookup_error(thread_lookup_error)
     turn_id = request_id or task_id
@@ -422,7 +431,7 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
     if entries and turn_id:
         attempt_id = (
             str(getattr(params, "attempt_id", "") or "").strip()
-            or run_id
+            or str(getattr(params, "run_id", "") or "").strip()
             or turn_id
         )
         def reserve_and_inject() -> list[Any]:
@@ -488,8 +497,8 @@ def _inject_claimed_guidance(
     _queue_guidance_ack(params, entries)
 
 
-# LLM: A request/task steer arriving during model generation invalidates that stale model action.
-# 函数用途：检查当前一次请求或持久任务是否有新引导，不消费、不改变提示账本。
+# LLM: Pending checks and injection must use the same exact-agent mailboxes, including direct child guidance.
+# 函数用途: 检查本代理的新消息；子代理插话也能阻止旧响应直接结束，父级插话不能打断子代理。
 def has_pending_request_guidance(agent: object, params: object) -> bool:
     store = getattr(agent, "conversation_store", None)
     request_id = str(getattr(params, "request_id", "") or "").strip()
@@ -497,13 +506,7 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
     if store is None or not (request_id or task_id):
         return False
     try:
-        entries = []
-        if request_id:
-            entries.extend(store.pending_guidance("request", request_id, limit=1))
-        if task_id and task_id != request_id:
-            entries.extend(store.pending_guidance("request", task_id, limit=1))
-        if task_id:
-            entries.extend(store.pending_guidance("task", task_id, limit=1))
+        entries, task_id, _warning = _pending_guidance_for_current_agent(store, params, limit=1)
         candidates = _guidance_not_yet_injected(params, _dedupe_guidance(entries))
         turn_id = request_id or task_id
         return any(

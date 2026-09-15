@@ -21,7 +21,7 @@ from .recovery.strategy import (
 
 # LLM: Starting an attempt must bind RuntimeDB identity and may reopen CANCELLED only when the
 # structured conversation_user_stop eligibility contract proves this exact run is resumable.
-# 函数用途: 为子代理准备新的执行轮；普通终态拒绝重启，用户主动停止的同一 run 可显式续跑。
+# 函数用途: 为子代理准备新执行轮；普通终态拒绝重启，用户停止的同一 run 显式续跑时恢复其暂停目标。
 def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = "") -> SubAgentTask:
     task = manager.load(run_id)
     resumable_user_stop = user_stopped_run_is_resumable(task)
@@ -59,6 +59,10 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
         raise RuntimeError(
             f"runner attempt rejected by canonical lifecycle: run_id={run_id}"
         )
+    if resumable_user_stop:
+        from ...conversation.goal_delegation import transition_delegated_goal
+
+        transition_delegated_goal(manager, task, expected_status="paused", status="active")
     suffix = f" retry_reason={retry_reason}" if retry_reason else ""
     manager.actions._append_task_work_log(
         task,

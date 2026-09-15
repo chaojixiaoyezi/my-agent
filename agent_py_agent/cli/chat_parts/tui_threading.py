@@ -543,6 +543,7 @@ def _publish_background_activity(
                 "compact_count": compact_count,
                 "main_activity": value.get("main_activity"),
                 "context_usage": value.get("context_usage") if value.get("context_usage_projection_ok") is not False else None,
+                "model_metrics": value.get("model_metrics"),
                 "goals": goals,
                 "subagents": subagents,
                 "task_progress": task_progress,

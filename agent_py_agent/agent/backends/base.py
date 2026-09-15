@@ -28,6 +28,7 @@ from .anthropic_prompt_cache import (
     anthropic_prompt_cache_projection,
 )
 from .errors import (
+    ModelNotConfiguredError,
     ProviderConfigurationError,
     ProviderRecoverableError,
     ProviderResponseError,
@@ -291,6 +292,22 @@ class BaseBackend:
 
         del max_tokens
         return self.generate(prompt, messages=messages)
+
+
+# LLM: 未配置适配器只保持构造与设置入口可用；所有生成和探针明确失败，不模拟模型、不发送网络请求。
+# 类用途: 在新安装尚未选模型时承载空状态，让用户仍可进入 /model。
+class UnconfiguredBackend(BaseBackend):
+    name = "unconfigured"
+
+    # LLM: 工具能力预检与实际生成共用相同缺配置错误，不能误报成模型不支持工具。
+    # 函数用途: 尚无模型时拒绝能力探针，不发网络请求。
+    def probe_tool_capability(self) -> ProviderToolCapability:
+        raise ModelNotConfiguredError()
+
+    # LLM: 兼容基础生成入口所有参数，但缺配置时绝不消费 prompt 或产生虚假回复。
+    # 函数用途: 明确提醒先选择模型，普通聊天和后台生成都不能偷偷回退。
+    def generate(self, prompt: str, **kwargs: Any) -> ModelResponse:
+        raise ModelNotConfiguredError()
 
 
 class EchoBackend(BaseBackend):
@@ -1602,15 +1619,21 @@ def _response_preview(obj: object, *, max_chars: int = 1000) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + "... [truncated]"
 
 
-# LLM: 只按显式协议构造后端，请求头/top_p/温度与模型配置同快照；不因失败换接口。
-# 函数用途: 创建指定协议的适配器，让 YAML 和模型级采样配置进入真实请求。
+# LLM: 只按显式协议构造后端；空协议、模型或端点保持未配置，不因缺字段或失败换接口。
+# 函数用途: 创建用户指定的适配器；尚未配置也能打开设置，但所有真实调用都明确拒绝。
 def get_backend(name: str, config: Any | None = None) -> BaseBackend:
     """Resolve a configured backend name to a backend adapter instance."""
 
     if name == "echo":
         return EchoBackend()
+    if not str(name or "").strip():
+        return UnconfiguredBackend()
     if config is None:
         raise ValueError("真实模型后端需要传入 config。")
+    if name in {"openai_compatible", "openai_responses", "anthropic_compatible"} and not (
+        str(config.model_name or "").strip() and str(config.api_base or "").strip()
+    ):
+        return UnconfiguredBackend()
 
     common = BackendOptions(
         api_base=config.api_base,

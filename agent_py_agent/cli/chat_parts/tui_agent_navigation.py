@@ -53,6 +53,7 @@ _ROW_SCALAR_FIELDS = frozenset(
 _GOAL_ROW_SCALAR_FIELDS = frozenset(
     {
         "goal_id",
+        "revision",
         "name",
         "objective",
         "status",
@@ -115,6 +116,7 @@ class TuiAgentNavigationState:
         self._rows_by_parent: dict[str, tuple[dict[str, object], ...]] = {"": ()}
         self._rows_by_run: dict[str, dict[str, object]] = {}
         self._goal_rows: dict[str, dict[str, object]] = {}
+        self._child_goal_rows: dict[str, dict[str, dict[str, object]]] = {}
         self._selected_by_parent: dict[str, str] = {}
         self._expanded_goal_id = ""
         self._path: list[str] = []
@@ -156,16 +158,21 @@ class TuiAgentNavigationState:
             runtime.store.invalidate()
         return True
 
-    # LLM: Goal rows are exact read-only ThreadGoal projections. They join only
-    # the root visual selector and cannot be used as an agent run id or control
-    # operation.
-    # 函数用途: 刷新主界面底部 Goal 行，并保持方向键选择和展开项跟随准确 Goal。
-    def update_goal_rows(self, value: object) -> bool:
+    # LLM: Goal rows are exact read-only projections, scoped to the root or the
+    # current child view. Goal IDs cannot stand in for agent run IDs or authorize control.
+    # 函数用途: 刷新当前主子代理视角底部 Goal 行，让方向键和编辑器指向本代理的准确目标。
+    def update_goal_rows(self, value: object, *, parent_run_id: str = "") -> bool:
         rows = _goal_navigation_rows(value)
         next_rows = {
             _goal_navigation_id(str(row["goal_id"])): row for row in rows
         }
         with self._lock:
+            if parent_run_id:
+                if self._child_goal_rows.get(parent_run_id) == next_rows:
+                    return False
+                self._child_goal_rows[parent_run_id] = next_rows
+                self._runtime_for_locked(parent_run_id).store.invalidate()
+                return True
             if self._goal_rows == next_rows:
                 return False
             self._goal_rows = next_rows
@@ -177,6 +184,15 @@ class TuiAgentNavigationState:
             runtime = self.root_runtime
         runtime.store.invalidate()
         return True
+
+    # LLM: Return a copy of the exact current-page selection; it is display data, never control authorization.
+    # 函数用途: 编辑器取得被方向键选中的目标，Gateway 保存时仍会重新校验归属和版本。
+    def selected_goal(self) -> dict[str, object] | None:
+        with self._lock:
+            parent = self._active_run_id_locked()
+            rows = self._child_goal_rows.get(parent, {}) if parent else self._goal_rows
+            row = rows.get(self._selected_by_parent.get(parent, ""))
+            return dict(row) if row is not None else None
 
     # LLM: Direction movement is active only when the input controller explicitly
     # calls it. It never consumes history or changes the current view itself.
@@ -212,9 +228,10 @@ class TuiAgentNavigationState:
             selected = self._selected_by_parent.get(parent, "")
             if not selected or selected not in self._selection_ids_locked(parent):
                 return False
-            if not parent and selected in self._goal_rows:
+            goals = self._child_goal_rows.get(parent, {}) if parent else self._goal_rows
+            if selected in goals:
                 self._expanded_goal_id = "" if self._expanded_goal_id == selected else selected
-                runtime = self.root_runtime
+                runtime = self._active_runtime_locked()
                 callback = None
                 has_snapshot = True
                 lifecycle_phase = ""
@@ -246,9 +263,9 @@ class TuiAgentNavigationState:
     def back(self) -> bool:
         reconcile_rows: tuple[dict[str, object], ...] | None = None
         with self._lock:
-            if not self._path and self._expanded_goal_id:
+            if self._expanded_goal_id:
                 self._expanded_goal_id = ""
-                runtime = self.root_runtime
+                runtime = self._active_runtime_locked()
                 callback = None
             elif not self._path:
                 return False
@@ -299,7 +316,7 @@ class TuiAgentNavigationState:
                 active_name=str(row.get("name") or row.get("role") or active or "main"),
                 active_status=status,
                 selected_run_id=self._selected_by_parent.get(active, ""),
-                expanded_goal_id=self._expanded_goal_id if not active else "",
+                expanded_goal_id=self._expanded_goal_id,
                 depth=len(self._path),
                 terminal=bool(active and status in _TERMINAL_AGENT_STATUSES),
             )
@@ -329,6 +346,8 @@ class TuiAgentNavigationState:
         runtime, first_goal, prior_final_key, typed_final_already_visible = (
             self._register_agent_view(view)
         )
+        if view.payload.get("goal_projection_ok") is not False:
+            self.update_goal_rows(view.payload.get("goals") or [], parent_run_id=view.run_id)
         goal = str(view.row.get("goal") or "").strip()
         if first_goal and goal:
             runtime.enqueue_prompt(f"agent-goal:{view.run_id}", goal, queued=False)
@@ -387,7 +406,7 @@ class TuiAgentNavigationState:
             self._rows_by_parent[view.run_id] = view.children
             for child in view.children:
                 self._rows_by_run[str(child["run_id"])] = child
-            child_ids = {str(child["run_id"]) for child in view.children}
+            child_ids = set(self._selection_ids_locked(view.run_id))
             if self._selected_by_parent.get(view.run_id, "") not in child_ids:
                 self._selected_by_parent.pop(view.run_id, None)
             runtime = self._runtime_for_locked(view.run_id)
@@ -412,7 +431,7 @@ class TuiAgentNavigationState:
     # 函数用途: 返回当前页面方向键可以选择的准确行 ID。
     def _selection_ids_locked(self, parent_run_id: str) -> list[str]:
         parent = str(parent_run_id or "").strip()
-        ids = list(self._goal_rows) if not parent else []
+        ids = list(self._goal_rows) if not parent else list(self._child_goal_rows.get(parent, {}))
         ids.extend(
             str(row["run_id"])
             for row in self._rows_by_parent.get(parent, ())
@@ -528,8 +547,11 @@ def _agent_view_background_activity(view: _AgentViewProjection) -> dict[str, obj
     }
     return {
         "compact_count": max(0, _safe_int(row.get("compact_count"))),
+        "model_metrics": view.raw_agent.get("model_metrics"),
         "main_activity": main_activity,
         "subagents": view.children,
+        "goals": payload.get("goals"),
+        "goal_projection_ok": payload.get("goal_projection_ok") is not False,
         "task_progress": {
             "items": payload.get("task_progress_items"),
             "generation_id": payload.get("task_progress_generation_id"),

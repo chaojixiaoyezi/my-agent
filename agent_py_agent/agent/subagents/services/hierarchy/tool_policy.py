@@ -8,6 +8,7 @@ from typing import Any, ClassVar
 
 from ....tooling.write_boundary import WRITE_TOOL_ORDER
 from ...role_templates import (
+    AGENT_PROGRESS_TOOLS,
     COORDINATOR_TOOLS,
     DIRECT_CHILD_CONTROL_TOOLS,
     active_model_subagent_tools,
@@ -18,6 +19,7 @@ from ...role_templates import (
 # children; scheduled_child_tools still intersects them with the parent's cap.
 # 常量用途: 定义递归编码子代理的缺省工具候选，实际授权仍不得超过父级工具上界。
 _DEFAULT_LEAF_CODING_TOOLS = [
+    *AGENT_PROGRESS_TOOLS,
     "list_files",
     "read_file",
     "search_text",

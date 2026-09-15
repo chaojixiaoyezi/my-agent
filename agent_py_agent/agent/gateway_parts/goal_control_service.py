@@ -39,7 +39,7 @@ def execute_goal_control_operation(request: GoalControlRequest) -> ConversationC
     """Apply one parsed `/goal` operation under the thread's goal transition lock."""
     thread_id = str(getattr(request.thread, "thread_id", "") or "")
     operation = request.command.operation or "view"
-    if operation == "clear" and request.command.name:
+    if operation == "clear" and request.command.name and not request.command.name.startswith("goal-"):
         return _clear_named_goal(request)
     with request.store.goal_transition_guard(thread_id):
         goals = request.store.load_goals(thread_id)
@@ -68,16 +68,23 @@ def execute_goal_control_operation(request: GoalControlRequest) -> ConversationC
         return handler(request, current)
 
 
-# LLM: Named goals share one thread but keep independent task/goal identities.
-# 函数用途: 新建命名持续目标、登记其根任务并发布第一次续跑信号。
+# LLM: One Goal overlays the selected agent task; naming never starts a second executor beside an ordinary active turn.
+# 函数用途: 给当前工作建立持续目标；空闲时建立一个根任务，已有未结束目标则提示修改。
 def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
     scope = request.scope
+    if any(goal.status != "complete" for goal in request.store.load_goals(request.thread.thread_id)):
+        return ConversationControlResult("goal", False, "当前代理已有未结束目标；请修改它或先完成/清除。", error_code="GOAL_STATE_CONFLICT")
+    from .control_service import _active_conversation_task
+
+    active = _active_conversation_task(request.owner_agent, scope, ordinary_only=True)
+    task_id = str(active.payload.get("id") or "") if active is not None else ""
     try:
         goal = request.store.create_goal(
             {
                 "thread_id": request.thread.thread_id,
                 "objective": request.command.value,
                 "name": request.command.name,
+                **({"task_id": task_id} if task_id else {}),
                 "duration_seconds": request.command.duration_seconds,
                 "metadata": {
                     "channel": str(getattr(scope, "channel", "") or ""),
@@ -87,10 +94,7 @@ def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
             }
         )
     except ValueError as exc:
-        message = str(exc)
-        if "unfinished unnamed goal" in message:
-            message = "当前已有未结束的未命名目标；请先完成或使用 /goal clear。"
-        return ConversationControlResult("goal", False, message)
+        return ConversationControlResult("goal", False, str(exc), error_code="GOAL_INVALID_REQUEST")
     request.store.bind_task(
         {
             "thread_id": request.thread.thread_id,
@@ -100,7 +104,7 @@ def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
             "work_kind": "goal",
             "work_name": goal.name,
             "duration_seconds": goal.duration_seconds,
-            "cancellation_scope": "detached" if goal.name else "foreground",
+            "cancellation_scope": "foreground",
         }
     )
     request.owner_agent.local_store.task_registry.register_task(
@@ -125,15 +129,12 @@ def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
 # LLM: Edits objective text without changing goal/task identity or workspace lineage.
 # 函数用途: 修改当前持续目标的内容，并同步任务索引中的显示说明。
 def _edit_goal(request: GoalControlRequest, current: object) -> ConversationControlResult:
-    requested_status = (
-        "active" if current.status in {"complete", "budget_limited"} else current.status
-    )
     updated = request.store.update_goal(
         {
             "thread_id": request.thread.thread_id,
             "goal_id": current.goal_id,
             "objective": request.command.value,
-            "status": requested_status,
+            "status": current.status,
             "expected_status": current.status,
         }
     )
@@ -155,8 +156,6 @@ def _edit_goal(request: GoalControlRequest, current: object) -> ConversationCont
         }
     )
     if updated.status == "active":
-        request.store.update_task_status({"task_id": current.task_id, "status": "active"})
-        request.resume_registry(current.task_id)
         _raise_goal_wake(request.store, updated, request.scope)
     return ConversationControlResult(
         "goal",
@@ -192,20 +191,19 @@ def _pause_goal(request: GoalControlRequest, current: object) -> ConversationCon
     )
 
 
-# LLM: Resume reactivates the same task identity and publishes one deduplicated continuation wake.
-# 函数用途: 恢复原持续目标和原任务，不创建新会话或新工作区。
+# LLM: 精确显式 resume 可修复旧共享任务绑定；一般目标保持原身份，active 也需核对任务和续跑事件。
+# 函数用途: 恢复持久目标；不会因表面 active 就跳过已丢失的任务接续，也不会偷偷挑选多目标。
 def _resume_goal(request: GoalControlRequest, current: object) -> ConversationControlResult:
-    if current.status == "active":
-        return ConversationControlResult(
-            "goal",
-            True,
-            "持续目标正在运行。",
-            request_id=current.task_id,
-        )
-    if current.status not in {"paused", "blocked", "usage_limited"}:
+    if current.status not in {"active", "paused", "blocked", "usage_limited"}:
         return ConversationControlResult(
             "goal", False, f"当前目标状态为 {current.status}，不能恢复。", request_id=current.task_id
         )
+    from ..conversation.goal_recovery import prepare_goal_resume
+
+    try:
+        current = prepare_goal_resume(request.owner_agent, request.store, current)
+    except ValueError as exc:
+        return ConversationControlResult("goal", False, str(exc), request_id=current.task_id)
     updated = _transition_goal(request, current, "active")
     if updated is None:
         return _goal_race_result()
@@ -307,7 +305,8 @@ def _goal_view_result(goals: list[object]) -> ConversationControlResult:
         ):
             name = str(getattr(goal, "name", "") or "").strip() or "未命名"
             status = str(getattr(goal, "status", "") or "")
-            lines.append(f"- {name}｜{_GOAL_STATUS_LABELS.get(status, status)}")
+            lines.append(f"- {name}｜{_GOAL_STATUS_LABELS.get(status, status)}｜{goal.goal_id}")
+        lines.append("精确操作：/goal 名称或目标编号 pause|resume|clear")
         return ConversationControlResult("goal", True, "\n".join(lines))
     goal = visible[0]
     status = str(getattr(goal, "status", "") or "")
@@ -316,7 +315,7 @@ def _goal_view_result(goals: list[object]) -> ConversationControlResult:
     tokens_used = max(0, int(getattr(goal, "tokens_used", 0) or 0))
     token_budget = getattr(goal, "token_budget", None)
     name = str(getattr(goal, "name", "") or "").strip()
-    lines = [f"持续目标：{objective}", f"状态：{_GOAL_STATUS_LABELS.get(status, status)}"]
+    lines = [f"持续目标：{objective}", f"状态：{_GOAL_STATUS_LABELS.get(status, status)}", f"编号：{goal.goal_id}"]
     if name:
         lines.insert(0, f"名称：{name}")
     if time_used:
@@ -341,6 +340,8 @@ _GOAL_STATUS_LABELS = {
 }
 
 
+# LLM: 选择仅来自当前 thread 的精确编号或名称，含糊时返回错误，不按更新时间猜。
+# 函数用途: 从当前目标中选中用户要操作的一条；旧无名冲突也可通过编号处理。
 def _selected_goal(goals: list[object], name: str) -> tuple[object | None, str]:
     unfinished = [
         goal
@@ -351,13 +352,13 @@ def _selected_goal(goals: list[object], name: str) -> tuple[object | None, str]:
         matching = [
             goal
             for goal in unfinished
-            if str(getattr(goal, "name", "") or "").casefold() == name.casefold()
+            if goal.goal_id == name or str(getattr(goal, "name", "") or "").casefold() == name.casefold()
         ]
         if len(matching) > 1:
             return None, "同名 Goal 状态冲突，请先用 /status 核对。"
         return (matching[0], "") if matching else (None, "")
     if len(unfinished) > 1:
-        return None, "当前有多个 Goal，请使用“/goal 名称 clear”指定一个。"
+        return None, "当前有多个 Goal，请用 /goal 名称或目标编号 pause|resume|clear 指定一个。"
     return (unfinished[0], "") if unfinished else (None, "")
 
 

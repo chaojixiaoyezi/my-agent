@@ -28,6 +28,7 @@ from .tui_markdown import (
     sanitize_terminal_text,
     wrap_fragments,
 )
+from .tui_model_metrics import render_model_metrics
 from .tui_view_model import (
     TuiBlock,
     TuiContextUsage,
@@ -205,6 +206,7 @@ class TuiRenderContext:
     status_last_event_at: float = 0.0
     context_tokens: int = 0
     context_usage: TuiContextUsage | None = None
+    model_metrics: tuple[tuple[str, object], ...] = ()
     compact_count: int = 0
     output_tokens: int = 0
     has_active_tools: bool = False
@@ -357,6 +359,7 @@ def tui_render_context_key(
         context.show_all,
         context.context_tokens,
         context.context_usage,
+        context.model_metrics,
         context.compact_count,
         context.output_tokens,
         context.has_active_tools,
@@ -2425,6 +2428,7 @@ def _render_input_status(
                 continuation_prefix=(("class:tui-muted", "    "),),
             )
         )
+    lines.extend(render_model_metrics(dict(context.model_metrics), context.width))
     return tuple(lines)
 
 
@@ -2944,7 +2948,7 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if context.selected_agent_run_id:
         if context.selected_agent_run_id.startswith("goal:"):
-            action = "Enter 收起 Goal" if context.expanded_goal_id else "Enter 查看 Goal"
+            action = "Enter 查看/编辑 Goal"
             text = f"  ↑↓ 选择 · {action} · {history_hint}"
             if context.expanded_goal_id:
                 text = f"  Ctrl+G 收起 Goal · ↑↓ 选择 · {history_hint}"

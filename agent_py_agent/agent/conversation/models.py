@@ -342,6 +342,9 @@ class ConversationThread:
     # LLM: 最近 preflight 的纯数字显示记录，不是计费或校准权威；Compact 与此字段在同一原子提交清代。
     # 字段用途: 让主/子代理空闲和重新打开后仍能展示最后一次调用前的上下文。
     model_context_usage: dict[str, Any] = field(default_factory=dict)
+    # LLM: 只读数值投影不进入模型上下文；累计费用仍从用量账本读取，压缩不得清除此显示副本。
+    # 字段用途: 保留当前代理最近一帧模型统计，重连和子代理切页也能查看。
+    model_metrics: dict[str, Any] = field(default_factory=dict)
     # LLM: LLM summary prose cannot be the authority for whether a compacted
     # assistant turn actually executed a side effect.  This bounded public
     # ledger is advanced atomically with the compact cursor and injected beside
@@ -423,6 +426,7 @@ class ConversationThread:
                 if isinstance(data.get("model_context_usage"), dict)
                 else {}
             ),
+            model_metrics=data.get("model_metrics") if isinstance(data.get("model_metrics"), dict) else {},
             compact_operation_evidence=(
                 data.get("compact_operation_evidence")
                 if isinstance(data.get("compact_operation_evidence"), dict)
@@ -509,6 +513,8 @@ class BackgroundMainAgentReport:
     # 本轮工具调用的结构化统计(§6-B4 无进展退避的判据来源:零成功调用=无进展轮)。
     tool_call_count: int = 0
     tool_success_count: int = 0
+    # 宿主按真实回合结束原因授予续跑资格；仅有 Goal active 或一段回复都不能绕过错误/审批/未知副作用。
+    goal_continuation_allowed: bool = False
     # 只统计 ToolRuntimePolicy 明示为 mutating/dangerous 的成功调用；只读成功不能
     # 伪装成任务推进并持续清空后台退避。
     material_progress_count: int = 0
@@ -776,6 +782,7 @@ class ThreadGoal:
     time_used_seconds: int = 0
     created_at: float = 0.0
     updated_at: float = 0.0
+    revision: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
 
     # LLM: Goal records cross process boundaries as plain JSON with no model-derived status aliases.
@@ -783,10 +790,11 @@ class ThreadGoal:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    # LLM: The model and user receive the 会话运行时 protocol projection; scheduler-only ids stay private.
-    # 函数用途: 返回与 会话运行时 ThreadGoal 一致的公开字段，不泄露 my-agent 内部任务编号。
+    # LLM: 公开目标编号供同会话精确选择；不公开任务路径、迁移快照或 owner 私有 metadata。
+    # 函数用途: 展示目标、状态与用量，多目标时可按稳定编号操作而不是猜名称。
     def public_dict(self) -> dict[str, Any]:
         payload = {
+            "goalId": self.goal_id,
             "threadId": self.thread_id,
             "objective": self.objective,
             "status": self.status,
@@ -794,6 +802,7 @@ class ThreadGoal:
             "timeUsedSeconds": self.time_used_seconds,
             "createdAt": int(self.created_at),
             "updatedAt": int(self.updated_at),
+            "revision": self.revision,
         }
         if self.name:
             payload["name"] = self.name
@@ -829,5 +838,6 @@ class ThreadGoal:
             time_used_seconds=max(0, int(data.get("time_used_seconds") or 0)),
             created_at=float(data.get("created_at") or 0.0),
             updated_at=float(data.get("updated_at") or 0.0),
+            revision=max(1, int(data.get("revision") or 1)),
             metadata=metadata if isinstance(metadata, dict) else {},
         )

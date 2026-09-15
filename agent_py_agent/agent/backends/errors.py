@@ -18,6 +18,17 @@ class ProviderConfigurationError(RuntimeError):
     error_code = "PROVIDER_CONFIGURATION_INVALID"
 
 
+# LLM: 本地配置缺失不是上游拒绝或瞬时故障；不得发请求、重试或切换其它模型。
+# 类用途: 提示用户先配置模型，同时允许无模型状态下使用设置菜单和查看历史。
+class ModelNotConfiguredError(ProviderConfigurationError):
+    error_code = "MODEL_NOT_CONFIGURED"
+
+    # LLM: 文案不包含私有配置或占位模型名；CLI、Gateway 和后台消费者使用同一异常身份。
+    # 函数用途: 给未配置模型的调用返回明确、可操作的错误。
+    def __init__(self) -> None:
+        super().__init__("尚未配置模型，请先通过 /model 新增并选择模型；系统不会自动使用其它模型。")
+
+
 # LLM: ProviderConnectionError 只承载尚未证明可瞬时恢复的 DNS/地址/代理配置失败；typed ECONNREFUSED 已在 transport 边界归 ProviderTransientError。
 # 类用途: 表示需要用户检查模型接口地址、DNS 或代理配置的不可重试连接错误。
 class ProviderConnectionError(ProviderConfigurationError):
@@ -188,6 +199,8 @@ def provider_recoverable_report(exc: BaseException, *, timeout_seconds: object =
 # LLM: CLI 按异常类型区分请求拒绝与配置错误；此入口不知道此前工具是否运行，不能作零执行断言。
 # 函数用途: 输出本次失败的性质和已有诊断，不误导用户修改密钥或重做已完成工作。
 def provider_configuration_report(exc: BaseException) -> str:
+    if isinstance(exc, ModelNotConfiguredError):
+        return f"[model_not_configured]\n{exc}"
     if isinstance(exc, ProviderRequestRejectedError):
         return (
             "[provider_request_rejected]\n"

@@ -309,10 +309,11 @@ def _register_scroll_bindings(
 
 
 # LLM: 全局 bindings 只接管已接通的 会话运行时/终端交互 映射；普通 Emacs 编辑键继续交给 TextArea 默认 key map。
-# 函数用途: 创建对话输入、鼠标模式和 transcript 导航的快捷键集合。
+# 函数用途: 创建聊天快捷键；Goal 编辑期间整体让位给草稿控件，避免 Enter、方向键和 Ctrl+E 操作到背后的聊天。
 def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
+    from prompt_toolkit.application import get_app
     from prompt_toolkit.filters import Condition
-    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.key_binding import ConditionalKeyBindings, KeyBindings
     from prompt_toolkit.keys import Keys
 
     kb = KeyBindings()
@@ -343,7 +344,9 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     )
     _register_transcript_bindings(kb, params, filters)
     _register_scroll_bindings(kb, params, filters, Keys, Condition)
-    return kb
+    return ConditionalKeyBindings(kb, filter=Condition(
+        lambda: not bool(getattr(get_app(), "_my_agent_goal_editor_open", False))
+    ))
 
 
 # LLM: help toggle 只修改 TuiInteractionState 并请求重绘；`?` 不得成为 prompt、slash command 或历史正文。
@@ -377,6 +380,12 @@ def _handle_enter_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
             event.app.invalidate()
             return
     if not str(buffer.text or "").strip():
+        selected_goal = getattr(getattr(params, "agent_navigation", None), "selected_goal", None)
+        if callable(selected_goal) and selected_goal() is not None:
+            from .tui_goal_editor import open_goal_editor
+
+            event.app.create_background_task(open_goal_editor(event.app, params))
+            return
         enter_selected = getattr(
             getattr(params, "agent_navigation", None),
             "enter_selected",

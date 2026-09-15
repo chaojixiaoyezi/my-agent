@@ -1105,6 +1105,8 @@ def _request_is_detached(record: _GatewayRequestRecord) -> bool:
     )
 
 
+# LLM: Resolve one foreground root from canonical task links; an active Goal belongs to that root, not a second detached executor.
+# 函数用途: 按当前用户会话定位可操作的主任务；普通窗口停止也要覆盖 Goal 两轮之间的等待，命名 Audit 保持独立。
 def _active_conversation_task(
     base_agent: object,
     scope: GatewayControlScope,
@@ -1138,7 +1140,7 @@ def _active_conversation_task(
             link
             for link in active
             if str(getattr(link, "work_kind", "") or "").strip().lower()
-            not in {"audit", "goal"}
+            != "audit"
         ]
     if not active:
         return None

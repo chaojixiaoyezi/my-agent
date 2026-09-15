@@ -12,7 +12,10 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
 from agent_py_agent.agent.agent_core.models import AgentRunResult
 from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_scope_root
 from agent_py_agent.agent.backends.base import ModelResponse
-from agent_py_agent.agent.conversation.agent_thread import prepare_subagent_thread_turn
+from agent_py_agent.agent.conversation.agent_thread import (
+    AgentThreadTurnInput,
+    prepare_subagent_thread_turn,
+)
 from agent_py_agent.agent.conversation.agent_transcript import (
     read_agent_transcript_events,
 )
@@ -521,8 +524,7 @@ def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
     followup = prepare_subagent_thread_turn(
         agent,
         task,
-        prompt="继续核对刚才写入的文件",
-        attempt_id="followup-attempt",
+        turn=AgentThreadTurnInput("继续核对刚才写入的文件", "followup-attempt"),
     )
 
     assert followup.compact_generation == 0

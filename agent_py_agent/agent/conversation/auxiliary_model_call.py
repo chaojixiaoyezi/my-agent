@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import logging
 import time
 import uuid
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from ..agent_core.model.call_runtime import (
@@ -28,9 +31,8 @@ from ..contracts.model_call_ledger import (
 from ..memory_archive import estimate_tokens
 from ..tooling.runtime_contracts import ToolChoice
 
-# LLM: This module is the one accounting/admission boundary for real model calls made outside the
-# main tool loop. It must never own Compact state or infer request identity from prompt prose.
-# 模块用途: 让 Compact 等辅助模型请求也进入统一调用账、供应商重试账、并发闸和成本统计。
+# LLM: 辅助模型共享调用账与并发入口；独立 request 的用量在自身收口时持久化，不拥有压缩状态或解析提示词身份。
+# 模块用途: 让压缩等辅助请求进入统一调用账、会话消耗、重试账和成本统计，避免遗漏手动压缩费用。
 
 
 # LLM: The host supplies exact request/run/task identity and a typed purpose; optional tools and
@@ -270,10 +272,41 @@ def _record_auxiliary_cost(
         pass
 
 
+# LLM: 仅结算拥有独立 request_id 的辅助调用；绑定普通工作片的压缩仍由原 finalizer 结算，避免跨 source 重记。
+# 函数用途: 将手动或独立预检压缩的模型消耗幂等写入原会话账并刷新显示，失败不改变压缩结果。
+def settle_standalone_model_usage(request: object) -> None:
+    from ..agent_core.model.call_runtime import model_call_summary
+    from .model_metrics import publish_model_metrics
+
+    try:
+        store, agent = request.store, request.agent
+        append = getattr(store, "append_model_usage_snapshot_once", None)
+        if not callable(append):
+            return
+        summary = model_call_summary(agent, request_id=request.request_id, run_id=request.run_id)
+        count = int(summary.get("physical_model_attempt_count") or 0)
+        if not count:
+            return
+        thread_id = request.thread.thread_id
+        identity = f"{thread_id}\x1f{request.operation_id}\x1f{count}"
+        append({
+            "event_id": "usage-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32],
+            "thread_id": thread_id, "request_id": request.request_id,
+            "run_id": request.run_id, "task_id": request.task_id,
+            "source": "conversation_compact", "model_calls": summary, "now": time.time(),
+        })
+        params = SimpleNamespace(request_id=request.request_id, run_id=request.run_id,
+            live_archive_state={}, task_attributes={"conversation_thread_id": thread_id})
+        # 已结束的独立压缩没有工具执行权；没有原始响应就不伪造最近缓存与速度。
+        publish_model_metrics(agent, params, pending=False, tool_count=0)
+    except Exception:
+        logging.getLogger(__name__).warning("独立模型调用用量保存失败；压缩结果不受影响", exc_info=False)
+
+
 # LLM: Purpose is a bounded diagnostic label, not a routing decision or prompt-derived status.
 # 函数用途: 规范辅助调用用途标签，避免空值或超长内容污染模型账。
 def _purpose(value: object) -> str:
     return str(value or "auxiliary").strip()[:80] or "auxiliary"
 
 
-__all__ = ["AuxiliaryModelCallRequest", "generate_auxiliary_model_response"]
+__all__ = ["AuxiliaryModelCallRequest", "generate_auxiliary_model_response", "settle_standalone_model_usage"]

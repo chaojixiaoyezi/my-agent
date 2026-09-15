@@ -1,5 +1,16 @@
 # Subagent Structure
 
+## 执行器退出与积压恢复
+
+- `runtime_db/executor_liveness.py` 在真实执行边界记录 exact attempt 元数据；本进程注册只在执行期间存在，
+  不以 Gateway PID 或旧心跳代替真实执行器。退出事实不产生模型调用。
+- `services/executor_recovery.py` 复用正式 runner_result/WAL/父级通知；没有结论的退出显示失败，
+  存在未决工具则保留 UNKNOWN 与执行锁，显示阻塞，不能凭全部工具成功反推整个任务成功。
+- `runtime_db/repository.py::pending_events_page` 按未消费事实分页轮转；游标与消费回执分开，
+  原事件不删除，处理失败可在下一圈重试，旧记录不受最近 50/100 条窗口限制。
+- 定向回归：`test_executor_exit_recovery.py`、`test_closeout_recovery_paging.py`；真实 TUI 验收另记，
+  不以无模型回归代替真实模型通过。
+
 ### R291 追加：未知/脏 run 状态不再静默丢弃 runner 结论（僵尸根因之一）
 
 **现场（104 轮真机注入）**：执行中把 run 状态改成未知值后，`status_conflict` 被写下、runner 停止，
@@ -16,7 +27,7 @@ runner session）时，`_dead_running_reclaim_facts` 因 `if not session: return
 open attempt 会一直挂着。它的判据应当建立在"执行器确证退出/失去宿主所有权"的结构化事实上
 （execution lock 的 holder pid+start_token 存活判定、无 in-flight 工具操作、runner session 的
 ended/进程事实），而不是心跳年龄或"没有输出"；健康慢首包/持续慢流/合法工具进行中必须继续存活。
-本分支尚未实现，留待下一轮单独设计 + 真机验收。
+这一缺口的修复入口见本页“执行器退出与积压恢复”；旧版记录仅用于解释问题来源，当前边界以该节为准。
 
 ### R291 追加：收口事实写不进去时不得继续不可恢复的后续动作
 

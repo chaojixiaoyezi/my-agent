@@ -84,11 +84,8 @@ DEFAULT_DECISION_AUTONOMY = (
 )
 
 
-# LLM: Root and delegated runners share persistence and verification, but their
-# scope authority differs: root preserves the user objective, while a child
-# preserves only its direct parent's goal. Keep both as model guidance, never a
-# host-side completion gate.
-# 配置用途: 定义所有代理共用的持续完成主体，再分别拼接 root 与 child 的目标、阶段成果和验证口径。
+# LLM: 持续执行规则必须服从当前结构化执行归属；独立 Goal 不等于普通子代理，不能要求每个运行者重复完成整个用户请求。
+# 配置用途: 共用持续工作和验证纪律，分别明确主代理与子代理负责的范围；这些是模型指导，不是机器完成门。
 _EXECUTION_PERSISTENCE_BODY = (
     "而且现有工具、子代理或可用证据还能继续推进，"
     "就持续工作，不要停在分析、骨架、局部修复或一份诚实的未完成清单上；把工作推进到实现、验证和清楚交付。"
@@ -103,12 +100,16 @@ _EXECUTION_VERIFICATION_SUFFIX = (
     "应该修实现，确实无法解决时保留真实失败并如实报告。"
 )
 DEFAULT_EXECUTION_PERSISTENCE = (
-    "执行纪律：只要当前用户目标仍有你已知的未完成部分，"
+    "执行归属：普通回合负责当前用户请求；运行时存在 current_goal 时，本轮负责该目标的完整要求。"
+    "每个代理最多一个未结束 Goal，历史目标不是本轮的新任务。主子代理目标各自独立，"
+    "不能替未结束的下级宣布完成。"
+    "用户新消息仍需回应，明确改派时再按新的执行归属工作。"
+    "执行纪律：只要本轮负责的目标仍有你已知的未完成部分，"
     + _EXECUTION_PERSISTENCE_BODY
-    + "委派只是分工，不会缩小用户原始目标；"
+    + "本轮自己创建的普通子代理只是分工，仍需接收结果、整合验证和交付；"
     + "骨架、空壳、最小示例或只显示欢迎信息的 demo 只能算阶段成果，"
-    + "不能替代用户要求的完整功能、完整测试和可运行交付。"
-    + "验证纪律：验证必须覆盖用户实际要求"
+    + "不能替代本轮目标要求的完整功能、完整测试和可运行交付。"
+    + "验证纪律：验证必须覆盖本轮目标实际要求"
     + _EXECUTION_VERIFICATION_SUFFIX
 )
 DEFAULT_DELEGATED_EXECUTION_PERSISTENCE = (
@@ -142,7 +143,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "失败后根据真实结果调整，不机械重复。只做用户要求的范围。复杂任务能并行时使用子代理，"
     "但不要为了显得忙而派工；用户限制主代理只能协调时，实际实现必须留给下级，主代理只做协调、"
     "已有产物整合、测试和汇报。 "
-    "任务管理：多步骤任务先用 task_progress 建一份稳定清单，后续沿用原 id 更新状态，不要在每次唤醒时"
+    "持续目标：用户或直接父级明确要求建立 Goal 时，先调用 create_goal 并确认成功；task_progress 只记计划，不会建立 Goal，也不能代替它。普通任务不自动建立 Goal。已有目标需要纠正时用 update_goal 修改，不为换名字另开目标。派工可只给 prompt，也可显式附 persistent_goal。 "
+    "任务管理：主子代理可按复杂度自行选择用 task_progress 建清单或直接执行；使用清单时沿用原 id 更新状态，不要在每次唤醒时"
     "重复创建同义清单。凡把现有清单中的工作交给子代理，create_subagents 对应 item 必须原样复制该项 id "
     "到 covers；只有下级工作不属于任何现有项或对应关系不能确定时才省略，绝不能拿无关 id 顶替。显式 "
     "covers 的 child DONE 后系统会按 id 打勾；未绑定 child 不会关闭原 Todo，父级收到完成事件后应立刻用 "
@@ -232,10 +234,10 @@ class _ToolConfigFields:
     tool_catalog_entry_max_chars: int = 700
     tool_catalog_show_truncated_notice: bool = True
     # 渐进式披露:这些 category 仍注册，但不进初始模型 schema；通过 tool_search 加载。
-    # 递归代理控制属于主链，orchestration 必须首轮直出；显式 allowed_tools 的
+    # 递归代理和持续目标控制属于主链，orchestration/goal 默认首轮直出；显式 allowed_tools 的
     # 结构化后台/runner profile 仍保持全量直出。[] 恢复全量。
     tool_catalog_deferred_categories: list[str] = field(
-        default_factory=lambda: ["collaboration", "goal", "web", "vision", "meta", "mcp"]
+        default_factory=lambda: ["collaboration", "web", "vision", "meta", "mcp"]
     )
     tool_detail_max_chars: int = 4000
     # 推荐区和 tool_search 的检索容量；search 有 score>0 过滤，不相关不会凑数。
@@ -315,7 +317,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     tui_mouse_capture_default: bool = True
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     workspace_root: str | list[str] = ""
-    model_backend: str = "echo"
+    # 未配置时允许打开 Gateway/TUI 和 /model，但不选厂商、不调用模型；echo 仅供显式离线调试。
+    model_backend: str = ""
     memory_path: str = ""
     memory_top_k: int = 5
     auto_save_memory: bool = True
@@ -536,13 +539,13 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     log_level: str = "info"
     extensions_dir: str = "extensions"
     extension_plugins: list[str] = field(default_factory=list)
-    api_base: str = "https://api.openai.com/v1"
+    api_base: str = ""
     api_key: str = ""
     api_key_env: str = "AGENT_API_KEY"
     # 显式兼容头只影响模型请求；认证由 api_key 负责，会话头由宿主逐会话生成。
     model_custom_headers: dict[str, str] = field(default_factory=dict)
     model_session_header: str = ""
-    model_name: str = "gpt-4o-mini"
+    model_name: str = ""
     request_timeout: int = 240
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
     model_context_window_tokens: int = 128_000

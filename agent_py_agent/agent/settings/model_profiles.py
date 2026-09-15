@@ -76,13 +76,18 @@ def _save_profiles(path: Path, data: dict) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-# LLM: model/provider 列表只含白名单字段，密钥和任意自定义头值不公开；默认来自真实部署快照。
-# 函数用途: 提供可选择的模型和可管理的服务商投影，不泄漏私有字段。
+# LLM: 列表只含白名单字段；未配置不制造占位模型或虚假 has_key，用户显式配置仍可选。
+# 函数用途: 提供可选择的真实模型和服务商，空部署配置不出现在模型列表中。
 def public_model_profiles(data: dict, config: object) -> dict:
     default = {key: getattr(config, key, "") for key in (
         "model_backend", "model_name", "model_context_window_tokens",
     )}
-    rows = [{"id": "default", **default, "api_base": "（使用部署配置）", "has_key": True}]
+    configured = bool(default["model_backend"] and default["model_name"] and getattr(config, "api_base", ""))
+    rows = []
+    if configured or default["model_backend"] == "echo":
+        rows.append({"id": "default", **default, "api_base": "（使用显式部署配置）",
+                     "model_name": default["model_name"] or "echo（离线调试）",
+                     "has_key": bool(getattr(config, "api_key", "")), "available": True})
     for profile_id, row in data["profiles"].items():
         provider = data["providers"][row["provider_id"]]
         rows.append({"id": profile_id, **row, "api_base": provider["api_base"],
@@ -145,7 +150,7 @@ def _model_selection_projection(agent: object, data: dict, thread_id: str) -> di
         shared = public_shared_profiles(agent.home_paths)
     except (ModelProfileError, OSError):
         shared = []
-        result["warning"] = "共享模型目录暂不可用；仍可选择自己的私有模型或部署默认。"
+        result["warning"] = "共享模型目录暂不可用；仍可选择自己的私有模型或显式部署配置。"
     result["can_share"] = is_permission_admin(agent.home_paths)
     if result["can_share"]:
         shared_keys = {shared_profile_key(row["id"]) for row in shared}
@@ -161,7 +166,9 @@ def _model_selection_projection(agent: object, data: dict, thread_id: str) -> di
     result["selection_available"] = any(row["id"] == result["selected"] and row.get("available", True)
                                         for row in result["profiles"])
     if not result["selection_available"]:
-        result["warning"] = "本会话选定模型已不可用，请重新选择；系统没有自动切换到其他模型。"
+        result["warning"] = ("尚未配置模型，请先通过 /model 新增并选择模型。"
+                             if result["selected"] == "default"
+                             else "本会话选定模型已不可用，请重新选择；系统没有自动切换到其他模型。")
     return result
 
 

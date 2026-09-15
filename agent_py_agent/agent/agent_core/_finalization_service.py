@@ -53,7 +53,6 @@ class FinalizationService:
     # 函数用途: 收口一轮模型运行、写恢复事实并在任务完成时登记后台记忆提炼。
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
-        _mark_open_goal_progress_unfinished(self._agent, ctx)
         if _conversation_turn_is_terminal(ctx):
             # 会话运行时 的普通 turn 以运行时最终响应事件结束；不解析“做完了”等自然语言，
             # 也不再扫描 output/ 或要求模型额外提交验收。
@@ -100,10 +99,8 @@ class FinalizationService:
             )
         )
         _schedule_typed_unfinished_continuation(self._agent, ctx)
-        from ..conversation.goal_runtime import schedule_goal_activated_in_turn
         from .runtime.goal_accounting import finish_goal_turn_accounting
 
-        schedule_goal_activated_in_turn(self._agent, ctx.task_attributes)
         finish_goal_turn_accounting(self._agent, ctx.task_attributes)
         if conversation_task_completed(ctx.task_attributes):
             _request_memory_curator(self._agent, "task_complete")
@@ -668,17 +665,13 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
     }
 
 
-# LLM: Only an explicit persistent Goal may schedule another model turn after a
-# turn boundary. Ordinary chat stops at the boundary and is resumed solely by a
-# real user/control/lifecycle event; child turns stay on their own runner lane.
-# 函数用途: 只为显式 Goal 安排持久续跑；普通任务和子代理不创建定时模型轮询。
+# LLM: 持久目标与 turn 完成分离；只在安全结构化边界续接 active Goal，工具数和 Todo 不能决定生命周期。
+# 函数用途: 前台正常回复或可恢复技术收口后保持目标运行；后台由 wake 消费回执接续，避免双重调度。
 def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext) -> None:
     """Resume an explicit persistent Goal after a structured turn boundary."""
     source = str(ctx.source or "").strip().lower()
-    # Background lifecycle slices deliberately use ``save=False`` because the
-    # conversation transcript is already the authority.  That presentation/
-    # archive choice must not also disable the active-turn continuation gate.
-    if not ctx.do_save and source != "background_main_agent":
+    # 后台先完成当前 wake 的回执，再由 scheduler 发布下一条；提前发布会被当前 pending wake 吞掉。
+    if source == "background_main_agent" or not ctx.do_save:
         return
     if str(ctx.context_scope or "").strip().lower() == "task_local":
         return
@@ -690,71 +683,29 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
         return
     goal_id = str(attrs.get("thread_goal_id") or "").strip()
     if not goal_id:
-        # 会话运行时 ordinary turns have no host-created polling loop. A tool
-        # limit or soft failure is an honest handoff; a later user message may
-        # continue the same thread/task. Child completion and approval results
-        # already have exact typed wake paths and must not be duplicated here.
-        return
+        # 用户可在运行中通过控制面建目标；这里只查同 task 的记录，普通任务不自动建 Goal。
+        store = getattr(agent, "conversation_store", None)
+        thread_id = str(attrs.get("conversation_thread_id") or "")
+        task_id = str(attrs.get("conversation_task_id") or "")
+        if store is None or not thread_id or not task_id:
+            return
+        goal = store.load_goal(thread_id, task_id=task_id)
+        if goal is None or goal.task_id != task_id or goal.status != "active":
+            return
+        goal_id = goal.goal_id
 
     # Goal mode uses the shared typed continuation gate. Blocked, cancelled,
     # protocol-violating and unknown-effect turns never acquire a future tick.
     from ..conversation.runtime import should_continue_task
 
     should, _reason = should_continue_task(ctx.final_response)
-    if not should:
+    if not should and not _conversation_turn_is_terminal(ctx):
         return
     from ..conversation.runtime import ensure_goal_progress_continuation
-    from .runtime.task_identity import durable_task_id
-
     thread_id = str(attrs.get("conversation_thread_id") or "")
-    # 前台会话任务立即 expedite 续跑:gateway worker 硬编码 source="gateway",
-    # 直跑传 chat/cli_run,HTTP 适配器传 http:<channel>,cli_* 是预留前缀;
-    # 排除法比旧白名单 {gateway,chat,cli_run} 更健壮(任何前台形态都不漏)。
-    # 后台唤醒轮/子代理收口按 policy interval 自然触发,不抢占资源。
-    foreground = (
-        source.startswith("cli_")
-        or source.startswith("http:")
-        or source in {"gateway", "chat", "cli_run"}
-        or not source
-    )
     ensure_goal_progress_continuation(
         agent,
-        task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
+        task_id=str(attrs.get("conversation_task_id") or ""),
         thread_id=thread_id,
-        due_now=foreground,
+        goal_id=goal_id,
     )
-
-
-# LLM: only an explicit persistent goal owns an open-plan lifecycle gate; ordinary task_progress
-# remains advisory and must not alter the current turn or any later turn.
-# 函数用途: 仅在 `/goal` 的计划还没完成时保持任务运行，普通任务不会被旧清单卡住。
-def _mark_open_goal_progress_unfinished(agent: object, ctx: FinalizeContext) -> None:
-    """Keep the explicit persistent ``/goal`` lifecycle open with open plan items.
-
-    Ordinary tasks may keep a progress note for memory and compact recovery,
-    but that note neither gates completion nor schedules future execution.
-    """
-
-    attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
-    if (
-        not ctx.do_save
-        or conversation_task_completed(ctx.task_attributes)
-        or not str(attrs.get("thread_goal_id") or "").strip()
-        or str(getattr(ctx.final_response, "runtime_status", "ok") or "ok").strip().lower() != "ok"
-    ):
-        return
-    from .runtime.task_identity import progress_ledger_id
-
-    # 读侧必须与写侧同一把 key:task_progress_tool 用 progress_ledger_id 记账
-    # (会话任务=task-path:<目录指纹>),收口用 durable_task_id(原始 id)读=读错位
-    # =恒 0=有 open item 也误收口(问题4:任务没做完 link 就转终态)。
-    task_id = str(progress_ledger_id(agent, ctx) or attrs.get("root_task_id") or "").strip()
-    if not task_id:
-        return
-    from ..conversation.runtime import ledger_open_progress_item_count
-
-    if ledger_open_progress_item_count(agent, task_id) <= 0:
-        return
-    ctx.final_response.runtime_status = "unfinished"
-    ctx.final_response.runtime_reason = "TASK_PROGRESS_OPEN"
-    ctx.final_response.runtime_source = "task_progress"

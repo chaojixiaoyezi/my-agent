@@ -811,7 +811,7 @@ def test_goal_rejects_second_unfinished_goal(tmp_path) -> None:
     assert "已有未结束" in second.message
 
 
-def test_named_goals_coexist_list_and_clear_by_exact_name(tmp_path) -> None:
+def test_goal_name_does_not_create_second_executor_and_clear_is_exact(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
@@ -861,13 +861,14 @@ def test_named_goals_coexist_list_and_clear_by_exact_name(tmp_path) -> None:
     )
     goals = agent.conversation_store.load_goals(thread.thread_id)
 
-    assert first.ok is True and second.ok is True
+    assert first.ok is True and second.ok is False
+    assert second.error_code == "GOAL_STATE_CONFLICT"
     assert duplicate.ok is False
-    assert "周报整理" in status.message and "依赖升级" in status.message
+    assert "周报整理" in status.message and "依赖升级" not in status.message
     assert "Goal：" in status.message
-    assert window_stop.ok is False
+    assert window_stop.ok is True
     assert cleared.ok is True
-    assert [(goal.name, goal.status) for goal in goals] == [("依赖升级", "active")]
+    assert goals == []
 
 
 def test_named_audit_survives_window_stop_and_clear_targets_only_that_audit(
@@ -1242,7 +1243,8 @@ def test_audit_help_status_and_exact_case_sensitive_selection(tmp_path) -> None:
     assert "/audit <名称> prepare <内容>" in help_result.message
     assert "/audit <时长> <名称> <任务内容>" in help_result.message
     assert global_status.ok is True
-    assert "状态：运行中" in global_status.message
+    # 持久 Goal 已激活不代表模型调用已经启动；没有真实执行器时整体仍显示空闲。
+    assert "状态：空闲" in global_status.message
     assert "ABC" in global_status.message and "abc" in global_status.message
     assert "准备中" in global_status.message
     assert "Goal：" in global_status.message and "周报整理" in global_status.message
@@ -1911,7 +1913,7 @@ def test_stop_pauses_active_goal_without_deleting_it(tmp_path) -> None:
     assert goal.task_id == created.request_id
 
 
-def test_stop_without_live_turn_does_not_change_goal_or_task_lifecycle(tmp_path) -> None:
+def test_stop_also_pauses_goal_between_model_turns(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
@@ -1933,14 +1935,13 @@ def test_stop_without_live_turn_does_not_change_goal_or_task_lifecycle(tmp_path)
 
     goal = agent.conversation_store.load_goal(thread.thread_id)
     links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
-    assert stopped.ok is False
-    assert "没有运行中的内容" in stopped.message
-    assert goal is not None and goal.status == "active"
-    assert links[created.request_id].status == "active"
+    assert stopped.ok is True
+    assert goal is not None and goal.status == "paused"
+    assert links[created.request_id].status == "interrupted"
 
 
 def test_first_work_tool_resumes_stopped_goal_in_same_workspace(tmp_path) -> None:
-    from agent_py_agent.agent.conversation.goal_runtime import schedule_goal_activated_in_turn
+    from agent_py_agent.agent.conversation.runtime import ensure_goal_progress_continuation
     from agent_py_agent.agent.conversation.task_promotion import (
         promote_current_conversation_task,
     )
@@ -1978,7 +1979,9 @@ def test_first_work_tool_resumes_stopped_goal_in_same_workspace(tmp_path) -> Non
     )
     try:
         selected = promote_current_conversation_task(agent)
-        scheduled = schedule_goal_activated_in_turn(agent, attrs)
+        scheduled = ensure_goal_progress_continuation(
+            agent, thread_id=thread.thread_id, task_id=created.request_id, goal_id=attrs["thread_goal_id"],
+        )
     finally:
         del agent._current_run_params
 
@@ -2057,7 +2060,7 @@ def test_first_work_after_stop_resumes_goal_workspace_without_selection_command(
     assert result is not None and result.task_id == created.request_id
     assert result.task_path == str(task_root)
     assert goal is not None and goal.status == "active"
-    assert attrs["thread_goal_activation_pending"] is True
+    assert attrs["thread_goal_id"] == goal.goal_id
 
 
 def test_btw_on_goal_keeps_goal_continuation_reason(tmp_path) -> None:

@@ -286,7 +286,7 @@ def tool_loop_response_decision(
 
 # LLM: 裁决本体(与入口分开只为让"消费登记 -> 裁决 -> 未交付则续挂前导段落"这条生命周期
 #   只有一个出口); 本函数不碰 live_archive_state 上的探针登记。
-# 函数用途: 按工具调用/协议/终答三类结构事实给出本轮裁决。
+# 函数用途: 按工具调用/协议/终答三类结构事实给出本轮裁决；工具数投影读取同一解析结果，不影响执行。
 def _decided_response(
     request: ToolLoopResponseDecisionRequest,
     probe_rollback: object | None,
@@ -302,6 +302,9 @@ def _decided_response(
         return ToolLoopResponseDecision("break", final, [], request.counters)
 
     adapted = _tool_calls_from_response(request)
+    from ...conversation.model_metrics import publish_model_metrics
+
+    publish_model_metrics(request.agent, request.params, pending=False, tool_count=None if adapted.violations else len(adapted.calls))
     # R232: 未完成响应仍然整轮零执行，但被丢弃的工具名是供应商事实，先给有界恢复一次机会。
     # 没有它，截断的 write_file 只会退化成通用格式纠偏，现场问题回到"反复重生成又截断"的死循环。
     truncated_write = _truncated_tool_recovery_decision(

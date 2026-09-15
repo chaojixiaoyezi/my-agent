@@ -130,8 +130,7 @@ def test_gateway_runtime_snapshot_reports_canonical_endpoint_and_identity(
         "metrics_path": "/metrics",
     }
     assert "model_name" not in snapshot["identity"]
-    assert snapshot["deployment_defaults"]["model_name"] == "MiniMax-M2.7"
-    assert snapshot["deployment_defaults"]["is_current_request_model"] is False
+    assert "deployment_defaults" not in snapshot
     assert snapshot["identity"]["config_path"] == "/tmp/testbox-single-gateway.yaml"
     assert snapshot["log_diagnostics"]["status"] == "quiet"
     assert "api_key" not in json.dumps(snapshot).lower()
@@ -158,7 +157,7 @@ def test_caller_model_does_not_use_gateway_startup_default(tmp_path: Path) -> No
     agent.config.config_sources = {"model_name": {"profile_id": "deepseek-current"}}
     agent.backend = SimpleNamespace(name="anthropic_compatible", model_name="deepseek-v4-flash")
     payload = json.loads(GatewayStatusTool(agent).execute({}).output)
-    assert payload["deployment_defaults"]["model_name"] == "MiniMax-M2.7"
+    assert "deployment_defaults" not in payload
     assert payload["caller_model"] == {
         "model_name": "deepseek-v4-flash", "backend": "anthropic_compatible",
         "source": "calling_agent_execution_config", "profile_id": "deepseek-current",

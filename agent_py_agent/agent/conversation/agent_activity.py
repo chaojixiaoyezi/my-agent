@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,7 @@ from .background_transcript import BackgroundTranscriptSink
 from .channels import project_user_reply, redact_host_absolute_paths
 from .context_usage import context_usage_from_thread
 from .context_usage import public_context_usage as _public_context_usage
+from .model_metrics import model_metrics_from_thread
 from .models import (
     THREAD_TASK_LINK_ACTIVE_STATUS,
     THREAD_TASK_LINK_INACTIVE_STATUSES,
@@ -345,6 +346,7 @@ class ConversationAgentActivity:
     compact_count: int = 0
     main_activity: dict[str, object] | None = None
     context_usage: dict[str, object] | None = None
+    model_metrics: dict[str, object] | None = None
     context_usage_projection_ok: bool = True
     goals: tuple[dict[str, object], ...] = ()
     subagents: tuple[dict[str, object], ...] = ()
@@ -368,6 +370,7 @@ class ConversationAgentActivity:
             "compact_count": max(0, int(self.compact_count or 0)),
             "main_activity": dict(self.main_activity or {}),
             "context_usage": dict(self.context_usage or {}),
+            "model_metrics": dict(self.model_metrics or {}),
             "context_usage_projection_ok": self.context_usage_projection_ok,
             "goals": [dict(row) for row in self.goals],
             "subagents": [dict(row) for row in self.subagents],
@@ -386,6 +389,21 @@ class ConversationAgentActivity:
         }
 
 
+# LLM: 空闲和活动页共用同一会话数值与目标读取，不因 active link 缺失丢失统计。
+# 函数用途: 读取无运行副作用的公共显示部分，避免两个分支分别维护重复字段。
+def _conversation_display_state(store: object, thread_id: str) -> tuple[ConversationAgentActivity, list[str], list[str]]:
+    compact_count, context_usage, compact_warnings = _conversation_context_state(store, thread_id)
+    goals, goal_warnings = _conversation_goal_rows(store, thread_id)
+    return ConversationAgentActivity(
+        compact_count=compact_count,
+        context_usage=context_usage,
+        model_metrics=model_metrics_from_thread(store, thread_id),
+        context_usage_projection_ok=not compact_warnings,
+        goals=tuple(goals),
+        goal_projection_ok=not goal_warnings,
+    ), compact_warnings, goal_warnings
+
+
 # LLM: This is the single read adapter from conversation task identity to direct
 # child run activity. It must not infer roots from prompt text or expose descendants
 # outside the active, already-authenticated thread.
@@ -395,8 +413,7 @@ def conversation_agent_activity(
     store: object,
     thread_id: str,
 ) -> ConversationAgentActivity:
-    compact_count, context_usage, compact_warnings = _conversation_context_state(store, thread_id)
-    goals, goal_warnings = _conversation_goal_rows(store, thread_id)
+    display, compact_warnings, goal_warnings = _conversation_display_state(store, thread_id)
     active_links, link_warnings = _active_task_links(store, thread_id)
     workspace_task_id = _conversation_workspace_task_id(store, thread_id)
     active_task_ids = [
@@ -412,14 +429,10 @@ def conversation_agent_activity(
         str(getattr(link, "task_id", "") or "").strip() for link in display_links
     ]
     if not display_task_ids:
-        return ConversationAgentActivity(
+        return replace(
+            display,
             active_task_count=0,
-            compact_count=compact_count,
-            context_usage=context_usage,
-            context_usage_projection_ok=not compact_warnings,
-            goals=tuple(goals),
             active_task_projection_ok=not link_warnings,
-            goal_projection_ok=not goal_warnings,
             warnings=tuple(
                 dict.fromkeys((*link_warnings, *goal_warnings, *compact_warnings))
             ),
@@ -459,20 +472,16 @@ def conversation_agent_activity(
     if _todo_panel_should_collapse(display_links, rows):
         progress_items = ()
     visible = rows[:_MAX_PROJECTED_SUBAGENTS]
-    return ConversationAgentActivity(
+    return replace(
+        display,
         active_task_count=len(live_task_ids),
-        compact_count=compact_count,
-        context_usage=context_usage,
-        context_usage_projection_ok=not compact_warnings,
         main_activity=main_activity,
-        goals=tuple(goals),
         subagents=tuple(visible),
         task_progress_items=progress_items,
         task_progress_generation_id=progress_generation_id,
         task_progress_plan_revision=progress_plan_revision,
         hidden_subagent_count=max(0, len(rows) - len(visible)),
         active_task_projection_ok=not link_warnings,
-        goal_projection_ok=not goal_warnings,
         subagent_projection_ok=not run_warnings,
         task_progress_projection_ok=not progress_warnings,
         warnings=tuple(
@@ -544,6 +553,7 @@ def _conversation_goal_rows(
         duration_seconds = getattr(goal, "duration_seconds", None)
         row: dict[str, object] = {
             "goal_id": goal_id,
+            "revision": max(1, int(getattr(goal, "revision", 1))),
             "name": _bounded_text(getattr(goal, "name", ""), limit=240),
             "objective": _bounded_text(
                 getattr(goal, "objective", ""),
@@ -722,6 +732,7 @@ def conversation_agent_view(
         after=after,
     )
     thread_id = str(getattr(task, "agent_thread_id", "") or "").strip()
+    goals, goal_warnings = _conversation_goal_rows(store, thread_id)
     (
         final_response,
         final_response_request_id,
@@ -748,9 +759,12 @@ def conversation_agent_view(
                 lifecycle_phase=str(row.get("lifecycle_phase") or ""),
             ),
             "context_usage": context_state[1],
+            "model_metrics": model_metrics_from_thread(store, thread_id),
         },
         "terminal": terminal,
         "children": rows[:_MAX_PROJECTED_SUBAGENTS],
+        "goals": goals,
+        "goal_projection_ok": not goal_warnings,
         "hidden_child_count": max(0, len(rows) - _MAX_PROJECTED_SUBAGENTS),
         "task_progress_items": list(progress_items),
         "task_progress_generation_id": progress_generation_id,
@@ -774,6 +788,7 @@ def conversation_agent_view(
                     *warnings,
                     *progress_warnings,
                     *history_warnings,
+                    *goal_warnings,
                     *transcript_warnings,
                 )
             )

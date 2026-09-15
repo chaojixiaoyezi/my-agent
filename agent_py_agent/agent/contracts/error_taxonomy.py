@@ -1146,6 +1146,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.SWITCH_BACKEND.value,
         recovery_hint="当前模型供应商额度已耗尽；不要用同一凭据原地重试，切换已配置的可用后端。",
     ),
+    "MODEL_NOT_CONFIGURED": ErrorContract(
+        code="MODEL_NOT_CONFIGURED",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="尚未配置模型；通过 /model 新增并选择，不发送探针、不自动切换其它模型。",
+    ),
     "PROVIDER_CONFIGURATION_INVALID": ErrorContract(
         code="PROVIDER_CONFIGURATION_INVALID",
         category="model",

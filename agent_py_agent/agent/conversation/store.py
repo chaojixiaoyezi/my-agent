@@ -676,6 +676,7 @@ class ConversationBaseStore:
     # pass initialize=False for a path that has not already been resolved inside an authenticated
     # owner home.
     # 新会话模型引用通过宿主 callback 一次性取得；store 不读取私有配置或复制密钥。
+    # 同一 owner store 的多个前后台对象共享进程内时钟，不能分别累计同一段 Goal 时间。
     # 函数用途: 初始化会话路径与新会话默认解析器；被动重放可只读打开现有目录。
     def __init__(self, root: str | Path, *, initialize: bool = True, model_default: Callable[[], str] | None = None):
         self.root = Path(root)
@@ -701,11 +702,12 @@ class ConversationBaseStore:
         self.user_latest_path = self.root / "user_latest_threads.json"
         self.background_claims_dir = self.root / "background_claims"
         self.wake_dedupe_dir = self.wake_queue_dir / "dedupe"
-        # 会话运行时 keeps goal wall-clock accounting in the live thread runtime, not
-        # in the persisted goal timestamp. A process restart therefore starts a
-        # fresh baseline instead of charging service downtime to the user.
-        self._goal_clock_lock = threading.Lock()
-        self._goal_clock: dict[str, tuple[str, float]] = {}
+        from .goal_clock import shared_goal_clocks
+
+        # 单 Gateway 下同源 Store 共用单调时钟；服务重启从新基线开始，不计停机时间。
+        self._goal_clock_group = shared_goal_clocks(self.root)
+        self._goal_clock_lock = self._goal_clock_group.lock
+        self._goal_clock = self._goal_clock_group.clocks
         if initialize:
             self._ensure_dirs()
 
@@ -2042,6 +2044,18 @@ def _updated_task_link(
 # LLM: 模型计费事件与 preflight 显示分别保存，各自有唯一口径；共享 store 原子写入，不新增旁路文件。
 # 类用途: 保存模型调用的消耗账及最近上下文显示，后者不能作为费用或任务完成证据。
 class ConversationModelUsageStore(ConversationMessageStore):
+    # LLM: 统计仅保存数字投影，不改活跃时间或历史；延迟到达的旧帧不得覆盖新采样。
+    # 函数用途: 原子保存本代理最近模型统计，供重新打开会话读取，不作计费依据。
+    def update_model_metrics(self, thread_id: str, metrics: dict[str, Any]) -> ConversationThread:
+        from .model_metrics import newer_model_metrics
+
+        # LLM: 持有会话锁期间合并显示副本；不访问模型和用量文件。
+        # 函数用途: 保留最新的合法统计数，不产生新的运行活动。
+        def apply(thread: ConversationThread) -> ConversationThread:
+            return replace(thread, model_metrics=newer_model_metrics(thread.model_metrics, metrics))
+
+        return self._update_thread_atomic(thread_id, apply)
+
     # LLM: 显示快照只接受纯数字协议；generation CAS 防止压缩后写回旧数，不更新会话活跃时间或聊天历史。
     # 函数用途: 原子保存当前主/子代理最近一次调用前的上下文，失败或旧代不能覆盖当前值。
     def update_model_context_usage(
@@ -5143,6 +5157,8 @@ def _goals_from_mutation_payload(payload: dict[str, Any]) -> list[ThreadGoal]:
     return [ThreadGoal.from_dict(row) for row in rows if isinstance(row, dict)]
 
 
+# LLM: 精确选择器遇到多条未结束记录必须暴露冲突；历史完成记录不遮挡后来创建的唯一活跃目标。
+# 函数用途: 在持久目标集合里选取当前记录，不能把歧义当作目标不存在或暗中覆盖旧目标。
 def _select_thread_goal(
     goals: list[ThreadGoal],
     *,
@@ -5158,8 +5174,10 @@ def _select_thread_goal(
     if name:
         folded = name.casefold()
         selected = [goal for goal in selected if goal.name.casefold() == folded]
-    if goal_id or task_id or name:
-        return selected[0] if len(selected) == 1 else None
+    if goal_id:
+        if len(selected) > 1:
+            raise ValueError("duplicate goal id; goal state requires repair")
+        return selected[0] if selected else None
     unfinished = [goal for goal in selected if goal.status in _UNFINISHED_GOAL_STATUSES]
     if len(unfinished) > 1:
         raise ValueError("multiple unfinished goals exist; select one by name or id")
@@ -5313,9 +5331,8 @@ class ConversationGoalStore(ConversationGoalClockStore):
             report["thread_id"] = thread_id
             return None, report
 
-    # LLM: Named goals may coexist; unnamed model-created goals retain the old
-    # single-active constraint so a model cannot silently fan out durable work.
-    # 函数用途: 原子创建一个命名持续目标；同名活跃目标和含糊的无名并发都会拒绝。
+    # LLM: Each canonical agent thread permits one unfinished Goal, regardless of name/task. Completed history is retained.
+    # 函数用途: 原子创建当前代理目标；名字不同不再产生隐式并行执行器，暂停目标也不能被覆盖。
     def create_goal(self, request: dict[str, Any]) -> ThreadGoal:
         thread_id = str(request.get("thread_id") or "").strip()
         objective = str(request.get("objective") or "").strip()
@@ -5349,20 +5366,11 @@ class ConversationGoalStore(ConversationGoalClockStore):
                     str(error.get("message") or "conversation goal read failed")
                 )
             unfinished = [goal for goal in existing if goal.status in _UNFINISHED_GOAL_STATUSES]
-            # 同一 task 只允许一个未完成目标：名字不同不能成为绕过口（真实事故：同 task 上出现
-            # 两条 active，get_goal/update_goal 从此恒 GOAL_STATE_CONFLICT，活跃目标门也失效）。
-            # 收口只由显式 update_goal 完成，这里既不按 updated_at 猜、也不隐式 supersede 旧目标。
-            task_id = str(request.get("task_id") or "").strip()
-            if task_id and any(goal.task_id == task_id for goal in unfinished):
+            if unfinished:
                 raise ValueError(
-                    "an unfinished goal already exists for this exact task; "
+                    "an unfinished goal already exists for this agent thread; "
                     "close or update it explicitly instead of creating another"
                 )
-            if name:
-                if any(goal.name.casefold() == name.casefold() for goal in unfinished):
-                    raise ValueError(f"an unfinished goal named {name!r} already exists")
-            elif unfinished:
-                raise ValueError("an unfinished unnamed goal already exists for this thread")
             goal_id = new_id("goal")
             created = ThreadGoal(
                 goal_id=goal_id,
@@ -5388,12 +5396,13 @@ class ConversationGoalStore(ConversationGoalClockStore):
         self.begin_goal_accounting(goal, reset=True)
         return goal
 
-    # LLM: Compare expected goal/status before changing the objective or system-owned lifecycle.
-    # 函数用途: 以 CAS 语义修改目标内容或状态，竞态失败返回空。
+    # LLM: Compare exact Goal/status/content revision before mutation; usage accounting never increments this revision.
+    # 函数用途: 原子保存目标并拒绝过期草稿；保留用量和历史，不把模型计费刷新误判为编辑冲突。
     def update_goal(self, request: dict[str, Any]) -> ThreadGoal | None:
         thread_id = str(request.get("thread_id") or "").strip()
         requested_status = str(request.get("status") or "").strip().lower()
         expected_status = str(request.get("expected_status") or "").strip().lower()
+        expected_revision = request.get("expected_revision")
         expected_goal_id = str(
             request.get("goal_id") or request.get("expected_goal_id") or ""
         ).strip()
@@ -5429,6 +5438,8 @@ class ConversationGoalStore(ConversationGoalClockStore):
                 return data
             if expected_status and current.status != expected_status:
                 return data
+            if expected_revision is not None and current.revision != int(expected_revision):
+                return data
             changed = True
             previous_status = current.status
             status = requested_status or current.status
@@ -5458,6 +5469,7 @@ class ConversationGoalStore(ConversationGoalClockStore):
                 token_budget=next_budget,
                 time_used_seconds=next_time_used,
                 updated_at=current_time,
+                revision=current.revision + 1,
             )
             return _goal_collection_payload(
                 [updated_goal if goal.goal_id == current.goal_id else goal for goal in goals]
@@ -5474,6 +5486,40 @@ class ConversationGoalStore(ConversationGoalClockStore):
         else:
             self.clear_goal_accounting(updated.thread_id, goal_id=updated.goal_id)
         return updated
+
+    # LLM: 调用方持有目标迁移锁；内部使用 goal/task 双重 CAS，不重复领取同一文件锁；先准备禁用任务链接。
+    # 函数用途: 修复旧数据里多个目标共用任务的冲突，保留目标身份、历史用量与原始记录，不自行唤醒。
+    def rebind_goal_task(self, thread_id: str, *, goal_id: str, expected_task_id: str, task_id: str) -> ThreadGoal | None:
+        self._require_thread(thread_id)
+        link = self.load_task_link(task_id)
+        if link is None or link.thread_id != thread_id or link.status != "interrupted":
+            raise ValueError("goal migration requires a prepared inactive task in this thread")
+        migrated = None
+
+        # LLM: 整个源目标快照与新绑定同一次原子落盘，失败不发布半条迁移记录。
+        # 函数用途: 比较旧绑定后只替换所选目标，兄弟目标原样保留。
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            nonlocal migrated
+            goals, error = _goals_from_update_data(data, path=self._goal_path(thread_id))
+            if error is not None:
+                raise DataCorruptionError(str(error.get("message") or "goal migration read failed"))
+            current = _select_thread_goal(goals, goal_id=goal_id)
+            if current is None or current.task_id != expected_task_id:
+                return data
+            if any(item.goal_id != goal_id and item.task_id == task_id for item in goals):
+                raise ValueError("goal migration destination already belongs to another goal")
+            migrated = replace(
+                current, task_id=task_id,
+                metadata={**current.metadata, "task_binding_migration": {
+                    "schema_version": "goal-task-binding.v1", "source_goal": current.to_dict(),
+                    "reason": "explicit_resume_shared_task", "task_id": task_id,
+                    "migrated_at": now(None),
+                }},
+            )
+            return _goal_collection_payload([migrated if item.goal_id == goal_id else item for item in goals])
+
+        update_json_file_atomic(self._goal_path(thread_id), updater, require_existing=True)
+        return migrated
 
     # LLM: Clear removes one exact goal from the per-thread collection; sibling
     # goals, task evidence, and transcript remain intact.
@@ -6565,6 +6611,7 @@ class ConversationStore(ConversationClaimStore):
         goals, goal_error = self.load_goals_report(thread_id)
         thread_payload = thread.to_dict()
         thread_payload.pop("model_context_usage", None)
+        thread_payload.pop("model_metrics", None)
         return {
             "thread": thread_payload,
             "messages": [item.to_dict() for item in messages],

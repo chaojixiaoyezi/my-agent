@@ -578,6 +578,18 @@ class BufferedChunkStreamWriter:
         )
         return True
 
+    # LLM: 统计事件只输出白名单数字，进入已有有序 chunk 流，不额外扫描账本或写模型消息。
+    # 函数用途: 将模型开始、结算、工具解析后的统计快照传给前台 TUI。
+    def write_model_metrics(self, metrics: dict[str, object]) -> bool:
+        from ..conversation.model_metrics import public_model_metrics
+
+        public = public_model_metrics(metrics)
+        if not self.rich_transcript or not public:
+            return False
+        self.flush()
+        self._write_event({"kind": "model_metrics_updated", "model_metrics": public})
+        return True
+
     # LLM: Context usage is a rich-client-only numeric projection. The writer must whitelist
     # fields and must never serialize prompt, message, guidance, or tool-schema content.
     # 函数用途: 把每次模型调用前的上下文总量和分类估算实时写入 TUI 事件流。
@@ -2843,10 +2855,8 @@ def _compact_operation_evidence_ref(agent: object, thread_id: str) -> str:
     return str(path) if path.is_file() else ""
 
 
-# LLM: An ordinary foreground turn may project one unambiguous goal as background
-# context. Multiple named goals stay out of the ordinary prompt; their exact
-# continuation turns carry ``thread_goal_id`` and `/status` lists them all.
-# 函数用途: 普通聊天只在目标唯一时注入摘要；多个命名目标不猜“当前目标”，也不误报会话损坏。
+# LLM: 当前目标由任务执行范围决定，不以名字或后台剩余数量选取；独立 Goal 仍由精确身份续跑。
+# 函数用途: 给前台注入唯一属于前台的未结束目标，避免后台只剩一项时误占前台或导致加载失败。
 def _gateway_thread_goal(
     store: object, thread_id: str, load_errors: list[dict]
 ) -> dict[str, object] | None:
@@ -2859,6 +2869,14 @@ def _gateway_thread_goal(
         load_errors.append(error)
         return None
     unfinished = [goal for goal in goals if str(getattr(goal, "status", "") or "") != "complete"]
+    try:
+        unfinished = [
+            goal for goal in unfinished
+            if str(getattr(store.load_task_link(goal.task_id), "cancellation_scope", "") or "") != "detached"
+        ]
+    except Exception as exc:
+        load_errors.append(_conversation_error(exc, "gateway.conversation.goal_task"))
+        return None
     if len(unfinished) != 1:
         return None
     goal = unfinished[0]

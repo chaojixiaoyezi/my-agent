@@ -31,12 +31,14 @@ agent_py_agent/
 |   |-- chat_parts/                     # TUI、gateway client、stream/render worker
 |   |   |-- chat_prompt_queue.py        # 可按 request identity 原子回取且保持 FIFO/task_done 账的聊天任务队列
 |   |   |-- tui_agent_navigation.py     # TUI 精确子代理选择栈、详情游标与父子视图切换状态
+|   |   |-- tui_goal_editor.py          # 主子代理共用 Goal 草稿编辑、明确保存、版本冲突与放弃退出
 |   |   |-- tui.py                      # chat TUI 生命周期、唯一 runtime/worker/preflight 接线与返回码
 |   |   |-- tui_block_renderer.py       # typed snapshot 到欢迎/消息/思考/工具/权限/队列/footer formatted lines
 |   |   |-- tui_complete_detail.py      # 完整原文有界分页、长行分片与稀疏页索引
 |   |   |-- tui_display_archive.py      # 异步读取原文归档页，缓存限额与失败重试
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
 |   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
+|   |   |-- tui_model_metrics.py        # Context 下方模型轮、工具数、最近缓存、会话累计与输出速度的一行统计
 |   |   |-- tui_shared_model_menu.py    # 管理员逐模型显式共享/撤销，普通用户只选已开放模型
 |   |   |-- tui_permissions_menu.py     # /permissions 与 F4 三档权限菜单、保存/取消及管理员确认
 |   |   |-- tui_provider_menu.py        # 服务商、多模型编辑、启停、目录发现和明确短连接测试
@@ -104,6 +106,7 @@ agent_py_agent/
 |   |   |   |-- runner_context_service.py # 执行上下文和边界文件
 |   |   |   |-- runner_result_service.py # runner result 写回和副作用
 |   |   |   |-- runtime_closeout.py    # runner 终态收口的可恢复 WAL + 一致终态重入 + 恢复扫描
+|   |   |   |-- executor_recovery.py   # 执行器确证退出后的失败/未知副作用投影与父级通知
 |   |   |   |-- board/                  # board、due-check、action-plan
 |   |   |   |-- actions/                # action-plan 应用、取消/接管动作
 |   |   |   |-- hierarchy/              # 多层调度和恢复包
@@ -141,6 +144,7 @@ agent_py_agent/
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源；ledger_redaction.py 精确擦除已删事实但保留幂等身份
 |   |-- runtime_db/                     # SQLite 运行事实源：Task 身份、TaskRun/AgentRun/Attempt 生命周期、wake 与投递账本
+|   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- display_archive_service.py # 按可信 owner 与主子会话归属读取一页完整原文
 |   |   |-- approval_mode_service.py   # /client/permissions 认证与冷 owner 控制入口
@@ -158,6 +162,7 @@ agent_py_agent/
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- compact_progress.py       # transcript/live-tool/turn-local Compact 来源与提交权的唯一公开进度协议
 |   |   |-- context_usage.py          # 主/子 preflight 数字的 canonical thread 保存、代次检查与无正文展示
+|   |   |-- model_metrics.py          # 主/子模型调用账与历史用量的只读显示投影，不回灌模型上下文
 |   |   |-- agent_activity.py          # active task link + canonical child run 到 TUI/Web 共用有界活动投影
 |   |   |-- agent_transcript.py        # 子代理跨进程公开过程事件的 owner 存储、游标和有界裁剪
 |   |   |-- agent_control.py           # owner 树内代理详情、运行中 guidance 与精确停止的通道中立控制面
@@ -166,7 +171,7 @@ agent_py_agent/
 |   |   |-- background_history.py     # 后台完整展示块快照，随 canonical final 保存并用于恢复重基
 |   |   |-- display_checkpoint.py     # canonical逐块公开过程校验/写入、恢复未知占位与显示去重
 |   |   |-- display_archive.py        # 不可变显示原文、无路径引用与有界页文件，不进入模型上下文
-|   |   |-- auxiliary_model_call.py   # Compact 等会话辅助模型调用的统一记账、退避、并发闸和成本统计
+|   |   |-- auxiliary_model_call.py   # 会话辅助模型调用的统一账、退避、并发闸；独立压缩用量持久结算
 |   |   |-- tool_context_window.py    # text/native 共用的有界工具历史窗口与稳定前缀投影
 |   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
 |   |   |-- agent_thread.py            # child/grandchild 独立 thread、逐 attempt transcript 与统一 Compact 适配
@@ -187,7 +192,13 @@ agent_py_agent/
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
 |   |   |-- runtime.py                  # 后台主代理调度热循环：wake_queue 到期消费、三源对账(5min)、事件提前醒取消闹钟
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
-|   |   |-- goal_tools.py              # 持续目标轮精确 scoped 的 get_goal/update_goal
+|   |   |-- goal_tools.py              # 默认可见的持续目标创建、读取与精确收口
+|   |   |-- goal_binding.py            # 当前代理及直属下级的精确目标身份解析，拒绝借用父目标
+|   |   |-- goal_delegation.py         # 显式子目标初始化、正常轮续接及授权停止/恢复的状态同步
+|   |   |-- goal_editing.py            # 目标草稿版本比较保存，保持身份、状态、用量并投递引导
+|   |   |-- goal_control.py            # 复用用户会话树授权的主子目标完整读取和编辑 API
+|   |   |-- goal_recovery.py           # 用户显式恢复时修复旧目标共享任务冲突，保留源记录与任务现场
+|   |   |-- goal_clock.py              # 同一会话存储的前后台共享单调时钟，避免重复累计目标耗时
 |   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源
 |   |   `-- task_promotion.py          # 任务工具触发提升、完成/中断候选选择与关闭
 |   |-- scheduler/                     # owner 持久 at/every/cron、CAS job/run 账本、claim/heartbeat 与同 thread 唤醒
@@ -278,6 +289,7 @@ agent_py_agent/
 |   |-- test_shell_stdin.py             # 普通/受控/attempt 命令不抢读宿主 stdin，显式管道仍可传入
 |   |-- test_tui_ansi_snapshot.py       # ANSI offset 重放、样式/背景、Unicode、resize 和坏账 fail-closed 回归
 |   |-- test_tui_agent_navigation.py    # 子代理选中/进入/返回、详情过程、只读终态与 footer 回归
+|   |-- test_agent_goals.py            # 单代理单 Goal、主子隔离、版本冲突、停止和同执行轮持续工作回归
 |   |-- test_tui_events.py              # TUI event 信封、sequencer、cursor、重复/冲突/乱序与有界重放
 |   |-- test_tui_markdown.py            # CommonMark 标题/列表/引用/代码/表格、样式角色与 Unicode 宽度换行
 |   |-- test_tui_runtime.py             # 本地/Gateway 流式、工具、queue、终态和全局事件顺序 adapter 回归
@@ -353,6 +365,13 @@ docs/
 
 ### 关键文件说明
 
+- `docs/design/THREAD_GOAL_LIFECYCLE.md`：Goal 可见性、单一事件续跑、状态边界与旧冲突显式恢复的开发合同。
+- `agent_py_agent/agent/conversation/goal_recovery.py`：精确恢复旧共享任务 Goal，不迁移运行中的执行，不清除源记录。
+- `agent_py_agent/agent/conversation/goal_clock.py`：前台、后台及控制视图共用同 owner 会话存储的目标时钟。
+- `agent_py_agent/agent/conversation/goal_binding.py`、`goal_delegation.py`：按代理自身 thread/run 归属目标和用量；显式子目标沿同一运行器续接，不另建执行通道。
+- `agent_py_agent/agent/conversation/goal_control.py`、`goal_editing.py`：用户修改自己会话树的目标；内容版本防止并发覆盖，不把保存当作恢复。
+- `agent_py_agent/cli/chat_parts/tui_goal_editor.py`：方向键选择 Goal、Enter 编辑、Ctrl+S 保存、Ctrl+G 放弃退出，Esc 保留停止。
+
 - `cli/chat_parts/tui_complete_detail.py`、`tui_display_archive.py`：Ctrl+E 完整浏览的有界分页和异步读取，长行不因终端宽度丢字。
 - `agent/conversation/display_archive.py`、`agent/gateway_parts/display_archive_service.py`：完整原文以 owner 私有不可变页保存，前端只有引用；跨 owner、无关会话或任意磁盘路径均拒绝。
 - `agent/agent_core/tool_loop/display_archive.py`：在工具显示投影裁剪之前存真实执行快照；不读取当前文件重建历史，也不改变 LLM 工具输入。
@@ -399,6 +418,7 @@ docs/
 - `agent/conversation/message_stream.py`：正文及显式协商检查点的唯一公开增量投影，复用 ConversationStore，不另存 notices 正文。
 - `agent/conversation/display_checkpoint.py`：公开完整块的typed检查点，保存到同thread会话账本并排除模型/Compact/Memory。
 - `agent/conversation/context_usage.py`：各代理最近上下文的统一数字投影；与 Working、模型输入、计费和校准分离。
+- `agent/conversation/model_metrics.py`、`cli/chat_parts/tui_model_metrics.py`：按当前代理会话显示累计消耗，按工作片显示模型轮和当轮工具；缺报、重试、重放、压缩与线程隔离按统一数值协议处理。
 - `agent/conversation/background_history.py`：按稳定块 ID 保存后台完整终态展示，逐 token 增量不重复存储；
   canonical final 提交前不授权 TUI 丢弃旧事件，不进入 provider history 或 Compact 输入。
 

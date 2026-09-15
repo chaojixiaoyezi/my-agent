@@ -99,12 +99,13 @@ def _request_data_sync(agent, session_id: str, operation: str, payload: dict) ->
         return {"ok": False, "message": "模型配置操作失败，请检查本机配置目录是否可写。"}
 
 
-# LLM: 只认配置操作成功回执里的 selected ID；失败、取消和未选择的新增记录不得改变当前模型显示。
+# LLM: 只认成功回执里的 selected ID；未配置明确显示空状态，不用部署占位值，保存未选择不自动切换。
 # 函数用途: 从脱敏模型列表更新 TUI，整个配置和密钥都不进入显示事件。
 def _publish_selection(runtime, result: dict) -> None:
     if result.get("ok") is True:
         if result.get("selection_available") is False:
-            runtime.publish_model_selection("当前模型不可用（/model 重新选择）")
+            runtime.publish_model_selection("未配置模型（/model 配置）" if result.get("selected") == "default"
+                                            else "当前模型不可用（/model 重新选择）")
             runtime.set_notice(str(result.get("warning") or "当前模型不可用，请重新选择。"), duration_seconds=8)
             return
         row = next((row for row in result["profiles"] if row["id"] == result["selected"]), None)

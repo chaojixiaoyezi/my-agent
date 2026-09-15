@@ -798,7 +798,7 @@ _BOOL_ATTRIBUTE_FIELDS = ("defer_start", "long_running")
 # service_window_seconds(A4 持续型委派语义):持续型任务的最短值守窗口(秒)。子代理收口
 #   层据此抑制"落一次产物即 DONE"的提前收工;父代理 wake 消费据此判断"窗口未走完就退了"。
 _POSITIVE_INT_ATTRIBUTE_FIELDS = ("service_window_seconds",)
-_SCALAR_ATTRIBUTE_FIELDS: tuple[str, ...] = ()
+_SCALAR_ATTRIBUTE_FIELDS: tuple[str, ...] = ("persistent_goal",)
 
 
 def _root_agent_name(raw_params: dict[str, object], role: str) -> str:

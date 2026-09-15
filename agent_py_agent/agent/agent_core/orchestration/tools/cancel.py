@@ -629,7 +629,7 @@ def cancel_subagent_tree(
 # attempt/terminal state. Branch-aware user/model close calls must use cancel_subagent_tree;
 # root-request stop may call this primitive for its already-resolved full lineage while holding
 # the non-reentrant creation guard.
-# 函数用途: 精确打断一个子代理执行体，再原子收口该节点的执行轮、终态、心跳和会话链接；本函数不自行遍历后代。
+# 函数用途: 精确打断子代理执行体、暂停自身 Goal，再收口执行轮和会话链接；不自行遍历后代。
 def cancel_subagent_task(
     agent: SimpleAgent,
     request: CancelSubagentTaskRequest,
@@ -671,6 +671,9 @@ def cancel_subagent_task(
         findings_recorded,
     )
     task.attributes = _cancelled_attributes(task, context)
+    from ....conversation.goal_delegation import transition_delegated_goal
+
+    transition_delegated_goal(agent.subagents, task, expected_status="active", status="paused")
     return _persist_cancelled_task(agent, task, context)
 
 

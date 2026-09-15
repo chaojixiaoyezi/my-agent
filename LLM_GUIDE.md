@@ -38,6 +38,7 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
   用户明确指定的其它协议/模型单独验证；私有凭据不进仓库、不输出，不静默切用户日常模型。
 - 产品名与发布库是 my-agent；品牌清理不搬迁检出、owner home、真实 tmux 或任务数据。
 - `/model` 管理 owner 私有 provider/model v2；获取目录、短测必须显式操作。保存/编辑不调用模型。
+  软件不预填模型/协议/端点；未配置仍可打开设置，真实调用明确提示 `/model`，不自动回退。
   新工作片冻结模型/端点/密钥/容量/请求头整组配置，子孙继承创建时引用，显式 model 只解析本 owner 配置。
   Auth 仍预留；Embedding 只管理目录用途，不能选作主子模型。详见 `docs/design/TUI_MODEL_PROFILES.md`。
 - `/permissions` / F4 使用 owner tool_policy.json 的 ask、auto、full-access；Full Access 仅可信管理员。
@@ -55,6 +56,8 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 - Context 是本线程模型 preflight 压力，不是累计计费。压缩开始的实际窗口由压缩模块提供，
   先保存同代数值再通知 TUI；成功提交清旧数字。显示遥测、计数和进度不得进入模型输入/缓存前缀。
   ModelCallLedger 是成本唯一权威；缓存命中以 provider usage 为准，不能用估算或比例推测账单。
+  TUI 统计条的本次模型轮、当轮工具、最近缓存与当前代理会话累计各有独立口径，见 `docs/design/TUI_DESIGN.md`。
+  `ConversationThread.model_metrics` 仅为有界显示副本；完整/精简模型上下文均排除它，不能据此调度、判断完成或收费。
 - 大窗口切小窗口用有预算的连续分段摘要；覆盖所有来源后才提交，typed overflow 可缩小请求，
   网络/认证错误不伪装成超窗。observed_tool_paths 仅是有界查找提示，不是权限或文件存在证据。
   能容纳的单次请求保留原缓存面；分段采用无执行工具的摘要角色。原文锚点在固定预算内优先保留用户原话，
@@ -79,6 +82,10 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 - Todo 是软计划，不是完成验收；普通 final 不因未勾完而被挡或暗中续跑。只有显式 /goal 和既有
   child 等待、审批、UNKNOWN 保留各自生命周期。UI 清单读 display_plan 的 exact generation/revision；
   历史页只恢复正文，不能用旧 Todo 覆盖当前计划。
+- 每个代理最多一个未结束 Goal；主子各自归属，普通派工可不附目标，Todo 可选。方向键选 Goal、Enter 编辑，
+  Ctrl+S 保存、Ctrl+G 放弃、Esc 停止当前代理。内容版本冲突不覆盖草稿，保存不隐式恢复暂停目标。
+  Goal 编号不是当前运行状态；只有精确归属且仍为 active 才可承诺续跑。历史多目标不自动合并或激活，
+  并行分工仍有独立开放问题，不能以单 Goal 和编辑器验收代替整项关闭。
 - 模型不再请求工具就结束本轮；turn_end.reason 不证明项目完成。失败原因、未验证范围需模型如实说明，
   编译/旧版本成功不能代替新版启动和业务验证；不能拿无响应、空日志猜成沙箱限制。
 - 用户可见 commentary、thinking、tool、final 以 typed block/message/request ID 同步主子页面与 canonical

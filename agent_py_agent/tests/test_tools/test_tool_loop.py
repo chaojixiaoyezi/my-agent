@@ -1635,12 +1635,12 @@ def test_active_goal_continuation_ignores_legacy_ordinary_policy(tmp_path):
         return SimpleNamespace(**base)
 
     assert _active_goal_continuation_available(agent, params()) is False
-    # typed Goal id 是当前轮已经绑定活跃 Goal 的结构化事实。
+    # 编号只是旧绑定；目标不存在时不能承诺自动续跑。
     assert (
         _active_goal_continuation_available(
             agent, params(task_attributes={**params().task_attributes, "thread_goal_id": "goal-1"})
         )
-        is True
+        is False
     )
 
     # 生产语义:同一任务同一时刻只有一个 ordinary_task_resume policy(创建后每次
@@ -1808,15 +1808,8 @@ def test_legacy_ordinary_task_resume_policy_is_retired_without_running(tmp_path)
     assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
 
 
-@pytest.mark.xfail(reason="EXEC-31b: native 下 natural-user-reply 经 IR 消息注入, 不再出现在 prompt 文本; 断言待适配")
 def test_background_main_agent_no_ordinary_resume_policy(tmp_path):
-    """LLM: 后台唤醒轮收口不占普通任务续跑预算。
-
-    唤醒轮是「读状态、给回执」语义,推进由 wait 定时器/wake 信号驱动——同 source
-    排除先例(后台唤醒轮不再派生相同唤醒)。若误建 policy,调度器每 interval
-    都会拉起一个空转唤醒 run,白烧预算。前台 cli_gateway 走创建路径(上个测试),
-    这里验证排除分支:同样收口,policy 必须为零。
-    """
+    """后台普通任务遇到轮限也不创建 Goal、周期策略或隐式续跑 wake。"""
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     agent = SimpleAgent(
         _text_agent_config(
@@ -1857,10 +1850,11 @@ def test_background_main_agent_no_ordinary_resume_policy(tmp_path):
 
     assert result.runtime_status == "unfinished"
     assert agent.conversation_store.list_progress_policies(enabled_only=False) == []
+    assert agent.conversation_store.load_goals(thread.thread_id) == []
+    assert agent.conversation_store.pending_wake_signals() == []
 
 
-@pytest.mark.xfail(reason="EXEC-31b: native 下 natural-user-reply 经 IR 消息注入, 不再出现在 prompt 文本; 断言待适配")
-def test_explicit_goal_cannot_close_with_open_progress(tmp_path):
+def test_explicit_goal_turn_finishes_without_todo_overriding_goal(tmp_path):
     from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
     from agent_py_agent.agent.task_progress import write_task_progress
 
@@ -1873,16 +1867,25 @@ def test_explicit_goal_cannot_close_with_open_progress(tmp_path):
     class OpenProgressBackend:
         name = "open_progress"
 
+        def probe_tool_capability(self):
+            from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
+
+            return ProviderToolCapability(
+                provider=self.name, endpoint="local://goal-test", model="", stream=False,
+                native_supported=True, evidence="test_native_tools", observed_at=_utc_now_iso(),
+            )
+
         def __init__(self):
             self.calls = 0
             self.prompts: list[str] = []
 
-        def generate(self, prompt: str, on_chunk=None):
-            del on_chunk
+        def generate(self, prompt: str, on_chunk=None, **kwargs):
+            del on_chunk, kwargs
             self.calls += 1
             self.prompts.append(prompt)
             if self.calls == 1:
                 return ModelResponse(
+                    text="",
                     tool_use_blocks=[{"id": "call_auto", "name": 'read_file', "input": {"path": "notes.txt"}}],
                     backend=self.name,
                 )
@@ -1938,17 +1941,14 @@ def test_explicit_goal_cannot_close_with_open_progress(tmp_path):
 
     assert agent.backend.calls == 2
     assert result.response.startswith("文件已经读取，但验证项仍未完成")
-    assert result.runtime_status == "unfinished"
-    assert result.runtime_reason == "TASK_PROGRESS_OPEN"
-    assert result.runtime_source == "task_progress"
+    assert result.runtime_status == "ok"
+    assert result.runtime_reason != "TASK_PROGRESS_OPEN"
     current = agent.conversation_store.load_thread(thread.thread_id)
     assert current is not None and current.active_task_ids == ("task-open-progress",)
-    policies = agent.conversation_store.list_progress_policies(enabled_only=True)
-    assert len(policies) == 1
-    assert policies[0].task_id == "task-open-progress"
-    assert policies[0].metadata["tool"] == "goal_progress_continuation"
-    assert policies[0].metadata["expedite_reason"] == "typed_unfinished_foreground"
-    assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]
+    assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
+    pending = agent.conversation_store.pending_wake_signals()
+    assert len(pending) == 1 and pending[0].root_task_id == "task-open-progress"
+    assert pending[0].reason == "thread_goal_continue"
 
 
 @pytest.mark.parametrize(

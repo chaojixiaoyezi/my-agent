@@ -19,6 +19,7 @@ from ..concurrency.interrupt import (
     register_interrupt_callback,
     set_interrupt,
 )
+from ..conversation.model_metrics import publish_model_metrics
 from ..model_guidance import provider_system_instruction
 from ..tooling.runtime_contracts import ToolChoice
 from ._runtime_params import ToolLoopExecuteParams
@@ -419,6 +420,7 @@ def _generate_or_recover_context_pressure(
         raise
     except Exception as exc:
         record_model_call_failed(state.ledger, state.call_id, exc)
+        publish_model_metrics(request.agent, request.params, pending=False)
         if is_context_window_error(exc):
             return (
                 context_pressure_response(
@@ -792,12 +794,13 @@ def _forwarded_guidance_seen(params: object) -> set:
 
 # LLM: Provider full-thinking must be published before the chunk filter flushes assistant text;
 # otherwise a non-streaming thinking block appears after its answer and breaks transcript order.
-# 函数用途: 先收口一次模型调用的显式思考，再刷新正文、账本与 trace。
+# 函数用途: 先收口一次模型调用的显式思考，再刷新正文、账本、用量显示与 trace。
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
     response = _recover_unclosed_long_write_response(request, response)
     _publish_provider_thinking(request, state, response)
     state.chunk_filter.finish()
     record_model_call_finished(state.ledger, state.call_id, response)
+    publish_model_metrics(request.agent, request.params, pending=False, response=response, call_id=state.call_id)
     record_provider_context_observation(
         request.agent,
         request.params,
@@ -984,6 +987,7 @@ def _record_provider_timeout(record: _ProviderTimeoutRecord) -> None:
         idle_silence_seconds=_provider_timeout_idle_silence(record.ledger, record.call_id),
     )
     _trace_model_failure(record.request, record.exc)
+    publish_model_metrics(record.request.agent, record.request.params, pending=False)
 
 
 def _provider_timeout_idle_silence(ledger: object, call_id: str) -> float | None:

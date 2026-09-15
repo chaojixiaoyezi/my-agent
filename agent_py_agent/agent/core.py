@@ -165,18 +165,17 @@ def _build_memory_curator_backend(
     return get_backend(provider, scoped_config), provider, model
 
 
-# LLM: 策展是后台消费者，用户选择保存在 owner model profile 里、只在请求路径经
-# selected_model_scope 生效；若直接读基础 config，会把部署占位默认（echo/gpt-4o-mini）当成真实模型，
-# 实测导致抽取输出永远过不了 schema（CURATOR_SCHEMA_INVALID）。
-# 函数用途: 解析 owner 当前选中的模型配置；profile 缺失或损坏时回落基础 config，不静默换模型。
+# LLM: 策展读取 owner 显式选择；失效引用不能回退到启动模型，更不能请求另一个服务商。
+# 函数用途: 解析记忆策展使用的模型；配置损坏时保留未配置状态与诊断，让前台仍可进入设置修正。
 def _curator_profile_config(agent: object, config: AgentConfig) -> AgentConfig:
-    from .settings.model_profiles import selected_model_config
+    from .settings.model_profiles import ModelProfileError, selected_model_config
 
     try:
         resolved = selected_model_config(agent)
-    except Exception:  # noqa: BLE001 - 配置问题不能让策展构造失败，回落基础 config 并由 run 账如实记录
-        return config
-    return resolved if isinstance(resolved, AgentConfig) else config
+    except (ModelProfileError, OSError):
+        logging.getLogger(__name__).warning("记忆策展选定模型配置不可用，未自动切换模型。")
+        return replace(config, model_backend="", model_name="", api_base="", api_key="")
+    return resolved
 
 
 # LLM: The composition root is the only adapter allowed to join Memory Store with the existing

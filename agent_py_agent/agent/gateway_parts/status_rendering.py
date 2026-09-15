@@ -198,8 +198,8 @@ def gateway_runtime_snapshot(
     return snapshot
 
 
-# LLM: v2 将进程身份与启动默认模型分开；Gateway 服务多个 owner/会话，启动配置绝不能充当当前调用模型。
-# 函数用途: 组装网关健康事实；默认模型只标记为部署信息，不新增 I/O，也不猜当前会话使用哪个模型。
+# LLM: Gateway 服务多个 owner/会话；进程健康快照不提供启动模型，调用者模型由执行快照单独补充。
+# 函数用途: 组装网关健康事实，移除可能误导模型身份回答的启动默认值，不新增 I/O。
 def _gateway_runtime_base_snapshot(
     agent: SimpleAgent,
     paths: GatewayPaths,
@@ -227,11 +227,6 @@ def _gateway_runtime_base_snapshot(
             "config_path": str(
                 state.get("config_path") or getattr(config, "config_path", "") or ""
             ),
-        },
-        "deployment_defaults": {
-            "model_name": str(state.get("model_name") or ""),
-            "scope": "gateway_startup_only",
-            "is_current_request_model": False,
         },
         "status": status,
         "alive": running.alive,

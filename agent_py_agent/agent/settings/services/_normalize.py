@@ -134,7 +134,7 @@ def _temperature_value(raw_temp: object) -> float | None:
 # Model / Gateway / Daemon (was _normalize_core_fields.py)
 # ---------------------------------------------------------------------------
 
-# LLM: 规范化显式协议选择，Responses 与 Chat/Messages 使用同一配置链，不从模型名猜协议。
+# LLM: 规范化显式协议选择；空值保持未配置，非法协议也不能回退到可生成回复的模型。
 # 类用途: 检查模型连接、容量和请求选项的配置值。
 class ModelFieldsService:
     # LLM: 不发模型请求或改持久配置；top_p 与模型表单共用范围校验，非法 YAML 按既有规则告警回默认。
@@ -144,7 +144,7 @@ class ModelFieldsService:
         out = dict(data)
         warnings = _apply_choice_field(
             out, defaults, "model_backend",
-            ("echo", "anthropic_compatible", "openai_compatible", "openai_responses"),
+            ("", "echo", "anthropic_compatible", "openai_compatible", "openai_responses"),
         )
         warnings.extend(_apply_int_fields(
             out, defaults,

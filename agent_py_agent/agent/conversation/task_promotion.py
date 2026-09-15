@@ -617,6 +617,8 @@ def _terminal_successor_task_id(
     return ""
 
 
+# LLM: 只按已经核对的任务绑定恢复目标并写回精确 Goal ID；续跑交给回合结束后的唯一 wake 入口。
+# 函数用途: 用户明确续接原任务时恢复暂停目标，不从消息文字猜目标，也不额外排第二条续跑事件。
 def _resume_matching_bound_goal(agent: object, store: object, link: object) -> bool:
     """Exact workspace binding reactivates its paused goal without parsing user prose."""
     thread_id = str(getattr(link, "thread_id", "") or "").strip()
@@ -648,7 +650,6 @@ def _resume_matching_bound_goal(agent: object, store: object, link: object) -> b
     if updated is None or str(getattr(updated, "status", "") or "").strip().lower() != "active":
         return False
     attrs["thread_goal_id"] = str(getattr(updated, "goal_id", "") or "")
-    attrs["thread_goal_activation_pending"] = True
     return True
 
 

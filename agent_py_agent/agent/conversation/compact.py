@@ -1,6 +1,5 @@
-# LLM: This is the single automatic per-thread compaction path. Raw transcript, structured
-# operation evidence, recent tail, validated checkpoint, and live cursor must remain distinct.
-# 模块用途: 在 owner 隔离的唯一对话历史上做自动压缩；坏摘要不得推进游标，近期完整对话仍保留原文。
+# LLM: 单一会话压缩链保持原文、证据、尾部、检查点和游标分离；独立请求负责结算自己的模型用量，不改普通请求收口。
+# 模块用途: 在隔离的会话历史上压缩并记录真实消耗；坏摘要不得推进游标，近期完整对话仍保留原文。
 
 from __future__ import annotations
 
@@ -129,9 +128,8 @@ class ConversationCompactOptions:
     model_surface: ConversationCompactModelSurface | None = None
 
 
-# LLM: This immutable request keeps one compact invocation's authority, token baseline, progress,
-# and optional typed interruption check aligned through candidate generation and commit.
-# 类用途: 将一次压缩所需的 agent、thread、原文尾部、策略和中断检查打包，供候选与提交共用。
+# LLM: 不可变请求绑定压缩权限与状态；standalone_usage 表示未绑定普通工作片的独立计费范围，不得靠提示文字判断。
+# 类用途: 将压缩的会话、历史、策略、中断检查和用量归属打包，供生成候选、提交与收口共用。
 @dataclass(frozen=True)
 class _CompactRunRequest:
     agent: SimpleAgent
@@ -144,6 +142,7 @@ class _CompactRunRequest:
     forced: bool
     attempted_at: float
     operation_id: str
+    standalone_usage: bool = False
     request_id: str = ""
     run_id: str = ""
     task_id: str = ""
@@ -217,9 +216,8 @@ def prepare_conversation_context(
     return _execute_compact_request(prepared)
 
 
-# LLM: Preflight reads one durable tail and returns either a no-op result or one immutable run
-# request. It may reject impossible/cooling compactions but must never generate or commit a summary.
-# 函数用途: 统一完成压缩前的历史加载、token 估算、触发判断和请求快照构造。
+# LLM: 预检只冻结历史与请求；无绑定请求时分配独立 operation 身份，失败后再次尝试也不能重用旧计费范围。
+# 函数用途: 加载历史、估算触发线并构造压缩请求，不在这里生成摘要或修改会话游标。
 def _prepare_compact_request(
     agent: SimpleAgent,
     store: ConversationStore,
@@ -280,6 +278,7 @@ def _prepare_compact_request(
             code="COMPACT_CIRCUIT_OPEN",
         )
 
+    operation_id = f"transcript:{uuid.uuid4().hex}"
     request = _CompactRunRequest(
         agent=agent,
         store=store,
@@ -290,10 +289,11 @@ def _prepare_compact_request(
         projected_tokens=projected,
         forced=bool(options.force),
         attempted_at=attempted_at,
-        operation_id=f"transcript:{uuid.uuid4().hex}",
+        operation_id=operation_id,
+        standalone_usage=not str(options.exclude_request_id or "").strip(),
         request_id=(
             str(options.exclude_request_id or "").strip()
-            or f"conversation-compact:{current.thread_id}:{current.compact_generation + 1}"
+            or f"conversation-compact:{operation_id}"
         ),
         run_id=str(
             (
@@ -313,9 +313,8 @@ def _prepare_compact_request(
     return request
 
 
-# LLM: Progress events wrap only candidate generation/commit. Typed interruption remains distinct
-# from provider failure, and a terminal event is emitted exactly once for every started operation.
-# 函数用途: 执行已经完成预检的压缩请求，并把开始、完成、中断或失败进度交给界面。
+# LLM: 进度围绕候选与提交，独立模型用量在成功/失败后均结算；计费失败不覆盖压缩异常或改变终态。
+# 函数用途: 执行压缩并上报开始、完成、中断或失败，同时让独立压缩的消耗不依赖后续聊天才能入账。
 def _execute_compact_request(request: _CompactRunRequest) -> ConversationCompactResult:
     _emit_compact_progress(request, phase="started", stage="preparing", percent=5)
     try:
@@ -337,6 +336,11 @@ def _execute_compact_request(request: _CompactRunRequest) -> ConversationCompact
             error_code=compact_exception_code(exc),
         )
         raise
+    finally:
+        if request.standalone_usage:
+            from .auxiliary_model_call import settle_standalone_model_usage
+
+            settle_standalone_model_usage(request)
     _emit_compact_progress(
         request,
         phase="completed",

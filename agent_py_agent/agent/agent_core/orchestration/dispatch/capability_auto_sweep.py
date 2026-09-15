@@ -423,6 +423,8 @@ def _reconcile_direct_parent_waits(agent: Any) -> dict[str, int]:
 #   保守:心跳新鲜不动;宿主 pid 还活着也不动(可能只是心跳抖动/长 GC,交给出口回收
 #   的活性豁免链处置);无会话事实的老数据不动。
 # 函数用途: 网关重启/进程被杀后,把"看着在跑其实早死了"的 run 放回队列续命。
+# LLM: 优先处理 exact 执行器退出，再走既有来源岗位回收；无 session 不再意味着无法检查执行权。
+# 函数用途: 修复实际退出后的假运行，保留慢模型和来源岗位的既有独立生命周期。
 def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
@@ -438,6 +440,19 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     decisions = conversation_lifecycle_decisions(agent, tasks)
     for task in tasks:
         decision = decisions.get(str(getattr(task, "id", "") or ""))
+        try:
+            from ....common.audit_activation import structured_audit_supervised_worker_attributes
+            from ....subagents.services.executor_recovery import recover_exited_runner
+
+            supervised = structured_audit_supervised_worker_attributes(getattr(task, "attributes", {}))
+            if not supervised and _reclaim_decision_allows(decision, supervised):
+                exited = recover_exited_runner(manager, task)
+                if exited is not None:
+                    reclaimed.append(exited)
+                    continue
+        except Exception:
+            _LOGGER.warning("executor exit recovery failed (run_id=%s)", task.id, exc_info=True)
+            continue
         facts = _dead_running_reclaim_facts(
             task,
             decision,

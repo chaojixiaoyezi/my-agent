@@ -12,7 +12,6 @@ from types import SimpleNamespace
 from typing import Any
 
 from ..agent_core.orchestration.coordinator_policy import coordinator_tool_boundary_text
-from ..agent_core.runtime.task_identity import conversation_task_progress_ledger_id
 from ..backends.errors import (
     is_provider_quota_exhausted_error,
     is_provider_transient_error,
@@ -212,10 +211,13 @@ _AUDIT_CAPACITY_REPORT_PROMPT = (
 )
 
 
+# LLM: 后台提示只投影本轮冻结的 Goal 与事件；同线程其他目标不成为当前回合的派工需求。
+# 函数用途: 根据结构化唤醒生成说明，保留普通后台、目标续跑和子代理回报的既有分流。
 def background_prompt(
     reason: str,
     *,
     goal: object | None = None,
+    other_goals: tuple[object, ...] = (),
     goal_subagent_phase: str = "",
     wake_signal: dict[str, Any] | None = None,
     proactive_delivery_available: bool | None = None,
@@ -241,7 +243,7 @@ def background_prompt(
     }:
         from .goal_prompting import continuation_prompt
 
-        prompt = continuation_prompt(goal)
+        prompt = continuation_prompt(goal, other_goals=other_goals)
         if goal_subagent_phase == "subagents_active":
             return prompt + _GOAL_SUBAGENTS_ACTIVE_PROMPT
         if goal_subagent_phase == "subagents_terminal":
@@ -694,8 +696,7 @@ class _BackgroundCompactSliceYield(RuntimeError):
     pass
 
 
-# LLM: This snapshot binds one exact task objective and child phase to one background sample;
-# callers must not replace the objective with the synthetic wake instruction.
+# LLM: 一次采样冻结精确目标、兄弟目标状态与 child phase；兄弟目标不是本回合的执行范围。
 # 类用途: 固定一次后台模型调用所见的目标、任务目录和子代理阶段，避免采样中途漂移。
 @dataclass(frozen=True)
 class GoalRuntimeContext:
@@ -704,6 +705,7 @@ class GoalRuntimeContext:
     task_path: str = ""
     subagent_phase: str = ""
     state_error: str = ""
+    other_goals: tuple[object, ...] = ()
 
 
 def _material_tool_success_count(
@@ -736,8 +738,8 @@ def _material_tool_success_count(
     return count
 
 
-# LLM: 同一后台轮只采样一次目标/child phase；task link 管路径和身份，lifecycle 请求编号管原用户正文。
-# prompt、finalization 与公开投递共用快照，原消息缺失不得默默改用别轮目标；只读，不改历史或任务账。
+# LLM: 同一后台轮冻结 Goal/child phase；active Goal 管本轮目标，普通 lifecycle 请求编号管原用户正文。
+# 原始用户历史不裁剪；拆开的命名目标不得把整条多目标消息重新作为各自的任务。只读，不改历史或任务账。
 # 函数用途: 固定后台续接的正确用户要求与子树阶段，避免新任务完成后主代理回去回答旧任务。
 def _goal_runtime_context(
     agent: object,
@@ -761,7 +763,9 @@ def _goal_runtime_context(
         phase, phase_error = _goal_subagent_phase(agent, task_id)
         state_error = phase_error or link_error
     try:
-        goal = store.load_goal(request.thread_id, task_id=task_id)
+        wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+        metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+        goal = store.load_goal(request.thread_id, goal_id=str(metadata.get("goal_id") or ""), task_id=task_id)
     except Exception:
         return GoalRuntimeContext(
             task_objective=task_objective,
@@ -782,12 +786,14 @@ def _goal_runtime_context(
         )
     if not phase and not state_error:
         phase, state_error = _goal_subagent_phase(agent, task_id)
+    goals, goals_error = store.load_goals_report(request.thread_id)
     return GoalRuntimeContext(
         goal=goal,
-        task_objective=task_objective,
+        task_objective=str(goal.objective),
         task_path=task_path,
         subagent_phase=phase,
-        state_error=state_error,
+        state_error=state_error or ("goal_state_load_error" if goals_error else ""),
+        other_goals=tuple(item for item in goals if item.goal_id != goal.goal_id),
     )
 
 
@@ -938,6 +944,7 @@ def _complete_background_slice(
         created_at=request.now,
         tool_call_count=tool_call_count,
         tool_success_count=tool_success_count,
+        goal_continuation_allowed=(plan.display_snapshot or {}).get("goal_continuation_allowed") is True,
         material_progress_count=material_progress_count,
         delivery_status=delivery_status,
         delivery_reason=delivery_reason,
@@ -1106,6 +1113,7 @@ class BackgroundMainAgentRuntime:
             delivery_status=commit.delivery_status,
             delivery_reason="cached_owner_delivery_retry",
             wake_handled=wake_handled,
+            goal_continuation_allowed=frozen.message_metadata.get("goal_continuation_allowed") is True,
             task_status=_background_task_link_status(self.agent, request, store=self.store),
             commit_kind=commit.commit_kind,
             message_id=commit.message_id,
@@ -1241,6 +1249,8 @@ class BackgroundMainAgentRuntime:
             operation_verification=operation_verification,
             frozen_retry=frozen_retry,
         )
+        if display_snapshot is not None and frozen_retry is None:
+            message_metadata["goal_continuation_allowed"] = display_snapshot.get("goal_continuation_allowed") is True
         wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
         wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
         route = _background_delivery_route(
@@ -1526,6 +1536,7 @@ def _invoke_background_main_agent_with_model(
     wake_prompt = background_prompt(
         request.reason,
         goal=goal_context.goal,
+        other_goals=goal_context.other_goals,
         goal_subagent_phase=goal_context.subagent_phase,
         wake_signal=request.wake_signal,
         proactive_delivery_available=proactive_delivery_available,
@@ -1563,6 +1574,9 @@ def _invoke_background_main_agent_with_model(
 
     snapshot = activity_sink.display_history_snapshot()
     snapshot["turn_end_reason"] = result_turn_end_reason(result)
+    snapshot["goal_continuation_allowed"] = (
+        snapshot["turn_end_reason"] == "completed" or should_continue_task(result)[0]
+    )
     return result, snapshot
 
 
@@ -2518,6 +2532,8 @@ def _channel_declares_proactive(channels: object, channel: str) -> bool:
     return str(channel or "").strip().lower() in PROACTIVE_PUSH_CHANNELS
 
 
+# LLM: 读取 exact wake goal/task；冲突和损坏是未知状态，不得当作没有目标或推断完成。
+# 函数用途: 为后台结果投影读取真实目标状态，不修改生命周期。
 def _matching_goal_status(
     store: ConversationStore | None,
     request: BackgroundRunRequest,
@@ -2525,9 +2541,11 @@ def _matching_goal_status(
     if store is None:
         return ""
     try:
-        goal = store.load_goal(request.thread_id, task_id=str(request.task_id or "").strip())
+        wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+        metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+        goal = store.load_goal(request.thread_id, goal_id=str(metadata.get("goal_id") or ""), task_id=str(request.task_id or "").strip())
     except Exception:
-        return ""
+        return "state_conflict"
     if goal is None:
         return ""
     if str(getattr(goal, "task_id", "") or "").strip() != str(request.task_id or "").strip():
@@ -3252,6 +3270,8 @@ def _run_params(
         sampled_subagent_phase=resolved_goal_context.subagent_phase,
         thread=thread,
     )
+    if resolved_goal_context.goal is not None and isinstance(task_attributes, dict):
+        task_attributes["thread_goal_id"] = resolved_goal_context.goal.goal_id
     carried_tool_calls = _background_active_turn_tool_calls(
         request,
         resolved_goal_context,
@@ -4472,9 +4492,12 @@ def _latest_thread_with_load_error(state: _BackgroundContextLoad) -> Conversatio
 
 # LLM: 最小模型上下文与完整 bundle 使用相同的显示排除边界；读取失败不能把 UI 遥测写进 prompt。
 # 函数用途: 提供缺少其它会话材料时的最小运行上下文，不包含 Context 展示数字。
+# LLM: 精简模型上下文与完整上下文同样排除纯显示遥测，避免每次数字刷新破坏缓存前缀。
+# 函数用途: 构造无历史时的会话上下文，不把终端统计条传给模型。
 def _minimal_context_bundle(thread: ConversationThread) -> dict[str, Any]:
     thread_payload = thread.to_dict()
     thread_payload.pop("model_context_usage", None)
+    thread_payload.pop("model_metrics", None)
     return {
         "thread": thread_payload,
         "messages": [],
@@ -6117,7 +6140,7 @@ def _complete_wake_report(
         )
     if lifecycle_reason == "thread_goal_continue":
         scheduler._continue_thread_goal(signal, report=report, now=now)
-    if lifecycle_reason == "subagent_runner_finished":
+    if lifecycle_reason == "subagent_runner_finished" and report.goal_continuation_allowed:
         _ensure_goal_progress_wake_chain(scheduler, signal, now=now)
     if scheduler.scheduler_service is not None:
         scheduler.scheduler_service.reconcile_waiting_run(
@@ -6306,8 +6329,8 @@ class _BackgroundSchedulerGoalMixin:
             if registry is not None:
                 registry.register_task(goal.task_id, status="blocked", goal=updated.objective)
 
-    # LLM: Reconcile exact goal/task identity after a turn, then publish at most one deduplicated next wake.
-    # 函数用途: 持续目标一轮结束后同步终态，仍 active 则继续推进同一目标。
+    # LLM: 精确 Goal 状态决定续跑；工具计数只是统计，不能成为运行授权。子代理等待和任务中断仍优先。
+    # 函数用途: 持续目标一轮结束后同步终态，仍可运行则发布一个去重续跑事件，不依赖 Todo 或工具次数。
     def _continue_thread_goal(
         self,
         signal: WakeSignal,
@@ -6316,6 +6339,8 @@ class _BackgroundSchedulerGoalMixin:
         now: float,
     ) -> None:
         """Reconcile one goal turn and enqueue exactly one next turn while active."""
+        if not report.goal_continuation_allowed:
+            return
         try:
             metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
             goal = self.store.load_goal(
@@ -6343,7 +6368,7 @@ class _BackgroundSchedulerGoalMixin:
                         {"task_id": goal.task_id, "status": "interrupted"}
                     )
                 return
-            if task_status != "active" or report.tool_call_count == 0:
+            if task_status != "active":
                 return
             subagent_phase, state_error = _goal_subagent_phase(
                 self.runtime.agent,
@@ -6559,10 +6584,18 @@ def _subagent_owned_background_report(kwargs: dict) -> BackgroundMainAgentReport
 class _BackgroundSchedulerExecutionMixin:
     """Claimed progress-policy execution, heartbeats, and runtime facts."""
 
+    # LLM: 旧目标周期策略一次迁移为 canonical Goal wake；普通用户定时策略保留原调度语义。
+    # 函数用途: 运行到期策略，旧 Goal 轮询只迁移事件而不直接再调用模型。
     def _run_due_policy(
         self, policy: ProgressPolicy, *, now: float
     ) -> BackgroundMainAgentReport | None:
         metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+        if metadata.get("tool") == "goal_progress_continuation" and metadata.get("kind") == "subagent_progress_watch":
+            ensure_goal_progress_continuation(
+                self.runtime.agent, task_id=policy.task_id, thread_id=policy.thread_id, store=self.store, now=now,
+            )
+            self.store.disable_progress_policy(policy.policy_id)
+            return None
         if str(metadata.get("kind") or "") == "subagent_progress_watch":
             watched = str(metadata.get("watch_run_id") or "").strip()
             if watched:
@@ -6981,9 +7014,8 @@ def _policy_failure_backoff(failures: int, policy_id: str) -> float:
     return round(base * ratio, 3)
 
 
-# LLM: A plain task checklist is memory, not a lifecycle.  Only an exact active /goal may
-# schedule another model turn after a child-finished wake.
-# 函数用途: 显式持续目标仍有开放计划时补续跑；普通任务清单不会自行唤醒或劫持后续聊天。
+# LLM: 子代理终态只结束一次整合回合；后续运行仍以精确 active Goal 为准，不读取 Todo 文本或数量。
+# 函数用途: 子代理返回后的目标整合轮结束时补一个去重续跑事件，普通任务不自动续跑。
 def _ensure_goal_progress_wake_chain(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -7005,19 +7037,8 @@ def _ensure_goal_progress_wake_chain(
         _HEARTBEAT_LOGGER.warning("goal-progress wake chain ensure failed", exc_info=True)
 
 
-# LLM: Goal continuation must use the shared conversation ledger resolver; the
-# durable goal id remains scheduling identity and must not duplicate path hashing.
-# 函数用途: 把持续目标编号转换成该任务实际使用的进度账本编号。
-def _goal_ledger_task_id(store: ConversationStore, task_id: str) -> str:
-    """账本 key 与 task_progress_tool 写侧同一把。
-
-    task_id 是唤醒目标/goal 记录/policy 归属 key(durable);账本读写按
-    progress_ledger_id 寻址——会话任务绑定任务目录后 = task-path:<目录指纹>。
-    这里只做读侧映射,不让调用方各自传两个 key。
-    """
-    return conversation_task_progress_ledger_id(store, task_id)
-
-
+# LLM: 只认 active Goal 与 active task；沿唯一 goal wake 去重，不再创建由 Todo 驱动的第二套周期策略。
+# 函数用途: 在安全回合边界为持久目标安排下一轮；子代理尚在工作时留给生命周期事件接续。
 def ensure_goal_progress_continuation(
     agent: object | None,
     *,
@@ -7025,28 +7046,20 @@ def ensure_goal_progress_continuation(
     thread_id: str = "",
     store: ConversationStore | None = None,
     now: float | None = None,
-    due_now: bool = False,
+    goal_id: str = "",
 ) -> bool:
-    """Keep one explicit persistent goal alive while its plan is unfinished.
-
-    The exact goal record and task-progress ledger are both required.  An
-    ordinary task can leave open progress notes without creating a future turn.
-    """
+    """保持显式目标的单一事件续跑链，普通任务不会因此获得执行权。"""
     task_id = str(task_id or "").strip()
     if agent is None or not task_id:
         return False
     selected_store = store or getattr(agent, "conversation_store", None)
-    if (
-        selected_store is None
-        or ledger_open_progress_item_count(agent, _goal_ledger_task_id(selected_store, task_id))
-        <= 0
-    ):
+    if selected_store is None:
         return False
     thread_id = str(thread_id or "").strip() or _thread_id_for_task(selected_store, task_id)
     if not thread_id:
         return False
     try:
-        goal = selected_store.load_goal(thread_id, task_id=task_id)
+        goal = selected_store.load_goal(thread_id, goal_id=goal_id, task_id=task_id)
     except Exception:
         return False
     if (
@@ -7055,53 +7068,15 @@ def ensure_goal_progress_continuation(
         or str(getattr(goal, "status", "") or "").strip().lower() != "active"
     ):
         return False
-    matching = [
-        policy
-        for policy in selected_store.list_progress_policies(enabled_only=True)
-        if policy.task_id == task_id
-    ]
-    current = now if now is not None else time.time()
-    if matching:
-        if due_now:
-            selected_store.expedite_progress_policy(
-                matching[0].policy_id,
-                due_at=current,
-                reason="typed_unfinished_foreground",
-                now=current,
-            )
-        return True
-    interval = int(
-        getattr(
-            getattr(agent, "config", None),
-            "continuation_reminder_seconds",
-            0,
-        )
-        or 0
-    )
-    policy = selected_store.set_progress_policy(
-        {
-            "thread_id": thread_id,
-            "task_id": task_id,
-            "interval_seconds": max(60, interval) if interval > 0 else 180,
-            "route_channel": "internal",
-            "route_target": "",
-            "now": current,
-            "metadata": {
-                "kind": "subagent_progress_watch",
-                "tool": "goal_progress_continuation",
-                "scope": "own_task_tree",
-                "reason": "显式 /goal 仍有未闭环计划项，到点继续推进；普通任务清单不创建此提醒",
-                "watch_run_id": task_id,
-            },
-        }
-    )
-    if due_now:
-        selected_store.expedite_progress_policy(
-            policy.policy_id,
-            due_at=current,
-            reason="typed_unfinished_foreground",
-            now=current,
-        )
+    request = BackgroundRunRequest(thread_id=thread_id, task_id=task_id, reason="thread_goal_continue")
+    if _background_task_link_status(agent, request, store=selected_store) != "active":
+        return False
+    phase, state_error = _goal_subagent_phase(agent, task_id)
+    if phase == "subagents_active" or state_error:
+        return False
+    from .goal_runtime import raise_goal_continuation_wake
+
+    raise_goal_continuation_wake(selected_store, goal, now=now)
     return True
 
 

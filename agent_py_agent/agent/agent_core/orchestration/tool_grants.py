@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from ...subagents.role_templates import SHELL_SESSION_TOOLS, active_model_subagent_tools
+from ...subagents.role_templates import (
+    AGENT_PROGRESS_TOOLS,
+    SHELL_SESSION_TOOLS,
+    active_model_subagent_tools,
+)
 from ...tooling.write_boundary import WRITE_TOOL_ORDER
 
 CODING_SUBAGENT_TOOLS = [
+    *AGENT_PROGRESS_TOOLS,
     "list_files",
     "read_file",
     "search_text",
@@ -18,6 +23,7 @@ CODING_SUBAGENT_TOOLS = [
     "capability_request",
 ]
 READ_ONLY_SUBAGENT_TOOLS = [
+    *AGENT_PROGRESS_TOOLS,
     "list_files",
     "read_file",
     "search_text",

@@ -2257,7 +2257,7 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     assert not (store.root / "notices").exists()
 
 
-def test_thread_goal_turn_with_no_tool_calls_stops_auto_continuation(tmp_path) -> None:
+def test_thread_goal_turn_with_no_tool_calls_keeps_active_goal_continuation(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
@@ -2303,7 +2303,10 @@ def test_thread_goal_turn_with_no_tool_calls_stops_auto_continuation(tmp_path) -
     updated = store.load_goal(thread.thread_id)
     assert updated is not None and updated.status == "active"
     pending = store.pending_wake_signals()
-    assert pending == []
+    assert len(pending) == 1
+    assert pending[0].reason == "thread_goal_continue"
+    assert pending[0].metadata["goal_id"] == goal.goal_id
+    assert pending[0].wake_signal_id != first_wake.wake_signal_id
     assert first_wake.status == "pending"
     assert reports[0].delivery_status == "sent"
     assert reports[0].delivery_reason == "thread_goal_progress"
@@ -6567,16 +6570,19 @@ def test_only_explicit_goal_progress_keeps_background_continuation_chain(tmp_pat
     )
     _ensure_goal_progress_wake_chain(scheduler, signal, now=14.0)
 
-    policies = store.list_progress_policies(enabled_only=True)
-    assert len(policies) == 1
-    assert policies[0].task_id == "task-plain-items"
-    assert policies[0].metadata["tool"] == "goal_progress_continuation"
+    assert store.list_progress_policies(enabled_only=True) == []
+    pending = [item for item in store.pending_wake_signals() if item.reason == "thread_goal_continue"]
+    assert len(pending) == 1 and pending[0].root_task_id == "task-plain-items"
     write_task_progress(
         runtime_owner_root(agent),
         "task-plain-items",
         {"items": [{"id": "report", "status": "done"}]},
     )
     assert ledger_open_progress_item_count(agent, "task-plain-items") == 0
+    store.mark_wake_signal_handled(pending[0].wake_signal_id)
+    _ensure_goal_progress_wake_chain(scheduler, signal, now=15.0)
+    pending = [item for item in store.pending_wake_signals() if item.reason == "thread_goal_continue"]
+    assert len(pending) == 1  # Todo 已结束不等于 Goal 已完成。
 
 
 def test_scheduler_renews_stale_policy_while_coverage_open(tmp_path) -> None:

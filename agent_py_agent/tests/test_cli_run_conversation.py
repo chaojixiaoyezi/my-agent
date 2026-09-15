@@ -189,6 +189,41 @@ def test_cli_run_reused_request_rejects_different_run_lineage(tmp_path) -> None:
         bind_cli_run_conversation(agent, second, "同一条用户输入")
 
 
+def test_cli_run_goal_resolves_explicit_task_without_promoting_conversation(tmp_path):
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _active_goal_continuation_available,
+    )
+    from agent_py_agent.agent.conversation.goal_binding import goal_binding
+
+    agent = _agent(tmp_path)
+    params = bind_cli_run_conversation(agent, RunParams(source="cli_run", request_id="cli-goal-request",
+                                      run_id="cli-goal-run", task_id="cli-goal-task"), "持续完成资料整理")
+    agent._current_run_params = params
+    thread_id = params.task_attributes["conversation_thread_id"]
+    assert goal_binding(agent)[:2] == (thread_id, "cli-goal-task")
+    assert "conversation_task_id" not in params.task_attributes
+    assert agent.conversation_store.task_links(thread_id) == []
+    assert not _active_goal_continuation_available(agent, params)
+    goal = agent.conversation_store.create_goal({"thread_id": thread_id, "task_id": params.task_id,
+                                                "objective": "持续完成资料整理"})
+    assert _active_goal_continuation_available(agent, params)
+    assert agent.tools.tools["get_goal"].execute({}).ok
+    assert agent.tools.tools["update_goal"].execute({"status": "complete"}).ok
+    assert agent.conversation_store.load_goal(thread_id, goal_id=goal.goal_id).status == "complete"
+    assert not _active_goal_continuation_available(agent, params)
+    assert "conversation_task_id" not in params.task_attributes
+
+
+@pytest.mark.parametrize("source,scope", [("gateway", "default"), ("cli_run", "task_local")])
+def test_goal_binding_does_not_borrow_unbound_main_or_child_task(tmp_path, source, scope):
+    from agent_py_agent.agent.conversation.goal_binding import goal_binding
+
+    agent = _agent(tmp_path)
+    params = RunParams(source=source, context_scope=scope, task_id="unbound-task",
+                       task_attributes={"conversation_thread_id": "parent-thread"})
+    assert not goal_binding(agent, params)[1]
+
+
 def test_cli_run_user_persistence_failure_stops_before_model(tmp_path, monkeypatch) -> None:
     agent = _agent(tmp_path)
     backend = _StaticBackend()

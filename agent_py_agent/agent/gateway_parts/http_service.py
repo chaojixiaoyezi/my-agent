@@ -31,6 +31,7 @@ from .http_handlers import (
     handle_client_notices,
     handle_client_memory,
     handle_client_agent_guidance,
+    handle_client_goal,
     handle_client_agent_permission,
     handle_client_agent_stop,
     handle_client_agent_view,
@@ -215,6 +216,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/client/agent-view":
             self._handle_client_agent_view()
+            return
+        if self.path == "/client/goal":
+            handle_client_goal(self, _server_instance)
             return
         if self.path == "/client/agent-guidance":
             self._handle_client_agent_guidance()

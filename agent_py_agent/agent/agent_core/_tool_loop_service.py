@@ -263,11 +263,13 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return prompt
 
 
+# LLM: 所有协议共用当前 Goal 的临时执行范围投影；它不写入历史，不改变预算或工具权限。
+# 函数用途: 渲染本轮真实上下文，使回合中刚建立或变更的目标立即被模型看见。
 def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return agent.prompts.build(
         params.user_prompt,
         params.memories,
-        inject=_runtime_injections_with_delivery_contract(params),
+        inject=_runtime_injections_with_delivery_contract(params, agent=agent),
         prompt_files=params.prompt_files,
         system_prompt_override=params.system_prompt_override,
         context_scope=params.context_scope,
@@ -1215,7 +1217,9 @@ def _native_tool_history_summary(
     )
 
 
-def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) -> list:
+# LLM: 注入副本追加当前目标事实，不修改历史容器或堆积逐轮副本；正文和状态分别保留既有权威。
+# 函数用途: 组装文本历史、投递要求与本轮 Goal 归属，前后台和原生工具协议共用。
+def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *, agent: object | None = None) -> list:
     injections = list(params.runtime_injections)
     if not native_tool_use_active(params):
         conversation = _text_conversation_history_section(
@@ -1228,6 +1232,12 @@ def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams) ->
             injections.append(runtime_state)
     if isinstance(params.delivery_contract, dict):
         injections.append(render_delivery_contract_section(params.delivery_contract))
+    if agent is not None:
+        from ..conversation.goal_prompting import current_goal_scope_prompt
+
+        goal_scope = current_goal_scope_prompt(agent, params)
+        if goal_scope:
+            injections.append(goal_scope)
     return injections
 
 
@@ -1937,24 +1947,25 @@ def _repeated_failure_halt_threshold(params: ToolLoopExecuteParams) -> int:
     return configured_repeated_failure_halt_threshold(params)
 
 
-# LLM: Tool-limit wording may promise another host-driven turn only when the
-# exact thread/task owns an active Goal. Never infer this from ordinary progress
-# policies or model prose; those legacy policies are retired by the scheduler.
-# 函数用途: 判断当前轮是否属于显式活跃 Goal，供轮限回复选择真实承诺文案。
+# LLM: 轮限承诺必须重读 exact thread/task/goal 的 active 状态；缓存编号仅用于定位，不能证明仍有续跑权。
+# 函数用途: 生成阶段回复前核对真实目标；完成、暂停、删除、绑定冲突和读取失败均不能承诺自动续跑。
 def _active_goal_continuation_available(agent, params: ToolLoopExecuteParams) -> bool:
     try:
-        attrs = getattr(params, "task_attributes", None)
-        attrs = attrs if isinstance(attrs, dict) else {}
-        if str(attrs.get("thread_goal_id") or "").strip():
-            return True
+        from ..conversation.goal_binding import goal_binding
+        from .runner.context import current_subagent_run_id
+
         store = getattr(agent, "conversation_store", None)
-        task_id = str(getattr(params, "task_id", "") or "").strip()
-        thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+        thread_id, task_id, goal_id, _ = goal_binding(agent, params)
+        execution_id = current_subagent_run_id(agent) or str(getattr(params, "task_id", "") or "").strip()
         if store is None or not task_id or not thread_id:
             return False
-        goal = store.load_goal(thread_id, task_id=task_id)
+        if execution_id != task_id:
+            return False
+        goal = store.load_goal(thread_id, goal_id=goal_id, task_id=task_id)
         return bool(
             goal is not None
+            and str(getattr(goal, "task_id", "") or "") == task_id
+            and (not goal_id or str(getattr(goal, "goal_id", "") or "") == goal_id)
             and str(getattr(goal, "status", "") or "").strip().lower() == "active"
         )
     except Exception:

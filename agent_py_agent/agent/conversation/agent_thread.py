@@ -32,6 +32,15 @@ if TYPE_CHECKING:
 _AGENT_THREAD_CHANNEL = "agent-runtime"
 
 
+# LLM: One runner attempt may contain several Goal turns; display/history IDs differ while execution authority stays in attempt_id.
+# 类用途: 显式区分子代理执行凭证和模型对话轮次，避免下一轮覆盖上一轮或压缩重放当前输入。
+@dataclass(frozen=True)
+class AgentThreadTurnInput:
+    prompt: str
+    attempt_id: str
+    turn_id: str = ""
+
+
 # LLM: The prepared context carries only the live thread generation and bounded prompt section;
 # callers must reload through ConversationStore for any later authoritative decision.
 # 类用途: 保存某次子代理运行前已经完成 Compact 后要注入模型的历史片段。
@@ -118,13 +127,12 @@ def ensure_subagent_thread(manager: object, task: object) -> ConversationThread 
 # LLM: The current child prompt is appended once before preflight and excluded by its typed request
 # id. The runner supplies the same model surface used by its following ordinary turn; interruption
 # crosses summary/checkpoint/CAS exactly like the foreground path.
-# 函数用途: 子代理调用模型前记录输入，以相同工具与 system 缓存面执行可中断 Compact，再生成有界历史注入。
+# 函数用途: 按独立对话轮记录输入，保留真实 attempt 身份，以相同缓存面做可中断 Compact 并生成历史注入。
 def prepare_subagent_thread_turn(
     agent: object,
     task: object,
     *,
-    prompt: str,
-    attempt_id: str,
+    turn: AgentThreadTurnInput,
     force: bool = False,
     progress_callback: Callable[[dict[str, object]], object] | None = None,
     interrupt_check: CompactInterruptCheck | None = None,
@@ -132,7 +140,8 @@ def prepare_subagent_thread_turn(
 ) -> AgentThreadTurnContext:
     from .compact import ConversationCompactOptions, prepare_conversation_context
 
-    selected_attempt = str(attempt_id or "").strip()
+    prompt, attempt_id = turn.prompt, turn.attempt_id
+    selected_attempt = str(turn.turn_id or attempt_id or "").strip()
     if not selected_attempt:
         raise ValueError("subagent attempt_id is required")
     manager = getattr(agent, "subagents", None)
@@ -148,7 +157,7 @@ def prepare_subagent_thread_turn(
             "role": "user",
             "content": str(prompt or ""),
             "channel": _AGENT_THREAD_CHANNEL,
-            "metadata": _agent_turn_metadata(task, selected_attempt),
+            "metadata": {**_agent_turn_metadata(task, attempt_id), "conversation_request_id": selected_attempt},
         },
         dedupe_key=_agent_message_dedupe_key(task, selected_attempt, "user"),
     )
@@ -186,19 +195,23 @@ def append_subagent_thread_result(
     *,
     attempt_id: str,
     result: object,
+    turn_id: str = "",
 ) -> MessageLogEntry:
     manager = getattr(agent, "subagents", None)
     thread = ensure_subagent_thread(manager, task)
     if thread is None:
         raise RuntimeError("subagent ConversationStore is unavailable")
+    selected_turn = str(turn_id or attempt_id)
     _append_subagent_thread_commentaries(
         agent,
         task,
         thread_id=thread.thread_id,
         attempt_id=attempt_id,
+        turn_id=selected_turn,
         values=getattr(result, "assistant_commentary_messages", None),
     )
     metadata = _agent_turn_metadata(task, attempt_id)
+    metadata["conversation_request_id"] = selected_turn
     metadata.update(
         {
             "assistant_part_id": "final",
@@ -230,7 +243,7 @@ def append_subagent_thread_result(
             "channel": _AGENT_THREAD_CHANNEL,
             "metadata": metadata,
         },
-        dedupe_key=_agent_message_dedupe_key(task, attempt_id, "assistant"),
+        dedupe_key=_agent_message_dedupe_key(task, selected_turn, "assistant"),
     )
 
 
@@ -244,6 +257,7 @@ def _append_subagent_thread_commentaries(
     thread_id: str,
     attempt_id: str,
     values: object,
+    turn_id: str = "",
 ) -> None:
     if not isinstance(values, (list, tuple)):
         return
@@ -252,6 +266,7 @@ def _append_subagent_thread_commentaries(
         if not text:
             continue
         commentary_metadata = _agent_turn_metadata(task, attempt_id)
+        commentary_metadata["conversation_request_id"] = turn_id or attempt_id
         commentary_metadata.update(
             {
                 "assistant_part_id": f"commentary:{index}",
@@ -268,7 +283,7 @@ def _append_subagent_thread_commentaries(
             },
             dedupe_key=_agent_message_dedupe_key(
                 task,
-                attempt_id,
+                turn_id or attempt_id,
                 f"assistant-commentary-{index}",
             ),
         )

@@ -2874,21 +2874,42 @@ class RuntimeRepository(
             ).fetchall()
         return [conn_row_to_event(row) for row in rows]
 
-    # LLM: 只按事件类型做有界倒序查询，供"某个结构事实是否留下过"的恢复扫描使用；
-    # 它不参与状态裁决，也不做全表聚合，调用方必须自带 limit。
-    # 函数用途: 读取某一类运行时事件的最新若干条（恢复链据此找回未落盘事实的精确身份）。
-    def recent_events_of_type(self, event_type: str, *, limit: int = 50) -> list[dict[str, Any]]:
-        normalized = str(event_type or "").strip()
-        if not normalized:
-            return []
-        with self._runtime_connection() as conn:
+    # LLM: 恢复游标只决定扫描顺序，不代表消费；消费由同 agent_run/attempt 的独立回执决定。
+    # 每页在未消费集合内按 seq 前进，到尾部再绕回，坏记录不会饿死后面的记录；不删除事件。
+    # 函数用途: 分页轮转读取待恢复事实，并持久化下一次扫描位置；同一身份只返回最新事实。
+    def pending_events_page(
+        self, event_type: str, *, consumed_event_type: str, consumer: str, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        key = f"event_recovery_cursor:{consumer}:{event_type}"
+        with self.transaction() as conn:
+            saved = conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
+            cursor = int(saved["value"]) if saved is not None else 0
+            query = """
+                SELECT e.* FROM runtime_events e
+                WHERE e.event_type = ? AND e.seq > ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM runtime_events c WHERE c.event_type = ?
+                    AND c.agent_run_id = e.agent_run_id AND c.attempt_id = e.attempt_id
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM runtime_events n WHERE n.event_type = e.event_type
+                    AND n.agent_run_id = e.agent_run_id AND n.attempt_id = e.attempt_id
+                    AND n.seq > e.seq
+                  )
+                ORDER BY e.seq ASC LIMIT ?
+            """
             rows = conn.execute(
-                """
-                SELECT * FROM runtime_events WHERE event_type = ?
-                ORDER BY seq DESC LIMIT ?
-                """,
-                (normalized, int(limit)),
+                query, (event_type, cursor, consumed_event_type, max(1, int(limit))),
             ).fetchall()
+            if not rows and cursor:
+                rows = conn.execute(
+                    query, (event_type, 0, consumed_event_type, max(1, int(limit))),
+                ).fetchall()
+            conn.execute(
+                "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(rows[-1]["seq"] if rows else 0)),
+            )
         return [conn_row_to_event(row) for row in rows]
 
 

@@ -1093,6 +1093,23 @@ def handle_client_agent_guidance(handler, server) -> None:
     handler._send_json(202, result)
 
 
+# LLM: Reuse authenticated client owner resolution, then the transport-neutral Goal controller; raw thread IDs are not accepted.
+# 函数用途: 接收目标查看与明确保存操作，不在 HTTP 线程调用模型或改变权限。
+def handle_client_goal(handler, server) -> None:
+    from ..conversation.goal_control import execute_agent_goal_control
+
+    body = _read_agent_control_body(handler, server)
+    if body is None:
+        return
+    try:
+        owner_agent, scope = _agent_control_context(handler, server, body)
+        result = execute_agent_goal_control(owner_agent, scope=scope, payload=body)
+    except AgentControlError as exc:
+        _send_agent_control_error(handler, exc)
+        return
+    handler._send_json(200, result)
+
+
 # LLM: The handler forwards only mappings to the exact owner's approval service;
 # missing/scalar bodies and owner-resolution failures end before durable mutation.
 # 函数用途: 把 TUI/Web 的子代理工具审批决定写回当前用户的原始等待调用。
