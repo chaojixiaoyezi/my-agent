@@ -3,6 +3,7 @@ from __future__ import annotations
 """Recursive parent-child lifecycle uses durable events instead of polling."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from agent_py_agent.agent.agent_core.runner.prompt_context_summary import (
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
+    task_local_wait_response_for_open_subagents,
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import runtime as runtime_module
@@ -38,6 +40,30 @@ from agent_py_agent.agent.subagents.runner_completion_wake import (
     notify_parent_on_capability_request,
     notify_parent_on_runner_result,
 )
+
+
+def test_simultaneous_child_results_release_one_parent_wait(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    manager, parent, children = _parent_and_children(tmp_path, ("RUNNING", "RUNNING"))
+    mark_parent_waiting_for_direct_children(manager, parent.id)
+    for child in children:
+        child.status = "DONE"
+        manager.save(child)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        decisions = list(pool.map(lambda child: reconcile_parent_wait_for_child(manager, child.id), children))
+    assert sum(item.should_resume for item in decisions) == 1
+
+
+def test_result_arriving_between_model_response_and_wait_is_not_treated_as_read(tmp_path):
+    manager, parent, children = _parent_and_children(tmp_path, ("DONE", "RUNNING"))
+    observed = {child.id: {"status": "RUNNING"} for child in children}
+    waiting = mark_parent_waiting_for_direct_children(manager, parent.id, observed_children=observed)
+    assert children[0].id in waiting
+    assert reconcile_parent_wait_for_child(manager, children[0].id).should_resume
+    observed[children[0].id]["status"] = "DONE"
+    assert mark_parent_waiting_for_direct_children(manager, parent.id, observed_children=observed) == (children[1].id,)
+    assert not reconcile_parent_wait_for_child(manager, children[0].id).should_resume
 
 
 def _parent_and_children(tmp_path, statuses=("RUNNING",)):
@@ -91,7 +117,7 @@ def _tool_loop_params(parent_id: str) -> ToolLoopExecuteParams:
     )
 
 
-def test_task_local_create_yields_and_wait_marker_blocks_orphan_restart(tmp_path) -> None:
+def test_task_local_create_continues_and_only_plain_final_marks_wait(tmp_path) -> None:
     manager, parent, children = _parent_and_children(tmp_path)
     agent = type(
         "Agent",
@@ -103,16 +129,21 @@ def test_task_local_create_yields_and_wait_marker_blocks_orphan_restart(tmp_path
         },
     )()
 
+    params = _tool_loop_params(parent.id)
     response = completion_response_after_tool_round(
         ToolRoundCompletionRequest(
-            agent=agent,
-            params=_tool_loop_params(parent.id),
+            params=params,
             response=ModelResponse(text="created", backend="test"),
-            before_executed_count=0,
-            subagent_output_written=False,
         )
     )
 
+    assert response is None
+    assert not parent_wait_blocks_dispatch(manager.load(parent.id))
+    # 下一工具轮也能执行；只有模型真正让出时才进入原等待链路。
+    params.executed_tools.append("read_file")
+    response = task_local_wait_response_for_open_subagents(
+        agent, params, response=ModelResponse(text="created", backend="test"),
+    )
     refreshed = manager.load(parent.id)
     assert response is not None
     assert response.runtime_status == "unfinished"
@@ -127,7 +158,7 @@ def test_task_local_create_yields_and_wait_marker_blocks_orphan_restart(tmp_path
     assert children[0].id in refreshed.attributes["direct_child_wait"]["run_ids"]
 
 
-def test_successful_siblings_resume_parent_only_after_last_child(tmp_path) -> None:
+def test_successful_child_resumes_parent_then_remaining_sibling_can_wake_again(tmp_path) -> None:
     manager, parent, children = _parent_and_children(tmp_path, statuses=("RUNNING", "RUNNING"))
     mark_parent_waiting_for_direct_children(
         manager, parent.id, [child.id for child in children]
@@ -138,9 +169,13 @@ def test_successful_siblings_resume_parent_only_after_last_child(tmp_path) -> No
     manager.save(first)
     first_decision = reconcile_parent_wait_for_child(manager, first.id)
 
-    assert first_decision.should_resume is False
-    assert first_decision.reason == "siblings_still_active"
-    assert parent_wait_blocks_dispatch(manager.load(parent.id)) is True
+    assert first_decision.should_resume is True
+    assert first_decision.reason == "direct_child_completed"
+    assert parent_wait_blocks_dispatch(manager.load(parent.id)) is False
+    assert not reconcile_parent_wait_for_child(manager, first.id).should_resume
+    # 父级处理第一份后再让出，只登记仍在跑的第二份；旧 DONE 不触发重复续跑。
+    assert mark_parent_waiting_for_direct_children(manager, parent.id) == (children[1].id,)
+    assert not reconcile_parent_wait_for_child(manager, first.id).should_resume
 
     second = manager.load(children[1].id)
     second.status = "DONE"
@@ -179,13 +214,14 @@ def test_late_child_completion_resumes_same_parent_after_many_work_slices(
         manager.save(child)
         _resume_direct_parent_after_session(worker, child.id)
         if index == 0:
-            assert started == []
-            assert parent_wait_blocks_dispatch(manager.load(parent.id))
+            assert started == [[parent.id]]
+            assert not parent_wait_blocks_dispatch(manager.load(parent.id))
+            mark_parent_waiting_for_direct_children(manager, parent.id)
 
-    assert started == [[parent.id]]
+    assert started == [[parent.id], [parent.id]]
     assert not parent_wait_blocks_dispatch(manager.load(parent.id))
     _resume_direct_parent_after_session(worker, children[-1].id)
-    assert started == [[parent.id]]
+    assert started == [[parent.id], [parent.id]]
 
 
 def test_user_guidance_releases_parent_wait_without_stopping_children(tmp_path) -> None:
@@ -532,7 +568,7 @@ def test_completion_prose_cannot_override_typed_failed_status() -> None:
     assert metadata["completion_message"] == task.result
 
 
-def test_root_success_wake_waits_model_free_until_same_tree_settles(tmp_path) -> None:
+def test_root_success_wake_does_not_wait_for_slow_sibling(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / "subagents")
     first = manager.create_run(goal="第一块", thought="执行", plan=["做"], role="worker")
     second = manager.create_run(goal="第二块", thought="执行", plan=["做"], role="worker")
@@ -554,7 +590,7 @@ def test_root_success_wake_waits_model_free_until_same_tree_settles(tmp_path) ->
         metadata={"status": "DONE"},
     )
 
-    assert _successful_completion_waiting_for_batch(scheduler, signal, 10.0) is True
+    assert _successful_completion_waiting_for_batch(scheduler, signal, 10.0) is False
 
     second = manager.load(second.id)
     second.status = "DONE"
@@ -563,8 +599,8 @@ def test_root_success_wake_waits_model_free_until_same_tree_settles(tmp_path) ->
     assert _successful_completion_waiting_for_batch(scheduler, signal, 10.0) is False
 
 
-def test_completion_batch_uses_root_reader_without_full_history_scan() -> None:
-    """生产 manager 提供 root reader 时，后台合批不得再读全部历史。"""
+def test_completion_batch_does_not_read_any_tree() -> None:
+    """是否等待合批只由持久事件时间决定，不依赖同根活跃孩子或完整历史。"""
     seen: list[str] = []
 
     def root_report(root_task_id: str):
@@ -595,14 +631,10 @@ def test_completion_batch_uses_root_reader_without_full_history_scan() -> None:
     )
 
     assert _successful_completion_waiting_for_batch(scheduler, signal, 10.0) is False
-    assert seen == ["root-indexed"]
+    assert seen == []
 
 
-# LLM: 一轮 ready 扫描里同一 root_task_id 可能有 6 条 DONE 通知，每条都查一次同根全树
-# 就是 6 次 exists/stat/deepcopy；单次扫描缓存必须把它压成每个根一次，
-# 但不得跨调用存在（直接调用/其它入口仍必须读到最新树状态）。
-# 函数用途: 验证同一次扫描内同根只查一次，且不同根各自查一次。
-def test_ready_scan_checks_each_root_tree_once(monkeypatch) -> None:
+def test_ready_scan_never_uses_tree_as_completion_barrier(monkeypatch) -> None:
     store = SimpleNamespace(
         pending_wake_signals=lambda limit=0: (
             _root_done_signal("wake-a1", "root-a"),
@@ -632,8 +664,20 @@ def test_ready_scan_checks_each_root_tree_once(monkeypatch) -> None:
 
     ready = runtime_module._ready_background_thread_ids(scheduler, current=10.0)
 
-    assert checked == ["root-a", "root-b"]
+    assert checked == []
     assert len(ready) == len(set(ready))
+    assert set(ready) == {"thread-root-a", "thread-root-b"}
+
+
+def test_completion_coalesce_deadline_is_not_extended_by_new_successes() -> None:
+    scheduler = SimpleNamespace(_config_limit=lambda _name: 5)
+    signal = _root_done_signal("first-result", "root")
+    assert _successful_completion_waiting_for_batch(scheduler, signal, 2.0)
+    assert not _successful_completion_waiting_for_batch(scheduler, signal, 6.0)
+    # 后到同根或另一批结果不改变第一份的截止时间。
+    later = replace(_root_done_signal("later-result", "root"), created_at=5.0)
+    assert _successful_completion_waiting_for_batch(scheduler, later, 6.0)
+    assert not _successful_completion_waiting_for_batch(scheduler, signal, 6.0)
 
 
 def _root_done_signal(wake_signal_id: str, root_task_id: str) -> WakeSignal:

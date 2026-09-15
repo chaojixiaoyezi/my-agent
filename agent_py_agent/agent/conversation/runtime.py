@@ -5190,19 +5190,16 @@ def _batched_audit_finding_signal(signals: tuple[WakeSignal, ...]) -> WakeSignal
     )
 
 
-# LLM: Successful root-child wakes are model-free while the exact tree still
-# has active runs, then use the existing short debounce to batch the settled tree.
-# 函数用途: 成功子代理不逐个叫醒主模型，等同树任务收齐后一次整合。
+# LLM: 合批只读事件创建时间与配置，不能用同树活跃孩子阻挡已完成结果。
+#   就绪扫描与消费必须共用本入口；确认仍由实际采样信封的耐久回执负责。
+# 函数用途: 短暂合并连续完成通知，到期即可交父级，不等最慢的兄弟。
 def _successful_completion_waiting_for_batch(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
     current: float,
-    tree_cache: dict[str, bool] | None = None,
 ) -> bool:
     if not _successful_completion_signal(signal):
         return False
-    if _successful_completion_tree_still_active(scheduler, signal, tree_cache):
-        return True
     delay = scheduler._config_limit("background_completion_coalesce_seconds")
     created_at = float(signal.created_at or 0.0)
     return delay > 0 and 0 < created_at <= current < created_at + delay
@@ -5219,39 +5216,6 @@ def _successful_completion_signal(signal: WakeSignal) -> bool:
         str(metadata.get("status") or "").strip().upper() == "DONE"
         and metadata.get("audit_source_worker") is not True
     )
-
-
-# LLM: This tree check is status-only and excludes deterministic Audit source
-# lifecycle wakes, which must reach their non-model supervisor immediately.
-# tree_cache 由调用方在**单次扫描**内传入：一轮 ready 扫描会对每条 pending 信号各查一次同根全树
-# （6 条 DONE × 同根 N 个孩子 = 6N 份记录被重复 exists/stat/deepcopy），而同一轮扫描内树状态不会变。
-# 缓存不挂在 scheduler 上、不跨调用存在：直接调用（含测试与其它入口）仍必然读到最新状态。
-# 函数用途: 判断一条 DONE 通知所属的精确任务树是否还有孩子在跑。
-def _successful_completion_tree_still_active(
-    scheduler: BackgroundMainAgentScheduler,
-    signal: WakeSignal,
-    tree_cache: dict[str, bool] | None = None,
-) -> bool:
-    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-    if metadata.get("audit_source_worker") is True:
-        return False
-    agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
-    root_task_id = str(signal.root_task_id or "").strip()
-    if agent is None or not root_task_id:
-        return False
-    if tree_cache is not None and root_task_id in tree_cache:
-        return tree_cache[root_task_id]
-    related, state_error = _related_subagent_runs(agent, root_task_id)
-    if state_error:
-        return False
-    from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
-
-    still_active = any(
-        not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related
-    )
-    if tree_cache is not None:
-        tree_cache[root_task_id] = still_active
-    return still_active
 
 
 # LLM: 这里只比较事件身份和终态类型；能否随本轮一起确认还必须由调用方检查采样时间边界。
@@ -5468,14 +5432,10 @@ def _ready_background_thread_ids(
         seen.add(normalized)
         ready.append(normalized)
 
-    # 单次扫描内同根树状态只查一次：一轮里可能有同一 root_task_id 的多条 DONE 通知。
-    completion_tree_cache: dict[str, bool] = {}
     for signal in scheduler.store.pending_wake_signals(limit=0):
         if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
             continue
-        if _successful_completion_waiting_for_batch(
-            scheduler, signal, current, completion_tree_cache
-        ):
+        if _successful_completion_waiting_for_batch(scheduler, signal, current):
             continue
         append(signal.thread_id, signal.root_task_id)
     for observation in scheduler.store.unhandled_observations_requiring_main(limit=0):

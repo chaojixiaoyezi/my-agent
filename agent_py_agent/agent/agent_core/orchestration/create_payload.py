@@ -190,10 +190,8 @@ def _operation_contract(
     }
 
 
-# LLM: Create receipts never recommend polling. Like 会话运行时 spawn_agent, a root
-# parent may use a direct-child control tool immediately in the same active turn,
-# then yield; host lifecycle events remain the only automatic wake authority.
-# 函数用途: 告诉父代理可立刻追加消息或停止子代理；没有控制动作时再等待宿主生命周期事件，不产生轮询调用。
+# LLM: 回执只报告异步启动与事件交付，不强迫结束当前回合或轮询；延迟创建仍读显式状态。
+# 函数用途: 让父级继续不冲突的工作，需要孩子结果时才自然让出等待。
 def _next_action(
     tasks,
     request_params: dict[str, object],
@@ -221,13 +219,13 @@ def _next_action(
         }
     if (auto_start or {}).get("status") == "started":
         return {
-            "action": "await_lifecycle_event",
+            "action": "continue_independent_work",
             "run_ids": run_ids,
             "immediate_control_tools": ["send_guidance", "cancel_subagents"],
             "reason": (
-                "create_subagents 已把本批 run 交给后台调度；若本轮还有追加要求或纠偏，"
-                "现在可直接使用 send_guidance，随后结束本回合。否则直接等待，"
-                "进展、阻塞或完成时宿主会唤醒直接父级；不要轮询。"
+                "本批子代理已在后台运行。你可以继续自己的独立工作、使用已完成结果或给直属孩子追加要求。"
+                "需要的结果尚未到达且没有其他有用工作时，再自然结束本轮等待事件。"
+                "孩子的结果或异常会交给直接父级，不必等全部兄弟完成；不要反复轮询或重复它们的工作。"
             ),
         }
     return {

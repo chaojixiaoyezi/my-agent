@@ -38,3 +38,13 @@ subagent_stream_activity_projection_enabled: true
 # 慢模型流式活动最短刷新间隔（秒）。
 # 默认 15 秒，避免每个 token 都写文件；小于 1 的值运行时按 1 秒处理。
 subagent_stream_activity_interval_seconds: 15
+
+# 是否提醒直属父级某个阶段长时间没有新活动；复用原心跳，不周期性调用模型。
+# 提醒不是失败判定，不自动停止、重跑或接管；慢流只看最近数据，不看总工作时长。
+subagent_activity_notices_enabled: true
+# 首 token 尚未出现，或退避结束后仍长期无事件，提醒秒数；0 关闭此类提醒。
+subagent_first_token_notice_seconds: 600
+# 流已开始但长期无数据，或步骤之间没有新活动，提醒秒数；0 关闭此类提醒。
+subagent_stream_idle_notice_seconds: 180
+# 工具长时间未返回时的提醒秒数；可能仍在编译或等待审批，不判失败；0 关闭。
+subagent_tool_wait_notice_seconds: 900

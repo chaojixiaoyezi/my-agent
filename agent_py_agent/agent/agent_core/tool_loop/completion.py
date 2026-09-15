@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# LLM: 工具结果只驱动正常下一轮；本模块维护显式上下文转换和自然让出后的依赖等待，不因创建自动停工。
+# 模块用途: 处理工具轮收尾和模型阶段答复，避免把派工误当成任务完成或强制等待。
 import json
 import time
 from dataclasses import dataclass
@@ -21,10 +23,7 @@ from ...tooling.operation_verification import (
     public_operation_verification,
 )
 from .._runtime_params import ToolLoopExecuteParams
-from ..runtime.guidance import (
-    active_turn_user_reply_required,
-    satisfy_active_turn_user_reply,
-)
+from ..runtime.guidance import observed_direct_children, satisfy_active_turn_user_reply
 from ..runtime.task_identity import durable_task_id
 from .natural_user_reply import queue_natural_user_reply
 
@@ -33,23 +32,19 @@ _MAX_WAIT_REPLY_GUIDANCE_CHARS = 1200
 _MAX_WAIT_REPLY_GUIDANCE_ITEMS = 5
 
 
+# LLM: 只携带完成转换确实消费的模型响应与回合参数；删除旧的创建计数/产物探测字段。
+# 类用途: 把本轮响应交给收尾判断，不再重复统计子代理创建行为。
 @dataclass(frozen=True)
 class ToolRoundCompletionRequest:
     __test__: ClassVar[bool] = False
 
-    agent: object
     params: ToolLoopExecuteParams
     response: ModelResponse
-    before_executed_count: int
-    subagent_output_written: bool
-    tool_rounds: int = 0
 
 
-# LLM: A task-local recursive create ends that child execution slice, but a root
-# turn receives the create result in the same active turn so it
-# may immediately send guidance/cancel before choosing to wait. Do not queue a
-# presentation receipt merely because create_subagents succeeded.
-# 函数用途: 工具轮结束后处理 Compact 转换；孙代理创建后让子代理等待，主代理则继续同一回合以便立刻追加消息。
+# LLM: 创建是所有层级的普通工具结果，不是轮结束信号；真正的 plain final 才由
+#   _tool_loop_service 调用直属等待入口。保持 Compact 转换与已回复插话的记账。
+# 函数用途: 工具轮后继续独立工作，不因派出孩子强制主、子或孙代理等待。
 def completion_response_after_tool_round(
     request: ToolRoundCompletionRequest,
 ) -> ModelResponse | None:
@@ -61,24 +56,6 @@ def completion_response_after_tool_round(
         # child transcript sinks, so this model-authored segment satisfies the
         # consumed steer even though the task continues to execute tools.
         satisfy_active_turn_user_reply(request.params)
-    successful_tools = list(request.params.executed_tools or [])[request.before_executed_count :]
-    if "create_subagents" in successful_tools:
-        if active_turn_user_reply_required(request.params):
-            # A user steer that immediately caused another child spawn still
-            # needs one ordinary reply. Continue the same bounded model loop;
-            # do not settle the parent wait with an empty assistant message.
-            return None
-        if wait_response := task_local_wait_response_for_open_subagents(
-            request.agent,
-            request.params,
-            response=request.response,
-        ):
-            return wait_response
-        # A child creation result is an ordinary tool result: the parent
-        # model gets another sample in the same active turn and can immediately
-        # call send_message.  Root create_subagents must preserve that control
-        # opportunity; the generic open-child receipt is queued only if the
-        # model later tries to finish while a direct child is still active.
     # 工具轮后正文为空不代表结束，主循环须带着工具结果继续采样。
     # 没有工具也没有正文时，由 response_decision 处理有界重试；持续无产出报告
     # USER_REPLY_UNAVAILABLE，不能把缺失结果冒充正常完成。
@@ -107,6 +84,7 @@ def task_local_wait_response_for_open_subagents(
     waiting = mark_parent_waiting_for_direct_children(
         getattr(agent, "subagents", None),
         parent_run_id,
+        observed_children=observed_direct_children(params),
     )
     if not waiting:
         return None
@@ -745,10 +723,6 @@ def _bounded_reply_fact_text(value: object, limit: int) -> str:
     head = (limit - len(marker)) // 2
     tail = limit - len(marker) - head
     return text[:head] + marker + text[-tail:]
-
-
-def _is_task_local_round(request: ToolRoundCompletionRequest) -> bool:
-    return str(getattr(request.params, "context_scope", "") or "").strip().lower() == "task_local"
 
 
 __all__ = [

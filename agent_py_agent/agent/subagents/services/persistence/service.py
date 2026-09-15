@@ -818,7 +818,8 @@ def _merge_existing_child_links(service: SubAgentPersistenceService, task: SubAg
 # LLM: Capability records form an independent append-only domain and are merged on every full save.
 # runner_attempts is the monotonic generation fence: an older writer may add a capability delta,
 # but cannot replace lifecycle/result/attempt facts settled by a newer runner generation.
-# 函数用途: 双向保留并发授权账，并阻止旧副本把已收口的子代理改回运行中。
+#   活动诊断只允许专属窄 mutation 更新，full save 始终保留 canonical 版本。
+# 函数用途: 保留并发授权与活动提醒，并阻止旧副本把已收口的子代理改回运行中。
 def _merge_concurrent_capability_and_runner_state(
     service: SubAgentPersistenceService,
     task: SubAgentTask,
@@ -845,6 +846,11 @@ def _merge_concurrent_capability_and_runner_state(
     if existing_runner_is_newer and not incoming_is_control_terminal:
         for item in fields(task):
             setattr(task, item.name, copy.deepcopy(getattr(existing, item.name)))
+    # 活动诊断由心跳的窄 mutation 独占写入。旧工具/进度快照保存时不能覆盖或删除它，
+    # 否则正常流式进展会抹掉提醒回执，造成重复通知；旧 attempt 的展示仍按 exact ID 隔离。
+    diagnostic = (existing.attributes or {}).get("runtime_activity_diagnostic")
+    if isinstance(diagnostic, dict):
+        task.attributes = {**dict(task.attributes or {}), "runtime_activity_diagnostic": copy.deepcopy(diagnostic)}
     # capability 是独立的 append-only 域。canonical 永远是冲突裁决基线，旧 writer
     # 只能补新 request/grant/gap 或把 OPEN 推进到终态，不能翻转已落盘的终态。
     task.capability_requests = _merge_capability_requests(

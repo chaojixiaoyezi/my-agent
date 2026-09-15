@@ -459,12 +459,13 @@ def test_items_without_output_files_keep_business_output_contract_empty(tmp_path
     assert payload["child_result_index"][0]["read_order"] == []
     assert payload["child_output_read_order"][0]["expected_outputs"] == []
     assert payload["child_output_read_order"][0]["read_order"] == payload["child_result_index"][0]["read_order"]
-    assert payload["next_action"]["action"] == "await_lifecycle_event"
+    assert payload["next_action"]["action"] == "continue_independent_work"
     assert payload["next_action"]["immediate_control_tools"] == [
         "send_guidance",
         "cancel_subagents",
     ]
-    assert "现在可直接使用 send_guidance" in payload["next_action"]["reason"]
+    assert "自己的独立工作" in payload["next_action"]["reason"]
+    assert "随后结束本回合" not in payload["next_action"]["reason"]
     assert "status_tool_call" not in payload
     assert "wait_tool_call" not in payload
     assert "subagent_workspace" not in payload

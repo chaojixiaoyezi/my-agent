@@ -507,7 +507,7 @@ class TestCreateSubagentsToolExecute:
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["dispatch_mode"] == "background"
         assert "agent_tree" not in payload["auto_start"]
-        assert payload["next_action"]["action"] == "await_lifecycle_event"
+        assert payload["next_action"]["action"] == "continue_independent_work"
 
     def test_default_capacity_accepts_one_atomic_batch_of_eight(self, monkeypatch):
         """默认八槽必须允许一个 items 调用完整创建八名 child，不静默拆批或截断。"""

@@ -75,6 +75,9 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
   Shell/controlled_exec 是非交互批处理（stdin=DEVNULL），交互用独立 PTY；后台句柄不是 PTY 句柄。
 - 普通子代理直接创建并自动运行；角色/权限快照决定是否可递归，不能解析 goal 扩权。
   正常进度靠直属生命周期事件；list_agents 只供按需查看，不轮询或手工推动。
+  创建不自动让出；主子孙均可继续独立工作，任一新结果可交给直属父级，不等全树结束。
+  阶段长等待按 exact attempt 给诊断，慢流不按总耗时强杀；提醒不改权限或重跑未知副作用。
+  详见 `docs/design/SUBAGENT_PARALLEL_EXECUTION.md`，真实组合的覆盖边界另列。
   用户插话/停止/查看走同一 owner-scoped 结构化控制协议。详见 `docs/modules/subagent/SUBAGENT_RUNBOOK.md`。
 - 派工以显式 covers 绑定原 Todo，output_files 可选且不授予额外权限；共享项目目录不代表冲突。
   同一 operation 重放回原回执，普通不同创建不能因 IO 路径相同被合并。依赖/独占写集由模型合理分工，

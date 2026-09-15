@@ -134,7 +134,7 @@ class TestCreateSubagentsItemsMode:
         assert payload["created"] == 3
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["run_ids"] == ["run_1", "run_2", "run_3"]
-        assert payload["next_action"]["action"] == "await_lifecycle_event"
+        assert payload["next_action"]["action"] == "continue_independent_work"
 
     def test_batch_description_does_not_replace_each_child_duty(self):
         """顶层批次说明不能扇出成所有 child 相同的 TUI 职责短标题。"""

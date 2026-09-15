@@ -12,7 +12,11 @@ from pathlib import Path
 
 from ..settings.config import load_simple_yaml
 
+# LLM: 子代理权限、运行投影和阶段提醒的唯一默认配置；新增字段同步随包 YAML 与配置一致性测试。
+# 模块用途: 集中读取协作能力设置，不把阶段提醒时间当成执行超时或权限授予。
 
+# LLM: 时间限制与只提示不终止的活动阈值分开；关闭提醒不得改变 runner 原生命周期。
+# 类用途: 定义子代理能力和观测选项；数值为零的阶段提醒表示关闭该阶段。
 @dataclass
 class CapabilityConfig:
     """能力路由与子代理运行配置总表。
@@ -35,6 +39,12 @@ class CapabilityConfig:
     subagent_stream_activity_projection_enabled: bool = True
     # 同一模型流阶段写 canonical child state 的最小间隔，避免逐 token 落盘。
     subagent_stream_activity_interval_seconds: int = 15
+    # 使用既有 runner 心跳做阶段化提醒；不改变执行超时、终态或重试，关闭时不产生提醒。
+    subagent_activity_notices_enabled: bool = True
+    # 首 token/退避后长期无事件、已开始流的静默、长工具分别提醒；0 关闭相应阶段提醒。
+    subagent_first_token_notice_seconds: int = 600
+    subagent_stream_idle_notice_seconds: int = 180
+    subagent_tool_wait_notice_seconds: int = 900
     # 失败自省自动拆分：should_split + 拆分建议存在时自动 split_task 重新派工。
     # 默认关闭——拆分会创建新任务并改变原任务状态，需用户显式开启。
     subagent_failure_auto_split_enabled: bool = False

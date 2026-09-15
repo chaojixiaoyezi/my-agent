@@ -25,6 +25,42 @@ _COMPLETION_MESSAGE_MAX_TOKENS = 1_000
 _COMPLETION_EVIDENCE_REF_LIMIT = 20
 
 
+# LLM: 活动提醒走原 wake/observation 原子对，按 run+attempt+阶段去重；不是终态，不触发强杀。
+#   递归父级从 canonical 直属快照和等待调和读取同一诊断，不把孙代理通知越级广播给根。
+# 函数用途: 把长时间没有新活动的观测交给直属父级，让它决定查看、插话或继续等。
+def notify_parent_on_activity_notice(manager: Any, task: Any, notice: dict[str, Any]) -> bool:
+    if _has_persisted_subagent_parent(manager, task):
+        return True
+    store = getattr(manager, "conversation_store", None)
+    if store is None:
+        return False
+    thread = store.thread_for_task(task.id)
+    if thread is None:
+        return False
+    key = str(notice["notice_key"])
+    if store.wake_delivery_receipt(thread.thread_id, key) in {"pending", "handled"}:
+        return True
+    public = {k: v for k, v in notice.items() if k != "notified"}
+    metadata = {"task_id": task.id, "status": task.status, "activity_diagnostic": public}
+    shared = {
+        "thread_id": thread.thread_id, "urgency": "normal",
+        "source_agent_id": task.id, "parent_agent_id": str(task.parent_id),
+        "root_task_id": str(task.root_id), "metadata": metadata,
+    }
+    store.append_observation_with_wake(
+        {
+            **shared, "event_type": "subagent_activity_notice", "requires_main_agent": True,
+            "summary": (
+                f"子代理 {task.id} 阶段 {notice['phase']} 已 {int(notice['quiet_seconds'])} 秒没有新活动。"
+                "这是阶段等待观测，不是已失败或已停止；先核对当前活动，慢首 token、长工具和审批可能正常。"
+                "可在原权限内查看、补充消息或继续等待；未知执行效果不得自动重跑。"
+            ),
+        },
+        {**shared, "reason": "subagent_activity_notice", "dedupe_key": key},
+    )
+    return True
+
+
 # LLM: Normal runner results notify only statuses that need parent model attention. User-controlled
 # cancellation uses the sibling entry below so model-owned cancel_subagents remains an in-turn fact
 # and cannot create a duplicate background wake.

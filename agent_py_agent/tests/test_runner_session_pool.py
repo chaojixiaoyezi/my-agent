@@ -88,3 +88,23 @@ def test_runner_session_heartbeat_stops_at_cancelled_canonical_state(tmp_path) -
         is False
     )
     assert manager.load(task.id).attributes["runner_session"]["status"] == "cancelled"
+
+
+def test_activity_observer_failure_never_stops_heartbeat(monkeypatch, caplog):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runner import session_pool
+
+    beats = []
+    waits = iter([False, False, True])
+    monkeypatch.setattr(session_pool, "_record_runner_session", lambda *args, **kwargs: beats.append(kwargs["status"]) or True)
+
+    def fail():
+        raise OSError("temporary diagnostic write error")
+
+    session_pool._heartbeat_loop(
+        RunnerSessionPoolLease(manager=None, run_id="test-child", activity_observer=fail),
+        {}, SimpleNamespace(wait=lambda interval: next(waits)),
+    )
+    assert beats == ["running", "running"]
+    assert "runner activity observation failed" in caplog.text

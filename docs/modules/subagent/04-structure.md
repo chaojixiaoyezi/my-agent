@@ -347,7 +347,9 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 ## 2026-08-25 root completion mailbox 合批边界
 
 - 每个直属 child 的 `subagent-completion.v1` 都是独立耐久交付义务；canonical 树全终态只证明可以整合，
-  不能证明 root 模型已经读取每份结果。
+  不能证明 root 模型已经读取每份结果，也不是处理某一份已完成结果的前置条件。
+- 成功通知只保留 `background_completion_coalesce_seconds` 的短窗口；以已持久信封的创建时间
+  为准，慢兄弟不会无限延后。原批次筛选、逐 ID 确认与跨页恢复保留。
 - scheduler 可把同一 exact root 的多个成功信封合成有界模型轮。选中的 batch 由 background context projector
   缩短 `completion_message`，同时保留 child id、status、`final_report_ref`；预算外 sibling 仍在 durable queue。
 - 后台轮开始时记录队列采样快照：快照内但未入 active batch 的信封不能走 mid-turn 瘦事件通道。root 任务

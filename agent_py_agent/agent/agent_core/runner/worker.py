@@ -1,12 +1,13 @@
 
 from __future__ import annotations
 
-"""Worker execution helpers for runner dispatch."""
-
+# LLM: 子代理执行器复用原 attempt、权限与心跳；活动诊断不另开执行者，也不改变显式超时。
+# 模块用途: 启动和收口子代理工作片，并把新结果交回直属父级。
 import logging
 import threading
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from ...settings import AgentConfig
@@ -15,6 +16,7 @@ from ...subagents.authorization_gate import OperationRequest, authorize_operatio
 from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
 from ...subagents.models import FailureType, SubAgentRunnerResult
 from ..subagent.params import SubagentRunParams
+from .activity_diagnostics import observe_runner_activity
 from .session_pool import RunnerSessionPoolLease, runner_session_lease
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,9 +37,8 @@ class RunSubagentWorkerParams:
     backend_override: object | None = None
 
 
-# LLM: One worker owns one bounded model slice and then settles its runner lease.
-# After settlement, continuation is driven by typed source or direct-child facts.
-# 函数用途: 运行一个子代理工作片，落盘结果后继续来源岗位或唤醒直属父级。
+# LLM: 每个 worker 只持有自己的执行代；原心跳附带阶段观测，收口后才按结构化来源或直属孩子事实续跑。
+# 函数用途: 运行子代理工作片，续租并诊断长等待，落盘结果后继续来源岗位或唤醒直属父级。
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
     from ...core import SimpleAgent
 
@@ -48,6 +49,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
             run_id=params.run_id,
             worker_id=f"subagent-worker:{params.run_id}",
             interval_seconds=_runner_session_heartbeat_interval(worker),
+            activity_observer=partial(observe_runner_activity, worker, params.run_id),
         )
     ):
         if params.dry_run:
@@ -114,10 +116,8 @@ def _continue_source_worker_after_session(worker, run_id: str, result) -> None:
         return
 
 
-# LLM: A child result may wake only the canonical direct parent. Successful
-# siblings are batched; failures release the parent immediately. The generic
-# orphan auto-start path supplies idempotency and session-liveness fencing.
-# 函数用途: 子代理工作片收口后，在等待条件满足时自动拉起它的直属父代理。
+# LLM: 新结果只解除直属父级的等待，不等全部兄弟；原 auto-start 的 session/attempt 栅栏阻止双执行。
+# 函数用途: 孩子收口后让空闲父级及时处理结果，已在工作的父级不会另开副本。
 def _resume_direct_parent_after_session(worker: object, child_run_id: str) -> None:
     try:
         from ...subagents.direct_parent_lifecycle import (
@@ -213,10 +213,8 @@ def _attach_worker_local_store(worker, local_store: object | None) -> None:
     worker.memory.local_store = local_store
 
 
-# LLM: Every real child attempt owns a named cancellation token, not only timeout-enabled
-# attempts. The exact run/attempt identity is prepared before registration and passed unchanged
-# into the lifecycle so an Esc/model cancel can close only this child inside a shared Gateway.
-# 函数用途: 在没有超时计时器的普通子代理执行轮外包一层精确可中断边界。
+# LLM: 真实执行前绑定 exact attempt 给取消令牌与心跳观测；身份不可被后来的执行代替换。
+# 函数用途: 给普通子代理建立可中断边界和活动身份，停止不影响共享 Gateway 内其它代理。
 def _run_subagent_worker_interruptibly(
     worker,
     params: RunSubagentWorkerParams,
@@ -228,6 +226,8 @@ def _run_subagent_worker_interruptibly(
         retry_reason=params.retry_reason,
     )
     attempt_id = prepared.runner_active_attempt_id
+    # 跨心跳线程只传递此 worker 真正取得的执行代；不能拿后来新 worker 的活动冒充本轮。
+    worker._runner_activity_attempt_id = attempt_id
     interrupt_name = f"subagent-runner-attempt:{params.run_id}:{attempt_id}"
     with register_interruptible(interrupt_name):
         return worker.run_subagent(
@@ -243,6 +243,8 @@ def _run_subagent_worker_interruptibly(
         )
 
 
+# LLM: 仅执行显式 timeout，活动提醒不能进入这条取消路径；执行和观测使用同一个预备 attempt。
+# 函数用途: 为明确有时间预算的子代理启动执行线程，到期按原合同收口，而不是因模型慢自行判死。
 def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
     from ...concurrency.interrupt import (
         interrupt_by_name,
@@ -254,6 +256,7 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
         params.run_id, retry_reason=params.retry_reason
     )
     attempt_id = prepared.runner_active_attempt_id
+    worker._runner_activity_attempt_id = attempt_id
     interrupt_name = (
         f"subagent-runner-attempt:{params.run_id}:{attempt_id}"
     )

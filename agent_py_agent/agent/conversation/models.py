@@ -36,6 +36,7 @@ SUBAGENT_LIFECYCLE_WAKE_REASONS = frozenset(
         "subagent_runner_finished",
         "subagent_capability_request_open",
         "subagent_capability_granted",
+        "subagent_activity_notice",
     }
 )
 

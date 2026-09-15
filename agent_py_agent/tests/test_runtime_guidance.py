@@ -260,6 +260,41 @@ def test_runtime_direct_children_snapshot_never_claims_terminal_when_load_is_par
     assert payload["all_terminal"] is False
 
 
+def test_root_snapshot_uses_index_without_duplicating_completion_body() -> None:
+    child = _direct_child("child-done", "task-root", "DONE")
+    child.result = "这份结论由耐久完成事件交付。"
+    manager = _MutableSubagentManager([child])
+    manager.list_runs_for_root_report = MagicMock(return_value=SimpleNamespace(runs=[child], load_errors=[]))
+    manager.list_runs_report = MagicMock(side_effect=AssertionError("不应扫描全部历史"))
+    agent = SimpleNamespace(subagents=manager)
+    params = _tool_loop_params(task_id="task-root")
+
+    assert refresh_runtime_direct_children_snapshot(agent, params)
+    manager.list_runs_for_root_report.assert_called_once_with("task-root")
+    assert "child-done" in params.runtime_injections[0]
+    assert child.result not in params.runtime_injections[0]
+    assert "completion_message" not in params.runtime_injections[0]
+
+
+def test_busy_recursive_parent_receives_result_without_reading_root_mailbox() -> None:
+    grandchild = _direct_child("grandchild", "child-parent", "RUNNING")
+    agent = SimpleNamespace(subagents=_MutableSubagentManager([grandchild]))
+    params = _tool_loop_params(task_id="task-root", context_scope="task_local")
+    previous = set_current_subagent_context(agent, run_id="child-parent")
+    try:
+        refresh_runtime_direct_children_snapshot(agent, params)
+        assert not has_pending_turn_input(agent, params)
+        grandchild.status = "DONE"
+        grandchild.result = "整理出的兼容方案可供父级接入。"
+        assert has_pending_turn_input(agent, params)
+        assert inject_pending_turn_input(agent, params)
+        assert not has_pending_turn_input(agent, params)
+        assert "整理出的兼容方案" in params.runtime_injections[0]
+        assert acknowledge_injected_turn_input(agent, params) == 0
+    finally:
+        restore_current_subagent_context(agent, previous)
+
+
 def test_subagents_active_receipt_keeps_root_turn_interrupted() -> None:
     params = _tool_loop_params()
     queue_natural_user_reply(
@@ -2654,7 +2689,7 @@ def test_task_local_wait_keeps_model_reply_and_turn_end(monkeypatch) -> None:
     marked: list[str] = []
     monkeypatch.setattr(
         "agent_py_agent.agent.subagents.direct_parent_lifecycle.mark_parent_waiting_for_direct_children",
-        lambda _manager, parent_id: marked.append(str(parent_id)) or ["child-1"],
+        lambda _manager, parent_id, **kwargs: marked.append(str(parent_id)) or ["child-1"],
     )
     agent = SimpleNamespace(
         backend=SimpleNamespace(name="unit"),

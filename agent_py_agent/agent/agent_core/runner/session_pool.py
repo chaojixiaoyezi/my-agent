@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-"""Process-level runner session heartbeat governance."""
-
+# LLM: 负责 runner 租约及可选活动观察；观察失败不得中断心跳或改变任务状态。
+# 模块用途: 为正在执行的子代理续租，在同一条线程中检查长等待，不叠加后台计时器。
 import logging
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -18,12 +18,15 @@ from ...subagents.models import (
 )
 
 
+# LLM: 一个租约绑定一个 run 的现有心跳；activity_observer 只能提供只读采样和非终态诊断。
+# 类用途: 声明子代理心跳间隔和附带检查，不负责超时杀进程或重新派工。
 @dataclass(frozen=True)
 class RunnerSessionPoolLease:
     manager: Any
     run_id: str
     worker_id: str = ""
     interval_seconds: float = 5.0
+    activity_observer: Callable[[], None] | None = None
 
 
 @contextmanager
@@ -77,14 +80,18 @@ def _new_runner_session(lease: RunnerSessionPoolLease) -> dict[str, object]:
     }
 
 
-# LLM: Heartbeats stop themselves when the canonical lifecycle rejects a stale live-session
-# projection; retryable persistence errors still keep the loop alive for the next interval.
-# 函数用途: 周期刷新 runner 会话，任务已进入不可恢复终态时立即停止继续写心跳。
+# LLM: 心跳写入与活动诊断共享一条线程；诊断失败只记日志，不能停掉健康模型或导致心跳失活。
+# 函数用途: 续租并检查长等待，终态拒绝旧心跳后退出，不额外创建轮询器。
 def _heartbeat_loop(lease: RunnerSessionPoolLease, session: dict[str, object], stop_event: threading.Event) -> None:
     interval = max(0.2, float(lease.interval_seconds or 5.0))
     while not stop_event.wait(interval):
         if not _record_runner_session(lease, session, status="running"):
             return
+        if lease.activity_observer is not None:
+            try:
+                lease.activity_observer()
+            except Exception:
+                logging.getLogger(__name__).warning("runner activity observation failed (run_id=%s)", lease.run_id, exc_info=True)
 
 
 # LLM: This is the sole session-pool write adapter. False means canonical terminal state fenced

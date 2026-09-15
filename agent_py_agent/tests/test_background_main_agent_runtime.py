@@ -4858,6 +4858,28 @@ def test_done_child_wake_with_carried_successful_spawn_closes_root_task(
     assert final_row.metadata["operation_verification"]["counts"]["succeeded"] == 1
 
 
+def test_successful_result_deadline_is_not_extended_by_a_running_sibling(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.models import WakeSignal
+    from agent_py_agent.agent.conversation.runtime import _successful_completion_waiting_for_batch
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    fast = agent.subagents.create_run(goal="较快部分", thought="", plan=[], parent_id="root", root_id="root")
+    slow = agent.subagents.create_run(goal="较慢部分", thought="", plan=[], parent_id="root", root_id="root")
+    agent.subagents.lifecycle.set_status(fast.id, "DONE")
+    agent.subagents.lifecycle.set_status(slow.id, "RUNNING")
+    scheduler = SimpleNamespace(runtime=SimpleNamespace(agent=agent), _config_limit=lambda _name: 5)
+    signal = WakeSignal(
+        wake_signal_id="fast-result", thread_id="thread", root_task_id="root",
+        reason="subagent_runner_finished", source_agent_id=fast.id,
+        created_at=100.0, metadata={"status": "DONE"},
+    )
+
+    assert _successful_completion_waiting_for_batch(scheduler, signal, 104.9)
+    assert not _successful_completion_waiting_for_batch(scheduler, signal, 105.0)
+    assert not _successful_completion_waiting_for_batch(scheduler, signal, 5000.0)
+    assert agent.subagents.load(slow.id).status == "RUNNING"
+
+
 def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
     tmp_path,
 ) -> None:

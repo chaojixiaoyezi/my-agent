@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """LLM: Own the recursive parent-child wait contract for every subagent depth.
 
-模块用途: 让子代理、孙代理都用同一套“创建后暂停、孩子发事件后唤醒直属父级”规则。
+模块用途: 子代理与孙代理主动让出时登记等待；任一新结果可唤醒直属父级，不等待最慢兄弟。
 """
 
 import time
@@ -42,21 +42,39 @@ class DirectParentResumeDecision:
 
 # LLM: Persist only exact direct-child ids that are still non-terminal. The
 # marker suppresses generic orphan redispatch until a child lifecycle edge.
-# 函数用途: 父代理创建或继续等孩子时，把等待关系耐久化。
+# 函数用途: 父代理自然让出时登记仍活跃的孩子，不因创建直接暂停执行。
 def mark_parent_waiting_for_direct_children(
     manager: Any,
     parent_run_id: str,
     child_run_ids: list[str] | tuple[str, ...] | None = None,
+    *,
+    observed_children: dict[str, dict[str, object]] | None = None,
 ) -> tuple[str, ...]:
     parent_id = str(parent_run_id or "").strip()
     if manager is None or not parent_id:
         return ()
+    waiting: list[str] = []
+
+    # LLM: 仅在 canonical 父状态锁内登记等待，不覆盖并发工具进度或显式停止。
+    # 函数用途: 用最新的父子关系创建精确等待记录。
+    def update(parent: Any) -> None:
+        if not task_has_ended_status(parent):
+            waiting.extend(_mark_parent_wait_state(manager, parent, child_run_ids, observed_children))
+
     try:
-        parent = manager.load(parent_id)
+        manager.mutate(parent_id, update)
     except (FileNotFoundError, TypeError, ValueError):
         return ()
-    if task_has_ended_status(parent):
-        return ()
+    return tuple(waiting)
+
+
+# LLM: 由持有父状态锁的入口调用，只写等待字段；读取子状态不将正文解释为完成。
+# 函数用途: 汇总仍活跃的直属孩子，并记录父级已看到的提醒，供下一次事件释放等待。
+def _mark_parent_wait_state(
+    manager: Any, parent: Any, child_run_ids: object,
+    observed_children: dict[str, dict[str, object]] | None,
+) -> tuple[str, ...]:
+    parent_id = str(parent.id)
     attrs = dict(getattr(parent, "attributes", {}) or {})
     previous = _wait_record(parent)
     candidate_ids = _unique_ids(
@@ -67,16 +85,26 @@ def mark_parent_waiting_for_direct_children(
         ]
     )
     active_ids: list[str] = []
+    notice_keys: dict[str, str] = {}
     for child_id in candidate_ids:
         child = _load_exact_direct_child(manager, parent_id, child_id)
-        if child is not None and not task_status_in(
-            getattr(child, "status", ""), SUBAGENT_ENDED_STATUSES
-        ):
-            active_ids.append(child_id)
+        if child is None:
+            continue
+        status = str(getattr(child, "status", ""))
+        observed = observed_children.get(child_id, {}) if observed_children is not None else None
+        unseen_terminal = (
+            observed is not None and observed.get("status") != status
+            and (status == TaskStatus.DONE.value or _child_requires_immediate_parent_attention(child, status))
+        )
+        if task_status_in(status, SUBAGENT_ENDED_STATUSES) and not unseen_terminal:
+            continue
+        active_ids.append(child_id)
+        # 模型尚未见到的终态/提醒必须留在这次等待里，由下一事件片处理，不能被登记动作吞掉。
+        notice = observed.get("activity_diagnostic", {}) if observed is not None else current_activity_diagnostic(child)
+        notice_keys[child_id] = str(notice.get("notice_key") or "") if isinstance(notice, dict) else ""
     if not active_ids:
         if attrs.pop(DIRECT_CHILD_WAIT_ATTR, None) is not None:
             parent.attributes = attrs
-            manager.save(parent)
         return ()
     now = time.time()
     attrs[DIRECT_CHILD_WAIT_ATTR] = {
@@ -85,9 +113,9 @@ def mark_parent_waiting_for_direct_children(
         "run_ids": active_ids,
         "created_at": float(previous.get("created_at") or now),
         "updated_at": now,
+        "activity_notice_keys": notice_keys,
     }
     parent.attributes = attrs
-    manager.save(parent)
     return tuple(active_ids)
 
 
@@ -136,12 +164,9 @@ def release_parent_wait_for_user_guidance(
     return tuple(released_run_ids)
 
 
-# LLM: One child terminal event may resume only its exact direct parent. A
-# normal DONE child is batched until all marked siblings end; failures, an
-# externally controlled cancellation, and missing canonical rows demand
-# immediate parent attention. Cancellation authority comes from the durable
-# structured cancel record, never from its prose reason.
-# 函数用途: 收到孩子结果后核对等待清单；普通完成可等同批兄弟，用户从详情页停止则马上叫醒直属父级。
+# LLM: 任一新 DONE、失败或外部取消只解除直属父级的等待；父级执行仍受原 session/attempt 门保护。
+#   父级自己取消的孩子不制造额外唤醒，控制来源读取耐久字段而非正文。
+# 函数用途: 让已完成结果及时被整合，不把快孩子扣到所有兄弟完成。
 def reconcile_parent_wait_for_child(
     manager: Any,
     child_run_id: str,
@@ -249,6 +274,7 @@ def _reconcile_parent_wait(
         return DirectParentResumeDecision(parent_run_id=parent_id, reason="no_wait_marker")
     active: list[str] = []
     terminal: list[str] = []
+    completed: list[str] = []
     attention: list[str] = []
     missing: list[str] = []
     for child_id in run_ids:
@@ -263,10 +289,20 @@ def _reconcile_parent_wait(
             attention.append(child_id)
         elif task_status_in(status, SUBAGENT_ENDED_STATUSES):
             terminal.append(child_id)
+            if status == TaskStatus.DONE.value:
+                completed.append(child_id)
         else:
             active.append(child_id)
+            notice = current_activity_diagnostic(child)
+            seen_notices = marker.get("activity_notice_keys") or {}
+            if (
+                notice.get("state") == "quiet"
+                and notice.get("notice_key")
+                and notice["notice_key"] != seen_notices.get(child_id)
+            ):
+                attention.append(child_id)
     parent_terminal = task_has_ended_status(parent)
-    should_resume = not parent_terminal and (bool(attention) or not active)
+    should_resume = not parent_terminal and (bool(attention or completed) or not active)
     reason = (
         "parent_terminal"
         if parent_terminal
@@ -274,13 +310,28 @@ def _reconcile_parent_wait(
         if attention
         else "all_direct_children_terminal"
         if not active
+        else "direct_child_completed"
+        if completed
         else "siblings_still_active"
     )
     if should_resume or parent_terminal:
-        attrs = dict(getattr(parent, "attributes", {}) or {})
-        attrs.pop(DIRECT_CHILD_WAIT_ATTR, None)
-        parent.attributes = attrs
-        manager.save(parent)
+        released = False
+
+        # LLM: 只消费刚核对过的 marker，锁内保留并发进度与控制；两个孩子同时结束只有一个释放者。
+        # 函数用途: 原子解除本次等待，不能删掉父代理刚登记的新一批等待。
+        def release(current: Any) -> None:
+            nonlocal released
+            if _wait_record(current) != marker:
+                return
+            attrs = dict(getattr(current, "attributes", {}) or {})
+            attrs.pop(DIRECT_CHILD_WAIT_ATTR, None)
+            current.attributes = attrs
+            released = not task_has_ended_status(current)
+
+        manager.mutate(parent_id, release)
+        should_resume = should_resume and released
+        if not released and not parent_terminal:
+            reason = "wait_changed"
     return DirectParentResumeDecision(
         parent_run_id=parent_id,
         marker_found=True,
@@ -345,8 +396,22 @@ def _direct_child_context_row(task: object) -> dict[str, object]:
         "artifact_refs": list(getattr(task, "artifact_refs", []) or [])[:8],
         "evidence_refs": list(getattr(task, "evidence_refs", []) or [])[:8],
         **handoff,
+        "activity_diagnostic": current_activity_diagnostic(task),
         "open_capability_requests": requests,
     }
+
+
+# LLM: 诊断是 exact attempt 的有界展示/模型事实，不是运行终态；通知回执等内部字段不进入模型。
+# 函数用途: 主子页面与模型只读取当前执行代的阶段提醒，旧 attempt 不污染新一轮。
+def current_activity_diagnostic(task: object) -> dict[str, object]:
+    notice = (getattr(task, "attributes", {}) or {}).get("runtime_activity_diagnostic")
+    if not isinstance(notice, dict) or notice.get("schema_version") != "subagent-activity-diagnostic.v1":
+        return {}
+    if notice.get("attempt_id") != str(getattr(task, "runner_active_attempt_id", "") or ""):
+        return {}
+    if str(getattr(task, "status", "") or "") != "RUNNING":
+        return {}
+    return {k: v for k, v in notice.items() if k != "notified"}
 
 
 # LLM: A direct child must match both opaque id and canonical parent_id.
@@ -393,6 +458,7 @@ def _unique_ids(values: object) -> list[str]:
 __all__ = [
     "DIRECT_CHILD_WAIT_ATTR",
     "DirectParentResumeDecision",
+    "current_activity_diagnostic",
     "direct_children_context_payload",
     "mark_parent_waiting_for_direct_children",
     "parent_wait_blocks_dispatch",

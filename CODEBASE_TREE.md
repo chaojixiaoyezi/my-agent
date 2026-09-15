@@ -10,6 +10,7 @@
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
 `-- docs/design/
     |-- TUI_DESIGN.md                    # 终端布局、事件、输入与生命周期规范
+    |-- SUBAGENT_PARALLEL_EXECUTION.md   # 父子独立工作、逐项交付与慢任务诊断边界
     `-- TUI_BEHAVIOR_CHECKLIST.md        # 不依赖历史流水的 TUI 验收场景
 ```
 
@@ -87,9 +88,10 @@ agent_py_agent/
 |   |   |-- agent_tree/status.py        # `/status`、TUI、恢复与诊断共用的内部代理树投影（不是模型工具）
 |   |   |-- _finalization_service.py   # 保留模型最终正文并记录 turn_end.reason
 |   |   |-- tool_loop/natural_user_reply.py # 派工/续跑/完成共用的无工具 LLM 用户回复出口
-|   |   |-- tool_loop/completion.py     # 工具上限、截断与递归 child 创建后的结构化让出
+|   |   |-- tool_loop/completion.py     # 工具上限、截断与递归父级自然让出后的依赖等待
 |   |   |-- tool_loop/deliverable_closeout.py # 子代理声明了交付物却缺产物时的有界收口门（只认宿主声明的清单）
 |   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout；context.py 也隔离共享 Agent 的 thread-local 运行态
+|   |       `-- activity_diagnostics.py # 复用心跳的 exact attempt 阶段提醒，不强杀慢模型或自动重派
 |   |-- subagents/
 |   |   |-- manager.py                  # 子代理 root manager：初始化、基础生命周期、服务组合
 |   |   |-- kernel.py                   # 子代理树快照
@@ -274,6 +276,7 @@ agent_py_agent/
 |       |-- base.py                    # 各 provider HTTP 请求、流式解析与统一 Backend 工厂
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- test_subagent_activity_diagnostics.py # 阶段提醒、慢流不误杀、执行代与消息去重回归
 |   |-- test_r223_audit_regressions.py   # 外部审计的编码、版本、并发、MCP、输出、网络和恢复故障注入
 |   |-- test_timeout_recovery_delivery.py  # 门槛5 探针的无损交付：两枪合法正文按序保留、归属同一轮、截断/预算/零工具轮语义不变
 |   |-- test_store_scan_indexes.py      # wake/观察/策略读取侧索引：条目+记录双预算有界、删名清理、目录不可读不误清、枚举与 glob 同口径
@@ -365,7 +368,11 @@ docs/
 
 ### 关键文件说明
 
+- `agent_py_agent/agent/agent_core/runner/activity_diagnostics.py`：复用现有心跳与调用账，阶段长等待只通知直属父级，不强杀或自动重派。
+- `agent_py_agent/tests/test_subagent_activity_diagnostics.py`：慢流、阶段诊断、通知去重、旧执行代与并发进度保存的定向验证。
+
 - `docs/design/THREAD_GOAL_LIFECYCLE.md`：Goal 可见性、单一事件续跑、状态边界与旧冲突显式恢复的开发合同。
+- `docs/design/SUBAGENT_PARALLEL_EXECUTION.md`：逐项交付、递归等待与活动诊断的现行设计和验收要求。
 - `agent_py_agent/agent/conversation/goal_recovery.py`：精确恢复旧共享任务 Goal，不迁移运行中的执行，不清除源记录。
 - `agent_py_agent/agent/conversation/goal_clock.py`：前台、后台及控制视图共用同 owner 会话存储的目标时钟。
 - `agent_py_agent/agent/conversation/goal_binding.py`、`goal_delegation.py`：按代理自身 thread/run 归属目标和用量；显式子目标沿同一运行器续接，不另建执行通道。

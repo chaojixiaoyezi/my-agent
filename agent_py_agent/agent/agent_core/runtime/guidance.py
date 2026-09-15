@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+# LLM: 用户插话与直属孩子事件在安全点注入；按 canonical 身份隔离，不解析正文决定调度。
+# 模块用途: 让工作的代理及时看到新消息与孩子交接，保持前缀稳定并在模型接受后确认投递。
 import json
 from typing import Any
 
@@ -50,7 +52,7 @@ def refresh_runtime_direct_children_snapshot(agent: object, params: object) -> b
 
 # LLM: Parent identity comes only from the runner scope or durable task id. Canonical run rows are
 # filtered by exact parent_id; root lineage, names, goals and summaries never establish ownership.
-# 函数用途: 读取当前代理直属孩子的权威状态，并渲染成有界、稳定的模型上下文尾部。
+# 函数用途: 在原状态快照中提供直属孩子的完成交接，主子孙都能在下一安全边界整合结果。
 def _render_runtime_direct_children(agent: object, params: object) -> str:
     parent_run_id = current_subagent_run_id(agent) or durable_task_id(params)
     if not parent_run_id:
@@ -61,8 +63,18 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
     runs: list[Any] = []
     load_errors: list[object] = []
     try:
+        root_reporter = getattr(manager, "list_runs_for_root_report", None)
         reporter = getattr(manager, "list_runs_report", None)
-        if callable(reporter):
+        if callable(root_reporter):
+            # 索引只选择 ID，reporter 会回读 canonical 文件；不在每个安全点扫描用户全部历史。
+            root_id = durable_task_id(params) or parent_run_id
+            if current_subagent_run_id(agent):
+                parent = manager.load(parent_run_id)
+                root_id = str(getattr(parent, "root_id", "") or parent_run_id)
+            report = root_reporter(root_id)
+            runs = list(getattr(report, "runs", ()) or ())
+            load_errors = list(getattr(report, "load_errors", ()) or ())
+        elif callable(reporter):
             report = reporter()
             runs = list(getattr(report, "runs", ()) or ())
             load_errors = list(getattr(report, "load_errors", ()) or ())
@@ -79,13 +91,25 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
     children.sort(key=lambda task: str(getattr(task, "id", "") or "").strip())
     if not children and not load_errors:
         return ""
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, object]] = []
     status_counts: dict[str, int] = {}
     nonterminal_run_ids: list[str] = []
     for task in children:
         run_id = str(getattr(task, "id", "") or "").strip()
         status = str(getattr(task, "status", "") or "UNKNOWN").strip().upper() or "UNKNOWN"
-        rows.append({"run_id": run_id, "status": status})
+        row: dict[str, object] = {"run_id": run_id, "status": status}
+        from ...subagents.direct_parent_lifecycle import current_activity_diagnostic
+
+        if diagnostic := current_activity_diagnostic(task):
+            row["activity_diagnostic"] = diagnostic
+        # 根父级通过耐久事件接收正文，快照不再重复装入一遍；递归父级没有根邮箱，需在这里交接。
+        if current_subagent_run_id(agent) and (task_status_in(status, SUBAGENT_ENDED_STATUSES) or status == "BLOCKED"):
+            from ...subagents.runner_completion_wake import completion_handoff_payload
+
+            row.update(completion_handoff_payload(task))
+            row["turn_end_reason"] = str(getattr(task, "turn_end_reason", "") or "")
+            row["failure_type"] = str(getattr(task, "failure_type", "") or "")
+        rows.append(row)
         status_counts[status] = status_counts.get(status, 0) + 1
         if not task_status_in(status, SUBAGENT_ENDED_STATUSES):
             nonterminal_run_ids.append(run_id)
@@ -115,9 +139,13 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
     )
 
 
+# LLM: 用户插话与父级事件沿原安全点注入；递归父级仅更新自己的直属快照，不领取根邮箱。
+# 函数用途: 给下一模型轮带入新消息与孩子结果，避免孙代理完成时仍按旧快照收尾。
 def inject_pending_turn_input(agent: object, params: object, *, now: float | None = None) -> bool:
     """Inject user steering and structured task events at one model safe point."""
     guidance_injected = inject_pending_guidance(agent, params, now=now)
+    if _has_unseen_direct_child_result(agent, params):
+        guidance_injected = refresh_runtime_direct_children_snapshot(agent, params) or guidance_injected
     events = _task_events_not_yet_injected(params, _pending_task_events(agent, params))
     if not events:
         return guidance_injected
@@ -133,11 +161,47 @@ def inject_pending_turn_input(agent: object, params: object, *, now: float | Non
     return True
 
 
+# LLM: 未读直属结果属于结构化输入变化，不是任务质量判定；这里只读，不消费根或兄弟邮箱。
+# 函数用途: 孩子在模型响应期间结束时，让父级先吸收结果，避免旧响应漏掉交接。
 def has_pending_turn_input(agent: object, params: object) -> bool:
     """Return whether the active turn has newer user or runtime input."""
-    return has_pending_request_guidance(agent, params) or bool(
+    return has_pending_request_guidance(agent, params) or _has_unseen_direct_child_result(agent, params) or bool(
         _task_events_not_yet_injected(params, _pending_task_events(agent, params))
     )
+
+
+# LLM: task-local 的结果权威仍是 direct child canonical state；只比较已发送的稳定快照。
+#   主会话继续走耐久 wake，缺少已发送快照不制造新轮，心跳/耗时不进入比较。
+# 函数用途: 发现递归父级模型调用期间到达的新结果，不另建事件队列或恢复执行器。
+def _has_unseen_direct_child_result(agent: object, params: object) -> bool:
+    if str(getattr(params, "context_scope", "") or "") != "task_local":
+        return False
+    if not current_subagent_run_id(agent):
+        return False
+    injections = getattr(params, "runtime_injections", None)
+    if not isinstance(injections, list):
+        return False
+    previous = next((item for item in injections if str(item).startswith(_DIRECT_CHILDREN_MARKER)), "")
+    return bool(previous and _render_runtime_direct_children(agent, params) != previous)
+
+
+# LLM: 只解析本模块构建并提交的结构化快照，不读模型正文；它标识模型已见事实，不替代 canonical 状态。
+# 函数用途: 等待登记使用上轮确实看过的孩子状态，避免把模型回答之后才到的结果误算为已读。
+def observed_direct_children(params: object) -> dict[str, dict[str, object]]:
+    for item in getattr(params, "runtime_injections", ()) or ():
+        if not isinstance(item, str) or not item.startswith(_DIRECT_CHILDREN_MARKER):
+            continue
+        try:
+            payload = json.loads(item.split("\n", 2)[2])
+        except (ValueError, IndexError):
+            return {}
+        if not isinstance(payload, dict) or payload.get("schema_version") != "runtime-direct-children.v1":
+            return {}
+        return {
+            str(row["run_id"]): row for row in payload.get("children", [])
+            if isinstance(row, dict) and row.get("run_id")
+        }
+    return {}
 
 
 def acknowledge_injected_turn_input(
@@ -743,6 +807,8 @@ def _render_task_events(events: list[WakeSignal]) -> str:
     )
 
 
+# LLM: 安全点消费必须给模型实际交接与诊断，不可只给状态编号却确认整条事件已读。
+# 函数用途: 保留有界完成回复、产物引用与活动诊断，正文不参与宿主调度裁决。
 def _task_event_payload(event: WakeSignal) -> dict[str, object]:
     metadata = event.metadata if isinstance(event.metadata, dict) else {}
     return {
@@ -753,6 +819,10 @@ def _task_event_payload(event: WakeSignal) -> dict[str, object]:
         "status": str(metadata.get("status") or ""),
         "task_id": str(metadata.get("task_id") or ""),
         "created_at": event.created_at,
+        **{key: metadata[key] for key in (
+            "completion_message", "final_report_ref", "declared_output_refs", "artifact_refs",
+            "turn_end_reason", "failure_type", "activity_diagnostic",
+        ) if key in metadata},
     }
 
 

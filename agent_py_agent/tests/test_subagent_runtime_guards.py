@@ -491,25 +491,18 @@ def test_dispatch_round_returns_to_parent_when_child_report_exists(tmp_path):
     task.verification_status = "VERIFIED"
     manager.save(task)
     _write_json(task.reports_dir, "runner_result.json", {"decision": "REJECT", "ok": False})
-    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id="")
     params = _tool_loop_params("请安排小傻妞完成并汇报。")
 
     first = completion_response_after_tool_round(
         ToolRoundCompletionRequest(
-            agent=agent,
             params=params,
             response=ModelResponse(text="[TOOL_CALL dispatch_subagents]", backend="test"),
-            before_executed_count=0,
-            subagent_output_written=False,
         )
     )
     second = completion_response_after_tool_round(
         ToolRoundCompletionRequest(
-            agent=agent,
             params=params,
             response=ModelResponse(text="[TOOL_CALL dispatch_subagents]", backend="test"),
-            before_executed_count=0,
-            subagent_output_written=False,
         )
     )
 
@@ -521,20 +514,10 @@ def test_dispatch_round_returns_to_parent_when_child_report_exists(tmp_path):
 def test_root_create_keeps_same_turn_open_for_immediate_child_guidance() -> None:
     params = _tool_loop_params("创建孩子后立刻补充要求。")
     params.executed_tools.append("create_subagents")
-    agent = SimpleNamespace(
-        subagent_run_ids_for_request=lambda _task_id: ["child-1"],
-        subagents=SimpleNamespace(
-            list_runs=lambda: [SimpleNamespace(id="child-1", status="RUNNING")]
-        ),
-    )
-
     response = completion_response_after_tool_round(
         ToolRoundCompletionRequest(
-            agent=agent,
             params=params,
             response=ModelResponse(text="已创建孩子", backend="test"),
-            before_executed_count=1,
-            subagent_output_written=False,
         )
     )
 
@@ -553,11 +536,8 @@ def test_task_local_context_refresh_ends_slice_without_another_model_round() -> 
 
     response = completion_response_after_tool_round(
         ToolRoundCompletionRequest(
-            agent=SimpleNamespace(),
             params=params,
             response=ModelResponse(text="旧上下文中的草稿", backend="test"),
-            before_executed_count=0,
-            subagent_output_written=False,
         )
     )
 

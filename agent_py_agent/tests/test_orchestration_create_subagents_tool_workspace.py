@@ -49,7 +49,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["run_ids"] == ["run_0", "run_1"]
         assert payload["pending_start_run_ids"] == []
-        assert payload["next_action"]["action"] == "await_lifecycle_event"
+        assert payload["next_action"]["action"] == "continue_independent_work"
         assert payload["next_action"]["run_ids"] == ["run_0", "run_1"]
 
     def test_items_mode_does_not_infer_sibling_output_dependencies(self):

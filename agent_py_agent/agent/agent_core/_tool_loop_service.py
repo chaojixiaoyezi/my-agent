@@ -1867,21 +1867,18 @@ def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
     return request.current_prompt, final_response, next_round
 
 
+# LLM: 执行普通工具轮后只处理真实转换；创建子代理不会再触发隐式等待或按产物推断轮结束。
+# 函数用途: 运行本轮工具并交给正常模型循环继续工作，同时保留原进展和错误提示。
 def _run_tool_round(agent, request: ToolRoundExecutionRequest):
-    before_executed_count = len(request.params.executed_tools)
-    subagent_output_written = execute_tool_round(request)
+    execute_tool_round(request)
     update_runtime_fact_progress_if_enabled(agent, request.params, tool_round=request.tool_rounds)
     append_tool_guardrail_action_block_hint(request)
     # 检索完备性软引导(R5b/R6c 实锤):同一工具系统失败达阈值即提醒枚举未试渠道。
     append_tool_failure_channel_hint(request)
     final_response = completion_response_after_tool_round(
         ToolRoundCompletionRequest(
-            agent,
             request.params,
             request.response,
-            before_executed_count,
-            subagent_output_written,
-            request.tool_rounds,
         )
     )
     return request.tool_rounds, final_response
