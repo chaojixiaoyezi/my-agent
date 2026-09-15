@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
-"""builds subagent runner execution prompts from canonical task context.
+"""LLM: 从 canonical 执行上下文构造 runner 提示；当前角色快照、工具授权与共享分工说明须一致。
 
-runner 真正调用模型前，把执行上下文压成明确任务；模型按普通 assistant 回合自然结束，
+模块用途: runner 真正调用模型前，把执行上下文压成明确任务；模型按普通 assistant 回合自然结束，
 宿主不再要求或修复额外的机器结果块。
 """
 
@@ -13,7 +13,6 @@ from ...settings.config import DEFAULT_DELEGATED_EXECUTION_PERSISTENCE
 from ...subagents import SubAgentExecutionContext
 from ...subagents.context_bundle import context_gate_prompt_lines
 from ...subagents.role_templates import (
-    role_template_detail_text,
     role_template_index_text,
     role_template_snapshot_for_role,
     template_for_role_identity,
@@ -27,11 +26,8 @@ SUBAGENT_DEFAULT_THOUGHT = "根据父代理派工执行，并保留真实结果�
 SUBAGENT_DEFAULT_PLAN: tuple[str, ...] = ("理解目标", "执行任务", "核对真实结果", "交回结果和引用")
 
 
-# LLM: Every delegated runner receives the shared persistence discipline and
-# live-user reply etiquette while structured context remains the authority for
-# identity, scope, tools, and lifecycle. Reply etiquette is model behavior only;
-# machine delivery continues to use typed guidance receipts.
-# 函数用途: 生成子代理每次模型调用使用的系统提示、执行边界和用户插话回复习惯。
+# LLM: 主子共用的执行纪律不能要求协调者亲手重写已委派成果；身份、文件交接与消息消费仍读结构化事实。
+# 函数用途: 生成子代理模型的系统说明，要求真实交付和回复插话，不把本层负责误写成每个文件都要亲手实现。
 def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
     if _audit_source_runtime_profile(context):
         return _audit_source_worker_system_prompt(context)
@@ -47,10 +43,10 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
         "持续执行纪律：在当前回合能继续推进时，必须继续使用现有工具，直到任务真正完成或出现真实阻塞；"
         "不要以“现在开始/接下来会/马上写入/随后验证”这类未来动作结束回复。"
         "如果最终回复里还存在你承诺要做的动作，就先执行该动作，再向父级交回结果。\n"
-        "完成纪律：如果任务在 goal 或输出要求里点名了要产出的文件（明确给了产物路径），"
-        "在你亲手把该文件真正写出来、并确认它存在之前，不要输出最终完成结果——"
-        "继续调用写文件工具把它做出来。确实做不到就如实标记未完成或上抛能力请求，"
-        "不要用“进行中/下一步再写”这类中间汇报冒充完成。\n"
+        "完成纪律：明确要求的产物必须实际存在；按本层分工由你或受委派下级通过真实工具产出。"
+        "下级交回文件时先核对引用和所需内容，不要为了证明完成而亲手重写一份。"
+        "自己负责的未完成部分继续做；依赖下级的部分等待真实交接后再接入。"
+        "确实做不到就如实说明缺口，不用“进行中/下一步再写”冒充完成。\n"
         "持续任务中的 coverage、游标、积压、签收、工具结果和 source_ref 是运行事实；"
         "不能把候选排序、结构频次或工具提示当成业务结论，也不能把部分覆盖说成完整覆盖。"
         "怎样分析、是否委派、是否复核和怎样交付，由你结合本轮用户目标、可用工具及真实结果"
@@ -418,22 +414,18 @@ def _is_root_context(context: SubAgentExecutionContext) -> bool:
     return not parent_id and (not root_id or root_id == context.run_id or context.depth == 0)
 
 
+# LLM: 协调层只需可选角色索引与统一纪律；其它角色正文不属于当前身份，不能混入当前执行约束。
+# 函数用途: 保留选下级角色的简短目录，避免把执行者、测试者等整份行为同时灌给协调者。
 def _coordinator_execution_contract_lines() -> list[str]:
     lines = ["可用角色模板索引："]
     lines.extend(f"  {line}" for line in role_template_index_text().splitlines())
-    lines.append("模板详情：")
-    lines.extend(f"  {line}" for line in role_template_detail_text().splitlines())
     lines.extend(coordinator_execution_policy_lines())
     return lines
 
 
-# LLM: A leaf receives only its own role behavior, preferably from the
-# creation-time snapshot so custom templates remain stable across restarts.
-# Role prose is soft guidance and never grants tools, paths, or lifecycle state.
-# 函数用途: 给普通子代理补入自己的精简角色行为，不把整份角色目录塞进上下文。
+# LLM: 每个角色（含 coordinator）只读取自己的创建时行为快照；重启不换成当前目录，不增加权限或状态。
+# 函数用途: 给子代理补入自己的角色说明，避免协调者吃下其它角色全文或丢失自定义角色行为。
 def _current_role_template_lines(context: SubAgentExecutionContext) -> list[str]:
-    if _is_coordinator_context(context):
-        return []
     snapshot = context.role_template if isinstance(context.role_template, dict) else {}
     prompt = str(snapshot.get("prompt_zh") or "").strip()
     role_name = str(snapshot.get("name_zh") or context.role or "当前角色").strip()

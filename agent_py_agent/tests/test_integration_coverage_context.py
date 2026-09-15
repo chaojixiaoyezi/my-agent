@@ -59,6 +59,11 @@ def test_coordinator_policy_does_not_silently_take_over_delegated_work():
     assert "不要重复下级正在执行的工作" in policy
     assert "用户明确要求主代理不写功能代码" in policy
     assert "不冲突的工作" in policy
+    assert "派工前先确定自己接下来做什么" in policy
+    assert "用户明确分给你的工作不要一并转交" in policy
+    assert "接手下级范围前确认其已结束或已停止冲突操作" in policy
+    assert "不为保持忙碌编造文档" in policy
+    assert "execution_context.output_json" not in policy
     assert "角色就变为协调者" not in policy
     assert "诚实列出未完成项不能代替继续工作" in policy
     assert "下级卡住时，你可以直接完成" not in policy
@@ -95,6 +100,9 @@ def test_subagent_runner_uses_task_scoped_soft_persistence_discipline():
     assert "有效测试不得仅为变绿而删除、跳过、放宽断言" in prompt
     assert "先在普通 assistant 回复中直接回答或确认用户" in prompt
     assert "不要只在 thinking里回应" in prompt
+    assert "按本层分工由你或受委派下级通过真实工具产出" in prompt
+    assert "不要为了证明完成而亲手重写一份" in prompt
+    assert "在你亲手把该文件真正写出来" not in prompt
 
 
 def test_scheduled_prompt_not_polluted():

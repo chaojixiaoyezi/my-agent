@@ -258,8 +258,8 @@ def test_role_template_detail_text_loads_prompt_contract_on_demand():
 def test_coordinator_template_says_parent_authority_covers_children_without_disabling_work():
     detail = role_template_detail_text(roles=["coordinator"])
 
-    assert "上层权限应覆盖下层" in detail
-    assert "继承产物写入根" in detail
+    assert "当前上下文的权限是上界" in detail
+    assert "下级继续继承或缩小" in detail
     assert "可以直接完成" in detail
     assert "需要多人视角" in detail
     assert "coordinator" in detail
@@ -349,10 +349,7 @@ def test_runner_prompt_loads_current_role_behavior_without_other_leaf_details():
         )
         prompt = _build_subagent_runner_prompt(context)
 
-        if template_id == "coordinator":
-            assert "模板详情" in prompt
-            assert "你是找茬子代理" in prompt
-        else:
-            assert template.prompt_zh in prompt
-            assert "当前角色行为" in prompt
-            _assert_other_role_prompts_absent(prompt, store=store, template_id=template_id)
+        assert template.prompt_zh in prompt
+        assert "当前角色行为" in prompt
+        assert "模板详情" not in prompt
+        _assert_other_role_prompts_absent(prompt, store=store, template_id=template_id)

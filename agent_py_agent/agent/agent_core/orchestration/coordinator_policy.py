@@ -1,4 +1,4 @@
-"""Shared 会话运行时-aligned coordinator execution policy."""
+"""主代理与递归协调者共用的软分工说明。"""
 
 # LLM: This module is the canonical model-facing coordinator boundary shared by
 # root tool discovery, child runner prompts, and create receipts. It is a soft
@@ -8,8 +8,7 @@
 from __future__ import annotations
 
 
-# LLM: These lines adapt 会话运行时's no-duplicate-work orchestrator rule. They guide
-# model behavior but cannot authorize paths, infer completion, or block tools.
+# LLM: 所有协调层共用此说明；它不授予路径、不判完成、不拦工具，改动需核对创建回执与 runner。
 # 函数用途: 返回按用户目标分工、避免活跃任务重复的软指导，不把派工变成永久禁写。
 def coordinator_execution_policy_lines() -> list[str]:
     return [
@@ -22,8 +21,7 @@ def coordinator_execution_policy_lines() -> list[str]:
         "- 如果缺口只属于未来 child/leaf 的执行能力，例如 leaf 才需要 controlled_exec、shell、网络或某个 skill，"
         "coordinator/lead 不要替后代提前提交 capability_request 后停止；先创建对应 child，"
         "由真正需要该能力的 runner 正式申请，父级再 route grant 并继续推进。",
-        "- 给 child 写 goal 时，不要要求它在产物目录写 output.json；"
-        "如需结构化汇报，只能要求它写自己的 execution_context.output_json。",
+        "- child 自然回复时交回实际成果和引用；内部结果文件由宿主登记，不要求下级手写运行时 JSON。",
         "- coordinator 可以继续创建 coordinator 作为下一层领导节点；"
         "需要多层协作时不要误以为只能创建 worker；不要为了层数或角色扩充没有实际作用的节点。",
         "- 只创建父级任务确实需要的 child；父级明确点名 tester、reviewer 等角色时才创建对应 run，"
@@ -39,15 +37,18 @@ def coordinator_execution_policy_lines() -> list[str]:
     ]
 
 
-# LLM: Tool discovery uses a compact form of the same canonical boundary so
-# every root sees it before delegation without duplicating the full runner prompt.
+# LLM: 工具发现、runner 与唤醒共享同一分工纪律；只指导模型，不从自然语言计算权限、写集或等待状态。
 # 函数用途: 为工具说明、runner 和后台唤醒提供同一份分工范围，避免三处互相矛盾。
 def coordinator_tool_boundary_text() -> str:
     return (
         "派工不会永久改变你的职责或用户授权。不要重复下级正在执行的工作；"
+        "派工前先确定自己接下来做什么，再把可独立推进的部分交给下级；用户明确分给你的工作不要一并转交。"
+        "分工包括你自己和各下级的文件或模块范围；已约定接口时，可以先做不依赖下级结果的部分。"
         "等待期间继续做用户授权内不冲突的工作，收到结果后及时整合、修正和测试。"
+        "确实依赖尚未返回的结果且没有其它有用工作时自然等待，不为保持忙碌编造文档或反复查状态。"
         "用户明确要求主代理不写功能代码时，保留该限制，把实现缺口交给具体下级，主代理仍做允许的整合与测试；"
         "没有这项限制时，不因派过子代理而放弃必要的本地工作。"
+        "接手下级范围前确认其已结束或已停止冲突操作；慢或暂时没结果不等于失败，不盲目启动重复实现。"
     )
 
 

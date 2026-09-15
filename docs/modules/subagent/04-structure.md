@@ -1,5 +1,14 @@
 # Subagent Structure
 
+## 派工事实与角色提示
+
+- `orchestration/dispatch/state_contract.py` 仅汇总 run 状态、缺失与恢复事实，不为父级推导等待或完成动作。
+- `orchestration/coordinator_policy.py` 是根、递归协调者和创建入口共用的软分工说明，不构成权限或完成门。
+- `runner/prompts.py` 按创建时快照装入当前角色行为；协调层只另取角色索引，不装载所有角色正文。
+- 协调者可在用户授权内承担独立实施和整合；结果存在性与引用以工具和 canonical 交接为准，不要求重复写入。
+- 定向入口：`test_orchestration_dispatch_state_contract.py`、`test_subagent_prompt_contract.py`、
+  `test_subagent_role_templates.py`、`test_tool_context_reducer.py`；真实分工结果不能由这些测试代替。
+
 ## 执行器退出与积压恢复
 
 - `runtime_db/executor_liveness.py` 在真实执行边界记录 exact attempt 元数据；本进程注册只在执行期间存在，

@@ -1,3 +1,5 @@
+# LLM: 创建回执和递归派工共用此只读状态投影；不能从孩子活跃推导父级下一步或引入新的等待门。
+# 模块用途: 汇总已知子代理的启动、运行、终态和故障事实，与模型的分工建议分开。
 from __future__ import annotations
 
 from ....contracts.error_taxonomy import error_contract
@@ -12,13 +14,13 @@ from ....subagents.models import (
 from ..run_scope import remembered_orchestration_run_ids
 
 
+# LLM: 只读取 remembered run 的 canonical 状态；调用方另行提供模型软建议，本函数不改状态或派工。
+# 函数用途: 给创建回执附上当前子代理事实，避免同一回执同时要求父级继续工作和等待。
 def dispatch_state_contract_payload(agent: object) -> dict[str, object]:
     tasks, missing, load_errors = _remembered_tasks(agent)
     if not tasks and not missing and not load_errors:
         return {}
-    state = _state_payload(tasks, missing, load_errors)
-    _attach_state_next_action(state)
-    return {"current_turn_run_state": state}
+    return {"current_turn_run_state": _state_payload(tasks, missing, load_errors)}
 
 
 def _remembered_tasks(agent: object) -> tuple[list[object], list[str], list[dict[str, object]]]:
@@ -119,41 +121,6 @@ def _append_recovery_recommendation(buckets: dict[str, object], snapshot: dict[s
             "recovery_hint": contract.recovery_hint,
         }
     )
-
-
-# LLM: State receipts describe host-owned lifecycle actions without suggesting
-# model polling. Direct-parent wake events carry the next actionable facts.
-# 函数用途: 为当前子代理状态标记宿主下一步，不生成查树工具建议。
-def _attach_state_next_action(state: dict[str, object]) -> None:
-    blocked = list(state.get("blocked_run_ids") or [])
-    dispatchable = list(state.get("dispatchable_run_ids") or [])
-    running = list(state.get("running_run_ids") or [])
-    starting = list(state.get("starting_run_ids") or [])
-    unfinished = list(state.get("unfinished_run_ids") or [])
-    missing = list(state.get("missing_run_ids") or [])
-    load_errors = list(state.get("task_load_errors") or [])
-    if blocked:
-        state["next_action"] = "handle_direct_child_blocker_from_lifecycle_event"
-        return
-    if dispatchable:
-        state["next_action"] = "wait_for_automatic_runner_start"
-        return
-    if running:
-        state["next_action"] = "wait_for_subagent_completion_event"
-        return
-    if starting:
-        state["next_action"] = "wait_for_subagent_runner_start"
-        return
-    if load_errors:
-        state["next_action"] = "host_rebuild_state_index_or_report_load_error"
-        return
-    if missing:
-        state["next_action"] = "host_reconcile_missing_run_ids"
-        return
-    if unfinished:
-        state["next_action"] = "await_unfinished_run_lifecycle_event"
-        return
-    state["next_action"] = "summarize_or_report_completed_runs"
 
 
 def _clean_ids(values: list[object]) -> list[str]:

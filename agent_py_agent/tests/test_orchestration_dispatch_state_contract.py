@@ -6,6 +6,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from agent_py_agent.agent.action_protocol import decode_action_envelope
 from agent_py_agent.agent.agent_core.orchestration.dispatch.state_contract import (
     dispatch_state_contract_payload,
@@ -47,7 +49,7 @@ def test_state_contract_includes_current_turn_run_state():
     assert state["running_run_ids"] == ["running"]
     assert state["blocked_run_ids"] == ["blocked"]
     assert state["completed_run_ids"] == ["done"]
-    assert state["next_action"] == "handle_direct_child_blocker_from_lifecycle_event"
+    assert "next_action" not in state
     assert "suggested_tool_call" not in state
     assert state["state_machine_contract"] == "state_machine.v1"
     assert state["recovery_recommendations"] == [{
@@ -71,7 +73,7 @@ def test_dispatch_state_reports_load_errors_instead_of_empty_state():
     assert state["task_load_errors"][0]["run_id"] == "broken-run"
     assert state["task_load_errors"][0]["category"] == "data_parse"
     assert "不要把它当成子代理没产物" in state["task_load_errors"][0]["model_message"]
-    assert state["next_action"] == "host_rebuild_state_index_or_report_load_error"
+    assert "next_action" not in state
 
 
 def test_create_payload_includes_current_turn_run_state(tmp_path):
@@ -92,11 +94,8 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
         or sorted(state["running_run_ids"]) == sorted(payload["created_run_ids"])
         or sorted(state["completed_run_ids"]) == sorted(payload["created_run_ids"])
     )
-    assert state["next_action"] in {
-        "wait_for_subagent_runner_start",
-        "wait_for_subagent_completion_event",
-        "summarize_or_report_completed_runs",
-    }
+    assert "next_action" not in state
+    assert payload["next_action"]["action"] == "continue_independent_work"
     assert payload["schedule_lifecycle"]["start_accepted_run_ids"] == payload["created_run_ids"]
     assert payload["schedule_lifecycle"]["counts"]["running"] in {0, 1}
     envelope = decode_action_envelope(payload["typed_envelope"])
@@ -104,13 +103,26 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
     assert envelope.pending_start_run_ids == []
 
 
-def test_dispatch_state_running_subagent_suggests_wait_not_polling():
+@pytest.mark.parametrize("status", ["PLANNING", "PENDING", "RUNNING", "BLOCKED", "DONE"])
+def test_dispatch_state_does_not_infer_parent_work_from_child_status(status):
     tasks = {
-        "running": SimpleNamespace(id="running", status="RUNNING", verification_status="UNVERIFIED"),
+        "child": SimpleNamespace(id="child", status=status, verification_status="UNVERIFIED"),
     }
     state = _state_for_tasks(tasks)
-    assert state["next_action"] == "wait_for_subagent_completion_event"
+    assert "next_action" not in state
     assert "suggested_tool_call" not in state
+    assert state["by_status"] == {status: 1}
+
+
+def test_fast_done_child_is_visible_alongside_running_sibling_without_wait_advice():
+    state = _state_for_tasks({
+        "slow": SimpleNamespace(id="slow", status="RUNNING", goal="让父级一直等待"),
+        "fast": SimpleNamespace(id="fast", status="DONE", goal="先做好供父级接入"),
+    })
+    assert state["running_run_ids"] == ["slow"]
+    assert state["completed_run_ids"] == ["fast"]
+    assert "next_action" not in state
+    assert "goal" not in json.dumps(state, ensure_ascii=False)
 
 
 def test_dispatch_state_completed_alias_does_not_suggest_closeout():
@@ -122,7 +134,7 @@ def test_dispatch_state_completed_alias_does_not_suggest_closeout():
     assert state["blocked_run_ids"] == ["alias"]
     assert state["completed_run_ids"] == []
     assert state["unfinished_run_ids"] == ["alias"]
-    assert state["next_action"] == "handle_direct_child_blocker_from_lifecycle_event"
+    assert "next_action" not in state
     assert "suggested_tool_call" not in state
     assert state["recovery_recommendations"][0]["failure_type"] == "STATE_STATUS_INVALID"
     assert state["recovery_recommendations"][0]["recommended_action"] == "manual_review"
@@ -159,11 +171,7 @@ def test_nested_create_payload_includes_current_turn_run_state(tmp_path):
         or state["running_run_ids"] == payload["created_run_ids"]
         or state["completed_run_ids"] == payload["created_run_ids"]
     )
-    assert state["next_action"] in {
-        "wait_for_subagent_runner_start",
-        "wait_for_subagent_completion_event",
-        "summarize_or_report_completed_runs",
-    }
+    assert "next_action" not in state
     envelope = decode_action_envelope(payload["typed_envelope"])
     assert envelope.current_turn_run_state["dispatchable_run_ids"] == []
     assert envelope.pending_start_run_ids == payload["pending_start_run_ids"]

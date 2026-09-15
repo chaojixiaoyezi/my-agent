@@ -387,9 +387,8 @@ def test_orchestration_externalized_result_keeps_current_turn_run_state():
                 "total": 1,
                 "by_status": {"RUNNING": 1},
                 "running_run_ids": ["child-new"],
-                "next_action": "wait_for_subagent_completion_event",
-                "suggested_tool_call": {"tool": "inspect_agent_tree", "params": {}},
             },
+            "next_action": {"action": "continue_independent_work"},
             "records": [{"message": "z" * 2000}],
         }
     )
@@ -400,7 +399,8 @@ def test_orchestration_externalized_result_keeps_current_turn_run_state():
     )
 
     assert "current_turn_run_state" in rendered
-    assert "wait_for_subagent_completion_event" in rendered
+    assert "continue_independent_work" in rendered
+    assert "wait_for_subagent_completion_event" not in rendered
     assert "child-new" in rendered
     assert "dispatch_subagents" not in rendered
     assert "records" not in rendered

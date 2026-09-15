@@ -119,7 +119,7 @@ def test_runner_prompt_tells_controlled_exec_leaf_to_apply_and_report_refs():
 
 
 def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_useful():
-    """coordinator 可以写协调报告，但最终业务产物仍要派给 worker/writer。"""
+    """协调者保留自己工作，索引只辅助选下级，不混入所有角色正文。"""
     context = SubAgentExecutionContext(
         run_id="child-1",
         generated_at=1.0,
@@ -139,8 +139,7 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     assert "派工不会永久改变你的职责或用户授权" in prompt
     assert "继续做用户授权内不冲突的工作" in prompt
     assert "紧急且下一步直接依赖的工作可在用户允许范围内自己处理" in prompt
-    # LLM: 已删除的旧口号改为反断言，防止产品把这套“永久协调禁写”措辞加回来；
-    # 当前真实边界由唯一 coordinator 角色模板给出（先确认边界再派工、不静默接管、仍可做未派工的简单任务）。
+    # 当前角色说明与共用纪律一致，不能重加全部外包或永久禁止接手的旧规则。
     assert "不要在派工前把所有正文" not in prompt
     assert "先创建 child；创建后它会自动运行" not in prompt
     assert "简单任务可以一开始就直接做" not in prompt
@@ -148,9 +147,12 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     assert "先读取最小必要材料" not in prompt
     assert "先读最小必要材料来确认目标、目录和质量边界" in prompt
     assert "不要把所有 child 正文一次性吞回自己的上下文" in prompt
-    assert "不要与它重复工作" in prompt
-    assert "不要在 child 失败、容量不足或结束后静默接管该实现" in prompt
-    assert "尚未派工的简单任务可以直接完成" in prompt
+    assert "不要重复下级正在执行的工作" in prompt
+    assert "不要在 child 失败、容量不足或结束后静默接管该实现" not in prompt
+    assert "简单任务可以直接完成" in prompt
+    assert "能拆给 child 的研究、实现、测试和汇总" not in prompt
+    assert "用户明确分给你的工作不要一并转交" in prompt
+    assert "execution_context.output_json" not in prompt
     assert "是否派工由目标规模、可并行性和用户要求决定" in prompt
     assert "不要误以为只能创建 worker" in prompt
     assert "下一层仍使用统一的 create_subagents" in prompt
@@ -171,11 +173,36 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     assert "不要自动创建整批 repair/QA 子代理" in prompt
     assert "quality_advice" not in prompt
     assert "qa_repair_advice" not in prompt
-    assert "模板详情" in prompt
-    assert "你是找茬子代理" in prompt
+    assert "模板详情" not in prompt
+    assert "你是找茬子代理" not in prompt
+    assert "你是协调子代理" in prompt
     assert "send_guidance" in prompt
     assert "scope=descendants" not in prompt
     assert "scope=peers" not in prompt
+
+
+def test_coordinator_uses_frozen_own_role_not_current_builtin_detail():
+    context = SubAgentExecutionContext(
+        run_id="custom-coordinator",
+        generated_at=1.0,
+        goal="协调互不干扰的模块",
+        thought="",
+        plan=[],
+        role="coordinator",
+        allowed_tools=["create_subagents", "read_file"],
+        role_template={
+            "id": "coordinator",
+            "name_zh": "项目协调",
+            "can_spawn_children": True,
+            "prompt_zh": "冻结的自定义角色：负责协议整合。",
+        },
+    )
+    prompt = _build_subagent_runner_prompt(context)
+    assert "冻结的自定义角色：负责协议整合。" in prompt
+    assert "你是协调子代理" not in prompt
+    assert "你是找茬子代理" not in prompt
+    assert "可用角色模板索引" in prompt
+    assert "派工不会永久改变你的职责" in prompt
 
 
 def test_runner_prompt_tells_root_not_to_request_capability():
