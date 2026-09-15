@@ -1,8 +1,11 @@
 
+# LLM: 子代理路径事实源区分可信 cwd 和内部运行记录；投影不得隐式授予权限。
+# 模块用途: 为工具、提示和结果交接提供一致的目录与身份引用。
 from __future__ import annotations
 
 from pathlib import Path
 
+from ..conversation.authority import conversation_execution_cwd
 from ..model_visible_refs import current_model_ref
 from .models import SubAgentTask
 
@@ -16,12 +19,8 @@ def workspace_refs(task: SubAgentTask) -> dict[str, str]:
     work_dir = str(Path(task_workspace) / "work") if task_workspace else ""
     output_dir = str(Path(task_workspace) / "output") if task_workspace else ""
     return {
-        # LLM: 远程 owner 的长期资料/项目根与单次任务交付根不是同一个目录。
-        #   把两者作为结构化环境事实同时交给 runner，避免模型把
-        #   owner/workspace/input 错拼成 task_root/workspace/input。
-        # 人类: 这相当于 会话运行时/模型助手 Code 明确告诉代理“主工作目录”；
-        #   task_root 仍只负责本任务的 work/output，不改变任何读写权限。
-        "owner_workspace_dir": _owner_workspace_dir(task),
+        "execution_cwd": execution_cwd(task),
+        "owner_workspace_dir": execution_cwd(task),
         "task_root": task_workspace,
         "task_work_dir": work_dir,
         "task_output_dir": output_dir,
@@ -43,12 +42,12 @@ def workspace_refs(task: SubAgentTask) -> dict[str, str]:
     }
 
 
-# LLM: A child inherits the host-authored task/project cwd stored at creation. The
-# canonical owner home is only a fallback for older tasks lacking that turn fact;
-# do not invent a second owner_home/workspace hierarchy.
+# LLM: 当前会话 cwd 优先于创建时 workspace 投影；缺字段才读 owner home，不从 task 归档根推导。
 # 函数用途: 返回子代理实际项目工作目录，供提示和工具共同使用。
-def _owner_workspace_dir(task: SubAgentTask) -> str:
+def execution_cwd(task: SubAgentTask) -> str:
     attrs = getattr(task, "attributes", {}) or {}
+    if cwd := conversation_execution_cwd(attrs):
+        return current_model_ref(cwd)
     if isinstance(attrs, dict):
         workspace_root = current_model_ref(attrs.get("workspace_root"))
         if workspace_root:

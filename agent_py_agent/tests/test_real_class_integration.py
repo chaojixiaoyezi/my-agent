@@ -46,6 +46,7 @@ from agent_py_agent.agent.agent_core.runner.timeout_policy import get_task_timeo
 from agent_py_agent.agent.backends import BaseBackend, ModelResponse
 from agent_py_agent.agent.core import ResolveCapabilityRequestsTool, SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.subagents.context_bundle_refs import execution_cwd
 from agent_py_agent.agent.subagents.kernel import SubagentKernelQuery
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
@@ -63,7 +64,6 @@ from agent_py_agent.agent.subagents.services.lifecycle import (
 )
 from agent_py_agent.agent.subagents.services.output_alignment import (
     anchored_output_refs,
-    delivery_root,
 )
 
 pytestmark = pytest.mark.integration
@@ -325,7 +325,7 @@ def test_failure_introspection_split_disabled_by_default_records_skip(tmp_path: 
 
 
 # ---------------------------------------------------------------------------
-# c. runner result 写回→产物搬运到声明位置
+# c. runner result 写回保留真实 cwd 下的产物，不做隐式搬运
 # ---------------------------------------------------------------------------
 
 
@@ -333,11 +333,9 @@ def test_runner_result_delivers_real_artifact_to_declared_location(tmp_path: Pat
     manager = SubAgentManager(workspace=tmp_path / "workspace")
     task = _create_task(manager, attributes={"output_files": ["proj/app.py"]})
 
-    # 家目录方案：相对声明直接锚到任务交付区 tasks/<日期>/<任务>/output/，
-    # 子代理直接写、用户拿走即可，无需"子代理家→搬运"两段式（delivery_map 空）。
+    # 相对声明和工具共用可信 cwd；收口不会把结果搬到另一套内部目录。
     anchoring = anchored_output_refs(task)
-    assert anchoring.delivery_map == []
-    delivery = delivery_root(task)
+    delivery = execution_cwd(task)
     anchored_target = Path(anchoring.anchored_refs[0])
     assert str(anchored_target).startswith(delivery)
     assert anchored_target.as_posix().endswith("proj/app.py")

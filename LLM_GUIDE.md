@@ -103,6 +103,9 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 
 ---
 
+子代理交接补充：自然 final 与结构化 final 共用工具产物 registry 的精确引用，不恢复“模型不输出 JSON
+就没有产物”的旧分支。声明与工具共用 execution_cwd，不把内部 run/output 当业务目录，不自动搬运文件。
+
 ## 项目结构速览
 
 ```

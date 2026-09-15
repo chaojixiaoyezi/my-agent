@@ -52,14 +52,15 @@ provider 达到输出长度限制时，宿主的 `turn_end_reason=max-tokens` �
 child 详情页将已收到的正文与技术提示分开，空正文也能显示原因；提示本身不决定重派、取消或完成。
 它与主代理/后台历史共用同一协议，不能通过回复中是否包含“完成”或“截断”来判断。
 
-创建回执只给本批 run ids、结果读取 refs 和 `await_lifecycle_event`。根主代理会先给用户一条短回执；
-任意 task-local 父代理则立即以 `interrupted/SUBAGENTS_ACTIVE` 结束当前工作片。宿主把正在等待的
-直属 run ids 写入 canonical state，孤儿恢复器不会把这种正常等待误当挂死重启。child 的进展、
-阻塞、权限申请和完成会作为结构化生命周期事件唤醒直属父级。不要用 shell
+创建回执给本批 run ids、真实 `execution_cwd`、结果读取 refs 和 `continue_independent_work`。
+主、子、孙代理可继续当前模型/工具循环，不因创建强制结束工作片。模型确实没有独立工作而自然让出时，
+才把等待的直属 run ids 写入 canonical state；孤儿恢复器不会把正常等待误当挂死重启。
+child 的阻塞、权限申请和完成会作为结构化生命周期事件唤醒直属父级。不要用 shell
 `sleep`、新建“巡检代理”或反复调用其它工具猜状态。
 
-成功同批 child 会等到收齐后只唤醒一次，避免每个 child 都让父级重读整份上下文。失败、
-缺失 canonical state 或 capability 阻塞会立即唤醒。父级新工作片的 `direct_children` 包直接给出
+成功 child 按已有短合批窗口投递，不等最慢兄弟；递归等待也可由任一未读结果解除。
+父级忙时在原安全点接收，空闲时沿原调度车道唤醒；已消费事件不重复确认。
+失败、缺失 canonical state 或 capability 阻塞会及时交回。父级新工作片的 `direct_children` 包直接给出
 status、turn end、failure type、有界最终回复、正式 artifact/声明输出 refs 和待裁决请求；过长最终回复可按
 `final_report_ref` 继续读取。内部 runner result/output/response 文件不进入正常父模型 prompt。
 
@@ -144,6 +145,8 @@ allow 与 forbidden 同时命中时按最具体路径条目决定，同层由 fo
 没有用户指定目标时，child 继承父级可信 cwd 与 owner home 上界，按软整理约定在用户家中安排目录；
 内部 run 工作区只保存运行记录，不强制作为业务产物目录。父级从创建回执或生命周期事件
 里的 `child_output_read_order`、`primary_artifact_refs`、`expected_outputs` 读取结果。
+输出声明与文件工具共用可信 cwd；权限不足时由工具明确拒绝，不把目标静默移到内部 output。
+收口不自动复制业务文件；`run_workspace.output_dir` 不覆盖业务 cwd，输出声明不能新增写权限。
 
 ## 插话、取消与替代
 
@@ -174,6 +177,10 @@ child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是�
 1. 完成事件或 `direct_children.items[].completion_message` 里的 child 最终回复。
 2. 同一交接包里的 artifact refs、`declared_output_refs` 与 `final_report_ref`。
 3. 只有这些结构化交接内容缺失或损坏时，才由宿主把 run 内部结果文件当恢复证据。
+
+自然回复不需要附加 JSON 才能交回文件：收口读取 exact run 的工具产物 registry，把最新 ready 记录
+投影进 canonical artifact refs 和结果信封。工具输出归档、其它 run、已删除或缺失记录不算交付物；
+账本读取错误单独留诊断。模型报告的完成与项目质量不由这些引用自动判定。
 
 执行 child 只写 `required_file_refs` 或父级明确声明的业务产物。内部 final report、runner result 和 closeout
 记录由宿主在 child 自然 final 后自动生成，不会出现在 child 的 output contract、task packet 或 workspace

@@ -348,3 +348,78 @@ def _empty_tool_loop_params():
         executed_tools=[],
         archive_tool_calls=[],
     )
+
+
+# LLM: 实际补丁执行和统一归档一起验证，避免直接伪造 registry 绕开漏交接入口。
+# 函数用途: 把真实补丁结果按生产工具回执形式归档到测试 run。
+def _archive_patch_outcome(root, outcome):
+    from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_call_record
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
+    from agent_py_agent.tests._tool_runtime_harness import (
+        canonical_history_call,
+        canonical_history_result,
+    )
+
+    call = canonical_history_call('apply_patch', {}, call_id='patch-result', run_id='run-1')
+    result = canonical_history_result(call, outcome.output, ok=outcome.ok, handler_details=outcome.result_envelope)
+    return archive_tool_call_record(
+        SimpleNamespace(root=root, config=SimpleNamespace()),
+        ToolCallRecordParams(params=_empty_tool_loop_params(), tool_rounds=1, idx=1, call=call, result=result),
+    )
+
+
+def test_patch_add_update_move_delete_reach_natural_child_handoff(tmp_path):
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        latest_artifact_records,
+        register_artifact,
+    )
+    from agent_py_agent.agent.subagents.models import SubAgentTask
+    from agent_py_agent.agent.subagents.result_registered_artifacts import (
+        collect_registered_artifacts,
+    )
+    from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
+
+    for name in ('a.txt', 'b.txt', 'delete.txt'):
+        path = tmp_path / name
+        path.write_text('old\n')
+        register_artifact(ArtifactRegistration(workspace_root=tmp_path, path=path, run_id='run-1'))
+    task = SubAgentTask(id='run-1', goal='修改资料', thought='', plan=[], agent_run_workspace_dir=str(tmp_path))
+    collect_registered_artifacts(task)
+    outcome = ApplyPatchTool(tmp_path).execute({'patch': (
+        '*** Begin Patch\n*** Update File: a.txt\n-old\n+new\n'
+        '*** Update File: b.txt\n*** Move to: 中文.txt\n-old\n+moved\n'
+        '*** Add File: empty.txt\n+\n*** Delete File: delete.txt\n*** End Patch'
+    )})
+    assert outcome.ok, outcome.output
+    _archive_patch_outcome(tmp_path, outcome)
+    items = collect_registered_artifacts(task)
+    assert {item['path'] for item in items} == {str(tmp_path / name) for name in ('a.txt', '中文.txt', 'empty.txt')}
+    assert set(task.artifact_refs) == {item['path'] for item in items}
+    records = {Path(row.path).name: row for row in latest_artifact_records(tmp_path).values()}
+    assert records['b.txt'].status == records['delete.txt'].status == 'deleted'
+    assert records['a.txt'].created_by_tool == 'apply_patch'
+
+
+def test_partial_patch_registers_committed_file_not_failed_target(tmp_path, monkeypatch):
+    from agent_py_agent.agent.artifacts.registry import latest_artifact_records
+    from agent_py_agent.agent.tooling import _filesystem_patch as module
+
+    for name in ('a', 'b'):
+        (tmp_path / name).write_text('old\n')
+    original = module._atomic_write_bytes
+
+    def fail_second(path, data, **kwargs):
+        if path.name == 'b':
+            raise OSError('injected write failure')
+        original(path, data, **kwargs)
+
+    monkeypatch.setattr(module, '_atomic_write_bytes', fail_second)
+    outcome = module.ApplyPatchTool(tmp_path).execute({'patch': (
+        '*** Begin Patch\n*** Update File: a\n-old\n+new\n'
+        '*** Update File: b\n-old\n+new\n*** End Patch'
+    )})
+    assert not outcome.ok
+    assert outcome.result_envelope['partial_commit']
+    _archive_patch_outcome(tmp_path, outcome)
+    assert {row.path for row in latest_artifact_records(tmp_path).values()} == {str(tmp_path / 'a')}

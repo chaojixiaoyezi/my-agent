@@ -1,4 +1,6 @@
 
+# LLM: runner 模型只消费有界的身份、cwd、恢复和产物投影，不把内部 output 目录当写入目的地。
+# 模块用途: 精简子代理启动与续跑上下文，保持工具路径与展示提示一致。
 from __future__ import annotations
 
 from pathlib import Path
@@ -223,23 +225,24 @@ def _context_packs_prompt_payload(value: object) -> list[dict[str, object]]:
     return packs
 
 
+# LLM: 运行记录与业务 cwd 分开命名；移除旧内部 work/output 路径提示，不改宿主恢复字段。
+# 函数用途: 给子代理明确工作目录及恢复位置，避免重复出两套“交付目录”。
 def _runner_ref_payload(context: SubAgentExecutionContext, bundle: dict[str, object]) -> dict[str, object]:
     workspace_refs = _dict_prompt_subset(
         bundle.get("workspace_refs"),
         [
+            "execution_cwd",
             "owner_workspace_dir",
             "agent_work_dir",
             "own_context_bundle_ref",
             "parent_context_bundle_ref",
             "task_root",
-            "task_work_dir",
-            "task_output_dir",
             "agent_run_checkpoint",
             "agent_run_summary",
         ],
     )
     return {
-        "task_root": current_model_ref(workspace_refs.get("task_root") or context.task_dir),
+        "runtime_state_root": current_model_ref(workspace_refs.pop("task_root", "") or context.task_dir),
         "context_bundle_json": current_model_ref(context.context_bundle_json),
         "context_bundle_file": current_model_ref(context.context_bundle_file),
         "workspace_refs": workspace_refs,

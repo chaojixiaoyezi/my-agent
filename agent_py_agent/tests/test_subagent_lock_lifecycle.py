@@ -15,12 +15,12 @@ from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.subagents.context_bundle_refs import execution_cwd
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.base import CreateRunParams
 from agent_py_agent.agent.subagents.services.output_alignment import (
     LOCKED_FILES_CHANGES_ATTR,
     LOCKED_FILES_SANITIZED_ATTR,
-    delivery_root,
 )
 
 pytestmark = pytest.mark.integration
@@ -45,7 +45,7 @@ def _task_with_outputs(manager: SubAgentManager, outputs: list[str]):
 def test_self_locked_delivery_file_is_sanitized_on_save(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     task = _task_with_outputs(manager, ["backend/app.py"])
-    target = str(Path(delivery_root(task)) / "backend" / "app.py")
+    target = str(Path(execution_cwd(task)) / "backend" / "app.py")
 
     task.locked_files = [target]  # R5a 形态:锁住自己要交付的文件
     manager.save(task)
@@ -57,11 +57,11 @@ def test_self_locked_delivery_file_is_sanitized_on_save(tmp_path: Path) -> None:
     assert ledger[-1]["code"] == "OUTPUT_TARGET_LOCKED"
 
 
-def test_directory_lock_covering_delivery_root_is_sanitized(tmp_path: Path) -> None:
+def test_directory_lock_covering_declared_target_is_sanitized(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     task = _task_with_outputs(manager, ["report.md"])
 
-    task.locked_files = [delivery_root(task)]  # 锁整个交付目录(R5a "output 目录被锁"形态)
+    task.locked_files = [execution_cwd(task)]  # 锁整个可信 cwd 会覆盖任务自己的声明目标。
     manager.save(task)
 
     reloaded = manager.load(task.id)
@@ -108,7 +108,7 @@ def test_takeover_passed_self_lock_is_also_sanitized(tmp_path: Path) -> None:
     """takeover 透传的锁(R5a 疑似来源链)同样过 save 权威口被剔。"""
     manager = _manager(tmp_path)
     task = _task_with_outputs(manager, ["final/report.md"])
-    target = str(Path(delivery_root(task)) / "final" / "report.md")
+    target = str(Path(execution_cwd(task)) / "final" / "report.md")
 
     manager.record_takeover(task.id, take_over_by="parent", reason="重派", locked_files=[target])
 

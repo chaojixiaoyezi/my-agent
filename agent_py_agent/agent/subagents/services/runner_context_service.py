@@ -1,5 +1,7 @@
 """Runner execution-context construction and persistence service."""
 
+# LLM: 子代理执行边界只来自继承权限、正式授权和可信 cwd，内部恢复目录不构成业务输出约定。
+# 模块用途: 构造 runner 的工具权限与路径上下文，不替模型变更输出地址。
 from __future__ import annotations
 
 import json
@@ -34,7 +36,6 @@ from ..utils import (
     _apply_missing_paths,
     _merge_list,
 )
-from .output_alignment import declared_output_write_roots, output_write_grant_roots
 
 
 @dataclass(frozen=True)
@@ -117,23 +118,8 @@ class SubAgentRunnerContextService:
         )
         if exact_source_read_scope:
             read_roots = _merge_list(read_roots, [_model_task_dir(task)])
-        # 任务交付区（tasks/<日期>/<任务>/output）必须可写：子代理直接把声明产物写到
-        # 交付区，用户拿走即可（见 output_alignment）。显式并入，不依赖 task_workspace_dir
-        # 是否被 locator 过滤，也修 R4 那种"主代理只给 output 子目录、没给交付区根"的形态。
-        # R8 接力实锤补强：delivery_root 的环境字段缺失时（创建链未透传 run_workspace
-        # 等），声明产物目录过围栏（与 capability grant 同款基准）后直接授权——
-        # 声明驱动的对偶，子代理写自己声明的交付位置不再被自家边界拦。
-        fence_roots = [
-            str(getattr(task, "task_workspace_dir", "") or ""),
-            str(getattr(task, "task_dir", "") or ""),
-            str(getattr(self.manager, "workspace_root", "") or ""),
-            str(getattr(self.manager, "workspace", "") or ""),
-        ]
-        delivery_grant_roots = [
-            *output_write_grant_roots(task),
-            *declared_output_write_roots(task, fence_roots),
-        ]
-        allowed_write_roots = _model_allowed_write_roots(task, [*grant_write_roots, *delivery_grant_roots], report_roots)
+        # 输出声明不是授权；继承的 owner 范围、明确写根和正式 grant 是唯一权限来源。
+        allowed_write_roots = _model_allowed_write_roots(task, grant_write_roots, report_roots)
         return {
             "task_dir": _model_task_dir(task),
             # LLM: 会话运行时 keeps cwd separate from rollout/task storage. This is
@@ -422,6 +408,8 @@ def _task_report_write_roots(task: SubAgentTask) -> list[str]:
     return roots
 
 
+# LLM: 产品写根是继承权限的投影，空集合不能由内部 work/output 兜底填满。
+# 函数用途: 提取子代理真实可写的业务目录，缺少授权时保持显式空范围。
 def task_product_write_roots(task: SubAgentTask, report_roots: list[str]) -> list[str]:
     task_dir = _resolved_path_text(task.task_dir)
     report_root_set = {_resolved_path_text(item) for item in report_roots}
@@ -435,25 +423,7 @@ def task_product_write_roots(task: SubAgentTask, report_roots: list[str]) -> lis
             continue
         if text not in roots:
             roots.append(text)
-    if not roots:
-        roots = _task_workspace_fallback_roots(task)
     return roots
-
-
-# LLM: 子代理产物写区兜底(batch3 C3/G4 实锤:子代理 allowed_write_roots 只含
-#   自己的 agent 目录〔没声明 output_files,declared_output_write_roots 没生效〕,
-#   过滤掉自己目录后 product_write_roots 为空 → tool_preflight 报 missing_allowed_
-#   write_roots → 子代理写不了产物 → BLOCKED → 主代理空等未收口)。my-agent 的
-#   "必须先声明产物落点才有写区"是对模型的过度约束(对照组子代理直接写工作区)。
-#   兜底:product_write_roots 为空时回退到任务工作区的 output/work——子代理总能
-#   写产物(交付事实优先),且围栏在本任务工作区内(非任意位置),安全。
-# 函数用途: 子代理没有任何声明产物写区时,给它任务工作区的 output 和 work 兜底。
-def _task_workspace_fallback_roots(task: SubAgentTask) -> list[str]:
-    workspace = str(getattr(task, "task_workspace_dir", "") or "").strip()
-    if not workspace:
-        return []
-    base = Path(workspace)
-    return [str(base / "output"), str(base / "work")]
 
 
 def task_product_write_policy(task: SubAgentTask, product_roots: list[str]) -> str:

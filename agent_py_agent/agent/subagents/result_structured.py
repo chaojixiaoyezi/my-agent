@@ -1,4 +1,6 @@
 
+# LLM: 模型结构化结果仅补充事实；不再通过交付映射静默复制业务文件。
+# 模块用途: 合并子代理结果字段、工具记录与证据，文件操作仍由正式工具执行。
 from __future__ import annotations
 
 """Structured runner-output processing for subagent results."""
@@ -16,7 +18,6 @@ from .models import (
 )
 from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict
 from .result_artifact_evidence import (
-    deliver_anchored_outputs_to_declared,
     merge_artifact_evidence,
     normalize_artifact_items,
 )
@@ -224,12 +225,12 @@ def _merge_structured_tools(
     return ignored_tools, ignored_skills
 
 
+# LLM: 输出声明是预期，不授权宿主造文件或搬文件；只登记报告中引用的真实产物。
+# 函数用途: 规范子代理结构化输出，保留实际文件记录。
 def _normalized_structured_artifacts(task: SubAgentTask, parsed: SubAgentParsedOutput) -> dict[str, object]:
     normalized = _normalize_parsed_fields(parsed)
     artifacts = normalize_artifact_items(task, normalized["artifacts"])
     # 只接受真实存在的 runner 产物；声明清单是交付预期，不能据此造文件。
-    # 唯一允许的搬运是结构化 delivery_map 明确给出的真实 source -> target。
-    artifacts.extend(deliver_anchored_outputs_to_declared(task, artifacts))
     normalized["artifacts"] = artifacts
     return normalized
 

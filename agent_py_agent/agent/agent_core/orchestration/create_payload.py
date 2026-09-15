@@ -1,4 +1,5 @@
-"""创建子代理的请求条目解析与响应 payload 组装（原 create_payload.py / create_items.py 并入）。"""
+# LLM: 创建回执只投影异步启动、可信 cwd 和结果引用；内部运行根不代表业务文件目录。
+# 模块用途: 组装子代理派工条目和父级回执，不替父级决定分工或等待时机。
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ from ...action_protocol import subagent_schedule_envelope_from_payload
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ...contracts.idempotency import idempotency_key, operation_id
 from ...model_visible_refs import current_model_ref, current_model_ref_list, current_model_text
+from ...subagents.context_bundle_refs import execution_cwd
 from ...subagents.role_templates import role_template_snapshot_for_task
 from ..runner.ref_fields import (
     _file_refs_from_value,
@@ -235,12 +237,16 @@ def _next_action(
     }
 
 
+# LLM: task_root 保留为内部运行定位符；普通相对文件只相对于同一宿主 execution_cwd。
+# 函数用途: 明确告诉父级孩子实际在哪工作，避免拿内部目录拼业务文件路径。
 def _task_payload(task: object) -> dict[str, object]:
     return {
         "id": _task_text(task, "id"),
         "goal": current_model_text(_task_text(task, "goal")),
         "status": _task_text(task, "status"),
         "task_root": current_model_ref(_task_text(task, "task_workspace_dir")),
+        "task_root_role": "internal_run_state",
+        "execution_cwd": execution_cwd(task),
         "attributes": _task_attributes(task),
     }
 

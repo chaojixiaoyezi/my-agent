@@ -357,6 +357,16 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - 该结构适配 会话运行时 `forward_child_completion_to_parent -> parent mailbox`：调用次数可以合并，完成消息不能
   因 token 预算或普通 pending-list 展示上限被提前确认。
 
+## 自然结果交接与唯一文件起点
+
+- `runner_result_service.py` 在自然与结构化 final 的共同出口调用 `result_registered_artifacts.py`，
+  只消费 canonical agent run 下的工具产物 registry。ready 记录按 artifact id 取最新、按 exact run 筛选；
+  工具归档、其它 run、删除/missing 不进入产物列表。文件存在不等于项目质量验收通过。
+- `context_bundle_refs.execution_cwd` 是声明文件与工具的共同起点，允许根不表示多个目标目录。
+  绝对声明不重写，相对声明不移入内部 output；旧 delivery map、收口复制和声明写授权已删除。
+- 创建回执明确 `task_root_role=internal_run_state`，另给 `execution_cwd`；模型投影不再列内部
+  task_work_dir/task_output_dir 作为可选交付位置。恢复记录与用户业务文件分开。
+
 ## 2026-08-25 create_subagents 单派/批量目标合同
 
 - 单派以顶层非空 `goal` 为 child 的完整目标；批量以非空 `items` 为权威，每个 item 的非空 `goal` 分别
@@ -986,21 +996,21 @@ root 对用户完整目标负责；delegated runner 只把直接父级当前 `go
 
 子代理可以写自己的过程产物和协作文件，但最终用户交付由主代理汇总。子代理 `final_report.md` 这类内部文件只作为证据/引用，不会自动变成用户最终交付。
 
-子代理结果回报里的产物入口只认当前结构化字段：`artifacts`、顶层
-`artifact_refs`、`evidence kind=artifact` 和 `evidence_packets[].artifact_refs`。
+子代理自然完成与结构化完成都读取本 run 工具 registry 的真实文件引用；模型结果可补充
+`artifacts`、顶层 `artifact_refs`、`evidence kind=artifact` 和 `evidence_packets[].artifact_refs`。
 `deliverables`、`files_modified`、顶层 `file_path/path` 这类历史别名不会被恢复成
-artifact refs。创建任务时给子代理的 `output_files` 是目标路径合同，不是结果回报别名。
+artifact refs；补丁工具通过独立结构化 `artifact_refs` 交接已提交文件，不解析显示名称。
+创建任务时给子代理的 `output_files` 是目标路径合同，不是结果回报别名。
 
-声明产物只表示预期交付，不授权 runtime 自动创建内容。runner result 只登记确实存在、
-可解析到当前任务工作区且通过 registry 校验的文件；缺失声明保持缺失，交给父代理根据
+声明产物只表示预期交付，不授权 runtime 自动创建内容。runner result 交接正式工具账本中的文件，
+读写权限仍由工具在执行时核验；缺失声明保持缺失，交给父代理根据
 结构化缺口继续工作或报告。禁止从另一个文本产物按后缀或同名搜索复制，禁止把 summary/
-findings 渲染成占位文件。唯一允许的收尾复制是 `output_delivery_map` 明确记录的真实
-`source -> target`，并且 source 必须存在、target 必须仍在声明写围栏内。
+findings 渲染成占位文件。收口不复制或搬运业务文件；声明、文件工具与结果引用共用可信 cwd。
 
 `create_subagents` 的模型入口只有单 `goal` 和明确 `items` 两种形态，不克隆同一份任务。
 多个 child 必须在 `items` 里声明不同工作；需要给出明确交付路径时，每个 item 可显式声明自己的
-`output_files`。提供的相同目录以及目录与其子路径属于同一个冲突范围，不能分给并行 child；没有声明时
-不能假定模型已经预报完整写集。顶层交付目标归父任务，不会暗中复制到所有 child。
+`output_files`。共享目录及目录与子路径重叠本身不构成互斥，模型应合理划分实际文件修改；没有声明时
+不能假定模型已经预报完整写集，也不自动创建目录锁。顶层交付目标归父任务，不会暗中复制到所有 child。
 
 ## 2026-06-10 Facade 清理
 
@@ -1017,22 +1027,21 @@ findings 渲染成占位文件。唯一允许的收尾复制是 `output_delivery
   共享 helper 留一份。调用方（create_context / create_constraints /
   hierarchy/schedule_idempotency）改导入合并后模块，行为不变。
 
-## 2026-06-11 产物落点投影层
+## 输出路径投影与权限
 
-- 新增 `services/output_alignment.py`：纯投影、不改 task。`anchored_output_refs(task)`
-  产出 OutputAnchoring（anchored_refs / delivery_map / warnings）；
-  `anchor_refs_for_execution(task, refs)` 给合同投影层批量翻译目标 refs。
+- `services/output_alignment.py`：路径解析不改 task。`anchored_output_refs(task)`
+  产出 OutputAnchoring（anchored_refs / warnings）；
+  `anchor_refs_for_execution(task, refs)` 按可信 cwd 解析目标 refs，不重定位或扩权。
   消费方：`context_bundle_contracts.task_packet/output_contract`（执行合同）、
-  `result_artifact_evidence.deliver_anchored_outputs_to_declared`（收尾搬运）、
-  `delivery_closeout/subagent_aggregation`（声明对账复用 looks_like_output_path）。
+  `services/runner_context_service`（执行上下文）。结果文件来自
+  `result_registered_artifacts.collect_registered_artifacts` 的 exact run 账本投影，不经完成时搬运。
 - `agent_core/orchestration/tools/capability.py`：`resolve_capability_requests` 工具
   实现（grant/deny + 安全围栏 + wake）；注册链 core.py → orchestration_tools.py。
 - `services/lifecycle.py`：capability request/grant/gap 与 evidence 生命周期写入；grant 保存后只对精确
   `capability_request` 阻塞 child 做 conversation link 的 `blocked -> active` CAS，使同 run 可以续跑，
   但 cancelled/terminal link 不会被复活。
-- `services/runner_context_service.py`:`task_product_write_roots` 子代理产物写区
-  (过滤自己 agent 目录与 report 区);为空时 `_task_workspace_fallback_roots`
-  回退任务工作区 output/work,保证子代理总能写产物(batch3 C3/G4 修复)。
+- `services/runner_context_service.py` 的 `task_product_write_roots` 投影继承的业务写区，
+  过滤内部 agent/report 区；空范围不由内部 output/work 兜底，也不由输出声明产生授权。
 
 ## TUI/Web Agent View And Control
 

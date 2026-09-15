@@ -1,4 +1,6 @@
 
+# LLM: runner 结果、自然回复与工具产物共用 canonical 收口；保持 attempt 校验、状态和直属通知的原子顺序。
+# 模块用途: 保存子代理本轮结果和文件交接，再由现有生命周期唤醒父级。
 from __future__ import annotations
 
 """Runner result recording and debrief persistence service."""
@@ -24,6 +26,7 @@ from ..result_processors import (
     _write_runner_result_files,
     merge_actual_tools_for_unparsed,
 )
+from ..result_registered_artifacts import collect_registered_artifacts
 from ..runner_rendering import render_runner_result_markdown
 from ..tool_failure_ledger import record_tool_failure_ledger
 from ..utils import _apply_missing_paths
@@ -63,6 +66,8 @@ class _RunnerResultBuildParams:
         self.now = now
 
 
+# LLM: 结果保存、产物投影和通知都属于同一 canonical 收口；不要旁路写终态或抢占其它 attempt。
+# 类用途: 收集子代理的自然与结构化结果，再持久化并通知直属父级。
 class SubAgentRunnerResultService:
     """Persist parsed runner output and update the owning subagent task."""
 
@@ -102,6 +107,8 @@ class SubAgentRunnerResultService:
         Path(ctx.task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
         return result
 
+    # LLM: 结构化输出是可选内容，工具账本是独立事实源；自然 final 同样交付产物，不要求模型复述 JSON。
+    # 函数用途: 收集合规的结果字段和真实文件记录，修改 task 的交接投影但不代写业务文件。
     def _extract_parsed_output(
         self,
         task: SubAgentTask,
@@ -113,7 +120,7 @@ class SubAgentRunnerResultService:
         parsed = structured_output or SubAgentParsedOutput()
         if parsed.found and parsed.ok:
             proc = _process_structured_output(task, parsed, now, actual_tools)
-            return _ExtractedOutput(
+            extracted = _ExtractedOutput(
                 parsed=parsed,
                 ignored_tools=proc["ignored_tools"],
                 ignored_skills=proc["ignored_skills"],
@@ -128,8 +135,14 @@ class SubAgentRunnerResultService:
                 lessons=proc["lessons"],
                 next_actions=proc["next_actions"],
             )
-        merge_actual_tools_for_unparsed(task, actual_tools, now)
-        return _ExtractedOutput(parsed=parsed)
+        else:
+            merge_actual_tools_for_unparsed(task, actual_tools, now)
+            extracted = _ExtractedOutput(parsed=parsed)
+        observed = collect_registered_artifacts(task)
+        by_path = {str(item.get("path") or ""): item for item in extracted.artifacts}
+        by_path.update({str(item["path"]): item for item in observed})
+        extracted.artifacts = list(by_path.values())
+        return extracted
 
     def _apply_status_and_build_payload(
         self,

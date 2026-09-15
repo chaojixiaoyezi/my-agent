@@ -156,7 +156,7 @@ def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert "acceptance_checks" not in bundle.source_refs
 
 
-def test_context_bundle_maps_required_file_to_product_root(tmp_path) -> None:
+def test_context_bundle_maps_required_file_to_explicit_execution_cwd(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
     product_root = tmp_path / "product"
     task = manager.create_run(
@@ -165,7 +165,7 @@ def test_context_bundle_maps_required_file_to_product_root(tmp_path) -> None:
         plan=["读取上游", "写报告"],
         role="coordinator",
         extra_write_roots=[str(product_root)],
-        attributes={"required_files": ["final_report.md"]},
+        attributes={"required_files": ["final_report.md"], "conversation_execution_cwd": str(product_root)},
     )
     manager.save(task)
 
@@ -223,7 +223,7 @@ def test_context_bundle_hides_legacy_system_default_output_ref_from_model(tmp_pa
 
     assert bundle.output_contract["declared_output_refs"] == []
     assert bundle.output_contract["required_file_refs"] == []
-    assert bundle.output_contract["output_delivery_map"] == []
+    assert "output_delivery_map" not in bundle.output_contract
     assert "final_report_ref" not in bundle.output_contract
     assert bundle.task_packet["file_contract"]["declared_output_refs"] == []
     assert bundle.task_packet["file_contract"]["required_file_refs"] == []
@@ -312,7 +312,7 @@ def test_context_bundle_ignores_placeholder_output_path_refs(tmp_path) -> None:
     assert str(tmp_path / "fixture_project" / "[任务目录]") not in bundle.task_packet["write_contract"]["allowed_write_roots"]
 
 
-def test_context_bundle_strips_product_root_basename_from_required_ref(tmp_path) -> None:
+def test_context_bundle_does_not_strip_a_real_relative_directory(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
     product_root = tmp_path / "site"
     task = manager.create_run(
@@ -322,7 +322,7 @@ def test_context_bundle_strips_product_root_basename_from_required_ref(tmp_path)
         role="worker",
         extra_write_roots=[str(product_root)],
         acceptance_checks=["site/index.html 存在"],
-        attributes={"required_files": ["site/index.html"]},
+        attributes={"required_files": ["site/index.html"], "conversation_execution_cwd": str(tmp_path)},
     )
     manager.save(task)
 

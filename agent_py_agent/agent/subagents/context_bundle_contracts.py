@@ -1,4 +1,6 @@
 
+# LLM: 文件合同只表达显式输出和继承权限；路径与工具共享 cwd，不再把相对引用移入内部 output。
+# 模块用途: 给子代理投影身份、文件引用和读写边界，不代写或搬运交付物。
 from __future__ import annotations
 
 import ast
@@ -19,7 +21,6 @@ from .services.output_alignment import (
     OutputAnchoring,
     anchor_refs_for_execution,
     anchored_output_refs,
-    output_write_grant_roots,
 )
 
 _SAFE_FILE_SUFFIX_RE = re.compile(r"^\.[a-z0-9][a-z0-9._+-]{0,63}$")
@@ -39,15 +40,13 @@ class _TaskContractComponents(NamedTuple):
 # 函数用途: 生成子代理真正需要执行的业务产物合同，不把内部收口文件伪装成待写交付物。
 def output_contract(task: SubAgentTask) -> dict[str, object]:
     components = task_contract_components(task)
-    # R4 修复：执行合同里的目标 refs 必须翻译成子代理可写落点（声明意图位置保留在
-    # declared_output_refs / output_delivery_map，由主代理收尾时按 map 汇总搬运）。
+    # 相对声明只补可信 cwd，不能因为权限不够而换一个地址冒充目标。
     anchoring = _model_visible_output_anchoring(task)
     anchored_required = _merged_anchored_required(task, components.required_file_refs, anchoring)
     return {
         "product_write_roots": components.product_roots,
         "required_file_refs": anchored_required,
         "declared_output_refs": declared_output_refs(task),
-        "output_delivery_map": anchoring.delivery_map,
         "write_contract_warnings": anchoring.warnings,
         "required_files": components.required_files,
         "forbidden_files": components.forbidden_files,
@@ -61,8 +60,6 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
 def task_packet(task: SubAgentTask) -> dict[str, object]:
     refs = workspace_refs(task)
     components = task_contract_components(task)
-    # R4 修复：file/write contract 给子代理的目标 refs 用可写落点；
-    # output_delivery_map 记录 落点→声明意图位置，收尾汇总按它搬运。
     anchoring = _model_visible_output_anchoring(task)
     anchored_required = _merged_anchored_required(task, components.required_file_refs, anchoring)
     return {
@@ -86,7 +83,6 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
             "product_write_roots": components.product_roots,
             "required_file_refs": anchored_required,
             "declared_output_refs": declared_output_refs(task),
-            "output_delivery_map": anchoring.delivery_map,
             "write_contract_warnings": anchoring.warnings,
             "allowed_write_roots": allowed_write_roots(task),
             "forbidden_write_roots": _model_visible_file_terms(task.forbidden_write_roots),
@@ -107,8 +103,7 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
     }
 
 
-# LLM: 执行合同 required_file_refs 的组装权威：现有 product_roots 解析结果走锚定翻译，
-#   并补上声明产物的锚定落点（product_roots 为空时相对声明也有可写目标）。
+# LLM: 执行合同的文件引用必须共用工具 cwd，不从权限根列表复制出多个同名目标。
 # 函数用途: 合出子代理执行视角的完整目标 refs 列表。
 def _merged_anchored_required(
     task: SubAgentTask,
@@ -122,12 +117,13 @@ def _merged_anchored_required(
     return merged
 
 
+# LLM: 保留宿主运行根与已继承写根；output_files/output_refs 不能授予新目录权限。
+# 函数用途: 投影现有写权限，不按交付意图新增授权。
 def allowed_write_roots(task: SubAgentTask) -> list[str]:
     roots: list[str] = []
     for raw in (
         safe_string_ref(task, "task_workspace_dir"),
         safe_string_ref(task, "agent_run_workspace_dir"),
-        *output_write_grant_roots(task),
         *list(task.allowed_write_roots or []),
     ):
         text = _model_visible_write_root(task, raw)
@@ -149,7 +145,7 @@ def task_contract_components(task: SubAgentTask) -> _TaskContractComponents:
     return _TaskContractComponents(
         required_files=required_files,
         product_roots=product_roots,
-        required_file_refs=required_product_file_refs(task, required_files, product_roots),
+        required_file_refs=required_product_file_refs(task, required_files),
         forbidden_files=forbidden_file_contract(task),
         source=file_contract_source(task),
     )
@@ -176,18 +172,14 @@ def product_write_roots(task: SubAgentTask) -> list[str]:
     return roots
 
 
+# LLM: 所有声明文件只按 canonical cwd 解析，不从权限根列表推导多个交付目标。
+# 函数用途: 把明确文件要求转成唯一真实路径，避免多写根产生多个假交付目标。
 def required_product_file_refs(
     task: SubAgentTask,
     required_files: list[str] | None = None,
-    roots: list[str] | None = None,
 ) -> list[str]:
     files = required_files if required_files is not None else required_file_contract(task)
-    product_roots = roots if roots is not None else product_write_roots(task)
-    refs: list[str] = []
-    for filename in files:
-        for ref in _required_product_ref_candidates(str(filename or "").strip(), product_roots):
-            add_file_root_term(refs, ref)
-    return refs
+    return anchor_refs_for_execution(task, files)
 
 
 def forbidden_file_contract(task: SubAgentTask) -> list[str]:
@@ -283,21 +275,8 @@ def render_task_packet_lines(packet: dict[str, object]) -> list[str]:
         f"- forbidden_files: {_compact_list(file_contract.get('forbidden_files'))}",
         f"- product_write_roots: {_compact_list(write_contract.get('product_write_roots'))}",
         f"- allowed_write_roots: {_compact_list(write_contract.get('allowed_write_roots'))}",
-        f"- output_delivery_map: {_compact_delivery_map(write_contract.get('output_delivery_map'))}",
         f"- allowed_tools: {_compact_list(tool_contract.get('allowed_tools'))}",
     ]
-
-
-# 函数用途: 把 delivery_map 渲染成 runner prompt 里的紧凑单行（落点 => 最终位置）。
-def _compact_delivery_map(value: object) -> str:
-    if not isinstance(value, list) or not value:
-        return "none"
-    pairs = [
-        f"{item.get('from')} => {item.get('to')}"
-        for item in value
-        if isinstance(item, dict) and item.get("from") and item.get("to")
-    ]
-    return "; ".join(pairs) if pairs else "none"
 
 
 def _context_bundle_json_ref(refs: dict[str, str]) -> str:
@@ -352,40 +331,6 @@ def _dedupe_file_terms(values) -> list[str]:
         if text and text not in terms:
             terms.append(text)
     return terms
-
-
-def _resolve_required_file_ref(root: str, file_path: Path) -> str:
-    root_path = Path(str(root or "").strip())
-    if not str(root_path):
-        return ""
-    if is_contract_file_path(root_path):
-        normalized_file = file_path.as_posix()
-        normalized_root = root_path.as_posix()
-        return str(root_path) if root_path.name == file_path.name or normalized_root.endswith("/" + normalized_file) else ""
-    return str(root_path / _file_path_with_product_root_stripped(root_path, file_path))
-
-
-def _file_path_with_product_root_stripped(root_path: Path, file_path: Path) -> Path:
-    file_parts = file_path.parts
-    root_parts = root_path.parts
-    max_size = min(len(file_parts) - 1, len(root_parts))
-    for size in range(max_size, 0, -1):
-        if file_parts[:size] == root_parts[-size:]:
-            return Path(*file_parts[size:])
-    return file_path
-
-
-def _required_product_ref_candidates(file_text: str, product_roots: list[str]) -> list[str]:
-    if not file_text:
-        return []
-    file_path = Path(file_text)
-    if file_path.is_absolute():
-        return [str(file_path)]
-    return [
-        resolved
-        for root in product_roots
-        if (resolved := _resolve_required_file_ref(root, file_path))
-    ]
 
 
 def _compact_list(value: object) -> str:

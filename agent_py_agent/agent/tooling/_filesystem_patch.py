@@ -1,6 +1,6 @@
 
-# LLM: 本模块实现 canonical apply_patch 解析、全量预检、配额核算与原子文件变更；展示 diff 不参与补丁是否允许或成功的裁决。
-# 模块用途: 应用新增、更新、移动、删除文本文件的结构化补丁，并报告涉及文件及可视化差异。
+# LLM: canonical 补丁预检和原子变更复用精确路径；成功或部分提交把真实引用交给统一工具账本，展示 diff 不作权限依据。
+# 模块用途: 应用新增、更新、移动、删除文本文件的补丁，报告已提交文件与差异，不让父级丢失补丁产物。
 
 from __future__ import annotations
 
@@ -112,6 +112,8 @@ def _build_apply_patch_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: 权限和执行仍由统一工具链处理；回执须包含已提交文件的精确引用，供归档和子代理交接共用。
+# 类用途: 提供多文件补丁工具，连同部分失败事实一起报告，不另建文件交付通道。
 class ApplyPatchTool(FileSystemTool):
     model_spec = _build_apply_patch_model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -163,8 +165,8 @@ class ApplyPatchTool(FileSystemTool):
                 roots.append(str(path.resolve()))
         return tuple(dict.fromkeys(roots))
 
-    # LLM: 成功结果附带预检阶段生成的有界结构化 diff；display 仅供客户端渲染，不参与写入、配额或成功判断。
-    # 函数用途: 校验并应用一份文本补丁，同时返回单文件或多文件的终端差异展示数据。
+    # LLM: 仅已提交目标生成 artifact_refs；部分失败不宣称未触及目标有产物。路径来自预检，不解析输出正文。
+    # 函数用途: 应用文本补丁，返回真实文件交接、删除记录及终端差异；display 不参与权限和成功判断。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             patch = _text_param(params.get("patch"), name="patch", max_chars=_MAX_WRITE_TEXT_CHARS)
@@ -189,6 +191,7 @@ class ApplyPatchTool(FileSystemTool):
                 "apply_patch", False, f"补丁未全部完成，已提交 {len(exc.touched)} 个路径；失败目标 {exc.failed_path}: {exc}",
                 error_code=exc.error_code, effect_outcome="failed" if exc.touched else "not_started" if exc.error_code == "STALE_VERSION" else "unknown",
                 result_envelope={"files_modified": exc.touched, "failed_path": exc.failed_path,
+                                 "artifact_refs": _patch_artifact_refs(self, exc.touched, versions),
                                  "partial_commit": bool(exc.touched), "failed_path_effect": "unknown"},
             )
         except PatchTargetMissingError as exc:
@@ -207,9 +210,20 @@ class ApplyPatchTool(FileSystemTool):
             "已应用补丁: " + ", ".join(touched),
             result_envelope={
                 "files_modified": list(touched),
+                "artifact_refs": _patch_artifact_refs(self, touched, versions),
                 **({"display": display} if display else {}),
             },
         )
+
+
+# LLM: 只用预检路径及实际提交清单；保留删除墓碑供原 registry 更新，不重新猜 cwd 或扫描文件。
+# 函数用途: 把显示文件名还原为本次验证的绝对引用，移动同时报告新文件与旧地址删除。
+def _patch_artifact_refs(tool: FileSystemTool, touched: list[str], versions: dict) -> list[dict[str, str]]:
+    paths = {tool.display_path(path): path for path in versions}
+    return [
+        {"path": str(paths[name]), "kind": "file", "status": "ready" if paths[name].is_file() else "deleted"}
+        for name in dict.fromkeys(touched) if name in paths
+    ]
 
 
 def _parse_simple_patch(patch: str) -> list[dict[str, Any]]:

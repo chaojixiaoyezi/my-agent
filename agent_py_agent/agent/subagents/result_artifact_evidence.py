@@ -7,6 +7,8 @@ text as recovery hints. It must not turn a missing artifact into a task failure;
 closeout and the parent model decide what to do with incomplete delivery.
 """
 
+# LLM: 产物规范化仅登记现有文件；不能从声明生成产物或自动复制到另一个目录。
+# 模块用途: 解析结果中的文件引用并登记证据，缺失产物如实交回父级判断。
 from __future__ import annotations
 
 import json
@@ -36,74 +38,6 @@ def normalize_artifact_items(task: SubAgentTask, artifacts: list[dict[str, objec
             copied = _with_registry_ref(task, copied)
             normalized.append(copied)
     return normalized
-
-
-# LLM: R4 子项④的搬运步骤，在 materialize 之前执行：把子代理锚定落点（output_alignment
-#   的 delivery_map.from）的真实产物复制到声明意图位置（.to）。目标必须通过
-#   _materializable_declared_output_path 的工作区围栏；已存在非空目标不覆盖。
-#   搬运结果结构化记入 task.attributes["output_delivery_results"]，交付对账消费。
-# 函数用途: 子代理 runner 结果写回时，把真实产物送到主代理声明的最终位置。
-def deliver_anchored_outputs_to_declared(
-    task: SubAgentTask,
-    artifacts: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    from .services.output_alignment import anchored_output_refs
-
-    delivery_map = anchored_output_refs(task).delivery_map
-    if not delivery_map:
-        return []
-    existing_refs = {artifact_ref(item) for item in artifacts}
-    delivered: list[dict[str, object]] = []
-    results: list[dict[str, str]] = []
-    for entry in delivery_map:
-        source_text = str(entry.get("from") or "")
-        declared_text = str(entry.get("to") or "")
-        target = _materializable_declared_output_path(task, declared_text)
-        if target is None:
-            results.append({"from": source_text, "to": declared_text, "status": "target_outside_workspace"})
-            continue
-        source = _existing_local_path(source_text)
-        if source is None or not source.is_file():
-            results.append({"from": source_text, "to": str(target), "status": "source_missing"})
-            continue
-        if target.resolve(strict=False) == source.resolve(strict=False):
-            continue
-        if target.exists() and target.stat().st_size > 0:
-            results.append({"from": source_text, "to": str(target), "status": "skipped_existing"})
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        import shutil
-
-        shutil.copyfile(source, target)
-        results.append({"from": source_text, "to": str(target), "status": "delivered"})
-        if str(target) not in existing_refs:
-            delivered.append(
-                {
-                    "path": str(target),
-                    "kind": target.suffix.lstrip(".") or "file",
-                    "summary": "delivered subagent output to declared location",
-                    "source_ref": source_text,
-                }
-            )
-    _record_delivery_results(task, results)
-    return delivered
-
-
-# 函数用途: 把搬运结果按结构化账本追加到 task.attributes（去重保序）。
-def _record_delivery_results(task: SubAgentTask, results: list[dict[str, str]]) -> None:
-    if not results:
-        return
-    attrs = dict(getattr(task, "attributes", {}) or {})
-    existing = attrs.get("output_delivery_results")
-    records = list(existing) if isinstance(existing, list) else []
-    seen = {(str(r.get("from")), str(r.get("to")), str(r.get("status"))) for r in records if isinstance(r, dict)}
-    for item in results:
-        key = (item["from"], item["to"], item["status"])
-        if key not in seen:
-            records.append(item)
-            seen.add(key)
-    attrs["output_delivery_results"] = records
-    task.attributes = attrs
 
 
 def _normalized_artifact_item(task: SubAgentTask, item: object) -> dict[str, object] | None:
@@ -151,59 +85,6 @@ def _append_task_registry_ref(task: SubAgentTask, record: dict[str, object]) -> 
     rows.append(record)
     attrs["artifact_registry_refs"] = rows
     task.attributes = attrs
-
-
-def _materializable_declared_output_path(task: SubAgentTask, ref: str) -> Path | None:
-    if not ref or "://" in ref or has_placeholder_path_segment(ref):
-        return None
-    try:
-        path = Path(ref).expanduser()
-    except OSError:
-        return None
-    if not path.is_absolute():
-        path = _relative_declared_output_path(task, path)
-    if path is None:
-        return None
-    resolved = path.resolve(strict=False)
-    return resolved if _inside_allowed_declared_output_root(task, resolved) else None
-
-
-def _relative_declared_output_path(task: SubAgentTask, path: Path) -> Path | None:
-    task_workspace = str(getattr(task, "task_workspace_dir", "") or "").strip()
-    if task_workspace:
-        return Path(task_workspace).expanduser() / path
-    task_dir = str(getattr(task, "task_dir", "") or "").strip()
-    return Path(task_dir).expanduser().parent / path if task_dir else None
-
-
-def _inside_allowed_declared_output_root(task: SubAgentTask, path: Path) -> bool:
-    roots = [
-        _path_or_none(getattr(task, "task_workspace_dir", "")),
-        _path_or_none(getattr(task, "agent_run_workspace_dir", "")),
-        _path_or_none(getattr(task, "task_dir", "")),
-    ]
-    for root in roots:
-        if root is not None and _same_or_inside(path, root if root.is_dir() else root.parent):
-            return True
-    return False
-
-
-def _path_or_none(value: object) -> Path | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return Path(text).expanduser().resolve(strict=False)
-    except OSError:
-        return None
-
-
-def _same_or_inside(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root.resolve(strict=False))
-        return True
-    except ValueError:
-        return False
 
 
 def _registry_workspace_root(task: SubAgentTask, path: Path | None) -> Path | None:

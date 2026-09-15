@@ -100,9 +100,10 @@ agent_py_agent/
 |   |   |-- process_control.py          # 后台进程治理原语：存活探测/两阶段终止（SIGTERM→SIGKILL）
 |   |   |-- direct_parent_lifecycle.py # 直属父子等待、事件唤醒、同批合并与结果上下文
 |   |   |-- tool_failure_ledger.py      # 系统级工具失败账本：archive ok=False 摘要 -> attributes/对账投影
+|   |   |-- result_registered_artifacts.py # 自然/结构化收口共用的 exact run 工具产物投影
 |   |   |-- services/                   # 子代理业务服务
 |   |   |   |-- base.py                 # create_run/split/owner/runtime config scope
-|   |   |   |-- output_alignment.py    # 声明产物 -> 子代理可写落点投影 + delivery_map
+|   |   |   |-- output_alignment.py    # 声明按可信 cwd 解析，不重定位、不搬运、不增权
 |   |   |   |-- persistence/            # canonical state、projection、index 同步
 |   |   |   |-- dispatch/               # dispatch/watch/parent planner 报告
 |   |   |   |-- runner_context_service.py # 执行上下文和边界文件
@@ -368,6 +369,7 @@ docs/
 
 ### 关键文件说明
 
+- `agent_py_agent/agent/subagents/result_registered_artifacts.py`：从 exact run 的工具产物账本投影真实文件；自然最终回复与结构化收口共用，不扫描目录或搬运文件。
 - `agent_py_agent/agent/agent_core/runner/activity_diagnostics.py`：复用现有心跳与调用账，阶段长等待只通知直属父级，不强杀或自动重派。
 - `agent_py_agent/tests/test_subagent_activity_diagnostics.py`：慢流、阶段诊断、通知去重、旧执行代与并发进度保存的定向验证。
 

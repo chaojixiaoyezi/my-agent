@@ -1,4 +1,6 @@
 
+# LLM: 工具回执、文件引用及删除记录进入同一 exact run 账本；不从正文提取路径或完成状态。
+# 模块用途: 归档工具输出与文件交接，供父子代理继续工作和恢复使用，不代写业务文件。
 from __future__ import annotations
 
 from pathlib import Path
@@ -303,8 +305,7 @@ def _applied_tool_approval_from_result(result: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-# LLM: Tool result refs remain discoverable in the artifact registry, but raw tool-output archives
-# are typed as non-deliverables so foreground shell protection never copies its own growing ledger.
+# LLM: 实际文件和显式已删除引用复用原 registry；删除须文件当前不存在，同一次回执同一路径状态只落一次。
 # 函数用途: 登记工具返回的文件引用，并给完整工具回执标明“可读取但不属于用户交付物”的结构化角色。
 def _register_tool_result_artifacts(
     agent: object,
@@ -317,12 +318,19 @@ def _register_tool_result_artifacts(
     scope = output_record.get("run_scope")
     scope = scope if isinstance(scope, dict) else {}
     workspace_root = _artifact_registry_root(agent, record.params)
+    seen: set[tuple[str, str]] = set()
     for ref in refs:
         if not isinstance(ref, dict):
             continue
-        path = _existing_file_ref(ref.get("ref") or ref.get("path"))
+        deleted = ref.get("status") == "deleted"
+        path = _existing_file_ref(ref.get("ref") or ref.get("path"), allow_deleted=deleted)
         if path is None:
             continue
+        status = "deleted" if deleted and not path.exists() else ""
+        identity = (str(path), status)
+        if identity in seen:
+            continue
+        seen.add(identity)
         kind = str(ref.get("kind") or "")
         metadata = {"call_id": str(output_record.get("call_id") or "")}
         if kind == "tool_output":
@@ -342,6 +350,7 @@ def _register_tool_result_artifacts(
                 kind=kind,
                 source="tool_result",
                 created_by_tool=record.result.tool_name,
+                status=status,
                 metadata=metadata,
             )
         )
@@ -358,15 +367,20 @@ def _artifact_registry_root(agent: object, params: object) -> Path:
     return runtime_owner_root(agent)
 
 
-def _existing_file_ref(value: object) -> Path | None:
+# LLM: 删除记录只接受绝对路径且当前确实缺失；普通引用继续要求实际文件，不把失败正文当文件。
+# 函数用途: 检查要登记的文件路径，允许显式删除墓碑更新旧交接记录。
+def _existing_file_ref(value: object, *, allow_deleted: bool = False) -> Path | None:
     text = str(value or "").strip()
     if not text or "://" in text:
         return None
     try:
-        path = Path(text).expanduser().resolve(strict=False)
+        path = Path(text).expanduser()
+        if allow_deleted and not path.is_absolute():
+            return None
+        path = path.resolve(strict=False)
     except OSError:
         return None
-    return path if path.is_file() else None
+    return path if path.is_file() or (allow_deleted and not path.exists() and not path.is_symlink()) else None
 
 
 def _attach_run_scope(output_record: dict[str, object], agent: object, record: ToolCallRecordParams) -> None:
@@ -701,7 +715,13 @@ def _compact_artifact_integrity(value: object) -> dict[str, object]:
     return compact
 
 
+# LLM: 仅消费工具结构化 refs；保留删除状态给 registry，不通过 files_modified 展示名猜物理路径。
+# 函数用途: 汇入多文件补丁等工具的精确引用，同时保留已有单文件回执格式。
 def _append_refs(refs: list[dict[str, object]], payload: dict[str, object]) -> None:
+    for key in ("tool_result_refs", "artifact_refs", "output_refs"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            refs.extend(dict(item) for item in values if isinstance(item, dict))
     for key in ("artifact_ref", "source_ref", "path", "target_path", "output_path"):
         for value in _ref_values(payload.get(key)):
             _append_ref(refs, key, value)
