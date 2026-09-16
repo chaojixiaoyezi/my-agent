@@ -17,7 +17,7 @@
 
 ### `agent_core/`
 
-主代理应用服务层。放 `SimpleAgent` 的主循环、子代理 runner、父代理 planner、宿主内部自动 dispatch/watch、编排工具和 runner 重试规则。`orchestration/planned_delegation.py` 负责已有 canonical Todo 时的创建前 exact covers 活动占用与父 workspace 上界预检；共享 task root 不形成目录锁，也不承担质量或完成判定。模型侧只保留统一创建和直属下级的插话、打断、权限裁决，不暴露查树、等待、手动 dispatch/schedule 或自报进展工具；活动与终态由宿主事件写入。
+主代理应用服务层。放 `SimpleAgent` 的主循环、子代理 runner、父代理 planner、宿主内部自动 dispatch/watch、编排工具和 runner 重试规则。`orchestration/planned_delegation.py` 负责已有 canonical Todo 时的创建前 exact covers 活动占用与父 workspace 上界预检；共享 task root 不形成目录锁，也不承担质量或完成判定。模型侧保留统一创建和直属下级的插话、打断、权限裁决，以及按需只读 `list_agents`；不暴露手动 dispatch/schedule 或自报进展工具。活动与终态由宿主事件写入，`agent_tree/model_view.py` 将已授权状态转为紧凑模型视图，不创建新状态源。
 
 允许：业务流程编排、调用下层服务、把多个模块串成一轮完整行为。
 

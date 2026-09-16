@@ -26,6 +26,8 @@ from .scope_filter import (
 _SCHEMA_VERSION = "agent_tree_status.v1"
 
 
+# LLM: 从规范 kernel 生成一次只读快照，保留 owner/thread/run 范围及裁决，不驱动生命周期。
+# 函数用途: 为界面、诊断与模型适配器提供同一事实源，任务结束后的会话查询仍不串其它窗口。
 def agent_tree_status_payload(agent: object, params: dict[str, object] | None = None) -> dict[str, object]:
     params = params or {}
     query = _kernel_query(agent, params)
@@ -41,6 +43,7 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
         effective_run_id=query.run_id,
         effective_root_id=query.root_id or snapshot.root_id,
         effective_scope=query.scope,
+        effective_thread_id=query.conversation_thread_id,
     )
     nodes = [node_from_kernel_run(agent, row) for row in snapshot.runs]
     nodes = visible_nodes(nodes, params.get("visible_run_ids"))
@@ -98,6 +101,8 @@ def _kernel_snapshot(agent: object, query: SubagentKernelQuery):
         return _empty_snapshot(runtime_error_report(exc, context="subagent_kernel.snapshot"))
 
 
+# LLM: 子 runner 身份优先于显式参数；没有活动任务目录的主代理从宿主 thread 属性查询，不回退整个 owner。
+# 函数用途: 决定状态快照的只读范围，让任务完成后的普通追问仍看到本会话的真实子代理。
 def _kernel_query(agent: object, params: dict[str, object]) -> SubagentKernelQuery:
     current_run_id = current_subagent_run_id(agent)
     if current_run_id:
@@ -117,6 +122,11 @@ def _kernel_query(agent: object, params: dict[str, object]) -> SubagentKernelQue
         # currently executing task, not an owner-wide historical tree.  The
         # task workspace is the existing typed scope for that current task.
         return SubagentKernelQuery(scope="task_workspace", task_workspace_dir=task_workspace)
+    current = getattr(agent, "_current_run_params", None)
+    attrs = getattr(current, "task_attributes", None)
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip() if isinstance(attrs, dict) else ""
+    if not root_id and not run_id and thread_id:
+        return SubagentKernelQuery(scope="conversation_thread", conversation_thread_id=thread_id)
     return SubagentKernelQuery(root_id=root_id, run_id=run_id, scope=scope)
 
 

@@ -251,7 +251,8 @@ def build_list_agents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="list_agents",
         description=(
-            "只读列出当前代理可见的主代理、子代理和孙代理状态。它不会启动、推进、等待、重试或取消任何代理；"
+            "只读列出当前代理可见的主代理、子代理和孙代理状态，以及 read_order 中可直接读取的实际产物或终态报告。"
+            "没有结果引用不等于失败，不要猜内部目录或恢复文件。它不会启动、推进、等待、重试或取消任何代理；"
             "正常工作不需要轮询，宿主仍会在直属下级发生结构化生命周期事件时自动唤醒父级。"
         ),
         input_schema=_input_schema(

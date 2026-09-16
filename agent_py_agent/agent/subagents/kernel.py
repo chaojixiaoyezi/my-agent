@@ -27,6 +27,8 @@ from .protocol import build_task_address, build_task_envelope
 from .recovery_eligibility import user_stopped_resume_eligibility
 
 
+# LLM: 查询身份来自宿主 run/task/thread；会话过滤只读规范 attributes，不从提示词或目录名猜归属。
+# 类用途: 描述代理树只读范围，支持任务结束后的同会话查询，避免退回整个 owner 历史。
 @dataclass(frozen=True)
 class SubagentKernelQuery:
     root_id: str = ""
@@ -34,6 +36,7 @@ class SubagentKernelQuery:
     scope: str = "root_tree"
     include_refs: bool = True
     task_workspace_dir: str = ""
+    conversation_thread_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -165,6 +168,8 @@ class SubagentKernelMixin:
         return SubagentKernel(self).snapshot(query)
 
 
+# LLM: 优先使用显式子树/任务/会话范围；已选择的空会话不能回退为 owner 全量。
+# 函数用途: 从规范任务记录筛选查询结果，不改变状态、授权或调度。
 def _select_tasks(
     tasks: list[SubAgentTask],
     query: SubagentKernelQuery,
@@ -175,6 +180,8 @@ def _select_tasks(
         return _ordered_subtree(tasks, query.run_id), warnings
     if query.scope == "task_workspace":
         return _select_task_workspace(tasks, query)
+    if query.scope == "conversation_thread":
+        return _select_conversation_tasks(tasks, query.conversation_thread_id)
     root_id = query.root_id or _root_for_run(by_id.get(query.run_id))
     if root_id:
         return [task for task in _stable_tasks(tasks) if task.id == root_id or task.root_id == root_id], warnings
@@ -183,6 +190,21 @@ def _select_tasks(
     if query.run_id and query.run_id in by_id:
         return [by_id[query.run_id]], warnings
     return _stable_tasks(tasks), warnings
+
+
+# LLM: 会话种子来自创建时冻结的 conversation_thread_id；孙级依照 parent_id 扩展，不接受正文里的身份。
+# 函数用途: 找出同一 TUI/IM 会话的子树，包含已结束任务，排除同 owner 其它窗口的历史代理。
+def _select_conversation_tasks(tasks: list[SubAgentTask], thread_id: str) -> tuple[list[SubAgentTask], list[str]]:
+    if not thread_id:
+        return [], ["conversation_scope_missing_thread"]
+    selected = {task.id for task in tasks if (task.attributes or {}).get("conversation_thread_id") == thread_id}
+    while True:
+        descendants = {task.id for task in tasks if task.parent_id in selected}
+        added = descendants - selected
+        if not added:
+            break
+        selected.update(added)
+    return [task for task in _stable_tasks(tasks) if task.id in selected], []
 
 
 def _select_task_workspace(
@@ -196,22 +218,34 @@ def _select_task_workspace(
     return selected, [] if selected else ["task_workspace_scope_had_no_subagent_rows"]
 
 
+# LLM: 主代理 run 可能只存在于会话账、不在子代理表；用子行精确 parent_id 连边，不靠前缀或名称猜树。
+# 函数用途: 查询真实父子关系的整棵子树，支持主请求作为根，未知 ID 返回空且循环引用不会卡死。
 def _ordered_subtree(tasks: list[SubAgentTask], run_id: str) -> list[SubAgentTask]:
     by_id = {task.id: task for task in tasks}
+    children: dict[str, list[str]] = {}
+    for task in _stable_tasks(tasks):
+        children.setdefault(task.parent_id, []).append(task.id)
     selected: list[SubAgentTask] = []
+    visited: set[str] = set()
 
+    # LLM: 只遍历规范 parent_id 的邻接表；虚拟主根不造一条子代理记录。
+    # 函数用途: 深度优先收集已存节点，用 visited 防止损坏谱系无限递归。
     def visit(current_id: str) -> None:
-        task = by_id.get(current_id)
-        if task is None or task in selected:
+        if current_id in visited:
             return
-        selected.append(task)
-        for child_id in task.child_ids:
+        visited.add(current_id)
+        task = by_id.get(current_id)
+        if task is not None:
+            selected.append(task)
+        for child_id in children.get(current_id, []):
             visit(child_id)
 
     visit(run_id)
     return selected
 
 
+# LLM: kernel 保留宿主记录的精确报告位置，模型交付层另核对终态和存在性；不改变 context bundle 的写入合同。
+# 函数用途: 将规范任务字段投影为界面与状态查询共用节点，不拼接、搬运或生成报告文件。
 def _task_to_kernel_run(
     task: SubAgentTask,
     *,
@@ -247,7 +281,7 @@ def _task_to_kernel_run(
         child_ids=list(task.child_ids),
         address=build_task_address(task, all_tasks=all_tasks).to_dict() if include_refs else {},
         task_envelope=build_task_envelope(task, all_tasks=all_tasks).to_dict() if include_refs else {},
-        workspace_refs=model_workspace_refs(task) if include_refs else {},
+        workspace_refs={**model_workspace_refs(task), "final_report": task.agent_run_final_report_md} if include_refs else {},
         recovery_refs=_recovery_refs(task) if include_refs else {},
         tool_contract=_tool_contract(task) if include_refs else {},
         artifact_refs=list(task.artifact_refs),
@@ -371,9 +405,13 @@ def _root_for_run(task: SubAgentTask | None) -> str:
     return task.root_id or task.id
 
 
+# LLM: 会话可能包含多个已结束任务，不能将首个历史 root 假装成整份快照的唯一根。
+# 函数用途: 返回确有唯一身份的树根，多根会话快照用各节点 root_id 表达。
 def _snapshot_root_id(tasks: list[SubAgentTask], query: SubagentKernelQuery) -> str:
     if query.root_id:
         return query.root_id
+    if query.scope == "conversation_thread" and len({_root_for_run(task) for task in tasks}) != 1:
+        return ""
     if tasks:
         return _root_for_run(tasks[0])
     return ""

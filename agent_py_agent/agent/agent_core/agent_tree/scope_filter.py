@@ -1,9 +1,13 @@
 
+# LLM: 本模块仅过滤已授权树和生成软提示；生命周期决策仍读取规范状态，不读取提示正文。
+# 模块用途: 汇总代理状态并提示合理协作，不因查询状态强迫等待或把慢代理判成失败。
+
 from __future__ import annotations
 
 from dataclasses import replace
 
 from ...subagents.models import SUBAGENT_FAILED_RESULT_STATUSES, TaskStatus, task_status_in
+from ..orchestration.coordinator_policy import coordinator_tool_boundary_text
 
 
 def scope_main_visible_snapshot(agent: object, snapshot: object, remembered: set[str]) -> object:
@@ -119,15 +123,17 @@ def _tool_allowed(allowed_tools: set[str] | None, tool: str) -> bool:
     return allowed_tools is None or tool in allowed_tools
 
 
+# LLM: 状态查询复用创建与 runner 的同一分工边界，不再发先结束本回合的冲突指令。
+# 函数用途: 生成不控制运行时的协作说明；慢和缺少产物都不是接管依据。
 def _coordination_next_step(has_pending: bool, allowed_tools: set[str] | None = None) -> str:
     if not has_pending:
         return "如果只是查看状态，直接向用户汇报；不要声称手动推进了下级代理。"
-    guidance = "先结束本回合，派工监督提醒/完成事件会自动唤醒；期间可继续自己的工作或回复用户。"
+    guidance = coordinator_tool_boundary_text()
     if _tool_allowed(allowed_tools, "send_guidance"):
         guidance += "只有要补充具体指令时，才给具体 run_id 发 send_guidance。"
     return (
         "还有下级代理在运行、规划或等待验收时，不要把目标目录暂时为空或占位报告当失败；"
-        f"{guidance}只有下级明确失败、用户要求接手或超过约定等待时间时，才考虑新建替代代理或自己接手。"
+        f"{guidance}直属下级的结构化活动或完成事件由宿主投递，不需要循环查询。"
     )
 
 

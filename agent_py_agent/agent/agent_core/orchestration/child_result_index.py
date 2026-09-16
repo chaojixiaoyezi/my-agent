@@ -1,3 +1,6 @@
+# LLM: 交付索引只登记真实产物或已结束代理的实际报告；恢复摘要不属于父级文件读取合同。
+# 模块用途: 从规范任务或代理树生成统一产物引用，不用内部恢复文件假装工作成果。
+
 from __future__ import annotations
 
 import json
@@ -7,20 +10,19 @@ from pathlib import Path
 from ...model_visible_refs import current_model_ref, current_model_ref_list
 from ...runtime_errors import runtime_error_report
 from ...subagents.context_bundle_contracts import declared_output_refs
-from ...subagents.models import TaskStatus, task_status_in
+from ...subagents.models import SUBAGENT_ENDED_STATUSES, TaskStatus, task_status_in
 
 
+# LLM: 这里只携带生成交付行所需的引用，不把 checkpoint/summary 暴露为可读成果。
+# 类用途: 暂存一个树节点的产物、报告和进度字段，不产生第二份状态存储。
 @dataclass(frozen=True)
 class ChildResultNodeRefs:
     registry_refs: list[dict[str, object]]
     expected_outputs: list[str]
     primary_refs: list[str]
     workspace_refs: dict[str, object]
-    recovery_refs: dict[str, object]
     progress_layer: dict[str, object]
     final_report_ref: str
-    summary_ref: str
-    checkpoint_ref: str
 
 
 def child_result_index(agent: object, tasks: list[object]) -> list[dict[str, object]]:
@@ -64,6 +66,8 @@ def _child_result_row(task: object) -> dict[str, object]:
     return row
 
 
+# LLM: 文件报告仅在规范终态且文件确实存在时可读；实际产物优先，绝不回退到恢复摘要。
+# 函数用途: 将节点转为交付行，保留真实进度，不让父级读取尚未生成的内部占位报告。
 def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
     refs = _child_node_refs(node)
     status = str(node.get("status") or "").strip()
@@ -79,9 +83,7 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
         "primary_artifact_refs": refs.primary_refs,
         "primary_artifact_stats": _artifact_stats(refs.primary_refs),
         "artifact_registry_refs": _current_registry_refs(refs.registry_refs),
-        "summary_ref": refs.summary_ref,
-        "checkpoint_ref": refs.checkpoint_ref,
-        "read_order": _read_order(refs.primary_refs, refs.summary_ref if task_status_in(status, {TaskStatus.DONE.value}) else ""),
+        "read_order": _read_order(refs.primary_refs, refs.final_report_ref),
         "task_root": current_model_ref(refs.workspace_refs.get("task_root")),
         "agent_work_dir": current_model_ref(refs.workspace_refs.get("agent_work_dir")),
         "progress": node.get("progress", 0.0),
@@ -92,28 +94,28 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
         ).strip(),
         "not_done_reason": str(node.get("not_done_reason") or "").strip(),
         "recent_tool_trace": _dict_list(node.get("recent_tool_trace"))[-5:],
-        "readiness": _readiness_label(str(node.get("status") or ""), refs.primary_refs, refs.summary_ref),
+        "readiness": _readiness_label(status, refs.primary_refs, refs.final_report_ref),
     }
 
 
+# LLM: 报告路径只来自规范 workspace_refs；不拼接目录、不读取正文、不从自然语言判终态。
+# 函数用途: 提取真实产物和可读终态报告，恢复文件继续留在宿主自己的快照中。
 def _child_node_refs(node: dict[str, object]) -> ChildResultNodeRefs:
     registry_refs = _dict_list(node.get("artifact_registry_refs"))
     artifact_refs = _string_items(node.get("artifact_refs"))
     expected_outputs = _node_expected_outputs(node)
     workspace_refs = _dict_field(node, "workspace_refs")
-    recovery_refs = _dict_field(node, "recovery_refs")
     progress_layer = _dict_field(node, "progress_layer")
     primary_refs = _node_primary_refs(registry_refs, artifact_refs, expected_outputs)
+    report = current_model_ref(workspace_refs.get("final_report"))
+    report_ready = task_status_in(node.get("status"), SUBAGENT_ENDED_STATUSES) and _looks_like_existing_path(report)
     return ChildResultNodeRefs(
         registry_refs=registry_refs,
         expected_outputs=expected_outputs,
         primary_refs=primary_refs,
         workspace_refs=workspace_refs,
-        recovery_refs=recovery_refs,
         progress_layer=progress_layer,
-        final_report_ref=current_model_ref(workspace_refs.get("final_report")),
-        summary_ref=current_model_ref(recovery_refs.get("summary")),
-        checkpoint_ref=current_model_ref(recovery_refs.get("checkpoint")),
+        final_report_ref=report if report_ready else "",
     )
 
 
@@ -133,13 +135,15 @@ def _dict_field(node: dict[str, object], key: str) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _readiness_label(status: str, primary_refs: list[str], summary_ref: str) -> str:
+# LLM: readiness 只描述可读引用，不改变 status；失败报告存在也不能改判任务成功。
+# 函数用途: 区分完整结果、阶段产物、终态报告和尚无可读结果。
+def _readiness_label(status: str, primary_refs: list[str], final_report_ref: str) -> str:
     if task_status_in(status, {TaskStatus.DONE.value}):
-        return "result_ready" if (primary_refs or summary_ref) else "done_without_refs"
+        return "result_ready" if (primary_refs or final_report_ref) else "done_without_refs"
     if primary_refs:
         return "partial_artifacts_available"
-    if summary_ref:
-        return "progress_refs_available"
+    if final_report_ref:
+        return "terminal_report_available"
     if task_status_in(status, {TaskStatus.RUNNING.value, TaskStatus.PLANNING.value}):
         return "running_no_result_yet"
     return "not_ready"
@@ -152,13 +156,15 @@ def _node_expected_outputs(node: dict[str, object]) -> list[str]:
     return list(dict.fromkeys(refs))
 
 
+# LLM: 产物优先，只有没有产物时才读取宿主记录的终态报告；不加入恢复文件。
+# 函数用途: 返回无需猜测路径的文件读取顺序，不改变原始引用。
 def _read_order(
     primary_refs: list[str],
-    summary_ref: str,
+    final_report_ref: str,
 ) -> list[str]:
     refs = [*primary_refs]
-    if not refs and summary_ref:
-        refs.append(summary_ref)
+    if not refs and final_report_ref:
+        refs.append(final_report_ref)
     return list(dict.fromkeys(refs))
 
 

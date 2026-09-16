@@ -1,8 +1,4 @@
-"""Read-only model tool for the current agent tree.
-
-The tool exposes the same bounded canonical projection already used by the TUI
-and background runtime. It never starts, wakes, retries, or cancels an agent.
-"""
+"""当前代理树的只读模型工具，返回状态与真实产物引用，不暴露界面恢复细节。"""
 
 # LLM: This module is the only model-visible read adapter for the canonical
 # agent-tree projection. Keep lifecycle mutations in create/guidance/cancel and
@@ -22,6 +18,7 @@ from ....tooling.models import (
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
+from ...agent_tree.model_view import agent_tree_model_payload, agent_tree_model_preview
 from ...agent_tree.status import agent_tree_status_payload
 from ..tool_specs import build_list_agents_model_spec
 
@@ -53,18 +50,17 @@ class ListAgentsTool(BaseTool):
     def __init__(self, agent: SimpleAgent) -> None:
         self.agent = agent
 
-    # LLM: The result is a bounded runtime projection with explicit read_only
-    # policy facts. Do not turn empty nodes into completion or mutate wait state.
-    # 函数用途: 读取当前代理树；可按明确 run_id 缩窄，但不会改变任何运行状态。
+    # LLM: 身份裁决仍由 canonical tree 完成；模型和归档都只保存可读视图，长摘要走既有输出策略。
+    # 函数用途: 读取代理状态与产物引用，不改等待状态；不再让模型去猜不能读取的内部恢复文件。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         run_id = str(params.get("run_id") or "").strip()
         query = {"run_id": run_id, "scope": "own_subtree"} if run_id else {}
-        payload = agent_tree_status_payload(self.agent, query)
+        payload = agent_tree_model_payload(agent_tree_status_payload(self.agent, query))
         return ToolHandlerOutcome(
             self.model_spec.name,
             True,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            result_envelope={"agent_tree_status": payload},
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            result_envelope={"tool_output_policy": {"live_prompt_output": agent_tree_model_preview(payload)}},
         )
 
 

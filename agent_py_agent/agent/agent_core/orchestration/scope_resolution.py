@@ -1,3 +1,6 @@
+# LLM: 范围裁决是宿主结构化诊断，不接受自然语言授权；调用方必须提供当前执行身份。
+# 模块用途: 统一说明树查询、派工和消息工具实际使用的身份以及被忽略的冲突参数。
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -26,6 +29,8 @@ class ScopeResolution:
         }
 
 
+# LLM: 裁决只说明宿主选择了哪个 run/root/thread；显式请求不得覆盖正在运行的子代理身份。
+# 函数用途: 将查询范围与被忽略参数公开为结构化诊断，不从提示正文推断权限。
 def tree_scope_resolution(
     agent: object,
     params: dict[str, object],
@@ -33,6 +38,7 @@ def tree_scope_resolution(
     effective_run_id: str = "",
     effective_root_id: str = "",
     effective_scope: str = "",
+    effective_thread_id: str = "",
 ) -> ScopeResolution:
     explicit = _explicit_scope(params, include_parent=False)
     current = current_subagent_run_id(agent)
@@ -41,12 +47,13 @@ def tree_scope_resolution(
             "run_id": effective_run_id,
             "root_id": effective_root_id,
             "scope": effective_scope,
+            "thread_id": effective_thread_id,
         }
     )
     ignored = explicit if current and explicit else {}
     warnings = [_OVERRIDE_WARNING] if ignored else []
     return ScopeResolution(
-        source="current_runner_context" if current else _source_for_explicit(explicit),
+        source="current_runner_context" if current else "current_conversation_context" if effective_thread_id else _source_for_explicit(explicit),
         effective=effective,
         explicit=explicit,
         ignored_explicit=ignored,

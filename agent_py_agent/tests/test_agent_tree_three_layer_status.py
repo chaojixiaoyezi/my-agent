@@ -595,6 +595,13 @@ def test_agent_tree_soft_advice_does_not_treat_running_children_as_failed_output
     assert advice["missing_outputs_while_running_is_failure"] is False
     assert advice["should_take_over_running_children"] is False
     assert "不要把目标目录暂时为空或占位报告当失败" in payload["policy"]["next_step"]
+    from agent_py_agent.agent.agent_core.orchestration.coordinator_policy import (
+        coordinator_tool_boundary_text,
+    )
+
+    assert coordinator_tool_boundary_text() in payload["policy"]["next_step"]
+    assert "先结束本回合" not in payload["policy"]["next_step"]
+    assert "超过约定等待时间" not in payload["policy"]["next_step"]
 
 
 def test_agent_tree_completion_buckets_require_exact_done_status():
@@ -626,8 +633,8 @@ def test_agent_tree_completion_buckets_require_exact_done_status():
     assert rows["child-success"]["not_done_reason"] == "raw_status:SUCCESS"
 
 
-def test_child_result_index_keeps_progress_refs_out_of_read_order_for_running_child():
-    """运行中的子代理可展示进度 refs，但不能诱导父代理读取内部占位报告。"""
+def test_child_result_index_keeps_recovery_refs_out_of_delivery_rows():
+    """恢复引用留在宿主节点，不能放进父级交付行诱导读取内部文件。"""
 
     class _Manager:
         def kernel_snapshot(self, query):
@@ -666,9 +673,10 @@ def test_child_result_index_keeps_progress_refs_out_of_read_order_for_running_ch
 
     assert row["primary_artifact_refs"] == []
     assert "final_report_ref" not in row
-    assert row["summary_ref"].endswith("/work/agents/child-running/summary.md")
-    assert row["checkpoint_ref"].endswith("/work/agents/child-running/checkpoint.json")
+    assert "summary_ref" not in row
+    assert "checkpoint_ref" not in row
+    assert payload["nodes"][0]["recovery_refs"]["summary"].endswith("/summary.md")
     assert row["agent_work_dir"].endswith("/work/agents/child-running")
     assert row["read_order"] == []
-    assert row["readiness"] == "progress_refs_available"
+    assert row["readiness"] == "running_no_result_yet"
     assert row["recent_tool_trace"] == [{"tool": "list_files", "ok": True, "summary": "最近成功调用工具: list_files"}]

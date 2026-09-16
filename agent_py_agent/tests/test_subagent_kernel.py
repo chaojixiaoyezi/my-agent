@@ -5,6 +5,65 @@ from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import CapabilityGap, CapabilityGrant, CapabilityRequest
 
 
+def test_conversation_scope_keeps_completed_children_and_descendants_without_other_windows(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    root, child = _create_kernel_root_worker(manager, tmp_path)
+    root.attributes["conversation_thread_id"] = "thread-a"
+    child.attributes["conversation_thread_id"] = "thread-child"
+    for task in (root, child):
+        manager.save(task)
+    other = manager.create_run(goal="another window", thought="", plan=[])
+    other.attributes["conversation_thread_id"] = "thread-b"
+    manager.save(other)
+
+    snapshot = manager.kernel_snapshot(SubagentKernelQuery(scope="conversation_thread", conversation_thread_id="thread-a"))
+
+    assert [row.run_id for row in snapshot.runs] == [root.id, child.id]
+    assert child.id in snapshot.completed_run_ids
+    assert snapshot.root_id == root.id
+    for thread_id in ("", "missing-thread"):
+        empty = manager.kernel_snapshot(SubagentKernelQuery(scope="conversation_thread", conversation_thread_id=thread_id))
+        assert empty.runs == []
+
+
+def test_conversation_scope_does_not_label_multiple_task_roots_as_the_first_one(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    for goal in ("first task", "next task"):
+        task = manager.create_run(goal=goal, thought="", plan=[])
+        task.attributes["conversation_thread_id"] = "thread-a"
+        manager.save(task)
+    snapshot = manager.kernel_snapshot(SubagentKernelQuery(scope="conversation_thread", conversation_thread_id="thread-a"))
+    assert len(snapshot.runs) == 2
+    assert snapshot.root_id == ""
+
+
+def test_subtree_can_start_at_main_request_not_stored_as_a_child(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    parent = manager.create_run(goal="child", thought="", plan=[], parent_id="main-request", root_id="main-request")
+    leaf = manager.create_run(goal="leaf", thought="", plan=[], parent_id=parent.id, root_id="main-request")
+    manager.create_run(goal="another task", thought="", plan=[], parent_id="other-request")
+    snapshot = manager.kernel_snapshot(SubagentKernelQuery(scope="own_subtree", run_id="main-request"))
+    assert [row.run_id for row in snapshot.runs] == [parent.id, leaf.id]
+    assert manager.kernel_snapshot(SubagentKernelQuery(scope="own_subtree", run_id="unknown-request")).runs == []
+
+
+def test_read_only_child_exposes_exact_final_report_from_canonical_record(tmp_path):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.agent_tree.status import agent_tree_status_payload
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="检查现有产物", thought="", plan=[])
+    task.status = "DONE"
+    report = Path(task.agent_run_final_report_md)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("检查结果，无新增业务文件。", encoding="utf-8")
+    manager.save(task)
+    snapshot = agent_tree_status_payload(SimpleNamespace(subagents=manager))
+    assert snapshot["child_result_index"][0]["read_order"] == [str(report)]
+
+
 def test_kernel_snapshot_returns_root_tree_with_status_buckets(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     root, worker = _create_kernel_root_worker(manager, tmp_path)

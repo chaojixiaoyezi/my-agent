@@ -2,6 +2,9 @@
 
 ## 派工事实与角色提示
 
+- `agent_tree/model_view.py` 从同一已授权快照投影模型状态；`list_agents` 不再原样输出界面恢复细节。
+- `orchestration/child_result_index.py` 的 `read_order` 不含恢复摘要；实际产物优先，缺产物时可读已存在的终态报告。
+- 大结果继续由统一工具归档保存；实时摘要明确省略范围并保留逻辑读取入口，不切坏身份或路径。
 - `orchestration/dispatch/state_contract.py` 仅汇总 run 状态、缺失与恢复事实，不为父级推导等待或完成动作。
 - `orchestration/coordinator_policy.py` 是根、递归协调者和创建入口共用的软分工说明，不构成权限或完成门。
 - `runner/prompts.py` 按创建时快照装入当前角色行为；协调层只另取角色索引，不装载所有角色正文。

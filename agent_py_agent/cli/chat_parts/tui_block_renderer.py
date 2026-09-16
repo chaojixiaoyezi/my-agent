@@ -1491,8 +1491,9 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
     return tuple(lines or [(("class:tui-assistant-marker", "●"),)])
 
 
-# LLM: thinking 展开/折叠只由 context mode 与 typed phase 决定，正文内容不能触发展开。
-# 函数用途: 渲染活动 spinner 或完成摘要；预览先限排版预算，完整原文由Ctrl+E分页。
+# LLM: thinking 展开/折叠只由 context mode 与 typed phase 决定；实时计数只读已收到文本，
+# 不推测模型总长度或完成率。预览预算、完整原文分页和终态自动折叠必须保持一致。
+# 函数用途: 渲染活动思考及实时折叠数量，结束后恢复摘要；不为计数排版完整长文本。
 def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     # 对齐 终端交互：思考统一浅灰（tui-thinking），stalled 不换红；
     # 活动态默认显示内容（实时可见），超长折叠提示展开。
@@ -1520,12 +1521,11 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
             content_lines = _thinking_content_lines(preview, context, closed=False)
             if truncated or len(content_lines) > _THINKING_LIVE_MAX_LINES:
                 lines.extend(content_lines[:_THINKING_LIVE_MAX_LINES])
-                lines.append(
-                    (
-                        (
-                            "class:tui-thinking",
-                            "  … 思考预览已折叠，Ctrl+O 后 Ctrl+E 分页查看完整原文",
-                        ),
+                lines.extend(
+                    _thinking_live_fold_hint(
+                        block.text, preview,
+                        hidden_preview_lines=max(0, len(content_lines) - _THINKING_LIVE_MAX_LINES),
+                        context=context,
                     )
                 )
             else:
@@ -1562,6 +1562,36 @@ def _thinking_preview_text(text: str, *, live: bool) -> tuple[str, bool]:
     prefix = text[:char_limit]
     rows = prefix.split("\n", line_limit)
     return "\n".join(rows[:line_limit]), len(text) > char_limit or len(rows) > line_limit
+
+
+# LLM: 计数基于原文换行和有界预览的排版行，两个口径分开显示；跨字符上限的半行
+# 计入折叠原文。只用 count 的索引扫描，不复制尾部、不全量 Markdown 排版，不改上下文。
+# 函数用途: 随流式增量刷新隐藏行数和接收字符数，单段无换行时也能看见新内容到达。
+def _thinking_live_fold_hint(
+    text: str, preview: str, *, hidden_preview_lines: int, context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    tail_start = len(preview)
+    if text[tail_start:tail_start + 1] == "\n":
+        tail_start += 1
+    hidden_source_lines = (
+        text.count("\n", tail_start) + int(not text.endswith("\n"))
+        if tail_start < len(text) else 0
+    )
+    parts = []
+    if hidden_source_lines:
+        parts.append(f"已折叠 {hidden_source_lines:,} 行原文")
+    if hidden_preview_lines:
+        label = "另折叠" if parts else "已折叠"
+        parts.append(f"{label} {hidden_preview_lines:,} 行预览")
+    if not parts:
+        parts.append("预览已折叠")
+    parts.append(f"已接收 {len(text):,} 字符")
+    return wrap_fragments(
+        (("class:tui-thinking", " · ".join(parts) + "（Ctrl+O 后 Ctrl+E 查看完整原文）"),),
+        width=context.width,
+        first_prefix=(("class:tui-thinking", "  … "),),
+        continuation_prefix=(("class:tui-thinking", "    "),),
+    )
 
 
 # LLM: Durable Compact renders provider-backed milestones only. Manual control operations cannot

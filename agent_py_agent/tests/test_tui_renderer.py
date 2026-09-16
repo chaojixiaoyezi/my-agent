@@ -594,6 +594,73 @@ def test_completed_thinking_long_content_folds_with_hint() -> None:
     assert "思考第 79 行内容" in detailed_text
 
 
+def test_live_thinking_fold_counts_refresh_after_preview_has_stopped_changing() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("thinking-progress", clock=lambda: 30.0)
+    store.publish(seq.emit("thinking_started", "started", "thinking"))
+    text = "\n".join(f"row {i}" for i in range(100))
+    store.publish(seq.emit("thinking_delta", "delta", "thinking", {"text": text}))
+    cache = TuiBlockRenderCache()
+    context = TuiRenderContext(width=160, now=30.0)
+    first = _frame_text(render_tui_snapshot(store.snapshot(), context, cache=cache))
+    assert "已折叠 50 行原文" in first
+    assert f"已接收 {len(text):,} 字符" in first
+
+    addition = "\n新收到的一行"
+    store.publish(seq.emit("thinking_delta", "delta", "thinking", {"text": addition}))
+    second = _frame_text(render_tui_snapshot(store.snapshot(), replace(context, now=31.0), cache=cache))
+    assert "已折叠 51 行原文" in second
+    assert f"已接收 {len(text + addition):,} 字符" in second
+    assert first != second
+    assert store.snapshot().active_blocks[0].text == text + addition
+
+    store.publish(seq.emit("thinking_completed", "completed", "thinking", {"text": text + addition}))
+    completed = _frame_text(render_tui_snapshot(store.snapshot(), context, cache=cache))
+    assert "已折叠" not in completed
+    assert "Ctrl+O 展开" in completed
+
+
+def test_live_thinking_single_line_progress_keeps_layout_input_bounded(monkeypatch) -> None:
+    from agent_py_agent.cli.chat_parts import tui_block_renderer as renderer
+
+    lengths = []
+    original = renderer.render_markdown
+
+    def record_markdown(text, context):
+        lengths.append(len(text))
+        return original(text, context)
+
+    monkeypatch.setattr(renderer, "render_markdown", record_markdown)
+    block = TuiBlock("long", "thinking_delta", "thinking", "delta", text="界" * 100_000)
+    context = TuiRenderContext(width=80, now=30.0)
+    cache = TuiBlockRenderCache()
+    first = "\n".join(fragments_text(line) for line in cache.render(block, context))
+    second = "\n".join(fragments_text(line) for line in cache.render(
+        replace(block, text=block.text + "继续", updated_seq=1), replace(context, now=31.0),
+    ))
+    assert "已折叠 1 行原文" in first
+    assert "行预览" in first
+    assert "已接收 100,000 字符" in first
+    assert "已接收 100,002 字符" in second
+    assert max(lengths) <= 4_000
+    assert len(block.text) == 100_000
+
+
+@pytest.mark.parametrize("trailing_newline", [False, True])
+def test_live_thinking_fold_line_count_ignores_empty_trailing_row(trailing_newline) -> None:
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import (
+        _thinking_live_fold_hint,
+        _thinking_preview_text,
+    )
+
+    text = "\n".join(f"row {i}" for i in range(75)) + ("\n" if trailing_newline else "")
+    preview, truncated = _thinking_preview_text(text, live=True)
+    assert truncated
+    lines = _thinking_live_fold_hint(text, preview, hidden_preview_lines=0, context=TuiRenderContext(width=30))
+    assert "已折叠 25 行原文" in "".join(fragments_text(line).strip() for line in lines)
+    assert all(display_width_fragments(line) <= 30 for line in lines)
+
+
 def test_block_cache_reuses_stable_history_when_active_stream_changes() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("cache", clock=lambda: 40.0)
