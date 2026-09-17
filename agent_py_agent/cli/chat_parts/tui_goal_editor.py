@@ -50,8 +50,8 @@ def _request_goal(agent, session_id: str, payload: dict) -> dict:
         return {"ok": False, "message": "暂时无法确认目标状态；保留草稿，请稍后重试。"}
 
 
-# LLM: One modal per Application captures its own run ID; navigation/status refresh cannot retarget an open draft.
-# 函数用途: 查看并编辑当前选中 Goal；Ctrl+S 保存，Ctrl+G 放弃，Esc 沿用停止当前代理的操作。
+# LLM: One modal captures its run ID; root resume help is display-only and never activates a paused goal or retargets a child.
+# 函数用途: 查看并编辑当前 Goal；固定展示保存、放弃、停止与主目标恢复方法，不让保存反馈遮掉操作提示。
 async def open_goal_editor(app, params) -> None:
     if getattr(app, "_my_agent_goal_editor_open", False):
         return
@@ -65,7 +65,12 @@ async def open_goal_editor(app, params) -> None:
     text_area = TextArea(text="正在读取目标…", multiline=True, scrollbar=True, height=10,
                          read_only=Condition(lambda: busy))
     latest_area = TextArea(text="对比最新：点击“读取最新”后显示服务器正文，编辑草稿不被覆盖。", read_only=True, height=4, scrollbar=True)
-    feedback = Label("Ctrl+S 保存 · Ctrl+G 放弃退出 · Esc 停止当前代理（不保存）")
+    help_text = "Ctrl+S 保存 · Ctrl+G 放弃退出"
+    help_text += (
+        " · Esc 停止当前子代理（不保存）" if run_id else
+        " · Esc 中断本轮（不保存，活动 Goal 继续）\n暂停目标：返回聊天后 /goal pause；恢复：/goal resume。"
+    )
+    feedback = Label("")
     busy = True
     bindings = KeyBindings()
 
@@ -129,7 +134,7 @@ async def open_goal_editor(app, params) -> None:
     bindings.add("c-g", eager=True)(discard)
     bindings.add("escape", eager=True)(stop)
     dialog = Dialog(title=f"Goal · {params.agent_navigation.snapshot().active_name}",
-                    body=HSplit([text_area, feedback, latest_area]),
+                    body=HSplit([text_area, Label(help_text), feedback, latest_area]),
                     buttons=[Button("保存", handler=submit), Button("读取最新", handler=lambda: app.create_background_task(reload_latest())),
                              Button("放弃/退出", handler=discard)],
                     with_background=True, modal=False, width=Dimension(preferred=100))

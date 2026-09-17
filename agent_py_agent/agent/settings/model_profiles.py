@@ -76,9 +76,11 @@ def _save_profiles(path: Path, data: dict) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-# LLM: 列表只含白名单字段；未配置不制造占位模型或虚假 has_key，用户显式配置仍可选。
+# LLM: 列表只含白名单字段；OAuth 暴露登录状态而非 token/account/secret，未登录不冒充可调用。
 # 函数用途: 提供可选择的真实模型和服务商，空部署配置不出现在模型列表中。
 def public_model_profiles(data: dict, config: object) -> dict:
+    from .model_oauth_schema import has_credential
+
     default = {key: getattr(config, key, "") for key in (
         "model_backend", "model_name", "model_context_window_tokens",
     )}
@@ -92,16 +94,19 @@ def public_model_profiles(data: dict, config: object) -> dict:
         provider = data["providers"][row["provider_id"]]
         rows.append({"id": profile_id, **row, "api_base": provider["api_base"],
                      "provider_name": provider["display_name"], "has_key": bool(provider["api_key"]),
-                     "available": bool(row["enabled"] and provider["enabled"] and provider["api_key"]
+                     "auth_mode": provider.get("auth", {}).get("mode", "api_key"),
+                     "available": bool(row["enabled"] and provider["enabled"] and has_credential(provider)
                                        and row["capability"] == "agentic" and "agentic" in provider["capabilities"])})
     providers = [{"id": key, **{field: row[field] for field in (
         "display_name", "api_base", "enabled", "capabilities", "session_header")},
-        "has_key": bool(row["api_key"]), "header_names": sorted(row["custom_headers"])} for key, row in data["providers"].items()]
+        "has_key": bool(row["api_key"]), "header_names": sorted(row["custom_headers"]),
+        "auth_mode": row.get("auth", {}).get("mode", "api_key"), "signed_in": bool(row.get("auth") and has_credential(row))}
+        for key, row in data["providers"].items()]
     return {"ok": True, "selected": data["selected"], "profiles": rows, "providers": providers}
 
 
 # LLM: 目录写入锁内原子进行；select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用。
-# 函数用途: 管理会话选择、用户默认和显式共享；网络仅在用户主动 discover/probe 时请求，回执不含密钥。
+# 函数用途: 管理会话选择、用户默认、共享及显式登录；网络只在认证或 discover/probe 动作发生，回执不含令牌。
 def execute_model_profile_operation(agent: object, operation: str, payload: dict, *, thread_id: str = "") -> dict:
     path = model_profiles_path(agent.home_paths)
     if thread_id:
@@ -120,6 +125,10 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
         operation = "list"
     if operation == "list":
         return _model_selection_projection(agent, read_model_profiles(path), thread_id)
+    if operation in {"auth_start", "auth_poll", "auth_status", "auth_parameters", "auth_cancel", "auth_logout"}:
+        from .model_oauth import execute_oauth
+
+        return execute_oauth(agent, operation, payload)
     if operation in {"discover", "probe"}:
         from .model_provider_network import execute_provider_network
 
@@ -190,14 +199,17 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
     return config
 
 
-# LLM: 只检查单份连接数据，子代理创建前校验无需构造运行 backend/config；共享必须核验目录授权。
+# LLM: 子代理只解析本 owner 的配置；OAuth 引用路径由可信 home 生成，不接受客户端填写或网络响应指定。
 # 函数用途: 将可用模型编号解析成连接字段，未知模型明确失败。
 def _resolved_profile(agent: object, data: dict, selected: str) -> dict:
     if shared_profile_key(selected):
         return resolve_shared_model(agent.home_paths, selected)
     if selected not in data["profiles"]:
         raise ModelProfileError("任务原模型配置已不存在，不能静默换成其它模型。")
-    return resolved_model(data, selected)
+    row = resolved_model(data, selected)
+    if row.get("model_auth_ref"):
+        row["model_auth_ref"]["path"] = str(model_profiles_path(agent.home_paths))
+    return row
 
 
 # LLM: 显式 model 只按当前 owner 私有及管理员已发布模型精确解析；不接受端点、密钥或未授权 owner 引用。

@@ -70,6 +70,7 @@ def record_tool_guard_observation(
     finding = repeated_success_observation(
         facts, records, threshold=config.repeated_success_hint_threshold,
     )
+    _set_tool_guardrail_records(agent, records)
     if finding is None:
         return ""
     records[-1]["repeated_success_hint_count"] = finding.evidence["count"]
@@ -108,8 +109,8 @@ def clear_consecutive_failure_segment(
     _set_tool_guardrail_records(agent, tuple(remaining))
 
 
-# LLM: 哈希取规范结果正文，不含 call ID/耗时；UNKNOWN、未执行或幂等回放不计入成功观测。
-# 函数用途: 从工具事实提取安全分类与重复诊断，安全分类和是否提醒分别判断。
+# LLM: 原文摘要与宿主进展摘要分开；后者只供软提醒，不参与动作门；UNKNOWN/回放不计成功。
+# 函数用途: 从真实工具结果提取安全分类和执行事实，避免未执行拦截被当成进展。
 def _facts_from_result(
     runtime_params: object,
     call: ToolCall,
@@ -117,7 +118,13 @@ def _facts_from_result(
 ) -> ToolGuardrailFacts:
     effect = _resolved_effect(runtime_params, call, result)
     is_readonly = effect == "read_only"
-    output_hash = result_hash_for_guardrail(result.output) if result.ok else ""
+    output_hash = _observation_result_hash(result) if result.ok else ""
+    details = result.metadata.get("handler_details")
+    progress = details.get("progress_observation") if isinstance(details, dict) else None
+    progress = progress if isinstance(progress, dict) else {}
+    progress_hash = progress.get("sha256")
+    if not isinstance(progress_hash, str) or len(progress_hash) != 64 or not all(c in "0123456789abcdef" for c in progress_hash):
+        progress_hash = ""
     operation = result.operation
     observed_success = (
         result.ok and result.handler_executed and result.effect_outcome in {"", "confirmed"}
@@ -136,7 +143,19 @@ def _facts_from_result(
         failure_class=_failure_class(result) if not result.ok else "",
         observed_success=observed_success,
         run_id=call.run_id,
+        handler_executed=result.handler_executed,
+        progress_hash=progress_hash,
+        progress_pending=bool(progress_hash) and progress.get("pending") is True,
     )
+
+
+# LLM: raw_output_sha256 由执行器/归档器生成而非模型字段；直接合同调用无摘要时才从正文计算。
+# 函数用途: 比较完整工具结果而不是带随机归档地址的预览，避免相同输出漏报或相同截断预览误报。
+def _observation_result_hash(result: ToolResult) -> str:
+    digest = result.metadata.get("raw_output_sha256")
+    if isinstance(digest, str) and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest):
+        return "sha256:" + digest
+    return result_hash_for_guardrail(result.output)
 
 
 def _resolved_effect(

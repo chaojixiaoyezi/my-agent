@@ -343,10 +343,11 @@ def _slash_command_prefix(before: str) -> str | None:
     return before[1:].casefold()
 
 
-# LLM: 路径语法只开放 `@token` 和 `/prompt-file token`；空白后的普通词不触发磁盘枚举。
-# 函数用途: 提取待补全路径和是否保留 @ 前缀。
+# LLM: 路径语法只开放 `@token` 和 `/prompt-file token`；空白输入没有 token，分隔符后的光标不回取旧 @token。
+# 函数用途: 安全提取光标前的路径；纯空白不枚举磁盘，也不让已完成的引用覆盖后面的空格。
 def _path_query(before: str) -> tuple[str, bool] | None:
-    token = before.rsplit(maxsplit=1)[-1] if before else ""
+    tokens = before.rsplit(maxsplit=1)
+    token = tokens[-1] if tokens and not before[-1].isspace() else ""
     if token.startswith("@"):
         return token[1:], True
     prefix = "/prompt-file "

@@ -2398,6 +2398,15 @@ def _render_permission(
     return tuple(lines)
 
 
+# LLM: 活动判断来自前台 phase 或后台 typed count；不因前台 worker 空闲就把后台插话显示为已结束。
+# 函数用途: 为输入回执和快捷键说明提供一致的活动状态，不修改任何任务状态。
+def _has_running_conversation(snapshot: TuiViewSnapshot) -> bool:
+    return snapshot.status.phase in {"running", "interrupting"} or any(
+        block.role == "background" and _safe_render_int(block.metadata.get("active_task_count")) > 0
+        for block in snapshot.active_blocks
+    )
+
+
 # LLM: Input status owns only pending/queue receipts, typed context metrics and
 # stash state. Todo and agent panels have separate fixed layout regions.
 # 函数用途: 在输入框上方固定显示待插入消息、上下文和草稿状态。
@@ -2413,7 +2422,7 @@ def _render_input_status(
                 snapshot.pending_steers,
                 snapshot.queued_inputs,
                 context,
-                turn_active=snapshot.status.phase in {"running", "interrupting"},
+                turn_active=_has_running_conversation(snapshot),
             )
         )
     else:
@@ -2422,7 +2431,7 @@ def _render_input_status(
                 _render_pending_steers(
                     snapshot.pending_steers,
                     context,
-                    turn_active=snapshot.status.phase in {"running", "interrupting"},
+                    turn_active=_has_running_conversation(snapshot),
                 )
             )
         if snapshot.queued_inputs:
@@ -2929,8 +2938,8 @@ def _render_pending_input_message(
     return tuple(visible)
 
 
-# LLM: footer 只读 structured mode/status/permission/help；详细模式和运行中提示优先级固定。
-# 函数用途: 返回输入框下提示；状态读取失败在主/子页面和展开模式下可见，不掩盖权限或粘贴操作。
+# LLM: footer 只读状态；主代理中断与目标暂停必须区分，子代理仍走停止语义，不改变控制权限。
+# 函数用途: 展示当前页面可用按键，避免把 Esc 中断一轮误解为已暂停整个 Goal。
 def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> FormattedLine:
     if snapshot.permission is not None:
         return ()
@@ -2984,18 +2993,11 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
                 text = f"  Ctrl+G 收起 Goal · ↑↓ 选择 · {history_hint}"
         else:
             text = f"  ↑↓ 选择 · Enter 查看 · {history_hint}"
-        if snapshot.status.phase in {"running", "interrupting"}:
-            text += " · Esc 停止主代理"
+        if _has_running_conversation(snapshot):
+            text += " · Esc 中断本轮"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
-    if snapshot.status.phase in {"running", "interrupting"}:
-        text = f"  Esc 停止 · {history_hint}"
-        return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
-    if any(
-        block.role == "background"
-        and _safe_render_int(block.metadata.get("active_task_count")) > 0
-        for block in snapshot.active_blocks
-    ):
-        text = f"  /stop 停止后台任务 · {history_hint}"
+    if _has_running_conversation(snapshot):
+        text = f"  Esc 中断本轮 · /stop 暂停任务 · {history_hint}"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     text = f"  ? 快捷键 · F4 权限 · {history_hint}"
     return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)

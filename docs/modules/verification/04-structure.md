@@ -1,5 +1,18 @@
 # Verification：结构
 
+## 长等待与完成通知
+
+`process_session` 的 wait 使用宿主取消令牌与单调时钟，不持锁长等，默认 30/上限 600 秒。
+`ProcessSessionStore` 保存不可变通知地址与已发布回执；去重仍由 ConversationStore 负责。
+新增测试覆盖通知写入后崩溃、陈旧回写、隔离与显式停止；不把等待超时或退出当业务验收失败/成功。
+
+## 重复观测
+
+`contracts/gates/tool_guardrail.py` 保存有界实际观测并按精确门码/handler_executed 排除自身拒绝；
+`tool_guard/call_guardrail.py` 从规范结果提取执行事实，`action_policy.py` 按精确调用查最近结果。
+`executor.py` 将原门恢复说明写入同一失败正文，不在显示层另造解释；归档和模型历史仍保留全部拒绝。
+`filesystem_read_file.py` 的行/字符失败共用非文本说明，不隐式调用视觉服务。
+
 ## 补丁文件交接
 
 `ApplyPatchTool` 从预检冻结路径和已提交列表产生 `artifact_refs`，包含真实绝对路径及 ready/deleted 状态。

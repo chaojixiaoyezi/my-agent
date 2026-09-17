@@ -23,7 +23,7 @@ def _model_id(value: object) -> str:
         raise ModelProfileError("模型配置编号无效。") from exc
 
 
-# LLM: 编辑空 key/headers 保留原值；清空必须单独布尔字段，删改不会静默重新选择其他模型。
+# LLM: 编辑空 key/headers 保留原值；OAuth 表单不能注入令牌，改变认证参数会丢弃旧登录，不能移送凭据。
 # 函数用途: 校验服务商表单并更新单份连接配置。
 def _save_provider(data: dict, payload: dict) -> None:
     provider_id = validate_provider_id(payload.get("provider_id"))
@@ -34,6 +34,20 @@ def _save_provider(data: dict, payload: dict) -> None:
     if previous and payload.get("editing") is not True:
         raise ModelProfileError("Provider ID 已存在，请进入编辑。")
     draft = {**previous, **value}
+    if value.get("auth") or previous.get("auth"):
+        from .model_oauth_schema import oauth_config
+
+        requested = dict(value.get("auth") or previous["auth"])
+        if payload.get("clear_auth_secret") is True:
+            requested["client_secret"] = ""
+        elif not requested.get("client_secret"):
+            requested["client_secret"] = previous.get("auth", {}).get("client_secret", "")
+        config = oauth_config(requested, draft["api_base"])
+        if value.get("auth") and set(value["auth"]) - {"mode", "client_id", "device_url", "token_url", "scope", "audience", "client_secret"}:
+            raise ModelProfileError("登录状态只能由授权流程写入，不能通过表单填写令牌。")
+        old_auth = previous.get("auth", {})
+        unchanged = old_auth and previous["api_base"] == draft["api_base"] and oauth_config(old_auth, previous["api_base"]) == config
+        draft["auth"] = old_auth if unchanged else config
     draft["api_key"] = "" if payload.get("clear_key") is True else value.get("api_key") or previous.get("api_key", "")
     if payload.get("clear_headers") is True:
         draft["custom_headers"] = {}

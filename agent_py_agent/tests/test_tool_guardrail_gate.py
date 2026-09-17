@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from agent_py_agent.agent.contracts.gates.tool_guardrail import (
     ToolGuardrailConfig,
     ToolGuardrailFacts,
@@ -190,6 +192,55 @@ class TestNoProgressDetection:
 
 
 class TestRecordToolGuardrailResult:
+    @pytest.mark.parametrize("kind", ["NO_PROGRESS", "REPEAT_FAILURE"])
+    def test_own_rejections_do_not_reset_or_evict_observations(self, kind):
+        failed = kind == "REPEAT_FAILURE"
+        facts = ToolGuardrailFacts(
+            "run_command", "same", failed=failed, is_readonly=True,
+            failure_class="code:TOOL_TIMEOUT" if failed else "",
+            result_hash="" if failed else "same-result", handler_executed=True,
+        )
+        records = ()
+        for _ in range(9):
+            records = record_tool_guardrail_result(records, facts)
+        cfg = ToolGuardrailConfig(repeat_fail_threshold=3, readonly_no_progress_threshold=3)
+        rejection = ToolGuardrailFacts(
+            "run_command", "same", failed=True,
+            failure_class=f"code:TOOL_GUARDRAIL_{kind}_BLOCKED", handler_executed=False,
+        )
+        for _ in range(300):
+            decision = evaluate_tool_guardrail_gate(facts, config=cfg, records=records)
+            assert not decision.allowed
+            assert decision.evidence["count"] == 9
+            assert not decision.block_task
+            records = record_tool_guardrail_result(records, rejection)
+        assert len(records) == 9
+
+    @pytest.mark.parametrize("handler_executed", [False, True])
+    def test_only_unexecuted_guard_rejection_is_excluded(self, handler_executed):
+        facts = ToolGuardrailFacts(
+            "read_file", "same", failed=True,
+            failure_class="code:TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED",
+            handler_executed=handler_executed,
+        )
+        assert len(record_tool_guardrail_result((), facts)) == int(handler_executed)
+
+    def test_other_denial_and_error_text_are_not_guard_rejections(self):
+        for error in ["code:WRITE_FORBIDDEN", "output:TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED"]:
+            assert len(record_tool_guardrail_result((), ToolGuardrailFacts(
+                "read_file", "same", failed=True, failure_class=error,
+            ))) == 1
+
+    def test_existing_rejection_record_does_not_clear_same_result(self):
+        records = tuple(_make_record("run_command", "same", result_hash="result") for _ in range(9))
+        records += (_make_record("run_command", "same", failed=True,
+                                 failure_class="code:TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED"),)
+        decision = evaluate_tool_guardrail_gate(
+            ToolGuardrailFacts("run_command", "same", result_hash="result"), records=records,
+        )
+        assert not decision.allowed
+        assert decision.evidence["count"] == 9
+
     def test_appends_record(self):
         records: tuple[dict[str, object], ...] = ()
         facts = ToolGuardrailFacts("pwd", "hash1", failed=True, result_hash="res1", failure_class="code:x", now=100.0)

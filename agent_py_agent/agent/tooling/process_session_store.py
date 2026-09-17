@@ -150,6 +150,7 @@ class ProcessSessionStore:
             record
             for record in records
             if str(record.get("status") or "") in {"exited", "killed"}
+            and (not record.get("completion_target") or record.get("completion_notice_id"))
         ]
         finished.sort(
             key=lambda item: float(item.get("finished_at") or item.get("started_at") or 0.0),
@@ -194,6 +195,16 @@ def _validated_record(record: object) -> dict[str, object]:
     conversation_id = str(scope.get("conversation_id") or "").strip()
     if not owner_id or not conversation_id:
         raise ValueError("managed process access_scope is not bound")
+    target = payload.get("completion_target") or {}
+    if not isinstance(target, dict):
+        raise ValueError("invalid managed process completion target")
+    if target and (
+        set(target) != {"store_root", "thread_id", "task_id", "run_id"}
+        or not all(isinstance(value, str) and value for value in target.values())
+        or target["thread_id"] != conversation_id
+        or not Path(target["store_root"]).is_absolute()
+    ):
+        raise ValueError("invalid managed process completion target scope")
     payload.update(
         {
             "schema": PROCESS_SESSION_SCHEMA,
@@ -222,6 +233,8 @@ def _assert_same_process_authority(
     immutable_keys = ("session_id", "pid", "pid_birth_token", "access_scope")
     if any(existing.get(key) != incoming.get(key) for key in immutable_keys):
         raise ValueError("managed process session immutable authority conflict")
+    if existing.get("completion_target", {}) != incoming.get("completion_target", {}):
+        raise ValueError("managed process completion target conflict")
 
 
 # LLM: Terminal state is monotonic. Explicit killed outranks a racing exited
@@ -231,10 +244,12 @@ def _terminal_transition(
     existing: dict[str, object],
     incoming: dict[str, object],
 ) -> dict[str, object]:
+    if existing.get("completion_notice_id"):
+        incoming = {**incoming, "completion_notice_id": existing["completion_notice_id"]}
     old_status = str(existing.get("status") or "")
     new_status = str(incoming.get("status") or "")
     if old_status == "killed":
-        return existing
+        return {**existing, "completion_notice_id": incoming.get("completion_notice_id", "")}
     if old_status == "exited" and new_status == "running":
         return existing
     if old_status == "exited" and new_status == "killed":

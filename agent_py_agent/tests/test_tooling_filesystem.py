@@ -15,6 +15,21 @@ from agent_py_agent.agent.tooling._filesystem_read import (
 from agent_py_agent.agent.tooling._filesystem_search import SearchTextTool
 
 
+@pytest.mark.parametrize("window", [{}, {"offset": 0, "max_chars": 100}])
+def test_non_text_read_explains_capability_without_converting_file(tmp_path, window):
+    image_bytes = b"\x89PNG\r\n\x1a\n\x00\xff\xfe\x00"
+    target = tmp_path / "binary.asset"
+    target.write_bytes(image_bytes)
+    result = ReadFileTool(tmp_path, max_chars=2000).execute({"path": "binary.asset", **window})
+    assert not result.ok
+    assert result.error_code == "TOOL_EXECUTION_FAILED"
+    assert "read_file 只能读取文本" in result.output
+    assert "tool_search" in result.output
+    assert "若视觉能力不可用" in result.output
+    assert target.read_bytes() == image_bytes
+    assert list(tmp_path.iterdir()) == [target]
+
+
 class TestFileSystemToolBase:
     """测试 FileSystemTool 基类的路径解析和安全边界。"""
 

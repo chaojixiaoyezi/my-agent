@@ -421,6 +421,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     result_check_execute_tests: bool = False
     result_check_timeout_seconds: int = 120
     dynamic_timeout_safety_margin: float = 2.0
+    # 主会话后台命令完成后进入既有持久唤醒队列；关闭后仍可主动查询或长等待。
+    background_process_notifications: bool = True
+    # 只在调用账本记录无正文请求摘要，不改变请求前缀；服务端缓存状态仍为未知。
+    cache_diagnostics_enabled: bool = True
     dynamic_timeout_min: int = 30
     dynamic_timeout_max: int = 10800
     # 未取得稳定 probe 样本时的保守吞吐估计；只用于本次请求的首包/非流式预算。
@@ -464,6 +468,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_request_max_attempts: int = 2
     # 后台会话全局线程池上限；超出留在持久队列，同 thread 仍由 run claim 单飞。
     background_owner_workers: int = 8
+    # 后台会话宿主异常的最短重试间隔；保留持久事件，不影响前台消息或其它会话。
+    background_main_error_backoff_seconds: float = 30.0
     # 单 owner 同时可跑的独立后台会话数；调大会增加并发模型请求。
     background_threads_per_owner: int = 4
     # per-owner 作用域 agent 实例池上限(原 owner_scoped_pool.py 硬编码 64):有界 LRU,
@@ -545,8 +551,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 显式兼容头只影响模型请求；认证由 api_key 负责，会话头由宿主逐会话生成。
     model_custom_headers: dict[str, str] = field(default_factory=dict)
     model_session_header: str = ""
+    # 仅由 /model 的可信 owner 解析填充；OAuth token 不进入运行快照，禁止手填跨用户路径。
+    model_auth_ref: dict[str, str] = field(default_factory=dict)
     model_name: str = ""
     request_timeout: int = 240
+    # 单槽位/繁忙模型的额外排队预算，仅加到首事件等待；0 不额外等待，健康流仍无总墙钟限制。
+    model_queue_wait_seconds: float = 0.0
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
     model_context_window_tokens: int = 128_000
     # /model 保存的用户窗口为显式容量；默认部署仍保留原 provider metadata 优先策略。

@@ -41,6 +41,7 @@ from typing import Any
 
 from ..common.json_io import read_json_object
 from .background_process_host import HOST_STATE_SCHEMA
+from .cancellation import current_cancellation_token, raise_if_cancelled
 from .process_session_store import (
     PROCESS_SESSION_SCHEMA,
     ProcessSessionStore,
@@ -98,6 +99,7 @@ class ProcessRegistration:
     cwd: str = ""
     session_id: str | None = None
     access_scope: ProcessAccessScope | None = None
+    completion_target: dict[str, str] = field(default_factory=dict)
     child_pid: int = 0
     pid_birth_token: str = ""
     host_state_file: str = ""
@@ -156,6 +158,8 @@ class BackgroundProcess:
     status: str = "running"  # running / exited / killed
     exit_code: int | None = None
     finished_at: float | None = None
+    completion_target: dict[str, str] = field(default_factory=dict)
+    completion_notice_id: str = ""
 
     # LLM: Terminal is a typed host fact; model text and host-state prose never
     # participate in this transition.
@@ -163,10 +167,8 @@ class BackgroundProcess:
     def is_terminal(self) -> bool:
         return self.status in {"exited", "killed"}
 
-    # LLM: Summary intentionally exposes only the stable session handle. Host,
-    # command-entry and birth-token PIDs are lifecycle internals: descendants may
-    # fork again, so none of them identifies the process that owns a resource.
-    # 函数用途: 生成 process_session 返回给模型的简短状态和可选日志尾部。
+    # LLM: 摘要只暴露 session 句柄；日志字节数区分相同尾部的新增输出，读取失败为未知，不能改进程终态。
+    # 函数用途: 生成后台进程的状态和日志观测，耗时与输出增长分开，宿主 PID 保持内部使用。
     def to_summary(self, *, include_output: bool = False, output_tail_chars: int = _OUTPUT_TAIL_CHARS) -> dict[str, Any]:
         summary: dict[str, Any] = {
             "session_id": self.session_id,
@@ -180,6 +182,10 @@ class BackgroundProcess:
             summary["exit_code"] = self.exit_code
         if include_output:
             summary["output_tail"] = _read_log_tail(self.output_file, output_tail_chars)
+            try:
+                summary["output_bytes"] = Path(self.output_file).stat().st_size if self.output_file else None
+            except OSError:
+                summary["output_bytes"] = None
         return summary
 
     # LLM: Durable serialization carries the exact immutable scope and birth
@@ -205,6 +211,8 @@ class BackgroundProcess:
             "status": self.status,
             "exit_code": self.exit_code,
             "finished_at": self.finished_at,
+            "completion_target": self.completion_target,
+            "completion_notice_id": self.completion_notice_id,
         }
 
     # LLM: Hydration accepts only ProcessSessionStore-validated payloads and
@@ -239,6 +247,8 @@ class BackgroundProcess:
             status=str(payload.get("status") or "running"),
             exit_code=int(exit_code) if exit_code is not None else None,
             finished_at=float(finished_at) if finished_at is not None else None,
+            completion_target=dict(payload.get("completion_target") or {}),
+            completion_notice_id=str(payload.get("completion_notice_id") or ""),
         )
 
 
@@ -311,6 +321,7 @@ class ProcessRegistry:
                 child_pid=max(0, int(request.child_pid or 0)),
                 pid_birth_token=birth_token,
                 host_state_file=str(request.host_state_file or ""),
+                completion_target=dict(request.completion_target),
                 store_root=(
                     str(Path(request.store_root).resolve(strict=False))
                     if request.store_root
@@ -454,9 +465,9 @@ class ProcessRegistry:
                 return summary
         return None
 
-    # LLM: wait 是 会话运行时 write_stdin 空轮询的有界等价入口；它等待真实 Popen/PID，
-    # 不启动 shell sleep、不循环调用模型，超时只返回 running 事实而不伪造失败。
-    # 函数用途: 在限定秒数内等待后台命令结束，并返回结束状态或当前进度。
+    # LLM: wait 只等待真实 Popen/PID，使用单调时钟与宿主取消令牌；取消等待不等于杀后台进程，
+    # 不持注册表锁等待，不循环请求模型，届满仍返回 running，不能改成失败或重放命令。
+    # 函数用途: 可中断地长等后台结果；用户插话/停止能释放工具线程，其他会话仍可查询与控制。
     def wait(
         self,
         session_id: str,
@@ -478,21 +489,23 @@ class ProcessRegistry:
             pid = record.pid
             birth_token = record.pid_birth_token
 
-        timed_out = False
-        if proc is not None:
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-        else:
-            deadline = time.monotonic() + timeout
-            while _same_process(pid, birth_token) and time.monotonic() < deadline:
-                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-            timed_out = _same_process(pid, birth_token)
+        deadline = time.monotonic() + timeout
+        token = current_cancellation_token()
+        while True:
+            raise_if_cancelled()
+            alive = proc.poll() is None if proc is not None else _same_process(pid, birth_token)
+            remaining = deadline - time.monotonic()
+            if not alive or remaining <= 0:
+                break
+            interval = min(0.25, remaining)
+            if token is not None:
+                token.wait(interval)
+            else:
+                time.sleep(interval)
 
         summary = self.status(session_id, access_scope, store_root)
         if summary is not None:
-            summary["wait_timed_out"] = timed_out and summary.get("status") == "running"
+            summary["wait_timed_out"] = summary.get("status") == "running"
         return summary
 
     # LLM: This is the single scope predicate used before process state or logs are exposed.

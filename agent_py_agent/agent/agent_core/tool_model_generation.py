@@ -1166,7 +1166,9 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
 
     # 全局在飞 LLM 并发闸(T4 层4):默认关=nullcontext 零变化;配了 LLM_MAX_INFLIGHT 才封顶,
     # 拿槽在 llm_inflight 计数【之前】(槽满时等待期不算在飞,gauge 只反映真在飞)。
-    with provider_attempt_observer(_observe_provider_attempt):
+    with provider_attempt_observer(_observe_provider_attempt, cache_diagnostics=bool(
+        getattr(getattr(state.agent, "config", None), "cache_diagnostics_enabled", True)
+    )):
         with global_llm_admission_slot():
             llm_inflight(1)
             try:

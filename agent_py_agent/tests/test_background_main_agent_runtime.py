@@ -42,6 +42,7 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     assert params.source == "background_main_agent"
     assert params.save is False
     assert params.run_id == "task-1"
+    assert params.request_id == "task-1"
     assert params.task_id == "task-1"
     assert params.task_attributes == {
         "conversation_thread_id": "thread-1",
@@ -724,6 +725,41 @@ def test_lifecycle_objective_pages_exact_requests_without_rewriting_history(tmp_
     assert _background_request_objective(store, request) == "第一轮原话\n\n第二轮原话"
     assert path.read_bytes() == before
     assert store.load_thread(thread.thread_id).compact_generation == thread.compact_generation
+
+
+@pytest.mark.parametrize("goal_status", ["active", "complete"])
+@pytest.mark.parametrize("ordinary_input", ["none", "present", "missing"])
+def test_goal_child_wake_does_not_require_a_synthetic_user_request(tmp_path, goal_status, ordinary_input):
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _goal_runtime_context,
+    )
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread({"canonical_user_id": "owner", "channel": "tui", "channel_conversation_id": "same"})
+    task_id = "durable-task-with-no-user-request"
+    objective = "完成知识库整理并整合子代理成果"
+    store.bind_task({"thread_id": thread.thread_id, "task_id": task_id, "goal": objective, "status": "active"})
+    goal = store.create_goal({"thread_id": thread.thread_id, "task_id": task_id, "objective": objective})
+    if goal_status == "complete":
+        store.update_goal({"thread_id": thread.thread_id, "goal_id": goal.goal_id, "status": "complete"})
+    metadata = {"conversation_request_id": task_id}
+    if ordinary_input != "none":
+        metadata["events"] = [{"metadata": {"conversation_request_id": "real-user-request"}}]
+    if ordinary_input == "present":
+        store.append_message({"thread_id": thread.thread_id, "role": "user", "content": "补充报告格式",
+                              "metadata": {"conversation_request_id": "real-user-request"}})
+    request = BackgroundRunRequest(thread_id=thread.thread_id, task_id=task_id, reason="subagent_runner_finished",
+                                   wake_signal={"metadata": metadata})
+    if ordinary_input == "missing":
+        with pytest.raises(DataCorruptionError, match="background request input is missing"):
+            _goal_runtime_context(SimpleNamespace(), store, request)
+        return
+    context = _goal_runtime_context(SimpleNamespace(), store, request)
+    assert context.task_objective == ("补充报告格式" if goal_status == "complete" and ordinary_input == "present" else objective)
+    assert (context.goal is not None) == (goal_status == "active")
+    rows = store.recent_messages(thread.thread_id, limit=20)
+    assert all(row.metadata.get("conversation_request_id") != task_id for row in rows)
 
 
 @pytest.mark.parametrize("failure", ["missing", "foreign_thread", "corrupt"])
@@ -3219,19 +3255,20 @@ def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch
     assert [row.content for row in store.recent_messages(thread.thread_id)] == [final.response]
 
 
-def test_child_settling_during_background_sampling_requires_fresh_terminal_turn(
+def test_child_settling_during_background_work_does_not_require_an_extra_wake(
     tmp_path,
 ) -> None:
-    """后台轮开始时仍有 child 运行，采样期间全结束也不能用旧快照关闭根任务。"""
+    """开始快照不能否定当前子树和空邮箱；正常结束后不靠用户补一句才能看到汇报。"""
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
 
     agent, store, thread, runtime, first, second = _child_settlement_fixture(tmp_path)
     agent.backend = _SettlesLastChildBackend(agent, second.id)
     partial = _run_child_done_wake(runtime, thread.thread_id, first.id, now=20.0)
 
-    assert partial.delivery_status == "suppressed"
-    assert partial.delivery_reason == "subagent_completion_requires_fresh_turn"
-    assert store.load_task_link("task-root").status == "active"
+    assert partial.delivery_status == "sent"
+    assert partial.delivery_reason == "root_subagents_terminal"
+    assert partial.response
+    assert store.load_task_link("task-root").status == "completed"
     params = _run_params(
         thread.thread_id,
         BackgroundRunRequest(
@@ -3244,13 +3281,6 @@ def test_child_settling_during_background_sampling_requires_fresh_terminal_turn(
     assert (
         params.task_attributes[CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR] == "subagents_terminal"
     )
-
-    agent.backend = _NaturalCompletionBackend()
-    final = _run_child_done_wake(runtime, thread.thread_id, second.id, now=30.0)
-
-    assert final.delivery_reason == "root_subagents_terminal"
-    assert store.load_task_link("task-root").status == "completed"
-
 
 def test_terminal_subagent_reply_does_not_wait_for_root_task_status(tmp_path) -> None:
     from agent_py_agent.agent.conversation.runtime import (
@@ -3303,7 +3333,6 @@ def test_terminal_subagent_reply_does_not_wait_for_root_task_status(tmp_path) ->
         agent,
         request,
         store=store,
-        sampled_subagent_phase="subagents_terminal",
     ) == (True, "root_subagents_terminal")
 
 

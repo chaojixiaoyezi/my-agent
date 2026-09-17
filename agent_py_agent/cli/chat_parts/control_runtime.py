@@ -505,9 +505,11 @@ def _cancel_local_subagents(agent: object, request_id: str) -> None:
     threading.Thread(target=cancel, name=f"cancel-{request_id}", daemon=True).start()
 
 
-# LLM: Re-serialization preserves the parsed command instead of trusting arbitrary caller text.
-# 函数用途：把结构化命令还原成 Gateway 可以再次校验的规范文本。
+# LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop。
+# 函数用途: 将界面的结构化控制还原为服务端共用的命令协议，不发送给模型。
 def _command_text(command: ConversationControlCommand) -> str:
+    if command.kind == "stop" and command.operation == "interrupt":
+        return "/interrupt"
     if command.kind == "context":
         return "/context"
     if command.kind == "compact":

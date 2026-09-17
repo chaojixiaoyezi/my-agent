@@ -21,6 +21,17 @@ def test_parse_conversation_controls_are_explicit() -> None:
     assert parse_conversation_control("先停一下") is None
 
 
+def test_interrupt_is_typed_turn_stop_not_goal_pause() -> None:
+    from agent_py_agent.cli.chat_parts.control_runtime import _command_text
+
+    command = parse_conversation_control("/interrupt")
+    assert command.valid and command.kind == "stop" and command.operation == "interrupt"
+    assert _command_text(command) == "/interrupt"
+    assert _command_text(parse_conversation_control("/stop")) == "/stop"
+    assert not parse_conversation_control("/interrupt someone").valid
+    assert parse_conversation_control("打断一下，我补充要求") is None
+
+
 def test_parse_context_compact_and_effort_commands() -> None:
     context = parse_conversation_control("/context")
     compact = parse_conversation_control("/compact 优先保留未完成事项")

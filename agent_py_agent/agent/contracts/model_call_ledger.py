@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -103,6 +104,7 @@ class ModelCallProviderAttemptParams:
     http_status: int = 0
     error_type: str = ""
     retry_scheduled: bool = False
+    request_surface: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -192,10 +194,11 @@ class ModelCallRecord:
         }
 
 
-# LLM: 聚合态只保存计数、去重键和展示集合，不保存 prompt、响应正文、请求体或密钥。
+# LLM: 聚合态保存唯一统计代次、计数和展示集合；重建累计容器必须生成新身份，来源切换不换代。
 # 类用途: 在详细调用记录被裁剪后继续保留某个 request/run 的准确累计统计。
 @dataclass
 class _ModelCallAggregate:
+    usage_scope_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     logical_call_counts: dict[str, int] = field(default_factory=dict)
     physical_model_attempt_count: int = 0
     provider_http_attempt_count: int = 0
@@ -580,6 +583,8 @@ class ModelCallLedger:
             self._replace(updated)
             return updated
 
+    # LLM: 请求摘要按同线程比较，缺线程时仅同 run；不同用户账本独立，摘要不改变计费/恢复行为。
+    # 函数用途: 记录 HTTP 尝试及客户端缓存前缀变化；服务端是否淘汰缓存保持未知。
     def provider_attempt(
         self,
         params: ModelCallProviderAttemptParams,
@@ -596,6 +601,18 @@ class ModelCallLedger:
                 None,
             )
             now = float(self.context.now())
+            metadata = dict(record.metadata)
+            if params.request_surface and "request_surface" not in metadata:
+                from ..backends.cache_diagnostics import compare_request_surfaces
+
+                thread_id = metadata.get("thread_id")
+                previous = next((item for item in reversed(self._records) if item.call_id != record.call_id
+                    and item.metadata.get("request_surface")
+                    and (item.metadata.get("thread_id") == thread_id if thread_id else item.run_id == record.run_id)), None)
+                metadata["request_surface"] = params.request_surface
+                metadata["cache_diagnostic"] = compare_request_surfaces(
+                    previous.metadata["request_surface"] if previous else {}, params.request_surface,
+                )
             payload = {
                 "attempt_id": params.attempt_id,
                 "status": params.status,
@@ -617,6 +634,7 @@ class ModelCallLedger:
                 record,
                 last_activity_at=now,
                 provider_attempt_count=len(attempts),
+                metadata=metadata,
                 provider_attempts=tuple(attempts),
                 events=_append_event(record.events, f"provider_attempt_{params.status}"),
             )
@@ -627,8 +645,8 @@ class ModelCallLedger:
         with self._lock:
             return tuple(self._records)
 
-    # LLM: request_id 优先于 run_id，与最终化调用方现有筛选合同一致；返回副本而非内部 aggregate。
-    # 函数用途: 查询一次请求或运行的完整累计调用统计，即使早期明细已经超过上限被裁剪。
+    # LLM: request_id 优先；累计容器的唯一代次随摘要返回，进程重启或 LRU 重建不得沿用旧游标。
+    # 函数用途: 查询一次请求的完整累计用量及统计代次，前后台交接复用、真正新调用另计。
     def cumulative_summary(
         self,
         *,
@@ -640,7 +658,7 @@ class ModelCallLedger:
             return None
         with self._lock:
             aggregate = self._scope_aggregates.get(scope_key)
-            return aggregate.to_summary() if aggregate is not None else None
+            return {**aggregate.to_summary(), "usage_scope_id": aggregate.usage_scope_id} if aggregate is not None else None
 
     # LLM: 新 call_id 先进入累计态再裁剪明细；重复 call_id 只走 replacement delta，不能重复计数。
     # 函数用途: 新增或替换一条模型调用记录，并维持累计统计与明细索引一致。

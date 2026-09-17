@@ -163,16 +163,16 @@ def _gateway_submit_workspace(
     return {"cwd": str(effective_root or ""), "roots": roots}
 
 
-# LLM: Polling ends only after a validated canonical terminal envelope appears. Chunk and response
-# projections may update the UI but can never complete a request.
-# 函数用途: 持续读取新增 chunk，等待响应文件就绪，并写回调用方计数和游标。
+# LLM: 终态仍只认 canonical envelope；入口绝对 deadline 仅转换一次为单调时钟，
+# 后续活动续租不受 NTP/手动校时影响。chunk/response 投影不得成为完成事实。
+# 函数用途: 持续读取新增事件与唯一终态，使用稳定计时等待，并写回调用方游标。
 def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     chunks_printed = request.chunks_printed_ref[0]
     visible_chunks = request.visible_chunks_ref[0] if request.visible_chunks_ref else 0
     chunk_offset = request.chunk_offset_ref[0] if request.chunk_offset_ref else 0
     response = {}
     response_poll_state = GatewayResponsePollState()
-    deadline = request.deadline
+    deadline = time.monotonic() + max(0.0, request.deadline - time.time())
     activity_fingerprints = {
         path: _path_activity_fingerprint(path) for path in request.activity_paths
     }
@@ -182,7 +182,7 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
             activity_fingerprints,
             deadline=deadline,
         )
-        if time.time() > deadline:
+        if time.monotonic() > deadline:
             break
         chunks_printed, visible_chunks, chunk_offset = _poll_chunk_file(
             ChunkFilePollRequest(
@@ -221,10 +221,9 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     return response
 
 
-# LLM: A live gateway turn is user-interruptible work, not a fixed-wall-clock
-# RPC.  Renew the client wait only from machine-authoritative file activity
-# (processing lease/chunks); natural-language output never controls liveness.
-# 函数用途: 活跃请求持续刷新等待窗；只有连续无活动达到配置时长才向客户端报超时。
+# LLM: deadline 属于当前进程单调时钟；只按请求租约/chunk 文件活动续租，
+# 不用自然语言、系统日期或其它请求的心跳决定本请求是否活跃。
+# 函数用途: 活跃请求刷新不活跃等待窗，避免慢任务因系统校时提前断开或无限延后。
 def _extend_active_request_deadline(
     request: GatewayChunkPollRequest,
     activity_fingerprints: dict[Path, tuple[int, int] | None],
@@ -243,7 +242,7 @@ def _extend_active_request_deadline(
         activity_fingerprints[path] = current
     if not changed:
         return deadline
-    return max(deadline, time.time() + timeout)
+    return max(deadline, time.monotonic() + timeout)
 
 
 def _path_activity_fingerprint(path: Path) -> tuple[int, int] | None:

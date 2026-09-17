@@ -864,17 +864,17 @@ def _record_background_job(
 # LLM: Durable registration is a fail-closed boundary. Production scopes receive
 # one protected cross-process authority record; an unbound internal/test call stays
 # process-local. If persistence fails, the exact managed host tree is terminated.
-# 函数用途: 登记托管后台进程、写辅助观测记录；登记失败时立即回收，避免失管服务。
+# 函数用途: 登记托管后台进程及宿主冻结的通知地址、写辅助观测；失败立即回收，避免失管服务。
 def _register_hosted_background_process(
     *,
     workspace_root: Path,
     owner_scope_root: object,
-    jobs_dir: Path,
     log_path: Path,
     command: str,
     target: Path,
     hosted: HostedBackgroundProcess,
     access_scope: ProcessAccessScope,
+    completion_target: dict[str, str] | None = None,
 ) -> BackgroundProcess:
     store_root = (
         process_session_store_root(workspace_root, owner_scope_root)
@@ -890,6 +890,7 @@ def _register_hosted_background_process(
                 process=hosted.process,
                 cwd=str(target),
                 access_scope=access_scope,
+                completion_target=dict(completion_target or {}),
                 child_pid=hosted.child_pid,
                 pid_birth_token=hosted.pid_birth_token,
                 host_state_file=str(hosted.state_file),
@@ -900,7 +901,7 @@ def _register_hosted_background_process(
         _kill_process_group(hosted.process)
         raise
     _record_background_job(
-        jobs_dir,
+        log_path.parent,
         hosted.process.pid,
         command,
         log_path,
@@ -1008,6 +1009,7 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
                 "__sandbox_protected_write_paths",
                 "__access_mode",
                 "__run_scope",
+                "__process_completion_target",
                 "__tool_call_id",
                 "__operation_id",
                 "__operation_managed",
@@ -1122,7 +1124,7 @@ class ShellTool(BaseTool):
     # LLM: shell 自带 & 不得进入执行；deadline 已过等前置拒绝必须声明 not_started，不能遗留 UNKNOWN。
     # 函数用途: 校验并执行命令，未启动与执行后失败分账；长期进程统一登记为受管后台会话。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
-        command_result = self._parse_command(params)
+        command_result = _parsed_command_or_error(self.model_spec.name, params.get("command", ""))
         if isinstance(command_result, ToolHandlerOutcome):
             return command_result
         command = command_result
@@ -1175,6 +1177,7 @@ class ShellTool(BaseTool):
                     params.get("__run_scope"),
                     self.path_access_policy.owner_scope_root,
                 ),
+                completion_target=params.get("__process_completion_target"),
             )
         return _execute_with_artifact_protection(
             _ShellArtifactExecutionRequest(
@@ -1313,7 +1316,7 @@ class ShellTool(BaseTool):
 
     # LLM: Background execution is owned by a detached managed host, not the
     # one-shot agent runner. Model output exposes only the stable session handle;
-    # host and command-entry PIDs remain private lifecycle facts because later
+    # completion target is host-injected and immutable; host and command-entry PIDs remain private because later
     # descendants may own the actual resource. Exact scope is persisted first.
     # stdin remains unsupported here because interactive processes belong to PTY.
     # 函数用途: 把命令放到当前用户会话的后台，马上返回，不堵住模型工具循环。
@@ -1325,6 +1328,7 @@ class ShellTool(BaseTool):
         sandbox_read_roots: tuple[Path, ...] | None,
         sandbox_protected_paths: tuple[Path, ...] | None,
         access_scope: ProcessAccessScope,
+        completion_target: dict[str, str] | None = None,
     ) -> ToolHandlerOutcome:
         try:
             jobs_dir = self.workspace_root / ".background_jobs"
@@ -1367,12 +1371,12 @@ class ShellTool(BaseTool):
             record = _register_hosted_background_process(
                 workspace_root=self.workspace_root,
                 owner_scope_root=self.path_access_policy.owner_scope_root,
-                jobs_dir=jobs_dir,
                 log_path=log_path,
                 command=command,
                 target=target,
                 hosted=hosted,
                 access_scope=access_scope,
+                completion_target=completion_target,
             )
         except (OSError, TypeError, ValueError) as exc:
             return ToolHandlerOutcome(
@@ -1391,9 +1395,6 @@ class ShellTool(BaseTool):
             record=record,
             log_path=log_path,
         )
-
-    def _parse_command(self, params: dict[str, Any]) -> str | ToolHandlerOutcome:
-        return _parsed_command_or_error(self.model_spec.name, params.get("command", ""))
 
     def _run_command(
         self,

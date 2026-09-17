@@ -25,6 +25,39 @@ def test_owner_discovery_pages_continue_next_tick_before_steady_rescan_delay() -
     assert _next_owner_discovery_at(10.0, 60.0, None) == 70.0
 
 
+def test_failed_thread_cools_down_without_blocking_healthy_thread(monkeypatch):
+    from agent_py_agent.cli import gateway_loops
+
+    supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._base_agent = SimpleNamespace(config=SimpleNamespace(background_main_error_backoff_seconds=30))
+    supervisor._inflight = {}
+    supervisor._owner_schedulers = {}
+    supervisor._lane_retry_after = {}
+    now = [100.0]
+    monkeypatch.setattr(gateway_loops.time, "monotonic", lambda: now[0])
+    prepared = []
+
+    def fail(_thread):
+        raise RuntimeError("configuration unavailable")
+
+    scheduler = SimpleNamespace(tick_thread=fail, prepare_tick=lambda **kw: None,
+                                ready_thread_ids=lambda **kw: ("failed", "healthy"))
+    supervisor._base_scheduler = scheduler
+    key = gateway_loops._BASE_SCHEDULER_KEY
+    supervisor._submit_thread_candidates = lambda candidates, **kw: prepared.extend(candidates)
+    assert supervisor._safe_thread_tick(scheduler, str(key), "failed") == []
+    assert supervisor._lane_retry_after[(str(key), "failed")] == 130
+    supervisor._submit_ready_thread_ticks()
+    assert prepared[0][2] == ["healthy"]
+    now[0] = 131
+    prepared.clear()
+    supervisor._submit_ready_thread_ticks()
+    assert prepared[0][2] == ["failed", "healthy"]
+    scheduler.tick_thread = lambda _thread: []
+    supervisor._safe_thread_tick(scheduler, str(key), "failed")
+    assert (str(key), "failed") not in supervisor._lane_retry_after
+
+
 def test_background_main_loop_survives_tick_exceptions_and_reports_supply_error(monkeypatch, capsys) -> None:
     from agent_py_agent.cli import gateway_loops
 

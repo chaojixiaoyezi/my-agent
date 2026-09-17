@@ -65,7 +65,7 @@ def _admin_profiles(home: object) -> dict:
     return read_model_profiles(model_profiles_path(identity))
 
 
-# LLM: 每次新执行重新核验发布状态及 provider 可用性；撤销或删除后明确失败，不悄悄降级到另一模型。
+# LLM: 每次执行核验发布及可用性；OAuth 账号不能跨用户共享，撤销或删除后不换模型。
 # 函数用途: 在服务端将已授权共享引用解析为完整连接配置。
 def resolve_shared_model(home: object, profile_id: str) -> dict:
     key = shared_profile_key(profile_id)
@@ -74,6 +74,8 @@ def resolve_shared_model(home: object, profile_id: str) -> dict:
     data = _admin_profiles(home)
     if key not in data["profiles"]:
         raise ModelProfileError("共享模型原配置已删除，请在 /model 重新选择。")
+    if data["providers"][data["profiles"][key]["provider_id"]].get("auth"):
+        raise ModelProfileError("订阅/OAuth 登录仅供所属用户使用，不能跨用户共享。")
     return resolved_model(data, key)
 
 
@@ -91,8 +93,8 @@ def public_shared_profiles(home: object) -> list[dict]:
     return [{**row, "id": "shared:" + row["id"], "shared": True} for row in public["profiles"] if row["id"] in selected]
 
 
-# LLM: 发布与撤销只接受结构化 bool 和当前管理员自己的编号；操作只写引用目录，不更改任何会话选择。
-# 函数用途: 显式开放或关闭一个模型供其他用户调用；费用由此模型对应账号承担。
+# LLM: 发布与撤销只接受结构化 bool 和管理员本人编号；OAuth 不能跨用户共享，不改变会话选择。
+# 函数用途: 显式开放或关闭 API Key 模型的共享引用；订阅账号仍只供所属用户使用。
 def set_shared_profile(agent: object, profile_id: object, enabled: object) -> None:
     if not is_permission_admin(agent.home_paths):
         raise ModelProfileError("只有管理员可以发布或撤销共享模型。")
@@ -106,6 +108,8 @@ def set_shared_profile(agent: object, profile_id: object, enabled: object) -> No
         data = _admin_profiles(agent.home_paths)
         if key not in data["profiles"]:
             raise ModelProfileError("管理员模型配置不存在。")
+        if data["providers"][data["profiles"][key]["provider_id"]].get("auth"):
+            raise ModelProfileError("订阅/OAuth 登录仅供所属用户使用，不能跨用户共享。")
         resolved_model(data, key)
     path = shared_catalog_path(agent.home_paths)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -8,6 +8,9 @@
 
 ## 必测模块
 
+长时间运行增量矩阵见 [设计与验收](docs/design/LONG_RUNNING_EXECUTION.md)。真实测试使用一条本地慢模型
+TUI（无子代理）及多条正常模型 TUI，共用单 Gateway，定向回放和真实通过分别记账。
+
 | 模块 | 验证要点 |
 |---|---|
 | 配置与模型 | 服务商协议、密钥引用、上下文容量、会话选择、用户默认、子代理继承与显式覆盖 |
@@ -20,6 +23,29 @@
 | 调度与交付 | 普通回合与目标模式、挂起唤醒、断线、后台交付和恢复；IM 无环境时标明未测 |
 
 ## 重点定向回归入口
+
+- 客户端计时：`test_gateway_client.py`、`test_gateway_admission_wait.py`、`test_tui_worker_paths.py`，
+  覆盖时钟前跳/回拨、失联超时和活动租约续期。真实 TUI 可隔离替换客户端模块时钟注入跳变，
+  不修改系统时钟、不影响 Gateway/模型计时；单独记录注入已发生、真实终态及任务产物，不能把替身当真实模型。
+- 账号认证：`test_model_oauth.py`、`test_model_oauth_transport.py`、`test_tui_model_menu.py`，
+  联合模型配置/共享目录/会话选择/原后端测试。覆盖跨 owner、冻结引用、刷新轮换、取消和退出竞态、
+  私密参数保留/清除、重定向拒绝及协议复用。真实 TUI 的设备码确认另验；替身不作为实际账号权益证明。
+- 用量增量：`test_model_call_ledger.py`、`test_tui_model_metrics.py`、`test_reproject_model_usage.py`，
+  成功/异常/取消共用结算；累计容器重建换代，来源切换不重复算，旧账与缺报不得估算重写。
+  真 TUI 中断后追加、Goal 后台交接、子代理及 Compact 必须按 provider 分项对账。
+- 慢模型额外排队：模型配置与首事件估算定向测试，默认 0、按模型覆盖、无穷大/布尔/非法值拒绝。
+  真实单槽并发等待、滚动输入、Esc 分开验；额外预算不能修复 schema 编译错误或输出截断。
+
+- 工具重复恢复：`test_tool_guardrail_gate.py`、`test_tool_call_guardrail_runtime.py`，覆盖 300 次自身拒绝
+  与 400 次成功调用的持续计数/提醒、不同归档引用同正文及相同预览不同尾部。
+  不清计数、不挤掉原观测、真实失败/不同结果/实际写入及零阈值；拒绝经真实归档和 native 投影后仍有
+  计数及换路说明。`test_tooling_filesystem.py` 验证行/字符非文本失败提示及无额外文件转换。
+  真实 TUI 复验单文件动画与正常连续工具任务；没有触发重复门的真实任务只算正常链路验收。
+
+- 模型资源与后台策展：`test_provider_request_scope.py`、`test_memory_curator_v2.py`，覆盖同端点前台
+  优先、退出释放、pending/游标保留、pre_compact 屏障、request-local 预算、取消连接及旧请求未退出不重试。
+  真机只开一路本地慢模型且不派子代理；官网正常模型可并行对照。缓存核对需同时查推理服务槽位日志，
+  外部请求/代理别名和缓存容量不能从 TUI 百分比推断。
 
 - 状态读取：`test_agent_tree_model_view.py`、`test_agent_tree_three_layer_status.py`、`test_orchestration_tools.py`，
   覆盖规范原状态、scope 裁决、恢复路径不外泄、实际报告与缺失报告、八节点直接可读及大树省略计数；
@@ -49,6 +75,10 @@
 - 历史：`test_conversation_store.py`、`test_background_history_snapshot.py`。
 - 目标：`test_conversation_goal_tools.py`、`test_goal_lifecycle_recovery.py`、
   `test_agent_goals.py`、`test_background_main_agent_runtime.py`、`test_gateway_conversation_control.py`、`test_run_audit_terminal.py`。
+  中断增量另联测 `test_tui_input.py`、`test_tui_agent_navigation.py`、`test_r103_ledger_selfheal.py`：
+  空白补全、前后台插话、Esc 与明确暂停分离、同任务换代、恢复总账及历史关闭事件保留。
+  后台参数构造必须走到真实回执消费，不能仅断言邮箱写入；先后完成的历史目标不得误触发并行冲突迁移。
+  子代理在 Goal 后台轮创建再回报时，持久 task ID 不需要伪造 user 消息；并测 active/complete 与混合普通请求，后者真实缺失仍报错。
   覆盖默认工具可见、无工具/无 Todo 的安全续跑、审批/暂停/错误边界、旧绑定显式迁移、
   命名目标的精确回合上下文、前后台共享时钟；普通模式不得因此自动续跑。
   另覆盖每代理一个未结束目标、父子计费与权限隔离、编辑版本冲突、暂停后保存不恢复、
@@ -66,7 +96,13 @@
 
 ## 真实 TUI 记录
 
+后台进程重复观测：`test_process_sessions.py` 回放 33 次 uptime 变化但状态/输出不变的等待，
+并核对原始结果哈希、软提示频率、日志同尾增长和退出后重置；真实 TUI 单独记录模型是否采纳提示。
+
 每次公布 tmux 名称；使用隔离测试用户和同一 Gateway。记录开始/结束、版本、供应商/接口、会话与请求身份、实际工具结果、最终产物、失败和未测边界。不写真实密钥或私人对话。
+
+本轮慢模型只启用一路 TUI、不派子代理，优先验证长等待、流式、插话与停止；正常远端模型可多路并行。
+本地缓存诊断同时核对界面最近一次比例、输入用量和推理服务实际预填充，不用延迟反推缓存，更不把缓存未命中当成上下文丢失。
 
 验收分为启动/简单工具、连续多任务、多子代理、长上下文与慢模型组合。普通真实模型测试使用官方 MiniMax-M2.7；协议兼容测试按明确目标选择服务商，不静默改用户日常模型。
 

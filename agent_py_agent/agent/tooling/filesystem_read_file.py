@@ -165,8 +165,8 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
     return outcome
 
 
-# LLM: 行读取不再 read_bytes 整文件；统计与字符页共用有界索引，错误按输入/编码/IO 分类。
-# 函数用途: 为普通文件返回可续读的行或字符窗口。
+# LLM: 行读取不再 read_bytes 整文件；行/字符页共享解码失败说明，不猜格式、不自动转文件或发视觉请求。
+# 函数用途: 返回可续读文本窗口；非文本结果引导模型选择已配置的合适能力。
 def _ordinary_file_result(request: ReadFileRequest) -> ToolHandlerOutcome:
     target = request.target
     if _has_char_window_params(request.params):
@@ -179,7 +179,7 @@ def _ordinary_file_result(request: ReadFileRequest) -> ToolHandlerOutcome:
     try:
         return _stream_numbered_result(request)
     except UnicodeDecodeError:
-        return ToolHandlerOutcome("read_file", False, "文件不是有效文本（编码探测失败），无法读取。", error_code="TOOL_EXECUTION_FAILED")
+        return _non_text_file_result()
     except ValueError as exc:
         return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     except OSError as exc:
@@ -278,8 +278,8 @@ def _line_max_chars(params: dict[str, Any], default_max_chars: int) -> int:
     return min(requested, default_max_chars)
 
 
-# LLM: 字符页复用有版本的编码/检查点索引；解码错误不可落入 ValueError 参数分支。
-# 函数用途: 有界读取任意已识别编码的字符窗口，返回真实续读位置。
+# LLM: 字符页复用有版本的编码/检查点索引；解码错误返回统一非文本说明，不落入 ValueError 参数分支。
+# 函数用途: 有界读取文本并返回真实续读位置；失败不会触发额外模型或转换工具。
 def _char_window_file_result(request: CharWindowFileRequest) -> ToolHandlerOutcome:
     try:
         offset, limit = _char_window_values(request.params, request.default_max_chars)
@@ -289,7 +289,7 @@ def _char_window_file_result(request: CharWindowFileRequest) -> ToolHandlerOutco
             return _offset_out_of_range_result(offset, total_chars)
         window = index.read(offset, min(limit, request.default_max_chars))
     except UnicodeDecodeError:
-        return ToolHandlerOutcome("read_file", False, "文件不是有效文本（编码探测失败），无法读取。", error_code="TOOL_EXECUTION_FAILED")
+        return _non_text_file_result()
     except ValueError as exc:
         return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     except OSError as exc:
@@ -301,6 +301,19 @@ def _char_window_file_result(request: CharWindowFileRequest) -> ToolHandlerOutco
         requested_limit=limit,
         default_max_chars=request.default_max_chars,
     ))
+
+
+# LLM: 只说明文本解码失败及能力发现途径；不凭扩展名断言格式，不承诺视觉工具已配置或自动转发私有文件。
+# 函数用途: 给行/字符读取提供同一换路提示，避免把图片转换成另一图片后继续当文本读取。
+def _non_text_file_result() -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
+        "read_file", False,
+        "文件不是有效文本（编码探测失败）；read_file 只能读取文本，重复读取不会获得图片或二进制内容。"
+        "请按真实格式选择读取能力；如果是图片，可通过 tool_search 查找当前实际可用的图片或视觉工具，不能假定已配置。"
+        "转换成另一种图片格式不会让它变成文本。若视觉能力不可用，请如实说明未做目视核验，"
+        "使用已有文件或结构检查结果继续，不要反复确认同一文件是否存在。",
+        error_code="TOOL_EXECUTION_FAILED",
+    )
 
 
 def _char_window_values(params: dict[str, Any], default_max_chars: int) -> tuple[int, int]:

@@ -1375,9 +1375,8 @@ def _ensure_control_operation_reconciler(
     return reconciler
 
 
-# LLM: Busy Gateway submissions use one expected turn id and one opaque client id. Accepted and
-# unknown both retain the pending receipt; only an explicit rejected result permits queue fallback.
-# 函数用途: 运行中把普通 Enter 送进精确当前回合，并按投递三态决定等待、对账或排队。
+# LLM: 前后台输入共用稳定消息 ID 和持久回执；后台快照仅提供目标提示，服务端重查真实执行权。
+# 函数用途: 普通 Enter 进入当前主代理的安全点；只在明确拒绝或已排队时回到原任务队列。
 def _tui_submit_active_turn_input(
     params: TuiCreateKeybindingsParams,
     text: str,
@@ -1394,14 +1393,16 @@ def _tui_submit_active_turn_input(
     with params.state_lock:
         running = bool(params.is_running_ref[0])
         expected_turn_id = str(params.running_request_id_ref[0] or "").strip()
-    if not running or not expected_turn_id:
+    runtime = _required_tui_runtime(params)
+    if not running:
+        expected_turn_id = runtime.background_input_target()
+    if not expected_turn_id:
         return False
     if not callable(getattr(params.agent, "request_active_turn_input", None)):
         return False
     from ...agent.conversation.models import new_id
 
     message_id = new_id("steer")
-    runtime = _required_tui_runtime(params)
     runtime.enqueue_active_turn_input(message_id, display_text)
     from .tui_input_delivery import TuiActiveInputOutboxEntry
 
@@ -1799,11 +1800,11 @@ def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None
     if callable(background_active) and background_active():
         # 会话运行时 的中断动作绑定当前 active turn，而不是只看 composer worker 是否
         # 正在流式输出。后台等待子代理时本地 worker 已空闲，但 canonical task 仍
-        # 活动，所以 Ctrl-C 仍需走同一个 typed `/stop`。
+        # 活动，所以 Ctrl-C 仍需走同一个 typed 本轮中断。
         if bool(getattr(params, "use_gateway", False)):
-            _tui_submit_control_operation(params, "/stop")
+            _tui_submit_control_operation(params, "/interrupt")
         else:
-            _tui_handle_command(params=_handle_command_params(params, "/stop"))
+            _tui_handle_command(params=_handle_command_params(params, "/interrupt"))
         event.app.invalidate()
         return
     if queued and _restore_editable_queue(params):
@@ -2053,8 +2054,8 @@ def _handle_ctrl_d_keybinding(event, params: TuiCreateKeybindingsParams) -> None
     _required_tui_runtime(params).set_notice("Press Ctrl-D again to exit")
 
 
-# LLM: Esc 在运行中只发送 typed stop；空闲非空输入必须在 800ms 内双击且草稿未变才保存历史并清空。
-# 函数用途: 处理中断当前回合，或以 终端交互 的双 Esc 防误触语义清空草稿。
+# LLM: 主代理 Esc 发送本轮中断，子代理沿原停止入口；空闲双 Esc 才清空草稿，均不按正文改变 Goal。
+# 函数用途: 处理中断当前回合，或以双 Esc 防误触方式保存历史并清空草稿。
 def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     buffer = params.input_area.buffer
     if buffer.complete_state is not None:
@@ -2090,9 +2091,9 @@ def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None
         # 会话运行时 的 Esc 始终中断当前 active turn；后台等待子代理时本地 worker 已
         # 空闲，但 canonical task 仍活动，因此不能让 Esc 静默退化成空操作。
         if bool(getattr(params, "use_gateway", False)):
-            _tui_submit_control_operation(params, "/stop")
+            _tui_submit_control_operation(params, "/interrupt")
         else:
-            _tui_handle_command(params=_handle_command_params(params, "/stop"))
+            _tui_handle_command(params=_handle_command_params(params, "/interrupt"))
         event.app.invalidate()
         return
     if queued and _restore_editable_queue(params):
@@ -2186,13 +2187,13 @@ def _restore_editable_queue(params: TuiCreateKeybindingsParams) -> bool:
     return True
 
 
-# LLM: Gateway stop 的网络往返不得占用 prompt_toolkit UI 线程；typed interrupting 先发布，真实终态仍由 worker response 决定。
-# 函数用途: 立即反馈活动中断，并按本地/Gateway 后端安全派发同一 `/stop` 控制命令。
+# LLM: Esc 只中断本轮；网络不占 UI 线程，Goal 的续接交由服务端原执行权与去重 wake。
+# 函数用途: 立即显示中断反馈并派发 /interrupt；显式 /stop 仍可暂停目标。
 def _dispatch_active_interrupt(event, params: TuiCreateKeybindingsParams) -> None:
     if not params.use_gateway:
         _required_tui_runtime(params).request_interrupt()
         event.app.invalidate()
-        _tui_handle_command(params=_handle_command_params(params, "/stop"))
+        _tui_handle_command(params=_handle_command_params(params, "/interrupt"))
         return
     with params.state_lock:
         exact_turn_id = str(params.running_request_id_ref[0] or "").strip()
@@ -2204,7 +2205,7 @@ def _dispatch_active_interrupt(event, params: TuiCreateKeybindingsParams) -> Non
         event.app.invalidate()
         return
     _required_tui_runtime(params).request_interrupt()
-    _tui_submit_control_operation(params, "/stop")
+    _tui_submit_control_operation(params, "/interrupt")
     event.app.invalidate()
 
 

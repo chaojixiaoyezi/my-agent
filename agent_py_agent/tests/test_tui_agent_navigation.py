@@ -680,7 +680,7 @@ def test_selected_child_footer_overrides_root_running_hint() -> None:
     )
 
     assert fragments_text(frame.footer).strip() == (
-        "↑↓ 选择 · Enter 查看 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式 · Esc 停止主代理"
+        "↑↓ 选择 · Enter 查看 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式 · Esc 中断本轮"
     )
 
 

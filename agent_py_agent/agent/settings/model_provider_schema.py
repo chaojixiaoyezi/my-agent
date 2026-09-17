@@ -43,7 +43,7 @@ def validate_provider_id(value: object) -> str:
     return value
 
 
-# LLM: 保留/清除 secret 是明确字段操作；启停与能力是布尔/枚举事实，不读取显示文案。
+# LLM: 保留/清除 secret 是明确字段操作；OAuth 私有状态只校验不公开，表单入口另拦状态注入。
 # 函数用途: 检查服务商配置；允许无密钥保存草稿，发请求前另行检查。
 def validate_provider(value: object) -> dict:
     if not isinstance(value, dict):
@@ -65,16 +65,23 @@ def validate_provider(value: object) -> dict:
         raise ModelProfileError(str(exc)) from exc
     if session and session.lower() in {key.lower() for key in headers}:
         raise ModelProfileError("会话头请使用专门选项，不要同时填写静态值。")
-    return {"display_name": name.strip(), "api_base": validate_base_url(value.get("api_base")),
+    result = {"display_name": name.strip(), "api_base": validate_base_url(value.get("api_base")),
             "api_key": key.strip(), "enabled": enabled, "capabilities": sorted(set(capabilities)),
             "custom_headers": headers, "session_header": session}
+    if value.get("auth"):
+        from .model_oauth_schema import stored_oauth
+
+        if key.strip():
+            raise ModelProfileError("同一服务商不能同时保存 API Key 和 OAuth 登录，请分开创建。")
+        result["auth"] = stored_oauth(value["auth"], result["api_base"])
+    return result
 
 
-# LLM: 模型引用不持有第二份 secret；top_p/温度按独立模型保存，未知模型名称允许透传。
-# 函数用途: 检查模型协议、用途、容量及可选采样值，非法数值不能悄悄保存或发往上游。
+# LLM: 模型引用不持有第二份 secret；采样、容量和排队预算按模型保存，未知型号允许透传。
+# 函数用途: 检查模型协议、用途、容量、采样及额外首事件等待；非法数值不能保存或发送。
 def validate_model(value: object) -> dict:
     if not isinstance(value, dict) or value.get("model_backend") not in BACKENDS:
-        raise ModelProfileError("请选择 OpenAI Chat、OpenAI Responses 或 Anthropic；Auth 暂未开放。")
+        raise ModelProfileError("请选择 OpenAI Chat、OpenAI Responses 或 Anthropic；登录认证在服务商中配置。")
     name = value.get("model_name")
     if not isinstance(name, str) or not name.strip() or len(name) > 4096 or any(ord(c) < 32 for c in name):
         raise ModelProfileError("模型名称不能为空或包含控制字符。")
@@ -102,6 +109,15 @@ def validate_model(value: object) -> dict:
         raise ModelProfileError(str(exc)) from exc
     if top_p is not None:
         result["top_p"] = top_p
+    queue = value.get("model_queue_wait_seconds")
+    if queue not in (None, ""):
+        try:
+            seconds = float(queue)
+        except (TypeError, ValueError):
+            raise ModelProfileError("排队预算须为 0 至 86400 秒。") from None
+        if isinstance(queue, bool) or not math.isfinite(seconds) or not 0 <= seconds <= 86400:
+            raise ModelProfileError("排队预算须为 0 至 86400 秒。")
+        result["model_queue_wait_seconds"] = seconds
     return result
 
 
@@ -115,7 +131,7 @@ def validate_model_profile(value: object) -> dict:
         "custom_headers": value.get("model_custom_headers", {}), "session_header": value.get("model_session_header", "")})
     if not provider["api_key"]:
         raise ModelProfileError("模型名称、地址和密钥不能为空。")
-    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p") if key in model}
+    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds") if key in model}
     row.update(api_base=provider["api_base"], api_key=provider["api_key"])
     if provider["custom_headers"]:
         row["model_custom_headers"] = provider["custom_headers"]
@@ -136,14 +152,25 @@ def migrate_v1(data: dict) -> dict:
     return migrated
 
 
-# LLM: 唯一解析点将 model/provider 合并为含可选 top_p 的运行快照；缺省不覆盖部署采样，禁用不回落默认模型。
+# LLM: 唯一解析点合并连接；OAuth 只返回代次绑定引用，不返回 token，路径由可信 owner 调用方补齐。
 # 函数用途: 获得可发送请求的连接和采样配置，不返回展示或管理字段，不发模型请求。
 def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True) -> dict:
+    from .model_oauth_schema import has_credential, oauth_binding
+
     model = data["profiles"][profile_id]
     provider = data["providers"][model["provider_id"]]
-    if require_enabled and (not model["enabled"] or not provider["enabled"] or not provider["api_key"]
+    if require_enabled and (not model["enabled"] or not provider["enabled"] or not has_credential(provider)
                             or model["capability"] != "agentic" or "agentic" not in provider["capabilities"]):
-        raise ModelProfileError("这个模型或服务商未启用、缺少密钥，或不是 Agentic 模型。")
-    return {**{key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p") if key in model},
+        raise ModelProfileError("这个模型或服务商未启用、缺少密钥或尚未登录，或不是 Agentic 模型。")
+    result = {**{key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds") if key in model},
             "api_base": provider["api_base"], "api_key": provider["api_key"],
             "model_custom_headers": dict(provider["custom_headers"]), "model_session_header": provider["session_header"]}
+    auth = provider.get("auth")
+    if auth:
+        if auth["mode"] == "chatgpt" and model["model_backend"] != "openai_responses":
+            raise ModelProfileError("ChatGPT 订阅登录需要 OpenAI Responses 接口。")
+        result["model_auth_ref"] = {"provider_id": model["provider_id"], "mode": auth["mode"],
+                                   "generation": auth.get("generation", ""), "binding": oauth_binding(provider)}
+    else:
+        result["model_auth_ref"] = {}
+    return result

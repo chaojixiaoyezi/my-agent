@@ -1,11 +1,13 @@
+# LLM: 本模块只计算首事件预算和缓存疑似观测，不发送请求、不裁剪输出，也不决定任务终态。
+# 模块用途: 根据输入量、探针和显式排队设置规划慢模型等待，流式存活仍由传输层负责。
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ...contracts.model_call_ledger import ModelCallLedger, ModelCallRecord
 
 
-# LLM: First-event estimation parameters are pure request-planning inputs; they never mutate backend transport state.
+# LLM: 首事件估计和显式排队预算均为请求级参数；排队预算不能变成健康流的总时限。
 # 类用途: 保存首 token 预算所需的吞吐、上下限与 probe 采样策略。
 @dataclass(frozen=True)
 class FirstTokenTimeoutOptions:
@@ -14,6 +16,7 @@ class FirstTokenTimeoutOptions:
     safety_margin: float = 1.5
     min_timeout_seconds: float = 5.0
     max_timeout_seconds: float = 120.0
+    queue_wait_seconds: float = 0.0
     cache_suspected_min_input_tokens: int = 5000
     cache_suspected_max_ratio: float = 0.25
     cache_suspected_max_latency_seconds: float = 2.0
@@ -38,6 +41,8 @@ class FirstTokenTimeoutParams:
     context: FirstTokenTimeoutContext = FirstTokenTimeoutContext()
 
 
+# LLM: 估计值只描述首事件窗口，排队时间单列，不可用它当作模型健康流的总执行时限。
+# 类用途: 记录一次首事件预期等待及预算来源，供账本与请求监视使用。
 @dataclass(frozen=True)
 class FirstTokenTimeoutEstimate:
     timeout_seconds: float
@@ -45,7 +50,10 @@ class FirstTokenTimeoutEstimate:
     first_token_seconds: float
     source: str
     cache_suspected: bool = False
+    queue_wait_seconds: float = 0.0
 
+    # LLM: 仅投影数值和来源，不携带模型正文或账号凭据，不参与权限或费用判断。
+    # 函数用途: 将首事件等待组成写到调用诊断。
     def to_dict(self) -> dict[str, float | str | bool]:
         return {
             "timeout_seconds": self.timeout_seconds,
@@ -53,9 +61,12 @@ class FirstTokenTimeoutEstimate:
             "first_token_seconds": self.first_token_seconds,
             "source": self.source,
             "cache_suspected": self.cache_suspected,
+            "queue_wait_seconds": self.queue_wait_seconds,
         }
 
 
+# LLM: 排队是用户配置的额外首事件预算，不从静默推断上游状态；不更改 prefill 估计或流式 idle。
+# 函数用途: 计算排队加预填充的等待窗口，供主代理、子代理共用同一取消和超时通道。
 def estimate_first_token_timeout(params: FirstTokenTimeoutParams) -> FirstTokenTimeoutEstimate:
     input_tokens = max(0, int(params.input_tokens))
     probe_estimate = _estimate_from_required_probes(
@@ -64,9 +75,9 @@ def estimate_first_token_timeout(params: FirstTokenTimeoutParams) -> FirstTokenT
         options=params.options,
         context=params.context,
     )
-    if probe_estimate is not None:
-        return probe_estimate
-    return _estimate_from_estimated_rate(input_tokens=input_tokens, options=params.options)
+    estimate = probe_estimate or _estimate_from_estimated_rate(input_tokens=input_tokens, options=params.options)
+    queue = max(0.0, min(86400.0, float(params.options.queue_wait_seconds)))
+    return replace(estimate, timeout_seconds=estimate.timeout_seconds + queue, queue_wait_seconds=queue)
 
 
 def is_cache_suspected(

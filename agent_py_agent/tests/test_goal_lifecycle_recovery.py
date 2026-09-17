@@ -125,6 +125,27 @@ def test_completed_goal_history_does_not_hide_new_active_goal(tmp_path):
     assert agent.conversation_store.load_goal(thread.thread_id, task_id=first.task_id).goal_id == second.goal_id
 
 
+@pytest.mark.parametrize("task_status", ["interrupted", "completed"])
+def test_completed_goal_history_does_not_block_sequential_goal_resume(tmp_path, task_status):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread({"canonical_user_id": "user-test", "channel": "internal",
+                                          "channel_conversation_id": "goal-recovery"})
+    first = store.create_goal({"thread_id": thread.thread_id, "task_id": "same-project", "objective": "完成初版"})
+    finished = store.update_goal({"thread_id": thread.thread_id, "goal_id": first.goal_id, "status": "complete"})
+    second = store.create_goal({"thread_id": thread.thread_id, "task_id": first.task_id, "objective": "增加备份恢复"})
+    store.bind_task({"thread_id": thread.thread_id, "task_id": first.task_id, "goal": second.objective,
+                     "status": task_status, "work_kind": "goal"})
+    store.update_goal({"thread_id": thread.thread_id, "goal_id": second.goal_id, "status": "paused"})
+    result = _control(agent, thread, "resume")
+    assert result.ok and result.request_id == first.task_id
+    current = store.load_goal(thread.thread_id, goal_id=second.goal_id)
+    assert current.status == "active" and current.task_id == second.task_id
+    assert "task_binding_migration" not in current.metadata
+    assert store.load_goal(thread.thread_id, goal_id=first.goal_id) == finished
+    assert len(store.pending_wake_signals()) == 1
+
+
 def test_child_wake_keeps_exact_goal_scope_and_shared_original_history(tmp_path):
     from agent_py_agent.agent.conversation.runtime import (
         BackgroundRunRequest,
@@ -155,3 +176,73 @@ def test_child_wake_keeps_exact_goal_scope_and_shared_original_history(tmp_path)
     assert '"current_goal"' in prompt and '"other_goals"' in prompt
     assert "Each agent has at most one unfinished goal" in prompt
     assert store.recent_messages(thread.thread_id)[0].content == original
+
+
+@pytest.mark.parametrize("status", ["active", "paused", "blocked", "usage_limited"])
+def test_followup_selects_only_active_goal_without_changing_it(tmp_path, status):
+    from agent_py_agent.agent.gateway_parts.request_execution import (
+        _conversation_prompt_section,
+        _gateway_run_params,
+        _GatewayAskRunContext,
+        _GatewayConversationContext,
+        _GatewayRunParamsRequest,
+        _select_gateway_workspace_link,
+    )
+    from agent_py_agent.tests.test_conversation_goal_tools import _goal_agent
+
+    agent, thread, goal = _goal_agent(tmp_path)
+    store = agent.conversation_store
+    current = store.update_goal({"thread_id": thread.thread_id, "goal_id": goal.goal_id, "status": status})
+    goal_data = current.to_dict()
+    links = store.task_links(thread.thread_id)
+    selected, _ = _select_gateway_workspace_link(
+        selectable=links, thread=thread, thread_goal=goal_data, request={}, request_id="followup", load_errors=[],
+    )
+    assert (selected is not None) == (status == "active")
+    conversation = _GatewayConversationContext(thread_id=thread.thread_id, thread_goal=goal_data)
+    request = {"id": "followup", "prompt": "补充要求，报告里保留原始来源"}
+    context = _GatewayAskRunContext(agent, request, tmp_path / "request.json", tmp_path / "response.json", "followup", None)
+    params = _gateway_run_params(_GatewayRunParamsRequest(request, context, conversation, request["prompt"]))
+    assert params.task_id == (goal.task_id if status == "active" else "")
+    assert store.load_goal(thread.thread_id) == current
+    prompt = _conversation_prompt_section(conversation)
+    assert "纠偏不必写入 Goal 才生效" in prompt
+    assert "当前普通用户消息不会自动成为目标引导" not in prompt
+
+
+def test_followup_runtime_attempt_reuses_goal_and_settles_by_attempt(tmp_path):
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.agent_core.runtime_mixin import (
+        _bind_main_agent_authority,
+        _settle_main_agent_run_status,
+    )
+    from agent_py_agent.tests.test_conversation_goal_tools import _goal_agent
+
+    agent, thread, goal = _goal_agent(tmp_path)
+    first = _bind_main_agent_authority(agent, RunParams(
+        run_id="first-turn", task_id=goal.task_id, task_attributes={"conversation_thread_id": thread.thread_id},
+    ))
+    _settle_main_agent_run_status(agent, run_id="first-turn", attempt_id=first.attempt_id, runtime_status="cancelled")
+    second = _bind_main_agent_authority(agent, replace(first, run_id="followup-turn"))
+    repo = agent.subagents.runtime_db
+    row = repo.main_agent_run_for_task(goal.task_id)
+    assert row["current_attempt_id"] == second.attempt_id != first.attempt_id
+    assert repo.agent_run_for_run_id("followup-turn") is None
+    _settle_main_agent_run_status(agent, run_id="followup-turn", attempt_id=second.attempt_id, runtime_status="ok")
+    assert repo.main_agent_run_for_task(goal.task_id)["status"] == "done"
+    assert not repo.has_active_exec_lock(row["agent_run_id"])
+
+
+def test_compact_keeps_correction_without_editing_goal(tmp_path):
+    from agent_py_agent.agent.conversation.compact import _summary_with_conversation_landmarks
+    from agent_py_agent.tests.test_conversation_goal_tools import _goal_agent
+
+    agent, thread, goal = _goal_agent(tmp_path)
+    correction = "接下来的报告都附原始来源，称重单位改为千克。"
+    store = agent.conversation_store
+    store.append_message({"thread_id": thread.thread_id, "role": "user", "content": goal.objective})
+    store.append_message({"thread_id": thread.thread_id, "role": "user", "content": correction})
+    first = _summary_with_conversation_landmarks("正在整理资料", "", store.recent_messages(thread.thread_id), max_chars=6000)
+    second = _summary_with_conversation_landmarks("继续整理下一批", first, [], max_chars=6000)
+    assert correction in first and correction in second
+    assert store.load_goal(thread.thread_id).objective == goal.objective

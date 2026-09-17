@@ -1,13 +1,14 @@
-# LLM: 仅显式目标控制调用此模块；读取或启动不迁移。共享任务必须已完成且无执行者，迁移不重放历史操作。
-# 模块用途: 安全修复升级前多个 Goal 误绑同一任务的旧数据，保留原现场并拒绝活动执行中的改绑。
+# LLM: 仅显式目标控制迁移多个未结束 Goal 的共享冲突；已完成历史不是冲突。迁移仍要求任务关闭且无执行者。
+# 模块用途: 安全修复旧并行目标的任务误绑定；同一项目先后建立目标不改身份，保留正常暂停恢复。
 from __future__ import annotations
 
 
-# LLM: 调用者持有 goal transition guard；running claim 即使过期也不等于原执行结束，须由执行器先释放。
-# 函数用途: 用户精确恢复旧目标时分离冲突任务身份；正常目标原样返回。
+# LLM: 调用者持有目标锁；只有另一个未结束 Goal 共用 task 才需分离，迁移时 running claim 过期也不等于释放。
+# 函数用途: 显式恢复时排除真正的旧多目标冲突，不让已完成的历史 Goal 阻止当前工作继续。
 def prepare_goal_resume(agent: object, store: object, goal: object) -> object:
     siblings = store.load_goals(goal.thread_id)
-    shared = any(item.goal_id != goal.goal_id and item.task_id == goal.task_id for item in siblings)
+    shared = any(item.goal_id != goal.goal_id and item.task_id == goal.task_id
+                 and item.status != "complete" for item in siblings)
     if not shared:
         return goal
     from .run_claim import detached_task_claim_scope_id

@@ -570,8 +570,8 @@ class HttpBackend(BaseBackend):
             )
         )
 
-    # LLM: 唯一传输封装应用显式请求头和宿主会话；认证不被覆盖，URL 不重复 /v1，首包预算保持 request-local。
-    # 函数用途: 组装统一的 HTTP 请求，不改变流式空闲/取消/重试行为。
+    # LLM: 唯一传输封装应用显式请求头和宿主会话；后台预算与首包预算保持 request-local，不改共享配置。
+    # 函数用途: 组装统一 HTTP 请求，把已授权后台预算传到底层；普通流式空闲/取消语义不变。
     def _gateway_request(
         self,
         path: str,
@@ -581,6 +581,8 @@ class HttpBackend(BaseBackend):
         first_event_timeout_seconds: float | None = None,
     ) -> GatewayRequest:
         """Build the immutable gateway request envelope used by all HTTP calls."""
+        from .request_scope import provider_request_timeout
+
         api_base, path = endpoint_parts(self.api_base, path)
         return GatewayRequest(
             api_base=api_base,
@@ -588,7 +590,7 @@ class HttpBackend(BaseBackend):
             path=path,
             payload=payload,
             headers=request_headers(headers, self.custom_headers, self.session_header),
-            timeout=self.request_timeout,
+            timeout=provider_request_timeout(self.request_timeout),
             connect_timeout=self.connect_timeout,
             first_event_timeout=first_event_timeout_seconds,
         )
@@ -1619,7 +1621,7 @@ def _response_preview(obj: object, *, max_chars: int = 1000) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + "... [truncated]"
 
 
-# LLM: 只按显式协议构造后端；空协议、模型或端点保持未配置，不因缺字段或失败换接口。
+# LLM: 只按显式协议构造后端；OAuth 引用附加认证层，空配置保持未配置，不因失败换接口。
 # 函数用途: 创建用户指定的适配器；尚未配置也能打开设置，但所有真实调用都明确拒绝。
 def get_backend(name: str, config: Any | None = None) -> BaseBackend:
     """Resolve a configured backend name to a backend adapter instance."""
@@ -1650,6 +1652,17 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         custom_headers=getattr(config, "model_custom_headers", {}),
         session_header=getattr(config, "model_session_header", ""),
     )
+
+    auth_ref = getattr(config, "model_auth_ref", {})
+    if auth_ref:
+        from .oauth import OAuthChatBackend, OAuthMessagesBackend, OAuthResponsesBackend
+
+        adapters = {"openai_compatible": OAuthChatBackend, "openai_responses": OAuthResponsesBackend,
+                    "anthropic_compatible": OAuthMessagesBackend}
+        if name not in adapters or (auth_ref.get("mode") == "chatgpt" and name != "openai_responses"):
+            raise ValueError("登录类型与模型接口不匹配。")
+        extra = {"anthropic_version": config.anthropic_version} if name == "anthropic_compatible" else {}
+        return adapters[name](common, auth_ref=auth_ref, **extra)
 
     if name == "openai_compatible":
         return OpenAICompatibleBackend(common)

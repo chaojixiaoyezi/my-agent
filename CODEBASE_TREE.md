@@ -39,6 +39,7 @@ agent_py_agent/
 |   |   |-- tui_display_archive.py      # 异步读取原文归档页，缓存限额与失败重试
 |   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
 |   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
+|   |   |-- tui_model_auth.py           # 私密设备码登录、通用参数编辑、取消及退出账号
 |   |   |-- tui_model_metrics.py        # Context 下方模型轮、工具数、最近缓存、会话累计与输出速度的一行统计
 |   |   |-- tui_shared_model_menu.py    # 管理员逐模型显式共享/撤销，普通用户只选已开放模型
 |   |   |-- tui_permissions_menu.py     # /permissions 与 F4 三档权限菜单、保存/取消及管理员确认
@@ -164,6 +165,7 @@ agent_py_agent/
 |   |   |-- permission_bridge.py       # TUI/Gateway 工具审批 request binding 的原子决定文件桥
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
+|   |   |-- process_events.py           # 受管后台命令终态到原会话 wake 的去重交接
 |   |   |-- compact_progress.py       # transcript/live-tool/turn-local Compact 来源与提交权的唯一公开进度协议
 |   |   |-- context_usage.py          # 主/子 preflight 数字的 canonical thread 保存、代次检查与无正文展示
 |   |   |-- model_metrics.py          # 主/子模型调用账与历史用量的只读显示投影，不回灌模型上下文
@@ -216,6 +218,9 @@ agent_py_agent/
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |   |-- user_config_capability.py  # 用户可自助修改配置的唯一白名单/校验/生效时机；安全边界结构性拒绝
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
+|   |   |-- model_oauth.py              # owner 登录代次、取消与刷新并发控制，复用私有配置源
+|   |   |-- model_oauth_schema.py       # 授权配置、凭据目的地、私有状态与绑定校验
+|   |   |-- model_oauth_wire.py         # 设备码、兑换和刷新协议的有界无重定向 HTTP
 |   |   |-- thread_model_selection.py   # canonical 会话模型编号、默认初始化与逐工作片解析
 |   |   |-- shared_model_catalog.py     # 管理员显式共享引用目录，不复制私有连接凭证
 |   |   |-- model_provider_schema.py    # provider/model v2 校验、v1 显式迁移与单份连接快照解析
@@ -270,7 +275,11 @@ agent_py_agent/
 |   |   `-- memory_context.py          # 非权威、可转义且可统一剥离的召回记忆信封
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
 |   `-- backends/                      # 模型后端适配、run 固定协议/tool_choice、原生工具历史与结构化生成
+|       |-- oauth.py                   # 原三种模型协议的 OAuth 认证层，不新建执行循环
+|       |-- oauth_transport.py         # 带凭据请求的重定向拒绝，登录和模型共用
 |       |-- provider_headers.py        # 自定义头保护、owner/thread 稳定会话头及 endpoint 拼接
+|       |-- request_scope.py           # 前台模型端点占用与后台单次预算；不保存正文和持久状态
+|       |-- cache_diagnostics.py       # 出站请求摘要及前缀变化诊断，不存正文或改变缓存布局
 |       |-- sampling.py                # top_p 校验与精确端点 V4 Flash 采样默认，不改变身份或重试
 |       |-- responses.py               # Responses 协议生成入口，复用正式 HTTP/取消/超时主链
 |       |-- responses_wire.py          # typed SSE/items 与既有工具历史映射、加密 reasoning 回放
@@ -322,6 +331,7 @@ agent_py_agent/
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
+|   |-- test_provider_request_scope.py # 同端点前台优先、后台预算传递、取消和不重叠重试
 |   |-- test_memory_promotion_v2.py    # 证据/冲突/Persona/lesson/HOT 晋升边界
 |   |-- test_memory_recall_v2.py       # 正式来源、scope、陈旧索引、owner 隔离与信封安全
 |   |-- test_memory_migration_v2.py    # v1→v2 dry-run、备份、回滚、幂等与坏数据关闭式失败
@@ -330,6 +340,8 @@ agent_py_agent/
 |   |-- test_tool_input_completion_provenance.py # 有限补参、来源账目、伪造拒绝和旧旁路删除回归
 |   |-- test_tool_input_schema.py      # 强类型纠正、嵌套/组合/边界规则与显式 Schema fail-closed
 |   |-- test_process_sessions.py       # 后台命令有界等待、进程树停止与 owner/TUI 会话隔离回归
+|   |-- test_process_completion_events.py # 后台完成通知的重启补发、去重和停止边界
+|   |-- test_cache_diagnostics.py       # 请求前缀诊断、无正文存储与线程隔离
 |   |-- test_gateway_status_tool.py    # Gateway 权威身份、端点与生命周期日志诊断回归
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
 |   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
@@ -357,6 +369,7 @@ docs/
 |-- tasks/completed/TASK-20260818-终端交互-tui-parity.md # 已完成 TUI 复刻实施、测试机边界和验收记录
 |-- design/FEATURE-20260804-tool-runtime-unification.md # 工具唯一主链的用户行为、需求与验收规格
 |-- design/tool-runtime-unification.md  # 工具参考证据、架构、迁移删除表与并行边界
+|-- design/LONG_RUNNING_EXECUTION.md    # 慢模型、后台长等待与缓存诊断统一合同及验收矩阵
 |-- design/P2_SCALE_ROLLOUT_DR_OWNER_STORE.md # 灰度/灾备/Owner store/24h proof 事实
 |-- architecture/BOUNDARY_RULES.md      # 分层和写入边界
 |-- architecture/MODEL_CATALOG_SNAPSHOT.md # 模型目录、配置覆盖及元数据维护边界
@@ -409,12 +422,17 @@ docs/
 - `agent/gateway_parts/approval_mode_service.py`：认证 owner 的权限菜单服务，不允许正文伪造管理员。
 - `agent/user_space/approval_mode.py`：既有 owner 工具策略里的唯一用户审批模式读写与运行快照映射。
 - `agent/settings/model_profiles.py` 与 `model_scope.py`：用户模型存储和运行快照；敏感配置位于宿主 config/model-profiles，非业务目录。
+- `agent/settings/model_oauth.py`、`model_oauth_schema.py`、`model_oauth_wire.py`：账号登录的状态、校验与协议；说明见 `docs/design/MODEL_OAUTH.md`。
+- `agent/backends/oauth.py`、`oauth_transport.py` 和 `cli/chat_parts/tui_model_auth.py`：认证与原模型后端的适配及私密登录交互。
 - `agent/settings/thread_model_selection.py`：按 canonical thread 固定模型，同 owner 多 TUI 不串配置，默认值只初始化新会话。
 - `agent/settings/shared_model_catalog.py` 与 `cli/chat_parts/tui_shared_model_menu.py`：管理员逐模型发布共享引用；秘密留在原 provider 文件，撤销后明确提示而非换模型。
 - `cli/chat_parts/tui_model_menu.py`：真实 TUI 模型菜单，保存/返回与模型执行分离。
 - `cli/chat_parts/tui_provider_menu.py`：同一个 provider 管理多个模型；敏感字段仅表单暂存，短测试明确提示消耗。
 - `agent/settings/model_provider_*.py`：v2 存储 schema/锁内修改/用户主动网络操作，配置只在 owner 私有文件存在一份。
 - `agent/backends/provider_headers.py`、`responses.py`、`responses_wire.py`：统一身份与三种协议；不复制其他产品认证身份。
+- `agent/backends/request_scope.py`：同 Gateway 前台端点占用和请求局部预算；外部程序及代理别名不作推断。
+- `agent/backends/cache_diagnostics.py`：真实 HTTP 请求的无正文摘要，不修改模型请求或记忆。
+- `agent/conversation/process_events.py`：原进程记录到原 wake 队列的耐久终态通知；不新增任务状态机。
 - `agent/backends/sampling.py`：YAML/profile/backend 共用 top_p 数值校验；已知 Flash 方言默认与任意端点显式覆盖分开。
 - `agent_py_agent/tests/test_gateway_main_activity.py`：前后台数值/阶段共享、任务晋升、跨会话拒绝、迟到关闭和显示故障验证。
 - `agent_py_agent/tests/test_shell_stdin.py`：使用独立宿主管道验证批处理 EOF、输入不串和显式管道，不读取真实用户输入。

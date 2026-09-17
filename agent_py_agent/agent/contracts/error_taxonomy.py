@@ -34,6 +34,11 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "EDIT_TARGET_MISMATCH": ErrorContract(
+        code="EDIT_TARGET_MISMATCH", category="state", retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前文件无法唯一匹配旧文本；文件未修改。按结果的 recovery 参数先 read_file，再合并修改；不要原样重试或自动放宽匹配。",
+    ),
     "STALE_VERSION": ErrorContract(
         code="STALE_VERSION", category="state", retryable=True,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,

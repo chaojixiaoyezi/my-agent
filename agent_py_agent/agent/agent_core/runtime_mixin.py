@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
@@ -147,8 +148,8 @@ class SimpleAgentRuntimeMixin:
         return self._services
 
 
-    # LLM: run 的工具权限只接受 allowed_tools；工作片冻结模型及宿主会话身份，探针/Compact/子代理不能混用头或模型。
-    # 函数用途: 规范化一次用户请求，绑定本轮模型配置，再进入共享运行、压缩、工具和保存主链。
+    # LLM: run 冻结模型和身份并登记端点占用；完整工作片结束后释放，后台记忆不得趁工具间隙抢同端点。
+    # 函数用途: 绑定本轮模型/权限，再进入共享运行、压缩、工具和保存主链；前台之间不串行。
     def run(
         self,
         user_prompt: str,
@@ -197,6 +198,7 @@ class SimpleAgentRuntimeMixin:
             ),
         )
         from ..backends.provider_headers import provider_runtime_scope
+        from ..backends.request_scope import foreground_model_scope
         from ..settings.model_scope import selected_model_scope
 
         attrs = params.task_attributes or {}
@@ -204,7 +206,8 @@ class SimpleAgentRuntimeMixin:
             self, inherited=params.context_scope == "task_local",
             thread_id=str(attrs.get("conversation_thread_id") or ""),
         ):
-            return _run_with_params(self, user_prompt, params)
+            with foreground_model_scope(self.backend):
+                return _run_with_params(self, user_prompt, params)
 
     def _build_finalize_context(self, params: FinalizeParams):
         rp = params.run_params
@@ -302,8 +305,9 @@ class SimpleAgentRuntimeMixin:
 
 # LLM: 主代理每轮必须挂到 params.task_id 对应的权威根 run；run_id 命中旧任务时
 # 必须丢弃该行并按 task 回退，绝不能仅凭线程级旧身份跨任务创建 attempt。
-#   Gateway 需要在模型/工具之前收到本次实际 DB 身份，不能从后续会话展示任务反推恢复身份。
-# 函数用途: 登记主代理数据库权威链并回填 attempt；同步宿主恢复凭据，落盘失败时不进入模型。
+#   Gateway 在模型/工具之前收到真实 DB 身份；request_id 保留消息身份，run/attempt 一起回填，
+#   Compact 再入仍按消息编号发布宿主凭据。同步检查跨身份续跑与工具权威门测试。
+# 函数用途: 登记并传回成对的执行身份，避免追问拿新消息编号执行旧任务；凭据保存失败不进入模型。
 def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     """MANAGED 下主代理 run 登记权威链（seq 255 单一闭合：root/main AgentRun）。
 
@@ -314,8 +318,8 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     首 attempt；compact/账本续跑轮（同 run_id 已登记）→ create_attempt
     轮换 current pointer（G4 语义：旧 attempt 非终态操作转 UNKNOWN）。
 
-    返回 replace 后的 params（attempt_id=DB current attempt，工具循环
-    `_loop_attempt_id` 回落读 params 即拿到权威 attempt，与子代理同源）；
+    返回 replace 后的 params（run_id/attempt_id 同属 DB 权威执行链，
+    request_id 保留调用方消息身份，工具循环与子代理使用同源权威）；
     LOCAL_UNMANAGED（无 repo）/无 run 上下文/子代理上下文 → 原样返回，
     投影 id 行为不变。
     """
@@ -372,7 +376,8 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     if callable(publish):
         try:
             if publish({
-                "task_id": task_id, "run_id": authority_run_id, "invocation_run_id": run_id,
+                "task_id": task_id, "run_id": authority_run_id,
+                "invocation_run_id": str(params.request_id or run_id),
                 "agent_run_id": agent_run_id, "attempt_id": attempt_id,
             }) is not True:
                 raise RuntimeError("主代理执行身份无法可靠保存，尚未进入模型或工具")
@@ -384,13 +389,15 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
                 runtime_reason="runtime_authority_publish_failed",
             )
             raise
-    return replace(params, attempt_id=attempt_id)
+    return replace(params, run_id=authority_run_id, attempt_id=attempt_id)
 
 
 # 审计账本终态别名：运行时语义 → agent_runs 终态串（只认结构化字段）。
 _RUN_STATUS_ALIASES = {"ok": "done", "user_stop": "cancelled", "conversation_control": "cancelled"}
 
 
+# LLM: 收口按本轮权威 attempt 定位 AgentRun；前台请求和后台唤醒的临时 run_id 不得造成漏记或误关别人的轮次。
+# 函数用途: 结束精确执行代次并释放执行权；旧 attempt 的 CAS 不能覆盖新 attempt。
 def _settle_main_agent_run_status(
     agent,
     *,
@@ -462,9 +469,10 @@ def _settle_main_agent_run_status(
     if repo is None:
         return  # LOCAL_UNMANAGED：显式选择本地投影库，无权威账本
     try:
-        row = repo.agent_run_for_run_id(run_id)
-        if row is None:
+        attempt = repo.get_attempt(attempt_id)
+        if attempt is None:
             return
+        agent_run_id = str(attempt["agent_run_id"])
         payload = {
             "status": terminal or "attempt_done",
             "runtime_status": runtime_status,
@@ -474,14 +482,14 @@ def _settle_main_agent_run_status(
         }
         if terminal:
             repo.settle_agent_run(
-                agent_run_id=str(row["agent_run_id"]),
+                agent_run_id=agent_run_id,
                 status=terminal,
                 attempt_id=attempt_id,
                 payload=payload,
             )
         else:
             repo.settle_agent_attempt(
-                agent_run_id=str(row["agent_run_id"]),
+                agent_run_id=agent_run_id,
                 attempt_id=attempt_id,
                 payload=payload,
             )
@@ -585,14 +593,19 @@ def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseExceptio
 # every caller must retain the returned params through execution, exception closeout,
 # Compact continuation, and final closeout.  Dropping the replacement recreates a stale-attempt
 # closeout and leaves the root active forever.
-# 函数用途: 为一次主代理模型回合选定任务工作区并绑定数据库权威 attempt，返回值必须贯穿整轮。
+# LLM: 与终态扫描投影共用任务换代锁；原执行权与 attempt CAS 仍是准入门，不能用此锁绕过。
+# 函数用途: 原子选定归档并绑定新 attempt，防止中途被旧取消快照覆盖；返回值须贯穿整轮。
 def _bind_main_agent_turn_params(
     agent,
     user_prompt: str,
     params: RunParams,
 ) -> RunParams:
-    attached = attach_run_task_workspace_context(agent, params, user_prompt)
-    return _bind_main_agent_authority(agent, attached)
+    store = getattr(agent, "conversation_store", None)
+    guard = getattr(store, "task_transition_guard", None)
+    task_id = str(params.task_id or params.run_id or "")
+    with guard(task_id) if task_id and callable(guard) else nullcontext():
+        attached = attach_run_task_workspace_context(agent, params, user_prompt)
+        return _bind_main_agent_authority(agent, attached)
 
 
 # LLM: 顶层运行和所有自动 Compact 续接共用这一返回缝隙；只有最终不再续接时才能投影 standalone 终态。
@@ -671,6 +684,8 @@ def _log_run_stage(
     )
 
 
+# LLM: 所有异常路径必须结算已知调用和真实 attempt；费用收口失败不得覆盖原异常，禁止猜补未知费用。
+# 函数用途: 执行一轮模型工具循环，成功或中断都保留实际消耗与运行终态。
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     _run_stage_started = time.monotonic()
     _log_run_stage("run_started", params)
@@ -712,6 +727,10 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
             _log_run_stage("finalize_done", params, started_mono=_run_stage_started)
             return result
     except BaseException as exc:
+        try:
+            FinalizationService(agent).settle_model_usage(params)
+        except Exception:
+            logging.getLogger(__name__).error("模型用量收口失败，保留原任务错误；请核对用量账", exc_info=False)
         # 会话运行时 在 task spawn 边界统一调用 on_task_finished；这里等价地覆盖
         # 已绑定 attempt 后的所有入口，包括 skill/tool snapshot、provider
         # capability probe、上下文准备、模型循环和 finalization。任何一步抛错

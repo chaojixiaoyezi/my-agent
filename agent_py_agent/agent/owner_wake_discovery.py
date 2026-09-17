@@ -550,7 +550,10 @@ def _bump_fact_stat(name: str) -> None:
 # the evaluation it guards.
 # 函数用途: 计算 owner home 事实相关文件的结构化签名,供判定缓存失效比较。
 def _owner_fact_signature(owner_home: Path) -> tuple[tuple[str, tuple[Any, ...]], ...]:
+    from .tooling.process_session_store import process_session_store_root
+
     parts: list[tuple[str, tuple[Any, ...]]] = []
+    parts.append(("process_completions", _dir_entries_signature(process_session_store_root(owner_home, owner_home), "bg-*.json")))
     store_roots = tuple(_store_roots(owner_home))
     parts.append(("store_roots", tuple(str(root) for root in store_roots)))
     for root in store_roots:
@@ -631,6 +634,8 @@ def _dir_own_signature(root: Path) -> tuple[int, int]:
 
 
 def _owner_has_hard_facts(owner_home: Path, *, deadline_out: list[float] | None = None) -> bool:
+    from .conversation.process_events import owner_has_pending_process_completions
+
     if any(
         _has_pending_wake_signal(store_root)
         or _has_enabled_progress_policy(store_root, deadline_out=deadline_out)
@@ -638,7 +643,8 @@ def _owner_has_hard_facts(owner_home: Path, *, deadline_out: list[float] | None 
     ):
         return True
     return (
-        _has_unfinished_subagent_run(owner_home)
+        owner_has_pending_process_completions(owner_home)
+        or _has_unfinished_subagent_run(owner_home)
         or _has_unfinished_task_ledger(owner_home, deadline_out=deadline_out)
         or _has_incomplete_watch_lane(owner_home, deadline_out=deadline_out)
         or _has_due_scheduler_fact(owner_home, deadline_out=deadline_out)
@@ -1125,7 +1131,47 @@ def _filter_by_runtime_authority(
     return filtered
 
 
+# LLM: 扫描快照不是写权限；与执行器换代共用 task transition 锁，重新核对当前 attempt 与 Goal。
+# 函数用途: 防止旧取消记录盖掉已续接的执行，或把有持续目标的一轮中断升级成整项任务取消。
 def _project_task_ledger_terminal(
+    owner_home: Path,
+    repo: RuntimeRepository,
+    task_id: str,
+    run_row,
+    link_path: Path | None,
+) -> bool:
+    if link_path is None or not link_path.is_file():
+        return False
+    from .conversation.store import ConversationStore
+
+    store = ConversationStore(link_path.parent.parent, initialize=False)
+    with store.task_transition_guard(task_id):
+        current = repo.main_agent_run_for_task(task_id)
+        if current is None:
+            return False
+        fields = ("agent_run_id", "current_attempt_id", "current_attempt_generation", "status")
+        if any(current[key] != run_row[key] for key in fields):
+            return True  # 旧快照已失效；新执行负责后续投影。
+        link = store.load_task_link(task_id)
+        if link is None:
+            return False
+        if link.status == "interrupted":
+            return True  # 用户可恢复中断不是取消任务。
+        try:
+            goal = (
+                store.load_goal(link.thread_id, task_id=task_id)
+                if store._goal_path(link.thread_id).is_file() else None
+            )
+        except (KeyError, ValueError, OSError):
+            return False  # Goal 记录存在但不可核对，不能把它猜成普通取消任务。
+        if goal is not None and goal.task_id == task_id and goal.status == "active":
+            return True  # 是否续跑只由原 Goal wake 决定，此处不新增唤醒。
+        return _project_task_ledger_terminal_locked(owner_home, repo, task_id, run_row, link_path)
+
+
+# LLM: 调用方已持任务锁并核对当前代次；这里只投影真实任务取消，不决定是否恢复。
+# 函数用途: 同步任务链接、归档和任务运行账本，保持原子换代之外的幂等收尾。
+def _project_task_ledger_terminal_locked(
     owner_home: Path,
     repo: RuntimeRepository,
     task_id: str,

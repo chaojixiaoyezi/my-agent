@@ -51,14 +51,14 @@ class ModelScopedAttribute:
         instance.__dict__[self.name] = value
 
 
-# LLM: 后端缓存按含 top_p 的完整模型配置快照命中；有界、同 owner，不热改已有执行后端。
+# LLM: 缓存键含 OAuth 引用代次而非 token；刷新不换模型，退出/重登录不能复用原身份。
 # 函数用途: 切换模型或采样配置时创建对应后端，相同快照复用连接与探针缓存。
 def _profile_backend(agent: object, config: object):
     from ..backends import get_backend
 
     values = [getattr(config, key) for key in (
         "model_backend", "model_name", "api_base", "api_key", "model_context_window_tokens", "max_tokens",
-        "model_custom_headers", "model_session_header",
+        "model_custom_headers", "model_session_header", "model_auth_ref",
         "temperature", "top_p", "stream_enabled", "anthropic_prompt_cache_enabled", "anthropic_version", "request_timeout",
         "model_temperature_explicit",
     )]

@@ -210,7 +210,7 @@ def test_parallel_tools_keep_selected_model_and_permission_snapshot(tmp_path):
     host = Host(tmp_path / "config")
     host.home_paths = owner_home(tmp_path, admin=True)
     profile_id, _ = add(host, model_name="deepseek-v4-flash")
-    execute_model_profile_operation(host, "select", {"profile_id": profile_id})
+    execute_model_profile_operation(host, "set_default", {"profile_id": profile_id})
     execute_approval_mode_operation(host.home_paths, "set", "full-access")
     observations = []
 

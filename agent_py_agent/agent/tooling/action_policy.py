@@ -22,6 +22,7 @@ from ..contracts.gates.tool_guardrail import (
     ToolGuardrailConfig,
     ToolGuardrailFacts,
     evaluate_tool_guardrail_gate,
+    is_guardrail_rejection,
 )
 from ..contracts.gates.tool_rate_limit import (
     ToolRateLimitFacts,
@@ -500,20 +501,22 @@ def _guardrail_decision(
     )
 
 
+# LLM: 只找精确 tool/args 的最近真实结果；自身拒绝及其它调用的失败不清空其结果哈希，真实同调用失败仍清空。
+# 函数用途: 给执行前重复门提供上次结果，避免刚拦截一次就再次放行。
 def _latest_guardrail_result_hash(
     records: tuple[object, ...],
     tool_name: str,
     args_hash: str,
 ) -> str:
     for item in reversed(records):
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or is_guardrail_rejection(item):
             continue
-        if item.get("failed") is True:
-            return ""
         if str(item.get("tool_name") or "") != tool_name:
             continue
         if str(item.get("args_hash") or "") != args_hash:
             continue
+        if item.get("failed") is True:
+            return ""
         return str(item.get("result_hash") or "")
     return ""
 

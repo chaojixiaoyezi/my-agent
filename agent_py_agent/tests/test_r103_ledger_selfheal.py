@@ -152,6 +152,39 @@ def test_projection_is_idempotent(stale_owner):
     assert task_id not in unfinished_task_ids(home)
 
 
+def test_cancelled_old_attempt_cannot_overwrite_new_generation(stale_owner):
+    from agent_py_agent.agent.owner_wake_discovery import _project_task_ledger_terminal
+
+    repo = stale_owner["repo"]
+    task_id = stale_owner["task_id"]
+    old = repo.main_agent_run_for_task(task_id)
+    new = repo.create_attempt(old["agent_run_id"])
+    projected = _project_task_ledger_terminal(
+        stale_owner["home"], repo, task_id, old, stale_owner["link_path"],
+    )
+    assert projected
+    assert repo.main_agent_run_for_task(task_id)["current_attempt_id"] == new["attempt_id"]
+    assert _read_json(stale_owner["link_path"])["status"] == "active"
+    assert _read_json(stale_owner["task_root"] / "work/state.json")["status"] == "RUNNING"
+
+
+def test_cancelled_turn_is_not_cancelled_active_goal(stale_owner):
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+
+    store = ConversationStore(stale_owner["link_path"].parent.parent)
+    thread = store.get_or_create_thread({"canonical_user_id": "test", "channel": "chat", "channel_conversation_id": "goal"})
+    link = _read_json(stale_owner["link_path"])
+    link["thread_id"] = thread.thread_id
+    write_json_file_atomic(stale_owner["link_path"], link)
+    goal = store.create_goal({"thread_id": thread.thread_id, "task_id": stale_owner["task_id"], "objective": "持续整理"})
+    unfinished_task_ids(stale_owner["home"])
+    assert store.load_task_link(goal.task_id).status == "active"
+    assert store.load_goal(thread.thread_id).status == "active"
+    assert _read_json(stale_owner["task_root"] / "work/state.json")["status"] == "RUNNING"
+    assert not store.pending_wake_signals()  # 扫描不得自己创建续跑授权。
+
+
 def test_non_terminal_run_keeps_driving(tmp_path):
     """run 非终态（created）→ 不投影账本，任务照旧返回驱动（保护既有行为）。"""
     home = tmp_path / "home"

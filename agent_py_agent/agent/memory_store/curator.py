@@ -136,9 +136,8 @@ class _CuratorLifecycleMixin:
             "requested_at": state.pending_requested_at,
         }
 
-    # LLM: Due selection uses durable state and incremental counts only; it never infers trigger
-    # intent from conversation text.
-    # 函数用途: 在 Gateway owner maintenance tick 中运行一个到期批次。
+    # LLM: 普通维护在同端点前台工作时延后，不消费 pending/游标；pre_compact 屏障例外，避免互等。
+    # 函数用途: 按持久状态与前台资源事实调度到期批次，不从正文判断优先级。
     def run_if_due(self, *, now: datetime | None = None) -> CuratorRunResult:
         if not self.config.enabled:
             return self._result(status="disabled", reason="interval")
@@ -148,6 +147,10 @@ class _CuratorLifecycleMixin:
             return self._corrupt_failure("interval", exc)
         current = _localized_now(now, self.timezone_name)
         pending = _pending_reason(state.pending_reasons)
+        from ..backends.request_scope import foreground_model_active
+
+        if pending != "pre_compact" and foreground_model_active(self.backend):
+            return self._result(status="busy", reason=pending or "interval")
         if pending:
             return self._run_pending_when_due(state, pending, current)
         batch = self._collect(state, include_formal=False)

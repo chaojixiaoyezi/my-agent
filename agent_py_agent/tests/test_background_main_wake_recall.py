@@ -520,6 +520,7 @@ def test_prepare_tick_can_skip_inline_orphan_supervision(monkeypatch) -> None:
     from agent_py_agent.agent.conversation import runtime
 
     scheduler = object.__new__(BackgroundMainAgentScheduler)
+    scheduler.runtime = SimpleNamespace(agent=SimpleNamespace())
     scheduler._maybe_gc_ledger = lambda *, now: None
     scheduler._process_collaboration_cases = lambda *, now: None
     scheduler._enqueue_scheduler_runs = lambda *, now: None

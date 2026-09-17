@@ -5,7 +5,9 @@ import time
 from queue import Queue
 from types import SimpleNamespace
 
+import pytest
 from prompt_toolkit.buffer import Buffer, CompletionState
+from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 from prompt_toolkit.widgets import TextArea
 
@@ -288,6 +290,7 @@ def test_escape_stops_canonical_background_task_while_local_worker_is_idle() -> 
 
     assert len(captured) == 1
     assert captured[0].command_kind == "stop"
+    assert captured[0].command_text == "/interrupt"
     assert captured[0].expected_turn_id == ""
     assert app.invalidate_calls == 1
 
@@ -319,6 +322,36 @@ def test_input_completer_uses_structured_commands_and_one_level_paths(tmp_path) 
     assert [item.text for item in paths] == ["@docs/", "@draft.md"]
     prompt_file = list(completer.get_completions(Document("/prompt-file dr"), None))
     assert [item.text for item in prompt_file] == ["draft.md"]
+
+
+@pytest.mark.parametrize("text", ["", " ", "   ", "\t", "\n", " \t\n ", "\u3000", "\u00a0", "@docs ", "@docs\n"])
+def test_input_completer_blank_or_completed_token_never_scans_paths(tmp_path, monkeypatch, text) -> None:
+    import asyncio
+
+    from agent_py_agent.cli.chat_parts import tui_input
+
+    def unexpected_scan(*args):
+        pytest.fail("空白或已结束的引用不应触发目录补全")
+
+    monkeypatch.setattr(tui_input, "_path_candidates", unexpected_scan)
+    completer = TuiInputCompleter(tmp_path)
+    document = Document(text)
+    event = CompleteEvent(text_inserted=True)
+    assert list(completer.get_completions(document, event)) == []
+
+    async def collect():
+        return [item async for item in completer.get_completions_async(document, event)]
+
+    assert asyncio.run(collect()) == []
+
+
+def test_input_completer_respects_cursor_and_keeps_explicit_empty_path_query(tmp_path) -> None:
+    (tmp_path / "docs").mkdir()
+    completer = TuiInputCompleter(tmp_path)
+    assert list(completer.get_completions(Document("   @docs", cursor_position=2), None)) == []
+    for text in ("@", "看一下 @", "\n@d"):
+        assert [item.text for item in completer.get_completions(Document(text), None)] == ["@docs/"]
+    assert [item.text for item in completer.get_completions(Document("/prompt-file "), None)] == ["docs/"]
 
 
 def test_completion_menu_selects_first_without_editing_document() -> None:
@@ -1006,8 +1039,12 @@ def test_gateway_stop_completion_is_stable_transcript_feedback(tmp_path) -> None
     )
 
 
-def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue() -> None:
+@pytest.mark.parametrize("foreground", [True, False])
+def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue(foreground) -> None:
     runtime = TuiRuntime("active-turn-submit")
+    target = "gwreq-active-submit" if foreground else "goal-task-background"
+    if not foreground:
+        runtime.update_background_activity(1, {"main_activity": {"task_id": target, "phase": "running"}})
     captured: dict[str, object] = {}
 
     class Agent:
@@ -1021,7 +1058,7 @@ def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue() 
     params = SimpleNamespace(
         use_gateway=True,
         state_lock=threading.Lock(),
-        is_running_ref=[True],
+        is_running_ref=[foreground],
         running_request_id_ref=["gwreq-active-submit"],
         runtime_inject=["遵守项目规则"],
         prompt_files=["spec.md"],
@@ -1043,7 +1080,7 @@ def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue() 
     entry = captured["entry"]
     assert entry.text == "继续原任务并改成 JSON"
     assert entry.message_id.startswith("steer-")
-    assert entry.expected_turn_id == "gwreq-active-submit"
+    assert entry.expected_turn_id == target
     assert entry.execution_options.inject == (
         "遵守项目规则",
         CHAT_RESPONSE_STYLE_INJECT,
@@ -1053,6 +1090,14 @@ def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue() 
     assert entry.execution_options.resume_context is True
     assert entry.execution_options.tool_approval is True
     assert entry.execution_options.rich_transcript is True
+
+
+def test_background_input_target_disappears_when_activity_ends() -> None:
+    runtime = TuiRuntime("background-input-target")
+    runtime.update_background_activity(1, {"main_activity": {"task_id": "goal-task", "phase": "running"}})
+    assert runtime.background_input_target() == "goal-task"
+    runtime.update_background_activity(0, {"main_activity": {"task_id": "goal-task", "phase": "done"}})
+    assert runtime.background_input_target() == ""
 
 
 def test_child_input_stays_queued_until_exact_provider_consumption(monkeypatch) -> None:

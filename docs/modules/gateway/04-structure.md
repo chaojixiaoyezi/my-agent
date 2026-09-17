@@ -1,5 +1,30 @@
 # Gateway Structure
 
+## 受管命令完成交接
+
+`cli/gateway_loops.py` 的会话 worker 异常由同一个 supervisor 记录临时 retry-after，规划阶段过滤，
+并为冷却条目后面的健康会话保留候选容量；冷却不改持久状态，成功后删除，不用 sleep 占线程。
+
+`conversation/process_events.py` 复用受保护 ProcessSessionStore 与原 ConversationStore wake。
+工具执行器注入不可变收件地址，原 tick/安全点收割真实退出；先去重入队，再确认发布。
+owner 发现层签名进程记录，不因热缓存淘汰丢唤醒；显式停止不重启，子代理仍走直属生命周期。
+
+## 中断与持续目标
+
+`control_service.py` 区分显式 `/interrupt` 与 `/stop`：前者保留 active Goal 及原 task，
+经原 owner wake 去重续接；后者暂停目标并收停子树。`request_execution.py` 和 task transition
+锁维护 exact attempt，迟到取消不覆盖活动目标的新执行。`request_errors.py` 将绑定冲突独立报告，
+不把完好的会话历史误报为无法读取。前后台共享 canonical task/history，不新增恢复会话。
+后台输入使用原 task 邮箱及持久消息回执；`control_service.py` 核对同会话执行 claim，
+TUI 的背景 task ID 仅作 expected-target 提示。`runtime_db/repository.py` 在新 attempt 成功取得执行权后
+同事务重开旧 TaskRun 并追加事件，不把历史关闭状态当作当前状态，也不绕过原执行锁。
+后台 `_run_params` 沿用精确 task 作为输入 request ID，scheduler 独立 run ID 不变；否则核心自动编号会使邮箱与模型认领不匹配。
+`goal_recovery.py` 只分离多个未结束 Goal 的共享冲突；已完成历史不阻止当前目标沿原任务恢复。
+`runtime.py::_goal_runtime_context` 先读取同线程精确 Goal，再让 `_background_request_objective`
+排除已核实的持久 task 输入编号；普通请求没有消息仍是错误，不按编号前缀或自然语言猜归属。
+`runtime_mixin.py::_bind_main_agent_authority` 成对回填数据库的 run/attempt，当前消息 `request_id` 保留。
+宿主恢复发布区分 invocation 消息与实际 run，Compact 再入不以已绑定 run 替换 invocation；工具门不解析身份别名。
+
 ## 模型统计投影
 
 `request_execution.py::BufferedChunkStreamWriter.write_model_metrics` 发布 `model_metrics_updated`，

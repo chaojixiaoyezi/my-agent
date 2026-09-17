@@ -59,6 +59,31 @@ my-agent 的工具系统只保留这一条权威链：
 | 终端交互 | typed allow/ask/deny 与 reason/evidence；deny、ask 在 allow 前；解析真实 command/argv/operator/redirection；无法证明安全时 ask；原路径+解析路径/符号链接同时校验；DNS 结果参与 SSRF 决策 | 巨大命令白名单整包移植；模型 classifier 作为硬授权；用命令分类替代 OS sandbox；把 loopback 放行策略无条件复制 |
 | 通道运行时 | run 前解析 provider/model runtime policy；按层过滤工具并保留排除来源；历史 ToolCall/ToolResult 保守配对；provider stream 边界修复不污染业务 handler | native 模式把独立正文提升成 ToolCall；跨不明确 occurrence 猜 ToolResult 归属；让修复层成为 native/text 的静默切换器 |
 
+## 重复工具观测与恢复
+
+同参数同结果的只读调用沿既有阈值提醒和动作门处理；成功重复观察不扩大权限，也不判定任务完成。
+`TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED` / `TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED` 且
+`handler_executed=false` 是门自身拒绝，不是工具获得了新结果。它们不进入有界重复观测窗口，
+但原始回执仍完整归档、审计并提交模型；否则连续拒绝会清计数或挤掉历史，造成再次放行。
+执行前结果查找只看精确 tool/args；另一工具的失败不能清除该结果。真实同调用失败、结果变化和
+成功非只读操作继续按原规则划分观测段；配置 `0` 的不限制语义不变。
+Executor 将原门的计数、未执行事实及换路建议写入原失败正文，native/text 共用同一回执。
+模型可利用已有结果继续下一步，不由宿主代做、改参数、判完成或按慢流耗时终止任务。
+成功重复提醒按配置阈值的固定间隔发送，不再指数拉长间隔；有界观测记录携带该签名的累计次数，
+超过 256 条也继续提醒。结果指纹优先取宿主归档前的完整输出摘要，不能把每次变化的 artifact 路径
+算作新进展，也不能只凭相同 preview 忽略尾部变化。普通 Python/Shell 不因此变成只读或免审批。
+成功重复仍是软诊断，模型可能忽略；不能把计数回归通过说成任何模型都不再循环。
+受管进程 `status/wait` 的宿主回执另带 `handler_details.progress_observation`，
+以 `sha256/pending` 表示稳定进展摘要与仍在运行的事实。指纹排除 `uptime_seconds` 和
+`wait_timed_out`，保留状态、退出码、日志尾部及日志字节数；尾部相同但日志增长仍是新观测。
+该摘要只供成功软提醒，动作门仍读取原始完整结果，不从输出正文提取或覆盖权限和终态。
+重复空等不证明卡死；提示检查依赖或推进独立工作，不能自动杀进程或替模型判任务完成。
+文本解码错误统一说明读取能力边界；图片可发现已配置视觉能力，未配置时如实报告核验缺口，
+不自动转发文件、不自动添加模型、不为某一任务添加专项分支。
+
+现行精确编辑的未命中/歧义使用 `EDIT_TARGET_MISMATCH`，归类 state；返回有界当前片段、版本和
+read_file 恢复参数。schema 不合法仍用参数错误；两者不能混淆成原样重试，不自动模糊匹配或覆盖。
+
 ## 3. 迁移前基线诊断（历史，不是当前运行方式）
 
 本节保留开工时看到的问题，用来解释为什么要删除旧链。下列 `ToolSpec`、多套

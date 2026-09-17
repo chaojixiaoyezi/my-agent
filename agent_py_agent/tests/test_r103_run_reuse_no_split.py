@@ -24,6 +24,11 @@ import pytest
 from agent_py_agent.agent.agent_core import runtime_mixin
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.runtime_mixin import _bind_main_agent_authority
+from agent_py_agent.agent.runtime_db.managed_operation_store import (
+    AuthorityContextMissing,
+    ManagedOperationStore,
+    ToolOperationAuthorityRequest,
+)
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
 
@@ -113,6 +118,51 @@ def test_cross_identity_resume_does_not_split_run_tree(repo):
     # 续挂语义：返回 attempt 属于原 run，generation 递增到 2。
     assert bound.attempt_id != first["attempt_id"]
     assert bound.attempt_id  # 续挂 attempt 已就位
+
+
+@pytest.mark.parametrize("source", ["gateway", "background_main_agent"])
+def test_followup_tool_scope_uses_bound_run_and_preserves_message_identity(repo, source):
+    """等待子代理时普通追问沿原执行树使用工具，消息编号不冒充执行编号。"""
+    first = repo.record_run_creation(
+        owner_id="local/main", goal="批量导入", conversation_task_id="task-import",
+        run_id="initial-request", role="main",
+    )
+    captured = []
+    bound = _bind_main_agent_authority(
+        _agent(repo),
+        RunParams(
+            request_id="followup-message", run_id="followup-message", task_id="task-import",
+            source=source,
+            conversation_task_binding_callback=SimpleNamespace(
+                bind_runtime_authority=lambda binding: captured.append(binding) or True,
+            ),
+        ),
+    )
+    # 使用真正的工具权威门，不能只断言 attempt 换代后便宣称工具能执行。
+    store = ManagedOperationStore(repo)
+    authority = ToolOperationAuthorityRequest(
+        owner_id="local/main", run_id=bound.run_id, task_id=bound.task_id,
+        attempt_id=bound.attempt_id, operation_id="read-current-report", tool_name="read_file",
+    )
+    store.require_authority(authority)
+    assert bound.run_id == "initial-request"
+    assert bound.request_id == "followup-message"
+    assert captured[-1]["invocation_run_id"] == "followup-message"
+    assert captured[-1]["run_id"] == bound.run_id
+    assert captured[-1]["agent_run_id"] == first["agent_run_id"]
+    assert len(_main_run_rows(repo, "task-import")) == 1
+    with pytest.raises(AuthorityContextMissing):
+        store.require_authority(replace(authority, run_id="followup-message"))
+    with pytest.raises(AuthorityContextMissing):
+        store.require_authority(replace(authority, task_id="other-task"))
+
+    # Compact 再换代仍向宿主发布原消息凭据，旧 attempt 继续拒绝，不能隐式借用当前代次。
+    next_bound = _bind_main_agent_authority(_agent(repo), bound)
+    assert captured[-1]["invocation_run_id"] == "followup-message"
+    assert next_bound.request_id == bound.request_id
+    store.require_authority(replace(authority, attempt_id=next_bound.attempt_id))
+    with pytest.raises(AuthorityContextMissing):
+        store.require_authority(authority)
 
 
 def test_legacy_thread_run_from_old_task_cannot_hijack_new_task(repo):

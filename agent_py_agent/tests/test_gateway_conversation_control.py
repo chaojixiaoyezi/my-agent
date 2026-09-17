@@ -450,6 +450,59 @@ def test_ordinary_input_steers_only_the_matching_active_conversation(tmp_path) -
     assert no_live_turn is None
 
 
+@pytest.mark.parametrize("case", ["running", "finished", "other_task", "paused", "wrong_turn"])
+def test_ordinary_input_can_join_exact_running_background_claim(tmp_path, case) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path)
+    paths = gateway_paths(agent)
+    thread, link = _bind_durable_task(agent, "background-goal")
+    store = agent.conversation_store
+    claim = store.claim_background_run({
+        "thread_id": thread.thread_id,
+        "task_id": "different-task" if case == "other_task" else link.task_id,
+        "reason": "thread_goal_continue", "lease_seconds": 300,
+    })
+    assert claim is not None
+    if case == "finished":
+        store.finish_background_run({
+            "thread_id": thread.thread_id, "claim_id": claim["claim_id"],
+            "task_id": link.task_id, "status": "finished",
+        })
+    if case == "paused":
+        store.update_task_status({"task_id": link.task_id, "status": "interrupted"})
+    scope = GatewayControlScope("u-1", "feishu", "c-1", metadata={
+        "message_id": "background-input", "expected_turn_id": "stale-turn" if case == "wrong_turn" else link.task_id,
+    })
+    result = steer_active_conversation_if_running(agent, paths, message="补充中文检索要求", scope=scope)
+    if case != "running":
+        assert result is None or not result.ok
+        assert store.pending_guidance("task", link.task_id) == []
+        return
+    assert result is not None and result.ok and result.request_id == link.task_id
+    entries = store.pending_guidance("task", link.task_id)
+    assert len(entries) == 1 and entries[0].message == "补充中文检索要求"
+    assert entries[0].metadata["record_in_transcript"] is True
+    assert entries[0].metadata["expected_turn_id"] == link.task_id
+    replay = steer_active_conversation_if_running(agent, paths, message="补充中文检索要求", scope=scope)
+    assert replay is not None
+    assert len(store.pending_guidance("task", link.task_id)) == 1
+    # 接收不等于投递：用真实后台参数构造链走到模型提交和消费确认，防止运行时另造回合编号。
+    from agent_py_agent.agent.agent_core.runtime.run_params import run_params_with_request_id
+    from agent_py_agent.agent.conversation.runtime import _run_params
+    from agent_py_agent.tests.test_runtime_guidance import _tool_loop_params
+
+    seed = run_params_with_request_id(_run_params(
+        thread.thread_id, BackgroundRunRequest(thread_id=thread.thread_id, task_id=link.task_id,
+                                               reason="thread_goal_continue"), agent,
+    ))
+    params = _tool_loop_params(request_id=seed.request_id, task_id=seed.task_id,
+                               attempt_id=seed.attempt_id, task_attributes=seed.task_attributes)
+    assert inject_pending_guidance(agent, params)
+    mark_injected_turn_input_submitted(agent, params)
+    assert acknowledge_injected_turn_input(agent, params) == 1
+    assert store.pending_guidance("task", link.task_id) == []
+    assert inject_pending_guidance(agent, params) is False
+
+
 def test_ordinary_input_follows_only_the_task_linked_to_the_live_turn(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
@@ -1940,7 +1993,7 @@ def test_stop_also_pauses_goal_between_model_turns(tmp_path) -> None:
     assert links[created.request_id].status == "interrupted"
 
 
-def test_first_work_tool_resumes_stopped_goal_in_same_workspace(tmp_path) -> None:
+def test_first_work_tool_does_not_resume_explicitly_paused_goal(tmp_path) -> None:
     from agent_py_agent.agent.conversation.runtime import ensure_goal_progress_continuation
     from agent_py_agent.agent.conversation.task_promotion import (
         promote_current_conversation_task,
@@ -1980,7 +2033,7 @@ def test_first_work_tool_resumes_stopped_goal_in_same_workspace(tmp_path) -> Non
     try:
         selected = promote_current_conversation_task(agent)
         scheduled = ensure_goal_progress_continuation(
-            agent, thread_id=thread.thread_id, task_id=created.request_id, goal_id=attrs["thread_goal_id"],
+            agent, thread_id=thread.thread_id, task_id=created.request_id,
         )
     finally:
         del agent._current_run_params
@@ -1988,18 +2041,13 @@ def test_first_work_tool_resumes_stopped_goal_in_same_workspace(tmp_path) -> Non
     goal = agent.conversation_store.load_goal(thread.thread_id)
     links = {item.task_id: item for item in agent.conversation_store.task_links(thread.thread_id)}
     assert stopped.ok is True
-    assert selected is not None and selected.task_id == created.request_id
-    assert selected.task_path == links[created.request_id].task_path
-    assert goal is not None and goal.status == "active" and goal.task_id == created.request_id
-    assert links[created.request_id].status == "active"
-    assert scheduled is True
-    assert any(
-        item.reason == "thread_goal_continue" and item.root_task_id == created.request_id
-        for item in agent.conversation_store.pending_wake_signals()
-    )
+    assert selected is None
+    assert goal is not None and goal.status == "paused" and goal.task_id == created.request_id
+    assert links[created.request_id].status == "interrupted"
+    assert scheduled is False
 
 
-def test_first_work_after_stop_resumes_goal_workspace_without_selection_command(tmp_path) -> None:
+def test_first_work_after_explicit_resume_keeps_goal_workspace(tmp_path) -> None:
     from agent_py_agent.agent.conversation.task_promotion import (
         promote_current_conversation_task,
     )
@@ -2035,6 +2083,8 @@ def test_first_work_after_stop_resumes_goal_workspace_without_selection_command(
     }
     write_json_file(paths.processing / "req-live-goal.json", payload)
     execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
+    resumed = execute_gateway_conversation_control(agent, paths, _command("/goal resume"), _scope())
+    assert resumed.ok
     attrs = {
         "conversation_thread_id": thread.thread_id,
         "conversation_task_id": created.request_id,
@@ -2060,7 +2110,37 @@ def test_first_work_after_stop_resumes_goal_workspace_without_selection_command(
     assert result is not None and result.task_id == created.request_id
     assert result.task_path == str(task_root)
     assert goal is not None and goal.status == "active"
-    assert attrs["thread_goal_id"] == goal.goal_id
+    assert goal.task_id == created.request_id
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_turn_interrupt_keeps_goal_and_children_and_one_wake(tmp_path, monkeypatch, live) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path)
+    paths = gateway_paths(agent)
+    created = execute_gateway_conversation_control(agent, paths, _command("/goal 整理数据"), _scope())
+    store = agent.conversation_store
+    thread = store.thread_for_task(created.request_id)
+    goal = store.load_goal(thread.thread_id)
+    for wake in store.pending_wake_signals():
+        store.mark_wake_signal_handled(wake.wake_signal_id)
+    if live:
+        paths.processing.mkdir(parents=True, exist_ok=True)
+        payload = _request("req-interrupt-goal")
+        payload["conversation_runtime"] = {
+            "thread_id": thread.thread_id, "task_id": goal.task_id, "task_path": "",
+        }
+        write_json_file(paths.processing / "req-interrupt-goal.json", payload)
+    monkeypatch.setattr(control_service, "_cancel_request_subagents_async",
+                        lambda *a, **k: pytest.fail("本轮中断不得取消目标子树"))
+    interrupted = execute_gateway_conversation_control(agent, paths, _command("/interrupt"), _scope())
+    assert interrupted.ok, interrupted.message
+    assert "目标仍在进行" in interrupted.message
+    current = store.load_goal(thread.thread_id)
+    assert current.status == "active" and current.revision == goal.revision
+    assert store.load_task_link(goal.task_id).status == "active"
+    wakes = store.pending_wake_signals()
+    assert len(wakes) == 1 and wakes[0].root_task_id == goal.task_id
+    assert wakes[0].reason == "thread_goal_continue"
 
 
 def test_btw_on_goal_keeps_goal_continuation_reason(tmp_path) -> None:

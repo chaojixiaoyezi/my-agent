@@ -460,7 +460,7 @@ class _BackgroundThreadLaneSupervisorMixin:
                 )
                 ready = scheduler.ready_thread_ids(
                     now=planned_at,
-                    limit=per_owner_limit + len(active_threads),
+                    limit=per_owner_limit + len(active_threads) + len(getattr(self, "_lane_retry_after", {})),
                 )
             except Exception as exc:
                 _print_gateway_loop_error(
@@ -469,7 +469,9 @@ class _BackgroundThreadLaneSupervisorMixin:
                     exc,
                 )
                 continue
-            pending = [thread_id for thread_id in ready if thread_id not in active_threads]
+            retry_after = getattr(self, "_lane_retry_after", {})
+            pending = [thread_id for thread_id in ready if thread_id not in active_threads
+                       and time.monotonic() >= retry_after.get((str(owner_key), thread_id), 0.0)]
             if pending:
                 candidates.append((owner_key, scheduler, pending[:owner_slots]))
         self._submit_thread_candidates(candidates, available=available)
@@ -551,7 +553,7 @@ class _BackgroundThreadLaneSupervisorMixin:
 
     # LLM: One failed conversation lane is logged and isolated; it cannot terminate
     # the supervisor or consume another thread's durable source.
-    # 函数用途: 安全运行指定会话的后台消费。
+    # 函数用途: 安全运行后台消费；宿主异常对精确 owner/thread 退避，不能吞异常后每 tick 热重试挤占工位。
     def _safe_thread_tick(
         self,
         scheduler: BackgroundMainAgentScheduler,
@@ -559,8 +561,18 @@ class _BackgroundThreadLaneSupervisorMixin:
         thread_id: str,
     ) -> list[object]:
         try:
-            return list(scheduler.tick_thread(thread_id) or [])
+            result = list(scheduler.tick_thread(thread_id) or [])
+            getattr(self, "_lane_retry_after", {}).pop((label, thread_id), None)
+            return result
         except Exception as exc:
+            retry_after = getattr(self, "_lane_retry_after", None)
+            if retry_after is None:
+                self._lane_retry_after = retry_after = {}
+            config = getattr(self._base_agent, "config", None)
+            delay = max(0.0, float(getattr(config, "background_main_error_backoff_seconds", 30.0)))
+            if len(retry_after) >= 1024:
+                retry_after.pop(next(iter(retry_after)), None)
+            retry_after[(label, thread_id)] = time.monotonic() + delay
             _print_gateway_loop_error(
                 "gateway_background_main.iteration",
                 f"background-main:{label}:{thread_id}",
@@ -597,6 +609,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self._curator_executor: object | None = None
         # 会话运行时 的 active turn 是 thread-scoped；这里也以 durable thread_id 作最小运行车道。
         self._inflight: dict[object, object] = {}
+        self._lane_retry_after: dict[tuple[str, str], float] = {}
         # 磁盘级唤醒发现(治「睡死叫不醒」§1):登记表是进程内易失结构,网关重启清零、
         # LRU 会逐出,且只有新入站请求才补记;长盯守非阻塞挂起期恰恰没有新请求 →
         # scoped owner 的到点 policy 从此无人消费。这里启动即扫一次、之后按间隔重扫,

@@ -12,6 +12,7 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallLedger,
     ModelCallLedgerContext,
     ModelCallLedgerOptions,
+    ModelCallProviderAttemptParams,
     ModelCallStartedParams,
 )
 from agent_py_agent.agent.conversation.agent_activity import conversation_agent_activity
@@ -71,6 +72,19 @@ def test_round_tools_cache_speed_and_no_double_count(tmp_path):
     assert model_metrics_from_thread(agent.conversation_store, thread.thread_id) == replay
 
 
+def test_cache_comparison_survives_store_reload_with_same_response_metrics(tmp_path):
+    from agent_py_agent.agent.backends.cache_diagnostics import request_surface
+
+    agent, params, clock, _runtime, thread = fixture(tmp_path)
+    response = settled(agent, params, clock)
+    agent._model_call_ledger.provider_attempt(ModelCallProviderAttemptParams(
+        "call-1", "attempt", "finished", request_surface=request_surface({"messages": []}, "private endpoint")))
+    metrics = publish_model_metrics(agent, params, pending=False, response=response, call_id="call-1")
+    assert metrics["cache_percent"] == 75
+    assert metrics["cache_diagnostic"]["baseline_available"] is False
+    assert model_metrics_from_thread(ConversationStore(tmp_path), thread.thread_id) == metrics
+
+
 @pytest.mark.parametrize("usage,expected", [
     ({"prompt_tokens": 100, "completion_tokens": 2}, None),
     ({"prompt_tokens": 100, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 0}}, 0),
@@ -98,6 +112,70 @@ def test_previous_requests_accumulate_but_current_persisted_snapshot_not_added_t
     assert metrics["input_tokens"] == 2000 and metrics["output_tokens"] == 200
     assert metrics["model_rounds"] == 1
     assert publish_model_metrics(agent, params, pending=True)["input_tokens"] == 2000
+
+
+def test_usage_handoff_settles_once_and_restart_adds_new_calls(tmp_path):
+    from agent_py_agent.agent.agent_core._finalization_service import FinalizationService
+
+    agent, params, clock, _runtime, thread = fixture(tmp_path)
+    params.task_id, params.source = "task-1", "gateway"
+    settled(agent, params, clock)
+    finalizer = FinalizationService(agent)
+    first = finalizer.settle_model_usage(params)
+    params.source = "background_main_agent"
+    assert finalizer.settle_model_usage(params) == first
+    settled(agent, params, clock, call_id="second-call")
+    finalizer.settle_model_usage(params)
+    assert agent.conversation_store.model_usage_summary(thread.thread_id)["provider"]["input_tokens"] == 2000
+
+    # 同一任务/消息在进程重启后是新的真实调用，不得与旧调用相减或复用事件键。
+    agent._model_call_ledger = ModelCallLedger()
+    params.live_archive_state = {}
+    settled(agent, params, clock, call_id="new-process-call")
+    value = publish_model_metrics(agent, params, pending=False)
+    assert value["input_tokens"] == 3000
+    finalizer.settle_model_usage(params)
+    rows, errors = agent.conversation_store.model_usage_events_report(thread.thread_id)
+    assert not errors and len(rows) == 3
+    assert rows[0].model_calls["usage_scope_id"] != rows[-1].model_calls["usage_scope_id"]
+    assert agent.conversation_store.model_usage_summary(thread.thread_id)["provider"]["input_tokens"] == 3000
+
+
+@pytest.mark.parametrize("error", [InterruptedError("cancelled"), RuntimeError("provider failed")])
+def test_exception_closeout_keeps_known_usage_without_masking_error(tmp_path, monkeypatch, error):
+    from agent_py_agent.agent.agent_core import runtime_mixin
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+
+    agent, sample, clock, _runtime, thread = fixture(tmp_path)
+    agent.config = SimpleNamespace(enable_tools=False, auto_save_memory=False)
+    params = RunParams(request_id=sample.request_id, run_id=sample.run_id, task_id="task-1",
+        source="gateway", save=False, task_attributes=sample.task_attributes)
+
+    def fail_after_a_real_settlement(*_args, **_kwargs):
+        settled(agent, params, clock)
+        raise error
+
+    monkeypatch.setattr(runtime_mixin, "_prepare_runtime_context", fail_after_a_real_settlement)
+    with pytest.raises(type(error)) as caught:
+        runtime_mixin._run_once_with_params(agent, "继续整理原项目", params)
+    assert caught.value is error
+    summary = agent.conversation_store.model_usage_summary(thread.thread_id)
+    assert summary["provider"]["input_tokens"] == 1000
+    assert summary["provider"]["output_tokens"] == 100
+
+
+def test_evicted_usage_scope_reentry_is_new_epoch(tmp_path):
+    agent, params, clock, _runtime, _thread = fixture(tmp_path)
+    settled(agent, params, clock)
+    old = model_call_summary(agent, request_id=params.request_id)["usage_scope_id"]
+    for index in range(8):
+        params.request_id, params.run_id = f"other-{index}", f"run-other-{index}"
+        settled(agent, params, clock, call_id=f"other-call-{index}")
+    params.request_id, params.run_id = "request-1", "run-1"
+    settled(agent, params, clock, call_id="reentered")
+    fresh = model_call_summary(agent, request_id=params.request_id)
+    assert fresh["usage_scope_id"] != old
+    assert fresh["physical_model_attempt_count"] == 1
 
 
 def test_pruned_detail_preserves_total_and_retry_does_not_add_logical_round(tmp_path):

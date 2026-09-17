@@ -86,6 +86,7 @@ def start_model_call_record(
             metadata={
                 "tool_rounds": getattr(request, "tool_rounds", 0),
                 "task_id": str(getattr(params, "task_id", "") or ""),
+                "thread_id": str((getattr(params, "task_attributes", None) or {}).get("conversation_thread_id") or ""),
                 "logical_call_id": logical_call_id,
                 "physical_attempt": physical_attempt,
                 "first_token_timeout_estimate": estimate.to_dict(),
@@ -236,6 +237,7 @@ def record_model_provider_attempt(
             http_status=_nonnegative_int(event.get("http_status")),
             error_type=str(event.get("error_type") or ""),
             retry_scheduled=event.get("retry_scheduled") is True,
+            request_surface=dict(event.get("request_surface") or {}),
         )
     )
 
@@ -484,7 +486,7 @@ def has_dynamic_timeout_config(agent: object) -> bool:
     return any(hasattr(config, name) for name in ("dynamic_timeout_min", "dynamic_timeout_max", "dynamic_timeout_safety_margin"))
 
 
-# LLM: Runtime timeout options come only from normalized config and feed request-local first-event estimation.
+# LLM: 超时参数来自当前工作片，包括该模型显式排队预算；不修改共享 backend 的流式 idle。
 # 函数用途: 从当前代理配置读取慢模型首事件预算参数，供主代理和各级子代理共用。
 def first_token_timeout_options(agent: object) -> FirstTokenTimeoutOptions:
     config = getattr(agent, "config", None)
@@ -497,6 +499,7 @@ def first_token_timeout_options(agent: object) -> FirstTokenTimeoutOptions:
         safety_margin=float_config(config, "dynamic_timeout_safety_margin", 1.5),
         min_timeout_seconds=float_config(config, "dynamic_timeout_min", 5.0),
         max_timeout_seconds=float_config(config, "dynamic_timeout_max", 120.0),
+        queue_wait_seconds=float_config(config, "model_queue_wait_seconds", 0.0),
         # 门槛4: probe 统计参数(最小样本数/滑窗上限/去极值开关), 默认 2/5/True
         probe_min_samples=int(float_config(config, "probe_min_samples", 2)),
         probe_window_samples=int(float_config(config, "probe_window_samples", 5)),

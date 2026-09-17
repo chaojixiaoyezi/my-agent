@@ -1,4 +1,4 @@
-# LLM: 本模块只按结构化调用/结果事实判定既有动作门与独立软观察；重复成功不能扩权、代替执行或升级硬门。
+# LLM: 本模块只按结构化调用/结果事实判定既有动作门与独立软观察；门自身未执行的拒绝不是新结果，不能重置或挤掉原观测。
 # 模块用途: 统一保存有界工具观测，并分别提供重复失败/只读门和成功重复提醒。
 from __future__ import annotations
 
@@ -39,8 +39,8 @@ class ToolGuardrailConfig:
     repeated_success_hint_threshold: int = 5
 
 
-# LLM: observed_success 只来自已执行且非 UNKNOWN 的规范结果，不能从正文或安全 effect 推测。
-# 类用途: 表示一条工具调用的哈希与执行事实，供原 gate 和成功重复提醒共享。
+# LLM: 执行事实来自规范结果；progress_hash 只用于成功软观察，不得替代动作门的原始结果摘要或安全 effect。
+# 类用途: 保存调用哈希和真实执行事实，区分工具失败与门自身拒绝，供动作门及成功提醒共用。
 @dataclass(frozen=True)
 class ToolGuardrailFacts:
     """Structured facts for one tool guardrail check.
@@ -58,15 +58,33 @@ class ToolGuardrailFacts:
     now: float = 0.0
     observed_success: bool = False
     run_id: str = ""
+    handler_executed: bool = False
+    progress_hash: str = ""
+    progress_pending: bool = False
 
 
+# LLM: 仅识别本门的精确错误码和未执行事实，不解析错误正文；真实 handler 失败及其它权限拒绝仍是观测。
+# 函数用途: 区分“重复门自己拦住了”与“工具执行后有新结果”，供记录和查询共用。
+def is_guardrail_rejection(record: dict[str, object]) -> bool:
+    return (
+        record.get("failed") is True
+        and record.get("handler_executed") is not True
+        and record.get("failure_class") in {
+            "code:TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED",
+            "code:TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED",
+        }
+    )
+
+
+# LLM: 原动作门只消费实际结果观测；历史中的自身拒绝不成为进展或另一失败类，不改变任务终态。
+# 函数用途: 基于有界调用事实计算重复提醒或当前动作拒绝，保持原阈值和配置语义。
 def evaluate_tool_guardrail_gate(
     facts: ToolGuardrailFacts,
     config: ToolGuardrailConfig | None = None,
     records: tuple[dict[str, object], ...] = (),
 ) -> GateDecision:
     cfg = config or ToolGuardrailConfig()
-    records_list = [dict(r) for r in records if isinstance(r, dict)]
+    records_list = [dict(r) for r in records if isinstance(r, dict) and not is_guardrail_rejection(r)]
     decision = _repeat_failure_decision(records_list, facts, cfg)
     if decision:
         return decision
@@ -124,6 +142,8 @@ def _repeat_failure_decision(
     return None
 
 
+# LLM: 只读结果的哈希与既有阈值是裁决来源；提示只建议换路，不把重复读取判作任务完成。
+# 函数用途: 生成同参数同结果的提醒和动作拒绝，并说明应使用已有结果继续工作。
 def _no_progress_decision(
     records_list: list[dict[str, object]],
     facts: ToolGuardrailFacts,
@@ -145,7 +165,8 @@ def _no_progress_decision(
                 GateFinding(
                     "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED",
                     "P0",
-                    f"{facts.tool_name} returned the same result {count} times; change strategy",
+                    f"{facts.tool_name} 使用相同参数已返回相同结果 {count} 次；"
+                    "请使用已有结果继续下一步，或换用能获得新信息的方法；重复确认相同结果不构成进展",
                     action_evidence,
                 ),
             ),
@@ -161,7 +182,7 @@ def _no_progress_decision(
                 GateFinding(
                     "TOOL_GUARDRAIL_NO_PROGRESS_WARNING",
                     "P1",
-                    f"{facts.tool_name} returned the same result {count} times; use existing result or change strategy",
+                    f"{facts.tool_name} 使用相同参数已返回相同结果 {count} 次；请使用已有结果或改用能获得新信息的方法",
                     evidence,
                 ),
             ),
@@ -171,8 +192,8 @@ def _no_progress_decision(
     return None
 
 
-# LLM: records 是唯一有界观测历史；保留安全 effect 与成功事实，不为提醒另建持久队列。
-# 函数用途: 追加一次规范调用观测，既有失败/只读 gate 与成功重复提醒共用该记录。
+# LLM: records 是唯一有界观测历史；自身未执行拒绝不追加，以免清计数或挤掉原结果；完整拒绝仍由规范工具账记录。
+# 函数用途: 同时保留原始结果和可选稳定进展摘要；重复门自身拒绝不算新结果，不删除审计或模型回执。
 def record_tool_guardrail_result(
     records: tuple[dict[str, object], ...],
     facts: ToolGuardrailFacts,
@@ -185,13 +206,18 @@ def record_tool_guardrail_result(
         "is_readonly": facts.is_readonly,
         "observed_success": facts.observed_success,
         "run_id": facts.run_id,
+        "handler_executed": facts.handler_executed,
     }
     if facts.failed:
         record["failure_class"] = facts.failure_class or "unknown"
     if facts.result_hash:
         record["result_hash"] = facts.result_hash
+    if facts.progress_hash:
+        record["progress_hash"] = facts.progress_hash
     if facts.now:
         record["ts"] = facts.now
+    if is_guardrail_rejection(record):
+        return records
     new_records = list(records)
     new_records.append(record)
     if len(new_records) > max_records:
@@ -199,8 +225,8 @@ def record_tool_guardrail_result(
     return tuple(new_records)
 
 
-# LLM: 只观察已执行成功的相同 tool/args/result；返回 Finding 而非 GateDecision，调用方不得据此拒绝或重放工具。
-# 函数用途: 在阈值及倍增点提醒模型检查重复动作，利用原记录上的提示标记避免窗口饱和后逐轮刷屏。
+# LLM: 优先比较宿主进展摘要，否则比较完整结果；只返回软 Finding，不能据此拒绝、重放或终止进程。
+# 函数用途: 按固定间隔提醒重复动作或空等；时间流逝不算新进展，仍运行也不等于卡死。
 def repeated_success_observation(
     facts: ToolGuardrailFacts,
     records: tuple[dict[str, object], ...],
@@ -209,29 +235,42 @@ def repeated_success_observation(
 ) -> GateFinding | None:
     if threshold <= 0 or not facts.observed_success or not facts.result_hash:
         return None
+    observation_hash = facts.progress_hash or facts.result_hash
     matching: list[dict[str, object]] = []
     for record in reversed(records):
         if record.get("run_id") != facts.run_id:
             continue
         if record.get("tool_name") != facts.tool_name or record.get("args_hash") != facts.args_hash:
             continue
-        if record.get("observed_success") is not True or record.get("result_hash") != facts.result_hash:
+        if record.get("observed_success") is not True or (record.get("progress_hash") or record.get("result_hash")) != observation_hash:
             break
         matching.append(record)
-    count = len(matching)
-    multiple, remainder = divmod(count, threshold)
-    if remainder or multiple <= 0 or multiple & (multiple - 1):
+    # 最后一条是本次结果；前一条同签名观测携带累计数，避免窗口淘汰后永远停在 256。
+    previous_count = int(matching[1].get("repeated_success_count") or 0) if len(matching) > 1 else 0
+    count = max(len(matching), previous_count + 1)
+    if matching:
+        matching[0]["repeated_success_count"] = count
+    if count < threshold or count % threshold:
         return None
     if any(record.get("repeated_success_hint_count") == count for record in matching):
         return None
+    message = (
+        f"{facts.tool_name} 连续 {count} 次观测到相同的运行状态和输出；耗时增长不是新进展。"
+        "这不代表进程卡死，也不要求终止任务。请检查日志、依赖或网络等可验证原因，"
+        "有独立工作可先推进，不要把原样高频轮询当成实质进展。"
+    ) if facts.progress_pending else (
+        f"{facts.tool_name} 使用相同参数已执行成功 {count} 次，返回内容也相同。"
+        "结果相同不代表没有副作用，也不证明任务完成。请停止原样重复这一动作，复用已有结果，"
+        "重新对照用户要求选择尚未完成的实质步骤；若缺少能力，说明具体缺口并换方法。"
+        "这不是任务完成或失败指令，也不要求向用户申请重复执行的审批。"
+    )
     return GateFinding(
         "TOOL_REPEATED_SUCCESS_OBSERVATION",
         "P1",
-        f"{facts.tool_name} 使用相同参数已执行成功 {count} 次，返回内容也相同。"
-        "结果相同不代表没有副作用，也不证明任务完成；请利用已有结果判断是否确需再次执行，"
-        "或改用能提供新信息的步骤。本提醒不阻止工具、不要求用户审批。",
+        message,
         {"run_id": facts.run_id, "tool_name": facts.tool_name, "args_hash": facts.args_hash,
-         "result_hash": facts.result_hash, "count": count, "threshold": threshold},
+         "result_hash": facts.result_hash, "progress_hash": facts.progress_hash,
+         "count": count, "threshold": threshold},
     )
 
 
@@ -401,6 +440,7 @@ __all__ = [
     "ToolGuardrailFacts",
     "args_hash_for_guardrail",
     "evaluate_tool_guardrail_gate",
+    "is_guardrail_rejection",
     "record_tool_guardrail_result",
     "repeated_success_observation",
     "result_hash_for_guardrail",

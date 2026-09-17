@@ -659,10 +659,10 @@ class TestGetBackend:
 
     def test_get_backend_unknown(self):
         with pytest.raises(ValueError, match="未知模型后端"):
-            get_backend("unknown_backend", config=MagicMock())
+            get_backend("unknown_backend", config=MagicMock(model_auth_ref={}))
 
     def test_get_backend_openai_with_config(self):
-        config = MagicMock()
+        config = MagicMock(model_auth_ref={})
         config.api_base = "https://api.example.com"
         config.api_key = "key"
         config.model_name = "gpt-4"
@@ -679,7 +679,7 @@ class TestGetBackend:
         assert backend.context_window_tokens == 234567
 
     def test_get_backend_anthropic_with_config(self):
-        config = MagicMock()
+        config = MagicMock(model_auth_ref={})
         config.api_base = "https://api.example.com"
         config.api_key = "key"
         config.model_name = "claude-3"

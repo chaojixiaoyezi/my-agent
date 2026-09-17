@@ -19,6 +19,12 @@ class ConversationPersistenceError(RuntimeError):
     error_code = "CONVERSATION_PERSISTENCE_UNAVAILABLE"
 
 
+# LLM: 任务绑定冲突与历史文件读写故障分别报告；不据此清空历史或自动重放旧操作。
+# 类用途: 表示会话任务与执行身份不一致，提供可定位的错误码而不归咎用户聊天记录。
+class ConversationTaskBindingError(RuntimeError):
+    error_code = "CONVERSATION_TASK_BINDING_CONFLICT"
+
+
 # LLM: 仅精确恢复返回 operation_outcome_uncertain 时使用；不能靠异常文本推断或扩大到所有持久化错误。
 # 类用途: 表示上一轮操作结果未核清，恢复被阻止，避免界面误导用户反复重发任务。
 class ActiveTurnOutcomeUncertainError(ConversationPersistenceError):
@@ -80,6 +86,10 @@ def gateway_client_error_message(error_code: object) -> str:
         "CONVERSATION_PERSISTENCE_UNAVAILABLE": (
             "当前会话记录无法可靠读取或保存，本轮已停止，避免在缺少上下文时继续执行。"
             "请查看运行诊断后再恢复。"
+        ),
+        "CONVERSATION_TASK_BINDING_CONFLICT": (
+            "当前任务的状态与执行绑定不一致，本轮未继续；不是聊天记录丢失。"
+            "请核对运行诊断；确认旧执行已经停止后，可用 /goal resume 显式恢复目标。"
         ),
     }
     if code in messages:

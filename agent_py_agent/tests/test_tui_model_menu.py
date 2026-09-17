@@ -130,6 +130,30 @@ def test_revoked_selection_does_not_keep_misleading_deployment_banner():
     assert "撤销" in runtime.notice()
 
 
+def test_auth_action_refreshes_revoked_current_model(monkeypatch):
+    from agent_py_agent.cli.chat_parts import tui_model_auth, tui_model_menu
+
+    calls = []
+
+    async def manage(app, agent, session):
+        calls.append(("logout", session))
+        return "已退出登录"
+
+    async def request(app, agent, session, operation):
+        calls.append((operation, session))
+        return {"ok": True, "selected": "oauth", "selection_available": False, "warning": "账号已退出"}
+
+    monkeypatch.setattr(tui_model_auth, "manage_auth", manage)
+    monkeypatch.setattr(tui_model_menu, "_request", request)
+    runtime = TuiRuntime("logout-selection")
+    runtime.publish_model_selection("signed-in-model")
+    result = asyncio.run(tui_model_menu._run_model_action(None, None, "logout-selection", runtime, "auth"))
+    assert result == "已退出登录"
+    assert calls == [("logout", "logout-selection"), ("list", "logout-selection")]
+    assert "不可用" in runtime.store.snapshot().selected_model_name
+    assert "退出" in runtime.notice()
+
+
 @pytest.mark.parametrize("width", [58, 120])
 def test_current_model_renders_in_frozen_welcome_after_selection(tmp_path, width):
     from agent_py_agent.cli.chat_parts.tui_interaction import TuiInteractionState
@@ -149,3 +173,45 @@ def test_current_model_renders_in_frozen_welcome_after_selection(tmp_path, width
     runtime.publish_model_selection("qwen-test")
     after = "\n".join("".join(text for _, text in row) for row in provider.frame(width).transcript_lines)
     assert "qwen-test" in after and "old-model" not in after
+
+
+def test_auth_escape_cancels_login_without_interrupting_agent(tmp_path, monkeypatch):
+    from agent_py_agent.cli.chat_parts import tui_model_auth
+
+    calls = []
+
+    async def request(app, agent, session, operation, payload):
+        calls.append(operation)
+        return {"ok": True, "status": "pending", "attempt_id": "attempt", "interval": 60,
+                "verification_uri": "https://example.test/device", "user_code": "TEST-CODE"}
+
+    async def data(agent, session, operation, payload):
+        calls.append(operation)
+        assert payload["attempt_id"] == "attempt"
+        return {"ok": True, "status": "signed_out"}
+
+    monkeypatch.setattr(tui_model_auth, "_request", request)
+    monkeypatch.setattr(tui_model_auth, "_request_data", data)
+
+    async def scenario():
+        runtime = TuiRuntime("auth-cancel")
+        params = _app_params(tmp_path, runtime)
+        with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+            app = make_tui_app(params)
+            runner = asyncio.create_task(app.run_async())
+            try:
+                await settle()
+                login = asyncio.create_task(tui_model_auth._login(app, params.agent, "auth-cancel", "account"))
+                await settle()
+                assert app._my_agent_model_float_container.floats
+                pipe.send_bytes(b"\x1b")
+                result = await asyncio.wait_for(login, 2)
+                assert "已取消" in result and calls == ["auth_start", "auth_cancel"]
+                assert not app._my_agent_model_float_container.floats
+                assert params.jobs.empty() and not params.stop_event.is_set()
+                assert all("TEST-CODE" not in block.text for block in runtime.store.snapshot().stable_blocks)
+            finally:
+                app.exit()
+                await runner
+
+    asyncio.run(scenario())

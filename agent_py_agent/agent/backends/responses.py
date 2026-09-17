@@ -20,7 +20,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
 
         return "".join(endpoint_parts(self.api_base, "/responses"))
 
-    # LLM: Responses 只发送显式采样配置，不沿用 Chat 的供应商默认；工具选择仍来自 typed choice。
+    # LLM: Responses 只发送显式采样；订阅登录固定使用流式、不发 max_output_tokens，system 移到 instructions。
     # 函数用途: 用工作片冻结的私有配置及 top_p 发送一次请求，转成上层通用模型结果。
     def _generate(self, request) -> ModelResponse:
         payload = {"model": self.model_name, "store": False, "include": ["reasoning.encrypted_content"],
@@ -44,6 +44,10 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             payload["text"] = {"format": {"type": "json_schema", "name": "my_agent_output", "strict": True, "schema": request.response_schema}}
         elif request.json_object:
             payload["text"] = {"format": {"type": "json_object"}}
+        if getattr(self, "auth_ref", {}).get("mode") == "chatgpt":
+            payload.pop("max_output_tokens", None)
+            payload["instructions"] = "\n\n".join(item["content"] for item in payload["input"] if item.get("role") == "system")
+            payload["input"] = [item for item in payload["input"] if item.get("role") != "system"]
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
         if self.stream_enabled:
             payload["stream"] = True

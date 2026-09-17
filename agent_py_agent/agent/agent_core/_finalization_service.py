@@ -85,7 +85,7 @@ class FinalizationService:
             run_request_id,
         )
         self._write_runtime_fact_source_if_needed(ctx, run_request_id, model_calls)
-        self._write_thread_model_usage_if_bound(ctx, run_request_id, model_calls)
+        self.settle_model_usage(ctx, model_calls=model_calls)
         self._update_main_context_bundle_artifacts(ctx, run_request_id)
         token_ledger = self._estimate_token_usage(_estimate_token_params(ctx, run_request_id))
 
@@ -145,18 +145,17 @@ class FinalizationService:
             )
         return written
 
-    # LLM: Provider usage follows the exact conversation/agent thread even when
-    # do_save=False. Each finalization submits the cumulative request/run
-    # snapshot at its physical-attempt cursor; ConversationStore atomically
-    # persists only the new delta so Compact retries neither collide nor double
-    # count. This stays independent from transcript, memory and run archives.
-    # 函数用途: 将本轮累计模型账按物理调用游标幂等写入所属会话；没有可信线程身份时明确跳过而不猜。
-    def _write_thread_model_usage_if_bound(
+    # LLM: 成功、错误和取消共享 exact thread/request/run 的用量收口；累计代次与物理游标去重，source 不拥有费用。
+    # 函数用途: 将已经发生的模型用量幂等写入本会话，不因暂停丢账、不因前后台切换重复计算。
+    def settle_model_usage(
         self,
-        ctx: FinalizeContext,
-        run_request_id: str,
-        model_calls: dict[str, object],
+        ctx: object,
+        *,
+        model_calls: dict[str, object] | None = None,
     ) -> str:
+        request_id = str(ctx.request_id or "").strip()
+        if model_calls is None:
+            model_calls = _current_model_call_summary(self._agent, ctx, request_id)
         if int(model_calls.get("physical_model_attempt_count") or 0) <= 0:
             return ""
         attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
@@ -169,7 +168,6 @@ class FinalizationService:
         append_usage = getattr(store, "append_model_usage_snapshot_once", None)
         if not thread_id or not callable(append_usage):
             return ""
-        request_id = str(ctx.request_id or run_request_id or "").strip()
         physical_attempt_count = int(
             model_calls.get("physical_model_attempt_count") or 0
         )
@@ -179,7 +177,7 @@ class FinalizationService:
                 request_id,
                 str(ctx.run_id or "").strip(),
                 str(ctx.task_id or "").strip(),
-                str(ctx.source or "").strip(),
+                str(model_calls.get("usage_scope_id") or ctx.source or "").strip(),
                 str(physical_attempt_count),
             )
         )

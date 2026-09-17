@@ -18,10 +18,10 @@ from ...agent.settings.model_profiles import (
 from ...agent.settings.thread_model_selection import execute_local_model_operation
 
 
-# LLM: modal 只占现有 Application 的浮层；Esc 关闭该表单，不复用停止代理的键盘路由。
+# LLM: modal 只占现有浮层；外部 Future 仅供认证状态完成，Esc 只取消表单、不停止代理。
 # 函数用途: 显示一个可返回结果的对话框，关闭时恢复此前输入焦点，不销毁聊天界面。
-async def _dialog(app, title: str, body, actions: tuple, *, focus=None):
-    future = asyncio.get_running_loop().create_future()
+async def _dialog(app, title: str, body, actions: tuple, *, focus=None, completion=None):
+    future = completion if completion is not None else asyncio.get_running_loop().create_future()
     bindings = KeyBindings()
 
     # LLM: Future 只结算一次；返回值是按钮显式提供的动作，不解析标签。
@@ -64,8 +64,10 @@ async def _dialog(app, title: str, body, actions: tuple, *, focus=None):
 # LLM: 请求参数通过单独payload映射传递；走现有owner认证，保存重试复用profile_id，未知结果不自动另建记录。
 # 函数用途: 不阻塞 TUI 绘制地管理配置或执行用户明确选择的连接检查，等待提示区分网络与纯配置操作。
 async def _request(app, agent, session_id: str, operation: str, payload: dict[str, object] | None = None) -> dict:
-    text = "正在发送短问候，等待模型回复…" if operation == "probe" else "正在读取模型目录…" if operation == "discover" else "正在等待配置操作确认…（不会向模型发请求）"
-    waiting = TextArea(text=text, read_only=True, height=2)
+    text = ("正在发送短问候，等待模型回复…" if operation == "probe" else "正在读取模型目录…" if operation == "discover"
+            else "正在联系认证服务…（不会调用模型）" if operation.startswith("auth_")
+            else "正在等待配置操作确认…（不会向模型发请求）")
+    waiting = TextArea(text=text, read_only=True, height=2, width=64)
     busy = Float(content=Dialog(title="模型配置", body=waiting, buttons=[], with_background=True))
     host = app._my_agent_model_float_container
     previous = app.layout.current_window
@@ -126,21 +128,19 @@ def refresh_model_selection(agent, session_id: str, runtime, stop_event=None) ->
         runtime.set_notice("当前模型名称尚未同步，可打开 /model 重新确认。", duration_seconds=6)
 
 
-# LLM: provider 的动作值是后端枚举，Auth 仅保留菜单项，不发登录请求、不落不完整记录。
+# LLM: 协议与认证分开选择；快捷新增可进入 Auth，已有 provider 的模型编辑不重复创建账号。
 # 函数用途: 选择新模型的接口类型。
-async def _choose_interface(app, *, default=None):
-    choices = RadioList([
+async def _choose_interface(app, *, default=None, allow_auth=True):
+    values = [
         ("openai_compatible", "OpenAI 风格（Chat Completions）"),
         ("anthropic_compatible", "Anthropic 风格（Messages）"),
         ("openai_responses", "OpenAI Responses（响应 / 工具流）"),
-        ("auth", "Auth 认证（暂未开放）"),
-    ], default=default, select_on_focus=True)
-    while True:
-        value = await _dialog(app, "新增模型 · 选择接口", choices,
-                              (("下一步", lambda: choices.current_value), ("返回", None)), focus=choices)
-        if value != "auth":
-            return value
-        await _dialog(app, "Auth 认证", Label("此选项已预留，暂未实现认证接入。"), (("返回", None),))
+    ]
+    if allow_auth:
+        values.append(("auth", "Auth 登录（ChatGPT 订阅 / 通用 OAuth）"))
+    choices = RadioList(values, default=default, select_on_focus=True)
+    return await _dialog(app, "新增模型 · 选择接口", choices,
+                         (("下一步", lambda: choices.current_value), ("返回", None)), focus=choices)
 
 
 # LLM: 表单不使用持久 history；密码控件掩码，校验仅检查配置格式，保存不自动启用或测试接口。
@@ -149,6 +149,10 @@ async def _add_model(app, agent, session_id: str) -> str:
     backend = await _choose_interface(app)
     if backend is None:
         return ""
+    if backend == "auth":
+        from .tui_model_auth import manage_auth
+
+        return await manage_auth(app, agent, session_id, create=True)
     name = TextArea(height=1, multiline=False)
     address = TextArea(height=1, multiline=False)
     key = TextArea(height=1, multiline=False, password=True)
@@ -218,6 +222,7 @@ async def run_model_menu(app, agent, session_id: str, runtime) -> None:
     try:
         while True:
             choices = RadioList([("select", "选择已有模型（当前会话）"), ("add", "新增模型（快捷）"),
+                ("auth", "登录认证（ChatGPT Plus / Pro、通用 OAuth）"),
                 ("provider_add", "新增服务商（支持多个模型）"), ("providers", "管理服务商 / 模型 / 请求头"),
                 ("probe", "连接测试（短问候，不做任务）"),
                 ("set_default", "新会话默认模型（不修改已有会话）"),
@@ -238,6 +243,12 @@ async def run_model_menu(app, agent, session_id: str, runtime) -> None:
 # LLM: 只分发菜单结构化选项；网络与配置副作用仍由各动作的确认入口负责，未知选项不能默认切模型。
 # 函数用途: 保持主菜单循环轻量，分别进入会话选择、默认值、服务商、共享和连接测试。
 async def _run_model_action(app, agent, session_id: str, runtime, action: str) -> str:
+    if action == "auth":
+        from .tui_model_auth import manage_auth
+
+        message = await manage_auth(app, agent, session_id)
+        _publish_selection(runtime, await _request(app, agent, session_id, "list"))
+        return message
     from .tui_provider_menu import manage_providers, test_connection
     from .tui_shared_model_menu import manage_shared_models
 

@@ -41,6 +41,7 @@ _COMPACT_COMMAND = re.compile(r"^/compact(?:\s*(.*))?$", re.IGNORECASE | re.DOTA
 _EFFORT_COMMAND = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
 _STEER_COMMAND = re.compile(r"^/btw(?:\s+(.*))?$", re.IGNORECASE)
 _STOP_COMMAND = re.compile(r"^/stop(?:\s+(.*))?$", re.IGNORECASE)
+_INTERRUPT_COMMAND = re.compile(r"^/interrupt(?:\s+(.*))?$", re.IGNORECASE)
 _GOAL_COMMAND = re.compile(r"^/goal(?:\s+(.*))?$", re.IGNORECASE)
 _AUDIT_PREFIX = re.compile(r"^/audit(?:\s|$)", re.IGNORECASE)
 _VERBOSE_COMMAND = re.compile(r"^/(?:verbose|v)(?:\s+(\S+))?\s*$", re.IGNORECASE)
@@ -163,9 +164,8 @@ def parse_conversation_control(
     return command if isinstance(command, ConversationControlCommand) else None
 
 
-# LLM: All adapters consume one typed slash grammar; projection helpers below
-# never carry their own syntax or precedence rules.
-# 函数用途：在一个入口区分即时控制与需要模型执行的任务命令，避免同一 `/audit` 被两套正则解释。
+# LLM: 所有通道复用此显式语法；interrupt 是 stop 的本轮操作，不由自然语言推断，也不等于暂停 Goal。
+# 函数用途：区分即时控制与模型任务，Esc 与 /stop 共用停止传输但保留不同生命周期语义。
 def parse_conversation_command(
     text: object,
     *,
@@ -197,6 +197,11 @@ def parse_conversation_command(
         )
     if match := _STOP_COMMAND.fullmatch(raw):
         return _argumentless_command("stop", match.group(1), "/stop")
+    if match := _INTERRUPT_COMMAND.fullmatch(raw):
+        return ConversationControlCommand(
+            "stop", operation="interrupt", valid=not str(match.group(1) or "").strip(),
+            usage="用法：/interrupt（中断本轮；活动 Goal 仍会继续）",
+        )
     if match := _STEER_COMMAND.fullmatch(raw):
         value = str(match.group(1) or "").strip()
         return ConversationControlCommand(

@@ -6,6 +6,7 @@ import json
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,12 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
-from agent_py_agent.agent.tooling.process_registry import process_registry
+from agent_py_agent.agent.tooling.cancellation import (
+    CancellationToken,
+    ToolCancelled,
+    bind_cancellation_token,
+)
+from agent_py_agent.agent.tooling.process_registry import ProcessRegistration, process_registry
 from agent_py_agent.agent.tooling.process_session_store import (
     PROCESS_SESSION_SCHEMA,
     ProcessSessionStore,
@@ -157,6 +163,47 @@ def test_process_session_wait_replaces_shell_sleep_polling(tmp_path: Path) -> No
     assert "pid" not in finished and "process_pid" not in finished
 
 
+def test_long_wait_is_cancellable_without_killing_background_command(tmp_path: Path) -> None:
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    record = process_registry.register(ProcessRegistration(
+        command="test long wait", pid=process.pid, output_file="", process=process,
+    ))
+    token = CancellationToken()
+    timer = threading.Timer(0.1, token.cancel)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with bind_cancellation_token(token), pytest.raises(ToolCancelled):
+            process_registry.wait(record.session_id, 600)
+        assert time.monotonic() - started < 2
+        assert process.poll() is None
+        assert process_registry.status(record.session_id)["status"] == "running"
+    finally:
+        timer.cancel()
+        process_registry.kill(record.session_id)
+
+
+def test_long_wait_budget_exposed_and_bounded() -> None:
+    assert ProcessSessionTool._wait_timeout(600) == 600
+    assert ProcessSessionTool._wait_timeout(999999) == 600
+    assert ProcessSessionTool._wait_timeout(-2) == 0
+    assert ProcessSessionTool._wait_timeout(None) == 30
+
+
+def test_wait_timeout_does_not_terminate_process() -> None:
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    record = process_registry.register(ProcessRegistration(
+        command="test wait deadline", pid=process.pid, output_file="", process=process,
+    ))
+    try:
+        result = process_registry.wait(record.session_id, 0.01)
+        assert result["wait_timed_out"] is True
+        assert result["status"] == "running"
+        assert process.poll() is None
+    finally:
+        process_registry.kill(record.session_id)
+
+
 def test_process_summary_uses_session_id_as_only_management_handle(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
     scope = {
@@ -174,17 +221,75 @@ def test_process_summary_uses_session_id_as_only_management_handle(tmp_path: Pat
         )
     )
 
-    status = _payload(
-        _call(
-            registry,
-            "process_session",
-            {"action": "status", "session_id": started["session_id"]},
-            scope,
-        )
+    result = _call(
+        registry, "process_session", {"action": "status", "session_id": started["session_id"]}, scope,
     )
+    status = _payload(result)
 
     assert status["session_id"] == started["session_id"]
     assert "pid" not in status and "process_pid" not in status
+    observation = result.metadata["handler_details"]["progress_observation"]
+    assert len(observation["sha256"]) == 64
+    assert observation["pending"] is (status["status"] == "running")
+
+
+def test_process_wait_soft_observation_ignores_elapsed_time(tmp_path: Path, monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core.tool_guard.call_guardrail import (
+        record_tool_guard_observation,
+        tool_guardrail_records,
+    )
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolResult, ToolSuccessFacts
+
+    tool = ProcessSessionTool(owner_scope_root=tmp_path, workspace_root=tmp_path)
+    snapshot = runtime_snapshot_for_tools({"process_session": tool}, run_id="run-a")
+    params = SimpleNamespace(task_attributes={"repeated_success_hint_threshold": 5}, tool_runtime_snapshot=snapshot)
+    agent = SimpleNamespace()
+    payload = {"session_id": "bg-pending", "status": "running", "output_tail": "", "output_bytes": 0}
+    monkeypatch.setattr(process_registry, "wait", lambda *_: dict(payload))
+    hints = []
+    raw_hashes = set()
+    for index in range(33):
+        payload.update(uptime_seconds=index * 30, wait_timed_out=True)
+        args = {"action": "wait", "session_id": "bg-pending", "timeout_seconds": 30}
+        call = canonical_test_call(snapshot, "process_session", args, call_id=f"poll-{index}")
+        outcome = tool.execute({**args, "__run_scope": {"owner_id": "owner-a", "session_id": "thread-a"}})
+        result = ToolResult.succeeded(call, outcome.output, facts=ToolSuccessFacts(
+            metadata={"handler_details": outcome.result_envelope},
+        ))
+        hints.append(record_tool_guard_observation(agent, params, call, result))
+        raw_hashes.add(tool_guardrail_records(agent)[-1]["result_hash"])
+    assert len(raw_hashes) == 33  # 原始审计保留时长差异，软观察不再把它当进展。
+    assert [i + 1 for i, hint in enumerate(hints) if hint] == [5, 10, 15, 20, 25, 30]
+    assert "不代表进程卡死" in hints[4]
+    payload.update(output_bytes=10, output_tail="new output", uptime_seconds=1000)
+    outcome = tool.execute({**args, "__run_scope": {"owner_id": "owner-a", "session_id": "thread-a"}})
+    result = ToolResult.succeeded(call, outcome.output, facts=ToolSuccessFacts(
+        metadata={"handler_details": outcome.result_envelope},
+    ))
+    assert not record_tool_guard_observation(agent, params, call, result)
+    assert tool_guardrail_records(agent)[-1]["repeated_success_count"] == 1
+
+
+def test_process_progress_observation_changes_with_log_growth_and_exit(tmp_path: Path) -> None:
+    from agent_py_agent.agent.tooling.process_registry import BackgroundProcess
+
+    log = tmp_path / "output.log"
+    log.write_text("x" * 8000, encoding="utf-8")
+    record = BackgroundProcess("bg-log", "build", 0, time.time(), output_file=str(log))
+    tool = ProcessSessionTool(owner_scope_root=tmp_path, workspace_root=tmp_path)
+    first = record.to_summary(include_output=True)
+    log.write_text("x" * 9000, encoding="utf-8")
+    second = record.to_summary(include_output=True)
+    assert first["output_tail"] == second["output_tail"]
+    assert first["output_bytes"] < second["output_bytes"]
+    left = tool._ok(first, observe_progress=True).result_envelope["progress_observation"]
+    right = tool._ok(second, observe_progress=True).result_envelope["progress_observation"]
+    assert left["sha256"] != right["sha256"]
+    assert left["pending"] is True
+    record.status, record.exit_code = "exited", 0
+    ended = tool._ok(record.to_summary(include_output=True), observe_progress=True)
+    assert ended.result_envelope["progress_observation"]["pending"] is False
+    assert ended.result_envelope["progress_observation"]["sha256"] != right["sha256"]
 
 
 def test_process_session_hides_other_tui_session(tmp_path: Path) -> None:

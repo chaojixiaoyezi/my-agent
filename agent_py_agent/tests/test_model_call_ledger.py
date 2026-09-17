@@ -50,6 +50,15 @@ class _ProbeSpec:
     latency_seconds: float
 
 
+def test_queue_budget_extends_first_event_without_changing_prefill_or_idle():
+    normal = estimate_first_token_timeout(FirstTokenTimeoutParams(input_tokens=10000, ledger=ModelCallLedger()))
+    queued = estimate_first_token_timeout(FirstTokenTimeoutParams(input_tokens=10000, ledger=ModelCallLedger(),
+        options=FirstTokenTimeoutOptions(queue_wait_seconds=1800)))
+    assert queued.timeout_seconds == normal.timeout_seconds + 1800
+    assert queued.prefill_seconds == normal.prefill_seconds
+    assert queued.to_dict()["queue_wait_seconds"] == 1800
+
+
 def test_ledger_records_finished_model_call_timing() -> None:
     clock = _FakeClock(100.0)
     ledger = _ledger(clock)
@@ -114,7 +123,9 @@ def test_finished_model_call_records_provider_usage_and_cache_tokens() -> None:
     assert finished.cached_input_tokens == 700
     assert finished.cache_creation_input_tokens == 50
     assert finished.provider_usage_reported is True
-    assert ledger.cumulative_summary(run_id="run-provider-usage") == {
+    summary = ledger.cumulative_summary(run_id="run-provider-usage")
+    assert len(summary.pop("usage_scope_id")) == 32
+    assert summary == {
         "logical_model_turn_count": 1,
         "physical_model_attempt_count": 1,
         "model_retry_count": 0,
@@ -369,7 +380,9 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
         records[0].input_tokens,
         records[1].input_tokens,
     ]
-    assert model_call_summary(agent, request_id="request-1") == {
+    summary = model_call_summary(agent, request_id="request-1")
+    assert len(summary.pop("usage_scope_id")) == 32
+    assert summary == {
         "schema": "model_call_summary.v1",
         "logical_model_turn_count": 1,
         "physical_model_attempt_count": 2,
@@ -487,7 +500,9 @@ def test_summary_counts_all_calls_after_detail_retention_limit() -> None:
         ledger.finished(ModelCallFinishParams(call_id=call_id, output_tokens=1))
 
     assert len(ledger.records()) == 4
-    assert model_call_summary(agent, request_id="request-over-limit") == {
+    summary = model_call_summary(agent, request_id="request-over-limit")
+    assert len(summary.pop("usage_scope_id")) == 32
+    assert summary == {
         "schema": "model_call_summary.v1",
         "logical_model_turn_count": 4,
         "physical_model_attempt_count": 7,

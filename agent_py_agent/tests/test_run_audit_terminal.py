@@ -323,6 +323,42 @@ def test_active_goal_link_keeps_task_run_open_even_with_transient_completion_fla
     assert _task_run_row(repo, rec["task_run_id"])["closed_at"] == 0
 
 
+def test_resumed_attempt_reopens_task_run_and_can_close_with_new_outcome(repo):
+    rec = _record(repo)
+    repo.settle_agent_run(agent_run_id=rec["agent_run_id"], status="cancelled", attempt_id=rec["attempt_id"])
+    repo.settle_task_run_if_agent_tree_terminal(task_run_id=rec["task_run_id"], task_id=rec["task_id"])
+    closed_at = _task_run_row(repo, rec["task_run_id"])["closed_at"]
+    assert closed_at > 0
+    resumed = repo.create_attempt(rec["agent_run_id"])
+    current = _task_run_row(repo, rec["task_run_id"])
+    assert current["closed_at"] == 0 and current["status"] == "created"
+    reopened = repo._runtime_connect().execute(
+        "SELECT * FROM runtime_events WHERE task_run_id = ? AND event_type = 'task_run.reopened'",
+        (rec["task_run_id"],),
+    ).fetchall()
+    assert len(reopened) == 1 and reopened[0]["attempt_id"] == resumed["attempt_id"]
+    assert json.loads(reopened[0]["payload_json"])["previous_closed_at"] == closed_at
+    assert not repo.settle_task_run_if_agent_tree_terminal(task_run_id=rec["task_run_id"])["settled"]
+    repo.settle_agent_run(agent_run_id=rec["agent_run_id"], status="done", attempt_id=resumed["attempt_id"])
+    assert repo.settle_task_run_if_agent_tree_terminal(task_run_id=rec["task_run_id"])["settled"]
+    assert _task_run_row(repo, rec["task_run_id"])["status"] == "done"
+
+
+def test_rejected_attempt_does_not_reopen_task_run(repo):
+    from agent_py_agent.agent.runtime_db.repository import RuntimeConflictError
+
+    rec = _record(repo)
+    repo.settle_agent_run(agent_run_id=rec["agent_run_id"], status="cancelled", attempt_id=rec["attempt_id"])
+    repo.settle_task_run_if_agent_tree_terminal(task_run_id=rec["task_run_id"])
+    previous = dict(_task_run_row(repo, rec["task_run_id"]))
+    conn = repo._runtime_connect()
+    conn.execute("UPDATE agent_attempts SET status = 'unknown' WHERE attempt_id = ?", (rec["attempt_id"],))
+    conn.commit()
+    with pytest.raises(RuntimeConflictError):
+        repo.create_attempt(rec["agent_run_id"])
+    assert dict(_task_run_row(repo, rec["task_run_id"])) == previous
+
+
 def test_last_child_terminal_edge_closes_already_terminal_conversation_task(repo):
     rec = _record(repo)
     child = repo.record_run_creation(

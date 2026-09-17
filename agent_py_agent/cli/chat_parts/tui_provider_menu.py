@@ -83,9 +83,9 @@ async def _edit_provider(app, agent, session: str, existing: dict | None = None)
 
 
 # LLM: 每模型显式选择协议/容量/采样，top_p 空值沿用部署或供应商默认；保存不发模型请求。
-# 函数用途: 新增或编辑模型配置和采样覆盖，原 profile UUID 保持不变。
+# 函数用途: 新增或编辑模型、采样及额外排队预算；认证在 provider 管理，原 profile UUID 保持不变。
 async def _edit_model(app, agent, session: str, provider_id: str, row: dict | None = None) -> str:
-    backend = await _choose_interface(app, default=(row or {}).get("model_backend"))
+    backend = await _choose_interface(app, default=(row or {}).get("model_backend"), allow_auth=False)
     if backend is None:
         return ""
     data = row or {}
@@ -93,6 +93,7 @@ async def _edit_model(app, agent, session: str, provider_id: str, row: dict | No
     window = _field(data.get("model_context_window_tokens") or 128000)
     temperature = _field(data.get("temperature", ""))
     top_p = _field(data.get("top_p", ""))
+    queue = _field(data.get("model_queue_wait_seconds", ""))
     enabled = Checkbox("启用模型", checked=data.get("enabled", True))
     capability = RadioList([("agentic", "Agentic 对话/工具"), ("embedding", "Embedding 目录配置")],
                            default=data.get("capability", "agentic"), select_on_focus=True)
@@ -100,6 +101,7 @@ async def _edit_model(app, agent, session: str, provider_id: str, row: dict | No
     body = HSplit([Label("模型名称（区分大小写）"), name, Label("总上下文 tokens（按供应商说明填写）"), window,
                    Label("温度 0–2（留空沿用部署值；按供应商要求填写）"), temperature,
                    Label("top_p 0–1（留空沿用部署/供应商；Flash 思考下限 0.95）"), top_p,
+                   Label("额外排队预算秒数（0–86400，留空继承；慢模型可增大）"), queue,
                    enabled, capability, notice, Label("Tab 切换 · Esc 不保存返回")])
     identity = data.get("id") or str(uuid4())
     while await _dialog(app, "编辑模型" if data.get("id") else "新增模型", body,
@@ -108,6 +110,7 @@ async def _edit_model(app, agent, session: str, provider_id: str, row: dict | No
             "profile": {"provider_id": provider_id, "model_backend": backend, "model_name": name.text,
                         "model_context_window_tokens": window.text, "temperature": temperature.text,
                         "top_p": top_p.text,
+                        "model_queue_wait_seconds": queue.text,
                         "enabled": enabled.checked, "capability": capability.current_value}})
         if result.get("ok"):
             return "模型已保存；选择后将在后续工作片生效。"

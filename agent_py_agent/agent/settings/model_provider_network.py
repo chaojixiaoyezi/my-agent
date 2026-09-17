@@ -18,9 +18,17 @@ from .model_provider_schema import (
 from .shared_model_catalog import resolve_shared_model, shared_profile_key
 
 
-# LLM: 目录内容是服务商数据，只投影 ID/显式容量，不执行建议命令，不按名称猜协议或自动启用模型。
+# LLM: 目录只投影 ID/显式容量；OAuth 只在显式动作解析引用，订阅不猜普通 /v1/models 路径。
 # 函数用途: 读取服务商模型目录，供用户挑选后填写接口和上下文。
-def _discover(provider: dict) -> dict:
+def _discover(provider: dict, *, auth_ref: dict | None = None) -> dict:
+    account_headers = {}
+    if auth_ref:
+        from .model_oauth import request_credentials
+
+        if auth_ref["mode"] == "chatgpt":
+            raise ModelProfileError("订阅模型请按账号可用目录手动填写名称和容量；不会用普通 API 目录探测订阅凭据。")
+        key, account_headers = request_credentials(auth_ref, provider["api_base"])
+        provider = {**provider, "api_key": key}
     base = provider["api_base"]
     for suffix in ("/chat/completions", "/responses", "/messages"):
         if base.endswith(suffix):
@@ -28,9 +36,11 @@ def _discover(provider: dict) -> dict:
             break
     path = "/models" if base.endswith("/v1") else "/v1/models"
     headers = request_headers({"Authorization": "Bearer " + provider["api_key"], "x-api-key": provider["api_key"],
-                               "Accept": "application/json"}, provider["custom_headers"], provider["session_header"])
+                               "Accept": "application/json", **account_headers}, provider["custom_headers"], provider["session_header"])
+    if auth_ref:
+        headers.pop("x-api-key", None)
     obj = get_json(GatewayRequest(api_base=base, api_key=provider["api_key"], path=path, payload={},
-                                 headers=headers, timeout=15, connect_timeout=8))
+                                 headers=headers, timeout=15, connect_timeout=8, allow_redirects=not bool(auth_ref)))
     items = obj.get("data", obj.get("models", []))
     if not isinstance(items, list):
         raise ModelProfileError("接口未返回有效的模型列表，可手动填写模型名称。")
@@ -41,19 +51,21 @@ def _discover(provider: dict) -> dict:
     return {"ok": True, "models": rows, "message": f"读取到 {len(rows)} 个模型；接口类型和容量仍需确认。"}
 
 
-# LLM: 一次主动短请求不探测工具、不补发修复提示；仅明确的正常文字终态才标连接可用，不代表任务能力已验收。
+# LLM: 短测复用可信 owner 解析与正式认证后端；仅完整正文算连接可用，不能宣称任务/Plus/Pro 权益已全部验证。
 # 函数用途: 使用已保存配置发一个问候并返回耗时、少量正文和 token 数，不保存聊天历史。
 def _probe(agent: object, data: dict, profile_id: str) -> dict:
     if profile_id not in data["profiles"]:
         raise ModelProfileError("请先保存并选择要测试的模型。")
-    row = resolved_model(data, profile_id)
+    from .model_profiles import _resolved_profile
+
+    row = _resolved_profile(agent, data, profile_id)
     config = replace(agent.config, **row, api_key_env="", max_tokens=1024, request_timeout=60, stream_enabled=True,
                      model_temperature_explicit="temperature" in row or agent.config.model_temperature_explicit)
     backend = get_backend(config.model_backend, config)
     started = time.monotonic()
     response = backend.generate("你好，请简短回复一句问候。")
     elapsed = round(time.monotonic() - started, 2)
-    text = _redact_network_text(str(response.text or ""), data)
+    text = _redact_network_text(str(response.text or ""), _current_redaction_data(agent, data))
     ok = bool(text.strip()) and not response.truncated and not response.tool_use_blocks
     return {"ok": ok, "profile_id": profile_id, "model_name": config.model_name, "elapsed_seconds": elapsed,
             "reply": text[:500], "usage": response.usage, "truncated": response.truncated,
@@ -75,13 +87,21 @@ def execute_provider_network(agent: object, data: dict, operation: str, payload:
             provider = data["providers"].get(str(payload.get("provider_id") or ""))
             if not provider or not provider["enabled"]:
                 raise ModelProfileError("请先保存并启用服务商。")
-            return _discover(provider)
+            auth_ref = None
+            if provider.get("auth"):
+                from .model_oauth_schema import oauth_binding
+                from .model_profiles import model_profiles_path
+
+                auth_ref = {"path": str(model_profiles_path(agent.home_paths)), "provider_id": str(payload["provider_id"]),
+                            "mode": provider["auth"]["mode"], "generation": provider["auth"].get("generation", ""),
+                            "binding": oauth_binding(provider)}
+            return _discover(provider, auth_ref=auth_ref)
     except ModelProfileError:
         raise
     except Exception as exc:
         return {"ok": False, "message": "接口调用失败，请检查服务商地址、协议、模型和密钥。",
                 "model_name": model.get("model_name", ""), "elapsed_seconds": round(time.monotonic() - started, 2),
-                "provider_message": _provider_message(exc, data),
+                "provider_message": _provider_message(exc, _current_redaction_data(agent, data)),
                 "error_type": type(exc).__name__, "status_code": int(getattr(exc, "status_code", 0) or 0)}
 
 
@@ -95,6 +115,18 @@ def _shared_probe_data(agent: object, data: dict, profile_id: str) -> dict:
     model = validate_model({**row, "provider_id": provider_id})
     return {**data, "profiles": {**data["profiles"], profile_id: model},
             "providers": {**data["providers"], provider_id: provider}}
+
+
+# LLM: OAuth 可能在探针中刷新令牌；旧/新凭据均参加回显清洗，不能只拿请求前的快照脱敏。
+# 函数用途: 请求结束后重读私有凭据作为清洗材料；读取失败不公开未经确认的上游文本。
+def _current_redaction_data(agent: object, data: dict) -> dict:
+    if not any(row.get("auth") for row in data["providers"].values()):
+        return data
+    from .model_profiles import model_profiles_path, read_model_profiles
+
+    current = read_model_profiles(model_profiles_path(agent.home_paths))
+    return {**data, "providers": {**data["providers"], **{
+        "fresh:" + key: row for key, row in current["providers"].items()}}}
 
 
 # LLM: 上游原因只作为用户诊断材料，不决定恢复/路由；只公开 message/code，统一移除已存密钥、头值和控制字符。
@@ -116,7 +148,8 @@ def _redact_network_text(text: str, data: dict) -> str:
     from ..common.log_redaction import redact_sensitive_text
 
     for row in data["providers"].values():
-        secrets = [row["api_key"], *row["custom_headers"].values()]
+        secrets = [row["api_key"], *row["custom_headers"].values(),
+                   *[row.get("auth", {}).get(key, "") for key in ("access_token", "refresh_token", "client_secret")]]
         for secret in secrets:
             if secret:
                 text = text.replace(secret, "[已隐藏]")

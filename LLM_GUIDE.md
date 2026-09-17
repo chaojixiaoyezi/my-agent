@@ -21,6 +21,9 @@
 
 ## 当前运行边界（验收状态看 STATUS）
 
+长等待、后台进程完成通知与缓存诊断复用既有进程/会话账本，见 `docs/design/LONG_RUNNING_EXECUTION.md`。
+后台收尾看当前子树及未读邮箱，不用工作片开始时的旧阶段永久抑制最终回复；编辑匹配冲突要求读回文件。
+
 SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 派工不会永久禁止主代理本地工作，用户明确限制仍保留；复制按最新代次和实际通道结果反馈。
 
@@ -40,7 +43,8 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 - `/model` 管理 owner 私有 provider/model v2；获取目录、短测必须显式操作。保存/编辑不调用模型。
   软件不预填模型/协议/端点；未配置仍可打开设置，真实调用明确提示 `/model`，不自动回退。
   新工作片冻结模型/端点/密钥/容量/请求头整组配置，子孙继承创建时引用，显式 model 只解析本 owner 配置。
-  Auth 仍预留；Embedding 只管理目录用途，不能选作主子模型。详见 `docs/design/TUI_MODEL_PROFILES.md`。
+  Auth 支持显式订阅设备码登录与通用 OAuth 参数；令牌仍在 owner 私有 provider，不能跨用户共享。
+  Embedding 只管理目录用途，不能选作主子模型。详见 `docs/design/TUI_MODEL_PROFILES.md`、`docs/design/MODEL_OAUTH.md`。
 - `/permissions` / F4 使用 owner tool_policy.json 的 ask、auto、full-access；Full Access 仅可信管理员。
   工具执行线程继承工作片 Context；角色、工具可用性、Full Access 都不增加用户未要求的工作目标。
   capability grant 与具体工具批准是不同事实；SOUL 专用确认、owner 墙、灾难保护仍有效。
@@ -58,6 +62,7 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
   ModelCallLedger 是成本唯一权威；缓存命中以 provider usage 为准，不能用估算或比例推测账单。
   TUI 统计条的本次模型轮、当轮工具、最近缓存与当前代理会话累计各有独立口径，见 `docs/design/TUI_DESIGN.md`。
   `ConversationThread.model_metrics` 仅为有界显示副本；完整/精简模型上下文均排除它，不能据此调度、判断完成或收费。
+  成功、异常和取消共用结算；`usage_scope_id` 是累计容器代次，source 切换不重计，重启/重建另计；旧账不静默改写。
 - 大窗口切小窗口用有预算的连续分段摘要；覆盖所有来源后才提交，typed overflow 可缩小请求，
   网络/认证错误不伪装成超窗。observed_tool_paths 仅是有界查找提示，不是权限或文件存在证据。
   能容纳的单次请求保留原缓存面；分段采用无执行工具的摘要角色。原文锚点在固定预算内优先保留用户原话，
@@ -66,11 +71,19 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
   一个 user 只出现一次；模型/工具快照必须与真实请求一致。Provider system 是授权/验证软指导的唯一正文，
   不能逐工具重复长规则。实际 native Schema 必须与冻结工具快照相同。
 - 连接/首事件/流间隔超时分开，健康慢流没有隐式总墙钟；停止贯穿请求和退避。
+  Gateway chat 客户端的不活跃等待使用单调时钟，系统校时不能使活跃请求提前超时；只有本请求活动可续租。
+  每模型可显式设置 `model_queue_wait_seconds`，默认 0，只额外延长首事件等待，不增加流静默或输出预算。
   明确 HTTP 400 不因缺少解释自动重试；429、5xx、网络瞬断仍走 typed 有界恢复。
 - 采样 top_p 是可选配置：普通端点默认省略，模型级覆盖与连接同快照、同缓存键。
   已核对的精确官方/工具运行时 V4 Flash Chat 采用 0.95；用户显式温度不被删除。
   不按任意模型名或代理猜默认，不以调整采样代替 400 根因诊断，详见 `docs/design/TUI_MODEL_PROFILES.md`。
 - 工具操作身份、owner、run/task/parent/root 和副作用结果均读取结构化事实。
+  成功重复按完整原始结果摘要观察并定间隔软提醒；后台查询另用宿主稳定进展摘要，不把耗时当进展。
+  该摘要不能参与动作拒绝、任意 Python 的只读分类或任务完成裁决；沉默的进程不因此被强杀。
+  普通后台记忆策展避让本 Gateway 的同端点活动工作片，pending/游标保留；pre_compact 不互等。
+  后台请求预算必须传到底层，超时取消旧传输，旧线程尚未退出不叠加重试。
+  重复门自身的未执行拒绝不是新结果，不清空或挤掉原观测；完整拒绝仍归档并返回模型。
+  拒绝正文携带原计数和换路建议，不新增完成门或慢流时限；非文本读取说明能力边界，不自动转图。
   明确零副作用失败可交模型修参；部分写入/执行效果未知仍保持 UNKNOWN，不自动重放。
   Shell/controlled_exec 是非交互批处理（stdin=DEVNULL），交互用独立 PTY；后台句柄不是 PTY 句柄。
 - 普通子代理直接创建并自动运行；角色/权限快照决定是否可递归，不能解析 goal 扩权。
@@ -89,7 +102,12 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
   child 等待、审批、UNKNOWN 保留各自生命周期。UI 清单读 display_plan 的 exact generation/revision；
   历史页只恢复正文，不能用旧 Todo 覆盖当前计划。
 - 每个代理最多一个未结束 Goal；主子各自归属，普通派工可不附目标，Todo 可选。方向键选 Goal、Enter 编辑，
-  Ctrl+S 保存、Ctrl+G 放弃、Esc 停止当前代理。内容版本冲突不覆盖草稿，保存不隐式恢复暂停目标。
+  Ctrl+S 保存、Ctrl+G 放弃。主代理 Esc 中断当前轮，active Goal 沿原 wake 安全续接；
+  `/stop` 或 `/goal pause` 才暂停目标，普通消息不隐式恢复。子代理 Esc 保留当前停止语义。
+  后台普通插话由精确 running claim 验证，复用原持久回执；合法新 attempt 与 TaskRun 重开同事务提交，旧关闭事件保留。
+  同任务追问只更换消息 request ID；主执行入口将 run/attempt 成对绑定到真实数据库身份，工具不能拿新消息编号冒充原 run。
+  内容版本冲突不覆盖草稿，保存不隐式恢复暂停目标；新中断行为的真实 TUI 组合验收仍见 STATUS。
+  Goal 的持久 task 输入编号不是一条普通用户消息；子代理返回先核对精确 Goal 归属，其余请求仍查原历史，不能伪造消息补齐。
   Goal 编号不是当前运行状态；只有精确归属且仍为 active 才可承诺续跑。历史多目标不自动合并或激活，
   并行分工仍有独立开放问题，不能以单 Goal 和编辑器验收代替整项关闭。
 - 模型不再请求工具就结束本轮；turn_end.reason 不证明项目完成。失败原因、未验证范围需模型如实说明，

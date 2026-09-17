@@ -481,3 +481,16 @@ def test_full_pending_view_queued_label_is_truthful_after_terminal() -> None:
     status = _status_lines(store)
     assert status[0] == "• 当前回合已结束；以下插话未获模型消费确认", status
     assert not any("下一次工具调用" in line for line in status)
+
+
+def test_background_input_keeps_active_receipt_until_background_ends() -> None:
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("background-receipt")
+    runtime.enqueue_active_turn_input("background-message", "补充中文标签要求")
+    runtime.update_background_activity(1, {"main_activity": {"task_id": "goal-task"}})
+    active = _status_lines(runtime.store)
+    assert any("下一次工具调用" in line for line in active), active
+    assert not any("回合已结束" in line for line in active), active
+    runtime.update_background_activity(0, {})
+    assert any("回合已结束" in line for line in _status_lines(runtime.store))

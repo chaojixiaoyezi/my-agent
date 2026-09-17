@@ -112,6 +112,120 @@ def test_runtime_no_progress_threshold_zero_is_unlimited() -> None:
     assert decision.allowed is True
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_runtime_denial_keeps_original_observation_and_explains_recovery(failed) -> None:
+    from agent_py_agent.agent.tooling.executor import _decision_message
+
+    agent = _agent()
+    params = _params(task_attributes={"readonly_no_progress_threshold": 1, "repeat_fail_threshold": 1})
+    payload = {"tool": "list_tools"}
+    for _ in range(3):
+        record_tool_guard_observation(
+            agent, params, payload,
+            ToolHandlerOutcome("list_tools", not failed, "same", error_code="TOOL_TIMEOUT" if failed else ""),
+        )
+    original = tool_guardrail_records(agent)
+    for _ in range(270):
+        decision = _decision(agent, params, payload)
+        assert not decision.allowed
+        message = _decision_message(decision)
+        assert "重复诊断" in message
+        assert "本次工具未执行" in message
+        assert "而不是原样重试" in message
+        assert decision.evidence["gate"]["block_task"] is False
+        call = _canonical_call(agent, params, payload)
+        result = ToolResult.failed(
+            call, message, error_code=decision.reason_codes[0], failure_stage="authorization",
+            facts=ToolFailureFacts(handler_executed=False),
+        )
+        _record_tool_guard_observation(agent, params, call, result)
+    assert tool_guardrail_records(agent) == original
+    assert _decision(agent, params, {"tool": "web_search", "query": "a different step"}).allowed
+
+
+def test_runtime_unrelated_failure_does_not_forget_read_result() -> None:
+    agent = _agent()
+    params = _params(task_attributes={"readonly_no_progress_threshold": 1})
+    for _ in range(3):
+        record_tool_guard_observation(agent, params, {"tool": "list_tools"}, ToolHandlerOutcome("list_tools", True, "same"))
+    record_tool_guard_observation(
+        agent, params, {"tool": "web_search", "query": "another step"},
+        ToolHandlerOutcome("web_search", False, "offline", error_code="TOOL_TIMEOUT"),
+    )
+    assert not _decision(agent, params, {"tool": "list_tools"}).allowed
+
+
+def test_guardrail_recovery_survives_canonical_record_and_native_projection(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        ToolCallRecordParams,
+        ToolLoopService,
+    )
+    from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn
+    from agent_py_agent.agent.tooling.executor import _decision_message
+    from agent_py_agent.tests.test_tool_output_externalizer import _tool_loop_params
+
+    agent = _agent()
+    params = _params(task_attributes={"readonly_no_progress_threshold": 1})
+    payload = {"tool": "list_tools"}
+    for _ in range(3):
+        record_tool_guard_observation(agent, params, payload, ToolHandlerOutcome("list_tools", True, "same"))
+    decision = _decision(agent, params, payload)
+    call = _canonical_call(agent, params, payload)
+    result = ToolResult.failed(
+        call, _decision_message(decision), error_code=decision.reason_codes[0],
+        failure_stage="authorization", facts=ToolFailureFacts(handler_executed=False),
+    )
+    loop_params = _tool_loop_params(request_id=params.request_id, run_id=call.run_id, task_id=params.task_id)
+    loop_params.tool_ir_history.append(AssistantTurn(text="", tool_calls=[call]))
+    ToolLoopService(SimpleNamespace(root=tmp_path))._record_tool_call(ToolCallRecordParams(
+        params=loop_params, tool_rounds=1, idx=1, call=call, result=result,
+    ))
+    native = AnthropicMessageAdapter().to_provider_messages(loop_params.tool_ir_history)
+    block = native[-1]["content"][0]
+    assert block["is_error"] is True
+    assert "相同结果 3 次" in block["content"]
+    assert "而不是原样重试" in block["content"]
+    assert "此拒绝不证明任务完成" in block["content"]
+    assert any("而不是原样重试" in entry for entry in loop_params.tool_context)
+    assert loop_params.archive_tool_calls[-1]["handler_executed"] is False
+
+
+def test_real_shell_executor_stops_repeats_and_accepts_progress(tmp_path) -> None:
+    from agent_py_agent.tests.test_tool_gateway_contract import _registry
+
+    (tmp_path / "source.txt").write_text("initial", encoding="utf-8")
+    registry = _registry(tmp_path, shell_output_max_chars=2000)
+    snapshot = registry.runtime_snapshot(run_id="run-1")
+    agent = SimpleNamespace(tools=registry.tools, local_store=None)
+    params = _params(task_attributes={"readonly_no_progress_threshold": 1})
+    params.tool_runtime_snapshot = snapshot
+    outcomes = []
+    for index in range(15):
+        call = canonical_test_call(snapshot, "run_command", {"command": "ls -l source.txt"}, call_id=f"check-{index}")
+        execution = registry.execute_tool(
+            call, runtime_snapshot=snapshot, write_boundary=write_boundary_with_runtime_ledger(agent, params),
+        )
+        _record_tool_guard_observation(agent, params, execution.call, execution.result)
+        outcomes.append(execution.result)
+    assert [result.handler_executed for result in outcomes] == [True] * 3 + [False] * 12
+    assert all(result.ok for result in outcomes[:3])
+    assert all(result.error_code == "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED" for result in outcomes[3:])
+    assert all("而不是原样重试" in result.output for result in outcomes[3:])
+    assert len(tool_guardrail_records(agent)) == 3
+    call = canonical_test_call(snapshot, "write_file", {"path": "source.txt", "content": "changed"}, call_id="change")
+    execution = registry.execute_tool(
+        call, runtime_snapshot=snapshot, write_boundary=write_boundary_with_runtime_ledger(agent, params),
+    )
+    assert execution.result.ok
+    _record_tool_guard_observation(agent, params, execution.call, execution.result)
+    call = canonical_test_call(snapshot, "run_command", {"command": "ls -l source.txt"}, call_id="after-change")
+    execution = registry.execute_tool(
+        call, runtime_snapshot=snapshot, write_boundary=write_boundary_with_runtime_ledger(agent, params),
+    )
+    assert execution.result.ok and execution.result.handler_executed
+
+
 def test_runtime_repeated_read_guard_resets_after_local_progress() -> None:
     agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 1})
@@ -299,7 +413,7 @@ def test_repeated_mutating_success_warns_without_changing_permission() -> None:
         agent, params, payload, ToolHandlerOutcome("write_file", True, '{"written":4}')
     ) for _ in range(24)]
 
-    assert [index + 1 for index, warning in enumerate(warnings) if warning] == [3, 6, 12, 24]
+    assert [index + 1 for index, warning in enumerate(warnings) if warning] == list(range(3, 25, 3))
     assert all(len(warning) <= 500 for warning in warnings)
     assert "结果相同不代表没有副作用" in warnings[2]
     decision = _decision(agent, params, payload)
@@ -330,7 +444,7 @@ def test_shell_repeat_observation_uses_real_policy_without_executing_commands(tm
             agent, params, {"tool": "read_artifact", "artifact_ref": str(index)},
             ToolHandlerOutcome("read_artifact", True, f"page {index}"),
         )
-    assert [index + 1 for index, warning in enumerate(warnings) if warning] == [5, 10, 20, 40]
+    assert [index + 1 for index, warning in enumerate(warnings) if warning] == list(range(5, 58, 5))
     assert tool_effect_for_runtime_policy(shell.runtime_policy, arguments) == "mutating"
 
 
@@ -419,7 +533,35 @@ def test_repeated_success_records_remain_bounded(threshold) -> None:
             ToolHandlerOutcome("write_file", True, "same result"),
         ))
     assert len(tool_guardrail_records(agent)) == 256
-    assert sum(bool(warning) for warning in warnings) <= 9
+    assert sum(bool(warning) for warning in warnings) == 400 // threshold
+    assert tool_guardrail_records(agent)[-1]["repeated_success_count"] == 400
+
+
+def test_repeat_observation_uses_full_raw_digest_not_random_archive_ref(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.tool_call_archive_record import (
+        archive_tool_output_projection,
+    )
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    agent = _agent()
+    agent.root = tmp_path
+    agent.config = AgentConfig(tool_output_externalize_min_chars=10, tool_output_preview_chars=20)
+    params = _params(task_attributes={"repeated_success_hint_threshold": 3})
+    snapshot = _snapshot(agent, params)
+    results = []
+    warnings = []
+    for index in range(4):
+        call = canonical_test_call(snapshot, "write_file", {"path": "a", "content": "same"}, call_id=f"c{index}")
+        output = "prefix\n" * 50 + ("same" if index < 3 else "changed tail")
+        projection = archive_tool_output_projection(agent, params, call, ToolHandlerOutcome("write_file", True, output))
+        result = ToolResult.succeeded(call, facts=ToolSuccessFacts(
+            content_blocks=projection.content_blocks, metadata=projection.metadata, refs=projection.refs,
+        ))
+        results.append(result)
+        warnings.append(_record_tool_guard_observation(agent, params, call, result))
+    assert results[0].output != results[1].output  # 相同正文的不同归档 ID。
+    assert [bool(w) for w in warnings] == [False, False, True, False]
+    assert tool_guardrail_records(agent)[-1]["repeated_success_count"] == 1
 
 
 def test_repeated_success_observation_is_run_scoped_even_when_agent_reused() -> None:

@@ -27,11 +27,14 @@ def _number(value: object) -> float | None:
     return result if math.isfinite(result) and result >= 0 else None
 
 
-# LLM: 所有通道共用该纯数字 schema；缓存缺报必须保持 None，不得从速度或模型名猜命中。
-# 函数用途: 清洗统计条数据，拒绝未知 schema 和任意嵌套正文。
+# LLM: 所有通道共用数值及原因码白名单；缓存缺报保持 None，诊断只描述客户端变化，禁止推断服务端缓存。
+# 函数用途: 清洗统计条及最近缓存诊断，拒绝未知 schema 和任意嵌套正文。
 def public_model_metrics(value: object) -> dict[str, object]:
+    from ..backends.cache_diagnostics import public_cache_diagnostic
+
     if not isinstance(value, Mapping) or value.get("schema") != _SCHEMA:
         return {}
+    diagnostic = public_cache_diagnostic(value.get("cache_diagnostic"))
     return {
         "schema": _SCHEMA,
         **{key: int(_number(value.get(key)) or 0) for key in _COUNTS},
@@ -40,6 +43,7 @@ def public_model_metrics(value: object) -> dict[str, object]:
         "output_tps": _number(value.get("output_tps")),
         "pending": value.get("pending") is True,
         "totals_known": value.get("totals_known") is True,
+        **({"cache_diagnostic": diagnostic} if diagnostic else {}),
     }
 
 
@@ -65,11 +69,11 @@ def model_metrics_from_thread(store: object, thread_id: str) -> dict[str, object
         return {}
 
 
-# LLM: 每个工作片仅首次读取既有用量事件，排除当前 request/run 后与其内存账本相加；不重复计算当前快照。
+# LLM: 每个工作片首次读取既有事件，仅排除相同统计代次的 request/run；重启旧账仍加入基数。
 # 函数用途: 取得本会话以前已经落账的消耗基数，长输出的每个 token 不会触发历史扫描。
-def _previous_totals(agent: object, params: object, thread_id: str) -> dict[str, object]:
+def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_id: str) -> dict[str, object]:
     state = getattr(params, "live_archive_state", None)
-    key = (thread_id, str(getattr(params, "request_id", "") or ""), str(getattr(params, "run_id", "") or ""))
+    key = (thread_id, str(getattr(params, "request_id", "") or ""), str(getattr(params, "run_id", "") or ""), usage_scope_id)
     cached = state.get("_model_metrics_baseline") if isinstance(state, dict) else None
     if isinstance(cached, tuple) and cached[0] == key:
         return dict(cached[1])
@@ -80,7 +84,7 @@ def _previous_totals(agent: object, params: object, thread_id: str) -> dict[str,
             events, errors = reader(thread_id)
             totals["totals_known"] = not errors
             for event in events:
-                if (event.request_id, event.run_id) == key[1:]:
+                if (event.request_id, event.run_id, str(event.model_calls.get("usage_scope_id") or "")) == key[1:]:
                     continue
                 _add_usage(totals, event.model_calls)
         except (OSError, RuntimeError, TypeError, ValueError):
@@ -129,7 +133,7 @@ def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count
     summary = summary_reader(request_id=str(getattr(params, "request_id", "") or ""), run_id=str(getattr(params, "run_id", "") or "")) or {}
     state = getattr(params, "live_archive_state", None)
     previous = state.get("_model_metrics_current", {}) if isinstance(state, dict) else {}
-    totals = _previous_totals(agent, params, thread_id)
+    totals = _previous_totals(agent, params, thread_id, str(summary.get("usage_scope_id") or ""))
     _add_usage(totals, summary)
     payload = {
         **previous, **totals, "schema": _SCHEMA,
@@ -156,8 +160,8 @@ def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count
     return public
 
 
-# LLM: 速度取 exact call_id 已结束调用的 provider 输出与首 token 后耗时；缓存只有原始响应明确报告时才展示。
-# 函数用途: 得到最近一次结算的缓存百分比和平均输出速度，不把等待首字时间当生成速度。
+# LLM: 速度及缓存来自 exact call_id 已结束调用；同一账本记录的请求比较只写显示副本，不修改模型输入。
+# 函数用途: 得到最近结算的缓存、速度和前缀变化原因；随已有 thread 统计持久保存，不建立第二套账本。
 def _last_response_metrics(response: object, ledger: object, call_id: str) -> dict[str, object]:
     from ..agent_core.model.usage import (
         input_token_usage,
@@ -177,4 +181,5 @@ def _last_response_metrics(response: object, ledger: object, call_id: str) -> di
     record = next((record for record in ledger.records() if record.call_id == call_id), None)
     elapsed = (record.finished_at - record.first_token_at) if record and record.finished_at is not None and record.first_token_at is not None else 0
     output = output_token_usage(response)
-    return {"cache_percent": cache, "output_tps": output / elapsed if output is not None and elapsed >= 0.1 else None}
+    return {"cache_percent": cache, "output_tps": output / elapsed if output is not None and elapsed >= 0.1 else None,
+            "cache_diagnostic": record.metadata.get("cache_diagnostic") if record else None}

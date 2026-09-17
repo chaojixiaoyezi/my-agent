@@ -430,6 +430,12 @@ class _TuiBackgroundActivityController:
         with self._owner._lock:
             return self._state.count > 0
 
+    # LLM: 此 ID 是显示快照中的目标提示，不是后台执行权；服务端须重新核对 owner、任务与 claim。
+    # 函数用途: 原子读取当前后台主任务，活动归零时不再把新消息发给已结束任务。
+    def input_target(self) -> str:
+        with self._owner._lock:
+            return str(self._state.main_activity.get("task_id") or "") if self._state.count > 0 else ""
+
     # LLM: Count, one focused-agent row, and direct-child rows share one display
     # projection. A valid zero count retains terminal rows for read-only
     # navigation; only a zero count with no agent rows removes the block.
@@ -1420,6 +1426,11 @@ class TuiRuntime(
             {"text": str(text)},
             request_id=normalized,
         )
+
+    # LLM: 前后台共用输入回执；此读取只借用活动投影，不创建第二份执行状态或授予插话权限。
+    # 函数用途: 向消息投递入口提供后台任务提示，避免把正在执行时的补充排到整个目标之后。
+    def background_input_target(self) -> str:
+        return self._background_activity.input_target()
 
     # LLM: Active-turn input stays in a session-local receipt map until the runtime emits the
     # same opaque client id at the real model-injection boundary; acceptance alone is not proof.

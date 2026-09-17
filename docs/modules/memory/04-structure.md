@@ -1,5 +1,22 @@
 # Memory Structure
 
+## 缓存前缀诊断
+
+`backends/cache_diagnostics.py` 在 HTTP 实际出站处生成摘要，`ModelCallLedger` 按同 thread 比较。
+只追加、历史缩短及 system/tools/model/选项变化分开，超过 512 消息明确部分比较；不改变 Compact 或记忆。
+配置 `cache_diagnostics_enabled` 控制采集，关闭不计算摘要，不新增另一份用量账。
+
+## 前台优先与后台请求预算
+
+- 同 Gateway 内按实际后端 HTTP origin 登记完整 `agent.run` 的占用，覆盖工具间隙及 Compact；
+  普通 Curator 在同端点被占用时返回 busy，不推进游标、不清 pending、不丢消息。
+  `pre_compact` 需要打通屏障，显式管理运行也保留；前台之间不串行化。
+- 这是维护启动时的延后，不保证独占模型。已在运行的后台请求、外部程序和不同代理地址的同一服务器
+  不由此机制抢占或推断。客户端也不能保证服务端缓存容量及保留时间。
+- Curator 自适应预算通过 request-local deadline 进入 HTTP 层，不再被默认 240 秒提前截断；
+  普通前台流式超时不改变。超时先关闭本调用传输，旧线程仍存活时禁止同后端叠加重试。
+  非协作后端保留失败诊断，不强杀线程，晚到结果没有提交记忆权限；外部服务是否停止计算由服务端决定。
+
 ## 2026-09-13 R285 后台历史种子三态 + 任务范围 + 递归等待对称
 
 1. **读不到历史不再静默降级**：`_background_conversation_history_seed` 返回三态

@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 
 from .authority import (
-    CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
     CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR,
     CONVERSATION_CANCELLATION_SCOPE_ATTR,
     CONVERSATION_EXECUTION_CWD_ATTR,
@@ -449,9 +448,8 @@ def _set_current_task_workspace(
     agent._current_run_task_workspace = str(workspace)
 
 
-# LLM: Exact terminal workspace binding forks a fresh execution generation unless a persisted /goal
-# requires its original task id.  A new active turn retains persistent history and working directory.
-# 函数用途: 激活已绑定目录；普通任务续做不改变旧终态，特殊持续目标才原位恢复。
+# LLM: active Goal 才可原位续接；暂停/阻塞/预算状态须由显式控制恢复，工作工具不能偷偷激活目标。
+# 函数用途: 激活有执行授权的既有目录；普通已结束工作建立新代次，暂停目标不变。
 def _activate_reusable_workspace_link(agent: object, store: object, link: object):
     prior_status = str(getattr(link, "status", "") or "").strip().lower()
     if prior_status not in {
@@ -470,18 +468,6 @@ def _activate_reusable_workspace_link(agent: object, store: object, link: object
         return None
     if reopened is None:
         return None
-    if not _resume_matching_bound_goal(agent, store, reopened):
-        try:
-            store.update_task_status(
-                {
-                    "task_id": link.task_id,
-                    "status": prior_status,
-                    "expected_status": "active",
-                }
-            )
-        except Exception:
-            pass
-        return None
     try:
         registry = agent.local_store.task_registry
         current = registry.lookup_task(link.task_id)
@@ -493,8 +479,9 @@ def _activate_reusable_workspace_link(agent: object, store: object, link: object
     return reopened
 
 
+# LLM: 三态分别表示 active Goal 原位续接、普通新代次、不可自动续接；不写 Goal 状态。
+# 函数用途: 检查精确目标是否允许恢复这份任务，不把用户新聊天当作 resume。
 def _bound_goal_requires_in_place_resume(store: object, link: object) -> bool | None:
-    """Return whether an exact paused /goal record owns the bound terminal task."""
     try:
         goal = store.load_goal(
             str(getattr(link, "thread_id", "") or ""),
@@ -506,12 +493,10 @@ def _bound_goal_requires_in_place_resume(store: object, link: object) -> bool | 
         getattr(link, "task_id", "") or ""
     ):
         return False
-    return str(getattr(goal, "status", "") or "").strip().lower() in {
-        "active",
-        "blocked",
-        "paused",
-        "usage_limited",
-    }
+    status = str(getattr(goal, "status", "") or "").strip().lower()
+    if status == "active":
+        return True
+    return False if status == "complete" else None
 
 
 def _continue_terminal_link_as_new_execution(agent: object, store: object, link: object):
@@ -615,42 +600,6 @@ def _terminal_successor_task_id(
         if status != "superseded":
             return ""
     return ""
-
-
-# LLM: 只按已经核对的任务绑定恢复目标并写回精确 Goal ID；续跑交给回合结束后的唯一 wake 入口。
-# 函数用途: 用户明确续接原任务时恢复暂停目标，不从消息文字猜目标，也不额外排第二条续跑事件。
-def _resume_matching_bound_goal(agent: object, store: object, link: object) -> bool:
-    """Exact workspace binding reactivates its paused goal without parsing user prose."""
-    thread_id = str(getattr(link, "thread_id", "") or "").strip()
-    task_id = str(getattr(link, "task_id", "") or "").strip()
-    current = getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None) if current is not None else None
-    if not thread_id or not task_id or not isinstance(attrs, dict):
-        return False
-    try:
-        with store.goal_transition_guard(thread_id):
-            goal = store.load_goal(thread_id, task_id=task_id)
-            if goal is None or str(getattr(goal, "task_id", "") or "").strip() != task_id:
-                return True
-            status = str(getattr(goal, "status", "") or "").strip().lower()
-            if status in {"active", "complete"}:
-                return True
-            if status not in {"paused", "blocked", "usage_limited"}:
-                return False
-            updated = store.update_goal(
-                {
-                    "thread_id": thread_id,
-                    "goal_id": goal.goal_id,
-                    "status": "active",
-                    "expected_status": status,
-                }
-            )
-    except Exception:
-        return False
-    if updated is None or str(getattr(updated, "status", "") or "").strip().lower() != "active":
-        return False
-    attrs["thread_goal_id"] = str(getattr(updated, "goal_id", "") or "")
-    return True
 
 
 def _supersede_prior_current(
@@ -864,9 +813,8 @@ def _append_execution_source(
         sources_by_task_id.setdefault(selected_id, []).append(source)
 
 
-# LLM: 仅由正常 runtime turn 终态调用；此函数自身不读取最终回复正文。后台
-# child lifecycle 回合还必须来自终态树快照，不能用采样期间才变化的新状态误关根任务。
-# 函数用途: 在没有待处理引导、活跃目标、未终态子代理或陈旧阶段快照时关闭普通会话任务。
+# LLM: 仅由正常 runtime turn 终态调用；当前子树和未读信封是权威，不用工作片开始时的冻结阶段否定已接收结果。
+# 函数用途: 在没有待处理引导、活跃目标、未终态子代理或未读事件时关闭普通会话任务，不检查回复质量。
 def complete_current_conversation_task(
     agent: object,
     task_attributes: object,
@@ -889,8 +837,6 @@ def complete_current_conversation_task(
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     run_task_id = str(current_task_id or "").strip()
     if not run_source:
-        return False
-    if _background_child_phase_requires_fresh_turn(attrs, run_source):
         return False
     # 子代理继承父 conversation_task_id 时，不得关闭父任务；如果系统为子代理
     # 建了与其自身 task_id 完全相同的会话链接，则允许它关闭自己的链接，避免
@@ -975,21 +921,6 @@ def complete_current_conversation_task(
         )
     attrs["conversation_task_completed"] = True
     return True
-
-
-# LLM: This is an event-freshness fence, not an acceptance gate. A turn that
-# started from a partial child tree may report or integrate what it saw, but a
-# later child terminal edge must get its own model sampling boundary before the
-# durable root can close.
-# 函数用途: 防止后台模型只看见部分子代理完成，却因采样期间最后一个子代理结束而误关根任务。
-def _background_child_phase_requires_fresh_turn(
-    attrs: dict[str, object],
-    run_source: str,
-) -> bool:
-    if run_source != "background_main_agent":
-        return False
-    phase = str(attrs.get(CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR) or "").strip()
-    return phase in {"subagents_active", "subagent_state_unknown"}
 
 
 # LLM: Child lifecycle envelopes are durable parent-mailbox obligations. A task

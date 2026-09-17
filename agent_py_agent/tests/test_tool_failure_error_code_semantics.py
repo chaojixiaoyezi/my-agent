@@ -106,14 +106,16 @@ def test_edit_file_same_string_still_invalid_arguments(tmp_path: Path):
     assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
 
 
-def test_edit_file_string_not_found_is_invalid_arguments(tmp_path: Path):
-    # 文件存在但 old_string 匹配不到→这才是"改 old_string"能修的 TOOL_INVALID_ARGUMENTS
+def test_edit_file_string_not_found_is_file_state_conflict(tmp_path: Path):
+    # 参数符合 schema 但旧文本与文件不符，需要先读取，而不是继续猜参数。
     ws = _workspace(tmp_path)
     (ws / "real.py").write_text("alpha\n")
     tool = EditFileTool(ws)
     r = tool.execute({"path": "real.py", "old_string": "zzz_not_present", "new_string": "b"})
     assert r.ok is False
-    assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
+    assert r.error_code == "EDIT_TARGET_MISMATCH", r.error_code
+    assert r.result_envelope["recovery"]["tool"] == "read_file"
+    assert "alpha" in r.output
 
 
 # ---- apply_patch:Update/Delete 目标文件不存在→PATH_NOT_FOUND;解析/上下文错→TOOL_INVALID_ARGUMENTS ----

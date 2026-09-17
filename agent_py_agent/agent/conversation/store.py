@@ -2247,16 +2247,16 @@ def _model_usage_identity_payload(event: ThreadModelUsageEvent) -> dict[str, Any
     return payload
 
 
-# LLM: Usage snapshot subtraction is scoped only by immutable structured
-# identities; prompt text, cwd, display names and model prose never participate.
-# 函数用途: 生成模型用量增量账的精确会话/请求/运行范围键。
+# LLM: 新账按累计容器代次相减，source 仅供诊断；缺少代次的历史账维持原范围，不隐式迁移费用。
+# 函数用途: 区分重复提交与重启后的新调用，前后台切换不再重复计费。
 def _model_usage_event_scope(event: ThreadModelUsageEvent) -> tuple[str, ...]:
+    scope_id = str(event.model_calls.get("usage_scope_id") or "")
     return (
         event.thread_id,
         event.request_id,
         event.run_id,
         event.task_id,
-        event.source,
+        "scope:" + scope_id if scope_id else "legacy-source:" + event.source,
     )
 
 
@@ -2310,6 +2310,8 @@ def _model_usage_snapshot_delta(
         "estimated_usage_call_count",
     )
     delta: dict[str, Any] = {"schema": "model_call_summary.v1"}
+    if snapshot.get("usage_scope_id"):
+        delta["usage_scope_id"] = snapshot["usage_scope_id"]
     for key in additive_fields:
         delta[key] = _monotonic_usage_delta(snapshot.get(key), prior.get(key), key)
     delta["status_counts"] = _usage_mapping_delta(
@@ -2359,7 +2361,7 @@ def _sum_model_call_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]
     }
     for summary in summaries:
         for key, value in summary.items():
-            if key in {"schema", "ledger_projection", "status_counts", "usage_breakdown"}:
+            if key in {"schema", "usage_scope_id", "ledger_projection", "status_counts", "usage_breakdown"}:
                 continue
             if key in {"backends", "models"}:
                 known = {str(item) for item in total[key] if str(item)}

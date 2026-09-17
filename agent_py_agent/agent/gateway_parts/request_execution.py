@@ -2165,19 +2165,29 @@ def _require_gateway_conversation_ready(
         raise ConversationPersistenceError("会话记录当前不可用，请稍后重试")
 
 
-# LLM: Reuse a persisted actual task on same-turn resume/overflow, never a display task's cwd.
-# The callback commits each new DB attempt before model entry and survives normal RunParams use.
-# 函数用途: 为本回合构造运行参数；恢复沿用真实 task，首次绑定由 core 写回，用户工作目录不受影响。
+# LLM: 模型前统一 canonical task 与 RuntimeDB 身份；active Goal 跨前台/后台保持同一任务，不以请求 ID 另建树。
+# 函数用途: 构造精确运行参数，已发布的恢复身份优先，未发布时沿已经校验的活动任务或 Goal 绑定。
 def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     request = inputs.request
     context = inputs.context
     conversation = inputs.conversation
+    attrs = _gateway_run_task_attributes(conversation, request, context.request_id)
+    task_id = str(_gateway_runtime_authority(request, context.request_id).get("task_id") or "")
+    selected_task_id = str((attrs or {}).get("conversation_task_id") or "")
+    goal = conversation.thread_goal or {}
+    if not selected_task_id and goal.get("status") == "active":
+        selected_task_id = str(goal.get("task_id") or "")
+    if task_id and selected_task_id and task_id != selected_task_id:
+        from .request_errors import ConversationTaskBindingError
+
+        raise ConversationTaskBindingError("当前请求的执行身份与会话任务绑定不一致")
+    task_id = task_id or selected_task_id
     return RunParams(
         inject=_gateway_injections(request, conversation),
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
         save=bool(request.get("save", True)),
         request_id=context.request_id,
-        task_id=str(_gateway_runtime_authority(request, context.request_id).get("task_id") or ""),
+        task_id=task_id,
         attempt_id=str(request.get("execution_attempt_id") or "").strip() or context.request_id,
         source="gateway",
         resume_context=_gateway_resume_context(request, conversation),
@@ -2187,11 +2197,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         recovery_content_paths=[str(context.request_path), str(context.response_path)],
         on_chunk=context.on_chunk,
         root_user_prompt=inputs.prompt,
-        task_attributes=_gateway_run_task_attributes(
-            conversation,
-            request,
-            context.request_id,
-        ),
+        task_attributes=attrs,
         context_scope="conversation" if conversation.thread_id else "default",
         carried_archive_tool_calls=[dict(item) for item in inputs.carried_archive_tool_calls],
         carried_active_turn_user_inputs=[
@@ -3107,10 +3113,8 @@ def _gateway_workspace_task(
     )
 
 
-# LLM: Selection priority is entirely structured. Exact request lineage and Goal identity may
-# select a terminal workspace; otherwise only a currently active task is eligible and ambiguity
-# yields no selection rather than a recency/artifact guess.
-# 函数用途: 按请求绑定、持续目标、当前活跃任务的顺序选择工作区链接，不读取用户措辞或产物多少。
+# LLM: 精确请求可恢复原现场；新消息只绑定 active Goal，不将暂停目标或历史 sticky 指针视作执行授权。
+# 函数用途: 按结构化任务归属选择工作区，暂停后的普通聊天仍能进行且不恢复目标。
 def _select_gateway_workspace_link(
     *,
     selectable: list[object],
@@ -3136,13 +3140,16 @@ def _select_gateway_workspace_link(
             source="bound request",
         ), True
     goal_task_id = str((thread_goal or {}).get("task_id") or "").strip()
-    if goal_task_id:
+    if goal_task_id and (thread_goal or {}).get("status") == "active":
         return _required_gateway_workspace_link(
             allowed,
             goal_task_id,
             load_errors,
             source="thread goal",
         ), True
+    if goal_task_id:
+        allowed.pop(goal_task_id, None)
+        selectable = [link for link in selectable if getattr(link, "task_id", "") != goal_task_id]
     sticky_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
     sticky = allowed.get(sticky_id)
     if sticky is not None and _gateway_workspace_link_active(sticky):
@@ -3176,9 +3183,8 @@ def _gateway_bound_request_task_id(
     return str(runtime.get("task_id") or "").strip()
 
 
-# LLM: Exact request/Goal identities fail closed when their task link is missing or retired;
-# silently falling back to another workspace could redirect writes across unrelated tasks.
-# 函数用途: 读取必须存在且可复用的精确任务链接；损坏时登记会话加载错误。
+# LLM: 必需任务绑定不可用是执行状态冲突，不是聊天历史损坏；不能换目录猜测恢复。
+# 函数用途: 精确链接缺失或已取消时返回独立诊断，避免误报会话记录不可读。
 def _required_gateway_workspace_link(
     allowed: dict[str, object],
     task_id: str,
@@ -3189,13 +3195,9 @@ def _required_gateway_workspace_link(
     selected = allowed.get(str(task_id or "").strip())
     if selected is not None:
         return selected
-    load_errors.append(
-        _conversation_error(
-            ValueError(f"{source} workspace task is missing or not reusable: {task_id}"),
-            "gateway.conversation.workspace_task",
-        )
-    )
-    return None
+    from .request_errors import ConversationTaskBindingError
+
+    raise ConversationTaskBindingError(f"{source} workspace task is missing or not reusable: {task_id}")
 
 
 # LLM: Only active means an ordinary new turn still belongs to a live execution. Interrupted and
@@ -3351,8 +3353,7 @@ def _ensure_gateway_conversation_index(
             )
 
 
-# LLM: Structured completion envelopes and artifact refs supplement the canonical transcript;
-# exact ids/refs are facts, while child prose remains integration input rather than lifecycle authority.
+# LLM: 精确 ids/refs 是运行事实，正文仍是模型上下文；后续纠偏与 Goal 同属会话，不要求斜杠命令才能被理解。
 # 函数用途: 把同一 thread 的历史、直属子代理交付、近期产物和工作索引渲染成有边界的模型上下文。
 def _conversation_prompt_section(
     conversation: _GatewayConversationContext,
@@ -3410,7 +3411,7 @@ def _conversation_prompt_section(
                 "## Named Persistent Work",
                 "- 下面 JSON 是当前会话仍未结束的命名 Audit/Goal，只提供名称与状态，不指定本轮要继续哪一项。",
                 "- 用户明确要求停止其中一个精确名称时，调用 stop_named_work；不要改用普通任务列表或定时任务工具。",
-                "- 普通 /stop 只打断前台回复，不会停止这些命名工作。",
+                "- /stop 暂停前台任务及其 Goal，不影响独立的后台 Audit；Esc 只中断当前轮。",
                 json.dumps(
                     list(conversation.named_work),
                     ensure_ascii=False,
@@ -3423,8 +3424,9 @@ def _conversation_prompt_section(
         lines.extend(
             [
                 "## Persistent Goal",
-                "- 这是同一会话中独立运行的 /goal 状态，只是背景事实；当前普通用户消息不会自动成为目标引导。",
-                "- 用户要改变正在运行的目标时应使用 /btw；暂停、恢复或清除使用对应 /goal 控制命令。",
+                "- 这是当前会话的目标状态；后续用户消息可能是纠偏、补充要求或临时提问，请结合历史理解并回应。",
+                "- 相关纠偏不必写入 Goal 才生效；需求实质变化可用 update_goal 更新正文。不要要求用户必须用 /btw 才能纠偏。",
+                "- 暂停、恢复、清除仍由显式 /goal 控制；普通聊天和目标正文编辑不改变暂停状态。",
                 f"- {json.dumps(conversation.thread_goal, ensure_ascii=False, sort_keys=True)}",
             ]
         )

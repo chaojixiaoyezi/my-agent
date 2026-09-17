@@ -306,8 +306,8 @@ def reconcile_gateway_steer_delivery(
     return _reconcile_existing_steer_receipt(paths, scope, receipt, turn_id)
 
 
-# LLM: Every adapter reaches the same typed control service; no IM-specific prompt branch is allowed.
-# 函数用途：执行一条已解析的会话控制命令，并返回可直接回复用户的结果。
+# LLM: 每个通道使用同一结构化控制；interrupt 保留 active Goal，普通 stop 才暂停，不解析聊天正文。
+# 函数用途：执行即时命令并返回确认，目标续接仍受同一会话执行锁保护。
 def execute_gateway_conversation_control(
     agent: object,
     paths: GatewayPaths,
@@ -371,14 +371,19 @@ def execute_gateway_conversation_control(
                 "检测到多个冲突的活动回合，未猜测停止其中一个；请先让 Gateway 恢复器收口。",
             )
         if live_requests:
-            return _stop_live_window_request(agent, paths, live_requests[0], scope)
+            return _stop_live_window_request(
+                agent, paths, live_requests[0], scope,
+                interrupt_only=command.operation == "interrupt",
+            )
         # 会话运行时 interrupts the session's authoritative active turn.  Our
         # foreground request may already have yielded while its durable root
         # waits for children, so the ConversationThread active-task index—not
         # an ephemeral process/claim probe—owns this fallback.
         live_task = _active_conversation_task(agent, scope, ordinary_only=True)
         if live_task is not None:
-            return _stop_active_task(agent, live_task, scope)
+            return _stop_active_task(
+                agent, live_task, scope, interrupt_only=command.operation == "interrupt",
+            )
         return ConversationControlResult(
             "stop",
             False,
@@ -538,9 +543,8 @@ def _pending_exact_audit_requests(
     return selected
 
 
-# LLM: Ordinary input during one live conversation follows the same structured active-turn
-# steer path as explicit /btw; callers must not classify the message text to choose this path.
-# 函数用途：若当前 owner/thread 正在执行，把一条普通用户输入写入该轮；没有活跃轮则返回 None。
+# LLM: 普通输入复用精确回合投递；后台执行须有同任务的 running claim，单有活动链接不能冒充执行权。
+# 函数用途：把前台或后台正在执行时的补充消息交给当前代理，不让后台 Goal 的插话排到整个任务之后。
 def steer_active_conversation_if_running(
     agent: object,
     paths: GatewayPaths,
@@ -555,20 +559,17 @@ def steer_active_conversation_if_running(
     message remains opaque user input.  A caller can safely fall back to a normal
     queued request when this returns ``None`` or a non-success result.
     """
-    # Ordinary input joins only a currently executing Gateway turn.  A durable
-    # task link without a live request is not enough: in that state a fresh
-    # ordinary turn must be queued so it owns a real reply envelope.  Explicit
-    # /btw remains able to steer that durable task through
-    # execute_gateway_conversation_control().
     processing = _active_request(paths, scope)
     if processing is None:
-        return None
-    linked_task_id = _linked_conversation_task_id(processing)
-    active = (
-        _linked_active_task_record(agent, processing, scope, linked_task_id)
-        if linked_task_id
-        else None
-    ) or processing
+        active = _running_background_input_target(agent, scope)
+        if active is None:
+            return None
+    else:
+        linked_task_id = _linked_conversation_task_id(processing)
+        active = (
+            _linked_active_task_record(agent, processing, scope, linked_task_id)
+            if linked_task_id else None
+        ) or processing
     user_input = str(message or "").strip()
     result = _steer_active_request(
         agent,
@@ -577,7 +578,7 @@ def steer_active_conversation_if_running(
         ConversationControlCommand("steer", value=user_input, valid=bool(user_input)),
         scope,
     )
-    if result.ok and active is not processing:
+    if result.ok and processing is not None and active is not processing:
         # `/ask` callers keep polling the live Gateway request that already owns
         # the response stream.  The guidance itself remains bound to the linked
         # durable task so it survives the foreground/background handoff.
@@ -591,6 +592,23 @@ def steer_active_conversation_if_running(
             guidance_dedupe_key=result.guidance_dedupe_key,
         )
     return result
+
+
+# LLM: 只读取本 owner/thread 的原后台执行权；模型文字、Goal active 和 TUI 快照均不能单独证明在运行。
+# 函数用途: 为后台执行的普通插话找到原任务邮箱；缺失、损坏、暂停和独立 Audit 均回到普通排队。
+def _running_background_input_target(
+    agent: object, scope: GatewayControlScope,
+) -> _GatewayRequestRecord | None:
+    active = _active_conversation_task(agent, scope, ordinary_only=True)
+    if active is None:
+        return None
+    store = _request_agent_for_scope(agent, scope).conversation_store
+    thread_id = str(active.payload.get("conversation_thread_id") or "")
+    claim = store.load_background_run_claim(thread_id)
+    if (claim.get("load_error") or claim.get("status") != "running"
+            or str(claim.get("task_id") or "") != _record_id(active)):
+        return None
+    return active
 
 
 # LLM: Resolve authority from trusted scope, then delegate lifecycle semantics to the single goal service.
@@ -1839,13 +1857,15 @@ def _stop_active_request(
     )
 
 
-# LLM: A window stop targets the exact live request before consulting durable task metadata.
-# 函数用途：像停止按钮一样先打断本会话当前执行轮，再清理它绑定的任务和子代理。
+# LLM: 只停止精确活动请求；interrupt_only 传给持久任务控制，不能在传输中丢失而暂停 Goal。
+# 函数用途：先中断本窗口当前执行轮，再按控制语义处理目标和子代理。
 def _stop_live_window_request(
     base_agent: object,
     paths: GatewayPaths,
     live_request: _GatewayRequestRecord,
     scope: GatewayControlScope,
+    *,
+    interrupt_only: bool = False,
 ) -> ConversationControlResult:
     request_id = _record_id(live_request)
     try:
@@ -1881,12 +1901,15 @@ def _stop_live_window_request(
         else None
     )
     if durable is not None:
-        _stop_active_task(
+        result = _stop_active_task(
             base_agent,
             durable,
             scope,
             linked_request_already_stopped=True,
+            interrupt_only=interrupt_only,
         )
+        if interrupt_only:
+            return result
     else:
         if owner_agent is not None:
             _cancel_request_subagents_async(owner_agent, request_id)
@@ -1959,15 +1982,15 @@ def _mark_request_stopping_locked(
     return True, ""
 
 
-# LLM: Durable task stop uses the owner already frozen in the control scope for every task,
-# guidance, registry, and child-run mutation; active payload routing is never re-evaluated.
-# 函数用途: 停止一个持久会话任务及其精确绑定执行轮，并保留可恢复现场。
+# LLM: 控制 owner 已冻结；本轮中断保留活动 Goal 及其子树，明确 stop 才暂停并回收。续接复用同一 wake/claim。
+# 函数用途: 区分中断一轮和暂停整项工作，旧执行退出前不另起执行器。
 def _stop_active_task(
     base_agent: object,
     active: _GatewayRequestRecord,
     scope: GatewayControlScope,
     *,
     linked_request_already_stopped: bool = False,
+    interrupt_only: bool = False,
 ) -> ConversationControlResult:
     task_id = _record_id(active)
     linked_request_id = _record_id(active.linked_request)
@@ -1976,6 +1999,14 @@ def _stop_active_task(
     else:
         linked_request_id, linked_marked = _stop_linked_live_request(active, scope)
     task_interrupted = interrupt_by_name(conversation_request_interrupt_name(task_id))
+    if interrupt_only and _continue_goal_after_turn_interrupt(base_agent, active, scope):
+        if linked_request_id:
+            interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
+        return ConversationControlResult(
+            "stop", True,
+            "已中断本轮；目标仍在进行，当前执行退出后继续。暂停目标请用 /goal pause 或 /stop。",
+            request_id=task_id,
+        )
     try:
         owner_agent, store, stopped = _interrupt_active_task_link(
             base_agent,
@@ -2023,6 +2054,26 @@ def _stop_active_task(
         "已收到停止请求，当前任务正在停止。",
         request_id=task_id,
     )
+
+
+# LLM: 仅精确 active Goal 可保留执行授权；原 claim 未释放时 wake 不能运行，暂停/预算/未知状态不会自动恢复。
+# 函数用途: Esc 后保留原目标和任务，并发布一个去重续接事件；不取消仍独立工作的子代理。
+def _continue_goal_after_turn_interrupt(
+    base_agent: object, active: _GatewayRequestRecord, scope: GatewayControlScope,
+) -> bool:
+    from ..conversation.goal_runtime import raise_goal_continuation_wake
+
+    store = _request_agent_for_scope(base_agent, scope).conversation_store
+    task_id = _record_id(active)
+    thread_id = str(active.payload.get("conversation_thread_id") or "")
+    with store.goal_transition_guard(thread_id):
+        goal = store.load_goal(thread_id, task_id=task_id)
+        if goal is None or goal.task_id != task_id or goal.status != "active":
+            return False
+        raise_goal_continuation_wake(
+            store, goal, channel=scope.channel, conversation_id=scope.conversation_id,
+        )
+        return True
 
 
 # LLM: The task-link CAS operates only in the persisted control owner selected before execution.

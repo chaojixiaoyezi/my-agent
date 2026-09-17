@@ -12,6 +12,7 @@ from ...conversation.authority import (
     CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR,
 )
 from ...conversation.models import SUBAGENT_LIFECYCLE_WAKE_REASONS, WakeSignal
+from ...conversation.process_events import PROCESS_COMPLETION_REASON, reconcile_process_completions
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ..runner.context import current_subagent_run_id
@@ -706,6 +707,7 @@ def _submit_active_turn_user_reply_segment(
 # must never inspect or acknowledge the root main agent's completion queue.
 # 函数用途: 读取只属于当前主代理会话任务的子代理完成事件，防止运行中的兄弟子代理偷走通知。
 def _pending_task_events(agent: object, params: object) -> list[WakeSignal]:
+    reconcile_process_completions(agent)
     store = getattr(agent, "conversation_store", None)
     task_id = _parent_lifecycle_mailbox_task_id(params)
     if store is None or not task_id:
@@ -723,7 +725,7 @@ def _pending_task_events(agent: object, params: object) -> list[WakeSignal]:
         signal
         for signal in signals
         if signal.root_task_id == task_id
-        and str(signal.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS
+        and str(signal.reason or "").strip().lower() in {*SUBAGENT_LIFECYCLE_WAKE_REASONS, PROCESS_COMPLETION_REASON}
         and signal.wake_signal_id not in excluded_ids
     ]
     return matching[:_TASK_EVENT_LIMIT]
@@ -822,6 +824,7 @@ def _task_event_payload(event: WakeSignal) -> dict[str, object]:
         **{key: metadata[key] for key in (
             "completion_message", "final_report_ref", "declared_output_refs", "artifact_refs",
             "turn_end_reason", "failure_type", "activity_diagnostic",
+            "process_completion",
         ) if key in metadata},
     }
 

@@ -251,6 +251,10 @@ def background_prompt(
         return prompt
     if normalized_reason == "thread_goal_continue":
         return "Continue working toward the active thread goal. Call get_goal first."
+    if normalized_reason == "managed_process_exited":
+        return ("当前会话先前启动的受管后台命令已结束，退出状态和日志引用在结构化唤醒事实中。"
+                "核对相关结果，向用户汇报；若原任务仍进行中则继续相关工作。"
+                "命令退出不等于任务验证通过，不重跑原命令，不重新开启已经结束或暂停的目标。")
     if normalized_reason == "audit_finding":
         return _audit_finding_report_prompt(
             proactive_delivery_available=proactive_delivery_available,
@@ -738,7 +742,7 @@ def _material_tool_success_count(
     return count
 
 
-# LLM: 同一后台轮冻结 Goal/child phase；active Goal 管本轮目标，普通 lifecycle 请求编号管原用户正文。
+# LLM: 同一后台轮冻结 Goal/child phase；Goal 的持久任务编号不是普通用户请求编号，先按本线程事实解析归属。
 # 原始用户历史不裁剪；拆开的命名目标不得把整条多目标消息重新作为各自的任务。只读，不改历史或任务账。
 # 函数用途: 固定后台续接的正确用户要求与子树阶段，避免新任务完成后主代理回去回答旧任务。
 def _goal_runtime_context(
@@ -755,8 +759,6 @@ def _goal_runtime_context(
         request.thread_id,
         task_id,
     )
-    if not link_error and _is_active_turn_lifecycle_continuation(request, task_objective):
-        task_objective = _background_request_objective(store, request) or task_objective
     phase = ""
     state_error = link_error
     if str(request.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS:
@@ -773,6 +775,15 @@ def _goal_runtime_context(
             subagent_phase=phase,
             state_error=state_error or "goal_state_load_error",
         )
+    if not link_error and _is_active_turn_lifecycle_continuation(request, task_objective):
+        durable_goal_task_id = task_id if (
+            goal is not None
+            and str(getattr(goal, "thread_id", "") or "") == request.thread_id
+            and str(getattr(goal, "task_id", "") or "") == task_id
+        ) else ""
+        task_objective = _background_request_objective(
+            store, request, durable_goal_task_id=durable_goal_task_id,
+        ) or task_objective
     if (
         goal is None
         or str(getattr(goal, "task_id", "") or "").strip() != task_id
@@ -828,11 +839,18 @@ def _background_task_continuation_fields(
 
 
 # LLM: Resolve only host-owned wake request ids in this store/thread's canonical transcript.
-# Page cursors are ephemeral reads, not model state. Missing/corrupt explicit inputs fail visibly;
-# guidance/assistant prose cannot impersonate the initial input, and no history/Compact is written.
-# 函数用途: 子代理返回时按派工请求找回用户原话，逐页读取避免长期会话全量加载，批量唤醒保持原消息顺序。
-def _background_request_objective(store: ConversationStore, request: BackgroundRunRequest) -> str:
+# Page cursors are ephemeral reads, not model state. The exact Goal task already validated by
+# the caller has no synthetic user message; all other explicit request ids still fail if missing.
+# 函数用途: 按普通派工请求找回用户原话；已核实的 Goal 任务沿目标账读取，不伪造消息或吞掉真实历史损坏。
+def _background_request_objective(
+    store: ConversationStore,
+    request: BackgroundRunRequest,
+    *,
+    durable_goal_task_id: str = "",
+) -> str:
     pending = set(_background_active_turn_request_ids(request))
+    if durable_goal_task_id and durable_goal_task_id == request.task_id:
+        pending.discard(durable_goal_task_id)
     if not pending:
         return ""
     selected: list[str] = []
@@ -1027,7 +1045,6 @@ class BackgroundMainAgentRuntime:
             resolved_channel=channel,
             resolved_route_supports_proactive=route_supports_proactive,
             resolved_route_supports_transcript=route_supports_transcript,
-            sampled_subagent_phase=goal_context.subagent_phase,
         )
         return _complete_background_slice(
             self,
@@ -2247,8 +2264,9 @@ def _channel_attachments(
 
 # LLM: Goal continuation is a real 会话运行时 turn, so its terminal assistant message must enter
 # the canonical owner transcript even while the Goal remains active. Child lifecycle/capability
-# wakes are still internal control events and may be suppressed by their typed reason below.
-# 函数用途: 决定后台模型回复是否进入用户会话；保留每轮 Goal 正式回复，同时隐藏内部能力流转和过期子代理进度。
+# wakes are still internal control events; current child facts and unread envelopes, not the
+# slice-start snapshot, determine whether the integration response is ready to publish.
+# 函数用途: 决定后台模型回复是否进入用户会话；原开始快照不能吞掉长工作片已吸收结果后的最终汇报。
 def _background_delivery_decision(
     agent: object,
     request: BackgroundRunRequest,
@@ -2257,7 +2275,6 @@ def _background_delivery_decision(
     resolved_channel: str | None = None,
     resolved_route_supports_proactive: bool | None = None,
     resolved_route_supports_transcript: bool | None = None,
-    sampled_subagent_phase: str = "",
 ) -> tuple[bool, str]:
     """Keep partial child integration internal and publish one fresh terminal turn."""
     task_status = _background_task_link_status(agent, request, store=store)
@@ -2361,8 +2378,6 @@ def _background_delivery_decision(
         not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related
     ):
         return False, "partial_subagent_success"
-    if str(sampled_subagent_phase or "").strip() == "subagents_active":
-        return False, "subagent_completion_requires_fresh_turn"
     return _terminal_subagent_delivery_decision(agent, store, wake, root_task_id)
 
 
@@ -3245,6 +3260,8 @@ def _background_conversation_history_seed(
     )
 
 
+# LLM: 后台执行使用精确持久任务作为输入回合编号；定时任务保留自己的 run ID，attempt 仍逐次独立。
+# 函数用途: 构造后台模型执行参数，让普通插话、消费回执、归档和续跑共享同一任务身份。
 def _run_params(
     thread_id: str,
     request: BackgroundRunRequest,
@@ -3280,7 +3297,7 @@ def _run_params(
     return RunParams(
         save=False,
         source="background_main_agent",
-        request_id=scheduler_run_id,
+        request_id=scheduler_run_id or request.task_id,
         run_id=scheduler_run_id or request.task_id or f"bg-main-{thread_id}",
         # A conversation thread identifies where this turn runs; it is not a
         # durable task.  Internal events without an exact task must stay
@@ -4787,9 +4804,13 @@ def _skip_pending_wake_signal(
         return True
     if _successful_completion_waiting_for_batch(scheduler, signal, current):
         return True
-    if not _wake_survives_inactive_root(signal) and _wake_signal_root_is_inactive(
-        scheduler.store, signal
-    ):
+    from .process_events import process_completion_delivery_state
+
+    if (not _wake_survives_inactive_root(signal)
+        and _wake_signal_root_is_inactive(scheduler.store, signal)):
+        completion = process_completion_delivery_state(scheduler.runtime.agent, signal)
+        if completion:
+            return completion != "ready"
         # Ordinary late child lifecycle signals cannot revive an inactive root.
         scheduler._mark_signal(signal, current, handled)
         return True
@@ -5478,7 +5499,10 @@ class _BackgroundSchedulerThreadLaneMixin:
         now: float | None = None,
         include_orphan_supervision: bool = True,
     ) -> None:
+        from .process_events import reconcile_process_completions
+
         current = now if now is not None else __import__("time").time()
+        reconcile_process_completions(self.runtime.agent)
         self._maybe_gc_ledger(now=current)
         self._process_collaboration_cases(now=current)
         if include_orphan_supervision:
@@ -7201,6 +7225,8 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
     return False
 
 
+# LLM: claim 后重查精确任务；自然收尾后的受管进程补报与队列筛选共用权威校验，不复活停止任务。
+# 函数用途: 拦截过期后台工作，同时保留已经核实但尚欠用户的命令结束通知。
 def _claimed_background_task_is_terminal(
     agent: object,
     store: object,
@@ -7210,6 +7236,14 @@ def _claimed_background_task_is_terminal(
     thread_id = str(kwargs.get("thread_id") or "").strip()
     task_id = str(kwargs.get("task_id") or "").strip()
     if not thread_id or not task_id:
+        return False
+    from .process_events import process_completion_delivery_state
+
+    signal = kwargs.get("wake_signal")
+    if (isinstance(signal, WakeSignal)
+        and signal.thread_id == thread_id and signal.root_task_id == task_id
+        and signal.reason == kwargs.get("reason")
+        and process_completion_delivery_state(agent, signal) == "ready"):
         return False
     status = _background_task_link_status(
         agent,

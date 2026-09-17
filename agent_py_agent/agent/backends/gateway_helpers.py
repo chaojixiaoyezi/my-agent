@@ -89,7 +89,7 @@ _HTTP_ERROR_DETAIL_ATTR = "_my_agent_provider_error_detail"
 _PROVIDER_ATTEMPT_OBSERVER = threading.local()
 
 
-# LLM: One immutable envelope owns all per-attempt transport budgets; callers must not mutate shared backend timeout state.
+# LLM: 请求封装持有独立超时和重定向策略；OAuth 禁止重定向，以免账号凭据被送往非绑定地址。
 # 类用途: 保存一次 provider HTTP 请求及 connect、首事件和滚动 idle 参数。
 @dataclass(frozen=True)
 class GatewayRequest:
@@ -105,6 +105,7 @@ class GatewayRequest:
     # 首个 SSE data 可以包含排队和长 prompt prefill，预算与后续事件空闲分开。
     # None 表示沿用 timeout；该字段只影响当前请求，不能修改共享 backend。
     first_event_timeout: float | None = None
+    allow_redirects: bool = True
 
     @property
     def url(self) -> str:
@@ -112,15 +113,20 @@ class GatewayRequest:
         return self.api_base + self.path
 
 
+# LLM: 观测开关仅作用当前 provider 线程；退出恢复嵌套作用域，不修改共享模型配置。
+# 函数用途: 绑定 HTTP 尝试观察者，可附加无正文的请求前缀摘要。
 @contextmanager
-def provider_attempt_observer(callback):
+def provider_attempt_observer(callback, *, cache_diagnostics: bool = False):
     """Observe physical inference HTTP attempts in the current provider thread."""
 
     previous = getattr(_PROVIDER_ATTEMPT_OBSERVER, "callback", None)
+    previous_diagnostics = getattr(_PROVIDER_ATTEMPT_OBSERVER, "cache_diagnostics", False)
+    _PROVIDER_ATTEMPT_OBSERVER.cache_diagnostics = cache_diagnostics
     _PROVIDER_ATTEMPT_OBSERVER.callback = callback
     try:
         yield
     finally:
+        _PROVIDER_ATTEMPT_OBSERVER.cache_diagnostics = previous_diagnostics
         if previous is None:
             try:
                 delattr(_PROVIDER_ATTEMPT_OBSERVER, "callback")
@@ -537,6 +543,10 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
         "method": "POST",
         "path": request.path,
     }
+    if getattr(_PROVIDER_ATTEMPT_OBSERVER, "cache_diagnostics", False):
+        from .cache_diagnostics import request_surface
+
+        base_event["request_surface"] = request_surface(request.payload, request.url)
     _emit_provider_attempt({**base_event, "status": "started"})
     try:
         response = _gateway_urlopen(req, request)
@@ -589,7 +599,7 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
     return response
 
 
-# LLM: 连接建立和响应头等待也属于同一个可中断 provider attempt；open guard 必须在 `opener.open` 前注册并在响应移交后解除引用。
+# LLM: 连接建立和响应头等待可中断；OAuth 请求显式禁重定向，open guard 必须在 open 前注册。
 # 函数用途: 用独立连接/读取超时打开模型请求，并让用户停止能关闭尚未返回 HTTPResponse 的底层连接。
 def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
     """Open one provider request with distinct connect and read timeouts.
@@ -606,11 +616,16 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
     read_timeout = _request_initial_read_timeout(request)
     open_guard = _GatewayOpenGuard()
     transport_options = _SplitTimeoutOptions(connect_timeout, read_timeout, open_guard)
-    opener = urllib.request.build_opener(
+    handlers = [
         _provider_proxy_handler(req.full_url),
         _SplitTimeoutHTTPHandler(transport_options),
         _SplitTimeoutHTTPSHandler(transport_options),
-    )
+    ]
+    if not request.allow_redirects:
+        from .oauth_transport import NoAuthRedirect
+
+        handlers.append(NoAuthRedirect())
+    opener = urllib.request.build_opener(*handlers)
     try:
         with _provider_interrupt_callback(open_guard.abort):
             if _provider_is_interrupted():

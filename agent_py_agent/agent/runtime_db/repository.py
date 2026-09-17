@@ -1390,7 +1390,8 @@ class RuntimeRepository(
     # _main_agent_recovery_reason；只读 preflight 不能替代这里的最终 CAS。
     # 换代必须同时关闭所有非 current 的 active attempt，但不能把旧工具副作用
     # 猜成成功：工具仍转 UNKNOWN、mutation 仍转 DIRTY。
-    # 函数用途: 为现有 AgentRun 创建唯一新执行轮，原子取得执行权并收掉旧运行态。
+    # 合法恢复若复用已关闭 TaskRun，须在同一事务重开总账并留事件；不允许运行中的树仍展示旧 cancelled。
+    # 函数用途: 原子取得新执行权、收掉旧运行态并同步整棵执行总账；准入拒绝时这些状态均不改变。
     def create_attempt(
         self,
         agent_run_id: str,
@@ -1590,6 +1591,7 @@ class RuntimeRepository(
                 raise RuntimeConflictError(
                     f"attempt CAS 失败: {agent_run_id} generation {generation - 1}->{generation}"
                 )
+            self._reopen_task_run_for_attempt_conn(conn, run, agent_run_id, attempt_id, now)
             self._append_event_conn(
                 conn,
                 event_type="agent_run.started",
@@ -1618,6 +1620,27 @@ class RuntimeRepository(
         row = self.get_attempt(attempt_id)
         assert row is not None
         return row
+
+    # LLM: 仅由已通过原执行锁和代次 CAS 的 create_attempt 调用，旧关闭事实保留在事件账；本方法不授予续跑权。
+    # 函数用途: 显式恢复后把执行总账同步为进行中，避免新一轮运行乃至完成时仍挂着上次取消状态。
+    def _reopen_task_run_for_attempt_conn(
+        self, conn, run, agent_run_id: str, attempt_id: str, now: float,
+    ) -> None:
+        task_run_id = str(run["task_run_id"] or "")
+        previous = conn.execute(
+            "SELECT status, closed_at FROM task_runs WHERE task_run_id = ?", (task_run_id,),
+        ).fetchone()
+        if previous is None or float(previous["closed_at"] or 0) <= 0:
+            return
+        conn.execute(
+            "UPDATE task_runs SET status = 'created', closed_at = 0, updated_at = ? WHERE task_run_id = ?",
+            (now, task_run_id),
+        )
+        self._append_event_conn(
+            conn, event_type="task_run.reopened", attempt_id=attempt_id,
+            agent_run_id=agent_run_id, task_run_id=task_run_id,
+            payload={"previous_status": previous["status"], "previous_closed_at": previous["closed_at"]},
+        )
 
     # ------------------------------------------------------ R1-03 辅助
     def _start_token(self) -> str:

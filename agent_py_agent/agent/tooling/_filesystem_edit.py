@@ -1,6 +1,6 @@
 # LLM: edit_file 默认精确且唯一匹配；空白容错只按 allow_fuzzy 显式启用，不能把字符串内空白视为无意义。
 #   与 write_file/apply_patch 共享权限、原编码、原子发布及乐观版本检查；不是跨所有写入者的内核 CAS。
-# 模块用途: 小范围修改已有文本，保留普通权限和原格式，并展示实际变化位置；陈旧版本要求重新读取。
+# 模块用途: 小范围修改已有文本，保留权限和原格式；匹配冲突返回文件事实和读取入口，不鼓励原样重试。
 from __future__ import annotations
 
 import difflib
@@ -81,6 +81,14 @@ def _build_edit_file_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: 参数格式正确但当前文件无法唯一定位目标，与 schema 错误分开；不得据此放宽匹配或写入。
+# 类用途: 标识需要重新读取文件的编辑冲突。
+class _EditMatchError(ValueError):
+    pass
+
+
+# LLM: 写入仍共享原子发布和版本检查；失败的读取提示只反映当前文件，不拥有自动修复权限。
+# 类用途: 对已有文件执行精确修改，并把真实冲突交给调用方重新合并。
 class EditFileTool(FileSystemTool):
     model_spec = _build_edit_file_model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -99,8 +107,8 @@ class EditFileTool(FileSystemTool):
     ):
         super().__init__(workspace_root, workspace_roots, access_options)
 
-    # LLM: 编辑成功必须同时保留模型用最新片段和有界结构化 diff；后者只供富客户端展示，不参与工具成功或文件状态判断。
-    # 函数用途: 替换目标文本、原子写回文件，并返回可供终端高亮展示的增删行事实。
+    # LLM: 成功返回最新片段和 diff；定位冲突返回 state 类事实而非参数修复，绝不隐式模糊覆盖。
+    # 函数用途: 原子替换目标文本；冲突时不写入，提供当前片段和明确的重新读取入口。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             target = self.resolve_write_path(
@@ -139,6 +147,8 @@ class EditFileTool(FileSystemTool):
             )
         except StaleFileVersionError as exc:
             return ToolHandlerOutcome("edit_file", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
+        except _EditMatchError as exc:
+            return _edit_match_failure(self.display_path(target), content, old, observed_version, str(exc))
         except ValueError as exc:
             return ToolHandlerOutcome("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         except OSError as exc:
@@ -195,14 +205,30 @@ def _replace_in_content(content: str, old: str, new: str, *, replace_all: bool, 
     exact_count = content.count(old)
     if exact_count > 0:
         if exact_count > 1 and not replace_all:
-            raise ValueError(
+            raise _EditMatchError(
                 f"old_string 在文件中出现 {exact_count} 次,不唯一;请多带几行上下文使其唯一,或设 replace_all=true。"
             )
         replaced = content.replace(old, new) if replace_all else content.replace(old, new, 1)
         return replaced, "exact", (exact_count if replace_all else 1)
     if allow_fuzzy:
         return _fuzzy_replace(content, old, new, replace_all=replace_all)
-    raise ValueError("old_string 未精确命中，请先 read_file 读取原文；确认空白可忽略时显式设 allow_fuzzy=true。")
+    raise _EditMatchError("old_string 未精确命中，请先 read_file 读取原文；确认空白可忽略时显式设 allow_fuzzy=true。")
+
+
+# LLM: 片段只用于重新定位，首个共有行不是写入位置授权；匹配权限和 expected_version 检查保持不变。
+# 函数用途: 返回有界的当前文本与读工具参数，避免模型把文件冲突当成参数格式错误反复提交。
+def _edit_match_failure(path: str, content: str, old: str, version: str, message: str) -> ToolHandlerOutcome:
+    lines = content.splitlines()
+    anchors = {line.strip() for line in old.splitlines() if len(line.strip()) >= 4}
+    index = next((i for i, line in enumerate(lines) if line.strip() in anchors), 0)
+    start, end = max(0, index - 3), min(len(lines), index + 12)
+    preview = "\n".join(f"{i + 1}: {lines[i]}" for i in range(start, end))[:2400]
+    return ToolHandlerOutcome(
+        "edit_file", False, f"{message}\n文件未修改。先读取最新文本再合并，不要原样重试。\n当前文件片段（只供定位）：\n{preview}",
+        error_code="EDIT_TARGET_MISMATCH", effect_outcome="not_started", retryable=True,
+        result_envelope={"path": path, "file_version": version, "matched_target": False,
+            "recovery": {"tool": "read_file", "arguments": {"path": path, "start_line": start + 1, "end_line": max(start + 1, end)}}},
+    )
 
 
 _LINE_TRIM = ("line_trimmed", lambda line: line.strip())
@@ -236,6 +262,7 @@ def _replaced_context_preview(before: str, after: str, new_text: str, count: int
         return ""
 
 
+# LLM: 仅显式 allow_fuzzy 调用；所有定位失败仍是文件冲突，不自动重试写入。
 # 函数用途: 精确失配时的容错替换——按行规范化(先行首尾空白,再行内空白)滑窗
 #   找连续块,唯一命中即用文件里的真实行替换;多处命中且未开 replace_all 则报错。
 def _fuzzy_replace(content: str, old: str, new: str, *, replace_all: bool) -> tuple[str, str, int]:
@@ -250,7 +277,7 @@ def _fuzzy_replace(content: str, old: str, new: str, *, replace_all: bool) -> tu
         if not spans:
             continue
         if len(spans) > 1 and not replace_all:
-            raise ValueError(
+            raise _EditMatchError(
                 f"容错匹配({label})在文件中找到 {len(spans)} 处,不唯一;请多带上下文或设 replace_all=true。"
             )
         new_block = new.split("\n")
@@ -259,7 +286,7 @@ def _fuzzy_replace(content: str, old: str, new: str, *, replace_all: bool) -> tu
         for start, end in reversed(applied):
             result[start:end] = _reindent(new_block, old_lines, content_lines[start:end])
         return "\n".join(result), label, len(applied)
-    raise ValueError(
+    raise _EditMatchError(
         "old_string 未在文件中找到(精确/行空白/全空白三级匹配均失败);"
         "请先用 read_file 确认确切文本再编辑。"
     )

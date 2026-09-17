@@ -686,6 +686,9 @@ def _handler_arguments(
         payload["__operation_managed"] = operation_managed
     if "__cancellation_token" in internal_parameters:
         payload["__cancellation_token"] = request.cancellation_token
+    if "__process_completion_target" in internal_parameters:
+        trusted = request.trusted_run_context or {}
+        payload["__process_completion_target"] = dict(trusted.get("process_completion_target") or {})
     return payload
 
 
@@ -972,8 +975,8 @@ def _result_refs(outcome: ToolHandlerOutcome) -> tuple[ToolResultRef, ...]:
     return tuple(refs)
 
 
-# LLM: 只渲染 ActionPolicy 的结构化裁决；公开 schema 和命令门位置可展示，原始参数值/密钥不可回显。
-# 函数用途: 让模型和用户知道具体哪里被拦，减少盲猜参数；此处不改变授权结果、不自动重试。
+# LLM: 只渲染 ActionPolicy 结构化裁决；重复门的有界恢复说明随原回执进入模型，参数值/密钥不回显。
+# 函数用途: 让模型和用户知道哪里被拦及如何换路；不修改裁决，不替模型执行或自动重试。
 def _decision_message(decision: ActionDecision) -> str:
     if decision.status == "ask":
         return "Approval or explicit user confirmation is required before this tool can run."
@@ -992,6 +995,11 @@ def _decision_message(decision: ActionDecision) -> str:
     gate = decision.evidence.get("gate")
     if isinstance(gate, dict):
         message += _render_gate_findings(gate.get("findings"))
+        if gate.get("gate") == "tool_guardrail" and gate.get("recommended_action") == "change_strategy":
+            detail = gate.get("model_message")
+            if isinstance(detail, str) and detail:
+                message += "。重复诊断: " + detail[:500]
+            message += "。本次工具未执行；请基于已有结果调整下一步，而不是原样重试。此拒绝不证明任务完成。"
     return message
 
 

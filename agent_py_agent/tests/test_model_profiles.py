@@ -88,6 +88,19 @@ def test_preserve_model_case_and_normalize_window():
     assert row["api_base"] == "http://localhost:4000/v1"
 
 
+@pytest.mark.parametrize("value", [-1, "nan", "inf", True, 86401])
+def test_invalid_queue_budget_rejected(value):
+    with pytest.raises(ValueError, match="排队预算"):
+        validate_model_profile(profile(model_queue_wait_seconds=value))
+
+
+def test_queue_budget_follows_selected_profile(tmp_path):
+    host = Host(tmp_path)
+    key, _ = add(host, model_queue_wait_seconds=3600)
+    cfg = selected_model_config(host, profile_id=key)
+    assert cfg.model_queue_wait_seconds == 3600 and host.config.model_queue_wait_seconds == 0
+
+
 def test_saving_same_id_is_idempotent_but_never_overwrites(tmp_path):
     host = Host(tmp_path)
     key, _ = add(host)

@@ -7,6 +7,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import (
     GatewayPaths,
@@ -448,6 +450,54 @@ def test_chat_gateway_poll_uses_processing_activity_as_inactivity_lease(tmp_path
     worker.join(timeout=1)
 
     assert response["response"] == "finished after initial deadline"
+
+
+@pytest.mark.parametrize("clock_jump", [3600.0, -3600.0])
+def test_chat_poll_ignores_wall_clock_adjustment(tmp_path, monkeypatch, clock_jump):
+    from agent_py_agent.cli.chat_parts import gateway_client as client
+
+    terminal = tmp_path / "req.json"
+    ticks = [0.0]
+
+    def advance(seconds):
+        ticks[0] += seconds
+        if ticks[0] >= 0.3:
+            terminal.write_text(json.dumps(_terminal_envelope(
+                "req", {"ok": True, "response": "真实回执"},
+            )), encoding="utf-8")
+
+    monkeypatch.setattr(client, "time", SimpleNamespace(
+        time=lambda: 100.0 + ticks[0] + (clock_jump if ticks[0] else 0.0),
+        monotonic=lambda: ticks[0], sleep=advance,
+    ))
+    response = client.poll_gateway_chunks(client.GatewayChunkPollRequest(
+        tmp_path / "req.chunks.jsonl", terminal, 100.5, lambda _: False, [0],
+    ))
+    assert response["response"] == "真实回执"
+
+
+def test_chat_poll_backward_clock_does_not_extend_inactive_wait(tmp_path, monkeypatch):
+    from agent_py_agent.cli.chat_parts import gateway_client as client
+
+    terminal = tmp_path / "req.json"
+    ticks = [0.0]
+
+    def advance(seconds):
+        ticks[0] += seconds
+        if ticks[0] >= 0.8:
+            terminal.write_text(json.dumps(_terminal_envelope(
+                "req", {"ok": True, "response": "过期后的回执"},
+            )), encoding="utf-8")
+
+    monkeypatch.setattr(client, "time", SimpleNamespace(
+        time=lambda: 100.0 + ticks[0] - (3600 if ticks[0] else 0),
+        monotonic=lambda: ticks[0], sleep=advance,
+    ))
+    response = client.poll_gateway_chunks(client.GatewayChunkPollRequest(
+        tmp_path / "req.chunks.jsonl", terminal, 100.3, lambda _: False, [0],
+    ))
+    assert response == {}
+    assert ticks[0] < 0.8
 
 
 def test_chat_commentary_does_not_claim_terminal_response_stream(tmp_path):

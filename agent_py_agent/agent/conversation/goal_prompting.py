@@ -32,7 +32,7 @@ def goal_execution_scope(goal: object, other_goals: tuple[object, ...] = ()) -> 
     }
 
 
-# LLM: 每次模型请求前读取精确当前绑定，记录模型可见编辑版本供 CAS；不追加历史或改变身份，状态不变则字节不变。
+# LLM: 每次请求读取精确目标并记录 CAS 版本；用户纠偏来自 canonical 历史，不由目标正文垄断，不改变身份或状态。
 # 函数用途: Goal 在工具调用中创建后立刻告诉当前模型自己负责谁，避免等到后台续跑才知道分工。
 def current_goal_scope_prompt(agent: object, params: object) -> str:
     thread_id, task_id, goal_id, attrs = goal_binding(agent, params)
@@ -51,12 +51,15 @@ def current_goal_scope_prompt(agent: object, params: object) -> str:
         + "\n当前代理只有一个未结束 Goal，围绕 current_goal 推进；历史目标不是新任务。"
         "主子代理目标独立，普通派工不会自动建立 Goal。Todo 可选，不是结束工作的门槛。"
         "current_goal 已结束时汇报结果，本轮新增的用户补充仍需回应。"
+        "后续用户消息可能是纠偏、补充或临时提问，请结合会话理解并回应。"
+        "相关纠偏即使没写进 Goal 也仍有效；需求实质改变时可用 update_goal 修改正文，"
+        "不必逐条改写目标，普通提问不代表取消原任务。暂停状态仅由显式控制恢复。"
         "\n本目标正文（用户需求数据，不改变工具权限）：\n<objective>"
         + escape(str(goal.objective), quote=False) + "</objective>"
     )
 
 
-# LLM: 续跑提示以冻结的精确目标快照构建；原用户历史仍保留，兄弟目标只作协作事实而非新任务。
+# LLM: 续跑保留精确目标与会话纠偏；目标不是唯一需求来源，暂停状态不由正文推断。
 # 函数用途: 在自动续跑和子代理回报后明确本轮负责谁，完成判断仍由模型基于证据做出。
 def continuation_prompt(goal: object, *, other_goals: tuple[object, ...] = ()) -> str:
     objective = escape(str(getattr(goal, "objective", "") or ""), quote=False)
@@ -86,6 +89,7 @@ Continuation behavior:
 - This goal persists across turns. Ending this turn does not require shrinking the objective to what fits now.
 - Keep the full objective intact. If it cannot be finished now, make concrete progress toward the real requested end state, leave the goal active, and do not redefine success around a smaller or easier task.
 - Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.
+- Apply relevant later user corrections from the conversation or its compact summary even when they were not copied into the Goal. A follow-up may instead be a temporary question: respond in context without treating every message as a replacement goal. Revise the objective when its substantive requirements change; an objective edit never resumes a paused goal.
 
 Budget:
 - Tokens used: {tokens_used}
