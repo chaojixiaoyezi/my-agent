@@ -1622,21 +1622,27 @@ def _response_preview(obj: object, *, max_chars: int = 1000) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + "... [truncated]"
 
 
-# LLM: 只按显式协议构造后端；OAuth 引用附加认证层，空配置保持未配置，不因失败换接口。
+# LLM: 后端构造与后台调度共用本地缺配置判据；不探测网络、密钥权益或模型能力，未知协议仍由工厂拒绝。
+# 函数用途: 检查是否缺少明确的模型连接信息，避免把尚未设置模型当成临时网络故障。
+def model_configuration_missing(name: str, config: Any | None = None) -> bool:
+    if not str(name or "").strip():
+        return True
+    return config is not None and name in {
+        "openai_compatible", "openai_responses", "anthropic_compatible",
+    } and not (str(config.model_name or "").strip() and str(config.api_base or "").strip())
+
+
+# LLM: 只按显式协议构造后端；缺配置判据与后台准入共用，OAuth 引用附加认证层，不因失败换接口。
 # 函数用途: 创建用户指定的适配器；尚未配置也能打开设置，但所有真实调用都明确拒绝。
 def get_backend(name: str, config: Any | None = None) -> BaseBackend:
     """Resolve a configured backend name to a backend adapter instance."""
 
     if name == "echo":
         return EchoBackend()
-    if not str(name or "").strip():
+    if model_configuration_missing(name, config):
         return UnconfiguredBackend()
     if config is None:
         raise ValueError("真实模型后端需要传入 config。")
-    if name in {"openai_compatible", "openai_responses", "anthropic_compatible"} and not (
-        str(config.model_name or "").strip() and str(config.api_base or "").strip()
-    ):
-        return UnconfiguredBackend()
 
     common = BackendOptions(
         api_base=config.api_base,

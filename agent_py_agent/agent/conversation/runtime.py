@@ -25,6 +25,7 @@ from ..contracts.subagent_completion import (
 from ..runtime_errors import compact_error_message, runtime_error_report
 from ..settings.config import DEFAULT_EXECUTION_PERSISTENCE
 from ..settings.runtime_guard_config import runtime_guard_int
+from ..settings.thread_model_selection import is_model_configuration_unavailable
 from ..subagents.role_templates import active_model_subagent_tools
 from .agent_activity import (
     BackgroundMainActivitySink,
@@ -6076,6 +6077,8 @@ def _quota_wake_report_after_error(
     return report
 
 
+# LLM: 本地缺模型保留原 wake/Goal，由 Gateway 配置依赖退避；真实任务错误/额度保持现有显式恢复语义。
+# 函数用途: 关闭或释放失败的调度 claim；不能把暂缺模型配置误作任务已受阻并吃掉恢复事件。
 def _handle_nonquota_wake_error(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -6085,6 +6088,10 @@ def _handle_nonquota_wake_error(
     error: BaseException,
 ) -> None:
     observed_at = time.time()
+    if is_model_configuration_unavailable(error):
+        if claim is not None:
+            scheduler.scheduler_service.release(claim, now=observed_at)
+        return
     if claim is not None:
         if is_provider_transient_error(error):
             scheduler.scheduler_service.release(claim, now=observed_at)
@@ -6735,6 +6742,8 @@ class _BackgroundSchedulerExecutionMixin:
             claim_scope_id=claim_scope_id,
         )
 
+    # LLM: 每片都按实际结果关闭 claim；本地模型依赖失败不累计 policy 退休次数，Goal/wake 保留在原权威账。
+    # 函数用途: 为后台执行续租并记下真实退出原因，慢模型活跃时不因等待时间停止。
     def _run_with_heartbeat(
         self,
         claim_id: str,
@@ -6785,7 +6794,8 @@ class _BackgroundSchedulerExecutionMixin:
                     "now": now(),
                 }
             )
-            if status == "failed" and error is not None and not is_provider_transient_error(error):
+            if (status == "failed" and error is not None and not is_provider_transient_error(error)
+                    and not is_model_configuration_unavailable(error)):
                 # 问题6:失败 run 的异常在 _consume_with_supply_guard 被吸收 → policy
                 # next_due_at 不动 → 下个 tick 又 due = 失败无限重试。这里把失败事实
                 # 落账(退避顺延/连续失败退休);非 policy 来源的失败不动账,行为不变。

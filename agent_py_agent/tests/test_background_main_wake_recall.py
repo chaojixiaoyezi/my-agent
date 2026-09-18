@@ -406,6 +406,8 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
         ),
     )
     supervisor._base_scheduler = BlockingBaseScheduler()
+    from agent_py_agent.cli.gateway_lane_retry import BackgroundLaneRetry
+    supervisor._lane_retry = BackgroundLaneRetry()
     supervisor._owner_schedulers = {1: OwnerScheduler()}
     supervisor._executor = None
     supervisor._inflight = {}
@@ -463,6 +465,8 @@ def test_blocked_thread_does_not_starve_sibling_thread_for_same_owner() -> None:
         ),
     )
     supervisor._base_scheduler = TwoThreadScheduler()
+    from agent_py_agent.cli.gateway_lane_retry import BackgroundLaneRetry
+    supervisor._lane_retry = BackgroundLaneRetry()
     supervisor._owner_schedulers = {}
     supervisor._executor = None
     supervisor._inflight = {}

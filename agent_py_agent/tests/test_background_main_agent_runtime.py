@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.backends import ModelResponse
-from agent_py_agent.agent.backends.errors import ProviderUsageLimitError
+from agent_py_agent.agent.backends.errors import ModelNotConfiguredError, ProviderUsageLimitError
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
@@ -26,6 +26,7 @@ from agent_py_agent.agent.conversation.authority import (
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings.model_profiles import ModelProfileError
 
 
 # LLM: 只为公开回复断言分离空正文原生事实行；事实行必须有合法信封，不能借此隐藏漏写或空白 final。
@@ -8270,12 +8271,9 @@ def test_successful_policy_run_resets_failure_accounting(tmp_path) -> None:
     assert after.next_due_at == 40.0 + 30 * 2
 
 
-def test_supply_failure_does_not_record_policy_failure_accounting(tmp_path, monkeypatch) -> None:
-    """429/限流等供应类错误不记 policy 失败账(走 supply backoff 专属退避)。
-
-    C 批失败记账若把 429 也计 failure_count,连续 3 次 429 就把 policy 退休
-    (错杀:额度恢复后应照常排期)。判据只认 typed provider error。
-    """
+@pytest.mark.parametrize("error", [ProviderUsageLimitError("限流"), ModelNotConfiguredError(), ModelProfileError("模型引用已撤销")])
+def test_supply_or_configuration_failure_does_not_retire_policy(tmp_path, monkeypatch, error) -> None:
+    """供应等待与本地模型依赖均不累计策略退休次数；真实执行错误仍由相邻测试覆盖。"""
     from agent_py_agent.agent.conversation.runtime import (
         BackgroundMainAgentRuntime,
         BackgroundMainAgentScheduler,
@@ -8324,13 +8322,12 @@ def test_supply_failure_does_not_record_policy_failure_accounting(tmp_path, monk
     )
     scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
 
-    # 直接让 run_once 抛 429(绕过 run_once 内部 provider auto_resume 重试环,
-    # 测试目标=finally 的供应错误排除分支,与重试环无关)。
+    # 直接让执行片抛出 typed 异常，验证原 claim 收口不会误退休策略。
     def quota_boom(_request):
-        raise ProviderUsageLimitError("HTTP 429: 已达到 Token Plan 用量上限")
+        raise error
 
     monkeypatch.setattr(runtime, "run_once", quota_boom)
-    with pytest.raises(ProviderUsageLimitError):
+    with pytest.raises(type(error)):
         scheduler._run_due_policy(policy, now=30.0)
 
     after = store.get_progress_policy(policy.policy_id)

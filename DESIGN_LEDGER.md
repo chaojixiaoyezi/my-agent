@@ -4,6 +4,12 @@
 
 ## 已采用的原则
 
+后台缺模型等待已实现、真实 TUI 已验：本地 `ModelNotConfiguredError/ModelProfileError` 等待该会话配置恢复，
+不因 30 秒届满反复执行。普通错误仍按原配置冷却；网络限流与远端请求拒绝不误当本地未配置。
+进程内退避有界且线程安全，不消费持久唤醒、不改 Goal、不选择默认模型；模型选择仍以 canonical thread 为准。
+详见 [长时间运行](docs/design/LONG_RUNNING_EXECUTION.md#后台异常退避)。
+真实验收补齐 Goal 的旧错误收口分支；缺配置不消费 wake 或终结目标，选好模型后原任务自动继续并完成。
+
 TUI 持久请求回执优先于 Gateway 瞬时存活检查：已经取得规范 request ID 的消息沿原终态等待，
 不能因重启间隙 PID 不可见而宣告未执行。未提交请求保留服务检查，超时/取消不变、不自动重发。
 
@@ -101,6 +107,17 @@ RFC 8628 参数，不导入其他应用凭据、不默认选模型。登录取�
 | 完整历史与展示窗口分离 | 完整未压缩历史来自 canonical 消息，分页不能裁掉模型记忆 | [上下文](docs/design/CONVERSATION_CONTEXT_DESIGN.md) |
 | 权限硬、任务组织软 | 自然语言不决定运行状态、越权、任务归属或验收结果 | [开发规则](docs/development/DEVELOPMENT_RULES.md) |
 | 分层验证 | 确定性合同/替身/回放用于开发反馈，真实 TUI 用于最终验收 | [测试分层](docs/design/main-agent-contract-testing.md) |
+
+## 代码体检与后续拆分计划
+
+已落地第一步：后台重试策略独立为 `cli/gateway_lane_retry.py`，调度器只负责编排，
+会话模型解析只负责编号与 owner 验证，后端工厂与恢复准入共用缺配置判据。
+删除 worker/planner 中分散的退避字典兼容初始化与重复判断，避免只加转发壳。
+
+后续按模块推进：`conversation/runtime.py` 的执行与恢复、`cli/gateway_loops.py` 的维护车道、
+`backends/base.py` 的协议适配仍偏大；先明确直接调用方和接口，再独立搬迁低耦合实现。
+不在修行为的同一批进行大文件移动，不放宽尺寸基线，不把通过尺寸检查说成可读性已经理想。
+每批保留 focused 回归、文档同步和真实 TUI 验收；模型请求、权限、持久状态是不可意外改变的边界。
 
 ## 当前待落地或待复验
 

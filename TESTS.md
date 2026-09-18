@@ -24,6 +24,15 @@ TUI（无子代理）及多条正常模型 TUI，共用单 Gateway，定向回�
 
 ## 重点定向回归入口
 
+- 后台失败退避：`test_gateway_lane_retry.py`、`test_gateway_loops_resilience.py`、
+  `test_background_main_wake_recall.py`、`test_model_unconfigured.py` 与会话模型选择联合验证。
+  覆盖缺配置长时间不重跑、模型引用删除/恢复、精确旧会话改选、默认选择不串会话、零值冷却、
+  远端拒绝不误判本地缺配置、同 owner 健康车道、跨 owner、短锁与有界回收。
+  联合 `test_background_supply_backoff.py` 和 Goal 测试核对 scheduler 不提前关闭目标/消费 wake；
+  真实执行错误和额度限制仍受原保护，不把原已暂停或受阻目标无条件激活。
+  真 TUI 在未配置会话设置目标，再通过 /model 选模型，核对原目标恢复、唯一最终回复及原 wake；
+  另一路正常任务并行，不能把手工改任务文件或替身模型当作真实恢复验收。
+
 - 重启与持久回执：`test_tui_worker_paths.py` 验证已提交消息在 PID 暂不可见时仍读取原 terminal；
   没有终态沿既有超时返回，不再入队；未提交请求仍报告服务停止。真实 TUI 将重启与消息投递交错，
   区分队列提交、实际执行、模型 final 和前端展示，不把服务启动命令退出当作已经就绪。

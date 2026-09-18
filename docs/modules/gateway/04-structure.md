@@ -27,8 +27,14 @@ HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台�
 
 ## 受管命令完成交接
 
-`cli/gateway_loops.py` 的会话 worker 异常由同一个 supervisor 记录临时 retry-after，规划阶段过滤，
-并为冷却条目后面的健康会话保留候选容量；冷却不改持久状态，成功后删除，不用 sleep 占线程。
+`cli/gateway_lane_retry.py` 管理会话车道的 typed 失败退避：普通错误记录单调时钟 retry-after，
+本地缺模型/无效模型引用则等待当前 thread 配置恢复；`gateway_loops.py` 只规划、执行与记录诊断。
+`thread_model_selection.py::thread_model_is_configured` 复用 owner 校验及规范引用，后端工厂共用
+`model_configuration_missing`，不建立默认模型或第二份配置。配置读取失败只影响精确车道。
+候选数只补偿同 owner 的失败条目，保留后排健康会话；进程内短锁保护共享字典，网络不在锁中。
+冷却不改持久状态，成功/owner 淘汰后删除，不用 sleep 占线程，不干涉正在执行的慢模型。
+会话 scheduler 遇同一 typed 本地配置异常时仅释放 claim，不消费 wake、不把 active Goal 改成 blocked，
+不累计周期策略退休次数；已暂停/受阻的旧目标仍需显式恢复。其它错误维持原行为。
 
 `conversation/process_events.py` 复用受保护 ProcessSessionStore 与原 ConversationStore wake。
 工具执行器注入不可变收件地址，原 tick/安全点收割真实退出；先去重入队，再确认发布。

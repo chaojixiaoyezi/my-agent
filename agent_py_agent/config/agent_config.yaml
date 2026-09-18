@@ -412,7 +412,7 @@ gateway_request_max_attempts: 2
 # 后台会话全局线程池上限；不同 owner 和不同 thread 都可并发，同 thread
 # 仍由持久 run claim 保证单飞。超出的会话留在持久队列，不丢弃。
 background_owner_workers: 8
-# 后台会话宿主异常后按 owner/thread 退避，避免未配置模型等错误持续占工位；不暂停持久任务。
+# 后台普通宿主异常按 owner/thread 冷却；缺模型/无效模型引用改为等待配置，不计时重试，也不暂停持久任务。
 background_main_error_backoff_seconds: 30.0
 # 同一 owner 最多同时跑几个不同会话的后台回合。默认 4 能覆盖多 TUI，
 # 同时防止一个用户用大量历史会话占满全局模型池；调大会增加并发模型请求。

@@ -1,12 +1,8 @@
 
+# LLM: 单 Gateway 的请求、后台会话和维护车道编排；执行权与事件保存在原队列/会话层，重试策略独立且不落盘。
+# 模块用途: 连接请求处理、按用户公平调度、维护和心跳；不要在此新增任务状态或默认模型。
+
 from __future__ import annotations
-
-"""gateway background loop functions — request workers, heartbeat, and worker pool management.
-
-给人看的解释：
-这个文件放 gateway 后台跑的各种循环：请求处理 worker 池、心跳写入。
-从 gateway_process.py 拆出来，让主入口文件更短。
-"""
 
 import json
 import os
@@ -52,12 +48,14 @@ from ..agent.owner_wake_discovery import (
 )
 from ..agent.runtime_errors import runtime_error_report
 from ..agent.scheduler import SchedulerDueIndex
+from ..agent.settings.thread_model_selection import thread_model_is_configured
 from ..agent.user_space.owner_maintenance import run_owner_retention_if_due
 from ..agent.user_space.owner_resolver import (
     OwnerIdentity,
     home_paths_with_owner,
     resolve_owner_home,
 )
+from .gateway_lane_retry import BackgroundLaneRetry
 from .models import GatewayRunContext
 
 
@@ -435,7 +433,7 @@ class _BackgroundThreadLaneSupervisorMixin:
     # across owners, bounded globally and per owner, and keyed by durable thread id.
     # Gateway's independent orphan reconciler owns recovery scans, so preparation
     # must skip the duplicate inline sweep before ready lanes are submitted.
-    # 函数用途: 公平提交就绪会话，且不让重复孤儿扫描堵住同用户或其它窗口。
+    # 函数用途: 公平提交就绪会话；配置等待和普通冷却不占执行工位，不影响其它窗口。
     def _submit_ready_thread_ticks(self) -> None:
         global_limit = _background_owner_workers(self._base_agent)
         available = max(0, global_limit - len(self._inflight))
@@ -446,6 +444,7 @@ class _BackgroundThreadLaneSupervisorMixin:
             (_BASE_SCHEDULER_KEY, self._base_scheduler),
             *list(self._owner_schedulers.items()),
         ]
+        self._lane_retry.retain_owners(str(key) for key, _scheduler in schedulers)
         candidates: list[tuple[object, BackgroundMainAgentScheduler, list[str]]] = []
         planned_at = time.time()
         for owner_key, scheduler in schedulers:
@@ -460,7 +459,7 @@ class _BackgroundThreadLaneSupervisorMixin:
                 )
                 ready = scheduler.ready_thread_ids(
                     now=planned_at,
-                    limit=per_owner_limit + len(active_threads) + len(getattr(self, "_lane_retry_after", {})),
+                    limit=per_owner_limit + len(active_threads) + self._lane_retry.count(str(owner_key)),
                 )
             except Exception as exc:
                 _print_gateway_loop_error(
@@ -469,12 +468,33 @@ class _BackgroundThreadLaneSupervisorMixin:
                     exc,
                 )
                 continue
-            retry_after = getattr(self, "_lane_retry_after", {})
             pending = [thread_id for thread_id in ready if thread_id not in active_threads
-                       and time.monotonic() >= retry_after.get((str(owner_key), thread_id), 0.0)]
+                       and self._thread_lane_can_retry(scheduler, str(owner_key), thread_id)]
             if pending:
                 candidates.append((owner_key, scheduler, pending[:owner_slots]))
         self._submit_thread_candidates(candidates, available=available)
+
+    # LLM: 配置只在失败车道复查；读取失败也局限于当前线程，不让一份坏配置阻塞同用户其它会话。
+    # 函数用途: 检查一条后台车道是否可以再跑，不构造后端或占用模型执行工位。
+    def _thread_lane_can_retry(self, scheduler: BackgroundMainAgentScheduler, label: str, thread_id: str) -> bool:
+        try:
+            return self._lane_retry.ready(
+                label, thread_id,
+                model_ready=lambda: thread_model_is_configured(scheduler.runtime.agent, thread_id),
+            )
+        except Exception as exc:
+            self._record_thread_failure(label, thread_id, exc)
+            return False
+
+    # LLM: 执行异常与恢复检查异常共用 typed 退避及脱敏日志，不修改持久 wake、claim 或 Goal。
+    # 函数用途: 记录精确失败车道和恢复条件，普通错误沿用用户配置的冷却时间。
+    def _record_thread_failure(self, label: str, thread_id: str, exc: Exception) -> None:
+        config = self._base_agent.config
+        delay = max(0.0, float(config.background_main_error_backoff_seconds))
+        self._lane_retry.failed(label, thread_id, exc, delay=delay)
+        _print_gateway_loop_error(
+            "gateway_background_main.iteration", f"background-main:{label}:{thread_id}", exc,
+        )
 
     # LLM: Candidate submission uses the already-bounded executor and never
     # changes durable source status before the worker acquires its run claim.
@@ -551,9 +571,8 @@ class _BackgroundThreadLaneSupervisorMixin:
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
 
-    # LLM: One failed conversation lane is logged and isolated; it cannot terminate
-    # the supervisor or consume another thread's durable source.
-    # 函数用途: 安全运行后台消费；宿主异常对精确 owner/thread 退避，不能吞异常后每 tick 热重试挤占工位。
+    # LLM: 异常由 typed 退避组件隔离，不能终止 supervisor、消费事件或修改 Goal；慢流中的执行不经过此门。
+    # 函数用途: 安全运行一个工作片；成功清除旧冷却，失败记录原诊断并等待对应恢复条件。
     def _safe_thread_tick(
         self,
         scheduler: BackgroundMainAgentScheduler,
@@ -562,38 +581,22 @@ class _BackgroundThreadLaneSupervisorMixin:
     ) -> list[object]:
         try:
             result = list(scheduler.tick_thread(thread_id) or [])
-            getattr(self, "_lane_retry_after", {}).pop((label, thread_id), None)
+            self._lane_retry.succeeded(label, thread_id)
             return result
         except Exception as exc:
-            retry_after = getattr(self, "_lane_retry_after", None)
-            if retry_after is None:
-                self._lane_retry_after = retry_after = {}
-            config = getattr(self._base_agent, "config", None)
-            delay = max(0.0, float(getattr(config, "background_main_error_backoff_seconds", 30.0)))
-            if len(retry_after) >= 1024:
-                retry_after.pop(next(iter(retry_after)), None)
-            retry_after[(label, thread_id)] = time.monotonic() + delay
-            _print_gateway_loop_error(
-                "gateway_background_main.iteration",
-                f"background-main:{label}:{thread_id}",
-                exc,
-            )
+            self._record_thread_failure(label, thread_id, exc)
             return []
 
 
 
 
+# LLM: supervisor 复用 owner agent 与规范会话存储；独立 thread 在有界池并发，模型/权限由工作片作用域隔离。
+# 类用途: 统一后台会话、owner 发现和低优先级维护编排；不重复创建 Gateway 或修改持久任务的事实源。
 class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
-    """后台主代理值守:按 owner + thread 消费各自 store 的唤醒并投真渠道。
+    """单 Gateway 的 owner/thread 后台调度入口，渠道交付沿原 DeliveryService。"""
 
-    修「叫回半环」两处断裂:
-    - 多 owner 消费:scoped owner 的子代理把唤醒写进各自 owner 的 conversation_store,base 调度器看不到。
-      这里按共享活跃登记表(请求路 record)逐 owner 建**本后台线程私有**的 scoped agent + 调度器 tick;
-      scoped agent 只这一条线程用,不跨线程共享实例(on-disk store 本就并发安全)。单 owner / 未开 scoping
-      → 登记表空 → 只 tick base,行为不变。
-    - 真渠道投递:base 与各 owner 调度器都用 DeliveryService(叫回产出主动外呼飞书),不再 FakeDeliveryService。
-    """
-
+    # LLM: 复用组合根和 owner 池；进程内执行池/退避不替代 durable claim，初始化不发模型请求。
+    # 函数用途: 接线后台会话与维护资源，并建立可随进程退出回收的调度状态。
     def __init__(self, context: GatewayRunContext) -> None:
         self._base_agent = _gateway_agent_from_context(context)
         self._channels = self._base_agent.delivery_service
@@ -609,7 +612,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self._curator_executor: object | None = None
         # 会话运行时 的 active turn 是 thread-scoped；这里也以 durable thread_id 作最小运行车道。
         self._inflight: dict[object, object] = {}
-        self._lane_retry_after: dict[tuple[str, str], float] = {}
+        self._lane_retry = BackgroundLaneRetry()
         # 磁盘级唤醒发现(治「睡死叫不醒」§1):登记表是进程内易失结构,网关重启清零、
         # LRU 会逐出,且只有新入站请求才补记;长盯守非阻塞挂起期恰恰没有新请求 →
         # scoped owner 的到点 policy 从此无人消费。这里启动即扫一次、之后按间隔重扫,

@@ -64,6 +64,7 @@ agent_py_agent/
 |   |   `-- control_runtime.py          # CLI 对共享会话控制协议及窗口级精确中断的运行适配
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
 |   |-- gateway_process.py              # gateway 进程入口
+|   |-- gateway_lane_retry.py           # 后台 owner/thread 配置等待与普通冷却；有界、线程安全、不另存任务状态
 |   `-- _*.py                           # CLI 子命令实现
 |-- skills/builtin/<category>/<name>/   # 内置知识型 skill 树：目录即分类（research/documents/…），递归扫描，类目索引常驻 prompt，skill_search 工具按需检索（千级地基）
 |-- agent/

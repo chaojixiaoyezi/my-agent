@@ -32,7 +32,7 @@ def test_failed_thread_cools_down_without_blocking_healthy_thread(monkeypatch):
     supervisor._base_agent = SimpleNamespace(config=SimpleNamespace(background_main_error_backoff_seconds=30))
     supervisor._inflight = {}
     supervisor._owner_schedulers = {}
-    supervisor._lane_retry_after = {}
+    supervisor._lane_retry = gateway_loops.BackgroundLaneRetry()
     now = [100.0]
     monkeypatch.setattr(gateway_loops.time, "monotonic", lambda: now[0])
     prepared = []
@@ -46,7 +46,7 @@ def test_failed_thread_cools_down_without_blocking_healthy_thread(monkeypatch):
     key = gateway_loops._BASE_SCHEDULER_KEY
     supervisor._submit_thread_candidates = lambda candidates, **kw: prepared.extend(candidates)
     assert supervisor._safe_thread_tick(scheduler, str(key), "failed") == []
-    assert supervisor._lane_retry_after[(str(key), "failed")] == 130
+    assert supervisor._lane_retry.count(str(key)) == 1
     supervisor._submit_ready_thread_ticks()
     assert prepared[0][2] == ["healthy"]
     now[0] = 131
@@ -55,7 +55,7 @@ def test_failed_thread_cools_down_without_blocking_healthy_thread(monkeypatch):
     assert prepared[0][2] == ["failed", "healthy"]
     scheduler.tick_thread = lambda _thread: []
     supervisor._safe_thread_tick(scheduler, str(key), "failed")
-    assert (str(key), "failed") not in supervisor._lane_retry_after
+    assert supervisor._lane_retry.count(str(key)) == 0
 
 
 def test_background_main_loop_survives_tick_exceptions_and_reports_supply_error(monkeypatch, capsys) -> None:

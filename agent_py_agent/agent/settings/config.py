@@ -468,7 +468,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_request_max_attempts: int = 2
     # 后台会话全局线程池上限；超出留在持久队列，同 thread 仍由 run claim 单飞。
     background_owner_workers: int = 8
-    # 后台会话宿主异常的最短重试间隔；保留持久事件，不影响前台消息或其它会话。
+    # 后台普通宿主异常的重试间隔；本地缺模型等待配置恢复，保留持久事件，不影响前台或其它会话。
     background_main_error_backoff_seconds: float = 30.0
     # 单 owner 同时可跑的独立后台会话数；调大会增加并发模型请求。
     background_threads_per_owner: int = 4

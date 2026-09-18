@@ -74,6 +74,16 @@ def test_echo_requires_explicit_selection():
     assert get_backend("echo", AgentConfig(model_backend="echo")).name == "echo"
 
 
+@pytest.mark.parametrize("backend", ["", "echo", "openai_compatible", "openai_responses", "anthropic_compatible"])
+@pytest.mark.parametrize("model,url", [("", ""), ("chosen", ""), ("", "https://example.test/v1"),
+                                       ("chosen", "https://example.test/v1")])
+def test_background_readiness_matches_backend_factory(backend, model, url):
+    from agent_py_agent.agent.backends.base import model_configuration_missing
+
+    config = AgentConfig(model_backend=backend, model_name=model, api_base=url)
+    assert model_configuration_missing(backend, config) == (get_backend(backend, config).name == "unconfigured")
+
+
 def test_curator_invalid_selection_does_not_fall_back_to_deployment(monkeypatch):
     from agent_py_agent.agent.core import _curator_profile_config
     from agent_py_agent.agent.settings import model_profiles

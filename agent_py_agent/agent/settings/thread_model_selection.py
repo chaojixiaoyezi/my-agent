@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from ..backends.errors import ModelNotConfiguredError
 from .model_profiles import (
     ModelProfileError,
     model_profiles_path,
@@ -81,3 +82,21 @@ def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None
 # 函数用途: 为前台、后台、恢复和手动 Compact 取得同一个会话选定的模型配置。
 def thread_model_config(agent: object, thread_id: str):
     return selected_model_config(agent, profile_id=thread_model_profile_id(agent, thread_id))
+
+
+# LLM: 仅 typed 本地配置/引用异常需要等待配置；远端 4xx、额度和任务阻塞不能由此解除或吞掉。
+# 函数用途: 让 Goal 错误处理和 Gateway 重试统一识别缺模型，不用异常正文猜测恢复条件。
+def is_model_configuration_unavailable(error: BaseException) -> bool:
+    return isinstance(error, (ModelNotConfiguredError, ModelProfileError))
+
+
+# LLM: 仅供已因模型配置失败的后台车道复查；复用 owner 验证及模型引用，旧空引用沿原入口一次迁移。
+# 函数用途: 用户修改模型后判断是否可恢复后台工作；不读其它会话选择，不构造后端或发送网络请求。
+def thread_model_is_configured(agent: object, thread_id: str) -> bool:
+    from ..backends.base import model_configuration_missing
+
+    try:
+        config = thread_model_config(agent, thread_id)
+    except ModelProfileError:
+        return False
+    return not model_configuration_missing(config.model_backend, config)
