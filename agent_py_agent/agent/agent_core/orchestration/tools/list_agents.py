@@ -18,7 +18,11 @@ from ....tooling.models import (
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
-from ...agent_tree.model_view import agent_tree_model_payload, agent_tree_model_preview
+from ...agent_tree.model_view import (
+    agent_tree_model_payload,
+    agent_tree_model_preview,
+    agent_tree_progress_observation,
+)
 from ...agent_tree.status import agent_tree_status_payload
 from ..tool_specs import build_list_agents_model_spec
 
@@ -50,17 +54,21 @@ class ListAgentsTool(BaseTool):
     def __init__(self, agent: SimpleAgent) -> None:
         self.agent = agent
 
-    # LLM: 身份裁决仍由 canonical tree 完成；模型和归档都只保存可读视图，长摘要走既有输出策略。
-    # 函数用途: 读取代理状态与产物引用，不改等待状态；不再让模型去猜不能读取的内部恢复文件。
+    # LLM: 身份裁决仍由 canonical tree 完成；原始结果保留，稳定进展元数据只接既有软观察，不判死或取消。
+    # 函数用途: 读取状态与产物引用，并排除仅耗时变化的假进展；不改等待、权限或生命周期状态。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         run_id = str(params.get("run_id") or "").strip()
         query = {"run_id": run_id, "scope": "own_subtree"} if run_id else {}
-        payload = agent_tree_model_payload(agent_tree_status_payload(self.agent, query))
+        snapshot = agent_tree_status_payload(self.agent, query)
+        payload = agent_tree_model_payload(snapshot)
         return ToolHandlerOutcome(
             self.model_spec.name,
             True,
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            result_envelope={"tool_output_policy": {"live_prompt_output": agent_tree_model_preview(payload)}},
+            result_envelope={
+                "tool_output_policy": {"live_prompt_output": agent_tree_model_preview(payload)},
+                "progress_observation": agent_tree_progress_observation(snapshot, payload),
+            },
         )
 
 

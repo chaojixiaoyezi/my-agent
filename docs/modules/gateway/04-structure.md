@@ -1,5 +1,19 @@
 # Gateway Structure
 
+## 本地来源与 owner 身份
+
+TUI worker 收到已经持久入队的 `gateway_request_id` 时，直接接原 terminal，不再以前台 PID
+快照否认该回执。只有未入队路径检查服务活性；重启不自动复制请求，超时/取消仍走同一协议。
+
+文件队列由 `submit_gateway_ask` 写入精确 `source=cli_chat/cli_gateway`；
+`metadata.channel` 在多用户 TUI 中承载 owner provider，不能同时决定本地输出脱敏。
+`request_execution.py::_gateway_request_channel` 只把这两个宿主来源投影为 `chat/gateway-cli`，
+流式、final、普通追加和 repair 使用同一决定。保存消息的 channel 供历史重放使用，
+请求 metadata 与 thread 绑定仍不变；这不是鉴权或外部主动投递的路由更改。
+HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台外部投递仍由原 DeliveryContext 决定。
+标识遮蔽也必须使用同一展示通道：本机私有正文中的独立内部编号照常遮蔽，路径里的 owner/request
+不能被替换为“当前空间/当前请求”而破坏地址。外部通道仍先去除宿主路径，再按原策略遮蔽标识。
+
 ## 异常回合历史
 
 `RunParams.partial_turn_callback` 由调用宿主绑定精确 owner/thread/request。共享工具循环在异常退出前

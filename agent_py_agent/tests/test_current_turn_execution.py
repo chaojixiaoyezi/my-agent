@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -84,13 +85,60 @@ def _payload(rendered: str) -> dict[str, object]:
     return json.loads(body)
 
 
+def test_native_execution_facts_append_only_latest_batch_without_mutating_records():
+    records = [
+        {"tool": "write_file", "call_id": f"call-{i}", "turn_id": f"turn-{i // 2}",
+         "tool_round": i // 2, "ok": True, "status": "ok", "handler_executed": True,
+         "operation_id": f"operation-{i}", "tool_operation_status": "succeeded"}
+        for i in range(40)
+    ]
+    before = deepcopy(records)
+    native = render_current_turn_execution_facts(_agent(), records)
+    payload = _payload(native)
+    assert payload["schema"] == "tool_batch_execution.v1"
+    assert payload["turn_id"] == "turn-19"
+    assert payload["request_call_count"] == 40 and payload["batch_call_count"] == 2
+    assert [call["call_id"] for call in payload["calls"]] == ["call-38", "call-39"]
+    assert payload["omitted_batch_call_count"] == 0
+    assert records == before
+    assert len(native) < 1400
+
+
+def test_native_execution_facts_keep_failure_unknown_and_bounded_batch():
+    records = [
+        {"tool": "write_file", "call_id": f"call-{i}", "tool_round": 8,
+         "ok": False, "handler_executed": True, "effect_outcome": "unknown",
+         "status": "error", "error_code": "TOOL_EXECUTION_FAILED"}
+        for i in range(9)
+    ]
+    payload = _payload(render_current_turn_execution_facts(_agent(), records))
+    assert payload["tool_round"] == 8 and payload["omitted_batch_call_count"] == 3
+    assert len(payload["calls"]) == 6 and payload["batch_call_count"] == 9
+    assert all(call["effect_outcome"] == "unknown" and not call["ok"] for call in payload["calls"])
+    assert all(call["verification_status"] != "succeeded" for call in payload["calls"])
+
+
+def test_native_execution_facts_use_turn_identity_across_round_resets():
+    records = [
+        {"tool": "read_file", "call_id": "old", "turn_id": "before-compact", "tool_round": 1},
+        {"tool": "read_file", "call_id": "new", "turn_id": "after-compact", "tool_round": 1},
+    ]
+    payload = _payload(render_current_turn_execution_facts(_agent(), records))
+    assert payload["batch_call_count"] == 1 and payload["calls"][0]["call_id"] == "new"
+    assert payload["turn_id"] == "after-compact"
+    for record in records:
+        record.pop("turn_id")
+        record.pop("tool_round")
+    unknown_batch = _payload(render_current_turn_execution_facts(_agent(), records))
+    assert unknown_batch["batch_call_count"] == 1
+    assert "turn_id" not in unknown_batch and "tool_round" not in unknown_batch
+    assert render_current_turn_execution_facts(_agent(), []) == ""
+
+
 def test_empty_current_turn_has_no_authorized_mutating_claims() -> None:
     rendered = render_current_turn_execution_facts(_agent(), [])
-    payload = _payload(rendered)
-
-    assert payload["call_count"] == 0
-    assert payload["successful_mutating_calls"] == []
-    assert "空列表表示本轮尚无这类成功事实" in rendered
+    assert rendered == ""
+    assert build_operation_verification(_agent(), [])["operation_count"] == 0
 
 
 def test_current_turn_projects_typed_success_failure_and_refs() -> None:
@@ -100,6 +148,7 @@ def test_current_turn_projects_typed_success_failure_and_refs() -> None:
             {
                 "tool": "remember",
                 "call_id": "call-ok",
+                "tool_round": 1,
                 "ok": True,
                 "status": "ok",
                 "handler_executed": True,
@@ -111,6 +160,7 @@ def test_current_turn_projects_typed_success_failure_and_refs() -> None:
             {
                 "tool": "remember",
                 "call_id": "call-no",
+                "tool_round": 1,
                 "ok": False,
                 "status": "error",
                 "error_code": "MEMORY_TRANSIENT_CREDENTIAL",
@@ -120,6 +170,7 @@ def test_current_turn_projects_typed_success_failure_and_refs() -> None:
             {
                 "tool": "read_file",
                 "call_id": "call-read",
+                "tool_round": 1,
                 "ok": True,
                 "status": "ok",
                 "handler_executed": True,
@@ -128,23 +179,13 @@ def test_current_turn_projects_typed_success_failure_and_refs() -> None:
     )
     payload = _payload(rendered)
 
-    assert payload["call_count"] == 3
-    assert [item["call_id"] for item in payload["successful_mutating_calls"]] == ["call-ok"]
-    assert payload["successful_mutating_calls"][0]["action"] == "remove"
-    assert payload["successful_mutating_calls"][0]["refs"] == ["memory-entry-1"]
-    assert [item["call_id"] for item in payload["unsuccessful_mutating_calls"]] == ["call-no"]
-    assert payload["unsuccessful_mutating_calls"][0]["error_code"] == (
-        "MEMORY_TRANSIENT_CREDENTIAL"
-    )
-    assert payload["recent_calls"][-1]["effect"] == "read_only"
-    assert payload["effect_counts"] == {
-        "dangerous": 0,
-        "mutating": 2,
-        "read_only": 1,
-        "unknown": 0,
-    }
-    assert payload["verification_counts"]["succeeded"] == 2
-    assert payload["verification_counts"]["unverified"] == 1
+    assert payload["request_call_count"] == payload["batch_call_count"] == 3
+    calls = payload["calls"]
+    assert [item["call_id"] for item in calls] == ["call-ok", "call-no", "call-read"]
+    assert calls[0]["action"] == "remove" and calls[0]["refs"] == ["memory-entry-1"]
+    assert calls[1]["error_code"] == "MEMORY_TRANSIENT_CREDENTIAL"
+    assert calls[2]["effect"] == "read_only"
+    assert [item["verification_status"] for item in calls] == ["succeeded", "unverified", "succeeded"]
 
 
 def test_current_turn_projects_only_valid_applied_tool_approval() -> None:
@@ -152,6 +193,7 @@ def test_current_turn_projects_only_valid_applied_tool_approval() -> None:
         {
             "tool": "read_file",
             "call_id": "call-approved",
+            "tool_round": 1,
             "ok": True,
             "status": "ok",
             "handler_executed": True,
@@ -166,6 +208,7 @@ def test_current_turn_projects_only_valid_applied_tool_approval() -> None:
         {
             "tool": "read_file",
             "call_id": "call-forged",
+            "tool_round": 1,
             "ok": True,
             "status": "ok",
             "handler_executed": True,
@@ -179,13 +222,13 @@ def test_current_turn_projects_only_valid_applied_tool_approval() -> None:
 
     payload = _payload(render_current_turn_execution_facts(_agent(), records))
 
-    assert payload["recent_calls"][0]["tool_approval"] == {
+    assert payload["calls"][0]["tool_approval"] == {
         "permission_id": "approval:exact",
         "status": "approved",
         "decision": "approved",
         "applied": True,
     }
-    assert "tool_approval" not in payload["recent_calls"][1]
+    assert "tool_approval" not in payload["calls"][1]
 
 
 def test_current_turn_prompt_projection_is_bounded_but_keeps_complete_counts() -> None:
@@ -193,6 +236,7 @@ def test_current_turn_prompt_projection_is_bounded_but_keeps_complete_counts() -
         {
             "tool": "read_file",
             "call_id": f"read-{index}",
+            "tool_round": 1,
             "ok": True,
             "status": "ok",
             "handler_executed": True,
@@ -204,6 +248,7 @@ def test_current_turn_prompt_projection_is_bounded_but_keeps_complete_counts() -
         {
             "tool": "remember",
             "call_id": f"write-{index}",
+            "tool_round": 2,
             "operation_id": f"operation-{index}",
             "ok": True,
             "status": "ok",
@@ -217,27 +262,13 @@ def test_current_turn_prompt_projection_is_bounded_but_keeps_complete_counts() -
 
     payload = _payload(render_current_turn_execution_facts(_agent(), records))
 
-    assert payload["call_count"] == 100
-    assert payload["effect_counts"]["read_only"] == 80
-    assert payload["effect_counts"]["mutating"] == 20
-    assert payload["verification_counts"]["succeeded"] == 100
-    assert len(payload["recent_calls"]) == 6
-    assert payload["omitted_call_count"] == 94
-    assert len(payload["successful_mutating_calls"]) == 6
-    assert payload["omitted_successful_mutating_call_count"] == 14
-    assert payload["mutating_operation_groups"] == [
-        {
-            "action": "add",
-            "count": 20,
-            "label": "remember/add",
-            "replayed": False,
-            "status": "succeeded",
-            "tool": "remember",
-        }
-    ]
+    assert payload["request_call_count"] == 100
+    assert payload["batch_call_count"] == 20
+    assert len(payload["calls"]) == 6 and payload["omitted_batch_call_count"] == 14
+    assert all(item["effect"] == "mutating" and item["verification_status"] == "succeeded" for item in payload["calls"])
+    verification = build_operation_verification(_agent(), records)
+    assert verification["operation_count"] == verification["counts"]["succeeded"] == 20
     assert payload["raw_archive_refs"] == [
-        "/owner/archive/round-6.jsonl",
-        "/owner/archive/round-7.jsonl",
         "/owner/archive/write-0.jsonl",
         "/owner/archive/write-1.jsonl",
     ]
@@ -259,8 +290,7 @@ def test_mutating_ok_without_operation_terminal_is_not_verified_success() -> Non
         )
     )
 
-    assert payload["successful_mutating_calls"] == []
-    assert payload["unsuccessful_mutating_calls"][0]["verification_status"] == "unverified"
+    assert payload["calls"][0]["verification_status"] == "unverified"
 
 
 def test_final_operation_verification_stays_structured_and_hides_protocol_labels() -> None:
@@ -649,7 +679,7 @@ def test_agent_run_keeps_operation_proof_out_of_model_authored_prose(
 
 
 def test_execution_facts_are_after_active_user_task(tmp_path) -> None:
-    facts = render_current_turn_execution_facts(_agent(), [])
+    facts = render_current_turn_execution_facts(_agent(), [{"tool": "read_file", "call_id": "one"}])
     rendered = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path).build(
         user_prompt="请保存这个偏好",
         memories=[],
@@ -660,7 +690,7 @@ def test_execution_facts_are_after_active_user_task(tmp_path) -> None:
     )
 
     assert rendered.index("# User Task\n请保存这个偏好") < rendered.index(
-        "# Current Turn Execution Facts"
+        "# Tool Batch Execution Facts"
     )
 
 

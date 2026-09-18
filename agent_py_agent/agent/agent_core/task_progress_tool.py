@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
-"""LLM: Expose task progress as an advisory ledger, never a lifecycle gate.
+"""LLM: Expose exact owner/thread progress ledgers as notes, never a lifecycle gate or workspace selector.
 
-模块用途: 让模型记录和读取软进度，同时用结构化状态同步已结束的子代理条目。
+模块用途: 让模型记录和读取软进度；同会话旧计划可显式补充，子代理只写自身，身份与生命周期不随笔记变化。
 """
 
 import json
@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from ..task_progress import (
     invalid_coverage_statuses,
     invalid_item_statuses,
+    progress_path,
     read_task_progress,
     task_progress_display_identity,
     task_progress_display_items,
@@ -42,6 +43,7 @@ from .orchestration.tool_specs import build_task_progress_model_spec
 from .runner.context import current_subagent_run_id
 from .runtime.owner_roots import runtime_owner_root
 from .runtime.task_identity import (
+    conversation_task_progress_ledger_id,
     durable_task_id,
     progress_display_generation_id,
     progress_ledger_id,
@@ -78,26 +80,28 @@ class TaskProgressTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    # LLM: Writes promote the conversation task before resolving its ledger,
-    # then project canonical child state so stale input cannot hide a DONE child.
-    # 函数用途: 在稳定任务账本中读写软进度，并把真实子代理终态同步到返回结果。
+    # LLM: 默认写入当前账本；显式历史目标须属于同 owner/thread 的已存在账本，不能据读取或正文自动改绑运行。
+    # 函数用途: 按精确账本 ID 读写软进度；允许主代理补充自己的旧计划，子代理仍只写自己，任务生命周期不变。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = _normalized_action(params.get("action"))
         if action_error := _invalid_action_result(action):
             return action_error
         if field_error := _invalid_action_fields_result(action, params):
             return field_error
-        if action == "update":
+        explicit = str(params.get("run_id") or "").strip()
+        if action == "update" and not explicit:
             # 先晋升再选账本 key：否则首条 Todo 会写 request id，后续派工却写
             # task-path 指纹，同一任务会分裂成两本清单。
             from ..conversation.task_promotion import promote_current_conversation_task
 
             promote_current_conversation_task(self.agent)
-        run_id = _target_run_id(self.agent, params, allow_explicit=action == "read")
+        run_id = _target_run_id(self.agent, params, allow_explicit=True)
         if not run_id:
             run_id = "main"
         root = runtime_owner_root(self.agent)
         if action == "update":
+            if scope_error := _invalid_write_target(self.agent, root, run_id, params):
+                return scope_error
             if status_error := _invalid_status_result(params):
                 return status_error
             if identity_error := _invalid_new_item_identity_result(root, run_id, params):
@@ -360,7 +364,7 @@ def _invalid_action_fields_result(
 ) -> ToolHandlerOutcome | None:
     action_fields = {
         "read": frozenset({"action", "run_id"}),
-        "update": frozenset({"action", "summary", "next_action", "items", "coverage"}),
+        "update": frozenset({"action", "run_id", "summary", "next_action", "items", "coverage"}),
     }
     protocol_fields = frozenset(
         {
@@ -395,10 +399,44 @@ def _invalid_action_fields_result(
         effect_outcome="not_started",
     )
 
-# LLM: An explicit read target that equals the current structured task identity
-# is only an alias for this turn's canonical ledger. Keep true cross-run reads
-# exact, and never infer aliases from prompt text or identifier prefixes.
-# 函数用途: 解析进度账本编号；当前任务编号自动归一到唯一账本，其他历史编号仍按原值读取。
+
+# LLM: 历史笔记写入只接受当前 owner store 的同线程 task link 与实际账本；不得从文件名、自然语言或上次 read 猜目标。
+# 子代理不能借父级 thread_id 写父/兄弟账本；该裁决不晋升、不重绑、不重启历史任务。
+# 函数用途: 校验显式旧计划的写权限，拒绝时返回精确作用域，避免悄悄另建一份计划。
+def _invalid_write_target(agent: object, root: Path, target: str, params: dict) -> ToolHandlerOutcome | None:
+    current_id = _target_run_id(agent, params, allow_explicit=False) or "main"
+    if target == current_id:
+        return None
+    current = getattr(agent, "_current_run_params", None)
+    scope = str(getattr(current, "context_scope", "") or "default").strip().lower()
+    attrs = getattr(current, "task_attributes", None)
+    thread_id = str(attrs.get("conversation_thread_id") or "") if isinstance(attrs, dict) else ""
+    store = getattr(agent, "conversation_store", None)
+    loader = getattr(store, "task_links_report", None)
+    if not current_subagent_run_id(agent) and scope in {"default", "conversation", ""} and thread_id and callable(loader):
+        try:
+            links, errors = loader(thread_id)
+        except (KeyError, OSError, ValueError):
+            links, errors = (), ("scope_unavailable",)
+        if not errors and progress_path(root, target).is_file() and any(
+            str(getattr(link, "thread_id", "")) == thread_id
+            and str(getattr(link, "cancellation_scope", "")) != "detached"
+            and conversation_task_progress_ledger_id(store, link.task_id) == target
+            for link in links
+        ):
+            return None
+    payload = {
+        "ok": False,
+        "reason": "task_progress_scope_mismatch",
+        "error": "目标账本不属于当前代理可更新的计划。",
+        "scope_resolution": {"current_run_id": current_id, "requested_run_id": target, "decision": "denied"},
+        "how_to_fix": "新计划省略 run_id；补充旧计划使用同一会话 read 返回的 run_id。子代理只能更新自身计划。",
+    }
+    return ToolHandlerOutcome("task_progress", False, json.dumps(payload, ensure_ascii=False),
+                              error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+
+# LLM: 显式当前任务 ID 只是 canonical ledger 别名；真正历史目标保持精确，写入权限由调用方另行校验。
+# 函数用途: 解析读写账本编号，不从 prompt 或编号前缀猜目标，也不重新绑定任务。
 def _target_run_id(agent: object, params: dict[str, object], *, allow_explicit: bool) -> str:
     """账本键解析（与派工 seed 和任务工作区使用同一份任务身份）。
     唯一特殊分支=【后台唤醒轮】(_current_run_params.source=="background_main_agent"):

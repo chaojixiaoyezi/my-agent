@@ -52,6 +52,7 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
   执行 cwd 与内部 owner_runs_dir 分离，后台恢复不能继承 daemon 的 cwd。用户明确外部 cwd 仍经权限门。
   文件整理/命名共用 home_context_enabled 与 workspace_task_path_template 软提示，不靠标题猜运行身份。
 - 每个 owner/thread 只有一份 canonical transcript；task link、child wake、展示投影不得建立第二份模型历史。
+  本地 TUI 展示通道与 owner provider 分开；宿主路径保留时，后续内部编号遮蔽也不能改写路径片段。
   新消息只追加，普通轮不改旧缓存前缀。任务切换不删除历史/记忆，真正摘要替换只在 Compact。
   详见 `docs/design/CONVERSATION_CONTEXT_DESIGN.md`。
 - main/child/grandchild 各自用 ConversationThread 的 checkpoint + generation CAS 提交 Compact。
@@ -73,13 +74,16 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
   中断、异常和后台静默让出都保留本轮原生历史，空正文事实不冒充公开回复；后台每片有独立宿主回合号，
   原生信封与公开 final 同号去重，外发重投沿原冻结身份。缺工具结果只标记效果未知，不从屏幕补造事实。
 - 连接/首事件/流间隔超时分开，健康慢流没有隐式总墙钟；停止贯穿请求和退避。
+  TUI 已入队的持久请求沿原回执等待，Gateway 瞬时重启不能被前端误报成该任务未执行；不自动重发。
   Gateway chat 客户端的不活跃等待使用单调时钟，系统校时不能使活跃请求提前超时；只有本请求活动可续租。
   每模型可显式设置 `model_queue_wait_seconds`，默认 0，只额外延长首事件等待，不增加流静默或输出预算。
   明确 HTTP 400 不因缺少解释自动重试；429、5xx、网络瞬断仍走 typed 有界恢复。
 - 采样 top_p 是可选配置：普通端点默认省略，模型级覆盖与连接同快照、同缓存键。
+  三种接口的温度统一由显式开关控制，默认不覆盖提供方；单模型填写温度自动启用，请求级显式覆盖保留。
   已核对的精确官方/工具运行时 V4 Flash Chat 采用 0.95；用户显式温度不被删除。
   不按任意模型名或代理猜默认，不以调整采样代替 400 根因诊断，详见 `docs/design/TUI_MODEL_PROFILES.md`。
 - 工具操作身份、owner、run/task/parent/root 和副作用结果均读取结构化事实。
+  原生轮次只新增本批执行事实，不反复复制近期账本；全轮核验与原始工具历史保留，旧缓存前缀不改。
   成功重复按完整原始结果摘要观察并定间隔软提醒；后台查询另用宿主稳定进展摘要，不把耗时当进展。
   该摘要不能参与动作拒绝、任意 Python 的只读分类或任务完成裁决；沉默的进程不因此被强杀。
   普通后台记忆策展避让本 Gateway 的同端点活动工作片，pending/游标保留；pre_compact 不互等。
@@ -103,6 +107,8 @@ SSE delta 原样保留，OpenAI 工具参数生成有独立进度；
 - Todo 是软计划，不是完成验收；普通 final 不因未勾完而被挡或暗中续跑。只有显式 /goal 和既有
   child 等待、审批、UNKNOWN 保留各自生命周期。UI 清单读 display_plan 的 exact generation/revision；
   历史页只恢复正文，不能用旧 Todo 覆盖当前计划。
+  Todo/覆盖清单按 ID 部分更新时，缺省状态保持原值，新项才默认 pending；更正开关不补造状态。
+  已完成项仍可补写 notes 和 evidence，不能返回成功却吞掉验证备注；状态/结果更正仍显式声明。
 - 每个代理最多一个未结束 Goal；主子各自归属，普通派工可不附目标，Todo 可选。方向键选 Goal、Enter 编辑，
   Ctrl+S 保存、Ctrl+G 放弃。主代理 Esc 中断当前轮，active Goal 沿原 wake 安全续接；
   `/stop` 或 `/goal pause` 才暂停目标，普通消息不隐式恢复。子代理 Esc 保留当前停止语义。

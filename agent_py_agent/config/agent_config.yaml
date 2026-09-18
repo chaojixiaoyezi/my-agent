@@ -649,15 +649,15 @@ model_context_window_tokens: 128000
 # /model 保存的各模型窗口自动采用此语义；部署默认 false 保持既有探测优先行为。
 model_context_window_explicit: false
 
-# 采样温度
-# /model 的模型独立温度可覆盖此值，留空沿用；不按模型名称写死温度。
+# 显式采样温度；仅 model_temperature_explicit=true 时发送。
+# /model 填写模型独立温度自动启用，留空继承部署是否覆盖；不按模型名称写死温度。
 temperature: 0.2
 # 核采样概率，留空沿用供应商默认，显式值为 0 至 1。
 # 已核对官方/OpenCode Go/Zen 的 DeepSeek V4 Flash 思考模式默认 0.95，低于 0.95 按协议提升。
 # 其它模型/私有代理未填写时不发送；/model 可按单个模型覆盖。
 top_p: null
-# Responses 接口默认不发送温度（部分推理模型不接受）；显式 true 才发送上述温度。
-# /model 每模型填写温度自动显式启用，Chat/Messages 仍按原逻辑发送。
+# Chat、Messages、Responses 均默认不发送温度，沿用提供方默认；显式 true 才发送上述温度。
+# /model 每模型填写温度自动显式启用；false 不会用软件默认 0.2 干预兼容模型。
 model_temperature_explicit: false
 
 # Anthropic API 版本

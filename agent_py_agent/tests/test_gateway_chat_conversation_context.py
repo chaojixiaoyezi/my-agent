@@ -1110,6 +1110,67 @@ def test_gateway_stream_commentary_uses_same_structured_identifier_redaction(tmp
     assert commentary["text"] == "正在处理 当前会话，对应 当前请求。"
 
 
+@pytest.mark.parametrize("source,provider,private", [
+    ("cli_chat", "scoped-owner", True),
+    ("cli_gateway", "scoped-owner", True),
+    ("http:feishu", "feishu", False),
+    ("unknown", "scoped-owner", False),
+])
+def test_scoped_local_tui_preserves_paths_in_final_stream_and_history(tmp_path, monkeypatch, source, provider, private):
+    from agent_py_agent.agent.conversation.history_display import (
+        conversation_history_display_events,
+    )
+    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_request_channel
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    request = {
+        "prompt": "给出文件路径", "source": source,
+        "metadata": {"channel": provider, "owner_id": "providers/sample-provider/users/example-user"},
+        "client_capabilities": {"rich_transcript": True},
+        "conversation": {"channel": provider, "channel_conversation_id": "local-session",
+                         "channel_user_id": "example-user", "canonical_user_id": "example-user"},
+    }
+    path = "/home/example/owners/providers/sample-provider/users/example-user/tasks/req-path-test/report.md"
+    raw = f"入口：`{path}`；内部请求 req-path-test"
+    expected = f"入口：`{path if private else 'report.md'}`；内部请求 当前请求"
+    monkeypatch.setattr(agent, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        response=raw, runtime_status="ok", delivery_artifacts=[],
+    ))
+    result = _run_claimed_gateway_ask(_GatewayAskRunContext(
+        agent, request, tmp_path / "req.json", tmp_path / "resp.json", "req-path-test", lambda _chunk: None,
+    ))
+    assert result.channel_delivery["content"] == expected
+    thread = agent.conversation_store.resolve_thread(
+        channel=provider, channel_conversation_id="local-session", channel_user_id="example-user",
+    )
+    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
+    assert rows[-1].content == expected
+    events = conversation_history_display_events(rows)
+    assert any(event.get("payload", {}).get("text") == expected for event in events)
+    assert request["metadata"]["channel"] == provider
+    writer = BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", delivery_channel=_gateway_request_channel(request))
+    writer.set_identifier_redactions((("providers/sample-provider/users/example-user", "当前空间"),
+                                     ("example-user", "当前用户"), ("req-path-test", "当前请求")))
+    writer.write_model(raw)
+    writer.write_progress({"phase": "started"}, "开始")
+    writer.close()
+    chunks = [json.loads(line) for line in (tmp_path / "chunks.jsonl").read_text().splitlines()]
+    assert any(row.get("kind") == "assistant_commentary" and row.get("text") == expected for row in chunks)
+
+
+@pytest.mark.parametrize("path", [
+    "/home/example-user/work/report.md", r"C:\Users\example-user\work\report.md",
+    "tasks/example-user/report.md", "~/work/example-user/report.md",
+])
+def test_private_identifier_projection_preserves_path_segments_not_standalone_ids(path):
+    from agent_py_agent.agent.conversation.channels import redact_structured_identifiers
+
+    raw = f"文件 `{path}`；用户 example-user。"
+    ids = (("example-user", "当前用户"),)
+    assert redact_structured_identifiers(raw, ids, channel="chat") == f"文件 `{path}`；用户 当前用户。"
+    assert "example-user" not in redact_structured_identifiers(raw, ids, channel="feishu")
+
+
 def test_gateway_compacts_and_retries_internal_context_pressure_inline(tmp_path, monkeypatch):
     agent = SimpleAgent(
         AgentConfig(

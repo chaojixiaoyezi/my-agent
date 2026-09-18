@@ -1,7 +1,7 @@
 
 
-# LLM: 工具循环用同一 native IR 和 owner/thread Compact 权威；副作用按工具账本结构化结果处理，不能由次数或错误码旁路恢复保护。
-# 模块用途: 组装每轮工具请求并协调压缩与提交；不以裁剪改写用户输入、工具账本或任务状态。
+# LLM: 工具循环用同一 native IR 和 owner/thread Compact 权威；原生执行事实只补当前批次，不从次数推断任务完成。
+# 模块用途: 组装工具请求并协调压缩与提交，避免重复复制执行摘要；不改已有用户输入、账本、缓存前缀或任务状态。
 from __future__ import annotations
 
 import json
@@ -263,8 +263,8 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return prompt
 
 
-# LLM: 所有协议共用当前 Goal 的临时执行范围投影；它不写入历史，不改变预算或工具权限。
-# 函数用途: 渲染本轮真实上下文，使回合中刚建立或变更的目标立即被模型看见。
+# LLM: Goal 临时投影不改变预算或权限；原生执行事实只生成最近批次，后续按原 IR 来源追加机制持久化。
+# 函数用途: 渲染本轮目标和真实上下文，只补最近工具批次的执行状态，避免原生请求反复抄账。
 def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return agent.prompts.build(
         params.user_prompt,

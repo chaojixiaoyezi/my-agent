@@ -18,6 +18,13 @@ task 或 turn 语义；它们进入同一个 Gateway/runtime。
 
 ## Transcript and compact
 
+本地文件队列的 `cli_chat/cli_gateway` 来源由提交入口写入，属于私有展示，不能把用于多用户身份的
+`metadata.channel`（owner provider）当成外部投递通道。前台流式、final、延迟 repair 与保存消息的
+channel 使用同一 resolver；历史回放读取落账 channel。HTTP/IM/未知来源仍沿原脱敏策略，
+不因 rich transcript、角色或正文改变可见性；owner 路由与会话绑定身份保持不变。
+独立的内部编号仍可遮蔽，但私有路径内的 owner/request 片段不能变成“当前空间/当前请求”；
+路径策略和标识投影消费同一个通道事实，原生模型历史不改写。
+
 中断或模型/工具循环抛错不是丢弃执行历史的理由。正常返回的停止结果以及异常栈退出前的 native IR
 都进入同一个 canonical 消息信封；正文为空并单独标记 `aborted/error`，不对用户发送假回复。
 Gateway 沿原 final/repair 写入，子代理绑定精确 child thread/turn，一次性 CLI 沿其原会话写入。
@@ -104,11 +111,18 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 
 ## Cache economics
 
+系统通道的验证规则只限定证据表述，不要求每个动作前重新运行已有检查。相同版本、输入和观察点
+复用有效结果，定位后推进已授权的修复，再针对实际改动验证；权限仍由原工具门判断，不由提示文字放宽。
+
 动态状态由 PromptBuilder 的字段携带来源键，不能通过 Markdown 标题或公共前缀反推来源。记忆召回、工具
 推荐、工作区、运行注入、执行事实各自形成一个分段；普通工具轮只追加相对同来源最新 IR 状态的变化，
 不变项留在原位置，A→B→A 的最后 A 也必须追加。IR 是唯一比较基线，不另存永远 seen 的集合。
 完整诊断/摘要 prompt 从同一分段无损渲染。预检查与真实发送共用 `project_native_prompt_history`，
 前者只操作浅副本，后者提交原 IR；避免预检查多算整包或将动态字段混入稳定校准指纹。
+执行事实来源只追加最近完成的工具批次，以归档 turn_id/tool_round 识别，保留有界调用状态、批准及引用；
+不再每轮复制近期成功/失败明细和全轮统计。缺批次字段时仅陈述最后一条已返回记录，不猜任务意图。
+完整工具结果仍成对留在历史，最终操作核验仍按全轮账本汇总；没有工具结果时不注入空账本说明。
+这只减少后续新增字节，不追溯删除旧会话中的冗余快照；旧前缀仍只能在成功 Compact 后按原规则回收。
 完整 Compact 摘要覆盖连续退休工具前缀后，才可回收其中旧分段，并保留每个来源的最新项；取消或 CAS
 失败恢复原列表，也同时恢复比较基线。真正用户输入、Memory 存储、历史账本和权限不参与这一回收。
 
@@ -210,6 +224,9 @@ guidance id 幂等追加到同一 raw transcript；provider 失败、进程崩�
 
 - 每条用户消息直接成为新的 active turn；无需选择、关闭或新建普通任务。
 - 普通 `task_progress` 只允许 `read/update`，是模型可选的恢复笔记，不是会话或任务控制器。
+- 补充同会话旧计划时，主代理在 update 显式携带 read 返回的 `run_id`，底座核对同 owner/thread
+  的已有 task link 和账本。省略仍写当前计划；不因 read、条目重名或自然语言自动改绑。
+  子代理只能写自身，独立后台与其他会话的计划不可据此改写；旧任务不被重新启动。
 - exact request-level binding、未结束 Goal 或 active task 自动延续 canonical task root；普通
   completed/interrupted task 只保留历史/导航投影，不隐式吸附下一个新回合。
 - 不解析“继续、重来、第二步”等自然语言来猜 task id 或控制生命周期。

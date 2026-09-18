@@ -324,6 +324,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 ## 2026-08-25 长期进度账本与当前回合展示计划
 
+- Todo 与覆盖目标的部分更新区分“未提供状态”和“新建默认状态”。更新备注/优先级不会把原状态重置
+  为 pending；即便传更正标记，也只有明确传入的状态才可参与更正。新项仍默认 pending，参数身份门不变。
+- Todo 项的原生 Schema 同样声明 ID 必填，避免生成合同说可省略、运行时却不断拒绝；新项标题和状态取值
+  仍由 handler 返回具体错误，已有 ID 的部分更新无需强填标题或状态。
 - task-path `task_progress.v1` 继续保存跨阶段完整历史，是唯一耐久进度事实；TUI/Web 当前清单只是投影，不能
   删除旧项或重新定义完成状态。
 - 宿主在普通 conversation request 开始时以 exact request id 建立 `display_plan`，`task_progress` 与

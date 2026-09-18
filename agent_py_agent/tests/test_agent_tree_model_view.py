@@ -7,6 +7,7 @@ import pytest
 from agent_py_agent.agent.agent_core.agent_tree.model_view import (
     agent_tree_model_payload,
     agent_tree_model_preview,
+    agent_tree_progress_observation,
 )
 from agent_py_agent.agent.agent_core.orchestration.child_result_index import (
     child_result_index_from_nodes,
@@ -112,6 +113,88 @@ def test_normal_status_retains_all_eight_child_refs_without_readback():
         for i in range(8)
     ]))
     assert json.loads(agent_tree_model_preview(payload)) == payload
+
+
+def test_tree_progress_ignores_clock_heartbeat_and_query_activity():
+    node = {"run_id": "child", "status": "RUNNING", "last_progress_at": 100.0}
+    first = _snapshot([dict(node, updated_at=200, heartbeat_at=200, seconds_since_progress=100)])
+    second = _snapshot([dict(node, updated_at=250, heartbeat_at=250, seconds_since_progress=150)])
+    second["main"]["current_tool"] = "list_agents"
+    left = agent_tree_progress_observation(first, agent_tree_model_payload(first))
+    right = agent_tree_progress_observation(second, agent_tree_model_payload(second))
+    assert left == right
+    assert right["pending"] is True
+    assert first["nodes"][0]["seconds_since_progress"] == 100
+
+
+@pytest.mark.parametrize("source", ["current_runner_context", "explicit_params"])
+def test_tree_progress_excludes_only_actual_runner_not_explicit_target(source):
+    first = _snapshot([
+        {"run_id": "child", "status": "RUNNING", "current_tool": "list_agents", "last_progress_at": 100.0},
+        {"run_id": "grandchild", "parent_run_id": "child", "status": "DONE", "last_progress_at": 80.0},
+    ])
+    first["scope_resolution"] = {"source": source, "effective": {"run_id": "child", "scope": "own_subtree"}}
+    second = json.loads(json.dumps(first))
+    second["nodes"][0]["last_progress_at"] = 120.0
+    left = agent_tree_progress_observation(first, agent_tree_model_payload(first))
+    right = agent_tree_progress_observation(second, agent_tree_model_payload(second))
+    assert (left == right) is (source == "current_runner_context")
+    assert right["pending"] is (source != "current_runner_context")
+    assert len(agent_tree_model_payload(second)["nodes"]) == 2
+    second["nodes"][1]["artifact_refs"] = ["output/new.md"]
+    second["child_result_index"] = child_result_index_from_nodes(second["nodes"])
+    changed = agent_tree_progress_observation(second, agent_tree_model_payload(second))
+    assert changed["sha256"] != right["sha256"]
+
+
+@pytest.mark.parametrize("change", [
+    {"last_progress_at": 101.0}, {"status": "DONE"},
+    {"status": "FAILED", "failure_type": "runner_error"},
+    {"artifact_refs": ["output/new.md"]}, {"findings_recorded": 1},
+])
+def test_tree_real_progress_changes_observation(change):
+    node = {"run_id": "child", "status": "RUNNING", "last_progress_at": 100.0}
+    first, second = _snapshot([node]), _snapshot([{**node, **change}])
+    left = agent_tree_progress_observation(first, agent_tree_model_payload(first))
+    right = agent_tree_progress_observation(second, agent_tree_model_payload(second))
+    assert left["sha256"] != right["sha256"]
+    assert right["pending"] is (second["nodes"][0]["status"] == "RUNNING")
+
+
+def test_tree_polling_uses_existing_soft_observation_not_a_new_block():
+    from agent_py_agent.agent.agent_core.tool_guard.call_guardrail import (
+        record_tool_guard_observation,
+    )
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolResult, ToolSuccessFacts
+    from agent_py_agent.tests._tool_runtime_harness import (
+        canonical_test_call,
+        runtime_snapshot_for_tools,
+    )
+
+    agent = SimpleNamespace()
+    tool = ListAgentsTool(agent)
+    runtime = runtime_snapshot_for_tools({"list_agents": tool}, run_id="parent")
+    params = SimpleNamespace(tool_runtime_snapshot=runtime, task_attributes={"repeated_success_hint_threshold": 3})
+    warnings = []
+    for index in range(7):
+        snapshot = _snapshot([{
+            "run_id": "child", "status": "RUNNING", "last_progress_at": 1,
+            "seconds_since_progress": index, "updated_at": 100 + index,
+        }])
+        with patch(
+            "agent_py_agent.agent.agent_core.orchestration.tools.list_agents.agent_tree_status_payload",
+            return_value=snapshot,
+        ):
+            outcome = tool.execute({})
+        call = canonical_test_call(runtime, "list_agents", {}, call_id=f"call-{index}")
+        result = ToolResult.succeeded(call, outcome.output, facts=ToolSuccessFacts(
+            metadata={"handler_details": outcome.result_envelope},
+        ))
+        warnings.append(record_tool_guard_observation(agent, params, call, result))
+        assert json.loads(result.output)["nodes"][0]["seconds_since_progress"] == index
+        assert outcome.ok is True
+    assert [i + 1 for i, warning in enumerate(warnings) if warning] == [3, 6]
+    assert "不代表进程卡死" in warnings[2]
 
 
 def test_idle_followup_binds_status_query_to_current_conversation():

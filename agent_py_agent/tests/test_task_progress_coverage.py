@@ -7,6 +7,8 @@ from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 _TOOL_CALL_IDS = count(1)
@@ -27,6 +29,77 @@ def _execute_task_progress(agent: object, arguments: dict[str, object]):
 
 def _validation_issues(result: object) -> list[dict[str, object]]:
     return result.metadata["action_decision"]["evidence"]["issues"]
+
+
+@pytest.mark.parametrize("status", ["pending", "in_progress", "done", "skipped", "blocked"])
+@pytest.mark.parametrize("flag", [None, "correction", "overwrite", "replace"])
+def test_notes_only_item_update_preserves_status(tmp_path, status, flag):
+    from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+    write_task_progress(tmp_path, "main", {
+        "items": [{"id": "review", "title": "检查实际结果", "status": status, "notes": "首次观察"}],
+    })
+    patch = {"id": "review", "notes": "补充观察", "priority": {}, "updated_at": {}}
+    if flag:
+        patch[flag] = True
+    write_task_progress(tmp_path, "main", {"items": [patch]})
+
+    item = read_task_progress(tmp_path, "main")["items"][0]
+    assert item["status"] == status
+    assert item["title"] == "检查实际结果"
+    assert item["notes"] == "补充观察"
+
+
+@pytest.mark.parametrize("patch_status", [None, "done"])
+def test_completed_notes_update_is_applied_without_replacing_confirmed_result(tmp_path, patch_status):
+    from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+    write_task_progress(tmp_path, "main", {"items": [{
+        "id": "check", "title": "已有计划", "status": "done", "notes": "初次验证",
+        "result": "原结果", "evidence": ["first.log"],
+    }]})
+    item = {"id": "check", "notes": "追加验证", "result": "未经更正的替代结果", "evidence": ["second.log"]}
+    if patch_status is not None:
+        item["status"] = patch_status
+    write_task_progress(tmp_path, "main", {"items": [item]})
+    actual = read_task_progress(tmp_path, "main")["items"][0]
+    assert actual["notes"] == "追加验证"
+    assert actual["status"] == "done"
+    assert actual["result"] == "原结果"
+    assert actual["evidence"] == ["first.log", "second.log"]
+
+
+@pytest.mark.parametrize("status", ["pending", "in_progress", "done", "skipped", "blocked"])
+def test_notes_only_coverage_update_preserves_status(tmp_path, status):
+    from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+    write_task_progress(tmp_path, "main", {
+        "coverage": {"targets": [{"id": "review", "title": "覆盖检查", "status": status}]},
+    })
+    write_task_progress(tmp_path, "main", {
+        "coverage": {"targets": [{"id": "review", "notes": "补充观察"}]},
+    })
+    target = read_task_progress(tmp_path, "main")["coverage"]["targets"][0]
+    assert target["status"] == status
+    assert target["notes"] == "补充观察"
+
+
+@pytest.mark.parametrize("status_patch", [{}, {"status": ""}])
+def test_missing_status_defaults_only_for_new_rows(tmp_path, status_patch):
+    from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+    first = {"id": "existing", "title": "已有工作", "status": "in_progress"}
+    write_task_progress(tmp_path, "main", {"items": [first], "coverage": {"targets": [first]}})
+    rows = [
+        {"id": "existing", "notes": "补充备注", **status_patch},
+        {"id": "new", "title": "新工作", **status_patch},
+    ]
+    write_task_progress(tmp_path, "main", {"items": rows, "coverage": {"targets": rows}})
+    progress = read_task_progress(tmp_path, "main")
+    for values in (progress["items"], progress["coverage"]["targets"]):
+        assert {item["id"]: item["status"] for item in values} == {
+            "existing": "in_progress", "new": "pending",
+        }
 
 
 def test_task_progress_promotes_before_selecting_canonical_ledger(

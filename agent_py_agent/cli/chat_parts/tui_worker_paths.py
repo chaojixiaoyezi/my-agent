@@ -10,9 +10,9 @@ from typing import Any
 from .tui_runtime import TuiTurnSummary
 
 
-# LLM: Gateway TUI waits on the canonical terminal envelope; response/chunk files are display
-# projections only. timeout/error never splice legacy timing text into the transcript.
-# 函数用途: 提交并等待一次 Gateway 聊天请求，返回回复、记录标志和 TUI 终态。
+# LLM: 已有 gateway_request_id 表示持久提交成功，必须沿原终态信封等待，不能因重启瞬间 PID 不可见丢弃回执或重新提交。
+# 未提交请求仍检查服务；超时/取消沿现有协议，不由进程活性猜模型任务的成败。
+# 函数用途: 等待原 Gateway 请求的回复，让重启间隙已入队的消息继续接收结果，不误报停止后诱导用户重发。
 def _worker_gateway_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
     from ...agent.gateway_parts.permission_bridge import write_gateway_permission_decision
     from .gateway_client import (
@@ -22,7 +22,7 @@ def _worker_gateway_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
         poll_gateway_chunks,
     )
 
-    if not check_gateway_alive(ctx.cfg.paths):
+    if not str(getattr(ctx.job, "gateway_request_id", "") or "").strip() and not check_gateway_alive(ctx.cfg.paths):
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
     request_id, chunk_path, terminal_path = _submit_gateway_job(ctx)
     _publish_gateway_request_id(ctx, request_id)

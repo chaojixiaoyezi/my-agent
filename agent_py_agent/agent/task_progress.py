@@ -1,4 +1,6 @@
 
+# LLM: 规范进度账本与展示投影共用此入口；更新必须区分缺省字段与新建默认值，不能用模型文案改变状态。
+# 模块用途: 读取、合并和保存 Todo/覆盖清单；修改时联查工具参数校验、派工对账和 TUI 展示，完成状态不是任务验收门。
 from __future__ import annotations
 
 import json
@@ -18,7 +20,8 @@ TASK_PROGRESS_UNKNOWN_STATUS = "unknown"
 TASK_PROGRESS_COUNT_STATUSES = (*TASK_PROGRESS_KNOWN_STATUSES, TASK_PROGRESS_UNKNOWN_STATUS)
 TASK_PROGRESS_CLOSED_STATUSES = frozenset({"done", "skipped"})
 TASK_PROGRESS_STATUS_INVALID = "TASK_PROGRESS_STATUS_INVALID"
-_FACT_FIELDS = ("id", "title", "status", "notes", "result", "outcome", "conclusion", "decision", "summary")
+# 备注是持续维护的说明，不是冻结的完成事实；否则完成后补验证会返回成功却丢掉更新。
+_FACT_FIELDS = ("id", "title", "status", "result", "outcome", "conclusion", "decision", "summary")
 _RESULT_FIELDS = ("result", "outcome", "conclusion", "decision", "summary")
 _EXPLICIT_OVERWRITE_KEYS = ("correction", "overwrite", "replace")
 _DISPLAY_PLAN_KEY = "display_plan"
@@ -305,9 +308,12 @@ def normalize_task_progress(payload: dict[str, Any], *, run_id: str) -> dict[str
     return normalized
 
 
+# LLM: 纯合并规范进度；部分更新保留未传状态，新项才补默认值，不在此写文件或裁决任务完成。
+# 函数用途: 按原 ID 合并 Todo 和覆盖清单，补备注不能把正在做或已完成的工作重置为待办。
 def merge_task_progress(existing: dict[str, Any], update: dict[str, Any], *, run_id: str) -> dict[str, Any]:
     base = normalize_task_progress(existing, run_id=run_id)
-    merged_items = _merge_items(base["items"], [_normalize_item(item) for item in _list(update.get("items"))])
+    incoming = [_normalize_item(item, partial=True) for item in _list(update.get("items"))]
+    merged_items = _merge_items(base["items"], incoming)
     coverage = merge_coverage(base.get("coverage", {}), coverage_from_update(update))
     payload = {
         "schema_version": _SCHEMA_VERSION,
@@ -320,7 +326,7 @@ def merge_task_progress(existing: dict[str, Any], update: dict[str, Any], *, run
     payload["counts"] = _counts(merged_items)
     hints = quality_hints(
         merged_items,
-        incoming=[_normalize_item(item) for item in _list(update.get("items"))],
+        incoming=incoming,
         coverage=coverage,
     )
     if hints["messages"]:
@@ -452,13 +458,15 @@ def _merge_display_plan(
     }
 
 
-def normalize_coverage(payload: dict[str, Any]) -> dict[str, Any]:
+# LLM: 存储读取使用完整规范化；更新入口必须传 partial，以免丢失状态是否显式提供的事实。
+# 函数用途: 整理覆盖清单字段和计数，不写文件；更新备注时不擅自补状态。
+def normalize_coverage(payload: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
     raw_coverage = payload.get("coverage")
     coverage = dict(raw_coverage) if isinstance(raw_coverage, dict) else {}
     dimensions = string_list(coverage.get("dimensions"))
     normalized_targets = [
         target for item in _list(coverage.get("targets"))
-        if (target := _normalize_coverage_target(item))
+        if (target := _normalize_coverage_target(item, partial=partial))
     ]
     normalized = {
         "goal": str(coverage.get("goal") or "").strip(),
@@ -475,13 +483,17 @@ def normalize_coverage(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+# LLM: 更新与存量读取的默认值不同；这里仅提取补丁，不补目标状态、不修改原输入。
+# 函数用途: 从工具更新中取出覆盖清单，保留没有填写状态的含义。
 def coverage_from_update(update: dict[str, Any]) -> dict[str, Any]:
-    return normalize_coverage(update)
+    return normalize_coverage(update, partial=True)
 
 
+# LLM: 覆盖目标按 ID 合并；完整存量与部分更新分开规范化，仍沿用已完成证据保护规则。
+# 函数用途: 合并覆盖清单，不让新增备注误清原进度；返回数据，由调用方负责落盘。
 def merge_coverage(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     existing = normalize_coverage({"coverage": existing})
-    incoming = normalize_coverage({"coverage": incoming})
+    incoming = normalize_coverage({"coverage": incoming}, partial=True)
     targets = _merge_coverage_targets(existing["targets"], incoming["targets"])
     merged = {
         "goal": incoming["goal"] or existing["goal"],
@@ -512,6 +524,8 @@ def coverage_summary(coverage: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+# LLM: incoming 是部分更新；仅新 ID 做完整规范化，已有项继续保留未传字段及已完成检查。
+# 函数用途: 按 ID 合并覆盖对象及证据，不靠标题推测是否完成，也不写文件。
 def _merge_coverage_targets(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_id = {str(item.get("id") or ""): dict(item) for item in existing if str(item.get("id") or "")}
     order = [str(item.get("id") or "") for item in existing if str(item.get("id") or "")]
@@ -521,7 +535,7 @@ def _merge_coverage_targets(existing: list[dict[str, Any]], incoming: list[dict[
             continue
         if item_id not in by_id:
             order.append(item_id)
-            by_id[item_id] = item
+            by_id[item_id] = _normalize_coverage_target(item)
             continue
         previous = by_id[item_id]
         by_id[item_id] = {
@@ -544,7 +558,9 @@ def _preserve_done_checks(previous: dict[str, Any], merged: dict[str, Any]) -> d
     return checks
 
 
-def _normalize_coverage_target(value: object) -> dict[str, Any]:
+# LLM: partial 只用于更新补丁；缺省/空状态留空不覆盖原状态，新建或存量读取才默认 pending。
+# 函数用途: 整理一个覆盖对象，不把缺少状态误认为用户要求重置；无落盘副作用。
+def _normalize_coverage_target(value: object, *, partial: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     item = dict(value)
@@ -557,12 +573,13 @@ def _normalize_coverage_target(value: object) -> dict[str, Any]:
     result = {
         "id": target_id or _safe_id(title) or "target",
         "title": title,
-        "status": normalize_task_progress_status(raw_status or "pending"),
         "checks": _normalize_target_checks(item),
         "evidence": string_list(item.get("evidence")),
         "notes": str(item.get("notes") or "").strip(),
         "next": str(item.get("next") or "").strip(),
     }
+    if raw_status or not partial:
+        result["status"] = normalize_task_progress_status(raw_status or "pending")
     if raw_status and not task_progress_status_is_known(raw_status):
         result["raw_status"] = raw_status
         result["status_protocol_error"] = TASK_PROGRESS_STATUS_INVALID
@@ -761,7 +778,9 @@ def _empty_progress(run_id: str) -> dict[str, Any]:
     }
 
 
-def _normalize_item(value: object) -> dict[str, Any]:
+# LLM: partial 标识补丁而非完整行；状态缺省/空值不得生成 pending，未知显式状态仍保留协议错误事实。
+# 函数用途: 整理 Todo 字段，新建时补默认值，更新时不悄悄重置进度；无文件副作用。
+def _normalize_item(value: object, *, partial: bool = False) -> dict[str, Any]:
     item = dict(value) if isinstance(value, dict) else {"title": str(value or "").strip()}
     item_id = str(item.get("id") or item.get("title") or "").strip()
     # 与 _normalize_coverage_target 同理:缺 title 不回填 id,否则按 id 的部分更新
@@ -769,15 +788,15 @@ def _normalize_item(value: object) -> dict[str, Any]:
     title = str(item.get("title") or "").strip()
     raw_status = str(item.get("status") or "").strip()
     stored_raw_status = str(item.get("raw_status") or "").strip()
-    status = normalize_task_progress_status(raw_status or "pending")
     result = {
         "id": item_id or _safe_id(title) or "item",
         "title": title,
-        "status": status,
         "notes": str(item.get("notes") or "").strip(),
         "next": str(item.get("next") or "").strip(),
         "evidence": string_list(item.get("evidence")),
     }
+    if raw_status or not partial:
+        result["status"] = normalize_task_progress_status(raw_status or "pending")
     raw_status_for_metadata = stored_raw_status or raw_status
     if raw_status_for_metadata and not task_progress_status_is_known(raw_status_for_metadata):
         result["raw_status"] = raw_status_for_metadata
@@ -795,6 +814,8 @@ def _normalize_item(value: object) -> dict[str, Any]:
     return result
 
 
+# LLM: 只在新 ID 上应用完整行默认值；已有项按部分更新合并，显式更正仍受原完成事实规则约束。
+# 函数用途: 合并 Todo，更新备注不改变原状态；显式状态更新和新建待办继续生效。
 def _merge_items(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_id: dict[str, dict[str, Any]] = {}
     order: list[str] = []
@@ -813,7 +834,7 @@ def _merge_items(existing: list[dict[str, Any]], incoming: list[dict[str, Any]])
         key = _merge_key(item)
         if key not in by_id:
             order.append(key)
-            by_id[key] = item
+            by_id[key] = _normalize_item(item)
             continue
         previous = by_id[key]
         if _should_preserve_done_facts(previous, item):
@@ -840,6 +861,8 @@ def _should_preserve_done_facts(previous: dict[str, Any], incoming: dict[str, An
     )
 
 
+# LLM: 未声明更正时保留完成身份/状态/结果，普通 notes 更新和 evidence 追加仍须真实生效；不调度或写盘。
+# 函数用途: 防止无意冲掉完成结论，同时允许后续任务补验证备注，不把成功回执变成静默丢更新。
 def _merge_done_item_without_overwriting_facts(previous: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     merged = _merge_item_overlay(previous, incoming)
     for key in _FACT_FIELDS:

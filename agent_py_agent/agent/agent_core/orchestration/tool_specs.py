@@ -1,6 +1,6 @@
 
-# LLM: 编排工具 Schema 是公开参数事实源；说明按工具/参数职责分层，不重复整段系统规则，不用路径描述扩大权限。
-# 模块用途: 生成派工和计划工具的原生定义；压缩说明不删字段、约束或子代理能力。
+# LLM: 编排工具 Schema 必须与运行时必要字段一致；说明按职责分层，不重复整段系统规则或用描述扩大权限。
+# 模块用途: 生成派工和计划的原生参数定义；稳定身份等必要条件在生成时就明确，部分更新仍允许省略状态。
 from __future__ import annotations
 
 from copy import deepcopy
@@ -128,7 +128,7 @@ def build_task_progress_model_spec() -> ToolModelSpec:
     coverage_target_schema = _task_progress_coverage_target_schema()
     parameters = {
         "action": "read/update/create；不填默认 read。create 与 update 等效（账本不存在时自动创建，首次建清单也用 create 或 update），清单内容不会自动续跑普通任务，也不会阻止模型结束当前轮。",
-        "run_id": "仅用于 read 时查看另一个明确的历史运行；读取当前任务请省略。即使误传当前 task_id，系统也会归一到当前唯一账本；update 始终写当前运行自己的账本。",
+        "run_id": "省略时读写当前运行计划。主代理跨回合补充同一会话的旧计划时，read 和 update 都传 read 返回的精确 run_id；这不会切换工作区或重启旧任务。子代理只能更新自己的计划。",
         "summary": "可选。当前整体进展一句话",
         "next_action": "可选。下一步最应该做什么",
         "items": "可选。进度项列表，每项可含 id/title/status/evidence/notes/next",
@@ -189,14 +189,14 @@ def _task_progress_model_hints() -> ToolModelHints:
     )
 
 
-# LLM: Nested item schema advertises supported fields but deliberately leaves
-# required/status validation to the handler so partial updates get rich errors.
-# 函数用途: 构造进度项的模型 JSON 形状。
+# LLM: 每项更新都须有精确 ID，与运行时身份门一致；仅新项必需 title、显式状态合法性继续由 handler 校验。
+# 函数用途: 让模型生成阶段就知道 Todo 必须填写 ID，备注更新仍可省略标题和状态，不替模型猜已有项。
 def _task_progress_item_schema() -> dict[str, object]:
     return {
         "type": "object",
+        "required": ["id"],
         "properties": {
-            "id": {"type": "string"},
+            "id": {"type": "string", "description": "稳定条目 ID；更新已有项时使用原 ID。"},
             "title": {"type": "string"},
             "status": {"type": "string"},
             "evidence": {"type": "array", "items": {"type": "string"}},

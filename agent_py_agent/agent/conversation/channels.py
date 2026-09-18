@@ -144,11 +144,14 @@ def _host_path_basename(match: re.Match[str]) -> str:
 
 
 # LLM: 标识遮蔽只消费调用方从可信 request/thread/delivery 结构中传入的精确值；不得扫描正文猜
-#   哪一段“看起来像 ID”，也不得把模型文字作为新的遮蔽规则。
-# 函数用途: 在用户出口和权威用户 transcript 精确替换当前用户、会话、请求和任务的内部标识。
+#   哪一段“看起来像 ID”，也不得把模型文字作为新的遮蔽规则。本机私有通道保留文件路径，
+#   路径里包含 owner/request 值不代表路径本身是内部标识；该展示例外不改变任何访问权限。
+# 函数用途: 替换正文里的内部编号，但不把给本机用户复制的路径改成“当前空间”等不可用目录。
 def redact_structured_identifiers(
     text: str,
     identifiers: Iterable[tuple[object, str]],
+    *,
+    channel: object = "",
 ) -> str:
     projected = str(text or "")
     replacements: dict[str, str] = {}
@@ -159,12 +162,18 @@ def redact_structured_identifiers(
             continue
         replacements.setdefault(value, str(public_label or "当前对象"))
     for value in sorted(replacements, key=len, reverse=True):
-        projected = projected.replace(value, replacements[value])
+        if str(channel or "").strip().lower() in LOCAL_PRIVATE_CHANNELS:
+            # 完整路径先匹配并原样保留；相对路径中的精确目录段也不替换。
+            pattern = _HOST_ABSOLUTE_PATH_RE.pattern + rf"|(?<![/\\])(?P<identifier>{re.escape(value)})(?![/\\])"
+            projected = re.sub(pattern, lambda match: replacements[value]
+                               if match.group("identifier") is not None else match.group(0), projected)
+        else:
+            projected = projected.replace(value, replacements[value])
     return projected
 
 
 # LLM: DeliveryContext 是主动/回复投递的唯一可信路由，出口遮蔽只能从这里取值，不能从正文反推收件人。
-# 函数用途: 去掉一条用户回复中意外复述的通道目标、会话、消息、请求、线程和任务标识。
+# 函数用途: 去掉正文复述的内部路由编号；本机私有回复仍保留含这些编号的可复制文件路径。
 def redact_delivery_context_identifiers(text: str, context: DeliveryContext) -> str:
     return redact_structured_identifiers(
         text,
@@ -177,6 +186,7 @@ def redact_delivery_context_identifiers(text: str, context: DeliveryContext) -> 
             (context.thread_id, "当前会话"),
             (context.task_id, "当前任务"),
         ),
+        channel=context.channel,
     )
 
 

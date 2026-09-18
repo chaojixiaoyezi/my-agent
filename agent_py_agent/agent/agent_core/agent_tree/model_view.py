@@ -1,11 +1,14 @@
 """代理树的模型只读视图，与界面共用事实源但不暴露内部恢复路径。"""
 
-# LLM: 这里只投影已经通过 owner/subtree 裁决的快照；不得重新查树、改状态或推断完成。
-# 模块用途: 把界面大快照变成模型可直接使用的状态和产物引用，完整正文仍交统一归档保存。
+# LLM: 这里只投影已经通过 owner/subtree 裁决的快照；稳定摘要只供软观察，不重新查树、改状态或推断完成。
+# 模块用途: 把界面快照变成模型状态和产物引用，并区分实际进展与计时变化；完整正文仍交统一归档保存。
 
 from __future__ import annotations
 
+import hashlib
 import json
+
+from ...subagents.models import TaskStatus
 
 _NODE_FIELDS = (
     "run_id", "parent_run_id", "root_run_id", "agent_name", "role", "status",
@@ -13,6 +16,31 @@ _NODE_FIELDS = (
     "not_done_reason", "goal_digest", "last_progress_summary", "blockers",
 )
 _LIVE_CHARS = 12000
+
+
+# LLM: 消费同一次授权快照和结果视图；当前 runner 由 scope_resolution 精确识别，不含自身查询、心跳或耗时。
+# 函数用途: 为代理状态查询提供稳定进展指纹；真实工具进展、结果、增删节点及状态变化才重置成功重复提醒。
+def agent_tree_progress_observation(snapshot: dict[str, object], payload: dict[str, object]) -> dict[str, object]:
+    results = {row.get("run_id"): row for row in _rows(payload.get("nodes"))}
+    resolution = _pick(snapshot.get("scope_resolution"), ("source", "effective"))
+    caller = _pick(resolution.get("effective"), ("run_id",)).get("run_id") if resolution.get("source") == "current_runner_context" else None
+    nodes = []
+    for node in _rows(snapshot.get("nodes")):
+        if caller and node.get("run_id") == caller:
+            continue
+        stable = _pick(node, (
+            "run_id", "parent_run_id", "root_run_id", "status", "failure_type",
+            "current_tool", "last_progress_at", "findings_recorded", "child_ids",
+        ))
+        stable.update(_pick(results.get(node.get("run_id")), ("readiness", "read_order")))
+        nodes.append(stable)
+    nodes.sort(key=lambda row: str(row.get("run_id") or ""))
+    stable_tree = {**_pick(payload, ("root_id", "scope", "scope_resolution")), "nodes": nodes}
+    active = {TaskStatus.PLANNING.value, TaskStatus.PENDING.value, TaskStatus.RUNNING.value}
+    return {
+        "sha256": hashlib.sha256(_json(stable_tree).encode("utf-8")).hexdigest(),
+        "pending": any(node.get("status") in active for node in nodes),
+    }
 
 
 # LLM: 输入必须是 agent_tree_status_payload 的已授权结果；UI/source/recovery refs 不属于读取合同。

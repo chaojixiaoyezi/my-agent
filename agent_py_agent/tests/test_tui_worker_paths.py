@@ -175,6 +175,48 @@ def test_attached_gateway_job_registers_display_without_resubmitting():
     assert runtime._owned_gateway_requests == {"gwreq-existing"}
 
 
+@pytest.mark.parametrize("submitted", [True, False])
+@pytest.mark.parametrize("terminal_ready", [True, False])
+def test_durable_gateway_job_keeps_receipt_across_gateway_restart(tmp_path, monkeypatch, submitted, terminal_ready):
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.cli.chat_parts import gateway_client, tui_worker_paths
+
+    ctx, _runtime = _context()
+    ctx.cfg.paths = gateway_paths_from_root(tmp_path / "gateway")
+    ctx.cfg.running_request_id_ref = [""]
+    ctx.cfg.args = SimpleNamespace(gateway_timeout=1)
+    ctx.job.gateway_request_id = "gwreq-existing" if submitted else ""
+    ctx.turn_inject = []
+    cleared = []
+    ctx.turn_adapter = SimpleNamespace(
+        configure_gateway_permission_sink=lambda _sink: None,
+        clear_gateway_permission_sink=lambda: cleared.append(True), on_gateway_event=lambda _event: None,
+    )
+    polls = []
+
+    def poll(request):
+        polls.append(request.terminal_path)
+        return {"ok": True, "response": "原请求的最终回复"} if terminal_ready else None
+
+    monkeypatch.setattr(gateway_client, "check_gateway_alive", lambda _paths: False)
+    monkeypatch.setattr(gateway_client, "poll_gateway_chunks", poll)
+    monkeypatch.setattr(tui_worker_paths, "_submit_new_gateway_job", lambda *_args: pytest.fail("不能重复入队"))
+    if not submitted:
+        with pytest.raises(RuntimeError, match="gateway 已停止"):
+            tui_worker_paths._worker_gateway_path(ctx)
+        assert not polls
+    elif not terminal_ready:
+        with pytest.raises(TimeoutError, match="gwreq-existing"):
+            tui_worker_paths._worker_gateway_path(ctx)
+    else:
+        text, _recorded, summary = tui_worker_paths._worker_gateway_path(ctx)
+        assert text == "原请求的最终回复" and summary.ok
+    if submitted:
+        assert polls == [ctx.cfg.paths.terminal / "gwreq-existing.json"]
+        assert ctx.cfg.running_request_id_ref == ["gwreq-existing"]
+        assert cleared == [True]
+
+
 def test_complete_queued_inject_does_not_append_chat_style_twice() -> None:
     from agent_py_agent.cli.chat_parts.chat_style import CHAT_RESPONSE_STYLE_INJECT
 

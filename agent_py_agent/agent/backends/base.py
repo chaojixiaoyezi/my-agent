@@ -1,5 +1,5 @@
-# LLM: 模型协议在此统一转换；采样和思考控制按配置/精确协议，不改共享后端、身份或其它供应商字段。
-# 模块用途: 发送采样配置与模型请求，规范化文本、工具、思考和用量；须回归流式与非流式调用。
+# LLM: 模型协议在此统一转换；未显式温度不出站，请求级覆盖优先，不改共享后端、身份或其它供应商字段。
+# 模块用途: 按明确的采样配置发送请求，规范化文本、工具、思考和用量；须回归流式、非流式和摘要调用。
 from __future__ import annotations
 
 """模型后端适配层。
@@ -1303,8 +1303,8 @@ class AnthropicCompatibleBackend(HttpBackend):
             max_output_tokens=max_tokens,
         )
 
-    # LLM: Anthropic 单一组包入口仅发送显式 top_p，不套用 Chat 方言默认；流观察器不得进入 payload。
-    # 函数用途: 组装并发送 Anthropic-compatible 连接/采样配置，同时传递流式展示观察器。
+    # LLM: Anthropic 单一组包入口只发显式采样，请求级温度覆盖优先；不套 Chat 默认、不修改后端快照。
+    # 函数用途: 发送明确配置的连接与采样参数，未设置温度沿用服务端默认，摘要零温覆盖和流观察器保留。
     def _generate_request(
         self,
         prompt: str,
@@ -1328,8 +1328,9 @@ class AnthropicCompatibleBackend(HttpBackend):
                 self.max_tokens,
                 max_output_tokens,
             ),
-            "temperature": self.temperature if temperature is None else float(temperature),
         }
+        if temperature is not None or self.temperature_explicit:
+            payload["temperature"] = self.temperature if temperature is None else float(temperature)
         if self.top_p is not None:
             payload["top_p"] = self.top_p
         cache_projection = anthropic_prompt_cache_projection(

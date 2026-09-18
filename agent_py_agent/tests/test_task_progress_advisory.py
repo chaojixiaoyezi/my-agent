@@ -3,6 +3,9 @@ from __future__ import annotations
 """task_progress stays advisory and never adds a hidden ordinary-task model turn."""
 
 import json
+from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
     build_task_progress_model_spec,
@@ -14,12 +17,80 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.task_progress import (
     merge_task_progress,
     progress_path,
+    read_task_progress,
     rebind_task_progress_display_plan,
     task_progress_display_identity,
     task_progress_display_items,
     with_task_progress_display_plan,
     write_task_progress,
 )
+
+
+@pytest.mark.parametrize("same_thread,child,detached", [(True, False, False), (False, False, False), (True, True, False), (True, False, True)])
+def test_explicit_progress_update_targets_existing_same_thread_plan(tmp_path, same_thread, child, detached):
+    from agent_py_agent.agent.agent_core.runtime.task_identity import task_path_progress_ledger_id
+
+    agent = _agent(tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread({
+        "channel": "chat", "channel_conversation_id": "original-session", "canonical_user_id": "owner",
+    })
+    root = agent.home_paths.owner_home_dir
+    work = root / "tasks" / "previous-project"
+    work.mkdir(parents=True)
+    store.bind_task({
+        "thread_id": thread.thread_id, "task_id": "original-task", "goal": "原任务",
+        "task_path": str(work), "cancellation_scope": "detached" if detached else "foreground",
+    })
+    store.update_task_status({"task_id": "original-task", "status": "completed"})
+    ledger = task_path_progress_ledger_id(work)
+    write_task_progress(root, ledger, {"items": [{
+        "id": "verify", "title": "验证", "status": "done", "notes": "旧验证记录",
+    }]})
+    agent._current_run_params = SimpleNamespace(
+        context_scope="subagent" if child else "conversation", run_id="current-run", task_id="current-run",
+        task_attributes={"conversation_thread_id": thread.thread_id if same_thread else "another-thread"},
+    )
+    before = progress_path(root, ledger).read_bytes()
+    result = TaskProgressTool(agent).execute({
+        "action": "update", "run_id": ledger, "items": [{"id": "verify", "notes": "补充验证结果"}],
+    })
+    allowed = same_thread and not child and not detached
+    assert result.ok is allowed
+    if allowed:
+        item = read_task_progress(root, ledger)["items"][0]
+        assert item["status"] == "done"
+        assert item["notes"] == "补充验证结果"
+    else:
+        assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+        assert json.loads(result.output)["reason"] == "task_progress_scope_mismatch"
+        assert progress_path(root, ledger).read_bytes() == before
+    assert not progress_path(root, "current-run").exists()
+    assert store.load_task_link("original-task").status == "completed"
+    assert "conversation_task_id" not in agent._current_run_params.task_attributes
+
+
+def test_explicit_unknown_progress_target_does_not_create_or_rebind(tmp_path):
+    agent = _agent(tmp_path)
+    agent._main_agent_run_id = "current-run"
+    result = TaskProgressTool(agent).execute({
+        "action": "update", "run_id": "other-owner-plan",
+        "items": [{"id": "1", "title": "新计划", "status": "pending"}],
+    })
+    assert result.ok is False
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert json.loads(result.output)["reason"] == "task_progress_scope_mismatch"
+    assert not progress_path(agent.home_paths.owner_home_dir, "other-owner-plan").exists()
+
+
+def test_explicit_current_progress_target_keeps_same_scope(tmp_path):
+    agent = _agent(tmp_path)
+    agent._main_agent_run_id = "current-run"
+    result = TaskProgressTool(agent).execute({
+        "action": "update", "run_id": "current-run", "items": [{"id": "1", "title": "新计划"}],
+    })
+    assert result.ok is True
+    assert json.loads(result.output)["run_id"] == "current-run"
 
 
 class _CaptureBackend:
@@ -95,11 +166,11 @@ def test_open_progress_ledger_does_not_reconcile_or_resume_ordinary_final(tmp_pa
     assert not hasattr(result, "task_progress_auto_continued")
 
 
-def test_task_progress_schema_leaves_nested_validation_to_handler() -> None:
+def test_task_progress_schema_requires_id_but_allows_partial_updates() -> None:
     schema = build_task_progress_model_spec().input_schema
     item_schema = schema["properties"]["items"]["items"]
 
-    assert "required" not in item_schema
+    assert item_schema["required"] == ["id"]
     assert "additionalProperties" not in item_schema
     assert "unknown" not in item_schema["properties"]
     checks = schema["properties"]["coverage"]["properties"]["targets"]["items"][
@@ -169,6 +240,25 @@ def test_open_progress_result_gives_soft_continue_and_covers_guidance(tmp_path) 
     assert "covers" in payload["execution_guidance"]["message"]
     assert "correction=true" in payload["execution_guidance"]["message"]
     assert "不能拿无关 open id 顶替" in payload["execution_guidance"]["message"]
+
+
+def test_metadata_only_update_keeps_model_and_display_status(tmp_path) -> None:
+    agent = _agent(tmp_path)
+    agent._main_agent_run_id = "run-main"
+    tool = TaskProgressTool(agent)
+    created = tool.execute({
+        "action": "update",
+        "items": [{"id": "review", "title": "检查实际结果", "status": "in_progress"}],
+    })
+    updated = tool.execute({
+        "action": "update",
+        "items": [{"id": "review", "notes": "已确认边界", "overwrite": True}],
+    })
+
+    assert created.ok and updated.ok
+    assert json.loads(updated.output)["items"][0]["status"] == "in_progress"
+    projection = updated.result_envelope["task_progress_projection"]
+    assert projection["items"][0]["status"] == "in_progress"
 
 
 def test_open_progress_closeout_guidance_can_be_disabled(tmp_path) -> None:

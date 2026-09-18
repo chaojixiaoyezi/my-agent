@@ -61,6 +61,8 @@ from ..conversation.authority import (
     CONVERSATION_WORKSPACE_TASK_STATUS_ATTR,
 )
 from ..conversation.channels import (
+    LOCAL_CHAT_CHANNEL,
+    LOCAL_CHAT_SOURCE,
     project_host_paths_for_channel,
     project_user_reply,
     redact_host_absolute_paths,
@@ -502,6 +504,7 @@ class BufferedChunkStreamWriter:
         content = redact_structured_identifiers(
             project_host_paths_for_channel(str(text or ""), self.delivery_channel),
             self._identifier_redactions,
+            channel=self.delivery_channel,
         )
         if not content:
             return
@@ -778,6 +781,7 @@ class BufferedChunkStreamWriter:
         content = redact_structured_identifiers(
             project_host_paths_for_channel(projection.content, self.delivery_channel),
             self._identifier_redactions,
+            channel=self.delivery_channel,
         ).strip()
         if max_chars <= 0 or len(content) <= max_chars:
             return content
@@ -817,6 +821,7 @@ class BufferedChunkStreamWriter:
         content = redact_structured_identifiers(
             project_host_paths_for_channel(raw, self.delivery_channel),
             self._identifier_redactions,
+            channel=self.delivery_channel,
         )
         if not content:
             return
@@ -1821,6 +1826,7 @@ def _persist_gateway_assistant_result(
             _gateway_conversation_channel(context, conversation),
         ),
         _gateway_identifier_redactions(context, conversation, result=result),
+        channel=_gateway_conversation_channel(context, conversation),
     )
     channel_delivery["content"] = public_content
     channel_delivery["artifacts"] = _metadata_artifact_refs(
@@ -1918,6 +1924,7 @@ def _persist_gateway_assistant_commentaries(
         content = redact_structured_identifiers(
             project_host_paths_for_channel(projection.content, channel),
             identifiers,
+            channel=channel,
         ).strip()
         if not content:
             continue
@@ -3868,6 +3875,7 @@ def _latest_conversation_messages(
 # LLM: Assistant prose, artifacts, operation facts, and one immutable terminal tool fold are
 # persisted in separate fields. The public body must stay unchanged while later model turns may
 # consume the bounded fold from metadata.
+# 本地队列来源决定展示通道，owner provider 仍只负责身份；实时和重放不得使用不同的路径策略。
 # 函数用途: 幂等追加 Gateway 消息；空正文停止、截断或错误也落 final 元数据，保留工具历史但不生成替代正文。
 def _append_gateway_conversation_message(
     agent: SimpleAgent,
@@ -3934,7 +3942,7 @@ def _append_gateway_conversation_message(
                 "thread_id": conversation.thread_id,
                 "role": role,
                 "content": content,
-                "channel": str(metadata.get("channel") or request.get("source") or "gateway"),
+                "channel": _gateway_request_channel(request) or thread_channel(store, conversation.thread_id),
                 "channel_message_id": channel_message_id,
                 "metadata": entry_metadata,
             }
@@ -3965,6 +3973,7 @@ def _append_gateway_conversation_message(
 
 # LLM: Delayed repair preserves the same canonical request identity, sanitized body, artifacts,
 # operation facts, terminal native messages and turn-end reason as normal append; no repair may lose history.
+# 展示通道与正常提交共用 resolver，不把 owner provider 当作本地 TUI 的外部投递通道。
 # 函数用途: 写失败时保存原消息与结束原因，包括空正文中断、截断或错误；补交不再次执行任务。
 def _queue_gateway_conversation_repair(
     agent: SimpleAgent,
@@ -3988,7 +3997,6 @@ def _queue_gateway_conversation_repair(
     )
     if not root or not conversation.thread_id or (not content and not empty_terminal):
         return
-    metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
     repair_metadata: dict[str, object] = {
         "conversation_request_id": request_id,
         "gateway_request_id": request_id,
@@ -4013,7 +4021,7 @@ def _queue_gateway_conversation_repair(
         "thread_id": conversation.thread_id,
         "role": role,
         "content": content,
-        "channel": str(metadata.get("channel") or request.get("source") or "gateway"),
+        "channel": _gateway_request_channel(request) or thread_channel(store, conversation.thread_id),
         "channel_message_id": "",
         "metadata": repair_metadata,
     }
@@ -4382,21 +4390,23 @@ def _gateway_client_supports_tool_approval(request: object) -> bool:
     return bool(isinstance(capabilities, dict) and capabilities.get("tool_approval") is True)
 
 
-# LLM: 富 transcript 只能由 client_capabilities.rich_transcript 精确布尔真值开启，source/TTY/verbose 都不能隐式扩大输出面。
-# 函数用途: 判断请求客户端是否显式支持思考、逐轮说明和结构化工具结果。
-# LLM: 通道身份只从结构化请求字段读取（客户端声明的 channel、请求 source），不解析正文，
-#   也不按"看起来像不像本机"猜。缺失时返回空串，按外部通道 fail-closed 处理。
-# 函数用途: 取得这条 Gateway 请求的通道身份，供出口决定宿主路径展示策略。
+# LLM: 本地队列的 source 由 submit_gateway_ask 写入，metadata.channel 是 owner provider，二者不能混用。
+# 只把两个精确本地来源映射为私有展示；HTTP/IM/未知来源保留其通道策略，不改变鉴权、owner 或投递路由。
+# 函数用途: 决定前台文字的路径展示策略，让多用户本地 TUI 和默认本地 TUI 一样保留绝对路径。
 def _gateway_request_channel(request: object) -> str:
     if not isinstance(request, dict):
         return ""
+    source = str(request.get("source") or "").strip().lower()
+    if source == LOCAL_CHAT_SOURCE:
+        return LOCAL_CHAT_CHANNEL
+    if source == "cli_gateway":
+        return "gateway-cli"
     metadata = request.get("metadata")
     declared = metadata.get("channel") if isinstance(metadata, dict) else None
     return str(declared or request.get("source") or request.get("channel") or "").strip().lower()
 
 
-# LLM: 会话通道是交付与落账共用的同一份权威事实（客户端声明优先，其次请求 source，
-#   最后回到 store 里这条会话登记的通道）。三个来源都是结构化字段，缺失即按外部通道处理。
+# LLM: 展示与落账共用请求的通道 resolver；缺请求事实时回到会话绑定，不能从模型内容或 rich 开关猜私有性。
 # 函数用途: 取得本次交付/落账所用会话的通道身份。
 def _gateway_conversation_channel(context: object, conversation: object) -> str:
     request = getattr(context, "request", None)
@@ -4409,6 +4419,8 @@ def _gateway_conversation_channel(context: object, conversation: object) -> str:
     )
 
 
+# LLM: 富 transcript 只接受 client_capabilities.rich_transcript 的精确布尔真值，不从 source/TTY 猜测。
+# 函数用途: 判断请求客户端是否显式支持思考、逐轮说明和结构化工具结果。
 def _gateway_client_supports_rich_transcript(request: object) -> bool:
     if not isinstance(request, dict):
         return False

@@ -1,5 +1,5 @@
 # LLM: 采样参数仅由显式配置及已核对的精确服务端协议决定；不读取正文，不改变会话身份或重试策略。
-# 模块用途: 统一 top_p 校验与已知 DeepSeek V4 Flash 采样默认值，避免任意兼容端点被强加参数。
+# 模块用途: 统一显式温度、top_p 校验与已知协议采样默认值，避免兼容端点被隐式强加低温。
 from __future__ import annotations
 
 import math
@@ -53,11 +53,11 @@ def chat_top_p(api_base: str, model_name: str, value: object, *, thinking_disabl
 
 
 # LLM: 返回本次 Chat 的采样副本；保留显式温度，不读写工作片或 canonical 历史。
-# 函数用途: 把默认/显式采样集中到一处，普通端点继续发送原温度，已知 Flash 省略未显式温度。
+# 函数用途: 未启用显式温度时沿用提供方默认；用户温度含零值原样发送，top_p 保持原协议规则。
 def chat_sampling_fields(api_base: str, model_name: str, *, top_p: float | None, temperature: float,
                          temperature_explicit: bool, thinking_disabled: bool = False) -> dict[str, float]:
     result = {}
-    if temperature_explicit or not uses_deepseek_flash_sampling(api_base, model_name):
+    if temperature_explicit:
         result["temperature"] = temperature
     probability = chat_top_p(api_base, model_name, top_p, thinking_disabled=thinking_disabled)
     if probability is not None:

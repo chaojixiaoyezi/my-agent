@@ -13,6 +13,7 @@ from agent_py_agent.agent.agent_core.native_tool_protocol import (
 )
 from agent_py_agent.agent.model_guidance import (
     ACTION_AUTHORIZATION_GUIDANCE,
+    VERIFICATION_EVIDENCE_GUIDANCE,
     provider_system_instruction,
 )
 from agent_py_agent.agent.tooling.models import (
@@ -26,6 +27,17 @@ from agent_py_agent.agent.tooling.registry import _tool_call_protocol
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 
 # --- prompt-side protocol switch -------------------------------------------
+
+
+def test_evidence_guidance_reuses_valid_results_without_reducing_authorization():
+    text = provider_system_instruction(SimpleNamespace(
+        supports_system_instructions=True, supports_provider_request_options=True,
+    ))
+    assert text == VERIFICATION_EVIDENCE_GUIDANCE + ACTION_AUTHORIZATION_GUIDANCE
+    assert "每次行动和最终回复前重新核对" not in text
+    assert "版本、输入和观察点未变时复用已有有效结果" in text
+    assert "针对实际改动验证" in text
+    assert "宿主审批、owner 隔离及专用确认规则始终有效" in text
 
 
 def test_text_protocol_instruction_is_rejected():

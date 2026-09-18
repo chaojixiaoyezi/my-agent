@@ -620,6 +620,33 @@ def test_native_builder_materializes_only_changed_fact_sources(tmp_path) -> None
     assert params.tool_ir_history[0] == UserTurn("继续整理自己的项目")
 
 
+def test_native_batch_facts_keep_old_request_prefix_and_all_tool_pairs(tmp_path):
+    from agent_py_agent.agent.tooling.operation_verification import (
+        render_current_turn_execution_facts,
+    )
+
+    agent = _native_agent(tmp_path)
+    params = _params()
+    params.tool_ir_history.append(UserTurn("继续处理自己的文件"))
+    before = []
+    for index in range(1, 21):
+        _record(agent, params, tool_rounds=index, idx=1, tool_name="read_file",
+                call_id=f"batch-{index}", arguments={"path": "README.md"}, output=f"result-{index}")
+        facts = render_current_turn_execution_facts(agent, params.archive_tool_calls)
+        prompt = CacheStructuredPrompt("stable", volatile_sections=(("prompt.execution", facts),))
+        _materialize_native_prompt_facts(ModelGenerateParams(agent=agent, params=params, prompt=prompt, tool_rounds=index))
+        messages = _native_provider_messages(agent, params)
+        assert messages[:len(before)] == before
+        assert f'"call_id":"batch-{index}"' in facts
+        if index > 1:
+            assert f'"call_id":"batch-{index - 1}"' not in facts
+        before = messages
+    execution = [item for item in params.tool_ir_history if isinstance(item, RuntimeFactsTurn) and item.source == "prompt.execution"]
+    assert len(execution) == 20
+    assert sum(isinstance(item, ToolResult) for item in params.tool_ir_history) == 20
+    assert sum(item.text.count('"call_id":') for item in execution) == 20
+
+
 def test_native_pressure_projection_matches_materialized_request_without_mutation(tmp_path) -> None:
     from agent_py_agent.agent.agent_core.model.context_pressure import (
         _model_visible_context_components,

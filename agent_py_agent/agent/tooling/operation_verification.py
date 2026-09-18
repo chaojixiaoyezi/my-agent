@@ -1,3 +1,5 @@
+# LLM: 工具账本是执行权威；模型输入只追加最近批次的有界事实，最终核验独立保留全轮统计，不改变权限或终态。
+# 模块用途: 投影工具执行证据及公开核验摘要，避免原生长会话反复复制历史账本；须核对缓存和异常状态回归。
 from __future__ import annotations
 
 """Typed current-turn execution facts shared by every agent delivery surface."""
@@ -7,7 +9,6 @@ from collections import OrderedDict
 from typing import Any
 
 _MAX_PROMPT_RECENT_CALLS = 6
-_MAX_PROMPT_MUTATING_CALLS = 6
 _MAX_PROMPT_ARCHIVE_REFS = 4
 _MAX_MUTATING_CALLS = 64
 _MAX_VISIBLE_OPERATION_GROUPS = 12
@@ -32,78 +33,42 @@ _PUBLIC_OVERALL_STATUSES = frozenset(
 )
 
 
-def render_current_turn_execution_facts(
-    agent: object,
-    records: list[dict[str, object]] | None,
-) -> str:
-    """Render the current request's structured tool facts at the prompt tail.
-
-    会话运行时 keeps function-call outputs as typed response items and 长期助手 warns
-    that prose is only a self-report until a returned handle is verified.  Our
-    provider prompt is a single user message on the first native-tool round, so
-    the compact tool catalog can be far from the active user request.  Put one
-    bounded projection of the authoritative runtime records *after* that
-    request.  This does not infer intent or parse assistant prose.
-    """
-
-    normalized = [
-        _execution_call(agent, record)
-        for record in list(records or [])
-        if isinstance(record, dict)
-    ]
-    mutating = [item for item in normalized if item["effect"] in _MUTATING_EFFECTS]
-    successful_mutating = [
-        item for item in mutating if item["verification_status"] == "succeeded"
-    ]
-    unsuccessful_mutating = [
-        item for item in mutating if item["verification_status"] != "succeeded"
-    ]
-    verification_counts = {
-        status: sum(item["verification_status"] == status for item in normalized)
-        for status in _PUBLIC_VERIFICATION_STATUSES
-    }
-    effect_counts = {
-        effect: sum(item["effect"] == effect for item in normalized)
-        for effect in ("read_only", "mutating", "dangerous", "unknown")
-    }
-    mutating_groups = _visible_operation_groups(mutating)
-    archive_refs = _recent_raw_archive_refs(records)
+# LLM: 批次只取宿主归档的精确 turn_id，缺失时取 tool_round；无批次字段只投影最后一条，不猜模型正文。
+# 函数用途: 给原生历史补最近一批的有界执行状态，保留批准/失败/未知和引用；不裁剪已有缓存前缀。
+def render_current_turn_execution_facts(agent: object, records: list[dict[str, object]] | None) -> str:
+    rows = [row for row in records or [] if isinstance(row, dict)]
+    if not rows:
+        return ""
+    last = rows[-1]
+    turn_id = str(last.get("turn_id") or "").strip()
+    round_id = last.get("tool_round")
+    key = "turn_id" if turn_id else "tool_round"
+    value = turn_id if turn_id else round_id
+    has_key = bool(turn_id) or (isinstance(round_id, int) and not isinstance(round_id, bool) and round_id >= 0)
+    batch = [last]
+    if has_key:
+        for row in reversed(rows[:-1]):
+            if row.get(key) != value:
+                break
+            batch.append(row)
+        batch.reverse()
     payload = {
-        "schema": "current_turn_execution.v2",
-        "scope": "current_request_only",
-        "call_count": len(normalized),
-        "effect_counts": effect_counts,
-        "verification_counts": verification_counts,
-        "mutating_operation_groups": mutating_groups[-_MAX_VISIBLE_OPERATION_GROUPS:],
-        "omitted_mutating_operation_group_count": max(
-            0, len(mutating_groups) - _MAX_VISIBLE_OPERATION_GROUPS
-        ),
-        "successful_mutating_calls": successful_mutating[-_MAX_PROMPT_MUTATING_CALLS:],
-        "omitted_successful_mutating_call_count": max(
-            0, len(successful_mutating) - _MAX_PROMPT_MUTATING_CALLS
-        ),
-        "unsuccessful_mutating_calls": unsuccessful_mutating[
-            -_MAX_PROMPT_MUTATING_CALLS:
-        ],
-        "omitted_unsuccessful_mutating_call_count": max(
-            0, len(unsuccessful_mutating) - _MAX_PROMPT_MUTATING_CALLS
-        ),
-        "recent_calls": normalized[-_MAX_PROMPT_RECENT_CALLS:],
-        "omitted_call_count": max(0, len(normalized) - _MAX_PROMPT_RECENT_CALLS),
-        "raw_archive_refs": archive_refs,
+        "schema": "tool_batch_execution.v1",
+        "scope": "latest_completed_tool_batch",
+        "request_call_count": len(rows),
+        "batch_call_count": len(batch),
+        "calls": [_execution_call(agent, row) for row in batch[-_MAX_PROMPT_RECENT_CALLS:]],
+        "omitted_batch_call_count": max(0, len(batch) - _MAX_PROMPT_RECENT_CALLS),
+        "raw_archive_refs": _recent_raw_archive_refs(batch),
     }
+    if has_key:
+        payload[key] = value
     return (
-        "# Current Turn Execution Facts\n"
-        "```json\n"
+        "# Tool Batch Execution Facts\n```json\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + "\n```\n"
-        "这是本次请求的结构化执行事实，不是历史对话或模型自述。"
-        "只有 successful_mutating_calls 中同时具有 succeeded 权威操作终态的本轮调用，才允许支持"
-        "“已经保存、修改、发送、创建或删除”等副作用结论；空列表表示本轮尚无这类成功事实。"
-        "unsuccessful_mutating_calls 必须按失败或未完成说明。"
-        "较早明细被省略时，以聚合计数和 raw_archive_refs 指向的 owner 私有原始记录为准，"
-        "不得因明细不在热上下文中而重做已经执行过的调用。"
-        "若成功调用给出 refs，扩大成功结论前优先按句柄回读核验。"
+        "仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。"
+        "未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。"
     )
 
 
