@@ -1,9 +1,14 @@
+# LLM: 运行参数只携带当前调用的身份、上下文与宿主回调；回调不可写进模型输入或持久配置，复制续跑参数时必须保留。
+# 模块用途: 定义主链执行与收口的参数结构，让前台、子代理及 CLI 共享同一运行协议。
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
 
+# LLM: 入口参数保留请求、运行、尝试的独立身份；partial_turn_callback 由宿主绑定原会话，仅保存异常前的执行事实。
+# 类用途: 收拢一次代理调用的配置和上下文，不自行执行模型、工具或文件写入。
 @dataclass
 class RunParams:
     inject: list[str] | None = None
@@ -43,6 +48,8 @@ class RunParams:
     # The conversation layer supplies one immutable, already-bounded completed transcript seed.
     # Native protocol maps it to provider messages; text protocol renders it once.
     conversation_history_seed: object = None
+    # 宿主绑定本次精确 owner/thread/turn 的异常历史出口；只保存已有事实，不投递回复或续跑。
+    partial_turn_callback: object = None
     # CLI 自动续跑契约(2026-08-14 根因3 设计 v2): 首轮创建后贯穿所有续跑轮,
     # 保证同一 task/run/thread 链路(不每轮隐式生成新根)。
     # - continuation_seq: 0=首轮, 1..N=续跑轮(事件账本/终态分层用)
@@ -78,6 +85,8 @@ class RuntimeContextRequest:
     task_attributes: dict | None = None
 
 
+# LLM: 已解析的运行参数继续携带同一个宿主历史回调；不得重新猜测 owner/thread，也不能把回调转为 prompt。
+# 类用途: 把冻结的工具、权限与会话上下文交给工具循环，异常出口仍使用原宿主落账方式。
 @dataclass
 class RuntimeLoopParams:
     user_prompt: str
@@ -106,6 +115,7 @@ class RuntimeLoopParams:
     tool_runtime_snapshot: object = None
     tool_protocol_snapshot: object = None
     conversation_history_seed: object = None
+    partial_turn_callback: object = None
 
 
 @dataclass

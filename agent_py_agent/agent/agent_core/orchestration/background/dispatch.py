@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+# LLM: 后台派工只传任务身份与显式注入；生产模型由 child thread 引用恢复，不能捕获共享宿主的当前连接。
+# 模块用途: 将子代理交给持久进程或隔离线程执行，保存启动回执、失败与结果，不另设模型路由。
 import os
 import subprocess
 import sys
@@ -195,13 +197,10 @@ def _use_inprocess_autostart(agent) -> bool:
     return not (owner.provider == "local" and owner.owner_kind == "main")
 
 
+# LLM: 仅保留宿主显式依赖注入；普通模型连接必须由 worker 按 canonical child 配置构造，不继承调度线程的默认连接。
+# 函数用途: 捕获测试或嵌入宿主明确提供的替身，防止恢复时未配置的 Gateway 后端覆盖已选子代理模型。
 def _captured_backend_override(agent) -> object | None:
-    explicit = getattr(agent, "_subagent_worker_backend_override", None)
-    if explicit is not None:
-        return explicit
-    if _use_inprocess_autostart(agent):
-        return getattr(agent, "backend", None)
-    return None
+    return getattr(agent, "_subagent_worker_backend_override", None)
 
 
 # LLM: In-process startup uses the same event-driven receipt as subprocess

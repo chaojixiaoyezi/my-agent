@@ -747,6 +747,31 @@ def test_completed_native_tool_turn_round_trips_through_conversation_metadata(tm
     assert "第二轮" in str(next_messages[-1])
 
 
+@pytest.mark.parametrize("error,end", [(InterruptedError("stop"), "aborted"), (ValueError("provider failure"), "error")])
+def test_partial_native_turn_preserves_pairs_and_unknown_effects(tmp_path, error, end):
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _persist_partial_native_turn
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn
+
+    agent, params = _native_agent(tmp_path), _params()
+    params.tool_ir_history.append(UserTurn("# User Task\n原任务"))
+    _record(agent, params, tool_rounds=1, idx=1, tool_name="read_file", call_id="read-done",
+            arguments={"path": "README.md"}, output="不可丢的已读结果")
+    pending = canonical_history_call("write_file", {"path": "unknown.txt"}, call_id="pending-write")
+    params.tool_ir_history.append(AssistantTurn(tool_calls=[pending]))
+    before = list(params.tool_ir_history)
+    saved = []
+    _persist_partial_native_turn(saved.append, params, error)
+    assert len(saved) == 1 and saved[0].response == ""
+    assert saved[0].turn_end_reason == end
+    native = saved[0].canonical_native_messages
+    results = {b["tool_use_id"]: b for m in native for b in m["content"] if b.get("type") == "tool_result"}
+    assert "不可丢的已读结果" in results["read-done"]["content"]
+    assert results["pending-write"]["is_error"] is True
+    assert '"effect_outcome":"unknown"' in results["pending-write"]["content"]
+    assert "压缩中回收" not in results["pending-write"]["content"]
+    assert params.tool_ir_history == before
+
+
 # --- compact prep: integer-pair drop interface (Step 3/4 contract) ------------
 
 

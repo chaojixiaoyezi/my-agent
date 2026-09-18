@@ -1,4 +1,7 @@
 
+# LLM: 历史适配只转换原生 IR，不裁决工具副作用；缺失回执只能标记结果未知，不能宣称已经执行或已经压缩。
+# 模块用途: 在原生对话与工具历史间做协议翻译，保留调用配对，未知结果由后续执行者核实。
+
 from __future__ import annotations
 
 """IR ↔ 厂商原生 messages 的出/入站翻译适配器。
@@ -224,7 +227,10 @@ def _tool_result_block(result: ToolResult) -> dict[str, Any]:
 
 # tool_use 缺配对结果时补的合成占位（参照标杆 长期助手 _strip_orphaned_tool_blocks /
 # 通道运行时 transform-messages：宁可补合成结果也别删 assistant 文本）。
-_ORPHAN_TOOL_RESULT_STUB = "[结果已在上下文压缩中回收]"
+_ORPHAN_TOOL_RESULT_STUB = (
+    '[{"status":"result_unavailable","effect_outcome":"unknown",'
+    '"message":"该调用没有已记录的结果，不能据此认定成功、失败或未执行；重试有副作用的操作前先核实实际状态。"}]'
+)
 
 
 def strip_orphaned_tool_blocks(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

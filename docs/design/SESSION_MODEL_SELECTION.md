@@ -55,6 +55,10 @@ Gateway `/client/models` 沿用认证 owner/channel/conversation/user 解析，�
 父会话后续切换不改变 child/grandchild 已保存引用。子代理 thread 物化后是选择权威；
 task 创建引用只用于初始化尚未物化或旧记录的空字段，恢复不能拿它覆盖 thread 的新选择。
 
+后台派工不捕获共享主代理的 `backend` 对象。新建、输出上限后续跑、孤儿恢复均由 worker
+解析 child 自己的持久模型引用并构造连接，否则 Gateway 未设部署默认时会覆盖成未配置后端，
+父子异模型时也可能串线。嵌入宿主的显式依赖注入仍可使用，但按派工线程隔离并在退出时恢复。
+
 ## 对照实现
 
 - 会话运行时 `会话运行时-rs/core/src/session/config_lock.rs`：从 session configuration 生成线程配置快照；

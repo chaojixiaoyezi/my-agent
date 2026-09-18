@@ -1,9 +1,10 @@
 # LLM: 本模块串联同一 child 的尝试、模型轮和正式结果；Compact 续接不新建 run/attempt，失败交给生命周期处理。
-# 模块用途: 执行子代理并保存结果和 typed 截断说明；长期压缩不是重派次数，同步验证停止、恢复与显示身份。
+# 模块用途: 执行子代理并保存结果、异常前的历史和 typed 截断说明；压缩不是重派，同步验证停止与恢复身份。
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from ...concurrency.interrupt import is_interrupted
@@ -233,7 +234,7 @@ def _run_subagent_model_turn(lifecycle, prompt, context, task_attributes, *, tas
 
 
 # LLM: 子代理始终使用自身 ConversationThread 和同一执行身份；只有已提交 Compact 才能续接，
-# 不以累计压缩次数判失败。停止、真实压缩失败和预算仍生效，工具显示批次不改变权限或副作用幂等身份。
+# 不以累计压缩次数判失败。异常历史回调冻结到本次 child turn，不串父线程；显示批次不改变权限或副作用身份。
 # 函数用途: 使用子代理自己的历史执行长期任务；压缩后继续原尝试，落账后按真实结束原因显示正文或截断提示。
 def _run_subagent_conversation_turn(
     lifecycle,
@@ -283,6 +284,9 @@ def _run_subagent_conversation_turn(
                     transcript_sink=transcript_sink,
                 ),
             )
+            run_params.partial_turn_callback = partial(
+                _persist_subagent_partial_result, agent, task, turn,
+            )
             result = agent.run(prompt, params=run_params)
             if str(getattr(result, "runtime_status", "") or "").strip().lower() != (
                 "context_overflow"
@@ -323,6 +327,12 @@ def _run_subagent_conversation_turn(
         raise
     finally:
         _trim_subagent_transcript(agent, task, enabled=transcript_sink is not None)
+
+
+# LLM: 异常与正常结果共用 child 的 canonical 出口；不能用父 thread 或 attempt 代替本次独立 turn。
+# 函数用途: 在子代理异常退出前幂等保留原生历史，不投递成功正文或启动下一轮。
+def _persist_subagent_partial_result(agent, task, turn, result) -> None:
+    append_subagent_thread_result(agent, task, attempt_id=turn.attempt_id, turn_id=turn.turn_id, result=result)
 
 
 # LLM: Normalize typed Goal stop before canonical history/display publication; completing a logical turn does not settle its runner.

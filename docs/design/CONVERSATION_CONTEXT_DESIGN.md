@@ -18,6 +18,19 @@ task 或 turn 语义；它们进入同一个 Gateway/runtime。
 
 ## Transcript and compact
 
+中断或模型/工具循环抛错不是丢弃执行历史的理由。正常返回的停止结果以及异常栈退出前的 native IR
+都进入同一个 canonical 消息信封；正文为空并单独标记 `aborted/error`，不对用户发送假回复。
+Gateway 沿原 final/repair 写入，子代理绑定精确 child thread/turn，一次性 CLI 沿其原会话写入。
+缺配对结果的工具调用只补 `effect_outcome=unknown` 的错误占位，不能断言已成功、未执行或已经压缩；
+后续模型需核实有副作用的操作，不由宿主盲目重放。仅更正有序退出路径，不声称覆盖进程强杀、断电，
+也不能恢复旧版本已经丢失的原生历史；屏幕 display checkpoint 不回灌作为机器事实。
+
+后台工作片遵循相同规则：每次实际执行分配独立的宿主会话回合编号，任务、wake 和工具操作身份不变。
+原生历史先以空正文 `assistant_part_id=native` 写入原 transcript，再按原通道投递规则保存公开 final；
+两者共用该回合编号，模型投影只回放一次原生信封。静默等待、投递被抑制或异常退出不能删除工具事实。
+投递重试继续使用已冻结的原 metadata，不因重试分配的新请求对象改绑原回合；空历史不新建占位行。
+窄范围审计事件沿独立审计合同保留隔离，不将内部事件正文或原生历史注入普通会话。
+
 薄 Gateway TUI 显式恢复必须在同一可见 preflight 内先等待 readiness，再后台读取授权的 owner/session
 history，最后启动 worker；恢复失败不接受任务，客户端退出后迟到结果不重新启动。原会话的数据错误不得
 被包装成空历史成功，连接期间也不创建新 session、Gateway 或额外重试器。

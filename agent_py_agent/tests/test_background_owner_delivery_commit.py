@@ -157,12 +157,16 @@ def test_unregistered_identity_route_still_records_reply_in_canonical_thread(tmp
     assert report.commit_kind == "canonical_record"
     assert report.route_ownership == "undeclared", "报告必须带结构化路线归属供排障区分"
     rows = store.recent_messages(thread.thread_id, limit=0)
-    assert [row.content for row in rows] == [report.response]
-    assert report.message_id == rows[0].message_id
-    assert rows[0].channel == UNREGISTERED_IDENTITY
-    assert rows[0].metadata["assistant_part_id"] == "final"
+    native = [row for row in rows if row.metadata.get("assistant_part_id") == "native"]
+    assert len(native) == 1 and native[0].content == ""
+    assert native[0].metadata["canonical_native_messages"]["schema"] == "conversation_native_messages.v1"
+    assert [row.content for row in rows if row.content] == [report.response]
+    final = next(row for row in rows if row.content)
+    assert report.message_id == final.message_id
+    assert final.channel == UNREGISTERED_IDENTITY
+    assert final.metadata["assistant_part_id"] == "final"
     # 外发没有发生，也不能被当成发生过。
-    assert rows[0].metadata["background_delivery_reason"] == "non_subagent_completion"
+    assert final.metadata["background_delivery_reason"] == "non_subagent_completion"
 
 
 def test_unregistered_identity_route_is_not_opened_by_delivery_service(tmp_path) -> None:
@@ -221,8 +225,11 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
     frozen = pending.metadata["owner_delivery"]
     assert frozen["schema_version"] == "wake-owner-delivery.v2"
     assert frozen["content"] == "阶段汇报：已核对任务树，等待最后一个子代理。"
-    # 欠外发的路线不把失败草稿写进本地 transcript（原有边界保持）。
-    assert store.recent_messages(thread.thread_id, limit=0) == []
+    # 欠外发路线不保存公开 final；原生执行事实独立保留，不冒充成功投递。
+    rows = store.recent_messages(thread.thread_id, limit=0)
+    assert len(rows) == 1 and rows[0].content == ""
+    assert rows[0].metadata["assistant_part_id"] == "native"
+    native_request = rows[0].metadata["conversation_request_id"]
 
     channels.status = "sent"
     report = scheduler.tick(now=51.0)
@@ -233,6 +240,9 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
     assert report[0].wake_handled is True
     assert report[0].delivery_reason == "cached_owner_delivery_retry"
     assert store.pending_wake_signal(signal.wake_signal_id) is None
+    final_rows = [row for row in store.recent_messages(thread.thread_id, limit=0) if row.content]
+    assert len(final_rows) == 1
+    assert final_rows[0].metadata["conversation_request_id"] == native_request
 
 
 def test_audit_finding_failed_external_send_never_claims_transcript_receipt(

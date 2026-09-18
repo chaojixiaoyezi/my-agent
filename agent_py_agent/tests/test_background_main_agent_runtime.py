@@ -28,6 +28,17 @@ from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
 
 
+# LLM: 只为公开回复断言分离空正文原生事实行；事实行必须有合法信封，不能借此隐藏漏写或空白 final。
+# 函数用途: 测试真实公开聊天内容，同时验证后台原生历史仍保存在同一个 transcript。
+def _public_background_messages(store, thread_id, *, limit=0):
+    rows = store.recent_messages(thread_id, limit=limit)
+    for row in rows:
+        if not row.content:
+            assert row.metadata.get("assistant_part_id") == "native"
+            assert row.metadata.get("canonical_native_messages", {}).get("schema") == "conversation_native_messages.v1"
+    return [row for row in rows if row.content]
+
+
 def test_background_run_params_carry_structured_conversation_task_identity() -> None:
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
 
@@ -1935,6 +1946,69 @@ def _native_probe(self):
     )
 
 
+@pytest.mark.parametrize("outcome", ["completed", "aborted", "error"])
+def test_background_native_history_survives_each_execution_exit(tmp_path, monkeypatch, outcome):
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.conversation import runtime as module
+    from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread({"channel": "tui", "channel_conversation_id": "background-native"})
+    source = agent.home_paths.owner_home_dir / "background-fact.txt"
+    source.write_text("后台事实 Cedar-47", encoding="utf-8")
+
+    class Backend:
+        name = "background-native-history-test"
+        calls = 0
+        probe_tool_capability = _native_probe
+
+        def generate(self, _prompt, on_chunk=None, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(text="读取事实", backend=self.name, tool_use_blocks=[{
+                    "id": "background-read", "name": "read_file", "input": {"path": str(source)},
+                }])
+            if outcome != "completed":
+                raise (InterruptedError if outcome == "aborted" else ValueError)("背景测试退出")
+            return ModelResponse(text="已读取并核对 Cedar-47。", backend=self.name)
+
+    agent.backend = Backend()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    request = module.BackgroundRunRequest(thread_id=thread.thread_id)
+    monkeypatch.setattr(module, "_run_params", lambda *args, **kwargs: RunParams(
+        source="background_main_agent", request_id="background-request", allowed_tools=["read_file"],
+        task_attributes={"conversation_thread_id": thread.thread_id},
+        conversation_history_seed=kwargs["history_seed"],
+    ))
+    sink = module.BackgroundMainActivitySink(agent, thread_id=thread.thread_id, task_id="")
+
+    def invoke():
+        return module._run_background_main_turn_with_compact(
+            runtime, thread, request, module.GoalRuntimeContext(), user_prompt="继续核对文件",
+            continuation_injection=[], proactive_delivery_available=False, activity_sink=sink,
+        )
+
+    if outcome == "completed":
+        result = invoke()
+        runtime._record_response(request, module.DeliveryContext(channel="tui", target="", thread_id=thread.thread_id),
+            result.response, deliver=True, delivery_reason="root_subagents_terminal")
+    else:
+        with pytest.raises(InterruptedError if outcome == "aborted" else ValueError):
+            invoke()
+    rows = store.recent_messages(thread.thread_id, limit=0)
+    native_rows = [row for row in rows if row.metadata.get("canonical_native_messages")]
+    assert len(native_rows) == 1
+    assert native_rows[0].content == ""
+    assert native_rows[0].metadata["turn_end_reason"] == outcome
+    projected = provider_history_messages_from_rows(rows)
+    blocks = [b for m in projected for b in m["content"] if isinstance(b, dict)]
+    assert sum(b.get("type") == "tool_use" for b in blocks) == 1
+    assert any(b.get("type") == "tool_result" and "Cedar-47" in str(b) for b in blocks)
+    if outcome == "completed":
+        assert sum("已读取并核对 Cedar-47。" in str(b) for b in blocks) == 1
+
+
 def _provider_message_text(kwargs: dict) -> str:
     """把测试后端实际收到的 native messages 展开成可断言文本。"""
     parts: list[str] = []
@@ -2131,6 +2205,7 @@ class _GoalCompletingBackend:
     def __init__(self) -> None:
         self.calls = 0
         self.prompts: list[str] = []
+        self.provider_texts: list[str] = []
 
     def probe_tool_capability(self):
         return _native_probe(self)
@@ -2138,10 +2213,11 @@ class _GoalCompletingBackend:
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.calls += 1
         self.prompts.append(prompt)
+        self.provider_texts.append(_provider_message_text(kwargs))
         if self.calls == 1:
             return ModelResponse(
-                text='[TOOL_CALL]\n{"tool":"update_goal","status":"complete"}\n[/TOOL_CALL]',
-                backend=self.name,
+                text="", backend=self.name,
+                tool_use_blocks=[{"id": "complete-goal", "name": "update_goal", "input": {"status": "complete"}}],
             )
         return ModelResponse(text="已经完成整合和验证。", backend=self.name)
 
@@ -2349,7 +2425,7 @@ def test_thread_goal_turn_with_no_tool_calls_keeps_active_goal_continuation(tmp_
     assert [item.content for item in runtime.channels.adapter("internal").sent_messages] == [
         "后台主代理已检查任务树，并给出阶段汇报。"
     ]
-    rows = store.recent_messages(thread.thread_id)
+    rows = _public_background_messages(store, thread.thread_id)
     assert [(item.role, item.content) for item in rows] == [
         ("assistant", "后台主代理已检查任务树，并给出阶段汇报。")
     ]
@@ -2501,9 +2577,6 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
     assert store.pending_wake_signals() == []
 
 
-@pytest.mark.xfail(
-    reason="EXEC-31b 存量债: native 语义下 goal 完成整合轮投递被抑制(suppressed), 整合收口投递路径待适配"
-)
 def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
@@ -2559,8 +2632,14 @@ def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> No
     assert len(reports) == 1
     assert reports[0].delivery_status == "sent"
     assert reports[0].delivery_reason == "thread_goal_completion"
-    assert "Completion audit" in backend.prompts[0]
-    assert "A child status or prose is evidence, not authority" in backend.prompts[0]
+    assert "Completion audit" in backend.provider_texts[0]
+    # 孩子终态不能直接代替目标完成：核对模型实际调用的原生工具，而非已删除的软提示句子。
+    assert backend.calls == 2
+    native = [message for row in store.recent_messages(thread.thread_id, limit=0)
+              for message in row.metadata.get("canonical_native_messages", {}).get("messages", [])]
+    goal_calls = [block for message in native for block in message.get("content", [])
+                  if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "update_goal"]
+    assert len(goal_calls) == 1 and goal_calls[0]["input"]["status"] == "complete"
     assert store.load_goal(thread.thread_id).status == "complete"
     links = {item.task_id: item for item in store.task_links(thread.thread_id)}
     assert links[goal.task_id].status == "completed"
@@ -2778,9 +2857,6 @@ def test_task_continuation_uses_the_same_thread_history_and_compact(tmp_path) ->
     assert '"conversation_compact_included": false' not in prompt
 
 
-@pytest.mark.xfail(
-    reason="EXEC-31b 存量债: native 语义下 goal 完成整合轮投递被抑制(suppressed), 整合收口投递路径待适配"
-)
 def test_detached_named_task_excludes_future_ordinary_turns_from_background_context(
     tmp_path,
 ) -> None:
@@ -2893,7 +2969,7 @@ def test_detached_named_task_excludes_future_ordinary_turns_from_background_cont
     )
 
     reports = scheduler.tick(now=77.0)
-    prompt = backend.prompts[0]
+    prompt = backend.provider_texts[0]
     rows = store.recent_messages(thread.thread_id, limit=0)
     guidance_row = next(
         row for row in rows if row.metadata.get("guidance_id") == guidance.guidance_id
@@ -3231,7 +3307,7 @@ def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch
     assert partial.delivery_status == "suppressed"
     assert partial.delivery_reason == "partial_subagent_success"
     assert channels.adapter("internal").sent_messages == []
-    assert store.recent_messages(thread.thread_id) == []
+    assert _public_background_messages(store, thread.thread_id) == []
 
     agent.backend = _NaturalCompletionBackend()
     agent.subagents.lifecycle.set_status(second.id, "DONE")
@@ -3252,7 +3328,7 @@ def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch
     assert final.delivery_status == "sent"
     assert final.delivery_reason == "root_subagents_terminal"
     assert len(channels.adapter("internal").sent_messages) == 1
-    assert [row.content for row in store.recent_messages(thread.thread_id)] == [final.response]
+    assert [row.content for row in _public_background_messages(store, thread.thread_id)] == [final.response]
 
 
 def test_child_settling_during_background_work_does_not_require_an_extra_wake(
@@ -4460,7 +4536,7 @@ def test_completion_observation_fallback_uses_same_partial_delivery_policy(tmp_p
     assert reports[0].delivery_status == "suppressed"
     assert reports[0].delivery_reason == "partial_subagent_success"
     assert channels.adapter("internal").sent_messages == []
-    assert store.recent_messages(thread.thread_id) == []
+    assert _public_background_messages(store, thread.thread_id) == []
 
 
 def test_internal_wait_continuation_stays_out_of_chat_while_child_runs(tmp_path) -> None:
@@ -4507,7 +4583,7 @@ def test_internal_wait_continuation_stays_out_of_chat_while_child_runs(tmp_path)
     assert report.delivery_status == "suppressed"
     assert report.delivery_reason == "internal_scheduled_continuation"
     assert channels.adapter("internal").sent_messages == []
-    assert store.recent_messages(thread.thread_id) == []
+    assert _public_background_messages(store, thread.thread_id) == []
 
 
 def test_internal_wait_completion_delivers_model_authored_final_reply(tmp_path) -> None:
@@ -4556,7 +4632,7 @@ def test_internal_wait_completion_delivers_model_authored_final_reply(tmp_path) 
     assert report.delivery_status == "sent"
     assert report.delivery_reason == "internal_scheduled_completion"
     assert channels.adapter("internal").sent_messages[0].content == report.response
-    assert [row.content for row in store.recent_messages(thread.thread_id)] == [report.response]
+    assert [row.content for row in _public_background_messages(store, thread.thread_id)] == [report.response]
 
 
 def test_scheduled_turn_accepts_mid_turn_child_event_without_starting_second_main_run(
@@ -4727,7 +4803,7 @@ def test_internal_continuation_delivers_natural_runtime_completion(tmp_path) -> 
 
     assert report.delivery_status == "sent"
     assert report.delivery_reason == "internal_scheduled_completion"
-    messages = store.recent_messages(thread.thread_id)
+    messages = _public_background_messages(store, thread.thread_id)
     assert [row.content for row in messages] == ["任务全部完成。"]
     assert messages[0].created_at > 20.0
 
@@ -4777,7 +4853,7 @@ def test_done_child_wake_delivers_natural_final_response(tmp_path) -> None:
     assert report.delivery_status == "sent"
     assert report.delivery_reason == "root_subagents_terminal"
     assert channels.adapter("internal").sent_messages[0].content == report.response
-    assert [row.content for row in store.recent_messages(thread.thread_id)] == [report.response]
+    assert [row.content for row in _public_background_messages(store, thread.thread_id)] == [report.response]
 
 
 def test_done_child_wake_with_carried_successful_spawn_closes_root_task(
@@ -6405,7 +6481,7 @@ def test_background_internal_status_is_not_saved_as_ordinary_chat(tmp_path) -> N
 
     assert report.response == ""
     assert report.delivery_status == "suppressed"
-    assert store.recent_messages(thread.thread_id, limit=1) == []
+    assert _public_background_messages(store, thread.thread_id, limit=1) == []
     assert channels.adapter("feishu").sent_messages == []
 
 

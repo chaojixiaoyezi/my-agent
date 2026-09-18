@@ -132,6 +132,38 @@ class _WriteThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
         return ModelResponse(text="子代理写入完成。", backend=self.name)
 
 
+@pytest.mark.parametrize("error_type", [InterruptedError, ValueError])
+def test_child_failure_keeps_native_history_in_own_thread(tmp_path, error_type):
+    from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
+
+    class WriteThenFail(_WriteThenCompleteChildBackend):
+        def generate(self, prompt, on_chunk=None, **kwargs):
+            if self.model_prompts:
+                raise error_type("test child failure after tool")
+            return super().generate(prompt, on_chunk, **kwargs)
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    parent = agent.conversation_store.get_or_create_thread({"channel": "chat", "channel_conversation_id": "parent"})
+    workspace = agent.home_paths.owner_home_dir / "project"
+    workspace.mkdir(parents=True)
+    agent.conversation_store.bind_task({"thread_id": parent.thread_id, "task_id": "parent-task", "status": "active", "task_path": str(workspace)})
+    child = agent.subagents.create_run(goal="整理本地文件", root_id="parent-task", role="worker",
+        allowed_tools=["write_file"], extra_write_roots=[str(workspace)], attributes={
+            "conversation_thread_id": parent.thread_id, "conversation_task_id": "parent-task",
+            CONVERSATION_EXECUTION_CWD_ATTR: str(workspace), CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR: [str(workspace)],
+        })
+    agent.backend = WriteThenFail()
+    result = agent.run_subagent(child.id, dry_run=False, probe=False)
+    assert not result.ok
+    rows = agent.conversation_store.recent_messages(child.agent_thread_id, limit=0)
+    native = provider_history_messages_from_rows(rows)
+    assert "call-child-write-1" in str(native)
+    assert any("tool_result" in str(row) for row in native)
+    assert rows[-1].content == ""
+    assert rows[-1].metadata["turn_end_reason"] == ("aborted" if error_type is InterruptedError else "error")
+    assert agent.conversation_store.recent_messages(parent.thread_id, limit=0) == []
+
+
 class _OverflowThenListThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
     name = "overflow-list-then-complete-child"
 

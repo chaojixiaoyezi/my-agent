@@ -1,9 +1,10 @@
 # LLM: 本模块装配运行恢复状态与上下文，工具发现归档必须复用 tooling 的纯投影，不能反向要求 Gateway 导入运行循环。
-# 模块用途: 为主链准备记忆、一次性工具和续跑输入；缓存面与权限分别由各自权威模块维护。
+# 模块用途: 为主链准备记忆、工具及续跑输入，异常退出前交回原生历史；缓存面与权限仍由各自权威模块维护。
 
 from __future__ import annotations
 
 import json
+import logging
 from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 
@@ -127,6 +128,7 @@ def _runtime_loop_params(
         tool_runtime_snapshot=prepared.tool_runtime_snapshot,
         tool_protocol_snapshot=prepared.tool_protocol_snapshot,
         conversation_history_seed=params.conversation_history_seed,
+        partial_turn_callback=params.partial_turn_callback,
     )
 
 
@@ -536,8 +538,8 @@ def _runtime_injections_with_bundle(
     return injections
 
 
-# LLM: 每个 run 在首次模型请求前固定一个工具快照，之后目录、搜索、Schema 与执行只在其上做减法。
-# 函数用途: 创建请求级工具事实并驱动压缩和独立工具循环，返回本轮完整运行结果。
+# LLM: 工具快照逐 run 固定；异常退出先经宿主回调保存当前 IR，再原样抛错，不把中断当成功或重新执行工具。
+# 函数用途: 驱动模型工具循环，正常返回完整结果，异常也保留已经发生的会话事实。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
     audit_source_provision = _provision_audit_sources_before_model(agent, params)
@@ -579,7 +581,11 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     _queue_audit_source_provision_reply(loop_params, audit_source_provision)
     # 每个 run 都有自己的工具循环状态；同一 owner 的并发聊天/后台轮
     # 不能共享一个 ToolLoopService 实例。
-    final_prompt, final_response, tool_rounds = ToolLoopService(agent).execute(loop_params)
+    try:
+        final_prompt, final_response, tool_rounds = ToolLoopService(agent).execute(loop_params)
+    except (Exception, KeyboardInterrupt) as exc:
+        _persist_partial_native_turn(params.partial_turn_callback, loop_params, exc)
+        raise
     return RuntimeLoopResult(
         final_prompt=final_prompt,
         final_response=final_response,
@@ -602,6 +608,34 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             final_response,
         ),
     )
+
+
+# LLM: 异常快照只含当前 run 的原生 IR；精确会话归属、幂等与写盘修复由原宿主出口负责。
+# 函数用途: 在抛回原异常前保存已完成的工具往返；没有原生历史就不生成空的助手回复。
+def _persist_partial_native_turn(callback: object, params: ToolLoopExecuteParams, exc: BaseException) -> None:
+    from ..models import AgentRunResult
+
+    if not callable(callback):
+        return
+    native = _completed_turn_native_messages(params, None)
+    if not native:
+        return
+    cancelled = isinstance(exc, (InterruptedError, KeyboardInterrupt))
+    result = AgentRunResult(
+        prompt="", response="", backend="tool_loop", used_memories=0,
+        canonical_native_messages=native,
+        archive_tool_calls=list(params.archive_tool_calls),
+        executed_tools=list(params.executed_tools),
+        runtime_status="cancelled" if cancelled else "failed",
+        runtime_reason="user_stop" if cancelled else type(exc).__name__,
+        runtime_source="conversation_control" if cancelled else "runtime_error",
+        turn_end_reason="aborted" if cancelled else "error",
+    )
+    try:
+        callback(result)
+    except Exception:
+        # 保存失败不能改写为成功，也不能掩盖原始失败；宿主的原有 repair 仍负责可恢复写盘。
+        logging.getLogger(__name__).error("异常回合的原生历史保存失败；请核对会话账本", exc_info=True)
 
 
 def _tool_runtime_evidence(

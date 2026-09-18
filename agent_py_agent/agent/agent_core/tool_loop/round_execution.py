@@ -1,5 +1,5 @@
 # LLM: 本模块执行一轮 canonical ToolCall，并保持审批、并发、取消、记录和 provider 调用顺序的结构化一致性。
-# 模块用途: 编排单轮工具调用，输出配对结果与进度事件，并在用户拒绝后阻止完全相同的调用重复弹框。
+# 模块用途: 编排单轮工具调用，隔离线程依赖并输出配对结果；用户拒绝后阻止相同调用重复弹框。
 
 from __future__ import annotations
 
@@ -766,6 +766,8 @@ def _execute_parallel_call(
         _restore_parallel_thread_context(request.agent, restore_values)
 
 
+# LLM: 并行工具只继承本线程显式依赖与 runner 身份，不能读取其它会话的模型连接；接收线程必须对称恢复。
+# 函数用途: 冻结派工等工具需要的临时上下文，保留显式替身注入但不共享跨线程可变字段。
 def _capture_parallel_thread_context(agent: object) -> _ParallelThreadContext:
     from ..runner.context import (
         ThreadLocalAgentAttribute,
@@ -780,6 +782,7 @@ def _capture_parallel_thread_context(agent: object) -> _ParallelThreadContext:
         "_current_run_params",
         "_current_run_task_workspace",
         "_current_skill_snapshot",
+        "_subagent_worker_backend_override",
     ):
         descriptor = getattr(type(agent), name, None)
         if isinstance(descriptor, ThreadLocalAgentAttribute) and hasattr(agent, name):

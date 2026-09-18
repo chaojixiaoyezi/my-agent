@@ -1,5 +1,5 @@
 # LLM: 后台稳定 task 身份与逐轮请求分离；唤醒共用 coordinator 软指导，不能生成永久禁写或额外授权。
-# 模块用途: 处理后台事件、上下文和投递；子代理返回接回原用户目标和分工，截断回复保留真实原因。
+# 模块用途: 处理后台事件、上下文和投递；原生执行历史独立于公开回复保存，截断与中断保留真实原因。
 from __future__ import annotations
 
 import hashlib
@@ -49,6 +49,7 @@ from .models import (
     MessageLogEntry,
     ObservationEvent,
     WakeSignal,
+    new_id,
 )
 from .run_claim import ConversationRunClaimHeartbeat, claim_heartbeat_interval_seconds
 from .store import ConversationStore
@@ -681,6 +682,8 @@ from .channels import (
 from .models import BackgroundDeliveryCommit, BackgroundMainAgentReport
 
 
+# LLM: 执行片的会话编号由宿主分配，不能复用稳定 task/wake ID；同片 Compact 仍沿原编号，外发重投保留冻结 metadata。
+# 类用途: 绑定一次后台执行的线程、触发事实和会话回合，避免多次续做覆盖此前历史。
 @dataclass(frozen=True)
 class BackgroundRunRequest:
     thread_id: str
@@ -690,6 +693,7 @@ class BackgroundRunRequest:
     route_target: str = ""
     now: float = 0.0
     wake_signal: dict[str, Any] | None = None
+    conversation_turn_id: str = field(default_factory=lambda: new_id("background-turn"))
 
 
 # LLM: This private control signal means a healthy background turn exhausted its bounded Compact
@@ -1441,7 +1445,7 @@ def _frozen_owner_delivery(payload: dict[str, object]) -> _FrozenOwnerDelivery |
 
 # LLM: canonical 行 metadata 只能在这里构造：重投时 frozen metadata 是权威，
 # 只补齐本次重投的时间无关字段，避免重投把原始 task/refs/过程信息覆盖成重投时的值。
-# 函数用途: 组装后台 owner 消息的 canonical metadata。
+# 函数用途: 组装后台公开消息 metadata，与本片原生历史关联；重投保留原编号，不重复写入模型事实。
 def _background_owner_message_metadata(
     request: BackgroundRunRequest,
     *,
@@ -1458,6 +1462,7 @@ def _background_owner_message_metadata(
             "background_delivery_retry_reason": delivery_reason,
         }
     metadata: dict[str, object] = {
+        "conversation_request_id": request.conversation_turn_id,
         "reason": request.reason,
         "task_id": request.task_id,
         "delivery_artifacts": [dict(item) for item in delivery_artifacts],
@@ -1498,7 +1503,7 @@ def _background_external_delivery(
 
 
 # LLM: 投递前的三道抑制判定必须同源：未授权投递、任务已终态、没有可交付正文。它们都表示
-# “这片回复不面向 owner”，因此既不外发也不落 canonical；goal 终态交付是唯一例外。
+# “这片回复不面向 owner”，因此不外发也不保存公开正文；原生执行历史独立保留，goal 终态交付是例外。
 # 函数用途: 判断这片后台回复是否在调用投递服务之前就应被抑制。
 def _background_reply_suppressed(
     runtime: BackgroundMainAgentRuntime,
@@ -1600,7 +1605,7 @@ def _invoke_background_main_agent_with_model(
 # LLM: Background lifecycle wakes continue the same authoritative active turn. Like foreground
 # Gateway and child runners, context overflow must compact the durable transcript and retry while
 # carrying typed tool and steering state; a new scheduler slice must not be the retry mechanism.
-# 函数用途: 后台主代理在同一工作片压缩并续跑；每次模型执行同时换工具显示批次，避免同号覆盖旧工具。
+# 函数用途: 后台主代理在同片压缩并续跑；正常/异常原生历史写回原会话，工具显示批次不改变执行身份。
 def _run_background_main_turn_with_compact(
     runtime: BackgroundMainAgentRuntime,
     thread: ConversationThread,
@@ -1651,9 +1656,11 @@ def _run_background_main_turn_with_compact(
             *continuation_injection,
         ]
         run_params.on_chunk = activity_sink
+        run_params.partial_turn_callback = partial(_persist_background_native_turn, runtime.store, request)
         activity_sink.begin_model_attempt(_attempt + 1)
         result = runtime.agent.run(user_prompt, params=run_params)
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != ("context_overflow"):
+            _persist_background_native_turn(runtime.store, request, result)
             return result
         (
             carried_archive_tool_calls,
@@ -1674,34 +1681,73 @@ def _run_background_main_turn_with_compact(
             carried_archive_tool_calls=carried_archive_tool_calls,
         )
         if refreshed.compact_generation <= current.compact_generation:
-            from .active_turn_compact import (
-                ActiveTurnArchiveCompactRequest,
-                compact_carried_active_turn_archive,
+            refreshed = _compact_background_active_turn(
+                runtime, refreshed, run_params, carried_archive_tool_calls,
+                task_id=request.task_id, user_prompt=user_prompt, activity_sink=activity_sink,
             )
-
-            active_turn_compact = compact_carried_active_turn_archive(
-                runtime.agent,
-                runtime.store,
-                refreshed,
-                carried_archive_tool_calls,
-                ActiveTurnArchiveCompactRequest(
-                    task_attributes=run_params.task_attributes,
-                    request_id=str(run_params.request_id or request.task_id or ""),
-                    attempt_id=str(run_params.attempt_id or run_params.request_id or ""),
-                    task_prompt=user_prompt,
-                    progress_callback=activity_sink.write_conversation_compact_progress,
-                    interrupt_check=is_interrupted,
-                ),
-            )
-            if not active_turn_compact.compacted:
-                raise RuntimeError(
-                    "background main thread cannot compact the overflowing active turn"
-                )
-            refreshed = active_turn_compact.thread
         current = refreshed
     raise _BackgroundCompactSliceYield(
         "background main compact slice advanced eight generations and will resume"
     )
+
+
+# LLM: 已结束历史无压缩进展时仅压缩本活动轮归档；沿原 CAS 与取消合同提交，不凭输出正文判定可继续。
+# 函数用途: 缩减后台当前轮的工具上下文并确认真正推进，失败时保留原错误而不空转重试。
+def _compact_background_active_turn(
+    runtime: BackgroundMainAgentRuntime,
+    thread: ConversationThread,
+    run_params: RunParams,
+    archive: list[dict[str, object]],
+    *,
+    task_id: str,
+    user_prompt: str,
+    activity_sink: BackgroundMainActivitySink,
+) -> ConversationThread:
+    from .active_turn_compact import (
+        ActiveTurnArchiveCompactRequest,
+        compact_carried_active_turn_archive,
+    )
+
+    result = compact_carried_active_turn_archive(
+        runtime.agent, runtime.store, thread, archive,
+        ActiveTurnArchiveCompactRequest(
+            task_attributes=run_params.task_attributes,
+            request_id=str(run_params.request_id or task_id or ""),
+            attempt_id=str(run_params.attempt_id or run_params.request_id or ""),
+            task_prompt=user_prompt,
+            progress_callback=activity_sink.write_conversation_compact_progress,
+            interrupt_check=is_interrupted,
+        ),
+    )
+    if not result.compacted:
+        raise RuntimeError("background main thread cannot compact the overflowing active turn")
+    return result.thread
+
+
+# LLM: 原生信封只进入当前 store/thread 的同一 transcript；与公开 final 按宿主回合编号去重，不发消息或修改 wake 生命周期。
+# 函数用途: 保存后台正常、静默让出或异常前的工具历史，外发被抑制时也不丢记录；写盘失败不能冒充保存成功。
+def _persist_background_native_turn(store: ConversationStore, request: BackgroundRunRequest, result: object) -> None:
+    from ..turn_end import result_turn_end_reason
+    from .native_history import (
+        CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
+        canonical_native_messages_envelope,
+    )
+
+    # 窄范围审计事件不是普通会话续接，沿原隔离合同保存，不把内部事件写入用户模型历史。
+    if _narrow_audit_event_reason(request.reason):
+        return
+    native = canonical_native_messages_envelope(getattr(result, "canonical_native_messages", None))
+    if not native:
+        return
+    store.append_message_once({
+        "thread_id": request.thread_id, "role": "assistant", "content": "", "channel": request.route_channel,
+        "metadata": {
+            "conversation_request_id": request.conversation_turn_id,
+            "assistant_part_id": "native", "task_id": request.task_id,
+            "turn_end_reason": result_turn_end_reason(result),
+            CANONICAL_NATIVE_MESSAGES_METADATA_KEY: native,
+        },
+    }, dedupe_key=f"background-native:{request.conversation_turn_id}")
 
 
 # LLM: Compact retry carry contains only structured runtime records. It never reconstructs work

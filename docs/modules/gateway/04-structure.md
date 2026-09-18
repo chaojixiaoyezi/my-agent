@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## 异常回合历史
+
+`RunParams.partial_turn_callback` 由调用宿主绑定精确 owner/thread/request。共享工具循环在异常退出前
+把当前 IR 交回原宿主，再抛回原异常；Gateway 使用 `_persist_gateway_partial_result` 复用普通 final
+和 `message_repairs`。正常返回的 user-stop 也经过同一历史出口，频道投递仍静默。
+空正文原生信封不是用户回复；工具缺结果时只记录未知，不重放命令、不伪造成功、不建立第二份会话历史。
+
+后台 `BackgroundRunRequest.conversation_turn_id` 为本次宿主执行分配独立编号，task/wake/工具身份不变。
+`_persist_background_native_turn` 在原 transcript 写空正文 native 行，公开 final 共用编号，模型投影只回放一次。
+公开投递重试沿冻结 metadata，不触发第二次模型调用；窄范围审计事件保留原隔离协议，不纳入普通续接。
+
 ## 受管命令完成交接
 
 `cli/gateway_loops.py` 的会话 worker 异常由同一个 supervisor 记录临时 retry-after，规划阶段过滤，

@@ -418,6 +418,46 @@ def test_gateway_final_persists_typed_model_failure_including_repair(tmp_path, m
     assert store._message_path(thread.thread_id).read_bytes() == before
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+def test_gateway_stop_keeps_native_history_without_public_reply(tmp_path, monkeypatch, deferred):
+    from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
+    from agent_py_agent.agent.gateway_parts import request_execution as module
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=False), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread({"channel": "chat", "channel_conversation_id": "stop-history"})
+    conversation = _GatewayConversationContext(thread_id=thread.thread_id)
+    context = _GatewayAskRunContext(
+        agent=agent, request={"metadata": {"channel": "chat"}}, request_id="req-stop-native",
+        request_path=tmp_path / "request.json", response_path=tmp_path / "response.json", on_chunk=None,
+    )
+    native = [
+        {"role": "user", "content": "原任务"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "done-read", "name": "read_file", "input": {"path": "note.md"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "done-read", "content": "已经读过的事实"}]},
+    ]
+    result = SimpleNamespace(response="", runtime_status="cancelled", runtime_reason="user_stop", canonical_native_messages=native)
+    module._append_gateway_conversation_message(agent, context.request, conversation,
+        request_id=context.request_id, role="user", content="原任务")
+    with monkeypatch.context() as patch:
+        if deferred:
+            patch.setattr(store, "append_message", lambda _payload: (_ for _ in ()).throw(OSError("test disk failure")))
+        module._persist_gateway_assistant_result(context, conversation, result)
+    if deferred:
+        assert result.conversation_persist_degraded
+        errors = []
+        module._repair_gateway_conversation_messages(store, thread.thread_id, errors)
+        assert not errors
+    rows = store.recent_messages(thread.thread_id, limit=0)
+    assert [r.content for r in rows] == ["原任务", ""]
+    assert rows[-1].metadata["turn_end_reason"] == "aborted"
+    assert list(provider_history_messages_from_rows(rows)) == native
+    assert result.channel_delivery["content"] == ""
+    assert result.channel_delivery["projection_status"] == "suppressed_user_stop"
+    module._persist_gateway_assistant_result(context, conversation, result)
+    assert len(store.recent_messages(thread.thread_id, limit=0)) == 2
+
+
 def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path

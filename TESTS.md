@@ -24,6 +24,18 @@ TUI（无子代理）及多条正常模型 TUI，共用单 Gateway，定向回�
 
 ## 重点定向回归入口
 
+- 子代理模型续派：`test_orchestration_background_dispatch.py`、`test_model_profiles.py`、
+  `test_thread_model_selection.py` 及 worker/timeout 测试。覆盖 Gateway 无默认模型、父子异模型、
+  child thread 改选后的恢复、并发显式注入和并行工具线程的依赖传递；旧捕获函数回放须能重现配置/连接不一致。
+  真实验收区分普通父子交接与 coordinator 等待孙代理后的重新派工；没有真正产生孙代理的不计后者通过。
+
+- 中断历史：`test_native_tool_use_ir_messages_flow.py`、`test_cli_run_conversation.py`、
+  `test_gateway_chat_conversation_context.py`、`test_subagent_runtime_compact.py`、
+  `test_background_main_agent_runtime.py`、`test_background_owner_delivery_commit.py` 联合验证
+  原生调用/结果保留、未知副作用占位、空正文与异常不改成功、后台静默/外发失败仍留事实而不伪造送达、
+  原请求幂等、同一 repair 补交。真实 TUI 用执行中 Esc 后继续，核对下一轮真实输入和已发生的工具事实；
+  一路慢模型不派子代理，正常模型并行验证父/子与普通后续轮。历史旧缺口不按显示文字补造成功。
+
 - 客户端计时：`test_gateway_client.py`、`test_gateway_admission_wait.py`、`test_tui_worker_paths.py`，
   覆盖时钟前跳/回拨、失联超时和活动租约续期。真实 TUI 可隔离替换客户端模块时钟注入跳变，
   不修改系统时钟、不影响 Gateway/模型计时；单独记录注入已发生、真实终态及任务产物，不能把替身当真实模型。

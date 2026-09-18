@@ -1,7 +1,7 @@
 """composition root for SimpleAgent runtime, tools, memory, gateway, and subagents."""
 
 # LLM: core.py 只装配 SimpleAgent 的当前主链；拆出的私有 helper 必须由所属
-# 模块直接导入，不在这里保留无人消费的旧 re-export 兼容面。
+# 模块直接导入，不在这里保留无人消费的旧 re-export 兼容面；显式派工后端注入也须隔离到线程。
 # 模块用途: 组装模型后端、工具、记忆、会话和子代理，生成可运行的 SimpleAgent。
 
 from __future__ import annotations
@@ -314,8 +314,8 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
     )
 
 
-# LLM: 模型与工具权限依赖按执行作用域覆盖；其它 owner/runtime/存储依赖保持原权威对象，不复制整套 Agent。
-# 类用途: 组装主代理，让同用户切模型或权限不会热改正在工作的其它线程。
+# LLM: 模型与权限依赖按执行作用域覆盖；显式子代理后端注入按派工线程隔离，存储和 owner 保持原权威。
+# 类用途: 组装主代理，让同用户切模型、权限或并发派工不会覆盖其它会话的运行依赖。
 class SimpleAgent(
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
@@ -334,6 +334,7 @@ class SimpleAgent(
     _current_run_task_workspace = ThreadLocalAgentAttribute("_current_run_task_workspace")
     _current_tool_loop_params = ThreadLocalAgentAttribute("_current_tool_loop_params")
     _current_skill_snapshot = ThreadLocalAgentAttribute("_current_skill_snapshot")
+    _subagent_worker_backend_override = ThreadLocalAgentAttribute("_subagent_worker_backend_override")
     config = ModelScopedAttribute("config")
     backend = ModelScopedAttribute("backend")
     prompts = ModelScopedAttribute("prompts")

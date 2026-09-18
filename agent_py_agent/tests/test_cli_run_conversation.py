@@ -96,6 +96,37 @@ def _agent(tmp_path) -> SimpleAgent:
     )
 
 
+@pytest.mark.parametrize("error_type", [InterruptedError, ValueError])
+def test_run_exception_preserves_completed_tool_history(tmp_path, error_type):
+    from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
+
+    class ReadThenFail(_StaticBackend):
+        def generate(self, prompt, on_chunk=None, tools=None, messages=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(text="", backend=self.name, tool_use_blocks=[{
+                    "id": "read-before-stop", "name": "read_file", "input": {"path": str(owner_home / "notes.txt")},
+                }])
+            raise error_type("test stop after completed tool")
+
+    agent = _agent(tmp_path)
+    owner_home = agent.home_paths.owner_home_dir
+    owner_home.mkdir(parents=True, exist_ok=True)
+    (owner_home / "notes.txt").write_text("已读取的线索 Cedar47", encoding="utf-8")
+    agent.backend = ReadThenFail()
+    with pytest.raises(error_type):
+        agent.run("读取资料后继续分析", source="cli_run", request_id="req-partial-cli",
+                  run_id="run-partial-cli", task_id="task-partial-cli", allowed_tools=["read_file"])
+    thread = agent.conversation_store.list_threads()[0]
+    rows = agent.conversation_store.recent_messages(thread.thread_id, limit=0)
+    assert [row.role for row in rows] == ["user", "assistant"]
+    assert rows[-1].content == ""
+    native = provider_history_messages_from_rows(rows)
+    assert any("tool_result" in str(row) for row in native)
+    assert "Cedar47" in str(native)
+    assert rows[-1].metadata["turn_end_reason"] == ("aborted" if error_type is InterruptedError else "error")
+
+
 def test_cli_run_user_message_is_authoritative_before_remember(tmp_path) -> None:
     agent = _agent(tmp_path)
     backend = _RememberOnceBackend()

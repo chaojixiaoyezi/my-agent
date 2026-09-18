@@ -1,14 +1,14 @@
-"""Canonical provider-neutral message envelopes for completed conversation turns.
+"""Canonical provider-neutral message envelopes for ended conversation turns.
 
 The visible transcript remains ordinary user/assistant prose.  A final assistant row may also
-carry the exact native messages used by that completed turn so a later turn can retain tool calls,
+carry the exact native messages used by that turn, including an interrupted/failed turn, so a later turn can retain tool calls,
 tool results and their append-only cache prefix.  Compact is the only operation allowed to replace
 that raw tail with a summary.
 """
 
 # LLM: This module owns the sole persisted provider-neutral native-message envelope used by both
 # Gateway and child threads; changes must keep schema validation, turn grouping and Compact aligned.
-# 模块用途: 保存并恢复跨轮原生消息，使工具调用、结果和缓存前缀不会在下一轮退化成普通文字。
+# 模块用途: 保存正常或中断回合的原生消息；停止的空正文只携带历史，不生成替代回复或丢失工具往返。
 
 from __future__ import annotations
 

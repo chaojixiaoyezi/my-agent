@@ -9,14 +9,20 @@ it does not turn the command into an interactive Gateway conversation.
 
 # LLM: This module adapts only cli_run into the existing owner ConversationStore; it must not
 # create a second transcript, relax Memory evidence, or reinterpret a one-shot run as Gateway.
-# 模块用途: 给一次性 my-agent run 补齐权威用户/回复记录，同时保持原独立任务和工作区生命周期。
+# 模块用途: 给一次性运行保存权威用户、回复及异常前的工具记录，同时保持原独立任务和工作区生命周期。
 
 import logging
 from dataclasses import replace
+from functools import partial
 
 from ..conversation.channels import project_user_reply
 from ..conversation.history_index import index_conversation_message
+from ..conversation.native_history import (
+    CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
+    canonical_native_messages_envelope,
+)
 from ..tooling.operation_verification import public_operation_verification
+from ..turn_end import result_turn_end_reason
 
 _LOGGER = logging.getLogger(__name__)
 _CLI_RUN_SOURCE = "cli_run"
@@ -36,8 +42,7 @@ class CliRunConversationPersistenceError(RuntimeError):
     error_code = "CONVERSATION_PERSISTENCE_UNAVAILABLE"
 
 
-# LLM: Only cli_run enters here; it writes one owner-scoped user message before execution and
-# returns immutable run params carrying the real thread id, never a fabricated task-link id.
+# LLM: 只绑定 cli_run 的真实 owner/thread 并写入用户消息；异常回调沿同一正文/原生历史出口，不另外创建会话。
 # 函数用途: 为一次性 CLI 建立权威会话记录并写入用户原文；会写 ConversationStore 和检索索引。
 def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
     """Persist one CLI user turn before model/tool execution and return bound params.
@@ -128,12 +133,12 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
     attributes["conversation_thread_id"] = str(thread.thread_id)
     # Do not predeclare conversation_task_id.  cli_run owns a standalone task/workspace; a
     # ConversationStore task link may be created only by a real task-promoting tool.
-    return replace(params, task_attributes=attributes)
+    bound = replace(params, task_attributes=attributes)
+    return replace(bound, partial_turn_callback=partial(persist_cli_run_assistant, agent, bound))
 
 
-# LLM: The final public projection is appended idempotently after execution; failure must only
-# mark typed delivery degradation because the user input and completed operation facts remain.
-# 函数用途: 把 CLI 最终公开回复写入同一会话；失败时只更新结果的降级字段并记录错误日志。
+# LLM: 正常和异常出口共用请求幂等键；原生历史保留，空正文异常只写 metadata，不制造用户回复。
+# 函数用途: 保存 CLI 回复及工具历史；中断也能继续查证，保存失败明确标记降级。
 def persist_cli_run_assistant(agent: object, params: object, result: object) -> bool:
     """Append the final public CLI reply exactly once; degrade only this trailing write."""
 
@@ -145,7 +150,8 @@ def persist_cli_run_assistant(agent: object, params: object, result: object) -> 
     request_id = str(getattr(params, "request_id", "") or "").strip()
     store = getattr(agent, "conversation_store", None)
     projection = project_user_reply(str(getattr(result, "response", "") or ""))
-    if projection.internal_signal or not projection.content:
+    native = canonical_native_messages_envelope(getattr(result, "canonical_native_messages", None))
+    if projection.internal_signal or (not projection.content and not native):
         return True
     if not thread_id or not request_id or store is None:
         return _mark_assistant_persist_degraded(
@@ -153,6 +159,9 @@ def persist_cli_run_assistant(agent: object, params: object, result: object) -> 
             "CLI run assistant transcript lacks its bound ConversationStore identity",
         )
     metadata = _message_metadata(params)
+    metadata["turn_end_reason"] = result_turn_end_reason(result)
+    if native:
+        metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = native
     metadata["operation_verification"] = public_operation_verification(
         getattr(result, "operation_verification", None)
     )
