@@ -31,9 +31,9 @@ from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 _MODEL_SUMMARY_MAX_CHARS = 12_000
 
 
-# LLM: Raw tool output must be archived together with host-owned execution/operation facts and a
-# separate provider-authored parameter view before the later in-memory record is enriched.
-# 函数用途: 归档工具原始输出、执行终态和模型原始参数，供后台续轮安全恢复而不回灌宿主字段。
+# LLM: 原始输出先按 owner/run 归档；仅真正外置且未声明保留正文的结果使用预览。读取器已分页的正文、
+# 游标及文件版本必须完整进入 canonical ToolResult；同步检查 reducer、原生历史及外置输出回归。
+# 函数用途: 写入工具归档并生成安全的模型结果；日志预览不能代替有界正文，否则会丢尾部并诱发重复读取。
 def archive_tool_output_projection(
     agent: object,
     params: object,
@@ -81,16 +81,21 @@ def archive_tool_output_projection(
     )
     output_record = externalize_tool_output_record(request)
     output_record.update(write_tool_output_fail_safe_checkpoint(request))
-    preview = project_tool_output_body(
+    # 读取工具已限制单页大小，output_externalized=false 是归档层的明确内联裁决。
+    # 日志 output_preview 无论是否外置都会缩短，不能用它作为所有模型回执的正文。
+    use_preview = bool(output_record.get("output_externalized")) and not bool(
+        policy.get("preserve_prompt_output")
+    )
+    body = project_tool_output_body(
         tool=call.tool_name,
-        output=output_record.get("output_preview", ""),
+        output=output_record.get("output_preview", "") if use_preview else outcome.output,
         trust=trust,
         redaction=redaction,
     )
     refs = _projection_refs(output_record, outcome)
     blocks: list[ToolContentBlock] = []
-    if preview:
-        blocks.append(ToolContentBlock("text", text=preview))
+    if body:
+        blocks.append(ToolContentBlock("text", text=body))
     blocks.extend(ToolContentBlock("ref", ref=ref.ref) for ref in refs)
     return ToolOutputProjection(
         content_blocks=tuple(blocks),
@@ -100,7 +105,7 @@ def archive_tool_output_projection(
             "raw_output_chars": len(str(outcome.output or "")),
             "raw_output_bytes": int(output_record.get("output_size_bytes") or 0),
             "raw_output_sha256": str(output_record.get("output_hash") or ""),
-            "projection_truncated": output_record.get("output_externalized") is True,
+            "projection_truncated": use_preview,
         },
     )
 

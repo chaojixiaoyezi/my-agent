@@ -8,8 +8,11 @@ from __future__ import annotations
 """
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolCallRecordParams, ToolLoopService
@@ -19,6 +22,7 @@ from agent_py_agent.agent.agent_core.tool_context.call_reducer import (
     render_assistant_tool_round_context,
     render_tool_payload_for_live_prompt,
 )
+from agent_py_agent.agent.agent_core.tool_context.reducer import render_tool_result_for_live_prompt
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.memory_archive.artifact.reader import (
     ReadToolOutputArtifactRequest,
@@ -35,6 +39,7 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     externalize_tool_output_record,
 )
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
 from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
 from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolFailureFacts,
@@ -43,9 +48,11 @@ from agent_py_agent.agent.tooling.runtime_contracts import (
 )
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
+    execute_canonical_test_call,
     make_test_model_spec,
     make_test_protocol_snapshot,
     runtime_snapshot_for_model_specs,
+    runtime_snapshot_for_tools,
 )
 
 
@@ -280,6 +287,88 @@ def test_production_archiver_preserves_tool_preview_policy_when_adding_trust(
 
     assert record["output_externalized"] is True
     assert Path(record["output_path"]).is_file()
+
+
+@pytest.mark.parametrize("archive_threshold", [1, 200_000])
+@pytest.mark.parametrize("page_chars", [12_000, 5_000])
+def test_production_file_read_keeps_bounded_body_and_continuation(
+    tmp_path: Path, archive_threshold: int, page_chars: int,
+) -> None:
+    """读取器的有界结果经过真实执行/归档链后，不能被日志预览再裁一次。"""
+    (tmp_path / "source.txt").write_text("row-data\n" * 800 + "LAST-ROW\n", encoding="utf-8")
+    tool = ReadFileTool(tmp_path, max_chars=page_chars)
+    params = _tool_loop_params(request_id="req-read", run_id="run-read", task_id="task-read")
+    params = replace(params, tool_runtime_snapshot=runtime_snapshot_for_tools({"read_file": tool}, run_id="run-read"))
+    agent = SimpleNamespace(root=tmp_path, config=AgentConfig(
+        tool_output_externalize_min_chars=archive_threshold, tool_output_preview_chars=4_000,
+    ))
+    outcome = tool.execute({"path": "source.txt"})
+    execution = execute_canonical_test_call(
+        tmp_path, tools={"read_file": tool}, tool_name="read_file",
+        arguments={"path": "source.txt"}, run_id="run-read",
+        output_archiver=lambda call, result: archive_tool_output_projection(agent, params, call, result),
+    )
+    result = execution.result
+    archive = result.metadata["archive_output_record"]
+    rendered = render_tool_result_for_live_prompt(result, archive)
+    assert result.ok
+    assert len(outcome.output) > 4_000
+    assert outcome.output in rendered
+    assert "... [truncated" not in rendered
+    assert result.metadata["projection_truncated"] is False
+    assert len(archive["output_preview"]) < len(outcome.output)
+    ToolLoopService(agent)._record_tool_call(ToolCallRecordParams(
+        params=params, tool_rounds=1, idx=1, call=execution.call, result=result,
+    ))
+    native = AnthropicMessageAdapter().to_provider_messages(params.tool_ir_history)
+    assert outcome.output in native[-1]["content"][0]["content"]
+
+
+def test_production_artifact_page_keeps_valid_json_and_next_cursor(tmp_path: Path) -> None:
+    """归档读取页本身不可再次变成预览，否则正文和下一页参数均无法使用。"""
+    output = json.dumps({"reads_artifact_body": True, "artifact_ref": "source-run:source-call",
+        "content": "page-data\n" * 700, "next_read": {"offset": 7_000, "max_chars": 7_000}})
+    params = _tool_loop_params(request_id="req-page", run_id="run-page", task_id="task-page")
+    call = canonical_history_call("read_artifact", {}, call_id="page-call", run_id="run-page")
+    projection = archive_tool_output_projection(
+        SimpleNamespace(root=tmp_path, config=AgentConfig()), params, call,
+        ToolHandlerOutcome("read_artifact", True, output),
+    )
+    body = "\n".join(block.text for block in projection.content_blocks if block.type == "text")
+    assert json.loads(body)["next_read"] == {"offset": 7_000, "max_chars": 7_000}
+    assert body == output
+
+
+def test_production_explicit_preserve_policy_keeps_bounded_body(tmp_path: Path) -> None:
+    """宿主允许工具保留的有界正文，不能在下游 reducer 使用前已丢失。"""
+    output = "bounded item\n" * 500
+    params = _tool_loop_params(request_id="req-keep", run_id="run-keep", task_id="task-keep")
+    call = canonical_history_call("watch_stream", {}, call_id="keep-call", run_id="run-keep")
+    projection = archive_tool_output_projection(
+        SimpleNamespace(root=tmp_path, config=AgentConfig()), params, call,
+        ToolHandlerOutcome("watch_stream", True, output, result_envelope={
+            "tool_output_policy": {"preserve_prompt_output": True},
+        }),
+    )
+    assert projection.metadata["archive_output_record"]["output_externalized"] is True
+    assert projection.metadata["projection_truncated"] is False
+    assert output == "\n".join(block.text for block in projection.content_blocks if block.type == "text")
+
+
+def test_production_inline_body_still_uses_redaction(tmp_path: Path) -> None:
+    """改为保留内联正文不代表可以绕过最终脱敏，尾部非敏感信息仍须到达模型。"""
+    output = json.dumps({"payload": "bounded-data " * 500,
+                         "api_key": "fixture-secret-not-a-real-key", "tail": "LAST-ITEM"})
+    params = _tool_loop_params(request_id="req-safe", run_id="run-safe", task_id="task-safe")
+    projection = archive_tool_output_projection(
+        SimpleNamespace(root=tmp_path, config=AgentConfig()), params,
+        canonical_history_call("read_file", {}, call_id="safe-call", run_id="run-safe"),
+        ToolHandlerOutcome("read_file", True, output),
+    )
+    body = "\n".join(block.text for block in projection.content_blocks if block.type == "text")
+    assert "fixture-secret-not-a-real-key" not in body
+    assert json.loads(body)["tail"] == "LAST-ITEM"
+    assert projection.metadata["projection_truncated"] is False
 
 
 def test_compact_carried_create_subagents_keeps_structured_child_recovery_facts(

@@ -1,5 +1,25 @@
 # Verification：结构
 
+## 零工具续跑原生历史
+
+`backends.response_completion.has_reasoning_content` 区分有效 typed 思考与空包；适配器返回原内容和用量。
+`tool_loop.response_decision` 在 continue 时调用 `tool_ir_history.record_unexecuted_response_ir`，
+追加独立 assistant 轮，不复用工具轮号，不记录未执行工具。实际工具轮和 final 沿原入口保存，
+下一次请求、Compact 与取消保存共同消费这一份 IR，不另存展示文本作为模型历史。
+
+## 渠道故障诊断
+
+`tool_guard.loop_hints` 读取 `error_taxonomy` 的规范错误合同，明确的网络/能力不可用才进入渠道提示计数。
+记录按 tool/call_id 选最新事实；不解析 stdout、错误描述或模型回复，不复制第二套错误分类表。
+原工具结果、账本、审批和执行状态不变；只是避免将普通失败注入成错误的模型恢复指令。
+
+## 工具结果正文与预览
+
+`tool_call_archive_record.archive_tool_output_projection` 先归档原始结果，再按明确的
+`output_externalized` 与 `preserve_prompt_output` 选择模型正文；仅外置结果使用归档预览。
+内联和已分页读取保留整页及继续参数，之后共用脱敏/信任投影、canonical ToolResult 与 native IR。
+`output_preview` 仍为有界日志字段，`projection_truncated` 描述模型正文是否缩成预览，不能用归档存在与否代替。
+
 ## 长等待与完成通知
 
 `process_session` 的 wait 使用宿主取消令牌与单调时钟，不持锁长等，默认 30/上限 600 秒。

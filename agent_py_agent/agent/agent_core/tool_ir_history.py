@@ -1,6 +1,6 @@
 
 # LLM: 本模块维护模型可见的 typed IR；普通请求只追加，摘要覆盖后的回收保留用户输入和当前运行事实。
-# 模块用途: 保存并整理原生工具往返；改动须同时核对配对、缓存前缀、Compact 探针和取消回滚。
+# 模块用途: 保存原生工具往返及无工具续跑响应；须核对配对、缓存前缀、Compact 和取消回滚。
 from __future__ import annotations
 
 """原生 tool_use 协议下的 IR 历史维护（Step 2 接线层）。
@@ -46,6 +46,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
 
+from ..backends.response_completion import has_reasoning_content, without_tool_blocks
 from ..backends.tool_ir import (
     AssistantTurn,
     CompactionSummary,
@@ -179,6 +180,16 @@ def open_assistant_turn_ir(
         response_text,
         response_content_blocks,
     )
+
+
+# LLM: 只在继续生成且本轮零工具执行时调用；追加独立 AssistantTurn，不能按未变的工具轮号合并。
+# 函数用途: 保存继续生成前的正文和原生思考，滤掉未执行工具；不产生公开答复或工具执行事实。
+def record_unexecuted_response_ir(
+    params: object, *, response_text: str, response_content_blocks: list[dict[str, Any]],
+) -> None:
+    blocks = deepcopy(without_tool_blocks(response_content_blocks))
+    if response_text or has_reasoning_content(blocks):
+        native_tool_ir_history(params).append(AssistantTurn(text=response_text, content_blocks=blocks))
 
 
 def record_tool_call_ir(
@@ -390,4 +401,5 @@ __all__ = [
     "project_native_prompt_history",
     "replace_compaction_summary_ir",
     "record_tool_call_ir",
+    "record_unexecuted_response_ir",
 ]

@@ -24,6 +24,17 @@ TUI（无子代理）及多条正常模型 TUI，共用单 Gateway，定向回�
 
 ## 重点定向回归入口
 
+- 仅思考响应：Chat/Messages 的流式与非流式不得因无正文丢弃有效思考、用量或隐藏重试；
+  真空白仍报错。`test_native_tool_use_ir_messages_flow.py` 验证两次无工具续跑逐条保存、
+  OpenAI 实际出站回放、下一工具轮和最终保存不重复；`test_response_decision_native_tool_use.py`
+  验证坏工具修复不回放未执行工具。联合原超时探针、截断、插话及中断历史回归。
+  真实抓包先检查仅思考响应是否漏入下一请求，再评价真实任务完成，不能仅凭缓存高称通过。
+
+- 渠道失败提示：`test_tool_failure_channel_hint.py` 联合错误语义与工具执行回归，覆盖测试/编译非零、
+  参数/状态/权限拒绝、取消、未知、真实网络不可用、重复回执和新回执覆盖旧失败。
+  错误正文不能提升为控制码，缺 call_id 不猜新事件；关闭阈值和每工具一次不变。
+  真实 TUI 核对失败码、下一次请求是否误加换渠道提示及实际排错进展；不能把提示过滤通过当作模型不再循环。
+
 - 后台失败退避：`test_gateway_lane_retry.py`、`test_gateway_loops_resilience.py`、
   `test_background_main_wake_recall.py`、`test_model_unconfigured.py` 与会话模型选择联合验证。
   覆盖缺配置长时间不重跑、模型引用删除/恢复、精确旧会话改选、默认选择不串会话、零值冷却、
@@ -143,6 +154,14 @@ TUI（无子代理）及多条正常模型 TUI，共用单 Gateway，定向回�
 文件位于 `agent_py_agent/tests/`；改模块时补充对应边界用例，不以此短列表代替所有模块回归。
 
 ## 真实 TUI 记录
+
+工具正文完整性：`test_tool_output_externalizer.py` 必须经过生产 `ToolExecutor` 与
+`archive_tool_output_projection`，而不是仅手造完整 `ToolResult` 给 reducer；覆盖预览阈值以上的
+完整文件、分页及继续游标、归档读取 JSON 和显式保留正文，同时保留大输出外置/脱敏回归。
+慢模型复读验收沿原始任务和输入文件建立独立 owner/TUI，记录真实出站回执、重复调用、
+产物与独立测试结果；不更改测试项目或用硬停计为通过，不并发占用慢模型。
+`test_tools/test_shell_tool.py` 另从 Schema、规范执行入口及真实本地进程验证长命令，
+与空输入、危险命令、owner 沙箱、超时和非零退出联测；不把旧长度拒绝当安全边界。
 
 后台进程重复观测：`test_process_sessions.py` 回放 33 次 uptime 变化但状态/输出不变的等待，
 并核对原始结果哈希、软提示频率、日志同尾增长和退出后重置；真实 TUI 单独记录模型是否采纳提示。

@@ -44,6 +44,43 @@ def _options(**overrides) -> BackendOptions:
     return replace(_DEFAULT_OPTIONS, **overrides)
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("block", [
+    {"type": "thinking", "thinking": "已经分析完数据", "signature": "signature-original"},
+    {"type": "redacted_thinking", "data": "opaque-original"},
+])
+def test_reasoning_only_response_is_not_retried_or_discarded(stream, block):
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=stream))
+    calls = []
+
+    def nonstream(*args):
+        calls.append(args)
+        return {"content": [block], "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 80}}
+
+    def events(*args):
+        calls.append(args)
+        for event in [
+            {"type": "message_start", "message": {"usage": {"input_tokens": 100}}},
+            {"type": "content_block_start", "index": 0, "content_block": block},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 80}},
+            {"type": "message_stop"},
+        ]:
+            yield json.dumps(event)
+
+    backend.request_json = nonstream
+    backend.request_stream = events
+    response = backend.generate("继续完成任务", tools=_TOOLS)
+    assert len(calls) == 1
+    assert response.text == ""
+    assert response.tool_use_blocks == []
+    assert response.assistant_content_blocks == [block]
+    assert response.usage["output_tokens"] == 80
+    assert response.stop_reason == "end_turn"
+
+
 def _count_cache_markers(messages: list[dict[str, object]]) -> int:
     count = 0
     for message in messages:

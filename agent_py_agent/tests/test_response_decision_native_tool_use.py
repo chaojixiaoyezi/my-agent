@@ -91,6 +91,28 @@ def _decide(agent, response: ModelResponse, *, source_protocol: str = "native"):
     )
 
 
+def test_protocol_repair_keeps_thought_but_never_replays_unexecuted_tool(tmp_path):
+    from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
+
+    params = _params()
+    thought = {"type": "thinking", "thinking": "先前分析", "signature": "unchanged"}
+    response = ModelResponse(text="", backend="anthropic_compatible",
+        assistant_content_blocks=[thought, {"type": "tool_use", "id": "bad",
+                                           "name": "read_file", "input": {"path": "a"}}],
+        tool_use_blocks=[{"id": "bad", "name": "read_file", "input": "broken-json"}])
+    decision = tool_loop_response_decision(ToolLoopResponseDecisionRequest(
+        _agent(tmp_path), params, response, ToolLoopRepairCounters(),
+    ))
+    assert decision.action == "continue"
+    assert decision.calls == []
+    assert params.executed_tools == []
+    assert AnthropicMessageAdapter().to_provider_messages(params.tool_ir_history) == [
+        {"role": "assistant", "content": [thought]},
+    ]
+    thought["thinking"] = "后续修改不污染保存历史"
+    assert params.tool_ir_history[0].content_blocks[0]["thinking"] == "先前分析"
+
+
 def test_native_tool_use_blocks_become_canonical_calls_without_text_parse(tmp_path: Path):
     response = ModelResponse(
         text="",

@@ -10,8 +10,8 @@ from __future__ import annotations
     (retryable=False, report_blocker)，模型被告知"未知失败、报阻塞、别重试"，
     而实际是改参数/换工具就能修的。
 
-本组守住审计直接修复的 8 条路径。参照 COMMAND_TOO_LONG 的修法(精确码 + 注册 + 对齐
-retryable/recommended_action)。
+本组守住审计直接修复的 8 条路径：精确码、注册合同与 retryable/recommended_action
+须对应真实失败阶段，不能用同一个参数错误覆盖文件和状态问题。
 """
 
 from pathlib import Path

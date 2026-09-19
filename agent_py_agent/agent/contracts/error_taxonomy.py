@@ -2,6 +2,7 @@
 #   Persona CAS 冲突保留原错误码；分类表不证明是否写入，副作用事实必须由实际 handler 提供。
 #   回合结果未知和父级授权快照缺失不可自动重放或补授权，必须分别核实事实或报告阻塞。
 #   删除恢复文案只指向可发现的真实工具和既有 grant；不能把内部回收流程当工具或授予权限。
+#   已退休工具限制的错误码只解释旧持久回执，不重新启用原限制或假称当前仍会触发。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -1025,12 +1026,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="shell 命令返回非零状态；读取 stdout/stderr，修正命令或换成更可靠的专用工具。",
     ),
+    # 只供旧版本持久回执恢复诊断；当前 Shell 不再按人工字符上限拒绝命令。
     "COMMAND_TOO_LONG": ErrorContract(
         code="COMMAND_TOO_LONG",
         category="tool",
         retryable=True,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
-        recovery_hint="run_command 命令字符串超出长度上限；命令本身合法，拆成多条 run_command 分别执行，或改用 write_file 写文件，不要改参数格式。",
+        recovery_hint="旧版本 run_command 曾因命令长度上限拒绝；先核对运行版本，或将脚本写入文件再执行，不要反复修改参数格式。",
     ),
     "BACKGROUND_PROCESS_MODE_REQUIRED": ErrorContract(
         code="BACKGROUND_PROCESS_MODE_REQUIRED",

@@ -1,5 +1,5 @@
 # LLM: 三种 provider 协议共用未完成事实投影；只读结构字段，不推测正文、不调度恢复、不修改模型配置。
-# 模块用途: 区分输出上限、断流、坏工具参数和其它未完成响应，保留原停止原因与部分正文。
+# 模块用途: 区分空响应、仅思考和未完成响应，保留原停止原因及已生成内容。
 from __future__ import annotations
 
 from typing import Any
@@ -10,6 +10,23 @@ _ERROR_REASONS = {
     "invalid_tool_arguments": "MODEL_TOOL_ARGUMENTS_INVALID",
     "content_filter": "MODEL_RESPONSE_CONTENT_FILTERED",
 }
+
+
+# LLM: 仅按协议类型和非空载荷识别思考；不解析其含义、不视为公开回复，不改签名或密文。
+# 函数用途: 避免把真实思考误判为空响应；供后端和工具循环共同判断是否已生成内容。
+def has_reasoning_content(blocks: list[dict[str, Any]]) -> bool:
+    for block in blocks:
+        kind = block.get("type")
+        if kind in {"thinking", "redacted_thinking"}:
+            value = block.get("thinking" if kind == "thinking" else "data")
+            if isinstance(value, str) and value.strip():
+                return True
+        elif kind == "responses_reasoning":
+            from .responses_wire import reasoning_item
+
+            if isinstance(block.get("model"), str) and reasoning_item(block.get("item")):
+                return True
+    return False
 
 
 # LLM: 空字典表示没有不完整事实；长度优先于同轮半截参数，未知原因仍是错误而不是长度上限。

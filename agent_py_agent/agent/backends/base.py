@@ -1,5 +1,5 @@
 # LLM: 模型协议在此统一转换；未显式温度不出站，请求级覆盖优先，不改共享后端、身份或其它供应商字段。
-# 模块用途: 按明确的采样配置发送请求，规范化文本、工具、思考和用量；须回归流式、非流式和摘要调用。
+# 模块用途: 按明确配置发送请求，规范化文本、工具、思考和用量；仅思考不丢弃或偷偷重采样。
 from __future__ import annotations
 
 """模型后端适配层。
@@ -37,6 +37,7 @@ from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream
 from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
 from .provider_headers import endpoint_parts, request_headers
 from .response_completion import (
+    has_reasoning_content,
     incomplete_response_fields,
     truncated_tool_names,
     without_tool_blocks,
@@ -768,7 +769,7 @@ class OpenAICompatibleBackend(HttpBackend):
         )
 
     # LLM: reasoning_content 与正文必须走不同观察器，并在正文/工具或流结束前封口思考块；
-    # 工具参数开始立即封口思考并发布计数；不完整响应零工具执行且保留 typed 终态与可归档部分。
+    # 工具参数开始立即封口思考并发布计数；不完整响应零工具执行，仅思考也保留原内容和用量。
     # 函数用途: 解析 OpenAI SSE，同时展示正文、思考与长工具参数的实时准备进度。
     def _generate_stream(
         self,
@@ -809,7 +810,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 truncated_tool_names=truncated_tool_names(completion.tool_names),
                 **incomplete,
             )
-        if not text and not blocks and payload.get("tools"):
+        if not text and not blocks and not has_reasoning_content(assistant_blocks) and payload.get("tools"):
             raise ProviderResponseError(
                 "OpenAI-compatible 流式响应没有文本或工具调用",
                 error_code="MODEL_EMPTY_RESPONSE",
@@ -825,7 +826,7 @@ class OpenAICompatibleBackend(HttpBackend):
         )
 
 
-# LLM: 保留 reasoning_content 的显式存在性；坏参数/截断整轮零执行，思考与正文仍可归档。
+# LLM: 保留 reasoning_content 的显式存在性；仅思考不是空响应，坏参数/截断整轮零执行。
 # 函数用途: 解析非流式回复，生成和 SSE 相同的正文、工具及原生思考历史，供跨轮回放。
 def _openai_non_stream_response(
     obj: dict[str, Any],
@@ -863,7 +864,7 @@ def _openai_non_stream_response(
             truncated_tool_names=truncated_tool_names(dropped_names),
             **incomplete,
         )
-    if not text and not blocks and tools_requested:
+    if not text and not blocks and not (reasoning or "").strip() and tools_requested:
         raise ProviderResponseError(
             f"OpenAI-compatible 响应没有文本或工具调用: {_response_preview(obj)}",
             error_code="MODEL_EMPTY_RESPONSE",
@@ -1383,7 +1384,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             )
         return self._generate_non_stream(payload, headers)
 
-    # LLM: 非流式响应按同一完整性合同保留正文/思考，坏工具参数不能猜补或绕过整轮零执行。
+    # LLM: 非流式响应按同一合同保留正文/思考；合法思考不得隐藏重试，坏参数仍整轮零执行。
     # 函数用途: 请求一次非流式 Anthropic-compatible 响应，并整理成运行时统一结果。
     def _generate_non_stream(
         self, payload: dict[str, Any], headers: dict[str, str]
@@ -1414,10 +1415,10 @@ class AnthropicCompatibleBackend(HttpBackend):
                     truncated_tool_names=truncated_tool_names(dropped_names),
                     **incomplete,
                 )
-            if text or blocks or attempt > 0 or not _anthropic_has_thinking_without_text(obj):
+            if text or blocks or has_reasoning_content(assistant_blocks) or attempt > 0 or not _anthropic_has_thinking_without_text(obj):
                 break
         # 原生 tool_use 下模型可能只回 tool_use 块、没有文本，这种是合法的，不报空响应。
-        if not text and not blocks:
+        if not text and not blocks and not has_reasoning_content(assistant_blocks):
             raise ProviderResponseError(
                 f"Anthropic-compatible 响应没有文本内容: {_response_preview(obj)}",
                 error_code="MODEL_EMPTY_RESPONSE",
@@ -1432,7 +1433,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         )
 
     # LLM: 流式 Anthropic 响应由 StreamCompletion 带回完整有序 assistant 块；thinking delta/block-stop 与
-    # 工具参数计数各走显式 observer；EOF/坏参数不重试为空响应，不执行工具，不丢弃已闭合正文/思考。
+    # 工具参数计数各走显式 observer；仅思考不隐藏重试，EOF/坏参数不执行工具，保留已闭合内容。
     # 函数用途: 收集流式响应、保留内部历史，并按供应商块顺序投影思考和工具参数进度。
     def _generate_stream(
         self,
@@ -1443,7 +1444,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
         first_event_timeout_seconds: float | None = None,
     ) -> ModelResponse:
-        """Parse Anthropic SSE and retry the same stream path once when no text is visible."""
+        """保留已生成的思考；真正空流才沿既有预算重试一次。"""
         text, usage, blocks, completion = "", {}, [], StreamCompletion()
         for attempt in range(2):
             text, usage, blocks, completion = self._stream_text_once(
@@ -1465,10 +1466,10 @@ class AnthropicCompatibleBackend(HttpBackend):
                     truncated_tool_names=truncated_tool_names(completion.tool_names),
                     **incomplete,
                 )
-            if text or blocks or attempt > 0:
+            if text or blocks or has_reasoning_content(list(completion.assistant_content_blocks)) or attempt > 0:
                 break
         # 同非流式：只回 tool_use 块、无文本也合法，不报空响应。
-        if not text and not blocks:
+        if not text and not blocks and not has_reasoning_content(list(completion.assistant_content_blocks)):
             raise ProviderResponseError(
                 "Anthropic-compatible 流式响应没有文本内容",
                 error_code="MODEL_EMPTY_RESPONSE",

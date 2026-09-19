@@ -1,3 +1,5 @@
+# LLM: 按结构化响应决定工具/有界续跑/结束；续跑前保存真实响应，不从思考内容推断完成。
+# 模块用途: 统一模型轮裁决和修复预算，保护无工具续跑历史；不会因长思考而强停任务。
 from __future__ import annotations
 
 import json
@@ -8,6 +10,7 @@ from typing import ClassVar
 _LOGGER = logging.getLogger(__name__)
 
 from ...backends import ModelResponse
+from ...backends.response_completion import has_reasoning_content
 from ...backends.tool_protocol_adapter import (
     ProviderToolCallRequest,
     ProviderToolCallResult,
@@ -29,6 +32,7 @@ from ..tool_guard.unresolved_runtime_issue import (
     has_unresolved_runtime_issues,
     unresolved_runtime_issue_context,
 )
+from ..tool_ir_history import record_unexecuted_response_ir
 from .deliverable_closeout import deliverable_closeout_block
 
 _PROTECTED_TOOL_MARKERS = (
@@ -38,12 +42,12 @@ _PROTECTED_TOOL_MARKERS = (
     "[tool-result;",
 )
 
-# 长期助手 式空响应 nudge 的有界次数:执行过工具后模型空正文无工具调用时,
+# 空正文 nudge 的有界次数:执行过工具或生成有效思考后，模型空正文无工具调用时,
 # 塞一条提示要求继续;超限后诚实失败(USER_REPLY_UNAVAILABLE),不让坏输出无限烧 token。
 _MAX_EMPTY_TEXT_REPAIRS = 2
 _EMPTY_TEXT_NUDGE = (
     "[tool-system]\n"
-    "上一轮你执行了工具调用，但回复正文为空。请基于上方真实工具结果继续推进："
+    "上一轮模型响应没有可展示的正文或工具调用。请结合当前请求、已保存思考和已有工具结果继续推进："
     "任务未完成就调用下一步工具，任务已完成才给最终回答。不要重复读取同一批材料，"
     "也不要只复述计划。"
 )
@@ -274,6 +278,8 @@ class _NoToolCallsRequest:
     probe_rollback: object | None = None
 
 
+# LLM: continue 不执行工具；先把本轮真实内容追加到唯一 IR，再由既有恢复提示引导下一轮。
+# 函数用途: 作出本轮裁决并保留续跑上下文；工具轮及最终回复仍由各自原入口保存，避免重复。
 def tool_loop_response_decision(
     request: ToolLoopResponseDecisionRequest,
 ) -> ToolLoopResponseDecision:
@@ -281,6 +287,12 @@ def tool_loop_response_decision(
     # 「探针那一枪」这一个 model turn。这里不读 response.text 做任何判定。
     probe_rollback = _take_provider_timeout_probe_rollback(request.params)
     decision = _decided_response(request, probe_rollback)
+    if decision.action == "continue" and _native_tool_use_active(request.params):
+        record_unexecuted_response_ir(
+            request.params,
+            response_text=str(getattr(request.response, "text", "") or ""),
+            response_content_blocks=list(getattr(request.response, "assistant_content_blocks", None) or []),
+        )
     return _carry_provider_timeout_probe_segment(request.params, probe_rollback, decision)
 
 
@@ -846,8 +858,8 @@ def _tool_call_payload(call: ToolCall) -> dict[str, object]:
     return {"tool": call.tool_name, "call_id": call.call_id, **call.arguments}
 
 
-# LLM: 无工具调用时只处理 typed runtime error 和受保护标记；普通模型回复直接结束本轮。
-# 函数用途: 判断没有工具请求的模型回复应返回、修复一次，还是结构化阻断。
+# LLM: 仅思考也沿原空正文预算续跑；不是公开回复或完成证据，超预算仍走原终态。
+# 函数用途: 处理零工具响应，保留用户插话、错误和已有交付行为，不解析思考内容。
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
     if _is_runtime_status_response(request.response):
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
@@ -888,7 +900,8 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         if (
             not response_text
             and request.probe_rollback is None
-            and list(getattr(request.params, "executed_tools", None) or [])
+            and (list(getattr(request.params, "executed_tools", None) or [])
+                 or has_reasoning_content(list(getattr(request.response, "assistant_content_blocks", None) or [])))
             and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIRS
         ):
             request.params.tool_context.append(_EMPTY_TEXT_NUDGE)

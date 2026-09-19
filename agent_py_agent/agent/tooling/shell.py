@@ -1,4 +1,5 @@
-# LLM: 普通 shell 关闭宿主 stdin，交互归独立 PTY；捕获全文与模型预览分离，展示归档不得拿裁剪预览充全文。
+# LLM: 普通 shell 关闭宿主 stdin，交互归独立 PTY；命令长度不是权限边界，不再额外卡短脚本。
+# 捕获全文与模型预览分离，展示归档不得拿裁剪预览充全文；修改执行入口需联测参数、危险命令和 owner 沙箱。
 # 模块用途: 在用户权限内执行命令并整理输出、进程及产物保护记录，保留有界采集原文和真实缺失事实。
 from __future__ import annotations
 
@@ -77,7 +78,6 @@ from .process_registry import (
 from .process_session_store import process_session_store_root
 from .sandbox import SandboxUnavailable
 
-_MAX_COMMAND_CHARS = 2000
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
 _DEFAULT_ACCESS_MODE = "workspace-write"
 _ShellSandboxRoots = tuple[
@@ -148,15 +148,6 @@ def _is_dangerous_command(command: str) -> bool:
     return not evaluate_command_policy(command, allow_shell_operators=True).allowed
 
 
-class CommandTooLongError(ValueError):
-    """command 超过 _MAX_COMMAND_CHARS：命令本身合法，只是太长，不是参数格式错。
-
-    专门区分于"空 command"(那才是参数无效 TOOL_INVALID_ARGUMENTS)，让 _parse_command
-    给出 COMMAND_TOO_LONG，引导模型拆成多条命令/改用 write_file，而不是误以为参数 schema 写错。
-    仍继承 ValueError，既有 except ValueError 调用方与 match="过长" 测试不受影响。
-    """
-
-
 class CommandInterruptedError(RuntimeError):
     """Foreground command was cancelled by the owning conversation request."""
 
@@ -175,30 +166,22 @@ class CommandTimeoutError(subprocess.TimeoutExpired):
         self.pipes_drained: bool = pipes_drained
 
 
+# LLM: 仅校验非空文本，不按字符数量猜合法性；完整命令仍必须通过原安全策略和执行沙箱。
+# 函数用途: 保留真实脚本文本并拒绝空输入，避免人工长度限制迫使模型重复拆改合法命令。
 def _validate_command(command: str) -> str:
     if not command:
         raise ValueError("command 不能为空")
     text = command.strip()
     if not text:
         raise ValueError("command 不能为空或仅包含空白字符")
-    if len(text) > _MAX_COMMAND_CHARS:
-        raise CommandTooLongError(
-            f"command 过长({len(text)} 字符)，最多 {_MAX_COMMAND_CHARS} 个字符；"
-            "命令本身没问题,拆成多条 run_command 分别执行,或改用 write_file 写文件。"
-        )
     return text
 
 
+# LLM: 这里只转换空输入的参数错误；不执行命令、不截断或代写脚本，后续策略仍校验完整文本。
+# 函数用途: 将输入校验结果交给命令执行入口，缺少命令时明确返回参数问题。
 def _parsed_command_or_error(tool_name: str, raw_command: object) -> str | ToolHandlerOutcome:
-    """校验 command,合法返回字符串,否则返回带精确 error_code 的失败结果。
-
-    too-long 走 COMMAND_TOO_LONG(命令合法但太长→拆条/换 write_file),空/空白走
-    TOOL_INVALID_ARGUMENTS(真缺必填参数)。两者分流,避免超长被误标成"参数格式错"。
-    """
     try:
         return _validate_command(str(raw_command or ""))
-    except CommandTooLongError as exc:
-        return ToolHandlerOutcome(tool_name, False, str(exc), error_code="COMMAND_TOO_LONG")
     except ValueError as exc:
         return ToolHandlerOutcome(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
 
@@ -911,8 +894,9 @@ def _register_hosted_background_process(
     return record
 
 
-# LLM: 模型说明必须把持久进程导向结构化 run_in_background，和 execute 的硬门保持一致。
-# 函数用途: 构造模型可见的 run_command 参数、适用场景和安全使用提示。
+# LLM: 模型与执行使用同一 Schema；持久进程走结构化 run_in_background，命令不设人为字符上限。
+# 安全策略、后台归属和时间预算各自保持，修改时联测模型快照与真实执行入口。
+# 函数用途: 描述 Shell 工具可接受的参数，避免 Schema 提前挡住合法长脚本而与执行能力冲突。
 def _build_shell_tool_model_spec(
     access_mode: str, default_timeout: int, max_output_chars: int
 ) -> ToolModelSpec:
@@ -931,7 +915,6 @@ def _build_shell_tool_model_spec(
                 "command": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": _MAX_COMMAND_CHARS,
                     "description": "Required shell command string, for example 'ls -la' or 'python build.py'.",
                 },
                 "timeout": {

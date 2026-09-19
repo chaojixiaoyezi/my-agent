@@ -57,13 +57,8 @@ def test_ok_result_never_carries_error_code():
 
 
 def test_command_too_long_code_is_registered_with_change_strategy():
-    """COMMAND_TOO_LONG 必须是已注册契约(非 UNKNOWN),且动作=change_strategy。
-
-    真实任务回归:run_command 超长命令旧实现报 TOOL_INVALID_ARGUMENTS(误导改参数),
-    现改报 COMMAND_TOO_LONG。若忘记在 error_taxonomy 注册,会回落 UNKNOWN_ERROR
-    (retryable=False)误导模型放弃,本测试守住这一点。
-    """
-    r = ToolHandlerOutcome("run_command", False, "command 过长(2187 字符)，最多 2000 个字符；...", error_code="COMMAND_TOO_LONG")
+    """旧归档里的明确错误码仍可诊断；当前 Shell 不再产生人工长度上限拒绝。"""
+    r = ToolHandlerOutcome("run_command", False, "历史调用超出当时的命令长度上限", error_code="COMMAND_TOO_LONG")
     assert r.error_code == "COMMAND_TOO_LONG"
     assert r.error_category == "tool"
     assert r.retryable is True

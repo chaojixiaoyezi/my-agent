@@ -49,6 +49,7 @@ from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
     canonical_history_result,
     make_test_protocol_snapshot,
+    runtime_snapshot_for_model_specs,
 )
 
 # --- minimal native agent + params (no archive/network side effects) ---------
@@ -95,6 +96,83 @@ def _params(*, protocol: str = "native") -> ToolLoopExecuteParams:
             run_id="run-1", source_protocol=protocol
         ),
     )
+
+
+def test_reasoning_only_continue_preserves_each_response_before_next_tool_round(tmp_path):
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _completed_turn_native_messages
+    from agent_py_agent.agent.agent_core.tool_ir_history import open_assistant_turn_ir
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+        ToolLoopRepairCounters,
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.agent.backends.base import OpenAICompatibleBackend
+
+    agent, params = _native_agent(tmp_path), _params()
+    params = replace(params, tool_runtime_snapshot=runtime_snapshot_for_model_specs((), run_id=params.run_id))
+    counters = ToolLoopRepairCounters()
+    thoughts = ["先前完整分析一。" * 4000, "继续先前分析二。" * 1000]
+    for index, thought in enumerate(thoughts):
+        decision = tool_loop_response_decision(ToolLoopResponseDecisionRequest(
+            agent, params, ModelResponse(text="", backend="openai_compatible",
+                assistant_content_blocks=[{"type": "thinking", "thinking": thought}]),
+            counters, turn_id=f"model-{index}",
+        ))
+        assert decision.action == "continue"
+        counters = decision.counters
+    assert counters.empty_text_repairs == 2
+    messages = _native_provider_messages(agent, params)
+    assert [m["content"][0]["thinking"] for m in messages if m["role"] == "assistant"] == thoughts
+
+    captured = {}
+    backend = OpenAICompatibleBackend(BackendOptions(api_base="https://example.test/v1",
+        api_key="test", model_name="test", stream_enabled=False))
+
+    def reply(path, payload, headers):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "已完成"}, "finish_reason": "stop"}]}
+
+    backend.request_json = reply
+    backend.generate("继续", messages=messages)
+    assert [m["reasoning_content"] for m in captured["messages"] if m["role"] == "assistant"] == thoughts
+    open_assistant_turn_ir(params, tool_rounds=1, response_text="执行验证")
+    _record(agent, params, tool_rounds=1, idx=1, tool_name="read_file", call_id="c1",
+            arguments={"path": "a"}, output="真实结果")
+    final = ModelResponse(text="已经完成", backend="openai_compatible")
+    decision = tool_loop_response_decision(ToolLoopResponseDecisionRequest(agent, params, final, counters))
+    assert decision.action == "break"
+    saved = _completed_turn_native_messages(params, final)
+    assert [b["thinking"] for m in saved for b in m["content"] if b["type"] == "thinking"] == thoughts
+    assert sum(b.get("text") == "已经完成" for m in saved for b in m["content"]) == 1
+
+
+@pytest.mark.parametrize("block", [
+    {"type": "thinking", "thinking": "已生成的思考", "signature": "original"},
+    {"type": "redacted_thinking", "data": "opaque"},
+    {"type": "responses_reasoning", "model": "test",
+     "item": {"type": "reasoning", "encrypted_content": "opaque", "summary": []}},
+])
+def test_reasoning_only_retry_is_bounded_without_public_answer(tmp_path, block):
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+        ToolLoopRepairCounters,
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+
+    agent, params = _native_agent(tmp_path), _params()
+    params = replace(params, tool_runtime_snapshot=runtime_snapshot_for_model_specs((), run_id=params.run_id))
+    response = ModelResponse(text="", backend="anthropic_compatible", assistant_content_blocks=[block])
+    counters = ToolLoopRepairCounters()
+    actions = []
+    for _ in range(3):
+        decision = tool_loop_response_decision(ToolLoopResponseDecisionRequest(agent, params, response, counters))
+        counters = decision.counters
+        actions.append(decision.action)
+    assert actions == ["continue", "continue", "break"]
+    assert len(params.tool_ir_history) == 2
+    assert decision.response.text == ""
 
 
 def _record(

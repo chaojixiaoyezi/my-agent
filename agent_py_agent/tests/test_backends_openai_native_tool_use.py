@@ -34,6 +34,45 @@ _TOOLS = [
 ]
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_reasoning_only_response_keeps_history_and_usage(stream):
+    backend = OpenAICompatibleBackend(replace(_OPTIONS, stream_enabled=stream))
+    reasoning = "已分析输入，下一步检查统计结果。" * 1800
+    calls = []
+    usage = {"prompt_tokens": 40000, "completion_tokens": 12000, "total_tokens": 52000}
+
+    def nonstream(*args):
+        calls.append(args)
+        return {"choices": [{"message": {"content": None, "reasoning_content": reasoning},
+                             "finish_reason": "stop"}], "usage": usage}
+
+    def events(*args):
+        calls.append(args)
+        yield json.dumps({"choices": [{"delta": {"reasoning_content": reasoning}}]})
+        yield json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": usage})
+        yield "[DONE]"
+
+    backend.request_json = nonstream
+    backend.request_stream = events
+    response = backend.generate("继续完成任务", tools=_TOOLS)
+    assert len(calls) == 1
+    assert response.text == ""
+    assert response.tool_use_blocks == []
+    assert response.assistant_content_blocks == [{"type": "thinking", "thinking": reasoning}]
+    assert response.usage["completion_tokens"] == 12000
+    assert response.stop_reason == "stop"
+
+
+@pytest.mark.parametrize("reasoning", ["", " \n\t"])
+def test_empty_reasoning_still_reports_empty_response(reasoning):
+    backend = OpenAICompatibleBackend(_OPTIONS)
+    backend.request_json = lambda *_: {"choices": [{
+        "message": {"content": None, "reasoning_content": reasoning}, "finish_reason": "stop",
+    }]}
+    with pytest.raises(ProviderResponseError, match="没有文本或工具调用"):
+        backend.generate("继续", tools=_TOOLS)
+
+
 def test_openai_tool_arguments_report_live_progress_before_completion():
     backend = OpenAICompatibleBackend(replace(_OPTIONS, stream_enabled=True))
     progress = []

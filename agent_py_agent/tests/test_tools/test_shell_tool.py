@@ -26,6 +26,7 @@ from agent_py_agent.agent.tooling.shell import (
     _is_dangerous_command,
     _validate_command,
 )
+from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
 
 @pytest.fixture
@@ -193,25 +194,27 @@ def test_shell_tool_whitespace_only_command_rejected(shell_tool: ShellTool) -> N
     assert "不能为空" in result.output
 
 
-def test_shell_tool_command_too_long_rejected(shell_tool: ShellTool) -> None:
-    """Test that overly long command is rejected."""
-    long_command = "a" * 5000
-    result = shell_tool.execute({"command": long_command})
-    assert result.ok is False
-    assert "过长" in result.output
+def test_shell_tool_accepts_long_valid_command(shell_tool: ShellTool) -> None:
+    """合法长参数仍执行，不因过去的两千字符门要求模型拆写。"""
+    value = "a" * 5000
+    result = shell_tool.execute({"command": f"echo {value}"})
+    assert result.ok is True
+    assert value in result.output
 
 
-def test_shell_tool_command_too_long_uses_command_too_long_code(shell_tool: ShellTool) -> None:
-    """超长命令的 error_code 应是 COMMAND_TOO_LONG 而非 TOOL_INVALID_ARGUMENTS。
-
-    真实任务回归(M3 用 run_command 跑 7 条 `cp ... && cp ...` 的链,命令字符串 2187 字符,
-    超 _MAX_COMMAND_CHARS=2000):旧实现一律 TOOL_INVALID_ARGUMENTS(暗示"参数格式错、改参数"),
-    误导模型；命令本身合法,只是太长,应给 COMMAND_TOO_LONG(change_strategy:拆条/换 write_file)。
-    """
-    result = shell_tool.execute({"command": "a" * 5000})
-    assert result.ok is False
-    assert result.error_code == "COMMAND_TOO_LONG"
-    assert result.recommended_action == "change_strategy"
+def test_shell_gateway_schema_and_handler_accept_same_long_command(
+    shell_tool: ShellTool, tmp_path: Path,
+) -> None:
+    """必须穿过规范执行入口；只测裸 handler 会漏掉 Schema 中的重复长度限制。"""
+    assert "maxLength" not in shell_tool.model_spec.input_schema["properties"]["command"]
+    value = "b" * 8000
+    execution = execute_canonical_test_call(
+        tmp_path, tools={"run_command": shell_tool}, tool_name="run_command",
+        arguments={"command": f"echo {value}"},
+    )
+    assert execution.result.ok is True
+    assert execution.result.handler_executed is True
+    assert value in execution.result.output
 
 
 def test_shell_tool_empty_command_keeps_invalid_arguments_code(shell_tool: ShellTool) -> None:
@@ -247,10 +250,10 @@ def test_validate_command_rejects_whitespace_only() -> None:
         _validate_command("   ")
 
 
-def test_validate_command_rejects_too_long() -> None:
-    """Test _validate_command rejects overly long command."""
-    with pytest.raises(ValueError, match="过长"):
-        _validate_command("a" * 5000)
+def test_validate_command_preserves_long_command() -> None:
+    """校验入口完整保留长命令，而不是截断造成错误执行。"""
+    command = "echo " + "a" * 5000
+    assert _validate_command(command) == command
 
 
 def test_is_dangerous_command_patterns() -> None:

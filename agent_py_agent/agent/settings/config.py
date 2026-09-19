@@ -200,8 +200,8 @@ class _ToolConfigFields:
     # Todo 仍开放时，把 exact-id 收尾软提醒放进模型上下文；只提示模型在最终回复前
     # 自主核对，不自动打勾、不阻断最终回复，也不增加隐藏模型调用。
     task_progress_closeout_guidance_enabled: bool = True
-    # 检索完备性软引导(R5b/R6c 实锤:单一渠道失败即下"不存在"绝对结论):同一工具
-    # 系统失败累计达此阈值时注入"枚举未试渠道再下结论"软提示(每工具一次);0=关闭。
+    # 同一工具的明确网络/能力不可用回执去重后达到阈值，提示核对其它授权来源；
+    # 命令非零、参数/状态/权限错误、取消与未知失败不计数。每工具一次，0=关闭。
     tool_failure_channel_hint_threshold: int = 2
     tool_agent_budget_window_seconds: int | None = None
     tool_agent_budget_max_calls: int | None = None
