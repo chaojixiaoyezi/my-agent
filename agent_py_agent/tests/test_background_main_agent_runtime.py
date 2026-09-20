@@ -5156,6 +5156,8 @@ def test_scheduled_continuation_keeps_direct_child_results_after_wakes_are_consu
                     "completion_message": f"第 {index} 份精确研究结论" + ("甲" * 600),
                     "final_report_ref": f"/workspace/child-{index}/final_report.md",
                     "runner_result_json": "private-runner-payload",
+                    "service_window_incomplete": True,
+                    "service_window_remaining_seconds": 700 + index,
                 },
                 "now": 20.0 + index,
             }
@@ -5212,9 +5214,15 @@ def test_scheduled_continuation_keeps_direct_child_results_after_wakes_are_consu
     )
 
     assert "## Subagent Completion Inputs" in rendered
+    completion_text = rendered.split("## Subagent Completion Inputs\n```json\n", 1)[1].split("\n```", 1)[0]
+    completion_items = json.loads(completion_text)["items"]
     for index in range(1, 5):
         assert f'"task_id": "child-{index}"' in rendered
         assert f"/workspace/child-{index}/final_report.md" in rendered
+        item = next(row for row in completion_items if row["task_id"] == f"child-{index}")
+        assert item["status"] == "DONE"
+        assert item["service_window_incomplete"] is True
+        assert item["service_window_remaining_seconds"] == 700 + index
     assert "孙代理私有结果" not in rendered
     assert "/workspace/grandchild-1/final_report.md" not in rendered
     assert "private-runner-payload" not in rendered

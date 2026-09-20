@@ -1,10 +1,11 @@
-# LLM: 用户插话与直属孩子事件在安全点注入；按 canonical 身份隔离，不解析正文决定调度。
-# 模块用途: 让工作的代理及时看到新消息与孩子交接，保持前缀稳定并在模型接受后确认投递。
+# LLM: 用户插话与直属孩子事件在安全点注入；按 canonical 身份隔离，窗口事实复用中性合同。
+# 模块用途: 交付新消息和孩子的结构化交接，在模型接受后确认投递，不解析正文决定调度。
 from __future__ import annotations
 
 import json
 from typing import Any
 
+from ...contracts.subagent_completion import completion_service_window_facts
 from ...conversation.active_turn_input import append_active_turn_user_input, packet_from_guidance
 from ...conversation.authority import (
     CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR,
@@ -816,8 +817,8 @@ def _render_task_events(events: list[WakeSignal]) -> str:
     )
 
 
-# LLM: 安全点消费必须给模型实际交接与诊断，不可只给状态编号却确认整条事件已读。
-# 函数用途: 保留有界完成回复、产物引用与活动诊断，正文不参与宿主调度裁决。
+# LLM: 安全点确认事件前保留交接、诊断及宿主冻结窗口事实；不能只交付状态就确认已读。
+# 函数用途: 生成活动回合可见事件，窗口提示不改写生命周期或触发额外模型轮。
 def _task_event_payload(event: WakeSignal) -> dict[str, object]:
     metadata = event.metadata if isinstance(event.metadata, dict) else {}
     return {
@@ -828,6 +829,7 @@ def _task_event_payload(event: WakeSignal) -> dict[str, object]:
         "status": str(metadata.get("status") or ""),
         "task_id": str(metadata.get("task_id") or ""),
         "created_at": event.created_at,
+        **completion_service_window_facts(metadata),
         **{key: metadata[key] for key in (
             "completion_message", "final_report_ref", "declared_output_refs", "artifact_refs",
             "turn_end_reason", "failure_type", "activity_diagnostic",

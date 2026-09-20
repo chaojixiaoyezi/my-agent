@@ -1,9 +1,11 @@
-
+# LLM: 后台上下文预算只裁展示副本；身份、可恢复引用及宿主窗口事实沿中性完成合同保留。
+# 模块用途: 控制后台模型输入的大小，不修改持久账本、重新计时或以摘要裁决任务状态。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..contracts.subagent_completion import completion_service_window_facts
 from ..memory_archive.tokens import estimate_tokens
 
 
@@ -344,9 +346,8 @@ def _bounded_subagent_completions(
     }
 
 
-# LLM: This is a field-selecting public projection, not a generic dict truncation. Never expose
-# private runner payloads, and never clip the host-generated final report path into an unusable ref.
-# 函数用途: 压缩一名直属子代理的完成正文，同时保留状态、身份和可直接读取的精确报告路径。
+# LLM: 完成清单显式选择公开字段；窗口事实沿共用合同传递，私有 runner 数据不进入模型。
+# 函数用途: 缩短完成正文，同时保留状态、身份、冻结窗口事实和可读的完整报告引用。
 def _bounded_subagent_completion_item(
     value: dict[str, Any],
     budget: BackgroundContextBudget,
@@ -375,6 +376,7 @@ def _bounded_subagent_completion_item(
             limit=ref_limit,
         ),
         "observed_at": value.get("observed_at", 0.0),
+        **completion_service_window_facts(value),
     }
     if preview != message:
         item["completion_message_truncated"] = True

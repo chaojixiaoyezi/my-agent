@@ -1057,7 +1057,11 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
             "root_task_id": "task-1",
             "reason": "subagent_runner_finished",
             "source_agent_id": "child-1",
-            "metadata": {"task_id": "child-1", "status": "DONE"},
+            "metadata": {
+                "task_id": "child-1", "status": "DONE",
+                "service_window_incomplete": True,
+                "service_window_remaining_seconds": 748,
+            },
             "now": 10.0,
         }
     )
@@ -1093,6 +1097,8 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
     assert "RUNTIME_TASK_EVENTS" in rendered
     assert "不是用户指令" in rendered
     assert rendered.index(first.wake_signal_id) < rendered.index(second.wake_signal_id)
+    assert '"service_window_incomplete": true' in rendered
+    assert '"service_window_remaining_seconds": 748' in rendered
     assert "other-child" not in rendered
     assert has_pending_turn_input(agent, params) is False
     assert [item.wake_signal_id for item in store.wakes.pending()] == [

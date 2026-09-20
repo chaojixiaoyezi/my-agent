@@ -4,6 +4,61 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+
+@pytest.mark.parametrize(
+    "facts, expected",
+    [
+        ({}, {}),
+        ({"service_window_incomplete": True, "service_window_remaining_seconds": 748},
+         {"service_window_incomplete": True, "service_window_remaining_seconds": 748}),
+        ({"service_window_incomplete": True, "service_window_remaining_seconds": 0},
+         {"service_window_incomplete": True, "service_window_remaining_seconds": 0}),
+        ({"service_window_incomplete": "true", "service_window_remaining_seconds": 8}, {}),
+        ({"service_window_incomplete": False, "service_window_remaining_seconds": 8}, {}),
+        ({"service_window_incomplete": True}, {}),
+        ({"service_window_incomplete": True, "service_window_remaining_seconds": "8"}, {}),
+        ({"service_window_incomplete": True, "service_window_remaining_seconds": True}, {}),
+        ({"service_window_incomplete": True, "service_window_remaining_seconds": -1}, {}),
+        ({"service_window_incomplete": True, "service_window_remaining_seconds": float("nan")}, {}),
+    ],
+)
+def test_completion_window_facts_survive_neutral_and_bounded_projection(facts, expected) -> None:
+    from agent_py_agent.agent.contracts.subagent_completion import (
+        subagent_completion_context_from_observations,
+    )
+    from agent_py_agent.agent.conversation.context_budget import (
+        BackgroundContextBudget,
+        BackgroundContextPayloadRequest,
+        bounded_background_context_payload,
+    )
+
+    metadata = {
+        "task_id": "child", "status": "DONE", "turn_end_reason": "completed",
+        "completion_schema_version": "subagent-completion.v1",
+        "completion_message": "模型声称已完成，正文不能决定窗口事实。" * 60,
+        "final_report_ref": "/workspace/child/final_report.md",
+        "runner_result_json": "private-runner-payload", **facts,
+    }
+    event = SimpleNamespace(
+        event_type="subagent_runner_finished", source_agent_id="child",
+        parent_agent_id="root", root_task_id="root", observed_at=10.0, metadata=metadata,
+    )
+    context, issues = subagent_completion_context_from_observations([event], root_task_ids={"root"})
+    assert not issues
+    payload = bounded_background_context_payload(BackgroundContextPayloadRequest(
+        bundle={}, active_wake_signal=None, pending_wake_signals=[], agent_tree={},
+        subagent_completions=context, budget=BackgroundContextBudget(max_string_chars=64),
+    ))
+    keys = {"service_window_incomplete", "service_window_remaining_seconds"}
+    for item in [context["items"][0], payload["subagent_completions"]["items"][0]]:
+        assert {key: item[key] for key in keys if key in item} == expected
+        assert item["status"] == "DONE"
+        assert item["turn_end_reason"] == "completed"
+        assert "runner_result_json" not in item
+    assert payload["subagent_completions"]["items"][0]["completion_message_truncated"] is True
+
 
 def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
     from agent_py_agent.agent.settings.config import normalize_agent_config

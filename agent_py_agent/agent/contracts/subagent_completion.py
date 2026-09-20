@@ -1,9 +1,8 @@
 """Versioned contracts and neutral projections for child completion envelopes."""
 
-# LLM: This module is the neutral schema boundary shared by child publishers and
-# conversation consumers. Changing a value requires updating both sides and the
-# replay/compatibility tests; model prose never selects a schema version.
-# 模块用途: 集中保存子代理完成交接包的协议版本，避免 Gateway 反向依赖子代理实现模块。
+# LLM: 中性完成合同连接子代理发布方和前后台消费者；窗口字段只复制宿主事件的冻结事实，
+# 不重新计时或改变终态。字段变更须同步活动回合、后台预算投影与交接回归。
+# 模块用途: 统一子代理交接协议和可见事实，避免各条消费链丢字段或反向依赖子代理实现。
 
 SUBAGENT_COMPLETION_SCHEMA_VERSION = "subagent-completion.v1"
 CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA_VERSION = (
@@ -69,9 +68,8 @@ def subagent_completion_context_from_observations(
     }, tuple(issues)
 
 
-# LLM: Status and ownership come from the host event. Completion prose and refs are public
-# integration evidence only; private runner JSON must never cross this neutral projection.
-# 函数用途: 校验并净化单条完成观察，只允许 exact root 的直属孩子进入父代理上下文。
+# LLM: 状态、归属和未满声明窗口均来自宿主事件；正文不参与裁决，私有 runner JSON 不外露。
+# 函数用途: 校验直属孩子身份后提取完成消息和冻结窗口事实，不从摘要推断是否完成。
 def _subagent_completion_item(
     event: object,
     root_task_ids: set[str],
@@ -120,6 +118,7 @@ def _subagent_completion_item(
             path_from_mapping=True,
         ),
         "observed_at": observed_at,
+        **completion_service_window_facts(metadata),
     }
     if metadata.get("completion_message_truncated") is True:
         item["completion_message_truncated"] = True
@@ -127,6 +126,21 @@ def _subagent_completion_item(
             metadata.get("completion_message_original_tokens")
         )
     return (task_id, observed_at, item), ""
+
+
+# LLM: 前后台投影共用此只读筛选；只接受既有宿主字段的原生类型，不回算时钟或修正状态。
+# 整秒剩余量可以为零，因为发布端会将不足一秒的未满窗口取整；不能据此自动完成或重派。
+# 函数用途: 成对保留有效的未满声明窗口及当时剩余秒数，缺失或损坏的数据不补造。
+def completion_service_window_facts(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or value.get("service_window_incomplete") is not True:
+        return {}
+    remaining = value.get("service_window_remaining_seconds")
+    if type(remaining) is not int or remaining < 0:
+        return {}
+    return {
+        "service_window_incomplete": True,
+        "service_window_remaining_seconds": remaining,
+    }
 
 
 # LLM: Output refs are open-world scalar identifiers. Legacy artifact mappings may contribute
@@ -161,5 +175,6 @@ __all__ = [
     "CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA_VERSION",
     "DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS",
     "SUBAGENT_COMPLETION_SCHEMA_VERSION",
+    "completion_service_window_facts",
     "subagent_completion_context_from_observations",
 ]
