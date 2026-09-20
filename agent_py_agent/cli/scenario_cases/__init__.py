@@ -1,4 +1,5 @@
-
+# LLM: 仅导出仍注册的 CLI 场景；后端替身由对应场景直接导入，不形成公开兼容入口。
+# 模块用途: 汇集隔离诊断场景的命令入口，供 scenario 注册表使用。
 from __future__ import annotations
 
 """Scenario case public entrypoint.
@@ -17,17 +18,10 @@ from .gateway_multi_worker_case import run_scenario_gateway_multi_worker_case
 from .gateway_processing_case import run_scenario_gateway_processing_stop_case
 from .real_model_multi_round_case import run_scenario_real_model_recovery_multi_round_case
 from .real_model_recovery_case import run_scenario_real_model_recovery_case
-from .repair_retry_cases import (
-    ScenarioRetryBackend,
-    ScenarioStructuredRepairBackend,
-    run_scenario_runner_retry_case,
-    run_scenario_structured_repair_case,
-)
+from .runner_retry_case import run_scenario_runner_retry_case
 from .subagent_cases import run_scenario_parent_subagent_cross_day_resume_case
 
 __all__ = [
-    "ScenarioRetryBackend",
-    "ScenarioStructuredRepairBackend",
     "run_scenario_gateway_cross_day_resume_case",
     "run_scenario_gateway_delayed_response_case",
     "run_scenario_gateway_multi_worker_case",
@@ -38,5 +32,4 @@ __all__ = [
     "run_scenario_real_model_recovery_case",
     "run_scenario_real_model_recovery_multi_round_case",
     "run_scenario_runner_retry_case",
-    "run_scenario_structured_repair_case",
 ]

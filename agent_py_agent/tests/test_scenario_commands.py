@@ -281,23 +281,14 @@ class TestScenarioCases:
             result = cmd_scenario_test(args)
             assert result in (0, 2)
 
-    def test_run_scenario_structured_repair_case(self, tmp_path: Path):
-        """测试 structured-repair 场景。"""
-        from agent_py_agent.cli.scenario import cmd_scenario_test
+    @pytest.mark.parametrize("case", ["structured-repair", "unknown-scenario"])
+    def test_cli_rejects_unregistered_case(self, case, capsys):
+        """已删除和未知场景都由真实参数解析器拒绝，不能退回 happy 执行。"""
+        from agent_py_agent.cli.parser import build_parser
 
-        args = MagicMock()
-        args.case = "structured-repair"
-        args.count = 1
-        args.max_runners = 1
-        args.max_cycles = 1
-        args.dry_run = True
-        args.direct = False
-        args.timeout = 60
-        args.planner = False
-        args.skill_dir = None
-        args.workspace = str(tmp_path)
-        args.capability_config = str(tmp_path / "capability.yaml")
+        parser = build_parser()
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["scenario-test", "--case", case])
 
-        with patch("agent_py_agent.cli.scenario.run_scenario_structured_repair_case", return_value=0):
-            result = cmd_scenario_test(args)
-            assert result in (0, 2)
+        assert exc.value.code == 2
+        assert "invalid choice" in capsys.readouterr().err

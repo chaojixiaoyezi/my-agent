@@ -1,16 +1,9 @@
-
+# LLM: 本场景只模拟 runner 重试；入口同步 scenario 注册表，既有验收断言的债务见场景测试。
+# 模块用途: 在隔离目录内模拟一次 runner 失败后的再次调度，不调用真实模型。
 from __future__ import annotations
-
-"""implements structured-repair and runner-retry scenario tests with their backend stubs.
-
-给人看的解释：
-这个文件包含结构化输出修复和 runner 重试的极端场景测试。
-验证模型输出损坏时系统能自动修复，临时失败时系统能自动重试。
-"""
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 
 from ...agent.agent_core.orchestration.dispatch.params import DispatchExecutionPlan
 from ...agent.capability.config import load_capability_config
@@ -22,18 +15,11 @@ from ..scenario_utils import (
     print_scenario_step,
     write_scenario_summary,
 )
-from .repair_retry_backends import ScenarioRetryBackend, ScenarioStructuredRepairBackend
+from .runner_retry_backend import ScenarioRetryBackend
 
 
-@dataclass(frozen=True)
-class StructuredRepairVerifyRequest:
-    backend: object
-    loaded: object
-    runner: dict
-    output: dict
-    report: object
-
-
+# LLM: 场景的单轮调度参数不增加执行权限，仍由正式 dispatcher 校验。
+# 类用途: 携带模拟场景执行一轮调度所需的对象和记录说明。
 @dataclass(frozen=True)
 class DispatchRoundRequest:
     agent: object
@@ -43,6 +29,8 @@ class DispatchRoundRequest:
     note: str
 
 
+# LLM: 保留现有重试场景断言的数据，不从模型正文推断状态。
+# 类用途: 汇集两次调度的结果和持久状态，供场景判定使用。
 @dataclass(frozen=True)
 class RunnerRetryVerifyRequest:
     first: object
@@ -52,6 +40,8 @@ class RunnerRetryVerifyRequest:
     backend: object
 
 
+# LLM: 此输出仅为诊断展示，不能回流成为运行事实。
+# 函数用途: 把本轮调度记录打印到终端。
 def print_dispatch_report(report) -> None:
 
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -64,90 +54,8 @@ def print_dispatch_report(report) -> None:
         )
 
 
-def _structured_repair_setup(args):
-    paths = create_scenario_workspace(args)
-    print("MY-AGENT SCENARIO TEST")
-    print("case=structured-repair")
-    print(f"run_root={paths.run_root}")
-    print(f"fixture_root={paths.fixture_root}")
-    print(f"config={paths.config}")
-
-    agent = load_scenario_agent(paths.config)
-    backend = ScenarioStructuredRepairBackend()
-    install_scenario_backend(agent, backend)
-    capability_config = load_capability_config(args.capability_config)
-    router = make_capability_router(agent, capability_config, args.skill_dir)
-
-    print_scenario_step(1, "创建会输出坏 JSON 的子代理工单")
-    task = agent.subagents.create_run(
-        goal="极端场景：runner 输出损坏的 SUBAGENT_RESULT，父代理应触发修复回合",
-        thought="验证结构化输出坏掉时不会直接把任务丢成无法验收。",
-        plan=["输出损坏结果块", "修复结构化结果", "交回真实结果"],
-        acceptance_checks=["必须触发 structured repair", "修复后必须有证据", "父代理必须完成普通收口"],
-    )
-    print(f"run_id={task.id}")
-    return paths, agent, backend, capability_config, router, task
-
-
-def _verify_structured_repair(request: StructuredRepairVerifyRequest):
-    return (
-        request.backend.calls == 2
-        and request.loaded.status == "DONE"
-        and request.loaded.verification_status == "VERIFIED"
-        and request.runner.get("structured_output_found") is True
-        and request.runner.get("structured_output_ok") is True
-        and request.runner.get("structured_repair_attempted") is True
-        and request.runner.get("structured_repair_ok") is True
-        and request.output.get("structured_output", {}).get("repair_attempted") is True
-    )
-
-
-def run_scenario_structured_repair_case(args) -> int:
-
-    paths, agent, backend, capability_config, router, task = _structured_repair_setup(args)
-
-    print_scenario_step(2, "执行 dispatch：runner 输出坏 JSON 后修复并验收")
-    report = agent.dispatch_subagents(
-        router,
-        capability_config,
-        execution_plan=DispatchExecutionPlan.from_parts(
-            mutate_state=True,
-            start_runners=True,
-            max_runners=1,
-        ),
-        max_runners=1, probe=False,
-        reviewer="scenario-structured-repair", note="structured output damage should be repaired",
-    )
-    print_dispatch_report(report)
-    loaded = agent.subagents.load(task.id)
-    runner = json.loads(Path(loaded.runner_result_json).read_text(encoding="utf-8"))
-    output = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
-    print(
-        f"final status={loaded.status} verify={loaded.verification_status} "
-        f"backend_calls={backend.calls} repair_attempted={runner.get('structured_repair_attempted')} "
-        f"repair_ok={runner.get('structured_repair_ok')}"
-    )
-
-    final_ok = _verify_structured_repair(StructuredRepairVerifyRequest(backend, loaded, runner, output, report))
-    write_scenario_summary(
-        paths,
-        ok=final_ok,
-        reason="structured repair passed" if final_ok else "structured repair failed",
-        extra={
-            "case": "structured-repair",
-            "run_id": task.id,
-            "backend_calls": backend.calls,
-            "final_status": loaded.status,
-            "structured_repair_attempted": runner.get("structured_repair_attempted"),
-            "structured_repair_ok": runner.get("structured_repair_ok"),
-        },
-    )
-    print(f"\nsummary_json={paths.summary_json}")
-    print(f"summary_md={paths.summary_md}")
-    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
-    return 0 if final_ok else 2
-
-
+# LLM: 仅在场景私有目录装配固定后端，配置和持久结果不能写入用户日常目录。
+# 函数用途: 建立隔离工作区和模拟失败任务，写入本轮诊断文件。
 def _runner_retry_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -173,6 +81,8 @@ def _runner_retry_setup(args):
     return paths, agent, backend, capability_config, router, task
 
 
+# LLM: 复用正式 dispatch，固定后端负责造错；运行会更新该隔离任务的账本。
+# 函数用途: 推进一轮模拟任务并打印调度结果。
 def _run_dispatch_round(request: DispatchRoundRequest):
     report = request.agent.dispatch_subagents(
         request.router,
@@ -188,6 +98,8 @@ def _run_dispatch_round(request: DispatchRoundRequest):
     return report
 
 
+# LLM: 保留已有严格条件及其已知失败；不得通过删断言让旧场景冒充验收通过。
+# 函数用途: 核对模拟任务的重试次数和状态，返回场景判定。
 def _verify_runner_retry(request: RunnerRetryVerifyRequest):
     first_runner = [item for item in request.first.records if item.step == "runner"]
     second_runner = [item for item in request.second.records if item.step == "runner"]
@@ -208,6 +120,8 @@ def _verify_runner_retry(request: RunnerRetryVerifyRequest):
     )
 
 
+# LLM: CLI 入口只运行离线替身；持久输出归隔离目录，当前断言债务在 test_scenario_gateway_resume 中保留。
+# 函数用途: 执行两轮模拟调度、写诊断摘要，并用退出码报告结果。
 def run_scenario_runner_retry_case(args) -> int:
 
     paths, agent, backend, capability_config, router, task = _runner_retry_setup(args)

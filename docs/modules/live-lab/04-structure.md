@@ -5,6 +5,8 @@ F821/F811 不再在仓库全局关闭。`test_r223_audit_regressions.py` 是底�
 真实模型验收记录 tmux、单 Gateway、request ID、工具轮次、终态和实际产物；不以模型说“完成”作为质量分数。
 
 Live Lab 现在只作为真实链路验证辅助，不作为主架构来源。
+`cases.py::case_bad_weather` 只调用当前注册的 Gateway 恢复和 runner 重试场景；专用 JSON 修复场景及其后端已删除。
+保留的重试实现位于 `cli/scenario_cases/runner_retry_case.py`，离线替身在同目录 `runner_retry_backend.py`。
 
 保留目标：
 

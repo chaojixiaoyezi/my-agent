@@ -1,4 +1,5 @@
-
+# LLM: 实验脚本只调用已注册的诊断场景；不能恢复已停用的结果块修复协议或冒充真实 TUI。
+# 模块用途: 组织 Live Lab 的隔离诊断流程与产物目录，真实模型场景按显式选择运行。
 from __future__ import annotations
 
 """concrete Live Lab case implementations.
@@ -66,15 +67,17 @@ def case_health(lab) -> None:
     lab.run_command(lab.agent_command("gateway", "status"), timeout=60)
 
 
+# LLM: 保留当前 Gateway 恢复和 runner 重试入口；执行命令会写入本轮实验目录。
+# 函数用途: 用固定后端运行故障恢复场景，不调用真实模型。
 def case_bad_weather(lab) -> None:
     """runs focused recovery/guard scenarios that do not require real LLM calls.
 
-    这组是“坏天气测试”：gateway 崩溃残留、坏 JSON、runner 临时失败。
+    这组是“坏天气测试”：gateway 崩溃残留、runner 临时失败。
     它们用固定/模拟后端复现坑位，适合快速回归系统边界。"""
 
     lab.section("CASE bad_weather")
     workspace = lab.run_root / "bad_weather"
-    for case_name in ["gateway-restart", "structured-repair", "runner-retry"]:
+    for case_name in ["gateway-restart", "runner-retry"]:
         lab.log(f"### scenario-test --case {case_name}")
         lab.run_command(
             lab.agent_command(

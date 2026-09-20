@@ -223,7 +223,6 @@ run(agent_cmd("scenario-test", "--case", "gateway-delayed-response"))
 run(agent_cmd("scenario-test", "--case", "gateway-multi-worker"))
 run(agent_cmd("scenario-test", "--case", "gateway-stale-lease"))
 run(agent_cmd("scenario-test", "--case", "parent-subagent-cross-day-resume"))
-run(agent_cmd("scenario-test", "--case", "structured-repair"))
 run(agent_cmd("scenario-test", "--case", "runner-retry"))
 run(agent_cmd("scenario-test", "--count", "1", "--max-runners", "1", "--max-cycles", "2", "--timeout", "180"))
 

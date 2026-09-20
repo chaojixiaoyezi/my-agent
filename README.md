@@ -439,9 +439,6 @@ my-agent scenario-test --case gateway-stale-lease
 my-agent scenario-test --case parent-subagent-cross-day-resume
 # 验证真实 subagent runner 写回后跨天恢复到任务事实源；使用测试后端，不调用真实模型。
 
-my-agent scenario-test --case structured-repair
-# 验证坏 SUBAGENT_RESULT 能触发修复回合；使用测试后端，不调用真实模型。
-
 my-agent scenario-test --case runner-retry
 # 验证 runner 临时失败会有限重试；使用测试后端，不调用真实模型。
 

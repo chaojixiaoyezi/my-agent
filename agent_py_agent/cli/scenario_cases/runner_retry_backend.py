@@ -1,45 +1,25 @@
-
+# LLM: 这是 runner-retry 场景的固定后端，只供离线场景注入，不注册为用户模型。
+# 模块用途: 首次调用抛出临时错误，下一次返回固定回复，供调度恢复场景使用。
 from __future__ import annotations
-
-"""backend stubs used by structured-repair and runner-retry scenario cases."""
 
 import json
 
 from ...agent.backends import ModelResponse
 
 
-class ScenarioStructuredRepairBackend:
-
-    name = "scenario_structured_repair_backend"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        self.calls += 1
-        if self.calls == 1:
-            return ModelResponse(
-                text=(
-                    "我已经完成任务，但这次故意输出一个损坏的结构化结果块。\n"
-                    "[SUBAGENT_RESULT]\n"
-                    "{\n"
-                    '  "status": "DONE",\n'
-                    '  "summary": "这个 JSON 少了结尾，用来模拟模型输出损坏",\n'
-                    '  "evidence": [\n'
-                    '    {"kind": "note", "summary": "原始回复声称已有证据", "ok": true}\n'
-                ),
-                backend=self.name,
-            )
-        return ModelResponse(text=_structured_repair_success_text(), backend=self.name)
-
-
+# LLM: 仅用于离线场景，调用计数属于当前实例；不得作为真实 provider 注册。
+# 类用途: 让第一轮任务失败、下一轮返回固定回复，供重试诊断使用。
 class ScenarioRetryBackend:
 
     name = "scenario_retry_backend"
 
+    # LLM: 每个场景实例单独记调用次数，不能跨实验复用计数。
+    # 函数用途: 初始化固定后端的模拟调用状态。
     def __init__(self) -> None:
         self.calls = 0
 
+    # LLM: 这里只模拟后端响应；特殊诊断回复不计任务调用，保持旧场景行为且不产生网络请求。
+    # 函数用途: 为失败诊断返回固定说明，并让任务调用依次失败和成功。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         if "输出严格 JSON 格式" in prompt:
             return ModelResponse(
@@ -62,34 +42,8 @@ class ScenarioRetryBackend:
         return ModelResponse(text=_runner_retry_success_text(), backend=self.name)
 
 
-def _structured_repair_success_text() -> str:
-    text = (
-        "[SUBAGENT_RESULT]\n"
-        "{\n"
-        '  "status": "DONE",\n'
-        '  "summary": "结构化输出损坏后已通过修复回合补齐。",\n'
-        '  "used_tools": [],\n'
-        '  "used_skills": [],\n'
-        '  "evidence": [{"kind": "note", "summary": "修复回合生成了可解析证据", "ok": true}],\n'
-        '  "evidence_packets": [_STRUCTURED_PACKET_],\n'
-        '  "capability_requests": [],\n'
-        '  "artifacts": [],\n'
-        '  "tests": [_STRUCTURED_TEST_],\n'
-        '  "patches": [],\n'
-        '  "lessons": ["结构化输出损坏时先做格式修复，不新增事实"],\n'
-        '  "next_actions": [],\n'
-        '  "blocked_reason": "",\n'
-        '  "failure_type": ""\n'
-        "}\n"
-        "[/SUBAGENT_RESULT]"
-    )
-    text = text.replace(
-        "_STRUCTURED_PACKET_",
-        _packet("evpkt-structured-repair", "结构化输出修复后可验收", "structured repair scenario"),
-    )
-    return text.replace("_STRUCTURED_TEST_", _file_check_test("structured repair", "坏 JSON 已修复"))
-
-
+# LLM: 固定回复仍保留旧场景数据，正式 runner 不把其中的状态和验收声明作为事实。
+# 函数用途: 构造第二次模拟任务调用的固定正文，现有验收断言债务另行处理。
 def _runner_retry_success_text() -> str:
     text = (
         "[SUBAGENT_RESULT]\n"
@@ -118,6 +72,8 @@ def _runner_retry_success_text() -> str:
     return text.replace("_RETRY_TEST_", _file_check_test("runner retry", "第二次尝试通过"))
 
 
+# LLM: 本函数只序列化离线样例，不登记或验证生产证据。
+# 函数用途: 生成固定回复中的示例证据字段。
 def _packet(packet_id: str, claim: str, checked_scope: str) -> str:
     return json.dumps({
         "id": packet_id,
@@ -129,12 +85,9 @@ def _packet(packet_id: str, claim: str, checked_scope: str) -> str:
     }, ensure_ascii=False)
 
 
+# LLM: 返回的声明只属于旧场景正文，不执行文件检查，也不能证明任务质量。
+# 函数用途: 保留重试场景的固定样例数据，避免清理另一场景时改变它的行为。
 def _file_check_test(name: str, summary: str) -> str:
-    # 机器验收(问题3):tests[] 会被真实执行,file_path 必须在验收工作区(=
-    # 子代理 runner cwd,agent_run_workspace_dir)里真实存在。state.json 是任务
-    # 账本文件,create_run/save 必然落在这个工作区——检查它才是机器可绑定的事实
-    # (旧的 README.md 只活在 fixture 根、task.yaml 只活在 work/ 上一级,验收工作区
-    # 里根本没有,必假失败)。
     return json.dumps({
         "name": name,
         "validation_method": "file_check",

@@ -32,6 +32,10 @@ agent_py_agent/
 |-- cli/                                # 命令行、chat/TUI、gateway 管理、诊断维护命令
 |   |-- chat.py                         # 本地 chat 入口
 |   |-- chat_client_context.py          # 轻量 Gateway TUI 客户端、活动输入三态与 input-status 查询
+|   |-- scenario.py                     # 隔离诊断场景注册、命令参数来源及 suite 调度
+|   |-- scenario_cases/                 # 各类诊断场景及其专用替身
+|   |   |-- runner_retry_case.py        # runner 重试场景，保留现有收口断言及其失败证据
+|   |   `-- runner_retry_backend.py     # 只供该场景注入的离线失败后端
 |   |-- memory_admin_parser.py          # Memory v2 唯一管理员命令树与中文参数帮助
 |   |-- memory_admin_commands.py        # Candidate/Curator/Retention/Doctor/Migration 共用正式 Service 的 CLI 适配
 |   |-- chat_parts/                     # TUI、gateway client、stream/render worker
@@ -439,6 +443,7 @@ docs/
 
 ### 关键文件说明
 
+- `agent_py_agent/cli/scenario.py`：诊断场景注册与参数目录；`scenario_cases/runner_retry_case.py` 和 `runner_retry_backend.py` 只负责保留的离线重试场景，旧结果块修复场景已删除。
 - `agent_py_agent/agent/verification/runtime.py`：主子代理共用的被动验证入口；它消费工具执行事实，不裁决任意报告的语义正确性。
 - `scripts/check_offline_contract_matrix.py`：开发文件完整性检查，验证证据项指向实际运行模块与测试；已删除无生产调用的旧 verifier integrity 合同及其自造数据测试。
 

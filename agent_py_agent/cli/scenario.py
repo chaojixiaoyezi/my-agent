@@ -1,11 +1,12 @@
-
+# LLM: CLI 场景目录与合法参数共用注册表；删除场景须同步 suite、命令帮助和离线脚本。
+# 模块用途: 路由隔离诊断场景，并实现默认 happy 流程；这些结果不能替代真实 TUI 验收。
 from __future__ import annotations
 
 """routes scenario-test CLI cases and implements the happy-path full-flow scenario.
 
 给人看的解释：
 这个文件是 scenario-test 命令入口。
-普通 happy path 在这里，几个更极端的专项 case 拆到了 scenario_cases.py。
+普通 happy path 在这里，其余 case 放在 scenario_cases 包中。
 """
 
 import argparse
@@ -29,7 +30,6 @@ from .scenario_cases import (
     run_scenario_real_model_recovery_case,
     run_scenario_real_model_recovery_multi_round_case,
     run_scenario_runner_retry_case,
-    run_scenario_structured_repair_case,
 )
 from .scenario_utils import (
     build_scenario_prompt,
@@ -267,6 +267,8 @@ def cmd_scenario_test(args) -> int:
     return _cmd_scenario_happy_path(args, paths)
 
 
+# LLM: 此注册表是 case choices 的唯一来源；不可恢复已停用协议的入口或隐藏别名。
+# 函数用途: 返回当前可选诊断场景，不执行场景或调用模型。
 def _scenario_case_runners():
     return {
         "gateway-restart": run_scenario_gateway_restart_case,
@@ -278,11 +280,12 @@ def _scenario_case_runners():
         "parent-subagent-cross-day-resume": run_scenario_parent_subagent_cross_day_resume_case,
         "real-model-recovery": run_scenario_real_model_recovery_case,
         "real-model-recovery-multi-round": run_scenario_real_model_recovery_multi_round_case,
-        "structured-repair": run_scenario_structured_repair_case,
         "runner-retry": run_scenario_runner_retry_case,
     }
 
 
+# LLM: suite 保持原调用顺序及失败即停；真实模型只由被选中的场景决定，不把假后端当实际验收。
+# 函数用途: 顺序运行既有场景并打印结果，场景会在各自隔离目录写证据。
 def run_scenario_suite(args) -> int:
 
     # Keep all cheap deterministic recovery cases before the happy path, which may call a real model.
@@ -294,7 +297,6 @@ def run_scenario_suite(args) -> int:
         "gateway-multi-worker",
         "gateway-stale-lease",
         "parent-subagent-cross-day-resume",
-        "structured-repair",
         "runner-retry",
         "happy",
     ]

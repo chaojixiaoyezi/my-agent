@@ -131,18 +131,6 @@ def test_scenario_runner_retry_reaches_final_closeout(tmp_path, capsys):
     assert "final status=DONE verify=VERIFIED" in output
 
 
-@pytest.mark.skip(
-    reason="旧 final-closeout scenario 已删除，结构化修复以 runner 输出和统一 closeout 为准"
-)
-def test_scenario_structured_repair_reaches_final_closeout(tmp_path, capsys):
-    """The structured repair scenario should satisfy the current evidence-packet acceptance contract."""
-
-    output = _run_offline_scenario_case(tmp_path, capsys, "structured-repair")
-
-    assert "repair_attempted=True" in output
-    assert "final status=DONE verify=VERIFIED" in output
-
-
 @pytest.mark.xfail(
     reason="存量债: gateway 进程级场景收口断言(RC=2 vs 0)与 native 语义差异, 需场景框架适配; 不影响 CLI 主链路"
 )

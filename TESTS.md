@@ -4,6 +4,8 @@
 
 验证证据以 `test_verification_runtime.py`、`test_verification_repository.py` 和项目命令识别测试为准，覆盖真实工具出口、写后过期及 owner/task 隔离。
 离线矩阵只检查实现/测试文件存在及尺寸报告，不能当作行为验收。无生产调用的旧 verifier integrity 模块及仅检查输入字典的测试已删除，不再计入运行时覆盖。
+旧结果块修复场景及其跳过的验收已删除；`test_scenario_commands.py` 用正式参数解析器核对已删除/未知 case 被拒绝。
+自然回复与宿主结束原因继续由 `test_subagent_finalize_helpers.py` 覆盖，保留相邻 runner 重试场景的已有 xfail，不能将删除旧协议测试计为修复该失败。
 
 开发反馈优先定向合同、工具替身、模型替身和脱敏回放；真实 TUI 是最终验收最低要求。测试任务由被测代理完成，测试者不能代写产物后计为通过。
 子代理审批回归必须包含真实创建生命周期的父会话关联，覆盖 child/grandchild 的批准与拒绝；仅裸 manager 创建不足以代表正常 TUI 派工。
