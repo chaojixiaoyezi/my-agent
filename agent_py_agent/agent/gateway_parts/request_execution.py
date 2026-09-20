@@ -490,7 +490,8 @@ def _register_named_system_task(
 
 
 # LLM: One Gateway request may cross several provider slices, but every overflow must advance the
-# same canonical Compact generation before retry. Full carried archives remain effect authority.
+# same canonical Compact generation before retry. Full carried archives remain effect authority;
+# the same active request retains exact host rejection memory without inheriting approval grants.
 # 与后台共用携带 reducer；先按原身份释放 mailbox，再计算携带快照，不能由模型正文猜测消费。
 # 函数用途: 在同一用户回合内处理上下文超限，正式压缩旧会话或本轮工具历史后继续执行。
 def _run_gateway_turn_with_conversation_compact(
@@ -504,6 +505,7 @@ def _run_gateway_turn_with_conversation_compact(
     carried_archive_tool_calls = _gateway_recovered_active_turn_tool_calls(context)
     _recover_gateway_active_turn_authority(context, carried_archive_tool_calls)
     carried_active_turn_user_inputs: list[dict[str, object]] = []
+    runtime_rejected_actions: list[dict[str, str]] = []
     for _attempt in range(8):
         run_params = _gateway_run_params(
             _GatewayRunParamsRequest(
@@ -515,6 +517,7 @@ def _run_gateway_turn_with_conversation_compact(
                 tuple(carried_active_turn_user_inputs),
             )
         )
+        run_params.runtime_rejected_actions = runtime_rejected_actions
         _run_started = time.monotonic()
         result = context.agent.run(
             prompt,

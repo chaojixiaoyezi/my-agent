@@ -608,6 +608,40 @@ Responses 已使用该入口，纳入同组回归；保留代理前缀和完整�
 尚未实现的管理动作不展示为可用；现有管理员启动插件的失败策略不随结构迁移放宽。
 核心保留默认“手脚”，不为了统一形式将所有内置能力强制改成可卸载插件。
 
+### 第 1 步依赖与副作用清单
+
+以下按 `61d8b4673` 核对定义、直接调用和关键提交路径；是拆分所需的定向清单，不是全仓逐行审阅。
+本表完成不代表真实基线通过；当前失败及进入第 2 步的条件仍由执行 Goal 记录。
+表内路径均相对 `agent_py_agent/`。
+
+| 边界 | 当前入口和直接调用方 | 读取事实与写入责任 | 拆分时必须保留 |
+| --- | --- | --- | --- |
+| 后台会话车道 | `cli/background_main_agent.py` 组装 `conversation/runtime.py::BackgroundMainAgentScheduler`；五个 mixin 共同使用 runtime/store | `prepare_tick` 做维护与入队；`ready_thread_ids` 只投影就绪线程；`tick_thread` 消费原事件 | 每线程执行归属仍由持久 claim 裁决，不能由就绪列表或新队列取得执行权 |
+| 纯策略与进程内退避 | 同文件 `_policy_failure_backoff`、`_next_no_progress_streak`、`_ProviderSupplyBackoff` | 前两者只计算；后者及 `_wake_retry_after`、`_quota_fallback_wakes`、`_authority_recovery_blocks` 是调度器内存状态 | 计算与可变状态分开；不复制持久 Goal/wake/policy，不改变时钟、错误分类及读取时机 |
+| Gateway 配置恢复冷却 | `cli/gateway_lane_retry.py::BackgroundLaneRetry` 由 Gateway 车道消费 | 记录当前宿主的配置故障冷却，阻止缺模型热重试 | 与 provider 供应退避的作用域不同，不能因为都叫 backoff 就合成同一状态 |
+| 租约与后台执行 | `runtime.py::_run_claimed`、`_run_with_heartbeat` 调用原 `store.claims` 与 `runtime.run_once` | 领取后重读任务终态/恢复阻断；心跳续租；finally 停心跳并关闭精确 claim | 终态竞态检查不能移到领取前；仅关闭本 claim 不等于消费来源；供应/配置错误不增加普通 policy 失败次数 |
+| 子代理生命周期和审批 | `agent_core/orchestration/lifecycle.py::_bind_tasks_to_conversation` 与 `conversation/tool_approval_scope.py` | 前者建立父会话的显示/查找关联；canonical child 持有真实 run/root/thread/status；审批沿原账本记录具体操作 | task link 不能充当 child 执行身份；主代理仍读有效 claim，坏账不回退，不把能力授予当批准 |
+| 模型与工具轮 | `agent_core/_tool_loop_service.py` 调用现有 `tool_loop/round_execution.py`、`completion.py`、`deliverable_closeout.py` | 原链路冻结工具快照、审批/执行、保存原生历史、决定让出/结束；产物存在与操作成功各有明确口径 | 不新建执行器或把完成状态扩成内容正确；Compact 仍用原 checkpoint/generation 提交 |
+| 命令、帮助与补全 | `conversation/control_commands.py::system_slash_command_name`、`cli/chat_parts/slash_command_types.py`、`slash_commands.py`、`tui_input.py` | 公共控制解析负责动作；静态命令声明供帮助和 TUI 补全读取 | 插件请求进入同一公共解析，身份由宿主绑定；不能只在 TUI 加分支或让错误命令进入聊天 |
+| 启动扩展与工具注册 | `extensions/plugin.py::ExtensionRegistry` 被 `agent/core.py` 和 `cli/parser.py` 使用；`tooling/registry.py` 提供执行快照 | 启动扩展直接加载显式模块并调用注册 hook；工具注册表与每轮授权快照分开 | 现有启动 hook 没有热撤销合同；不能直接当成可卸载插件。新增贡献须带所属插件和激活代次，继续走原工具执行/权限链 |
+
+原有顺序需作为迁移约束逐项核对：
+
+1. 后台准备保持进程完成对账、旧账维护、协作处理、可选孤儿监督、定时入队、孤儿 attempt 回收、未完成任务唤醒的现有顺序。
+2. 车道消费保持 wake → observation → policy；领取 claim 后再查终态与恢复阻断，避免准备阶段之后的停止竞态。
+3. 每片退出先停止续租再关闭本 claim；Compact 让出保留未处理来源，具体来源确认仍留在原调用位置。
+4. 同批唤醒确认仍以模型轮开始时的采样时间为界；期间新到的孩子结果保留 pending，不能顺带消费。
+5. 插件停用要先撤销执行资格，再清理其进程/订阅；冻结旧快照不能重新激活已撤销贡献。此项是待实现合同，不代表当前注册表已有能力。
+
+资源归属继续分三层：Goal 管自动续跑，当前回合管模型/工具执行链，进程与子代理由精确任务/attempt 管理。
+实际 TUI 另暴露拒绝记忆只存在内部工具参数中、跨同一子代理 Goal 回合丢失；当前修复由宿主运行参数承接原列表，
+并让前后台 Compact 保持同一对象。不同孩子/新调用隔离、批准不提升；模型结束与 Goal 状态仍按各自原合同处理。
+参考定向读取 Codex `tools/approvals.rs` 的结构化拒绝结果和 Hermes `tools/approval.py` 的上下文隔离；未复制其策略或宣称整库审阅。
+插件的执行进程、订阅和注册贡献也必须带显式归属；卸载不能据名称相似清理无关资源。
+接下来只在第 1 步实际基线收口后实施纯策略切片；本轮清单不引入空 SDK、替代 Store 或兼容转发。
+
+### 后续切片实施约束
+
 第 2 步内部从纯判断开始；一次迁移一个可以单独验证的职责。需要查询 Store 的规则显式接收事实或只读能力，
 领取租约、消费事件、写账与通知仍由原副作用入口负责，不能为了“纯函数”增加事实副本或改变读取时机。
 组装对象明确列出依赖，不把整个 Agent/Store 换名塞入通用大上下文，也不把原私有方法原样复制成多层转发。
@@ -627,7 +661,8 @@ Responses 已使用该入口，纳入同组回归；保留代理前缀和完整�
 插件只提交声明和实现，宿主组装所需适配器；owner/run 身份由当前宿主上下文绑定，不信任命令参数自报身份。
 普通对话仍由原模型入口运行，显式工具动作仍由原工具执行入口处理。
 
-真实报告与 CSV 不符的调查可以与第 2 步的结构工作并行读取证据；先确认出站上下文、文件版本与交接时序。
+第 1 步先并行读取真实报告、文件和交接证据；基线未收口时，不开始第 2 步结构修改。
+先确认出站上下文、文件版本与交接时序，具体准入以执行 Goal 的逐步验收为准。
 若确证通用实现缺陷，单独小批修复；模型判断失误继续如实留证，不承诺移动代码就能消除。
 Goal 预算授权属于行为边界，不能借结构迁移顺手改变。Audit/摄取及其来源提示撤销不在本轮待办。
 auth、Jev 和完整桌面 Computer Use 改造继续独立；第 10 步增加样本计划内的受控浏览器、OCR 与官方 MiniMax-M3 视觉验收。

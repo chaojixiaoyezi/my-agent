@@ -50,7 +50,7 @@ class FinalizeContext:
 
 
 # LLM: ToolLoopExecuteParams 是工具调用的 run 级事实源；临时批准/拒绝只能由当前审批等待链追加，不能来自模型参数。
-# 类用途: 汇总一轮工具循环所需的上下文、协议快照、取消令牌和临时审批决定。
+# 类用途: 汇总工具循环的上下文、快照和取消令牌；批准只在本轮使用，拒绝记忆可由同一执行链承接。
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
     user_prompt: str
@@ -131,8 +131,8 @@ class ToolLoopExecuteParams:
     repeated_failure_halt_exhausted: bool = False
     # 当前 run 内已由交互审批确认的精确 ActionPolicy binding；不持久化、不按工具名泛化。
     runtime_approved_actions: list[dict[str, str]] = field(default_factory=list)
-    # 当前 run 内用户已拒绝/取消的精确工具参数指纹；provider 重建 call identity 时仍按
-    # tool_name + args_hash 阻止同一调用再次弹框，参数变化后才允许重新请求。
+    # 同一宿主执行链共享的拒绝/取消指纹，跨自动续轮和 Compact 保留；不跨子代理或新调用。
+    # provider 重建 call identity 时仍按 tool_name + args_hash 阻止重复弹框，参数变化后可重新申请。
     runtime_rejected_actions: list[dict[str, str]] = field(default_factory=list)
 
 

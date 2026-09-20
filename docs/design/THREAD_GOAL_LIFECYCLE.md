@@ -34,6 +34,11 @@ workspace 是控制输入的一部分，必须纳入持久回执的版本化摘�
 - 普通聊天不会自动建立 Goal。模型只有在用户或系统明确要求时才调用 `create_goal`；说“已建立”或写 Todo 不是创建事实。
 - `get_goal/create_goal/update_goal` 默认进入首轮工具 schema；显式工具授权与用户配置的延迟目录仍有效。
 - 模型最终回复只结束一次 turn。持久 Goal 的 `active/paused/blocked/complete` 与用量限制才控制目标生命周期。
+- 同一子代理 attempt 内的 Goal 自动续轮沿原宿主拒绝列表；主/子活动回合的 Compact 也保留该列表。
+  `RunParams` → `RuntimeLoopParams` → `ToolLoopExecuteParams` 共享同一对象，拒绝只由真实审批决定追加，
+  不从自然语言、摘要或 task attributes 恢复。按原 `tool_name + args_hash` 判同参，新的 provider call id 不重置拒绝。
+  参数变化可重新申请；不同孩子、新执行调用各有独立列表。批准不提升到续轮作用域，也不新增持久拒绝表。
+  此约定不把一次工具拒绝变成 Goal 暂停或全任务停止，不承诺跨进程重启、全新 attempt 自动复用拒绝。
 - `update_goal(complete)` 只完成目标，不提前将运行任务或父任务注册表标为 done。当前回合、待处理消息和未结束子树仍由统一 finalization 安全收尾；显式 blocked 保留现有可恢复停止行为。
 - active Goal 在当前 turn 正常结束后安排一个去重 wake；不检查工具次数，不要求 Todo 存在或保持开放。
 - 工具轮限交接的续跑承诺也重读精确 Goal 的当前状态；旧 `thread_goal_id` 只用于定位。目标完成、暂停、删除、任务绑定冲突或读取失败时，不因编号还留在回合参数中而承诺自动继续。

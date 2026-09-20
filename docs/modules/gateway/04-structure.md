@@ -59,6 +59,10 @@ HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台�
 
 ## 异常回合历史
 
+Gateway 的同一活动请求与后台工作片各自持有 `RunParams.runtime_rejected_actions`，Compact 重建参数时共享原列表。
+该宿主内存只记录用户拒绝/取消的工具名和参数指纹，沿公共运行参数进入原审批判断；不从模型历史重建，也不承接批准。
+新调用默认独立，子代理由自己的 attempt 持有；它不是持久授权表，不能替代 `/stop` 或 Goal 状态。
+
 `RunParams.partial_turn_callback` 由调用宿主绑定精确 owner/thread/request。共享工具循环在异常退出前
 把当前 IR 交回原宿主，再抛回原异常；Gateway 使用 `_persist_gateway_partial_result` 复用普通 final
 和 `message_repairs`。正常返回的 user-stop 也经过同一历史出口，频道投递仍静默。

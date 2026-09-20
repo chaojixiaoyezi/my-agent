@@ -1,4 +1,4 @@
-# LLM: 本模块串联同一 child 的尝试、模型轮和正式结果；Compact 续接不新建 run/attempt，失败交给生命周期处理。
+# LLM: 本模块串联同一 child 的尝试、模型轮和正式结果；Goal/Compact 续接保留拒绝记忆，失败交给生命周期处理。
 # 模块用途: 执行子代理并保存结果、异常前的历史和 typed 截断说明；压缩不是重派，同步验证停止与恢复身份。
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ class SubagentModelTurnBundle:
 
 
 # LLM: This immutable carrier groups only one provider iteration's changing
-# transcript/carry state; authority ids and permissions remain explicit arguments.
+# transcript/carry state and the exact attempt's rejection memory; it never carries approval grants.
 # 类用途: 收拢一次子代理模型调用会变化的 Compact 续接材料，避免长参数列表和字段错位。
 @dataclass(frozen=True)
 class SubagentModelIteration:
@@ -53,6 +53,7 @@ class SubagentModelIteration:
     carried_archive_tool_calls: list[dict[str, object]]
     carried_active_turn_user_inputs: list[dict[str, object]]
     transcript_sink: object
+    runtime_rejected_actions: list[dict[str, str]]
 
 
 # LLM: This immutable request keeps one child overflow's thread generation, active archive,
@@ -214,17 +215,19 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
     )
 
 
-# LLM: Goal persistence reuses the exact runner and permission scope; a typed non-normal end never schedules another turn.
+# LLM: Goal persistence reuses the exact runner, permission scope and rejection list; fresh attempts allocate their own list.
 # 函数用途: 子代理目标未完成时接着执行下一对话轮，普通 prompt-only 派工仍只执行原有模型循环。
 def _run_subagent_model_turn(lifecycle, prompt, context, task_attributes, *, task, attempt_id):
     from ...conversation.goal_delegation import active_delegated_goal_after_turn
     from ...conversation.goal_prompting import continuation_prompt
 
     turn_number = 0
+    runtime_rejected_actions: list[dict[str, str]] = []
     while True:
         turn_id = f"{attempt_id}-goal-{turn_number}" if turn_number else attempt_id
         result = _run_subagent_conversation_turn(
             lifecycle, AgentThreadTurnInput(prompt, attempt_id, turn_id), context, task_attributes, task=task,
+            runtime_rejected_actions=runtime_rejected_actions,
         )
         goal = active_delegated_goal_after_turn(lifecycle.agent, task, result)
         if goal is None:
@@ -234,7 +237,7 @@ def _run_subagent_model_turn(lifecycle, prompt, context, task_attributes, *, tas
 
 
 # LLM: 子代理始终使用自身 ConversationThread 和同一执行身份；只有已提交 Compact 才能续接，
-# 不以累计压缩次数判失败。异常历史回调冻结到本次 child turn，不串父线程；显示批次不改变权限或副作用身份。
+# 不以累计压缩次数判失败。拒绝列表沿同一 attempt 共享；历史回调只绑定本次 child turn，不串父线程。
 # 函数用途: 使用子代理自己的历史执行长期任务；压缩后继续原尝试，落账后按真实结束原因显示正文或截断提示。
 def _run_subagent_conversation_turn(
     lifecycle,
@@ -243,6 +246,7 @@ def _run_subagent_conversation_turn(
     task_attributes: dict[str, object],
     *,
     task: object,
+    runtime_rejected_actions: list[dict[str, str]],
 ):
     agent = lifecycle.agent
     prompt, attempt_id, conversation_turn_id = turn.prompt, turn.attempt_id, turn.turn_id
@@ -282,6 +286,7 @@ def _run_subagent_conversation_turn(
                     carried_archive_tool_calls=carried_archive_tool_calls,
                     carried_active_turn_user_inputs=carried_active_turn_user_inputs,
                     transcript_sink=transcript_sink,
+                    runtime_rejected_actions=runtime_rejected_actions,
                 ),
             )
             run_params.partial_turn_callback = partial(
@@ -491,7 +496,8 @@ def _open_subagent_transcript_sink(agent, task: object, current, attempt_id: str
 
 
 # LLM: Every compact generation reuses this exact task-local RunParams contract;
-# display callbacks are observers and cannot alter ids, permissions, or carry state.
+# display callbacks are observers and cannot alter ids, permissions, or carry state. Rejections
+# share the outer attempt's list; approvals are never promoted into this carrier.
 # 函数用途: 组装一次子代理模型调用参数，让初轮和 Compact 后续轮保持同一身份与权限。
 def _subagent_model_run_params(
     *,
@@ -520,6 +526,7 @@ def _subagent_model_run_params(
         root_user_prompt=prompt,
         carried_archive_tool_calls=list(iteration.carried_archive_tool_calls),
         carried_active_turn_user_inputs=list(iteration.carried_active_turn_user_inputs),
+        runtime_rejected_actions=iteration.runtime_rejected_actions,
         conversation_history_seed=iteration.current.history_seed,
         on_chunk=iteration.transcript_sink,
     )

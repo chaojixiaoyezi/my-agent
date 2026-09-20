@@ -5591,10 +5591,12 @@ def test_gateway_overflow_without_transcript_commits_active_turn_compact(tmp_pat
         for index in range(1, 5)
     ]
     captured: list[RunParams] = []
+    rejection = {"tool_name": "run_command", "args_hash": "sha256:denied", "decision": "denied"}
 
     def run(_prompt, *, params):
         captured.append(params)
         if len(captured) == 1:
+            params.runtime_rejected_actions.append(rejection)
             return SimpleNamespace(
                 runtime_status="context_overflow",
                 archive_tool_calls=records,
@@ -5612,6 +5614,9 @@ def test_gateway_overflow_without_transcript_commits_active_turn_compact(tmp_pat
     assert result.runtime_status == "ok"
     assert refreshed.compact_generation == 1
     assert len(captured) == 2
+    assert captured[1].runtime_rejected_actions == [rejection]
+    assert captured[1].runtime_rejected_actions is captured[0].runtime_rejected_actions
+    assert RunParams().runtime_rejected_actions == []
     assert [item["call_id"] for item in captured[1].carried_archive_tool_calls] == [
         "overflow-1",
         "overflow-2",

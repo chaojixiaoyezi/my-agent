@@ -96,6 +96,7 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
     original = ConversationThread(thread_id="thread-bg", canonical_user_id="owner-bg")
     compacted = replace(original, compact_generation=1, summary="已压缩旧历史")
     observed_params: list[RunParams] = []
+    rejection = {"tool_name": "run_command", "args_hash": "sha256:denied", "decision": "denied"}
 
     class Agent:
         # 历史种子需要读会话范围配置；生产 AgentConfig 一直有这些字段，桩必须同样提供。
@@ -107,6 +108,7 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
         def run(self, _prompt, *, params):
             observed_params.append(params)
             if len(observed_params) == 1:
+                params.runtime_rejected_actions.append(rejection)
                 return SimpleNamespace(
                     runtime_status="context_overflow",
                     archive_tool_calls=[{"tool": "read_file", "ok": True}],
@@ -189,6 +191,9 @@ def test_background_context_overflow_compacts_and_retries_same_slice(monkeypatch
     assert observed_params[0].inject == ["ctx-generation-0", "child completed"]
     assert observed_params[1].inject == ["ctx-generation-1", "child completed"]
     assert observed_params[1].carried_archive_tool_calls == [{"tool": "read_file", "ok": True}]
+    assert observed_params[1].runtime_rejected_actions == [rejection]
+    assert observed_params[1].runtime_rejected_actions is observed_params[0].runtime_rejected_actions
+    assert RunParams().runtime_rejected_actions == []
     assert observed_params[0].on_chunk is sink
     assert observed_params[1].on_chunk is sink
 

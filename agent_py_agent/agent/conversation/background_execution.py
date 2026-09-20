@@ -1,4 +1,4 @@
-# LLM: 后台单片执行不拥有 wake/Goal/租约或外部投递；原生历史写同一 store，Compact 沿原 CAS 和取消合同。
+# LLM: 后台单片不拥有 wake/Goal/租约或外部投递；同片 Compact 保留拒绝记忆，历史、CAS 和取消仍沿原合同。
 # 模块用途: 独立后台模型工作片、压缩重试和具名执行结果，修改时同步后台历史、模型选择、取消和投递回归。
 from __future__ import annotations
 
@@ -108,7 +108,7 @@ def invoke_background_turn(
 
 
 # LLM: 后台生命周期唤醒继续同一个权威活动轮；超窗在同片压缩并携带已执行工具与插话，
-# 携带快照与前台共用纯 reducer，mailbox 释放仍在超窗后原位置；正常/异常/取消写原 store，同步 Compact 回归。
+# 携带快照与前台共用纯 reducer，同片拒绝记忆保持原对象；mailbox 释放和历史写回顺序不变，同步 Compact 回归。
 # 函数用途: 后台主代理在同片压缩并续跑；正常/异常原生历史写回原会话，工具显示批次不改变执行身份。
 def run_background_turn_with_compact(
     execution: BackgroundExecutionDependencies,
@@ -123,6 +123,7 @@ def run_background_turn_with_compact(
     current = thread
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] = []
+    runtime_rejected_actions: list[dict[str, str]] | None = None
     for _attempt in range(8):
         history_seed = background_history_seed_or_raise(
             execution.agent,
@@ -141,6 +142,10 @@ def run_background_turn_with_compact(
         else:
             run_params.carried_archive_tool_calls = list(carried_archive_tool_calls)
         run_params.carried_active_turn_user_inputs = list(carried_active_turn_user_inputs)
+        if runtime_rejected_actions is None:
+            runtime_rejected_actions = run_params.runtime_rejected_actions
+        else:
+            run_params.runtime_rejected_actions = runtime_rejected_actions
         run_params.inject = [
             context_markdown(
                 agent=execution.agent,

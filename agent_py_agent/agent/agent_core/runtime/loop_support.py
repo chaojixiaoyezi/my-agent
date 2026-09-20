@@ -1,4 +1,4 @@
-# LLM: 本模块装配运行恢复状态与上下文，工具发现归档必须复用 tooling 的纯投影，不能反向要求 Gateway 导入运行循环。
+# LLM: 本模块装配运行恢复状态与上下文，工具发现复用 tooling 投影，拒绝列表沿宿主参数传递；禁止反向依赖 Gateway。
 # 模块用途: 为主链准备记忆、工具及续跑输入，异常退出前交回原生历史；缓存面与权限仍由各自权威模块维护。
 
 from __future__ import annotations
@@ -96,6 +96,8 @@ def run_params_from_values(
     return replace(params, **updates)
 
 
+# LLM: 宿主拒绝列表必须沿参数链共享，不能复制为空或从模型历史推导；批准仍由每次精确调用自己获取。
+# 函数用途: 把已准备上下文和同一执行链的宿主状态传给公共工具循环。
 def _runtime_loop_params(
     user_prompt: str,
     prepared: PreparedRuntimeContext,
@@ -124,6 +126,7 @@ def _runtime_loop_params(
         save=params.save,
         carried_archive_tool_calls=params.carried_archive_tool_calls,
         carried_active_turn_user_inputs=params.carried_active_turn_user_inputs,
+        runtime_rejected_actions=params.runtime_rejected_actions,
         active_turn_transition_callback=params.active_turn_transition_callback,
         tool_runtime_snapshot=prepared.tool_runtime_snapshot,
         tool_protocol_snapshot=prepared.tool_protocol_snapshot,
@@ -884,7 +887,8 @@ def _native_user_task_text(value: object) -> str:
 
 # LLM: Resume reconstruction has two projections: the complete owner archive restores budgets,
 # dedupe and effect state, while only calls not covered by committed Compact checkpoints reach the
-# provider. Never use the bounded model projection as runtime authority.
+# provider. Never use the bounded model projection as runtime authority. Exact rejection memory
+# remains the same host-owned list across automatic continuations, independent of model history.
 # 函数用途: 从当前请求与完整续跑账本组装工具循环参数，并只把未压缩的近期轨迹展示给模型。
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = seed.params
@@ -978,6 +982,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         provider_history_messages=_native_provider_history_messages(params),
         active_turn_user_inputs=active_turn_user_inputs,
         active_turn_transition_callback=params.active_turn_transition_callback,
+        runtime_rejected_actions=params.runtime_rejected_actions,
         conversation_history_seed=params.conversation_history_seed,
         context_scope=params.context_scope,
         loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names},

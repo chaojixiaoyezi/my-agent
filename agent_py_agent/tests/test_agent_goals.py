@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -250,3 +252,74 @@ def test_paused_child_goal_does_not_relabel_completed_turn_as_interrupted(tmp_pa
     result = SimpleNamespace(turn_end_reason="completed", runtime_status="ok", runtime_reason="")
     assert active_delegated_goal_after_turn(agent, child, result) is None
     assert vars(result) == {"turn_end_reason": "completed", "runtime_status": "ok", "runtime_reason": ""}
+
+
+@pytest.mark.parametrize("boundary", ["goal", "goal_then_compact"])
+def test_child_continuation_keeps_exact_denials_and_isolates_other_children(tmp_path, monkeypatch, boundary):
+    from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    prompts = []
+
+    # LLM: 仅替换用户审批输入；真实子代理生命周期、工具权限和 Goal/Compact 续接照常执行。
+    # 函数用途: 拒绝每次实际到达审批消费者的请求，以计数证明同参拒绝没有因续轮遗忘。
+    def deny(_sink, payload, *, cancellation_token=None):
+        prompts.append(payload)
+        return {"permission_id": payload["permission_id"], "decision": "denied"}
+
+    monkeypatch.setattr(BackgroundTranscriptSink, "request_permission", deny)
+
+    # LLM: 只控制模型回复和压缩摘要，不代替权限裁决或修改运行参数。
+    # 类用途: 稳定复现拒绝后跨 Goal 或 Compact 再请求同一工具，再尝试不同参数。
+    class Backend(_OverflowThenCompleteChildBackend):
+        # LLM: 每个孩子有自己的回复游标，共享审批观察列表只用于断言隔离。
+        # 函数用途: 初始化这一次子代理的确定性模型序列。
+        def __init__(self):
+            super().__init__(overflow_once=False)
+            self.calls = 0
+
+        # LLM: 模型可以重复请求，但是否再次询问用户必须由宿主保留的精确拒绝事实决定。
+        # 函数用途: 按固定序列产生工具调用、自动续轮边界和显式目标结束。
+        def generate(self, prompt, on_chunk=None, **kwargs):
+            if "You maintain a conversation summary" in prompt:
+                return super().generate(prompt, on_chunk, **kwargs)
+            self.calls += 1
+            compact = boundary == "goal_then_compact"
+            assert self.calls <= 6 + int(compact)
+            if compact and self.calls == 3:
+                return ModelResponse(text="上下文压力", backend=self.name, runtime_status="context_overflow",
+                                     runtime_reason="context_overflow", runtime_source="provider_error")
+            stage = self.calls - int(compact and self.calls > 3)
+            if stage == 2:
+                return ModelResponse(text="当前操作被拒绝。", backend=self.name)
+            if stage in {1, 3, 4}:
+                command = "printf changed-fixture" if stage == 4 else "printf denied-fixture"
+                return ModelResponse(text="", backend=self.name, tool_use_blocks=[{
+                    "id": f"request-{self.calls}", "name": "run_command",
+                    "input": {"command": command, "run_in_background": True},
+                }])
+            if stage == 5:
+                return ModelResponse(text="", backend=self.name, tool_use_blocks=[{
+                    "id": "finish-goal", "name": "update_goal", "input": {"status": "complete"},
+                }])
+            return ModelResponse(text="已记录拒绝，未执行命令。", backend=self.name)
+
+    for child_number in range(2):
+        task = agent.subagents.create_run(goal="核对拒绝边界", role="worker",
+                                         attributes={"persistent_goal": "检查两个工具参数的拒绝结果"})
+        backend = Backend()
+        agent.backend = backend
+        result = agent.run_subagent(task.id, dry_run=False, probe=False)
+        assert result.ok, result.message
+        assert backend.calls == 6 + int(boundary == "goal_then_compact")
+        assert len(prompts) == (child_number + 1) * 2
+        current = prompts[-2:]
+        assert {p["binding"]["run_id"] for p in current} == {task.id}
+        assert current[0]["binding"]["args_hash"] != current[1]["binding"]["args_hash"]
+        assert bool(backend.summary_prompts) is (boundary == "goal_then_compact")
+        index = Path(task.agent_run_workspace_dir) / "blobs/tool_outputs/index.jsonl"
+        commands = [row for line in index.read_text().splitlines()
+                    if (row := json.loads(line))["tool"] == "run_command"]
+        assert len(commands) == 3
+        assert all(row["error_code"] == "APPROVAL_REJECTED" for row in commands)
+        assert all(row["tool_execution"]["handler_executed"] is False for row in commands)
