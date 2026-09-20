@@ -21,9 +21,16 @@ my-agent 需要操作终端之外的系统界面：查看窗口、读取屏幕�
 | `computer-control-mcp` | MIT，PyPI `0.3.13`，Python MCP | 选用；提供窗口、截图、OCR、鼠标和键盘，能直接走现有 stdio MCP |
 
 审计基线：`computer-control-mcp` commit `e74cbb14b16ba616f0dc251a39c9f7732fca8a25`，PyPI 版本
-`0.3.13`。本项目不复制其源文件，只在 `pyproject.toml` 的 `computer-use` extra 固定版本。上游唯一缺少的常用
-动作是滚轮；适配入口只调用其既有 PyAutoGUI 依赖公开的 `scroll()`，没有复制或重写截图、OCR、窗口、鼠标或
-键盘引擎。
+`0.3.13`。本项目不复制其源文件，只在 `pyproject.toml` 的 `computer-use` extra 固定版本。
+适配入口通过 MCP 公开注册接口组合上游工具，仅补滚轮与可靠文本输入；不改 SDK 私有注册表。
+真实 macOS TUI 暴露即时键入丢字符和中文静默忽略，因此同名 `type_text` 使用已有依赖的公开接口：
+macOS 走 Quartz Unicode 键盘事件，其他平台用带间隔的 PyAutoGUI；不支持的字符在输入前报错。
+`clear_existing` 是显式参数，按平台发送全选/删除，不解析普通自然语言触发清空。
+该修复沿用既有 Computer Use 开关、Full Access 与危险工具审批，不新增依赖或剪贴板状态。
+返回值只证明提交了字符，必须另行读取目标应用确认；部分应用可能不接受 Unicode 事件。
+
+接口依据：[PyAutoGUI 键盘文档](https://pyautogui.readthedocs.io/en/latest/keyboard.html)、
+[Apple Unicode 键盘事件](https://developer.apple.com/documentation/coregraphics/cgevent/keyboardsetunicodestring(stringlength:unicodestring:))。
 
 ## 唯一装配路径
 
@@ -39,7 +46,7 @@ computer_use_profile.py
 existing MCP stdio client -> ToolRegistry -> Tool Gateway
              |
              v
-computer_use_server.py (仅补 scroll 注册)
+computer_use_server.py (组合上游工具、滚轮和文本输入)
              |
              v
 computer-control-mcp (PyAutoGUI / RapidOCR / ONNX)
@@ -56,8 +63,8 @@ computer-control-mcp (PyAutoGUI / RapidOCR / ONNX)
   `computer_use`，其 16 个稳定工具 Schema 在第一轮直接可见。原因不是权限特例，而是当前 MiniMax-M2.7
   不支持 会话运行时/终端交互 的原生 Tool Search 引用协议。分类只改变 provider 工具目录，不能改变 owner、
   Full Access、effect、审批或执行快照；同一会话中这组稳定 Schema 保持顺序不变，便于前缀缓存复用。
-- 子进程使用当前 Python 的 `-m agent_py_agent.agent.tooling.computer_use_server`；入口继续运行同一份上游
-  FastMCP server，只多注册 `scroll_screen`，不会依赖 PATH 中另一个不确定 Python。
+- 子进程使用当前 Python 的 `-m agent_py_agent.agent.tooling.computer_use_server`；公开目录中的上游函数
+  注册到唯一 FastMCP server，文本输入由本地实现接管并补充滚轮，不依赖 PATH 中其他 Python。
 - Linux 只显式透传当前 `DISPLAY`、`WAYLAND_DISPLAY`、`XAUTHORITY`、`DBUS_SESSION_BUS_ADDRESS`；MCP 安全环境
   仍不继承 API Key、Token 或 Cookie。适配器固定上游 `ENV=development`，只为把其诊断输出送到 stderr，
   防止日志混入 stdout 的 JSON-RPC 数据流。
@@ -81,8 +88,10 @@ computer-control-mcp (PyAutoGUI / RapidOCR / ONNX)
 - MiniMax-M2.7 是文本工具模型，当前主链不把 MCP image block 直接送进 provider。应调用
   `take_screenshot_with_ocr` 获得文字与绝对坐标，再用第二次 OCR 验证动作；原始 screenshot 工具的 image
   只说明外部执行器确实支持，不能宣称模型已视觉理解。
-- 上游 `type_text` 基于 PyAutoGUI，跨平台 Unicode 输入能力有限。首轮真机只验证 ASCII；中文输入需要后续
-  选择成熟的剪贴板/无障碍输入上游能力，不能在本项目临时拼平台脚本。
+- macOS 的 Unicode 适配已通过真实 TUI 的英文和中文替换、保存及读回复验；其他平台的 Unicode
+  输入尚未覆盖。Quartz 提交成功也不证明每个应用都接受文字，必须保留应用侧读回。
+- 纯 OCR 对空白控件和窗口定位仍可能失败；本次空白输入框曾被错点成标签，加占位文字的夹具才完成定位。
+  输入修复不等于解决视觉理解、任意控件定位或全部应用兼容性。
 - 浏览器内页面优先现有 Browser 工具。Computer Use 只处理浏览器能力覆盖不到的系统 UI、原生应用和桌面。
 - Linux 头less 验收需要 Xvfb 之外再运行窗口管理器；没有窗口管理器时窗口枚举、激活和按窗口 OCR 不能作为
   可用证据。RPM 系测试环境还需 `xorg-x11-server-Xvfb`、`xterm`、`xorg-x11-xauth`、
@@ -99,8 +108,8 @@ computer-control-mcp (PyAutoGUI / RapidOCR / ONNX)
 
 ## 真 TUI 验收
 
-测试必须在 `.10` 的唯一 Gateway 上进行，模型固定 MiniMax-M2.7；图形环境用独立 Xvfb/xterm，避免误操作
-测试者真实桌面。普通中文 prompt 只描述用户目标，不写工具协议：识别指定窗口文字、激活窗口、输入一段
+测试必须通过目标机器上的唯一 Gateway，模型使用官方 MiniMax-M2.7，并核对实际 provider 与端点。
+远端图形环境用独立 Xvfb/xterm；本机按用户授权使用专用测试窗口。普通中文 prompt 只描述用户目标：识别指定窗口文字、激活窗口、输入一段
 ASCII、按 Enter，再读取结果文字。通过条件同时包括：
 
 1. TUI 能发现 `mcp__computer_use__*`，且危险动作经过 exact approval；
@@ -109,6 +118,15 @@ ASCII、按 Enter，再读取结果文字。通过条件同时包括：
 4. `/stop` 能中断慢 OCR，Gateway 和 MCP 子进程不遗留失控调用；
 5. 同时连接多个 TUI 时仍只有一个 Gateway、local/main 只保留一个 Computer Use MCP 子进程；
 6. 一个普通 owner 在相同全局配置下看不到 Computer Use 工具。
+
+## 2026-09-19 本机增量验收
+
+本机 Python 3.12、固定执行器版本，经真实 TUI 和官方 MiniMax-M2.7 完成观察、点击、输入、保存、读回。
+最初出现英文丢字符、中文静默忽略，已保留失败记录；修复后新会话连续读回 `DESKTOP-OK-2026`
+与 `中文输入验收`，观察者另用只读无障碍树核对最终输入框和保存状态。测试者未代执行点击或填写。
+慢 OCR 期间的 TUI 停止已返回工具中断；旧版本的远端隔离验收不计入本轮本机通过数。
+四项文本事件回归和现有接入/认证相关定向共 103 项通过；替身不计入真实桌面次数。
+截图、原始 OCR、窗口坐标和本机目录只保存在仓库外，脱敏场景见 [本轮矩阵](MAINTAINABILITY_AND_JEV_REVIEW.md#本轮真实-tui-验收矩阵)。
 
 ## 2026-09-01 最终验收记录
 

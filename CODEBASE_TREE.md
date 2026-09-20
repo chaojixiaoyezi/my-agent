@@ -244,7 +244,8 @@ agent_py_agent/
 |   |-- tooling/                       # 唯一 ToolRuntime/ActionPolicy/ToolExecutor、写入边界与结果投影
 |   |   |-- process_output_capture.py   # stdout/stderr 有界保留与持续排空，公开截断和完整性
 |   |   |-- computer_use_profile.py   # MIT 开源桌面执行器的 local/main + Full Access MCP 薄装配与 effect 边界
-|   |   |-- computer_use_server.py    # 启动开源执行器并复用其 PyAutoGUI 补齐滚轮工具
+|   |   |-- computer_use_server.py    # 用公开 MCP 接口组合上游桌面工具、滚轮及文本输入
+|   |   |-- computer_text_input.py    # 按平台提交可靠文本，校验 Unicode 并保留后置验证边界
 |   |   |-- models.py                 # ToolModelSpec、ToolRuntimePolicy、ToolRuntime/Snapshot 与 handler outcome
 |   |   |-- runtime_contracts.py      # 唯一 canonical ToolCall/ToolResult、ToolChoice、协议与 operation 合同
 |   |   |-- tool_search_state.py      # 主/子/Gateway 共用的纯工具发现归档投影，不导入执行循环
@@ -292,6 +293,7 @@ agent_py_agent/
 |       |-- factory.py                 # 显式配置构造唯一后端，缺配置判据与调度共享
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- test_computer_text_input.py     # 文本事件 UTF-16、显式替换与不支持字符零副作用回归
 |   |-- test_subagent_activity_diagnostics.py # 阶段提醒、慢流不误杀、执行代与消息去重回归
 |   |-- test_r223_audit_regressions.py   # 外部审计的编码、版本、并发、MCP、输出、网络和恢复故障注入
 |   |-- test_timeout_recovery_delivery.py  # 门槛5 探针的无损交付：两枪合法正文按序保留、归属同一轮、截断/预算/零工具轮语义不变
@@ -414,6 +416,7 @@ docs/
 - `agent/common/text_file_window.py`：64 KiB 流式索引、有限检查点与页面 cookie；编码和字符坐标只保留一个实现。
 - `agent/common/file_version.py`：read_file 返回观察版本，write/edit/patch 明确携带前置条件；外部写入者不被强制纳管。
 - `agent/tooling/process_output_capture.py`：前台进程每流最多保留 4 MiB，仍持续排空并公开不完整事实，不假装完整大输出归档。
+- `agent/tooling/computer_text_input.py`：文本事件的唯一适配入口；macOS 使用 Quartz Unicode，其他平台使用 PyAutoGUI 支持的字符，结果不代替应用状态验收。
 - `agent_py_agent/tests/test_r223_audit_regressions.py`：本轮底层故障样本；真实 TUI 另记在 R223 审计报告，不相互冒充。
 - 已删除 `agent/agent_core/_compression_service.py` 的旧记忆拼接路径；正式 Compact 仍由 ConversationStore/checkpoint/CAS 负责。
 
