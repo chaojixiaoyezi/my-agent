@@ -54,3 +54,14 @@ rollback plan.
 ### References
 
 - ADR-0001 (extensions layer); REFACTORING_BACKLOG.md item 8; ARCHITECTURE_EXEMPTIONS.md E-008
+
+## 可装卸能力的后续设计（待实施）
+
+上文是启动扩展合同；示意接口不等于完整热装卸实现。当前实现还包括记忆源注册，命令钩子对接 argparse，
+并未支持任意 TUI `/xxx` 注册、版本化切换或卡死插件的有界回收。
+
+外围工具/命令/Skill 的新方案见 [可装卸插件生命周期](../design/PLUGIN_LIFECYCLE.md)。
+优先采用隔离依赖的 Python 进程与现有工具/MCP 链；不把完整 Agent/Store 暴露给可选插件。
+安装默认不启用，停用不执行或进入模型目录，卸载撤销精确注册与资源；核心正常会话持续可用。
+现有管理员启动插件仍保持 fail-closed；迁移须显式声明依赖与失败策略，不能将可选插件隔离理解为全局吞掉启动错误。
+本文补充仅记录方向，尚未更改生产接口或配置。
