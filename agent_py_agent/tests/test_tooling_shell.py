@@ -67,6 +67,8 @@ class TestShellToolBasics:
         assert result.ok is True
         assert "return_code=0" in result.output
         assert "hello" in result.output
+        assert "stdout_lines=1 " in result.output
+        assert result.result_envelope["display"]["stdout_lines"] == 1
 
     def test_running_process_obeys_bound_cancellation_token(self, tmp_path: Path):
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions

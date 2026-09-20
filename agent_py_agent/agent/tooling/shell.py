@@ -1,5 +1,6 @@
 # LLM: 普通 shell 关闭宿主 stdin，交互归独立 PTY；命令长度不是权限边界，不再额外卡短脚本。
 # 捕获全文与模型预览分离，展示归档不得拿裁剪预览充全文；修改执行入口需联测参数、危险命令和 owner 沙箱。
+# 输出行数按采集正文的 LF 分隔计算，模型回执、截断说明与展示事实必须共用口径。
 # 模块用途: 在用户权限内执行命令并整理输出、进程及产物保护记录，保留有界采集原文和真实缺失事实。
 from __future__ import annotations
 
@@ -345,6 +346,14 @@ def _working_dir_from_params(
     )
 
 
+# LLM: 只统计已采集文本，不从预览或业务文件推断；末尾 LF 结束现有行，不新增空行，裸 CR 仍是同一行。
+# 函数用途: 给模型回执、截断说明和展示记录提供一致行数；空输出为零，未换行的尾段算一行。
+def _captured_line_count(text: str) -> int:
+    return text.count("\n") + int(bool(text) and not text.endswith("\n"))
+
+
+# LLM: 只裁剪模型预览；说明使用原采集文本的行数，归档仍由 _command_display 保留原文。
+# 函数用途: 输出超限时保留开头和结尾，避免丢掉构建或测试在尾部给出的结论。
 def _bounded_output(text: str, max_chars: int) -> tuple[str, bool]:
     """超限时保留头部+尾部、省略中段（构建/测试输出的结论通常在尾部）。"""
     if max_chars <= 0:
@@ -354,10 +363,12 @@ def _bounded_output(text: str, max_chars: int) -> tuple[str, bool]:
     head_chars = max(1, int(max_chars * 0.6))
     tail_chars = max(1, max_chars - head_chars)
     omitted = len(text) - head_chars - tail_chars
-    marker = f"\n...[中段省略 {omitted} 字符，完整输出共 {len(text)} 字符 / {text.count(chr(10)) + 1} 行]...\n"
+    marker = f"\n...[中段省略 {omitted} 字符，完整输出共 {len(text)} 字符 / {_captured_line_count(text)} 行]...\n"
     return text[:head_chars] + marker + text[-tail_chars:], True
 
 
+# LLM: 模型正文的计数必须基于 CompletedProcess 原采集文本，与展示层同源；不能把预览截断当实际输出丢失。
+# 函数用途: 生成有界命令回执，保留退出码、实际采集长度和行数，不修改进程输出。
 def _format_process_result(result: subprocess.CompletedProcess[str], max_output_chars: int) -> str:
     stdout = result.stdout if result.stdout else ""
     stderr = result.stderr if result.stderr else ""
@@ -365,7 +376,7 @@ def _format_process_result(result: subprocess.CompletedProcess[str], max_output_
     stderr_preview, stderr_truncated = _bounded_output(stderr, max_output_chars)
     return (
         f"return_code={result.returncode}\n"
-        f"stdout_chars={len(stdout)} stdout_lines={stdout.count(chr(10)) + (1 if stdout else 0)} "
+        f"stdout_chars={len(stdout)} stdout_lines={_captured_line_count(stdout)} "
         f"stdout_preview_chars={len(stdout_preview)} "
         f"stdout_truncated={stdout_truncated}\n"
         f"stdout={stdout_preview}\n"
@@ -375,7 +386,7 @@ def _format_process_result(result: subprocess.CompletedProcess[str], max_output_
     )
 
 
-# LLM: 保存当次 CompletedProcess 的采集全文，供统一 owner/thread archive 在事件预览前冻结；模型正文仍由 _format_process_result 限额。
+# LLM: 保存当次 CompletedProcess 的采集全文，供统一 owner/thread archive 在事件预览前冻结；模型正文仍由 _format_process_result 限额，两者使用同一行数口径。
 # 函数用途: 保留命令原始标准/错误输出和采集缺口；不能重读业务文件，也不能把采集上限外的字节称为已保存。
 def _command_display(result: subprocess.CompletedProcess[str]) -> dict[str, object]:
     stdout = str(result.stdout or "")
@@ -388,8 +399,8 @@ def _command_display(result: subprocess.CompletedProcess[str]) -> dict[str, obje
         "return_code": int(result.returncode) if result.returncode is not None else None,
         "stdout": stdout,
         "stderr": stderr,
-        "stdout_lines": stdout.count("\n") + (1 if stdout else 0),
-        "stderr_lines": stderr.count("\n") + (1 if stderr else 0),
+        "stdout_lines": _captured_line_count(stdout),
+        "stderr_lines": _captured_line_count(stderr),
         "stdout_truncated": seen.get("stdout", 0) > retained.get("stdout", 0),
         "stderr_truncated": seen.get("stderr", 0) > retained.get("stderr", 0),
         "capture_complete": capture.get("complete") is not False,

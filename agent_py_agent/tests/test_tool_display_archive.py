@@ -167,6 +167,35 @@ def test_shell_keeps_captured_original_before_preview_and_archive(tmp_path, chil
     assert event.result.output == body
 
 
+@pytest.mark.parametrize(("text", "line_count"), [
+    ("", 0), ("one", 1), ("one\n", 1), ("\n", 1), ("\n\n", 2),
+    ("one\n\ntwo\n", 3), ("one\n\ntwo", 3),
+    ("one\r\ntwo\r\n", 2), ("进度一\r进度二", 1),
+])
+def test_shell_line_facts_count_captured_lines_without_phantom_tail(text, line_count):
+    process = subprocess.CompletedProcess("fixture", 0, text, text)
+
+    body = _format_process_result(process, 12000)
+    display = _command_display(process)
+
+    assert f"stdout_lines={line_count} " in body
+    assert display["stdout_lines"] == display["stderr_lines"] == line_count
+    assert display["stdout"] == display["stderr"] == text
+
+
+def test_truncated_shell_preview_uses_original_line_count():
+    text = "first-" + "中" * 100 + "\n\nlast\n"
+    process = subprocess.CompletedProcess("fixture", 0, text, text)
+
+    body = _format_process_result(process, 20)
+    display = _command_display(process)
+
+    assert "stdout_lines=3 " in body
+    assert body.count(f"完整输出共 {len(text)} 字符 / 3 行") == 2
+    assert display["stdout_lines"] == display["stderr_lines"] == 3
+    assert display["stdout"] == display["stderr"] == text
+
+
 def test_actual_capture_limit_is_explicit_in_archive_and_history(tmp_path):
     from agent_py_agent.agent.tooling.process_output_capture import ProcessOutputCapture
     from agent_py_agent.cli.chat_parts.tui_runtime import _tool_payload
