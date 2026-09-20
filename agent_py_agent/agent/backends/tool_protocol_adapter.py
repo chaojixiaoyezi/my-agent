@@ -1,3 +1,5 @@
+# LLM: 此模块独占规范工具调用的协议转换与显式目录选择；模型正文不取得执行权，需联合三种后端和工具合同测试。
+# 模块用途: 将原生事件或完整文本协议帧转换为工具调用，并验证请求指定工具属于本次目录。
 from __future__ import annotations
 
 """Provider protocol adapters for canonical ToolCall values.
@@ -20,10 +22,6 @@ from ..tooling.runtime_contracts import (
 from .text_protocol_parser import (
     _TEXT_CLOSE,
     _TEXT_OPEN,
-    MAX_BLOCK_CHARS,
-    MAX_RESPONSE_CHARS,
-    MAX_TEXT_CALLS,
-    scan_text_blocks,
 )
 
 _NATIVE_PSEUDO_TOOL_MARKERS = (
@@ -350,3 +348,22 @@ __all__ = [
     "canonical_tool_calls_from_response",
     "openai_tool_choice",
 ]
+
+
+# LLM: 工具协议只从已提供目录中应用显式 ToolChoice；越界特定工具必须报错，需联合三种后端回归。
+# 函数用途: 生成本次请求的工具目录，关闭模式清空，指定模式验证工具确实存在。
+def tools_for_choice(
+    tools: list[dict[str, Any]] | None,
+    choice: ToolChoice | None,
+) -> list[dict[str, Any]]:
+    selected = list(tools or ())
+    if choice is None or choice.mode == "auto":
+        return selected
+    if choice.mode == "none":
+        return []
+    if not selected:
+        raise ValueError(f"tool_choice={choice.mode} requires a non-empty tools surface")
+    names = {str(tool.get("name") or "").strip() for tool in selected if isinstance(tool, dict)}
+    if choice.mode == "specific" and choice.tool_name not in names:
+        raise ValueError(f"specific tool_choice is outside provider surface: {choice.tool_name}")
+    return selected

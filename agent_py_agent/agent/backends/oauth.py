@@ -2,8 +2,10 @@
 # 模块用途: 将登录账号接入原 HTTP、流式、取消及用量链路，订阅接口的显式差异保持局部。
 from __future__ import annotations
 
-from .base import AnthropicCompatibleBackend, OpenAICompatibleBackend
+from .anthropic import AnthropicCompatibleBackend
+from .base import BackendOptions
 from .gateway_helpers import GatewayRequest
+from .openai_chat import OpenAICompatibleBackend
 from .provider_headers import endpoint_parts, request_headers
 from .responses import OpenAIResponsesBackend
 
@@ -11,13 +13,20 @@ from .responses import OpenAIResponsesBackend
 # LLM: 每个实例持有无秘密的冻结引用；令牌不会缓存在工作片中，也不能修改共享 Agent 配置。
 # 类用途: 为已有协议附加 owner 私有 OAuth 认证。
 class _OAuthMixin:
-    # LLM: 引用由模型配置解析器生成，必须完整；旧登录代次失效时不能自行读取新账号。
-    # 函数用途: 初始化认证引用并复用原后端初始化。
-    def __init__(self, options, *, auth_ref: dict, **kwargs):
+    # LLM: 引用由模型配置解析器生成，必须完整；仅 Messages 有版本参数，工厂须显式传入，不接收未知配置。
+    # 函数用途: 初始化冻结认证引用并复用原协议构造，不读取账号或发起认证请求。
+    def __init__(
+        self,
+        options: BackendOptions,
+        *,
+        auth_ref: dict,
+        anthropic_version: str | None = None,
+    ) -> None:
         self.auth_ref = dict(auth_ref)
         if not all(self.auth_ref.get(field) for field in ("path", "provider_id", "generation", "binding", "mode")):
             raise ValueError("OAuth 运行引用不完整，请重新选择已登录的模型。")
-        super().__init__(options, **kwargs)
+        protocol_options = {} if anthropic_version is None else {"anthropic_version": anthropic_version}
+        super().__init__(options, **protocol_options)
         if self.auth_ref["mode"] == "chatgpt":
             self.stream_enabled = True
             self.stream_timeout_is_idle = True

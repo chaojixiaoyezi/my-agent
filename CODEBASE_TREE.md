@@ -285,7 +285,11 @@ agent_py_agent/
 |       |-- responses.py               # Responses 协议生成入口，复用正式 HTTP/取消/超时主链
 |       |-- responses_wire.py          # typed SSE/items 与既有工具历史映射、加密 reasoning 回放
 |       |-- anthropic_prompt_cache.py  # Anthropic tools/system/最新 history 断点与追加式 user 投影
-|       |-- base.py                    # 各 provider HTTP 请求、流式解析与统一 Backend 工厂
+|       |-- base.py                    # 模型响应、冻结选项和公共后端接口；本地 echo/缺配置实现
+|       |-- http.py                    # HTTP 传输、请求局部控制、工具探针与模型目录读取
+|       |-- openai_chat.py             # Chat Completions 请求、原生历史、思考和流式结果转换
+|       |-- anthropic.py               # Messages 请求对象、缓存布局、思考及工具结果转换
+|       |-- factory.py                 # 显式配置构造唯一后端，缺配置判据与调度共享
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- test_subagent_activity_diagnostics.py # 阶段提醒、慢流不误杀、执行代与消息去重回归

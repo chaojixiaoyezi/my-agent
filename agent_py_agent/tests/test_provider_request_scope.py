@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.backends.base import BackendOptions, OpenAICompatibleBackend
+from agent_py_agent.agent.backends.base import BackendOptions
+from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.backends.request_scope import (
     foreground_model_active,
     foreground_model_scope,

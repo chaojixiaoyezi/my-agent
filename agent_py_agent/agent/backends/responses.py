@@ -2,8 +2,11 @@
 # 模块用途: 支持 /responses 的显式采样、文本、工具调用、流式摘要、JSON 输出及用量统计。
 from __future__ import annotations
 
-from .base import ModelResponse, OpenAICompatibleBackend, _bounded_output_tokens, _tools_for_choice
+from .base import ModelResponse
+from .http import bounded_output_tokens
+from .openai_chat import OpenAICompatibleBackend
 from .responses_wire import collect_response, input_items, response_fields
+from .tool_protocol_adapter import tools_for_choice
 
 
 # LLM: 继承公开生成签名以保持 Compact/原生调用方一致，仅覆盖协议组装和解析。
@@ -24,13 +27,13 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     # 函数用途: 用工作片冻结的私有配置及 top_p 发送一次请求，转成上层通用模型结果。
     def _generate(self, request) -> ModelResponse:
         payload = {"model": self.model_name, "store": False, "include": ["reasoning.encrypted_content"],
-                   "max_output_tokens": _bounded_output_tokens(self.max_tokens, request.max_output_tokens),
+                   "max_output_tokens": bounded_output_tokens(self.max_tokens, request.max_output_tokens),
                    "input": input_items(request.prompt, request.messages, request.system_instruction, self.model_name)}
         if self.temperature_explicit:
             payload["temperature"] = self.temperature
         if self.top_p is not None:
             payload["top_p"] = self.top_p
-        tools = _tools_for_choice(request.tools, request.tool_choice)
+        tools = tools_for_choice(request.tools, request.tool_choice)
         if tools:
             payload["tools"] = [{"type": "function", "name": tool["name"], "description": tool.get("description", ""),
                                  "parameters": tool["input_schema"], "strict": False} for tool in tools]

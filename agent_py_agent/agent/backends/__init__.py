@@ -7,15 +7,15 @@ import importlib
 from typing import Any
 
 _EXPORTS: dict[str, tuple[str, str]] = {
-    "AnthropicCompatibleBackend": ("base", "AnthropicCompatibleBackend"),
+    "AnthropicCompatibleBackend": ("anthropic", "AnthropicCompatibleBackend"),
     "BackendOptions": ("base", "BackendOptions"),
     "BaseBackend": ("base", "BaseBackend"),
     "EchoBackend": ("base", "EchoBackend"),
-    "HttpBackend": ("base", "HttpBackend"),
+    "HttpBackend": ("http", "HttpBackend"),
     "ModelResponse": ("base", "ModelResponse"),
-    "OpenAICompatibleBackend": ("base", "OpenAICompatibleBackend"),
+    "OpenAICompatibleBackend": ("openai_chat", "OpenAICompatibleBackend"),
     "ProviderRequestOptions": ("base", "ProviderRequestOptions"),
-    "get_backend": ("base", "get_backend"),
+    "get_backend": ("factory", "get_backend"),
     "ProviderContextWindowError": ("errors", "ProviderContextWindowError"),
     "ProviderQuotaExhaustedError": ("errors", "ProviderQuotaExhaustedError"),
     "ProviderConnectionError": ("errors", "ProviderConnectionError"),

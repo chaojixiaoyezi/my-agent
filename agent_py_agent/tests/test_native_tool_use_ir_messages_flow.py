@@ -33,7 +33,8 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
     _materialize_native_prompt_facts,
     _native_provider_messages,
 )
-from agent_py_agent.agent.backends.base import AnthropicCompatibleBackend, BackendOptions
+from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+from agent_py_agent.agent.backends.base import BackendOptions
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.backends.tool_ir import RuntimeFactsTurn, ToolResult, UserTurn
 from agent_py_agent.agent.conversation.models import ConversationHistorySeed, MessageLogEntry
@@ -107,7 +108,7 @@ def test_reasoning_only_continue_preserves_each_response_before_next_tool_round(
         tool_loop_response_decision,
     )
     from agent_py_agent.agent.backends import ModelResponse
-    from agent_py_agent.agent.backends.base import OpenAICompatibleBackend
+    from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 
     agent, params = _native_agent(tmp_path), _params()
     params = replace(params, tool_runtime_snapshot=runtime_snapshot_for_model_specs((), run_id=params.run_id))

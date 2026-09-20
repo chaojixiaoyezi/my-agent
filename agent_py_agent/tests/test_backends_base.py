@@ -8,17 +8,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
 from agent_py_agent.agent.backends.base import (
-    AnthropicCompatibleBackend,
     BackendOptions,
     BaseBackend,
     EchoBackend,
-    HttpBackend,
     ModelResponse,
-    OpenAICompatibleBackend,
-    get_backend,
 )
 from agent_py_agent.agent.backends.errors import ProviderResponseError, ProviderTimeoutError
+from agent_py_agent.agent.backends.factory import get_backend
+from agent_py_agent.agent.backends.http import HttpBackend
+from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 
 _DEFAULT_OPTIONS = BackendOptions(
     api_base="https://api.example.com",

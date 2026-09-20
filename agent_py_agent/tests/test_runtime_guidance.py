@@ -52,11 +52,9 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
     _native_provider_messages,
 )
 from agent_py_agent.agent.backends import ModelResponse, ProviderResponseError
-from agent_py_agent.agent.backends.base import (
-    AnthropicCompatibleBackend,
-    BackendOptions,
-    OpenAICompatibleBackend,
-)
+from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+from agent_py_agent.agent.backends.base import BackendOptions
+from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation.authority import (

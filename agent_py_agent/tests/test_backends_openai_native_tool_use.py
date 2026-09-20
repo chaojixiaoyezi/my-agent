@@ -5,12 +5,9 @@ from dataclasses import replace
 
 import pytest
 
-from agent_py_agent.agent.backends.base import (
-    BackendOptions,
-    OpenAICompatibleBackend,
-    ProviderRequestOptions,
-)
+from agent_py_agent.agent.backends.base import BackendOptions, ProviderRequestOptions
 from agent_py_agent.agent.backends.errors import ProviderResponseError
+from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 
 _OPTIONS = BackendOptions(
@@ -292,7 +289,7 @@ def test_openai_replays_reasoning_on_final_before_followup_with_tools(reasoning)
 
 
 def test_openai_plain_assistant_does_not_invent_reasoning_metadata() -> None:
-    from agent_py_agent.agent.backends.base import _openai_assistant_messages
+    from agent_py_agent.agent.backends.openai_chat import _openai_assistant_messages
 
     assert _openai_assistant_messages([{"type": "text", "text": "hello"}]) == [
         {"role": "assistant", "content": "hello"}
@@ -302,7 +299,7 @@ def test_openai_plain_assistant_does_not_invent_reasoning_metadata() -> None:
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("reasoning", [None, "", "已经确认。"])
 def test_openai_response_reasoning_presence_survives_native_replay(stream, reasoning):
-    from agent_py_agent.agent.backends.base import _openai_assistant_messages
+    from agent_py_agent.agent.backends.openai_chat import _openai_assistant_messages
 
     backend = OpenAICompatibleBackend(replace(_OPTIONS, stream_enabled=stream))
     message = {"content": "已完成这一步。"}
@@ -552,7 +549,8 @@ def test_openai_length_native_arguments_are_rejected_as_incomplete() -> None:
 
 
 def _openai_backend_capturing(captured):
-    from agent_py_agent.agent.backends.base import BackendOptions, OpenAICompatibleBackend
+    from agent_py_agent.agent.backends.base import BackendOptions
+    from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 
     backend = OpenAICompatibleBackend(
         BackendOptions(
@@ -622,7 +620,8 @@ def test_complete_reasoning_history_keeps_thinking_mode_and_original_text():
 
 
 def test_unknown_gateway_never_receives_deepseek_thinking_field():
-    from agent_py_agent.agent.backends.base import BackendOptions, OpenAICompatibleBackend
+    from agent_py_agent.agent.backends.base import BackendOptions
+    from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 
     captured = {}
     backend = OpenAICompatibleBackend(

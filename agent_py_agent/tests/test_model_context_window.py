@@ -86,7 +86,8 @@ def test_unknown_model_window_uses_generic_200k_fallback() -> None:
 
 
 def test_http_backend_model_metadata_beats_config(monkeypatch) -> None:
-    from agent_py_agent.agent.backends.base import BackendOptions, OpenAICompatibleBackend
+    from agent_py_agent.agent.backends.base import BackendOptions
+    from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 
     monkeypatch.setattr(
         "agent_py_agent.agent.backends.model_metadata.get_json",
@@ -107,7 +108,8 @@ def test_http_backend_model_metadata_beats_config(monkeypatch) -> None:
 
 
 def test_http_backend_metadata_without_window_uses_config(monkeypatch) -> None:
-    from agent_py_agent.agent.backends.base import AnthropicCompatibleBackend, BackendOptions
+    from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+    from agent_py_agent.agent.backends.base import BackendOptions
 
     monkeypatch.setattr(
         "agent_py_agent.agent.backends.model_metadata.get_json",

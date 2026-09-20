@@ -7,12 +7,10 @@ from dataclasses import replace
 
 import pytest
 
-from agent_py_agent.agent.backends.base import (
-    AnthropicCompatibleBackend,
-    BackendOptions,
-    OpenAICompatibleBackend,
-)
+from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+from agent_py_agent.agent.backends.base import BackendOptions
 from agent_py_agent.agent.backends.errors import ProviderResponseError
+from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 
 _OPTIONS = BackendOptions(
     api_base="https://api.example.com",

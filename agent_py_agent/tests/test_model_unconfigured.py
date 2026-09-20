@@ -78,7 +78,7 @@ def test_echo_requires_explicit_selection():
 @pytest.mark.parametrize("model,url", [("", ""), ("chosen", ""), ("", "https://example.test/v1"),
                                        ("chosen", "https://example.test/v1")])
 def test_background_readiness_matches_backend_factory(backend, model, url):
-    from agent_py_agent.agent.backends.base import model_configuration_missing
+    from agent_py_agent.agent.backends.factory import model_configuration_missing
 
     config = AgentConfig(model_backend=backend, model_name=model, api_base=url)
     assert model_configuration_missing(backend, config) == (get_backend(backend, config).name == "unconfigured")

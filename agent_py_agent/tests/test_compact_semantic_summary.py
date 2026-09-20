@@ -21,14 +21,10 @@ from agent_py_agent.agent.agent_core.runtime.loop_models import (
     RuntimeToolLoopSeed,
 )
 from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
-from agent_py_agent.agent.backends.base import (
-    AnthropicCompatibleBackend,
-    BackendOptions,
-    ModelResponse,
-    OpenAICompatibleBackend,
-    ProviderRequestOptions,
-)
+from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+from agent_py_agent.agent.backends.base import BackendOptions, ModelResponse, ProviderRequestOptions
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
+from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.backends.tool_ir import (
     AssistantTurn,
     CompactionSummary,

@@ -50,17 +50,15 @@ def without_tool_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [dict(block) for block in blocks if block.get("type") != "tool_use"]
 
 
-# LLM: 只读取响应里真实出现过的 name，不按工具职责补全或猜类型；返回结果只用于让上层判断
-# "该给哪个工具发有界恢复"，绝不能据此生成可执行调用。
+# LLM: Chat/Messages 每次传入一份已观察工具序列；只读真实 name，不猜类型、不生成调用，调整时核对两种协议。
 # 函数用途: 收集本次未完成响应中被丢弃工具的工具名，去重保序，供工具循环做有界恢复。
-def truncated_tool_names(*sources: object) -> list[str]:
+def truncated_tool_names(source: object) -> list[str]:
     names: list[str] = []
-    for source in sources:
-        considered = source if isinstance(source, (list, tuple)) else ()
-        for item in considered:
-            name = _observed_tool_name(item)
-            if name and name not in names:
-                names.append(name)
+    considered = source if isinstance(source, (list, tuple)) else ()
+    for item in considered:
+        name = _observed_tool_name(item)
+        if name and name not in names:
+            names.append(name)
     return names
 
 
@@ -76,3 +74,10 @@ def _observed_tool_name(item: object) -> str:
         return name
     function = item.get("function")
     return str(function.get("name") or "").strip() if isinstance(function, dict) else ""
+
+
+# LLM: 响应诊断只裁剪错误展示，不得替换 canonical 响应或影响重试分类；调用方需遵守私有错误展示边界。
+# 函数用途: 为供应商响应解析错误生成有界预览，不写文件或发请求。
+def response_preview(obj: object, *, max_chars: int = 1000) -> str:
+    text = str(obj)
+    return text if len(text) <= max_chars else text[:max_chars] + "... [truncated]"

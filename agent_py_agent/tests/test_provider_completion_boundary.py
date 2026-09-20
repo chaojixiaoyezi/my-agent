@@ -8,11 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.backends.base import (
-    AnthropicCompatibleBackend,
-    ModelResponse,
-    OpenAICompatibleBackend,
-)
+from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+from agent_py_agent.agent.backends.base import ModelResponse
+from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.backends.responses_wire import response_fields
 from agent_py_agent.agent.backends.tool_protocol_adapter import canonical_tool_calls_from_response
 from agent_py_agent.agent.turn_end import result_turn_end_reason

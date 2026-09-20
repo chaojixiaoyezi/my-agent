@@ -7,11 +7,8 @@ from dataclasses import replace
 import pytest
 
 from agent_py_agent.agent.backends import anthropic_prompt_cache
-from agent_py_agent.agent.backends.base import (
-    AnthropicCompatibleBackend,
-    BackendOptions,
-    ProviderRequestOptions,
-)
+from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+from agent_py_agent.agent.backends.base import BackendOptions, ProviderRequestOptions
 from agent_py_agent.agent.backends.errors import ProviderResponseError
 from agent_py_agent.agent.backends.stream_parsers import anthropic_stream_events
 from agent_py_agent.agent.backends.usage_metadata import (

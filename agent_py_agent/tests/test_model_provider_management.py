@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from agent_py_agent.agent.backends import BackendOptions, get_backend
-from agent_py_agent.agent.backends.base import HttpBackend
+from agent_py_agent.agent.backends.http import HttpBackend
 from agent_py_agent.agent.backends.provider_headers import (
     provider_runtime_scope,
     request_headers,

@@ -242,7 +242,8 @@ def test_incomplete_body_exhausts_only_existing_model_retry_budget(monkeypatch):
 
 
 def test_native_partial_tool_input_never_returns_a_response_on_http_disconnect(monkeypatch):
-    from agent_py_agent.agent.backends.base import AnthropicCompatibleBackend, BackendOptions
+    from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+    from agent_py_agent.agent.backends.base import BackendOptions
 
     events = [
         {"type": "content_block_start", "index": 0,

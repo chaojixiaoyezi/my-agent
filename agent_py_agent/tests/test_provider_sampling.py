@@ -144,7 +144,9 @@ def test_messages_request_temperature_override_is_local(monkeypatch):
     config = AgentConfig(model_backend="anthropic_compatible", model_name="custom", api_base="https://example.test/v1",
                          api_key="fake", stream_enabled=False)
     backend, payload = capture_payload(monkeypatch, config)
-    backend._generate_request("summarize", temperature=0.0)
+    from agent_py_agent.agent.backends.anthropic import _AnthropicGenerateRequest
+
+    backend._generate_request(_AnthropicGenerateRequest("summarize", temperature=0.0))
     assert payload["temperature"] == 0.0
     payload.clear()
     backend.generate("hi")

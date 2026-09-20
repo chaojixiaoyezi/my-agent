@@ -39,6 +39,9 @@ Shell 不设人为命令字符上限，安全、权限、时间和输出预算�
 本入口只保留现行规则与导航；当前设计、已实现内容和开放问题分别见 `DESIGN_LEDGER.md`、
 `docs/COMPLETED.md` 和 `STATUS.md`。旧轮次的测试结果不替代当前发布验收。
 
+后端公共合同读 `backends/base.py`，传输读 `http.py`，协议读 `openai_chat.py` / `anthropic.py` / `responses.py`，
+构造及缺配置判据读 `factory.py`；旧 base 文件不再承载协议实现。
+
 - 每台机器一个 Gateway，多个 TUI 是独立客户端/会话。wheel 使用 non-editable 独立 runtime，
   Gateway 与默认 TUI 入口必须同版；检查 executable、module.__file__、安装位置和实际配置，保留回滚。
 - 常规真实模型验收默认官网 MiniMax-M2.7；检查实际 provider/端点，不按同名模型推断。

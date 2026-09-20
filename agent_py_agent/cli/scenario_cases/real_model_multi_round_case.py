@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ...agent.backends import ModelResponse
-from ...agent.backends.base import get_backend
+from ...agent.backends.factory import get_backend
 from ..scenario_utils import (
     create_scenario_workspace,
     install_scenario_backend,

@@ -93,7 +93,7 @@ def is_model_configuration_unavailable(error: BaseException) -> bool:
 # LLM: 仅供已因模型配置失败的后台车道复查；复用 owner 验证及模型引用，旧空引用沿原入口一次迁移。
 # 函数用途: 用户修改模型后判断是否可恢复后台工作；不读其它会话选择，不构造后端或发送网络请求。
 def thread_model_is_configured(agent: object, thread_id: str) -> bool:
-    from ..backends.base import model_configuration_missing
+    from ..backends.factory import model_configuration_missing
 
     try:
         config = thread_model_config(agent, thread_id)
