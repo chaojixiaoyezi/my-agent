@@ -38,6 +38,11 @@ TUI，共用单 Gateway；只有用户明确要求的慢模型专项才另用单
 
 ## 重点定向回归入口
 
+- runner 正常让出：`test_subagent_runner_result_state.py` 通过真实 manager 写回和读盘，联测六种结束原因、
+  旧错误清理、显式失败、缺失/未知原因及状态冲突；`ok=False` 的正常让出不应填 `runner_error` 或最近错误。
+  联合直属等待、恢复、结果载荷、能力授权、来源工作者和 Compact 共 237 项通过、1 项既有 xfail。
+  真实 TUI 核对递归父级的 `PENDING / interrupted`、空错误字段、精确等待身份及结果触发的续跑；
+  另用真实 `/stop` 验证取消不被清成普通等待，模型分工质量单独记录。
 - 探针端点：`test_backends_base.py::test_probe_endpoint_matches_transport_request` 截获实际 HTTP 出口信封，
   比较能力诊断与请求 URL；覆盖 Messages、Chat、Responses 的代理前缀、版本后缀、完整接口、尾斜杠及成功/未证明能力共 36 组。
   替身只提供协议响应，不替换地址计算；与原生工具、请求作用域和 OAuth 相邻回归共 228 项通过。

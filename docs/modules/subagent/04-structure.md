@@ -1,5 +1,17 @@
 # Subagent Structure
 
+## runner 当前错误投影
+
+- `manager_runner_result_payload.py::apply_status_and_build_payload` 将显式 `turn_end_reason` 传入既有
+  状态上下文；后续为展示推导的原因不能用来证明本次没有失败。
+- `runner_result_state.py` 复用 `turn_end.py::subagent_outcome_for_turn_end`：只有已知原因对应的状态和
+  `ok` 同时匹配、且没有显式失败时，才清除当前 `failure_type` 与 `runner_last_error`。
+  正常让出仍为 `PENDING/ok=False`，不改成完成；后续正常完成也不遗留上一轮错误。
+- 缺失或未知原因、状态不符及显式失败保留原有保守诊断；不改历史结果、attempt 身份、权限、收口和通知顺序。
+- 定向入口 `test_subagent_runner_result_state.py` 覆盖正式管理器落盘、结果归档、正常让出与完成、
+  模型失败、能力阻塞、取消和冲突组合；真实逐项唤醒及停止证据见
+  [并行执行验收](../../design/SUBAGENT_PARALLEL_EXECUTION.md)。
+
 ## 派工事实与角色提示
 
 - `agent_tree/model_view.py` 从同一已授权快照投影模型状态；`list_agents` 不再原样输出界面恢复细节。

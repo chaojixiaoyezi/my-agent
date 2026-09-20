@@ -1,4 +1,5 @@
-
+# LLM: runner 写回遵守唯一 turn_end 协议及宿主授权事实；未完成不等于失败，修改须联测持久结果、直属等待和恢复。
+# 模块用途: 把子代理本轮状态、失败分类和活动信息写回任务对象，由调用方沿原账本持久化。
 from __future__ import annotations
 
 """task state mutation rules for runner result recording.
@@ -10,6 +11,7 @@ runner 写回状态的分支比较多，单独放这里，manager mixin 只负�
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..turn_end import normalize_turn_end_reason, subagent_outcome_for_turn_end
 from .model_capabilities import (
     capability_request_counts_as_open,
     capability_request_requires_parent_resolution,
@@ -46,6 +48,8 @@ class RunnerResultFieldParams:
     now: float
 
 
+# LLM: 显式结束原因只描述本轮宿主事实，不读取旧 task.turn_end_reason；调用方保持原 attempt 计数与清理顺序。
+# 类用途: 携带当前尝试的记账字段，区分正常未完成与真正错误，不新增持久格式。
 @dataclass(frozen=True)
 class RunnerAttemptParams:
 
@@ -54,11 +58,11 @@ class RunnerAttemptParams:
     ok: bool
     message: str
     now: float
+    turn_end_reason: str
 
 
-# LLM: Runner state projection must prefer host-owned capability request/grant
-# facts over a generic provider "ok" turn end; model prose is never inspected.
-# 函数用途: 把本轮 runner 结果写回任务，并保证待授权子代理不会被误关成完成。
+# LLM: 宿主授权事实优先；显式结束原因与状态共同分类失败，不能把未完成当异常；保持租约释放和 attempt 顺序。
+# 函数用途: 更新 runner 任务、尝试计数与当前活动，正常让出保留可恢复状态并清除旧错误投影。
 def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     """Apply parsed runner status and raw status text to a task in place."""
     task = params.task
@@ -92,7 +96,9 @@ def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     elif message:
         task.result = message
     _apply_runner_timestamps(task, params.now)
-    _apply_runner_attempt_fields(RunnerAttemptParams(task, dry_run, ok, message, params.now))
+    _apply_runner_attempt_fields(RunnerAttemptParams(
+        task, dry_run, ok, message, params.now, status_context.get("turn_end_reason", ""),
+    ))
     apply_runner_display_status(task)
     _release_source_worker_lease_after_result(task, dry_run=dry_run)
     _reclaim_runner_launch_if_requeued(task)
@@ -163,10 +169,8 @@ def _consume_source_binding_transition_response(task: object) -> bool:
     return bool(current_attempt and current_attempt == expected_attempt)
 
 
-# LLM: Outcome truth comes from the already-projected structured task state;
-# an OPEN request is a blocker, while a just-granted final request means the
-# same run should continue rather than fail or close.
-# 函数用途: 给这次 runner 收口生成真实成功标志和说明。
+# LLM: 先沿宿主来源/授权状态裁决；未解析正文的失败分类只读显式结束原因，不能用 ok=False 判断所有未完成均失败。
+# 函数用途: 更新当前结果及失败字段并返回原成功标志和说明；正常让出仍未完成，不冒充成功收口。
 def _runner_result_outcome(task, parsed, result_meta: dict, status_context: dict) -> tuple[bool, str]:
     ok = result_meta["ok"]
     message = result_meta["message"]
@@ -194,7 +198,7 @@ def _runner_result_outcome(task, parsed, result_meta: dict, status_context: dict
     if parsed.found and task_has_failure_status(task):
         return False, parsed.blocked_reason or message or task.failure_type or task_status_reason_code(task.status)
     if not parsed.found:
-        _apply_unstructured_failure(task, ok, status_context["failure_type"])
+        _apply_unstructured_failure(task, ok, status_context)
         task.result = response or message or task.result
     return ok, message
 
@@ -598,10 +602,24 @@ def _normalized_verification_status(value: object) -> str:
     return normalize_verification_status(value)
 
 
-def _apply_unstructured_failure(task, ok, failure_type: str) -> None:
-    known = known_failure_type(failure_type)
+# LLM: 复用唯一轮结束映射，只接受显式合法 reason 与当前 status/ok 一致；未知原因或冲突不能豁免失败记录。
+# 函数用途: 只读判断当前宿主结果是否明确不带失败，供任务字段及尝试诊断共用。
+def _runner_turn_has_no_failure(task: object, ok: bool, turn_end_reason: object) -> bool:
+    reason = normalize_turn_end_reason(turn_end_reason)
+    if not reason:
+        return False
+    status, failure_type, expected_ok = subagent_outcome_for_turn_end(reason)
+    return not failure_type and ok == expected_ok and task_status_in(getattr(task, "status", ""), {status})
+
+
+# LLM: 明确失败类型优先，正常完成/让出清当前错误投影；未知或冲突结果保留原失败规则，不改历史尝试档案。
+# 函数用途: 在无结构化模型结果时更新任务失败字段，防止通用 runner_error 污染正常等待及后续完成。
+def _apply_unstructured_failure(task, ok, status_context: dict) -> None:
+    known = known_failure_type(status_context["failure_type"])
     if known:
         task.failure_type = known
+    elif _runner_turn_has_no_failure(task, ok, status_context.get("turn_end_reason", "")):
+        task.failure_type = ""
     elif not ok:
         task.failure_type = task.failure_type or FailureType.RUNNER_ERROR.value
 
@@ -617,13 +635,16 @@ def _apply_runner_timestamps(task, now: float) -> None:
     task.heartbeat_at = now
 
 
+# LLM: 正常让出仍计一次真实 attempt 且保留 ok=False，但不写最近错误；typed 失败、未知原因和状态冲突仍留诊断。
+# 函数用途: 更新尝试次数、时间和最近错误并释放当前 attempt 标识，不改变调度和持久化顺序。
 def _apply_runner_attempt_fields(params: RunnerAttemptParams) -> None:
     task = params.task
     if params.dry_run:
         return
     task.runner_attempts = max(0, int(task.runner_attempts or 0)) + 1
     task.runner_last_attempt_at = params.now
-    if not params.ok or task_has_failure_status(task):
+    nonfailure = not task.failure_type and _runner_turn_has_no_failure(task, params.ok, params.turn_end_reason)
+    if (not params.ok and not nonfailure) or task_has_failure_status(task):
         task.runner_last_error = params.message
     else:
         task.runner_last_error = ""

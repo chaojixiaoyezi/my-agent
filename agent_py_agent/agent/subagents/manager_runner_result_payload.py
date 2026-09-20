@@ -1,4 +1,5 @@
-
+# LLM: runner 状态写回与结果载荷共用宿主结束协议；显式 reason 须传至失败分类，联测自然让出、异常和恢复。
+# 模块用途: 组装子代理本轮状态和持久结果，不从模型正文推断成功、失败或继续。
 from __future__ import annotations
 
 """Helpers for applying runner status and assembling runner result payloads."""
@@ -287,9 +288,8 @@ def _build_context_params(request: _ContextBuildRequest) -> _BuildContextParams:
     )
 
 
-# LLM: Build the payload only after structured runner state has been applied;
-# capability blockers may replace the provider's generic completed turn reason.
-# 函数用途: 先落任务状态，再用最终宿主事实组装 runner 结果。
+# LLM: 显式宿主 reason 参与失败分类，推断值仅沿原载荷协议；先落状态再组装，授权阻塞仍优先，联测等待和错误写回。
+# 函数用途: 把本轮结束事实交给任务状态写回，再组装持久结果；正常让出不能被未完成布尔误当失败。
 def apply_status_and_build_payload(
     params: RecordRunnerResultParams,
     extracted: _ApplyStatusParams,
@@ -312,6 +312,7 @@ def apply_status_and_build_payload(
         "status": params.status,
         "verification_status": params.verification_status,
         "failure_type": params.failure_type,
+        "turn_end_reason": params.turn_end_reason,
         "actual_tools": list(params.actual_tools or []),
     }
     turn_end_reason = infer_turn_end_reason(

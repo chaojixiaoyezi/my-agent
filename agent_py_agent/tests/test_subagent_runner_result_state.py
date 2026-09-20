@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from agent_py_agent.agent.agent_core.models import AgentRunResult
+from agent_py_agent.agent.agent_core.subagent.finalize_helpers import (
+    FinalizedRunnerRecordRequest,
+    record_finalized_runner_result,
+)
+from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.models import SubAgentParsedOutput, SubAgentTask
 from agent_py_agent.agent.subagents.runner_result_state import (
     RunnerResultFieldParams,
@@ -75,6 +88,71 @@ def test_runner_result_state_does_not_store_unknown_context_failure_type() -> No
     _apply(task, parsed=SubAgentParsedOutput(found=False, ok=False), ok=False, failure_type="error")
 
     assert task.failure_type == "runner_error"
+
+
+@pytest.mark.parametrize("reason,status,failure,ok", [
+    ("completed", "DONE", "", True),
+    ("interrupted", "PENDING", "", False),
+    ("max-tokens", "PENDING", "model_error", False),
+    ("blocked", "BLOCKED", "status_blocked", False),
+    ("aborted", "CANCELLED", "cancelled", False),
+    ("error", "FAILED", "runner_error", False),
+])
+def test_finalized_turn_persists_failure_classification(tmp_path, reason, status, failure, ok):
+    manager = SubAgentManager(tmp_path / "subagents")
+    task = manager.create_run(goal="整理结果", thought="沿原工作继续", plan=["整理"])
+    task.status = "RUNNING"
+    task.failure_type = "runner_error"
+    task.runner_last_error = "上一轮错误"
+    manager.save(task)
+    result = record_finalized_runner_result(FinalizedRunnerRecordRequest(
+        agent=SimpleNamespace(subagents=manager),
+        params=SimpleNamespace(
+            run_id=task.id,
+            active_attempt_id="",
+            result=AgentRunResult(
+                prompt="整理结果", response="正文只作展示，不决定成功或失败。",
+                backend="test", used_memories=0, turn_end_reason=reason,
+            ),
+        ),
+    ))
+
+    saved = manager.load(task.id)
+    assert saved.status == status
+    assert saved.failure_type == failure
+    assert bool(saved.runner_last_error) is bool(failure)
+    assert saved.runner_attempts == 1
+    assert saved.turn_end_reason == reason
+    assert result.ok is ok
+    assert result.runner_last_error == saved.runner_last_error
+    payload = json.loads(Path(saved.output_json).read_text())
+    archived = json.loads(Path(saved.runner_result_json).read_text())
+    assert payload["runner_last_error"] == saved.runner_last_error
+    assert archived["runner_last_error"] == saved.runner_last_error
+    assert payload["status"] == archived["status"] == status
+    assert payload["ok"] is archived["ok"] is ok
+
+
+@pytest.mark.parametrize("reason,status,failure,expected_failure", [
+    ("", "PENDING", "", "runner_error"),
+    ("unknown", "PENDING", "", "runner_error"),
+    ("interrupted", "FAILED", "", "runner_error"),
+    ("interrupted", "PENDING", "model_error", "model_error"),
+    ("interrupted", "BLOCKED", "permission_blocked", "permission_blocked"),
+    ("interrupted", "BLOCKED", "unknown_failure", "runner_error"),
+])
+def test_unfinished_result_keeps_unproven_or_explicit_failure(tmp_path, reason, status, failure, expected_failure):
+    manager = SubAgentManager(tmp_path / "subagents")
+    task = manager.create_run(goal="整理结果", thought="检查失败边界", plan=["整理"])
+    result = manager.runner_result.record_runner_result(RecordRunnerResultParams(
+        run_id=task.id, dry_run=False, ok=False, message="本轮未完成",
+        status=status, turn_end_reason=reason, failure_type=failure,
+    ))
+
+    saved = manager.load(task.id)
+    assert saved.failure_type == expected_failure
+    assert saved.runner_last_error == "本轮未完成"
+    assert result.ok is False
 
 
 # LLM: 真实事故形态：宿主机按"可续跑族"(MODEL_STREAM_INCOMPLETE) 提前结清 attempt

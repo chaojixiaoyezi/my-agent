@@ -51,10 +51,18 @@ runtime status 获取客观事实，归一为六种公开 reason：
 协作者消息原样归档；宿主另行记录 `turn_end.reason`，并以结构化 wake 通知父级。
 父级可以查看结果 refs、发补充消息或取消，不需要再调一个“推进”工具。
 
-后代调用 `create_subagents` 后，当前工作片按宿主
+后代仍有直属孩子运行并自然让出时，当前工作片按宿主
 `interrupted/SUBAGENTS_ACTIVE` 投影为 `PENDING`，并以精确直属 child ids 记录等待。
-这是主动让出，不是挂死。成功 child 收齐后宿主唤醒直属父级一次；失败或
+这是主动让出，不是挂死。任一直属 child 的新结果可唤醒父级；已处理的终态不重复触发，失败或
 capability 阻塞立即唤醒。新工作片从 canonical child state 获得结果引用，不依赖轮询工具。
+
+runner 写回同时保留 `ok=False`（未完成）与空 `failure_type`（没有失败），不能把两者合并成错误判断。
+显式合法 reason 与当前 status/ok 必须匹配唯一映射，且没有当前明确失败；此时清除当前任务的旧失败投影及 `runner_last_error`。
+`completed` 也按同一规则清当前旧错误。截断的 `model_error`、取消、权限阻塞、真实异常、未知原因及状态冲突仍保留诊断，
+历史尝试记录不改写。当前改动不改变直属等待、唤醒、调度或持久字段。
+
+参考核对了 Codex `codex-rs/core/src/agent/status.rs` 中 interrupted 与 errored 的独立事件投影；
+匹配合同索引未列到这一文件，因此仅引用已读源码边界，不宣称完整覆盖参考工程。
 
 历史 task 里的 `acceptance_checks` / `verification_status` 暂不物理删除，以便读取旧账本；
 它们不再进入 TaskEnvelope、runner 模型摘要、父级 wake、树摘要或完成算法。
