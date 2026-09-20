@@ -31,7 +31,8 @@ runner 的未完成不等于失败；显式结束原因与当前状态、成功�
 子代理身份先读 canonical run；父会话任务关联只是展示投影，不能把孩子或孙代理误当成主代理 claim。
 此修复已发布并同版部署双机，实际子/孙审批与原调用接续已验；报告质量和长任务失败仍见 STATUS。
 同参拒绝携带已发布部署：宿主列表跨同一 child attempt 的 Goal 续轮和活动回合 Compact 传递，批准不随之扩大。
-实际 TUI 70 已验证 Goal 续轮同参不再弹窗；其后模型改用嵌套 Shell 后台启动，暴露前台超时遗留进程，仍须修复。
+实际 TUI 70 已验证 Goal 续轮同参不再弹窗；其后嵌套 Shell 后台启动与前台超时遗留进程已本地修复，安装版复验待完成。
+Shell 字面程序语法归 shell_syntax.py；前台管道结束前保留组长，终止仍沿 process_registry 核对出生标识与独立组成员。
 无生产调用的旧 verifier integrity 模块已删除；验证事实入口统一读 verification/runtime.py，文件完整性矩阵不证明报告正确。
 main 绑定当前选定任务的有效 claim；换轮失效，Goal paused 不取消当前审批，不把接收方续租当批准。
 同任务续做先绑定 canonical run/attempt 再准备归档，request 只代表当前消息；目录准备失败关闭本次新 attempt。

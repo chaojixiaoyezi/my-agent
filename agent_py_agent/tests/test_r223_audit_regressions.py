@@ -253,8 +253,8 @@ def test_search_provider_fallback_happens_after_domain_filter():
     ("echo '&'; sleep 3 &", True), ("cat <<'EOF'\nx & y\nEOF", False),
 ])
 def test_shell_background_lexer_keeps_quote_and_escape(command, background):
-    from agent_py_agent.agent.tooling.shell import _contains_unmanaged_background_operator
-    assert _contains_unmanaged_background_operator(command) is background
+    from agent_py_agent.agent.tooling.shell_syntax import contains_unmanaged_background_operator
+    assert contains_unmanaged_background_operator(command) is background
 
 
 def test_shell_capture_drains_both_unbroken_streams_with_bounded_memory(monkeypatch):

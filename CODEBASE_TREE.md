@@ -309,6 +309,7 @@ agent_py_agent/
 |   |   |-- gateway_status.py         # 本机管理员读取唯一 Gateway 身份、端点、队列和本生命周期日志摘要
 |   |   |-- user_config_tool.py        # main_agent 专用：读生效值/来源，写白名单项并报告生效时机
 |   |   |-- shell.py                  # 非交互 run_command、独立 stdin、超时/中断与有界 pipe drain
+|   |   |-- shell_syntax.py           # 外层及字面 Shell -c 的后台语法检查，不解释普通字符串或 heredoc 正文
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
@@ -504,6 +505,7 @@ docs/
 - `agent/common/text_file_window.py`：64 KiB 流式索引、有限检查点与页面 cookie；编码和字符坐标只保留一个实现。
 - `agent/common/file_version.py`：read_file 返回观察版本，write/edit/patch 明确携带前置条件；外部写入者不被强制纳管。
 - `agent/tooling/process_output_capture.py`：前台进程每流最多保留 4 MiB，仍持续排空并公开不完整事实，不假装完整大输出归档。
+- `agent_py_agent/agent/tooling/shell_syntax.py`：后台语法的唯一判断入口，复用公共命令分析器识别嵌套 Shell；动态变量与任意脚本不做静态安全证明。
 - `agent/tooling/computer_text_input.py`：文本事件的唯一适配入口；macOS 使用 Quartz Unicode，其他平台使用 PyAutoGUI 支持的字符，结果不代替应用状态验收。
 - `agent_py_agent/tests/test_r223_audit_regressions.py`：本轮底层故障样本；真实 TUI 另记在 R223 审计报告，不相互冒充。
 - 已删除 `agent/agent_core/_compression_service.py` 的旧记忆拼接路径；正式 Compact 仍由 ConversationStore/checkpoint/CAS 负责。

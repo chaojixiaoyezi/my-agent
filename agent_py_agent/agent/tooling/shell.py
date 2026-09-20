@@ -77,6 +77,7 @@ from .process_registry import (
 )
 from .process_session_store import process_session_store_root
 from .sandbox import SandboxUnavailable
+from .shell_syntax import contains_unmanaged_background_operator
 
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
 _DEFAULT_ACCESS_MODE = "workspace-write"
@@ -502,8 +503,8 @@ def _process_output_text(value: str | bytes | None) -> str:
     return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
 
 
-# LLM: 前台宿主与沙箱共用有界采集和进程树终止；超限只截断保留内容，继续排空，不能假装完整输出。
-# 函数用途: 等待命令完成；取消/超时清理进程，返回有限输出、完整性和终止事实。
+# LLM: 前台宿主与沙箱共用采集和进程树终止；管道结束前不得 poll 回收组长，否则孤儿后代失去可核对的组归属；联测 shell orphan kill。
+# 函数用途: 等待命令及输出管道完成；取消/超时清理原进程树和独立组成员，保留有限输出与真实终止事实。
 def _communicate_process(
     proc: subprocess.Popen[str],
     *,
@@ -526,7 +527,7 @@ def _communicate_process(
                 error = CommandTimeoutError(command, timeout, out, err, termination, drained)
                 error.capture = facts
                 raise error
-            if proc.poll() is not None and capture.done():
+            if capture.done() and proc.poll() is not None:
                 out, err, facts = capture.result()
                 if cancellation_requested():
                     raise CommandInterruptedError(command)
@@ -542,84 +543,6 @@ def _wants_background(params: dict[str, Any]) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"true", "1", "yes"}
-
-
-# LLM: Heredoc bodies are payload bytes rather than shell syntax. This helper
-# removes only those bodies while retaining opener and later shell lines, so
-# background detection cannot mistake source-code address operators for `&`.
-# 函数用途: 剔除 heredoc 正文，保留真正会由 shell 解释的命令行。
-def _shell_syntax_without_heredoc_bodies(command: str) -> str:
-    syntax_lines: list[str] = []
-    pending: list[tuple[str, bool]] = []
-    for line in str(command or "").splitlines():
-        if pending:
-            delimiter, strip_tabs = pending[0]
-            candidate = line.lstrip("\t") if strip_tabs else line
-            if candidate == delimiter:
-                pending.pop(0)
-            continue
-        syntax_lines.append(line)
-        pending.extend(_heredoc_delimiters_from_shell_line(line))
-    return "\n".join(syntax_lines)
-
-
-# LLM: Delimiter discovery uses the same quote-aware shell lexer as control
-# parsing. It recognizes `<<`/`<<-` only on syntax lines and never scans payload.
-# 函数用途: 读取一条 shell 命令里按出现顺序声明的 heredoc 结束标记。
-def _heredoc_delimiters_from_shell_line(line: str) -> list[tuple[str, bool]]:
-    try:
-        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>")
-        lexer.whitespace_split = True
-        lexer.commenters = "#"
-        tokens = tuple(lexer)
-    except ValueError:
-        return []
-    delimiters: list[tuple[str, bool]] = []
-    for index, token in enumerate(tokens[:-1]):
-        if token != "<<":
-            continue
-        delimiter = str(tokens[index + 1] or "")
-        strip_tabs = delimiter.startswith("-")
-        if strip_tabs:
-            delimiter = delimiter[1:]
-        if delimiter and delimiter not in {";", "&", "|", "<", ">"}:
-            delimiters.append((delimiter, strip_tabs))
-    return delimiters
-
-
-# LLM: 这里只识别外层未引用的独立 &，不是任意 Shell 程序的安全证明；真正边界仍是沙箱和进程树管理。
-# 函数用途: 保留引号、转义和注释信息，避免把字符串内的 & 或文件描述符重定向当成后台启动。
-def _contains_unmanaged_background_operator(command: str) -> bool:
-    syntax = _shell_syntax_without_heredoc_bodies(command)
-    quote, index = "", 0
-    while index < len(syntax):
-        char = syntax[index]
-        if char == "\\" and quote != "'":
-            index += 2
-            continue
-        if quote:
-            if char == quote:
-                quote = ""
-            index += 1
-            continue
-        if char in {"'", '"'}:
-            quote = char
-            index += 1
-            continue
-        if char == "#" and (index == 0 or syntax[index - 1].isspace()):
-            newline = syntax.find("\n", index)
-            index = len(syntax) if newline < 0 else newline + 1
-            continue
-        if char == "&":
-            previous = syntax[index - 1] if index else ""
-            following = syntax[index + 1] if index + 1 < len(syntax) else ""
-            if following == "&":
-                index += 2
-                continue
-            if previous not in {"<", ">", "|"} and following != ">":
-                return True
-        index += 1
-    return False
 
 
 # LLM: 错误正文只解释如何改成唯一受管形态，控制流仍由已注册 error_code 和
@@ -1123,7 +1046,7 @@ class ShellTool(BaseTool):
                 ),
                 error_code="COMMAND_POLICY_BLOCKED",
             )
-        if _contains_unmanaged_background_operator(command):
+        if contains_unmanaged_background_operator(command):
             return _unmanaged_background_result(self.model_spec.name)
         internal_status_ref = _internal_agent_status_command(command)
         if internal_status_ref is not None:

@@ -17,9 +17,9 @@ from agent_py_agent.agent.tooling.process_registry import process_registry
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.agent.tooling.shell import (
     ShellTool,
-    _contains_unmanaged_background_operator,
     _wants_background,
 )
+from agent_py_agent.agent.tooling.shell_syntax import contains_unmanaged_background_operator
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_test_call,
     runtime_snapshot_for_tools,
@@ -166,10 +166,35 @@ def test_shell_background_operator_requires_managed_mode(tmp_path, run_in_backgr
 
 
 def test_background_operator_parser_ignores_quotes_and_fd_redirects():
-    assert _contains_unmanaged_background_operator("sleep 1&") is True
-    assert _contains_unmanaged_background_operator("(sleep 1)&") is True
-    assert _contains_unmanaged_background_operator('printf "a&b"') is False
-    assert _contains_unmanaged_background_operator("echo hi 2>&1") is False
+    assert contains_unmanaged_background_operator("sleep 1&") is True
+    assert contains_unmanaged_background_operator("(sleep 1)&") is True
+    assert contains_unmanaged_background_operator('printf "a&b"') is False
+    assert contains_unmanaged_background_operator("echo hi 2>&1") is False
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("bash -c 'sleep 1 &'", True),
+        ("cd . && /bin/sh -lc 'sleep 1&'", True),
+        ("env FLAG=1 bash -c 'sleep 1 &'", True),
+        ("timeout 10 sh -c 'sleep 1 &'", True),
+        ('''bash -c "sh -c 'sleep 1 &'"''', True),
+        ('''bash -c "printf '%s' 'a&b'"''', False),
+        ("echo bash -c 'sleep 1 &'", False),
+        ('''python3 -c "value='&'"''', False),
+    ],
+)
+def test_background_operator_checks_literal_shell_programs(command, expected):
+    assert contains_unmanaged_background_operator(command) is expected
+
+
+def test_nested_background_is_rejected_before_launch(tmp_path, monkeypatch):
+    tool = ShellTool(tmp_path)
+    monkeypatch.setattr(tool, "_run_command", lambda *a, **k: pytest.fail("must not spawn"))
+    result = tool.execute({"command": "cd . && bash -c 'echo ready && sleep 30 &'"})
+    assert result.error_code == "BACKGROUND_PROCESS_MODE_REQUIRED"
+    assert result.effect_outcome == "not_started"
 
 
 def test_background_operator_parser_ignores_heredoc_body_but_keeps_shell_lines():
@@ -193,10 +218,10 @@ sleep 1 &
 EOF
 """
 
-    assert _contains_unmanaged_background_operator(go_source) is False
-    assert _contains_unmanaged_background_operator(background_after_body) is True
-    assert _contains_unmanaged_background_operator(background_on_opener) is True
-    assert _contains_unmanaged_background_operator(commented_fake_opener) is True
+    assert contains_unmanaged_background_operator(go_source) is False
+    assert contains_unmanaged_background_operator(background_after_body) is True
+    assert contains_unmanaged_background_operator(background_on_opener) is True
+    assert contains_unmanaged_background_operator(commented_fake_opener) is True
 
 
 def test_fd_redirect_remains_valid_in_foreground(tmp_path):

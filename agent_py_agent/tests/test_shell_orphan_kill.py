@@ -17,6 +17,50 @@ import pytest
 from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX orphaned process-group semantics")
+@pytest.mark.parametrize("ignore_term", [False, True])
+def test_foreground_timeout_cleans_group_after_leader_exits(tmp_path, ignore_term):
+    from agent_py_agent.agent.tooling.shell import CommandTimeoutError, _communicate_process
+
+    pidfile = tmp_path / "orphan.pid"
+    script = (
+        ("trap '' TERM; " if ignore_term else "")
+        + f"sleep 30 & echo $! > {shlex.quote(str(pidfile))}"
+    )
+    proc = subprocess.Popen(
+        ["bash", "-c", script], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    unrelated = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    child_pid = 0
+    try:
+        with pytest.raises(CommandTimeoutError) as caught:
+            _communicate_process(proc, command=script, timeout=1)
+        child_pid = int(pidfile.read_text())
+        deadline = time.monotonic() + 2
+        while _pid_alive(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _pid_alive(child_pid), "已退出的组长不能让仍持有管道的后台后代逃过超时清理"
+        assert caught.value.pipes_drained is True
+        assert caught.value.termination.confirmed is True
+        assert caught.value.termination.observed_processes >= 2
+        assert unrelated.poll() is None
+    finally:
+        if not child_pid and pidfile.exists():
+            child_pid = int(pidfile.read_text())
+        if child_pid and _pid_alive(child_pid):
+            os.kill(child_pid, 9)
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=3)
+        unrelated.terminate()
+        unrelated.wait(timeout=3)
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -179,3 +223,26 @@ def test_termination_does_not_resnapshot_reused_root_pid(monkeypatch):
     assert receipt.confirmed is True
     assert len(signal_tree.call_args_list) == 2
     assert signal_tree.call_args_list[-1].args[0] == {12345: "old-root", 12346: "original-child"}
+
+
+@pytest.mark.parametrize(
+    "root_group, same_identity, complete",
+    [(12345, False, False), (90000, True, True), (None, True, False)],
+)
+def test_group_expansion_requires_same_present_independent_leader(
+    monkeypatch, root_group, same_identity, complete,
+):
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    rows = "12346 12345\n"
+    if root_group is not None:
+        rows += f"12345 {root_group}\n"
+    monkeypatch.setattr(module, "capture_process_birth_token", lambda pid: "original-birth")
+    monkeypatch.setattr(module, "_same_process", lambda *args: same_identity)
+    monkeypatch.setattr(module.os, "getpgrp", lambda: 90000)
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, stdout=rows),
+    )
+
+    assert module._exclusive_group_members(12345) == ([], complete)

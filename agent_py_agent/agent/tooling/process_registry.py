@@ -1,4 +1,6 @@
 
+# LLM: 后台记录与前台命令共用出生标识和终止回执；组长仍可核对时才纳入其组成员，不能用旧 PID 猜归属；联测 registry、后台 host 与 shell orphan kill。
+# 模块用途: 记录受管进程并按精确执行归属停止，核对原进程树和独立组成员退出，不把发送信号当成清理完成。
 from __future__ import annotations
 
 """后台进程注册表 —— 让模型能管住 run_command(run_in_background=true) 起的后台进程。
@@ -712,8 +714,8 @@ def _safe_popen_kill(proc: subprocess.Popen | None) -> None:
         pass
 
 
-# LLM: 快照同时返回完整性；枚举失败不能等同于没有后代，也不能用于确认终止。
-# 函数用途: 只读采集 root 及可观察后代的出生标识，供同一次终止与退出核对使用。
+# LLM: 快照合并父子关系与仍可核对的独立进程组；只有活的或未回收组长能授予组范围，旧 PID 不能；枚举失败保留不完整，联测 shell orphan kill。
+# 函数用途: 只读采集原进程树及已换父进程的同组后代出生标识，供本次终止和退出核对共用。
 def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     if root_pid <= 0:
         return {}, False
@@ -721,8 +723,10 @@ def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     parents, complete = _process_parent_map()
     for child, parent in parents.items():
         children.setdefault(parent, []).append(child)
+    group_members, group_complete = _exclusive_group_members(root_pid)
+    complete = complete and group_complete
     ordered: list[int] = []
-    pending = [root_pid]
+    pending = [root_pid, *group_members]
     seen: set[int] = set()
     while pending:
         current = pending.pop()
@@ -734,6 +738,41 @@ def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     snapshot = {current: capture_process_birth_token(current) for current in ordered}
     complete = complete and all(token or _process_instance_terminated(pid, "") for pid, token in snapshot.items())
     return snapshot, complete
+
+
+# LLM: 仅独立组长且出生身份在枚举前后相同才拥有整组；不恢复已回收 root 的旧 PGID，不读取命令文字或扩大到宿主组。
+# 函数用途: 找出仍由本次组长证明归属的进程组成员，避免外层 Shell 退出后漏掉被系统接管的子进程。
+def _exclusive_group_members(root_pid: int) -> tuple[list[int], bool]:
+    birth = capture_process_birth_token(root_pid)
+    if not birth:
+        return [], _process_instance_terminated(root_pid, "")
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,pgid="], capture_output=True, text=True,
+            timeout=1, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return [], False
+    members: list[int] = []
+    root_group: int | None = None
+    complete = result.returncode == 0
+    for line in result.stdout.splitlines():
+        try:
+            pid, pgid = map(int, line.split())
+        except (TypeError, ValueError):
+            complete = False
+            continue
+        if pgid == root_pid:
+            members.append(pid)
+        if pid == root_pid:
+            root_group = pgid
+    if not _same_process(root_pid, birth):
+        return [], False
+    if root_group is None:
+        return [], False
+    if root_group != root_pid or root_group == os.getpgrp():
+        return [], complete
+    return members, complete
 
 
 # LLM: 进程枚举只使用系统结构化字段；无法访问或解析时返回不完整，禁止用空表证明退出。
