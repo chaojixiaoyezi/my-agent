@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# LLM: 此开发检查只核对合同实现、测试文件及尺寸报告是否齐备，不执行验证或证明业务质量；修改索引须检查真实调用方和 matrix gate 测试。
+# 模块用途: 检查离线验证入口是否缺文件；实际行为由索引中的测试和真实 TUI 分别验收。
 
 from __future__ import annotations
 
@@ -57,9 +59,11 @@ REQUIRED_AREAS = {
         "agent_py_agent/agent/contracts/effective_contract_snapshot.py",
         "agent_py_agent/tests/test_effective_contract_snapshot.py",
     ),
-    "verifier_integrity": (
-        "agent_py_agent/agent/contracts/offline_verifier_integrity_contract.py",
-        "agent_py_agent/tests/test_offline_verifier_integrity_contract.py",
+    "verification_evidence": (
+        "agent_py_agent/agent/verification/runtime.py",
+        "agent_py_agent/agent/verification/repository.py",
+        "agent_py_agent/tests/test_verification_runtime.py",
+        "agent_py_agent/tests/test_verification_repository.py",
     ),
     "plan_contract": (
         "agent_py_agent/agent/contracts/offline_plan_contract.py",

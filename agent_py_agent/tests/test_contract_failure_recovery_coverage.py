@@ -32,9 +32,6 @@ from agent_py_agent.agent.contracts.offline_tool_contract import validate_tool_e
 from agent_py_agent.agent.contracts.offline_tool_guardrail_contract import (
     validate_tool_guardrail_events,
 )
-from agent_py_agent.agent.contracts.offline_verifier_integrity_contract import (
-    validate_verifier_integrity,
-)
 from agent_py_agent.agent.contracts.run_trace_contract import validate_run_trace_events
 from agent_py_agent.agent.contracts.runtime_cards import RuntimeCard, validate_runtime_card_set
 from agent_py_agent.agent.contracts.runtime_config_contract import validate_runtime_config
@@ -75,7 +72,6 @@ def test_runtime_contract_validation_failures_return_recovery() -> None:
         )),
         validate_subagent_contract({"parent": {"run_id": "p", "status": "DONE", "required_child_run_ids": ["c"]}}),
         validate_security_boundary_events(({"type": "network_request", "url": "file:///etc/passwd"},)),
-        validate_verifier_integrity({"verifier": {"requires_llm": True}}),
         validate_runtime_card_set([RuntimeCard(kind="task", card_id="task-1", owner_user_id="u", status="RUNNING")]),
         validate_runtime_config({}),
         validate_replay_effective_contract({"contract_hash": "sha256:old"}, snapshot),

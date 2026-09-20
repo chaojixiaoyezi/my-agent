@@ -252,6 +252,9 @@ agent_py_agent/
 |   |   `-- task_promotion.py          # 任务工具触发提升、完成/中断候选选择与关闭
 |   |-- scheduler/                     # owner 持久 at/every/cron、CAS job/run 账本、claim/heartbeat 与同 thread 唤醒
 |   |-- verification/                  # owner 被动验证事件、targeted/full 投影与文件写后 stale
+|   |   |-- runtime.py                 # 公共工具出口读取结构化执行结果，记录验证或文件修改
+|   |   |-- repository.py              # 按 owner/thread/task 保存事件和过期状态，不升级验证范围
+|   |   `-- project_facts.py           # 从项目显式声明识别验证命令，不按报告文字猜测已验证
 |   |-- delivery/                      # 多 IM 统一投递：registry、可信 context、reply envelope、receipt
 |   |   |-- registry.py                # adapter/配置/健康/绑定/capabilities/target validator 唯一注册表
 |   |   `-- service.py                 # 普通回复、主动消息、原生附件的统一发送出口
@@ -434,6 +437,9 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `agent_py_agent/agent/verification/runtime.py`：主子代理共用的被动验证入口；它消费工具执行事实，不裁决任意报告的语义正确性。
+- `scripts/check_offline_contract_matrix.py`：开发文件完整性检查，验证证据项指向实际运行模块与测试；已删除无生产调用的旧 verifier integrity 合同及其自造数据测试。
 
 - `docs/design/MAINTAINABILITY_AND_JEV_REVIEW.md`：热点源码与参考阅读证据、未实施的重构顺序、Computer Use 当前条件及 Jev 可选接入方案。
 - `docs/design/PLUGIN_LIFECYCLE.md`：可选 Python 插件的核心边界、命令目录、隔离依赖、版本绑定和卡死卸载；提案与现有实现明确区分。
