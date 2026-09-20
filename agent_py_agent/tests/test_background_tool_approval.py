@@ -180,6 +180,18 @@ def test_background_approval_after_claim_end_never_publishes(background):
     assert list_pending_agent_tool_approvals(ctx.agent, root_task_id=ctx.task_id) == []
 
 
+@pytest.mark.parametrize("error", [OSError("unreadable"), ValueError("invalid state")])
+def test_canonical_child_read_error_cannot_fall_back_to_main_claim(background, monkeypatch, error):
+    ctx = background
+
+    def unreadable(_run_id):
+        raise error
+
+    monkeypatch.setattr(ctx.agent.subagents, "load", unreadable)
+    assert ctx.sink.request_permission(ctx.request.to_dict())["decision"] == "unavailable"
+    assert list_pending_agent_tool_approvals(ctx.agent, root_task_id=ctx.task_id) == []
+
+
 def test_main_session_approval_cannot_cross_claim_or_cancellation(background):
     ctx = background
     _pending_request(ctx)

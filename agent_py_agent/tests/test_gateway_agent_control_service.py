@@ -823,8 +823,24 @@ def test_thin_client_agent_requests_keep_local_conversation_identity() -> None:
     assert calls[-1][2] == 10.0
 
 
-def test_owner_tui_decision_resumes_exact_child_approval(tmp_path) -> None:
+@pytest.mark.parametrize("parent_projection", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("decision_kind", ["approved", "denied"])
+def test_owner_tui_decision_resumes_exact_child_approval(tmp_path, parent_projection, nested, decision_kind) -> None:
     agent, scope, child = _bound_agent_tree(tmp_path)
+    parent_thread_id = agent.conversation_store.tasks.load(child.root_id).thread_id
+    if nested:
+        parent_thread_id = child.agent_thread_id
+        child = agent.subagents.create_run(goal="完成下一层子任务", root_id=child.root_id, parent_id=child.id)
+        child = agent.subagents.lifecycle.prepare_runner_attempt(child.id)
+    if parent_projection:
+        from agent_py_agent.agent.agent_core.orchestration.lifecycle import (
+            _bind_tasks_to_conversation,
+        )
+
+        child.attributes["conversation_thread_id"] = parent_thread_id
+        agent.subagents.save(child)
+        assert _bind_tasks_to_conversation(agent, [child]) == []
     request = _child_approval_request(child.id)
     initial = read_gateway_client_notices(
         agent,
@@ -872,7 +888,7 @@ def test_owner_tui_decision_resumes_exact_child_approval(tmp_path) -> None:
     assert projected["agent_permission_requests"][0]["request"] == request.to_dict()
     decision = ToolApprovalDecision(
         request.permission_id,
-        "approved",
+        decision_kind,
         "只执行这一次",
     )
     written = resolve_agent_permission(
@@ -886,7 +902,7 @@ def test_owner_tui_decision_resumes_exact_child_approval(tmp_path) -> None:
 
     assert not thread.is_alive()
     assert written["ok"] is True
-    assert result["decision"] == "approved"
+    assert result["decision"] == decision_kind
     assert result["feedback"] == "只执行这一次"
     assert list_pending_agent_tool_approvals(
         agent,

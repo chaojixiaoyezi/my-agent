@@ -2,6 +2,7 @@
 
 状态：子代理桥已有真实 TUI 验收；2026-09-19 后台主代理桥已实现，428 项定向和实际 TUI 的批准、拒绝、暂停及换轮续用通过。
 具体证据及已知边界见 STATUS；历史目录和 schema 保持。
+安装版长任务新增发现：父会话关联场景下的子代理审批在发布前失效；归属修正已通过定向回归，安装版真实复验待做。
 
 ## 解决问题
 
@@ -59,6 +60,11 @@ capability grant 当成批准，直接执行 `controlled_exec(apply=true)`。
 同一路径重放只有完整 root/run/thread/claim/request 相同才幂等；同 id 异请求、异决定和畸形记录全部关闭式失败。
 历史目录及 schema 名中的 `subagent` 保持，避免把一个耐久概念拆成两处；内部 API 统一为 agent，不留旧名转发。
 `conversation/tool_approval_scope.py` 只读原任务、线程、child 和 claim，不建立第二份运行账本。
+子代理创建生命周期会把孩子登记到父会话的任务列表；这个 link 只用于查找、展示，不代表该孩子是主代理。
+归属读取先按精确 run ID 查询 canonical 子代理记录，得到它自己的 thread/root/status；孙代理同样处理。
+只有该记录不存在时，才读取主任务 link 与有效 claim。记录损坏不能退回主任务，孤立子线程也不能被认作 main。
+实测修复前，合法后台命令会直接返回 `APPROVAL_REQUIRED`，父级即使授予 capability 也不会产生具体工具批准。
+修复不替模型扩大权限、自动重派孩子或恢复旧失败任务；已发生的运行和失败记录原样保留。
 
 `.consumer.json` 是 `subagent_tool_approval_consumer.v1` 交互能力租约，只表示 owner TUI/Web 正在领取请求，
 不是用户批准。当前发现等待为 1.5 秒，活跃租约为 15 秒；这些常量只决定“多久后返回 unavailable”，不能
@@ -121,6 +127,8 @@ main 标题显示 `主代理`，child 显示 `子代理 <name>`；回写闭包�
 合同回归至少覆盖：实际主/子 sink 发布/等待/恢复、无 consumer fail closed、owner/root/current attempt/claim
 授权、完整 request mismatch、三种来源的统一 FIFO、原始 request 回写和 child 页面仍显示 root overlay。
 还须覆盖 Goal paused 后当前审批可继续、换 claim 后旧批准与缓存失效，以及主审批不放开 child 查看/插话/停止端点。
+创建生命周期登记父会话 link 后，必须重测子/孙审批的批准与拒绝，不能只使用没有 link 的裸 manager 夹具。
+本轮对照本地 Codex `tools/approvals.rs::resolve_tool_apporval` 的精确请求/回合路由；参考的是归属及决定边界，未移植 reviewer 或权限策略。
 
 真实验收必须通过每台机器唯一 Gateway、官方 MiniMax-M2.7 的实际 TUI：未批准前 handler/端口/operation 均不存在；
 面板明确标出来源；批准后原调用成功继续，拒绝时不执行。暂停 Goal、中断回合、明确停止资源分别核对，

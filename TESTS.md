@@ -3,6 +3,8 @@
 ## 原则
 
 开发反馈优先定向合同、工具替身、模型替身和脱敏回放；真实 TUI 是最终验收最低要求。测试任务由被测代理完成，测试者不能代写产物后计为通过。
+子代理审批回归必须包含真实创建生命周期的父会话关联，覆盖 child/grandchild 的批准与拒绝；仅裸 manager 创建不足以代表正常 TUI 派工。
+归属记录读取失败不能退回主任务批准；具体审批与 capability grant 分开核验。对应 gateway control、background approval、owner policy 和 tool round 定向测试。
 
 普通需求用自然中文表达。权限、参数、隔离、状态和恢复由底座控制，不靠在提示词里写特殊限制规避缺陷。详见 [测试分层](docs/design/main-agent-contract-testing.md) 与 [测试清单](TEST_CHECKLIST.md)。
 

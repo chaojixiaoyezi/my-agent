@@ -28,6 +28,7 @@ runner 的未完成不等于失败；显式结束原因与当前状态、成功�
 后台本地缺模型等待该会话配置恢复，不按固定时间热重试；普通错误仍走原冷却，进程内策略不拥有持久状态。
 后台进程持久地址读取宿主冻结的 canonical owner home，不能随 Full Access 的路径墙变化而迁移。
 后台主/子工具审批共用 `agent_tool_approval.py` 的原账本和 TUI FIFO；归属校验读 `tool_approval_scope.py`。
+子代理身份先读 canonical run；父会话任务关联只是展示投影，不能把孩子或孙代理误当成主代理 claim。
 main 绑定当前选定任务的有效 claim；换轮失效，Goal paused 不取消当前审批，不把接收方续租当批准。
 同任务续做先绑定 canonical run/attempt 再准备归档，request 只代表当前消息；目录准备失败关闭本次新 attempt。
 普通 Shell 与交互 PTY 共用 `parse_shell_command`；删除解析入口时必须同时核对两条执行链。
@@ -54,6 +55,7 @@ Computer Use 的依赖与当前桌面验收须单独确认。
 Audit/摄取重构已移出本轮；新增第 10 步制作约 10 个自有简易插件并做组合验收，详见 [样本计划](docs/design/PLUGIN_SAMPLE_ACCEPTANCE.md)。
 TUI 插件只提交声明式展示，读取有作用域的快照/订阅；所有订阅随停用撤销，不直接执行插件 Python。
 下一代码片从后台纯策略及进程内退避分离开始；插件详细合同读 [可装卸插件方案](docs/design/PLUGIN_LIFECYCLE.md)。
+当前基线已发布并同版部署，详细 Goal 已建立；第 1 步的实际合并/报告质量失败和长任务尚未收口，暂不进入后台调度拆分。
 首批插件支持显式本地包与只读示例，隔离和撤销必须完整；在线安装、更新/回退另批实施，不能将待做动作显示为可用。
 其中候选功能及 slash 名称只用于说明插件内容，不能当作现有命令或已验能力。
 社区插件调查只核对公开说明与包声明，运行兼容性未验；DSH Web/Cordis 插件不能视作可直接安装的 Python/TUI 扩展。

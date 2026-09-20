@@ -1,4 +1,4 @@
-# LLM: 审批归属只读 owner 的任务、线程及执行租约；main 以精确 claim 隔离换轮，child 保持原 canonical run 归属。
+# LLM: 审批归属只读 owner 的任务、线程及执行租约；子代理权威记录优先于父会话展示关联，main 仍以精确 claim 隔离换轮。
 # 模块用途: 为发布、展示和决定审批提供同一身份校验，不创建状态、授予权限或读取模型正文。
 from __future__ import annotations
 
@@ -23,37 +23,39 @@ class ToolApprovalScope:
     claim_id: str = ""
 
 
-# LLM: 有任务关联时先验证其线程类型；子线程沿 canonical subagent 读取，不从 ID 前缀或名称猜主子身份。
-# 函数用途: 解析一次审批的真实归属，坏账和身份冲突关闭式失败。
+# LLM: 子代理可关联在父会话任务列表中，该投影不拥有执行身份；先读 canonical subagent，再判定 main claim。
+# 仅权威子代理记录不存在时读取主任务关联，坏账及孤立子线程仍失败；同步核对创建生命周期与主子孙审批回归。
+# 函数用途: 只读解析审批的真实执行者，避免把挂在父会话里的孩子误当主代理而丢失审批。
 def tool_approval_scope(agent: object, run_id: str) -> ToolApprovalScope:
     selected = validate_opaque_id(run_id, kind="run_id")
     store = getattr(agent, "conversation_store", None)
     if store is None:
         raise RuntimeError("tool approval requires ConversationStore")
+    manager = getattr(agent, "subagents", None)
+    try:
+        task = manager.load(selected) if manager is not None else None
+    except FileNotFoundError:
+        task = None
+    if task is not None:
+        return ToolApprovalScope(
+            run_id=selected,
+            root_task_id=validate_opaque_id(str(task.root_id or ""), kind="root_task_id"),
+            thread_id=str(task.agent_thread_id or ""),
+            agent_kind="subagent",
+            agent_name=str(getattr(task, "name", "") or task.role or selected)[:96],
+            active=not task_status_in(str(task.status or ""), SUBAGENT_ENDED_STATUSES),
+        )
     link, error = store.tasks.load_report(selected)
     if error is not None:
         raise OSError("tool approval task is unreadable")
-    if link is not None:
-        thread, error = store.threads.load_report(link.thread_id)
-        if error is not None or thread is None:
-            raise OSError("tool approval thread is unreadable")
-        child_id = str(thread.metadata.get("agent_run_id") or "")
-        if not child_id:
-            return _main_scope(store, link, thread)
-        if child_id != selected:
-            raise ValueError("tool approval thread identity conflict")
-    manager = getattr(agent, "subagents", None)
-    if manager is None:
-        raise RuntimeError("subagent manager unavailable")
-    task = manager.load(selected)
-    return ToolApprovalScope(
-        run_id=selected,
-        root_task_id=validate_opaque_id(str(task.root_id or ""), kind="root_task_id"),
-        thread_id=str(task.agent_thread_id or ""),
-        agent_kind="subagent",
-        agent_name=str(getattr(task, "name", "") or task.role or selected)[:96],
-        active=not task_status_in(str(task.status or ""), SUBAGENT_ENDED_STATUSES),
-    )
+    if link is None:
+        raise FileNotFoundError("tool approval execution is unavailable")
+    thread, error = store.threads.load_report(link.thread_id)
+    if error is not None or thread is None:
+        raise OSError("tool approval thread is unreadable")
+    if thread.metadata.get("agent_run_id"):
+        raise ValueError("tool approval child record is unavailable")
+    return _main_scope(store, link, thread)
 
 
 # LLM: 主代理审批只属于当前线程选定任务的有效 claim；Goal paused 不影响当前执行，旧 claim 不可给新轮授权。
