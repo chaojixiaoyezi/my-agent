@@ -16,7 +16,7 @@ Status: implemented in the current worktree. Release and 1.10 evidence remain go
 直属完成事件的 `service_window_incomplete` 与 `service_window_remaining_seconds` 是发布时冻结的声明窗口事实，
 前台安全点、后台完成清单和预算裁剪共用中性合同筛选；两字段类型正确时成对保留，缺失或损坏时不推测补齐。
 这些值不是当前倒计时，也不是采样进程运行时间；它们不改变子代理终态、Goal 或重派策略。
-真实 TUI 曾在当前 wake 中携带此事实，但后续完成清单丢字段；本地修复只补齐既有事实传递，无新增配置或执行行为。
+真实 TUI 曾在当前 wake 中携带此事实，但后续完成清单丢字段；修复已同版部署，实际后台消费在正文裁剪后仍保留原值及终态，无新增配置或执行行为。
 完成正文仍可显式截短，完整报告引用必须保留；实际旧样本已核对报告存在并包含全文，不将有恢复引用的预览裁剪称为数据丢失。
 
 IM 只完成身份映射、消息/附件接收和回复投递。Feishu、CLI、HTTP 以及未来 IM 都不得定义 compact、memory、
